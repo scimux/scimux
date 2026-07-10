@@ -13,6 +13,10 @@ jobs:
           git checkout ${{ github.sha }}
           mkdir -p builds
 
+      - name: Run tests (short mode; integration tests need tmux and are skipped)
+        run: |
+          go test -short ./...
+
       - name: Build for linux/amd64
         run: |
           GOOS=linux GOARCH=amd64 go build -o builds/scimux-linux-amd64 && file builds/scimux-linux-amd64
