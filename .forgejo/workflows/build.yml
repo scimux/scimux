@@ -1,0 +1,26 @@
+on: [push]
+jobs:
+  build-and-test:
+    runs-on: go-builder
+    steps:
+      - name: Add missing tools
+        run: |
+          apk add --no-cache git file
+
+      - name: Clone and checkout repository
+        run: |
+          git clone https://codeberg.org/chrberger/scimux.git .
+          git checkout ${{ github.sha }}
+          mkdir -p builds
+
+      - name: Build for linux/amd64
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o builds/scimux-linux-amd64 && file builds/scimux-linux-amd64
+
+      - name: Build for linux/arm64
+        run: |
+          GOOS=linux GOARCH=arm64 go build -o builds/scimux-linux-arm64 && file builds/scimux-linux-arm64
+
+      - name: Build for darwin/arm64
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
