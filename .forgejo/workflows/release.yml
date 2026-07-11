@@ -1,4 +1,7 @@
-on: [release]
+on:
+  release:
+    types:
+      - published
 env:
   CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
 jobs:
