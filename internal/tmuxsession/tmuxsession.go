@@ -127,6 +127,31 @@ func (s *Session) Send(text string) error {
 	return nil
 }
 
+// allowedKeys are the single keys a supervisor may press into an agent's TUI
+// dialog (approval prompts, question menus). A closed whitelist: anything
+// else must be a full prompt and goes through Send.
+var allowedKeys = map[string]bool{
+	"Enter": true, "Escape": true, "Tab": true,
+	"Up": true, "Down": true, "Left": true, "Right": true,
+	"1": true, "2": true, "3": true, "4": true, "5": true,
+	"6": true, "7": true, "8": true, "9": true,
+	"y": true, "n": true,
+}
+
+func AllowedKey(key string) bool { return allowedKeys[key] }
+
+// SendKey presses one whitelisted key in the pane — how a supervisor answers
+// an agent's approval prompt or question menu without attaching.
+func (s *Session) SendKey(key string) error {
+	if !allowedKeys[key] {
+		return fmt.Errorf("key %q not allowed", key)
+	}
+	if out, err := s.sv.tmux("", "send-keys", "-t", s.paneTarget(), key); err != nil {
+		return fmt.Errorf("tmux send-keys: %v: %s", err, out)
+	}
+	return nil
+}
+
 // Capture returns the pane's rendered plain text (last 200 scrollback lines).
 func (s *Session) Capture() (string, error) {
 	out, err := s.sv.tmux("", "capture-pane", "-p", "-t", s.paneTarget(), "-S", "-200")

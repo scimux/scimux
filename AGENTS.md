@@ -40,6 +40,15 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   model, effort, dir) but never conversation history.
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from
   pane-change detection). Do not add regexes matching agent TUI strings.
+  Needs-input detection follows the same rule: it combines an unresolved
+  tool call in the transcript (structured data — both CLIs log the call
+  record when the agent asks and the result record only after the human
+  answers) with a mechanically quiet pane (running tools animate a timer;
+  approval dialogs are static). Never detect dialogs by matching pane text.
+- **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
+  (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
+  a keystroke injector. Every key pressed via the API is recorded in the
+  store with the pane's bottom lines as decision evidence.
 - **Polling must never clobber user input.** The web UI re-renders only
   when the state signature changes, and any re-render preserves input
   values, focus, and cursor (`withInputsPreserved` in web/index.html).

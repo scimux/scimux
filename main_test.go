@@ -212,3 +212,28 @@ func TestSysloadOnLinux(t *testing.T) {
 		t.Errorf("mem = %q", s["mem"])
 	}
 }
+
+func TestAttentionKind(t *testing.T) {
+	cases := map[string]string{
+		"AskUserQuestion": "question",
+		"ExitPlanMode":    "question",
+		"Bash":            "approval",
+		"Edit":            "approval",
+		"exec_command":    "approval",
+		"":                "approval",
+	}
+	for tool, want := range cases {
+		if got := attentionKind(tool); got != want {
+			t.Errorf("attentionKind(%q) = %q, want %q", tool, got, want)
+		}
+	}
+}
+
+func TestLastLines(t *testing.T) {
+	if got := lastLines("a\nb\nc\nd\n\n  \n", 2); got != "c\nd" {
+		t.Errorf("lastLines = %q", got)
+	}
+	if got := lastLines("only", 5); got != "only" {
+		t.Errorf("short input = %q", got)
+	}
+}

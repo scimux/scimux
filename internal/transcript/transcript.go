@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -115,19 +116,130 @@ func contentText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
+// pendingCall is a tool/exec call the agent has logged whose result has not
+// been logged yet. Both CLIs write the call record the moment the agent asks
+// for it — verified empirically: an approval-gated call sits unresolved in
+// the file for exactly as long as the human takes to answer. An unresolved
+// call plus a mechanically quiet pane is therefore the signature of "agent
+// is awaiting user input", with no TUI string matching involved.
+type pendingCall struct{ id, name string }
+
 // Tailer incrementally reads one transcript file, remembering its byte
-// offset between polls and buffering partial trailing lines.
+// offset between polls and buffering partial trailing lines. It is safe for
+// concurrent use (the poller and the chat handler both poll it).
 type Tailer struct {
-	Path   string
-	Turns  []Turn
-	offset int64
-	buf    []byte
+	Path    string
+	Turns   []Turn
+	mu      sync.Mutex
+	offset  int64
+	buf     []byte
+	pending []pendingCall
+}
+
+// WaitingOn reports the most recent tool call without a logged result — the
+// transcript half of needs-input detection. The caller must combine it with
+// pane quietness: a pending call under an actively changing pane is just a
+// long-running tool.
+func (t *Tailer) WaitingOn() (name string, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.pending) == 0 {
+		return "", false
+	}
+	return t.pending[len(t.pending)-1].name, true
+}
+
+// notePending updates the pending-call set from one JSONL line.
+func (t *Tailer) notePending(line []byte) {
+	var generic struct {
+		Type    string          `json:"type"`
+		Message json.RawMessage `json:"message"`
+		Payload json.RawMessage `json:"payload"`
+		IsMeta  bool            `json:"isMeta"`
+	}
+	if json.Unmarshal(line, &generic) != nil {
+		return
+	}
+	switch generic.Type {
+	case "user", "assistant": // Claude Code
+		if generic.IsMeta {
+			return
+		}
+		var msg struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(generic.Message, &msg) != nil {
+			return
+		}
+		var blocks []struct {
+			Type      string `json:"type"`
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			// Plain-string content: a human prompt (or interrupt notice)
+			// means the human already acted; stale pending calls are moot.
+			if generic.Type == "user" {
+				t.pending = nil
+			}
+			return
+		}
+		for _, b := range blocks {
+			switch b.Type {
+			case "tool_use":
+				t.pending = append(t.pending, pendingCall{b.ID, b.Name})
+			case "tool_result":
+				t.resolve(b.ToolUseID)
+			case "text":
+				if generic.Type == "user" {
+					t.pending = nil
+				}
+			}
+		}
+	case "response_item": // Codex
+		var p struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+			Name   string `json:"name"`
+		}
+		if json.Unmarshal(generic.Payload, &p) != nil {
+			return
+		}
+		switch p.Type {
+		case "function_call", "custom_tool_call":
+			t.pending = append(t.pending, pendingCall{p.CallID, p.Name})
+		case "function_call_output", "custom_tool_call_output":
+			t.resolve(p.CallID)
+		}
+	case "event_msg": // Codex marks turn boundaries explicitly
+		var p struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(generic.Payload, &p) != nil {
+			return
+		}
+		if p.Type == "task_complete" || p.Type == "turn_aborted" {
+			t.pending = nil
+		}
+	}
+}
+
+func (t *Tailer) resolve(id string) {
+	for i, c := range t.pending {
+		if c.id == id {
+			t.pending = append(t.pending[:i], t.pending[i+1:]...)
+			return
+		}
+	}
 }
 
 // Poll reads newly appended bytes and returns the accumulated turn list.
 // All I/O failures are absorbed: the previous turn list is returned and the
 // next poll retries. A shrunken file (rotation) resets the tailer.
 func (t *Tailer) Poll() []Turn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	f, err := os.Open(t.Path)
 	if err != nil {
 		return t.Turns
@@ -138,7 +250,7 @@ func (t *Tailer) Poll() []Turn {
 		return t.Turns
 	}
 	if st.Size() < t.offset {
-		t.offset, t.buf, t.Turns = 0, nil, nil
+		t.offset, t.buf, t.Turns, t.pending = 0, nil, nil, nil
 	}
 	if st.Size() == t.offset {
 		return t.Turns
@@ -159,6 +271,7 @@ func (t *Tailer) Poll() []Turn {
 		}
 		line := t.buf[:i]
 		t.buf = append([]byte(nil), t.buf[i+1:]...)
+		t.notePending(line)
 		if turn, ok := ParseLine(line); ok {
 			t.Turns = append(t.Turns, turn)
 		}

@@ -191,3 +191,77 @@ func TestFindCodexRollout(t *testing.T) {
 		t.Fatal("matched a rollout for the wrong cwd")
 	}
 }
+
+// WaitingOn is the transcript half of needs-input detection: a logged tool
+// call whose result has not been logged yet. Verified against real session
+// logs: both CLIs write the call record when the agent asks, and the result
+// record only after the human answers (gaps of minutes to hours observed).
+
+func TestWaitingOnClaude(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "w.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tl := &Tailer{Path: path}
+
+	// Agent issues a Bash call: pending until the result lands.
+	f.WriteString(`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}]}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); !ok || name != "Bash" {
+		t.Fatalf("WaitingOn = %q,%v, want Bash,true", name, ok)
+	}
+	f.WriteString(`{"type":"user","timestamp":"t2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); ok {
+		t.Fatalf("resolved call still pending: %q", name)
+	}
+
+	// An explicit question tool stays pending, keeping its name so the
+	// caller can tell "question" from "approval".
+	f.WriteString(`{"type":"assistant","timestamp":"t3","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu2","name":"AskUserQuestion","input":{}}]}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); !ok || name != "AskUserQuestion" {
+		t.Fatalf("WaitingOn = %q,%v, want AskUserQuestion,true", name, ok)
+	}
+	// A plain user turn (answer typed in the TUI, or an interrupt notice)
+	// means the human already acted: nothing stays pending.
+	f.WriteString(`{"type":"user","timestamp":"t4","message":{"role":"user","content":"[Request interrupted by user]"}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); ok {
+		t.Fatalf("user turn did not clear pending: %q", name)
+	}
+}
+
+func TestWaitingOnCodex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tl := &Tailer{Path: path}
+
+	f.WriteString(`{"timestamp":"t1","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{}"}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); !ok || name != "exec_command" {
+		t.Fatalf("WaitingOn = %q,%v, want exec_command,true", name, ok)
+	}
+	f.WriteString(`{"timestamp":"t2","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); ok {
+		t.Fatalf("resolved call still pending: %q", name)
+	}
+
+	// task_complete / turn_aborted are explicit turn boundaries: whatever is
+	// still unresolved (e.g. after an interrupt) is moot.
+	f.WriteString(`{"timestamp":"t3","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c2","arguments":"{}"}}` + "\n")
+	f.WriteString(`{"timestamp":"t4","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}` + "\n")
+	tl.Poll()
+	if name, ok := tl.WaitingOn(); ok {
+		t.Fatalf("turn boundary did not clear pending: %q", name)
+	}
+}

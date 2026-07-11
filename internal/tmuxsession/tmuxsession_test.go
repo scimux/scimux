@@ -169,3 +169,28 @@ func TestKillServerToleratesNoServer(t *testing.T) {
 		t.Fatalf("kill-server on dead server must be a no-op, got %v", err)
 	}
 }
+
+func TestSendKey(t *testing.T) {
+	f := &fakeRunner{}
+	sv := newTestServer(f)
+	if err := sv.Session("node1").SendKey("1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-L", "testsock", "send-keys", "-t", "=node1:", "1"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, want) {
+		t.Fatalf("args = %v, want %v", f.calls, want)
+	}
+	// Non-whitelisted input must never reach tmux — SendKey answers dialogs,
+	// it is not a general keystroke injector.
+	for _, bad := range []string{"", "q", "C-c", "rm -rf /", "Enter Enter", "0"} {
+		if err := sv.Session("node1").SendKey(bad); err == nil {
+			t.Errorf("key %q accepted, want error", bad)
+		}
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("rejected keys reached tmux: %d calls", len(f.calls))
+	}
+	if !AllowedKey("Escape") || AllowedKey("C-c") {
+		t.Error("AllowedKey whitelist inconsistent")
+	}
+}

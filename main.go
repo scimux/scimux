@@ -44,10 +44,16 @@ type Node struct {
 // storeRecord is one line of the append-only store file. Node metadata is
 // tiny; chat content lives in the agents' own transcript files.
 type storeRecord struct {
-	Type string `json:"type"` // "node" | "transcript"
+	Type string `json:"type"` // "node" | "transcript" | "key"
 	Node *Node  `json:"node,omitempty"`
 	ID   string `json:"id,omitempty"`
 	Path string `json:"path,omitempty"`
+	// "key" records are the answered-dialog evidence trail: which key was
+	// pressed for a node while what dialog (pane excerpt) was on screen.
+	// Replay ignores them — they carry no node state.
+	Key     string `json:"key,omitempty"`
+	Excerpt string `json:"excerpt,omitempty"`
+	Time    string `json:"time,omitempty"`
 }
 
 type app struct {
@@ -55,6 +61,7 @@ type app struct {
 	nodes   []*Node
 	byID    map[string]*Node
 	live    map[string]string // node id -> "active"|"quiet"|"exited"
+	attn    map[string]string // node id -> ""|"approval"|"question"
 	prevCap map[string]string
 	lastChg map[string]time.Time
 	tailers map[string]*transcript.Tailer
@@ -306,7 +313,14 @@ func sessionArgFromCmdline(args []string) string {
 // ---------- background poller ----------
 
 // poll refreshes liveness (mechanical only: pane changed recently, quiet, or
-// session gone) and runs one-time transcript discovery for young nodes.
+// session gone), detects needs-input, and runs one-time transcript discovery
+// for young nodes.
+//
+// Needs-input = an unresolved tool call in the transcript AND a quiet pane.
+// Both halves matter: while a tool actually runs, both TUIs animate a timer
+// (pane keeps changing); an approval prompt or question menu is static. This
+// keeps detection free of TUI string matching — the transcript side is
+// structured data, the pane side is the same byte-compare liveness uses.
 func (a *app) poll() {
 	a.mu.Lock()
 	nodes := make([]*Node, len(a.nodes))
@@ -334,11 +348,35 @@ func (a *app) poll() {
 				state = "unavailable"
 			}
 		}
+		attn := ""
+		if state == "quiet" {
+			a.mu.Lock()
+			tl := a.tailerLocked(n)
+			a.mu.Unlock()
+			if tl != nil {
+				tl.Poll()
+				if name, ok := tl.WaitingOn(); ok {
+					attn = attentionKind(name)
+				}
+			}
+		}
 		a.mu.Lock()
 		a.live[n.ID] = state
+		a.attn[n.ID] = attn
 		a.mu.Unlock()
 		a.discoverTranscript(n)
 	}
+}
+
+// attentionKind classifies what the agent is waiting for, from the name of
+// its unresolved tool call: Claude logs explicit question tools; everything
+// else (Bash, Edit, codex exec_command, …) is a permission prompt.
+func attentionKind(tool string) string {
+	switch tool {
+	case "AskUserQuestion", "ExitPlanMode":
+		return "question"
+	}
+	return "approval"
 }
 
 func (a *app) discoverTranscript(n *Node) {
@@ -401,6 +439,7 @@ func sysload() map[string]string {
 type nodeView struct {
 	*Node
 	Live          string `json:"live"`
+	Attention     string `json:"attention,omitempty"` // "approval" | "question"
 	HasTranscript bool   `json:"has_transcript"`
 }
 
@@ -409,7 +448,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	views := make([]nodeView, 0, len(a.nodes))
 	for _, n := range a.nodes {
-		views = append(views, nodeView{Node: n, Live: a.live[n.ID], HasTranscript: n.Transcript != ""})
+		views = append(views, nodeView{Node: n, Live: a.live[n.ID], Attention: a.attn[n.ID], HasTranscript: n.Transcript != ""})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server).
@@ -483,7 +522,10 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if n.Transcript == "" {
+		// A process-derived id remains authoritative even if Claude has not
+		// created (or we cannot yet see) its transcript. discoverTranscript
+		// will retry it; do not replace it with the nondeterministic mtime guess.
+		if n.SessionID == "" && n.Transcript == "" {
 			if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
 				n.Transcript, n.SessionID = path, sid
 			}
@@ -546,21 +588,72 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	path := n.Transcript
-	tl := a.tailers[n.ID]
-	// (Re)build the tailer when the transcript appears or is relinked to a
-	// different file (e.g. a corrected adoption guess).
-	if path != "" && (tl == nil || tl.Path != path) {
-		tl = &transcript.Tailer{Path: path}
-		a.tailers[n.ID] = tl
-	}
+	pending := n.Transcript == ""
+	tl := a.tailerLocked(n)
 	live := a.live[n.ID]
 	a.mu.Unlock()
 	turns := []transcript.Turn{}
 	if tl != nil {
 		turns = tl.Poll()
 	}
-	writeJSON(w, map[string]any{"turns": turns, "pending": path == "", "live": live})
+	writeJSON(w, map[string]any{"turns": turns, "pending": pending, "live": live})
+}
+
+// tailerLocked returns the node's transcript tailer, (re)building it when
+// the transcript appears or is relinked to a different file (e.g. a
+// corrected adoption guess). Callers hold a.mu.
+func (a *app) tailerLocked(n *Node) *transcript.Tailer {
+	if n.Transcript == "" {
+		return nil
+	}
+	tl := a.tailers[n.ID]
+	if tl == nil || tl.Path != n.Transcript {
+		tl = &transcript.Tailer{Path: n.Transcript}
+		a.tailers[n.ID] = tl
+	}
+	return tl
+}
+
+// handleKey presses one whitelisted key in the node's pane — answering an
+// approval prompt or question menu remotely — and appends the pane's bottom
+// lines plus the key to the store as decision evidence.
+func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	var body struct{ Key string }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Key == "" {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	if !tmuxsession.AllowedKey(body.Key) {
+		http.Error(w, fmt.Sprintf("key %q not allowed", body.Key), 400)
+		return
+	}
+	s := a.server.Session(n.ID)
+	excerpt := ""
+	if cap, err := s.Capture(); err == nil {
+		excerpt = lastLines(cap, 12)
+	}
+	if err := s.SendKey(body.Key); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
+		Excerpt: excerpt, Time: time.Now().UTC().Format(time.RFC3339)})
+	writeJSON(w, map[string]string{"ok": "sent"})
+}
+
+// lastLines returns the last n lines of s with trailing blank lines removed —
+// the visible bottom of a pane, where approval dialogs live.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, " \t\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
@@ -603,6 +696,7 @@ func main() {
 	a := &app{
 		byID:      map[string]*Node{},
 		live:      map[string]string{},
+		attn:      map[string]string{},
 		prevCap:   map[string]string{},
 		lastChg:   map[string]time.Time{},
 		tailers:   map[string]*transcript.Tailer{},
@@ -638,6 +732,7 @@ func main() {
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
 	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
+	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
 
