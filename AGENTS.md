@@ -40,6 +40,10 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   model, effort, dir) but never conversation history.
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from
   pane-change detection). Do not add regexes matching agent TUI strings.
+- **Polling must never clobber user input.** The web UI re-renders only
+  when the state signature changes, and any re-render preserves input
+  values, focus, and cursor (`withInputsPreserved` in web/index.html).
+  Any new polled UI element must respect this.
 - The README's **Non-goals** section is a hard scope fence; features listed
   there need explicit maintainer approval, not code.
 

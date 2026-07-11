@@ -94,9 +94,33 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
 });
 const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
 
-/* ---- tree rendering: foldable list, children indented under parents ---- */
+/* ---- tree rendering: foldable list, children indented under parents ----
+   Polling must never clobber typing: render() preserves input values,
+   focus, and cursor, and refresh() skips rendering entirely unless the
+   state signature changed. */
 
-function render() {
+function withInputsPreserved(fn) {
+  const vals = {};
+  document.querySelectorAll('#list input, #list textarea').forEach(el => {
+    if (el.id && el.value) vals[el.id] = el.value;
+  });
+  const act = document.activeElement;
+  const focus = act && act.id && (act.tagName === 'TEXTAREA' || act.tagName === 'INPUT')
+    ? { id: act.id, start: act.selectionStart, end: act.selectionEnd } : null;
+  fn();
+  for (const [id, v] of Object.entries(vals)) {
+    const el = document.getElementById(id);
+    if (el && !el.value) el.value = v;
+  }
+  if (focus) {
+    const el = document.getElementById(focus.id);
+    if (el) { el.focus(); try { el.setSelectionRange(focus.start, focus.end); } catch {} }
+  }
+}
+
+function render() { withInputsPreserved(renderInner); }
+
+function renderInner() {
   const kids = {};
   nodes.forEach(n => (kids[n.parent || ''] ||= []).push(n));
   const known = new Set(nodes.map(n => n.id));
@@ -147,7 +171,7 @@ function toggle(id) { open.has(id) ? open.delete(id) : open.add(id); render(); }
 
 /* ---- data ---- */
 
-let SOCKET = 'scimux';
+let SOCKET = 'scimux', lastSig = '';
 async function refresh() {
   try {
     const st = await api('/api/state');
@@ -156,7 +180,9 @@ async function refresh() {
     SOCKET = st.socket || 'scimux';
     $('#sys').textContent = [st.sys?.load ? 'load ' + st.sys.load : '', st.sys?.mem || '']
       .filter(Boolean).join(' · ');
-    render();
+    // Re-render only when something visible actually changed.
+    const sig = JSON.stringify([st.nodes, st.unadopted]);
+    if (sig !== lastSig) { lastSig = sig; render(); }
   } catch { $('#sys').textContent = 'server unreachable'; }
 }
 
