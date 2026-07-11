@@ -21,7 +21,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
-//go:embed web/index.html
+//go:embed web/*
 var webFS embed.FS
 
 // ---------- model ----------
@@ -725,6 +725,12 @@ func main() {
 		// a cached copy after a scimux upgrade is a recurring dogfooding
 		// trap (especially iPad Safari). It's one small local page: always
 		// fetch fresh.
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(b)
+	})
+	mux.HandleFunc("GET /assets/pico.min.css", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := webFS.ReadFile("web/pico.min.css")
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(b)
 	})
