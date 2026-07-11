@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -175,6 +176,33 @@ func FindClaudeTranscript(home, sessionID string) (string, bool) {
 		return "", false
 	}
 	return matches[0], true
+}
+
+// FindClaudeNewestInDir locates the most recently modified Claude session
+// log for a given working directory — used when adopting a session whose
+// id we don't know (e.g. migrated via --resume). Returns path and the
+// session id (the filename). Claude escapes the cwd into a project dir
+// name by replacing path separators and other specials with '-'.
+func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
+	esc := regexp.MustCompile(`[^a-zA-Z0-9-]`).ReplaceAllString(dir, "-")
+	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", esc, "*.jsonl"))
+	if err != nil || len(matches) == 0 {
+		return "", "", false
+	}
+	var bestTime time.Time
+	for _, m := range matches {
+		st, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if path == "" || st.ModTime().After(bestTime) {
+			path, bestTime = m, st.ModTime()
+		}
+	}
+	if path == "" {
+		return "", "", false
+	}
+	return path, strings.TrimSuffix(filepath.Base(path), ".jsonl"), true
 }
 
 // FindCodexRollout locates the newest Codex rollout file under root

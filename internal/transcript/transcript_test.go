@@ -146,6 +146,26 @@ func TestFindClaudeTranscript(t *testing.T) {
 	}
 }
 
+func TestFindClaudeNewestInDir(t *testing.T) {
+	home := t.TempDir()
+	proj := filepath.Join(home, ".claude", "projects", "-data-my-exp-1")
+	os.MkdirAll(proj, 0o755)
+	older := filepath.Join(proj, "aaaaaaaa-0000-0000-0000-000000000001.jsonl")
+	newer := filepath.Join(proj, "bbbbbbbb-0000-0000-0000-000000000002.jsonl")
+	os.WriteFile(older, []byte("{}\n"), 0o644)
+	os.WriteFile(newer, []byte("{}\n"), 0o644)
+	past := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(older, past, past)
+
+	path, sid, ok := FindClaudeNewestInDir(home, "/data/my/exp_1")
+	if !ok || path != newer || sid != "bbbbbbbb-0000-0000-0000-000000000002" {
+		t.Fatalf("got %q sid=%q ok=%v", path, sid, ok)
+	}
+	if _, _, ok := FindClaudeNewestInDir(home, "/data/unknown"); ok {
+		t.Fatal("unknown dir must not match")
+	}
+}
+
 func TestFindCodexRollout(t *testing.T) {
 	root := t.TempDir()
 	day := filepath.Join(root, "2026", "07", "11")

@@ -155,8 +155,8 @@ function body(n) {
     <div class="chat" id="chat-${esc(n.id)}"><div class="pending">loading transcript…</div></div>
     <div class="peek" id="peek-${esc(n.id)}" style="display:none"></div>
     <div class="sendrow">
-      <textarea id="send-${esc(n.id)}" placeholder="prompt… (Ctrl+Enter to send)"
-        onkeydown="if(event.ctrlKey&&event.key==='Enter'){sendPrompt('${esc(n.id)}')}"></textarea>
+      <textarea id="send-${esc(n.id)}" placeholder="prompt… (Enter sends, Shift+Enter for newline)"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPrompt('${esc(n.id)}')}"></textarea>
       <button class="primary" onclick="sendPrompt('${esc(n.id)}')">send</button>
     </div>
     <div class="tools">
@@ -276,8 +276,8 @@ function adoptDlg(session) {
   $('#dlgFields').innerHTML = `
     <label>agent running inside it</label>
     <select id="a_agent"><option>claude</option><option>codex</option></select>
-    <label>claude session id (from --session-id / --resume; enables the chat view — leave empty for peek-only)</label>
-    <input id="a_sid" placeholder="uuid, optional">
+    <label>claude session id (optional — if empty, scimux takes the newest session log in the pane's working directory)</label>
+    <input id="a_sid" placeholder="uuid, auto-discovered if empty">
     <label>transcript path (optional override if known)</label>
     <input id="a_path">
     <label>title (optional)</label><input id="a_title">

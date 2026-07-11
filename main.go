@@ -401,6 +401,15 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
 		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	// Adopted claude session without a known id: the newest session log in
+	// the pane's working directory is almost certainly it (a migrated
+	// --resume keeps appending to its original file). Best-effort — a wrong
+	// guess still leaves peek + send working.
+	if n.Agent == "claude" && n.SessionID == "" && n.Transcript == "" {
+		if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
+			n.Transcript, n.SessionID = path, sid
+		}
+	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
