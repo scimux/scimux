@@ -1,11 +1,13 @@
 on: [release]
+env:
+  CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
 jobs:
   build-and-test-and-release:
     runs-on: go-builder
     steps:
       - name: Add missing tools
         run: |
-          apk add --no-cache git file
+          apk add --no-cache bash curl file git
 
       - name: Clone and checkout repository
         run: |
@@ -30,9 +32,6 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
 
       - name: Attach built artifacts
-        environment:
-          CODEBERG_TOKEN:
-            from_secret: CODEBERG_TOKEN
         run: |
           .forgejo/codeberg-release.sh ${CI_COMMIT_TAG} ./builds
 

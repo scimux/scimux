@@ -5,7 +5,7 @@ jobs:
     steps:
       - name: Add missing tools
         run: |
-          apk add --no-cache git file
+          apk add --no-cache file git
 
       - name: Clone and checkout repository
         run: |
