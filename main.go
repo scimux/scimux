@@ -337,13 +337,77 @@ type nodeView struct {
 }
 
 func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
+	sessions := a.server.Sessions()
 	a.mu.Lock()
 	views := make([]nodeView, 0, len(a.nodes))
 	for _, n := range a.nodes {
 		views = append(views, nodeView{Node: n, Live: a.live[n.ID], HasTranscript: n.Transcript != ""})
 	}
+	// Sessions on our socket that no node accounts for: candidates for
+	// adoption (manually created, or migrated from another tmux server).
+	unadopted := []string{}
+	for _, s := range sessions {
+		if _, known := a.byID[s]; !known {
+			unadopted = append(unadopted, s)
+		}
+	}
 	a.mu.Unlock()
-	writeJSON(w, map[string]any{"nodes": views, "sys": sysload(), "socket": a.server.Socket})
+	writeJSON(w, map[string]any{"nodes": views, "unadopted": unadopted, "sys": sysload(), "socket": a.server.Socket})
+}
+
+// handleAdopt registers an already-running tmux session (which scimux did
+// not start) as a node. No tmux state is touched — this only writes the
+// node record, so adoption is always safe for the running agent.
+func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Session    string `json:"session"`
+		Title      string `json:"title"`
+		Prompt     string `json:"prompt"`
+		Agent      string `json:"agent"`
+		Model      string `json:"model"`
+		Dir        string `json:"dir"`
+		SessionID  string `json:"session_id"`
+		Transcript string `json:"transcript"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Session == "" {
+		http.Error(w, "bad request: need session", 400)
+		return
+	}
+	s := a.server.Session(body.Session)
+	if !s.Alive() {
+		http.Error(w, fmt.Sprintf("no session %q on socket %q", body.Session, a.server.Socket), 404)
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, taken := a.byID[body.Session]; taken {
+		http.Error(w, "node already exists", 409)
+		return
+	}
+	dir := body.Dir
+	if dir == "" {
+		if cwd, err := s.Cwd(); err == nil {
+			dir = cwd
+		}
+	}
+	title := body.Title
+	if title == "" {
+		title = body.Session
+	}
+	agent := body.Agent
+	if agent == "" {
+		agent = "claude"
+	}
+	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
+		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, n)
 }
 
 func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
@@ -477,6 +541,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
+	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)

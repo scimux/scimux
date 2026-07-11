@@ -73,6 +73,16 @@ func (sv *Server) NewSession(name, dir, command string) (*Session, error) {
 // Session returns a handle without checking existence; Alive answers that.
 func (sv *Server) Session(name string) *Session { return &Session{sv: sv, Name: name} }
 
+// Sessions lists the names of all sessions on this private server. A server
+// that is not running is not an error — it simply has no sessions.
+func (sv *Server) Sessions() []string {
+	out, err := sv.tmux("", "list-sessions", "-F", "#{session_name}")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
 // KillServer stops the private tmux server and with it every scimux session.
 // A server that is not running is not an error.
 func (sv *Server) KillServer() error {
@@ -124,6 +134,16 @@ func (s *Session) Capture() (string, error) {
 		return "", fmt.Errorf("tmux capture-pane: %v: %s", err, out)
 	}
 	return out, nil
+}
+
+// Cwd returns the current working directory of the session's pane. Used
+// when adopting a manually created session whose dir scimux never knew.
+func (s *Session) Cwd() (string, error) {
+	out, err := s.sv.tmux("", "display-message", "-p", "-t", s.paneTarget(), "#{pane_current_path}")
+	if err != nil {
+		return "", fmt.Errorf("tmux display-message: %v: %s", err, out)
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func (s *Session) Kill() error {

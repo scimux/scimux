@@ -130,6 +130,39 @@ func TestAliveMapsExitCode(t *testing.T) {
 	}
 }
 
+func TestSessionsListsNames(t *testing.T) {
+	f := &fakeRunner{out: "ra-study\nlc-study\nskab-e2"}
+	sv := newTestServer(f)
+	got := sv.Sessions()
+	want := []string{"ra-study", "lc-study", "skab-e2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Sessions() = %v, want %v", got, want)
+	}
+	if got := f.calls[0].args[2:]; !reflect.DeepEqual(got, []string{"list-sessions", "-F", "#{session_name}"}) {
+		t.Errorf("list-sessions args = %v", got)
+	}
+}
+
+func TestSessionsEmptyWhenServerDown(t *testing.T) {
+	f := &fakeRunner{out: "no server running on /tmp/x", err: errors.New("exit status 1")}
+	if got := newTestServer(f).Sessions(); got != nil {
+		t.Fatalf("dead server must yield no sessions, got %v", got)
+	}
+}
+
+func TestCwdUsesPaneTarget(t *testing.T) {
+	f := &fakeRunner{out: "/data/exp1"}
+	sv := newTestServer(f)
+	cwd, err := sv.Session("n1").Cwd()
+	if err != nil || cwd != "/data/exp1" {
+		t.Fatalf("Cwd() = %q, %v", cwd, err)
+	}
+	want := []string{"display-message", "-p", "-t", "=n1:", "#{pane_current_path}"}
+	if got := f.calls[0].args[2:]; !reflect.DeepEqual(got, want) {
+		t.Errorf("display-message args = %v", got)
+	}
+}
+
 func TestKillServerToleratesNoServer(t *testing.T) {
 	f := &fakeRunner{out: "no server running on /tmp/tmux-1000/testsock", err: errors.New("exit status 1")}
 	if err := newTestServer(f).KillServer(); err != nil {

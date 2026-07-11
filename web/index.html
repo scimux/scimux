@@ -86,7 +86,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let nodes = [], open = new Set();
+let nodes = [], open = new Set(), unadopted = [];
 
 const api = (path, opts) => fetch(path, opts).then(async r => {
   if (!r.ok) throw new Error(await r.text());
@@ -111,10 +111,17 @@ function render() {
       </div>
       ${open.has(n.id) ? body(n) : ''}
     </div>` + (kids[n.id] || []).map(c => one(c, depth + 1)).join('');
-  $('#list').innerHTML = nodes.length
+  const adoptStrip = unadopted.length ? `
+    <div class="node" style="border-style:dashed">
+      <div class="nhead" style="cursor:default">
+        <span class="meta">unadopted tmux sessions on this socket:</span>
+        ${unadopted.map(s => `<button onclick="adoptDlg('${esc(s)}')">adopt ${esc(s)}</button>`).join(' ')}
+      </div>
+    </div>` : '';
+  $('#list').innerHTML = adoptStrip + (nodes.length
     ? roots.map(n => one(n, 0)).join('')
     : `<div class="empty">No chats yet.<br><br>
-       <button class="primary" onclick="newChatDlg('')">start your first chat</button></div>`;
+       <button class="primary" onclick="newChatDlg('')">start your first chat</button></div>`);
   for (const id of open) fillChat(id);
 }
 
@@ -145,6 +152,7 @@ async function refresh() {
   try {
     const st = await api('/api/state');
     nodes = st.nodes || [];
+    unadopted = st.unadopted || [];
     SOCKET = st.socket || 'scimux';
     $('#sys').textContent = [st.sys?.load ? 'load ' + st.sys.load : '', st.sys?.mem || '']
       .filter(Boolean).join(' · ');
@@ -230,6 +238,35 @@ function newChatDlg(parent) {
       const n = await api('/api/nodes', { method: 'POST', body: JSON.stringify(payload) });
       open.add(n.id);
       await refresh();
+    } catch (e) { alert(e.message); }
+  };
+  dlg.showModal();
+}
+
+/* ---- adopt an already-running session scimux did not start ---- */
+
+function adoptDlg(session) {
+  $('#dlgTitle').textContent = `adopt session "${session}"`;
+  $('#dlgFields').innerHTML = `
+    <label>agent running inside it</label>
+    <select id="a_agent"><option>claude</option><option>codex</option></select>
+    <label>claude session id (from --session-id / --resume; enables the chat view — leave empty for peek-only)</label>
+    <input id="a_sid" placeholder="uuid, optional">
+    <label>transcript path (optional override if known)</label>
+    <input id="a_path">
+    <label>title (optional)</label><input id="a_title">
+    <label>what is this session working on? (recorded as the node's question)</label>
+    <textarea id="a_prompt" rows="2"></textarea>`;
+  const dlg = $('#dlg');
+  dlg.onclose = async () => {
+    if (dlg.returnValue !== 'ok') return;
+    try {
+      const n = await api('/api/adopt', { method: 'POST', body: JSON.stringify({
+        session, agent: $('#a_agent').value, session_id: $('#a_sid').value.trim(),
+        transcript: $('#a_path').value.trim(), title: $('#a_title').value.trim(),
+        prompt: $('#a_prompt').value.trim(),
+      })});
+      open.add(n.id); await refresh();
     } catch (e) { alert(e.message); }
   };
   dlg.showModal();
