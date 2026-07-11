@@ -1,6 +1,6 @@
-on: [push]
+on: [release]
 jobs:
-  build-and-test:
+  build-and-test-and-release:
     runs-on: go-builder
     steps:
       - name: Add missing tools
@@ -28,3 +28,11 @@ jobs:
       - name: Build for darwin/arm64
         run: |
           GOOS=darwin GOARCH=arm64 go build -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
+
+      - name: Attach built artifacts
+        environment:
+          CODEBERG_TOKEN:
+            from_secret: CODEBERG_TOKEN
+        run: |
+          .forgejo/codeberg-release.sh ${CI_COMMIT_TAG} ./builds
+
