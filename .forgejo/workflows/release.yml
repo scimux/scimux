@@ -1,7 +1,6 @@
 on: [release]
 env:
   CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
-  RELEASE: ${{ steps.meta.outputs.tag-names }}
 jobs:
   build-and-test-and-release:
     runs-on: go-builder
@@ -34,5 +33,5 @@ jobs:
 
       - name: Attach built artifacts
         run: |
-          .forgejo/codeberg-release.sh ${RELEASE} ./builds
+          .forgejo/codeberg-release.sh "${{ steps.meta.outputs.tag-names }}" ./builds
 
