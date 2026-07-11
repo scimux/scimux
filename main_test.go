@@ -176,6 +176,33 @@ func TestLoadStoreMissingFile(t *testing.T) {
 	}
 }
 
+func TestSessionArgFromCmdline(t *testing.T) {
+	id := "12345678-1234-4234-8234-123456789abc"
+	cases := [][]string{
+		{"claude", "--resume", id},
+		{"claude", "-r", id},
+		{"claude", "--session-id", id, "hello"},
+		{"sh", "-c", "claude --resume " + id},
+		{"/bin/sh", "-c", "claude --model opus --session-id " + id + " 'prompt'"},
+	}
+	for _, args := range cases {
+		if got := sessionArgFromCmdline(args); got != id {
+			t.Errorf("sessionArgFromCmdline(%v) = %q, want %q", args, got, id)
+		}
+	}
+	for _, args := range [][]string{
+		{"claude", "--resume"},               // missing value
+		{"claude", "--resume", "not-a-uuid"}, // bad value
+		{"bash", "--norc"},                   // unrelated
+		{"vim", "notes--resume plan.md"},     // substring red herring
+		nil,
+	} {
+		if got := sessionArgFromCmdline(args); got != "" {
+			t.Errorf("sessionArgFromCmdline(%v) = %q, want empty", args, got)
+		}
+	}
+}
+
 func TestSysloadOnLinux(t *testing.T) {
 	s := sysload()
 	if s["load"] == "" {

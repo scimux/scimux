@@ -235,6 +235,74 @@ func firstWords(s string, n int) string {
 	return strings.Join(words, " ")
 }
 
+// claudeSessionFromPane inspects the pane's process and its direct
+// children (tmux may wrap the command in `sh -c`) for a claude invocation
+// and extracts the session id from --session-id / --resume / -r arguments.
+// Linux /proc only; returns "" anywhere it can't look.
+func claudeSessionFromPane(panePID string) string {
+	if id := sessionArgFromCmdline(procCmdline(panePID)); id != "" {
+		return id
+	}
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid := e.Name()
+		if pid[0] < '0' || pid[0] > '9' {
+			continue
+		}
+		if ppidOf(pid) == panePID {
+			if id := sessionArgFromCmdline(procCmdline(pid)); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func procCmdline(pid string) []string {
+	b, err := os.ReadFile("/proc/" + pid + "/cmdline")
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+}
+
+func ppidOf(pid string) string {
+	b, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return ""
+	}
+	// PPid is the 2nd field after the parenthesized comm (which may itself
+	// contain spaces), so split after the last ')'.
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 {
+		return ""
+	}
+	f := strings.Fields(s[i+1:])
+	if len(f) < 2 {
+		return ""
+	}
+	return f[1]
+}
+
+var sessionIDArgRe = regexp.MustCompile(`^[0-9a-fA-F][0-9a-fA-F-]{31,35}$`)
+
+func sessionArgFromCmdline(args []string) string {
+	for i, a := range args {
+		if (a == "--session-id" || a == "--resume" || a == "-r") &&
+			i+1 < len(args) && sessionIDArgRe.MatchString(args[i+1]) {
+			return args[i+1]
+		}
+		// `sh -c "claude --resume <id> …"`: the whole command is one arg.
+		if strings.Contains(a, "--resume ") || strings.Contains(a, "--session-id ") {
+			if id := sessionArgFromCmdline(strings.Fields(a)); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 // ---------- background poller ----------
 
 // poll refreshes liveness (mechanical only: pane changed recently, quiet, or
@@ -401,13 +469,24 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
 		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	// Adopted claude session without a known id: the newest session log in
-	// the pane's working directory is almost certainly it (a migrated
-	// --resume keeps appending to its original file). Best-effort — a wrong
+	// Adopted claude session without a known id: first try the pane's own
+	// process arguments (claude --resume <id> / --session-id <id>), which is
+	// deterministic even with several sessions in one directory. Fall back
+	// to the newest session log in the working directory. A wrong or missing
 	// guess still leaves peek + send working.
 	if n.Agent == "claude" && n.SessionID == "" && n.Transcript == "" {
-		if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
-			n.Transcript, n.SessionID = path, sid
+		if pid, err := s.PanePID(); err == nil {
+			if sid := claudeSessionFromPane(pid); sid != "" {
+				n.SessionID = sid
+				if path, ok := transcript.FindClaudeTranscript(a.home, sid); ok {
+					n.Transcript = path
+				}
+			}
+		}
+		if n.Transcript == "" {
+			if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
+				n.Transcript, n.SessionID = path, sid
+			}
 		}
 	}
 	a.nodes = append(a.nodes, n)
@@ -469,7 +548,9 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	path := n.Transcript
 	tl := a.tailers[n.ID]
-	if tl == nil && path != "" {
+	// (Re)build the tailer when the transcript appears or is relinked to a
+	// different file (e.g. a corrected adoption guess).
+	if path != "" && (tl == nil || tl.Path != path) {
 		tl = &transcript.Tailer{Path: path}
 		a.tailers[n.ID] = tl
 	}

@@ -136,6 +136,15 @@ func (s *Session) Capture() (string, error) {
 	return out, nil
 }
 
+// PanePID returns the pid of the process running in the session's pane.
+func (s *Session) PanePID() (string, error) {
+	out, err := s.sv.tmux("", "display-message", "-p", "-t", s.paneTarget(), "#{pane_pid}")
+	if err != nil {
+		return "", fmt.Errorf("tmux display-message: %v: %s", err, out)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // Cwd returns the current working directory of the session's pane. Used
 // when adopting a manually created session whose dir scimux never knew.
 func (s *Session) Cwd() (string, error) {
