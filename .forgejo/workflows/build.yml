@@ -31,7 +31,7 @@ jobs:
 
 on: [release]
 jobs:
-  build-and-test-release:
+  build-and-test-and-release:
     runs-on: go-builder
     steps:
       - name: Add missing tools
@@ -65,5 +65,5 @@ jobs:
           CODEBERG_TOKEN:
             from_secret: CODEBERG_TOKEN
         run: |
-          .forgejo/workflows/codeberg-release.sh ${CI_COMMIT_TAG} ./builds
+          .forgejo/codeberg-release.sh ${CI_COMMIT_TAG} ./builds
 
