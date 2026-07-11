@@ -22,12 +22,12 @@ jobs:
 
       - name: Build for linux/amd64
         run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-linux-amd64 && file builds/scimux-linux-amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-linux-amd64 && file builds/scimux-linux-amd64
 
       - name: Build for linux/arm64
         run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-linux-arm64 && file builds/scimux-linux-arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-linux-arm64 && file builds/scimux-linux-arm64
 
       - name: Build for darwin/arm64
         run: |
-          GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
