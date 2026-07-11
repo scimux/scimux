@@ -28,3 +28,42 @@ jobs:
       - name: Build for darwin/arm64
         run: |
           GOOS=darwin GOARCH=arm64 go build -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
+
+on: [release]
+jobs:
+  build-and-test-release:
+    runs-on: go-builder
+    steps:
+      - name: Add missing tools
+        run: |
+          apk add --no-cache git file
+
+      - name: Clone and checkout repository
+        run: |
+          git clone https://codeberg.org/chrberger/scimux.git .
+          git checkout ${{ github.sha }}
+          mkdir -p builds
+
+      - name: Run tests (short mode; integration tests need tmux and are skipped)
+        run: |
+          go test -short ./...
+
+      - name: Build for linux/amd64
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o builds/scimux-linux-amd64 && file builds/scimux-linux-amd64
+
+      - name: Build for linux/arm64
+        run: |
+          GOOS=linux GOARCH=arm64 go build -o builds/scimux-linux-arm64 && file builds/scimux-linux-arm64
+
+      - name: Build for darwin/arm64
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
+
+      - name: Attach built artifacts
+        environment:
+          CODEBERG_TOKEN:
+            from_secret: CODEBERG_TOKEN
+        run: |
+          .forgejo/workflows/codeberg-release.sh ${CI_COMMIT_TAG} ./builds
+
