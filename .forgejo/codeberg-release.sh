@@ -24,6 +24,8 @@ while [[ $# -gt 2 ]]; do
   esac
 done
 
+echo "1: $1"
+echo "2: $2"
 TAG="$1"
 DIR="$2"
 
