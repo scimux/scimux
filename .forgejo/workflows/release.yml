@@ -33,5 +33,5 @@ jobs:
 
       - name: Attach built artifacts
         run: |
-          .forgejo/codeberg-release.sh "${{ steps.meta.outputs.tag-names }}" ./builds
+          .forgejo/codeberg-release.sh "${{ forgejo.ref_name }}" ./builds
 
