@@ -7,7 +7,7 @@ jobs:
     steps:
       - name: Add missing tools
         run: |
-          apk add --no-cache bash curl file git
+          apk add --no-cache bash curl file git jq
 
       - name: Clone and checkout repository
         run: |
