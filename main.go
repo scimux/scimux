@@ -546,6 +546,11 @@ func main() {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := webFS.ReadFile("web/index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// The UI is embedded in the binary and changes with every build;
+		// a cached copy after a scimux upgrade is a recurring dogfooding
+		// trap (especially iPad Safari). It's one small local page: always
+		// fetch fresh.
+		w.Header().Set("Cache-Control", "no-store")
 		w.Write(b)
 	})
 	mux.HandleFunc("GET /api/state", a.handleState)
