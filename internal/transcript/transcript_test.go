@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -235,9 +236,9 @@ func TestFindCodexRolloutExcludesPreexisting(t *testing.T) {
 	meta := `{"timestamp":"x","type":"session_meta","payload":{"id":"i","cwd":"/data/exp1"}}` + "\n"
 	oldRollout := filepath.Join(day, "rollout-2026-07-12T08-00-00-old.jsonl")
 	os.WriteFile(oldRollout, []byte(meta), 0o644)
-	snapshot := ListCodexRollouts(root) // taken at launch: only the old file exists
-	if !snapshot[oldRollout] {
-		t.Fatal("snapshot must contain the pre-launch rollout")
+	snapshot, complete := ListCodexRollouts(root) // taken at launch: only the old file exists
+	if !complete || !snapshot[oldRollout] {
+		t.Fatalf("snapshot must be complete and contain the pre-launch rollout (complete=%v)", complete)
 	}
 	newRollout := filepath.Join(day, "rollout-2026-07-12T10-00-00-new.jsonl")
 	os.WriteFile(newRollout, []byte(meta), 0o644)
@@ -291,6 +292,110 @@ func TestTailerUnparseableAfterValidTurns(t *testing.T) {
 	tl.Poll()
 	if tl.Unparseable() {
 		t.Fatal("streak must reset once recognizable data resumes")
+	}
+}
+
+// The session id embedded in a rollout filename is codex's own, so matching
+// on it is deterministic — the safe correlation for adopted/resumed sessions
+// where no pre-launch snapshot exists (finding 20).
+func TestFindCodexRolloutBySession(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "12")
+	os.MkdirAll(day, 0o755)
+	id := "00000000-0000-7000-8000-000000000001"
+	want := filepath.Join(day, "rollout-2026-07-12T10-00-00-"+id+".jsonl")
+	other := filepath.Join(day, "rollout-2026-07-12T09-00-00-ffffffff-0000-0000-0000-000000000000.jsonl")
+	os.WriteFile(want, []byte("{}\n"), 0o644)
+	os.WriteFile(other, []byte("{}\n"), 0o644)
+
+	got, ok := FindCodexRolloutBySession(root, id)
+	if !ok || got != want {
+		t.Fatalf("got %q ok=%v, want %q", got, ok, want)
+	}
+	// Case-insensitive: ids extracted from a command line may be uppercased.
+	if got, ok := FindCodexRolloutBySession(root, strings.ToUpper(id)); !ok || got != want {
+		t.Fatalf("uppercase id: got %q ok=%v", got, ok)
+	}
+	if _, ok := FindCodexRolloutBySession(root, "11111111-2222-3333-4444-555555555555"); ok {
+		t.Fatal("found a rollout for an unknown session id")
+	}
+}
+
+// The snapshot's safety property needs a full walk: a traversal error must
+// be reported as incomplete, while a missing root (no codex history at all)
+// is a complete, empty snapshot (finding 22).
+func TestListCodexRolloutsCompleteness(t *testing.T) {
+	if snap, complete := ListCodexRollouts(filepath.Join(t.TempDir(), "absent")); !complete || len(snap) != 0 {
+		t.Fatalf("missing root: complete=%v len=%d, want complete and empty", complete, len(snap))
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permissions cannot make a directory unreadable")
+	}
+	root := t.TempDir()
+	sealed := filepath.Join(root, "2026", "07", "12")
+	os.MkdirAll(sealed, 0o755)
+	os.WriteFile(filepath.Join(sealed, "rollout-hidden.jsonl"), []byte("{}\n"), 0o644)
+	if err := os.Chmod(sealed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(sealed, 0o755)
+	if _, complete := ListCodexRollouts(root); complete {
+		t.Fatal("unreadable subtree must mark the snapshot incomplete")
+	}
+}
+
+// A future format that keeps emitting typed JSON objects but moves visible
+// messages to a new shape must be detectable: bytes advance while the
+// chat-record count stands still. Structural health (Unparseable) cannot see
+// this case — that is exactly why Progress exists (finding 21).
+func TestTailerProgressTypedFormatChange(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	os.WriteFile(p, []byte(
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"question"}}`+"\n"+
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"answer"}}`+"\n"), 0o644)
+	tl := &Tailer{Path: p}
+	tl.Poll()
+	off1, prog1 := tl.Progress()
+	if prog1 != 2 || off1 == 0 {
+		t.Fatalf("valid prefix: offset=%d chatRecords=%d, want offset>0 and 2 records", off1, prog1)
+	}
+	append_ := func(lines ...string) {
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range lines {
+			f.WriteString(l + "\n")
+		}
+		f.Close()
+	}
+	// The hypothetical next CLI release: still JSONL, still typed, but the
+	// message shape moved — no turn, no tool call this parser recognizes.
+	append_(`{"type":"message_v2","timestamp":"t3","body":{"speaker":"assistant","parts":[{"kind":"text","value":"new shape"}]}}`)
+	tl.Poll()
+	off2, prog2 := tl.Progress()
+	if off2 <= off1 {
+		t.Fatalf("offset did not advance: %d -> %d", off1, off2)
+	}
+	if prog2 != prog1 {
+		t.Fatalf("typed future message counted as chat progress: %d -> %d", prog1, prog2)
+	}
+	if tl.Unparseable() {
+		t.Fatal("typed records must not trip the structural health signal")
+	}
+	// Known chat shapes — including pure tool activity with no visible
+	// message — do count as progress.
+	append_(`{"type":"assistant","timestamp":"t4","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`)
+	tl.Poll()
+	if _, prog3 := tl.Progress(); prog3 != prog2+1 {
+		t.Fatalf("tool call not counted as chat progress: %d -> %d", prog2, prog3)
+	}
+	// Benign side records (titles, token counts) are not progress — and that
+	// alone must never mark anything unhealthy.
+	append_(`{"type":"ai-title","title":"threshold sweep"}`)
+	tl.Poll()
+	if _, prog4 := tl.Progress(); prog4 != prog2+1 {
+		t.Fatalf("side record counted as chat progress")
 	}
 }
 

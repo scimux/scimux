@@ -44,7 +44,7 @@ type Node struct {
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
 	Dir        string `json:"dir"`
-	SessionID  string `json:"session_id,omitempty"` // claude session uuid (minted by us)
+	SessionID  string `json:"session_id,omitempty"` // claude session uuid (minted by us) or codex session id (extracted from a resumed pane)
 	Transcript string `json:"transcript,omitempty"`
 	CreatedAt  string `json:"created_at"`
 }
@@ -74,11 +74,19 @@ type app struct {
 	lastChg map[string]time.Time
 	tailers map[string]*transcript.Tailer
 	// rolloutSnaps: node id -> rollout paths that existed at launch; codex
-	// discovery only correlates files that appeared afterwards.
+	// discovery only correlates files that appeared afterwards. A node with
+	// no entry has no trustworthy snapshot (adopted, created after an
+	// incomplete walk, or scimux restarted) — for such nodes the cwd+time
+	// heuristic is unsafe and discovery must not run at all.
 	rolloutSnaps map[string]map[string]bool
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool
+	// chatMark/staleChat: per-node transcript progress at the last
+	// active→quiet pane transition, and whether the file has been growing
+	// without recognizable chat records since (degrade the UI to peek).
+	chatMark  map[string]chatMark
+	staleChat map[string]bool
 
 	server    *tmuxsession.Server
 	storePath string
@@ -208,7 +216,9 @@ func agentCommand(n *Node) (string, error) {
 // It returns the HTTP status to use on error: client mistakes are 400,
 // server-side failures (tmux, store) are 500. Callers hold a.mu; taken
 // carries tmux session names that must not be reused as node IDs, and
-// rollouts is a pre-launch snapshot of existing codex rollout paths.
+// rollouts is a pre-launch snapshot of existing codex rollout paths — nil
+// means no trustworthy snapshot exists, which disables transcript discovery
+// for this node (peek still works) rather than risking a wrong link.
 func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]bool) (int, error) {
 	if strings.TrimSpace(n.Prompt) == "" {
 		return 400, fmt.Errorf("prompt must not be empty")
@@ -273,7 +283,7 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
-	if n.Agent == "codex" {
+	if n.Agent == "codex" && rollouts != nil {
 		// Discovery must only correlate rollouts that appear after launch.
 		a.rolloutSnaps[n.ID] = rollouts
 	}
@@ -288,12 +298,12 @@ func firstWords(s string, n int) string {
 	return strings.Join(words, " ")
 }
 
-// claudeSessionFromPane inspects the pane's process and its direct
-// children (tmux may wrap the command in `sh -c`) for a claude invocation
-// and extracts the session id from --session-id / --resume / -r arguments.
-// Linux /proc only; returns "" anywhere it can't look.
-func claudeSessionFromPane(panePID string) string {
-	if id := sessionArgFromCmdline(procCmdline(panePID)); id != "" {
+// sessionFromPane inspects the pane's process and its direct children (tmux
+// may wrap the command in `sh -c`), applying extract to each command line to
+// find an agent session id. Linux /proc only; returns "" anywhere it can't
+// look.
+func sessionFromPane(panePID string, extract func([]string) string) string {
+	if id := extract(procCmdline(panePID)); id != "" {
 		return id
 	}
 	entries, _ := os.ReadDir("/proc")
@@ -303,7 +313,7 @@ func claudeSessionFromPane(panePID string) string {
 			continue
 		}
 		if ppidOf(pid) == panePID {
-			if id := sessionArgFromCmdline(procCmdline(pid)); id != "" {
+			if id := extract(procCmdline(pid)); id != "" {
 				return id
 			}
 		}
@@ -356,6 +366,24 @@ func sessionArgFromCmdline(args []string) string {
 	return ""
 }
 
+// codexSessionFromCmdline extracts the session id from a resumed codex
+// invocation (`codex resume <id>`). A fresh `codex` launch carries no id —
+// codex only exposes one on resume.
+func codexSessionFromCmdline(args []string) string {
+	for i, a := range args {
+		if a == "resume" && i+1 < len(args) && sessionIDArgRe.MatchString(args[i+1]) {
+			return args[i+1]
+		}
+		// `sh -c "codex resume <id> …"`: the whole command is one arg.
+		if strings.Contains(a, "resume ") {
+			if id := codexSessionFromCmdline(strings.Fields(a)); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 // ---------- background poller ----------
 
 // poll refreshes liveness (mechanical only: pane changed recently, quiet, or
@@ -397,12 +425,19 @@ func (a *app) poll() {
 		attn := ""
 		if state == "quiet" {
 			a.mu.Lock()
+			prev := a.live[n.ID] // not yet overwritten this tick
 			tl := a.tailerLocked(n)
 			a.mu.Unlock()
 			if tl != nil {
 				tl.Poll()
 				if name, ok := tl.WaitingOn(); ok {
 					attn = attentionKind(name)
+				}
+				if prev == "active" {
+					// The pane just went quiet after a working phase: judge
+					// whether the transcript carried that phase (finding 21).
+					off, prog := tl.Progress()
+					a.noteChatProgress(n.ID, off, prog)
 				}
 			}
 		}
@@ -453,6 +488,7 @@ func (a *app) discoverTranscript(n *Node) {
 	for p := range a.pathClaims {
 		excluded[p] = true
 	}
+	_, haveSnap := a.rolloutSnaps[n.ID]
 	for p := range a.rolloutSnaps[n.ID] {
 		excluded[p] = true
 	}
@@ -461,9 +497,25 @@ func (a *app) discoverTranscript(n *Node) {
 	var ok bool
 	switch n.Agent {
 	case "claude":
+		if n.SessionID == "" {
+			return // adopted without an id: adoption already made its one guess
+		}
 		path, ok = transcript.FindClaudeTranscript(a.home, n.SessionID)
 	case "codex":
-		path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created, excluded)
+		switch {
+		case n.SessionID != "":
+			// Deterministic: the id (from a resumed pane's command line) is
+			// embedded in the rollout filename by codex itself.
+			path, ok = transcript.FindCodexRolloutBySession(a.codexRoot, n.SessionID)
+		case haveSnap:
+			path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created, excluded)
+		default:
+			// No snapshot and no session id — adopted, restarted, or launched
+			// after an incomplete walk. The cwd+time heuristic could link a
+			// merely plausible rollout, and a wrong conversation is worse
+			// than none: stay on peek.
+			return
+		}
 	}
 	if !ok || excluded[path] {
 		return
@@ -493,6 +545,35 @@ func (a *app) discoverTranscript(n *Node) {
 	delete(a.pathClaims, path)
 	delete(a.rolloutSnaps, n.ID)
 	a.mu.Unlock()
+}
+
+// chatMark is one node's transcript progress as of the last active→quiet
+// pane transition: bytes consumed and chat-shaped records seen.
+type chatMark struct {
+	seen bool
+	off  int64
+	prog int
+}
+
+// noteChatProgress updates the stale-transcript signal at the moment a
+// node's pane turns quiet. Bytes that advanced over a whole active phase
+// without one recognized chat record mean the linked file no longer carries
+// the conversation — a typed future format the structural health check
+// cannot see — so the UI degrades to peek alongside the retained turns.
+// Recognized chat progress clears the signal again. Anchoring the judgment
+// to pane activity cycles (not per-line thresholds) is what keeps benign
+// non-chat records, however many, from ever tripping it on their own.
+func (a *app) noteChatProgress(id string, off int64, prog int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m := a.chatMark[id]
+	switch {
+	case m.seen && prog > m.prog:
+		a.staleChat[id] = false
+	case m.seen && off > m.off:
+		a.staleChat[id] = true
+	}
+	a.chatMark[id] = chatMark{seen: true, off: off, prog: prog}
 }
 
 // pathClaimedLocked reports whether a transcript path is already owned by
@@ -678,7 +759,7 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	// guess still leaves peek + send working.
 	if n.Agent == "claude" && n.SessionID == "" && n.Transcript == "" {
 		if pid, err := s.PanePID(); err == nil {
-			if sid := claudeSessionFromPane(pid); sid != "" {
+			if sid := sessionFromPane(pid, sessionArgFromCmdline); sid != "" {
 				n.SessionID = sid
 				if path, ok := transcript.FindClaudeTranscript(a.home, sid); ok {
 					n.Transcript = path
@@ -691,6 +772,24 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		if n.SessionID == "" && n.Transcript == "" {
 			if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
 				n.Transcript, n.SessionID = path, sid
+			}
+		}
+	}
+	// Adopted codex session: a resumed pane carries the session id on its
+	// command line, and codex embeds that id in the rollout filename — a
+	// deterministic match. Without an id there is no pre-launch snapshot to
+	// make the cwd+time heuristic safe (an adopted/resumed session normally
+	// appends to an *existing* rollout among possibly several same-cwd
+	// candidates), so no guess is attempted: linking the wrong conversation
+	// is worse than showing peek. The node stays on pane snapshots unless an
+	// explicit transcript is supplied.
+	if n.Agent == "codex" && n.SessionID == "" && n.Transcript == "" {
+		if pid, err := s.PanePID(); err == nil {
+			if sid := sessionFromPane(pid, codexSessionFromCmdline); sid != "" {
+				n.SessionID = sid
+				if path, ok := transcript.FindCodexRolloutBySession(a.codexRoot, sid); ok {
+					n.Transcript = path
+				}
 			}
 		}
 	}
@@ -717,15 +816,27 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
-	// Snapshot current session names and existing rollouts before the
-	// critical section (tmux and the filesystem walk are slow); the ID
-	// allocator must avoid unadopted sessions, and codex discovery must
-	// only correlate rollouts that appear after this launch.
+	// Snapshot current session names before the critical section (tmux is
+	// slow); the ID allocator must avoid unadopted sessions.
 	taken := map[string]bool{}
 	for _, s := range a.server.Sessions() {
 		taken[s] = true
 	}
-	rollouts := transcript.ListCodexRollouts(a.codexRoot)
+	// The rollout snapshot walks the entire codex history, so take it only
+	// when this request will actually launch codex — resolved the same way
+	// createNode resolves it — and not for requests that fail validation
+	// anyway. An incomplete walk cannot guarantee "everything not in the
+	// snapshot appeared after launch"; then the launch proceeds but
+	// discovery stays disabled (nil snapshot) and the node relies on peek.
+	var rollouts map[string]bool
+	if strings.TrimSpace(n.Prompt) != "" && a.effectiveAgent(&n) == "codex" {
+		snap, complete := transcript.ListCodexRollouts(a.codexRoot)
+		if complete {
+			rollouts = snap
+		} else {
+			fmt.Fprintf(os.Stderr, "scimux: codex rollout snapshot incomplete; transcript discovery disabled for this node\n")
+		}
+	}
 	a.mu.Lock()
 	status, err := a.createNode(&n, taken, rollouts)
 	a.mu.Unlock()
@@ -734,6 +845,23 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, n)
+}
+
+// effectiveAgent resolves which agent a new-node request will launch,
+// mirroring createNode's inheritance (explicit agent, else the parent's,
+// else claude) without mutating the request.
+func (a *app) effectiveAgent(n *Node) string {
+	if n.Agent != "" {
+		return n.Agent
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n.Parent != "" {
+		if p, ok := a.byID[n.Parent]; ok && p.Agent != "" {
+			return p.Agent
+		}
+	}
+	return "claude"
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {
@@ -771,6 +899,7 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	pending := n.Transcript == ""
 	tl := a.tailerLocked(n)
 	live := a.live[n.ID]
+	stale := a.staleChat[n.ID]
 	a.mu.Unlock()
 	turns := []transcript.Turn{}
 	if tl != nil {
@@ -778,12 +907,13 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// fallback signals "the transcript is not (or no longer) making sense" —
 	// missing, not yet populated, unreadable, format-incompatible from the
-	// start, or a file whose recent appended data has stopped being
-	// interpretable even though earlier turns parsed fine. A path string
-	// existing does not mean the transcript is usable; the client must
-	// degrade to the pane snapshot in every one of these cases.
+	// start, structurally broken after valid turns (Unparseable), or still
+	// growing through whole pane-activity cycles without one recognizable
+	// chat record (staleChat: a typed future format). A path string existing
+	// does not mean the transcript is usable; the client must degrade to the
+	// pane snapshot in every one of these cases.
 	writeJSON(w, map[string]any{"turns": turns, "pending": pending, "live": live,
-		"fallback": len(turns) == 0 || (tl != nil && tl.Unparseable())})
+		"fallback": len(turns) == 0 || (tl != nil && tl.Unparseable()) || stale})
 }
 
 // tailerLocked returns the node's transcript tailer, (re)building it when
@@ -797,6 +927,10 @@ func (a *app) tailerLocked(n *Node) *transcript.Tailer {
 	if tl == nil || tl.Path != n.Transcript {
 		tl = &transcript.Tailer{Path: n.Transcript}
 		a.tailers[n.ID] = tl
+		// A fresh file needs a fresh progress baseline; staleness measured
+		// against the old file says nothing about this one.
+		delete(a.chatMark, n.ID)
+		delete(a.staleChat, n.ID)
 	}
 	return tl
 }
@@ -905,6 +1039,8 @@ func main() {
 		tailers:      map[string]*transcript.Tailer{},
 		rolloutSnaps: map[string]map[string]bool{},
 		pathClaims:   map[string]bool{},
+		chatMark:     map[string]chatMark{},
+		staleChat:    map[string]bool{},
 		server:       tmuxsession.NewServer(*socket),
 		storePath:    filepath.Join(*data, "nodes.jsonl"),
 		codexRoot:    *codexRoot,

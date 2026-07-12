@@ -245,6 +245,83 @@ func TestSessionArgFromCmdline(t *testing.T) {
 	}
 }
 
+func TestCodexSessionFromCmdline(t *testing.T) {
+	id := "00000000-0000-7000-8000-000000000001"
+	for _, args := range [][]string{
+		{"codex", "resume", id},
+		{"codex", "--model", "gpt-5.5", "resume", id},
+		{"sh", "-c", "codex resume " + id},
+	} {
+		if got := codexSessionFromCmdline(args); got != id {
+			t.Errorf("codexSessionFromCmdline(%v) = %q, want %q", args, got, id)
+		}
+	}
+	for _, args := range [][]string{
+		{"codex", "resume"},                  // missing value
+		{"codex", "resume", "--last"},        // no explicit id
+		{"codex", "'sweep thresholds'"},      // fresh launch: no id exists
+		{"vim", "how-to-resume plan.md"},     // substring red herring
+		{"claude", "--resume", id + " tail"}, // not a codex invocation shape
+		nil,
+	} {
+		if got := codexSessionFromCmdline(args); got != "" {
+			t.Errorf("codexSessionFromCmdline(%v) = %q, want empty", args, got)
+		}
+	}
+}
+
+// noteChatProgress turns per-cycle transcript progress into the stale-chat
+// signal: growth without chat records sets it, chat records clear it, and
+// the first observation only establishes the baseline (finding 21).
+func TestNoteChatProgress(t *testing.T) {
+	a := &app{chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}
+	a.noteChatProgress("n", 100, 2) // baseline
+	if a.staleChat["n"] {
+		t.Fatal("baseline observation must not mark stale")
+	}
+	a.noteChatProgress("n", 300, 2) // bytes grew, no chat record: stale
+	if !a.staleChat["n"] {
+		t.Fatal("growth without chat progress must mark stale")
+	}
+	a.noteChatProgress("n", 320, 2) // still growing, still no chat: stays stale
+	if !a.staleChat["n"] {
+		t.Fatal("stale must persist while no chat progress arrives")
+	}
+	a.noteChatProgress("n", 500, 3) // a recognized chat record: recovered
+	if a.staleChat["n"] {
+		t.Fatal("chat progress must clear the stale signal")
+	}
+	a.noteChatProgress("n", 500, 3) // idle cycle: nothing changes
+	if a.staleChat["n"] {
+		t.Fatal("idle cycle must not mark stale")
+	}
+}
+
+// effectiveAgent mirrors createNode's inheritance so the rollout snapshot
+// is taken exactly for the requests that launch codex (finding 22).
+func TestEffectiveAgent(t *testing.T) {
+	a := &app{byID: map[string]*Node{
+		"cx": {ID: "cx", Agent: "codex"},
+		"cl": {ID: "cl", Agent: "claude"},
+	}}
+	cases := []struct {
+		n    Node
+		want string
+	}{
+		{Node{Agent: "codex"}, "codex"},
+		{Node{Agent: "claude", Parent: "cx"}, "claude"}, // explicit beats inherited
+		{Node{Parent: "cx"}, "codex"},
+		{Node{Parent: "cl"}, "claude"},
+		{Node{Parent: "missing"}, "claude"}, // createNode will 400; no walk needed
+		{Node{}, "claude"},
+	}
+	for _, c := range cases {
+		if got := a.effectiveAgent(&c.n); got != c.want {
+			t.Errorf("effectiveAgent(%+v) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
 func TestSysloadOnLinux(t *testing.T) {
 	s := sysload()
 	if s.NCPU <= 0 {

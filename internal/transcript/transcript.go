@@ -140,6 +140,12 @@ type Tailer struct {
 	// that stopped being this transcript format at all (wrong file linked,
 	// corruption, a non-JSONL future format), even after earlier valid turns.
 	unknownStreak int
+	// progress counts chat-shaped records ever seen (see chatShaped). The
+	// caller compares it, together with the byte offset, across pane
+	// activity cycles: bytes that advance while this count stands still mean
+	// the file keeps growing but no longer carries interpretable
+	// conversation — the typed-format-change case unknownStreak cannot see.
+	progress int
 }
 
 // unparseableThreshold is how many consecutive structurally-unrecognizable
@@ -163,6 +169,54 @@ func recognizedLine(line []byte) bool {
 		Type string `json:"type"`
 	}
 	return json.Unmarshal(line, &g) == nil && g.Type != ""
+}
+
+// chatShaped reports whether a line is a chat record whose inner shape this
+// parser understands — a visible message, a tool call, or a tool result —
+// regardless of whether it yields a visible turn. This is the chat-progress
+// signal: a future format that keeps emitting typed JSON objects while its
+// messages have moved to new shapes appends bytes without a single
+// chat-shaped record, even though recognizedLine stays satisfied. Benign
+// side records (titles, token counts, queue operations) are simply not
+// progress; they never mark anything unhealthy on their own.
+func chatShaped(line []byte) bool {
+	var g struct {
+		Type    string          `json:"type"`
+		Message json.RawMessage `json:"message"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if json.Unmarshal(line, &g) != nil {
+		return false
+	}
+	switch g.Type {
+	case "user", "assistant": // Claude Code chat record
+		var msg struct {
+			Content json.RawMessage `json:"content"`
+		}
+		return json.Unmarshal(g.Message, &msg) == nil && len(msg.Content) > 0
+	case "response_item": // Codex chat record
+		var p struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(g.Payload, &p) != nil {
+			return false
+		}
+		switch p.Type {
+		case "message", "function_call", "custom_tool_call",
+			"function_call_output", "custom_tool_call_output":
+			return true
+		}
+	}
+	return false
+}
+
+// Progress reports how far the tailer has read (bytes consumed from the
+// file) and how many chat-shaped records it has seen in total. Both values
+// only grow (except on file rotation, which resets the tailer).
+func (t *Tailer) Progress() (offset int64, chatRecords int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.offset, t.progress
 }
 
 // WaitingOn reports the most recent tool call without a logged result — the
@@ -280,6 +334,7 @@ func (t *Tailer) Poll() []Turn {
 	}
 	if st.Size() < t.offset {
 		t.offset, t.buf, t.Turns, t.pending = 0, nil, nil, nil
+		t.unknownStreak, t.progress = 0, 0
 	}
 	if st.Size() == t.offset {
 		return t.Turns
@@ -305,6 +360,9 @@ func (t *Tailer) Poll() []Turn {
 				t.unknownStreak = 0
 			} else {
 				t.unknownStreak++
+			}
+			if chatShaped(line) {
+				t.progress++
 			}
 		}
 		t.notePending(line)
@@ -358,10 +416,22 @@ func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
 // Taken as a snapshot before launching a Codex node, it lets discovery
 // correlate only files that appeared after the launch — immune to mtime
 // games from concurrent sessions appending to older rollouts.
-func ListCodexRollouts(root string) map[string]bool {
-	out := map[string]bool{}
+//
+// complete is false when any part of the tree could not be traversed: the
+// snapshot's safety property ("everything in it existed before launch, and
+// everything not in it appeared after") requires a full walk, so an
+// incomplete snapshot must not be used for correlation. A missing root is
+// complete — it means no codex history exists at all.
+func ListCodexRollouts(root string) (out map[string]bool, complete bool) {
+	out, complete = map[string]bool{}, true
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			if !(path == root && os.IsNotExist(err)) {
+				complete = false
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if strings.HasPrefix(d.Name(), "rollout-") && strings.HasSuffix(d.Name(), ".jsonl") {
@@ -369,7 +439,28 @@ func ListCodexRollouts(root string) map[string]bool {
 		}
 		return nil
 	})
-	return out
+	return out, complete
+}
+
+// FindCodexRolloutBySession locates a rollout by the codex session id
+// embedded in its filename (rollout-<timestamp>-<session-id>.jsonl). Unlike
+// the cwd+time heuristic this is deterministic: the filename id is written
+// by codex itself, so a match cannot be a merely plausible neighbor file.
+func FindCodexRolloutBySession(root, sessionID string) (string, bool) {
+	suffix := "-" + strings.ToLower(sessionID) + ".jsonl"
+	var found string
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(d.Name())
+		if strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, suffix) {
+			found = path
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found, found != ""
 }
 
 // FindCodexRollout locates the oldest unclaimed Codex rollout file under
