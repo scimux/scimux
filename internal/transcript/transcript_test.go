@@ -183,12 +183,44 @@ func TestFindCodexRollout(t *testing.T) {
 	past := time.Now().Add(-1 * time.Hour)
 	os.Chtimes(old, past, past)
 
-	got, ok := FindCodexRollout(root, "/data/exp1", time.Now().Add(-time.Minute))
+	got, ok := FindCodexRollout(root, "/data/exp1", time.Now().Add(-time.Minute), nil)
 	if !ok || got != match {
 		t.Fatalf("got %q ok=%v, want %q", got, ok, match)
 	}
-	if _, ok := FindCodexRollout(root, "/data/nomatch", time.Now().Add(-time.Minute)); ok {
+	if _, ok := FindCodexRollout(root, "/data/nomatch", time.Now().Add(-time.Minute), nil); ok {
 		t.Fatal("matched a rollout for the wrong cwd")
+	}
+}
+
+// Two same-cwd nodes starting close together must resolve to two different
+// rollouts: claimed paths are excluded, and the oldest-by-filename candidate
+// wins, so discovery in node start order pairs each node with its own file
+// (finding 3 of the 2026-07 review).
+func TestFindCodexRolloutConcurrentSameDir(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "12")
+	os.MkdirAll(day, 0o755)
+	meta := `{"timestamp":"x","type":"session_meta","payload":{"id":"i","cwd":"/data/exp1"}}` + "\n"
+	first := filepath.Join(day, "rollout-2026-07-12T10-00-00-aaa.jsonl")
+	second := filepath.Join(day, "rollout-2026-07-12T10-00-05-bbb.jsonl")
+	os.WriteFile(first, []byte(meta), 0o644)
+	os.WriteFile(second, []byte(meta), 0o644)
+	since := time.Now().Add(-time.Minute)
+
+	// Node A (started first, discovered first) takes the older rollout…
+	gotA, ok := FindCodexRollout(root, "/data/exp1", since, nil)
+	if !ok || gotA != first {
+		t.Fatalf("node A got %q ok=%v, want %q", gotA, ok, first)
+	}
+	// …and node B, with A's path claimed, takes the remaining one.
+	gotB, ok := FindCodexRollout(root, "/data/exp1", since, map[string]bool{gotA: true})
+	if !ok || gotB != second {
+		t.Fatalf("node B got %q ok=%v, want %q", gotB, ok, second)
+	}
+	// With both claimed, nothing is left to link.
+	if _, ok := FindCodexRollout(root, "/data/exp1", since,
+		map[string]bool{first: true, second: true}); ok {
+		t.Fatal("returned a claimed rollout")
 	}
 }
 

@@ -318,13 +318,18 @@ func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
 	return path, strings.TrimSuffix(filepath.Base(path), ".jsonl"), true
 }
 
-// FindCodexRollout locates the newest Codex rollout file under root
-// (normally ~/.codex/sessions) created at or after since (with slack for
-// clock skew) whose recorded cwd matches dir. Codex offers no way to pin a
-// session id at launch, so discovery-by-cwd-and-time is the correlation.
-func FindCodexRollout(root, dir string, since time.Time) (string, bool) {
+// FindCodexRollout locates the oldest unclaimed Codex rollout file under
+// root (normally ~/.codex/sessions) modified at or after since (with slack
+// for clock skew) whose recorded cwd matches dir. Codex offers no way to pin
+// a session id at launch, so discovery-by-cwd-and-time is the correlation.
+//
+// Two rules keep concurrent same-dir nodes from linking the same file:
+// paths in claimed are never candidates, and among candidates the oldest
+// rollout wins (by the timestamp embedded in the filename, not mtime, which
+// moves with every append). With discovery running in node start order,
+// each node pairs with the earliest file that appeared after its own start.
+func FindCodexRollout(root, dir string, since time.Time, claimed map[string]bool) (string, bool) {
 	var best string
-	var bestTime time.Time
 	slack := since.Add(-10 * time.Second)
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -334,6 +339,9 @@ func FindCodexRollout(root, dir string, since time.Time) (string, bool) {
 		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
 			return nil
 		}
+		if claimed[path] {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil || info.ModTime().Before(slack) {
 			return nil
@@ -341,8 +349,8 @@ func FindCodexRollout(root, dir string, since time.Time) (string, bool) {
 		if rolloutCwd(path) != dir {
 			return nil
 		}
-		if best == "" || info.ModTime().After(bestTime) {
-			best, bestTime = path, info.ModTime()
+		if best == "" || name < filepath.Base(best) {
+			best = path
 		}
 		return nil
 	})

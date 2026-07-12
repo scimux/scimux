@@ -104,6 +104,12 @@ func (a *app) loadStore() error {
 	if err != nil {
 		return err
 	}
+	// Replay semantics for the append-only store: corrections are new
+	// records. A later node record for an existing ID replaces the value in
+	// place (first-seen order preserved, no duplicate UI nodes); the latest
+	// transcript record wins regardless of where it appears relative to its
+	// node record.
+	transcripts := map[string]string{}
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -114,12 +120,19 @@ func (a *app) loadStore() error {
 		}
 		switch {
 		case rec.Type == "node" && rec.Node != nil:
-			a.nodes = append(a.nodes, rec.Node)
-			a.byID[rec.Node.ID] = rec.Node
-		case rec.Type == "transcript":
-			if n, ok := a.byID[rec.ID]; ok {
-				n.Transcript = rec.Path
+			if existing, ok := a.byID[rec.Node.ID]; ok {
+				*existing = *rec.Node
+			} else {
+				a.nodes = append(a.nodes, rec.Node)
+				a.byID[rec.Node.ID] = rec.Node
 			}
+		case rec.Type == "transcript":
+			transcripts[rec.ID] = rec.Path
+		}
+	}
+	for id, path := range transcripts {
+		if n, ok := a.byID[id]; ok {
+			n.Transcript = path
 		}
 	}
 	return nil
@@ -141,7 +154,10 @@ func newUUID() string {
 
 var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-func (a *app) uniqueID(title string) string {
+// uniqueID allocates a slug that collides neither with registered nodes nor
+// with any name in taken — the current tmux sessions, so an unadopted session
+// with the same slug cannot make new-session fail.
+func (a *app) uniqueID(title string, taken map[string]bool) string {
 	slug := strings.Trim(slugStrip.ReplaceAllString(title, "-"), "-.")
 	if slug == "" || !tmuxsession.ValidName(slug) {
 		slug = "chat"
@@ -151,7 +167,7 @@ func (a *app) uniqueID(title string) string {
 	}
 	id := slug
 	for i := 2; ; i++ {
-		if _, taken := a.byID[id]; !taken {
+		if _, used := a.byID[id]; !used && !taken[id] {
 			return id
 		}
 		id = fmt.Sprintf("%s-%d", slug, i)
@@ -183,15 +199,17 @@ func agentCommand(n *Node) (string, error) {
 }
 
 // createNode validates, starts the tmux session, and persists the node.
-// Callers hold a.mu.
-func (a *app) createNode(n *Node) error {
+// It returns the HTTP status to use on error: client mistakes are 400,
+// server-side failures (tmux, store) are 500. Callers hold a.mu; taken
+// carries tmux session names that must not be reused as node IDs.
+func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	if strings.TrimSpace(n.Prompt) == "" {
-		return fmt.Errorf("prompt must not be empty")
+		return 400, fmt.Errorf("prompt must not be empty")
 	}
 	if n.Parent != "" {
 		p, ok := a.byID[n.Parent]
 		if !ok {
-			return fmt.Errorf("parent %q not found", n.Parent)
+			return 400, fmt.Errorf("parent %q not found", n.Parent)
 		}
 		// Fresh-context fork: inherit the launch config, never the conversation.
 		if n.Agent == "" {
@@ -215,16 +233,16 @@ func (a *app) createNode(n *Node) error {
 	}
 	abs, err := filepath.Abs(n.Dir)
 	if err != nil {
-		return err
+		return 400, err
 	}
 	n.Dir = abs
 	if st, err := os.Stat(n.Dir); err != nil || !st.IsDir() {
-		return fmt.Errorf("dir %q is not an existing directory", n.Dir)
+		return 400, fmt.Errorf("dir %q is not an existing directory", n.Dir)
 	}
 	if n.Title == "" {
 		n.Title = firstWords(n.Prompt, 6)
 	}
-	n.ID = a.uniqueID(n.Title)
+	n.ID = a.uniqueID(n.Title, taken)
 	if n.Agent == "claude" {
 		n.SessionID = newUUID()
 	}
@@ -232,14 +250,23 @@ func (a *app) createNode(n *Node) error {
 
 	cmd, err := agentCommand(n)
 	if err != nil {
-		return err
+		return 400, err
 	}
 	if _, err := a.server.NewSession(n.ID, n.Dir, cmd); err != nil {
-		return err
+		return 500, err
+	}
+	// Persist before publishing in memory. The tmux session had to exist
+	// first, so a store failure rolls it back — otherwise a session would
+	// run supervised-in-memory but vanish from the registry on restart.
+	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
+			fmt.Fprintf(os.Stderr, "scimux: rollback of session %s failed: %v\n", n.ID, kerr)
+		}
+		return 500, fmt.Errorf("persist node (session rolled back): %v", err)
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
-	return a.appendRecord(storeRecord{Type: "node", Node: n})
+	return 0, nil
 }
 
 func firstWords(s string, n int) string {
@@ -398,21 +425,38 @@ func (a *app) discoverTranscript(n *Node) {
 	if err != nil || time.Since(created) > 15*time.Minute {
 		return // stop searching for stale nodes; peek remains available
 	}
+	// Transcript paths are exclusive among nodes: a rollout another node
+	// already claimed must never be linked twice (two same-dir codex nodes
+	// starting close together would otherwise share the newest file).
+	claimed := map[string]bool{}
+	a.mu.Lock()
+	for _, o := range a.nodes {
+		if o.ID != n.ID && o.Transcript != "" {
+			claimed[o.Transcript] = true
+		}
+	}
+	a.mu.Unlock()
 	var path string
 	var ok bool
 	switch n.Agent {
 	case "claude":
 		path, ok = transcript.FindClaudeTranscript(a.home, n.SessionID)
 	case "codex":
-		path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created)
+		path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created, claimed)
 	}
-	if !ok {
+	if !ok || claimed[path] {
+		return
+	}
+	// Record first, publish second: if the store write fails, the in-memory
+	// path stays empty and the poller retries on the next tick instead of
+	// treating an unpersisted link as final.
+	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: path}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: record transcript for %s: %v (will retry)\n", n.ID, err)
 		return
 	}
 	a.mu.Lock()
 	n.Transcript = path
 	a.mu.Unlock()
-	a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: path})
 }
 
 // ---------- sysload ----------
@@ -494,7 +538,10 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		if t, ok := a.lastChg[n.ID]; ok {
 			lastMS = t.UnixMilli()
 		}
-		views = append(views, nodeView{Node: n, Live: a.live[n.ID], Attention: a.attn[n.ID],
+		// Copy the node while holding the lock: marshaling a live *Node after
+		// unlock races the poller's Transcript writes (a Go data race).
+		nc := *n
+		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID],
 			HasTranscript: n.Transcript != "", LastActivity: lastMS})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
@@ -597,12 +644,14 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	a.nodes = append(a.nodes, n)
-	a.byID[n.ID] = n
+	// Persist before publishing: an adopted node that exists only in memory
+	// would silently vanish from the registry on restart.
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
-		http.Error(w, err.Error(), 500)
+		http.Error(w, "persist node: "+err.Error(), 500)
 		return
 	}
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
 	writeJSON(w, n)
 }
 
@@ -612,11 +661,17 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
+	// Snapshot current session names before the critical section (tmux is
+	// slow); the allocator must avoid unadopted sessions too.
+	taken := map[string]bool{}
+	for _, s := range a.server.Sessions() {
+		taken[s] = true
+	}
 	a.mu.Lock()
-	err := a.createNode(&n)
+	status, err := a.createNode(&n, taken)
 	a.mu.Unlock()
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, err.Error(), status)
 		return
 	}
 	writeJSON(w, n)
@@ -662,7 +717,12 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	if tl != nil {
 		turns = tl.Poll()
 	}
-	writeJSON(w, map[string]any{"turns": turns, "pending": pending, "live": live})
+	// fallback signals "no useful turns" — whether the transcript is missing,
+	// not yet populated, unreadable, or format-incompatible. A path string
+	// existing does not mean the transcript is usable; the client must degrade
+	// to the pane snapshot in every one of these cases.
+	writeJSON(w, map[string]any{"turns": turns, "pending": pending, "live": live,
+		"fallback": len(turns) == 0})
 }
 
 // tailerLocked returns the node's transcript tailer, (re)building it when
@@ -707,8 +767,15 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
-		Excerpt: excerpt, Time: time.Now().UTC().Format(time.RFC3339)})
+	// The audit record is part of the operation's success contract: a keypress
+	// whose evidence cannot be persisted must not report plain success. The key
+	// is already delivered (cannot be unsent), so say exactly that.
+	if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
+		Excerpt: excerpt, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: key %q sent to %s but audit record failed: %v\n", body.Key, n.ID, err)
+		http.Error(w, "key was sent, but persisting the audit record failed: "+err.Error(), 500)
+		return
+	}
 	writeJSON(w, map[string]string{"ok": "sent"})
 }
 

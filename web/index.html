@@ -733,8 +733,17 @@ $("#mapclose").addEventListener("click", () => setLevel(2));
 /* ---------- chat ---------- */
 function nodeById(id){ return nodes.find(n => n.id === id); }
 
+/* selGen guards async work: any await that outlives a selection change must
+   not touch the DOM for the node the user has already left. */
+let selGen = 0;
+function hashStr(s){
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
 function select(id){
-  if (sel !== id){ chatSig = ""; peekOn = false; mapSig = ""; }
+  if (sel !== id){ chatSig = ""; peekOn = false; mapSig = ""; selGen++; }
   sel = id;
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
@@ -757,26 +766,33 @@ async function refreshChat(){
   const n = nodeById(sel);
   if (!n){ return; }
   renderChatHead();
+  const gen = selGen;
   let d;
   try { d = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
   catch { return; }
-  const showPeek = peekOn || !!n.attention;
+  if (gen !== selGen || sel !== n.id) return;   /* selection moved on */
+  /* degrade to the pane snapshot whenever no useful turns exist — missing,
+     young, unreadable, or format-incompatible transcripts all end up here */
+  const turns = d.turns || [];
+  const showPeek = peekOn || !!n.attention || d.fallback || !turns.length;
   let peekText = "";
   if (showPeek){
     try { peekText = await api(`/api/nodes/${encodeURIComponent(n.id)}/peek`); } catch {}
+    if (gen !== selGen || sel !== n.id) return;
   }
-  const turns = d.turns || [];
-  const last = turns[turns.length - 1];
-  const sig = [n.id, turns.length, last ? last.text.length : 0, d.live, n.attention,
-               showPeek, peekText.length].join("|");
+  const sig = [n.id, d.live, n.attention, showPeek,
+               hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
+               hashStr(peekText)].join("|");
   if (sig === chatSig) return;
   chatSig = sig;
 
   const el = $("#msgs");
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   el.innerHTML =
-    (d.pending && !turns.length
-      ? `<div class="pending">waiting for the agent's transcript file… (terminal view below shows the raw session)</div>` : "") +
+    (!turns.length
+      ? `<div class="pending">${d.pending
+          ? "waiting for the agent's transcript file — showing the raw terminal below"
+          : "no readable transcript — showing the raw terminal below"}</div>` : "") +
     turns.map(t => `
       <div class="turn ${t.role === "user" ? "user" : "assistant"}">
         <div class="who">${t.role === "user" ? "you" : "agent"}</div>
@@ -823,17 +839,19 @@ $("#sendbtn").addEventListener("click", sendPrompt);
 async function sendPrompt(){
   const ta = $("#prompt"), text = ta.value.trim();
   if (!text || !sel) return;
+  const dest = sel;   /* capture: selection may change while the send is in flight */
   ta.value = ""; ta.style.height = "auto";
-  localStorage.removeItem("scimux-draft:" + sel);
+  localStorage.removeItem("scimux-draft:" + dest);
   try {
-    await api(`/api/nodes/${encodeURIComponent(sel)}/send`,
+    await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
       { method: "POST", body: JSON.stringify({ text }) });
     chatSig = "";
     setTimeout(tick, 400);
   } catch (err) {
     alert(err.message);
-    ta.value = text;   /* nothing typed is ever lost */
-    localStorage.setItem("scimux-draft:" + sel, text);
+    /* nothing typed is ever lost — restored under the node it was written for */
+    localStorage.setItem("scimux-draft:" + dest, text);
+    if (sel === dest) ta.value = text;
   }
 }
 
@@ -952,39 +970,54 @@ $("#ad_go").addEventListener("click", async () => {
   } catch (err) { alert(err.message); }
 });
 
-/* ---------- polling: 2 s visible, paused hidden, immediate on return ---------- */
+/* ---------- polling: 2 s visible, paused hidden, immediate on return.
+   Non-overlapping: the next tick is scheduled only after the current one
+   completes, and re-entry (e.g. the post-send fast tick) is a no-op. ---------- */
+let ticking = false;
 async function tick(){
-  let r;
+  if (ticking) return;
+  ticking = true;
   try {
-    r = await fetch("/api/state", { headers: stateEtag ? { "If-None-Match": stateEtag } : {} });
-  } catch { $("#sys").textContent = "server unreachable"; return; }
-  if (r.status === 304){ updateCardAges(); return; }
-  if (!r.ok) return;
-  stateEtag = r.headers.get("ETag") || "";
-  const st = await r.json();
-  nodes = st.nodes || [];
-  unadopted = st.unadopted || [];
-  SOCKET = st.socket || "scimux";
-  if (st.hostname) $("#host").textContent = st.hostname;
-  if (st.version) $("#m_version").textContent = st.version;
-  $("#m_socket").textContent = SOCKET;
-  renderSys(st.sys);
-  if (!sel || !nodeById(sel)){
-    const first = orderedNodes()[0];
-    if (first) select(first.id);
-  }
-  renderCards();
-  renderMap();
-  await refreshChat();
+    let r;
+    try {
+      r = await fetch("/api/state", { headers: stateEtag ? { "If-None-Match": stateEtag } : {} });
+    } catch { $("#sys").textContent = "server unreachable"; return; }
+    if (r.status === 304){
+      updateCardAges();
+      await refreshChat();   /* transcripts are an independent data source */
+      return;
+    }
+    if (!r.ok) return;
+    stateEtag = r.headers.get("ETag") || "";
+    const st = await r.json();
+    nodes = st.nodes || [];
+    unadopted = st.unadopted || [];
+    SOCKET = st.socket || "scimux";
+    if (st.hostname) $("#host").textContent = st.hostname;
+    if (st.version) $("#m_version").textContent = st.version;
+    $("#m_socket").textContent = SOCKET;
+    renderSys(st.sys);
+    if (!sel || !nodeById(sel)){
+      const first = orderedNodes()[0];
+      if (first) select(first.id);
+    }
+    renderCards();
+    renderMap();
+    await refreshChat();
+  } finally { ticking = false; }
 }
-let timer = null;
+let pollTimer = null;
+async function pollLoop(){
+  await tick();
+  if (!document.hidden) pollTimer = setTimeout(pollLoop, 2000);
+}
 function startPolling(){
-  if (timer) clearInterval(timer);
-  timer = setInterval(tick, 2000);
-  tick();
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+  pollLoop();
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden){ if (timer) clearInterval(timer); timer = null; }
+  if (document.hidden){ if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
   else startPolling();
 });
 setLevel(level);

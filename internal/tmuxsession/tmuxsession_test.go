@@ -73,17 +73,36 @@ func TestSendOrderingAndPayload(t *testing.T) {
 		t.Fatalf("want 3 tmux calls (load, paste, enter), got %d", len(f.calls))
 	}
 	load, paste, enter := f.calls[0], f.calls[1], f.calls[2]
-	if got := load.args[2:]; !reflect.DeepEqual(got, []string{"load-buffer", "-b", "scimux-send", "-"}) {
+	if got := load.args[2:]; len(got) != 4 || got[0] != "load-buffer" || got[1] != "-b" ||
+		!strings.HasPrefix(got[2], "scimux-send-") || got[3] != "-" {
 		t.Errorf("load-buffer args = %v", got)
 	}
 	if load.stdin != prompt {
 		t.Errorf("prompt not passed byte-identically via stdin")
 	}
-	if got := paste.args[2:]; !reflect.DeepEqual(got, []string{"paste-buffer", "-d", "-b", "scimux-send", "-t", "=node1:"}) {
-		t.Errorf("paste-buffer args = %v", got)
+	buf := load.args[4] // the per-send buffer name
+	if got := paste.args[2:]; !reflect.DeepEqual(got, []string{"paste-buffer", "-d", "-b", buf, "-t", "=node1:"}) {
+		t.Errorf("paste-buffer args = %v (want same buffer %q as load)", got, buf)
 	}
 	if got := enter.args[2:]; !reflect.DeepEqual(got, []string{"send-keys", "-t", "=node1:", "Enter"}) {
 		t.Errorf("send-keys args = %v", got)
+	}
+}
+
+// Concurrent sends must never share a paste buffer: a shared name lets one
+// node's paste deliver another node's prompt (finding 2 of the 2026-07 review).
+func TestSendsUseDistinctBuffers(t *testing.T) {
+	f := &fakeRunner{}
+	sv := newTestServer(f)
+	if err := sv.Session("a").Send("prompt A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sv.Session("b").Send("prompt B"); err != nil {
+		t.Fatal(err)
+	}
+	bufA, bufB := f.calls[0].args[4], f.calls[3].args[4]
+	if bufA == bufB {
+		t.Errorf("two sends used the same buffer %q", bufA)
 	}
 }
 

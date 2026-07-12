@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -111,13 +112,20 @@ func (s *Session) Alive() bool {
 	return err == nil
 }
 
+// sendSeq makes every Send use its own tmux buffer. HTTP handlers run
+// concurrently; a shared buffer name lets one node's paste deliver another
+// node's prompt (load A, load B, paste A gets B). A unique name per send
+// removes the interleaving entirely without serializing sends.
+var sendSeq atomic.Uint64
+
 // Send delivers text as a single paste (safe for long, multi-line prompts —
 // send-keys would re-interpret newlines as submissions) and then submits it.
 func (s *Session) Send(text string) error {
-	if out, err := s.sv.tmux(text, "load-buffer", "-b", "scimux-send", "-"); err != nil {
+	buf := fmt.Sprintf("scimux-send-%d", sendSeq.Add(1))
+	if out, err := s.sv.tmux(text, "load-buffer", "-b", buf, "-"); err != nil {
 		return fmt.Errorf("tmux load-buffer: %v: %s", err, out)
 	}
-	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-b", "scimux-send", "-t", s.paneTarget()); err != nil {
+	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-b", buf, "-t", s.paneTarget()); err != nil {
 		return fmt.Errorf("tmux paste-buffer: %v: %s", err, out)
 	}
 	time.Sleep(s.sv.PasteDelay)

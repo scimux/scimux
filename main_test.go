@@ -78,7 +78,7 @@ func TestUniqueID(t *testing.T) {
 		"--leading-dashes":         "leading-dashes",
 	}
 	for title, want := range cases {
-		got := a.uniqueID(title)
+		got := a.uniqueID(title, nil)
 		if got != want {
 			t.Errorf("uniqueID(%q) = %q, want %q", title, got, want)
 		}
@@ -87,18 +87,60 @@ func TestUniqueID(t *testing.T) {
 		}
 	}
 	// Long titles are truncated.
-	long := a.uniqueID(strings.Repeat("x", 100))
+	long := a.uniqueID(strings.Repeat("x", 100), nil)
 	if len(long) > 40 {
 		t.Errorf("long id not truncated: %d chars", len(long))
 	}
 	// Collisions get numeric suffixes.
 	a.byID["demo"] = &Node{}
-	if got := a.uniqueID("demo"); got != "demo-2" {
+	if got := a.uniqueID("demo", nil); got != "demo-2" {
 		t.Errorf("collision id = %q, want demo-2", got)
 	}
 	a.byID["demo-2"] = &Node{}
-	if got := a.uniqueID("demo"); got != "demo-3" {
+	if got := a.uniqueID("demo", nil); got != "demo-3" {
 		t.Errorf("second collision id = %q, want demo-3", got)
+	}
+	// Unadopted tmux sessions reserve their names too (finding 11).
+	if got := a.uniqueID("adopted", map[string]bool{"adopted": true}); got != "adopted-2" {
+		t.Errorf("session-name collision id = %q, want adopted-2", got)
+	}
+}
+
+// Replay semantics: corrections are new records — a later node record for an
+// existing ID replaces the value (no duplicates, first-seen order kept), and
+// transcript records apply regardless of ordering (finding 10).
+func TestLoadStoreReplayCorrections(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "nodes.jsonl")
+	lines := []string{
+		`{"type":"transcript","id":"a","path":"/t/early.jsonl"}`, // before its node
+		`{"type":"node","node":{"id":"a","title":"first title","prompt":"p","agent":"claude","dir":"/tmp","created_at":"2026-07-01T08:00:00Z"}}`,
+		`{"type":"node","node":{"id":"b","title":"other","prompt":"q","agent":"codex","dir":"/tmp","created_at":"2026-07-02T08:00:00Z"}}`,
+		`{"type":"node","node":{"id":"a","title":"corrected title","prompt":"p","agent":"claude","dir":"/tmp","created_at":"2026-07-01T08:00:00Z"}}`,
+		`{"type":"transcript","id":"a","path":"/t/late.jsonl"}`,
+	}
+	if err := os.WriteFile(store, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{byID: map[string]*Node{}, storePath: store}
+	if err := a.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.nodes) != 2 {
+		t.Fatalf("want 2 nodes after replay with correction, got %d", len(a.nodes))
+	}
+	if a.nodes[0].ID != "a" || a.nodes[1].ID != "b" {
+		t.Errorf("first-seen order not preserved: %s, %s", a.nodes[0].ID, a.nodes[1].ID)
+	}
+	na := a.byID["a"]
+	if na.Title != "corrected title" {
+		t.Errorf("correction not applied: title = %q", na.Title)
+	}
+	if na.Transcript != "/t/late.jsonl" {
+		t.Errorf("latest transcript record must win regardless of order, got %q", na.Transcript)
+	}
+	if a.nodes[0] != na {
+		t.Error("byID and nodes slice diverged after correction")
 	}
 }
 
