@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -140,11 +141,11 @@ type Tailer struct {
 	// that stopped being this transcript format at all (wrong file linked,
 	// corruption, a non-JSONL future format), even after earlier valid turns.
 	unknownStreak int
-	// progress counts chat-shaped records ever seen (see chatShaped). The
+	// progress counts agent-side records ever seen (see agentShaped). The
 	// caller compares it, together with the byte offset, across pane
 	// activity cycles: bytes that advance while this count stands still mean
-	// the file keeps growing but no longer carries interpretable
-	// conversation — the typed-format-change case unknownStreak cannot see.
+	// the file keeps growing but no longer carries an interpretable agent
+	// response — the typed-format-change case unknownStreak cannot see.
 	progress int
 }
 
@@ -171,68 +172,93 @@ func recognizedLine(line []byte) bool {
 	return json.Unmarshal(line, &g) == nil && g.Type != ""
 }
 
-// chatShaped reports whether a line is a chat record whose inner shape this
-// parser actually understands — a visible message it can render text from,
-// or a tool call/result it can track — not merely a record with the right
-// outer type. This is the chat-progress signal: a future format that keeps
-// the outer types but moves message content to a new inner shape appends
-// bytes without a single chat-shaped record, even though recognizedLine
-// stays satisfied. The signal must never claim more understanding than the
-// parser has, so text extraction goes through the same contentText that
-// ParseLine renders with. Benign side records (titles, token counts, queue
-// operations) are simply not progress; they never mark anything unhealthy
-// on their own.
-func chatShaped(line []byte) bool {
+// agentShaped reports whether a line is an agent-side record whose inner
+// shape this parser actually understands: a visible assistant message it can
+// render text from, or a tool call/result it can track — not merely a record
+// with the right outer type. This is the chat-progress signal, and it is
+// deliberately directional: a user prompt, a meta record, or injected
+// scaffolding must not vouch for the health of the *response* side of the
+// transcript, because a normal phase logs the user record first — counting
+// it would mask an assistant format that changed out from under the parser.
+// The signal must never claim more understanding than the parser has, so
+// text extraction goes through the same contentText that ParseLine renders
+// with and tool records must carry the fields the pending-call tracking
+// reads. Benign side records (titles, token counts, queue operations) are
+// simply not progress; they never mark anything unhealthy on their own.
+func agentShaped(line []byte) bool {
 	var g struct {
 		Type    string          `json:"type"`
 		Message json.RawMessage `json:"message"`
 		Payload json.RawMessage `json:"payload"`
+		IsMeta  bool            `json:"isMeta"`
 	}
-	if json.Unmarshal(line, &g) != nil {
+	if json.Unmarshal(line, &g) != nil || g.IsMeta {
 		return false
 	}
 	switch g.Type {
-	case "user", "assistant": // Claude Code chat record
+	case "assistant": // Claude: visible text or a trackable tool call
 		var msg struct {
 			Content json.RawMessage `json:"content"`
 		}
-		if json.Unmarshal(g.Message, &msg) != nil || len(msg.Content) == 0 {
+		if json.Unmarshal(g.Message, &msg) != nil {
 			return false
 		}
-		// Either the parser can render visible text from it…
-		if contentText(msg.Content) != "" {
+		if strings.TrimSpace(contentText(msg.Content)) != "" {
 			return true
 		}
-		// …or it carries blocks whose types the tool tracking understands.
 		var blocks []struct {
 			Type string `json:"type"`
+			Name string `json:"name"`
 		}
 		if json.Unmarshal(msg.Content, &blocks) != nil {
 			return false
 		}
 		for _, b := range blocks {
-			switch b.Type {
-			case "text", "tool_use", "tool_result":
+			if b.Type == "tool_use" && b.Name != "" {
 				return true
 			}
 		}
 		return false
-	case "response_item": // Codex chat record
+	case "user": // Claude: a tool result is agent-side work; a prompt is not
+		var msg struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(g.Message, &msg) != nil {
+			return false
+		}
+		var blocks []struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			return false
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_result" && b.ToolUseID != "" {
+				return true
+			}
+		}
+		return false
+	case "response_item": // Codex
 		var p struct {
 			Type    string          `json:"type"`
 			Role    string          `json:"role"`
+			Name    string          `json:"name"`
+			CallID  string          `json:"call_id"`
 			Content json.RawMessage `json:"content"`
 		}
 		if json.Unmarshal(g.Payload, &p) != nil {
 			return false
 		}
 		switch p.Type {
-		case "function_call", "custom_tool_call",
-			"function_call_output", "custom_tool_call_output":
-			return true
+		case "function_call", "custom_tool_call":
+			return p.Name != ""
+		case "function_call_output", "custom_tool_call_output":
+			return p.CallID != ""
 		case "message":
-			return (p.Role == "user" || p.Role == "assistant") &&
-				contentText(p.Content) != ""
+			// User messages — real prompts and <environment_context>-style
+			// scaffolding alike — say nothing about the response format.
+			return p.Role == "assistant" && strings.TrimSpace(contentText(p.Content)) != ""
 		}
 	}
 	return false
@@ -241,9 +267,9 @@ func chatShaped(line []byte) bool {
 // Progress reports how far the tailer has consumed the file — the committed
 // watermark behind any partial trailing line still buffered, since a
 // half-written record is not data the parser failed on — and how many
-// chat-shaped records it has seen in total. Both values only grow (except on
+// agent-side records it has seen in total. Both values only grow (except on
 // file rotation, which resets the tailer).
-func (t *Tailer) Progress() (offset int64, chatRecords int) {
+func (t *Tailer) Progress() (offset int64, agentRecords int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.offset - int64(len(t.buf)), t.progress
@@ -391,7 +417,7 @@ func (t *Tailer) Poll() []Turn {
 			} else {
 				t.unknownStreak++
 			}
-			if chatShaped(line) {
+			if agentShaped(line) {
 				t.progress++
 			}
 		}
@@ -470,6 +496,49 @@ func ListCodexRollouts(root string) (out map[string]bool, complete bool) {
 		return nil
 	})
 	return out, complete
+}
+
+// RolloutInfo describes one codex rollout: where it lives, the session id
+// codex embedded in its filename (empty when the filename carries none), and
+// when it was last appended to.
+type RolloutInfo struct {
+	Path      string
+	SessionID string
+	ModTime   time.Time
+}
+
+var rolloutIDRe = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.jsonl$`)
+
+// FindCodexRolloutsForDir lists every rollout under root whose session_meta
+// records dir as the working directory, newest mtime first. The cwd match
+// parses the rollout's JSON (rolloutCwd) — never raw substring matching, so
+// whitespace variations or escaped characters in the path cannot cause false
+// negatives. It exists for the migration workflow: when no deterministic
+// session id is available, the operator — not a heuristic — must choose among
+// same-cwd candidates.
+func FindCodexRolloutsForDir(root, dir string) []RolloutInfo {
+	var out []RolloutInfo
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
+		if rolloutCwd(path) != dir {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		id := strings.TrimSuffix(rolloutIDRe.FindString(name), ".jsonl")
+		out = append(out, RolloutInfo{Path: path, SessionID: id, ModTime: info.ModTime()})
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].ModTime.After(out[j].ModTime) })
+	return out
 }
 
 // FindCodexRolloutBySession locates a rollout by the codex session id

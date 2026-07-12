@@ -84,7 +84,7 @@ type app struct {
 	pathClaims map[string]bool
 	// chatMark/staleChat: per-node transcript progress at the last
 	// active→quiet pane transition, and whether the file has been growing
-	// without recognizable chat records since (degrade the UI to peek).
+	// without recognizable agent-side records since (degrade the UI to peek).
 	chatMark  map[string]chatMark
 	staleChat map[string]bool
 
@@ -444,9 +444,8 @@ func (a *app) poll() {
 		if state == "quiet" {
 			a.mu.Lock()
 			prev := a.live[n.ID] // not yet overwritten this tick
-			tl := a.tailerLocked(n)
 			a.mu.Unlock()
-			if tl != nil {
+			if tl := a.tailerFor(n); tl != nil {
 				tl.Poll()
 				if name, ok := tl.WaitingOn(); ok {
 					attn = attentionKind(name)
@@ -568,7 +567,7 @@ func (a *app) discoverTranscript(n *Node) {
 }
 
 // chatMark is one node's transcript progress as of the last active→quiet
-// pane transition: bytes consumed and chat-shaped records seen.
+// pane transition: bytes consumed and agent-side records seen.
 type chatMark struct {
 	seen bool
 	off  int64
@@ -577,16 +576,19 @@ type chatMark struct {
 
 // noteChatProgress updates the stale-transcript signal. Bytes that advanced
 // over a whole active phase (judge is true exactly at the active→quiet
-// transition) without one recognized chat record mean the linked file no
-// longer carries the conversation — a typed future format the structural
-// health check cannot see — so the UI degrades to peek alongside the
-// retained turns. Recognized chat progress clears the signal the moment it
-// arrives, even if the pane never becomes active again (a record split
-// across polls completes while quiet). Ordinary quiet ticks otherwise only
-// advance the mark, so each phase is judged against a pre-phase baseline.
-// Anchoring the stale judgment to pane activity cycles (not per-line
-// thresholds) is what keeps benign non-chat records, however many, from
-// ever tripping it on their own.
+// transition) without one recognized *agent-side* record mean the linked
+// file no longer carries an interpretable response — a typed future format
+// the structural health check cannot see — so the UI degrades to peek
+// alongside the retained turns. The progress count is directional by
+// construction (transcript.Tailer counts only understood assistant messages
+// and tool calls/results): a phase's own user prompt, meta records, or
+// injected scaffolding cannot vouch for an assistant format that changed.
+// Recognized progress clears the signal the moment it arrives, even if the
+// pane never becomes active again (a record split across polls completes
+// while quiet). Ordinary quiet ticks otherwise only advance the mark, so
+// each phase is judged against a pre-phase baseline. Anchoring the stale
+// judgment to pane activity cycles (not per-line thresholds) is what keeps
+// benign non-chat records, however many, from ever tripping it on their own.
 func (a *app) noteChatProgress(id string, off int64, prog int, judge bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -919,9 +921,9 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	tl := a.tailerFor(n) // may reset staleness on a relink; read flags after
 	a.mu.Lock()
 	pending := n.Transcript == ""
-	tl := a.tailerLocked(n)
 	live := a.live[n.ID]
 	stale := a.staleChat[n.ID]
 	a.mu.Unlock()
@@ -940,26 +942,42 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		"fallback": len(turns) == 0 || (tl != nil && tl.Unparseable()) || stale})
 }
 
-// tailerLocked returns the node's transcript tailer, (re)building it when
-// the transcript appears or is relinked to a different file (e.g. a
-// corrected adoption guess). Callers hold a.mu.
-func (a *app) tailerLocked(n *Node) *transcript.Tailer {
-	if n.Transcript == "" {
+// tailerFor returns the node's transcript tailer, (re)building it when the
+// transcript appears or is relinked to a different file (e.g. a corrected
+// adoption guess). Callers must not hold a.mu: a fresh tailer first consumes
+// the file's existing history outside the lock, and its baseline is taken
+// from that catch-up read — pre-link history is never attributed to the
+// current pane phase, so the first active→quiet judgment after a link or a
+// scimux restart sees only bytes and records that arrived afterwards
+// (finding 28). The built tailer is installed atomically together with its
+// watermark.
+func (a *app) tailerFor(n *Node) *transcript.Tailer {
+	a.mu.Lock()
+	path := n.Transcript
+	tl := a.tailers[n.ID]
+	a.mu.Unlock()
+	if path == "" {
 		return nil
 	}
-	tl := a.tailers[n.ID]
-	if tl == nil || tl.Path != n.Transcript {
-		tl = &transcript.Tailer{Path: n.Transcript}
-		a.tailers[n.ID] = tl
-		// A fresh file needs a fresh progress baseline; staleness measured
-		// against the old file says nothing about this one. The baseline is
-		// zero (a new tailer has consumed nothing), not absent — so even the
-		// very first activity cycle after linking is judged, instead of only
-		// establishing a baseline (finding 24).
-		a.chatMark[n.ID] = chatMark{seen: true}
-		delete(a.staleChat, n.ID)
+	if tl != nil && tl.Path == path {
+		return tl
 	}
-	return tl
+	nt := &transcript.Tailer{Path: path}
+	nt.Poll() // catch up on existing history: the baseline, not phase progress
+	off, prog := nt.Progress()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n.Transcript != path {
+		return nil // relinked while reading history; the next call rebuilds
+	}
+	if cur := a.tailers[n.ID]; cur != nil && cur.Path == path {
+		return cur // a concurrent caller finished building first
+	}
+	a.tailers[n.ID] = nt
+	// Staleness measured against the old file says nothing about this one.
+	a.chatMark[n.ID] = chatMark{seen: true, off: off, prog: prog}
+	delete(a.staleChat, n.ID)
+	return nt
 }
 
 // handleKey presses one whitelisted key in the node's pane — answering an
@@ -1015,6 +1033,37 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// handleCodexRollouts lists the codex rollouts whose session_meta records the
+// given cwd, newest first — the migration script's candidate enumeration. The
+// cwd match reuses the same JSON parsing as discovery (never raw substring
+// matching of undocumented log bytes), and the response is plain text — one
+// "mtime<TAB>session-id<TAB>path<TAB>preview" line per rollout — so a POSIX
+// shell can consume it without a JSON parser. The preview is the last visible
+// turn, rendered by the real transcript parser, so the operator can correlate
+// a candidate with the pane they are migrating. Deliberately *not* used for
+// automatic linking: with several same-cwd sessions only a human (or an
+// explicit session id) can pick the right one.
+func (a *app) handleCodexRollouts(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		http.Error(w, "bad request: need dir", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	for _, ri := range transcript.FindCodexRolloutsForDir(a.codexRoot, dir) {
+		preview := ""
+		if turns := (&transcript.Tailer{Path: ri.Path}).Poll(); len(turns) > 0 {
+			preview = turns[len(turns)-1].Text
+		}
+		preview = strings.Join(strings.Fields(preview), " ") // no tabs/newlines
+		if r := []rune(preview); len(r) > 80 {
+			preview = string(r[:80]) + "…"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			ri.ModTime.UTC().Format(time.RFC3339), ri.SessionID, ri.Path, preview)
+	}
 }
 
 func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
@@ -1103,6 +1152,7 @@ func main() {
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
+	mux.HandleFunc("GET /api/codex-rollouts", a.handleCodexRollouts)
 
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)

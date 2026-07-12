@@ -356,8 +356,8 @@ func TestTailerProgressTypedFormatChange(t *testing.T) {
 	tl := &Tailer{Path: p}
 	tl.Poll()
 	off1, prog1 := tl.Progress()
-	if prog1 != 2 || off1 == 0 {
-		t.Fatalf("valid prefix: offset=%d chatRecords=%d, want offset>0 and 2 records", off1, prog1)
+	if prog1 != 1 || off1 == 0 {
+		t.Fatalf("valid prefix: offset=%d agentRecords=%d, want offset>0 and 1 record (the assistant turn; the user prompt is not agent progress)", off1, prog1)
 	}
 	append_ := func(lines ...string) {
 		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -378,24 +378,24 @@ func TestTailerProgressTypedFormatChange(t *testing.T) {
 		t.Fatalf("offset did not advance: %d -> %d", off1, off2)
 	}
 	if prog2 != prog1 {
-		t.Fatalf("typed future message counted as chat progress: %d -> %d", prog1, prog2)
+		t.Fatalf("typed future message counted as agent progress: %d -> %d", prog1, prog2)
 	}
 	if tl.Unparseable() {
 		t.Fatal("typed records must not trip the structural health signal")
 	}
-	// Known chat shapes — including pure tool activity with no visible
+	// Known agent-side shapes — including pure tool activity with no visible
 	// message — do count as progress.
 	append_(`{"type":"assistant","timestamp":"t4","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`)
 	tl.Poll()
 	if _, prog3 := tl.Progress(); prog3 != prog2+1 {
-		t.Fatalf("tool call not counted as chat progress: %d -> %d", prog2, prog3)
+		t.Fatalf("tool call not counted as agent progress: %d -> %d", prog2, prog3)
 	}
 	// Benign side records (titles, token counts) are not progress — and that
 	// alone must never mark anything unhealthy.
 	append_(`{"type":"ai-title","title":"threshold sweep"}`)
 	tl.Poll()
 	if _, prog4 := tl.Progress(); prog4 != prog2+1 {
-		t.Fatalf("side record counted as chat progress")
+		t.Fatalf("side record counted as agent progress")
 	}
 }
 
@@ -405,7 +405,7 @@ func TestTailerProgressTypedFormatChange(t *testing.T) {
 // already quiet — it counts as progress at that moment (finding 24).
 func TestTailerProgressPartialLine(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
-	full := `{"type":"user","timestamp":"t1","message":{"role":"user","content":"question"}}` + "\n"
+	full := `{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"answer"}}` + "\n"
 	os.WriteFile(p, []byte(full[:40]), 0o644)
 	tl := &Tailer{Path: p}
 	tl.Poll()
@@ -426,37 +426,87 @@ func TestTailerProgressPartialLine(t *testing.T) {
 	}
 }
 
-// chatShaped must not claim more understanding than the parser has: a known
-// outer type whose inner message shape moved is not chat progress
-// (finding 24).
-func TestChatShapedInnerValidation(t *testing.T) {
+// agentShaped is directional and strict: only understood *agent-side*
+// records count — visible assistant text, trackable tool calls/results —
+// never user prompts, meta records, or injected scaffolding, which would
+// otherwise mask an assistant format change during the same phase
+// (findings 24, 27).
+func TestAgentShapedDirectional(t *testing.T) {
 	yes := []string{
-		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"a"}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}]}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"1","name":"Bash","input":{}}]}}`,
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}}`,
 		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}`,
 		`{"type":"response_item","payload":{"type":"function_call","call_id":"c1","name":"exec"}}`,
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}`,
 	}
 	for _, l := range yes {
-		if !chatShaped([]byte(l)) {
-			t.Errorf("understood chat record not counted: %s", l)
+		if !agentShaped([]byte(l)) {
+			t.Errorf("understood agent-side record not counted: %s", l)
 		}
 	}
 	no := []string{
-		`{"type":"user","message":{"role":"user","content":{"v2_rich":"hi"}}}`,                                     // content moved to a new object shape
-		`{"type":"assistant","message":{"role":"assistant","content":[{"kind":"txt","value":"x"}]}}`,               // only unknown block types
-		`{"type":"assistant","message":{"role":"assistant"}}`,                                                      // no content at all
-		`{"type":"response_item","payload":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`,     // no role
-		`{"type":"response_item","payload":{"type":"message","role":"tool","content":"x"}}`,                        // unknown role
-		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"kind":"v2","data":"x"}]}}`, // codex content moved
-		`{"type":"ai-title","title":"threshold sweep"}`,                                                            // benign side record
+		// User-side records must not vouch for the response format (finding 27):
+		`{"type":"user","message":{"role":"user","content":"a real human prompt"}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"typed answer"}]}}`,
+		`{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>x</local-command-caveat>"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>…</environment_context>"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sweep the thresholds"}]}}`,
+		// Known outer type, moved inner shape — no claimed understanding:
+		`{"type":"assistant","message":{"role":"assistant","content":{"v2_rich":"hi"}}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"kind":"txt","value":"x"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant"}}`,
+		`{"type":"assistant","isMeta":true,"message":{"role":"assistant","content":"meta"}}`,
+		`{"type":"response_item","payload":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"tool","content":"x"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"kind":"v2","data":"x"}]}}`,
+		`{"type":"response_item","payload":{"type":"function_call"}}`,
+		`{"type":"ai-title","title":"threshold sweep"}`,
 		`not json`,
 	}
 	for _, l := range no {
-		if chatShaped([]byte(l)) {
-			t.Errorf("uninterpretable record counted as chat progress: %s", l)
+		if agentShaped([]byte(l)) {
+			t.Errorf("record counted as agent progress but must not be: %s", l)
 		}
+	}
+}
+
+// FindCodexRolloutsForDir enumerates a cwd's rollouts for the migration
+// workflow: JSON-parsed cwd matching (no raw substring games), session ids
+// from the filename, newest first (finding 26).
+func TestFindCodexRolloutsForDir(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "12")
+	os.MkdirAll(day, 0o755)
+	meta := func(cwd string) string {
+		// Whitespace after the colon: raw substring matching for "cwd":"…"
+		// would miss this; JSON parsing must not.
+		return `{"timestamp":"x","type":"session_meta","payload":{"id":"i", "cwd": "` + cwd + `"}}` + "\n"
+	}
+	idOld := "aaaaaaaa-0000-0000-0000-000000000001"
+	idNew := "bbbbbbbb-0000-0000-0000-000000000002"
+	older := filepath.Join(day, "rollout-2026-07-12T08-00-00-"+idOld+".jsonl")
+	newer := filepath.Join(day, "rollout-2026-07-12T10-00-00-"+idNew+".jsonl")
+	other := filepath.Join(day, "rollout-2026-07-12T09-00-00-cccccccc-0000-0000-0000-000000000003.jsonl")
+	os.WriteFile(older, []byte(meta("/data/exp1")), 0o644)
+	os.WriteFile(newer, []byte(meta("/data/exp1")), 0o644)
+	os.WriteFile(other, []byte(meta("/data/exp2")), 0o644)
+	past := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(older, past, past)
+
+	got := FindCodexRolloutsForDir(root, "/data/exp1")
+	if len(got) != 2 {
+		t.Fatalf("want 2 candidates, got %d: %#v", len(got), got)
+	}
+	if got[0].Path != newer || got[0].SessionID != idNew {
+		t.Errorf("newest first: got %q id %q", got[0].Path, got[0].SessionID)
+	}
+	if got[1].Path != older || got[1].SessionID != idOld {
+		t.Errorf("older second: got %q id %q", got[1].Path, got[1].SessionID)
+	}
+	if extra := FindCodexRolloutsForDir(root, "/data/nomatch"); len(extra) != 0 {
+		t.Errorf("unrelated cwd matched: %#v", extra)
 	}
 }
 

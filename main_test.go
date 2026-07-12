@@ -304,27 +304,119 @@ func TestNoteChatProgress(t *testing.T) {
 	}
 }
 
-// A (re)linked transcript starts from an explicit zero baseline, so even the
-// first activity cycle is judged instead of only calibrating (finding 24).
-func TestTailerLockedBaseline(t *testing.T) {
-	a := &app{tailers: map[string]*transcript.Tailer{},
+func newTailerTestApp() *app {
+	return &app{tailers: map[string]*transcript.Tailer{},
 		chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}
-	dir := t.TempDir()
-	n := &Node{ID: "n", Transcript: filepath.Join(dir, "a.jsonl")}
-	a.tailerLocked(n)
-	if m := a.chatMark["n"]; !m.seen || m.off != 0 || m.prog != 0 {
-		t.Fatalf("fresh link must set a zero baseline, got %+v", m)
+}
+
+func appendLines(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Relinking to a different file resets staleness and the baseline.
-	a.staleChat["n"] = true
-	a.chatMark["n"] = chatMark{seen: true, off: 50, prog: 1}
+	defer f.Close()
+	for _, l := range lines {
+		if _, err := f.WriteString(l + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A (re)built tailer takes its baseline from the file's existing history —
+// catch-up reading is calibration, never progress attributed to the current
+// pane phase. So after a link, a relink, or a scimux restart, the very first
+// active→quiet judgment sees only what arrived afterwards, and historical
+// chat records cannot mask a first-phase incompatible record (findings 24, 28).
+func TestTailerForBaselineFromHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.jsonl")
+	appendLines(t, path,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"old question"}}`,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"old answer"}}`)
+
+	// Fresh app: the restart/adoption case — history exists before any tailer.
+	a := newTailerTestApp()
+	n := &Node{ID: "n", Transcript: path}
+	tl := a.tailerFor(n)
+	if tl == nil {
+		t.Fatal("no tailer built")
+	}
+	off, prog := tl.Progress()
+	if prog != 1 {
+		t.Fatalf("history agent records = %d, want 1", prog)
+	}
+	if m := a.chatMark["n"]; !m.seen || m.off != off || m.prog != prog {
+		t.Fatalf("baseline must equal the catch-up watermark: mark %+v, tailer %d/%d", m, off, prog)
+	}
+	if a.tailerFor(n) != tl {
+		t.Fatal("repeated calls must return the installed tailer")
+	}
+
+	// First phase after the (re)link appends only an incompatible assistant
+	// shape: historical records must not clear the judgment.
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t3","message":{"role":"assistant","content":{"v2_rich":"moved"}}}`)
+	tl.Poll()
+	off2, prog2 := tl.Progress()
+	a.noteChatProgress("n", off2, prog2, true)
+	if !a.staleChat["n"] {
+		t.Fatal("first post-link phase with an incompatible record must mark stale despite valid history")
+	}
+
+	// Relinking to a different file resets staleness and re-baselines there.
 	n.Transcript = filepath.Join(dir, "b.jsonl")
-	a.tailerLocked(n)
+	if a.tailerFor(n) == tl {
+		t.Fatal("relink must build a new tailer")
+	}
 	if a.staleChat["n"] {
 		t.Fatal("relink must clear staleness measured against the old file")
 	}
 	if m := a.chatMark["n"]; !m.seen || m.off != 0 || m.prog != 0 {
-		t.Fatalf("relink must reset the baseline to zero, got %+v", m)
+		t.Fatalf("empty new file must baseline at zero, got %+v", m)
+	}
+}
+
+// User-side records logged during a phase — the prompt itself, meta records,
+// injected scaffolding — must not vouch for the assistant's response format:
+// a phase whose only interpretable records are user-side ends stale when the
+// assistant shape is unknown (finding 27).
+func TestStaleChatNotMaskedByUserRecords(t *testing.T) {
+	cases := map[string][]string{
+		"meta and scaffolding plus unknown assistant": {
+			`{"type":"user","isMeta":true,"message":{"role":"user","content":"<command-name>/clear</command-name>"}}`,
+			`{"type":"response_item","timestamp":"t","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>…</environment_context>"}]}}`,
+			`{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":{"v2_rich":"moved"}}}`,
+		},
+		"valid user prompt plus unknown assistant": {
+			`{"type":"user","timestamp":"t","message":{"role":"user","content":"sweep the thresholds"}}`,
+			`{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":{"v2_rich":"moved"}}}`,
+		},
+	}
+	for name, lines := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "s.jsonl")
+			appendLines(t, path) // create empty: node linked before the phase
+			a := newTailerTestApp()
+			n := &Node{ID: "n", Transcript: path}
+			tl := a.tailerFor(n)
+			appendLines(t, path, lines...)
+			tl.Poll()
+			off, prog := tl.Progress()
+			a.noteChatProgress("n", off, prog, true)
+			if !a.staleChat["n"] {
+				t.Fatal("user-side records masked an unknown assistant shape")
+			}
+			// A later understood assistant record clears the signal.
+			appendLines(t, path,
+				`{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":"back to a known shape"}}`)
+			tl.Poll()
+			off, prog = tl.Progress()
+			a.noteChatProgress("n", off, prog, false)
+			if a.staleChat["n"] {
+				t.Fatal("recognized assistant progress must clear stale")
+			}
+		})
 	}
 }
 
