@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -484,6 +485,17 @@ func (a *app) poll() {
 				// cycle (finding 24).
 				off, prog := tl.Progress()
 				a.noteChatProgress(n.ID, off, prog, prev == "active")
+			}
+			// Parallel regex-based dialog detection. Independent of structured
+			// transcript parsing; fires on terminal-only harnesses, format
+			// changes, or discovery failures. Only runs on quiet panes, only
+			// examines visible screen (no scrollback mixed in).
+			if attn == "" {
+				if visible, err := s.CaptureVisible(); err == nil {
+					if dialoghint.ClassifyVisible(visible) {
+						attn = "dialog"
+					}
+				}
 			}
 			// Neutral needs-a-look state: the pane is quiet but there is no
 			// trustworthy structured transcript to say whether the agent

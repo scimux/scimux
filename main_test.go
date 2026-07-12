@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -602,5 +603,134 @@ func TestHandleSendAcknowledgedByPane(t *testing.T) {
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"acknowledged"`) {
 			t.Fatalf("send %d = %d %s, want acknowledged", i, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// TestPollerDialogDetection verifies that the poller's dialoghint integration
+// fires attention independently of structured transcript parsing, covering
+// terminal-only harnesses, format changes, and discovery failures (feedback round).
+func TestPollerDialogDetection(t *testing.T) {
+	// Approval dialog pane
+	dialogPane := `Allow WebFetch to fetch https://example.com?
+  1. Allow once
+  2. Allow for this session
+  3. Deny
+  Esc to cancel`
+
+	// Rate limit pane
+	rateLimitPane := `You've hit your usage limit.
+  1. Stop and wait for limit to reset
+  2. Switch model`
+
+	normalPane := "Agent working..."
+
+	cases := []struct {
+		name       string
+		pane       string
+		hasCapt    bool
+		transcript string
+		wantAttn   string
+	}{
+		{"approval dialog visible", dialogPane, true, "", "dialog"},
+		{"rate limit visible", rateLimitPane, true, "", "dialog"},
+		{"normal quiet pane", normalPane, true, "", "inspect"},        // no transcript → inspect
+		{"capture error sets unavailable", dialogPane, false, "", ""}, // state=unavailable, not quiet
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captureErr := !tc.hasCapt
+			runner := func(stdin string, args ...string) (string, error) {
+				for _, arg := range args {
+					if arg == "has-session" {
+						return "", nil // session alive
+					}
+					if arg == "capture-pane" {
+						if captureErr {
+							return "", fmt.Errorf("capture failed")
+						}
+						return tc.pane, nil
+					}
+				}
+				return "", nil
+			}
+
+			n := &Node{ID: "pi1", Agent: "pi", Transcript: tc.transcript}
+			a := &app{
+				byID:      map[string]*Node{"pi1": n},
+				nodes:     []*Node{n},
+				live:      map[string]string{},
+				attn:      map[string]string{},
+				prevCap:   map[string]string{"pi1": tc.pane}, // same content = no change = quiet
+				lastChg:   map[string]time.Time{"pi1": time.Now().Add(-10 * time.Second)},
+				tailers:   map[string]*transcript.Tailer{},
+				chatMark:  map[string]chatMark{},
+				staleChat: map[string]bool{},
+				server:    tmuxsession.NewServerWithRunner("testsock", runner),
+			}
+
+			a.poll()
+
+			if got := a.attn["pi1"]; got != tc.wantAttn {
+				t.Errorf("attention = %q, want %q", got, tc.wantAttn)
+			}
+		})
+	}
+}
+
+// TestDialogDetectionOrWithStructured verifies that regex and structured
+// attention paths are independent: either can fire.
+func TestDialogDetectionOrWithStructured(t *testing.T) {
+	dialogPane := `Do you want to proceed?
+  1. Yes
+  2. No
+  Esc to cancel`
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tx.jsonl")
+	appendLines(t, path,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run sweep"}}`,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"Bash","input":{}}]}}`)
+
+	runner := func(stdin string, args ...string) (string, error) {
+		for _, arg := range args {
+			if arg == "capture-pane" {
+				return dialogPane, nil
+			}
+			if arg == "has-session" {
+				return "", nil
+			}
+		}
+		return "", nil
+	}
+
+	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	a := &app{
+		byID:      map[string]*Node{"cl1": n},
+		nodes:     []*Node{n},
+		live:      map[string]string{},
+		attn:      map[string]string{},
+		prevCap:   map[string]string{"cl1": dialogPane}, // same content = quiet
+		lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+
+	a.poll()
+
+	// Structured path fires first (unresolved Bash tool_use)
+	if got := a.attn["cl1"]; got != "approval" {
+		t.Fatalf("structured attention = %q, want approval", got)
+	}
+
+	// Now resolve the tool call, regex should fire
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t3","message":{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"call1","content":"ok"}]}}`)
+
+	a.poll()
+	if got := a.attn["cl1"]; got != "dialog" {
+		t.Fatalf("after structured resolved, regex attention = %q, want dialog", got)
 	}
 }
