@@ -6,6 +6,7 @@ package main
 // smoke test in the README, not here — they need tmux and real sessions.
 
 import (
+	"context"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -528,7 +529,7 @@ func TestLastLines(t *testing.T) {
 // discipline: no real agent CLI, no real tmux).
 func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 	// Every capture-pane returns the same bytes: the TUI never reacts.
-	runner := func(stdin string, args ...string) (string, error) {
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
 		return "static pane", nil
 	}
 	n := &Node{ID: "n1", Agent: "claude"}
@@ -576,7 +577,7 @@ func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 // the state immediately, so consecutive sends flow.
 func TestHandleSendAcknowledgedByPane(t *testing.T) {
 	seq := 0
-	runner := func(stdin string, args ...string) (string, error) {
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
 		for _, arg := range args {
 			if arg == "capture-pane" {
 				seq++
@@ -640,7 +641,7 @@ func TestPollerDialogDetection(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			captureErr := !tc.hasCapt
-			runner := func(stdin string, args ...string) (string, error) {
+			runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
 				for _, arg := range args {
 					if arg == "has-session" {
 						return "", nil // session alive
@@ -692,7 +693,7 @@ func TestDialogDetectionOrWithStructured(t *testing.T) {
 		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run sweep"}}`,
 		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"Bash","input":{}}]}}`)
 
-	runner := func(stdin string, args ...string) (string, error) {
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
 		for _, arg := range args {
 			if arg == "capture-pane" {
 				return dialogPane, nil

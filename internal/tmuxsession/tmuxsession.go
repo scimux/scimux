@@ -7,6 +7,7 @@
 package tmuxsession
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -18,10 +19,10 @@ import (
 // Runner executes the tmux binary with the given arguments, feeding stdin if
 // non-empty, and returns trimmed combined output. It exists as a seam so unit
 // tests can assert the exact tmux invocations without a tmux binary.
-type Runner func(stdin string, args ...string) (string, error)
+type Runner func(ctx context.Context, stdin string, args ...string) (string, error)
 
-func execTmux(stdin string, args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+func execTmux(ctx context.Context, stdin string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "tmux", args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -59,7 +60,9 @@ var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 func ValidName(name string) bool { return nameRe.MatchString(name) }
 
 func (sv *Server) tmux(stdin string, args ...string) (string, error) {
-	return sv.run(stdin, append([]string{"-L", sv.Socket}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return sv.run(ctx, stdin, append([]string{"-L", sv.Socket}, args...)...)
 }
 
 // NewSession starts command detached in a new session with a fixed-size pane

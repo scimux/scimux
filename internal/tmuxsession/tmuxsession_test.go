@@ -4,6 +4,7 @@ package tmuxsession
 // tmux invocations — the contract with tmux is where the real bugs live.
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -21,7 +22,7 @@ type fakeRunner struct {
 	err   error
 }
 
-func (f *fakeRunner) run(stdin string, args ...string) (string, error) {
+func (f *fakeRunner) run(ctx context.Context, stdin string, args ...string) (string, error) {
 	f.calls = append(f.calls, call{stdin: stdin, args: args})
 	return f.out, f.err
 }
@@ -222,7 +223,7 @@ type scriptedRunner struct {
 	captures []string
 }
 
-func (s *scriptedRunner) run(stdin string, args ...string) (string, error) {
+func (s *scriptedRunner) run(ctx context.Context, stdin string, args ...string) (string, error) {
 	s.calls = append(s.calls, call{stdin: stdin, args: args})
 	for _, a := range args {
 		if a == "capture-pane" {
@@ -290,5 +291,33 @@ func TestCaptureVisible(t *testing.T) {
 	want := []string{"-L", "testsock", "capture-pane", "-p", "-t", "=node1:"}
 	if !reflect.DeepEqual(f.calls[0].args, want) {
 		t.Fatalf("args = %v, want %v (no -S: visible screen only)", f.calls[0].args, want)
+	}
+}
+
+// blockingRunner blocks indefinitely until the context is cancelled.
+type blockingRunner struct {
+	calls []call
+}
+
+func (b *blockingRunner) run(ctx context.Context, stdin string, args ...string) (string, error) {
+	b.calls = append(b.calls, call{stdin: stdin, args: args})
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestTmuxTimeout(t *testing.T) {
+	// A tmux call that blocks must timeout and return an error, not freeze
+	// the supervisor forever (finding 47 of the 2026-07 review).
+	b := &blockingRunner{}
+	sv := NewServerWithRunner("testsock", b.run)
+	_, err := sv.Session("node1").Capture()
+	if err == nil {
+		t.Fatal("blocking capture should timeout and return error")
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Errorf("timeout error should mention context deadline, got: %v", err)
+	}
+	if len(b.calls) != 1 {
+		t.Fatalf("want exactly 1 tmux call attempted, got %d", len(b.calls))
 	}
 }

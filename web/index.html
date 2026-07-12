@@ -226,23 +226,6 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #gauge i { display: block; height: 100%; background: var(--work); transition: width .5s; }
 #gauge i.high { background: #C7791B; }
 
-/* decision region: when the agent needs the supervisor (attention, fallback,
-   unconfirmed send), the live terminal is required evidence — pinned under
-   the chat head at decision size, never folded, never buried under history */
-#decision { display: none; flex-direction: column; flex: none;
-  border-bottom: 1px solid var(--hairline); background: var(--bg); min-height: 0; }
-#decision.on { display: flex; }
-#decision .dhead { display: flex; align-items: center; gap: 10px;
-  padding: 6px 12px 2px; font-size: 12px; color: var(--dim); }
-#decision .dhead .dlabel { flex: 1; min-width: 0; }
-#decision .dhead button { color: var(--work); font-size: 12px; font-weight: 600;
-  padding: 4px 2px; white-space: nowrap; }
-#decision .dpane { margin: 6px 10px 10px; height: 56dvh; overflow: auto; }
-#decision.full .dpane { height: 82dvh; }
-@media (min-width: 900px) { #decision .dpane { height: 50dvh; } }
-#decision .dnotice { padding: 2px 12px 8px; font-size: 13px; color: var(--bad); }
-#decision .dnotice button { color: var(--work); font-weight: 600; padding: 2px 0 0; display: block; }
-
 #msgs { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
 /* no "you/agent" labels — side + color already carry the role */
 .turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
@@ -256,16 +239,29 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
 
-/* working indicator: rotating word + indeterminate shimmer rail. Purely
-   decorative liveliness from the mechanical active state — no fake progress,
-   no percentages; the accessible name stays constant. */
-.workrow { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
-.workrow .workword { color: var(--dim); font-style: italic; font-size: 14px; flex: none; }
-.workrow .rail { flex: 1; max-width: 180px; height: 3px; border-radius: 2px;
-  background: var(--hairline); overflow: hidden; }
-.workrow .rail i { display: block; height: 100%; width: 30%; border-radius: 2px;
-  background: var(--work); animation: railslide 1.6s ease-in-out infinite; }
-@keyframes railslide { from { transform: translateX(-110%); } to { transform: translateX(400%); } }
+/* working indicator: a single calm petrol pulse that gently breathes just
+   above the prompt while the pane is mechanically active. No rotating words,
+   no shimmer rail, no fake progress — liveliness only, accessible name stays
+   constant (the aria-label never changes). */
+#workpulse { height: 2px; margin: 0 16px; border-radius: 2px; flex: none;
+  background: var(--work); opacity: 0; transition: opacity .3s; }
+#workpulse.on { animation: workglow 2.6s ease-in-out infinite; }
+@keyframes workglow {
+  0%, 100% { opacity: .22; box-shadow: 0 0 4px 0 rgba(14,124,134,.30); }
+  50%      { opacity: .85; box-shadow: 0 0 13px 2px rgba(14,124,134,.55); }
+}
+
+/* composer tools: a small icon row sitting above the prompt — toggle the
+   terminal open below the last bubble */
+#convtools { display: flex; align-items: center; gap: 16px; justify-content: flex-end;
+  padding: 4px 16px 0; }
+#convtools[hidden] { display: none; }
+#convtools button { width: 34px; height: 34px; border-radius: 9px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; }
+#convtools button:active { color: var(--work); }
+#convtools button.on { color: var(--work); background: var(--th-bg); }
+#convtools button:disabled { opacity: .4; }
+.copied { color: var(--work) !important; }
 
 /* inline field validation: message + icon next to the field (color is never
    the only cue), restrained border — no glow, no motion */
@@ -279,7 +275,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #syncwarn:empty { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .workrow .rail i { animation: none; }
+  #workpulse.on { animation: none; opacity: .6; }
   .card.attention { animation: none; box-shadow: 0 0 0 2px var(--attn); }
   .workdot, #chathead .dot.active { animation: none; opacity: 1; }
 }
@@ -304,16 +300,29 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .bubble strong { font-weight: 650; }
 .turn.user .bubble code { background: rgba(255,255,255,.18); }
 
-/* TUI blocker: raw pane snapshot (the question) + key row (the answer) */
+/* TUI blocker: raw pane snapshot (the question) + key row (the answer).
+   The terminal always renders inline below the last bubble — never a pinned
+   overlay above the chat. It gets a generous, device-aware height so a full
+   pane of options is readable; content scrolls inside it. */
+.peekblock { margin: 8px 0 2px; }
+.peekhead { display: flex; align-items: center; gap: 8px; padding: 0 2px 4px;
+  font-size: 12px; color: var(--dim); }
+.peekhead .plabel { flex: 1; min-width: 0; }
+.peekhead button { color: var(--work); font-size: 12px; font-weight: 600;
+  padding: 2px 4px; white-space: nowrap; }
 .peek {
-  margin: 4px 0 0; padding: 10px 12px; border-radius: 10px;
-  font: 12px/1.45 ui-monospace, "SF Mono", monospace; white-space: pre;
-  overflow-x: auto; background: #101014; color: #d7dde4;
+  padding: 12px 14px; border-radius: 10px;
+  font: 12px/1.5 ui-monospace, "SF Mono", monospace; white-space: pre;
+  overflow: auto; background: #101014; color: #d7dde4;
   border: 1px solid var(--hairline);
+  height: 46dvh;                       /* phone: generous, always readable */
 }
-/* the raw pane folds behind a link once readable turns exist */
+@media (min-width: 700px) { .peek { height: 50dvh; } }   /* iPad */
+@media (min-width: 900px) { .peek { height: 52dvh; } }   /* desktop app */
+.peek.full { height: 82dvh; }
 .peek.hidden { display: none; }
-#termbtn { align-self: flex-start; font-size: 13px; color: var(--work); padding: 2px 0; }
+.pnotice { padding: 6px 2px 0; font-size: 13px; color: var(--bad); }
+.pnotice button { color: var(--work); font-weight: 600; padding: 2px 0 0; display: block; }
 #keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   padding: 8px 14px; border-top: 1px solid var(--hairline); }
 #keyrow:empty { display: none; }
@@ -473,9 +482,12 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
       <div class="mission" id="chatmission"></div>
     </div>
     <div id="gauge" hidden><i id="gaugefill"></i></div>
-    <div id="decision"></div>
     <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
     <div id="keyrow"></div>
+    <div id="convtools" hidden>
+      <button id="termtoggle" aria-label="show terminal" title="show/hide terminal"></button>
+    </div>
+    <div id="workpulse" aria-hidden="true"></div>
     <div id="promptbar">
       <textarea id="prompt" rows="1" placeholder="Message the agent…"></textarea>
       <button id="sendbtn" aria-label="send">&#10148;</button>
@@ -546,7 +558,6 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <div class="sect" id="i_rat_s" style="display:none"><div class="k">Why (fork rationale)</div><div class="v" id="i_rat"></div></div>
   <div class="sect"><div class="k">Setup</div><div class="v" id="i_setup"></div></div>
   <div class="sect"><div class="k">Attach from a terminal</div><div class="v"><code id="i_attach"></code></div></div>
-  <button class="cta" id="i_peek">Show terminal</button>
 </div>
 
 <!-- message context menu (long-press a bubble) -->
@@ -621,8 +632,7 @@ let unadopted = [];
 let SOCKET = "scimux";
 let sel = localStorage.getItem("scimux-sel") || "";
 let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
-let peekOn = false;
-let termOpen = false;        // TUI pane unfolded in the chat (folds per selection)
+let termOpen = false;        // terminal unfolded below the last bubble (per selection)
 let cardTab = "current";
 let mapTab = localStorage.getItem("scimux-maptab") || "all";
 const expanded = new Set();
@@ -794,6 +804,12 @@ const ICON_TRASH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
   <path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3h5A1.5 1.5 0 0 1 16 4.5V6"/>
   <path d="M5 6l1.2 14a2 2 0 0 0 2 1.8h7.6a2 2 0 0 0 2-1.8L19 6"/>
   <path d="M10 11v6M14 11v6"/>
+</svg>`;
+/* terminal glyph: fa-regular fa-window-maximize (framed window w/ title bar) */
+const ICON_TERM = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+  <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+  <path d="M3 8.5h18"/>
 </svg>`;
 
 /* clipboard: the async API needs a secure context (HTTPS/localhost) — over
@@ -1178,7 +1194,12 @@ function emptyTap(container, interactiveSelector, fn){
   });
 }
 emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-adopt],[data-x],[data-open]", () => {
-  if (!isDesktop()) setLevel(1);
+  if (isDesktop()){
+    /* iPad/desktop columns: tapping the Activity gutter folds the Journey
+       column back, mirroring the same gesture on the map itself */
+    document.body.classList.remove("map-open");
+    mapSig = ""; renderMap();
+  } else setLevel(1);
 });
 emptyTap($("#mapscroll"), ".strow,.lanechip,[data-nid],[data-chip],button,a,input,textarea,select", () => {
   if (isDesktop()){
@@ -1200,7 +1221,7 @@ function hashStr(s){
 }
 
 function select(id){
-  if (sel !== id){ chatSig = ""; peekOn = false; termOpen = false; mapSig = ""; selGen++; }
+  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; }
   sel = id;
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
@@ -1240,23 +1261,14 @@ function renderNotes(){
     : `<div class="empty">Park a thought here — notes stay on this host, private to you.</div>`;
   $("#keyrow").innerHTML = "";
   $("#gauge").hidden = true;
-  $("#decision").className = "";
-  $("#decision").innerHTML = "";
-  ensureWorkTicker(false);
+  $("#convtools").hidden = true;   /* notes have no terminal to toggle */
+  setWorkPulse(false);
   $("#msgs").scrollTop = 1e6;
 }
 
-const WORK_WORDS = ["working","thinking","cooking","brewing","sauteing","stirring","chugging","crunching"];
-let workIdx = 0, workTimer = null;
-function ensureWorkTicker(active){
-  if (!active){ clearInterval(workTimer); workTimer = null; return; }
-  if (workTimer) return;
-  workTimer = setInterval(() => {
-    workIdx = (workIdx + 1) % WORK_WORDS.length;
-    const w = $("#workword");
-    if (w) w.textContent = WORK_WORDS[workIdx];
-  }, 9000 + Math.random() * 2000);
-}
+/* one calm pulse above the prompt — CSS handles the breathing; we only
+   flip the class from the mechanical active state */
+function setWorkPulse(active){ $("#workpulse").classList.toggle("on", !!active); }
 const DEC_LABELS = {
   no_transcript: "No transcript yet \u2014 showing the terminal",
   no_structured_request: "Showing the terminal",
@@ -1265,7 +1277,7 @@ const DEC_LABELS = {
   waiting_approval: "Agent needs your approval",
   quiet_inspect: "Quiet \u2014 inspect the terminal",
 };
-let decFull = false;
+let termFull = false;
 
 async function refreshChat(){
   if (sel === "NOTES"){ renderNotes(); return; }
@@ -1282,7 +1294,10 @@ async function refreshChat(){
   const turns = d.turns || [];
   const unconfirmed = d.delivery === "unconfirmed";
   const mustShowPane = !!d.fallback || !!n.attention || unconfirmed;
-  const showPeek = mustShowPane || peekOn || (termOpen && turns.length > 0) || !turns.length;
+  /* forced: the pane is required evidence (blocker) or the only content
+     (no readable turns yet); otherwise the window-maximize toggle governs it */
+  const forcePeek = mustShowPane || !turns.length;
+  const showPeek = forcePeek || termOpen;
   let peekText = "";
   if (showPeek){
     try {
@@ -1301,19 +1316,24 @@ async function refreshChat(){
     gauge.hidden = true;
   }
 
-  const sig = [n.id, d.live, n.attention, d.delivery, showPeek, termOpen,
+  const sig = [n.id, d.live, n.attention, d.delivery, showPeek, termOpen, termFull,
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
   if (sig === chatSig) return;
   chatSig = sig;
   lastTurns = turns;
 
-  /* with readable turns the raw pane folds behind a link \u2014 the key row below
-     already carries the answer affordance; without them, or while the
-     decision region needs it pinned open as evidence, it IS the content */
-  const foldable = turns.length > 0 && !peekOn && !mustShowPane;
+  /* the terminal always renders inline as the last block below the bubbles \u2014
+     never a pinned overlay above the chat. When the agent blocks on the
+     operator (attention, fallback, unconfirmed send) or has no readable turns
+     yet, it is forced open, labelled, and cannot be folded; otherwise the
+     window-maximize toggle in the composer row governs it. The key row of
+     answer buttons sits directly beneath, right under the terminal. */
   const el = $("#msgs");
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  const label = unconfirmed
+    ? "Send unconfirmed \u2014 check the terminal"
+    : (DEC_LABELS[d.reason] || "Needs your attention");
   el.innerHTML =
     (!turns.length
       ? `<div class="pending">${d.pending
@@ -1324,55 +1344,40 @@ async function refreshChat(){
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(t.text)}</div>
         <button class="copybtn" data-i="${i}" aria-label="copy message">${ICON_COPY}</button>
       </div>`).join("") +
-    (d.live === "active" && !mustShowPane
-      ? `<div class="workrow"><span class="workword" id="workword">${WORK_WORDS[workIdx]}</span><span class="rail"><i></i></span></div>`
-      : "") +
-    (showPeek && !mustShowPane && peekText
-      ? (foldable
-          ? `<button id="termbtn">${termOpen ? "Hide terminal &#9662;" : "Show terminal &#9656;"}</button>
-             <div class="peek ${termOpen ? "" : "hidden"}">${esc(peekText)}</div>`
-          : `<div class="peek">${esc(peekText)}</div>`)
+    (showPeek && peekText
+      ? `<div class="peekblock">
+           <div class="peekhead">
+             <span class="plabel">${forcePeek ? esc(label) : "Terminal"}</span>
+             <button id="termfull" aria-label="${termFull ? "shrink terminal" : "expand terminal"}">${termFull ? "\u2921 shrink" : "\u2922 expand"}</button>
+           </div>
+           <div class="peek${termFull ? " full" : ""}">${esc(peekText)}</div>` +
+         (unconfirmed
+           ? `<div class="pnotice">Delivery to the terminal could not be confirmed.
+                <button id="decresolve">I checked \u2014 resume sending</button></div>`
+           : "") +
+        `</div>`
       : "");
-  const tb = $("#termbtn");
-  if (tb) tb.addEventListener("click", () => {
-    termOpen = !termOpen; chatSig = ""; refreshChat();
-    if (termOpen) $("#msgs").scrollTop = 1e6;
-  });
-  if (atBottom) el.scrollTop = el.scrollHeight;
-  ensureWorkTicker(d.live === "active" && !mustShowPane);
+  if (atBottom || forcePeek) el.scrollTop = el.scrollHeight;
+  const pk = el.querySelector(".peek");
+  if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
 
-  /* the decision region is pinned, non-foldable evidence: shown whenever the
-     agent blocks on the operator, or a send couldn't be confirmed delivered */
-  const dec = $("#decision");
-  if (!mustShowPane){
-    dec.className = "";
-    dec.innerHTML = "";
-  } else {
-    dec.className = "on" + (decFull ? " full" : "");
-    const label = unconfirmed
-      ? "Send unconfirmed \u2014 check the terminal"
-      : (DEC_LABELS[d.reason] || "Needs your attention");
-    dec.innerHTML =
-      `<div class="dhead">
-         <span class="dlabel">${esc(label)}</span>
-         <button id="decfull" aria-label="${decFull ? "shrink" : "expand"}">${decFull ? "\u2921" : "\u2922"}</button>
-       </div>
-       <div class="dpane">${esc(peekText)}</div>` +
-      (unconfirmed
-        ? `<div class="dnotice">Delivery to the terminal could not be confirmed.
-             <button id="decresolve">I checked \u2014 resume sending</button></div>`
-        : "");
-    const df = $("#decfull");
-    if (df) df.addEventListener("click", () => { decFull = !decFull; chatSig = ""; refreshChat(); });
-    const dr = $("#decresolve");
-    if (dr) dr.addEventListener("click", async () => {
-      try { await api(`/api/nodes/${encodeURIComponent(n.id)}/send/resolve`, { method: "POST" }); }
-      catch {}
-      chatSig = ""; tick();
-    });
-    const dp = dec.querySelector(".dpane");
-    if (dp) dp.scrollTop = dp.scrollHeight;
-  }
+  const tf = $("#termfull");
+  if (tf) tf.addEventListener("click", () => { termFull = !termFull; chatSig = ""; refreshChat(); });
+  const dr = $("#decresolve");
+  if (dr) dr.addEventListener("click", async () => {
+    try { await api(`/api/nodes/${encodeURIComponent(n.id)}/send/resolve`, { method: "POST" }); }
+    catch {}
+    chatSig = ""; tick();
+  });
+
+  /* working pulse (calm, above the prompt) + composer tools */
+  setWorkPulse(d.live === "active" && !mustShowPane);
+  $("#convtools").hidden = false;
+  const ct = $("#termtoggle");
+  ct.innerHTML = ICON_TERM;
+  ct.classList.toggle("on", showPeek);
+  ct.disabled = forcePeek;                  /* required evidence can't be folded */
+  ct.setAttribute("aria-label", showPeek ? "hide terminal" : "show terminal");
 
   /* key row appears only while the agent blocks on a dialog, or quietly
      invites a look without claiming a specific question/approval */
@@ -1620,13 +1625,18 @@ function openInfo(){
   $("#i_setup").textContent =
     [n.agent, n.model, n.effort].filter(Boolean).join(" · ") + " — " + n.dir;
   $("#i_attach").textContent = `tmux -L ${SOCKET} attach -t ${n.id}`;
-  $("#i_peek").textContent = peekOn ? "Hide terminal" : "Show terminal";
   openSheet("#info");
 }
 $("#infobtn").addEventListener("click", openInfo);
 $("#chattitle").addEventListener("click", openInfo);
-$("#i_peek").addEventListener("click", () => {
-  peekOn = !peekOn; chatSig = ""; closeSheets(); refreshChat();
+
+/* composer tools: window-maximize toggles the terminal below the last bubble;
+   the choice rides through the next prompt (termOpen persists until the
+   selection changes). */
+$("#termtoggle").addEventListener("click", () => {
+  if ($("#termtoggle").disabled) return;      /* forced-open evidence */
+  termOpen = !termOpen; chatSig = ""; refreshChat();
+  if (termOpen) $("#msgs").scrollTop = 1e6;
 });
 
 /* new activity — agent and model lists come from the backend, which probes
