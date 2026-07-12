@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -270,81 +271,112 @@ func TestCodexSessionFromCmdline(t *testing.T) {
 	}
 }
 
-// noteChatProgress turns per-cycle transcript progress into the stale-chat
-// signal: growth without chat records sets it, chat records clear it, and
-// the first observation only establishes the baseline (finding 21).
+// noteChatProgress turns transcript progress into the stale-chat signal:
+// growth across a whole working phase (judge=true, the active→quiet
+// transition) without one chat record sets it; recognized chat progress
+// clears it the moment it arrives, even on an ordinary quiet tick; quiet
+// ticks otherwise only advance the baseline (findings 21, 24).
 func TestNoteChatProgress(t *testing.T) {
 	a := &app{chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}
-	a.noteChatProgress("n", 100, 2) // baseline
+	a.noteChatProgress("n", 100, 2, false) // quiet tick: baseline
 	if a.staleChat["n"] {
 		t.Fatal("baseline observation must not mark stale")
 	}
-	a.noteChatProgress("n", 300, 2) // bytes grew, no chat record: stale
+	a.noteChatProgress("n", 300, 2, true) // phase ended: bytes grew, no chat record
 	if !a.staleChat["n"] {
-		t.Fatal("growth without chat progress must mark stale")
+		t.Fatal("growth without chat progress across a phase must mark stale")
 	}
-	a.noteChatProgress("n", 320, 2) // still growing, still no chat: stays stale
+	a.noteChatProgress("n", 320, 2, false) // quiet growth: baseline moves, no judgment
 	if !a.staleChat["n"] {
 		t.Fatal("stale must persist while no chat progress arrives")
 	}
-	a.noteChatProgress("n", 500, 3) // a recognized chat record: recovered
+	a.noteChatProgress("n", 400, 3, false) // split record completed while quiet
 	if a.staleChat["n"] {
-		t.Fatal("chat progress must clear the stale signal")
+		t.Fatal("chat progress must clear stale without another activity cycle")
 	}
-	a.noteChatProgress("n", 500, 3) // idle cycle: nothing changes
+	a.noteChatProgress("n", 400, 3, true) // idle phase end: nothing grew
 	if a.staleChat["n"] {
 		t.Fatal("idle cycle must not mark stale")
 	}
-}
-
-// effectiveAgent mirrors createNode's inheritance so the rollout snapshot
-// is taken exactly for the requests that launch codex (finding 22).
-func TestEffectiveAgent(t *testing.T) {
-	a := &app{byID: map[string]*Node{
-		"cx": {ID: "cx", Agent: "codex"},
-		"cl": {ID: "cl", Agent: "claude"},
-	}}
-	cases := []struct {
-		n    Node
-		want string
-	}{
-		{Node{Agent: "codex"}, "codex"},
-		{Node{Agent: "claude", Parent: "cx"}, "claude"}, // explicit beats inherited
-		{Node{Parent: "cx"}, "codex"},
-		{Node{Parent: "cl"}, "claude"},
-		{Node{Parent: "missing"}, "claude"}, // createNode will 400; no walk needed
-		{Node{}, "claude"},
-	}
-	for _, c := range cases {
-		if got := a.effectiveAgent(&c.n); got != c.want {
-			t.Errorf("effectiveAgent(%+v) = %q, want %q", c.n, got, c.want)
-		}
+	a.noteChatProgress("n", 900, 3, false) // benign growth while quiet: no phase, no stale
+	if a.staleChat["n"] {
+		t.Fatal("quiet growth must not mark stale without a working phase")
 	}
 }
 
-// effectiveDirOK keeps invalid codex requests from paying the history walk;
-// it must mirror createNode's dir resolution, including parent inheritance.
-func TestEffectiveDirOK(t *testing.T) {
+// A (re)linked transcript starts from an explicit zero baseline, so even the
+// first activity cycle is judged instead of only calibrating (finding 24).
+func TestTailerLockedBaseline(t *testing.T) {
+	a := &app{tailers: map[string]*transcript.Tailer{},
+		chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}
+	dir := t.TempDir()
+	n := &Node{ID: "n", Transcript: filepath.Join(dir, "a.jsonl")}
+	a.tailerLocked(n)
+	if m := a.chatMark["n"]; !m.seen || m.off != 0 || m.prog != 0 {
+		t.Fatalf("fresh link must set a zero baseline, got %+v", m)
+	}
+	// Relinking to a different file resets staleness and the baseline.
+	a.staleChat["n"] = true
+	a.chatMark["n"] = chatMark{seen: true, off: 50, prog: 1}
+	n.Transcript = filepath.Join(dir, "b.jsonl")
+	a.tailerLocked(n)
+	if a.staleChat["n"] {
+		t.Fatal("relink must clear staleness measured against the old file")
+	}
+	if m := a.chatMark["n"]; !m.seen || m.off != 0 || m.prog != 0 {
+		t.Fatalf("relink must reset the baseline to zero, got %+v", m)
+	}
+}
+
+// resolveNode is the single validation/resolution step shared by
+// handleNewNode's snapshot decision and createNode, so the two can never
+// diverge; a request that fails any validation — including an unknown
+// parent combined with an explicit codex agent — resolves to an error
+// before any codex-history walk (findings 22, 25).
+func TestResolveNode(t *testing.T) {
 	dir := t.TempDir()
 	a := &app{home: dir, byID: map[string]*Node{
-		"p":   {ID: "p", Dir: dir},
-		"bad": {ID: "bad", Dir: filepath.Join(dir, "gone")},
+		"cx": {ID: "cx", Agent: "codex", Model: "gpt-5.5", Effort: "high", Dir: dir},
+		"cl": {ID: "cl", Agent: "claude", Dir: dir},
 	}}
-	cases := []struct {
-		n    Node
-		want bool
-	}{
-		{Node{Dir: dir}, true},
-		{Node{}, true},                                           // defaults to home
-		{Node{Parent: "p"}, true},                                // inherited valid dir
-		{Node{Parent: "bad"}, false},                             // inherited invalid dir
-		{Node{Dir: filepath.Join(dir, "nope")}, false},           // missing
-		{Node{Dir: filepath.Join(dir, "f"), Parent: "p"}, false}, // explicit beats inherited
-	}
 	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644) // a file, not a dir
-	for _, c := range cases {
-		if got := a.effectiveDirOK(&c.n); got != c.want {
-			t.Errorf("effectiveDirOK(%+v) = %v, want %v", c.n, got, c.want)
+
+	ok := []struct {
+		n        Node
+		agent, d string
+	}{
+		{Node{Prompt: "p", Agent: "codex", Dir: dir}, "codex", dir},
+		{Node{Prompt: "p", Parent: "cx"}, "codex", dir},                   // full inheritance
+		{Node{Prompt: "p", Agent: "claude", Parent: "cx"}, "claude", dir}, // explicit beats inherited
+		{Node{Prompt: "p"}, "claude", dir},                                // defaults: claude, home
+	}
+	for _, c := range ok {
+		if status, err := a.resolveNode(&c.n); err != nil {
+			t.Errorf("resolveNode(%+v) failed: %d %v", c.n, status, err)
+			continue
+		}
+		if c.n.Agent != c.agent || c.n.Dir != c.d {
+			t.Errorf("resolved agent/dir = %q/%q, want %q/%q", c.n.Agent, c.n.Dir, c.agent, c.d)
+		}
+	}
+	// Inherited launch config, never the conversation (fresh-context fork).
+	forked := Node{Prompt: "p", Parent: "cx"}
+	a.resolveNode(&forked)
+	if forked.Model != "gpt-5.5" || forked.Effort != "high" {
+		t.Errorf("fork must inherit model/effort, got %q/%q", forked.Model, forked.Effort)
+	}
+
+	bad := []Node{
+		{Prompt: "  "},                   // empty prompt
+		{Prompt: "p", Parent: "missing"}, // unknown parent
+		{Prompt: "p", Parent: "missing", Agent: "codex", Dir: dir}, // finding 25: must fail before any walk
+		{Prompt: "p", Agent: "gemini"},                             // unknown agent
+		{Prompt: "p", Dir: filepath.Join(dir, "nope")},             // missing dir
+		{Prompt: "p", Dir: filepath.Join(dir, "f")},                // dir is a file
+	}
+	for _, n := range bad {
+		if status, err := a.resolveNode(&n); err == nil || status != 400 {
+			t.Errorf("resolveNode(%+v) = %d, %v; want 400 and error", n, status, err)
 		}
 	}
 }

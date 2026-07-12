@@ -212,14 +212,15 @@ func agentCommand(n *Node) (string, error) {
 	return "", fmt.Errorf("unknown agent %q (want claude or codex)", n.Agent)
 }
 
-// createNode validates, starts the tmux session, and persists the node.
-// It returns the HTTP status to use on error: client mistakes are 400,
-// server-side failures (tmux, store) are 500. Callers hold a.mu; taken
-// carries tmux session names that must not be reused as node IDs, and
-// rollouts is a pre-launch snapshot of existing codex rollout paths — nil
-// means no trustworthy snapshot exists, which disables transcript discovery
-// for this node (peek still works) rather than risking a wrong link.
-func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]bool) (int, error) {
+// resolveNode validates a new-node request and resolves its launch
+// configuration in place: parent inheritance (fresh-context fork: the launch
+// config, never the conversation), agent and directory defaults, and the
+// title. It is idempotent, so handleNewNode runs it once up front — deciding
+// from the resolved result whether the codex rollout snapshot is needed at
+// all — and createNode runs the very same step instead of a diverging
+// preflight mirror (finding 25). Callers hold a.mu. Returns the HTTP status
+// to use on error: every resolution failure is a client mistake, 400.
+func (a *app) resolveNode(n *Node) (int, error) {
 	if strings.TrimSpace(n.Prompt) == "" {
 		return 400, fmt.Errorf("prompt must not be empty")
 	}
@@ -245,6 +246,9 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	if n.Agent == "" {
 		n.Agent = "claude"
 	}
+	if n.Agent != "claude" && n.Agent != "codex" {
+		return 400, fmt.Errorf("unknown agent %q (want claude or codex)", n.Agent)
+	}
 	if n.Dir == "" {
 		n.Dir = a.home
 	}
@@ -258,6 +262,20 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	}
 	if n.Title == "" {
 		n.Title = firstWords(n.Prompt, 6)
+	}
+	return 0, nil
+}
+
+// createNode validates, starts the tmux session, and persists the node.
+// It returns the HTTP status to use on error: client mistakes are 400,
+// server-side failures (tmux, store) are 500. Callers hold a.mu; taken
+// carries tmux session names that must not be reused as node IDs, and
+// rollouts is a pre-launch snapshot of existing codex rollout paths — nil
+// means no trustworthy snapshot exists, which disables transcript discovery
+// for this node (peek still works) rather than risking a wrong link.
+func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]bool) (int, error) {
+	if status, err := a.resolveNode(n); err != nil {
+		return status, err
 	}
 	n.ID = a.uniqueID(n.Title, taken)
 	if n.Agent == "claude" {
@@ -433,12 +451,14 @@ func (a *app) poll() {
 				if name, ok := tl.WaitingOn(); ok {
 					attn = attentionKind(name)
 				}
-				if prev == "active" {
-					// The pane just went quiet after a working phase: judge
-					// whether the transcript carried that phase (finding 21).
-					off, prog := tl.Progress()
-					a.noteChatProgress(n.ID, off, prog)
-				}
+				// Judge the transcript only across a whole working phase (the
+				// active→quiet transition, finding 21); on ordinary quiet ticks
+				// the mark still advances — establishing the baseline before
+				// the next phase — and newly recognized chat progress clears a
+				// stale flag immediately, without waiting for another activity
+				// cycle (finding 24).
+				off, prog := tl.Progress()
+				a.noteChatProgress(n.ID, off, prog, prev == "active")
 			}
 		}
 		a.mu.Lock()
@@ -555,22 +575,26 @@ type chatMark struct {
 	prog int
 }
 
-// noteChatProgress updates the stale-transcript signal at the moment a
-// node's pane turns quiet. Bytes that advanced over a whole active phase
-// without one recognized chat record mean the linked file no longer carries
-// the conversation — a typed future format the structural health check
-// cannot see — so the UI degrades to peek alongside the retained turns.
-// Recognized chat progress clears the signal again. Anchoring the judgment
-// to pane activity cycles (not per-line thresholds) is what keeps benign
-// non-chat records, however many, from ever tripping it on their own.
-func (a *app) noteChatProgress(id string, off int64, prog int) {
+// noteChatProgress updates the stale-transcript signal. Bytes that advanced
+// over a whole active phase (judge is true exactly at the active→quiet
+// transition) without one recognized chat record mean the linked file no
+// longer carries the conversation — a typed future format the structural
+// health check cannot see — so the UI degrades to peek alongside the
+// retained turns. Recognized chat progress clears the signal the moment it
+// arrives, even if the pane never becomes active again (a record split
+// across polls completes while quiet). Ordinary quiet ticks otherwise only
+// advance the mark, so each phase is judged against a pre-phase baseline.
+// Anchoring the stale judgment to pane activity cycles (not per-line
+// thresholds) is what keeps benign non-chat records, however many, from
+// ever tripping it on their own.
+func (a *app) noteChatProgress(id string, off int64, prog int, judge bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	m := a.chatMark[id]
 	switch {
 	case m.seen && prog > m.prog:
 		a.staleChat[id] = false
-	case m.seen && off > m.off:
+	case m.seen && judge && off > m.off:
 		a.staleChat[id] = true
 	}
 	a.chatMark[id] = chatMark{seen: true, off: off, prog: prog}
@@ -759,37 +783,43 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	// guess still leaves peek + send working.
 	if n.Agent == "claude" && n.SessionID == "" && n.Transcript == "" {
 		if pid, err := s.PanePID(); err == nil {
-			if sid := sessionFromPane(pid, sessionArgFromCmdline); sid != "" {
-				n.SessionID = sid
-				if path, ok := transcript.FindClaudeTranscript(a.home, sid); ok {
-					n.Transcript = path
-				}
-			}
+			n.SessionID = sessionFromPane(pid, sessionArgFromCmdline)
 		}
 		// A process-derived id remains authoritative even if Claude has not
 		// created (or we cannot yet see) its transcript. discoverTranscript
 		// will retry it; do not replace it with the nondeterministic mtime guess.
-		if n.SessionID == "" && n.Transcript == "" {
+		if n.SessionID == "" {
 			if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
 				n.Transcript, n.SessionID = path, sid
 			}
 		}
 	}
 	// Adopted codex session: a resumed pane carries the session id on its
-	// command line, and codex embeds that id in the rollout filename — a
-	// deterministic match. Without an id there is no pre-launch snapshot to
-	// make the cwd+time heuristic safe (an adopted/resumed session normally
+	// command line. Without an id there is no pre-launch snapshot to make
+	// the cwd+time heuristic safe (an adopted/resumed session normally
 	// appends to an *existing* rollout among possibly several same-cwd
 	// candidates), so no guess is attempted: linking the wrong conversation
 	// is worse than showing peek. The node stays on pane snapshots unless an
-	// explicit transcript is supplied.
+	// explicit session id or transcript is supplied.
 	if n.Agent == "codex" && n.SessionID == "" && n.Transcript == "" {
 		if pid, err := s.PanePID(); err == nil {
-			if sid := sessionFromPane(pid, codexSessionFromCmdline); sid != "" {
-				n.SessionID = sid
-				if path, ok := transcript.FindCodexRolloutBySession(a.codexRoot, sid); ok {
-					n.Transcript = path
-				}
+			n.SessionID = sessionFromPane(pid, codexSessionFromCmdline)
+		}
+	}
+	// Any known session id — supplied explicitly (the migration script sends
+	// one) or extracted from the pane above — gets its deterministic lookup
+	// now: the claude id is the transcript filename, the codex id is embedded
+	// in the rollout filename by codex itself. If the file is not visible
+	// yet, discoverTranscript retries the same lookup.
+	if n.SessionID != "" && n.Transcript == "" {
+		switch n.Agent {
+		case "claude":
+			if path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok {
+				n.Transcript = path
+			}
+		case "codex":
+			if path, ok := transcript.FindCodexRolloutBySession(a.codexRoot, n.SessionID); ok {
+				n.Transcript = path
 			}
 		}
 	}
@@ -816,6 +846,18 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
+	// Resolve and validate the launch configuration first: no request that
+	// fails validation (empty prompt, unknown parent, bad agent or dir) ever
+	// pays the codex-history walk, and the walk decision reads the *resolved*
+	// agent, so an explicit-codex request with a missing parent is rejected
+	// here rather than after a full traversal (finding 25).
+	a.mu.Lock()
+	status, err := a.resolveNode(&n)
+	a.mu.Unlock()
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
 	// Snapshot current session names before the critical section (tmux is
 	// slow); the ID allocator must avoid unadopted sessions.
 	taken := map[string]bool{}
@@ -823,13 +865,12 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		taken[s] = true
 	}
 	// The rollout snapshot walks the entire codex history, so take it only
-	// when this request will actually launch codex — resolved the same way
-	// createNode resolves it — and not for requests that fail validation
-	// anyway. An incomplete walk cannot guarantee "everything not in the
-	// snapshot appeared after launch"; then the launch proceeds but
-	// discovery stays disabled (nil snapshot) and the node relies on peek.
+	// when this request will actually launch codex. An incomplete walk
+	// cannot guarantee "everything not in the snapshot appeared after
+	// launch"; then the launch proceeds but discovery stays disabled (nil
+	// snapshot) and the node relies on peek.
 	var rollouts map[string]bool
-	if strings.TrimSpace(n.Prompt) != "" && a.effectiveAgent(&n) == "codex" && a.effectiveDirOK(&n) {
+	if n.Agent == "codex" {
 		snap, complete := transcript.ListCodexRollouts(a.codexRoot)
 		if complete {
 			rollouts = snap
@@ -838,54 +879,13 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.mu.Lock()
-	status, err := a.createNode(&n, taken, rollouts)
+	status, err = a.createNode(&n, taken, rollouts)
 	a.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
 	}
 	writeJSON(w, n)
-}
-
-// effectiveAgent resolves which agent a new-node request will launch,
-// mirroring createNode's inheritance (explicit agent, else the parent's,
-// else claude) without mutating the request.
-func (a *app) effectiveAgent(n *Node) string {
-	if n.Agent != "" {
-		return n.Agent
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if n.Parent != "" {
-		if p, ok := a.byID[n.Parent]; ok && p.Agent != "" {
-			return p.Agent
-		}
-	}
-	return "claude"
-}
-
-// effectiveDirOK mirrors createNode's directory resolution (explicit, else
-// the parent's, else home) and reports whether it will pass validation, so
-// a codex request that createNode is going to reject cannot cost a history
-// walk. Like effectiveAgent it does not mutate the request.
-func (a *app) effectiveDirOK(n *Node) bool {
-	dir := n.Dir
-	if dir == "" && n.Parent != "" {
-		a.mu.Lock()
-		if p, ok := a.byID[n.Parent]; ok {
-			dir = p.Dir
-		}
-		a.mu.Unlock()
-	}
-	if dir == "" {
-		dir = a.home
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return false
-	}
-	st, err := os.Stat(abs)
-	return err == nil && st.IsDir()
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {
@@ -952,8 +952,11 @@ func (a *app) tailerLocked(n *Node) *transcript.Tailer {
 		tl = &transcript.Tailer{Path: n.Transcript}
 		a.tailers[n.ID] = tl
 		// A fresh file needs a fresh progress baseline; staleness measured
-		// against the old file says nothing about this one.
-		delete(a.chatMark, n.ID)
+		// against the old file says nothing about this one. The baseline is
+		// zero (a new tailer has consumed nothing), not absent — so even the
+		// very first activity cycle after linking is judged, instead of only
+		// establishing a baseline (finding 24).
+		a.chatMark[n.ID] = chatMark{seen: true}
 		delete(a.staleChat, n.ID)
 	}
 	return tl

@@ -399,6 +399,67 @@ func TestTailerProgressTypedFormatChange(t *testing.T) {
 	}
 }
 
+// Progress must report the committed watermark, not raw bytes read: a
+// partial trailing line buffered across polls is not data the parser failed
+// on, and when the record completes later — perhaps while the pane is
+// already quiet — it counts as progress at that moment (finding 24).
+func TestTailerProgressPartialLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	full := `{"type":"user","timestamp":"t1","message":{"role":"user","content":"question"}}` + "\n"
+	os.WriteFile(p, []byte(full[:40]), 0o644)
+	tl := &Tailer{Path: p}
+	tl.Poll()
+	if off, prog := tl.Progress(); off != 0 || prog != 0 {
+		t.Fatalf("buffered partial line must not advance the watermark: off=%d prog=%d", off, prog)
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(full[40:])
+	f.Close()
+	if turns := tl.Poll(); len(turns) != 1 {
+		t.Fatalf("completed record must yield its turn, got %d", len(turns))
+	}
+	if off, prog := tl.Progress(); off != int64(len(full)) || prog != 1 {
+		t.Fatalf("completed record must commit: off=%d prog=%d, want %d and 1", off, prog, len(full))
+	}
+}
+
+// chatShaped must not claim more understanding than the parser has: a known
+// outer type whose inner message shape moved is not chat progress
+// (finding 24).
+func TestChatShapedInnerValidation(t *testing.T) {
+	yes := []string{
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"1","name":"Bash","input":{}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}`,
+		`{"type":"response_item","payload":{"type":"function_call","call_id":"c1","name":"exec"}}`,
+	}
+	for _, l := range yes {
+		if !chatShaped([]byte(l)) {
+			t.Errorf("understood chat record not counted: %s", l)
+		}
+	}
+	no := []string{
+		`{"type":"user","message":{"role":"user","content":{"v2_rich":"hi"}}}`,                                     // content moved to a new object shape
+		`{"type":"assistant","message":{"role":"assistant","content":[{"kind":"txt","value":"x"}]}}`,               // only unknown block types
+		`{"type":"assistant","message":{"role":"assistant"}}`,                                                      // no content at all
+		`{"type":"response_item","payload":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`,     // no role
+		`{"type":"response_item","payload":{"type":"message","role":"tool","content":"x"}}`,                        // unknown role
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"kind":"v2","data":"x"}]}}`, // codex content moved
+		`{"type":"ai-title","title":"threshold sweep"}`,                                                            // benign side record
+		`not json`,
+	}
+	for _, l := range no {
+		if chatShaped([]byte(l)) {
+			t.Errorf("uninterpretable record counted as chat progress: %s", l)
+		}
+	}
+}
+
 // WaitingOn is the transcript half of needs-input detection: a logged tool
 // call whose result has not been logged yet. Verified against real session
 // logs: both CLIs write the call record when the agent asks, and the result

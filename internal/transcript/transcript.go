@@ -172,13 +172,16 @@ func recognizedLine(line []byte) bool {
 }
 
 // chatShaped reports whether a line is a chat record whose inner shape this
-// parser understands — a visible message, a tool call, or a tool result —
-// regardless of whether it yields a visible turn. This is the chat-progress
-// signal: a future format that keeps emitting typed JSON objects while its
-// messages have moved to new shapes appends bytes without a single
-// chat-shaped record, even though recognizedLine stays satisfied. Benign
-// side records (titles, token counts, queue operations) are simply not
-// progress; they never mark anything unhealthy on their own.
+// parser actually understands — a visible message it can render text from,
+// or a tool call/result it can track — not merely a record with the right
+// outer type. This is the chat-progress signal: a future format that keeps
+// the outer types but moves message content to a new inner shape appends
+// bytes without a single chat-shaped record, even though recognizedLine
+// stays satisfied. The signal must never claim more understanding than the
+// parser has, so text extraction goes through the same contentText that
+// ParseLine renders with. Benign side records (titles, token counts, queue
+// operations) are simply not progress; they never mark anything unhealthy
+// on their own.
 func chatShaped(line []byte) bool {
 	var g struct {
 		Type    string          `json:"type"`
@@ -193,30 +196,57 @@ func chatShaped(line []byte) bool {
 		var msg struct {
 			Content json.RawMessage `json:"content"`
 		}
-		return json.Unmarshal(g.Message, &msg) == nil && len(msg.Content) > 0
+		if json.Unmarshal(g.Message, &msg) != nil || len(msg.Content) == 0 {
+			return false
+		}
+		// Either the parser can render visible text from it…
+		if contentText(msg.Content) != "" {
+			return true
+		}
+		// …or it carries blocks whose types the tool tracking understands.
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			return false
+		}
+		for _, b := range blocks {
+			switch b.Type {
+			case "text", "tool_use", "tool_result":
+				return true
+			}
+		}
+		return false
 	case "response_item": // Codex chat record
 		var p struct {
-			Type string `json:"type"`
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		}
 		if json.Unmarshal(g.Payload, &p) != nil {
 			return false
 		}
 		switch p.Type {
-		case "message", "function_call", "custom_tool_call",
+		case "function_call", "custom_tool_call",
 			"function_call_output", "custom_tool_call_output":
 			return true
+		case "message":
+			return (p.Role == "user" || p.Role == "assistant") &&
+				contentText(p.Content) != ""
 		}
 	}
 	return false
 }
 
-// Progress reports how far the tailer has read (bytes consumed from the
-// file) and how many chat-shaped records it has seen in total. Both values
-// only grow (except on file rotation, which resets the tailer).
+// Progress reports how far the tailer has consumed the file — the committed
+// watermark behind any partial trailing line still buffered, since a
+// half-written record is not data the parser failed on — and how many
+// chat-shaped records it has seen in total. Both values only grow (except on
+// file rotation, which resets the tailer).
 func (t *Tailer) Progress() (offset int64, chatRecords int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.offset, t.progress
+	return t.offset - int64(len(t.buf)), t.progress
 }
 
 // WaitingOn reports the most recent tool call without a logged result — the
