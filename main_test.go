@@ -205,11 +205,21 @@ func TestSessionArgFromCmdline(t *testing.T) {
 
 func TestSysloadOnLinux(t *testing.T) {
 	s := sysload()
-	if s["load"] == "" {
-		t.Error("no loadavg read on linux")
+	if s.NCPU <= 0 {
+		t.Errorf("ncpu = %d, want > 0", s.NCPU)
 	}
-	if s["mem"] == "" || !strings.Contains(s["mem"], "%") {
-		t.Errorf("mem = %q", s["mem"])
+	if s.MemTotalGB <= 0 {
+		t.Errorf("mem_total_gb = %f, want > 0", s.MemTotalGB)
+	}
+	if s.MemPct <= 0 || s.MemPct > 100 {
+		t.Errorf("mem_pct = %f, want (0,100]", s.MemPct)
+	}
+	if s.SwapPct < 0 || s.SwapPct > 100 {
+		t.Errorf("swap_pct = %f, want [0,100]", s.SwapPct)
+	}
+	// cached: a second call within the 30 s window returns the same sample
+	if s2 := sysload(); s2 != s {
+		t.Error("sysload not cached within 30s window")
 	}
 }
 

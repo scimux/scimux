@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,12 @@ import (
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
+
+// version is stamped at build time: go build -ldflags "-X main.version=v0.5.0"
+var version = "dev"
+
+// hostname is resolved once at startup; shown in the UI statusbar.
+var hostname = "scimux"
 
 //go:embed web/*
 var webFS embed.FS
@@ -409,14 +417,36 @@ func (a *app) discoverTranscript(n *Node) {
 
 // ---------- sysload ----------
 
-func sysload() map[string]string {
-	out := map[string]string{}
+// sysInfo carries normalized numbers; the browser only renders values and
+// trends (no Linux parsing rules in JavaScript). Sampled at most every 30 s
+// so the state ETag stays stable between sys refreshes on an idle system.
+type sysInfo struct {
+	Load1      float64 `json:"load1"`
+	NCPU       int     `json:"ncpu"`
+	MemPct     float64 `json:"mem_pct"`
+	MemTotalGB float64 `json:"mem_total_gb"`
+	SwapPct    float64 `json:"swap_pct"`
+}
+
+var (
+	sysMu      sync.Mutex
+	sysCache   sysInfo
+	sysCacheAt time.Time
+)
+
+func sysload() sysInfo {
+	sysMu.Lock()
+	defer sysMu.Unlock()
+	if time.Since(sysCacheAt) < 30*time.Second {
+		return sysCache
+	}
+	out := sysInfo{NCPU: runtime.NumCPU()}
 	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
-		if f := strings.Fields(string(b)); len(f) >= 3 {
-			out["load"] = strings.Join(f[:3], " ")
+		if f := strings.Fields(string(b)); len(f) >= 1 {
+			fmt.Sscanf(f[0], "%f", &out.Load1)
 		}
 	}
-	var totalKB, availKB float64
+	var totalKB, availKB, swapTotalKB, swapFreeKB float64
 	if b, err := os.ReadFile("/proc/meminfo"); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			var v float64
@@ -426,11 +456,22 @@ func sysload() map[string]string {
 			if _, err := fmt.Sscanf(line, "MemAvailable: %f kB", &v); err == nil {
 				availKB = v
 			}
+			if _, err := fmt.Sscanf(line, "SwapTotal: %f kB", &v); err == nil {
+				swapTotalKB = v
+			}
+			if _, err := fmt.Sscanf(line, "SwapFree: %f kB", &v); err == nil {
+				swapFreeKB = v
+			}
 		}
 	}
 	if totalKB > 0 {
-		out["mem"] = fmt.Sprintf("%.0f%% of %.1f GB used", 100*(totalKB-availKB)/totalKB, totalKB/1024/1024)
+		out.MemPct = 100 * (totalKB - availKB) / totalKB
+		out.MemTotalGB = totalKB / 1024 / 1024
 	}
+	if swapTotalKB > 0 {
+		out.SwapPct = 100 * (swapTotalKB - swapFreeKB) / swapTotalKB
+	}
+	sysCache, sysCacheAt = out, time.Now()
 	return out
 }
 
@@ -441,6 +482,7 @@ type nodeView struct {
 	Live          string `json:"live"`
 	Attention     string `json:"attention,omitempty"` // "approval" | "question"
 	HasTranscript bool   `json:"has_transcript"`
+	LastActivity  int64  `json:"last_activity,omitempty"` // unix ms of last pane change
 }
 
 func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
@@ -448,7 +490,12 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	views := make([]nodeView, 0, len(a.nodes))
 	for _, n := range a.nodes {
-		views = append(views, nodeView{Node: n, Live: a.live[n.ID], Attention: a.attn[n.ID], HasTranscript: n.Transcript != ""})
+		var lastMS int64
+		if t, ok := a.lastChg[n.ID]; ok {
+			lastMS = t.UnixMilli()
+		}
+		views = append(views, nodeView{Node: n, Live: a.live[n.ID], Attention: a.attn[n.ID],
+			HasTranscript: n.Transcript != "", LastActivity: lastMS})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server).
@@ -459,7 +506,26 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.mu.Unlock()
-	writeJSON(w, map[string]any{"nodes": views, "unadopted": unadopted, "sys": sysload(), "socket": a.server.Socket})
+	body, err := json.Marshal(map[string]any{
+		"nodes": views, "unadopted": unadopted, "sys": sysload(),
+		"socket": a.server.Socket, "hostname": hostname, "version": version,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	// ETag short-circuit: an unchanged state costs the client a few header
+	// bytes instead of a body — polling stays, but nearly free when idle.
+	h := fnv.New64a()
+	h.Write(body)
+	etag := fmt.Sprintf(`"%x"`, h.Sum64())
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 // handleAdopt registers an already-running tmux session (which scimux did
@@ -683,6 +749,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		hostname = h
+	}
 	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
@@ -725,12 +794,6 @@ func main() {
 		// a cached copy after a scimux upgrade is a recurring dogfooding
 		// trap (especially iPad Safari). It's one small local page: always
 		// fetch fresh.
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(b)
-	})
-	mux.HandleFunc("GET /assets/pico.min.css", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := webFS.ReadFile("web/pico.min.css")
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(b)
 	})
