@@ -221,6 +221,28 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #chathead.compact .mission { max-height: 0; opacity: 0; overflow: hidden; }
 #chathead .dots { color: var(--dim); font-size: 19px; padding: 4px 0 4px 10px; }
 
+/* context gauge: a 3px fill bar under the chat head (see demo #gauge) */
+#gauge { height: 3px; background: var(--hairline); position: relative; flex: none; }
+#gauge i { display: block; height: 100%; background: var(--work); transition: width .5s; }
+#gauge i.high { background: #C7791B; }
+
+/* decision region: when the agent needs the supervisor (attention, fallback,
+   unconfirmed send), the live terminal is required evidence — pinned under
+   the chat head at decision size, never folded, never buried under history */
+#decision { display: none; flex-direction: column; flex: none;
+  border-bottom: 1px solid var(--hairline); background: var(--bg); min-height: 0; }
+#decision.on { display: flex; }
+#decision .dhead { display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px 2px; font-size: 12px; color: var(--dim); }
+#decision .dhead .dlabel { flex: 1; min-width: 0; }
+#decision .dhead button { color: var(--work); font-size: 12px; font-weight: 600;
+  padding: 4px 2px; white-space: nowrap; }
+#decision .dpane { margin: 6px 10px 10px; height: 56dvh; overflow: auto; }
+#decision.full .dpane { height: 82dvh; }
+@media (min-width: 900px) { #decision .dpane { height: 50dvh; } }
+#decision .dnotice { padding: 2px 12px 8px; font-size: 13px; color: var(--bad); }
+#decision .dnotice button { color: var(--work); font-weight: 600; padding: 2px 0 0; display: block; }
+
 #msgs { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
 /* no "you/agent" labels — side + color already carry the role */
 .turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
@@ -233,6 +255,34 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
+
+/* working indicator: rotating word + indeterminate shimmer rail. Purely
+   decorative liveliness from the mechanical active state — no fake progress,
+   no percentages; the accessible name stays constant. */
+.workrow { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
+.workrow .workword { color: var(--dim); font-style: italic; font-size: 14px; flex: none; }
+.workrow .rail { flex: 1; max-width: 180px; height: 3px; border-radius: 2px;
+  background: var(--hairline); overflow: hidden; }
+.workrow .rail i { display: block; height: 100%; width: 30%; border-radius: 2px;
+  background: var(--work); animation: railslide 1.6s ease-in-out infinite; }
+@keyframes railslide { from { transform: translateX(-110%); } to { transform: translateX(400%); } }
+
+/* inline field validation: message + icon next to the field (color is never
+   the only cue), restrained border — no glow, no motion */
+.fielderr { display: flex; gap: 6px; align-items: baseline; color: var(--bad);
+  font-size: 13px; margin-top: 5px; }
+.sheet [aria-invalid="true"] { border-color: var(--bad); }
+.sheet .k .opt { font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+/* sync state: visible when local UI changes are not yet on the server */
+#syncwarn { color: #FF9500; font-size: 12px; white-space: nowrap; }
+#syncwarn:empty { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .workrow .rail i { animation: none; }
+  .card.attention { animation: none; box-shadow: 0 0 0 2px var(--attn); }
+  .workdot, #chathead .dot.active { animation: none; opacity: 1; }
+}
 
 /* copy affordance: bottom-aligned beside the bubble (right of agent bubbles,
    left of user bubbles); hover-revealed on pointer devices, always on touch */
@@ -379,6 +429,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <span class="host" id="host">scimux</span>
   <span class="sys" id="sys"></span>
   <span class="spacer"></span>
+  <span id="syncwarn" role="status"></span>
 </header>
 
 <div id="app">
@@ -421,6 +472,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
       </div>
       <div class="mission" id="chatmission"></div>
     </div>
+    <div id="gauge" hidden><i id="gaugefill"></i></div>
+    <div id="decision"></div>
     <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
     <div id="keyrow"></div>
     <div id="promptbar">
@@ -439,8 +492,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <div class="grab"></div>
   <h3>New activity</h3>
   <div class="sect">
-    <div class="k">Research question</div>
-    <textarea id="nc_prompt" rows="4" placeholder="What should this agent investigate?"></textarea>
+    <div class="k">Research question <span class="opt">&#8212; required</span></div>
+    <textarea id="nc_prompt" rows="4" placeholder="What should this agent investigate?" required></textarea>
   </div>
   <div class="sect row2">
     <div><label>agent</label><select id="nc_agent"></select></div>
@@ -449,7 +502,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
       <option>low</option><option>medium</option><option>high</option></select></div>
   </div>
   <div class="sect">
-    <div class="k">Working directory</div>
+    <div class="k">Working directory <span class="opt">&#8212; optional, defaults to home</span></div>
     <input id="nc_dir" placeholder="/path/to/experiment">
   </div>
   <div class="sect">
@@ -591,25 +644,142 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
    Map group tabs, the archived-card set, and private notes survive scimux
    restarts and are shared across devices: they live in ~/.scimux/ui.json via
    GET/PUT /api/ui. localStorage only mirrors them for offline reads;
-   per-device state (drafts, selection) stays purely local. */
+   per-device state (drafts, selection) stays purely local.
+
+   Sync protocol: every GET carries an ETag revision; every PUT names the
+   revision it was based on (If-Match) and gets a 409 when another device
+   wrote in between. Local changes are recorded as small operations so a
+   conflict can be resolved by refetching and replaying them on the fresh
+   document — two devices adding notes concurrently keep both notes. The
+   server state is polled on the normal tick, so an open second device sees
+   an archive or note within one interval. Nothing is reported as synced
+   until the server acknowledged it (#syncwarn shows pending/failed saves). */
 let UI = { groups: [], archived: [], notes: [] };
+let uiRev = "";          // last server revision seen (ETag)
+let uiOps = [];          // local operations not yet acknowledged by the server
+let uiLoaded = false;    // initial load finished — writes are gated on this
+let uiSaving = false;
 let uiTimer = null;
+const normUI = j => Object.assign({ groups: [], archived: [], notes: [] }, j || {});
+
+function applyOp(doc, op){
+  switch (op.k){
+    case "arch":
+      doc.archived ||= [];
+      if (!doc.archived.includes(op.id)) doc.archived.push(op.id);
+      break;
+    case "unarch":
+      doc.archived = (doc.archived || []).filter(x => x !== op.id);
+      break;
+    case "note-add":
+      doc.notes ||= [];
+      if (!doc.notes.some(n => n.t === op.note.t)) doc.notes.push(op.note);
+      break;
+    case "note-del":
+      doc.notes = (doc.notes || []).filter(n => n.t !== op.t);
+      break;
+    case "groups":   /* group edits replace the whole tab list (rare, one device) */
+      doc.groups = op.groups;
+      break;
+  }
+}
+/* uiMutate: apply an operation locally right away, queue it for the server */
+function uiMutate(op){
+  applyOp(UI, op);
+  uiOps.push(op);
+  localStorage.setItem("scimux-ui", JSON.stringify(UI));
+  renderSyncState();
+  clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
+  uiTimer = setTimeout(flushUI, 300);
+}
+function renderSyncState(){
+  $("#syncwarn").textContent = uiOps.length ? "syncing…" : "";
+}
+async function flushUI(){
+  if (uiSaving || !uiLoaded || !uiOps.length) return;
+  uiSaving = true;
+  try {
+    for (let attempt = 0; attempt < 4 && uiOps.length; attempt++){
+      let r;
+      try {
+        r = await fetch("/api/ui", { method: "PUT",
+          headers: { "If-Match": uiRev || "*", "Content-Type": "application/json" },
+          body: JSON.stringify(UI) });
+      } catch { break; }               /* offline: keep ops, retry next tick */
+      if (r.ok){
+        uiRev = r.headers.get("ETag") || "";
+        uiOps = [];
+        localStorage.setItem("scimux-ui", JSON.stringify(UI));
+        break;
+      }
+      if (r.status === 409 || r.status === 428){
+        /* another device wrote first: refetch, replay our ops on top, retry */
+        let g;
+        try { g = await fetch("/api/ui"); } catch { break; }
+        if (!g.ok) break;
+        uiRev = g.headers.get("ETag") || "";
+        UI = normUI(await g.json());
+        uiOps.forEach(op => applyOp(UI, op));
+        applyRemoteUI();
+        continue;
+      }
+      break;                            /* 5xx/413: keep ops, show unsynced */
+    }
+  } finally {
+    uiSaving = false;
+    renderSyncState();
+    if (uiOps.length) $("#syncwarn").textContent = "changes not saved yet";
+  }
+}
+/* re-render everything that draws from UI, preserving inputs (the prompt bar
+   and sheets are singletons outside these render regions) */
+function applyRemoteUI(){
+  cardsSig = ""; mapSig = "";
+  renderCards(); renderMapTabs(); renderMap();
+  if (sel === "NOTES"){ chatSig = ""; renderNotes(); }
+}
 async function loadUI(){
   try {
-    UI = Object.assign({ groups: [], archived: [], notes: [] }, await api("/api/ui"));
+    const r = await fetch("/api/ui");
+    if (!r.ok) throw new Error();
+    uiRev = r.headers.get("ETag") || "";
+    UI = normUI(await r.json());
+    localStorage.setItem("scimux-ui", JSON.stringify(UI));
   } catch {
-    try { UI = Object.assign(UI, JSON.parse(localStorage.getItem("scimux-ui") || "{}")); } catch {}
+    try { UI = normUI(JSON.parse(localStorage.getItem("scimux-ui") || "{}")); } catch {}
   }
-  cardsSig = ""; mapSig = ""; chatSig = "";
-  renderCards(); renderMapTabs(); renderMap();
+  uiLoaded = true;
+  uiOps.forEach(op => applyOp(UI, op));  /* mutations made before load finished */
+  chatSig = "";
+  applyRemoteUI();
   if (sel === "NOTES") refreshChat();
+  if (uiOps.length) flushUI();
 }
-function saveUI(){
+/* poll the shared state alongside /api/state; skip while local ops are in
+   flight so a stale remote document cannot clobber them (they replay on 409) */
+async function pollUI(){
+  if (!uiLoaded || uiSaving || uiOps.length) return;
+  let r;
+  try {
+    r = await fetch("/api/ui", { headers: uiRev ? { "If-None-Match": uiRev } : {} });
+  } catch { return; }
+  if (r.status === 304 || !r.ok) return;
+  uiRev = r.headers.get("ETag") || "";
+  const remote = normUI(await r.json());
+  if (JSON.stringify(remote) === JSON.stringify(UI)) return;
+  UI = remote;
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
-  clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
-  uiTimer = setTimeout(() =>
-    fetch("/api/ui", { method: "PUT", body: JSON.stringify(UI) }).catch(() => {}), 300);
+  applyRemoteUI();
 }
+/* last-chance flush when the page goes away; keepalive survives unload */
+addEventListener("pagehide", () => {
+  if (!uiLoaded || !uiOps.length) return;
+  try {
+    fetch("/api/ui", { method: "PUT", keepalive: true,
+      headers: { "If-Match": uiRev || "*", "Content-Type": "application/json" },
+      body: JSON.stringify(UI) });
+  } catch {}
+});
 
 /* copy glyph: fa-regular fa-clone (two offset rounded squares), inlined */
 const ICON_COPY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
@@ -705,13 +875,17 @@ function ageText(ms){
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
 }
+/* "inspect" is the neutral attention: quiet pane, no structured transcript
+   evidence — worth a look, but never the yellow "needs your decision" alarm */
+const hardAttention = n => n.attention && n.attention !== "inspect";
 function cardState(n){
-  if (n.attention) return "attention";
+  if (hardAttention(n)) return "attention";
   if (n.live === "active") return "working";
   if (n.live === "exited" || n.live === "unavailable") return "dead";
   return "idle";
 }
 function statusText(n){
+  if (n.attention === "inspect") return "Quiet · check the terminal";
   if (n.attention) return `Waiting · needs your ${n.attention}`;
   if (n.live === "active") return "Running";
   if (n.live === "exited") return "Exited";
@@ -720,7 +894,7 @@ function statusText(n){
 }
 function orderedNodes(){
   return [...nodes].sort((a, b) => {
-    const aa = a.attention ? 1 : 0, ba = b.attention ? 1 : 0;
+    const aa = hardAttention(a) ? 1 : 0, ba = hardAttention(b) ? 1 : 0;
     if (aa !== ba) return ba - aa;
     return (b.last_activity || 0) - (a.last_activity || 0);
   });
@@ -748,7 +922,11 @@ const isArchived = id => (UI.archived || []).includes(id);
 
 function renderCards(){
   const lm = laneModel();
-  const list = orderedNodes().filter(n => isArchived(n.id) === (cardTab === "archived"));
+  /* an archived node that needs a decision surfaces in Current anyway —
+     archiving organizes, it must never hide a pending approval/question */
+  const list = orderedNodes().filter(n =>
+    isArchived(n.id) === (cardTab === "archived") ||
+    (cardTab === "current" && hardAttention(n)));
   const sig = JSON.stringify(list.map(n => [n.id, n.title, n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
     + "|" + cardTab + "|" + (UI.notes || []).length;
@@ -783,7 +961,7 @@ function renderCards(){
       ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
       : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`)
     + notesCard;
-  const waiting = nodes.filter(n => n.attention).length;
+  const waiting = nodes.filter(hardAttention).length;
   document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
 }
 $("#cardtabs").addEventListener("click", e => {
@@ -842,7 +1020,9 @@ let mapSig = "";
 const groupLanes = () => mapTab === "all" ? null
   : ((UI.groups || []).find(t => t.id === mapTab)?.lanes ?? null);
 function renderMapTabs(){
-  if (mapTab !== "all" && !(UI.groups || []).some(t => t.id === mapTab)) mapTab = "all";
+  /* validate the saved group only against loaded state — before loadUI
+     resolves, UI.groups is the empty default and would wrongly reset it */
+  if (uiLoaded && mapTab !== "all" && !(UI.groups || []).some(t => t.id === mapTab)) mapTab = "all";
   $("#maptabs").innerHTML =
     `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All</button>` +
     (UI.groups || []).map(t => `<button data-mt="${esc(t.id)}" class="${mapTab === t.id ? "on" : ""}">
@@ -915,10 +1095,10 @@ function renderMap(){
 function removeMapTab(id){
   const i = (UI.groups || []).findIndex(t => t.id === id);
   if (i < 0) return;
-  UI.groups.splice(i, 1);
+  const groups = (UI.groups || []).filter(t => t.id !== id);
   if (mapTab === id) mapTab = "all";
   localStorage.setItem("scimux-maptab", mapTab);
-  saveUI();
+  uiMutate({ k: "groups", groups });
   renderMapTabs(); mapSig = ""; renderMap();
 }
 let editTab = null;
@@ -963,7 +1143,7 @@ $("#tab_save").addEventListener("click", () => {
     mapTab = id;
     localStorage.setItem("scimux-maptab", mapTab);
   }
-  saveUI();
+  uiMutate({ k: "groups", groups: UI.groups || [] });
   renderMapTabs(); mapSig = ""; renderMap(); closeSheets();
 });
 $("#tab_del").addEventListener("click", () => {
@@ -985,6 +1165,27 @@ $("#journeybtn").addEventListener("click", () => {
   } else setLevel(3);
 });
 $("#mapclose").addEventListener("click", () => setLevel(2));
+
+/* tapping empty space folds back a level — but a scroll-drag (>6px) or a
+   tap on anything interactive must never trigger it */
+function emptyTap(container, interactiveSelector, fn){
+  let start = null;
+  container.addEventListener("pointerdown", e => { start = { x: e.clientX, y: e.clientY }; });
+  container.addEventListener("click", e => {
+    if (e.target.closest(interactiveSelector)) return;
+    if (start && Math.abs(e.clientX - start.x) + Math.abs(e.clientY - start.y) > 6) return;
+    fn(e);
+  });
+}
+emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-adopt],[data-x],[data-open]", () => {
+  if (!isDesktop()) setLevel(1);
+});
+emptyTap($("#mapscroll"), ".strow,.lanechip,[data-nid],[data-chip],button,a,input,textarea,select", () => {
+  if (isDesktop()){
+    document.body.classList.remove("map-open");
+    mapSig = ""; renderMap();
+  } else setLevel(2);
+});
 
 /* ---------- chat ---------- */
 function nodeById(id){ return nodes.find(n => n.id === id); }
@@ -1021,7 +1222,7 @@ function renderChatHead(){
   const n = nodeById(sel);
   $("#chattitle").textContent = n ? n.title : "scimux";
   $("#chatmission").textContent = n ? (n.prompt || "") : "";
-  $("#chatdot").className = "dot " + (n ? (n.attention ? "attention" : n.live) : "");
+  $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
 }
 
 /* notes are local records, not agent turns — same bubbles, own store */
@@ -1038,8 +1239,33 @@ function renderNotes(){
     </div>`).join("")
     : `<div class="empty">Park a thought here — notes stay on this host, private to you.</div>`;
   $("#keyrow").innerHTML = "";
+  $("#gauge").hidden = true;
+  $("#decision").className = "";
+  $("#decision").innerHTML = "";
+  ensureWorkTicker(false);
   $("#msgs").scrollTop = 1e6;
 }
+
+const WORK_WORDS = ["working","thinking","cooking","brewing","sauteing","stirring","chugging","crunching"];
+let workIdx = 0, workTimer = null;
+function ensureWorkTicker(active){
+  if (!active){ clearInterval(workTimer); workTimer = null; return; }
+  if (workTimer) return;
+  workTimer = setInterval(() => {
+    workIdx = (workIdx + 1) % WORK_WORDS.length;
+    const w = $("#workword");
+    if (w) w.textContent = WORK_WORDS[workIdx];
+  }, 9000 + Math.random() * 2000);
+}
+const DEC_LABELS = {
+  no_transcript: "No transcript yet \u2014 showing the terminal",
+  no_structured_request: "Showing the terminal",
+  pane_active: "Agent is working",
+  waiting_question: "Agent is waiting for your answer",
+  waiting_approval: "Agent needs your approval",
+  quiet_inspect: "Quiet \u2014 inspect the terminal",
+};
+let decFull = false;
 
 async function refreshChat(){
   if (sel === "NOTES"){ renderNotes(); return; }
@@ -1051,39 +1277,57 @@ async function refreshChat(){
   try { d = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
   catch { return; }
   if (gen !== selGen || sel !== n.id) return;   /* selection moved on */
-  /* degrade to the pane snapshot whenever no useful turns exist — missing,
+  /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
      young, unreadable, or format-incompatible transcripts all end up here */
   const turns = d.turns || [];
-  const showPeek = peekOn || !!n.attention || d.fallback || !turns.length;
+  const unconfirmed = d.delivery === "unconfirmed";
+  const mustShowPane = !!d.fallback || !!n.attention || unconfirmed;
+  const showPeek = mustShowPane || peekOn || (termOpen && turns.length > 0) || !turns.length;
   let peekText = "";
   if (showPeek){
-    try { peekText = await api(`/api/nodes/${encodeURIComponent(n.id)}/peek`); } catch {}
+    try {
+      peekText = await api(`/api/nodes/${encodeURIComponent(n.id)}/peek${mustShowPane ? "?mode=visible" : ""}`);
+    } catch {}
     if (gen !== selGen || sel !== n.id) return;
   }
-  const sig = [n.id, d.live, n.attention, showPeek, termOpen,
+
+  const gauge = $("#gauge");
+  if (d.ctx_window){
+    gauge.hidden = false;
+    const fill = $("#gaugefill");
+    fill.style.width = Math.min(100, d.ctx_pct || 0) + "%";
+    fill.className = (d.ctx_pct || 0) >= 80 ? "high" : "";
+  } else {
+    gauge.hidden = true;
+  }
+
+  const sig = [n.id, d.live, n.attention, d.delivery, showPeek, termOpen,
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
   if (sig === chatSig) return;
   chatSig = sig;
   lastTurns = turns;
 
-  /* with readable turns the raw pane folds behind a link — the key row below
-     already carries the answer affordance; without them it IS the content */
-  const foldable = turns.length > 0 && !peekOn;
+  /* with readable turns the raw pane folds behind a link \u2014 the key row below
+     already carries the answer affordance; without them, or while the
+     decision region needs it pinned open as evidence, it IS the content */
+  const foldable = turns.length > 0 && !peekOn && !mustShowPane;
   const el = $("#msgs");
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   el.innerHTML =
     (!turns.length
       ? `<div class="pending">${d.pending
-          ? "waiting for the agent's transcript file — showing the raw terminal below"
-          : "no readable transcript — showing the raw terminal below"}</div>` : "") +
+          ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
+          : "no readable transcript \u2014 showing the raw terminal below"}</div>` : "") +
     turns.map((t, i) => `
       <div class="turn ${t.role === "user" ? "user" : "assistant"}" data-i="${i}">
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(t.text)}</div>
         <button class="copybtn" data-i="${i}" aria-label="copy message">${ICON_COPY}</button>
       </div>`).join("") +
-    (d.live === "active" ? `<div class="pending">agent is working…</div>` : "") +
-    (showPeek && peekText
+    (d.live === "active" && !mustShowPane
+      ? `<div class="workrow"><span class="workword" id="workword">${WORK_WORDS[workIdx]}</span><span class="rail"><i></i></span></div>`
+      : "") +
+    (showPeek && !mustShowPane && peekText
       ? (foldable
           ? `<button id="termbtn">${termOpen ? "Hide terminal &#9662;" : "Show terminal &#9656;"}</button>
              <div class="peek ${termOpen ? "" : "hidden"}">${esc(peekText)}</div>`
@@ -1095,11 +1339,49 @@ async function refreshChat(){
     if (termOpen) $("#msgs").scrollTop = 1e6;
   });
   if (atBottom) el.scrollTop = el.scrollHeight;
+  ensureWorkTicker(d.live === "active" && !mustShowPane);
 
-  /* key row appears only while the agent blocks on a dialog */
-  const KEYS = { Up: "↑", Down: "↓", Enter: "⏎", Escape: "Esc" };
+  /* the decision region is pinned, non-foldable evidence: shown whenever the
+     agent blocks on the operator, or a send couldn't be confirmed delivered */
+  const dec = $("#decision");
+  if (!mustShowPane){
+    dec.className = "";
+    dec.innerHTML = "";
+  } else {
+    dec.className = "on" + (decFull ? " full" : "");
+    const label = unconfirmed
+      ? "Send unconfirmed \u2014 check the terminal"
+      : (DEC_LABELS[d.reason] || "Needs your attention");
+    dec.innerHTML =
+      `<div class="dhead">
+         <span class="dlabel">${esc(label)}</span>
+         <button id="decfull" aria-label="${decFull ? "shrink" : "expand"}">${decFull ? "\u2921" : "\u2922"}</button>
+       </div>
+       <div class="dpane">${esc(peekText)}</div>` +
+      (unconfirmed
+        ? `<div class="dnotice">Delivery to the terminal could not be confirmed.
+             <button id="decresolve">I checked \u2014 resume sending</button></div>`
+        : "");
+    const df = $("#decfull");
+    if (df) df.addEventListener("click", () => { decFull = !decFull; chatSig = ""; refreshChat(); });
+    const dr = $("#decresolve");
+    if (dr) dr.addEventListener("click", async () => {
+      try { await api(`/api/nodes/${encodeURIComponent(n.id)}/send/resolve`, { method: "POST" }); }
+      catch {}
+      chatSig = ""; tick();
+    });
+    const dp = dec.querySelector(".dpane");
+    if (dp) dp.scrollTop = dp.scrollHeight;
+  }
+
+  /* key row appears only while the agent blocks on a dialog, or quietly
+     invites a look without claiming a specific question/approval */
+  const KEYS = { Up: "\u2191", Down: "\u2193", Enter: "\u23ce", Escape: "Esc" };
+  const HINTS = {
+    inspect: "The agent has gone quiet \u2014 check the terminal below; keys go straight to it:",
+  };
   $("#keyrow").innerHTML = n.attention
-    ? `<span class="hint">The agent waits for your ${esc(n.attention)} — keys go straight to its terminal:</span>` +
+    ? `<span class="hint">${esc(HINTS[n.attention] || `The agent waits for your ${n.attention} \u2014 keys go straight to its terminal:`)}</span>` +
       ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
         `<button data-key="${k}">${KEYS[k] || k}</button>`).join("")
     : "";
@@ -1123,8 +1405,8 @@ $("#msgs").addEventListener("scroll", () =>
 $("#msgs").addEventListener("click", e => {
   const tb = e.target.closest(".trashbtn");
   if (tb && sel === "NOTES"){        /* notes only: remove the entry, keep the store */
-    (UI.notes || []).splice(+tb.dataset.i, 1);
-    saveUI();
+    const note = (UI.notes || [])[+tb.dataset.i];
+    if (note) uiMutate({ k: "note-del", t: note.t });
     chatSig = ""; cardsSig = "";
     renderNotes(); renderCards();
     return;
@@ -1190,10 +1472,7 @@ longpress($("#cardlist"), ".card", el => {
     ? "Restore to current activity"
     : "Archive — move out of the current stack";
   $("#ca_arch").onclick = () => {
-    UI.archived ||= [];
-    const i = UI.archived.indexOf(id);
-    if (i >= 0) UI.archived.splice(i, 1); else UI.archived.push(id);
-    saveUI();
+    uiMutate({ k: isArchived(id) ? "unarch" : "arch", id });
     cardsSig = ""; renderCards(); closeSheets();
   };
   openSheet("#cardact");
@@ -1253,8 +1532,7 @@ async function sendPrompt(){
   const ta = $("#prompt"), text = ta.value.trim();
   if (!text || !sel) return;
   if (sel === "NOTES"){              /* notes never leave scimux's own store */
-    (UI.notes ||= []).push({ t: new Date().toISOString(), text });
-    saveUI();
+    uiMutate({ k: "note-add", note: { t: new Date().toISOString(), text } });
     ta.value = ""; ta.style.height = "auto";
     localStorage.removeItem("scimux-draft:NOTES");
     ta.blur();                       /* dismiss the keyboard; the note is visible */
@@ -1266,12 +1544,23 @@ async function sendPrompt(){
   ta.value = ""; ta.style.height = "auto";
   localStorage.removeItem("scimux-draft:" + dest);
   try {
-    await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
+    const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
       { method: "POST", body: JSON.stringify({ text }) });
     chatSig = "";
+    /* "unconfirmed" is not a failure — the paste+Enter was sent, but the pane
+       never visibly reacted; the decision pane below picks this up via
+       delivery status and offers a recheck, so the draft stays cleared */
     setTimeout(tick, 400);
   } catch (err) {
-    alert(err.message);
+    if (err.message && err.message.includes("still in flight")){
+      /* a send is already outstanding for this node — nothing was lost,
+         restore the draft so the operator can retry once it resolves */
+    } else if (err.message && err.message.includes("unconfirmed")){
+      /* previous send is unresolved; hold this text as a draft until the
+         operator checks the terminal and resumes sending */
+    } else {
+      alert(err.message);
+    }
     /* nothing typed is ever lost — restored under the node it was written
        for, and merged in front of anything typed while the send was pending
        rather than overwriting it */
@@ -1370,7 +1659,27 @@ $("#plusbtn").addEventListener("click", () => {
   if (lastDir && !$("#nc_dir").value) $("#nc_dir").value = lastDir;
   openSheet("#newchat");
 });
+function fieldError(el, msg){
+  clearFieldError(el);
+  const id = el.id + "-err";
+  el.setAttribute("aria-invalid", "true");
+  el.setAttribute("aria-describedby", id);
+  const err = document.createElement("div");
+  err.className = "fielderr";
+  err.id = id;
+  err.textContent = msg;
+  el.insertAdjacentElement("afterend", err);
+  const clear = () => { clearFieldError(el); el.removeEventListener("input", clear); };
+  el.addEventListener("input", clear);
+}
+function clearFieldError(el){
+  el.removeAttribute("aria-invalid");
+  el.removeAttribute("aria-describedby");
+  const err = document.getElementById(el.id + "-err");
+  if (err) err.remove();
+}
 $("#nc_start").addEventListener("click", async () => {
+  clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir"));
   const payload = {
     prompt: $("#nc_prompt").value.trim(),
     agent: $("#nc_agent").value,
@@ -1382,7 +1691,12 @@ $("#nc_start").addEventListener("click", async () => {
     parent: ncParent,
     rationale: ncParent ? "follow-up on: " + ncRationale : "",
   };
-  if (!payload.prompt) return;
+  if (!payload.prompt){
+    fieldError($("#nc_prompt"), "Enter a research question before starting.");
+    $("#nc_prompt").focus();
+    $("#nc_prompt").scrollIntoView({ block: "center" });
+    return;
+  }
   try {
     const n = await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) });
     if (payload.dir) localStorage.setItem("scimux-lastdir", payload.dir);
@@ -1392,7 +1706,13 @@ $("#nc_start").addEventListener("click", async () => {
     await tick();
     select(n.id);
     if (!isDesktop()) setLevel(1);
-  } catch (err) { alert(err.message); }
+  } catch (err) {
+    const msg = err.message || "Could not start this activity.";
+    const target = /\b(dir|directory|path)\b/i.test(msg) ? $("#nc_dir") : $("#nc_prompt");
+    fieldError(target, msg);
+    target.focus();
+    target.scrollIntoView({ block: "center" });
+  }
 });
 
 /* adoption */
@@ -1434,6 +1754,7 @@ async function tick(){
     if (r.status === 304){
       updateCardAges();
       await refreshChat();   /* transcripts are an independent data source */
+      pollUI();
       return;
     }
     if (!r.ok) return;
@@ -1453,6 +1774,7 @@ async function tick(){
     renderCards();
     renderMap();
     await refreshChat();
+    pollUI();
   } finally { ticking = false; }
 }
 let pollTimer = null;

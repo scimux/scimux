@@ -147,6 +147,11 @@ type Tailer struct {
 	// the file keeps growing but no longer carries an interpretable agent
 	// response — the typed-format-change case unknownStreak cannot see.
 	progress int
+	// ctxUsed/ctxWindow track the latest context-window usage the transcript
+	// reports (Claude assistant usage blocks, Codex token_count events).
+	// Purely informational — never part of health or progress signals.
+	ctxUsed   int64
+	ctxWindow int64
 }
 
 // unparseableThreshold is how many consecutive structurally-unrecognizable
@@ -275,6 +280,73 @@ func (t *Tailer) Progress() (offset int64, agentRecords int) {
 	return t.offset - int64(len(t.buf)), t.progress
 }
 
+// Usage reports the latest context-window usage the transcript recorded:
+// tokens occupied and the model's window size. Either value is 0 when the
+// transcript has not (or never) reported it — Claude logs per-turn usage but
+// no window size, Codex logs both.
+func (t *Tailer) Usage() (used, window int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ctxUsed, t.ctxWindow
+}
+
+// noteUsage extracts context usage from one JSONL line. Defensive like all
+// other parsing: unknown shapes leave the previous values standing.
+func (t *Tailer) noteUsage(line []byte) {
+	var g struct {
+		Type    string `json:"type"`
+		Message struct {
+			Usage struct {
+				InputTokens              int64 `json:"input_tokens"`
+				CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+				OutputTokens             int64 `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+		Payload struct {
+			Type string `json:"type"`
+			Info struct {
+				ModelContextWindow int64 `json:"model_context_window"`
+				LastTokenUsage     struct {
+					InputTokens       int64 `json:"input_tokens"`
+					CachedInputTokens int64 `json:"cached_input_tokens"`
+					OutputTokens      int64 `json:"output_tokens"`
+				} `json:"last_token_usage"`
+			} `json:"info"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &g) != nil {
+		return
+	}
+	switch g.Type {
+	case "assistant": // Claude: usage rides on every assistant record
+		u := g.Message.Usage
+		// Context occupancy after this turn: everything the request carried
+		// in (fresh + cached) plus what the model produced.
+		if used := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens; used > 0 {
+			t.ctxUsed = used
+		}
+	case "event_msg": // Codex: explicit token_count events
+		if g.Payload.Type != "token_count" {
+			return
+		}
+		u := g.Payload.Info.LastTokenUsage
+		if used := u.InputTokens + u.CachedInputTokens + u.OutputTokens; used > 0 {
+			t.ctxUsed = used
+		}
+		if g.Payload.Info.ModelContextWindow > 0 {
+			t.ctxWindow = g.Payload.Info.ModelContextWindow
+		}
+	}
+}
+
+// PendingCount reports how many logged tool calls still lack a result.
+func (t *Tailer) PendingCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.pending)
+}
+
 // WaitingOn reports the most recent tool call without a logged result — the
 // transcript half of needs-input detection. The caller must combine it with
 // pane quietness: a pending call under an actively changing pane is just a
@@ -391,6 +463,7 @@ func (t *Tailer) Poll() []Turn {
 	if st.Size() < t.offset {
 		t.offset, t.buf, t.Turns, t.pending = 0, nil, nil, nil
 		t.unknownStreak, t.progress = 0, 0
+		t.ctxUsed, t.ctxWindow = 0, 0
 	}
 	if st.Size() == t.offset {
 		return t.Turns
@@ -422,6 +495,7 @@ func (t *Tailer) Poll() []Turn {
 			}
 		}
 		t.notePending(line)
+		t.noteUsage(line)
 		if turn, ok := ParseLine(line); ok {
 			t.Turns = append(t.Turns, turn)
 		}

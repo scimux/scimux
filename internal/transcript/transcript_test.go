@@ -583,3 +583,42 @@ func TestWaitingOnCodex(t *testing.T) {
 		t.Fatalf("turn boundary did not clear pending: %q", name)
 	}
 }
+
+func TestTailerUsageClaude(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	f, _ := os.Create(p)
+	defer f.Close()
+	tl := &Tailer{Path: p}
+	if used, window := tl.Usage(); used != 0 || window != 0 {
+		t.Fatalf("fresh tailer usage = %d/%d, want 0/0", used, window)
+	}
+	// Usage rides on every assistant record; the latest one wins.
+	f.WriteString(`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"cache_read_input_tokens":50000,"cache_creation_input_tokens":2000,"output_tokens":300}}}` + "\n")
+	tl.Poll()
+	if used, window := tl.Usage(); used != 52310 || window != 0 {
+		t.Fatalf("usage = %d/%d, want 52310/0 (claude logs no window)", used, window)
+	}
+	f.WriteString(`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"more"}],"usage":{"input_tokens":20,"cache_read_input_tokens":60000,"cache_creation_input_tokens":0,"output_tokens":100}}}` + "\n")
+	tl.Poll()
+	if used, _ := tl.Usage(); used != 60120 {
+		t.Fatalf("usage after second turn = %d, want 60120 (latest wins)", used)
+	}
+}
+
+func TestTailerUsageCodex(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	f, _ := os.Create(p)
+	defer f.Close()
+	tl := &Tailer{Path: p}
+	f.WriteString(`{"type":"event_msg","timestamp":"t1","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":999999,"output_tokens":999},"last_token_usage":{"input_tokens":40000,"cached_input_tokens":30000,"output_tokens":500},"model_context_window":272000}}}` + "\n")
+	tl.Poll()
+	used, window := tl.Usage()
+	if used != 70500 || window != 272000 {
+		t.Fatalf("usage = %d/%d, want 70500/272000 (last request, not lifetime total)", used, window)
+	}
+	// token_count is a benign side record: it must not count as progress or
+	// clear the health signals.
+	if _, prog := tl.Progress(); prog != 0 {
+		t.Fatalf("token_count counted as agent progress: %d", prog)
+	}
+}

@@ -36,11 +36,15 @@ type Server struct {
 	// PasteDelay is the pause between pasting a prompt and submitting it,
 	// giving the agent TUI time to ingest the paste. Tests set it to 0.
 	PasteDelay time.Duration
-	run        Runner
+	// AckPoll is the pause between the pane captures SendAck takes while
+	// waiting for the TUI to visibly react to Enter. Tests set it to 0.
+	AckPoll time.Duration
+	run     Runner
 }
 
 func NewServer(socket string) *Server {
-	return &Server{Socket: socket, PasteDelay: 150 * time.Millisecond, run: execTmux}
+	return &Server{Socket: socket, PasteDelay: 150 * time.Millisecond,
+		AckPoll: 250 * time.Millisecond, run: execTmux}
 }
 
 // NewServerWithRunner is the test constructor.
@@ -135,6 +139,43 @@ func (s *Session) Send(text string) error {
 	return nil
 }
 
+// sendAckPolls bounds how long SendAck watches for a pane reaction to Enter:
+// sendAckPolls × AckPoll ≈ 2 s with the default 250 ms interval.
+const sendAckPolls = 8
+
+// SendAck delivers text like Send but additionally reports whether the pane
+// visibly changed after Enter — mechanical evidence that the TUI consumed the
+// submission. It never inspects pane content and never presses Enter twice:
+// acked == false means "no observable reaction within the window", which the
+// caller must treat as an unconfirmed delivery, not as a licence to retry.
+func (s *Session) SendAck(text string) (acked bool, err error) {
+	buf := fmt.Sprintf("scimux-send-%d", sendSeq.Add(1))
+	if out, err := s.sv.tmux(text, "load-buffer", "-b", buf, "-"); err != nil {
+		return false, fmt.Errorf("tmux load-buffer: %v: %s", err, out)
+	}
+	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-b", buf, "-t", s.paneTarget()); err != nil {
+		return false, fmt.Errorf("tmux paste-buffer: %v: %s", err, out)
+	}
+	time.Sleep(s.sv.PasteDelay)
+	// Snapshot after the paste and before Enter: the paste itself changes the
+	// pane, so only a post-Enter delta counts as a reaction to the submission.
+	before, capErr := s.Capture()
+	if out, err := s.sv.tmux("", "send-keys", "-t", s.paneTarget(), "Enter"); err != nil {
+		return false, fmt.Errorf("tmux send-keys: %v: %s", err, out)
+	}
+	if capErr != nil {
+		return false, nil // delivered, but unverifiable without a baseline
+	}
+	for i := 0; i < sendAckPolls; i++ {
+		time.Sleep(s.sv.AckPoll)
+		after, err := s.Capture()
+		if err == nil && after != before {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // allowedKeys are the single keys a supervisor may press into an agent's TUI
 // dialog (approval prompts, question menus). A closed whitelist: anything
 // else must be a full prompt and goes through Send.
@@ -163,6 +204,17 @@ func (s *Session) SendKey(key string) error {
 // Capture returns the pane's rendered plain text (last 200 scrollback lines).
 func (s *Session) Capture() (string, error) {
 	out, err := s.sv.tmux("", "capture-pane", "-p", "-t", s.paneTarget(), "-S", "-200")
+	if err != nil {
+		return "", fmt.Errorf("tmux capture-pane: %v: %s", err, out)
+	}
+	return out, nil
+}
+
+// CaptureVisible returns only the pane's currently rendered screen (no
+// scrollback) — the decision view: what a supervisor must read to answer an
+// approval dialog, without history mixed in.
+func (s *Session) CaptureVisible() (string, error) {
+	out, err := s.sv.tmux("", "capture-pane", "-p", "-t", s.paneTarget())
 	if err != nil {
 		return "", fmt.Errorf("tmux capture-pane: %v: %s", err, out)
 	}

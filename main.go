@@ -70,7 +70,7 @@ type app struct {
 	nodes   []*Node
 	byID    map[string]*Node
 	live    map[string]string // node id -> "active"|"quiet"|"exited"
-	attn    map[string]string // node id -> ""|"approval"|"question"
+	attn    map[string]string // node id -> ""|"approval"|"question"|"inspect"
 	prevCap map[string]string
 	lastChg map[string]time.Time
 	tailers map[string]*transcript.Tailer
@@ -88,6 +88,12 @@ type app struct {
 	// without recognizable agent-side records since (degrade the UI to peek).
 	chatMark  map[string]chatMark
 	staleChat map[string]bool
+	// sendState: per-node web prompt delivery state, "submitting" while a
+	// send is in flight, "unconfirmed" when neither the pane nor the
+	// transcript acknowledged the submission. New sends are held (409) until
+	// the state clears, so a delayed Enter can never stack a second prompt
+	// onto an unsubmitted first one.
+	sendState map[string]string
 
 	server    *tmuxsession.Server
 	storePath string
@@ -464,7 +470,8 @@ func (a *app) poll() {
 			a.mu.Lock()
 			prev := a.live[n.ID] // not yet overwritten this tick
 			a.mu.Unlock()
-			if tl := a.tailerFor(n); tl != nil {
+			tl := a.tailerFor(n)
+			if tl != nil {
 				tl.Poll()
 				if name, ok := tl.WaitingOn(); ok {
 					attn = attentionKind(name)
@@ -477,6 +484,21 @@ func (a *app) poll() {
 				// cycle (finding 24).
 				off, prog := tl.Progress()
 				a.noteChatProgress(n.ID, off, prog, prev == "active")
+			}
+			// Neutral needs-a-look state: the pane is quiet but there is no
+			// trustworthy structured transcript to say whether the agent
+			// finished or sits on a dialog this parser cannot see — no
+			// transcript at all (terminal-only harnesses, discovery pending),
+			// a stale one, or one whose recent data stopped parsing. Never
+			// labeled question/approval (no structured evidence, and pane
+			// regexes stay forbidden); the UI shows the terminal instead.
+			if attn == "" {
+				a.mu.Lock()
+				noEvidence := n.Transcript == "" || a.staleChat[n.ID]
+				a.mu.Unlock()
+				if noEvidence || (tl != nil && tl.Unparseable()) {
+					attn = "inspect"
+				}
 			}
 		}
 		a.mu.Lock()
@@ -700,7 +722,7 @@ func sysload() sysInfo {
 type nodeView struct {
 	*Node
 	Live          string `json:"live"`
-	Attention     string `json:"attention,omitempty"` // "approval" | "question"
+	Attention     string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
 	HasTranscript bool   `json:"has_transcript"`
 	LastActivity  int64  `json:"last_activity,omitempty"` // unix ms of last pane change
 }
@@ -916,6 +938,13 @@ func (a *app) node(r *http.Request) (*Node, bool) {
 	return n, ok
 }
 
+// handleSend delivers a web prompt and reports what the delivery evidence
+// supports: "acknowledged" when the pane visibly reacted to Enter or a new
+// transcript turn appeared, "unconfirmed" otherwise. {ok:"sent"} alone would
+// only mean "tmux accepted the keystrokes" — the TUI may have held the text
+// in its editor (e.g. a pre-existing draft), and the next blind send would
+// concatenate with it. Sends are serialized per node; an unresolved delivery
+// holds further sends until the supervisor rechecks (POST …/send/resolve).
 func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
@@ -927,11 +956,71 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
-	if err := a.server.Session(n.ID).Send(body.Text); err != nil {
+	a.mu.Lock()
+	switch a.sendState[n.ID] {
+	case "submitting":
+		a.mu.Unlock()
+		http.Error(w, "a send to this node is still in flight", 409)
+		return
+	case "unconfirmed":
+		a.mu.Unlock()
+		http.Error(w, "the previous send is unconfirmed — check the terminal, then recheck", 409)
+		return
+	}
+	a.sendState[n.ID] = "submitting"
+	a.mu.Unlock()
+
+	// Transcript watermark before the send: a new user turn appearing is the
+	// structured acknowledgement (slash commands may never enter the
+	// transcript — for those the mechanical pane change has to carry it).
+	turnsBefore := -1
+	tl := a.tailerFor(n)
+	if tl != nil {
+		turnsBefore = len(tl.Poll())
+	}
+	acked, err := a.server.Session(n.ID).SendAck(body.Text)
+	if err != nil {
+		a.mu.Lock()
+		delete(a.sendState, n.ID)
+		a.mu.Unlock()
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	writeJSON(w, map[string]string{"ok": "sent"})
+	if !acked && tl != nil && len(tl.Poll()) > turnsBefore {
+		acked = true
+	}
+	a.mu.Lock()
+	if acked {
+		delete(a.sendState, n.ID)
+	} else {
+		a.sendState[n.ID] = "unconfirmed"
+	}
+	a.mu.Unlock()
+	if !acked {
+		writeJSON(w, map[string]string{"status": "unconfirmed", "text": body.Text})
+		return
+	}
+	writeJSON(w, map[string]string{"status": "acknowledged"})
+}
+
+// handleSendResolve is the supervisor's "I checked (or fixed) this in the
+// terminal" acknowledgement: it clears an unconfirmed delivery so sending
+// can resume. It never re-presses Enter.
+func (a *app) handleSendResolve(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	a.mu.Lock()
+	if a.sendState[n.ID] == "submitting" {
+		a.mu.Unlock()
+		http.Error(w, "a send is still in flight", 409)
+		return
+	}
+	delete(a.sendState, n.ID)
+	a.mu.Unlock()
+	writeJSON(w, map[string]string{"ok": "resolved"})
 }
 
 func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -945,6 +1034,13 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	pending := n.Transcript == ""
 	live := a.live[n.ID]
 	stale := a.staleChat[n.ID]
+	attn := a.attn[n.ID]
+	delivery := a.sendState[n.ID]
+	agent, model := n.Agent, n.Model
+	var lastMS int64
+	if t, ok := a.lastChg[n.ID]; ok {
+		lastMS = t.UnixMilli()
+	}
 	a.mu.Unlock()
 	turns := []transcript.Turn{}
 	if tl != nil {
@@ -957,8 +1053,69 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	// chat record (staleChat: a typed future format). A path string existing
 	// does not mean the transcript is usable; the client must degrade to the
 	// pane snapshot in every one of these cases.
-	writeJSON(w, map[string]any{"turns": turns, "pending": pending, "live": live,
-		"fallback": len(turns) == 0 || (tl != nil && tl.Unparseable()) || stale})
+	fallback := len(turns) == 0 || (tl != nil && tl.Unparseable()) || stale
+
+	// Diagnostics: where the chat content comes from and why attention (or
+	// its absence) looks the way it does — so a missed question is
+	// distinguishable from "no transcript" versus "no structured request".
+	source := "transcript"
+	switch {
+	case agent == "pi" || agent == "opencode":
+		source = "terminal_only" // supported via pane peek + send only
+	case pending:
+		source = "none"
+	case fallback:
+		source = "peek"
+	}
+	reason := ""
+	switch {
+	case live == "active":
+		reason = "pane_active"
+	case attn == "question":
+		reason = "waiting_question"
+	case attn == "approval":
+		reason = "waiting_approval"
+	case attn == "inspect":
+		reason = "quiet_inspect"
+	case pending:
+		reason = "no_transcript"
+	case fallback:
+		reason = "no_structured_request"
+	}
+	var watermark, ctxUsed, ctxWindow int64
+	var prog, pendCalls int
+	var waiting string
+	if tl != nil {
+		watermark, prog = tl.Progress()
+		pendCalls = tl.PendingCount()
+		waiting, _ = tl.WaitingOn()
+		ctxUsed, ctxWindow = tl.Usage()
+	}
+	// Claude transcripts report usage but never the window size; estimate it
+	// from the model name (the "[1m]" marker is the long-context variant).
+	if ctxUsed > 0 && ctxWindow == 0 {
+		if strings.Contains(model, "[1m]") {
+			ctxWindow = 1_000_000
+		} else {
+			ctxWindow = 200_000
+		}
+	}
+	var ctxPct int
+	if ctxWindow > 0 {
+		ctxPct = int(100 * ctxUsed / ctxWindow)
+		if ctxPct > 100 {
+			ctxPct = 100
+		}
+	}
+	writeJSON(w, map[string]any{
+		"turns": turns, "pending": pending, "live": live, "fallback": fallback,
+		"attention": attn, "delivery": delivery,
+		"source": source, "reason": reason,
+		"watermark": watermark, "progress": prog,
+		"pending_calls": pendCalls, "waiting_on": waiting,
+		"last_change": lastMS,
+		"ctx_used":    ctxUsed, "ctx_window": ctxWindow, "ctx_pct": ctxPct,
+	})
 }
 
 // tailerFor returns the node's transcript tailer, (re)building it when the
@@ -1085,13 +1242,23 @@ func (a *app) handleCodexRollouts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handlePeek returns the pane snapshot: the last 200 scrollback lines by
+// default, or only the currently rendered screen with ?mode=visible — the
+// decision view, where an approval dialog is not buried under history.
 func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
 		return
 	}
-	cap, err := a.server.Session(n.ID).Capture()
+	s := a.server.Session(n.ID)
+	var cap string
+	var err error
+	if r.URL.Query().Get("mode") == "visible" {
+		cap, err = s.CaptureVisible()
+	} else {
+		cap, err = s.Capture()
+	}
 	if err != nil {
 		cap = "(session exited or unavailable)\n\n" + err.Error()
 	}
@@ -1105,16 +1272,55 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 // the archived-card set, private notes — that must survive scimux restarts,
 // so it lives next to the node store instead of in localStorage (per-device
 // state like drafts stays client-side). The blob is opaque JSON to the
-// server: its shape belongs to the client. Last writer wins; the writers are
-// one supervisor's own devices.
+// server: its shape belongs to the client.
+//
+// Writes are revisioned, not last-writer-wins: every GET carries an ETag
+// derived from the stored bytes, every PUT must name the revision it was
+// based on (If-Match), and a stale base gets 409 — the client refetches,
+// replays its local operations on the fresh document, and retries. That is
+// what lets two of the supervisor's devices add notes concurrently without
+// silently erasing each other. Clients poll GET with If-None-Match (304) on
+// the same cadence as /api/state.
 const uiStateMax = 1 << 20
+
+// uiETag derives the revision tag from the canonical stored bytes.
+func uiETag(b []byte) string {
+	h := fnv.New64a()
+	h.Write(b)
+	return fmt.Sprintf(`"%x"`, h.Sum64())
+}
+
+// readUILocked returns the stored UI document, "{}" when none exists yet.
+// Any error other than not-exist is a real storage failure the client must
+// see — reporting it as an empty document would invite the next mutation to
+// overwrite whatever the unreadable file still holds. Callers hold a.mu.
+func (a *app) readUILocked() ([]byte, error) {
+	b, err := os.ReadFile(a.uiPath)
+	if os.IsNotExist(err) {
+		return []byte("{}"), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(b) {
+		return nil, fmt.Errorf("stored ui state is not valid JSON")
+	}
+	return b, nil
+}
 
 func (a *app) handleUIGet(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
-	b, err := os.ReadFile(a.uiPath)
+	b, err := a.readUILocked()
 	a.mu.Unlock()
 	if err != nil {
-		b = []byte("{}")
+		http.Error(w, "read ui state: "+err.Error(), 500)
+		return
+	}
+	etag := uiETag(b)
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(b)
@@ -1134,12 +1340,28 @@ func (a *app) handleUIPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ui state must be valid JSON", 400)
 		return
 	}
+	match := r.Header.Get("If-Match")
+	if match == "" {
+		http.Error(w, "ui writes require If-Match (use * to bootstrap)", 428)
+		return
+	}
 	// Atomic replace under the lock: a crash mid-write must never leave a
-	// truncated file, and concurrent PUTs must not interleave tmp files.
+	// truncated file, concurrent PUTs must not interleave tmp files, and the
+	// revision check must be atomic with the write it guards.
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	cur, err := a.readUILocked()
+	if err != nil {
+		http.Error(w, "read ui state: "+err.Error(), 500)
+		return
+	}
+	if match != "*" && match != uiETag(cur) {
+		http.Error(w, "ui state changed since this revision was read", 409)
+		return
+	}
+	// Private notes live here: owner-only permissions.
 	tmp := a.uiPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -1147,6 +1369,7 @@ func (a *app) handleUIPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	w.Header().Set("ETag", uiETag(b))
 	writeJSON(w, map[string]string{"ok": "saved"})
 }
 
@@ -1179,10 +1402,14 @@ func main() {
 	codexRoot := flag.String("codex-sessions", filepath.Join(home, ".codex", "sessions"), "where Codex writes rollout logs")
 	flag.Parse()
 
-	if err := os.MkdirAll(*data, 0o755); err != nil {
+	// The data directory holds private notes and pane-excerpt evidence:
+	// owner-only. Tighten pre-existing broader modes where we can.
+	if err := os.MkdirAll(*data, 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	os.Chmod(*data, 0o700)
+	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
 	a := &app{
 		byID:         map[string]*Node{},
 		live:         map[string]string{},
@@ -1194,6 +1421,7 @@ func main() {
 		pathClaims:   map[string]bool{},
 		chatMark:     map[string]chatMark{},
 		staleChat:    map[string]bool{},
+		sendState:    map[string]string{},
 		server:       tmuxsession.NewServer(*socket),
 		storePath:    filepath.Join(*data, "nodes.jsonl"),
 		uiPath:       filepath.Join(*data, "ui.json"),
@@ -1230,6 +1458,7 @@ func main() {
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
 	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
+	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)

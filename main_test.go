@@ -6,6 +6,8 @@ package main
 // smoke test in the README, not here — they need tmux and real sessions.
 
 import (
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -515,5 +517,90 @@ func TestLastLines(t *testing.T) {
 	}
 	if got := lastLines("only", 5); got != "only" {
 		t.Errorf("short input = %q", got)
+	}
+}
+
+// TestHandleSendUnconfirmedHoldsNextSend covers the delivery state machine:
+// a send whose Enter produces no pane reaction and no transcript turn is
+// reported "unconfirmed", further sends are held with 409, and an explicit
+// resolve reopens the node. The fake tmux runner is inert (finding 29-style
+// discipline: no real agent CLI, no real tmux).
+func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
+	// Every capture-pane returns the same bytes: the TUI never reacts.
+	runner := func(stdin string, args ...string) (string, error) {
+		return "static pane", nil
+	}
+	n := &Node{ID: "n1", Agent: "claude"}
+	a := &app{
+		byID:      map[string]*Node{"n1": n},
+		nodes:     []*Node{n},
+		sendState: map[string]string{},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+	send := func(text string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/nodes/n1/send", strings.NewReader(`{"text":"`+text+`"}`))
+		req.SetPathValue("id", "n1")
+		a.handleSend(rec, req)
+		return rec
+	}
+
+	rec := send("hello")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unconfirmed"`) {
+		t.Fatalf("send on static pane = %d %s, want unconfirmed", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "hello") {
+		t.Errorf("unconfirmed response must return the text for recovery: %s", rec.Body.String())
+	}
+	if rec := send("next"); rec.Code != 409 {
+		t.Fatalf("send during unconfirmed delivery = %d, want 409", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/nodes/n1/send/resolve", nil)
+	req.SetPathValue("id", "n1")
+	a.handleSendResolve(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("resolve = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := send("after-resolve"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unconfirmed"`) {
+		t.Fatalf("send after resolve = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleSendAcknowledgedByPane: a pane that changes after Enter clears
+// the state immediately, so consecutive sends flow.
+func TestHandleSendAcknowledgedByPane(t *testing.T) {
+	seq := 0
+	runner := func(stdin string, args ...string) (string, error) {
+		for _, arg := range args {
+			if arg == "capture-pane" {
+				seq++
+				return fmt.Sprintf("pane state %d", seq), nil
+			}
+		}
+		return "", nil
+	}
+	n := &Node{ID: "n1", Agent: "claude"}
+	a := &app{
+		byID:      map[string]*Node{"n1": n},
+		nodes:     []*Node{n},
+		sendState: map[string]string{},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/nodes/n1/send", strings.NewReader(`{"text":"go"}`))
+		req.SetPathValue("id", "n1")
+		a.handleSend(rec, req)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"acknowledged"`) {
+			t.Fatalf("send %d = %d %s, want acknowledged", i, rec.Code, rec.Body.String())
+		}
 	}
 }

@@ -213,3 +213,82 @@ func TestSendKey(t *testing.T) {
 		t.Error("AllowedKey whitelist inconsistent")
 	}
 }
+
+// scriptedRunner answers capture-pane calls from a queue (last entry repeats)
+// while recording every invocation — enough to simulate a TUI that does or
+// does not react to Enter.
+type scriptedRunner struct {
+	calls    []call
+	captures []string
+}
+
+func (s *scriptedRunner) run(stdin string, args ...string) (string, error) {
+	s.calls = append(s.calls, call{stdin: stdin, args: args})
+	for _, a := range args {
+		if a == "capture-pane" {
+			out := s.captures[0]
+			if len(s.captures) > 1 {
+				s.captures = s.captures[1:]
+			}
+			return out, nil
+		}
+	}
+	return "", nil
+}
+
+func (s *scriptedRunner) enterCount() int {
+	n := 0
+	for _, c := range s.calls {
+		if len(c.args) > 0 && c.args[len(c.args)-1] == "Enter" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestSendAckPaneChange(t *testing.T) {
+	// The pane changes after Enter: the submission is acknowledged, and Enter
+	// was pressed exactly once (a duplicate could answer the next dialog).
+	s := &scriptedRunner{captures: []string{"> prompt pasted", "agent is thinking"}}
+	sv := NewServerWithRunner("testsock", s.run)
+	acked, err := sv.Session("node1").SendAck("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acked {
+		t.Error("pane changed after Enter but send not acknowledged")
+	}
+	if s.enterCount() != 1 {
+		t.Fatalf("Enter pressed %d times, want exactly 1", s.enterCount())
+	}
+}
+
+func TestSendAckNoReaction(t *testing.T) {
+	// A TUI that ignores Enter (e.g. a preloaded editor draft): the pane
+	// never changes, the delivery is unconfirmed, and Enter is not retried.
+	s := &scriptedRunner{captures: []string{"> /usagehello"}}
+	sv := NewServerWithRunner("testsock", s.run)
+	acked, err := sv.Session("node1").SendAck("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acked {
+		t.Error("static pane must not acknowledge the send")
+	}
+	if s.enterCount() != 1 {
+		t.Fatalf("Enter pressed %d times, want exactly 1 (never retry)", s.enterCount())
+	}
+}
+
+func TestCaptureVisible(t *testing.T) {
+	f := &fakeRunner{out: "screen"}
+	sv := newTestServer(f)
+	out, err := sv.Session("node1").CaptureVisible()
+	if err != nil || out != "screen" {
+		t.Fatalf("CaptureVisible = %q, %v", out, err)
+	}
+	want := []string{"-L", "testsock", "capture-pane", "-p", "-t", "=node1:"}
+	if !reflect.DeepEqual(f.calls[0].args, want) {
+		t.Fatalf("args = %v, want %v (no -S: visible screen only)", f.calls[0].args, want)
+	}
+}

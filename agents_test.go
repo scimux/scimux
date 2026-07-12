@@ -44,18 +44,35 @@ func TestPiModelsParse(t *testing.T) {
 
 func TestHandleUIRoundTrip(t *testing.T) {
 	a := &app{uiPath: filepath.Join(t.TempDir(), "ui.json")}
+	put := func(body, ifMatch string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("PUT", "/api/ui", strings.NewReader(body))
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		a.handleUIPut(rec, req)
+		return rec
+	}
 
-	// A fresh install has no file: GET must serve an empty object, not 404.
+	// A fresh install has no file: GET must serve an empty object, not 404,
+	// and carry the revision tag every write must name.
 	rec := httptest.NewRecorder()
 	a.handleUIGet(rec, httptest.NewRequest("GET", "/api/ui", nil))
 	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != "{}" {
 		t.Errorf("empty GET = %d %q", rec.Code, rec.Body.String())
 	}
+	rev := rec.Header().Get("ETag")
+	if rev == "" {
+		t.Fatal("GET carries no ETag")
+	}
+
+	// Writes without a base revision are refused outright.
+	if rec := put(`{}`, ""); rec.Code != http.StatusPreconditionRequired {
+		t.Errorf("PUT without If-Match = %d, want 428", rec.Code)
+	}
 
 	body := `{"groups":[{"id":"g1","name":"automotive","lanes":["a"]}],"archived":["x"],"notes":[]}`
-	rec = httptest.NewRecorder()
-	a.handleUIPut(rec, httptest.NewRequest("PUT", "/api/ui", strings.NewReader(body)))
-	if rec.Code != 200 {
+	if rec := put(body, rev); rec.Code != 200 {
 		t.Fatalf("PUT = %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -64,11 +81,28 @@ func TestHandleUIRoundTrip(t *testing.T) {
 	if rec.Body.String() != body {
 		t.Errorf("GET after PUT = %q, want %q", rec.Body.String(), body)
 	}
+	rev2 := rec.Header().Get("ETag")
+
+	// An unchanged revision polls for free.
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/ui", nil)
+	req.Header.Set("If-None-Match", rev2)
+	a.handleUIGet(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET = %d, want 304", rec.Code)
+	}
+
+	// A write based on a superseded revision must conflict, not overwrite.
+	if rec := put(`{"notes":["stale"]}`, rev); rec.Code != http.StatusConflict {
+		t.Errorf("stale PUT = %d, want 409", rec.Code)
+	}
+	// The wildcard bootstrap always wins (single supervisor, explicit intent).
+	if rec := put(body, "*"); rec.Code != 200 {
+		t.Errorf("wildcard PUT = %d", rec.Code)
+	}
 
 	// Invalid JSON must be rejected, and must not clobber the stored state.
-	rec = httptest.NewRecorder()
-	a.handleUIPut(rec, httptest.NewRequest("PUT", "/api/ui", strings.NewReader("{broken")))
-	if rec.Code != http.StatusBadRequest {
+	if rec := put("{broken", rev2); rec.Code != http.StatusBadRequest {
 		t.Errorf("invalid PUT = %d, want 400", rec.Code)
 	}
 	rec = httptest.NewRecorder()
@@ -78,10 +112,8 @@ func TestHandleUIRoundTrip(t *testing.T) {
 	}
 
 	// Oversized blobs are refused before touching the file.
-	rec = httptest.NewRecorder()
 	huge := `{"notes":["` + strings.Repeat("x", uiStateMax) + `"]}`
-	a.handleUIPut(rec, httptest.NewRequest("PUT", "/api/ui", strings.NewReader(huge)))
-	if rec.Code != http.StatusRequestEntityTooLarge {
+	if rec := put(huge, rev2); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized PUT = %d, want 413", rec.Code)
 	}
 }
