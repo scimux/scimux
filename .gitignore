@@ -6,3 +6,5 @@ scimux
 # scripts/capture-fixtures.sh; they contain personal environment snapshots
 # even after scrubbing, so they stay out of the public repo)
 internal/transcript/testdata/real-*.jsonl
+review.md
+review-response.md

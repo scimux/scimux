@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,6 +91,7 @@ type app struct {
 
 	server    *tmuxsession.Server
 	storePath string
+	uiPath    string
 	codexRoot string
 	home      string
 }
@@ -208,8 +210,23 @@ func agentCommand(n *Node) (string, error) {
 			parts = append(parts, "-c", shellQuote("model_reasoning_effort="+n.Effort))
 		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
+	// pi and opencode run TUI-supervised only (pane peek + send, no
+	// transcript discovery); both take the "provider/model" form their own
+	// list commands emit.
+	case "pi":
+		parts := []string{"pi"}
+		if n.Model != "" {
+			parts = append(parts, "--model", shellQuote(n.Model))
+		}
+		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
+	case "opencode":
+		parts := []string{"opencode"}
+		if n.Model != "" {
+			parts = append(parts, "--model", shellQuote(n.Model))
+		}
+		return strings.Join(append(parts, "--prompt", shellQuote(n.Prompt)), " "), nil
 	}
-	return "", fmt.Errorf("unknown agent %q (want claude or codex)", n.Agent)
+	return "", fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
 }
 
 // resolveNode validates a new-node request and resolves its launch
@@ -246,8 +263,10 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	if n.Agent == "" {
 		n.Agent = "claude"
 	}
-	if n.Agent != "claude" && n.Agent != "codex" {
-		return 400, fmt.Errorf("unknown agent %q (want claude or codex)", n.Agent)
+	switch n.Agent {
+	case "claude", "codex", "pi", "opencode":
+	default:
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
 	}
 	if n.Dir == "" {
 		n.Dir = a.home
@@ -1080,6 +1099,64 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, cap)
 }
 
+// ---------- UI state ----------
+
+// The web client owns a small blob of cross-device state — map group tabs,
+// the archived-card set, private notes — that must survive scimux restarts,
+// so it lives next to the node store instead of in localStorage (per-device
+// state like drafts stays client-side). The blob is opaque JSON to the
+// server: its shape belongs to the client. Last writer wins; the writers are
+// one supervisor's own devices.
+const uiStateMax = 1 << 20
+
+func (a *app) handleUIGet(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	b, err := os.ReadFile(a.uiPath)
+	a.mu.Unlock()
+	if err != nil {
+		b = []byte("{}")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
+}
+
+func (a *app) handleUIPut(w http.ResponseWriter, r *http.Request) {
+	b, err := io.ReadAll(io.LimitReader(r.Body, uiStateMax+1))
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if len(b) > uiStateMax {
+		http.Error(w, "ui state too large", 413)
+		return
+	}
+	if !json.Valid(b) {
+		http.Error(w, "ui state must be valid JSON", 400)
+		return
+	}
+	// Atomic replace under the lock: a crash mid-write must never leave a
+	// truncated file, and concurrent PUTs must not interleave tmp files.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tmp := a.uiPath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err := os.Rename(tmp, a.uiPath); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]string{"ok": "saved"})
+}
+
+// handleAgents reports the installed harnesses and their models — the
+// new-activity dialog's source of truth (its built-in list is only the
+// fallback for when this call fails).
+func (a *app) handleAgents(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, detectAgents())
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
@@ -1119,6 +1196,7 @@ func main() {
 		staleChat:    map[string]bool{},
 		server:       tmuxsession.NewServer(*socket),
 		storePath:    filepath.Join(*data, "nodes.jsonl"),
+		uiPath:       filepath.Join(*data, "ui.json"),
 		codexRoot:    *codexRoot,
 		home:         home,
 	}
@@ -1133,6 +1211,9 @@ func main() {
 			time.Sleep(2 * time.Second)
 		}
 	}()
+	// Warm the harness/model probe (it shells out to the agent CLIs) so the
+	// first new-activity dialog doesn't wait on subprocesses.
+	go detectAgents()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -1153,6 +1234,9 @@ func main() {
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
 	mux.HandleFunc("GET /api/codex-rollouts", a.handleCodexRollouts)
+	mux.HandleFunc("GET /api/agents", a.handleAgents)
+	mux.HandleFunc("GET /api/ui", a.handleUIGet)
+	mux.HandleFunc("PUT /api/ui", a.handleUIPut)
 
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)

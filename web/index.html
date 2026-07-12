@@ -62,7 +62,9 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-bottom: 1px solid var(--hairline);
   font-size: 13px;
 }
-#burger { font-size: 19px; color: var(--dim); padding: 8px; margin-left: -8px; }
+#burger { font-size: 19px; color: var(--dim); padding: 8px; margin-left: -8px;
+  /* optically align the glyph's bottom bar with the text baseline */
+  transform: translateY(-1.5px); }
 #statusbar .host { font-weight: 600; letter-spacing: .01em; }
 #statusbar .sys  { color: var(--dim); display: flex; gap: 12px; white-space: nowrap; overflow: hidden; }
 #statusbar .sys b { color: var(--ink); font-weight: 500; display: inline-block; }
@@ -117,12 +119,34 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .phead h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .01em; }
 .phead .spacer { flex: 1; }
 .backbtn { color: var(--work); font-size: 16px; padding: 6px 8px 6px 0; }
+/* "‹" opens the next-deeper overlay pane — the pointer stand-in for the
+   phone's edge-swipe, so it only exists on iPad/desktop */
+.navnext { display: none; color: var(--work); font-size: 22px;
+  padding: 4px 10px 6px 0; }
+@media (min-width: 900px) { .navnext { display: block; } }
 .plus {
   width: 34px; height: 34px; border-radius: 17px;
   font-size: 22px; line-height: 32px; text-align: center;
   color: var(--work); background: var(--surface);
   border: 1px solid var(--hairline);
 }
+
+/* ---------- browser-style tab rows (Activity current/archived, map groups):
+   rounded-top tabs on a hairline; the active tab merges with the page below.
+   Distinct from the rounded lane chips, which stay filters. ---------- */
+.tabs { display: flex; align-items: flex-end; gap: 3px; padding: 8px 12px 0;
+  border-bottom: 1px solid var(--hairline); overflow-x: auto; }
+.tabs button { flex: none; font-size: 13px; font-weight: 600; color: var(--dim);
+  padding: 6px 14px 7px; margin-bottom: -1px; white-space: nowrap;
+  background: var(--th-bg); border: 1px solid var(--hairline); border-bottom: none;
+  border-radius: 10px 10px 0 0; }
+.tabs button.on { background: var(--bg); color: var(--ink);
+  border-bottom: 1px solid var(--bg); }
+.tabs .x { display: none; margin-left: 8px; opacity: .6; font-weight: 400; }
+@media (hover: hover) { .tabs button:hover .x { display: inline; } }
+@media (hover: none)  { .tabs .x { display: inline; } }  /* touch: ✕ always visible */
+.tabs .add { border: none; background: none; color: var(--work);
+  font-size: 17px; padding: 4px 10px 6px; margin-bottom: 1px; }
 
 /* ---------- cards ---------- */
 #cardlist { flex: 1; overflow-y: auto; padding: 4px 12px calc(16px + env(safe-area-inset-bottom)); }
@@ -131,10 +155,11 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   background: var(--surface);
   border: 1.5px solid var(--hairline);
   border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: 12px 14px 12px 18px;
   margin: 10px 2px;
   overflow: hidden;
 }
+.card .stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
 .card .row1 { display: flex; align-items: center; gap: 8px; }
 .card .title { font-size: 16px; font-weight: 600; flex: 1; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -161,7 +186,18 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   50%      { box-shadow: 0 0 14px 2px rgba(255,204,0,.55); }
 }
 .card.working { border-color: rgba(14,124,134,.55); box-shadow: 0 0 12px 0 rgba(14,124,134,.28); }
+.card.selected .title { color: var(--work); }
 .card.dead .title { color: var(--dim); }
+
+/* agent active: breathing dot on the card, breathing lane dot in the chat head */
+.workdot { display: inline-block; width: 7px; height: 7px; border-radius: 4px;
+  background: var(--work); margin-right: 5px; vertical-align: 1px;
+  animation: breathe 1.4s ease-in-out infinite; }
+#chathead .dot.active { animation: breathe 1.4s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { opacity: .3; transform: scale(.8); }
+  50%      { opacity: 1;  transform: scale(1.15); }
+}
 .card.adoptable { border-style: dashed; }
 .empty { padding: 60px 20px; color: var(--dim); text-align: center; font-size: 15px; }
 
@@ -186,18 +222,27 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #chathead .dots { color: var(--dim); font-size: 19px; padding: 4px 0 4px 10px; }
 
 #msgs { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
-.turn { max-width: 92%; }
-.turn .who { font-size: 11px; color: var(--dim); margin: 0 6px 3px; }
+/* no "you/agent" labels — side + color already carry the role */
+.turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
 .turn .bubble {
   padding: 10px 14px; border-radius: 16px; font-size: 15px; line-height: 1.5;
-  overflow-wrap: break-word;
+  overflow-wrap: break-word; min-width: 0;
 }
-.turn.user { align-self: flex-end; }
+.turn.user { align-self: flex-end; flex-direction: row-reverse; }
 .turn.user .bubble { background: var(--work); color: #fff; border-bottom-right-radius: 5px; }
-.turn.user .who { text-align: right; }
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
+
+/* copy affordance: bottom-aligned beside the bubble (right of agent bubbles,
+   left of user bubbles); hover-revealed on pointer devices, always on touch */
+.copybtn { flex: none; width: 30px; height: 30px; border-radius: 8px;
+  color: var(--dim); font-size: 15px; opacity: 0; transition: opacity .15s;
+  display: flex; align-items: center; justify-content: center; }
+@media (hover: hover) { .turn:hover .copybtn { opacity: 1; } }
+@media (hover: none)  { .copybtn { opacity: .9; } }
+.copybtn:active { color: var(--work); }
+.trashbtn:active { color: var(--bad); }
 
 .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin: 0; }
 .bubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; background: var(--code-bg);
@@ -216,6 +261,9 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   overflow-x: auto; background: #101014; color: #d7dde4;
   border: 1px solid var(--hairline);
 }
+/* the raw pane folds behind a link once readable turns exist */
+.peek.hidden { display: none; }
+#termbtn { align-self: flex-start; font-size: 13px; color: var(--work); padding: 2px 0; }
 #keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   padding: 8px 14px; border-top: 1px solid var(--hairline); }
 #keyrow:empty { display: none; }
@@ -275,6 +323,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-radius: var(--radius); text-align: center; }
 .sheet .item { display: flex; gap: 10px; align-items: baseline; margin: 8px 0; font-size: 14px; }
 .sheet .item .tag { color: var(--dim); font-size: 12px; margin-left: auto; }
+.sheet .pos-item { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; font-size: 14px; }
+.sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
 #backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,.25);
   opacity: 0; pointer-events: none; transition: opacity .3s; }
 #backdrop.on { opacity: 1; pointer-events: auto; }
@@ -299,8 +349,6 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border: 1.5px solid transparent; opacity: .45; max-width: 160px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lanechip.focused { opacity: 1; }
-#mapmode { font-size: 14px; color: var(--work); padding: 6px 0; }
-#journeybtn { color: var(--work); font-size: 14px; padding: 6px 8px; }
 
 /* app chrome is not selectable text */
 #statusbar, #cards, #map, .phead, .sheet .grab { -webkit-user-select: none; user-select: none; }
@@ -341,8 +389,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
       <button class="backbtn" id="mapclose">&#8249; Activity</button>
       <h2>Journey</h2>
       <span class="spacer"></span>
-      <button id="mapmode">All journeys</button>
     </div>
+    <div class="tabs" id="maptabs"></div>
     <div class="lanechips" id="lanechips"></div>
     <div id="mapscroll"><div id="mapwrap"></div></div>
   </section>
@@ -350,10 +398,14 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <!-- level 2: activity cards -->
   <section id="cards" class="panel">
     <div class="phead">
+      <button class="navnext" id="journeybtn" aria-label="open journey">&#8249;</button>
       <h2>Activity</h2>
       <span class="spacer"></span>
-      <button id="journeybtn">Journey</button>
       <button class="plus" id="plusbtn" aria-label="new activity">+</button>
+    </div>
+    <div class="tabs" id="cardtabs">
+      <button data-tab="current" class="on">Current</button>
+      <button data-tab="archived">Archived</button>
     </div>
     <div id="cardlist"><div class="empty">loading…</div></div>
   </section>
@@ -391,7 +443,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
     <textarea id="nc_prompt" rows="4" placeholder="What should this agent investigate?"></textarea>
   </div>
   <div class="sect row2">
-    <div><label>agent</label><select id="nc_agent"><option>claude</option><option>codex</option></select></div>
+    <div><label>agent</label><select id="nc_agent"></select></div>
     <div><label>model</label><select id="nc_model"></select></div>
     <div><label>effort</label><select id="nc_effort"><option value=""></option>
       <option>low</option><option>medium</option><option>high</option></select></div>
@@ -412,7 +464,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <div class="grab"></div>
   <h3 id="ad_title">Adopt session</h3>
   <div class="sect row2">
-    <div><label>agent inside it</label><select id="ad_agent"><option>claude</option><option>codex</option></select></div>
+    <div><label>agent inside it</label><select id="ad_agent"><option>claude</option><option>codex</option><option>pi</option><option>opencode</option></select></div>
   </div>
   <div class="sect">
     <div class="k">Claude session id (optional — auto-discovered if empty)</div>
@@ -442,6 +494,47 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <div class="sect"><div class="k">Setup</div><div class="v" id="i_setup"></div></div>
   <div class="sect"><div class="k">Attach from a terminal</div><div class="v"><code id="i_attach"></code></div></div>
   <button class="cta" id="i_peek">Show terminal</button>
+</div>
+
+<!-- message context menu (long-press a bubble) -->
+<div class="sheet" id="msgact">
+  <div class="grab"></div>
+  <h3 style="font-size:17px">Message</h3>
+  <div class="sect">
+    <button class="pos-item" id="ma_copy" style="width:100%;text-align:left"><span>Copy message</span></button>
+    <button class="pos-item" id="ma_fork" style="width:100%;text-align:left"><span>New activity from here&#8230;</span></button>
+  </div>
+</div>
+
+<!-- notes: long-press forwards a note into a chat's draft -->
+<div class="sheet" id="sendto">
+  <div class="grab"></div>
+  <h3 style="font-size:17px">Send note to&#8230;</h3>
+  <div class="sect" id="sendto_list"></div>
+</div>
+
+<!-- card actions (long-press a card): archive in/out of the current stack -->
+<div class="sheet" id="cardact">
+  <div class="grab"></div>
+  <h3 style="font-size:17px" id="ca_title"></h3>
+  <div class="sect">
+    <button class="pos-item" id="ca_arch" style="width:100%;text-align:left"><span></span></button>
+  </div>
+</div>
+
+<!-- map group sheet: (+) creates, tapping the active tab again edits -->
+<div class="sheet" id="tabsheet">
+  <div class="grab"></div>
+  <h3 id="tab_head">New map group</h3>
+  <div class="sect"><div class="k">Name</div><input id="tab_name" placeholder="e.g. automotive"></div>
+  <div class="sect"><div class="k">Journeys in this group</div><div id="tab_lanes"></div></div>
+  <div class="sect" style="color:var(--dim);font-size:13px">
+    Groups are a viewing filter &#8212; an empty group is fine, and removing a tab
+    never touches the journeys.
+  </div>
+  <button class="cta" id="tab_save">Add group</button>
+  <button id="tab_del" style="display:none;width:100%;margin-top:10px;padding:12px;
+    color:var(--bad);font-weight:600">Delete group (journeys stay)</button>
 </div>
 
 <!-- burger menu -->
@@ -476,12 +569,16 @@ let SOCKET = "scimux";
 let sel = localStorage.getItem("scimux-sel") || "";
 let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
 let peekOn = false;
+let termOpen = false;        // TUI pane unfolded in the chat (folds per selection)
+let cardTab = "current";
+let mapTab = localStorage.getItem("scimux-maptab") || "all";
 const expanded = new Set();
 const summaries = {};        // node id -> last-turn tail (fetched on expand)
 let stateEtag = "";
 let cardsSig = "";
 let chatSig = "";
 let sysPrev = null;
+let lastTurns = [];          // turns behind the rendered bubbles (copy/fork source)
 
 const isDesktop = () => matchMedia("(min-width: 900px)").matches;
 
@@ -489,6 +586,60 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
   if (!r.ok) throw new Error(await r.text());
   return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
 });
+
+/* ---------- server-persisted UI state ----------
+   Map group tabs, the archived-card set, and private notes survive scimux
+   restarts and are shared across devices: they live in ~/.scimux/ui.json via
+   GET/PUT /api/ui. localStorage only mirrors them for offline reads;
+   per-device state (drafts, selection) stays purely local. */
+let UI = { groups: [], archived: [], notes: [] };
+let uiTimer = null;
+async function loadUI(){
+  try {
+    UI = Object.assign({ groups: [], archived: [], notes: [] }, await api("/api/ui"));
+  } catch {
+    try { UI = Object.assign(UI, JSON.parse(localStorage.getItem("scimux-ui") || "{}")); } catch {}
+  }
+  cardsSig = ""; mapSig = ""; chatSig = "";
+  renderCards(); renderMapTabs(); renderMap();
+  if (sel === "NOTES") refreshChat();
+}
+function saveUI(){
+  localStorage.setItem("scimux-ui", JSON.stringify(UI));
+  clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
+  uiTimer = setTimeout(() =>
+    fetch("/api/ui", { method: "PUT", body: JSON.stringify(UI) }).catch(() => {}), 300);
+}
+
+/* copy glyph: fa-regular fa-clone (two offset rounded squares), inlined */
+const ICON_COPY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+  <rect x="2" y="8" width="14" height="14" rx="3"/>
+  <path d="M8 4.5A2.5 2.5 0 0 1 10.5 2h9A2.5 2.5 0 0 1 22 4.5v9a2.5 2.5 0 0 1-2.5 2.5H19"/>
+</svg>`;
+/* trash glyph: fa-regular fa-trash (lidded can), inlined like the copy icon */
+const ICON_TRASH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M3 6h18"/>
+  <path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3h5A1.5 1.5 0 0 1 16 4.5V6"/>
+  <path d="M5 6l1.2 14a2 2 0 0 0 2 1.8h7.6a2 2 0 0 0 2-1.8L19 6"/>
+  <path d="M10 11v6M14 11v6"/>
+</svg>`;
+
+/* clipboard: the async API needs a secure context (HTTPS/localhost) — over
+   plain LAN http fall back to execCommand */
+function copyText(s){
+  if (navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(s); return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = s;
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  ta.setAttribute("readonly", "");            /* no keyboard flash on iOS */
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, s.length);
+  try { document.execCommand("copy"); } finally { ta.remove(); }
+}
 
 function esc(s){ const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
@@ -574,32 +725,74 @@ function orderedNodes(){
     return (b.last_activity || 0) - (a.last_activity || 0);
   });
 }
+/* laneModel: the shared journey structure — every node rides the rail of its
+   root ancestor; cards, chips, and the map all draw the same lane colors. */
+function laneModel(){
+  const byId = {};
+  nodes.forEach(n => byId[n.id] = n);
+  const rootOf = id => {
+    let cur = byId[id], guard = 0;
+    while (cur && cur.parent && byId[cur.parent] && guard++ < 100) cur = byId[cur.parent];
+    return cur ? cur.id : id;
+  };
+  const laneOf = {}, roots = [];
+  [...nodes].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""))
+    .forEach(n => {
+      const r = rootOf(n.id);
+      if (!(r in laneOf)){ laneOf[r] = roots.length; roots.push(r); }
+    });
+  return { byId, rootOf, laneOf, roots,
+           color: r => LANE_COLORS[laneOf[r] % LANE_COLORS.length] };
+}
+const isArchived = id => (UI.archived || []).includes(id);
+
 function renderCards(){
-  const list = orderedNodes();
+  const lm = laneModel();
+  const list = orderedNodes().filter(n => isArchived(n.id) === (cardTab === "archived"));
   const sig = JSON.stringify(list.map(n => [n.id, n.title, n.live, n.attention, n.model, n.effort]))
-    + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",");
+    + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
+    + "|" + cardTab + "|" + (UI.notes || []).length;
   if (sig === cardsSig){ updateCardAges(); return; }
   cardsSig = sig;
-  const adoptCards = unadopted.map(s => `
+  const adoptCards = cardTab !== "current" ? "" : unadopted.map(s => `
     <div class="card adoptable">
       <div class="row1"><span class="title">${esc(s)}</span></div>
       <div class="status">unadopted tmux session</div>
       <button class="go" data-adopt="${esc(s)}" aria-label="adopt ${esc(s)}"></button>
     </div>`).join("");
+  /* notes ride along as a pseudo-activity: private, never archived */
+  const notesCard = cardTab !== "current" ? "" : `
+    <div class="card ${sel === "NOTES" ? "selected" : ""}" id="card-NOTES">
+      <span class="stripe" style="background:var(--dim)"></span>
+      <button class="go" data-open="NOTES" aria-label="open notes"></button>
+      <div class="row1"><span class="title">Notes</span></div>
+      <div class="status">${(UI.notes || []).length} notes · private</div>
+    </div>`;
   $("#cardlist").innerHTML = adoptCards + (list.length ? list.map(n => `
     <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""}" id="card-${esc(n.id)}">
+      <span class="stripe" style="background:${lm.color(lm.rootOf(n.id))}"></span>
       <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
       <div class="row1">
         <span class="title">${esc(n.title)}</span>
         <button class="chev" data-x="${esc(n.id)}" aria-label="summary">&#8250;</button>
       </div>
-      <div class="status"><span class="st">${esc(statusText(n))}</span> · <span class="age">${ageText(n.last_activity)}</span></div>
+      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · <span class="age">${ageText(n.last_activity)}</span></div>
       <div class="summary">${esc(summaries[n.id] || "…")}</div>
     </div>`).join("")
-    : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
+    : cardTab === "archived"
+      ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
+      : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`)
+    + notesCard;
   const waiting = nodes.filter(n => n.attention).length;
   document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
 }
+$("#cardtabs").addEventListener("click", e => {
+  const b = e.target.closest("[data-tab]");
+  if (!b) return;
+  cardTab = b.dataset.tab;
+  document.querySelectorAll("#cardtabs button").forEach(x => x.classList.toggle("on", x === b));
+  cardsSig = ""; renderCards();
+});
 function updateCardAges(){
   for (const n of nodes){
     const el = document.getElementById("card-" + CSS.escape(n.id).replace(/\\/g, ""));
@@ -641,49 +834,54 @@ const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#A2845E","#FF2D55"
 let mapFocus = true;
 let mapSig = "";
 
+/* map groups: logical tabs over the journeys — a viewing filter only.
+   "All" is fixed; user tabs are added via (+), removed via the ✕
+   (hover-revealed on pointer, always visible on touch) or from the edit
+   sheet (tap the active tab again). Removing a tab never touches a lane.
+   Groups persist server-side in UI.groups: {id, name, lanes:[root ids]}. */
+const groupLanes = () => mapTab === "all" ? null
+  : ((UI.groups || []).find(t => t.id === mapTab)?.lanes ?? null);
+function renderMapTabs(){
+  if (mapTab !== "all" && !(UI.groups || []).some(t => t.id === mapTab)) mapTab = "all";
+  $("#maptabs").innerHTML =
+    `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All</button>` +
+    (UI.groups || []).map(t => `<button data-mt="${esc(t.id)}" class="${mapTab === t.id ? "on" : ""}">
+       ${esc(t.name)}<span class="x" data-rm="${esc(t.id)}">&#10005;</span></button>`).join("") +
+    `<button data-mt="+" class="add" aria-label="add group">+</button>`;
+}
+
 function mapVisible(){
   return isDesktop() ? document.body.classList.contains("map-open") : level === 3;
 }
 function renderMap(){
   if (!mapVisible()) return;
-  const byId = {};
-  nodes.forEach(n => byId[n.id] = n);
-  const rootOf = n => {
-    let cur = n, guard = 0;
-    while (cur.parent && byId[cur.parent] && guard++ < 100) cur = byId[cur.parent];
-    return cur.id;
-  };
-  const laneOf = {}, roots = [];
-  [...nodes].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""))
-    .forEach(n => {
-      const r = rootOf(n);
-      if (!(r in laneOf)){ laneOf[r] = roots.length; roots.push(r); }
-    });
-  const rows = [...nodes].sort((a, b) =>
-    (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
-  const focusRoot = mapFocus && nodeById(sel) ? rootOf(nodeById(sel)) : null;
+  const lm = laneModel();
+  const grp = groupLanes();
+  const inGroup = r => !grp || grp.includes(r);
+  const rows = [...nodes].filter(n => inGroup(lm.rootOf(n.id)))
+    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
+  const focusRoot = mapFocus && nodeById(sel) ? lm.rootOf(sel) : null;
 
   const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.live, n.attention]))
-    + "|" + focusRoot + "|" + mapFocus;
+    + "|" + focusRoot + "|" + mapFocus + "|" + mapTab + "|" + JSON.stringify(UI.groups || []);
   if (sig === mapSig) return;
   mapSig = sig;
 
   const RH = 76, laneX = i => 22 + i * 20;
-  const GW = Math.max(60, 22 + roots.length * 20 + 14);
+  const GW = Math.max(60, 22 + lm.roots.length * 20 + 14);
   const H = rows.length * RH;
   const y = i => i * RH + RH / 2;
-  const laneColor = r => LANE_COLORS[laneOf[r] % LANE_COLORS.length];
   const dimLane = r => focusRoot && r !== focusRoot;
   let svg = "";
 
-  for (const r of roots){
-    const idx = rows.map((n, i) => rootOf(n) === r ? i : -1).filter(i => i >= 0);
+  for (const r of lm.roots.filter(inGroup)){
+    const idx = rows.map((n, i) => lm.rootOf(n.id) === r ? i : -1).filter(i => i >= 0);
     if (idx.length > 1)
-      svg += `<line x1="${laneX(laneOf[r])}" y1="${y(idx[0])}" x2="${laneX(laneOf[r])}" y2="${y(idx[idx.length - 1])}"
-              stroke="${laneColor(r)}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(r) ? .22 : 1}"/>`;
+      svg += `<line x1="${laneX(lm.laneOf[r])}" y1="${y(idx[0])}" x2="${laneX(lm.laneOf[r])}" y2="${y(idx[idx.length - 1])}"
+              stroke="${lm.color(r)}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(r) ? .22 : 1}"/>`;
   }
   rows.forEach((n, i) => {
-    const r = rootOf(n), x = laneX(laneOf[r]), yy = y(i), col = laneColor(r);
+    const r = lm.rootOf(n.id), x = laneX(lm.laneOf[r]), yy = y(i), col = lm.color(r);
     const op = dimLane(r) ? .25 : 1;
     if (n.attention)
       svg += `<circle cx="${x}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
@@ -696,7 +894,7 @@ function renderMap(){
   $("#mapwrap").innerHTML =
     `<svg id="mapsvg" width="${GW}" height="${H}" viewBox="0 0 ${GW} ${H}"></svg>`.replace("></svg>", `>${svg}</svg>`) +
     rows.map(n => {
-      const r = rootOf(n);
+      const r = lm.rootOf(n.id);
       const when = (n.created_at || "").slice(5, 16).replace("T", " ");
       return `
       <div class="strow ${dimLane(r) ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}"
@@ -705,15 +903,73 @@ function renderMap(){
         <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}</div>
         ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
       </div>`;
-    }).join("") + (rows.length ? "" : `<div class="empty">No journeys yet.</div>`);
+    }).join("") + (rows.length ? "" : `<div class="empty">No journeys${grp ? " in this group" : ""} yet.</div>`);
 
-  $("#lanechips").innerHTML = roots.map(r => `
+  $("#lanechips").innerHTML = lm.roots.filter(inGroup).map(r => `
     <span class="lanechip ${!focusRoot || r === focusRoot ? "focused" : ""}"
-          style="border-color:${laneColor(r)};color:${laneColor(r)}"
-          data-chip="${esc(r)}">${esc((byId[r] || {}).title || r)}</span>`).join("");
-  $("#mapmode").textContent = mapFocus ? "All journeys" : "Focus";
+          style="border-color:${lm.color(r)};color:${lm.color(r)}"
+          data-chip="${esc(r)}">${esc((lm.byId[r] || {}).title || r)}</span>`).join("");
 }
-$("#mapmode").addEventListener("click", () => { mapFocus = !mapFocus; mapSig = ""; renderMap(); });
+
+/* group tab handling: select, second-tap edit, ✕ remove, (+) create */
+function removeMapTab(id){
+  const i = (UI.groups || []).findIndex(t => t.id === id);
+  if (i < 0) return;
+  UI.groups.splice(i, 1);
+  if (mapTab === id) mapTab = "all";
+  localStorage.setItem("scimux-maptab", mapTab);
+  saveUI();
+  renderMapTabs(); mapSig = ""; renderMap();
+}
+let editTab = null;
+function openTabSheet(t){
+  editTab = t || null;
+  $("#tab_head").textContent = t ? "Edit group" : "New map group";
+  $("#tab_name").value = t ? t.name : "";
+  const lm = laneModel();
+  $("#tab_lanes").innerHTML = lm.roots.map(r => `
+    <label style="display:flex;gap:10px;align-items:center;margin:8px 0;font-size:15px">
+      <input type="checkbox" value="${esc(r)}" style="width:auto;margin:0"
+        ${t && t.lanes.includes(r) ? "checked" : ""}>
+      <span style="width:12px;height:12px;border-radius:6px;flex:none;background:${lm.color(r)}"></span>
+      ${esc((lm.byId[r] || {}).title || r)}</label>`).join("")
+    || `<div style="color:var(--dim);font-size:14px">no journeys yet — an empty group is fine</div>`;
+  $("#tab_save").textContent = t ? "Save group" : "Add group";
+  $("#tab_del").style.display = t ? "block" : "none";
+  openSheet("#tabsheet");
+}
+$("#maptabs").addEventListener("click", e => {
+  const rm = e.target.closest("[data-rm]");
+  if (rm){ e.stopPropagation(); removeMapTab(rm.dataset.rm); return; }
+  const b = e.target.closest("[data-mt]");
+  if (!b) return;
+  if (b.dataset.mt === "+"){ openTabSheet(null); return; }
+  if (b.dataset.mt === mapTab && mapTab !== "all"){       /* second tap = edit */
+    openTabSheet((UI.groups || []).find(t => t.id === mapTab));
+    return;
+  }
+  mapTab = b.dataset.mt;
+  localStorage.setItem("scimux-maptab", mapTab);
+  renderMapTabs(); mapSig = ""; renderMap();
+});
+$("#tab_save").addEventListener("click", () => {
+  const name = $("#tab_name").value.trim();
+  if (!name) return;
+  const lanes = [...document.querySelectorAll("#tab_lanes input:checked")].map(i => i.value);
+  if (editTab){ editTab.name = name; editTab.lanes = lanes; }
+  else {
+    const id = "g" + Date.now();
+    (UI.groups ||= []).push({ id, name, lanes });
+    mapTab = id;
+    localStorage.setItem("scimux-maptab", mapTab);
+  }
+  saveUI();
+  renderMapTabs(); mapSig = ""; renderMap(); closeSheets();
+});
+$("#tab_del").addEventListener("click", () => {
+  if (editTab) removeMapTab(editTab.id);
+  closeSheets();
+});
 $("#lanechips").addEventListener("click", e => {
   const c = e.target.closest("[data-chip]");
   if (c){ select(c.dataset.chip); mapSig = ""; renderMap(); }
@@ -743,7 +999,7 @@ function hashStr(s){
 }
 
 function select(id){
-  if (sel !== id){ chatSig = ""; peekOn = false; mapSig = ""; selGen++; }
+  if (sel !== id){ chatSig = ""; peekOn = false; termOpen = false; mapSig = ""; selGen++; }
   sel = id;
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
@@ -756,13 +1012,37 @@ function select(id){
   refreshChat();
 }
 function renderChatHead(){
+  if (sel === "NOTES"){
+    $("#chattitle").textContent = "Notes";
+    $("#chatmission").textContent = "private scratchpad — long-press a note to send it to a chat";
+    $("#chatdot").className = "dot";
+    return;
+  }
   const n = nodeById(sel);
   $("#chattitle").textContent = n ? n.title : "scimux";
   $("#chatmission").textContent = n ? (n.prompt || "") : "";
   $("#chatdot").className = "dot " + (n ? (n.attention ? "attention" : n.live) : "");
 }
 
+/* notes are local records, not agent turns — same bubbles, own store */
+function renderNotes(){
+  const notes = UI.notes || [];
+  const sig = "NOTES|" + hashStr(JSON.stringify(notes));
+  if (sig === chatSig) return;
+  chatSig = sig;
+  $("#msgs").innerHTML = notes.length ? notes.map((t, i) => `
+    <div class="turn user" data-i="${i}">
+      <div class="bubble" title="${esc(t.t || "")}">${md(t.text || "")}</div>
+      <button class="copybtn" data-i="${i}" aria-label="copy note">${ICON_COPY}</button>
+      <button class="copybtn trashbtn" data-i="${i}" aria-label="delete note">${ICON_TRASH}</button>
+    </div>`).join("")
+    : `<div class="empty">Park a thought here — notes stay on this host, private to you.</div>`;
+  $("#keyrow").innerHTML = "";
+  $("#msgs").scrollTop = 1e6;
+}
+
 async function refreshChat(){
+  if (sel === "NOTES"){ renderNotes(); return; }
   const n = nodeById(sel);
   if (!n){ return; }
   renderChatHead();
@@ -780,12 +1060,16 @@ async function refreshChat(){
     try { peekText = await api(`/api/nodes/${encodeURIComponent(n.id)}/peek`); } catch {}
     if (gen !== selGen || sel !== n.id) return;
   }
-  const sig = [n.id, d.live, n.attention, showPeek,
+  const sig = [n.id, d.live, n.attention, showPeek, termOpen,
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
   if (sig === chatSig) return;
   chatSig = sig;
+  lastTurns = turns;
 
+  /* with readable turns the raw pane folds behind a link — the key row below
+     already carries the answer affordance; without them it IS the content */
+  const foldable = turns.length > 0 && !peekOn;
   const el = $("#msgs");
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   el.innerHTML =
@@ -793,13 +1077,23 @@ async function refreshChat(){
       ? `<div class="pending">${d.pending
           ? "waiting for the agent's transcript file — showing the raw terminal below"
           : "no readable transcript — showing the raw terminal below"}</div>` : "") +
-    turns.map(t => `
-      <div class="turn ${t.role === "user" ? "user" : "assistant"}">
-        <div class="who">${t.role === "user" ? "you" : "agent"}</div>
-        <div class="bubble">${md(t.text)}</div>
+    turns.map((t, i) => `
+      <div class="turn ${t.role === "user" ? "user" : "assistant"}" data-i="${i}">
+        <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(t.text)}</div>
+        <button class="copybtn" data-i="${i}" aria-label="copy message">${ICON_COPY}</button>
       </div>`).join("") +
     (d.live === "active" ? `<div class="pending">agent is working…</div>` : "") +
-    (showPeek && peekText ? `<div class="peek">${esc(peekText)}</div>` : "");
+    (showPeek && peekText
+      ? (foldable
+          ? `<button id="termbtn">${termOpen ? "Hide terminal &#9662;" : "Show terminal &#9656;"}</button>
+             <div class="peek ${termOpen ? "" : "hidden"}">${esc(peekText)}</div>`
+          : `<div class="peek">${esc(peekText)}</div>`)
+      : "");
+  const tb = $("#termbtn");
+  if (tb) tb.addEventListener("click", () => {
+    termOpen = !termOpen; chatSig = ""; refreshChat();
+    if (termOpen) $("#msgs").scrollTop = 1e6;
+  });
   if (atBottom) el.scrollTop = el.scrollHeight;
 
   /* key row appears only while the agent blocks on a dialog */
@@ -825,6 +1119,125 @@ $("#keyrow").addEventListener("click", async e => {
 $("#msgs").addEventListener("scroll", () =>
   $("#chathead").classList.toggle("compact", $("#msgs").scrollTop > 30));
 
+/* per-bubble copy (and, for notes, delete) */
+$("#msgs").addEventListener("click", e => {
+  const tb = e.target.closest(".trashbtn");
+  if (tb && sel === "NOTES"){        /* notes only: remove the entry, keep the store */
+    (UI.notes || []).splice(+tb.dataset.i, 1);
+    saveUI();
+    chatSig = ""; cardsSig = "";
+    renderNotes(); renderCards();
+    return;
+  }
+  const cb = e.target.closest(".copybtn");
+  if (!cb) return;
+  const src = sel === "NOTES" ? (UI.notes || [])[+cb.dataset.i] : lastTurns[+cb.dataset.i];
+  if (src) copyText(src.text || "");
+  cb.innerHTML = "&#10003;";
+  setTimeout(() => { cb.innerHTML = ICON_COPY; }, 900);
+});
+
+/* ---- long-press (HIG context-menu idiom): delegated helper ----
+   A long-press may be followed by a synthesized click on the same element;
+   lpFired swallows exactly that one click so tap and hold stay distinct. */
+let lpFired = false;
+document.addEventListener("click", e => {
+  if (lpFired){ e.stopPropagation(); e.preventDefault(); lpFired = false; }
+}, true);
+function longpress(container, selector, fn){
+  let timer = null;
+  const fire = el => {
+    lpFired = true;
+    setTimeout(() => { lpFired = false; }, 700);  /* don't swallow later taps */
+    fn(el);
+  };
+  container.addEventListener("touchstart", e => {
+    const el = e.target.closest(selector);
+    if (!el) return;
+    timer = setTimeout(() => fire(el), 500);
+  }, { passive: true });
+  ["touchmove","touchend","touchcancel"].forEach(ev =>
+    container.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
+  /* press-and-hold with a pointer (mouse, iPad trackpad) — synthesized mouse
+     events after a touch tap arrive as a quick down/up pair, so the timer
+     never fires for those; moving > 6px (text selection, drag) cancels */
+  let mstart = null;
+  container.addEventListener("mousedown", e => {
+    const el = e.target.closest(selector);
+    if (!el) return;
+    mstart = { x: e.clientX, y: e.clientY };
+    timer = setTimeout(() => fire(el), 500);
+  });
+  container.addEventListener("mousemove", e => {
+    if (mstart && Math.abs(e.clientX - mstart.x) + Math.abs(e.clientY - mstart.y) > 6)
+      clearTimeout(timer);
+  });
+  ["mouseup","mouseleave"].forEach(ev =>
+    container.addEventListener(ev, () => { mstart = null; clearTimeout(timer); }));
+  container.addEventListener("contextmenu", e => {   /* desktop right-click */
+    const el = e.target.closest(selector);
+    if (el){ e.preventDefault(); fire(el); }
+  });
+}
+
+/* long-press a card → archive it out of (or restore it to) the current stack */
+longpress($("#cardlist"), ".card", el => {
+  const id = el.querySelector(".go")?.dataset.open;
+  const n = id && nodeById(id);
+  if (!n) return;                     /* notes and adoptables don't archive */
+  $("#ca_title").textContent = n.title;
+  $("#ca_arch").querySelector("span").textContent = isArchived(id)
+    ? "Restore to current activity"
+    : "Archive — move out of the current stack";
+  $("#ca_arch").onclick = () => {
+    UI.archived ||= [];
+    const i = UI.archived.indexOf(id);
+    if (i >= 0) UI.archived.splice(i, 1); else UI.archived.push(id);
+    saveUI();
+    cardsSig = ""; renderCards(); closeSheets();
+  };
+  openSheet("#cardact");
+});
+
+/* long-press a message bubble:
+   in Notes → forward into a chat's draft; elsewhere → copy, or start a new
+   activity (fresh-context fork) from this evidence */
+let ncParent = "", ncRationale = "";
+longpress($("#msgs"), ".turn", el => {
+  if (sel === "NOTES"){
+    const note = (UI.notes || [])[+el.dataset.i];
+    if (!note) return;
+    const lm = laneModel();
+    $("#sendto_list").innerHTML = orderedNodes().map(n => `
+      <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
+        <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${lm.color(lm.rootOf(n.id))}"></span>
+        <span>${esc(n.title)}</span>
+      </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
+    $("#sendto_list").onclick = ev => {
+      const b = ev.target.closest("[data-fwd]");
+      if (!b) return;
+      const tgt = b.dataset.fwd;
+      const prev = localStorage.getItem("scimux-draft:" + tgt) || "";
+      localStorage.setItem("scimux-draft:" + tgt, (prev ? prev + "\n\n" : "") + (note.text || ""));
+      closeSheets(); select(tgt); if (!isDesktop()) setLevel(1);
+      $("#prompt").focus();
+    };
+    openSheet("#sendto");
+    return;
+  }
+  const turn = lastTurns[+el.dataset.i];
+  if (!turn) return;
+  $("#ma_copy").onclick = () => { copyText(turn.text); closeSheets(); };
+  $("#ma_fork").onclick = () => {
+    closeSheets();
+    ncParent = sel;
+    ncRationale = turn.text.split("\n")[0].slice(0, 140);
+    $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
+    openSheet("#newchat");
+  };
+  openSheet("#msgact");
+});
+
 /* ---------- prompt bar (singleton; drafts survive everything) ---------- */
 $("#prompt").addEventListener("input", e => {
   const ta = e.target;
@@ -839,6 +1252,16 @@ $("#sendbtn").addEventListener("click", sendPrompt);
 async function sendPrompt(){
   const ta = $("#prompt"), text = ta.value.trim();
   if (!text || !sel) return;
+  if (sel === "NOTES"){              /* notes never leave scimux's own store */
+    (UI.notes ||= []).push({ t: new Date().toISOString(), text });
+    saveUI();
+    ta.value = ""; ta.style.height = "auto";
+    localStorage.removeItem("scimux-draft:NOTES");
+    ta.blur();                       /* dismiss the keyboard; the note is visible */
+    chatSig = ""; cardsSig = "";
+    renderNotes(); renderCards();
+    return;
+  }
   const dest = sel;   /* capture: selection may change while the send is in flight */
   ta.value = ""; ta.style.height = "auto";
   localStorage.removeItem("scimux-draft:" + dest);
@@ -898,6 +1321,7 @@ $("#burger").addEventListener("click", () => openSheet("#menu"));
 
 /* details sheet */
 function openInfo(){
+  if (sel === "NOTES") return;   /* nothing to attach to — notes live in scimux */
   const n = nodeById(sel);
   if (!n) return;
   $("#i_title").textContent = n.title;
@@ -916,18 +1340,32 @@ $("#i_peek").addEventListener("click", () => {
   peekOn = !peekOn; chatSig = ""; closeSheets(); refreshChat();
 });
 
-/* new activity */
+/* new activity — agent and model lists come from the backend, which probes
+   the installed harness CLIs (GET /api/agents); this static set is only the
+   fallback for when that call fails */
 const MODELS = {
-  claude: ["", "fable-5", "opus-4.8", "sonnet-5", "haiku-4.5"],
-  codex:  ["", "gpt-5.1-codex-max", "gpt-5.1-codex", "gpt-5-codex"],
+  claude: ["", "fable", "opus", "sonnet", "haiku"],
+  codex:  ["", "gpt-5.4", "gpt-5.4-mini"],
 };
+function fillAgents(){
+  $("#nc_agent").innerHTML = Object.keys(MODELS).map(a =>
+    `<option>${esc(a)}</option>`).join("");
+}
 function fillModels(){
-  $("#nc_model").innerHTML = MODELS[$("#nc_agent").value].map(m =>
-    `<option value="${m}">${m || "(default)"}</option>`).join("");
+  $("#nc_model").innerHTML = (MODELS[$("#nc_agent").value] || [""]).map(m =>
+    `<option value="${esc(m)}">${m || "(default)"}</option>`).join("");
 }
 $("#nc_agent").addEventListener("change", fillModels);
-fillModels();
+fillAgents(); fillModels();
+api("/api/agents").then(j => {
+  if (!j || !Object.keys(j).length) return;
+  Object.keys(MODELS).forEach(k => delete MODELS[k]);
+  for (const [agent, models] of Object.entries(j))
+    MODELS[agent] = ["", ...models];   /* "" = launch with the harness default */
+  fillAgents(); fillModels();
+}).catch(() => {});
 $("#plusbtn").addEventListener("click", () => {
+  ncParent = ""; ncRationale = "";     /* a plain + is never a fork */
   const lastDir = localStorage.getItem("scimux-lastdir");
   if (lastDir && !$("#nc_dir").value) $("#nc_dir").value = lastDir;
   openSheet("#newchat");
@@ -940,6 +1378,9 @@ $("#nc_start").addEventListener("click", async () => {
     effort: $("#nc_effort").value,
     dir: $("#nc_dir").value.trim(),
     title: $("#nc_title").value.trim(),
+    /* set by "New activity from here…": fresh-context fork off the evidence */
+    parent: ncParent,
+    rationale: ncParent ? "follow-up on: " + ncRationale : "",
   };
   if (!payload.prompt) return;
   try {
@@ -1005,7 +1446,7 @@ async function tick(){
     if (st.version) $("#m_version").textContent = st.version;
     $("#m_socket").textContent = SOCKET;
     renderSys(st.sys);
-    if (!sel || !nodeById(sel)){
+    if (sel !== "NOTES" && (!sel || !nodeById(sel))){
       const first = orderedNodes()[0];
       if (first) select(first.id);
     }
@@ -1029,6 +1470,8 @@ document.addEventListener("visibilitychange", () => {
   else startPolling();
 });
 setLevel(level);
+renderMapTabs();
+loadUI();
 startPolling();
 </script>
 </body>
