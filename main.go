@@ -73,6 +73,12 @@ type app struct {
 	prevCap map[string]string
 	lastChg map[string]time.Time
 	tailers map[string]*transcript.Tailer
+	// rolloutSnaps: node id -> rollout paths that existed at launch; codex
+	// discovery only correlates files that appeared afterwards.
+	rolloutSnaps map[string]map[string]bool
+	// pathClaims: transcript paths reserved by an in-flight discovery store
+	// write, so a concurrent adoption cannot publish the same path.
+	pathClaims map[string]bool
 
 	server    *tmuxsession.Server
 	storePath string
@@ -201,8 +207,9 @@ func agentCommand(n *Node) (string, error) {
 // createNode validates, starts the tmux session, and persists the node.
 // It returns the HTTP status to use on error: client mistakes are 400,
 // server-side failures (tmux, store) are 500. Callers hold a.mu; taken
-// carries tmux session names that must not be reused as node IDs.
-func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
+// carries tmux session names that must not be reused as node IDs, and
+// rollouts is a pre-launch snapshot of existing codex rollout paths.
+func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]bool) (int, error) {
 	if strings.TrimSpace(n.Prompt) == "" {
 		return 400, fmt.Errorf("prompt must not be empty")
 	}
@@ -266,6 +273,10 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
+	if n.Agent == "codex" {
+		// Discovery must only correlate rollouts that appear after launch.
+		a.rolloutSnaps[n.ID] = rollouts
+	}
 	return 0, nil
 }
 
@@ -423,17 +434,27 @@ func (a *app) discoverTranscript(n *Node) {
 	}
 	created, err := time.Parse(time.RFC3339, n.CreatedAt)
 	if err != nil || time.Since(created) > 15*time.Minute {
-		return // stop searching for stale nodes; peek remains available
+		a.mu.Lock()
+		delete(a.rolloutSnaps, n.ID) // stale: stop searching, free the snapshot
+		a.mu.Unlock()
+		return // peek remains available
 	}
-	// Transcript paths are exclusive among nodes: a rollout another node
-	// already claimed must never be linked twice (two same-dir codex nodes
-	// starting close together would otherwise share the newest file).
-	claimed := map[string]bool{}
+	// Transcript paths are exclusive among nodes, and codex discovery only
+	// considers rollouts that appeared after this node's launch (pre-launch
+	// snapshot): an older same-cwd rollout still being appended by some other
+	// session can never be linked, no matter what its mtime says.
+	excluded := map[string]bool{}
 	a.mu.Lock()
 	for _, o := range a.nodes {
 		if o.ID != n.ID && o.Transcript != "" {
-			claimed[o.Transcript] = true
+			excluded[o.Transcript] = true
 		}
+	}
+	for p := range a.pathClaims {
+		excluded[p] = true
+	}
+	for p := range a.rolloutSnaps[n.ID] {
+		excluded[p] = true
 	}
 	a.mu.Unlock()
 	var path string
@@ -442,21 +463,50 @@ func (a *app) discoverTranscript(n *Node) {
 	case "claude":
 		path, ok = transcript.FindClaudeTranscript(a.home, n.SessionID)
 	case "codex":
-		path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created, claimed)
+		path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created, excluded)
 	}
-	if !ok || claimed[path] {
+	if !ok || excluded[path] {
 		return
 	}
+	// Reserve the path under the lock before the store write, re-checking
+	// against live state: a concurrent adoption may have published it since
+	// the snapshot above.
+	a.mu.Lock()
+	if a.pathClaimedLocked(path, n.ID) {
+		a.mu.Unlock()
+		return
+	}
+	a.pathClaims[path] = true
+	a.mu.Unlock()
 	// Record first, publish second: if the store write fails, the in-memory
 	// path stays empty and the poller retries on the next tick instead of
 	// treating an unpersisted link as final.
 	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: path}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: record transcript for %s: %v (will retry)\n", n.ID, err)
+		a.mu.Lock()
+		delete(a.pathClaims, path)
+		a.mu.Unlock()
 		return
 	}
 	a.mu.Lock()
 	n.Transcript = path
+	delete(a.pathClaims, path)
+	delete(a.rolloutSnaps, n.ID)
 	a.mu.Unlock()
+}
+
+// pathClaimedLocked reports whether a transcript path is already owned by
+// another node or reserved by an in-flight discovery. Callers hold a.mu.
+func (a *app) pathClaimedLocked(path, excludeID string) bool {
+	if a.pathClaims[path] {
+		return true
+	}
+	for _, o := range a.nodes {
+		if o.ID != excludeID && o.Transcript == path {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- sysload ----------
@@ -644,6 +694,12 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Transcript exclusivity holds for adoption too: a path another node
+	// owns (or a discovery is reserving right now) must not be published twice.
+	if n.Transcript != "" && a.pathClaimedLocked(n.Transcript, n.ID) {
+		http.Error(w, fmt.Sprintf("transcript %q already belongs to another node", n.Transcript), 409)
+		return
+	}
 	// Persist before publishing: an adopted node that exists only in memory
 	// would silently vanish from the registry on restart.
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
@@ -661,14 +717,17 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
-	// Snapshot current session names before the critical section (tmux is
-	// slow); the allocator must avoid unadopted sessions too.
+	// Snapshot current session names and existing rollouts before the
+	// critical section (tmux and the filesystem walk are slow); the ID
+	// allocator must avoid unadopted sessions, and codex discovery must
+	// only correlate rollouts that appear after this launch.
 	taken := map[string]bool{}
 	for _, s := range a.server.Sessions() {
 		taken[s] = true
 	}
+	rollouts := transcript.ListCodexRollouts(a.codexRoot)
 	a.mu.Lock()
-	status, err := a.createNode(&n, taken)
+	status, err := a.createNode(&n, taken, rollouts)
 	a.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), status)
@@ -717,12 +776,14 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	if tl != nil {
 		turns = tl.Poll()
 	}
-	// fallback signals "no useful turns" — whether the transcript is missing,
-	// not yet populated, unreadable, or format-incompatible. A path string
-	// existing does not mean the transcript is usable; the client must degrade
-	// to the pane snapshot in every one of these cases.
+	// fallback signals "the transcript is not (or no longer) making sense" —
+	// missing, not yet populated, unreadable, format-incompatible from the
+	// start, or a file whose recent appended data has stopped being
+	// interpretable even though earlier turns parsed fine. A path string
+	// existing does not mean the transcript is usable; the client must
+	// degrade to the pane snapshot in every one of these cases.
 	writeJSON(w, map[string]any{"turns": turns, "pending": pending, "live": live,
-		"fallback": len(turns) == 0})
+		"fallback": len(turns) == 0 || (tl != nil && tl.Unparseable())})
 }
 
 // tailerLocked returns the node's transcript tailer, (re)building it when
@@ -759,10 +820,16 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := a.server.Session(n.ID)
-	excerpt := ""
-	if cap, err := s.Capture(); err == nil {
-		excerpt = lastLines(cap, 12)
+	// Evidence capture is a prerequisite, not best-effort: a keypress whose
+	// pane context cannot be photographed would produce an audit record that
+	// cannot distinguish "empty pane" from "no evidence". Refuse and let the
+	// supervisor retry (or attach) instead of acting unauditably.
+	cap, err := s.Capture()
+	if err != nil {
+		http.Error(w, "refusing keypress without pane evidence (capture failed): "+err.Error(), 500)
+		return
 	}
+	excerpt := lastLines(cap, 12)
 	if err := s.SendKey(body.Key); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -830,16 +897,18 @@ func main() {
 		os.Exit(1)
 	}
 	a := &app{
-		byID:      map[string]*Node{},
-		live:      map[string]string{},
-		attn:      map[string]string{},
-		prevCap:   map[string]string{},
-		lastChg:   map[string]time.Time{},
-		tailers:   map[string]*transcript.Tailer{},
-		server:    tmuxsession.NewServer(*socket),
-		storePath: filepath.Join(*data, "nodes.jsonl"),
-		codexRoot: *codexRoot,
-		home:      home,
+		byID:         map[string]*Node{},
+		live:         map[string]string{},
+		attn:         map[string]string{},
+		prevCap:      map[string]string{},
+		lastChg:      map[string]time.Time{},
+		tailers:      map[string]*transcript.Tailer{},
+		rolloutSnaps: map[string]map[string]bool{},
+		pathClaims:   map[string]bool{},
+		server:       tmuxsession.NewServer(*socket),
+		storePath:    filepath.Join(*data, "nodes.jsonl"),
+		codexRoot:    *codexRoot,
+		home:         home,
 	}
 	if err := a.loadStore(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)

@@ -224,6 +224,76 @@ func TestFindCodexRolloutConcurrentSameDir(t *testing.T) {
 	}
 }
 
+// An older same-cwd rollout whose mtime advances after launch (another
+// session outside scimux still appending to it) must not beat the node's
+// own new rollout: the pre-launch snapshot excludes it regardless of mtime
+// and of its older filename (finding 14 of the 2026-07 review).
+func TestFindCodexRolloutExcludesPreexisting(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "12")
+	os.MkdirAll(day, 0o755)
+	meta := `{"timestamp":"x","type":"session_meta","payload":{"id":"i","cwd":"/data/exp1"}}` + "\n"
+	oldRollout := filepath.Join(day, "rollout-2026-07-12T08-00-00-old.jsonl")
+	os.WriteFile(oldRollout, []byte(meta), 0o644)
+	snapshot := ListCodexRollouts(root) // taken at launch: only the old file exists
+	if !snapshot[oldRollout] {
+		t.Fatal("snapshot must contain the pre-launch rollout")
+	}
+	newRollout := filepath.Join(day, "rollout-2026-07-12T10-00-00-new.jsonl")
+	os.WriteFile(newRollout, []byte(meta), 0o644)
+	// The outside session keeps appending: the old file's mtime is fresh.
+	now := time.Now()
+	os.Chtimes(oldRollout, now, now)
+	got, ok := FindCodexRollout(root, "/data/exp1", now.Add(-time.Minute), snapshot)
+	if !ok || got != newRollout {
+		t.Fatalf("got %q ok=%v, want the newly appeared %q", got, ok, newRollout)
+	}
+}
+
+// A transcript that produced valid turns and then stops making sense must
+// flag Unparseable so the UI can degrade to the pane snapshot — while
+// benign unknown *typed* records never trip the signal (finding 15).
+func TestTailerUnparseableAfterValidTurns(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	valid := `{"type":"user","timestamp":"t1","message":{"role":"user","content":"question"}}` + "\n" +
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"answer"}}` + "\n"
+	os.WriteFile(p, []byte(valid), 0o644)
+	tl := &Tailer{Path: p}
+	if turns := tl.Poll(); len(turns) != 2 || tl.Unparseable() {
+		t.Fatalf("valid prefix: turns=%d unparseable=%v", len(turns), tl.Unparseable())
+	}
+	append_ := func(line string, n int) {
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < n; i++ {
+			f.WriteString(line + "\n")
+		}
+		f.Close()
+	}
+	// Unknown but typed records are normal defensive-parser territory.
+	append_(`{"type":"future_record_kind","payload":{"x":1}}`, 30)
+	tl.Poll()
+	if tl.Unparseable() {
+		t.Fatal("unknown typed records must not mark the transcript unparseable")
+	}
+	// A real format break: recent appended data is not interpretable at all.
+	append_("this is no longer a transcript line", 12)
+	if turns := tl.Poll(); len(turns) != 2 {
+		t.Fatalf("earlier turns must survive, got %d", len(turns))
+	}
+	if !tl.Unparseable() {
+		t.Fatal("garbage tail must mark the transcript unparseable")
+	}
+	// Recovery: recognizable data resets the streak.
+	append_(`{"type":"assistant","timestamp":"t3","message":{"role":"assistant","content":"back"}}`, 1)
+	tl.Poll()
+	if tl.Unparseable() {
+		t.Fatal("streak must reset once recognizable data resumes")
+	}
+}
+
 // WaitingOn is the transcript half of needs-input detection: a logged tool
 // call whose result has not been logged yet. Verified against real session
 // logs: both CLIs write the call record when the agent asks, and the result

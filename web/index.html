@@ -849,9 +849,17 @@ async function sendPrompt(){
     setTimeout(tick, 400);
   } catch (err) {
     alert(err.message);
-    /* nothing typed is ever lost — restored under the node it was written for */
-    localStorage.setItem("scimux-draft:" + dest, text);
-    if (sel === dest) ta.value = text;
+    /* nothing typed is ever lost — restored under the node it was written
+       for, and merged in front of anything typed while the send was pending
+       rather than overwriting it */
+    const newer = localStorage.getItem("scimux-draft:" + dest) || "";
+    const merged = newer && newer !== text ? text + "\n\n" + newer : text;
+    localStorage.setItem("scimux-draft:" + dest, merged);
+    if (sel === dest){
+      ta.value = merged;
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+    }
   }
 }
 

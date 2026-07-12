@@ -134,6 +134,35 @@ type Tailer struct {
 	offset  int64
 	buf     []byte
 	pending []pendingCall
+	// unknownStreak counts consecutive appended lines that are not even
+	// structurally recognizable (valid JSON object with a "type"). Unknown
+	// *typed* records are normal and never counted — this catches a file
+	// that stopped being this transcript format at all (wrong file linked,
+	// corruption, a non-JSONL future format), even after earlier valid turns.
+	unknownStreak int
+}
+
+// unparseableThreshold is how many consecutive structurally-unrecognizable
+// lines mark a transcript as no longer making sense.
+const unparseableThreshold = 10
+
+// Unparseable reports that the transcript's recent appended data cannot be
+// interpreted — the signal for degrading the UI to the pane snapshot even
+// when older turns were parsed fine.
+func (t *Tailer) Unparseable() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.unknownStreak >= unparseableThreshold
+}
+
+// recognizedLine is deliberately lenient: any JSON object carrying a type
+// string counts as "still this format", so benign new record types never
+// trip the health signal.
+func recognizedLine(line []byte) bool {
+	var g struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(line, &g) == nil && g.Type != ""
 }
 
 // WaitingOn reports the most recent tool call without a logged result — the
@@ -271,6 +300,13 @@ func (t *Tailer) Poll() []Turn {
 		}
 		line := t.buf[:i]
 		t.buf = append([]byte(nil), t.buf[i+1:]...)
+		if len(bytes.TrimSpace(line)) > 0 {
+			if recognizedLine(line) {
+				t.unknownStreak = 0
+			} else {
+				t.unknownStreak++
+			}
+		}
 		t.notePending(line)
 		if turn, ok := ParseLine(line); ok {
 			t.Turns = append(t.Turns, turn)
@@ -316,6 +352,24 @@ func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
 		return "", "", false
 	}
 	return path, strings.TrimSuffix(filepath.Base(path), ".jsonl"), true
+}
+
+// ListCodexRollouts returns the set of rollout paths currently under root.
+// Taken as a snapshot before launching a Codex node, it lets discovery
+// correlate only files that appeared after the launch — immune to mtime
+// games from concurrent sessions appending to older rollouts.
+func ListCodexRollouts(root string) map[string]bool {
+	out := map[string]bool{}
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), "rollout-") && strings.HasSuffix(d.Name(), ".jsonl") {
+			out[path] = true
+		}
+		return nil
+	})
+	return out
 }
 
 // FindCodexRollout locates the oldest unclaimed Codex rollout file under
