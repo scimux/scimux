@@ -829,7 +829,7 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	// snapshot appeared after launch"; then the launch proceeds but
 	// discovery stays disabled (nil snapshot) and the node relies on peek.
 	var rollouts map[string]bool
-	if strings.TrimSpace(n.Prompt) != "" && a.effectiveAgent(&n) == "codex" {
+	if strings.TrimSpace(n.Prompt) != "" && a.effectiveAgent(&n) == "codex" && a.effectiveDirOK(&n) {
 		snap, complete := transcript.ListCodexRollouts(a.codexRoot)
 		if complete {
 			rollouts = snap
@@ -862,6 +862,30 @@ func (a *app) effectiveAgent(n *Node) string {
 		}
 	}
 	return "claude"
+}
+
+// effectiveDirOK mirrors createNode's directory resolution (explicit, else
+// the parent's, else home) and reports whether it will pass validation, so
+// a codex request that createNode is going to reject cannot cost a history
+// walk. Like effectiveAgent it does not mutate the request.
+func (a *app) effectiveDirOK(n *Node) bool {
+	dir := n.Dir
+	if dir == "" && n.Parent != "" {
+		a.mu.Lock()
+		if p, ok := a.byID[n.Parent]; ok {
+			dir = p.Dir
+		}
+		a.mu.Unlock()
+	}
+	if dir == "" {
+		dir = a.home
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	st, err := os.Stat(abs)
+	return err == nil && st.IsDir()
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {

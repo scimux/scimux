@@ -322,6 +322,33 @@ func TestEffectiveAgent(t *testing.T) {
 	}
 }
 
+// effectiveDirOK keeps invalid codex requests from paying the history walk;
+// it must mirror createNode's dir resolution, including parent inheritance.
+func TestEffectiveDirOK(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{
+		"p":   {ID: "p", Dir: dir},
+		"bad": {ID: "bad", Dir: filepath.Join(dir, "gone")},
+	}}
+	cases := []struct {
+		n    Node
+		want bool
+	}{
+		{Node{Dir: dir}, true},
+		{Node{}, true},                                           // defaults to home
+		{Node{Parent: "p"}, true},                                // inherited valid dir
+		{Node{Parent: "bad"}, false},                             // inherited invalid dir
+		{Node{Dir: filepath.Join(dir, "nope")}, false},           // missing
+		{Node{Dir: filepath.Join(dir, "f"), Parent: "p"}, false}, // explicit beats inherited
+	}
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644) // a file, not a dir
+	for _, c := range cases {
+		if got := a.effectiveDirOK(&c.n); got != c.want {
+			t.Errorf("effectiveDirOK(%+v) = %v, want %v", c.n, got, c.want)
+		}
+	}
+}
+
 func TestSysloadOnLinux(t *testing.T) {
 	s := sysload()
 	if s.NCPU <= 0 {
