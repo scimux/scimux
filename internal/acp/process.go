@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -63,32 +64,48 @@ func execRunner(nodeID, agent, dir string) (Process, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s ACP: %w", agent, err)
 	}
-	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout}, nil
+	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout, waited: make(chan struct{})}, nil
 }
 
 type osProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.Reader
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.Reader
+	waited   chan struct{} // closed by Wait once the process is reaped
+	waitOnce sync.Once
+	killOnce sync.Once
 }
 
 func (p *osProcess) Stdin() io.WriteCloser { return p.stdin }
 func (p *osProcess) Stdout() io.Reader     { return p.stdout }
 
-// Kill signals the whole process group (negative pid), then escalates: an ACP
-// agent may have spawned tool grandchildren that must not orphan.
+// Kill signals the whole process group (negative pid), then escalates to
+// SIGKILL only if the group is still running — an ACP agent may have spawned
+// tool grandchildren that must not orphan. Escalation is gated on the process
+// actually still being alive (waited), not a blind timer, so a group that
+// exits promptly is never SIGKILLed after its pid/pgid may have been reused by
+// an unrelated process (finding 58). Repeated calls are idempotent.
 func (p *osProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
 	}
-	pgid := p.cmd.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	// Give the group a brief grace period, then SIGKILL.
-	go func(pgid int) {
-		time.Sleep(2 * time.Second)
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	}(pgid)
+	p.killOnce.Do(func() {
+		pgid := p.cmd.Process.Pid
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		go func(pgid int) {
+			select {
+			case <-p.waited:
+				// Exited after SIGTERM; do not signal a possibly-reused pgid.
+			case <-time.After(2 * time.Second):
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+		}(pgid)
+	})
 	return nil
 }
 
-func (p *osProcess) Wait() error { return p.cmd.Wait() }
+func (p *osProcess) Wait() error {
+	err := p.cmd.Wait()
+	p.waitOnce.Do(func() { close(p.waited) })
+	return err
+}

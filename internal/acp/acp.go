@@ -67,6 +67,14 @@ func NewManagerWithRunner(logDir string, r Runner) *Manager {
 	return &Manager{sessions: map[string]*Session{}, runner: r, logDir: logDir}
 }
 
+// killAndReap kills a started subprocess and drains its exit in the background
+// so a launch that fails after Start (initialize/new-session error) never leaks
+// a zombie (finding 57). The success path installs its own reaper instead.
+func killAndReap(p Process) {
+	_ = p.Kill()
+	go func() { _ = p.Wait() }()
+}
+
 func (m *Manager) logPath(nodeID string) string {
 	return filepath.Join(m.logDir, nodeID+".jsonl")
 }
@@ -110,12 +118,12 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 			Terminal: false,
 		},
 	}); err != nil {
-		proc.Kill()
+		killAndReap(proc)
 		return "", fmt.Errorf("acp initialize: %w", err)
 	}
 	resp, err := s.conn.NewSession(ctx, sdk.NewSessionRequest{Cwd: dir, McpServers: []sdk.McpServer{}})
 	if err != nil {
-		proc.Kill()
+		killAndReap(proc)
 		return "", fmt.Errorf("acp new session: %w", err)
 	}
 	s.sessionID = resp.SessionId
@@ -160,13 +168,65 @@ func (m *Manager) Send(nodeID, text string) error {
 }
 
 // Resolve answers a pending permission request by mapping a whitelisted key to
-// an option. Returns evidence (the tool title) for the audit record.
+// an option and delivering it in one call. Returns evidence (the tool title)
+// for the audit record. The HTTP path uses the split PrepareResolve/Deliver so
+// it can persist the audit record between mapping and delivery; this composed
+// form is retained for tests and callers that do not audit separately.
 func (m *Manager) Resolve(nodeID, key string) (string, error) {
 	s := m.session(nodeID)
 	if s == nil {
 		return "", ErrNoSession
 	}
-	return s.resolvePermission(key)
+	id, evidence, err := s.prepareResolve(key)
+	if err != nil {
+		return "", err
+	}
+	if err := s.deliver(id); err != nil {
+		return "", err
+	}
+	return evidence, nil
+}
+
+// PrepareResolve maps the pending key to a permission option and returns the
+// option id plus audit evidence WITHOUT delivering it, so the HTTP layer can
+// persist the decision before the agent ever receives the answer (finding 53:
+// no unaudited permission decision). Deliver completes the answer.
+func (m *Manager) PrepareResolve(nodeID, key string) (optID, evidence string, err error) {
+	s := m.session(nodeID)
+	if s == nil {
+		return "", "", ErrNoSession
+	}
+	id, ev, err := s.prepareResolve(key)
+	return string(id), ev, err
+}
+
+// Deliver sends a previously mapped permission option to the pending request.
+// It fails if the pending request has changed or already been answered, so a
+// stale answer is never delivered to a fresh request.
+func (m *Manager) Deliver(nodeID, optID string) error {
+	s := m.session(nodeID)
+	if s == nil {
+		return ErrNoSession
+	}
+	return s.deliver(sdk.PermissionOptionId(optID))
+}
+
+// RecordStartFailure marks a node whose first prompt could not be delivered
+// (finding 52). It writes the failure to the authoritative log — so it survives
+// a restart and renders in the peek/chat view — and, when a session still
+// exists, surfaces it as the node's LastError. This upholds the creation
+// invariant: once a node is published, its first prompt is either in the
+// agent's context or visibly failed in the node's own history.
+func (m *Manager) RecordStartFailure(nodeID string, cause error) {
+	msg := "first prompt not delivered: " + cause.Error()
+	_ = (&logWriter{path: m.logPath(nodeID)}).append(Event{T: "error", Error: msg})
+	if s := m.session(nodeID); s != nil {
+		s.mu.Lock()
+		if s.lastError == "" {
+			s.lastError = msg
+		}
+		s.mu.Unlock()
+	}
 }
 
 // Pending reports the outstanding permission request, if any, so the UI can
@@ -309,14 +369,15 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 		s.appendAssistantLocked(blockText(u.AgentMessageChunk.Content), u.AgentMessageChunk.MessageId)
 	case u.ToolCall != nil:
 		s.flushAssistantLocked()
-		s.turnHadOutput = true
-		_ = s.logw.append(Event{T: "tool", Tool: &ToolEvent{
+		if s.appendLocked(Event{T: "tool", Tool: &ToolEvent{
 			ID:       string(u.ToolCall.ToolCallId),
 			Title:    u.ToolCall.Title,
 			Kind:     string(u.ToolCall.Kind),
 			Status:   string(u.ToolCall.Status),
 			RawInput: u.ToolCall.RawInput,
-		}})
+		}}) {
+			s.turnHadOutput = true
+		}
 	case u.ToolCallUpdate != nil:
 		tu := u.ToolCallUpdate
 		ev := &ToolEvent{ID: string(tu.ToolCallId), RawInput: tu.RawInput}
@@ -329,8 +390,9 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 		if tu.Status != nil {
 			ev.Status = string(*tu.Status)
 		}
-		s.turnHadOutput = true
-		_ = s.logw.append(Event{T: "tool", Tool: ev})
+		if s.appendLocked(Event{T: "tool", Tool: ev}) {
+			s.turnHadOutput = true
+		}
 	case u.UsageUpdate != nil:
 		uu := u.UsageUpdate
 		ev := &UsageEvent{Used: uu.Used, Size: uu.Size}
@@ -338,7 +400,7 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 			ev.CostAmount = uu.Cost.Amount
 			ev.CostCurrency = uu.Cost.Currency
 		}
-		_ = s.logw.append(Event{T: "usage", Usage: ev})
+		s.appendLocked(Event{T: "usage", Usage: ev})
 	default:
 		// Thoughts, plans, mode/config/info updates, and any future variant:
 		// ignored, never an error (defensive-parsing contract).
@@ -456,19 +518,24 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 		if u.CachedReadTokens != nil {
 			ev.CachedReadTokens = *u.CachedReadTokens
 		}
-		_ = s.logw.append(Event{T: "usage", Usage: ev})
+		s.appendLocked(Event{T: "usage", Usage: ev})
 	}
 	switch {
 	case err != nil:
 		s.lastError = err.Error()
-		_ = s.logw.append(Event{T: "error", Error: err.Error()})
+		s.appendLocked(Event{T: "error", Error: err.Error()})
 	default:
-		_ = s.logw.append(Event{T: "stop", StopReason: string(resp.StopReason)})
+		s.appendLocked(Event{T: "stop", StopReason: string(resp.StopReason)})
 		// A turn that ended without any text or tool output is a failed/empty
-		// turn (observed: a model failure can end_turn silently). Surface it.
+		// turn (observed: a model failure can end_turn silently). A persistence
+		// failure (appendLocked already set lastError) also lands here because
+		// turnHadOutput is only claimed for records that reached the log, so
+		// keep the earlier, more specific error rather than masking it.
 		if !s.turnHadOutput {
-			s.lastError = "agent produced no output this turn"
-			_ = s.logw.append(Event{T: "error", Error: s.lastError})
+			if s.lastError == "" {
+				s.lastError = "agent produced no output this turn"
+			}
+			s.appendLocked(Event{T: "error", Error: s.lastError})
 		}
 	}
 	s.turnActive = false
@@ -508,28 +575,77 @@ func (s *Session) flushAssistantLocked() {
 	}
 	txt := s.assistant.String()
 	s.assistant.Reset()
-	s.turnHadOutput = true
-	_ = s.logw.append(Event{T: "assistant", Text: txt})
+	if s.appendLocked(Event{T: "assistant", Text: txt}) {
+		s.turnHadOutput = true
+	}
+}
+
+// appendLocked persists one event and folds a write failure into the session's
+// visible error state (finding 51). Callers hold s.mu. It returns true only
+// when the record actually reached the log: the ACP log is the authoritative
+// history, so callers must not claim turnHadOutput for an event that did not
+// persist, and a silent write failure must not let the agent produce output
+// that is neither stored nor surfaced. The first failure wins so the chat view
+// shows the original cause.
+func (s *Session) appendLocked(ev Event) bool {
+	if err := s.logw.append(ev); err != nil {
+		if s.lastError == "" {
+			s.lastError = "session log write failed: " + err.Error()
+		}
+		fmt.Fprintf(os.Stderr, "scimux/acp: persisting %s for %s failed: %v\n", ev.T, s.nodeID, err)
+		return false
+	}
+	return true
 }
 
 // --- permission answering ---
 
-func (s *Session) resolvePermission(key string) (string, error) {
+// prepareResolve maps a whitelisted key to the pending option and returns the
+// option id plus audit evidence, without delivering. Holds s.mu for the whole
+// mapping so it reads a consistent pending snapshot.
+func (s *Session) prepareResolve(key string) (sdk.PermissionOptionId, string, error) {
 	s.mu.Lock()
-	p := s.pending
-	s.mu.Unlock()
-	if p == nil {
-		return "", ErrNoPending
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		return "", "", ErrNoPending
 	}
-	id, ok := mapKeyToOption(key, p.options)
+	id, ok := mapKeyToOption(key, s.pending.options)
 	if !ok {
-		return "", fmt.Errorf("key %q maps to no permission option", key)
+		return "", "", fmt.Errorf("key %q maps to no permission option", key)
 	}
+	return id, "permission: " + s.pending.toolTitle, nil
+}
+
+// deliver hands the mapped option to the blocked RequestPermission goroutine.
+// It holds s.mu across the check-and-send and consumes the pending request
+// (pending = nil) atomically, closing the finding-53 race where a copy of
+// pending could be sent into a stale channel after clearPending had run. The
+// option must still belong to the current pending request, so an answer mapped
+// against a since-replaced request is refused rather than misdelivered.
+func (s *Session) deliver(id sdk.PermissionOptionId) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending
+	if p == nil {
+		return ErrNoPending
+	}
+	valid := false
+	for _, o := range p.options {
+		if o.OptionId == id {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return errors.New("pending permission changed before the answer was delivered")
+	}
+	s.pending = nil // consume; RequestPermission's deferred clearPending is now a no-op
 	select {
-	case p.ch <- id:
-	default: // already answered/cancelled; harmless
+	case p.ch <- id: // buffered (cap 1) and empty: completes without blocking
+		return nil
+	default:
+		return errors.New("permission request was already answered")
 	}
-	return "permission: " + p.toolTitle, nil
 }
 
 func (s *Session) pendingInfo() (string, []PermOption, bool) {

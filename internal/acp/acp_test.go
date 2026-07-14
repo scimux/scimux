@@ -2,7 +2,10 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -284,5 +287,81 @@ func TestSendToDeadSession(t *testing.T) {
 	m := newManager(t, &fakeAgent{})
 	if err := m.Send("missing", "hi"); err != ErrNoSession {
 		t.Fatalf("err = %v, want ErrNoSession", err)
+	}
+}
+
+// A log write failure must not be swallowed: the failing record does not count
+// as turn output, and the failure becomes the session's visible error rather
+// than a quiet, successful-looking empty turn (finding 51).
+func TestAppendFailureIsVisible(t *testing.T) {
+	dir := t.TempDir()
+	// A directory where the log file should be makes every append fail.
+	badPath := filepath.Join(dir, "n1.jsonl")
+	if err := os.Mkdir(badPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Session{nodeID: "n1", logw: &logWriter{path: badPath}}
+	s.mu.Lock()
+	s.assistant.WriteString("real output that cannot be persisted")
+	s.flushAssistantLocked()
+	hadOutput := s.turnHadOutput
+	s.mu.Unlock()
+
+	if hadOutput {
+		t.Error("turnHadOutput set for an assistant record that did not persist")
+	}
+	if s.LastError() == "" {
+		t.Error("expected a visible error after a log write failure")
+	}
+}
+
+// After a node is published, a first-prompt delivery failure must be visible in
+// the node's own history and error state, not a silent empty success
+// (finding 52).
+func TestRecordStartFailureSurfaces(t *testing.T) {
+	agent := &fakeAgent{}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.RecordStartFailure("n1", errors.New("subprocess exited before send"))
+
+	if le := m.LastError("n1"); le == "" {
+		t.Error("expected LastError after a start failure")
+	}
+	// The failure is also durable in the authoritative log (survives restart).
+	found := false
+	for _, ev := range readEvents(filepath.Join(dir, "n1.jsonl")) {
+		if ev.T == "error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected an error event persisted to the log")
+	}
+}
+
+// Delivering an option that no longer matches the current pending request is
+// refused rather than answering a since-replaced prompt (finding 53).
+func TestDeliverRejectsStaleOption(t *testing.T) {
+	s := &Session{nodeID: "n1", logw: &logWriter{path: filepath.Join(t.TempDir(), "n1.jsonl")}}
+	s.pending = &pendingPermission{
+		toolTitle: "run bash",
+		options:   []sdk.PermissionOption{{OptionId: "opt_allow", Name: "Allow"}},
+		ch:        make(chan sdk.PermissionOptionId, 1),
+	}
+	if err := s.deliver(sdk.PermissionOptionId("opt_gone")); err == nil {
+		t.Error("expected delivery of an unknown option to be refused")
+	}
+	// A valid option is consumed and clears the pending request.
+	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != nil {
+		t.Fatalf("valid deliver failed: %v", err)
+	}
+	if _, _, ok := s.pendingInfo(); ok {
+		t.Error("pending should be cleared after a successful deliver")
+	}
+	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != ErrNoPending {
+		t.Errorf("second deliver err = %v, want ErrNoPending", err)
 	}
 }

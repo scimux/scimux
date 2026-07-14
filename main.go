@@ -285,10 +285,13 @@ func (a *app) resolveNode(n *Node) (int, error) {
 			n.Dir = p.Dir
 		}
 		// A fork inherits the parent's transport (fresh context, same
-		// mechanism). Derivation from the agent below only fires when neither
-		// the request nor a parent pinned one.
+		// mechanism). Use the migrated value, not the raw field: an old or
+		// adopted pi/opencode parent with an empty Transport means tmux, so the
+		// child must resolve to tmux too rather than falling through to the
+		// agent-derived ACP default below (finding 54). Derivation only fires
+		// when neither the request nor a parent pinned a transport.
 		if n.Transport == "" {
-			n.Transport = p.Transport
+			n.Transport = p.transport()
 		}
 	}
 	if n.Agent == "" {
@@ -393,11 +396,16 @@ func (a *app) createACPNode(n *Node) (int, error) {
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
-	// Deliver the research question as the first turn. A failure is recorded
-	// visibly by the manager (error record), not swallowed; the node still
-	// exists and can be retried.
+	// Deliver the research question as the first turn. Unlike the tmux path
+	// (where the first prompt rides the launch command line and thus always
+	// reaches the agent), an ACP Send can fail before anything is recorded —
+	// e.g. the subprocess died during launch, or the user-turn append failed.
+	// Persist that failure to the node's own history so the chat view shows it
+	// instead of a silent, empty successful node (finding 52). The node still
+	// exists and the prompt can be retried.
 	if err := a.acp.Send(n.ID, n.Prompt); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: first prompt to ACP node %s failed: %v\n", n.ID, err)
+		a.acp.RecordStartFailure(n.ID, err)
 	}
 	return 0, nil
 }
@@ -1346,11 +1354,14 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// ACP: the key answers a structured permission request (there is no pane to
-	// press it into). The manager maps the whitelisted key to a permission
-	// option; the tool title stands in for the pane excerpt as decision
-	// evidence in the audit record.
+	// press it into). Because ACP resolution is structured, the key can be
+	// mapped to an option and audited *before* the agent is told the answer —
+	// unlike a tmux keypress, this need not be a post-send best-effort write.
+	// Persist the decision first, then deliver, so a store failure can never
+	// leave an unaudited permission answer already acted on (finding 53). The
+	// tool title stands in for the pane excerpt as decision evidence.
 	if n.transport() == "acp" {
-		evidence, err := a.acp.Resolve(n.ID, body.Key)
+		optID, evidence, err := a.acp.PrepareResolve(n.ID, body.Key)
 		if err != nil {
 			code := 400
 			if err == acp.ErrNoSession || err == acp.ErrNoPending {
@@ -1361,8 +1372,12 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
 			Excerpt: evidence, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
-			fmt.Fprintf(os.Stderr, "scimux: key %q answered on %s but audit record failed: %v\n", body.Key, n.ID, err)
-			http.Error(w, "key was answered, but persisting the audit record failed: "+err.Error(), 500)
+			http.Error(w, "refusing to answer without an audit record: "+err.Error(), 500)
+			return
+		}
+		if err := a.acp.Deliver(n.ID, optID); err != nil {
+			fmt.Fprintf(os.Stderr, "scimux: key %q audited on %s but delivery failed: %v\n", body.Key, n.ID, err)
+			http.Error(w, "the decision was recorded, but delivering it to the agent failed: "+err.Error(), 500)
 			return
 		}
 		writeJSON(w, map[string]string{"ok": "sent"})

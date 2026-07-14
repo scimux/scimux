@@ -73,6 +73,33 @@ func TestAgentCommand(t *testing.T) {
 	}
 }
 
+// A fork of an old or adopted pi/opencode node whose stored Transport predates
+// the field (empty → tmux) must stay on tmux, not silently flip to the ACP
+// default derived from the agent name (finding 54).
+func TestForkInheritsMigratedTransport(t *testing.T) {
+	a := &app{byID: map[string]*Node{}, home: t.TempDir()}
+	parent := &Node{ID: "root", Agent: "pi", Dir: a.home, Transport: ""}
+	a.byID["root"] = parent
+
+	child := &Node{Parent: "root", Prompt: "keep supervising over tmux"}
+	if status, err := a.resolveNode(child); err != nil {
+		t.Fatalf("resolveNode: %d %v", status, err)
+	}
+	if got := child.transport(); got != "tmux" {
+		t.Errorf("fork of empty-Transport pi parent = %q, want tmux", got)
+	}
+
+	// A parent explicitly on ACP is inherited as ACP.
+	a.byID["acproot"] = &Node{ID: "acproot", Agent: "pi", Dir: a.home, Transport: "acp"}
+	acpChild := &Node{Parent: "acproot", Prompt: "p"}
+	if status, err := a.resolveNode(acpChild); err != nil {
+		t.Fatalf("resolveNode acp: %d %v", status, err)
+	}
+	if got := acpChild.transport(); got != "acp" {
+		t.Errorf("fork of acp parent = %q, want acp", got)
+	}
+}
+
 func TestUniqueID(t *testing.T) {
 	a := &app{byID: map[string]*Node{}}
 	cases := map[string]string{

@@ -1320,6 +1320,7 @@ async function refreshChat(){
   }
 
   const sig = [n.id, d.live, n.attention, d.delivery, showPeek, termOpen, termFull,
+               d.source, d.perm_title, (d.perm_options || []).map(o => o.key + o.name).join(","),
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
   if (sig === chatSig) return;
@@ -1388,11 +1389,26 @@ async function refreshChat(){
   const HINTS = {
     inspect: "The agent has gone quiet \u2014 check the terminal below; keys go straight to it:",
   };
-  $("#keyrow").innerHTML = n.attention
-    ? `<span class="hint">${esc(HINTS[n.attention] || `The agent waits for your ${n.attention} \u2014 keys go straight to its terminal:`)}</span>` +
+  if (!n.attention) {
+    $("#keyrow").innerHTML = "";
+  } else if (d.source === "acp") {
+    /* ACP prompts are structured: render one button per returned option with
+       its own label, so prompts with more than four options are fully
+       answerable and option names are visible. There is no terminal, so the
+       hint doesn't promise keystrokes go to one. */
+    const opts = d.perm_options || [];
+    const what = d.perm_title ? `for ${esc(d.perm_title)}` : "";
+    $("#keyrow").innerHTML =
+      `<span class="hint">The agent needs your approval ${what} \u2014 choose one:</span>` +
+      (opts.length
+        ? opts.map(o => `<button data-key="${esc(o.key)}">${esc(o.key)}. ${esc(o.name)}</button>`).join("")
+        : ["y","n"].map(k => `<button data-key="${k}">${k}</button>`).join(""));
+  } else {
+    $("#keyrow").innerHTML =
+      `<span class="hint">${esc(HINTS[n.attention] || `The agent waits for your ${n.attention} \u2014 keys go straight to its terminal:`)}</span>` +
       ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
-        `<button data-key="${k}">${KEYS[k] || k}</button>`).join("")
-    : "";
+        `<button data-key="${k}">${KEYS[k] || k}</button>`).join("");
+  }
 }
 
 $("#keyrow").addEventListener("click", async e => {

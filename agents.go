@@ -22,7 +22,14 @@ import (
 // broke, and an empty model list is still valid (the harness launches with
 // its own default model).
 type harness struct {
-	bin      string
+	bin string
+	// require is the executable whose presence gates whether this harness is
+	// offered at all. Empty means bin itself. It differs from bin when creation
+	// launches through a different binary than the one that lists models: pi
+	// nodes launch via `pi-acp` (the ACP transport) but list models via `pi`,
+	// so offering pi when only `pi` — not `pi-acp` — is installed would present
+	// a selectable agent that cannot start (finding 56).
+	require  string
 	list     func(ctx context.Context, bin string) []string
 	fallback func() []string
 }
@@ -36,7 +43,10 @@ var harnesses = []harness{
 	// codex has no list command either; put the locally configured model
 	// first, then the known current line-up.
 	{bin: "codex", fallback: codexModels},
-	{bin: "pi", list: piModels},
+	// pi is launchable only when its ACP binary `pi-acp` exists; the models
+	// come from `pi --list-models` when that is also present.
+	{bin: "pi", require: "pi-acp", list: piModels},
+	// opencode exposes ACP as a subcommand of the same binary, so bin suffices.
 	{bin: "opencode", list: opencodeModels},
 }
 
@@ -52,15 +62,24 @@ func detectAgents() map[string][]string {
 	agentsOnce.Do(func() {
 		res := map[string][]string{}
 		for _, h := range harnesses {
-			bin, err := exec.LookPath(h.bin)
-			if err != nil {
+			require := h.require
+			if require == "" {
+				require = h.bin
+			}
+			// Presence is gated on the binary creation actually requires.
+			if _, err := exec.LookPath(require); err != nil {
 				continue
 			}
 			var models []string
+			// Model probing uses bin, which may differ from require and may be
+			// absent on its own — an installed launcher with no lister still
+			// yields an offerable agent that runs on its default model.
 			if h.list != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				models = h.list(ctx, bin)
-				cancel()
+				if bin, err := exec.LookPath(h.bin); err == nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					models = h.list(ctx, bin)
+					cancel()
+				}
 			}
 			if len(models) == 0 && h.fallback != nil {
 				models = h.fallback()
