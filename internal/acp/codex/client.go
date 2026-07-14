@@ -208,6 +208,8 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 		return r.err
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-c.done:
+		return fmt.Errorf("peer closed during turn")
 	}
 }
 
@@ -264,10 +266,35 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 			c.emit(Event{T: "usage", Usage: u})
 		}
 	case "turn/completed":
+		// Safety-net flush: if the server ended the turn without emitting
+		// item/completed for a buffered delta item (protocol churn or an
+		// interrupted item), emit whatever text was accumulated so it is not
+		// silently lost (finding 84).
+		c.flushDeltas()
 		c.signalTurn(turnResult{reason: "turn/completed"})
 	case "turn/failed", "error":
+		// Clear buffered deltas on failure; do not emit partial text as
+		// assistant output for a turn that did not complete (finding 84).
+		c.mu.Lock()
+		c.deltas = nil
+		c.mu.Unlock()
 		c.emit(Event{T: "error", Error: string(params)})
 		c.signalTurn(turnResult{reason: "error", err: fmt.Errorf("turn failed: %s", string(params))})
+	}
+}
+
+// flushDeltas emits any buffered delta fragments as assistant events and clears
+// the buffer. Called on turn/completed as a safety net for delta items whose
+// item/completed was never delivered.
+func (c *Client) flushDeltas() {
+	c.mu.Lock()
+	leftover := c.deltas
+	c.deltas = nil
+	c.mu.Unlock()
+	for _, b := range leftover {
+		if text := b.String(); text != "" {
+			c.emit(Event{T: "assistant", Text: text})
+		}
 	}
 }
 

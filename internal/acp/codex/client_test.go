@@ -190,6 +190,64 @@ func TestDeltaWithInlineTextPreservesInlineText(t *testing.T) {
 	}
 }
 
+func TestDeltaFlushedOnTurnCompleted(t *testing.T) {
+	// If the server emits deltas and then turn/completed without a matching
+	// item/completed, the buffered text must still be emitted as an assistant
+	// event (finding 84 safety-net flush).
+	c, ms, col := newClientWithMock(t)
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() {
+		_, _ = c.Initialize(ctx, "test", "1")
+		ti, _ := c.StartThread(ctx, StartThreadParams{Cwd: "/w"})
+		done <- c.RunTurn(ctx, ti.ID, "ping")
+	}()
+
+	ms.reply(t, ms.nextReq(t).ID, `{}`)
+	ms.reply(t, ms.nextReq(t).ID, threadStartResult)
+	ms.reply(t, ms.nextReq(t).ID, `{"turn":{}}`)
+
+	// Deltas arrive but item/completed is never sent — turn/completed comes directly.
+	ms.note(t, "item/agentMessage/delta", `{"itemId":"msg-x","delta":"flushed "}`)
+	ms.note(t, "item/agentMessage/delta", `{"itemId":"msg-x","delta":"text"}`)
+	ms.note(t, "turn/completed", `{}`)
+
+	if err := <-done; err != nil {
+		t.Fatalf("turn error: %v", err)
+	}
+	a := col.byType("assistant")
+	if len(a) != 1 || a[0].Text != "flushed text" {
+		t.Fatalf("assistant events = %+v", a)
+	}
+}
+
+func TestDeltaClearedOnTurnFailed(t *testing.T) {
+	// On turn/failed the buffered deltas must be cleared without being emitted
+	// as assistant text — a failed turn should not log partial content (finding 84).
+	c, ms, col := newClientWithMock(t)
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() {
+		_, _ = c.Initialize(ctx, "test", "1")
+		ti, _ := c.StartThread(ctx, StartThreadParams{Cwd: "/w"})
+		done <- c.RunTurn(ctx, ti.ID, "ping")
+	}()
+
+	ms.reply(t, ms.nextReq(t).ID, `{}`)
+	ms.reply(t, ms.nextReq(t).ID, threadStartResult)
+	ms.reply(t, ms.nextReq(t).ID, `{"turn":{}}`)
+
+	ms.note(t, "item/agentMessage/delta", `{"itemId":"msg-y","delta":"partial"}`)
+	ms.note(t, "turn/failed", `"rate limit"`)
+
+	if err := <-done; err == nil {
+		t.Fatal("want turn error, got nil")
+	}
+	if a := col.byType("assistant"); len(a) != 0 {
+		t.Fatalf("want no assistant events on turn failure, got %+v", a)
+	}
+}
+
 func TestTurnApprovalAccepted(t *testing.T) {
 	c, ms, col := newClientWithMock(t)
 	var gotApproval Approval

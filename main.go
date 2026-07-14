@@ -931,6 +931,18 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: need session", 400)
 		return
 	}
+	agent := body.Agent
+	if agent == "" {
+		agent = "claude"
+	}
+	// Codex now uses the app-server protocol: scimux starts the subprocess
+	// itself via POST /api/nodes. Reject before the tmux Alive check so any
+	// agent:"codex" request gets the clear explanation regardless of whether
+	// the named session exists.
+	if agent == "codex" {
+		http.Error(w, "codex uses the app-server protocol; use POST /api/nodes with agent:\"codex\" to create a new activity", 400)
+		return
+	}
 	s := a.server.Session(body.Session)
 	if !s.Alive() {
 		http.Error(w, fmt.Sprintf("no session %q on socket %q", body.Session, a.server.Socket), 404)
@@ -951,19 +963,6 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	title := body.Title
 	if title == "" {
 		title = body.Session
-	}
-	agent := body.Agent
-	if agent == "" {
-		agent = "claude"
-	}
-	// Codex now uses the app-server protocol: scimux starts the subprocess
-	// itself via POST /api/nodes. Adopting an externally-managed codex tmux
-	// session is no longer supported because the Codex-specific transcript
-	// discovery path was removed and adopted tmux-Codex nodes would never get
-	// structured chat history. Use POST /api/nodes with agent:"codex" instead.
-	if agent == "codex" {
-		http.Error(w, "codex uses the app-server protocol; use POST /api/nodes with agent:\"codex\" to create a new activity", 400)
-		return
 	}
 	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
 		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,

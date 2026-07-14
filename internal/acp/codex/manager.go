@@ -26,6 +26,9 @@ type Manager struct {
 	sessions map[string]*Session
 	spawn    SpawnFunc
 	logDir   string
+	// wg tracks in-flight runTurn goroutines so Shutdown can wait for them
+	// before returning, preventing writes to a deleted log directory.
+	wg sync.WaitGroup
 }
 
 // SpawnFunc launches the app-server transport for a node. Injectable so unit
@@ -148,7 +151,8 @@ func (m *Manager) Send(nodeID, text string) error {
 		s.abortTurn()
 		return fmt.Errorf("record user turn: %w", err)
 	}
-	go s.runTurn(text)
+	m.wg.Add(1)
+	go func() { defer m.wg.Done(); s.runTurn(text) }()
 	return nil
 }
 
@@ -274,6 +278,10 @@ func (m *Manager) Shutdown() {
 	for _, s := range ss {
 		_ = s.stop()
 	}
+	// Wait for in-flight runTurn goroutines to finish. They write to the session
+	// log; without this wait, callers (e.g. tests using t.TempDir) can delete
+	// the log directory before the goroutine is done, producing write errors.
+	m.wg.Wait()
 }
 
 // ---------- Session ----------

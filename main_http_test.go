@@ -416,15 +416,34 @@ func (t *fakeCodexTransport) Close() error {
 	return nil
 }
 
-// newFakeCodexSpawn returns a SpawnFunc whose transports are served by an
-// inline goroutine that completes the initialize + thread/start handshake and
-// then handles one turn per call (turn/start → reply → item/completed →
-// turn/completed). The returned *string collects all requests for assertions.
-func newFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (codex.SpawnFunc, *[]string) {
-	t.Helper()
-	var mu sync.Mutex
-	var reqs []string
-	spawn := func(nodeID, dir string) (codex.Transport, error) {
+// fakeCodexServer is shared state for the inline fake app-server goroutine.
+// All access to methods goes through locks so tests can read safely under race.
+type fakeCodexServer struct {
+	mu   sync.Mutex
+	reqs []string
+}
+
+func (s *fakeCodexServer) record(method string) {
+	s.mu.Lock()
+	s.reqs = append(s.reqs, method)
+	s.mu.Unlock()
+}
+
+// requests returns a snapshot of all recorded method names under the lock,
+// safe to call concurrently with the server goroutine (finding 82).
+func (s *fakeCodexServer) requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]string, len(s.reqs))
+	copy(cp, s.reqs)
+	return cp
+}
+
+// fakeCodexSpawnBase is the shared server loop for the two spawn variants.
+// unblock, if non-nil, is a channel the fake blocks on before completing
+// turn/start; turnStarted, if non-nil, is closed once turn/start is received.
+func fakeCodexSpawnBase(srv *fakeCodexServer, threadID, rolloutPath string, turnStarted chan<- struct{}, unblock <-chan struct{}) codex.SpawnFunc {
+	return func(nodeID, dir string) (codex.Transport, error) {
 		serverR, clientW := io.Pipe()
 		clientR, serverW := io.Pipe()
 		tr := &fakeCodexTransport{stdin: clientW, stdout: clientR}
@@ -437,11 +456,10 @@ func newFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (codex.SpawnF
 				if json.Unmarshal([]byte(line), &req) != nil {
 					continue
 				}
-				mu.Lock()
-				reqs = append(reqs, strings.Trim(string(req["method"]), `"`))
-				mu.Unlock()
+				method := strings.Trim(string(req["method"]), `"`)
+				srv.record(method)
 				rawID := req["id"]
-				switch strings.Trim(string(req["method"]), `"`) {
+				switch method {
 				case "initialize":
 					fmt.Fprintf(serverW, `{"id":%s,"result":{"userAgent":"fake"}}`+"\n", rawID)
 				case "thread/start":
@@ -449,6 +467,13 @@ func newFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (codex.SpawnF
 						rawID, threadID, rolloutPath)
 				case "turn/start":
 					fmt.Fprintf(serverW, `{"id":%s,"result":{"turn":{}}}`+"\n", rawID)
+					if turnStarted != nil {
+						close(turnStarted)
+						turnStarted = nil // prevent double-close on subsequent turn/start
+					}
+					if unblock != nil {
+						<-unblock
+					}
 					fmt.Fprintf(serverW, `{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"pong"}}}`+"\n")
 					fmt.Fprintf(serverW, `{"method":"turn/completed","params":{}}`+"\n")
 				}
@@ -456,21 +481,41 @@ func newFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (codex.SpawnF
 		}()
 		return tr, nil
 	}
-	return spawn, &reqs
 }
 
-func newCodexTestApp(t *testing.T, threadID, rolloutPath string) (*app, *[]string) {
+// newFakeCodexSpawn returns a SpawnFunc that completes turns immediately and
+// a thread-safe requests() accessor for assertions (finding 82).
+func newFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (codex.SpawnFunc, func() []string) {
+	t.Helper()
+	srv := &fakeCodexServer{}
+	return fakeCodexSpawnBase(srv, threadID, rolloutPath, nil, nil), srv.requests
+}
+
+// newBlockingFakeCodexSpawn returns a SpawnFunc that signals turnStarted
+// when it receives turn/start and then blocks until unblock is closed —
+// giving the test a reliable window where the first turn is provably in flight.
+func newBlockingFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (codex.SpawnFunc, func() []string, <-chan struct{}, chan struct{}) {
+	t.Helper()
+	srv := &fakeCodexServer{}
+	turnStarted := make(chan struct{})
+	unblock := make(chan struct{})
+	return fakeCodexSpawnBase(srv, threadID, rolloutPath, turnStarted, unblock), srv.requests, turnStarted, unblock
+}
+
+func newCodexTestApp(t *testing.T, threadID, rolloutPath string) (*app, func() []string) {
 	t.Helper()
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
-	spawn, reqs := newFakeCodexSpawn(t, threadID, rolloutPath)
-	a.codex = codexManager{codex.NewManagerWithSpawn(filepath.Join(a.storePath[:len(a.storePath)-len("nodes.jsonl")], "codex"), spawn)}
-	return a, reqs
+	spawn, requests := newFakeCodexSpawn(t, threadID, rolloutPath)
+	logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
+	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+	return a, requests
 }
 
 func TestHandleNewNodeCodexCreatesNode(t *testing.T) {
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	a, reqs := newCodexTestApp(t, "THREAD-HTTP", rollout)
+	a, requests := newCodexTestApp(t, "THREAD-HTTP", rollout)
 
 	rec := newNode(a, `{"prompt":"research this","title":"R","agent":"codex","dir":"`+a.home+`"}`)
 	if rec.Code != 200 {
@@ -480,14 +525,22 @@ func TestHandleNewNodeCodexCreatesNode(t *testing.T) {
 	if len(a.nodes) != 1 || a.nodes[0].Transport != "codex" {
 		t.Fatalf("node not registered or wrong transport: %+v", a.nodes)
 	}
-	// Manager must have run initialize + thread/start.
-	for _, m := range *reqs {
-		if m == "initialize" || m == "thread/start" {
-			goto ok
+	// Manager must have run both initialize AND thread/start (finding 83):
+	// Launch is synchronous for both calls, so both are recorded before
+	// newNode returns 200.
+	rlist := requests()
+	var sawInit, sawThread bool
+	for _, m := range rlist {
+		if m == "initialize" {
+			sawInit = true
+		}
+		if m == "thread/start" {
+			sawThread = true
 		}
 	}
-	t.Fatalf("initialize/thread/start not issued: %v", *reqs)
-ok:
+	if !sawInit || !sawThread {
+		t.Fatalf("want both initialize and thread/start, got: %v", rlist)
+	}
 	// SessionID must be the thread id from thread/start.
 	if a.nodes[0].SessionID != "THREAD-HTTP" {
 		t.Errorf("session id = %q, want THREAD-HTTP", a.nodes[0].SessionID)
@@ -497,7 +550,7 @@ ok:
 func TestHandleChatCodexSourceACP(t *testing.T) {
 	// procChat must set source:"acp" so the browser renders the structured view.
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	a, _ := newCodexTestApp(t, "THREAD-CHAT", rollout)
+	a, _ := newCodexTestApp(t, "THREAD-CHAT", rollout) // requests not needed here
 
 	// Create the node first.
 	rec := newNode(a, `{"prompt":"q","agent":"codex","dir":"`+a.home+`"}`)
@@ -537,9 +590,16 @@ func TestHandleChatCodexSourceACP(t *testing.T) {
 }
 
 func TestHandleSendCodexConflict(t *testing.T) {
-	// Send to a codex node with an active turn must return 409.
+	// A second /send while a Codex turn is in flight must return exactly 409
+	// (not 200, not 500). We use a blocking fake server so the first turn is
+	// provably still active when we issue the second request (finding 83).
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	a, _ := newCodexTestApp(t, "THREAD-SEND", rollout)
+	spawn, _, turnStarted, unblock := newBlockingFakeCodexSpawn(t, "THREAD-SEND", rollout)
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
+	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
 
 	rec := newNode(a, `{"prompt":"do x","agent":"codex","dir":"`+a.home+`"}`)
 	if rec.Code != 200 {
@@ -547,21 +607,25 @@ func TestHandleSendCodexConflict(t *testing.T) {
 	}
 	n := a.nodes[0]
 
-	// Inject a second send while the first turn may still be active (or
-	// ErrNoSession if the turn completed and state was reset). Either is a
-	// Conflict → 409.
+	// Wait until the fake server has acknowledged turn/start so we know the
+	// first turn is provably in flight (turnActive == true).
+	select {
+	case <-turnStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first turn to start")
+	}
+
+	// Second send while first turn is active must return 409.
 	sendReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"second"}`))
 	sendReq.SetPathValue("id", n.ID)
 	sendRec := httptest.NewRecorder()
-	// If the turn is still running, Live == "active" → 409.
-	// If it already completed, Send → ErrNotAlive (no session in manager for
-	// a completed turn-goroutine that did not remove the session) or
-	// ErrTurnActive. Either maps to Conflict → 409, or the send succeeds (200).
-	// We only assert no 5xx.
 	a.handleSend(sendRec, sendReq)
-	if sendRec.Code == 500 {
-		t.Fatalf("send second prompt: unexpected 500 %q", sendRec.Body)
+	if sendRec.Code != 409 {
+		t.Fatalf("second send: code = %d, want 409", sendRec.Code)
 	}
+
+	// Unblock the first turn so the manager can clean up before temp-dir removal.
+	close(unblock)
 }
 
 func TestHandleKeyCodexAuditBeforeDeliver(t *testing.T) {
@@ -572,7 +636,7 @@ func TestHandleKeyCodexAuditBeforeDeliver(t *testing.T) {
 	// we verify the simpler case: a missing session returns 400/409 (not 500 and
 	// not an unaudited deliver).
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	a, _ := newCodexTestApp(t, "THREAD-KEY", rollout)
+	a, _ := newCodexTestApp(t, "THREAD-KEY", rollout) // requests not needed here
 
 	// Register a codex node that has no live session (was never launched via
 	// HTTP, so the manager has no session) to exercise PrepareResolve → ErrNoSession.
