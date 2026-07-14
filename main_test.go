@@ -239,6 +239,24 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// The store holds prompts, working dirs, and pane-excerpt evidence; it must be
+// created owner-only rather than relying on the parent directory's mode
+// (finding 63).
+func TestAppendRecordFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	a := &app{byID: map[string]*Node{}, storePath: path}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: &Node{ID: "n", CreatedAt: "2026-07-14T00:00:00Z"}}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("nodes.jsonl mode = %o, want 600", perm)
+	}
+}
+
 // TestLoadStoreMissingFile: a fresh install has no store yet.
 func TestLoadStoreMissingFile(t *testing.T) {
 	a := &app{byID: map[string]*Node{}, storePath: filepath.Join(t.TempDir(), "absent.jsonl")}

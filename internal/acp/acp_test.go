@@ -19,11 +19,12 @@ type fakeAgent struct {
 	conn *sdk.AgentSideConnection
 	// prompt scripts one turn; it may stream updates and request permission
 	// via a. Returning end_turn (or an error) ends the turn.
-	prompt      func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error)
-	newSession  func() sdk.NewSessionResponse
-	mu          sync.Mutex
-	lastConfig  *sdk.SetSessionConfigOptionRequest
-	lastModeSet *sdk.SetSessionModeRequest
+	prompt        func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error)
+	newSession    func() sdk.NewSessionResponse
+	newSessionErr error // when set, NewSession fails — drives the launch-failure reaping path
+	mu            sync.Mutex
+	lastConfig    *sdk.SetSessionConfigOptionRequest
+	lastModeSet   *sdk.SetSessionModeRequest
 }
 
 var _ sdk.Agent = (*fakeAgent)(nil)
@@ -32,6 +33,9 @@ func (a *fakeAgent) Initialize(ctx context.Context, _ sdk.InitializeRequest) (sd
 	return sdk.InitializeResponse{ProtocolVersion: sdk.ProtocolVersionNumber}, nil
 }
 func (a *fakeAgent) NewSession(ctx context.Context, _ sdk.NewSessionRequest) (sdk.NewSessionResponse, error) {
+	if a.newSessionErr != nil {
+		return sdk.NewSessionResponse{}, a.newSessionErr
+	}
 	if a.newSession != nil {
 		return a.newSession(), nil
 	}
@@ -339,6 +343,22 @@ func TestRecordStartFailureSurfaces(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected an error event persisted to the log")
+	}
+}
+
+// When the authoritative log is the failing component, RecordStartFailure
+// cannot make the failure durable and must report that to the caller, so the
+// creation path can avoid reporting a clean success (finding 59).
+func TestRecordStartFailureReportsUndurableLog(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(&fakeAgent{}))
+	// Occupy the node's log path with a directory: any O_WRONLY append fails
+	// with EISDIR, independent of the test's uid.
+	if err := os.Mkdir(filepath.Join(dir, "n1.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RecordStartFailure("n1", errors.New("subprocess exited before send")); err == nil {
+		t.Error("expected RecordStartFailure to report the log-write failure")
 	}
 }
 

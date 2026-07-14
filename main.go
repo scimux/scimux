@@ -124,7 +124,10 @@ type app struct {
 // ---------- store ----------
 
 func (a *app) appendRecord(rec storeRecord) error {
-	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600: the store holds prompts, working dirs, transcript paths, and
+	// remote-key pane excerpts. Match the ACP log and ui.json rather than
+	// relying on the startup chmod of the parent dir (finding 63).
+	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -405,7 +408,14 @@ func (a *app) createACPNode(n *Node) (int, error) {
 	// exists and the prompt can be retried.
 	if err := a.acp.Send(n.ID, n.Prompt); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: first prompt to ACP node %s failed: %v\n", n.ID, err)
-		a.acp.RecordStartFailure(n.ID, err)
+		// If the failure record also cannot be written (the ACP log is the
+		// failing component — commonly the same disk problem that broke Send),
+		// there is no durable trace of the lost first prompt. The node is
+		// persisted and must stay, but the caller must not see a clean success:
+		// report it so the operator retries the prompt (finding 59).
+		if rerr := a.acp.RecordStartFailure(n.ID, err); rerr != nil {
+			return 500, fmt.Errorf("node created but first prompt %q and its failure record were not durable (retry the prompt): %v", err, rerr)
+		}
 	}
 	return 0, nil
 }
@@ -1625,6 +1635,7 @@ func main() {
 	}
 	os.Chmod(*data, 0o700)
 	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
+	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
 	a := &app{
 		byID:         map[string]*Node{},
 		live:         map[string]string{},

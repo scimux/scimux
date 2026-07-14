@@ -217,9 +217,9 @@ func (m *Manager) Deliver(nodeID, optID string) error {
 // exists, surfaces it as the node's LastError. This upholds the creation
 // invariant: once a node is published, its first prompt is either in the
 // agent's context or visibly failed in the node's own history.
-func (m *Manager) RecordStartFailure(nodeID string, cause error) {
+func (m *Manager) RecordStartFailure(nodeID string, cause error) error {
 	msg := "first prompt not delivered: " + cause.Error()
-	_ = (&logWriter{path: m.logPath(nodeID)}).append(Event{T: "error", Error: msg})
+	logErr := (&logWriter{path: m.logPath(nodeID)}).append(Event{T: "error", Error: msg})
 	if s := m.session(nodeID); s != nil {
 		s.mu.Lock()
 		if s.lastError == "" {
@@ -227,6 +227,7 @@ func (m *Manager) RecordStartFailure(nodeID string, cause error) {
 		}
 		s.mu.Unlock()
 	}
+	return logErr
 }
 
 // Pending reports the outstanding permission request, if any, so the UI can
