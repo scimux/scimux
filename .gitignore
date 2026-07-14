@@ -15,3 +15,5 @@ internal/acp/codex/testdata/real-*.ndjson
 !README.md
 !AGENTS.md
 !CLAUDE.md
+
+attic/
