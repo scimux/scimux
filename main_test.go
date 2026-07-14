@@ -477,6 +477,37 @@ func TestResolveNode(t *testing.T) {
 	}
 }
 
+func TestResolveNodeTransport(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{
+		// A pi node adopted onto tmux (Transport pinned to "tmux"): its forks
+		// must stay tmux, not flip to the agent-derived default.
+		"pi-tmux": {ID: "pi-tmux", Agent: "pi", Transport: "tmux", Dir: dir},
+	}}
+	cases := []struct {
+		n    Node
+		want string
+	}{
+		{Node{Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
+		{Node{Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
+		{Node{Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
+		{Node{Prompt: "p", Agent: "codex", Dir: dir}, "tmux"},
+		{Node{Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport
+	}
+	for _, c := range cases {
+		if status, err := a.resolveNode(&c.n); err != nil {
+			t.Fatalf("resolveNode(%+v) failed: %d %v", c.n, status, err)
+		}
+		if c.n.Transport != c.want {
+			t.Errorf("agent %q parent %q: transport = %q, want %q", c.n.Agent, c.n.Parent, c.n.Transport, c.want)
+		}
+	}
+	// Migration: a stored record with no Transport field is treated as tmux.
+	if got := (&Node{Agent: "pi"}).transport(); got != "tmux" {
+		t.Errorf("absent transport = %q, want tmux (back-compat migration)", got)
+	}
+}
+
 func TestSysloadOnLinux(t *testing.T) {
 	s := sysload()
 	if s.NCPU <= 0 {

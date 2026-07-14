@@ -8,3 +8,4 @@ scimux
 internal/transcript/testdata/real-*.jsonl
 review.md
 review-response.md
+acp-integration-plan.md

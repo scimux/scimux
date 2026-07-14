@@ -23,11 +23,21 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
 - **Zero build dependencies.** Standard library only. Do not add modules
   (no SQLite, no WebSocket lib, no JS framework). If a feature seems to need
   one, stop and discuss instead.
+  - **One approved exception:** `github.com/coder/acp-go-sdk`, the Agent
+    Client Protocol peer, is a deliberate, maintainer-approved dependency
+    **scoped to `internal/acp/` only** (the ACP transport for pi/opencode; see
+    `acp-integration-plan.md`). A hand-rolled bidirectional JSON-RPC peer with
+    typed unions was evaluated and rejected as ~600 lines of ongoing schema
+    churn. The tmux/transcript core stays stdlib-only; do not let the SDK (or
+    any other module) leak beyond `internal/acp/`.
 - **Snapshot over stream.** Output is read via `tmux capture-pane -p`
   snapshots and via the transcript JSONL files the agent CLIs write
   themselves. Never parse the terminal byte stream, never use tmux control
   mode (`-CC`), no WebSockets, no in-browser terminal emulator. Polling is
-  the intended transport.
+  the intended transport. (The ACP transport in `internal/acp/` is consistent
+  with this: it consumes the agent's *structured* typed protocol records, never
+  a terminal byte stream, and the UI still polls. For an ACP node "peek" renders
+  a tail of the append-only session log instead of a pane photo.)
 - **One session = one window = one pane = one agent process.** No muxing.
 - **Defensive transcript parsing.** The CLIs' log formats are undocumented
   internals. Unknown record types/shapes are silently ignored, never errors;

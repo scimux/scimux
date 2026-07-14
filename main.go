@@ -13,13 +13,16 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -42,13 +45,27 @@ type Node struct {
 	Title      string `json:"title"`
 	Prompt     string `json:"prompt"`              // first prompt == the node's research question
 	Rationale  string `json:"rationale,omitempty"` // why this fork exists (decision evidence)
-	Agent      string `json:"agent"`               // "claude" | "codex"
+	Agent      string `json:"agent"`               // "claude" | "codex" | "pi" | "opencode"
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
 	Dir        string `json:"dir"`
-	SessionID  string `json:"session_id,omitempty"` // claude session uuid (minted by us) or codex session id (extracted from a resumed pane)
+	SessionID  string `json:"session_id,omitempty"` // claude session uuid (minted by us), codex session id (extracted from a resumed pane), or ACP session id
 	Transcript string `json:"transcript,omitempty"`
-	CreatedAt  string `json:"created_at"`
+	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
+	// transcript files, the original path) or "acp" (an Agent Client Protocol
+	// subprocess, pi/opencode only). An absent value means tmux — every stored
+	// record predates this field, so migration is "" == "tmux" (see transport).
+	Transport string `json:"transport,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// transport reports the node's supervision mechanism, defaulting an absent
+// value to "tmux" so pre-existing store records replay unchanged.
+func (n *Node) transport() string {
+	if n.Transport == "" {
+		return "tmux"
+	}
+	return n.Transport
 }
 
 // storeRecord is one line of the append-only store file. Node metadata is
@@ -97,6 +114,7 @@ type app struct {
 	sendState map[string]string
 
 	server    *tmuxsession.Server
+	acp       *acp.Manager
 	storePath string
 	uiPath    string
 	codexRoot string
@@ -266,6 +284,12 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		if n.Dir == "" {
 			n.Dir = p.Dir
 		}
+		// A fork inherits the parent's transport (fresh context, same
+		// mechanism). Derivation from the agent below only fires when neither
+		// the request nor a parent pinned one.
+		if n.Transport == "" {
+			n.Transport = p.Transport
+		}
 	}
 	if n.Agent == "" {
 		n.Agent = "claude"
@@ -274,6 +298,17 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	case "claude", "codex", "pi", "opencode":
 	default:
 		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
+	}
+	// New pi/opencode nodes are supervised over ACP; claude/codex stay on tmux.
+	// Only set this on creation — stored records with an absent Transport are
+	// migrated to tmux by Node.transport, never rewritten here.
+	if n.Transport == "" {
+		switch n.Agent {
+		case "pi", "opencode":
+			n.Transport = "acp"
+		default:
+			n.Transport = "tmux"
+		}
 	}
 	if n.Dir == "" {
 		n.Dir = a.home
@@ -309,6 +344,10 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	}
 	n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 
+	if n.transport() == "acp" {
+		return a.createACPNode(n)
+	}
+
 	cmd, err := agentCommand(n)
 	if err != nil {
 		return 400, err
@@ -330,6 +369,35 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	if n.Agent == "codex" && rollouts != nil {
 		// Discovery must only correlate rollouts that appear after launch.
 		a.rolloutSnaps[n.ID] = rollouts
+	}
+	return 0, nil
+}
+
+// createACPNode launches an ACP subprocess, persists the node, then delivers
+// the first prompt. Like the tmux path it persists before publishing so a
+// store failure rolls the subprocess back (kill the group) rather than leaving
+// an orphaned process absent from the registry. The first prompt is an
+// ordinary Send fired after persistence — ACP has no command-line first-turn.
+// Callers hold a.mu.
+func (a *app) createACPNode(n *Node) (int, error) {
+	sid, err := a.acp.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
+	if err != nil {
+		return 500, err
+	}
+	n.SessionID = sid
+	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		if kerr := a.acp.Kill(n.ID); kerr != nil {
+			fmt.Fprintf(os.Stderr, "scimux: rollback of ACP session %s failed: %v\n", n.ID, kerr)
+		}
+		return 500, fmt.Errorf("persist node (ACP session rolled back): %v", err)
+	}
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+	// Deliver the research question as the first turn. A failure is recorded
+	// visibly by the manager (error record), not swallowed; the node still
+	// exists and can be retried.
+	if err := a.acp.Send(n.ID, n.Prompt); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: first prompt to ACP node %s failed: %v\n", n.ID, err)
 	}
 	return 0, nil
 }
@@ -446,6 +514,20 @@ func (a *app) poll() {
 	a.mu.Unlock()
 
 	for _, n := range nodes {
+		// ACP nodes carry no tmux pane: liveness and needs-input come from the
+		// manager's structured state (process alive, turn in flight, pending
+		// permission), not pane-change detection. No capture, no transcript
+		// discovery.
+		if n.transport() == "acp" {
+			a.mu.Lock()
+			a.live[n.ID] = a.acp.Live(n.ID)
+			a.attn[n.ID] = a.acp.Attention(n.ID)
+			if a.live[n.ID] == "active" {
+				a.lastChg[n.ID] = time.Now()
+			}
+			a.mu.Unlock()
+			continue
+		}
 		s := a.server.Session(n.ID)
 		state := "exited"
 		if s.Alive() {
@@ -751,8 +833,11 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// Copy the node while holding the lock: marshaling a live *Node after
 		// unlock races the poller's Transcript writes (a Go data race).
 		nc := *n
+		// ACP nodes keep their history in the manager's session log rather than
+		// a linked transcript file, so they always have chat to show.
+		hasTranscript := n.Transcript != "" || n.transport() == "acp"
 		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID],
-			HasTranscript: n.Transcript != "", LastActivity: lastMS})
+			HasTranscript: hasTranscript, LastActivity: lastMS})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server).
@@ -968,6 +1053,27 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
+	// ACP delivery is reliable (no pane-ack race, so no "unconfirmed" state),
+	// but the preflight still holds: refuse a second turn while one is in
+	// flight, and refuse entirely if the subprocess is gone. The manager
+	// records the user turn before prompting (a log-append failure refuses the
+	// send) — see acp.Manager.Send.
+	if n.transport() == "acp" {
+		if a.acp.Live(n.ID) == "active" {
+			http.Error(w, "a turn to this node is still in flight", 409)
+			return
+		}
+		if err := a.acp.Send(n.ID, body.Text); err != nil {
+			code := 500
+			if err == acp.ErrNoSession || err == acp.ErrNotAlive || err == acp.ErrTurnActive {
+				code = 409
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "acknowledged"})
+		return
+	}
 	a.mu.Lock()
 	switch a.sendState[n.ID] {
 	case "submitting":
@@ -1039,6 +1145,10 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if n.transport() == "acp" {
+		a.acpChat(w, n)
 		return
 	}
 	tl := a.tailerFor(n) // may reset staleness on a relink; read flags after
@@ -1130,6 +1240,55 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// acpChat renders the chat view for an ACP node. It has no tmux pane and no
+// tailer: turns, liveness, usage and any pending permission come from the ACP
+// manager's authoritative session log. The response shape mirrors the tmux
+// branch so the web client's rendering path is shared, with ACP-specific
+// fields (source "acp", perm_* for the pending approval, error for a
+// failed/empty turn) and the tmux-only ones neutralized (fallback false,
+// delivery "", no watermark/pending_calls).
+func (a *app) acpChat(w http.ResponseWriter, n *Node) {
+	turns := a.acp.Turns(n.ID)
+	live := a.acp.Live(n.ID)
+	attn := a.acp.Attention(n.ID)
+	lastErr := a.acp.LastError(n.ID)
+	used, window := a.acp.Usage(n.ID)
+	permTitle, permOptions, _ := a.acp.Pending(n.ID)
+	a.mu.Lock()
+	var lastMS int64
+	if t, ok := a.lastChg[n.ID]; ok {
+		lastMS = t.UnixMilli()
+	}
+	a.mu.Unlock()
+
+	reason := ""
+	switch {
+	case live == "active":
+		reason = "turn_active"
+	case attn == "approval":
+		reason = "waiting_approval"
+	case lastErr != "":
+		reason = "turn_error"
+	}
+	var ctxPct int
+	if window > 0 {
+		ctxPct = int(100 * used / window)
+		if ctxPct > 100 {
+			ctxPct = 100
+		}
+	}
+	writeJSON(w, map[string]any{
+		"turns": turns, "pending": false, "live": live, "fallback": false,
+		"attention": attn, "delivery": "",
+		"source": "acp", "reason": reason,
+		"watermark": int64(0), "progress": len(turns),
+		"pending_calls": 0, "waiting_on": permTitle,
+		"last_change": lastMS,
+		"ctx_used":    used, "ctx_window": window, "ctx_pct": ctxPct,
+		"error": lastErr, "perm_title": permTitle, "perm_options": permOptions,
+	})
+}
+
 // tailerFor returns the node's transcript tailer, (re)building it when the
 // transcript appears or is relinked to a different file (e.g. a corrected
 // adoption guess). Callers must not hold a.mu: a fresh tailer first consumes
@@ -1184,6 +1343,29 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if !tmuxsession.AllowedKey(body.Key) {
 		http.Error(w, fmt.Sprintf("key %q not allowed", body.Key), 400)
+		return
+	}
+	// ACP: the key answers a structured permission request (there is no pane to
+	// press it into). The manager maps the whitelisted key to a permission
+	// option; the tool title stands in for the pane excerpt as decision
+	// evidence in the audit record.
+	if n.transport() == "acp" {
+		evidence, err := a.acp.Resolve(n.ID, body.Key)
+		if err != nil {
+			code := 400
+			if err == acp.ErrNoSession || err == acp.ErrNoPending {
+				code = 409
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
+			Excerpt: evidence, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			fmt.Fprintf(os.Stderr, "scimux: key %q answered on %s but audit record failed: %v\n", body.Key, n.ID, err)
+			http.Error(w, "key was answered, but persisting the audit record failed: "+err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "sent"})
 		return
 	}
 	s := a.server.Session(n.ID)
@@ -1261,6 +1443,12 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if n.transport() == "acp" {
+		// No pane to photograph: peek renders a tail of the raw ACP event log.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprint(w, a.acp.Peek(n.ID))
 		return
 	}
 	s := a.server.Session(n.ID)
@@ -1435,6 +1623,7 @@ func main() {
 		staleChat:    map[string]bool{},
 		sendState:    map[string]string{},
 		server:       tmuxsession.NewServer(*socket),
+		acp:          acp.NewManager(filepath.Join(*data, "acp")),
 		storePath:    filepath.Join(*data, "nodes.jsonl"),
 		uiPath:       filepath.Join(*data, "ui.json"),
 		codexRoot:    *codexRoot,
@@ -1444,6 +1633,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
 		os.Exit(1)
 	}
+
+	// ACP subprocesses are ours: unlike tmux sessions (which deliberately
+	// survive scimux exit), they must not orphan. Kill every ACP process group
+	// on shutdown. tmux sessions are untouched.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-stop
+		a.acp.Shutdown()
+		os.Exit(0)
+	}()
 
 	go func() {
 		for {
