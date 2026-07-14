@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/acp"
+	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -49,12 +50,15 @@ type Node struct {
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
 	Dir        string `json:"dir"`
-	SessionID  string `json:"session_id,omitempty"` // claude session uuid (minted by us), codex session id (extracted from a resumed pane), or ACP session id
+	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
 	Transcript string `json:"transcript,omitempty"`
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
-	// transcript files, the original path) or "acp" (an Agent Client Protocol
-	// subprocess, pi/opencode only). An absent value means tmux — every stored
-	// record predates this field, so migration is "" == "tmux" (see transport).
+	// transcript files, the original path — claude), "acp" (an Agent Client
+	// Protocol subprocess, pi/opencode) or "codex" (codex's app-server protocol
+	// wrapped as a structured bridge). "acp" and "codex" are both structured
+	// subprocess transports (no pane); see procManager. An absent value means
+	// tmux — every stored record predates this field, so migration is "" ==
+	// "tmux" (see transport).
 	Transport string `json:"transport,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
@@ -92,12 +96,6 @@ type app struct {
 	prevCap map[string]string
 	lastChg map[string]time.Time
 	tailers map[string]*transcript.Tailer
-	// rolloutSnaps: node id -> rollout paths that existed at launch; codex
-	// discovery only correlates files that appeared afterwards. A node with
-	// no entry has no trustworthy snapshot (adopted, created after an
-	// incomplete walk, or scimux restarted) — for such nodes the cwd+time
-	// heuristic is unsafe and discovery must not run at all.
-	rolloutSnaps map[string]map[string]bool
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool
@@ -114,11 +112,94 @@ type app struct {
 	sendState map[string]string
 
 	server    *tmuxsession.Server
-	acp       *acp.Manager
+	acp       acpManager
+	codex     codexManager
 	storePath string
 	uiPath    string
-	codexRoot string
 	home      string
+}
+
+// PermOption is one answerable permission/decision choice surfaced to the UI:
+// the key a supervisor presses and its human-readable name.
+type PermOption struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+// procManager is the shared surface of scimux's two structured-protocol
+// transports: acp.Manager (pi/opencode over the ACP SDK) and codex.Manager
+// (codex over its app-server protocol). Both drive one subprocess per node,
+// keep the authoritative history in an append-only session log, and answer
+// permission prompts structurally — so the create/poll/chat/send/key/peek paths
+// treat them uniformly. tmux (claude) nodes are not driven through it.
+type procManager interface {
+	Launch(nodeID, agent, dir, model, effort string) (string, error)
+	Send(nodeID, text string) error
+	PrepareResolve(nodeID, key string) (optID, evidence string, err error)
+	Deliver(nodeID, optID string) error
+	Pending(nodeID string) (title string, opts []PermOption, ok bool)
+	Turns(nodeID string) []transcript.Turn
+	Peek(nodeID string) string
+	Usage(nodeID string) (used, window int64)
+	Live(nodeID string) string
+	Attention(nodeID string) string
+	LastError(nodeID string) string
+	HasSession(nodeID string) bool
+	Kill(nodeID string) error
+	RecordStartFailure(nodeID string, cause error) error
+	Shutdown()
+	// Conflict reports whether a Send/Resolve error is a client/state conflict
+	// (HTTP 409) rather than a server error (500).
+	Conflict(err error) bool
+}
+
+// acpManager and codexManager adapt the two concrete managers to procManager:
+// each embeds its manager (whose method set already matches) and adds only the
+// two pieces the interface needs but the managers express with package-local
+// types — a PermOption of the shared shape and error classification.
+type acpManager struct{ *acp.Manager }
+
+func (m acpManager) Pending(id string) (string, []PermOption, bool) {
+	title, opts, ok := m.Manager.Pending(id)
+	out := make([]PermOption, len(opts))
+	for i, o := range opts {
+		out[i] = PermOption{Key: o.Key, Name: o.Name}
+	}
+	return title, out, ok
+}
+
+func (m acpManager) Conflict(err error) bool {
+	return err == acp.ErrNoSession || err == acp.ErrNotAlive ||
+		err == acp.ErrTurnActive || err == acp.ErrNoPending
+}
+
+type codexManager struct{ *codex.Manager }
+
+func (m codexManager) Pending(id string) (string, []PermOption, bool) {
+	title, opts, ok := m.Manager.Pending(id)
+	out := make([]PermOption, len(opts))
+	for i, o := range opts {
+		out[i] = PermOption{Key: o.Key, Name: o.Name}
+	}
+	return title, out, ok
+}
+
+func (m codexManager) Conflict(err error) bool {
+	return err == codex.ErrNoSession || err == codex.ErrNotAlive ||
+		err == codex.ErrTurnActive || err == codex.ErrNoPending
+}
+
+// proc returns the structured-protocol manager for a node, or nil for a tmux
+// (claude) node. It is the single dispatch point that lets the HTTP/poll paths
+// treat ACP and codex-app-server nodes identically.
+func (a *app) proc(n *Node) procManager {
+	switch n.transport() {
+	case "acp":
+		return a.acp
+	case "codex":
+		return a.codex
+	}
+	return nil
 }
 
 // ---------- store ----------
@@ -229,18 +310,9 @@ func agentCommand(n *Node) (string, error) {
 			parts = append(parts, "--model", shellQuote(n.Model))
 		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
-	case "codex":
-		parts := []string{"codex"}
-		if n.Model != "" {
-			parts = append(parts, "--model", shellQuote(n.Model))
-		}
-		if n.Effort != "" {
-			parts = append(parts, "-c", shellQuote("model_reasoning_effort="+n.Effort))
-		}
-		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
-	// pi and opencode run TUI-supervised only (pane peek + send, no
-	// transcript discovery); both take the "provider/model" form their own
-	// list commands emit.
+	// pi and opencode reach agentCommand only as a legacy/forced tmux fallback
+	// (new pi/opencode nodes resolve to the ACP transport); both take the
+	// "provider/model" form their own list commands emit.
 	case "pi":
 		parts := []string{"pi"}
 		if n.Model != "" {
@@ -260,11 +332,10 @@ func agentCommand(n *Node) (string, error) {
 // resolveNode validates a new-node request and resolves its launch
 // configuration in place: parent inheritance (fresh-context fork: the launch
 // config, never the conversation), agent and directory defaults, and the
-// title. It is idempotent, so handleNewNode runs it once up front — deciding
-// from the resolved result whether the codex rollout snapshot is needed at
-// all — and createNode runs the very same step instead of a diverging
-// preflight mirror (finding 25). Callers hold a.mu. Returns the HTTP status
-// to use on error: every resolution failure is a client mistake, 400.
+// title. It is idempotent, so handleNewNode runs it once up front and
+// createNode runs the very same step instead of a diverging preflight mirror
+// (finding 25). Callers hold a.mu. Returns the HTTP status to use on error:
+// every resolution failure is a client mistake, 400.
 func (a *app) resolveNode(n *Node) (int, error) {
 	if strings.TrimSpace(n.Prompt) == "" {
 		return 400, fmt.Errorf("prompt must not be empty")
@@ -305,13 +376,16 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	default:
 		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
 	}
-	// New pi/opencode nodes are supervised over ACP; claude/codex stay on tmux.
-	// Only set this on creation — stored records with an absent Transport are
-	// migrated to tmux by Node.transport, never rewritten here.
+	// New nodes pick a transport by agent: pi/opencode over ACP, codex over its
+	// app-server bridge, claude over tmux. Only set this on creation — stored
+	// records with an absent Transport are migrated to tmux by Node.transport,
+	// never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
 		case "pi", "opencode":
 			n.Transport = "acp"
+		case "codex":
+			n.Transport = "codex"
 		default:
 			n.Transport = "tmux"
 		}
@@ -333,14 +407,12 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	return 0, nil
 }
 
-// createNode validates, starts the tmux session, and persists the node.
-// It returns the HTTP status to use on error: client mistakes are 400,
-// server-side failures (tmux, store) are 500. Callers hold a.mu; taken
-// carries tmux session names that must not be reused as node IDs, and
-// rollouts is a pre-launch snapshot of existing codex rollout paths — nil
-// means no trustworthy snapshot exists, which disables transcript discovery
-// for this node (peek still works) rather than risking a wrong link.
-func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]bool) (int, error) {
+// createNode validates, starts the tmux session (or a structured-protocol
+// subprocess), and persists the node. It returns the HTTP status to use on
+// error: client mistakes are 400, server-side failures (tmux, store) are 500.
+// Callers hold a.mu; taken carries tmux session names that must not be reused
+// as node IDs.
+func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	if status, err := a.resolveNode(n); err != nil {
 		return status, err
 	}
@@ -350,8 +422,8 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	}
 	n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	if n.transport() == "acp" {
-		return a.createACPNode(n)
+	if pm := a.proc(n); pm != nil {
+		return a.createProcNode(n, pm)
 	}
 
 	cmd, err := agentCommand(n)
@@ -372,48 +444,45 @@ func (a *app) createNode(n *Node, taken map[string]bool, rollouts map[string]boo
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
-	if n.Agent == "codex" && rollouts != nil {
-		// Discovery must only correlate rollouts that appear after launch.
-		a.rolloutSnaps[n.ID] = rollouts
-	}
 	return 0, nil
 }
 
-// createACPNode launches an ACP subprocess, persists the node, then delivers
+// createProcNode launches a structured-protocol subprocess (ACP for
+// pi/opencode, codex app-server for codex), persists the node, then delivers
 // the first prompt. Like the tmux path it persists before publishing so a
 // store failure rolls the subprocess back (kill the group) rather than leaving
-// an orphaned process absent from the registry. The first prompt is an
-// ordinary Send fired after persistence — ACP has no command-line first-turn.
-// Callers hold a.mu.
-func (a *app) createACPNode(n *Node) (int, error) {
-	sid, err := a.acp.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
+// an orphaned process absent from the registry. The first prompt is an ordinary
+// Send fired after persistence — these transports have no command-line
+// first-turn. Callers hold a.mu.
+func (a *app) createProcNode(n *Node, pm procManager) (int, error) {
+	sid, err := pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
 	if err != nil {
 		return 500, err
 	}
 	n.SessionID = sid
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
-		if kerr := a.acp.Kill(n.ID); kerr != nil {
-			fmt.Fprintf(os.Stderr, "scimux: rollback of ACP session %s failed: %v\n", n.ID, kerr)
+		if kerr := pm.Kill(n.ID); kerr != nil {
+			fmt.Fprintf(os.Stderr, "scimux: rollback of %s session %s failed: %v\n", n.transport(), n.ID, kerr)
 		}
-		return 500, fmt.Errorf("persist node (ACP session rolled back): %v", err)
+		return 500, fmt.Errorf("persist node (%s session rolled back): %v", n.transport(), err)
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
 	// Deliver the research question as the first turn. Unlike the tmux path
 	// (where the first prompt rides the launch command line and thus always
-	// reaches the agent), an ACP Send can fail before anything is recorded —
-	// e.g. the subprocess died during launch, or the user-turn append failed.
+	// reaches the agent), a structured Send can fail before anything is recorded
+	// — e.g. the subprocess died during launch, or the user-turn append failed.
 	// Persist that failure to the node's own history so the chat view shows it
 	// instead of a silent, empty successful node (finding 52). The node still
 	// exists and the prompt can be retried.
-	if err := a.acp.Send(n.ID, n.Prompt); err != nil {
-		fmt.Fprintf(os.Stderr, "scimux: first prompt to ACP node %s failed: %v\n", n.ID, err)
-		// If the failure record also cannot be written (the ACP log is the
+	if err := pm.Send(n.ID, n.Prompt); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: first prompt to %s node %s failed: %v\n", n.transport(), n.ID, err)
+		// If the failure record also cannot be written (the session log is the
 		// failing component — commonly the same disk problem that broke Send),
 		// there is no durable trace of the lost first prompt. The node is
 		// persisted and must stay, but the caller must not see a clean success:
 		// report it so the operator retries the prompt (finding 59).
-		if rerr := a.acp.RecordStartFailure(n.ID, err); rerr != nil {
+		if rerr := pm.RecordStartFailure(n.ID, err); rerr != nil {
 			return 500, fmt.Errorf("node created but first prompt %q and its failure record were not durable (retry the prompt): %v", err, rerr)
 		}
 	}
@@ -496,24 +565,6 @@ func sessionArgFromCmdline(args []string) string {
 	return ""
 }
 
-// codexSessionFromCmdline extracts the session id from a resumed codex
-// invocation (`codex resume <id>`). A fresh `codex` launch carries no id —
-// codex only exposes one on resume.
-func codexSessionFromCmdline(args []string) string {
-	for i, a := range args {
-		if a == "resume" && i+1 < len(args) && sessionIDArgRe.MatchString(args[i+1]) {
-			return args[i+1]
-		}
-		// `sh -c "codex resume <id> …"`: the whole command is one arg.
-		if strings.Contains(a, "resume ") {
-			if id := codexSessionFromCmdline(strings.Fields(a)); id != "" {
-				return id
-			}
-		}
-	}
-	return ""
-}
-
 // ---------- background poller ----------
 
 // poll refreshes liveness (mechanical only: pane changed recently, quiet, or
@@ -532,14 +583,14 @@ func (a *app) poll() {
 	a.mu.Unlock()
 
 	for _, n := range nodes {
-		// ACP nodes carry no tmux pane: liveness and needs-input come from the
-		// manager's structured state (process alive, turn in flight, pending
-		// permission), not pane-change detection. No capture, no transcript
-		// discovery.
-		if n.transport() == "acp" {
+		// Structured-protocol nodes (ACP, codex app-server) carry no tmux pane:
+		// liveness and needs-input come from the manager's structured state
+		// (process alive, turn in flight, pending permission), not pane-change
+		// detection. No capture, no transcript discovery.
+		if pm := a.proc(n); pm != nil {
 			a.mu.Lock()
-			a.live[n.ID] = a.acp.Live(n.ID)
-			a.attn[n.ID] = a.acp.Attention(n.ID)
+			a.live[n.ID] = pm.Live(n.ID)
+			a.attn[n.ID] = pm.Attention(n.ID)
 			if a.live[n.ID] == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
@@ -639,17 +690,18 @@ func (a *app) discoverTranscript(n *Node) {
 	if done {
 		return
 	}
+	// Only claude (tmux) nodes discover a transcript file. The structured
+	// transports keep their history in the manager's session log and never
+	// reach here (the poller continues past them before discovery). An adopted
+	// claude node without a known id already made its one guess at adoption.
+	if n.Agent != "claude" || n.SessionID == "" {
+		return
+	}
 	created, err := time.Parse(time.RFC3339, n.CreatedAt)
 	if err != nil || time.Since(created) > 15*time.Minute {
-		a.mu.Lock()
-		delete(a.rolloutSnaps, n.ID) // stale: stop searching, free the snapshot
-		a.mu.Unlock()
 		return // peek remains available
 	}
-	// Transcript paths are exclusive among nodes, and codex discovery only
-	// considers rollouts that appeared after this node's launch (pre-launch
-	// snapshot): an older same-cwd rollout still being appended by some other
-	// session can never be linked, no matter what its mtime says.
+	// Transcript paths are exclusive among nodes.
 	excluded := map[string]bool{}
 	a.mu.Lock()
 	for _, o := range a.nodes {
@@ -660,35 +712,8 @@ func (a *app) discoverTranscript(n *Node) {
 	for p := range a.pathClaims {
 		excluded[p] = true
 	}
-	_, haveSnap := a.rolloutSnaps[n.ID]
-	for p := range a.rolloutSnaps[n.ID] {
-		excluded[p] = true
-	}
 	a.mu.Unlock()
-	var path string
-	var ok bool
-	switch n.Agent {
-	case "claude":
-		if n.SessionID == "" {
-			return // adopted without an id: adoption already made its one guess
-		}
-		path, ok = transcript.FindClaudeTranscript(a.home, n.SessionID)
-	case "codex":
-		switch {
-		case n.SessionID != "":
-			// Deterministic: the id (from a resumed pane's command line) is
-			// embedded in the rollout filename by codex itself.
-			path, ok = transcript.FindCodexRolloutBySession(a.codexRoot, n.SessionID)
-		case haveSnap:
-			path, ok = transcript.FindCodexRollout(a.codexRoot, n.Dir, created, excluded)
-		default:
-			// No snapshot and no session id — adopted, restarted, or launched
-			// after an incomplete walk. The cwd+time heuristic could link a
-			// merely plausible rollout, and a wrong conversation is worse
-			// than none: stay on peek.
-			return
-		}
-	}
+	path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID)
 	if !ok || excluded[path] {
 		return
 	}
@@ -715,7 +740,6 @@ func (a *app) discoverTranscript(n *Node) {
 	a.mu.Lock()
 	n.Transcript = path
 	delete(a.pathClaims, path)
-	delete(a.rolloutSnaps, n.ID)
 	a.mu.Unlock()
 }
 
@@ -851,9 +875,10 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// Copy the node while holding the lock: marshaling a live *Node after
 		// unlock races the poller's Transcript writes (a Go data race).
 		nc := *n
-		// ACP nodes keep their history in the manager's session log rather than
-		// a linked transcript file, so they always have chat to show.
-		hasTranscript := n.Transcript != "" || n.transport() == "acp"
+		// Structured-protocol nodes (ACP, codex) keep their history in the
+		// manager's session log rather than a linked transcript file, so they
+		// always have chat to show.
+		hasTranscript := n.Transcript != "" || a.proc(n) != nil
 		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID],
 			HasTranscript: hasTranscript, LastActivity: lastMS})
 	}
@@ -931,6 +956,15 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	if agent == "" {
 		agent = "claude"
 	}
+	// Codex now uses the app-server protocol: scimux starts the subprocess
+	// itself via POST /api/nodes. Adopting an externally-managed codex tmux
+	// session is no longer supported because the Codex-specific transcript
+	// discovery path was removed and adopted tmux-Codex nodes would never get
+	// structured chat history. Use POST /api/nodes with agent:"codex" instead.
+	if agent == "codex" {
+		http.Error(w, "codex uses the app-server protocol; use POST /api/nodes with agent:\"codex\" to create a new activity", 400)
+		return
+	}
 	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
 		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339)}
@@ -952,33 +986,13 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// Adopted codex session: a resumed pane carries the session id on its
-	// command line. Without an id there is no pre-launch snapshot to make
-	// the cwd+time heuristic safe (an adopted/resumed session normally
-	// appends to an *existing* rollout among possibly several same-cwd
-	// candidates), so no guess is attempted: linking the wrong conversation
-	// is worse than showing peek. The node stays on pane snapshots unless an
-	// explicit session id or transcript is supplied.
-	if n.Agent == "codex" && n.SessionID == "" && n.Transcript == "" {
-		if pid, err := s.PanePID(); err == nil {
-			n.SessionID = sessionFromPane(pid, codexSessionFromCmdline)
-		}
-	}
-	// Any known session id — supplied explicitly (the migration script sends
-	// one) or extracted from the pane above — gets its deterministic lookup
-	// now: the claude id is the transcript filename, the codex id is embedded
-	// in the rollout filename by codex itself. If the file is not visible
+	// Any known claude session id — supplied explicitly (the migration script
+	// sends one) or extracted from the pane above — gets its deterministic
+	// lookup now (the id is the transcript filename). If the file is not visible
 	// yet, discoverTranscript retries the same lookup.
-	if n.SessionID != "" && n.Transcript == "" {
-		switch n.Agent {
-		case "claude":
-			if path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok {
-				n.Transcript = path
-			}
-		case "codex":
-			if path, ok := transcript.FindCodexRolloutBySession(a.codexRoot, n.SessionID); ok {
-				n.Transcript = path
-			}
+	if n.Agent == "claude" && n.SessionID != "" && n.Transcript == "" {
+		if path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok {
+			n.Transcript = path
 		}
 	}
 	// Transcript exclusivity holds for adoption too: a path another node
@@ -1006,9 +1020,8 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve and validate the launch configuration first: no request that
 	// fails validation (empty prompt, unknown parent, bad agent or dir) ever
-	// pays the codex-history walk, and the walk decision reads the *resolved*
-	// agent, so an explicit-codex request with a missing parent is rejected
-	// here rather than after a full traversal (finding 25).
+	// reaches createNode, and the transport decision reads the *resolved* agent
+	// (finding 25).
 	a.mu.Lock()
 	status, err := a.resolveNode(&n)
 	a.mu.Unlock()
@@ -1022,22 +1035,8 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	for _, s := range a.server.Sessions() {
 		taken[s] = true
 	}
-	// The rollout snapshot walks the entire codex history, so take it only
-	// when this request will actually launch codex. An incomplete walk
-	// cannot guarantee "everything not in the snapshot appeared after
-	// launch"; then the launch proceeds but discovery stays disabled (nil
-	// snapshot) and the node relies on peek.
-	var rollouts map[string]bool
-	if n.Agent == "codex" {
-		snap, complete := transcript.ListCodexRollouts(a.codexRoot)
-		if complete {
-			rollouts = snap
-		} else {
-			fmt.Fprintf(os.Stderr, "scimux: codex rollout snapshot incomplete; transcript discovery disabled for this node\n")
-		}
-	}
 	a.mu.Lock()
-	status, err = a.createNode(&n, taken, rollouts)
+	status, err = a.createNode(&n, taken)
 	a.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), status)
@@ -1071,19 +1070,19 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
-	// ACP delivery is reliable (no pane-ack race, so no "unconfirmed" state),
-	// but the preflight still holds: refuse a second turn while one is in
-	// flight, and refuse entirely if the subprocess is gone. The manager
-	// records the user turn before prompting (a log-append failure refuses the
-	// send) — see acp.Manager.Send.
-	if n.transport() == "acp" {
-		if a.acp.Live(n.ID) == "active" {
+	// Structured-protocol delivery (ACP, codex) is reliable (no pane-ack race,
+	// so no "unconfirmed" state), but the preflight still holds: refuse a second
+	// turn while one is in flight, and refuse entirely if the subprocess is
+	// gone. The manager records the user turn before prompting (a log-append
+	// failure refuses the send) — see the Send contract on each manager.
+	if pm := a.proc(n); pm != nil {
+		if pm.Live(n.ID) == "active" {
 			http.Error(w, "a turn to this node is still in flight", 409)
 			return
 		}
-		if err := a.acp.Send(n.ID, body.Text); err != nil {
+		if err := pm.Send(n.ID, body.Text); err != nil {
 			code := 500
-			if err == acp.ErrNoSession || err == acp.ErrNotAlive || err == acp.ErrTurnActive {
+			if pm.Conflict(err) {
 				code = 409
 			}
 			http.Error(w, err.Error(), code)
@@ -1165,8 +1164,8 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	if n.transport() == "acp" {
-		a.acpChat(w, n)
+	if pm := a.proc(n); pm != nil {
+		a.procChat(w, n, pm)
 		return
 	}
 	tl := a.tailerFor(n) // may reset staleness on a relink; read flags after
@@ -1258,20 +1257,21 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// acpChat renders the chat view for an ACP node. It has no tmux pane and no
-// tailer: turns, liveness, usage and any pending permission come from the ACP
-// manager's authoritative session log. The response shape mirrors the tmux
-// branch so the web client's rendering path is shared, with ACP-specific
-// fields (source "acp", perm_* for the pending approval, error for a
-// failed/empty turn) and the tmux-only ones neutralized (fallback false,
-// delivery "", no watermark/pending_calls).
-func (a *app) acpChat(w http.ResponseWriter, n *Node) {
-	turns := a.acp.Turns(n.ID)
-	live := a.acp.Live(n.ID)
-	attn := a.acp.Attention(n.ID)
-	lastErr := a.acp.LastError(n.ID)
-	used, window := a.acp.Usage(n.ID)
-	permTitle, permOptions, _ := a.acp.Pending(n.ID)
+// procChat renders the chat view for a structured-protocol node (ACP or codex
+// app-server). It has no tmux pane and no tailer: turns, liveness, usage and
+// any pending permission come from the manager's authoritative session log. The
+// response shape mirrors the tmux branch so the web client's rendering path is
+// shared, with the structured-specific fields (source "acp" — the web UI's
+// structured-node rendering path, shared by both bridges — perm_* for the
+// pending approval, error for a failed/empty turn) and the tmux-only ones
+// neutralized (fallback false, delivery "", no watermark/pending_calls).
+func (a *app) procChat(w http.ResponseWriter, n *Node, pm procManager) {
+	turns := pm.Turns(n.ID)
+	live := pm.Live(n.ID)
+	attn := pm.Attention(n.ID)
+	lastErr := pm.LastError(n.ID)
+	used, window := pm.Usage(n.ID)
+	permTitle, permOptions, _ := pm.Pending(n.ID)
 	a.mu.Lock()
 	var lastMS int64
 	if t, ok := a.lastChg[n.ID]; ok {
@@ -1363,18 +1363,19 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("key %q not allowed", body.Key), 400)
 		return
 	}
-	// ACP: the key answers a structured permission request (there is no pane to
-	// press it into). Because ACP resolution is structured, the key can be
-	// mapped to an option and audited *before* the agent is told the answer —
-	// unlike a tmux keypress, this need not be a post-send best-effort write.
-	// Persist the decision first, then deliver, so a store failure can never
-	// leave an unaudited permission answer already acted on (finding 53). The
-	// tool title stands in for the pane excerpt as decision evidence.
-	if n.transport() == "acp" {
-		optID, evidence, err := a.acp.PrepareResolve(n.ID, body.Key)
+	// Structured protocols (ACP, codex): the key answers a structured permission
+	// request (there is no pane to press it into). Because resolution is
+	// structured, the key can be mapped to an option and audited *before* the
+	// agent is told the answer — unlike a tmux keypress, this need not be a
+	// post-send best-effort write. Persist the decision first, then deliver, so
+	// a store failure can never leave an unaudited permission answer already
+	// acted on (finding 53). The tool title stands in for the pane excerpt as
+	// decision evidence.
+	if pm := a.proc(n); pm != nil {
+		optID, evidence, err := pm.PrepareResolve(n.ID, body.Key)
 		if err != nil {
 			code := 400
-			if err == acp.ErrNoSession || err == acp.ErrNoPending {
+			if pm.Conflict(err) {
 				code = 409
 			}
 			http.Error(w, err.Error(), code)
@@ -1385,7 +1386,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "refusing to answer without an audit record: "+err.Error(), 500)
 			return
 		}
-		if err := a.acp.Deliver(n.ID, optID); err != nil {
+		if err := pm.Deliver(n.ID, optID); err != nil {
 			fmt.Fprintf(os.Stderr, "scimux: key %q audited on %s but delivery failed: %v\n", body.Key, n.ID, err)
 			http.Error(w, "the decision was recorded, but delivering it to the agent failed: "+err.Error(), 500)
 			return
@@ -1430,37 +1431,6 @@ func lastLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// handleCodexRollouts lists the codex rollouts whose session_meta records the
-// given cwd, newest first — the migration script's candidate enumeration. The
-// cwd match reuses the same JSON parsing as discovery (never raw substring
-// matching of undocumented log bytes), and the response is plain text — one
-// "mtime<TAB>session-id<TAB>path<TAB>preview" line per rollout — so a POSIX
-// shell can consume it without a JSON parser. The preview is the last visible
-// turn, rendered by the real transcript parser, so the operator can correlate
-// a candidate with the pane they are migrating. Deliberately *not* used for
-// automatic linking: with several same-cwd sessions only a human (or an
-// explicit session id) can pick the right one.
-func (a *app) handleCodexRollouts(w http.ResponseWriter, r *http.Request) {
-	dir := r.URL.Query().Get("dir")
-	if dir == "" {
-		http.Error(w, "bad request: need dir", 400)
-		return
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	for _, ri := range transcript.FindCodexRolloutsForDir(a.codexRoot, dir) {
-		preview := ""
-		if turns := (&transcript.Tailer{Path: ri.Path}).Poll(); len(turns) > 0 {
-			preview = turns[len(turns)-1].Text
-		}
-		preview = strings.Join(strings.Fields(preview), " ") // no tabs/newlines
-		if r := []rune(preview); len(r) > 80 {
-			preview = string(r[:80]) + "…"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			ri.ModTime.UTC().Format(time.RFC3339), ri.SessionID, ri.Path, preview)
-	}
-}
-
 // handlePeek returns the pane snapshot: the last 200 scrollback lines by
 // default, or only the currently rendered screen with ?mode=visible — the
 // decision view, where an approval dialog is not buried under history.
@@ -1470,10 +1440,10 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	if n.transport() == "acp" {
-		// No pane to photograph: peek renders a tail of the raw ACP event log.
+	if pm := a.proc(n); pm != nil {
+		// No pane to photograph: peek renders a tail of the raw event log.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprint(w, a.acp.Peek(n.ID))
+		fmt.Fprint(w, pm.Peek(n.ID))
 		return
 	}
 	s := a.server.Session(n.ID)
@@ -1624,7 +1594,6 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
-	codexRoot := flag.String("codex-sessions", filepath.Join(home, ".codex", "sessions"), "where Codex writes rollout logs")
 	flag.Parse()
 
 	// The data directory holds private notes and pane-excerpt evidence:
@@ -1637,37 +1606,38 @@ func main() {
 	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
 	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
 	a := &app{
-		byID:         map[string]*Node{},
-		live:         map[string]string{},
-		attn:         map[string]string{},
-		prevCap:      map[string]string{},
-		lastChg:      map[string]time.Time{},
-		tailers:      map[string]*transcript.Tailer{},
-		rolloutSnaps: map[string]map[string]bool{},
-		pathClaims:   map[string]bool{},
-		chatMark:     map[string]chatMark{},
-		staleChat:    map[string]bool{},
-		sendState:    map[string]string{},
-		server:       tmuxsession.NewServer(*socket),
-		acp:          acp.NewManager(filepath.Join(*data, "acp")),
-		storePath:    filepath.Join(*data, "nodes.jsonl"),
-		uiPath:       filepath.Join(*data, "ui.json"),
-		codexRoot:    *codexRoot,
-		home:         home,
+		byID:       map[string]*Node{},
+		live:       map[string]string{},
+		attn:       map[string]string{},
+		prevCap:    map[string]string{},
+		lastChg:    map[string]time.Time{},
+		tailers:    map[string]*transcript.Tailer{},
+		pathClaims: map[string]bool{},
+		chatMark:   map[string]chatMark{},
+		staleChat:  map[string]bool{},
+		sendState:  map[string]string{},
+		server:     tmuxsession.NewServer(*socket),
+		acp:        acpManager{acp.NewManager(filepath.Join(*data, "acp"))},
+		codex:      codexManager{codex.NewManager(filepath.Join(*data, "codex"))},
+		storePath:  filepath.Join(*data, "nodes.jsonl"),
+		uiPath:     filepath.Join(*data, "ui.json"),
+		home:       home,
 	}
 	if err := a.loadStore(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
 		os.Exit(1)
 	}
 
-	// ACP subprocesses are ours: unlike tmux sessions (which deliberately
-	// survive scimux exit), they must not orphan. Kill every ACP process group
-	// on shutdown. tmux sessions are untouched.
+	// Structured-protocol subprocesses (ACP, codex app-server) are ours: unlike
+	// tmux sessions (which deliberately survive scimux exit), they must not
+	// orphan. Kill every such process group on shutdown. tmux sessions are
+	// untouched.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-stop
 		a.acp.Shutdown()
+		a.codex.Shutdown()
 		os.Exit(0)
 	}()
 
@@ -1700,7 +1670,6 @@ func main() {
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
-	mux.HandleFunc("GET /api/codex-rollouts", a.handleCodexRollouts)
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
 	mux.HandleFunc("GET /api/ui", a.handleUIGet)
 	mux.HandleFunc("PUT /api/ui", a.handleUIPut)

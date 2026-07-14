@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -77,10 +76,6 @@ func TestParseRealCodexFixture(t *testing.T) {
 	}
 	if turns[1].Role != "assistant" || turns[1].Text != "pong" {
 		t.Errorf("assistant turn = %#v", turns[1])
-	}
-	// Discovery relies on session_meta carrying the cwd.
-	if cwd := rolloutCwd("testdata/real-codex-rollout.jsonl"); cwd == "" {
-		t.Error("rolloutCwd found no cwd in real session_meta")
 	}
 }
 
@@ -167,90 +162,6 @@ func TestFindClaudeNewestInDir(t *testing.T) {
 	}
 }
 
-func TestFindCodexRollout(t *testing.T) {
-	root := t.TempDir()
-	day := filepath.Join(root, "2026", "07", "11")
-	os.MkdirAll(day, 0o755)
-	meta := func(cwd string) string {
-		return `{"timestamp":"x","type":"session_meta","payload":{"id":"i","cwd":"` + cwd + `"}}` + "\n"
-	}
-	old := filepath.Join(day, "rollout-old.jsonl")
-	match := filepath.Join(day, "rollout-match.jsonl")
-	otherCwd := filepath.Join(day, "rollout-other.jsonl")
-	os.WriteFile(old, []byte(meta("/data/exp1")), 0o644)
-	os.WriteFile(match, []byte(meta("/data/exp1")), 0o644)
-	os.WriteFile(otherCwd, []byte(meta("/data/exp2")), 0o644)
-	// Make "old" predate the search window.
-	past := time.Now().Add(-1 * time.Hour)
-	os.Chtimes(old, past, past)
-
-	got, ok := FindCodexRollout(root, "/data/exp1", time.Now().Add(-time.Minute), nil)
-	if !ok || got != match {
-		t.Fatalf("got %q ok=%v, want %q", got, ok, match)
-	}
-	if _, ok := FindCodexRollout(root, "/data/nomatch", time.Now().Add(-time.Minute), nil); ok {
-		t.Fatal("matched a rollout for the wrong cwd")
-	}
-}
-
-// Two same-cwd nodes starting close together must resolve to two different
-// rollouts: claimed paths are excluded, and the oldest-by-filename candidate
-// wins, so discovery in node start order pairs each node with its own file
-// (finding 3 of the 2026-07 review).
-func TestFindCodexRolloutConcurrentSameDir(t *testing.T) {
-	root := t.TempDir()
-	day := filepath.Join(root, "2026", "07", "12")
-	os.MkdirAll(day, 0o755)
-	meta := `{"timestamp":"x","type":"session_meta","payload":{"id":"i","cwd":"/data/exp1"}}` + "\n"
-	first := filepath.Join(day, "rollout-2026-07-12T10-00-00-aaa.jsonl")
-	second := filepath.Join(day, "rollout-2026-07-12T10-00-05-bbb.jsonl")
-	os.WriteFile(first, []byte(meta), 0o644)
-	os.WriteFile(second, []byte(meta), 0o644)
-	since := time.Now().Add(-time.Minute)
-
-	// Node A (started first, discovered first) takes the older rollout…
-	gotA, ok := FindCodexRollout(root, "/data/exp1", since, nil)
-	if !ok || gotA != first {
-		t.Fatalf("node A got %q ok=%v, want %q", gotA, ok, first)
-	}
-	// …and node B, with A's path claimed, takes the remaining one.
-	gotB, ok := FindCodexRollout(root, "/data/exp1", since, map[string]bool{gotA: true})
-	if !ok || gotB != second {
-		t.Fatalf("node B got %q ok=%v, want %q", gotB, ok, second)
-	}
-	// With both claimed, nothing is left to link.
-	if _, ok := FindCodexRollout(root, "/data/exp1", since,
-		map[string]bool{first: true, second: true}); ok {
-		t.Fatal("returned a claimed rollout")
-	}
-}
-
-// An older same-cwd rollout whose mtime advances after launch (another
-// session outside scimux still appending to it) must not beat the node's
-// own new rollout: the pre-launch snapshot excludes it regardless of mtime
-// and of its older filename (finding 14 of the 2026-07 review).
-func TestFindCodexRolloutExcludesPreexisting(t *testing.T) {
-	root := t.TempDir()
-	day := filepath.Join(root, "2026", "07", "12")
-	os.MkdirAll(day, 0o755)
-	meta := `{"timestamp":"x","type":"session_meta","payload":{"id":"i","cwd":"/data/exp1"}}` + "\n"
-	oldRollout := filepath.Join(day, "rollout-2026-07-12T08-00-00-old.jsonl")
-	os.WriteFile(oldRollout, []byte(meta), 0o644)
-	snapshot, complete := ListCodexRollouts(root) // taken at launch: only the old file exists
-	if !complete || !snapshot[oldRollout] {
-		t.Fatalf("snapshot must be complete and contain the pre-launch rollout (complete=%v)", complete)
-	}
-	newRollout := filepath.Join(day, "rollout-2026-07-12T10-00-00-new.jsonl")
-	os.WriteFile(newRollout, []byte(meta), 0o644)
-	// The outside session keeps appending: the old file's mtime is fresh.
-	now := time.Now()
-	os.Chtimes(oldRollout, now, now)
-	got, ok := FindCodexRollout(root, "/data/exp1", now.Add(-time.Minute), snapshot)
-	if !ok || got != newRollout {
-		t.Fatalf("got %q ok=%v, want the newly appeared %q", got, ok, newRollout)
-	}
-}
-
 // A transcript that produced valid turns and then stops making sense must
 // flag Unparseable so the UI can degrade to the pane snapshot — while
 // benign unknown *typed* records never trip the signal (finding 15).
@@ -292,55 +203,6 @@ func TestTailerUnparseableAfterValidTurns(t *testing.T) {
 	tl.Poll()
 	if tl.Unparseable() {
 		t.Fatal("streak must reset once recognizable data resumes")
-	}
-}
-
-// The session id embedded in a rollout filename is codex's own, so matching
-// on it is deterministic — the safe correlation for adopted/resumed sessions
-// where no pre-launch snapshot exists (finding 20).
-func TestFindCodexRolloutBySession(t *testing.T) {
-	root := t.TempDir()
-	day := filepath.Join(root, "2026", "07", "12")
-	os.MkdirAll(day, 0o755)
-	id := "00000000-0000-7000-8000-000000000001"
-	want := filepath.Join(day, "rollout-2026-07-12T10-00-00-"+id+".jsonl")
-	other := filepath.Join(day, "rollout-2026-07-12T09-00-00-ffffffff-0000-0000-0000-000000000000.jsonl")
-	os.WriteFile(want, []byte("{}\n"), 0o644)
-	os.WriteFile(other, []byte("{}\n"), 0o644)
-
-	got, ok := FindCodexRolloutBySession(root, id)
-	if !ok || got != want {
-		t.Fatalf("got %q ok=%v, want %q", got, ok, want)
-	}
-	// Case-insensitive: ids extracted from a command line may be uppercased.
-	if got, ok := FindCodexRolloutBySession(root, strings.ToUpper(id)); !ok || got != want {
-		t.Fatalf("uppercase id: got %q ok=%v", got, ok)
-	}
-	if _, ok := FindCodexRolloutBySession(root, "11111111-2222-3333-4444-555555555555"); ok {
-		t.Fatal("found a rollout for an unknown session id")
-	}
-}
-
-// The snapshot's safety property needs a full walk: a traversal error must
-// be reported as incomplete, while a missing root (no codex history at all)
-// is a complete, empty snapshot (finding 22).
-func TestListCodexRolloutsCompleteness(t *testing.T) {
-	if snap, complete := ListCodexRollouts(filepath.Join(t.TempDir(), "absent")); !complete || len(snap) != 0 {
-		t.Fatalf("missing root: complete=%v len=%d, want complete and empty", complete, len(snap))
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permissions cannot make a directory unreadable")
-	}
-	root := t.TempDir()
-	sealed := filepath.Join(root, "2026", "07", "12")
-	os.MkdirAll(sealed, 0o755)
-	os.WriteFile(filepath.Join(sealed, "rollout-hidden.jsonl"), []byte("{}\n"), 0o644)
-	if err := os.Chmod(sealed, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(sealed, 0o755)
-	if _, complete := ListCodexRollouts(root); complete {
-		t.Fatal("unreadable subtree must mark the snapshot incomplete")
 	}
 }
 
@@ -469,44 +331,6 @@ func TestAgentShapedDirectional(t *testing.T) {
 		if agentShaped([]byte(l)) {
 			t.Errorf("record counted as agent progress but must not be: %s", l)
 		}
-	}
-}
-
-// FindCodexRolloutsForDir enumerates a cwd's rollouts for the migration
-// workflow: JSON-parsed cwd matching (no raw substring games), session ids
-// from the filename, newest first (finding 26).
-func TestFindCodexRolloutsForDir(t *testing.T) {
-	root := t.TempDir()
-	day := filepath.Join(root, "2026", "07", "12")
-	os.MkdirAll(day, 0o755)
-	meta := func(cwd string) string {
-		// Whitespace after the colon: raw substring matching for "cwd":"…"
-		// would miss this; JSON parsing must not.
-		return `{"timestamp":"x","type":"session_meta","payload":{"id":"i", "cwd": "` + cwd + `"}}` + "\n"
-	}
-	idOld := "aaaaaaaa-0000-0000-0000-000000000001"
-	idNew := "bbbbbbbb-0000-0000-0000-000000000002"
-	older := filepath.Join(day, "rollout-2026-07-12T08-00-00-"+idOld+".jsonl")
-	newer := filepath.Join(day, "rollout-2026-07-12T10-00-00-"+idNew+".jsonl")
-	other := filepath.Join(day, "rollout-2026-07-12T09-00-00-cccccccc-0000-0000-0000-000000000003.jsonl")
-	os.WriteFile(older, []byte(meta("/data/exp1")), 0o644)
-	os.WriteFile(newer, []byte(meta("/data/exp1")), 0o644)
-	os.WriteFile(other, []byte(meta("/data/exp2")), 0o644)
-	past := time.Now().Add(-2 * time.Hour)
-	os.Chtimes(older, past, past)
-
-	got := FindCodexRolloutsForDir(root, "/data/exp1")
-	if len(got) != 2 {
-		t.Fatalf("want 2 candidates, got %d: %#v", len(got), got)
-	}
-	if got[0].Path != newer || got[0].SessionID != idNew {
-		t.Errorf("newest first: got %q id %q", got[0].Path, got[0].SessionID)
-	}
-	if got[1].Path != older || got[1].SessionID != idOld {
-		t.Errorf("older second: got %q id %q", got[1].Path, got[1].SessionID)
-	}
-	if extra := FindCodexRolloutsForDir(root, "/data/nomatch"); len(extra) != 0 {
-		t.Errorf("unrelated cwd matched: %#v", extra)
 	}
 }
 

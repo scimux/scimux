@@ -2,10 +2,16 @@ builds/
 scimux-*
 scimux
 
-# locally captured transcript fixtures (regenerate with
+# locally captured transcript/protocol fixtures (regenerate with
 # scripts/capture-fixtures.sh; they contain personal environment snapshots
 # even after scrubbing, so they stay out of the public repo)
 internal/transcript/testdata/real-*.jsonl
-review.md
-review-response.md
-acp-integration-plan.md
+internal/acp/codex/testdata/real-*.ndjson
+
+# Only README.md, AGENTS.md, and CLAUDE.md are tracked. Every other markdown
+# file (design/planning intermediates, working notes) is a local or
+# in-repo-but-unpublished document — keep them all out of git.
+*.md
+!README.md
+!AGENTS.md
+!CLAUDE.md

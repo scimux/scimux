@@ -52,13 +52,11 @@ func TestAgentCommand(t *testing.T) {
 		t.Errorf("bare claude cmd = %s", got)
 	}
 
+	// codex no longer launches over tmux — it is supervised through the codex
+	// app-server bridge — so it has no tmux launch command line.
 	codex := &Node{Agent: "codex", Model: "gpt-5.5", Effort: "high", Prompt: "sweep thresholds"}
-	got, err = agentCommand(codex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != `codex --model 'gpt-5.5' -c 'model_reasoning_effort=high' 'sweep thresholds'` {
-		t.Errorf("codex cmd = %s", got)
+	if _, err := agentCommand(codex); err == nil {
+		t.Error("agentCommand should reject codex (no tmux launch path)")
 	}
 
 	// A prompt containing quotes and shell metacharacters must stay inert.
@@ -295,31 +293,6 @@ func TestSessionArgFromCmdline(t *testing.T) {
 	}
 }
 
-func TestCodexSessionFromCmdline(t *testing.T) {
-	id := "00000000-0000-7000-8000-000000000001"
-	for _, args := range [][]string{
-		{"codex", "resume", id},
-		{"codex", "--model", "gpt-5.5", "resume", id},
-		{"sh", "-c", "codex resume " + id},
-	} {
-		if got := codexSessionFromCmdline(args); got != id {
-			t.Errorf("codexSessionFromCmdline(%v) = %q, want %q", args, got, id)
-		}
-	}
-	for _, args := range [][]string{
-		{"codex", "resume"},                  // missing value
-		{"codex", "resume", "--last"},        // no explicit id
-		{"codex", "'sweep thresholds'"},      // fresh launch: no id exists
-		{"vim", "how-to-resume plan.md"},     // substring red herring
-		{"claude", "--resume", id + " tail"}, // not a codex invocation shape
-		nil,
-	} {
-		if got := codexSessionFromCmdline(args); got != "" {
-			t.Errorf("codexSessionFromCmdline(%v) = %q, want empty", args, got)
-		}
-	}
-}
-
 // noteChatProgress turns transcript progress into the stale-chat signal:
 // growth across a whole working phase (judge=true, the active→quiet
 // transition) without one chat record sets it; recognized chat progress
@@ -536,7 +509,7 @@ func TestResolveNodeTransport(t *testing.T) {
 		{Node{Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
 		{Node{Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
 		{Node{Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
-		{Node{Prompt: "p", Agent: "codex", Dir: dir}, "tmux"},
+		{Node{Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
 		{Node{Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport
 	}
 	for _, c := range cases {

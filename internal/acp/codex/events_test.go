@@ -1,0 +1,98 @@
+package codex
+
+import "testing"
+
+func TestDecodeAgentDelta(t *testing.T) {
+	if _, got := decodeAgentDelta([]byte(`{"delta":"pon"}`)); got != "pon" {
+		t.Fatalf("delta = %q", got)
+	}
+	if _, got := decodeAgentDelta([]byte(`garbage`)); got != "" {
+		t.Fatalf("garbage delta should be empty, got %q", got)
+	}
+}
+
+func TestDecodeStatus(t *testing.T) {
+	// Synthetic status envelope: status is an object, not a string.
+	if got := decodeStatus([]byte(`{"threadId":"t","status":{"type":"active","activeFlags":[]}}`)); got != "active" {
+		t.Fatalf("status = %q", got)
+	}
+	if got := decodeStatus([]byte(`{"status":{"type":"idle"}}`)); got != "idle" {
+		t.Fatalf("status = %q", got)
+	}
+}
+
+func TestDecodeTokenUsage(t *testing.T) {
+	// Synthetic last-turn counters deliberately differ from cumulative counters.
+	raw := []byte(`{"threadId":"t","turnId":"u","tokenUsage":{"total":{"totalTokens":360,"inputTokens":300,"cachedInputTokens":120,"outputTokens":60,"reasoningOutputTokens":0},"last":{"totalTokens":120,"inputTokens":100,"cachedInputTokens":40,"outputTokens":20,"reasoningOutputTokens":0},"modelContextWindow":1000}}`)
+	u := decodeTokenUsage(raw)
+	if u == nil {
+		t.Fatal("nil usage")
+	}
+	if u.Used != 120 || u.Size != 1000 {
+		t.Fatalf("Used/Size = %d/%d", u.Used, u.Size)
+	}
+	if u.InputTokens != 100 || u.OutputTokens != 20 || u.CachedReadTokens != 40 || u.TotalTokens != 120 {
+		t.Fatalf("token breakdown wrong: %+v", u)
+	}
+	if decodeTokenUsage([]byte(`not json`)) != nil {
+		t.Fatal("garbage usage should be nil")
+	}
+}
+
+func TestDecodeItemUserMessage(t *testing.T) {
+	raw := []byte(`{"item":{"type":"userMessage","id":"i","content":[{"type":"text","text":"hello"}]},"turnId":"u"}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.T != "user" || ev.Text != "hello" {
+		t.Fatalf("user item decode: %+v", ev)
+	}
+}
+
+func TestDecodeItemAgentMessage(t *testing.T) {
+	// agentMessage carries final text directly.
+	raw := []byte(`{"item":{"type":"agentMessage","id":"i","text":"pong"}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.T != "assistant" || ev.Text != "pong" {
+		t.Fatalf("agent item decode: %+v", ev)
+	}
+}
+
+func TestDecodeItemReasoningIgnored(t *testing.T) {
+	if ev := decodeItem([]byte(`{"item":{"type":"reasoning","id":"i"}}`), true); ev != nil {
+		t.Fatalf("reasoning should be ignored, got %+v", ev)
+	}
+}
+
+func TestDecodeItemToolFallback(t *testing.T) {
+	raw := []byte(`{"item":{"type":"commandExecution","id":"call_x","command":"ls -la","status":"in_progress"}}`)
+	ev := decodeItem(raw, false)
+	if ev == nil || ev.T != "tool" || ev.Tool == nil {
+		t.Fatalf("tool decode: %+v", ev)
+	}
+	if ev.Tool.Title != "ls -la" || ev.Tool.Kind != "commandExecution" || ev.Tool.Status != "in_progress" {
+		t.Fatalf("tool fields: %+v", ev.Tool)
+	}
+	if ev.Tool.RawInput != "ls -la" {
+		t.Fatalf("rawInput = %v", ev.Tool.RawInput)
+	}
+}
+
+func TestDecodeItemToolDefaultStatus(t *testing.T) {
+	// No status + completed=true → "completed"; completed=false → "started".
+	done := decodeItem([]byte(`{"item":{"type":"x","id":"i"}}`), true)
+	if done.Tool.Status != "completed" {
+		t.Fatalf("completed status = %q", done.Tool.Status)
+	}
+	start := decodeItem([]byte(`{"item":{"type":"x","id":"i"}}`), false)
+	if start.Tool.Status != "started" {
+		t.Fatalf("started status = %q", start.Tool.Status)
+	}
+}
+
+func TestDecodeItemEmptyTextSkipped(t *testing.T) {
+	if ev := decodeItem([]byte(`{"item":{"type":"agentMessage","text":"   "}}`), true); ev != nil {
+		t.Fatalf("blank assistant text should be skipped, got %+v", ev)
+	}
+	if ev := decodeItem([]byte(`garbage`), true); ev != nil {
+		t.Fatalf("garbage item should be nil")
+	}
+}

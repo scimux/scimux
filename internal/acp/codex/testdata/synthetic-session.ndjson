@@ -1,0 +1,10 @@
+{"result":{"userAgent":"codex/synthetic","codexHome":"/scrubbed/.codex","platformFamily":"linux","platformOs":"linux"}}
+{"result":{"thread":{"id":"THREAD-SYN","path":"/scrubbed/rollout.jsonl"},"model":"codex-o4-mini","approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite"},"reasoningEffort":"medium"}}
+{"result":{"turn":{}}}
+{"method":"item/agentMessage/delta","params":{"itemId":"msg-syn-1","delta":"Delta "}}
+{"method":"item/agentMessage/delta","params":{"itemId":"msg-syn-1","delta":"assembled."}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-syn-1","text":""}}}
+{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"totalTokens":77,"inputTokens":60,"cachedInputTokens":0,"outputTokens":17},"modelContextWindow":128000}}}
+{"method":"future/unknownNotificationType","params":{"data":"silently ignored per defensive-parsing invariant"}}
+{"id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"THREAD-SYN","turnId":"turn-syn-1","itemId":"call-syn-1","reason":"list temp directory","command":"ls /tmp","cwd":"/scrubbed","availableDecisions":["accept","cancel"]}}
+{"method":"turn/completed","params":{"threadId":"THREAD-SYN","turn":{}}}
