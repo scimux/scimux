@@ -628,6 +628,55 @@ func TestHandleSendCodexConflict(t *testing.T) {
 	close(unblock)
 }
 
+// newApprovalFakeCodexSpawn builds a SpawnFunc whose fake server sends
+// item/commandExecution/requestApproval after acknowledging turn/start, then
+// waits for the client's decision response before sending turn/completed.
+// approvalDispatched is closed once the approval request is written to the
+// pipe; decisionDelivered is closed once the peer's response is read back.
+func newApprovalFakeCodexSpawn(t *testing.T, threadID, rolloutPath string) (
+	codex.SpawnFunc, <-chan struct{}, <-chan struct{},
+) {
+	t.Helper()
+	approvalDispatched := make(chan struct{})
+	decisionDelivered := make(chan struct{})
+	spawn := func(nodeID, dir string) (codex.Transport, error) {
+		serverR, clientW := io.Pipe()
+		clientR, serverW := io.Pipe()
+		tr := &fakeCodexTransport{stdin: clientW, stdout: clientR}
+		go func() {
+			defer serverW.Close()
+			sc := bufio.NewScanner(serverR)
+			for sc.Scan() {
+				var req map[string]json.RawMessage
+				if json.Unmarshal([]byte(sc.Text()), &req) != nil {
+					continue
+				}
+				method := strings.Trim(string(req["method"]), `"`)
+				rawID := req["id"]
+				switch method {
+				case "initialize":
+					fmt.Fprintf(serverW, `{"id":%s,"result":{"userAgent":"fake"}}`+"\n", rawID)
+				case "thread/start":
+					fmt.Fprintf(serverW, `{"id":%s,"result":{"thread":{"id":%q,"path":%q},"model":"fake-model","approvalPolicy":"on-request"}}`+"\n",
+						rawID, threadID, rolloutPath)
+				case "turn/start":
+					fmt.Fprintf(serverW, `{"id":%s,"result":{"turn":{}}}`+"\n", rawID)
+					// Send an approval request to the client and wait for its response.
+					fmt.Fprintf(serverW, `{"id":"srv-1","method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /","reason":"test","availableDecisions":["accept","cancel"]}}`+"\n")
+					close(approvalDispatched)
+					if sc.Scan() { // reads the peer's approval-response line
+						close(decisionDelivered)
+					}
+					fmt.Fprintf(serverW, `{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"approved"}}}`+"\n")
+					fmt.Fprintf(serverW, `{"method":"turn/completed","params":{}}`+"\n")
+				}
+			}
+		}()
+		return tr, nil
+	}
+	return spawn, approvalDispatched, decisionDelivered
+}
+
 func TestHandleKeyCodexAuditBeforeDeliver(t *testing.T) {
 	// For a codex node with a pending approval, the audit record must be written
 	// before Deliver is called (finding 53). We verify by injecting a node whose
@@ -664,6 +713,91 @@ func TestHandleKeyCodexAuditBeforeDeliver(t *testing.T) {
 		if r.Type == "key" {
 			t.Fatalf("key audit record written despite PrepareResolve failure: %+v", r)
 		}
+	}
+}
+
+func TestHandleKeyCodexAuditPositive(t *testing.T) {
+	// Positive /key path for a live Codex turn: the audit record must be written
+	// to the store BEFORE the decision is delivered to the agent (finding 53/86).
+	// Verified by observing that the fake server receives the decision response
+	// only after /key has returned 200 and the audit record already exists.
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	spawn, approvalDispatched, decisionDelivered := newApprovalFakeCodexSpawn(t, "THREAD-KEY-POS", rollout)
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
+	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+
+	// Create the node; the first prompt triggers turn/start → approval request.
+	rec := newNode(a, `{"prompt":"do it","title":"T","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d", rec.Code)
+	}
+	n := a.nodes[0]
+
+	// Wait for the fake server to dispatch the approval request.
+	select {
+	case <-approvalDispatched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approval to be dispatched")
+	}
+
+	// Poll until the session's pending field is populated; there is a brief
+	// scheduling gap between the pipe write completing and approve() setting
+	// s.pending.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, ok := a.codex.Pending(n.ID); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, _, ok := a.codex.Pending(n.ID); !ok {
+		t.Fatal("timed out waiting for pending approval to appear")
+	}
+
+	// POST /key y: maps to the first non-rejecting decision ("accept"), writes
+	// the audit record, then delivers the decision.
+	keyReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/key",
+		strings.NewReader(`{"key":"y"}`))
+	keyReq.SetPathValue("id", n.ID)
+	keyRec := httptest.NewRecorder()
+	a.handleKey(keyRec, keyReq)
+	if keyRec.Code != 200 {
+		t.Fatalf("handleKey: code = %d body %q", keyRec.Code, keyRec.Body)
+	}
+
+	// The audit record must be in the store immediately after /key returns 200
+	// (written before Deliver — the HTTP handler persists first, then delivers).
+	recs := keyRecords(t, a.storePath)
+	var found *storeRecord
+	for i := range recs {
+		if recs[i].Type == "key" {
+			found = &recs[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no key audit record in store after /key returned 200")
+	}
+	if found.Key != "y" {
+		t.Errorf("audit key = %q, want y", found.Key)
+	}
+	if found.Excerpt == "" {
+		t.Error("audit evidence (excerpt) must not be empty")
+	}
+	if found.ID != n.ID {
+		t.Errorf("audit node id = %q, want %q", found.ID, n.ID)
+	}
+
+	// The fake server must receive the decision. Since store append happens before
+	// Deliver, which happens before approve() returns, which happens before the
+	// server reads the response, the ordering guarantee is transitive.
+	select {
+	case <-decisionDelivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for decision to reach fake server")
 	}
 }
 

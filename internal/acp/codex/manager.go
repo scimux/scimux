@@ -26,8 +26,11 @@ type Manager struct {
 	sessions map[string]*Session
 	spawn    SpawnFunc
 	logDir   string
+	closing  bool
 	// wg tracks in-flight runTurn goroutines so Shutdown can wait for them
 	// before returning, preventing writes to a deleted log directory.
+	// Add(1) is always called while holding mu (before Shutdown can set
+	// closing=true and reach Wait), so Wait() never misses a concurrent Add.
 	wg sync.WaitGroup
 }
 
@@ -137,21 +140,34 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 // prompting — a log-append failure refuses the send rather than prompting
 // without a durable record. The turn itself runs in a goroutine.
 func (m *Manager) Send(nodeID, text string) error {
-	s := m.session(nodeID)
+	m.mu.Lock()
+	s := m.sessions[nodeID]
 	if s == nil {
+		m.mu.Unlock()
 		return ErrNoSession
 	}
+	if m.closing {
+		m.mu.Unlock()
+		return ErrNotAlive
+	}
+	// Add while holding the lock so Shutdown's wg.Wait() can never observe a
+	// zero count between the session lookup and the goroutine launch (finding 87).
+	m.wg.Add(1)
+	m.mu.Unlock()
+
 	if !s.alive() {
+		m.wg.Done()
 		return ErrNotAlive
 	}
 	if !s.reserveTurn() {
+		m.wg.Done()
 		return ErrTurnActive
 	}
 	if err := s.logw.append(Event{T: "user", Text: text}); err != nil {
 		s.abortTurn()
+		m.wg.Done()
 		return fmt.Errorf("record user turn: %w", err)
 	}
-	m.wg.Add(1)
 	go func() { defer m.wg.Done(); s.runTurn(text) }()
 	return nil
 }
@@ -269,6 +285,7 @@ func (m *Manager) Kill(nodeID string) error {
 // sessions), these are ours and must not orphan. Wire it to a signal handler.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	m.closing = true
 	ss := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		ss = append(ss, s)
