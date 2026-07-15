@@ -345,7 +345,7 @@ func (c *Client) handleApproval(method string, params json.RawMessage) (any, *rp
 	if !ok {
 		return nil, &rpcError{Code: -32000, Message: "approval rejected by handler"}
 	}
-	return buildDecisionResult(key, payload), nil
+	return buildDecisionResult(a.Method, key, payload), nil
 }
 
 // callCtx runs peer.call but honours ctx cancellation.

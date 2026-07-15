@@ -1389,10 +1389,13 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 func (a *app) procChat(w http.ResponseWriter, n *Node, pm procManager) {
 	turns := pm.Turns(n.ID)
 	live := pm.Live(n.ID)
-	attn := pm.Attention(n.ID)
 	lastErr := pm.LastError(n.ID)
 	used, window := pm.Usage(n.ID)
-	permTitle, permOptions, _ := pm.Pending(n.ID)
+	permTitle, permOptions, hasPerm := pm.Pending(n.ID)
+	attn := ""
+	if hasPerm {
+		attn = "approval"
+	}
 	a.mu.Lock()
 	var lastMS int64
 	if t, ok := a.lastChg[n.ID]; ok {

@@ -2,11 +2,9 @@ package codex
 
 import "encoding/json"
 
-// Approval is a decoded server->client approval request. Codex enumerates the
-// valid decisions per request in AvailableDecisions (finding 66): there is no
-// single opaque option id, so the UI must render exactly these choices. The
-// method determines the decision enum (ReviewDecision vs
-// CommandExecutionApprovalDecision), which is why Method is preserved.
+// Approval is a decoded server->client approval request. Codex uses different
+// request/response shapes per approval method; AvailableDecisions is the
+// normalized list scimux may render and later send back.
 type Approval struct {
 	Method   string // e.g. "item/commandExecution/requestApproval"
 	Reason   string
@@ -14,9 +12,10 @@ type Approval struct {
 	Cwd      string
 	ThreadID string
 	TurnID   string
-	// AvailableDecisions is the server-supplied set of valid choices. Each is
-	// either a bare string enum ("accept","cancel") or a single-key object
-	// variant (e.g. {"acceptWithExecpolicyAmendment":{...}}).
+	// AvailableDecisions is either the server-supplied set of valid choices
+	// (command execution) or the method's fixed response enum (file changes,
+	// legacy exec/patch, permissions). Each decision carries enough payload to
+	// build the method-specific JSON-RPC response.
 	AvailableDecisions []Decision
 	Raw                json.RawMessage // full params, for anything not modelled
 }
@@ -33,7 +32,7 @@ type Decision struct {
 // IsRejection reports whether a decision key denies/cancels the request.
 func (d Decision) IsRejection() bool {
 	switch d.Key {
-	case "cancel", "decline", "denied", "abort":
+	case "cancel", "decline", "denied", "abort", "declinePermissions":
 		return true
 	}
 	return false
@@ -54,16 +53,55 @@ func decodeApproval(method string, params json.RawMessage) Approval {
 		ThreadID           string            `json:"threadId"`
 		TurnID             string            `json:"turnId"`
 		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
+		Permissions        json.RawMessage   `json:"permissions"`
 	}
 	_ = json.Unmarshal(params, &p)
 	a := Approval{
 		Method: method, Reason: p.Reason, Command: p.Command, Cwd: p.Cwd,
 		ThreadID: p.ThreadID, TurnID: p.TurnID, Raw: params,
 	}
-	for _, d := range p.AvailableDecisions {
-		a.AvailableDecisions = append(a.AvailableDecisions, parseDecision(d))
+	switch method {
+	case "item/commandExecution/requestApproval":
+		for _, d := range p.AvailableDecisions {
+			a.AvailableDecisions = append(a.AvailableDecisions, parseDecision(d))
+		}
+		if len(a.AvailableDecisions) == 0 {
+			a.AvailableDecisions = []Decision{{Key: "accept"}, {Key: "acceptForSession"}, {Key: "decline"}, {Key: "cancel"}}
+		}
+	case "item/fileChange/requestApproval":
+		a.AvailableDecisions = []Decision{{Key: "accept"}, {Key: "acceptForSession"}, {Key: "decline"}, {Key: "cancel"}}
+	case "execCommandApproval", "applyPatchApproval":
+		a.AvailableDecisions = []Decision{{Key: "approved"}, {Key: "approved_for_session"}, {Key: "denied"}, {Key: "abort"}}
+	case "item/permissions/requestApproval":
+		a.AvailableDecisions = permissionDecisions(p.Permissions)
 	}
 	return a
+}
+
+func permissionDecisions(permissions json.RawMessage) []Decision {
+	return []Decision{
+		{Key: "allowForTurn", Payload: permissionResponse(permissions, "turn")},
+		{Key: "allowForSession", Payload: permissionResponse(permissions, "session")},
+		{Key: "declinePermissions", Payload: json.RawMessage(`{"permissions":{},"scope":"turn"}`)},
+	}
+}
+
+func permissionResponse(permissions json.RawMessage, scope string) json.RawMessage {
+	var requested struct {
+		Network    json.RawMessage `json:"network"`
+		FileSystem json.RawMessage `json:"fileSystem"`
+	}
+	_ = json.Unmarshal(permissions, &requested)
+	granted := map[string]json.RawMessage{}
+	if len(requested.Network) > 0 && string(requested.Network) != "null" {
+		granted["network"] = requested.Network
+	}
+	if len(requested.FileSystem) > 0 && string(requested.FileSystem) != "null" {
+		granted["fileSystem"] = requested.FileSystem
+	}
+	resp := map[string]any{"permissions": granted, "scope": scope}
+	b, _ := json.Marshal(resp)
+	return b
 }
 
 // parseDecision handles both a bare string enum and a single-key object variant.
@@ -84,7 +122,14 @@ func parseDecision(raw json.RawMessage) Decision {
 // buildDecisionResult renders the {"decision": ...} response body. A bare key
 // yields a string decision; a key with payload yields the object variant, so
 // e.g. acceptWithExecpolicyAmendment round-trips its amendment back to codex.
-func buildDecisionResult(key string, payload json.RawMessage) map[string]any {
+func buildDecisionResult(method, key string, payload json.RawMessage) any {
+	if method == "item/permissions/requestApproval" {
+		var v any
+		if len(payload) != 0 && json.Unmarshal(payload, &v) == nil {
+			return v
+		}
+		return map[string]any{"permissions": map[string]any{}, "scope": "turn"}
+	}
 	if len(payload) == 0 {
 		return map[string]any{"decision": key}
 	}

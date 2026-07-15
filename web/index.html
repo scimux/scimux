@@ -1554,7 +1554,7 @@ async function refreshChat(){
       `<span class="hint">The agent needs your approval ${what} \u2014 choose one:</span>` +
       (opts.length
         ? opts.map(o => `<button data-key="${esc(o.key)}">${esc(o.key)}. ${esc(o.name)}</button>`).join("")
-        : ["y","n"].map(k => `<button data-key="${k}">${k}</button>`).join(""));
+        : `<span class="hint">Waiting for approval options from the agent...</span>`);
   } else {
     $("#keyrow").innerHTML =
       `<span class="hint">${esc(HINTS[n.attention] || `The agent waits for your ${n.attention} \u2014 keys go straight to its terminal:`)}</span>` +

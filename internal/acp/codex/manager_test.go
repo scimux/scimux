@@ -138,6 +138,81 @@ func TestManagerApprovalResolve(t *testing.T) {
 	waitFor(t, func() bool { return m.Attention("n1") == "" && m.Live("n1") == "quiet" })
 }
 
+func TestManagerFileChangeApprovalResolve(t *testing.T) {
+	m, _, ms := newManagerWithMock(t)
+	launch(t, m, ms, "n1", "", "")
+	if err := m.Send("n1", "edit"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ms.reply(t, ms.nextReq(t).ID, `{"turn":{}}`) // turn/start
+	ms.serverRequest(t, 0, "item/fileChange/requestApproval", `{"threadId":"THREAD-1","turnId":"turn-1","itemId":"patch-1","startedAtMs":1,"reason":"write file","grantRoot":"/w"}`)
+
+	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
+	title, opts, ok := m.Pending("n1")
+	if !ok || title != "item/fileChange/requestApproval" {
+		t.Fatalf("pending = %q %+v %v", title, opts, ok)
+	}
+	if got := optionNames(opts); strings.Join(got, ",") != "accept,acceptForSession,decline,cancel" {
+		t.Fatalf("file-change options = %v", got)
+	}
+
+	optID, _, err := m.PrepareResolve("n1", "2")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := m.Deliver("n1", optID); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	dec := ms.nextResp(t)
+	if !strings.Contains(string(dec.Result), `"decision":"acceptForSession"`) {
+		t.Fatalf("decision result = %s", dec.Result)
+	}
+}
+
+func TestManagerQueuesConcurrentApprovals(t *testing.T) {
+	m, _, ms := newManagerWithMock(t)
+	launch(t, m, ms, "n1", "", "")
+	if err := m.Send("n1", "two approvals"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ms.reply(t, ms.nextReq(t).ID, `{"turn":{}}`) // turn/start
+	ms.serverRequest(t, 1, "item/commandExecution/requestApproval", syntheticApproval)
+
+	waitFor(t, func() bool {
+		_, opts, ok := m.Pending("n1")
+		return ok && len(opts) == 3
+	})
+	ms.serverRequest(t, 2, "item/fileChange/requestApproval", `{"threadId":"THREAD-1","turnId":"turn-1","itemId":"patch-1","startedAtMs":1}`)
+
+	optID, _, err := m.PrepareResolve("n1", "1")
+	if err != nil {
+		t.Fatalf("prepare first: %v", err)
+	}
+	if err := m.Deliver("n1", optID); err != nil {
+		t.Fatalf("deliver first: %v", err)
+	}
+	first := ms.nextResp(t)
+	if !strings.Contains(string(first.Result), `"decision":"accept"`) {
+		t.Fatalf("first decision = %s", first.Result)
+	}
+
+	waitFor(t, func() bool {
+		title, opts, ok := m.Pending("n1")
+		return ok && title == "item/fileChange/requestApproval" && len(opts) == 4
+	})
+	optID, _, err = m.PrepareResolve("n1", "4")
+	if err != nil {
+		t.Fatalf("prepare second: %v", err)
+	}
+	if err := m.Deliver("n1", optID); err != nil {
+		t.Fatalf("deliver second: %v", err)
+	}
+	second := ms.nextResp(t)
+	if !strings.Contains(string(second.Result), `"decision":"cancel"`) {
+		t.Fatalf("second decision = %s", second.Result)
+	}
+}
+
 func TestManagerNoPendingResolve(t *testing.T) {
 	m, _, ms := newManagerWithMock(t)
 	launch(t, m, ms, "n1", "", "")
@@ -237,4 +312,12 @@ func TestManagerSendNoSession(t *testing.T) {
 	if m.Live("ghost") != "exited" {
 		t.Fatal("no-session node should read exited")
 	}
+}
+
+func optionNames(opts []PermOption) []string {
+	out := make([]string, len(opts))
+	for i, o := range opts {
+		out[i] = o.Name
+	}
+	return out
 }

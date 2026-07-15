@@ -306,7 +306,7 @@ func (m *Manager) Shutdown() {
 // Session is one node's codex client and turn state. The client drives the wire
 // (streaming, turn completion, approval blocking); the Session owns the
 // authoritative log and the acp-style bookkeeping (liveness, last error,
-// "no output this turn", the one pending approval) the fire-and-forget event
+// "no output this turn", pending approvals) the fire-and-forget event
 // sink cannot express on its own.
 type Session struct {
 	nodeID   string
@@ -320,14 +320,15 @@ type Session struct {
 	turnActive    bool
 	turnHadOutput bool
 	lastError     string
-	pending       *pendingPermission
+	pending       []*pendingPermission
 
 	done     chan struct{} // closed on exit/stop; unblocks a pending approval
 	doneOnce sync.Once
 }
 
-// pendingPermission is the one outstanding approval (codex, like ACP, runs one
-// turn at a time). approve blocks on ch until a key resolves it or done closes.
+// pendingPermission is one outstanding approval. Codex can issue more than one
+// server request while the same turn is active, so scimux queues them and lets
+// the supervisor answer the head of the queue.
 type pendingPermission struct {
 	approval Approval
 	ch       chan chosen
@@ -363,23 +364,18 @@ func (s *Session) appendLocked(ev Event) bool {
 	return true
 }
 
-// approve is the injected ApprovalFunc. It records the one pending request and
-// blocks until a supervisor answers (via Deliver) or the turn/session is
+// approve is the injected ApprovalFunc. It queues a pending request and blocks
+// until a supervisor answers it (via Deliver) or the turn/session is
 // cancelled (done closes → fail-closed rejection). The pending approval is
 // already logged as tool evidence by the client before this is called.
 func (s *Session) approve(a Approval) (string, json.RawMessage, bool) {
 	ch := make(chan chosen, 1)
+	p := &pendingPermission{approval: a, ch: ch}
 	s.mu.Lock()
-	if s.pending != nil {
-		// One pending at a time; a second is an agent error → reject it.
-		s.mu.Unlock()
-		_ = s.logw.append(Event{T: "error", Error: "duplicate approval request ignored"})
-		return "", nil, false
-	}
-	s.pending = &pendingPermission{approval: a, ch: ch}
+	s.pending = append(s.pending, p)
 	s.mu.Unlock()
 
-	defer s.clearPending()
+	defer s.removePending(p)
 	select {
 	case c := <-ch:
 		return c.key, c.payload, c.ok
@@ -394,14 +390,14 @@ func (s *Session) approve(a Approval) (string, json.RawMessage, bool) {
 func (s *Session) prepareResolve(key string) (optID, evidence string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.pending == nil {
+	if len(s.pending) == 0 {
 		return "", "", ErrNoPending
 	}
-	idx, ok := mapKeyToDecision(key, s.pending.approval.AvailableDecisions)
+	idx, ok := mapKeyToDecision(key, s.pending[0].approval.AvailableDecisions)
 	if !ok {
 		return "", "", fmt.Errorf("key %q maps to no decision", key)
 	}
-	return strconv.Itoa(idx), "permission: " + approvalTitle(s.pending.approval), nil
+	return strconv.Itoa(idx), "permission: " + approvalTitle(s.pending[0].approval), nil
 }
 
 // deliver hands the mapped decision to the blocked approve goroutine. It holds
@@ -411,16 +407,16 @@ func (s *Session) prepareResolve(key string) (optID, evidence string, err error)
 func (s *Session) deliver(optID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p := s.pending
-	if p == nil {
+	if len(s.pending) == 0 {
 		return ErrNoPending
 	}
+	p := s.pending[0]
 	idx, err := strconv.Atoi(optID)
 	if err != nil || idx < 0 || idx >= len(p.approval.AvailableDecisions) {
 		return errors.New("pending permission changed before the answer was delivered")
 	}
 	d := p.approval.AvailableDecisions[idx]
-	s.pending = nil // consume; approve's deferred clearPending is now a no-op
+	s.pending = s.pending[1:] // consume; approve's deferred removePending is now a no-op
 	select {
 	case p.ch <- chosen{key: d.Key, payload: d.Payload, ok: true}:
 		return nil
@@ -432,21 +428,26 @@ func (s *Session) deliver(optID string) error {
 func (s *Session) pendingInfo() (string, []PermOption, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.pending == nil {
+	if len(s.pending) == 0 {
 		return "", nil, false
 	}
-	ds := s.pending.approval.AvailableDecisions
+	ds := s.pending[0].approval.AvailableDecisions
 	opts := make([]PermOption, 0, len(ds))
 	for i, d := range ds {
 		opts = append(opts, PermOption{Key: strconv.Itoa(i + 1), Name: d.Key})
 	}
-	return approvalTitle(s.pending.approval), opts, true
+	return approvalTitle(s.pending[0].approval), opts, true
 }
 
-func (s *Session) clearPending() {
+func (s *Session) removePending(p *pendingPermission) {
 	s.mu.Lock()
-	s.pending = nil
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	for i, cur := range s.pending {
+		if cur == p {
+			s.pending = append(s.pending[:i], s.pending[i+1:]...)
+			return
+		}
+	}
 }
 
 // mapKeyToDecision resolves a whitelisted dialog key to a decision index: a
@@ -557,7 +558,7 @@ func (s *Session) Live() string {
 func (s *Session) Attention() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.pending != nil {
+	if len(s.pending) != 0 {
 		return "approval"
 	}
 	return ""

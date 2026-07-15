@@ -54,7 +54,7 @@ func TestDecisionIsRejection(t *testing.T) {
 }
 
 func TestBuildDecisionResultBareKey(t *testing.T) {
-	r := buildDecisionResult("accept", nil)
+	r := buildDecisionResult("item/commandExecution/requestApproval", "accept", nil)
 	b, _ := json.Marshal(r)
 	if string(b) != `{"decision":"accept"}` {
 		t.Fatalf("bare decision = %s", b)
@@ -63,7 +63,7 @@ func TestBuildDecisionResultBareKey(t *testing.T) {
 
 func TestBuildDecisionResultObjectVariant(t *testing.T) {
 	payload := json.RawMessage(`{"execpolicy_amendment":["printf"]}`)
-	r := buildDecisionResult("acceptWithExecpolicyAmendment", payload)
+	r := buildDecisionResult("item/commandExecution/requestApproval", "acceptWithExecpolicyAmendment", payload)
 	b, _ := json.Marshal(r)
 	want := `{"decision":{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["printf"]}}}`
 	if string(b) != want {
@@ -77,4 +77,40 @@ func TestParseDecisionGarbage(t *testing.T) {
 	if d.Key != "" {
 		t.Fatalf("numeric decision should yield empty key, got %+v", d)
 	}
+}
+
+func TestDecodeFileChangeApprovalUsesFixedDecisions(t *testing.T) {
+	a := decodeApproval("item/fileChange/requestApproval", []byte(`{
+		"threadId":"t","turnId":"u","itemId":"i","startedAtMs":1,
+		"reason":"write file","grantRoot":"/w"
+	}`))
+	got := decisionKeys(a.AvailableDecisions)
+	want := []string{"accept", "acceptForSession", "decline", "cancel"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("file-change decisions = %v, want %v", got, want)
+	}
+}
+
+func TestBuildPermissionsApprovalResponse(t *testing.T) {
+	a := decodeApproval("item/permissions/requestApproval", []byte(`{
+		"threadId":"t","turnId":"u","itemId":"i","environmentId":"local",
+		"startedAtMs":1,"cwd":"/w","reason":"need write",
+		"permissions":{"network":null,"fileSystem":{"write":["/w"]}}
+	}`))
+	if got := decisionKeys(a.AvailableDecisions); strings.Join(got, ",") != "allowForTurn,allowForSession,declinePermissions" {
+		t.Fatalf("permissions decisions = %v", got)
+	}
+	r := buildDecisionResult(a.Method, a.AvailableDecisions[0].Key, a.AvailableDecisions[0].Payload)
+	b, _ := json.Marshal(r)
+	if !strings.Contains(string(b), `"scope":"turn"`) || !strings.Contains(string(b), `"fileSystem":{"write":["/w"]}`) {
+		t.Fatalf("permissions response = %s", b)
+	}
+}
+
+func decisionKeys(ds []Decision) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.Key
+	}
+	return out
 }
