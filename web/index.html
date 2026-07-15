@@ -384,13 +384,18 @@ body.cards-open #msgs { overflow: hidden; }
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--hairline); background: var(--bg);
 }
-#promptbar textarea {
+#promptbar [contenteditable] {
   flex: 1; resize: none; max-height: 120px;
   font-size: 16px; line-height: 1.4; font-family: inherit; color: var(--ink);
   background: var(--surface); border: 1px solid var(--hairline);
   border-radius: 20px; padding: 9px 16px; outline: none;
+  min-height: calc(1.4em + 18px); overflow-y: auto; white-space: pre-wrap;
+  word-break: break-word; -webkit-user-select: text; user-select: text;
 }
-#promptbar textarea:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
+#promptbar [contenteditable]:empty::before {
+  content: attr(data-placeholder); color: var(--dim); pointer-events: none;
+}
+#promptbar [contenteditable]:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
 #sendbtn {
   width: 38px; height: 38px; border-radius: 19px; flex: none;
   background: var(--work); color: #fff; font-size: 17px;
@@ -535,7 +540,8 @@ body.cards-open #msgs { overflow: hidden; }
     </div>
     <div id="workpulse" aria-hidden="true"></div>
     <div id="promptbar">
-      <textarea id="prompt" rows="1" placeholder="Message the agent…"></textarea>
+      <div id="prompt" role="textbox" aria-multiline="true" contenteditable="true"
+        data-placeholder="Message the agent…"></div>
       <button id="sendbtn" aria-label="send">&#10148;</button>
     </div>
   </section>
@@ -1377,9 +1383,7 @@ function select(id){
   sel = id;
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
-  ta.value = localStorage.getItem("scimux-draft:" + sel) || "";
-  ta.style.height = "auto";
-  if (ta.value) ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+  setPromptText(localStorage.getItem("scimux-draft:" + sel) || "");
   cardsSig = "";
   renderCards();
   renderChatHead();
@@ -1721,11 +1725,31 @@ longpress($("#msgs"), ".turn", el => {
 });
 
 /* ---------- prompt bar (singleton; drafts survive everything) ---------- */
+function promptText(){
+  return ($("#prompt").innerText || "").replace(/\u00a0/g, " ");
+}
+function resizePrompt(){
+  const el = $("#prompt");
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 120) + "px";
+}
+function setPromptText(s){
+  const el = $("#prompt");
+  el.textContent = s || "";
+  resizePrompt();
+}
+function clearPrompt(){
+  setPromptText("");
+}
 $("#prompt").addEventListener("input", e => {
-  const ta = e.target;
-  ta.style.height = "auto";
-  ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
-  if (sel) localStorage.setItem("scimux-draft:" + sel, ta.value);
+  resizePrompt();
+  if (sel) localStorage.setItem("scimux-draft:" + sel, promptText());
+});
+$("#prompt").addEventListener("paste", e => {
+  const text = e.clipboardData?.getData("text/plain");
+  if (text == null) return;
+  e.preventDefault();
+  document.execCommand("insertText", false, text);
 });
 $("#prompt").addEventListener("keydown", e => {
   if (isPhoneTouch()) return;
@@ -1735,11 +1759,11 @@ $("#prompt").addEventListener("keydown", e => {
 });
 $("#sendbtn").addEventListener("click", sendPrompt);
 async function sendPrompt(){
-  const ta = $("#prompt"), text = ta.value.trim();
+  const ta = $("#prompt"), text = promptText().trim();
   if (!text || !sel) return;
   if (sel === "NOTES"){              /* notes never leave scimux's own store */
     uiMutate({ k: "note-add", note: { t: new Date().toISOString(), text } });
-    ta.value = ""; ta.style.height = "auto";
+    clearPrompt();
     localStorage.removeItem("scimux-draft:NOTES");
     ta.blur();                       /* dismiss the keyboard; the note is visible */
     chatSig = ""; cardsSig = "";
@@ -1747,7 +1771,7 @@ async function sendPrompt(){
     return;
   }
   const dest = sel;   /* capture: selection may change while the send is in flight */
-  ta.value = ""; ta.style.height = "auto";
+  clearPrompt();
   localStorage.removeItem("scimux-draft:" + dest);
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
@@ -1774,9 +1798,7 @@ async function sendPrompt(){
     const merged = newer && newer !== text ? text + "\n\n" + newer : text;
     localStorage.setItem("scimux-draft:" + dest, merged);
     if (sel === dest){
-      ta.value = merged;
-      ta.style.height = "auto";
-      ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+      setPromptText(merged);
     }
   }
 }
