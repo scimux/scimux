@@ -271,16 +271,22 @@ body.cards-open #msgs { overflow: hidden; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
 
-/* working indicator: a single calm petrol pulse that gently breathes just
-   above the prompt while the pane is mechanically active. No rotating words,
-   no shimmer rail, no fake progress — liveliness only, accessible name stays
-   constant (the aria-label never changes). */
-#workpulse { height: 2px; margin: 0 16px; border-radius: 2px; flex: none;
-  background: var(--work); opacity: 0; transition: opacity .3s; }
-#workpulse.on { animation: workglow 2.6s ease-in-out infinite; }
-@keyframes workglow {
-  0%, 100% { opacity: .22; box-shadow: 0 0 4px 0 rgba(14,124,134,.30); }
-  50%      { opacity: .85; box-shadow: 0 0 13px 2px rgba(14,124,134,.55); }
+/* working indicator: a small scanner stripe above the prompt while the pane is
+   mechanically active. It uses movement, not glow, so it stays visible on iOS. */
+#workpulse { height: 3px; margin: 0 16px; border-radius: 3px; flex: none;
+  position: relative; overflow: hidden; opacity: 0;
+  background: color-mix(in srgb, var(--work) 16%, transparent);
+  transition: opacity .2s; }
+#workpulse::after {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 34%;
+  border-radius: inherit; background: var(--work);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--work) 50%, transparent);
+}
+#workpulse.on { opacity: 1; }
+#workpulse.on::after { animation: workscan 1.25s ease-in-out infinite alternate; }
+@keyframes workscan {
+  from { left: 0; }
+  to   { left: 66%; }
 }
 
 /* composer tools: a small icon row sitting above the prompt — toggle the
@@ -307,12 +313,12 @@ body.cards-open #msgs { overflow: hidden; }
 #syncwarn:empty { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  #workpulse.on { animation: none; opacity: .6; }
+  #workpulse.on { opacity: 1; }
+  #workpulse.on::after { animation: none; left: 33%; }
   .card.attention { animation: none; box-shadow: 0 0 0 2px var(--attn); }
   .workdot, #chathead .dot.active { animation: none; opacity: 1; }
 }
 @media (max-width: 520px) {
-  #workpulse.on { animation: none; opacity: .65; box-shadow: none; }
   .card.attention { animation: none; box-shadow: 0 0 0 2px rgba(255,204,0,.8); }
 }
 
