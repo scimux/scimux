@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#F5F4F1" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#161618" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%231C1C1E"/><path d="M18 12v40M32 12v40M46 12v40" stroke="%23007AFF" stroke-width="4" stroke-linecap="round"/><circle cx="18" cy="22" r="6" fill="%2334C759"/><circle cx="32" cy="34" r="6" fill="%23FF2D55"/><circle cx="46" cy="44" r="6" fill="%23AF52DE"/></svg>'>
 <title>scimux</title>
 <style>
 /* ---------- design tokens (HIG-derived; see experimental-dashboard/demo) ---------- */
@@ -19,6 +20,7 @@
   --attn:      #FFCC00;   /* systemYellow — needs you; reserved for attention only */
   --bad:       #FF3B30;   /* systemRed — error/exited */
   --work:      #0E7C86;   /* petrol accent — agent working */
+  --unlane:    #C7C7CC;   /* adaptive systemGray3-style unassigned lane */
   --sb-bg:     rgba(245,244,241,.88);
   --code-bg:   rgba(60,60,67,.08);
   --th-bg:     rgba(60,60,67,.05);
@@ -35,6 +37,7 @@
     --attn:     #FFD60A;
     --bad:      #FF453A;
     --work:     #2FA7B4;
+    --unlane:   #48484A;
     --sb-bg:    rgba(22,22,24,.88);
     --code-bg:  rgba(255,255,255,.09);
     --th-bg:    rgba(255,255,255,.05);
@@ -185,6 +188,15 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   color: var(--ink); background: var(--bg);
   border: 1px solid var(--hairline); border-radius: 10px;
 }
+.card .lanebox {
+  display: none; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+.card.expanded .lanebox { display: block; }
+.lanepick { display: flex; gap: 8px; align-items: center; }
+.lanepick select, .lanepick input { margin-top: 0; }
+.lanepick input[hidden] { display: none; }
+.laneswatch { width: 12px; height: 12px; border-radius: 6px; flex: none; background: var(--unlane); }
 .card.editing .descbox { display: block; }
 .card.editing .summary { display: none; }
 .card .save-desc {
@@ -193,6 +205,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   position: relative; z-index: 3;
 }
 .card.editing .save-desc { display: flex; }
+.card.expanded.lane-edit .save-desc { display: flex; }
 .card .go { position: absolute; inset: 0; }
 .card.actions-open .go, .card.expanded .go, .card.editing .go { display: none; }
 .card .actions {
@@ -509,8 +522,8 @@ body.cards-open #msgs { overflow: hidden; }
   <!-- level 3: metro map -->
   <section id="map" class="panel">
     <div class="phead">
-      <button class="backbtn" id="mapclose">&#8249; Activity</button>
-      <h2>Journey</h2>
+      <button class="backbtn" id="mapclose">&#8249; Activities</button>
+      <h2>Journeys</h2>
       <span class="spacer"></span>
     </div>
     <div class="tabs" id="maptabs"></div>
@@ -521,8 +534,8 @@ body.cards-open #msgs { overflow: hidden; }
   <!-- level 2: activity cards -->
   <section id="cards" class="panel">
     <div class="phead">
-      <button class="navnext" id="journeybtn" aria-label="open journey">&#8249;</button>
-      <h2>Activity</h2>
+      <button class="navnext" id="journeybtn" aria-label="open journeys">&#8249;</button>
+      <h2>Activities</h2>
       <span class="spacer"></span>
       <button class="plus" id="plusbtn" aria-label="new activity">+</button>
     </div>
@@ -537,7 +550,7 @@ body.cards-open #msgs { overflow: hidden; }
   <section id="chat" class="panel">
     <div id="chathead">
       <div class="toprow">
-        <button class="backbtn" id="chatback">&#8249; Activity</button>
+        <button class="backbtn" id="chatback">&#8249; Activities</button>
         <span class="dot" id="chatdot"></span>
         <h2 id="chattitle">scimux</h2>
         <button class="dots" id="infobtn" aria-label="details">&#8943;</button>
@@ -569,7 +582,7 @@ body.cards-open #msgs { overflow: hidden; }
   <h3>New activity</h3>
   <div class="sect">
     <div class="k">Title <span class="opt">&#8212; required</span></div>
-    <input id="nc_title" required placeholder="Lane title">
+    <input id="nc_title" required placeholder="Activity title">
   </div>
   <div class="sect">
     <div class="k">Description <span class="opt">&#8212; optional</span></div>
@@ -584,6 +597,14 @@ body.cards-open #msgs { overflow: hidden; }
   <div class="sect">
     <div class="k">Working directory <span class="opt">&#8212; optional, defaults to home</span></div>
     <input id="nc_dir" placeholder="/path/to/experiment">
+  </div>
+  <div class="sect" id="nc_lane_s">
+    <div class="k">Lane</div>
+    <div class="lanepick">
+      <span class="laneswatch" id="nc_lane_swatch"></span>
+      <select id="nc_lane" data-lane-select></select>
+    </div>
+    <input id="nc_lane_new" hidden placeholder="New lane name">
   </div>
   <button class="cta" id="nc_start">Start</button>
 </div>
@@ -653,16 +674,16 @@ body.cards-open #msgs { overflow: hidden; }
 <!-- map group sheet: (+) creates, tapping the active tab again edits -->
 <div class="sheet" id="tabsheet">
   <div class="grab"></div>
-  <h3 id="tab_head">New map group</h3>
+  <h3 id="tab_head">New map</h3>
   <div class="sect"><div class="k">Name</div><input id="tab_name" placeholder="e.g. automotive"></div>
-  <div class="sect"><div class="k">Journeys in this group</div><div id="tab_lanes"></div></div>
+  <div class="sect"><div class="k">Journeys on this map</div><div id="tab_lanes"></div></div>
   <div class="sect" style="color:var(--dim);font-size:13px">
-    Groups are a viewing filter &#8212; an empty group is fine, and removing a tab
+    Maps are a viewing filter &#8212; an empty map is fine, and removing a map
     never touches the journeys.
   </div>
-  <button class="cta" id="tab_save">Add group</button>
+  <button class="cta" id="tab_save">Add map</button>
   <button id="tab_del" style="display:none;width:100%;margin-top:10px;padding:12px;
-    color:var(--bad);font-weight:600">Delete group (journeys stay)</button>
+    color:var(--bad);font-weight:600">Delete map (journeys stay)</button>
 </div>
 
 <!-- burger menu -->
@@ -730,13 +751,13 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
    server state is polled on the normal tick, so an open second device sees
    an archive or note within one interval. Nothing is reported as synced
    until the server acknowledged it (#syncwarn shows pending/failed saves). */
-let UI = { groups: [], archived: [], notes: [] };
+let UI = { groups: [], archived: [], notes: [], lanes: [] };
 let uiRev = "";          // last server revision seen (ETag)
 let uiOps = [];          // local operations not yet acknowledged by the server
 let uiLoaded = false;    // initial load finished — writes are gated on this
 let uiSaving = false;
 let uiTimer = null;
-const normUI = j => Object.assign({ groups: [], archived: [], notes: [] }, j || {});
+const normUI = j => Object.assign({ groups: [], archived: [], notes: [], lanes: [] }, j || {});
 
 function applyOp(doc, op){
   switch (op.k){
@@ -754,8 +775,11 @@ function applyOp(doc, op){
     case "note-del":
       doc.notes = (doc.notes || []).filter(n => n.t !== op.t);
       break;
-    case "groups":   /* group edits replace the whole tab list (rare, one device) */
+    case "groups":   /* map edits replace the whole tab list (rare, one device) */
       doc.groups = op.groups;
+      break;
+    case "lanes":    /* lane create/rename replaces the compact lane list */
+      doc.lanes = op.lanes;
       break;
   }
 }
@@ -811,7 +835,7 @@ async function flushUI(){
    and sheets are singletons outside these render regions) */
 function applyRemoteUI(){
   cardsSig = ""; mapSig = "";
-  renderCards(); renderMapTabs(); renderMap();
+  renderCards(); renderChatHead(); renderMapTabs(); renderMap();
   if (sel === "NOTES"){ chatSig = ""; renderNotes(); }
 }
 async function loadUI(){
@@ -1048,24 +1072,88 @@ function orderedNodes(){
     return (b.last_activity || 0) - (a.last_activity || 0);
   });
 }
-/* laneModel: the shared journey structure — every node rides the rail of its
-   root ancestor; cards, chips, and the map all draw the same lane colors. */
+const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#FF9500","#FF2D55","#00C7BE"];
+const NEW_LANE_VALUE = "__new";
+const laneList = () => Array.isArray(UI.lanes) ? UI.lanes : [];
+function laneById(id){
+  return laneList().find(l => l.id === id) || null;
+}
+function laneName(id){
+  return laneById(id)?.name || id || "unset";
+}
+function laneColor(id){
+  const lane = laneById(id);
+  if (lane?.color) return lane.color;
+  if (!id) return "var(--unlane)";
+  return LANE_COLORS[Math.abs(hashStr(id)) % LANE_COLORS.length];
+}
+function uniqueLaneID(name){
+  const base = (name || "lane").toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "lane";
+  const used = new Set(laneList().map(l => l.id));
+  if (!used.has(base)) return base;
+  for (let i = 2; ; i++){
+    const id = `${base}-${i}`;
+    if (!used.has(id)) return id;
+  }
+}
+function nextLaneColor(){
+  return LANE_COLORS[laneList().length % LANE_COLORS.length];
+}
+function makeLane(name){
+  const clean = name.trim();
+  return { id: uniqueLaneID(clean), name: clean, color: nextLaneColor() };
+}
+function laneOptionsHTML(selected = "", includeUnset = true, disabled = false){
+  const unset = includeUnset ? `<option value="" ${!selected ? "selected" : ""}>unset</option>` : "";
+  const missing = selected && !laneById(selected)
+    ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>` : "";
+  const lanes = laneList().map(l =>
+    `<option value="${esc(l.id)}" ${selected === l.id ? "selected" : ""}>${esc(l.name)}</option>`).join("");
+  const create = disabled ? "" : `<option value="${NEW_LANE_VALUE}">New lane...</option>`;
+  return `${unset}${missing}${lanes}${create}`;
+}
+function laneSelectHTML(selected = "", includeUnset = true, disabled = false){
+  return `<select data-lane-select ${disabled ? "disabled" : ""}>${laneOptionsHTML(selected, includeUnset, disabled)}</select>`;
+}
+function fillLaneSelect(select, selected = "", includeUnset = true, disabled = false){
+  if (!select) return;
+  select.innerHTML = laneOptionsHTML(selected, includeUnset, disabled);
+  select.disabled = !!disabled;
+  select.value = selected;
+  syncLanePicker(select);
+}
+function syncLanePicker(select){
+  if (!select) return;
+  const pick = select.closest(".lanepick");
+  const input = pick?.nextElementSibling?.matches("input") ? pick.nextElementSibling : null;
+  const swatch = pick?.querySelector(".laneswatch");
+  if (input) input.hidden = select.value !== NEW_LANE_VALUE;
+  if (swatch) swatch.style.background = select.value === NEW_LANE_VALUE ? nextLaneColor() : laneColor(select.value);
+}
+function readLaneChoice(select, input){
+  const val = select?.value || "";
+  if (val === NEW_LANE_VALUE){
+    const name = input?.value.trim() || "";
+    if (!name) return { error: "Enter a lane name." };
+    const lane = makeLane(name);
+    return { laneID: lane.id, lane };
+  }
+  return { laneID: val };
+}
+/* laneModel: the shared journey structure. Lanes are explicit assignments;
+   unassigned nodes stay in Activities but do not become Journeys. */
 function laneModel(){
   const byId = {};
   nodes.forEach(n => byId[n.id] = n);
-  const rootOf = id => {
-    let cur = byId[id], guard = 0;
-    while (cur && cur.parent && byId[cur.parent] && guard++ < 100) cur = byId[cur.parent];
-    return cur ? cur.id : id;
-  };
-  const laneOf = {}, roots = [];
-  [...nodes].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""))
-    .forEach(n => {
-      const r = rootOf(n.id);
-      if (!(r in laneOf)){ laneOf[r] = roots.length; roots.push(r); }
-    });
-  return { byId, rootOf, laneOf, roots,
-           color: r => LANE_COLORS[laneOf[r] % LANE_COLORS.length] };
+  const used = new Set(nodes.map(n => n.lane_id).filter(Boolean));
+  const lanes = laneList().filter(l => used.has(l.id));
+  for (const id of used){
+    if (!lanes.some(l => l.id === id)) lanes.push({ id, name: id, color: laneColor(id) });
+  }
+  const laneOf = {};
+  lanes.forEach((l, i) => laneOf[l.id] = i);
+  return { byId, lanes, laneOf, color: laneColor, name: laneName };
 }
 const isArchived = id => (UI.archived || []).includes(id);
 
@@ -1076,9 +1164,10 @@ function renderCards(){
   const list = orderedNodes().filter(n =>
     isArchived(n.id) === (cardTab === "archived") ||
     (cardTab === "current" && hardAttention(n)));
-  const sig = JSON.stringify(list.map(n => [n.id, n.title, n.description, n.live, n.attention, n.model, n.effort]))
+  const sig = JSON.stringify(list.map(n => [n.id, n.title, n.description, n.lane_id, n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
-    + "|" + cardTab + "|" + (UI.notes || []).length + "|" + actionCard + "|" + editingDesc;
+    + "|" + cardTab + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
+    + "|" + actionCard + "|" + editingDesc;
   if (sig === cardsSig){ updateCardAges(); return; }
   cardsSig = sig;
   const adoptCards = cardTab !== "current" ? "" : unadopted.map(s => `
@@ -1099,14 +1188,21 @@ function renderCards(){
     const desc = n.description || n.prompt || "";
     const archived = isArchived(n.id);
     return `
-    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""}" id="card-${esc(n.id)}">
-      <span class="stripe" style="background:${lm.color(lm.rootOf(n.id))}"></span>
+    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${!n.lane_id ? "lane-edit" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""}" id="card-${esc(n.id)}">
+      <span class="stripe" style="background:${lm.color(n.lane_id)}"></span>
       <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
       <div class="row1">
         <span class="title">${esc(n.title)}</span>
         <button class="save-desc" data-save-desc="${esc(n.id)}" aria-label="save description">${ICON_CHECK}</button>
         <button class="chev" data-x="${esc(n.id)}" aria-label="summary">&#8250;</button>
       </div>
+      ${!n.lane_id ? `<div class="lanebox" data-card-lane="${esc(n.id)}">
+        <div class="lanepick">
+          <span class="laneswatch"></span>
+          ${laneSelectHTML("", true)}
+        </div>
+        <input data-lane-new="${esc(n.id)}" hidden placeholder="New lane name">
+      </div>` : ""}
       <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · <span class="age">${ageText(n.last_activity)}</span></div>
       <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
       <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
@@ -1122,6 +1218,7 @@ function renderCards(){
     + notesCard;
   const waiting = nodes.filter(hardAttention).length;
   document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
+  document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
 }
 $("#cardtabs").addEventListener("click", e => {
   const b = e.target.closest("[data-tab]");
@@ -1130,6 +1227,10 @@ $("#cardtabs").addEventListener("click", e => {
   actionCard = ""; editingDesc = "";
   document.querySelectorAll("#cardtabs button").forEach(x => x.classList.toggle("on", x === b));
   cardsSig = ""; renderCards();
+});
+document.addEventListener("change", e => {
+  const sel = e.target.closest("[data-lane-select]");
+  if (sel) syncLanePicker(sel);
 });
 function updateCardAges(){
   for (const n of nodes){
@@ -1146,11 +1247,24 @@ $("#cardlist").addEventListener("click", async e => {
     const id = save.dataset.saveDesc;
     const ta = document.querySelector(`[data-desc-input="${CSS.escape(id)}"]`);
     const description = ta ? ta.value.trim() : "";
+    const laneBox = document.querySelector(`[data-card-lane="${CSS.escape(id)}"]`);
+    const laneChoice = laneBox
+      ? readLaneChoice(laneBox.querySelector("[data-lane-select]"), laneBox.querySelector("[data-lane-new]"))
+      : {};
+    if (laneChoice.error){
+      fieldError(laneBox.querySelector("[data-lane-new]"), laneChoice.error);
+      laneBox.querySelector("[data-lane-new]")?.focus();
+      return;
+    }
+    const body = { description };
+    if (laneChoice.laneID) body.lane_id = laneChoice.laneID;
     try {
       const n = await api(`/api/nodes/${encodeURIComponent(id)}`, {
         method: "PATCH",
-        body: JSON.stringify({ description }),
+        body: JSON.stringify(body),
       });
+      if (laneChoice.lane)
+        uiMutate({ k: "lanes", lanes: [...laneList(), laneChoice.lane] });
       const cur = nodeById(id);
       if (cur) Object.assign(cur, n);
       editingDesc = "";
@@ -1201,19 +1315,17 @@ $("#cardlist").addEventListener("click", async e => {
   if (g){ actionCard = ""; editingDesc = ""; select(g.dataset.open); if (!isDesktop()) setLevel(1); }
 });
 
-/* ---------- metro map: journeys = fork trees, stations = activities ----------
-   Every node is a station on the rail of its root ancestor (lane). Fork
-   rationale renders as "why:" under the station. Finer structure (ruled-out
-   stubs, ghosts, cross-lane sparks) arrives with the record store. */
-const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#A2845E","#FF2D55"];
+/* ---------- metro map: journeys = explicit lanes, stations = activities ----------
+   Only nodes assigned to a lane render here. Fork rationale renders as "why:"
+   under the station; unassigned activities stay solely in Activities. */
 let mapFocus = true;
 let mapSig = "";
 
-/* map groups: logical tabs over the journeys — a viewing filter only.
-   "All" is fixed; user tabs are added via (+), removed via the ✕
+/* maps: logical tabs over the journeys — a viewing filter only.
+   "All" is fixed; user maps are added via (+), removed via the ✕
    (hover-revealed on pointer, always visible on touch) or from the edit
-   sheet (tap the active tab again). Removing a tab never touches a lane.
-   Groups persist server-side in UI.groups: {id, name, lanes:[root ids]}. */
+   sheet (tap the active tab again). Removing a map never touches a lane.
+   Maps persist server-side in UI.groups: {id, name, lanes:[lane ids]}. */
 const groupLanes = () => mapTab === "all" ? null
   : ((UI.groups || []).find(t => t.id === mapTab)?.lanes ?? null);
 function renderMapTabs(){
@@ -1224,7 +1336,7 @@ function renderMapTabs(){
     `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All</button>` +
     (UI.groups || []).map(t => `<button data-mt="${esc(t.id)}" class="${mapTab === t.id ? "on" : ""}">
        ${esc(t.name)}<span class="x" data-rm="${esc(t.id)}">&#10005;</span></button>`).join("") +
-    `<button data-mt="+" class="add" aria-label="add group">+</button>`;
+    `<button data-mt="+" class="add" aria-label="add map">+</button>`;
 }
 
 function mapVisible(){
@@ -1234,32 +1346,33 @@ function renderMap(){
   if (!mapVisible()) return;
   const lm = laneModel();
   const grp = groupLanes();
-  const inGroup = r => !grp || grp.includes(r);
-  const rows = [...nodes].filter(n => inGroup(lm.rootOf(n.id)))
+  const inGroup = laneID => !grp || grp.includes(laneID);
+  const rows = [...nodes].filter(n => n.lane_id && inGroup(n.lane_id))
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
-  const focusRoot = mapFocus && nodeById(sel) ? lm.rootOf(sel) : null;
+  const focusLane = mapFocus && nodeById(sel) ? nodeById(sel).lane_id : null;
 
-  const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.live, n.attention]))
-    + "|" + focusRoot + "|" + mapFocus + "|" + mapTab + "|" + JSON.stringify(UI.groups || []);
+  const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.lane_id, n.live, n.attention]))
+    + "|" + focusLane + "|" + mapFocus + "|" + mapTab
+    + "|" + JSON.stringify(UI.groups || []) + "|" + JSON.stringify(UI.lanes || []);
   if (sig === mapSig) return;
   mapSig = sig;
 
   const RH = 76, laneX = i => 22 + i * 20;
-  const GW = Math.max(60, 22 + lm.roots.length * 20 + 14);
+  const GW = Math.max(60, 22 + lm.lanes.length * 20 + 14);
   const H = rows.length * RH;
   const y = i => i * RH + RH / 2;
-  const dimLane = r => focusRoot && r !== focusRoot;
+  const dimLane = laneID => focusLane && laneID !== focusLane;
   let svg = "";
 
-  for (const r of lm.roots.filter(inGroup)){
-    const idx = rows.map((n, i) => lm.rootOf(n.id) === r ? i : -1).filter(i => i >= 0);
+  for (const lane of lm.lanes.filter(l => inGroup(l.id))){
+    const idx = rows.map((n, i) => n.lane_id === lane.id ? i : -1).filter(i => i >= 0);
     if (idx.length > 1)
-      svg += `<line x1="${laneX(lm.laneOf[r])}" y1="${y(idx[0])}" x2="${laneX(lm.laneOf[r])}" y2="${y(idx[idx.length - 1])}"
-              stroke="${lm.color(r)}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(r) ? .22 : 1}"/>`;
+      svg += `<line x1="${laneX(lm.laneOf[lane.id])}" y1="${y(idx[0])}" x2="${laneX(lm.laneOf[lane.id])}" y2="${y(idx[idx.length - 1])}"
+              stroke="${lm.color(lane.id)}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(lane.id) ? .22 : 1}"/>`;
   }
   rows.forEach((n, i) => {
-    const r = lm.rootOf(n.id), x = laneX(lm.laneOf[r]), yy = y(i), col = lm.color(r);
-    const op = dimLane(r) ? .25 : 1;
+    const laneID = n.lane_id, x = laneX(lm.laneOf[laneID]), yy = y(i), col = lm.color(laneID);
+    const op = dimLane(laneID) ? .25 : 1;
     if (n.attention)
       svg += `<circle cx="${x}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
     if (n.live === "exited" || n.live === "unavailable")
@@ -1271,21 +1384,21 @@ function renderMap(){
   $("#mapwrap").innerHTML =
     `<svg id="mapsvg" width="${GW}" height="${H}" viewBox="0 0 ${GW} ${H}"></svg>`.replace("></svg>", `>${svg}</svg>`) +
     rows.map(n => {
-      const r = lm.rootOf(n.id);
+      const laneID = n.lane_id;
       const when = (n.created_at || "").slice(5, 16).replace("T", " ");
       return `
-      <div class="strow ${dimLane(r) ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}"
+      <div class="strow ${dimLane(laneID) ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}"
            style="padding-left:${GW + 16}px" data-nid="${esc(n.id)}">
         <div class="lbl">${esc(n.title)}</div>
         <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}</div>
         ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
       </div>`;
-    }).join("") + (rows.length ? "" : `<div class="empty">No journeys${grp ? " in this group" : ""} yet.</div>`);
+    }).join("") + (rows.length ? "" : `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`);
 
-  $("#lanechips").innerHTML = lm.roots.filter(inGroup).map(r => `
-    <span class="lanechip ${!focusRoot || r === focusRoot ? "focused" : ""}"
-          style="border-color:${lm.color(r)};color:${lm.color(r)}"
-          data-chip="${esc(r)}">${esc((lm.byId[r] || {}).title || r)}</span>`).join("");
+  $("#lanechips").innerHTML = lm.lanes.filter(l => inGroup(l.id)).map(l => `
+    <button class="lanechip ${!focusLane || l.id === focusLane ? "focused" : ""}"
+          style="border-color:${lm.color(l.id)};color:${lm.color(l.id)}"
+          data-chip="${esc(l.id)}">${esc(l.name || l.id)}</button>`).join("");
 }
 
 /* group tab handling: select, second-tap edit, ✕ remove, (+) create */
@@ -1301,17 +1414,17 @@ function removeMapTab(id){
 let editTab = null;
 function openTabSheet(t){
   editTab = t || null;
-  $("#tab_head").textContent = t ? "Edit group" : "New map group";
+  $("#tab_head").textContent = t ? "Edit map" : "New map";
   $("#tab_name").value = t ? t.name : "";
   const lm = laneModel();
-  $("#tab_lanes").innerHTML = lm.roots.map(r => `
+  $("#tab_lanes").innerHTML = lm.lanes.map(l => `
     <label style="display:flex;gap:10px;align-items:center;margin:8px 0;font-size:15px">
-      <input type="checkbox" value="${esc(r)}" style="width:auto;margin:0"
-        ${t && t.lanes.includes(r) ? "checked" : ""}>
-      <span style="width:12px;height:12px;border-radius:6px;flex:none;background:${lm.color(r)}"></span>
-      ${esc((lm.byId[r] || {}).title || r)}</label>`).join("")
-    || `<div style="color:var(--dim);font-size:14px">no journeys yet — an empty group is fine</div>`;
-  $("#tab_save").textContent = t ? "Save group" : "Add group";
+      <input type="checkbox" value="${esc(l.id)}" style="width:auto;margin:0"
+        ${t && t.lanes.includes(l.id) ? "checked" : ""}>
+      <span style="width:12px;height:12px;border-radius:6px;flex:none;background:${lm.color(l.id)}"></span>
+      ${esc(l.name || l.id)}</label>`).join("")
+    || `<div style="color:var(--dim);font-size:14px">no journeys yet — an empty map is fine</div>`;
+  $("#tab_save").textContent = t ? "Save map" : "Add map";
   $("#tab_del").style.display = t ? "block" : "none";
   openSheet("#tabsheet");
 }
@@ -1349,7 +1462,26 @@ $("#tab_del").addEventListener("click", () => {
 });
 $("#lanechips").addEventListener("click", e => {
   const c = e.target.closest("[data-chip]");
-  if (c){ select(c.dataset.chip); mapSig = ""; renderMap(); }
+  if (c){
+    const first = [...nodes]
+      .filter(n => n.lane_id === c.dataset.chip)
+      .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
+    if (first) select(first.id);
+    mapSig = ""; renderMap();
+  }
+});
+longpress($("#lanechips"), ".lanechip", el => {
+  const id = el.dataset.chip;
+  const lane = laneById(id);
+  if (!lane) return;
+  const name = prompt("Rename lane", lane.name || id);
+  if (name == null) return;
+  const clean = name.trim();
+  if (!clean || clean === lane.name) return;
+  const lanes = laneList().map(l => l.id === id ? { ...l, name: clean } : l);
+  uiMutate({ k: "lanes", lanes });
+  mapSig = ""; cardsSig = "";
+  renderCards(); renderMapTabs(); renderMap();
 });
 $("#mapwrap").addEventListener("click", e => {
   const r = e.target.closest("[data-nid]");
@@ -1417,12 +1549,15 @@ function renderChatHead(){
     $("#chattitle").textContent = "Notes";
     $("#chatmission").textContent = "private scratchpad — long-press a note to send it to a chat";
     $("#chatdot").className = "dot";
+    $("#chatdot").style.background = "";
     return;
   }
   const n = nodeById(sel);
   $("#chattitle").textContent = n ? n.title : "scimux";
   $("#chatmission").textContent = n ? (n.description || n.prompt || "") : "";
   $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
+  $("#chatdot").style.background = n && !hardAttention(n) && !["exited","unavailable"].includes(n.live)
+    ? laneColor(n.lane_id) : "";
 }
 
 /* notes are local records, not agent turns — same bubbles, own store */
@@ -1720,7 +1855,7 @@ longpress($("#msgs"), ".turn", el => {
     const lm = laneModel();
     $("#sendto_list").innerHTML = orderedNodes().map(n => `
       <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
-        <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${lm.color(lm.rootOf(n.id))}"></span>
+        <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${lm.color(n.lane_id)}"></span>
         <span>${esc(n.title)}</span>
       </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
     $("#sendto_list").onclick = ev => {
@@ -1745,6 +1880,7 @@ longpress($("#msgs"), ".turn", el => {
     setNewActivitySubmitting(false);
     $("#nc_title").value = "Follow-up";
     $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
+    prepareNewActivityLane();
     openSheet("#newchat");
   };
   openSheet("#msgact");
@@ -1959,11 +2095,19 @@ api("/api/agents").then(j => {
     MODELS[agent] = ["", ...models];   /* "" = launch with the harness default */
   fillAgents(); fillModels();
 }).catch(() => {});
+function prepareNewActivityLane(){
+  const inherited = nodeById(ncParent)?.lane_id || "";
+  fillLaneSelect($("#nc_lane"), inherited, true, !!inherited);
+  $("#nc_lane_new").value = "";
+  clearFieldError($("#nc_lane_new"));
+  syncLanePicker($("#nc_lane"));
+}
 $("#plusbtn").addEventListener("click", () => {
   ncParent = ""; ncRationale = "";     /* a plain + is never a fork */
   setNewActivitySubmitting(false);
   $("#nc_title").value = "";
   $("#nc_prompt").value = "";
+  prepareNewActivityLane();
   const lastDir = localStorage.getItem("scimux-lastdir");
   if (lastDir && !$("#nc_dir").value) $("#nc_dir").value = lastDir;
   openSheet("#newchat");
@@ -1999,6 +2143,13 @@ $("#nc_start").addEventListener("click", async () => {
   clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir"));
   const title = $("#nc_title").value.trim();
   const description = $("#nc_prompt").value.trim();
+  const laneChoice = readLaneChoice($("#nc_lane"), $("#nc_lane_new"));
+  if (laneChoice.error){
+    fieldError($("#nc_lane_new"), laneChoice.error);
+    $("#nc_lane_new").focus();
+    $("#nc_lane_new").scrollIntoView({ block: "center" });
+    return;
+  }
   const payload = {
     title,
     description,
@@ -2011,6 +2162,7 @@ $("#nc_start").addEventListener("click", async () => {
     parent: ncParent,
     rationale: ncParent ? "follow-up on: " + ncRationale : "",
   };
+  if (laneChoice.laneID) payload.lane_id = laneChoice.laneID;
   if (!payload.title){
     fieldError($("#nc_title"), "Enter a title before starting.");
     $("#nc_title").focus();
@@ -2020,6 +2172,8 @@ $("#nc_start").addEventListener("click", async () => {
   setNewActivitySubmitting(true);
   try {
     const n = await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) });
+    if (laneChoice.lane)
+      uiMutate({ k: "lanes", lanes: [...laneList(), laneChoice.lane] });
     if (payload.dir) localStorage.setItem("scimux-lastdir", payload.dir);
     $("#nc_prompt").value = ""; $("#nc_title").value = "";
     closeSheets();

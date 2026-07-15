@@ -47,6 +47,7 @@ type Node struct {
 	Prompt      string `json:"prompt"`                // first prompt == the node's research question
 	Description string `json:"description,omitempty"` // card/map description; defaults to Prompt
 	Rationale   string `json:"rationale,omitempty"`   // why this fork exists (decision evidence)
+	LaneID      string `json:"lane_id,omitempty"`     // immutable journey lane assignment; empty means unassigned
 	Agent       string `json:"agent"`                 // "claude" | "codex" | "pi" | "opencode"
 	Model       string `json:"model,omitempty"`
 	Effort      string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
@@ -368,6 +369,7 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	n.Title = strings.TrimSpace(n.Title)
 	n.Prompt = strings.TrimSpace(n.Prompt)
 	n.Description = strings.TrimSpace(n.Description)
+	n.LaneID = strings.TrimSpace(n.LaneID)
 	if n.Title == "" {
 		return 400, fmt.Errorf("title must not be empty")
 	}
@@ -398,6 +400,9 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		}
 		if n.Dir == "" {
 			n.Dir = p.Dir
+		}
+		if n.LaneID == "" {
+			n.LaneID = p.LaneID
 		}
 		// A fork inherits the parent's transport (fresh context, same
 		// mechanism). Use the migrated value, not the raw field: an old or
@@ -1091,6 +1096,7 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Title       *string `json:"title"`
 		Description *string `json:"description"`
+		LaneID      *string `json:"lane_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
@@ -1115,6 +1121,17 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Description != nil {
 		next.Description = strings.TrimSpace(*body.Description)
+	}
+	if body.LaneID != nil {
+		laneID := strings.TrimSpace(*body.LaneID)
+		switch {
+		case n.LaneID == "" && laneID != "":
+			next.LaneID = laneID
+		case n.LaneID != laneID:
+			a.mu.Unlock()
+			http.Error(w, "lane assignment is immutable", 409)
+			return
+		}
 	}
 	if next.Description == "" {
 		next.Description = next.Prompt

@@ -270,6 +270,54 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 	}
 }
 
+func TestHandleNodeLaneAssignmentIsOneWay(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+
+	req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"lane_id":"lane-a"}`))
+	req.SetPathValue("id", id)
+	up := httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("assign lane: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].LaneID; got != "lane-a" {
+		t.Fatalf("lane = %q, want lane-a", got)
+	}
+
+	req = httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"lane_id":"lane-b"}`))
+	req.SetPathValue("id", id)
+	up = httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 409 {
+		t.Fatalf("reassign lane: code = %d body %q, want 409", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].LaneID; got != "lane-a" {
+		t.Fatalf("lane changed to %q", got)
+	}
+}
+
+func TestHandleNewNodeInheritsParentLane(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	parent := newNode(a, `{"title":"Parent","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+	if parent.Code != 200 {
+		t.Fatalf("parent: code = %d body %q", parent.Code, parent.Body.String())
+	}
+	child := newNode(a, `{"title":"Child","parent":"`+a.nodes[0].ID+`","description":"follow","agent":"claude","dir":"`+a.home+`"}`)
+	if child.Code != 200 {
+		t.Fatalf("child: code = %d body %q", child.Code, child.Body.String())
+	}
+	if got := a.nodes[1].LaneID; got != "lane-a" {
+		t.Fatalf("child lane = %q, want lane-a", got)
+	}
+}
+
 func TestHandleUpdateAndDeleteNode(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"T": true}}
 	a := newTestApp(t, f)
