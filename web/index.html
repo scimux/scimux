@@ -1837,9 +1837,27 @@ document.addEventListener("touchend", e => {
 }, { passive: true });
 
 /* ---------- sheets ---------- */
-function openSheet(id){ $("#backdrop").classList.add("on"); $(id).classList.add("open"); }
+function setSheetActive(sheet, active){
+  sheet.classList.toggle("open", active);
+  sheet.toggleAttribute("inert", !active);
+  sheet.setAttribute("aria-hidden", active ? "false" : "true");
+  sheet.querySelectorAll("input, textarea, select").forEach(el => {
+    if (active){
+      if (el.dataset.sheetDisabledByClose) el.disabled = false;
+      delete el.dataset.sheetDisabledByClose;
+    } else if (!el.disabled) {
+      el.disabled = true;
+      el.dataset.sheetDisabledByClose = "1";
+    }
+  });
+}
+function openSheet(id){
+  $("#backdrop").classList.add("on");
+  document.querySelectorAll(".sheet").forEach(s => setSheetActive(s, s.matches(id)));
+}
 function closeSheets(){ $("#backdrop").classList.remove("on");
-  document.querySelectorAll(".sheet").forEach(s => s.classList.remove("open")); }
+  document.querySelectorAll(".sheet").forEach(s => setSheetActive(s, false)); }
+closeSheets();
 $("#backdrop").addEventListener("click", closeSheets);
 $("#burger").addEventListener("click", () => openSheet("#menu"));
 
