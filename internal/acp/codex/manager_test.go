@@ -90,6 +90,22 @@ func TestManagerLaunchAndTurn(t *testing.T) {
 	}
 }
 
+func TestManagerInterruptCancelsActiveTurn(t *testing.T) {
+	m, _, ms := newManagerWithMock(t)
+	launch(t, m, ms, "n1", "", "")
+	if err := m.Send("n1", "long"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if r := ms.nextReq(t); r.Method != "turn/start" {
+		t.Fatalf("turn/start = %q", r.Method)
+	}
+	waitFor(t, func() bool { return m.Live("n1") == "active" })
+	if err := m.Interrupt("n1"); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	waitFor(t, func() bool { return m.Live("n1") == "quiet" && m.LastError("n1") != "" })
+}
+
 func TestManagerRejectsSecondTurn(t *testing.T) {
 	m, _, ms := newManagerWithMock(t)
 	launch(t, m, ms, "n1", "", "")

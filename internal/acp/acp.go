@@ -41,6 +41,7 @@ var (
 	ErrNotAlive   = errors.New("ACP subprocess has exited")
 	ErrNoPending  = errors.New("no permission request is pending")
 	ErrTurnActive = errors.New("a turn is already in flight")
+	ErrNoTurn     = errors.New("no turn is in flight")
 )
 
 // launchTimeout bounds initialize + new-session so a hung agent (e.g. one
@@ -156,14 +157,15 @@ func (m *Manager) Send(nodeID, text string) error {
 	}
 	// Reserve the turn atomically: ACP is one turn at a time, so a second Send
 	// racing the first must be refused, not silently interleaved.
-	if !s.reserveTurn() {
+	ctx, ok := s.reserveTurn()
+	if !ok {
 		return ErrTurnActive
 	}
 	if err := s.logw.append(Event{T: "user", Text: text}); err != nil {
 		s.abortTurn()
 		return fmt.Errorf("record user turn: %w", err)
 	}
-	go s.runPrompt(text)
+	go s.runPrompt(ctx, text)
 	return nil
 }
 
@@ -272,6 +274,15 @@ func (m *Manager) Live(nodeID string) string {
 	return "exited"
 }
 
+// Interrupt cancels the active prompt turn, if any.
+func (m *Manager) Interrupt(nodeID string) error {
+	s := m.session(nodeID)
+	if s == nil {
+		return ErrNoSession
+	}
+	return s.Interrupt()
+}
+
 // Attention is "approval" while a permission request is outstanding, else "".
 func (m *Manager) Attention(nodeID string) string {
 	if s := m.session(nodeID); s != nil {
@@ -333,6 +344,7 @@ type Session struct {
 	mu            sync.Mutex
 	procAlive     bool
 	turnActive    bool
+	turnCancel    context.CancelFunc
 	turnHadOutput bool
 	curMsgID      string
 	assistant     strings.Builder
@@ -479,30 +491,52 @@ func (s *Session) WaitForTerminalExit(ctx context.Context, p sdk.WaitForTerminal
 
 // reserveTurn atomically marks a turn in flight, resetting per-turn state. It
 // returns false if a turn is already active (one turn at a time).
-func (s *Session) reserveTurn() bool {
+func (s *Session) reserveTurn() (context.Context, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.turnActive {
-		return false
+		return nil, false
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s.turnActive = true
+	s.turnCancel = cancel
 	s.turnHadOutput = false
 	s.curMsgID = ""
 	s.lastError = ""
 	s.assistant.Reset()
-	return true
+	return ctx, true
 }
 
 // abortTurn releases a reservation whose prompt was never fired (e.g. the user
 // turn could not be recorded, so we refuse the send).
 func (s *Session) abortTurn() {
 	s.mu.Lock()
+	if s.turnCancel != nil {
+		s.turnCancel()
+		s.turnCancel = nil
+	}
 	s.turnActive = false
 	s.mu.Unlock()
 }
 
-func (s *Session) runPrompt(text string) {
-	resp, err := s.conn.Prompt(context.Background(), sdk.PromptRequest{
+func (s *Session) Interrupt() error {
+	s.mu.Lock()
+	if !s.procAlive {
+		s.mu.Unlock()
+		return ErrNotAlive
+	}
+	cancel := s.turnCancel
+	if !s.turnActive || cancel == nil {
+		s.mu.Unlock()
+		return ErrNoTurn
+	}
+	s.mu.Unlock()
+	cancel()
+	return nil
+}
+
+func (s *Session) runPrompt(ctx context.Context, text string) {
+	resp, err := s.conn.Prompt(ctx, sdk.PromptRequest{
 		SessionId: s.sessionID,
 		Prompt:    []sdk.ContentBlock{sdk.TextBlock(text)},
 	})
@@ -540,6 +574,10 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 		}
 	}
 	s.turnActive = false
+	if s.turnCancel != nil {
+		s.turnCancel()
+	}
+	s.turnCancel = nil
 	s.curMsgID = ""
 	s.turnHadOutput = false
 }

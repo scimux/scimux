@@ -45,6 +45,7 @@ var (
 	ErrNoSession = errors.New("no live codex session for node")
 	ErrNotAlive  = errors.New("codex subprocess has exited")
 	ErrNoPending = errors.New("no permission request is pending")
+	ErrNoTurn    = errors.New("no turn is in flight")
 )
 
 // launchTimeout bounds initialize + thread/start so a hung app-server (e.g. one
@@ -159,7 +160,8 @@ func (m *Manager) Send(nodeID, text string) error {
 		m.wg.Done()
 		return ErrNotAlive
 	}
-	if !s.reserveTurn() {
+	ctx, ok := s.reserveTurn()
+	if !ok {
 		m.wg.Done()
 		return ErrTurnActive
 	}
@@ -168,7 +170,7 @@ func (m *Manager) Send(nodeID, text string) error {
 		m.wg.Done()
 		return fmt.Errorf("record user turn: %w", err)
 	}
-	go func() { defer m.wg.Done(); s.runTurn(text) }()
+	go func() { defer m.wg.Done(); s.runTurn(ctx, text) }()
 	return nil
 }
 
@@ -253,6 +255,15 @@ func (m *Manager) Live(nodeID string) string {
 	return "exited"
 }
 
+// Interrupt cancels the active prompt turn, if any.
+func (m *Manager) Interrupt(nodeID string) error {
+	s := m.session(nodeID)
+	if s == nil {
+		return ErrNoSession
+	}
+	return s.Interrupt()
+}
+
 // Attention is "approval" while a permission request is outstanding, else "".
 func (m *Manager) Attention(nodeID string) string {
 	if s := m.session(nodeID); s != nil {
@@ -318,6 +329,7 @@ type Session struct {
 	mu            sync.Mutex
 	procAlive     bool
 	turnActive    bool
+	turnCancel    context.CancelFunc
 	turnHadOutput bool
 	lastError     string
 	pending       []*pendingPermission
@@ -493,26 +505,48 @@ func approvalTitle(a Approval) string {
 
 // --- turn lifecycle ---
 
-func (s *Session) reserveTurn() bool {
+func (s *Session) reserveTurn() (context.Context, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.turnActive {
-		return false
+		return nil, false
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s.turnActive = true
+	s.turnCancel = cancel
 	s.turnHadOutput = false
 	s.lastError = ""
-	return true
+	return ctx, true
 }
 
 func (s *Session) abortTurn() {
 	s.mu.Lock()
+	if s.turnCancel != nil {
+		s.turnCancel()
+		s.turnCancel = nil
+	}
 	s.turnActive = false
 	s.mu.Unlock()
 }
 
-func (s *Session) runTurn(text string) {
-	err := s.client.RunTurn(context.Background(), s.threadID, text)
+func (s *Session) Interrupt() error {
+	s.mu.Lock()
+	if !s.procAlive {
+		s.mu.Unlock()
+		return ErrNotAlive
+	}
+	cancel := s.turnCancel
+	if !s.turnActive || cancel == nil {
+		s.mu.Unlock()
+		return ErrNoTurn
+	}
+	s.mu.Unlock()
+	cancel()
+	return nil
+}
+
+func (s *Session) runTurn(ctx context.Context, text string) {
+	err := s.client.RunTurn(ctx, s.threadID, text)
 	s.endTurn(err)
 }
 
@@ -538,6 +572,10 @@ func (s *Session) endTurn(err error) {
 		}
 	}
 	s.turnActive = false
+	if s.turnCancel != nil {
+		s.turnCancel()
+	}
+	s.turnCancel = nil
 	s.turnHadOutput = false
 }
 

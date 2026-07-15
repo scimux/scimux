@@ -154,6 +154,37 @@ func TestBasicTurn(t *testing.T) {
 	}
 }
 
+func TestInterruptCancelsActiveTurn(t *testing.T) {
+	cancelled := make(chan struct{})
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			<-ctx.Done()
+			close(cancelled)
+			return sdk.PromptResponse{}, ctx.Err()
+		},
+	}
+	m := newManager(t, agent)
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "long"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to become active", func() bool { return m.Live("n1") == "active" })
+	if err := m.Interrupt("n1"); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("prompt context was not cancelled")
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	if m.LastError("n1") == "" {
+		t.Fatal("interrupt should be visible as a turn error")
+	}
+}
+
 func TestPermissionApprove(t *testing.T) {
 	agent := &fakeAgent{
 		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {

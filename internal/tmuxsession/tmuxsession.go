@@ -204,6 +204,14 @@ func (s *Session) SendKey(key string) error {
 	return nil
 }
 
+// Interrupt asks the foreground TUI to stop the current turn.
+func (s *Session) Interrupt() error {
+	if out, err := s.sv.tmux("", "send-keys", "-t", s.paneTarget(), "C-c"); err != nil {
+		return fmt.Errorf("tmux send-keys C-c: %v: %s", err, out)
+	}
+	return nil
+}
+
 // Capture returns the pane's rendered plain text (last 200 scrollback lines).
 func (s *Session) Capture() (string, error) {
 	out, err := s.sv.tmux("", "capture-pane", "-p", "-t", s.paneTarget(), "-S", "-200")

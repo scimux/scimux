@@ -278,15 +278,16 @@ body.cards-open #msgs { overflow: hidden; }
   background: color-mix(in srgb, var(--work) 16%, transparent);
   transition: opacity .2s; }
 #workpulse::after {
-  content: ""; position: absolute; inset: 0 auto 0 0; width: 34%;
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 34%;
   border-radius: inherit; background: var(--work);
   box-shadow: 0 0 8px color-mix(in srgb, var(--work) 50%, transparent);
+  transform: translateX(0); will-change: transform;
 }
 #workpulse.on { opacity: 1; }
 #workpulse.on::after { animation: workscan 1.25s ease-in-out infinite alternate; }
 @keyframes workscan {
-  from { left: 0; }
-  to   { left: 66%; }
+  from { transform: translateX(0); }
+  to   { transform: translateX(194%); }
 }
 
 /* composer tools: a small icon row sitting above the prompt — toggle the
@@ -314,7 +315,7 @@ body.cards-open #msgs { overflow: hidden; }
 
 @media (prefers-reduced-motion: reduce) {
   #workpulse.on { opacity: 1; }
-  #workpulse.on::after { animation: none; left: 33%; }
+  #workpulse.on::after { animation: none; transform: translateX(97%); }
   .card.attention { animation: none; box-shadow: 0 0 0 2px var(--attn); }
   .workdot, #chathead .dot.active { animation: none; opacity: 1; }
 }
@@ -402,10 +403,14 @@ body.cards-open #msgs { overflow: hidden; }
   content: attr(data-placeholder); color: var(--dim); pointer-events: none;
 }
 #promptbar [contenteditable]:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
+#promptbar.busy [contenteditable] { opacity: .55; }
 #sendbtn {
   width: 38px; height: 38px; border-radius: 19px; flex: none;
   background: var(--work); color: #fff; font-size: 17px;
+  display: flex; align-items: center; justify-content: center;
 }
+#sendbtn.stop { background: var(--bad); }
+#sendbtn svg { display: block; }
 
 /* ---------- sheets ---------- */
 .sheet {
@@ -437,6 +442,7 @@ body.cards-open #msgs { overflow: hidden; }
 .sheet .cta { display: block; width: 100%; margin-top: 20px; padding: 13px;
   background: var(--work); color: #fff; font-weight: 600; font-size: 16px;
   border-radius: var(--radius); text-align: center; }
+.sheet .cta:disabled { opacity: .55; }
 .sheet .item { display: flex; gap: 10px; align-items: baseline; margin: 8px 0; font-size: 14px; }
 .sheet .item .tag { color: var(--dim); font-size: 12px; margin-left: auto; }
 .sheet .pos-item { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; font-size: 14px; }
@@ -548,7 +554,7 @@ body.cards-open #msgs { overflow: hidden; }
     <div id="promptbar">
       <div id="prompt" role="textbox" aria-multiline="true" contenteditable="true"
         data-placeholder="Message the agent…"></div>
-      <button id="sendbtn" aria-label="send">&#10148;</button>
+      <button id="sendbtn" aria-label="send"></button>
     </div>
   </section>
 
@@ -880,6 +886,17 @@ const ICON_CHECK = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <circle cx="12" cy="12" r="9"/>
   <path d="M8 12.5l2.5 2.5L16 9"/>
+</svg>`;
+const ICON_SEND = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M4 11.5L20 4l-7.5 16-2-6.5L4 11.5Z"/>
+  <path d="M10.5 13.5L20 4"/>
+</svg>`;
+/* stop glyph: fa-regular fa-circle-stop */
+const ICON_STOP = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <circle cx="12" cy="12" r="9"/>
+  <rect x="9" y="9" width="6" height="6" rx="1"/>
 </svg>`;
 /* terminal glyph: fa-regular fa-window-maximize (framed window w/ title bar) */
 const ICON_TERM = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
@@ -1410,6 +1427,7 @@ function renderChatHead(){
 
 /* notes are local records, not agent turns — same bubbles, own store */
 function renderNotes(){
+  setComposerBusy(false);
   const notes = UI.notes || [];
   const sig = "NOTES|" + hashStr(JSON.stringify(notes));
   if (sig === chatSig) return;
@@ -1447,7 +1465,7 @@ let termFull = false;
 async function refreshChat(){
   if (sel === "NOTES"){ renderNotes(); return; }
   const n = nodeById(sel);
-  if (!n){ return; }
+  if (!n){ setComposerBusy(false); return; }
   renderChatHead();
   const gen = selGen;
   let d;
@@ -1538,6 +1556,7 @@ async function refreshChat(){
 
   /* working pulse (calm, above the prompt) + composer tools */
   setWorkPulse(d.live === "active" && !mustShowPane);
+  setComposerBusy(d.live === "active");
   $("#convtools").hidden = false;
   const ct = $("#termtoggle");
   ct.innerHTML = ICON_TERM;
@@ -1723,6 +1742,7 @@ longpress($("#msgs"), ".turn", el => {
     closeSheets();
     ncParent = sel;
     ncRationale = turn.text.split("\n")[0].slice(0, 140);
+    setNewActivitySubmitting(false);
     $("#nc_title").value = "Follow-up";
     $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
     openSheet("#newchat");
@@ -1747,6 +1767,21 @@ function setPromptText(s){
 function clearPrompt(){
   setPromptText("");
 }
+let composerBusy = false;
+function setComposerBusy(active){
+  composerBusy = !!active;
+  const bar = $("#promptbar");
+  const prompt = $("#prompt");
+  const btn = $("#sendbtn");
+  bar.classList.toggle("busy", composerBusy);
+  prompt.contentEditable = composerBusy ? "false" : "true";
+  prompt.setAttribute("aria-disabled", composerBusy ? "true" : "false");
+  btn.classList.toggle("stop", composerBusy);
+  btn.innerHTML = composerBusy ? ICON_STOP : ICON_SEND;
+  btn.setAttribute("aria-label", composerBusy ? "stop agent" : "send");
+  btn.title = composerBusy ? "stop agent" : "send";
+}
+setComposerBusy(false);
 $("#prompt").addEventListener("input", e => {
   resizePrompt();
   if (sel) localStorage.setItem("scimux-draft:" + sel, promptText());
@@ -1760,11 +1795,24 @@ $("#prompt").addEventListener("paste", e => {
 $("#prompt").addEventListener("keydown", e => {
   if (isPhoneTouch()) return;
   if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
-    e.preventDefault(); sendPrompt();
+    e.preventDefault();
+    if (!composerBusy) sendPrompt();
   }
 });
-$("#sendbtn").addEventListener("click", sendPrompt);
+$("#sendbtn").addEventListener("click", () => composerBusy ? interruptPrompt() : sendPrompt());
+async function interruptPrompt(){
+  if (!sel || sel === "NOTES") return;
+  const dest = sel;
+  try {
+    await api(`/api/nodes/${encodeURIComponent(dest)}/send/interrupt`, { method: "POST" });
+    chatSig = "";
+    setTimeout(tick, 250);
+  } catch (err) {
+    alert(err.message);
+  }
+}
 async function sendPrompt(){
+  if (composerBusy) return;
   const ta = $("#prompt"), text = promptText().trim();
   if (!text || !sel) return;
   if (sel === "NOTES"){              /* notes never leave scimux's own store */
@@ -1913,6 +1961,7 @@ api("/api/agents").then(j => {
 }).catch(() => {});
 $("#plusbtn").addEventListener("click", () => {
   ncParent = ""; ncRationale = "";     /* a plain + is never a fork */
+  setNewActivitySubmitting(false);
   $("#nc_title").value = "";
   $("#nc_prompt").value = "";
   const lastDir = localStorage.getItem("scimux-lastdir");
@@ -1938,7 +1987,15 @@ function clearFieldError(el){
   const err = document.getElementById(el.id + "-err");
   if (err) err.remove();
 }
+let newActivitySubmitting = false;
+function setNewActivitySubmitting(active){
+  newActivitySubmitting = !!active;
+  const btn = $("#nc_start");
+  btn.disabled = newActivitySubmitting;
+  btn.textContent = newActivitySubmitting ? "Starting..." : "Start";
+}
 $("#nc_start").addEventListener("click", async () => {
+  if (newActivitySubmitting) return;
   clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir"));
   const title = $("#nc_title").value.trim();
   const description = $("#nc_prompt").value.trim();
@@ -1960,6 +2017,7 @@ $("#nc_start").addEventListener("click", async () => {
     $("#nc_title").scrollIntoView({ block: "center" });
     return;
   }
+  setNewActivitySubmitting(true);
   try {
     const n = await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) });
     if (payload.dir) localStorage.setItem("scimux-lastdir", payload.dir);
@@ -1976,6 +2034,8 @@ $("#nc_start").addEventListener("click", async () => {
     fieldError(target, msg);
     target.focus();
     target.scrollIntoView({ block: "center" });
+  } finally {
+    setNewActivitySubmitting(false);
   }
 });
 

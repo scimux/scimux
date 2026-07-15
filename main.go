@@ -137,6 +137,7 @@ type PermOption struct {
 type procManager interface {
 	Launch(nodeID, agent, dir, model, effort string) (string, error)
 	Send(nodeID, text string) error
+	Interrupt(nodeID string) error
 	PrepareResolve(nodeID, key string) (optID, evidence string, err error)
 	Deliver(nodeID, optID string) error
 	Pending(nodeID string) (title string, opts []PermOption, ok bool)
@@ -172,7 +173,7 @@ func (m acpManager) Pending(id string) (string, []PermOption, bool) {
 
 func (m acpManager) Conflict(err error) bool {
 	return err == acp.ErrNoSession || err == acp.ErrNotAlive ||
-		err == acp.ErrTurnActive || err == acp.ErrNoPending
+		err == acp.ErrTurnActive || err == acp.ErrNoPending || err == acp.ErrNoTurn
 }
 
 type codexManager struct{ *codex.Manager }
@@ -188,7 +189,7 @@ func (m codexManager) Pending(id string) (string, []PermOption, bool) {
 
 func (m codexManager) Conflict(err error) bool {
 	return err == codex.ErrNoSession || err == codex.ErrNotAlive ||
-		err == codex.ErrTurnActive || err == codex.ErrNoPending
+		err == codex.ErrTurnActive || err == codex.ErrNoPending || err == codex.ErrNoTurn
 }
 
 // proc returns the structured-protocol manager for a node, or nil for a tmux
@@ -1279,6 +1280,34 @@ func (a *app) handleSendResolve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"ok": "resolved"})
 }
 
+func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	if pm := a.proc(n); pm != nil {
+		if err := pm.Interrupt(n.ID); err != nil {
+			code := 500
+			if pm.Conflict(err) {
+				code = 409
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "interrupted"})
+		return
+	}
+	if err := a.server.Session(n.ID).Interrupt(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	a.mu.Lock()
+	delete(a.sendState, n.ID)
+	a.mu.Unlock()
+	writeJSON(w, map[string]string{"ok": "interrupted"})
+}
+
 func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
@@ -1793,6 +1822,7 @@ func main() {
 	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
 	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
+	mux.HandleFunc("POST /api/nodes/{id}/send/interrupt", a.handleSendInterrupt)
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
