@@ -422,8 +422,8 @@ body.cards-open #msgs { overflow: hidden; }
   background: var(--work); color: #fff; font-size: 17px;
   display: flex; align-items: center; justify-content: center;
 }
-#sendbtn.stop { background: var(--bad); }
 #sendbtn svg { display: block; }
+#sendbtn.stop svg { width: 38px; height: 38px; }
 
 /* ---------- sheets ---------- */
 .sheet {
@@ -917,7 +917,7 @@ const ICON_SEND = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
   <path d="M10.5 13.5L20 4"/>
 </svg>`;
 /* stop glyph: fa-regular fa-circle-stop */
-const ICON_STOP = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+const ICON_STOP = `<svg width="38" height="38" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <circle cx="12" cy="12" r="9"/>
   <rect x="9" y="9" width="6" height="6" rx="1"/>
