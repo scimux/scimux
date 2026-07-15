@@ -41,17 +41,19 @@ var webFS embed.FS
 // ---------- model ----------
 
 type Node struct {
-	ID         string `json:"id"`
-	Parent     string `json:"parent,omitempty"`
-	Title      string `json:"title"`
-	Prompt     string `json:"prompt"`              // first prompt == the node's research question
-	Rationale  string `json:"rationale,omitempty"` // why this fork exists (decision evidence)
-	Agent      string `json:"agent"`               // "claude" | "codex" | "pi" | "opencode"
-	Model      string `json:"model,omitempty"`
-	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
-	Dir        string `json:"dir"`
-	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
-	Transcript string `json:"transcript,omitempty"`
+	ID          string `json:"id"`
+	Parent      string `json:"parent,omitempty"`
+	Title       string `json:"title"`
+	Prompt      string `json:"prompt"`                // first prompt == the node's research question
+	Description string `json:"description,omitempty"` // card/map description; defaults to Prompt
+	Rationale   string `json:"rationale,omitempty"`   // why this fork exists (decision evidence)
+	Agent       string `json:"agent"`                 // "claude" | "codex" | "pi" | "opencode"
+	Model       string `json:"model,omitempty"`
+	Effort      string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
+	Dir         string `json:"dir"`
+	SessionID   string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
+	Transcript  string `json:"transcript,omitempty"`
+	Adopted     bool   `json:"adopted,omitempty"` // adopted tmux sessions are never killed by scimux
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
 	// transcript files, the original path — claude), "acp" (an Agent Client
 	// Protocol subprocess, pi/opencode) or "codex" (codex's app-server protocol
@@ -75,7 +77,7 @@ func (n *Node) transport() string {
 // storeRecord is one line of the append-only store file. Node metadata is
 // tiny; chat content lives in the agents' own transcript files.
 type storeRecord struct {
-	Type string `json:"type"` // "node" | "transcript" | "key"
+	Type string `json:"type"` // "node" | "transcript" | "key" | "delete"
 	Node *Node  `json:"node,omitempty"`
 	ID   string `json:"id,omitempty"`
 	Path string `json:"path,omitempty"`
@@ -233,7 +235,8 @@ func (a *app) loadStore() error {
 	// records. A later node record for an existing ID replaces the value in
 	// place (first-seen order preserved, no duplicate UI nodes); the latest
 	// transcript record wins regardless of where it appears relative to its
-	// node record.
+	// node record. A delete record removes the node from the visible registry;
+	// a later node record with the same ID would reintroduce it.
 	transcripts := map[string]string{}
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -245,6 +248,9 @@ func (a *app) loadStore() error {
 		}
 		switch {
 		case rec.Type == "node" && rec.Node != nil:
+			if rec.Node.Description == "" {
+				rec.Node.Description = rec.Node.Prompt
+			}
 			if existing, ok := a.byID[rec.Node.ID]; ok {
 				*existing = *rec.Node
 			} else {
@@ -253,6 +259,9 @@ func (a *app) loadStore() error {
 			}
 		case rec.Type == "transcript":
 			transcripts[rec.ID] = rec.Path
+		case rec.Type == "delete":
+			a.removeNodeLocked(rec.ID)
+			delete(transcripts, rec.ID)
 		}
 	}
 	for id, path := range transcripts {
@@ -261,6 +270,24 @@ func (a *app) loadStore() error {
 		}
 	}
 	return nil
+}
+
+func (a *app) removeNodeLocked(id string) {
+	delete(a.byID, id)
+	for i, n := range a.nodes {
+		if n.ID == id {
+			a.nodes = append(a.nodes[:i], a.nodes[i+1:]...)
+			break
+		}
+	}
+	delete(a.live, id)
+	delete(a.attn, id)
+	delete(a.prevCap, id)
+	delete(a.lastChg, id)
+	delete(a.tailers, id)
+	delete(a.chatMark, id)
+	delete(a.staleChat, id)
+	delete(a.sendState, id)
 }
 
 // ---------- node lifecycle ----------
@@ -337,8 +364,21 @@ func agentCommand(n *Node) (string, error) {
 // (finding 25). Callers hold a.mu. Returns the HTTP status to use on error:
 // every resolution failure is a client mistake, 400.
 func (a *app) resolveNode(n *Node) (int, error) {
-	if strings.TrimSpace(n.Prompt) == "" {
-		return 400, fmt.Errorf("prompt must not be empty")
+	n.Title = strings.TrimSpace(n.Title)
+	n.Prompt = strings.TrimSpace(n.Prompt)
+	n.Description = strings.TrimSpace(n.Description)
+	if n.Title == "" {
+		return 400, fmt.Errorf("title must not be empty")
+	}
+	if n.Prompt == "" {
+		if n.Description != "" {
+			n.Prompt = n.Description
+		} else {
+			n.Prompt = n.Title
+		}
+	}
+	if n.Description == "" {
+		n.Description = n.Prompt
 	}
 	if n.Parent != "" {
 		p, ok := a.byID[n.Parent]
@@ -400,9 +440,6 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	n.Dir = abs
 	if st, err := os.Stat(n.Dir); err != nil || !st.IsDir() {
 		return 400, fmt.Errorf("dir %q is not an existing directory", n.Dir)
-	}
-	if n.Title == "" {
-		n.Title = firstWords(n.Prompt, 6)
 	}
 	return 0, nil
 }
@@ -918,14 +955,15 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 // node record, so adoption is always safe for the running agent.
 func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Session    string `json:"session"`
-		Title      string `json:"title"`
-		Prompt     string `json:"prompt"`
-		Agent      string `json:"agent"`
-		Model      string `json:"model"`
-		Dir        string `json:"dir"`
-		SessionID  string `json:"session_id"`
-		Transcript string `json:"transcript"`
+		Session     string `json:"session"`
+		Title       string `json:"title"`
+		Prompt      string `json:"prompt"`
+		Description string `json:"description"`
+		Agent       string `json:"agent"`
+		Model       string `json:"model"`
+		Dir         string `json:"dir"`
+		SessionID   string `json:"session_id"`
+		Transcript  string `json:"transcript"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Session == "" {
 		http.Error(w, "bad request: need session", 400)
@@ -966,7 +1004,10 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
 		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+		Description: body.Description, Adopted: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if n.Description == "" {
+		n.Description = n.Prompt
+	}
 	// Adopted claude session without a known id: first try the pane's own
 	// process arguments (claude --resume <id> / --session-id <id>), which is
 	// deterministic even with several sessions in one directory. Fall back
@@ -1042,6 +1083,87 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, n)
+}
+
+func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request: "+err.Error(), 400)
+		return
+	}
+	a.mu.Lock()
+	n, ok := a.byID[id]
+	if !ok {
+		a.mu.Unlock()
+		http.Error(w, "not found", 404)
+		return
+	}
+	next := *n
+	if body.Title != nil {
+		title := strings.TrimSpace(*body.Title)
+		if title == "" {
+			a.mu.Unlock()
+			http.Error(w, "title must not be empty", 400)
+			return
+		}
+		next.Title = title
+	}
+	if body.Description != nil {
+		next.Description = strings.TrimSpace(*body.Description)
+	}
+	if next.Description == "" {
+		next.Description = next.Prompt
+	}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: &next}); err != nil {
+		a.mu.Unlock()
+		http.Error(w, "persist node: "+err.Error(), 500)
+		return
+	}
+	*n = next
+	a.mu.Unlock()
+	writeJSON(w, next)
+}
+
+func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	if pm := a.proc(n); pm != nil {
+		if pm.HasSession(n.ID) {
+			if err := pm.Kill(n.ID); err != nil {
+				http.Error(w, "close session: "+err.Error(), 500)
+				return
+			}
+		}
+	} else if !n.Adopted {
+		s := a.server.Session(n.ID)
+		if s.Alive() {
+			if err := s.Kill(); err != nil {
+				http.Error(w, "close session: "+err.Error(), 500)
+				return
+			}
+		}
+	}
+	a.mu.Lock()
+	if _, ok := a.byID[n.ID]; !ok {
+		a.mu.Unlock()
+		http.Error(w, "not found", 404)
+		return
+	}
+	if err := a.appendRecord(storeRecord{Type: "delete", ID: n.ID, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		a.mu.Unlock()
+		http.Error(w, "persist delete: "+err.Error(), 500)
+		return
+	}
+	a.removeNodeLocked(n.ID)
+	a.mu.Unlock()
+	writeJSON(w, map[string]string{"ok": "deleted"})
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {
@@ -1663,6 +1785,8 @@ func main() {
 	})
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
+	mux.HandleFunc("PATCH /api/nodes/{id}", a.handleUpdateNode)
+	mux.HandleFunc("DELETE /api/nodes/{id}", a.handleDeleteNode)
 	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
 	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)

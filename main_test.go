@@ -79,7 +79,7 @@ func TestForkInheritsMigratedTransport(t *testing.T) {
 	parent := &Node{ID: "root", Agent: "pi", Dir: a.home, Transport: ""}
 	a.byID["root"] = parent
 
-	child := &Node{Parent: "root", Prompt: "keep supervising over tmux"}
+	child := &Node{Title: "T", Parent: "root", Prompt: "keep supervising over tmux"}
 	if status, err := a.resolveNode(child); err != nil {
 		t.Fatalf("resolveNode: %d %v", status, err)
 	}
@@ -89,7 +89,7 @@ func TestForkInheritsMigratedTransport(t *testing.T) {
 
 	// A parent explicitly on ACP is inherited as ACP.
 	a.byID["acproot"] = &Node{ID: "acproot", Agent: "pi", Dir: a.home, Transport: "acp"}
-	acpChild := &Node{Parent: "acproot", Prompt: "p"}
+	acpChild := &Node{Title: "T", Parent: "acproot", Prompt: "p"}
 	if status, err := a.resolveNode(acpChild); err != nil {
 		t.Fatalf("resolveNode acp: %d %v", status, err)
 	}
@@ -459,10 +459,10 @@ func TestResolveNode(t *testing.T) {
 		n        Node
 		agent, d string
 	}{
-		{Node{Prompt: "p", Agent: "codex", Dir: dir}, "codex", dir},
-		{Node{Prompt: "p", Parent: "cx"}, "codex", dir},                   // full inheritance
-		{Node{Prompt: "p", Agent: "claude", Parent: "cx"}, "claude", dir}, // explicit beats inherited
-		{Node{Prompt: "p"}, "claude", dir},                                // defaults: claude, home
+		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex", dir},
+		{Node{Title: "T", Prompt: "p", Parent: "cx"}, "codex", dir},                   // full inheritance
+		{Node{Title: "T", Prompt: "p", Agent: "claude", Parent: "cx"}, "claude", dir}, // explicit beats inherited
+		{Node{Title: "T"}, "claude", dir},                                             // defaults: claude, home, prompt from title
 	}
 	for _, c := range ok {
 		if status, err := a.resolveNode(&c.n); err != nil {
@@ -472,21 +472,24 @@ func TestResolveNode(t *testing.T) {
 		if c.n.Agent != c.agent || c.n.Dir != c.d {
 			t.Errorf("resolved agent/dir = %q/%q, want %q/%q", c.n.Agent, c.n.Dir, c.agent, c.d)
 		}
+		if c.n.Description == "" || c.n.Prompt == "" {
+			t.Errorf("resolved prompt/description must be populated, got %q/%q", c.n.Prompt, c.n.Description)
+		}
 	}
 	// Inherited launch config, never the conversation (fresh-context fork).
-	forked := Node{Prompt: "p", Parent: "cx"}
+	forked := Node{Title: "T", Prompt: "p", Parent: "cx"}
 	a.resolveNode(&forked)
 	if forked.Model != "gpt-5.5" || forked.Effort != "high" {
 		t.Errorf("fork must inherit model/effort, got %q/%q", forked.Model, forked.Effort)
 	}
 
 	bad := []Node{
-		{Prompt: "  "},                   // empty prompt
-		{Prompt: "p", Parent: "missing"}, // unknown parent
-		{Prompt: "p", Parent: "missing", Agent: "codex", Dir: dir}, // finding 25: must fail before any walk
-		{Prompt: "p", Agent: "gemini"},                             // unknown agent
-		{Prompt: "p", Dir: filepath.Join(dir, "nope")},             // missing dir
-		{Prompt: "p", Dir: filepath.Join(dir, "f")},                // dir is a file
+		{Prompt: "p"}, // empty title
+		{Title: "T", Prompt: "p", Parent: "missing"},                           // unknown parent
+		{Title: "T", Prompt: "p", Parent: "missing", Agent: "codex", Dir: dir}, // finding 25: must fail before any walk
+		{Title: "T", Prompt: "p", Agent: "gemini"},                             // unknown agent
+		{Title: "T", Prompt: "p", Dir: filepath.Join(dir, "nope")},             // missing dir
+		{Title: "T", Prompt: "p", Dir: filepath.Join(dir, "f")},                // dir is a file
 	}
 	for _, n := range bad {
 		if status, err := a.resolveNode(&n); err == nil || status != 400 {
@@ -506,11 +509,11 @@ func TestResolveNodeTransport(t *testing.T) {
 		n    Node
 		want string
 	}{
-		{Node{Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
-		{Node{Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
-		{Node{Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
-		{Node{Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
-		{Node{Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport
+		{Node{Title: "T", Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
+		{Node{Title: "T", Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
+		{Node{Title: "T", Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
+		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
+		{Node{Title: "T", Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport
 	}
 	for _, c := range cases {
 		if status, err := a.resolveNode(&c.n); err != nil {

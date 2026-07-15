@@ -234,9 +234,9 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 		t.Errorf("bad json: code = %d, want 400", rec.Code)
 	}
 	if rec := newNode(a, `{"agent":"claude","dir":"`+a.home+`"}`); rec.Code != 400 {
-		t.Errorf("empty prompt: code = %d, want 400", rec.Code)
+		t.Errorf("empty title: code = %d, want 400", rec.Code)
 	}
-	if rec := newNode(a, `{"prompt":"hi","agent":"martian","dir":"`+a.home+`"}`); rec.Code != 400 {
+	if rec := newNode(a, `{"title":"T","prompt":"hi","agent":"martian","dir":"`+a.home+`"}`); rec.Code != 400 {
 		t.Errorf("unknown agent: code = %d, want 400", rec.Code)
 	}
 	// No failing request should have reached tmux new-session.
@@ -246,7 +246,7 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 		}
 	}
 
-	rec := newNode(a, `{"prompt":"do the thing","title":"T","agent":"claude","dir":"`+a.home+`"}`)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`)
 	if rec.Code != 200 {
 		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
 	}
@@ -261,6 +261,53 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 	}
 	if !sawNewSession {
 		t.Error("create did not start a tmux session")
+	}
+	if got := a.nodes[0].Prompt; got != "T" {
+		t.Errorf("prompt default = %q, want title", got)
+	}
+	if got := a.nodes[0].Description; got != "T" {
+		t.Errorf("description default = %q, want first prompt", got)
+	}
+}
+
+func TestHandleUpdateAndDeleteNode(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","description":"first","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+
+	req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"description":"edited"}`))
+	req.SetPathValue("id", id)
+	up := httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("update: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].Description; got != "edited" {
+		t.Fatalf("description = %q, want edited", got)
+	}
+
+	delReq := httptest.NewRequest("DELETE", "/api/nodes/"+id, nil)
+	delReq.SetPathValue("id", id)
+	del := httptest.NewRecorder()
+	a.handleDeleteNode(del, delReq)
+	if del.Code != 200 {
+		t.Fatalf("delete: code = %d body %q", del.Code, del.Body.String())
+	}
+	if len(a.nodes) != 0 {
+		t.Fatalf("nodes after delete = %d, want 0", len(a.nodes))
+	}
+	sawKill := false
+	for _, s := range f.subcommands() {
+		if s == "kill-session" {
+			sawKill = true
+		}
+	}
+	if !sawKill {
+		t.Fatal("delete did not close owned tmux session")
 	}
 }
 
@@ -553,7 +600,7 @@ func TestHandleChatCodexSourceACP(t *testing.T) {
 	a, _ := newCodexTestApp(t, "THREAD-CHAT", rollout) // requests not needed here
 
 	// Create the node first.
-	rec := newNode(a, `{"prompt":"q","agent":"codex","dir":"`+a.home+`"}`)
+	rec := newNode(a, `{"title":"Q","prompt":"q","agent":"codex","dir":"`+a.home+`"}`)
 	if rec.Code != 200 {
 		t.Fatalf("create: code = %d %s", rec.Code, rec.Body)
 	}
@@ -601,7 +648,7 @@ func TestHandleSendCodexConflict(t *testing.T) {
 	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
 	t.Cleanup(a.codex.Shutdown)
 
-	rec := newNode(a, `{"prompt":"do x","agent":"codex","dir":"`+a.home+`"}`)
+	rec := newNode(a, `{"title":"X","prompt":"do x","agent":"codex","dir":"`+a.home+`"}`)
 	if rec.Code != 200 {
 		t.Fatalf("create: code = %d", rec.Code)
 	}

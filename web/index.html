@@ -88,7 +88,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 
 /* ---------- app shell: chat is the base layer, cards slide over (phone) ---------- */
 #app { height: 100dvh; padding-top: calc(var(--sbh) + env(safe-area-inset-top)); }
-.panel { display: flex; flex-direction: column; height: 100%; }
+.panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 #chat { position: relative; }
 #cards {
   position: fixed; z-index: 30;
@@ -149,7 +149,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   font-size: 17px; padding: 4px 10px 6px; margin-bottom: 1px; }
 
 /* ---------- cards ---------- */
-#cardlist { flex: 1; overflow-y: auto; padding: 4px 12px calc(16px + env(safe-area-inset-bottom)); }
+#cardlist { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 12px calc(16px + env(safe-area-inset-bottom));
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; }
 .card {
   position: relative;
   background: var(--surface);
@@ -177,7 +178,36 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   overflow-wrap: break-word;
 }
 .card.expanded .summary { display: block; }
+.card .descbox {
+  display: none; width: 100%; min-height: 92px; resize: vertical;
+  margin-top: 10px; padding: 10px 12px;
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  color: var(--ink); background: var(--bg);
+  border: 1px solid var(--hairline); border-radius: 10px;
+}
+.card.editing .descbox { display: block; }
+.card.editing .summary { display: none; }
+.card .save-desc {
+  display: none; width: 34px; height: 34px; border-radius: 9px;
+  color: var(--work); align-items: center; justify-content: center;
+  position: relative; z-index: 3;
+}
+.card.editing .save-desc { display: flex; }
 .card .go { position: absolute; inset: 0; }
+.card.actions-open .go, .card.expanded .go, .card.editing .go { display: none; }
+.card .actions {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  display: none; gap: 8px; z-index: 4;
+}
+.card.actions-open .actions { display: flex; }
+.card .actions button {
+  width: 40px; height: 40px; border-radius: 20px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--hairline);
+  box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+.card .actions .archive { color: var(--work); }
+.card .actions .trash { color: var(--bad); }
 .card.selected { background: color-mix(in srgb, var(--work) 8%, var(--surface));
   border-color: color-mix(in srgb, var(--work) 40%, transparent); }
 .card.attention { border-color: var(--attn); animation: pulse 2.2s ease-in-out infinite; }
@@ -226,11 +256,13 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #gauge i { display: block; height: 100%; background: var(--work); transition: width .5s; }
 #gauge i.high { background: #C7791B; }
 
-#msgs { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+#msgs { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+body.cards-open #msgs { overflow: hidden; }
 /* no "you/agent" labels — side + color already carry the role */
 .turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
 .turn .bubble {
-  padding: 10px 14px; border-radius: 16px; font-size: 15px; line-height: 1.5;
+  padding: 10px 14px; border-radius: 16px; font-size: 16px; line-height: 1.52;
   overflow-wrap: break-word; min-width: 0;
 }
 .turn.user { align-self: flex-end; flex-direction: row-reverse; }
@@ -279,6 +311,10 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   .card.attention { animation: none; box-shadow: 0 0 0 2px var(--attn); }
   .workdot, #chathead .dot.active { animation: none; opacity: 1; }
 }
+@media (max-width: 520px) {
+  #workpulse.on { animation: none; opacity: .65; box-shadow: none; }
+  .card.attention { animation: none; box-shadow: 0 0 0 2px rgba(255,204,0,.8); }
+}
 
 /* copy affordance: bottom-aligned beside the bubble (right of agent bubbles,
    left of user bubbles); hover-revealed on pointer devices, always on touch */
@@ -293,6 +329,16 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin: 0; }
 .bubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; background: var(--code-bg);
   padding: 1px 5px; border-radius: 4px; }
+.bubble pre {
+  margin: 8px 0; padding: 10px 12px; border-radius: 8px;
+  background: var(--code-bg); overflow-x: auto;
+}
+.bubble pre code { background: none; padding: 0; border-radius: 0; font-size: 12.5px; }
+.bubble h1, .bubble h2, .bubble h3 { margin: 10px 0 6px; line-height: 1.22; }
+.bubble h1 { font-size: 1.22em; }
+.bubble h2 { font-size: 1.14em; }
+.bubble h3 { font-size: 1.06em; }
+.bubble blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--hairline); color: var(--dim); }
 .bubble table { border-collapse: collapse; margin: 6px 0; font-size: 13px; width: 100%; }
 .bubble th, .bubble td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
 .bubble th { background: var(--th-bg); font-weight: 600; }
@@ -504,8 +550,12 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <div class="grab"></div>
   <h3>New activity</h3>
   <div class="sect">
-    <div class="k">Research question <span class="opt">&#8212; required</span></div>
-    <textarea id="nc_prompt" rows="4" placeholder="What should this agent investigate?" required></textarea>
+    <div class="k">Title <span class="opt">&#8212; required</span></div>
+    <input id="nc_title" required placeholder="Lane title">
+  </div>
+  <div class="sect">
+    <div class="k">Description <span class="opt">&#8212; optional</span></div>
+    <textarea id="nc_prompt" rows="4" placeholder="First prompt or context for the agent"></textarea>
   </div>
   <div class="sect row2">
     <div><label>agent</label><select id="nc_agent"></select></div>
@@ -516,10 +566,6 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   <div class="sect">
     <div class="k">Working directory <span class="opt">&#8212; optional, defaults to home</span></div>
     <input id="nc_dir" placeholder="/path/to/experiment">
-  </div>
-  <div class="sect">
-    <div class="k">Title (optional)</div>
-    <input id="nc_title">
   </div>
   <button class="cta" id="nc_start">Start</button>
 </div>
@@ -636,7 +682,8 @@ let termOpen = false;        // terminal unfolded below the last bubble (per sel
 let cardTab = "current";
 let mapTab = localStorage.getItem("scimux-maptab") || "all";
 const expanded = new Set();
-const summaries = {};        // node id -> last-turn tail (fetched on expand)
+let actionCard = "";
+let editingDesc = "";
 let stateEtag = "";
 let cardsSig = "";
 let chatSig = "";
@@ -805,6 +852,22 @@ const ICON_TRASH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
   <path d="M5 6l1.2 14a2 2 0 0 0 2 1.8h7.6a2 2 0 0 0 2-1.8L19 6"/>
   <path d="M10 11v6M14 11v6"/>
 </svg>`;
+const ICON_ARCHIVE = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M4 7h16l-1 13H5L4 7Z"/>
+  <path d="M3 4h18v3H3z"/>
+  <path d="M9 11h6"/>
+</svg>`;
+const ICON_RESTORE = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M9 14l-4-4 4-4"/>
+  <path d="M5 10h9a5 5 0 1 1 0 10H8"/>
+</svg>`;
+const ICON_CHECK = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <circle cx="12" cy="12" r="9"/>
+  <path d="M8 12.5l2.5 2.5L16 9"/>
+</svg>`;
 /* terminal glyph: fa-regular fa-window-maximize (framed window w/ title bar) */
 const ICON_TERM = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
@@ -829,17 +892,56 @@ function copyText(s){
 
 function esc(s){ const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
-/* ---------- minimal markdown (escape-first; tables, bold, code) ---------- */
+/* ---------- minimal markdown (escape-first; fenced code, tables, lists) ---------- */
 function mdInline(s){
-  return s.replace(/`([^`]+)`/g, "<code>$1</code>")
+  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>")
+          .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`)
           .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 function md(src){
-  const lines = esc(src).split("\n");
-  let out = [], para = [], table = null;
+  const lines = (src || "").split("\n");
+  let out = [], para = [], table = null, list = null, quote = [];
   const flushP = () => { if (para.length){ out.push("<p>" + mdInline(para.join("<br>")) + "</p>"); para = []; } };
   const flushT = () => { if (table){ out.push(table + "</table>"); table = null; } };
+  const flushL = () => { if (list){ out.push(list.html + `</${list.tag}>`); list = null; } };
+  const flushQ = () => { if (quote.length){ out.push("<blockquote>" + quote.map(mdInline).join("<br>") + "</blockquote>"); quote = []; } };
+  const flushAll = () => { flushP(); flushT(); flushL(); flushQ(); };
+  let code = null;
   for (const ln of lines){
+    if (code){
+      if (/^\s*```/.test(ln)){
+        out.push(`<pre><code>${esc(code.lines.join("\n"))}</code></pre>`);
+        code = null;
+      } else code.lines.push(ln);
+      continue;
+    }
+    if (/^\s*```/.test(ln)){
+      flushAll();
+      code = { lines: [] };
+      continue;
+    }
+    const h = ln.match(/^(#{1,3})\s+(.+)$/);
+    if (h){
+      flushAll();
+      out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`);
+      continue;
+    }
+    const bq = ln.match(/^\s*>\s?(.*)$/);
+    if (bq){
+      flushP(); flushT(); flushL();
+      quote.push(bq[1]);
+      continue;
+    }
+    flushQ();
+    const li = ln.match(/^(\s*)([-*]|\d+[.])\s+(.+)$/);
+    if (li){
+      flushP(); flushT();
+      const tag = /\d+[.]/.test(li[2]) ? "ol" : "ul";
+      if (!list || list.tag !== tag){ flushL(); list = { tag, html: `<${tag}>` }; }
+      list.html += `<li>${mdInline(li[3])}</li>`;
+      continue;
+    }
+    flushL();
     if (/^\s*\|.*\|\s*$/.test(ln)){
       const cells = ln.trim().slice(1, -1).split("|").map(c => c.trim());
       if (cells.every(c => /^[-: ]+$/.test(c))) continue;
@@ -852,7 +954,8 @@ function md(src){
     flushT();
     if (!ln.trim()) flushP(); else para.push(ln);
   }
-  flushP(); flushT();
+  if (code) out.push(`<pre><code>${esc(code.lines.join("\n"))}</code></pre>`);
+  flushAll();
   return out.join("");
 }
 
@@ -943,9 +1046,9 @@ function renderCards(){
   const list = orderedNodes().filter(n =>
     isArchived(n.id) === (cardTab === "archived") ||
     (cardTab === "current" && hardAttention(n)));
-  const sig = JSON.stringify(list.map(n => [n.id, n.title, n.live, n.attention, n.model, n.effort]))
+  const sig = JSON.stringify(list.map(n => [n.id, n.title, n.description, n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
-    + "|" + cardTab + "|" + (UI.notes || []).length;
+    + "|" + cardTab + "|" + (UI.notes || []).length + "|" + actionCard + "|" + editingDesc;
   if (sig === cardsSig){ updateCardAges(); return; }
   cardsSig = sig;
   const adoptCards = cardTab !== "current" ? "" : unadopted.map(s => `
@@ -962,17 +1065,27 @@ function renderCards(){
       <div class="row1"><span class="title">Notes</span></div>
       <div class="status">${(UI.notes || []).length} notes · private</div>
     </div>`;
-  $("#cardlist").innerHTML = adoptCards + (list.length ? list.map(n => `
-    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""}" id="card-${esc(n.id)}">
+  $("#cardlist").innerHTML = adoptCards + (list.length ? list.map(n => {
+    const desc = n.description || n.prompt || "";
+    const archived = isArchived(n.id);
+    return `
+    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""}" id="card-${esc(n.id)}">
       <span class="stripe" style="background:${lm.color(lm.rootOf(n.id))}"></span>
       <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
       <div class="row1">
         <span class="title">${esc(n.title)}</span>
+        <button class="save-desc" data-save-desc="${esc(n.id)}" aria-label="save description">${ICON_CHECK}</button>
         <button class="chev" data-x="${esc(n.id)}" aria-label="summary">&#8250;</button>
       </div>
       <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · <span class="age">${ageText(n.last_activity)}</span></div>
-      <div class="summary">${esc(summaries[n.id] || "…")}</div>
-    </div>`).join("")
+      <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
+      <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
+      <div class="actions">
+        <button class="archive" data-arch-action="${esc(n.id)}" aria-label="${archived ? "restore" : "archive"}">${archived ? ICON_RESTORE : ICON_ARCHIVE}</button>
+        <button class="trash" data-trash="${esc(n.id)}" aria-label="remove">${ICON_TRASH}</button>
+      </div>
+    </div>`;
+  }).join("")
     : cardTab === "archived"
       ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
       : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`)
@@ -984,6 +1097,7 @@ $("#cardtabs").addEventListener("click", e => {
   const b = e.target.closest("[data-tab]");
   if (!b) return;
   cardTab = b.dataset.tab;
+  actionCard = ""; editingDesc = "";
   document.querySelectorAll("#cardtabs button").forEach(x => x.classList.toggle("on", x === b));
   cardsSig = ""; renderCards();
 });
@@ -996,28 +1110,65 @@ function updateCardAges(){
     if (age) age.textContent = ageText(n.last_activity);
   }
 }
-async function fetchSummary(id){
-  try {
-    const d = await api(`/api/nodes/${encodeURIComponent(id)}/chat`);
-    const last = [...(d.turns || [])].reverse().find(t => t.role === "assistant");
-    summaries[id] = last ? last.text.trim().slice(-320) : "(no transcript yet — see terminal)";
-  } catch { summaries[id] = "(unreachable)"; }
-  cardsSig = ""; renderCards();
-}
-
-$("#cardlist").addEventListener("click", e => {
+$("#cardlist").addEventListener("click", async e => {
+  const save = e.target.closest("[data-save-desc]");
+  if (save){
+    const id = save.dataset.saveDesc;
+    const ta = document.querySelector(`[data-desc-input="${CSS.escape(id)}"]`);
+    const description = ta ? ta.value.trim() : "";
+    try {
+      const n = await api(`/api/nodes/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ description }),
+      });
+      const cur = nodeById(id);
+      if (cur) Object.assign(cur, n);
+      editingDesc = "";
+      cardsSig = ""; chatSig = ""; mapSig = "";
+      renderCards(); renderChatHead(); renderMap();
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const arch = e.target.closest("[data-arch-action]");
+  if (arch){
+    const id = arch.dataset.archAction;
+    uiMutate({ k: isArchived(id) ? "unarch" : "arch", id });
+    actionCard = "";
+    cardsSig = ""; renderCards();
+    return;
+  }
+  const trash = e.target.closest("[data-trash]");
+  if (trash){
+    const id = trash.dataset.trash;
+    const n = nodeById(id);
+    if (!n) return;
+    const msg = n.adopted
+      ? `Remove "${n.title}" from scimux? The adopted tmux session will keep running.`
+      : `Remove "${n.title}" and close its running session/link?`;
+    if (!confirm(msg)) return;
+    try {
+      await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (isArchived(id)) uiMutate({ k: "unarch", id });
+      nodes = nodes.filter(x => x.id !== id);
+      if (sel === id) sel = "";
+      actionCard = ""; editingDesc = ""; stateEtag = ""; cardsSig = ""; chatSig = ""; mapSig = "";
+      renderCards(); renderChatHead(); renderMap();
+      setTimeout(tick, 200);
+    } catch (err) { alert(err.message); }
+    return;
+  }
   const x = e.target.closest("[data-x]");
   if (x){
     const id = x.dataset.x;
     expanded.has(id) ? expanded.delete(id) : expanded.add(id);
-    if (expanded.has(id)) fetchSummary(id);
+    actionCard = "";
     cardsSig = ""; renderCards();
     return;
   }
   const ad = e.target.closest("[data-adopt]");
   if (ad){ openAdopt(ad.dataset.adopt); return; }
   const g = e.target.closest("[data-open]");
-  if (g){ select(g.dataset.open); if (!isDesktop()) setLevel(1); }
+  if (g){ actionCard = ""; editingDesc = ""; select(g.dataset.open); if (!isDesktop()) setLevel(1); }
 });
 
 /* ---------- metro map: journeys = fork trees, stations = activities ----------
@@ -1242,7 +1393,7 @@ function renderChatHead(){
   }
   const n = nodeById(sel);
   $("#chattitle").textContent = n ? n.title : "scimux";
-  $("#chatmission").textContent = n ? (n.prompt || "") : "";
+  $("#chatmission").textContent = n ? (n.description || n.prompt || "") : "";
   $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
 }
 
@@ -1486,21 +1637,47 @@ function longpress(container, selector, fn){
   });
 }
 
-/* long-press a card → archive it out of (or restore it to) the current stack */
+/* long-press a folded card → reveal archive/restore and remove actions */
 longpress($("#cardlist"), ".card", el => {
+  if (el.classList.contains("adoptable") || el.id === "card-NOTES") return;
+  if (el.classList.contains("expanded") || el.closest(".editing")) return;
   const id = el.querySelector(".go")?.dataset.open;
   const n = id && nodeById(id);
-  if (!n) return;                     /* notes and adoptables don't archive */
-  $("#ca_title").textContent = n.title;
-  $("#ca_arch").querySelector("span").textContent = isArchived(id)
-    ? "Restore to current activity"
-    : "Archive — move out of the current stack";
-  $("#ca_arch").onclick = () => {
-    uiMutate({ k: isArchived(id) ? "unarch" : "arch", id });
-    cardsSig = ""; renderCards(); closeSheets();
-  };
-  openSheet("#cardact");
+  if (!n) return;
+  actionCard = actionCard === id ? "" : id;
+  editingDesc = "";
+  cardsSig = ""; renderCards();
 });
+
+/* long-press an expanded description → edit it in place */
+longpress($("#cardlist"), ".summary", el => {
+  const id = el.dataset.desc;
+  if (!id) return;
+  expanded.add(id);
+  actionCard = "";
+  editingDesc = id;
+  cardsSig = ""; renderCards();
+  setTimeout(() => document.querySelector(`[data-desc-input="${CSS.escape(id)}"]`)?.focus(), 0);
+});
+
+let cardSwipe = null;
+$("#cardlist").addEventListener("touchstart", e => {
+  const card = e.target.closest(".card");
+  const id = card?.querySelector(".go")?.dataset.open;
+  if (!id || card.classList.contains("expanded") || card.classList.contains("editing")) return;
+  const t = e.touches[0];
+  cardSwipe = { id, x: t.clientX, y: t.clientY };
+}, { passive: true });
+$("#cardlist").addEventListener("touchend", e => {
+  if (!cardSwipe) return;
+  const t = e.changedTouches[0], dx = t.clientX - cardSwipe.x, dy = t.clientY - cardSwipe.y;
+  const id = cardSwipe.id;
+  cardSwipe = null;
+  if (dx < -46 && Math.abs(dx) > Math.abs(dy) * 1.6){
+    actionCard = id; editingDesc = "";
+    cardsSig = ""; renderCards();
+  }
+}, { passive: true });
 
 /* long-press a message bubble:
    in Notes → forward into a chat's draft; elsewhere → copy, or start a new
@@ -1535,6 +1712,7 @@ longpress($("#msgs"), ".turn", el => {
     closeSheets();
     ncParent = sel;
     ncRationale = turn.text.split("\n")[0].slice(0, 140);
+    $("#nc_title").value = "Follow-up";
     $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
     openSheet("#newchat");
   };
@@ -1549,7 +1727,9 @@ $("#prompt").addEventListener("input", e => {
   if (sel) localStorage.setItem("scimux-draft:" + sel, ta.value);
 });
 $("#prompt").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendPrompt(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
+    e.preventDefault(); sendPrompt();
+  }
 });
 $("#sendbtn").addEventListener("click", sendPrompt);
 async function sendPrompt(){
@@ -1603,6 +1783,7 @@ async function sendPrompt(){
 function setLevel(n){
   level = Math.max(1, Math.min(3, n));
   if (isDesktop()) return;
+  document.body.classList.toggle("cards-open", level >= 2);
   $("#cards").classList.toggle("open", level >= 2);
   $("#map").classList.toggle("open", level >= 3);
   $("#scrim").classList.toggle("on", level === 2);
@@ -1638,7 +1819,7 @@ function openInfo(){
   const n = nodeById(sel);
   if (!n) return;
   $("#i_title").textContent = n.title;
-  $("#i_mission").textContent = n.prompt || "(adopted without a recorded question)";
+  $("#i_mission").textContent = n.description || n.prompt || "(adopted without a recorded question)";
   $("#i_rat_s").style.display = n.rationale ? "block" : "none";
   $("#i_rat").textContent = n.rationale || "";
   $("#i_setup").textContent =
@@ -1684,6 +1865,8 @@ api("/api/agents").then(j => {
 }).catch(() => {});
 $("#plusbtn").addEventListener("click", () => {
   ncParent = ""; ncRationale = "";     /* a plain + is never a fork */
+  $("#nc_title").value = "";
+  $("#nc_prompt").value = "";
   const lastDir = localStorage.getItem("scimux-lastdir");
   if (lastDir && !$("#nc_dir").value) $("#nc_dir").value = lastDir;
   openSheet("#newchat");
@@ -1708,22 +1891,25 @@ function clearFieldError(el){
   if (err) err.remove();
 }
 $("#nc_start").addEventListener("click", async () => {
-  clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir"));
+  clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir"));
+  const title = $("#nc_title").value.trim();
+  const description = $("#nc_prompt").value.trim();
   const payload = {
-    prompt: $("#nc_prompt").value.trim(),
+    title,
+    description,
+    prompt: description || title,
     agent: $("#nc_agent").value,
     model: $("#nc_model").value,
     effort: $("#nc_effort").value,
     dir: $("#nc_dir").value.trim(),
-    title: $("#nc_title").value.trim(),
     /* set by "New activity from here…": fresh-context fork off the evidence */
     parent: ncParent,
     rationale: ncParent ? "follow-up on: " + ncRationale : "",
   };
-  if (!payload.prompt){
-    fieldError($("#nc_prompt"), "Enter a research question before starting.");
-    $("#nc_prompt").focus();
-    $("#nc_prompt").scrollIntoView({ block: "center" });
+  if (!payload.title){
+    fieldError($("#nc_title"), "Enter a title before starting.");
+    $("#nc_title").focus();
+    $("#nc_title").scrollIntoView({ block: "center" });
     return;
   }
   try {
@@ -1737,7 +1923,8 @@ $("#nc_start").addEventListener("click", async () => {
     if (!isDesktop()) setLevel(1);
   } catch (err) {
     const msg = err.message || "Could not start this activity.";
-    const target = /\b(dir|directory|path)\b/i.test(msg) ? $("#nc_dir") : $("#nc_prompt");
+    const target = /\b(dir|directory|path)\b/i.test(msg) ? $("#nc_dir")
+      : /\btitle\b/i.test(msg) ? $("#nc_title") : $("#nc_prompt");
     fieldError(target, msg);
     target.focus();
     target.scrollIntoView({ block: "center" });
