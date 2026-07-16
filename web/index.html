@@ -576,7 +576,15 @@ body.cards-open #msgs { overflow: hidden; }
    the › toggle in the chat title bar points at the edge it reveals, the
    same idiom as the ‹ journeys button on the left. */
 #notespane { display: none; }
-#notesbtn { display: none; font-size: 22px; color: var(--work); }
+#notesbtn { font-size: 22px; color: var(--work); }
+/* the flags stack on the right edge, thumb-sized (44pt), lane-colored;
+   hidden while the pane is open (the notebook is already unfolded) */
+#noteflags { display: none; position: fixed; z-index: 25; right: 0;
+  top: calc(var(--sbh) + env(safe-area-inset-top) + 80px);
+  flex-direction: column; gap: 8px; }
+#noteflags button { width: 15px; height: 44px; border-radius: 8px 0 0 8px;
+  opacity: .85; transition: width .15s; }
+#noteflags button:hover { width: 22px; opacity: 1; }
 #notetabs { border-bottom: 1px solid var(--hairline); }
 #notelist { flex: 1; overflow-y: auto; padding: 6px 14px 12px; }
 .note { margin: 12px 0; }
@@ -628,9 +636,9 @@ body.cards-open #msgs { overflow: hidden; }
   #map { width: 400px; display: none; }
   body.map-open #map { display: flex; }
   #chat { flex: 1; min-width: 0; }
-  #notesbtn { display: flex; }
   body.notes-open #notespane { display: flex; width: 340px; flex: none;
     border-left: 1px solid var(--hairline); }
+  body:not(.notes-open) #noteflags { display: flex; }
   #scrim { display: none; }
   .backbtn { display: none; }
   .sheet { left: 50%; right: auto; width: 480px; transform: translate(-50%, 103%); }
@@ -711,6 +719,10 @@ body.cards-open #msgs { overflow: hidden; }
       <button id="sendbtn" aria-label="send"></button>
     </div>
   </section>
+
+  <!-- sticky-note flags: the stickies "sticking out" of the closed notebook.
+       One per lane with notes (gray = General), click opens that tab. -->
+  <div id="noteflags"></div>
 
   <!-- right side: sticky-notes pane (lab-notebook stickies). Chat-like order:
        oldest top, newest bottom, pinned to the bottom when (re)opened. -->
@@ -2334,6 +2346,7 @@ function fmtWhen(t){
 }
 function renderNotesPane(){
   document.body.classList.toggle("notes-open", notesOpen);
+  renderNoteFlags();
   if (!notesOpen) return;
   const notes = UI.notes || [];
   const byT = {};
@@ -2372,11 +2385,35 @@ function renderNotesPane(){
   $("#notelist").innerHTML = listHtml;
   if (notesPin){ const nl = $("#notelist"); nl.scrollTop = nl.scrollHeight; notesPin = false; }
 }
-$("#notesbtn").addEventListener("click", () => {
-  notesOpen = !notesOpen;
-  localStorage.setItem("scimux-notes", notesOpen ? "1" : "0");
+/* the flags stack: which lanes currently hold notes (gray = General) */
+let flagsSig = "";
+function renderNoteFlags(){
+  const notes = UI.notes || [];
+  const byT = {};
+  notes.forEach(nt => byT[nt.t] = nt);
+  const laneIds = new Set(notes.map(nt => noteLaneId(nt, byT)));
+  const flags = laneList().filter(l => laneIds.has(l.id));
+  const html = flags.map(f => `<button data-flag="${esc(f.id)}" title="${esc(f.name)} notes"
+      aria-label="${esc(f.name)} notes" style="background:${esc(f.color || "")}"></button>`).join("")
+    + (laneIds.has("") ? `<button data-flag="GENERAL" title="General notes"
+      aria-label="General notes" style="background:var(--unlane)"></button>` : "");
+  if (html === flagsSig) return;
+  flagsSig = html;
+  $("#noteflags").innerHTML = html;
+}
+function setNotesOpen(open){
+  notesOpen = open;
+  localStorage.setItem("scimux-notes", open ? "1" : "0");
   notesSig = ""; notesPin = true;
   renderNotesPane();
+}
+$("#notesbtn").addEventListener("click", () => setNotesOpen(!notesOpen));
+$("#noteflags").addEventListener("click", e => {
+  const f = e.target.closest("[data-flag]");
+  if (!f) return;
+  noteTab = f.dataset.flag;
+  localStorage.setItem("scimux-notetab", noteTab);
+  setNotesOpen(true);
 });
 $("#notespane").addEventListener("click", e => {
   const tb = e.target.closest("[data-ntab]");
