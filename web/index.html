@@ -575,7 +575,14 @@ body.cards-open #msgs { overflow: hidden; }
    Desktop/iPad only for now (the iPhone sheet presentation comes later);
    the › toggle in the chat title bar points at the edge it reveals, the
    same idiom as the ‹ journeys button on the left. */
-#notespane { display: none; }
+/* phone: the pane slides over the chat from the right (full-width sheet);
+   desktop/iPad docks it as a trailing column (see the min-width block) */
+#notespane { position: fixed; z-index: 40; display: flex;
+  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; right: 0;
+  width: 100%; background: var(--bg);
+  transform: translateX(103%); transition: transform .25s;
+  box-shadow: -12px 0 30px rgba(0,0,0,.25); }
+body.notes-open #notespane { transform: translateX(0); }
 #notesbtn { font-size: 22px; color: var(--work); }
 /* the flags stack on the right edge, thumb-sized (44pt), lane-colored;
    hidden while the pane is open (the notebook is already unfolded) */
@@ -636,8 +643,10 @@ body.cards-open #msgs { overflow: hidden; }
   #map { width: 400px; display: none; }
   body.map-open #map { display: flex; }
   #chat { flex: 1; min-width: 0; }
-  body.notes-open #notespane { display: flex; width: 340px; flex: none;
+  #notespane { position: static; transform: none; transition: none;
+    box-shadow: none; display: none; width: 340px; flex: none;
     border-left: 1px solid var(--hairline); }
+  body.notes-open #notespane { display: flex; }
   body:not(.notes-open) #noteflags { display: flex; }
   #scrim { display: none; }
   .backbtn { display: none; }
@@ -727,6 +736,11 @@ body.cards-open #msgs { overflow: hidden; }
   <!-- right side: sticky-notes pane (lab-notebook stickies). Chat-like order:
        oldest top, newest bottom, pinned to the bottom when (re)opened. -->
   <section id="notespane" class="panel">
+    <div class="phead">
+      <button class="backbtn" id="notesback">&#8249; Back</button>
+      <h2>Notes</h2>
+      <span class="spacer"></span>
+    </div>
     <div class="tabs" id="notetabs"></div>
     <div id="notelist"><div class="empty">No notes yet.</div></div>
     <!-- the composer is a singleton outside the polled #notelist region
@@ -1000,7 +1014,6 @@ async function flushUI(){
 function applyRemoteUI(){
   cardsSig = ""; mapSig = ""; notesSig = "";
   renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderNotesPane();
-  if (sel === "NOTES"){ chatSig = ""; renderNotes(); }
 }
 async function loadUI(){
   try {
@@ -1016,7 +1029,6 @@ async function loadUI(){
   uiOps.forEach(op => applyOp(UI, op));  /* mutations made before load finished */
   chatSig = "";
   applyRemoteUI();
-  if (sel === "NOTES") refreshChat();
   if (uiOps.length) flushUI();
 }
 /* poll the shared state alongside /api/state; skip while local ops are in
@@ -1390,14 +1402,7 @@ function renderCards(){
       <div class="status">unadopted tmux session</div>
       <button class="go" data-adopt="${esc(s)}" aria-label="adopt ${esc(s)}"></button>
     </div>`).join("");
-  /* notes ride along as a pseudo-activity: private, never archived */
-  const notesCard = cardTab !== "current" ? "" : `
-    <div class="card ${sel === "NOTES" ? "selected" : ""}" id="card-NOTES">
-      <span class="stripe" style="background:var(--dim)"></span>
-      <button class="go" data-open="NOTES" aria-label="open notes"></button>
-      <div class="row1"><span class="title">Notes</span></div>
-      <div class="status">${(UI.notes || []).length} notes · private</div>
-    </div>`;
+  /* notes retired as a pseudo-activity: they live in the sticky-notes pane */
   withCardEditsPreserved(() => {
   $("#cardlist").innerHTML = adoptCards + (list.length ? list.map(n => {
     const desc = n.description || n.prompt || "";
@@ -1432,8 +1437,7 @@ function renderCards(){
   }).join("")
     : cardTab === "archived"
       ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
-      : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`)
-    + notesCard;
+      : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
   });
   const waiting = nodes.filter(hardAttention).length;
   document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
@@ -1817,7 +1821,7 @@ function focusTitleEditorNow(id){
 }
 function focusTitleEditor(id){ setTimeout(() => focusTitleEditorNow(id), 0); }
 function startTitleEdit(id, scope){
-  if (!id || id === "NOTES" || !nodeById(id)) return;
+  if (!id || !nodeById(id)) return;
   editingTitle = id;
   editingTitleScope = scope || "cards";
   actionCard = "";
@@ -1885,18 +1889,10 @@ function renderChatHead(){
   const head = $("#chathead");
   const toggle = $("#infobtn");
   const details = $("#chatdetails");
-  head.classList.toggle("details-open", chatDetailsOpen && sel !== "NOTES");
+  head.classList.toggle("details-open", chatDetailsOpen);
   head.classList.toggle("desc-editing", editingChatDesc);
-  details.hidden = !(chatDetailsOpen && sel !== "NOTES");
+  details.hidden = !chatDetailsOpen;
   details.setAttribute("aria-hidden", details.hidden ? "true" : "false");
-  if (sel === "NOTES"){
-    $("#chattitle").textContent = "Notes";
-    $("#chatmission").textContent = "private scratchpad — long-press a note to send it to a chat";
-    $("#chatdot").className = "dot";
-    $("#chatdot").style.background = "";
-    toggle.hidden = true;
-    return;
-  }
   const n = nodeById(sel);
   toggle.hidden = !n;
   if (n && editingTitle === n.id && editingTitleScope === "chat"){
@@ -1958,7 +1954,7 @@ document.addEventListener("focusout", e => {
 });
 
 async function saveChatDescription(){
-  if (!sel || sel === "NOTES") return;
+  if (!sel || !nodeById(sel)) return;
   const id = sel;
   const description = $("#chatdescinput").value.trim();
   try {
@@ -1986,27 +1982,6 @@ $("#infobtn").addEventListener("click", () => {
   chatDetailsOpen = !chatDetailsOpen;
   renderChatHead();
 });
-
-/* notes are local records, not agent turns — same bubbles, own store */
-function renderNotes(){
-  setComposerBusy(false);
-  const notes = UI.notes || [];
-  const sig = "NOTES|" + hashStr(JSON.stringify(notes));
-  if (sig === chatSig) return;
-  chatSig = sig;
-  $("#msgs").innerHTML = notes.length ? notes.map((t, i) => `
-    <div class="turn user" data-i="${i}">
-      <div class="bubble" title="${esc(t.t || "")}">${md(t.text || "")}</div>
-      <button class="copybtn" data-i="${i}" aria-label="copy note">${ICON_COPY}</button>
-      <button class="copybtn trashbtn" data-i="${i}" aria-label="delete note">${ICON_TRASH}</button>
-    </div>`).join("")
-    : `<div class="empty">Park a thought here — notes stay on this host, private to you.</div>`;
-  $("#keyrow").innerHTML = "";
-  $("#gauge").hidden = true;
-  $("#convtools").hidden = true;   /* notes have no terminal to toggle */
-  setWorkPulse(false);
-  $("#msgs").scrollTop = 1e6;
-}
 
 /* one calm pulse above the prompt — CSS handles the breathing; we only
    flip the class from the mechanical active state */
@@ -2046,7 +2021,6 @@ function collapseAttentionUI(id){
 }
 
 async function refreshChat(){
-  if (sel === "NOTES"){ renderNotes(); return; }
   const n = nodeById(sel);
   if (!n){ setComposerBusy(false); return; }
   renderChatHead();
@@ -2209,7 +2183,7 @@ $("#msgs").addEventListener("scroll", () =>
 let tappedTurn = -1;
 function renderBubbleActions(){
   document.querySelectorAll("#msgs .bubactions").forEach(x => x.remove());
-  if (tappedTurn < 0 || sel === "NOTES") return;
+  if (tappedTurn < 0) return;
   const turnEl = document.querySelector(`#msgs .turn[data-i="${tappedTurn}"]`);
   if (!turnEl || !lastTurns[tappedTurn]){ tappedTurn = -1; return; }
   const row = document.createElement("div");
@@ -2252,17 +2226,9 @@ function useTurnAsDescription(text){
 
 /* per-bubble copy (and, for notes, delete) + tap actions */
 $("#msgs").addEventListener("click", e => {
-  const tb = e.target.closest(".trashbtn");
-  if (tb && sel === "NOTES"){        /* notes only: remove the entry, keep the store */
-    const note = (UI.notes || [])[+tb.dataset.i];
-    if (note) uiMutate({ k: "note-del", t: note.t });
-    chatSig = ""; cardsSig = "";
-    renderNotes(); renderCards();
-    return;
-  }
   const cb = e.target.closest(".copybtn");
   if (cb){
-    const src = sel === "NOTES" ? (UI.notes || [])[+cb.dataset.i] : lastTurns[+cb.dataset.i];
+    const src = lastTurns[+cb.dataset.i];
     if (src) copyText(src.text || "");
     cb.innerHTML = "&#10003;";
     setTimeout(() => { cb.innerHTML = ICON_COPY; }, 900);
@@ -2302,7 +2268,7 @@ $("#msgs").addEventListener("click", e => {
     return;
   }
   const turnEl = e.target.closest(".turn");
-  if (turnEl && sel !== "NOTES" && !e.target.closest("a, button")){
+  if (turnEl && !e.target.closest("a, button")){
     const i = +turnEl.dataset.i;
     tappedTurn = tappedTurn === i ? -1 : i;
     renderBubbleActions();
@@ -2408,6 +2374,7 @@ function setNotesOpen(open){
   renderNotesPane();
 }
 $("#notesbtn").addEventListener("click", () => setNotesOpen(!notesOpen));
+$("#notesback").addEventListener("click", () => setNotesOpen(false));
 $("#noteflags").addEventListener("click", e => {
   const f = e.target.closest("[data-flag]");
   if (!f) return;
@@ -2561,7 +2528,7 @@ longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"), { pre
 
 /* long-press a folded card → reveal archive/restore and remove actions */
 longpress($("#cardlist"), ".card", (el, ev) => {
-  if (el.classList.contains("adoptable") || el.id === "card-NOTES") return;
+  if (el.classList.contains("adoptable")) return;
   if (el.classList.contains("expanded") || el.closest(".editing")) return;
   if (ev?.target?.closest(".title,input,textarea,select,button")) return;
   const id = el.querySelector(".go")?.dataset.open;
@@ -2584,7 +2551,7 @@ longpress($("#cardlist"), ".summary", el => {
 });
 
 longpress($("#chathead"), "#chatdesc", () => {
-  if (!sel || sel === "NOTES" || !nodeById(sel)) return;
+  if (!sel || !nodeById(sel)) return;
   chatDetailsOpen = true;
   editingChatDesc = true;
   chatSig = "";
@@ -2615,14 +2582,12 @@ $("#cardlist").addEventListener("touchend", e => {
   }
 }, { passive: true });
 
-/* long-press a message bubble: Notes only — forward the note into a chat's
-   draft. Regular chat bubbles have no long-press: the tap-revealed icon row
-   already carries the same actions (fork, use-as-description; copy has its
-   own per-bubble affordance). */
+/* long-press a sticky note — forward its text into a chat's draft (moved
+   here from the retired Notes activity). Regular chat bubbles have no
+   long-press: the tap-revealed icon row already carries the same actions. */
 let ncParent = "", ncRationale = "";
-longpress($("#msgs"), ".turn", el => {
-  if (sel !== "NOTES") return;
-  const note = (UI.notes || [])[+el.dataset.i];
+longpress($("#notelist"), ".note", el => {
+  const note = (UI.notes || []).find(x => x.t === el.dataset.t);
   if (!note) return;
   const lm = laneModel();
   $("#sendto_list").innerHTML = orderedNodes().map(n => `
@@ -2704,7 +2669,7 @@ $("#prompt").addEventListener("beforeinput", e => {
 });
 $("#sendbtn").addEventListener("click", () => composerBusy ? interruptPrompt() : sendPrompt());
 async function interruptPrompt(){
-  if (!sel || sel === "NOTES") return;
+  if (!sel || !nodeById(sel)) return;
   const dest = sel;
   try {
     await api(`/api/nodes/${encodeURIComponent(dest)}/send/interrupt`, { method: "POST" });
@@ -2719,17 +2684,8 @@ async function interruptPrompt(){
   }
 }
 async function sendPrompt(){
-  const ta = $("#prompt"), text = promptText().trim();
+  const text = promptText().trim();
   if (!text || !sel) return;
-  if (sel === "NOTES"){              /* notes never leave scimux's own store */
-    uiMutate({ k: "note-add", note: { t: new Date().toISOString(), text } });
-    clearPrompt();
-    localStorage.removeItem("scimux-draft:NOTES");
-    ta.blur();                       /* dismiss the keyboard; the note is visible */
-    chatSig = ""; cardsSig = "";
-    renderNotes(); renderCards();
-    return;
-  }
   const dest = sel;   /* capture: selection may change while the send is in flight */
   clearPrompt();
   localStorage.removeItem("scimux-draft:" + dest);
@@ -2774,7 +2730,8 @@ $("#scrim").addEventListener("click", () => setLevel(1));
 let touch = null;
 document.addEventListener("touchstart", e => {
   const t = e.touches[0];
-  touch = { x: t.clientX, y: t.clientY, edge: t.clientX < 28, localCard: !!e.target.closest("#cardlist .card") };
+  touch = { x: t.clientX, y: t.clientY, edge: t.clientX < 28,
+    edgeR: t.clientX > innerWidth - 28, localCard: !!e.target.closest("#cardlist .card") };
 }, { passive: true });
 document.addEventListener("touchend", e => {
   if (!touch) return;
@@ -2787,7 +2744,9 @@ document.addEventListener("touchend", e => {
     chatSig = "";
     cardsSig = "";
     renderCards(); renderChatHead();
-  } else if (!touch.localCard && horiz && dx > 0 && touch.edge) setLevel(level + 1);
+  } else if (!isDesktop() && horiz && dx < 0 && touch.edgeR && !notesOpen) setNotesOpen(true);
+  else if (!isDesktop() && horiz && dx > 0 && notesOpen) setNotesOpen(false);
+  else if (!touch.localCard && horiz && dx > 0 && touch.edge) setLevel(level + 1);
   else if (!touch.localCard && horiz && dx < 0 && level > 1) setLevel(level - 1);
   touch = null;
 }, { passive: true });
@@ -3000,7 +2959,9 @@ async function tick(){
     if (st.version) $("#m_version").textContent = st.version;
     $("#m_socket").textContent = SOCKET;
     renderSys(st.sys);
-    if (sel !== "NOTES" && (!sel || !nodeById(sel))){
+    /* a stored sel of "NOTES" (the retired pseudo-activity) falls through
+       to the first real node here */
+    if (!sel || !nodeById(sel)){
       const first = orderedNodes()[0];
       if (first) select(first.id);
     }
