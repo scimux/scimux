@@ -18,8 +18,10 @@
   --dim:       #8A8A8E;
   --hairline:  rgba(60,60,67,.14);
   --attn:      #FFCC00;   /* systemYellow — needs you; reserved for attention only */
+  --attn-rgb:  255, 204, 0;
   --bad:       #FF3B30;   /* systemRed — error/exited */
   --work:      #0E7C86;   /* petrol accent — agent working */
+  --work-rgb:  14, 124, 134;
   --unlane:    #C7C7CC;   /* adaptive systemGray3-style unassigned lane */
   --sb-bg:     rgba(245,244,241,.88);
   --code-bg:   rgba(60,60,67,.08);
@@ -35,8 +37,10 @@
     --dim:      #98989E;
     --hairline: rgba(84,84,88,.48);
     --attn:     #FFD60A;
+    --attn-rgb: 255, 214, 10;
     --bad:      #FF453A;
     --work:     #2FA7B4;
+    --work-rgb: 47, 167, 180;
     --unlane:   #48484A;
     --sb-bg:    rgba(22,22,24,.88);
     --code-bg:  rgba(255,255,255,.09);
@@ -238,23 +242,55 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .card .actions .trash { color: var(--bad); }
 .card.selected { background: color-mix(in srgb, var(--work) 8%, var(--surface));
   border-color: color-mix(in srgb, var(--work) 40%, transparent); }
-.card.attention { border-color: var(--attn); animation: pulse 2.2s ease-in-out infinite; }
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255,204,0,0); }
-  50%      { box-shadow: 0 0 14px 2px rgba(255,204,0,.55); }
+.card.attention { border-color: var(--attn); }
+.card.attention::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 1;
+  box-shadow:
+    inset 0 0 0 2px rgba(var(--attn-rgb), .95),
+    inset 0 0 18px rgba(var(--attn-rgb), .34),
+    0 0 14px rgba(var(--attn-rgb), .42);
+  opacity: .45;
+  transform: translateZ(0);
+  will-change: opacity, box-shadow;
+  animation: attentionPulse 1.65s ease-in-out infinite;
 }
-.card.working { border-color: rgba(14,124,134,.55); box-shadow: 0 0 12px 0 rgba(14,124,134,.28); }
+@keyframes attentionPulse {
+  0%, 100% {
+    opacity: .42;
+    box-shadow:
+      inset 0 0 0 2px rgba(var(--attn-rgb), .75),
+      inset 0 0 10px rgba(var(--attn-rgb), .20),
+      0 0 8px rgba(var(--attn-rgb), .24);
+  }
+  50% {
+    opacity: 1;
+    box-shadow:
+      inset 0 0 0 2px rgba(var(--attn-rgb), 1),
+      inset 0 0 22px rgba(var(--attn-rgb), .45),
+      0 0 18px rgba(var(--attn-rgb), .55);
+  }
+}
+.card.working { border-color: rgba(var(--work-rgb), .55); box-shadow: 0 0 12px 0 rgba(var(--work-rgb), .28); }
 .card.selected .title { color: var(--work); }
 .card.dead .title { color: var(--dim); }
 
 /* agent active: breathing dot on the card, breathing lane dot in the chat head */
 .workdot { display: inline-block; width: 7px; height: 7px; border-radius: 4px;
   background: var(--work); margin-right: 5px; vertical-align: 1px;
-  animation: breathe 1.4s ease-in-out infinite; }
-#chathead .dot.active { animation: breathe 1.4s ease-in-out infinite; }
+  transform: translateZ(0) scale(.85); transform-origin: center;
+  will-change: transform, opacity; animation: breathe 1.25s ease-in-out infinite; }
+#chathead .dot.active {
+  transform: translateZ(0) scale(.85); transform-origin: center;
+  will-change: transform, opacity; animation: breathe 1.25s ease-in-out infinite;
+}
 @keyframes breathe {
-  0%, 100% { opacity: .3; transform: scale(.8); }
-  50%      { opacity: 1;  transform: scale(1.15); }
+  0%, 100% { opacity: .35; transform: translateZ(0) scale(.76); }
+  50%      { opacity: 1;  transform: translateZ(0) scale(1.22); }
 }
 .card.adoptable { border-style: dashed; }
 .empty { padding: 60px 20px; color: var(--dim); text-align: center; font-size: 15px; }
@@ -327,19 +363,19 @@ body.cards-open #msgs { overflow: hidden; }
    mechanically active. It uses movement, not glow, so it stays visible on iOS. */
 #workpulse { height: 3px; margin: 0 16px; border-radius: 3px; flex: none;
   position: relative; overflow: hidden; opacity: 0;
-  background: color-mix(in srgb, var(--work) 16%, transparent);
+  background: rgba(var(--work-rgb), .16);
   transition: opacity .2s; }
 #workpulse::after {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 34%;
   border-radius: inherit; background: var(--work);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--work) 50%, transparent);
-  transform: translateX(0); will-change: transform;
+  box-shadow: 0 0 8px rgba(var(--work-rgb), .5);
+  transform: translate3d(0,0,0); will-change: transform;
 }
 #workpulse.on { opacity: 1; }
 #workpulse.on::after { animation: workscan 1.25s ease-in-out infinite alternate; }
 @keyframes workscan {
-  from { transform: translateX(0); }
-  to   { transform: translateX(194%); }
+  from { transform: translate3d(0,0,0); }
+  to   { transform: translate3d(194%,0,0); }
 }
 
 /* composer tools: a small icon row sitting above the prompt — toggle the
@@ -366,13 +402,7 @@ body.cards-open #msgs { overflow: hidden; }
 #syncwarn:empty { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  #workpulse.on { opacity: 1; }
-  #workpulse.on::after { animation: none; transform: translateX(97%); }
-  .card.attention { animation: none; box-shadow: 0 0 0 2px var(--attn); }
-  .workdot, #chathead .dot.active { animation: none; opacity: 1; }
-}
-@media (max-width: 520px) {
-  .card.attention { animation: none; box-shadow: 0 0 0 2px rgba(255,204,0,.8); }
+  .roll-dn, .roll-up { animation: none; }
 }
 
 /* copy affordance: bottom-aligned beside the bubble (right of agent bubbles,
@@ -1808,6 +1838,16 @@ function renderNotes(){
 /* one calm pulse above the prompt — CSS handles the breathing; we only
    flip the class from the mechanical active state */
 function setWorkPulse(active){ $("#workpulse").classList.toggle("on", !!active); }
+function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek){
+  setWorkPulse(live === "active" && !mustShowPane);
+  setComposerBusy(live === "active");
+  $("#convtools").hidden = false;
+  const ct = $("#termtoggle");
+  ct.innerHTML = ICON_TERM;
+  ct.classList.toggle("on", showPeek);
+  ct.disabled = forcePeek;                  /* required evidence can't be folded */
+  ct.setAttribute("aria-label", showPeek ? "hide terminal" : "show terminal");
+}
 const DEC_LABELS = {
   no_transcript: "No transcript yet \u2014 showing the terminal",
   no_structured_request: "Showing the terminal",
@@ -1842,6 +1882,19 @@ async function refreshChat(){
   try { d = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
   catch { return; }
   if (gen !== selGen || sel !== n.id) return;   /* selection moved on */
+  let chromeChanged = false;
+  if (d.live && n.live !== d.live){
+    n.live = d.live;
+    chromeChanged = true;
+  }
+  if ((d.attention || "") !== (n.attention || "")){
+    n.attention = d.attention || "";
+    chromeChanged = true;
+  }
+  if (chromeChanged){
+    cardsSig = ""; mapSig = "";
+    renderCards(); renderChatHead(); renderMap();
+  }
   /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
      young, unreadable, or format-incompatible transcripts all end up here */
   const turns = d.turns || [];
@@ -1870,6 +1923,7 @@ async function refreshChat(){
   } else {
     gauge.hidden = true;
   }
+  applyChatActivityChrome(d.live, mustShowPane, forcePeek, showPeek);
 
   const sig = [n.id, d.live, n.attention, attentionHidden, d.delivery, showPeek, termOpen, termFull,
                d.source, d.perm_title, (d.perm_options || []).map(o => o.key + o.name).join(","),
@@ -1925,16 +1979,6 @@ async function refreshChat(){
     catch {}
     chatSig = ""; tick();
   });
-
-  /* working pulse (calm, above the prompt) + composer tools */
-  setWorkPulse(d.live === "active" && !mustShowPane);
-  setComposerBusy(d.live === "active");
-  $("#convtools").hidden = false;
-  const ct = $("#termtoggle");
-  ct.innerHTML = ICON_TERM;
-  ct.classList.toggle("on", showPeek);
-  ct.disabled = forcePeek;                  /* required evidence can't be folded */
-  ct.setAttribute("aria-label", showPeek ? "hide terminal" : "show terminal");
 
   /* key row appears only while the agent blocks on a dialog, or quietly
      invites a look without claiming a specific question/approval */
