@@ -1304,29 +1304,6 @@ func (a *app) archiveSessionLog(id string) {
 	os.Rename(src, filepath.Join(dir, id+"."+stamp+".jsonl"))
 }
 
-// migrateSessionLogs is the one-time move of per-transport session logs from
-// the legacy <data>/acp and <data>/codex directories into the unified
-// <data>/sessions store. Rename is atomic (same filesystem) and idempotent:
-// files whose name already exists in the target are left in place.
-func migrateSessionLogs(data, sessions string) {
-	for _, legacy := range []string{"acp", "codex"} {
-		matches, _ := filepath.Glob(filepath.Join(data, legacy, "*.jsonl"))
-		if len(matches) == 0 {
-			continue
-		}
-		if err := os.MkdirAll(sessions, 0o700); err != nil {
-			return
-		}
-		for _, m := range matches {
-			dst := filepath.Join(sessions, filepath.Base(m))
-			if _, err := os.Stat(dst); err == nil {
-				continue
-			}
-			os.Rename(m, dst)
-		}
-	}
-}
-
 func (a *app) node(r *http.Request) (*Node, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1981,7 +1958,6 @@ func main() {
 	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
 	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
 	sessionsDir := filepath.Join(*data, "sessions")
-	migrateSessionLogs(*data, sessionsDir)
 	a := &app{
 		byID:        map[string]*Node{},
 		live:        map[string]string{},

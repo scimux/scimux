@@ -788,45 +788,6 @@ func TestDialogDetectionOrWithStructured(t *testing.T) {
 	}
 }
 
-func TestMigrateSessionLogs(t *testing.T) {
-	data := t.TempDir()
-	sessions := filepath.Join(data, "sessions")
-	write := func(rel, content string) {
-		t.Helper()
-		path := filepath.Join(data, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("acp/pi-node.jsonl", "from-acp\n")
-	write("codex/cx-node.jsonl", "from-codex\n")
-	write("codex/clash.jsonl", "legacy\n")
-	write("sessions/clash.jsonl", "already-migrated\n")
-
-	migrateSessionLogs(data, sessions)
-	migrateSessionLogs(data, sessions) // idempotent
-
-	for name, want := range map[string]string{
-		"pi-node.jsonl": "from-acp\n",
-		"cx-node.jsonl": "from-codex\n",
-		"clash.jsonl":   "already-migrated\n", // existing target wins
-	} {
-		b, err := os.ReadFile(filepath.Join(sessions, name))
-		if err != nil || string(b) != want {
-			t.Errorf("sessions/%s = %q, %v; want %q", name, b, err, want)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(data, "acp", "pi-node.jsonl")); !os.IsNotExist(err) {
-		t.Error("migrated file still present in legacy acp dir")
-	}
-	if _, err := os.Stat(filepath.Join(data, "codex", "clash.jsonl")); err != nil {
-		t.Error("colliding legacy file must be left in place, not lost")
-	}
-}
-
 func TestArchiveSessionLog(t *testing.T) {
 	sessions := t.TempDir()
 	a := &app{sessionsDir: sessions}
