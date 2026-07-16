@@ -2177,7 +2177,26 @@ $("#msgs").addEventListener("click", e => {
   }
   const ba = e.target.closest("[data-bact]");
   if (ba){
-    if (ba.dataset.bact === "note") return; // not wired yet; row stays open
+    if (ba.dataset.bact === "note"){
+      /* capture: a verbatim, immutable copy of the bubble plus the pointer
+         back to its context (node + the turn's own timestamp — bubble
+         indexes are not stable across relinks). Lane is snapshotted only as
+         a fallback for deleted activities; rendering derives it live. */
+      const turn = lastTurns[tappedTurn];
+      if (!turn) return;
+      const dup = (UI.notes || []).some(n =>
+        n.node === sel && n.turnTime === (turn.time || "") && n.text === (turn.text || ""));
+      if (!dup){
+        const node = nodes.find(x => x.id === sel);
+        uiMutate({ k: "note-add", note: {
+          t: new Date().toISOString(), text: turn.text || "",
+          node: sel, lane: node?.lane_id || "", turnTime: turn.time || "",
+        }});
+      }
+      ba.innerHTML = "&#10003; noted";
+      setTimeout(() => { tappedTurn = -1; renderBubbleActions(); }, 700);
+      return;
+    }
     const turn = lastTurns[tappedTurn];
     tappedTurn = -1;
     renderBubbleActions();
