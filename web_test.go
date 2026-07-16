@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +39,23 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	}
 	if out, err := exec.Command(node, "--check", f).CombinedOutput(); err != nil {
 		t.Fatalf("inline JS does not parse: %v\n%s", err, out)
+	}
+}
+
+func TestEmbeddedAgentAssetsServe(t *testing.T) {
+	assets, err := fs.Sub(webFS, "web/assets")
+	if err != nil {
+		t.Fatalf("sub web/assets: %v", err)
+	}
+	h := http.StripPrefix("/assets/", http.FileServer(http.FS(assets)))
+	req := httptest.NewRequest("GET", "/assets/agents/openai.svg", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("asset code = %d body %q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Font Awesome") {
+		t.Fatal("openai asset does not look like the vendored Font Awesome SVG")
 	}
 }
 

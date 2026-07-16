@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1822,6 +1823,9 @@ func main() {
 	go detectAgents()
 
 	mux := http.NewServeMux()
+	if assets, err := fs.Sub(webFS, "web/assets"); err == nil {
+		mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := webFS.ReadFile("web/index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

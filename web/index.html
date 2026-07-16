@@ -166,7 +166,13 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .card .stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
 .card .row1 { display: flex; align-items: center; gap: 8px; }
 .agent-logo { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--ink); }
-.agent-logo svg { width: 20px; height: 20px; display: block; }
+.agent-logo img, .agent-logo svg, .agent-logo .mask-logo { width: 20px; height: 20px; display: block; }
+.agent-logo img { object-fit: contain; }
+.agent-logo .mask-logo {
+  background: currentColor;
+  -webkit-mask: var(--logo) center / contain no-repeat;
+  mask: var(--logo) center / contain no-repeat;
+}
 .card .agent-logo { margin-left: -2px; }
 .card .title { font-size: 16px; font-weight: 600; flex: 1; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -265,7 +271,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #chathead .dot.attention { background: var(--attn); }
 #chathead .dot.exited, #chathead .dot.unavailable { background: var(--bad); }
 #chathead h2 { margin: 0; font-size: 24px; font-weight: 700; flex: 1; min-width: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: font-size .2s; }
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: font-size .2s;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
 #chathead.compact h2 { font-size: 17px; }
 #chathead .mission { font-size: 13px; color: var(--dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -982,33 +989,23 @@ const ICON_CHEV_UP = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none
   stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M6 15l6-6 6 6"/>
 </svg>`;
-const AGENT_LOGOS = {
-  claude: `<svg viewBox="0 0 24 24" aria-hidden="true">
-    <circle cx="12" cy="12" r="10" fill="#D97757"/>
-    <path d="M12 5.2l1.9 4.9 5.1 1.9-5.1 1.9-1.9 4.9-1.9-4.9L5 12l5.1-1.9L12 5.2Z" fill="#fff"/>
-  </svg>`,
-  codex: `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M9.1 4.2c2-1.2 4.5-.5 5.7 1.5l3.6 6.2c1.2 2 .5 4.5-1.5 5.7"/>
-    <path d="M14.9 19.8c-2 1.2-4.5.5-5.7-1.5L5.6 12c-1.2-2-.5-4.5 1.5-5.7"/>
-    <path d="M5.7 12c0-2.3 1.9-4.2 4.2-4.2h7.2c2.3 0 4.2 1.9 4.2 4.2"/>
-    <path d="M18.3 12c0 2.3-1.9 4.2-4.2 4.2H6.9c-2.3 0-4.2-1.9-4.2-4.2"/>
-    <path d="M9.2 19.8c-2-1.2-2.7-3.7-1.5-5.7l3.6-6.2c1.2-2 3.7-2.7 5.7-1.5"/>
-    <path d="M14.8 4.2c2 1.2 2.7 3.7 1.5 5.7l-3.6 6.2c-1.2 2-3.7 2.7-5.7 1.5"/>
-  </svg>`,
-  pi: `<svg viewBox="0 0 24 24" aria-hidden="true">
-    <rect x="2" y="2" width="20" height="20" rx="6" fill="#191919"/>
-    <path d="M6.3 8.2h11.4M9.2 8.2v8.1M14.8 8.2v8.1M9.2 12.2h5.6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
-  </svg>`,
-  opencode: `<svg viewBox="0 0 24 24" aria-hidden="true">
-    <rect x="2" y="2" width="20" height="20" rx="5" fill="#0E7C86"/>
-    <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
-  </svg>`,
-};
 function agentLogo(agent){
-  return AGENT_LOGOS[(agent || "").toLowerCase()] || `<svg viewBox="0 0 24 24" aria-hidden="true">
+  switch ((agent || "").toLowerCase()){
+  case "claude":
+    return `<span class="mask-logo" style="--logo:url('/assets/agents/claude.svg')" aria-hidden="true"></span>`;
+  case "codex":
+  case "openai":
+    return `<span class="mask-logo" style="--logo:url('/assets/agents/openai.svg')" aria-hidden="true"></span>`;
+  case "pi":
+    return `<img src="/assets/agents/pi.svg" alt="" aria-hidden="true">`;
+  case "opencode":
+    return `<img src="/assets/agents/opencode.svg" alt="" aria-hidden="true">`;
+  default:
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">
     <circle cx="12" cy="12" r="10" fill="var(--dim)"/>
     <circle cx="12" cy="12" r="3" fill="#fff"/>
   </svg>`;
+  }
 }
 
 /* clipboard: the async API needs a secure context (HTTPS/localhost) — over
@@ -1620,12 +1617,11 @@ function updateLocalNode(next){
   const cur = next?.id && nodeById(next.id);
   if (cur) Object.assign(cur, next);
 }
-function focusTitleEditor(id){
-  setTimeout(() => {
-    const input = document.querySelector(`[data-title-input="${CSS.escape(id)}"]`);
-    if (input){ input.focus(); input.select(); }
-  }, 0);
+function focusTitleEditorNow(id){
+  const input = document.querySelector(`[data-title-input="${CSS.escape(id)}"]`);
+  if (input){ input.focus(); input.select(); }
 }
+function focusTitleEditor(id){ setTimeout(() => focusTitleEditorNow(id), 0); }
 function startTitleEdit(id){
   if (!id || id === "NOTES" || !nodeById(id)) return;
   editingTitle = id;
@@ -2014,7 +2010,7 @@ let lpFired = false;
 document.addEventListener("click", e => {
   if (lpFired){ e.stopPropagation(); e.preventDefault(); lpFired = false; }
 }, true);
-function longpress(container, selector, fn){
+function longpress(container, selector, fn, opts = {}){
   let timer = null;
   const fire = (el, ev) => {
     lpFired = true;
@@ -2024,8 +2020,9 @@ function longpress(container, selector, fn){
   container.addEventListener("touchstart", e => {
     const el = e.target.closest(selector);
     if (!el) return;
+    if (opts.preventNative) e.preventDefault();
     timer = setTimeout(() => fire(el, e), 500);
-  }, { passive: true });
+  }, { passive: !opts.preventNative });
   ["touchmove","touchend","touchcancel"].forEach(ev =>
     container.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
   /* press-and-hold with a pointer (mouse, iPad trackpad) — synthesized mouse
@@ -2051,8 +2048,11 @@ function longpress(container, selector, fn){
 }
 
 /* long-press a title wherever the Activity title is shown -> edit it in place */
-longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title));
-longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel));
+longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title), { preventNative: true });
+longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel), { preventNative: true });
+["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
+  if (editingTitle) focusTitleEditorNow(editingTitle);
+}, { passive: true }));
 
 /* long-press a folded card → reveal archive/restore and remove actions */
 longpress($("#cardlist"), ".card", (el, ev) => {

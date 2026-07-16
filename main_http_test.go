@@ -337,6 +337,16 @@ func TestHandleUpdateAndDeleteNode(t *testing.T) {
 	if got := a.nodes[0].Description; got != "edited" {
 		t.Fatalf("description = %q, want edited", got)
 	}
+	req = httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"title":"Renamed"}`))
+	req.SetPathValue("id", id)
+	up = httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("title update: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].Title; got != "Renamed" {
+		t.Fatalf("title = %q, want Renamed", got)
+	}
 
 	delReq := httptest.NewRequest("DELETE", "/api/nodes/"+id, nil)
 	delReq.SetPathValue("id", id)
