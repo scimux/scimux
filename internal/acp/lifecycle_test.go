@@ -100,7 +100,7 @@ func TestLaunchReapsOnSessionFailure(t *testing.T) {
 // answers. Session teardown (closeDone, driven by stop/Shutdown) must unblock
 // it as cancelled rather than leaking the goroutine forever.
 func TestRequestPermissionCancelledOnDone(t *testing.T) {
-	s := &Session{done: make(chan struct{}), logw: &logWriter{path: filepath.Join(t.TempDir(), "n.jsonl")}}
+	s := &Session{done: make(chan struct{}), logw: &logWriter{Path: filepath.Join(t.TempDir(), "n.jsonl")}}
 	respCh := make(chan sdk.RequestPermissionResponse, 1)
 	go func() {
 		resp, _ := s.RequestPermission(context.Background(), sdk.RequestPermissionRequest{

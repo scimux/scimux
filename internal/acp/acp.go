@@ -32,6 +32,7 @@ import (
 
 	sdk "github.com/coder/acp-go-sdk"
 
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
@@ -103,9 +104,15 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		nodeID:    nodeID,
 		agent:     agent,
 		proc:      proc,
-		logw:      &logWriter{path: m.logPath(nodeID)},
+		logw:      &logWriter{Path: m.logPath(nodeID)},
 		procAlive: true,
 		done:      make(chan struct{}),
+	}
+	// Self-describing header first: the filename is a reusable slug, so the
+	// log carries its own identity and launch config (see sessionlog.MetaEvent).
+	if err := s.logw.Append(sessionlog.NewMeta(nodeID, agent, model, dir)); err != nil {
+		killAndReap(proc)
+		return "", fmt.Errorf("session log: %w", err)
 	}
 	s.conn = sdk.NewClientSideConnection(s, proc.Stdin(), proc.Stdout())
 
@@ -161,7 +168,7 @@ func (m *Manager) Send(nodeID, text string) error {
 	if !ok {
 		return ErrTurnActive
 	}
-	if err := s.logw.append(Event{T: "user", Text: text}); err != nil {
+	if err := s.logw.Append(Event{T: "user", Text: text}); err != nil {
 		s.abortTurn()
 		return fmt.Errorf("record user turn: %w", err)
 	}
@@ -221,7 +228,7 @@ func (m *Manager) Deliver(nodeID, optID string) error {
 // agent's context or visibly failed in the node's own history.
 func (m *Manager) RecordStartFailure(nodeID string, cause error) error {
 	msg := "first prompt not delivered: " + cause.Error()
-	logErr := (&logWriter{path: m.logPath(nodeID)}).append(Event{T: "error", Error: msg})
+	logErr := (&logWriter{Path: m.logPath(nodeID)}).Append(Event{T: "error", Error: msg})
 	if s := m.session(nodeID); s != nil {
 		s.mu.Lock()
 		if s.lastError == "" {
@@ -435,7 +442,7 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 	if s.pending != nil {
 		// One pending at a time; a second is an agent error → cancel it.
 		s.mu.Unlock()
-		_ = s.logw.append(Event{T: "error", Error: "duplicate permission request ignored"})
+		_ = s.logw.Append(Event{T: "error", Error: "duplicate permission request ignored"})
 		return cancelledPermission(), nil
 	}
 	s.pending = &pendingPermission{toolTitle: title, options: p.Options, ch: ch}
@@ -632,7 +639,7 @@ func (s *Session) flushAssistantLocked() {
 // that is neither stored nor surfaced. The first failure wins so the chat view
 // shows the original cause.
 func (s *Session) appendLocked(ev Event) bool {
-	if err := s.logw.append(ev); err != nil {
+	if err := s.logw.Append(ev); err != nil {
 		if s.lastError == "" {
 			s.lastError = "session log write failed: " + err.Error()
 		}

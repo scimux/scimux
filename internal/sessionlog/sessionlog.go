@@ -1,0 +1,242 @@
+// Package sessionlog owns scimux's unified per-node session history: one
+// append-only JSONL file per node under <data>/sessions/<node-id>.jsonl,
+// shared by every transport (ACP, codex app-server, and — via the transcript
+// mirror — tmux-wrapped claude). The filename is the node's human-friendly
+// slug; identity across slug reuse comes from the meta header record inside
+// the file. Records are plain-text JSON lines on purpose: the corpus must
+// stay grep/sed/awk/jq-able for future search/consolidation/sharing readers.
+package sessionlog
+
+import (
+	"bufio"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"codeberg.org/chrberger/scimux/internal/transcript"
+)
+
+// Event is one record of the append-only session log. It mirrors the ACP
+// plan's schema: one record per observed event, with only the fields relevant
+// to that record's type set. The log is the authoritative history for a
+// structured-transport node — there is no pane photo — so a reader
+// reconstructs the chat, liveness, usage, and peek from it. Readers skip
+// record types they don't know, so the schema can grow without breaking
+// old binaries or old files.
+type Event struct {
+	T          string      `json:"t"` // "meta" | "user" | "assistant" | "tool" | "usage" | "stop" | "error"
+	Time       string      `json:"time"`
+	Text       string      `json:"text,omitempty"`       // user / assistant
+	Tool       *ToolEvent  `json:"tool,omitempty"`       // tool
+	Usage      *UsageEvent `json:"usage,omitempty"`      // usage
+	Meta       *MetaEvent  `json:"meta,omitempty"`       // meta
+	StopReason string      `json:"stopReason,omitempty"` // stop
+	Error      string      `json:"error,omitempty"`      // error
+}
+
+// ToolEvent is the tool-call state assembled by toolCallId. rawInput carries
+// paths, diffs and command text — the same sensitivity as tmux pane excerpts,
+// which is why the log file is 0600.
+type ToolEvent struct {
+	ID       string `json:"id"`
+	Title    string `json:"title,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Status   string `json:"status,omitempty"`
+	RawInput any    `json:"rawInput,omitempty"`
+}
+
+// UsageEvent carries both observed usage shapes (opencode streams the first
+// four fields via usage_update; the token breakdown arrives only in the final
+// PromptResponse.usage). Any subset may be present.
+type UsageEvent struct {
+	Used             int     `json:"used,omitempty"`
+	Size             int     `json:"size,omitempty"`
+	CostAmount       float64 `json:"costAmount,omitempty"`
+	CostCurrency     string  `json:"costCurrency,omitempty"`
+	InputTokens      int     `json:"inputTokens,omitempty"`
+	OutputTokens     int     `json:"outputTokens,omitempty"`
+	CachedReadTokens int     `json:"cachedReadTokens,omitempty"`
+	TotalTokens      int     `json:"totalTokens,omitempty"`
+}
+
+// MetaEvent is the self-describing header written as a log's first record.
+// The filename is only a friendly slug that can be reissued after a delete;
+// UID is the collision-proof identity, and the launch config makes a log
+// file meaningful on its own (shared, archived, or searched outside the
+// node store's context). Old logs without a header stay valid — every
+// reader treats meta as just another skippable record type.
+type MetaEvent struct {
+	Node    string `json:"node"`
+	UID     string `json:"uid"`
+	Agent   string `json:"agent"`
+	Model   string `json:"model,omitempty"`
+	Dir     string `json:"dir,omitempty"`
+	Created string `json:"created"`
+}
+
+// NewMeta builds the header record for a fresh node log.
+func NewMeta(node, agent, model, dir string) Event {
+	b := make([]byte, 8)
+	rand.Read(b)
+	now := nowStamp()
+	return Event{T: "meta", Time: now, Meta: &MetaEvent{
+		Node: node, UID: fmt.Sprintf("%x", b), Agent: agent, Model: model,
+		Dir: dir, Created: now,
+	}}
+}
+
+// Writer serializes append-only writes to one node's log file. Writes are
+// small and infrequent (turn boundaries, tool state, usage), so a fresh
+// O_APPEND handle per write keeps the file crash-safe without a long-lived fd.
+type Writer struct {
+	mu   sync.Mutex
+	Path string
+}
+
+func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+func (w *Writer) Append(ev Event) error {
+	if ev.Time == "" {
+		ev.Time = nowStamp()
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// 0600: rawInput and prompt text are as sensitive as pane-excerpt evidence.
+	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(b, '\n'))
+	return err
+}
+
+// ReadEvents replays the log file. Defensive like the transcript parser:
+// unreadable file yields nothing, unparseable lines are skipped.
+func ReadEvents(path string) []Event {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []Event
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var ev Event
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// ReadTurns yields the chat turns (user/assistant) from the log — the
+// structured-transport equivalent of transcript.Tailer.Poll for tmux nodes.
+func ReadTurns(path string) []transcript.Turn {
+	turns := []transcript.Turn{}
+	for _, ev := range ReadEvents(path) {
+		switch ev.T {
+		case "user":
+			if strings.TrimSpace(ev.Text) != "" {
+				turns = append(turns, transcript.Turn{Role: "user", Text: ev.Text, Time: ev.Time})
+			}
+		case "assistant":
+			if strings.TrimSpace(ev.Text) != "" {
+				turns = append(turns, transcript.Turn{Role: "assistant", Text: ev.Text, Time: ev.Time})
+			}
+		}
+	}
+	return turns
+}
+
+// LatestUsage folds the log's usage records into the newest known values.
+// used/size feed the context gauge; either is 0 when never reported (pi).
+func LatestUsage(path string) (used, size int64) {
+	for _, ev := range ReadEvents(path) {
+		if ev.T != "usage" || ev.Usage == nil {
+			continue
+		}
+		if ev.Usage.Used > 0 {
+			used = int64(ev.Usage.Used)
+		}
+		if ev.Usage.Size > 0 {
+			size = int64(ev.Usage.Size)
+		}
+	}
+	return used, size
+}
+
+// PeekLog renders the tail of the raw event log as plain text — the
+// structured-transport analogue of a pane photo (no terminal to capture).
+// At most maxLines lines; empty is shown for a missing or event-free log.
+func PeekLog(path string, maxLines int, empty string) string {
+	evs := ReadEvents(path)
+	var lines []string
+	for _, ev := range evs {
+		lines = append(lines, formatEvent(ev))
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	if len(lines) == 0 {
+		return empty
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatEvent(ev Event) string {
+	switch ev.T {
+	case "meta":
+		if ev.Meta != nil {
+			return "— session " + ev.Meta.Node + " (" + ev.Meta.Agent +
+				strings.TrimRight(" "+ev.Meta.Model, " ") + ")"
+		}
+		return "— session"
+	case "user":
+		return "» " + oneLine(ev.Text)
+	case "assistant":
+		return "« " + oneLine(ev.Text)
+	case "tool":
+		if ev.Tool != nil {
+			return "· tool " + ev.Tool.Title + " [" + ev.Tool.Status + "]"
+		}
+		return "· tool"
+	case "usage":
+		if ev.Usage != nil {
+			return "· usage used=" + itoa(ev.Usage.Used) + " size=" + itoa(ev.Usage.Size)
+		}
+		return "· usage"
+	case "stop":
+		return "— stop (" + ev.StopReason + ")"
+	case "error":
+		return "! error: " + oneLine(ev.Error)
+	}
+	return "· " + ev.T
+}
+
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > 200 {
+		return string(r[:200]) + "…"
+	}
+	return s
+}
+
+func itoa(n int) string {
+	b, _ := json.Marshal(n)
+	return strings.TrimSpace(string(b))
+}

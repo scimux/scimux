@@ -111,9 +111,10 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		staleChat:   map[string]bool{},
 		sendState:   map[string]string{},
 		server:      tmuxsession.NewServerWithRunner("testsock", f.run),
-		acp:         acpManager{acp.NewManager(filepath.Join(dir, "acp"))},
-		codex:       codexManager{codex.NewManager(filepath.Join(dir, "codex"))},
+		acp:         acpManager{acp.NewManager(filepath.Join(dir, "sessions"))},
+		codex:       codexManager{codex.NewManager(filepath.Join(dir, "sessions"))},
 		storePath:   filepath.Join(dir, "nodes.jsonl"),
+		sessionsDir: filepath.Join(dir, "sessions"),
 		home:        dir,
 	}
 }

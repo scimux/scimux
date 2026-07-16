@@ -335,7 +335,7 @@ func TestAppendFailureIsVisible(t *testing.T) {
 	if err := os.Mkdir(badPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := &Session{nodeID: "n1", logw: &logWriter{path: badPath}}
+	s := &Session{nodeID: "n1", logw: &logWriter{Path: badPath}}
 	s.mu.Lock()
 	s.assistant.WriteString("real output that cannot be persisted")
 	s.flushAssistantLocked()
@@ -396,7 +396,7 @@ func TestRecordStartFailureReportsUndurableLog(t *testing.T) {
 // Delivering an option that no longer matches the current pending request is
 // refused rather than answering a since-replaced prompt (finding 53).
 func TestDeliverRejectsStaleOption(t *testing.T) {
-	s := &Session{nodeID: "n1", logw: &logWriter{path: filepath.Join(t.TempDir(), "n1.jsonl")}}
+	s := &Session{nodeID: "n1", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
 	s.pending = &pendingPermission{
 		toolTitle: "run bash",
 		options:   []sdk.PermissionOption{{OptionId: "opt_allow", Name: "Allow"}},

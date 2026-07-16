@@ -46,6 +46,15 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   `internal/transcript`.
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.
+- **One session-log store, one schema.** Every structured transport writes its
+  per-node history to `~/.scimux/sessions/<node-id>.jsonl` as
+  `internal/sessionlog` events (plain JSONL — the corpus must stay
+  grep/sed/awk-able; nothing binary). The filename is the node's reusable
+  title slug; identity lives in the file's `meta` header record, and deleting
+  a node archives its log to `sessions/archive/` so a reissued slug can never
+  append onto dead history. New transports (and the planned Claude transcript
+  mirror) write the same records to the same directory — do not introduce
+  per-transport log formats or directories.
 - **Fork = fresh context.** A forked node inherits launch config (agent,
   model, effort, dir) but never conversation history.
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from

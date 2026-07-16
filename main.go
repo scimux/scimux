@@ -125,7 +125,11 @@ type app struct {
 	codex     codexManager
 	storePath string
 	uiPath    string
-	home      string
+	// sessionsDir is the unified session-log store: one JSONL file per node,
+	// every transport, one schema (internal/sessionlog). Future readers
+	// (search, consolidation, sharing) scan this one directory.
+	sessionsDir string
+	home        string
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:
@@ -1278,7 +1282,49 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	}
 	a.removeNodeLocked(n.ID)
 	a.mu.Unlock()
+	a.archiveSessionLog(n.ID)
 	writeJSON(w, map[string]string{"ok": "deleted"})
+}
+
+// archiveSessionLog moves a deleted node's session log into sessions/archive/
+// with a timestamp suffix. Node IDs are friendly slugs that uniqueID can
+// reissue once the node is gone; without this move a future node reusing the
+// slug would append onto the dead node's history. Best-effort: history
+// retention must never block a delete.
+func (a *app) archiveSessionLog(id string) {
+	src := filepath.Join(a.sessionsDir, id+".jsonl")
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	dir := filepath.Join(a.sessionsDir, "archive")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	os.Rename(src, filepath.Join(dir, id+"."+stamp+".jsonl"))
+}
+
+// migrateSessionLogs is the one-time move of per-transport session logs from
+// the legacy <data>/acp and <data>/codex directories into the unified
+// <data>/sessions store. Rename is atomic (same filesystem) and idempotent:
+// files whose name already exists in the target are left in place.
+func migrateSessionLogs(data, sessions string) {
+	for _, legacy := range []string{"acp", "codex"} {
+		matches, _ := filepath.Glob(filepath.Join(data, legacy, "*.jsonl"))
+		if len(matches) == 0 {
+			continue
+		}
+		if err := os.MkdirAll(sessions, 0o700); err != nil {
+			return
+		}
+		for _, m := range matches {
+			dst := filepath.Join(sessions, filepath.Base(m))
+			if _, err := os.Stat(dst); err == nil {
+				continue
+			}
+			os.Rename(m, dst)
+		}
+	}
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {
@@ -1934,6 +1980,8 @@ func main() {
 	os.Chmod(*data, 0o700)
 	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
 	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
+	sessionsDir := filepath.Join(*data, "sessions")
+	migrateSessionLogs(*data, sessionsDir)
 	a := &app{
 		byID:        map[string]*Node{},
 		live:        map[string]string{},
@@ -1947,10 +1995,11 @@ func main() {
 		staleChat:   map[string]bool{},
 		sendState:   map[string]string{},
 		server:      tmuxsession.NewServer(*socket),
-		acp:         acpManager{acp.NewManager(filepath.Join(*data, "acp"))},
-		codex:       codexManager{codex.NewManager(filepath.Join(*data, "codex"))},
+		acp:         acpManager{acp.NewManager(sessionsDir)},
+		codex:       codexManager{codex.NewManager(sessionsDir)},
 		storePath:   filepath.Join(*data, "nodes.jsonl"),
 		uiPath:      filepath.Join(*data, "ui.json"),
+		sessionsDir: sessionsDir,
 		home:        home,
 	}
 	if err := a.loadStore(); err != nil {

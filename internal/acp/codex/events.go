@@ -5,42 +5,9 @@ import (
 	"strings"
 )
 
-// Event is one record of the append-only session log, intentionally identical
-// in shape to internal/acp.Event so the codex transport can share scimux's log
-// sink, chat reconstruction, usage folding, and "peek" verbatim. Only the
-// fields relevant to a record's type are set.
-type Event struct {
-	T          string      `json:"t"` // "user" | "assistant" | "tool" | "usage" | "stop" | "error"
-	Time       string      `json:"time,omitempty"`
-	Text       string      `json:"text,omitempty"`
-	Tool       *ToolEvent  `json:"tool,omitempty"`
-	Usage      *UsageEvent `json:"usage,omitempty"`
-	StopReason string      `json:"stopReason,omitempty"`
-	Error      string      `json:"error,omitempty"`
-}
-
-// ToolEvent is the tool-call state assembled from item/* notifications, keyed
-// by the item id. rawInput carries command text / paths — as sensitive as a
-// pane excerpt, so the log stays 0600.
-type ToolEvent struct {
-	ID       string `json:"id"`
-	Title    string `json:"title,omitempty"`
-	Kind     string `json:"kind,omitempty"`
-	Status   string `json:"status,omitempty"`
-	RawInput any    `json:"rawInput,omitempty"`
-}
-
-// UsageEvent mirrors acp.UsageEvent. Codex reports a richer token breakdown
-// than ACP; we fold thread/tokenUsage/updated into these fields. Used/Size feed
-// the context gauge (Used = last-turn total, Size = model context window).
-type UsageEvent struct {
-	Used             int `json:"used,omitempty"`
-	Size             int `json:"size,omitempty"`
-	InputTokens      int `json:"inputTokens,omitempty"`
-	OutputTokens     int `json:"outputTokens,omitempty"`
-	CachedReadTokens int `json:"cachedReadTokens,omitempty"`
-	TotalTokens      int `json:"totalTokens,omitempty"`
-}
+// The Event/ToolEvent/UsageEvent record types are the unified sessionlog
+// schema, aliased in log.go — the codex transport writes the same records as
+// every other transport, which is what makes the store readable uniformly.
 
 // --- notification decoders (defensive: unknown shapes yield nothing) ---
 
