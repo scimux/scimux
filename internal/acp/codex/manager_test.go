@@ -96,14 +96,61 @@ func TestManagerInterruptCancelsActiveTurn(t *testing.T) {
 	if err := m.Send("n1", "long"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if r := ms.nextReq(t); r.Method != "turn/start" {
+	r := ms.nextReq(t)
+	if r.Method != "turn/start" {
 		t.Fatalf("turn/start = %q", r.Method)
 	}
+	ms.reply(t, r.ID, `{"turn":{"id":"turn-1"}}`)
 	waitFor(t, func() bool { return m.Live("n1") == "active" })
 	if err := m.Interrupt("n1"); err != nil {
 		t.Fatalf("interrupt: %v", err)
 	}
+	// The interrupt must reach the server as turn/interrupt for the live
+	// turn — cancelling only the local wait would leave codex running the
+	// turn server-side while scimux reports it as over.
+	ir := ms.nextReq(t)
+	if ir.Method != "turn/interrupt" {
+		t.Fatalf("interrupt request = %q, want turn/interrupt", ir.Method)
+	}
+	if !strings.Contains(string(ir.Params), `"turnId":"turn-1"`) {
+		t.Fatalf("turn/interrupt params = %s", ir.Params)
+	}
+	ms.reply(t, ir.ID, `{}`)
+	ms.note(t, "turn/completed", `{"turn":{"id":"turn-1","status":"interrupted"}}`)
 	waitFor(t, func() bool { return m.Live("n1") == "quiet" && m.LastError("n1") != "" })
+	if got := m.LastError("n1"); !strings.Contains(got, "interrupted") {
+		t.Fatalf("last error = %q, want interrupt notice", got)
+	}
+}
+
+func TestManagerInterruptUnblocksPendingApproval(t *testing.T) {
+	m, _, ms := newManagerWithMock(t)
+	launch(t, m, ms, "n1", "", "")
+	if err := m.Send("n1", "risky"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	r := ms.nextReq(t)
+	ms.reply(t, r.ID, `{"turn":{"id":"turn-1"}}`)
+	ms.serverRequest(t, 7, "item/commandExecution/requestApproval", syntheticApproval)
+	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
+
+	if err := m.Interrupt("n1"); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	ir := ms.nextReq(t)
+	if ir.Method != "turn/interrupt" {
+		t.Fatalf("interrupt request = %q", ir.Method)
+	}
+	ms.reply(t, ir.ID, `{}`)
+	ms.note(t, "turn/completed", `{"turn":{"id":"turn-1","status":"interrupted"}}`)
+
+	// The dead approval is failed closed (client answers with an error
+	// response) and attention clears instead of sticking to a moot question.
+	dec := ms.nextResp(t)
+	if len(dec.Error) == 0 {
+		t.Fatalf("stale approval should be rejected, got result %s", dec.Result)
+	}
+	waitFor(t, func() bool { return m.Attention("n1") == "" && m.Live("n1") == "quiet" })
 }
 
 func TestManagerRejectsSecondTurn(t *testing.T) {

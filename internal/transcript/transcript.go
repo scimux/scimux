@@ -519,6 +519,15 @@ func FindClaudeTranscript(home, sessionID string) (string, bool) {
 // session id (the filename). Claude escapes the cwd into a project dir
 // name by replacing path separators and other specials with '-'.
 func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
+	return FindClaudeNewestInDirSince(home, dir, time.Time{})
+}
+
+// FindClaudeNewestInDirSince is FindClaudeNewestInDir restricted to session
+// logs modified after since — used to re-run discovery when a pane finished a
+// whole working phase that the linked transcript never carried (a /clear or
+// relaunch inside the pane started a new session file). Only a file the
+// phase actually wrote can be the pane's current session.
+func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessionID string, ok bool) {
 	esc := regexp.MustCompile(`[^a-zA-Z0-9-]`).ReplaceAllString(dir, "-")
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", esc, "*.jsonl"))
 	if err != nil || len(matches) == 0 {
@@ -527,7 +536,7 @@ func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
 	var bestTime time.Time
 	for _, m := range matches {
 		st, err := os.Stat(m)
-		if err != nil {
+		if err != nil || !st.ModTime().After(since) {
 			continue
 		}
 		if path == "" || st.ModTime().After(bestTime) {

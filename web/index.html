@@ -415,6 +415,17 @@ body.cards-open #msgs { overflow: hidden; }
 .copybtn:active { color: var(--work); }
 .trashbtn:active { color: var(--bad); }
 
+/* bubble tap actions: one tap on a bubble reveals a small icon row directly
+   below it (fork a new activity, adopt as description). Tap again or tap
+   another bubble to dismiss; long-press keeps the full context sheet. */
+.bubactions { display: flex; gap: 10px; padding: 2px 6px 8px; }
+.turn.user + .bubactions { justify-content: flex-end; }
+.bubactions button { width: 44px; height: 44px; border-radius: 12px;  /* HIG 44pt minimum touch target */
+  color: var(--dim); background: var(--surface);
+  border: 1px solid var(--hairline);
+  display: flex; align-items: center; justify-content: center; }
+.bubactions button:active { color: var(--work); }
+
 .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin: 0; }
 .bubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; background: var(--code-bg);
   padding: 1px 5px; border-radius: 4px; }
@@ -485,7 +496,6 @@ body.cards-open #msgs { overflow: hidden; }
   content: attr(data-placeholder); color: var(--dim); pointer-events: none;
 }
 #promptbar [contenteditable]:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
-#promptbar.busy [contenteditable] { opacity: .55; }
 #sendbtn {
   width: 38px; height: 38px; border-radius: 19px; flex: none;
   background: var(--work); color: #fff; font-size: 17px;
@@ -713,26 +723,6 @@ body.cards-open #msgs { overflow: hidden; }
   <button class="cta" id="ad_go">Adopt</button>
 </div>
 
-<!-- activity details sheet (… / title tap) -->
-<div class="sheet" id="info">
-  <div class="grab"></div>
-  <h3 id="i_title"></h3>
-  <div class="sect"><div class="k">Mission</div><div class="v" id="i_mission"></div></div>
-  <div class="sect" id="i_rat_s" style="display:none"><div class="k">Why (fork rationale)</div><div class="v" id="i_rat"></div></div>
-  <div class="sect"><div class="k">Setup</div><div class="v" id="i_setup"></div></div>
-  <div class="sect"><div class="k">Attach from a terminal</div><div class="v"><code id="i_attach"></code></div></div>
-</div>
-
-<!-- message context menu (long-press a bubble) -->
-<div class="sheet" id="msgact">
-  <div class="grab"></div>
-  <h3 style="font-size:17px">Message</h3>
-  <div class="sect">
-    <button class="pos-item" id="ma_copy" style="width:100%;text-align:left"><span>Copy message</span></button>
-    <button class="pos-item" id="ma_fork" style="width:100%;text-align:left"><span>New activity from here&#8230;</span></button>
-  </div>
-</div>
-
 <!-- notes: long-press forwards a note into a chat's draft -->
 <div class="sheet" id="sendto">
   <div class="grab"></div>
@@ -802,6 +792,7 @@ const expanded = new Set();
 let actionCard = "";
 let editingDesc = "";
 let editingTitle = "";
+let editingTitleScope = "";   /* "cards" | "chat" — the editor renders only where it was opened */
 let chatDetailsOpen = false;
 let editingChatDesc = false;
 let chatDetailSavedUntil = 0;
@@ -816,7 +807,11 @@ const isDesktop = () => matchMedia("(min-width: 900px)").matches;
 const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
 
 const api = (path, opts) => fetch(path, opts).then(async r => {
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok){
+    const err = new Error(await r.text());
+    err.status = r.status;   /* callers can tell a 409 conflict from a failure */
+    throw err;
+  }
   return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
 });
 
@@ -1004,6 +999,17 @@ const ICON_STOP = `<svg width="38" height="38" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <circle cx="12" cy="12" r="9"/>
   <rect x="9" y="9" width="6" height="6" rx="1"/>
+</svg>`;
+/* forgejo brand glyph (official mark, filled) — "new activity from here" */
+const ICON_FORGEJO = `<svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+  <path d="M16.7773 0c1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.1175a7.0759 7.0759 0 0 1 4.148-1.4205l.1176-.001 1.3385.0002c.4973-.8827 1.4434-1.4788 2.5288-1.4788 1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.319c.8827.4973 1.4788 1.4434 1.4788 2.5287 0 1.602-1.2986 2.9005-2.9005 2.9005-1.6018 0-2.9004-1.2986-2.9004-2.9005 0-1.0853.596-2.0314 1.4788-2.5287l-.0002-9.9831c0-3.887 3.1195-7.0453 6.9915-7.108l.1176-.001h1.3385C14.7458.5962 15.692 0 16.7773 0ZM7.2227 19.9052c-.6596 0-1.1943.5347-1.1943 1.1943s.5347 1.1943 1.1943 1.1943 1.1944-.5347 1.1944-1.1943-.5348-1.1943-1.1944-1.1943Zm9.5546-10.4644c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Zm0-7.7346c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Z"/>
+</svg>`;
+/* info glyph: fa-regular fa-circle-info style — "use as description" */
+const ICON_INFO = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <circle cx="12" cy="12" r="9"/>
+  <path d="M12 11v5"/>
+  <path d="M11.95 8h.1"/>
 </svg>`;
 /* terminal glyph: fa-regular fa-window-maximize (framed window w/ title bar) */
 const ICON_TERM = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
@@ -1293,16 +1299,17 @@ function renderCards(){
       <div class="row1"><span class="title">Notes</span></div>
       <div class="status">${(UI.notes || []).length} notes · private</div>
     </div>`;
+  withCardEditsPreserved(() => {
   $("#cardlist").innerHTML = adoptCards + (list.length ? list.map(n => {
     const desc = n.description || n.prompt || "";
     const archived = isArchived(n.id);
     return `
-    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${!n.lane_id ? "lane-edit" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""} ${editingTitle === n.id ? "title-editing" : ""}" id="card-${esc(n.id)}">
+    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${!n.lane_id ? "lane-edit" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""} ${editingTitle === n.id && editingTitleScope === "cards" ? "title-editing" : ""}" id="card-${esc(n.id)}">
       <span class="stripe" style="background:${lm.color(n.lane_id)}"></span>
       <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
       <div class="row1">
         <span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span>
-        ${editingTitle === n.id
+        ${editingTitle === n.id && editingTitleScope === "cards"
           ? `<input class="title-edit" data-title-input="${esc(n.id)}" value="${esc(n.title)}">`
           : `<span class="title" data-title="${esc(n.id)}">${esc(n.title)}</span>`}
         <button class="save-desc" data-save-desc="${esc(n.id)}" aria-label="save description">${ICON_CHECK}</button>
@@ -1328,9 +1335,61 @@ function renderCards(){
       ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
       : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`)
     + notesCard;
+  });
   const waiting = nodes.filter(hardAttention).length;
   document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
   document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
+}
+
+/* Poll-safe editing: #cardlist is rebuilt whenever its signature changes, and
+   the signature includes every card's volatile live/attention state — so an
+   in-progress edit on one card would be wiped by any other card's state
+   change. Snapshot every edit field's value (and the focused one's cursor)
+   before the rebuild and restore afterwards. This is the input-preservation
+   invariant ("polling must never clobber user input") for the card editors;
+   the composer is a singleton outside all render regions and #chatdescinput
+   guards itself via dataset.node. */
+function cardEditKey(el){
+  if (el.dataset.titleInput != null) return "title:" + el.dataset.titleInput;
+  /* every card carries a (hidden) descbox; only the one being edited may
+     shadow a fresh server value */
+  if (el.dataset.descInput != null)
+    return editingDesc === el.dataset.descInput ? "desc:" + el.dataset.descInput : "";
+  if (el.dataset.laneNew != null) return "lanenew:" + el.dataset.laneNew;
+  if (el.matches("[data-lane-select]"))
+    return "lanesel:" + (el.closest("[data-card-lane]")?.dataset.cardLane || "");
+  return "";
+}
+function withCardEditsPreserved(render){
+  const root = $("#cardlist");
+  const saved = {};
+  let focusKey = "", selStart = 0, selEnd = 0;
+  root.querySelectorAll("input, textarea, select").forEach(el => {
+    const k = cardEditKey(el);
+    if (!k) return;
+    saved[k] = el.value;
+    if (el === document.activeElement){
+      focusKey = k;
+      if (el.setSelectionRange){
+        selStart = el.selectionStart ?? el.value.length;
+        selEnd = el.selectionEnd ?? el.value.length;
+      }
+    }
+  });
+  render();
+  if (!Object.keys(saved).length) return;
+  root.querySelectorAll("input, textarea, select").forEach(el => {
+    const k = cardEditKey(el);
+    if (!k || !(k in saved)) return;
+    if (el.value !== saved[k]) el.value = saved[k];
+    if (el.matches("[data-lane-select]")) syncLanePicker(el);
+    if (k === focusKey){
+      el.focus();
+      if (el.setSelectionRange && el.type !== "select-one"){
+        try { el.setSelectionRange(selStart, selEnd); } catch {}
+      }
+    }
+  });
 }
 $("#cardtabs").addEventListener("click", e => {
   const b = e.target.closest("[data-tab]");
@@ -1647,14 +1706,21 @@ function updateLocalNode(next){
   const cur = next?.id && nodeById(next.id);
   if (cur) Object.assign(cur, next);
 }
+function titleEditorRoot(){
+  return editingTitleScope === "chat" ? "#chathead " : "#cardlist ";
+}
 function focusTitleEditorNow(id){
-  const input = document.querySelector(`[data-title-input="${CSS.escape(id)}"]`);
+  /* scope the lookup: on iPhone the card list is hidden while the chat is
+     open — focusing its (invisible) input would edit into the void */
+  const input = document.querySelector(`${titleEditorRoot()}[data-title-input="${CSS.escape(id)}"]`)
+    || document.querySelector(`[data-title-input="${CSS.escape(id)}"]`);
   if (input){ input.focus(); input.select(); }
 }
 function focusTitleEditor(id){ setTimeout(() => focusTitleEditorNow(id), 0); }
-function startTitleEdit(id){
+function startTitleEdit(id, scope){
   if (!id || id === "NOTES" || !nodeById(id)) return;
   editingTitle = id;
+  editingTitleScope = scope || "cards";
   actionCard = "";
   editingDesc = "";
   cardsSig = ""; chatSig = "";
@@ -1664,6 +1730,7 @@ function startTitleEdit(id){
 function cancelTitleEdit(id){
   if (editingTitle !== id) return;
   editingTitle = "";
+  editingTitleScope = "";
   cardsSig = ""; chatSig = "";
   renderCards(); renderChatHead();
 }
@@ -1671,12 +1738,14 @@ async function commitTitleEdit(id, raw){
   if (editingTitle !== id) return;
   const title = (raw || "").trim();
   if (!title){
-    alert("Title must not be empty.");
-    focusTitleEditor(id);
+    /* an emptied title is a cancel, not an error: an alert here loops with
+       the blur that triggered the commit (no escape on touch keyboards) */
+    cancelTitleEdit(id);
     return;
   }
   const cur = nodeById(id);
   editingTitle = "";
+  editingTitleScope = "";
   cardsSig = ""; chatSig = "";
   renderCards(); renderChatHead();
   if (cur && cur.title === title) return;
@@ -1701,9 +1770,9 @@ function hashStr(s){
 }
 
 function select(id){
-  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; }
+  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = -1; }
   sel = id;
-  editingChatDesc = false;
+  editingChatDesc = false;   /* a pending "use as description" is discarded here */
   chatDetailSavedUntil = 0;
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
@@ -1731,10 +1800,15 @@ function renderChatHead(){
   }
   const n = nodeById(sel);
   toggle.hidden = !n;
-  if (n && editingTitle === n.id)
-    $("#chattitle").innerHTML = `<input class="title-edit" data-title-input="${esc(n.id)}" value="${esc(n.title)}">`;
-  else
+  if (n && editingTitle === n.id && editingTitleScope === "chat"){
+    /* renderChatHead runs on every poll tick — recreating the input each
+       time would clobber the user's in-progress edit (invariant). Build it
+       once; it carries its own state until commit/cancel. */
+    if (!$("#chattitle").querySelector(`[data-title-input="${CSS.escape(n.id)}"]`))
+      $("#chattitle").innerHTML = `<input class="title-edit" data-title-input="${esc(n.id)}" value="${esc(n.title)}">`;
+  } else {
     $("#chattitle").textContent = n ? n.title : "scimux";
+  }
   $("#chatmission").textContent = "";
   $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
   $("#chatdot").style.background = n && !hardAttention(n) && !["exited","unavailable"].includes(n.live)
@@ -1967,6 +2041,7 @@ async function refreshChat(){
            : "") +
         `</div>`
       : "");
+  renderBubbleActions();                    /* re-attach the tapped bubble's icon row */
   if (atBottom || forcePeek) el.scrollTop = el.scrollHeight;
   const pk = el.querySelector(".peek");
   if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
@@ -2029,7 +2104,53 @@ $("#keyrow").addEventListener("click", async e => {
 $("#msgs").addEventListener("scroll", () =>
   $("#chathead").classList.toggle("compact", $("#msgs").scrollTop > 30));
 
-/* per-bubble copy (and, for notes, delete) */
+/* bubble tap actions: one tap on a bubble toggles a small icon row below it
+   (long-press keeps the full context sheet). The row is client-only DOM,
+   re-attached by refreshChat after every #msgs rebuild. */
+let tappedTurn = -1;
+function renderBubbleActions(){
+  document.querySelectorAll("#msgs .bubactions").forEach(x => x.remove());
+  if (tappedTurn < 0 || sel === "NOTES") return;
+  const turnEl = document.querySelector(`#msgs .turn[data-i="${tappedTurn}"]`);
+  if (!turnEl || !lastTurns[tappedTurn]){ tappedTurn = -1; return; }
+  const row = document.createElement("div");
+  row.className = "bubactions";
+  row.innerHTML =
+    `<button data-bact="fork" aria-label="new activity from here" title="New activity from here">${ICON_FORGEJO}</button>` +
+    `<button data-bact="desc" aria-label="use as description" title="Use as description">${ICON_INFO}</button>`;
+  turnEl.after(row);
+}
+/* forkFromTurn: shared by the tap icon and the long-press sheet — prefill a
+   fresh-context fork from this message as evidence */
+function forkFromTurn(text){
+  ncParent = sel;
+  ncRationale = (text || "").split("\n")[0].slice(0, 140);
+  setNewActivitySubmitting(false);
+  $("#nc_title").value = "Follow-up";
+  $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
+  prepareNewActivityLane();
+  openSheet("#newchat");
+}
+/* useTurnAsDescription: open the chat details in description-edit mode seeded
+   with this message; nothing is saved until the ✓ — switching to another
+   activity discards the pending text (select() leaves edit mode). */
+function useTurnAsDescription(text){
+  const n = nodeById(sel);
+  if (!n) return;
+  chatDetailsOpen = true;
+  editingChatDesc = true;
+  const input = $("#chatdescinput");
+  input.value = text || "";
+  input.dataset.node = n.id;
+  chatSig = "";
+  renderChatHead();
+  setTimeout(() => {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, 0);
+}
+
+/* per-bubble copy (and, for notes, delete) + tap actions */
 $("#msgs").addEventListener("click", e => {
   const tb = e.target.closest(".trashbtn");
   if (tb && sel === "NOTES"){        /* notes only: remove the entry, keep the store */
@@ -2040,11 +2161,32 @@ $("#msgs").addEventListener("click", e => {
     return;
   }
   const cb = e.target.closest(".copybtn");
-  if (!cb) return;
-  const src = sel === "NOTES" ? (UI.notes || [])[+cb.dataset.i] : lastTurns[+cb.dataset.i];
-  if (src) copyText(src.text || "");
-  cb.innerHTML = "&#10003;";
-  setTimeout(() => { cb.innerHTML = ICON_COPY; }, 900);
+  if (cb){
+    const src = sel === "NOTES" ? (UI.notes || [])[+cb.dataset.i] : lastTurns[+cb.dataset.i];
+    if (src) copyText(src.text || "");
+    cb.innerHTML = "&#10003;";
+    setTimeout(() => { cb.innerHTML = ICON_COPY; }, 900);
+    return;
+  }
+  const ba = e.target.closest("[data-bact]");
+  if (ba){
+    const turn = lastTurns[tappedTurn];
+    tappedTurn = -1;
+    renderBubbleActions();
+    if (!turn) return;
+    if (ba.dataset.bact === "fork") forkFromTurn(turn.text);
+    /* no confirm: nothing is saved until the ✓, and switching away discards —
+       the edit mode itself is the confirmation (HIG: confirmations are for
+       destructive actions) */
+    else if (ba.dataset.bact === "desc") useTurnAsDescription(turn.text);
+    return;
+  }
+  const turnEl = e.target.closest(".turn");
+  if (turnEl && sel !== "NOTES" && !e.target.closest("a, button")){
+    const i = +turnEl.dataset.i;
+    tappedTurn = tappedTurn === i ? -1 : i;
+    renderBubbleActions();
+  }
 });
 
 /* ---- long-press (HIG context-menu idiom): delegated helper ----
@@ -2092,8 +2234,8 @@ function longpress(container, selector, fn, opts = {}){
 }
 
 /* long-press a title wherever the Activity title is shown -> edit it in place */
-longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title), { preventNative: true });
-longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel), { preventNative: true });
+longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title, "cards"), { preventNative: true });
+longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"), { preventNative: true });
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
@@ -2154,46 +2296,31 @@ $("#cardlist").addEventListener("touchend", e => {
   }
 }, { passive: true });
 
-/* long-press a message bubble:
-   in Notes → forward into a chat's draft; elsewhere → copy, or start a new
-   activity (fresh-context fork) from this evidence */
+/* long-press a message bubble: Notes only — forward the note into a chat's
+   draft. Regular chat bubbles have no long-press: the tap-revealed icon row
+   already carries the same actions (fork, use-as-description; copy has its
+   own per-bubble affordance). */
 let ncParent = "", ncRationale = "";
 longpress($("#msgs"), ".turn", el => {
-  if (sel === "NOTES"){
-    const note = (UI.notes || [])[+el.dataset.i];
-    if (!note) return;
-    const lm = laneModel();
-    $("#sendto_list").innerHTML = orderedNodes().map(n => `
-      <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
-        <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${lm.color(n.lane_id)}"></span>
-        <span>${esc(n.title)}</span>
-      </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
-    $("#sendto_list").onclick = ev => {
-      const b = ev.target.closest("[data-fwd]");
-      if (!b) return;
-      const tgt = b.dataset.fwd;
-      const prev = localStorage.getItem("scimux-draft:" + tgt) || "";
-      localStorage.setItem("scimux-draft:" + tgt, (prev ? prev + "\n\n" : "") + (note.text || ""));
-      closeSheets(); select(tgt); if (!isDesktop()) setLevel(1);
-      $("#prompt").focus();
-    };
-    openSheet("#sendto");
-    return;
-  }
-  const turn = lastTurns[+el.dataset.i];
-  if (!turn) return;
-  $("#ma_copy").onclick = () => { copyText(turn.text); closeSheets(); };
-  $("#ma_fork").onclick = () => {
-    closeSheets();
-    ncParent = sel;
-    ncRationale = turn.text.split("\n")[0].slice(0, 140);
-    setNewActivitySubmitting(false);
-    $("#nc_title").value = "Follow-up";
-    $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
-    prepareNewActivityLane();
-    openSheet("#newchat");
+  if (sel !== "NOTES") return;
+  const note = (UI.notes || [])[+el.dataset.i];
+  if (!note) return;
+  const lm = laneModel();
+  $("#sendto_list").innerHTML = orderedNodes().map(n => `
+    <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
+      <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${lm.color(n.lane_id)}"></span>
+      <span>${esc(n.title)}</span>
+    </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
+  $("#sendto_list").onclick = ev => {
+    const b = ev.target.closest("[data-fwd]");
+    if (!b) return;
+    const tgt = b.dataset.fwd;
+    const prev = localStorage.getItem("scimux-draft:" + tgt) || "";
+    localStorage.setItem("scimux-draft:" + tgt, (prev ? prev + "\n\n" : "") + (note.text || ""));
+    closeSheets(); select(tgt); if (!isDesktop()) setLevel(1);
+    $("#prompt").focus();
   };
-  openSheet("#msgact");
+  openSheet("#sendto");
 });
 
 /* ---------- prompt bar (singleton; drafts survive everything) ---------- */
@@ -2213,15 +2340,18 @@ function setPromptText(s){
 function clearPrompt(){
   setPromptText("");
 }
-let composerBusy = false;
+/* composerBusy swaps the send button for a stop button while the agent works.
+   Typing stays enabled the whole time: liveness is mechanical and can flap,
+   and disabling the field would clobber a draft in progress (invariant) —
+   Claude Code even accepts queued input mid-turn. Enter still sends; a
+   structured transport that refuses a mid-turn send answers 409 and the
+   draft is preserved by sendPrompt's failure path. */
+let composerBusy = null;
 function setComposerBusy(active){
+  if (composerBusy === !!active) return;   /* poll-safe: no DOM churn per tick */
   composerBusy = !!active;
-  const bar = $("#promptbar");
-  const prompt = $("#prompt");
   const btn = $("#sendbtn");
-  bar.classList.toggle("busy", composerBusy);
-  prompt.contentEditable = composerBusy ? "false" : "true";
-  prompt.setAttribute("aria-disabled", composerBusy ? "true" : "false");
+  $("#promptbar").classList.toggle("busy", composerBusy);
   btn.classList.toggle("stop", composerBusy);
   btn.innerHTML = composerBusy ? ICON_STOP : ICON_SEND;
   btn.setAttribute("aria-label", composerBusy ? "stop agent" : "send");
@@ -2242,8 +2372,16 @@ $("#prompt").addEventListener("keydown", e => {
   if (isPhoneTouch()) return;
   if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
     e.preventDefault();
-    if (!composerBusy) sendPrompt();
+    sendPrompt();
   }
+});
+/* drops can carry live HTML into the contenteditable (paste is already
+   sanitized above) — force plain text */
+$("#prompt").addEventListener("beforeinput", e => {
+  if (e.inputType !== "insertFromDrop") return;
+  e.preventDefault();
+  const text = e.dataTransfer?.getData("text/plain");
+  if (text) document.execCommand("insertText", false, text);
 });
 $("#sendbtn").addEventListener("click", () => composerBusy ? interruptPrompt() : sendPrompt());
 async function interruptPrompt(){
@@ -2254,11 +2392,14 @@ async function interruptPrompt(){
     chatSig = "";
     setTimeout(tick, 250);
   } catch (err) {
-    alert(err.message);
+    /* a stop tap racing the turn's natural end 409s ("no turn is in
+       flight") — that is the outcome the user wanted, not an error */
+    if (err.status !== 409) alert(err.message);
+    chatSig = "";
+    refreshChat();
   }
 }
 async function sendPrompt(){
-  if (composerBusy) return;
   const ta = $("#prompt"), text = promptText().trim();
   if (!text || !sel) return;
   if (sel === "NOTES"){              /* notes never leave scimux's own store */
@@ -2282,15 +2423,11 @@ async function sendPrompt(){
        delivery status and offers a recheck, so the draft stays cleared */
     setTimeout(tick, 400);
   } catch (err) {
-    if (err.message && err.message.includes("still in flight")){
-      /* a send is already outstanding for this node — nothing was lost,
-         restore the draft so the operator can retry once it resolves */
-    } else if (err.message && err.message.includes("unconfirmed")){
-      /* previous send is unresolved; hold this text as a draft until the
-         operator checks the terminal and resumes sending */
-    } else {
-      alert(err.message);
-    }
+    /* 409s are turn-state conflicts, not failures: a send already in
+       flight, a previous send unconfirmed, or a structured agent mid-turn.
+       Nothing was lost — hold the text as a draft and let the operator
+       retry once the conflict resolves. Real failures still alert. */
+    if (err.status !== 409) alert(err.message);
     /* nothing typed is ever lost — restored under the node it was written
        for, and merged in front of anything typed while the send was pending
        rather than overwriting it */
@@ -2326,7 +2463,7 @@ document.addEventListener("touchend", e => {
   const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
   const horiz = Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy);
   if ((editingChatDesc || editingTitle === sel) && horiz && dx < 0){
-    if (editingTitle === sel) editingTitle = "";
+    if (editingTitle === sel){ editingTitle = ""; editingTitleScope = ""; }
     editingChatDesc = false;
     chatSig = "";
     cardsSig = "";

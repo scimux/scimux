@@ -32,6 +32,10 @@ type fakeTmux struct {
 	alive      map[string]bool // has-session result per exact name
 	capture    string          // capture-pane output
 	captureErr bool
+	// captureAfterEnter, when set, is returned by capture-pane once an Enter
+	// keypress was sent — it lets SendAck observe a pane "reaction".
+	captureAfterEnter string
+	enterSent         bool
 }
 
 func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (string, error) {
@@ -55,7 +59,15 @@ func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (strin
 		if f.captureErr {
 			return "", errors.New("capture failed")
 		}
+		if f.enterSent && f.captureAfterEnter != "" {
+			return f.captureAfterEnter, nil
+		}
 		return f.capture, nil
+	case "send-keys":
+		if lastArg(args) == "Enter" {
+			f.enterSent = true
+		}
+		return "", nil
 	case "display-message":
 		return "12345", nil // pane_pid / pane_current_path stand-in
 	default:
@@ -87,21 +99,22 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 	t.Helper()
 	dir := t.TempDir()
 	return &app{
-		byID:       map[string]*Node{},
-		live:       map[string]string{},
-		attn:       map[string]string{},
-		prevCap:    map[string]string{},
-		lastChg:    map[string]time.Time{},
-		tailers:    map[string]*transcript.Tailer{},
-		pathClaims: map[string]bool{},
-		chatMark:   map[string]chatMark{},
-		staleChat:  map[string]bool{},
-		sendState:  map[string]string{},
-		server:     tmuxsession.NewServerWithRunner("testsock", f.run),
-		acp:        acpManager{acp.NewManager(filepath.Join(dir, "acp"))},
-		codex:      codexManager{codex.NewManager(filepath.Join(dir, "codex"))},
-		storePath:  filepath.Join(dir, "nodes.jsonl"),
-		home:       dir,
+		byID:        map[string]*Node{},
+		live:        map[string]string{},
+		attn:        map[string]string{},
+		prevCap:     map[string]string{},
+		lastChg:     map[string]time.Time{},
+		activeSince: map[string]time.Time{},
+		tailers:     map[string]*transcript.Tailer{},
+		pathClaims:  map[string]bool{},
+		chatMark:    map[string]chatMark{},
+		staleChat:   map[string]bool{},
+		sendState:   map[string]string{},
+		server:      tmuxsession.NewServerWithRunner("testsock", f.run),
+		acp:         acpManager{acp.NewManager(filepath.Join(dir, "acp"))},
+		codex:       codexManager{codex.NewManager(filepath.Join(dir, "codex"))},
+		storePath:   filepath.Join(dir, "nodes.jsonl"),
+		home:        dir,
 	}
 }
 
@@ -931,5 +944,182 @@ func TestCodexManagerConflictAndPending(t *testing.T) {
 	// Pending on a node with no session must return ok=false.
 	if title, opts, ok := cm.Pending("ghost"); ok {
 		t.Errorf("Pending(ghost) = (%q, %v, true), want ok=false", title, opts)
+	}
+}
+
+// TestMaybeRelinkTranscriptAfterSessionRollover: a /clear or relaunch inside
+// the pane starts a new session file; once the pane finishes a working phase
+// the stale link never carried, discovery must re-run and relink — otherwise
+// the chat freezes on the old conversation forever (restarts replay the store
+// and change nothing).
+func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(proj, "old-session.jsonl")
+	newPath := filepath.Join(proj, "new-session.jsonl")
+	for _, p := range []string{oldPath, newPath} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj", Transcript: oldPath, SessionID: "old-session"}
+	a.nodes = append(a.nodes, n)
+	a.byID["c1"] = n
+	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+
+	a.maybeRelinkTranscript(n)
+
+	if n.Transcript != newPath {
+		t.Fatalf("transcript = %q, want relink to %q", n.Transcript, newPath)
+	}
+	if n.SessionID != "new-session" {
+		t.Fatalf("session id = %q, want new-session", n.SessionID)
+	}
+	b, err := os.ReadFile(a.storePath)
+	if err != nil || !strings.Contains(string(b), newPath) {
+		t.Fatalf("relink not persisted to store: %v\n%s", err, b)
+	}
+}
+
+// A linked transcript that carried the phase (mtime after phase start) is
+// healthy — a newer sibling session file must not steal the link.
+func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(proj, "linked.jsonl")
+	other := filepath.Join(proj, "other.jsonl")
+	for _, p := range []string{linked, other} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj", Transcript: linked}
+	a.nodes = append(a.nodes, n)
+	a.byID["c1"] = n
+	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+
+	a.maybeRelinkTranscript(n)
+
+	if n.Transcript != linked {
+		t.Fatalf("healthy link was stolen: %q", n.Transcript)
+	}
+}
+
+// TestHandleSendInterruptTmux: the tmux interrupt is a remote keypress and
+// follows the SendKey contract — Escape (whitelisted, Claude Code's turn
+// interrupt), recorded in the store with pane evidence. An unconfirmed prior
+// send is withdrawn; a send still in flight keeps its state.
+func TestHandleSendInterruptTmux(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}, capture: "esc to interrupt"}
+	a := newTestApp(t, f)
+	if rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`); rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	a.sendState[id] = "unconfirmed"
+
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/nodes/"+id+"/send/interrupt", nil)
+		req.SetPathValue("id", id)
+		w := httptest.NewRecorder()
+		a.handleSendInterrupt(w, req)
+		return w
+	}
+	if w := post(); w.Code != 200 {
+		t.Fatalf("interrupt: %d %s", w.Code, w.Body.String())
+	}
+
+	var sentKey string
+	f.mu.Lock()
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "send-keys" {
+			sentKey = c[len(c)-1]
+		}
+	}
+	f.mu.Unlock()
+	if sentKey != "Escape" {
+		t.Fatalf("interrupt key = %q, want Escape", sentKey)
+	}
+	b, err := os.ReadFile(a.storePath)
+	if err != nil || !strings.Contains(string(b), `"key":"Escape"`) || !strings.Contains(string(b), "interrupt: ") {
+		t.Fatalf("interrupt not audited: %v\n%s", err, b)
+	}
+	if _, ok := a.sendState[id]; ok {
+		t.Fatal("unconfirmed send should be withdrawn by the interrupt")
+	}
+
+	a.sendState[id] = "submitting"
+	if w := post(); w.Code != 200 {
+		t.Fatalf("interrupt while submitting: %d", w.Code)
+	}
+	if a.sendState[id] != "submitting" {
+		t.Fatalf("in-flight send state = %q, want submitting kept", a.sendState[id])
+	}
+}
+
+// TestHandleSendClearRetiresTranscript: /clear delivered through scimux is a
+// known session rollover — the transcript link and session id are retired
+// (persisted as new records), so the UI degrades to peek immediately and the
+// phase-end relink can adopt the fresh session file. Ordinary prompts must
+// not retire anything.
+func TestHandleSendClearRetiresTranscript(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}, capture: "idle", captureAfterEnter: "cleared"}
+	a := newTestApp(t, f)
+	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
+	if rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`); rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	n := a.nodes[0]
+	tx := filepath.Join(t.TempDir(), "sess.jsonl")
+	if err := os.WriteFile(tx, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n.Transcript, n.SessionID = tx, "sess"
+
+	send := func(text string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":`+text+`}`))
+		req.SetPathValue("id", n.ID)
+		w := httptest.NewRecorder()
+		a.handleSend(w, req)
+		return w
+	}
+
+	if w := send(`"  /clear  "`); w.Code != 200 || !strings.Contains(w.Body.String(), "acknowledged") {
+		t.Fatalf("send /clear: %d %s", w.Code, w.Body.String())
+	}
+	if n.Transcript != "" || n.SessionID != "" {
+		t.Fatalf("link not retired: transcript=%q session=%q", n.Transcript, n.SessionID)
+	}
+
+	// The retirement must survive a restart (replay).
+	a2 := &app{byID: map[string]*Node{}, storePath: a.storePath}
+	if err := a2.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a2.byID[n.ID]; got == nil || got.Transcript != "" || got.SessionID != "" {
+		t.Fatalf("replay resurrected the link: %+v", got)
+	}
+
+	// An ordinary prompt never retires a link.
+	n.Transcript, n.SessionID = tx, "sess"
+	if w := send(`"hello"`); w.Code != 200 {
+		t.Fatalf("send hello: %d %s", w.Code, w.Body.String())
+	}
+	if n.Transcript != tx || n.SessionID != "sess" {
+		t.Fatalf("ordinary send retired the link: transcript=%q session=%q", n.Transcript, n.SessionID)
 	}
 }

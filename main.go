@@ -99,7 +99,12 @@ type app struct {
 	attn    map[string]string // node id -> ""|"approval"|"question"|"inspect"
 	prevCap map[string]string
 	lastChg map[string]time.Time
-	tailers map[string]*transcript.Tailer
+	// activeSince: when the pane last entered the mechanically active state —
+	// the start of the current/most recent working phase. Used to judge at the
+	// active→quiet transition whether the linked transcript carried the phase
+	// (mtime after the phase start) or has gone dead (session rollover).
+	activeSince map[string]time.Time
+	tailers     map[string]*transcript.Tailer
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool
@@ -287,6 +292,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.attn, id)
 	delete(a.prevCap, id)
 	delete(a.lastChg, id)
+	delete(a.activeSince, id)
 	delete(a.tailers, id)
 	delete(a.chatMark, id)
 	delete(a.staleChat, id)
@@ -642,6 +648,9 @@ func (a *app) poll() {
 			continue
 		}
 		s := a.server.Session(n.ID)
+		a.mu.Lock()
+		prev := a.live[n.ID] // not yet overwritten this tick
+		a.mu.Unlock()
 		state := "exited"
 		if s.Alive() {
 			cap, err := s.Capture()
@@ -656,6 +665,12 @@ func (a *app) poll() {
 				} else {
 					state = "quiet"
 				}
+				if state == "active" && prev != "active" {
+					if a.activeSince == nil {
+						a.activeSince = map[string]time.Time{}
+					}
+					a.activeSince[n.ID] = time.Now()
+				}
 				a.mu.Unlock()
 			} else {
 				state = "unavailable"
@@ -663,9 +678,6 @@ func (a *app) poll() {
 		}
 		attn := ""
 		if state == "quiet" {
-			a.mu.Lock()
-			prev := a.live[n.ID] // not yet overwritten this tick
-			a.mu.Unlock()
 			tl := a.tailerFor(n)
 			if tl != nil {
 				tl.Poll()
@@ -712,7 +724,91 @@ func (a *app) poll() {
 		a.live[n.ID] = state
 		a.attn[n.ID] = attn
 		a.mu.Unlock()
+		// A whole working phase just ended: if the linked transcript never
+		// carried it, the pane's claude has moved to a new session file
+		// (/clear, relaunch) — re-run discovery. Mechanical signal only.
+		if n.Agent == "claude" && prev == "active" && state == "quiet" {
+			a.maybeRelinkTranscript(n)
+		}
 		a.discoverTranscript(n)
+	}
+}
+
+// maybeRelinkTranscript re-runs transcript discovery for a tmux claude node
+// whose pane just finished a working phase the linked transcript did not
+// carry. Claude Code starts a new session file on /clear or a relaunch inside
+// the same pane; the old link then points at a file that stops growing, the
+// chat silently freezes on the last linked conversation, and — because the
+// store is replayed at startup — restarting scimux does not recover. The
+// judgment is mechanical (pane went active→quiet while the linked file's
+// mtime stayed before the phase start); a wrong or missing guess leaves peek
+// and send working exactly as at adoption. Also links a node that never got
+// a transcript (adoption guess failed) once its pane completes a phase.
+func (a *app) maybeRelinkTranscript(n *Node) {
+	a.mu.Lock()
+	cur := n.Transcript
+	since, ok := a.activeSince[n.ID]
+	a.mu.Unlock()
+	if !ok {
+		return
+	}
+	// Transcript writes can precede the first observed pane change by up to a
+	// poll tick; pad the phase-start watermark.
+	since = since.Add(-10 * time.Second)
+	if cur != "" {
+		if st, err := os.Stat(cur); err == nil && st.ModTime().After(since) {
+			return // the linked file carried this phase; the link is healthy
+		}
+	}
+	// Prefer the pane process's own session id (deterministic even with many
+	// sessions in one directory); fall back to the session file this phase
+	// just wrote. The fallback is ambiguous only when two panes in the same
+	// directory finish concurrently, and path exclusivity bounds that damage.
+	var path, sid string
+	if pid, err := a.server.Session(n.ID).PanePID(); err == nil {
+		if got := sessionFromPane(pid, sessionArgFromCmdline); got != "" {
+			if p, ok := transcript.FindClaudeTranscript(a.home, got); ok {
+				path, sid = p, got
+			}
+		}
+	}
+	if path == "" {
+		if p, s, ok := transcript.FindClaudeNewestInDirSince(a.home, n.Dir, since); ok {
+			path, sid = p, s
+		}
+	}
+	if path == "" || path == cur {
+		return
+	}
+	a.mu.Lock()
+	if a.pathClaimedLocked(path, n.ID) {
+		a.mu.Unlock()
+		return
+	}
+	a.pathClaims[path] = true
+	a.mu.Unlock()
+	// Record first, publish second — same contract as discoverTranscript.
+	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: path}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: relink transcript for %s: %v (will retry)\n", n.ID, err)
+		a.mu.Lock()
+		delete(a.pathClaims, path)
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Lock()
+	n.Transcript = path
+	var cp Node
+	if sid != "" && sid != n.SessionID {
+		n.SessionID = sid
+		cp = *n
+	}
+	delete(a.pathClaims, path)
+	a.mu.Unlock()
+	// Persist the corrected session id as a fresh node record (append-only:
+	// corrections are new records). Best-effort — the transcript record above
+	// already carries the link across restarts.
+	if cp.ID != "" {
+		_ = a.appendRecord(storeRecord{Type: "node", Node: &cp})
 	}
 }
 
@@ -1271,11 +1367,50 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		a.sendState[n.ID] = "unconfirmed"
 	}
 	a.mu.Unlock()
+	// /clear delivered through scimux is a *known* session rollover: Claude
+	// Code starts a fresh session file and the linked transcript goes dead.
+	// Retire the link right away — the UI degrades honestly to peek (the old
+	// conversation is gone from the pane too), and the phase-end relink picks
+	// up the new session file after the next turn. A /clear typed directly
+	// into an attached pane still relies on the mtime heuristic.
+	if acked && n.Agent == "claude" && strings.TrimSpace(body.Text) == "/clear" {
+		a.retireTranscript(n)
+	}
 	if !acked {
 		writeJSON(w, map[string]string{"status": "unconfirmed", "text": body.Text})
 		return
 	}
 	writeJSON(w, map[string]string{"status": "acknowledged"})
+}
+
+// retireTranscript unlinks a node's transcript (and session id) after a known
+// session rollover. Corrections are new records: an empty-path transcript
+// record retires the link across restarts (the latest transcript record wins
+// at replay), and a node record persists the cleared session id so a young
+// node's discovery cannot resurrect the dead file. Record first, publish
+// second, as everywhere.
+func (a *app) retireTranscript(n *Node) {
+	a.mu.Lock()
+	if n.Transcript == "" && n.SessionID == "" {
+		a.mu.Unlock()
+		return
+	}
+	cp := *n
+	cp.Transcript, cp.SessionID = "", ""
+	a.mu.Unlock()
+	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: ""}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: retire transcript for %s: %v\n", n.ID, err)
+		return
+	}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: &cp}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: retire session id for %s: %v\n", n.ID, err)
+	}
+	a.mu.Lock()
+	n.Transcript, n.SessionID = "", ""
+	delete(a.tailers, n.ID)
+	delete(a.chatMark, n.ID)
+	delete(a.staleChat, n.ID)
+	a.mu.Unlock()
 }
 
 // handleSendResolve is the supervisor's "I checked (or fixed) this in the
@@ -1316,12 +1451,35 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"ok": "interrupted"})
 		return
 	}
-	if err := a.server.Session(n.ID).Interrupt(); err != nil {
+	// tmux path: the interrupt is a remote keypress and follows the SendKey
+	// contract — whitelisted key only (Escape is Claude Code's documented
+	// turn interrupt; C-c on an idle pane clears input and a double press
+	// exits the CLI), recorded in the store with pane evidence. Evidence
+	// capture is a prerequisite, exactly as in handleKey.
+	s := a.server.Session(n.ID)
+	cap, err := s.Capture()
+	if err != nil {
+		http.Error(w, "refusing interrupt without pane evidence (capture failed): "+err.Error(), 500)
+		return
+	}
+	excerpt := lastLines(cap, 12)
+	if err := s.SendKey("Escape"); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: "Escape",
+		Excerpt: "interrupt: " + excerpt, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: interrupt sent to %s but audit record failed: %v\n", n.ID, err)
+		http.Error(w, "the interrupt was sent, but the audit record failed: "+err.Error(), 500)
+		return
+	}
+	// Interrupting also withdraws an unconfirmed prior send — the supervisor
+	// has taken over. A send still in flight ("submitting") keeps its state:
+	// clearing it here would let a second send race the in-flight paste.
 	a.mu.Lock()
-	delete(a.sendState, n.ID)
+	if a.sendState[n.ID] != "submitting" {
+		delete(a.sendState, n.ID)
+	}
 	a.mu.Unlock()
 	writeJSON(w, map[string]string{"ok": "interrupted"})
 }
@@ -1777,22 +1935,23 @@ func main() {
 	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
 	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
 	a := &app{
-		byID:       map[string]*Node{},
-		live:       map[string]string{},
-		attn:       map[string]string{},
-		prevCap:    map[string]string{},
-		lastChg:    map[string]time.Time{},
-		tailers:    map[string]*transcript.Tailer{},
-		pathClaims: map[string]bool{},
-		chatMark:   map[string]chatMark{},
-		staleChat:  map[string]bool{},
-		sendState:  map[string]string{},
-		server:     tmuxsession.NewServer(*socket),
-		acp:        acpManager{acp.NewManager(filepath.Join(*data, "acp"))},
-		codex:      codexManager{codex.NewManager(filepath.Join(*data, "codex"))},
-		storePath:  filepath.Join(*data, "nodes.jsonl"),
-		uiPath:     filepath.Join(*data, "ui.json"),
-		home:       home,
+		byID:        map[string]*Node{},
+		live:        map[string]string{},
+		attn:        map[string]string{},
+		prevCap:     map[string]string{},
+		lastChg:     map[string]time.Time{},
+		activeSince: map[string]time.Time{},
+		tailers:     map[string]*transcript.Tailer{},
+		pathClaims:  map[string]bool{},
+		chatMark:    map[string]chatMark{},
+		staleChat:   map[string]bool{},
+		sendState:   map[string]string{},
+		server:      tmuxsession.NewServer(*socket),
+		acp:         acpManager{acp.NewManager(filepath.Join(*data, "acp"))},
+		codex:       codexManager{codex.NewManager(filepath.Join(*data, "codex"))},
+		storePath:   filepath.Join(*data, "nodes.jsonl"),
+		uiPath:      filepath.Join(*data, "ui.json"),
+		home:        home,
 	}
 	if err := a.loadStore(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
@@ -1823,9 +1982,13 @@ func main() {
 	go detectAgents()
 
 	mux := http.NewServeMux()
-	if assets, err := fs.Sub(webFS, "web/assets"); err == nil {
-		mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+	// The assets tree is compiled in; a Sub failure means the embed layout
+	// changed and must fail loudly at startup, not silently drop the route.
+	assets, err := fs.Sub(webFS, "web/assets")
+	if err != nil {
+		panic("embedded web/assets missing: " + err.Error())
 	}
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := webFS.ReadFile("web/index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

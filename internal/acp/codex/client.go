@@ -29,6 +29,14 @@ type Client struct {
 	approve  ApprovalFunc
 	turnDone chan turnResult
 	closed   bool
+	// curTurnID is the server-assigned id of the turn in flight (from the
+	// turn/start result, or the turn/started notification for servers that
+	// respond late). turn/interrupt requires it; cleared when the turn ends.
+	// turnIDReady closes once the id is known (or the turn ends without one),
+	// so an interrupt racing the turn/start response can wait instead of
+	// silently skipping the wire call.
+	curTurnID   string
+	turnIDReady chan struct{}
 	// deltas accumulates item/agentMessage/delta fragments keyed by item id.
 	// Flushed on item/completed when the completed item carries no text itself
 	// (some server versions stream the full answer as deltas and emit an empty
@@ -195,22 +203,122 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 	// client therefore does not emit the user event itself, and onNotify skips
 	// the server's userMessage echo.
 
-	_, err := c.callCtx(ctx, "turn/start", map[string]any{
-		"threadId": threadID,
-		"input":    []map[string]any{{"type": "text", "text": text}},
-	})
-	if err != nil {
-		return err
+	c.mu.Lock()
+	c.turnIDReady = make(chan struct{})
+	c.mu.Unlock()
+
+	// turn/start runs detached from ctx so a cancel racing the response still
+	// publishes the turn id (setTurnID) — an interrupt needs it to address the
+	// turn that may already be running server-side.
+	type startRes struct {
+		raw json.RawMessage
+		err error
+	}
+	startCh := make(chan startRes, 1)
+	go func() {
+		raw, err := c.peer.call("turn/start", map[string]any{
+			"threadId": threadID,
+			"input":    []map[string]any{{"type": "text", "text": text}},
+		})
+		if err == nil {
+			c.setTurnID(turnIDFromResult(raw))
+		}
+		startCh <- startRes{raw, err}
+	}()
+
+	// cancelAndSettle: abandoning the local wait alone would leave codex
+	// executing the turn server-side while scimux reports it as over — tell
+	// the server to stop (turn/interrupt), then give it a moment to confirm
+	// via turn/completed so a follow-up Send cannot collide with a live turn.
+	cancelAndSettle := func() error {
+		c.interruptTurn(threadID)
+		select {
+		case <-done:
+		case <-time.After(interruptSettle):
+		case <-c.done:
+		}
+		return ctx.Err()
+	}
+
+	select {
+	case r := <-startCh:
+		if r.err != nil {
+			return r.err
+		}
+	case <-ctx.Done():
+		return cancelAndSettle()
+	case <-c.done:
+		return fmt.Errorf("peer closed during turn")
 	}
 
 	select {
 	case r := <-done:
 		return r.err
 	case <-ctx.Done():
-		return ctx.Err()
+		return cancelAndSettle()
 	case <-c.done:
 		return fmt.Errorf("peer closed during turn")
 	}
+}
+
+// interruptSettle bounds how long an interrupted RunTurn waits for the server
+// to confirm the turn is over before reporting the cancellation anyway.
+var interruptSettle = 5 * time.Second
+
+// interruptTurn asks the app-server to stop the running turn (turn/interrupt
+// requires both ids). If the id is not known yet — the interrupt raced the
+// turn/start response — it waits for the id (or the turn's end, or the peer's
+// death) before giving up. Best-effort beyond that: without an id there is
+// nothing addressable to interrupt.
+func (c *Client) interruptTurn(threadID string) {
+	c.mu.Lock()
+	turnID, ready := c.curTurnID, c.turnIDReady
+	c.mu.Unlock()
+	if turnID == "" && ready != nil {
+		select {
+		case <-ready:
+		case <-time.After(interruptSettle):
+		case <-c.done:
+		}
+		c.mu.Lock()
+		turnID = c.curTurnID
+		c.mu.Unlock()
+	}
+	if turnID == "" {
+		return
+	}
+	ictx, cancel := context.WithTimeout(context.Background(), interruptSettle)
+	defer cancel()
+	_, _ = c.callCtx(ictx, "turn/interrupt", map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+	})
+}
+
+// setTurnID publishes the in-flight turn's id and unblocks any interrupt
+// waiting for it. Empty ids are ignored.
+func (c *Client) setTurnID(id string) {
+	if id == "" {
+		return
+	}
+	c.mu.Lock()
+	c.curTurnID = id
+	if c.turnIDReady != nil {
+		close(c.turnIDReady)
+		c.turnIDReady = nil
+	}
+	c.mu.Unlock()
+}
+
+// turnIDFromResult extracts the turn id from a turn/start result ({"turn":{"id":...}}).
+func turnIDFromResult(res json.RawMessage) string {
+	var v struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	_ = json.Unmarshal(res, &v)
+	return v.Turn.ID
 }
 
 // onNotify routes streaming notifications to the sink and detects turn end.
@@ -265,6 +373,8 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 		if u := decodeTokenUsage(params); u != nil {
 			c.emit(Event{T: "usage", Usage: u})
 		}
+	case "turn/started":
+		c.setTurnID(turnIDFromResult(params))
 	case "turn/completed":
 		// Safety-net flush: if the server ended the turn without emitting
 		// item/completed for a buffered delta item (protocol churn or an
@@ -301,6 +411,11 @@ func (c *Client) flushDeltas() {
 func (c *Client) signalTurn(r turnResult) {
 	c.mu.Lock()
 	done := c.turnDone
+	c.curTurnID = "" // the turn is over; nothing addressable to interrupt
+	if c.turnIDReady != nil {
+		close(c.turnIDReady) // unblock a waiting interrupt; it reads "" and stops
+		c.turnIDReady = nil
+	}
 	c.mu.Unlock()
 	if done != nil {
 		select {

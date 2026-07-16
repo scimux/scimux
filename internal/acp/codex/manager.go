@@ -333,6 +333,7 @@ type Session struct {
 	turnHadOutput bool
 	lastError     string
 	pending       []*pendingPermission
+	pendingSeq    uint64
 
 	done     chan struct{} // closed on exit/stop; unblocks a pending approval
 	doneOnce sync.Once
@@ -340,8 +341,11 @@ type Session struct {
 
 // pendingPermission is one outstanding approval. Codex can issue more than one
 // server request while the same turn is active, so scimux queues them and lets
-// the supervisor answer the head of the queue.
+// the supervisor answer the head of the queue. seq identifies the request
+// across the prepare→deliver gap (a bare queue index could name a different
+// approval after the head changes).
 type pendingPermission struct {
+	seq      uint64
 	approval Approval
 	ch       chan chosen
 }
@@ -382,8 +386,9 @@ func (s *Session) appendLocked(ev Event) bool {
 // already logged as tool evidence by the client before this is called.
 func (s *Session) approve(a Approval) (string, json.RawMessage, bool) {
 	ch := make(chan chosen, 1)
-	p := &pendingPermission{approval: a, ch: ch}
 	s.mu.Lock()
+	s.pendingSeq++
+	p := &pendingPermission{seq: s.pendingSeq, approval: a, ch: ch}
 	s.pending = append(s.pending, p)
 	s.mu.Unlock()
 
@@ -396,26 +401,31 @@ func (s *Session) approve(a Approval) (string, json.RawMessage, bool) {
 	}
 }
 
-// prepareResolve maps a whitelisted key to a pending decision index and returns
-// it plus audit evidence, without delivering. Holds s.mu for the whole mapping
-// so it reads a consistent pending snapshot.
+// prepareResolve maps a whitelisted key to a pending decision and returns an
+// opaque token naming both the approval (by identity) and the chosen decision
+// index, plus audit evidence, without delivering. The token pins deliver to
+// this exact approval: with a queue, the head can change between the audit
+// write and the delivery (turn end, cancellation), and a bare index would
+// silently answer a different request than the one recorded as evidence.
 func (s *Session) prepareResolve(key string) (optID, evidence string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.pending) == 0 {
 		return "", "", ErrNoPending
 	}
-	idx, ok := mapKeyToDecision(key, s.pending[0].approval.AvailableDecisions)
+	p := s.pending[0]
+	idx, ok := mapKeyToDecision(key, p.approval.AvailableDecisions)
 	if !ok {
 		return "", "", fmt.Errorf("key %q maps to no decision", key)
 	}
-	return strconv.Itoa(idx), "permission: " + approvalTitle(s.pending[0].approval), nil
+	return fmt.Sprintf("%d:%d", p.seq, idx), "permission: " + approvalTitle(p.approval), nil
 }
 
 // deliver hands the mapped decision to the blocked approve goroutine. It holds
 // s.mu across the check-and-send and consumes the pending request atomically,
 // so a decision mapped against a since-replaced request is refused rather than
-// misdelivered (the finding-53 race, mirrored from acp.deliver).
+// misdelivered (the finding-53 race, mirrored from acp.deliver). The token's
+// sequence number must still name the queue head.
 func (s *Session) deliver(optID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -423,8 +433,12 @@ func (s *Session) deliver(optID string) error {
 		return ErrNoPending
 	}
 	p := s.pending[0]
-	idx, err := strconv.Atoi(optID)
-	if err != nil || idx < 0 || idx >= len(p.approval.AvailableDecisions) {
+	var seq uint64
+	var idx int
+	if n, err := fmt.Sscanf(optID, "%d:%d", &seq, &idx); n != 2 || err != nil {
+		return errors.New("malformed decision token")
+	}
+	if seq != p.seq || idx < 0 || idx >= len(p.approval.AvailableDecisions) {
 		return errors.New("pending permission changed before the answer was delivered")
 	}
 	d := p.approval.AvailableDecisions[idx]
@@ -547,6 +561,9 @@ func (s *Session) Interrupt() error {
 
 func (s *Session) runTurn(ctx context.Context, text string) {
 	err := s.client.RunTurn(ctx, s.threadID, text)
+	if errors.Is(err, context.Canceled) {
+		err = errors.New("turn interrupted by supervisor")
+	}
 	s.endTurn(err)
 }
 
@@ -577,6 +594,17 @@ func (s *Session) endTurn(err error) {
 	}
 	s.turnCancel = nil
 	s.turnHadOutput = false
+	// Approvals cannot outlive their turn: after an interrupt the server
+	// requests that were blocking on a human are moot — unblock them
+	// fail-closed (the client answers "rejected by handler") instead of
+	// leaving attention stuck on a dead question.
+	for _, p := range s.pending {
+		select {
+		case p.ch <- chosen{}:
+		default:
+		}
+	}
+	s.pending = nil
 }
 
 // --- liveness / lifecycle ---

@@ -536,10 +536,15 @@ func (s *Session) Interrupt() error {
 }
 
 func (s *Session) runPrompt(ctx context.Context, text string) {
+	// On cancellation the SDK sends session/cancel to the agent for us
+	// (Prompt's ctx.Err() path), so the wire side of an interrupt is covered.
 	resp, err := s.conn.Prompt(ctx, sdk.PromptRequest{
 		SessionId: s.sessionID,
 		Prompt:    []sdk.ContentBlock{sdk.TextBlock(text)},
 	})
+	if errors.Is(err, context.Canceled) {
+		err = errors.New("turn interrupted by supervisor")
+	}
 	s.endTurn(resp, err)
 }
 

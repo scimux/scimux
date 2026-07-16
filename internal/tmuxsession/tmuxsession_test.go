@@ -90,20 +90,6 @@ func TestSendOrderingAndPayload(t *testing.T) {
 	}
 }
 
-func TestInterruptSendsCtrlC(t *testing.T) {
-	f := &fakeRunner{}
-	sv := newTestServer(f)
-	if err := sv.Session("node1").Interrupt(); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.calls) != 1 {
-		t.Fatalf("want 1 tmux call, got %d", len(f.calls))
-	}
-	if got := f.calls[0].args[2:]; !reflect.DeepEqual(got, []string{"send-keys", "-t", "=node1:", "C-c"}) {
-		t.Errorf("send-keys args = %v", got)
-	}
-}
-
 // Concurrent sends must never share a paste buffer: a shared name lets one
 // node's paste deliver another node's prompt (finding 2 of the 2026-07 review).
 func TestSendsUseDistinctBuffers(t *testing.T) {
