@@ -105,6 +105,9 @@ type app struct {
 	// (mtime after the phase start) or has gone dead (session rollover).
 	activeSince map[string]time.Time
 	tailers     map[string]*transcript.Tailer
+	// mirrors: per-node transcript→session-log projection state (mirror.go),
+	// so tmux nodes end up with the same on-disk history as structured ones.
+	mirrors map[string]*mirror
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool
@@ -735,6 +738,7 @@ func (a *app) poll() {
 			a.maybeRelinkTranscript(n)
 		}
 		a.discoverTranscript(n)
+		a.syncMirror(n)
 	}
 }
 
@@ -1958,6 +1962,10 @@ func main() {
 	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
 	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
 	sessionsDir := filepath.Join(*data, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
 	a := &app{
 		byID:        map[string]*Node{},
 		live:        map[string]string{},
@@ -1966,6 +1974,7 @@ func main() {
 		lastChg:     map[string]time.Time{},
 		activeSince: map[string]time.Time{},
 		tailers:     map[string]*transcript.Tailer{},
+		mirrors:     map[string]*mirror{},
 		pathClaims:  map[string]bool{},
 		chatMark:    map[string]chatMark{},
 		staleChat:   map[string]bool{},

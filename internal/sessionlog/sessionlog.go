@@ -28,14 +28,15 @@ import (
 // record types they don't know, so the schema can grow without breaking
 // old binaries or old files.
 type Event struct {
-	T          string      `json:"t"` // "meta" | "user" | "assistant" | "tool" | "usage" | "stop" | "error"
-	Time       string      `json:"time"`
-	Text       string      `json:"text,omitempty"`       // user / assistant
-	Tool       *ToolEvent  `json:"tool,omitempty"`       // tool
-	Usage      *UsageEvent `json:"usage,omitempty"`      // usage
-	Meta       *MetaEvent  `json:"meta,omitempty"`       // meta
-	StopReason string      `json:"stopReason,omitempty"` // stop
-	Error      string      `json:"error,omitempty"`      // error
+	T          string       `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "stop" | "error"
+	Time       string       `json:"time"`
+	Text       string       `json:"text,omitempty"`       // user / assistant
+	Tool       *ToolEvent   `json:"tool,omitempty"`       // tool
+	Usage      *UsageEvent  `json:"usage,omitempty"`      // usage
+	Meta       *MetaEvent   `json:"meta,omitempty"`       // meta
+	Source     *SourceEvent `json:"source,omitempty"`     // source
+	StopReason string       `json:"stopReason,omitempty"` // stop
+	Error      string       `json:"error,omitempty"`      // error
 }
 
 // ToolEvent is the tool-call state assembled by toolCallId. rawInput carries
@@ -76,6 +77,23 @@ type MetaEvent struct {
 	Model   string `json:"model,omitempty"`
 	Dir     string `json:"dir,omitempty"`
 	Created string `json:"created"`
+}
+
+// SourceEvent marks the seam where a transcript-mirrored node (re)binds to an
+// agent-CLI session file: first link, adoption correction, /clear rollover,
+// rotation. The turns that follow a source record were mirrored from that
+// file, which is also the mirror's dedupe anchor — on startup it replays the
+// log, finds the last source, and counts the turns after it to know where to
+// resume. Structured transports never write source records (their log is the
+// primary history, not a mirror).
+type SourceEvent struct {
+	Path      string `json:"path"`
+	SessionID string `json:"sessionId,omitempty"`
+}
+
+// NewSource builds a seam record for a (re)bound transcript file.
+func NewSource(path, sessionID string) Event {
+	return Event{T: "source", Source: &SourceEvent{Path: path, SessionID: sessionID}}
 }
 
 // NewMeta builds the header record for a fresh node log.
@@ -206,6 +224,11 @@ func formatEvent(ev Event) string {
 				strings.TrimRight(" "+ev.Meta.Model, " ") + ")"
 		}
 		return "— session"
+	case "source":
+		if ev.Source != nil {
+			return "— source " + ev.Source.Path
+		}
+		return "— source"
 	case "user":
 		return "» " + oneLine(ev.Text)
 	case "assistant":

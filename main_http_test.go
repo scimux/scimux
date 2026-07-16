@@ -106,6 +106,7 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		lastChg:     map[string]time.Time{},
 		activeSince: map[string]time.Time{},
 		tailers:     map[string]*transcript.Tailer{},
+		mirrors:     map[string]*mirror{},
 		pathClaims:  map[string]bool{},
 		chatMark:    map[string]chatMark{},
 		staleChat:   map[string]bool{},

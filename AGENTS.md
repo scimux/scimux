@@ -52,8 +52,11 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   grep/sed/awk-able; nothing binary). The filename is the node's reusable
   title slug; identity lives in the file's `meta` header record, and deleting
   a node archives its log to `sessions/archive/` so a reissued slug can never
-  append onto dead history. New transports (and the planned Claude transcript
-  mirror) write the same records to the same directory — do not introduce
+  append onto dead history. tmux nodes reach the store through the transcript
+  mirror (`mirror.go`): the poller projects tailer output into the same
+  records, with `source` seam records marking every transcript (re)bind
+  (/clear rollover, relink, rotation) as the dedupe watermark. New transports
+  write the same records to the same directory — do not introduce
   per-transport log formats or directories.
 - **Fork = fresh context.** A forked node inherits launch config (agent,
   model, effort, dir) but never conversation history.

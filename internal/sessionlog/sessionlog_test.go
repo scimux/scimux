@@ -90,3 +90,24 @@ func TestPeekLog(t *testing.T) {
 		t.Fatalf("peek misses flattened user line: %q", got)
 	}
 }
+
+func TestSourceRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	w.Append(NewMeta("n", "claude", "", ""))
+	w.Append(NewSource("/x/aaa.jsonl", "aaa"))
+	w.Append(Event{T: "user", Text: "hi"})
+	evs := ReadEvents(path)
+	if len(evs) != 3 || evs[1].T != "source" || evs[1].Source == nil {
+		t.Fatalf("events: %+v", evs)
+	}
+	if evs[1].Source.Path != "/x/aaa.jsonl" || evs[1].Source.SessionID != "aaa" {
+		t.Fatalf("source fields: %+v", evs[1].Source)
+	}
+	if turns := ReadTurns(path); len(turns) != 1 {
+		t.Fatalf("source records must not become turns: %+v", turns)
+	}
+	if peek := PeekLog(path, 10, ""); !strings.Contains(peek, "— source /x/aaa.jsonl") {
+		t.Fatalf("peek misses source seam: %q", peek)
+	}
+}
