@@ -571,6 +571,27 @@ body.cards-open #msgs { overflow: hidden; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lanechip.focused { opacity: 1; }
 
+/* ---------- sticky-notes pane: lab-notebook stickies on the right.
+   Desktop/iPad only for now (the iPhone sheet presentation comes later);
+   the › toggle in the chat title bar points at the edge it reveals, the
+   same idiom as the ‹ journeys button on the left. */
+#notespane { display: none; }
+#notesbtn { display: none; font-size: 22px; color: var(--work); }
+#notetabs { border-bottom: 1px solid var(--hairline); }
+#notelist { flex: 1; overflow-y: auto; padding: 6px 14px 12px; }
+.note { margin: 12px 0; }
+.note .when { font-size: 11px; color: var(--dim); margin: 0 0 3px 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.note .nbubble { background: var(--surface); border-radius: 10px; padding: 8px 11px;
+  font-size: 13.5px; line-height: 1.45; border-left: 3px solid var(--unlane);
+  overflow-wrap: break-word; }
+.noteactions { display: flex; gap: 8px; padding: 6px 2px 0; }
+.noteactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; background: var(--surface); }
+.noteactions button:active { color: var(--work); }
+/* jump-to-source lands here: briefly ring the target bubble */
+.turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
+
 /* app chrome is not selectable text */
 #statusbar, #cards, #map, .phead, .sheet .grab { -webkit-user-select: none; user-select: none; }
 .card, .strow, .lanechip { -webkit-touch-callout: none; }
@@ -586,6 +607,9 @@ body.cards-open #msgs { overflow: hidden; }
   #map { width: 400px; display: none; }
   body.map-open #map { display: flex; }
   #chat { flex: 1; min-width: 0; }
+  #notesbtn { display: flex; }
+  body.notes-open #notespane { display: flex; width: 340px; flex: none;
+    border-left: 1px solid var(--hairline); }
   #scrim { display: none; }
   .backbtn { display: none; }
   .sheet { left: 50%; right: auto; width: 480px; transform: translate(-50%, 103%); }
@@ -640,6 +664,7 @@ body.cards-open #msgs { overflow: hidden; }
         <span class="dot" id="chatdot"></span>
         <h2 id="chattitle">scimux</h2>
         <button class="headtoggle" id="infobtn" aria-label="show details"></button>
+        <button class="headtoggle" id="notesbtn" aria-label="toggle notes pane">&#8250;</button>
       </div>
       <div class="mission" id="chatmission"></div>
       <div id="chatdetails" aria-hidden="true">
@@ -664,6 +689,13 @@ body.cards-open #msgs { overflow: hidden; }
         data-placeholder="Message the agent…"></div>
       <button id="sendbtn" aria-label="send"></button>
     </div>
+  </section>
+
+  <!-- right side: sticky-notes pane (lab-notebook stickies). Chat-like order:
+       oldest top, newest bottom, pinned to the bottom when (re)opened. -->
+  <section id="notespane" class="panel">
+    <div class="tabs" id="notetabs"></div>
+    <div id="notelist"><div class="empty">No notes yet.</div></div>
   </section>
 
 </div>
@@ -874,6 +906,7 @@ function uiMutate(op){
   uiOps.push(op);
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
   renderSyncState();
+  renderNotesPane();   /* signature-guarded; cheap when notes didn't change */
   clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
   uiTimer = setTimeout(flushUI, 300);
 }
@@ -919,8 +952,8 @@ async function flushUI(){
 /* re-render everything that draws from UI, preserving inputs (the prompt bar
    and sheets are singletons outside these render regions) */
 function applyRemoteUI(){
-  cardsSig = ""; mapSig = "";
-  renderCards(); renderChatHead(); renderMapTabs(); renderMap();
+  cardsSig = ""; mapSig = ""; notesSig = "";
+  renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderNotesPane();
   if (sel === "NOTES"){ chatSig = ""; renderNotes(); }
 }
 async function loadUI(){
@@ -1016,6 +1049,14 @@ const ICON_INTO = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
   <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/>
   <path d="M3 12h12"/>
   <path d="M11 8l4 4-4 4"/>
+</svg>`;
+/* jump-to-source glyph: fa share-from-square mirrored along its y-axis so the
+   arrow leaves to the left — "back into the activity", inlined stroke style */
+const ICON_JUMP = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M13 6h4a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-4"/>
+  <path d="M9 3H3v6"/>
+  <path d="M3 3l9 9"/>
 </svg>`;
 /* terminal glyph: fa-regular fa-window-maximize (framed window w/ title bar) */
 const ICON_TERM = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
@@ -2048,7 +2089,7 @@ async function refreshChat(){
         `</div>`
       : "");
   renderBubbleActions();                    /* re-attach the tapped bubble's icon row */
-  if (atBottom || forcePeek) el.scrollTop = el.scrollHeight;
+  if (!consumePendingJump(el, turns) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
   const pk = el.querySelector(".peek");
   if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
 
@@ -2215,6 +2256,127 @@ $("#msgs").addEventListener("click", e => {
     renderBubbleActions();
   }
 });
+
+/* ---------- sticky-notes pane ----------
+   Captured notes are immutable evidence (copy of a bubble + pointer back to
+   its context); manual notes are freeform. Chat-like ordering: oldest top,
+   newest bottom, pinned to the bottom when the view (re)opens. The pane is a
+   polled render region guarded by a signature; tapping a note unfolds its
+   action row (jump-to-source · copy · trash), and that state must survive
+   rebuilds like every other polled element. */
+let notesOpen = localStorage.getItem("scimux-notes") === "1";
+let noteTab = localStorage.getItem("scimux-notetab") || "GENERAL";
+let openNoteT = "";        // note whose action row is unfolded
+let notesSig = "";
+let notesPin = true;       // scroll to the bottom on the next render
+let pendingJump = null;    // jump-to-source in flight: {node, turnTime, text, ts}
+
+/* a note's lane is derived live from its activity (activities gain lanes
+   later; notes follow automatically); the capture-time snapshot is only the
+   fallback for deleted activities. Manual notes are lane-less → General. */
+function noteLaneId(nt){
+  if (!nt.node) return "";
+  const nd = nodeById(nt.node);
+  return nd ? (nd.lane_id || "") : (nt.lane || "");
+}
+function fmtWhen(t){
+  const d = new Date(t);
+  return isNaN(d) ? (t || "") : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+function renderNotesPane(){
+  document.body.classList.toggle("notes-open", notesOpen);
+  if (!notesOpen) return;
+  const notes = UI.notes || [];
+  const laneOf = {};
+  notes.forEach(nt => laneOf[nt.t] = noteLaneId(nt));
+  const tabs = laneList().filter(l => notes.some(nt => laneOf[nt.t] === l.id));
+  if (noteTab !== "GENERAL" && !tabs.some(l => l.id === noteTab)) noteTab = "GENERAL";
+  const list = notes
+    .filter(nt => (laneOf[nt.t] || "") === (noteTab === "GENERAL" ? "" : noteTab))
+    .sort((a, b) => (a.t || "").localeCompare(b.t || ""));
+  const tabsHtml =
+    `<button data-ntab="GENERAL" class="${noteTab === "GENERAL" ? "on" : ""}">General</button>` +
+    tabs.map(l => `<button data-ntab="${esc(l.id)}" class="${noteTab === l.id ? "on" : ""}"
+      style="color:${esc(l.color || "")}">${esc(l.name)}</button>`).join("");
+  const color = noteTab === "GENERAL" ? "var(--unlane)" : laneColor(noteTab);
+  const listHtml = list.length ? list.map(nt => {
+    const nd = nt.node ? nodeById(nt.node) : null;
+    const src = nd ? " · " + esc(nd.title) : "";
+    return `
+    <div class="note" data-t="${esc(nt.t)}">
+      <div class="when">${esc(fmtWhen(nt.t))}${src}</div>
+      <div class="nbubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
+      ${openNoteT === nt.t ? `<div class="noteactions">
+        ${nt.node ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
+        <button data-nact="copy" aria-label="copy note">${ICON_COPY}</button>
+        <button data-nact="del" aria-label="delete note">${ICON_TRASH}</button>
+      </div>` : ""}
+    </div>`;
+  }).join("") : `<div class="empty">No notes here yet — tap a bubble and “take a note”.</div>`;
+  const sig = hashStr(tabsHtml + "|" + listHtml);
+  if (sig === notesSig) return;
+  notesSig = sig;
+  $("#notetabs").innerHTML = tabsHtml;
+  $("#notelist").innerHTML = listHtml;
+  if (notesPin){ const nl = $("#notelist"); nl.scrollTop = nl.scrollHeight; notesPin = false; }
+}
+$("#notesbtn").addEventListener("click", () => {
+  notesOpen = !notesOpen;
+  localStorage.setItem("scimux-notes", notesOpen ? "1" : "0");
+  notesSig = ""; notesPin = true;
+  renderNotesPane();
+});
+$("#notespane").addEventListener("click", e => {
+  const tb = e.target.closest("[data-ntab]");
+  if (tb){
+    noteTab = tb.dataset.ntab;
+    localStorage.setItem("scimux-notetab", noteTab);
+    openNoteT = ""; notesSig = ""; notesPin = true;
+    renderNotesPane();
+    return;
+  }
+  const act = e.target.closest("[data-nact]");
+  if (act){
+    const nt = (UI.notes || []).find(x => x.t === act.closest(".note")?.dataset.t);
+    if (!nt) return;
+    if (act.dataset.nact === "jump" && nt.node){
+      /* bubble indexes are unstable; the turn's own timestamp (with the text
+         as fallback) finds it again once the chat has rendered */
+      pendingJump = { node: nt.node, turnTime: nt.turnTime || "", text: nt.text || "", ts: Date.now() };
+      select(nt.node);
+    } else if (act.dataset.nact === "copy"){
+      copyText(nt.text || "");
+      act.innerHTML = "&#10003;";
+      setTimeout(() => { act.innerHTML = ICON_COPY; notesSig = ""; }, 900);
+    } else if (act.dataset.nact === "del"){
+      openNoteT = "";
+      uiMutate({ k: "note-del", t: nt.t });
+    }
+    return;
+  }
+  const noteEl = e.target.closest(".note");
+  if (noteEl){
+    openNoteT = openNoteT === noteEl.dataset.t ? "" : noteEl.dataset.t;
+    renderNotesPane();
+  }
+});
+/* consume a pending jump once the target activity's chat has rendered:
+   scroll the noted bubble into view and ring it briefly. Returns whether it
+   scrolled (the caller then skips its own bottom-pinning). */
+function consumePendingJump(el, turns){
+  if (!pendingJump || pendingJump.node !== sel) return false;
+  if (Date.now() - pendingJump.ts > 15000){ pendingJump = null; return false; }
+  let idx = pendingJump.turnTime ? turns.findIndex(t => t.time === pendingJump.turnTime) : -1;
+  if (idx < 0) idx = turns.findIndex(t => t.text === pendingJump.text);
+  if (idx < 0) return false;  /* chat may still be loading; retry next render */
+  pendingJump = null;
+  const target = el.querySelector(`.turn[data-i="${idx}"]`);
+  if (!target) return false;
+  target.scrollIntoView({ block: "center" });
+  target.classList.add("jumpflash");
+  setTimeout(() => target.classList.remove("jumpflash"), 1600);
+  return true;
+}
 
 /* ---- long-press (HIG context-menu idiom): delegated helper ----
    A long-press may be followed by a synthesized click on the same element;
@@ -2714,6 +2876,7 @@ async function tick(){
     }
     renderCards();
     renderMap();
+    renderNotesPane();  /* lanes/titles derive live from nodes; sig-guarded */
     await refreshChat();
     pollUI();
   } finally { ticking = false; }
