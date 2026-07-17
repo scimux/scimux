@@ -48,7 +48,12 @@
   }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { height: 100%; }
+html, body { height: 100%;
+  /* reading flows one axis: nothing may widen the pannable area. clip (not
+     hidden) forbids horizontal panning without creating a scroll container —
+     the notes sheet parked offscreen right (translateX) must never do what
+     the cards sheet offscreen left cannot (negative coords are unreachable). */
+  overflow-x: clip; overscroll-behavior-x: none; }
 body {
   margin: 0;
   background: var(--bg);
