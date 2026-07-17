@@ -102,8 +102,11 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #app { height: 100dvh; padding-top: calc(var(--sbh) + env(safe-area-inset-top)); }
 .panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 #chat { position: relative; }
+/* .panel's height:100% would beat bottom:0 here (over-constrained fixed
+   positioning drops `bottom`), overflowing the viewport by the statusbar
+   height and clipping the list's last card — let top+bottom size the pane */
 #cards {
-  position: fixed; z-index: 30;
+  position: fixed; z-index: 30; height: auto;
   top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; left: 0;
   width: min(86%, 380px);
   background: var(--bg);
@@ -113,7 +116,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 }
 #cards.open { transform: translateX(0); }
 #map {
-  position: fixed; z-index: 31;
+  position: fixed; z-index: 31; height: auto;
   top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; left: 0;
   width: 100%;
   background: var(--bg);
@@ -344,8 +347,6 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 }
 #chathead.desc-editing .chatdesc { display: none; }
 #chathead.desc-editing .chatdescbox { display: block; }
-.attachcmd { display: none; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.attachcmd.show { display: block; }
 
 /* context gauge: a 3px fill bar under the chat head (see demo #gauge) */
 #gauge { height: 3px; background: var(--hairline); position: relative; flex: none; }
@@ -735,7 +736,6 @@ body.notes-open #notespane { transform: translateX(0); }
         </div>
         <div class="chatdesc" id="chatdesc"></div>
         <textarea class="chatdescbox" id="chatdescinput"></textarea>
-        <code class="attachcmd" id="chatattach"></code>
       </div>
     </div>
     <div id="gauge" hidden><i id="gaugefill"></i></div>
@@ -883,9 +883,6 @@ body.notes-open #notespane { transform: translateX(0); }
   <h3>scimux</h3>
   <div class="sect">
     <div class="item"><span>Version</span><span class="tag" id="m_version">—</span></div>
-    <div class="item"><span>tmux socket</span><span class="tag" id="m_socket">—</span></div>
-    <div class="item"><span>Data sources</span><span class="tag">planned</span></div>
-    <div class="item"><span>Appearance</span><span class="tag">follows system</span></div>
   </div>
 </div>
 
@@ -905,7 +902,6 @@ const $ = s => document.querySelector(s);
 
 let nodes = [];              // last /api/state nodes
 let unadopted = [];
-let SOCKET = "scimux";
 let sel = localStorage.getItem("scimux-sel") || "";
 let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
 let termOpen = false;        // terminal unfolded below the last bubble (per selection)
@@ -1953,10 +1949,6 @@ function renderChatHead(){
     input.value = desc;
     input.dataset.node = n.id;
   }
-  const attach = $("#chatattach");
-  const isClaudeTmux = (n.agent || "").toLowerCase() === "claude" && (n.transport || "tmux") === "tmux";
-  attach.classList.toggle("show", isClaudeTmux);
-  attach.textContent = isClaudeTmux ? `tmux -L ${SOCKET} attach -t ${n.id}` : "";
 }
 
 document.addEventListener("keydown", e => {
@@ -3049,10 +3041,8 @@ async function tick(){
     const st = await r.json();
     nodes = st.nodes || [];
     unadopted = st.unadopted || [];
-    SOCKET = st.socket || "scimux";
     if (st.hostname) $("#host").textContent = st.hostname;
     if (st.version) $("#m_version").textContent = st.version;
-    $("#m_socket").textContent = SOCKET;
     renderSys(st.sys);
     /* a stored sel of "NOTES" (the retired pseudo-activity) falls through
        to the first real node here */
