@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	sdk "github.com/coder/acp-go-sdk"
 )
 
@@ -415,4 +416,71 @@ func TestDeliverRejectsStaleOption(t *testing.T) {
 	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != ErrNoPending {
 		t.Errorf("second deliver err = %v, want ErrNoPending", err)
 	}
+}
+
+// Clear = the structured /clear: a fresh session on the same subprocess,
+// recorded as a path-less source seam appended only after session/new
+// succeeded. The chat surface (the log's current segment) restarts; the
+// prior conversation stays behind the seam in the same file.
+func TestClearStartsFreshSegment(t *testing.T) {
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: sdk.UpdateAgentMessageText("answer")})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+
+	if err := m.Clear("n1"); err != nil {
+		t.Fatal(err)
+	}
+	seg := sessionlog.ReadSegment(filepath.Join(dir, "n1.jsonl"))
+	if len(seg.Turns) != 0 || seg.PriorTurns != 2 || seg.StartTime == "" {
+		t.Fatalf("post-clear segment: turns=%d prior=%d start=%q",
+			len(seg.Turns), seg.PriorTurns, seg.StartTime)
+	}
+	// The fresh session accepts the next turn (same process, new context).
+	if err := m.Send("n1", "again"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "second turn", func() bool { return m.Live("n1") == "quiet" })
+	if turns := sessionlog.ReadSegment(filepath.Join(dir, "n1.jsonl")).Turns; len(turns) != 2 {
+		t.Fatalf("fresh segment turns: %+v", turns)
+	}
+}
+
+// A /clear racing an active turn is refused like a second Send: one turn at
+// a time also guards the session swap.
+func TestClearDuringActiveTurn(t *testing.T) {
+	release := make(chan struct{})
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	m := newManager(t, agent)
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn active", func() bool { return m.Live("n1") == "active" })
+	if err := m.Clear("n1"); err != ErrTurnActive {
+		t.Fatalf("clear during turn: err = %v, want ErrTurnActive", err)
+	}
+	close(release)
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
 }

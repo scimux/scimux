@@ -26,6 +26,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -130,9 +131,34 @@ type app struct {
 	uiPath    string
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
-	// (search, consolidation, sharing) scan this one directory.
+	// (search, consolidation, sharing) scan this one directory. It is also
+	// the chat read path for every transport: handleChat renders from the
+	// log, never from the transcript tailer (phase 3 of the consolidation).
 	sessionsDir string
-	home        string
+	// segCache memoizes each node's parsed current segment so the 1s chat
+	// poll costs a stat, not a reparse, while the log is unchanged.
+	segCache map[string]*sessionlog.Cache
+	home     string
+}
+
+// segment returns the node's current conversation — the session log's tail
+// after its last source seam. A /clear appends a seam, so this is what makes
+// "fresh chat surface under the same activity" uniform across transports.
+func (a *app) segment(n *Node) sessionlog.Segment {
+	if a.sessionsDir == "" {
+		return sessionlog.Segment{Turns: []transcript.Turn{}} // bare test apps
+	}
+	a.mu.Lock()
+	if a.segCache == nil {
+		a.segCache = map[string]*sessionlog.Cache{}
+	}
+	c := a.segCache[n.ID]
+	if c == nil {
+		c = &sessionlog.Cache{}
+		a.segCache[n.ID] = c
+	}
+	a.mu.Unlock()
+	return c.Segment(filepath.Join(a.sessionsDir, n.ID+".jsonl"))
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:
@@ -151,6 +177,10 @@ type PermOption struct {
 type procManager interface {
 	Launch(nodeID, agent, dir, model, effort string) (string, error)
 	Send(nodeID, text string) error
+	// Clear is the structured-transport /clear: a fresh protocol session on
+	// the same subprocess, recorded as a source seam in the session log — the
+	// chat surface turns the page, the node and its log file stay.
+	Clear(nodeID string) error
 	Interrupt(nodeID string) error
 	PrepareResolve(nodeID, key string) (optID, evidence string, err error)
 	Deliver(nodeID, optID string) error
@@ -1343,6 +1373,22 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "a turn to this node is still in flight", 409)
 			return
 		}
+		// The structured transports have no TUI to interpret slash commands,
+		// so scimux implements /clear itself: a fresh protocol session on the
+		// same process, recorded as a source seam — same page-turn semantics
+		// as Claude's /clear, same log file, same node.
+		if strings.TrimSpace(body.Text) == "/clear" {
+			if err := pm.Clear(n.ID); err != nil {
+				code := 500
+				if pm.Conflict(err) {
+					code = 409
+				}
+				http.Error(w, err.Error(), code)
+				return
+			}
+			writeJSON(w, map[string]string{"status": "acknowledged"})
+			return
+		}
 		if err := pm.Send(n.ID, body.Text); err != nil {
 			code := 500
 			if pm.Conflict(err) {
@@ -1437,7 +1483,28 @@ func (a *app) retireTranscript(n *Node) {
 	delete(a.tailers, n.ID)
 	delete(a.chatMark, n.ID)
 	delete(a.staleChat, n.ID)
+	// Drop the mirror's in-memory watermark too: it rebuilds from the log
+	// (which now ends in the seam below), exactly like after a restart — so
+	// a relink can never attribute pre-/clear turns to the fresh segment.
+	delete(a.mirrors, n.ID)
 	a.mu.Unlock()
+	// A known rollover also turns the page in the session log: a path-less
+	// "detached" seam makes the fresh chat surface immediate (the reader
+	// renders since-last-source), while the prior conversation stays behind
+	// it in the same file. The relink after the next turn appends the real
+	// source seam with the new transcript path — two seams, both true. Only
+	// an existing log gets one: a node that never mirrored has no page to
+	// turn. Append failures are logged, not fatal: the UI degrades to peek
+	// either way and the mirror's next seam still separates the segments.
+	if a.sessionsDir != "" {
+		logPath := filepath.Join(a.sessionsDir, n.ID+".jsonl")
+		if _, err := os.Stat(logPath); err == nil {
+			w := &sessionlog.Writer{Path: logPath}
+			if err := w.Append(sessionlog.NewSource("", "")); err != nil {
+				fmt.Fprintf(os.Stderr, "scimux: clear seam for %s: %v\n", n.ID, err)
+			}
+		}
+	}
 }
 
 // handleSendResolve is the supervisor's "I checked (or fixed) this in the
@@ -1511,16 +1578,46 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"ok": "interrupted"})
 }
 
+// handleChat renders the chat view for any node from its unified session log:
+// the store is the read path for conversation history on every transport
+// (phase 3 of the session-log consolidation). Transport machinery contributes
+// only overlays — the tmux branch derives fallback/diagnostics/needs-input
+// from the transcript tailer and pane mechanics; the structured branch adds
+// the pending permission and last error from its manager. chat_started and
+// prior_turns carry the /clear divider: a source seam in the log starts a
+// fresh chat surface under the same activity, with the prior conversation
+// preserved behind the seam in the same file.
 func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
 		return
 	}
-	if pm := a.proc(n); pm != nil {
-		a.procChat(w, n, pm)
-		return
+	seg := a.segment(n)
+	a.mu.Lock()
+	var lastMS int64
+	if t, ok := a.lastChg[n.ID]; ok {
+		lastMS = t.UnixMilli()
 	}
+	a.mu.Unlock()
+	resp := map[string]any{
+		"turns": seg.Turns, "last_change": lastMS,
+		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
+	}
+	if pm := a.proc(n); pm != nil {
+		a.procChatInto(resp, n, pm, seg)
+	} else {
+		a.tmuxChatInto(resp, n, seg)
+	}
+	writeJSON(w, resp)
+}
+
+// tmuxChatInto overlays the tmux-transport state onto the shared chat
+// response: liveness, attention, delivery, and the fallback decision — the
+// mechanics stay with the pane and the transcript tailer even though the
+// turns themselves now come from the session log (the mirror keeps the log
+// at most one poll tick behind the transcript).
+func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment) {
 	tl := a.tailerFor(n) // may reset staleness on a relink; read flags after
 	a.mu.Lock()
 	pending := n.Transcript == ""
@@ -1529,22 +1626,15 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	attn := a.attn[n.ID]
 	delivery := a.sendState[n.ID]
 	agent, model := n.Agent, n.Model
-	var lastMS int64
-	if t, ok := a.lastChg[n.ID]; ok {
-		lastMS = t.UnixMilli()
-	}
 	a.mu.Unlock()
-	turns := []transcript.Turn{}
-	if tl != nil {
-		turns = tl.Poll()
-	}
+	turns := seg.Turns
 	// fallback signals "the transcript is not (or no longer) making sense" —
-	// missing, not yet populated, unreadable, format-incompatible from the
-	// start, structurally broken after valid turns (Unparseable), or still
-	// growing through whole pane-activity cycles without one recognizable
-	// chat record (staleChat: a typed future format). A path string existing
-	// does not mean the transcript is usable; the client must degrade to the
-	// pane snapshot in every one of these cases.
+	// missing, not yet populated (or not yet mirrored), unreadable,
+	// format-incompatible from the start, structurally broken after valid
+	// turns (Unparseable), or still growing through whole pane-activity
+	// cycles without one recognizable chat record (staleChat: a typed future
+	// format). A path string existing does not mean the transcript is usable;
+	// the client must degrade to the pane snapshot in every one of these cases.
 	fallback := len(turns) == 0 || (tl != nil && tl.Unparseable()) || stale
 
 	// Diagnostics: where the chat content comes from and why attention (or
@@ -1574,17 +1664,19 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	case fallback:
 		reason = "no_structured_request"
 	}
-	var watermark, ctxUsed, ctxWindow int64
+	var watermark int64
 	var prog, pendCalls int
 	var waiting string
 	if tl != nil {
 		watermark, prog = tl.Progress()
 		pendCalls = tl.PendingCount()
 		waiting, _ = tl.WaitingOn()
-		ctxUsed, ctxWindow = tl.Usage()
 	}
-	// Claude transcripts report usage but never the window size; estimate it
-	// from the model name (the "[1m]" marker is the long-context variant).
+	// Usage is segment-scoped: a /clear seam resets the gauge together with
+	// the context it measures. Claude transcripts report usage but never the
+	// window size; estimate it from the model name (the "[1m]" marker is the
+	// long-context variant).
+	ctxUsed, ctxWindow := seg.Used, seg.Size
 	if ctxUsed > 0 && ctxWindow == 0 {
 		if strings.Contains(model, "[1m]") {
 			ctxWindow = 1_000_000
@@ -1599,42 +1691,38 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 			ctxPct = 100
 		}
 	}
-	writeJSON(w, map[string]any{
-		"turns": turns, "pending": pending, "live": live, "fallback": fallback,
-		"attention": attn, "delivery": delivery,
-		"source": source, "reason": reason,
-		"watermark": watermark, "progress": prog,
-		"pending_calls": pendCalls, "waiting_on": waiting,
-		"last_change": lastMS,
-		"ctx_used":    ctxUsed, "ctx_window": ctxWindow, "ctx_pct": ctxPct,
-	})
+	resp["pending"] = pending
+	resp["live"] = live
+	resp["fallback"] = fallback
+	resp["attention"] = attn
+	resp["delivery"] = delivery
+	resp["source"] = source
+	resp["reason"] = reason
+	resp["watermark"] = watermark
+	resp["progress"] = prog
+	resp["pending_calls"] = pendCalls
+	resp["waiting_on"] = waiting
+	resp["ctx_used"] = ctxUsed
+	resp["ctx_window"] = ctxWindow
+	resp["ctx_pct"] = ctxPct
 }
 
-// procChat renders the chat view for a structured-protocol node (ACP or codex
-// app-server). It has no tmux pane and no tailer: turns, liveness, usage and
-// any pending permission come from the manager's authoritative session log. The
-// response shape mirrors the tmux branch so the web client's rendering path is
-// shared, with the structured-specific fields (source "acp" — the web UI's
-// structured-node rendering path, shared by both bridges — perm_* for the
-// pending approval, error for a failed/empty turn) and the tmux-only ones
-// neutralized (fallback false, delivery "", no watermark/pending_calls).
-func (a *app) procChat(w http.ResponseWriter, n *Node, pm procManager) {
-	turns := pm.Turns(n.ID)
+// procChatInto overlays the structured-transport (ACP or codex app-server)
+// state onto the shared chat response. No pane and no tailer: liveness and
+// any pending permission come from the manager, while history and usage came
+// from the same session log the manager writes. The tmux-only fields are
+// neutralized (fallback false, delivery "", no watermark/pending_calls) so
+// the web client's rendering path is shared; source "acp" selects the
+// structured-node rendering path for both bridges; perm_* carries the pending
+// approval and error a failed/empty turn.
+func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg sessionlog.Segment) {
 	live := pm.Live(n.ID)
 	lastErr := pm.LastError(n.ID)
-	used, window := pm.Usage(n.ID)
 	permTitle, permOptions, hasPerm := pm.Pending(n.ID)
 	attn := ""
 	if hasPerm {
 		attn = "approval"
 	}
-	a.mu.Lock()
-	var lastMS int64
-	if t, ok := a.lastChg[n.ID]; ok {
-		lastMS = t.UnixMilli()
-	}
-	a.mu.Unlock()
-
 	reason := ""
 	switch {
 	case live == "active":
@@ -1645,22 +1733,29 @@ func (a *app) procChat(w http.ResponseWriter, n *Node, pm procManager) {
 		reason = "turn_error"
 	}
 	var ctxPct int
-	if window > 0 {
-		ctxPct = int(100 * used / window)
+	if seg.Size > 0 {
+		ctxPct = int(100 * seg.Used / seg.Size)
 		if ctxPct > 100 {
 			ctxPct = 100
 		}
 	}
-	writeJSON(w, map[string]any{
-		"turns": turns, "pending": false, "live": live, "fallback": false,
-		"attention": attn, "delivery": "",
-		"source": "acp", "reason": reason,
-		"watermark": int64(0), "progress": len(turns),
-		"pending_calls": 0, "waiting_on": permTitle,
-		"last_change": lastMS,
-		"ctx_used":    used, "ctx_window": window, "ctx_pct": ctxPct,
-		"error": lastErr, "perm_title": permTitle, "perm_options": permOptions,
-	})
+	resp["pending"] = false
+	resp["live"] = live
+	resp["fallback"] = false
+	resp["attention"] = attn
+	resp["delivery"] = ""
+	resp["source"] = "acp"
+	resp["reason"] = reason
+	resp["watermark"] = int64(0)
+	resp["progress"] = len(seg.Turns)
+	resp["pending_calls"] = 0
+	resp["waiting_on"] = permTitle
+	resp["ctx_used"] = seg.Used
+	resp["ctx_window"] = seg.Size
+	resp["ctx_pct"] = ctxPct
+	resp["error"] = lastErr
+	resp["perm_title"] = permTitle
+	resp["perm_options"] = permOptions
 }
 
 // tailerFor returns the node's transcript tailer, (re)building it when the

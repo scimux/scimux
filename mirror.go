@@ -8,8 +8,12 @@
 //
 // The mirror is write-only and transcript-driven — it ingests only from the
 // tailer (never from handleSend), so prompts typed into an attached pane are
-// captured identically to prompts sent through the web UI. The UI's read
-// path is untouched: chat still renders straight from the tailer.
+// captured identically to prompts sent through the web UI. Since phase 3 of
+// the consolidation the mirror is also the chat's supply line: handleChat
+// renders every transport from the session log (current segment = everything
+// after the last source seam), so the log trails the transcript by at most
+// one poll tick and the tailer serves only mechanics (needs-input,
+// staleness, delivery confirmation).
 package main
 
 import (

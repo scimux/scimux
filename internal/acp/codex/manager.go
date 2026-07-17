@@ -103,6 +103,9 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		nodeID:    nodeID,
 		tr:        tr,
 		logw:      &logWriter{Path: m.logPath(nodeID)},
+		dir:       dir,
+		model:     model,
+		effort:    effort,
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -178,6 +181,45 @@ func (m *Manager) Send(nodeID, text string) error {
 		return fmt.Errorf("record user turn: %w", err)
 	}
 	go func() { defer m.wg.Done(); s.runTurn(ctx, text) }()
+	return nil
+}
+
+// Clear opens a fresh thread for the node on the same app-server process —
+// the structured-transport /clear, mirroring acp.Manager.Clear. thread/start
+// is negotiated first and the source seam is appended only after it
+// succeeded, so the log records what actually happened; the prior
+// conversation stays behind the seam in the same file. One turn at a time
+// applies: a /clear racing an active turn is refused like a second Send.
+func (m *Manager) Clear(nodeID string) error {
+	m.mu.Lock()
+	s := m.sessions[nodeID]
+	closing := m.closing
+	m.mu.Unlock()
+	if s == nil {
+		return ErrNoSession
+	}
+	if closing || !s.alive() {
+		return ErrNotAlive
+	}
+	if _, ok := s.reserveTurn(); !ok {
+		return ErrTurnActive
+	}
+	defer s.abortTurn() // the reservation only guarded the swap; no prompt ran
+	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer cancel()
+	info, err := s.client.StartThread(ctx, StartThreadParams{
+		Cwd: s.dir, ApprovalPolicy: defaultApprovalPolicy, Model: s.model, Effort: s.effort,
+	})
+	if err != nil {
+		return fmt.Errorf("codex thread/start: %w", err)
+	}
+	if err := s.logw.Append(sessionlog.NewSource("", info.ID)); err != nil {
+		return fmt.Errorf("record clear seam: %w", err)
+	}
+	s.mu.Lock()
+	s.threadID = info.ID
+	s.lastError = ""
+	s.mu.Unlock()
 	return nil
 }
 
@@ -332,6 +374,12 @@ type Session struct {
 	tr       Transport
 	logw     *logWriter
 	threadID string
+	// dir/model/effort are kept from Launch so Clear can open a fresh thread
+	// under the same conditions (/clear never changes launch config — fork is
+	// the path that can).
+	dir    string
+	model  string
+	effort string
 
 	mu            sync.Mutex
 	procAlive     bool

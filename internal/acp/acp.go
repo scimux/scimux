@@ -105,6 +105,8 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		agent:     agent,
 		proc:      proc,
 		logw:      &logWriter{Path: m.logPath(nodeID)},
+		dir:       dir,
+		effort:    effort,
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -173,6 +175,45 @@ func (m *Manager) Send(nodeID, text string) error {
 		return fmt.Errorf("record user turn: %w", err)
 	}
 	go s.runPrompt(ctx, text)
+	return nil
+}
+
+// Clear starts a fresh conversation for the node on the same subprocess — the
+// structured-transport /clear. The fresh chat surface lives under the same
+// node: the new session is negotiated first, and the source seam is appended
+// only after the protocol call succeeded, so the log records what actually
+// happened; the prior conversation stays behind the seam in the same file.
+// One turn at a time applies: a /clear racing an active turn is refused like
+// a second Send.
+func (m *Manager) Clear(nodeID string) error {
+	s := m.session(nodeID)
+	if s == nil {
+		return ErrNoSession
+	}
+	if !s.alive() {
+		return ErrNotAlive
+	}
+	if _, ok := s.reserveTurn(); !ok {
+		return ErrTurnActive
+	}
+	defer s.abortTurn() // the reservation only guarded the swap; no prompt ran
+	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer cancel()
+	resp, err := s.conn.NewSession(ctx, sdk.NewSessionRequest{Cwd: s.dir, McpServers: []sdk.McpServer{}})
+	if err != nil {
+		return fmt.Errorf("acp new session: %w", err)
+	}
+	if err := s.logw.Append(sessionlog.NewSource("", string(resp.SessionId))); err != nil {
+		return fmt.Errorf("record clear seam: %w", err)
+	}
+	s.mu.Lock()
+	old := s.sessionID
+	s.sessionID = resp.SessionId
+	s.lastError = ""
+	s.mu.Unlock()
+	// Politely retire the dead session; its fate is irrelevant to the new one.
+	_, _ = s.conn.CloseSession(ctx, sdk.CloseSessionRequest{SessionId: old})
+	s.applyEffort(ctx, s.effort, resp)
 	return nil
 }
 
@@ -347,6 +388,11 @@ type Session struct {
 	proc      Process
 	sessionID sdk.SessionId
 	logw      *logWriter
+	// dir and effort are kept from Launch so Clear can renegotiate a fresh
+	// session under the same conditions (/clear never changes launch config —
+	// fork is the path that can).
+	dir    string
+	effort string
 
 	mu            sync.Mutex
 	procAlive     bool

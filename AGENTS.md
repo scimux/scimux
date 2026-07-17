@@ -57,9 +57,20 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   records, with `source` seam records marking every transcript (re)bind
   (/clear rollover, relink, rotation) as the dedupe watermark. New transports
   write the same records to the same directory — do not introduce
-  per-transport log formats or directories.
-- **Fork = fresh context.** A forked node inherits launch config (agent,
-  model, effort, dir) but never conversation history.
+  per-transport log formats or directories. The store is also the **chat
+  read path for every transport** (phase 3): handleChat renders the log's
+  current segment — everything after the last `source` seam — while the
+  tailer serves only mechanics (needs-input, staleness, delivery
+  confirmation).
+- **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
+  surface under the *same* node: same log file, an appended `source` seam —
+  never a new file, never truncation; the context gauge is segment-scoped.
+  Structured transports implement it as a fresh protocol session
+  (`session/new` / `thread/start`) on the same subprocess, seam appended only
+  after the call succeeded; Claude gets a path-less "detached" seam at
+  retire time and the real seam at relink. Fork stays the only path that can
+  change launch config: a forked node inherits agent/model/effort/dir but
+  never conversation history.
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from
   pane-change detection). Do not add regexes matching agent TUI strings.
   Needs-input detection follows the same rule: it combines an unresolved

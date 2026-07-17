@@ -18,6 +18,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -1123,5 +1124,115 @@ func TestHandleSendClearRetiresTranscript(t *testing.T) {
 	}
 	if n.Transcript != tx || n.SessionID != "sess" {
 		t.Fatalf("ordinary send retired the link: transcript=%q session=%q", n.Transcript, n.SessionID)
+	}
+}
+
+// --- /clear: uniform page-turn semantics (session-log phase 3) ---
+
+// A "/clear" sent to a structured node must open a fresh protocol session on
+// the same subprocess (second thread/start), append a path-less source seam
+// to the node's log, and leave the chat with a fresh surface: zero turns,
+// the prior count, and the seam's own timestamp for the divider.
+func TestHandleSendCodexClear(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	spawn, requests := newFakeCodexSpawn(t, "THREAD-CLR", rollout)
+	// Wire the manager at sessionsDir like production main() does, so the
+	// chat read path observes the manager's log.
+	a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+
+	rec := newNode(a, `{"title":"C","prompt":"ping","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	n := a.nodes[0]
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && a.codex.Live(n.ID) == "active" {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sendReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	sendReq.SetPathValue("id", n.ID)
+	sendRec := httptest.NewRecorder()
+	a.handleSend(sendRec, sendReq)
+	if sendRec.Code != 200 {
+		t.Fatalf("/clear: code = %d body %q", sendRec.Code, sendRec.Body.String())
+	}
+	starts := 0
+	for _, m := range requests() {
+		if m == "thread/start" {
+			starts++
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("thread/start count = %d, want 2 (launch + clear)", starts)
+	}
+	evs := sessionlog.ReadEvents(filepath.Join(a.sessionsDir, n.ID+".jsonl"))
+	if len(evs) == 0 {
+		t.Fatal("no session log events")
+	}
+	last := evs[len(evs)-1]
+	if last.T != "source" || last.Source == nil || last.Source.Path != "" {
+		t.Fatalf("last event = %+v, want path-less source seam", last)
+	}
+
+	chatReq := httptest.NewRequest("GET", "/api/nodes/"+n.ID+"/chat", nil)
+	chatReq.SetPathValue("id", n.ID)
+	chatRec := httptest.NewRecorder()
+	a.handleChat(chatRec, chatReq)
+	var body struct {
+		Turns       []any  `json:"turns"`
+		PriorTurns  int    `json:"prior_turns"`
+		ChatStarted string `json:"chat_started"`
+	}
+	if err := json.Unmarshal(chatRec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Turns) != 0 || body.PriorTurns == 0 || body.ChatStarted == "" {
+		t.Fatalf("fresh surface: turns=%d prior=%d started=%q",
+			len(body.Turns), body.PriorTurns, body.ChatStarted)
+	}
+}
+
+// A known Claude rollover (retireTranscript) must turn the page immediately:
+// a path-less seam lands in the log at retire time so the fresh surface does
+// not wait for the relink after the next turn.
+func TestRetireTranscriptAppendsClearSeam(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "c1", Agent: "claude", Transcript: "/tmp/x.jsonl", SessionID: "sid"}
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", a.home),
+		sessionlog.NewSource("/tmp/x.jsonl", "sid"),
+		{T: "user", Text: "old question"},
+		{T: "assistant", Text: "old answer"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a.retireTranscript(n)
+
+	seg := sessionlog.ReadSegment(w.Path)
+	if len(seg.Turns) != 0 || seg.PriorTurns != 2 || seg.StartTime == "" {
+		t.Fatalf("post-retire segment: turns=%d prior=%d start=%q",
+			len(seg.Turns), seg.PriorTurns, seg.StartTime)
+	}
+	// A node that never mirrored has no page to turn: no log file appears.
+	n2 := &Node{ID: "c2", Agent: "claude", Transcript: "/tmp/y.jsonl", SessionID: "s2"}
+	a.nodes = append(a.nodes, n2)
+	a.byID[n2.ID] = n2
+	a.retireTranscript(n2)
+	if _, err := os.Stat(filepath.Join(a.sessionsDir, "c2.jsonl")); err == nil {
+		t.Fatal("retire must not create a log for a never-mirrored node")
 	}
 }
