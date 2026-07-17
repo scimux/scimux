@@ -42,6 +42,61 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	}
 }
 
+// Extract the pure markdown helpers (mdInline/md) from the embedded page and
+// execute them under node with a DOM-free esc stub. Finding 97: paragraph
+// lines must be escaped per line and then joined with a real <br>, never the
+// other way around.
+func TestWebMarkdownParagraphs(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "function mdInline(")
+	if start < 0 {
+		t.Fatal("could not locate mdInline in web/index.html")
+	}
+	end := strings.Index(html[start:], "/* ---------- statusbar")
+	if end < 0 {
+		t.Fatal("could not locate the end of the markdown helpers in web/index.html")
+	}
+	script := `function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }` + "\n" +
+		html[start:start+end] + `
+const assert = require("assert");
+assert.strictEqual(md("line one\nline two"), "<p>line one<br>line two</p>");
+assert.strictEqual(md("a <b> tag\nnext"), "<p>a &lt;b&gt; tag<br>next</p>");
+assert.strictEqual(md("solo"), "<p>solo</p>");
+assert.strictEqual(md("p1 l1\np1 l2\n\np2"), "<p>p1 l1<br>p1 l2</p><p>p2</p>");
+`
+	f := filepath.Join(t.TempDir(), "md.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("markdown paragraph rendering broken: %v\n%s", err, out)
+	}
+}
+
+// Finding 98 contract: a fork must not submit the sheet's stale launch config.
+// The payload sends agent/model/effort/dir empty whenever a parent is set so
+// that resolveNode remains the single inheritance authority.
+func TestForkPayloadDefersLaunchConfigToServer(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, field := range []string{"agent", "model", "effort", "dir"} {
+		if !strings.Contains(html, field+`: ncParent ? "" :`) {
+			t.Errorf("new-node payload field %q is not emptied in fork mode", field)
+		}
+	}
+}
+
 func TestEmbeddedAgentAssetsServe(t *testing.T) {
 	assets, err := fs.Sub(webFS, "web/assets")
 	if err != nil {

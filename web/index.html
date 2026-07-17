@@ -742,8 +742,8 @@ body.notes-open #notespane { transform: translateX(0); }
     <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
     <div id="keyrow"></div>
     <div id="convtools" hidden>
-      <button id="scrollend" aria-label="scroll to latest message" title="scroll to latest"></button>
       <button id="termtoggle" aria-label="show terminal" title="show/hide terminal"></button>
+      <button id="scrollend" aria-label="scroll to latest message" title="scroll to latest"></button>
     </div>
     <div id="workpulse" aria-hidden="true"></div>
     <div id="promptbar">
@@ -825,7 +825,7 @@ body.notes-open #notespane { transform: translateX(0); }
   <div class="grab"></div>
   <h3 id="ad_title">Adopt session</h3>
   <div class="sect row2">
-    <div><label>agent inside it</label><select id="ad_agent"><option>claude</option><option>codex</option><option>pi</option><option>opencode</option></select></div>
+    <div><label>agent inside it</label><select id="ad_agent"><option>claude</option><option>pi</option><option>opencode</option></select></div>
   </div>
   <div class="sect">
     <div class="k">Claude session id (optional — auto-discovered if empty)</div>
@@ -1211,7 +1211,7 @@ function mdInline(s){
 function md(src){
   const lines = (src || "").split("\n");
   let out = [], para = [], table = null, list = null, quote = [];
-  const flushP = () => { if (para.length){ out.push("<p>" + mdInline(para.join("<br>")) + "</p>"); para = []; } };
+  const flushP = () => { if (para.length){ out.push("<p>" + para.map(mdInline).join("<br>") + "</p>"); para = []; } };
   const flushT = () => { if (table){ out.push(table + "</table>"); table = null; } };
   const flushL = () => { if (list){ out.push(list.html + `</${list.tag}>`); list = null; } };
   const flushQ = () => { if (quote.length){ out.push("<blockquote>" + quote.map(mdInline).join("<br>") + "</blockquote>"); quote = []; } };
@@ -2237,6 +2237,7 @@ function forkFromTurn(text){
   setNewActivitySubmitting(false);
   $("#nc_title").value = "Follow-up";
   $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
+  prepareLaunchConfig();
   prepareNewActivityLane();
   openSheet("#newchat");
 }
@@ -2870,7 +2871,7 @@ function fillAgents(){
 }
 function fillModels(){
   $("#nc_model").innerHTML = (MODELS[$("#nc_agent").value] || [""]).map(m =>
-    `<option value="${esc(m)}">${m || "(default)"}</option>`).join("");
+    `<option value="${esc(m)}">${esc(m) || "(default)"}</option>`).join("");
 }
 $("#nc_agent").addEventListener("change", fillModels);
 fillAgents(); fillModels();
@@ -2881,6 +2882,25 @@ api("/api/agents").then(j => {
     MODELS[agent] = ["", ...models];   /* "" = launch with the harness default */
   fillAgents(); fillModels();
 }).catch(() => {});
+/* prepareLaunchConfig: fork mode shows the parent's launch config read-only
+   (same pattern as the inherited lane); the payload sends those fields empty
+   so resolveNode stays the single inheritance authority. A plain + restores
+   the editable selectors with the detected agent/model lists. */
+function prepareLaunchConfig(){
+  const p = nodeById(ncParent);
+  if (p){
+    $("#nc_agent").innerHTML = `<option>${esc(p.agent || "")}</option>`;
+    $("#nc_model").innerHTML = `<option>${esc(p.model) || "(default)"}</option>`;
+    $("#nc_effort").value = $("#nc_effort").querySelector(`option[value="${esc(p.effort || "")}"]`) ? (p.effort || "") : "";
+    $("#nc_dir").value = p.dir || "";
+  } else if ($("#nc_agent").disabled){  /* leaving fork mode: rebuild the real lists */
+    fillAgents(); fillModels();
+    $("#nc_effort").value = "";
+    $("#nc_dir").value = "";
+  }
+  for (const id of ["#nc_agent", "#nc_model", "#nc_effort", "#nc_dir"])
+    $(id).disabled = !!p;
+}
 function prepareNewActivityLane(){
   const inherited = nodeById(ncParent)?.lane_id || "";
   fillLaneSelect($("#nc_lane"), inherited, true, !!inherited);
@@ -2893,6 +2913,7 @@ $("#plusbtn").addEventListener("click", () => {
   setNewActivitySubmitting(false);
   $("#nc_title").value = "";
   $("#nc_prompt").value = "";
+  prepareLaunchConfig();
   prepareNewActivityLane();
   const lastDir = localStorage.getItem("scimux-lastdir");
   if (lastDir && !$("#nc_dir").value) $("#nc_dir").value = lastDir;
@@ -2940,10 +2961,12 @@ $("#nc_start").addEventListener("click", async () => {
     title,
     description,
     prompt: description || title,
-    agent: $("#nc_agent").value,
-    model: $("#nc_model").value,
-    effort: $("#nc_effort").value,
-    dir: $("#nc_dir").value.trim(),
+    /* fork mode sends the launch config empty: resolveNode inherits from the
+       parent, and the disabled selectors only display those inherited values */
+    agent: ncParent ? "" : $("#nc_agent").value,
+    model: ncParent ? "" : $("#nc_model").value,
+    effort: ncParent ? "" : $("#nc_effort").value,
+    dir: ncParent ? "" : $("#nc_dir").value.trim(),
     /* set by "New activity from here…": fresh-context fork off the evidence */
     parent: ncParent,
     rationale: ncParent ? "follow-up on: " + ncRationale : "",
@@ -3044,15 +3067,15 @@ async function tick(){
     pollUI();
   } finally { ticking = false; }
 }
-let pollTimer = null;
-async function pollLoop(){
+let pollTimer = null, pollGen = 0;
+async function pollLoop(gen){
   await tick();
-  if (!document.hidden) pollTimer = setTimeout(pollLoop, 2000);
+  if (!document.hidden && gen === pollGen) pollTimer = setTimeout(() => pollLoop(gen), 2000);
 }
 function startPolling(){
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
-  pollLoop();
+  pollLoop(++pollGen);
 }
 document.addEventListener("visibilitychange", () => {
   if (document.hidden){ if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
