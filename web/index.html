@@ -605,7 +605,9 @@ body.notes-open #notespane { transform: translateX(0); }
   opacity: .85; transition: width .15s; }
 #noteflags button:hover { width: 22px; opacity: 1; }
 #notetabs { border-bottom: 1px solid var(--hairline); }
-#notelist { flex: 1; overflow-y: auto; padding: 6px 14px 12px; }
+#notelist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: clip;
+  padding: 6px 14px 12px;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .note { margin: 12px 0; }
 .note .when { font-size: 11px; color: var(--dim); margin: 0 0 3px 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
