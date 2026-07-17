@@ -184,12 +184,15 @@ func (m *Manager) Send(nodeID, text string) error {
 	return nil
 }
 
-// Clear opens a fresh thread for the node on the same app-server process —
-// the structured-transport /clear, mirroring acp.Manager.Clear. thread/start
-// is negotiated first and the source seam is appended only after it
-// succeeded, so the log records what actually happened; the prior
-// conversation stays behind the seam in the same file. One turn at a time
-// applies: a /clear racing an active turn is refused like a second Send.
+// Clear opens a fresh thread for the node — the structured-transport /clear.
+// Unlike acp.Manager.Clear (which replaces the subprocess, because a second
+// session/new on one ACP connection is unproven upstream), codex keeps the
+// same PID: multiple threads per app-server process are a first-class
+// concept of its protocol. thread/start is negotiated first and the source
+// seam is appended only after it succeeded, so the log records what actually
+// happened; the prior conversation stays behind the seam in the same file.
+// One turn at a time applies: a /clear racing an active turn is refused like
+// a second Send.
 func (m *Manager) Clear(nodeID string) error {
 	m.mu.Lock()
 	s := m.sessions[nodeID]

@@ -65,10 +65,14 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam —
   never a new file, never truncation; the context gauge is segment-scoped.
-  Structured transports implement it as a fresh protocol session
-  (`session/new` / `thread/start`) on the same subprocess, seam appended only
-  after the call succeeded; Claude gets a path-less "detached" seam at
-  retire time and the real seam at relink. Fork stays the only path that can
+  ACP nodes (pi/opencode) implement it as **deterministic process
+  replacement** — kill the subprocess, negotiate a fresh one under the same
+  node (a second `session/new` on one connection is unproven upstream; a
+  fresh PID self-evidently carries no context); codex opens a new thread on
+  the same PID (multi-thread per app-server process is first-class there).
+  In both, the seam is appended only after the protocol call succeeded;
+  Claude gets a path-less "detached" seam at retire time and the real seam
+  at relink. Fork stays the only path that can
   change launch config: a forked node inherits agent/model/effort/dir but
   never conversation history.
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from

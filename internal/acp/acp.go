@@ -178,42 +178,86 @@ func (m *Manager) Send(nodeID, text string) error {
 	return nil
 }
 
-// Clear starts a fresh conversation for the node on the same subprocess — the
-// structured-transport /clear. The fresh chat surface lives under the same
-// node: the new session is negotiated first, and the source seam is appended
-// only after the protocol call succeeded, so the log records what actually
-// happened; the prior conversation stays behind the seam in the same file.
-// One turn at a time applies: a /clear racing an active turn is refused like
-// a second Send.
+// Clear is the /clear for ACP nodes, and it is deliberately a process
+// replacement: the old subprocess is killed and a fresh one is negotiated
+// under the same node. ACP permits a second session/new over one connection,
+// but the agents in the wild are driven one-session-per-process by their
+// usual clients — that code path is unproven upstream, and /clear must be
+// deterministic. A fresh PID self-evidently carries no prior context. Same
+// node, same log file: the source seam is appended only after the
+// replacement session exists, so the log records what actually happened; on
+// any failure the old conversation is left untouched (/clear simply
+// failed). One turn at a time applies: a /clear racing an active turn is
+// refused like a second Send. (codex differs: its app-server hosts multiple
+// threads per process as a first-class concept, so codex.Manager.Clear
+// opens a thread on the same PID.)
 func (m *Manager) Clear(nodeID string) error {
-	s := m.session(nodeID)
-	if s == nil {
+	old := m.session(nodeID)
+	if old == nil {
 		return ErrNoSession
 	}
-	if !s.alive() {
+	if !old.alive() {
 		return ErrNotAlive
 	}
-	if _, ok := s.reserveTurn(); !ok {
+	// Fence the swap like a turn: refuse a racing /clear-vs-turn, and keep
+	// new turns out while the replacement is negotiated.
+	if _, ok := old.reserveTurn(); !ok {
 		return ErrTurnActive
 	}
-	defer s.abortTurn() // the reservation only guarded the swap; no prompt ran
+	proc, err := m.runner(nodeID, old.agent, old.dir)
+	if err != nil {
+		old.abortTurn()
+		return err
+	}
+	s := &Session{
+		nodeID:    nodeID,
+		agent:     old.agent,
+		proc:      proc,
+		logw:      old.logw, // same file, same writer: stragglers stay serialized
+		dir:       old.dir,
+		effort:    old.effort,
+		procAlive: true,
+		done:      make(chan struct{}),
+	}
+	s.conn = sdk.NewClientSideConnection(s, proc.Stdin(), proc.Stdout())
 	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
 	defer cancel()
+	if _, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
+		ProtocolVersion: sdk.ProtocolVersionNumber,
+		ClientCapabilities: sdk.ClientCapabilities{
+			Fs:       sdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
+			Terminal: false,
+		},
+	}); err != nil {
+		killAndReap(proc)
+		old.abortTurn()
+		return fmt.Errorf("acp initialize: %w", err)
+	}
 	resp, err := s.conn.NewSession(ctx, sdk.NewSessionRequest{Cwd: s.dir, McpServers: []sdk.McpServer{}})
 	if err != nil {
+		killAndReap(proc)
+		old.abortTurn()
 		return fmt.Errorf("acp new session: %w", err)
 	}
+	s.sessionID = resp.SessionId
+	s.captureBanner(resp)
+	s.applyEffort(ctx, s.effort, resp)
+	// Seam before the visible flip — record first, publish second.
 	if err := s.logw.Append(sessionlog.NewSource("", string(resp.SessionId))); err != nil {
+		killAndReap(proc)
+		old.abortTurn()
 		return fmt.Errorf("record clear seam: %w", err)
 	}
-	s.mu.Lock()
-	old := s.sessionID
-	s.sessionID = resp.SessionId
-	s.lastError = ""
-	s.mu.Unlock()
-	// Politely retire the dead session; its fate is irrelevant to the new one.
-	_, _ = s.conn.CloseSession(ctx, sdk.CloseSessionRequest{SessionId: old})
-	s.applyEffort(ctx, s.effort, resp)
+	m.mu.Lock()
+	m.sessions[nodeID] = s
+	m.mu.Unlock()
+	// Reap the replacement like Launch does, then retire the old process
+	// (cancel, close session, kill the group). Its turn fence dies with it.
+	go func() {
+		_ = proc.Wait()
+		s.markExited()
+	}()
+	_ = old.stop()
 	return nil
 }
 
