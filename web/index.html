@@ -563,6 +563,14 @@ body.cards-open #msgs { overflow: hidden; }
 .sheet .cta:disabled { opacity: .55; }
 .sheet .item { display: flex; gap: 10px; align-items: baseline; margin: 8px 0; font-size: 14px; }
 .sheet .item .tag { color: var(--dim); font-size: 12px; margin-left: auto; }
+/* burger menu: update row + about ([hidden] must beat the display rules above) */
+.sheet .item[hidden], .sheet .cta[hidden] { display: none; }
+#m_check { color: var(--work); font-size: 16px; line-height: 1; }
+#menu .lic { text-decoration: underline dotted; }
+#m_notes { max-height: 40dvh; overflow-y: auto; margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid var(--hairline); font-size: 14px; }
+#m_lictext { max-height: 40dvh; overflow-y: auto; margin: 8px 0 0; white-space: pre-wrap;
+  overflow-wrap: break-word; font: 11px/1.5 ui-monospace, monospace; color: var(--dim); }
 .sheet .pos-item { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; font-size: 14px; }
 .sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
 #backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,.25);
@@ -882,7 +890,22 @@ body.notes-open #notespane { transform: translateX(0); }
   <div class="grab"></div>
   <h3>scimux</h3>
   <div class="sect">
-    <div class="item"><span>Version</span><span class="tag" id="m_version">—</span></div>
+    <div class="item"><span>Version</span><span class="tag" id="m_version">—</span>
+      <button id="m_check" aria-label="check for updates" title="check for updates">&#8635;</button></div>
+    <div class="item" id="m_result" hidden><span id="m_reltext"></span>
+      <a class="tag" id="m_relurl" target="_blank" rel="noopener">release page</a></div>
+    <button class="cta" id="m_apply" hidden>Update &amp; restart</button>
+    <div id="m_notes" hidden></div>
+  </div>
+  <div class="sect">
+    <div class="k">About</div>
+    <div class="item"><span>Author</span><span class="tag">Christian Berger</span></div>
+    <div class="item"><span>Source</span>
+      <a class="tag" href="https://codeberg.org/chrberger/scimux" target="_blank" rel="noopener">codeberg.org/chrberger/scimux</a></div>
+    <div class="item"><span>License</span><button class="tag lic" data-lic="scimux">MPL-2.0</button></div>
+    <div class="item"><span>acp-go-sdk (ACP transport)</span><button class="tag lic" data-lic="acp">Apache-2.0</button></div>
+    <div class="item"><span>Go runtime</span><button class="tag lic" data-lic="go">BSD-3-Clause</button></div>
+    <pre id="m_lictext" hidden></pre>
   </div>
 </div>
 
@@ -2833,6 +2856,70 @@ function closeSheets(){ $("#backdrop").classList.remove("on");
 closeSheets();
 $("#backdrop").addEventListener("click", closeSheets);
 $("#burger").addEventListener("click", () => openSheet("#menu"));
+
+/* ---- burger menu: manual update check + self-update + about ----
+   The check and the download run only on an explicit tap; the server never
+   phones home on its own. The install is confirm-first, and the button walks
+   through honest states (checking → available → updating → restarting). */
+let updateInfo = null;
+$("#m_check").addEventListener("click", async () => {
+  const btn = $("#m_check"), tag = $("#m_version");
+  btn.disabled = true;
+  tag.textContent = "checking…";
+  try {
+    updateInfo = await api("/api/update/check");
+    tag.textContent = updateInfo.current;
+    $("#m_result").hidden = false;
+    $("#m_reltext").textContent = updateInfo.available
+      ? updateInfo.latest + " available" : "up to date (" + updateInfo.latest + ")";
+    $("#m_relurl").href = updateInfo.url || "https://codeberg.org/chrberger/scimux/releases";
+    $("#m_apply").hidden = !updateInfo.available;
+    $("#m_notes").innerHTML = updateInfo.available ? md(updateInfo.notes || "") : "";
+    $("#m_notes").hidden = !updateInfo.available || !updateInfo.notes;
+  } catch {
+    updateInfo = null;
+    tag.textContent = "check failed";
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#m_apply").addEventListener("click", async () => {
+  if (!updateInfo || !updateInfo.available) return;
+  if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and restart scimux?\n\n` +
+    "pi/opencode/codex agents are stopped by the restart; tmux agents keep running.")) return;
+  const btn = $("#m_apply");
+  btn.disabled = true;
+  btn.textContent = "updating…";
+  try {
+    await api("/api/update", { method: "POST" });
+    btn.textContent = "restarting…";
+    const want = updateInfo.latest, t0 = Date.now();
+    while (Date.now() - t0 < 60000){
+      await new Promise(res => setTimeout(res, 1000));
+      try {
+        const r = await fetch("/api/state", { cache: "no-store" });
+        if (r.ok && (await r.json()).version === want){ location.reload(); return; }
+      } catch {}
+    }
+    btn.textContent = "restart timed out — reload the page";
+  } catch (e) {
+    alert("Update failed: " + (e.message || e));
+    btn.disabled = false;
+    btn.textContent = "Update & restart";
+  }
+});
+/* license texts: fetched once on first tap, folded like everything else */
+let licenseTexts = null;
+document.querySelectorAll("#menu .lic").forEach(b => b.addEventListener("click", async () => {
+  const pre = $("#m_lictext");
+  if (!licenseTexts){
+    try { licenseTexts = await api("/api/licenses"); } catch { return; }
+  }
+  if (!pre.hidden && pre.dataset.lic === b.dataset.lic){ pre.hidden = true; return; }
+  pre.textContent = licenseTexts[b.dataset.lic] || "";
+  pre.dataset.lic = b.dataset.lic;
+  pre.hidden = false;
+}));
 
 /* composer tools: window-maximize toggles the terminal below the last bubble;
    the choice rides through the next prompt (termOpen persists until the

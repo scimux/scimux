@@ -2142,6 +2142,9 @@ func main() {
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
 	mux.HandleFunc("GET /api/ui", a.handleUIGet)
 	mux.HandleFunc("PUT /api/ui", a.handleUIPut)
+	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
+	mux.HandleFunc("POST /api/update", a.handleUpdateApply)
+	mux.HandleFunc("GET /api/licenses", handleLicenses)
 
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)
