@@ -993,6 +993,50 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	}
 }
 
+// TestMaybeRelinkTranscriptIgnoresStaleCmdlineSession: the pane cmdline names
+// the session claude was *launched* with; after an in-pane /clear the process
+// keeps that argv while writing a new session file. Relinking must reject a
+// cmdline-derived transcript that did not carry the finished phase — trusting
+// it rebinds the dead pre-/clear file and needs-input (the approval watcher)
+// goes permanently blind on that node.
+func TestMaybeRelinkTranscriptIgnoresStaleCmdlineSession(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(proj, "old-session.jsonl")
+	newPath := filepath.Join(proj, "new-session.jsonl")
+	for _, p := range []string{oldPath, newPath} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+	// The pane process still advertises the retired launch session.
+	a.paneSession = func(pid string) string { return "old-session" }
+
+	// /clear through scimux retired the link; the first phase of the new
+	// session just ended.
+	n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj"}
+	a.nodes = append(a.nodes, n)
+	a.byID["c1"] = n
+	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+
+	a.maybeRelinkTranscript(n)
+
+	if n.Transcript != newPath {
+		t.Fatalf("transcript = %q, want %q (stale cmdline session id must not win)", n.Transcript, newPath)
+	}
+	if n.SessionID != "new-session" {
+		t.Fatalf("session id = %q, want new-session", n.SessionID)
+	}
+}
+
 // A linked transcript that carried the phase (mtime after phase start) is
 // healthy — a newer sibling session file must not steal the link.
 func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {

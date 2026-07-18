@@ -582,10 +582,17 @@ body.cards-open #msgs { overflow: hidden; }
 #mapwrap { position: relative; }
 #mapsvg { position: absolute; left: 0; top: 0; pointer-events: none; }
 .strow { position: relative; display: flex; flex-direction: column; justify-content: center;
-  height: 76px; padding-right: 16px; cursor: pointer; }
+  height: 76px; padding-right: 16px; cursor: pointer; overflow: hidden; }
 .strow:active { background: var(--th-bg); }
 .strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 500;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* the row height is fixed (the SVG's station y-positions depend on it), so the
+   description gets one ellipsized line and the title yields to a single line
+   whenever a description is present */
+.strow .desc { font-size: 12px; color: var(--dim); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strow .desc + .cap { margin-top: 0; }
+.strow .lbl:has(+ .desc) { -webkit-line-clamp: 1; }
 .strow .cap { font-size: 11px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strow .why { font-size: 11.5px; color: var(--dim); margin-top: 1px;
@@ -1682,7 +1689,10 @@ function renderMap(){
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
   const focusLane = mapFocus && nodeById(sel) ? nodeById(sel).lane_id : null;
 
-  const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.lane_id, n.live, n.attention]))
+  /* the signature must cover every rendered field — a description edit (or a
+     model/rationale change) has to repaint the station rows */
+  const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.description || n.prompt || "",
+      n.rationale, n.agent, n.model, n.lane_id, n.live, n.attention]))
     + "|" + focusLane + "|" + mapFocus + "|" + mapTab
     + "|" + JSON.stringify(UI.groups || []) + "|" + JSON.stringify(UI.lanes || []);
   if (sig === mapSig) return;
@@ -1717,10 +1727,12 @@ function renderMap(){
     rows.map(n => {
       const laneID = n.lane_id;
       const when = (n.created_at || "").slice(5, 16).replace("T", " ");
+      const desc = n.description || n.prompt || "";   /* same fallback as the card summary */
       return `
       <div class="strow ${dimLane(laneID) ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}"
            style="padding-left:${GW + 16}px" data-nid="${esc(n.id)}">
         <div class="lbl">${esc(n.title)}</div>
+        ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
         <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}</div>
         ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
       </div>`;
@@ -2323,6 +2335,12 @@ $("#msgs").addEventListener("click", e => {
     const i = +turnEl.dataset.i;
     tappedTurn = tappedTurn === i ? -1 : i;
     renderBubbleActions();
+    /* the row appears below the bubble — for a tall bubble tapped near the
+       viewport bottom it would land off-screen; reveal it. Only on the tap
+       itself, never on the poll-driven re-attach (polling must not scroll). */
+    if (tappedTurn >= 0)
+      document.querySelector("#msgs .bubactions")
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 });
 
@@ -2477,6 +2495,11 @@ $("#notespane").addEventListener("click", e => {
   if (noteEl){
     openNoteT = openNoteT === noteEl.dataset.t ? "" : noteEl.dataset.t;
     renderNotesPane();
+    /* same reveal as chat bubbles: the unfolded action row must be visible
+       after the tap (re-query — the render above rebuilt the list DOM) */
+    if (openNoteT)
+      document.querySelector(`#notelist .note[data-t="${CSS.escape(openNoteT)}"] .noteactions`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 });
 /* the note composer: always visible, two modes. Default appends a manual

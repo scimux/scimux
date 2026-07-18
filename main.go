@@ -123,6 +123,10 @@ type app struct {
 	// the state clears, so a delayed Enter can never stack a second prompt
 	// onto an unsubmitted first one.
 	sendState map[string]string
+	// paneSession, when non-nil, replaces the /proc-based session-id lookup
+	// for a pane pid (sessionFromPane). Tests set it: the process tree behind
+	// a fake tmux pane is not reachable through the Runner seam.
+	paneSession func(pid string) string
 
 	server    *tmuxsession.Server
 	acp       acpManager
@@ -588,6 +592,15 @@ func firstWords(s string, n int) string {
 // may wrap the command in `sh -c`), applying extract to each command line to
 // find an agent session id. Linux /proc only; returns "" anywhere it can't
 // look.
+// paneSessionID resolves the claude session id from the pane's process tree,
+// through the test seam when one is installed.
+func (a *app) paneSessionID(pid string) string {
+	if a.paneSession != nil {
+		return a.paneSession(pid)
+	}
+	return sessionFromPane(pid, sessionArgFromCmdline)
+}
+
 func sessionFromPane(panePID string, extract func([]string) string) string {
 	if id := extract(procCmdline(panePID)); id != "" {
 		return id
@@ -799,14 +812,22 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 		}
 	}
 	// Prefer the pane process's own session id (deterministic even with many
-	// sessions in one directory); fall back to the session file this phase
-	// just wrote. The fallback is ambiguous only when two panes in the same
+	// sessions in one directory) — but only when the file it names carried
+	// the phase that just ended. The cmdline holds the id claude was
+	// *launched* with; after an in-pane /clear the process keeps that argv
+	// while writing a brand-new session file, so a stale cmdline id must fall
+	// through to the newest-file heuristic instead of relinking the dead
+	// pre-/clear transcript (which would blind needs-input for good: the
+	// dead file never grows, so no pending call and no staleness signal ever
+	// appear). The fallback is ambiguous only when two panes in the same
 	// directory finish concurrently, and path exclusivity bounds that damage.
 	var path, sid string
 	if pid, err := a.server.Session(n.ID).PanePID(); err == nil {
-		if got := sessionFromPane(pid, sessionArgFromCmdline); got != "" {
+		if got := a.paneSessionID(pid); got != "" {
 			if p, ok := transcript.FindClaudeTranscript(a.home, got); ok {
-				path, sid = p, got
+				if st, err := os.Stat(p); err == nil && st.ModTime().After(since) {
+					path, sid = p, got
+				}
 			}
 		}
 	}
