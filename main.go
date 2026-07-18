@@ -127,6 +127,13 @@ type app struct {
 	// runs outside a.mu; uniqueID must not reissue them, like pathClaims for
 	// transcript paths.
 	reserved map[string]bool
+	// anim: per-node pane-change geometry (noteAnim). Tracks whether
+	// successive capture diffs stay confined to the same few lines — the
+	// mechanical signature of a static screen with an animation strip (a
+	// queued tool's spinner under an approval dialog), as opposed to
+	// streaming output. Feeds the active-pane dialog corroboration and the
+	// stalled-wait backstop in poll().
+	anim map[string]*animState
 	// paneSession, when non-nil, replaces the /proc-based session-id lookup
 	// for a pane pid (sessionFromPane). Tests set it: the process tree behind
 	// a fake tmux pane is not reachable through the Runner seam.
@@ -356,6 +363,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.staleChat, id)
 	delete(a.sendState, id)
 	delete(a.segCache, id)
+	delete(a.anim, id)
 }
 
 // ---------- node lifecycle ----------
@@ -753,7 +761,8 @@ func (a *app) poll() {
 			cap, err := s.Capture()
 			if err == nil {
 				a.mu.Lock()
-				if cap != a.prevCap[n.ID] {
+				if pc := a.prevCap[n.ID]; cap != pc {
+					a.noteAnim(n.ID, pc, cap)
 					a.prevCap[n.ID] = cap
 					a.lastChg[n.ID] = time.Now()
 				}
@@ -814,6 +823,40 @@ func (a *app) poll() {
 				a.mu.Unlock()
 				if noEvidence || (tl != nil && tl.Unparseable()) {
 					attn = "inspect"
+				}
+			}
+		} else if state == "active" {
+			// Active-pane needs-input: only when the transcript shows an
+			// unresolved call AND the pane's changes are confined to an
+			// animation strip is one visible-capture spent on the dialoghint
+			// matchers. A streaming pane never gets here (noteAnim cleared
+			// the state), so running tools cost nothing and cannot false-fire
+			// — their pane doesn't render an approval dialog. If the matcher
+			// stays dark long enough while the transcript stalls, the wait
+			// degrades to the neutral "inspect", never a classified dialog.
+			if tl := a.tailerFor(n); tl != nil {
+				tl.Poll()
+				if name, ok := tl.WaitingOn(); ok {
+					off, _ := tl.Progress()
+					a.mu.Lock()
+					st := a.anim[n.ID]
+					var stalledSince time.Time
+					if st != nil {
+						if st.off != off {
+							// Transcript progressed: the agent is producing,
+							// not waiting. Restart the stall window.
+							st.off, st.since = off, time.Now()
+						}
+						stalledSince = st.since
+					}
+					a.mu.Unlock()
+					if st != nil {
+						if visible, err := s.CaptureVisible(); err == nil && dialoghint.ClassifyVisible(visible) {
+							attn = attentionKind(name)
+						} else if time.Since(stalledSince) >= animStallAfter {
+							attn = "inspect"
+						}
+					}
 				}
 			}
 		}
@@ -916,6 +959,101 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	if cp.ID != "" {
 		_ = a.appendRecord(storeRecord{Type: "node", Node: &cp})
 	}
+}
+
+// The quiet gate is structurally blind to one case: an approval dialog with
+// parallel tool calls queued behind it — the queued call's spinner keeps the
+// pane "active" for as long as the human stays away (observed live: 6m42s
+// unnoticed). The pieces below close it without weakening the mechanical
+// core: line-diff geometry decides whether an "active" pane is really a
+// static screen with an animation strip, and only then is the dialoghint
+// matcher consulted to classify a transcript-evidenced wait. Text corroborates
+// structured evidence; it never replaces it and never feeds liveness.
+
+// animMaxLines: pane changes confined to this many distinct lines across
+// ticks count as an in-place animation strip (spinner + timer rows), not
+// real output. animStallAfter: how long a confined-animated pane with an
+// unresolved tool call and a stalled transcript waits before the neutral
+// "inspect" backstop fires — the safety net for dialogs the matcher no
+// longer recognizes after a TUI rewording.
+const animMaxLines = 3
+const animStallAfter = 90 * time.Second
+
+type animState struct {
+	lines []int     // union of line indices seen changing, sorted
+	since time.Time // when changes became confined; restarts on transcript growth
+	off   int64     // transcript offset backing the stall window; -1 until read
+}
+
+// noteAnim classifies one pane change: streaming or redrawing output touches
+// many lines and clears the state; an animation strip touches the same few
+// lines tick after tick. Mechanical only — diff geometry, never text.
+// Callers hold a.mu.
+func (a *app) noteAnim(id, prev, cur string) {
+	if prev == "" {
+		return // first observation: no baseline to diff against
+	}
+	idx := changedLines(prev, cur, animMaxLines+1)
+	if st := a.anim[id]; st != nil {
+		if merged := unionInts(st.lines, idx); len(merged) <= animMaxLines {
+			st.lines = merged
+			return
+		}
+	}
+	if len(idx) <= animMaxLines {
+		if a.anim == nil { // tests build app literals without the map
+			a.anim = map[string]*animState{}
+		}
+		a.anim[id] = &animState{lines: idx, since: time.Now(), off: -1}
+	} else {
+		delete(a.anim, id)
+	}
+}
+
+// changedLines reports the indices of lines that differ between two
+// captures, giving up after max entries (the caller only distinguishes
+// "confined" from "not confined").
+func changedLines(prev, cur string, max int) []int {
+	po, co := strings.Split(prev, "\n"), strings.Split(cur, "\n")
+	n := len(po)
+	if len(co) > n {
+		n = len(co)
+	}
+	var idx []int
+	for i := 0; i < n && len(idx) < max; i++ {
+		var p, c string
+		if i < len(po) {
+			p = po[i]
+		}
+		if i < len(co) {
+			c = co[i]
+		}
+		if p != c {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// unionInts merges two sorted int slices without duplicates.
+func unionInts(a, b []int) []int {
+	out := make([]int, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		switch {
+		case j == len(b) || (i < len(a) && a[i] < b[j]):
+			out = append(out, a[i])
+			i++
+		case i == len(a) || b[j] < a[i]:
+			out = append(out, b[j])
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
 }
 
 // attentionKind classifies what the agent is waiting for, from the name of
@@ -1988,9 +2126,39 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		cap = "(session exited or unavailable)\n\n" + err.Error()
+	} else {
+		a.notePeekDialog(n, s)
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, cap)
+}
+
+// notePeekDialog runs the corroborated dialog check when a human opens the
+// terminal view. Peeking is exactly the manual gesture that catches a dialog
+// the quiet gate cannot see (parallel calls queued behind it keep the pane
+// animating), so automate it at the same moment: one visible capture,
+// transcript corroboration required, attention only ever added — the poller
+// keeps owning clearing. Unlike the poller's tick path this is one-shot and
+// human-triggered, so it skips the confined-animation gate.
+func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
+	tl := a.tailerFor(n)
+	if tl == nil {
+		return
+	}
+	tl.Poll()
+	name, ok := tl.WaitingOn()
+	if !ok {
+		return
+	}
+	visible, err := s.CaptureVisible()
+	if err != nil || !dialoghint.ClassifyVisible(visible) {
+		return
+	}
+	a.mu.Lock()
+	if a.attn[n.ID] == "" {
+		a.attn[n.ID] = attentionKind(name)
+	}
+	a.mu.Unlock()
 }
 
 // ---------- UI state ----------
@@ -2156,6 +2324,7 @@ func main() {
 		staleChat:   map[string]bool{},
 		sendState:   map[string]string{},
 		reserved:    map[string]bool{},
+		anim:        map[string]*animState{},
 		server:      tmuxsession.NewServer(*socket),
 		acp:         acpManager{acp.NewManager(sessionsDir)},
 		codex:       codexManager{codex.NewManager(sessionsDir)},

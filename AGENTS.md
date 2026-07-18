@@ -81,7 +81,20 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   tool call in the transcript (structured data — both CLIs log the call
   record when the agent asks and the result record only after the human
   answers) with a mechanically quiet pane (running tools animate a timer;
-  approval dialogs are static). Never detect dialogs by matching pane text.
+  approval dialogs are static). Pane text never creates attention on its
+  own; the fenced exceptions are the `internal/dialoghint` matchers, which
+  only ever *corroborate or classify*: on a quiet pane as the regex fallback,
+  and on an active pane **only** when (a) the transcript already shows an
+  unresolved call and (b) successive capture diffs stay confined to a few
+  stable lines (`noteAnim` — diff geometry, still mechanical). That second
+  path exists because an approval dialog with parallel tool calls queued
+  behind it animates the queued call's spinner indefinitely, so quietness
+  never arrives (observed live: a 6m42s approval wait, unnoticed). If the
+  matcher goes dark (TUI rewording), the same confined-animation state with
+  a stalled transcript degrades to the neutral `inspect` after
+  `animStallAfter`, never a classified dialog. `handlePeek` runs the same
+  corroborated check one-shot when a human opens the terminal view. Liveness
+  itself stays regex-free — the matchers must never feed active/quiet.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

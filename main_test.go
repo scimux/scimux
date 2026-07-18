@@ -788,6 +788,119 @@ func TestDialogDetectionOrWithStructured(t *testing.T) {
 	}
 }
 
+// TestActivePaneDialogCorroboration covers the quiet-gate blind spot: an
+// approval dialog with a parallel tool call queued behind it animates the
+// queued call's spinner, so the pane never goes quiet. When the transcript
+// shows an unresolved call and the pane's changes stay confined to an
+// animation strip, the dialoghint matcher classifies the wait; a pane whose
+// changes are unconfined (streaming output) must stay unflagged even with a
+// dialog on screen — that geometry means a running tool.
+func TestActivePaneDialogCorroboration(t *testing.T) {
+	dialog := "Bash command\n  go test ./...\nDo you want to proceed?\n  1. Yes\n  2. No\n  Esc to cancel\n  · queued: grep (12s)"
+	confinedPrev := strings.Replace(dialog, "(12s)", "(11s)", 1) // only the spinner line differs
+	streamingPrev := "aa\nbb\ncc\ndd\nee\nff\ngg"
+
+	cases := []struct {
+		name     string
+		prev     string
+		wantAttn string
+	}{
+		{"confined animation + dialog", confinedPrev, "approval"},
+		{"unconfined changes stay running", streamingPrev, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tx.jsonl")
+			appendLines(t, path,
+				`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`,
+				`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c2","name":"Bash","input":{}}]}}`)
+			runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
+				for _, arg := range args {
+					if arg == "capture-pane" {
+						return dialog, nil
+					}
+					if arg == "has-session" {
+						return "", nil
+					}
+				}
+				return "", nil
+			}
+			n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+			a := &app{
+				byID:      map[string]*Node{"cl1": n},
+				nodes:     []*Node{n},
+				live:      map[string]string{},
+				attn:      map[string]string{},
+				prevCap:   map[string]string{"cl1": tc.prev},
+				lastChg:   map[string]time.Time{},
+				tailers:   map[string]*transcript.Tailer{},
+				chatMark:  map[string]chatMark{},
+				staleChat: map[string]bool{},
+				server:    tmuxsession.NewServerWithRunner("testsock", runner),
+			}
+			a.poll()
+			if got := a.live["cl1"]; got != "active" {
+				t.Fatalf("live = %q, want active", got)
+			}
+			if got := a.attn["cl1"]; got != tc.wantAttn {
+				t.Errorf("attention = %q, want %q", got, tc.wantAttn)
+			}
+		})
+	}
+}
+
+// TestActiveConfinedStallBackstop: a wait the matcher does not recognize
+// (future TUI wording) still degrades to the neutral "inspect" once the pane
+// has been animating in place with an unresolved call and a stalled
+// transcript for animStallAfter — never a classified dialog.
+func TestActiveConfinedStallBackstop(t *testing.T) {
+	pane := "Pick an action\n  1. Continue\n  ▸ waiting (11s)"
+	prev := strings.Replace(pane, "(11s)", "(10s)", 1)
+	path := filepath.Join(t.TempDir(), "tx.jsonl")
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
+		for _, arg := range args {
+			if arg == "capture-pane" {
+				return pane, nil
+			}
+			if arg == "has-session" {
+				return "", nil
+			}
+		}
+		return "", nil
+	}
+	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	a := &app{
+		byID:      map[string]*Node{"cl1": n},
+		nodes:     []*Node{n},
+		live:      map[string]string{},
+		attn:      map[string]string{},
+		prevCap:   map[string]string{"cl1": prev},
+		lastChg:   map[string]time.Time{},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+	a.poll() // establishes the confined-animation state and its offset
+	if got := a.attn["cl1"]; got != "" {
+		t.Fatalf("fresh stall window: attention = %q, want none", got)
+	}
+	a.mu.Lock()
+	st := a.anim["cl1"]
+	if st == nil {
+		a.mu.Unlock()
+		t.Fatal("expected confined-animation state after poll")
+	}
+	st.since = time.Now().Add(-2 * animStallAfter)
+	a.mu.Unlock()
+	a.poll()
+	if got := a.attn["cl1"]; got != "inspect" {
+		t.Errorf("stalled wait: attention = %q, want inspect", got)
+	}
+}
+
 func TestArchiveSessionLog(t *testing.T) {
 	sessions := t.TempDir()
 	a := &app{sessionsDir: sessions}

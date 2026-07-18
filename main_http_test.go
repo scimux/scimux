@@ -483,6 +483,31 @@ func TestHandlePeekTmux(t *testing.T) {
 	}
 }
 
+// TestHandlePeekSpotsDialog: opening the terminal view runs the corroborated
+// dialog check regardless of the quiet gate — the human's peek is exactly the
+// gesture that catches a dialog hidden behind an animating pane.
+func TestHandlePeekSpotsDialog(t *testing.T) {
+	dialogPane := "Do you want to proceed?\n  1. Yes\n  2. No\n  Esc to cancel"
+	f := &fakeTmux{alive: map[string]bool{"p1": true}, capture: dialogPane}
+	a := newTestApp(t, f)
+	path := filepath.Join(t.TempDir(), "tx.jsonl")
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
+	n := &Node{ID: "p1", Title: "p1", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+	a.nodes, a.byID["p1"] = []*Node{n}, n
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/p1/peek", nil)
+	r.SetPathValue("id", "p1")
+	a.handlePeek(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("peek = %d", rec.Code)
+	}
+	if got := a.attn["p1"]; got != "approval" {
+		t.Errorf("attention after peek = %q, want approval", got)
+	}
+}
+
 // --- /api/nodes/{id}/chat (tmux fallback) ---
 
 func TestHandleChatTmuxFallbackNoTranscript(t *testing.T) {
