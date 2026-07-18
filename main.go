@@ -351,9 +351,11 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.lastChg, id)
 	delete(a.activeSince, id)
 	delete(a.tailers, id)
+	delete(a.mirrors, id)
 	delete(a.chatMark, id)
 	delete(a.staleChat, id)
 	delete(a.sendState, id)
+	delete(a.segCache, id)
 }
 
 // ---------- node lifecycle ----------

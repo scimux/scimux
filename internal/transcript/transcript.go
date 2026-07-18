@@ -522,13 +522,15 @@ func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
 	return FindClaudeNewestInDirSince(home, dir, time.Time{})
 }
 
+var projectDirEsc = regexp.MustCompile(`[^a-zA-Z0-9-]`)
+
 // FindClaudeNewestInDirSince is FindClaudeNewestInDir restricted to session
 // logs modified after since — used to re-run discovery when a pane finished a
 // whole working phase that the linked transcript never carried (a /clear or
 // relaunch inside the pane started a new session file). Only a file the
 // phase actually wrote can be the pane's current session.
 func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessionID string, ok bool) {
-	esc := regexp.MustCompile(`[^a-zA-Z0-9-]`).ReplaceAllString(dir, "-")
+	esc := projectDirEsc.ReplaceAllString(dir, "-")
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", esc, "*.jsonl"))
 	if err != nil || len(matches) == 0 {
 		return "", "", false

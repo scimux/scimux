@@ -36,7 +36,8 @@ func ClassifyVisible(pane string) bool {
 	return false
 }
 
+var ansi = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
 func stripANSI(s string) string {
-	ansi := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansi.ReplaceAllString(s, "")
 }
