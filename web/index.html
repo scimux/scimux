@@ -981,6 +981,18 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
 let UI = { groups: [], archived: [], notes: [], lanes: [] };
 let uiRev = "";          // last server revision seen (ETag)
 let uiOps = [];          // local operations not yet acknowledged by the server
+/* Pending ops survive the page: the pagehide keepalive PUT is fire-and-forget
+   and can be dropped, and the next load would then fetch the server document
+   and silently overwrite the local edits. Persisted ops replay in loadUI()
+   exactly like ops made before load finished; replay is idempotent (note ops
+   dedupe on timestamp), so a keepalive that did land costs nothing. */
+function savePendingOps(){
+  try { localStorage.setItem("scimux-ui-ops", JSON.stringify(uiOps)); } catch {}
+}
+function loadPendingOps(){
+  try { return JSON.parse(localStorage.getItem("scimux-ui-ops") || "[]") || []; }
+  catch { return []; }
+}
 let uiLoaded = false;    // initial load finished — writes are gated on this
 let uiSaving = false;
 let uiTimer = null;
@@ -1014,6 +1026,7 @@ function applyOp(doc, op){
 function uiMutate(op){
   applyOp(UI, op);
   uiOps.push(op);
+  savePendingOps();
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
   renderSyncState();
   renderNotesPane();   /* signature-guarded; cheap when notes didn't change */
@@ -1037,6 +1050,7 @@ async function flushUI(){
       if (r.ok){
         uiRev = r.headers.get("ETag") || "";
         uiOps = [];
+        savePendingOps();
         localStorage.setItem("scimux-ui", JSON.stringify(UI));
         break;
       }
@@ -1076,6 +1090,8 @@ async function loadUI(){
     try { UI = normUI(JSON.parse(localStorage.getItem("scimux-ui") || "{}")); } catch {}
   }
   uiLoaded = true;
+  /* ops persisted by a previous page life come before this life's early ones */
+  uiOps = loadPendingOps().concat(uiOps);
   uiOps.forEach(op => applyOp(UI, op));  /* mutations made before load finished */
   chatSig = "";
   applyRemoteUI();
