@@ -1226,7 +1226,9 @@ function copyText(s){
   try { document.execCommand("copy"); } finally { ta.remove(); }
 }
 
-function esc(s){ const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+/* textContent→innerHTML escapes < > & but not " — add it, since esc() output
+   also lands inside double-quoted attributes. */
+function esc(s){ const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML.replaceAll('"', "&quot;"); }
 
 /* ---------- minimal markdown (escape-first; fenced code, tables, lists) ---------- */
 function mdInline(s){
@@ -1465,7 +1467,7 @@ function renderCards(){
     const archived = isArchived(n.id);
     return `
     <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${!n.lane_id ? "lane-edit" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""} ${editingTitle === n.id && editingTitleScope === "cards" ? "title-editing" : ""}" id="card-${esc(n.id)}">
-      <span class="stripe" style="background:${lm.color(n.lane_id)}"></span>
+      <span class="stripe" style="background:${esc(lm.color(n.lane_id))}"></span>
       <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
       <div class="row1">
         <span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span>
@@ -1709,10 +1711,10 @@ function renderMap(){
     const idx = rows.map((n, i) => n.lane_id === lane.id ? i : -1).filter(i => i >= 0);
     if (idx.length > 1)
       svg += `<line x1="${laneX(lm.laneOf[lane.id])}" y1="${y(idx[0])}" x2="${laneX(lm.laneOf[lane.id])}" y2="${y(idx[idx.length - 1])}"
-              stroke="${lm.color(lane.id)}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(lane.id) ? .22 : 1}"/>`;
+              stroke="${esc(lm.color(lane.id))}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(lane.id) ? .22 : 1}"/>`;
   }
   rows.forEach((n, i) => {
-    const laneID = n.lane_id, x = laneX(lm.laneOf[laneID]), yy = y(i), col = lm.color(laneID);
+    const laneID = n.lane_id, x = laneX(lm.laneOf[laneID]), yy = y(i), col = esc(lm.color(laneID));
     const op = dimLane(laneID) ? .25 : 1;
     if (n.attention)
       svg += `<circle cx="${x}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
@@ -1740,7 +1742,7 @@ function renderMap(){
 
   $("#lanechips").innerHTML = lm.lanes.filter(l => inGroup(l.id)).map(l => `
     <button class="lanechip ${!focusLane || l.id === focusLane ? "focused" : ""}"
-          style="border-color:${lm.color(l.id)};color:${lm.color(l.id)}"
+          style="border-color:${esc(lm.color(l.id))};color:${esc(lm.color(l.id))}"
           data-chip="${esc(l.id)}">${esc(l.name || l.id)}</button>`).join("");
 }
 
@@ -1764,7 +1766,7 @@ function openTabSheet(t){
     <label style="display:flex;gap:10px;align-items:center;margin:8px 0;font-size:15px">
       <input type="checkbox" value="${esc(l.id)}" style="width:auto;margin:0"
         ${t && t.lanes.includes(l.id) ? "checked" : ""}>
-      <span style="width:12px;height:12px;border-radius:6px;flex:none;background:${lm.color(l.id)}"></span>
+      <span style="width:12px;height:12px;border-radius:6px;flex:none;background:${esc(lm.color(l.id))}"></span>
       ${esc(l.name || l.id)}</label>`).join("")
     || `<div style="color:var(--dim);font-size:14px">no journeys yet — an empty map is fine</div>`;
   $("#tab_save").textContent = t ? "Save map" : "Add map";
@@ -2397,7 +2399,7 @@ function renderNotesPane(){
     `<button data-ntab="GENERAL" class="${noteTab === "GENERAL" ? "on" : ""}">General</button>` +
     tabs.map(l => `<button data-ntab="${esc(l.id)}" class="${noteTab === l.id ? "on" : ""}"
       style="color:${esc(l.color || "")}">${esc(l.name)}</button>`).join("");
-  const color = noteTab === "GENERAL" ? "var(--unlane)" : laneColor(noteTab);
+  const color = noteTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(noteTab));
   const listHtml = list.length ? list.map(nt => {
     const nd = nt.node ? nodeById(nt.node) : null;
     const src = nd ? " · " + esc(nd.title) : "";
@@ -2692,7 +2694,7 @@ longpress($("#notelist"), ".note", el => {
   const lm = laneModel();
   $("#sendto_list").innerHTML = orderedNodes().map(n => `
     <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
-      <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${lm.color(n.lane_id)}"></span>
+      <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${esc(lm.color(n.lane_id))}"></span>
       <span>${esc(n.title)}</span>
     </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
   $("#sendto_list").onclick = ev => {
