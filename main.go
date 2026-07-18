@@ -123,6 +123,10 @@ type app struct {
 	// the state clears, so a delayed Enter can never stack a second prompt
 	// onto an unsubmitted first one.
 	sendState map[string]string
+	// reserved: node ids claimed by an in-flight create whose external launch
+	// runs outside a.mu; uniqueID must not reissue them, like pathClaims for
+	// transcript paths.
+	reserved map[string]bool
 	// paneSession, when non-nil, replaces the /proc-based session-id lookup
 	// for a pane pid (sessionFromPane). Tests set it: the process tree behind
 	// a fake tmux pane is not reachable through the Runner seam.
@@ -371,7 +375,7 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 	}
 	id := slug
 	for i := 2; ; i++ {
-		if _, used := a.byID[id]; !used && !taken[id] && !a.sessionLogExists(id) {
+		if _, used := a.byID[id]; !used && !taken[id] && !a.reserved[id] && !a.sessionLogExists(id) {
 			return id
 		}
 		id = fmt.Sprintf("%s-%d", slug, i)
@@ -508,25 +512,91 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	return 0, nil
 }
 
-// createNode validates, starts the tmux session (or a structured-protocol
-// subprocess), and persists the node. It returns the HTTP status to use on
-// error: client mistakes are 400, server-side failures (tmux, store) are 500.
-// Callers hold a.mu; taken carries tmux session names that must not be reused
-// as node IDs.
+// createNode validates and reserves the node id under a.mu, then runs the
+// external launch and the store append with the lock released — a structured
+// launch can spend up to its negotiation timeout shelling out, and holding
+// a.mu for that window would stall every handler, /api/state polling included
+// (R18.5). The reservation keeps the id invisible to concurrent creates until
+// the node is published or the attempt failed. Returns the HTTP status to use
+// on error: client mistakes are 400, server-side failures (tmux, store) are
+// 500. taken carries tmux session names that must not be reused as node IDs.
 func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
+	a.mu.Lock()
 	if status, err := a.resolveNode(n); err != nil {
+		a.mu.Unlock()
 		return status, err
 	}
 	n.ID = a.uniqueID(n.Title, taken)
+	if a.reserved == nil { // tests build app literals without the map
+		a.reserved = map[string]bool{}
+	}
+	a.reserved[n.ID] = true
 	if n.Agent == "claude" {
 		n.SessionID = newUUID()
 	}
 	n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	pm := a.proc(n)
+	a.mu.Unlock()
 
-	if pm := a.proc(n); pm != nil {
-		return a.createProcNode(n, pm)
+	status, err := a.launchNode(n, pm)
+
+	// Publish (or abandon) under the lock; either way the reservation ends.
+	a.mu.Lock()
+	delete(a.reserved, n.ID)
+	if err == nil {
+		a.nodes = append(a.nodes, n)
+		a.byID[n.ID] = n
+	}
+	a.mu.Unlock()
+	if err != nil {
+		return status, err
 	}
 
+	// Deliver the research question as the first turn of a structured node.
+	// Unlike the tmux path (where the first prompt rides the launch command
+	// line and thus always reaches the agent), a structured Send can fail
+	// before anything is recorded — e.g. the subprocess died during launch, or
+	// the user-turn append failed. Persist that failure to the node's own
+	// history so the chat view shows it instead of a silent, empty successful
+	// node (finding 52). The node still exists and the prompt can be retried.
+	if pm != nil {
+		if err := pm.Send(n.ID, n.Prompt); err != nil {
+			fmt.Fprintf(os.Stderr, "scimux: first prompt to %s node %s failed: %v\n", n.transport(), n.ID, err)
+			// If the failure record also cannot be written (the session log is
+			// the failing component — commonly the same disk problem that broke
+			// Send), there is no durable trace of the lost first prompt. The
+			// node is persisted and must stay, but the caller must not see a
+			// clean success: report it so the operator retries the prompt
+			// (finding 59).
+			if rerr := pm.RecordStartFailure(n.ID, err); rerr != nil {
+				return 500, fmt.Errorf("node created but first prompt %q and its failure record were not durable (retry the prompt): %v", err, rerr)
+			}
+		}
+	}
+	return 0, nil
+}
+
+// launchNode starts the tmux session or structured-protocol subprocess (ACP
+// for pi/opencode, codex app-server for codex) and persists the node record.
+// Runs without a.mu. Persist follows launch: the session/process had to exist
+// first, so a store failure rolls it back (kill) — otherwise a session would
+// run supervised-in-memory but vanish from the registry on restart. The
+// caller publishes the node in memory only after this succeeds.
+func (a *app) launchNode(n *Node, pm procManager) (int, error) {
+	if pm != nil {
+		sid, err := pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
+		if err != nil {
+			return 500, err
+		}
+		n.SessionID = sid
+		if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+			if kerr := pm.Kill(n.ID); kerr != nil {
+				fmt.Fprintf(os.Stderr, "scimux: rollback of %s session %s failed: %v\n", n.transport(), n.ID, kerr)
+			}
+			return 500, fmt.Errorf("persist node (%s session rolled back): %v", n.transport(), err)
+		}
+		return 0, nil
+	}
 	cmd, err := agentCommand(n)
 	if err != nil {
 		return 400, err
@@ -534,58 +604,11 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	if _, err := a.server.NewSession(n.ID, n.Dir, cmd); err != nil {
 		return 500, err
 	}
-	// Persist before publishing in memory. The tmux session had to exist
-	// first, so a store failure rolls it back — otherwise a session would
-	// run supervised-in-memory but vanish from the registry on restart.
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
 		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
 			fmt.Fprintf(os.Stderr, "scimux: rollback of session %s failed: %v\n", n.ID, kerr)
 		}
 		return 500, fmt.Errorf("persist node (session rolled back): %v", err)
-	}
-	a.nodes = append(a.nodes, n)
-	a.byID[n.ID] = n
-	return 0, nil
-}
-
-// createProcNode launches a structured-protocol subprocess (ACP for
-// pi/opencode, codex app-server for codex), persists the node, then delivers
-// the first prompt. Like the tmux path it persists before publishing so a
-// store failure rolls the subprocess back (kill the group) rather than leaving
-// an orphaned process absent from the registry. The first prompt is an ordinary
-// Send fired after persistence — these transports have no command-line
-// first-turn. Callers hold a.mu.
-func (a *app) createProcNode(n *Node, pm procManager) (int, error) {
-	sid, err := pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
-	if err != nil {
-		return 500, err
-	}
-	n.SessionID = sid
-	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
-		if kerr := pm.Kill(n.ID); kerr != nil {
-			fmt.Fprintf(os.Stderr, "scimux: rollback of %s session %s failed: %v\n", n.transport(), n.ID, kerr)
-		}
-		return 500, fmt.Errorf("persist node (%s session rolled back): %v", n.transport(), err)
-	}
-	a.nodes = append(a.nodes, n)
-	a.byID[n.ID] = n
-	// Deliver the research question as the first turn. Unlike the tmux path
-	// (where the first prompt rides the launch command line and thus always
-	// reaches the agent), a structured Send can fail before anything is recorded
-	// — e.g. the subprocess died during launch, or the user-turn append failed.
-	// Persist that failure to the node's own history so the chat view shows it
-	// instead of a silent, empty successful node (finding 52). The node still
-	// exists and the prompt can be retried.
-	if err := pm.Send(n.ID, n.Prompt); err != nil {
-		fmt.Fprintf(os.Stderr, "scimux: first prompt to %s node %s failed: %v\n", n.transport(), n.ID, err)
-		// If the failure record also cannot be written (the session log is the
-		// failing component — commonly the same disk problem that broke Send),
-		// there is no durable trace of the lost first prompt. The node is
-		// persisted and must stay, but the caller must not see a clean success:
-		// report it so the operator retries the prompt (finding 59).
-		if rerr := pm.RecordStartFailure(n.ID, err); rerr != nil {
-			return 500, fmt.Errorf("node created but first prompt %q and its failure record were not durable (retry the prompt): %v", err, rerr)
-		}
 	}
 	return 0, nil
 }
@@ -1247,9 +1270,9 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	for _, s := range a.server.Sessions() {
 		taken[s] = true
 	}
-	a.mu.Lock()
+	// createNode manages a.mu itself: the id reservation happens under the
+	// lock, the external launch outside it.
 	status, err = a.createNode(&n, taken)
-	a.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
@@ -2110,6 +2133,7 @@ func main() {
 		chatMark:    map[string]chatMark{},
 		staleChat:   map[string]bool{},
 		sendState:   map[string]string{},
+		reserved:    map[string]bool{},
 		server:      tmuxsession.NewServer(*socket),
 		acp:         acpManager{acp.NewManager(sessionsDir)},
 		codex:       codexManager{codex.NewManager(sessionsDir)},
