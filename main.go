@@ -358,7 +358,9 @@ var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // uniqueID allocates a slug that collides neither with registered nodes nor
 // with any name in taken — the current tmux sessions, so an unadopted session
-// with the same slug cannot make new-session fail.
+// with the same slug cannot make new-session fail. A session log left on disk
+// under the slug also counts as taken: it means a dead node's archive rename
+// failed, and reissuing the slug would append new history onto dead history.
 func (a *app) uniqueID(title string, taken map[string]bool) string {
 	slug := strings.Trim(slugStrip.ReplaceAllString(title, "-"), "-.")
 	if slug == "" || !tmuxsession.ValidName(slug) {
@@ -369,11 +371,19 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 	}
 	id := slug
 	for i := 2; ; i++ {
-		if _, used := a.byID[id]; !used && !taken[id] {
+		if _, used := a.byID[id]; !used && !taken[id] && !a.sessionLogExists(id) {
 			return id
 		}
 		id = fmt.Sprintf("%s-%d", slug, i)
 	}
+}
+
+func (a *app) sessionLogExists(id string) bool {
+	if a.sessionsDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(a.sessionsDir, id+".jsonl"))
+	return err == nil
 }
 
 // agentCommand builds the launch command. The first prompt rides on the
@@ -1353,10 +1363,13 @@ func (a *app) archiveSessionLog(id string) {
 	}
 	dir := filepath.Join(a.sessionsDir, "archive")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive session log for %s: %v\n", id, err)
 		return
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	os.Rename(src, filepath.Join(dir, id+"."+stamp+".jsonl"))
+	if err := os.Rename(src, filepath.Join(dir, id+"."+stamp+".jsonl")); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive session log for %s: %v\n", id, err)
+	}
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {
@@ -1478,11 +1491,13 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 }
 
 // retireTranscript unlinks a node's transcript (and session id) after a known
-// session rollover. Corrections are new records: an empty-path transcript
-// record retires the link across restarts (the latest transcript record wins
-// at replay), and a node record persists the cleared session id so a young
-// node's discovery cannot resurrect the dead file. Record first, publish
-// second, as everywhere.
+// session rollover. Corrections are new records: a node record persists the
+// cleared session id so a young node's discovery cannot resurrect the dead
+// file, and an empty-path transcript record retires the link across restarts
+// (the latest transcript record wins at replay). The node record goes first:
+// if only one append lands, a cleared session id with a stale path is inert,
+// while a cleared path with a live session id lets discovery relink the dead
+// transcript. Record first, publish second, as everywhere.
 func (a *app) retireTranscript(n *Node) {
 	a.mu.Lock()
 	if n.Transcript == "" && n.SessionID == "" {
@@ -1492,12 +1507,12 @@ func (a *app) retireTranscript(n *Node) {
 	cp := *n
 	cp.Transcript, cp.SessionID = "", ""
 	a.mu.Unlock()
-	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: ""}); err != nil {
-		fmt.Fprintf(os.Stderr, "scimux: retire transcript for %s: %v\n", n.ID, err)
-		return
-	}
 	if err := a.appendRecord(storeRecord{Type: "node", Node: &cp}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: retire session id for %s: %v\n", n.ID, err)
+		return
+	}
+	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: ""}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: retire transcript for %s: %v\n", n.ID, err)
 	}
 	a.mu.Lock()
 	n.Transcript, n.SessionID = "", ""
