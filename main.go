@@ -259,6 +259,18 @@ func (a *app) proc(n *Node) procManager {
 
 // ---------- store ----------
 
+// jsonBodyMax bounds every JSON request body (prompts included; 1 MiB is
+// generous). -addr may be bound wider than loopback, so unbounded decodes
+// would be an easy memory-exhaustion hole (R18.6). /api/ui has its own,
+// larger uiStateMax limit.
+const jsonBodyMax = 1 << 20
+
+// decodeJSON decodes a bounded JSON request body.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyMax)
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
 func (a *app) appendRecord(rec storeRecord) error {
 	// 0600: the store holds prompts, working dirs, transcript paths, and
 	// remote-key pane excerpts. Match the ACP log and ui.json rather than
@@ -1160,8 +1172,16 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		SessionID   string `json:"session_id"`
 		Transcript  string `json:"transcript"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Session == "" {
+	if err := decodeJSON(w, r, &body); err != nil || body.Session == "" {
 		http.Error(w, "bad request: need session", 400)
+		return
+	}
+	// The tmux session name becomes the node id (and its session-log
+	// filename): hold it to the same rules NewSession applies to created
+	// nodes. tmux itself already rejects '.' and ':', so this is defense in
+	// depth against names that would misbehave as ids (e.g. containing '/').
+	if !tmuxsession.ValidName(body.Session) {
+		http.Error(w, fmt.Sprintf("session name %q is not adoptable as a node id", body.Session), 400)
 		return
 	}
 	agent := body.Agent
@@ -1249,7 +1269,7 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	var n Node
-	if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
+	if err := decodeJSON(w, r, &n); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
@@ -1287,7 +1307,7 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		Description *string `json:"description"`
 		LaneID      *string `json:"lane_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
@@ -1416,7 +1436,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct{ Text string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" {
+	if err := decodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
 		http.Error(w, "bad request", 400)
 		return
 	}
@@ -1865,7 +1885,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct{ Key string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Key == "" {
+	if err := decodeJSON(w, r, &body); err != nil || body.Key == "" {
 		http.Error(w, "bad request", 400)
 		return
 	}
@@ -2208,7 +2228,17 @@ func main() {
 
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	// -addr may be bound wider than loopback, so give the server real
+	// timeouts (slowloris defense). No ReadTimeout/WriteTimeout: legitimate
+	// handlers can be slow (structured sends, the self-update download);
+	// ReadHeaderTimeout covers the attack that matters.
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
