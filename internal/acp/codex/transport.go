@@ -42,9 +42,11 @@ func Spawn(bin string, extraArgs ...string) (Transport, error) {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		stdin.Close() // Start never ran, so nothing else will close it
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		// Start closes both pipe ends itself on failure.
 		return nil, fmt.Errorf("start codex app-server: %w", err)
 	}
 	t := &execTransport{cmd: cmd, stdin: stdin, stdout: stdout, waited: make(chan struct{})}

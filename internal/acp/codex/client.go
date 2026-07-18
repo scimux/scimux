@@ -463,23 +463,12 @@ func (c *Client) handleApproval(method string, params json.RawMessage) (any, *rp
 	return buildDecisionResult(a.Method, key, payload), nil
 }
 
-// callCtx runs peer.call but honours ctx cancellation.
+// callCtx runs a peer call that honours ctx cancellation. Cancellation
+// deregisters the pending id inside the peer, so repeated timeouts against a
+// live process (e.g. /clear's thread/start) cannot accumulate parked
+// goroutines or stale pending entries.
 func (c *Client) callCtx(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	type res struct {
-		raw json.RawMessage
-		err error
-	}
-	ch := make(chan res, 1)
-	go func() {
-		raw, err := c.peer.call(method, params)
-		ch <- res{raw, err}
-	}()
-	select {
-	case r := <-ch:
-		return r.raw, r.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return c.peer.callCtx(ctx, method, params)
 }
 
 // Close tears down the transport. In-flight calls are released with an error.

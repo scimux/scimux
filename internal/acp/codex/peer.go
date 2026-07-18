@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,11 @@ import (
 type peer struct {
 	w   io.Writer
 	log Tracer // optional frame trace; nil is fine
+
+	// wmu serializes frame writes and is never held with mu: a write into a
+	// full stdin pipe may block indefinitely, and the pending map must stay
+	// reachable (deliverResponse, failAll) while it does.
+	wmu sync.Mutex
 
 	mu      sync.Mutex
 	nextID  int
@@ -182,6 +188,14 @@ func (p *peer) deliverResponse(m rpcMessage) {
 
 // call sends a client->server request and blocks for its response.
 func (p *peer) call(method string, params any) (json.RawMessage, error) {
+	return p.callCtx(context.Background(), method, params)
+}
+
+// callCtx is call with cancellation: on ctx.Done() the pending id is
+// deregistered, so a timed-out call leaves no parked goroutine and no stale
+// pending-map entry behind. The response channel is buffered, so a response
+// that races the cancellation is dropped, not leaked.
+func (p *peer) callCtx(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -200,11 +214,18 @@ func (p *peer) call(method string, params any) (json.RawMessage, error) {
 		p.mu.Unlock()
 		return nil, err
 	}
-	resp := <-ch
-	if resp.Error != nil {
-		return nil, resp.Error
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			return nil, resp.Error
+		}
+		return resp.Result, nil
+	case <-ctx.Done():
+		p.mu.Lock()
+		delete(p.pending, key)
+		p.mu.Unlock()
+		return nil, ctx.Err()
 	}
-	return resp.Result, nil
 }
 
 // notify sends a client->server notification (no id, no response expected).
@@ -218,8 +239,8 @@ func (p *peer) send(v any) error {
 		return err
 	}
 	b = append(b, '\n')
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
 	p.trace("out", methodOf(v), b)
 	_, err = p.w.Write(b)
 	return err

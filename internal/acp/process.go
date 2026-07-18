@@ -59,9 +59,11 @@ func execRunner(nodeID, agent, dir string) (Process, error) {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		stdin.Close() // Start never ran, so nothing else will close it
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		// Start closes both pipe ends itself on failure.
 		return nil, fmt.Errorf("start %s ACP: %w", agent, err)
 	}
 	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout, waited: make(chan struct{})}, nil
