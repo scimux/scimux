@@ -331,6 +331,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #chathead.compact .mission { max-height: 0; opacity: 0; overflow: hidden; }
 #chathead .headtoggle { color: var(--dim); width: 34px; height: 34px; border-radius: 9px;
   display: flex; align-items: center; justify-content: center; flex: none; }
+#chathead .headtoggle[hidden] { display: none; }  /* display:flex beats [hidden] */
 #chathead .headtoggle.saving { color: var(--work); }
 #chathead .title-edit { font-size: 22px; height: 38px; }
 #chathead.compact .title-edit { font-size: 17px; height: 32px; }
@@ -659,13 +660,6 @@ body.notes-open #notespane { transform: translateX(0); }
 #notebar { border-top: 1px solid var(--hairline); background: var(--bg);
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
 #chathead .toprow, #chatmission { cursor: pointer; }
-/* comment-mode chip: must read as a pill the ✕ belongs to, never a bare ✕ */
-#notechip { display: flex; align-items: center; gap: 8px; font-size: 12px;
-  color: var(--ink); background: var(--surface); border: 1px solid var(--hairline);
-  border-radius: 12px; padding: 4px 6px 4px 10px; margin-bottom: 6px; }
-#notechiptxt { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; }
-#notechipx { color: var(--dim); width: 24px; height: 24px; flex: none; }
 #notebarrow { display: flex; align-items: flex-end; gap: 8px; }
 #noteprompt { flex: 1; font-size: 14px; line-height: 1.4; color: var(--ink);
   background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
@@ -796,12 +790,9 @@ body.notes-open #notespane { transform: translateX(0); }
     <div class="tabs" id="notetabs"></div>
     <div id="notelist"><div class="empty">No notes yet.</div></div>
     <!-- the composer is a singleton outside the polled #notelist region
-         (invariant); the chip makes comment mode visible and cancelable -->
+         (invariant); reply mode shows as the "Reply…" placeholder and is
+         canceled by leaving the empty composer (blur/Escape) -->
     <div id="notebar">
-      <div id="notechip" hidden>
-        <span id="notechiptxt"></span>
-        <button id="notechipx" aria-label="cancel comment">&#10005;</button>
-      </div>
       <div id="notebarrow">
         <div id="noteprompt" role="textbox" aria-multiline="true" contenteditable="true"
           data-placeholder="Add a note…"></div>
@@ -2601,13 +2592,9 @@ $("#notespane").addEventListener("click", e => {
    capture itself is never editable — commenting is the annotation path. */
 let noteAnchor = "";   // t of the capture being commented on
 function setNoteAnchor(t){
-  noteAnchor = t || "";
-  const nt = noteAnchor && (UI.notes || []).find(x => x.t === noteAnchor);
-  if (!nt){ noteAnchor = ""; $("#notechip").hidden = true; return; }
-  const first = (nt.text || "").split("\n")[0].slice(0, 60).trim();
-  $("#notechiptxt").textContent =
-    first ? `commenting on: «${first}»` : "commenting on a captured note";
-  $("#notechip").hidden = false;
+  noteAnchor = t && (UI.notes || []).some(x => x.t === t) ? t : "";
+  /* no chip: the focused composer's placeholder carries the reply semantics */
+  $("#noteprompt").dataset.placeholder = noteAnchor ? "Reply…" : "Add a note…";
 }
 function addManualNote(){
   const text = $("#noteprompt").innerText.trim();
@@ -2623,12 +2610,17 @@ function addManualNote(){
 }
 $("#notesend").innerHTML = ICON_SEND;
 $("#notesend").addEventListener("click", addManualNote);
-$("#notechipx").addEventListener("click", () => setNoteAnchor(""));
 $("#noteprompt").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
     e.preventDefault();
     addManualNote();
   }
+  if (e.key === "Escape"){ setNoteAnchor(""); e.target.blur(); }
+});
+/* walking away from an empty composer ends reply mode — a later plain note
+   must never silently become a comment on a long-forgotten target */
+$("#noteprompt").addEventListener("blur", () => {
+  if (!$("#noteprompt").innerText.trim()) setNoteAnchor("");
 });
 
 /* double-tap on the empty chat background snaps pinch-zoom back to 1.
