@@ -198,7 +198,13 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .card .agent-logo { margin-left: -2px; }
 .card .title { font-size: 16px; font-weight: 600; flex: 1; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* long-press targets: suppress the iOS text-selection callout in CSS so the
+   longpress handler never has to preventDefault (which would kill native
+   scrolling and tapping for any touch that starts on a title) */
+.card .title, #chattitle {
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .title-edit {
+  -webkit-user-select: text; user-select: text;   /* editable despite the parent's none */
   flex: 1; min-width: 0; height: 34px; margin: 0; padding: 5px 8px;
   font: 600 16px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   color: var(--ink); background: var(--bg);
@@ -314,6 +320,19 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   50%      { opacity: 1;  transform: translateZ(0) scale(1.22); }
 }
 .card.adoptable { border-style: dashed; }
+/* "Input needed": out-of-scope attention gathered under one pinned fold —
+   the yellow dot breathes (same calm cadence as the working dot), never
+   blinks; unfolding discloses the cards in place */
+.attnfold { display: flex; align-items: center; gap: 8px; width: calc(100% - 4px);
+  padding: 10px 14px; margin: 10px 2px; text-align: left; font-size: 14px;
+  border: 1.5px solid rgba(var(--attn-rgb), .5); border-radius: var(--radius);
+  background: rgba(var(--attn-rgb), .08); color: var(--ink); }
+.attnfold .attndot { width: 9px; height: 9px; border-radius: 5px; flex: none;
+  background: var(--attn); transform: translateZ(0) scale(.85); transform-origin: center;
+  will-change: transform, opacity; animation: breathe 1.65s ease-in-out infinite; }
+.attnfold .foldlabel { flex: 1; font-weight: 600; }
+.attnfold .foldchev { color: var(--dim); font-size: 17px; transition: transform .2s; }
+.attnfold.open .foldchev { transform: rotate(90deg); }
 .empty { padding: 60px 20px; color: var(--dim); text-align: center; font-size: 15px; }
 
 /* ---------- chat ---------- */
@@ -942,6 +961,7 @@ let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts o
 let termOpen = false;        // terminal unfolded below the last bubble (per selection)
 let cardTab = "current";
 let laneFilter = localStorage.getItem("scimux-lanefilter") || "";
+let attnFoldOpen = false;   /* "Input needed" disclosure; folded on scope change */
 let mapTab = localStorage.getItem("scimux-maptab") || "all";
 const expanded = new Set();
 let actionCard = "";
@@ -1471,35 +1491,69 @@ function laneModel(){
 const isArchived = id => (UI.archived || []).includes(id);
 
 function renderCards(){
-  const lm = laneModel();
   /* an archived node that needs a decision surfaces in Current anyway —
-     archiving organizes, it must never hide a pending approval/question.
-     The lane filter obeys the same rule: attention pierces the scope. */
-  const inScope = n => !laneFilter || n.lane_id === laneFilter || hardAttention(n);
-  const list = orderedNodes().filter(n =>
-    (isArchived(n.id) === (cardTab === "archived") ||
-    (cardTab === "current" && hardAttention(n))) && inScope(n));
-  const sig = JSON.stringify(list.map(n => [n.id, n.title, n.description, n.lane_id, n.live, n.attention, n.model, n.effort]))
+     archiving organizes, it must never hide a pending approval/question */
+  const tabList = orderedNodes().filter(n =>
+    isArchived(n.id) === (cardTab === "archived") ||
+    (cardTab === "current" && hardAttention(n)));
+  /* The lane scope hides other journeys' cards, with two exemptions that
+     keep the panes coherent: the open chat's own card always shows (its
+     conversation is on screen — the list must not deny it exists), and
+     out-of-scope cards that need input gather under the pinned "Input
+     needed" fold below instead of interleaving with the focused lane.
+     Invariant: nothing that needs input is ever invisible — it is either
+     in the list (in-lane, or no filter) or in the fold, never neither. */
+  const inScope = n => !laneFilter || n.lane_id === laneFilter || n.id === sel;
+  const list = tabList.filter(inScope);
+  const foldList = laneFilter && cardTab === "current"
+    ? tabList.filter(n => !inScope(n) && hardAttention(n)) : [];
+  if (!foldList.length) attnFoldOpen = false;
+  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
-    + "|" + cardTab + "|" + laneFilter + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
+    + "|" + cardTab + "|" + laneFilter + "|" + foldList.length + "|" + attnFoldOpen
+    + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
     + "|" + actionCard + "|" + editingDesc + "|" + editingTitle;
   if (sig === cardsSig){ updateCardAges(); return; }
   cardsSig = sig;
   renderCardTabs();
-  const adoptCards = cardTab !== "current" ? "" : unadopted.map(s => `
+  /* adoptable sessions belong to no journey yet — a lane scope hides them
+     like any other out-of-lane card (they return with "All") */
+  const adoptCards = cardTab !== "current" || laneFilter ? "" : unadopted.map(s => `
     <div class="card adoptable">
       <div class="row1"><span class="title">${esc(s)}</span></div>
       <div class="status">unadopted tmux session</div>
       <button class="go" data-adopt="${esc(s)}" aria-label="adopt ${esc(s)}"></button>
     </div>`).join("");
+  /* the fold: out-of-scope attention, one calm pinned row — folded it says
+     "N waiting elsewhere", unfolded the cards work in place (disclosure,
+     not navigation) */
+  const foldHtml = !foldList.length ? "" : `
+    <button class="attnfold ${attnFoldOpen ? "open" : ""}" data-attnfold
+      aria-expanded="${attnFoldOpen}">
+      <span class="attndot"></span>
+      <span class="foldlabel">Input needed (${foldList.length})</span>
+      <span class="foldchev">&#8250;</span>
+    </button>` + (attnFoldOpen ? foldList.map(cardHTML).join("") : "");
   /* notes retired as a pseudo-activity: they live in the sticky-notes pane */
   withCardEditsPreserved(() => {
-  $("#cardlist").innerHTML = adoptCards + (list.length ? list.map(n => {
+  $("#cardlist").innerHTML = foldHtml + adoptCards + (list.length ? list.map(cardHTML).join("")
+    : laneFilter
+      ? `<div class="empty">No ${cardTab === "archived" ? "archived " : ""}activities on this journey.</div>`
+      : cardTab === "archived"
+        ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
+        : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
+  });
+  const waiting = nodes.filter(hardAttention).length;
+  document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
+  document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
+}
+
+function cardHTML(n){
     const desc = n.description || n.prompt || "";
     const archived = isArchived(n.id);
     return `
     <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${!n.lane_id ? "lane-edit" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""} ${editingTitle === n.id && editingTitleScope === "cards" ? "title-editing" : ""}" id="card-${esc(n.id)}">
-      <span class="stripe" style="background:${esc(lm.color(n.lane_id))}"></span>
+      <span class="stripe" style="background:${esc(laneColor(n.lane_id))}"></span>
       <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
       <div class="row1">
         <span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span>
@@ -1524,23 +1578,13 @@ function renderCards(){
         <button class="trash" data-trash="${esc(n.id)}" aria-label="remove">${ICON_TRASH}</button>
       </div>
     </div>`;
-  }).join("")
-    : laneFilter
-      ? adoptCards ? "" : `<div class="empty">No ${cardTab === "archived" ? "archived " : ""}activities on this journey.</div>`
-      : cardTab === "archived"
-        ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
-        : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
-  });
-  const waiting = nodes.filter(hardAttention).length;
-  document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
-  document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
 }
 
 /* The map's lane filter propagated into the Activities pane: the first tab
    *is* the scope — "All" unfiltered, the lane's dot + name + ✕ when a lane
    is filtered (same vocabulary as the Journeys "All" tab). Cards outside
-   the lane are hidden (not dimmed — the pane is crowded enough), except
-   hardAttention ones, which pierce every scope. */
+   the lane are hidden (not dimmed — the pane is crowded enough); the open
+   chat's card and the "Input needed" fold are the only exemptions. */
 function renderCardTabs(){
   const scope = laneFilter
     ? `<span class="tabdot" style="background:${esc(laneColor(laneFilter))}"></span>${esc(laneName(laneFilter))}<span class="x" data-clear-scope aria-label="show all activities">&#10005;</span>`
@@ -1551,6 +1595,7 @@ function renderCardTabs(){
 }
 function setLaneFilter(id){
   laneFilter = id || "";
+  attnFoldOpen = false;      /* a new scope starts with the fold closed */
   if (laneFilter) localStorage.setItem("scimux-lanefilter", laneFilter);
   else localStorage.removeItem("scimux-lanefilter");
   cardsSig = ""; mapSig = "";
@@ -1631,6 +1676,11 @@ function updateCardAges(){
   }
 }
 $("#cardlist").addEventListener("click", async e => {
+  if (e.target.closest("[data-attnfold]")){
+    attnFoldOpen = !attnFoldOpen;
+    cardsSig = ""; renderCards();
+    return;
+  }
   const save = e.target.closest("[data-save-desc]");
   if (save){
     const id = save.dataset.saveDesc;
@@ -1715,7 +1765,6 @@ $("#cardlist").addEventListener("click", async e => {
 /* ---------- metro map: journeys = explicit lanes, stations = activities ----------
    Only nodes assigned to a lane render here. Fork rationale renders as "why:"
    under the station; unassigned activities stay solely in Activities. */
-let mapFocus = true;
 let mapSig = "";
 
 /* maps: logical tabs over the journeys — a viewing filter only.
@@ -1746,14 +1795,16 @@ function renderMap(){
   const inGroup = laneID => !grp || grp.includes(laneID);
   const rows = [...nodes].filter(n => n.lane_id && inGroup(n.lane_id))
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
-  /* an explicit chip filter outranks the selection-derived focus */
-  const focusLane = laneFilter || (mapFocus && nodeById(sel) ? nodeById(sel).lane_id : null);
+  /* dimming is owned by the explicit lane filter alone — if selection also
+     drove it, clearing the filter (chip second tap, scope-tab ✕) would leave
+     the map identically dimmed and the tap would read as a no-op */
+  const focusLane = laneFilter || null;
 
   /* the signature must cover every rendered field — a description edit (or a
      model/rationale change) has to repaint the station rows */
   const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.description || n.prompt || "",
       n.rationale, n.agent, n.model, n.lane_id, n.live, n.attention]))
-    + "|" + focusLane + "|" + mapFocus + "|" + mapTab
+    + "|" + focusLane + "|" + mapTab
     + "|" + JSON.stringify(UI.groups || []) + "|" + JSON.stringify(UI.lanes || []);
   if (sig === mapSig) return;
   mapSig = sig;
@@ -2236,9 +2287,10 @@ async function refreshChat(){
     ? "Send unconfirmed \u2014 check the terminal"
     : (DEC_LABELS[d.reason] || "Needs your attention");
   el.innerHTML =
-    /* page-turn divider: a /clear left prior history behind a source seam in
-       the session log; the surface restarts here, under the same activity */
-    (d.prior_turns > 0
+    /* every chat opens with its start stamp — the same header a /clear
+       page-turn writes, so a fresh chat and a cleared one read alike (the
+       prior history then sits behind the seam in the same log) */
+    (d.chat_started
       ? `<div class="chatseam"><span>chat started ${esc(fmtWhen(d.chat_started))}</span></div>` : "") +
     (!turns.length && !(d.prior_turns > 0 && d.source === "acp")
       ? `<div class="pending">${d.pending
@@ -2670,32 +2722,28 @@ let lpFired = false;
 document.addEventListener("click", e => {
   if (lpFired){ e.stopPropagation(); e.preventDefault(); lpFired = false; }
 }, true);
-function longpress(container, selector, fn, opts = {}){
+function longpress(container, selector, fn){
   let timer = null;
-  let tapEl = null;   /* a preventNative touch that may still turn out a tap */
   const fire = (el, ev) => {
     lpFired = true;
     setTimeout(() => { lpFired = false; }, 700);  /* don't swallow later taps */
     fn(el, ev);
   };
+  /* all listeners are passive: preventDefault() here would suppress native
+     panning for the whole touch, turning every long-pressable title into a
+     scroll dead zone. The iOS text-selection callout is suppressed by CSS
+     instead (.no-callout on the long-press targets), so taps, scrolling,
+     and the native click all stay fully native. */
   container.addEventListener("touchstart", e => {
     const el = e.target.closest(selector);
     if (!el) return;
     /* touches inside form controls stay fully native (cursor placement in
        an open title editor); long-press means nothing there */
     if (e.target.closest("input, textarea, select, button")) return;
-    if (opts.preventNative) e.preventDefault();
-    tapEl = opts.preventNative ? el : null;
-    timer = setTimeout(() => { tapEl = null; fire(el, e); }, 500);
-  }, { passive: !opts.preventNative });
-  ["touchmove","touchcancel"].forEach(ev =>
-    container.addEventListener(ev, () => { clearTimeout(timer); tapEl = null; }, { passive: true }));
-  container.addEventListener("touchend", () => {
-    clearTimeout(timer);
-    /* preventDefault at touchstart killed iOS's synthetic click — a quick
-       tap (no long-press fired, no movement) must still act as one */
-    if (tapEl){ const el = tapEl; tapEl = null; el.click(); }
+    timer = setTimeout(() => fire(el, e), 500);
   }, { passive: true });
+  ["touchmove","touchend","touchcancel"].forEach(ev =>
+    container.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
   /* press-and-hold with a pointer (mouse, iPad trackpad) — synthesized mouse
      events after a touch tap arrive as a quick down/up pair, so the timer
      never fires for those; moving > 6px (text selection, drag) cancels */
@@ -2719,8 +2767,8 @@ function longpress(container, selector, fn, opts = {}){
 }
 
 /* long-press a title wherever the Activity title is shown -> edit it in place */
-longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title, "cards"), { preventNative: true });
-longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"), { preventNative: true });
+longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title, "cards"));
+longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"));
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
@@ -3109,7 +3157,11 @@ function prepareLaunchConfig(){
 }
 function prepareNewActivityLane(){
   const inherited = nodeById(ncParent)?.lane_id || "";
-  fillLaneSelect($("#nc_lane"), inherited, true, !!inherited);
+  /* under a lane scope, + means "start one on this journey": prefill the
+     filtered lane (editable) — otherwise the new card would be born outside
+     the scope and vanish from the list the moment it appears. A fork's
+     inherited lane still wins and stays read-only. */
+  fillLaneSelect($("#nc_lane"), inherited || laneFilter, true, !!inherited);
   $("#nc_lane_new").value = "";
   clearFieldError($("#nc_lane_new"));
   syncLanePicker($("#nc_lane"));

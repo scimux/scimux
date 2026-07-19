@@ -16,8 +16,13 @@ import (
 // as prior history. A log that never rolled over is one segment.
 type Segment struct {
 	Turns      []transcript.Turn
-	PriorTurns int    // turns before the last seam; >0 means "render a divider"
-	StartTime  string // the last seam's own timestamp ("" when no seam exists)
+	PriorTurns int // turns before the last seam; >0 means "render a divider"
+	// StartTime is when the current chat surface began: the last seam's own
+	// timestamp, or — for a log that never rolled over — the first timed
+	// record's (normally the meta header). Every chat gets a "chat started"
+	// header from it, not just post-/clear segments; "" only for a missing
+	// or empty log.
+	StartTime string
 	// Usage folded from records within the segment only: a rollover starts a
 	// fresh context, so the gauge must not carry the dead session's fill.
 	Used, Size int64
@@ -27,6 +32,9 @@ func segmentOf(evs []Event) Segment {
 	var seg Segment
 	seg.Turns = []transcript.Turn{}
 	for _, ev := range evs {
+		if seg.StartTime == "" && ev.Time != "" {
+			seg.StartTime = ev.Time // first-segment fallback; a seam overwrites
+		}
 		switch ev.T {
 		case "source":
 			seg.PriorTurns += len(seg.Turns)

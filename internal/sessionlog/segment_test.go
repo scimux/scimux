@@ -19,16 +19,19 @@ func writeLog(t *testing.T, evs []Event) string {
 }
 
 func TestSegmentNoSeam(t *testing.T) {
-	// A log that never rolled over is one segment: all turns, no divider.
+	// A log that never rolled over is one segment: all turns, no divider,
+	// and the chat's start stamp comes from the meta header (every chat
+	// renders a "chat started" header, not just post-/clear segments).
+	meta := NewMeta("n1", "codex", "gpt", "/tmp")
 	path := writeLog(t, []Event{
-		NewMeta("n1", "codex", "gpt", "/tmp"),
+		meta,
 		{T: "user", Text: "hello"},
 		{T: "assistant", Text: "hi"},
 		{T: "usage", Usage: &UsageEvent{Used: 100, Size: 1000}},
 	})
 	seg := ReadSegment(path)
-	if len(seg.Turns) != 2 || seg.PriorTurns != 0 || seg.StartTime != "" {
-		t.Fatalf("got turns=%d prior=%d start=%q", len(seg.Turns), seg.PriorTurns, seg.StartTime)
+	if len(seg.Turns) != 2 || seg.PriorTurns != 0 || seg.StartTime != meta.Time {
+		t.Fatalf("got turns=%d prior=%d start=%q (want start %q)", len(seg.Turns), seg.PriorTurns, seg.StartTime, meta.Time)
 	}
 	if seg.Used != 100 || seg.Size != 1000 {
 		t.Fatalf("usage got %d/%d", seg.Used, seg.Size)
