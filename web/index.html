@@ -1309,7 +1309,10 @@ function mdInline(s){
           .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 function md(src){
-  const lines = (src || "").split("\n");
+  /* the tmux paste path delivers a multi-line prompt's newlines as \r
+     (terminal Enter), and the CLI transcript records them that way — treat
+     every CR flavor as a line break or the turn renders flattened */
+  const lines = (src || "").replace(/\r\n?/g, "\n").split("\n");
   let out = [], para = [], table = null, list = null, quote = [];
   const flushP = () => { if (para.length){ out.push("<p>" + para.map(mdInline).join("<br>") + "</p>"); para = []; } };
   const flushT = () => { if (table){ out.push(table + "</table>"); table = null; } };
@@ -2264,9 +2267,17 @@ async function refreshChat(){
   /* the echo retires once the store serves the turn (or after a generous
      timeout \u2014 the unconfirmed-delivery flow owns the failure story) */
   if (sentEcho && sentEcho.node === n.id){
-    const lastUser = [...turns].reverse().find(t => t.role === "user");
-    if ((lastUser && lastUser.text.trim() === sentEcho.text) ||
-        Date.now() - sentEcho.at > 180000) sentEcho = null;
+    /* the store's copy of the turn is not byte-identical to the draft: the
+       tmux paste turns \n into \r, and the CLI may reflow whitespace —
+       compare whitespace-insensitively. And since sends are serialized per
+       node, any user turn that lands after the send *is* this send: retire
+       on arrival even if the text was reshaped beyond recognition. */
+    const norm = s => (s || "").replace(/\s+/g, " ").trim();
+    const iLast = turns.reduce((a, t, i) => t.role === "user" ? i : a, -1);
+    const landed = iLast >= 0 &&
+      (norm(turns[iLast].text) === norm(sentEcho.text) ||
+       (sentEcho.seen != null && iLast >= sentEcho.seen));
+    if (landed || Date.now() - sentEcho.at > 180000) sentEcho = null;
   }
   const echo = sentEcho && sentEcho.node === n.id ? sentEcho : null;
   const unconfirmed = d.delivery === "unconfirmed";
@@ -3016,7 +3027,12 @@ async function sendPrompt(){
      + chat poll), and an empty chat after hitting send reads as a swallowed
      prompt. Translucent until the real turn lands; removed on failure —
      then the draft returns instead. */
-  sentEcho = { node: dest, text, at: Date.now() };
+  /* seen = how many turns were on screen at send time; the next user turn
+     past that index is this send landing. Only trustworthy when the chat has
+     actually rendered for this node (chatSig set after a render, cleared on
+     select) — otherwise leave it null and rely on the text match/timeout. */
+  sentEcho = { node: dest, text, at: Date.now(),
+               seen: chatSig ? lastTurns.length : null };
   paintEchoNow(dest);
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
