@@ -84,8 +84,8 @@ type MetaEvent struct {
 // rotation. The turns that follow a source record were mirrored from that
 // file, which is also the mirror's dedupe anchor — on startup it replays the
 // log, finds the last source, and counts the turns after it to know where to
-// resume. Structured transports never write source records (their log is the
-// primary history, not a mirror).
+// resume. Structured transports write source records only as /clear page-turn
+// seams (their log is the primary history, not a mirror), with an empty path.
 type SourceEvent struct {
 	Path      string `json:"path"`
 	SessionID string `json:"sessionId,omitempty"`
@@ -99,10 +99,19 @@ func NewSource(path, sessionID string) Event {
 // NewMeta builds the header record for a fresh node log.
 func NewMeta(node, agent, model, dir string) Event {
 	b := make([]byte, 8)
-	rand.Read(b)
+	var uid string
+	if _, err := rand.Read(b); err == nil {
+		uid = fmt.Sprintf("%x", b)
+	} else {
+		// The UID exists to be collision-proof across slug reuse; a silent
+		// all-zero value on RNG failure would defeat exactly that. A
+		// nanosecond stamp cannot collide with another log minted by this
+		// process, and the "t" prefix keeps it distinguishable from hex UIDs.
+		uid = fmt.Sprintf("t%x", time.Now().UnixNano())
+	}
 	now := nowStamp()
 	return Event{T: "meta", Time: now, Meta: &MetaEvent{
-		Node: node, UID: fmt.Sprintf("%x", b), Agent: agent, Model: model,
+		Node: node, UID: uid, Agent: agent, Model: model,
 		Dir: dir, Created: now,
 	}}
 }
@@ -200,9 +209,18 @@ func LatestUsage(path string) (used, size int64) {
 
 // PeekLog renders the tail of the raw event log as plain text — the
 // structured-transport analogue of a pane photo (no terminal to capture).
-// At most maxLines lines; empty is shown for a missing or event-free log.
+// Scoped to the current segment: a /clear appends a source seam and turns the
+// page, so the peek must not resurface the dead conversation behind it (the
+// seam line itself is kept as the visible boundary). At most maxLines lines;
+// empty is shown for a missing or event-free log.
 func PeekLog(path string, maxLines int, empty string) string {
 	evs := ReadEvents(path)
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].T == "source" {
+			evs = evs[i:]
+			break
+		}
+	}
 	var lines []string
 	for _, ev := range evs {
 		lines = append(lines, formatEvent(ev))

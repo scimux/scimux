@@ -91,6 +91,30 @@ func TestPeekLog(t *testing.T) {
 	}
 }
 
+// A /clear appends a source seam and turns the page; the peek must show only
+// the current segment, never resurface the dead conversation behind the seam
+// (finding 90).
+func TestPeekLogScopedToCurrentSegment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	w.Append(NewMeta("n1", "opencode", "", "/wd"))
+	w.Append(Event{T: "user", Text: "old question"})
+	w.Append(Event{T: "assistant", Text: "old answer"})
+	w.Append(NewSource("", "fresh-session"))
+	got := PeekLog(path, 10, "(empty)")
+	if strings.Contains(got, "old question") || strings.Contains(got, "old answer") {
+		t.Fatalf("peek resurfaces pre-seam history: %q", got)
+	}
+	if !strings.Contains(got, "— source") {
+		t.Fatalf("peek should keep the seam line as the boundary: %q", got)
+	}
+	w.Append(Event{T: "user", Text: "new question"})
+	got = PeekLog(path, 10, "(empty)")
+	if !strings.Contains(got, "» new question") || strings.Contains(got, "old answer") {
+		t.Fatalf("post-seam peek wrong: %q", got)
+	}
+}
+
 func TestSourceRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}

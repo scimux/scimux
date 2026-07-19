@@ -457,6 +457,45 @@ func TestClearStartsFreshSegment(t *testing.T) {
 	}
 }
 
+// After a /clear the retired session shares the log writer with its
+// replacement; a straggler from the dying process (a late usage or tool
+// event) must not land after the seam, where it would poison the fresh
+// segment — most concretely its context gauge (finding 91).
+func TestClearFencesRetiredSessionWrites(t *testing.T) {
+	agent := &fakeAgent{}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	old := m.session("n1")
+	if err := m.Clear("n1"); err != nil {
+		t.Fatal(err)
+	}
+	// The dying process reports usage after the page turn.
+	old.mu.Lock()
+	persisted := old.appendLocked(Event{T: "usage", Usage: &UsageEvent{Used: 9000, Size: 10000}})
+	old.mu.Unlock()
+	if persisted {
+		t.Error("retired session's write claimed to persist")
+	}
+	seg := sessionlog.ReadSegment(filepath.Join(dir, "n1.jsonl"))
+	if seg.Used != 0 || seg.Size != 0 {
+		t.Fatalf("fresh segment gauge poisoned by retired session: used=%d size=%d", seg.Used, seg.Size)
+	}
+	// The replacement session still writes normally.
+	fresh := m.session("n1")
+	fresh.mu.Lock()
+	ok := fresh.appendLocked(Event{T: "usage", Usage: &UsageEvent{Used: 1, Size: 100}})
+	fresh.mu.Unlock()
+	if !ok {
+		t.Fatal("fresh session's write failed")
+	}
+	if seg := sessionlog.ReadSegment(filepath.Join(dir, "n1.jsonl")); seg.Used != 1 {
+		t.Fatalf("fresh session's usage not visible: %+v", seg)
+	}
+}
+
 // A /clear racing an active turn is refused like a second Send: one turn at
 // a time also guards the session swap.
 func TestClearDuringActiveTurn(t *testing.T) {

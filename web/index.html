@@ -679,6 +679,11 @@ body.notes-open #notespane { transform: translateX(0); }
 .noteactions button:active { color: var(--work); }
 /* jump-to-source lands here: briefly ring the target bubble */
 .turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
+/* transient notice (jump-to-source misses); fixed so polled rebuilds can't wipe it */
+#toast { position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom));
+  transform: translateX(-50%); max-width: min(86vw, 420px); z-index: 60;
+  background: var(--ink); color: var(--bg); font-size: 13px; line-height: 1.4;
+  padding: 8px 14px; border-radius: 12px; text-align: center; pointer-events: none; }
 /* comments sort at their anchor and read as a scribble under the sticky */
 .note.comment { margin: 8px 0 8px 26px; }
 #notesback { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1050,6 +1055,19 @@ function applyOp(doc, op){
       if (!doc.notes.some(n => n.t === op.note.t)) doc.notes.push(op.note);
       break;
     case "note-del":
+      /* deleting a capture promotes its anchored comments to standalone
+         notes — neither deleted with it nor stripped of context. They keep
+         the anchor's activity/lane (so they stay on their tab and can still
+         jump); they now sort at their own timestamp. */
+      {
+        const dead = (doc.notes || []).find(n => n.t === op.t);
+        if (dead) for (const c of doc.notes){
+          if (c.anchor !== op.t) continue;
+          delete c.anchor;
+          if (dead.node && !c.node){ c.node = dead.node; if (dead.turnTime) c.turnTime = dead.turnTime; }
+          if (dead.lane && !c.lane) c.lane = dead.lane;
+        }
+      }
       doc.notes = (doc.notes || []).filter(n => n.t !== op.t);
       break;
     case "groups":   /* map edits replace the whole tab list (rare, one device) */
@@ -2255,9 +2273,14 @@ async function refreshChat(){
   if (!n.attention) delete suppressAttentionUntil[n.id];
   const attentionHidden = !!n.attention && attentionSuppressed(n.id);
   const mustShowPane = !attentionHidden && (!!d.fallback || !!n.attention || unconfirmed);
+  /* a structured node right after a /clear page turn is a calm state — empty
+     segment, quiet, nothing to approve. Don't force the log peek open (it
+     would resurface the dead conversation) and never the attention label */
+  const freshSurface = !turns.length && !mustShowPane &&
+                       d.source === "acp" && (d.prior_turns || 0) > 0;
   /* forced: the pane is required evidence (blocker) or the only content
      (no readable turns yet); otherwise the window-maximize toggle governs it */
-  const forcePeek = mustShowPane || !turns.length;
+  const forcePeek = mustShowPane || (!turns.length && !freshSurface);
   const showPeek = forcePeek || termOpen;
   let peekText = "";
   if (showPeek){
@@ -2309,10 +2332,12 @@ async function refreshChat(){
        prior history then sits behind the seam in the same log) */
     (d.chat_started
       ? `<div class="chatseam"><span>chat started ${esc(fmtWhen(d.chat_started))}</span></div>` : "") +
-    (!turns.length && !(d.prior_turns > 0 && d.source === "acp")
-      ? `<div class="pending">${d.pending
-          ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
-          : "no readable transcript \u2014 showing the raw terminal below"}</div>` : "") +
+    (!turns.length
+      ? (freshSurface
+          ? `<div class="pending">fresh chat \u2014 send a prompt</div>`
+          : `<div class="pending">${d.pending
+              ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
+              : "no readable transcript \u2014 showing the raw terminal below"}</div>`) : "") +
     turns.map((t, i) => `
       <div class="turn ${t.role === "user" ? "user" : "assistant"}" data-i="${i}">
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(t.text)}</div>
@@ -2336,7 +2361,7 @@ async function refreshChat(){
         `</div>`
       : "");
   renderBubbleActions();                    /* re-attach the tapped bubble's icon row */
-  if (!consumePendingJump(el, turns) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
+  if (!consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
   const pk = el.querySelector(".peek");
   if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
 
@@ -2625,6 +2650,12 @@ $("#notespane").addEventListener("click", e => {
     const nt = (UI.notes || []).find(x => x.t === act.closest(".note")?.dataset.t);
     if (!nt) return;
     if (act.dataset.nact === "jump" && nt.node){
+      if (!nodeById(nt.node)){
+        /* the activity is gone (deleted; its log lives in sessions/archive) —
+           the note itself still reads and copies */
+        toast("This note's activity was deleted — the text is still here to read or copy.");
+        return;
+      }
       /* bubble indexes are unstable; the turn's own timestamp (with the text
          as fallback) finds it again once the chat has rendered */
       pendingJump = { node: nt.node, turnTime: nt.turnTime || "", text: nt.text || "", ts: Date.now() };
@@ -2718,15 +2749,38 @@ $("#msgs").addEventListener("touchend", e => {
   lastBgTap = now;
 }, { passive: true });
 
+/* transient one-liner, fixed above the composer; outside every polled render
+   region so a rebuild cannot wipe it mid-display */
+let toastTimer = null;
+function toast(msg){
+  let el = $("#toast");
+  if (!el){
+    el = document.createElement("div");
+    el.id = "toast";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 3000);
+}
+
 /* consume a pending jump once the target activity's chat has rendered:
    scroll the noted bubble into view and ring it briefly. Returns whether it
    scrolled (the caller then skips its own bottom-pinning). */
-function consumePendingJump(el, turns){
+function consumePendingJump(el, turns, priorTurns){
   if (!pendingJump || pendingJump.node !== sel) return false;
   if (Date.now() - pendingJump.ts > 15000){ pendingJump = null; return false; }
   let idx = pendingJump.turnTime ? turns.findIndex(t => t.time === pendingJump.turnTime) : -1;
   if (idx < 0) idx = turns.findIndex(t => t.text === pendingJump.text);
-  if (idx < 0) return false;  /* chat may still be loading; retry next render */
+  if (idx < 0){
+    /* the rendered turns are segment-scoped: a note captured before a /clear
+       can never match. Say so instead of silently landing at the bottom. */
+    if (priorTurns > 0){
+      pendingJump = null;
+      toast("This note points to an earlier chat segment (before a /clear).");
+    }
+    return false;  /* otherwise the chat may still be loading; retry next render */
+  }
   pendingJump = null;
   const target = el.querySelector(`.turn[data-i="${idx}"]`);
   if (!target) return false;

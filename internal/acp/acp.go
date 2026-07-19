@@ -242,8 +242,14 @@ func (m *Manager) Clear(nodeID string) error {
 	s.sessionID = resp.SessionId
 	s.captureBanner(resp)
 	s.applyEffort(ctx, s.effort, resp)
+	// Retire the old session's writer before the seam goes in: from here its
+	// stragglers are dropped rather than landing inside the fresh segment
+	// (finding 91). Reverted if the seam append fails, so that failure path
+	// leaves the old session fully intact.
+	old.setRetired(true)
 	// Seam before the visible flip — record first, publish second.
 	if err := s.logw.Append(sessionlog.NewSource("", string(resp.SessionId))); err != nil {
+		old.setRetired(false)
 		killAndReap(proc)
 		old.abortTurn()
 		return fmt.Errorf("record clear seam: %w", err)
@@ -440,6 +446,7 @@ type Session struct {
 
 	mu            sync.Mutex
 	procAlive     bool
+	retired       bool // /clear replaced this session: its writes must not land after the seam
 	turnActive    bool
 	turnCancel    context.CancelFunc
 	turnHadOutput bool
@@ -721,6 +728,14 @@ func (s *Session) flushAssistantLocked() {
 	}
 }
 
+// setRetired fences this session's writer off the shared log (or lifts the
+// fence again when a /clear fails after retiring).
+func (s *Session) setRetired(v bool) {
+	s.mu.Lock()
+	s.retired = v
+	s.mu.Unlock()
+}
+
 // appendLocked persists one event and folds a write failure into the session's
 // visible error state (finding 51). Callers hold s.mu. It returns true only
 // when the record actually reached the log: the ACP log is the authoritative
@@ -729,6 +744,15 @@ func (s *Session) flushAssistantLocked() {
 // that is neither stored nor surfaced. The first failure wins so the chat view
 // shows the original cause.
 func (s *Session) appendLocked(ev Event) bool {
+	if s.retired {
+		// A /clear turned the page: the shared log's tail is now the fresh
+		// segment, and a straggler from the dying process (a late usage or
+		// tool event, a duplicate-permission error) would land after the seam
+		// and poison the new chat surface — most concretely its context
+		// gauge. Drop it visibly on stderr instead (finding 91).
+		fmt.Fprintf(os.Stderr, "scimux/acp: dropping %s from retired session %s\n", ev.T, s.nodeID)
+		return false
+	}
 	if err := s.logw.Append(ev); err != nil {
 		if s.lastError == "" {
 			s.lastError = "session log write failed: " + err.Error()
