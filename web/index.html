@@ -15,7 +15,7 @@
   --bg:        #F5F4F1;   /* warm paper */
   --surface:   #FFFFFF;
   --ink:       #1C1C1E;
-  --dim:       #8A8A8E;
+  --dim:       #6C6C70;   /* ≥4.5:1 on --bg/--surface (WCAG AA for caption text) */
   --hairline:  rgba(60,60,67,.14);
   --attn:      #FFCC00;   /* systemYellow — needs you; reserved for attention only */
   --attn-rgb:  255, 204, 0;
@@ -34,7 +34,7 @@
     --bg:       #161618;
     --surface:  #242428;
     --ink:      #F2F2F7;
-    --dim:      #98989E;
+    --dim:      #A0A0A6;  /* ≥4.5:1 on the dark surfaces */
     --hairline: rgba(84,84,88,.48);
     --attn:     #FFD60A;
     --attn-rgb: 255, 214, 10;
@@ -160,6 +160,10 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .tabs .x { display: none; margin-left: 8px; opacity: .6; font-weight: 400; }
 @media (hover: hover) { .tabs button:hover .x { display: inline; } }
 @media (hover: none)  { .tabs .x { display: inline; } }  /* touch: ✕ always visible */
+/* lane identity on a tab is a dot, never the text color — fill means
+   selected, color means lane, in every tab row (one vocabulary) */
+.tabs .tabdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 6px; }
 .tabs .add { border: none; background: none; color: var(--work);
   font-size: 17px; padding: 4px 10px 6px; margin-bottom: 1px; }
 
@@ -604,6 +608,10 @@ body.cards-open #msgs { overflow: hidden; }
   border: 1.5px solid transparent; opacity: .45; max-width: 160px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lanechip.focused { opacity: 1; }
+/* lane scope chip in the Activities pane: the active map-lane filter with
+   its ✕ remover; .lanechips sets display:flex, so [hidden] needs help */
+#lanescope[hidden] { display: none; }
+#lanescope .x { margin-left: 5px; opacity: .7; }
 
 /* ---------- sticky-notes pane: lab-notebook stickies on the right.
    Desktop/iPad only for now (the iPhone sheet presentation comes later);
@@ -647,10 +655,14 @@ body.notes-open #notespane { transform: translateX(0); }
 .turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
 /* comments sort at their anchor and read as a scribble under the sticky */
 .note.comment { margin: 8px 0 8px 26px; }
+#notesback { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #notebar { border-top: 1px solid var(--hairline); background: var(--bg);
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+#chathead .toprow, #chatmission { cursor: pointer; }
+/* comment-mode chip: must read as a pill the ✕ belongs to, never a bare ✕ */
 #notechip { display: flex; align-items: center; gap: 8px; font-size: 12px;
-  color: var(--dim); padding: 0 4px 6px; }
+  color: var(--ink); background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 12px; padding: 4px 6px 4px 10px; margin-bottom: 6px; }
 #notechiptxt { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 #notechipx { color: var(--dim); width: 24px; height: 24px; flex: none; }
@@ -730,6 +742,7 @@ body.notes-open #notespane { transform: translateX(0); }
       <button data-tab="current" class="on">Current</button>
       <button data-tab="archived">Archived</button>
     </div>
+    <div class="lanechips" id="lanescope" hidden></div>
     <div id="cardlist"><div class="empty">loading…</div></div>
   </section>
 
@@ -936,6 +949,7 @@ let sel = localStorage.getItem("scimux-sel") || "";
 let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
 let termOpen = false;        // terminal unfolded below the last bubble (per selection)
 let cardTab = "current";
+let laneFilter = localStorage.getItem("scimux-lanefilter") || "";
 let mapTab = localStorage.getItem("scimux-maptab") || "all";
 const expanded = new Set();
 let actionCard = "";
@@ -945,6 +959,9 @@ let editingTitleScope = "";   /* "cards" | "chat" — the editor renders only wh
 let chatDetailsOpen = false;
 let editingChatDesc = false;
 let chatDetailSavedUntil = 0;
+/* last context-gauge reading, for the details meta line (per node — a stale
+   value from the previous selection must never show under a new chat) */
+let chatCtxPct = { node: "", pct: null };
 let suppressAttentionUntil = {};
 let stateEtag = "";
 let cardsSig = "";
@@ -1292,7 +1309,9 @@ function md(src){
       flushP(); flushT();
       const tag = /\d+[.]/.test(li[2]) ? "ol" : "ul";
       if (!list || list.tag !== tag){ flushL(); list = { tag, html: `<${tag}>` }; }
-      list.html += `<li>${mdInline(li[3])}</li>`;
+      /* keep the author's numbering: continuation text between items splits
+         the <ol>, and a restarted <ol> would renumber everything "1." */
+      list.html += `<li${tag === "ol" ? ` value="${parseInt(li[2], 10)}"` : ""}>${mdInline(li[3])}</li>`;
       continue;
     }
     flushL();
@@ -1460,16 +1479,19 @@ const isArchived = id => (UI.archived || []).includes(id);
 function renderCards(){
   const lm = laneModel();
   /* an archived node that needs a decision surfaces in Current anyway —
-     archiving organizes, it must never hide a pending approval/question */
+     archiving organizes, it must never hide a pending approval/question.
+     The lane filter obeys the same rule: attention pierces the scope. */
+  const inScope = n => !laneFilter || n.lane_id === laneFilter || hardAttention(n);
   const list = orderedNodes().filter(n =>
-    isArchived(n.id) === (cardTab === "archived") ||
-    (cardTab === "current" && hardAttention(n)));
+    (isArchived(n.id) === (cardTab === "archived") ||
+    (cardTab === "current" && hardAttention(n))) && inScope(n));
   const sig = JSON.stringify(list.map(n => [n.id, n.title, n.description, n.lane_id, n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
-    + "|" + cardTab + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
+    + "|" + cardTab + "|" + laneFilter + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
     + "|" + actionCard + "|" + editingDesc + "|" + editingTitle;
   if (sig === cardsSig){ updateCardAges(); return; }
   cardsSig = sig;
+  renderLaneScope();
   const adoptCards = cardTab !== "current" ? "" : unadopted.map(s => `
     <div class="card adoptable">
       <div class="row1"><span class="title">${esc(s)}</span></div>
@@ -1509,14 +1531,40 @@ function renderCards(){
       </div>
     </div>`;
   }).join("")
-    : cardTab === "archived"
-      ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
-      : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
+    : laneFilter
+      ? adoptCards ? "" : `<div class="empty">No ${cardTab === "archived" ? "archived" : "current"} activities on this journey.</div>`
+      : cardTab === "archived"
+        ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
+        : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
   });
   const waiting = nodes.filter(hardAttention).length;
   document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
   document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
 }
+
+/* The map's lane filter propagated into the Activities pane: a scope chip
+   naming the filtered journey, whose ✕ instantly shows all cards again.
+   Cards outside the lane are hidden (not dimmed — the pane is crowded
+   enough), except hardAttention ones, which pierce every scope. */
+function renderLaneScope(){
+  const box = $("#lanescope");
+  box.hidden = !laneFilter;
+  if (!laneFilter){ box.innerHTML = ""; return; }
+  const col = laneColor(laneFilter);
+  box.innerHTML = `<button class="lanechip focused" data-clear-scope
+      style="border-color:${esc(col)};color:${esc(col)}"
+      aria-label="show all activities">${esc(laneName(laneFilter))}<span class="x">&#10005;</span></button>`;
+}
+function setLaneFilter(id){
+  laneFilter = id || "";
+  if (laneFilter) localStorage.setItem("scimux-lanefilter", laneFilter);
+  else localStorage.removeItem("scimux-lanefilter");
+  cardsSig = ""; mapSig = "";
+  renderCards(); renderMap();
+}
+$("#lanescope").addEventListener("click", e => {
+  if (e.target.closest("[data-clear-scope]")) setLaneFilter("");
+});
 
 /* Poll-safe editing: #cardlist is rebuilt whenever its signature changes, and
    the signature includes every card's volatile live/attention state — so an
@@ -1705,7 +1753,8 @@ function renderMap(){
   const inGroup = laneID => !grp || grp.includes(laneID);
   const rows = [...nodes].filter(n => n.lane_id && inGroup(n.lane_id))
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
-  const focusLane = mapFocus && nodeById(sel) ? nodeById(sel).lane_id : null;
+  /* an explicit chip filter outranks the selection-derived focus */
+  const focusLane = laneFilter || (mapFocus && nodeById(sel) ? nodeById(sel).lane_id : null);
 
   /* the signature must cover every rendered field — a description edit (or a
      model/rationale change) has to repaint the station rows */
@@ -1823,13 +1872,15 @@ $("#tab_del").addEventListener("click", () => {
 });
 $("#lanechips").addEventListener("click", e => {
   const c = e.target.closest("[data-chip]");
-  if (c){
-    const first = [...nodes]
-      .filter(n => n.lane_id === c.dataset.chip)
-      .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
-    if (first) select(first.id);
-    mapSig = ""; renderMap();
-  }
+  if (!c) return;
+  /* tap = focus the lane and filter Activities to it; second tap clears —
+     same as the ✕ on the Activities scope chip */
+  if (laneFilter === c.dataset.chip){ setLaneFilter(""); return; }
+  const first = [...nodes]
+    .filter(n => n.lane_id === c.dataset.chip)
+    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
+  if (first) select(first.id);
+  setLaneFilter(c.dataset.chip);
 });
 longpress($("#lanechips"), ".lanechip", el => {
   const id = el.dataset.chip;
@@ -1973,7 +2024,11 @@ function renderChatHead(){
   details.hidden = !chatDetailsOpen;
   details.setAttribute("aria-hidden", details.hidden ? "true" : "false");
   const n = nodeById(sel);
-  toggle.hidden = !n;
+  /* Messages-style: tapping the header opens the details, so the "open"
+     chevron is redundant chrome — the button only appears as the collapse
+     control (or the save check while the description is being edited) */
+  const saving = editingChatDesc || Date.now() < chatDetailSavedUntil;
+  toggle.hidden = !n || (!chatDetailsOpen && !saving);
   if (n && editingTitle === n.id && editingTitleScope === "chat"){
     /* renderChatHead runs on every poll tick — recreating the input each
        time would clobber the user's in-progress edit (invariant). Build it
@@ -1984,6 +2039,9 @@ function renderChatHead(){
     $("#chattitle").textContent = n ? n.title : "scimux";
   }
   $("#chatmission").textContent = "";
+  /* the Notes pane's back button names its destination (HIG), like every
+     other back button — that destination is this chat */
+  $("#notesback").textContent = "‹ " + (n ? n.title : "Chat");
   $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
   $("#chatdot").style.background = n && !hardAttention(n) && !["exited","unavailable"].includes(n.live)
     ? laneColor(n.lane_id) : "";
@@ -1994,7 +2052,9 @@ function renderChatHead(){
   toggle.setAttribute("aria-label", editingChatDesc ? "save description" : (chatDetailsOpen ? "hide details" : "show details"));
   $("#chatagentlogo").innerHTML = agentLogo(n.agent);
   $("#chatagentlogo").title = n.agent || "agent";
-  $("#chatmeta").textContent = [n.agent || "agent", n.model || "default", n.effort || ""].filter(Boolean).join(" · ");
+  const ctx = chatCtxPct.node === n.id && chatCtxPct.pct != null
+    ? `context ${Math.round(chatCtxPct.pct)}%` : "";
+  $("#chatmeta").textContent = [n.agent || "agent", n.model || "default", n.effort || "", ctx].filter(Boolean).join(" · ");
   const desc = n.description || n.prompt || "";
   $("#chatdesc").textContent = desc || "No description yet.";
   const input = $("#chatdescinput");
@@ -2054,6 +2114,16 @@ async function saveChatDescription(){
 
 $("#infobtn").addEventListener("click", () => {
   if (editingChatDesc){ saveChatDescription(); return; }
+  chatDetailsOpen = !chatDetailsOpen;
+  renderChatHead();
+});
+/* tap anywhere on the header row (not its buttons, not the open details
+   region) to toggle the details — the long-press title edit stays distinct
+   via the global lpFired click-swallower */
+$("#chathead").addEventListener("click", e => {
+  if (!nodeById(sel) || editingChatDesc) return;
+  if (e.target.closest("button, input, textarea, a, #chatdetails")) return;
+  if (!e.target.closest(".toprow, #chatmission")) return;
   chatDetailsOpen = !chatDetailsOpen;
   renderChatHead();
 });
@@ -2144,6 +2214,11 @@ async function refreshChat(){
     fill.className = (d.ctx_pct || 0) >= 80 ? "high" : "";
   } else {
     gauge.hidden = true;
+  }
+  const pct = d.ctx_window ? Math.min(100, d.ctx_pct || 0) : null;
+  if (chatCtxPct.node !== n.id || chatCtxPct.pct !== pct){
+    chatCtxPct = { node: n.id, pct };
+    renderChatHead();   /* keep the details meta line's context % fresh */
   }
   applyChatActivityChrome(d.live, mustShowPane, forcePeek, showPeek);
 
@@ -2414,7 +2489,7 @@ function renderNotesPane(){
   const tabsHtml =
     `<button data-ntab="GENERAL" class="${noteTab === "GENERAL" ? "on" : ""}">General</button>` +
     tabs.map(l => `<button data-ntab="${esc(l.id)}" class="${noteTab === l.id ? "on" : ""}"
-      style="color:${esc(l.color || "")}">${esc(l.name)}</button>`).join("");
+      ><span class="tabdot" style="background:${esc(laneColor(l.id))}"></span>${esc(l.name)}</button>`).join("");
   const color = noteTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(noteTab));
   const listHtml = list.length ? list.map(nt => {
     const nd = nt.node ? nodeById(nt.node) : null;
@@ -2529,8 +2604,9 @@ function setNoteAnchor(t){
   noteAnchor = t || "";
   const nt = noteAnchor && (UI.notes || []).find(x => x.t === noteAnchor);
   if (!nt){ noteAnchor = ""; $("#notechip").hidden = true; return; }
+  const first = (nt.text || "").split("\n")[0].slice(0, 60).trim();
   $("#notechiptxt").textContent =
-    "commenting on: «" + (nt.text || "").split("\n")[0].slice(0, 60) + "»";
+    first ? `commenting on: «${first}»` : "commenting on a captured note";
   $("#notechip").hidden = false;
 }
 function addManualNote(){
