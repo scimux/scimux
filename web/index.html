@@ -77,8 +77,11 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #burger { font-size: 19px; color: var(--dim); padding: 8px; margin-left: -8px;
   /* optically align the glyph's bottom bar with the text baseline */
   transform: translateY(-1.5px); }
-#statusbar .host { font-weight: 600; letter-spacing: .01em; }
-#statusbar .sys  { color: var(--dim); display: flex; gap: 12px; white-space: nowrap; overflow: hidden; }
+/* a long FQDN must never push M/S/L off the bar: the host is the only
+   shrinkable item and ellipsizes; the gauges keep their full width */
+#statusbar .host { font-weight: 600; letter-spacing: .01em; flex: 0 1 auto;
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#statusbar .sys  { color: var(--dim); display: flex; gap: 12px; white-space: nowrap; flex: none; }
 #statusbar .sys b { color: var(--ink); font-weight: 500; display: inline-block; }
 #statusbar .trend { font-size: 11px; }
 #statusbar .spacer { flex: 1; }
