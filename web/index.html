@@ -1433,6 +1433,8 @@ function fillLaneSelect(select, selected = "", includeUnset = true, disabled = f
   if (!select) return;
   select.innerHTML = laneOptionsHTML(selected, includeUnset, disabled);
   select.disabled = !!disabled;
+  /* authoritative disable (inherited lane): survive the sheet-open re-enable */
+  delete select.dataset.sheetDisabledByClose;
   select.value = selected;
   syncLanePicker(select);
 }
@@ -3100,8 +3102,13 @@ function prepareLaunchConfig(){
     $("#nc_effort").value = "";
     $("#nc_dir").value = "";
   }
-  for (const id of ["#nc_agent", "#nc_model", "#nc_effort", "#nc_dir"])
-    $(id).disabled = !!p;
+  for (const id of ["#nc_agent", "#nc_model", "#nc_effort", "#nc_dir"]){
+    const el = $(id);
+    el.disabled = !!p;
+    /* this is the authoritative state — the sheet-open re-enable must not
+       undo a fork-mode read-only control (setSheetActive's marker) */
+    delete el.dataset.sheetDisabledByClose;
+  }
 }
 function prepareNewActivityLane(){
   const inherited = nodeById(ncParent)?.lane_id || "";
@@ -3209,6 +3216,13 @@ let adoptSession = "";
 function openAdopt(session){
   adoptSession = session;
   $("#ad_title").textContent = `Adopt "${session}"`;
+  /* fresh sheet per session: a previous adoption's session-id/transcript
+     must never silently bind to a different tmux session */
+  $("#ad_agent").value = "claude";
+  $("#ad_sid").value = "";
+  $("#ad_path").value = "";
+  $("#ad_titlein").value = "";
+  $("#ad_prompt").value = "";
   openSheet("#adopt");
 }
 $("#ad_go").addEventListener("click", async () => {
