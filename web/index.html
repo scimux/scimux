@@ -2673,6 +2673,7 @@ document.addEventListener("click", e => {
 }, true);
 function longpress(container, selector, fn, opts = {}){
   let timer = null;
+  let tapEl = null;   /* a preventNative touch that may still turn out a tap */
   const fire = (el, ev) => {
     lpFired = true;
     setTimeout(() => { lpFired = false; }, 700);  /* don't swallow later taps */
@@ -2681,11 +2682,21 @@ function longpress(container, selector, fn, opts = {}){
   container.addEventListener("touchstart", e => {
     const el = e.target.closest(selector);
     if (!el) return;
+    /* touches inside form controls stay fully native (cursor placement in
+       an open title editor); long-press means nothing there */
+    if (e.target.closest("input, textarea, select, button")) return;
     if (opts.preventNative) e.preventDefault();
-    timer = setTimeout(() => fire(el, e), 500);
+    tapEl = opts.preventNative ? el : null;
+    timer = setTimeout(() => { tapEl = null; fire(el, e); }, 500);
   }, { passive: !opts.preventNative });
-  ["touchmove","touchend","touchcancel"].forEach(ev =>
-    container.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
+  ["touchmove","touchcancel"].forEach(ev =>
+    container.addEventListener(ev, () => { clearTimeout(timer); tapEl = null; }, { passive: true }));
+  container.addEventListener("touchend", () => {
+    clearTimeout(timer);
+    /* preventDefault at touchstart killed iOS's synthetic click — a quick
+       tap (no long-press fired, no movement) must still act as one */
+    if (tapEl){ const el = tapEl; tapEl = null; el.click(); }
+  }, { passive: true });
   /* press-and-hold with a pointer (mouse, iPad trackpad) — synthesized mouse
      events after a touch tap arrive as a quick down/up pair, so the timer
      never fires for those; moving > 6px (text selection, drag) cancels */
