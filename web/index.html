@@ -398,6 +398,10 @@ body.cards-open #msgs { overflow: hidden; }
 }
 .turn.user { align-self: flex-end; flex-direction: row-reverse; }
 .turn.user .bubble { background: var(--work); color: #fff; border-bottom-right-radius: 5px; }
+/* optimistic send echo: the prompt shows the instant it is sent, translucent
+   until the transcript's own copy replaces it at full opacity — delivery
+   made visible without a spinner */
+.turn.echo .bubble { opacity: .55; }
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
@@ -974,6 +978,11 @@ let chatDetailSavedUntil = 0;
 /* last context-gauge reading, for the details meta line (per node — a stale
    value from the previous selection must never show under a new chat) */
 let chatCtxPct = { node: "", pct: null };
+/* optimistic echo of the last sent prompt: the store's copy of a user turn
+   arrives only after the agent CLI logs it and the poller mirrors it (a few
+   seconds on tmux nodes) — until then the sent text renders immediately as a
+   translucent bubble, turning fully opaque when the real turn replaces it */
+let sentEcho = null;   /* {node, text, at} */
 let suppressAttentionUntil = {};
 let stateEtag = "";
 let cardsSig = "";
@@ -2234,6 +2243,14 @@ async function refreshChat(){
   /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
      young, unreadable, or format-incompatible transcripts all end up here */
   const turns = d.turns || [];
+  /* the echo retires once the store serves the turn (or after a generous
+     timeout \u2014 the unconfirmed-delivery flow owns the failure story) */
+  if (sentEcho && sentEcho.node === n.id){
+    const lastUser = [...turns].reverse().find(t => t.role === "user");
+    if ((lastUser && lastUser.text.trim() === sentEcho.text) ||
+        Date.now() - sentEcho.at > 180000) sentEcho = null;
+  }
+  const echo = sentEcho && sentEcho.node === n.id ? sentEcho : null;
   const unconfirmed = d.delivery === "unconfirmed";
   if (!n.attention) delete suppressAttentionUntil[n.id];
   const attentionHidden = !!n.attention && attentionSuppressed(n.id);
@@ -2268,7 +2285,7 @@ async function refreshChat(){
 
   const sig = [n.id, d.live, n.attention, attentionHidden, d.delivery, showPeek, termOpen, termFull,
                d.source, d.perm_title, (d.perm_options || []).map(o => o.key + o.name).join(","),
-               d.prior_turns || 0, d.chat_started || "",
+               d.prior_turns || 0, d.chat_started || "", echo ? hashStr(echo.text) : "",
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
   if (sig === chatSig) return;
@@ -2301,6 +2318,10 @@ async function refreshChat(){
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(t.text)}</div>
         <button class="copybtn" data-i="${i}" aria-label="copy message">${ICON_COPY}</button>
       </div>`).join("") +
+    (echo ? `
+      <div class="turn user echo">
+        <div class="bubble" title="you — delivering">${md(echo.text)}</div>
+      </div>` : "") +
     (showPeek && peekText
       ? `<div class="peekblock">
            <div class="peekhead">
@@ -2936,6 +2957,13 @@ async function sendPrompt(){
   const dest = sel;   /* capture: selection may change while the send is in flight */
   clearPrompt();
   localStorage.removeItem("scimux-draft:" + dest);
+  /* optimistic echo, painted before the POST even resolves: the store's
+     copy of this turn is seconds away (CLI transcript write + mirror tick
+     + chat poll), and an empty chat after hitting send reads as a swallowed
+     prompt. Translucent until the real turn lands; removed on failure —
+     then the draft returns instead. */
+  sentEcho = { node: dest, text, at: Date.now() };
+  paintEchoNow(dest);
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
       { method: "POST", body: JSON.stringify({ text }) });
@@ -2950,6 +2978,9 @@ async function sendPrompt(){
        Nothing was lost — hold the text as a draft and let the operator
        retry once the conflict resolves. Real failures still alert. */
     if (err.status !== 409) alert(err.message);
+    /* the echo lied — nothing reached the agent; retract it */
+    sentEcho = null;
+    document.querySelectorAll("#msgs .turn.echo").forEach(x => x.remove());
     /* nothing typed is ever lost — restored under the node it was written
        for, and merged in front of anything typed while the send was pending
        rather than overwriting it */
@@ -2960,6 +2991,19 @@ async function sendPrompt(){
       setPromptText(merged);
     }
   }
+}
+/* paintEchoNow puts the echo bubble on screen synchronously — zero-latency
+   feedback for the tap on send. The next signature-driven rebuild re-renders
+   it from sentEcho, so polling can never clobber it (invariant). */
+function paintEchoNow(dest){
+  if (sel !== dest || !sentEcho) return;
+  const el = $("#msgs");
+  el.querySelectorAll(".turn.echo").forEach(x => x.remove());
+  const div = document.createElement("div");
+  div.className = "turn user echo";
+  div.innerHTML = `<div class="bubble" title="you — delivering">${md(sentEcho.text)}</div>`;
+  el.insertBefore(div, el.querySelector(".peekblock"));   /* null target = append */
+  el.scrollTop = el.scrollHeight;
 }
 
 /* ---------- navigation (phone: cards slide over chat) ---------- */
