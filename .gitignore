@@ -8,14 +8,15 @@ scimux
 internal/transcript/testdata/real-*.jsonl
 internal/acp/codex/testdata/real-*.ndjson
 
-# Only README.md, AGENTS.md, CLAUDE.md, and the README-linked adoption guide
-# are tracked. Every other markdown file (design/planning intermediates,
+# Only README.md, AGENTS.md, CLAUDE.md, and the README-linked docs are
+# tracked. Every other markdown file (design/planning intermediates,
 # working notes) is a local or in-repo-but-unpublished document — keep them
 # all out of git.
 *.md
 !README.md
 !AGENTS.md
 !CLAUDE.md
+!docs/http-api.md
 
 attic/
 
