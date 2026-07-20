@@ -318,6 +318,57 @@ func TestHandleNodeLaneAssignmentIsOneWay(t *testing.T) {
 	}
 }
 
+func TestHandleNodeInterchangeAndService(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleUpdateNode(up, req)
+		return up
+	}
+
+	// Interchange list is deduplicated, the home lane is silently dropped,
+	// and the list stays mutable (full replacement each time).
+	if up := patch(`{"also_lanes":["lane-b","lane-a","lane-b"," lane-c "]}`); up.Code != 200 {
+		t.Fatalf("set also_lanes: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].AlsoLanes; len(got) != 2 || got[0] != "lane-b" || got[1] != "lane-c" {
+		t.Fatalf("also_lanes = %v, want [lane-b lane-c]", got)
+	}
+	if up := patch(`{"also_lanes":[]}`); up.Code != 200 {
+		t.Fatalf("clear also_lanes: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].AlsoLanes; len(got) != 0 {
+		t.Fatalf("also_lanes not cleared: %v", got)
+	}
+
+	// Service accepts the three rail states, normalizes through to the
+	// unmarked default, and rejects anything else.
+	if up := patch(`{"service":"siding"}`); up.Code != 200 {
+		t.Fatalf("set siding: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].Service; got != "siding" {
+		t.Fatalf("service = %q, want siding", got)
+	}
+	if up := patch(`{"service":"through"}`); up.Code != 200 {
+		t.Fatalf("set through: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].Service; got != "" {
+		t.Fatalf("service = %q, want empty (through)", got)
+	}
+	if up := patch(`{"service":"derailed"}`); up.Code != 400 {
+		t.Fatalf("bad service: code = %d, want 400", up.Code)
+	}
+}
+
 func TestHandleNewNodeInheritsParentLane(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)

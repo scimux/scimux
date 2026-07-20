@@ -50,13 +50,24 @@ type Node struct {
 	Description string `json:"description,omitempty"` // card/map description; defaults to Prompt
 	Rationale   string `json:"rationale,omitempty"`   // why this fork exists (decision evidence)
 	LaneID      string `json:"lane_id,omitempty"`     // immutable journey lane assignment; empty means unassigned
-	Agent       string `json:"agent"`                 // "claude" | "codex" | "pi" | "opencode"
-	Model       string `json:"model,omitempty"`
-	Effort      string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
-	Dir         string `json:"dir"`
-	SessionID   string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
-	Transcript  string `json:"transcript,omitempty"`
-	Adopted     bool   `json:"adopted,omitempty"` // adopted tmux sessions are never killed by scimux
+	// AlsoLanes marks an interchange station: further journeys this activity
+	// serves beyond its home LaneID. Mutable, unlike the home lane — a
+	// cross-link is discovered knowledge about the journey network, so it must
+	// be addable after the fact (corrections are new records).
+	AlsoLanes []string `json:"also_lanes,omitempty"`
+	// Service is the station's rail-map state, orthogonal to process liveness:
+	// "siding" (a question ridden out and set aside — spur + buffer stop) or
+	// "terminus" (completed, ceiling reached — cap bar). Empty means through
+	// service. Mutable for the same reason as AlsoLanes: a branch's death is
+	// often recognized only later.
+	Service    string `json:"service,omitempty"`
+	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode"
+	Model      string `json:"model,omitempty"`
+	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
+	Dir        string `json:"dir"`
+	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
+	Transcript string `json:"transcript,omitempty"`
+	Adopted    bool   `json:"adopted,omitempty"` // adopted tmux sessions are never killed by scimux
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
 	// transcript files, the original path — claude), "acp" (an Agent Client
 	// Protocol subprocess, pi/opencode) or "codex" (codex's app-server protocol
@@ -1443,9 +1454,11 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Title       *string `json:"title"`
-		Description *string `json:"description"`
-		LaneID      *string `json:"lane_id"`
+		Title       *string   `json:"title"`
+		Description *string   `json:"description"`
+		LaneID      *string   `json:"lane_id"`
+		AlsoLanes   *[]string `json:"also_lanes"`
+		Service     *string   `json:"service"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
@@ -1479,6 +1492,34 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		case n.LaneID != laneID:
 			a.mu.Unlock()
 			http.Error(w, "lane assignment is immutable", 409)
+			return
+		}
+	}
+	if body.AlsoLanes != nil {
+		// The home lane never repeats in the interchange list, and the list
+		// stays deduplicated; the full list replaces the old one (the client
+		// sends the complete set on every add/remove).
+		seen := map[string]bool{}
+		var also []string
+		for _, l := range *body.AlsoLanes {
+			l = strings.TrimSpace(l)
+			if l == "" || l == next.LaneID || seen[l] {
+				continue
+			}
+			seen[l] = true
+			also = append(also, l)
+		}
+		next.AlsoLanes = also
+	}
+	if body.Service != nil {
+		switch svc := strings.TrimSpace(*body.Service); svc {
+		case "", "through":
+			next.Service = "" // through service is the unmarked default
+		case "siding", "terminus":
+			next.Service = svc
+		default:
+			a.mu.Unlock()
+			http.Error(w, fmt.Sprintf("unknown service %q (want through, siding or terminus)", svc), 400)
 			return
 		}
 	}

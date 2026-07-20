@@ -239,6 +239,25 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-top: 1px solid var(--hairline);
 }
 .card.expanded .lanebox { display: block; }
+/* rail properties (Journey / Interchange / Service) on the expanded card:
+   instant-commit controls, one PATCH per change — no save button involved */
+.card .railbox {
+  display: none; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  position: relative; z-index: 3;
+}
+.card.expanded .railbox { display: block; }
+.railrow { display: flex; gap: 8px; align-items: center; min-height: 30px; }
+.railrow .k { font-size: 12px; color: var(--dim); width: 84px; flex: none; }
+.railrow select { margin-top: 0; }
+.alsorow { padding-left: 92px; min-height: 26px; font-size: 13px; }
+.alsorow .rm { width: 26px; height: 26px; border-radius: 7px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; font-size: 13px; }
+.segctl { display: flex; background: var(--th-bg); border-radius: 9px; padding: 2px; gap: 2px; }
+.segctl button { font-size: 12.5px; font-weight: 500; padding: 4px 10px; border-radius: 7px;
+  color: var(--dim); }
+.segctl button.on { background: var(--bg); color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0,0,0,.12); font-weight: 600; }
 .lanepick { display: flex; gap: 8px; align-items: center; }
 .lanepick select, .lanepick input { margin-top: 0; }
 .lanepick input[hidden] { display: none; }
@@ -619,14 +638,19 @@ body.cards-open #msgs { overflow: hidden; }
   height: 76px; padding-right: 16px; cursor: pointer; overflow: hidden; }
 .strow:active { background: var(--th-bg); }
 .strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 500;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  display: flex; gap: 6px; align-items: flex-start; }
+/* the agent logo sits left of the title, sized to the first text line */
+.strow .lbl .agent-logo { width: 16px; height: 16px; margin-top: 1px; }
+.strow .lbl .agent-logo img, .strow .lbl .agent-logo svg,
+.strow .lbl .agent-logo .mask-logo { width: 16px; height: 16px; }
+.strow .lbl .t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* the row height is fixed (the SVG's station y-positions depend on it), so the
    description gets one ellipsized line and the title yields to a single line
    whenever a description is present */
 .strow .desc { font-size: 12px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strow .desc + .cap { margin-top: 0; }
-.strow .lbl:has(+ .desc) { -webkit-line-clamp: 1; }
+.strow .lbl:has(+ .desc) .t { -webkit-line-clamp: 1; }
 .strow .cap { font-size: 11px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strow .why { font-size: 11.5px; color: var(--dim); margin-top: 1px;
@@ -1509,7 +1533,7 @@ function readLaneChoice(select, input){
 function laneModel(){
   const byId = {};
   nodes.forEach(n => byId[n.id] = n);
-  const used = new Set(nodes.map(n => n.lane_id).filter(Boolean));
+  const used = new Set(nodes.flatMap(n => [n.lane_id, ...(n.also_lanes || [])]).filter(Boolean));
   const lanes = laneList().filter(l => used.has(l.id));
   for (const id of used){
     if (!lanes.some(l => l.id === id)) lanes.push({ id, name: id, color: laneColor(id) });
@@ -1533,12 +1557,16 @@ function renderCards(){
      needed" fold below instead of interleaving with the focused lane.
      Invariant: nothing that needs input is ever invisible — it is either
      in the list (in-lane, or no filter) or in the fold, never neither. */
-  const inScope = n => !laneFilter || n.lane_id === laneFilter || n.id === sel;
+  /* full strength for interchange stations: a lane's scope includes every
+     activity it serves, home or via also_lanes — a rider on the line stops
+     there either way */
+  const inScope = n => !laneFilter || n.lane_id === laneFilter
+    || (n.also_lanes || []).includes(laneFilter) || n.id === sel;
   const list = tabList.filter(inScope);
   const foldList = laneFilter && cardTab === "current"
     ? tabList.filter(n => !inScope(n) && hardAttention(n)) : [];
   if (!foldList.length) attnFoldOpen = false;
-  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.live, n.attention, n.model, n.effort]))
+  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
     + "|" + cardTab + "|" + laneFilter + "|" + foldList.length + "|" + attnFoldOpen
     + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
@@ -1578,6 +1606,37 @@ function renderCards(){
   document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
 }
 
+/* Rail properties on the expanded card, shown once a Journey is set. The home
+   lane is read-only here (set-once); Interchange is a pull-down that adds a
+   line plus removable swatch rows; Service is a three-state segmented control.
+   Every change commits one PATCH immediately. */
+function railboxHTML(n){
+  const also = n.also_lanes || [];
+  const addable = laneList().filter(l => l.id !== n.lane_id && !also.includes(l.id));
+  const alsoRows = also.map(id => `
+      <div class="railrow alsorow">
+        <span class="laneswatch" style="background:${esc(laneColor(id))}"></span>
+        <span>${esc(laneName(id))}</span>
+        <button class="rm" data-also-rm="${esc(n.id)}" data-lane="${esc(id)}" aria-label="remove interchange ${esc(laneName(id))}">&#10005;</button>
+      </div>`).join("");
+  const seg = [["", "through"], ["siding", "siding"], ["terminus", "terminus"]].map(([v, label]) => `
+        <button data-service-btn="${esc(n.id)}" data-service="${v}"
+          class="${(n.service || "") === v ? "on" : ""}">${label}</button>`).join("");
+  return `<div class="railbox">
+      <div class="railrow"><span class="k">Journey</span>
+        <span class="laneswatch" style="background:${esc(laneColor(n.lane_id))}"></span>
+        <span>${esc(laneName(n.lane_id))}</span></div>
+      <div class="railrow"><span class="k">Interchange</span>
+        ${addable.length ? `<select data-also-add="${esc(n.id)}">
+          <option value="" selected>&ndash; add line &ndash;</option>
+          ${addable.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}
+        </select>` : `<span class="k" style="width:auto">${also.length ? "" : "no other lines yet"}</span>`}</div>
+      ${alsoRows}
+      <div class="railrow"><span class="k">Service</span>
+        <div class="segctl">${seg}</div></div>
+    </div>`;
+}
+
 function cardHTML(n){
     const desc = n.description || n.prompt || "";
     const archived = isArchived(n.id);
@@ -1599,7 +1658,7 @@ function cardHTML(n){
           ${laneSelectHTML("", true)}
         </div>
         <input data-lane-new="${esc(n.id)}" hidden placeholder="New lane name">
-      </div>` : ""}
+      </div>` : railboxHTML(n)}
       <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · <span class="age">${ageText(n.last_activity)}</span></div>
       <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
       <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
@@ -1696,6 +1755,24 @@ document.addEventListener("change", e => {
   const sel = e.target.closest("[data-lane-select]");
   if (sel) syncLanePicker(sel);
 });
+/* one PATCH per rail-property change; the poll's re-render draws the result */
+async function patchRail(id, body){
+  try {
+    const n = await api(`/api/nodes/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    });
+    updateLocalNode(n);
+    cardsSig = ""; mapSig = "";
+    renderCards(); renderMap();
+  } catch (err) { alert(err.message); }
+}
+document.addEventListener("change", e => {
+  const add = e.target.closest("[data-also-add]");
+  if (!add || !add.value) return;
+  const n = nodeById(add.dataset.alsoAdd);
+  if (!n) return;
+  patchRail(n.id, { also_lanes: [...(n.also_lanes || []), add.value] });
+});
 function updateCardAges(){
   for (const n of nodes){
     const el = document.getElementById("card-" + CSS.escape(n.id).replace(/\\/g, ""));
@@ -1739,6 +1816,17 @@ $("#cardlist").addEventListener("click", async e => {
       cardsSig = ""; chatSig = ""; mapSig = "";
       renderCards(); renderChatHead(); renderMap();
     } catch (err) { alert(err.message); }
+    return;
+  }
+  const rm = e.target.closest("[data-also-rm]");
+  if (rm){
+    const n = nodeById(rm.dataset.alsoRm);
+    if (n) patchRail(n.id, { also_lanes: (n.also_lanes || []).filter(l => l !== rm.dataset.lane) });
+    return;
+  }
+  const svc = e.target.closest("[data-service-btn]");
+  if (svc){
+    patchRail(svc.dataset.serviceBtn, { service: svc.dataset.service });
     return;
   }
   const arch = e.target.closest("[data-arch-action]");
@@ -1823,7 +1911,11 @@ function renderMap(){
   const lm = laneModel();
   const grp = groupLanes();
   const inGroup = laneID => !grp || grp.includes(laneID);
-  const rows = [...nodes].filter(n => n.lane_id && inGroup(n.lane_id))
+  /* a station is on this map when any lane it serves (home or interchange)
+     belongs to the group; its dot sits on the home column when that lane is
+     in the group, else on its first in-group interchange line */
+  const served = n => [n.lane_id, ...(n.also_lanes || [])].filter(Boolean);
+  const rows = [...nodes].filter(n => n.lane_id && served(n).some(inGroup))
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));   /* newest on top */
   /* dimming is owned by the explicit lane filter alone — if selection also
      drove it, clearing the filter (chip second tap, scope-tab ✕) would leave
@@ -1833,46 +1925,70 @@ function renderMap(){
   /* the signature must cover every rendered field — a description edit (or a
      model/rationale change) has to repaint the station rows */
   const sig = JSON.stringify(rows.map(n => [n.id, n.title, n.description || n.prompt || "",
-      n.rationale, n.agent, n.model, n.lane_id, n.live, n.attention]))
+      n.rationale, n.agent, n.model, n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention]))
     + "|" + focusLane + "|" + mapTab
     + "|" + JSON.stringify(UI.groups || []) + "|" + JSON.stringify(UI.lanes || []);
   if (sig === mapSig) return;
   mapSig = sig;
 
   const RH = 76, laneX = i => 22 + i * 20;
-  const GW = Math.max(60, 22 + lm.lanes.length * 20 + 14);
+  const GW = Math.max(60, 22 + lm.lanes.length * 20 + 14 + 22 /* siding spur room */);
   const H = rows.length * RH;
   const y = i => i * RH + RH / 2;
   const dimLane = laneID => focusLane && laneID !== focusLane;
+  /* full strength on every line the station serves */
+  const dimRow = n => focusLane && !served(n).includes(focusLane);
+  const rowLanes = n => served(n).filter(l => inGroup(l) && lm.laneOf[l] !== undefined);
   let svg = "";
 
   for (const lane of lm.lanes.filter(l => inGroup(l.id))){
-    const idx = rows.map((n, i) => n.lane_id === lane.id ? i : -1).filter(i => i >= 0);
+    /* the line spans every station it serves, interchange stops included */
+    const idx = rows.map((n, i) => served(n).includes(lane.id) ? i : -1).filter(i => i >= 0);
     if (idx.length > 1)
       svg += `<line x1="${laneX(lm.laneOf[lane.id])}" y1="${y(idx[0])}" x2="${laneX(lm.laneOf[lane.id])}" y2="${y(idx[idx.length - 1])}"
               stroke="${esc(lm.color(lane.id))}" stroke-width="3.5" stroke-linecap="round" opacity="${dimLane(lane.id) ? .22 : 1}"/>`;
   }
   rows.forEach((n, i) => {
-    const laneID = n.lane_id, x = laneX(lm.laneOf[laneID]), yy = y(i), col = esc(lm.color(laneID));
-    const op = dimLane(laneID) ? .25 : 1;
+    const lanesHere = rowLanes(n);
+    const homeID = lanesHere.includes(n.lane_id) ? n.lane_id : lanesHere[0];
+    const x = laneX(lm.laneOf[homeID]), yy = y(i), col = esc(lm.color(homeID));
+    const op = dimRow(n) ? .25 : 1;
+    const inter = lanesHere.length > 1;
+    /* transfer corridor across every line served at this station */
+    if (inter){
+      const xs = lanesHere.map(l => laneX(lm.laneOf[l]));
+      svg += `<line x1="${Math.min(...xs)}" y1="${yy}" x2="${Math.max(...xs)}" y2="${yy}"
+              stroke="${col}" stroke-width="2" opacity="${op * .8}"/>`;
+    }
+    /* siding: the dot leaves the line on a short spur that ends at a buffer stop */
+    let dotX = x;
+    if (n.service === "siding"){
+      dotX = x + 14;
+      svg += `<line x1="${x}" y1="${yy}" x2="${dotX}" y2="${yy}" stroke="${col}" stroke-width="2.5" opacity="${op}"/>
+              <line x1="${dotX + 8}" y1="${yy - 5}" x2="${dotX + 8}" y2="${yy + 5}" stroke="${col}" stroke-width="3" stroke-linecap="round" opacity="${op}"/>`;
+    }
+    /* terminus: the cap bar closes the line just past the station */
+    if (n.service === "terminus")
+      svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
     if (n.attention)
-      svg += `<circle cx="${x}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
-    if (n.live === "exited" || n.live === "unavailable")
-      svg += `<circle cx="${x}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
+      svg += `<circle cx="${dotX}" cy="${yy}" r="${inter ? 11.5 : 9.5}" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
+    if (inter)   /* the classic interchange glyph: white-filled ring */
+      svg += `<circle cx="${dotX}" cy="${yy}" r="7" fill="var(--bg)" stroke="${col}" stroke-width="3" opacity="${op}"/>`;
+    else if (n.live === "exited" || n.live === "unavailable")
+      svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
     else
-      svg += `<circle cx="${x}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
+      svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
   });
 
   $("#mapwrap").innerHTML =
     `<svg id="mapsvg" width="${GW}" height="${H}" viewBox="0 0 ${GW} ${H}"></svg>`.replace("></svg>", `>${svg}</svg>`) +
     rows.map(n => {
-      const laneID = n.lane_id;
       const when = (n.created_at || "").slice(5, 16).replace("T", " ");
       const desc = n.description || n.prompt || "";   /* same fallback as the card summary */
       return `
-      <div class="strow ${dimLane(laneID) ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}"
+      <div class="strow ${dimRow(n) ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}"
            style="padding-left:${GW + 16}px" data-nid="${esc(n.id)}">
-        <div class="lbl">${esc(n.title)}</div>
+        <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(n.title)}</span></div>
         ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
         <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}</div>
         ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
