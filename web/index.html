@@ -1051,8 +1051,17 @@ let uiOps = [];          // local operations not yet acknowledged by the server
 /* Pending ops survive the page: the pagehide keepalive PUT is fire-and-forget
    and can be dropped, and the next load would then fetch the server document
    and silently overwrite the local edits. Persisted ops replay in loadUI()
-   exactly like ops made before load finished; replay is idempotent (note ops
-   dedupe on timestamp), so a keepalive that did land costs nothing. */
+   exactly like ops made before load finished. But a stored op may be stale by
+   the time it replays — the keepalive PUT may have landed, or another device
+   may have edited since — so every op is stamped with the document revision
+   it was built against (op.rev, set in uiMutate) and non-idempotent ops
+   replay only while that revision still matches the fetched document (R20.7):
+   the groups/lanes ops are wholesale list snapshots that would roll back
+   newer cross-device edits, and arch/unarch encode intent against a state
+   that may have moved on. Note ops always replay — they dedupe on timestamp,
+   so a keepalive that did land costs nothing, and a note typed just before
+   pagehide must not be dropped merely because another device wrote since. */
+const idempotentOp = op => op.k === "note-add" || op.k === "note-del";
 function savePendingOps(){
   try { localStorage.setItem("scimux-ui-ops", JSON.stringify(uiOps)); } catch {}
 }
@@ -1105,6 +1114,7 @@ function applyOp(doc, op){
 /* uiMutate: apply an operation locally right away, queue it for the server */
 function uiMutate(op){
   applyOp(UI, op);
+  op.rev = uiRev;   /* the revision this op was built against (R20.7) */
   uiOps.push(op);
   savePendingOps();
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
@@ -1170,8 +1180,15 @@ async function loadUI(){
     try { UI = normUI(JSON.parse(localStorage.getItem("scimux-ui") || "{}")); } catch {}
   }
   uiLoaded = true;
-  /* ops persisted by a previous page life come before this life's early ones */
-  uiOps = loadPendingOps().concat(uiOps);
+  /* ops persisted by a previous page life come before this life's early ones.
+     Idempotent note ops always replay; the rest only when the fetched
+     document is still the revision they were built against — a stale
+     whole-list snapshot replayed over newer cross-device state (and then
+     pushed with a fresh ETag) would silently roll those edits back (R20.7).
+     When the fetch failed (offline, uiRev === "") we render the cached copy
+     the ops were made on, so nothing newer exists to protect: keep them. */
+  uiOps = loadPendingOps().filter(op => idempotentOp(op) || !uiRev || op.rev === uiRev)
+          .concat(uiOps);
   uiOps.forEach(op => applyOp(UI, op));  /* mutations made before load finished */
   chatSig = "";
   applyRemoteUI();
@@ -1972,10 +1989,14 @@ function renderMap(){
       svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
     if (n.attention)
       svg += `<circle cx="${dotX}" cy="${yy}" r="${inter ? 11.5 : 9.5}" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
-    if (inter)   /* the classic interchange glyph: white-filled ring */
+    /* the death state wins over the interchange ring: a dead interchange
+       station must not render as a healthy in-service ring (its corridor
+       line above still marks the transfer) — only the ring's size keeps
+       the interchange footprint */
+    if (n.live === "exited" || n.live === "unavailable")
+      svg += `<circle cx="${dotX}" cy="${yy}" r="${inter ? 7 : 5.5}" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
+    else if (inter)   /* the classic interchange glyph: white-filled ring */
       svg += `<circle cx="${dotX}" cy="${yy}" r="7" fill="var(--bg)" stroke="${col}" stroke-width="3" opacity="${op}"/>`;
-    else if (n.live === "exited" || n.live === "unavailable")
-      svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
     else
       svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
   });
@@ -3164,9 +3185,15 @@ async function sendPrompt(){
        Nothing was lost — hold the text as a draft and let the operator
        retry once the conflict resolves. Real failures still alert. */
     if (err.status !== 409) alert(err.message);
-    /* the echo lied — nothing reached the agent; retract it */
-    sentEcho = null;
-    document.querySelectorAll("#msgs .turn.echo").forEach(x => x.remove());
+    /* the echo lied — nothing reached the agent; retract it. Only if it is
+       still this send's echo: the user may have switched nodes and sent
+       elsewhere while this POST was in flight, and retracting that newer
+       echo would make the other node's just-sent prompt visibly vanish
+       (R20.8 — dest was captured for exactly this). */
+    if (sentEcho && sentEcho.node === dest){
+      sentEcho = null;
+      document.querySelectorAll("#msgs .turn.echo").forEach(x => x.remove());
+    }
     /* nothing typed is ever lost — restored under the node it was written
        for, and merged in front of anything typed while the send was pending
        rather than overwriting it */

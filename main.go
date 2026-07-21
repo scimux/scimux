@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -1595,6 +1596,24 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if next.Description == "" {
 		next.Description = next.Prompt
 	}
+	// Normalize the merged node once, after all field branches: whichever
+	// field this PATCH touched, the home lane never appears in the
+	// interchange list. The also_lanes branch above dedupes only against the
+	// incoming state, so assigning lane_id after also_lanes (direct API use)
+	// would otherwise persist a station that interchanges with itself and
+	// draws a bogus ring.
+	if next.LaneID != "" && len(next.AlsoLanes) > 0 {
+		also := make([]string, 0, len(next.AlsoLanes))
+		for _, l := range next.AlsoLanes {
+			if l != next.LaneID {
+				also = append(also, l)
+			}
+		}
+		if len(also) == 0 {
+			also = nil
+		}
+		next.AlsoLanes = also
+	}
 	if err := a.appendRecord(storeRecord{Type: "node", Node: &next}); err != nil {
 		a.mu.Unlock()
 		http.Error(w, "persist node: "+err.Error(), 500)
@@ -1687,6 +1706,14 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct{ Text string }
 	if err := decodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
+		// The body cap is a deliberate defense (R18.6), but a bare "bad
+		// request" for an oversized prompt gives the user no size hint and
+		// invites retries that can never succeed — name the limit.
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, fmt.Sprintf("prompt too large: the request body is capped at %d bytes (%d MiB); shorten the prompt or point the agent at a file instead", jsonBodyMax, jsonBodyMax>>20), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad request", 400)
 		return
 	}

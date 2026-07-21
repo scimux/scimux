@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -622,6 +623,34 @@ func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 	}
 	if rec := send("after-resolve"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unconfirmed"`) {
 		t.Fatalf("send after resolve = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A prompt past the 1 MiB body cap must fail with a specific 413 naming the
+// limit, not a bare "bad request" that gives the user no size hint and
+// invites retries that can never succeed.
+func TestHandleSendOversizedPrompt413(t *testing.T) {
+	n := &Node{ID: "n1", Agent: "claude"}
+	a := &app{
+		byID:      map[string]*Node{"n1": n},
+		nodes:     []*Node{n},
+		sendState: map[string]string{},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server: tmuxsession.NewServerWithRunner("testsock",
+			func(ctx context.Context, stdin string, args ...string) (string, error) { return "", nil }),
+	}
+	big := `{"text":"` + strings.Repeat("a", jsonBodyMax+1024) + `"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/nodes/n1/send", strings.NewReader(big))
+	req.SetPathValue("id", "n1")
+	a.handleSend(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized prompt: code = %d, want 413", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, fmt.Sprint(jsonBodyMax)) {
+		t.Errorf("413 body must name the limit, got %q", body)
 	}
 }
 

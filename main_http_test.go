@@ -417,6 +417,36 @@ func TestHandleNodeInterchangeAndService(t *testing.T) {
 	}
 }
 
+// Assigning the home lane after also_lanes already contains it (reachable via
+// direct API use only — the rail editor requires a home lane first) must not
+// persist a station that interchanges with itself: the merged node is
+// normalized once after all field branches.
+func TestHandleNodeSelfInterchangeNormalized(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`) // no home lane yet
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleUpdateNode(up, req)
+		return up
+	}
+	if up := patch(`{"also_lanes":["lane-x","lane-y"]}`); up.Code != 200 {
+		t.Fatalf("set also_lanes: code = %d body %q", up.Code, up.Body.String())
+	}
+	if up := patch(`{"lane_id":"lane-x"}`); up.Code != 200 {
+		t.Fatalf("assign lane: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].AlsoLanes; len(got) != 1 || got[0] != "lane-y" {
+		t.Fatalf("also_lanes = %v, want [lane-y] (home lane stripped)", got)
+	}
+}
+
 func TestHandleNewNodeInheritsParentLane(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
