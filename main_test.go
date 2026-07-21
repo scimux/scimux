@@ -901,6 +901,94 @@ func TestActiveConfinedStallBackstop(t *testing.T) {
 	}
 }
 
+// TestActivePaneKeepsPeekSetAttention: attention set by the one-shot peek
+// path (notePeekDialog) must survive the poller's active branch while the
+// corroborated check is indeterminate — an unresolved call but no confined-
+// animation state (a full-pane redraw deleted it). Without preservation the
+// human-confirmed approval is wiped one tick later (R20.5). It still clears
+// mechanically once the tool call resolves.
+func TestActivePaneKeepsPeekSetAttention(t *testing.T) {
+	pane := "line0\nline1\nline2\nline3\nline4\nline5\nline6"
+	prev := "aa\nbb\ncc\ndd\nee\nff\ngg" // unconfined diff: anim state stays nil
+	path := filepath.Join(t.TempDir(), "tx.jsonl")
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
+		for _, arg := range args {
+			if arg == "capture-pane" {
+				return pane, nil
+			}
+			if arg == "has-session" {
+				return "", nil
+			}
+		}
+		return "", nil
+	}
+	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	a := &app{
+		byID:      map[string]*Node{"cl1": n},
+		nodes:     []*Node{n},
+		live:      map[string]string{},
+		attn:      map[string]string{"cl1": "approval"}, // set by notePeekDialog
+		prevCap:   map[string]string{"cl1": prev},
+		lastChg:   map[string]time.Time{},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+	a.poll()
+	if got := a.live["cl1"]; got != "active" {
+		t.Fatalf("live = %q, want active", got)
+	}
+	if got := a.attn["cl1"]; got != "approval" {
+		t.Errorf("peek-set attention wiped by the active branch: %q, want approval", got)
+	}
+	// Once the call resolves, the preserved attention clears mechanically.
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}}`)
+	a.poll()
+	if got := a.attn["cl1"]; got != "" {
+		t.Errorf("attention not cleared after the call resolved: %q", got)
+	}
+}
+
+// TestNoteAnimSpillKeepsStallWindow: when the accumulated line-union spills
+// past animMaxLines but the instantaneous diff is still confined (the
+// animation strip drifted position), the stall window must carry over —
+// resetting since/off on every drift would postpone the 90s inspect backstop
+// forever (R20.6).
+func TestNoteAnimSpillKeepsStallWindow(t *testing.T) {
+	a := &app{anim: map[string]*animState{}}
+	base := "l0\nl1\nl2\nl3\nl4\nl5"
+	step1 := "l0\nx1\nx2\nx3\nl4\nl5" // lines 1,2,3 change: confined
+	a.noteAnim("n", base, step1)
+	st := a.anim["n"]
+	if st == nil {
+		t.Fatal("expected confined-animation state")
+	}
+	old := time.Now().Add(-time.Hour)
+	st.since, st.off = old, 42
+
+	step2 := "l0\nx1\nx2\nx3\nl4\ny5" // line 5 changes: union {1,2,3,5} spills, diff confined
+	a.noteAnim("n", step1, step2)
+	st2 := a.anim["n"]
+	if st2 == nil {
+		t.Fatal("re-confined state missing after spill")
+	}
+	if !st2.since.Equal(old) || st2.off != 42 {
+		t.Errorf("stall window reset on drift: since=%v off=%d, want carried over", st2.since, st2.off)
+	}
+	if len(st2.lines) != 1 || st2.lines[0] != 5 {
+		t.Errorf("re-confined lines = %v, want [5]", st2.lines)
+	}
+	// Genuinely unconfined output still clears the state.
+	a.noteAnim("n", step2, base)
+	if a.anim["n"] != nil {
+		t.Error("unconfined diff should clear the anim state")
+	}
+}
+
 func TestArchiveSessionLog(t *testing.T) {
 	sessions := t.TempDir()
 	a := &app{sessionsDir: sessions}

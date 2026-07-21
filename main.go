@@ -899,6 +899,19 @@ func (a *app) poll() {
 							attn = "inspect"
 						}
 					}
+					// While the call stays unresolved and this tick produced no
+					// fresh classification, the check is indeterminate (most
+					// concretely: a full-pane redraw deleted the anim state, so
+					// st == nil) — preserve attention already set, e.g. by the
+					// one-shot peek path, instead of wiping it a tick after a
+					// human-confirmed dialog (R20.5). It clears mechanically
+					// once the tool call resolves (WaitingOn goes false) or the
+					// quiet gate re-evaluates.
+					if attn == "" {
+						a.mu.Lock()
+						attn = a.attn[n.ID]
+						a.mu.Unlock()
+					}
 				}
 			}
 		}
@@ -1043,6 +1056,16 @@ func (a *app) noteAnim(id, prev, cur string) {
 		}
 	}
 	if len(idx) <= animMaxLines {
+		if st := a.anim[id]; st != nil {
+			// Re-confining after a union spill: the animation strip drifted
+			// position (elapsed-time rewrapping, queue reordering) but this
+			// tick's diff is still confined — the same wait continues. Carry
+			// since and off over; resetting them would let a strip that
+			// drifts more often than animStallAfter postpone the inspect
+			// backstop forever (R20.6).
+			st.lines = idx
+			return
+		}
 		if a.anim == nil { // tests build app literals without the map
 			a.anim = map[string]*animState{}
 		}
