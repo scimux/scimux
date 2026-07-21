@@ -112,8 +112,19 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	}
 	// Self-describing header first: the filename is a reusable slug, so the
 	// log carries its own identity and launch config (see sessionlog.MetaEvent).
+	// Remember whether the file pre-existed: a launch that fails after this
+	// point must remove the meta-only log it just created, or the leftover
+	// header makes sessionLogExists treat the slug as taken-by-dead-history
+	// forever (R20.3). A pre-existing file is never ours to remove.
+	_, statErr := os.Stat(s.logw.Path)
+	discardLog := func() {
+		if os.IsNotExist(statErr) {
+			_ = os.Remove(s.logw.Path)
+		}
+	}
 	if err := s.logw.Append(sessionlog.NewMeta(nodeID, agent, model, dir)); err != nil {
 		killAndReap(proc)
+		discardLog()
 		return "", fmt.Errorf("session log: %w", err)
 	}
 	s.conn = sdk.NewClientSideConnection(s, proc.Stdin(), proc.Stdout())
@@ -129,11 +140,13 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		},
 	}); err != nil {
 		killAndReap(proc)
+		discardLog()
 		return "", fmt.Errorf("acp initialize: %w", err)
 	}
 	resp, err := s.conn.NewSession(ctx, sdk.NewSessionRequest{Cwd: dir, McpServers: []sdk.McpServer{}})
 	if err != nil {
 		killAndReap(proc)
+		discardLog()
 		return "", fmt.Errorf("acp new session: %w", err)
 	}
 	s.sessionID = resp.SessionId
@@ -319,6 +332,13 @@ func (m *Manager) Deliver(nodeID, optID string) error {
 // agent's context or visibly failed in the node's own history.
 func (m *Manager) RecordStartFailure(nodeID string, cause error) error {
 	msg := "first prompt not delivered: " + cause.Error()
+	// If the log is gone, the node was deleted (and its history archived)
+	// while the first prompt was in flight. Recreating the file here would
+	// resurrect a dead slug as an orphan that burns the name forever (R20.2);
+	// with the node gone there is nothing left to record the failure for.
+	if _, err := os.Stat(m.logPath(nodeID)); err != nil {
+		return nil
+	}
 	logErr := (&logWriter{Path: m.logPath(nodeID)}).Append(Event{T: "error", Error: msg})
 	if s := m.session(nodeID); s != nil {
 		s.mu.Lock()
@@ -537,9 +557,13 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 	ch := make(chan sdk.PermissionOptionId, 1)
 	s.mu.Lock()
 	if s.pending != nil {
-		// One pending at a time; a second is an agent error → cancel it.
+		// One pending at a time; a second is an agent error → cancel it. The
+		// error record goes through appendLocked, never s.logw directly, so
+		// the /clear retire fence applies (R20.1): a straggler request on the
+		// dying connection must be dropped, not written after the seam into
+		// the fresh segment.
+		s.appendLocked(Event{T: "error", Error: "duplicate permission request ignored"})
 		s.mu.Unlock()
-		_ = s.logw.Append(Event{T: "error", Error: "duplicate permission request ignored"})
 		return cancelledPermission(), nil
 	}
 	s.pending = &pendingPermission{toolTitle: title, options: p.Options, ch: ch}

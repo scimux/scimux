@@ -234,6 +234,54 @@ func TestHandleAdoptValidation(t *testing.T) {
 	}
 }
 
+// An id reserved by an in-flight create must be rejected for adoption, and a
+// leftover session log under the slug is a dead node's history the adopt must
+// not bind onto (R20.2, R20.4).
+func TestHandleAdoptRejectsReservedAndDeadSlug(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"pending": true, "deadslug": true}}
+	a := newTestApp(t, f)
+	a.reserved = map[string]bool{"pending": true}
+	if rec := adopt(a, `{"session":"pending","agent":"claude"}`); rec.Code != 409 {
+		t.Errorf("reserved id: code = %d, want 409", rec.Code)
+	}
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(a.sessionsDir, "deadslug.jsonl")
+	if err := os.WriteFile(logPath, []byte(`{"t":"meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := adopt(a, `{"session":"deadslug","agent":"claude"}`)
+	if rec.Code != 409 {
+		t.Errorf("dead-history slug: code = %d body %q, want 409", rec.Code, rec.Body.String())
+	}
+	if _, ok := a.byID["deadslug"]; ok {
+		t.Error("dead-history adopt still registered a node")
+	}
+	if b, err := os.ReadFile(logPath); err != nil || string(b) != `{"t":"meta"}`+"\n" {
+		t.Errorf("dead node's log was touched: %q %v", b, err)
+	}
+}
+
+// The /api/state unadopted list must not offer a session whose id an
+// in-flight create has reserved: adopting it would race the publish (R20.2).
+func TestHandleStateUnadoptedExcludesReserved(t *testing.T) {
+	f := &fakeTmux{list: []string{"ghost", "pending"}}
+	a := newTestApp(t, f)
+	a.reserved = map[string]bool{"pending": true}
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	var body struct {
+		Unadopted []string `json:"unadopted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
+		t.Errorf("unadopted = %v, want [ghost] (pending is reserved)", body.Unadopted)
+	}
+}
+
 // --- /api/nodes ---
 
 func newNode(a *app, bodyJSON string) *httptest.ResponseRecorder {
@@ -708,6 +756,84 @@ func newCodexTestApp(t *testing.T, threadID, rolloutPath string) (*app, func() [
 	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
 	t.Cleanup(a.codex.Shutdown)
 	return a, requests
+}
+
+// If another path publishes the same id while createNode's launch runs with
+// a.mu released, the publish-time re-check must abandon the launch — kill the
+// subprocess, negate the persisted record, archive the log — instead of
+// silently double-publishing the id (R20.2). The interleaving is injected at
+// the spawn seam, which runs exactly inside the unlocked window.
+func TestCreateNodePublishCollisionRollsBack(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	srv := &fakeCodexServer{}
+	base := fakeCodexSpawnBase(srv, "THREAD-COLL", filepath.Join(t.TempDir(), "rollout.jsonl"), nil, nil)
+	var imposter *Node
+	spawn := func(nodeID, dir string) (codex.Transport, error) {
+		a.mu.Lock()
+		imposter = &Node{ID: nodeID, Title: "imposter", Agent: "claude", Adopted: true,
+			CreatedAt: "2026-07-20T00:00:00Z"}
+		a.nodes = append(a.nodes, imposter)
+		a.byID[nodeID] = imposter
+		a.mu.Unlock()
+		return base(nodeID, dir)
+	}
+	a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+
+	rec := newNode(a, `{"title":"T","prompt":"p","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 409 {
+		t.Fatalf("collided create: code = %d body %q, want 409", rec.Code, rec.Body.String())
+	}
+	a.mu.Lock()
+	got := a.byID["T"]
+	count := len(a.nodes)
+	a.mu.Unlock()
+	if got != imposter || count != 1 {
+		t.Fatalf("registry after collision: byID[T]=%p imposter=%p nodes=%d", got, imposter, count)
+	}
+	if a.codex.HasSession("T") {
+		t.Error("abandoned launch left a live codex session")
+	}
+	// The session log is archived, freeing the slug.
+	if _, err := os.Stat(filepath.Join(a.sessionsDir, "T.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("abandoned launch left a session log: stat err = %v", err)
+	}
+	// The store negates the abandoned record: a replay must not resurrect it.
+	fresh := &app{byID: map[string]*Node{}, storePath: a.storePath,
+		live: map[string]string{}, attn: map[string]string{}}
+	if err := fresh.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fresh.byID["T"]; ok {
+		t.Error("abandoned node record resurrected on store replay")
+	}
+}
+
+// A store-append failure after a successful structured launch rolls back the
+// subprocess; the launcher's just-written meta header must be archived with
+// it, or the slug reads as taken-by-dead-history forever (R20.3).
+func TestLaunchNodeRollbackArchivesSessionLog(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	spawn, _ := newFakeCodexSpawn(t, "THREAD-RB", filepath.Join(t.TempDir(), "rollout.jsonl"))
+	a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+	// A directory at the store path makes every node-record append fail.
+	if err := os.Mkdir(a.storePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := newNode(a, `{"title":"T","prompt":"p","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 500 {
+		t.Fatalf("create with broken store: code = %d, want 500", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(a.sessionsDir, "T.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("rolled-back launch left a session log burning the slug: stat err = %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(a.sessionsDir, "archive", "T.*.jsonl"))
+	if len(matches) != 1 {
+		t.Errorf("want the meta-only log archived, got %v", matches)
+	}
 }
 
 func TestHandleNewNodeCodexCreatesNode(t *testing.T) {

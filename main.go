@@ -574,15 +574,42 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	status, err := a.launchNode(n, pm)
 
 	// Publish (or abandon) under the lock; either way the reservation ends.
+	// Re-check the id for a collision at publish time: the launch ran with
+	// a.mu released, and a double-publish would leave two *Node values under
+	// one id with the store replaying both (R20.2). Every id-minting path now
+	// consults a.reserved (uniqueID, handleAdopt), so a hit here should be
+	// unreachable — but the cost of missing one is silent registry and store
+	// corruption, so the launch is abandoned and rolled back instead.
 	a.mu.Lock()
 	delete(a.reserved, n.ID)
+	collided := false
 	if err == nil {
-		a.nodes = append(a.nodes, n)
-		a.byID[n.ID] = n
+		if _, dup := a.byID[n.ID]; dup {
+			collided = true
+		} else {
+			a.nodes = append(a.nodes, n)
+			a.byID[n.ID] = n
+		}
 	}
 	a.mu.Unlock()
 	if err != nil {
 		return status, err
+	}
+	if collided {
+		fmt.Fprintf(os.Stderr, "scimux: node id %s was claimed concurrently during launch; abandoning the new launch\n", n.ID)
+		if pm != nil {
+			_ = pm.Kill(n.ID)
+		} else if s := a.server.Session(n.ID); s.Alive() {
+			_ = s.Kill()
+		}
+		// Negate the just-persisted node record. Append-only store: the delete
+		// record is the only correction that prevents this launch's dead config
+		// from clobbering the collision winner's record at replay (both share
+		// the id, and the later node record would win). The winner's in-memory
+		// node stays; its supervisor can re-adopt after a restart if needed.
+		_ = a.appendRecord(storeRecord{Type: "delete", ID: n.ID, Time: time.Now().UTC().Format(time.RFC3339)})
+		a.archiveSessionLog(n.ID)
+		return 409, fmt.Errorf("node id %q was claimed concurrently; launch abandoned", n.ID)
 	}
 
 	// Deliver the research question as the first turn of a structured node.
@@ -626,6 +653,10 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 			if kerr := pm.Kill(n.ID); kerr != nil {
 				fmt.Fprintf(os.Stderr, "scimux: rollback of %s session %s failed: %v\n", n.transport(), n.ID, kerr)
 			}
+			// The launcher already wrote the session log's meta header; without
+			// the node record it is dead history that would burn the slug
+			// forever (R20.3) — archive it with the rollback.
+			a.archiveSessionLog(n.ID)
 			return 500, fmt.Errorf("persist node (%s session rolled back): %v", n.transport(), err)
 		}
 		return 0, nil
@@ -1278,10 +1309,12 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 			HasTranscript: hasTranscript, LastActivity: lastMS})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
-	// adoption (manually created, or migrated from another tmux server).
+	// adoption (manually created, or migrated from another tmux server). A
+	// session whose id is reserved by an in-flight create is already spoken
+	// for (R20.2) — offering it for adoption would race the publish.
 	unadopted := []string{}
 	for _, s := range sessions {
-		if _, known := a.byID[s]; !known {
+		if _, known := a.byID[s]; !known && !a.reserved[s] {
 			unadopted = append(unadopted, s)
 		}
 	}
@@ -1356,6 +1389,19 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	defer a.mu.Unlock()
 	if _, taken := a.byID[body.Session]; taken {
 		http.Error(w, "node already exists", 409)
+		return
+	}
+	// The same taken-checks uniqueID applies to created ids (R20.2, R20.4):
+	// an id reserved by an in-flight create must not be adopted out from under
+	// the launch, and a leftover session log under this slug is a dead node's
+	// history — adopting onto it would bind the mirror to foreign turns under
+	// the dead node's identity.
+	if a.reserved[body.Session] {
+		http.Error(w, fmt.Sprintf("a node %q is being created right now; retry or pick another session name", body.Session), 409)
+		return
+	}
+	if a.sessionLogExists(body.Session) {
+		http.Error(w, fmt.Sprintf("session log %s.jsonl already holds a dead node's history; move it out of the sessions directory (or into sessions/archive/) before adopting this name", body.Session), 409)
 		return
 	}
 	dir := body.Dir

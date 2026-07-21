@@ -2,6 +2,10 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -52,6 +56,49 @@ func launch(t *testing.T, m *Manager, ms *mockServer, nodeID, model, effort stri
 		t.Fatalf("session id = %q, want thread id", got.sid)
 	}
 	return got.sid
+}
+
+// A launch that fails after the meta header was written must remove the
+// meta-only log it just created, or the slug reads as taken-by-dead-history
+// forever (R20.3).
+func TestManagerLaunchFailureRemovesMetaOnlyLog(t *testing.T) {
+	mt, ms := newMockTransport()
+	dir := t.TempDir()
+	m := NewManagerWithSpawn(dir, func(nodeID, d string) (Transport, error) { return mt, nil })
+	errc := make(chan error, 1)
+	go func() {
+		_, err := m.Launch("n1", "codex", "/w", "", "")
+		errc <- err
+	}()
+	r := ms.nextReq(t)
+	if r.Method != "initialize" {
+		t.Fatalf("first req = %q", r.Method)
+	}
+	idb, _ := json.Marshal(r.ID)
+	ms.writeRaw(t, `{"id":`+string(idb)+`,"error":{"code":-1,"message":"broken binary"}}`)
+	if err := <-errc; err == nil {
+		t.Fatal("launch should have failed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "n1.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("meta-only log left behind by a failed launch: stat err = %v", err)
+	}
+}
+
+// RecordStartFailure must not recreate a session log that no longer exists
+// (node deleted, history archived, while the first prompt was in flight) —
+// that would resurrect the dead slug as an orphan (R20.2).
+func TestManagerRecordStartFailureSkipsMissingLog(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManagerWithSpawn(dir, func(nodeID, d string) (Transport, error) {
+		t.Fatal("spawn must not run")
+		return nil, nil
+	})
+	if err := m.RecordStartFailure("gone", errors.New("subprocess killed by delete")); err != nil {
+		t.Fatalf("RecordStartFailure on a deleted node: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gone.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("RecordStartFailure recreated a deleted node's log: stat err = %v", err)
+	}
 }
 
 func TestManagerLaunchAndTurn(t *testing.T) {

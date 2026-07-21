@@ -111,8 +111,19 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	}
 	// Self-describing header first: the filename is a reusable slug, so the
 	// log carries its own identity and launch config (see sessionlog.MetaEvent).
+	// Remember whether the file pre-existed: a launch that fails after this
+	// point must remove the meta-only log it just created, or the leftover
+	// header makes the slug read as taken-by-dead-history forever (R20.3). A
+	// pre-existing file is never ours to remove.
+	_, statErr := os.Stat(s.logw.Path)
+	discardLog := func() {
+		if os.IsNotExist(statErr) {
+			_ = os.Remove(s.logw.Path)
+		}
+	}
 	if err := s.logw.Append(sessionlog.NewMeta(nodeID, agent, model, dir)); err != nil {
 		_ = tr.Close()
+		discardLog()
 		return "", fmt.Errorf("session log: %w", err)
 	}
 	s.client = NewClient(tr, s.onEvent, nil)
@@ -122,6 +133,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	defer cancel()
 	if _, err := s.client.Initialize(ctx, "scimux", "1"); err != nil {
 		_ = tr.Close()
+		discardLog()
 		return "", fmt.Errorf("codex initialize: %w", err)
 	}
 	info, err := s.client.StartThread(ctx, StartThreadParams{
@@ -129,6 +141,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	})
 	if err != nil {
 		_ = tr.Close()
+		discardLog()
 		return "", fmt.Errorf("codex thread/start: %w", err)
 	}
 	s.threadID = info.ID
@@ -272,6 +285,13 @@ type PermOption struct {
 // session still exists, surfaces it as the node's LastError.
 func (m *Manager) RecordStartFailure(nodeID string, cause error) error {
 	msg := "first prompt not delivered: " + cause.Error()
+	// If the log is gone, the node was deleted (and its history archived)
+	// while the first prompt was in flight. Recreating the file here would
+	// resurrect a dead slug as an orphan that burns the name forever (R20.2);
+	// with the node gone there is nothing left to record the failure for.
+	if _, err := os.Stat(m.logPath(nodeID)); err != nil {
+		return nil
+	}
 	logErr := (&logWriter{Path: m.logPath(nodeID)}).Append(Event{T: "error", Error: msg})
 	if s := m.session(nodeID); s != nil {
 		s.mu.Lock()

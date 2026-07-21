@@ -496,6 +496,92 @@ func TestClearFencesRetiredSessionWrites(t *testing.T) {
 	}
 }
 
+// A launch that fails after the meta header was written must remove the
+// meta-only log it just created: the leftover file would make the slug read
+// as taken-by-dead-history forever, silently minting study-2, study-3, … on
+// every retry against a broken agent (R20.3).
+func TestLaunchFailureRemovesMetaOnlyLog(t *testing.T) {
+	agent := &fakeAgent{newSessionErr: errors.New("agent not authenticated")}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err == nil {
+		t.Fatal("launch should have failed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "n1.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("meta-only log left behind by a failed launch: stat err = %v", err)
+	}
+	// The slug is reusable: a retry against a working agent launches cleanly
+	// under the same node id.
+	agent.newSessionErr = nil
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatalf("retry launch: %v", err)
+	}
+	defer m.Shutdown()
+	if _, err := os.Stat(filepath.Join(dir, "n1.jsonl")); err != nil {
+		t.Fatalf("retry did not create the log: %v", err)
+	}
+}
+
+// RecordStartFailure must not recreate a session log that no longer exists:
+// the node was deleted (its history archived) while the first prompt was in
+// flight, and a fresh meta-less file would resurrect the dead slug as an
+// orphan (R20.2).
+func TestRecordStartFailureSkipsMissingLog(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(&fakeAgent{}))
+	if err := m.RecordStartFailure("gone", errors.New("subprocess killed by delete")); err != nil {
+		t.Fatalf("RecordStartFailure on a deleted node: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gone.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("RecordStartFailure recreated a deleted node's log: stat err = %v", err)
+	}
+}
+
+// The retire fence must hold for every write path of the dying session, not
+// just the streamed-update ones: the duplicate-permission error was the one
+// call site writing to the shared log directly, so a straggler permission
+// request in the Clear window landed after the seam (R20.1).
+func TestRetiredSessionDuplicatePermissionErrorFenced(t *testing.T) {
+	agent := &fakeAgent{}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	old := m.session("n1")
+	if err := m.Clear("n1"); err != nil {
+		t.Fatal(err)
+	}
+	// A straggler permission request arrives on the dying connection while an
+	// earlier one is still marked pending: the duplicate is cancelled, and its
+	// error record must be dropped by the fence, not written after the seam.
+	old.mu.Lock()
+	old.pending = &pendingPermission{toolTitle: "stale", ch: make(chan sdk.PermissionOptionId, 1)}
+	old.mu.Unlock()
+	resp, err := old.RequestPermission(context.Background(), sdk.RequestPermissionRequest{})
+	if err != nil {
+		t.Fatalf("RequestPermission: %v", err)
+	}
+	if resp.Outcome.Cancelled == nil {
+		t.Fatalf("duplicate permission request outcome = %+v, want cancelled", resp.Outcome)
+	}
+	evs := readEvents(filepath.Join(dir, "n1.jsonl"))
+	seam := -1
+	for i, ev := range evs {
+		if ev.T == "source" {
+			seam = i
+		}
+	}
+	if seam < 0 {
+		t.Fatal("no source seam after /clear")
+	}
+	for _, ev := range evs[seam:] {
+		if ev.T == "error" {
+			t.Fatalf("retired session's error record landed in the fresh segment: %+v", ev)
+		}
+	}
+}
+
 // A /clear racing an active turn is refused like a second Send: one turn at
 // a time also guards the session swap.
 func TestClearDuringActiveTurn(t *testing.T) {
