@@ -57,7 +57,38 @@ func segmentOf(evs []Event) Segment {
 			}
 		}
 	}
+	// A mirror/adopt/import seam is stamped at bind time, but the turns it
+	// precedes can be far older (an adopted claude session, or one of the
+	// imported archives). Dating the surface at the seam then renders "chat
+	// started 07-20" above turns visibly from 2025 (R20.9). When the first turn
+	// of the segment predates its StartTime, prefer the turn's own timestamp;
+	// a genuine /clear, whose fresh turns all follow the seam, is unaffected.
+	if len(seg.Turns) > 0 {
+		if t0 := seg.Turns[0].Time; t0 != "" && earlier(t0, seg.StartTime) {
+			seg.StartTime = t0
+		}
+	}
 	return seg
+}
+
+// earlier reports whether timestamp a is chronologically before b. Both are
+// raw logged strings (RFC3339 from seams, whatever the CLI wrote for turns);
+// parse defensively and, if either is unparseable, make no claim (false) so a
+// fabricated stamp is only ever corrected on solid evidence.
+func earlier(a, b string) bool {
+	ta, ea := parseStamp(a)
+	tb, eb := parseStamp(b)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return ta.Before(tb)
+}
+
+func parseStamp(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, s)
 }
 
 // ReadSegment parses the log and returns its current segment.

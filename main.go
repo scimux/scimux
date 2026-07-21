@@ -105,11 +105,20 @@ type storeRecord struct {
 }
 
 type app struct {
-	mu      sync.Mutex
-	nodes   []*Node
-	byID    map[string]*Node
-	live    map[string]string // node id -> "active"|"quiet"|"exited"
-	attn    map[string]string // node id -> ""|"approval"|"question"|"inspect"
+	mu    sync.Mutex
+	nodes []*Node
+	byID  map[string]*Node
+	live  map[string]string // node id -> "active"|"quiet"|"exited"
+	attn  map[string]string // node id -> ""|"approval"|"question"|"inspect"
+	// attnAt: when a.attn[id] was last set by *fresh* evidence (a classification
+	// this tick, or the one-shot peek path) rather than carried over. The
+	// active-branch preserve path (R20.5) keeps attention while the corroborated
+	// check is indeterminate, but only while it is younger than animStallAfter —
+	// otherwise a human answer given in the terminal (which touches nothing) would
+	// leave the card claiming "approval" for the whole runtime of the approved
+	// tool, since the tool-call record stays unresolved until the tool completes
+	// (R21.2). A web-key answer clears attn outright in handleKey.
+	attnAt  map[string]time.Time
 	prevCap map[string]string
 	lastChg map[string]time.Time
 	// activeSince: when the pane last entered the mechanically active state —
@@ -185,7 +194,7 @@ func (a *app) segment(n *Node) sessionlog.Segment {
 		a.segCache[n.ID] = c
 	}
 	a.mu.Unlock()
-	return c.Segment(filepath.Join(a.sessionsDir, n.ID+".jsonl"))
+	return c.Segment(a.sessionLogPath(n.ID))
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:
@@ -366,6 +375,7 @@ func (a *app) removeNodeLocked(id string) {
 	}
 	delete(a.live, id)
 	delete(a.attn, id)
+	delete(a.attnAt, id)
 	delete(a.prevCap, id)
 	delete(a.lastChg, id)
 	delete(a.activeSince, id)
@@ -416,11 +426,17 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 	}
 }
 
+// sessionLogPath is the single spelling of a node's session-log location; the
+// id is the reusable title slug and the file's basename.
+func (a *app) sessionLogPath(id string) string {
+	return filepath.Join(a.sessionsDir, id+".jsonl")
+}
+
 func (a *app) sessionLogExists(id string) bool {
 	if a.sessionsDir == "" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(a.sessionsDir, id+".jsonl"))
+	_, err := os.Stat(a.sessionLogPath(id))
 	return err == nil
 }
 
@@ -584,9 +600,11 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	a.mu.Lock()
 	delete(a.reserved, n.ID)
 	collided := false
+	var winner *Node
 	if err == nil {
-		if _, dup := a.byID[n.ID]; dup {
+		if w, dup := a.byID[n.ID]; dup {
 			collided = true
+			winner = w // the node that reached the slug first; preserve its record
 		} else {
 			a.nodes = append(a.nodes, n)
 			a.byID[n.ID] = n
@@ -603,13 +621,18 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 		} else if s := a.server.Session(n.ID); s.Alive() {
 			_ = s.Kill()
 		}
-		// Negate the just-persisted node record. Append-only store: the delete
-		// record is the only correction that prevents this launch's dead config
-		// from clobbering the collision winner's record at replay (both share
-		// the id, and the later node record would win). The winner's in-memory
-		// node stays; its supervisor can re-adopt after a restart if needed.
+		// Negate the just-persisted node record, then re-assert the winner's.
+		// Append-only store: the delete record stops this launch's dead config
+		// from clobbering the winner at replay (both share the id, and the later
+		// node record wins) — but that same delete would also erase the winner's
+		// earlier record. Re-appending the winner's node record (its *Node is in
+		// hand, captured under the collision lock) makes replay converge on the
+		// live node with no manual re-adopt (R21.4). The winner owns
+		// sessions/<id>.jsonl, so its log is left intact — never archived here.
 		_ = a.appendRecord(storeRecord{Type: "delete", ID: n.ID, Time: time.Now().UTC().Format(time.RFC3339)})
-		a.archiveSessionLog(n.ID)
+		if winner != nil {
+			_ = a.appendRecord(storeRecord{Type: "node", Node: winner})
+		}
 		return 409, fmt.Errorf("node id %q was claimed concurrently; launch abandoned", n.ID)
 	}
 
@@ -826,6 +849,10 @@ func (a *app) poll() {
 			}
 		}
 		attn := ""
+		// freshAttn distinguishes attention classified from evidence this tick
+		// from attention merely preserved across an indeterminate tick: only the
+		// former (re)stamps attnAt, so the preserve window ages out (R21.2).
+		freshAttn := false
 		if state == "quiet" {
 			tl := a.tailerFor(n)
 			if tl != nil {
@@ -868,6 +895,7 @@ func (a *app) poll() {
 					attn = "inspect"
 				}
 			}
+			freshAttn = attn != "" // every quiet-branch assignment is fresh evidence
 		} else if state == "active" {
 			// Active-pane needs-input: only when the transcript shows an
 			// unresolved call AND the pane's changes are confined to an
@@ -900,17 +928,26 @@ func (a *app) poll() {
 							attn = "inspect"
 						}
 					}
+					freshAttn = attn != ""
 					// While the call stays unresolved and this tick produced no
 					// fresh classification, the check is indeterminate (most
 					// concretely: a full-pane redraw deleted the anim state, so
 					// st == nil) — preserve attention already set, e.g. by the
 					// one-shot peek path, instead of wiping it a tick after a
-					// human-confirmed dialog (R20.5). It clears mechanically
-					// once the tool call resolves (WaitingOn goes false) or the
-					// quiet gate re-evaluates.
+					// human-confirmed dialog (R20.5). But bound the preservation:
+					// a tool call stays unresolved until the tool *completes*
+					// (both CLIs write the result record only then), and an
+					// executing tool streams — deleting the anim state and making
+					// every tick indeterminate. Without a bound, approving a
+					// 3-minute Bash call in the terminal would leave the card on
+					// "approval" for all 3 minutes (R21.2). Only preserve while
+					// the last fresh classification is younger than animStallAfter;
+					// a web-key answer clears it outright in handleKey.
 					if attn == "" {
 						a.mu.Lock()
-						attn = a.attn[n.ID]
+						if prevAttn := a.attn[n.ID]; prevAttn != "" && time.Since(a.attnAt[n.ID]) < animStallAfter {
+							attn = prevAttn
+						}
 						a.mu.Unlock()
 					}
 				}
@@ -918,6 +955,12 @@ func (a *app) poll() {
 		}
 		a.mu.Lock()
 		a.live[n.ID] = state
+		if freshAttn && attn != "" {
+			if a.attnAt == nil { // tests build app literals without the map
+				a.attnAt = map[string]time.Time{}
+			}
+			a.attnAt[n.ID] = time.Now()
+		}
 		a.attn[n.ID] = attn
 		a.mu.Unlock()
 		// A whole working phase just ended: if the linked transcript never
@@ -1669,7 +1712,7 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 // slug would append onto the dead node's history. Best-effort: history
 // retention must never block a delete.
 func (a *app) archiveSessionLog(id string) {
-	src := filepath.Join(a.sessionsDir, id+".jsonl")
+	src := a.sessionLogPath(id)
 	if _, err := os.Stat(src); err != nil {
 		return
 	}
@@ -1853,7 +1896,7 @@ func (a *app) retireTranscript(n *Node) {
 	// turn. Append failures are logged, not fatal: the UI degrades to peek
 	// either way and the mirror's next seam still separates the segments.
 	if a.sessionsDir != "" {
-		logPath := filepath.Join(a.sessionsDir, n.ID+".jsonl")
+		logPath := a.sessionLogPath(n.ID)
 		if _, err := os.Stat(logPath); err == nil {
 			w := &sessionlog.Writer{Path: logPath}
 			if err := w.Append(sessionlog.NewSource("", "")); err != nil {
@@ -2216,6 +2259,15 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	// The human just answered the dialog; clear attention now rather than waiting
+	// for the tool-call record to resolve (it only lands when the approved tool
+	// completes, which for a long tool is minutes away — R21.2). The mechanical
+	// pipeline re-raises on the next tick if the dialog is still up, mirroring
+	// what the structured path gets for free from pm.Attention.
+	a.mu.Lock()
+	a.attn[n.ID] = ""
+	delete(a.attnAt, n.ID)
+	a.mu.Unlock()
 	// The audit record is part of the operation's success contract: a keypress
 	// whose evidence cannot be persisted must not report plain success. The key
 	// is already delivered (cannot be unsent), so say exactly that.
@@ -2287,6 +2339,15 @@ func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
 	if !ok {
 		return
 	}
+	// Skip the visible-pane capture entirely when attention is already set — the
+	// poller has classified this node and notePeekDialog only ever raises fresh
+	// attention, never overwrites (efficiency, 2026-07-20 batch).
+	a.mu.Lock()
+	already := a.attn[n.ID] != ""
+	a.mu.Unlock()
+	if already {
+		return
+	}
 	visible, err := s.CaptureVisible()
 	if err != nil || !dialoghint.ClassifyVisible(visible) {
 		return
@@ -2294,6 +2355,10 @@ func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
 	a.mu.Lock()
 	if a.attn[n.ID] == "" {
 		a.attn[n.ID] = attentionKind(name)
+		if a.attnAt == nil { // tests build app literals without the map
+			a.attnAt = map[string]time.Time{}
+		}
+		a.attnAt[n.ID] = time.Now() // fresh evidence: start the preserve window (R21.2)
 	}
 	a.mu.Unlock()
 }
@@ -2451,6 +2516,7 @@ func main() {
 		byID:        map[string]*Node{},
 		live:        map[string]string{},
 		attn:        map[string]string{},
+		attnAt:      map[string]time.Time{},
 		prevCap:     map[string]string{},
 		lastChg:     map[string]time.Time{},
 		activeSince: map[string]time.Time{},

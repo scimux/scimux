@@ -78,6 +78,38 @@ func TestSegmentRollover(t *testing.T) {
 	}
 }
 
+func TestSegmentMirroredOldTurnsDateAtTheTurn(t *testing.T) {
+	// A mirror/adopt/import seam is stamped at bind time, but the turns it
+	// precedes can be far older. The surface must date at the earliest turn, not
+	// the seam, so the UI doesn't render "chat started" at import time above
+	// turns visibly from a year earlier (R20.9).
+	path := writeLog(t, []Event{
+		NewMeta("n1", "claude", "", "/tmp"),
+		{T: "source", Time: "2026-07-20T09:00:00Z", Source: &SourceEvent{SessionID: "s1"}},
+		{T: "user", Text: "old q", Time: "2025-03-01T12:00:00Z"},
+		{T: "assistant", Text: "old a", Time: "2025-03-01T12:01:00Z"},
+	})
+	seg := ReadSegment(path)
+	if seg.StartTime != "2025-03-01T12:00:00Z" {
+		t.Fatalf("start=%q, want the oldest turn's own time", seg.StartTime)
+	}
+}
+
+func TestSegmentFreshClearKeepsSeamTime(t *testing.T) {
+	// A genuine /clear: the fresh turns all follow the seam in time, so the seam
+	// stamp is the true chat-start and must not be pulled back (R20.9 guard).
+	path := writeLog(t, []Event{
+		NewMeta("n1", "codex", "", "/tmp"),
+		{T: "user", Text: "old q", Time: "2026-07-17T09:00:00Z"},
+		{T: "source", Time: "2026-07-17T10:00:00Z", Source: &SourceEvent{SessionID: "s2"}},
+		{T: "user", Text: "new q", Time: "2026-07-17T10:05:00Z"},
+	})
+	seg := ReadSegment(path)
+	if seg.StartTime != "2026-07-17T10:00:00Z" {
+		t.Fatalf("start=%q, want the seam time", seg.StartTime)
+	}
+}
+
 func TestSegmentFreshClear(t *testing.T) {
 	// Seam as the last record: the fresh surface is empty but the divider data
 	// (prior turns, start time) is there.

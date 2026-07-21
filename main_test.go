@@ -958,7 +958,8 @@ func TestActivePaneKeepsPeekSetAttention(t *testing.T) {
 		byID:      map[string]*Node{"cl1": n},
 		nodes:     []*Node{n},
 		live:      map[string]string{},
-		attn:      map[string]string{"cl1": "approval"}, // set by notePeekDialog
+		attn:      map[string]string{"cl1": "approval"},    // set by notePeekDialog
+		attnAt:    map[string]time.Time{"cl1": time.Now()}, // freshly, this instant
 		prevCap:   map[string]string{"cl1": prev},
 		lastChg:   map[string]time.Time{},
 		tailers:   map[string]*transcript.Tailer{},
@@ -979,6 +980,51 @@ func TestActivePaneKeepsPeekSetAttention(t *testing.T) {
 	a.poll()
 	if got := a.attn["cl1"]; got != "" {
 		t.Errorf("attention not cleared after the call resolved: %q", got)
+	}
+}
+
+// TestPeekSetAttentionExpiresAfterStall: a dialog answered in the terminal
+// touches no server state, so the tool call stays unresolved (its result record
+// lands only when the tool completes) and the active branch keeps preserving
+// attention. Bound that: once the last fresh classification is older than
+// animStallAfter, the preserved attention must age out rather than pin the card
+// on "approval" for the whole runtime of the approved tool (R21.2).
+func TestPeekSetAttentionExpiresAfterStall(t *testing.T) {
+	pane := "line0\nline1\nline2\nline3\nline4\nline5\nline6"
+	prev := "aa\nbb\ncc\ndd\nee\nff\ngg" // unconfined diff: anim state stays nil
+	path := filepath.Join(t.TempDir(), "tx.jsonl")
+	appendLines(t, path,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
+		for _, arg := range args {
+			if arg == "capture-pane" {
+				return pane, nil
+			}
+			if arg == "has-session" {
+				return "", nil
+			}
+		}
+		return "", nil
+	}
+	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	a := &app{
+		byID:  map[string]*Node{"cl1": n},
+		nodes: []*Node{n},
+		live:  map[string]string{},
+		attn:  map[string]string{"cl1": "approval"},
+		// Classified more than the stall window ago (answered in the terminal
+		// since; nothing refreshed the stamp).
+		attnAt:    map[string]time.Time{"cl1": time.Now().Add(-animStallAfter - time.Second)},
+		prevCap:   map[string]string{"cl1": prev},
+		lastChg:   map[string]time.Time{},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+	a.poll()
+	if got := a.attn["cl1"]; got != "" {
+		t.Errorf("stale peek-set attention not aged out: %q, want empty", got)
 	}
 }
 

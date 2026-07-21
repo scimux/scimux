@@ -97,6 +97,44 @@ func TestForkPayloadDefersLaunchConfigToServer(t *testing.T) {
 	}
 }
 
+// R18.1 altitude: a lane color is user-authored and flows into many style=""
+// interpolations. safeColor must return only well-formed color syntax verbatim
+// and reject anything that could break out of an attribute, so the accessor is
+// the single guard rather than every call site's esc() wrap.
+func TestWebSafeColorRejectsInjection(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "const SAFE_COLOR")
+	end := strings.Index(html, "function laneColor(")
+	if start < 0 || end < 0 || end < start {
+		t.Fatal("could not locate the safeColor helpers in web/index.html")
+	}
+	script := html[start:end] + `
+const assert = require("assert");
+for (const ok of ["#abc", "#aabbcc", "#aabbccdd", "var(--work)", "rgb(1,2,3)", "rgba(1,2,3,.5)", "hsl(200, 50%, 40%)", "tomato", "  #fff  "]) {
+  assert.ok(safeColor(ok) !== null, "should accept " + ok);
+}
+for (const bad of ['#fff"><script>', 'red;background:url(x)', 'expression(1)', '</style>', '', null, undefined, "var(--x); }"]) {
+  assert.strictEqual(safeColor(bad), null, "should reject " + JSON.stringify(bad));
+}
+assert.strictEqual(safeColor("  #fff  "), "#fff", "trims");
+`
+	f := filepath.Join(t.TempDir(), "color.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("safeColor sanitization broken: %v\n%s", err, out)
+	}
+}
+
 func TestEmbeddedAgentAssetsServe(t *testing.T) {
 	assets, err := fs.Sub(webFS, "web/assets")
 	if err != nil {

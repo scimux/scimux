@@ -825,18 +825,24 @@ func TestCreateNodePublishCollisionRollsBack(t *testing.T) {
 	if a.codex.HasSession("T") {
 		t.Error("abandoned launch left a live codex session")
 	}
-	// The session log is archived, freeing the slug.
-	if _, err := os.Stat(filepath.Join(a.sessionsDir, "T.jsonl")); !os.IsNotExist(err) {
-		t.Errorf("abandoned launch left a session log: stat err = %v", err)
+	// The winner owns sessions/T.jsonl; the rollback leaves it intact rather
+	// than archiving it out from under the live node (R21.4).
+	if _, err := os.Stat(filepath.Join(a.sessionsDir, "T.jsonl")); err != nil {
+		t.Errorf("winner's session log was archived by the rollback: stat err = %v", err)
 	}
-	// The store negates the abandoned record: a replay must not resurrect it.
+	// The store negates the abandoned record and re-asserts the winner's, so a
+	// replay converges on the winner with no manual re-adopt (R21.4). The
+	// winner was published straight to memory in this test, so its only store
+	// record is the one the rollback re-appended.
 	fresh := &app{byID: map[string]*Node{}, storePath: a.storePath,
 		live: map[string]string{}, attn: map[string]string{}}
 	if err := fresh.loadStore(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := fresh.byID["T"]; ok {
-		t.Error("abandoned node record resurrected on store replay")
+	if got := fresh.byID["T"]; got == nil {
+		t.Error("winner record not converged on store replay")
+	} else if got.Title != "imposter" {
+		t.Errorf("replay converged on the wrong node: title = %q, want imposter", got.Title)
 	}
 }
 

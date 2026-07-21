@@ -64,7 +64,7 @@ func (a *app) syncMirror(n *Node) {
 		m = &mirror{}
 		a.mirrors[n.ID] = m
 	}
-	logPath := filepath.Join(a.sessionsDir, n.ID+".jsonl")
+	logPath := a.sessionLogPath(n.ID)
 	a.mu.Unlock()
 
 	m.sync(logPath, n, tl.Path, turns, used, win)

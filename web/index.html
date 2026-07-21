@@ -727,6 +727,13 @@ body.notes-open #notespane { transform: translateX(0); }
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
 #chathead .toprow, #chatmission { cursor: pointer; }
 #notebarrow { display: flex; align-items: flex-end; gap: 8px; }
+#notechip { display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  padding: 4px 6px 4px 10px; border-radius: 12px; font-size: 12.5px; color: var(--dim);
+  background: color-mix(in srgb, var(--work) 12%, transparent);
+  border-left: 3px solid var(--work); }
+#notechiptext { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#notechipx { flex: none; width: 20px; height: 20px; border-radius: 10px; font-size: 15px;
+  line-height: 1; color: var(--dim); display: flex; align-items: center; justify-content: center; }
 #noteprompt { flex: 1; font-size: 14px; line-height: 1.4; color: var(--ink);
   background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
   padding: 7px 12px; outline: none; min-height: calc(1.4em + 14px); max-height: 100px;
@@ -858,6 +865,10 @@ body.notes-open #notespane { transform: translateX(0); }
          (invariant); reply mode shows as the "Reply…" placeholder and is
          canceled by leaving the empty composer (blur/Escape) -->
     <div id="notebar">
+      <div id="notechip" hidden>
+        <span id="notechiptext"></span>
+        <button id="notechipx" aria-label="cancel reply">&times;</button>
+      </div>
       <div id="notebarrow">
         <div id="noteprompt" role="textbox" aria-multiline="true" contenteditable="true"
           data-placeholder="Add a note…"></div>
@@ -1010,7 +1021,16 @@ let attnFoldOpen = false;   /* "Input needed" disclosure; folded on scope change
 let mapTab = localStorage.getItem("scimux-maptab") || "all";
 /* per-device view state, like mapTab: which lane blocks are folded shut */
 let mapFold = new Set(JSON.parse(localStorage.getItem("scimux-mapfold") || "[]"));
-function saveMapFold(){ localStorage.setItem("scimux-mapfold", JSON.stringify([...mapFold])); }
+function saveMapFold(){
+  /* prune folds for lanes no longer in use so deleted-lane ids don't accumulate
+     forever; only when state is loaded, so a transient empty `nodes` can't wipe
+     legitimate folds */
+  if (uiLoaded && nodes.length){
+    const live = new Set(laneModel().lanes.map(l => l.id));
+    for (const id of mapFold) if (!live.has(id)) mapFold.delete(id);
+  }
+  localStorage.setItem("scimux-mapfold", JSON.stringify([...mapFold]));
+}
 const expanded = new Set();
 let actionCard = "";
 let editingDesc = "";
@@ -1145,11 +1165,31 @@ async function flushUI(){
   if (uiSaving || !uiLoaded || !uiOps.length) return;
   uiSaving = true;
   try {
+    /* R21.1: a device whose first fetch failed has uiRev === "" and must never
+       PUT with If-Match: "*" — that unconditionally overwrites another device's
+       newer document, rolling it back with our stale whole-list ops (the exact
+       phone-returns-later loss R20.7 set out to close). Adopt the server's
+       current revision first, keep only ops still valid against it (idempotent
+       note ops always; others only when built against this exact rev, which
+       offline ops never are), replay them, then PUT conditionally. */
+    if (!uiRev){
+      let g;
+      try { g = await fetch("/api/ui"); } catch { return; }  /* still offline: keep ops */
+      if (!g.ok) return;
+      uiRev = g.headers.get("ETag") || "";
+      UI = normUI(await g.json());
+      uiOps = uiOps.filter(op => idempotentOp(op) || op.rev === uiRev);
+      uiOps.forEach(op => applyOp(UI, op));
+      applyRemoteUI();
+      savePendingOps();
+      localStorage.setItem("scimux-ui", JSON.stringify(UI));
+      if (!uiOps.length) return;        /* only rolled-back ops remained */
+    }
     for (let attempt = 0; attempt < 4 && uiOps.length; attempt++){
       let r;
       try {
         r = await fetch("/api/ui", { method: "PUT",
-          headers: { "If-Match": uiRev || "*", "Content-Type": "application/json" },
+          headers: { "If-Match": uiRev, "Content-Type": "application/json" },
           body: JSON.stringify(UI) });
       } catch { break; }               /* offline: keep ops, retry next tick */
       if (r.ok){
@@ -1160,13 +1200,17 @@ async function flushUI(){
         break;
       }
       if (r.status === 409 || r.status === 428){
-        /* another device wrote first: refetch, replay our ops on top, retry */
+        /* another device wrote first: refetch, replay our still-valid ops on
+           top, retry. Same filter as the load path — a stale whole-list op
+           replayed over newer state would roll it back (R21.1). */
         let g;
         try { g = await fetch("/api/ui"); } catch { break; }
         if (!g.ok) break;
         uiRev = g.headers.get("ETag") || "";
         UI = normUI(await g.json());
+        uiOps = uiOps.filter(op => idempotentOp(op) || op.rev === uiRev);
         uiOps.forEach(op => applyOp(UI, op));
+        savePendingOps();
         applyRemoteUI();
         continue;
       }
@@ -1225,12 +1269,15 @@ async function pollUI(){
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
   applyRemoteUI();
 }
-/* last-chance flush when the page goes away; keepalive survives unload */
+/* last-chance flush when the page goes away; keepalive survives unload. With
+   no known revision we cannot PUT safely (If-Match: "*" would clobber a newer
+   document — R21.1); the ops are already persisted to localStorage, so the next
+   load replays the still-valid ones after fetching the current revision. */
 addEventListener("pagehide", () => {
-  if (!uiLoaded || !uiOps.length) return;
+  if (!uiLoaded || !uiOps.length || !uiRev) return;
   try {
     fetch("/api/ui", { method: "PUT", keepalive: true,
-      headers: { "If-Match": uiRev || "*", "Content-Type": "application/json" },
+      headers: { "If-Match": uiRev, "Content-Type": "application/json" },
       body: JSON.stringify(UI) });
   } catch {}
 });
@@ -1498,9 +1545,20 @@ function laneById(id){
 function laneName(id){
   return laneById(id)?.name || id || "unset";
 }
+/* A lane color is user-authored (ui.json / the lane editor) and lands in many
+   style="" interpolations. Sanitizing at the accessor — rather than trusting
+   every call site to esc()-wrap it — disarms the injection trap permanently:
+   a crafted color can no longer break out of an attribute even if a future
+   template forgets the wrap (R18.1 altitude). Only well-formed color syntax is
+   returned verbatim; anything else falls back to the deterministic hash color. */
+const SAFE_COLOR = /^(#[0-9a-fA-F]{3,8}|var\(--[a-zA-Z0-9-]+\)|rgba?\([\d.,%\s]+\)|hsla?\([\d.,%\s]+\)|[a-zA-Z]+)$/;
+function safeColor(c){
+  return typeof c === "string" && SAFE_COLOR.test(c.trim()) ? c.trim() : null;
+}
 function laneColor(id){
   const lane = laneById(id);
-  if (lane?.color) return lane.color;
+  const c = lane && safeColor(lane.color);
+  if (c) return c;
   if (!id) return "var(--unlane)";
   return LANE_COLORS[Math.abs(hashStr(id)) % LANE_COLORS.length];
 }
@@ -1560,19 +1618,19 @@ function readLaneChoice(select, input){
   }
   return { laneID: val };
 }
+/* every lane a node rides: its home lane plus any interchange (also_lanes) */
+const servedLanes = n => [n.lane_id, ...(n.also_lanes || [])].filter(Boolean);
 /* laneModel: the shared journey structure. Lanes are explicit assignments;
    unassigned nodes stay in Activities but do not become Journeys. */
 function laneModel(){
   const byId = {};
   nodes.forEach(n => byId[n.id] = n);
-  const used = new Set(nodes.flatMap(n => [n.lane_id, ...(n.also_lanes || [])]).filter(Boolean));
+  const used = new Set(nodes.flatMap(servedLanes));
   const lanes = laneList().filter(l => used.has(l.id));
   for (const id of used){
     if (!lanes.some(l => l.id === id)) lanes.push({ id, name: id, color: laneColor(id) });
   }
-  const laneOf = {};
-  lanes.forEach((l, i) => laneOf[l.id] = i);
-  return { byId, lanes, laneOf, color: laneColor, name: laneName };
+  return { byId, lanes, color: laneColor, name: laneName };
 }
 const isArchived = id => (UI.archived || []).includes(id);
 
@@ -1592,8 +1650,7 @@ function renderCards(){
   /* full strength for interchange stations: a lane's scope includes every
      activity it serves, home or via also_lanes — a rider on the line stops
      there either way */
-  const inScope = n => !laneFilter || n.lane_id === laneFilter
-    || (n.also_lanes || []).includes(laneFilter) || n.id === sel;
+  const inScope = n => !laneFilter || servedLanes(n).includes(laneFilter) || n.id === sel;
   const list = tabList.filter(inScope);
   const foldList = laneFilter && cardTab === "current"
     ? tabList.filter(n => !inScope(n) && hardAttention(n)) : [];
@@ -1943,7 +2000,7 @@ function renderMap(){
   const lm = laneModel();
   const grp = groupLanes();
   const inGroup = laneID => !grp || grp.includes(laneID);
-  const served = n => [n.lane_id, ...(n.also_lanes || [])].filter(Boolean);
+  const served = servedLanes;
   const stations = nodes.filter(n => n.lane_id && served(n).some(inGroup));
   /* dimming is owned by the explicit lane filter alone — if selection also
      drove it, clearing the filter (chip second tap, scope-tab ✕) would leave
@@ -2142,6 +2199,15 @@ function toggleMapFold(id){
   mapSig = ""; renderMap();
 }
 function gotoLaneBlock(id){
+  /* an interchange chip can point to a lane with no block on the current map
+     (an off-map lane on a group tab); jumping there was a silent no-op (R21.3).
+     "All" carries every lane the stations serve, so fall back to it. */
+  if (mapTab !== "all" &&
+      !document.querySelector(`#mapwrap .lblock[data-lane="${CSS.escape(id)}"]`)){
+    mapTab = "all";
+    localStorage.setItem("scimux-maptab", mapTab);
+    mapSig = ""; renderMapTabs(); renderMap();
+  }
   if (mapFold.has(id)){ mapFold.delete(id); saveMapFold(); mapSig = ""; renderMap(); }
   document.querySelector(`#mapwrap .lblock[data-lane="${CSS.escape(id)}"]`)
     ?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2456,9 +2522,20 @@ async function refreshChat(){
        on arrival even if the text was reshaped beyond recognition. */
     const norm = s => (s || "").replace(/\s+/g, " ").trim();
     const iLast = turns.reduce((a, t, i) => t.role === "user" ? i : a, -1);
-    const landed = iLast >= 0 &&
+    let landed = iLast >= 0 &&
       (norm(turns[iLast].text) === norm(sentEcho.text) ||
        (sentEcho.seen != null && iLast >= sentEcho.seen));
+    /* Cold start: on the first send after selecting a node the chat had not
+       rendered yet, so `seen` is null and a CLI-reshaped prompt never
+       text-matches — the echo then lingered beside the real turn until the
+       180s timeout (below-cap 2026-07-20). Sends are serialized per node, so
+       baseline the user-turn count on the first post-send refresh and retire
+       once it grows: the next user turn to appear is unambiguously this send. */
+    if (!landed && sentEcho.seen == null){
+      const users = turns.reduce((a, t) => a + (t.role === "user" ? 1 : 0), 0);
+      if (sentEcho.base == null) sentEcho.base = users;
+      else if (users > sentEcho.base) landed = true;
+    }
     if (landed || Date.now() - sentEcho.at > 180000) sentEcho = null;
   }
   const echo = sentEcho && sentEcho.node === n.id ? sentEcho : null;
@@ -2891,9 +2968,21 @@ $("#notespane").addEventListener("click", e => {
    capture itself is never editable — commenting is the annotation path. */
 let noteAnchor = "";   // t of the capture being commented on
 function setNoteAnchor(t){
-  noteAnchor = t && (UI.notes || []).some(x => x.t === t) ? t : "";
-  /* no chip: the focused composer's placeholder carries the reply semantics */
+  const target = t ? (UI.notes || []).find(x => x.t === t) : null;
+  noteAnchor = target ? t : "";
   $("#noteprompt").dataset.placeholder = noteAnchor ? "Reply…" : "Add a note…";
+  /* A persistent, dismissible chip — the placeholder alone vanished at the
+     first typed character, so a reply half-written then finished as an intended
+     general note landed silently as a comment on a forgotten capture (R20.10).
+     The chip stays while the anchor is set and offers a keep-the-text cancel
+     that does not require the keyboard. */
+  const chip = $("#notechip");
+  if (noteAnchor){
+    $("#notechiptext").textContent = "Replying to: " + (target.text || "").replace(/\s+/g, " ").trim();
+    chip.hidden = false;
+  } else {
+    chip.hidden = true;
+  }
 }
 function addManualNote(){
   const text = $("#noteprompt").innerText.trim();
@@ -2921,6 +3010,9 @@ $("#noteprompt").addEventListener("keydown", e => {
 $("#noteprompt").addEventListener("blur", () => {
   if (!$("#noteprompt").innerText.trim()) setNoteAnchor("");
 });
+/* the chip's dismiss cancels reply mode but keeps whatever is typed — the
+   pointer-reachable equivalent of Escape (R20.10) */
+$("#notechipx").addEventListener("click", () => { setNoteAnchor(""); $("#noteprompt").focus(); });
 
 /* double-tap on the empty chat background snaps pinch-zoom back to 1.
    iOS offers no JS zoom API; momentarily clamping the viewport meta to
