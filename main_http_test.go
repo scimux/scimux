@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,7 @@ type fakeTmux struct {
 	alive      map[string]bool // has-session result per exact name
 	capture    string          // capture-pane output
 	captureErr bool
+	killErr    bool // kill-session returns an error (delete-durability tests)
 	// captureAfterEnter, when set, is returned by capture-pane once an Enter
 	// keypress was sent — it lets SendAck observe a pane "reaction".
 	captureAfterEnter string
@@ -64,6 +66,11 @@ func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (strin
 			return f.captureAfterEnter, nil
 		}
 		return f.capture, nil
+	case "kill-session":
+		if f.killErr {
+			return "", errors.New("kill failed")
+		}
+		return "", nil
 	case "send-keys":
 		if lastArg(args) == "Enter" {
 			f.enterSent = true
@@ -201,8 +208,9 @@ func adopt(a *app, bodyJSON string) *httptest.ResponseRecorder {
 func TestHandleAdoptValidation(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"live1": true, "dup": true, "claimer": true}}
 	a := newTestApp(t, f)
+	shared := filepath.Join(a.home, ".claude", "projects", "proj", "shared.jsonl")
 	a.nodes = []*Node{{ID: "dup", Title: "dup", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"},
-		{ID: "owner", Title: "owner", Agent: "codex", Transcript: "/t/shared.jsonl", CreatedAt: "2026-07-14T00:00:00Z"}}
+		{ID: "owner", Title: "owner", Agent: "claude", Transcript: shared, CreatedAt: "2026-07-14T00:00:00Z"}}
 	for _, n := range a.nodes {
 		a.byID[n.ID] = n
 	}
@@ -221,8 +229,12 @@ func TestHandleAdoptValidation(t *testing.T) {
 		t.Errorf("codex adopt: code = %d, want 400", rec.Code)
 	}
 	// Path claim still enforced for claude.
-	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":"/t/shared.jsonl"}`); rec.Code != 409 {
+	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":`+strconv.Quote(shared)+`}`); rec.Code != 409 {
 		t.Errorf("path claim: code = %d, want 409", rec.Code)
+	}
+	// A transcript override outside the claude root is rejected before any bind.
+	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":"/t/elsewhere.jsonl"}`); rec.Code != 400 {
+		t.Errorf("out-of-root transcript: code = %d, want 400", rec.Code)
 	}
 
 	// Success: a claude session with an explicit id and dir.
@@ -512,6 +524,62 @@ func TestHandleUpdateAndDeleteNode(t *testing.T) {
 	}
 	if !sawKill {
 		t.Fatal("delete did not close owned tmux session")
+	}
+}
+
+// The delete record must be durable before the agent is torn down: if the
+// store append fails, nothing is killed and the node stays.
+func TestDeletePersistsBeforeKill(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+	// A directory cannot be opened for append, so appendRecord fails.
+	if err := os.Mkdir(a.storePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 500 {
+		t.Fatalf("code=%d, want 500", del.Code)
+	}
+	if _, ok := a.byID["n1"]; !ok {
+		t.Error("node removed despite a failed delete persist")
+	}
+	for _, s := range f.subcommands() {
+		if s == "kill-session" {
+			t.Error("agent killed before the delete was durable")
+		}
+	}
+}
+
+// If the agent survives the delete (kill fails), the node is re-asserted so the
+// durable store replays it as live again — never a killed-but-forgotten node.
+func TestDeleteReassertsNodeOnKillFailure(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}, killErr: true}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 500 {
+		t.Fatalf("code=%d, want 500", del.Code)
+	}
+	if _, ok := a.byID["n1"]; !ok {
+		t.Error("node vanished after a failed kill")
+	}
+	// Replay the store into a fresh app: the delete-then-node ordering must
+	// converge on a live node.
+	b := &app{byID: map[string]*Node{}, storePath: a.storePath}
+	if err := b.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.byID["n1"]; !ok {
+		t.Error("replay dropped the node whose kill failed")
 	}
 }
 

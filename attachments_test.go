@@ -183,6 +183,60 @@ func TestServeAttachment(t *testing.T) {
 	}
 }
 
+// Uploaded content must be served inert: nosniff always, inline only for a
+// whitelist of safe raster images, everything else (SVG, HTML, unknown) forced
+// to download so it can never run as same-origin active content.
+func TestServeAttachmentHeaders(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.byID["n1"] = &Node{ID: "n1"}
+
+	serve := func(name, mime, data string) *httptest.ResponseRecorder {
+		att, err := a.storeAttachment("n1", name, mime, strings.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		leaf := filepath.Base(att.Path)
+		req := httptest.NewRequest("GET", "/api/nodes/n1/attachments/"+leaf, nil)
+		req.SetPathValue("id", "n1")
+		req.SetPathValue("name", leaf)
+		rec := httptest.NewRecorder()
+		a.handleAttachment(rec, req)
+		return rec
+	}
+
+	// safe raster: inline, no Content-Disposition, pinned content type
+	rec := serve("pic.png", "image/png", "PNGDATA")
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Error("png: missing nosniff")
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != "" {
+		t.Errorf("png should render inline, got Content-Disposition %q", cd)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Errorf("png content-type %q", ct)
+	}
+
+	// active/unknown content: forced download
+	for _, tc := range []struct{ name, mime string }{
+		{"evil.svg", "image/svg+xml"},
+		{"evil.html", "text/html"},
+		{"data.bin", "application/octet-stream"},
+	} {
+		rec := serve(tc.name, tc.mime, "<x>")
+		if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s: missing nosniff", tc.name)
+		}
+		if !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
+			t.Errorf("%s: not forced to download (Content-Disposition %q)", tc.name, rec.Header().Get("Content-Disposition"))
+		}
+		if ct := rec.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/html") || strings.Contains(ct, "svg") {
+			// A download with an active content type + nosniff is still inert,
+			// but the whitelist should never serve svg/html as its own type.
+			t.Errorf("%s: served active content type %q", tc.name, ct)
+		}
+	}
+}
+
 func TestExtendPrompt(t *testing.T) {
 	if got := extendPrompt("hello", nil); got != "hello" {
 		t.Errorf("no attachments should pass text through, got %q", got)

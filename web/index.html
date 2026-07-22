@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="scimux-csrf" content="__SCIMUX_CSRF__">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -1261,7 +1262,22 @@ let lastTurns = [];          // turns behind the rendered bubbles (copy/fork sou
 const isDesktop = () => matchMedia("(min-width: 900px)").matches;
 const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
 
-const api = (path, opts) => fetch(path, opts).then(async r => {
+/* Per-process CSRF token, embedded in the page by the server. Every unsafe
+   request echoes it back in X-Scimux-CSRF; a cross-origin page can neither read
+   it nor forge the custom header, so this is what stops a web page the operator
+   happens to open from driving the local API (send/approve/interrupt/update). */
+const CSRF = document.querySelector('meta[name="scimux-csrf"]')?.content || "";
+const UNSAFE = /^(POST|PUT|PATCH|DELETE)$/i;
+function withCsrf(opts = {}){
+  if (!UNSAFE.test(opts.method || "GET")) return opts;
+  const h = new Headers(opts.headers || {});
+  h.set("X-Scimux-CSRF", CSRF);
+  /* JSON bodies are strings; multipart (FormData) sets its own content type */
+  if (typeof opts.body === "string" && !h.has("Content-Type"))
+    h.set("Content-Type", "application/json");
+  return { ...opts, headers: h };
+}
+const api = (path, opts) => fetch(path, withCsrf(opts)).then(async r => {
   if (!r.ok){
     const err = new Error(await r.text());
     err.status = r.status;   /* callers can tell a 409 conflict from a failure */
@@ -1392,9 +1408,9 @@ async function flushUI(){
     for (let attempt = 0; attempt < 4 && uiOps.length; attempt++){
       let r;
       try {
-        r = await fetch("/api/ui", { method: "PUT",
+        r = await fetch("/api/ui", withCsrf({ method: "PUT",
           headers: { "If-Match": uiRev, "Content-Type": "application/json" },
-          body: JSON.stringify(UI) });
+          body: JSON.stringify(UI) }));
       } catch { break; }               /* offline: keep ops, retry next tick */
       if (r.ok){
         uiRev = r.headers.get("ETag") || "";
@@ -1480,9 +1496,9 @@ async function pollUI(){
 addEventListener("pagehide", () => {
   if (!uiLoaded || !uiOps.length || !uiRev) return;
   try {
-    fetch("/api/ui", { method: "PUT", keepalive: true,
+    fetch("/api/ui", withCsrf({ method: "PUT", keepalive: true,
       headers: { "If-Match": uiRev, "Content-Type": "application/json" },
-      body: JSON.stringify(UI) });
+      body: JSON.stringify(UI) }));
   } catch {}
 });
 
@@ -1707,9 +1723,14 @@ const ATT_RE = /\[attached (image|file): ([^\]]+)\]/g;
 /* one attachment tile (thumbnail for images, chip for other files). A tile whose
    bytes 404 removes itself (onerror) — so a marker pointing outside the node's
    uploads renders nothing. */
+const RASTER_RE = /\.(png|jpe?g|gif|webp)$/i;   /* safe raster types (mirror of the server whitelist) */
 function attTile(nodeId, leaf, isImage){
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
   const name = leaf.replace(/^[0-9a-f]{8}-/, "");     /* drop the storage token */
+  /* only whitelisted raster types render as a thumbnail; SVG and everything
+     else become a download chip — the server serves them Content-Disposition:
+     attachment, so an <img>/new-tab open would break or download anyway */
+  isImage = isImage && RASTER_RE.test(name);
   return isImage
     ? `<a class="attthumb" href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
       `<img src="${url}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
@@ -4012,7 +4033,7 @@ async function uploadOne(it, dest){
   const fd = new FormData();
   fd.append("files", it.file, it.name);
   try {
-    const r = await fetch(`/api/nodes/${encodeURIComponent(dest)}/attachments`, { method: "POST", body: fd });
+    const r = await fetch(`/api/nodes/${encodeURIComponent(dest)}/attachments`, withCsrf({ method: "POST", body: fd }));
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     it.ref = (await r.json()).attachments[0];
     it.status = "done";
@@ -4251,7 +4272,7 @@ $("#m_apply").addEventListener("click", async () => {
   btn.disabled = true;
   btn.textContent = "updating…";
   try {
-    await api("/api/update", { method: "POST" });
+    await api("/api/update", { method: "POST", body: JSON.stringify({ expected_tag: updateInfo.latest }) });
     btn.textContent = "restarting…";
     const want = updateInfo.latest, t0 = Date.now();
     while (Date.now() - t0 < 60000){

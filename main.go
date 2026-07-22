@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"io/fs"
 	mimepkg "mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -162,6 +164,12 @@ type app struct {
 	// a fake tmux pane is not reachable through the Runner seam.
 	paneSession func(pid string) string
 
+	// storeMu serializes every append to nodes.jsonl, independent of a.mu (some
+	// callers hold a.mu, some do not). It gives the append-only store one
+	// process-local write point so concurrent audit/transcript/delete records
+	// cannot interleave a partial line, and pairs each append with an fsync —
+	// these records are the durable truth the supervisor replays and audits.
+	storeMu   sync.Mutex
 	server    *tmuxsession.Server
 	acp       acpManager
 	codex     codexManager
@@ -315,16 +323,30 @@ func (a *app) appendRecord(rec storeRecord) error {
 	// 0600: the store holds prompts, working dirs, transcript paths, and
 	// remote-key pane excerpts. Match the ACP log and ui.json rather than
 	// relying on the startup chmod of the parent dir (finding 63).
-	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(append(b, '\n'))
+	b = append(b, '\n')
+	// One process-local write point, fsynced. The store is the durability and
+	// audit mechanism (replay, key evidence, slug-reuse safety), so an append
+	// is only "done" once the bytes and a full-write check have reached disk.
+	a.storeMu.Lock()
+	defer a.storeMu.Unlock()
+	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	n, err := f.Write(b)
+	if err == nil && n != len(b) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	return err
 }
 
@@ -406,13 +428,130 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func newUUID() string {
+// newUUID mints a v4 UUID used as a Claude session id. randSource is a seam so
+// TestNewUUID can force the RNG-failure path. A silent zero/partial UUID on RNG
+// failure would be exactly the kind of identity bug the rest of the code avoids
+// (cf. sessionlog.NewMeta), so a read error is a hard failure, not ignored.
+var randSource io.Reader = rand.Reader
+
+func newUUID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := io.ReadFull(randSource, b); err != nil {
+		return "", fmt.Errorf("uuid: %w", err)
+	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
+
+// csrfToken is a per-process secret embedded in the served index page (as the
+// scimux-csrf meta tag) and echoed back by the UI in the X-Scimux-CSRF header
+// on every unsafe request. It is the write-side security boundary: scimux is
+// intentionally unauthenticated and usually loopback-bound, but a loopback
+// service is still reachable by any web page the operator happens to open, and
+// the unsafe API can send prompts, answer approvals, interrupt turns, upload
+// files and self-update. A cross-origin page cannot read this token (the
+// same-origin policy hides the HTML body) and cannot forge the custom header on
+// a simple request, so requiring it closes the CSRF surface with no dependency.
+var csrfToken = mustToken()
+
+func mustToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// A weak/empty token would silently defeat the control it exists to be;
+		// fail loudly at startup instead.
+		panic("scimux: generate CSRF token: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+// guardMutations enforces same-origin + CSRF-token on every unsafe method
+// before the request reaches a handler. Safe methods (GET/HEAD/OPTIONS) pass
+// through untouched — they neither mutate state nor are readable cross-origin
+// without CORS, which scimux never grants.
+func guardMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !sameOrigin(r) {
+			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Scimux-CSRF")), []byte(csrfToken)) != 1 {
+			http.Error(w, "missing or invalid CSRF token", http.StatusForbidden)
+			return
+		}
+		if !validContentType(r) {
+			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sameOrigin rejects a browser request whose Origin (or, absent that, Referer)
+// names a different host than the one it was sent to. A missing Origin *and*
+// Referer is allowed: non-browser clients (curl, scripts) send neither, and for
+// them the CSRF token is the gate. Browsers always attach Origin to unsafe
+// cross-origin fetches, so this catches the case the token alone would not (a
+// buggy client that leaked the token can still not be driven cross-origin).
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		if ref := r.Header.Get("Referer"); ref != "" {
+			if u, err := url.Parse(ref); err == nil {
+				origin = u.Scheme + "://" + u.Host
+			}
+		}
+	}
+	if origin == "" {
+		return true // non-browser client; the token requirement still applies
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
+}
+
+// validContentType keeps unsafe requests to the content types the API actually
+// accepts: JSON everywhere, multipart only on the attachment upload route. A
+// bodyless request (interrupt, resolve, delete) carries no Content-Type and is
+// fine. This is defense in depth behind the token — it also blocks the classic
+// simple-request form POST (which cannot set the token header anyway).
+func validContentType(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return true
+	}
+	mediaType, _, err := mimepkg.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	if mediaType == "multipart/form-data" {
+		return strings.HasSuffix(r.URL.Path, "/attachments")
+	}
+	return mediaType == "application/json"
+}
+
+// csrfIndex reads the embedded index page once and substitutes the per-process
+// CSRF token into its placeholder meta tag. The token is hex, so it is inert in
+// an HTML attribute; the page is served verbatim thereafter.
+func csrfIndex(fsys embed.FS) []byte {
+	b, err := fsys.ReadFile("web/index.html")
+	if err != nil {
+		panic("embedded web/index.html missing: " + err.Error())
+	}
+	if !strings.Contains(string(b), csrfPlaceholder) {
+		panic("web/index.html is missing the " + csrfPlaceholder + " placeholder")
+	}
+	return []byte(strings.Replace(string(b), csrfPlaceholder, csrfToken, 1))
+}
+
+const csrfPlaceholder = "__SCIMUX_CSRF__"
 
 var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
@@ -594,7 +733,13 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	}
 	a.reserved[n.ID] = true
 	if n.Agent == "claude" {
-		n.SessionID = newUUID()
+		sid, err := newUUID()
+		if err != nil {
+			delete(a.reserved, n.ID)
+			a.mu.Unlock()
+			return 500, fmt.Errorf("allocate session id: %w", err)
+		}
+		n.SessionID = sid
 	}
 	n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	pm := a.proc(n)
@@ -1481,6 +1626,29 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "codex uses the app-server protocol; use POST /api/nodes with agent:\"codex\" to create a new activity", 400)
 		return
 	}
+	// Hold adopted agents to the creation allowlist (minus codex): a direct API
+	// client must not persist a node with an agent the rest of the code does not
+	// support. Only tmux-transport agents are adoptable — pi/opencode over ACP
+	// are created, not adopted, but a legacy tmux-run pi/opencode may exist.
+	switch agent {
+	case "claude", "pi", "opencode":
+	default:
+		http.Error(w, fmt.Sprintf("unknown agent %q (adoptable: claude, pi, opencode)", agent), 400)
+		return
+	}
+	// A transcript override, if supplied, must be an absolute, cleaned path under
+	// the agent's transcript root. Otherwise a crafted path (paired with a
+	// guessed tmux session) could make scimux parse and mirror an arbitrary
+	// local file under a node's identity. Only claude uses transcript files.
+	if body.Transcript != "" {
+		root := filepath.Join(a.home, ".claude", "projects") + string(filepath.Separator)
+		clean := filepath.Clean(body.Transcript)
+		if agent != "claude" || !filepath.IsAbs(clean) || !strings.HasPrefix(clean, root) {
+			http.Error(w, "transcript override must be an absolute path under ~/.claude/projects/", 400)
+			return
+		}
+		body.Transcript = clean
+	}
 	s := a.server.Session(body.Session)
 	if !s.Alive() {
 		http.Error(w, fmt.Sprintf("no session %q on socket %q", body.Session, a.server.Socket), 404)
@@ -1707,22 +1875,11 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	if pm := a.proc(n); pm != nil {
-		if pm.HasSession(n.ID) {
-			if err := pm.Kill(n.ID); err != nil {
-				http.Error(w, "close session: "+err.Error(), 500)
-				return
-			}
-		}
-	} else if !n.Adopted {
-		s := a.server.Session(n.ID)
-		if s.Alive() {
-			if err := s.Kill(); err != nil {
-				http.Error(w, "close session: "+err.Error(), 500)
-				return
-			}
-		}
-	}
+	// Persist the delete before tearing anything down. The store is the
+	// supervisor's durable truth; killing an owned agent first and only then
+	// recording the delete risks a killed agent the store still replays as a
+	// live node. Order is persist-intent → close → finalize, and the node is
+	// re-asserted if the close fails so the durable record matches reality.
 	a.mu.Lock()
 	if _, ok := a.byID[n.ID]; !ok {
 		a.mu.Unlock()
@@ -1734,11 +1891,48 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist delete: "+err.Error(), 500)
 		return
 	}
+	a.mu.Unlock()
+
+	if err := a.closeOwned(n); err != nil {
+		// The agent outlived the delete record. Re-assert the node so replay
+		// (and this process) keep showing it live: a later node record wins
+		// over the delete, exactly as the concurrent-launch path relies on.
+		a.mu.Lock()
+		if _, ok := a.byID[n.ID]; ok {
+			if rerr := a.appendRecord(storeRecord{Type: "node", Node: n}); rerr != nil {
+				fmt.Fprintf(os.Stderr, "scimux: delete of %s failed to close the agent and failed to re-assert the node: %v\n", n.ID, rerr)
+			}
+		}
+		a.mu.Unlock()
+		http.Error(w, "close session: "+err.Error(), 500)
+		return
+	}
+
+	a.mu.Lock()
 	a.removeNodeLocked(n.ID)
 	a.mu.Unlock()
 	a.archiveSessionLog(n.ID)
 	a.archiveAttachments(n.ID)
 	writeJSON(w, map[string]string{"ok": "deleted"})
+}
+
+// closeOwned tears down the process or tmux session scimux owns for n. Adopted
+// tmux sessions are deliberately left running — scimux did not start them.
+func (a *app) closeOwned(n *Node) error {
+	if pm := a.proc(n); pm != nil {
+		if pm.HasSession(n.ID) {
+			return pm.Kill(n.ID)
+		}
+		return nil
+	}
+	if n.Adopted {
+		return nil
+	}
+	s := a.server.Session(n.ID)
+	if s.Alive() {
+		return s.Kill()
+	}
+	return nil
 }
 
 // archiveSessionLog moves a deleted node's session log into sessions/archive/
@@ -1924,15 +2118,25 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]Attachment, 0, len(files))
+	// A multipart upload is all-or-nothing: if a later file fails, the bytes
+	// already written for earlier files have no returned reference and would
+	// leak on disk. Roll them back so a partial failure leaves nothing behind.
+	cleanup := func() {
+		for _, at := range out {
+			os.Remove(at.Path)
+		}
+	}
 	for _, fh := range files {
 		src, err := fh.Open()
 		if err != nil {
+			cleanup()
 			http.Error(w, "open upload: "+err.Error(), 400)
 			return
 		}
 		att, err := a.storeAttachment(n.ID, fh.Filename, fh.Header.Get("Content-Type"), src)
 		src.Close()
 		if err != nil {
+			cleanup()
 			http.Error(w, "store upload: "+err.Error(), 500)
 			return
 		}
@@ -1969,7 +2173,40 @@ func (a *app) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	http.ServeFile(w, r, full) // sets Content-Type from extension/sniff
+	// Serve uploads as inert content: an uploaded .html/.svg opened from the
+	// app origin would otherwise run as same-origin active content (and, once
+	// the CSRF token exists, read it). nosniff pins the type we set; only a
+	// whitelist of safe raster images is served inline, everything else — SVG,
+	// HTML, unknown — is forced to download. We set Content-Type explicitly so
+	// ServeFile does not sniff its own.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if raster := inlineImageTypes[strings.ToLower(filepath.Ext(name))]; raster != "" {
+		w.Header().Set("Content-Type", raster)
+	} else {
+		// Anything not on the raster whitelist downloads as an opaque blob:
+		// octet-stream + nosniff + attachment leaves no path for an uploaded
+		// .html/.svg to run as same-origin active content, whatever its name.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		disp := name // strip the storage token for the download name (as the UI does)
+		if i := strings.IndexByte(disp, '-'); i == 8 {
+			disp = disp[i+1:]
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(disp))
+	}
+	http.ServeFile(w, r, full)
+}
+
+// inlineImageTypes maps the file extensions served inline (as an <img> or a
+// new-tab open) to their content type: safe raster formats with no active
+// content. SVG is excluded on purpose — it can carry script — as is everything
+// else, which downloads. Keyed by extension so the whitelist does not depend on
+// the host's mime table knowing webp.
+var inlineImageTypes = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
 }
 
 func (a *app) node(r *http.Request) (*Node, bool) {
@@ -2847,8 +3084,9 @@ func main() {
 		panic("embedded web/assets missing: " + err.Error())
 	}
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+	indexHTML := csrfIndex(webFS)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := webFS.ReadFile("web/index.html")
+		b := indexHTML
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// The UI is embedded in the binary and changes with every build;
 		// a cached copy after a scimux upgrade is a recurring dogfooding
@@ -2885,7 +3123,7 @@ func main() {
 	// ReadHeaderTimeout covers the attack that matters.
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           guardMutations(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}

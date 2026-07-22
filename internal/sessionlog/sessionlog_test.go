@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -133,5 +134,34 @@ func TestSourceRoundTrip(t *testing.T) {
 	}
 	if peek := PeekLog(path, 10, ""); !strings.Contains(peek, "— source /x/aaa.jsonl") {
 		t.Fatalf("peek misses source seam: %q", peek)
+	}
+}
+
+// Separate Writer instances against one path (as /clear seams and start-failure
+// records create) must serialize: concurrent appends stay whole JSONL lines,
+// none lost or interleaved. Run with -race to catch the shared-fd hazard.
+func TestConcurrentAppendsAcrossWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	const n = 50
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			w := &Writer{Path: path} // a fresh Writer per goroutine on purpose
+			if err := w.Append(Event{T: "user", Text: strings.Repeat("x", 100+i)}); err != nil {
+				t.Errorf("append: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	evs := ReadEvents(path)
+	if len(evs) != n {
+		t.Fatalf("read %d events, want %d (a lost or torn line)", len(evs), n)
+	}
+	for _, ev := range evs {
+		if ev.T != "user" {
+			t.Fatalf("torn/garbled record: %+v", ev)
+		}
 	}
 }

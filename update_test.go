@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,7 +135,7 @@ func TestUpdateApplyInstallsVerifiedBinary(t *testing.T) {
 
 	a := newUpdateTestApp(t)
 	rec := httptest.NewRecorder()
-	a.handleUpdateApply(rec, httptest.NewRequest("POST", "/api/update", nil))
+	a.handleUpdateApply(rec, updateReq("v9.9.9"))
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -178,7 +179,7 @@ func TestUpdateApplyChecksumMismatchLeavesBinary(t *testing.T) {
 
 	a := newUpdateTestApp(t)
 	rec := httptest.NewRecorder()
-	a.handleUpdateApply(rec, httptest.NewRequest("POST", "/api/update", nil))
+	a.handleUpdateApply(rec, updateReq("v9.9.9"))
 	if rec.Code != 502 || !strings.Contains(rec.Body.String(), "checksum mismatch") {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -200,11 +201,37 @@ func TestUpdateApplyRefusesDevAndCurrent(t *testing.T) {
 	for _, current := range []string{"dev", "v9.9.9"} {
 		withUpdateSeams(t, srv.URL, current)
 		rec := httptest.NewRecorder()
-		a.handleUpdateApply(rec, httptest.NewRequest("POST", "/api/update", nil))
+		a.handleUpdateApply(rec, updateReq("v9.9.9"))
 		if rec.Code != 409 {
 			t.Errorf("current=%s: status %d, want 409", current, rec.Code)
 		}
 	}
+}
+
+// The apply must refuse when no expected_tag is sent, and when the tag the user
+// confirmed no longer matches the latest release (pinned, intentional update).
+func TestUpdateApplyPinsExpectedTag(t *testing.T) {
+	srv := fakeForgejo(t, "v9.9.9", nil)
+	a := newUpdateTestApp(t)
+	withUpdateSeams(t, srv.URL, "v1.0.0")
+
+	rec := httptest.NewRecorder()
+	a.handleUpdateApply(rec, httptest.NewRequest("POST", "/api/update", nil))
+	if rec.Code != 400 {
+		t.Errorf("missing expected_tag: status %d, want 400", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	a.handleUpdateApply(rec, updateReq("v9.9.8"))
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "v9.9.9") {
+		t.Errorf("stale expected_tag: status %d body %q, want 409", rec.Code, rec.Body)
+	}
+}
+
+// updateReq builds a POST /api/update request pinned to tag.
+func updateReq(tag string) *http.Request {
+	return httptest.NewRequest("POST", "/api/update",
+		strings.NewReader(`{"expected_tag":`+strconv.Quote(tag)+`}`))
 }
 
 func TestLicensesEmbedded(t *testing.T) {

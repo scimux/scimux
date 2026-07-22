@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
@@ -191,7 +193,10 @@ func TestNewUUID(t *testing.T) {
 	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
-		id := newUUID()
+		id, err := newUUID()
+		if err != nil {
+			t.Fatalf("newUUID: %v", err)
+		}
 		if !re.MatchString(id) {
 			t.Fatalf("not a v4 uuid: %s", id)
 		}
@@ -199,6 +204,16 @@ func TestNewUUID(t *testing.T) {
 			t.Fatalf("duplicate uuid: %s", id)
 		}
 		seen[id] = true
+	}
+}
+
+// A failing RNG must surface as an error, not a zero/partial session id.
+func TestNewUUIDRNGFailure(t *testing.T) {
+	orig := randSource
+	randSource = iotest.ErrReader(errors.New("rng down"))
+	defer func() { randSource = orig }()
+	if _, err := newUUID(); err == nil {
+		t.Fatal("expected error when the RNG fails")
 	}
 }
 

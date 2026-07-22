@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -135,8 +136,20 @@ func NewMeta(node, agent, model, dir string) Event {
 // small and infrequent (turn boundaries, tool state, usage), so a fresh
 // O_APPEND handle per write keeps the file crash-safe without a long-lived fd.
 type Writer struct {
-	mu   sync.Mutex
 	Path string
+}
+
+// fileLocks serializes appends *per path*, across every Writer instance that
+// targets it. A per-Writer mutex is not enough: /clear seams and start-failure
+// records mint fresh Writers against a live node's file, and two unsynchronized
+// O_APPEND writers can interleave a partial line if one crashes mid-write.
+var fileLocks sync.Map // path -> *sync.Mutex
+
+func lockPath(path string) func() {
+	m, _ := fileLocks.LoadOrStore(path, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -149,15 +162,26 @@ func (w *Writer) Append(ev Event) error {
 	if err != nil {
 		return err
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	b = append(b, '\n')
+	unlock := lockPath(w.Path)
+	defer unlock()
 	// 0600: rawInput and prompt text are as sensitive as pane-excerpt evidence.
 	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.Write(append(b, '\n'))
+	n, err := f.Write(b)
+	if err == nil && n != len(b) {
+		err = io.ErrShortWrite
+	}
+	// The seam and turn records are the node's durable history; fsync so a
+	// crash right after a "done" append cannot lose the last page turn.
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	return err
 }
 

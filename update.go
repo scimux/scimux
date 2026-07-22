@@ -187,6 +187,22 @@ var (
 // would orphan the ACP/codex children that the signal handler normally kills
 // (tmux sessions survive on purpose, exactly as on a normal restart).
 func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	// The apply is pinned to the exact tag the check displayed. Without this the
+	// handler re-fetches "latest" and installs whatever it finds — so a release
+	// cut between check and apply would silently install a version the operator
+	// never saw, and it makes the endpoint a blind-fire CSRF target (though the
+	// unsafe-method guard now also stands in front of it).
+	var body struct {
+		ExpectedTag string `json:"expected_tag"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		http.Error(w, "bad request: expected {\"expected_tag\":\"vX.Y.Z\"}", 400)
+		return
+	}
+	if body.ExpectedTag == "" {
+		http.Error(w, "update: expected_tag is required (the tag the check displayed)", 400)
+		return
+	}
 	if !updateMu.TryLock() {
 		http.Error(w, "update already in progress", 409)
 		return
@@ -199,6 +215,10 @@ func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	}
 	if version == "dev" || rel.Tag == version {
 		http.Error(w, "already up to date", 409)
+		return
+	}
+	if rel.Tag != body.ExpectedTag {
+		http.Error(w, fmt.Sprintf("update: latest is now %s, not the %s you confirmed — re-check before updating", rel.Tag, body.ExpectedTag), 409)
 		return
 	}
 	exe, err := executablePath()
