@@ -3113,10 +3113,12 @@ async function refreshChat(){
   /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
      young, unreadable, or format-incompatible transcripts all end up here */
   const turns = d.turns || [];
-  /* the + appears only once this activity has any history — its opening prompt
-     is text-only (see setAttachAvail). prior_turns keeps it visible across a
-     /clear on an established node. */
-  setAttachAvail(turns.length > 0 || (d.prior_turns || 0) > 0);
+  /* the + appears only once the *current* chat surface has a turn — its opening
+     prompt is text-only (see setAttachAvail). d.turns is the segment after the
+     last source seam, so a /clear turns the page back to an empty surface and
+     the + hides again until the first post-clear prompt lands: same rule as a
+     brand-new activity. */
+  setAttachAvail(turns.length > 0);
   /* the echo retires once the store serves the turn (or after a generous
      timeout \u2014 the unconfirmed-delivery flow owns the failure story) */
   if (sentEcho && sentEcho.node === n.id){
