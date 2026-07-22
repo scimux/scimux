@@ -90,11 +90,34 @@ is rejected — codex runs as a scimux-started subprocess, not in tmux.
 
 ### `POST /api/nodes/{id}/send`
 
-Body: `{"text": "…"}`. Delivers a follow-up turn (tmux: paste + Enter;
-structured transports: a protocol prompt). `409` while a turn is still in
-flight. On structured transports `"/clear"` is implemented by scimux itself:
-a fresh protocol session on the same node, recorded as a source seam — same
-page-turn semantics as Claude's `/clear`.
+Body: `{"text": "…", "attachments": [<ref>, …]}`. Delivers a follow-up turn
+(tmux: paste + Enter; structured transports: a protocol prompt). `409` while a
+turn is still in flight. On structured transports `"/clear"` is implemented by
+scimux itself: a fresh protocol session on the same node, recorded as a source
+seam — same page-turn semantics as Claude's `/clear`.
+
+`attachments` is optional; each element is a reference returned by
+`POST …/attachments` (below). Every ref must point inside this node's own
+upload directory (others are rejected `400`). For each, a plain-text line
+`[attached image|file: /abs/path]` is appended to the delivered prompt so the
+agent reads the file — one uniform mechanism across all transports (no inline
+image bytes). A turn may carry text, attachments, or both; an attachments-only
+turn is valid, but an entirely empty one is `400`.
+
+### `POST /api/nodes/{id}/attachments`
+
+`multipart/form-data` with one or more files under the field `files`. Stores
+them under `~/.scimux/attachments/{id}/` and returns
+`{"attachments": [{"path","mime","name","size"}, …]}` — the refs to pass to
+`/send`. Separate, larger size cap than the JSON body; the bytes never enter
+any JSONL store (the log records only the text reference). Files are archived
+with the node on delete.
+
+### `GET /api/nodes/{id}/attachments/{name}`
+
+Serves one uploaded file's bytes (for the chat view's thumbnails). Only a bare
+filename inside this node's own upload directory is served — no traversal, no
+cross-node access; anything else is `404`.
 
 ### `POST /api/nodes/{id}/send/resolve`
 

@@ -540,6 +540,26 @@ body.cards-open #msgs { overflow: hidden; }
 .bubble strong { font-weight: 650; }
 .turn.user .bubble code { background: rgba(255,255,255,.18); }
 
+/* multimodal attachments (P3): thumbnails / file chips inside a bubble. */
+.attrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.bubble > .attrow:first-child { margin-top: 0; }          /* image-only turn */
+.attthumb { display: block; line-height: 0; border-radius: 12px; overflow: hidden;
+  border: 1px solid rgba(255,255,255,.28); max-width: min(220px, 60vw);
+  transition: transform .12s ease, box-shadow .12s ease; }
+.attthumb img { display: block; width: 100%; max-height: 240px; object-fit: cover; }
+.attthumb:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,.18); }
+.turn.assistant .attthumb { border-color: var(--hairline); }
+.attfile { display: inline-flex; align-items: center; gap: 7px; max-width: 240px;
+  padding: 8px 12px; border-radius: 12px; text-decoration: none; color: inherit;
+  background: rgba(255,255,255,.16); font-size: 13px; font-weight: 550; }
+.attfile span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attfile svg { flex: none; opacity: .85; }
+.attfile:hover { background: rgba(255,255,255,.26); }
+.turn.assistant .attfile { background: var(--surface); border: 1px solid var(--hairline); }
+.turn.assistant .attfile:hover { background: var(--code-bg); }
+/* an image-only user turn: let the media breathe, drop the chat-bubble skin */
+.turn.media .bubble { background: none; padding: 0; border: none; }
+
 /* TUI blocker: raw pane snapshot (the question) + key row (the answer).
    The terminal always renders inline below the last bubble — never a pinned
    overlay above the chat. It gets a generous, device-aware height so a full
@@ -574,10 +594,11 @@ body.cards-open #msgs { overflow: hidden; }
 }
 
 #promptbar {
-  display: flex; align-items: flex-end; gap: 10px;
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--hairline); background: var(--bg);
 }
+#promptrow { display: flex; align-items: flex-end; gap: 10px; }
+#promptbar.drop { outline: 2px dashed var(--work); outline-offset: -6px; border-radius: 10px; }
 #promptbar [contenteditable] {
   flex: 1; resize: none; max-height: 120px;
   font-size: 16px; line-height: 1.4; font-family: inherit; color: var(--ink);
@@ -597,6 +618,64 @@ body.cards-open #msgs { overflow: hidden; }
 }
 #sendbtn svg { display: block; }
 #sendbtn.stop svg { width: 38px; height: 38px; }
+
+/* ---- attachments (P4): leading + , source menu, staged chip row ---- */
+#attadd {
+  width: 38px; height: 38px; border-radius: 19px; flex: none;
+  background: var(--surface); border: 1px solid var(--hairline); color: var(--dim);
+  display: flex; align-items: center; justify-content: center;
+  transition: color .12s, border-color .12s, background .12s, transform .12s;
+}
+#attadd:hover { color: var(--work); border-color: color-mix(in srgb, var(--work) 40%, transparent); }
+#attadd.armed { color: var(--work); border-color: var(--work);
+  background: color-mix(in srgb, var(--work) 9%, var(--surface)); transform: rotate(45deg); }
+#attadd svg { display: block; }
+@media (prefers-reduced-motion: reduce) { #attadd { transition: none; } #attadd.armed { transform: none; } }
+
+#attmenu {
+  position: fixed; z-index: 70; min-width: 190px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 13px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.24);
+  transform-origin: bottom left; animation: attmenu-in .12s ease;
+}
+@keyframes attmenu-in { from { opacity: 0; transform: translateY(4px) scale(.97); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #attmenu { animation: none; } }
+#attmenu button {
+  display: flex; align-items: center; gap: 11px; width: 100%; min-height: 44px;
+  padding: 10px 12px; border-radius: 9px; font-size: 15px; color: var(--ink); text-align: left;
+}
+#attmenu button:hover { background: var(--code-bg); }
+#attmenu svg { flex: none; opacity: .75; }
+
+#attstage { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+#attstage[hidden] { display: none; }
+.stagechip {
+  position: relative; display: inline-flex; align-items: center; gap: 8px;
+  max-width: 210px; padding: 6px 10px 6px 6px;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 13px;
+}
+.stagechip img, .stagechip .fico {
+  width: 40px; height: 40px; border-radius: 8px; flex: none; display: block; object-fit: cover;
+}
+.stagechip .fico { display: flex; align-items: center; justify-content: center;
+  background: var(--code-bg); color: var(--dim); }
+.stagechip .snm { font-size: 12.5px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stagechip.up { opacity: .6; }                 /* uploading */
+.stagechip.err { border-color: var(--bad); }
+.stagechip .sx {
+  position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; flex: none;
+  border-radius: 11px; background: var(--ink); color: var(--bg);
+  border: 2px solid var(--bg); font-size: 13px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.stagechip .sx::before { content: ""; position: absolute; inset: -11px; }  /* 44pt touch */
+.stagechip .spin { position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; }
+.stagechip .spin i { width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--hairline); border-top-color: var(--work); animation: spin .7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .stagechip .spin i { animation: none; } }
 
 /* ---------- sheets ---------- */
 .sheet {
@@ -909,9 +988,23 @@ body.notes-open #notespane { transform: translateX(0); }
     </div>
     <div id="workpulse" aria-hidden="true"></div>
     <div id="promptbar">
-      <div id="prompt" role="textbox" aria-multiline="true" contenteditable="true"
-        data-placeholder="Message the agent…"></div>
-      <button id="sendbtn" aria-label="send"></button>
+      <!-- staged attachments (P4): a poll-safe singleton row above the input;
+           thumbnails/chips picked before send, each removable. -->
+      <div id="attstage" hidden></div>
+      <div id="promptrow">
+        <button id="attadd" aria-label="Add attachment" title="Add attachment"
+          aria-haspopup="menu" aria-expanded="false"></button>
+        <div id="prompt" role="textbox" aria-multiline="true" contenteditable="true"
+          data-placeholder="Message the agent…"></div>
+        <button id="sendbtn" aria-label="send"></button>
+      </div>
+      <!-- HIG: one leading + presents its sources via a menu, not a button row -->
+      <div id="attmenu" role="menu" hidden>
+        <button role="menuitem" data-src="image"></button>
+        <button role="menuitem" data-src="file"></button>
+      </div>
+      <input id="attimg" type="file" accept="image/*" multiple hidden>
+      <input id="attfile" type="file" multiple hidden>
     </div>
   </section>
 
@@ -1430,6 +1523,19 @@ const ICON_SEND = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
 const ICON_PENCIL = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="M13.5 6.5l3 3"/></svg>`;
+/* dog-eared document glyph for non-image attachment chips */
+const ICON_FILE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M6 2h8l4 4v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/>
+  <path d="M13 2v5h5"/></svg>`;
+const ICON_PLUS = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+  <path d="M12 5v14M5 12h14"/></svg>`;
+/* picture glyph (mountain + sun) for the "Choose image…" menu item */
+const ICON_IMAGE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+  <circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4"/></svg>`;
 /* stop glyph: fa-regular fa-circle-stop */
 const ICON_STOP = `<svg width="38" height="38" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1588,6 +1694,43 @@ function md(src){
   if (code) out.push(`<pre><code>${esc(code.lines.join("\n"))}</code></pre>`);
   flushAll();
   return out.join("");
+}
+
+/* Multimodal render (P3): the delivered prompt carries a plain-text reference
+   per attachment ("[attached image: /abs/path]"). Pull those out of a user turn
+   and render them as thumbnails / file chips instead of leaving the raw path in
+   the bubble. The bytes come from the per-node guarded static handler, so a
+   spoofed path outside the node's uploads simply 404s and the tile drops itself
+   (onerror). Returns the cleaned text and the tile HTML. */
+const ATT_RE = /\[attached (image|file): ([^\]]+)\]/g;
+/* one attachment tile (thumbnail for images, chip for other files). A tile whose
+   bytes 404 removes itself (onerror) — so a marker pointing outside the node's
+   uploads renders nothing. */
+function attTile(nodeId, leaf, isImage){
+  const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
+  const name = leaf.replace(/^[0-9a-f]{8}-/, "");     /* drop the storage token */
+  return isImage
+    ? `<a class="attthumb" href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
+      `<img src="${url}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
+    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
+      `${ICON_FILE}<span>${esc(name)}</span></a>`;
+}
+function splitAttachments(text, nodeId){
+  ATT_RE.lastIndex = 0;
+  if (!ATT_RE.test(text)) return { clean: text, html: "" };
+  const tiles = [];
+  const clean = text.replace(ATT_RE, (_m, kind, path) => {
+    tiles.push(attTile(nodeId, path.split("/").pop(), kind === "image"));
+    return "";
+  }).replace(/\n{3,}/g, "\n\n").trim();
+  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
+}
+/* echo path: build tiles straight from the uploaded refs (no marker to parse) */
+function refTilesHTML(refs, nodeId){
+  if (!refs || !refs.length) return "";
+  const tiles = refs.map(r =>
+    attTile(nodeId, (r.path || "").split("/").pop(), /^image\//.test(r.mime || ""))).join("");
+  return `<div class="attrow">${tiles}</div>`;
 }
 
 /* ---------- statusbar ---------- */
@@ -2775,6 +2918,7 @@ function select(id){
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
   setPromptText(localStorage.getItem("scimux-draft:" + sel) || "");
+  renderStage();   /* show this node's staged attachments (per-node, poll-safe) */
   cardsSig = "";
   renderCards();
   renderChatHead();
@@ -3063,11 +3207,14 @@ async function refreshChat(){
           : `<div class="pending">${d.pending
               ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
               : "no readable transcript \u2014 showing the raw terminal below"}</div>`) : "") +
-    turns.map((t, i) => `
-      <div class="turn ${t.role === "user" ? "user" : "assistant"}" data-i="${i}">
-        <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(t.text)}</div>
+    turns.map((t, i) => {
+      const a = t.role === "user" ? splitAttachments(t.text, n.id) : { clean: t.text, html: "" };
+      return `
+      <div class="turn ${t.role === "user" ? "user" : "assistant"}${a.html && !a.clean ? " media" : ""}" data-i="${i}">
+        <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(a.clean)}${a.html}</div>
         <button class="copybtn" data-i="${i}" aria-label="copy message">${ICON_COPY}</button>
-      </div>`).join("") +
+      </div>`;
+    }).join("") +
     (echo ? `
       <div class="turn user echo">
         <div class="bubble" title="you — delivering">${md(echo.text)}</div>
@@ -3764,6 +3911,8 @@ $("#prompt").addEventListener("input", e => {
   if (sel) localStorage.setItem("scimux-draft:" + sel, promptText());
 });
 $("#prompt").addEventListener("paste", e => {
+  const files = e.clipboardData?.files;
+  if (files && files.length){ e.preventDefault(); addFiles(files); return; }
   const text = e.clipboardData?.getData("text/plain");
   if (text == null) return;
   e.preventDefault();
@@ -3800,12 +3949,122 @@ async function interruptPrompt(){
     refreshChat();
   }
 }
+/* ---------- composer attachments (P4) ---------- */
+$("#attadd").innerHTML = ICON_PLUS;
+$("#attmenu").children[0].innerHTML = ICON_IMAGE + "<span>Choose image…</span>";
+$("#attmenu").children[1].innerHTML = ICON_FILE + "<span>Choose file…</span>";
+/* stage: per-node staged files (poll-safe — the composer is a singleton outside
+   every render region; keyed by node id so switching activities keeps each
+   node's picks, like the text draft). In-memory only: a reload resets staging. */
+const stage = {};
+let stageKey = 0;
+function staged(id){ return stage[id] || (stage[id] = []); }
+
+function renderStage(){
+  const box = $("#attstage");
+  const items = sel ? (stage[sel] || []) : [];
+  if (!items.length){ box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = items.map(it => {
+    const disp = esc(it.name);
+    const thumb = it.isImage && it.preview
+      ? `<img src="${it.preview}" alt="${disp}">`
+      : `<span class="fico">${ICON_FILE}</span>`;
+    const spin = it.status === "up" ? `<span class="spin"><i></i></span>` : "";
+    return `<div class="stagechip ${it.status}" data-key="${it.key}" title="${disp}">
+        ${thumb}${spin}<span class="snm">${disp}</span>
+        <button class="sx" data-key="${it.key}" aria-label="Remove ${disp}">&times;</button>
+      </div>`;
+  }).join("");
+  box.querySelectorAll(".sx").forEach(b =>
+    b.addEventListener("click", () => removeStaged(b.dataset.key)));
+}
+function removeStaged(key){
+  if (!sel) return;
+  const arr = stage[sel] || [], i = arr.findIndex(x => String(x.key) === String(key));
+  if (i < 0) return;
+  if (arr[i].preview) URL.revokeObjectURL(arr[i].preview);
+  arr.splice(i, 1);
+  renderStage();
+}
+async function uploadOne(it, dest){
+  const fd = new FormData();
+  fd.append("files", it.file, it.name);
+  try {
+    const r = await fetch(`/api/nodes/${encodeURIComponent(dest)}/attachments`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    it.ref = (await r.json()).attachments[0];
+    it.status = "done";
+  } catch (e) { it.status = "err"; it.error = e.message; }
+  if (sel === dest) renderStage();
+}
+function addFiles(files, dest){
+  dest = dest || sel;
+  if (!dest || !files || !files.length) return;
+  const arr = staged(dest);
+  for (const f of files){
+    const isImage = /^image\//.test(f.type);
+    const it = { key: ++stageKey, file: f, name: f.name || (isImage ? "pasted-image.png" : "file"),
+                 isImage, preview: isImage ? URL.createObjectURL(f) : "", ref: null, status: "up" };
+    arr.push(it);
+    uploadOne(it, dest);
+  }
+  if (sel === dest) renderStage();
+}
+/* the + menu (HIG: one leading control presents its sources) */
+function closeAttMenu(){
+  $("#attmenu").hidden = true;
+  $("#attadd").classList.remove("armed");
+  $("#attadd").setAttribute("aria-expanded", "false");
+}
+$("#attadd").addEventListener("click", e => {
+  e.stopPropagation();
+  const m = $("#attmenu");
+  if (!m.hidden){ closeAttMenu(); return; }
+  m.hidden = false;                                  /* unhide to measure, then place upward */
+  const r = $("#attadd").getBoundingClientRect();
+  m.style.left = r.left + "px";
+  m.style.top = (r.top - m.offsetHeight - 8) + "px";
+  $("#attadd").classList.add("armed");
+  $("#attadd").setAttribute("aria-expanded", "true");
+});
+$("#attmenu").addEventListener("click", e => {
+  const b = e.target.closest("button[data-src]"); if (!b) return;
+  closeAttMenu();
+  (b.dataset.src === "image" ? $("#attimg") : $("#attfile")).click();
+});
+document.addEventListener("click", () => { if (!$("#attmenu").hidden) closeAttMenu(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#attmenu").hidden) closeAttMenu(); });
+$("#attimg").addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
+$("#attfile").addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
+/* drag-drop files onto the composer */
+const _pbar = $("#promptbar");
+["dragover", "dragenter"].forEach(ev => _pbar.addEventListener(ev, e => {
+  if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")){ e.preventDefault(); _pbar.classList.add("drop"); }
+}));
+["dragleave", "dragend", "drop"].forEach(ev => _pbar.addEventListener(ev, () => _pbar.classList.remove("drop")));
+_pbar.addEventListener("drop", e => {
+  if (e.dataTransfer && e.dataTransfer.files.length){ e.preventDefault(); addFiles(e.dataTransfer.files); }
+});
+
 async function sendPrompt(){
   const text = promptText().trim();
-  if (!text || !sel) return;
+  if (!sel) return;
   const dest = sel;   /* capture: selection may change while the send is in flight */
+  const items = (stage[dest] || []).slice();
+  /* wait out any in-flight uploads so their refs ride this turn */
+  if (items.some(x => x.status === "up")){
+    await new Promise(res => {
+      const t = setInterval(() => { if (!items.some(x => x.status === "up")){ clearInterval(t); res(); } }, 150);
+      setTimeout(() => { clearInterval(t); res(); }, 12000);
+    });
+  }
+  const refs = items.filter(x => x.status === "done" && x.ref).map(x => x.ref);
+  if (!text && !refs.length) return;
   clearPrompt();
   localStorage.removeItem("scimux-draft:" + dest);
+  stage[dest] = [];                 /* clear the stage optimistically; restore on failure */
+  if (sel === dest) renderStage();
   /* optimistic echo, painted before the POST even resolves: the store's
      copy of this turn is seconds away (CLI transcript write + mirror tick
      + chat poll), and an empty chat after hitting send reads as a swallowed
@@ -3815,13 +4074,14 @@ async function sendPrompt(){
      past that index is this send landing. Only trustworthy when the chat has
      actually rendered for this node (chatSig set after a render, cleared on
      select) — otherwise leave it null and rely on the text match/timeout. */
-  sentEcho = { node: dest, text, at: Date.now(),
+  sentEcho = { node: dest, text, atts: refs, at: Date.now(),
                seen: chatSig ? lastTurns.length : null };
   paintEchoNow(dest);
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
-      { method: "POST", body: JSON.stringify({ text }) });
+      { method: "POST", body: JSON.stringify({ text, attachments: refs }) });
     chatSig = "";
+    items.forEach(x => { if (x.preview) URL.revokeObjectURL(x.preview); });   /* staged files delivered */
     /* "unconfirmed" is not a failure — the paste+Enter was sent, but the pane
        never visibly reacted; the decision pane below picks this up via
        delivery status and offers a recheck, so the draft stays cleared */
@@ -3846,9 +4106,13 @@ async function sendPrompt(){
        rather than overwriting it */
     const newer = localStorage.getItem("scimux-draft:" + dest) || "";
     const merged = newer && newer !== text ? text + "\n\n" + newer : text;
-    localStorage.setItem("scimux-draft:" + dest, merged);
+    if (merged) localStorage.setItem("scimux-draft:" + dest, merged);
+    /* the staged files never reached the agent either — put the chips back so
+       the operator can retry the whole turn (text + attachments) as one. */
+    if (items.length) stage[dest] = (stage[dest] || []).length ? stage[dest].concat(items) : items;
     if (sel === dest){
       setPromptText(merged);
+      renderStage();
     }
   }
 }
@@ -3860,8 +4124,9 @@ function paintEchoNow(dest){
   const el = $("#msgs");
   el.querySelectorAll(".turn.echo").forEach(x => x.remove());
   const div = document.createElement("div");
-  div.className = "turn user echo";
-  div.innerHTML = `<div class="bubble" title="you — delivering">${md(sentEcho.text)}</div>`;
+  const tiles = refTilesHTML(sentEcho.atts, sentEcho.node);
+  div.className = "turn user echo" + (tiles && !sentEcho.text ? " media" : "");
+  div.innerHTML = `<div class="bubble" title="you — delivering">${md(sentEcho.text)}${tiles}</div>`;
   el.insertBefore(div, el.querySelector(".peekblock"));   /* null target = append */
   el.scrollTop = el.scrollHeight;
 }

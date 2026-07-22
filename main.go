@@ -6,6 +6,7 @@ package main
 import (
 	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
+	mimepkg "mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -171,6 +173,11 @@ type app struct {
 	// the chat read path for every transport: handleChat renders from the
 	// log, never from the transcript tailer (phase 3 of the consolidation).
 	sessionsDir string
+	// attachmentsDir holds uploaded files, one subdirectory per node
+	// (~/.scimux/attachments/<node-id>/). Bytes live here; the session log and
+	// nodes.jsonl only ever record a text reference (Attachment) — the
+	// text-only/append-only store invariants forbid binary in either JSONL.
+	attachmentsDir string
 	// segCache memoizes each node's parsed current segment so the 1s chat
 	// poll costs a stat, not a reparse, while the log is unchanged.
 	segCache map[string]*sessionlog.Cache
@@ -292,6 +299,11 @@ func (a *app) proc(n *Node) procManager {
 // would be an easy memory-exhaustion hole (R18.6). /api/ui has its own,
 // larger uiStateMax limit.
 const jsonBodyMax = 1 << 20
+
+// attachUploadMax bounds a multipart attachment upload. Files blow past
+// jsonBodyMax, so uploads have their own, larger cap and never ride the prompt
+// JSON. Bytes land on disk; the session log only ever stores a text reference.
+const attachUploadMax = 25 << 20
 
 // decodeJSON decodes a bounded JSON request body.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
@@ -1725,6 +1737,7 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	a.removeNodeLocked(n.ID)
 	a.mu.Unlock()
 	a.archiveSessionLog(n.ID)
+	a.archiveAttachments(n.ID)
 	writeJSON(w, map[string]string{"ok": "deleted"})
 }
 
@@ -1749,6 +1762,216 @@ func (a *app) archiveSessionLog(id string) {
 	}
 }
 
+// Attachment references an uploaded file stored on disk. The bytes live under
+// ~/.scimux/attachments/<node-id>/; only this text reference is ever recorded
+// in a store — nodes.jsonl and the session log stay grep-able, never binary.
+type Attachment struct {
+	Path string `json:"path"`
+	Mime string `json:"mime"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+func (a *app) attachmentDir(id string) string { return filepath.Join(a.attachmentsDir, id) }
+
+// storeAttachment writes one uploaded file into the node's attachment directory
+// and returns its reference. The stored leaf is prefixed with a random token so
+// re-uploading a name never collides or overwrites, and so a crafted filename
+// can never escape the directory: filepath.Base strips any separators and the
+// token guarantees a non-empty, traversal-free leaf. Written O_EXCL 0600.
+func (a *app) storeAttachment(id, name, mime string, src io.Reader) (Attachment, error) {
+	base := filepath.Base(name)
+	if base == "." || base == ".." || base == "" || base == string(filepath.Separator) {
+		base = "file"
+	}
+	var tok [4]byte
+	if _, err := rand.Read(tok[:]); err != nil {
+		return Attachment{}, err
+	}
+	dir := a.attachmentDir(id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Attachment{}, err
+	}
+	dst := filepath.Join(dir, hex.EncodeToString(tok[:])+"-"+base)
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return Attachment{}, err
+	}
+	n, err := io.Copy(f, src)
+	cerr := f.Close()
+	if err != nil || cerr != nil {
+		os.Remove(dst)
+		if err != nil {
+			return Attachment{}, err
+		}
+		return Attachment{}, cerr
+	}
+	if mime == "" || mime == "application/octet-stream" {
+		if t := mimepkg.TypeByExtension(filepath.Ext(base)); t != "" {
+			mime = t
+		}
+	}
+	return Attachment{Path: dst, Mime: mime, Name: base, Size: n}, nil
+}
+
+// archiveAttachments mirrors archiveSessionLog for a deleted node's uploaded
+// files: it moves ~/.scimux/attachments/<id> into attachments/archive/ so a
+// reissued slug can never inherit a dead node's files. Best-effort — retention
+// never blocks a delete.
+func (a *app) archiveAttachments(id string) {
+	if a.attachmentsDir == "" {
+		return
+	}
+	src := a.attachmentDir(id)
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	dir := filepath.Join(a.attachmentsDir, "archive")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive attachments for %s: %v\n", id, err)
+		return
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	if err := os.Rename(src, filepath.Join(dir, id+"."+stamp)); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive attachments for %s: %v\n", id, err)
+	}
+}
+
+// extendPrompt appends a plain-text reference to each attachment so the agent
+// reads the local file — proven across every transport to trigger image
+// ingestion (see multimodal-input-design.md), so one mechanism serves all three
+// with no per-transport image plumbing. Delivery-time only: never stored on
+// n.Prompt, so cards and the research question stay clean. The reference left in
+// the recorded user turn (mirror echo for tmux; the manager's own user event
+// for ACP/codex) is also what the chat view renders (P3).
+func extendPrompt(text string, atts []Attachment) string {
+	if len(atts) == 0 {
+		return text
+	}
+	lines := make([]string, 0, len(atts))
+	for _, at := range atts {
+		kind := "file"
+		if strings.HasPrefix(at.Mime, "image/") {
+			kind = "image"
+		}
+		lines = append(lines, fmt.Sprintf("[attached %s: %s]", kind, at.Path))
+	}
+	ref := strings.Join(lines, "\n")
+	if strings.TrimSpace(text) == "" {
+		return ref
+	}
+	return text + "\n\n" + ref
+}
+
+// resolveAttachments validates each posted attachment reference: it must point
+// at a file inside THIS node's attachment directory (the only legitimate source
+// — the client uploaded it via POST …/attachments). This closes off a send that
+// would otherwise make the agent read an arbitrary local path. Metadata (name,
+// size, mime) is refreshed from disk.
+func (a *app) resolveAttachments(id string, refs []Attachment) ([]Attachment, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	nodeDir := a.attachmentDir(id) + string(filepath.Separator)
+	out := make([]Attachment, 0, len(refs))
+	for _, r := range refs {
+		clean := filepath.Clean(r.Path)
+		if !strings.HasPrefix(clean, nodeDir) {
+			return nil, fmt.Errorf("attachment %q is not one of this activity's uploads", r.Name)
+		}
+		fi, err := os.Stat(clean)
+		if err != nil || fi.IsDir() {
+			return nil, fmt.Errorf("attachment %q not found", r.Name)
+		}
+		at := Attachment{Path: clean, Name: r.Name, Mime: r.Mime, Size: fi.Size()}
+		if at.Name == "" {
+			at.Name = filepath.Base(clean)
+		}
+		if at.Mime == "" {
+			at.Mime = mimepkg.TypeByExtension(filepath.Ext(clean))
+		}
+		out = append(out, at)
+	}
+	return out, nil
+}
+
+// handleUploadAttachments stores multipart file uploads for a node and returns
+// their references. It is deliberately separate from the JSON send path: files
+// exceed jsonBodyMax, so uploads get their own larger cap (attachUploadMax) and
+// never ride the prompt JSON. The prompt references the returned paths (P2).
+func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, attachUploadMax)
+	if err := r.ParseMultipartForm(attachUploadMax); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, fmt.Sprintf("upload too large: the total is capped at %d MiB", attachUploadMax>>20), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "bad multipart request", 400)
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		http.Error(w, "no files in upload (expected multipart field \"files\")", 400)
+		return
+	}
+	out := make([]Attachment, 0, len(files))
+	for _, fh := range files {
+		src, err := fh.Open()
+		if err != nil {
+			http.Error(w, "open upload: "+err.Error(), 400)
+			return
+		}
+		att, err := a.storeAttachment(n.ID, fh.Filename, fh.Header.Get("Content-Type"), src)
+		src.Close()
+		if err != nil {
+			http.Error(w, "store upload: "+err.Error(), 500)
+			return
+		}
+		out = append(out, att)
+	}
+	writeJSON(w, map[string]any{"attachments": out})
+}
+
+// handleAttachment serves one uploaded file's bytes for the chat view. Guarded:
+// only a bare filename inside THIS node's attachment directory is served — no
+// traversal, no cross-node reach. That scoping is also what keeps the delivered
+// path-marker spoof-safe: a marker pointing outside the node's own uploads has
+// no servable URL, so a crafted "[attached image: /etc/passwd]" renders nothing.
+// Read-only; live nodes only (a deleted node's files are archived away).
+func (a *app) handleAttachment(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	name := filepath.Base(r.PathValue("name")) // strips any path separators
+	if name == "." || name == ".." || name == "" {
+		http.Error(w, "not found", 404)
+		return
+	}
+	dir := a.attachmentDir(n.ID)
+	full := filepath.Join(dir, name)
+	if !strings.HasPrefix(full, dir+string(filepath.Separator)) { // defense in depth
+		http.Error(w, "not found", 404)
+		return
+	}
+	fi, err := os.Stat(full)
+	if err != nil || fi.IsDir() {
+		http.Error(w, "not found", 404)
+		return
+	}
+	http.ServeFile(w, r, full) // sets Content-Type from extension/sniff
+}
+
 func (a *app) node(r *http.Request) (*Node, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1769,11 +1992,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	var body struct{ Text string }
-	if err := decodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
+	var body struct {
+		Text        string       `json:"text"`
+		Attachments []Attachment `json:"attachments"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
 		// The body cap is a deliberate defense (R18.6), but a bare "bad
 		// request" for an oversized prompt gives the user no size hint and
-		// invites retries that can never succeed — name the limit.
+		// invites retries that can never succeed — name the limit. (Files ride
+		// the separate multipart upload, not this JSON body.)
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			http.Error(w, fmt.Sprintf("prompt too large: the request body is capped at %d bytes (%d MiB); shorten the prompt or point the agent at a file instead", jsonBodyMax, jsonBodyMax>>20), http.StatusRequestEntityTooLarge)
@@ -1782,6 +2009,20 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
+	// A send may carry text, attachments, or both — an image-only turn is valid.
+	if strings.TrimSpace(body.Text) == "" && len(body.Attachments) == 0 {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	atts, err := a.resolveAttachments(n.ID, body.Attachments)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	// delivered is what the transport receives and records: the user's text with
+	// a plain-text reference to each uploaded file appended (extendPrompt). The
+	// raw text is kept only for /clear detection and unconfirmed-draft echo.
+	delivered := extendPrompt(body.Text, atts)
 	// Structured-protocol delivery (ACP, codex) is reliable (no pane-ack race,
 	// so no "unconfirmed" state), but the preflight still holds: refuse a second
 	// turn while one is in flight, and refuse entirely if the subprocess is
@@ -1808,7 +2049,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]string{"status": "acknowledged"})
 			return
 		}
-		if err := pm.Send(n.ID, body.Text); err != nil {
+		if err := pm.Send(n.ID, delivered); err != nil {
 			code := 500
 			if pm.Conflict(err) {
 				code = 409
@@ -1841,7 +2082,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	if tl != nil {
 		turnsBefore = len(tl.Poll())
 	}
-	acked, err := a.server.Session(n.ID).SendAck(body.Text)
+	acked, err := a.server.Session(n.ID).SendAck(delivered)
 	if err != nil {
 		a.mu.Lock()
 		delete(a.sendState, n.ID)
@@ -2540,29 +2781,35 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	attachmentsDir := filepath.Join(*data, "attachments")
+	if err := os.MkdirAll(attachmentsDir, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
 	a := &app{
-		byID:        map[string]*Node{},
-		live:        map[string]string{},
-		attn:        map[string]string{},
-		attnAt:      map[string]time.Time{},
-		prevCap:     map[string]string{},
-		lastChg:     map[string]time.Time{},
-		activeSince: map[string]time.Time{},
-		tailers:     map[string]*transcript.Tailer{},
-		mirrors:     map[string]*mirror{},
-		pathClaims:  map[string]bool{},
-		chatMark:    map[string]chatMark{},
-		staleChat:   map[string]bool{},
-		sendState:   map[string]string{},
-		reserved:    map[string]bool{},
-		anim:        map[string]*animState{},
-		server:      tmuxsession.NewServer(*socket),
-		acp:         acpManager{acp.NewManager(sessionsDir)},
-		codex:       codexManager{codex.NewManager(sessionsDir)},
-		storePath:   filepath.Join(*data, "nodes.jsonl"),
-		uiPath:      filepath.Join(*data, "ui.json"),
-		sessionsDir: sessionsDir,
-		home:        home,
+		byID:           map[string]*Node{},
+		live:           map[string]string{},
+		attn:           map[string]string{},
+		attnAt:         map[string]time.Time{},
+		prevCap:        map[string]string{},
+		lastChg:        map[string]time.Time{},
+		activeSince:    map[string]time.Time{},
+		tailers:        map[string]*transcript.Tailer{},
+		mirrors:        map[string]*mirror{},
+		pathClaims:     map[string]bool{},
+		chatMark:       map[string]chatMark{},
+		staleChat:      map[string]bool{},
+		sendState:      map[string]string{},
+		reserved:       map[string]bool{},
+		anim:           map[string]*animState{},
+		server:         tmuxsession.NewServer(*socket),
+		acp:            acpManager{acp.NewManager(sessionsDir)},
+		codex:          codexManager{codex.NewManager(sessionsDir)},
+		storePath:      filepath.Join(*data, "nodes.jsonl"),
+		uiPath:         filepath.Join(*data, "ui.json"),
+		sessionsDir:    sessionsDir,
+		attachmentsDir: attachmentsDir,
+		home:           home,
 	}
 	if err := a.loadStore(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
@@ -2616,6 +2863,8 @@ func main() {
 	mux.HandleFunc("DELETE /api/nodes/{id}", a.handleDeleteNode)
 	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
+	mux.HandleFunc("POST /api/nodes/{id}/attachments", a.handleUploadAttachments)
+	mux.HandleFunc("GET /api/nodes/{id}/attachments/{name}", a.handleAttachment)
 	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
 	mux.HandleFunc("POST /api/nodes/{id}/send/interrupt", a.handleSendInterrupt)
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
