@@ -294,6 +294,15 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   display: none; gap: 8px; z-index: 4;
 }
 .card.actions-open .actions { display: flex; }
+/* Desktop has no long-press or swipe. Hovering a folded card reveals the same
+   archive/remove row (same hover idiom as the bubble copy button), so pointer
+   users get a discoverable equivalent of the touch long-press. Touch devices
+   report (hover: none) and keep long-press/swipe; they never match this. The
+   :not() chain mirrors the long-press guards — no actions on adoptable,
+   expanded, or in-edit cards. */
+@media (hover: hover) and (pointer: fine) {
+  .card:not(.adoptable):not(.expanded):not(.editing):not(.title-editing):hover .actions { display: flex; }
+}
 .card .actions button {
   width: 40px; height: 40px; border-radius: 20px;
   display: flex; align-items: center; justify-content: center;

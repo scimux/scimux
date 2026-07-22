@@ -333,6 +333,11 @@ func (a *app) appendRecord(rec storeRecord) error {
 	// is only "done" once the bytes and a full-write check have reached disk.
 	a.storeMu.Lock()
 	defer a.storeMu.Unlock()
+	// A first append creates nodes.jsonl; its dirent is not crash-durable until
+	// the parent directory is synced too (see sessionlog.SyncParentDir). Detect
+	// creation under the same lock that serializes the write.
+	_, statErr := os.Stat(a.storePath)
+	created := os.IsNotExist(statErr)
 	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -346,6 +351,9 @@ func (a *app) appendRecord(rec storeRecord) error {
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if err == nil && created {
+		err = sessionlog.SyncParentDir(a.storePath)
 	}
 	return err
 }

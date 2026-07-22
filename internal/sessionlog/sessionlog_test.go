@@ -165,3 +165,31 @@ func TestConcurrentAppendsAcrossWriters(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendFirstCreateSyncsParentDir(t *testing.T) {
+	// The first Append creates the file and must sync the parent dir; a second
+	// append to the existing file must not error either. We can't observe the
+	// dirent fsync directly, but the code path (created vs existing) must run
+	// cleanly and the records must survive.
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	if err := w.Append(Event{T: "user", Text: "first"}); err != nil {
+		t.Fatalf("first append (create): %v", err)
+	}
+	if err := w.Append(Event{T: "user", Text: "second"}); err != nil {
+		t.Fatalf("second append (existing): %v", err)
+	}
+	if evs := ReadEvents(path); len(evs) != 2 {
+		t.Fatalf("read %d events, want 2", len(evs))
+	}
+}
+
+func TestSyncParentDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := SyncParentDir(filepath.Join(dir, "n.jsonl")); err != nil {
+		t.Fatalf("SyncParentDir on existing dir: %v", err)
+	}
+	if err := SyncParentDir(filepath.Join(dir, "nope", "n.jsonl")); err == nil {
+		t.Fatalf("SyncParentDir on missing parent: want error, got nil")
+	}
+}

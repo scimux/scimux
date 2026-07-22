@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,23 @@ func lockPath(path string) func() {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// SyncParentDir fsyncs the directory that holds path so a newly created file's
+// directory entry survives a crash. On POSIX, fsyncing a file does not
+// necessarily make its new dirent durable; the parent directory must be synced
+// too. Call this only after the file itself has been synced, and only when the
+// file was newly created — an append to an existing file needs no dirent update.
+func SyncParentDir(path string) error {
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 func (w *Writer) Append(ev Event) error {
 	if ev.Time == "" {
 		ev.Time = nowStamp()
@@ -165,6 +183,11 @@ func (w *Writer) Append(ev Event) error {
 	b = append(b, '\n')
 	unlock := lockPath(w.Path)
 	defer unlock()
+	// A first append to this node's log creates the file; its dirent is not
+	// durable until the parent directory is also synced (see SyncParentDir).
+	// Detect that under the same per-path lock that serializes the write.
+	_, statErr := os.Stat(w.Path)
+	created := os.IsNotExist(statErr)
 	// 0600: rawInput and prompt text are as sensitive as pane-excerpt evidence.
 	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -181,6 +204,9 @@ func (w *Writer) Append(ev Event) error {
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if err == nil && created {
+		err = SyncParentDir(w.Path)
 	}
 	return err
 }
