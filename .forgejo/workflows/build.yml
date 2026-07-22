@@ -31,3 +31,7 @@ jobs:
       - name: Build for darwin/arm64
         run: |
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-darwin-arm64 && file builds/scimux-darwin-arm64
+
+      - name: Build for darwin/amd64
+        run: |
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-darwin-amd64 && file builds/scimux-darwin-amd64
