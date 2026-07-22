@@ -629,6 +629,7 @@ body.cards-open #msgs { overflow: hidden; }
 #attadd:hover { color: var(--work); border-color: color-mix(in srgb, var(--work) 40%, transparent); }
 #attadd.armed { color: var(--work); border-color: var(--work);
   background: color-mix(in srgb, var(--work) 9%, var(--surface)); transform: rotate(45deg); }
+#attadd[hidden] { display: none; }   /* id specificity beats the UA [hidden] rule */
 #attadd svg { display: block; }
 @media (prefers-reduced-motion: reduce) { #attadd { transition: none; } #attadd.armed { transform: none; } }
 
@@ -993,7 +994,7 @@ body.notes-open #notespane { transform: translateX(0); }
       <div id="attstage" hidden></div>
       <div id="promptrow">
         <button id="attadd" aria-label="Add attachment" title="Add attachment"
-          aria-haspopup="menu" aria-expanded="false"></button>
+          aria-haspopup="menu" aria-expanded="false" hidden></button>
         <div id="prompt" role="textbox" aria-multiline="true" contenteditable="true"
           data-placeholder="Message the agent…"></div>
         <button id="sendbtn" aria-label="send"></button>
@@ -2918,6 +2919,7 @@ function select(id){
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
   setPromptText(localStorage.getItem("scimux-draft:" + sel) || "");
+  setAttachAvail(false);   /* hide + until this node's chat load confirms it has started */
   renderStage();   /* show this node's staged attachments (per-node, poll-safe) */
   cardsSig = "";
   renderCards();
@@ -3111,6 +3113,10 @@ async function refreshChat(){
   /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
      young, unreadable, or format-incompatible transcripts all end up here */
   const turns = d.turns || [];
+  /* the + appears only once this activity has any history — its opening prompt
+     is text-only (see setAttachAvail). prior_turns keeps it visible across a
+     /clear on an established node. */
+  setAttachAvail(turns.length > 0 || (d.prior_turns || 0) > 0);
   /* the echo retires once the store serves the turn (or after a generous
      timeout \u2014 the unconfirmed-delivery flow owns the failure story) */
   if (sentEcho && sentEcho.node === n.id){
@@ -3960,6 +3966,19 @@ const stage = {};
 let stageKey = 0;
 function staged(id){ return stage[id] || (stage[id] = []); }
 
+/* Attachments become available only once the conversation has started (the
+   node then exists with an upload directory). A brand-new activity's opening
+   prompt is text-only — it is the message that *creates* the node, so there is
+   no id to upload against yet. The + simply stays hidden until the first turn
+   lands: cheap, and it teaches the rule without a word of explanation. */
+let canAttach = false;
+function setAttachAvail(on){
+  if (canAttach === on){ $("#attadd").hidden = !on; return; }
+  canAttach = on;
+  $("#attadd").hidden = !on;
+  if (!on) closeAttMenu();
+}
+
 function renderStage(){
   const box = $("#attstage");
   const items = sel ? (stage[sel] || []) : [];
@@ -4000,7 +4019,7 @@ async function uploadOne(it, dest){
 }
 function addFiles(files, dest){
   dest = dest || sel;
-  if (!dest || !files || !files.length) return;
+  if (!canAttach || !dest || !files || !files.length) return;   /* gated: only after the first turn */
   const arr = staged(dest);
   for (const f of files){
     const isImage = /^image\//.test(f.type);
