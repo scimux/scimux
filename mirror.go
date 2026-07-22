@@ -38,6 +38,10 @@ type mirror struct {
 	mirrored int
 	lastUsed int64
 	lastWin  int64
+	// tsize is the transcript byte size mirrored so far — the restart fast
+	// path's watermark. Recovered from the last "mark" record and re-persisted
+	// as mirroring advances; a stat equal to it means "nothing new, skip".
+	tsize int64
 }
 
 // syncMirror advances a tmux node's session log to match its transcript.
@@ -48,13 +52,6 @@ func (a *app) syncMirror(n *Node) {
 	if a.sessionsDir == "" {
 		return // no session store configured (bare test apps)
 	}
-	tl := a.tailerFor(n)
-	if tl == nil {
-		return // no transcript linked yet; nothing to mirror
-	}
-	turns := tl.Poll()
-	used, win := tl.Usage()
-
 	a.mu.Lock()
 	if a.mirrors == nil {
 		a.mirrors = map[string]*mirror{}
@@ -65,27 +62,54 @@ func (a *app) syncMirror(n *Node) {
 		a.mirrors[n.ID] = m
 	}
 	logPath := a.sessionLogPath(n.ID)
+	tpath := n.Transcript
 	a.mu.Unlock()
 
-	m.sync(logPath, n, tl.Path, turns, used, win)
-}
-
-func (m *mirror) sync(logPath string, n *Node, tpath string, turns []transcript.Turn, used, win int64) {
 	if tpath == "" {
-		return
+		return // no transcript linked yet; nothing to mirror, create no log
 	}
-	// First sync (process start or a node whose log path we haven't touched):
-	// recover the watermark from the log itself.
+
+	// Recover the durable watermark before touching the transcript. The log is
+	// the only persistent mirror state, and reading it here — our own compact
+	// JSONL, not the agent's large transcript — is what lets an unchanged
+	// transcript skip the far more expensive tailer parse on restart. Re-run
+	// when the log path changes (a retitled node's slug moves the file).
 	if m.logw == nil || m.logw.Path != logPath {
 		m.logw = &sessionlog.Writer{Path: logPath}
 		st := replayMirrorState(logPath)
-		m.path, m.mirrored, m.lastUsed, m.lastWin = st.path, st.mirrored, st.used, st.win
+		m.path, m.mirrored, m.lastUsed, m.lastWin, m.tsize = st.path, st.mirrored, st.used, st.win, st.size
 		if !st.hasMeta {
 			if err := m.logw.Append(sessionlog.NewMeta(n.ID, n.Agent, n.Model, n.Dir)); err != nil {
 				m.logw = nil // retry next tick; don't advance state past a failed write
 				return
 			}
 		}
+	}
+
+	// Fast path: transcripts are append-only, so a size still equal to the last
+	// mirrored size means there is nothing new — one stat, no tailer, no parse.
+	// This is the restart win: settled nodes (the common case) cost a stat each
+	// instead of a full-file re-parse. A grown or shrunken file falls through to
+	// the full parse below (correctness over the speed-up on change).
+	if fi, err := os.Stat(tpath); err == nil && tpath == m.path && fi.Size() == m.tsize {
+		return
+	}
+
+	tl := a.tailerFor(n)
+	if tl == nil {
+		return
+	}
+	turns := tl.Poll()
+	used, win := tl.Usage()
+	m.sync(n, tl.Path, turns, used, win)
+}
+
+// sync appends any new turns/usage to the log and re-persists the transcript
+// size watermark. The caller has already recovered durable state and confirmed
+// the transcript changed (or is new). Fields are owned by the poller goroutine.
+func (m *mirror) sync(n *Node, tpath string, turns []transcript.Turn, used, win int64) {
+	if tpath == "" {
+		return
 	}
 	// A different transcript file (first link, /clear rollover, corrected
 	// adoption, relink) or a rebuilt one (rotation: the tailer reset and now
@@ -95,7 +119,7 @@ func (m *mirror) sync(logPath string, n *Node, tpath string, turns []transcript.
 		if err := m.logw.Append(sessionlog.NewSource(tpath, sid)); err != nil {
 			return
 		}
-		m.path, m.mirrored = tpath, 0
+		m.path, m.mirrored, m.tsize = tpath, 0, 0
 	}
 	for _, t := range turns[m.mirrored:] {
 		// Role is "user"/"assistant" (transcript.ParseLine yields nothing
@@ -114,6 +138,16 @@ func (m *mirror) sync(logPath string, n *Node, tpath string, turns []transcript.
 		}
 		m.lastUsed, m.lastWin = used, win
 	}
+	// Persist the consumed transcript size so a restart can skip this file if it
+	// has not grown. Only when it advances, so a settled node writes no marks;
+	// stat again here (rather than trust the tailer offset) so the watermark is
+	// exactly what the restart fast path compares against.
+	if fi, err := os.Stat(tpath); err == nil && fi.Size() > m.tsize {
+		if err := m.logw.Append(sessionlog.NewMark(fi.Size())); err != nil {
+			return
+		}
+		m.tsize = fi.Size()
+	}
 }
 
 // mirrorState is what replayMirrorState recovers from an existing log: the
@@ -124,6 +158,7 @@ type mirrorState struct {
 	mirrored int
 	used     int64
 	win      int64
+	size     int64 // transcript byte size at the last mark of the current segment
 }
 
 // replayMirrorState derives the mirror's resume point from the log file —
@@ -141,13 +176,18 @@ func replayMirrorState(logPath string) mirrorState {
 			st.hasMeta = true
 		case "source":
 			if ev.Source != nil {
-				st.path, st.mirrored = ev.Source.Path, 0
+				// a new segment resets the size watermark with the turn count
+				st.path, st.mirrored, st.size = ev.Source.Path, 0, 0
 			}
 		case "user", "assistant":
 			st.mirrored++
 		case "usage":
 			if ev.Usage != nil {
 				st.used, st.win = int64(ev.Usage.Used), int64(ev.Usage.Size)
+			}
+		case "mark":
+			if ev.Mark != nil {
+				st.size = ev.Mark.Off
 			}
 		}
 	}

@@ -28,13 +28,14 @@ import (
 // record types they don't know, so the schema can grow without breaking
 // old binaries or old files.
 type Event struct {
-	T          string       `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "stop" | "error"
+	T          string       `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "error"
 	Time       string       `json:"time"`
 	Text       string       `json:"text,omitempty"`       // user / assistant
 	Tool       *ToolEvent   `json:"tool,omitempty"`       // tool
 	Usage      *UsageEvent  `json:"usage,omitempty"`      // usage
 	Meta       *MetaEvent   `json:"meta,omitempty"`       // meta
 	Source     *SourceEvent `json:"source,omitempty"`     // source
+	Mark       *MarkEvent   `json:"mark,omitempty"`       // mark
 	StopReason string       `json:"stopReason,omitempty"` // stop
 	Error      string       `json:"error,omitempty"`      // error
 }
@@ -94,6 +95,20 @@ type SourceEvent struct {
 // NewSource builds a seam record for a (re)bound transcript file.
 func NewSource(path, sessionID string) Event {
 	return Event{T: "source", Source: &SourceEvent{Path: path, SessionID: sessionID}}
+}
+
+// MarkEvent records how far the transcript mirror has consumed its current
+// source file, as a byte size. It is pure mirror bookkeeping — the restart
+// fast path: an append-only transcript whose size still equals the last mark
+// has nothing new, so it is skipped without re-parsing. It carries no chat
+// content; segment and chat readers ignore it like any unknown record.
+type MarkEvent struct {
+	Off int64 `json:"off"`
+}
+
+// NewMark builds a mirror-watermark record for the given transcript byte size.
+func NewMark(off int64) Event {
+	return Event{T: "mark", Mark: &MarkEvent{Off: off}}
 }
 
 // NewMeta builds the header record for a fresh node log.
