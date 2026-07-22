@@ -134,6 +134,14 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   transition: transform .2s; }
 #mapfullbtn.contract { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { #mapfullbtn { transition: none; } }
+/* fare toggle: a small pill, shown only in full screen (with #mapfullbtn's
+   ≥900px rule); .on marks the active state */
+#farebtn { display: none; font-size: 12px; font-weight: 600; padding: 4px 10px;
+  border-radius: 12px; border: 1px solid var(--hairline); color: var(--dim);
+  background: none; line-height: 1; }
+#farebtn.on { color: var(--work); border-color: var(--work); }
+.fare { font-size: 11px; color: var(--dim); margin-top: 2px; letter-spacing: .2px; }
+.fare .high { color: var(--attn); font-weight: 600; }
 #scrim {
   position: fixed; inset: 0; z-index: 25; background: rgba(0,0,0,.18);
   opacity: 0; pointer-events: none; transition: opacity .3s;
@@ -801,6 +809,7 @@ body.notes-open #notespane { transform: translateX(0); }
   body.map-open #map { display: flex; }
   #chat { flex: 1; min-width: 0; }
   #mapfullbtn { display: flex; }
+  body.map-full #farebtn { display: inline-flex; }
   /* full screen: the map earns the whole width; cards + chat + notes fold away
      (chat is one gesture back). Entered independent of map-open. The opacity
      cross-fade is the whole enter animation (the map is position:static here,
@@ -845,6 +854,7 @@ body.notes-open #notespane { transform: translateX(0); }
       <button class="backbtn" id="mapclose">&#8249; Activities</button>
       <h2>Journeys</h2>
       <span class="spacer"></span>
+      <button id="farebtn" aria-label="toggle fare details">Fare</button>
       <button id="mapfullbtn" aria-label="full-screen map">&#10530;</button>
     </div>
     <div class="tabs" id="maptabs"></div>
@@ -1096,6 +1106,10 @@ function saveMapFold(){
    behind the ≥900px query). Independent of body.map-open — entering restores
    whatever column layout you came from on exit. */
 let mapFull = localStorage.getItem("scimux-mapfull") === "1";
+/* fare toggle (full screen only): adds per-station timing stats — start, last
+   active, elapsed — plus the exact context %. The context arc itself is always
+   drawn for live stations; the fare toggle governs only the text stat line. */
+let fareOn = localStorage.getItem("scimux-fare") === "1";
 /* the wall map's OWN selection, independent of `sel` (the open chat). Entering
    full screen starts clean (content first, HIG deference); a click selects a
    row (highlight + toolbar), a second click on it deselects. "Open chat" is the
@@ -1611,6 +1625,16 @@ function ageText(ms){
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
 }
+/* a duration span (elapsed = last_activity − created_at): coarse two-field
+   readout, distinct from ageText's "how long ago" single field */
+function fmtDur(ms){
+  if (!ms || ms < 0) return "0m";
+  const s = ms / 1000;
+  if (s < 60) return Math.floor(s) + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+}
 /* map station timestamp — locale-ordered day/month + time (was a fixed
    MM-DD slice that read as American to European users); the browser locale
    decides field order (21.07. 14:30 vs 07/21 2:30 PM) */
@@ -2120,8 +2144,25 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current }){
           ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
           <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${esc(l)}"` : ""} style="color:${esc(lm.color(l))}">&#8644; ${esc(lm.name(l))}</span>`).join("")}</div>
+          ${fareLineHTML(n)}
           ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
         </div>`;
+}
+/* the fare stat line (full screen + toggle on): start / last active / elapsed,
+   plus the exact context % (co-encodes the canvas arc; high band warms).
+   elapsed is created_at → last_activity — labelled "elapsed", it includes
+   idle, so it is not "worked". */
+function fareLineHTML(n){
+  if (!mapFull || !fareOn) return "";
+  const parts = [];
+  if (n.created_at) parts.push(`start ${esc(fmtStamp(n.created_at))}`);
+  if (n.last_activity) parts.push(`last ${esc(ageText(n.last_activity))}`);
+  const started = Date.parse(n.created_at);
+  if (n.last_activity && !isNaN(started))
+    parts.push(`elapsed ${esc(fmtDur(n.last_activity - started))}`);
+  if (n.ctx_pct != null)
+    parts.push(`<span class="${n.ctx_pct >= 80 ? "high" : ""}">${n.ctx_pct}% ctx</span>`);
+  return parts.length ? `<div class="fare">${parts.join(" · ")}</div>` : "";
 }
 function renderLaneChips(lm, inGroup, focusLane){
   $("#lanechips").innerHTML = lm.lanes.filter(l => inGroup(l.id)).map(l => `
@@ -2345,10 +2386,14 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
 
   const sig = "wall|" + cols.join(",") + "|" + focusLane + "|" + mapTab + "|" +
-    mapSel + "|" +
+    mapSel + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify(rows.map(n => [n.id, n.created_at, n.title,
       n.description || n.prompt || "", n.rationale, n.agent, n.model,
-      n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention]));
+      n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention,
+      n.ctx_pct == null ? -1 : n.ctx_pct,
+      /* last_activity drives the fare line's "last"/"elapsed"; keep it out of
+         the sig unless fare is on, so an idle map does not repaint each poll */
+      fareOn ? (n.last_activity || 0) : 0]));
   if (sig === mapSig) return;
   mapSig = sig;
 
@@ -2436,6 +2481,19 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
       svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
     else
       svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
+    /* context-usage gauge: a filling arc around the dot for live stations
+       (server projects ctx_pct only for active/quiet). Faint full-circle track
+       + a dasharray fill from 12 o'clock clockwise; warms to --attn past 80%.
+       Suppressed under attention — the attention ring owns this radius. */
+    if (n.ctx_pct != null && !n.attention){
+      const R = 9, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
+      svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none" stroke="${col}" stroke-width="2" opacity="${op * .2}"/>`;
+      if (frac > 0)
+        svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none"
+                stroke="${n.ctx_pct >= 80 ? "var(--attn)" : col}" stroke-width="2"
+                stroke-dasharray="${frac * C} ${C}" stroke-linecap="round"
+                transform="rotate(-90 ${dotX} ${yy})" opacity="${op}"/>`;
+    }
   });
 
   $("#mapwrap").innerHTML = `<div class="lbody wallbody">
@@ -2601,6 +2659,15 @@ $("#mapclose").addEventListener("click", () => setLevel(2));
    the column layout you came from (map-open is untouched, so exit restores it).
    Escape is the keyboard-parity exit (added to the global keydown handler). */
 $("#mapfullbtn").addEventListener("click", () => setMapFull(!mapFull));
+/* fare toggle: shows the per-station timing stats (start/last/elapsed + exact
+   context %). Per-device like mapFull; the context arc is unaffected. */
+$("#farebtn").addEventListener("click", () => {
+  fareOn = !fareOn;
+  if (fareOn) localStorage.setItem("scimux-fare", "1");
+  else localStorage.removeItem("scimux-fare");
+  $("#farebtn").classList.toggle("on", fareOn);
+  mapSig = ""; renderMap();
+});
 
 /* tapping empty space folds back a level — but a scroll-drag (>6px) or a
    tap on anything interactive must never trigger it */
@@ -4214,6 +4281,7 @@ setLevel(level);
 /* restore persisted full-screen (desktop/iPad only; the class is inert on
    phone, but don't apply it there — mapVisible ignores mapFull on phone) */
 if (mapFull && isDesktop()) document.body.classList.add("map-full");
+$("#farebtn").classList.toggle("on", fareOn);
 syncMapFullBtn();
 renderMapTabs();
 loadUI();

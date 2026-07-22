@@ -1354,6 +1354,11 @@ type nodeView struct {
 	Attention     string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
 	HasTranscript bool   `json:"has_transcript"`
 	LastActivity  int64  `json:"last_activity,omitempty"` // unix ms of last pane change
+	// CtxPct is the live context occupancy (segment-scoped, 0-100), projected
+	// onto the list only for live nodes (active/quiet) — the map's at-a-glance
+	// congestion gauge. A pointer so absent (dead node / no usage yet) is
+	// distinct from a genuine 0%.
+	CtxPct *int `json:"ctx_pct,omitempty"`
 }
 
 func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
@@ -1386,6 +1391,23 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.mu.Unlock()
+	// Project live context occupancy onto the list — only for live nodes, and
+	// only after the unlock (a.segment takes a.mu itself, so calling it inside
+	// the loop above would deadlock). segment() is cache-backed, so a quiet
+	// node whose log is unchanged re-parses nothing.
+	for i := range views {
+		v := &views[i]
+		if v.Live == "exited" || v.Live == "unavailable" {
+			continue
+		}
+		seg := a.segment(v.Node)
+		win := ctxWindowFor(seg.Used, seg.Size, v.Node.Model)
+		if win <= 0 {
+			continue // no usage reported yet — no gauge, don't fake a 0
+		}
+		p := ctxPctOf(seg.Used, win)
+		v.CtxPct = &p
+	}
 	body, err := json.Marshal(map[string]any{
 		"nodes": views, "unadopted": unadopted, "sys": sysload(),
 		"socket": a.server.Socket, "hostname": hostname, "version": version,
@@ -2016,6 +2038,32 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 // mechanics stay with the pane and the transcript tailer even though the
 // turns themselves now come from the session log (the mirror keeps the log
 // at most one poll tick behind the transcript).
+// ctxWindowFor returns the context window, estimating it from the model name
+// when the transcript reports usage but not a window size — Claude reports
+// usage but never the window; the "[1m]" marker is the long-context variant.
+func ctxWindowFor(used, window int64, model string) int64 {
+	if used > 0 && window == 0 {
+		if strings.Contains(model, "[1m]") {
+			return 1_000_000
+		}
+		return 200_000
+	}
+	return window
+}
+
+// ctxPctOf is the clamped context-occupancy percent (0 when the window is
+// unknown, so a missing window never fabricates a reading).
+func ctxPctOf(used, window int64) int {
+	if window <= 0 {
+		return 0
+	}
+	p := int(100 * used / window)
+	if p > 100 {
+		p = 100
+	}
+	return p
+}
+
 func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment) {
 	tl := a.tailerFor(n) // may reset staleness on a relink; read flags after
 	a.mu.Lock()
@@ -2072,24 +2120,10 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 		waiting, _ = tl.WaitingOn()
 	}
 	// Usage is segment-scoped: a /clear seam resets the gauge together with
-	// the context it measures. Claude transcripts report usage but never the
-	// window size; estimate it from the model name (the "[1m]" marker is the
-	// long-context variant).
-	ctxUsed, ctxWindow := seg.Used, seg.Size
-	if ctxUsed > 0 && ctxWindow == 0 {
-		if strings.Contains(model, "[1m]") {
-			ctxWindow = 1_000_000
-		} else {
-			ctxWindow = 200_000
-		}
-	}
-	var ctxPct int
-	if ctxWindow > 0 {
-		ctxPct = int(100 * ctxUsed / ctxWindow)
-		if ctxPct > 100 {
-			ctxPct = 100
-		}
-	}
+	// the context it measures.
+	ctxUsed := seg.Used
+	ctxWindow := ctxWindowFor(seg.Used, seg.Size, model)
+	ctxPct := ctxPctOf(ctxUsed, ctxWindow)
 	resp["pending"] = pending
 	resp["live"] = live
 	resp["fallback"] = fallback
@@ -2131,13 +2165,7 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	case lastErr != "":
 		reason = "turn_error"
 	}
-	var ctxPct int
-	if seg.Size > 0 {
-		ctxPct = int(100 * seg.Used / seg.Size)
-		if ctxPct > 100 {
-			ctxPct = 100
-		}
-	}
+	ctxPct := ctxPctOf(seg.Used, seg.Size)
 	resp["pending"] = false
 	resp["live"] = live
 	resp["fallback"] = false
