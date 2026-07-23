@@ -1626,6 +1626,15 @@ const ICON_INTO = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
   <path d="M3 12h12"/>
   <path d="M11 8l4 4-4 4"/>
 </svg>`;
+/* merge glyph: fa-regular fa-code-merge style (git-merge), inlined like the
+   copy icon. Used by the fork action, rotated 180deg by its .rot180 wrapper
+   so the branch reads as merging *out of* the bubble into a new chat. */
+const ICON_MERGE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <circle cx="18" cy="18" r="3"/>
+  <circle cx="6" cy="6" r="3"/>
+  <path d="M6 9v6a6 6 0 0 0 6 6h3"/>
+</svg>`;
 /* comment glyph: fa-regular fa-comment style speech bubble — deliberately not
    a reply arrow, which would collide with the leftward jump-to-source icon */
 const ICON_COMMENT = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
@@ -3637,7 +3646,7 @@ function renderBubbleActions(){
   const row = document.createElement("div");
   row.className = "bubactions";
   row.innerHTML =
-    `<button data-bact="fork"><span class="rot180">${ICON_INTO}</span>fork from here</button>` +
+    `<button data-bact="fork"><span class="rot180">${ICON_MERGE}</span>fork from here</button>` +
     `<button data-bact="desc"><span class="rot90l">${ICON_INTO}</span>use as description</button>` +
     `<button data-bact="note"><span>${ICON_INTO}</span>take a note</button>`;
   turnEl.after(row);
