@@ -2738,7 +2738,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   const nCols = cols.length, nRows = rows.length;
   const colX = c => MX + c * CW;
   const rowY = i => OFF + i * RH + RH / 2;
-  const colsW = MX + Math.max(0, nCols - 1) * CW + MX;
+  let colsW = MX + Math.max(0, nCols - 1) * CW + MX;
   const svgH = OFF + nRows * RH;
   const dimLane = id => focusLane && id !== focusLane;
   const dimNode = n => focusLane && n.lane_id !== focusLane;
@@ -2751,9 +2751,37 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
 
   const rowIdx = {}; rows.forEach((s, i) => rowIdx[stopKey(s)] = i);
 
-  /* lane line spans every dot on its column (single membership now — no lifts) */
+  /* Y-stay branch tracks: a same-lane fork is a parallel thread, so it runs on
+     its OWN vertical track beside the lane, not stacked onto the lane line —
+     the fork curve splits off the parent dot onto the branch track (a true Y).
+     Each branch node gets a distinct slot per lane (creation order) so sibling
+     branches never share a track; gated on the parent existing, same as the
+     crossover glyph (an orphaned fork reverts to riding the lane itself). */
+  const BR = 13;
+  const xOff = {};
+  {
+    const slots = {};
+    stations.slice().sort((a, b) => stampMS(a.created_at) - stampMS(b.created_at))
+      .forEach(n => {
+        const p = n.parent && lm.byId[n.parent];
+        if (p && n.lane_id === p.lane_id && colIdx[n.lane_id] != null){
+          slots[n.lane_id] = (slots[n.lane_id] || 0) + 1;
+          xOff[n.id] = slots[n.lane_id] * BR;
+        }
+      });
+  }
+  const nodeX = n => colX(colIdx[n.lane_id]) + (xOff[n.id] || 0);
+  colsW += Math.max(0, ...Object.values(xOff));
+
+  /* lane line spans every on-track dot on its column; branch nodes span their
+     own offset track instead (single membership now — no lifts) */
   const touch = {}; cols.forEach(id => touch[id] = []);
-  rows.forEach((s, i) => { if (colIdx[s.n.lane_id] != null) touch[s.n.lane_id].push(rowY(i)); });
+  const branchYs = {};
+  rows.forEach((s, i) => {
+    if (colIdx[s.n.lane_id] == null) return;
+    if (xOff[s.n.id]) (branchYs[s.n.id] = branchYs[s.n.id] || []).push(rowY(i));
+    else touch[s.n.lane_id].push(rowY(i));
+  });
 
   let svg = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
@@ -2765,6 +2793,17 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     svg += `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
             stroke="${esc(lm.color(id))}" stroke-width="3.5" stroke-linecap="round"
             opacity="${dimLane(id) ? .22 : 1}"/>`;
+  });
+  /* 1b. Y-stay branch tracks: each same-lane fork's own parallel vertical,
+     same colour as its lane, spanning that node's stops. The fork curve
+     (section 2) joins it to the parent dot. */
+  Object.keys(branchYs).forEach(id => {
+    const ys = branchYs[id], n = lm.byId[id];
+    if (ys.length < 2 || !n) return;
+    const x = nodeX(n);
+    svg += `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
+            stroke="${esc(lm.color(n.lane_id))}" stroke-width="3.5" stroke-linecap="round"
+            opacity="${dimNode(n) ? .22 : 1}"/>`;
   });
   /* 2. fork crossovers: parent gave rise to child (directional, one-way). The
      child is newer, so it sits higher (smaller row). Same lane → Y-stay (a
@@ -2782,9 +2821,13 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     const cc = colIdx[n.lane_id], cp = colIdx[p.lane_id],
       pi = rowIdx[p.id + "#" + parentStopIndex(p, n.created_at)];
     if (cc == null || cp == null || pi == null) return;
-    const xC = colX(cc), yC = rowY(ci), xP = colX(cp), yP = rowY(pi);
+    /* branch-track offsets apply on both ends: a Y-stay child lands on its own
+       parallel track, and a fork OFF a branch node departs from that track */
+    const xC = nodeX(n), yC = rowY(ci), xP = nodeX(p), yP = rowY(pi);
     const ym = (yP + yC) / 2, op = dimNode(n) ? .25 : 1;
-    if (cc === cp){
+    if (xC === xP){
+      /* degenerate fallback (both ends on one x — e.g. a legacy record with no
+         track slot): a small arc so the split stays visible at all */
       const col = esc(lm.color(n.lane_id)), bx = xC + 13;
       svg += `<path d="M ${xC} ${yP} C ${bx} ${ym} ${bx} ${ym} ${xC} ${yC}"
               fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
@@ -2801,9 +2844,9 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   rows.forEach((s, i) => {
     const n = s.n;
     const a = n.lane_id; if (colIdx[a] == null) return;
-    const x = colX(colIdx[a]), yy = rowY(i), col = esc(lm.color(n.lane_id));
+    const yy = rowY(i), col = esc(lm.color(n.lane_id));
     const op = dimNode(n) ? .25 : 1;
-    let dotX = x;
+    let dotX = nodeX(n);
     /* a history stop (segment closed by a later /clear) is a plain small
        dot — the /clear itself is a non-event, the line just continues */
     if (!s.head){
