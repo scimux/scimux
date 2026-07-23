@@ -613,7 +613,10 @@ func (a *app) sessionLogExists(id string) bool {
 func agentCommand(n *Node) (string, error) {
 	switch n.Agent {
 	case "claude":
-		parts := []string{"claude", "--session-id", n.SessionID}
+		parts := []string{"claude", "--session-id", n.SessionID, "--remote-control"}
+		if n.Title != "" {
+			parts = append(parts, shellQuote(n.Title))
+		}
 		if n.Model != "" {
 			parts = append(parts, "--model", shellQuote(n.Model))
 		}

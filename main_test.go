@@ -41,17 +41,17 @@ func TestShellQuote(t *testing.T) {
 }
 
 func TestAgentCommand(t *testing.T) {
-	claude := &Node{Agent: "claude", SessionID: "uuid-1", Model: "opus", Prompt: "hello world"}
+	claude := &Node{Agent: "claude", SessionID: "uuid-1", Title: "My Session", Model: "opus", Prompt: "hello world"}
 	got, err := agentCommand(claude)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != `claude --session-id uuid-1 --model 'opus' 'hello world'` {
+	if got != `claude --session-id uuid-1 --remote-control 'My Session' --model 'opus' 'hello world'` {
 		t.Errorf("claude cmd = %s", got)
 	}
 
 	claudeBare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(claudeBare); got != `claude --session-id uuid-2 'p'` {
+	if got, _ := agentCommand(claudeBare); got != `claude --session-id uuid-2 --remote-control 'p'` {
 		t.Errorf("bare claude cmd = %s", got)
 	}
 
