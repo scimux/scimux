@@ -783,9 +783,11 @@ body.cards-open #msgs { overflow: hidden; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9; }
 .strow .forkcue:hover { opacity: 1; text-decoration: underline; }
 .strow.dimmed { opacity: .32; }
-/* history stop (a /clear-closed segment): dim, minimal — the head row above
-   it carries the thread's full label and status */
-.strow.stoprow { opacity: .55; }
+/* history stop (a /clear-closed segment): secondary, minimal — the head row
+   above it carries the thread's full label and status. Hierarchy comes from
+   colour/weight/size only: --dim is calibrated to WCAG AA, so no opacity on
+   top — stacking both made past stops unreadable, and reading the journey's
+   past is the map's point */
 .strow.stoprow .lbl { color: var(--dim); font-weight: 400; font-size: 13px; }
 .strow.dead .lbl { color: var(--dim); font-weight: 400; }
 .strow.originflash { box-shadow: inset 0 0 0 2px var(--work); border-radius: 6px; }
@@ -3100,6 +3102,15 @@ function select(id){
   setPromptText(localStorage.getItem("scimux-draft:" + sel) || "");
   setAttachAvail(false);   /* hide + until this node's chat load confirms it has started */
   renderStage();   /* show this node's staged attachments (per-node, poll-safe) */
+  /* the selected node's card must be visible: opening an archived chat (map
+     toolbar, notes jump) switches the Activities tab to where the card lives —
+     same visibility rule as the renderCards filter */
+  const seln = nodeById(id);
+  if (seln){
+    const visibleHere = isArchived(seln.id) === (cardTab === "archived") ||
+      (cardTab === "current" && hardAttention(seln));
+    if (!visibleHere) cardTab = isArchived(seln.id) ? "archived" : "current";
+  }
   cardsSig = "";
   renderCards();
   renderChatHead();
