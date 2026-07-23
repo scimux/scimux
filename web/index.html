@@ -345,6 +345,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .card.working { border-color: rgba(var(--work-rgb), .55); box-shadow: 0 0 12px 0 rgba(var(--work-rgb), .28); }
 .card.selected .title { color: var(--work); }
 .card.dead .title { color: var(--dim); }
+.card.closed { border-color: var(--dim); }
+.card.closed .st { color: var(--dim); }
 
 /* agent active: breathing dot on the card, breathing lane dot in the chat head */
 .workdot { display: inline-block; width: 7px; height: 7px; border-radius: 4px;
@@ -492,6 +494,8 @@ body.cards-open #msgs { overflow: hidden; }
   font-size: 13px; margin-top: 5px; }
 .sheet [aria-invalid="true"] { border-color: var(--bad); }
 .sheet .k .opt { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.nc-hint { font-size: 12px; line-height: 1.45; color: var(--dim); margin-top: 6px; }
+.nc-hint b { color: var(--ink); font-weight: 600; }
 
 /* sync state: visible when local UI changes are not yet on the server */
 #syncwarn { color: #FF9500; font-size: 12px; white-space: nowrap; }
@@ -617,6 +621,8 @@ body.cards-open #msgs { overflow: hidden; }
   content: attr(data-placeholder); color: var(--dim); pointer-events: none;
 }
 #promptbar [contenteditable]:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
+#promptbar.closed [contenteditable] { opacity: .55; cursor: not-allowed; }
+#promptbar.closed #sendbtn, #promptbar.closed #attadd { opacity: .4; cursor: not-allowed; }
 #sendbtn {
   width: 38px; height: 38px; border-radius: 19px; flex: none;
   background: var(--work); color: #fff; font-size: 17px;
@@ -773,8 +779,12 @@ body.cards-open #msgs { overflow: hidden; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strow .why { font-size: 11.5px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strow .forkcue { font-size: 11px; font-weight: 600; margin-top: 1px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9; }
+.strow .forkcue:hover { opacity: 1; text-decoration: underline; }
 .strow.dimmed { opacity: .32; }
 .strow.dead .lbl { color: var(--dim); font-weight: 400; }
+.strow.originflash { box-shadow: inset 0 0 0 2px var(--work); border-radius: 6px; }
 /* wall map: persistent selection marker on the open/selected station (the
    stack's :active is only a press-flash — this reads as "you are here") */
 .strow.current { background: var(--th-bg);
@@ -1079,6 +1089,10 @@ body.notes-open #notespane { transform: translateX(0); }
       <select id="nc_lane" data-lane-select></select>
     </div>
     <input id="nc_lane_new" hidden placeholder="New lane name">
+    <div class="nc-hint" id="nc_lane_hint" hidden>The lane is this fork&rsquo;s decision:
+      the <b>parent&rsquo;s lane</b> makes a parallel same-colour thread, a
+      <b>new lane</b> branches a new topic, another <b>existing lane</b> crosses
+      over onto it. To just continue this thread, close and use <b>/clear</b> instead.</div>
   </div>
   <button class="cta" id="nc_start">Start</button>
 </div>
@@ -1824,12 +1838,20 @@ function fmtStamp(iso){
    evidence — worth a look, but never the yellow "needs your decision" alarm */
 const hardAttention = n => n.attention && n.attention !== "inspect";
 function cardState(n){
+  // A deliberately closed thread (/exit) is an immutable dead-end: it takes
+  // precedence over mechanical liveness so a closed-but-adopted or
+  // close-failed thread never renders as working/dead, and never shows a
+  // workdot or attention glow on the card.
+  if (n.ended_at) return "closed";
   if (hardAttention(n)) return "attention";
   if (n.live === "active") return "working";
   if (n.live === "exited" || n.live === "unavailable") return "dead";
   return "idle";
 }
 function statusText(n){
+  // Closed is a deliberate, durable cap — it wins over mechanical liveness and
+  // any lingering attention flag, matching the expanded rail's "Closed" label.
+  if (n.ended_at) return "Closed";
   if (n.attention === "inspect") return "Quiet · check the terminal";
   if (n.attention) return `Waiting · needs your ${n.attention}`;
   if (n.live === "active") return "Running";
@@ -2279,7 +2301,24 @@ function mapVisible(){
 /* one station label row, shared by the stacked map and the full-screen wall
    map. `others` are the interchange lines named by ⇄ chips; `golane` marks them
    jump-to-block targets (stack only — the wall has no per-lane block). */
-function stationRowHTML(n, lm, { padLeft, others, dim, golane, current }){
+/* the stack/phone map cannot draw the wall map's cross-lane crossover curves
+   (its lanes are independent, foldable blocks with no shared column geometry),
+   so fork topology travels as a per-station caption instead: what the fork was,
+   where it came from, tappable to the origin. Colour matches the wall map's
+   crossover rule (y-new → child lane, S/y-stay → origin lane) so the two maps
+   read as one system. Empty for roots and deleted-parent stations. */
+function forkCueHTML(n, lm){
+  const k = forkKind(n);
+  if (!k) return "";
+  const p = nodeById(n.parent);
+  if (!p) return "";
+  const kindLabel = k === "y-stay" ? "parallel thread" : k === "y-new" ? "new topic" : "crossover";
+  const col = esc(lm.color(k === "y-new" ? n.lane_id : p.lane_id));
+  const laneSuffix = p.lane_id !== n.lane_id ? ` &middot; ${esc(lm.name(p.lane_id))}` : "";
+  return `<div class="forkcue" data-goorigin="${esc(p.id)}" style="color:${col}"
+            title="jump to the fork origin">&#9282; ${kindLabel} &middot; from &ldquo;${esc(p.title)}&rdquo;${laneSuffix}</div>`;
+}
+function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork }){
   const when = fmtStamp(n.created_at);
   const desc = n.description || n.prompt || "";   /* same fallback as the card summary */
   /* the selected station keeps only a "you are here" highlight; its actions
@@ -2292,6 +2331,7 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current }){
           ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
           <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${esc(l)}"` : ""} style="color:${esc(lm.color(l))}">&#8644; ${esc(lm.name(l))}</span>`).join("")}</div>
+          ${fork ? forkCueHTML(n, lm) : ""}
           ${fareLineHTML(n)}
           ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
         </div>`;
@@ -2377,13 +2417,44 @@ $("#maptoolbar").addEventListener("click", e => {
 async function exitThread(id){
   const n = nodeById(id);
   if (!n) return;
-  if (!confirm(`Close "${n.title}"? It stays on the map with a dead-end cap, but its running session/link is stopped.`)) return;
+  /* Truth in advertising: scimux never kills a tmux session it only adopted, so
+     for those "close" means "marked closed here", not "process stopped". Owned
+     sessions/links are torn down. The confirm reflects which one this is; the
+     server then reports whether the stop actually happened (adopted / kill
+     failure both keep the agent alive). */
+  const prompt = n.adopted
+    ? `Close "${n.title}"? It stays on the map with a dead-end cap and is marked closed in scimux — but the adopted tmux session keeps running (scimux never kills a session it didn't start).`
+    : `Close "${n.title}"? It stays on the map with a dead-end cap, and its running session/link is stopped.`;
+  if (!confirm(prompt)) return;
   try {
-    const upd = await api(`/api/nodes/${encodeURIComponent(id)}/exit`, { method: "POST" });
-    updateLocalNode(upd);
+    const res = await api(`/api/nodes/${encodeURIComponent(id)}/exit`, { method: "POST" });
+    updateLocalNode(res.node);
     cardsSig = ""; chatSig = ""; mapSig = "";
     renderCards(); renderChatHead(); renderMap();
+    if (res.closed && !res.stopped && res.reason === "kill_failed")
+      alert(`"${n.title}" is marked closed, but scimux could not stop its process — it may still be running.`);
   } catch (err) { alert(err.message); }
+}
+/* forkKind: what a station's fork did, fixed at creation time. null → no parent
+   (a root) or the parent was deleted, so there is no glyph to draw. "y-stay" →
+   forked into the parent's own lane (a parallel same-colour thread). "y-new" →
+   forked into a lane that did NOT yet exist at the split (a topic born here).
+   "s" → forked onto a lane that ALREADY had an older station (a crossover onto
+   an existing line). The server now records this at creation (n.fork_kind), so
+   it is stable under later sibling deletion — a live recomputation would flip a
+   historical S to Y-new the moment the older station that made it a crossover
+   was removed. We still gate on the parent existing (no glyph for an orphaned
+   fork) and fall back to the historical computation for records that predate
+   the stored field. Shared by the wall map (crossover colour) and the stack map
+   (fork cue), so both agree on one source of truth. */
+function forkKind(n){
+  const p = n.parent && nodeById(n.parent);
+  if (!p) return null;
+  if (n.fork_kind) return n.fork_kind;
+  if (n.lane_id === p.lane_id) return "y-stay";
+  const priorInDest = nodes.some(x => x.id !== n.id && x.lane_id === n.lane_id &&
+    (x.created_at || "") < (n.created_at || ""));
+  return priorInDest ? "s" : "y-new";
 }
 function renderMap(){
   if (!mapVisible()) return;
@@ -2455,6 +2526,15 @@ function renderMap(){
       const yy = y(i);
       const op = dimRow(n) ? .25 : 1;
       const dotX = LX;
+      /* fork spur: a short branch tick off the dot marks a fork point, colored
+         by the same rule the wall map uses for the crossover (y-new → own lane,
+         S/y-stay → origin lane). Drawn before the dot so the dot sits on top.
+         The caption below the row (forkCueHTML) carries the origin + kind. */
+      const fk = forkKind(n);
+      if (fk){
+        const fcol = esc(lm.color(fk === "y-new" ? n.lane_id : (nodeById(n.parent)?.lane_id || b.lane.id)));
+        svg += `<path d="M ${dotX} ${yy} q 9 -2 14 -9" fill="none" stroke="${fcol}" stroke-width="2.5" stroke-linecap="round" opacity="${op}"/>`;
+      }
       /* dead-end ⊣ cap: a thread deliberately closed via /exit (co-encoded with
          the card's "Closed" label). A station is on exactly one lane now — no
          interchange ring, no siding/terminus tags. */
@@ -2475,6 +2555,7 @@ function renderMap(){
         others: [],
         dim: dimRow(n),
         golane: true,
+        fork: true,
       })).join("")}
     </div></div>`;
   }).join("") || `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
@@ -2562,7 +2643,6 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   }
 
   const rowIdx = {}; rows.forEach((n, i) => rowIdx[n.id] = i);
-  const laneCount = {}; rows.forEach(n => { laneCount[n.lane_id] = (laneCount[n.lane_id] || 0) + 1; });
 
   /* lane line spans every dot on its column (single membership now — no lifts) */
   const touch = {}; cols.forEach(id => touch[id] = []);
@@ -2597,8 +2677,10 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
       svg += `<path d="M ${xC} ${yP} C ${bx} ${ym} ${bx} ${ym} ${xC} ${yC}"
               fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
     } else {
-      const newLane = (laneCount[n.lane_id] || 0) <= 1;
-      const col = esc(lm.color(newLane ? n.lane_id : p.lane_id));
+      /* y-new (topic born at the split) takes the child lane's colour; an S
+         onto an existing line takes the origin (parent) lane's — classified by
+         history, so it never flips as the destination lane grows (finding #2) */
+      const col = esc(lm.color(forkKind(n) === "y-new" ? n.lane_id : p.lane_id));
       svg += `<path d="M ${xP} ${yP} C ${xP} ${ym} ${xC} ${ym} ${xC} ${yC}"
               fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
     }
@@ -2741,6 +2823,26 @@ function toggleMapFold(id){
   saveMapFold();
   mapSig = ""; renderMap();
 }
+/* jump to a specific station (the fork cue's "from" origin): reveal its block
+   (fall back to "all", unfold if collapsed), scroll it into view, flash it. The
+   stack-map analog of following a crossover curve back to the parent. */
+function gotoStation(id){
+  const n = nodeById(id);
+  if (!n) return;
+  if (mapTab !== "all" &&
+      !document.querySelector(`#mapwrap .strow[data-nid="${CSS.escape(id)}"]`)){
+    mapTab = "all";
+    localStorage.setItem("scimux-maptab", mapTab);
+    mapSig = ""; renderMapTabs(); renderMap();
+  }
+  if (n.lane_id && mapFold.has(n.lane_id)){ mapFold.delete(n.lane_id); saveMapFold(); mapSig = ""; renderMap(); }
+  const row = document.querySelector(`#mapwrap .strow[data-nid="${CSS.escape(id)}"]`);
+  if (row){
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.add("originflash");
+    setTimeout(() => row.classList.remove("originflash"), 1200);
+  }
+}
 function gotoLaneBlock(id){
   /* an interchange chip can point to a lane with no block on the current map
      (an off-map lane on a group tab); jumping there was a silent no-op (R21.3).
@@ -2769,6 +2871,10 @@ $("#mapwrap").addEventListener("click", e => {
   /* the ⇄ chip sits inside a station row — resolve it before the row */
   const g = e.target.closest("[data-golane]");
   if (g){ gotoLaneBlock(g.dataset.golane); return; }
+  /* the fork cue also lives inside a row — jump to the origin, don't open the
+     child's chat */
+  const go = e.target.closest("[data-goorigin]");
+  if (go){ gotoStation(go.dataset.goorigin); return; }
   const r = e.target.closest("[data-nid]");
   if (r){
     /* full screen: click toggles the map's own selection (highlight + toolbar),
@@ -2954,6 +3060,7 @@ function renderChatHead(){
   $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
   $("#chatdot").style.background = n && !hardAttention(n) && !["exited","unavailable"].includes(n.live)
     ? laneColor(n.lane_id) : "";
+  setComposerClosed(!!(n && n.ended_at));
   if (!n) return;
   const saved = Date.now() < chatDetailSavedUntil;
   toggle.innerHTML = editingChatDesc || saved ? ICON_CHECK : (chatDetailsOpen ? ICON_CHEV_UP : ICON_CHEV_DOWN);
@@ -3919,6 +4026,25 @@ function setComposerBusy(active){
   btn.title = composerBusy ? "stop agent" : "send";
 }
 setComposerBusy(false);
+/* A closed thread (/exit) is an immutable dead-end: the server refuses sends,
+   uploads, interrupts, and keys with 409, so the composer disables itself and
+   says so rather than letting the user type a turn that can only bounce.
+   Pick-up is via fork. Poll-safe: DOM churns only on the closed/open edge, and
+   the contenteditable is never rebuilt, so a draft on a still-open node is
+   never clobbered (invariant). */
+let composerClosed = null;
+function setComposerClosed(closed){
+  if (composerClosed === !!closed) return;
+  composerClosed = !!closed;
+  const bar = $("#promptbar"), prompt = $("#prompt");
+  bar.classList.toggle("closed", composerClosed);
+  prompt.setAttribute("contenteditable", composerClosed ? "false" : "true");
+  prompt.dataset.placeholder = composerClosed
+    ? "Thread closed — fork to continue" : "Message the agent…";
+  $("#sendbtn").disabled = composerClosed;
+  $("#attadd").disabled = composerClosed;
+}
+setComposerClosed(false);
 $("#prompt").addEventListener("input", e => {
   resizePrompt();
   if (sel) localStorage.setItem("scimux-draft:" + sel, promptText());
@@ -4076,6 +4202,7 @@ _pbar.addEventListener("drop", e => {
 async function sendPrompt(){
   const text = promptText().trim();
   if (!sel) return;
+  if (nodeById(sel)?.ended_at) return;   /* closed thread: server would 409 */
   const dest = sel;   /* capture: selection may change while the send is in flight */
   const items = (stage[dest] || []).slice();
   /* wait out any in-flight uploads so their refs ride this turn */
@@ -4351,15 +4478,20 @@ function prepareLaunchConfig(){
   }
 }
 function prepareNewActivityLane(){
-  const inherited = nodeById(ncParent)?.lane_id || "";
-  /* The lane is always EDITABLE now — for a fork it is *the* decision that
-     shapes the map: leave it on the parent's topic (Y-stay, a parallel same-
-     colour thread), type a new name (Y-new, a new topic born at the split), or
-     pick another existing topic (S, a crossover onto that line). It is merely
-     preselected to the inherited/scoped lane, never locked. */
-  fillLaneSelect($("#nc_lane"), inherited || laneFilter, true, false);
+  const forking = !!ncParent;
+  /* The lane is always EDITABLE — for a fork it is *the* decision that shapes
+     the map: leave it on the parent's topic (Y-stay, a parallel same-colour
+     thread), type a new name (Y-new, a new topic born at the split), or pick
+     another existing topic (S, a crossover onto that line). A fork gets NO
+     preselection so the choice is conscious (a preselected inherited lane reads
+     as "continue this thread", but it actually forks a parallel thread — that's
+     what /clear is for); a plain new activity keeps the scoped preselect. */
+  fillLaneSelect($("#nc_lane"), forking ? "" : laneFilter, true, false);
+  const hint = $("#nc_lane_hint");
+  if (hint) hint.hidden = !forking;
   $("#nc_lane_new").value = "";
   clearFieldError($("#nc_lane_new"));
+  clearFieldError($("#nc_lane"));
   syncLanePicker($("#nc_lane"));
 }
 $("#plusbtn").addEventListener("click", () => {
@@ -4406,7 +4538,7 @@ function setNewActivitySubmitting(active){
 }
 $("#nc_start").addEventListener("click", async () => {
   if (newActivitySubmitting) return;
-  clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir"));
+  clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir")); clearFieldError($("#nc_lane"));
   const title = $("#nc_title").value.trim();
   const description = $("#nc_prompt").value.trim();
   /* edit mode: PATCH title + description on the existing node, stay put */
@@ -4438,6 +4570,14 @@ $("#nc_start").addEventListener("click", async () => {
     fieldError($("#nc_lane_new"), laneChoice.error);
     $("#nc_lane_new").focus();
     $("#nc_lane_new").scrollIntoView({ block: "center" });
+    return;
+  }
+  /* A fork must land on a lane — that choice is what makes it Y-stay / Y-new /
+     S on the map, so "unset" is not a valid fork (unlike a plain activity). */
+  if (ncParent && !laneChoice.laneID){
+    fieldError($("#nc_lane"), "Pick a lane for this fork (or use /clear to continue the thread).");
+    $("#nc_lane").focus();
+    $("#nc_lane").scrollIntoView({ block: "center" });
     return;
   }
   const payload = {

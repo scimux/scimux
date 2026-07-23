@@ -152,6 +152,95 @@ func TestEmbeddedAgentAssetsServe(t *testing.T) {
 	}
 }
 
+// Fork kind is fixed at creation time (finding #2): a fork into a lane that did
+// not yet exist is Y-new forever, and must NOT redraw as an origin-coloured S
+// once that lane later gathers more stations. Execute forkKind under node
+// against synthetic node sets to lock the chronological (not population-based)
+// classification.
+func TestWebForkKindStableAcrossLaneGrowth(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "function forkKind(n){")
+	if start < 0 {
+		t.Fatal("could not locate forkKind in web/index.html")
+	}
+	end := strings.Index(html[start:], "function renderMap(){")
+	if end < 0 {
+		t.Fatal("could not locate the end of forkKind in web/index.html")
+	}
+	script := `let nodes = [];
+function nodeById(id){ return nodes.find(n => n.id === id); }
+` + html[start:start+end] + `
+const assert = require("assert");
+// Y-new: destination lane had no station at fork time; a LATER station in that
+// lane must not flip the historical fork to S.
+nodes = [
+  {id:"p",     lane_id:"lane-a", created_at:"2026-01-01T00:00:00Z"},
+  {id:"c",     lane_id:"lane-b", parent:"p", created_at:"2026-01-02T00:00:00Z"},
+  {id:"later", lane_id:"lane-b", created_at:"2026-01-03T00:00:00Z"},
+];
+assert.strictEqual(forkKind(nodeById("c")), "y-new", "grown lane must stay y-new");
+// S: destination lane already had an older station when the child forked in.
+nodes = [
+  {id:"a0", lane_id:"lane-b", created_at:"2026-01-01T00:00:00Z"},
+  {id:"p",  lane_id:"lane-a", created_at:"2026-01-02T00:00:00Z"},
+  {id:"c",  lane_id:"lane-b", parent:"p", created_at:"2026-01-03T00:00:00Z"},
+];
+assert.strictEqual(forkKind(nodeById("c")), "s", "prior station in dest lane is a crossover");
+// Y-stay: same lane as parent.
+nodes = [
+  {id:"p", lane_id:"lane-a", created_at:"2026-01-01T00:00:00Z"},
+  {id:"c", lane_id:"lane-a", parent:"p", created_at:"2026-01-02T00:00:00Z"},
+];
+assert.strictEqual(forkKind(nodeById("c")), "y-stay", "same-lane fork is y-stay");
+// Root and deleted-parent: no glyph.
+assert.strictEqual(forkKind({id:"r", lane_id:"lane-a"}), null, "root has no fork");
+nodes = [{id:"c", lane_id:"lane-b", parent:"ghost", created_at:"2026-01-02T00:00:00Z"}];
+assert.strictEqual(forkKind(nodeById("c")), null, "deleted parent has no glyph");
+`
+	f := filepath.Join(t.TempDir(), "forkkind.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("forkKind classification broken: %v\n%s", err, out)
+	}
+}
+
+// The stack/phone map is the primary map on small screens, so it must keep
+// carrying fork topology (finding #3) even though it cannot draw the wall map's
+// crossover curves: a per-station fork cue, its dot spur, and a tap-to-origin
+// jump. Guard the wiring so it cannot silently regress while the wall map stays
+// correct — and guard that the old population-based classifier is gone.
+func TestWebStackMapKeepsForkCues(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		"function forkCueHTML(",   // the caption builder
+		"fork: true,",             // stack renderer opts in
+		"data-goorigin=",          // tap-to-origin target
+		"function gotoStation(",   // …and its handler
+		`forkKind(n) === "y-new"`, // wall map classifies by history
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("stack fork-topology wiring missing: %q", want)
+		}
+	}
+	if strings.Contains(html, "laneCount[n.lane_id]") {
+		t.Error("old population-based Y-new/S classifier still present; must be replaced by forkKind")
+	}
+}
+
 func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {

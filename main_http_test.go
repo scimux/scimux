@@ -347,6 +347,77 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 	}
 }
 
+// A create request supplies launch config only; identity, adoption, the ended
+// cap, and the linked transcript are server-owned and must never be trusted
+// from the body (adopted → an owned session is never killed; ended_at → a node
+// born closed; transcript → an arbitrary mirror bind with no pathClaimed check).
+func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	body := `{"title":"Sneaky","agent":"claude","dir":"` + a.home + `",` +
+		`"id":"pwned","adopted":true,"ended_at":"2020-01-01T00:00:00Z",` +
+		`"transcript":"/etc/shadow","session_id":"forged","fork_kind":"s"}`
+	rec := newNode(a, body)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	if len(a.nodes) != 1 {
+		t.Fatalf("want 1 node, got %d", len(a.nodes))
+	}
+	n := a.nodes[0]
+	if n.Adopted {
+		t.Error("adopted trusted from body — an owned session would then never be killed")
+	}
+	if n.EndedAt != "" {
+		t.Errorf("ended_at trusted from body: %q (node born closed)", n.EndedAt)
+	}
+	if n.Transcript != "" {
+		t.Errorf("transcript trusted from body: %q (arbitrary mirror bind)", n.Transcript)
+	}
+	if n.ID == "pwned" {
+		t.Error("id trusted from body instead of minted server-side")
+	}
+	if n.ForkKind != "" {
+		t.Errorf("fork_kind trusted from body: %q (a root has no fork)", n.ForkKind)
+	}
+	// A claude node's session id is minted server-side, never the forged value.
+	if n.SessionID == "forged" {
+		t.Error("session_id trusted from body")
+	}
+}
+
+// forkKind is fixed at creation so the map cannot reclassify it later when a
+// sibling is deleted: same lane as the parent → y-stay, a lane that already
+// holds a station → s (crossover), an unused lane → y-new.
+func TestForkKindRecordedAtCreation(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if rec := newNode(a, `{"title":"Root","agent":"claude","dir":"`+a.home+`","lane_id":"topic-x"}`); rec.Code != 200 {
+		t.Fatalf("root: %d %s", rec.Code, rec.Body.String())
+	}
+	root := a.nodes[0]
+	if root.ForkKind != "" {
+		t.Errorf("root fork_kind = %q, want empty (a root has no fork)", root.ForkKind)
+	}
+	fork := func(lane string) *Node {
+		body := `{"title":"F","agent":"claude","dir":"` + a.home + `","parent":"` + root.ID + `","lane_id":"` + lane + `"}`
+		rec := newNode(a, body)
+		if rec.Code != 200 {
+			t.Fatalf("fork into %q: %d %s", lane, rec.Code, rec.Body.String())
+		}
+		return a.nodes[len(a.nodes)-1]
+	}
+	if k := fork("topic-x").ForkKind; k != "y-stay" {
+		t.Errorf("fork into the parent's lane: fork_kind = %q, want y-stay", k)
+	}
+	if k := fork("topic-y").ForkKind; k != "y-new" {
+		t.Errorf("fork into an unused lane: fork_kind = %q, want y-new", k)
+	}
+	if k := fork("topic-y").ForkKind; k != "s" {
+		t.Errorf("fork into a lane that now holds a station: fork_kind = %q, want s", k)
+	}
+}
+
 func TestHandleNodeLaneAssignmentIsOneWay(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"T": true}}
 	a := newTestApp(t, f)
@@ -452,6 +523,120 @@ func TestHandleExitNodeMarksEndedAndKeepsNode(t *testing.T) {
 	if up2.Code != 200 || a.byID[id].EndedAt != first {
 		t.Fatalf("second exit: code = %d ended_at = %q want %q", up2.Code, a.byID[id].EndedAt, first)
 	}
+}
+
+// /exit must tell the truth about whether it actually stopped the process, so
+// the UI never claims a stop it did not deliver: an owned live tmux session is
+// killed (stopped), an adopted one is deliberately left running, and a failed
+// kill is reported as not stopped. All three still mark the node closed.
+func TestHandleExitNodeReportsProcessOutcome(t *testing.T) {
+	exit := func(a *app, id string) (closed, stopped bool, reason string) {
+		req := httptest.NewRequest("POST", "/api/nodes/"+id+"/exit", nil)
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleExitNode(up, req)
+		if up.Code != 200 {
+			t.Fatalf("exit: code = %d body %q", up.Code, up.Body.String())
+		}
+		var body struct {
+			Closed  bool   `json:"closed"`
+			Stopped bool   `json:"stopped"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal(up.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Closed, body.Stopped, body.Reason
+	}
+	t.Run("owned live session is killed", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{}}
+		a := newTestApp(t, f)
+		newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+		id := a.nodes[0].ID
+		f.alive[id] = true
+		closed, stopped, reason := exit(a, id)
+		if !closed || !stopped || reason != "" {
+			t.Fatalf("owned: closed=%v stopped=%v reason=%q, want closed stopped no-reason", closed, stopped, reason)
+		}
+		if !containsSub(f.subcommands(), "kill-session") {
+			t.Fatal("owned live session was not killed")
+		}
+	})
+	t.Run("adopted session is left running", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{}}
+		a := newTestApp(t, f)
+		newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+		id := a.nodes[0].ID
+		a.byID[id].Adopted = true
+		f.alive[id] = true
+		closed, stopped, reason := exit(a, id)
+		if !closed || stopped || reason != "adopted" {
+			t.Fatalf("adopted: closed=%v stopped=%v reason=%q, want closed not-stopped adopted", closed, stopped, reason)
+		}
+		if containsSub(f.subcommands(), "kill-session") {
+			t.Fatal("adopted session was killed; it must be left running")
+		}
+	})
+	t.Run("failed kill is reported not stopped", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{}, killErr: true}
+		a := newTestApp(t, f)
+		newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+		id := a.nodes[0].ID
+		f.alive[id] = true
+		closed, stopped, reason := exit(a, id)
+		if !closed || stopped || reason != "kill_failed" {
+			t.Fatalf("kill fail: closed=%v stopped=%v reason=%q, want closed not-stopped kill_failed", closed, stopped, reason)
+		}
+	})
+}
+
+// An ended thread (/exit) is an immutable dead-end: every mutation endpoint
+// must refuse it with 409 so a "Closed" thread — including an adopted one whose
+// process outlived the cap — can never accept new history. Pick-up is via fork.
+func TestEndedNodeRejectsMutations(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{}, capture: "Approve? (y/n)\n"}
+	a := newTestApp(t, f)
+	if rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`); rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	a.byID[id].EndedAt = "2026-07-23T00:00:00Z"
+
+	post := func(path, body string, h http.HandlerFunc) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/api/nodes/"+id+path, strings.NewReader(body))
+		r.SetPathValue("id", id)
+		h(w, r)
+		return w
+	}
+	cases := []struct {
+		name, path, body string
+		h                http.HandlerFunc
+	}{
+		{"send", "/send", `{"text":"hi"}`, a.handleSend},
+		{"clear", "/send", `{"text":"/clear"}`, a.handleSend},
+		{"upload", "/attachments", "", a.handleUploadAttachments},
+		{"interrupt", "/send/interrupt", "", a.handleSendInterrupt},
+		{"key", "/key", `{"key":"y"}`, a.handleKey},
+	}
+	for _, c := range cases {
+		if w := post(c.path, c.body, c.h); w.Code != http.StatusConflict {
+			t.Errorf("%s on ended node: code = %d, want 409 (body %q)", c.name, w.Code, w.Body.String())
+		}
+	}
+	// The guard short-circuits before any tmux side effect.
+	if subs := f.subcommands(); containsSub(subs, "send-keys") || containsSub(subs, "paste-buffer") {
+		t.Fatalf("ended node produced tmux mutations: %v", subs)
+	}
+}
+
+func containsSub(subs []string, want string) bool {
+	for _, s := range subs {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandleNewNodeInheritsParentLane(t *testing.T) {
@@ -1519,8 +1704,8 @@ func TestHandleSendCodexClear(t *testing.T) {
 		t.Fatal("no session log events")
 	}
 	last := evs[len(evs)-1]
-	if last.T != "source" || last.Source == nil || last.Source.Path != "" {
-		t.Fatalf("last event = %+v, want path-less source seam", last)
+	if last.T != "source" || last.Source == nil || last.Source.Path != "" || last.Source.Reason != "clear" {
+		t.Fatalf("last event = %+v, want path-less clear-tagged source seam", last)
 	}
 
 	chatReq := httptest.NewRequest("GET", "/api/nodes/"+n.ID+"/chat", nil)
@@ -1571,6 +1756,12 @@ func TestRetireTranscriptAppendsClearSeam(t *testing.T) {
 	if len(seg.Turns) != 0 || seg.PriorTurns != 2 || seg.StartTime == "" {
 		t.Fatalf("post-retire segment: turns=%d prior=%d start=%q",
 			len(seg.Turns), seg.PriorTurns, seg.StartTime)
+	}
+	// The retire seam is a real /clear page-turn, tagged so a chain renderer
+	// splits a stop here; Claude has no fresh session id yet, so it is path-less.
+	evs := sessionlog.ReadEvents(w.Path)
+	if last := evs[len(evs)-1]; last.T != "source" || last.Source == nil || last.Source.Reason != "clear" || last.Source.Path != "" {
+		t.Fatalf("retire seam = %+v, want path-less reason=clear source", last.Source)
 	}
 	// A node that never mirrored has no page to turn: no log file appears.
 	n2 := &Node{ID: "c2", Agent: "claude", Transcript: "/tmp/y.jsonl", SessionID: "s2"}

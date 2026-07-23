@@ -55,6 +55,14 @@ type Node struct {
 	Description string `json:"description,omitempty"` // card/map description; defaults to Prompt
 	Rationale   string `json:"rationale,omitempty"`   // why this fork exists (decision evidence)
 	LaneID      string `json:"lane_id,omitempty"`     // immutable topic/lane assignment; empty means unassigned
+	// ForkKind records what a fork did relative to its destination lane, fixed
+	// at creation ("y-stay" | "y-new" | "s"; empty for a root). It is stored
+	// rather than recomputed so a later sibling deletion cannot silently
+	// reclassify the fork on the map (a live recomputation flips S→Y-new when
+	// the older station that made it a crossover is removed). Empty on records
+	// that predate the field; the client falls back to the historical
+	// computation for those.
+	ForkKind string `json:"fork_kind,omitempty"`
 	// EndedAt marks a thread the user deliberately closed via /exit (the "ended"
 	// head state): a dead-end ⊣ cap on the map, kept visible and rideable. This
 	// is a scimux decision, distinct from a *mechanical* process exit — a crash
@@ -163,7 +171,13 @@ type app struct {
 	// process-local write point so concurrent audit/transcript/delete records
 	// cannot interleave a partial line, and pairs each append with an fsync —
 	// these records are the durable truth the supervisor replays and audits.
-	storeMu   sync.Mutex
+	storeMu sync.Mutex
+	// uiMu serializes the read-modify-write of the UI-state file (ui.json),
+	// independent of a.mu. The revision check plus the atomic tmp-write+rename
+	// must be one critical section, but they are pure file I/O over a private
+	// document — holding the app-wide a.mu across two syscalls would stall the
+	// poller and every other handler for a write that touches no shared state.
+	uiMu      sync.Mutex
 	server    *tmuxsession.Server
 	acp       acpManager
 	codex     codexManager
@@ -677,6 +691,25 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		// when neither the request nor a parent pinned a transport.
 		if n.Transport == "" {
 			n.Transport = p.transport()
+		}
+		// Classify the fork now, against the destination lane's current
+		// membership, so the map never re-derives it from mutable sibling
+		// existence. y-stay: same lane as the parent (a parallel same-colour
+		// thread). s: the destination lane already holds a station (this fork
+		// crosses onto an existing line). y-new: a lane born at this split.
+		// Every existing node in the lane is older than this brand-new one, so
+		// "any prior member" is exactly the historical "older station existed".
+		switch {
+		case n.LaneID == p.LaneID:
+			n.ForkKind = "y-stay"
+		default:
+			n.ForkKind = "y-new"
+			for _, o := range a.nodes {
+				if o.ID != n.ID && o.LaneID == n.LaneID {
+					n.ForkKind = "s"
+					break
+				}
+			}
 		}
 	}
 	if n.Agent == "" {
@@ -1741,6 +1774,16 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
+	// Scrub every server-owned field before validation: a create request only
+	// supplies launch config (title/description/prompt/agent/model/effort/dir/
+	// parent/lane_id/rationale). Identity, adoption, liveness, and the linked
+	// transcript are all minted or managed by the server, and trusting them from
+	// the body would let a client be born "Closed" (ended_at), keep an owned
+	// tmux session alive forever (adopted → closeOwned never kills it), or bind
+	// the mirror to an arbitrary transcript path (no pathClaimed check on
+	// create, unlike handleAdopt). The UI never sends these; this closes the
+	// gap for any other client. ForkKind is recomputed in resolveNode.
+	n.ID, n.SessionID, n.Transcript, n.CreatedAt, n.EndedAt, n.ForkKind, n.Adopted = "", "", "", "", "", "", false
 	// Resolve and validate the launch configuration first: no request that
 	// fails validation (empty prompt, unknown parent, bad agent or dir) ever
 	// reaches createNode, and the transport decision reads the *resolved* agent
@@ -1842,7 +1885,8 @@ func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	if cur.EndedAt == "" {
+	firstExit := cur.EndedAt == ""
+	if firstExit {
 		next := *cur
 		next.EndedAt = time.Now().UTC().Format(time.RFC3339)
 		if err := a.appendRecord(storeRecord{Type: "node", Node: &next}); err != nil {
@@ -1853,13 +1897,38 @@ func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
 		*cur = next
 	}
 	a.mu.Unlock()
-	// Best-effort process teardown: the thread is already marked ended in the
-	// durable store, so a failure to reach the agent must not un-end it — the
-	// node stays visibly closed regardless.
-	if err := a.closeOwned(n); err != nil {
-		fmt.Fprintf(os.Stderr, "scimux: exit of %s marked ended but failed to close the agent: %v\n", n.ID, err)
+	// The response reports whether the underlying process actually stopped so the
+	// UI can tell the truth instead of promising a stop it may not have
+	// delivered: an adopted tmux session is deliberately left running
+	// (closeOwned returns nil without killing it), and a kill can fail. In both
+	// cases the node is "closed in scimux" but the agent is still alive.
+	stopped, reason := true, ""
+	if firstExit {
+		// Best-effort process teardown, once. The thread is already marked ended
+		// in the durable store, so a failure to reach the agent must not un-end
+		// it — the node stays visibly closed regardless.
+		if err := a.closeOwned(n); err != nil {
+			stopped, reason = false, "kill_failed"
+			fmt.Fprintf(os.Stderr, "scimux: exit of %s marked ended but failed to close the agent: %v\n", n.ID, err)
+		} else if a.proc(n) == nil && n.Adopted {
+			stopped, reason = false, "adopted"
+		}
+	} else {
+		// Idempotent re-exit (only reachable by a direct API call — the UI hides
+		// the control once ended): do not tear the process down a second time.
+		// Report the agent's current standing from mechanical liveness instead of
+		// attempting a fresh kill that a first, already-successful exit made moot.
+		a.mu.Lock()
+		live := a.live[n.ID]
+		a.mu.Unlock()
+		switch {
+		case a.proc(n) == nil && n.Adopted:
+			stopped, reason = false, "adopted"
+		case live == "active" || live == "quiet":
+			stopped, reason = false, "running"
+		}
 	}
-	writeJSON(w, *n)
+	writeJSON(w, map[string]any{"node": *n, "closed": true, "stopped": stopped, "reason": reason})
 }
 
 func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
@@ -2092,6 +2161,9 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	if a.refuseEnded(w, n) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, attachUploadMax)
 	if err := r.ParseMultipartForm(attachUploadMax); err != nil {
 		var tooBig *http.MaxBytesError
@@ -2209,6 +2281,24 @@ func (a *app) node(r *http.Request) (*Node, bool) {
 	return n, ok
 }
 
+// refuseEnded reports whether the node is a deliberately closed ("ended")
+// thread and, if so, writes a 409. /exit makes the ended head an immutable
+// dead-end cap; every mutation endpoint (send, /clear, upload, interrupt,
+// remote key) refuses it so a "Closed" thread can never accept new history —
+// including an adopted thread whose process outlived the cap, or one whose
+// teardown failed. Read paths (peek, chat) and the allowed post-end
+// operations (fork, edit, archive, delete) are deliberately not guarded:
+// pick-up is via fork, not by reopening the dead-end.
+func (a *app) refuseEnded(w http.ResponseWriter, n *Node) bool {
+	a.mu.Lock()
+	ended := n.EndedAt != ""
+	a.mu.Unlock()
+	if ended {
+		http.Error(w, "thread is closed; fork to continue", http.StatusConflict)
+	}
+	return ended
+}
+
 // handleSend delivers a web prompt and reports what the delivery evidence
 // supports: "acknowledged" when the pane visibly reacted to Enter or a new
 // transcript turn appeared, "unconfirmed" otherwise. {ok:"sent"} alone would
@@ -2220,6 +2310,9 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if a.refuseEnded(w, n) {
 		return
 	}
 	var body struct {
@@ -2392,7 +2485,7 @@ func (a *app) retireTranscript(n *Node) {
 		logPath := a.sessionLogPath(n.ID)
 		if _, err := os.Stat(logPath); err == nil {
 			w := &sessionlog.Writer{Path: logPath}
-			if err := w.Append(sessionlog.NewClearSource()); err != nil {
+			if err := w.Append(sessionlog.NewClearSource("")); err != nil {
 				fmt.Fprintf(os.Stderr, "scimux: clear seam for %s: %v\n", n.ID, err)
 			}
 		}
@@ -2423,6 +2516,9 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if a.refuseEnded(w, n) {
 		return
 	}
 	if pm := a.proc(n); pm != nil {
@@ -2703,6 +2799,9 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	if a.refuseEnded(w, n) {
+		return
+	}
 	var body struct{ Key string }
 	if err := decodeJSON(w, r, &body); err != nil || body.Key == "" {
 		http.Error(w, "bad request", 400)
@@ -2889,7 +2988,7 @@ func uiETag(b []byte) string {
 // readUILocked returns the stored UI document, "{}" when none exists yet.
 // Any error other than not-exist is a real storage failure the client must
 // see — reporting it as an empty document would invite the next mutation to
-// overwrite whatever the unreadable file still holds. Callers hold a.mu.
+// overwrite whatever the unreadable file still holds. Callers hold a.uiMu.
 func (a *app) readUILocked() ([]byte, error) {
 	b, err := os.ReadFile(a.uiPath)
 	if os.IsNotExist(err) {
@@ -2905,9 +3004,9 @@ func (a *app) readUILocked() ([]byte, error) {
 }
 
 func (a *app) handleUIGet(w http.ResponseWriter, r *http.Request) {
-	a.mu.Lock()
+	a.uiMu.Lock()
 	b, err := a.readUILocked()
-	a.mu.Unlock()
+	a.uiMu.Unlock()
 	if err != nil {
 		http.Error(w, "read ui state: "+err.Error(), 500)
 		return
@@ -2941,11 +3040,12 @@ func (a *app) handleUIPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ui writes require If-Match (use * to bootstrap)", 428)
 		return
 	}
-	// Atomic replace under the lock: a crash mid-write must never leave a
-	// truncated file, concurrent PUTs must not interleave tmp files, and the
-	// revision check must be atomic with the write it guards.
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// Atomic replace under the UI lock (not a.mu): a crash mid-write must never
+	// leave a truncated file, concurrent PUTs must not interleave tmp files, and
+	// the revision check must be atomic with the write it guards — but this is
+	// pure I/O over a private document, so it must not stall the poller.
+	a.uiMu.Lock()
+	defer a.uiMu.Unlock()
 	cur, err := a.readUILocked()
 	if err != nil {
 		http.Error(w, "read ui state: "+err.Error(), 500)
@@ -2955,7 +3055,10 @@ func (a *app) handleUIPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ui state changed since this revision was read", 409)
 		return
 	}
-	// Private notes live here: owner-only permissions.
+	// Private notes live here: owner-only permissions. The tmp write + rename is
+	// atomic for content (rename swaps the inode), which is the guarantee this
+	// per-device UI blob needs; unlike the audit store it is not fsync'd — a lost
+	// note after a host crash is recoverable, a corrupted nodes.jsonl is not.
 	tmp := a.uiPath + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		http.Error(w, err.Error(), 500)

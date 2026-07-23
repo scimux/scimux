@@ -30,12 +30,14 @@ The polling snapshot the UI runs on. Returns:
 ```
 
 Each entry is the stored node (id, title, prompt, description, rationale,
-lane_id, agent, model, effort, dir, transport, created_at, …) plus the
-mechanical view: `live` is `active | quiet | exited | unavailable`,
+lane_id, agent, model, effort, dir, transport, created_at, `ended_at`, …) plus
+the mechanical view: `live` is `active | quiet | exited | unavailable`,
 `attention` (when set) is `approval | question | inspect`, and
-`last_activity` is the last pane change in Unix milliseconds. `unadopted`
-lists tmux sessions on scimux's socket that no node accounts for —
-candidates for `POST /api/adopt`.
+`last_activity` is the last pane change in Unix milliseconds. `ended_at` (RFC
+3339, present only once set) marks a thread deliberately closed via
+`POST …/exit`: the node stays visible with a dead-end cap on the map rather
+than being deleted. `unadopted` lists tmux sessions on scimux's socket that no
+node accounts for — candidates for `POST /api/adopt`.
 
 ### `GET /api/nodes/{id}/chat`
 
@@ -67,11 +69,34 @@ optionally `title`, `model`, `effort`, `dir`, `description`, `lane_id`, and
 `parent` + `rationale` for a fork. Returns the created node. Validation
 failures (empty prompt, unknown parent, bad agent or dir) are 4xx.
 
+Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
+`transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
+present in the body — they are minted or derived server-side. Adopting an
+existing tmux session is a separate endpoint (`POST /api/adopt`).
+
 ### `PATCH /api/nodes/{id}`
 
 Body: any of `title`, `description`, `lane_id`. Title must stay non-empty.
 Lane assignment is write-once: setting it on an unassigned node succeeds,
 changing an existing assignment is `409`.
+
+### `POST /api/nodes/{id}/exit`
+
+Close a thread deliberately: stamps `ended_at` durably and keeps the node
+visible on the map with a dead-end cap (unlike `DELETE`, which removes it).
+Idempotent — a second call keeps the original stamp. The `ended_at` record is
+persisted first, then the owned process is stopped best-effort, so a failure to
+reach the agent never un-ends the node.
+
+Returns `{"node": <node>, "closed": true, "stopped": <bool>, "reason": <string>}`.
+`stopped` reports whether the underlying process was actually stopped: it is
+`false` with `reason:"adopted"` for an adopted tmux session (scimux never kills
+a session it did not start — the agent keeps running), and `false` with
+`reason:"kill_failed"` when teardown was attempted but errored. Owned sessions
+and structured-transport links are stopped (`stopped:true`, empty `reason`).
+`/exit` is idempotent: a repeat call on an already-closed node does not tear the
+process down again and reports its current standing (`reason:"running"` when the
+agent is still live), so it never issues a second kill.
 
 ### `DELETE /api/nodes/{id}`
 

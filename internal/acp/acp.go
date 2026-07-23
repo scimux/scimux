@@ -261,7 +261,7 @@ func (m *Manager) Clear(nodeID string) error {
 	// leaves the old session fully intact.
 	old.setRetired(true)
 	// Seam before the visible flip — record first, publish second.
-	if err := s.logw.Append(sessionlog.NewSource("", string(resp.SessionId))); err != nil {
+	if err := s.logw.Append(sessionlog.NewClearSource(string(resp.SessionId))); err != nil {
 		old.setRetired(false)
 		killAndReap(proc)
 		old.abortTurn()

@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -108,8 +109,12 @@ func NewSource(path, sessionID string) Event {
 
 // NewClearSource builds the path-less "detached" seam appended when a /clear
 // turns the page, tagged so a chain renderer can tell it from a relink/rotation.
-func NewClearSource() Event {
-	return Event{T: "source", Source: &SourceEvent{Reason: "clear"}}
+// Claude's rollover has no new session id yet at retire time and passes ""; the
+// structured transports (ACP, codex) already hold the fresh session/thread id
+// from the protocol call and pass it, so their clear seams are both tagged AND
+// carry the new session — the seam stays uniform across every transport.
+func NewClearSource(sessionID string) Event {
+	return Event{T: "source", Source: &SourceEvent{SessionID: sessionID, Reason: "clear"}}
 }
 
 // MarkEvent records how far the transcript mirror has consumed its current
@@ -356,6 +361,5 @@ func oneLine(s string) string {
 }
 
 func itoa(n int) string {
-	b, _ := json.Marshal(n)
-	return strings.TrimSpace(string(b))
+	return strconv.Itoa(n)
 }

@@ -229,7 +229,7 @@ func (m *Manager) Clear(nodeID string) error {
 	if err != nil {
 		return fmt.Errorf("codex thread/start: %w", err)
 	}
-	if err := s.logw.Append(sessionlog.NewSource("", info.ID)); err != nil {
+	if err := s.logw.Append(sessionlog.NewClearSource(info.ID)); err != nil {
 		return fmt.Errorf("record clear seam: %w", err)
 	}
 	s.mu.Lock()

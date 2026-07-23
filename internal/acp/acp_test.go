@@ -447,6 +447,14 @@ func TestClearStartsFreshSegment(t *testing.T) {
 		t.Fatalf("post-clear segment: turns=%d prior=%d start=%q",
 			len(seg.Turns), seg.PriorTurns, seg.StartTime)
 	}
+	// The /clear seam is tagged as a real page-turn boundary (reason "clear"),
+	// not a mechanical rebind, and carries the fresh session id — uniform with
+	// Claude and codex so a chain renderer never has to special-case transports.
+	evs := sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl"))
+	last := evs[len(evs)-1]
+	if last.T != "source" || last.Source == nil || last.Source.Reason != "clear" || last.Source.SessionID == "" {
+		t.Fatalf("clear seam = %+v, want reason=clear with a fresh session id", last.Source)
+	}
 	// The fresh session accepts the next turn (same process, new context).
 	if err := m.Send("n1", "again"); err != nil {
 		t.Fatal(err)
