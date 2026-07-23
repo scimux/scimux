@@ -61,7 +61,13 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   read path for every transport** (phase 3): handleChat renders the log's
   current segment — everything after the last `source` seam — while the
   tailer serves only mechanics (needs-input, staleness, delivery
-  confirmation).
+  confirmation). Earlier segments are readable on demand, never polled:
+  `?history=1` returns the whole log as ordered surfaces
+  (`sessionlog.ReadHistory`), which the UI renders above the live segment
+  behind a "show earlier history" tap (and auto-expanded when an earlier
+  stop is tapped on the metro map). Keep that split — history in the poll
+  payload would ship the whole corpus every second and can repeat turns
+  across mechanical seams (a rotation re-mirrors from turn zero).
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam —
   never a new file, never truncation; the context gauge is segment-scoped.

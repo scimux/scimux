@@ -455,6 +455,13 @@ body.cards-open #msgs { overflow: hidden; }
 .chatseam::before, .chatseam::after { content: ""; flex: 1;
   border-top: 1px solid var(--hairline); }
 .chatseam span { white-space: nowrap; }
+/* "show earlier history": the on-demand loader for the segments behind the
+   seam(s). A pill in seam position; loaded history renders as normal bubbles
+   (full contrast — reading the past is the point), separated by .chatseam
+   dividers per surface. */
+.histload { font-size: 12px; font-weight: 600; color: var(--work);
+  border: 1px solid var(--hairline); border-radius: 14px; padding: 5px 12px;
+  background: var(--surface); white-space: nowrap; }
 
 /* working indicator: a small scanner stripe above the prompt while the pane is
    mechanically active. It uses movement, not glow, so it stays visible on iOS. */
@@ -811,6 +818,8 @@ body.map-full #maptoolbar.on { display: flex; }
 #maptoolbar .mtb-title { font-weight: 700; font-size: 14px; max-width: 30vw;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #maptoolbar .mtb-sep { width: 1px; align-self: stretch; background: var(--hairline); margin: 2px 2px; }
+/* earlier-stop selection: names the moment "Open chat" will land on */
+#maptoolbar .mtb-stopcue { font-size: 11px; color: var(--dim); white-space: nowrap; }
 #maptoolbar .sbtn { font-size: 13px; font-weight: 600; color: var(--work);
   padding: 8px 12px; border-radius: 10px; white-space: nowrap;
   background: color-mix(in srgb, var(--work) 12%, transparent); }
@@ -1239,15 +1248,28 @@ let fareOn = localStorage.getItem("scimux-fare") === "1";
    row (highlight + toolbar), a second click on it deselects. "Open chat" is the
    explicit act that opens the conversation — selecting never opens it. */
 let mapSel = "";
-function setMapSel(id){
-  mapSel = (mapSel === id) ? "" : id;   /* toggle */
+/* selection is STOP-scoped on the wall: mapSelKey is the selected row's
+   stop key (nid#i), so an earlier stop can carry the highlight and the
+   toolbar — node-scoped selection always resolved to the head row, making
+   past stations unselectable. mapSel stays the node id (toolbar actions). */
+let mapSelKey = "";
+/* seam time of the selected row when it was an earlier stop — the toolbar's
+   "Open chat" then opens the conversation with history expanded at that
+   surface. Cleared whenever the selection or full-screen mode changes. */
+let mapSelStop = "";
+const headStopKey = id => { const n = nodeById(id); return id + "#" + (n ? stopTimes(n).length - 1 : 0); };
+function setMapSel(id, key){
+  key = key || headStopKey(id);
+  if (mapSelKey === key){ mapSel = ""; mapSelKey = ""; }   /* second tap deselects */
+  else { mapSel = id; mapSelKey = key; }
+  mapSelStop = "";
   mapSig = ""; renderMap();             /* repaint highlight + refresh toolbar */
 }
 function setMapFull(on){
   mapFull = !!on;
   if (mapFull) localStorage.setItem("scimux-mapfull", "1");
   else localStorage.removeItem("scimux-mapfull");
-  mapSel = "";   /* enter clean, leave clean — no stale selection/toolbar */
+  mapSel = ""; mapSelKey = ""; mapSelStop = "";   /* enter clean, leave clean — no stale selection/toolbar */
   document.body.classList.toggle("map-full", mapFull);
   syncMapFullBtn();
   /* preserve scroll + laneFilter: do NOT route through the setLevel push path,
@@ -2335,9 +2357,9 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, st
      back through the history is the chat's scrollback, not the map's. */
   if (stop && !stop.head)
     return `
-        <div class="strow stoprow ${dim ? "dimmed" : ""}" style="padding-left:${padLeft}px" data-nid="${esc(n.id)}">
+        <div class="strow stoprow ${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${esc(n.id)}" data-skey="${esc(stopKey(stop))}" data-stop="${esc(stop.time)}">
           <div class="lbl"><span class="t">${esc(n.title)}</span></div>
-          <div class="cap">${esc(fmtStamp(stop.time))} &middot; earlier stop (before /clear)</div>
+          <div class="cap">${esc(fmtStamp(stop.time))} &middot; earlier stop &middot; tap to read</div>
         </div>`;
   /* a multi-stop head is positioned by its current stop's start, so its
      caption leads with that time; created_at stays the thread-start anchor
@@ -2350,7 +2372,7 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, st
      content they act on) */
   return `
         <div class="strow ${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
-             style="padding-left:${padLeft}px" data-nid="${esc(n.id)}">
+             style="padding-left:${padLeft}px" data-nid="${esc(n.id)}"${stop ? ` data-skey="${esc(stopKey(stop))}"` : ""}>
           <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(n.title)}</span></div>
           ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
           <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}${
@@ -2395,6 +2417,7 @@ function renderMapToolbar(){
     <span class="mtb-node">
       <span class="mtb-swatch" style="background:${esc(laneColor(n.lane_id))}"></span>
       <span class="mtb-title">${esc(n.title)}</span>
+      ${mapSelStop ? `<span class="mtb-stopcue">earlier stop &middot; ${esc(fmtStamp(mapSelStop))}</span>` : ""}
     </span>
     <span class="mtb-sep"></span>
     <button class="sbtn" data-jump="${esc(n.id)}">&#8249; Open chat</button>
@@ -2409,7 +2432,10 @@ function renderMapToolbar(){
 function positionMapToolbar(){
   const bar = $("#maptoolbar");
   if (!bar || !bar.classList.contains("on")) return;
-  const row = $("#mapwrap").querySelector(`.strow[data-nid="${CSS.escape(mapSel)}"]`);
+  /* stop-scoped: the toolbar rides the exact selected row (an earlier stop
+     included), not the node's first (= head) row */
+  const row = $("#mapwrap").querySelector(`.strow[data-skey="${CSS.escape(mapSelKey)}"]`)
+    || $("#mapwrap").querySelector(`.strow[data-nid="${CSS.escape(mapSel)}"]`);
   const scroll = $("#mapscroll"), mapEl = $("#map");
   if (!row || !scroll){ bar.style.display = "none"; return; }
   const rr = row.getBoundingClientRect(), sr = scroll.getBoundingClientRect(), mr = mapEl.getBoundingClientRect();
@@ -2426,7 +2452,13 @@ $("#mapscroll").addEventListener("scroll", positionMapToolbar, { passive: true }
 addEventListener("resize", positionMapToolbar);
 $("#maptoolbar").addEventListener("click", e => {
   const j = e.target.closest("[data-jump]");
-  if (j){ select(j.dataset.jump); setMapFull(false); return; }
+  if (j){
+    const st = mapSelStop;   /* setMapFull clears it — read before */
+    select(j.dataset.jump);
+    if (st) loadChatHistory(j.dataset.jump, st);
+    setMapFull(false);
+    return;
+  }
   const pe = e.target.closest("[data-medit]");
   if (pe){ openActivityEditor(pe.dataset.medit); return; }
   const nt = e.target.closest("[data-forknote]");
@@ -2681,7 +2713,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   const rows = stations.flatMap(stopsOf).sort(newestFirst);
 
   const sig = "wall|" + cols.join(",") + "|" + focusLane + "|" + mapTab + "|" +
-    mapSel + "|" + (fareOn ? "F" : "") + "|" +
+    mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify(rows.map(s => [stopKey(s), s.time, s.head, s.n.created_at,
       s.n.title, s.n.description || s.n.prompt || "", s.n.rationale, s.n.agent,
       s.n.model, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
@@ -2804,7 +2836,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
       others: [],
       dim: dimNode(s.n),
       golane: false,
-      current: s.head && s.n.id === mapSel,
+      current: stopKey(s) === mapSelKey,
       stop: s,
     })).join("")}
   </div>`;
@@ -2955,11 +2987,18 @@ $("#mapwrap").addEventListener("click", e => {
   if (go){ gotoStation(go.dataset.goorigin); return; }
   const r = e.target.closest("[data-nid]");
   if (r){
+    /* an earlier stop carries its seam time — opening it expands the chat's
+       history scrolled to that surface ("ride back through the journey") */
+    const st = r.dataset.stop || "";
     /* full screen: click toggles the map's own selection (highlight + toolbar),
        never opens the chat — that's the toolbar's "Open chat". Column/phone
        keeps drilling into the conversation. */
-    if (mapFull) setMapSel(r.dataset.nid);
-    else { select(r.dataset.nid); if (!isDesktop()) setLevel(1); }
+    if (mapFull){ setMapSel(r.dataset.nid, r.dataset.skey || ""); mapSelStop = mapSel ? st : ""; }
+    else {
+      select(r.dataset.nid);
+      if (st) loadChatHistory(r.dataset.nid, st);
+      if (!isDesktop()) setLevel(1);
+    }
   }
 });
 /* iPad: long-press a station selects it AND opens the editor sheet in one
@@ -2970,7 +3009,11 @@ longpress($("#mapwrap"), ".strow", (el, ev) => {
   if (ev?.target?.closest("button, a, input")) return;
   const id = el.dataset.nid;
   if (!id) return;
-  if (mapSel !== id){ mapSel = id; mapSig = ""; renderMap(); }   /* select + edit in one gesture */
+  const key = el.dataset.skey || headStopKey(id);
+  if (mapSelKey !== key){
+    mapSel = id; mapSelKey = key; mapSelStop = el.dataset.stop || "";
+    mapSig = ""; renderMap();   /* select + edit in one gesture */
+  }
   openActivityEditor(id);
 });
 $("#journeybtn").addEventListener("click", () => {
@@ -3093,7 +3136,8 @@ function hashStr(s){
 }
 
 function select(id){
-  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = -1; }
+  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = -1;
+    chatHist = { node: "", segs: null, scrollTo: "" }; }   /* history is per-visit, reloaded on demand */
   sel = id;
   editingChatDesc = false;   /* a pending "use as description" is discarded here */
   chatDetailSavedUntil = 0;
@@ -3279,6 +3323,22 @@ function collapseAttentionUI(id){
   document.querySelectorAll("#msgs .peekblock, #msgs .pending").forEach(el => el.remove());
 }
 
+/* earlier /clear segments, loaded on demand (the polled chat stays
+   segment-scoped — history is a per-tap read, not poll payload): segs = the
+   whole log's surfaces from ?history=1, rendered above the live segment at
+   full contrast; scrollTo = a one-shot scroll target consumed by the next
+   render ("seam" = the live segment's own divider, else an earlier stop's
+   seam time from the metro map) */
+let chatHist = { node: "", segs: null, scrollTo: "" };
+async function loadChatHistory(id, scrollTo){
+  try {
+    const d = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
+    if (sel !== id) return;   /* user moved on while it loaded */
+    chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "seam" };
+    chatSig = "";
+    refreshChat();
+  } catch (err) { alert(err.message); }
+}
 async function refreshChat(){
   const n = nodeById(sel);
   if (!n){ setComposerBusy(false); return; }
@@ -3374,9 +3434,17 @@ async function refreshChat(){
   }
   applyChatActivityChrome(d.live, mustShowPane, forcePeek, showPeek);
 
+  /* on-demand history: render every surface that predates the live one; the
+     live segment itself keeps coming from the poll (fresher — history is a
+     snapshot from tap time). Strict < drops the history copy of the live
+     segment: both sides date a surface by the same seam/backdate rule. */
+  const hist = chatHist.node === n.id && chatHist.segs ? chatHist.segs : null;
+  const curT = Date.parse(d.chat_started || "") || Infinity;
+  const priorSegs = hist ? hist.filter(s => (Date.parse(s.start || s.seam || "") || 0) < curT) : [];
   const sig = [n.id, d.live, n.attention, attentionHidden, d.delivery, showPeek, termOpen, termFull,
                d.source, d.perm_title, (d.perm_options || []).map(o => o.key + o.name).join(","),
                d.prior_turns || 0, d.chat_started || "", echo ? hashStr(echo.text) : "",
+               hist ? "h" + priorSegs.length : "",
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
   if (sig === chatSig) return;
@@ -3395,11 +3463,28 @@ async function refreshChat(){
     ? "Send unconfirmed \u2014 check the terminal"
     : (DEC_LABELS[d.reason] || "Needs your attention");
   el.innerHTML =
+    /* earlier surfaces: a loader pill until fetched, then the prior segments
+       as normal full-contrast bubbles under per-surface seam dividers —
+       reading the journey's past is the metro map's point. History bubbles
+       carry no data-i (the tap-action/copy machinery indexes the live
+       lastTurns only). */
+    (d.prior_turns > 0 && !hist
+      ? `<div class="chatseam"><button class="histload">show earlier history &middot; ${d.prior_turns} turn${d.prior_turns === 1 ? "" : "s"}</button></div>` : "") +
+    priorSegs.map(s =>
+      `<div class="chatseam histseam" data-seam="${esc(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${esc(fmtWhen(s.start))}</span></div>` +
+      s.turns.map(t => {
+        const h = t.role === "user" ? splitAttachments(t.text, n.id) : { clean: t.text, html: "" };
+        return `
+      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}">
+        <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(h.clean)}${h.html}</div>
+      </div>`;
+      }).join("")
+    ).join("") +
     /* every chat opens with its start stamp — the same header a /clear
        page-turn writes, so a fresh chat and a cleared one read alike (the
        prior history then sits behind the seam in the same log) */
     (d.chat_started
-      ? `<div class="chatseam"><span>chat started ${esc(fmtWhen(d.chat_started))}</span></div>` : "") +
+      ? `<div class="chatseam curseam"><span>chat started ${esc(fmtWhen(d.chat_started))}</span></div>` : "") +
     (!turns.length
       ? (freshSurface
           ? `<div class="pending">fresh chat \u2014 send a prompt</div>`
@@ -3432,7 +3517,29 @@ async function refreshChat(){
         `</div>`
       : "");
   renderBubbleActions();                    /* re-attach the tapped bubble's icon row */
-  if (!consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
+  /* one-shot after history loads: land the reader at the requested surface
+     instead of snapping to the bottom. "seam" (the loader pill) parks the
+     live segment's divider at the viewport bottom so the freshly revealed
+     past fills the view; a stop time (metro map) starts at that surface. */
+  let histScrolled = false;
+  if (hist && chatHist.scrollTo){
+    const t = chatHist.scrollTo;
+    let target = null;
+    if (t !== "seam"){
+      /* a stop's surface = the earliest seam at-or-after the stop time.
+         Time comparison, not string equality: a claude /clear writes its
+         clear-tagged seam at retire, but the fresh turns land behind the
+         LATER mechanical relink seam — the stop time never string-matches
+         the surface that actually holds its conversation */
+      const T = Date.parse(t) || 0;
+      target = [...el.querySelectorAll(".histseam")]
+        .find(s2 => (Date.parse(s2.dataset.seam || "") || 0) >= T) || null;
+    }
+    if (!target) target = el.querySelector(".curseam") || el.querySelector(".histseam");
+    if (target){ target.scrollIntoView({ block: t === "seam" ? "end" : "start" }); histScrolled = true; }
+    chatHist.scrollTo = "";
+  }
+  if (!histScrolled && !consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
   const pk = el.querySelector(".peek");
   if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
 
@@ -3606,6 +3713,8 @@ function useTurnAsDescription(text){
 
 /* per-bubble copy (and, for notes, delete) + tap actions */
 $("#msgs").addEventListener("click", e => {
+  const hl = e.target.closest(".histload");
+  if (hl){ if (sel) loadChatHistory(sel, "seam"); return; }
   const cb = e.target.closest(".copybtn");
   if (cb){
     const src = lastTurns[+cb.dataset.i];
@@ -3648,7 +3757,9 @@ $("#msgs").addEventListener("click", e => {
     return;
   }
   const turnEl = e.target.closest(".turn");
-  if (turnEl && !e.target.closest("a, button")){
+  /* history bubbles carry no data-i: they are read-only (the action row
+     indexes the live segment's lastTurns) */
+  if (turnEl && turnEl.dataset.i != null && !e.target.closest("a, button")){
     const i = +turnEl.dataset.i;
     tappedTurn = tappedTurn === i ? -1 : i;
     renderBubbleActions();

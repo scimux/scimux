@@ -2595,6 +2595,19 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	// ?history=1: the whole log as ordered surfaces — the on-demand read
+	// behind the chat's "show earlier history" divider and the map's earlier
+	// stops ("ride back through the journey"). A per-tap read, not a poll
+	// path, so it is parsed fresh and uncached; the polled response below
+	// stays segment-scoped.
+	if r.URL.Query().Get("history") == "1" {
+		segs := []sessionlog.HistorySegment{}
+		if a.sessionsDir != "" {
+			segs = sessionlog.ReadHistory(a.sessionLogPath(n.ID))
+		}
+		writeJSON(w, map[string]any{"segments": segs})
+		return
+	}
 	seg := a.segment(n)
 	a.mu.Lock()
 	var lastMS int64

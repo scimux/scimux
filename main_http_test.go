@@ -913,6 +913,71 @@ func TestHandleChatTmuxFallbackNoTranscript(t *testing.T) {
 	}
 }
 
+// TestHandleChatHistory: ?history=1 returns the whole log as ordered
+// surfaces — the on-demand read behind "show earlier history" and the metro
+// map's earlier stops — while the plain poll stays segment-scoped.
+func TestHandleChatHistory(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID["c1"] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", a.home),
+		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
+		{T: "assistant", Text: "old answer", Time: "2026-07-14T01:01:00Z"},
+		{T: "source", Time: "2026-07-15T09:00:00Z", Source: &sessionlog.SourceEvent{SessionID: "s2", Reason: "clear"}},
+		{T: "user", Text: "new question", Time: "2026-07-15T09:05:00Z"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/c1/chat?history=1", nil)
+	r.SetPathValue("id", "c1")
+	a.handleChat(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("history code = %d", rec.Code)
+	}
+	var body struct {
+		Segments []sessionlog.HistorySegment `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Segments) != 2 {
+		t.Fatalf("segments = %+v, want 2 surfaces", body.Segments)
+	}
+	if len(body.Segments[0].Turns) != 2 || body.Segments[0].Reason != "" {
+		t.Errorf("first surface = %+v", body.Segments[0])
+	}
+	if len(body.Segments[1].Turns) != 1 || body.Segments[1].Reason != "clear" ||
+		body.Segments[1].Seam != "2026-07-15T09:00:00Z" {
+		t.Errorf("clear surface = %+v", body.Segments[1])
+	}
+	// The polled response is untouched by the new branch: segment-scoped,
+	// prior turns behind the divider.
+	rec2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/nodes/c1/chat", nil)
+	r2.SetPathValue("id", "c1")
+	a.handleChat(rec2, r2)
+	var poll struct {
+		Turns      []transcript.Turn `json:"turns"`
+		PriorTurns int               `json:"prior_turns"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &poll); err != nil {
+		t.Fatal(err)
+	}
+	if len(poll.Turns) != 1 || poll.PriorTurns != 2 {
+		t.Errorf("poll = turns %d prior %d, want 1/2", len(poll.Turns), poll.PriorTurns)
+	}
+}
+
 // --- Codex app-server HTTP integration tests (finding 78) ---
 //
 // These tests drive handleNewNode, handleChat, handleSend, and handleKey for

@@ -125,6 +125,54 @@ func TestSegmentFreshClear(t *testing.T) {
 	}
 }
 
+func TestReadHistory(t *testing.T) {
+	// The whole log as ordered surfaces: first surface (dated at meta),
+	// a /clear surface, and a trailing empty surface (detached seam) dropped.
+	// Empty back-to-back mechanical seams are dropped too.
+	meta := NewMeta("n1", "claude", "", "/tmp")
+	path := writeLog(t, []Event{
+		meta,
+		{T: "user", Text: "old q", Time: "2026-07-01T09:00:00Z"},
+		{T: "assistant", Text: "old a", Time: "2026-07-01T09:01:00Z"},
+		{T: "assistant", Text: "   ", Time: "2026-07-01T09:02:00Z"}, // whitespace-only: never rendered
+		{T: "source", Time: "2026-07-02T10:00:00Z", Source: &SourceEvent{SessionID: "s2", Reason: "clear"}},
+		{T: "user", Text: "new q", Time: "2026-07-02T10:05:00Z"},
+		NewSource("", ""), // detached seam, nothing after: no empty surface
+	})
+	segs := ReadHistory(path)
+	if len(segs) != 2 {
+		t.Fatalf("got %d surfaces: %+v", len(segs), segs)
+	}
+	// The turns predate the meta stamp (written now), so the backdate rule
+	// dates the surface at the first turn; the seam keeps the meta time.
+	if len(segs[0].Turns) != 2 || segs[0].Reason != "" ||
+		segs[0].Start != "2026-07-01T09:00:00Z" || segs[0].Seam != meta.Time {
+		t.Fatalf("first surface: %+v (want start at first turn, seam %q)", segs[0], meta.Time)
+	}
+	if len(segs[1].Turns) != 1 || segs[1].Reason != "clear" ||
+		segs[1].Seam != "2026-07-02T10:00:00Z" || segs[1].Start != "2026-07-02T10:00:00Z" {
+		t.Fatalf("clear surface: %+v", segs[1])
+	}
+	if ReadHistory(filepath.Join(t.TempDir(), "missing.jsonl")) == nil {
+		t.Fatal("missing log must yield an empty, non-nil slice (JSON [])")
+	}
+}
+
+func TestReadHistoryBackdatesMirroredTurns(t *testing.T) {
+	// Same R20.9 rule as Segment.StartTime: a bind seam stamped now above
+	// year-old adopted turns dates the surface at the first turn. Seam keeps
+	// the raw time (the map's stop key must still match).
+	path := writeLog(t, []Event{
+		NewMeta("n1", "claude", "", "/tmp"),
+		{T: "source", Time: "2026-07-20T09:00:00Z", Source: &SourceEvent{SessionID: "s1"}},
+		{T: "user", Text: "old q", Time: "2025-03-01T12:00:00Z"},
+	})
+	segs := ReadHistory(path)
+	if len(segs) != 1 || segs[0].Start != "2025-03-01T12:00:00Z" || segs[0].Seam != "2026-07-20T09:00:00Z" {
+		t.Fatalf("got %+v", segs)
+	}
+}
+
 func TestSegmentCache(t *testing.T) {
 	path := writeLog(t, []Event{
 		NewMeta("n1", "codex", "", "/tmp"),

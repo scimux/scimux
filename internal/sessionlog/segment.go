@@ -106,6 +106,64 @@ func ReadSegment(path string) Segment {
 	return segmentOf(ReadEvents(path))
 }
 
+// HistorySegment is one chat surface of the whole log, oldest first — the
+// on-demand read behind the chat's "show earlier history" divider and the
+// metro map's earlier stops, where Segment is only the live tail. Seam is the
+// opening seam's raw timestamp (for clear seams this is the map's stop time,
+// so the UI can match a tapped stop to its surface); Start is the display
+// time, backdated to the first turn when the turns predate the seam (same
+// R20.9 rule as Segment.StartTime — adopted/imported turns can be far older
+// than their bind seam).
+type HistorySegment struct {
+	Start  string            `json:"start"`
+	Seam   string            `json:"seam"`
+	Reason string            `json:"reason,omitempty"` // opening seam's reason; "" for the log's first surface
+	Turns  []transcript.Turn `json:"turns"`
+}
+
+// ReadHistory parses the log into all its surfaces, oldest first. Surfaces
+// with no readable turns (back-to-back mechanical seams: detach + relink, or
+// a /clear nothing was said after) render nothing and are dropped. Turns can
+// repeat across mechanical seams — a rotation re-mirrors the transcript from
+// turn zero behind a fresh seam — and history is a reading surface, so the
+// honest repeat beats a dedup guess. Not cached: this is a per-tap read, not
+// a poll path.
+func ReadHistory(path string) []HistorySegment {
+	segs := []HistorySegment{}
+	cur := HistorySegment{Turns: []transcript.Turn{}}
+	flush := func() {
+		if len(cur.Turns) == 0 {
+			return
+		}
+		if t0 := cur.Turns[0].Time; t0 != "" && earlier(t0, cur.Start) {
+			cur.Start = t0
+		}
+		segs = append(segs, cur)
+	}
+	for _, ev := range ReadEvents(path) {
+		// first-surface fallback: date it at the first timed record (normally
+		// the meta header), exactly like segmentOf; a seam overwrites
+		if cur.Start == "" && ev.Time != "" {
+			cur.Start, cur.Seam = ev.Time, ev.Time
+		}
+		switch ev.T {
+		case "source":
+			flush()
+			cur = HistorySegment{Start: ev.Time, Seam: ev.Time, Turns: []transcript.Turn{}}
+			if ev.Source != nil {
+				cur.Reason = ev.Source.Reason
+			}
+		case "user", "assistant":
+			// Same filter as segmentOf: whitespace-only records render nothing.
+			if strings.TrimSpace(ev.Text) != "" {
+				cur.Turns = append(cur.Turns, transcript.Turn{Role: ev.T, Text: ev.Text, Time: ev.Time})
+			}
+		}
+	}
+	flush()
+	return segs
+}
+
 // Cache memoizes one node's parsed segment keyed by the file's (size, mtime).
 // The chat endpoint polls every second while logs change only at turn/tool
 // granularity, so the common case is a stat plus a cache hit; a change
