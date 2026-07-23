@@ -255,8 +255,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-top: 1px solid var(--hairline);
 }
 .card.expanded .lanebox { display: block; }
-/* rail properties (Journey / Interchange / Service) on the expanded card:
-   instant-commit controls, one PATCH per change — no save button involved */
+/* rail properties (read-only Journey + derived status) on the expanded card.
+   Nothing to hand-annotate: topology is derived from forks, status from /exit. */
 .card .railbox {
   display: none; margin-top: 10px; padding-top: 10px;
   border-top: 1px solid var(--hairline);
@@ -266,14 +266,9 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .railrow { display: flex; gap: 8px; align-items: center; min-height: 30px; }
 .railrow .k { font-size: 12px; color: var(--dim); width: 84px; flex: none; }
 .railrow select { margin-top: 0; }
-.alsorow { padding-left: 92px; min-height: 26px; font-size: 13px; }
-.alsorow .rm { width: 26px; height: 26px; border-radius: 7px; color: var(--dim);
-  display: flex; align-items: center; justify-content: center; font-size: 13px; }
-.segctl { display: flex; background: var(--th-bg); border-radius: 9px; padding: 2px; gap: 2px; }
-.segctl button { font-size: 12.5px; font-weight: 500; padding: 4px 10px; border-radius: 7px;
-  color: var(--dim); }
-.segctl button.on { background: var(--bg); color: var(--ink);
-  box-shadow: 0 1px 3px rgba(0,0,0,.12); font-weight: 600; }
+.thread-status { font-size: 13px; font-weight: 600; }
+.thread-status.live { color: var(--work); }
+.thread-status.closed { color: var(--dim); }
 .lanepick { display: flex; gap: 8px; align-items: center; }
 .lanepick select, .lanepick input { margin-top: 0; }
 .lanepick input[hidden] { display: none; }
@@ -309,6 +304,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   background: var(--surface); border: 1px solid var(--hairline);
   box-shadow: 0 2px 8px rgba(0,0,0,.12);
 }
+.card .actions .endthread { color: var(--dim); }
 .card .actions .archive { color: var(--work); }
 .card .actions .trash { color: var(--bad); }
 .card.selected { background: color-mix(in srgb, var(--work) 8%, var(--surface));
@@ -1541,6 +1537,12 @@ const ICON_CHECK = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
   <circle cx="12" cy="12" r="9"/>
   <path d="M8 12.5l2.5 2.5L16 9"/>
 </svg>`;
+/* buffer-stop / dead-end: a track meeting a terminating cap bar (the ⊣ glyph) */
+const ICON_END = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M4 12h11"/>
+  <path d="M18 6v12"/>
+</svg>`;
 const ICON_SEND = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M4 11.5L20 4l-7.5 16-2-6.5L4 11.5Z"/>
@@ -1924,8 +1926,9 @@ function readLaneChoice(select, input){
   }
   return { laneID: val };
 }
-/* every lane a node rides: its home lane plus any interchange (also_lanes) */
-const servedLanes = n => [n.lane_id, ...(n.also_lanes || [])].filter(Boolean);
+/* the lane a thread rides. Single membership now: a thread belongs to exactly
+   one topic/lane; cross-lane structure comes from fork parent edges, not tags. */
+const servedLanes = n => [n.lane_id].filter(Boolean);
 /* laneModel: the shared journey structure. Lanes are explicit assignments;
    unassigned nodes stay in Activities but do not become Journeys. */
 function laneModel(){
@@ -1953,15 +1956,14 @@ function renderCards(){
      needed" fold below instead of interleaving with the focused lane.
      Invariant: nothing that needs input is ever invisible — it is either
      in the list (in-lane, or no filter) or in the fold, never neither. */
-  /* full strength for interchange stations: a lane's scope includes every
-     activity it serves, home or via also_lanes — a rider on the line stops
-     there either way */
+  /* a lane's scope is every thread on that lane (single membership now) plus
+     the open chat, which always shows */
   const inScope = n => !laneFilter || servedLanes(n).includes(laneFilter) || n.id === sel;
   const list = tabList.filter(inScope);
   const foldList = laneFilter && cardTab === "current"
     ? tabList.filter(n => !inScope(n) && hardAttention(n)) : [];
   if (!foldList.length) attnFoldOpen = false;
-  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention, n.model, n.effort]))
+  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention, n.model, n.effort]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
     + "|" + cardTab + "|" + laneFilter + "|" + foldList.length + "|" + attnFoldOpen
     + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
@@ -2001,34 +2003,17 @@ function renderCards(){
   document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
 }
 
-/* Rail properties on the expanded card, shown once a Journey is set. The home
-   lane is read-only here (set-once); Interchange is a pull-down that adds a
-   line plus removable swatch rows; Service is a three-state segmented control.
-   Every change commits one PATCH immediately. */
+/* Rail properties on the expanded card, shown once a Journey is set. The lane is
+   read-only (set-once, colours the whole topic). Status is derived, never tagged:
+   a thread is Live, or Closed once /exit caps it — nothing to hand-annotate. */
 function railboxHTML(n){
-  const also = n.also_lanes || [];
-  const addable = laneList().filter(l => l.id !== n.lane_id && !also.includes(l.id));
-  const alsoRows = also.map(id => `
-      <div class="railrow alsorow">
-        <span class="laneswatch" style="background:${esc(laneColor(id))}"></span>
-        <span>${esc(laneName(id))}</span>
-        <button class="rm" data-also-rm="${esc(n.id)}" data-lane="${esc(id)}" aria-label="remove interchange ${esc(laneName(id))}">&#10005;</button>
-      </div>`).join("");
-  const seg = [["", "through"], ["siding", "siding"], ["terminus", "terminus"]].map(([v, label]) => `
-        <button data-service-btn="${esc(n.id)}" data-service="${v}"
-          class="${(n.service || "") === v ? "on" : ""}">${label}</button>`).join("");
+  const closed = !!n.ended_at;
   return `<div class="railbox">
       <div class="railrow"><span class="k">Journey</span>
         <span class="laneswatch" style="background:${esc(laneColor(n.lane_id))}"></span>
         <span>${esc(laneName(n.lane_id))}</span></div>
-      <div class="railrow"><span class="k">Interchange</span>
-        ${addable.length ? `<select data-also-add="${esc(n.id)}">
-          <option value="" selected>&ndash; add line &ndash;</option>
-          ${addable.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}
-        </select>` : `<span class="k" style="width:auto">${also.length ? "" : "no other lines yet"}</span>`}</div>
-      ${alsoRows}
-      <div class="railrow"><span class="k">Service</span>
-        <div class="segctl">${seg}</div></div>
+      <div class="railrow"><span class="k">Status</span>
+        <span class="thread-status ${closed ? "closed" : "live"}">${closed ? "Closed" : "Live"}</span></div>
     </div>`;
 }
 
@@ -2058,6 +2043,7 @@ function cardHTML(n){
       <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
       <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
       <div class="actions">
+        ${n.ended_at ? "" : `<button class="endthread" data-exit="${esc(n.id)}" aria-label="close thread (mark ended)">${ICON_END}</button>`}
         <button class="archive" data-arch-action="${esc(n.id)}" aria-label="${archived ? "restore" : "archive"}">${archived ? ICON_RESTORE : ICON_ARCHIVE}</button>
         <button class="trash" data-trash="${esc(n.id)}" aria-label="remove">${ICON_TRASH}</button>
       </div>
@@ -2161,13 +2147,6 @@ async function patchRail(id, body){
     renderCards(); renderMap();
   } catch (err) { alert(err.message); }
 }
-document.addEventListener("change", e => {
-  const add = e.target.closest("[data-also-add]");
-  if (!add || !add.value) return;
-  const n = nodeById(add.dataset.alsoAdd);
-  if (!n) return;
-  patchRail(n.id, { also_lanes: [...(n.also_lanes || []), add.value] });
-});
 function updateCardAges(){
   for (const n of nodes){
     const el = document.getElementById("card-" + CSS.escape(n.id).replace(/\\/g, ""));
@@ -2213,15 +2192,10 @@ $("#cardlist").addEventListener("click", async e => {
     } catch (err) { alert(err.message); }
     return;
   }
-  const rm = e.target.closest("[data-also-rm]");
-  if (rm){
-    const n = nodeById(rm.dataset.alsoRm);
-    if (n) patchRail(n.id, { also_lanes: (n.also_lanes || []).filter(l => l !== rm.dataset.lane) });
-    return;
-  }
-  const svc = e.target.closest("[data-service-btn]");
-  if (svc){
-    patchRail(svc.dataset.serviceBtn, { service: svc.dataset.service });
+  const endt = e.target.closest("[data-exit]");
+  if (endt){
+    actionCard = "";
+    exitThread(endt.dataset.exit);
     return;
   }
   const arch = e.target.closest("[data-arch-action]");
@@ -2362,7 +2336,8 @@ function renderMapToolbar(){
     <button class="sbtn" data-jump="${esc(n.id)}">&#8249; Open chat</button>
     <button class="sbtn iconbtn" data-medit="${esc(n.id)}" aria-label="edit title & description">${ICON_PENCIL} Edit</button>
     <button class="sbtn" data-forknote="${esc(n.id)}">Add note</button>
-    <button class="sbtn" data-forkfrom="${esc(n.id)}">+ New</button>`;
+    <button class="sbtn" data-forkfrom="${esc(n.id)}">+ New</button>
+    ${n.ended_at ? "" : `<button class="sbtn iconbtn" data-mapexit="${esc(n.id)}" aria-label="close thread">${ICON_END} End</button>`}`;
   positionMapToolbar();
 }
 /* place the toolbar just below the selected row, left-aligned to its label;
@@ -2394,7 +2369,22 @@ $("#maptoolbar").addEventListener("click", e => {
   if (nt){ addStationNote(nt.dataset.forknote); return; }
   const fk = e.target.closest("[data-forkfrom]");
   if (fk){ forkFromStation(fk.dataset.forkfrom); return; }
+  const ex = e.target.closest("[data-mapexit]");
+  if (ex){ exitThread(ex.dataset.mapexit); return; }
 });
+/* /exit: mark a thread ended (dead-end cap, stays on the map) and stop its
+   process. Shared by the card action and the map toolbar. */
+async function exitThread(id){
+  const n = nodeById(id);
+  if (!n) return;
+  if (!confirm(`Close "${n.title}"? It stays on the map with a dead-end cap, but its running session/link is stopped.`)) return;
+  try {
+    const upd = await api(`/api/nodes/${encodeURIComponent(id)}/exit`, { method: "POST" });
+    updateLocalNode(upd);
+    cardsSig = ""; chatSig = ""; mapSig = "";
+    renderCards(); renderChatHead(); renderMap();
+  } catch (err) { alert(err.message); }
+}
 function renderMap(){
   if (!mapVisible()) return;
   const lm = laneModel();
@@ -2431,7 +2421,7 @@ function renderMap(){
   const sig = JSON.stringify(blocks.map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
       mapFold.has(b.lane.id), hasAttn(b),
       b.rows.map(n => [n.id, n.title, n.description || n.prompt || "", n.rationale,
-        n.agent, n.model, n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention])]))
+        n.agent, n.model, n.lane_id, n.parent || "", n.ended_at || "", n.live, n.attention])]))
     + "|" + focusLane + "|" + mapTab + "|" + mapFull;
   if (sig === mapSig) return;
   mapSig = sig;
@@ -2464,27 +2454,16 @@ function renderMap(){
     b.rows.forEach((n, i) => {
       const yy = y(i);
       const op = dimRow(n) ? .25 : 1;
-      const inter = served(n).length > 1;
-      /* siding: the dot leaves the line on a short spur that ends at a buffer stop */
-      let dotX = LX;
-      if (n.service === "siding"){
-        dotX = LX + 14;
-        svg += `<line x1="${LX}" y1="${yy}" x2="${dotX}" y2="${yy}" stroke="${col}" stroke-width="2.5" opacity="${op}"/>
-                <line x1="${dotX + 8}" y1="${yy - 5}" x2="${dotX + 8}" y2="${yy + 5}" stroke="${col}" stroke-width="3" stroke-linecap="round" opacity="${op}"/>`;
-      }
-      /* terminus: the cap bar closes the line just past the station */
-      if (n.service === "terminus")
+      const dotX = LX;
+      /* dead-end ⊣ cap: a thread deliberately closed via /exit (co-encoded with
+         the card's "Closed" label). A station is on exactly one lane now — no
+         interchange ring, no siding/terminus tags. */
+      if (n.ended_at)
         svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
       if (n.attention)
-        svg += `<circle cx="${dotX}" cy="${yy}" r="${inter ? 11.5 : 9.5}" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
-      /* the death state wins over the interchange ring: a dead interchange
-         station must not render as a healthy in-service ring (its ⇄ chip
-         still marks the transfer) — only the ring's size keeps the
-         interchange footprint */
+        svg += `<circle cx="${dotX}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
       if (n.live === "exited" || n.live === "unavailable")
-        svg += `<circle cx="${dotX}" cy="${yy}" r="${inter ? 7 : 5.5}" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
-      else if (inter)   /* the classic interchange glyph: white-filled ring */
-        svg += `<circle cx="${dotX}" cy="${yy}" r="7" fill="var(--bg)" stroke="${col}" stroke-width="3" opacity="${op}"/>`;
+        svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
       else
         svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
     });
@@ -2493,7 +2472,7 @@ function renderMap(){
       <svg width="${LW}" height="${b.rows.length * RH}" viewBox="0 0 ${LW} ${b.rows.length * RH}">${svg}</svg>
       ${b.rows.map(n => stationRowHTML(n, lm, {
         padLeft: LW + 12,
-        others: served(n).filter(l => l !== b.lane.id),
+        others: [],
         dim: dimRow(n),
         golane: true,
       })).join("")}
@@ -2506,27 +2485,27 @@ function renderMap(){
 /* ---------- full-screen "wall map": the integrated network diagram (P2) ----------
    One SVG spanning all lane columns × all station rows, plus one label row per
    station in global newest-first order. Columns are lanes (ordered so
-   interchange partners sit adjacent); rows carry chronology; interchanges are
-   home-coloured ascending S-crossovers rising into the receiver column. */
+   fork partners sit adjacent); rows carry chronology; a fork onto another lane
+   is an origin-coloured ascending S-crossover from parent dot up to child dot. */
 
-/* order lane columns so interchange partners are adjacent (short crossovers):
-   greedy chain over the interchange graph, isolated lanes appended newest-first.
-   Columns carry no chronology, so reordering them is free. */
-function laneColumnOrder(colLanes, stations, served){
+/* order lane columns so fork partners are adjacent (short crossovers): greedy
+   chain over the fork graph (a cross-lane fork links parent lane ↔ child lane),
+   isolated lanes appended newest-first. Columns carry no chronology, so
+   reordering them is free. */
+function laneColumnOrder(colLanes, stations, byId){
   const ids = colLanes.map(l => l.id);
   const inSet = new Set(ids);
   const w = {}, nbr = {}, rec = {};
   ids.forEach(id => { nbr[id] = new Set(); rec[id] = 0; });
   for (const n of stations){
-    const s = served(n).filter(l => inSet.has(l));
     const t = Date.parse(n.created_at) || 0;
-    for (const l of s) if (t > rec[l]) rec[l] = t;
-    for (let i = 0; i < s.length; i++)
-      for (let j = i + 1; j < s.length; j++){
-        const k = [s[i], s[j]].sort().join("|");
-        w[k] = (w[k] || 0) + 1;
-        nbr[s[i]].add(s[j]); nbr[s[j]].add(s[i]);
-      }
+    if (inSet.has(n.lane_id) && t > rec[n.lane_id]) rec[n.lane_id] = t;
+    const p = n.parent && byId[n.parent];
+    if (p && n.lane_id !== p.lane_id && inSet.has(n.lane_id) && inSet.has(p.lane_id)){
+      const k = [n.lane_id, p.lane_id].sort().join("|");
+      w[k] = (w[k] || 0) + 1;
+      nbr[n.lane_id].add(p.lane_id); nbr[p.lane_id].add(n.lane_id);
+    }
   }
   const wt = (a, b) => w[[a, b].sort().join("|")] || 0;
   const total = a => [...nbr[a]].reduce((s, b) => s + wt(a, b), 0);
@@ -2550,12 +2529,8 @@ function laneColumnOrder(colLanes, stations, served){
 
 function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   const colLanes = lm.lanes.filter(l => inGroup(l.id));
-  const cols = laneColumnOrder(colLanes, stations, served);
+  const cols = laneColumnOrder(colLanes, stations, lm.byId);
   const colIdx = {}; cols.forEach((id, c) => colIdx[id] = c);
-  /* a station whose home lane is off-group still rides its first in-group line
-     (parity with the stack's fallback); that column is its anchor */
-  const anchorOf = n => colIdx[n.lane_id] != null ? n.lane_id
-    : (served(n).find(l => colIdx[l] != null) || null);
   const rows = stations.slice()
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
 
@@ -2563,7 +2538,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     mapSel + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify(rows.map(n => [n.id, n.created_at, n.title,
       n.description || n.prompt || "", n.rationale, n.agent, n.model,
-      n.lane_id, n.also_lanes || [], n.service || "", n.live, n.attention,
+      n.lane_id, n.parent || "", n.ended_at || "", n.live, n.attention,
       n.ctx_pct == null ? -1 : n.ctx_pct,
       /* last_activity drives the fare line's "last"/"elapsed"; keep it out of
          the sig unless fare is on, so an idle map does not repaint each poll */
@@ -2571,14 +2546,14 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   if (sig === mapSig) return;
   mapSig = sig;
 
-  const RH = 76, CW = 46, MX = 24, OFF = 16, GAP = 16;   /* top head-room for a row-0 lifted ring */
+  const RH = 76, CW = 46, MX = 24, OFF = 16, GAP = 16;
   const nCols = cols.length, nRows = rows.length;
   const colX = c => MX + c * CW;
   const rowY = i => OFF + i * RH + RH / 2;
   const colsW = MX + Math.max(0, nCols - 1) * CW + MX;
   const svgH = OFF + nRows * RH;
   const dimLane = id => focusLane && id !== focusLane;
-  const dimNode = n => focusLane && !served(n).includes(focusLane);
+  const dimNode = n => focusLane && n.lane_id !== focusLane;
 
   if (!nRows){
     $("#mapwrap").innerHTML = `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
@@ -2586,15 +2561,12 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     return;
   }
 
-  /* lane line spans every y it touches: home dots at rowY, lifted interchange
-     rings at rowY - RH/2 */
+  const rowIdx = {}; rows.forEach((n, i) => rowIdx[n.id] = i);
+  const laneCount = {}; rows.forEach(n => { laneCount[n.lane_id] = (laneCount[n.lane_id] || 0) + 1; });
+
+  /* lane line spans every dot on its column (single membership now — no lifts) */
   const touch = {}; cols.forEach(id => touch[id] = []);
-  rows.forEach((n, i) => {
-    const a = anchorOf(n);
-    if (a != null) touch[a].push(rowY(i));
-    for (const l of served(n))
-      if (l !== a && colIdx[l] != null) touch[l].push(rowY(i) - RH / 2);
-  });
+  rows.forEach((n, i) => { if (colIdx[n.lane_id] != null) touch[n.lane_id].push(rowY(i)); });
 
   let svg = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
@@ -2607,44 +2579,39 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
             stroke="${esc(lm.color(id))}" stroke-width="3.5" stroke-linecap="round"
             opacity="${dimLane(id) ? .22 : 1}"/>`;
   });
-  /* 2. interchange S-crossovers (giver = home colour), under the dots */
-  rows.forEach((n, i) => {
-    const a = anchorOf(n); if (a == null) return;
-    const xh = colX(colIdx[a]), yh = rowY(i), col = esc(lm.color(n.lane_id));
-    const op = dimNode(n) ? .25 : 1;
-    for (const l of served(n)){
-      if (l === a || colIdx[l] == null) continue;
-      const xa = colX(colIdx[l]), yd = yh - RH / 2, ym = yh - RH / 4;
-      /* cubic S with vertical tangents at both lane lines (control points sit
-         on each lane's vertical) — a railway crossover, not a U */
-      svg += `<path d="M ${xh} ${yh} C ${xh} ${ym} ${xa} ${ym} ${xa} ${yd}"
+  /* 2. fork crossovers: parent gave rise to child (directional, one-way). The
+     child is newer, so it sits higher (smaller row). Same lane → Y-stay (a
+     parallel same-colour branch stub); different lane → an ascending S from the
+     parent dot up to the child dot, coloured by the origin (parent) lane — or,
+     when the child lane springs into existence at the split (Y-new, its only
+     station), coloured by the new child lane. Missing parent (deleted) → no glyph. */
+  rows.forEach((n, ci) => {
+    const p = n.parent && lm.byId[n.parent];
+    if (!p) return;
+    const cc = colIdx[n.lane_id], cp = colIdx[p.lane_id], pi = rowIdx[p.id];
+    if (cc == null || cp == null || pi == null) return;
+    const xC = colX(cc), yC = rowY(ci), xP = colX(cp), yP = rowY(pi);
+    const ym = (yP + yC) / 2, op = dimNode(n) ? .25 : 1;
+    if (cc === cp){
+      const col = esc(lm.color(n.lane_id)), bx = xC + 13;
+      svg += `<path d="M ${xC} ${yP} C ${bx} ${ym} ${bx} ${ym} ${xC} ${yC}"
+              fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
+    } else {
+      const newLane = (laneCount[n.lane_id] || 0) <= 1;
+      const col = esc(lm.color(newLane ? n.lane_id : p.lane_id));
+      svg += `<path d="M ${xP} ${yP} C ${xP} ${ym} ${xC} ${ym} ${xC} ${yC}"
               fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
     }
   });
-  /* 3. lifted destination rings (the interchange glyph, on the receiver line) */
+  /* 3. home station glyphs (on top) */
   rows.forEach((n, i) => {
-    const a = anchorOf(n); if (a == null) return;
-    const yd = rowY(i) - RH / 2, op = dimNode(n) ? .25 : 1;
-    const dead = n.live === "exited" || n.live === "unavailable";
-    for (const l of served(n)){
-      if (l === a || colIdx[l] == null) continue;
-      const xa = colX(colIdx[l]);
-      svg += `<circle cx="${xa}" cy="${yd}" r="7" fill="var(--bg)" stroke="${esc(lm.color(l))}"
-              stroke-width="${dead ? 2.5 : 3}" opacity="${dead ? op * .55 : op}"/>`;
-    }
-  });
-  /* 4. home station glyphs (on top) */
-  rows.forEach((n, i) => {
-    const a = anchorOf(n); if (a == null) return;
+    const a = n.lane_id; if (colIdx[a] == null) return;
     const x = colX(colIdx[a]), yy = rowY(i), col = esc(lm.color(n.lane_id));
     const op = dimNode(n) ? .25 : 1;
     let dotX = x;
-    if (n.service === "siding"){
-      dotX = x + 12;
-      svg += `<line x1="${x}" y1="${yy}" x2="${dotX}" y2="${yy}" stroke="${col}" stroke-width="2.5" opacity="${op}"/>
-              <line x1="${dotX + 7}" y1="${yy - 5}" x2="${dotX + 7}" y2="${yy + 5}" stroke="${col}" stroke-width="3" stroke-linecap="round" opacity="${op}"/>`;
-    }
-    if (n.service === "terminus")
+    /* dead-end ⊣ cap: a thread deliberately closed via /exit. A perpendicular
+       buffer bar at the head (top = newest), co-encoded with the "Closed" label. */
+    if (n.ended_at)
       svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
     if (n.attention){
       /* co-encoded: glow + ring + the row's "needs input" status text */
@@ -2675,7 +2642,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     <div style="height:${OFF}px"></div>
     ${rows.map(n => stationRowHTML(n, lm, {
       padLeft: colsW + GAP,
-      others: served(n).filter(l => l !== anchorOf(n)),
+      others: [],
       dim: dimNode(n),
       golane: false,
       current: n.id === mapSel,
@@ -3356,11 +3323,19 @@ function forkFromTurn(text){
   ncParent = sel;
   ncRationale = (text || "").split("\n")[0].slice(0, 140);
   setNewActivitySubmitting(false);
-  $("#nc_title").value = "Follow-up";
+  seedForkTitle(text);
   $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
   prepareLaunchConfig();
   prepareNewActivityLane();
   openSheet("#newchat");
+}
+/* Seed the fork's title from the source's first line and select-all, so one
+   keystroke renames it. The title is display-only (not the log filename), so a
+   twin label is only a legibility nudge, never a collision. */
+function seedForkTitle(src){
+  const first = (src || "").split("\n").map(s => s.trim()).find(Boolean) || "Follow-up";
+  $("#nc_title").value = first.slice(0, 60);
+  setTimeout(() => { const t = $("#nc_title"); t.focus(); t.select(); }, 0);
 }
 /* wall map: "+ New" on a station forks a fresh-context activity from that node
    (inherits agent/model/effort/dir, never history). After Start, nc_start
@@ -3375,7 +3350,7 @@ function forkFromStation(id){
   $("#newchat").classList.remove("editing");
   $("#nc_head").textContent = "New activity";
   $("#nc_start").textContent = "Start";
-  $("#nc_title").value = "Follow-up";
+  seedForkTitle(n.description || n.title);
   $("#nc_prompt").value = "";
   prepareLaunchConfig();
   prepareNewActivityLane();
@@ -4377,11 +4352,12 @@ function prepareLaunchConfig(){
 }
 function prepareNewActivityLane(){
   const inherited = nodeById(ncParent)?.lane_id || "";
-  /* under a lane scope, + means "start one on this journey": prefill the
-     filtered lane (editable) — otherwise the new card would be born outside
-     the scope and vanish from the list the moment it appears. A fork's
-     inherited lane still wins and stays read-only. */
-  fillLaneSelect($("#nc_lane"), inherited || laneFilter, true, !!inherited);
+  /* The lane is always EDITABLE now — for a fork it is *the* decision that
+     shapes the map: leave it on the parent's topic (Y-stay, a parallel same-
+     colour thread), type a new name (Y-new, a new topic born at the split), or
+     pick another existing topic (S, a crossover onto that line). It is merely
+     preselected to the inherited/scoped lane, never locked. */
+  fillLaneSelect($("#nc_lane"), inherited || laneFilter, true, false);
   $("#nc_lane_new").value = "";
   clearFieldError($("#nc_lane_new"));
   syncLanePicker($("#nc_lane"));

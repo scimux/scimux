@@ -54,18 +54,12 @@ type Node struct {
 	Prompt      string `json:"prompt"`                // first prompt == the node's research question
 	Description string `json:"description,omitempty"` // card/map description; defaults to Prompt
 	Rationale   string `json:"rationale,omitempty"`   // why this fork exists (decision evidence)
-	LaneID      string `json:"lane_id,omitempty"`     // immutable journey lane assignment; empty means unassigned
-	// AlsoLanes marks an interchange station: further journeys this activity
-	// serves beyond its home LaneID. Mutable, unlike the home lane — a
-	// cross-link is discovered knowledge about the journey network, so it must
-	// be addable after the fact (corrections are new records).
-	AlsoLanes []string `json:"also_lanes,omitempty"`
-	// Service is the station's rail-map state, orthogonal to process liveness:
-	// "siding" (a question ridden out and set aside — spur + buffer stop) or
-	// "terminus" (completed, ceiling reached — cap bar). Empty means through
-	// service. Mutable for the same reason as AlsoLanes: a branch's death is
-	// often recognized only later.
-	Service    string `json:"service,omitempty"`
+	LaneID      string `json:"lane_id,omitempty"`     // immutable topic/lane assignment; empty means unassigned
+	// EndedAt marks a thread the user deliberately closed via /exit (the "ended"
+	// head state): a dead-end ⊣ cap on the map, kept visible and rideable. This
+	// is a scimux decision, distinct from a *mechanical* process exit — a crash
+	// leaves the node live until /exit is invoked. Empty means not ended.
+	EndedAt    string `json:"ended_at,omitempty"`
 	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode"
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
@@ -1777,11 +1771,9 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Title       *string   `json:"title"`
-		Description *string   `json:"description"`
-		LaneID      *string   `json:"lane_id"`
-		AlsoLanes   *[]string `json:"also_lanes"`
-		Service     *string   `json:"service"`
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+		LaneID      *string `json:"lane_id"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
@@ -1818,54 +1810,8 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if body.AlsoLanes != nil {
-		// The home lane never repeats in the interchange list, and the list
-		// stays deduplicated; the full list replaces the old one (the client
-		// sends the complete set on every add/remove).
-		seen := map[string]bool{}
-		var also []string
-		for _, l := range *body.AlsoLanes {
-			l = strings.TrimSpace(l)
-			if l == "" || l == next.LaneID || seen[l] {
-				continue
-			}
-			seen[l] = true
-			also = append(also, l)
-		}
-		next.AlsoLanes = also
-	}
-	if body.Service != nil {
-		switch svc := strings.TrimSpace(*body.Service); svc {
-		case "", "through":
-			next.Service = "" // through service is the unmarked default
-		case "siding", "terminus":
-			next.Service = svc
-		default:
-			a.mu.Unlock()
-			http.Error(w, fmt.Sprintf("unknown service %q (want through, siding or terminus)", svc), 400)
-			return
-		}
-	}
 	if next.Description == "" {
 		next.Description = next.Prompt
-	}
-	// Normalize the merged node once, after all field branches: whichever
-	// field this PATCH touched, the home lane never appears in the
-	// interchange list. The also_lanes branch above dedupes only against the
-	// incoming state, so assigning lane_id after also_lanes (direct API use)
-	// would otherwise persist a station that interchanges with itself and
-	// draws a bogus ring.
-	if next.LaneID != "" && len(next.AlsoLanes) > 0 {
-		also := make([]string, 0, len(next.AlsoLanes))
-		for _, l := range next.AlsoLanes {
-			if l != next.LaneID {
-				also = append(also, l)
-			}
-		}
-		if len(also) == 0 {
-			also = nil
-		}
-		next.AlsoLanes = also
 	}
 	if err := a.appendRecord(storeRecord{Type: "node", Node: &next}); err != nil {
 		a.mu.Unlock()
@@ -1875,6 +1821,45 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	*n = next
 	a.mu.Unlock()
 	writeJSON(w, next)
+}
+
+// handleExitNode implements /exit: the deliberate "ended" head state. Unlike
+// delete, the node stays on the map (dead-end ⊣ cap, visible and rideable); unlike
+// a mechanical process exit, this is a user decision recorded durably. Order
+// mirrors delete — persist the intent (the ended node record) before tearing the
+// process down, so a crash between the two never loses the closed marker; then
+// stop the owned process via the same closeOwned path delete uses.
+func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	a.mu.Lock()
+	cur, ok := a.byID[n.ID]
+	if !ok {
+		a.mu.Unlock()
+		http.Error(w, "not found", 404)
+		return
+	}
+	if cur.EndedAt == "" {
+		next := *cur
+		next.EndedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := a.appendRecord(storeRecord{Type: "node", Node: &next}); err != nil {
+			a.mu.Unlock()
+			http.Error(w, "persist node: "+err.Error(), 500)
+			return
+		}
+		*cur = next
+	}
+	a.mu.Unlock()
+	// Best-effort process teardown: the thread is already marked ended in the
+	// durable store, so a failure to reach the agent must not un-end it — the
+	// node stays visibly closed regardless.
+	if err := a.closeOwned(n); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: exit of %s marked ended but failed to close the agent: %v\n", n.ID, err)
+	}
+	writeJSON(w, *n)
 }
 
 func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
@@ -2407,7 +2392,7 @@ func (a *app) retireTranscript(n *Node) {
 		logPath := a.sessionLogPath(n.ID)
 		if _, err := os.Stat(logPath); err == nil {
 			w := &sessionlog.Writer{Path: logPath}
-			if err := w.Append(sessionlog.NewSource("", "")); err != nil {
+			if err := w.Append(sessionlog.NewClearSource()); err != nil {
 				fmt.Fprintf(os.Stderr, "scimux: clear seam for %s: %v\n", n.ID, err)
 			}
 		}
@@ -3107,6 +3092,7 @@ func main() {
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
 	mux.HandleFunc("PATCH /api/nodes/{id}", a.handleUpdateNode)
 	mux.HandleFunc("DELETE /api/nodes/{id}", a.handleDeleteNode)
+	mux.HandleFunc("POST /api/nodes/{id}/exit", a.handleExitNode)
 	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
 	mux.HandleFunc("POST /api/nodes/{id}/attachments", a.handleUploadAttachments)

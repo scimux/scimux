@@ -379,8 +379,49 @@ func TestHandleNodeLaneAssignmentIsOneWay(t *testing.T) {
 	}
 }
 
-func TestHandleNodeInterchangeAndService(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"T": true}}
+// The lane is set-once (immutable once assigned); title and description stay
+// mutable. Interchange and Service are gone — the model derives topology from
+// forks, not hand-tagged fields.
+func TestHandleNodeLaneImmutableAndEditable(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`) // no lane yet
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleUpdateNode(up, req)
+		return up
+	}
+
+	// First assignment sets the lane; a second, different value is rejected.
+	if up := patch(`{"lane_id":"lane-a"}`); up.Code != 200 {
+		t.Fatalf("assign lane: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].LaneID; got != "lane-a" {
+		t.Fatalf("lane_id = %q, want lane-a", got)
+	}
+	if up := patch(`{"lane_id":"lane-b"}`); up.Code != 409 {
+		t.Fatalf("reassign lane: code = %d, want 409", up.Code)
+	}
+
+	// Title and description remain mutable.
+	if up := patch(`{"title":"Renamed","description":"why"}`); up.Code != 200 {
+		t.Fatalf("edit title/desc: code = %d body %q", up.Code, up.Body.String())
+	}
+	if a.nodes[0].Title != "Renamed" || a.nodes[0].Description != "why" {
+		t.Fatalf("title/desc = %q/%q", a.nodes[0].Title, a.nodes[0].Description)
+	}
+}
+
+// /exit marks a thread ended (dead-end cap) and stops its process, but keeps
+// the node on the map — unlike delete, which removes it.
+func TestHandleExitNodeMarksEndedAndKeepsNode(t *testing.T) {
+	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
 	if rec.Code != 200 {
@@ -388,75 +429,28 @@ func TestHandleNodeInterchangeAndService(t *testing.T) {
 	}
 	id := a.nodes[0].ID
 
-	patch := func(body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
-		req.SetPathValue("id", id)
-		up := httptest.NewRecorder()
-		a.handleUpdateNode(up, req)
-		return up
+	req := httptest.NewRequest("POST", "/api/nodes/"+id+"/exit", nil)
+	req.SetPathValue("id", id)
+	up := httptest.NewRecorder()
+	a.handleExitNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("exit: code = %d body %q", up.Code, up.Body.String())
 	}
-
-	// Interchange list is deduplicated, the home lane is silently dropped,
-	// and the list stays mutable (full replacement each time).
-	if up := patch(`{"also_lanes":["lane-b","lane-a","lane-b"," lane-c "]}`); up.Code != 200 {
-		t.Fatalf("set also_lanes: code = %d body %q", up.Code, up.Body.String())
+	n, ok := a.byID[id]
+	if !ok {
+		t.Fatal("node removed by /exit; want it to stay visible")
 	}
-	if got := a.nodes[0].AlsoLanes; len(got) != 2 || got[0] != "lane-b" || got[1] != "lane-c" {
-		t.Fatalf("also_lanes = %v, want [lane-b lane-c]", got)
+	if n.EndedAt == "" {
+		t.Fatal("ended_at not stamped")
 	}
-	if up := patch(`{"also_lanes":[]}`); up.Code != 200 {
-		t.Fatalf("clear also_lanes: code = %d body %q", up.Code, up.Body.String())
-	}
-	if got := a.nodes[0].AlsoLanes; len(got) != 0 {
-		t.Fatalf("also_lanes not cleared: %v", got)
-	}
-
-	// Service accepts the three rail states, normalizes through to the
-	// unmarked default, and rejects anything else.
-	if up := patch(`{"service":"siding"}`); up.Code != 200 {
-		t.Fatalf("set siding: code = %d body %q", up.Code, up.Body.String())
-	}
-	if got := a.nodes[0].Service; got != "siding" {
-		t.Fatalf("service = %q, want siding", got)
-	}
-	if up := patch(`{"service":"through"}`); up.Code != 200 {
-		t.Fatalf("set through: code = %d body %q", up.Code, up.Body.String())
-	}
-	if got := a.nodes[0].Service; got != "" {
-		t.Fatalf("service = %q, want empty (through)", got)
-	}
-	if up := patch(`{"service":"derailed"}`); up.Code != 400 {
-		t.Fatalf("bad service: code = %d, want 400", up.Code)
-	}
-}
-
-// Assigning the home lane after also_lanes already contains it (reachable via
-// direct API use only — the rail editor requires a home lane first) must not
-// persist a station that interchanges with itself: the merged node is
-// normalized once after all field branches.
-func TestHandleNodeSelfInterchangeNormalized(t *testing.T) {
-	f := &fakeTmux{}
-	a := newTestApp(t, f)
-	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`) // no home lane yet
-	if rec.Code != 200 {
-		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
-	}
-	id := a.nodes[0].ID
-	patch := func(body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
-		req.SetPathValue("id", id)
-		up := httptest.NewRecorder()
-		a.handleUpdateNode(up, req)
-		return up
-	}
-	if up := patch(`{"also_lanes":["lane-x","lane-y"]}`); up.Code != 200 {
-		t.Fatalf("set also_lanes: code = %d body %q", up.Code, up.Body.String())
-	}
-	if up := patch(`{"lane_id":"lane-x"}`); up.Code != 200 {
-		t.Fatalf("assign lane: code = %d body %q", up.Code, up.Body.String())
-	}
-	if got := a.nodes[0].AlsoLanes; len(got) != 1 || got[0] != "lane-y" {
-		t.Fatalf("also_lanes = %v, want [lane-y] (home lane stripped)", got)
+	// Idempotent: a second /exit keeps the original stamp and does not error.
+	first := n.EndedAt
+	up2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/nodes/"+id+"/exit", nil)
+	req2.SetPathValue("id", id)
+	a.handleExitNode(up2, req2)
+	if up2.Code != 200 || a.byID[id].EndedAt != first {
+		t.Fatalf("second exit: code = %d ended_at = %q want %q", up2.Code, a.byID[id].EndedAt, first)
 	}
 }
 

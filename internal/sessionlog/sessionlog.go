@@ -92,11 +92,24 @@ type MetaEvent struct {
 type SourceEvent struct {
 	Path      string `json:"path"`
 	SessionID string `json:"sessionId,omitempty"`
+	// Reason distinguishes a deliberate /clear page-turn ("clear") from the
+	// mechanical (re)binds — initial mirror bind, relink, rotation — that also
+	// emit a source seam. Empty means a mechanical bind. Only "clear" seams are
+	// genuine stop boundaries a chain renderer should split on; without this the
+	// two are indistinguishable (a heavily relinked thread would draw dozens of
+	// bogus stops). Absent on every pre-existing seam, so replay is unchanged.
+	Reason string `json:"reason,omitempty"`
 }
 
-// NewSource builds a seam record for a (re)bound transcript file.
+// NewSource builds a seam record for a (re)bound transcript file (mechanical).
 func NewSource(path, sessionID string) Event {
 	return Event{T: "source", Source: &SourceEvent{Path: path, SessionID: sessionID}}
+}
+
+// NewClearSource builds the path-less "detached" seam appended when a /clear
+// turns the page, tagged so a chain renderer can tell it from a relink/rotation.
+func NewClearSource() Event {
+	return Event{T: "source", Source: &SourceEvent{Reason: "clear"}}
 }
 
 // MarkEvent records how far the transcript mirror has consumed its current
