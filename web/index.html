@@ -2456,6 +2456,7 @@ $("#maptoolbar").addEventListener("click", e => {
     const st = mapSelStop;   /* setMapFull clears it — read before */
     select(j.dataset.jump);
     if (st) loadChatHistory(j.dataset.jump, st);
+    else jumpChatToNow();    /* head station = "go to now" */
     setMapFull(false);
     return;
   }
@@ -2997,6 +2998,7 @@ $("#mapwrap").addEventListener("click", e => {
     else {
       select(r.dataset.nid);
       if (st) loadChatHistory(r.dataset.nid, st);
+      else jumpChatToNow();   /* head station = "go to now" */
       if (!isDesktop()) setLevel(1);
     }
   }
@@ -3335,9 +3337,25 @@ async function loadChatHistory(id, scrollTo){
     const d = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
     if (sel !== id) return;   /* user moved on while it loaded */
     chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "seam" };
+    chatScrollBottom = false;   /* riding back wins over a pending "go to now" */
     chatSig = "";
     refreshChat();
   } catch (err) { alert(err.message); }
+}
+/* head-station tap = "go to now": a deterministic jump to the chat's newest
+   turn. The atBottom heuristic can't do this — after a past-stop ride-back
+   the view is parked at a seam (not at the bottom), and re-selecting the
+   same node often changes no render signature at all. */
+let chatScrollBottom = false;
+function jumpChatToNow(){
+  chatHist.scrollTo = "";       /* a pending ride-back yields to the newer intent */
+  /* select() clears chatSig only on a node switch — so a non-empty sig means
+     the chat on screen is already this node's: jump immediately and leave no
+     flag behind (a lingering flag would yank a user who scrolled up right
+     after). On a switch the content isn't there yet; the flag is consumed by
+     the next render. */
+  if (chatSig) $("#msgs").scrollTop = $("#msgs").scrollHeight;
+  else chatScrollBottom = true;
 }
 async function refreshChat(){
   const n = nodeById(sel);
@@ -3447,7 +3465,12 @@ async function refreshChat(){
                hist ? "h" + priorSegs.length : "",
                hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
                hashStr(peekText)].join("|");
-  if (sig === chatSig) return;
+  if (sig === chatSig){
+    /* nothing re-rendered, but a "go to now" tap may still be pending
+       (jumpChatToNow's immediate jump can race an in-flight render) */
+    if (chatScrollBottom){ const m = $("#msgs"); m.scrollTop = m.scrollHeight; chatScrollBottom = false; }
+    return;
+  }
   chatSig = sig;
   lastTurns = turns;
 
@@ -3539,6 +3562,7 @@ async function refreshChat(){
     if (target){ target.scrollIntoView({ block: t === "seam" ? "end" : "start" }); histScrolled = true; }
     chatHist.scrollTo = "";
   }
+  if (chatScrollBottom){ el.scrollTop = el.scrollHeight; chatScrollBottom = false; histScrolled = true; }
   if (!histScrolled && !consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
   const pk = el.querySelector(".peek");
   if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
