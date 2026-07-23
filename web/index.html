@@ -783,6 +783,10 @@ body.cards-open #msgs { overflow: hidden; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9; }
 .strow .forkcue:hover { opacity: 1; text-decoration: underline; }
 .strow.dimmed { opacity: .32; }
+/* history stop (a /clear-closed segment): dim, minimal — the head row above
+   it carries the thread's full label and status */
+.strow.stoprow { opacity: .55; }
+.strow.stoprow .lbl { color: var(--dim); font-weight: 400; font-size: 13px; }
 .strow.dead .lbl { color: var(--dim); font-weight: 400; }
 .strow.originflash { box-shadow: inset 0 0 0 2px var(--work); border-radius: 6px; }
 /* wall map: persistent selection marker on the open/selected station (the
@@ -2318,8 +2322,22 @@ function forkCueHTML(n, lm){
   return `<div class="forkcue" data-goorigin="${esc(p.id)}" style="color:${col}"
             title="jump to the fork origin">&#9282; ${kindLabel} &middot; from &ldquo;${esc(p.title)}&rdquo;${laneSuffix}</div>`;
 }
-function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork }){
-  const when = fmtStamp(n.created_at);
+function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, stop }){
+  /* a history stop (a segment closed by a later /clear) renders as a dim
+     minimal row: the thread's title for orientation plus when that stop began.
+     It still carries data-nid, so tapping it selects/opens the thread — riding
+     back through the history is the chat's scrollback, not the map's. */
+  if (stop && !stop.head)
+    return `
+        <div class="strow stoprow ${dim ? "dimmed" : ""}" style="padding-left:${padLeft}px" data-nid="${esc(n.id)}">
+          <div class="lbl"><span class="t">${esc(n.title)}</span></div>
+          <div class="cap">${esc(fmtStamp(stop.time))} &middot; earlier stop (before /clear)</div>
+        </div>`;
+  /* a multi-stop head is positioned by its current stop's start, so its
+     caption leads with that time; created_at stays the thread-start anchor
+     for single-stop threads */
+  const when = stop && stop.i > 0
+    ? `${fmtStamp(stop.time)} · stop ${stop.i + 1}` : fmtStamp(n.created_at);
   const desc = n.description || n.prompt || "";   /* same fallback as the card summary */
   /* the selected station keeps only a "you are here" highlight; its actions
      live in the floating map toolbar (HIG deference — controls never cover the
@@ -2456,6 +2474,32 @@ function forkKind(n){
     (x.created_at || "") < (n.created_at || ""));
   return priorInDest ? "s" : "y-new";
 }
+/* ---------- stops: a station is one /clear-delimited segment, not a whole
+   thread (metro-map-design.md state machine). The server sends n.stops = the
+   clear-tagged seam times only (relink/rotation noise never adds stations);
+   creation is the first stop, each /clear prolongs the thread's line by one.
+   The newest stop is the thread's head — it carries the full label row and
+   the live/attention/cap glyphs; older stops are dim history dots ("ride
+   back = open the chat and scroll up"). */
+const stampMS = t => { const v = Date.parse(t || ""); return isNaN(v) ? 0 : v; };
+function stopTimes(n){ return [n.created_at || "", ...(n.stops || [])]; }
+function stopsOf(n){
+  const ts = stopTimes(n);
+  return ts.map((t, i) => ({ n, i, time: t, head: i === ts.length - 1 }));
+}
+const stopKey = s => s.n.id + "#" + s.i;
+const newestFirst = (a, b) => stampMS(b.time) - stampMS(a.time) ||
+  (b.time || "").localeCompare(a.time || "");
+/* the parent stop a fork grew from: the newest stop that already existed when
+   the child was created (the spec's legacy fallback — no per-edge stop refs
+   are recorded yet, so the containing stop is derived from timestamps) */
+function parentStopIndex(p, childCreated){
+  const ts = stopTimes(p), c = stampMS(childCreated);
+  let idx = 0;
+  for (let i = 1; i < ts.length; i++)
+    if (c && stampMS(ts[i]) <= c) idx = i;
+  return idx;
+}
 function renderMap(){
   if (!mapVisible()) return;
   const lm = laneModel();
@@ -2476,13 +2520,16 @@ function renderMap(){
      with a ⇄ chip to the other line. Recency rules at both levels: blocks
      float up by their newest pane activity (attention outranks recency),
      stations are newest-first within their journey. */
+  /* rows are STOPS, not threads: each /clear-delimited segment is one
+     station, newest-first by its start time — so a fresh /clear surfaces on
+     top, exactly like a fresh thread */
   const blocks = lm.lanes.filter(l => inGroup(l.id)).map(l => ({
     lane: l,
     rows: stations.filter(n => served(n).includes(l.id))
-      .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")),
+      .flatMap(stopsOf).sort(newestFirst),
   })).filter(b => b.rows.length);
-  const lastAct = b => Math.max(0, ...b.rows.map(n => n.last_activity || 0));
-  const hasAttn = b => b.rows.some(n => n.attention) ? 1 : 0;
+  const lastAct = b => Math.max(0, ...b.rows.map(s => s.n.last_activity || 0));
+  const hasAttn = b => b.rows.some(s => s.n.attention) ? 1 : 0;
   blocks.sort((a, b) => hasAttn(b) - hasAttn(a) || lastAct(b) - lastAct(a));
 
   /* the signature must cover every rendered field — a description edit (or a
@@ -2491,8 +2538,10 @@ function renderMap(){
      repaint doesn't fire every tick. */
   const sig = JSON.stringify(blocks.map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
       mapFold.has(b.lane.id), hasAttn(b),
-      b.rows.map(n => [n.id, n.title, n.description || n.prompt || "", n.rationale,
-        n.agent, n.model, n.lane_id, n.parent || "", n.ended_at || "", n.live, n.attention])]))
+      b.rows.map(s => [stopKey(s), s.time, s.head, s.n.title,
+        s.n.description || s.n.prompt || "", s.n.rationale,
+        s.n.agent, s.n.model, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
+        s.n.live, s.n.attention])]))
     + "|" + focusLane + "|" + mapTab + "|" + mapFull;
   if (sig === mapSig) return;
   mapSig = sig;
@@ -2513,7 +2562,7 @@ function renderMap(){
         ${mapFull ? "" : `<span class="chev">${folded ? "&#9656;" : "&#9662;"}</span>`}
         <span class="lswatch" style="background:${col}"></span>
         <span class="lname">${esc(b.lane.name || b.lane.id)}</span>
-        <span class="lcount">${b.rows.length}</span>
+        <span class="lcount">${new Set(b.rows.map(s => s.n.id)).size}</span>
         ${hasAttn(b) ? `<span class="lattn"></span>` : ""}
       </button>`;
     if (folded) return `<div class="lblock" data-lane="${esc(b.lane.id)}">${head}</div>`;
@@ -2522,18 +2571,26 @@ function renderMap(){
     if (b.rows.length > 1)
       svg += `<line x1="${LX}" y1="${y(0)}" x2="${LX}" y2="${y(b.rows.length - 1)}"
               stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${dimBlock ? .22 : 1}"/>`;
-    b.rows.forEach((n, i) => {
+    b.rows.forEach((s, i) => {
+      const n = s.n;
       const yy = y(i);
       const op = dimRow(n) ? .25 : 1;
       const dotX = LX;
       /* fork spur: a short branch tick off the dot marks a fork point, colored
          by the same rule the wall map uses for the crossover (y-new → own lane,
          S/y-stay → origin lane). Drawn before the dot so the dot sits on top.
-         The caption below the row (forkCueHTML) carries the origin + kind. */
-      const fk = forkKind(n);
+         The caption below the row (forkCueHTML) carries the origin + kind.
+         The fork happened at creation, so the spur rides the FIRST stop. */
+      const fk = s.i === 0 && forkKind(n);
       if (fk){
         const fcol = esc(lm.color(fk === "y-new" ? n.lane_id : (nodeById(n.parent)?.lane_id || b.lane.id)));
         svg += `<path d="M ${dotX} ${yy} q 9 -2 14 -9" fill="none" stroke="${fcol}" stroke-width="2.5" stroke-linecap="round" opacity="${op}"/>`;
+      }
+      /* a history stop (segment closed by a later /clear) is a plain small
+         dot — the /clear itself is a non-event, the line just continues */
+      if (!s.head){
+        svg += `<circle cx="${dotX}" cy="${yy}" r="4" fill="${col}" opacity="${op * .8}"/>`;
+        return;
       }
       /* dead-end ⊣ cap: a thread deliberately closed via /exit (co-encoded with
          the card's "Closed" label). A station is on exactly one lane now — no
@@ -2550,12 +2607,13 @@ function renderMap(){
 
     return `<div class="lblock" data-lane="${esc(b.lane.id)}">${head}<div class="lbody">
       <svg width="${LW}" height="${b.rows.length * RH}" viewBox="0 0 ${LW} ${b.rows.length * RH}">${svg}</svg>
-      ${b.rows.map(n => stationRowHTML(n, lm, {
+      ${b.rows.map(s => stationRowHTML(s.n, lm, {
         padLeft: LW + 12,
         others: [],
-        dim: dimRow(n),
+        dim: dimRow(s.n),
         golane: true,
         fork: true,
+        stop: s,
       })).join("")}
     </div></div>`;
   }).join("") || `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
@@ -2612,18 +2670,19 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   const colLanes = lm.lanes.filter(l => inGroup(l.id));
   const cols = laneColumnOrder(colLanes, stations, lm.byId);
   const colIdx = {}; cols.forEach((id, c) => colIdx[id] = c);
-  const rows = stations.slice()
-    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  /* rows are STOPS (one per /clear-delimited segment), globally newest-first
+     by stop start — a fresh /clear surfaces its thread's head at the top */
+  const rows = stations.flatMap(stopsOf).sort(newestFirst);
 
   const sig = "wall|" + cols.join(",") + "|" + focusLane + "|" + mapTab + "|" +
     mapSel + "|" + (fareOn ? "F" : "") + "|" +
-    JSON.stringify(rows.map(n => [n.id, n.created_at, n.title,
-      n.description || n.prompt || "", n.rationale, n.agent, n.model,
-      n.lane_id, n.parent || "", n.ended_at || "", n.live, n.attention,
-      n.ctx_pct == null ? -1 : n.ctx_pct,
+    JSON.stringify(rows.map(s => [stopKey(s), s.time, s.head, s.n.created_at,
+      s.n.title, s.n.description || s.n.prompt || "", s.n.rationale, s.n.agent,
+      s.n.model, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
+      s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
       /* last_activity drives the fare line's "last"/"elapsed"; keep it out of
          the sig unless fare is on, so an idle map does not repaint each poll */
-      fareOn ? (n.last_activity || 0) : 0]));
+      fareOn ? (s.n.last_activity || 0) : 0]));
   if (sig === mapSig) return;
   mapSig = sig;
 
@@ -2642,11 +2701,11 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     return;
   }
 
-  const rowIdx = {}; rows.forEach((n, i) => rowIdx[n.id] = i);
+  const rowIdx = {}; rows.forEach((s, i) => rowIdx[stopKey(s)] = i);
 
   /* lane line spans every dot on its column (single membership now — no lifts) */
   const touch = {}; cols.forEach(id => touch[id] = []);
-  rows.forEach((n, i) => { if (colIdx[n.lane_id] != null) touch[n.lane_id].push(rowY(i)); });
+  rows.forEach((s, i) => { if (colIdx[s.n.lane_id] != null) touch[s.n.lane_id].push(rowY(i)); });
 
   let svg = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
@@ -2665,10 +2724,15 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
      parent dot up to the child dot, coloured by the origin (parent) lane — or,
      when the child lane springs into existence at the split (Y-new, its only
      station), coloured by the new child lane. Missing parent (deleted) → no glyph. */
-  rows.forEach((n, ci) => {
+  rows.forEach((s, ci) => {
+    if (s.i !== 0) return;   /* the fork landed at the child's creation stop */
+    const n = s.n;
     const p = n.parent && lm.byId[n.parent];
     if (!p) return;
-    const cc = colIdx[n.lane_id], cp = colIdx[p.lane_id], pi = rowIdx[p.id];
+    /* anchor at the parent stop that contained the fork (the newest stop
+       already open when the child was created), not blindly at its head */
+    const cc = colIdx[n.lane_id], cp = colIdx[p.lane_id],
+      pi = rowIdx[p.id + "#" + parentStopIndex(p, n.created_at)];
     if (cc == null || cp == null || pi == null) return;
     const xC = colX(cc), yC = rowY(ci), xP = colX(cp), yP = rowY(pi);
     const ym = (yP + yC) / 2, op = dimNode(n) ? .25 : 1;
@@ -2686,11 +2750,18 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     }
   });
   /* 3. home station glyphs (on top) */
-  rows.forEach((n, i) => {
+  rows.forEach((s, i) => {
+    const n = s.n;
     const a = n.lane_id; if (colIdx[a] == null) return;
     const x = colX(colIdx[a]), yy = rowY(i), col = esc(lm.color(n.lane_id));
     const op = dimNode(n) ? .25 : 1;
     let dotX = x;
+    /* a history stop (segment closed by a later /clear) is a plain small
+       dot — the /clear itself is a non-event, the line just continues */
+    if (!s.head){
+      svg += `<circle cx="${dotX}" cy="${yy}" r="4" fill="${col}" opacity="${op * .8}"/>`;
+      return;
+    }
     /* dead-end ⊣ cap: a thread deliberately closed via /exit. A perpendicular
        buffer bar at the head (top = newest), co-encoded with the "Closed" label. */
     if (n.ended_at)
@@ -2722,12 +2793,13 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   $("#mapwrap").innerHTML = `<div class="lbody wallbody">
     <svg width="${colsW}" height="${svgH}" viewBox="0 0 ${colsW} ${svgH}">${svg}</svg>
     <div style="height:${OFF}px"></div>
-    ${rows.map(n => stationRowHTML(n, lm, {
+    ${rows.map(s => stationRowHTML(s.n, lm, {
       padLeft: colsW + GAP,
       others: [],
-      dim: dimNode(n),
+      dim: dimNode(s.n),
       golane: false,
-      current: n.id === mapSel,
+      current: s.head && s.n.id === mapSel,
+      stop: s,
     })).join("")}
   </div>`;
   renderLaneChips(lm, inGroup, focusLane);
@@ -4441,8 +4513,13 @@ function fillAgents(){
     `<option>${esc(a)}</option>`).join("");
 }
 function fillModels(){
+  /* the empty option means "no explicit model" — for a same-agent fork the
+     server inherits the parent's model there, so label it honestly */
+  const p = nodeById(ncParent);
+  const dflt = p && p.agent === $("#nc_agent").value && p.model
+    ? `(inherit: ${esc(p.model)})` : "(default)";
   $("#nc_model").innerHTML = (MODELS[$("#nc_agent").value] || [""]).map(m =>
-    `<option value="${esc(m)}">${esc(m) || "(default)"}</option>`).join("");
+    `<option value="${esc(m)}">${esc(m) || dflt}</option>`).join("");
 }
 $("#nc_agent").addEventListener("change", fillModels);
 fillAgents(); fillModels();
@@ -4453,27 +4530,38 @@ api("/api/agents").then(j => {
     MODELS[agent] = ["", ...models];   /* "" = launch with the harness default */
   fillAgents(); fillModels();
 }).catch(() => {});
-/* prepareLaunchConfig: fork mode shows the parent's launch config read-only
-   (same pattern as the inherited lane); the payload sends those fields empty
-   so resolveNode stays the single inheritance authority. A plain + restores
-   the editable selectors with the detected agent/model lists. */
+/* prepareLaunchConfig: fork is the one path that may change launch config
+   (a fork inherits agent/model/effort/dir but never conversation history —
+   AGENTS.md). So the selectors stay EDITABLE in fork mode and merely start on
+   the parent's values: "same setup, fresh context" is zero taps, "same thread
+   on a different agent/model" is a real choice. The payload sends the visible
+   values; resolveNode backfills anything left empty from the parent. */
 function prepareLaunchConfig(){
+  fillAgents(); fillModels();
   const p = nodeById(ncParent);
   if (p){
-    $("#nc_agent").innerHTML = `<option>${esc(p.agent || "")}</option>`;
-    $("#nc_model").innerHTML = `<option>${esc(p.model) || "(default)"}</option>`;
+    const ag = $("#nc_agent");
+    /* the probe list may lack the parent's agent (CLI not installed here) —
+       keep the inherited value selectable instead of silently switching */
+    if (p.agent && ![...ag.options].some(o => o.value === p.agent))
+      ag.insertAdjacentHTML("beforeend", `<option>${esc(p.agent)}</option>`);
+    if (p.agent) ag.value = p.agent;
+    fillModels();   /* the model list follows the (possibly re-set) agent */
+    const mo = $("#nc_model");
+    if (p.model && ![...mo.options].some(o => o.value === p.model))
+      mo.insertAdjacentHTML("beforeend", `<option value="${esc(p.model)}">${esc(p.model)}</option>`);
+    mo.value = p.model || "";
     $("#nc_effort").value = $("#nc_effort").querySelector(`option[value="${esc(p.effort || "")}"]`) ? (p.effort || "") : "";
     $("#nc_dir").value = p.dir || "";
-  } else if ($("#nc_agent").disabled){  /* leaving fork mode: rebuild the real lists */
-    fillAgents(); fillModels();
+  } else {
     $("#nc_effort").value = "";
     $("#nc_dir").value = "";
   }
   for (const id of ["#nc_agent", "#nc_model", "#nc_effort", "#nc_dir"]){
     const el = $(id);
-    el.disabled = !!p;
-    /* this is the authoritative state — the sheet-open re-enable must not
-       undo a fork-mode read-only control (setSheetActive's marker) */
+    el.disabled = false;
+    /* authoritative state — the sheet-open re-enable must not fight it
+       (setSheetActive's marker) */
     delete el.dataset.sheetDisabledByClose;
   }
 }
@@ -4584,12 +4672,13 @@ $("#nc_start").addEventListener("click", async () => {
     title,
     description,
     prompt: description || title,
-    /* fork mode sends the launch config empty: resolveNode inherits from the
-       parent, and the disabled selectors only display those inherited values */
-    agent: ncParent ? "" : $("#nc_agent").value,
-    model: ncParent ? "" : $("#nc_model").value,
-    effort: ncParent ? "" : $("#nc_effort").value,
-    dir: ncParent ? "" : $("#nc_dir").value.trim(),
+    /* fork mode: the selectors start on the parent's values but stay
+       editable — send what is visible; resolveNode backfills only empty
+       fields from the parent */
+    agent: $("#nc_agent").value,
+    model: $("#nc_model").value,
+    effort: $("#nc_effort").value,
+    dir: $("#nc_dir").value.trim(),
     /* set by "New activity from here…": fresh-context fork off the evidence */
     parent: ncParent,
     rationale: ncParent ? "follow-up on: " + ncRationale : "",

@@ -671,26 +671,32 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		if n.Agent == "" {
 			n.Agent = p.Agent
 		}
-		if n.Model == "" {
-			n.Model = p.Model
-		}
-		if n.Effort == "" {
-			n.Effort = p.Effort
+		// Model, effort, and transport are meaningful only for the parent's
+		// agent: a fork that switches agents must fall through to that agent's
+		// own defaults instead of dragging an incompatible model name (or the
+		// parent's tmux transport) across the switch.
+		if n.Agent == p.Agent {
+			if n.Model == "" {
+				n.Model = p.Model
+			}
+			if n.Effort == "" {
+				n.Effort = p.Effort
+			}
+			// Same mechanism as the parent. Use the migrated value, not the
+			// raw field: an old or adopted pi/opencode parent with an empty
+			// Transport means tmux, so the child must resolve to tmux too
+			// rather than falling through to the agent-derived ACP default
+			// below (finding 54). Derivation only fires when neither the
+			// request nor a same-agent parent pinned a transport.
+			if n.Transport == "" {
+				n.Transport = p.transport()
+			}
 		}
 		if n.Dir == "" {
 			n.Dir = p.Dir
 		}
 		if n.LaneID == "" {
 			n.LaneID = p.LaneID
-		}
-		// A fork inherits the parent's transport (fresh context, same
-		// mechanism). Use the migrated value, not the raw field: an old or
-		// adopted pi/opencode parent with an empty Transport means tmux, so the
-		// child must resolve to tmux too rather than falling through to the
-		// agent-derived ACP default below (finding 54). Derivation only fires
-		// when neither the request nor a parent pinned a transport.
-		if n.Transport == "" {
-			n.Transport = p.transport()
 		}
 		// Classify the fork now, against the destination lane's current
 		// membership, so the map never re-derives it from mutable sibling
@@ -1551,6 +1557,10 @@ type nodeView struct {
 	// congestion gauge. A pointer so absent (dead node / no usage yet) is
 	// distinct from a genuine 0%.
 	CtxPct *int `json:"ctx_pct,omitempty"`
+	// Stops are the timestamps of the node's /clear page-turns (clear-tagged
+	// seams only), oldest first. The metro map prepends the node's creation to
+	// get the full stop chain: creation plus each /clear is one station.
+	Stops []string `json:"stops,omitempty"`
 }
 
 func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
@@ -1589,10 +1599,14 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	// node whose log is unchanged re-parses nothing.
 	for i := range views {
 		v := &views[i]
-		if v.Live == "exited" || v.Live == "unavailable" {
-			continue
-		}
+		// Every node reports its stop chain (the map draws stations for dead
+		// threads too); segment() is cache-backed, so this costs a stat per
+		// node while the log is unchanged.
 		seg := a.segment(v.Node)
+		v.Stops = seg.ClearTimes
+		if v.Live == "exited" || v.Live == "unavailable" {
+			continue // gauge is live-only
+		}
 		win := ctxWindowFor(seg.Used, seg.Size, v.Node.Model)
 		if win <= 0 {
 			continue // no usage reported yet — no gauge, don't fake a 0

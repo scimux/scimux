@@ -26,6 +26,13 @@ type Segment struct {
 	// Usage folded from records within the segment only: a rollover starts a
 	// fresh context, so the gauge must not carry the dead session's fill.
 	Used, Size int64
+	// ClearTimes are the timestamps of the log's clear-tagged seams (deliberate
+	// /clear page-turns), oldest first — the metro map's stop boundaries. Only
+	// reason:"clear" seams count: mechanical binds (relink, rotation, adoption)
+	// also write source records, and a heavily relinked thread must not sprout
+	// bogus stations. Whole-log data, not segment-scoped, riding here so the
+	// existing per-node cache serves it for free.
+	ClearTimes []string
 }
 
 func segmentOf(evs []Event) Segment {
@@ -41,6 +48,9 @@ func segmentOf(evs []Event) Segment {
 			seg.Turns = seg.Turns[:0]
 			seg.StartTime = ev.Time
 			seg.Used, seg.Size = 0, 0
+			if ev.Source != nil && ev.Source.Reason == "clear" {
+				seg.ClearTimes = append(seg.ClearTimes, ev.Time)
+			}
 		case "user", "assistant":
 			// Same filter as ReadTurns: whitespace-only records render nothing.
 			if strings.TrimSpace(ev.Text) != "" {

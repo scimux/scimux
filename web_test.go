@@ -81,19 +81,29 @@ assert.strictEqual(md("p1 l1\np1 l2\n\np2"), "<p>p1 l1<br>p1 l2</p><p>p2</p>");
 	}
 }
 
-// Finding 98 contract: a fork must not submit the sheet's stale launch config.
-// The payload sends agent/model/effort/dir empty whenever a parent is set so
-// that resolveNode remains the single inheritance authority.
-func TestForkPayloadDefersLaunchConfigToServer(t *testing.T) {
+// Fork launch-config contract (supersedes finding 98's "send empty"): fork is
+// the one path that may CHANGE launch config, so the payload sends the visible
+// selector values in fork mode too. The staleness hazard finding 98 guarded
+// against is now closed at the source — prepareLaunchConfig rebuilds the
+// selectors and re-seeds them from the parent on every sheet open, so what is
+// visible is never a leftover from a previous open.
+func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
-	for _, field := range []string{"agent", "model", "effort", "dir"} {
-		if !strings.Contains(html, field+`: ncParent ? "" :`) {
-			t.Errorf("new-node payload field %q is not emptied in fork mode", field)
+	for _, field := range []string{"agent", "model", "effort"} {
+		if strings.Contains(html, field+`: ncParent ? "" :`) {
+			t.Errorf("new-node payload field %q is still emptied in fork mode", field)
 		}
+		if !strings.Contains(html, field+`: $("#nc_`+field+`").value`) {
+			t.Errorf("new-node payload field %q does not send the visible selector value", field)
+		}
+	}
+	// The per-open re-seed that replaces the old empty-payload staleness guard.
+	if !strings.Contains(html, "function prepareLaunchConfig(){\n  fillAgents(); fillModels();") {
+		t.Error("prepareLaunchConfig no longer rebuilds the selectors on open — stale-config guard lost")
 	}
 }
 
