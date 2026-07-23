@@ -916,8 +916,12 @@ body.notes-open #notespane { transform: translateX(0); }
      so there is no layout transition) — opacity-only is already the
      Reduce-Motion-safe form the design mandates, so one mechanism serves both;
      trimmed further under the reduced-motion query below. */
-  body.map-full #map { display: flex; width: auto; flex: 1; border-right: none;
-    animation: mapfade .26s ease; }
+  /* min-width:0 overrides the flex-item default (min-width:auto = content
+     width): the wall map's fixed-width SVG must scroll inside #mapscroll, not
+     widen #map past the viewport — body's overflow-x:clip would put the phead's
+     right edge (the shrink button) permanently off-screen */
+  body.map-full #map { display: flex; width: auto; flex: 1; min-width: 0;
+    border-right: none; animation: mapfade .26s ease; }
   body.map-full #cards, body.map-full #chat,
   body.map-full #notespane, body.map-full #noteflags { display: none; }
   #notespane { position: static; transform: none; transition: none;
