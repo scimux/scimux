@@ -260,8 +260,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-top: 1px solid var(--hairline);
 }
 .card.expanded .lanebox { display: block; }
-/* rail properties (read-only Journey + derived status) on the expanded card.
-   Nothing to hand-annotate: topology is derived from forks, status from /exit. */
+/* rail properties on the expanded card. Journey is read-only (set-once, colours
+   the whole topic); process state stays in the card meta line. */
 .card .railbox {
   display: none; margin-top: 10px; padding-top: 10px;
   border-top: 1px solid var(--hairline);
@@ -271,9 +271,6 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .railrow { display: flex; gap: 8px; align-items: center; min-height: 30px; }
 .railrow .k { font-size: 12px; color: var(--dim); width: 84px; flex: none; }
 .railrow select { margin-top: 0; }
-.thread-status { font-size: 13px; font-weight: 600; }
-.thread-status.live { color: var(--work); }
-.thread-status.closed { color: var(--dim); }
 .lanepick { display: flex; gap: 8px; align-items: center; }
 .lanepick select, .lanepick input { margin-top: 0; }
 .lanepick input[hidden] { display: none; }
@@ -796,10 +793,10 @@ body.cards-open #msgs { overflow: hidden; }
 /* the row height is fixed (the SVG's station y-positions depend on it), so the
    description gets one ellipsized line and the title yields to a single line
    whenever a description is present */
-.strow .desc { font-size: 12px; color: var(--dim); margin-top: 1px;
+.strow .desc { font-size: 12px; color: var(--dim); margin-top: 3px;
+  padding-top: 3px; border-top: 1px solid var(--hairline);
   line-height: 1.25; overflow: hidden; display: -webkit-box;
   -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.strow .cap + .desc { margin-top: 0; }
 .strow .lbl:has(+ .cap + .desc) .t { -webkit-line-clamp: 1; }
 .strow .cap { font-size: 11px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1913,7 +1910,7 @@ function cardState(n){
 }
 function statusText(n){
   // Closed is a deliberate, durable cap — it wins over mechanical liveness and
-  // any lingering attention flag, matching the expanded rail's "Closed" label.
+  // any lingering attention flag.
   if (n.ended_at) return "Closed";
   if (n.attention === "inspect") return "Quiet · check the terminal";
   if (n.attention) return `Waiting · needs your ${n.attention}`;
@@ -1921,6 +1918,15 @@ function statusText(n){
   if (n.live === "exited") return "Exited";
   if (n.live === "unavailable") return "Unavailable";
   return "Quiet";
+}
+function cardConfigText(n){
+  const parts = [n.model || "default"];
+  if (n.effort) parts.push(n.effort);
+  return parts.join("/");
+}
+function cardMetaHTML(n){
+  const state = statusText(n).toLowerCase();
+  return `${esc(cardConfigText(n))} · ${esc(state)} · ${cardTimeHTML(n)}`;
 }
 let cardTimeFlip = 0;
 const CARD_TIME_SWAP_MS = 30000;
@@ -2164,16 +2170,12 @@ function renderCards(){
 }
 
 /* Rail properties on the expanded card, shown once a Journey is set. The lane is
-   read-only (set-once, colours the whole topic). Status is derived, never tagged:
-   a thread is Live, or Closed once /exit caps it — nothing to hand-annotate. */
+   read-only (set-once, colours the whole topic). */
 function railboxHTML(n){
-  const closed = !!n.ended_at;
   return `<div class="railbox">
-      <div class="railrow"><span class="k">Journey</span>
+      <div class="railrow"><span class="k">Journey:</span>
         <span class="laneswatch" style="background:${esc(laneColor(n.lane_id))}"></span>
         <span>${esc(laneName(n.lane_id))}</span></div>
-      <div class="railrow"><span class="k">Status</span>
-        <span class="thread-status ${closed ? "closed" : "live"}">${closed ? "Closed" : "Live"}</span></div>
     </div>`;
 }
 
@@ -2192,6 +2194,7 @@ function cardHTML(n){
         <button class="save-desc" data-save-desc="${esc(n.id)}" aria-label="save description">${ICON_CHECK}</button>
         <button class="chev" data-x="${esc(n.id)}" aria-label="summary">&#8250;</button>
       </div>
+      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${cardMetaHTML(n)}</span></div>
       ${!n.lane_id ? `<div class="lanebox" data-card-lane="${esc(n.id)}">
         <div class="lanepick">
           <span class="laneswatch"></span>
@@ -2199,7 +2202,6 @@ function cardHTML(n){
         </div>
         <input data-lane-new="${esc(n.id)}" hidden placeholder="New lane name">
       </div>` : railboxHTML(n)}
-      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · ${cardTimeHTML(n)}</div>
       <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
       <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
       <div class="actions">
@@ -2492,7 +2494,7 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, st
         <div class="strow ${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${esc(n.id)}"${stop ? ` data-skey="${esc(stopKey(stop))}"` : ""}>
           <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(n.title)}</span>${fork ? forkCueHTML(n, lm) : ""}</div>
-          <div class="cap">${esc(when)} · ${esc([n.agent, n.model, n.effort].filter(Boolean).join(" · "))} · ${esc(statusText(n))}${
+          <div class="cap">${esc(when)} · ${esc(cardConfigText(n))} · ${esc(statusText(n))}${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${esc(l)}"` : ""} style="color:${esc(lm.color(l))}">&#8644; ${esc(lm.name(l))}</span>`).join("")}</div>
           ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
           ${fareLineHTML(n)}
@@ -2702,7 +2704,7 @@ function renderMap(){
   blocks.sort((a, b) => byNameID(a.lane, b.lane));
 
   /* the signature must cover every rendered field — a description edit (or a
-     model/rationale change) has to repaint the station rows. Block order is
+     model/effort change) has to repaint the station rows. Block order is
      covered by array position; last_activity itself stays out so an idle
      repaint doesn't fire every tick. */
   const sig = JSON.stringify(blocks.map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
