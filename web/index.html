@@ -1961,11 +1961,23 @@ function cardTimeHTML(n){
   }
   return `<span class="time" title="${esc(cardTimeTitle(n))}">${esc(txt)}</span>`;
 }
+function cardCreatedMS(n){
+  const v = Date.parse(n.created_at || "");
+  return isNaN(v) ? 0 : v;
+}
+function cardInteractionMS(n){
+  return n.last_interaction || 0;
+}
 function orderedNodes(){
   return [...nodes].sort((a, b) => {
     const aa = hardAttention(a) ? 1 : 0, ba = hardAttention(b) ? 1 : 0;
     if (aa !== ba) return ba - aa;
-    return (b.last_activity || 0) - (a.last_activity || 0);
+    const freshA = !(a.last_activity || 0), freshB = !(b.last_activity || 0);
+    if (freshA !== freshB) return freshA ? -1 : 1;
+    if (freshA && freshB) return cardCreatedMS(b) - cardCreatedMS(a);
+    return cardInteractionMS(b) - cardInteractionMS(a) ||
+      (b.last_activity || 0) - (a.last_activity || 0) ||
+      cardCreatedMS(b) - cardCreatedMS(a);
   });
 }
 const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#FF9500","#FF2D55","#00C7BE"];

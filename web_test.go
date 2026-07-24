@@ -312,6 +312,49 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 	}
 }
 
+func TestActivityCardOrderPinsAttentionThenFreshCards(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "const hardAttention = ")
+	if start < 0 {
+		t.Fatal("could not locate hardAttention in web/index.html")
+	}
+	end := strings.Index(html[start:], "const LANE_COLORS")
+	if end < 0 {
+		t.Fatal("could not locate the end of orderedNodes in web/index.html")
+	}
+	script := `let nodes = [];
+` + html[start:start+end] + `
+const assert = require("assert");
+nodes = [
+  {id:"active-older", last_activity: 900, last_interaction: 200, created_at:"2026-01-04T00:00:00Z"},
+  {id:"newer-fresh", created_at:"2026-01-06T00:00:00Z"},
+  {id:"active-newer", last_activity: 300, last_interaction: 800, created_at:"2026-01-01T00:00:00Z"},
+  {id:"never-touched", last_activity: 700, created_at:"2026-01-03T00:00:00Z"},
+  {id:"older-fresh", created_at:"2026-01-05T00:00:00Z"},
+  {id:"attn", attention:"approval", last_activity: 100, last_interaction: 100, created_at:"2026-01-02T00:00:00Z"},
+];
+assert.deepStrictEqual(
+  orderedNodes().map(n => n.id),
+  ["attn", "newer-fresh", "older-fresh", "active-newer", "active-older", "never-touched"]
+);
+`
+	f := filepath.Join(t.TempDir(), "card-order.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("activity card ordering broken: %v\n%s", err, out)
+	}
+}
+
 func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
