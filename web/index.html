@@ -142,8 +142,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   transition: transform .2s; }
 #mapfullbtn.contract { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { #mapfullbtn { transition: none; } }
-/* fare toggle: a small pill, shown only in full screen (with #mapfullbtn's
-   ≥900px rule); .on marks the active state */
+/* fare toggle: unfinished, hidden for now. Keep styles in place so the old
+   experiment can be revisited without touching the map layout again. */
 #farebtn { display: none; font-size: 12px; font-weight: 600; padding: 4px 10px;
   border-radius: 12px; border: 1px solid var(--hairline); color: var(--dim);
   background: none; line-height: 1; }
@@ -939,7 +939,6 @@ body.notes-open #notespane { transform: translateX(0); }
   body.map-open #map { display: flex; }
   #chat { flex: 1; min-width: 0; }
   #mapfullbtn { display: flex; }
-  body.map-full #farebtn { display: inline-flex; }
   /* full screen: the map earns the whole width; cards + chat + notes fold away
      (chat is one gesture back). Entered independent of map-open. The opacity
      cross-fade is the whole enter animation (the map is position:static here,
@@ -1265,10 +1264,9 @@ function saveMapFold(){
    behind the ≥900px query). Independent of body.map-open — entering restores
    whatever column layout you came from on exit. */
 let mapFull = localStorage.getItem("scimux-mapfull") === "1";
-/* fare toggle (full screen only): adds per-station timing stats — start, last
-   active, elapsed — plus the exact context %. The context arc itself is always
-   drawn for live stations; the fare toggle governs only the text stat line. */
-let fareOn = localStorage.getItem("scimux-fare") === "1";
+/* fare toggle (full screen only): dormant unfinished experiment. Do not read the
+   persisted flag while the button is hidden, or old browsers keep showing it. */
+let fareOn = false;
 /* the wall map's OWN selection, independent of `sel` (the open chat). Entering
    full screen starts clean (content first, HIG deference); a click selects a
    row (highlight + toolbar), a second click on it deselects. "Open chat" is the
