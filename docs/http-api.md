@@ -38,8 +38,8 @@ The polling snapshot the UI runs on. Returns:
 
 Each entry is the stored node (id, title, prompt, description, rationale,
 lane_id, fork_kind, agent, model, effort, dir, transport, created_at,
-`ended_at`, …) plus
-the mechanical view: `live` is `active | quiet | exited | unavailable`,
+`ended_at`, …) plus the mechanical view: `live` is
+`active | quiet | exited | unavailable`,
 `attention` (when set) is `approval | question | inspect`, and
 `last_activity` is the last pane change in Unix milliseconds. `ctx_pct`, when
 present, is the live segment's context occupancy percentage. `stops` are the
@@ -147,9 +147,9 @@ is rejected — codex runs as a scimux-started subprocess, not in tmux.
 Body: `{"text": "…", "attachments": [<ref>, …]}`. Delivers a follow-up turn
 (tmux: paste + Enter; structured transports: a protocol prompt). `409` while a
 turn is still in flight, while a tmux send is unconfirmed, or after `/exit`
-(`thread is closed; fork to continue`). On structured transports `"/clear"` is implemented by
-scimux itself: a fresh protocol session on the same node, recorded as a source
-seam — same page-turn semantics as Claude's `/clear`.
+(`thread is closed; fork to continue`). On structured transports `"/clear"` is
+implemented by scimux itself: a fresh protocol session on the same node,
+recorded as a source seam — same page-turn semantics as Claude's `/clear`.
 
 `attachments` is optional; each element is a reference returned by
 `POST …/attachments` (below). Every ref must point inside this node's own
@@ -172,7 +172,10 @@ with the node on delete.
 
 Serves one uploaded file's bytes (for the chat view's thumbnails). Only a bare
 filename inside this node's own upload directory is served — no traversal, no
-cross-node access; anything else is `404`.
+cross-node access; anything else is `404`. Safe raster images (`png`, `jpg`,
+`jpeg`, `gif`, `webp`) are served inline with `nosniff`; every other type
+downloads as `application/octet-stream` so uploaded active content cannot run
+same-origin.
 
 ### `POST /api/nodes/{id}/send/resolve`
 
