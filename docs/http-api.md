@@ -12,7 +12,10 @@ per-node reads over anything that mutates.
 
 **Security:** there is no authentication (see "Remote access and security"
 in the README). Anything that can reach the port can do everything listed
-here, including answering approval prompts.
+here, including answering approval prompts. Browser-originated unsafe methods
+are still guarded against CSRF: non-`GET`/`HEAD`/`OPTIONS` requests must be
+same-origin, must carry the `X-Scimux-CSRF` token embedded in the served page,
+and must use an accepted content type (`application/json` or multipart uploads).
 
 ## Reading state
 
@@ -23,30 +26,53 @@ The polling snapshot the UI runs on. Returns:
 ```json
 {
   "nodes":     [ { …node fields…, "live": "quiet", "attention": "approval",
-                   "has_transcript": true, "last_activity": 1752849600000 } ],
+                   "has_transcript": true, "last_activity": 1752849600000,
+                   "ctx_pct": 37, "stops": ["2026-07-24T09:12:00Z"] } ],
   "unadopted": [ "tmux-session-name" ],
-  "sys":       { …host load/memory… }
+  "sys":       { …host load/memory… },
+  "socket":    "scimux",
+  "hostname":  "workstation",
+  "version":   "v0.5.0"
 }
 ```
 
 Each entry is the stored node (id, title, prompt, description, rationale,
-lane_id, agent, model, effort, dir, transport, created_at, `ended_at`, …) plus
+lane_id, fork_kind, agent, model, effort, dir, transport, created_at,
+`ended_at`, …) plus
 the mechanical view: `live` is `active | quiet | exited | unavailable`,
 `attention` (when set) is `approval | question | inspect`, and
-`last_activity` is the last pane change in Unix milliseconds. `ended_at` (RFC
-3339, present only once set) marks a thread deliberately closed via
+`last_activity` is the last pane change in Unix milliseconds. `ctx_pct`, when
+present, is the live segment's context occupancy percentage. `stops` are the
+node's `/clear` page-turn timestamps; the map prepends `created_at` to draw the
+full station chain. `ended_at` (RFC 3339, present only once set) marks a thread
+deliberately closed via
 `POST …/exit`: the node stays visible with a dead-end cap on the map rather
 than being deleted. `unadopted` lists tmux sessions on scimux's socket that no
 node accounts for — candidates for `POST /api/adopt`.
 
+Responses carry an `ETag`; polling clients may send `If-None-Match` and receive
+`304 Not Modified` when the snapshot is unchanged.
+
 ### `GET /api/nodes/{id}/chat`
 
 The conversation, rendered from the session-log store (the current segment —
-everything after the last `/clear` seam), plus turn mechanics: `turns`,
-`source` (`transcript` or pane fallback, with `fallback` set), context-gauge
-fields (`ctx_used`, `ctx_window`, `ctx_pct`), `live`, `attention`,
-`pending`/`pending_calls` (unresolved tool calls), and `delivery` (state of
-the last send).
+everything after the last `/clear` seam), plus turn mechanics. Common fields
+include `turns`, `last_change`, `chat_started`, `prior_turns`, context-gauge
+fields (`ctx_used`, `ctx_window`, `ctx_pct`), `live`, `attention`, `source`,
+`reason`, `fallback`, `pending`, `pending_calls`, `waiting_on`, `watermark`,
+`progress`, and `delivery` (state of the last tmux send).
+
+For tmux/Claude nodes, `source` is `transcript`, `peek`, `none`, or
+`terminal_only`; `fallback:true` means the UI should degrade to the pane
+snapshot. For structured nodes (`codex`, ACP `pi`/`opencode`), `source` is
+`acp`; there is no pane fallback, and pending approval details are returned as
+`perm_title` and `perm_options`. Structured-node turn failures may also set
+`error`.
+
+`GET /api/nodes/{id}/chat?history=1` returns the whole log as ordered read-only
+surfaces: `{"segments":[{"start","seam","reason","turns"}, …]}`. This is the
+on-demand path behind "show earlier history" and earlier metro stops; normal
+polling stays current-segment only.
 
 ### `GET /api/nodes/{id}/peek[?mode=visible]`
 
@@ -64,10 +90,12 @@ dialog.
 ### `POST /api/nodes`
 
 Create and start a session. Body is the launch configuration (same fields as
-a stored node): `prompt` is required, `agent` selects the CLI, plus
-optionally `title`, `model`, `effort`, `dir`, `description`, `lane_id`, and
-`parent` + `rationale` for a fork. Returns the created node. Validation
-failures (empty prompt, unknown parent, bad agent or dir) are 4xx.
+a stored node): `agent` selects the CLI, plus optionally `prompt`, `title`,
+`model`, `effort`, `dir`, `description`, `lane_id`, and `parent` + `rationale`
+for a fork. A plain new activity needs a non-empty `prompt`; a fork inherits
+its parent's agent/model/effort/dir when those fields are omitted and must land
+on a lane. Returns the created node. Validation failures (empty prompt where
+required, unknown parent, bad agent or dir, bad fork lane) are 4xx.
 
 Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
 `transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
@@ -101,7 +129,8 @@ agent is still live), so it never issues a second kill.
 ### `DELETE /api/nodes/{id}`
 
 Appends a `delete` tombstone to the store and archives the node's session
-log to `sessions/archive/`. History is never destroyed.
+log to `sessions/archive/`. Uploaded files are archived under
+`attachments/archive/`. History is never destroyed.
 
 ### `POST /api/adopt`
 
@@ -117,7 +146,8 @@ is rejected — codex runs as a scimux-started subprocess, not in tmux.
 
 Body: `{"text": "…", "attachments": [<ref>, …]}`. Delivers a follow-up turn
 (tmux: paste + Enter; structured transports: a protocol prompt). `409` while a
-turn is still in flight. On structured transports `"/clear"` is implemented by
+turn is still in flight, while a tmux send is unconfirmed, or after `/exit`
+(`thread is closed; fork to continue`). On structured transports `"/clear"` is implemented by
 scimux itself: a fresh protocol session on the same node, recorded as a source
 seam — same page-turn semantics as Claude's `/clear`.
 

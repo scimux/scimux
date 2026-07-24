@@ -2194,7 +2194,7 @@ func (a *app) archiveAttachments(id string) {
 
 // extendPrompt appends a plain-text reference to each attachment so the agent
 // reads the local file — proven across every transport to trigger image
-// ingestion (see multimodal-input-design.md), so one mechanism serves all three
+// ingestion (see attic/multimodal-input-design.md), so one mechanism serves all three
 // with no per-transport image plumbing. Delivery-time only: never stored on
 // n.Prompt, so cards and the research question stay clean. The reference left in
 // the recorded user turn (mirror echo for tmux; the manager's own user event

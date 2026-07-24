@@ -2525,7 +2525,7 @@ function forkKind(n){
   return priorInDest ? "s" : "y-new";
 }
 /* ---------- stops: a station is one /clear-delimited segment, not a whole
-   thread (metro-map-design.md state machine). The server sends n.stops = the
+   thread (attic/metro-map-design.md state machine). The server sends n.stops = the
    clear-tagged seam times only (relink/rotation noise never adds stations);
    creation is the first stop, each /clear prolongs the thread's line by one.
    The newest stop is the thread's head — it carries the full label row and

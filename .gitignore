@@ -20,5 +20,10 @@ internal/acp/codex/testdata/real-*.ndjson
 
 attic/
 
+.agent
+.agents
+.codex
+.claude
+
 # server runtime log (nohup ./scimux …)
 nohup.out
