@@ -81,7 +81,12 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 /* a long FQDN must never push M/S/L off the bar: the host is the only
    shrinkable item and ellipsizes; the gauges keep their full width */
 #statusbar .host { font-weight: 600; letter-spacing: .01em; flex: 0 1 auto;
-  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: inline-flex; align-items: center; gap: 6px; }
+#statusbar .host::before { content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--dim); flex: none; }
+#statusbar .host.online::before { background: #34C759; }
+#statusbar .host.offline::before { background: var(--dim); }
 #statusbar .sys  { color: var(--dim); display: flex; gap: 12px; white-space: nowrap; flex: none; }
 #statusbar .sys b { color: var(--ink); font-weight: 500; display: inline-block; }
 #statusbar .trend { font-size: 11px; }
@@ -751,7 +756,7 @@ body.cards-open #msgs { overflow: hidden; }
   padding: 12px 16px 8px; text-align: left; font-size: 13px; font-weight: 700;
   background: var(--bg); position: sticky; top: 0; z-index: 2; }
 .lhead.dimmed { opacity: .32; }
-.lhead .chev { color: var(--dim); font-size: 11px; width: 12px; flex: none; }
+.lhead .chev { color: var(--dim); font-size: 15px; width: 16px; flex: none; text-align: center; }
 .lhead .lswatch { width: 18px; height: 6px; border-radius: 3px; flex: none; }
 .lhead .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lhead .lcount { color: var(--dim); font-weight: 500; }
@@ -820,9 +825,9 @@ body.map-full #maptoolbar.on { display: flex; }
 #maptoolbar .iconbtn { display: inline-flex; align-items: center; gap: 5px; }
 .lanechips { display: flex; gap: 8px; padding: 4px 16px 10px; flex-wrap: wrap; }
 .lanechip { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 12px;
-  border: 1.5px solid transparent; opacity: .45; max-width: 160px;
+  border: 1.5px solid transparent; max-width: 160px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lanechip.focused { opacity: 1; }
+.lanechip.selected { box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
 
 /* ---------- sticky-notes pane: lab-notebook stickies on the right.
    Desktop/iPad only for now (the iPhone sheet presentation comes later);
@@ -949,7 +954,7 @@ body.notes-open #notespane { transform: translateX(0); }
 
 <header id="statusbar">
   <button id="burger" aria-label="menu">&#9776;</button>
-  <span class="host" id="host">scimux</span>
+  <span class="host offline" id="host">scimux</span>
   <span class="sys" id="sys"></span>
   <span class="spacer"></span>
   <span id="syncwarn" role="status"></span>
@@ -1216,15 +1221,22 @@ let attnFoldOpen = false;   /* "Input needed" disclosure; folded on scope change
 let mapTab = localStorage.getItem("scimux-maptab") || "all";
 /* per-device view state, like mapTab: which lane blocks are folded shut */
 let mapFold = new Set(JSON.parse(localStorage.getItem("scimux-mapfold") || "[]"));
+let mapFoldKnown = new Set(JSON.parse(localStorage.getItem("scimux-mapfold-known") || "[]"));
 function saveMapFold(){
-  /* prune folds for lanes no longer in use so deleted-lane ids don't accumulate
-     forever; only when state is loaded, so a transient empty `nodes` can't wipe
-     legitimate folds */
+  /* Lanes default collapsed the first time this device sees them; after that,
+     mapFold records only the user's explicit open/closed choices. Prune lanes
+     no longer in use so deleted ids don't accumulate forever. */
   if (uiLoaded && nodes.length){
     const live = new Set(laneModel().lanes.map(l => l.id));
+    for (const id of live) if (!mapFoldKnown.has(id)){
+      mapFold.add(id);
+      mapFoldKnown.add(id);
+    }
     for (const id of mapFold) if (!live.has(id)) mapFold.delete(id);
+    for (const id of mapFoldKnown) if (!live.has(id)) mapFoldKnown.delete(id);
   }
   localStorage.setItem("scimux-mapfold", JSON.stringify([...mapFold]));
+  localStorage.setItem("scimux-mapfold-known", JSON.stringify([...mapFoldKnown]));
 }
 /* full-screen "wall map" mode — a desktop/iPad-only toggle that grows #map to
    fill #app and folds away cards + chat (P1: renders the existing block layout
@@ -1890,6 +1902,36 @@ function statusText(n){
   if (n.live === "unavailable") return "Unavailable";
   return "Quiet";
 }
+let cardTimeFlip = 0;
+const CARD_TIME_SWAP_MS = 30000;
+function cardTimeItems(n){
+  const you = n.last_interaction || 0;
+  const seen = n.last_activity || 0;
+  const items = [];
+  if (you) items.push({ key: "you", ms: you });
+  if ((!you && seen) || (you && seen > you + 9000)) items.push({ key: "seen", ms: seen });
+  return items;
+}
+function cardTimeTitle(n){
+  const you = n.last_interaction || 0;
+  const seen = n.last_activity || 0;
+  if (you && seen) return `Last interaction ${ageText(you)} · last seen ${ageText(seen)}`;
+  if (you) return `Last interaction ${ageText(you)}`;
+  return "Last seen";
+}
+function cardTimeText(n){
+  const items = cardTimeItems(n);
+  if (!items.length) return "";
+  const it = items[cardTimeFlip % items.length];
+  return `${it.key} ${ageText(it.ms)}`;
+}
+function cardTimeHTML(n){
+  const txt = cardTimeText(n);
+  if (!txt) {
+    return `<span class="time" title=""></span>`;
+  }
+  return `<span class="time" title="${esc(cardTimeTitle(n))}">${esc(txt)}</span>`;
+}
 function orderedNodes(){
   return [...nodes].sort((a, b) => {
     const aa = hardAttention(a) ? 1 : 0, ba = hardAttention(b) ? 1 : 0;
@@ -1927,6 +1969,44 @@ function laneColor(id){
   if (c) return c;
   if (!id) return "var(--unlane)";
   return LANE_COLORS[Math.abs(hashStr(id)) % LANE_COLORS.length];
+}
+function hexRGB(c){
+  if (typeof c !== "string" || !c.startsWith("#")) return null;
+  let h = c.slice(1);
+  if (h.length === 3) h = h.split("").map(x => x + x).join("");
+  if (h.length !== 6 || !/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
+}
+function cssRGB(c){
+  const hex = hexRGB(c);
+  if (hex) return hex;
+  if (typeof document === "undefined" || !document.body) return null;
+  const el = document.createElement("span");
+  el.style.color = c;
+  if (!el.style.color) return null;
+  el.style.display = "none";
+  document.body.appendChild(el);
+  const m = getComputedStyle(el).color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  el.remove();
+  return m ? [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)] : null;
+}
+function relLum(rgb){
+  const ch = v => {
+    v /= 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  const [r, g, b] = rgb.map(ch);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrastRatio(a, b){
+  const l1 = Math.max(a, b), l2 = Math.min(a, b);
+  return (l1 + 0.05) / (l2 + 0.05);
+}
+function contrastText(c){
+  const rgb = cssRGB(c);
+  if (!rgb) return "#fff";
+  const lum = relLum(rgb);
+  return contrastRatio(lum, 0) >= contrastRatio(lum, 1) ? "#000" : "#fff";
 }
 function uniqueLaneID(name){
   const base = (name || "lane").toLowerCase()
@@ -2021,7 +2101,7 @@ function renderCards(){
   const foldList = laneFilter && cardTab === "current"
     ? tabList.filter(n => !inScope(n) && hardAttention(n)) : [];
   if (!foldList.length) attnFoldOpen = false;
-  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention, n.model, n.effort]))
+  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention, n.model, n.effort, !!n.last_interaction]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
     + "|" + cardTab + "|" + laneFilter + "|" + foldList.length + "|" + attnFoldOpen
     + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
@@ -2097,7 +2177,7 @@ function cardHTML(n){
         </div>
         <input data-lane-new="${esc(n.id)}" hidden placeholder="New lane name">
       </div>` : railboxHTML(n)}
-      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · <span class="age">${ageText(n.last_activity)}</span></div>
+      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${esc(statusText(n))}</span> · ${cardTimeHTML(n)}</div>
       <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
       <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
       <div class="actions">
@@ -2205,15 +2285,30 @@ async function patchRail(id, body){
     renderCards(); renderMap();
   } catch (err) { alert(err.message); }
 }
-function updateCardAges(){
+function updateCardAges(animate=false){
   for (const n of nodes){
     const el = document.getElementById("card-" + CSS.escape(n.id).replace(/\\/g, ""));
     const card = document.getElementById("card-" + n.id) || el;
     if (!card) continue;
-    const age = card.querySelector(".age");
-    if (age) age.textContent = ageText(n.last_activity);
+    const time = card.querySelector(".time");
+    if (time) {
+      const next = cardTimeText(n);
+      if (time.textContent !== next) {
+        time.textContent = next;
+        if (animate) {
+          time.classList.remove("roll-dn", "roll-up");
+          void time.offsetWidth;
+          time.classList.add("roll-dn");
+        }
+      }
+      time.title = cardTimeTitle(n);
+    }
   }
 }
+setInterval(() => {
+  cardTimeFlip++;
+  updateCardAges(true);
+}, CARD_TIME_SWAP_MS);
 $("#cardlist").addEventListener("click", async e => {
   if (e.target.closest("[data-attnfold]")){
     attnFoldOpen = !attnFoldOpen;
@@ -2404,9 +2499,14 @@ function fareLineHTML(n){
 }
 function renderLaneChips(lm, inGroup, focusLane){
   $("#lanechips").innerHTML = lm.lanes.filter(l => inGroup(l.id)).map(l => `
-    <button class="lanechip ${!focusLane || l.id === focusLane ? "focused" : ""}"
-          style="border-color:${esc(lm.color(l.id))};color:${esc(lm.color(l.id))}"
+    <button class="lanechip ${focusLane === l.id ? "selected" : ""}"
+          style="${laneChipStyle(lm.color(l.id), focusLane === l.id)}"
           data-chip="${esc(l.id)}">${esc(l.name || l.id)}</button>`).join("");
+}
+function laneChipStyle(color, selected){
+  const c = esc(color);
+  if (!selected) return `border-color:${c};color:${c}`;
+  return `border-color:${c};background:${c};color:${esc(contrastText(color))}`;
 }
 /* the floating selection toolbar — a singleton outside the polled #mapwrap
    region, so a repaint can never clobber it. Shown only in full screen with a
@@ -2571,6 +2671,11 @@ function renderMap(){
     rows: stations.filter(n => served(n).includes(l.id))
       .flatMap(stopsOf).sort(newestFirst),
   })).filter(b => b.rows.length);
+  saveMapFold();
+  if (focusLane && mapFold.has(focusLane)){
+    mapFold.delete(focusLane);
+    saveMapFold();
+  }
   const lastAct = b => Math.max(0, ...b.rows.map(s => s.n.last_activity || 0));
   const hasAttn = b => b.rows.some(s => s.n.attention) ? 1 : 0;
   blocks.sort((a, b) => hasAttn(b) - hasAttn(a) || lastAct(b) - lastAct(a));
@@ -2954,14 +3059,27 @@ $("#tab_del").addEventListener("click", () => {
 $("#lanechips").addEventListener("click", e => {
   const c = e.target.closest("[data-chip]");
   if (!c) return;
-  /* tap = focus the lane and filter Activities to it; second tap clears —
-     same as the ✕ on the Activities scope chip */
-  if (laneFilter === c.dataset.chip){ setLaneFilter(""); return; }
+  const id = c.dataset.chip;
+  /* tap = focus the lane and unfold its journey; second tap clears the scope
+     and folds that lane again. Activities keeps the existing singular
+     laneFilter behavior. */
+  if (laneFilter === id){
+    mapFold.add(id);
+    saveMapFold();
+    setLaneFilter("");
+    return;
+  }
+  if (mapFold.has(id)){
+    mapFold.delete(id);
+    saveMapFold();
+  }
   const first = [...nodes]
-    .filter(n => n.lane_id === c.dataset.chip)
+    .filter(n => n.lane_id === id)
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
   if (first) select(first.id);
-  setLaneFilter(c.dataset.chip);
+  setLaneFilter(id);
+  document.querySelector(`#mapwrap .lblock[data-lane="${CSS.escape(id)}"]`)
+    ?.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 longpress($("#lanechips"), ".lanechip", el => {
   const id = el.dataset.chip;
@@ -4962,6 +5080,10 @@ $("#ad_go").addEventListener("click", async () => {
    Non-overlapping: the next tick is scheduled only after the current one
    completes, and re-entry (e.g. the post-send fast tick) is a no-op. ---------- */
 let ticking = false;
+function setHostOnline(ok){
+  $("#host").classList.toggle("online", ok);
+  $("#host").classList.toggle("offline", !ok);
+}
 async function tick(){
   if (ticking) return;
   ticking = true;
@@ -4969,14 +5091,16 @@ async function tick(){
     let r;
     try {
       r = await fetch("/api/state", { headers: stateEtag ? { "If-None-Match": stateEtag } : {} });
-    } catch { $("#sys").textContent = "server unreachable"; return; }
+    } catch { setHostOnline(false); $("#sys").textContent = "server unreachable"; return; }
     if (r.status === 304){
+      setHostOnline(true);
       updateCardAges();
       await refreshChat();   /* transcripts are an independent data source */
       pollUI();
       return;
     }
-    if (!r.ok) return;
+    if (!r.ok){ setHostOnline(false); return; }
+    setHostOnline(true);
     stateEtag = r.headers.get("ETag") || "";
     const st = await r.json();
     nodes = st.nodes || [];

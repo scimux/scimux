@@ -1009,6 +1009,55 @@ func TestHandleChatHistory(t *testing.T) {
 	}
 }
 
+func TestHandleStateReportsLastInteractionFromCurrentSegment(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID["c1"] = []*Node{n}, n
+	a.live["c1"] = "quiet"
+	a.lastChg["c1"] = time.Date(2026, 7, 15, 9, 7, 0, 0, time.UTC)
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", a.home),
+		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
+		{T: "source", Time: "2026-07-15T09:00:00Z", Source: &sessionlog.SourceEvent{SessionID: "s2", Reason: "clear"}},
+		{T: "assistant", Text: "ready", Time: "2026-07-15T09:01:00Z"},
+		{T: "user", Text: "new question", Time: "2026-07-15T09:05:00Z"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("state code = %d", rec.Code)
+	}
+	var body struct {
+		Nodes []struct {
+			ID              string `json:"id"`
+			LastActivity    int64  `json:"last_activity"`
+			LastInteraction int64  `json:"last_interaction"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", body.Nodes)
+	}
+	if body.Nodes[0].LastActivity != time.Date(2026, 7, 15, 9, 7, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("last_activity = %d", body.Nodes[0].LastActivity)
+	}
+	if body.Nodes[0].LastInteraction != time.Date(2026, 7, 15, 9, 5, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("last_interaction = %d, want current-segment user turn", body.Nodes[0].LastInteraction)
+	}
+}
+
 // --- Codex app-server HTTP integration tests (finding 78) ---
 //
 // These tests drive handleNewNode, handleChat, handleSend, and handleKey for

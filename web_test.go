@@ -241,6 +241,116 @@ assert.strictEqual(safeColor("  #fff  "), "#fff", "trims");
 	}
 }
 
+func TestLaneChipContrastTextUsesWCAGMath(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "function hexRGB(")
+	end := strings.Index(html, "function uniqueLaneID(")
+	if start < 0 || end < 0 || end < start {
+		t.Fatal("could not locate lane contrast helpers in web/index.html")
+	}
+	script := html[start:end] + `
+const assert = require("assert");
+assert.deepStrictEqual(hexRGB("#abc"), [170,187,204]);
+assert.strictEqual(contrastText("#007AFF"), "#000", "system blue has stronger black contrast by WCAG ratio");
+assert.strictEqual(contrastText("#5856D6"), "#fff", "system indigo needs white text");
+assert.strictEqual(contrastText("#FF9500"), "#000", "system orange needs dark text");
+assert.ok(contrastRatio(relLum(hexRGB("#FF9500")), relLum(hexRGB(contrastText("#FF9500")))) >= 4.5);
+assert.ok(contrastRatio(relLum(hexRGB("#5856D6")), relLum(hexRGB(contrastText("#5856D6")))) >= 4.5);
+`
+	f := filepath.Join(t.TempDir(), "lane-contrast.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("lane chip contrast helpers broken: %v\n%s", err, out)
+	}
+}
+
+func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		`<span class="host offline" id="host">scimux</span>`,
+		`#statusbar .host::before`,
+		`#statusbar .host.online::before { background: #34C759; }`,
+		`function setHostOnline(ok){`,
+		`setHostOnline(false); $("#sys").textContent = "server unreachable"; return;`,
+		`setHostOnline(true);`,
+		`let cardTimeFlip = 0;`,
+		`const CARD_TIME_SWAP_MS = 30000;`,
+		`function cardTimeItems(n){`,
+		`function cardTimeHTML(n){`,
+		`const you = n.last_interaction || 0;`,
+		`Last interaction ${ageText(you)} · last seen ${ageText(seen)}`,
+		`const it = items[cardTimeFlip % items.length];`,
+		`return ` + "`${it.key} ${ageText(it.ms)}`" + `;`,
+		`${cardTimeHTML(n)}`,
+		`function updateCardAges(animate=false){`,
+		`time.classList.add("roll-dn");`,
+		`setInterval(() => {`,
+		`cardTimeFlip++;`,
+		`updateCardAges(true);`,
+		`}, CARD_TIME_SWAP_MS);`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
+		}
+	}
+	if strings.Contains(html, `<span class="age">${ageText(n.last_activity)}</span>`) {
+		t.Fatal("folded activity cards should not label pane movement as the primary age")
+	}
+}
+
+func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		`let mapFoldKnown = new Set(JSON.parse(localStorage.getItem("scimux-mapfold-known") || "[]"));`,
+		`for (const id of live) if (!mapFoldKnown.has(id)){`,
+		`mapFold.add(id);`,
+		`mapFoldKnown.add(id);`,
+		`localStorage.setItem("scimux-mapfold-known", JSON.stringify([...mapFoldKnown]));`,
+		`if (focusLane && mapFold.has(focusLane)){`,
+		`mapFold.delete(focusLane);`,
+		`class="lanechip ${focusLane === l.id ? "selected" : ""}"`,
+		`style="${laneChipStyle(lm.color(l.id), focusLane === l.id)}"`,
+		`return ` + "`border-color:${c};background:${c};color:${esc(contrastText(color))}`" + `;`,
+		`mapFold.add(id);`,
+		`setLaneFilter("");`,
+		`mapFold.delete(id);`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("journey lane fold/chip wiring missing %q", want)
+		}
+	}
+	chipCSSStart := strings.Index(html, ".lanechip {")
+	chipCSSEnd := strings.Index(html[chipCSSStart:], ".lanechip.selected")
+	if chipCSSStart < 0 || chipCSSEnd < 0 {
+		t.Fatal("lane chip CSS not found")
+	}
+	chipCSS := html[chipCSSStart : chipCSSStart+chipCSSEnd]
+	if strings.Contains(html, ".lanechip.focused") || strings.Contains(chipCSS, "opacity:") {
+		t.Fatal("lane chips should no longer show selection by dimming unselected chips")
+	}
+	if !strings.Contains(html, `.lhead .chev { color: var(--dim); font-size: 15px; width: 16px;`) {
+		t.Fatal("lane fold glyph should be enlarged enough to read as a disclosure control")
+	}
+}
+
 func TestEmbeddedAgentAssetsServe(t *testing.T) {
 	assets, err := fs.Sub(webFS, "web/assets")
 	if err != nil {

@@ -1633,10 +1633,11 @@ func sysload() sysInfo {
 
 type nodeView struct {
 	*Node
-	Live          string `json:"live"`
-	Attention     string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
-	HasTranscript bool   `json:"has_transcript"`
-	LastActivity  int64  `json:"last_activity,omitempty"` // unix ms of last pane change
+	Live            string `json:"live"`
+	Attention       string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
+	HasTranscript   bool   `json:"has_transcript"`
+	LastActivity    int64  `json:"last_activity,omitempty"`    // unix ms of last pane/log movement
+	LastInteraction int64  `json:"last_interaction,omitempty"` // unix ms of last user turn or page-turn
 	// CtxPct is the live context occupancy (segment-scoped, 0-100), projected
 	// onto the list only for live nodes (active/quiet) — the map's at-a-glance
 	// congestion gauge. A pointer so absent (dead node / no usage yet) is
@@ -1646,6 +1647,34 @@ type nodeView struct {
 	// seams only), oldest first. The metro map prepends the node's creation to
 	// get the full stop chain: creation plus each /clear is one station.
 	Stops []string `json:"stops,omitempty"`
+}
+
+func unixMSStamp(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.UnixMilli()
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UnixMilli()
+	}
+	return 0
+}
+
+func lastInteractionMS(n *Node, seg sessionlog.Segment) int64 {
+	for i := len(seg.Turns) - 1; i >= 0; i-- {
+		t := seg.Turns[i]
+		if t.Role == "user" {
+			if ms := unixMSStamp(t.Time); ms > 0 {
+				return ms
+			}
+		}
+	}
+	if ms := unixMSStamp(seg.StartTime); ms > 0 {
+		return ms
+	}
+	return unixMSStamp(n.CreatedAt)
 }
 
 func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
@@ -1689,6 +1718,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// node while the log is unchanged.
 		seg := a.segment(v.Node)
 		v.Stops = seg.ClearTimes
+		v.LastInteraction = lastInteractionMS(v.Node, seg)
 		if v.Live == "exited" || v.Live == "unavailable" {
 			continue // gauge is live-only
 		}
