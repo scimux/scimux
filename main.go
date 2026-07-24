@@ -39,6 +39,8 @@ import (
 // version is stamped at build time: go build -ldflags "-X main.version=v0.5.0"
 var version = "dev"
 
+const appSummary = "scimux supervises agent chats from a local web page."
+
 // hostname is resolved once at startup; shown in the UI statusbar.
 var hostname = "scimux"
 
@@ -988,6 +990,86 @@ func sessionArgFromCmdline(args []string) string {
 }
 
 // ---------- background poller ----------
+
+// warmStartup pays the cold replay cost before the browser can ask for it:
+// one poll discovers/catches up tmux transcript mirrors, then the per-node
+// segment cache is populated so the first /api/state or chat poll reads
+// settled logs from memory instead of parsing every chat on demand.
+func (a *app) warmStartup() {
+	a.poll()
+
+	a.mu.Lock()
+	nodes := make([]*Node, len(a.nodes))
+	copy(nodes, a.nodes)
+	a.mu.Unlock()
+	for _, n := range nodes {
+		a.segment(n)
+	}
+}
+
+func configureUsage(fs *flag.FlagSet, name string) {
+	fs.Usage = func() {
+		out := fs.Output()
+		fmt.Fprintln(out, appSummary)
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "Usage: %s [options]\n\n", name)
+		fs.PrintDefaults()
+	}
+}
+
+type startupStatus struct {
+	w       io.Writer
+	label   string
+	start   time.Time
+	stop    chan struct{}
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func startStatus(w io.Writer, label string, animate bool) *startupStatus {
+	s := &startupStatus{w: w, label: label, start: time.Now()}
+	if !animate {
+		fmt.Fprintf(w, "%s ...\n", label)
+		return s
+	}
+	s.stop = make(chan struct{})
+	s.stopped = make(chan struct{})
+	go func() {
+		defer close(s.stopped)
+		frames := []byte{'|', '/', '-', '\\'}
+		tick := time.NewTicker(120 * time.Millisecond)
+		defer tick.Stop()
+		i := 0
+		for {
+			fmt.Fprintf(w, "\r%s %c", label, frames[i%len(frames)])
+			i++
+			select {
+			case <-s.stop:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return s
+}
+
+func (s *startupStatus) Done() {
+	s.once.Do(func() {
+		elapsed := time.Since(s.start).Round(time.Millisecond)
+		if s.stop != nil {
+			close(s.stop)
+			<-s.stopped
+			fmt.Fprintf(s.w, "\r\033[K%s done (%s)\n", s.label, elapsed)
+			return
+		}
+		fmt.Fprintf(s.w, "%s done (%s)\n", s.label, elapsed)
+	})
+}
+
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
 
 // poll refreshes liveness (mechanical only: pane changed recently, quiet, or
 // session gone), detects needs-input, and runs one-time transcript discovery
@@ -3125,6 +3207,7 @@ func main() {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		hostname = h
 	}
+	configureUsage(flag.CommandLine, os.Args[0])
 	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
@@ -3178,6 +3261,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
 		os.Exit(1)
 	}
+	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
+	a.warmStartup()
+	status.Done()
 
 	// Structured-protocol subprocesses (ACP, codex app-server) are ours: unlike
 	// tmux sessions (which deliberately survive scimux exit), they must not

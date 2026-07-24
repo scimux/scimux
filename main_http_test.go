@@ -913,6 +913,37 @@ func TestHandleChatTmuxFallbackNoTranscript(t *testing.T) {
 	}
 }
 
+func TestWarmStartupMirrorsAndCachesSegments(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}, capture: "ready"}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp, claudeTurn("user", "question", "t1")+claudeTurn("assistant", "answer", "t2"))
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", Model: "opus", Dir: "/wd",
+		Transcript: tp, CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID["c1"] = []*Node{n}, n
+
+	a.warmStartup()
+
+	evs := contentEvents(logEvents(t, a, "c1"))
+	if got, want := kinds(evs), []string{"meta", "source", "user", "assistant"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("warm startup log events = %v, want %v", got, want)
+	}
+	a.mu.Lock()
+	c := a.segCache["c1"]
+	a.mu.Unlock()
+	if c == nil {
+		t.Fatal("warm startup did not populate the segment cache")
+	}
+	seg := a.segment(n)
+	if len(seg.Turns) != 2 || seg.Turns[0].Text != "question" || seg.Turns[1].Text != "answer" {
+		t.Fatalf("warm startup segment = %+v", seg.Turns)
+	}
+}
+
 // TestHandleChatHistory: ?history=1 returns the whole log as ordered
 // surfaces — the on-demand read behind "show earlier history" and the metro
 // map's earlier stops — while the plain poll stays segment-scoped.
