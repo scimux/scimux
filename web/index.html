@@ -169,7 +169,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
    rounded-top tabs on a hairline; the active tab merges with the page below.
    Distinct from the rounded lane chips, which stay filters. ---------- */
 .tabs { display: flex; align-items: flex-end; gap: 3px; padding: 8px 12px 0;
-  border-bottom: 1px solid var(--hairline); overflow-x: auto; }
+  border-bottom: 1px solid var(--hairline); overflow-x: auto; overflow-y: hidden; }
 .tabs button { flex: none; font-size: 13px; font-weight: 600; color: var(--dim);
   padding: 6px 14px 7px; margin-bottom: -1px; white-space: nowrap;
   background: var(--th-bg); border: 1px solid var(--hairline); border-bottom: none;
@@ -1907,6 +1907,11 @@ function orderedNodes(){
 const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#FF9500","#FF2D55","#00C7BE"];
 const NEW_LANE_VALUE = "__new";
 const laneList = () => Array.isArray(UI.lanes) ? UI.lanes : [];
+function sortedLaneList(){
+  return [...laneList()].sort((a, b) =>
+    (a.name || a.id || "").localeCompare(b.name || b.id || "", undefined, { sensitivity: "base" })
+      || (a.id || "").localeCompare(b.id || "", undefined, { sensitivity: "base" }));
+}
 function laneById(id){
   return laneList().find(l => l.id === id) || null;
 }
@@ -1951,7 +1956,7 @@ function laneOptionsHTML(selected = "", includeUnset = true, disabled = false){
   const unset = includeUnset ? `<option value="" ${!selected ? "selected" : ""}>unset</option>` : "";
   const missing = selected && !laneById(selected)
     ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>` : "";
-  const lanes = laneList().map(l =>
+  const lanes = sortedLaneList().map(l =>
     `<option value="${esc(l.id)}" ${selected === l.id ? "selected" : ""}>${esc(l.name)}</option>`).join("");
   const create = disabled ? "" : `<option value="${NEW_LANE_VALUE}">New lane...</option>`;
   return `${unset}${missing}${lanes}${create}`;
