@@ -514,7 +514,7 @@ body.cards-open #msgs { overflow: hidden; }
 #syncwarn:empty { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .roll-dn, .roll-up { animation: none; }
+  .roll-dn, .roll-up, .lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }
 }
 
 /* bubble tap actions: one tap on a bubble reveals a small icon row directly
@@ -760,7 +760,26 @@ body.cards-open #msgs { overflow: hidden; }
 .lhead .lswatch { width: 18px; height: 6px; border-radius: 3px; flex: none; }
 .lhead .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lhead .lcount { color: var(--dim); font-weight: 500; }
-.lhead .lattn { width: 8px; height: 8px; border-radius: 4px; background: var(--attn); flex: none; }
+.lhead .lattn { width: 8px; height: 8px; border-radius: 4px; background: var(--attn); flex: none;
+  transform: translateZ(0) scale(.85); transform-origin: center;
+  box-shadow: 0 0 0 0 rgba(var(--attn-rgb), .34);
+  will-change: transform, opacity, box-shadow; animation: mapAttentionDot 1.65s ease-in-out infinite; }
+.attnstation-glow, .attnstation-ring { transform-box: fill-box; transform-origin: center;
+  will-change: transform, opacity; }
+.attnstation-glow { animation: mapAttentionGlow 1.65s ease-in-out infinite; }
+.attnstation-ring { animation: mapAttentionRing 1.65s ease-in-out infinite; }
+@keyframes mapAttentionDot {
+  0%, 100% { opacity: .45; transform: translateZ(0) scale(.76); box-shadow: 0 0 0 0 rgba(var(--attn-rgb), .20); }
+  50%      { opacity: 1; transform: translateZ(0) scale(1.28); box-shadow: 0 0 12px 3px rgba(var(--attn-rgb), .38); }
+}
+@keyframes mapAttentionGlow {
+  0%, 100% { opacity: calc(var(--attn-op) * .18); transform: scale(.88); }
+  50%      { opacity: calc(var(--attn-op) * .52); transform: scale(1.18); }
+}
+@keyframes mapAttentionRing {
+  0%, 100% { opacity: calc(var(--attn-op) * .55); transform: scale(.90); }
+  50%      { opacity: var(--attn-op); transform: scale(1.12); }
+}
 .lblock + .lblock .lhead { border-top: 1px solid var(--hairline); }
 .strow .cap .xchip { font-weight: 600; cursor: pointer; }
 .strow { position: relative; display: flex; flex-direction: column; justify-content: center;
@@ -1943,10 +1962,11 @@ function orderedNodes(){
 const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#FF9500","#FF2D55","#00C7BE"];
 const NEW_LANE_VALUE = "__new";
 const laneList = () => Array.isArray(UI.lanes) ? UI.lanes : [];
+const byNameID = (a, b) =>
+  (a.name || a.id || "").localeCompare(b.name || b.id || "", undefined, { sensitivity: "base" })
+    || (a.id || "").localeCompare(b.id || "", undefined, { sensitivity: "base" });
 function sortedLaneList(){
-  return [...laneList()].sort((a, b) =>
-    (a.name || a.id || "").localeCompare(b.name || b.id || "", undefined, { sensitivity: "base" })
-      || (a.id || "").localeCompare(b.id || "", undefined, { sensitivity: "base" }));
+  return [...laneList()].sort(byNameID);
 }
 function laneById(id){
   return laneList().find(l => l.id === id) || null;
@@ -2078,6 +2098,7 @@ function laneModel(){
   for (const id of used){
     if (!lanes.some(l => l.id === id)) lanes.push({ id, name: id, color: laneColor(id) });
   }
+  lanes.sort(byNameID);
   return { byId, lanes, color: laneColor, name: laneName };
 }
 const isArchived = id => (UI.archived || []).includes(id);
@@ -2419,9 +2440,10 @@ function renderMapTabs(){
   /* validate the saved group only against loaded state — before loadUI
      resolves, UI.groups is the empty default and would wrongly reset it */
   if (uiLoaded && mapTab !== "all" && !(UI.groups || []).some(t => t.id === mapTab)) mapTab = "all";
+  const groups = [...(UI.groups || [])].sort(byNameID);
   $("#maptabs").innerHTML =
     `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All</button>` +
-    (UI.groups || []).map(t => `<button data-mt="${esc(t.id)}" class="${mapTab === t.id ? "on" : ""}">
+    groups.map(t => `<button data-mt="${esc(t.id)}" class="${mapTab === t.id ? "on" : ""}">
        ${esc(t.name)}<span class="x" data-rm="${esc(t.id)}">&#10005;</span></button>`).join("") +
     `<button data-mt="+" class="add" aria-label="add map">+</button>`;
 }
@@ -2631,8 +2653,8 @@ const newestFirst = (a, b) => stampMS(b.time) - stampMS(a.time) ||
 const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
 function attentionStationSVG(x, y, op){
-  return `<circle cx="${x}" cy="${y}" r="10.5" fill="var(--attn)" opacity="${op * .42}" filter="url(#attnglow)"/>
-          <circle cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
+  return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="var(--attn)" filter="url(#attnglow)"/>
+          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5"/>`;
 }
 /* the parent stop a fork grew from: the newest stop that already existed when
    the child was created (the spec's legacy fallback — no per-edge stop refs
@@ -2661,8 +2683,7 @@ function renderMap(){
 
   /* line diagram: one contiguous, foldable block per lane. A station rides
      every line it serves, so an interchange repeats in each serving block
-     with a ⇄ chip to the other line. Recency rules at both levels: blocks
-     float up by their newest pane activity (attention outranks recency),
+     with a ⇄ chip to the other line. Journey blocks stay alphabetical while
      stations are newest-first within their journey. */
   /* rows are STOPS, not threads: each /clear-delimited segment is one
      station, newest-first by its start time — so a fresh /clear surfaces on
@@ -2677,9 +2698,8 @@ function renderMap(){
     mapFold.delete(focusLane);
     saveMapFold();
   }
-  const lastAct = b => Math.max(0, ...b.rows.map(s => s.n.last_activity || 0));
   const hasAttn = b => b.rows.some(s => s.n.attention) ? 1 : 0;
-  blocks.sort((a, b) => hasAttn(b) - hasAttn(a) || lastAct(b) - lastAct(a));
+  blocks.sort((a, b) => byNameID(a.lane, b.lane));
 
   /* the signature must cover every rendered field — a description edit (or a
      model/rationale change) has to repaint the station rows. Block order is
