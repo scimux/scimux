@@ -767,25 +767,26 @@ body.cards-open #msgs { overflow: hidden; }
   height: 76px; padding-right: 16px; cursor: pointer; overflow: hidden; }
 .strow:active { background: var(--th-bg); }
 .strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 500;
-  display: flex; gap: 6px; align-items: flex-start; }
+  display: flex; gap: 6px; align-items: flex-start; min-width: 0; }
 /* the agent logo sits left of the title, sized to the first text line */
 .strow .lbl .agent-logo { width: 16px; height: 16px; margin-top: 1px; }
 .strow .lbl .agent-logo img, .strow .lbl .agent-logo svg,
 .strow .lbl .agent-logo .mask-logo { width: 16px; height: 16px; }
-.strow .lbl .t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.strow .lbl .t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; min-width: 0; flex: 0 1 auto; }
 /* the row height is fixed (the SVG's station y-positions depend on it), so the
    description gets one ellipsized line and the title yields to a single line
    whenever a description is present */
 .strow .desc { font-size: 12px; color: var(--dim); margin-top: 1px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strow .desc + .cap { margin-top: 0; }
-.strow .lbl:has(+ .desc) .t { -webkit-line-clamp: 1; }
+  line-height: 1.25; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.strow .cap + .desc { margin-top: 0; }
+.strow .lbl:has(+ .cap + .desc) .t { -webkit-line-clamp: 1; }
 .strow .cap { font-size: 11px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strow .why { font-size: 11.5px; color: var(--dim); margin-top: 1px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strow .forkcue { font-size: 11px; font-weight: 600; margin-top: 1px; cursor: pointer;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9; }
+.strow .forkcue { font-size: 12px; font-weight: 600; margin-left: 14px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9;
+  flex: 1 1 30%; min-width: 44px; max-width: 45%; }
 .strow .forkcue:hover { opacity: 1; text-decoration: underline; }
 .strow.dimmed { opacity: .32; }
 /* history stop (a /clear-closed segment): secondary, minimal — the head row
@@ -2434,20 +2435,16 @@ function mapVisible(){
    jump-to-block targets (stack only — the wall has no per-lane block). */
 /* the stack/phone map cannot draw the wall map's cross-lane crossover curves
    (its lanes are independent, foldable blocks with no shared column geometry),
-   so fork topology travels as a per-station caption instead: what the fork was,
-   where it came from, tappable to the origin. Colour matches the wall map's
-   crossover rule (y-new → child lane, S/y-stay → origin lane) so the two maps
-   read as one system. Empty for roots and deleted-parent stations. */
+   so forks get a compact inline source link. Colour matches the wall map's
+   crossover rule (y-new → child lane, S/y-stay → origin lane). Empty for roots
+   and deleted-parent stations. */
 function forkCueHTML(n, lm){
   const k = forkKind(n);
   if (!k) return "";
   const p = nodeById(n.parent);
   if (!p) return "";
-  const kindLabel = k === "y-stay" ? "parallel thread" : k === "y-new" ? "new topic" : "crossover";
   const col = esc(lm.color(k === "y-new" ? n.lane_id : p.lane_id));
-  const laneSuffix = p.lane_id !== n.lane_id ? ` &middot; ${esc(lm.name(p.lane_id))}` : "";
-  return `<div class="forkcue" data-goorigin="${esc(p.id)}" style="color:${col}"
-            title="jump to the fork origin">&#9282; ${kindLabel} &middot; from &ldquo;${esc(p.title)}&rdquo;${laneSuffix}</div>`;
+  return `<span class="forkcue" data-goorigin="${esc(p.id)}" style="color:${col}">from ${esc(p.title)}</span>`;
 }
 function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, stop }){
   /* a history stop (a segment closed by a later /clear) renders as a dim
@@ -2472,13 +2469,11 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, st
   return `
         <div class="strow ${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${esc(n.id)}"${stop ? ` data-skey="${esc(stopKey(stop))}"` : ""}>
-          <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(n.title)}</span></div>
-          ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
-          <div class="cap">${esc(when)} · ${esc([n.agent, n.model].filter(Boolean).join(" · "))} · ${esc(statusText(n))}${
+          <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(n.title)}</span>${fork ? forkCueHTML(n, lm) : ""}</div>
+          <div class="cap">${esc(when)} · ${esc([n.agent, n.model, n.effort].filter(Boolean).join(" · "))} · ${esc(statusText(n))}${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${esc(l)}"` : ""} style="color:${esc(lm.color(l))}">&#8644; ${esc(lm.name(l))}</span>`).join("")}</div>
-          ${fork ? forkCueHTML(n, lm) : ""}
+          ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
           ${fareLineHTML(n)}
-          ${n.rationale ? `<div class="why">why: ${esc(n.rationale)}</div>` : ""}
         </div>`;
 }
 /* the fare stat line (full screen + toggle on): start / last active / elapsed,
@@ -2687,8 +2682,8 @@ function renderMap(){
   const sig = JSON.stringify(blocks.map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
       mapFold.has(b.lane.id), hasAttn(b),
       b.rows.map(s => [stopKey(s), s.time, s.head, s.n.title,
-        s.n.description || s.n.prompt || "", s.n.rationale,
-        s.n.agent, s.n.model, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
+        s.n.description || s.n.prompt || "",
+        s.n.agent, s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
         s.n.live, s.n.attention])]))
     + "|" + focusLane + "|" + mapTab + "|" + mapFull;
   if (sig === mapSig) return;
@@ -2825,8 +2820,8 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   const sig = "wall|" + cols.join(",") + "|" + focusLane + "|" + mapTab + "|" +
     mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify(rows.map(s => [stopKey(s), s.time, s.head, s.n.created_at,
-      s.n.title, s.n.description || s.n.prompt || "", s.n.rationale, s.n.agent,
-      s.n.model, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
+      s.n.title, s.n.description || s.n.prompt || "", s.n.agent,
+      s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
       s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
       /* last_activity drives the fare line's "last"/"elapsed"; keep it out of
          the sig unless fare is on, so an idle map does not repaint each poll */
@@ -2990,6 +2985,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
       dim: dimNode(s.n),
       golane: false,
       current: stopKey(s) === mapSelKey,
+      fork: true,
       stop: s,
     })).join("")}
   </div>`;
