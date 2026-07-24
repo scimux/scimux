@@ -107,6 +107,102 @@ func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
 	}
 }
 
+func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `id="notesbtn" aria-label="open notes pane">&#8249;</button>`) {
+		t.Fatal("closed notes toggle should point left and announce opening the notes pane")
+	}
+	for _, want := range []string{
+		`btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";`,
+		`btn.setAttribute("aria-label", notesOpen ? "close notes pane" : "open notes pane");`,
+		"renderNotesToggle();\n  renderNoteFlags();",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("notes toggle state sync missing %q", want)
+		}
+	}
+}
+
+func TestBubbleCopyLivesInActionRow(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	if strings.Contains(html, "copybtn") {
+		t.Fatal("chat bubbles should not render an always-visible copy button")
+	}
+	rowStart := strings.Index(html, "row.innerHTML =")
+	if rowStart < 0 {
+		t.Fatal("bubble action row renderer not found")
+	}
+	rowEnd := strings.Index(html[rowStart:], "turnEl.after(row);")
+	if rowEnd < 0 {
+		t.Fatal("bubble action row renderer end not found")
+	}
+	row := html[rowStart : rowStart+rowEnd]
+	for _, want := range []string{
+		`<div class="bubwhen">${esc(fmtBubbleTime(turn.time))}</div>`,
+		`data-bact="fork"`,
+		`data-bact="desc"`,
+		`data-bact="note"`,
+		`data-bact="copy"`,
+	} {
+		if !strings.Contains(row, want) {
+			t.Errorf("bubble action row missing %q", want)
+		}
+	}
+	if !(strings.Index(row, `data-bact="note"`) < strings.Index(row, `data-bact="copy"`)) {
+		t.Fatal("copy should be the rightmost bubble action")
+	}
+	if !(strings.Index(row, `class="bubwhen"`) < strings.Index(row, `data-bact="fork"`)) {
+		t.Fatal("timestamp should sit between the bubble and the action buttons")
+	}
+	if !strings.Contains(html, `if (ba.dataset.bact === "copy"){`) ||
+		!strings.Contains(html, `copyText(turn.text || "");`) {
+		t.Fatal("copy action row button is not wired to copy the selected turn")
+	}
+}
+
+func TestBubbleTimestampFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "function fmtBubbleTime(")
+	if start < 0 {
+		t.Fatal("could not locate fmtBubbleTime in web/index.html")
+	}
+	end := strings.Index(html[start:], "/* forkFromTurn:")
+	if end < 0 {
+		t.Fatal("could not locate the end of fmtBubbleTime in web/index.html")
+	}
+	script := html[start:start+end] + `
+const assert = require("assert");
+const now = new Date("2026-07-24T15:30:00");
+assert.strictEqual(fmtBubbleTime("2026-07-24T09:05:00", now), new Date("2026-07-24T09:05:00").toLocaleTimeString([], { timeStyle: "short" }));
+assert.strictEqual(fmtBubbleTime("2026-07-23T22:10:00", now), "Yesterday, " + new Date("2026-07-23T22:10:00").toLocaleTimeString([], { timeStyle: "short" }));
+assert.strictEqual(fmtBubbleTime("2026-07-20T08:15:00", now), new Date("2026-07-20T08:15:00").toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+assert.strictEqual(fmtBubbleTime("not-a-date", now), "not-a-date");
+`
+	f := filepath.Join(t.TempDir(), "bubble-time.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("bubble timestamp formatting broken: %v\n%s", err, out)
+	}
+}
+
 // R18.1 altitude: a lane color is user-authored and flows into many style=""
 // interpolations. safeColor must return only well-formed color syntax verbatim
 // and reject anything that could break out of an attribute, so the accessor is
