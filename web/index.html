@@ -767,9 +767,9 @@ body.cards-open #msgs { overflow: hidden; }
   height: 76px; padding-right: 16px; cursor: pointer; overflow: hidden; }
 .strow:active { background: var(--th-bg); }
 .strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 500;
-  display: flex; gap: 6px; align-items: flex-start; min-width: 0; }
+  display: flex; gap: 6px; align-items: baseline; min-width: 0; }
 /* the agent logo sits left of the title, sized to the first text line */
-.strow .lbl .agent-logo { width: 16px; height: 16px; margin-top: 1px; }
+.strow .lbl .agent-logo { width: 16px; height: 16px; margin-top: 1px; align-self: flex-start; }
 .strow .lbl .agent-logo img, .strow .lbl .agent-logo svg,
 .strow .lbl .agent-logo .mask-logo { width: 16px; height: 16px; }
 .strow .lbl .t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
