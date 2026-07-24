@@ -2628,6 +2628,12 @@ function stopsOf(n){
 const stopKey = s => s.n.id + "#" + s.i;
 const newestFirst = (a, b) => stampMS(b.time) - stampMS(a.time) ||
   (b.time || "").localeCompare(a.time || "");
+const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
+function attentionStationSVG(x, y, op){
+  return `<circle cx="${x}" cy="${y}" r="10.5" fill="var(--attn)" opacity="${op * .42}" filter="url(#attnglow)"/>
+          <circle cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
+}
 /* the parent stop a fork grew from: the newest stop that already existed when
    the child was created (the spec's legacy fallback — no per-edge stop refs
    are recorded yet, so the containing stop is derived from timestamps) */
@@ -2740,8 +2746,7 @@ function renderMap(){
          interchange ring, no siding/terminus tags. */
       if (n.ended_at)
         svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
-      if (n.attention)
-        svg += `<circle cx="${dotX}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
+      if (n.attention) svg += attentionStationSVG(dotX, yy, op);
       if (n.live === "exited" || n.live === "unavailable")
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
       else
@@ -2749,7 +2754,7 @@ function renderMap(){
     });
 
     return `<div class="lblock" data-lane="${esc(b.lane.id)}">${head}<div class="lbody">
-      <svg width="${LW}" height="${b.rows.length * RH}" viewBox="0 0 ${LW} ${b.rows.length * RH}">${svg}</svg>
+      <svg width="${LW}" height="${b.rows.length * RH}" viewBox="0 0 ${LW} ${b.rows.length * RH}">${ATTN_GLOW_DEF}${svg}</svg>
       ${b.rows.map(s => stationRowHTML(s.n, lm, {
         padLeft: LW + 12,
         others: [],
@@ -2878,8 +2883,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
     else touch[s.n.lane_id].push(rowY(i));
   });
 
-  let svg = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
-      <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
+  let svg = ATTN_GLOW_DEF;
   /* 1. lane lines */
   cols.forEach(id => {
     const ys = touch[id];
@@ -2952,11 +2956,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
        buffer bar at the head (top = newest), co-encoded with the "Closed" label. */
     if (n.ended_at)
       svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
-    if (n.attention){
-      /* co-encoded: glow + ring + the row's "needs input" status text */
-      svg += `<circle cx="${dotX}" cy="${yy}" r="9.5" fill="var(--attn)" opacity="${op * .5}" filter="url(#attnglow)"/>
-              <circle cx="${dotX}" cy="${yy}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5" opacity="${op}"/>`;
-    }
+    if (n.attention) svg += attentionStationSVG(dotX, yy, op);
     if (n.live === "exited" || n.live === "unavailable")
       svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
     else
