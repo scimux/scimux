@@ -27,6 +27,7 @@
   --sb-bg:     rgba(245,244,241,.88);
   --code-bg:   rgba(60,60,67,.08);
   --th-bg:     rgba(60,60,67,.05);
+  --journey-alt-bg: rgba(60,60,67,.03);
   --sbh:       44px;
   --radius:    12px;
 }
@@ -46,6 +47,7 @@
     --sb-bg:    rgba(22,22,24,.88);
     --code-bg:  rgba(255,255,255,.09);
     --th-bg:    rgba(255,255,255,.05);
+    --journey-alt-bg: rgba(255,255,255,.05);
   }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -781,6 +783,7 @@ body.cards-open #msgs { overflow: hidden; }
 .strow .cap .xchip { font-weight: 600; cursor: pointer; }
 .strow { position: relative; display: flex; flex-direction: column; justify-content: center;
   height: 76px; padding-right: 16px; cursor: pointer; overflow: hidden; }
+.strow.alt { background: var(--journey-alt-bg); }
 .strow:active { background: var(--th-bg); }
 .strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 500;
   display: flex; gap: 6px; align-items: baseline; min-width: 0; }
@@ -2470,14 +2473,14 @@ function forkCueHTML(n, lm){
   const col = esc(lm.color(k === "y-new" ? n.lane_id : p.lane_id));
   return `<span class="forkcue" data-goorigin="${esc(p.id)}" style="color:${col}">from ${esc(p.title)}</span>`;
 }
-function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, stop }){
+function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, stop, alt }){
   /* a history stop (a segment closed by a later /clear) renders as a dim
      minimal row: the thread's title for orientation plus when that stop began.
      It still carries data-nid, so tapping it selects/opens the thread — riding
      back through the history is the chat's scrollback, not the map's. */
   if (stop && !stop.head)
     return `
-        <div class="strow stoprow ${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${esc(n.id)}" data-skey="${esc(stopKey(stop))}" data-stop="${esc(stop.time)}">
+        <div class="strow stoprow ${alt ? "alt " : ""}${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${esc(n.id)}" data-skey="${esc(stopKey(stop))}" data-stop="${esc(stop.time)}">
           <div class="lbl"><span class="t">${esc(n.title)}</span></div>
           <div class="cap">${esc(fmtStamp(stop.time))} &middot; earlier stop &middot; tap to read</div>
         </div>`;
@@ -2491,7 +2494,7 @@ function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, st
      live in the floating map toolbar (HIG deference — controls never cover the
      content they act on) */
   return `
-        <div class="strow ${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
+        <div class="strow ${alt ? "alt " : ""}${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${esc(n.id)}"${stop ? ` data-skey="${esc(stopKey(stop))}"` : ""}>
           <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(n.title)}</span>${fork ? forkCueHTML(n, lm) : ""}</div>
           <div class="cap">${esc(when)} · ${esc(cardConfigText(n))} · ${esc(statusText(n))}${
@@ -2777,13 +2780,14 @@ function renderMap(){
 
     return `<div class="lblock" data-lane="${esc(b.lane.id)}">${head}<div class="lbody">
       <svg width="${LW}" height="${b.rows.length * RH}" viewBox="0 0 ${LW} ${b.rows.length * RH}">${ATTN_GLOW_DEF}${svg}</svg>
-      ${b.rows.map(s => stationRowHTML(s.n, lm, {
+      ${b.rows.map((s, i) => stationRowHTML(s.n, lm, {
         padLeft: LW + 12,
         others: [],
         dim: dimRow(s.n),
         golane: true,
         fork: true,
         stop: s,
+        alt: i % 2 === 1,
       })).join("")}
     </div></div>`;
   }).join("") || `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
@@ -3001,7 +3005,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   $("#mapwrap").innerHTML = `<div class="lbody wallbody">
     <svg width="${colsW}" height="${svgH}" viewBox="0 0 ${colsW} ${svgH}">${svg}</svg>
     <div style="height:${OFF}px"></div>
-    ${rows.map(s => stationRowHTML(s.n, lm, {
+    ${rows.map((s, i) => stationRowHTML(s.n, lm, {
       padLeft: colsW + GAP,
       others: [],
       dim: dimNode(s.n),
@@ -3009,6 +3013,7 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
       current: stopKey(s) === mapSelKey,
       fork: true,
       stop: s,
+      alt: i % 2 === 1,
     })).join("")}
   </div>`;
   renderLaneChips(lm, inGroup, focusLane);
