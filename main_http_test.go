@@ -125,6 +125,7 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		storePath:      filepath.Join(dir, "nodes.jsonl"),
 		sessionsDir:    filepath.Join(dir, "sessions"),
 		attachmentsDir: filepath.Join(dir, "attachments"),
+		assetsDir:      filepath.Join(dir, "assets"),
 		home:           dir,
 	}
 }

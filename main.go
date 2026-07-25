@@ -4,9 +4,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,6 +32,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
@@ -196,6 +199,12 @@ type app struct {
 	// nodes.jsonl only ever record a text reference (Attachment) — the
 	// text-only/append-only store invariants forbid binary in either JSONL.
 	attachmentsDir string
+	// assetsDir holds blob-storage session assets, one subdirectory per node
+	// (~/.scimux/assets/<node-id>/, internal/asset.WriteBlob/ResolveBlobPath).
+	// The session log stays the index of record — every blob has an "asset"
+	// event carrying id/name/mime/sha256/blobPath — this directory holds only
+	// the bytes for assets too large to inline. See upload-design.md.
+	assetsDir string
 	// segCache memoizes each node's parsed current segment so the 1s chat
 	// poll costs a stat, not a reparse, while the log is unchanged.
 	segCache map[string]*sessionlog.Cache
@@ -2390,6 +2399,73 @@ func (a *app) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, full)
 }
 
+// handleAsset serves one session asset's bytes: GET /api/nodes/{id}/assets/{assetID}.
+// The URL carries only an opaque asset ID, never a path — BlobPath lives in
+// the node's own session log and is resolved (with cross-node/traversal
+// containment) via internal/asset.ResolveBlobPath before anything is served.
+// Same inert-serving contract as handleAttachment: nosniff always, inline
+// only for the safe raster whitelist, everything else forced to download.
+func (a *app) handleAsset(w http.ResponseWriter, r *http.Request) {
+	n, ok := a.node(r)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	id := r.PathValue("assetID")
+	if id == "" || a.sessionsDir == "" {
+		http.Error(w, "not found", 404)
+		return
+	}
+	idx := sessionlog.ReadAssets(a.sessionLogPath(n.ID))
+	rec, ok := idx[id]
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+
+	var data []byte
+	var servePath string
+	switch rec.Storage {
+	case "inline":
+		b, err := base64.StdEncoding.DecodeString(rec.Bytes)
+		if err != nil {
+			http.Error(w, "not found", 404)
+			return
+		}
+		data = b
+	case "blob":
+		full, err := asset.ResolveBlobPath(a.assetsDir, n.ID, rec.BlobPath)
+		if err != nil {
+			http.Error(w, "not found", 404)
+			return
+		}
+		servePath = full
+	default:
+		http.Error(w, "not found", 404)
+		return
+	}
+
+	name := rec.Name
+	if name == "" {
+		name = "asset"
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if raster := inlineImageTypes[strings.ToLower(filepath.Ext(name))]; raster != "" {
+		w.Header().Set("Content-Type", raster)
+	} else {
+		// Same reasoning as handleAttachment: never trust the recorded MIME
+		// for inline rendering — force an opaque download so an agent- or
+		// user-supplied .html/.svg can never run as same-origin content.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(name))
+	}
+	if servePath != "" {
+		http.ServeFile(w, r, servePath)
+		return
+	}
+	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
+}
+
 // inlineImageTypes maps the file extensions served inline (as an <img> or a
 // new-tab open) to their content type: safe raster formats with no active
 // content. SVG is excluded on purpose — it can carry script — as is everything
@@ -3262,6 +3338,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	assetsDir := filepath.Join(*data, "assets")
+	if err := os.MkdirAll(assetsDir, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
 	a := &app{
 		byID:           map[string]*Node{},
 		live:           map[string]string{},
@@ -3285,6 +3366,7 @@ func main() {
 		uiPath:         filepath.Join(*data, "ui.json"),
 		sessionsDir:    sessionsDir,
 		attachmentsDir: attachmentsDir,
+		assetsDir:      assetsDir,
 		home:           home,
 	}
 	if err := a.loadStore(); err != nil {
@@ -3346,6 +3428,7 @@ func main() {
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
 	mux.HandleFunc("POST /api/nodes/{id}/attachments", a.handleUploadAttachments)
 	mux.HandleFunc("GET /api/nodes/{id}/attachments/{name}", a.handleAttachment)
+	mux.HandleFunc("GET /api/nodes/{id}/assets/{assetID}", a.handleAsset)
 	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
 	mux.HandleFunc("POST /api/nodes/{id}/send/interrupt", a.handleSendInterrupt)
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
