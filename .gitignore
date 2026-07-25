@@ -27,3 +27,6 @@ attic/
 
 # server runtime log (nohup ./scimux …)
 nohup.out
+
+# local E2E scratch script, not part of the test suite
+scripts/mm-e2e-image-delivery.sh
