@@ -205,6 +205,11 @@ type app struct {
 	// event carrying id/name/mime/sha256/blobPath — this directory holds only
 	// the bytes for assets too large to inline. See upload-design.md.
 	assetsDir string
+	// assetHook is the Phase 4 turn-append ingestion hook, called by every
+	// transport (mirror.go for tmux, a.acp/a.codex for ACP/codex — wired via
+	// SetAssetHook at startup) with each turn's scanned local-path candidates.
+	// See asset.IngestFunc and ingestAssetHook (agent_asset.go).
+	assetHook asset.IngestFunc
 	// segCache memoizes each node's parsed current segment so the 1s chat
 	// poll costs a stat, not a reparse, while the log is unchanged.
 	segCache map[string]*sessionlog.Cache
@@ -2851,27 +2856,29 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// projectTurns rewrites each turn's attachment markers into scimux-asset:<id>
-// references (internal/asset.Project) and returns the projected turns plus
-// the response's "assets" map, built from only the asset IDs actually
-// referenced after projection — never the whole node's asset set. Read-time
-// only: the stored log is never touched (P3, upload-design.md "Render-Time
-// Projection, Not Log Rewrite"). turns is returned unmodified (assets nil)
-// when the node has no session log or no ingested assets at all, so the
-// common no-attachment case does no extra log reads.
+// projectTurns rewrites each turn's attachment markers (internal/asset.Project)
+// and general agent-generated Markdown local-path references
+// (internal/asset.ProjectAgentPaths, Phase 4) into scimux-asset:<id>
+// references, and returns the projected turns plus the response's "assets"
+// map, built from only the asset IDs actually referenced after projection —
+// never the whole node's asset set. Read-time only: the stored log is never
+// touched (upload-design.md "Render-Time Projection, Not Log Rewrite").
+// ProjectAgentPaths runs even when byPath is empty — a Markdown path
+// reference with no matching ingested asset still needs to become a defined
+// "unavailable" chip rather than raw path text (Guaranteed Outcome), so it
+// can't be skipped just because nothing has been ingested yet. turns is
+// returned unmodified (assets nil) when the node has no session log at all.
 func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript.Turn, map[string]any) {
 	if a.sessionsDir == "" || len(turns) == 0 {
 		return turns, nil
 	}
 	logPath := a.sessionLogPath(nodeID)
 	byPath := sessionlog.ReadAssetsByPath(logPath)
-	if len(byPath) == 0 {
-		return turns, nil
-	}
 	out := make([]transcript.Turn, len(turns))
 	referenced := map[string]bool{}
 	for i, t := range turns {
 		t.Text = asset.Project(t.Text, byPath)
+		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
 		for _, id := range asset.ReferencedIDs(t.Text) {
 			referenced[id] = true
 		}
@@ -3459,6 +3466,9 @@ func main() {
 		assetsDir:      assetsDir,
 		home:           home,
 	}
+	a.assetHook = a.ingestAssetHook
+	a.acp.SetAssetHook(a.assetHook)
+	a.codex.SetAssetHook(a.assetHook)
 	if err := a.loadStore(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
 		os.Exit(1)

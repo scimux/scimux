@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -23,11 +24,12 @@ import (
 // when no live subprocess backs it). The only difference is the wire underneath
 // — codex's own app-server protocol (see peer.go), not the ACP SDK.
 type Manager struct {
-	mu       sync.Mutex
-	sessions map[string]*Session
-	spawn    SpawnFunc
-	logDir   string
-	closing  bool
+	mu        sync.Mutex
+	sessions  map[string]*Session
+	spawn     SpawnFunc
+	logDir    string
+	closing   bool
+	assetHook asset.IngestFunc
 	// wg tracks in-flight runTurn goroutines so Shutdown can wait for them
 	// before returning, preventing writes to a deleted log directory.
 	// Add(1) is always called while holding mu (before Shutdown can set
@@ -69,6 +71,15 @@ func NewManagerWithSpawn(logDir string, s SpawnFunc) *Manager {
 	return &Manager{sessions: map[string]*Session{}, spawn: s, logDir: logDir}
 }
 
+// SetAssetHook installs the Phase 4 turn-append asset-ingestion hook (see
+// asset.IngestFunc). Every session launched after this call carries it;
+// main.go calls this once at startup, so in practice every session does.
+func (m *Manager) SetAssetHook(f asset.IngestFunc) {
+	m.mu.Lock()
+	m.assetHook = f
+	m.mu.Unlock()
+}
+
 func defaultSpawn(nodeID, dir string) (Transport, error) {
 	// The working directory is delivered to codex via thread/start's cwd, so the
 	// subprocess itself needs no special cwd here.
@@ -106,6 +117,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		dir:       dir,
 		model:     model,
 		effort:    effort,
+		assetHook: m.assetHook,
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -192,6 +204,11 @@ func (m *Manager) Send(nodeID, text string) error {
 		s.abortTurn()
 		m.wg.Done()
 		return fmt.Errorf("record user turn: %w", err)
+	}
+	if s.assetHook != nil {
+		if cands := asset.ScanMarkdown(text); len(cands) > 0 {
+			s.assetHook(nodeID, s.dir, cands)
+		}
 	}
 	go func() { defer m.wg.Done(); s.runTurn(ctx, text) }()
 	return nil
@@ -400,9 +417,10 @@ type Session struct {
 	// dir/model/effort are kept from Launch so Clear can open a fresh thread
 	// under the same conditions (/clear never changes launch config — fork is
 	// the path that can).
-	dir    string
-	model  string
-	effort string
+	dir       string
+	model     string
+	effort    string
+	assetHook asset.IngestFunc
 
 	mu            sync.Mutex
 	procAlive     bool
@@ -455,7 +473,29 @@ func (s *Session) appendLocked(ev Event) bool {
 		fmt.Fprintf(os.Stderr, "scimux/codex: persisting %s for %s failed: %v\n", ev.T, s.nodeID, err)
 		return false
 	}
+	s.scanAssetsLocked(ev)
 	return true
+}
+
+// scanAssetsLocked is Phase 4's turn-append ingestion point for
+// assistant/tool records (the user-turn equivalent lives in Manager.Send,
+// which persists outside s.mu). It only detects candidates; asset.IngestFunc
+// (main.go) owns eligibility, storage, and the log-append of the asset event
+// itself. Callers hold s.mu.
+func (s *Session) scanAssetsLocked(ev Event) {
+	if s.assetHook == nil {
+		return
+	}
+	var cands []asset.Candidate
+	switch {
+	case ev.T == "assistant":
+		cands = asset.ScanMarkdown(ev.Text)
+	case ev.T == "tool" && ev.Tool != nil:
+		cands = asset.ScanToolOutput(ev.Tool)
+	}
+	if len(cands) > 0 {
+		s.assetHook(s.nodeID, s.dir, cands)
+	}
 }
 
 // approve is the injected ApprovalFunc. It queues a pending request and blocks

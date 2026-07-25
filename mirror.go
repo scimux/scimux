@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -101,13 +102,13 @@ func (a *app) syncMirror(n *Node) {
 	}
 	turns := tl.Poll()
 	used, win := tl.Usage()
-	m.sync(n, tl.Path, turns, used, win)
+	m.sync(a, n, tl.Path, turns, used, win)
 }
 
 // sync appends any new turns/usage to the log and re-persists the transcript
 // size watermark. The caller has already recovered durable state and confirmed
 // the transcript changed (or is new). Fields are owned by the poller goroutine.
-func (m *mirror) sync(n *Node, tpath string, turns []transcript.Turn, used, win int64) {
+func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, used, win int64) {
 	if tpath == "" {
 		return
 	}
@@ -129,6 +130,17 @@ func (m *mirror) sync(n *Node, tpath string, turns []transcript.Turn, used, win 
 			return // watermark stays; the failed turn is retried next tick
 		}
 		m.mirrored++
+		// Phase 4 ingestion point: tmux transcripts carry only chat text (the
+		// tailer discards tool records, see transcript.ParseLine), so only
+		// Markdown-mention scanning applies here — the tool-call scanner is
+		// exercised by the ACP/codex managers, which log ToolEvent records
+		// directly. Runs at turn-append time, matching the eager-ingestion
+		// rule (upload-design.md, "Ingestion Timing").
+		if a.assetHook != nil {
+			if cands := asset.ScanMarkdown(t.Text); len(cands) > 0 {
+				a.assetHook(n.ID, n.Dir, cands)
+			}
+		}
 	}
 	if used > 0 && (used != m.lastUsed || win != m.lastWin) {
 		if err := m.logw.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{

@@ -2,7 +2,9 @@ package asset
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"strings"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
@@ -62,4 +64,67 @@ func ReferencedIDs(text string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// ProjectAgentPaths rewrites a turn's general Markdown image/link references
+// — ![alt](path) / [text](path), as ScanMarkdown detects them, distinct from
+// the [attached ...] marker syntax Project handles above — into
+// scimux-asset:<id> Markdown, using byPath (asset events indexed by
+// SourcePath; the same map Project uses, since ingestAgentPathAsset records
+// the literal candidate ref text there too). Fenced code blocks are left
+// untouched, matching ScanMarkdown's exclusion. http(s) links and
+// already-projected scimux-asset: refs are left alone.
+//
+// A reference whose path was never ingested — outside the allowed root,
+// unreadable, too large, or scanned from a log written before this
+// mechanism existed — is rewritten to a synthetic, deterministic
+// scimux-asset:missing_<hash> reference rather than left as raw path text.
+// The synthetic id never resolves in the session log, so the existing
+// frontend "missing asset" fallback (web/index.html's assetTile, for any id
+// absent from the chat response's asset map) renders it as an explicit
+// unavailable chip for free — no new frontend path, and no filesystem
+// access at render time (eligibility was decided once, at turn-append time,
+// by ingestAssetHook). The hash is deterministic so repeated polls render
+// the same id and never appear as a new reference each time.
+func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) string {
+	if !mdLinkRE.MatchString(text) {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	inFence := false
+	for i, ln := range lines {
+		if fenceRE.MatchString(ln) {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		lines[i] = mdLinkRE.ReplaceAllStringFunc(ln, func(m string) string {
+			sub := mdLinkRE.FindStringSubmatch(m)
+			bang, alt, ref := sub[1], sub[2], sub[3]
+			if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") || strings.HasPrefix(ref, "scimux-asset:") {
+				return m
+			}
+			ev, ok := byPath[ref]
+			if !ok {
+				return missingRef(bang, alt, ref)
+			}
+			name := ev.Name
+			if name == "" {
+				name = "asset"
+			}
+			return fmt.Sprintf("%s[%s](scimux-asset:%s)", bang, name, ev.ID)
+		})
+	}
+	return strings.Join(lines, "\n")
+}
+
+func missingRef(bang, alt, ref string) string {
+	name := alt
+	if name == "" {
+		name = filepath.Base(ref)
+	}
+	id := "missing_" + sessionlog.SHA256Hex([]byte(ref))[:12]
+	return fmt.Sprintf("%s[%s](scimux-asset:%s)", bang, name, id)
 }

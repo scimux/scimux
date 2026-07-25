@@ -32,6 +32,7 @@ import (
 
 	sdk "github.com/coder/acp-go-sdk"
 
+	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -52,10 +53,11 @@ const launchTimeout = 30 * time.Second
 // Manager owns every node's ACP subprocess and connection. It is the seam the
 // HTTP handlers talk to; the tmux Server has the analogous role for TUI nodes.
 type Manager struct {
-	mu       sync.Mutex
-	sessions map[string]*Session
-	runner   Runner
-	logDir   string
+	mu        sync.Mutex
+	sessions  map[string]*Session
+	runner    Runner
+	logDir    string
+	assetHook asset.IngestFunc
 }
 
 // NewManager builds a Manager launching real agent subprocesses.
@@ -67,6 +69,15 @@ func NewManager(logDir string) *Manager {
 // in-process fake agent, so tests need no agent CLI and no tokens.
 func NewManagerWithRunner(logDir string, r Runner) *Manager {
 	return &Manager{sessions: map[string]*Session{}, runner: r, logDir: logDir}
+}
+
+// SetAssetHook installs the Phase 4 turn-append asset-ingestion hook (see
+// asset.IngestFunc). Every session launched after this call carries it;
+// main.go calls this once at startup, so in practice every session does.
+func (m *Manager) SetAssetHook(f asset.IngestFunc) {
+	m.mu.Lock()
+	m.assetHook = f
+	m.mu.Unlock()
 }
 
 // killAndReap kills a started subprocess and drains its exit in the background
@@ -107,6 +118,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		logw:      &logWriter{Path: m.logPath(nodeID)},
 		dir:       dir,
 		effort:    effort,
+		assetHook: m.assetHook,
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -187,6 +199,11 @@ func (m *Manager) Send(nodeID, text string) error {
 		s.abortTurn()
 		return fmt.Errorf("record user turn: %w", err)
 	}
+	if s.assetHook != nil {
+		if cands := asset.ScanMarkdown(text); len(cands) > 0 {
+			s.assetHook(nodeID, s.dir, cands)
+		}
+	}
 	go s.runPrompt(ctx, text)
 	return nil
 }
@@ -229,6 +246,7 @@ func (m *Manager) Clear(nodeID string) error {
 		logw:      old.logw, // same file, same writer: stragglers stay serialized
 		dir:       old.dir,
 		effort:    old.effort,
+		assetHook: old.assetHook,
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -461,8 +479,9 @@ type Session struct {
 	// dir and effort are kept from Launch so Clear can renegotiate a fresh
 	// session under the same conditions (/clear never changes launch config —
 	// fork is the path that can).
-	dir    string
-	effort string
+	dir       string
+	effort    string
+	assetHook asset.IngestFunc
 
 	mu            sync.Mutex
 	procAlive     bool
@@ -784,7 +803,29 @@ func (s *Session) appendLocked(ev Event) bool {
 		fmt.Fprintf(os.Stderr, "scimux/acp: persisting %s for %s failed: %v\n", ev.T, s.nodeID, err)
 		return false
 	}
+	s.scanAssetsLocked(ev)
 	return true
+}
+
+// scanAssetsLocked is Phase 4's turn-append ingestion point for
+// assistant/tool records (the user-turn equivalent lives in Manager.Send,
+// which persists outside s.mu). It only detects candidates; asset.IngestFunc
+// (main.go) owns eligibility, storage, and the log-append of the asset event
+// itself. Callers hold s.mu.
+func (s *Session) scanAssetsLocked(ev Event) {
+	if s.assetHook == nil {
+		return
+	}
+	var cands []asset.Candidate
+	switch {
+	case ev.T == "assistant":
+		cands = asset.ScanMarkdown(ev.Text)
+	case ev.T == "tool" && ev.Tool != nil:
+		cands = asset.ScanToolOutput(ev.Tool)
+	}
+	if len(cands) > 0 {
+		s.assetHook(s.nodeID, s.dir, cands)
+	}
 }
 
 // --- permission answering ---

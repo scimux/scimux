@@ -106,7 +106,7 @@ func lastArg(args []string) string {
 func newTestApp(t *testing.T, f *fakeTmux) *app {
 	t.Helper()
 	dir := t.TempDir()
-	return &app{
+	a := &app{
 		byID:           map[string]*Node{},
 		live:           map[string]string{},
 		attn:           map[string]string{},
@@ -128,6 +128,10 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		assetsDir:      filepath.Join(dir, "assets"),
 		home:           dir,
 	}
+	a.assetHook = a.ingestAssetHook
+	a.acp.SetAssetHook(a.assetHook)
+	a.codex.SetAssetHook(a.assetHook)
+	return a
 }
 
 func keyRecords(t *testing.T, path string) []storeRecord {

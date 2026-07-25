@@ -25,12 +25,23 @@ const assetInlineCap = 256 << 10
 // (internal/asset.Project, via sessionlog.ReadAssetsByPath) can resolve that
 // marker back to this asset without a second, send-time-only mechanism.
 func (a *app) ingestAttachmentAsset(nodeID, name, mime, sourcePath string, data []byte) (sessionlog.AssetEvent, error) {
+	return a.ingestAssetBytes(nodeID, name, mime, "upload", sourcePath, data)
+}
+
+// ingestAssetBytes is the storage-mode/log-append core shared by upload
+// ingestion (ingestAttachmentAsset, above) and agent-generated-path
+// ingestion (ingestAgentPathAsset, agent_asset.go): given already-read bytes
+// and identity, it picks inline vs blob storage, writes blob bytes if
+// needed, and appends the asset event. Deduplication (when the caller wants
+// it) happens before this is called — this function always mints a fresh
+// asset id.
+func (a *app) ingestAssetBytes(nodeID, name, mime, sourceKind, sourcePath string, data []byte) (sessionlog.AssetEvent, error) {
 	ev := sessionlog.AssetEvent{
 		ID:         sessionlog.NewAssetID(),
 		Name:       sessionlog.SanitizeAssetName(name),
 		Size:       int64(len(data)),
 		SHA256:     sessionlog.SHA256Hex(data),
-		SourceKind: "upload",
+		SourceKind: sourceKind,
 		SourcePath: sourcePath,
 	}
 	if mime == "" {

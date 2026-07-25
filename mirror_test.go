@@ -253,6 +253,37 @@ func TestMirrorFastPathSkipsUnchangedSize(t *testing.T) {
 	}
 }
 
+// Phase 4: a Markdown image reference in mirrored (tmux) chat text must be
+// ingested as a durable asset at turn-append time, the same "Ingestion
+// Timing" rule the ACP/codex managers follow — never lazily from a later
+// read, since a short-lived agent's temp file could vanish before then.
+func TestMirrorIngestsAssetOnTurnAppend(t *testing.T) {
+	a := mirrorTestApp(t)
+	a.assetsDir = t.TempDir()
+	a.assetHook = a.ingestAssetHook
+
+	wd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wd, "sketch.png"), []byte("PNGBYTES"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp, claudeTurn("assistant", "here: ![a sketch](sketch.png)", "t1"))
+	n := &Node{ID: "n1", Agent: "claude", Model: "opus", Dir: wd, Transcript: tp}
+
+	a.syncMirror(n)
+
+	byPath := sessionlog.ReadAssetsByPath(filepath.Join(a.sessionsDir, "n1.jsonl"))
+	ev, ok := byPath["sketch.png"]
+	if !ok {
+		t.Fatal("agent-referenced image not ingested at turn-append time")
+	}
+	if ev.SourceKind != "agent_path" {
+		t.Errorf("sourceKind = %q, want agent_path", ev.SourceKind)
+	}
+}
+
 func TestMirrorNoTranscriptIsNoop(t *testing.T) {
 	a := mirrorTestApp(t)
 	n := &Node{ID: "n1", Agent: "claude"}
