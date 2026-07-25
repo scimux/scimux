@@ -19,12 +19,15 @@ func TestIngestAttachmentAssetInline(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := []byte("small file bytes")
-	ev, err := a.ingestAttachmentAsset("n1", "note.txt", "text/plain", data)
+	ev, err := a.ingestAttachmentAsset("n1", "note.txt", "text/plain", "/tmp/uploads/note.txt", data)
 	if err != nil {
 		t.Fatalf("ingestAttachmentAsset: %v", err)
 	}
 	if ev.Storage != "inline" {
 		t.Fatalf("storage = %q, want inline", ev.Storage)
+	}
+	if ev.SourcePath != "/tmp/uploads/note.txt" {
+		t.Errorf("sourcePath = %q, want /tmp/uploads/note.txt", ev.SourcePath)
 	}
 	if ev.Size != int64(len(data)) {
 		t.Errorf("size = %d, want %d", ev.Size, len(data))
@@ -51,7 +54,7 @@ func TestIngestAttachmentAssetBlob(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	ev, err := a.ingestAttachmentAsset("n1", "big.bin", "application/octet-stream", data)
+	ev, err := a.ingestAttachmentAsset("n1", "big.bin", "application/octet-stream", "/tmp/uploads/big.bin", data)
 	if err != nil {
 		t.Fatalf("ingestAttachmentAsset: %v", err)
 	}
@@ -80,7 +83,7 @@ func TestIngestAttachmentAssetDetectsMimeWhenEmpty(t *testing.T) {
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ev, err := a.ingestAttachmentAsset("n1", "photo.png", "", []byte("PNGDATA"))
+	ev, err := a.ingestAttachmentAsset("n1", "photo.png", "", "/tmp/uploads/photo.png", []byte("PNGDATA"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +97,7 @@ func TestIngestAttachmentAssetSHA256Recorded(t *testing.T) {
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ev, err := a.ingestAttachmentAsset("n1", "x.txt", "text/plain", []byte("hello"))
+	ev, err := a.ingestAttachmentAsset("n1", "x.txt", "text/plain", "/tmp/uploads/x.txt", []byte("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}

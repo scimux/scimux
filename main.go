@@ -2354,7 +2354,7 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "read upload: "+err.Error(), 500)
 			return
 		}
-		ev, err := a.ingestAttachmentAsset(n.ID, att.Name, att.Mime, data)
+		ev, err := a.ingestAttachmentAsset(n.ID, att.Name, att.Mime, att.Path, data)
 		if err != nil {
 			cleanup()
 			http.Error(w, "ingest upload: "+err.Error(), 500)
@@ -2810,10 +2810,22 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	// stays segment-scoped.
 	if r.URL.Query().Get("history") == "1" {
 		segs := []sessionlog.HistorySegment{}
+		assets := map[string]any{}
 		if a.sessionsDir != "" {
 			segs = sessionlog.ReadHistory(a.sessionLogPath(n.ID))
+			for i := range segs {
+				var segAssets map[string]any
+				segs[i].Turns, segAssets = a.projectTurns(n.ID, segs[i].Turns)
+				for id, v := range segAssets {
+					assets[id] = v
+				}
+			}
 		}
-		writeJSON(w, map[string]any{"segments": segs})
+		resp := map[string]any{"segments": segs}
+		if len(assets) > 0 {
+			resp["assets"] = assets
+		}
+		writeJSON(w, resp)
 		return
 	}
 	seg := a.segment(n)
@@ -2823,9 +2835,13 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		lastMS = t.UnixMilli()
 	}
 	a.mu.Unlock()
+	turns, assets := a.projectTurns(n.ID, seg.Turns)
 	resp := map[string]any{
-		"turns": seg.Turns, "last_change": lastMS,
+		"turns": turns, "last_change": lastMS,
 		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
+	}
+	if assets != nil {
+		resp["assets"] = assets
 	}
 	if pm := a.proc(n); pm != nil {
 		a.procChatInto(resp, n, pm, seg)
@@ -2833,6 +2849,63 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		a.tmuxChatInto(resp, n, seg)
 	}
 	writeJSON(w, resp)
+}
+
+// projectTurns rewrites each turn's attachment markers into scimux-asset:<id>
+// references (internal/asset.Project) and returns the projected turns plus
+// the response's "assets" map, built from only the asset IDs actually
+// referenced after projection — never the whole node's asset set. Read-time
+// only: the stored log is never touched (P3, upload-design.md "Render-Time
+// Projection, Not Log Rewrite"). turns is returned unmodified (assets nil)
+// when the node has no session log or no ingested assets at all, so the
+// common no-attachment case does no extra log reads.
+func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript.Turn, map[string]any) {
+	if a.sessionsDir == "" || len(turns) == 0 {
+		return turns, nil
+	}
+	logPath := a.sessionLogPath(nodeID)
+	byPath := sessionlog.ReadAssetsByPath(logPath)
+	if len(byPath) == 0 {
+		return turns, nil
+	}
+	out := make([]transcript.Turn, len(turns))
+	referenced := map[string]bool{}
+	for i, t := range turns {
+		t.Text = asset.Project(t.Text, byPath)
+		for _, id := range asset.ReferencedIDs(t.Text) {
+			referenced[id] = true
+		}
+		out[i] = t
+	}
+	if len(referenced) == 0 {
+		return out, nil
+	}
+	idx := sessionlog.ReadAssets(logPath)
+	assets := map[string]any{}
+	for id := range referenced {
+		if rec, ok := idx[id]; ok {
+			assets[id] = a.assetSummary(nodeID, rec)
+		}
+	}
+	return out, assets
+}
+
+// assetSummary builds one entry of the chat response's "assets" map (see
+// upload-design.md "Rendering API"): inline assets carry their bytes as a
+// data: URI so the client never round-trips to the download endpoint just
+// to paint a thumbnail; blob assets carry the download URL instead.
+func (a *app) assetSummary(nodeID string, rec sessionlog.AssetEvent) map[string]any {
+	m := map[string]any{
+		"name": rec.Name, "mime": rec.Mime, "size": rec.Size, "sha256": rec.SHA256,
+	}
+	if rec.Storage == "inline" {
+		m["inline"] = true
+		m["data"] = "data:" + rec.Mime + ";base64," + rec.Bytes
+	} else {
+		m["inline"] = false
+		m["url"] = "/api/nodes/" + url.PathEscape(nodeID) + "/assets/" + url.PathEscape(rec.ID)
+	}
+	return m
 }
 
 // tmuxChatInto overlays the tmux-transport state onto the shared chat

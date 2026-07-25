@@ -78,6 +78,32 @@ func TestReadAssetsFirstRecordWinsOnIDCollision(t *testing.T) {
 	}
 }
 
+func TestReadAssetsByPathIndexesBySourcePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	w.Append(NewAsset(AssetEvent{ID: "a_1", Name: "one.png", Storage: "inline", SourcePath: "/tmp/n1/one.png"}))
+	w.Append(NewAsset(AssetEvent{ID: "a_2", Name: "two.png", Storage: "inline", SourcePath: "/tmp/n1/two.png"}))
+	idx := ReadAssetsByPath(path)
+	if len(idx) != 2 {
+		t.Fatalf("index len = %d, want 2: %+v", len(idx), idx)
+	}
+	if idx["/tmp/n1/one.png"].ID != "a_1" || idx["/tmp/n1/two.png"].ID != "a_2" {
+		t.Fatalf("index contents wrong: %+v", idx)
+	}
+}
+
+// Assets with no recorded SourcePath (should not occur for uploads, but the
+// replay must stay defensive) are simply omitted, not indexed under "".
+func TestReadAssetsByPathOmitsRecordsWithNoSourcePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	w.Append(NewAsset(AssetEvent{ID: "a_1", Name: "one.png", Storage: "inline"}))
+	idx := ReadAssetsByPath(path)
+	if len(idx) != 0 {
+		t.Fatalf("got %+v, want empty index", idx)
+	}
+}
+
 func TestReadAssetsIgnoresNonAssetRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}

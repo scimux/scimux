@@ -19,14 +19,19 @@ const assetInlineCap = 256 << 10
 // uploads get the same durability/search/download guarantees as
 // agent-generated assets, see upload-design.md). Ingestion happens at upload
 // time, synchronously, so a failure here fails the whole upload rather than
-// leaving an attachment with no backing asset.
-func (a *app) ingestAttachmentAsset(nodeID, name, mime string, data []byte) (sessionlog.AssetEvent, error) {
+// leaving an attachment with no backing asset. sourcePath is the staged
+// attachment file's local path — the same path extendPrompt later embeds in
+// the delivered/mirrored turn text — recorded so render-time projection
+// (internal/asset.Project, via sessionlog.ReadAssetsByPath) can resolve that
+// marker back to this asset without a second, send-time-only mechanism.
+func (a *app) ingestAttachmentAsset(nodeID, name, mime, sourcePath string, data []byte) (sessionlog.AssetEvent, error) {
 	ev := sessionlog.AssetEvent{
 		ID:         sessionlog.NewAssetID(),
 		Name:       sessionlog.SanitizeAssetName(name),
 		Size:       int64(len(data)),
 		SHA256:     sessionlog.SHA256Hex(data),
 		SourceKind: "upload",
+		SourcePath: sourcePath,
 	}
 	if mime == "" {
 		mime = sessionlog.DetectMIME(ev.Name, data)

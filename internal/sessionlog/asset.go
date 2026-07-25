@@ -121,3 +121,22 @@ func ReadAssets(path string) map[string]AssetEvent {
 	}
 	return idx
 }
+
+// ReadAssetsByPath replays a session log into an asset index keyed by
+// SourcePath — the lookup internal/asset.Project uses to resolve a turn's
+// local-path marker to its ingested asset at render time. Assets with no
+// recorded SourcePath are omitted; the same first-wins rule as ReadAssets
+// applies if two records ever carried the same path.
+func ReadAssetsByPath(path string) map[string]AssetEvent {
+	idx := make(map[string]AssetEvent)
+	for _, ev := range ReadEvents(path) {
+		if ev.T != "asset" || ev.Asset == nil || ev.Asset.SourcePath == "" {
+			continue
+		}
+		if _, exists := idx[ev.Asset.SourcePath]; exists {
+			continue
+		}
+		idx[ev.Asset.SourcePath] = *ev.Asset
+	}
+	return idx
+}
