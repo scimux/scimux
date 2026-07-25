@@ -591,6 +591,7 @@ body.cards-open #msgs { overflow: hidden; }
 .attfile:hover { background: rgba(255,255,255,.26); }
 .turn.assistant .attfile { background: var(--surface); border: 1px solid var(--hairline); }
 .turn.assistant .attfile:hover { background: var(--code-bg); }
+.attfile.missing { opacity: .6; cursor: default; pointer-events: none; }
 /* an image-only user turn: let the media breathe, drop the chat-bubble skin */
 .turn.media .bubble { background: none; padding: 0; border: none; }
 
@@ -1822,16 +1823,12 @@ function md(src){
   return out.join("");
 }
 
-/* Multimodal render (P3): the delivered prompt carries a plain-text reference
-   per attachment ("[attached image: /abs/path]"). Pull those out of a user turn
-   and render them as thumbnails / file chips instead of leaving the raw path in
-   the bubble. The bytes come from the per-node guarded static handler, so a
-   spoofed path outside the node's uploads simply 404s and the tile drops itself
-   (onerror). Returns the cleaned text and the tile HTML. */
-const ATT_RE = /\[attached (image|file): ([^\]]+)\]/g;
-/* one attachment tile (thumbnail for images, chip for other files). A tile whose
-   bytes 404 removes itself (onerror) — so a marker pointing outside the node's
-   uploads renders nothing. */
+/* one attachment tile (thumbnail for images, chip for other files), sourced
+   from the raw upload staging path. A tile whose bytes 404 removes itself
+   (onerror) — so a marker pointing outside the node's uploads renders
+   nothing. Used only by the pre-send echo bubble now (refTilesHTML, below);
+   persisted turns render via assetTile/splitAssetRefs instead (P5), since
+   by the time a turn is polled back the upload is already a durable asset. */
 const RASTER_RE = /\.(png|jpe?g|gif|webp)$/i;   /* safe raster types (mirror of the server whitelist) */
 function attTile(nodeId, leaf, isImage){
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
@@ -1846,22 +1843,51 @@ function attTile(nodeId, leaf, isImage){
     : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
       `${ICON_FILE}<span>${esc(name)}</span></a>`;
 }
-function splitAttachments(text, nodeId){
-  ATT_RE.lastIndex = 0;
-  if (!ATT_RE.test(text)) return { clean: text, html: "" };
-  const tiles = [];
-  const clean = text.replace(ATT_RE, (_m, kind, path) => {
-    tiles.push(attTile(nodeId, path.split("/").pop(), kind === "image"));
-    return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
-}
 /* echo path: build tiles straight from the uploaded refs (no marker to parse) */
 function refTilesHTML(refs, nodeId){
   if (!refs || !refs.length) return "";
   const tiles = refs.map(r =>
     attTile(nodeId, (r.path || "").split("/").pop(), /^image\//.test(r.mime || ""))).join("");
   return `<div class="attrow">${tiles}</div>`;
+}
+
+/* Session-asset render (P5): the server projects attachment/generated-file
+   references into scimux-asset:<id> Markdown at read time (see
+   internal/asset.Project, upload-design.md) rather than rewriting the
+   stored log; the chat response's "assets" map carries the metadata (and,
+   for inline assets, the bytes) needed to render each reference the
+   returned turns actually contain. A reference the server never got to
+   project — an old log written before this mechanism existed — is left as
+   plain Markdown text by the server itself, so there is no separate
+   legacy-marker renderer here either: this is the only path (hard cut).
+   A reference whose ID is missing from the assets map (should not happen
+   in practice, but the design requires a defined outcome for it) renders
+   an inert "unavailable" chip, never a raw path or a broken image. */
+const ASSET_REF_RE = /(!?)\[([^\]]*)\]\(scimux-asset:([\w-]+)\)/g;
+function assetTile(nodeId, id, alt, rec){
+  if (!rec){
+    return `<span class="attfile missing" title="${esc(alt || id)} — unavailable">` +
+           `${ICON_FILE}<span>${esc(alt || "file")} (unavailable)</span></span>`;
+  }
+  const url = `/api/nodes/${encodeURIComponent(nodeId)}/assets/${encodeURIComponent(id)}`;
+  const name = rec.name || alt || "file";
+  const isImage = /^image\//.test(rec.mime || "");
+  const src = rec.inline && rec.data ? rec.data : url;
+  return isImage
+    ? `<a class="attthumb" href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
+      `<img src="${src}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
+    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
+      `${ICON_FILE}<span>${esc(name)}</span></a>`;
+}
+function splitAssetRefs(text, nodeId, assets){
+  ASSET_REF_RE.lastIndex = 0;
+  if (!ASSET_REF_RE.test(text)) return { clean: text, html: "" };
+  const tiles = [];
+  const clean = text.replace(ASSET_REF_RE, (_m, _bang, alt, id) => {
+    tiles.push(assetTile(nodeId, id, alt, (assets || {})[id]));
+    return "";
+  }).replace(/\n{3,}/g, "\n\n").trim();
+  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
 }
 
 /* ---------- statusbar ---------- */
@@ -3360,7 +3386,7 @@ function hashStr(s){
 
 function select(id){
   if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = -1;
-    chatHist = { node: "", segs: null, scrollTo: "" }; }   /* history is per-visit, reloaded on demand */
+    chatHist = { node: "", segs: null, scrollTo: "", assets: {} }; }   /* history is per-visit, reloaded on demand */
   sel = id;
   editingChatDesc = false;   /* a pending "use as description" is discarded here */
   chatDetailSavedUntil = 0;
@@ -3572,12 +3598,12 @@ function collapseAttentionUI(id){
    full contrast; scrollTo = a one-shot scroll target consumed by the next
    render ("seam" = the live segment's own divider, else an earlier stop's
    seam time from the metro map) */
-let chatHist = { node: "", segs: null, scrollTo: "" };
+let chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
 async function loadChatHistory(id, scrollTo){
   try {
     const d = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
     if (sel !== id) return;   /* user moved on while it loaded */
-    chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "seam" };
+    chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "seam", assets: d.assets || {} };
     chatScrollBottom = false;   /* riding back wins over a pending "go to now" */
     chatSig = "";
     refreshChat();
@@ -3657,6 +3683,10 @@ async function refreshChat(){
     if (landed || Date.now() - sentEcho.at > 180000) sentEcho = null;
   }
   const echo = sentEcho && sentEcho.node === n.id ? sentEcho : null;
+  /* asset IDs are unique per node regardless of which segment minted them,
+     so the live poll's and the on-demand history's asset maps merge freely —
+     a priorSegs turn and a live turn never contend for the same key. */
+  const assets = Object.assign({}, chatHist.assets || {}, d.assets || {});
   const unconfirmed = d.delivery === "unconfirmed";
   if (!n.attention) delete suppressAttentionUntil[n.id];
   const attentionHidden = !!n.attention && attentionSuppressed(n.id);
@@ -3739,7 +3769,7 @@ async function refreshChat(){
     priorSegs.map(s =>
       `<div class="chatseam histseam" data-seam="${esc(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${esc(fmtWhen(s.start))}</span></div>` +
       s.turns.map(t => {
-        const h = t.role === "user" ? splitAttachments(t.text, n.id) : { clean: t.text, html: "" };
+        const h = splitAssetRefs(t.text, n.id, assets);
         return `
       <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}">
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(h.clean)}${h.html}</div>
@@ -3758,7 +3788,7 @@ async function refreshChat(){
               ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
               : "no readable transcript \u2014 showing the raw terminal below"}</div>`) : "") +
     turns.map((t, i) => {
-      const a = t.role === "user" ? splitAttachments(t.text, n.id) : { clean: t.text, html: "" };
+      const a = splitAssetRefs(t.text, n.id, assets);
       return `
       <div class="turn ${t.role === "user" ? "user" : "assistant"}${a.html && !a.clean ? " media" : ""}" data-i="${i}">
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(a.clean)}${a.html}</div>
