@@ -2164,6 +2164,10 @@ type Attachment struct {
 	Mime string `json:"mime"`
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+	// AssetID is the durable session-asset backing this upload (see
+	// ingestAttachmentAsset, upload_assets.go). Populated by
+	// handleUploadAttachments; never sent by the client.
+	AssetID string `json:"assetId,omitempty"`
 }
 
 func (a *app) attachmentDir(id string) string { return filepath.Join(a.attachmentsDir, id) }
@@ -2344,6 +2348,19 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out = append(out, att)
+		data, err := os.ReadFile(att.Path)
+		if err != nil {
+			cleanup()
+			http.Error(w, "read upload: "+err.Error(), 500)
+			return
+		}
+		ev, err := a.ingestAttachmentAsset(n.ID, att.Name, att.Mime, data)
+		if err != nil {
+			cleanup()
+			http.Error(w, "ingest upload: "+err.Error(), 500)
+			return
+		}
+		out[len(out)-1].AssetID = ev.ID
 	}
 	writeJSON(w, map[string]any{"attachments": out})
 }

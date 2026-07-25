@@ -15,6 +15,9 @@ func TestUploadAttachmentStoresFileAndRef(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	a.byID["n1"] = &Node{ID: "n1"}
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -78,6 +81,9 @@ func TestUploadAttachmentRejectsTraversal(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	a.byID["n1"] = &Node{ID: "n1"}
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
