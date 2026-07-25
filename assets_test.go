@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -168,5 +169,54 @@ func TestServeAssetCorruptInlineBytesRejected(t *testing.T) {
 	})
 	if rec := serveAsset(a, "n1", "a_1"); rec.Code != 404 {
 		t.Errorf("corrupt inline bytes: code=%d", rec.Code)
+	}
+}
+
+// Phase 6: a deleted node's blob-stored assets must not dangle under the
+// live assets directory — archiveAssets moves them out, mirroring
+// archiveAttachments/archiveSessionLog, so a reissued slug can never inherit
+// a dead node's blobs and the download endpoint (already unreachable once
+// the node record is gone) has nothing live left to leak.
+func TestArchiveAssetsMovesNodeDir(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.byID["n1"] = &Node{ID: "n1"}
+	if _, err := asset.WriteBlob(a.assetsDir, "n1", "a_1", "big.bin", []byte("blob bytes")); err != nil {
+		t.Fatal(err)
+	}
+	src := asset.NodeDir(a.assetsDir, "n1")
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("precondition: node asset dir missing: %v", err)
+	}
+	a.archiveAssets("n1")
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Errorf("node asset dir still present after archive: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(a.assetsDir, "archive"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("archive has %d entries, want 1", len(entries))
+	}
+	if !strings.HasPrefix(entries[0].Name(), "n1.") {
+		t.Errorf("archived dir %q not prefixed n1.", entries[0].Name())
+	}
+	got, err := os.ReadFile(filepath.Join(a.assetsDir, "archive", entries[0].Name(), "a_1-big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "blob bytes" {
+		t.Errorf("archived blob bytes = %q, want %q", got, "blob bytes")
+	}
+}
+
+// A node with only inline assets (bytes live in the already-archived
+// session log, not assetsDir) has no per-node asset directory at all — this
+// must be a no-op, not an error.
+func TestArchiveAssetsNoDirIsNoop(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.archiveAssets("no-such-node") // must not panic or error
+	if _, err := os.Stat(filepath.Join(a.assetsDir, "archive")); !os.IsNotExist(err) {
+		t.Errorf("archive dir created for a node with no assets")
 	}
 }

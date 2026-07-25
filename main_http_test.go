@@ -19,6 +19,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -708,6 +709,51 @@ func TestHandleUpdateAndDeleteNode(t *testing.T) {
 	}
 	if !sawKill {
 		t.Fatal("delete did not close owned tmux session")
+	}
+}
+
+// Phase 6: deleting a node must archive its blob-stored session assets, not
+// leave them dangling under the live assets directory, and the download
+// endpoint must go 404 once the node record itself is gone.
+func TestHandleDeleteNodeArchivesAssets(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := a.ingestAttachmentAsset("n1", "big.bin", "application/octet-stream", "/tmp/uploads/big.bin", make([]byte, assetInlineCap+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Storage != "blob" {
+		t.Fatalf("storage = %q, want blob", ev.Storage)
+	}
+	nodeDir := asset.NodeDir(a.assetsDir, "n1")
+	if _, err := os.Stat(nodeDir); err != nil {
+		t.Fatalf("precondition: node asset dir missing: %v", err)
+	}
+
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 200 {
+		t.Fatalf("delete: code = %d body %q", del.Code, del.Body.String())
+	}
+
+	if _, err := os.Stat(nodeDir); !os.IsNotExist(err) {
+		t.Errorf("node asset dir still present after delete: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(a.assetsDir, "archive"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("archive entries = %d, err=%v, want 1", len(entries), err)
+	}
+
+	rec := serveAsset(a, "n1", ev.ID)
+	if rec.Code != 404 {
+		t.Errorf("download after delete: code = %d, want 404", rec.Code)
 	}
 }
 

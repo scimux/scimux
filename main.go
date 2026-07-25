@@ -2118,6 +2118,7 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	a.archiveSessionLog(n.ID)
 	a.archiveAttachments(n.ID)
+	a.archiveAssets(n.ID)
 	writeJSON(w, map[string]string{"ok": "deleted"})
 }
 
@@ -2237,6 +2238,35 @@ func (a *app) archiveAttachments(id string) {
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	if err := os.Rename(src, filepath.Join(dir, id+"."+stamp)); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: archive attachments for %s: %v\n", id, err)
+	}
+}
+
+// archiveAssets mirrors archiveSessionLog/archiveAttachments for a deleted
+// node's blob-stored session assets (upload-design.md Phase 6): it moves
+// ~/.scimux/assets/<id> into assets/archive/ so a reissued slug can never
+// inherit a dead node's asset blobs, and a deleted node's images/files don't
+// dangle as orphaned-but-still-servable files (the download endpoint checks
+// n.ID against a.byID, so once removeNodeLocked has run the live path is
+// already unreachable — this only prevents the blobs themselves from
+// lingering under the live directory). Best-effort — retention never blocks
+// a delete. Inline assets need no such move: their bytes live in the
+// already-archived session log, not in assetsDir.
+func (a *app) archiveAssets(id string) {
+	if a.assetsDir == "" {
+		return
+	}
+	src := asset.NodeDir(a.assetsDir, id)
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	dir := filepath.Join(a.assetsDir, "archive")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive assets for %s: %v\n", id, err)
+		return
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	if err := os.Rename(src, filepath.Join(dir, id+"."+stamp)); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive assets for %s: %v\n", id, err)
 	}
 }
 
