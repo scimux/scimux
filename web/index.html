@@ -429,13 +429,33 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #gauge i { display: block; height: 100%; background: var(--work); transition: width .5s; }
 #gauge i.high { background: #C7791B; }
 
+#msgwrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
 #msgs { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;
   /* overflow-y:auto silently computes overflow-x to auto, turning the chat
      into a sideways scroller whenever any child is wide (peek lines, code).
      Reading flows one axis: clip x here; code/peek blocks scroll internally. */
   overflow-x: clip;
-  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  transition: filter .16s ease, opacity .16s ease; }
 body.cards-open #msgs { overflow: hidden; }
+#msgwrap.loading #msgs { filter: blur(2px); opacity: .58; pointer-events: none; }
+#chatloading {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 42%, transparent);
+  -webkit-backdrop-filter: blur(1px); backdrop-filter: blur(1px);
+}
+#chatloading[hidden] { display: none; }
+#chatloading .spin {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid rgba(var(--work-rgb), .22);
+  border-top-color: var(--work);
+  animation: spin .85s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  #msgs { transition: none; }
+  #chatloading .spin { animation: none; }
+}
 /* no "you/agent" labels — side + color already carry the role */
 .turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
 .turn .bubble {
@@ -1034,7 +1054,10 @@ body.notes-open #notespane { transform: translateX(0); }
       </div>
     </div>
     <div id="gauge" hidden><i id="gaugefill"></i></div>
-    <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
+    <div id="msgwrap">
+      <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
+      <div id="chatloading" hidden aria-live="polite" aria-label="loading chat"><div class="spin"></div></div>
+    </div>
     <div id="keyrow"></div>
     <div id="convtools" hidden>
       <button id="termtoggle" aria-label="show terminal" title="show/hide terminal"></button>
@@ -3489,6 +3512,26 @@ $("#chathead").addEventListener("click", e => {
 /* one calm pulse above the prompt — CSS handles the breathing; we only
    flip the class from the mechanical active state */
 function setWorkPulse(active){ $("#workpulse").classList.toggle("on", !!active); }
+let chatLoadTimer = null, chatLoadToken = 0;
+function clearChatLoad(){
+  if (chatLoadTimer) clearTimeout(chatLoadTimer);
+  chatLoadTimer = null;
+  $("#msgwrap").classList.remove("loading");
+  $("#chatloading").hidden = true;
+}
+function beginChatLoad(id, gen){
+  const token = ++chatLoadToken;
+  clearChatLoad();
+  chatLoadTimer = setTimeout(() => {
+    if (token !== chatLoadToken || sel !== id || selGen !== gen) return;
+    $("#msgwrap").classList.add("loading");
+    $("#chatloading").hidden = false;
+  }, 300);
+  return () => {
+    if (token !== chatLoadToken) return;
+    clearChatLoad();
+  };
+}
 function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek){
   setWorkPulse(live === "active" && !mustShowPane);
   setComposerBusy(live === "active");
@@ -3557,12 +3600,13 @@ function jumpChatToNow(){
 }
 async function refreshChat(){
   const n = nodeById(sel);
-  if (!n){ setComposerBusy(false); return; }
+  if (!n){ setComposerBusy(false); clearChatLoad(); return; }
   renderChatHead();
   const gen = selGen;
+  const endChatLoad = beginChatLoad(n.id, gen);
   let d;
   try { d = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
-  catch { return; }
+  catch { endChatLoad(); return; }
   if (gen !== selGen || sel !== n.id) return;   /* selection moved on */
   let chromeChanged = false;
   if (d.live && n.live !== d.live){
@@ -3667,6 +3711,7 @@ async function refreshChat(){
     /* nothing re-rendered, but a "go to now" tap may still be pending
        (jumpChatToNow's immediate jump can race an in-flight render) */
     if (chatScrollBottom){ const m = $("#msgs"); m.scrollTop = m.scrollHeight; chatScrollBottom = false; }
+    endChatLoad();
     return;
   }
   chatSig = sig;
@@ -3799,6 +3844,7 @@ async function refreshChat(){
       ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
         `<button data-key="${k}">${KEYS[k] || k}</button>`).join("");
   }
+  endChatLoad();
 }
 
 $("#keyrow").addEventListener("click", async e => {
