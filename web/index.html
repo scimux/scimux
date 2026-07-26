@@ -96,6 +96,49 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .a-good   { color: #34C759; }   /* relaxing */
 .a-stress { color: #FF9500; }   /* rising — orange; yellow stays reserved */
 .a-crit   { color: var(--bad); }/* last 10% */
+#searchbtn { font-size: 15px; color: var(--dim); padding: 8px; flex: none; }
+
+/* ---------- search overlay: a Spotlight-style modal over the blurred app ----------
+   Opened by 🔍 or ⌘/Ctrl-K from any view; floats OVER the untouched previous
+   view (no snapshot machinery — closing just un-blurs and returns focus). The
+   scrim blurs whatever is behind it; a reduced-transparency viewer gets an
+   opaque scrim instead. #searchfeed is filled by the grouped feed in G4. */
+#searchoverlay { position: fixed; inset: 0; z-index: 100;
+  display: flex; flex-direction: column; align-items: center; }
+#searchoverlay[hidden] { display: none; }
+#searchscrim { position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
+  animation: searchfade .16s ease; }
+@media (prefers-reduced-transparency: reduce) {
+  #searchscrim { background: var(--bg);
+    -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+#searchpanel { position: relative; z-index: 1;
+  width: min(680px, 92vw); margin-top: min(12vh, 88px);
+  max-height: 80dvh; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.28);
+  overflow: hidden; animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
+@keyframes searchfade { from { opacity: 0; } }
+@keyframes searchpop { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
+@media (prefers-reduced-motion: reduce) {
+  #searchscrim, #searchpanel { animation: none; }
+}
+#searchbar { display: flex; align-items: center; gap: 10px;
+  padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--hairline); }
+#searchbar .searchicon { font-size: 15px; opacity: .6; flex: none; }
+#searchinput { flex: 1; min-width: 0; font: inherit; font-size: 18px;
+  color: var(--ink); background: none; border: none; outline: none;
+  -webkit-appearance: none; appearance: none; }
+#searchinput::placeholder { color: var(--dim); }
+#searchinput::-webkit-search-cancel-button { -webkit-appearance: none; }
+#searchclose { flex: none; width: 32px; height: 32px; border-radius: 8px;
+  color: var(--dim); display: flex; align-items: center; justify-content: center; }
+#searchclose:active { background: var(--code-bg); }
+#searchfeed { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 0; }
+#searchfeed .empty { color: var(--dim); text-align: center; padding: 32px 20px; }
 .a-flat   { color: var(--dim); }
 .roll-dn { animation: rolldn .4s ease; }
 .roll-up { animation: rollup .4s ease; }
@@ -997,6 +1040,7 @@ body.notes-open #notespane { transform: translateX(0); }
   <span class="host offline" id="host">scimux</span>
   <span class="sys" id="sys"></span>
   <span class="spacer"></span>
+  <button id="searchbtn" aria-label="search" aria-haspopup="dialog">&#128269;</button>
   <span id="syncwarn" role="status"></span>
 </header>
 
@@ -1120,6 +1164,25 @@ body.notes-open #notespane { transform: translateX(0); }
 
 <div id="scrim"></div>
 <div id="backdrop"></div>
+
+<!-- search overlay (G3): Spotlight-style modal floating over the blurred app.
+     A real dialog — aria-modal, focus trapped inside, focus returned to the 🔍
+     trigger on close. The grouped feed fills #searchfeed in G4. -->
+<div id="searchoverlay" hidden role="dialog" aria-modal="true" aria-label="Search chats and notes">
+  <div id="searchscrim"></div>
+  <div id="searchpanel">
+    <div id="searchbar">
+      <span class="searchicon" aria-hidden="true">&#128269;</span>
+      <input id="searchinput" type="search" autocomplete="off" autocapitalize="off"
+             spellcheck="false" enterkeyhint="search" placeholder="Search chats and notes"
+             aria-label="Search chats and notes" aria-controls="searchfeed">
+      <button id="searchclose" aria-label="close search">&#10005;</button>
+    </div>
+    <div id="searchfeed" role="region" aria-live="polite">
+      <div class="empty">Search your current and past chats and notes.</div>
+    </div>
+  </div>
+</div>
 
 <!-- new activity sheet -->
 <div class="sheet" id="newchat">
@@ -4880,6 +4943,53 @@ function closeSheets(){ $("#backdrop").classList.remove("on");
 closeSheets();
 $("#backdrop").addEventListener("click", closeSheets);
 $("#burger").addEventListener("click", () => openSheet("#menu"));
+
+/* ---- search overlay (G3): open/close, blur, focus trap + restore ----
+   A Spotlight-style modal reachable from any view. Opening blurs the app
+   behind the scrim; closing just un-blurs and restores focus to whatever the
+   supervisor was on (the 🔍 trigger for a click/⌘K, or the field that had focus)
+   — no snapshot machinery, the previous view was never torn down. The grouped
+   feed is wired in G4; here the overlay is the shell. */
+let searchReturnFocus = null;
+function searchOpen(){ return !$("#searchoverlay").hidden; }
+function openSearch(){
+  if (searchOpen()) { $("#searchinput").focus(); return; }
+  searchReturnFocus = document.activeElement;
+  const ov = $("#searchoverlay");
+  ov.hidden = false;
+  /* focus the field after the element is shown so the caret lands correctly */
+  requestAnimationFrame(() => $("#searchinput").focus());
+}
+function closeSearch(){
+  if (!searchOpen()) return;
+  $("#searchoverlay").hidden = true;
+  const back = searchReturnFocus;
+  searchReturnFocus = null;
+  /* restore focus to the trigger (or the previously focused control); fall back
+     to 🔍 so keyboard users are never stranded on document.body */
+  if (back && document.contains(back) && typeof back.focus === "function") back.focus();
+  else $("#searchbtn").focus();
+}
+$("#searchbtn").addEventListener("click", openSearch);
+$("#searchclose").addEventListener("click", closeSearch);
+/* backdrop tap closes; a tap inside the panel does not bubble out to it */
+$("#searchscrim").addEventListener("click", closeSearch);
+/* global open shortcut: ⌘K / Ctrl-K from anywhere. Escape close and the focus
+   trap live in the overlay's own keydown so they win before other handlers. */
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")){
+    e.preventDefault(); openSearch();
+  }
+});
+$("#searchoverlay").addEventListener("keydown", e => {
+  if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closeSearch(); return; }
+  if (e.key !== "Tab") return;
+  /* focus trap: only two tabbables (input, ✕); keep Tab/Shift-Tab inside them */
+  const stops = [$("#searchinput"), $("#searchclose")];
+  const first = stops[0], last = stops[stops.length - 1];
+  if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+});
 
 /* ---- burger menu: manual update check + self-update + about ----
    The check and the download run only on an explicit tap; the server never

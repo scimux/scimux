@@ -526,3 +526,56 @@ func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 		t.Fatal("structured approval branch must render protocol options only, not y/n fallback")
 	}
 }
+
+// TestSearchOverlayShell asserts the G3 search overlay is a real Spotlight-style
+// modal: a 🔍 trigger reachable from any view, an aria-modal dialog that blurs
+// the app behind it (with a reduced-transparency fallback), Escape/backdrop/✕ to
+// close, and focus returned to the trigger. The grouped feed itself is G4 — here
+// #searchfeed exists but only carries the blank-state hint.
+func TestSearchOverlayShell(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+
+	// Structure + a11y: trigger and modal dialog.
+	for _, want := range []string{
+		`id="searchbtn"`,
+		`id="searchoverlay"`,
+		`role="dialog"`,
+		`aria-modal="true"`,
+		`id="searchinput"`,
+		`id="searchfeed"`,
+		`id="searchclose"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("search overlay markup missing %q", want)
+		}
+	}
+
+	// The app behind the overlay is blurred, with an opaque fallback when the
+	// viewer asks for reduced transparency (spec: honor Reduce Transparency).
+	if !strings.Contains(html, "backdrop-filter: blur") {
+		t.Error("search scrim should blur the app behind it")
+	}
+	if !strings.Contains(html, "prefers-reduced-transparency: reduce") {
+		t.Error("search overlay must honor prefers-reduced-transparency")
+	}
+	if !strings.Contains(html, "prefers-reduced-motion: reduce") {
+		t.Error("search overlay must honor prefers-reduced-motion")
+	}
+
+	// Open/close plumbing: named functions, keyboard open, Escape close, and
+	// focus returned to the trigger on close (focus trap / restore).
+	for _, want := range []string{
+		"function openSearch(",
+		"function closeSearch(",
+		`#searchbtn").addEventListener("click"`,
+		"searchReturnFocus",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("search overlay behavior missing %q", want)
+		}
+	}
+}
