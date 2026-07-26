@@ -102,7 +102,9 @@ func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
 		}
 	}
 	// The per-open re-seed that replaces the old empty-payload staleness guard.
-	if !strings.Contains(html, "function prepareLaunchConfig(){\n  fillAgents(); fillModels();") {
+	// (prepareLaunchConfig now takes an optional explicit config for archived
+	// fork; the on-open rebuild — fillAgents/fillModels first — is unchanged.)
+	if !strings.Contains(html, "function prepareLaunchConfig(cfg){\n  fillAgents(); fillModels();") {
 		t.Error("prepareLaunchConfig no longer rebuilds the selectors on open — stale-config guard lost")
 	}
 }
@@ -886,9 +888,9 @@ func TestSearchActionBar(t *testing.T) {
 }
 
 // TestSearchHitActionsAdaptive runs searchHitActions under node to prove the
-// per-hit action set is adaptive: live gets show+fork(+note), notes get
-// show+note (never fork), and archived gets note-only in G5a (its show-to-chat
-// and fork land in G5b with the read-only archived surface).
+// per-hit action set is adaptive: every hit can be shown, only a live+forkable
+// hit forks from the feed bar (archived fork lives inside the read-only view,
+// where the launch config is), and notes never fork.
 func TestSearchHitActionsAdaptive(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -914,8 +916,9 @@ const eq = (a, b) => assert.deepStrictEqual(a, b);
 eq(searchHitActions("live", true),      ["show", "fork", "note"]);
 eq(searchHitActions("live", false),     ["show", "note"]);
 eq(searchHitActions("notes", false),    ["show", "note"]);
-eq(searchHitActions("notes", true),     ["show", "note"]);   // notes never fork
-eq(searchHitActions("archived", true),  ["note"]);           // G5a: show/fork are G5b
+eq(searchHitActions("notes", true),     ["show", "note"]);     // notes never fork
+eq(searchHitActions("archived", true),  ["show", "note"]);     // fork is in the read-only view
+eq(searchHitActions("archived", false), ["show", "note"]);
 `
 	f := filepath.Join(t.TempDir(), "hitactions.js")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
@@ -923,5 +926,56 @@ eq(searchHitActions("archived", true),  ["note"]);           // G5a: show/fork a
 	}
 	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
 		t.Fatalf("search hit actions not adaptive as specified: %v\n%s", err, out)
+	}
+}
+
+// TestArchivedView asserts the G5b client surface: a read-only modal for a
+// deleted chat, opened from an archived show-to-chat, fed by /api/archived, with
+// a fork seeded from the endpoint's launch config (no live node) and NO composer.
+func TestArchivedView(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	// A real modal, like the search overlay.
+	for _, want := range []string{
+		`id="archivedview"`,
+		`role="dialog"`,
+		"function openArchived(",
+		"function closeArchived(",
+		"function renderArchived(",
+		`fetch("/api/archived?uid="`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("archived view missing %q", want)
+		}
+	}
+	// Archived show-to-chat routes into the read-only surface (not a toast).
+	i := strings.Index(html, "function doSearchAction(")
+	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	if !strings.Contains(body, "openArchived(") {
+		t.Error("archived show-to-chat must open the read-only surface")
+	}
+	// The read-only surface must not host a chat composer: no textarea in the
+	// #archivedview markup block (bounded to the overlay's own element).
+	if vs := strings.Index(html, `<div id="archivedview"`); vs >= 0 {
+		ve := strings.Index(html[vs:], "\n</div>\n") + vs
+		if ve > vs && strings.Contains(html[vs:ve], "<textarea") {
+			t.Error("the archived read-only surface must not contain a composer/textarea")
+		}
+	}
+	// Fork from the archived view seeds the launch config explicitly (there is
+	// no live parent node), so prepareLaunchConfig must accept an explicit config.
+	if !strings.Contains(html, "function forkFromArchived(") {
+		t.Error("archived fork entry point missing")
+	}
+	if !strings.Contains(html, "function prepareLaunchConfig(cfg)") ||
+		!strings.Contains(html, "const p = cfg || nodeById(ncParent);") {
+		t.Error("prepareLaunchConfig must take an explicit config so archived fork can seed without a live node")
+	}
+	// The anchored turn is marked, and truncation is surfaced honestly.
+	if !strings.Contains(html, "anchor") || !strings.Contains(html, "before_truncated") {
+		t.Error("archived render must mark the anchor turn and honor truncation flags")
 	}
 }

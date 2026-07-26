@@ -167,6 +167,37 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border: 1px solid var(--hairline); color: var(--work); background: var(--surface); }
 .searchhit .hitbar button:active { background: var(--code-bg); }
 .searchmore { color: var(--dim); text-align: center; font-size: 12px; padding: 10px 16px; }
+/* read-only archived-chat surface (G5b): same Spotlight material as search */
+#archivedview { position: fixed; inset: 0; z-index: 110;
+  display: flex; flex-direction: column; align-items: center; }
+#archivedview[hidden] { display: none; }
+#archivedscrim { position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3); backdrop-filter: blur(20px) saturate(1.3); }
+@media (prefers-reduced-transparency: reduce) {
+  #archivedscrim { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+#archivedpanel { position: relative; z-index: 1;
+  width: min(680px, 92vw); margin-top: min(8vh, 64px); max-height: 84dvh;
+  display: flex; flex-direction: column; background: var(--surface);
+  border: 1px solid var(--hairline); border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.28); overflow: hidden; }
+#archivedhead { display: flex; align-items: center; gap: 10px;
+  padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--hairline); }
+#archivedhead .ahtext { flex: 1; min-width: 0; }
+#archivedtitle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#archivedsub { font-size: 12px; color: var(--dim); }
+#archivedforkbtn { flex: none; font-size: 13px; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--hairline); color: var(--work); }
+#archivedforkbtn[hidden] { display: none; }
+#archivedclose { flex: none; width: 32px; height: 32px; border-radius: 8px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; }
+#archivedbody { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px; }
+#archivedbody .turn.anchor .bubble {
+  outline: 2px solid color-mix(in srgb, var(--attn) 55%, transparent); outline-offset: 2px; }
+.archtrunc { color: var(--dim); text-align: center; font-size: 12px; padding: 8px; font-style: italic; }
+#archivednote { flex: none; padding: 8px 16px; border-top: 1px solid var(--hairline);
+  font-size: 11px; color: var(--dim); }
 .a-flat   { color: var(--dim); }
 .roll-dn { animation: rolldn .4s ease; }
 .roll-up { animation: rollup .4s ease; }
@@ -1217,6 +1248,26 @@ body.notes-open #notespane { transform: translateX(0); }
     <div id="searchfeed" role="region" aria-live="polite">
       <div class="empty">Search your current and past chats and notes.</div>
     </div>
+  </div>
+</div>
+
+<!-- read-only surface for a DELETED chat (G5b): a bounded window of turns around
+     a search hit, opened by an archived show-to-chat. No composer, no polling —
+     it reads from /api/archived, never the live chat endpoint. Fork (when the
+     dir survives) reuses the new-activity sheet seeded from the log's meta. -->
+<div id="archivedview" hidden role="dialog" aria-modal="true" aria-label="Deleted chat (read-only)">
+  <div id="archivedscrim"></div>
+  <div id="archivedpanel">
+    <div id="archivedhead">
+      <div class="ahtext">
+        <div id="archivedtitle"></div>
+        <div id="archivedsub"></div>
+      </div>
+      <button id="archivedforkbtn" hidden>Fork from here</button>
+      <button id="archivedclose" aria-label="close">&#10005;</button>
+    </div>
+    <div id="archivedbody" role="region" aria-live="polite"></div>
+    <div id="archivednote">Read-only — this chat was deleted. Its history is preserved here.</div>
   </div>
 </div>
 
@@ -5236,8 +5287,8 @@ let openHit = null;   /* the hit whose bar is showing (transient; not polled) */
 const SACT_LABEL = { show: "Show to chat", fork: "Fork from here", note: "Add note" };
 function searchHitActions(kind, forkable){
   const acts = [];
-  if (kind === "live" || kind === "notes") acts.push("show");   /* archived show = G5b */
-  if (kind === "live" && forkable) acts.push("fork");           /* archived fork = G5b */
+  acts.push("show");                                   /* every hit can be shown */
+  if (kind === "live" && forkable) acts.push("fork");  /* archived fork lives in the read-only view */
   acts.push("note");
   return acts;
 }
@@ -5276,7 +5327,8 @@ function doSearchAction(a, hit){
   if (a === "show"){
     if (live) jumpToHitChat(id, turn);
     else if (kind === "notes"){ closeSearch(); setNotesOpen(true); }   /* free-standing note */
-    else toast("This chat was deleted — a read-only view is coming.");  /* G5b */
+    else if (kind === "archived"){ closeSearch(); openArchived(hit.dataset.uid, turn); }
+    else toast("This chat is unavailable.");
     return;
   }
   if (a === "fork"){
@@ -5306,6 +5358,83 @@ $("#searchfeed").addEventListener("click", e => {
   if (btn){ doSearchAction(btn.dataset.sact, btn.closest(".searchhit")); return; }
   const hit = e.target.closest(".searchhit");
   if (hit) toggleHitBar(hit);
+});
+
+/* ---- G5b: read-only surface for a deleted chat ----
+   A live search hit opens the normal chat; a DELETED chat has no node to open,
+   so its on-disk log is shown here as a bounded window of turns around the hit
+   (GET /api/archived — never the live chat endpoint, no composer, no polling).
+   Fork (when the dir survives) reuses the new-activity sheet, seeded from the
+   log's meta launch config rather than a live parent. */
+let archivedFork = null;         /* {title,agent,model,dir} when the log is forkable */
+let archivedReturnFocus = null;  /* focus restore on close */
+function archivedOpen(){ return !$("#archivedview").hidden; }
+async function openArchived(uid, at){
+  archivedReturnFocus = document.activeElement;
+  $("#archivedtitle").textContent = "Deleted chat";
+  $("#archivedsub").textContent = "";
+  $("#archivedforkbtn").hidden = true;
+  archivedFork = null;
+  $("#archivedbody").innerHTML = `<div class="archtrunc">Loading…</div>`;
+  $("#archivedview").hidden = false;
+  try {
+    const r = await fetch("/api/archived?uid=" + encodeURIComponent(uid) + "&at=" + encodeURIComponent(at || ""));
+    if (!r.ok) throw new Error("archived " + r.status);
+    renderArchived(await r.json());
+  } catch {
+    $("#archivedbody").innerHTML = `<div class="archtrunc">This chat could not be loaded.</div>`;
+  }
+}
+function renderArchived(d){
+  archivedFork = d.forkable ? { title: d.title, agent: d.agent, model: d.model, dir: d.dir } : null;
+  $("#archivedtitle").textContent = d.title || "Deleted chat";
+  $("#archivedsub").textContent = [d.agent, d.model].filter(Boolean).join(" · ");
+  $("#archivedforkbtn").hidden = !d.forkable;
+  const turns = d.turns || [];
+  const rows = turns.map((t, i) => {
+    /* archived blobs aren't served — splitAssetRefs with no asset map renders
+       any marker as an inert "unavailable" chip, same as the live projection */
+    const s = splitAssetRefs(t.text || "", "", {});
+    const role = t.role === "user" ? "user" : "assistant";
+    return `<div class="turn ${role} ${i === d.anchor ? "anchor" : ""}">` +
+      `<div class="bubble" title="${role === "user" ? "you" : "agent"}">${md(s.clean)}${s.html}</div></div>`;
+  }).join("");
+  const before = d.before_truncated ? `<div class="archtrunc">Earlier turns not shown</div>` : "";
+  const after = d.after_truncated ? `<div class="archtrunc">Later turns not shown</div>` : "";
+  $("#archivedbody").innerHTML = before + rows + after;
+  $("#archivedbody").querySelector(".turn.anchor")?.scrollIntoView({ block: "center" });
+}
+function closeArchived(){
+  if (!archivedOpen()) return;
+  $("#archivedview").hidden = true;
+  const back = archivedReturnFocus;
+  archivedReturnFocus = null;
+  if (back && document.contains(back) && typeof back.focus === "function") back.focus();
+}
+/* fork a deleted chat: a fresh activity seeded from the log's meta launch config
+   (agent/model/dir) — there is no live parent, so ncParent stays empty and the
+   fork inherits config, never history (effort rides along in G5c) */
+function forkFromArchived(){
+  if (!archivedFork) return;
+  const cfg = archivedFork;
+  closeArchived();
+  ncEdit = "";
+  ncParent = "";
+  setNewActivitySubmitting(false);
+  $("#newchat").classList.remove("editing");
+  $("#nc_head").textContent = "New activity";
+  $("#nc_start").textContent = "Start";
+  seedForkTitle(cfg.title || "Follow-up");
+  $("#nc_prompt").value = "";
+  prepareLaunchConfig({ agent: cfg.agent, model: cfg.model, dir: cfg.dir, effort: "" });
+  prepareNewActivityLane();
+  openSheet("#newchat");
+}
+$("#archivedclose").addEventListener("click", closeArchived);
+$("#archivedscrim").addEventListener("click", closeArchived);
+$("#archivedforkbtn").addEventListener("click", forkFromArchived);
+$("#archivedview").addEventListener("keydown", e => {
+  if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closeArchived(); }
 });
 
 /* ---- burger menu: manual update check + self-update + about ----
@@ -5423,9 +5552,11 @@ api("/api/agents").then(j => {
    the parent's values: "same setup, fresh context" is zero taps, "same thread
    on a different agent/model" is a real choice. The payload sends the visible
    values; resolveNode backfills anything left empty from the parent. */
-function prepareLaunchConfig(){
+function prepareLaunchConfig(cfg){
   fillAgents(); fillModels();
-  const p = nodeById(ncParent);
+  /* seed from an explicit config (archived fork — no live parent) or from the
+     parent node when forking a live chat */
+  const p = cfg || nodeById(ncParent);
   if (p){
     const ag = $("#nc_agent");
     /* the probe list may lack the parent's agent (CLI not installed here) —
