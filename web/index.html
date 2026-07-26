@@ -2015,10 +2015,24 @@ function cardCreatedMS(n){
 function cardInteractionMS(n){
   return n.last_interaction || 0;
 }
+/* The Activities list is tiered by liveness, then by recency within a tier.
+   Liveness — not last_interaction — must decide the tier: last_interaction is
+   the last *human* turn, so a chat where the agent has churned for minutes
+   since you last typed would otherwise sink below an idle chat you touched more
+   recently (the "active chats in the middle" bug). Tiers mirror cardState's
+   precedence exactly (closed > attention > active > dead > idle) so a card's
+   position and its rendered state never disagree. */
+function livenessTier(n){
+  if (n.ended_at) return 4;                                       // closed — immutable dead-end, sinks
+  if (hardAttention(n)) return 0;                                 // needs your decision — top
+  if (n.live === "active") return 1;                              // working now
+  if (n.live === "exited" || n.live === "unavailable") return 3;  // dead — sinks with closed
+  return 2;                                                       // idle / quiet / fresh
+}
 function orderedNodes(){
   return [...nodes].sort((a, b) => {
-    const aa = hardAttention(a) ? 1 : 0, ba = hardAttention(b) ? 1 : 0;
-    if (aa !== ba) return ba - aa;
+    const ta = livenessTier(a), tb = livenessTier(b);
+    if (ta !== tb) return ta - tb;
     const freshA = !(a.last_activity || 0), freshB = !(b.last_activity || 0);
     if (freshA !== freshB) return freshA ? -1 : 1;
     if (freshA && freshB) return cardCreatedMS(b) - cardCreatedMS(a);
