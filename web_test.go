@@ -737,3 +737,86 @@ func TestPinnedDragReorder(t *testing.T) {
 		t.Error("renderCards must not rebuild the list mid-drag (poll-safe)")
 	}
 }
+
+// TestSearchFeed asserts the G4 grouped feed wiring: the input drives a
+// debounced fetch of /api/search with an AbortController (so a superseded query
+// is dropped) and a client-side min-length gate, and the response renders as
+// per-chat groups with headers (agent, title, lane swatch) and hits.
+func TestSearchFeed(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		"function runSearch(",
+		"function renderSearchFeed(",
+		"function searchGroupHTML(",
+		"function searchHitHTML(",
+		"new AbortController()",
+		`fetch("/api/search?q=" + encodeURIComponent(`,
+		`$("#searchinput").addEventListener("input"`,
+		"const SEARCH_MIN =",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("search feed wiring missing %q", want)
+		}
+	}
+	// Min-length gate (mirrors the server's minSearchQuery) and a superseded-
+	// query guard so out-of-order responses never overwrite a newer render.
+	if !strings.Contains(html, "< SEARCH_MIN") {
+		t.Error("runSearch must gate on the client-side min query length")
+	}
+	if !strings.Contains(html, "searchSeq") {
+		t.Error("a sequence guard is expected so a stale response can't clobber a newer one")
+	}
+	// The debounced input handler must not fetch on every keystroke.
+	if !strings.Contains(html, "clearTimeout(searchDebounce)") {
+		t.Error("the search input must be debounced (clearTimeout(searchDebounce))")
+	}
+	// G4 renders the feed only; the action bar + jumps are G5, so a hit is not
+	// yet wired to a click handler.
+	if strings.Contains(html, `dataset.searchHit` /* placeholder for a G5-only handler */) {
+		t.Error("G4 should not wire hit clicks yet (action bar is G5)")
+	}
+}
+
+// TestSearchExcerptEscaping runs searchHitHTML under node with an esc stub to
+// prove the excerpt escapes before/after and wraps ONLY the match in <mark>.
+// The server sends raw spans (never HTML-escaped) — a double-escape would show
+// literal &lt; to the user and an unescaped span would be an injection.
+func TestSearchExcerptEscaping(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "function searchHitHTML(")
+	if start < 0 {
+		t.Fatal("could not locate searchHitHTML in web/index.html")
+	}
+	end := strings.Index(html[start:], "function searchGroupHTML(")
+	if end < 0 {
+		t.Fatal("could not locate the end of searchHitHTML in web/index.html")
+	}
+	script := `function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }` + "\n" +
+		html[start:start+end] + `
+const assert = require("assert");
+const out = searchHitHTML({ before: "a <b>", match: "x&y", after: "</b> z", time: "2026-07-26T10:00:00" });
+assert.ok(out.includes("a &lt;b&gt;<mark>x&amp;y</mark>&lt;/b&gt; z"),
+  "excerpt must escape before/after and wrap only the match in <mark>; got: " + out);
+assert.ok(!out.includes("<b>") && !out.includes("</b>"),
+  "raw HTML from the excerpt must never survive into the feed; got: " + out);
+`
+	f := filepath.Join(t.TempDir(), "searchhit.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("search excerpt escaping broken: %v\n%s", err, out)
+	}
+}

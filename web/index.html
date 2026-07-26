@@ -139,6 +139,27 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #searchclose:active { background: var(--code-bg); }
 #searchfeed { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 0; }
 #searchfeed .empty { color: var(--dim); text-align: center; padding: 32px 20px; }
+/* G4 grouped feed: one single-column list, grouped by chat, recency-ordered
+   (the server orders; the client renders as received). No left rail, no lane
+   grouping — lane survives only as the header swatch. */
+.searchgroup { padding: 2px 0 6px; }
+.searchgroup + .searchgroup { border-top: 1px solid var(--hairline); }
+.sghead { display: flex; align-items: center; gap: 8px; position: sticky; top: 0;
+  padding: 8px 16px 6px; background: var(--surface); z-index: 1; }
+.sghead .agent-logo { flex: none; display: inline-flex; }
+.sghead .tabdot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.sghead .sgtitle { font-weight: 600; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.sghead .sgkind { flex: none; margin-left: auto; font-size: 11px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .04em; }
+.searchhit { display: block; width: 100%; text-align: left; padding: 7px 16px;
+  color: var(--ink); }
+.searchhit .ex { display: block; font-size: 14px; line-height: 1.45;
+  overflow-wrap: anywhere; }
+.searchhit .ex mark { background: color-mix(in srgb, var(--attn) 40%, transparent);
+  color: inherit; border-radius: 3px; padding: 0 1px; }
+.searchhit .when { display: block; font-size: 11px; color: var(--dim); margin-top: 2px; }
+.searchmore { color: var(--dim); text-align: center; font-size: 12px; padding: 10px 16px; }
 .a-flat   { color: var(--dim); }
 .roll-dn { animation: rolldn .4s ease; }
 .roll-up { animation: rollup .4s ease; }
@@ -5107,6 +5128,89 @@ $("#searchoverlay").addEventListener("keydown", e => {
   const first = stops[0], last = stops[stops.length - 1];
   if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+});
+
+/* ---- G4: grouped search feed ----
+   The input drives /api/search: a min-length gate (mirrors the server's
+   minSearchQuery), a debounce so we don't fetch on every keystroke, and an
+   AbortController + a monotonic sequence so a superseded/out-of-order response
+   can never overwrite a newer render. The response is already grouped by chat
+   and recency-ordered by the server; the client renders it as received — one
+   single-column feed, no rail, lane only as the header swatch. A hit's excerpt
+   arrives RAW (server never HTML-escapes it): escape before/after and wrap only
+   the match in <mark>. Hits are inert here — the action bar + jumps are G5, so
+   each hit carries its identity in data-* now to keep that step a pure wiring. */
+const SEARCH_MIN = 2;
+let searchSeq = 0;         /* newest issued query; a lower-seq response is stale */
+let searchAbort = null;    /* cancels the in-flight fetch when superseded */
+let searchDebounce = null;
+
+function searchHitHTML(h){
+  const before = esc(h.before || ""), match = esc(h.match || ""), after = esc(h.after || "");
+  const when = h.turn_time || h.time || "";
+  return `<div class="searchhit" data-kind="${esc(h._kind || "")}" data-id="${esc(h._id || "")}"` +
+    ` data-uid="${esc(h._uid || "")}" data-segment="${h.segment || 0}" data-record="${h.record || 0}"` +
+    ` data-note-id="${esc(h.note_id || "")}">` +
+    `<span class="ex">${before}<mark>${match}</mark>${after}</span>` +
+    (when ? `<span class="when">${esc(when)}</span>` : "") +
+    `</div>`;
+}
+function searchGroupHTML(g){
+  const swatch = g.lane_id ? `<span class="tabdot" style="background:${esc(laneColor(g.lane_id))}"></span>` : "";
+  const kind = g.kind === "notes" ? "notes" : g.kind === "archived" ? "past" : "";
+  /* stamp the group's identity onto each hit so a G5 tap knows its destination
+     without re-walking the group */
+  const hits = (g.hits || []).map(h =>
+    searchHitHTML(Object.assign({ _kind: g.kind, _id: g.id, _uid: g.uid }, h))).join("");
+  return `<div class="searchgroup">` +
+    `<div class="sghead">` +
+      `<span class="agent-logo" title="${esc(g.agent || "agent")}">${agentLogo(g.agent)}</span>` +
+      swatch +
+      `<span class="sgtitle">${esc(g.title || "Untitled")}</span>` +
+      (kind ? `<span class="sgkind">${kind}</span>` : "") +
+    `</div>${hits}</div>`;
+}
+function renderSearchFeed(resp){
+  const feed = $("#searchfeed");
+  const groups = (resp && resp.groups) || [];
+  if (!groups.length){
+    feed.innerHTML = `<div class="empty">No matches.</div>`;
+    return;
+  }
+  feed.innerHTML = groups.map(searchGroupHTML).join("")
+    + (resp.partial ? `<div class="searchmore">Showing the most recent matches — refine to narrow.</div>` : "");
+}
+const searchBlank = () => {
+  $("#searchfeed").innerHTML = `<div class="empty">Search your current and past chats and notes.</div>`;
+};
+async function runSearch(q){
+  const query = (q || "").trim();
+  if (query.length < SEARCH_MIN){
+    /* below the gate: drop any in-flight query and return to the blank state so
+       a stale feed never lingers under a now-too-short field */
+    searchSeq++;
+    if (searchAbort){ searchAbort.abort(); searchAbort = null; }
+    searchBlank();
+    return;
+  }
+  const seq = ++searchSeq;
+  if (searchAbort) searchAbort.abort();
+  searchAbort = new AbortController();
+  try {
+    const r = await fetch("/api/search?q=" + encodeURIComponent(query), { signal: searchAbort.signal });
+    if (!r.ok) throw new Error("search " + r.status);
+    const resp = await r.json();
+    if (seq !== searchSeq) return;          /* a newer query already went out */
+    renderSearchFeed(resp);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;   /* superseded — not a failure */
+    if (seq === searchSeq) $("#searchfeed").innerHTML = `<div class="empty">Search is unavailable right now.</div>`;
+  }
+}
+$("#searchinput").addEventListener("input", e => {
+  clearTimeout(searchDebounce);
+  const q = e.target.value;
+  searchDebounce = setTimeout(() => runSearch(q), 180);
 });
 
 /* ---- burger menu: manual update check + self-update + about ----
