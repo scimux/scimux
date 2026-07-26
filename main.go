@@ -2328,10 +2328,11 @@ func (a *app) resolveAttachments(id string, refs []Attachment) ([]Attachment, er
 	return out, nil
 }
 
-// handleUploadAttachments stores multipart file uploads for a node and returns
-// their references. It is deliberately separate from the JSON send path: files
-// exceed jsonBodyMax, so uploads get their own larger cap (attachUploadMax) and
-// never ride the prompt JSON. The prompt references the returned paths (P2).
+// handleUploadAttachments stores one uploaded file for a node and returns its
+// reference (as a one-element list, matching the multipart field). It is
+// deliberately separate from the JSON send path: files exceed jsonBodyMax, so
+// uploads get their own larger cap (attachUploadMax) and never ride the prompt
+// JSON. The prompt references the returned path (P2).
 func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
@@ -2359,45 +2360,45 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no files in upload (expected multipart field \"files\")", 400)
 		return
 	}
-	out := make([]Attachment, 0, len(files))
-	// A multipart upload is all-or-nothing: if a later file fails, the bytes
-	// already written for earlier files have no returned reference and would
-	// leak on disk. Roll them back so a partial failure leaves nothing behind.
-	cleanup := func() {
-		for _, at := range out {
-			os.Remove(at.Path)
-		}
+	// One file per request. The composer already uploads files individually
+	// (each staged file is its own POST), so a single-file contract loses
+	// nothing — and it makes a partial-batch failure structurally impossible:
+	// there is never an earlier file already committed to the append-only
+	// session log when a later one fails. A caller that batches several files
+	// is rejected outright rather than silently half-ingested.
+	if len(files) > 1 {
+		http.Error(w, "one file per upload request", 400)
+		return
 	}
-	for _, fh := range files {
-		src, err := fh.Open()
-		if err != nil {
-			cleanup()
-			http.Error(w, "open upload: "+err.Error(), 400)
-			return
-		}
-		att, err := a.storeAttachment(n.ID, fh.Filename, fh.Header.Get("Content-Type"), src)
-		src.Close()
-		if err != nil {
-			cleanup()
-			http.Error(w, "store upload: "+err.Error(), 500)
-			return
-		}
-		out = append(out, att)
-		data, err := os.ReadFile(att.Path)
-		if err != nil {
-			cleanup()
-			http.Error(w, "read upload: "+err.Error(), 500)
-			return
-		}
-		ev, err := a.ingestAttachmentAsset(n.ID, att.Name, att.Mime, att.Path, data)
-		if err != nil {
-			cleanup()
-			http.Error(w, "ingest upload: "+err.Error(), 500)
-			return
-		}
-		out[len(out)-1].AssetID = ev.ID
+	fh := files[0]
+	src, err := fh.Open()
+	if err != nil {
+		http.Error(w, "open upload: "+err.Error(), 400)
+		return
 	}
-	writeJSON(w, map[string]any{"attachments": out})
+	att, err := a.storeAttachment(n.ID, fh.Filename, fh.Header.Get("Content-Type"), src)
+	src.Close()
+	if err != nil {
+		http.Error(w, "store upload: "+err.Error(), 500)
+		return
+	}
+	// Past this point any failure removes the staged file so a rejected upload
+	// leaves nothing behind; ingestAttachmentAsset removes its own blob on a
+	// failed log append (see ingestAssetBytes).
+	data, err := os.ReadFile(att.Path)
+	if err != nil {
+		os.Remove(att.Path)
+		http.Error(w, "read upload: "+err.Error(), 500)
+		return
+	}
+	ev, err := a.ingestAttachmentAsset(n.ID, att.Name, att.Mime, att.Path, data)
+	if err != nil {
+		os.Remove(att.Path)
+		http.Error(w, "ingest upload: "+err.Error(), 500)
+		return
+	}
+	att.AssetID = ev.ID
+	writeJSON(w, map[string]any{"attachments": []Attachment{att}})
 }
 
 // handleAttachment serves one uploaded file's bytes for the chat view. Guarded:

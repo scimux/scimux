@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
 
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -60,6 +62,15 @@ func (a *app) ingestAssetBytes(nodeID, name, mime, sourceKind, sourcePath string
 	}
 	w := &sessionlog.Writer{Path: a.sessionLogPath(nodeID)}
 	if err := w.Append(sessionlog.NewAsset(ev)); err != nil {
+		// The append-only log record that would reference this asset never
+		// landed. A blob written just above is now orphaned under
+		// assets/<node>/ with nothing pointing at it — and unlike the log,
+		// that write can be undone, so remove it. Inline assets keep their
+		// bytes in the (unwritten) record itself, so there is nothing on disk
+		// to clean up for them.
+		if ev.BlobPath != "" {
+			os.Remove(filepath.Join(a.assetsDir, ev.BlobPath))
+		}
 		return sessionlog.AssetEvent{}, err
 	}
 	return ev, nil

@@ -186,3 +186,66 @@ func TestHandleUploadAttachmentsRollsBackOnAssetIngestFailure(t *testing.T) {
 		t.Errorf("attachment left behind after rollback: %v", entries)
 	}
 }
+
+// Var 1: a blob written for an upload whose session-log append then FAILS must
+// not be left orphaned under assets/<node>/. The append-only log can't be
+// rolled back, but the blob write can, so ingestAssetBytes removes it. (The
+// test above covers the pre-append blob-write failure; this covers the
+// post-write append failure, which was previously untested and leaked.)
+func TestIngestAttachmentAsset_RemovesBlobOnAppendFailure(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Force the log append to fail while the blob write succeeds: make the
+	// node's session-log path a directory so Writer.Append's file open errors.
+	if err := os.Mkdir(a.sessionLogPath("n1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Over the inline cap so a blob is actually written before the append.
+	big := make([]byte, assetInlineCap+1)
+	if _, err := a.ingestAttachmentAsset("n1", "big.bin", "application/octet-stream", "/staged/big.bin", big); err == nil {
+		t.Fatal("want append failure, got nil error")
+	}
+	if entries, err := os.ReadDir(asset.NodeDir(a.assetsDir, "n1")); err == nil && len(entries) != 0 {
+		t.Fatalf("orphaned blob left behind after failed append: %v", entries)
+	}
+}
+
+// Var 2.a: the endpoint accepts one file per request. A request carrying more
+// than one file is rejected outright rather than partially ingested — which is
+// what makes a partial-batch leak against the append-only log impossible.
+func TestHandleUploadAttachments_RejectsMultipleFiles(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.byID["n1"] = &Node{ID: "n1"}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, name := range []string{"a.txt", "b.txt"} {
+		fw, err := mw.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte("data-" + name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mw.Close()
+	req := httptest.NewRequest("POST", "/api/nodes/n1/attachments", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	a.handleUploadAttachments(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400 for a multi-file request; body=%s", rec.Code, rec.Body.String())
+	}
+	// The batch is rejected before any file is stored — nothing durable created.
+	if a.sessionLogExists("n1") {
+		t.Error("rejected multi-file upload created a session log")
+	}
+	if entries, err := os.ReadDir(a.attachmentDir("n1")); err == nil && len(entries) != 0 {
+		t.Errorf("rejected multi-file upload staged files: %v", entries)
+	}
+}
