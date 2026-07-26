@@ -526,3 +526,161 @@ func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 		t.Fatal("structured approval branch must render protocol options only, not y/n fallback")
 	}
 }
+
+// TestPinnedStoreModel asserts the pinned-cards store model: an ordered
+// UI.pinned array carried through init + normUI, and op-merge cases for
+// pin (new pin to the front → renders at top), unpin, and drag reorder.
+func TestPinnedStoreModel(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		`let UI = { groups: [], archived: [], notes: [], lanes: [], pinned: [] };`,
+		`pinned: []`, // in normUI defaults too
+		`case "pin":`,
+		`case "unpin":`,
+		`case "pin-order":`,
+		"const isPinned =",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("pinned store model missing %q", want)
+		}
+	}
+	// A new pin goes to the FRONT (unshift) so it lands at the top of the tab.
+	if !strings.Contains(html, "doc.pinned.unshift(op.id)") {
+		t.Error("pin op should unshift (new pins land at the top)")
+	}
+	// pin-order (drag) replaces the whole ordered list, like groups/lanes; and
+	// like arch/unarch it is not an always-replay idempotent op.
+	if strings.Contains(html, `op.k === "pin"`) &&
+		!strings.Contains(html, `idempotentOp = op => op.k === "note-add" || op.k === "note-del"`) {
+		t.Error("pin ops must not be marked idempotent (they encode intent, replay on matching rev only)")
+	}
+}
+
+// TestPinnedIcons asserts both glyphs are inlined SVGs (no FontAwesome webfont
+// dependency) and carry no Pro/Commercial license artifact.
+func TestPinnedIcons(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	if !strings.Contains(html, "const ICON_PIN =") || !strings.Contains(html, "const ICON_UNPIN =") {
+		t.Error("ICON_PIN / ICON_UNPIN inlined glyphs missing")
+	}
+	if strings.Contains(html, "fa-thumbtack") || strings.Contains(html, `class="fa-`) {
+		t.Error("icons must be inlined SVG, not FontAwesome webfont classes")
+	}
+	if strings.Contains(html, "Commercial License") || strings.Contains(html, "Font Awesome Pro") {
+		t.Error("must not embed a Pro/Commercial-licensed glyph artifact")
+	}
+}
+
+// TestPinnedTab asserts a conditional "Pinned" tab sits between the scope tab
+// and "Archived", shows a live count, and appears only when something is pinned.
+func TestPinnedTab(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	i := strings.Index(html, "function renderCardTabs()")
+	if i < 0 {
+		t.Fatal("renderCardTabs not found")
+	}
+	j := strings.Index(html[i:], "\n}")
+	body := html[i : i+j]
+	for _, want := range []string{
+		`data-tab="pinned"`,
+		"pinnedCount",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderCardTabs missing %q", want)
+		}
+	}
+	// Ordering: the Pinned tab must be emitted after the scope tab and before
+	// Archived.
+	pin := strings.Index(body, `data-tab="pinned"`)
+	cur := strings.Index(body, `data-tab="current"`)
+	arch := strings.Index(body, `data-tab="archived"`)
+	if !(cur < pin && pin < arch) {
+		t.Errorf("Pinned tab must sit between current and archived (cur=%d pin=%d arch=%d)", cur, pin, arch)
+	}
+}
+
+// TestPinnedFilterAndOrder asserts the Pinned tab filters to pinned cards and
+// orders them attention-first, then by pin order (UI.pinned index).
+func TestPinnedFilterAndOrder(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	i := strings.Index(html, "function renderCards()")
+	j := strings.Index(html[i:], "document.title =")
+	body := html[i : i+j]
+	if !strings.Contains(body, `cardTab === "pinned"`) {
+		t.Error("renderCards must special-case the pinned tab")
+	}
+	if !strings.Contains(html, "function pinnedOrder(") {
+		t.Error("a pinnedOrder helper (attention-first, then pin order) is expected")
+	}
+}
+
+// TestPinnedActionAndFlag asserts the swipe/hover action row leads with a
+// pin/unpin button (leftmost), and a folded card shows a pin flag when pinned.
+func TestPinnedActionAndFlag(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	i := strings.Index(html, `<div class="actions">`)
+	j := strings.Index(html[i:], "</div>`")
+	actions := html[i : i+j]
+	pin := strings.Index(actions, "data-pin-action")
+	arch := strings.Index(actions, "data-arch-action")
+	trash := strings.Index(actions, "data-trash")
+	if pin < 0 {
+		t.Fatal("pin/unpin action button missing from the action row")
+	}
+	if !(pin < arch && pin < trash) {
+		t.Errorf("pin must be the leftmost action (pin=%d arch=%d trash=%d)", pin, arch, trash)
+	}
+	// The folded card marks pinned state with a flag glyph near the chevron.
+	if !strings.Contains(html, "pinflag") {
+		t.Error("a pinned card should show a pin flag on the folded card")
+	}
+	// Click handler wires the action.
+	if !strings.Contains(html, "data-pin-action") ||
+		!strings.Contains(html, `k: isPinned(id) ? "unpin" : "pin"`) {
+		t.Error("pin action handler must toggle pin/unpin via uiMutate")
+	}
+}
+
+// TestPinnedDragReorder asserts drag-to-reorder within the Pinned tab persists
+// order via a pin-order op, and is poll-safe (a drag in progress suppresses the
+// list rebuild).
+func TestPinnedDragReorder(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		`k: "pin-order"`,
+		"pinDragging",       // the in-progress-drag guard
+		`draggable="true"`,  // pinned cards are draggable
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("pinned drag reorder missing %q", want)
+		}
+	}
+	// Poll-safe: renderCards must bail while a pin drag is in progress.
+	if !strings.Contains(html, "if (pinDragging) return;") {
+		t.Error("renderCards must not rebuild the list mid-drag (poll-safe)")
+	}
+}
