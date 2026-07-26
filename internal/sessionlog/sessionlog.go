@@ -80,6 +80,7 @@ type MetaEvent struct {
 	UID     string `json:"uid"`
 	Agent   string `json:"agent"`
 	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"` // codex reasoning effort; empty for claude
 	Dir     string `json:"dir,omitempty"`
 	Created string `json:"created"`
 }
@@ -133,7 +134,7 @@ func NewMark(off int64) Event {
 }
 
 // NewMeta builds the header record for a fresh node log.
-func NewMeta(node, agent, model, dir string) Event {
+func NewMeta(node, agent, model, effort, dir string) Event {
 	b := make([]byte, 8)
 	var uid string
 	if _, err := rand.Read(b); err == nil {
@@ -148,7 +149,7 @@ func NewMeta(node, agent, model, dir string) Event {
 	now := nowStamp()
 	return Event{T: "meta", Time: now, Meta: &MetaEvent{
 		Node: node, UID: uid, Agent: agent, Model: model,
-		Dir: dir, Created: now,
+		Effort: effort, Dir: dir, Created: now,
 	}}
 }
 

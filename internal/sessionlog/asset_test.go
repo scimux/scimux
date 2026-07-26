@@ -11,7 +11,7 @@ import (
 func TestAssetEventRoundTripInline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}
-	if err := w.Append(NewMeta("n", "claude", "", "/wd")); err != nil {
+	if err := w.Append(NewMeta("n", "claude", "", "", "/wd")); err != nil {
 		t.Fatal(err)
 	}
 	a := AssetEvent{
@@ -52,7 +52,7 @@ func TestAssetEventRoundTripBlob(t *testing.T) {
 func TestReadAssetsIndexesByID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}
-	w.Append(NewMeta("n", "claude", "", ""))
+	w.Append(NewMeta("n", "claude", "", "", ""))
 	w.Append(NewAsset(AssetEvent{ID: "a_1", Name: "one.png", Storage: "inline"}))
 	w.Append(NewAsset(AssetEvent{ID: "a_2", Name: "two.png", Storage: "inline"}))
 	idx := ReadAssets(path)
@@ -107,7 +107,7 @@ func TestReadAssetsByPathOmitsRecordsWithNoSourcePath(t *testing.T) {
 func TestReadAssetsIgnoresNonAssetRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}
-	w.Append(NewMeta("n", "claude", "", ""))
+	w.Append(NewMeta("n", "claude", "", "", ""))
 	w.Append(Event{T: "user", Text: "hi"})
 	w.Append(Event{T: "tool", Tool: &ToolEvent{ID: "t1"}})
 	idx := ReadAssets(path)

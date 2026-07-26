@@ -27,7 +27,7 @@ func TestHandleChatProjectsUploadedAttachmentAsset(t *testing.T) {
 	a.nodes, a.byID["c1"] = []*Node{n}, n
 
 	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
-	must(t, w.Append(sessionlog.NewMeta("c1", "claude", "", a.home)))
+	must(t, w.Append(sessionlog.NewMeta("c1", "claude", "", "", a.home)))
 	must(t, w.Append(sessionlog.NewAsset(sessionlog.AssetEvent{
 		ID: "a_1", Name: "photo.png", Mime: "image/png", Size: 3,
 		Storage: "inline", Bytes: "aGk=", SourceKind: "upload",
@@ -101,7 +101,7 @@ func TestHandleChatLeavesUnknownAttachmentMarkerAsIs(t *testing.T) {
 	a.nodes, a.byID["c1"] = []*Node{n}, n
 
 	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
-	must(t, w.Append(sessionlog.NewMeta("c1", "claude", "", a.home)))
+	must(t, w.Append(sessionlog.NewMeta("c1", "claude", "", "", a.home)))
 	must(t, w.Append(sessionlog.Event{
 		T: "user", Time: "2026-07-14T01:00:00Z",
 		Text: "old-style upload\n\n[attached image: /tmp/n1/old.png]",

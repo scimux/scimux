@@ -27,6 +27,7 @@ type archivedResponse struct {
 	Title           string            `json:"title"`
 	Agent           string            `json:"agent,omitempty"`
 	Model           string            `json:"model,omitempty"`
+	Effort          string            `json:"effort,omitempty"`
 	Dir             string            `json:"dir,omitempty"`
 	Forkable        bool              `json:"forkable"`
 	Turns           []transcript.Turn `json:"turns"`
@@ -94,6 +95,7 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 		resp.Title = meta.Node
 		resp.Agent = meta.Agent
 		resp.Model = meta.Model
+		resp.Effort = meta.Effort
 		resp.Dir = meta.Dir
 		resp.Forkable = meta.Agent != "" && meta.Dir != "" && dirExists(meta.Dir)
 	}

@@ -1008,7 +1008,7 @@ func TestHandleChatHistory(t *testing.T) {
 	a.nodes, a.byID["c1"] = []*Node{n}, n
 	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
 	for _, ev := range []sessionlog.Event{
-		sessionlog.NewMeta("c1", "claude", "", a.home),
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
 		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
 		{T: "assistant", Text: "old answer", Time: "2026-07-14T01:01:00Z"},
 		{T: "source", Time: "2026-07-15T09:00:00Z", Source: &sessionlog.SourceEvent{SessionID: "s2", Reason: "clear"}},
@@ -1072,7 +1072,7 @@ func TestHandleStateReportsLastInteractionFromCurrentSegment(t *testing.T) {
 	a.lastChg["c1"] = time.Date(2026, 7, 15, 9, 7, 0, 0, time.UTC)
 	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
 	for _, ev := range []sessionlog.Event{
-		sessionlog.NewMeta("c1", "claude", "", a.home),
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
 		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
 		{T: "source", Time: "2026-07-15T09:00:00Z", Source: &sessionlog.SourceEvent{SessionID: "s2", Reason: "clear"}},
 		{T: "assistant", Text: "ready", Time: "2026-07-15T09:01:00Z"},
@@ -1936,7 +1936,7 @@ func TestRetireTranscriptAppendsClearSeam(t *testing.T) {
 	a.byID[n.ID] = n
 	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
 	for _, ev := range []sessionlog.Event{
-		sessionlog.NewMeta("c1", "claude", "", a.home),
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
 		sessionlog.NewSource("/tmp/x.jsonl", "sid"),
 		{T: "user", Text: "old question"},
 		{T: "assistant", Text: "old answer"},

@@ -80,7 +80,7 @@ func (a *app) syncMirror(n *Node) {
 		st := replayMirrorState(logPath)
 		m.path, m.mirrored, m.lastUsed, m.lastWin, m.tsize = st.path, st.mirrored, st.used, st.win, st.size
 		if !st.hasMeta {
-			if err := m.logw.Append(sessionlog.NewMeta(n.ID, n.Agent, n.Model, n.Dir)); err != nil {
+			if err := m.logw.Append(sessionlog.NewMeta(n.ID, n.Agent, n.Model, n.Effort, n.Dir)); err != nil {
 				m.logw = nil // retry next tick; don't advance state past a failed write
 				return
 			}

@@ -134,7 +134,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 			_ = os.Remove(s.logw.Path)
 		}
 	}
-	if err := s.logw.Append(sessionlog.NewMeta(nodeID, agent, model, dir)); err != nil {
+	if err := s.logw.Append(sessionlog.NewMeta(nodeID, agent, model, effort, dir)); err != nil {
 		killAndReap(proc)
 		discardLog()
 		return "", fmt.Errorf("session log: %w", err)

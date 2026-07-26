@@ -5366,7 +5366,7 @@ $("#searchfeed").addEventListener("click", e => {
    (GET /api/archived — never the live chat endpoint, no composer, no polling).
    Fork (when the dir survives) reuses the new-activity sheet, seeded from the
    log's meta launch config rather than a live parent. */
-let archivedFork = null;         /* {title,agent,model,dir} when the log is forkable */
+let archivedFork = null;         /* {title,agent,model,effort,dir} when the log is forkable */
 let archivedReturnFocus = null;  /* focus restore on close */
 function archivedOpen(){ return !$("#archivedview").hidden; }
 async function openArchived(uid, at){
@@ -5386,7 +5386,7 @@ async function openArchived(uid, at){
   }
 }
 function renderArchived(d){
-  archivedFork = d.forkable ? { title: d.title, agent: d.agent, model: d.model, dir: d.dir } : null;
+  archivedFork = d.forkable ? { title: d.title, agent: d.agent, model: d.model, effort: d.effort, dir: d.dir } : null;
   $("#archivedtitle").textContent = d.title || "Deleted chat";
   $("#archivedsub").textContent = [d.agent, d.model].filter(Boolean).join(" · ");
   $("#archivedforkbtn").hidden = !d.forkable;
@@ -5412,8 +5412,8 @@ function closeArchived(){
   if (back && document.contains(back) && typeof back.focus === "function") back.focus();
 }
 /* fork a deleted chat: a fresh activity seeded from the log's meta launch config
-   (agent/model/dir) — there is no live parent, so ncParent stays empty and the
-   fork inherits config, never history (effort rides along in G5c) */
+   (agent/model/effort/dir) — there is no live parent, so ncParent stays empty and
+   the fork inherits config, never history */
 function forkFromArchived(){
   if (!archivedFork) return;
   const cfg = archivedFork;
@@ -5426,7 +5426,7 @@ function forkFromArchived(){
   $("#nc_start").textContent = "Start";
   seedForkTitle(cfg.title || "Follow-up");
   $("#nc_prompt").value = "";
-  prepareLaunchConfig({ agent: cfg.agent, model: cfg.model, dir: cfg.dir, effort: "" });
+  prepareLaunchConfig({ agent: cfg.agent, model: cfg.model, dir: cfg.dir, effort: cfg.effort || "" });
   prepareNewActivityLane();
   openSheet("#newchat");
 }

@@ -78,12 +78,12 @@ func TestHandleSearchGroupsAndOrdering(t *testing.T) {
 	liveNode(a, &Node{ID: "beta", Title: "Beta", Agent: "codex", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
 
 	appendLog(t, a, "alpha.jsonl",
-		sessionlog.NewMeta("alpha", "claude", "", a.home),
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "how do WIDGETS work", Time: "2026-07-14T01:00:00Z"},
 		sessionlog.Event{T: "assistant", Text: "widgets are simple", Time: "2026-07-14T02:00:00Z"},
 	)
 	appendLog(t, a, "beta.jsonl",
-		sessionlog.NewMeta("beta", "codex", "", a.home),
+		sessionlog.NewMeta("beta", "codex", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "no widget here at all", Time: "2026-07-15T09:00:00Z"},
 	)
 
@@ -121,7 +121,7 @@ func TestHandleSearchIncludesArchivedAndLegacy(t *testing.T) {
 	a := newTestApp(t, f)
 
 	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
-		sessionlog.NewMeta("dead", "claude", "", a.home),
+		sessionlog.NewMeta("dead", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "the frobnicate ritual", Time: "2026-07-10T00:00:00Z"},
 	)
 	// No meta header → legacy identity, non-forkable.
@@ -168,7 +168,7 @@ func TestHandleSearchFoldsNotes(t *testing.T) {
 
 	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
 	appendLog(t, a, "alpha.jsonl",
-		sessionlog.NewMeta("alpha", "claude", "", a.home),
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "plain chat text", Time: "2026-07-14T01:00:00Z"},
 	)
 	ui := `{"notes":[
@@ -218,7 +218,7 @@ func TestHandleSearchShortQueryEmpty(t *testing.T) {
 	a := newTestApp(t, f)
 	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home})
 	appendLog(t, a, "alpha.jsonl",
-		sessionlog.NewMeta("alpha", "claude", "", a.home),
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "aaaa", Time: "2026-07-14T01:00:00Z"},
 	)
 	for _, q := range []string{"", "%20%20", "a"} {

@@ -22,7 +22,7 @@ func TestSegmentNoSeam(t *testing.T) {
 	// A log that never rolled over is one segment: all turns, no divider,
 	// and the chat's start stamp comes from the meta header (every chat
 	// renders a "chat started" header, not just post-/clear segments).
-	meta := NewMeta("n1", "codex", "gpt", "/tmp")
+	meta := NewMeta("n1", "codex", "gpt", "", "/tmp")
 	path := writeLog(t, []Event{
 		meta,
 		{T: "user", Text: "hello"},
@@ -41,7 +41,7 @@ func TestSegmentNoSeam(t *testing.T) {
 func TestSegmentFirstBindIsNoRollover(t *testing.T) {
 	// A tmux node's first source seam precedes any turns — no divider.
 	path := writeLog(t, []Event{
-		NewMeta("n1", "claude", "", "/tmp"),
+		NewMeta("n1", "claude", "", "", "/tmp"),
 		NewSource("/t/s1.jsonl", "s1"),
 		{T: "user", Text: "q"},
 		{T: "assistant", Text: "a"},
@@ -59,7 +59,7 @@ func TestSegmentRollover(t *testing.T) {
 	// /clear: turns after the last seam only; prior count and seam time kept;
 	// usage resets at the seam (fresh context, fresh gauge).
 	path := writeLog(t, []Event{
-		NewMeta("n1", "codex", "", "/tmp"),
+		NewMeta("n1", "codex", "", "", "/tmp"),
 		{T: "user", Text: "old q"},
 		{T: "assistant", Text: "old a"},
 		{T: "usage", Usage: &UsageEvent{Used: 900, Size: 1000}},
@@ -84,7 +84,7 @@ func TestSegmentMirroredOldTurnsDateAtTheTurn(t *testing.T) {
 	// the seam, so the UI doesn't render "chat started" at import time above
 	// turns visibly from a year earlier (R20.9).
 	path := writeLog(t, []Event{
-		NewMeta("n1", "claude", "", "/tmp"),
+		NewMeta("n1", "claude", "", "", "/tmp"),
 		{T: "source", Time: "2026-07-20T09:00:00Z", Source: &SourceEvent{SessionID: "s1"}},
 		{T: "user", Text: "old q", Time: "2025-03-01T12:00:00Z"},
 		{T: "assistant", Text: "old a", Time: "2025-03-01T12:01:00Z"},
@@ -99,7 +99,7 @@ func TestSegmentFreshClearKeepsSeamTime(t *testing.T) {
 	// A genuine /clear: the fresh turns all follow the seam in time, so the seam
 	// stamp is the true chat-start and must not be pulled back (R20.9 guard).
 	path := writeLog(t, []Event{
-		NewMeta("n1", "codex", "", "/tmp"),
+		NewMeta("n1", "codex", "", "", "/tmp"),
 		{T: "user", Text: "old q", Time: "2026-07-17T09:00:00Z"},
 		{T: "source", Time: "2026-07-17T10:00:00Z", Source: &SourceEvent{SessionID: "s2"}},
 		{T: "user", Text: "new q", Time: "2026-07-17T10:05:00Z"},
@@ -114,7 +114,7 @@ func TestSegmentFreshClear(t *testing.T) {
 	// Seam as the last record: the fresh surface is empty but the divider data
 	// (prior turns, start time) is there.
 	path := writeLog(t, []Event{
-		NewMeta("n1", "claude", "", "/tmp"),
+		NewMeta("n1", "claude", "", "", "/tmp"),
 		NewSource("/t/s1.jsonl", "s1"),
 		{T: "user", Text: "q"},
 		NewSource("", ""), // detached seam at /clear time
@@ -129,7 +129,7 @@ func TestReadHistory(t *testing.T) {
 	// The whole log as ordered surfaces: first surface (dated at meta),
 	// a /clear surface, and a trailing empty surface (detached seam) dropped.
 	// Empty back-to-back mechanical seams are dropped too.
-	meta := NewMeta("n1", "claude", "", "/tmp")
+	meta := NewMeta("n1", "claude", "", "", "/tmp")
 	path := writeLog(t, []Event{
 		meta,
 		{T: "user", Text: "old q", Time: "2026-07-01T09:00:00Z"},
@@ -163,7 +163,7 @@ func TestReadHistoryBackdatesMirroredTurns(t *testing.T) {
 	// year-old adopted turns dates the surface at the first turn. Seam keeps
 	// the raw time (the map's stop key must still match).
 	path := writeLog(t, []Event{
-		NewMeta("n1", "claude", "", "/tmp"),
+		NewMeta("n1", "claude", "", "", "/tmp"),
 		{T: "source", Time: "2026-07-20T09:00:00Z", Source: &SourceEvent{SessionID: "s1"}},
 		{T: "user", Text: "old q", Time: "2025-03-01T12:00:00Z"},
 	})
@@ -175,7 +175,7 @@ func TestReadHistoryBackdatesMirroredTurns(t *testing.T) {
 
 func TestSegmentCache(t *testing.T) {
 	path := writeLog(t, []Event{
-		NewMeta("n1", "codex", "", "/tmp"),
+		NewMeta("n1", "codex", "", "", "/tmp"),
 		{T: "user", Text: "one"},
 	})
 	var c Cache

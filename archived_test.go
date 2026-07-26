@@ -16,6 +16,7 @@ type archivedResp struct {
 	Title           string `json:"title"`
 	Agent           string `json:"agent"`
 	Model           string `json:"model"`
+	Effort          string `json:"effort"`
 	Dir             string `json:"dir"`
 	Forkable        bool   `json:"forkable"`
 	Anchor          int    `json:"anchor"`
@@ -49,7 +50,7 @@ func TestHandleArchivedWindowsAroundHit(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 
-	evs := []sessionlog.Event{sessionlog.NewMeta("dead", "claude", "sonnet", a.home)}
+	evs := []sessionlog.Event{sessionlog.NewMeta("dead", "codex", "sonnet", "high", a.home)}
 	for i := 0; i < 25; i++ {
 		role := "user"
 		if i%2 == 1 {
@@ -92,8 +93,9 @@ func TestHandleArchivedWindowsAroundHit(t *testing.T) {
 	if !ar.BeforeTruncated || !ar.AfterTruncated {
 		t.Errorf("truncation flags = before %v after %v, want both true", ar.BeforeTruncated, ar.AfterTruncated)
 	}
-	// Launch config from the meta header rides along for the fork step.
-	if ar.Agent != "claude" || ar.Model != "sonnet" || ar.Dir != a.home {
+	// Launch config from the meta header rides along for the fork step — including
+	// effort, so a fork from a deleted codex chat keeps its reasoning level (G5c).
+	if ar.Agent != "codex" || ar.Model != "sonnet" || ar.Effort != "high" || ar.Dir != a.home {
 		t.Errorf("launch config = %+v", ar)
 	}
 	if !ar.Forkable {
@@ -106,7 +108,7 @@ func TestHandleArchivedNoAnchor(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
-		sessionlog.NewMeta("dead", "claude", "", a.home),
+		sessionlog.NewMeta("dead", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "first needle", Time: "2026-07-10T00:00:00Z"},
 		sessionlog.Event{T: "assistant", Text: "second line", Time: "2026-07-10T01:00:00Z"},
 	)
@@ -149,7 +151,7 @@ func TestHandleArchivedNotFound(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
-		sessionlog.NewMeta("dead", "claude", "", a.home),
+		sessionlog.NewMeta("dead", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "hello", Time: "2026-07-10T00:00:00Z"},
 	)
 	if code, _ := doArchived(t, a, "nope-not-a-real-uid", ""); code != 404 {
