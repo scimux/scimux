@@ -167,6 +167,17 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border: 1px solid var(--hairline); color: var(--work); background: var(--surface); }
 .searchhit .hitbar button:active { background: var(--code-bg); }
 .searchmore { color: var(--dim); text-align: center; font-size: 12px; padding: 10px 16px; }
+/* G6 recents: recent searches fill the blank state (client-side, per-device,
+   persisted like drafts). Tapping one re-runs it; Clear wipes the history. */
+.recents { padding: 4px 0 10px; }
+.recentshead { display: flex; align-items: center; padding: 10px 16px 4px;
+  font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+#recentsclear { margin-left: auto; font-size: 11px; color: var(--work);
+  text-transform: none; letter-spacing: 0; }
+#recentsclear:active { text-decoration: underline; }
+.recent { display: block; width: 100%; text-align: left; padding: 9px 16px;
+  color: var(--ink); font-size: 15px; cursor: pointer; overflow-wrap: anywhere; }
+.recent:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
 /* read-only archived-chat surface (G5b): same Spotlight material as search */
 #archivedview { position: fixed; inset: 0; z-index: 110;
   display: flex; flex-direction: column; align-items: center; }
@@ -5154,6 +5165,10 @@ function openSearch(){
   searchReturnFocus = document.activeElement;
   const ov = $("#searchoverlay");
   ov.hidden = false;
+  /* an empty field opens on the blank state, refreshed each time so recents
+     reflect any searches acted on since the overlay was last open (G6). A
+     non-empty field keeps its preserved results (spec: results survive close). */
+  if (($("#searchinput").value || "").trim().length < SEARCH_MIN) searchBlank();
   /* focus the field after the element is shown so the caret lands correctly */
   requestAnimationFrame(() => $("#searchinput").focus());
 }
@@ -5241,9 +5256,43 @@ function renderSearchFeed(resp){
   feed.innerHTML = groups.map(searchGroupHTML).join("")
     + (resp.partial ? `<div class="searchmore">Showing the most recent matches — refine to narrow.</div>` : "");
 }
+/* ---- G6: recent searches ----
+   A short handful of past queries, kept client-side per device (like composer
+   drafts — never server state) so they survive reloads. Most-recent-first,
+   deduped, hard-capped; a query is remembered only once the supervisor ACTS on a
+   hit (recordRecent in doSearchAction), which is the unambiguous "this search
+   mattered" signal — recording every debounced keystroke would just fill the
+   list with prefixes of one word. They fill the blank state; tapping one re-runs
+   it, and Clear wipes the history. */
+const RECENTS_KEY = "scimux-search-recents";
+const RECENTS_CAP = 8;    /* hard cap on what we store */
+const RECENTS_SHOW = 5;   /* how many surface in the blank state */
+function loadRecents(){
+  try {
+    const a = JSON.parse(localStorage.getItem(RECENTS_KEY) || "[]");
+    return Array.isArray(a) ? a.filter(s => typeof s === "string") : [];
+  } catch { return []; }
+}
+function recordRecent(q){
+  const query = (q || "").trim();
+  if (query.length < SEARCH_MIN) return;   /* mirror the search gate */
+  const list = loadRecents().filter(s => s !== query);   /* drop a prior copy → move-to-front */
+  list.unshift(query);
+  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(list.slice(0, RECENTS_CAP))); } catch {}
+}
+function clearRecents(){ try { localStorage.removeItem(RECENTS_KEY); } catch {} }
+function recentsHTML(){
+  const list = loadRecents().slice(0, RECENTS_SHOW);
+  if (!list.length) return "";
+  return `<div class="recents"><div class="recentshead">Recent searches` +
+    `<button id="recentsclear" type="button">Clear</button></div>` +
+    list.map(q => `<button class="recent" type="button" data-recent="${esc(q)}">${esc(q)}</button>`).join("") +
+    `</div>`;
+}
 const searchBlank = () => {
   openHit = null;
-  $("#searchfeed").innerHTML = `<div class="empty">Search your current and past chats and notes.</div>`;
+  $("#searchfeed").innerHTML = recentsHTML()
+    || `<div class="empty">Search your current and past chats and notes.</div>`;
 };
 async function runSearch(q){
   const query = (q || "").trim();
@@ -5321,6 +5370,7 @@ function jumpToHitChat(id, turn){
 }
 function doSearchAction(a, hit){
   if (!hit) return;
+  recordRecent($("#searchinput").value);   /* acting on a hit means this query mattered (G6) */
   const kind = hit.dataset.kind, id = hit.dataset.id;
   const turn = hit.dataset.turn, lane = hit.dataset.lane;
   const live = id && nodeById(id);
@@ -5354,6 +5404,9 @@ function doSearchAction(a, hit){
   }
 }
 $("#searchfeed").addEventListener("click", e => {
+  if (e.target.closest("#recentsclear")){ clearRecents(); searchBlank(); return; }
+  const rc = e.target.closest("[data-recent]");
+  if (rc){ const q = rc.dataset.recent; $("#searchinput").value = q; runSearch(q); return; }
   const btn = e.target.closest("[data-sact]");
   if (btn){ doSearchAction(btn.dataset.sact, btn.closest(".searchhit")); return; }
   const hit = e.target.closest(".searchhit");

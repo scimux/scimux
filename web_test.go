@@ -979,3 +979,96 @@ func TestArchivedView(t *testing.T) {
 		t.Error("archived render must mark the anchor turn and honor truncation flags")
 	}
 }
+
+// TestSearchRecents covers G6: recent searches are kept client-side (localStorage,
+// like drafts), deduped most-recent-first, gated by the same min length as search,
+// hard-capped, and only recorded when the supervisor acts on a hit. It runs the
+// real recents helpers under node with a localStorage + esc stub.
+func TestSearchRecents(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+
+	// Wiring: a query is recorded on hit action (not per keystroke), tapping a
+	// recent re-runs it, and Clear wipes the history.
+	for _, want := range []string{
+		"function recordRecent(",
+		"function recentsHTML(",
+		"function clearRecents(",
+		`recordRecent($("#searchinput").value)`, // recorded inside doSearchAction
+		`data-recent=`,
+		`e.target.closest("#recentsclear")`,
+		"const RECENTS_CAP =",
+		"const RECENTS_SHOW =",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("recents wiring missing %q", want)
+		}
+	}
+	// recordRecent must gate on the same minimum as search (no 1-char noise).
+	if !strings.Contains(html, "if (query.length < SEARCH_MIN) return;") {
+		t.Error("recordRecent must reuse the SEARCH_MIN gate")
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	start := strings.Index(html, "const RECENTS_KEY =")
+	end := strings.Index(html, "const searchBlank =")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("could not locate the recents helper block in web/index.html")
+	}
+	script := `
+const store = new Map();
+const localStorage = {
+  getItem: k => store.has(k) ? store.get(k) : null,
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: k => store.delete(k),
+};
+function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+const SEARCH_MIN = 2;
+` + html[start:end] + `
+const assert = require("assert");
+
+// gate: a sub-minimum query is never recorded.
+recordRecent("a");
+assert.deepStrictEqual(loadRecents(), [], "1-char query must not be recorded");
+
+// dedup + move-to-front, most-recent-first.
+recordRecent("auth");
+recordRecent(" bug ");            // trimmed
+recordRecent("auth");             // repeat → jumps back to front, no duplicate
+assert.deepStrictEqual(loadRecents(), ["auth", "bug"],
+  "recents must dedup and move the repeat to the front; got " + JSON.stringify(loadRecents()));
+
+// hard cap at RECENTS_CAP.
+for (let i = 0; i < 20; i++) recordRecent("q" + i);
+assert.ok(loadRecents().length <= RECENTS_CAP,
+  "recents must be capped at " + RECENTS_CAP + "; got " + loadRecents().length);
+assert.strictEqual(loadRecents()[0], "q19", "newest query must be first");
+
+// blank-state render shows at most RECENTS_SHOW and escapes the query text.
+store.clear();
+recordRecent("<img src=x>");
+recordRecent("hello");
+const html2 = recentsHTML();
+assert.ok(html2.includes("&lt;img src=x&gt;") && !html2.includes("<img src=x>"),
+  "recent query text must be escaped; got " + html2);
+assert.ok(html2.includes('data-recent="hello"'), "recent must carry its query for re-run");
+
+// clear wipes everything → blank state renders nothing (falls back to the prompt).
+clearRecents();
+assert.deepStrictEqual(loadRecents(), [], "clearRecents must empty the history");
+assert.strictEqual(recentsHTML(), "", "no recents → empty render (prompt fallback)");
+`
+	f := filepath.Join(t.TempDir(), "recents.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("recents behavior broken: %v\n%s", err, out)
+	}
+}
