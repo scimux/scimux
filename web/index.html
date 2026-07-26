@@ -4582,6 +4582,13 @@ $("#cardlist").addEventListener("dragover", e => {
 $("#cardlist").addEventListener("drop", e => { if (pinDragging) e.preventDefault(); });
 $("#cardlist").addEventListener("dragend", () => {
   if (!pinDragging) return;
+  /* We persist the DOM order verbatim. When a pinned card has live hard-
+     attention, pinnedOrder() has floated it above its pin-order neighbours, so
+     dragging any *other* card bakes that transient float into the stored order:
+     the floated card keeps its raised position after its attention clears.
+     Accepted (rare: needs the Pinned tab open, a live-attention pinned card,
+     and a drag of a different card) — reconciling the drop against pin-order
+     neighbours while ignoring floated cards costs more than the wrinkle. */
   const order = [...$("#cardlist").querySelectorAll(".card")]
     .map(c => c.querySelector(".go")?.dataset.open).filter(Boolean);
   pinDragEl?.classList.remove("dragging");

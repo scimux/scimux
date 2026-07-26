@@ -672,8 +672,8 @@ func TestPinnedDragReorder(t *testing.T) {
 	html := string(b)
 	for _, want := range []string{
 		`k: "pin-order"`,
-		"pinDragging",       // the in-progress-drag guard
-		`draggable="true"`,  // pinned cards are draggable
+		"pinDragging",      // the in-progress-drag guard
+		`draggable="true"`, // pinned cards are draggable
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("pinned drag reorder missing %q", want)
