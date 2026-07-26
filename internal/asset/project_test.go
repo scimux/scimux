@@ -1,6 +1,7 @@
 package asset
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -144,5 +145,33 @@ func TestProjectAgentPaths_NoLinksNoOp(t *testing.T) {
 	text := "plain assistant reply, no links"
 	if got := ProjectAgentPaths(text, nil); got != text {
 		t.Fatalf("got %q, want unchanged %q", got, text)
+	}
+}
+
+// Regression: in-document anchor links and other non-path URL schemes are not
+// local paths and must be left exactly as written — never rewritten into an
+// "unavailable" asset chip. This is ordinary agent prose (doc headings,
+// footnotes, mailto links), not file references.
+func TestProjectAgentPaths_LeavesNonPathTargetsAlone(t *testing.T) {
+	cases := []string{
+		"See [Overview](#overview) and [Details](#details).",
+		"Mail [us](mailto:team@example.com) about it.",
+		"Inline [data](data:text/plain;base64,aGk=) blob.",
+	}
+	for _, text := range cases {
+		if got := ProjectAgentPaths(text, nil); got != text {
+			t.Errorf("ProjectAgentPaths(%q) = %q, want unchanged", text, got)
+		}
+	}
+}
+
+// The same filter must hold at ingestion time: non-path targets are never
+// scanned as candidates.
+func TestScanMarkdown_SkipsFragmentAndSchemeTargets(t *testing.T) {
+	text := "[Overview](#overview) [mail](mailto:x@y.z) [real](./out.png)"
+	got := ScanMarkdown(text)
+	want := []Candidate{{Ref: "./out.png", Alt: "real", IsImage: false}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want only the real local path %+v", got, want)
 	}
 }

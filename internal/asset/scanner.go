@@ -20,20 +20,38 @@ type Candidate struct {
 var mdLinkRE = regexp.MustCompile(`(!?)\[([^\]]*)\]\(([^)\s]+)\)`)
 var fenceRE = regexp.MustCompile("^\\s*```")
 
+// urlSchemeRE matches a leading URL scheme ("http:", "mailto:", "data:", and
+// our own "scimux-asset:" among them). A ref carrying a scheme is a URL, not a
+// local filesystem path, and is never an ingestion candidate.
+var urlSchemeRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:`)
+
+// isLocalPathRef reports whether a Markdown link/image target is a candidate
+// local filesystem path — as opposed to a URL (http, mailto, data, the
+// scimux-asset: refs we mint ourselves, …) or an in-document fragment
+// (#heading). Only genuine paths are eligible for ingestion and render-time
+// projection; everything else is left exactly as the agent wrote it. This is
+// the single filter shared by ScanMarkdown (ingestion) and ProjectAgentPaths
+// (render) so the two can never drift — without it, ordinary agent prose with
+// anchor or reference links renders as inert "unavailable" file chips.
+func isLocalPathRef(ref string) bool {
+	if ref == "" || strings.HasPrefix(ref, "#") {
+		return false
+	}
+	return !urlSchemeRE.MatchString(ref)
+}
+
 // ScanMarkdown extracts local-path candidates from Markdown image/link
 // syntax in turn text — the doc's `![alt](path)` / `[text](path)` shapes.
 // Fenced code blocks are skipped so example syntax quoted in prose is never
-// mistaken for a real reference. http(s) links and already-projected
-// scimux-asset: references are not local paths and are skipped too.
+// mistaken for a real reference. Targets that are not local paths — URLs
+// (http, mailto, data, already-projected scimux-asset:) and in-document
+// fragments (#heading) — are skipped via isLocalPathRef.
 func ScanMarkdown(text string) []Candidate {
 	stripped := stripFencedCode(text)
 	var out []Candidate
 	for _, m := range mdLinkRE.FindAllStringSubmatch(stripped, -1) {
 		ref := m[3]
-		if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
-			continue
-		}
-		if strings.HasPrefix(ref, "scimux-asset:") {
+		if !isLocalPathRef(ref) {
 			continue
 		}
 		out = append(out, Candidate{Ref: ref, Alt: m[2], IsImage: m[1] == "!"})

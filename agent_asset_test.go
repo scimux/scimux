@@ -144,6 +144,83 @@ func TestIngestAssetHook_RepeatedCallsIdempotent(t *testing.T) {
 	}
 }
 
+// Regression: identical bytes referenced under two different ref spellings
+// (dedup hit) must BOTH project to the real asset — not leave the second
+// reference as an "unavailable" chip. The dedup keeps a single stored asset
+// (one id), but a path-alias record makes the second ref resolvable at render
+// time. See ingestAgentPathAsset.
+func TestIngestAssetHook_DedupAliasesSecondPath(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// Two distinct paths, identical bytes → dedup hit on the second.
+	if err := os.WriteFile(filepath.Join(dir, "a.png"), []byte("SAMEBYTES"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.png"), []byte("SAMEBYTES"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "a.png"}, {Ref: "b.png"}})
+
+	// Still one stored asset (dedup held), but both paths resolve to it.
+	if n := len(sessionlog.ReadAssets(a.sessionLogPath("n1"))); n != 1 {
+		t.Fatalf("stored assets = %d, want 1 (dedup)", n)
+	}
+	byPath := sessionlog.ReadAssetsByPath(a.sessionLogPath("n1"))
+	evA, okA := byPath["a.png"]
+	evB, okB := byPath["b.png"]
+	if !okA || !okB {
+		t.Fatalf("both refs must resolve: a.png=%v b.png=%v", okA, okB)
+	}
+	if evA.ID != evB.ID {
+		t.Fatalf("aliased ref must share the id: %q vs %q", evA.ID, evB.ID)
+	}
+
+	// A turn referencing both must project both to the same real asset, with
+	// neither rendered as a synthetic "missing_" chip.
+	turns := []transcript.Turn{{Role: "assistant", Text: "![x](a.png) and ![y](b.png)"}}
+	out, assets := a.projectTurns("n1", turns)
+	if strings.Contains(out[0].Text, "missing_") {
+		t.Fatalf("a deduped-but-present file rendered as unavailable: %q", out[0].Text)
+	}
+	ids := asset.ReferencedIDs(out[0].Text)
+	if len(ids) != 1 || len(assets) != 1 {
+		t.Fatalf("want 1 shared asset id, got ids=%v assets=%d", ids, len(assets))
+	}
+}
+
+// Re-polling a turn whose ref aliases an existing asset must stay idempotent:
+// the alias record is written at most once, never once per poll.
+func TestIngestAssetHook_DedupAliasIdempotent(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.png"), []byte("SAMEBYTES"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.png"), []byte("SAMEBYTES"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "a.png"}})
+	for i := 0; i < 3; i++ {
+		a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "b.png"}})
+	}
+	// Count raw "asset" records in the log: one original + exactly one alias.
+	var assetRecs int
+	for _, ev := range sessionlog.ReadEvents(a.sessionLogPath("n1")) {
+		if ev.T == "asset" {
+			assetRecs++
+		}
+	}
+	if assetRecs != 2 {
+		t.Fatalf("asset records = %d, want 2 (one original + one alias, no per-poll growth)", assetRecs)
+	}
+}
+
 // End-to-end: a turn-append ingest followed by projectTurns must turn an
 // agent-generated Markdown image reference into a rendered asset entry, and
 // an assistant Markdown reference to a real (non-image) doc file into a

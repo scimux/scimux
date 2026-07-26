@@ -72,8 +72,11 @@ func ReferencedIDs(text string) []string {
 // scimux-asset:<id> Markdown, using byPath (asset events indexed by
 // SourcePath; the same map Project uses, since ingestAgentPathAsset records
 // the literal candidate ref text there too). Fenced code blocks are left
-// untouched, matching ScanMarkdown's exclusion. http(s) links and
-// already-projected scimux-asset: refs are left alone.
+// untouched, matching ScanMarkdown's exclusion. Non-path targets — URLs
+// (http, mailto, data, already-projected scimux-asset:) and in-document
+// fragments (#heading) — are left alone via the same isLocalPathRef filter
+// ScanMarkdown uses, so ordinary agent prose with anchor/reference links is
+// never turned into an "unavailable" chip.
 //
 // A reference whose path was never ingested — outside the allowed root,
 // unreadable, too large, or scanned from a log written before this
@@ -103,7 +106,7 @@ func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) str
 		lines[i] = mdLinkRE.ReplaceAllStringFunc(ln, func(m string) string {
 			sub := mdLinkRE.FindStringSubmatch(m)
 			bang, alt, ref := sub[1], sub[2], sub[3]
-			if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") || strings.HasPrefix(ref, "scimux-asset:") {
+			if !isLocalPathRef(ref) {
 				return m
 			}
 			ev, ok := byPath[ref]
