@@ -3545,10 +3545,16 @@ function clearChatLoad(){
   $("#msgwrap").classList.remove("loading");
   $("#chatloading").hidden = true;
 }
-function beginChatLoad(id, gen){
+/* The blur+spinner is a *cold-load* indicator only — a first open or a node
+   switch, where #msgs is empty or still showing the previous node's content
+   and there is a genuine wait with nothing correct to show. `cold` is false on
+   the 2s background poll of an already-rendered node: refreshing that content
+   must never blur it, however slow the network. Blurring on every slow poll is
+   what made the overlay flicker on unstable connections. */
+function beginChatLoad(id, gen, cold){
   const token = ++chatLoadToken;
   clearChatLoad();
-  chatLoadTimer = setTimeout(() => {
+  if (cold) chatLoadTimer = setTimeout(() => {
     if (token !== chatLoadToken || sel !== id || selGen !== gen) return;
     $("#msgwrap").classList.add("loading");
     $("#chatloading").hidden = false;
@@ -3629,7 +3635,7 @@ async function refreshChat(){
   if (!n){ setComposerBusy(false); clearChatLoad(); return; }
   renderChatHead();
   const gen = selGen;
-  const endChatLoad = beginChatLoad(n.id, gen);
+  const endChatLoad = beginChatLoad(n.id, gen, !chatSig);
   let d;
   try { d = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
   catch { endChatLoad(); return; }
