@@ -128,6 +128,30 @@ func ScanLog(path, query string, opt ScanOptions) ScanResult {
 	return res
 }
 
+// StringMatch is the excerpt window ScanString found for a single string.
+type StringMatch struct {
+	Before string
+	Match  string
+	After  string
+	OK     bool
+}
+
+// ScanString runs the same bounded-window excerpt logic ScanLog uses on prose,
+// but over a single caller-supplied string (a note's text) rather than a log
+// file. The query is matched case-insensitively; spans are raw (the caller
+// escapes them). OK is false when the query is absent or empty.
+func ScanString(text, query string, before, after int) StringMatch {
+	q := []rune(strings.TrimSpace(query))
+	if len(q) == 0 {
+		return StringMatch{}
+	}
+	for i, r := range q {
+		q[i] = unicode.ToLower(r)
+	}
+	b, m, a, ok := excerpt(text, q, before, after)
+	return StringMatch{Before: b, Match: m, After: a, OK: ok}
+}
+
 // searchable returns the role and text a record contributes to the corpus, or
 // ("", "") for record types that are counted in the ordinal but never matched
 // (meta, source, tool, usage, mark, stop, error). Asset records contribute their

@@ -3565,6 +3565,7 @@ func main() {
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
+	mux.HandleFunc("GET /api/search", a.handleSearch)
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
 	mux.HandleFunc("GET /api/ui", a.handleUIGet)
 	mux.HandleFunc("PUT /api/ui", a.handleUIPut)

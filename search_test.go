@@ -1,0 +1,247 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
+)
+
+// searchResp mirrors the /api/search JSON so tests read fields by name.
+type searchResp struct {
+	Query   string `json:"query"`
+	Partial bool   `json:"partial"`
+	Groups  []struct {
+		Kind     string `json:"kind"`
+		ID       string `json:"id"`
+		UID      string `json:"uid"`
+		Title    string `json:"title"`
+		LaneID   string `json:"lane_id"`
+		Agent    string `json:"agent"`
+		Forkable bool   `json:"forkable"`
+		Hits     []struct {
+			Role     string `json:"role"`
+			Segment  int    `json:"segment"`
+			Record   int    `json:"record"`
+			NoteID   string `json:"note_id"`
+			Time     string `json:"time"`
+			TurnTime string `json:"turn_time"`
+			Before   string `json:"before"`
+			Match    string `json:"match"`
+			After    string `json:"after"`
+		} `json:"hits"`
+	} `json:"groups"`
+}
+
+func doSearch(t *testing.T, a *app, q string) searchResp {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	a.handleSearch(rec, httptest.NewRequest("GET", "/api/search?q="+q, nil))
+	if rec.Code != 200 {
+		t.Fatalf("search %q code = %d, body %s", q, rec.Code, rec.Body.String())
+	}
+	var out searchResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode search body: %v (%s)", err, rec.Body.String())
+	}
+	return out
+}
+
+func appendLog(t *testing.T, a *app, file string, evs ...sessionlog.Event) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(a.sessionsDir, file)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, file)}
+	for _, ev := range evs {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func liveNode(a *app, n *Node) {
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+}
+
+// A live node's log hits surface under its group, groups order by newest match,
+// hits within a group order newest-first, and Match carries the query casing.
+func TestHandleSearchGroupsAndOrdering(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home, LaneID: "lane-1", CreatedAt: "2026-07-14T00:00:00Z"})
+	liveNode(a, &Node{ID: "beta", Title: "Beta", Agent: "codex", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
+
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", a.home),
+		sessionlog.Event{T: "user", Text: "how do WIDGETS work", Time: "2026-07-14T01:00:00Z"},
+		sessionlog.Event{T: "assistant", Text: "widgets are simple", Time: "2026-07-14T02:00:00Z"},
+	)
+	appendLog(t, a, "beta.jsonl",
+		sessionlog.NewMeta("beta", "codex", "", a.home),
+		sessionlog.Event{T: "user", Text: "no widget here at all", Time: "2026-07-15T09:00:00Z"},
+	)
+
+	out := doSearch(t, a, "widget")
+	if len(out.Groups) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(out.Groups), out.Groups)
+	}
+	// beta's only match (07-15) is newer than alpha's newest (07-14) → beta first.
+	if out.Groups[0].ID != "beta" || out.Groups[1].ID != "alpha" {
+		t.Fatalf("group order = %s,%s want beta,alpha", out.Groups[0].ID, out.Groups[1].ID)
+	}
+	alpha := out.Groups[1]
+	if alpha.Kind != "live" || alpha.Title != "Alpha" || alpha.LaneID != "lane-1" || alpha.Agent != "claude" {
+		t.Errorf("alpha header = %+v", alpha)
+	}
+	if len(alpha.Hits) != 2 {
+		t.Fatalf("alpha hits = %d, want 2", len(alpha.Hits))
+	}
+	// newest-first within the group
+	if alpha.Hits[0].Time != "2026-07-14T02:00:00Z" || alpha.Hits[1].Time != "2026-07-14T01:00:00Z" {
+		t.Errorf("alpha hit order = %s,%s", alpha.Hits[0].Time, alpha.Hits[1].Time)
+	}
+	// Match is the query-length span in the turn's original casing: "WIDGET".
+	if alpha.Hits[1].Match != "WIDGET" {
+		t.Errorf("match casing = %q, want WIDGET", alpha.Hits[1].Match)
+	}
+	if !alpha.Forkable {
+		t.Errorf("live node with existing dir should be forkable")
+	}
+}
+
+// Archived logs join the corpus; a header-less log becomes legacy: and non-forkable.
+func TestHandleSearchIncludesArchivedAndLegacy(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+
+	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
+		sessionlog.NewMeta("dead", "claude", "", a.home),
+		sessionlog.Event{T: "user", Text: "the frobnicate ritual", Time: "2026-07-10T00:00:00Z"},
+	)
+	// No meta header → legacy identity, non-forkable.
+	appendLog(t, a, filepath.Join("archive", "ancient.jsonl"),
+		sessionlog.Event{T: "user", Text: "frobnicate again", Time: "2026-07-11T00:00:00Z"},
+	)
+
+	out := doSearch(t, a, "frobnicate")
+	if len(out.Groups) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(out.Groups), out.Groups)
+	}
+	var dead, legacy bool
+	for _, g := range out.Groups {
+		if g.Kind != "archived" {
+			t.Errorf("group kind = %q, want archived", g.Kind)
+		}
+		switch {
+		case g.UID != "" && g.UID[:7] == "legacy:":
+			legacy = true
+			if g.Forkable {
+				t.Errorf("legacy (no-uid) group must not be forkable")
+			}
+		case g.Title == "dead":
+			dead = true
+			if g.UID == "" || g.UID[:7] == "legacy:" {
+				t.Errorf("dead group should have a real uid, got %q", g.UID)
+			}
+			if !g.Forkable {
+				t.Errorf("archived log with meta + existing dir should be forkable")
+			}
+		}
+	}
+	if !dead || !legacy {
+		t.Errorf("expected both dead and legacy groups, got dead=%v legacy=%v", dead, legacy)
+	}
+}
+
+// Notes join the corpus: one anchored to a live chat folds into that group; a
+// note with no owning chat lands in the "Notes" group. Neither is forkable.
+func TestHandleSearchFoldsNotes(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.uiPath = filepath.Join(a.home, "ui.json")
+
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", a.home),
+		sessionlog.Event{T: "user", Text: "plain chat text", Time: "2026-07-14T01:00:00Z"},
+	)
+	ui := `{"notes":[
+		{"t":"2026-07-16T00:00:00Z","text":"remember the sprocket","node":"alpha","turnTime":"2026-07-14T01:00:00Z"},
+		{"t":"2026-07-17T00:00:00Z","text":"loose sprocket idea"}
+	]}`
+	if err := os.WriteFile(a.uiPath, []byte(ui), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doSearch(t, a, "sprocket")
+	if len(out.Groups) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(out.Groups), out.Groups)
+	}
+	var foundInChat, foundInNotes bool
+	for _, g := range out.Groups {
+		for _, h := range g.Hits {
+			if h.Role != "note" {
+				continue
+			}
+			if g.ID == "alpha" {
+				foundInChat = true
+				if h.NoteID != "2026-07-16T00:00:00Z" || h.TurnTime != "2026-07-14T01:00:00Z" {
+					t.Errorf("chat note hit = %+v", h)
+				}
+			}
+			if g.Kind == "notes" {
+				foundInNotes = true
+				if g.Forkable {
+					t.Errorf("Notes group must not be forkable")
+				}
+				if h.NoteID != "2026-07-17T00:00:00Z" {
+					t.Errorf("notes-group hit = %+v", h)
+				}
+			}
+		}
+	}
+	if !foundInChat || !foundInNotes {
+		t.Errorf("expected note in chat and in Notes group, got chat=%v notes=%v", foundInChat, foundInNotes)
+	}
+}
+
+// Too-short / blank queries return an empty result, not an error — the field is
+// searched live as the user types.
+func TestHandleSearchShortQueryEmpty(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home})
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", a.home),
+		sessionlog.Event{T: "user", Text: "aaaa", Time: "2026-07-14T01:00:00Z"},
+	)
+	for _, q := range []string{"", "%20%20", "a"} {
+		out := doSearch(t, a, q)
+		if len(out.Groups) != 0 {
+			t.Errorf("query %q returned %d groups, want 0", q, len(out.Groups))
+		}
+	}
+}
+
+// Malformed ui.json / unknown note shapes are ignored, never an error.
+func TestHandleSearchDefensiveNotes(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.uiPath = filepath.Join(a.home, "ui.json")
+	if err := os.WriteFile(a.uiPath, []byte(`{"notes":"not an array","x":[1,2]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := doSearch(t, a, "anything")
+	if len(out.Groups) != 0 {
+		t.Errorf("groups = %d, want 0", len(out.Groups))
+	}
+	// A missing ui.json is likewise fine.
+	a.uiPath = filepath.Join(a.home, "nope.json")
+	_ = doSearch(t, a, "anything")
+}
