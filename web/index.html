@@ -153,12 +153,19 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .sghead .sgkind { flex: none; margin-left: auto; font-size: 11px; color: var(--dim);
   text-transform: uppercase; letter-spacing: .04em; }
 .searchhit { display: block; width: 100%; text-align: left; padding: 7px 16px;
-  color: var(--ink); }
+  color: var(--ink); cursor: pointer; }
+.searchhit:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.searchhit.open { background: color-mix(in srgb, var(--work) 8%, transparent); }
 .searchhit .ex { display: block; font-size: 14px; line-height: 1.45;
   overflow-wrap: anywhere; }
 .searchhit .ex mark { background: color-mix(in srgb, var(--attn) 40%, transparent);
   color: inherit; border-radius: 3px; padding: 0 1px; }
 .searchhit .when { display: block; font-size: 11px; color: var(--dim); margin-top: 2px; }
+/* inline action bar revealed under a tapped hit (metro-toolbar placement) */
+.searchhit .hitbar { display: flex; gap: 8px; margin-top: 8px; }
+.searchhit .hitbar button { font-size: 13px; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--hairline); color: var(--work); background: var(--surface); }
+.searchhit .hitbar button:active { background: var(--code-bg); }
 .searchmore { color: var(--dim); text-align: center; font-size: 12px; padding: 10px 16px; }
 .a-flat   { color: var(--dim); }
 .roll-dn { animation: rolldn .4s ease; }
@@ -4106,8 +4113,8 @@ function fmtBubbleTime(t, now = new Date()){
 }
 /* forkFromTurn: shared by the tap icon and the long-press sheet — prefill a
    fresh-context fork from this message as evidence */
-function forkFromTurn(text){
-  ncParent = sel;
+function forkFromTurn(text, parent){
+  ncParent = parent || sel;
   ncRationale = (text || "").split("\n")[0].slice(0, 140);
   setNewActivitySubmitting(false);
   seedForkTitle(text);
@@ -5150,7 +5157,8 @@ function searchHitHTML(h){
   const when = h.turn_time || h.time || "";
   return `<div class="searchhit" data-kind="${esc(h._kind || "")}" data-id="${esc(h._id || "")}"` +
     ` data-uid="${esc(h._uid || "")}" data-segment="${h.segment || 0}" data-record="${h.record || 0}"` +
-    ` data-note-id="${esc(h.note_id || "")}">` +
+    ` data-note-id="${esc(h.note_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
+    ` data-lane="${esc(h._lane || "")}" data-turn="${esc(h.turn_time || h.time || "")}">` +
     `<span class="ex">${before}<mark>${match}</mark>${after}</span>` +
     (when ? `<span class="when">${esc(when)}</span>` : "") +
     `</div>`;
@@ -5161,7 +5169,8 @@ function searchGroupHTML(g){
   /* stamp the group's identity onto each hit so a G5 tap knows its destination
      without re-walking the group */
   const hits = (g.hits || []).map(h =>
-    searchHitHTML(Object.assign({ _kind: g.kind, _id: g.id, _uid: g.uid }, h))).join("");
+    searchHitHTML(Object.assign({ _kind: g.kind, _id: g.id, _uid: g.uid,
+      _forkable: g.forkable, _lane: g.lane_id }, h))).join("");
   return `<div class="searchgroup">` +
     `<div class="sghead">` +
       `<span class="agent-logo" title="${esc(g.agent || "agent")}">${agentLogo(g.agent)}</span>` +
@@ -5172,6 +5181,7 @@ function searchGroupHTML(g){
 }
 function renderSearchFeed(resp){
   const feed = $("#searchfeed");
+  openHit = null;   /* the feed DOM is about to be replaced — drop the stale bar */
   const groups = (resp && resp.groups) || [];
   if (!groups.length){
     feed.innerHTML = `<div class="empty">No matches.</div>`;
@@ -5181,6 +5191,7 @@ function renderSearchFeed(resp){
     + (resp.partial ? `<div class="searchmore">Showing the most recent matches — refine to narrow.</div>` : "");
 }
 const searchBlank = () => {
+  openHit = null;
   $("#searchfeed").innerHTML = `<div class="empty">Search your current and past chats and notes.</div>`;
 };
 async function runSearch(q){
@@ -5211,6 +5222,90 @@ $("#searchinput").addEventListener("input", e => {
   clearTimeout(searchDebounce);
   const q = e.target.value;
   searchDebounce = setTimeout(() => runSearch(q), 180);
+});
+
+/* ---- G5a: per-hit action bar ----
+   Tapping a hit reveals an inline action bar under it (metro-toolbar idiom),
+   adaptive by hit kind. Show-to-chat and Fork are terminal — they leave the
+   overlay for the main view; Add note is non-terminal — the overlay stays open
+   so the supervisor can keep searching. In G5a the bar covers everything that
+   needs no server work: live chats (still nodes) jump/fork today, notes reveal
+   in place. Archived (deleted, on-disk-only) hits get Add note now; their
+   show-to-chat + fork arrive in G5b with the bounded read-only surface. */
+let openHit = null;   /* the hit whose bar is showing (transient; not polled) */
+const SACT_LABEL = { show: "Show to chat", fork: "Fork from here", note: "Add note" };
+function searchHitActions(kind, forkable){
+  const acts = [];
+  if (kind === "live" || kind === "notes") acts.push("show");   /* archived show = G5b */
+  if (kind === "live" && forkable) acts.push("fork");           /* archived fork = G5b */
+  acts.push("note");
+  return acts;
+}
+function closeHitBar(){
+  if (!openHit) return;
+  openHit.classList.remove("open");
+  openHit.querySelector(".hitbar")?.remove();
+  openHit = null;
+}
+function toggleHitBar(el){
+  if (openHit === el){ closeHitBar(); return; }
+  closeHitBar();
+  const bar = document.createElement("div");
+  bar.className = "hitbar";
+  bar.innerHTML = searchHitActions(el.dataset.kind, el.dataset.forkable === "1")
+    .map(a => `<button data-sact="${a}">${SACT_LABEL[a]}</button>`).join("");
+  el.appendChild(bar);
+  el.classList.add("open");
+  openHit = el;
+}
+/* jumpToHitChat: the shared live/notes show-to-chat destination — leave the
+   overlay, then jump the main chat to the hit's turn (turn timestamp is the
+   stable key; consumePendingJump finds it once the chat has rendered). */
+function jumpToHitChat(id, turn){
+  closeSearch();
+  pendingJump = { node: id, turnTime: turn || "", text: "", ts: Date.now() };
+  chatSig = "";
+  if (!isDesktop()) setNotesOpen(false);
+  select(id);
+}
+function doSearchAction(a, hit){
+  if (!hit) return;
+  const kind = hit.dataset.kind, id = hit.dataset.id;
+  const turn = hit.dataset.turn, lane = hit.dataset.lane;
+  const live = id && nodeById(id);
+  if (a === "show"){
+    if (live) jumpToHitChat(id, turn);
+    else if (kind === "notes"){ closeSearch(); setNotesOpen(true); }   /* free-standing note */
+    else toast("This chat was deleted — a read-only view is coming.");  /* G5b */
+    return;
+  }
+  if (a === "fork"){
+    if (!live) return;
+    const ex = hit.querySelector(".ex")?.textContent || "";
+    closeSearch();
+    forkFromTurn(ex, id);   /* parented to the hit's node, not the open chat */
+    return;
+  }
+  if (a === "note"){
+    /* non-terminal: the overlay stays open so search continues */
+    const text = prompt("Add a note");
+    if (text == null) return;
+    const clean = text.trim();
+    if (!clean) return;
+    const note = { t: new Date().toISOString(), text: clean };
+    if (live) note.node = id;
+    if (turn) note.turnTime = turn;
+    if (lane) note.lane = lane;
+    uiMutate({ k: "note-add", note });
+    toast("Note added");
+    closeHitBar();
+  }
+}
+$("#searchfeed").addEventListener("click", e => {
+  const btn = e.target.closest("[data-sact]");
+  if (btn){ doSearchAction(btn.dataset.sact, btn.closest(".searchhit")); return; }
+  const hit = e.target.closest(".searchhit");
+  if (hit) toggleHitBar(hit);
 });
 
 /* ---- burger menu: manual update check + self-update + about ----

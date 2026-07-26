@@ -820,3 +820,108 @@ assert.ok(!out.includes("<b>") && !out.includes("</b>"),
 		t.Fatalf("search excerpt escaping broken: %v\n%s", err, out)
 	}
 }
+
+// TestSearchActionBar asserts the G5a per-hit action bar: a tap on a hit reveals
+// an adaptive bar (show-to-chat / fork / add-note), show-to-chat exits the
+// overlay and jumps, fork reuses the fork sheet parented to the hit's node, and
+// add-note keeps the overlay open.
+func TestSearchActionBar(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		"function searchHitActions(",
+		"function doSearchAction(",
+		"function toggleHitBar(",
+		`$("#searchfeed").addEventListener("click"`,
+		"data-sact",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("search action bar wiring missing %q", want)
+		}
+	}
+	// fork is parented to the hit's node, not the currently-open chat — so
+	// forkFromTurn must take an explicit parent (default stays sel for callers).
+	if !strings.Contains(html, "function forkFromTurn(text, parent)") {
+		t.Error("forkFromTurn must accept an explicit parent so search can fork from the hit's node")
+	}
+	if !strings.Contains(html, "ncParent = parent || sel;") {
+		t.Error("forkFromTurn should default the parent to sel to preserve existing callers")
+	}
+	// show-to-chat's live/notes destination is the shared jumpToHitChat helper:
+	// it leaves the overlay and jumps via pendingJump.
+	j := strings.Index(html, "function jumpToHitChat(")
+	if j < 0 {
+		t.Fatal("jumpToHitChat not found")
+	}
+	jump := html[j : j+strings.Index(html[j:], "\n}\n")]
+	if !strings.Contains(jump, "closeSearch()") || !strings.Contains(jump, "pendingJump =") {
+		t.Error("show-to-chat must exit the overlay and jump to the turn")
+	}
+	// Isolate doSearchAction to assert per-action behaviour.
+	i := strings.Index(html, "function doSearchAction(")
+	if i < 0 {
+		t.Fatal("doSearchAction not found")
+	}
+	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	if !strings.Contains(body, "jumpToHitChat(") {
+		t.Error("show action must route live/notes hits through jumpToHitChat")
+	}
+	// fork: leaves the overlay (before opening the main-view sheet) and reuses
+	// forkFromTurn parented to the hit's node.
+	if !strings.Contains(body, "closeSearch()") || !strings.Contains(body, "forkFromTurn(") {
+		t.Error("fork action must exit the overlay and reuse forkFromTurn")
+	}
+	// add-note: files a note op and, being the "stays open" action, its branch
+	// must NOT contain a closeSearch.
+	nb := body[strings.Index(body, `a === "note"`):]
+	if !strings.Contains(nb, `k: "note-add"`) {
+		t.Error("add-note must file a note-add op")
+	}
+	if strings.Contains(nb, "closeSearch()") {
+		t.Error("add-note must keep the overlay open (no closeSearch in its branch)")
+	}
+}
+
+// TestSearchHitActionsAdaptive runs searchHitActions under node to prove the
+// per-hit action set is adaptive: live gets show+fork(+note), notes get
+// show+note (never fork), and archived gets note-only in G5a (its show-to-chat
+// and fork land in G5b with the read-only archived surface).
+func TestSearchHitActionsAdaptive(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "function searchHitActions(")
+	if start < 0 {
+		t.Fatal("searchHitActions not found")
+	}
+	end := strings.Index(html[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("end of searchHitActions not found")
+	}
+	script := html[start:start+end] + `
+}
+const assert = require("assert");
+const eq = (a, b) => assert.deepStrictEqual(a, b);
+eq(searchHitActions("live", true),      ["show", "fork", "note"]);
+eq(searchHitActions("live", false),     ["show", "note"]);
+eq(searchHitActions("notes", false),    ["show", "note"]);
+eq(searchHitActions("notes", true),     ["show", "note"]);   // notes never fork
+eq(searchHitActions("archived", true),  ["note"]);           // G5a: show/fork are G5b
+`
+	f := filepath.Join(t.TempDir(), "hitactions.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("search hit actions not adaptive as specified: %v\n%s", err, out)
+	}
+}
