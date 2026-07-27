@@ -2613,9 +2613,20 @@ function cardHTML(n){
    is filtered (same vocabulary as the Journeys "All" tab). Cards outside
    the lane are hidden (not dimmed — the pane is crowded enough); the open
    chat's card and the "Input needed" fold are the only exemptions. */
+/* Mirrors the tabList/inScope filtering in renderCards (minus the fold and
+   adoptable-session extras, which aren't "cards" either tab counts) so the
+   badge always matches what selecting the tab would actually show. */
+function cardTabCount(archived){
+  const inScope = n => !laneFilter || servedLanes(n).includes(laneFilter) || n.id === sel;
+  return orderedNodes().filter(n =>
+    (isArchived(n.id) === archived || (!archived && hardAttention(n))) && inScope(n)).length;
+}
 function renderCardTabs(){
+  /* "All" (no lane scoped) skips the count — it's the whole list, already
+     visible the moment you look, so a badge there is pure noise. A scoped
+     lane tab earns one: it tells you something before you switch to it. */
   const scope = laneFilter
-    ? `<span class="tabdot" style="background:${esc(laneColor(laneFilter))}"></span>${esc(laneName(laneFilter))}<span class="x" data-clear-scope aria-label="show all activities">&#10005;</span>`
+    ? `<span class="tabdot" style="background:${esc(laneColor(laneFilter))}"></span>${esc(laneName(laneFilter))} (${cardTabCount(false)})<span class="x" data-clear-scope aria-label="show all activities">&#10005;</span>`
     : "All";
   /* the Pinned tab appears only when something is pinned (Apple hides an empty
      Pinned section); it carries a live count and sits between the scope and
@@ -2624,7 +2635,7 @@ function renderCardTabs(){
   $("#cardtabs").innerHTML =
     `<button data-tab="current" class="${cardTab === "current" ? "on" : ""}">${scope}</button>` +
     (pc ? `<button data-tab="pinned" class="${cardTab === "pinned" ? "on" : ""}">Pinned (${pc})</button>` : "") +
-    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}">Archived</button>`;
+    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}">Archived (${cardTabCount(true)})</button>`;
 }
 function setLaneFilter(id){
   laneFilter = id || "";
