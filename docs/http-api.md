@@ -123,6 +123,72 @@ Plain-text pane snapshot for tmux nodes (`mode=visible` captures only the
 visible pane instead of history). For structured-transport nodes (ACP,
 codex) there is no pane; peek returns a tail of the raw event log.
 
+### `GET /api/search?q=<query>`
+
+Full-text search across every conversation in the session-log store — live
+nodes, deleted (archived) logs, and sticky notes — grouped by chat. Returns:
+
+```json
+{
+  "query": "timeout",
+  "groups": [
+    {
+      "kind": "live", "id": "my-node", "uid": "a1b2c3",
+      "title": "Fix the poller", "lane_id": "infra", "agent": "claude",
+      "forkable": true,
+      "hits": [
+        { "role": "assistant", "segment": 2, "record": 14,
+          "time": "2026-07-24T09:12:00Z",
+          "before": "…raised the ", "match": "timeout", "after": " to 10s…" }
+      ]
+    }
+  ],
+  "partial": false
+}
+```
+
+`kind` is `live | archived | notes`. A `live` group carries the node `id`
+(open the normal chat, or fork it); an `archived` group carries only `uid` —
+the deleted log's on-disk identity (a meta UID, or `legacy:<path>` for a
+header-less log) — read via `GET /api/archived`. `forkable` reports whether the
+chat can seed a fork (a live node, or an archived one whose recorded dir still
+exists). Each hit's `role` is `user | assistant | asset | note`; log hits carry
+the stable `(segment, record)` ordinal pair that anchors an archived read, note
+hits carry `note_id` and the referenced `turn_time`; `before`/`match`/`after`
+are the excerpt around the match.
+
+A query shorter than 2 runes returns empty `groups` (the field is searched live
+as it is typed); longer queries are clamped to 128 runes. The scan is bounded
+(per-file, per-group, total-hit, and group-count caps); tripping any cap sets
+`partial: true`. There is no cache and no `ETag` — each call rescans.
+
+### `GET /api/archived?uid=<uid>&seg=<n>&rec=<n>&at=<time>`
+
+The read-only surface for a **deleted** chat (a live search hit opens the normal
+chat instead). `uid` is required — the archived log's identity from a search
+group. The hit is anchored by its `(seg, rec)` ordinal (with `at`, a turn
+timestamp, as a defensive fallback). Returns a bounded window of turns around
+the anchor:
+
+```json
+{
+  "uid": "a1b2c3", "title": "Fix the poller",
+  "agent": "claude", "model": "…", "effort": "…", "dir": "/path",
+  "forkable": true,
+  "turns": [ { …transcript turn… } ],
+  "anchor": 8, "before_truncated": true, "after_truncated": false
+}
+```
+
+`anchor` is the index into `turns` of the hit turn; `before_truncated` /
+`after_truncated` say whether turns were dropped on either side. `forkable` is
+true when the recorded agent and dir survive. There is no node, process,
+composer, or polling here — just a photo of the turns so the supervisor can read
+what was said and, if the dir survives, fork from it. Asset markers render as
+inert "unavailable" chips (a deleted node's blobs are archived away). Missing
+`uid` is `400`; every other failure (unknown uid, unreadable log, traversal
+attempt) degrades to `404`.
+
 ### `GET /api/agents`
 
 Detected agent CLIs and their models/efforts, as offered in the new-activity
@@ -219,6 +285,18 @@ cross-node access; anything else is `404`. Safe raster images (`png`, `jpg`,
 `jpeg`, `gif`, `webp`) are served inline with `nosniff`; every other type
 downloads as `application/octet-stream` so uploaded active content cannot run
 same-origin.
+
+### `GET /api/nodes/{id}/assets/{assetID}`
+
+Serves the bytes of one session asset — a file the agent produced (or that was
+otherwise captured) during the conversation, indexed in the node's session log
+by `assetID`. Bytes come from the log's inline base64 record or from blob
+storage under `~/.scimux/assets/{id}/`. As with attachments, safe raster images
+(`png`, `jpg`, `jpeg`, `gif`, `webp`) are served inline with `nosniff`; every
+other type downloads as `application/octet-stream` so agent-generated active
+content (`.html`, `.svg`, …) can never run same-origin. An unknown node or asset
+id, or a blob path that resolves outside the node's own asset directory, is
+`404`.
 
 ### `POST /api/nodes/{id}/send/resolve`
 
