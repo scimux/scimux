@@ -713,7 +713,7 @@ body.cards-open #msgs { overflow: hidden; }
 .attthumb { display: block; line-height: 0; border-radius: 12px; overflow: hidden;
   border: 1px solid rgba(255,255,255,.28); max-width: min(220px, 60vw);
   transition: transform .12s ease, box-shadow .12s ease; }
-.attthumb img { display: block; width: 100%; max-height: 240px; object-fit: cover; }
+.attthumb img { display: block; width: 100%; height: 100%; max-height: 240px; object-fit: cover; }
 .attthumb:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,.18); }
 .turn.assistant .attthumb { border-color: var(--hairline); }
 .attfile { display: inline-flex; align-items: center; gap: 7px; max-width: 240px;
@@ -2023,6 +2023,18 @@ function md(src){
    persisted turns render via assetTile/splitAssetRefs instead (P5), since
    by the time a turn is polled back the upload is already a durable asset. */
 const RASTER_RE = /\.(png|jpe?g|gif|webp)$/i;   /* safe raster types (mirror of the server whitelist) */
+/* Reserve a thumbnail's rendered box once we've measured it (see the #msgs
+   load listener). The chat innerHTML is rebuilt on every poll while the
+   terminal is unfolded, so a freshly created <img loading="lazy"> that
+   collapsed to zero height until its (cached) bytes re-paint would make the
+   whole pane shorten-then-grow each tick — a visible scroll flicker. An
+   explicit box on the anchor keeps the layout height stable across rebuilds;
+   the first render of a never-seen image still reflows once (unavoidable). */
+const tileBox = {};
+const tileStyle = key => {
+  const b = tileBox[key];
+  return b ? ` style="width:${b.w}px;height:${b.h}px"` : "";
+};
 function attTile(nodeId, leaf, isImage){
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
   const name = leaf.replace(/^[0-9a-f]{8}-/, "");     /* drop the storage token */
@@ -2031,7 +2043,7 @@ function attTile(nodeId, leaf, isImage){
      attachment, so an <img>/new-tab open would break or download anyway */
   isImage = isImage && RASTER_RE.test(name);
   return isImage
-    ? `<a class="attthumb" href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
+    ? `<a class="attthumb" data-tkey="${esc(leaf)}"${tileStyle(leaf)} href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
       `<img src="${url}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
     : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
       `${ICON_FILE}<span>${esc(name)}</span></a>`;
@@ -2067,7 +2079,7 @@ function assetTile(nodeId, id, alt, rec){
   const isImage = /^image\//.test(rec.mime || "");
   const src = rec.inline && rec.data ? rec.data : url;
   return isImage
-    ? `<a class="attthumb" href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
+    ? `<a class="attthumb" data-tkey="${esc(id)}"${tileStyle(id)} href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
       `<img src="${src}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
     : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
       `${ICON_FILE}<span>${esc(name)}</span></a>`;
@@ -3995,22 +4007,26 @@ async function loadChatHistory(id, scrollTo){
    the view is parked at a seam (not at the bottom), and re-selecting the
    same node often changes no render signature at all. */
 let chatScrollBottom = false;
-/* Pin the chat to the bottom now, and keep it pinned as late-loading images
-   reflow the layout. Rendered asset tiles (<img loading="lazy"> with no
-   width/height) contribute ~0 height at innerHTML time, so a synchronous
-   scrollTop = scrollHeight lands above the true bottom once the bytes arrive
-   and the turn grows. Re-pin on each image's load — but only while the reader
-   is still parked near the bottom, so a load never yanks back a user who has
-   since scrolled up (same 80px slack as the atBottom heuristic). */
-function pinChatBottom(el){
-  el.scrollTop = el.scrollHeight;
-  el.querySelectorAll("img").forEach(img => {
-    if (img.complete) return;
-    img.addEventListener("load", () => {
-      if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
-    }, { once: true });
-  });
-}
+/* Pin the chat to the bottom. A late-loading image that reflows the layout
+   is re-pinned by the #msgs "load" listener below (which also measures the
+   tile so later rebuilds reserve its box). */
+function pinChatBottom(el){ el.scrollTop = el.scrollHeight; }
+/* First paint of a never-seen thumbnail grows the pane once; record its
+   rendered box so every subsequent rebuild reserves the same height (no
+   collapse-then-grow flicker), and re-pin to the bottom if the reader is
+   still parked there — same 80px slack as the atBottom heuristic, so a load
+   never yanks back someone who has scrolled up. capture:true because the
+   image "load" event does not bubble. */
+$("#msgs").addEventListener("load", e => {
+  const img = e.target;
+  if (!img || img.tagName !== "IMG") return;
+  const a = img.closest(".attthumb");
+  if (a && a.dataset.tkey && a.offsetHeight){
+    tileBox[a.dataset.tkey] = { w: a.offsetWidth, h: a.offsetHeight };
+  }
+  const el = $("#msgs");
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
+}, true);
 function jumpChatToNow(){
   chatHist.scrollTo = "";       /* a pending ride-back yields to the newer intent */
   /* select() clears chatSig only on a node switch — so a non-empty sig means
