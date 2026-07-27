@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,6 +230,153 @@ func TestPermissionApprove(t *testing.T) {
 	turns := m.Turns("n1")
 	if len(turns) == 0 || turns[len(turns)-1].Text != "done" {
 		t.Fatalf("expected approved output, got %+v", turns)
+	}
+}
+
+// The two-step answer path main.go actually uses — PrepareResolve to map the
+// whitelisted key and capture audit evidence, then Deliver only after the record
+// is written (finding 53) — driven end to end over the real SDK connection with
+// no mock: a real fakeAgent asks for permission and receives the delivered
+// option. TestPermissionApprove covers the one-shot Resolve; this covers the
+// split API and its intermediate invariants.
+func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
+	got := make(chan sdk.PermissionOptionId, 1)
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			resp, err := a.conn.RequestPermission(ctx, sdk.RequestPermissionRequest{
+				SessionId: p.SessionId,
+				ToolCall:  sdk.ToolCallUpdate{ToolCallId: "t1", Title: sdk.Ptr("run bash")},
+				Options: []sdk.PermissionOption{
+					{OptionId: "opt_allow", Name: "Allow", Kind: sdk.PermissionOptionKindAllowOnce},
+					{OptionId: "opt_reject", Name: "Reject", Kind: sdk.PermissionOptionKindRejectOnce},
+				},
+			})
+			if err != nil {
+				return sdk.PromptResponse{}, err
+			}
+			if resp.Outcome.Selected != nil {
+				got <- resp.Outcome.Selected.OptionId
+				_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: sdk.UpdateAgentMessageText("approved")})
+			}
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	m := newManager(t, agent)
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "go"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "permission prompt", func() bool { return m.Attention("n1") == "approval" })
+
+	// Step 1: map the key to an option and capture evidence, without delivering —
+	// the agent stays blocked and the request stays pending (PrepareResolve is
+	// read-only). Digit "1" selects the first option.
+	optID, evidence, err := m.PrepareResolve("n1", "1")
+	if err != nil {
+		t.Fatalf("PrepareResolve: %v", err)
+	}
+	if optID != "opt_allow" {
+		t.Errorf("key %q mapped to %q, want opt_allow (first option)", "1", optID)
+	}
+	if !strings.Contains(evidence, "run bash") {
+		t.Errorf("evidence = %q, want it to carry the tool title as decision context", evidence)
+	}
+	if _, _, ok := m.Pending("n1"); !ok {
+		t.Error("PrepareResolve must not consume the pending request")
+	}
+
+	// A delivery of an option that isn't the mapped/pending one is refused and
+	// leaves the request pending (finding 53) — then the real option goes through.
+	if err := m.Deliver("n1", "opt_bogus"); err == nil {
+		t.Error("Deliver of an unmapped option should be refused")
+	}
+	if _, _, ok := m.Pending("n1"); !ok {
+		t.Error("a refused delivery must leave the request pending")
+	}
+
+	// Step 2: deliver the mapped option, unblocking the agent's RequestPermission.
+	if err := m.Deliver("n1", optID); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	select {
+	case sel := <-got:
+		if sel != "opt_allow" {
+			t.Errorf("agent received option %q, want opt_allow", sel)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("agent never received the delivered option")
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" && m.Attention("n1") == "" })
+
+	// The request is consumed and a second answer has nothing to answer.
+	if _, _, err := m.PrepareResolve("n1", "1"); err != ErrNoPending {
+		t.Errorf("PrepareResolve after deliver = %v, want ErrNoPending", err)
+	}
+	turns := m.Turns("n1")
+	if len(turns) == 0 || turns[len(turns)-1].Text != "approved" {
+		t.Fatalf("expected approved output, got %+v", turns)
+	}
+	// Peek renders the log tail (the ACP analogue of a pane photo): it carries the
+	// turn's content without a live subprocess dependency.
+	if peek := m.Peek("n1"); !strings.Contains(peek, "approved") {
+		t.Errorf("Peek should surface the turn's output; got %q", peek)
+	}
+}
+
+// PrepareResolve/Deliver against a node with no live session report ErrNoSession
+// rather than panicking — the after-restart / never-launched case.
+func TestPrepareResolveNoSession(t *testing.T) {
+	m := newManager(t, &fakeAgent{})
+	if _, _, err := m.PrepareResolve("ghost", "1"); err != ErrNoSession {
+		t.Errorf("PrepareResolve(no session) = %v, want ErrNoSession", err)
+	}
+	if err := m.Deliver("ghost", "opt_allow"); err != ErrNoSession {
+		t.Errorf("Deliver(no session) = %v, want ErrNoSession", err)
+	}
+}
+
+// mapKeyToOption resolves the whitelisted dialog keys to permission options: a
+// digit selects the Nth option, y/Enter the first allow, n/Escape the first
+// reject, with documented fallbacks. Pure logic — no session needed.
+func TestMapKeyToOption(t *testing.T) {
+	opts := []sdk.PermissionOption{
+		{OptionId: "allow", Kind: sdk.PermissionOptionKindAllowOnce},
+		{OptionId: "reject", Kind: sdk.PermissionOptionKindRejectOnce},
+	}
+	cases := []struct {
+		key  string
+		want sdk.PermissionOptionId
+		ok   bool
+	}{
+		{"1", "allow", true},  // digit → Nth option
+		{"2", "reject", true}, //
+		{"0", "", false},      // out of range low
+		{"3", "", false},      // out of range high
+		{"y", "allow", true},  // first allow-kind
+		{"Enter", "allow", true},
+		{"n", "reject", true}, // first reject-kind
+		{"Escape", "reject", true},
+		{"x", "", false}, // not a whitelisted key
+	}
+	for _, c := range cases {
+		id, ok := mapKeyToOption(c.key, opts)
+		if id != c.want || ok != c.ok {
+			t.Errorf("mapKeyToOption(%q) = (%q, %v), want (%q, %v)", c.key, id, ok, c.want, c.ok)
+		}
+	}
+	// No options never map, whatever the key.
+	if _, ok := mapKeyToOption("y", nil); ok {
+		t.Error("empty options must never map")
+	}
+	// Fallbacks when no option carries an allow/reject kind: y → first, n → last.
+	noKind := []sdk.PermissionOption{{OptionId: "first"}, {OptionId: "last"}}
+	if id, ok := mapKeyToOption("y", noKind); !ok || id != "first" {
+		t.Errorf(`"y" fallback = (%q, %v), want ("first", true)`, id, ok)
+	}
+	if id, ok := mapKeyToOption("n", noKind); !ok || id != "last" {
+		t.Errorf(`"n" fallback = (%q, %v), want ("last", true)`, id, ok)
 	}
 }
 
