@@ -53,6 +53,49 @@ node accounts for — candidates for `POST /api/adopt`.
 Responses carry an `ETag`; polling clients may send `If-None-Match` and receive
 `304 Not Modified` when the snapshot is unchanged.
 
+### `GET /api/usage`
+
+The latest subscription-budget snapshot for the agents that expose one, for the
+status-bar gauge. Returns:
+
+```json
+{
+  "observed_at":      "2026-07-27T10:30:00Z",
+  "next_check_after": "2026-07-27T10:45:00Z",
+  "agents": {
+    "codex": {
+      "available": true,
+      "plan": "edu",
+      "five_hour_used": 10, "five_hour_remaining": 90,
+      "five_hour_reset": "2026-07-27T02:10:00Z",
+      "weekly_used": 3, "weekly_remaining": 97,
+      "weekly_reset": "2026-08-01T07:00:00Z",
+      "source": "codex-session-jsonl"
+    },
+    "claude": { "available": false, "reason": "usage unavailable",
+                "source": "claude-oauth" }
+  }
+}
+```
+
+Percentages are `0..100`; `*_remaining` is `100 - used` and is the runway a user
+wants before starting work. Claude may additionally carry
+`extra_usage_enabled | extra_usage_used | extra_usage_limit |
+extra_usage_currency`. Numeric fields are omitted when unknown, so `0` stays
+distinct from missing.
+
+Two contracts matter. **This read is cache-only:** it never performs provider
+I/O, so opening many tabs cannot fan out into many Claude OAuth calls or Codex
+transcript scans. Collection is prompt-driven instead — a successful
+Claude/Codex prompt refreshes the snapshot at most once every 15 minutes (or
+immediately when it is older than 60 minutes), and stops once no prompt has
+arrived for 15 minutes, so an idle or closed browser never triggers provider
+checks. **It is best-effort and never errors:** an agent with no usable data is
+returned as `{"available": false, "reason": "usage unavailable"}` rather than
+failing the request. The endpoint always answers `200`; an empty cache reports
+every agent unavailable. There is no `ETag` — the body is small and served from
+memory.
+
 ### `GET /api/nodes/{id}/chat`
 
 The conversation, rendered from the session-log store (the current segment —
