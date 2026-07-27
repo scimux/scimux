@@ -214,6 +214,15 @@ type app struct {
 	// poll costs a stat, not a reparse, while the log is unchanged.
 	segCache map[string]*sessionlog.Cache
 	home     string
+	// usage caches subscription-budget snapshots (usage.go). Its own mutex is
+	// independent of a.mu — collectors do file/HTTP I/O. Served cache-only via
+	// /api/usage; refreshed only by successful Claude/Codex prompts.
+	usage *usageCache
+	// Provider source overrides for tests; empty means the real default path
+	// (~/.codex/sessions, ~/.claude/.credentials.json, the OAuth endpoint).
+	codexSessionsDir string
+	claudeCredsPath  string
+	claudeUsageURL   string
 }
 
 // segment returns the node's current conversation — the session log's tail
@@ -1951,6 +1960,11 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	// The launch carried the node's first prompt (it rides the agent's command
+	// line), so a successful create is a budget-consuming turn for Claude/Codex.
+	if strings.TrimSpace(n.Prompt) != "" {
+		a.noteUsagePrompt(n.Agent)
+	}
 	writeJSON(w, n)
 }
 
@@ -2638,6 +2652,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), code)
 			return
 		}
+		a.noteUsagePrompt(n.Agent)
 		writeJSON(w, map[string]string{"status": "acknowledged"})
 		return
 	}
@@ -2681,6 +2696,11 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		a.sendState[n.ID] = "unconfirmed"
 	}
 	a.mu.Unlock()
+	// SendAck succeeded, so the prompt was delivered to the pane (acked or
+	// unconfirmed — both consume budget). /clear is a page turn, not a turn.
+	if strings.TrimSpace(body.Text) != "/clear" {
+		a.noteUsagePrompt(n.Agent)
+	}
 	// /clear delivered through scimux is a *known* session rollover: Claude
 	// Code starts a fresh session file and the linked transcript goes dead.
 	// Retire the link right away — the UI degrades honestly to peek (the old
@@ -3500,6 +3520,7 @@ func main() {
 	a.assetHook = a.ingestAssetHook
 	a.acp.SetAssetHook(a.assetHook)
 	a.codex.SetAssetHook(a.assetHook)
+	a.usage = newUsageCache(a.collectUsage)
 	if err := a.loadStore(); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
 		os.Exit(1)
@@ -3524,6 +3545,10 @@ func main() {
 	go func() {
 		for {
 			a.poll()
+			// Subscription usage refreshes only while the user is active; the
+			// cache no-ops outside the prompt-driven window, so this cannot
+			// probe providers overnight (usage.go).
+			a.maybeRefreshUsageAsync()
 			time.Sleep(2 * time.Second)
 		}
 	}()
@@ -3551,6 +3576,7 @@ func main() {
 		w.Write(b)
 	})
 	mux.HandleFunc("GET /api/state", a.handleState)
+	mux.HandleFunc("GET /api/usage", a.handleUsage)
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
 	mux.HandleFunc("PATCH /api/nodes/{id}", a.handleUpdateNode)
 	mux.HandleFunc("DELETE /api/nodes/{id}", a.handleDeleteNode)
