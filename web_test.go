@@ -582,6 +582,109 @@ func TestSearchOverlayShell(t *testing.T) {
 	}
 }
 
+// TestSearchSlashShortcut asserts the "/" activation shortcut (spec: search opens
+// on "/" when focus is not in a text field), alongside the existing Cmd/Ctrl-K.
+func TestSearchSlashShortcut(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	// The global keydown handler must react to "/", guarded so it stays a literal
+	// slash inside a text field and doesn't fire while the overlay is already open.
+	i := strings.Index(html, `if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k"`)
+	if i < 0 {
+		t.Fatal("global search shortcut handler not found")
+	}
+	handler := html[i : i+strings.Index(html[i:], "\n});")]
+	if !strings.Contains(handler, `e.key === "/"`) {
+		t.Error(`the "/" open shortcut is missing`)
+	}
+	if !strings.Contains(handler, "!searchOpen()") {
+		t.Error(`the "/" shortcut must not fire while the overlay is already open`)
+	}
+	if !strings.Contains(handler, `/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)`) ||
+		!strings.Contains(handler, "!e.target.isContentEditable") {
+		t.Error(`the "/" shortcut must be suppressed while a text field is focused`)
+	}
+}
+
+// TestSearchHitCarriesIdentity asserts each rendered hit carries its stable
+// identity in the DOM — role (so asset actions can be gated) and segment/record
+// (so archived show-to-chat can anchor by ordinal, not timestamp).
+func TestSearchHitCarriesIdentity(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	i := strings.Index(html, "function searchHitHTML(")
+	if i < 0 {
+		t.Fatal("searchHitHTML not found")
+	}
+	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	for _, want := range []string{
+		`data-role="${esc(h.role`,
+		`data-segment="${h.segment`,
+		`data-record="${h.record`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("hit markup missing stable-identity attribute %q", want)
+		}
+	}
+	// toggleHitBar must feed the role into searchHitActions so an asset hit's
+	// actions are gated.
+	if !strings.Contains(html, "searchHitActions(el.dataset.kind, el.dataset.forkable === \"1\", el.dataset.role)") {
+		t.Error("toggleHitBar must pass the hit role into searchHitActions")
+	}
+	// Archived show-to-chat must anchor by (segment, record), passed to openArchived.
+	if !strings.Contains(html, "openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") {
+		t.Error("archived show-to-chat must anchor by seg/rec, not just timestamp")
+	}
+	if !strings.Contains(html, `"&seg=" + encodeURIComponent(seg`) ||
+		!strings.Contains(html, `"&rec=" + encodeURIComponent(rec`) {
+		t.Error("openArchived must send seg/rec to /api/archived")
+	}
+}
+
+// TestSearchEarlierHistoryJump asserts finding #1's fix: a show-to-chat hit whose
+// turn lives in an earlier segment (before a /clear) no longer dead-ends in a
+// toast — consumePendingJump loads the full history and scrolls to the historical
+// turn by time, which requires the history bubbles to carry data-time.
+func TestSearchEarlierHistoryJump(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	i := strings.Index(html, "function consumePendingJump(")
+	if i < 0 {
+		t.Fatal("consumePendingJump not found")
+	}
+	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	// It must fall through to history instead of only toasting on an earlier-segment hit.
+	if !strings.Contains(body, "loadChatHistory(sel") {
+		t.Error("consumePendingJump must load history when the turn is in an earlier segment")
+	}
+	if !strings.Contains(body, ".turn.hist") || !strings.Contains(body, "dataset.time === pendingJump.turnTime") {
+		t.Error("consumePendingJump must scroll to the historical turn by time")
+	}
+	// The old behavior (a hard toast that abandons the jump on any prior history)
+	// must be gone from the earlier-history branch.
+	if strings.Contains(body, "earlier chat segment (before a /clear)") {
+		t.Error("the earlier-segment dead-end toast should be replaced by a history load")
+	}
+	// History bubbles must carry data-time so the jump can target them.
+	if !strings.Contains(html, `class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-time=`) {
+		t.Error("history bubbles must carry data-time for jump targeting")
+	}
+	// loadChatHistory must no longer force a seam scroll for an empty target, or the
+	// pending jump could never win the scroll.
+	if !strings.Contains(html, `scrollTo: scrollTo || ""`) {
+		t.Error("loadChatHistory must allow an empty scrollTo so a jump owns the scroll")
+	}
+}
+
 // TestPinnedStoreModel asserts the pinned-cards store model: an ordered
 // UI.pinned array carried through init + normUI, and op-merge cases for
 // pin (new pin to the front → renders at top), unpin, and drag reorder.
@@ -919,6 +1022,13 @@ eq(searchHitActions("notes", false),    ["show", "note"]);
 eq(searchHitActions("notes", true),     ["show", "note"]);     // notes never fork
 eq(searchHitActions("archived", true),  ["show", "note"]);     // fork is in the read-only view
 eq(searchHitActions("archived", false), ["show", "note"]);
+// An asset filename hit is show-to-chat ONLY — no fork, no add-note — even in a
+// live, forkable chat (spec §"Session assets").
+eq(searchHitActions("live", true, "asset"),     ["show"]);
+eq(searchHitActions("archived", true, "asset"), ["show"]);
+// A normal (non-asset) role in a forkable live chat keeps the full set.
+eq(searchHitActions("live", true, "user"),      ["show", "fork", "note"]);
+eq(searchHitActions("live", true, "assistant"), ["show", "fork", "note"]);
 `
 	f := filepath.Join(t.TempDir(), "hitactions.js")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {

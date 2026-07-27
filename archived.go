@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"codeberg.org/chrberger/scimux/internal/asset"
@@ -36,15 +37,18 @@ type archivedResponse struct {
 	AfterTruncated  bool              `json:"after_truncated"`
 }
 
-// handleArchived serves GET /api/archived?uid=<uid>&at=<turnTime>. uid is the
-// deleted log's on-disk identity (a meta UID, or "legacy:<path>" for a
-// header-less log); at is the hit turn's timestamp, the same stable key the live
-// jump uses (segment/record ordinals shift when empty surfaces drop on read, so
-// time — not an ordinal — anchors the window). Every failure degrades to 404,
-// never a 500 or a leak.
+// handleArchived serves GET /api/archived?uid=<uid>&seg=<n>&rec=<n>&at=<turnTime>.
+// uid is the deleted log's on-disk identity (a meta UID, or "legacy:<path>" for a
+// header-less log). The hit is anchored by its stable (seg, rec) ordinal pair —
+// the same identity ScanLog emits — resolved to a turn index by ResolveTurn, so a
+// duplicate or empty timestamp can never pick the wrong turn. `at` remains a
+// defensive fallback for a caller that has only the time. Every failure degrades
+// to 404, never a 500 or a leak.
 func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 	uid := r.URL.Query().Get("uid")
 	at := r.URL.Query().Get("at")
+	seg, haveSeg := atoiOK(r.URL.Query().Get("seg"))
+	rec, haveRec := atoiOK(r.URL.Query().Get("rec"))
 	if uid == "" {
 		http.Error(w, "uid required", 400)
 		return
@@ -66,14 +70,23 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 		turns[i].Text = asset.ProjectAgentPaths(turns[i].Text, empty)
 	}
 
+	// Prefer the stable (seg, rec) ordinal; fall back to the first turn matching
+	// the timestamp only when no ordinal was supplied. Anchor 0 if neither resolves.
 	anchor := 0
-	if at != "" {
+	if haveSeg && haveRec {
+		if idx, ok := sessionlog.ResolveTurn(path, seg, rec); ok {
+			anchor = idx
+		}
+	} else if at != "" {
 		for i, t := range turns {
 			if t.Time == at {
 				anchor = i
 				break
 			}
 		}
+	}
+	if anchor >= len(turns) {
+		anchor = 0
 	}
 	lo := anchor - archivedWindowBefore
 	if lo < 0 {
@@ -141,6 +154,19 @@ func (a *app) resolveArchived(uid string) (string, *sessionlog.MetaEvent, bool) 
 		}
 	}
 	return "", nil, false
+}
+
+// atoiOK parses a non-negative decimal query param. ok is false for an empty or
+// malformed value, so a missing seg/rec cleanly falls back to time anchoring.
+func atoiOK(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // withinDir reports whether p resolves inside dir (both cleaned). It rejects the

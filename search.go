@@ -19,12 +19,16 @@ import (
 // searchHitsPerFile hits, the response carries at most searchMaxGroups groups,
 // and any cap tripping sets Partial.
 const (
-	minSearchQuery    = 2
-	searchHitsPerFile = 20
-	searchMaxGroups   = 50
-	searchBytesCap    = 8 << 20 // per-file read ceiling, matches ScanLog's buffer
-	searchCtxBefore   = 60      // excerpt window, runes
-	searchCtxAfter    = 60
+	minSearchQuery     = 2
+	maxSearchQuery     = 128     // clamp the scanned query so a pathological length can't drive the scan cost
+	searchHitsPerFile  = 20      // per-file hit cap (ScanLog)
+	searchHitsPerGroup = 20      // per-group hit cap after log+note merge
+	searchMaxFiles     = 500     // stop scanning after this many catalog sources
+	searchMaxHitsTotal = 500     // stop scanning once this many log hits accumulate
+	searchMaxGroups    = 50      // response group cap
+	searchBytesCap     = 8 << 20 // per-file read ceiling, matches ScanLog's buffer
+	searchCtxBefore    = 60      // excerpt window, runes
+	searchCtxAfter     = 60
 )
 
 // searchHitJSON is one match in the response. Log hits carry (segment, record);
@@ -185,6 +189,11 @@ type searchNote struct {
 // unparseable ui.json all degrade to fewer hits, never a 500.
 func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	// Query-length caps, in order: a too-short query returns empty (the field is
+	// searched live as it's typed); a too-long one is clamped so its cost is bounded.
+	if qr := []rune(q); len(qr) > maxSearchQuery {
+		q = string(qr[:maxSearchQuery])
+	}
 	resp := searchResponseJSON{Query: q, Groups: []searchGroupJSON{}}
 	if len([]rune(q)) < minSearchQuery {
 		writeJSON(w, resp)
@@ -215,7 +224,16 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 			liveSrc[src.id] = src
 		}
 	}
+	filesScanned, totalHits := 0, 0
 	for _, src := range catalog {
+		// Stop scanning once a global cap is met — the discipline that keeps the
+		// no-cache scan bounded even against a large archive: files scanned and
+		// total hits are hard ceilings, and tripping either marks the result partial.
+		if filesScanned >= searchMaxFiles || totalHits >= searchMaxHitsTotal {
+			partial = true
+			break
+		}
+		filesScanned++
 		res := sessionlog.ScanLog(src.path, q, opt)
 		if res.Partial {
 			partial = true
@@ -223,6 +241,7 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if len(res.Hits) == 0 {
 			continue
 		}
+		totalHits += len(res.Hits)
 		key, uid := src.id, res.UID
 		if src.kind == "archived" {
 			if uid == "" {
@@ -283,6 +302,12 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 		sort.SliceStable(g.Hits, func(i, j int) bool {
 			return parseSearchTime(g.Hits[i].Time).After(parseSearchTime(g.Hits[j].Time))
 		})
+		// Per-group hit cap: applied after the log+note merge so a single chat can't
+		// dominate the feed. The newest hits survive (the sort above is newest-first).
+		if len(g.Hits) > searchHitsPerGroup {
+			g.Hits = g.Hits[:searchHitsPerGroup]
+			partial = true
+		}
 		resp.Groups = append(resp.Groups, *g)
 	}
 	sort.SliceStable(resp.Groups, func(i, j int) bool {

@@ -31,8 +31,17 @@ type archivedResp struct {
 
 func doArchived(t *testing.T, a *app, uid, at string) (int, archivedResp) {
 	t.Helper()
+	return doArchivedURL(t, a, "/api/archived?uid="+uid+"&at="+at)
+}
+
+func doArchivedSegRec(t *testing.T, a *app, uid string, seg, rec int, at string) (int, archivedResp) {
+	t.Helper()
+	return doArchivedURL(t, a, fmt.Sprintf("/api/archived?uid=%s&seg=%d&rec=%d&at=%s", uid, seg, rec, at))
+}
+
+func doArchivedURL(t *testing.T, a *app, u string) (int, archivedResp) {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	u := "/api/archived?uid=" + uid + "&at=" + at
 	a.handleArchived(rec, httptest.NewRequest("GET", u, nil))
 	var out archivedResp
 	if rec.Code == 200 {
@@ -100,6 +109,54 @@ func TestHandleArchivedWindowsAroundHit(t *testing.T) {
 	}
 	if !ar.Forkable {
 		t.Error("a meta with agent + existing dir should be forkable")
+	}
+}
+
+// The window is anchored by the hit's stable (seg, rec) ordinal, not its
+// timestamp: when several turns share one timestamp, only the ordinal picks the
+// right one. Time anchoring would land on the first turn with that time.
+func TestHandleArchivedAnchorsBySegRec(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+
+	// Five turns all stamped with the same time; the needle is the fourth.
+	evs := []sessionlog.Event{sessionlog.NewMeta("dead", "codex", "sonnet", "high", a.home)}
+	dupTime := "2026-07-10T00:00:00Z"
+	for i := 0; i < 5; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		text := fmt.Sprintf("shared-time line %d", i)
+		if i == 3 {
+			text = "the needle is here"
+		}
+		evs = append(evs, sessionlog.Event{T: role, Text: text, Time: dupTime})
+	}
+	appendLog(t, a, filepath.Join("archive", "dead.jsonl"), evs...)
+
+	out := doSearch(t, a, "needle")
+	if len(out.Groups) != 1 || len(out.Groups[0].Hits) != 1 {
+		t.Fatalf("search setup: groups=%+v", out.Groups)
+	}
+	hit := out.Groups[0].Hits[0]
+	uid := out.Groups[0].UID
+
+	// Anchor by ordinal — must land on the needle (the 4th turn, index 3), even
+	// though four other turns share its timestamp.
+	code, ar := doArchivedSegRec(t, a, uid, hit.Segment, hit.Record, hit.Time)
+	if code != 200 {
+		t.Fatalf("archived code = %d", code)
+	}
+	if ar.Turns[ar.Anchor].Text != "the needle is here" {
+		t.Errorf("seg/rec anchor = %q, want the needle line", ar.Turns[ar.Anchor].Text)
+	}
+
+	// The old time-only anchoring would land on the FIRST shared-time turn — prove
+	// the ordinal path did something different (a real correctness gain, not a tie).
+	_, atOnly := doArchived(t, a, uid, dupTime)
+	if atOnly.Turns[atOnly.Anchor].Text == "the needle is here" {
+		t.Fatal("test is not exercising the ordinal path: time anchoring already lands on the needle")
 	}
 }
 

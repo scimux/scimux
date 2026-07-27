@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -208,6 +210,81 @@ func TestHandleSearchFoldsNotes(t *testing.T) {
 	}
 	if !foundInChat || !foundInNotes {
 		t.Errorf("expected note in chat and in Notes group, got chat=%v notes=%v", foundInChat, foundInNotes)
+	}
+}
+
+// An asset filename hit is emitted with Role "asset" (so the client can hide
+// fork/add-note) and anchored on the OWNING turn's time, not the asset record's
+// own — the asset record is never rendered as a turn, so its time would never
+// resolve a jump.
+func TestHandleSearchAssetHitOwningTurn(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
+		sessionlog.Event{T: "assistant", Text: "here is the chart", Time: "2026-07-14T02:00:00Z"},
+		sessionlog.Event{T: "asset", Time: "2026-07-14T02:00:05Z",
+			Asset: &sessionlog.AssetEvent{ID: "a_1", Name: "revenue-widget.png", Storage: "inline"}},
+	)
+	out := doSearch(t, a, "revenue-widget")
+	if len(out.Groups) != 1 || len(out.Groups[0].Hits) != 1 {
+		t.Fatalf("groups = %+v, want one asset hit", out.Groups)
+	}
+	h := out.Groups[0].Hits[0]
+	if h.Role != "asset" {
+		t.Errorf("hit role = %q, want asset", h.Role)
+	}
+	if h.Time != "2026-07-14T02:00:00Z" {
+		t.Errorf("asset hit time = %q, want the owning assistant turn's time", h.Time)
+	}
+}
+
+// The response layers global caps over ScanLog's per-file limits: an over-long
+// query is clamped, and a single chat's hits are capped per group (marking the
+// result partial) so one conversation can't flood the feed.
+func TestHandleSearchGlobalCaps(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.uiPath = filepath.Join(a.home, "ui.json")
+
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
+	evs := []sessionlog.Event{sessionlog.NewMeta("alpha", "claude", "", "", a.home)}
+	// 15 log hits (below ScanLog's per-file cap of 20, so no per-file partial)…
+	for i := 0; i < 15; i++ {
+		evs = append(evs, sessionlog.Event{T: "user", Text: fmt.Sprintf("sprocket line %d", i),
+			Time: fmt.Sprintf("2026-07-14T%02d:00:00Z", i)})
+	}
+	appendLog(t, a, "alpha.jsonl", evs...)
+	// …plus 10 notes on the same node — together 25 hits fold into one group, over
+	// the per-group cap of 20.
+	notes := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		notes = append(notes, fmt.Sprintf(`{"t":"2026-07-15T%02d:00:00Z","text":"sprocket note %d","node":"alpha"}`, i, i))
+	}
+	if err := os.WriteFile(a.uiPath, []byte(`{"notes":[`+strings.Join(notes, ",")+`]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doSearch(t, a, "sprocket")
+	if len(out.Groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(out.Groups))
+	}
+	if len(out.Groups[0].Hits) != searchHitsPerGroup {
+		t.Errorf("group hits = %d, want the per-group cap %d", len(out.Groups[0].Hits), searchHitsPerGroup)
+	}
+	if !out.Partial {
+		t.Error("partial = false, want true when the per-group cap truncates hits")
+	}
+
+	// Query-length clamp: a query longer than the cap is scanned as its prefix.
+	long := ""
+	for len(long) < maxSearchQuery+40 {
+		long += "sprocket"
+	}
+	clamped := doSearch(t, a, long)
+	if l := len([]rune(clamped.Query)); l != maxSearchQuery {
+		t.Errorf("clamped query length = %d, want %d", l, maxSearchQuery)
 	}
 }
 

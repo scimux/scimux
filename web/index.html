@@ -3847,7 +3847,7 @@ async function loadChatHistory(id, scrollTo){
   try {
     const d = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
     if (sel !== id) return;   /* user moved on while it loaded */
-    chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "seam", assets: d.assets || {} };
+    chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "", assets: d.assets || {} };
     chatScrollBottom = false;   /* riding back wins over a pending "go to now" */
     chatSig = "";
     refreshChat();
@@ -4015,7 +4015,7 @@ async function refreshChat(){
       s.turns.map(t => {
         const h = splitAssetRefs(t.text, n.id, assets);
         return `
-      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}">
+      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-time="${esc(t.time || "")}">
         <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(h.clean)}${h.html}</div>
       </div>`;
       }).join("")
@@ -4584,27 +4584,46 @@ function toast(msg){
 /* consume a pending jump once the target activity's chat has rendered:
    scroll the noted bubble into view and ring it briefly. Returns whether it
    scrolled (the caller then skips its own bottom-pinning). */
-function consumePendingJump(el, turns, priorTurns){
-  if (!pendingJump || pendingJump.node !== sel) return false;
-  if (Date.now() - pendingJump.ts > 15000){ pendingJump = null; return false; }
-  let idx = pendingJump.turnTime ? turns.findIndex(t => t.time === pendingJump.turnTime) : -1;
-  if (idx < 0) idx = turns.findIndex(t => t.text === pendingJump.text);
-  if (idx < 0){
-    /* the rendered turns are segment-scoped: a note captured before a /clear
-       can never match. Say so instead of silently landing at the bottom. */
-    if (priorTurns > 0){
-      pendingJump = null;
-      toast("This note points to an earlier chat segment (before a /clear).");
-    }
-    return false;  /* otherwise the chat may still be loading; retry next render */
-  }
-  pendingJump = null;
-  const target = el.querySelector(`.turn[data-i="${idx}"]`);
-  if (!target) return false;
+function scrollAndFlash(target){
   target.scrollIntoView({ block: "center" });
   target.classList.add("jumpflash");
   setTimeout(() => target.classList.remove("jumpflash"), 1600);
-  return true;
+}
+function consumePendingJump(el, turns, priorTurns){
+  if (!pendingJump || pendingJump.node !== sel) return false;
+  if (Date.now() - pendingJump.ts > 15000){ pendingJump = null; return false; }
+  /* 1) the live segment: match by turn time, then text. */
+  let idx = pendingJump.turnTime ? turns.findIndex(t => t.time === pendingJump.turnTime) : -1;
+  if (idx < 0) idx = turns.findIndex(t => t.text === pendingJump.text);
+  if (idx >= 0){
+    pendingJump = null;
+    const target = el.querySelector(`.turn[data-i="${idx}"]`);
+    if (!target) return false;
+    scrollAndFlash(target);
+    return true;
+  }
+  /* 2) earlier history (before a /clear): the live turns are segment-scoped, so a
+     hit in a closed segment isn't here yet. A search hit carries a stable
+     identity, so instead of giving up we load the whole log once and scroll to
+     the historical turn by time. (A note jump reuses the same path.) */
+  if (priorTurns > 0 && pendingJump.turnTime){
+    const histReady = chatHist.node === sel && chatHist.segs;
+    if (!histReady){
+      if (!pendingJump.histLoading){
+        pendingJump.histLoading = true;
+        loadChatHistory(sel, "");   /* no seam scroll — the jump owns the scroll */
+      }
+      return false;   /* retry on the post-history render */
+    }
+    const h = [...el.querySelectorAll(".turn.hist")].find(t => t.dataset.time === pendingJump.turnTime);
+    if (h){ pendingJump = null; scrollAndFlash(h); return true; }
+    /* history is loaded but the turn is gone (empty/rewritten surface) — stop
+       cleanly rather than retry forever. */
+    pendingJump = null;
+    toast("Couldn't find that message in this chat.");
+    return false;
+  }
+  return false;  /* the chat may still be loading; retry next render */
 }
 
 /* ---- long-press (HIG context-menu idiom): delegated helper ----
@@ -5191,6 +5210,13 @@ $("#searchscrim").addEventListener("click", closeSearch);
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")){
     e.preventDefault(); openSearch();
+    return;
+  }
+  /* "/" opens search too, but only when focus is not in a text field (so it
+     stays a literal slash while composing) and the overlay isn't already up. */
+  if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey && !searchOpen() &&
+      !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable){
+    e.preventDefault(); openSearch();
   }
 });
 $("#searchoverlay").addEventListener("keydown", e => {
@@ -5223,7 +5249,7 @@ function searchHitHTML(h){
   const when = h.turn_time || h.time || "";
   return `<div class="searchhit" data-kind="${esc(h._kind || "")}" data-id="${esc(h._id || "")}"` +
     ` data-uid="${esc(h._uid || "")}" data-segment="${h.segment || 0}" data-record="${h.record || 0}"` +
-    ` data-note-id="${esc(h.note_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
+    ` data-role="${esc(h.role || "")}" data-note-id="${esc(h.note_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
     ` data-lane="${esc(h._lane || "")}" data-turn="${esc(h.turn_time || h.time || "")}">` +
     `<span class="ex">${before}<mark>${match}</mark>${after}</span>` +
     (when ? `<span class="when">${esc(when)}</span>` : "") +
@@ -5334,9 +5360,12 @@ $("#searchinput").addEventListener("input", e => {
    show-to-chat + fork arrive in G5b with the bounded read-only surface. */
 let openHit = null;   /* the hit whose bar is showing (transient; not polled) */
 const SACT_LABEL = { show: "Show to chat", fork: "Fork from here", note: "Add note" };
-function searchHitActions(kind, forkable){
+function searchHitActions(kind, forkable, role){
   const acts = [];
   acts.push("show");                                   /* every hit can be shown */
+  /* an asset filename hit is show-to-chat only (spec): it isn't a turn to fork
+     from, and a note belongs on the turn, not the file — so no fork, no note */
+  if (role === "asset") return acts;
   if (kind === "live" && forkable) acts.push("fork");  /* archived fork lives in the read-only view */
   acts.push("note");
   return acts;
@@ -5352,7 +5381,7 @@ function toggleHitBar(el){
   closeHitBar();
   const bar = document.createElement("div");
   bar.className = "hitbar";
-  bar.innerHTML = searchHitActions(el.dataset.kind, el.dataset.forkable === "1")
+  bar.innerHTML = searchHitActions(el.dataset.kind, el.dataset.forkable === "1", el.dataset.role)
     .map(a => `<button data-sact="${a}">${SACT_LABEL[a]}</button>`).join("");
   el.appendChild(bar);
   el.classList.add("open");
@@ -5377,7 +5406,7 @@ function doSearchAction(a, hit){
   if (a === "show"){
     if (live) jumpToHitChat(id, turn);
     else if (kind === "notes"){ closeSearch(); setNotesOpen(true); }   /* free-standing note */
-    else if (kind === "archived"){ closeSearch(); openArchived(hit.dataset.uid, turn); }
+    else if (kind === "archived"){ closeSearch(); openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn); }
     else toast("This chat is unavailable.");
     return;
   }
@@ -5422,7 +5451,7 @@ $("#searchfeed").addEventListener("click", e => {
 let archivedFork = null;         /* {title,agent,model,effort,dir} when the log is forkable */
 let archivedReturnFocus = null;  /* focus restore on close */
 function archivedOpen(){ return !$("#archivedview").hidden; }
-async function openArchived(uid, at){
+async function openArchived(uid, seg, rec, at){
   archivedReturnFocus = document.activeElement;
   $("#archivedtitle").textContent = "Deleted chat";
   $("#archivedsub").textContent = "";
@@ -5431,7 +5460,11 @@ async function openArchived(uid, at){
   $("#archivedbody").innerHTML = `<div class="archtrunc">Loading…</div>`;
   $("#archivedview").hidden = false;
   try {
-    const r = await fetch("/api/archived?uid=" + encodeURIComponent(uid) + "&at=" + encodeURIComponent(at || ""));
+    /* anchor by the hit's stable (seg, rec) ordinal — duplicate/empty timestamps
+       can't mis-anchor the window; `at` rides along only as a server-side fallback */
+    const r = await fetch("/api/archived?uid=" + encodeURIComponent(uid) +
+      "&seg=" + encodeURIComponent(seg || 0) + "&rec=" + encodeURIComponent(rec || 0) +
+      "&at=" + encodeURIComponent(at || ""));
     if (!r.ok) throw new Error("archived " + r.status);
     renderArchived(await r.json());
   } catch {

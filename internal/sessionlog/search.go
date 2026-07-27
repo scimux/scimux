@@ -72,6 +72,12 @@ func ScanLog(path, query string, opt ScanOptions) ScanResult {
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	rec, seg := 0, 0
+	// lastTurnTime is the timestamp of the most recent user/assistant turn in the
+	// current segment. An asset filename hit is not itself a rendered turn, so it
+	// anchors on the turn that owns it (the turn that produced/uploaded the file —
+	// the nearest preceding one); resetting at each seam keeps that owner inside
+	// the same chat surface. Empty until the segment's first turn.
+	var lastTurnTime string
 	var bytesRead int64
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -98,8 +104,15 @@ func ScanLog(path, query string, opt ScanOptions) ScanResult {
 		role, text := searchable(ev)
 		if role != "" {
 			if b, m, a, ok := excerpt(text, q, opt.Before, opt.After); ok {
+				// An asset hit reports the owning turn's time (the turn it belongs
+				// to), never the asset record's own time — that is a private,
+				// unrendered record; anchoring on it would never match a turn.
+				hitTime := ev.Time
+				if role == "asset" && lastTurnTime != "" {
+					hitTime = lastTurnTime
+				}
 				res.Hits = append(res.Hits, Hit{
-					Segment: seg, Record: rec, Role: role, Time: ev.Time,
+					Segment: seg, Record: rec, Role: role, Time: hitTime,
 					Before: b, Match: m, After: a,
 				})
 				if opt.MaxHits > 0 && len(res.Hits) >= opt.MaxHits {
@@ -108,11 +121,15 @@ func ScanLog(path, query string, opt ScanOptions) ScanResult {
 				}
 			}
 		}
+		if (ev.T == "user" || ev.T == "assistant") && strings.TrimSpace(ev.Text) != "" {
+			lastTurnTime = ev.Time
+		}
 		if ev.T == "meta" && res.UID == "" && ev.Meta != nil {
 			res.UID = ev.Meta.UID
 		}
 		if ev.T == "source" {
 			seg++
+			lastTurnTime = "" // owner search never crosses a seam
 		}
 		rec++
 
@@ -126,6 +143,50 @@ func ScanLog(path, query string, opt ScanOptions) ScanResult {
 		res.Hits[i].UID = res.UID
 	}
 	return res
+}
+
+// ResolveTurn maps a search hit's stable (segment, record) identity to an index
+// into the flattened turn stream — the concatenation of every segment's turns,
+// exactly what ReadTurns yields. It counts records the same way ScanLog assigns
+// them (segment = source seams seen, record = every successfully parsed record),
+// so a hit resolves to the same turn the excerpt was cut from. This is the
+// deleted-log surface's anchor: an ordinal, not a timestamp, so duplicate or
+// empty times can't mis-anchor the window.
+//
+// A hit on a non-turn record (an asset filename) resolves to the turn that owns
+// it: the nearest turn at or before the record within the same segment, or — for
+// a record that precedes every turn in its segment (an upload referenced by the
+// following prompt) — the next turn. Returns ok=false when the identity does not
+// resolve to any turn (out of range, or an empty log). Not cached: a per-tap read.
+func ResolveTurn(path string, segment, record int) (int, bool) {
+	rec, seg, turnCount, lastInSeg := 0, 0, 0, -1
+	pendingNext := false
+	for _, ev := range ReadEvents(path) {
+		isTurn := (ev.T == "user" || ev.T == "assistant") && strings.TrimSpace(ev.Text) != ""
+		if !pendingNext && seg == segment && rec == record {
+			switch {
+			case isTurn:
+				return turnCount, true
+			case lastInSeg >= 0:
+				return lastInSeg, true
+			default:
+				pendingNext = true // no owning turn yet — the next turn owns it
+			}
+		}
+		if isTurn {
+			if pendingNext {
+				return turnCount, true
+			}
+			lastInSeg = turnCount
+			turnCount++
+		}
+		if ev.T == "source" {
+			seg++
+			lastInSeg = -1
+		}
+		rec++
+	}
+	return 0, false
 }
 
 // StringMatch is the excerpt window ScanString found for a single string.
