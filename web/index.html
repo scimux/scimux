@@ -3995,6 +3995,22 @@ async function loadChatHistory(id, scrollTo){
    the view is parked at a seam (not at the bottom), and re-selecting the
    same node often changes no render signature at all. */
 let chatScrollBottom = false;
+/* Pin the chat to the bottom now, and keep it pinned as late-loading images
+   reflow the layout. Rendered asset tiles (<img loading="lazy"> with no
+   width/height) contribute ~0 height at innerHTML time, so a synchronous
+   scrollTop = scrollHeight lands above the true bottom once the bytes arrive
+   and the turn grows. Re-pin on each image's load — but only while the reader
+   is still parked near the bottom, so a load never yanks back a user who has
+   since scrolled up (same 80px slack as the atBottom heuristic). */
+function pinChatBottom(el){
+  el.scrollTop = el.scrollHeight;
+  el.querySelectorAll("img").forEach(img => {
+    if (img.complete) return;
+    img.addEventListener("load", () => {
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
+    }, { once: true });
+  });
+}
 function jumpChatToNow(){
   chatHist.scrollTo = "";       /* a pending ride-back yields to the newer intent */
   /* select() clears chatSig only on a node switch — so a non-empty sig means
@@ -4002,7 +4018,7 @@ function jumpChatToNow(){
      flag behind (a lingering flag would yank a user who scrolled up right
      after). On a switch the content isn't there yet; the flag is consumed by
      the next render. */
-  if (chatSig) $("#msgs").scrollTop = $("#msgs").scrollHeight;
+  if (chatSig) pinChatBottom($("#msgs"));
   else chatScrollBottom = true;
 }
 async function refreshChat(){
@@ -4121,7 +4137,7 @@ async function refreshChat(){
   if (sig === chatSig){
     /* nothing re-rendered, but a "go to now" tap may still be pending
        (jumpChatToNow's immediate jump can race an in-flight render) */
-    if (chatScrollBottom){ const m = $("#msgs"); m.scrollTop = m.scrollHeight; chatScrollBottom = false; }
+    if (chatScrollBottom){ pinChatBottom($("#msgs")); chatScrollBottom = false; }
     endChatLoad();
     return;
   }
@@ -4215,8 +4231,8 @@ async function refreshChat(){
     if (target){ target.scrollIntoView({ block: t === "seam" ? "end" : "start" }); histScrolled = true; }
     chatHist.scrollTo = "";
   }
-  if (chatScrollBottom){ el.scrollTop = el.scrollHeight; chatScrollBottom = false; histScrolled = true; }
-  if (!histScrolled && !consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) el.scrollTop = el.scrollHeight;
+  if (chatScrollBottom){ pinChatBottom(el); chatScrollBottom = false; histScrolled = true; }
+  if (!histScrolled && !consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) pinChatBottom(el);
   const pk = el.querySelector(".peek");
   if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
 
