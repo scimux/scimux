@@ -3628,6 +3628,7 @@ $("#journeybtn").addEventListener("click", () => {
   if (isDesktop()){
     document.body.classList.toggle("map-open");
     mapSig = ""; renderMap();
+    restartWorkPulse();
   } else setLevel(3);
 });
 $("#mapclose").addEventListener("click", () => setLevel(2));
@@ -3662,6 +3663,7 @@ emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-adopt],[dat
        column back, mirroring the same gesture on the map itself */
     document.body.classList.remove("map-open");
     mapSig = ""; renderMap();
+    restartWorkPulse();
   } else setLevel(1);
 });
 emptyTap($("#mapscroll"), ".strow,.lanechip,[data-nid],[data-chip],button,a,input,textarea,select", () => {
@@ -3671,6 +3673,7 @@ emptyTap($("#mapscroll"), ".strow,.lanechip,[data-nid],[data-chip],button,a,inpu
   if (isDesktop()){
     document.body.classList.remove("map-open");
     mapSig = ""; renderMap();
+    restartWorkPulse();
   } else setLevel(2);
 });
 
@@ -3897,6 +3900,19 @@ $("#chathead").addEventListener("click", e => {
 /* one calm pulse above the prompt — CSS handles the breathing; we only
    flip the class from the mechanical active state */
 function setWorkPulse(active){ $("#workpulse").classList.toggle("on", !!active); }
+/* the scan bar's translate keyframes are percentages of its own width; a
+   running animation doesn't re-resolve them when a column fold (map/notes)
+   resizes #chat, so it keeps scanning the old width. Folds only change
+   width in the desktop column layout — restart (reflow in between) so the
+   next frame is measured against the new box. */
+function restartWorkPulse(){
+  if (!isDesktop()) return;
+  const el = $("#workpulse");
+  if (!el.classList.contains("on")) return;
+  el.classList.remove("on");
+  void el.offsetWidth;
+  el.classList.add("on");
+}
 let chatLoadTimer = null, chatLoadToken = 0;
 function clearChatLoad(){
   if (chatLoadTimer) clearTimeout(chatLoadTimer);
@@ -4548,6 +4564,7 @@ function setNotesOpen(open){
   localStorage.setItem("scimux-notes", open ? "1" : "0");
   notesSig = ""; notesPin = true;
   renderNotesPane();
+  restartWorkPulse();
 }
 $("#notesbtn").addEventListener("click", () => setNotesOpen(!notesOpen));
 $("#notesback").addEventListener("click", () => setNotesOpen(false));
