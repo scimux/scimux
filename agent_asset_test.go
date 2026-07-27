@@ -296,23 +296,21 @@ func TestAgentPathAsset_FullLoopIngestProjectDownload(t *testing.T) {
 }
 
 // A reference scanned from a turn but never ingested (rejected or simply
-// never scanned) must still reach a defined "unavailable" outcome at render
-// time — never leave the raw local path exposed in chat text.
-func TestProjectTurns_UnavailableForUnresolvedAgentPath(t *testing.T) {
+// never scanned) is left exactly as the agent wrote it — plain path text,
+// never an "unavailable" chip (ineligible references were never going to
+// be servable, so a chip would just clutter the chat).
+func TestProjectTurns_LeavesUnresolvedAgentPathAsPlainText(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	turns := []transcript.Turn{{Role: "assistant", Text: "see [gone](/tmp/does/not/exist.txt)"}}
-	out, assets := a.projectTurns("n1", turns)
-	if strings.Contains(out[0].Text, "/tmp/does/not/exist.txt") {
-		t.Fatalf("raw path leaked into rendered text: %q", out[0].Text)
+	text := "see [gone](/tmp/does/not/exist.txt)"
+	turns := []transcript.Turn{{Role: "assistant", Text: text}}
+	out, _ := a.projectTurns("n1", turns)
+	if out[0].Text != text {
+		t.Fatalf("got %q, want unchanged %q", out[0].Text, text)
 	}
-	ids := asset.ReferencedIDs(out[0].Text)
-	if len(ids) != 1 {
-		t.Fatalf("got %d referenced ids, want 1: %q", len(ids), out[0].Text)
-	}
-	if _, ok := assets[ids[0]]; ok {
-		t.Fatalf("unresolved reference must not resolve to a real asset")
+	if ids := asset.ReferencedIDs(out[0].Text); len(ids) != 0 {
+		t.Fatalf("got %d referenced ids, want none: %q", len(ids), out[0].Text)
 	}
 }

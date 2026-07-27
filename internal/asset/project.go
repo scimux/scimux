@@ -2,7 +2,6 @@ package asset
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -80,15 +79,13 @@ func ReferencedIDs(text string) []string {
 //
 // A reference whose path was never ingested — outside the allowed root,
 // unreadable, too large, or scanned from a log written before this
-// mechanism existed — is rewritten to a synthetic, deterministic
-// scimux-asset:missing_<hash> reference rather than left as raw path text.
-// The synthetic id never resolves in the session log, so the existing
-// frontend "missing asset" fallback (web/index.html's assetTile, for any id
-// absent from the chat response's asset map) renders it as an explicit
-// unavailable chip for free — no new frontend path, and no filesystem
-// access at render time (eligibility was decided once, at turn-append time,
-// by ingestAssetHook). The hash is deterministic so repeated polls render
-// the same id and never appear as a new reference each time.
+// mechanism existed — is left exactly as written, same as Project's
+// unmatched markers above: these paths were never going to be servable
+// (most commonly an agent like codex pointing at a source file outside its
+// sandbox root), so turning every one into an inert "unavailable" chip just
+// clutters the chat with dead file affordances for prose that was never an
+// attachment in the first place. Plain path text degrades gracefully; a
+// chip implies a broken feature.
 func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) string {
 	if !mdLinkRE.MatchString(text) {
 		return text
@@ -105,13 +102,13 @@ func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) str
 		}
 		lines[i] = mdLinkRE.ReplaceAllStringFunc(ln, func(m string) string {
 			sub := mdLinkRE.FindStringSubmatch(m)
-			bang, alt, ref := sub[1], sub[2], sub[3]
+			bang, ref := sub[1], sub[3]
 			if !isLocalPathRef(ref) {
 				return m
 			}
 			ev, ok := byPath[ref]
 			if !ok {
-				return missingRef(bang, alt, ref)
+				return m
 			}
 			name := ev.Name
 			if name == "" {
@@ -123,11 +120,3 @@ func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) str
 	return strings.Join(lines, "\n")
 }
 
-func missingRef(bang, alt, ref string) string {
-	name := alt
-	if name == "" {
-		name = filepath.Base(ref)
-	}
-	id := "missing_" + sessionlog.SHA256Hex([]byte(ref))[:12]
-	return fmt.Sprintf("%s[%s](scimux-asset:%s)", bang, name, id)
-}

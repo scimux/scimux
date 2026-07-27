@@ -2,7 +2,6 @@ package asset
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -98,25 +97,18 @@ func TestProjectAgentPaths_RewritesFileLink(t *testing.T) {
 	}
 }
 
-// A reference that was scanned but never ingested must still reach a
-// defined outcome — a synthetic, deterministic scimux-asset: reference the
-// frontend renders as an "unavailable" chip — never raw path text
-// (Guaranteed Outcome, upload-design.md).
-func TestProjectAgentPaths_UnresolvedBecomesMissingRef(t *testing.T) {
-	got := ProjectAgentPaths("see [notes](scratch/notes.md)", nil)
-	if !assetRefRE.MatchString(got) {
-		t.Fatalf("got %q, want a scimux-asset: reference", got)
+// A reference that was scanned but never ingested — outside the allowed
+// root, unreadable, too large — is left exactly as written, never rewritten
+// into an "unavailable" chip: these were never going to be servable, so a
+// chip would just clutter the chat with a dead file affordance.
+func TestProjectAgentPaths_UnresolvedLeftAsIs(t *testing.T) {
+	text := "see [notes](scratch/notes.md)"
+	got := ProjectAgentPaths(text, nil)
+	if got != text {
+		t.Fatalf("got %q, want unchanged %q", got, text)
 	}
-	if strings.Contains(got, "scratch/notes.md") {
-		t.Fatalf("got %q, raw path leaked into rendered text", got)
-	}
-}
-
-func TestProjectAgentPaths_MissingRefIsDeterministic(t *testing.T) {
-	a := ProjectAgentPaths("[x](a/b.md)", nil)
-	b := ProjectAgentPaths("[x](a/b.md)", nil)
-	if a != b {
-		t.Fatalf("missing-ref id not deterministic: %q vs %q", a, b)
+	if assetRefRE.MatchString(got) {
+		t.Fatalf("got %q, unexpected scimux-asset: reference for unresolved ref", got)
 	}
 }
 
