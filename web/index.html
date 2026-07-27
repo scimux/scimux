@@ -89,8 +89,19 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   background: var(--dim); flex: none; }
 #statusbar .host.online::before { background: #34C759; }
 #statusbar .host.offline::before { background: var(--dim); }
-#statusbar .sys  { color: var(--dim); display: flex; gap: 12px; white-space: nowrap; flex: none; }
-#statusbar .sys b { color: var(--ink); font-weight: 500; display: inline-block; }
+#statusbar .sys  { flex: none; white-space: nowrap; }
+/* The status slot time-slices between system metrics and agent budgets; only
+   one phase is `.on` at a time. Both are fixed-shape rows so a phase flip
+   never reflows the bar. */
+#statusbar .sysphase  { color: var(--dim); gap: 12px; white-space: nowrap; align-items: center; display: none; }
+#statusbar .sysphase.on { display: flex; }
+#statusbar .sysphase b { color: var(--ink); font-weight: 500; display: inline-block; }
+#statusbar .ubadge { display: inline-flex; align-items: center; gap: 5px; }
+#statusbar .ubadge .agent-logo { width: 13px; height: 13px; opacity: .8; }
+#statusbar .ubadge .agent-logo .mask-logo { width: 13px; height: 13px; }
+#statusbar .ubadge b.u-warn { color: #FF9500; }
+#statusbar .ubadge b.u-crit { color: #FF3B30; }
+#statusbar .ubadge.u-off { opacity: .55; }
 #statusbar .trend { font-size: 11px; }
 #statusbar .spacer { flex: 1; }
 .a-good   { color: #34C759; }   /* relaxing */
@@ -217,7 +228,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .Labbr { display: none; }
 @media (max-width: 520px) {
   #statusbar { gap: 10px; padding-left: 12px; padding-right: 12px; }
-  #statusbar .sys { gap: 8px; }
+  #statusbar .sysphase { gap: 8px; }
   .Lfull { display: none; }
   .Labbr { display: inline; }
 }
@@ -1116,7 +1127,7 @@ body.notes-open #notespane { transform: translateX(0); }
 <header id="statusbar">
   <button id="burger" aria-label="menu">&#9776;</button>
   <span class="host offline" id="host">scimux</span>
-  <span class="sys" id="sys"></span>
+  <span class="sys" id="sys"><span class="sysphase on" id="sysmetrics"></span><span class="sysphase" id="sysclaude"></span><span class="sysphase" id="syscodex"></span></span>
   <span class="spacer"></span>
   <button id="searchbtn" aria-label="search" aria-haspopup="dialog">&#128269;</button>
   <span id="syncwarn" role="status"></span>
@@ -2082,19 +2093,93 @@ function metric(label, disp, pct, prevPct){
          ` <span class="trend ${aCls}">${dir > 0 ? "↑" : dir < 0 ? "↓" : "→"}</span></span>`;
 }
 function renderSys(sys){
-  if (!sys || sys.mem_pct == null) { $("#sys").textContent = ""; return; }
+  if (!sys || sys.mem_pct == null) { $("#sysmetrics").textContent = ""; return; }
   const loadPct = sys.ncpu ? 100 * sys.load1 / sys.ncpu : 0;
   const prev = sysPrev || {};
   if (sysPrev && sys.mem_pct === prev.mem_pct && sys.swap_pct === prev.swap_pct
       && sys.load1 === prev.load1) return;   /* unchanged: don't re-animate */
   const lbl = (f, a) => `<span class="Lfull">${f}</span><span class="Labbr">${a}</span>`;
-  $("#sys").innerHTML =
+  $("#sysmetrics").innerHTML =
     metric(lbl("MEM","M"),  sys.mem_pct.toFixed(0) + "%",  sys.mem_pct,  prev.mem_pct) +
     metric(lbl("SWAP","S"), sys.swap_pct.toFixed(0) + "%", sys.swap_pct, prev.swap_pct) +
     metric(lbl("LOAD","L"), sys.load1.toFixed(2),
            loadPct, prev.ncpu ? 100 * prev.load1 / prev.ncpu : null);
   sysPrev = sys;
 }
+
+/* ---------- subscription usage (status slot, phase 2) ----------
+   The slot flips between system metrics and agent budgets on a local timer;
+   the flip is presentation-only and never triggers a server fetch. Budget
+   data comes from /api/usage, which is a cache-only read (no provider I/O),
+   read at most every 30s while the tab is visible. Numbers are *remaining*
+   percentages — runway, the value a user needs before starting work. */
+let usageSnap = null;
+/* The slot cycles: system metrics → Claude budget → Codex budget → repeat.
+   Each phase is a fixed-shape row so a flip never reflows the bar. */
+const STATUS_PHASES = ["metrics", "claude", "codex"];
+let statusPhaseIdx = 0;
+
+function usageResetLabel(iso){
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const hhmm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === new Date().toDateString()) return hhmm;   /* same day: time only */
+  return d.toLocaleDateString([], { weekday: "short" }) + " " + hhmm; /* else: weekday + time */
+}
+function usageRemClass(rem){
+  if (rem == null) return "";
+  if (rem < 10) return "u-crit";
+  if (rem < 20) return "u-warn";
+  return "";
+}
+function usageBadge(agent, v){
+  const logo = `<span class="agent-logo" aria-hidden="true">${agentLogo(agent)}</span>`;
+  const name = agent === "codex" ? "Codex" : agent === "claude" ? "Claude" : esc(agent);
+  if (!v || !v.available){
+    return `<span class="ubadge u-off" title="${name}: usage unavailable">${logo}` +
+           `<span class="Lfull">--</span><span class="Labbr">--</span></span>`;
+  }
+  const fh = v.five_hour_remaining, wk = v.weekly_remaining;
+  const fhr = usageResetLabel(v.five_hour_reset), wkr = usageResetLabel(v.weekly_reset);
+  const num = (x) => x == null ? "--" : Math.round(x);
+  const fhc = usageRemClass(fh), wkc = usageRemClass(wk);
+  const full = `<span class="Lfull">5h <b class="${fhc}">${num(fh)}%</b>${fhr ? " " + esc(fhr) : ""}` +
+               ` · W <b class="${wkc}">${num(wk)}%</b>${wkr ? " " + esc(wkr) : ""}</span>`;
+  const abbr = `<span class="Labbr"><b class="${fhc}">${num(fh)}</b>/<b class="${wkc}">${num(wk)}</b></span>`;
+  const tip = `${name}: 5h ${num(fh)}% left${fhr ? ", resets " + fhr : ""}` +
+              ` · weekly ${num(wk)}% left${wkr ? ", resets " + wkr : ""}`;
+  return `<span class="ubadge" title="${esc(tip)}">${logo}${full}${abbr}</span>`;
+}
+function renderUsage(snap){
+  const a = (snap && snap.agents) || {};
+  $("#sysclaude").innerHTML = snap ? usageBadge("claude", a.claude) : "";
+  $("#syscodex").innerHTML  = snap ? usageBadge("codex",  a.codex)  : "";
+}
+function applyStatusPhase(){
+  let phase = STATUS_PHASES[statusPhaseIdx];
+  /* Only flip to a budget phase once we've read a snapshot at least once;
+     before that, keep showing metrics rather than an empty slot. */
+  if (phase !== "metrics" && usageSnap == null) phase = "metrics";
+  $("#sysmetrics").classList.toggle("on", phase === "metrics");
+  $("#sysclaude").classList.toggle("on",  phase === "claude");
+  $("#syscodex").classList.toggle("on",   phase === "codex");
+}
+async function readUsage(){
+  if (document.hidden) return;
+  try {
+    const r = await fetch("/api/usage", { cache: "no-store" });
+    if (!r.ok) return;
+    usageSnap = await r.json();
+    renderUsage(usageSnap);
+    applyStatusPhase();
+  } catch { /* cache-only read; a miss just leaves the last snapshot */ }
+}
+setInterval(() => {
+  statusPhaseIdx = (statusPhaseIdx + 1) % STATUS_PHASES.length;
+  applyStatusPhase();
+}, 8000);
+setInterval(readUsage, 30000);
 
 /* ---------- cards ---------- */
 function ageText(ms){
@@ -5903,6 +5988,7 @@ function startPolling(){
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
   pollLoop(++pollGen);
+  readUsage();  /* prime the budget slot; then on its own 30s cadence */
 }
 document.addEventListener("visibilitychange", () => {
   if (document.hidden){ if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }

@@ -1,0 +1,4 @@
+not-json
+{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":99,"window_minutes":60,"resets_at":1785104494},"secondary":{"used_percent":99,"window_minutes":10080,"resets_at":1785609005}}}}
+{"timestamp":"2026-07-27T08:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"plan_type":"edu","primary":{"used_percent":10,"window_minutes":300,"resets_at":1785146400},"secondary":{"used_percent":3,"window_minutes":10080,"resets_at":1785577200}}}}
+{"timestamp":"2026-07-27T09:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"plan_type":"edu","primary":{"used_percent":25,"window_minutes":300,"resets_at":1785146400},"secondary":{"used_percent":4,"window_minutes":10080,"resets_at":1785577200}}}}
