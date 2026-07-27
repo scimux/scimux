@@ -65,6 +65,37 @@ func TestQueryCodexUsageMissingDir(t *testing.T) {
 	}
 }
 
+func TestParseCodexLineMissingResetsAt(t *testing.T) {
+	// A token_count record with used_percent present but resets_at absent must
+	// leave the reset unknown (nil), not epoch 0 / 1970-01-01.
+	line := []byte(`{"timestamp":"2026-07-27T08:00:00Z","type":"event_msg",` +
+		`"payload":{"type":"token_count","rate_limits":{` +
+		`"primary":{"used_percent":25,"window_minutes":300},` +
+		`"secondary":{"used_percent":4,"window_minutes":10080}}}}`)
+	u, _, ok := parseCodexLine(line)
+	if !ok {
+		t.Fatal("parseCodexLine rejected a valid record missing resets_at")
+	}
+	if u.FiveHourReset != nil {
+		t.Fatalf("FiveHourReset = %v, want nil for absent resets_at", *u.FiveHourReset)
+	}
+	if u.WeeklyReset != nil {
+		t.Fatalf("WeeklyReset = %v, want nil for absent resets_at", *u.WeeklyReset)
+	}
+	// A present resets_at is still surfaced.
+	line2 := []byte(`{"timestamp":"2026-07-27T08:00:00Z","type":"event_msg",` +
+		`"payload":{"type":"token_count","rate_limits":{` +
+		`"primary":{"used_percent":25,"window_minutes":300,"resets_at":1800000000},` +
+		`"secondary":{"used_percent":4,"window_minutes":10080,"resets_at":1800000000}}}}`)
+	u2, _, ok := parseCodexLine(line2)
+	if !ok || u2.FiveHourReset == nil || u2.WeeklyReset == nil {
+		t.Fatalf("parseCodexLine dropped a present resets_at: ok=%v u=%+v", ok, u2)
+	}
+	if !u2.FiveHourReset.Equal(time.Unix(1800000000, 0)) {
+		t.Fatalf("FiveHourReset = %v, want %v", u2.FiveHourReset, time.Unix(1800000000, 0))
+	}
+}
+
 func TestQueryClaudeUsageNormalizes(t *testing.T) {
 	dir := t.TempDir()
 	creds := filepath.Join(dir, "credentials.json")

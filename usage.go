@@ -122,7 +122,11 @@ type codexRecord struct {
 type codexLimit struct {
 	UsedPercent   *float64 `json:"used_percent"`
 	WindowMinutes int      `json:"window_minutes"`
-	ResetsAt      int64    `json:"resets_at"`
+	// ResetsAt is a pointer so an absent field is distinguishable from a genuine
+	// epoch 0: a token_count record can carry used_percent without resets_at, and
+	// time.Unix(0,0) would serialize as 1970-01-01 — a reset time that already
+	// passed 50+ years ago — rather than an omitted/unknown value.
+	ResetsAt *int64 `json:"resets_at"`
 }
 
 // parseCodexLine decodes one JSONL line defensively. Unknown record types,
@@ -149,17 +153,26 @@ func parseCodexLine(line []byte) (agentUsage, time.Time, bool) {
 	if err != nil {
 		return agentUsage{}, time.Time{}, false
 	}
-	pr, sr := time.Unix(p.ResetsAt, 0), time.Unix(s.ResetsAt, 0)
+	// A missing resets_at leaves the reset unknown (nil), not epoch 0 / 1970.
+	var pr, sr *time.Time
+	if p.ResetsAt != nil {
+		t := time.Unix(*p.ResetsAt, 0)
+		pr = &t
+	}
+	if s.ResetsAt != nil {
+		t := time.Unix(*s.ResetsAt, 0)
+		sr = &t
+	}
 	prem, srem := remainingPercent(*p.UsedPercent), remainingPercent(*s.UsedPercent)
 	return agentUsage{
 		Agent:             "codex",
 		Plan:              rec.Payload.RateLimits.PlanType,
 		FiveHourUsed:      p.UsedPercent,
 		FiveHourRemaining: &prem,
-		FiveHourReset:     &pr,
+		FiveHourReset:     pr,
 		WeeklyUsed:        s.UsedPercent,
 		WeeklyRemaining:   &srem,
-		WeeklyReset:       &sr,
+		WeeklyReset:       sr,
 		ObservedAt:        ts,
 		Source:            "codex-session-jsonl",
 	}, ts, true

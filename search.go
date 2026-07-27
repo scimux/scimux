@@ -251,9 +251,12 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		// Trim this file's hits to the remaining total-hit budget so the response
 		// never carries more than searchMaxHitsTotal log hits (the per-file cap
-		// alone lets the last scanned file overshoot the global ceiling).
+		// alone lets the last scanned file overshoot the global ceiling). ScanLog
+		// appends in file (oldest-first) order, and the per-group sort below is
+		// newest-first, so keep the *tail* — discarding the budget overflow from
+		// the oldest hits leaves the newest (most useful) matches intact.
 		if remaining := searchMaxHitsTotal - totalHits; len(res.Hits) > remaining {
-			res.Hits = res.Hits[:remaining]
+			res.Hits = res.Hits[len(res.Hits)-remaining:]
 			partial = true
 		}
 		totalHits += len(res.Hits)
@@ -264,10 +267,19 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 			key = uid
 		}
+		// Forkability: a live group forks the in-memory node (src.forkable is the
+		// authoritative dir-exists affordance), so it must NOT be gated on the log's
+		// on-disk UID — a header-less/UID-less log would otherwise report the same
+		// live node non-forkable here yet forkable via a folded note (below). The
+		// UID gate is meaningful only for archived groups, which fork from the log.
+		forkable := src.forkable
+		if src.kind == "archived" {
+			forkable = forkable && uid != "" && !strings.HasPrefix(uid, "legacy:")
+		}
 		g := &searchGroupJSON{
 			Kind: src.kind, ID: src.id, UID: uid,
 			Title: src.title, LaneID: src.laneID, Agent: src.agent,
-			Forkable: src.forkable && uid != "" && !strings.HasPrefix(uid, "legacy:"),
+			Forkable: forkable,
 		}
 		for _, h := range res.Hits {
 			g.Hits = append(g.Hits, searchHitJSON{
