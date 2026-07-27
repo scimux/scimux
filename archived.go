@@ -38,12 +38,13 @@ type archivedResponse struct {
 }
 
 // handleArchived serves GET /api/archived?uid=<uid>&seg=<n>&rec=<n>&at=<turnTime>.
-// uid is the deleted log's on-disk identity (a meta UID, or "legacy:<path>" for a
+// uid is the deleted log's on-disk identity (a meta UID, or "legacy:<ref>" for a
 // header-less log). The hit is anchored by its stable (seg, rec) ordinal pair —
-// the same identity ScanLog emits — resolved to a turn index by ResolveTurn, so a
-// duplicate or empty timestamp can never pick the wrong turn. `at` remains a
-// defensive fallback for a caller that has only the time. Every failure degrades
-// to 404, never a 500 or a leak.
+// the same identity ScanLog emits — resolved to a bounded turn window by
+// ReadTurnWindow, so a duplicate or empty timestamp can never pick the wrong turn
+// and a click never materializes the whole archived log. `at` remains a defensive
+// fallback for a caller that has only the time. Every failure degrades to 404,
+// never a 500 or a leak.
 func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 	uid := r.URL.Query().Get("uid")
 	at := r.URL.Query().Get("at")
@@ -59,50 +60,64 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	turns := sessionlog.ReadTurns(path)
-	// Neutralize asset markers: archived blobs are not served in v1 (a deleted
-	// node's assets are archived away), so any scimux-asset marker or raw agent
-	// path degrades to an inert "unavailable" chip — same projection the live
-	// chat applies, with an empty asset set.
-	empty := map[string]sessionlog.AssetEvent{}
-	for i := range turns {
-		turns[i].Text = asset.Project(turns[i].Text, empty)
-		turns[i].Text = asset.ProjectAgentPaths(turns[i].Text, empty)
-	}
-
-	// Prefer the stable (seg, rec) ordinal; fall back to the first turn matching
-	// the timestamp only when no ordinal was supplied. Anchor 0 if neither resolves.
-	anchor := 0
+	// Prefer the stable (seg, rec) ordinal via a single bounded pass that keeps
+	// only the window — never the whole archived log. Fall back to a full read +
+	// timestamp scan only when no ordinal was supplied (a caller with just `at`).
+	var (
+		window                          []transcript.Turn
+		anchor                          int
+		beforeTruncated, afterTruncated bool
+		resolved                        bool
+	)
 	if haveSeg && haveRec {
-		if idx, ok := sessionlog.ResolveTurn(path, seg, rec); ok {
-			anchor = idx
+		if w, aIdx, bt, af, ok := sessionlog.ReadTurnWindow(path, seg, rec, archivedWindowBefore, archivedWindowAfter); ok {
+			window, anchor, beforeTruncated, afterTruncated, resolved = w, aIdx, bt, af, true
 		}
-	} else if at != "" {
-		for i, t := range turns {
-			if t.Time == at {
-				anchor = i
-				break
+	}
+	if !resolved {
+		turns := sessionlog.ReadTurns(path)
+		a := 0
+		if at != "" {
+			for i, t := range turns {
+				if t.Time == at {
+					a = i
+					break
+				}
 			}
 		}
+		if a >= len(turns) {
+			a = 0
+		}
+		lo := a - archivedWindowBefore
+		if lo < 0 {
+			lo = 0
+		}
+		hi := a + archivedWindowAfter + 1
+		if hi > len(turns) {
+			hi = len(turns)
+		}
+		window = turns[lo:hi]
+		anchor = a - lo
+		beforeTruncated = lo > 0
+		afterTruncated = hi < len(turns)
 	}
-	if anchor >= len(turns) {
-		anchor = 0
-	}
-	lo := anchor - archivedWindowBefore
-	if lo < 0 {
-		lo = 0
-	}
-	hi := anchor + archivedWindowAfter + 1
-	if hi > len(turns) {
-		hi = len(turns)
+
+	// Neutralize asset markers over the window only: archived blobs are not served
+	// in v1 (a deleted node's assets are archived away), so any scimux-asset marker
+	// or raw agent path degrades to an inert "unavailable" chip — same projection
+	// the live chat applies, with an empty asset set.
+	empty := map[string]sessionlog.AssetEvent{}
+	for i := range window {
+		window[i].Text = asset.Project(window[i].Text, empty)
+		window[i].Text = asset.ProjectAgentPaths(window[i].Text, empty)
 	}
 
 	resp := archivedResponse{
 		UID:             uid,
-		Turns:           turns[lo:hi],
-		Anchor:          anchor - lo,
-		BeforeTruncated: lo > 0,
-		AfterTruncated:  hi < len(turns),
+		Turns:           window,
+		Anchor:          anchor,
+		BeforeTruncated: beforeTruncated,
+		AfterTruncated:  afterTruncated,
 	}
 	if meta != nil {
 		resp.Title = meta.Node
@@ -118,19 +133,20 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// resolveArchived maps a uid to its archive file. A "legacy:<path>" uid embeds
-// the on-disk path (header-less logs have no UID to match on) — that path is
-// never trusted raw: it must resolve inside the archive directory, or the log is
-// treated as not found (traversal guard). A hex/tN uid is matched against the
-// meta header of each archived log.
+// resolveArchived maps a uid to its archive file. A "legacy:<ref>" uid carries a
+// path *relative* to the archive directory (header-less logs have no UID to match
+// on) — never an absolute path, which would leak the local data dir. The ref is
+// never trusted raw: it is joined onto the archive dir and must resolve back
+// inside it, or the log is treated as not found (traversal guard). A hex/tN uid
+// is matched against the meta header of each archived log.
 func (a *app) resolveArchived(uid string) (string, *sessionlog.MetaEvent, bool) {
 	if a.sessionsDir == "" {
 		return "", nil, false
 	}
 	archiveDir := filepath.Join(a.sessionsDir, "archive")
 
-	if p, ok := strings.CutPrefix(uid, "legacy:"); ok {
-		clean := filepath.Clean(p)
+	if ref, ok := strings.CutPrefix(uid, "legacy:"); ok {
+		clean := filepath.Join(archiveDir, filepath.Clean("/"+ref))
 		if !withinDir(archiveDir, clean) {
 			return "", nil, false
 		}

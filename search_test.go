@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -11,6 +12,76 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
+
+// The global total-hit budget caps hits ENTERING groups across files, not just
+// per file: without trimming the boundary file's result, the response overshoots
+// searchMaxHitsTotal by up to a full per-file batch. 27 chats × 19 hits = 513
+// available; the budget must cap the total that enters groups at exactly 500. 27
+// groups stays under searchMaxGroups and 19 under searchHitsPerGroup, so neither
+// the group cap nor the per-group cap masks the total-hit trim.
+func TestHandleSearchTotalHitCap(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	const files, per = 27, 19
+	for i := 0; i < files; i++ {
+		id := fmt.Sprintf("n%02d", i)
+		liveNode(a, &Node{ID: id, Title: id, Agent: "claude", Dir: a.home,
+			CreatedAt: fmt.Sprintf("2026-07-14T%02d:00:00Z", i)})
+		evs := []sessionlog.Event{sessionlog.NewMeta(id, "claude", "", "", a.home)}
+		for j := 0; j < per; j++ {
+			evs = append(evs, sessionlog.Event{T: "user", Text: "widget line",
+				Time: fmt.Sprintf("2026-07-14T%02d:%02d:00Z", i, j)})
+		}
+		appendLog(t, a, id+".jsonl", evs...)
+	}
+	out := doSearch(t, a, "widget")
+	total := 0
+	for _, g := range out.Groups {
+		for _, h := range g.Hits {
+			if h.Role != "note" {
+				total++
+			}
+		}
+	}
+	if total != searchMaxHitsTotal {
+		t.Errorf("total log hits = %d, want the global cap %d (overshoots to %d without the trim)",
+			total, searchMaxHitsTotal, files*per)
+	}
+	if !out.Partial {
+		t.Error("partial = false, want true when the total-hit cap trims")
+	}
+}
+
+// An aborted request stops the scan server-side, not just in the browser: with an
+// already-cancelled context the handler returns a partial, empty result instead
+// of scanning the catalog.
+func TestHandleSearchAbortStopsScan(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home})
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
+		sessionlog.Event{T: "user", Text: "widget", Time: "2026-07-14T00:00:00Z"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/search?q=widget", nil).WithContext(ctx)
+	a.handleSearch(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var out searchResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.Partial {
+		t.Error("partial = false, want true for an aborted scan")
+	}
+	if len(out.Groups) != 0 {
+		t.Errorf("groups = %d, want 0 (scan stopped before any file)", len(out.Groups))
+	}
+}
 
 // searchResp mirrors the /api/search JSON so tests read fields by name.
 type searchResp struct {
@@ -145,6 +216,14 @@ func TestHandleSearchIncludesArchivedAndLegacy(t *testing.T) {
 			legacy = true
 			if g.Forkable {
 				t.Errorf("legacy (no-uid) group must not be forkable")
+			}
+			// The legacy uid must be a path relative to the archive dir, never the
+			// absolute on-disk path (that would leak the local data directory).
+			if g.UID != "legacy:ancient.jsonl" {
+				t.Errorf("legacy uid = %q, want relative %q", g.UID, "legacy:ancient.jsonl")
+			}
+			if strings.Contains(g.UID, a.sessionsDir) {
+				t.Errorf("legacy uid %q leaks the absolute data dir", g.UID)
 			}
 		case g.Title == "dead":
 			dead = true

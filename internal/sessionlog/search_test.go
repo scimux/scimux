@@ -1,11 +1,31 @@
 package sessionlog
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// A cancelled context abandons the scan mid-file (marking it partial) rather than
+// reading to EOF — the server-side half of the search abort machinery.
+func TestScanLogCtx_StopsOnCancel(t *testing.T) {
+	lines := []string{metaU1}
+	for i := 0; i < 600; i++ {
+		lines = append(lines, userLine("2026-07-01T10:00:00Z", "needle here"))
+	}
+	p := writeLines(t, lines...)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := ScanLogCtx(ctx, p, "needle", ScanOptions{Before: 10, After: 10})
+	if !res.Partial {
+		t.Error("partial = false, want true when the context is cancelled mid-scan")
+	}
+	if len(res.Hits) >= 600 {
+		t.Errorf("hits = %d, want fewer than the full 600 (scan abandoned early)", len(res.Hits))
+	}
+}
 
 // writeLines writes the given raw JSONL lines to a temp log file and returns its
 // path. Lines are written verbatim (with a trailing newline) so a test can feed
@@ -330,10 +350,46 @@ func TestScanLog_AssetOwnerDoesNotCrossSeam(t *testing.T) {
 	}
 }
 
-// ResolveTurn maps a hit's (segment, record) to an index into the flattened turn
-// stream, counting records exactly as ScanLog does and mapping an asset record to
-// its owning turn.
-func TestResolveTurn(t *testing.T) {
+// An asset filename hit that PRECEDES its owning turn (the upload flow: the asset
+// record is appended before the prompt that references it) anchors on the *next*
+// turn's time, not the asset record's own time — so a live show-to-chat, which
+// jumps by turn time, can land on the owning turn instead of dead-ending.
+func TestScanLog_AssetHitBeforeOwnerGetsNextTurnTime(t *testing.T) {
+	p := writeLines(t,
+		metaU1,
+		assetLine("2026-07-01T10:00:30Z", "a_1", "upload-xyz.png"),   // rec 1: no preceding turn
+		userLine("2026-07-01T10:01:00Z", "please render the upload"), // rec 2: the owning turn
+	)
+	res := ScanLog(p, "upload-xyz", wideOpt)
+	if len(res.Hits) != 1 || res.Hits[0].Role != "asset" {
+		t.Fatalf("hits = %+v, want one asset hit", res.Hits)
+	}
+	if res.Hits[0].Time != "2026-07-01T10:01:00Z" {
+		t.Errorf("asset hit time = %q, want the following turn's time (the owner)", res.Hits[0].Time)
+	}
+	// The stable identity still points at the asset record itself (record 1).
+	if res.Hits[0].Record != 1 || res.Hits[0].Segment != 0 {
+		t.Errorf("asset hit identity = seg %d rec %d, want seg 0 rec 1", res.Hits[0].Segment, res.Hits[0].Record)
+	}
+}
+
+// anchorText resolves (seg, rec) through ReadTurnWindow and returns the anchor
+// turn's text, failing the test if the identity does not resolve.
+func anchorText(t *testing.T, path string, seg, rec int) string {
+	t.Helper()
+	w, anchor, _, _, ok := ReadTurnWindow(path, seg, rec, 8, 8)
+	if !ok {
+		t.Fatalf("ReadTurnWindow(%d,%d) did not resolve", seg, rec)
+	}
+	if anchor < 0 || anchor >= len(w) {
+		t.Fatalf("anchor %d out of range for window len %d", anchor, len(w))
+	}
+	return w[anchor].Text
+}
+
+// ReadTurnWindow maps a hit's (segment, record) to the turn it owns, counting
+// records exactly as ScanLog does and mapping an asset record to its owning turn.
+func TestReadTurnWindow(t *testing.T) {
 	// records: 0 meta, 1 user, 2 assistant, 3 asset, 4 seam, 5 user, 6 asset(no owner)
 	p := writeLines(t,
 		metaU1, // rec 0, seg 0
@@ -342,35 +398,88 @@ func TestResolveTurn(t *testing.T) {
 		assetLine("2026-07-01T10:02:05Z", "a_1", "one.png"), // rec 3 → owns turn 1
 		seamLine("2026-07-01T11:00:00Z"),                    // rec 4, seg→1
 		userLine("2026-07-01T11:01:00Z", "question two"),    // rec 5 → turn 2
-		assetLine("2026-07-01T11:00:30Z", "a_2", "pre.png"), // rec 6, seg 1: no preceding turn → next turn
+		assetLine("2026-07-01T11:00:30Z", "a_2", "pre.png"), // rec 6, seg 1: preceding turn rec 5
 	)
-	// A user turn resolves to its own flattened index.
-	if idx, ok := ResolveTurn(p, 0, 1); !ok || idx != 0 {
-		t.Errorf("user turn: idx=%d ok=%v, want 0 true", idx, ok)
+	// A user turn resolves to itself.
+	if got := anchorText(t, p, 0, 1); got != "question one" {
+		t.Errorf("user turn: anchor = %q, want %q", got, "question one")
 	}
-	if idx, ok := ResolveTurn(p, 1, 5); !ok || idx != 2 {
-		t.Errorf("second-segment user: idx=%d ok=%v, want 2 true", idx, ok)
+	if got := anchorText(t, p, 1, 5); got != "question two" {
+		t.Errorf("second-segment user: anchor = %q, want %q", got, "question two")
 	}
 	// An asset resolves to the nearest preceding turn in its segment.
-	if idx, ok := ResolveTurn(p, 0, 3); !ok || idx != 1 {
-		t.Errorf("asset owner: idx=%d ok=%v, want 1 true", idx, ok)
+	if got := anchorText(t, p, 0, 3); got != "answer one" {
+		t.Errorf("asset owner: anchor = %q, want %q", got, "answer one")
 	}
-	// An asset with no preceding turn in its segment resolves to the next turn.
-	// (rec 6 sits before its segment's only turn only if that turn followed it —
-	// here the user turn is rec 5, before rec 6, so the owner is that turn: idx 2.)
-	if idx, ok := ResolveTurn(p, 1, 6); !ok || idx != 2 {
-		t.Errorf("asset no-preceding: idx=%d ok=%v, want 2 true", idx, ok)
+	// An asset whose preceding turn is in the same segment owns that turn.
+	if got := anchorText(t, p, 1, 6); got != "question two" {
+		t.Errorf("asset in-segment owner: anchor = %q, want %q", got, "question two")
 	}
 	// Out of range resolves to nothing.
-	if _, ok := ResolveTurn(p, 9, 99); ok {
+	if _, _, _, _, ok := ReadTurnWindow(p, 9, 99, 8, 8); ok {
 		t.Error("out-of-range identity should not resolve")
 	}
 }
 
-// ResolveTurn's ordinals stay in lockstep with ReadTurns even when malformed
-// lines are skipped and blank lines appear — the same defensive stream ScanLog
-// counts, so a hit resolves to the exact turn.
-func TestResolveTurnLockstepWithReadTurns(t *testing.T) {
+// A record that precedes every turn in its segment (the upload flow: the asset is
+// appended before the prompt that references it) resolves forward to the next turn
+// in that segment.
+func TestReadTurnWindow_ForwardOwnerNextTurn(t *testing.T) {
+	p := writeLines(t,
+		metaU1, // rec 0
+		assetLine("2026-07-01T10:00:30Z", "a_1", "pre.png"), // rec 1, seg 0: no preceding turn
+		userLine("2026-07-01T10:01:00Z", "the prompt"),      // rec 2 → turn 0, the owner
+	)
+	if got := anchorText(t, p, 0, 1); got != "the prompt" {
+		t.Errorf("forward owner: anchor = %q, want %q", got, "the prompt")
+	}
+}
+
+// ReadTurnWindow never crosses a /clear seam to find a "next turn" owner: an asset
+// that precedes every turn in its segment, followed by a seam before any owner
+// turn appears, resolves to nothing rather than claiming the next segment's turn.
+func TestReadTurnWindow_SeamTerminatesForwardOwner(t *testing.T) {
+	p := writeLines(t,
+		metaU1, // rec 0
+		userLine("2026-07-01T10:01:00Z", "seg zero turn"),   // rec 1 → turn 0
+		seamLine("2026-07-01T11:00:00Z"),                    // rec 2, seg→1
+		assetLine("2026-07-01T11:00:05Z", "a_1", "pre.png"), // rec 3, seg 1: no preceding turn
+		seamLine("2026-07-01T12:00:00Z"),                    // rec 4, seg→2 (before any seg-1 turn)
+		userLine("2026-07-01T12:01:00Z", "seg two turn"),    // rec 5 → turn 1 (must NOT be claimed)
+	)
+	if w, anchor, _, _, ok := ReadTurnWindow(p, 1, 3, 8, 8); ok {
+		t.Errorf("seam should terminate the forward-owner search, got ok with anchor %d (%q)", anchor, w[anchor].Text)
+	}
+}
+
+// ReadTurnWindow keeps only a bounded window: for an anchor with many turns on
+// either side it returns before+1+after turns and flags both truncations, never
+// materializing the whole log.
+func TestReadTurnWindow_BoundedWindow(t *testing.T) {
+	lines := []string{metaU1}
+	for i := 0; i < 20; i++ {
+		lines = append(lines, userLine("2026-07-01T10:00:00Z", "turn"))
+	}
+	p := writeLines(t, lines...)
+	// Anchor turn 10 → parsed record 11 (meta is rec 0). before=2, after=3.
+	w, anchor, bt, af, ok := ReadTurnWindow(p, 0, 11, 2, 3)
+	if !ok {
+		t.Fatal("expected resolution")
+	}
+	if len(w) != 6 { // 2 before + anchor + 3 after
+		t.Errorf("window len = %d, want 6", len(w))
+	}
+	if anchor != 2 {
+		t.Errorf("anchor index = %d, want 2 (after 2 before-turns)", anchor)
+	}
+	if !bt || !af {
+		t.Errorf("truncation flags = before %v after %v, want both true", bt, af)
+	}
+}
+
+// ReadTurnWindow's ordinals stay in lockstep with ScanLog even when malformed and
+// blank lines appear — the same defensive stream, so a hit resolves to its turn.
+func TestReadTurnWindow_LockstepWithScanLog(t *testing.T) {
 	p := writeLines(t,
 		metaU1,
 		userLine("2026-07-01T10:01:00Z", "alpha"),
@@ -378,19 +487,11 @@ func TestResolveTurnLockstepWithReadTurns(t *testing.T) {
 		``,                   // blank, no ordinal shift
 		asstLine("2026-07-01T10:02:00Z", "beta"),
 	)
-	turns := ReadTurns(p)
-	if len(turns) != 2 {
-		t.Fatalf("turns = %d, want 2", len(turns))
-	}
-	// The assistant turn is parsed record 4 (meta=0, user=1, the malformed and
-	// blank lines don't advance the ordinal, so assistant is rec 2 in ScanLog's
-	// count — verify ResolveTurn agrees it's flattened turn index 1).
 	res := ScanLog(p, "beta", wideOpt)
 	if len(res.Hits) != 1 {
 		t.Fatalf("hits = %+v", res.Hits)
 	}
-	idx, ok := ResolveTurn(p, res.Hits[0].Segment, res.Hits[0].Record)
-	if !ok || idx != 1 || turns[idx].Text != "beta" {
-		t.Errorf("resolve = idx %d ok %v (turn %q), want idx 1 = beta", idx, ok, turns[idx].Text)
+	if got := anchorText(t, p, res.Hits[0].Segment, res.Hits[0].Record); got != "beta" {
+		t.Errorf("resolve = %q, want beta", got)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -872,6 +873,11 @@ func TestSearchFeed(t *testing.T) {
 	if !strings.Contains(html, "< SEARCH_MIN") {
 		t.Error("runSearch must gate on the client-side min query length")
 	}
+	// The client query-length cap must mirror the server's maxSearchQuery so a
+	// pasted over-long query stores and fetches only the prefix the server searches.
+	if want := fmt.Sprintf("const SEARCH_MAX = %d;", maxSearchQuery); !strings.Contains(html, want) {
+		t.Errorf("SEARCH_MAX must mirror the server cap: expected %q", want)
+	}
 	if !strings.Contains(html, "searchSeq") {
 		t.Error("a sequence guard is expected so a stale response can't clobber a newer one")
 	}
@@ -1140,8 +1146,16 @@ const localStorage = {
 };
 function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 const SEARCH_MIN = 2;
+const SEARCH_MAX = 128;
 ` + html[start:end] + `
 const assert = require("assert");
+
+// query-length cap: a pasted over-long query is stored only up to SEARCH_MAX
+// (the server searches just that prefix), never as a multi-KB string.
+recordRecent("z".repeat(SEARCH_MAX + 50));
+assert.strictEqual(loadRecents()[0].length, SEARCH_MAX,
+  "an over-long recent must be capped to SEARCH_MAX; got " + loadRecents()[0].length);
+store.clear();
 
 // gate: a sub-minimum query is never recorded.
 recordRecent("a");

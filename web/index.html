@@ -5325,6 +5325,7 @@ $("#searchoverlay").addEventListener("keydown", e => {
    the match in <mark>. Hits are inert here — the action bar + jumps are G5, so
    each hit carries its identity in data-* now to keep that step a pure wiring. */
 const SEARCH_MIN = 2;
+const SEARCH_MAX = 128;    /* mirror the server's maxSearchQuery: a longer query is only searched by its prefix, so recents and the fetch clamp to match */
 let searchSeq = 0;         /* newest issued query; a lower-seq response is stale */
 let searchAbort = null;    /* cancels the in-flight fetch when superseded */
 let searchDebounce = null;
@@ -5385,7 +5386,7 @@ function loadRecents(){
   } catch { return []; }
 }
 function recordRecent(q){
-  const query = (q || "").trim();
+  const query = (q || "").trim().slice(0, SEARCH_MAX);   /* store only what the server would search — never a multi-KB paste */
   if (query.length < SEARCH_MIN) return;   /* mirror the search gate */
   const list = loadRecents().filter(s => s !== query);   /* drop a prior copy → move-to-front */
   list.unshift(query);
@@ -5406,7 +5407,7 @@ const searchBlank = () => {
     || `<div class="empty">Search your current and past chats and notes.</div>`;
 };
 async function runSearch(q){
-  const query = (q || "").trim();
+  const query = (q || "").trim().slice(0, SEARCH_MAX);   /* the server clamps too, but sending the prefix keeps recents and the fetch identical */
   if (query.length < SEARCH_MIN){
     /* below the gate: drop any in-flight query and return to the blank state so
        a stale feed never lingers under a now-too-short field */

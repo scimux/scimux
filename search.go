@@ -74,13 +74,14 @@ type searchResponseJSON struct {
 // memory, archived logs from their on-disk meta header, and — separately — notes
 // from ui.json.
 type searchSource struct {
-	kind     string // "live" | "archived"
-	id       string // live node id ("" for archived)
-	path     string
-	title    string
-	laneID   string
-	agent    string
-	forkable bool
+	kind      string // "live" | "archived"
+	id        string // live node id ("" for archived)
+	path      string
+	legacyRef string // archived-only: path relative to sessions/archive, the "legacy:" uid for a header-less log (never the absolute path — that would leak the local data dir)
+	title     string
+	laneID    string
+	agent     string
+	forkable  bool
 }
 
 // searchCatalog enumerates every log the corpus can match this request: the live
@@ -118,7 +119,7 @@ func (a *app) searchCatalog() []searchSource {
 		}
 		path := filepath.Join(archiveDir, e.Name())
 		meta := readLogMeta(path)
-		src := searchSource{kind: "archived", path: path}
+		src := searchSource{kind: "archived", path: path, legacyRef: e.Name()}
 		if meta != nil && meta.UID != "" {
 			src.title = meta.Node
 			src.agent = meta.Agent
@@ -224,6 +225,7 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 			liveSrc[src.id] = src
 		}
 	}
+	ctx := r.Context()
 	filesScanned, totalHits := 0, 0
 	for _, src := range catalog {
 		// Stop scanning once a global cap is met — the discipline that keeps the
@@ -233,19 +235,32 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 			partial = true
 			break
 		}
+		// An aborted request (a superseded keystroke) stops the scan server-side,
+		// not just in the browser — the load the debounce/abort machinery targets.
+		if ctx.Err() != nil {
+			partial = true
+			break
+		}
 		filesScanned++
-		res := sessionlog.ScanLog(src.path, q, opt)
+		res := sessionlog.ScanLogCtx(ctx, src.path, q, opt)
 		if res.Partial {
 			partial = true
 		}
 		if len(res.Hits) == 0 {
 			continue
 		}
+		// Trim this file's hits to the remaining total-hit budget so the response
+		// never carries more than searchMaxHitsTotal log hits (the per-file cap
+		// alone lets the last scanned file overshoot the global ceiling).
+		if remaining := searchMaxHitsTotal - totalHits; len(res.Hits) > remaining {
+			res.Hits = res.Hits[:remaining]
+			partial = true
+		}
 		totalHits += len(res.Hits)
 		key, uid := src.id, res.UID
 		if src.kind == "archived" {
 			if uid == "" {
-				uid = "legacy:" + src.path
+				uid = "legacy:" + src.legacyRef
 			}
 			key = uid
 		}

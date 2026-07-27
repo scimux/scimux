@@ -188,8 +188,9 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 	appendLog(t, a, filepath.Join("archive", "ancient.jsonl"),
 		sessionlog.Event{T: "user", Text: "legacy needle", Time: "2026-07-10T00:00:00Z"},
 	)
-	// The real legacy uid the search path emits for a header-less log.
-	legacyUID := "legacy:" + filepath.Join(a.sessionsDir, "archive", "ancient.jsonl")
+	// The real legacy uid the search path emits for a header-less log: a path
+	// relative to the archive dir, not the absolute on-disk path.
+	legacyUID := "legacy:ancient.jsonl"
 	if code, ar := doArchived(t, a, legacyUID, ""); code != 200 || len(ar.Turns) != 1 {
 		t.Fatalf("legacy log should serve: code=%d turns=%d", code, len(ar.Turns))
 	} else if ar.Forkable {
@@ -197,7 +198,7 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 	}
 
 	// A traversal attempt must not escape the archive directory.
-	esc := "legacy:" + filepath.Join(a.sessionsDir, "archive", "..", "..", "secret.jsonl")
+	esc := "legacy:" + filepath.Join("..", "..", "secret.jsonl")
 	if code, _ := doArchived(t, a, esc, ""); code != 404 {
 		t.Errorf("path-escaping legacy uid code = %d, want 404", code)
 	}
