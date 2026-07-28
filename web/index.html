@@ -1479,11 +1479,14 @@ let mapSelKey = "";
    surface. Cleared whenever the selection or full-screen mode changes. */
 let mapSelStop = "";
 const headStopKey = id => { const n = nodeById(id); return id + "#" + (n ? stopTimes(n).length - 1 : 0); };
-function setMapSel(id, key){
+function setMapSel(id, key, stopTime){
   key = key || headStopKey(id);
   if (mapSelKey === key){ mapSel = ""; mapSelKey = ""; }   /* second tap deselects */
   else { mapSel = id; mapSelKey = key; }
-  mapSelStop = "";
+  /* set the selected stop BEFORE rendering so the toolbar (its title, the
+     "earlier stop" cue, and the edit routing) paints against the real
+     selection — deselect or a head row clears it */
+  mapSelStop = mapSel ? (stopTime || "") : "";
   mapSig = ""; renderMap();             /* repaint highlight + refresh toolbar */
 }
 function setMapFull(on){
@@ -2983,7 +2986,7 @@ function renderMapToolbar(){
     </span>
     <span class="mtb-sep"></span>
     <button class="sbtn" data-jump="${esc(n.id)}">&#8249; Open chat</button>
-    <button class="sbtn iconbtn" data-medit="${esc(n.id)}" data-mstop="${esc(mapSelStop || "")}" aria-label="edit title & description">${ICON_PENCIL} Edit</button>
+    <button class="sbtn iconbtn" data-medit="${esc(n.id)}" aria-label="edit title & description">${ICON_PENCIL} Edit</button>
     <button class="sbtn" data-forknote="${esc(n.id)}">Add note</button>
     <button class="sbtn" data-forkfrom="${esc(n.id)}">+ New</button>
     ${n.ended_at ? "" : `<button class="sbtn iconbtn" data-mapexit="${esc(n.id)}" aria-label="close thread">${ICON_END} End</button>`}`;
@@ -3023,7 +3026,10 @@ $("#maptoolbar").addEventListener("click", e => {
     return;
   }
   const pe = e.target.closest("[data-medit]");
-  if (pe){ openActivityEditor(pe.dataset.medit, pe.dataset.mstop || ""); return; }
+  /* read the live selection, not a data- attribute captured at render time:
+     mapSelStop can be set after the toolbar was last painted, which would
+     otherwise route an earlier-stop edit to the node (head) rename path */
+  if (pe){ openActivityEditor(pe.dataset.medit, mapSelStop || ""); return; }
   const nt = e.target.closest("[data-forknote]");
   if (nt){ addStationNote(nt.dataset.forknote); return; }
   const fk = e.target.closest("[data-forkfrom]");
@@ -3307,13 +3313,13 @@ function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
 
   const sig = "wall|" + cols.join(",") + "|" + focusLane + "|" + mapTab + "|" +
     mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
-    JSON.stringify(rows.map(s => [stopKey(s), s.time, s.head, s.n.created_at,
-      s.n.title, s.n.description || s.n.prompt || "", s.n.agent,
+    JSON.stringify(rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, s.n.created_at,
+      l.title, l.desc, s.n.agent,
       s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
       s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
       /* last_activity drives the fare line's "last"/"elapsed"; keep it out of
          the sig unless fare is on, so an idle map does not repaint each poll */
-      fareOn ? (s.n.last_activity || 0) : 0]));
+      fareOn ? (s.n.last_activity || 0) : 0]; }));
   if (sig === mapSig) return;
   mapSig = sig;
 
@@ -3639,7 +3645,7 @@ $("#mapwrap").addEventListener("click", e => {
     /* full screen: click toggles the map's own selection (highlight + toolbar),
        never opens the chat — that's the toolbar's "Open chat". Column/phone
        keeps drilling into the conversation. */
-    if (mapFull){ setMapSel(r.dataset.nid, r.dataset.skey || ""); mapSelStop = mapSel ? st : ""; }
+    if (mapFull){ setMapSel(r.dataset.nid, r.dataset.skey || "", st); }
     else {
       select(r.dataset.nid);
       if (st) loadChatHistory(r.dataset.nid, st);
