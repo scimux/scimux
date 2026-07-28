@@ -1542,6 +1542,7 @@ let cardsSig = "";
 let chatSig = "";
 let sysPrev = null;
 let lastTurns = [];          // turns behind the rendered bubbles (copy/fork source)
+let bubbleTurns = {};        // data-bk key -> turn, for every rendered bubble (live "i:n" + history "h:seg:turn")
 
 const isDesktop = () => matchMedia("(min-width: 900px)").matches;
 const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
@@ -3805,7 +3806,7 @@ function hashStr(s){
 }
 
 function select(id){
-  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = -1;
+  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = "";
     chatHist = { node: "", segs: null, scrollTo: "", assets: {} }; }   /* history is per-visit, reloaded on demand */
   sel = id;
   editingChatDesc = false;   /* a pending "use as description" is discarded here */
@@ -4205,6 +4206,7 @@ async function refreshChat(){
   }
   chatSig = sig;
   lastTurns = turns;
+  bubbleTurns = {};   /* rebuilt from the bubbles rendered just below */
 
   /* the terminal always renders inline as the last block below the bubbles \u2014
      never a pinned overlay above the chat. When the agent blocks on the
@@ -4225,13 +4227,18 @@ async function refreshChat(){
        lastTurns only). */
     (d.prior_turns > 0 && !hist
       ? `<div class="chatseam"><button class="histload">show earlier history &middot; ${d.prior_turns} turn${d.prior_turns === 1 ? "" : "s"}</button></div>` : "") +
-    priorSegs.map(s =>
+    priorSegs.map((s, si) =>
       `<div class="chatseam histseam" data-seam="${esc(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${esc(fmtWhen(s.start))}</span></div>` +
-      s.turns.map(t => {
+      s.turns.map((t, ti) => {
         const h = splitAssetRefs(t.text, n.id, assets);
+        /* history bubbles are tappable like live ones: a stable per-segment key
+           addresses them (times may be missing/duplicated across a segment) and
+           registers the turn so the action row resolves it. */
+        const bk = `h:${si}:${ti}`;
+        bubbleTurns[bk] = t;
         return `
-      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-time="${esc(t.time || "")}">
-        <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(h.clean)}${h.html}</div>
+      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-bk="${bk}" data-time="${esc(t.time || "")}">
+        <div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(h.clean)}${h.html}</div>
       </div>`;
       }).join("")
     ).join("") +
@@ -4248,9 +4255,11 @@ async function refreshChat(){
               : "no readable transcript \u2014 showing the raw terminal below"}</div>`) : "") +
     turns.map((t, i) => {
       const a = splitAssetRefs(t.text, n.id, assets);
+      const bk = `i:${i}`;
+      bubbleTurns[bk] = t;
       return `
-      <div class="turn ${t.role === "user" ? "user" : "assistant"}${a.html && !a.clean ? " media" : ""}" data-i="${i}">
-        <div class="bubble" title="${t.role === "user" ? "you" : "agent"}">${md(a.clean)}${a.html}</div>
+      <div class="turn ${t.role === "user" ? "user" : "assistant"}${a.html && !a.clean ? " media" : ""}" data-i="${i}" data-bk="${bk}">
+        <div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(a.clean)}${a.html}</div>
       </div>`;
     }).join("") +
     (echo ? `
@@ -4360,13 +4369,13 @@ $("#msgs").addEventListener("scroll", () =>
 /* bubble tap actions: one tap on a bubble toggles a small icon row below it
    (long-press keeps the full context sheet). The row is client-only DOM,
    re-attached by refreshChat after every #msgs rebuild. */
-let tappedTurn = -1;
+let tappedTurn = "";   // data-bk key of the bubble whose action row is open ("" = none)
 function renderBubbleActions(){
   document.querySelectorAll("#msgs .bubactions").forEach(x => x.remove());
-  if (tappedTurn < 0) return;
-  const turnEl = document.querySelector(`#msgs .turn[data-i="${tappedTurn}"]`);
-  const turn = lastTurns[tappedTurn];
-  if (!turnEl || !turn){ tappedTurn = -1; return; }
+  if (!tappedTurn) return;
+  const turnEl = document.querySelector(`#msgs .turn[data-bk="${tappedTurn}"]`);
+  const turn = bubbleTurns[tappedTurn];
+  if (!turnEl || !turn){ tappedTurn = ""; return; }
   const row = document.createElement("div");
   row.className = "bubactions";
   row.innerHTML =
@@ -4492,7 +4501,7 @@ $("#msgs").addEventListener("click", e => {
   if (hl){ if (sel) loadChatHistory(sel, "seam"); return; }
   const ba = e.target.closest("[data-bact]");
   if (ba){
-    const turn = lastTurns[tappedTurn];
+    const turn = bubbleTurns[tappedTurn];
     if (ba.dataset.bact === "copy"){
       if (turn) copyText(turn.text || "");
       ba.innerHTML = "&#10003; copied";
@@ -4515,10 +4524,10 @@ $("#msgs").addEventListener("click", e => {
         }});
       }
       ba.innerHTML = "&#10003; noted";
-      setTimeout(() => { tappedTurn = -1; renderBubbleActions(); }, 700);
+      setTimeout(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
       return;
     }
-    tappedTurn = -1;
+    tappedTurn = "";
     renderBubbleActions();
     if (!turn) return;
     if (ba.dataset.bact === "fork") forkFromTurn(turn.text);
@@ -4529,16 +4538,17 @@ $("#msgs").addEventListener("click", e => {
     return;
   }
   const turnEl = e.target.closest(".turn");
-  /* history bubbles carry no data-i: they are read-only (the action row
-     indexes the live segment's lastTurns) */
-  if (turnEl && turnEl.dataset.i != null && !e.target.closest("a, button")){
-    const i = +turnEl.dataset.i;
-    tappedTurn = tappedTurn === i ? -1 : i;
+  /* every bubble carries a data-bk key (live "i:n", history "h:seg:turn") and is
+     registered in bubbleTurns, so a past-station history bubble taps open the
+     same timestamp + action row as a live one. The echo bubble carries no key. */
+  if (turnEl && turnEl.dataset.bk && !e.target.closest("a, button")){
+    const k = turnEl.dataset.bk;
+    tappedTurn = tappedTurn === k ? "" : k;
     renderBubbleActions();
     /* the row appears below the bubble — for a tall bubble tapped near the
        viewport bottom it would land off-screen; reveal it. Only on the tap
        itself, never on the poll-driven re-attach (polling must not scroll). */
-    if (tappedTurn >= 0)
+    if (tappedTurn)
       document.querySelector("#msgs .bubactions")
         ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
@@ -4579,6 +4589,13 @@ function noteSortKey(nt, byT){
 function fmtWhen(t){
   const d = new Date(t);
   return isNaN(d) ? (t || "") : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+/* bubble hover title: the colour already tells you who spoke, so the tooltip
+   earns its keep by carrying the send time — the same stamp a tap reveals. */
+function bubbleTitle(role, time){
+  const who = role === "user" ? "you" : "agent";
+  const w = time ? fmtWhen(time) : "";
+  return w ? `${who} — sent ${w}` : who;
 }
 /* Long noted bubbles force a lot of scrolling; clamp the tall ~15% behind a
    "Show more" toggle and leave the short majority alone. noteClampState is the
@@ -5747,7 +5764,7 @@ function renderArchived(d){
     const s = splitAssetRefs(t.text || "", "", {});
     const role = t.role === "user" ? "user" : "assistant";
     return `<div class="turn ${role} ${i === d.anchor ? "anchor" : ""}">` +
-      `<div class="bubble" title="${role === "user" ? "you" : "agent"}">${md(s.clean)}${s.html}</div></div>`;
+      `<div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(s.clean)}${s.html}</div></div>`;
   }).join("");
   const before = d.before_truncated ? `<div class="archtrunc">Earlier turns not shown</div>` : "";
   const after = d.after_truncated ? `<div class="archtrunc">Later turns not shown</div>` : "";

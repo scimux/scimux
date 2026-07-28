@@ -710,7 +710,8 @@ func TestSearchEarlierHistoryJump(t *testing.T) {
 		t.Error("the earlier-segment dead-end toast should be replaced by a history load")
 	}
 	// History bubbles must carry data-time so the jump can target them.
-	if !strings.Contains(html, `class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-time=`) {
+	if !strings.Contains(html, `class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}"`) ||
+		!regexp.MustCompile(`class="turn hist [^\n]*?data-time="\$\{esc\(t\.time`).MatchString(html) {
 		t.Error("history bubbles must carry data-time for jump targeting")
 	}
 	// loadChatHistory must no longer force a seam scroll for an empty target, or the
@@ -1327,5 +1328,94 @@ func TestNoteCollapseWiring(t *testing.T) {
 		if strings.Contains(branch[:endB], "renderNotesPane(") {
 			t.Error("the data-nmore toggle must not rebuild the pane — flip the class in place")
 		}
+	}
+}
+
+// A past station opens its /clear-closed segment as history bubbles. Those must
+// be tappable like live bubbles — reveal the timestamp row and the action bar —
+// not inert. The tap machinery keys off a uniform data-bk addressed against a
+// bubbleTurns map, so both live ("i:…") and history ("h:…") bubbles resolve.
+func TestHistoryBubblesAreTappable(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	// Every rendered bubble carries the uniform tap key.
+	if strings.Count(html, "data-bk=") < 2 {
+		t.Error("both live and history bubble templates must carry a data-bk tap key")
+	}
+	// History bubbles feed the same turn store the action row reads from.
+	if !strings.Contains(html, "bubbleTurns[") {
+		t.Error("history bubbles must register their turn in the bubbleTurns lookup")
+	}
+	// The tap delegate must address bubbles by data-bk, not the live-only data-i.
+	msgsDele := strings.Index(html, `$("#msgs").addEventListener("click"`)
+	if msgsDele < 0 {
+		t.Fatal("could not locate the #msgs click delegate")
+	}
+	body := html[msgsDele:]
+	if !strings.Contains(body, "turnEl.dataset.bk") {
+		t.Error("the bubble tap branch must key off data-bk so history bubbles resolve")
+	}
+	// The action-row renderer must resolve its turn from the shared store, not
+	// the live-only lastTurns array, so it works for a history bubble too.
+	rowStart := strings.Index(html, "function renderBubbleActions(")
+	if rowStart < 0 {
+		t.Fatal("renderBubbleActions not found")
+	}
+	rowEnd := strings.Index(html[rowStart:], "turnEl.after(row);")
+	fn := html[rowStart : rowStart+rowEnd]
+	if !strings.Contains(fn, "bubbleTurns[tappedTurn]") {
+		t.Error("renderBubbleActions must resolve the tapped turn from bubbleTurns")
+	}
+	if strings.Contains(fn, `data-i="${tappedTurn}"`) {
+		t.Error("renderBubbleActions must address the tapped bubble by data-bk, not data-i")
+	}
+}
+
+// Desktop hover: the bubble tooltip was a bare "you"/"agent" — redundant with
+// the bubble color. bubbleTitle enriches it with the send time so a hover
+// surfaces what otherwise needs a tap.
+func TestBubbleTitleIncludesTimestamp(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	// The bubble templates must build their title from bubbleTitle, not a bare
+	// ternary on the role.
+	if strings.Contains(html, `title="${t.role === "user" ? "you" : "agent"}"`) {
+		t.Error("bubble title should come from bubbleTitle(), not a bare role ternary")
+	}
+	start := strings.Index(html, "function fmtWhen(")
+	if start < 0 {
+		t.Fatal("could not locate fmtWhen in web/index.html")
+	}
+	btStart := strings.Index(html, "function bubbleTitle(")
+	if btStart < 0 {
+		t.Fatal("could not locate bubbleTitle in web/index.html")
+	}
+	btEnd := strings.Index(html[btStart:], "\n}")
+	fmtEnd := strings.Index(html[start:], "\n}")
+	script := html[start:start+fmtEnd+2] + "\n" + html[btStart:btStart+btEnd+2] + `
+const assert = require("assert");
+const t = "2026-07-24T09:05:00";
+const w = fmtWhen(t);
+assert.strictEqual(bubbleTitle("user", t), "you — sent " + w);
+assert.strictEqual(bubbleTitle("assistant", t), "agent — sent " + w);
+assert.strictEqual(bubbleTitle("user", ""), "you");
+assert.strictEqual(bubbleTitle("assistant", null), "agent");
+`
+	f := filepath.Join(t.TempDir(), "bubble-title.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("bubbleTitle broken: %v\n%s", err, out)
 	}
 }
