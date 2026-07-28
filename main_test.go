@@ -109,6 +109,28 @@ func TestAgentCommand(t *testing.T) {
 	}
 }
 
+// A tmux launch is wrapped so that a process which exits before its interface
+// is ready (a rejected --model, a bad flag) leaves its error on the pane long
+// enough for awaitLaunch to read it, instead of the session vanishing into an
+// unexplained dead node. The wrapper must run the original command verbatim
+// first (so the first prompt still rides the command line) and must not touch
+// the clean-exit path.
+func TestWrapLaunchDiagnostics(t *testing.T) {
+	cmd := `claude --session-id u --remote-control 'T' --model 'opus' 'hi'`
+	w := wrapLaunch(cmd)
+	if !strings.HasPrefix(w, cmd+";") {
+		t.Errorf("wrapper must run the original command first, got %q", w)
+	}
+	if !strings.Contains(w, launchFailSentinel) {
+		t.Errorf("wrapper must emit the launch-failed sentinel, got %q", w)
+	}
+	// The sentinel is only printed on a non-zero exit — a clean exit must fall
+	// through untouched (pane closes, session dies, exactly as before).
+	if !strings.Contains(w, `!= 0`) {
+		t.Errorf("wrapper must guard the sentinel behind a non-zero exit, got %q", w)
+	}
+}
+
 // A fork of an old or adopted pi/opencode node whose stored Transport predates
 // the field (empty → tmux) must stay on tmux, not silently flip to the ACP
 // default derived from the agent name (finding 54).

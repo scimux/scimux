@@ -128,6 +128,10 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		attachmentsDir: filepath.Join(dir, "attachments"),
 		assetsDir:      filepath.Join(dir, "assets"),
 		home:           dir,
+		// Tiny launch-grace window so failure-detection tests run fast; a marker
+		// in the fake pane is seen on the first poll, success falls through at once.
+		launchGrace: 40 * time.Millisecond,
+		launchPoll:  5 * time.Millisecond,
 	}
 	a.assetHook = a.ingestAssetHook
 	a.acp.SetAssetHook(a.assetHook)
@@ -350,6 +354,59 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 	}
 	if got := a.nodes[0].Description; got != "T" {
 		t.Errorf("description default = %q, want first prompt", got)
+	}
+}
+
+// A launch that dies before its interface is ready (the real-world case: a
+// forked node whose --model the CLI rejects) must surface the agent's own error
+// to the create caller and leave no phantom node behind — not the opaque "dead
+// session that couldn't be adopted" that this replaces. The launch wrapper holds
+// the CLI's message on the pane; awaitLaunch reads it during the grace window.
+func TestHandleNewNodeSurfacesLaunchFailure(t *testing.T) {
+	f := &fakeTmux{capture: "API Error: model claude-4-6-opus is not available\n" +
+		launchFailSentinel + " (status 1)\n"}
+	a := newTestApp(t, f)
+
+	rec := newNode(a, `{"title":"Fork","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code == 200 {
+		t.Fatalf("failed launch must not report success, got 200 body %q", rec.Body.String())
+	}
+	if len(a.nodes) != 0 {
+		t.Fatalf("failed launch must not persist a node, got %d", len(a.nodes))
+	}
+	if !strings.Contains(rec.Body.String(), "claude-4-6-opus") {
+		t.Errorf("error must quote the CLI's own message, got %q", rec.Body.String())
+	}
+	// The lingering session (held open by the wrapper) must be cleaned up.
+	killed := false
+	for _, s := range f.subcommands() {
+		if s == "kill-session" {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Error("failed launch must kill the session the wrapper held open")
+	}
+}
+
+// The launched tmux command must carry the failure-diagnostic wrapper so a
+// launch that exits early is legible; a healthy launch is otherwise untouched.
+func TestHandleNewNodeWrapsLaunchCommand(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if rec := newNode(a, `{"title":"OK","agent":"claude","dir":"`+a.home+`"}`); rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	wrapped := false
+	f.mu.Lock()
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "new-session" && strings.Contains(strings.Join(c, " "), launchFailSentinel) {
+			wrapped = true
+		}
+	}
+	f.mu.Unlock()
+	if !wrapped {
+		t.Error("new-session command was not wrapped with launch diagnostics")
 	}
 }
 

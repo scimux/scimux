@@ -182,12 +182,20 @@ type app struct {
 	// must be one critical section, but they are pure file I/O over a private
 	// document — holding the app-wide a.mu across two syscalls would stall the
 	// poller and every other handler for a write that touches no shared state.
-	uiMu      sync.Mutex
-	server    *tmuxsession.Server
-	acp       acpManager
-	codex     codexManager
-	storePath string
-	uiPath    string
+	uiMu   sync.Mutex
+	server *tmuxsession.Server
+	acp    acpManager
+	codex  codexManager
+	// launchGrace bounds how long a freshly-launched tmux agent is watched for
+	// an immediate failure (a rejected --model, a bad flag). The launch is
+	// wrapped so such a process leaves its error on the pane (wrapLaunch); within
+	// this window awaitLaunch reads it and reports it to the create caller instead
+	// of persisting an unexplained dead node. Zero disables the check. launchPoll
+	// is the capture interval inside that window.
+	launchGrace time.Duration
+	launchPoll  time.Duration
+	storePath   string
+	uiPath      string
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also
@@ -665,6 +673,75 @@ func agentCommand(n *Node) (string, error) {
 	return "", fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
 }
 
+// launchFailSentinel is printed on the pane by wrapLaunch when the launched
+// process exits non-zero, and is what awaitLaunch greps for. It doubles as a
+// human-legible line for a supervisor peeking at the pane.
+const launchFailSentinel = "SCIMUX: agent process exited before its interface started"
+
+// launchHoldSeconds is how long the wrapper keeps a failed launch's pane open so
+// awaitLaunch (and a slower poll, or a human peek) can read the error. awaitLaunch
+// kills the session as soon as it detects the sentinel, cutting this short; the
+// hold only matters if that detection is missed, after which the pane self-cleans.
+const launchHoldSeconds = 30
+
+// wrapLaunch wraps a tmux launch command so that a process which exits before
+// its interface is ready leaves its error on the pane instead of the session
+// vanishing into an unexplained dead node (the "unknown error state, could not
+// be adopted" failure). The original command runs verbatim first — so the first
+// prompt still rides the command line — and the sentinel is emitted only on a
+// non-zero exit, so a clean quit falls through untouched (pane closes, session
+// dies, exactly as before). tmux runs this whole string via `sh -c`.
+func wrapLaunch(cmd string) string {
+	return fmt.Sprintf(`%s; __ec=$?; if [ "$__ec" != 0 ]; then printf '\n%s (status %%d)\n' "$__ec"; sleep %d; fi`,
+		cmd, launchFailSentinel, launchHoldSeconds)
+}
+
+// awaitLaunch watches a freshly-launched tmux session for an immediate failure.
+// It polls the pane over a.launchGrace; if wrapLaunch's sentinel appears the
+// launch failed, and the agent's own error (the pane text above the sentinel)
+// is returned as the reason. A launch that stays up past the window is taken to
+// be healthy. Zero grace disables the check (returns not-failed at once).
+func (a *app) awaitLaunch(name string) (reason string, failed bool) {
+	if a.launchGrace <= 0 {
+		return "", false
+	}
+	poll := a.launchPoll
+	if poll <= 0 {
+		poll = 250 * time.Millisecond
+	}
+	deadline := time.Now().Add(a.launchGrace)
+	for {
+		out, err := a.server.Session(name).CaptureVisible()
+		if err == nil {
+			if i := strings.Index(out, launchFailSentinel); i >= 0 {
+				return launchFailReason(out[:i]), true
+			}
+		}
+		if time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(poll)
+	}
+}
+
+// launchFailReason distills the pane text above the sentinel into a one-line
+// reason: the last few non-empty lines (where a CLI prints its error), joined.
+func launchFailReason(paneAbove string) string {
+	var lines []string
+	for _, ln := range strings.Split(paneAbove, "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" {
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) == 0 {
+		return "the process exited immediately (no output); check the agent and --model options"
+	}
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+	return strings.Join(lines, " / ")
+}
+
 // resolveNode validates a new-node request and resolves its launch
 // configuration in place: parent inheritance (fresh-context fork: the launch
 // config, never the conversation), agent and directory defaults, and the
@@ -915,8 +992,19 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 	if err != nil {
 		return 400, err
 	}
-	if _, err := a.server.NewSession(n.ID, n.Dir, cmd); err != nil {
+	if _, err := a.server.NewSession(n.ID, n.Dir, wrapLaunch(cmd)); err != nil {
 		return 500, err
+	}
+	// Catch a launch that dies before its interface is ready (a rejected --model,
+	// a bad flag): surface the agent's own error to the caller rather than
+	// persisting a node whose session has already vanished. Nothing is stored
+	// yet, so failing here leaves no phantom node — only the held-open session to
+	// reap.
+	if reason, bad := a.awaitLaunch(n.ID); bad {
+		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
+			fmt.Fprintf(os.Stderr, "scimux: reaping failed launch %s: %v\n", n.ID, kerr)
+		}
+		return 502, fmt.Errorf("agent exited on launch: %s", reason)
 	}
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
 		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
@@ -3592,6 +3680,8 @@ func main() {
 		reserved:       map[string]bool{},
 		anim:           map[string]*animState{},
 		server:         tmuxsession.NewServer(*socket),
+		launchGrace:    2500 * time.Millisecond,
+		launchPoll:     250 * time.Millisecond,
 		acp:            acpManager{acp.NewManager(sessionsDir)},
 		codex:          codexManager{codex.NewManager(sessionsDir)},
 		storePath:      filepath.Join(*data, "nodes.jsonl"),
