@@ -99,6 +99,7 @@ type searchResp struct {
 			Role     string `json:"role"`
 			Segment  int    `json:"segment"`
 			Record   int    `json:"record"`
+			UID      string `json:"uid"`
 			NoteID   string `json:"note_id"`
 			Time     string `json:"time"`
 			TurnTime string `json:"turn_time"`
@@ -382,6 +383,56 @@ func TestHandleSearchShortQueryEmpty(t *testing.T) {
 		if len(out.Groups) != 0 {
 			t.Errorf("query %q returned %d groups, want 0", q, len(out.Groups))
 		}
+	}
+}
+
+// A captured note that stamped the durable source address (uid, segment,
+// record) surfaces it on its search hit, so a jump can resolve the exact source
+// turn across /clear seams and node deletion — not the fragile turnTime scan.
+// The narrow defensive reader takes those fields and ignores the rest (Phase 0c).
+func TestHandleSearchNoteCarriesDurableAddress(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.uiPath = filepath.Join(a.home, "ui.json")
+
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"})
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
+		sessionlog.Event{T: "user", Text: "plain chat text", Time: "2026-07-14T01:00:00Z"},
+	)
+	// A note with the full triple, plus one legacy note with none of it and an
+	// unknown extra field the reader must ignore.
+	ui := `{"notes":[
+		{"t":"2026-07-16T00:00:00Z","text":"remember the sprocket","node":"alpha","turnTime":"2026-07-14T01:00:00Z","uid":"abc123","segment":1,"record":4},
+		{"t":"2026-07-17T00:00:00Z","text":"loose sprocket idea","bogus":true}
+	]}`
+	if err := os.WriteFile(a.uiPath, []byte(ui), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doSearch(t, a, "sprocket")
+	var addressed, legacy int
+	for _, g := range out.Groups {
+		for _, h := range g.Hits {
+			if h.Role != "note" {
+				continue
+			}
+			switch h.NoteID {
+			case "2026-07-16T00:00:00Z":
+				addressed++
+				if h.UID != "abc123" || h.Segment != 1 || h.Record != 4 {
+					t.Errorf("addressed note hit = %+v, want uid abc123 seg 1 rec 4", h)
+				}
+			case "2026-07-17T00:00:00Z":
+				legacy++
+				if h.UID != "" || h.Segment != 0 || h.Record != 0 {
+					t.Errorf("legacy note hit carried an address it never stored: %+v", h)
+				}
+			}
+		}
+	}
+	if addressed != 1 || legacy != 1 {
+		t.Fatalf("addressed=%d legacy=%d, want 1/1", addressed, legacy)
 	}
 }
 

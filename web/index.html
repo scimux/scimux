@@ -4510,19 +4510,23 @@ $("#msgs").addEventListener("click", e => {
       return;
     }
     if (ba.dataset.bact === "note"){
-      /* capture: a verbatim, immutable copy of the bubble plus the pointer
-         back to its context (node + the turn's own timestamp — bubble
-         indexes are not stable across relinks). Lane is snapshotted only as
-         a fallback for deleted activities; rendering derives it live. */
+      /* capture: a verbatim, immutable copy of the bubble plus its durable
+         source address (uid, segment, record) — the address of record for
+         jump-back, which survives /clear seams, rotation, slug reuse, and node
+         deletion. node + the turn's own timestamp demote to live-render hints
+         (bubble indexes are not stable across relinks); lane is snapshotted only
+         as a fallback for deleted activities, rendering derives it live. */
       if (!turn) return;
       const dup = (UI.notes || []).some(n =>
         n.node === sel && n.turnTime === (turn.time || "") && n.text === (turn.text || ""));
       if (!dup){
         const node = nodes.find(x => x.id === sel);
-        uiMutate({ k: "note-add", note: {
+        const note = {
           t: new Date().toISOString(), text: turn.text || "",
           node: sel, lane: node?.lane_id || "", turnTime: turn.time || "",
-        }});
+        };
+        stampAddress(note, turn);
+        uiMutate({ k: "note-add", note });
       }
       ba.innerHTML = "&#10003; noted";
       setTimeout(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
@@ -4569,6 +4573,18 @@ let expandedNotes = new Set();   // note.t values the user expanded — ephemera
 let notesSig = "";
 let notesPin = true;       // scroll to the bottom on the next render
 let pendingJump = null;    // jump-to-source in flight: {node, turnTime, text, ts}
+
+/* stampAddress copies a source turn's durable address (uid, segment, record)
+   onto a captured note. src can be a chat turn (numeric segment/record) or a
+   search hit's dataset (string values); coerce and stamp only when a real uid
+   is present, so a legacy/tmux turn with no address leaves the note to its
+   node+turnTime live hints rather than a bogus (uid:"", 0, 0) triple. */
+function stampAddress(note, src){
+  if (!src || !src.uid) return;
+  note.uid = src.uid;
+  note.segment = Number(src.segment) || 0;
+  note.record = Number(src.record) || 0;
+}
 
 /* a note's lane is derived live from its activity (activities gain lanes
    later; notes follow automatically); the capture-time snapshot is the
@@ -5709,6 +5725,7 @@ function doSearchAction(a, hit){
     if (live) note.node = id;
     if (turn) note.turnTime = turn;
     if (lane) note.lane = lane;
+    stampAddress(note, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
     uiMutate({ k: "note-add", note });
     toast("Note added");
     closeHitBar();

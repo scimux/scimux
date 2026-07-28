@@ -38,6 +38,7 @@ type searchHitJSON struct {
 	Role     string `json:"role"`
 	Segment  int    `json:"segment,omitempty"`
 	Record   int    `json:"record,omitempty"`
+	UID      string `json:"uid,omitempty"`
 	NoteID   string `json:"note_id,omitempty"`
 	Time     string `json:"time"`
 	TurnTime string `json:"turn_time,omitempty"`
@@ -181,6 +182,12 @@ type searchNote struct {
 	Lane     string `json:"lane"`
 	TurnTime string `json:"turnTime"`
 	Anchor   string `json:"anchor"`
+	// The durable source address stamped at capture time (Phase 0c). Present
+	// only on notes captured from a chat turn after the address existed; legacy
+	// notes leave them zero and fall back to the node+turnTime live hints.
+	UID     string `json:"uid"`
+	Segment int    `json:"segment"`
+	Record  int    `json:"record"`
 }
 
 // handleSearch answers GET /api/search?q= with the corpus matches grouped by
@@ -301,6 +308,7 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		hit := searchHitJSON{
 			Role: "note", NoteID: note.T, Time: note.T, TurnTime: note.TurnTime,
+			UID: note.UID, Segment: note.Segment, Record: note.Record,
 			Before: b, Match: m, After: af,
 		}
 		var g *searchGroupJSON
