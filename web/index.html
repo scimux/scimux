@@ -1037,6 +1037,14 @@ body.notes-open #notespane { transform: translateX(0); }
 .note .nbubble { background: var(--surface); border-radius: 10px; padding: 8px 11px;
   font-size: 13.5px; line-height: 1.45; border-left: 3px solid var(--unlane);
   overflow-wrap: break-word; }
+/* a tall noted bubble is clamped behind "Show more"; the mask fades the cut
+   edge without a wrapper element (overflow:hidden would clip a ::after) */
+.note .nbubble.clamped { max-height: 220px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 78%, transparent);
+  mask-image: linear-gradient(#000 78%, transparent); }
+.note .nmore { margin: 4px 2px 0; padding: 2px 0; background: none; border: 0;
+  font-size: 12px; color: var(--dim); cursor: pointer; }
+.note .nmore:active { color: var(--work); }
 .noteactions { display: flex; gap: 8px; padding: 6px 2px 0; }
 .noteactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
   display: flex; align-items: center; justify-content: center; background: var(--surface); }
@@ -4546,6 +4554,7 @@ $("#msgs").addEventListener("click", e => {
 let notesOpen = localStorage.getItem("scimux-notes") === "1";
 let noteTab = localStorage.getItem("scimux-notetab") || "GENERAL";
 let openNoteT = "";        // note whose action row is unfolded
+let expandedNotes = new Set();   // note.t values the user expanded — ephemeral view state
 let notesSig = "";
 let notesPin = true;       // scroll to the bottom on the next render
 let pendingJump = null;    // jump-to-source in flight: {node, turnTime, text, ts}
@@ -4570,6 +4579,17 @@ function noteSortKey(nt, byT){
 function fmtWhen(t){
   const d = new Date(t);
   return isNaN(d) ? (t || "") : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+/* Long noted bubbles force a lot of scrolling; clamp the tall ~15% behind a
+   "Show more" toggle and leave the short majority alone. noteClampState is the
+   DOM-free decision core — the measure loop feeds it a real scrollHeight —
+   kept pure so it is unit-testable without layout. NOTE_CLAMP_PX ≈ 12 lines,
+   near the p90 assistant bubble. Expand state is ephemeral view state (like
+   openNoteT): an in-memory Set, never persisted, never synced. */
+const NOTE_CLAMP_PX = 220;
+function noteClampState(naturalPx, expanded){
+  const tall = naturalPx > NOTE_CLAMP_PX;
+  return { clamped: tall && !expanded, showBtn: tall, label: expanded ? "Show less" : "Show more" };
 }
 function renderNotesPane(){
   document.body.classList.toggle("notes-open", notesOpen);
@@ -4598,6 +4618,7 @@ function renderNotesPane(){
     <div class="note ${nt.anchor ? "comment" : ""}" data-t="${esc(nt.t)}">
       <div class="when">${esc(fmtWhen(nt.t))}${src}</div>
       <div class="nbubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
+      <button class="nmore" data-nmore hidden></button>
       ${openNoteT === nt.t ? `<div class="noteactions">
         ${nt.node ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
         ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this note">${ICON_COMMENT}</button>` : ""}
@@ -4611,7 +4632,22 @@ function renderNotesPane(){
   notesSig = sig;
   $("#notetabs").innerHTML = tabsHtml;
   $("#notelist").innerHTML = listHtml;
+  applyNoteClamps();
   if (notesPin){ const nl = $("#notelist"); nl.scrollTop = nl.scrollHeight; notesPin = false; }
+}
+/* Measure each rebuilt bubble (scrollHeight reports the full content height
+   even while clamped) and apply the clamp/toggle from noteClampState. Runs
+   after the rebuild, so it re-derives from expandedNotes each time — the Set
+   is what carries expand state across polled rebuilds. */
+function applyNoteClamps(){
+  $("#notelist").querySelectorAll(".note").forEach(el => {
+    const b = el.querySelector(".nbubble"), btn = el.querySelector(".nmore");
+    if (!b || !btn) return;
+    const st = noteClampState(b.scrollHeight, expandedNotes.has(el.dataset.t));
+    b.classList.toggle("clamped", st.clamped);
+    btn.hidden = !st.showBtn;
+    btn.textContent = st.label;
+  });
 }
 /* the flags stack: which lanes currently hold notes (gray = General) */
 let flagsSig = "";
@@ -4651,6 +4687,19 @@ $("#noteflags").addEventListener("click", e => {
   setNotesOpen(true);
 });
 $("#notespane").addEventListener("click", e => {
+  const more = e.target.closest("[data-nmore]");
+  if (more){
+    /* ephemeral view-state flip: mutate the DOM in place, no rebuild, no
+       persistence. Precedes the .note tap branch so it never opens the
+       action bar. */
+    const el = more.closest(".note"), t = el.dataset.t;
+    expandedNotes.has(t) ? expandedNotes.delete(t) : expandedNotes.add(t);
+    const b = el.querySelector(".nbubble");
+    const st = noteClampState(b.scrollHeight, expandedNotes.has(t));
+    b.classList.toggle("clamped", st.clamped);
+    more.textContent = st.label;
+    return;
+  }
   const tb = e.target.closest("[data-ntab]");
   if (tb){
     noteTab = tb.dataset.ntab;

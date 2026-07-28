@@ -1230,3 +1230,102 @@ assert.strictEqual(recentsHTML(), "", "no recents → empty render (prompt fallb
 		t.Fatalf("recents behavior broken: %v\n%s", err, out)
 	}
 }
+
+// A long chat bubble taken to the Notes pane forces a lot of scrolling
+// (session logs: the top ~15% of bubbles blow past a screenful). The fix
+// clamps a note bubble past a pixel threshold behind a "Show more" toggle,
+// leaving the ~85% short bubbles untouched. noteClampState is the DOM-free
+// decision core (the measure loop feeds it a real scrollHeight); execute it
+// under node against synthetic heights so the clamp/label logic is locked.
+func TestNoteClampState(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, "const NOTE_CLAMP_PX")
+	if start < 0 {
+		t.Fatal("could not locate NOTE_CLAMP_PX in web/index.html")
+	}
+	end := strings.Index(html[start:], "function renderNotesPane(")
+	if end < 0 {
+		t.Fatal("could not locate the end of the clamp core in web/index.html")
+	}
+	script := html[start:start+end] + `
+const assert = require("assert");
+// A short bubble (below the cap) never clamps and never shows the toggle,
+// whatever its (irrelevant) expanded flag — this is the ~85% common case.
+assert.deepStrictEqual(noteClampState(120, false), { clamped: false, showBtn: false, label: "Show more" }, "short/collapsed: no clamp, no button");
+assert.deepStrictEqual(noteClampState(120, true),  { clamped: false, showBtn: false, label: "Show less" }, "short/expanded: still no clamp, no button");
+// A tall bubble, collapsed (default), clamps and offers "Show more".
+assert.deepStrictEqual(noteClampState(900, false), { clamped: true,  showBtn: true,  label: "Show more" }, "tall/collapsed: clamp + Show more");
+// The same tall bubble once the user expanded it: not clamped, toggle reads back.
+assert.deepStrictEqual(noteClampState(900, true),  { clamped: false, showBtn: true,  label: "Show less" }, "tall/expanded: no clamp, Show less");
+// The boundary is exclusive: exactly at the cap is not "tall".
+assert.deepStrictEqual(noteClampState(NOTE_CLAMP_PX, false), { clamped: false, showBtn: false, label: "Show more" }, "at the cap is not tall");
+`
+	f := filepath.Join(t.TempDir(), "noteclamp.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("note clamp decision broken: %v\n%s", err, out)
+	}
+}
+
+// The clamp is view state, not evidence: it must be ephemeral (in-memory Set,
+// no localStorage, no ui.json op) and its toggle must not rebuild the pane or
+// fall through to the note-tap that opens the action bar. Guard the wiring and
+// the ephemerality contract so neither can silently regress.
+func TestNoteCollapseWiring(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		"let expandedNotes = new Set();", // ephemeral, sibling of openNoteT
+		"const NOTE_CLAMP_PX",            // the threshold constant
+		"function noteClampState(",       // the decision core
+		"data-nmore",                     // the per-bubble toggle button
+		`class="nmore"`,                  // its markup in the note template
+		".note .nbubble.clamped",         // the CSS clamp
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("note collapse wiring missing %q", want)
+		}
+	}
+	// The toggle handler is a distinct branch keyed on data-nmore. It must sit
+	// in the #notespane click delegate BEFORE the generic ".note" tap branch,
+	// or clicking "Show more" would also open the action bar.
+	dele := strings.Index(html, `$("#notespane").addEventListener("click"`)
+	if dele < 0 {
+		t.Fatal("could not locate the #notespane click delegate")
+	}
+	body := html[dele:]
+	nmore := strings.Index(body, "[data-nmore]")
+	noteTap := strings.Index(body, `closest(".note")`)
+	if nmore < 0 {
+		t.Fatal("the notespane delegate has no data-nmore branch")
+	}
+	if !(nmore < noteTap) {
+		t.Error("the data-nmore branch must precede the .note tap branch so Show more does not open the action bar")
+	}
+	// Ephemerality: the expand state is never persisted. No localStorage key and
+	// no ui op may touch expandedNotes.
+	if regexp.MustCompile(`localStorage[^;\n]*expandedNotes|expandedNotes[^;\n]*localStorage`).MatchString(html) {
+		t.Error("expandedNotes must stay ephemeral — no localStorage persistence")
+	}
+	// The toggle mutates the DOM directly and returns; it must not call
+	// renderNotesPane (which would be a needless rebuild) inside its branch.
+	branch := body[nmore:]
+	if endB := strings.Index(branch, "return;"); endB > 0 {
+		if strings.Contains(branch[:endB], "renderNotesPane(") {
+			t.Error("the data-nmore toggle must not rebuild the pane — flip the class in place")
+		}
+	}
+}
