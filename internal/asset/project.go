@@ -119,4 +119,3 @@ func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) str
 	}
 	return strings.Join(lines, "\n")
 }
-
