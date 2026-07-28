@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,86 @@ func detectAgents() map[string][]string {
 		agentsCache = res
 	})
 	return agentsCache
+}
+
+// claudeModelPrompt asks the running claude harness to enumerate the concrete
+// model ids the current account can use. The CLI (observed on 2.1.x) mis-resolves
+// the short family aliases — `--model opus` expands to `claude-4-8-opus`, the
+// pre-4.x segment order the API no longer accepts — so scimux resolves
+// opus/sonnet/haiku/fable to the concrete id itself and passes that to --model.
+// The model answers from the ids actually available in its environment.
+const claudeModelPrompt = "List every Claude model id I can use in this environment, one per line, " +
+	"in the form claude-<family>-<version> (for example claude-opus-4-8). Output only the ids, nothing else."
+
+// claudeModelID matches a concrete model id of a known family. The family name
+// sits immediately after "claude-", so the mis-ordered "claude-4-8-opus" form
+// never matches — exactly the ids we must not adopt.
+var claudeModelID = regexp.MustCompile(`claude-(fable|opus|sonnet|haiku)-\d+(?:-\d+)*`)
+
+// parseClaudeModels extracts a family->concrete-id map from probe output. It is
+// deliberately tolerant: it picks model-id-shaped tokens out of arbitrary prose
+// or markdown, first id per family wins, and unknown/mis-ordered tokens are
+// ignored. No ids found yields an empty map (callers fall back to the alias).
+func parseClaudeModels(out string) map[string]string {
+	m := map[string]string{}
+	for _, match := range claudeModelID.FindAllStringSubmatch(out, -1) {
+		if _, seen := m[match[1]]; !seen {
+			m[match[1]] = match[0]
+		}
+	}
+	return m
+}
+
+// probeClaudeModels runs the claude harness once to learn the concrete ids it
+// accepts. Best-effort: a missing binary, an auth failure, or an unparseable
+// answer returns nil, and scimux falls back to passing the bare family alias
+// (the pre-existing behavior). This shells out to a real agent CLI, so it runs
+// only at startup, never in tests.
+func probeClaudeModels(ctx context.Context) map[string]string {
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, bin, "-p", claudeModelPrompt).Output()
+	if err != nil {
+		return nil
+	}
+	return parseClaudeModels(string(out))
+}
+
+// claudeCacheTTL bounds how long a successful model probe is trusted before
+// scimux re-runs the (API-billed) `claude -p` call. A failed probe writes
+// nothing, so a failure is simply retried at the next startup.
+const claudeCacheTTL = 7 * 24 * time.Hour
+
+// claudeCache is the on-disk shape of a successful probe (~/.scimux/claude-models.json).
+type claudeCache struct {
+	ProbedAt time.Time         `json:"probed_at"`
+	IDs      map[string]string `json:"ids"`
+}
+
+// readClaudeCache loads a prior successful probe. A missing or unparseable file
+// is not an error the caller must distinguish from staleness — it returns a zero
+// cache, which is neither fresh (old ProbedAt) nor usable (empty IDs).
+func readClaudeCache(path string) claudeCache {
+	var c claudeCache
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return claudeCache{}
+	}
+	if json.Unmarshal(b, &c) != nil {
+		return claudeCache{}
+	}
+	return c
+}
+
+// writeClaudeCache records a successful probe with the current timestamp.
+func writeClaudeCache(path string, ids map[string]string) error {
+	b, err := json.Marshal(claudeCache{ProbedAt: time.Now().UTC(), IDs: ids})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o600)
 }
 
 var codexConfigModel = regexp.MustCompile(`(?m)^\s*model\s*=\s*"([^"]+)"`)

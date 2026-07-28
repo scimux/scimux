@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentCommandPiOpencode(t *testing.T) {
@@ -115,6 +118,79 @@ func TestHandleUIRoundTrip(t *testing.T) {
 	huge := `{"notes":["` + strings.Repeat("x", uiStateMax) + `"]}`
 	if rec := put(huge, rev2); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized PUT = %d, want 413", rec.Code)
+	}
+}
+
+// The claude CLI mis-resolves its own family aliases (opus -> claude-4-8-opus,
+// wrong segment order), so scimux probes the concrete ids and maps them itself.
+// Parsing must be defensive: pick model-id-shaped tokens out of arbitrary prose
+// or markdown, first per family wins, and the mis-ordered form must be ignored.
+func TestParseClaudeModels(t *testing.T) {
+	out := "Based on the model IDs available in this environment:\n\n```\n" +
+		"claude-fable-5\nclaude-opus-4-8\nclaude-sonnet-5\nclaude-haiku-4-5\n```\n" +
+		"You could also try claude-4-8-opus (a bogus, mis-ordered id) — ignore it.\n"
+	got := parseClaudeModels(out)
+	want := map[string]string{
+		"fable":  "claude-fable-5",
+		"opus":   "claude-opus-4-8",
+		"sonnet": "claude-sonnet-5",
+		"haiku":  "claude-haiku-4-5",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %v, want %v", got, want)
+	}
+	for fam, id := range want {
+		if got[fam] != id {
+			t.Errorf("family %q = %q, want %q", fam, got[fam], id)
+		}
+	}
+	// A first-seen id wins; a later dated duplicate for the same family is ignored.
+	dup := parseClaudeModels("claude-opus-4-8\nclaude-opus-4-8-20260101\n")
+	if dup["opus"] != "claude-opus-4-8" {
+		t.Errorf("first-seen id must win, got %q", dup["opus"])
+	}
+	// No model-id tokens at all -> empty map (caller falls back to the alias).
+	if m := parseClaudeModels("I'm not sure which models you have."); len(m) != 0 {
+		t.Errorf("no ids should yield empty map, got %v", m)
+	}
+}
+
+// A successful probe is cached for claudeCacheTTL so the billed `claude -p` call
+// runs at most weekly; a missing or stale cache is not "fresh" (the caller
+// re-probes), and a stale cache still carries usable ids as a fallback.
+func TestClaudeCacheRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude-models.json")
+
+	// Missing file: zero cache — no ids, not fresh.
+	if c := readClaudeCache(path); len(c.IDs) != 0 || !c.ProbedAt.IsZero() {
+		t.Errorf("missing cache = %+v, want zero", c)
+	}
+
+	ids := map[string]string{"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"}
+	if err := writeClaudeCache(path, ids); err != nil {
+		t.Fatal(err)
+	}
+	got := readClaudeCache(path)
+	if got.IDs["opus"] != "claude-opus-4-8" || got.IDs["sonnet"] != "claude-sonnet-5" {
+		t.Errorf("round-trip ids = %v", got.IDs)
+	}
+	// A just-written cache is fresh.
+	if time.Since(got.ProbedAt) >= claudeCacheTTL {
+		t.Errorf("fresh cache read as stale: probed_at %v", got.ProbedAt)
+	}
+
+	// Hand-write a stale cache (8 days old): ids still present, but past the TTL.
+	stale := claudeCache{ProbedAt: time.Now().Add(-8 * 24 * time.Hour).UTC(), IDs: ids}
+	b, _ := json.Marshal(stale)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc := readClaudeCache(path)
+	if len(sc.IDs) == 0 {
+		t.Error("stale cache dropped its ids")
+	}
+	if time.Since(sc.ProbedAt) < claudeCacheTTL {
+		t.Error("8-day-old cache should be past the 7-day TTL")
 	}
 }
 

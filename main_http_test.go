@@ -357,6 +357,39 @@ func TestHandleNewNodeValidationAndCreate(t *testing.T) {
 	}
 }
 
+// The UI offers the family alias (opus); scimux resolves it to the concrete id
+// the CLI accepts (claude-opus-4-8) at launch, working around the CLI's broken
+// alias resolution. The stored node keeps the durable alias; only the launched
+// command carries the resolved id.
+func TestHandleNewNodeResolvesClaudeModelID(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.claudeIDs = map[string]string{"opus": "claude-opus-4-8"}
+
+	if rec := newNode(a, `{"title":"Fork","agent":"claude","model":"opus","effort":"medium","dir":"`+a.home+`"}`); rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	// Stored node keeps the alias (durable across model-version bumps).
+	if a.nodes[0].Model != "opus" {
+		t.Errorf("stored model = %q, want the alias 'opus'", a.nodes[0].Model)
+	}
+	// The launched command carries the resolved concrete id and the effort flag.
+	var launch string
+	f.mu.Lock()
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "new-session" {
+			launch = strings.Join(c, " ")
+		}
+	}
+	f.mu.Unlock()
+	if !strings.Contains(launch, "--model 'claude-opus-4-8'") {
+		t.Errorf("launch did not resolve the model id: %q", launch)
+	}
+	if !strings.Contains(launch, "--effort 'medium'") {
+		t.Errorf("launch did not pass effort: %q", launch)
+	}
+}
+
 // A launch that dies before its interface is ready (the real-world case: a
 // forked node whose --model the CLI rejects) must surface the agent's own error
 // to the create caller and leave no phantom node behind — not the opaque "dead

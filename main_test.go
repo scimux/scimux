@@ -109,6 +109,22 @@ func TestAgentCommand(t *testing.T) {
 	}
 }
 
+// The claude CLI accepts --effort <level> (low/medium/high/xhigh/max); scimux
+// passes it when set, and omits it entirely otherwise (so a node with no effort
+// launches exactly as before).
+func TestAgentCommandClaudeEffort(t *testing.T) {
+	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"}
+	got, _ := agentCommand(n)
+	if got != `claude --session-id u --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium' 'hi'` {
+		t.Errorf("claude+effort cmd = %s", got)
+	}
+	// No effort -> no --effort flag.
+	n2 := &Node{Agent: "claude", SessionID: "u", Prompt: "hi"}
+	if got, _ := agentCommand(n2); strings.Contains(got, "--effort") {
+		t.Errorf("effort-less claude cmd must omit --effort, got %s", got)
+	}
+}
+
 // A tmux launch is wrapped so that a process which exits before its interface
 // is ready (a rejected --model, a bad flag) leaves its error on the pane long
 // enough for awaitLaunch to read it, instead of the session vanishing into an

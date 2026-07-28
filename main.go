@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
@@ -75,7 +76,7 @@ type Node struct {
 	EndedAt    string `json:"ended_at,omitempty"`
 	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode"
 	Model      string `json:"model,omitempty"`
-	Effort     string `json:"effort,omitempty"` // codex reasoning effort; ignored for claude
+	Effort     string `json:"effort,omitempty"` // reasoning effort: codex thread config, claude --effort level
 	Dir        string `json:"dir"`
 	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
 	Transcript string `json:"transcript,omitempty"`
@@ -194,8 +195,17 @@ type app struct {
 	// is the capture interval inside that window.
 	launchGrace time.Duration
 	launchPoll  time.Duration
-	storePath   string
-	uiPath      string
+	// claudeIDs maps the family alias the UI offers (opus/sonnet/haiku/fable) to
+	// the concrete model id the installed claude CLI actually accepts, probed once
+	// at startup (probeClaudeModels) because the CLI mis-resolves its own aliases.
+	// Empty until the probe returns, and empty forever if claude is absent or the
+	// probe fails — in which case launches fall back to passing the bare alias.
+	// Written once by the startup goroutine, read per launch; guarded by claudeMu.
+	claudeIDs       map[string]string
+	claudeMu        sync.Mutex
+	claudeCachePath string // ~/.scimux/claude-models.json; empty disables caching
+	storePath       string
+	uiPath          string
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also
@@ -653,6 +663,11 @@ func agentCommand(n *Node) (string, error) {
 		if n.Model != "" {
 			parts = append(parts, "--model", shellQuote(n.Model))
 		}
+		// The claude CLI takes --effort <level> (low/medium/high/xhigh/max); pass
+		// it only when set so an effort-less node launches exactly as before.
+		if n.Effort != "" {
+			parts = append(parts, "--effort", shellQuote(n.Effort))
+		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
 	// pi and opencode reach agentCommand only as a legacy/forced tmux fallback
 	// (new pi/opencode nodes resolve to the ACP transport); both take the
@@ -740,6 +755,47 @@ func launchFailReason(paneAbove string) string {
 		lines = lines[len(lines)-3:]
 	}
 	return strings.Join(lines, " / ")
+}
+
+// resolveClaudeModel maps a family alias to the concrete id the CLI accepts. It
+// returns "" when there is no mapping — the probe is absent or failed, or the
+// value is not a known family (e.g. it is already a concrete id) — leaving the
+// caller to pass the value through unchanged.
+func (a *app) resolveClaudeModel(model string) string {
+	a.claudeMu.Lock()
+	defer a.claudeMu.Unlock()
+	return a.claudeIDs[model]
+}
+
+func (a *app) setClaudeIDs(ids map[string]string) {
+	a.claudeMu.Lock()
+	a.claudeIDs = ids
+	a.claudeMu.Unlock()
+}
+
+// refreshClaudeModels populates the family->id map, preferring a cached probe
+// no older than claudeCacheTTL over a fresh (API-billed) `claude -p` call. A
+// successful probe is cached; a failed one writes nothing and falls back to any
+// stale cache, so the call is retried at the next startup. Best-effort: run in a
+// background goroutine at startup, never blocking the UI.
+func (a *app) refreshClaudeModels(ctx context.Context) {
+	cache := readClaudeCache(a.claudeCachePath)
+	if len(cache.IDs) > 0 && time.Since(cache.ProbedAt) < claudeCacheTTL {
+		a.setClaudeIDs(cache.IDs)
+		return
+	}
+	if ids := probeClaudeModels(ctx); len(ids) > 0 {
+		a.setClaudeIDs(ids)
+		if err := writeClaudeCache(a.claudeCachePath, ids); err != nil {
+			fmt.Fprintf(os.Stderr, "scimux: cache claude models: %v\n", err)
+		}
+		return
+	}
+	// Probe failed: keep serving a stale cache if we have one; the retry is the
+	// next startup (nothing fresh was written).
+	if len(cache.IDs) > 0 {
+		a.setClaudeIDs(cache.IDs)
+	}
 }
 
 // resolveNode validates a new-node request and resolves its launch
@@ -988,7 +1044,20 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		}
 		return 0, nil
 	}
-	cmd, err := agentCommand(n)
+	launch := n
+	// Resolve a claude family alias (opus) to the concrete id the CLI accepts
+	// (claude-opus-4-8) — the CLI mis-resolves its own aliases. Resolve into a
+	// copy so the stored node keeps the durable alias; only the launched command
+	// carries the id. No mapping (probe absent/failed, or already a concrete id)
+	// leaves the value unchanged.
+	if n.Agent == "claude" {
+		if id := a.resolveClaudeModel(n.Model); id != "" {
+			cp := *n
+			cp.Model = id
+			launch = &cp
+		}
+	}
+	cmd, err := agentCommand(launch)
 	if err != nil {
 		return 400, err
 	}
@@ -3664,32 +3733,33 @@ func main() {
 		os.Exit(1)
 	}
 	a := &app{
-		byID:           map[string]*Node{},
-		live:           map[string]string{},
-		attn:           map[string]string{},
-		attnAt:         map[string]time.Time{},
-		prevCap:        map[string]string{},
-		lastChg:        map[string]time.Time{},
-		activeSince:    map[string]time.Time{},
-		tailers:        map[string]*transcript.Tailer{},
-		mirrors:        map[string]*mirror{},
-		pathClaims:     map[string]bool{},
-		chatMark:       map[string]chatMark{},
-		staleChat:      map[string]bool{},
-		sendState:      map[string]string{},
-		reserved:       map[string]bool{},
-		anim:           map[string]*animState{},
-		server:         tmuxsession.NewServer(*socket),
-		launchGrace:    2500 * time.Millisecond,
-		launchPoll:     250 * time.Millisecond,
-		acp:            acpManager{acp.NewManager(sessionsDir)},
-		codex:          codexManager{codex.NewManager(sessionsDir)},
-		storePath:      filepath.Join(*data, "nodes.jsonl"),
-		uiPath:         filepath.Join(*data, "ui.json"),
-		sessionsDir:    sessionsDir,
-		attachmentsDir: attachmentsDir,
-		assetsDir:      assetsDir,
-		home:           home,
+		byID:            map[string]*Node{},
+		live:            map[string]string{},
+		attn:            map[string]string{},
+		attnAt:          map[string]time.Time{},
+		prevCap:         map[string]string{},
+		lastChg:         map[string]time.Time{},
+		activeSince:     map[string]time.Time{},
+		tailers:         map[string]*transcript.Tailer{},
+		mirrors:         map[string]*mirror{},
+		pathClaims:      map[string]bool{},
+		chatMark:        map[string]chatMark{},
+		staleChat:       map[string]bool{},
+		sendState:       map[string]string{},
+		reserved:        map[string]bool{},
+		anim:            map[string]*animState{},
+		server:          tmuxsession.NewServer(*socket),
+		launchGrace:     2500 * time.Millisecond,
+		launchPoll:      250 * time.Millisecond,
+		claudeCachePath: filepath.Join(*data, "claude-models.json"),
+		acp:             acpManager{acp.NewManager(sessionsDir)},
+		codex:           codexManager{codex.NewManager(sessionsDir)},
+		storePath:       filepath.Join(*data, "nodes.jsonl"),
+		uiPath:          filepath.Join(*data, "ui.json"),
+		sessionsDir:     sessionsDir,
+		attachmentsDir:  attachmentsDir,
+		assetsDir:       assetsDir,
+		home:            home,
 	}
 	a.assetHook = a.ingestAssetHook
 	a.acp.SetAssetHook(a.assetHook)
@@ -3729,6 +3799,14 @@ func main() {
 	// Warm the harness/model probe (it shells out to the agent CLIs) so the
 	// first new-activity dialog doesn't wait on subprocesses.
 	go detectAgents()
+	// Learn the concrete claude model ids (the CLI mis-resolves its own family
+	// aliases) — cached for claudeCacheTTL, so this billed call runs at most
+	// weekly. Background: launches fall back to the bare alias until it returns.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		a.refreshClaudeModels(ctx)
+	}()
 
 	mux := http.NewServeMux()
 	// The assets tree is compiled in; a Sub failure means the embed layout
