@@ -101,8 +101,14 @@ func detectAgents() map[string][]string {
 // pre-4.x segment order the API no longer accepts — so scimux resolves
 // opus/sonnet/haiku/fable to the concrete id itself and passes that to --model.
 // The model answers from the ids actually available in its environment.
-const claudeModelPrompt = "List every Claude model id I can use in this environment, one per line, " +
-	"in the form claude-<family>-<version> (for example claude-opus-4-8). Output only the ids, nothing else."
+// The prompt is deliberately terse and format-pinned: the parser takes the
+// first id it sees per family, so prose that mentions an older id before the
+// current one would mislead it. Demanding one id per family, latest only, exact
+// dash-form, no other text keeps the answer a clean list and removes that risk.
+const claudeModelPrompt = "For each Claude model family available to me here — opus, sonnet, haiku, fable — " +
+	"output the single current model id, latest version only, one per line, in exact dash form " +
+	"claude-<family>-<version> (for example claude-opus-4-8). " +
+	"Output only those ids, one per line — no other text, no markdown, no duplicates, no older versions."
 
 // claudeModelID matches a concrete model id of a known family. The family name
 // sits immediately after "claude-", so the mis-ordered "claude-4-8-opus" form

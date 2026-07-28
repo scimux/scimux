@@ -153,6 +153,18 @@ func TestParseClaudeModels(t *testing.T) {
 	if m := parseClaudeModels("I'm not sure which models you have."); len(m) != 0 {
 		t.Errorf("no ids should yield empty map, got %v", m)
 	}
+
+	// A numbered list with backticks and trailing prose is still parsed cleanly.
+	numbered := parseClaudeModels("1. `claude-opus-4-8` — your top model\n" +
+		"2. `claude-sonnet-5` (fast)\n3. `claude-haiku-4-5`\n")
+	if numbered["opus"] != "claude-opus-4-8" || numbered["sonnet"] != "claude-sonnet-5" || numbered["haiku"] != "claude-haiku-4-5" {
+		t.Errorf("numbered/backticked list = %v", numbered)
+	}
+
+	// A date-stamped id is a valid concrete id and must be captured whole.
+	if d := parseClaudeModels("claude-sonnet-5-20260101"); d["sonnet"] != "claude-sonnet-5-20260101" {
+		t.Errorf("dated id truncated: %v", d)
+	}
 }
 
 // A successful probe is cached for claudeCacheTTL so the billed `claude -p` call
