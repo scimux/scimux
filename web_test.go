@@ -110,6 +110,30 @@ func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
 	}
 }
 
+// The effort selector offers agent-specific levels: claude's --effort takes
+// five (low..max), and the list must follow the selected agent, seed from the
+// parent on a fork, and rebuild on an agent switch.
+func TestEffortLevelsPerAgent(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `claude: ["low", "medium", "high", "xhigh", "max"]`) {
+		t.Error("EFFORTS is missing claude's five --effort levels")
+	}
+	if !strings.Contains(html, "function fillEfforts(){") {
+		t.Error("fillEfforts() not defined")
+	}
+	// The effort list must follow an agent switch and a fork's parent seed.
+	if !strings.Contains(html, `$("#nc_agent").addEventListener("change", () => { fillModels(); fillEfforts(); });`) {
+		t.Error("agent change does not refill the effort list")
+	}
+	if !strings.Contains(html, "fillModels(); fillEfforts();   /* model + effort lists follow") {
+		t.Error("prepareLaunchConfig does not refill efforts for the parent's agent")
+	}
+}
+
 func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {

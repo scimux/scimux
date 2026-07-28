@@ -1317,8 +1317,7 @@ body.notes-open #notespane { transform: translateX(0); }
   <div class="sect row2 nc-create-only">
     <div><label>agent</label><select id="nc_agent"></select></div>
     <div><label>model</label><select id="nc_model"></select></div>
-    <div><label>effort</label><select id="nc_effort"><option value=""></option>
-      <option>low</option><option>medium</option><option>high</option></select></div>
+    <div><label>effort</label><select id="nc_effort"><option value=""></option></select></div>
   </div>
   <div class="sect nc-create-only">
     <div class="k">Working directory <span class="opt">&#8212; optional, defaults to home</span></div>
@@ -5891,6 +5890,13 @@ const MODELS = {
   claude: ["", "fable", "opus", "sonnet", "haiku"],
   codex:  ["", "gpt-5.4", "gpt-5.4-mini"],
 };
+/* reasoning-effort levels per agent — claude's --effort takes five levels; the
+   empty option means "no explicit effort" (the agent's own default). Agents not
+   listed fall back to the common three. */
+const EFFORTS = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex:  ["low", "medium", "high"],
+};
 function fillAgents(){
   $("#nc_agent").innerHTML = Object.keys(MODELS).map(a =>
     `<option>${esc(a)}</option>`).join("");
@@ -5904,8 +5910,16 @@ function fillModels(){
   $("#nc_model").innerHTML = (MODELS[$("#nc_agent").value] || [""]).map(m =>
     `<option value="${esc(m)}">${esc(m) || dflt}</option>`).join("");
 }
-$("#nc_agent").addEventListener("change", fillModels);
-fillAgents(); fillModels();
+function fillEfforts(){
+  /* preserve the current selection across an agent switch when it stays valid */
+  const cur = $("#nc_effort").value;
+  const list = EFFORTS[$("#nc_agent").value] || ["low", "medium", "high"];
+  $("#nc_effort").innerHTML = `<option value=""></option>` +
+    list.map(e => `<option>${esc(e)}</option>`).join("");
+  if (list.includes(cur)) $("#nc_effort").value = cur;
+}
+$("#nc_agent").addEventListener("change", () => { fillModels(); fillEfforts(); });
+fillAgents(); fillModels(); fillEfforts();
 api("/api/agents").then(j => {
   if (!j || !Object.keys(j).length) return;
   Object.keys(MODELS).forEach(k => delete MODELS[k]);
@@ -5920,7 +5934,7 @@ api("/api/agents").then(j => {
    on a different agent/model" is a real choice. The payload sends the visible
    values; resolveNode backfills anything left empty from the parent. */
 function prepareLaunchConfig(cfg){
-  fillAgents(); fillModels();
+  fillAgents(); fillModels(); fillEfforts();
   /* seed from an explicit config (archived fork — no live parent) or from the
      parent node when forking a live chat */
   const p = cfg || nodeById(ncParent);
@@ -5931,7 +5945,7 @@ function prepareLaunchConfig(cfg){
     if (p.agent && ![...ag.options].some(o => o.value === p.agent))
       ag.insertAdjacentHTML("beforeend", `<option>${esc(p.agent)}</option>`);
     if (p.agent) ag.value = p.agent;
-    fillModels();   /* the model list follows the (possibly re-set) agent */
+    fillModels(); fillEfforts();   /* model + effort lists follow the (possibly re-set) agent */
     const mo = $("#nc_model");
     if (p.model && ![...mo.options].some(o => o.value === p.model))
       mo.insertAdjacentHTML("beforeend", `<option value="${esc(p.model)}">${esc(p.model)}</option>`);
