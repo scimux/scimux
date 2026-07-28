@@ -1150,6 +1150,97 @@ func TestHandleChatHistory(t *testing.T) {
 	}
 }
 
+// TestHandleChatCarriesDurableAddress: every turn the chat read path emits —
+// both the polled segment and the ?history=1 surfaces — carries the durable
+// source address (uid, segment, record), and it matches what ScanLog assigns to
+// the same text. This is the address a capture stamps so it can name and resolve
+// the exact chat turn it came from (Phase 0b).
+func TestHandleChatCarriesDurableAddress(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID["c1"] = []*Node{n}, n
+	logPath := a.sessionLogPath("c1")
+	w := &sessionlog.Writer{Path: logPath}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
+		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
+		{T: "assistant", Text: "old answer", Time: "2026-07-14T01:01:00Z"},
+		{T: "source", Time: "2026-07-15T09:00:00Z", Source: &sessionlog.SourceEvent{SessionID: "s2", Reason: "clear"}},
+		{T: "user", Text: "new question", Time: "2026-07-15T09:05:00Z"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// scanAddr returns the (uid, segment, record) ScanLog assigns to a text —
+	// the identity the read path must reproduce exactly.
+	scanAddr := func(text string) sessionlog.Hit {
+		res := sessionlog.ScanLog(logPath, text, sessionlog.ScanOptions{Before: 5, After: 5})
+		if len(res.Hits) != 1 {
+			t.Fatalf("ScanLog(%q) hits = %+v", text, res.Hits)
+		}
+		return res.Hits[0]
+	}
+	sameAddr := func(where string, tn transcript.Turn) {
+		want := scanAddr(tn.Text)
+		if tn.UID == "" || tn.UID != want.UID || tn.Segment != want.Segment || tn.Record != want.Record {
+			t.Fatalf("%s: turn %q address (uid %q seg %d rec %d) != ScanLog (uid %q seg %d rec %d)",
+				where, tn.Text, tn.UID, tn.Segment, tn.Record, want.UID, want.Segment, want.Record)
+		}
+	}
+
+	// Polled chat: the current segment's turn carries its address.
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/c1/chat", nil)
+	r.SetPathValue("id", "c1")
+	a.handleChat(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("chat code = %d", rec.Code)
+	}
+	var poll struct {
+		Turns []transcript.Turn `json:"turns"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &poll); err != nil {
+		t.Fatal(err)
+	}
+	if len(poll.Turns) != 1 {
+		t.Fatalf("poll turns = %+v, want 1 (current segment)", poll.Turns)
+	}
+	if poll.Turns[0].Segment != 1 {
+		t.Errorf("post-clear turn segment = %d, want 1", poll.Turns[0].Segment)
+	}
+	sameAddr("poll", poll.Turns[0])
+
+	// History: turns in surface 0 are segment 0, surface 1 is segment 1, and
+	// every one round-trips its address against ScanLog.
+	rec2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/nodes/c1/chat?history=1", nil)
+	r2.SetPathValue("id", "c1")
+	a.handleChat(rec2, r2)
+	var hist struct {
+		Segments []sessionlog.HistorySegment `json:"segments"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &hist); err != nil {
+		t.Fatal(err)
+	}
+	if len(hist.Segments) != 2 {
+		t.Fatalf("history surfaces = %d, want 2", len(hist.Segments))
+	}
+	for si, s := range hist.Segments {
+		for _, tn := range s.Turns {
+			if tn.Segment != si {
+				t.Errorf("history surface %d turn %q segment = %d", si, tn.Text, tn.Segment)
+			}
+			sameAddr(fmt.Sprintf("history[%d]", si), tn)
+		}
+	}
+}
+
 func TestHandleStateReportsLastInteractionFromCurrentSegment(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
