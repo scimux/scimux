@@ -23,10 +23,22 @@ import (
 )
 
 // Turn is one visible chat message.
+//
+// UID/Segment/Record are the turn's durable source address — the same positional
+// identity sessionlog.ScanLog assigns (UID = the log's meta uid, Segment = source
+// seams seen before the record, Record = 0-based index among successfully-parsed
+// records). They are populated only when a turn is read from a unified session log
+// (sessionlog.segmentOf / ReadHistory); the raw transcript tailer leaves them zero,
+// since a CLI transcript file has no scimux uid and no session-log record ordinals.
+// A capture stamps this triple so it can name the exact chat turn it came from and
+// resolve jump-back across /clear seams, rotation, slug reuse, and node deletion.
 type Turn struct {
-	Role string `json:"role"` // "user" or "assistant"
-	Text string `json:"text"`
-	Time string `json:"time,omitempty"` // raw timestamp string as logged, if any
+	Role    string `json:"role"` // "user" or "assistant"
+	Text    string `json:"text"`
+	Time    string `json:"time,omitempty"` // raw timestamp string as logged, if any
+	UID     string `json:"uid,omitempty"`
+	Segment int    `json:"segment,omitempty"`
+	Record  int    `json:"record,omitempty"`
 }
 
 // ParseLine extracts a turn from one JSONL line of either format.

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 func writeLog(t *testing.T, evs []Event) string {
@@ -171,6 +173,124 @@ func TestReadHistoryBackdatesMirroredTurns(t *testing.T) {
 	if len(segs) != 1 || segs[0].Start != "2025-03-01T12:00:00Z" || segs[0].Seam != "2026-07-20T09:00:00Z" {
 		t.Fatalf("got %+v", segs)
 	}
+}
+
+func TestSegmentTurnAddresses(t *testing.T) {
+	// Every rendered turn carries the durable address (UID, Segment, Record) —
+	// the same positional identity ScanLog assigns — so a capture can name the
+	// exact chat turn it came from. Record is the 0-based index among
+	// successfully-parsed records (tool/asset/usage records advance it too);
+	// Segment is the source seams seen before the record; UID is the meta uid.
+	meta := NewMeta("n1", "claude", "", "", "/tmp")
+	path := writeLog(t, []Event{
+		meta,
+		{T: "user", Text: "seg0 question", Time: "2026-07-01T09:00:00Z"},
+		{T: "tool", Tool: &ToolEvent{ID: "t1", Title: "Read", Status: "completed"}},
+		{T: "asset", Asset: &AssetEvent{ID: "a1", Name: "diagram.png", Storage: "inline"}},
+		{T: "assistant", Text: "seg0 answer", Time: "2026-07-01T09:01:00Z"},
+		{T: "usage", Usage: &UsageEvent{Used: 100, Size: 1000}},
+		NewClearSource("s2"), // /clear seam: segment 1 begins
+		{T: "user", Text: "seg1 followup", Time: "2026-07-02T10:00:00Z"},
+	})
+	uid := meta.Meta.UID
+
+	seg := ReadSegment(path)
+	// The current segment is everything after the last seam: only the followup.
+	if len(seg.Turns) != 1 || seg.Turns[0].Text != "seg1 followup" {
+		t.Fatalf("segment turns = %+v", seg.Turns)
+	}
+	tn := seg.Turns[0]
+	if tn.UID != uid || tn.Segment != 1 {
+		t.Fatalf("followup address = uid %q seg %d, want %q seg 1", tn.UID, tn.Segment, uid)
+	}
+	// Cross-check the ordinal against ScanLog: a hit on the same text must land
+	// on the same (Segment, Record). This is the load-bearing invariant — the
+	// read path and the search path must agree numerically or jump-back breaks.
+	res := ScanLog(path, "seg1 followup", ScanOptions{Before: 5, After: 5})
+	if len(res.Hits) != 1 {
+		t.Fatalf("ScanLog hits = %+v", res.Hits)
+	}
+	if res.Hits[0].Segment != tn.Segment || res.Hits[0].Record != tn.Record || res.Hits[0].UID != tn.UID {
+		t.Fatalf("address mismatch: turn (uid %q seg %d rec %d) vs ScanLog (uid %q seg %d rec %d)",
+			tn.UID, tn.Segment, tn.Record, res.Hits[0].UID, res.Hits[0].Segment, res.Hits[0].Record)
+	}
+	// Round-trip: the turn's own address resolves back to that exact turn.
+	win, anchor, _, _, ok := ReadTurnWindow(path, tn.Segment, tn.Record, 0, 0)
+	if !ok || win[anchor].Text != tn.Text {
+		t.Fatalf("round-trip: ok=%v anchor=%q, want %q", ok, mustText(win, anchor), tn.Text)
+	}
+}
+
+func TestReadHistoryTurnAddresses(t *testing.T) {
+	// The same durable address rides every history surface, not just the live
+	// tail — an embedded reference into an earlier /clear surface needs it too.
+	meta := NewMeta("n1", "codex", "", "", "/tmp")
+	path := writeLog(t, []Event{
+		meta,
+		{T: "user", Text: "old question", Time: "2026-07-01T09:00:00Z"},
+		{T: "assistant", Text: "old answer", Time: "2026-07-01T09:01:00Z"},
+		NewClearSource("s2"),
+		{T: "user", Text: "new question", Time: "2026-07-02T10:00:00Z"},
+	})
+	uid := meta.Meta.UID
+	segs := ReadHistory(path)
+	if len(segs) != 2 {
+		t.Fatalf("surfaces = %d", len(segs))
+	}
+	// Surface 0 turns are in segment 0; surface 1's are in segment 1. Each turn
+	// round-trips through its own address and reports the meta uid.
+	for si, s := range segs {
+		for _, tn := range s.Turns {
+			if tn.UID != uid || tn.Segment != si {
+				t.Fatalf("surface %d turn %q: uid %q seg %d, want %q seg %d", si, tn.Text, tn.UID, tn.Segment, uid, si)
+			}
+			win, anchor, _, _, ok := ReadTurnWindow(path, tn.Segment, tn.Record, 0, 0)
+			if !ok || win[anchor].Text != tn.Text {
+				t.Fatalf("surface %d turn %q did not round-trip (ok=%v)", si, tn.Text, ok)
+			}
+		}
+	}
+}
+
+func TestSegmentTurnAddressesSkipTornLines(t *testing.T) {
+	// A torn/blank line between two turns is not a parsed record, so it must not
+	// advance the record ordinal — the address stays aligned with ScanLog, which
+	// skips the same lines. Write a good log, then splice a garbage line in.
+	meta := NewMeta("n1", "claude", "", "", "/tmp")
+	path := writeLog(t, []Event{
+		meta,
+		{T: "user", Text: "before torn", Time: "2026-07-01T09:00:00Z"},
+	})
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n{not valid json\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	w := &Writer{Path: path}
+	if err := w.Append(Event{T: "assistant", Text: "after torn", Time: "2026-07-01T09:02:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	seg := ReadSegment(path)
+	if len(seg.Turns) != 2 {
+		t.Fatalf("turns = %+v", seg.Turns)
+	}
+	for _, tn := range seg.Turns {
+		res := ScanLog(path, tn.Text, ScanOptions{Before: 5, After: 5})
+		if len(res.Hits) != 1 || res.Hits[0].Segment != tn.Segment || res.Hits[0].Record != tn.Record {
+			t.Fatalf("turn %q address drifted from ScanLog: turn(seg %d rec %d) scan %+v", tn.Text, tn.Segment, tn.Record, res.Hits)
+		}
+	}
+}
+
+// mustText is a test helper: the text of window[i], or a marker when out of range.
+func mustText(window []transcript.Turn, i int) string {
+	if i < 0 || i >= len(window) {
+		return "<no anchor>"
+	}
+	return window[i].Text
 }
 
 func TestSegmentCache(t *testing.T) {

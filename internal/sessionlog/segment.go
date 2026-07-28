@@ -50,7 +50,17 @@ func segmentOf(evs []Event) Segment {
 	var seg Segment
 	seg.Turns = []transcript.Turn{}
 	seg.Stations = map[string]StationLabel{}
-	for _, ev := range evs {
+	// Durable address bookkeeping, kept numerically identical to ScanLog: uid is
+	// the meta header's, record is the event's index in evs (ReadEvents skips the
+	// same blank/torn lines ScanLog skips, so evs[i] is parsed record i), and
+	// recSeg counts source seams seen before the record. A rendered turn stamps
+	// this triple so a capture can name — and later resolve — the exact turn.
+	var uid string
+	recSeg := 0
+	for i, ev := range evs {
+		if ev.T == "meta" && ev.Meta != nil {
+			uid = ev.Meta.UID
+		}
 		if seg.StartTime == "" && ev.Time != "" {
 			seg.StartTime = ev.Time // first-segment fallback; a seam overwrites
 		}
@@ -63,10 +73,14 @@ func segmentOf(evs []Event) Segment {
 			if ev.Source != nil && ev.Source.Reason == "clear" {
 				seg.ClearTimes = append(seg.ClearTimes, ev.Time)
 			}
+			recSeg++ // subsequent records live in the next segment (matches ScanLog)
 		case "user", "assistant":
 			// Same filter as ReadTurns: whitespace-only records render nothing.
 			if strings.TrimSpace(ev.Text) != "" {
-				seg.Turns = append(seg.Turns, transcript.Turn{Role: ev.T, Text: ev.Text, Time: ev.Time})
+				seg.Turns = append(seg.Turns, transcript.Turn{
+					Role: ev.T, Text: ev.Text, Time: ev.Time,
+					UID: uid, Segment: recSeg, Record: i,
+				})
 			}
 		case "usage":
 			if ev.Usage != nil {
@@ -158,7 +172,14 @@ func ReadHistory(path string) []HistorySegment {
 		}
 		segs = append(segs, cur)
 	}
-	for _, ev := range ReadEvents(path) {
+	// Durable address bookkeeping, kept identical to segmentOf/ScanLog so a turn
+	// resolves to the same identity whether it's read live or as history.
+	var uid string
+	recSeg := 0
+	for i, ev := range ReadEvents(path) {
+		if ev.T == "meta" && ev.Meta != nil {
+			uid = ev.Meta.UID
+		}
 		// first-surface fallback: date it at the first timed record (normally
 		// the meta header), exactly like segmentOf; a seam overwrites
 		if cur.Start == "" && ev.Time != "" {
@@ -171,10 +192,14 @@ func ReadHistory(path string) []HistorySegment {
 			if ev.Source != nil {
 				cur.Reason = ev.Source.Reason
 			}
+			recSeg++
 		case "user", "assistant":
 			// Same filter as segmentOf: whitespace-only records render nothing.
 			if strings.TrimSpace(ev.Text) != "" {
-				cur.Turns = append(cur.Turns, transcript.Turn{Role: ev.T, Text: ev.Text, Time: ev.Time})
+				cur.Turns = append(cur.Turns, transcript.Turn{
+					Role: ev.T, Text: ev.Text, Time: ev.Time,
+					UID: uid, Segment: recSeg, Record: i,
+				})
 			}
 		}
 	}
