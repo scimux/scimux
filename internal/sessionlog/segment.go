@@ -33,11 +33,23 @@ type Segment struct {
 	// bogus stations. Whole-log data, not segment-scoped, riding here so the
 	// existing per-node cache serves it for free.
 	ClearTimes []string
+	// Stations maps a stop's start-time key to its frozen label snapshot (the
+	// newest StationEvent per seam wins). Whole-log data like ClearTimes, riding
+	// the per-node cache. Always non-nil so the projection never nil-checks; a
+	// stop with no entry falls back to the node's live Title/Description.
+	Stations map[string]StationLabel
+}
+
+// StationLabel is one stop's frozen name and description.
+type StationLabel struct {
+	Title string `json:"title,omitempty"`
+	Desc  string `json:"desc,omitempty"`
 }
 
 func segmentOf(evs []Event) Segment {
 	var seg Segment
 	seg.Turns = []transcript.Turn{}
+	seg.Stations = map[string]StationLabel{}
 	for _, ev := range evs {
 		if seg.StartTime == "" && ev.Time != "" {
 			seg.StartTime = ev.Time // first-segment fallback; a seam overwrites
@@ -64,6 +76,12 @@ func segmentOf(evs []Event) Segment {
 				if ev.Usage.Size > 0 {
 					seg.Size = int64(ev.Usage.Size)
 				}
+			}
+		case "station":
+			// Latest snapshot per seam wins (a manual edit is a newer record).
+			// Whole-log, not segment-scoped: closed stations live before seams.
+			if ev.Station != nil && ev.Station.Seam != "" {
+				seg.Stations[ev.Station.Seam] = StationLabel{Title: ev.Station.Title, Desc: ev.Station.Desc}
 			}
 		}
 	}

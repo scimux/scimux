@@ -31,17 +31,18 @@ import (
 // record types they don't know, so the schema can grow without breaking
 // old binaries or old files.
 type Event struct {
-	T          string       `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "error" | "asset"
-	Time       string       `json:"time"`
-	Text       string       `json:"text,omitempty"`       // user / assistant
-	Tool       *ToolEvent   `json:"tool,omitempty"`       // tool
-	Usage      *UsageEvent  `json:"usage,omitempty"`      // usage
-	Meta       *MetaEvent   `json:"meta,omitempty"`       // meta
-	Source     *SourceEvent `json:"source,omitempty"`     // source
-	Mark       *MarkEvent   `json:"mark,omitempty"`       // mark
-	Asset      *AssetEvent  `json:"asset,omitempty"`      // asset
-	StopReason string       `json:"stopReason,omitempty"` // stop
-	Error      string       `json:"error,omitempty"`      // error
+	T          string        `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset"
+	Time       string        `json:"time"`
+	Text       string        `json:"text,omitempty"`       // user / assistant
+	Tool       *ToolEvent    `json:"tool,omitempty"`       // tool
+	Usage      *UsageEvent   `json:"usage,omitempty"`      // usage
+	Meta       *MetaEvent    `json:"meta,omitempty"`       // meta
+	Source     *SourceEvent  `json:"source,omitempty"`     // source
+	Mark       *MarkEvent    `json:"mark,omitempty"`       // mark
+	Asset      *AssetEvent   `json:"asset,omitempty"`      // asset
+	Station    *StationEvent `json:"station,omitempty"`    // station
+	StopReason string        `json:"stopReason,omitempty"` // stop
+	Error      string        `json:"error,omitempty"`      // error
 }
 
 // ToolEvent is the tool-call state assembled by toolCallId. rawInput carries
@@ -117,6 +118,26 @@ func NewSource(path, sessionID string) Event {
 // carry the new session — the seam stays uniform across every transport.
 func NewClearSource(sessionID string) Event {
 	return Event{T: "source", Source: &SourceEvent{SessionID: sessionID, Reason: "clear"}}
+}
+
+// StationEvent is a per-station label snapshot: one metro-map stop's name and
+// description, frozen so a later rename of the active chat (which moves only the
+// node's live Title/Description = the head station) cannot rewrite a closed
+// station's label. Seam is the station's start-time key — the node's created_at
+// for the first station, or the /clear seam's RFC3339 time for later ones —
+// matching the strings the map already uses as stop keys. Append-only like every
+// record: a manual edit of a station is just a newer StationEvent for the same
+// Seam, latest wins. Unknown to old readers, so it degrades to the pre-feature
+// behaviour (node title on every stop).
+type StationEvent struct {
+	Seam  string `json:"seam"`
+	Title string `json:"title,omitempty"`
+	Desc  string `json:"desc,omitempty"`
+}
+
+// NewStation builds a per-station label snapshot for the stop that starts at seam.
+func NewStation(seam, title, desc string) Event {
+	return Event{T: "station", Station: &StationEvent{Seam: seam, Title: title, Desc: desc}}
 }
 
 // MarkEvent records how far the transcript mirror has consumed its current

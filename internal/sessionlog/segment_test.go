@@ -202,3 +202,51 @@ func TestSegmentCache(t *testing.T) {
 		t.Fatalf("after remove: %+v", got.Turns)
 	}
 }
+
+func TestSegmentStations(t *testing.T) {
+	// Per-station label snapshots fold into Segment.Stations keyed by the
+	// station's start-time seam; the latest record for a seam wins (a manual
+	// edit is just another snapshot). Whole-log data, like ClearTimes.
+	path := writeLog(t, []Event{
+		NewMeta("n1", "claude", "", "", "/tmp"),
+		NewStation("2026-07-01T09:00:00Z", "Alpha", "first station"),
+		NewStation("2026-07-02T10:00:00Z", "Beta", "second station"),
+		// a later edit of the first station overrides the earlier snapshot
+		NewStation("2026-07-01T09:00:00Z", "Alpha renamed", "edited"),
+	})
+	seg := ReadSegment(path)
+	if seg.Stations == nil {
+		t.Fatal("Stations must be a non-nil map")
+	}
+	if got := seg.Stations["2026-07-01T09:00:00Z"]; got.Title != "Alpha renamed" || got.Desc != "edited" {
+		t.Fatalf("first station = %+v, want latest override", got)
+	}
+	if got := seg.Stations["2026-07-02T10:00:00Z"]; got.Title != "Beta" || got.Desc != "second station" {
+		t.Fatalf("second station = %+v", got)
+	}
+}
+
+func TestSegmentStationsEmpty(t *testing.T) {
+	// A log with no station records yields an empty (non-nil) map — legacy
+	// safety, so the projection never nil-panics and old stops fall back cleanly.
+	path := writeLog(t, []Event{
+		NewMeta("n1", "codex", "", "", "/tmp"),
+		{T: "user", Text: "hi"},
+	})
+	seg := ReadSegment(path)
+	if seg.Stations == nil || len(seg.Stations) != 0 {
+		t.Fatalf("Stations = %+v, want empty non-nil map", seg.Stations)
+	}
+}
+
+func TestNewStationRoundTrip(t *testing.T) {
+	// NewStation survives marshal → append → ReadEvents unchanged.
+	path := writeLog(t, []Event{NewStation("2026-07-01T09:00:00Z", "Name", "Desc")})
+	evs := ReadEvents(path)
+	if len(evs) != 1 || evs[0].T != "station" || evs[0].Station == nil {
+		t.Fatalf("got %+v", evs)
+	}
+	if s := evs[0].Station; s.Seam != "2026-07-01T09:00:00Z" || s.Title != "Name" || s.Desc != "Desc" {
+		t.Fatalf("station = %+v", s)
+	}
+}

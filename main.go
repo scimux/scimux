@@ -1670,6 +1670,12 @@ type nodeView struct {
 	// seams only), oldest first. The metro map prepends the node's creation to
 	// get the full stop chain: creation plus each /clear is one station.
 	Stops []string `json:"stops,omitempty"`
+	// StationLabels maps a stop's start-time key to its frozen name/description
+	// snapshot. The map renders a stop with its own label; a stop with no entry
+	// (the head, or a legacy pre-snapshot stop) falls back to the node's live
+	// Title/Description. Keyed exactly as the client builds the stop chain
+	// (created_at + each Stops entry), so no parsing is needed to match.
+	StationLabels map[string]sessionlog.StationLabel `json:"station_labels,omitempty"`
 }
 
 func unixMSStamp(s string) int64 {
@@ -1741,6 +1747,9 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// node while the log is unchanged.
 		seg := a.segment(v.Node)
 		v.Stops = seg.ClearTimes
+		if len(seg.Stations) > 0 {
+			v.StationLabels = seg.Stations
+		}
 		v.LastInteraction = lastInteractionMS(v.Node, seg)
 		if v.Live == "exited" || v.Live == "unavailable" {
 			continue // gauge is live-only
@@ -1974,6 +1983,12 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		Title       *string `json:"title"`
 		Description *string `json:"description"`
 		LaneID      *string `json:"lane_id"`
+		// Station, when set, targets an OLD map station (its start-time key)
+		// instead of the node: the edit is written as a per-station label
+		// snapshot and the node record is left untouched, so renaming a closed
+		// station never bleeds into the head or its siblings (spec E). The head
+		// station has no key here — it is edited through the node fields above.
+		Station *string `json:"station"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
@@ -1984,6 +1999,37 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		a.mu.Unlock()
 		http.Error(w, "not found", 404)
+		return
+	}
+	// Old-station edit: snapshot the label for that stop only, node untouched.
+	if body.Station != nil {
+		a.mu.Unlock()
+		seam := strings.TrimSpace(*body.Station)
+		if seam == "" {
+			http.Error(w, "station must not be empty", 400)
+			return
+		}
+		title, desc := "", ""
+		if body.Title != nil {
+			title = strings.TrimSpace(*body.Title)
+		}
+		if body.Description != nil {
+			desc = strings.TrimSpace(*body.Description)
+		}
+		if title == "" {
+			http.Error(w, "title must not be empty", 400)
+			return
+		}
+		if a.sessionsDir == "" {
+			http.Error(w, "no session store", 409)
+			return
+		}
+		wtr := &sessionlog.Writer{Path: a.sessionLogPath(id)}
+		if err := wtr.Append(sessionlog.NewStation(seam, title, desc)); err != nil {
+			http.Error(w, "persist station: "+err.Error(), 500)
+			return
+		}
+		writeJSON(w, sessionlog.StationLabel{Title: title, Desc: desc})
 		return
 	}
 	next := *n
@@ -2633,6 +2679,11 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		// same process, recorded as a source seam — same page-turn semantics
 		// as Claude's /clear, same log file, same node.
 		if strings.TrimSpace(body.Text) == "/clear" {
+			// Freeze the closing station's label before the page turns, so a
+			// later rename only moves the fresh head (spec A/B/C). The manager
+			// appends the clear seam inside Clear; this reads the pre-clear stop
+			// chain, so it must run first.
+			a.snapshotClosingStation(n)
 			if err := pm.Clear(n.ID); err != nil {
 				code := 500
 				if pm.Conflict(err) {
@@ -2717,6 +2768,36 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "acknowledged"})
 }
 
+// snapshotClosingStation freezes the label of the station a /clear is about to
+// close, so a later rename of the active chat (which moves only the node's live
+// Title/Description = the fresh head) can never rewrite the closed station's
+// name on the map. The key is the closing station's start time: the last
+// existing /clear seam, or the node's creation when this is the first page-turn.
+// Call it BEFORE the clear seam is appended, so the key is read from the pre-clear
+// stop chain. Best-effort: an append failure is logged, not fatal (the map
+// degrades to the node title, the pre-feature behaviour). Guarded like the seam
+// write — a node that never mirrored has no station to freeze.
+func (a *app) snapshotClosingStation(n *Node) {
+	if a.sessionsDir == "" {
+		return
+	}
+	logPath := a.sessionLogPath(n.ID)
+	if _, err := os.Stat(logPath); err != nil {
+		return
+	}
+	key := n.CreatedAt
+	if ct := a.segment(n).ClearTimes; len(ct) > 0 {
+		key = ct[len(ct)-1]
+	}
+	if key == "" {
+		return
+	}
+	w := &sessionlog.Writer{Path: logPath}
+	if err := w.Append(sessionlog.NewStation(key, n.Title, n.Description)); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: station snapshot for %s: %v\n", n.ID, err)
+	}
+}
+
 // retireTranscript unlinks a node's transcript (and session id) after a known
 // session rollover. Corrections are new records: a node record persists the
 // cleared session id so a young node's discovery cannot resurrect the dead
@@ -2762,6 +2843,9 @@ func (a *app) retireTranscript(n *Node) {
 	if a.sessionsDir != "" {
 		logPath := a.sessionLogPath(n.ID)
 		if _, err := os.Stat(logPath); err == nil {
+			// Freeze the closing station's label before the seam turns the page,
+			// so a later rename only moves the fresh head (spec A/B/C).
+			a.snapshotClosingStation(n)
 			w := &sessionlog.Writer{Path: logPath}
 			if err := w.Append(sessionlog.NewClearSource("")); err != nil {
 				fmt.Fprintf(os.Stderr, "scimux: clear seam for %s: %v\n", n.ID, err)

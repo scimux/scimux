@@ -1968,3 +1968,149 @@ func TestRetireTranscriptAppendsClearSeam(t *testing.T) {
 		t.Fatal("retire must not create a log for a never-mirrored node")
 	}
 }
+
+// A /clear must snapshot the CLOSING station's label so a later rename of the
+// active chat cannot rewrite it (spec A/B/C). The snapshot is keyed to the
+// closing station's start time (created_at when no prior /clear) and lands
+// before the clear seam; the node's own Title/Description are left untouched so
+// the fresh head keeps reading the live label.
+func TestRetireTranscriptSnapshotsClosingStation(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "c1", Agent: "claude", Transcript: "/tmp/x.jsonl", SessionID: "sid",
+		Title: "Alpha", Description: "the alpha work", CreatedAt: "2026-07-01T09:00:00Z"}
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
+		sessionlog.NewSource("/tmp/x.jsonl", "sid"),
+		{T: "user", Text: "old question"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a.retireTranscript(n)
+
+	// The closing station (created_at, since no prior /clear) is snapshotted with
+	// the pre-clear label, and it precedes the clear seam.
+	evs := sessionlog.ReadEvents(w.Path)
+	stationIdx, seamIdx := -1, -1
+	for i, ev := range evs {
+		if ev.T == "station" && ev.Station != nil && ev.Station.Seam == n.CreatedAt {
+			stationIdx = i
+			if ev.Station.Title != "Alpha" || ev.Station.Desc != "the alpha work" {
+				t.Fatalf("snapshot label = %q/%q, want pre-clear Alpha/the alpha work", ev.Station.Title, ev.Station.Desc)
+			}
+		}
+		if ev.T == "source" && ev.Source != nil && ev.Source.Reason == "clear" {
+			seamIdx = i
+		}
+	}
+	if stationIdx < 0 {
+		t.Fatal("no station snapshot for the closing station")
+	}
+	if seamIdx < 0 || stationIdx > seamIdx {
+		t.Fatalf("station snapshot (idx %d) must precede the clear seam (idx %d)", stationIdx, seamIdx)
+	}
+	// The node's live label is untouched: the fresh head still reads Alpha, so a
+	// later rename only moves the head, never the snapshotted closing station.
+	if n.Title != "Alpha" || n.Description != "the alpha work" {
+		t.Fatalf("node label mutated by /clear: %q/%q", n.Title, n.Description)
+	}
+}
+
+// Editing an OLD station on the map (PATCH with a station seam) writes a label
+// snapshot for that station only and never touches the node record — so it
+// cannot bleed into the head or any other station (spec E). A PATCH without a
+// station still edits the node (the head path, unchanged).
+func TestHandleUpdateNodeStationOverride(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := newNode(a, `{"title":"Head","description":"head desc","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleUpdateNode(up, req)
+		return up
+	}
+
+	// Edit an old station: writes a station snapshot, node untouched.
+	if up := patch(`{"station":"2026-07-01T09:00:00Z","title":"Old renamed","description":"old desc"}`); up.Code != 200 {
+		t.Fatalf("station edit: code = %d body %q", up.Code, up.Body.String())
+	}
+	if a.nodes[0].Title != "Head" || a.nodes[0].Description != "head desc" {
+		t.Fatalf("node label changed by a station edit: %q/%q", a.nodes[0].Title, a.nodes[0].Description)
+	}
+	seg := sessionlog.ReadSegment(filepath.Join(a.sessionsDir, id+".jsonl"))
+	if got := seg.Stations["2026-07-01T09:00:00Z"]; got.Title != "Old renamed" || got.Desc != "old desc" {
+		t.Fatalf("station snapshot = %+v, want Old renamed/old desc", got)
+	}
+
+	// A PATCH without a station still edits the node (head path).
+	if up := patch(`{"title":"Head2"}`); up.Code != 200 {
+		t.Fatalf("head edit: code = %d body %q", up.Code, up.Body.String())
+	}
+	if a.nodes[0].Title != "Head2" {
+		t.Fatalf("head title = %q, want Head2", a.nodes[0].Title)
+	}
+}
+
+// handleState projects each node's per-station labels so the map can render a
+// stop with its own name/description rather than the node's single title.
+func TestHandleStateEmitsStationLabels(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "n1", Title: "Head", Agent: "claude", Dir: "/tmp", CreatedAt: "2026-07-01T09:00:00Z"}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "n1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("n1", "claude", "", "", a.home),
+		sessionlog.NewStation("2026-07-01T09:00:00Z", "First", "first desc"),
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("state code = %d", rec.Code)
+	}
+	var body struct {
+		Nodes []struct {
+			StationLabels map[string]struct {
+				Title string `json:"title"`
+				Desc  string `json:"desc"`
+			} `json:"station_labels"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Nodes) != 1 {
+		t.Fatalf("nodes = %d", len(body.Nodes))
+	}
+	got := body.Nodes[0].StationLabels["2026-07-01T09:00:00Z"]
+	if got.Title != "First" || got.Desc != "first desc" {
+		t.Fatalf("station_labels = %+v, want First/first desc", body.Nodes[0].StationLabels)
+	}
+}
