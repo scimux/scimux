@@ -358,6 +358,40 @@ assert.deepStrictEqual(
 	}
 }
 
+// A collapsed (docked column) metro map should let you edit a station's title
+// and description without going full-screen: long-press / right-click a station
+// opens the same activity editor the full-screen wall map reaches via its
+// pencil. Earlier that gesture early-returned unless mapFull was set, so the
+// docked map had no edit affordance at all.
+func TestDockedMapStationLongPressEdits(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	start := strings.Index(html, `longpress($("#mapwrap"), ".strow"`)
+	if start < 0 {
+		t.Fatal("station long-press handler not found")
+	}
+	end := strings.Index(html[start:], "});")
+	if end < 0 {
+		t.Fatal("station long-press handler not terminated")
+	}
+	block := html[start : start+end]
+	// The docked map must reach the editor — no unconditional mapFull bail-out.
+	if strings.Contains(block, "if (!mapFull) return;") {
+		t.Error("station long-press still bails out of the docked (collapsed) map")
+	}
+	// The full-screen-only selection move stays fenced behind mapFull.
+	if !strings.Contains(block, "if (mapFull){") {
+		t.Error("full-screen selection move should be gated on mapFull, not run in the docked map")
+	}
+	// Both maps open the editor scoped to the pressed station's stop.
+	if !strings.Contains(block, "openActivityEditor(id, stop)") {
+		t.Error("station long-press should open the activity editor scoped to the station's stop")
+	}
+}
+
 func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {

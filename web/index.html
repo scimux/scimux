@@ -3654,20 +3654,25 @@ $("#mapwrap").addEventListener("click", e => {
     }
   }
 });
-/* iPad: long-press a station selects it AND opens the editor sheet in one
-   gesture (desktop uses the pencil; right-click gets here too, matching the
-   app idiom) */
+/* long-press a station opens the editor sheet in one gesture (touch:
+   tap-and-hold; desktop: right-click / Ctrl-click — the HIG secondary-click
+   idiom). In the full-screen wall map it also moves the map's own selection;
+   in the docked (collapsed) column map it just opens the editor, so you can
+   edit a station's title/description while the lane stays on the left and the
+   chat on the right (desktop uses the pencil in full screen too). */
 longpress($("#mapwrap"), ".strow", (el, ev) => {
-  if (!mapFull) return;
   if (ev?.target?.closest("button, a, input")) return;
   const id = el.dataset.nid;
   if (!id) return;
-  const key = el.dataset.skey || headStopKey(id);
-  if (mapSelKey !== key){
-    mapSel = id; mapSelKey = key; mapSelStop = el.dataset.stop || "";
-    mapSig = ""; renderMap();   /* select + edit in one gesture */
+  const stop = el.dataset.stop || "";
+  if (mapFull){
+    const key = el.dataset.skey || headStopKey(id);
+    if (mapSelKey !== key){
+      mapSel = id; mapSelKey = key; mapSelStop = stop;
+      mapSig = ""; renderMap();   /* select + edit in one gesture */
+    }
   }
-  openActivityEditor(id, el.dataset.stop || "");
+  openActivityEditor(id, stop);
 });
 $("#journeybtn").addEventListener("click", () => {
   if (isDesktop()){
