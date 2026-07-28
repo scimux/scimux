@@ -612,7 +612,13 @@ func csrfIndex(fsys embed.FS) []byte {
 
 const csrfPlaceholder = "__SCIMUX_CSRF__"
 
-var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+// slugStrip collapses any run of characters not allowed in a tmux session name
+// into a single '-'. '.' is excluded from the allow-set on purpose: it is tmux's
+// window.pane target separator, so a slug containing it yields an unaddressable
+// session (see tmuxsession.nameRe). dashRun then squeezes the '-' runs this can
+// leave (e.g. from " - ") so names stay tidy.
+var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+var dashRun = regexp.MustCompile(`-{2,}`)
 
 // uniqueID allocates a slug that collides neither with registered nodes nor
 // with any name in taken — the current tmux sessions, so an unadopted session
@@ -620,7 +626,7 @@ var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // under the slug also counts as taken: it means a dead node's archive rename
 // failed, and reissuing the slug would append new history onto dead history.
 func (a *app) uniqueID(title string, taken map[string]bool) string {
-	slug := strings.Trim(slugStrip.ReplaceAllString(title, "-"), "-.")
+	slug := strings.Trim(dashRun.ReplaceAllString(slugStrip.ReplaceAllString(title, "-"), "-"), "-")
 	if slug == "" || !tmuxsession.ValidName(slug) {
 		slug = "chat"
 	}

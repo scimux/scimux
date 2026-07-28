@@ -182,6 +182,11 @@ func TestUniqueID(t *testing.T) {
 		"":                         "chat",
 		"!!!":                      "chat",
 		"--leading-dashes":         "leading-dashes",
+		// A dot is tmux's window.pane target separator: a session named with one
+		// is created but then unaddressable (capture/send/liveness all fail), so
+		// the slug must never contain it. The title itself keeps the dot.
+		"Review notes-design.md - 2": "Review-notes-design-md-2",
+		"v2.0 baseline":              "v2-0-baseline",
 	}
 	for title, want := range cases {
 		got := a.uniqueID(title, nil)

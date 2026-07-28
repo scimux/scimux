@@ -54,8 +54,12 @@ func NewServerWithRunner(socket string, run Runner) *Server {
 }
 
 // Session names must be shell- and tmux-safe: no separators tmux interprets,
-// no leading '-' that would parse as a flag.
-var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+// no leading '-' that would parse as a flag. In particular '.' is tmux's
+// window.pane target separator and ':' its window separator — a name carrying
+// either is created but then unaddressable by every pane command (capture-pane
+// reports "can't find pane"), so both are excluded. Only '_' and non-leading
+// '-' join the alphanumerics.
+var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 func ValidName(name string) bool { return nameRe.MatchString(name) }
 

@@ -11,6 +11,23 @@ import (
 	"testing"
 )
 
+// A session name must be safe as a tmux target, not merely non-empty: tmux
+// parses '.' as its window.pane separator and ':' as window, so a name carrying
+// either is created but then unaddressable by every pane command. ValidName must
+// reject them, while still accepting '_' and non-leading '-'.
+func TestValidNameRejectsTmuxSeparators(t *testing.T) {
+	for _, ok := range []string{"a", "Review-notes-design-md-2", "v2_0", "chat-3", "A.B-safe_ok"[:1]} {
+		if !ValidName(ok) {
+			t.Errorf("ValidName(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"notes-design.md", "a.b", "v2.0", "a:b", "-lead", "", ".hidden", "a b"} {
+		if ValidName(bad) {
+			t.Errorf("ValidName(%q) = true, want false", bad)
+		}
+	}
+}
+
 type call struct {
 	stdin string
 	args  []string
@@ -47,7 +64,9 @@ func TestNewSessionBuildsExactArgs(t *testing.T) {
 func TestNameValidation(t *testing.T) {
 	f := &fakeRunner{}
 	sv := newTestServer(f)
-	for _, bad := range []string{"", " ", "has space", "-leadingdash", "a;b", `a"b`, "a'b", "a\nb", "a:b"} {
+	// '.' (window.pane separator) and ':' (window separator) are rejected: a
+	// session so named is created but unaddressable by every pane command.
+	for _, bad := range []string{"", " ", "has space", "-leadingdash", "a;b", `a"b`, "a'b", "a\nb", "a:b", "rq2.low_speed"} {
 		if _, err := sv.NewSession(bad, "/", "bash"); err == nil {
 			t.Errorf("name %q accepted, want error", bad)
 		}
@@ -55,7 +74,7 @@ func TestNameValidation(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Fatalf("invalid names must not reach tmux, got %d calls", len(f.calls))
 	}
-	for _, good := range []string{"a", "rq2.low_speed-001", "X9"} {
+	for _, good := range []string{"a", "rq2_low_speed-001", "X9"} {
 		if _, err := sv.NewSession(good, "/", "bash"); err != nil {
 			t.Errorf("name %q rejected: %v", good, err)
 		}
