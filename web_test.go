@@ -1922,6 +1922,39 @@ func sliceBetween(t *testing.T, html, start, end string) string {
 	return rest[:j]
 }
 
+// iPhone feedback item 3: when a memo has no sections, the "No sections yet."
+// label duplicates the button beneath it. Drop the label and present just the
+// Add section button, centered vertically and horizontally in the pane.
+func TestWorkspaceEmptySectionStateIsCenteredButtonOnly(t *testing.T) {
+	html := mustReadIndex(t)
+	// the redundant caption is gone
+	if strings.Contains(html, "No sections yet.") {
+		t.Error(`the empty-section caption "No sections yet." must be dropped — it duplicates the Add section button`)
+	}
+	// the empty state is a centering wrapper holding the single add button
+	esi := strings.Index(html, "class=\"wssecempty\"")
+	if esi < 0 {
+		t.Fatal("empty section state must render a .wssecempty centering wrapper")
+	}
+	// the wrapper must contain the add-section button (so wsAddSection still fires)
+	wrap := html[esi:]
+	end := strings.Index(wrap, "</div>")
+	if end < 0 || !strings.Contains(wrap[:end+len("</div>")], "data-addsection") {
+		t.Error(".wssecempty must contain the data-addsection button")
+	}
+	// the wrapper centers its button both axes and fills the pane so it sits
+	// vertically centered, not pinned to the top
+	css := cssBlock(t, html, ".wssecempty {")
+	for _, want := range []string{"align-items: center", "justify-content: center"} {
+		if !strings.Contains(css, want) {
+			t.Errorf(".wssecempty must center its content (%s); got %q", want, css)
+		}
+	}
+	if !strings.Contains(css, "min-height") {
+		t.Errorf(".wssecempty must claim the pane height so the button centers vertically; got %q", css)
+	}
+}
+
 // mustReadIndex / cssBlock: small helpers shared by the workspace tests.
 func mustReadIndex(t *testing.T) string {
 	t.Helper()

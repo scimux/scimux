@@ -1222,7 +1222,10 @@ body.notes-open #notespane { transform: translateX(0); }
 #wssections { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; flex: 1;
   padding: 8px 18px 40px; }
 /* discoverable add control when a memo has no sections left (item 7) — the
-   overflow menu alone hid the escape hatch after deleting every section */
+   overflow menu alone hid the escape hatch after deleting every section.
+   iPhone item 3: no caption, just the button, centered in the pane. */
+#wssections .wssecempty { display: flex; align-items: center; justify-content: center;
+  min-height: 100%; }
 #wssections .wssecaddempty { display: inline-flex; align-items: center; gap: 6px; margin: 14px 4px;
   padding: 8px 13px; border-radius: 9px; font-size: 13px; color: var(--work);
   background: color-mix(in srgb, var(--work) 8%, transparent); }
@@ -5986,7 +5989,7 @@ function renderWsSheet(){
   /* deleting every section used to strand the memo — the only add control was
      the overflow menu (item 7). Offer a visible add button in the empty state. */
   secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id])).join("") ||
-    `<div class="empty">No sections yet.</div><button class="wssecaddempty" data-addsection>${ICON_PLUS}<span>Add section</span></button>`;
+    `<div class="wssecempty"><button class="wssecaddempty" data-addsection>${ICON_PLUS}<span>Add section</span></button></div>`;
   applyRefClamps(secWrap);
 }
 /* sectionBodyInner emits a section's resting body: the rendered Markdown plus
