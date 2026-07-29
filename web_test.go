@@ -141,14 +141,14 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 	}
 	html := string(b)
 	// the closed Bookmarks toggle announces opening bookmarks (glyph set by
-	// renderNotesToggle, so the static button carries no chevron)
-	if !strings.Contains(html, `id="notesbtn" aria-label="open bookmarks"></button>`) {
+	// renderBookmarksToggle, so the static button carries no chevron)
+	if !strings.Contains(html, `id="bookmarksbtn" aria-label="open bookmarks"></button>`) {
 		t.Fatal("closed bookmarks toggle should announce opening bookmarks")
 	}
 	for _, want := range []string{
-		`btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";`,
-		`btn.setAttribute("aria-label", notesOpen ? "close bookmarks" : "open bookmarks");`,
-		"renderNotesToggle();\n  renderNoteFlags();",
+		`btn.innerHTML = bookmarksOpen ? "&#8250;" : "&#8249;";`,
+		`btn.setAttribute("aria-label", bookmarksOpen ? "close bookmarks" : "open bookmarks");`,
+		"renderBookmarksToggle();\n  renderBookmarkFlags();",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("bookmarks toggle state sync missing %q", want)
@@ -167,14 +167,14 @@ func TestNotesJumpActionRendersForUIDOnlyNotes(t *testing.T) {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
-	if !strings.Contains(html, `${nt.node || nt.uid ? `+"`"+`<button data-nact="jump"`) {
+	if !strings.Contains(html, `${nt.node || nt.uid ? `+"`"+`<button data-bmact="jump"`) {
 		t.Error("notes-pane jump button must render when the note has a durable uid, not only a live node")
 	}
-	if strings.Contains(html, `${nt.node ? `+"`"+`<button data-nact="jump"`) {
+	if strings.Contains(html, `${nt.node ? `+"`"+`<button data-bmact="jump"`) {
 		t.Error("jump button is still gated on nt.node alone — UID-only archived-source notes get no jump affordance")
 	}
 	// The comment action stays live-node-only (it replies into the live chat).
-	if !strings.Contains(html, `${nt.node && !nt.anchor ? `+"`"+`<button data-nact="comment"`) {
+	if !strings.Contains(html, `${nt.node && !nt.anchor ? `+"`"+`<button data-bmact="comment"`) {
 		t.Error("comment action gate changed unexpectedly")
 	}
 }
@@ -201,14 +201,14 @@ func TestBubbleCopyLivesInActionRow(t *testing.T) {
 		`<div class="bubwhen">${esc(fmtBubbleTime(turn.time))}</div>`,
 		`data-bact="fork"`,
 		`data-bact="desc"`,
-		`data-bact="note"`,
+		`data-bact="bookmark"`,
 		`data-bact="copy"`,
 	} {
 		if !strings.Contains(row, want) {
 			t.Errorf("bubble action row missing %q", want)
 		}
 	}
-	if !(strings.Index(row, `data-bact="note"`) < strings.Index(row, `data-bact="copy"`)) {
+	if !(strings.Index(row, `data-bact="bookmark"`) < strings.Index(row, `data-bact="copy"`)) {
 		t.Fatal("copy should be the rightmost bubble action")
 	}
 	if !(strings.Index(row, `class="bubwhen"`) < strings.Index(row, `data-bact="fork"`)) {
@@ -780,7 +780,7 @@ func TestPinnedStoreModel(t *testing.T) {
 	}
 	html := string(b)
 	for _, want := range []string{
-		`let UI = { groups: [], archived: [], notes: [], lanes: [], pinned: [] };`,
+		`let UI = { groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] };`,
 		`pinned: []`, // in normUI defaults too
 		`case "pin":`,
 		`case "unpin":`,
@@ -798,7 +798,7 @@ func TestPinnedStoreModel(t *testing.T) {
 	// pin-order (drag) replaces the whole ordered list, like groups/lanes; and
 	// like arch/unarch it is not an always-replay idempotent op.
 	if strings.Contains(html, `op.k === "pin"`) &&
-		!strings.Contains(html, `idempotentOp = op => op.k === "note-add" || op.k === "note-del"`) {
+		!strings.Contains(html, `idempotentOp = op => op.k === "bookmark-add" || op.k === "bookmark-del"`) {
 		t.Error("pin ops must not be marked idempotent (they encode intent, replay on matching rev only)")
 	}
 }
@@ -1071,8 +1071,8 @@ func TestSearchActionBar(t *testing.T) {
 	}
 	// add-note: files a note op and, being the "stays open" action, its branch
 	// must NOT contain a closeSearch.
-	nb := body[strings.Index(body, `a === "note"`):]
-	if !strings.Contains(nb, `k: "note-add"`) {
+	nb := body[strings.Index(body, `a === "bookmark"`):]
+	if !strings.Contains(nb, `k: "bookmark-add"`) {
 		t.Error("add-note must file a note-add op")
 	}
 	if strings.Contains(nb, "closeSearch()") {
@@ -1106,19 +1106,19 @@ func TestSearchHitActionsAdaptive(t *testing.T) {
 }
 const assert = require("assert");
 const eq = (a, b) => assert.deepStrictEqual(a, b);
-eq(searchHitActions("live", true),      ["show", "fork", "note"]);
-eq(searchHitActions("live", false),     ["show", "note"]);
-eq(searchHitActions("notes", false),    ["show", "note"]);
-eq(searchHitActions("notes", true),     ["show", "note"]);     // notes never fork
-eq(searchHitActions("archived", true),  ["show", "note"]);     // fork is in the read-only view
-eq(searchHitActions("archived", false), ["show", "note"]);
+eq(searchHitActions("live", true),      ["show", "fork", "bookmark"]);
+eq(searchHitActions("live", false),     ["show", "bookmark"]);
+eq(searchHitActions("bookmarks", false),    ["show", "bookmark"]);
+eq(searchHitActions("bookmarks", true),     ["show", "bookmark"]);     // notes never fork
+eq(searchHitActions("archived", true),  ["show", "bookmark"]);     // fork is in the read-only view
+eq(searchHitActions("archived", false), ["show", "bookmark"]);
 // An asset filename hit is show-to-chat ONLY — no fork, no add-note — even in a
 // live, forkable chat (spec §"Session assets").
 eq(searchHitActions("live", true, "asset"),     ["show"]);
 eq(searchHitActions("archived", true, "asset"), ["show"]);
 // A normal (non-asset) role in a forkable live chat keeps the full set.
-eq(searchHitActions("live", true, "user"),      ["show", "fork", "note"]);
-eq(searchHitActions("live", true, "assistant"), ["show", "fork", "note"]);
+eq(searchHitActions("live", true, "user"),      ["show", "fork", "bookmark"]);
+eq(searchHitActions("live", true, "assistant"), ["show", "fork", "bookmark"]);
 `
 	f := filepath.Join(t.TempDir(), "hitactions.js")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
@@ -1284,7 +1284,7 @@ assert.strictEqual(recentsHTML(), "", "no recents → empty render (prompt fallb
 // A long chat bubble taken to the Notes pane forces a lot of scrolling
 // (session logs: the top ~15% of bubbles blow past a screenful). The fix
 // clamps a note bubble past a pixel threshold behind a "Show more" toggle,
-// leaving the ~85% short bubbles untouched. noteClampState is the DOM-free
+// leaving the ~85% short bubbles untouched. bookmarkClampState is the DOM-free
 // decision core (the measure loop feeds it a real scrollHeight); execute it
 // under node against synthetic heights so the clamp/label logic is locked.
 func TestNoteClampState(t *testing.T) {
@@ -1297,11 +1297,11 @@ func TestNoteClampState(t *testing.T) {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
-	start := strings.Index(html, "const NOTE_CLAMP_PX")
+	start := strings.Index(html, "const BOOKMARK_CLAMP_PX")
 	if start < 0 {
-		t.Fatal("could not locate NOTE_CLAMP_PX in web/index.html")
+		t.Fatal("could not locate BOOKMARK_CLAMP_PX in web/index.html")
 	}
-	end := strings.Index(html[start:], "function renderNotesPane(")
+	end := strings.Index(html[start:], "function renderBookmarksPane(")
 	if end < 0 {
 		t.Fatal("could not locate the end of the clamp core in web/index.html")
 	}
@@ -1309,14 +1309,14 @@ func TestNoteClampState(t *testing.T) {
 const assert = require("assert");
 // A short bubble (below the cap) never clamps and never shows the toggle,
 // whatever its (irrelevant) expanded flag — this is the ~85% common case.
-assert.deepStrictEqual(noteClampState(120, false), { clamped: false, showBtn: false, label: "Show more" }, "short/collapsed: no clamp, no button");
-assert.deepStrictEqual(noteClampState(120, true),  { clamped: false, showBtn: false, label: "Show less" }, "short/expanded: still no clamp, no button");
+assert.deepStrictEqual(bookmarkClampState(120, false), { clamped: false, showBtn: false, label: "Show more" }, "short/collapsed: no clamp, no button");
+assert.deepStrictEqual(bookmarkClampState(120, true),  { clamped: false, showBtn: false, label: "Show less" }, "short/expanded: still no clamp, no button");
 // A tall bubble, collapsed (default), clamps and offers "Show more".
-assert.deepStrictEqual(noteClampState(900, false), { clamped: true,  showBtn: true,  label: "Show more" }, "tall/collapsed: clamp + Show more");
+assert.deepStrictEqual(bookmarkClampState(900, false), { clamped: true,  showBtn: true,  label: "Show more" }, "tall/collapsed: clamp + Show more");
 // The same tall bubble once the user expanded it: not clamped, toggle reads back.
-assert.deepStrictEqual(noteClampState(900, true),  { clamped: false, showBtn: true,  label: "Show less" }, "tall/expanded: no clamp, Show less");
+assert.deepStrictEqual(bookmarkClampState(900, true),  { clamped: false, showBtn: true,  label: "Show less" }, "tall/expanded: no clamp, Show less");
 // The boundary is exclusive: exactly at the cap is not "tall".
-assert.deepStrictEqual(noteClampState(NOTE_CLAMP_PX, false), { clamped: false, showBtn: false, label: "Show more" }, "at the cap is not tall");
+assert.deepStrictEqual(bookmarkClampState(BOOKMARK_CLAMP_PX, false), { clamped: false, showBtn: false, label: "Show more" }, "at the cap is not tall");
 `
 	f := filepath.Join(t.TempDir(), "noteclamp.js")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
@@ -1338,43 +1338,43 @@ func TestNoteCollapseWiring(t *testing.T) {
 	}
 	html := string(b)
 	for _, want := range []string{
-		"let expandedNotes = new Set();", // ephemeral, sibling of openNoteT
-		"const NOTE_CLAMP_PX",            // the threshold constant
-		"function noteClampState(",       // the decision core
-		"data-nmore",                     // the per-bubble toggle button
-		`class="nmore"`,                  // its markup in the note template
-		".note .nbubble.clamped",         // the CSS clamp
+		"let expandedBookmarks = new Set();", // ephemeral, sibling of openBookmarkT
+		"const BOOKMARK_CLAMP_PX",            // the threshold constant
+		"function bookmarkClampState(",       // the decision core
+		"data-nmore",                         // the per-bubble toggle button
+		`class="nmore"`,                      // its markup in the note template
+		".bookmark .nbubble.clamped",         // the CSS clamp
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("note collapse wiring missing %q", want)
 		}
 	}
 	// The toggle handler is a distinct branch keyed on data-nmore. It must sit
-	// in the #notespane click delegate BEFORE the generic ".note" tap branch,
+	// in the #bookmarkspane click delegate BEFORE the generic ".bookmark" tap branch,
 	// or clicking "Show more" would also open the action bar.
-	dele := strings.Index(html, `$("#notespane").addEventListener("click"`)
+	dele := strings.Index(html, `$("#bookmarkspane").addEventListener("click"`)
 	if dele < 0 {
-		t.Fatal("could not locate the #notespane click delegate")
+		t.Fatal("could not locate the #bookmarkspane click delegate")
 	}
 	body := html[dele:]
 	nmore := strings.Index(body, "[data-nmore]")
-	noteTap := strings.Index(body, `closest(".note")`)
+	noteTap := strings.Index(body, `closest(".bookmark")`)
 	if nmore < 0 {
 		t.Fatal("the notespane delegate has no data-nmore branch")
 	}
 	if !(nmore < noteTap) {
-		t.Error("the data-nmore branch must precede the .note tap branch so Show more does not open the action bar")
+		t.Error("the data-nmore branch must precede the .bookmark tap branch so Show more does not open the action bar")
 	}
 	// Ephemerality: the expand state is never persisted. No localStorage key and
-	// no ui op may touch expandedNotes.
-	if regexp.MustCompile(`localStorage[^;\n]*expandedNotes|expandedNotes[^;\n]*localStorage`).MatchString(html) {
-		t.Error("expandedNotes must stay ephemeral — no localStorage persistence")
+	// no ui op may touch expandedBookmarks.
+	if regexp.MustCompile(`localStorage[^;\n]*expandedBookmarks|expandedBookmarks[^;\n]*localStorage`).MatchString(html) {
+		t.Error("expandedBookmarks must stay ephemeral — no localStorage persistence")
 	}
 	// The toggle mutates the DOM directly and returns; it must not call
-	// renderNotesPane (which would be a needless rebuild) inside its branch.
+	// renderBookmarksPane (which would be a needless rebuild) inside its branch.
 	branch := body[nmore:]
 	if endB := strings.Index(branch, "return;"); endB > 0 {
-		if strings.Contains(branch[:endB], "renderNotesPane(") {
+		if strings.Contains(branch[:endB], "renderBookmarksPane(") {
 			t.Error("the data-nmore toggle must not rebuild the pane — flip the class in place")
 		}
 	}
@@ -1537,7 +1537,7 @@ func TestWebUseInSheetWiring(t *testing.T) {
 	}
 	html := string(b)
 	for _, want := range []string{
-		`data-nact="sheet"`,        // Use-in-sheet action in the notes-pane action row
+		`data-bmact="sheet"`,       // Use-in-sheet action in the notes-pane action row
 		"function startPlacement(", // enters placement mode holding the note
 		`classList.add("placing")`, // placement mode drives the add-here affordances
 		`data-addhere`,             // per-section "add capture here" target
@@ -1594,7 +1594,7 @@ func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 		"data-wsimore",                 // per-bubble show-more toggle
 		".wsibubble.clamped",           // the CSS clamp on tall capture bubbles
 		"function applyWsInboxClamps(", // the measure/apply pass
-		"expandedWsInbox",              // ephemeral expand state, sibling of expandedNotes
+		"expandedWsInbox",              // ephemeral expand state, sibling of expandedBookmarks
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("workspace inbox tabs/clamp wiring missing %q", want)
@@ -1671,22 +1671,22 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 			t.Errorf("missing inlined icon constant %q", want)
 		}
 	}
-	// the chat-area toggle (#notesbtn) is the ‹/› chevron mirroring pane state;
+	// the chat-area toggle (#bookmarksbtn) is the ‹/› chevron mirroring pane state;
 	// the bookmark glyph now lives on the Bookmarks pane's top-right button.
-	tog := sliceBetween(t, html, "function renderNotesToggle(", "\n}\n")
+	tog := sliceBetween(t, html, "function renderBookmarksToggle(", "\n}\n")
 	if strings.Contains(tog, "ICON_BOOKMARK") {
-		t.Error("the chat-area toggle (#notesbtn) must be a chevron, not ICON_BOOKMARK")
+		t.Error("the chat-area toggle (#bookmarksbtn) must be a chevron, not ICON_BOOKMARK")
 	}
 	if !strings.Contains(tog, `"&#8249;"`) {
-		t.Error("the chat-area toggle (#notesbtn) must restore the ‹ chevron when closed")
+		t.Error("the chat-area toggle (#bookmarksbtn) must restore the ‹ chevron when closed")
 	}
 	if !strings.Contains(html, `$("#sheetsbtn").innerHTML = ICON_BOOKMARK;`) {
 		t.Error("the Bookmarks pane top-right button (#sheetsbtn) must use ICON_BOOKMARK")
 	}
 	// in the note action row, the paperclip (use-in-note) sits just before delete
-	row := sliceBetween(t, html, `<div class="noteactions">`, "</div>")
-	clip := strings.Index(row, `data-nact="sheet"`)
-	del := strings.Index(row, `data-nact="del"`)
+	row := sliceBetween(t, html, `<div class="bookmarkactions">`, "</div>")
+	clip := strings.Index(row, `data-bmact="sheet"`)
+	del := strings.Index(row, `data-bmact="del"`)
 	if clip < 0 || del < 0 {
 		t.Fatal("note action row must contain both the use-in-note and delete actions")
 	}
@@ -1717,7 +1717,7 @@ func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
 	}
 	body := html[i : i+strings.Index(html[i:], "}, { passive: true });")]
 	// a left-going swipe while the Bookmarks pane is open must open the workspace
-	if !regexp.MustCompile(`dx < 0 && notesOpen\)\s*openWorkspace\(\)`).MatchString(body) {
+	if !regexp.MustCompile(`dx < 0 && bookmarksOpen\)\s*openWorkspace\(\)`).MatchString(body) {
 		t.Error("swipe R->L on the open Bookmarks pane must call openWorkspace() (Notes overview)")
 	}
 }
@@ -1960,7 +1960,7 @@ setTimeout(() => {
 
 // Review finding 3: an anchored note *comment* embedded into a memo must inherit
 // its parent note's lane in the reference snapshot, exactly like the Notes pane
-// does. The snapshot path fed noteLaneId an empty byT map, so an anchored
+// does. The snapshot path fed bookmarkLaneId an empty byT map, so an anchored
 // comment lost its lane color and the memo card missed that lane dot.
 func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -1968,16 +1968,16 @@ func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
 		t.Skip("node not installed; skipping JS execution check")
 	}
 	html := mustReadIndex(t)
-	laneFn := sliceBetween(t, html, "function noteLaneId(", "\nfunction noteSortKey(")
-	snapFn := sliceBetween(t, html, "function noteSnapshot(", "\nfunction noteSource(")
+	laneFn := sliceBetween(t, html, "function bookmarkLaneId(", "\nfunction bookmarkSortKey(")
+	snapFn := sliceBetween(t, html, "function bookmarkSnapshot(", "\nfunction bookmarkSource(")
 	script := `
-const UI = { notes: [ { t: "1", lane: "lane-a" }, { t: "2", anchor: "1" } ] };
+const UI = { bookmarks: [ { t: "1", lane: "lane-a" }, { t: "2", anchor: "1" } ] };
 function nodeById(){ return null; }
 function laneColor(id){ return id ? "#c-" + id : ""; }
 ` + laneFn + "\n" + snapFn + `
 const assert = require("assert");
-const comment = UI.notes[1];   // anchored to note "1", carries no lane of its own
-const snap = noteSnapshot(comment);
+const comment = UI.bookmarks[1];   // anchored to note "1", carries no lane of its own
+const snap = bookmarkSnapshot(comment);
 assert.strictEqual(snap.lane, "#c-lane-a", "an anchored comment must inherit its parent note's lane color in the snapshot");
 console.log("ok");
 `

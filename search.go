@@ -33,13 +33,13 @@ const (
 
 // searchHitJSON is one match in the response. Log hits carry (segment, record);
 // note hits carry note_id and the referenced turn_time. Role is user|assistant|
-// asset|note.
+// asset|bookmark.
 type searchHitJSON struct {
 	Role     string `json:"role"`
 	Segment  int    `json:"segment,omitempty"`
 	Record   int    `json:"record,omitempty"`
 	UID      string `json:"uid,omitempty"`
-	NoteID   string `json:"note_id,omitempty"`
+	BookmarkID   string `json:"bookmark_id,omitempty"`
 	Time     string `json:"time"`
 	TurnTime string `json:"turn_time,omitempty"`
 	Before   string `json:"before"`
@@ -171,11 +171,11 @@ func dirExists(path string) bool {
 	return err == nil && st.IsDir()
 }
 
-// searchNote is the narrow, defensive projection of a ui.json note the server is
+// searchBookmark is the narrow, defensive projection of a ui.json note the server is
 // willing to read: the client owns ui.json's shape, so the reader takes only
 // these fields and ignores everything else. The note id is `t` (its ISO
 // creation stamp); node/turnTime tie it back to a chat; text is the corpus.
-type searchNote struct {
+type searchBookmark struct {
 	T        string `json:"t"`
 	Text     string `json:"text"`
 	Node     string `json:"node"`
@@ -301,13 +301,13 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Notes: fold into the owning live chat when it matched or exists; otherwise
 	// the "Notes" bucket. A note referencing a live node that produced no log hit
 	// still needs a group, so create the live group on demand from its source.
-	for _, note := range a.searchNotes() {
+	for _, note := range a.searchBookmarks() {
 		b, m, af, ok := searchExcerpt(note.Text, q)
 		if !ok {
 			continue
 		}
 		hit := searchHitJSON{
-			Role: "note", NoteID: note.T, Time: note.T, TurnTime: note.TurnTime,
+			Role: "bookmark", BookmarkID: note.T, Time: note.T, TurnTime: note.TurnTime,
 			UID: note.UID, Segment: note.Segment, Record: note.Record,
 			Before: b, Match: m, After: af,
 		}
@@ -323,10 +323,10 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if g == nil {
-			g = groups["notes"]
+			g = groups["bookmarks"]
 			if g == nil {
-				g = &searchGroupJSON{Kind: "notes", Title: "Notes"}
-				groups["notes"] = g
+				g = &searchGroupJSON{Kind: "bookmarks", Title: "Bookmarks"}
+				groups["bookmarks"] = g
 			}
 		}
 		g.Hits = append(g.Hits, hit)
@@ -356,10 +356,10 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// searchNotes reads ui.json through the narrow defensive reader. Any failure —
+// searchBookmarks reads ui.json through the narrow defensive reader. Any failure —
 // missing file, invalid JSON, notes not an array — yields no notes, never an
 // error: the server treats the client-owned document as untrusted input.
-func (a *app) searchNotes() []searchNote {
+func (a *app) searchBookmarks() []searchBookmark {
 	if a.uiPath == "" {
 		return nil
 	}
@@ -368,12 +368,12 @@ func (a *app) searchNotes() []searchNote {
 		return nil
 	}
 	var doc struct {
-		Notes []searchNote `json:"notes"`
+		Bookmarks []searchBookmark `json:"bookmarks"`
 	}
 	if json.Unmarshal(b, &doc) != nil {
 		return nil
 	}
-	return doc.Notes
+	return doc.Bookmarks
 }
 
 // searchExcerpt runs ScanLog's excerpt window over a single string (a note's

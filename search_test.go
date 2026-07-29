@@ -38,7 +38,7 @@ func TestHandleSearchTotalHitCap(t *testing.T) {
 	total := 0
 	for _, g := range out.Groups {
 		for _, h := range g.Hits {
-			if h.Role != "note" {
+			if h.Role != "bookmark" {
 				total++
 			}
 		}
@@ -96,16 +96,16 @@ type searchResp struct {
 		Agent    string `json:"agent"`
 		Forkable bool   `json:"forkable"`
 		Hits     []struct {
-			Role     string `json:"role"`
-			Segment  int    `json:"segment"`
-			Record   int    `json:"record"`
-			UID      string `json:"uid"`
-			NoteID   string `json:"note_id"`
-			Time     string `json:"time"`
-			TurnTime string `json:"turn_time"`
-			Before   string `json:"before"`
-			Match    string `json:"match"`
-			After    string `json:"after"`
+			Role       string `json:"role"`
+			Segment    int    `json:"segment"`
+			Record     int    `json:"record"`
+			UID        string `json:"uid"`
+			BookmarkID string `json:"bookmark_id"`
+			Time       string `json:"time"`
+			TurnTime   string `json:"turn_time"`
+			Before     string `json:"before"`
+			Match      string `json:"match"`
+			After      string `json:"after"`
 		} `json:"hits"`
 	} `json:"groups"`
 }
@@ -253,7 +253,7 @@ func TestHandleSearchFoldsNotes(t *testing.T) {
 		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "plain chat text", Time: "2026-07-14T01:00:00Z"},
 	)
-	ui := `{"notes":[
+	ui := `{"bookmarks":[
 		{"t":"2026-07-16T00:00:00Z","text":"remember the sprocket","node":"alpha","turnTime":"2026-07-14T01:00:00Z"},
 		{"t":"2026-07-17T00:00:00Z","text":"loose sprocket idea"}
 	]}`
@@ -268,21 +268,21 @@ func TestHandleSearchFoldsNotes(t *testing.T) {
 	var foundInChat, foundInNotes bool
 	for _, g := range out.Groups {
 		for _, h := range g.Hits {
-			if h.Role != "note" {
+			if h.Role != "bookmark" {
 				continue
 			}
 			if g.ID == "alpha" {
 				foundInChat = true
-				if h.NoteID != "2026-07-16T00:00:00Z" || h.TurnTime != "2026-07-14T01:00:00Z" {
+				if h.BookmarkID != "2026-07-16T00:00:00Z" || h.TurnTime != "2026-07-14T01:00:00Z" {
 					t.Errorf("chat note hit = %+v", h)
 				}
 			}
-			if g.Kind == "notes" {
+			if g.Kind == "bookmarks" {
 				foundInNotes = true
 				if g.Forkable {
 					t.Errorf("Notes group must not be forkable")
 				}
-				if h.NoteID != "2026-07-17T00:00:00Z" {
+				if h.BookmarkID != "2026-07-17T00:00:00Z" {
 					t.Errorf("notes-group hit = %+v", h)
 				}
 			}
@@ -342,7 +342,7 @@ func TestHandleSearchGlobalCaps(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		notes = append(notes, fmt.Sprintf(`{"t":"2026-07-15T%02d:00:00Z","text":"sprocket note %d","node":"alpha"}`, i, i))
 	}
-	if err := os.WriteFile(a.uiPath, []byte(`{"notes":[`+strings.Join(notes, ",")+`]}`), 0o600); err != nil {
+	if err := os.WriteFile(a.uiPath, []byte(`{"bookmarks":[`+strings.Join(notes, ",")+`]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -402,7 +402,7 @@ func TestHandleSearchNoteCarriesDurableAddress(t *testing.T) {
 	)
 	// A note with the full triple, plus one legacy note with none of it and an
 	// unknown extra field the reader must ignore.
-	ui := `{"notes":[
+	ui := `{"bookmarks":[
 		{"t":"2026-07-16T00:00:00Z","text":"remember the sprocket","node":"alpha","turnTime":"2026-07-14T01:00:00Z","uid":"abc123","segment":1,"record":4},
 		{"t":"2026-07-17T00:00:00Z","text":"loose sprocket idea","bogus":true}
 	]}`
@@ -414,10 +414,10 @@ func TestHandleSearchNoteCarriesDurableAddress(t *testing.T) {
 	var addressed, legacy int
 	for _, g := range out.Groups {
 		for _, h := range g.Hits {
-			if h.Role != "note" {
+			if h.Role != "bookmark" {
 				continue
 			}
-			switch h.NoteID {
+			switch h.BookmarkID {
 			case "2026-07-16T00:00:00Z":
 				addressed++
 				if h.UID != "abc123" || h.Segment != 1 || h.Record != 4 {
@@ -441,7 +441,7 @@ func TestHandleSearchDefensiveNotes(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	a.uiPath = filepath.Join(a.home, "ui.json")
-	if err := os.WriteFile(a.uiPath, []byte(`{"notes":"not an array","x":[1,2]}`), 0o600); err != nil {
+	if err := os.WriteFile(a.uiPath, []byte(`{"bookmarks":"not an array","x":[1,2]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out := doSearch(t, a, "anything")

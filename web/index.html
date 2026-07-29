@@ -1038,7 +1038,7 @@ body.map-full #maptoolbar.on { display: flex; }
    same idiom as the ‹ journeys button on the left. */
 /* phone: the pane slides over the chat from the right (full-width sheet);
    desktop/iPad docks it as a trailing column (see the min-width block) */
-#notespane { position: fixed; z-index: 40; display: flex;
+#bookmarkspane { position: fixed; z-index: 40; display: flex;
   top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; right: 0;
   width: 100%; background: var(--bg);
   /* top+bottom define the height; .panel's height:100% would overflow the
@@ -1046,38 +1046,38 @@ body.map-full #maptoolbar.on { display: flex; }
   height: auto;
   transform: translateX(103%); transition: transform .25s;
   box-shadow: -12px 0 30px rgba(0,0,0,.25); }
-body.notes-open #notespane { transform: translateX(0); }
-#notesbtn { font-size: 22px; color: var(--work); }
+body.bookmarks-open #bookmarkspane { transform: translateX(0); }
+#bookmarksbtn { font-size: 22px; color: var(--work); }
 /* the flags stack on the right edge, thumb-sized (44pt), lane-colored;
    hidden while the pane is open (the notebook is already unfolded) */
-#noteflags { display: none; position: fixed; z-index: 25; right: 0;
+#bookmarkflags { display: none; position: fixed; z-index: 25; right: 0;
   top: calc(var(--sbh) + env(safe-area-inset-top) + 80px);
   flex-direction: column; gap: 8px; }
-#noteflags button { width: 15px; height: 44px; border-radius: 8px 0 0 8px;
+#bookmarkflags button { width: 15px; height: 44px; border-radius: 8px 0 0 8px;
   opacity: .85; transition: width .15s; }
-#noteflags button:hover { width: 22px; opacity: 1; }
-#notetabs { border-bottom: 1px solid var(--hairline); }
-#notelist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: clip;
+#bookmarkflags button:hover { width: 22px; opacity: 1; }
+#bookmarktabs { border-bottom: 1px solid var(--hairline); }
+#bookmarklist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: clip;
   padding: 6px 14px 12px;
   -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-.note { margin: 12px 0; }
-.note .when { font-size: 11px; color: var(--dim); margin: 0 0 3px 2px;
+.bookmark { margin: 12px 0; }
+.bookmark .when { font-size: 11px; color: var(--dim); margin: 0 0 3px 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.note .nbubble { background: var(--surface); border-radius: 10px; padding: 8px 11px;
+.bookmark .nbubble { background: var(--surface); border-radius: 10px; padding: 8px 11px;
   font-size: 13.5px; line-height: 1.45; border-left: 3px solid var(--unlane);
   overflow-wrap: break-word; }
 /* a tall noted bubble is clamped behind "Show more"; the mask fades the cut
    edge without a wrapper element (overflow:hidden would clip a ::after) */
-.note .nbubble.clamped { max-height: 220px; overflow: hidden;
+.bookmark .nbubble.clamped { max-height: 220px; overflow: hidden;
   -webkit-mask-image: linear-gradient(#000 78%, transparent);
   mask-image: linear-gradient(#000 78%, transparent); }
-.note .nmore { margin: 4px 2px 0; padding: 2px 0; background: none; border: 0;
+.bookmark .nmore { margin: 4px 2px 0; padding: 2px 0; background: none; border: 0;
   font-size: 12px; color: var(--dim); cursor: pointer; }
-.note .nmore:active { color: var(--work); }
-.noteactions { display: flex; gap: 8px; padding: 6px 2px 0; }
-.noteactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
+.bookmark .nmore:active { color: var(--work); }
+.bookmarkactions { display: flex; gap: 8px; padding: 6px 2px 0; }
+.bookmarkactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
   display: flex; align-items: center; justify-content: center; background: var(--surface); }
-.noteactions button:active { color: var(--work); }
+.bookmarkactions button:active { color: var(--work); }
 /* jump-to-source lands here: briefly ring the target bubble */
 .turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
 /* transient notice (jump-to-source misses); fixed so polled rebuilds can't wipe it */
@@ -1086,29 +1086,29 @@ body.notes-open #notespane { transform: translateX(0); }
   background: var(--ink); color: var(--bg); font-size: 13px; line-height: 1.4;
   padding: 8px 14px; border-radius: 12px; text-align: center; pointer-events: none; }
 /* comments sort at their anchor and read as a scribble under the sticky */
-.note.comment { margin: 8px 0 8px 26px; }
-#notesback { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#notebar { border-top: 1px solid var(--hairline); background: var(--bg);
+.bookmark.comment { margin: 8px 0 8px 26px; }
+#bookmarksback { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bookmarkbar { border-top: 1px solid var(--hairline); background: var(--bg);
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); }
 #chathead .toprow, #chatmission { cursor: pointer; }
-#notebarrow { display: flex; align-items: flex-end; gap: 8px; }
-#notechip { display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+#bookmarkbarrow { display: flex; align-items: flex-end; gap: 8px; }
+#bookmarkchip { display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
   padding: 4px 6px 4px 10px; border-radius: 12px; font-size: 12.5px; color: var(--dim);
   background: color-mix(in srgb, var(--work) 12%, transparent);
   border-left: 3px solid var(--work); }
-#notechip[hidden] { display: none; }
-#notechiptext { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#notechipx { flex: none; width: 20px; height: 20px; border-radius: 10px; font-size: 15px;
+#bookmarkchip[hidden] { display: none; }
+#bookmarkchiptext { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bookmarkchipx { flex: none; width: 20px; height: 20px; border-radius: 10px; font-size: 15px;
   line-height: 1; color: var(--dim); display: flex; align-items: center; justify-content: center; }
-#noteprompt { flex: 1; font-size: 16px; line-height: 1.4; color: var(--ink);
+#bookmarkprompt { flex: 1; font-size: 16px; line-height: 1.4; color: var(--ink);
   background: var(--surface); border: 1px solid var(--hairline); border-radius: 20px;
   padding: 9px 16px; outline: none; min-height: calc(1.4em + 18px); max-height: 100px;
   overflow-y: auto; white-space: pre-wrap; word-break: break-word;
   -webkit-user-select: text; user-select: text; }
-#noteprompt:empty::before { content: attr(data-placeholder); color: var(--dim);
+#bookmarkprompt:empty::before { content: attr(data-placeholder); color: var(--dim);
   pointer-events: none; }
-#noteprompt:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
-#notesend { width: 38px; height: 38px; border-radius: 19px; flex: none;
+#bookmarkprompt:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
+#bookmarksend { width: 38px; height: 38px; border-radius: 19px; flex: none;
   background: var(--work); color: #fff;
   display: flex; align-items: center; justify-content: center; }
 
@@ -1143,12 +1143,12 @@ body.notes-open #notespane { transform: translateX(0); }
   body.map-full #map { display: flex; width: auto; flex: 1; min-width: 0;
     border-right: none; animation: mapfade .26s ease; }
   body.map-full #cards, body.map-full #chat,
-  body.map-full #notespane, body.map-full #noteflags { display: none; }
-  #notespane { position: static; transform: none; transition: none;
+  body.map-full #bookmarkspane, body.map-full #bookmarkflags { display: none; }
+  #bookmarkspane { position: static; transform: none; transition: none;
     box-shadow: none; display: none; width: 340px; flex: none;
     height: auto; border-left: 1px solid var(--hairline); }
-  body.notes-open #notespane { display: flex; }
-  body:not(.notes-open) #noteflags { display: flex; }
+  body.bookmarks-open #bookmarkspane { display: flex; }
+  body:not(.bookmarks-open) #bookmarkflags { display: flex; }
   #scrim { display: none; }
   .backbtn { display: none; }
   .sheet { left: 50%; right: auto; width: 480px; transform: translate(-50%, 103%); }
@@ -1165,10 +1165,10 @@ body.notes-open #notespane { transform: translateX(0); }
    INTENTIONALLY left unchanged (the maintainer wants to "feel" the new UI before
    committing to a deep rename). So there is a deliberate code<->UI mismatch:
 
-       UI "Bookmark"  ==  code `note`   (UI.notes, #notespane, data-nact="note",
-                                         noteSnapshot, expandedNotes, /notes ...)
+       UI "Bookmark"  ==  code `note`   (UI.bookmarks, #bookmarkspane, data-bmact="note",
+                                         bookmarkSnapshot, expandedBookmarks, /notes ...)
        UI "Note"      ==  code `sheet`/`memo`  (wsSheets, /api/sheets, sheetstore,
-                                         "memo" in comments, data-nact="sheet" ...)
+                                         "memo" in comments, data-bmact="sheet" ...)
 
    In other words: the visible word "Notes" now means what the code calls
    *sheets*, and the code word *note* now surfaces to users as "Bookmark". When
@@ -1198,7 +1198,7 @@ body.notes-open #notespane { transform: translateX(0); }
 
    3. TARGET NAMES ARE UNDECIDED HERE. This legend maps concepts, not concrete
       identifiers. A real pass needs a full inventory + chosen new names:
-      #notespane, noteSnapshot, expandedNotes, .note CSS, data-nact, wsSheets,
+      #bookmarkspane, bookmarkSnapshot, expandedBookmarks, .bookmark CSS, data-bmact, wsSheets,
       sheetstore package, etc. The `...` above is illustrative, not exhaustive.
 
    4. SCOPE. This note lives only in web/index.html; the Go side (sheetstore,
@@ -1319,7 +1319,7 @@ body.notes-open #notespane { transform: translateX(0); }
 #wsinboxlist { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
   padding: 4px 10px 14px; flex: 1; }
 #wsinboxlist .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
-.wsinote { border: 1px solid var(--hairline); border-radius: 12px; padding: 9px 11px; margin-top: 8px; }
+.wsibookmark { border: 1px solid var(--hairline); border-radius: 12px; padding: 9px 11px; margin-top: 8px; }
 .wsiwhen { font-size: 11px; color: var(--dim); }
 .wsibubble { border-left: 3px solid var(--unlane); padding-left: 8px; font-size: 13px;
   line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
@@ -1454,7 +1454,7 @@ body.notes-open #notespane { transform: translateX(0); }
         <span class="dot" id="chatdot"></span>
         <h2 id="chattitle">scimux</h2>
         <button class="headtoggle" id="infobtn" aria-label="show details"></button>
-        <button class="headtoggle" id="notesbtn" aria-label="open bookmarks"></button>
+        <button class="headtoggle" id="bookmarksbtn" aria-label="open bookmarks"></button>
       </div>
       <div class="mission" id="chatmission"></div>
       <div id="chatdetails" aria-hidden="true">
@@ -1500,31 +1500,31 @@ body.notes-open #notespane { transform: translateX(0); }
 
   <!-- sticky-note flags: the stickies "sticking out" of the closed notebook.
        One per lane with notes (gray = General), click opens that tab. -->
-  <div id="noteflags"></div>
+  <div id="bookmarkflags"></div>
 
   <!-- right side: sticky-notes pane (lab-notebook stickies). Chat-like order:
        oldest top, newest bottom, pinned to the bottom when (re)opened. -->
-  <section id="notespane" class="panel">
+  <section id="bookmarkspane" class="panel">
     <div class="phead">
-      <button class="backbtn" id="notesback">&#8249; Back</button>
+      <button class="backbtn" id="bookmarksback">&#8249; Back</button>
       <h2>Bookmarks</h2>
       <span class="spacer"></span>
       <button class="headtoggle" id="sheetsbtn" aria-label="show notes" title="Notes"></button>
     </div>
-    <div class="tabs" id="notetabs"></div>
-    <div id="notelist"><div class="empty">No bookmarks yet.</div></div>
-    <!-- the composer is a singleton outside the polled #notelist region
+    <div class="tabs" id="bookmarktabs"></div>
+    <div id="bookmarklist"><div class="empty">No bookmarks yet.</div></div>
+    <!-- the composer is a singleton outside the polled #bookmarklist region
          (invariant); reply mode shows as the "Reply…" placeholder and is
          canceled by leaving the empty composer (blur/Escape) -->
-    <div id="notebar">
-      <div id="notechip" hidden>
-        <span id="notechiptext"></span>
-        <button id="notechipx" aria-label="cancel reply">&times;</button>
+    <div id="bookmarkbar">
+      <div id="bookmarkchip" hidden>
+        <span id="bookmarkchiptext"></span>
+        <button id="bookmarkchipx" aria-label="cancel reply">&times;</button>
       </div>
-      <div id="notebarrow">
-        <div id="noteprompt" role="textbox" aria-multiline="true" contenteditable="true"
+      <div id="bookmarkbarrow">
+        <div id="bookmarkprompt" role="textbox" aria-multiline="true" contenteditable="true"
           data-placeholder="Add a bookmark…"></div>
-        <button id="notesend" aria-label="add bookmark"></button>
+        <button id="bookmarksend" aria-label="add bookmark"></button>
       </div>
     </div>
   </section>
@@ -1692,10 +1692,10 @@ body.notes-open #notespane { transform: translateX(0); }
   <button class="cta" id="ad_go">Adopt</button>
 </div>
 
-<!-- notes: long-press forwards a note into a chat's draft -->
+<!-- notes: long-press forwards a bookmark into a chat's draft -->
 <div class="sheet" id="sendto">
   <div class="grab"></div>
-  <h3 style="font-size:17px">Send note to&#8230;</h3>
+  <h3 style="font-size:17px">Send bookmark to&#8230;</h3>
   <div class="sect" id="sendto_list"></div>
 </div>
 
@@ -1912,7 +1912,7 @@ const api = (path, opts) => fetch(path, withCsrf(opts)).then(async r => {
    server state is polled on the normal tick, so an open second device sees
    an archive or note within one interval. Nothing is reported as synced
    until the server acknowledged it (#syncwarn shows pending/failed saves). */
-let UI = { groups: [], archived: [], notes: [], lanes: [], pinned: [] };
+let UI = { groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] };
 let uiRev = "";          // last server revision seen (ETag)
 let uiOps = [];          // local operations not yet acknowledged by the server
 /* Pending ops survive the page: the pagehide keepalive PUT is fire-and-forget
@@ -1928,7 +1928,7 @@ let uiOps = [];          // local operations not yet acknowledged by the server
    that may have moved on. Note ops always replay — they dedupe on timestamp,
    so a keepalive that did land costs nothing, and a note typed just before
    pagehide must not be dropped merely because another device wrote since. */
-const idempotentOp = op => op.k === "note-add" || op.k === "note-del";
+const idempotentOp = op => op.k === "bookmark-add" || op.k === "bookmark-del";
 function savePendingOps(){
   try { localStorage.setItem("scimux-ui-ops", JSON.stringify(uiOps)); } catch {}
 }
@@ -1939,7 +1939,7 @@ function loadPendingOps(){
 let uiLoaded = false;    // initial load finished — writes are gated on this
 let uiSaving = false;
 let uiTimer = null;
-const normUI = j => Object.assign({ groups: [], archived: [], notes: [], lanes: [], pinned: [] }, j || {});
+const normUI = j => Object.assign({ groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] }, j || {});
 
 function applyOp(doc, op){
   switch (op.k){
@@ -1950,25 +1950,25 @@ function applyOp(doc, op){
     case "unarch":
       doc.archived = (doc.archived || []).filter(x => x !== op.id);
       break;
-    case "note-add":
-      doc.notes ||= [];
-      if (!doc.notes.some(n => n.t === op.note.t)) doc.notes.push(op.note);
+    case "bookmark-add":
+      doc.bookmarks ||= [];
+      if (!doc.bookmarks.some(n => n.t === op.bookmark.t)) doc.bookmarks.push(op.bookmark);
       break;
-    case "note-del":
+    case "bookmark-del":
       /* deleting a capture promotes its anchored comments to standalone
          notes — neither deleted with it nor stripped of context. They keep
          the anchor's activity/lane (so they stay on their tab and can still
          jump); they now sort at their own timestamp. */
       {
-        const dead = (doc.notes || []).find(n => n.t === op.t);
-        if (dead) for (const c of doc.notes){
+        const dead = (doc.bookmarks || []).find(n => n.t === op.t);
+        if (dead) for (const c of doc.bookmarks){
           if (c.anchor !== op.t) continue;
           delete c.anchor;
           if (dead.node && !c.node){ c.node = dead.node; if (dead.turnTime) c.turnTime = dead.turnTime; }
           if (dead.lane && !c.lane) c.lane = dead.lane;
         }
       }
-      doc.notes = (doc.notes || []).filter(n => n.t !== op.t);
+      doc.bookmarks = (doc.bookmarks || []).filter(n => n.t !== op.t);
       break;
     case "pin":
       /* new pins land at the FRONT so a freshly pinned card shows at the top of
@@ -1998,7 +1998,7 @@ function uiMutate(op){
   savePendingOps();
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
   renderSyncState();
-  renderNotesPane();   /* signature-guarded; cheap when notes didn't change */
+  renderBookmarksPane();   /* signature-guarded; cheap when notes didn't change */
   renderWsInbox();     /* signature-guarded; the workspace inbox mirrors captures */
   clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
   uiTimer = setTimeout(flushUI, 300);
@@ -2070,8 +2070,8 @@ async function flushUI(){
 /* re-render everything that draws from UI, preserving inputs (the prompt bar
    and sheets are singletons outside these render regions) */
 function applyRemoteUI(){
-  cardsSig = ""; mapSig = ""; notesSig = "";
-  renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderNotesPane();
+  cardsSig = ""; mapSig = ""; bookmarksSig = "";
+  renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderBookmarksPane();
 }
 async function loadUI(){
   try {
@@ -2900,7 +2900,7 @@ function renderCards(){
   const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention, n.model, n.effort, !!n.last_interaction]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
     + "|" + cardTab + "|" + laneFilter + "|" + foldList.length + "|" + attnFoldOpen
-    + "|" + (UI.notes || []).length + "|" + JSON.stringify(UI.lanes || [])
+    + "|" + (UI.bookmarks || []).length + "|" + JSON.stringify(UI.lanes || [])
     + "|" + JSON.stringify(UI.pinned || [])
     + "|" + actionCard + "|" + editingDesc + "|" + editingTitle;
   if (sig === cardsSig){ updateCardAges(); return; }
@@ -3348,7 +3348,7 @@ function renderMapToolbar(){
     <span class="mtb-sep"></span>
     <button class="sbtn" data-jump="${esc(n.id)}">&#8249; Open chat</button>
     <button class="sbtn iconbtn" data-medit="${esc(n.id)}" aria-label="edit title & description">${ICON_PENCIL} Edit</button>
-    <button class="sbtn" data-forknote="${esc(n.id)}">Add note</button>
+    <button class="sbtn" data-forkbookmark="${esc(n.id)}">Add bookmark</button>
     <button class="sbtn" data-forkfrom="${esc(n.id)}">+ New</button>
     ${n.ended_at ? "" : `<button class="sbtn iconbtn" data-mapexit="${esc(n.id)}" aria-label="close thread">${ICON_END} End</button>`}`;
   positionMapToolbar();
@@ -3391,8 +3391,8 @@ $("#maptoolbar").addEventListener("click", e => {
      mapSelStop can be set after the toolbar was last painted, which would
      otherwise route an earlier-stop edit to the node (head) rename path */
   if (pe){ openActivityEditor(pe.dataset.medit, mapSelStop || ""); return; }
-  const nt = e.target.closest("[data-forknote]");
-  if (nt){ addStationNote(nt.dataset.forknote); return; }
+  const nt = e.target.closest("[data-forkbookmark]");
+  if (nt){ addStationBookmark(nt.dataset.forkbookmark); return; }
   const fk = e.target.closest("[data-forkfrom]");
   if (fk){ forkFromStation(fk.dataset.forkfrom); return; }
   const ex = e.target.closest("[data-mapexit]");
@@ -4209,7 +4209,7 @@ function renderChatHead(){
   $("#chatmission").textContent = "";
   /* the Notes pane's back button names its destination (HIG), like every
      other back button — that destination is this chat */
-  $("#notesback").textContent = "‹ " + (n ? n.title : "Chat");
+  $("#bookmarksback").textContent = "‹ " + (n ? n.title : "Chat");
   $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
   $("#chatdot").style.background = n && !hardAttention(n) && !["exited","unavailable"].includes(n.live)
     ? laneColor(n.lane_id) : "";
@@ -4734,7 +4734,7 @@ function renderBubbleActions(){
     `<div class="bubwhen">${esc(fmtBubbleTime(turn.time))}</div>` +
     `<button data-bact="fork"><span>${ICON_BRANCH}</span>fork from here</button>` +
     `<button data-bact="desc"><span class="rot90l">${ICON_INTO}</span>use as description</button>` +
-    `<button data-bact="note"><span>${ICON_INTO}</span>bookmark</button>` +
+    `<button data-bact="bookmark"><span>${ICON_INTO}</span>bookmark</button>` +
     `<button data-bact="copy"><span>${ICON_COPY}</span>copy</button>`;
   turnEl.after(row);
 }
@@ -4791,18 +4791,18 @@ function forkFromStation(id){
 /* wall map: "Add note" files a sticky note for this station. Notes are
    lane-scoped in the store (no per-node anchor), so it lands in the station's
    lane tab of the notes pane — same record the in-chat/notes composer writes. */
-function addStationNote(id){
+function addStationBookmark(id){
   const n = nodeById(id);
   if (!n) return;
-  const text = prompt(`Add a note — ${n.title}`);
+  const text = prompt(`Add a bookmark — ${n.title}`);
   if (text == null) return;
   const clean = text.trim();
   if (!clean) return;
-  const note = { t: new Date().toISOString(), text: clean };
-  if (n.lane_id) note.lane = n.lane_id;
-  uiMutate({ k: "note-add", note });
-  notesPin = true;
-  renderNotesPane();
+  const bookmark = { t: new Date().toISOString(), text: clean };
+  if (n.lane_id) bookmark.lane = n.lane_id;
+  uiMutate({ k: "bookmark-add", bookmark });
+  bookmarksPin = true;
+  renderBookmarksPane();
   toast("Note added" + (n.lane_id ? " to " + laneName(n.lane_id) : ""));
 }
 /* wall map: the pencil / long-press opens the SAME sheet used to add an
@@ -4860,7 +4860,7 @@ $("#msgs").addEventListener("click", e => {
       setTimeout(() => renderBubbleActions(), 900);
       return;
     }
-    if (ba.dataset.bact === "note"){
+    if (ba.dataset.bact === "bookmark"){
       /* capture: a verbatim, immutable copy of the bubble plus its durable
          source address (uid, segment, record) — the address of record for
          jump-back, which survives /clear seams, rotation, slug reuse, and node
@@ -4868,16 +4868,16 @@ $("#msgs").addEventListener("click", e => {
          (bubble indexes are not stable across relinks); lane is snapshotted only
          as a fallback for deleted activities, rendering derives it live. */
       if (!turn) return;
-      const dup = (UI.notes || []).some(n =>
+      const dup = (UI.bookmarks || []).some(n =>
         n.node === sel && n.turnTime === (turn.time || "") && n.text === (turn.text || ""));
       if (!dup){
         const node = nodes.find(x => x.id === sel);
-        const note = {
+        const bookmark = {
           t: new Date().toISOString(), text: turn.text || "",
           node: sel, lane: node?.lane_id || "", turnTime: turn.time || "",
         };
-        stampAddress(note, turn);
-        uiMutate({ k: "note-add", note });
+        stampAddress(bookmark, turn);
+        uiMutate({ k: "bookmark-add", bookmark });
       }
       ba.innerHTML = "&#10003; noted";
       setTimeout(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
@@ -4917,12 +4917,12 @@ $("#msgs").addEventListener("click", e => {
    polled render region guarded by a signature; tapping a note unfolds its
    action row (jump-to-source · copy · trash), and that state must survive
    rebuilds like every other polled element. */
-let notesOpen = localStorage.getItem("scimux-notes") === "1";
-let noteTab = localStorage.getItem("scimux-notetab") || "GENERAL";
-let openNoteT = "";        // note whose action row is unfolded
-let expandedNotes = new Set();   // note.t values the user expanded — ephemeral view state
-let notesSig = "";
-let notesPin = true;       // scroll to the bottom on the next render
+let bookmarksOpen = localStorage.getItem("scimux-bookmarks") === "1";
+let bookmarkTab = localStorage.getItem("scimux-bookmarktab") || "GENERAL";
+let openBookmarkT = "";        // note whose action row is unfolded
+let expandedBookmarks = new Set();   // note.t values the user expanded — ephemeral view state
+let bookmarksSig = "";
+let bookmarksPin = true;       // scroll to the bottom on the next render
 let pendingJump = null;    // jump-to-source in flight: {node, turnTime, text, ts}
 
 /* stampAddress copies a source turn's durable address (uid, segment, record)
@@ -4930,11 +4930,11 @@ let pendingJump = null;    // jump-to-source in flight: {node, turnTime, text, t
    search hit's dataset (string values); coerce and stamp only when a real uid
    is present, so a legacy/tmux turn with no address leaves the note to its
    node+turnTime live hints rather than a bogus (uid:"", 0, 0) triple. */
-function stampAddress(note, src){
+function stampAddress(bookmark, src){
   if (!src || !src.uid) return;
-  note.uid = src.uid;
-  note.segment = Number(src.segment) || 0;
-  note.record = Number(src.record) || 0;
+  bookmark.uid = src.uid;
+  bookmark.segment = Number(src.segment) || 0;
+  bookmark.record = Number(src.record) || 0;
 }
 
 /* jumpToChatAddress — the one resolver behind both a note's "jump to" and an
@@ -4954,7 +4954,7 @@ function jumpToChatAddress(a){
        hit the signature short-circuit before consumePendingJump */
     chatSig = "";
     if (wsOpen()) closeWorkspace();
-    if (!isDesktop()) setNotesOpen(false);
+    if (!isDesktop()) setBookmarksOpen(false);
     select(a.node);
     return true;
   }
@@ -4970,7 +4970,7 @@ function jumpToChatAddress(a){
    later; notes follow automatically); the capture-time snapshot is the
    fallback for deleted activities and the home of manual notes. Comments
    inherit their anchor's lane so the pair never separates. */
-function noteLaneId(nt, byT){
+function bookmarkLaneId(nt, byT){
   if (nt.anchor && byT && byT[nt.anchor]) nt = byT[nt.anchor];
   if (!nt.node) return nt.lane || "";
   const nd = nodeById(nt.node);
@@ -4979,7 +4979,7 @@ function noteLaneId(nt, byT){
 /* effective sort key: a comment sorts at its anchor's position, right after
    it ("~" > every ISO-timestamp character); its own creation time is still
    what's displayed — revelations may come late, order shows where they belong */
-function noteSortKey(nt, byT){
+function bookmarkSortKey(nt, byT){
   if (nt.anchor && byT[nt.anchor]) return byT[nt.anchor].t + "~" + nt.t;
   return nt.t + "~";
 }
@@ -4995,70 +4995,70 @@ function bubbleTitle(role, time){
   return w ? `${who} — sent ${w}` : who;
 }
 /* Long noted bubbles force a lot of scrolling; clamp the tall ~15% behind a
-   "Show more" toggle and leave the short majority alone. noteClampState is the
+   "Show more" toggle and leave the short majority alone. bookmarkClampState is the
    DOM-free decision core — the measure loop feeds it a real scrollHeight —
-   kept pure so it is unit-testable without layout. NOTE_CLAMP_PX ≈ 12 lines,
+   kept pure so it is unit-testable without layout. BOOKMARK_CLAMP_PX ≈ 12 lines,
    near the p90 assistant bubble. Expand state is ephemeral view state (like
-   openNoteT): an in-memory Set, never persisted, never synced. */
-const NOTE_CLAMP_PX = 220;
-function noteClampState(naturalPx, expanded){
-  const tall = naturalPx > NOTE_CLAMP_PX;
+   openBookmarkT): an in-memory Set, never persisted, never synced. */
+const BOOKMARK_CLAMP_PX = 220;
+function bookmarkClampState(naturalPx, expanded){
+  const tall = naturalPx > BOOKMARK_CLAMP_PX;
   return { clamped: tall && !expanded, showBtn: tall, label: expanded ? "Show less" : "Show more" };
 }
-function renderNotesPane(){
-  document.body.classList.toggle("notes-open", notesOpen);
-  renderNotesToggle();
-  renderNoteFlags();
-  if (!notesOpen) return;
-  const notes = UI.notes || [];
+function renderBookmarksPane(){
+  document.body.classList.toggle("bookmarks-open", bookmarksOpen);
+  renderBookmarksToggle();
+  renderBookmarkFlags();
+  if (!bookmarksOpen) return;
+  const bookmarks = UI.bookmarks || [];
   const byT = {};
-  notes.forEach(nt => byT[nt.t] = nt);
+  bookmarks.forEach(nt => byT[nt.t] = nt);
   const laneOf = {};
-  notes.forEach(nt => laneOf[nt.t] = noteLaneId(nt, byT));
-  const tabs = laneList().filter(l => notes.some(nt => laneOf[nt.t] === l.id));
-  if (noteTab !== "GENERAL" && !tabs.some(l => l.id === noteTab)) noteTab = "GENERAL";
-  const list = notes
-    .filter(nt => (laneOf[nt.t] || "") === (noteTab === "GENERAL" ? "" : noteTab))
-    .sort((a, b) => noteSortKey(a, byT).localeCompare(noteSortKey(b, byT)));
+  bookmarks.forEach(nt => laneOf[nt.t] = bookmarkLaneId(nt, byT));
+  const tabs = laneList().filter(l => bookmarks.some(nt => laneOf[nt.t] === l.id));
+  if (bookmarkTab !== "GENERAL" && !tabs.some(l => l.id === bookmarkTab)) bookmarkTab = "GENERAL";
+  const list = bookmarks
+    .filter(nt => (laneOf[nt.t] || "") === (bookmarkTab === "GENERAL" ? "" : bookmarkTab))
+    .sort((a, b) => bookmarkSortKey(a, byT).localeCompare(bookmarkSortKey(b, byT)));
   const tabsHtml =
-    `<button data-ntab="GENERAL" class="${noteTab === "GENERAL" ? "on" : ""}">General</button>` +
-    tabs.map(l => `<button data-ntab="${esc(l.id)}" class="${noteTab === l.id ? "on" : ""}"
+    `<button data-ntab="GENERAL" class="${bookmarkTab === "GENERAL" ? "on" : ""}">General</button>` +
+    tabs.map(l => `<button data-ntab="${esc(l.id)}" class="${bookmarkTab === l.id ? "on" : ""}"
       ><span class="tabdot" style="background:${esc(laneColor(l.id))}"></span>${esc(l.name)}</button>`).join("");
-  const color = noteTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(noteTab));
+  const color = bookmarkTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(bookmarkTab));
   const listHtml = list.length ? list.map(nt => {
     const nd = nt.node ? nodeById(nt.node) : null;
     const src = nd ? " · " + esc(nd.title) : "";
     return `
-    <div class="note ${nt.anchor ? "comment" : ""}" data-t="${esc(nt.t)}">
+    <div class="bookmark ${nt.anchor ? "comment" : ""}" data-t="${esc(nt.t)}">
       <div class="when">${esc(fmtWhen(nt.t))}${src}</div>
       <div class="nbubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
       <button class="nmore" data-nmore hidden></button>
-      ${openNoteT === nt.t ? `<div class="noteactions">
-        ${nt.node || nt.uid ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
-        ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this bookmark">${ICON_COMMENT}</button>` : ""}
-        <button data-nact="copy" aria-label="copy bookmark">${ICON_COPY}</button>
-        <button data-nact="sheet" aria-label="use in note">${ICON_CLIP}</button>
-        <button data-nact="del" aria-label="delete bookmark">${ICON_TRASH}</button>
+      ${openBookmarkT === nt.t ? `<div class="bookmarkactions">
+        ${nt.node || nt.uid ? `<button data-bmact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
+        ${nt.node && !nt.anchor ? `<button data-bmact="comment" aria-label="comment on this bookmark">${ICON_COMMENT}</button>` : ""}
+        <button data-bmact="copy" aria-label="copy bookmark">${ICON_COPY}</button>
+        <button data-bmact="sheet" aria-label="use in note">${ICON_CLIP}</button>
+        <button data-bmact="del" aria-label="delete bookmark">${ICON_TRASH}</button>
       </div>` : ""}
     </div>`;
   }).join("") : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
   const sig = hashStr(tabsHtml + "|" + listHtml);
-  if (sig === notesSig) return;
-  notesSig = sig;
-  $("#notetabs").innerHTML = tabsHtml;
-  $("#notelist").innerHTML = listHtml;
-  applyNoteClamps();
-  if (notesPin){ const nl = $("#notelist"); nl.scrollTop = nl.scrollHeight; notesPin = false; }
+  if (sig === bookmarksSig) return;
+  bookmarksSig = sig;
+  $("#bookmarktabs").innerHTML = tabsHtml;
+  $("#bookmarklist").innerHTML = listHtml;
+  applyBookmarkClamps();
+  if (bookmarksPin){ const nl = $("#bookmarklist"); nl.scrollTop = nl.scrollHeight; bookmarksPin = false; }
 }
 /* Measure each rebuilt bubble (scrollHeight reports the full content height
-   even while clamped) and apply the clamp/toggle from noteClampState. Runs
-   after the rebuild, so it re-derives from expandedNotes each time — the Set
+   even while clamped) and apply the clamp/toggle from bookmarkClampState. Runs
+   after the rebuild, so it re-derives from expandedBookmarks each time — the Set
    is what carries expand state across polled rebuilds. */
-function applyNoteClamps(){
-  $("#notelist").querySelectorAll(".note").forEach(el => {
+function applyBookmarkClamps(){
+  $("#bookmarklist").querySelectorAll(".bookmark").forEach(el => {
     const b = el.querySelector(".nbubble"), btn = el.querySelector(".nmore");
     if (!b || !btn) return;
-    const st = noteClampState(b.scrollHeight, expandedNotes.has(el.dataset.t));
+    const st = bookmarkClampState(b.scrollHeight, expandedBookmarks.has(el.dataset.t));
     b.classList.toggle("clamped", st.clamped);
     btn.hidden = !st.showBtn;
     btn.textContent = st.label;
@@ -5066,11 +5066,11 @@ function applyNoteClamps(){
 }
 /* the flags stack: which lanes currently hold notes (gray = General) */
 let flagsSig = "";
-function renderNoteFlags(){
-  const notes = UI.notes || [];
+function renderBookmarkFlags(){
+  const bookmarks = UI.bookmarks || [];
   const byT = {};
-  notes.forEach(nt => byT[nt.t] = nt);
-  const laneIds = new Set(notes.map(nt => noteLaneId(nt, byT)));
+  bookmarks.forEach(nt => byT[nt.t] = nt);
+  const laneIds = new Set(bookmarks.map(nt => bookmarkLaneId(nt, byT)));
   const flags = laneList().filter(l => laneIds.has(l.id));
   const html = flags.map(f => `<button data-flag="${esc(f.id)}" title="${esc(f.name)} bookmarks"
       aria-label="${esc(f.name)} bookmarks" style="background:${esc(f.color || "")}"></button>`).join("")
@@ -5078,59 +5078,59 @@ function renderNoteFlags(){
       aria-label="General bookmarks" style="background:var(--unlane)"></button>` : "");
   if (html === flagsSig) return;
   flagsSig = html;
-  $("#noteflags").innerHTML = html;
+  $("#bookmarkflags").innerHTML = html;
 }
-function renderNotesToggle(){
-  const btn = $("#notesbtn");
+function renderBookmarksToggle(){
+  const btn = $("#bookmarksbtn");
   /* the chevron mirrors the pane it reveals: ‹ (closed) points at the
      Bookmarks edge to the right; › (open) collapses back to the chat */
-  btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";
-  btn.setAttribute("aria-label", notesOpen ? "close bookmarks" : "open bookmarks");
+  btn.innerHTML = bookmarksOpen ? "&#8250;" : "&#8249;";
+  btn.setAttribute("aria-label", bookmarksOpen ? "close bookmarks" : "open bookmarks");
 }
-function setNotesOpen(open){
-  notesOpen = open;
-  localStorage.setItem("scimux-notes", open ? "1" : "0");
-  notesSig = ""; notesPin = true;
-  renderNotesPane();
+function setBookmarksOpen(open){
+  bookmarksOpen = open;
+  localStorage.setItem("scimux-bookmarks", open ? "1" : "0");
+  bookmarksSig = ""; bookmarksPin = true;
+  renderBookmarksPane();
   restartWorkPulse();
 }
-$("#notesbtn").addEventListener("click", () => setNotesOpen(!notesOpen));
-$("#notesback").addEventListener("click", () => setNotesOpen(false));
-$("#noteflags").addEventListener("click", e => {
+$("#bookmarksbtn").addEventListener("click", () => setBookmarksOpen(!bookmarksOpen));
+$("#bookmarksback").addEventListener("click", () => setBookmarksOpen(false));
+$("#bookmarkflags").addEventListener("click", e => {
   const f = e.target.closest("[data-flag]");
   if (!f) return;
-  noteTab = f.dataset.flag;
-  localStorage.setItem("scimux-notetab", noteTab);
-  setNotesOpen(true);
+  bookmarkTab = f.dataset.flag;
+  localStorage.setItem("scimux-bookmarktab", bookmarkTab);
+  setBookmarksOpen(true);
 });
-$("#notespane").addEventListener("click", e => {
+$("#bookmarkspane").addEventListener("click", e => {
   const more = e.target.closest("[data-nmore]");
   if (more){
     /* ephemeral view-state flip: mutate the DOM in place, no rebuild, no
-       persistence. Precedes the .note tap branch so it never opens the
+       persistence. Precedes the .bookmark tap branch so it never opens the
        action bar. */
-    const el = more.closest(".note"), t = el.dataset.t;
-    expandedNotes.has(t) ? expandedNotes.delete(t) : expandedNotes.add(t);
+    const el = more.closest(".bookmark"), t = el.dataset.t;
+    expandedBookmarks.has(t) ? expandedBookmarks.delete(t) : expandedBookmarks.add(t);
     const b = el.querySelector(".nbubble");
-    const st = noteClampState(b.scrollHeight, expandedNotes.has(t));
+    const st = bookmarkClampState(b.scrollHeight, expandedBookmarks.has(t));
     b.classList.toggle("clamped", st.clamped);
     more.textContent = st.label;
     return;
   }
   const tb = e.target.closest("[data-ntab]");
   if (tb){
-    noteTab = tb.dataset.ntab;
-    localStorage.setItem("scimux-notetab", noteTab);
-    setNoteAnchor("");   /* comment mode doesn't survive leaving its tab */
-    openNoteT = ""; notesSig = ""; notesPin = true;
-    renderNotesPane();
+    bookmarkTab = tb.dataset.ntab;
+    localStorage.setItem("scimux-bookmarktab", bookmarkTab);
+    setBookmarkAnchor("");   /* comment mode doesn't survive leaving its tab */
+    openBookmarkT = ""; bookmarksSig = ""; bookmarksPin = true;
+    renderBookmarksPane();
     return;
   }
-  const act = e.target.closest("[data-nact]");
+  const act = e.target.closest("[data-bmact]");
   if (act){
-    const nt = (UI.notes || []).find(x => x.t === act.closest(".note")?.dataset.t);
+    const nt = (UI.bookmarks || []).find(x => x.t === act.closest(".bookmark")?.dataset.t);
     if (!nt) return;
-    if (act.dataset.nact === "jump" && (nt.node || nt.uid)){
+    if (act.dataset.bmact === "jump" && (nt.node || nt.uid)){
       /* the durable (uid, segment, record) address resolves jump-back the same
          way for a note and an embedded reference — one shared resolver, so both
          survive /clear seams, rotation, and node deletion identically. A legacy
@@ -5138,31 +5138,31 @@ $("#notespane").addEventListener("click", e => {
       if (!jumpToChatAddress({ node: nt.node, uid: nt.uid, segment: nt.segment,
           record: nt.record, turnTime: nt.turnTime, text: nt.text }))
         toast("This note's activity was deleted — the text is still here to read or copy.");
-    } else if (act.dataset.nact === "sheet"){
+    } else if (act.dataset.bmact === "sheet"){
       startPlacement(nt);
-    } else if (act.dataset.nact === "comment"){
-      setNoteAnchor(nt.t);
-      openNoteT = "";
-      renderNotesPane();
-      $("#noteprompt").focus();
-    } else if (act.dataset.nact === "copy"){
+    } else if (act.dataset.bmact === "comment"){
+      setBookmarkAnchor(nt.t);
+      openBookmarkT = "";
+      renderBookmarksPane();
+      $("#bookmarkprompt").focus();
+    } else if (act.dataset.bmact === "copy"){
       copyText(nt.text || "");
       act.innerHTML = "&#10003;";
-      setTimeout(() => { act.innerHTML = ICON_COPY; notesSig = ""; }, 900);
-    } else if (act.dataset.nact === "del"){
-      openNoteT = "";
-      uiMutate({ k: "note-del", t: nt.t });
+      setTimeout(() => { act.innerHTML = ICON_COPY; bookmarksSig = ""; }, 900);
+    } else if (act.dataset.bmact === "del"){
+      openBookmarkT = "";
+      uiMutate({ k: "bookmark-del", t: nt.t });
     }
     return;
   }
-  const noteEl = e.target.closest(".note");
-  if (noteEl){
-    openNoteT = openNoteT === noteEl.dataset.t ? "" : noteEl.dataset.t;
-    renderNotesPane();
+  const bookmarkEl = e.target.closest(".bookmark");
+  if (bookmarkEl){
+    openBookmarkT = openBookmarkT === bookmarkEl.dataset.t ? "" : bookmarkEl.dataset.t;
+    renderBookmarksPane();
     /* same reveal as chat bubbles: the unfolded action row must be visible
        after the tap (re-query — the render above rebuilt the list DOM) */
-    if (openNoteT)
-      document.querySelector(`#notelist .note[data-t="${CSS.escape(openNoteT)}"] .noteactions`)
+    if (openBookmarkT)
+      document.querySelector(`#bookmarklist .bookmark[data-t="${CSS.escape(openBookmarkT)}"] .bookmarkactions`)
         ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 });
@@ -5170,53 +5170,53 @@ $("#notespane").addEventListener("click", e => {
    note to the current tab's lane; after "comment" it targets a captured
    note (visible, cancelable chip) and the new note is born anchored. The
    capture itself is never editable — commenting is the annotation path. */
-let noteAnchor = "";   // t of the capture being commented on
-function setNoteAnchor(t){
-  const target = t ? (UI.notes || []).find(x => x.t === t) : null;
-  noteAnchor = target ? t : "";
-  $("#noteprompt").dataset.placeholder = noteAnchor ? "Reply…" : "Add a note…";
+let bookmarkAnchor = "";   // t of the capture being commented on
+function setBookmarkAnchor(t){
+  const target = t ? (UI.bookmarks || []).find(x => x.t === t) : null;
+  bookmarkAnchor = target ? t : "";
+  $("#bookmarkprompt").dataset.placeholder = bookmarkAnchor ? "Reply…" : "Add a note…";
   /* A persistent, dismissible chip — the placeholder alone vanished at the
      first typed character, so a reply half-written then finished as an intended
      general note landed silently as a comment on a forgotten capture (R20.10).
      The chip stays while the anchor is set and offers a keep-the-text cancel
      that does not require the keyboard. */
-  const chip = $("#notechip");
-  if (noteAnchor){
-    $("#notechiptext").textContent = "Replying to: " + (target.text || "").replace(/\s+/g, " ").trim();
+  const chip = $("#bookmarkchip");
+  if (bookmarkAnchor){
+    $("#bookmarkchiptext").textContent = "Replying to: " + (target.text || "").replace(/\s+/g, " ").trim();
     chip.hidden = false;
   } else {
     chip.hidden = true;
   }
 }
-function addManualNote(){
-  const text = $("#noteprompt").innerText.trim();
+function addManualBookmark(){
+  const text = $("#bookmarkprompt").innerText.trim();
   if (!text) return;
-  const note = { t: new Date().toISOString(), text };
-  if (noteAnchor) note.anchor = noteAnchor;
-  else if (noteTab !== "GENERAL") note.lane = noteTab;
-  uiMutate({ k: "note-add", note });
-  $("#noteprompt").textContent = "";
-  setNoteAnchor("");
-  notesPin = true;
-  renderNotesPane();
+  const bookmark = { t: new Date().toISOString(), text };
+  if (bookmarkAnchor) bookmark.anchor = bookmarkAnchor;
+  else if (bookmarkTab !== "GENERAL") bookmark.lane = bookmarkTab;
+  uiMutate({ k: "bookmark-add", bookmark });
+  $("#bookmarkprompt").textContent = "";
+  setBookmarkAnchor("");
+  bookmarksPin = true;
+  renderBookmarksPane();
 }
-$("#notesend").innerHTML = ICON_SEND;
-$("#notesend").addEventListener("click", addManualNote);
-$("#noteprompt").addEventListener("keydown", e => {
+$("#bookmarksend").innerHTML = ICON_SEND;
+$("#bookmarksend").addEventListener("click", addManualBookmark);
+$("#bookmarkprompt").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
     e.preventDefault();
-    addManualNote();
+    addManualBookmark();
   }
-  if (e.key === "Escape"){ setNoteAnchor(""); e.target.blur(); }
+  if (e.key === "Escape"){ setBookmarkAnchor(""); e.target.blur(); }
 });
 /* walking away from an empty composer ends reply mode — a later plain note
    must never silently become a comment on a long-forgotten target */
-$("#noteprompt").addEventListener("blur", () => {
-  if (!$("#noteprompt").innerText.trim()) setNoteAnchor("");
+$("#bookmarkprompt").addEventListener("blur", () => {
+  if (!$("#bookmarkprompt").innerText.trim()) setBookmarkAnchor("");
 });
 /* the chip's dismiss cancels reply mode but keeps whatever is typed — the
    pointer-reachable equivalent of Escape (R20.10) */
-$("#notechipx").addEventListener("click", () => { setNoteAnchor(""); $("#noteprompt").focus(); });
+$("#bookmarkchipx").addEventListener("click", () => { setBookmarkAnchor(""); $("#bookmarkprompt").focus(); });
 
 /* double-tap on the empty chat background snaps pinch-zoom back to 1.
    iOS offers no JS zoom API; momentarily clamping the viewport meta to
@@ -5478,8 +5478,8 @@ $("#cardlist").addEventListener("dragend", () => {
 let ncParent = "", ncRationale = "";
 let ncEdit = "";   /* non-empty = the #newchat sheet is editing this node, not creating */
 let ncEditStop = ""; /* when editing: the earlier-stop seam being edited; "" = the head (node label) */
-longpress($("#notelist"), ".note", el => {
-  const note = (UI.notes || []).find(x => x.t === el.dataset.t);
+longpress($("#bookmarklist"), ".bookmark", el => {
+  const bookmark = (UI.bookmarks || []).find(x => x.t === el.dataset.t);
   if (!note) return;
   const lm = laneModel();
   $("#sendto_list").innerHTML = orderedNodes().map(n => `
@@ -5821,13 +5821,13 @@ document.addEventListener("touchend", e => {
     chatSig = "";
     cardsSig = "";
     renderCards(); renderChatHead();
-  } else if (!isDesktop() && horiz && dx < 0 && touch.edgeR && !notesOpen){
+  } else if (!isDesktop() && horiz && dx < 0 && touch.edgeR && !bookmarksOpen){
     /* right-edge swipe navigates back one level first; the notes pane only
        opens from the chat view itself */
-    if (level > 1) setLevel(level - 1); else setNotesOpen(true);
+    if (level > 1) setLevel(level - 1); else setBookmarksOpen(true);
   }
-  else if (!isDesktop() && horiz && dx < 0 && notesOpen) openWorkspace();  /* Bookmarks → swipe R→L → Notes overview (accelerator; #sheetsbtn is the tappable primary) */
-  else if (!isDesktop() && horiz && dx > 0 && notesOpen) setNotesOpen(false);
+  else if (!isDesktop() && horiz && dx < 0 && bookmarksOpen) openWorkspace();  /* Bookmarks → swipe R→L → Notes overview (accelerator; #sheetsbtn is the tappable primary) */
+  else if (!isDesktop() && horiz && dx > 0 && bookmarksOpen) setBookmarksOpen(false);
   else if (!touch.localCard && horiz && dx > 0 && touch.edge) setLevel(level + 1);
   else if (!touch.localCard && horiz && dx < 0 && level > 1) setLevel(level - 1);
   touch = null;
@@ -5893,24 +5893,24 @@ function closeWorkspace(){
 /* --- inbox zone (iPad/desktop): the capture layer, reused as the workspace's
    left column so material is visible while composing. It mirrors the compact
    Notes pane exactly (items 2/5): lane tabs order the captures, and tall bubbles
-   auto-collapse behind "Show more" via the same noteClampState core. It is a
+   auto-collapse behind "Show more" via the same bookmarkClampState core. It is a
    list of buttons, never an editor, so re-rendering it on a poll tick is safe —
    unlike the memo zone, it carries no caret to protect. Each capture offers one
    "Use in memo". --- */
 let wsInboxSig = "";
 let wsInboxTab = localStorage.getItem("scimux-wsinboxtab") || "GENERAL";
-const expandedWsInbox = new Set();   /* ephemeral, sibling of expandedNotes */
+const expandedWsInbox = new Set();   /* ephemeral, sibling of expandedBookmarks */
 function renderWsInbox(){
   if (!wsOpen()) return;
-  const notes = (UI.notes || []).slice();
-  const byT = {}; notes.forEach(nt => byT[nt.t] = nt);
-  const laneOf = {}; notes.forEach(nt => laneOf[nt.t] = noteLaneId(nt, byT));
-  const tabs = laneList().filter(l => notes.some(nt => laneOf[nt.t] === l.id));
+  const bookmarks = (UI.bookmarks || []).slice();
+  const byT = {}; bookmarks.forEach(nt => byT[nt.t] = nt);
+  const laneOf = {}; bookmarks.forEach(nt => laneOf[nt.t] = bookmarkLaneId(nt, byT));
+  const tabs = laneList().filter(l => bookmarks.some(nt => laneOf[nt.t] === l.id));
   if (wsInboxTab !== "GENERAL" && !tabs.some(l => l.id === wsInboxTab)) wsInboxTab = "GENERAL";
   const sel = wsInboxTab === "GENERAL" ? "" : wsInboxTab;
-  const list = notes
+  const list = bookmarks
     .filter(nt => (laneOf[nt.t] || "") === sel)
-    .sort((a, b) => noteSortKey(a, byT).localeCompare(noteSortKey(b, byT)));
+    .sort((a, b) => bookmarkSortKey(a, byT).localeCompare(bookmarkSortKey(b, byT)));
   const tabsHtml =
     `<button data-wsitab="GENERAL" class="${wsInboxTab === "GENERAL" ? "on" : ""}">General</button>` +
     tabs.map(l => `<button data-wsitab="${esc(l.id)}" class="${wsInboxTab === l.id ? "on" : ""}"
@@ -5919,7 +5919,7 @@ function renderWsInbox(){
   const listHtml = list.length ? list.map(nt => {
     const nd = nt.node ? nodeById(nt.node) : null;
     const src = nd ? " · " + esc(nd.title) : "";
-    return `<div class="wsinote" data-t="${esc(nt.t)}">
+    return `<div class="wsibookmark" data-t="${esc(nt.t)}">
       <div class="wsiwhen">${esc(fmtWhen(nt.t))}${src}</div>
       <div class="wsibubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
       <button class="wsimore" data-wsimore hidden></button>
@@ -5934,13 +5934,13 @@ function renderWsInbox(){
   applyWsInboxClamps();
 }
 /* Measure each rebuilt capture and clamp the tall ones — same pass as the
-   compact pane's applyNoteClamps; expandedWsInbox carries the flip across
+   compact pane's applyBookmarkClamps; expandedWsInbox carries the flip across
    polled rebuilds. Runs only when the inbox is laid out (hidden on iPhone). */
 function applyWsInboxClamps(){
-  $("#wsinboxlist").querySelectorAll(".wsinote").forEach(el => {
+  $("#wsinboxlist").querySelectorAll(".wsibookmark").forEach(el => {
     const b = el.querySelector(".wsibubble"), btn = el.querySelector(".wsimore");
     if (!b || !btn) return;
-    const st = noteClampState(b.scrollHeight, expandedWsInbox.has(el.dataset.t));
+    const st = bookmarkClampState(b.scrollHeight, expandedWsInbox.has(el.dataset.t));
     b.classList.toggle("clamped", st.clamped);
     btn.hidden = !st.showBtn;
     btn.textContent = st.label;
@@ -5959,18 +5959,18 @@ $("#wsinboxlist").addEventListener("click", e => {
      so a tap on the toggle never enters placement mode. */
   const more = e.target.closest("[data-wsimore]");
   if (more){
-    const el = more.closest(".wsinote"), t = el.dataset.t;
+    const el = more.closest(".wsibookmark"), t = el.dataset.t;
     expandedWsInbox.has(t) ? expandedWsInbox.delete(t) : expandedWsInbox.add(t);
     const b = el.querySelector(".wsibubble");
-    const st = noteClampState(b.scrollHeight, expandedWsInbox.has(t));
+    const st = bookmarkClampState(b.scrollHeight, expandedWsInbox.has(t));
     b.classList.toggle("clamped", st.clamped);
     more.textContent = st.label;
     return;
   }
   const use = e.target.closest("[data-wsiuse]");
   if (!use) return;
-  const t = use.closest(".wsinote").dataset.t;
-  const nt = (UI.notes || []).find(x => x.t === t);
+  const t = use.closest(".wsibookmark").dataset.t;
+  const nt = (UI.bookmarks || []).find(x => x.t === t);
   if (nt) startPlacement(nt);
 });
 $("#wsplacecancel").addEventListener("click", endPlacement);
@@ -6105,7 +6105,7 @@ function applyRefClamps(scope){
   (scope || document).querySelectorAll(".wsref").forEach(el => {
     const b = el.querySelector(".wsrefbody"), btn = el.querySelector(".wsrefmore");
     if (!b || !btn) return;
-    const st = noteClampState(b.scrollHeight, expandedRefs.has(el.dataset.ref));
+    const st = bookmarkClampState(b.scrollHeight, expandedRefs.has(el.dataset.ref));
     b.classList.toggle("clamped", st.clamped);
     btn.hidden = !st.showBtn;
     btn.textContent = st.label;
@@ -6261,7 +6261,7 @@ $("#wssections").addEventListener("click", e => {
   if (addSec){ wsAddSection(); return; }
   /* placement target: the held note lands at the bottom of this section */
   const addHere = e.target.closest("[data-addhere]");
-  if (addHere){ placeHeldNote(addHere.closest(".wssec").dataset.sec); return; }
+  if (addHere){ placeHeldBookmark(addHere.closest(".wssec").dataset.sec); return; }
   /* Show more/less on an embedded capture — flip its clamp in place, before the
      reference-reveal branch so it never also opens the action row (item 14) */
   const refMore = e.target.closest("[data-refmore]");
@@ -6269,7 +6269,7 @@ $("#wssections").addEventListener("click", e => {
     const el = refMore.closest(".wsref"), id = el.dataset.ref;
     expandedRefs.has(id) ? expandedRefs.delete(id) : expandedRefs.add(id);
     const b = el.querySelector(".wsrefbody");
-    const st = noteClampState(b.scrollHeight, expandedRefs.has(id));
+    const st = bookmarkClampState(b.scrollHeight, expandedRefs.has(id));
     b.classList.toggle("clamped", st.clamped);
     refMore.textContent = st.label;
     return;
@@ -6554,16 +6554,16 @@ function endPlacement(){
   wsPlacing = null;
   $("#sheetsworkspace").classList.remove("placing");
 }
-/* noteSnapshot / noteSource turn a captured sticky note into the reference's
+/* bookmarkSnapshot / bookmarkSource turn a captured sticky note into the reference's
    two halves. The snapshot is the self-contained display copy (lane *color*,
    station, speaker, time, text); the source is the durable address plus live
    hints. A note lacking a durable uid still yields a usable snapshot — jump-back
    then degrades to the snapshot, which is the documented orphan fallback. */
-function noteSnapshot(nt){
+function bookmarkSnapshot(nt){
   /* build the same by-timestamp map the Notes pane uses so an anchored comment
      inherits its parent note's lane instead of snapshotting with no color */
-  const byT = {}; (UI.notes || []).forEach(n => byT[n.t] = n);
-  const laneId = noteLaneId(nt, byT);
+  const byT = {}; (UI.bookmarks || []).forEach(n => byT[n.t] = n);
+  const laneId = bookmarkLaneId(nt, byT);
   const nd = nt.node ? nodeById(nt.node) : null;
   const speaker = nt.role === "user" ? "you" : nt.role === "assistant" ? "agent" : "";
   return {
@@ -6574,13 +6574,13 @@ function noteSnapshot(nt){
     text: nt.text || "",
   };
 }
-function noteSource(nt){
+function bookmarkSource(nt){
   return { uid: nt.uid || "", segment: nt.segment || 0, record: nt.record || 0,
     node: nt.node || "", turnTime: nt.turnTime || "" };
 }
-async function placeHeldNote(secId){
+async function placeHeldBookmark(secId){
   if (!wsPlacing || !wsActiveId) return;
-  const body = { source: noteSource(wsPlacing), snapshot: noteSnapshot(wsPlacing) };
+  const body = { source: bookmarkSource(wsPlacing), snapshot: bookmarkSnapshot(wsPlacing) };
   let doc;
   try {
     doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
@@ -6688,7 +6688,7 @@ function searchHitHTML(h){
   const when = h.turn_time || h.time || "";
   return `<div class="searchhit" data-kind="${esc(h._kind || "")}" data-id="${esc(h._id || "")}"` +
     ` data-uid="${esc(h._uid || "")}" data-segment="${h.segment || 0}" data-record="${h.record || 0}"` +
-    ` data-role="${esc(h.role || "")}" data-note-id="${esc(h.note_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
+    ` data-role="${esc(h.role || "")}" data-bookmark-id="${esc(h.bookmark_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
     ` data-lane="${esc(h._lane || "")}" data-turn="${esc(h.turn_time || h.time || "")}">` +
     `<span class="ex">${before}<mark>${match}</mark>${after}</span>` +
     (when ? `<span class="when">${esc(when)}</span>` : "") +
@@ -6696,7 +6696,7 @@ function searchHitHTML(h){
 }
 function searchGroupHTML(g){
   const swatch = g.lane_id ? `<span class="tabdot" style="background:${esc(laneColor(g.lane_id))}"></span>` : "";
-  const kind = g.kind === "notes" ? "notes" : g.kind === "archived" ? "past" : "";
+  const kind = g.kind === "bookmarks" ? "bookmarks" : g.kind === "archived" ? "past" : "";
   /* stamp the group's identity onto each hit so a G5 tap knows its destination
      without re-walking the group */
   const hits = (g.hits || []).map(h =>
@@ -6798,7 +6798,7 @@ $("#searchinput").addEventListener("input", e => {
    in place. Archived (deleted, on-disk-only) hits get Add note now; their
    show-to-chat + fork arrive in G5b with the bounded read-only surface. */
 let openHit = null;   /* the hit whose bar is showing (transient; not polled) */
-const SACT_LABEL = { show: "Show to chat", fork: "Fork from here", note: "Add note" };
+const SACT_LABEL = { show: "Show to chat", fork: "Fork from here", bookmark: "Add bookmark" };
 function searchHitActions(kind, forkable, role){
   const acts = [];
   acts.push("show");                                   /* every hit can be shown */
@@ -6806,7 +6806,7 @@ function searchHitActions(kind, forkable, role){
      from, and a note belongs on the turn, not the file — so no fork, no note */
   if (role === "asset") return acts;
   if (kind === "live" && forkable) acts.push("fork");  /* archived fork lives in the read-only view */
-  acts.push("note");
+  acts.push("bookmark");
   return acts;
 }
 function closeHitBar(){
@@ -6836,7 +6836,7 @@ function jumpToHitChat(id, turn, addr){
   pendingJump = { node: id, turnTime: turn || "", text: "", ts: Date.now(),
     uid: (addr && addr.uid) || "", segment: addr && +addr.segment, record: addr && +addr.record };
   chatSig = "";
-  if (!isDesktop()) setNotesOpen(false);
+  if (!isDesktop()) setBookmarksOpen(false);
   select(id);
 }
 function doSearchAction(a, hit){
@@ -6847,7 +6847,7 @@ function doSearchAction(a, hit){
   const live = id && nodeById(id);
   if (a === "show"){
     if (live) jumpToHitChat(id, turn, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
-    else if (kind === "notes"){ closeSearch(); setNotesOpen(true); }   /* free-standing note */
+    else if (kind === "bookmarks"){ closeSearch(); setBookmarksOpen(true); }   /* free-standing note */
     else if (kind === "archived"){ closeSearch(); openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn); }
     else toast("This chat is unavailable.");
     return;
@@ -6859,19 +6859,19 @@ function doSearchAction(a, hit){
     forkFromTurn(ex, id);   /* parented to the hit's node, not the open chat */
     return;
   }
-  if (a === "note"){
+  if (a === "bookmark"){
     /* non-terminal: the overlay stays open so search continues */
-    const text = prompt("Add a note");
+    const text = prompt("Add a bookmark");
     if (text == null) return;
     const clean = text.trim();
     if (!clean) return;
-    const note = { t: new Date().toISOString(), text: clean };
-    if (live) note.node = id;
-    if (turn) note.turnTime = turn;
-    if (lane) note.lane = lane;
-    stampAddress(note, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
-    uiMutate({ k: "note-add", note });
-    toast("Note added");
+    const bookmark = { t: new Date().toISOString(), text: clean };
+    if (live) bookmark.node = id;
+    if (turn) bookmark.turnTime = turn;
+    if (lane) bookmark.lane = lane;
+    stampAddress(bookmark, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
+    uiMutate({ k: "bookmark-add", bookmark });
+    toast("Bookmark added");
     closeHitBar();
   }
 }
@@ -7370,7 +7370,7 @@ async function tick(){
     }
     renderCards();
     renderMap();
-    renderNotesPane();  /* lanes/titles derive live from nodes; sig-guarded */
+    renderBookmarksPane();  /* lanes/titles derive live from nodes; sig-guarded */
     await refreshChat();
     pollUI();
   } finally { ticking = false; }
