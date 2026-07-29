@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // archivedResp mirrors the /api/archived JSON so tests read fields by name.
@@ -205,6 +206,55 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 }
 
 // An unknown uid is a clean 404, never a 500 or a leak.
+// TestNoteAddressResolvesAfterDeletion is the load-bearing Phase 0d contract:
+// the durable address a note stamps at capture time — read straight off the
+// chat read path (a.segment), exactly as the client copies it — resolves the
+// same source turn through /api/archived after the source node is deleted and
+// its log archived. This is what lets a notes-pane jump survive node deletion,
+// where the old node+turnTime scan gave up entirely. It also proves the read
+// path (0a) and the archived resolver name a turn by the same (uid, seg, rec).
+func TestNoteAddressResolvesAfterDeletion(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	n := &Node{ID: "alpha", Title: "Alpha", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	liveNode(a, n)
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
+		sessionlog.Event{T: "user", Text: "before the clear", Time: "2026-07-14T01:00:00Z"},
+		sessionlog.Event{T: "assistant", Text: "old answer", Time: "2026-07-14T01:01:00Z"},
+		sessionlog.NewClearSource("s2"),
+		sessionlog.Event{T: "user", Text: "the captured turn", Time: "2026-07-15T09:00:00Z"},
+	)
+
+	// The address a note would stamp: read the current segment and take the turn
+	// the researcher captured. It lives in segment 1 (past the /clear seam).
+	seg := a.segment(n)
+	var captured transcript.Turn
+	for _, tn := range seg.Turns {
+		if tn.Text == "the captured turn" {
+			captured = tn
+		}
+	}
+	if captured.UID == "" || captured.Segment != 1 {
+		t.Fatalf("captured turn address = %+v, want a uid and segment 1", captured)
+	}
+
+	// The node is deleted: its log moves to sessions/archive, and the live node
+	// is gone (a notes-pane jump discovers this via nodeById == nil).
+	a.archiveSessionLog("alpha")
+
+	// Resolving the stamped triple through the archived surface lands on the
+	// exact captured turn — not the same-segment neighbour, not the pre-clear
+	// turn — even though the live node no longer exists.
+	code, ar := doArchivedSegRec(t, a, captured.UID, captured.Segment, captured.Record, captured.Time)
+	if code != 200 {
+		t.Fatalf("archived resolve code = %d", code)
+	}
+	if ar.Turns[ar.Anchor].Text != "the captured turn" {
+		t.Errorf("archived anchor = %q, want %q", ar.Turns[ar.Anchor].Text, "the captured turn")
+	}
+}
+
 func TestHandleArchivedNotFound(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)

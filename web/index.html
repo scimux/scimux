@@ -4238,7 +4238,7 @@ async function refreshChat(){
         const bk = `h:${si}:${ti}`;
         bubbleTurns[bk] = t;
         return `
-      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-bk="${bk}" data-time="${esc(t.time || "")}">
+      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-bk="${bk}" data-time="${esc(t.time || "")}" data-uid="${esc(t.uid || "")}" data-segment="${t.segment || 0}" data-record="${t.record || 0}">
         <div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(h.clean)}${h.html}</div>
       </div>`;
       }).join("")
@@ -4747,16 +4747,21 @@ $("#notespane").addEventListener("click", e => {
   if (act){
     const nt = (UI.notes || []).find(x => x.t === act.closest(".note")?.dataset.t);
     if (!nt) return;
-    if (act.dataset.nact === "jump" && nt.node){
+    if (act.dataset.nact === "jump" && (nt.node || nt.uid)){
       if (!nodeById(nt.node)){
-        /* the activity is gone (deleted; its log lives in sessions/archive) —
-           the note itself still reads and copies */
+        /* the activity is gone (deleted; its log lives in sessions/archive). A
+           note captured with its durable address resolves anyway: open the same
+           bounded archived surface search uses, anchored by (uid, seg, rec). A
+           legacy note with no address can only offer its own text to read/copy. */
+        if (nt.uid){ openArchived(nt.uid, nt.segment, nt.record, nt.turnTime || ""); return; }
         toast("This note's activity was deleted — the text is still here to read or copy.");
         return;
       }
-      /* bubble indexes are unstable; the turn's own timestamp (with the text
-         as fallback) finds it again once the chat has rendered */
-      pendingJump = { node: nt.node, turnTime: nt.turnTime || "", text: nt.text || "", ts: Date.now() };
+      /* jump by the durable (segment, record) address when the note carries it —
+         stable across /clear seams and relinks — falling back to the turn's own
+         timestamp, then the text, for legacy notes captured before the address. */
+      pendingJump = { node: nt.node, turnTime: nt.turnTime || "", text: nt.text || "",
+        uid: nt.uid || "", segment: nt.segment, record: nt.record, ts: Date.now() };
       /* select() clears chatSig only on a node *change*; a same-node jump
          would hit the signature short-circuit before consumePendingJump */
       chatSig = "";
@@ -4888,8 +4893,15 @@ function scrollAndFlash(target){
 function consumePendingJump(el, turns, priorTurns){
   if (!pendingJump || pendingJump.node !== sel) return false;
   if (Date.now() - pendingJump.ts > 15000){ pendingJump = null; return false; }
-  /* 1) the live segment: match by turn time, then text. */
-  let idx = pendingJump.turnTime ? turns.findIndex(t => t.time === pendingJump.turnTime) : -1;
+  /* 1) the live segment: the durable (uid, segment, record) address first —
+     stable across seams and duplicate timestamps — then turn time, then text. */
+  let idx = -1;
+  if (pendingJump.uid)
+    /* segment/record are omitempty on the wire — an absent field means 0, so
+       coerce both sides or a segment-0 turn (field omitted) never matches. */
+    idx = turns.findIndex(t => t.uid === pendingJump.uid &&
+      (t.segment || 0) === (pendingJump.segment || 0) && (t.record || 0) === (pendingJump.record || 0));
+  if (idx < 0 && pendingJump.turnTime) idx = turns.findIndex(t => t.time === pendingJump.turnTime);
   if (idx < 0) idx = turns.findIndex(t => t.text === pendingJump.text);
   if (idx >= 0){
     pendingJump = null;
@@ -4902,7 +4914,7 @@ function consumePendingJump(el, turns, priorTurns){
      hit in a closed segment isn't here yet. A search hit carries a stable
      identity, so instead of giving up we load the whole log once and scroll to
      the historical turn by time. (A note jump reuses the same path.) */
-  if (priorTurns > 0 && pendingJump.turnTime){
+  if (priorTurns > 0 && (pendingJump.uid || pendingJump.turnTime)){
     const histReady = chatHist.node === sel && chatHist.segs;
     if (!histReady){
       if (!pendingJump.histLoading){
@@ -4911,7 +4923,13 @@ function consumePendingJump(el, turns, priorTurns){
       }
       return false;   /* retry on the post-history render */
     }
-    const h = [...el.querySelectorAll(".turn.hist")].find(t => t.dataset.time === pendingJump.turnTime);
+    const hists = [...el.querySelectorAll(".turn.hist")];
+    let h = pendingJump.uid
+      ? hists.find(t => t.dataset.uid === pendingJump.uid &&
+          (+t.dataset.segment || 0) === (pendingJump.segment || 0) &&
+          (+t.dataset.record || 0) === (pendingJump.record || 0))
+      : null;
+    if (!h && pendingJump.turnTime) h = hists.find(t => t.dataset.time === pendingJump.turnTime);
     if (h){ pendingJump = null; scrollAndFlash(h); return true; }
     /* history is loaded but the turn is gone (empty/rewritten surface) — stop
        cleanly rather than retry forever. */
@@ -5686,11 +5704,14 @@ function toggleHitBar(el){
   openHit = el;
 }
 /* jumpToHitChat: the shared live/notes show-to-chat destination — leave the
-   overlay, then jump the main chat to the hit's turn (turn timestamp is the
-   stable key; consumePendingJump finds it once the chat has rendered). */
-function jumpToHitChat(id, turn){
+   overlay, then jump the main chat to the hit's turn. The durable (uid, segment,
+   record) address is the primary key (stable across seams and duplicate
+   timestamps); consumePendingJump falls back to the turn timestamp for hits with
+   no address, and finds either once the chat has rendered. */
+function jumpToHitChat(id, turn, addr){
   closeSearch();
-  pendingJump = { node: id, turnTime: turn || "", text: "", ts: Date.now() };
+  pendingJump = { node: id, turnTime: turn || "", text: "", ts: Date.now(),
+    uid: (addr && addr.uid) || "", segment: addr && +addr.segment, record: addr && +addr.record };
   chatSig = "";
   if (!isDesktop()) setNotesOpen(false);
   select(id);
@@ -5702,7 +5723,7 @@ function doSearchAction(a, hit){
   const turn = hit.dataset.turn, lane = hit.dataset.lane;
   const live = id && nodeById(id);
   if (a === "show"){
-    if (live) jumpToHitChat(id, turn);
+    if (live) jumpToHitChat(id, turn, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
     else if (kind === "notes"){ closeSearch(); setNotesOpen(true); }   /* free-standing note */
     else if (kind === "archived"){ closeSearch(); openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn); }
     else toast("This chat is unavailable.");
