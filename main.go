@@ -36,6 +36,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sheetstore"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -231,7 +232,15 @@ type app struct {
 	// segCache memoizes each node's parsed current segment so the 1s chat
 	// poll costs a stat, not a reparse, while the log is unchanged.
 	segCache map[string]*sessionlog.Cache
-	home     string
+	// sheets is the synthesis-document store (~/.scimux/sheets/, one mutable
+	// JSON file per sheet — internal/sheetstore). Deliberately separate from the
+	// append-only session log: sheets are documents, not an event stream (see
+	// notes-design.md "Storage Model"). sheetMu serializes the handler-level
+	// read-modify-write so a section autosave and a rename cannot clobber each
+	// other's untouched fields; the store's own writes are atomic per file.
+	sheets  *sheetstore.Store
+	sheetMu sync.Mutex
+	home    string
 	// usage caches subscription-budget snapshots (usage.go). Its own mutex is
 	// independent of a.mu — collectors do file/HTTP I/O. Served cache-only via
 	// /api/usage; refreshed only by successful Claude/Codex prompts.
@@ -3738,6 +3747,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	// The sheets store creates its own directory lazily on first write, so no
+	// MkdirAll here — an empty install has no sheets/ until the user makes one.
+	sheetsDir := filepath.Join(*data, "sheets")
 	a := &app{
 		byID:            map[string]*Node{},
 		live:            map[string]string{},
@@ -3765,6 +3777,7 @@ func main() {
 		sessionsDir:     sessionsDir,
 		attachmentsDir:  attachmentsDir,
 		assetsDir:       assetsDir,
+		sheets:          sheetstore.New(sheetsDir),
 		home:            home,
 	}
 	a.assetHook = a.ingestAssetHook
@@ -3849,6 +3862,11 @@ func main() {
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
+	mux.HandleFunc("GET /api/sheets", a.handleSheetList)
+	mux.HandleFunc("POST /api/sheets", a.handleSheetCreate)
+	mux.HandleFunc("GET /api/sheets/{id}", a.handleSheetGet)
+	mux.HandleFunc("PATCH /api/sheets/{id}", a.handleSheetPatch)
+	mux.HandleFunc("DELETE /api/sheets/{id}", a.handleSheetDelete)
 	mux.HandleFunc("GET /api/search", a.handleSearch)
 	mux.HandleFunc("GET /api/archived", a.handleArchived)
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
