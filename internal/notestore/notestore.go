@@ -1,4 +1,4 @@
-// Package sheetstore owns scimux's synthesis documents ("Sheets"): the
+// Package notestore owns scimux's synthesis documents ("Notes"): the
 // researcher-composed surface that sits above the append-only capture layer.
 // Each sheet is one mutable JSON file under <data>/sheets/<id>.json, with its
 // sections and their embedded chat references nested inside it. A deleted sheet
@@ -10,12 +10,12 @@
 // word-processor document: the current text is the truth and edit history is
 // incidental, so the append-only replay/seam/dedupe machinery that is
 // load-bearing for nodes.jsonl and the session log buys nothing here and would
-// cost a full-body copy per autosave plus a compaction pass. Sheets are
+// cost a full-body copy per autosave plus a compaction pass. Notes are
 // documents, so they are stored as documents (see notes-design.md "Storage
 // Model"). Crash safety comes from tmp-write + rename atomicity, the same
 // pattern ui.json uses; the files stay stdlib-only and greppable
 // (`grep sheets/*.json`).
-package sheetstore
+package notestore
 
 import (
 	"crypto/rand"
@@ -76,12 +76,12 @@ type Section struct {
 	References []Reference `json:"references,omitempty"`
 }
 
-// Sheet is one synthesis document. Ordering (sheet Order and each section's
+// Note is one synthesis document. Ordering (sheet Order and each section's
 // Order) is a stored field the server persists on reorder, never derived from
 // events. IDs are opaque, stable strings; UI sorting uses Order, never lexical
 // id order. Display titles are labels, not identities — two sheets may share a
 // title.
-type Sheet struct {
+type Note struct {
 	ID       string    `json:"id"`
 	Title    string    `json:"title"`
 	Created  string    `json:"created_at"`
@@ -99,7 +99,7 @@ type Store struct {
 func New(dir string) *Store { return &Store{Dir: dir} }
 
 // ErrNotFound is returned by Get/Delete for an unknown or archived sheet id.
-var ErrNotFound = errors.New("sheetstore: sheet not found")
+var ErrNotFound = errors.New("notestore: sheet not found")
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
@@ -122,9 +122,9 @@ func (s *Store) path(id string) string { return filepath.Join(s.Dir, id+".json")
 // Create writes a fresh sheet: auto title YYYY-MM-DD HH:MM, a single starter
 // section titled "Section 1", and an order that appends it after existing
 // sheets. The file is persisted before returning.
-func (s *Store) Create() (Sheet, error) {
+func (s *Store) Create() (Note, error) {
 	now := nowStamp()
-	sh := Sheet{
+	sh := Note{
 		ID:      newID(),
 		Title:   time.Now().Format("2006-01-02 15:04"),
 		Created: now,
@@ -138,7 +138,7 @@ func (s *Store) Create() (Sheet, error) {
 		}},
 	}
 	if err := s.Save(sh); err != nil {
-		return Sheet{}, err
+		return Note{}, err
 	}
 	return sh, nil
 }
@@ -161,7 +161,7 @@ func (s *Store) nextOrder() int {
 
 // AddSection appends a new empty section after the sheet's current sections and
 // returns it. Pure in-memory mutation — the caller persists with Save.
-func (sh *Sheet) AddSection(title string) *Section {
+func (sh *Note) AddSection(title string) *Section {
 	order := 0
 	for _, sec := range sh.Sections {
 		if sec.Order >= order {
@@ -183,7 +183,7 @@ func (sh *Sheet) AddSection(title string) *Section {
 // missing ref.ID is minted here so every stored reference has a stable identity
 // for jump-back and (later) Find usages. Pure in-memory mutation — the caller
 // persists with Save. ErrNotFound if no section matches.
-func (sh *Sheet) AddReference(sectionID string, ref Reference) (*Reference, error) {
+func (sh *Note) AddReference(sectionID string, ref Reference) (*Reference, error) {
 	for i := range sh.Sections {
 		if sh.Sections[i].ID != sectionID {
 			continue
@@ -202,7 +202,7 @@ func (sh *Sheet) AddReference(sectionID string, ref Reference) (*Reference, erro
 // source chat bubble and never the capture-layer sticky note (removal from the
 // capture layer stays explicit). The same bubble embedded in N sections is N
 // references; this trashes one.
-func (sh *Sheet) RemoveReference(sectionID, refID string) bool {
+func (sh *Note) RemoveReference(sectionID, refID string) bool {
 	for i := range sh.Sections {
 		if sh.Sections[i].ID != sectionID {
 			continue
@@ -220,17 +220,17 @@ func (sh *Sheet) RemoveReference(sectionID, refID string) bool {
 // Get reads and parses one sheet. A missing file is ErrNotFound; a malformed
 // file is a hard error here (unlike List, a caller asking for a specific id
 // wants to know the file is corrupt rather than silently get an empty sheet).
-func (s *Store) Get(id string) (Sheet, error) {
+func (s *Store) Get(id string) (Note, error) {
 	b, err := os.ReadFile(s.path(id))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Sheet{}, ErrNotFound
+			return Note{}, ErrNotFound
 		}
-		return Sheet{}, err
+		return Note{}, err
 	}
-	var sh Sheet
+	var sh Note
 	if err := json.Unmarshal(b, &sh); err != nil {
-		return Sheet{}, err
+		return Note{}, err
 	}
 	return sh, nil
 }
@@ -238,9 +238,9 @@ func (s *Store) Get(id string) (Sheet, error) {
 // Save rewrites the sheet's file atomically (tmp-write + rename), overwriting
 // rather than appending, and stamps edited_at. Write cost is bounded by this
 // one sheet's size, so autosave frequency never grows the store.
-func (s *Store) Save(sh Sheet) error {
+func (s *Store) Save(sh Note) error {
 	if sh.ID == "" {
-		return errors.New("sheetstore: cannot save a sheet with an empty id")
+		return errors.New("notestore: cannot save a sheet with an empty id")
 	}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
@@ -290,7 +290,7 @@ func (s *Store) Delete(id string) error {
 // of the corpus readers: non-.json entries, the archive subdir, tmp files, and
 // malformed/unparseable files are skipped, never a hard error — a corrupt file
 // must not 500 the whole list.
-func (s *Store) List() ([]Sheet, error) {
+func (s *Store) List() ([]Note, error) {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -298,7 +298,7 @@ func (s *Store) List() ([]Sheet, error) {
 		}
 		return nil, err
 	}
-	var out []Sheet
+	var out []Note
 	for _, e := range entries {
 		if e.IsDir() {
 			continue // skips archive/
@@ -311,7 +311,7 @@ func (s *Store) List() ([]Sheet, error) {
 		if err != nil {
 			continue
 		}
-		var sh Sheet
+		var sh Note
 		if json.Unmarshal(b, &sh) != nil || sh.ID == "" {
 			continue // malformed or headerless: skip, don't fail the list
 		}

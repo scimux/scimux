@@ -20,8 +20,8 @@ import (
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/asset"
+	"codeberg.org/chrberger/scimux/internal/notestore"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sheetstore"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -128,7 +128,7 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		sessionsDir:    filepath.Join(dir, "sessions"),
 		attachmentsDir: filepath.Join(dir, "attachments"),
 		assetsDir:      filepath.Join(dir, "assets"),
-		sheets:         sheetstore.New(filepath.Join(dir, "sheets")),
+		notes:          notestore.New(filepath.Join(dir, "notes")),
 		home:           dir,
 		// Tiny launch-grace window so failure-detection tests run fast; a marker
 		// in the fake pane is seen on the first poll, success falls through at once.

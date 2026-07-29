@@ -6,24 +6,24 @@ import (
 	"net/http"
 	"strconv"
 
-	"codeberg.org/chrberger/scimux/internal/sheetstore"
+	"codeberg.org/chrberger/scimux/internal/notestore"
 )
 
-// Sheets HTTP API (phase 1b of the notes/sheets feature). Thin handlers over
-// internal/sheetstore: the server owns read/write of the sheet documents, while
-// ui.json keeps only view state (the sheet-list index and fold state). See
+// Sheets HTTP API (phase 1b of the notes/notes feature). Thin handlers over
+// internal/notestore: the server owns read/write of the note documents, while
+// ui.json keeps only view state (the note-list index and fold state). See
 // notes-design.md and notes-impl-plan.md.
 //
-// Every mutating handler serializes its read-modify-write under a.sheetMu so a
+// Every mutating handler serializes its read-modify-write under a.noteMu so a
 // section autosave and a rename racing on the same file cannot clobber each
 // other's untouched fields; the response always carries the fresh document
 // (with the advanced edited_at) so the client can reconcile a stale save.
 
-// sheetSummary is the sparse list row: enough to render a sheet card
+// noteSummary is the sparse list row: enough to render a note card
 // (title, edit time, section count, represented lane colors) without shipping
 // any section body. Keeping the list sparse is a deliberate density rule — the
 // navigator is navigation, not an inspector.
-type sheetSummary struct {
+type noteSummary struct {
 	ID           string   `json:"id"`
 	Title        string   `json:"title"`
 	Created      string   `json:"created_at"`
@@ -33,23 +33,23 @@ type sheetSummary struct {
 	Lanes        []string `json:"lanes"`
 }
 
-func (a *app) handleSheetList(w http.ResponseWriter, r *http.Request) {
-	list, err := a.sheets.List()
+func (a *app) handleNoteList(w http.ResponseWriter, r *http.Request) {
+	list, err := a.notes.List()
 	if err != nil {
-		http.Error(w, "list sheets: "+err.Error(), 500)
+		http.Error(w, "list notes: "+err.Error(), 500)
 		return
 	}
-	out := make([]sheetSummary, 0, len(list))
+	out := make([]noteSummary, 0, len(list))
 	for _, sh := range list {
 		out = append(out, summarize(sh))
 	}
-	writeJSON(w, map[string]any{"sheets": out})
+	writeJSON(w, map[string]any{"notes": out})
 }
 
-// summarize projects a full sheet to its sparse card row. Represented lane
+// summarize projects a full note to its sparse card row. Represented lane
 // colors are the deduped set of embedded-reference lane colors across all
 // sections, in first-seen order.
-func summarize(sh sheetstore.Sheet) sheetSummary {
+func summarize(sh notestore.Note) noteSummary {
 	var lanes []string
 	seen := map[string]bool{}
 	for _, sec := range sh.Sections {
@@ -62,7 +62,7 @@ func summarize(sh sheetstore.Sheet) sheetSummary {
 			lanes = append(lanes, c)
 		}
 	}
-	return sheetSummary{
+	return noteSummary{
 		ID:           sh.ID,
 		Title:        sh.Title,
 		Created:      sh.Created,
@@ -73,8 +73,8 @@ func summarize(sh sheetstore.Sheet) sheetSummary {
 	}
 }
 
-func (a *app) handleSheetGet(w http.ResponseWriter, r *http.Request) {
-	sh, err := a.sheets.Get(r.PathValue("id"))
+func (a *app) handleNoteGet(w http.ResponseWriter, r *http.Request) {
+	sh, err := a.notes.Get(r.PathValue("id"))
 	if err != nil {
 		a.sheetError(w, err)
 		return
@@ -82,12 +82,12 @@ func (a *app) handleSheetGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sh)
 }
 
-func (a *app) handleSheetCreate(w http.ResponseWriter, r *http.Request) {
-	a.sheetMu.Lock()
-	defer a.sheetMu.Unlock()
-	sh, err := a.sheets.Create()
+func (a *app) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	sh, err := a.notes.Create()
 	if err != nil {
-		http.Error(w, "create sheet: "+err.Error(), 500)
+		http.Error(w, "create note: "+err.Error(), 500)
 		return
 	}
 	writeJSON(w, sh)
@@ -98,8 +98,8 @@ func (a *app) handleSheetCreate(w http.ResponseWriter, r *http.Request) {
 // disturbs the title or another section — that is the partial-update contract
 // that makes concurrent rename + autosave safe.
 type sheetPatch struct {
-	Title      *string      `json:"title"`       // rename the sheet
-	Order      *int         `json:"order"`       // reposition the sheet among sheets
+	Title      *string      `json:"title"`       // rename the note
+	Order      *int         `json:"order"`       // reposition the note among notes
 	AddSection *string      `json:"add_section"` // append a section with this title ("" → "Section N")
 	Section    *sectionEdit `json:"section"`
 }
@@ -114,16 +114,16 @@ type sectionEdit struct {
 	Delete bool    `json:"delete"`
 }
 
-func (a *app) handleSheetPatch(w http.ResponseWriter, r *http.Request) {
+func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body sheetPatch
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
-	a.sheetMu.Lock()
-	defer a.sheetMu.Unlock()
-	sh, err := a.sheets.Get(id)
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	sh, err := a.notes.Get(id)
 	if err != nil {
 		a.sheetError(w, err)
 		return
@@ -149,8 +149,8 @@ func (a *app) handleSheetPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := a.sheets.Save(sh); err != nil {
-		http.Error(w, "save sheet: "+err.Error(), 500)
+	if err := a.notes.Save(sh); err != nil {
+		http.Error(w, "save note: "+err.Error(), 500)
 		return
 	}
 	writeJSON(w, sh)
@@ -159,7 +159,7 @@ func (a *app) handleSheetPatch(w http.ResponseWriter, r *http.Request) {
 // applySectionEdit mutates the named section in place: delete removes it,
 // otherwise the provided title/body/order fields are set. An unknown section id
 // is a client error, not a silent no-op.
-func applySectionEdit(sh *sheetstore.Sheet, sec *sectionEdit) error {
+func applySectionEdit(sh *notestore.Note, sec *sectionEdit) error {
 	idx := -1
 	for i := range sh.Sections {
 		if sh.Sections[i].ID == sec.ID {
@@ -186,23 +186,23 @@ func applySectionEdit(sh *sheetstore.Sheet, sec *sectionEdit) error {
 	return nil
 }
 
-// handleSheetAddReference appends an embedded chat reference to a section (phase
+// handleNoteAddReference appends an embedded chat reference to a section (phase
 // 1c). The client sends the durable source triple and the display snapshot it
 // already has in hand; the reference is self-contained, so it renders and
 // jumps back with no dependency on the source node still existing. The server
 // mints the reference id — a client-supplied id is never trusted, so a caller
 // cannot forge or collide reference identities that Find usages (phase 2) will
 // key on. Default placement is the bottom of the section.
-func (a *app) handleSheetAddReference(w http.ResponseWriter, r *http.Request) {
-	var ref sheetstore.Reference
+func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
+	var ref notestore.Reference
 	if err := decodeJSON(w, r, &ref); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
 	ref.ID = "" // force a server-minted id; ignore anything the client sent
-	a.sheetMu.Lock()
-	defer a.sheetMu.Unlock()
-	sh, err := a.sheets.Get(r.PathValue("id"))
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	sh, err := a.notes.Get(r.PathValue("id"))
 	if err != nil {
 		a.sheetError(w, err)
 		return
@@ -211,20 +211,20 @@ func (a *app) handleSheetAddReference(w http.ResponseWriter, r *http.Request) {
 		a.sheetError(w, err)
 		return
 	}
-	if err := a.sheets.Save(sh); err != nil {
-		http.Error(w, "save sheet: "+err.Error(), 500)
+	if err := a.notes.Save(sh); err != nil {
+		http.Error(w, "save note: "+err.Error(), 500)
 		return
 	}
 	writeJSON(w, sh)
 }
 
-// handleSheetTrashReference removes one embedded reference from a section. It
+// handleNoteTrashReference removes one embedded reference from a section. It
 // removes only that reference — never the source chat bubble and never the
 // capture-layer sticky note (removal from capture stays explicit).
-func (a *app) handleSheetTrashReference(w http.ResponseWriter, r *http.Request) {
-	a.sheetMu.Lock()
-	defer a.sheetMu.Unlock()
-	sh, err := a.sheets.Get(r.PathValue("id"))
+func (a *app) handleNoteTrashReference(w http.ResponseWriter, r *http.Request) {
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	sh, err := a.notes.Get(r.PathValue("id"))
 	if err != nil {
 		a.sheetError(w, err)
 		return
@@ -233,27 +233,27 @@ func (a *app) handleSheetTrashReference(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", 404)
 		return
 	}
-	if err := a.sheets.Save(sh); err != nil {
-		http.Error(w, "save sheet: "+err.Error(), 500)
+	if err := a.notes.Save(sh); err != nil {
+		http.Error(w, "save note: "+err.Error(), 500)
 		return
 	}
 	writeJSON(w, sh)
 }
 
-// sheetError maps a store read error to the right HTTP status: a missing sheet
+// sheetError maps a store read error to the right HTTP status: a missing note
 // or section is a 404, anything else a 500.
 func (a *app) sheetError(w http.ResponseWriter, err error) {
-	if errors.Is(err, sheetstore.ErrNotFound) {
+	if errors.Is(err, notestore.ErrNotFound) {
 		http.Error(w, "not found", 404)
 		return
 	}
 	http.Error(w, err.Error(), 500)
 }
 
-func (a *app) handleSheetDelete(w http.ResponseWriter, r *http.Request) {
-	a.sheetMu.Lock()
-	defer a.sheetMu.Unlock()
-	if err := a.sheets.Delete(r.PathValue("id")); err != nil {
+func (a *app) handleNoteDelete(w http.ResponseWriter, r *http.Request) {
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	if err := a.notes.Delete(r.PathValue("id")); err != nil {
 		a.sheetError(w, err)
 		return
 	}

@@ -1,4 +1,4 @@
-package sheetstore
+package notestore
 
 import (
 	"encoding/json"
@@ -60,7 +60,7 @@ func TestListOrderedByOrderField(t *testing.T) {
 
 	// Reorder so display order is c, a, b regardless of id/creation order.
 	a.Order, b.Order, c.Order = 1, 2, 0
-	for _, sh := range []Sheet{a, b, c} {
+	for _, sh := range []Note{a, b, c} {
 		if err := s.Save(sh); err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +104,7 @@ func TestSaveAtomicRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var probe Sheet
+	var probe Note
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		t.Fatalf("file is not a single JSON object (append corruption?): %v", err)
 	}

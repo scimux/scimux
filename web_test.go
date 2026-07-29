@@ -1537,7 +1537,7 @@ func TestWebUseInSheetWiring(t *testing.T) {
 	}
 	html := string(b)
 	for _, want := range []string{
-		`data-bmact="sheet"`,       // Use-in-sheet action in the notes-pane action row
+		`data-bmact="note"`,        // Use-in-sheet action in the notes-pane action row
 		"function startPlacement(", // enters placement mode holding the note
 		`classList.add("placing")`, // placement mode drives the add-here affordances
 		`data-addhere`,             // per-section "add capture here" target
@@ -1680,12 +1680,12 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	if !strings.Contains(tog, `"&#8249;"`) {
 		t.Error("the chat-area toggle (#bookmarksbtn) must restore the ‹ chevron when closed")
 	}
-	if !strings.Contains(html, `$("#sheetsbtn").innerHTML = ICON_BOOKMARK;`) {
-		t.Error("the Bookmarks pane top-right button (#sheetsbtn) must use ICON_BOOKMARK")
+	if !strings.Contains(html, `$("#notesbtn").innerHTML = ICON_BOOKMARK;`) {
+		t.Error("the Bookmarks pane top-right button (#notesbtn) must use ICON_BOOKMARK")
 	}
 	// in the note action row, the paperclip (use-in-note) sits just before delete
 	row := sliceBetween(t, html, `<div class="bookmarkactions">`, "</div>")
-	clip := strings.Index(row, `data-bmact="sheet"`)
+	clip := strings.Index(row, `data-bmact="note"`)
 	del := strings.Index(row, `data-bmact="del"`)
 	if clip < 0 || del < 0 {
 		t.Fatal("note action row must contain both the use-in-note and delete actions")
@@ -1706,7 +1706,7 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 }
 
 // Swipe R->L on the open Bookmarks pane opens the Notes overview (the workspace).
-// This is the swipe-forward accelerator; a tappable path (#sheetsbtn) remains the
+// This is the swipe-forward accelerator; a tappable path (#notesbtn) remains the
 // discoverable primary per HIG.
 func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
 	html := mustReadIndex(t)
@@ -1844,10 +1844,10 @@ func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
 // propagation, and the menu offers rename + delete.
 func TestWorkspaceSheetMenuOpens(t *testing.T) {
 	html := mustReadIndex(t)
-	h := html[strings.Index(html, `$("#wssheetmenu").addEventListener("click"`):]
+	h := html[strings.Index(html, `$("#wsnotemenu").addEventListener("click"`):]
 	h = h[:strings.Index(h, "\n});")]
 	if !strings.Contains(h, "stopPropagation") {
-		t.Error("#wssheetmenu handler must stopPropagation so the document close handler doesn't kill the menu")
+		t.Error("#wsnotemenu handler must stopPropagation so the document close handler doesn't kill the menu")
 	}
 	if !strings.Contains(h, "data-si=\"del\"") {
 		t.Error("memo menu must offer delete")
@@ -1860,13 +1860,13 @@ func TestWorkspaceSheetMenuOpens(t *testing.T) {
 func TestWorkspaceEscCancelsEdit(t *testing.T) {
 	html := mustReadIndex(t)
 	// sheet-title keydown handles Enter (blur) and Escape (revert + stopPropagation)
-	kd := html[strings.Index(html, `$("#wssheettitle").addEventListener("keydown"`):]
+	kd := html[strings.Index(html, `$("#wsnotetitle").addEventListener("keydown"`):]
 	kd = kd[:strings.Index(kd, "\n});")]
 	if !strings.Contains(kd, `"Enter"`) || !strings.Contains(kd, `"Escape"`) {
-		t.Error("#wssheettitle keydown must handle both Enter and Escape")
+		t.Error("#wsnotetitle keydown must handle both Enter and Escape")
 	}
 	if !strings.Contains(kd, "stopPropagation") {
-		t.Error("#wssheettitle Escape must stopPropagation so the workspace does not close")
+		t.Error("#wsnotetitle Escape must stopPropagation so the workspace does not close")
 	}
 	// section body editor cancels on Escape
 	be := html[strings.Index(html, "function startBodyEdit("):]

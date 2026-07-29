@@ -1167,8 +1167,8 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 
        UI "Bookmark"  ==  code `note`   (UI.bookmarks, #bookmarkspane, data-bmact="note",
                                          bookmarkSnapshot, expandedBookmarks, /notes ...)
-       UI "Note"      ==  code `sheet`/`memo`  (wsSheets, /api/sheets, sheetstore,
-                                         "memo" in comments, data-bmact="sheet" ...)
+       UI "Note"      ==  code `sheet`/`note`  (wsNotes, /api/notes, sheetstore,
+                                         "note" in comments, data-bmact="sheet" ...)
 
    In other words: the visible word "Notes" now means what the code calls
    *sheets*, and the code word *note* now surfaces to users as "Bookmark". When
@@ -1180,7 +1180,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
    spec — it is not sufficient on its own to drive the change safely):
 
    1. ORDERING HAZARD (the killer). The rename is TWO renames: note->bookmark
-      AND sheet/memo->note. They MUST run in that order — rename note->bookmark
+      AND sheet/note->note. They MUST run in that order — rename note->bookmark
       FIRST, then sheet->note. Do it the other way (or blind-replace both at
       once) and the new `note` (from sheet) collides with the old `note`
       (capture) and the code corrupts. No naive find-replace.
@@ -1188,9 +1188,9 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
    2. PERSISTED DATA / API (the real bite; comment above does NOT cover it):
       - On disk the store writes <data>/sheets/<id>.json + sheets/archive/
         (internal/sheetstore: Store.Dir, path(), Delete()). Renaming that dir
-        to notes/ ORPHANS every existing memo unless you migrate the files or
+        to notes/ ORPHANS every existing note unless you migrate the files or
         keep a back-compat read path.
-      - 7 routes at /api/sheets* in main.go (handleSheet*). Renaming the path
+      - 7 routes at /api/notes* in main.go (handleSheet*). Renaming the path
         is a coordinated, ATOMIC web+server cutover (single-user, so breaking
         is acceptable, but both sides must change together).
       - The JSON *field* tags (title/body/order/references/created_at/…) are
@@ -1198,11 +1198,11 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 
    3. TARGET NAMES ARE UNDECIDED HERE. This legend maps concepts, not concrete
       identifiers. A real pass needs a full inventory + chosen new names:
-      #bookmarkspane, bookmarkSnapshot, expandedBookmarks, .bookmark CSS, data-bmact, wsSheets,
+      #bookmarkspane, bookmarkSnapshot, expandedBookmarks, .bookmark CSS, data-bmact, wsNotes,
       sheetstore package, etc. The `...` above is illustrative, not exhaustive.
 
    4. SCOPE. This note lives only in web/index.html; the Go side (sheetstore,
-      main.go, sheets_http_test.go, ~16 "memo" strings in web_test.go) has no
+      main.go, notes_http_test.go, ~16 "note" strings in web_test.go) has no
       pointer. A comment cannot be executed — write an actual checklist/plan.
 
    See memory: notes-workspace-review-2-iphone.
@@ -1210,11 +1210,11 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 /* ---------- Notes workspace (sheets): the synthesis surface ----------
    A singleton overlay (like search) so the sheet editor is mounted once and
    never lives inside a polled render region. Mobile-first: one zone at a time,
-   toggled by #sheetsworkspace.sheet-open; the min-width query opens the
+   toggled by #notesworkspace.note-open; the min-width query opens the
    side-by-side navigator + active sheet. */
-#sheetsworkspace { position: fixed; inset: 0; z-index: 110; display: flex;
+#notesworkspace { position: fixed; inset: 0; z-index: 110; display: flex;
   flex-direction: column; align-items: stretch; }
-#sheetsworkspace[hidden] { display: none; }
+#notesworkspace[hidden] { display: none; }
 #wsscrim { position: absolute; inset: 0;
   background: color-mix(in srgb, var(--bg) 60%, transparent);
   -webkit-backdrop-filter: blur(18px) saturate(1.3);
@@ -1242,9 +1242,9 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 #wsnavhead { display: flex; align-items: center; justify-content: space-between;
   flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
   text-transform: uppercase; letter-spacing: .04em; }
-#wsnewsheet, #wssheetmenu { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
+#wsnewnote, #wsnotemenu { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
   display: inline-flex; align-items: center; justify-content: center; }
-#wsnewsheet:active, #wssheetmenu:active { background: var(--code-bg); }
+#wsnewnote:active, #wsnotemenu:active { background: var(--code-bg); }
 #wscards { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
 #wscards .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
 .wscard { position: relative; display: block; width: 100%; text-align: left;
@@ -1260,16 +1260,16 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   display: flex; align-items: center; gap: 6px; }
 .wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; flex: none; }
 .wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-#wssheet { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
-#wssheethead { display: flex; align-items: center; gap: 8px; flex: none;
+#wsnote { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
+#wsnotehead { display: flex; align-items: center; gap: 8px; flex: none;
   padding: 12px 18px; border-bottom: 1px solid var(--hairline); }
-#wssheettitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
+#wsnotetitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
   color: var(--ink); background: none; border: none; outline: none; padding: 3px 4px;
   border-radius: 6px; }
-#wssheettitle:focus { background: var(--code-bg); }
+#wsnotetitle:focus { background: var(--code-bg); }
 #wssections { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; flex: 1;
   padding: 8px 18px 40px; }
-/* discoverable add control when a memo has no sections left (item 7) — the
+/* discoverable add control when a note has no sections left (item 7) — the
    overflow menu alone hid the escape hatch after deleting every section.
    iPhone item 3: no caption, just the button, centered in the pane. */
 #wssections .wssecempty { display: flex; align-items: center; justify-content: center;
@@ -1279,7 +1279,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   background: color-mix(in srgb, var(--work) 8%, transparent); }
 #wssections .wssecaddempty svg { width: 14px; height: 14px; }
 #wssections .wssecaddempty:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
-#wssheetempty { color: var(--dim); text-align: center; padding: 15vh 20px; }
+#wsnoteempty { color: var(--dim); text-align: center; padding: 15vh 20px; }
 /* section blocks: rendered-markdown resting state, inline edit on tap */
 .wssec { border-bottom: 1px solid var(--hairline); padding: 12px 0; }
 .wssechead { display: flex; align-items: center; gap: 8px; }
@@ -1309,7 +1309,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 .wsmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .wsmenu button.danger { color: var(--attn); }
 .wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
-#sheetsworkspace .backbtn { display: flex; }
+#notesworkspace .backbtn { display: flex; }
 /* --- inbox zone (left): the reused capture layer --- */
 #wsinbox { display: flex; flex-direction: column; min-height: 0;
   border-right: 1px solid var(--hairline); }
@@ -1365,7 +1365,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 #wsplacebar { display: none; align-items: center; gap: 8px; flex: none;
   padding: 9px 14px; font-size: 13px; border-bottom: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--work) 12%, transparent); }
-#sheetsworkspace.placing #wsplacebar { display: flex; }
+#notesworkspace.placing #wsplacebar { display: flex; }
 .wsplacelabel { color: var(--work); font-weight: 600; flex: none; }
 #wsplacetext { color: var(--ink); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; max-width: 46vw; }
@@ -1375,29 +1375,29 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   border-radius: 7px; font-size: 12px; color: var(--work);
   background: color-mix(in srgb, var(--work) 12%, transparent); }
 .wsaddhere svg { width: 13px; height: 13px; }
-#sheetsworkspace.placing .wsaddhere { display: inline-flex; }
+#notesworkspace.placing .wsaddhere { display: inline-flex; }
 /* iPhone / narrow: one zone at a time. The compact notes pane is the inbox
    there, so the inbox zone is hidden; nav is the resting view and opening a
    sheet slides the sheet in over the nav (a visible Back returns). */
 @media (max-width: 767px) {
   #wspanel { width: 100vw; height: 100dvh; margin: 0; border-radius: 0; border: none; }
   #wsinbox { display: none; }
-  #wssheet { flex: 1; }
-  #sheetsworkspace:not(.sheet-open) #wssheet { display: none; }
-  #sheetsworkspace:not(.sheet-open) #wsback { display: none; }
-  #sheetsworkspace.sheet-open #wsnav { display: none; }
+  #wsnote { flex: 1; }
+  #notesworkspace:not(.note-open) #wsnote { display: none; }
+  #notesworkspace:not(.note-open) #wsback { display: none; }
+  #notesworkspace.note-open #wsnav { display: none; }
   #wsplacetext { max-width: 40vw; }
 }
 @media (min-width: 768px) {
-  /* three zones (item 2): inbox and nav are narrow and stable, the memo gets the
+  /* three zones (item 2): inbox and nav are narrow and stable, the note gets the
      weight. The breakpoint reaches iPad portrait so the capture zone is present
      there too; columns clamp narrower on smaller iPads. */
   #wsinbox { flex: none; width: clamp(210px, 25vw, 264px); }
   #wsnav { flex: none; width: clamp(190px, 23vw, 264px); }
-  /* id+id beats the `#sheetsworkspace .backbtn { display: flex }` above, which
+  /* id+id beats the `#notesworkspace .backbtn { display: flex }` above, which
      otherwise defeats both `hidden` and this hide (item 17: the chevron is
      redundant once the X closes the workspace and both zones are visible). */
-  #sheetsworkspace #wsback { display: none; }
+  #notesworkspace #wsback { display: none; }
 }
 </style>
 </head>
@@ -1509,7 +1509,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
       <button class="backbtn" id="bookmarksback">&#8249; Back</button>
       <h2>Bookmarks</h2>
       <span class="spacer"></span>
-      <button class="headtoggle" id="sheetsbtn" aria-label="show notes" title="Notes"></button>
+      <button class="headtoggle" id="notesbtn" aria-label="show notes" title="Notes"></button>
     </div>
     <div class="tabs" id="bookmarktabs"></div>
     <div id="bookmarklist"><div class="empty">No bookmarks yet.</div></div>
@@ -1577,10 +1577,10 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
      OUTSIDE every polled render region, so the section editors are never rebuilt
      from a poll (invariant). Three zones on iPad/desktop
      (inbox | sheet cards | active sheet); on iPhone one zone at a time, driven
-     by body classes (.ws-cards / .ws-sheet). The sticky-note inbox reuses the
+     by body classes (.ws-cards / .ws-note). The sticky-note inbox reuses the
      capture layer; the navigator lists sheets sparsely; the active sheet is the
      writing surface. -->
-<div id="sheetsworkspace" hidden role="dialog" aria-modal="true" aria-label="Notes workspace">
+<div id="notesworkspace" hidden role="dialog" aria-modal="true" aria-label="Notes workspace">
   <div id="wsscrim"></div>
   <div id="wspanel">
     <div id="wstopbar">
@@ -1612,19 +1612,19 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
         <div id="wsnavhead">
           <span>Notes</span>
           <span class="spacer" style="flex:1"></span>
-          <button id="wsnewsheet" aria-label="new note" title="New note"></button>
+          <button id="wsnewnote" aria-label="new note" title="New note"></button>
         </div>
         <div id="wscards"><div class="empty">loading…</div></div>
       </div>
       <!-- right zone: the active note writing surface (built once, patched by
            explicit user/load actions only — never by the poll) -->
-      <div id="wssheet" role="region" aria-label="Active note">
-        <div id="wssheethead" hidden>
-          <input id="wssheettitle" aria-label="note title" placeholder="Note title">
-          <button id="wssheetmenu" aria-label="note actions" title="Note actions"></button>
+      <div id="wsnote" role="region" aria-label="Active note">
+        <div id="wsnotehead" hidden>
+          <input id="wsnotetitle" aria-label="note title" placeholder="Note title">
+          <button id="wsnotemenu" aria-label="note actions" title="Note actions"></button>
         </div>
         <div id="wssections"></div>
-        <div id="wssheetempty" class="empty">Pick a note, or make one with +</div>
+        <div id="wsnoteempty" class="empty">Pick a note, or make one with +</div>
       </div>
     </div>
   </div>
@@ -2811,7 +2811,7 @@ function fillLaneSelect(select, selected = "", includeUnset = true, disabled = f
   if (!select) return;
   select.innerHTML = laneOptionsHTML(selected, includeUnset, disabled);
   select.disabled = !!disabled;
-  /* authoritative disable (inherited lane): survive the sheet-open re-enable */
+  /* authoritative disable (inherited lane): survive the note-open re-enable */
   delete select.dataset.sheetDisabledByClose;
   select.value = selected;
   syncLanePicker(select);
@@ -5037,7 +5037,7 @@ function renderBookmarksPane(){
         ${nt.node || nt.uid ? `<button data-bmact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
         ${nt.node && !nt.anchor ? `<button data-bmact="comment" aria-label="comment on this bookmark">${ICON_COMMENT}</button>` : ""}
         <button data-bmact="copy" aria-label="copy bookmark">${ICON_COPY}</button>
-        <button data-bmact="sheet" aria-label="use in note">${ICON_CLIP}</button>
+        <button data-bmact="note" aria-label="use in note">${ICON_CLIP}</button>
         <button data-bmact="del" aria-label="delete bookmark">${ICON_TRASH}</button>
       </div>` : ""}
     </div>`;
@@ -5138,7 +5138,7 @@ $("#bookmarkspane").addEventListener("click", e => {
       if (!jumpToChatAddress({ node: nt.node, uid: nt.uid, segment: nt.segment,
           record: nt.record, turnTime: nt.turnTime, text: nt.text }))
         toast("This note's activity was deleted — the text is still here to read or copy.");
-    } else if (act.dataset.bmact === "sheet"){
+    } else if (act.dataset.bmact === "note"){
       startPlacement(nt);
     } else if (act.dataset.bmact === "comment"){
       setBookmarkAnchor(nt.t);
@@ -5826,7 +5826,7 @@ document.addEventListener("touchend", e => {
        opens from the chat view itself */
     if (level > 1) setLevel(level - 1); else setBookmarksOpen(true);
   }
-  else if (!isDesktop() && horiz && dx < 0 && bookmarksOpen) openWorkspace();  /* Bookmarks → swipe R→L → Notes overview (accelerator; #sheetsbtn is the tappable primary) */
+  else if (!isDesktop() && horiz && dx < 0 && bookmarksOpen) openWorkspace();  /* Bookmarks → swipe R→L → Notes overview (accelerator; #notesbtn is the tappable primary) */
   else if (!isDesktop() && horiz && dx > 0 && bookmarksOpen) setBookmarksOpen(false);
   else if (!touch.localCard && horiz && dx > 0 && touch.edge) setLevel(level + 1);
   else if (!touch.localCard && horiz && dx < 0 && level > 1) setLevel(level - 1);
@@ -5862,32 +5862,32 @@ $("#burger").addEventListener("click", () => openSheet("#menu"));
    A singleton overlay mounted once in the DOM and NEVER inside a polled render
    region, so section editors are only ever patched by explicit user/load
    actions — the poll cannot rebuild the editable surface (invariant). The
-   server owns the sheet documents (/api/sheets); ui.json keeps only view state
+   server owns the sheet documents (/api/notes); ui.json keeps only view state
    (fold; here per-device in localStorage for the first build). */
-let wsSheets = [];         /* sparse card list from GET /api/sheets */
+let wsNotes = [];         /* sparse card list from GET /api/notes */
 let wsActiveId = null;     /* id of the open sheet, or null */
 let wsActive = null;       /* full document of the open sheet */
 let wsReturnFocus = null;
 const wsSaveTimers = {};   /* debounce handle per field key */
 const wsPending = {};      /* key -> pending send closure, flushed on close/blur */
 
-function wsOpen(){ return !$("#sheetsworkspace").hidden; }
+function wsOpen(){ return !$("#notesworkspace").hidden; }
 function openWorkspace(){
   if (wsOpen()){ return; }
   wsReturnFocus = document.activeElement;
-  $("#sheetsworkspace").hidden = false;
+  $("#notesworkspace").hidden = false;
   wsLoadCards();
   renderWsInbox();
-  requestAnimationFrame(() => $("#wsnewsheet").focus());
+  requestAnimationFrame(() => $("#wsnewnote").focus());
 }
 function closeWorkspace(){
   if (!wsOpen()) return;
   wsFlushPendingSaves();
   endPlacement();
-  $("#sheetsworkspace").hidden = true;
+  $("#notesworkspace").hidden = true;
   const back = wsReturnFocus; wsReturnFocus = null;
   if (back && document.contains(back) && back.focus) back.focus();
-  else $("#sheetsbtn").focus();
+  else $("#notesbtn").focus();
 }
 
 /* --- inbox zone (iPad/desktop): the capture layer, reused as the workspace's
@@ -5895,8 +5895,8 @@ function closeWorkspace(){
    Notes pane exactly (items 2/5): lane tabs order the captures, and tall bubbles
    auto-collapse behind "Show more" via the same bookmarkClampState core. It is a
    list of buttons, never an editor, so re-rendering it on a poll tick is safe —
-   unlike the memo zone, it carries no caret to protect. Each capture offers one
-   "Use in memo". --- */
+   unlike the note zone, it carries no caret to protect. Each capture offers one
+   "Use in note". --- */
 let wsInboxSig = "";
 let wsInboxTab = localStorage.getItem("scimux-wsinboxtab") || "GENERAL";
 const expandedWsInbox = new Set();   /* ephemeral, sibling of expandedBookmarks */
@@ -5955,7 +5955,7 @@ $("#wsinboxtabs").addEventListener("click", e => {
   renderWsInbox();
 });
 $("#wsinboxlist").addEventListener("click", e => {
-  /* Show more/less flips the clamp in place — precede the "Use in memo" branch
+  /* Show more/less flips the clamp in place — precede the "Use in note" branch
      so a tap on the toggle never enters placement mode. */
   const more = e.target.closest("[data-wsimore]");
   if (more){
@@ -5977,48 +5977,48 @@ $("#wsplacecancel").addEventListener("click", endPlacement);
 
 /* --- fold state (view state, per-device for now; design routes this to
    ui.json cross-device — deferred to keep the ops-sync surface untouched) --- */
-function wsFolds(){ try { return JSON.parse(localStorage.getItem("scimux-sheetfolds") || "{}") || {}; } catch { return {}; } }
+function wsFolds(){ try { return JSON.parse(localStorage.getItem("scimux-notefolds") || "{}") || {}; } catch { return {}; } }
 function wsSetFold(secId, folded){
   const f = wsFolds();
   if (folded) f[secId] = 1; else delete f[secId];
-  try { localStorage.setItem("scimux-sheetfolds", JSON.stringify(f)); } catch {}
+  try { localStorage.setItem("scimux-notefolds", JSON.stringify(f)); } catch {}
 }
 
-/* --- navigator (sparse memo cards) --- */
+/* --- navigator (sparse note cards) --- */
 let wsCardDragging = false, wsCardDragEl = null;   /* poll-safe drag guard */
 async function wsLoadCards(){
   try {
-    const resp = await api("/api/sheets");
-    wsSheets = (resp && resp.sheets) || [];
-  } catch { wsSheets = []; }
+    const resp = await api("/api/notes");
+    wsNotes = (resp && resp.notes) || [];
+  } catch { wsNotes = []; }
   renderWsCards();
 }
-function fmtSheetMeta(c){
+function fmtNoteMeta(c){
   const n = c.section_count || 0;
   return `${n} section${n === 1 ? "" : "s"} · ${fmtWhen(c.edited_at || c.created_at || "")}`;
 }
-/* Memo cards reorder by drag (item 6), the same gesture the pinned cards use —
+/* Note cards reorder by drag (item 6), the same gesture the pinned cards use —
    no per-card up/down arrows, no separate reorder mode. Each card carries every
    represented lane color as a swatch (item 11: multiple lanes → multiple dots). */
 function renderWsCards(){
   if (wsCardDragging) return;   /* never rebuild the list mid-drag */
   const host = $("#wscards");
-  if (!wsSheets.length){
+  if (!wsNotes.length){
     host.innerHTML = `<div class="empty">No notes yet — make one with +</div>`;
     return;
   }
-  host.innerHTML = wsSheets.map(c => {
+  host.innerHTML = wsNotes.map(c => {
     const lanes = (c.lanes || []).map(col => `<i style="background:${esc(col)}"></i>`).join("");
-    return `<button class="wscard ${c.id === wsActiveId ? "on" : ""}" draggable="true" data-sheet="${esc(c.id)}">
+    return `<button class="wscard ${c.id === wsActiveId ? "on" : ""}" draggable="true" data-note="${esc(c.id)}">
       <div class="wctitle">${esc(c.title || "Untitled")}</div>
-      <div class="wcmeta"><span>${esc(fmtSheetMeta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
+      <div class="wcmeta"><span>${esc(fmtNoteMeta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
     </button>`;
   }).join("");
 }
 
 async function wsCreate(){
   try {
-    const sh = await api("/api/sheets", { method: "POST" });
+    const sh = await api("/api/notes", { method: "POST" });
     await wsLoadCards();
     wsSelect(sh.id);
   } catch (e){ toast("Couldn't create note"); }
@@ -6026,27 +6026,27 @@ async function wsCreate(){
 
 async function wsSelect(id){
   try {
-    wsActive = await api("/api/sheets/" + encodeURIComponent(id));
+    wsActive = await api("/api/notes/" + encodeURIComponent(id));
   } catch { toast("Couldn't open note"); return; }
   wsActiveId = id;
-  $("#sheetsworkspace").classList.add("sheet-open");
+  $("#notesworkspace").classList.add("note-open");
   $("#wsback").hidden = false;
-  renderWsSheet();
+  renderWsNote();
   renderWsCards();   /* reflect the .on selection */
 }
 
-/* Build the active-sheet surface once per open/load. Poll ticks never call this;
+/* Build the active-note surface once per open/load. Poll ticks never call this;
    only explicit user actions (open, add/delete/move section) do — so a focused
    editor is never torn out from under the caret. */
-function renderWsSheet(){
-  const empty = $("#wssheetempty"), head = $("#wssheethead"), secWrap = $("#wssections");
+function renderWsNote(){
+  const empty = $("#wsnoteempty"), head = $("#wsnotehead"), secWrap = $("#wssections");
   if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Notes"; return; }
   empty.hidden = true; head.hidden = false;
   $("#wstitle").textContent = wsActive.title || "Note";
-  $("#wssheettitle").value = wsActive.title || "";
+  $("#wsnotetitle").value = wsActive.title || "";
   const folds = wsFolds();
   const secs = (wsActive.sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
-  /* deleting every section used to strand the memo — the only add control was
+  /* deleting every section used to strand the note — the only add control was
      the overflow menu (item 7). Offer a visible add button in the empty state. */
   secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id])).join("") ||
     `<div class="wssecempty"><button class="wssecaddempty" data-addsection>${ICON_PLUS}<span>Add section</span></button></div>`;
@@ -6116,12 +6116,12 @@ function applyRefClamps(scope){
    because the editor DOM is the source of truth and is never overwritten by a
    save response (we only fold edited_at back into the card metadata). --- */
 function wsSend(body){
-  return api("/api/sheets/" + encodeURIComponent(wsActiveId),
+  return api("/api/notes/" + encodeURIComponent(wsActiveId),
     { method: "PATCH", body: JSON.stringify(body) })
     .then(doc => {
       if (doc && doc.id === wsActiveId){
         if (wsActive) wsActive.edited_at = doc.edited_at;
-        const card = wsSheets.find(c => c.id === doc.id);
+        const card = wsNotes.find(c => c.id === doc.id);
         if (card){ card.edited_at = doc.edited_at; card.title = doc.title;
           card.section_count = (doc.sections || []).length; renderWsCards(); }
       }
@@ -6168,35 +6168,35 @@ function wsFlushPendingSaves(){
 $("#wsclose").addEventListener("click", closeWorkspace);
 $("#wsscrim").addEventListener("click", closeWorkspace);
 $("#wsback").addEventListener("click", () => {
-  $("#sheetsworkspace").classList.remove("sheet-open");
+  $("#notesworkspace").classList.remove("note-open");
   $("#wsback").hidden = true;
 });
-$("#wsnewsheet").addEventListener("click", wsCreate);
-$("#sheetsbtn").addEventListener("click", openWorkspace);
-$("#sheetsbtn").innerHTML = ICON_BOOKMARK;
-$("#wsnewsheet").innerHTML = ICON_PLUS;
-$("#wssheetmenu").innerHTML = ICON_MENU_DOTS;
-$("#sheetsworkspace").addEventListener("keydown", e => {
+$("#wsnewnote").addEventListener("click", wsCreate);
+$("#notesbtn").addEventListener("click", openWorkspace);
+$("#notesbtn").innerHTML = ICON_BOOKMARK;
+$("#wsnewnote").innerHTML = ICON_PLUS;
+$("#wsnotemenu").innerHTML = ICON_MENU_DOTS;
+$("#notesworkspace").addEventListener("keydown", e => {
   if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation();
     if (wsPlacing){ endPlacement(); return; }   /* Esc cancels placement before closing */
-    if ($("#sheetsworkspace").classList.contains("sheet-open") && window.matchMedia("(max-width: 767px)").matches){
+    if ($("#notesworkspace").classList.contains("note-open") && window.matchMedia("(max-width: 767px)").matches){
       $("#wsback").click();
     } else closeWorkspace();
   }
 });
 
-/* memo title autosave. Enter commits (blur → save) and Escape reverts to the
+/* note title autosave. Enter commits (blur → save) and Escape reverts to the
    value at focus time (items 18/19); both stop the key reaching the workspace
    Escape handler so a title edit never collapses the whole overlay. */
 let wsTitleOrig = null;
-$("#wssheettitle").addEventListener("focus", () => { wsTitleOrig = wsActive ? (wsActive.title || "") : null; });
-$("#wssheettitle").addEventListener("input", e => {
+$("#wsnotetitle").addEventListener("focus", () => { wsTitleOrig = wsActive ? (wsActive.title || "") : null; });
+$("#wsnotetitle").addEventListener("input", e => {
   if (!wsActive) return;
   wsActive.title = e.target.value;
   $("#wstitle").textContent = e.target.value || "Note";
-  wsPatch({ title: e.target.value }, "sheet-title");
+  wsPatch({ title: e.target.value }, "note-title");
 });
-$("#wssheettitle").addEventListener("keydown", e => {
+$("#wsnotetitle").addEventListener("keydown", e => {
   if (e.key === "Enter"){ e.preventDefault(); e.target.blur(); return; }
   if (e.key === "Escape"){
     e.preventDefault(); e.stopPropagation();
@@ -6204,21 +6204,21 @@ $("#wssheettitle").addEventListener("keydown", e => {
       e.target.value = wsTitleOrig;
       wsActive.title = wsTitleOrig;
       $("#wstitle").textContent = wsTitleOrig || "Note";
-      wsPatchNow({ title: wsTitleOrig }, "sheet-title");   /* persist the revert, ordered after any in-flight edit */
+      wsPatchNow({ title: wsTitleOrig }, "note-title");   /* persist the revert, ordered after any in-flight edit */
     }
     e.target.blur();
   }
 });
-$("#wssheettitle").addEventListener("blur", () => { if (wsActive) wsPatchNow({ title: wsActive.title }, "sheet-title"); });
+$("#wsnotetitle").addEventListener("blur", () => { if (wsActive) wsPatchNow({ title: wsActive.title }, "note-title"); });
 
-/* navigator: a plain tap opens the memo. Reorder is drag-and-drop (item 6),
+/* navigator: a plain tap opens the note. Reorder is drag-and-drop (item 6),
    mirroring the pinned-card gesture: wsCardDragging suppresses list rebuilds for
    the whole drag, the DOM order is read back on drop, and each card's explicit
    order position is persisted. A drag never fires a click, so the two don't
    fight. */
 $("#wscards").addEventListener("click", e => {
   const card = e.target.closest(".wscard");
-  if (card) wsSelect(card.dataset.sheet);
+  if (card) wsSelect(card.dataset.note);
 });
 $("#wscards").addEventListener("dragstart", e => {
   const card = e.target.closest(".wscard");
@@ -6239,16 +6239,16 @@ $("#wscards").addEventListener("dragover", e => {
 $("#wscards").addEventListener("drop", e => { if (wsCardDragging) e.preventDefault(); });
 $("#wscards").addEventListener("dragend", async () => {
   if (!wsCardDragging) return;
-  const ids = [...$("#wscards").querySelectorAll(".wscard")].map(c => c.dataset.sheet);
+  const ids = [...$("#wscards").querySelectorAll(".wscard")].map(c => c.dataset.note);
   wsCardDragEl?.classList.remove("dragging");
   wsCardDragEl = null; wsCardDragging = false;
   /* reorder the model to match the DOM, then persist each changed position */
-  const byId = {}; wsSheets.forEach(c => byId[c.id] = c);
-  wsSheets = ids.map(id => byId[id]).filter(Boolean);
-  await Promise.all(wsSheets.map(async (c, i) => {
+  const byId = {}; wsNotes.forEach(c => byId[c.id] = c);
+  wsNotes = ids.map(id => byId[id]).filter(Boolean);
+  await Promise.all(wsNotes.map(async (c, i) => {
     if (c.order === i) return;
     c.order = i;
-    try { await api("/api/sheets/" + encodeURIComponent(c.id),
+    try { await api("/api/notes/" + encodeURIComponent(c.id),
       { method: "PATCH", body: JSON.stringify({ order: i }) }); } catch {}
   }));
   renderWsCards();
@@ -6256,7 +6256,7 @@ $("#wscards").addEventListener("dragend", async () => {
 
 /* section interactions (fold, title, body edit, overflow menu) */
 $("#wssections").addEventListener("click", e => {
-  /* re-add a section after the memo was emptied (item 7) */
+  /* re-add a section after the note was emptied (item 7) */
   const addSec = e.target.closest("[data-addsection]");
   if (addSec){ wsAddSection(); return; }
   /* placement target: the held note lands at the bottom of this section */
@@ -6391,10 +6391,10 @@ function openSectionMenu(btn){
   });
 }
 /* wsAddSection appends a section and re-renders. Shared by the empty-state
-   button, the section menu, and the memo menu so there is one add path. */
+   button, the section menu, and the note menu so there is one add path. */
 async function wsAddSection(){
   const doc = await wsPatch({ add_section: "" });
-  if (doc){ wsActive = doc; renderWsSheet(); }
+  if (doc){ wsActive = doc; renderWsNote(); }
 }
 /* sectionSwapPlan is the pure move-up/down decision core. It works on the
    *visually sorted* order — not array position — so a swap is always with the
@@ -6417,7 +6417,7 @@ async function sectionMenuAction(action, secId){
   if (action === "add"){ await wsAddSection(); return; }
   if (action === "del"){
     const doc = await wsPatch({ section: { id: secId, delete: true } });
-    if (doc){ wsActive = doc; renderWsSheet(); } return;
+    if (doc){ wsActive = doc; renderWsNote(); } return;
   }
   if (action === "up" || action === "down"){
     const plan = sectionSwapPlan(secs, secId, action);
@@ -6428,17 +6428,17 @@ async function sectionMenuAction(action, secId){
       wsPatch({ section: { id: a.id, order: a.order } }),
       wsPatch({ section: { id: b.id, order: b.order } })
     ]);
-    renderWsSheet();
+    renderWsNote();
   }
 }
 /* CSS.escape shim for attribute selectors on opaque ids */
 function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&"); }
 
-/* memo-level menu: rename / add section / delete the whole memo. stopPropagation
+/* note-level menu: rename / add section / delete the whole note. stopPropagation
    is load-bearing — without it the same click bubbles to the document close
    handler below (which only spares [data-secmenu]) and the menu is torn down the
    instant it opens, so the three-dots button read as a no-op (item 16). */
-$("#wssheetmenu").addEventListener("click", e => {
+$("#wsnotemenu").addEventListener("click", e => {
   e.stopPropagation();
   closeWsMenu();
   const m = document.createElement("div");
@@ -6456,20 +6456,20 @@ $("#wssheetmenu").addEventListener("click", e => {
   m.addEventListener("click", async ev => {
     const mi = ev.target.closest("[data-si]"); if (!mi) return;
     closeWsMenu();
-    if (mi.dataset.si === "rename"){ const t = $("#wssheettitle"); t.focus(); t.select(); }
+    if (mi.dataset.si === "rename"){ const t = $("#wsnotetitle"); t.focus(); t.select(); }
     else if (mi.dataset.si === "add"){ await wsAddSection(); }
-    else if (mi.dataset.si === "del"){ await wsDeleteSheet(); }
+    else if (mi.dataset.si === "del"){ await wsDeleteNote(); }
   });
 });
-async function wsDeleteSheet(){
+async function wsDeleteNote(){
   if (!wsActiveId) return;
   const id = wsActiveId;
-  try { await api("/api/sheets/" + encodeURIComponent(id), { method: "DELETE" }); }
+  try { await api("/api/notes/" + encodeURIComponent(id), { method: "DELETE" }); }
   catch { toast("Delete failed"); return; }
   wsActiveId = null; wsActive = null;
-  $("#sheetsworkspace").classList.remove("sheet-open");
+  $("#notesworkspace").classList.remove("note-open");
   $("#wsback").hidden = true;
-  renderWsSheet();
+  renderWsNote();
   wsLoadCards();
 }
 
@@ -6502,10 +6502,10 @@ async function referenceAction(btn){
   }
   if (act === "trash"){
     /* remove only this reference — never the source bubble or the sticky note.
-       Update the DOM in place (not renderWsSheet) so a body editor open in
+       Update the DOM in place (not renderWsNote) so a body editor open in
        another section keeps its caret. */
     try {
-      const doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
+      const doc = await api("/api/notes/" + encodeURIComponent(wsActiveId) +
         "/sections/" + encodeURIComponent(secId) + "/references/" + encodeURIComponent(refId),
         { method: "DELETE" });
       if (doc && doc.id === wsActiveId){ wsActive = doc; syncCardMeta(doc); }
@@ -6519,7 +6519,7 @@ async function referenceAction(btn){
    without a full card rebuild fight — edited_at, title, section count, and the
    represented lane swatches (which change when a reference is added/removed). */
 function syncCardMeta(doc){
-  const card = wsSheets.find(c => c.id === doc.id);
+  const card = wsNotes.find(c => c.id === doc.id);
   if (!card) return;
   card.edited_at = doc.edited_at; card.title = doc.title;
   card.section_count = (doc.sections || []).length;
@@ -6532,11 +6532,11 @@ function syncCardMeta(doc){
   renderWsCards();
 }
 
-/* ---- "Use in memo": capture → synthesis ----
+/* ---- "Use in note": capture → synthesis ----
    Placement mode holds one captured note and lets the user drop it into a
    section as a self-contained embedded reference. It unifies both entry points
    (the compact notes-pane action and the desktop workspace inbox) and every
-   device: enter the mode, pick a memo if none is open, tap "Add note here"
+   device: enter the mode, pick a note if none is open, tap "Add note here"
    on the target section. The reference carries the note's durable source
    address plus a display snapshot frozen now, so it renders and jumps back with
    no dependency on the source node surviving. */
@@ -6545,14 +6545,14 @@ function startPlacement(nt){
   if (!nt) return;
   wsPlacing = nt;
   if (!wsOpen()) openWorkspace();
-  $("#sheetsworkspace").classList.add("placing");
+  $("#notesworkspace").classList.add("placing");
   $("#wsplacetext").textContent = (nt.text || "").replace(/\s+/g, " ").trim();
   /* on a narrow screen the workspace opens on the sheet cards; the banner tells
      the user to pick a sheet, then a section */
 }
 function endPlacement(){
   wsPlacing = null;
-  $("#sheetsworkspace").classList.remove("placing");
+  $("#notesworkspace").classList.remove("placing");
 }
 /* bookmarkSnapshot / bookmarkSource turn a captured sticky note into the reference's
    two halves. The snapshot is the self-contained display copy (lane *color*,
@@ -6583,7 +6583,7 @@ async function placeHeldBookmark(secId){
   const body = { source: bookmarkSource(wsPlacing), snapshot: bookmarkSnapshot(wsPlacing) };
   let doc;
   try {
-    doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
+    doc = await api("/api/notes/" + encodeURIComponent(wsActiveId) +
       "/sections/" + encodeURIComponent(secId) + "/references",
       { method: "POST", body: JSON.stringify(body) });
   } catch { toast("Couldn't add to note"); return; }
@@ -6603,7 +6603,7 @@ async function placeHeldBookmark(secId){
       wrap.insertAdjacentHTML("beforeend", referenceHTML(newRef));
       applyRefClamps(secEl);   /* clamp the freshly-added capture if tall (item 14) */
     } else {
-      renderWsSheet();
+      renderWsNote();
     }
     toast("Added to " + (doc.title || "note"));
   }
@@ -7122,7 +7122,7 @@ function prepareLaunchConfig(cfg){
   for (const id of ["#nc_agent", "#nc_model", "#nc_effort", "#nc_dir"]){
     const el = $(id);
     el.disabled = false;
-    /* authoritative state — the sheet-open re-enable must not fight it
+    /* authoritative state — the note-open re-enable must not fight it
        (setSheetActive's marker) */
     delete el.dataset.sheetDisabledByClose;
   }

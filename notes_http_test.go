@@ -6,54 +6,54 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sheetstore"
+	"codeberg.org/chrberger/scimux/internal/notestore"
 )
 
-// patchSheet drives handleSheetPatch with the id path value set (the mux would
+// patchSheet drives handleNotePatch with the id path value set (the mux would
 // normally supply it).
 func patchSheet(a *app, id, bodyJSON string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("PATCH", "/api/sheets/"+id, strings.NewReader(bodyJSON))
+	req := httptest.NewRequest("PATCH", "/api/notes/"+id, strings.NewReader(bodyJSON))
 	req.SetPathValue("id", id)
-	a.handleSheetPatch(rec, req)
+	a.handleNotePatch(rec, req)
 	return rec
 }
 
 func getSheet(a *app, id string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/sheets/"+id, nil)
+	req := httptest.NewRequest("GET", "/api/notes/"+id, nil)
 	req.SetPathValue("id", id)
-	a.handleSheetGet(rec, req)
+	a.handleNoteGet(rec, req)
 	return rec
 }
 
-func createSheet(t *testing.T, a *app) sheetstore.Sheet {
+func createSheet(t *testing.T, a *app) notestore.Note {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	a.handleSheetCreate(rec, httptest.NewRequest("POST", "/api/sheets", nil))
+	a.handleNoteCreate(rec, httptest.NewRequest("POST", "/api/notes", nil))
 	if rec.Code != 200 {
 		t.Fatalf("create: code = %d, body %s", rec.Code, rec.Body.String())
 	}
-	var sh sheetstore.Sheet
+	var sh notestore.Note
 	if err := json.Unmarshal(rec.Body.Bytes(), &sh); err != nil {
 		t.Fatal(err)
 	}
 	return sh
 }
 
-// POST creates a sheet with the starter shape; GET reads it back.
+// POST creates a note with the starter shape; GET reads it back.
 func TestSheetCreateAndGet(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	sh := createSheet(t, a)
 	if sh.ID == "" || len(sh.Sections) != 1 {
-		t.Fatalf("bad created sheet: %+v", sh)
+		t.Fatalf("bad created note: %+v", sh)
 	}
 
 	rec := getSheet(a, sh.ID)
 	if rec.Code != 200 {
 		t.Fatalf("get: code = %d", rec.Code)
 	}
-	var got sheetstore.Sheet
+	var got notestore.Note
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -67,23 +67,23 @@ func TestSheetCreateAndGet(t *testing.T) {
 	}
 }
 
-// GET /api/sheets is a sparse list: title, edited, section count, lane colors —
+// GET /api/notes is a sparse list: title, edited, section count, lane colors —
 // never the full section bodies.
 func TestSheetListSparse(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	sh := createSheet(t, a)
-	// Give the sheet a reference so a lane color is represented.
-	sh.Sections[0].References = []sheetstore.Reference{{
+	// Give the note a reference so a lane color is represented.
+	sh.Sections[0].References = []notestore.Reference{{
 		ID:       "r1",
-		Snapshot: sheetstore.Snapshot{Lane: "#c0392b", Text: "secret body text"},
+		Snapshot: notestore.Snapshot{Lane: "#c0392b", Text: "secret body text"},
 	}}
 	sh.Sections[0].Body = "secret body text"
-	if err := a.sheets.Save(sh); err != nil {
+	if err := a.notes.Save(sh); err != nil {
 		t.Fatal(err)
 	}
 
 	rec := httptest.NewRecorder()
-	a.handleSheetList(rec, httptest.NewRequest("GET", "/api/sheets", nil))
+	a.handleNoteList(rec, httptest.NewRequest("GET", "/api/notes", nil))
 	if rec.Code != 200 {
 		t.Fatalf("list: code = %d", rec.Code)
 	}
@@ -98,13 +98,13 @@ func TestSheetListSparse(t *testing.T) {
 			Edited       string   `json:"edited_at"`
 			SectionCount int      `json:"section_count"`
 			Lanes        []string `json:"lanes"`
-		} `json:"sheets"`
+		} `json:"notes"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
 	if len(resp.Sheets) != 1 {
-		t.Fatalf("want 1 sheet, got %d", len(resp.Sheets))
+		t.Fatalf("want 1 note, got %d", len(resp.Sheets))
 	}
 	s := resp.Sheets[0]
 	if s.ID != sh.ID || s.SectionCount != 1 || s.Edited == "" {
@@ -115,7 +115,7 @@ func TestSheetListSparse(t *testing.T) {
 	}
 }
 
-// PATCH renames a sheet, adds a section, and edits section fields.
+// PATCH renames a note, adds a section, and edits section fields.
 func TestSheetPatchTitleAndSections(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	sh := createSheet(t, a)
@@ -123,12 +123,12 @@ func TestSheetPatchTitleAndSections(t *testing.T) {
 	if rec := patchSheet(a, sh.ID, `{"title":"Install Guide"}`); rec.Code != 200 {
 		t.Fatalf("rename: code = %d, body %s", rec.Code, rec.Body.String())
 	}
-	// Add a section, capture its id from the returned sheet.
+	// Add a section, capture its id from the returned note.
 	rec := patchSheet(a, sh.ID, `{"add_section":"Findings"}`)
 	if rec.Code != 200 {
 		t.Fatalf("add_section: code = %d", rec.Code)
 	}
-	var afterAdd sheetstore.Sheet
+	var afterAdd notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &afterAdd)
 	if afterAdd.Title != "Install Guide" || len(afterAdd.Sections) != 2 {
 		t.Fatalf("after add: %+v", afterAdd)
@@ -149,10 +149,10 @@ func TestSheetPatchTitleAndSections(t *testing.T) {
 	}
 }
 
-func createGet(t *testing.T, a *app, id string) sheetstore.Sheet {
+func createGet(t *testing.T, a *app, id string) notestore.Note {
 	t.Helper()
 	rec := getSheet(a, id)
-	var sh sheetstore.Sheet
+	var sh notestore.Note
 	if err := json.Unmarshal(rec.Body.Bytes(), &sh); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestSheetAutosaveOverwrites(t *testing.T) {
 	}
 	// The store's List parses each file as a single JSON object; a corrupt
 	// (appended) file would drop out of the list entirely.
-	list, _ := a.sheets.List()
+	list, _ := a.notes.List()
 	if len(list) != 1 {
 		t.Fatalf("file no longer a single valid document: %d in list", len(list))
 	}
@@ -194,7 +194,7 @@ func TestSheetPatchIsPartial(t *testing.T) {
 	sh := createSheet(t, a)
 	sid := sh.Sections[0].ID
 
-	// Rename the sheet, then autosave a section body. The body PATCH carries no
+	// Rename the note, then autosave a section body. The body PATCH carries no
 	// title, so the earlier rename must survive.
 	patchSheet(a, sh.ID, `{"title":"Kept Title"}`)
 	patchSheet(a, sh.ID, `{"section":{"id":"`+sid+`","body":"edited"}}`)
@@ -208,7 +208,7 @@ func TestSheetPatchIsPartial(t *testing.T) {
 	}
 }
 
-// PATCH can reorder sheets and delete a section.
+// PATCH can reorder notes and delete a section.
 func TestSheetReorderAndSectionDelete(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	first := createSheet(t, a)
@@ -216,14 +216,14 @@ func TestSheetReorderAndSectionDelete(t *testing.T) {
 
 	// Move `second` in front of `first`.
 	patchSheet(a, second.ID, `{"order":-1}`)
-	list, _ := a.sheets.List()
+	list, _ := a.notes.List()
 	if list[0].ID != second.ID {
 		t.Errorf("reorder failed: list[0] = %q, want %q", list[0].ID, second.ID)
 	}
 
 	// Add then delete a section on `first`.
 	rec := patchSheet(a, first.ID, `{"add_section":"Temp"}`)
-	var withTemp sheetstore.Sheet
+	var withTemp notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &withTemp)
 	tempID := withTemp.Sections[1].ID
 	patchSheet(a, first.ID, `{"section":{"id":"`+tempID+`","delete":true}}`)
@@ -235,24 +235,24 @@ func TestSheetReorderAndSectionDelete(t *testing.T) {
 
 func addReference(a *app, sheetID, sectionID, bodyJSON string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sheets/"+sheetID+"/sections/"+sectionID+"/references", strings.NewReader(bodyJSON))
+	req := httptest.NewRequest("POST", "/api/notes/"+sheetID+"/sections/"+sectionID+"/references", strings.NewReader(bodyJSON))
 	req.SetPathValue("id", sheetID)
 	req.SetPathValue("sectionID", sectionID)
-	a.handleSheetAddReference(rec, req)
+	a.handleNoteAddReference(rec, req)
 	return rec
 }
 
 func trashReference(a *app, sheetID, sectionID, refID string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("DELETE", "/api/sheets/"+sheetID+"/sections/"+sectionID+"/references/"+refID, nil)
+	req := httptest.NewRequest("DELETE", "/api/notes/"+sheetID+"/sections/"+sectionID+"/references/"+refID, nil)
 	req.SetPathValue("id", sheetID)
 	req.SetPathValue("sectionID", sectionID)
 	req.SetPathValue("refID", refID)
-	a.handleSheetTrashReference(rec, req)
+	a.handleNoteTrashReference(rec, req)
 	return rec
 }
 
-// Posting a capture into (sheet, section) stores a self-contained reference:
+// Posting a capture into (note, section) stores a self-contained reference:
 // the durable triple in source, the display copy in snapshot, with a
 // server-minted id (a client-sent id is never trusted).
 func TestSheetAddReference(t *testing.T) {
@@ -266,7 +266,7 @@ func TestSheetAddReference(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("add reference: code = %d, body %s", rec.Code, rec.Body.String())
 	}
-	var got sheetstore.Sheet
+	var got notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &got)
 	refs := got.Sections[0].References
 	if len(refs) != 1 {
@@ -283,12 +283,12 @@ func TestSheetAddReference(t *testing.T) {
 		t.Errorf("snapshot did not persist: %+v", r.Snapshot)
 	}
 
-	// Unknown section 404, unknown sheet 404.
+	// Unknown section 404, unknown note 404.
 	if rec := addReference(a, sh.ID, "nope", `{}`); rec.Code != 404 {
 		t.Errorf("unknown section: code = %d, want 404", rec.Code)
 	}
 	if rec := addReference(a, "nope", sid, `{}`); rec.Code != 404 {
-		t.Errorf("unknown sheet: code = %d, want 404", rec.Code)
+		t.Errorf("unknown note: code = %d, want 404", rec.Code)
 	}
 }
 
@@ -298,7 +298,7 @@ func TestSheetReferenceMultipleUsages(t *testing.T) {
 	sh := createSheet(t, a)
 	secA := sh.Sections[0].ID
 	rec := patchSheet(a, sh.ID, `{"add_section":"Two"}`)
-	var withTwo sheetstore.Sheet
+	var withTwo notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &withTwo)
 	secB := withTwo.Sections[1].ID
 
@@ -326,7 +326,7 @@ func TestSheetTrashReference(t *testing.T) {
 	sid := sh.Sections[0].ID
 	addReference(a, sh.ID, sid, `{"source":{"uid":"keep"}}`)
 	rec := addReference(a, sh.ID, sid, `{"source":{"uid":"drop"}}`)
-	var withTwo sheetstore.Sheet
+	var withTwo notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &withTwo)
 	dropID := withTwo.Sections[0].References[1].ID
 
@@ -343,7 +343,7 @@ func TestSheetTrashReference(t *testing.T) {
 	}
 }
 
-// Deleting the source node must not rewrite or remove the sheet reference: the
+// Deleting the source node must not rewrite or remove the note reference: the
 // reference is self-contained (triple + snapshot survive intact).
 func TestReferenceSurvivesNodeDelete(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"n1": true}}
@@ -366,37 +366,37 @@ func TestReferenceSurvivesNodeDelete(t *testing.T) {
 	got := createGet(t, a, sh.ID)
 	refs := got.Sections[0].References
 	if len(refs) != 1 {
-		t.Fatalf("sheet reference lost on node delete: %d remain", len(refs))
+		t.Fatalf("note reference lost on node delete: %d remain", len(refs))
 	}
 	if refs[0].Source.UID != "u-n1" || refs[0].Snapshot.Text != "kept evidence" {
 		t.Errorf("reference rewritten by node delete: %+v", refs[0])
 	}
 }
 
-// DELETE archives the sheet; it disappears from the list and GET 404s.
+// DELETE archives the note; it disappears from the list and GET 404s.
 func TestSheetDeleteArchives(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	sh := createSheet(t, a)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("DELETE", "/api/sheets/"+sh.ID, nil)
+	req := httptest.NewRequest("DELETE", "/api/notes/"+sh.ID, nil)
 	req.SetPathValue("id", sh.ID)
-	a.handleSheetDelete(rec, req)
+	a.handleNoteDelete(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("delete: code = %d", rec.Code)
 	}
 	if r := getSheet(a, sh.ID); r.Code != 404 {
 		t.Errorf("get after delete: code = %d, want 404", r.Code)
 	}
-	list, _ := a.sheets.List()
+	list, _ := a.notes.List()
 	if len(list) != 0 {
-		t.Errorf("deleted sheet still listed: %d", len(list))
+		t.Errorf("deleted note still listed: %d", len(list))
 	}
 	// Deleting an unknown id is a 404, not a 500.
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("DELETE", "/api/sheets/nope", nil)
+	req2 := httptest.NewRequest("DELETE", "/api/notes/nope", nil)
 	req2.SetPathValue("id", "nope")
-	a.handleSheetDelete(rec2, req2)
+	a.handleNoteDelete(rec2, req2)
 	if rec2.Code != 404 {
 		t.Errorf("delete unknown: code = %d, want 404", rec2.Code)
 	}

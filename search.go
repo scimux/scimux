@@ -35,16 +35,16 @@ const (
 // note hits carry note_id and the referenced turn_time. Role is user|assistant|
 // asset|bookmark.
 type searchHitJSON struct {
-	Role     string `json:"role"`
-	Segment  int    `json:"segment,omitempty"`
-	Record   int    `json:"record,omitempty"`
-	UID      string `json:"uid,omitempty"`
-	BookmarkID   string `json:"bookmark_id,omitempty"`
-	Time     string `json:"time"`
-	TurnTime string `json:"turn_time,omitempty"`
-	Before   string `json:"before"`
-	Match    string `json:"match"`
-	After    string `json:"after"`
+	Role       string `json:"role"`
+	Segment    int    `json:"segment,omitempty"`
+	Record     int    `json:"record,omitempty"`
+	UID        string `json:"uid,omitempty"`
+	BookmarkID string `json:"bookmark_id,omitempty"`
+	Time       string `json:"time"`
+	TurnTime   string `json:"turn_time,omitempty"`
+	Before     string `json:"before"`
+	Match      string `json:"match"`
+	After      string `json:"after"`
 }
 
 // searchGroupJSON is one chat's (or the Notes bucket's) matches. Kind is
