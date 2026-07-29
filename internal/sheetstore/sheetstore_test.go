@@ -175,6 +175,70 @@ func TestReferenceRoundTrip(t *testing.T) {
 	}
 }
 
+// AddReference appends to the named section (bottom placement) and mints a
+// stable id; the same source added to two sections is two references, never a
+// move.
+func TestAddReferenceMintsIDAndAppends(t *testing.T) {
+	s := New(t.TempDir())
+	sh, _ := s.Create()
+	secA := sh.Sections[0].ID
+	secB := sh.AddSection("Two").ID
+
+	src := Source{UID: "u1", Segment: 0, Record: 3}
+	snap := Snapshot{Lane: "#c0392b", Speaker: "assistant", Text: "evidence"}
+
+	r1, err := sh.AddReference(secA, Reference{Source: src, Snapshot: snap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.ID == "" {
+		t.Error("AddReference did not mint a reference id")
+	}
+	r2, err := sh.AddReference(secB, Reference{Source: src, Snapshot: snap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.ID == r2.ID {
+		t.Error("two references to one source must have distinct ids")
+	}
+	if len(sh.Sections[0].References) != 1 || len(sh.Sections[1].References) != 1 {
+		t.Fatalf("want one reference in each section, got %d and %d",
+			len(sh.Sections[0].References), len(sh.Sections[1].References))
+	}
+
+	// Bottom placement: a second reference appends after the first.
+	if _, err := sh.AddReference(secA, Reference{Source: Source{UID: "u2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sh.Sections[0].References[1].Source.UID; got != "u2" {
+		t.Errorf("second reference not appended at bottom: %q", got)
+	}
+
+	// An unknown section is ErrNotFound, not a panic.
+	if _, err := sh.AddReference("nope", Reference{}); err != ErrNotFound {
+		t.Errorf("unknown section: err = %v, want ErrNotFound", err)
+	}
+}
+
+// RemoveReference trashes exactly one reference and leaves the rest intact.
+func TestRemoveReferenceIsScoped(t *testing.T) {
+	s := New(t.TempDir())
+	sh, _ := s.Create()
+	sec := sh.Sections[0].ID
+	keep, _ := sh.AddReference(sec, Reference{Source: Source{UID: "keep"}})
+	drop, _ := sh.AddReference(sec, Reference{Source: Source{UID: "drop"}})
+
+	if !sh.RemoveReference(sec, drop.ID) {
+		t.Fatal("RemoveReference reported not-found for a present reference")
+	}
+	if len(sh.Sections[0].References) != 1 || sh.Sections[0].References[0].ID != keep.ID {
+		t.Errorf("wrong reference removed: %+v", sh.Sections[0].References)
+	}
+	if sh.RemoveReference(sec, "already-gone") {
+		t.Error("RemoveReference reported found for an absent reference")
+	}
+}
+
 // Delete moves the file into archive/ — nothing erased, and a reissued id can
 // never append onto dead content because the live file is gone.
 func TestDeleteArchives(t *testing.T) {

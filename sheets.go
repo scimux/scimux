@@ -76,11 +76,7 @@ func summarize(sh sheetstore.Sheet) sheetSummary {
 func (a *app) handleSheetGet(w http.ResponseWriter, r *http.Request) {
 	sh, err := a.sheets.Get(r.PathValue("id"))
 	if err != nil {
-		if errors.Is(err, sheetstore.ErrNotFound) {
-			http.Error(w, "not found", 404)
-			return
-		}
-		http.Error(w, "read sheet: "+err.Error(), 500)
+		a.sheetError(w, err)
 		return
 	}
 	writeJSON(w, sh)
@@ -129,11 +125,7 @@ func (a *app) handleSheetPatch(w http.ResponseWriter, r *http.Request) {
 	defer a.sheetMu.Unlock()
 	sh, err := a.sheets.Get(id)
 	if err != nil {
-		if errors.Is(err, sheetstore.ErrNotFound) {
-			http.Error(w, "not found", 404)
-			return
-		}
-		http.Error(w, "read sheet: "+err.Error(), 500)
+		a.sheetError(w, err)
 		return
 	}
 	if body.Title != nil {
@@ -194,15 +186,75 @@ func applySectionEdit(sh *sheetstore.Sheet, sec *sectionEdit) error {
 	return nil
 }
 
+// handleSheetAddReference appends an embedded chat reference to a section (phase
+// 1c). The client sends the durable source triple and the display snapshot it
+// already has in hand; the reference is self-contained, so it renders and
+// jumps back with no dependency on the source node still existing. The server
+// mints the reference id — a client-supplied id is never trusted, so a caller
+// cannot forge or collide reference identities that Find usages (phase 2) will
+// key on. Default placement is the bottom of the section.
+func (a *app) handleSheetAddReference(w http.ResponseWriter, r *http.Request) {
+	var ref sheetstore.Reference
+	if err := decodeJSON(w, r, &ref); err != nil {
+		http.Error(w, "bad request: "+err.Error(), 400)
+		return
+	}
+	ref.ID = "" // force a server-minted id; ignore anything the client sent
+	a.sheetMu.Lock()
+	defer a.sheetMu.Unlock()
+	sh, err := a.sheets.Get(r.PathValue("id"))
+	if err != nil {
+		a.sheetError(w, err)
+		return
+	}
+	if _, err := sh.AddReference(r.PathValue("sectionID"), ref); err != nil {
+		a.sheetError(w, err)
+		return
+	}
+	if err := a.sheets.Save(sh); err != nil {
+		http.Error(w, "save sheet: "+err.Error(), 500)
+		return
+	}
+	writeJSON(w, sh)
+}
+
+// handleSheetTrashReference removes one embedded reference from a section. It
+// removes only that reference — never the source chat bubble and never the
+// capture-layer sticky note (removal from capture stays explicit).
+func (a *app) handleSheetTrashReference(w http.ResponseWriter, r *http.Request) {
+	a.sheetMu.Lock()
+	defer a.sheetMu.Unlock()
+	sh, err := a.sheets.Get(r.PathValue("id"))
+	if err != nil {
+		a.sheetError(w, err)
+		return
+	}
+	if !sh.RemoveReference(r.PathValue("sectionID"), r.PathValue("refID")) {
+		http.Error(w, "not found", 404)
+		return
+	}
+	if err := a.sheets.Save(sh); err != nil {
+		http.Error(w, "save sheet: "+err.Error(), 500)
+		return
+	}
+	writeJSON(w, sh)
+}
+
+// sheetError maps a store read error to the right HTTP status: a missing sheet
+// or section is a 404, anything else a 500.
+func (a *app) sheetError(w http.ResponseWriter, err error) {
+	if errors.Is(err, sheetstore.ErrNotFound) {
+		http.Error(w, "not found", 404)
+		return
+	}
+	http.Error(w, err.Error(), 500)
+}
+
 func (a *app) handleSheetDelete(w http.ResponseWriter, r *http.Request) {
 	a.sheetMu.Lock()
 	defer a.sheetMu.Unlock()
 	if err := a.sheets.Delete(r.PathValue("id")); err != nil {
-		if errors.Is(err, sheetstore.ErrNotFound) {
-			http.Error(w, "not found", 404)
-			return
-		}
-		http.Error(w, "delete sheet: "+err.Error(), 500)
+		a.sheetError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"ok": "deleted"})

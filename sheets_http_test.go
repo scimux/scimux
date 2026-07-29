@@ -233,6 +233,146 @@ func TestSheetReorderAndSectionDelete(t *testing.T) {
 	}
 }
 
+func addReference(a *app, sheetID, sectionID, bodyJSON string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sheets/"+sheetID+"/sections/"+sectionID+"/references", strings.NewReader(bodyJSON))
+	req.SetPathValue("id", sheetID)
+	req.SetPathValue("sectionID", sectionID)
+	a.handleSheetAddReference(rec, req)
+	return rec
+}
+
+func trashReference(a *app, sheetID, sectionID, refID string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("DELETE", "/api/sheets/"+sheetID+"/sections/"+sectionID+"/references/"+refID, nil)
+	req.SetPathValue("id", sheetID)
+	req.SetPathValue("sectionID", sectionID)
+	req.SetPathValue("refID", refID)
+	a.handleSheetTrashReference(rec, req)
+	return rec
+}
+
+// Posting a capture into (sheet, section) stores a self-contained reference:
+// the durable triple in source, the display copy in snapshot, with a
+// server-minted id (a client-sent id is never trusted).
+func TestSheetAddReference(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	sh := createSheet(t, a)
+	sid := sh.Sections[0].ID
+
+	body := `{"id":"client-forged","source":{"uid":"u1","segment":2,"record":7,"node":"lane-a","turnTime":"2026-07-28T10:00:00Z"},` +
+		`"snapshot":{"lane":"#c0392b","station":"lane-a","speaker":"assistant","time":"2026-07-28T10:00:00Z","text":"evidence"}}`
+	rec := addReference(a, sh.ID, sid, body)
+	if rec.Code != 200 {
+		t.Fatalf("add reference: code = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var got sheetstore.Sheet
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	refs := got.Sections[0].References
+	if len(refs) != 1 {
+		t.Fatalf("want 1 reference, got %d", len(refs))
+	}
+	r := refs[0]
+	if r.ID == "" || r.ID == "client-forged" {
+		t.Errorf("reference id must be server-minted, got %q", r.ID)
+	}
+	if r.Source.UID != "u1" || r.Source.Segment != 2 || r.Source.Record != 7 {
+		t.Errorf("source triple did not persist: %+v", r.Source)
+	}
+	if r.Snapshot.Text != "evidence" || r.Snapshot.Lane != "#c0392b" {
+		t.Errorf("snapshot did not persist: %+v", r.Snapshot)
+	}
+
+	// Unknown section 404, unknown sheet 404.
+	if rec := addReference(a, sh.ID, "nope", `{}`); rec.Code != 404 {
+		t.Errorf("unknown section: code = %d, want 404", rec.Code)
+	}
+	if rec := addReference(a, "nope", sid, `{}`); rec.Code != 404 {
+		t.Errorf("unknown sheet: code = %d, want 404", rec.Code)
+	}
+}
+
+// The same bubble added to two sections is two references to one source.
+func TestSheetReferenceMultipleUsages(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	sh := createSheet(t, a)
+	secA := sh.Sections[0].ID
+	rec := patchSheet(a, sh.ID, `{"add_section":"Two"}`)
+	var withTwo sheetstore.Sheet
+	json.Unmarshal(rec.Body.Bytes(), &withTwo)
+	secB := withTwo.Sections[1].ID
+
+	src := `{"source":{"uid":"u1","record":3},"snapshot":{"text":"shared"}}`
+	addReference(a, sh.ID, secA, src)
+	addReference(a, sh.ID, secB, src)
+
+	got := createGet(t, a, sh.ID)
+	if len(got.Sections[0].References) != 1 || len(got.Sections[1].References) != 1 {
+		t.Fatalf("want one reference in each section")
+	}
+	a1, b1 := got.Sections[0].References[0], got.Sections[1].References[0]
+	if a1.ID == b1.ID {
+		t.Error("two usages must have distinct reference ids")
+	}
+	if a1.Source.UID != b1.Source.UID {
+		t.Error("both references must point at the same source")
+	}
+}
+
+// Trashing a reference removes only that reference from the section.
+func TestSheetTrashReference(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	sh := createSheet(t, a)
+	sid := sh.Sections[0].ID
+	addReference(a, sh.ID, sid, `{"source":{"uid":"keep"}}`)
+	rec := addReference(a, sh.ID, sid, `{"source":{"uid":"drop"}}`)
+	var withTwo sheetstore.Sheet
+	json.Unmarshal(rec.Body.Bytes(), &withTwo)
+	dropID := withTwo.Sections[0].References[1].ID
+
+	if rec := trashReference(a, sh.ID, sid, dropID); rec.Code != 200 {
+		t.Fatalf("trash: code = %d", rec.Code)
+	}
+	got := createGet(t, a, sh.ID)
+	if len(got.Sections[0].References) != 1 || got.Sections[0].References[0].Source.UID != "keep" {
+		t.Errorf("wrong reference trashed: %+v", got.Sections[0].References)
+	}
+	// Trashing an absent reference is a 404.
+	if rec := trashReference(a, sh.ID, sid, "gone"); rec.Code != 404 {
+		t.Errorf("trash absent: code = %d, want 404", rec.Code)
+	}
+}
+
+// Deleting the source node must not rewrite or remove the sheet reference: the
+// reference is self-contained (triple + snapshot survive intact).
+func TestReferenceSurvivesNodeDelete(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+
+	sh := createSheet(t, a)
+	sid := sh.Sections[0].ID
+	addReference(a, sh.ID, sid, `{"source":{"uid":"u-n1","record":5,"node":"n1"},"snapshot":{"text":"kept evidence","speaker":"assistant"}}`)
+
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 200 {
+		t.Fatalf("node delete: code = %d", del.Code)
+	}
+
+	got := createGet(t, a, sh.ID)
+	refs := got.Sections[0].References
+	if len(refs) != 1 {
+		t.Fatalf("sheet reference lost on node delete: %d remain", len(refs))
+	}
+	if refs[0].Source.UID != "u-n1" || refs[0].Snapshot.Text != "kept evidence" {
+		t.Errorf("reference rewritten by node delete: %+v", refs[0])
+	}
+}
+
 // DELETE archives the sheet; it disappears from the list and GET 404s.
 func TestSheetDeleteArchives(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})

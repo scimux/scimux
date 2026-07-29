@@ -177,6 +177,46 @@ func (sh *Sheet) AddSection(title string) *Section {
 	return &sh.Sections[len(sh.Sections)-1]
 }
 
+// AddReference appends ref to the named section. Default placement is the
+// bottom of the section — the semantic default in the design: the researcher
+// writes the claim, the embedded bubble sits under it as supporting evidence. A
+// missing ref.ID is minted here so every stored reference has a stable identity
+// for jump-back and (later) Find usages. Pure in-memory mutation — the caller
+// persists with Save. ErrNotFound if no section matches.
+func (sh *Sheet) AddReference(sectionID string, ref Reference) (*Reference, error) {
+	for i := range sh.Sections {
+		if sh.Sections[i].ID != sectionID {
+			continue
+		}
+		if ref.ID == "" {
+			ref.ID = newID()
+		}
+		sh.Sections[i].References = append(sh.Sections[i].References, ref)
+		return &sh.Sections[i].References[len(sh.Sections[i].References)-1], nil
+	}
+	return nil, ErrNotFound
+}
+
+// RemoveReference trashes exactly one reference from the named section and
+// reports whether it was found. It removes only that reference — never the
+// source chat bubble and never the capture-layer sticky note (removal from the
+// capture layer stays explicit). The same bubble embedded in N sections is N
+// references; this trashes one.
+func (sh *Sheet) RemoveReference(sectionID, refID string) bool {
+	for i := range sh.Sections {
+		if sh.Sections[i].ID != sectionID {
+			continue
+		}
+		for j := range sh.Sections[i].References {
+			if sh.Sections[i].References[j].ID == refID {
+				sh.Sections[i].References = append(sh.Sections[i].References[:j], sh.Sections[i].References[j+1:]...)
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Get reads and parses one sheet. A missing file is ErrNotFound; a malformed
 // file is a hard error here (unlike List, a caller asking for a specific id
 // wants to know the file is corrupt rather than silently get an empty sheet).

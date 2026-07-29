@@ -3867,6 +3867,8 @@ func main() {
 	mux.HandleFunc("GET /api/sheets/{id}", a.handleSheetGet)
 	mux.HandleFunc("PATCH /api/sheets/{id}", a.handleSheetPatch)
 	mux.HandleFunc("DELETE /api/sheets/{id}", a.handleSheetDelete)
+	mux.HandleFunc("POST /api/sheets/{id}/sections/{sectionID}/references", a.handleSheetAddReference)
+	mux.HandleFunc("DELETE /api/sheets/{id}/sections/{sectionID}/references/{refID}", a.handleSheetTrashReference)
 	mux.HandleFunc("GET /api/search", a.handleSearch)
 	mux.HandleFunc("GET /api/archived", a.handleArchived)
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
