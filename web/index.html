@@ -1160,58 +1160,32 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 }
 
 /* ============================================================================
-   TERMINOLOGY LEGEND (2026-07-29 iPhone review). The USER-FACING vocabulary was
-   renamed, but code identifiers, API paths, ids, CSS classes and the store were
-   INTENTIONALLY left unchanged (the maintainer wants to "feel" the new UI before
-   committing to a deep rename). So there is a deliberate code<->UI mismatch:
+   TERMINOLOGY (code == UI, as of the 2026-07-29 rename). Two features:
 
-       UI "Bookmark"  ==  code `note`   (UI.bookmarks, #bookmarkspane, data-bmact="note",
-                                         bookmarkSnapshot, expandedBookmarks, /notes ...)
-       UI "Note"      ==  code `sheet`/`note`  (wsNotes, /api/notes, sheetstore,
-                                         "note" in comments, data-bmact="sheet" ...)
+       "Bookmark" — a chat capture. Code: `bookmark` (UI.bookmarks,
+                    #bookmarkspane, bookmarkSnapshot, data-bmact, the .bookmark
+                    card class; server search.go emits kind/role "bookmark").
+       "Note"     — a synthesis document. Code: `note` (wsNotes,
+                    #notesworkspace, #wsnote*, /api/notes, internal/notestore,
+                    <data>/notes/*.json). This is the workspace below.
 
-   In other words: the visible word "Notes" now means what the code calls
-   *sheets*, and the code word *note* now surfaces to users as "Bookmark". When
-   reading this file, translate: code `note` -> Bookmark, code `sheet` -> Note.
-   Until the rename below is done, do not "fix" the mismatch piecemeal.
+   Code identifiers now match the visible words — no translation needed.
 
-   ---------------------------------------------------------------------------
-   IF/WHEN YOU DO THE FULL CODE RENAME (this comment is a breadcrumb, NOT a
-   spec — it is not sufficient on its own to drive the change safely):
+   ONE HOMONYM TO WATCH: `.sheet` / `sheet` in this file usually means the
+   iOS-style *bottom-sheet modal* (openSheet/closeSheets/setSheetActive/
+   openTabSheet, class="sheet", the #newchat / #adopt / #sendto / #tabsheet
+   overlays, sheetDisabledByClose) — that is NOT the Note document. Do not
+   "align" those to `note`; they are a generic UI primitive.
 
-   1. ORDERING HAZARD (the killer). The rename is TWO renames: note->bookmark
-      AND sheet/note->note. They MUST run in that order — rename note->bookmark
-      FIRST, then sheet->note. Do it the other way (or blind-replace both at
-      once) and the new `note` (from sheet) collides with the old `note`
-      (capture) and the code corrupts. No naive find-replace.
-
-   2. PERSISTED DATA / API (the real bite; comment above does NOT cover it):
-      - On disk the store writes <data>/sheets/<id>.json + sheets/archive/
-        (internal/sheetstore: Store.Dir, path(), Delete()). Renaming that dir
-        to notes/ ORPHANS every existing note unless you migrate the files or
-        keep a back-compat read path.
-      - 7 routes at /api/notes* in main.go (handleSheet*). Renaming the path
-        is a coordinated, ATOMIC web+server cutover (single-user, so breaking
-        is acceptable, but both sides must change together).
-      - The JSON *field* tags (title/body/order/references/created_at/…) are
-        generic and rename-safe; the record shape does not need to change.
-
-   3. TARGET NAMES ARE UNDECIDED HERE. This legend maps concepts, not concrete
-      identifiers. A real pass needs a full inventory + chosen new names:
-      #bookmarkspane, bookmarkSnapshot, expandedBookmarks, .bookmark CSS, data-bmact, wsNotes,
-      sheetstore package, etc. The `...` above is illustrative, not exhaustive.
-
-   4. SCOPE. This note lives only in web/index.html; the Go side (sheetstore,
-      main.go, notes_http_test.go, ~16 "note" strings in web_test.go) has no
-      pointer. A comment cannot be executed — write an actual checklist/plan.
-
-   See memory: notes-workspace-review-2-iphone.
+   (History: captures were once code `note` and synthesis docs code `sheet`/
+   `memo`, renamed in two ordered passes — bookmark first, then note — to free
+   the `note` identifier. See memory: notes-workspace-review-2-iphone.)
    ============================================================================ */
-/* ---------- Notes workspace (sheets): the synthesis surface ----------
-   A singleton overlay (like search) so the sheet editor is mounted once and
+/* ---------- Notes workspace: the synthesis surface ----------
+   A singleton overlay (like search) so the note editor is mounted once and
    never lives inside a polled render region. Mobile-first: one zone at a time,
    toggled by #notesworkspace.note-open; the min-width query opens the
-   side-by-side navigator + active sheet. */
+   side-by-side navigator + active note. */
 #notesworkspace { position: fixed; inset: 0; z-index: 110; display: flex;
   flex-direction: column; align-items: stretch; }
 #notesworkspace[hidden] { display: none; }
@@ -1576,9 +1550,9 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 <!-- Notes workspace (sheets): a singleton synthesis surface, mounted once and
      OUTSIDE every polled render region, so the section editors are never rebuilt
      from a poll (invariant). Three zones on iPad/desktop
-     (inbox | sheet cards | active sheet); on iPhone one zone at a time, driven
+     (inbox | note cards | active note); on iPhone one zone at a time, driven
      by body classes (.ws-cards / .ws-note). The sticky-note inbox reuses the
-     capture layer; the navigator lists sheets sparsely; the active sheet is the
+     capture layer; the navigator lists notes sparsely; the active note is the
      writing surface. -->
 <div id="notesworkspace" hidden role="dialog" aria-modal="true" aria-label="Notes workspace">
   <div id="wsscrim"></div>
@@ -4945,7 +4919,7 @@ function stampAddress(bookmark, src){
    uid into the same bounded read-only surface search uses. Returns false only
    when neither a live node nor a durable uid is available, so the caller can
    fall back to the captured snapshot. Leaving any full-screen overlay (notes
-   sheet, sheets workspace) is part of the jump — the destination must show. */
+   sheet, notes workspace) is part of the jump — the destination must show. */
 function jumpToChatAddress(a){
   if (a.node && nodeById(a.node)){
     pendingJump = { node: a.node, turnTime: a.turnTime || "", text: a.text || "",
@@ -5862,7 +5836,7 @@ $("#burger").addEventListener("click", () => openSheet("#menu"));
    A singleton overlay mounted once in the DOM and NEVER inside a polled render
    region, so section editors are only ever patched by explicit user/load
    actions — the poll cannot rebuild the editable surface (invariant). The
-   server owns the sheet documents (/api/notes); ui.json keeps only view state
+   server owns the note documents (/api/notes); ui.json keeps only view state
    (fold; here per-device in localStorage for the first build). */
 let wsNotes = [];         /* sparse card list from GET /api/notes */
 let wsActiveId = null;     /* id of the open sheet, or null */
@@ -6547,7 +6521,7 @@ function startPlacement(nt){
   if (!wsOpen()) openWorkspace();
   $("#notesworkspace").classList.add("placing");
   $("#wsplacetext").textContent = (nt.text || "").replace(/\s+/g, " ").trim();
-  /* on a narrow screen the workspace opens on the sheet cards; the banner tells
+  /* on a narrow screen the workspace opens on the note cards; the banner tells
      the user to pick a sheet, then a section */
 }
 function endPlacement(){

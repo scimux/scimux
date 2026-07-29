@@ -9,9 +9,9 @@ import (
 	"codeberg.org/chrberger/scimux/internal/notestore"
 )
 
-// patchSheet drives handleNotePatch with the id path value set (the mux would
+// patchNote drives handleNotePatch with the id path value set (the mux would
 // normally supply it).
-func patchSheet(a *app, id, bodyJSON string) *httptest.ResponseRecorder {
+func patchNote(a *app, id, bodyJSON string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("PATCH", "/api/notes/"+id, strings.NewReader(bodyJSON))
 	req.SetPathValue("id", id)
@@ -19,7 +19,7 @@ func patchSheet(a *app, id, bodyJSON string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func getSheet(a *app, id string) *httptest.ResponseRecorder {
+func getNote(a *app, id string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/notes/"+id, nil)
 	req.SetPathValue("id", id)
@@ -27,7 +27,7 @@ func getSheet(a *app, id string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func createSheet(t *testing.T, a *app) notestore.Note {
+func createNote(t *testing.T, a *app) notestore.Note {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	a.handleNoteCreate(rec, httptest.NewRequest("POST", "/api/notes", nil))
@@ -42,14 +42,14 @@ func createSheet(t *testing.T, a *app) notestore.Note {
 }
 
 // POST creates a note with the starter shape; GET reads it back.
-func TestSheetCreateAndGet(t *testing.T) {
+func TestNoteCreateAndGet(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	if sh.ID == "" || len(sh.Sections) != 1 {
 		t.Fatalf("bad created note: %+v", sh)
 	}
 
-	rec := getSheet(a, sh.ID)
+	rec := getNote(a, sh.ID)
 	if rec.Code != 200 {
 		t.Fatalf("get: code = %d", rec.Code)
 	}
@@ -62,16 +62,16 @@ func TestSheetCreateAndGet(t *testing.T) {
 	}
 
 	// Unknown id is a 404, never a 500.
-	if r := getSheet(a, "nope"); r.Code != 404 {
+	if r := getNote(a, "nope"); r.Code != 404 {
 		t.Errorf("unknown id: code = %d, want 404", r.Code)
 	}
 }
 
 // GET /api/notes is a sparse list: title, edited, section count, lane colors —
 // never the full section bodies.
-func TestSheetListSparse(t *testing.T) {
+func TestNoteListSparse(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	// Give the note a reference so a lane color is represented.
 	sh.Sections[0].References = []notestore.Reference{{
 		ID:       "r1",
@@ -92,7 +92,7 @@ func TestSheetListSparse(t *testing.T) {
 		t.Error("sparse list leaked section body text")
 	}
 	var resp struct {
-		Sheets []struct {
+		Notes []struct {
 			ID           string   `json:"id"`
 			Title        string   `json:"title"`
 			Edited       string   `json:"edited_at"`
@@ -103,10 +103,10 @@ func TestSheetListSparse(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Sheets) != 1 {
-		t.Fatalf("want 1 note, got %d", len(resp.Sheets))
+	if len(resp.Notes) != 1 {
+		t.Fatalf("want 1 note, got %d", len(resp.Notes))
 	}
-	s := resp.Sheets[0]
+	s := resp.Notes[0]
 	if s.ID != sh.ID || s.SectionCount != 1 || s.Edited == "" {
 		t.Errorf("sparse fields wrong: %+v", s)
 	}
@@ -116,15 +116,15 @@ func TestSheetListSparse(t *testing.T) {
 }
 
 // PATCH renames a note, adds a section, and edits section fields.
-func TestSheetPatchTitleAndSections(t *testing.T) {
+func TestNotePatchTitleAndSections(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 
-	if rec := patchSheet(a, sh.ID, `{"title":"Install Guide"}`); rec.Code != 200 {
+	if rec := patchNote(a, sh.ID, `{"title":"Install Guide"}`); rec.Code != 200 {
 		t.Fatalf("rename: code = %d, body %s", rec.Code, rec.Body.String())
 	}
 	// Add a section, capture its id from the returned note.
-	rec := patchSheet(a, sh.ID, `{"add_section":"Findings"}`)
+	rec := patchNote(a, sh.ID, `{"add_section":"Findings"}`)
 	if rec.Code != 200 {
 		t.Fatalf("add_section: code = %d", rec.Code)
 	}
@@ -140,7 +140,7 @@ func TestSheetPatchTitleAndSections(t *testing.T) {
 
 	// Edit the new section's body + title.
 	body := `{"section":{"id":"` + newSec.ID + `","title":"Results","body":"# Results\nok"}}`
-	if rec := patchSheet(a, sh.ID, body); rec.Code != 200 {
+	if rec := patchNote(a, sh.ID, body); rec.Code != 200 {
 		t.Fatalf("section edit: code = %d, body %s", rec.Code, rec.Body.String())
 	}
 	got := createGet(t, a, sh.ID)
@@ -151,7 +151,7 @@ func TestSheetPatchTitleAndSections(t *testing.T) {
 
 func createGet(t *testing.T, a *app, id string) notestore.Note {
 	t.Helper()
-	rec := getSheet(a, id)
+	rec := getNote(a, id)
 	var sh notestore.Note
 	if err := json.Unmarshal(rec.Body.Bytes(), &sh); err != nil {
 		t.Fatal(err)
@@ -162,15 +162,15 @@ func createGet(t *testing.T, a *app, id string) notestore.Note {
 // Autosave (PATCH section body) rewrites the file atomically — the on-disk file
 // stays a single valid JSON object, never a growing append log, and edited_at
 // advances.
-func TestSheetAutosaveOverwrites(t *testing.T) {
+func TestNoteAutosaveOverwrites(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	sid := sh.Sections[0].ID
 
-	patchSheet(a, sh.ID, `{"section":{"id":"`+sid+`","body":"one"}}`)
+	patchNote(a, sh.ID, `{"section":{"id":"`+sid+`","body":"one"}}`)
 	afterFirst := createGet(t, a, sh.ID)
 
-	patchSheet(a, sh.ID, `{"section":{"id":"`+sid+`","body":"two"}}`)
+	patchNote(a, sh.ID, `{"section":{"id":"`+sid+`","body":"two"}}`)
 	afterSecond := createGet(t, a, sh.ID)
 
 	if afterSecond.Sections[0].Body != "two" {
@@ -189,15 +189,15 @@ func TestSheetAutosaveOverwrites(t *testing.T) {
 
 // A section-body autosave must not clobber a concurrent title rename: PATCH is a
 // partial read-modify-write over untouched fields, not a whole-document replace.
-func TestSheetPatchIsPartial(t *testing.T) {
+func TestNotePatchIsPartial(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	sid := sh.Sections[0].ID
 
 	// Rename the note, then autosave a section body. The body PATCH carries no
 	// title, so the earlier rename must survive.
-	patchSheet(a, sh.ID, `{"title":"Kept Title"}`)
-	patchSheet(a, sh.ID, `{"section":{"id":"`+sid+`","body":"edited"}}`)
+	patchNote(a, sh.ID, `{"title":"Kept Title"}`)
+	patchNote(a, sh.ID, `{"section":{"id":"`+sid+`","body":"edited"}}`)
 
 	got := createGet(t, a, sh.ID)
 	if got.Title != "Kept Title" {
@@ -209,43 +209,43 @@ func TestSheetPatchIsPartial(t *testing.T) {
 }
 
 // PATCH can reorder notes and delete a section.
-func TestSheetReorderAndSectionDelete(t *testing.T) {
+func TestNoteReorderAndSectionDelete(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	first := createSheet(t, a)
-	second := createSheet(t, a)
+	first := createNote(t, a)
+	second := createNote(t, a)
 
 	// Move `second` in front of `first`.
-	patchSheet(a, second.ID, `{"order":-1}`)
+	patchNote(a, second.ID, `{"order":-1}`)
 	list, _ := a.notes.List()
 	if list[0].ID != second.ID {
 		t.Errorf("reorder failed: list[0] = %q, want %q", list[0].ID, second.ID)
 	}
 
 	// Add then delete a section on `first`.
-	rec := patchSheet(a, first.ID, `{"add_section":"Temp"}`)
+	rec := patchNote(a, first.ID, `{"add_section":"Temp"}`)
 	var withTemp notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &withTemp)
 	tempID := withTemp.Sections[1].ID
-	patchSheet(a, first.ID, `{"section":{"id":"`+tempID+`","delete":true}}`)
+	patchNote(a, first.ID, `{"section":{"id":"`+tempID+`","delete":true}}`)
 	got := createGet(t, a, first.ID)
 	if len(got.Sections) != 1 {
 		t.Errorf("section delete failed: %d sections remain", len(got.Sections))
 	}
 }
 
-func addReference(a *app, sheetID, sectionID, bodyJSON string) *httptest.ResponseRecorder {
+func addReference(a *app, noteID, sectionID, bodyJSON string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/notes/"+sheetID+"/sections/"+sectionID+"/references", strings.NewReader(bodyJSON))
-	req.SetPathValue("id", sheetID)
+	req := httptest.NewRequest("POST", "/api/notes/"+noteID+"/sections/"+sectionID+"/references", strings.NewReader(bodyJSON))
+	req.SetPathValue("id", noteID)
 	req.SetPathValue("sectionID", sectionID)
 	a.handleNoteAddReference(rec, req)
 	return rec
 }
 
-func trashReference(a *app, sheetID, sectionID, refID string) *httptest.ResponseRecorder {
+func trashReference(a *app, noteID, sectionID, refID string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("DELETE", "/api/notes/"+sheetID+"/sections/"+sectionID+"/references/"+refID, nil)
-	req.SetPathValue("id", sheetID)
+	req := httptest.NewRequest("DELETE", "/api/notes/"+noteID+"/sections/"+sectionID+"/references/"+refID, nil)
+	req.SetPathValue("id", noteID)
 	req.SetPathValue("sectionID", sectionID)
 	req.SetPathValue("refID", refID)
 	a.handleNoteTrashReference(rec, req)
@@ -255,9 +255,9 @@ func trashReference(a *app, sheetID, sectionID, refID string) *httptest.Response
 // Posting a capture into (note, section) stores a self-contained reference:
 // the durable triple in source, the display copy in snapshot, with a
 // server-minted id (a client-sent id is never trusted).
-func TestSheetAddReference(t *testing.T) {
+func TestNoteAddReference(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	sid := sh.Sections[0].ID
 
 	body := `{"id":"client-forged","source":{"uid":"u1","segment":2,"record":7,"node":"lane-a","turnTime":"2026-07-28T10:00:00Z"},` +
@@ -293,11 +293,11 @@ func TestSheetAddReference(t *testing.T) {
 }
 
 // The same bubble added to two sections is two references to one source.
-func TestSheetReferenceMultipleUsages(t *testing.T) {
+func TestNoteReferenceMultipleUsages(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	secA := sh.Sections[0].ID
-	rec := patchSheet(a, sh.ID, `{"add_section":"Two"}`)
+	rec := patchNote(a, sh.ID, `{"add_section":"Two"}`)
 	var withTwo notestore.Note
 	json.Unmarshal(rec.Body.Bytes(), &withTwo)
 	secB := withTwo.Sections[1].ID
@@ -320,9 +320,9 @@ func TestSheetReferenceMultipleUsages(t *testing.T) {
 }
 
 // Trashing a reference removes only that reference from the section.
-func TestSheetTrashReference(t *testing.T) {
+func TestNoteTrashReference(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	sid := sh.Sections[0].ID
 	addReference(a, sh.ID, sid, `{"source":{"uid":"keep"}}`)
 	rec := addReference(a, sh.ID, sid, `{"source":{"uid":"drop"}}`)
@@ -351,7 +351,7 @@ func TestReferenceSurvivesNodeDelete(t *testing.T) {
 	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
 	a.byID["n1"] = a.nodes[0]
 
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 	sid := sh.Sections[0].ID
 	addReference(a, sh.ID, sid, `{"source":{"uid":"u-n1","record":5,"node":"n1"},"snapshot":{"text":"kept evidence","speaker":"assistant"}}`)
 
@@ -374,9 +374,9 @@ func TestReferenceSurvivesNodeDelete(t *testing.T) {
 }
 
 // DELETE archives the note; it disappears from the list and GET 404s.
-func TestSheetDeleteArchives(t *testing.T) {
+func TestNoteDeleteArchives(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	sh := createSheet(t, a)
+	sh := createNote(t, a)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/notes/"+sh.ID, nil)
@@ -385,7 +385,7 @@ func TestSheetDeleteArchives(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("delete: code = %d", rec.Code)
 	}
-	if r := getSheet(a, sh.ID); r.Code != 404 {
+	if r := getNote(a, sh.ID); r.Code != 404 {
 		t.Errorf("get after delete: code = %d, want 404", r.Code)
 	}
 	list, _ := a.notes.List()

@@ -22,7 +22,7 @@ const (
 	minSearchQuery     = 2
 	maxSearchQuery     = 128     // clamp the scanned query so a pathological length can't drive the scan cost
 	searchHitsPerFile  = 20      // per-file hit cap (ScanLog)
-	searchHitsPerGroup = 20      // per-group hit cap after log+note merge
+	searchHitsPerGroup = 20      // per-group hit cap after log+bookmark merge
 	searchMaxFiles     = 500     // stop scanning after this many catalog sources
 	searchMaxHitsTotal = 500     // stop scanning once this many log hits accumulate
 	searchMaxGroups    = 50      // response group cap
@@ -32,7 +32,7 @@ const (
 )
 
 // searchHitJSON is one match in the response. Log hits carry (segment, record);
-// note hits carry note_id and the referenced turn_time. Role is user|assistant|
+// bookmark hits carry bookmark_id and the referenced turn_time. Role is user|assistant|
 // asset|bookmark.
 type searchHitJSON struct {
 	Role       string `json:"role"`
@@ -47,10 +47,10 @@ type searchHitJSON struct {
 	After      string `json:"after"`
 }
 
-// searchGroupJSON is one chat's (or the Notes bucket's) matches. Kind is
-// live|archived|notes; ID is the live node id (show-to-chat live path, fork);
+// searchGroupJSON is one chat's (or the Bookmarks bucket's) matches. Kind is
+// live|archived|bookmarks; ID is the live node id (show-to-chat live path, fork);
 // UID is the log's on-disk identity ("legacy:<path>" for header-less logs, empty
-// for the Notes bucket).
+// for the Bookmarks bucket).
 type searchGroupJSON struct {
 	Kind     string          `json:"kind"`
 	ID       string          `json:"id,omitempty"`
@@ -72,7 +72,7 @@ type searchResponseJSON struct {
 
 // searchSource is one log to scan plus the group header it produces. It is
 // assembled per request from three places (the searchCatalog): live nodes from
-// memory, archived logs from their on-disk meta header, and — separately — notes
+// memory, archived logs from their on-disk meta header, and — separately — bookmarks
 // from ui.json.
 type searchSource struct {
 	kind      string // "live" | "archived"
@@ -86,7 +86,7 @@ type searchSource struct {
 }
 
 // searchCatalog enumerates every log the corpus can match this request: the live
-// nodes held in memory and the archived logs on disk. Notes (ui.json) are folded
+// nodes held in memory and the archived logs on disk. Bookmarks (ui.json) are folded
 // in later, in handleSearch. It does not touch nodes.jsonl — dead nodes live as
 // their archived log file, self-described by its meta header.
 func (a *app) searchCatalog() []searchSource {
@@ -171,9 +171,9 @@ func dirExists(path string) bool {
 	return err == nil && st.IsDir()
 }
 
-// searchBookmark is the narrow, defensive projection of a ui.json note the server is
+// searchBookmark is the narrow, defensive projection of a ui.json bookmark the server is
 // willing to read: the client owns ui.json's shape, so the reader takes only
-// these fields and ignores everything else. The note id is `t` (its ISO
+// these fields and ignores everything else. The bookmark id is `t` (its ISO
 // creation stamp); node/turnTime tie it back to a chat; text is the corpus.
 type searchBookmark struct {
 	T        string `json:"t"`
@@ -183,8 +183,8 @@ type searchBookmark struct {
 	TurnTime string `json:"turnTime"`
 	Anchor   string `json:"anchor"`
 	// The durable source address stamped at capture time (Phase 0c). Present
-	// only on notes captured from a chat turn after the address existed; legacy
-	// notes leave them zero and fall back to the node+turnTime live hints.
+	// only on bookmarks captured from a chat turn after the address existed; legacy
+	// bookmarks leave them zero and fall back to the node+turnTime live hints.
 	UID     string `json:"uid"`
 	Segment int    `json:"segment"`
 	Record  int    `json:"record"`
@@ -214,7 +214,7 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// groups keyed by a stable identity: live node id, archived uid/legacy path,
-	// or the "notes" bucket. liveSrc lets a note fold into its owning live chat's
+	// or the "bookmarks" bucket. liveSrc lets a bookmark fold into its owning live chat's
 	// group even when that chat produced no text hit of its own.
 	groups := map[string]*searchGroupJSON{}
 	liveSrc := map[string]searchSource{}
@@ -277,7 +277,7 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 		// Forkability: a live group forks the in-memory node (src.forkable is the
 		// authoritative dir-exists affordance), so it must NOT be gated on the log's
 		// on-disk UID — a header-less/UID-less log would otherwise report the same
-		// live node non-forkable here yet forkable via a folded note (below). The
+		// live node non-forkable here yet forkable via a folded bookmark (below). The
 		// UID gate is meaningful only for archived groups, which fork from the log.
 		forkable := src.forkable
 		if src.kind == "archived" {
@@ -298,28 +298,28 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 		groups[key] = g
 	}
 
-	// Notes: fold into the owning live chat when it matched or exists; otherwise
-	// the "Notes" bucket. A note referencing a live node that produced no log hit
+	// Bookmarks: fold into the owning live chat when it matched or exists; otherwise
+	// the "Bookmarks" bucket. A bookmark referencing a live node that produced no log hit
 	// still needs a group, so create the live group on demand from its source.
-	for _, note := range a.searchBookmarks() {
-		b, m, af, ok := searchExcerpt(note.Text, q)
+	for _, bookmark := range a.searchBookmarks() {
+		b, m, af, ok := searchExcerpt(bookmark.Text, q)
 		if !ok {
 			continue
 		}
 		hit := searchHitJSON{
-			Role: "bookmark", BookmarkID: note.T, Time: note.T, TurnTime: note.TurnTime,
-			UID: note.UID, Segment: note.Segment, Record: note.Record,
+			Role: "bookmark", BookmarkID: bookmark.T, Time: bookmark.T, TurnTime: bookmark.TurnTime,
+			UID: bookmark.UID, Segment: bookmark.Segment, Record: bookmark.Record,
 			Before: b, Match: m, After: af,
 		}
 		var g *searchGroupJSON
-		if src, ok := liveSrc[note.Node]; note.Node != "" && ok {
-			g = groups[note.Node]
+		if src, ok := liveSrc[bookmark.Node]; bookmark.Node != "" && ok {
+			g = groups[bookmark.Node]
 			if g == nil {
 				g = &searchGroupJSON{
 					Kind: "live", ID: src.id, Title: src.title,
 					LaneID: src.laneID, Agent: src.agent, Forkable: src.forkable,
 				}
-				groups[note.Node] = g
+				groups[bookmark.Node] = g
 			}
 		}
 		if g == nil {
@@ -330,14 +330,14 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		g.Hits = append(g.Hits, hit)
-		order(g, parseSearchTime(note.T))
+		order(g, parseSearchTime(bookmark.T))
 	}
 
 	for _, g := range groups {
 		sort.SliceStable(g.Hits, func(i, j int) bool {
 			return parseSearchTime(g.Hits[i].Time).After(parseSearchTime(g.Hits[j].Time))
 		})
-		// Per-group hit cap: applied after the log+note merge so a single chat can't
+		// Per-group hit cap: applied after the log+bookmark merge so a single chat can't
 		// dominate the feed. The newest hits survive (the sort above is newest-first).
 		if len(g.Hits) > searchHitsPerGroup {
 			g.Hits = g.Hits[:searchHitsPerGroup]
@@ -357,7 +357,7 @@ func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // searchBookmarks reads ui.json through the narrow defensive reader. Any failure —
-// missing file, invalid JSON, notes not an array — yields no notes, never an
+// missing file, invalid JSON, bookmarks not an array — yields no bookmarks, never an
 // error: the server treats the client-owned document as untrusted input.
 func (a *app) searchBookmarks() []searchBookmark {
 	if a.uiPath == "" {
@@ -376,7 +376,7 @@ func (a *app) searchBookmarks() []searchBookmark {
 	return doc.Bookmarks
 }
 
-// searchExcerpt runs ScanLog's excerpt window over a single string (a note's
+// searchExcerpt runs ScanLog's excerpt window over a single string (a bookmark's
 // text), returning the escaped-later before/match/after spans, or ok=false when
 // the query is absent.
 func searchExcerpt(text, query string) (before, match, after string, ok bool) {

@@ -1530,7 +1530,7 @@ func TestWebSectionRendersReferences(t *testing.T) {
 // "Use in sheet" is the capture→synthesis bridge. It must be an action on the
 // compact notes pane (the inbox on every device) and route through a shared
 // placement path that posts the reference to the section endpoint.
-func TestWebUseInSheetWiring(t *testing.T) {
+func TestWebUseInNoteWiring(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
 		t.Fatalf("read embedded web/index.html: %v", err)
@@ -1614,16 +1614,15 @@ func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 	}
 }
 
-// Terminology (2026-07-29 iPhone review): the product language became
-// Bookmarks (chat captures) and Notes (synthesis docs, formerly Memos). This is
-// a USER-FACING rename only — code identifiers (note=capture, sheet=synthesis)
-// are deliberately unchanged, see the TERMINOLOGY LEGEND in web/index.html. This
-// test guards the visible vocabulary; it must not assert on code identifiers.
+// Terminology (2026-07-29): the product language is Bookmarks (chat captures)
+// and Notes (synthesis docs, formerly Memos), and the code identifiers now
+// match — capture code is `bookmark`, synthesis code is `note`. This test
+// guards the visible vocabulary; it anchors to rendered markup rather than bare
+// words so it doesn't trip over the bottom-sheet `.sheet` homonym in comments.
 func TestWorkspaceRenames(t *testing.T) {
 	html := mustReadIndex(t)
-	// stale visible wording that must not leak. Rendered UI forms only — the
-	// legend intentionally keeps "memo" in code comments, so anchor to markup
-	// (tags/aria/labels) rather than bare words.
+	// stale visible wording that must not leak. Rendered UI forms only (anchor
+	// to tags/aria/labels rather than bare words).
 	for _, gone := range []string{
 		">Use in sheet<", "No captures yet", "No sheets yet", "Couldn't create sheet",
 		"take a note",              // the bubble action is now "bookmark"
@@ -1653,10 +1652,10 @@ func TestWorkspaceRenames(t *testing.T) {
 			t.Errorf("expected new vocabulary %q not found", want)
 		}
 	}
-	// the legend documenting the intentional code/UI mismatch must be present so
-	// the next maintainer isn't misled by code `note` meaning UI Bookmark.
-	if !strings.Contains(html, "TERMINOLOGY LEGEND") {
-		t.Error("a TERMINOLOGY LEGEND comment must document the code(note/sheet) vs UI(Bookmark/Note) mismatch")
+	// a short terminology note must remain, documenting the code==UI mapping and
+	// the one live gotcha: the bottom-sheet `.sheet` primitive is NOT a Note.
+	if !strings.Contains(html, "TERMINOLOGY (code == UI") {
+		t.Error("the terminology comment (code==UI mapping + bottom-sheet homonym warning) must be present")
 	}
 }
 
@@ -1734,7 +1733,7 @@ func TestWorkspaceInboxNoHorizontalScroll(t *testing.T) {
 
 // Item 6/9: memo cards reorder by drag-and-drop (the proven pinned-card gesture),
 // not by no-op up/down arrows; the redundant reorder-mode toggle is gone.
-func TestWorkspaceMemoCardsDragReorder(t *testing.T) {
+func TestWorkspaceNoteCardsDragReorder(t *testing.T) {
 	html := mustReadIndex(t)
 	for _, gone := range []string{
 		"data-wsmove",    // the old per-card up/down buttons
@@ -1842,7 +1841,7 @@ func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
 // Item 16: the memo's overflow (three-dots) menu must actually open — the
 // document-level close handler was firing on the same click. The handler stops
 // propagation, and the menu offers rename + delete.
-func TestWorkspaceSheetMenuOpens(t *testing.T) {
+func TestWorkspaceNoteMenuOpens(t *testing.T) {
 	html := mustReadIndex(t)
 	h := html[strings.Index(html, `$("#wsnotemenu").addEventListener("click"`):]
 	h = h[:strings.Index(h, "\n});")]

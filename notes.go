@@ -9,7 +9,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/notestore"
 )
 
-// Sheets HTTP API (phase 1b of the notes/notes feature). Thin handlers over
+// Notes HTTP API (phase 1b of the notes/notes feature). Thin handlers over
 // internal/notestore: the server owns read/write of the note documents, while
 // ui.json keeps only view state (the note-list index and fold state). See
 // notes-design.md and notes-impl-plan.md.
@@ -76,7 +76,7 @@ func summarize(sh notestore.Note) noteSummary {
 func (a *app) handleNoteGet(w http.ResponseWriter, r *http.Request) {
 	sh, err := a.notes.Get(r.PathValue("id"))
 	if err != nil {
-		a.sheetError(w, err)
+		a.noteError(w, err)
 		return
 	}
 	writeJSON(w, sh)
@@ -93,11 +93,11 @@ func (a *app) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sh)
 }
 
-// sheetPatch is the mutation envelope. Every field is optional; a request
+// notePatch is the mutation envelope. Every field is optional; a request
 // carries only what it changes, so a body autosave (Section.Body alone) never
 // disturbs the title or another section — that is the partial-update contract
 // that makes concurrent rename + autosave safe.
-type sheetPatch struct {
+type notePatch struct {
 	Title      *string      `json:"title"`       // rename the note
 	Order      *int         `json:"order"`       // reposition the note among notes
 	AddSection *string      `json:"add_section"` // append a section with this title ("" → "Section N")
@@ -116,7 +116,7 @@ type sectionEdit struct {
 
 func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var body sheetPatch
+	var body notePatch
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
@@ -125,7 +125,7 @@ func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
 	defer a.noteMu.Unlock()
 	sh, err := a.notes.Get(id)
 	if err != nil {
-		a.sheetError(w, err)
+		a.noteError(w, err)
 		return
 	}
 	if body.Title != nil {
@@ -204,11 +204,11 @@ func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
 	defer a.noteMu.Unlock()
 	sh, err := a.notes.Get(r.PathValue("id"))
 	if err != nil {
-		a.sheetError(w, err)
+		a.noteError(w, err)
 		return
 	}
 	if _, err := sh.AddReference(r.PathValue("sectionID"), ref); err != nil {
-		a.sheetError(w, err)
+		a.noteError(w, err)
 		return
 	}
 	if err := a.notes.Save(sh); err != nil {
@@ -226,7 +226,7 @@ func (a *app) handleNoteTrashReference(w http.ResponseWriter, r *http.Request) {
 	defer a.noteMu.Unlock()
 	sh, err := a.notes.Get(r.PathValue("id"))
 	if err != nil {
-		a.sheetError(w, err)
+		a.noteError(w, err)
 		return
 	}
 	if !sh.RemoveReference(r.PathValue("sectionID"), r.PathValue("refID")) {
@@ -240,9 +240,9 @@ func (a *app) handleNoteTrashReference(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sh)
 }
 
-// sheetError maps a store read error to the right HTTP status: a missing note
+// noteError maps a store read error to the right HTTP status: a missing note
 // or section is a 404, anything else a 500.
-func (a *app) sheetError(w http.ResponseWriter, err error) {
+func (a *app) noteError(w http.ResponseWriter, err error) {
 	if errors.Is(err, notestore.ErrNotFound) {
 		http.Error(w, "not found", 404)
 		return
@@ -254,7 +254,7 @@ func (a *app) handleNoteDelete(w http.ResponseWriter, r *http.Request) {
 	a.noteMu.Lock()
 	defer a.noteMu.Unlock()
 	if err := a.notes.Delete(r.PathValue("id")); err != nil {
-		a.sheetError(w, err)
+		a.noteError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"ok": "deleted"})

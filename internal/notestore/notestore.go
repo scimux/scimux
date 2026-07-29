@@ -1,12 +1,12 @@
 // Package notestore owns scimux's synthesis documents ("Notes"): the
 // researcher-composed surface that sits above the append-only capture layer.
-// Each sheet is one mutable JSON file under <data>/sheets/<id>.json, with its
-// sections and their embedded chat references nested inside it. A deleted sheet
-// is moved to sheets/archive/ rather than erased, mirroring the session-log
+// Each note is one mutable JSON file under <data>/notes/<id>.json, with its
+// sections and their embedded chat references nested inside it. A deleted note
+// is moved to notes/archive/ rather than erased, mirroring the session-log
 // store's delete-is-archive pattern so a reissued id can never collide with
 // live data.
 //
-// This is deliberately NOT an append-only event store. A sheet is a mutable
+// This is deliberately NOT an append-only event store. A note is a mutable
 // word-processor document: the current text is the truth and edit history is
 // incidental, so the append-only replay/seam/dedupe machinery that is
 // load-bearing for nodes.jsonl and the session log buys nothing here and would
@@ -14,7 +14,7 @@
 // documents, so they are stored as documents (see notes-design.md "Storage
 // Model"). Crash safety comes from tmp-write + rename atomicity, the same
 // pattern ui.json uses; the files stay stdlib-only and greppable
-// (`grep sheets/*.json`).
+// (`grep notes/*.json`).
 package notestore
 
 import (
@@ -64,7 +64,7 @@ type Reference struct {
 	Snapshot Snapshot `json:"snapshot"`
 }
 
-// Section is one editable block of a sheet: a title, a Markdown body, an
+// Section is one editable block of a note: a title, a Markdown body, an
 // explicit order position, and its embedded references. Fold/unfold is view
 // state and lives in ui.json, not here.
 type Section struct {
@@ -76,10 +76,10 @@ type Section struct {
 	References []Reference `json:"references,omitempty"`
 }
 
-// Note is one synthesis document. Ordering (sheet Order and each section's
+// Note is one synthesis document. Ordering (note Order and each section's
 // Order) is a stored field the server persists on reorder, never derived from
 // events. IDs are opaque, stable strings; UI sorting uses Order, never lexical
-// id order. Display titles are labels, not identities — two sheets may share a
+// id order. Display titles are labels, not identities — two notes may share a
 // title.
 type Note struct {
 	ID       string    `json:"id"`
@@ -90,7 +90,7 @@ type Note struct {
 	Sections []Section `json:"sections"`
 }
 
-// Store is a directory of sheet documents.
+// Store is a directory of note documents.
 type Store struct {
 	Dir string
 }
@@ -98,13 +98,13 @@ type Store struct {
 // New returns a store rooted at dir (created lazily on first write).
 func New(dir string) *Store { return &Store{Dir: dir} }
 
-// ErrNotFound is returned by Get/Delete for an unknown or archived sheet id.
-var ErrNotFound = errors.New("notestore: sheet not found")
+// ErrNotFound is returned by Get/Delete for an unknown or archived note id.
+var ErrNotFound = errors.New("notestore: note not found")
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // newID mints an opaque, stable, filename-safe id. A sortable time prefix aids
-// human debugging of the directory; the random suffix makes two sheets created
+// human debugging of the directory; the random suffix makes two notes created
 // in the same second (or minute) distinct, since display titles are not
 // identities. UI order comes from the Order field, never from this id.
 func newID() string {
@@ -119,9 +119,9 @@ func newID() string {
 
 func (s *Store) path(id string) string { return filepath.Join(s.Dir, id+".json") }
 
-// Create writes a fresh sheet: auto title YYYY-MM-DD HH:MM, a single starter
+// Create writes a fresh note: auto title YYYY-MM-DD HH:MM, a single starter
 // section titled "Section 1", and an order that appends it after existing
-// sheets. The file is persisted before returning.
+// notes. The file is persisted before returning.
 func (s *Store) Create() (Note, error) {
 	now := nowStamp()
 	sh := Note{
@@ -143,7 +143,7 @@ func (s *Store) Create() (Note, error) {
 	return sh, nil
 }
 
-// nextOrder returns one past the highest existing sheet Order, so a new sheet
+// nextOrder returns one past the highest existing note Order, so a new note
 // appends to the end of the navigator. Best-effort: a listing error yields 0.
 func (s *Store) nextOrder() int {
 	list, err := s.List()
@@ -159,7 +159,7 @@ func (s *Store) nextOrder() int {
 	return max + 1
 }
 
-// AddSection appends a new empty section after the sheet's current sections and
+// AddSection appends a new empty section after the note's current sections and
 // returns it. Pure in-memory mutation — the caller persists with Save.
 func (sh *Note) AddSection(title string) *Section {
 	order := 0
@@ -217,9 +217,9 @@ func (sh *Note) RemoveReference(sectionID, refID string) bool {
 	return false
 }
 
-// Get reads and parses one sheet. A missing file is ErrNotFound; a malformed
+// Get reads and parses one note. A missing file is ErrNotFound; a malformed
 // file is a hard error here (unlike List, a caller asking for a specific id
-// wants to know the file is corrupt rather than silently get an empty sheet).
+// wants to know the file is corrupt rather than silently get an empty note).
 func (s *Store) Get(id string) (Note, error) {
 	b, err := os.ReadFile(s.path(id))
 	if err != nil {
@@ -235,18 +235,18 @@ func (s *Store) Get(id string) (Note, error) {
 	return sh, nil
 }
 
-// Save rewrites the sheet's file atomically (tmp-write + rename), overwriting
+// Save rewrites the note's file atomically (tmp-write + rename), overwriting
 // rather than appending, and stamps edited_at. Write cost is bounded by this
-// one sheet's size, so autosave frequency never grows the store.
+// one note's size, so autosave frequency never grows the store.
 func (s *Store) Save(sh Note) error {
 	if sh.ID == "" {
-		return errors.New("notestore: cannot save a sheet with an empty id")
+		return errors.New("notestore: cannot save a note with an empty id")
 	}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
 	sh.Edited = nowStamp()
-	// Indented but still a single greppable JSON object per file; a sheet is a
+	// Indented but still a single greppable JSON object per file; a note is a
 	// document, not a JSONL stream, so readability wins over one-line-per-record.
 	b, err := json.MarshalIndent(sh, "", "  ")
 	if err != nil {
@@ -266,9 +266,9 @@ func (s *Store) Save(sh Note) error {
 	return nil
 }
 
-// Delete moves the sheet file into sheets/archive/ with a timestamp suffix.
+// Delete moves the note file into notes/archive/ with a timestamp suffix.
 // Nothing is erased; a reissued id can never append onto dead content because
-// the live file is gone. Missing sheet is ErrNotFound.
+// the live file is gone. Missing note is ErrNotFound.
 func (s *Store) Delete(id string) error {
 	src := s.path(id)
 	if _, err := os.Stat(src); err != nil {
@@ -285,7 +285,7 @@ func (s *Store) Delete(id string) error {
 	return os.Rename(src, filepath.Join(dir, id+"."+stamp+".json"))
 }
 
-// List returns every parseable sheet in the directory, sorted by the stored
+// List returns every parseable note in the directory, sorted by the stored
 // Order field (ties broken by id for a stable order). Defensive like the rest
 // of the corpus readers: non-.json entries, the archive subdir, tmp files, and
 // malformed/unparseable files are skipped, never a hard error — a corrupt file
