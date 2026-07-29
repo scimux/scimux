@@ -1564,3 +1564,270 @@ func TestWebSharedJumpResolver(t *testing.T) {
 		t.Error("jumpToChatAddress must be called from both the notes pane and references")
 	}
 }
+
+// --- Notes/Memos workspace feedback (phase 1d review) ---
+// The reviewer inspected the workspace on iPad and filed 20 issues. These
+// tests lock the fixes so they cannot silently regress.
+
+// Item 1: the workspace is a full-viewport writing surface (like the metro-map
+// wall map), not a centred card floating on a blurred scrim.
+func TestWorkspaceIsFullScreen(t *testing.T) {
+	html := mustReadIndex(t)
+	css := cssBlock(t, html, "#wspanel {")
+	if !strings.Contains(css, "100vw") || !strings.Contains(css, "100dvh") {
+		t.Errorf("#wspanel must fill the viewport (100vw/100dvh); got %q", css)
+	}
+	if strings.Contains(css, "margin: 3vh auto") {
+		t.Error("#wspanel must not be a centred card with a vh margin")
+	}
+}
+
+// Items 2 & 5: the left capture zone reuses the compact Notes UI — lane tabs and
+// the same auto-collapse ("Show more"/"Show less") for tall bubbles.
+func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, want := range []string{
+		`id="wsinboxtabs"`,             // the lane-tab row exists in markup
+		"data-wsitab",                  // per-tab selector
+		"data-wsimore",                 // per-bubble show-more toggle
+		".wsibubble.clamped",           // the CSS clamp on tall capture bubbles
+		"function applyWsInboxClamps(", // the measure/apply pass
+		"expandedWsInbox",              // ephemeral expand state, sibling of expandedNotes
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("workspace inbox tabs/clamp wiring missing %q", want)
+		}
+	}
+	// The show-more toggle branch must precede the "Use in memo" branch so a tap
+	// on Show more never enters placement mode.
+	dele := strings.Index(html, `$("#wsinboxlist").addEventListener("click"`)
+	if dele < 0 {
+		t.Fatal("could not locate the #wsinboxlist click delegate")
+	}
+	body := html[dele:]
+	more := strings.Index(body, "[data-wsimore]")
+	use := strings.Index(body, "[data-wsiuse]")
+	if more < 0 || use < 0 || more > use {
+		t.Error("the data-wsimore toggle branch must precede the data-wsiuse branch")
+	}
+}
+
+// Item 3: the product language is Notes (captures) and Memos (synthesis docs).
+// No user-facing "sheet"/"capture" wording may leak into the workspace chrome.
+func TestWorkspaceRenames(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, gone := range []string{
+		">Use in sheet<",
+		"No captures yet",
+		"No sheets yet",
+		"Couldn't create sheet",
+		"Add capture here",
+		`aria-label="use in sheet"`,
+	} {
+		if strings.Contains(html, gone) {
+			t.Errorf("stale wording %q must be renamed to Notes/Memos language", gone)
+		}
+	}
+	for _, want := range []string{
+		"Use in memo",
+		"Delete memo",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("expected Memo wording %q not found", want)
+		}
+	}
+}
+
+// Item 4: the capture list must not scroll horizontally (hard to use on touch);
+// long code fences scroll inside their own <pre>, the list itself does not.
+func TestWorkspaceInboxNoHorizontalScroll(t *testing.T) {
+	html := mustReadIndex(t)
+	css := cssBlock(t, html, "#wsinboxlist {")
+	if !strings.Contains(css, "overflow-x: hidden") && !strings.Contains(css, "overflow-x: clip") {
+		t.Errorf("#wsinboxlist must suppress horizontal scroll; got %q", css)
+	}
+}
+
+// Item 6/9: memo cards reorder by drag-and-drop (the proven pinned-card gesture),
+// not by no-op up/down arrows; the redundant reorder-mode toggle is gone.
+func TestWorkspaceMemoCardsDragReorder(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, gone := range []string{
+		"data-wsmove",    // the old per-card up/down buttons
+		`id="wsreorder"`, // the old reorder-mode toggle
+		"function wsMove(",
+	} {
+		if strings.Contains(html, gone) {
+			t.Errorf("obsolete reorder affordance %q must be removed", gone)
+		}
+	}
+	if !strings.Contains(html, `$("#wscards").addEventListener("dragstart"`) {
+		t.Error("memo cards must be reorderable by drag (dragstart handler on #wscards)")
+	}
+	// The card template must be draggable.
+	tmpl := html[strings.Index(html, "function renderWsCards("):]
+	tmpl = tmpl[:strings.Index(tmpl, "\n}")]
+	if !strings.Contains(tmpl, `draggable="true"`) {
+		t.Error("the .wscard template must set draggable=\"true\"")
+	}
+}
+
+// Item 10: section bodies, embedded references, and capture bubbles render
+// Markdown with the same element styling the chat bubbles use — headings, lists,
+// code, and quotes must be styled, not flat text.
+func TestWorkspaceMarkdownStyled(t *testing.T) {
+	html := mustReadIndex(t)
+	// A grouped selector must style headings/lists inside the workspace md
+	// containers (any of the three qualifies the rule).
+	for _, want := range []string{
+		".wssecrender h1",
+		".wssecrender ul",
+		".wssecrender pre",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("workspace markdown styling missing selector %q", want)
+		}
+	}
+}
+
+// Items 12 & 13: a section already at the top cannot move up, one at the bottom
+// cannot move down — no wrap-around. sectionSwapPlan is the pure decision core,
+// operating on the visually sorted order (not array position).
+func TestWorkspaceSectionMoveBoundary(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	html := mustReadIndex(t)
+	fn := regexp.MustCompile(`(?s)function sectionSwapPlan\(.*?\n\}`).FindString(html)
+	if fn == "" {
+		t.Fatal("could not locate sectionSwapPlan in web/index.html")
+	}
+	script := fn + `
+const assert = require("assert");
+// order values deliberately out of array order to prove it sorts first
+const secs = [ {id:"b",order:1}, {id:"a",order:0}, {id:"c",order:2} ];
+assert.strictEqual(sectionSwapPlan(secs, "a", "up"), null, "top cannot move up");
+assert.strictEqual(sectionSwapPlan(secs, "c", "down"), null, "bottom cannot move down");
+const up = sectionSwapPlan(secs, "b", "up");
+assert.deepStrictEqual({a:up.a, b:up.b}, {a:"b", b:"a"}, "middle up swaps with the one above");
+const dn = sectionSwapPlan(secs, "b", "down");
+assert.deepStrictEqual({a:dn.a, b:dn.b}, {a:"b", b:"c"}, "middle down swaps with the one below");
+assert.strictEqual(sectionSwapPlan(secs, "zzz", "up"), null, "unknown id is a no-op");
+`
+	f := filepath.Join(t.TempDir(), "swapplan.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("sectionSwapPlan boundary logic broken: %v\n%s", err, out)
+	}
+}
+
+// Item 14: an embedded capture inside a section auto-collapses like a Notes
+// bubble, with its own Show more/less toggle.
+func TestWorkspaceReferenceClamp(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, want := range []string{
+		"data-refmore",
+		".wsrefbody.clamped",
+		"function applyRefClamps(",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("embedded-reference clamp wiring missing %q", want)
+		}
+	}
+}
+
+// Item 15: after editing a section's body, its embedded references must still
+// render. The rendered-body rebuild must go through a helper that re-emits the
+// references, not overwrite the body with the prose alone.
+func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
+	html := mustReadIndex(t)
+	if !strings.Contains(html, "function sectionBodyInner(") {
+		t.Fatal("expected a sectionBodyInner helper that emits body + references together")
+	}
+	// startBodyEdit's blur must rebuild via the helper, never with a bare render div.
+	be := html[strings.Index(html, "function startBodyEdit("):]
+	be = be[:strings.Index(be, "\n}\n")]
+	if !strings.Contains(be, "sectionBodyInner(") {
+		t.Error("startBodyEdit must restore the body via sectionBodyInner so references survive an edit")
+	}
+}
+
+// Item 16: the memo's overflow (three-dots) menu must actually open — the
+// document-level close handler was firing on the same click. The handler stops
+// propagation, and the menu offers rename + delete.
+func TestWorkspaceSheetMenuOpens(t *testing.T) {
+	html := mustReadIndex(t)
+	h := html[strings.Index(html, `$("#wssheetmenu").addEventListener("click"`):]
+	h = h[:strings.Index(h, "\n});")]
+	if !strings.Contains(h, "stopPropagation") {
+		t.Error("#wssheetmenu handler must stopPropagation so the document close handler doesn't kill the menu")
+	}
+	if !strings.Contains(h, "data-si=\"del\"") {
+		t.Error("memo menu must offer delete")
+	}
+}
+
+// Items 18-20: Enter commits a title edit; Escape cancels it (title, section
+// title, section body) without collapsing the whole workspace. The editors stop
+// Escape from bubbling to the workspace-close handler.
+func TestWorkspaceEscCancelsEdit(t *testing.T) {
+	html := mustReadIndex(t)
+	// sheet-title keydown handles Enter (blur) and Escape (revert + stopPropagation)
+	kd := html[strings.Index(html, `$("#wssheettitle").addEventListener("keydown"`):]
+	kd = kd[:strings.Index(kd, "\n});")]
+	if !strings.Contains(kd, `"Enter"`) || !strings.Contains(kd, `"Escape"`) {
+		t.Error("#wssheettitle keydown must handle both Enter and Escape")
+	}
+	if !strings.Contains(kd, "stopPropagation") {
+		t.Error("#wssheettitle Escape must stopPropagation so the workspace does not close")
+	}
+	// section body editor cancels on Escape
+	be := html[strings.Index(html, "function startBodyEdit("):]
+	be = be[:strings.Index(be, "\n}\n")]
+	if !strings.Contains(be, `"Escape"`) || !strings.Contains(be, "stopPropagation") {
+		t.Error("startBodyEdit must cancel on Escape and stopPropagation")
+	}
+}
+
+// Item 17: the wide (iPad/desktop) layout shows all three zones and hides the
+// redundant back chevron. The multi-zone breakpoint reaches iPad portrait.
+func TestWorkspaceWideLayout(t *testing.T) {
+	html := mustReadIndex(t)
+	if !strings.Contains(html, "min-width: 768px") {
+		t.Error("multi-zone workspace breakpoint must reach iPad portrait (min-width: 768px)")
+	}
+	// #wsback is hidden in the wide layout (the X already closes the workspace).
+	wide := html[strings.Index(html, "@media (min-width: 768px)"):]
+	wide = wide[:strings.Index(wide, "\n}\n")+2]
+	if !strings.Contains(wide, "#wsback") {
+		t.Error("the wide layout must hide #wsback")
+	}
+}
+
+// mustReadIndex / cssBlock: small helpers shared by the workspace tests.
+func mustReadIndex(t *testing.T) string {
+	t.Helper()
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	return string(b)
+}
+
+// cssBlock returns the text of the first CSS rule whose selector line contains
+// marker, from that line to the closing brace.
+func cssBlock(t *testing.T, html, marker string) string {
+	t.Helper()
+	i := strings.Index(html, marker)
+	if i < 0 {
+		t.Fatalf("could not locate CSS rule %q", marker)
+	}
+	end := strings.Index(html[i:], "}")
+	if end < 0 {
+		t.Fatalf("unterminated CSS rule %q", marker)
+	}
+	return html[i : i+end]
+}

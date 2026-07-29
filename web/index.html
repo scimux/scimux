@@ -706,6 +706,33 @@ body.cards-open #msgs { overflow: hidden; }
 .bubble ul { margin: 4px 0 8px; padding-left: 20px; }
 .bubble strong { font-weight: 650; }
 .turn.user .bubble code { background: rgba(255,255,255,.18); }
+/* the Notes workspace renders Markdown through the same md() the chat bubbles
+   use (section bodies, embedded references, capture bubbles) — so it must carry
+   the same element styling, or headings/lists/code render as flat text (item
+   10). Grouped onto the three md() containers. */
+.wssecrender p, .wsrefbody p, .wsibubble p { margin: 0 0 8px; }
+.wssecrender p:last-child, .wsrefbody p:last-child, .wsibubble p:last-child { margin: 0; }
+.wssecrender code, .wsrefbody code, .wsibubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace;
+  background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.wssecrender pre, .wsrefbody pre, .wsibubble pre { margin: 8px 0; padding: 10px 12px;
+  border-radius: 8px; background: var(--code-bg); overflow-x: auto; }
+.wssecrender pre code, .wsrefbody pre code, .wsibubble pre code { background: none; padding: 0; border-radius: 0; }
+.wssecrender h1, .wssecrender h2, .wssecrender h3,
+.wsrefbody h1, .wsrefbody h2, .wsrefbody h3,
+.wsibubble h1, .wsibubble h2, .wsibubble h3 { margin: 10px 0 6px; line-height: 1.22; }
+.wssecrender h1, .wsrefbody h1, .wsibubble h1 { font-size: 1.22em; }
+.wssecrender h2, .wsrefbody h2, .wsibubble h2 { font-size: 1.14em; }
+.wssecrender h3, .wsrefbody h3, .wsibubble h3 { font-size: 1.06em; }
+.wssecrender blockquote, .wsrefbody blockquote, .wsibubble blockquote { margin: 6px 0;
+  padding-left: 10px; border-left: 3px solid var(--hairline); color: var(--dim); }
+.wssecrender ul, .wsrefbody ul, .wsibubble ul,
+.wssecrender ol, .wsrefbody ol, .wsibubble ol { margin: 4px 0 8px; padding-left: 20px; }
+.wssecrender table, .wsrefbody table, .wsibubble table { border-collapse: collapse; margin: 6px 0;
+  font-size: 13px; width: 100%; }
+.wssecrender th, .wssecrender td, .wsrefbody th, .wsrefbody td, .wsibubble th, .wsibubble td {
+  border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
+.wssecrender th, .wsrefbody th, .wsibubble th { background: var(--th-bg); font-weight: 600; }
+.wssecrender strong, .wsrefbody strong, .wsibubble strong { font-weight: 650; }
 
 /* multimodal attachments (P3): thumbnails / file chips inside a bubble. */
 .attrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -1147,10 +1174,11 @@ body.notes-open #notespane { transform: translateX(0); }
 @media (prefers-reduced-transparency: reduce) {
   #wsscrim { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
+/* full-viewport writing surface (like the metro-map wall map), not a centred
+   card — the researcher composes here, so it takes all the screen space. */
 #wspanel { position: relative; z-index: 1; flex: 1; min-height: 0;
-  width: min(1180px, 96vw); margin: 3vh auto; display: flex; flex-direction: column;
-  background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
-  box-shadow: 0 20px 60px rgba(0,0,0,.28); overflow: hidden;
+  width: 100vw; height: 100dvh; margin: 0; display: flex; flex-direction: column;
+  background: var(--surface); overflow: hidden;
   animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
 @media (prefers-reduced-motion: reduce) { #wsscrim, #wspanel { animation: none; } }
 #wstopbar { display: flex; align-items: center; gap: 10px; flex: none;
@@ -1161,47 +1189,45 @@ body.notes-open #notespane { transform: translateX(0); }
   color: var(--dim); display: flex; align-items: center; justify-content: center; font-size: 17px; }
 #wsback:active, #wsclose:active { background: var(--code-bg); }
 #wszones { flex: 1; min-height: 0; display: flex; }
-#wsnav { display: flex; flex-direction: column; min-height: 0; flex: 1;
+#wsnav { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1;
   border-right: 1px solid var(--hairline); }
 #wsnavhead { display: flex; align-items: center; justify-content: space-between;
   flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
   text-transform: uppercase; letter-spacing: .04em; }
-#wsnewsheet, #wssheetmenu, #wsreorder { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
+#wsnewsheet, #wssheetmenu { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
   display: inline-flex; align-items: center; justify-content: center; }
-#wsnewsheet:active, #wssheetmenu:active, #wsreorder:active { background: var(--code-bg); }
-#wsreorder { color: var(--dim); font-size: 15px; }
-#wscards { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
+#wsnewsheet:active, #wssheetmenu:active { background: var(--code-bg); }
+#wscards { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
 #wscards .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
 .wscard { position: relative; display: block; width: 100%; text-align: left;
   padding: 11px 12px; border-radius: 12px; border: 1px solid var(--hairline);
-  background: var(--surface); color: var(--ink); cursor: pointer; margin-top: 8px; }
+  background: var(--surface); color: var(--ink); cursor: grab; margin-top: 8px; }
 .wscard:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
 .wscard.on { border-color: var(--work);
   background: color-mix(in srgb, var(--work) 8%, transparent); }
+.wscard.dragging { opacity: .5; cursor: grabbing; }
 .wscard .wctitle { font-weight: 600; font-size: 14px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .wscard .wcmeta { font-size: 11px; color: var(--dim); margin-top: 3px;
   display: flex; align-items: center; gap: 6px; }
-.wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; }
+.wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; flex: none; }
 .wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.wscard .wcmove { position: absolute; top: 6px; right: 6px; display: none; gap: 2px; }
-.wscard:hover .wcmove { display: inline-flex; }        /* pointer/desktop: reveal on hover */
-#sheetsworkspace.reorder .wscard .wcmove { display: inline-flex; }  /* touch: explicit reorder mode */
-#wsreorder.on { color: var(--work); background: color-mix(in srgb, var(--work) 12%, transparent); }
-#sheetsworkspace.reorder .wscard { cursor: default; }
-.wcmove button { width: 26px; height: 24px; border-radius: 6px; color: var(--dim);
-  background: var(--surface); border: 1px solid var(--hairline);
-  display: inline-flex; align-items: center; justify-content: center; }
-.wscard.dragging { opacity: .5; }
-#wssheet { display: flex; flex-direction: column; min-height: 0; flex: 2.1; }
+#wssheet { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
 #wssheethead { display: flex; align-items: center; gap: 8px; flex: none;
   padding: 12px 18px; border-bottom: 1px solid var(--hairline); }
 #wssheettitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
   color: var(--ink); background: none; border: none; outline: none; padding: 3px 4px;
   border-radius: 6px; }
 #wssheettitle:focus { background: var(--code-bg); }
-#wssections { overflow-y: auto; -webkit-overflow-scrolling: touch; flex: 1;
+#wssections { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; flex: 1;
   padding: 8px 18px 40px; }
+/* discoverable add control when a memo has no sections left (item 7) — the
+   overflow menu alone hid the escape hatch after deleting every section */
+#wssections .wssecaddempty { display: inline-flex; align-items: center; gap: 6px; margin: 14px 4px;
+  padding: 8px 13px; border-radius: 9px; font-size: 13px; color: var(--work);
+  background: color-mix(in srgb, var(--work) 8%, transparent); }
+#wssections .wssecaddempty svg { width: 14px; height: 14px; }
+#wssections .wssecaddempty:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
 #wssheetempty { color: var(--dim); text-align: center; padding: 15vh 20px; }
 /* section blocks: rendered-markdown resting state, inline edit on tap */
 .wssec { border-bottom: 1px solid var(--hairline); padding: 12px 0; }
@@ -1238,13 +1264,23 @@ body.notes-open #notespane { transform: translateX(0); }
   border-right: 1px solid var(--hairline); }
 #wsinboxhead { flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
   text-transform: uppercase; letter-spacing: .04em; }
-#wsinboxlist { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
+#wsinboxtabs { flex: none; border-bottom: 1px solid var(--hairline); }
+#wsinboxlist { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  padding: 4px 10px 14px; flex: 1; }
 #wsinboxlist .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
 .wsinote { border: 1px solid var(--hairline); border-radius: 12px; padding: 9px 11px; margin-top: 8px; }
 .wsiwhen { font-size: 11px; color: var(--dim); }
 .wsibubble { border-left: 3px solid var(--unlane); padding-left: 8px; font-size: 13px;
   line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
 .wsibubble p:first-child { margin-top: 0; }
+/* a tall capture clamps behind "Show more", same logic as the compact pane
+   (items 5/14); the mask fades the cut edge (overflow:hidden would clip ::after) */
+.wsibubble.clamped { max-height: 220px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 78%, transparent);
+  mask-image: linear-gradient(#000 78%, transparent); }
+.wsimore { margin: 6px 0 0; padding: 2px 0; background: none; border: 0;
+  font-size: 12px; color: var(--dim); cursor: pointer; }
+.wsimore:active { color: var(--work); }
 .wsiuse { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
   padding: 5px 10px; border-radius: 8px; font-size: 12px; color: var(--work);
   background: color-mix(in srgb, var(--work) 8%, transparent); }
@@ -1260,6 +1296,13 @@ body.notes-open #notespane { transform: translateX(0); }
 .wsrefprov { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsrefbody { font-size: 13px; line-height: 1.5; margin-top: 3px; overflow-wrap: anywhere; }
 .wsrefbody p:first-child { margin-top: 0; }
+/* an embedded capture auto-collapses like a Notes bubble (item 14) */
+.wsrefbody.clamped { max-height: 220px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 76%, transparent);
+  mask-image: linear-gradient(#000 76%, transparent); }
+.wsrefmore { margin: 4px 0 0; padding: 2px 0; background: none; border: 0;
+  font-size: 11px; color: var(--dim); cursor: pointer; }
+.wsrefmore:active { color: var(--work); }
 .wsref .wsrefactions { display: none; gap: 6px; margin-top: 7px; }
 .wsref.open .wsrefactions { display: flex; }
 .wsrefactions button { width: 30px; height: 28px; border-radius: 7px; color: var(--dim);
@@ -1285,7 +1328,7 @@ body.notes-open #notespane { transform: translateX(0); }
 /* iPhone / narrow: one zone at a time. The compact notes pane is the inbox
    there, so the inbox zone is hidden; nav is the resting view and opening a
    sheet slides the sheet in over the nav (a visible Back returns). */
-@media (max-width: 899px) {
+@media (max-width: 767px) {
   #wspanel { width: 100vw; height: 100dvh; margin: 0; border-radius: 0; border: none; }
   #wsinbox { display: none; }
   #wssheet { flex: 1; }
@@ -1294,11 +1337,16 @@ body.notes-open #notespane { transform: translateX(0); }
   #sheetsworkspace.sheet-open #wsnav { display: none; }
   #wsplacetext { max-width: 40vw; }
 }
-@media (min-width: 900px) {
-  /* three zones: inbox and nav are narrow and stable, the sheet gets the weight */
-  #wsinbox { flex: none; width: 264px; }
-  #wsnav { flex: none; width: 264px; }
-  #wsback { display: none; }
+@media (min-width: 768px) {
+  /* three zones (item 2): inbox and nav are narrow and stable, the memo gets the
+     weight. The breakpoint reaches iPad portrait so the capture zone is present
+     there too; columns clamp narrower on smaller iPads. */
+  #wsinbox { flex: none; width: clamp(210px, 25vw, 264px); }
+  #wsnav { flex: none; width: clamp(190px, 23vw, 264px); }
+  /* id+id beats the `#sheetsworkspace .backbtn { display: flex }` above, which
+     otherwise defeats both `hidden` and this hide (item 17: the chevron is
+     redundant once the X closes the workspace and both zones are visible). */
+  #sheetsworkspace #wsback { display: none; }
 }
 </style>
 </head>
@@ -1410,7 +1458,7 @@ body.notes-open #notespane { transform: translateX(0); }
       <button class="backbtn" id="notesback">&#8249; Back</button>
       <h2>Notes</h2>
       <span class="spacer"></span>
-      <button class="headtoggle" id="sheetsbtn" aria-label="show sheets" title="Sheets"></button>
+      <button class="headtoggle" id="sheetsbtn" aria-label="show memos" title="Memos"></button>
     </div>
     <div class="tabs" id="notetabs"></div>
     <div id="notelist"><div class="empty">No notes yet.</div></div>
@@ -1486,45 +1534,46 @@ body.notes-open #notespane { transform: translateX(0); }
   <div id="wspanel">
     <div id="wstopbar">
       <button id="wsback" class="backbtn" hidden>&#8249;</button>
-      <h2 id="wstitle">Sheets</h2>
+      <h2 id="wstitle">Memos</h2>
       <span class="spacer"></span>
       <button id="wsclose" aria-label="close notes workspace">&#10005;</button>
     </div>
-    <!-- placement banner: shown while a captured note is held for "Use in sheet".
-         Pick a sheet if none is open, then tap "Add capture here" on a section. -->
+    <!-- placement banner: shown while a captured note is held for "Use in memo".
+         Pick a memo if none is open, then tap "Add note here" on a section. -->
     <div id="wsplacebar">
-      <span class="wsplacelabel">Placing capture:</span>
+      <span class="wsplacelabel">Placing note:</span>
       <span id="wsplacetext"></span>
       <span class="spacer" style="flex:1"></span>
       <button id="wsplacecancel">Cancel</button>
     </div>
     <div id="wszones">
-      <!-- left zone (iPad/desktop): the sticky-note inbox — the capture layer,
-           reused here so material is visible while composing. On iPhone the
-           compact notes pane is the inbox, so this zone is hidden. -->
-      <div id="wsinbox" role="region" aria-label="Captured notes">
-        <div id="wsinboxhead"><span>Captures</span></div>
-        <div id="wsinboxlist"><div class="empty">No captures yet.</div></div>
+      <!-- left zone (iPad/desktop): the Notes inbox — the capture layer, reused
+           here (same tabs + auto-collapse as the compact pane) so material is
+           visible while composing. On iPhone the compact notes pane is the
+           inbox, so this zone is hidden. -->
+      <div id="wsinbox" role="region" aria-label="Notes">
+        <div id="wsinboxhead"><span>Notes</span></div>
+        <div class="tabs" id="wsinboxtabs"></div>
+        <div id="wsinboxlist"><div class="empty">No notes yet.</div></div>
       </div>
-      <!-- middle zone: sparse sheet-card navigator -->
-      <div id="wsnav" role="region" aria-label="Sheets">
+      <!-- middle zone: sparse memo-card navigator -->
+      <div id="wsnav" role="region" aria-label="Memos">
         <div id="wsnavhead">
-          <span>Sheets</span>
+          <span>Memos</span>
           <span class="spacer" style="flex:1"></span>
-          <button id="wsreorder" aria-label="reorder sheets" title="Reorder">&#8645;</button>
-          <button id="wsnewsheet" aria-label="new sheet" title="New sheet"></button>
+          <button id="wsnewsheet" aria-label="new memo" title="New memo"></button>
         </div>
         <div id="wscards"><div class="empty">loading…</div></div>
       </div>
-      <!-- right zone: the active sheet writing surface (built once, patched by
+      <!-- right zone: the active memo writing surface (built once, patched by
            explicit user/load actions only — never by the poll) -->
-      <div id="wssheet" role="region" aria-label="Active sheet">
+      <div id="wssheet" role="region" aria-label="Active memo">
         <div id="wssheethead" hidden>
-          <input id="wssheettitle" aria-label="sheet title" placeholder="Sheet title">
-          <button id="wssheetmenu" aria-label="sheet actions" title="Sheet actions"></button>
+          <input id="wssheettitle" aria-label="memo title" placeholder="Memo title">
+          <button id="wssheetmenu" aria-label="memo actions" title="Memo actions"></button>
         </div>
         <div id="wssections"></div>
-        <div id="wssheetempty" class="empty">Pick a sheet, or make one with +</div>
+        <div id="wssheetempty" class="empty">Pick a memo, or make one with +</div>
       </div>
     </div>
   </div>
@@ -4926,7 +4975,7 @@ function renderNotesPane(){
       <button class="nmore" data-nmore hidden></button>
       ${openNoteT === nt.t ? `<div class="noteactions">
         ${nt.node || nt.uid ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
-        <button data-nact="sheet" aria-label="use in sheet">${ICON_SHEETS}</button>
+        <button data-nact="sheet" aria-label="use in memo">${ICON_SHEETS}</button>
         ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this note">${ICON_COMMENT}</button>` : ""}
         <button data-nact="copy" aria-label="copy note">${ICON_COPY}</button>
         <button data-nact="del" aria-label="delete note">${ICON_TRASH}</button>
@@ -5779,33 +5828,82 @@ function closeWorkspace(){
 }
 
 /* --- inbox zone (iPad/desktop): the capture layer, reused as the workspace's
-   left column so material is visible while composing. Chat-like order (oldest
-   top, newest bottom) mirrors the compact pane. It is a list of buttons, never
-   an editor, so re-rendering it on a poll tick is safe — unlike the sheet zone,
-   it carries no caret to protect. Each capture offers one "Use in sheet". --- */
+   left column so material is visible while composing. It mirrors the compact
+   Notes pane exactly (items 2/5): lane tabs order the captures, and tall bubbles
+   auto-collapse behind "Show more" via the same noteClampState core. It is a
+   list of buttons, never an editor, so re-rendering it on a poll tick is safe —
+   unlike the memo zone, it carries no caret to protect. Each capture offers one
+   "Use in memo". --- */
 let wsInboxSig = "";
+let wsInboxTab = localStorage.getItem("scimux-wsinboxtab") || "GENERAL";
+const expandedWsInbox = new Set();   /* ephemeral, sibling of expandedNotes */
 function renderWsInbox(){
   if (!wsOpen()) return;
   const notes = (UI.notes || []).slice();
   const byT = {}; notes.forEach(nt => byT[nt.t] = nt);
-  notes.sort((a, b) => noteSortKey(a, byT).localeCompare(noteSortKey(b, byT)));
-  const html = notes.length ? notes.map(nt => {
-    const laneId = noteLaneId(nt, byT);
-    const color = laneId ? laneColor(laneId) : "var(--unlane)";
+  const laneOf = {}; notes.forEach(nt => laneOf[nt.t] = noteLaneId(nt, byT));
+  const tabs = laneList().filter(l => notes.some(nt => laneOf[nt.t] === l.id));
+  if (wsInboxTab !== "GENERAL" && !tabs.some(l => l.id === wsInboxTab)) wsInboxTab = "GENERAL";
+  const sel = wsInboxTab === "GENERAL" ? "" : wsInboxTab;
+  const list = notes
+    .filter(nt => (laneOf[nt.t] || "") === sel)
+    .sort((a, b) => noteSortKey(a, byT).localeCompare(noteSortKey(b, byT)));
+  const tabsHtml =
+    `<button data-wsitab="GENERAL" class="${wsInboxTab === "GENERAL" ? "on" : ""}">General</button>` +
+    tabs.map(l => `<button data-wsitab="${esc(l.id)}" class="${wsInboxTab === l.id ? "on" : ""}"
+      ><span class="tabdot" style="background:${esc(laneColor(l.id))}"></span>${esc(l.name)}</button>`).join("");
+  const color = wsInboxTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(wsInboxTab));
+  const listHtml = list.length ? list.map(nt => {
     const nd = nt.node ? nodeById(nt.node) : null;
     const src = nd ? " · " + esc(nd.title) : "";
     return `<div class="wsinote" data-t="${esc(nt.t)}">
       <div class="wsiwhen">${esc(fmtWhen(nt.t))}${src}</div>
-      <div class="wsibubble" style="border-left-color:${esc(color)}">${md(nt.text || "")}</div>
-      <button class="wsiuse" data-wsiuse>${ICON_SHEETS}<span>Use in sheet</span></button>
+      <div class="wsibubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
+      <button class="wsimore" data-wsimore hidden></button>
+      <button class="wsiuse" data-wsiuse>${ICON_SHEETS}<span>Use in memo</span></button>
     </div>`;
-  }).join("") : `<div class="empty">No captures yet.</div>`;
-  const sig = hashStr(html);
+  }).join("") : `<div class="empty">No notes here yet — tap a bubble and “take a note”.</div>`;
+  const sig = hashStr(tabsHtml + "|" + listHtml);
   if (sig === wsInboxSig) return;
   wsInboxSig = sig;
-  $("#wsinboxlist").innerHTML = html;
+  $("#wsinboxtabs").innerHTML = tabsHtml;
+  $("#wsinboxlist").innerHTML = listHtml;
+  applyWsInboxClamps();
 }
+/* Measure each rebuilt capture and clamp the tall ones — same pass as the
+   compact pane's applyNoteClamps; expandedWsInbox carries the flip across
+   polled rebuilds. Runs only when the inbox is laid out (hidden on iPhone). */
+function applyWsInboxClamps(){
+  $("#wsinboxlist").querySelectorAll(".wsinote").forEach(el => {
+    const b = el.querySelector(".wsibubble"), btn = el.querySelector(".wsimore");
+    if (!b || !btn) return;
+    const st = noteClampState(b.scrollHeight, expandedWsInbox.has(el.dataset.t));
+    b.classList.toggle("clamped", st.clamped);
+    btn.hidden = !st.showBtn;
+    btn.textContent = st.label;
+  });
+}
+$("#wsinboxtabs").addEventListener("click", e => {
+  const tb = e.target.closest("[data-wsitab]");
+  if (!tb) return;
+  wsInboxTab = tb.dataset.wsitab;
+  localStorage.setItem("scimux-wsinboxtab", wsInboxTab);
+  wsInboxSig = "";
+  renderWsInbox();
+});
 $("#wsinboxlist").addEventListener("click", e => {
+  /* Show more/less flips the clamp in place — precede the "Use in memo" branch
+     so a tap on the toggle never enters placement mode. */
+  const more = e.target.closest("[data-wsimore]");
+  if (more){
+    const el = more.closest(".wsinote"), t = el.dataset.t;
+    expandedWsInbox.has(t) ? expandedWsInbox.delete(t) : expandedWsInbox.add(t);
+    const b = el.querySelector(".wsibubble");
+    const st = noteClampState(b.scrollHeight, expandedWsInbox.has(t));
+    b.classList.toggle("clamped", st.clamped);
+    more.textContent = st.label;
+    return;
+  }
   const use = e.target.closest("[data-wsiuse]");
   if (!use) return;
   const t = use.closest(".wsinote").dataset.t;
@@ -5823,7 +5921,8 @@ function wsSetFold(secId, folded){
   try { localStorage.setItem("scimux-sheetfolds", JSON.stringify(f)); } catch {}
 }
 
-/* --- navigator (sparse sheet cards) --- */
+/* --- navigator (sparse memo cards) --- */
+let wsCardDragging = false, wsCardDragEl = null;   /* poll-safe drag guard */
 async function wsLoadCards(){
   try {
     const resp = await api("/api/sheets");
@@ -5835,21 +5934,21 @@ function fmtSheetMeta(c){
   const n = c.section_count || 0;
   return `${n} section${n === 1 ? "" : "s"} · ${fmtWhen(c.edited_at || c.created_at || "")}`;
 }
+/* Memo cards reorder by drag (item 6), the same gesture the pinned cards use —
+   no per-card up/down arrows, no separate reorder mode. Each card carries every
+   represented lane color as a swatch (item 11: multiple lanes → multiple dots). */
 function renderWsCards(){
+  if (wsCardDragging) return;   /* never rebuild the list mid-drag */
   const host = $("#wscards");
   if (!wsSheets.length){
-    host.innerHTML = `<div class="empty">No sheets yet — make one with +</div>`;
+    host.innerHTML = `<div class="empty">No memos yet — make one with +</div>`;
     return;
   }
-  host.innerHTML = wsSheets.map((c, i) => {
+  host.innerHTML = wsSheets.map(c => {
     const lanes = (c.lanes || []).map(col => `<i style="background:${esc(col)}"></i>`).join("");
-    return `<button class="wscard ${c.id === wsActiveId ? "on" : ""}" data-sheet="${esc(c.id)}" data-idx="${i}">
+    return `<button class="wscard ${c.id === wsActiveId ? "on" : ""}" draggable="true" data-sheet="${esc(c.id)}">
       <div class="wctitle">${esc(c.title || "Untitled")}</div>
       <div class="wcmeta"><span>${esc(fmtSheetMeta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
-      <span class="wcmove">
-        <button data-wsmove="up" aria-label="move sheet up" ${i === 0 ? "disabled" : ""}>${ICON_MOVE_UP}</button>
-        <button data-wsmove="down" aria-label="move sheet down" ${i === wsSheets.length - 1 ? "disabled" : ""}>${ICON_MOVE_DOWN}</button>
-      </span>
     </button>`;
   }).join("");
 }
@@ -5859,13 +5958,13 @@ async function wsCreate(){
     const sh = await api("/api/sheets", { method: "POST" });
     await wsLoadCards();
     wsSelect(sh.id);
-  } catch (e){ toast("Couldn't create sheet"); }
+  } catch (e){ toast("Couldn't create memo"); }
 }
 
 async function wsSelect(id){
   try {
     wsActive = await api("/api/sheets/" + encodeURIComponent(id));
-  } catch { toast("Couldn't open sheet"); return; }
+  } catch { toast("Couldn't open memo"); return; }
   wsActiveId = id;
   $("#sheetsworkspace").classList.add("sheet-open");
   $("#wsback").hidden = false;
@@ -5878,28 +5977,35 @@ async function wsSelect(id){
    editor is never torn out from under the caret. */
 function renderWsSheet(){
   const empty = $("#wssheetempty"), head = $("#wssheethead"), secWrap = $("#wssections");
-  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Sheets"; return; }
+  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Memos"; return; }
   empty.hidden = true; head.hidden = false;
-  $("#wstitle").textContent = wsActive.title || "Sheet";
+  $("#wstitle").textContent = wsActive.title || "Memo";
   $("#wssheettitle").value = wsActive.title || "";
   const folds = wsFolds();
   const secs = (wsActive.sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  /* deleting every section used to strand the memo — the only add control was
+     the overflow menu (item 7). Offer a visible add button in the empty state. */
   secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id])).join("") ||
-    `<div class="empty">No sections.</div>`;
+    `<div class="empty">No sections yet.</div><button class="wssecaddempty" data-addsection>${ICON_PLUS}<span>Add section</span></button>`;
+  applyRefClamps(secWrap);
+}
+/* sectionBodyInner emits a section's resting body: the rendered Markdown plus
+   its embedded references. Both sectionHTML and the body editor's blur restore
+   route through it, so an edit can never drop the references (item 15). */
+function sectionBodyInner(s){
+  const refs = (s.references || []).map(referenceHTML).join("");
+  return `<div class="wssecrender" data-secrender>${md(s.body || "")}</div>` +
+    (refs ? `<div class="wsrefs">${refs}</div>` : "");
 }
 function sectionHTML(s, folded){
-  const refs = (s.references || []).map(referenceHTML).join("");
   return `<div class="wssec ${folded ? "folded" : ""}" data-sec="${esc(s.id)}">
     <div class="wssechead">
       <button class="wssecfold" data-secfold aria-label="fold section">${folded ? ICON_CHEV_RIGHT : ICON_CHEV_DOWN}</button>
       <input class="wssectitle" data-sectitle value="${esc(s.title || "")}" aria-label="section title" placeholder="Section title">
-      <button class="wsaddhere" data-addhere aria-label="add the held capture to this section">${ICON_PLUS}<span>Add capture here</span></button>
+      <button class="wsaddhere" data-addhere aria-label="add the held note to this section">${ICON_PLUS}<span>Add note here</span></button>
       <button class="wssecmenu" data-secmenu aria-label="section actions">${ICON_MENU_DOTS}</button>
     </div>
-    <div class="wssecbody">
-      <div class="wssecrender" data-secrender>${md(s.body || "")}</div>
-      ${refs ? `<div class="wsrefs">${refs}</div>` : ""}
-    </div>
+    <div class="wssecbody">${sectionBodyInner(s)}</div>
   </div>`;
 }
 /* provLabel joins an embedded reference's provenance parts (station, speaker,
@@ -5920,12 +6026,27 @@ function referenceHTML(r){
   return `<div class="wsref" data-ref="${esc(r.id)}" style="border-left-color:${esc(color)}">
     <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
     <div class="wsrefbody">${md(snap.text || "")}</div>
+    <button class="wsrefmore" data-refmore hidden></button>
     <div class="wsrefactions">
       <button data-refact="jump" aria-label="jump to chat">${ICON_JUMP}</button>
       <button data-refact="copy" aria-label="copy reference text">${ICON_COPY}</button>
       <button data-refact="trash" aria-label="remove reference">${ICON_TRASH}</button>
     </div>
   </div>`;
+}
+/* Clamp tall embedded captures behind "Show more" (item 14), same core as the
+   Notes bubbles; expandedRefs carries the flip. scope limits the measure to a
+   just-rebuilt section so an editor elsewhere is untouched. */
+const expandedRefs = new Set();
+function applyRefClamps(scope){
+  (scope || document).querySelectorAll(".wsref").forEach(el => {
+    const b = el.querySelector(".wsrefbody"), btn = el.querySelector(".wsrefmore");
+    if (!b || !btn) return;
+    const st = noteClampState(b.scrollHeight, expandedRefs.has(el.dataset.ref));
+    b.classList.toggle("clamped", st.clamped);
+    btn.hidden = !st.showBtn;
+    btn.textContent = st.label;
+  });
 }
 
 /* --- persistence: partial PATCH, debounced; newer local text always wins
@@ -5971,8 +6092,6 @@ $("#wsback").addEventListener("click", () => {
   $("#wsback").hidden = true;
 });
 $("#wsnewsheet").addEventListener("click", wsCreate);
-$("#wsreorder").addEventListener("click", () =>
-  $("#wsreorder").classList.toggle("on", $("#sheetsworkspace").classList.toggle("reorder")));
 $("#sheetsbtn").addEventListener("click", openWorkspace);
 $("#sheetsbtn").innerHTML = ICON_SHEETS;
 $("#wsnewsheet").innerHTML = ICON_PLUS;
@@ -5980,52 +6099,102 @@ $("#wssheetmenu").innerHTML = ICON_MENU_DOTS;
 $("#sheetsworkspace").addEventListener("keydown", e => {
   if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation();
     if (wsPlacing){ endPlacement(); return; }   /* Esc cancels placement before closing */
-    if ($("#sheetsworkspace").classList.contains("sheet-open") && window.matchMedia("(max-width: 899px)").matches){
+    if ($("#sheetsworkspace").classList.contains("sheet-open") && window.matchMedia("(max-width: 767px)").matches){
       $("#wsback").click();
     } else closeWorkspace();
   }
 });
 
-/* sheet title autosave */
+/* memo title autosave. Enter commits (blur → save) and Escape reverts to the
+   value at focus time (items 18/19); both stop the key reaching the workspace
+   Escape handler so a title edit never collapses the whole overlay. */
+let wsTitleOrig = null;
+$("#wssheettitle").addEventListener("focus", () => { wsTitleOrig = wsActive ? (wsActive.title || "") : null; });
 $("#wssheettitle").addEventListener("input", e => {
   if (!wsActive) return;
   wsActive.title = e.target.value;
-  $("#wstitle").textContent = e.target.value || "Sheet";
+  $("#wstitle").textContent = e.target.value || "Memo";
   wsPatch({ title: e.target.value }, "sheet-title");
+});
+$("#wssheettitle").addEventListener("keydown", e => {
+  if (e.key === "Enter"){ e.preventDefault(); e.target.blur(); return; }
+  if (e.key === "Escape"){
+    e.preventDefault(); e.stopPropagation();
+    if (wsActive && wsTitleOrig != null){
+      e.target.value = wsTitleOrig;
+      wsActive.title = wsTitleOrig;
+      $("#wstitle").textContent = wsTitleOrig || "Memo";
+      wsCancelPending("sheet-title");
+      wsPatch({ title: wsTitleOrig });   /* persist the revert */
+    }
+    e.target.blur();
+  }
 });
 $("#wssheettitle").addEventListener("blur", () => { if (wsActive) wsPatch({ title: wsActive.title }); });
 
-/* navigator: open a card, or move it in reorder mode */
-$("#wscards").addEventListener("click", async e => {
-  const mv = e.target.closest("[data-wsmove]");
-  if (mv){
-    e.stopPropagation();
-    const card = mv.closest(".wscard");
-    await wsMove(+card.dataset.idx, mv.dataset.wsmove === "up" ? -1 : 1);
-    return;
-  }
+/* navigator: a plain tap opens the memo. Reorder is drag-and-drop (item 6),
+   mirroring the pinned-card gesture: wsCardDragging suppresses list rebuilds for
+   the whole drag, the DOM order is read back on drop, and each card's explicit
+   order position is persisted. A drag never fires a click, so the two don't
+   fight. */
+$("#wscards").addEventListener("click", e => {
   const card = e.target.closest(".wscard");
   if (card) wsSelect(card.dataset.sheet);
 });
-async function wsMove(idx, dir){
-  const j = idx + dir;
-  if (j < 0 || j >= wsSheets.length) return;
-  const arr = wsSheets;
-  [arr[idx], arr[j]] = [arr[j], arr[idx]];
-  renderWsCards();
-  /* persist explicit positions for the two swapped cards */
-  await Promise.all([idx, j].map(async k => {
-    arr[k].order = k;
-    try { await api("/api/sheets/" + encodeURIComponent(arr[k].id),
-      { method: "PATCH", body: JSON.stringify({ order: k }) }); } catch {}
+$("#wscards").addEventListener("dragstart", e => {
+  const card = e.target.closest(".wscard");
+  if (!card) return;
+  wsCardDragging = true; wsCardDragEl = card;
+  card.classList.add("dragging");
+  try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", ""); } catch {}
+});
+$("#wscards").addEventListener("dragover", e => {
+  if (!wsCardDragging || !wsCardDragEl) return;
+  e.preventDefault();
+  const over = e.target.closest(".wscard");
+  if (!over || over === wsCardDragEl) return;
+  const r = over.getBoundingClientRect();
+  const after = e.clientY > r.top + r.height / 2;
+  over.parentNode.insertBefore(wsCardDragEl, after ? over.nextSibling : over);
+});
+$("#wscards").addEventListener("drop", e => { if (wsCardDragging) e.preventDefault(); });
+$("#wscards").addEventListener("dragend", async () => {
+  if (!wsCardDragging) return;
+  const ids = [...$("#wscards").querySelectorAll(".wscard")].map(c => c.dataset.sheet);
+  wsCardDragEl?.classList.remove("dragging");
+  wsCardDragEl = null; wsCardDragging = false;
+  /* reorder the model to match the DOM, then persist each changed position */
+  const byId = {}; wsSheets.forEach(c => byId[c.id] = c);
+  wsSheets = ids.map(id => byId[id]).filter(Boolean);
+  await Promise.all(wsSheets.map(async (c, i) => {
+    if (c.order === i) return;
+    c.order = i;
+    try { await api("/api/sheets/" + encodeURIComponent(c.id),
+      { method: "PATCH", body: JSON.stringify({ order: i }) }); } catch {}
   }));
-}
+  renderWsCards();
+});
 
 /* section interactions (fold, title, body edit, overflow menu) */
 $("#wssections").addEventListener("click", e => {
-  /* placement target: the held capture lands at the bottom of this section */
+  /* re-add a section after the memo was emptied (item 7) */
+  const addSec = e.target.closest("[data-addsection]");
+  if (addSec){ wsAddSection(); return; }
+  /* placement target: the held note lands at the bottom of this section */
   const addHere = e.target.closest("[data-addhere]");
   if (addHere){ placeHeldNote(addHere.closest(".wssec").dataset.sec); return; }
+  /* Show more/less on an embedded capture — flip its clamp in place, before the
+     reference-reveal branch so it never also opens the action row (item 14) */
+  const refMore = e.target.closest("[data-refmore]");
+  if (refMore){
+    const el = refMore.closest(".wsref"), id = el.dataset.ref;
+    expandedRefs.has(id) ? expandedRefs.delete(id) : expandedRefs.add(id);
+    const b = el.querySelector(".wsrefbody");
+    const st = noteClampState(b.scrollHeight, expandedRefs.has(id));
+    b.classList.toggle("clamped", st.clamped);
+    refMore.textContent = st.label;
+    return;
+  }
   /* embedded-reference action or reveal — checked before section edit so a tap
      on a reference never opens the body editor */
   const refBtn = e.target.closest("[data-refact]");
@@ -6056,22 +6225,65 @@ $("#wssections").addEventListener("input", e => {
     wsPatch({ section: { id: secId, title: t.value } }, "sectitle-" + secId);
   }
 });
-/* switch a section's rendered body to an inline editor; blur saves + re-renders */
+/* remember each section title's value at focus so Escape can revert it */
+const wsSecTitleOrig = {};
+$("#wssections").addEventListener("focusin", e => {
+  const t = e.target.closest("[data-sectitle]");
+  if (t){ wsSecTitleOrig[t.closest(".wssec").dataset.sec] = t.value; }
+});
+/* section title: Enter commits (blur), Escape reverts — both stopPropagation so
+   the workspace Escape handler never fires and collapses the overlay (item 20).
+   The body textarea handles its own Escape inside startBodyEdit. */
+$("#wssections").addEventListener("keydown", e => {
+  const t = e.target.closest("[data-sectitle]");
+  if (!t) return;
+  if (e.key === "Enter"){ e.preventDefault(); t.blur(); return; }
+  if (e.key === "Escape"){
+    e.preventDefault(); e.stopPropagation();
+    const secId = t.closest(".wssec").dataset.sec;
+    const s = wsActive && (wsActive.sections || []).find(x => x.id === secId);
+    const orig = wsSecTitleOrig[secId];
+    if (s && orig != null){
+      t.value = orig; s.title = orig;
+      wsCancelPending("sectitle-" + secId);
+      wsPatch({ section: { id: secId, title: orig } });   /* persist the revert */
+    }
+    t.blur();
+  }
+});
+/* switch a section's rendered body to an inline editor. Blur saves and restores
+   the resting body *via sectionBodyInner* so embedded references survive the
+   edit (item 15). Escape cancels — reverts to the value at edit start and stops
+   the key from closing the workspace (item 20). */
 function startBodyEdit(sec){
   const secId = sec.dataset.sec;
   const s = wsActive && (wsActive.sections || []).find(x => x.id === secId);
   if (!s) return;
+  const orig = s.body || "";
   const bodyWrap = sec.querySelector(".wssecbody");
   const ta = document.createElement("textarea");
-  ta.className = "wssecedit"; ta.value = s.body || ""; ta.setAttribute("aria-label", "section body (Markdown)");
+  ta.className = "wssecedit"; ta.value = orig; ta.setAttribute("aria-label", "section body (Markdown)");
   bodyWrap.innerHTML = ""; bodyWrap.appendChild(ta);
   ta.focus();
+  let cancelled = false;
   ta.addEventListener("input", () => { s.body = ta.value; wsPatch({ section: { id: secId, body: ta.value } }, "secbody-" + secId); });
+  ta.addEventListener("keydown", ev => {
+    if (ev.key !== "Escape") return;   /* Enter stays a newline in a body */
+    ev.preventDefault(); ev.stopPropagation();
+    cancelled = true;
+    s.body = orig;
+    wsCancelPending("secbody-" + secId);
+    wsPatch({ section: { id: secId, body: orig } });   /* persist the revert */
+    bodyWrap.innerHTML = sectionBodyInner(s);           /* removing ta fires blur */
+    applyRefClamps(bodyWrap);
+  });
   ta.addEventListener("blur", async () => {
+    if (cancelled) return;   /* Escape already restored the resting body */
     s.body = ta.value;
     wsCancelPending("secbody-" + secId);
     await wsPatch({ section: { id: secId, body: ta.value } });
-    bodyWrap.innerHTML = `<div class="wssecrender" data-secrender>${md(s.body || "")}</div>`;
+    bodyWrap.innerHTML = sectionBodyInner(s);
+    applyRefClamps(bodyWrap);
   });
 }
 
@@ -6102,26 +6314,40 @@ function openSectionMenu(btn){
     await sectionMenuAction(mi.dataset.mi, secId);
   });
 }
+/* wsAddSection appends a section and re-renders. Shared by the empty-state
+   button, the section menu, and the memo menu so there is one add path. */
+async function wsAddSection(){
+  const doc = await wsPatch({ add_section: "" });
+  if (doc){ wsActive = doc; renderWsSheet(); }
+}
+/* sectionSwapPlan is the pure move-up/down decision core. It works on the
+   *visually sorted* order — not array position — so a swap is always with the
+   real on-screen neighbour, and returns null at a boundary so a section already
+   at the top/bottom cannot move further and wrap around (items 12/13). */
+function sectionSwapPlan(sections, id, dir){
+  const sorted = (sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  const vi = sorted.findIndex(s => s.id === id);
+  if (vi < 0) return null;
+  const j = vi + (dir === "up" ? -1 : 1);
+  if (j < 0 || j >= sorted.length) return null;
+  /* swap the two order values: a takes b's slot and vice-versa */
+  return { a: sorted[vi].id, ao: (sorted[j].order || 0), b: sorted[j].id, bo: (sorted[vi].order || 0) };
+}
 async function sectionMenuAction(action, secId){
   const secs = wsActive.sections || [];
   const idx = secs.findIndex(s => s.id === secId);
   if (idx < 0) return;
   if (action === "edit"){ const sec = $(`#wssections .wssec[data-sec="${cssEsc(secId)}"]`); if (sec){ sec.classList.remove("folded"); wsSetFold(secId, false); startBodyEdit(sec); } return; }
-  if (action === "add"){
-    const doc = await wsPatch({ add_section: "" });
-    if (doc){ wsActive = doc; renderWsSheet(); } return;
-  }
+  if (action === "add"){ await wsAddSection(); return; }
   if (action === "del"){
     const doc = await wsPatch({ section: { id: secId, delete: true } });
     if (doc){ wsActive = doc; renderWsSheet(); } return;
   }
   if (action === "up" || action === "down"){
-    const j = idx + (action === "up" ? -1 : 1);
-    if (j < 0 || j >= secs.length) return;
-    /* swap order values, persist both, re-render from the new order */
-    const a = secs[idx], b = secs[j];
-    const ao = a.order || 0, bo = b.order || 0;
-    a.order = bo; b.order = ao;
+    const plan = sectionSwapPlan(secs, secId, action);
+    if (!plan) return;   /* already at that boundary — no wrap */
+    const a = secs.find(s => s.id === plan.a), b = secs.find(s => s.id === plan.b);
+    a.order = plan.ao; b.order = plan.bo;
     await Promise.all([
       wsPatch({ section: { id: a.id, order: a.order } }),
       wsPatch({ section: { id: b.id, order: b.order } })
@@ -6132,15 +6358,20 @@ async function sectionMenuAction(action, secId){
 /* CSS.escape shim for attribute selectors on opaque ids */
 function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&"); }
 
-/* sheet-level menu (rename hint / delete the whole sheet) */
+/* memo-level menu: rename / add section / delete the whole memo. stopPropagation
+   is load-bearing — without it the same click bubbles to the document close
+   handler below (which only spares [data-secmenu]) and the menu is torn down the
+   instant it opens, so the three-dots button read as a no-op (item 16). */
 $("#wssheetmenu").addEventListener("click", e => {
+  e.stopPropagation();
   closeWsMenu();
   const m = document.createElement("div");
   m.className = "wsmenu";
   m.innerHTML =
+    `<button data-si="rename">${ICON_PENCIL}<span>Rename</span></button>` +
     `<button data-si="add">${ICON_PLUS}<span>Add section</span></button>` +
     `<div class="sep"></div>` +
-    `<button data-si="del" class="danger">${ICON_TRASH}<span>Delete sheet</span></button>`;
+    `<button data-si="del" class="danger">${ICON_TRASH}<span>Delete memo</span></button>`;
   $("#wspanel").appendChild(m);
   const r = e.currentTarget.getBoundingClientRect(), pr = $("#wspanel").getBoundingClientRect();
   m.style.top = (r.bottom - pr.top + 4) + "px";
@@ -6149,7 +6380,8 @@ $("#wssheetmenu").addEventListener("click", e => {
   m.addEventListener("click", async ev => {
     const mi = ev.target.closest("[data-si]"); if (!mi) return;
     closeWsMenu();
-    if (mi.dataset.si === "add"){ const doc = await wsPatch({ add_section: "" }); if (doc){ wsActive = doc; renderWsSheet(); } }
+    if (mi.dataset.si === "rename"){ const t = $("#wssheettitle"); t.focus(); t.select(); }
+    else if (mi.dataset.si === "add"){ await wsAddSection(); }
     else if (mi.dataset.si === "del"){ await wsDeleteSheet(); }
   });
 });
@@ -6224,11 +6456,11 @@ function syncCardMeta(doc){
   renderWsCards();
 }
 
-/* ---- "Use in sheet": capture → synthesis ----
+/* ---- "Use in memo": capture → synthesis ----
    Placement mode holds one captured note and lets the user drop it into a
    section as a self-contained embedded reference. It unifies both entry points
    (the compact notes-pane action and the desktop workspace inbox) and every
-   device: enter the mode, pick a sheet if none is open, tap "Add capture here"
+   device: enter the mode, pick a memo if none is open, tap "Add note here"
    on the target section. The reference carries the note's durable source
    address plus a display snapshot frozen now, so it renders and jumps back with
    no dependency on the source node surviving. */
@@ -6275,7 +6507,7 @@ async function placeHeldNote(secId){
     doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
       "/sections/" + encodeURIComponent(secId) + "/references",
       { method: "POST", body: JSON.stringify(body) });
-  } catch { toast("Couldn't add to sheet"); return; }
+  } catch { toast("Couldn't add to memo"); return; }
   endPlacement();
   if (doc && doc.id === wsActiveId){
     wsActive = doc; syncCardMeta(doc);
@@ -6290,10 +6522,11 @@ async function placeHeldNote(secId){
       if (!wrap){ wrap = document.createElement("div"); wrap.className = "wsrefs";
         secEl.querySelector(".wssecbody").appendChild(wrap); }
       wrap.insertAdjacentHTML("beforeend", referenceHTML(newRef));
+      applyRefClamps(secEl);   /* clamp the freshly-added capture if tall (item 14) */
     } else {
       renderWsSheet();
     }
-    toast("Added to " + (doc.title || "sheet"));
+    toast("Added to " + (doc.title || "memo"));
   }
 }
 
