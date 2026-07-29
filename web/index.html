@@ -1131,6 +1131,122 @@ body.notes-open #notespane { transform: translateX(0); }
 @media (prefers-reduced-motion: reduce) {
   body.map-full #map { animation-duration: .12s; }
 }
+
+/* ---------- Notes workspace (sheets): the synthesis surface ----------
+   A singleton overlay (like search) so the sheet editor is mounted once and
+   never lives inside a polled render region. Mobile-first: one zone at a time,
+   toggled by #sheetsworkspace.sheet-open; the min-width query opens the
+   side-by-side navigator + active sheet. */
+#sheetsworkspace { position: fixed; inset: 0; z-index: 110; display: flex;
+  flex-direction: column; align-items: stretch; }
+#sheetsworkspace[hidden] { display: none; }
+#wsscrim { position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  backdrop-filter: blur(18px) saturate(1.3); animation: searchfade .16s ease; }
+@media (prefers-reduced-transparency: reduce) {
+  #wsscrim { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+#wspanel { position: relative; z-index: 1; flex: 1; min-height: 0;
+  width: min(1180px, 96vw); margin: 3vh auto; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.28); overflow: hidden;
+  animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
+@media (prefers-reduced-motion: reduce) { #wsscrim, #wspanel { animation: none; } }
+#wstopbar { display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 12px 14px; border-bottom: 1px solid var(--hairline); }
+#wstopbar h2 { font-size: 17px; font-weight: 650; }
+#wstopbar .spacer { flex: 1; }
+#wsback, #wsclose { flex: none; width: 34px; height: 34px; border-radius: 8px;
+  color: var(--dim); display: flex; align-items: center; justify-content: center; font-size: 17px; }
+#wsback:active, #wsclose:active { background: var(--code-bg); }
+#wszones { flex: 1; min-height: 0; display: flex; }
+#wsnav { display: flex; flex-direction: column; min-height: 0; flex: 1;
+  border-right: 1px solid var(--hairline); }
+#wsnavhead { display: flex; align-items: center; justify-content: space-between;
+  flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .04em; }
+#wsnewsheet, #wssheetmenu, #wsreorder { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
+  display: inline-flex; align-items: center; justify-content: center; }
+#wsnewsheet:active, #wssheetmenu:active, #wsreorder:active { background: var(--code-bg); }
+#wsreorder { color: var(--dim); font-size: 15px; }
+#wscards { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
+#wscards .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
+.wscard { position: relative; display: block; width: 100%; text-align: left;
+  padding: 11px 12px; border-radius: 12px; border: 1px solid var(--hairline);
+  background: var(--surface); color: var(--ink); cursor: pointer; margin-top: 8px; }
+.wscard:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.wscard.on { border-color: var(--work);
+  background: color-mix(in srgb, var(--work) 8%, transparent); }
+.wscard .wctitle { font-weight: 600; font-size: 14px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.wscard .wcmeta { font-size: 11px; color: var(--dim); margin-top: 3px;
+  display: flex; align-items: center; gap: 6px; }
+.wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; }
+.wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.wscard .wcmove { position: absolute; top: 6px; right: 6px; display: none; gap: 2px; }
+.wscard:hover .wcmove { display: inline-flex; }        /* pointer/desktop: reveal on hover */
+#sheetsworkspace.reorder .wscard .wcmove { display: inline-flex; }  /* touch: explicit reorder mode */
+#wsreorder.on { color: var(--work); background: color-mix(in srgb, var(--work) 12%, transparent); }
+#sheetsworkspace.reorder .wscard { cursor: default; }
+.wcmove button { width: 26px; height: 24px; border-radius: 6px; color: var(--dim);
+  background: var(--surface); border: 1px solid var(--hairline);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wscard.dragging { opacity: .5; }
+#wssheet { display: flex; flex-direction: column; min-height: 0; flex: 2.1; }
+#wssheethead { display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 12px 18px; border-bottom: 1px solid var(--hairline); }
+#wssheettitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
+  color: var(--ink); background: none; border: none; outline: none; padding: 3px 4px;
+  border-radius: 6px; }
+#wssheettitle:focus { background: var(--code-bg); }
+#wssections { overflow-y: auto; -webkit-overflow-scrolling: touch; flex: 1;
+  padding: 8px 18px 40px; }
+#wssheetempty { color: var(--dim); text-align: center; padding: 15vh 20px; }
+/* section blocks: rendered-markdown resting state, inline edit on tap */
+.wssec { border-bottom: 1px solid var(--hairline); padding: 12px 0; }
+.wssechead { display: flex; align-items: center; gap: 8px; }
+.wssecfold { flex: none; width: 26px; height: 26px; border-radius: 6px; color: var(--dim);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wssectitle { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; padding: 3px 4px;
+  border-radius: 6px; color: var(--ink); background: none; border: none; outline: none; }
+.wssectitle:focus { background: var(--code-bg); }
+.wssecmenu { flex: none; width: 28px; height: 28px; border-radius: 6px; color: var(--dim);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wssecmenu:active { background: var(--code-bg); }
+.wssecbody { padding: 6px 4px 2px 30px; }
+.wssec.folded .wssecbody { display: none; }
+.wssecrender { font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; cursor: text; }
+.wssecrender:empty::before { content: "Empty — tap to write."; color: var(--dim); }
+.wssecrender p:first-child { margin-top: 0; }
+.wssecedit { display: block; width: 100%; min-height: 96px; font: inherit; font-size: 14px;
+  line-height: 1.55; color: var(--ink); background: var(--code-bg); border: 1px solid var(--hairline);
+  border-radius: 10px; padding: 10px 12px; outline: none; resize: vertical; }
+.wssecedit:focus { border-color: var(--work); }
+/* section overflow menu (add-below / edit / move / delete) */
+.wsmenu { position: absolute; z-index: 3; min-width: 176px; background: var(--surface);
+  border: 1px solid var(--hairline); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.28);
+  padding: 6px; }
+.wsmenu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 9px 12px; border-radius: 8px; color: var(--ink); font-size: 14px; }
+.wsmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.wsmenu button.danger { color: var(--attn); }
+.wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
+#sheetsworkspace .backbtn { display: flex; }
+/* iPhone / narrow: one zone at a time. Nav is the resting view; opening a sheet
+   slides the sheet in and hides the nav (a visible Back returns). */
+@media (max-width: 899px) {
+  #wspanel { width: 100vw; height: 100dvh; margin: 0; border-radius: 0; border: none; }
+  #wssheet { flex: 1; }
+  #sheetsworkspace:not(.sheet-open) #wssheet { display: none; }
+  #sheetsworkspace:not(.sheet-open) #wsback { display: none; }
+  #sheetsworkspace.sheet-open #wsnav { display: none; }
+}
+@media (min-width: 900px) {
+  /* side-by-side: the nav is narrow and stable, the sheet gets the weight */
+  #wsnav { flex: none; width: 300px; }
+  #wsback { display: none; }
+}
 </style>
 </head>
 <body>
@@ -1241,6 +1357,7 @@ body.notes-open #notespane { transform: translateX(0); }
       <button class="backbtn" id="notesback">&#8249; Back</button>
       <h2>Notes</h2>
       <span class="spacer"></span>
+      <button class="headtoggle" id="sheetsbtn" aria-label="show sheets" title="Sheets"></button>
     </div>
     <div class="tabs" id="notetabs"></div>
     <div id="notelist"><div class="empty">No notes yet.</div></div>
@@ -1301,6 +1418,47 @@ body.notes-open #notespane { transform: translateX(0); }
     </div>
     <div id="archivedbody" role="region" aria-live="polite"></div>
     <div id="archivednote">Read-only — this chat was deleted. Its history is preserved here.</div>
+  </div>
+</div>
+
+<!-- Notes workspace (sheets): a singleton synthesis surface, mounted once and
+     OUTSIDE every polled render region, so the section editors are never rebuilt
+     from a poll (invariant). Three zones on iPad/desktop
+     (inbox | sheet cards | active sheet); on iPhone one zone at a time, driven
+     by body classes (.ws-cards / .ws-sheet). The sticky-note inbox reuses the
+     capture layer; the navigator lists sheets sparsely; the active sheet is the
+     writing surface. -->
+<div id="sheetsworkspace" hidden role="dialog" aria-modal="true" aria-label="Notes workspace">
+  <div id="wsscrim"></div>
+  <div id="wspanel">
+    <div id="wstopbar">
+      <button id="wsback" class="backbtn" hidden>&#8249;</button>
+      <h2 id="wstitle">Sheets</h2>
+      <span class="spacer"></span>
+      <button id="wsclose" aria-label="close notes workspace">&#10005;</button>
+    </div>
+    <div id="wszones">
+      <!-- middle zone: sparse sheet-card navigator -->
+      <div id="wsnav" role="region" aria-label="Sheets">
+        <div id="wsnavhead">
+          <span>Sheets</span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="wsreorder" aria-label="reorder sheets" title="Reorder">&#8645;</button>
+          <button id="wsnewsheet" aria-label="new sheet" title="New sheet"></button>
+        </div>
+        <div id="wscards"><div class="empty">loading…</div></div>
+      </div>
+      <!-- right zone: the active sheet writing surface (built once, patched by
+           explicit user/load actions only — never by the poll) -->
+      <div id="wssheet" role="region" aria-label="Active sheet">
+        <div id="wssheethead" hidden>
+          <input id="wssheettitle" aria-label="sheet title" placeholder="Sheet title">
+          <button id="wssheetmenu" aria-label="sheet actions" title="Sheet actions"></button>
+        </div>
+        <div id="wssections"></div>
+        <div id="wssheetempty" class="empty">Pick a sheet, or make one with +</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1918,6 +2076,21 @@ const ICON_CHEV_DOWN = `<svg width="18" height="18" viewBox="0 0 24 24" fill="no
 const ICON_CHEV_UP = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M6 15l6-6 6 6"/>
+</svg>`;
+/* Sheets glyph: fa-regular fa-pen-to-square — "compose/edit a sheet", the
+   synthesis layer's entry point (notes-design.md). Inline SVG constant, never a
+   runtime Font Awesome <i>. */
+const ICON_SHEETS = `<svg width="17" height="17" viewBox="0 0 512 512" fill="currentColor" aria-hidden="true">
+  <path d="M373.1 25 176 222.2c-8.7 8.7-15 19.4-18.3 31.1l-28.6 100c-2.4 8.4-.1 17.4 6.1 23.6s15.2 8.5 23.6 6.1l100-28.6c11.8-3.4 22.5-9.7 31.1-18.3L487 138.9c28.1-28.1 28.1-73.7 0-101.8L474.9 25C446.8-3.1 401.2-3.1 373.1 25zM88 64C39.4 64 0 103.4 0 152l0 272c0 48.6 39.4 88 88 88l272 0c48.6 0 88-39.4 88-88l0-112c0-13.3-10.7-24-24-24s-24 10.7-24 24l0 112c0 22.1-17.9 40-40 40L88 464c-22.1 0-40-17.9-40-40l0-272c0-22.1 17.9-40 40-40l112 0c13.3 0 24-10.7 24-24s-10.7-24-24-24L88 64z"/>
+</svg>`;
+const ICON_MOVE_UP = ICON_CHEV_UP, ICON_MOVE_DOWN = ICON_CHEV_DOWN;
+const ICON_CHEV_RIGHT = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M9 6l6 6-6 6"/>
+</svg>`;
+/* overflow/kebab glyph: three vertical dots */
+const ICON_MENU_DOTS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+  <circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/>
 </svg>`;
 function agentLogo(agent){
   switch ((agent || "").toLowerCase()){
@@ -5485,6 +5658,349 @@ function closeSheets(){ $("#backdrop").classList.remove("on");
 closeSheets();
 $("#backdrop").addEventListener("click", closeSheets);
 $("#burger").addEventListener("click", () => openSheet("#menu"));
+
+/* ---------- Notes workspace (sheets): the synthesis layer ----------
+   A singleton overlay mounted once in the DOM and NEVER inside a polled render
+   region, so section editors are only ever patched by explicit user/load
+   actions — the poll cannot rebuild the editable surface (invariant). The
+   server owns the sheet documents (/api/sheets); ui.json keeps only view state
+   (fold; here per-device in localStorage for the first build). */
+let wsSheets = [];         /* sparse card list from GET /api/sheets */
+let wsActiveId = null;     /* id of the open sheet, or null */
+let wsActive = null;       /* full document of the open sheet */
+let wsReturnFocus = null;
+const wsSaveTimers = {};   /* debounce handle per field key */
+const wsPending = {};      /* key -> pending send closure, flushed on close/blur */
+
+function wsOpen(){ return !$("#sheetsworkspace").hidden; }
+function openWorkspace(){
+  if (wsOpen()){ return; }
+  wsReturnFocus = document.activeElement;
+  $("#sheetsworkspace").hidden = false;
+  wsLoadCards();
+  requestAnimationFrame(() => $("#wsnewsheet").focus());
+}
+function closeWorkspace(){
+  if (!wsOpen()) return;
+  wsFlushPendingSaves();
+  $("#sheetsworkspace").hidden = true;
+  const back = wsReturnFocus; wsReturnFocus = null;
+  if (back && document.contains(back) && back.focus) back.focus();
+  else $("#sheetsbtn").focus();
+}
+
+/* --- fold state (view state, per-device for now; design routes this to
+   ui.json cross-device — deferred to keep the ops-sync surface untouched) --- */
+function wsFolds(){ try { return JSON.parse(localStorage.getItem("scimux-sheetfolds") || "{}") || {}; } catch { return {}; } }
+function wsSetFold(secId, folded){
+  const f = wsFolds();
+  if (folded) f[secId] = 1; else delete f[secId];
+  try { localStorage.setItem("scimux-sheetfolds", JSON.stringify(f)); } catch {}
+}
+
+/* --- navigator (sparse sheet cards) --- */
+async function wsLoadCards(){
+  try {
+    const resp = await api("/api/sheets");
+    wsSheets = (resp && resp.sheets) || [];
+  } catch { wsSheets = []; }
+  renderWsCards();
+}
+function fmtSheetMeta(c){
+  const n = c.section_count || 0;
+  return `${n} section${n === 1 ? "" : "s"} · ${fmtWhen(c.edited_at || c.created_at || "")}`;
+}
+function renderWsCards(){
+  const host = $("#wscards");
+  if (!wsSheets.length){
+    host.innerHTML = `<div class="empty">No sheets yet — make one with +</div>`;
+    return;
+  }
+  host.innerHTML = wsSheets.map((c, i) => {
+    const lanes = (c.lanes || []).map(col => `<i style="background:${esc(col)}"></i>`).join("");
+    return `<button class="wscard ${c.id === wsActiveId ? "on" : ""}" data-sheet="${esc(c.id)}" data-idx="${i}">
+      <div class="wctitle">${esc(c.title || "Untitled")}</div>
+      <div class="wcmeta"><span>${esc(fmtSheetMeta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
+      <span class="wcmove">
+        <button data-wsmove="up" aria-label="move sheet up" ${i === 0 ? "disabled" : ""}>${ICON_MOVE_UP}</button>
+        <button data-wsmove="down" aria-label="move sheet down" ${i === wsSheets.length - 1 ? "disabled" : ""}>${ICON_MOVE_DOWN}</button>
+      </span>
+    </button>`;
+  }).join("");
+}
+
+async function wsCreate(){
+  try {
+    const sh = await api("/api/sheets", { method: "POST" });
+    await wsLoadCards();
+    wsSelect(sh.id);
+  } catch (e){ toast("Couldn't create sheet"); }
+}
+
+async function wsSelect(id){
+  try {
+    wsActive = await api("/api/sheets/" + encodeURIComponent(id));
+  } catch { toast("Couldn't open sheet"); return; }
+  wsActiveId = id;
+  $("#sheetsworkspace").classList.add("sheet-open");
+  $("#wsback").hidden = false;
+  renderWsSheet();
+  renderWsCards();   /* reflect the .on selection */
+}
+
+/* Build the active-sheet surface once per open/load. Poll ticks never call this;
+   only explicit user actions (open, add/delete/move section) do — so a focused
+   editor is never torn out from under the caret. */
+function renderWsSheet(){
+  const empty = $("#wssheetempty"), head = $("#wssheethead"), secWrap = $("#wssections");
+  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Sheets"; return; }
+  empty.hidden = true; head.hidden = false;
+  $("#wstitle").textContent = wsActive.title || "Sheet";
+  $("#wssheettitle").value = wsActive.title || "";
+  const folds = wsFolds();
+  const secs = (wsActive.sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id])).join("") ||
+    `<div class="empty">No sections.</div>`;
+}
+function sectionHTML(s, folded){
+  return `<div class="wssec ${folded ? "folded" : ""}" data-sec="${esc(s.id)}">
+    <div class="wssechead">
+      <button class="wssecfold" data-secfold aria-label="fold section">${folded ? ICON_CHEV_RIGHT : ICON_CHEV_DOWN}</button>
+      <input class="wssectitle" data-sectitle value="${esc(s.title || "")}" aria-label="section title" placeholder="Section title">
+      <button class="wssecmenu" data-secmenu aria-label="section actions">${ICON_MENU_DOTS}</button>
+    </div>
+    <div class="wssecbody">
+      <div class="wssecrender" data-secrender>${md(s.body || "")}</div>
+    </div>
+  </div>`;
+}
+
+/* --- persistence: partial PATCH, debounced; newer local text always wins
+   because the editor DOM is the source of truth and is never overwritten by a
+   save response (we only fold edited_at back into the card metadata). --- */
+function wsPatch(body, key){
+  const send = async () => {
+    try {
+      const doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId),
+        { method: "PATCH", body: JSON.stringify(body) });
+      if (doc && doc.id === wsActiveId){
+        if (wsActive) wsActive.edited_at = doc.edited_at;
+        const card = wsSheets.find(c => c.id === doc.id);
+        if (card){ card.edited_at = doc.edited_at; card.title = doc.title;
+          card.section_count = (doc.sections || []).length; renderWsCards(); }
+      }
+      return doc;
+    } catch { toast("Save failed — will retry on next edit"); }
+  };
+  if (key){
+    clearTimeout(wsSaveTimers[key]);
+    wsPending[key] = send;
+    return new Promise(res => {
+      wsSaveTimers[key] = setTimeout(() => { delete wsPending[key]; res(send()); }, 1100);
+    });
+  }
+  return send();
+}
+function wsCancelPending(key){ clearTimeout(wsSaveTimers[key]); delete wsPending[key]; }
+function wsFlushPendingSaves(){
+  /* on close: fire any debounced field immediately so nothing is lost */
+  Object.keys(wsSaveTimers).forEach(k => clearTimeout(wsSaveTimers[k]));
+  const pend = Object.values(wsPending);
+  for (const k in wsPending) delete wsPending[k];
+  pend.forEach(fn => { try { fn(); } catch {} });
+}
+
+/* --- events: delegated on the panel, all explicit user actions --- */
+$("#wsclose").addEventListener("click", closeWorkspace);
+$("#wsscrim").addEventListener("click", closeWorkspace);
+$("#wsback").addEventListener("click", () => {
+  $("#sheetsworkspace").classList.remove("sheet-open");
+  $("#wsback").hidden = true;
+});
+$("#wsnewsheet").addEventListener("click", wsCreate);
+$("#wsreorder").addEventListener("click", () =>
+  $("#wsreorder").classList.toggle("on", $("#sheetsworkspace").classList.toggle("reorder")));
+$("#sheetsbtn").addEventListener("click", openWorkspace);
+$("#sheetsbtn").innerHTML = ICON_SHEETS;
+$("#wsnewsheet").innerHTML = ICON_PLUS;
+$("#wssheetmenu").innerHTML = ICON_MENU_DOTS;
+$("#sheetsworkspace").addEventListener("keydown", e => {
+  if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation();
+    if ($("#sheetsworkspace").classList.contains("sheet-open") && window.matchMedia("(max-width: 899px)").matches){
+      $("#wsback").click();
+    } else closeWorkspace();
+  }
+});
+
+/* sheet title autosave */
+$("#wssheettitle").addEventListener("input", e => {
+  if (!wsActive) return;
+  wsActive.title = e.target.value;
+  $("#wstitle").textContent = e.target.value || "Sheet";
+  wsPatch({ title: e.target.value }, "sheet-title");
+});
+$("#wssheettitle").addEventListener("blur", () => { if (wsActive) wsPatch({ title: wsActive.title }); });
+
+/* navigator: open a card, or move it in reorder mode */
+$("#wscards").addEventListener("click", async e => {
+  const mv = e.target.closest("[data-wsmove]");
+  if (mv){
+    e.stopPropagation();
+    const card = mv.closest(".wscard");
+    await wsMove(+card.dataset.idx, mv.dataset.wsmove === "up" ? -1 : 1);
+    return;
+  }
+  const card = e.target.closest(".wscard");
+  if (card) wsSelect(card.dataset.sheet);
+});
+async function wsMove(idx, dir){
+  const j = idx + dir;
+  if (j < 0 || j >= wsSheets.length) return;
+  const arr = wsSheets;
+  [arr[idx], arr[j]] = [arr[j], arr[idx]];
+  renderWsCards();
+  /* persist explicit positions for the two swapped cards */
+  await Promise.all([idx, j].map(async k => {
+    arr[k].order = k;
+    try { await api("/api/sheets/" + encodeURIComponent(arr[k].id),
+      { method: "PATCH", body: JSON.stringify({ order: k }) }); } catch {}
+  }));
+}
+
+/* section interactions (fold, title, body edit, overflow menu) */
+$("#wssections").addEventListener("click", e => {
+  const foldBtn = e.target.closest("[data-secfold]");
+  if (foldBtn){
+    const sec = foldBtn.closest(".wssec");
+    const folded = sec.classList.toggle("folded");
+    wsSetFold(sec.dataset.sec, folded);
+    foldBtn.innerHTML = folded ? ICON_CHEV_RIGHT : ICON_CHEV_DOWN;
+    return;
+  }
+  const menuBtn = e.target.closest("[data-secmenu]");
+  if (menuBtn){ openSectionMenu(menuBtn); return; }
+  const render = e.target.closest("[data-secrender]");
+  if (render && !render.closest(".wssec").classList.contains("folded")){
+    startBodyEdit(render.closest(".wssec"));
+  }
+});
+$("#wssections").addEventListener("input", e => {
+  const t = e.target.closest("[data-sectitle]");
+  if (t){
+    const secId = t.closest(".wssec").dataset.sec;
+    const s = wsActive && (wsActive.sections || []).find(x => x.id === secId);
+    if (s) s.title = t.value;
+    wsPatch({ section: { id: secId, title: t.value } }, "sectitle-" + secId);
+  }
+});
+/* switch a section's rendered body to an inline editor; blur saves + re-renders */
+function startBodyEdit(sec){
+  const secId = sec.dataset.sec;
+  const s = wsActive && (wsActive.sections || []).find(x => x.id === secId);
+  if (!s) return;
+  const bodyWrap = sec.querySelector(".wssecbody");
+  const ta = document.createElement("textarea");
+  ta.className = "wssecedit"; ta.value = s.body || ""; ta.setAttribute("aria-label", "section body (Markdown)");
+  bodyWrap.innerHTML = ""; bodyWrap.appendChild(ta);
+  ta.focus();
+  ta.addEventListener("input", () => { s.body = ta.value; wsPatch({ section: { id: secId, body: ta.value } }, "secbody-" + secId); });
+  ta.addEventListener("blur", async () => {
+    s.body = ta.value;
+    wsCancelPending("secbody-" + secId);
+    await wsPatch({ section: { id: secId, body: ta.value } });
+    bodyWrap.innerHTML = `<div class="wssecrender" data-secrender>${md(s.body || "")}</div>`;
+  });
+}
+
+/* section overflow menu: add-below, edit, move up/down, delete */
+let wsMenuEl = null;
+function closeWsMenu(){ if (wsMenuEl){ wsMenuEl.remove(); wsMenuEl = null; } }
+document.addEventListener("click", e => { if (wsMenuEl && !e.target.closest(".wsmenu") && !e.target.closest("[data-secmenu]")) closeWsMenu(); });
+function openSectionMenu(btn){
+  closeWsMenu();
+  const secId = btn.closest(".wssec").dataset.sec;
+  const m = document.createElement("div");
+  m.className = "wsmenu";
+  m.innerHTML =
+    `<button data-mi="add">${ICON_PLUS}<span>Add section below</span></button>` +
+    `<button data-mi="edit">${ICON_PENCIL}<span>Edit</span></button>` +
+    `<button data-mi="up">${ICON_MOVE_UP}<span>Move up</span></button>` +
+    `<button data-mi="down">${ICON_MOVE_DOWN}<span>Move down</span></button>` +
+    `<div class="sep"></div>` +
+    `<button data-mi="del" class="danger">${ICON_TRASH}<span>Delete section</span></button>`;
+  $("#wspanel").appendChild(m);
+  const r = btn.getBoundingClientRect(), pr = $("#wspanel").getBoundingClientRect();
+  m.style.top = (r.bottom - pr.top + 4) + "px";
+  m.style.left = Math.max(8, Math.min(r.left - pr.left - 150, pr.width - 190)) + "px";
+  wsMenuEl = m;
+  m.addEventListener("click", async ev => {
+    const mi = ev.target.closest("[data-mi]"); if (!mi) return;
+    closeWsMenu();
+    await sectionMenuAction(mi.dataset.mi, secId);
+  });
+}
+async function sectionMenuAction(action, secId){
+  const secs = wsActive.sections || [];
+  const idx = secs.findIndex(s => s.id === secId);
+  if (idx < 0) return;
+  if (action === "edit"){ const sec = $(`#wssections .wssec[data-sec="${cssEsc(secId)}"]`); if (sec){ sec.classList.remove("folded"); wsSetFold(secId, false); startBodyEdit(sec); } return; }
+  if (action === "add"){
+    const doc = await wsPatch({ add_section: "" });
+    if (doc){ wsActive = doc; renderWsSheet(); } return;
+  }
+  if (action === "del"){
+    const doc = await wsPatch({ section: { id: secId, delete: true } });
+    if (doc){ wsActive = doc; renderWsSheet(); } return;
+  }
+  if (action === "up" || action === "down"){
+    const j = idx + (action === "up" ? -1 : 1);
+    if (j < 0 || j >= secs.length) return;
+    /* swap order values, persist both, re-render from the new order */
+    const a = secs[idx], b = secs[j];
+    const ao = a.order || 0, bo = b.order || 0;
+    a.order = bo; b.order = ao;
+    await Promise.all([
+      wsPatch({ section: { id: a.id, order: a.order } }),
+      wsPatch({ section: { id: b.id, order: b.order } })
+    ]);
+    renderWsSheet();
+  }
+}
+/* CSS.escape shim for attribute selectors on opaque ids */
+function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&"); }
+
+/* sheet-level menu (rename hint / delete the whole sheet) */
+$("#wssheetmenu").addEventListener("click", e => {
+  closeWsMenu();
+  const m = document.createElement("div");
+  m.className = "wsmenu";
+  m.innerHTML =
+    `<button data-si="add">${ICON_PLUS}<span>Add section</span></button>` +
+    `<div class="sep"></div>` +
+    `<button data-si="del" class="danger">${ICON_TRASH}<span>Delete sheet</span></button>`;
+  $("#wspanel").appendChild(m);
+  const r = e.currentTarget.getBoundingClientRect(), pr = $("#wspanel").getBoundingClientRect();
+  m.style.top = (r.bottom - pr.top + 4) + "px";
+  m.style.left = Math.max(8, Math.min(r.left - pr.left - 150, pr.width - 190)) + "px";
+  wsMenuEl = m;
+  m.addEventListener("click", async ev => {
+    const mi = ev.target.closest("[data-si]"); if (!mi) return;
+    closeWsMenu();
+    if (mi.dataset.si === "add"){ const doc = await wsPatch({ add_section: "" }); if (doc){ wsActive = doc; renderWsSheet(); } }
+    else if (mi.dataset.si === "del"){ await wsDeleteSheet(); }
+  });
+});
+async function wsDeleteSheet(){
+  if (!wsActiveId) return;
+  const id = wsActiveId;
+  try { await api("/api/sheets/" + encodeURIComponent(id), { method: "DELETE" }); }
+  catch { toast("Delete failed"); return; }
+  wsActiveId = null; wsActive = null;
+  $("#sheetsworkspace").classList.remove("sheet-open");
+  $("#wsback").hidden = true;
+  renderWsSheet();
+  wsLoadCards();
+}
 
 /* ---- search overlay (G3): open/close, blur, focus trap + restore ----
    A Spotlight-style modal reachable from any view. Opening blurs the app
