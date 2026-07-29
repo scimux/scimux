@@ -1466,3 +1466,101 @@ assert.strictEqual(bubbleTitle("assistant", null), "agent");
 		t.Fatalf("bubbleTitle broken: %v\n%s", err, out)
 	}
 }
+
+// --- Stage 2: sticky-note inbox → "Use in sheet" → embedded references ---
+
+// provLabel builds an embedded reference's provenance line from its snapshot
+// parts, dropping the empty ones so a reference with only a timestamp still
+// reads cleanly (design: an embedded reference retains lane/station/speaker/time
+// provenance, but a manual capture may lack station or speaker).
+func TestWebReferenceProvenanceLabel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	m := regexp.MustCompile(`function provLabel\([^)]*\)\{[^}]*\}`).FindString(html)
+	if m == "" {
+		t.Fatal("could not locate provLabel in web/index.html")
+	}
+	script := m + `
+const assert = require("assert");
+assert.strictEqual(provLabel("Alpha", "agent", "Jul 28"), "Alpha · agent · Jul 28");
+assert.strictEqual(provLabel("", "", "Jul 28"), "Jul 28");
+assert.strictEqual(provLabel("Alpha", "", ""), "Alpha");
+assert.strictEqual(provLabel("", "", ""), "");
+`
+	f := filepath.Join(t.TempDir(), "provlabel.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("provLabel broken: %v\n%s", err, out)
+	}
+}
+
+// A section must render its embedded references (provenance chip + snapshot text
+// + jump/copy/trash actions) so a self-contained reference shows without any
+// dependency on the source node still existing.
+func TestWebSectionRendersReferences(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		"function referenceHTML(", // per-reference builder
+		`(s.references || [])`,    // sectionHTML iterates the section's references
+		`data-refact="jump"`,      // jump back to the source chat
+		`data-refact="copy"`,      // copy the snapshot text
+		`data-refact="trash"`,     // trash removes only this reference
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("section reference rendering missing %q", want)
+		}
+	}
+}
+
+// "Use in sheet" is the capture→synthesis bridge. It must be an action on the
+// compact notes pane (the inbox on every device) and route through a shared
+// placement path that posts the reference to the section endpoint.
+func TestWebUseInSheetWiring(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		`data-nact="sheet"`,        // Use-in-sheet action in the notes-pane action row
+		"function startPlacement(", // enters placement mode holding the note
+		`classList.add("placing")`, // placement mode drives the add-here affordances
+		`data-addhere`,             // per-section "add capture here" target
+		`/references`,              // posts to the section references endpoint
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("use-in-sheet wiring missing %q", want)
+		}
+	}
+}
+
+// Reference jump-back and the notes-pane jump must share one resolver so both
+// survive /clear seams, rotation, and node deletion identically (live node →
+// pendingJump; deleted-and-archived → openArchived by uid).
+func TestWebSharedJumpResolver(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	if !strings.Contains(html, "function jumpToChatAddress(") {
+		t.Error("shared jumpToChatAddress resolver not defined")
+	}
+	// The notes pane must delegate to it rather than keep a private copy.
+	if strings.Count(html, "jumpToChatAddress(") < 2 {
+		t.Error("jumpToChatAddress must be called from both the notes pane and references")
+	}
+}

@@ -1233,18 +1233,71 @@ body.notes-open #notespane { transform: translateX(0); }
 .wsmenu button.danger { color: var(--attn); }
 .wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
 #sheetsworkspace .backbtn { display: flex; }
-/* iPhone / narrow: one zone at a time. Nav is the resting view; opening a sheet
-   slides the sheet in and hides the nav (a visible Back returns). */
+/* --- inbox zone (left): the reused capture layer --- */
+#wsinbox { display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--hairline); }
+#wsinboxhead { flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .04em; }
+#wsinboxlist { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
+#wsinboxlist .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
+.wsinote { border: 1px solid var(--hairline); border-radius: 12px; padding: 9px 11px; margin-top: 8px; }
+.wsiwhen { font-size: 11px; color: var(--dim); }
+.wsibubble { border-left: 3px solid var(--unlane); padding-left: 8px; font-size: 13px;
+  line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
+.wsibubble p:first-child { margin-top: 0; }
+.wsiuse { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+  padding: 5px 10px; border-radius: 8px; font-size: 12px; color: var(--work);
+  background: color-mix(in srgb, var(--work) 8%, transparent); }
+.wsiuse svg { width: 14px; height: 14px; }
+.wsiuse:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+/* --- embedded chat references inside a section --- */
+.wsrefs { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.wsref { border: 1px solid var(--hairline); border-left: 3px solid var(--unlane);
+  border-radius: 8px; padding: 7px 9px; cursor: pointer;
+  background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.wsrefhead { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.wsrefdot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.wsrefprov { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsrefbody { font-size: 13px; line-height: 1.5; margin-top: 3px; overflow-wrap: anywhere; }
+.wsrefbody p:first-child { margin-top: 0; }
+.wsref .wsrefactions { display: none; gap: 6px; margin-top: 7px; }
+.wsref.open .wsrefactions { display: flex; }
+.wsrefactions button { width: 30px; height: 28px; border-radius: 7px; color: var(--dim);
+  background: var(--surface); border: 1px solid var(--hairline);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wsrefactions button svg { width: 15px; height: 15px; }
+.wsrefactions button:active { background: var(--code-bg); }
+/* --- placement mode: banner + per-section "add capture here" target --- */
+#wsplacebar { display: none; align-items: center; gap: 8px; flex: none;
+  padding: 9px 14px; font-size: 13px; border-bottom: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--work) 12%, transparent); }
+#sheetsworkspace.placing #wsplacebar { display: flex; }
+.wsplacelabel { color: var(--work); font-weight: 600; flex: none; }
+#wsplacetext { color: var(--ink); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 46vw; }
+#wsplacecancel { flex: none; padding: 5px 12px; border-radius: 8px; color: var(--dim);
+  background: var(--surface); border: 1px solid var(--hairline); }
+.wsaddhere { display: none; align-items: center; gap: 6px; padding: 4px 9px;
+  border-radius: 7px; font-size: 12px; color: var(--work);
+  background: color-mix(in srgb, var(--work) 12%, transparent); }
+.wsaddhere svg { width: 13px; height: 13px; }
+#sheetsworkspace.placing .wsaddhere { display: inline-flex; }
+/* iPhone / narrow: one zone at a time. The compact notes pane is the inbox
+   there, so the inbox zone is hidden; nav is the resting view and opening a
+   sheet slides the sheet in over the nav (a visible Back returns). */
 @media (max-width: 899px) {
   #wspanel { width: 100vw; height: 100dvh; margin: 0; border-radius: 0; border: none; }
+  #wsinbox { display: none; }
   #wssheet { flex: 1; }
   #sheetsworkspace:not(.sheet-open) #wssheet { display: none; }
   #sheetsworkspace:not(.sheet-open) #wsback { display: none; }
   #sheetsworkspace.sheet-open #wsnav { display: none; }
+  #wsplacetext { max-width: 40vw; }
 }
 @media (min-width: 900px) {
-  /* side-by-side: the nav is narrow and stable, the sheet gets the weight */
-  #wsnav { flex: none; width: 300px; }
+  /* three zones: inbox and nav are narrow and stable, the sheet gets the weight */
+  #wsinbox { flex: none; width: 264px; }
+  #wsnav { flex: none; width: 264px; }
   #wsback { display: none; }
 }
 </style>
@@ -1437,7 +1490,22 @@ body.notes-open #notespane { transform: translateX(0); }
       <span class="spacer"></span>
       <button id="wsclose" aria-label="close notes workspace">&#10005;</button>
     </div>
+    <!-- placement banner: shown while a captured note is held for "Use in sheet".
+         Pick a sheet if none is open, then tap "Add capture here" on a section. -->
+    <div id="wsplacebar">
+      <span class="wsplacelabel">Placing capture:</span>
+      <span id="wsplacetext"></span>
+      <span class="spacer" style="flex:1"></span>
+      <button id="wsplacecancel">Cancel</button>
+    </div>
     <div id="wszones">
+      <!-- left zone (iPad/desktop): the sticky-note inbox — the capture layer,
+           reused here so material is visible while composing. On iPhone the
+           compact notes pane is the inbox, so this zone is hidden. -->
+      <div id="wsinbox" role="region" aria-label="Captured notes">
+        <div id="wsinboxhead"><span>Captures</span></div>
+        <div id="wsinboxlist"><div class="empty">No captures yet.</div></div>
+      </div>
       <!-- middle zone: sparse sheet-card navigator -->
       <div id="wsnav" role="region" aria-label="Sheets">
         <div id="wsnavhead">
@@ -1831,6 +1899,7 @@ function uiMutate(op){
   localStorage.setItem("scimux-ui", JSON.stringify(UI));
   renderSyncState();
   renderNotesPane();   /* signature-guarded; cheap when notes didn't change */
+  renderWsInbox();     /* signature-guarded; the workspace inbox mirrors captures */
   clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
   uiTimer = setTimeout(flushUI, 300);
 }
@@ -4759,6 +4828,35 @@ function stampAddress(note, src){
   note.record = Number(src.record) || 0;
 }
 
+/* jumpToChatAddress — the one resolver behind both a note's "jump to" and an
+   embedded reference's "jump to chat". a = {node, uid, segment, record,
+   turnTime, text}. A live node resolves in its own log by the durable
+   (segment, record) address (turnTime, then text, are the legacy fallback);
+   a node that was deleted (its log archived to sessions/archive) resolves by
+   uid into the same bounded read-only surface search uses. Returns false only
+   when neither a live node nor a durable uid is available, so the caller can
+   fall back to the captured snapshot. Leaving any full-screen overlay (notes
+   sheet, sheets workspace) is part of the jump — the destination must show. */
+function jumpToChatAddress(a){
+  if (a.node && nodeById(a.node)){
+    pendingJump = { node: a.node, turnTime: a.turnTime || "", text: a.text || "",
+      uid: a.uid || "", segment: a.segment, record: a.record, ts: Date.now() };
+    /* select() clears chatSig only on a node *change*; a same-node jump would
+       hit the signature short-circuit before consumePendingJump */
+    chatSig = "";
+    if (wsOpen()) closeWorkspace();
+    if (!isDesktop()) setNotesOpen(false);
+    select(a.node);
+    return true;
+  }
+  if (a.uid){
+    if (wsOpen()) closeWorkspace();
+    openArchived(a.uid, a.segment, a.record, a.turnTime || "");
+    return true;
+  }
+  return false;
+}
+
 /* a note's lane is derived live from its activity (activities gain lanes
    later; notes follow automatically); the capture-time snapshot is the
    fallback for deleted activities and the home of manual notes. Comments
@@ -4828,6 +4926,7 @@ function renderNotesPane(){
       <button class="nmore" data-nmore hidden></button>
       ${openNoteT === nt.t ? `<div class="noteactions">
         ${nt.node || nt.uid ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
+        <button data-nact="sheet" aria-label="use in sheet">${ICON_SHEETS}</button>
         ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this note">${ICON_COMMENT}</button>` : ""}
         <button data-nact="copy" aria-label="copy note">${ICON_COPY}</button>
         <button data-nact="del" aria-label="delete note">${ICON_TRASH}</button>
@@ -4921,27 +5020,15 @@ $("#notespane").addEventListener("click", e => {
     const nt = (UI.notes || []).find(x => x.t === act.closest(".note")?.dataset.t);
     if (!nt) return;
     if (act.dataset.nact === "jump" && (nt.node || nt.uid)){
-      if (!nodeById(nt.node)){
-        /* the activity is gone (deleted; its log lives in sessions/archive). A
-           note captured with its durable address resolves anyway: open the same
-           bounded archived surface search uses, anchored by (uid, seg, rec). A
-           legacy note with no address can only offer its own text to read/copy. */
-        if (nt.uid){ openArchived(nt.uid, nt.segment, nt.record, nt.turnTime || ""); return; }
+      /* the durable (uid, segment, record) address resolves jump-back the same
+         way for a note and an embedded reference — one shared resolver, so both
+         survive /clear seams, rotation, and node deletion identically. A legacy
+         note with no address can only offer its own text to read/copy. */
+      if (!jumpToChatAddress({ node: nt.node, uid: nt.uid, segment: nt.segment,
+          record: nt.record, turnTime: nt.turnTime, text: nt.text }))
         toast("This note's activity was deleted — the text is still here to read or copy.");
-        return;
-      }
-      /* jump by the durable (segment, record) address when the note carries it —
-         stable across /clear seams and relinks — falling back to the turn's own
-         timestamp, then the text, for legacy notes captured before the address. */
-      pendingJump = { node: nt.node, turnTime: nt.turnTime || "", text: nt.text || "",
-        uid: nt.uid || "", segment: nt.segment, record: nt.record, ts: Date.now() };
-      /* select() clears chatSig only on a node *change*; a same-node jump
-         would hit the signature short-circuit before consumePendingJump */
-      chatSig = "";
-      /* below the column breakpoint the notes pane is a full-screen sheet
-         covering the chat — the jump must reveal its destination */
-      if (!isDesktop()) setNotesOpen(false);
-      select(nt.node);
+    } else if (act.dataset.nact === "sheet"){
+      startPlacement(nt);
     } else if (act.dataset.nact === "comment"){
       setNoteAnchor(nt.t);
       openNoteT = "";
@@ -5678,16 +5765,54 @@ function openWorkspace(){
   wsReturnFocus = document.activeElement;
   $("#sheetsworkspace").hidden = false;
   wsLoadCards();
+  renderWsInbox();
   requestAnimationFrame(() => $("#wsnewsheet").focus());
 }
 function closeWorkspace(){
   if (!wsOpen()) return;
   wsFlushPendingSaves();
+  endPlacement();
   $("#sheetsworkspace").hidden = true;
   const back = wsReturnFocus; wsReturnFocus = null;
   if (back && document.contains(back) && back.focus) back.focus();
   else $("#sheetsbtn").focus();
 }
+
+/* --- inbox zone (iPad/desktop): the capture layer, reused as the workspace's
+   left column so material is visible while composing. Chat-like order (oldest
+   top, newest bottom) mirrors the compact pane. It is a list of buttons, never
+   an editor, so re-rendering it on a poll tick is safe — unlike the sheet zone,
+   it carries no caret to protect. Each capture offers one "Use in sheet". --- */
+let wsInboxSig = "";
+function renderWsInbox(){
+  if (!wsOpen()) return;
+  const notes = (UI.notes || []).slice();
+  const byT = {}; notes.forEach(nt => byT[nt.t] = nt);
+  notes.sort((a, b) => noteSortKey(a, byT).localeCompare(noteSortKey(b, byT)));
+  const html = notes.length ? notes.map(nt => {
+    const laneId = noteLaneId(nt, byT);
+    const color = laneId ? laneColor(laneId) : "var(--unlane)";
+    const nd = nt.node ? nodeById(nt.node) : null;
+    const src = nd ? " · " + esc(nd.title) : "";
+    return `<div class="wsinote" data-t="${esc(nt.t)}">
+      <div class="wsiwhen">${esc(fmtWhen(nt.t))}${src}</div>
+      <div class="wsibubble" style="border-left-color:${esc(color)}">${md(nt.text || "")}</div>
+      <button class="wsiuse" data-wsiuse>${ICON_SHEETS}<span>Use in sheet</span></button>
+    </div>`;
+  }).join("") : `<div class="empty">No captures yet.</div>`;
+  const sig = hashStr(html);
+  if (sig === wsInboxSig) return;
+  wsInboxSig = sig;
+  $("#wsinboxlist").innerHTML = html;
+}
+$("#wsinboxlist").addEventListener("click", e => {
+  const use = e.target.closest("[data-wsiuse]");
+  if (!use) return;
+  const t = use.closest(".wsinote").dataset.t;
+  const nt = (UI.notes || []).find(x => x.t === t);
+  if (nt) startPlacement(nt);
+});
+$("#wsplacecancel").addEventListener("click", endPlacement);
 
 /* --- fold state (view state, per-device for now; design routes this to
    ui.json cross-device — deferred to keep the ops-sync surface untouched) --- */
@@ -5763,14 +5888,42 @@ function renderWsSheet(){
     `<div class="empty">No sections.</div>`;
 }
 function sectionHTML(s, folded){
+  const refs = (s.references || []).map(referenceHTML).join("");
   return `<div class="wssec ${folded ? "folded" : ""}" data-sec="${esc(s.id)}">
     <div class="wssechead">
       <button class="wssecfold" data-secfold aria-label="fold section">${folded ? ICON_CHEV_RIGHT : ICON_CHEV_DOWN}</button>
       <input class="wssectitle" data-sectitle value="${esc(s.title || "")}" aria-label="section title" placeholder="Section title">
+      <button class="wsaddhere" data-addhere aria-label="add the held capture to this section">${ICON_PLUS}<span>Add capture here</span></button>
       <button class="wssecmenu" data-secmenu aria-label="section actions">${ICON_MENU_DOTS}</button>
     </div>
     <div class="wssecbody">
       <div class="wssecrender" data-secrender>${md(s.body || "")}</div>
+      ${refs ? `<div class="wsrefs">${refs}</div>` : ""}
+    </div>
+  </div>`;
+}
+/* provLabel joins an embedded reference's provenance parts (station, speaker,
+   time), dropping the empty ones so a manual capture with only a timestamp
+   still reads cleanly. Pure — the caller escapes the parts. */
+function provLabel(station, speaker, when){ return [station, speaker, when].filter(Boolean).join(" · "); }
+/* referenceHTML renders one embedded chat reference entirely from its stored
+   snapshot — no dependency on the source node still existing or on live
+   capture-layer state (design: a reference is self-contained). Tapping it
+   reveals jump-to-chat / copy / trash; those live in an always-present, CSS-
+   hidden row toggled in place, so revealing them never re-renders the section
+   and so can never tear out a focused body editor. */
+function referenceHTML(r){
+  const snap = r.snapshot || {};
+  const color = snap.lane || "var(--unlane)";
+  const label = provLabel(esc(snap.station || ""), esc(snap.speaker || ""),
+    snap.time ? esc(fmtWhen(snap.time)) : "");
+  return `<div class="wsref" data-ref="${esc(r.id)}" style="border-left-color:${esc(color)}">
+    <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
+    <div class="wsrefbody">${md(snap.text || "")}</div>
+    <div class="wsrefactions">
+      <button data-refact="jump" aria-label="jump to chat">${ICON_JUMP}</button>
+      <button data-refact="copy" aria-label="copy reference text">${ICON_COPY}</button>
+      <button data-refact="trash" aria-label="remove reference">${ICON_TRASH}</button>
     </div>
   </div>`;
 }
@@ -5826,6 +5979,7 @@ $("#wsnewsheet").innerHTML = ICON_PLUS;
 $("#wssheetmenu").innerHTML = ICON_MENU_DOTS;
 $("#sheetsworkspace").addEventListener("keydown", e => {
   if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation();
+    if (wsPlacing){ endPlacement(); return; }   /* Esc cancels placement before closing */
     if ($("#sheetsworkspace").classList.contains("sheet-open") && window.matchMedia("(max-width: 899px)").matches){
       $("#wsback").click();
     } else closeWorkspace();
@@ -5869,6 +6023,15 @@ async function wsMove(idx, dir){
 
 /* section interactions (fold, title, body edit, overflow menu) */
 $("#wssections").addEventListener("click", e => {
+  /* placement target: the held capture lands at the bottom of this section */
+  const addHere = e.target.closest("[data-addhere]");
+  if (addHere){ placeHeldNote(addHere.closest(".wssec").dataset.sec); return; }
+  /* embedded-reference action or reveal — checked before section edit so a tap
+     on a reference never opens the body editor */
+  const refBtn = e.target.closest("[data-refact]");
+  if (refBtn){ referenceAction(refBtn); return; }
+  const refEl = e.target.closest(".wsref");
+  if (refEl){ refEl.classList.toggle("open"); return; }
   const foldBtn = e.target.closest("[data-secfold]");
   if (foldBtn){
     const sec = foldBtn.closest(".wssec");
@@ -6000,6 +6163,138 @@ async function wsDeleteSheet(){
   $("#wsback").hidden = true;
   renderWsSheet();
   wsLoadCards();
+}
+
+/* ---- embedded references: jump / copy / trash ----
+   A reference renders from its stored snapshot and resolves jump-back by its
+   durable source address, so all three actions work even after the source node
+   is deleted. */
+function findRef(secId, refId){
+  const sec = wsActive && (wsActive.sections || []).find(s => s.id === secId);
+  return sec && (sec.references || []).find(r => r.id === refId);
+}
+async function referenceAction(btn){
+  const refEl = btn.closest(".wsref"), secEl = btn.closest(".wssec");
+  const secId = secEl.dataset.sec, refId = refEl.dataset.ref;
+  const ref = findRef(secId, refId);
+  if (!ref) return;
+  const act = btn.dataset.refact;
+  if (act === "copy"){
+    copyText((ref.snapshot && ref.snapshot.text) || "");
+    btn.innerHTML = "&#10003;";
+    setTimeout(() => { btn.innerHTML = ICON_COPY; }, 900);
+    return;
+  }
+  if (act === "jump"){
+    const src = ref.source || {};
+    if (!jumpToChatAddress({ node: src.node, uid: src.uid, segment: src.segment,
+        record: src.record, turnTime: src.turnTime, text: (ref.snapshot || {}).text }))
+      toast("Source unavailable — the captured snapshot is still shown here.");
+    return;
+  }
+  if (act === "trash"){
+    /* remove only this reference — never the source bubble or the sticky note.
+       Update the DOM in place (not renderWsSheet) so a body editor open in
+       another section keeps its caret. */
+    try {
+      const doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
+        "/sections/" + encodeURIComponent(secId) + "/references/" + encodeURIComponent(refId),
+        { method: "DELETE" });
+      if (doc && doc.id === wsActiveId){ wsActive = doc; syncCardMeta(doc); }
+    } catch { toast("Couldn't remove reference"); return; }
+    const wrap = refEl.parentElement;
+    refEl.remove();
+    if (wrap && wrap.classList.contains("wsrefs") && !wrap.children.length) wrap.remove();
+  }
+}
+/* fold a saved sheet document's fresh metadata back into its navigator card
+   without a full card rebuild fight — edited_at, title, section count, and the
+   represented lane swatches (which change when a reference is added/removed). */
+function syncCardMeta(doc){
+  const card = wsSheets.find(c => c.id === doc.id);
+  if (!card) return;
+  card.edited_at = doc.edited_at; card.title = doc.title;
+  card.section_count = (doc.sections || []).length;
+  const seen = {}, lanes = [];
+  (doc.sections || []).forEach(s => (s.references || []).forEach(r => {
+    const c = r.snapshot && r.snapshot.lane;
+    if (c && !seen[c]){ seen[c] = 1; lanes.push(c); }
+  }));
+  card.lanes = lanes;
+  renderWsCards();
+}
+
+/* ---- "Use in sheet": capture → synthesis ----
+   Placement mode holds one captured note and lets the user drop it into a
+   section as a self-contained embedded reference. It unifies both entry points
+   (the compact notes-pane action and the desktop workspace inbox) and every
+   device: enter the mode, pick a sheet if none is open, tap "Add capture here"
+   on the target section. The reference carries the note's durable source
+   address plus a display snapshot frozen now, so it renders and jumps back with
+   no dependency on the source node surviving. */
+let wsPlacing = null;
+function startPlacement(nt){
+  if (!nt) return;
+  wsPlacing = nt;
+  if (!wsOpen()) openWorkspace();
+  $("#sheetsworkspace").classList.add("placing");
+  $("#wsplacetext").textContent = (nt.text || "").replace(/\s+/g, " ").trim();
+  /* on a narrow screen the workspace opens on the sheet cards; the banner tells
+     the user to pick a sheet, then a section */
+}
+function endPlacement(){
+  wsPlacing = null;
+  $("#sheetsworkspace").classList.remove("placing");
+}
+/* noteSnapshot / noteSource turn a captured sticky note into the reference's
+   two halves. The snapshot is the self-contained display copy (lane *color*,
+   station, speaker, time, text); the source is the durable address plus live
+   hints. A note lacking a durable uid still yields a usable snapshot — jump-back
+   then degrades to the snapshot, which is the documented orphan fallback. */
+function noteSnapshot(nt){
+  const laneId = noteLaneId(nt, {});
+  const nd = nt.node ? nodeById(nt.node) : null;
+  const speaker = nt.role === "user" ? "you" : nt.role === "assistant" ? "agent" : "";
+  return {
+    lane: laneId ? laneColor(laneId) : "",
+    station: nd ? nd.title : "",
+    speaker,
+    time: nt.turnTime || nt.t || "",
+    text: nt.text || "",
+  };
+}
+function noteSource(nt){
+  return { uid: nt.uid || "", segment: nt.segment || 0, record: nt.record || 0,
+    node: nt.node || "", turnTime: nt.turnTime || "" };
+}
+async function placeHeldNote(secId){
+  if (!wsPlacing || !wsActiveId) return;
+  const body = { source: noteSource(wsPlacing), snapshot: noteSnapshot(wsPlacing) };
+  let doc;
+  try {
+    doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
+      "/sections/" + encodeURIComponent(secId) + "/references",
+      { method: "POST", body: JSON.stringify(body) });
+  } catch { toast("Couldn't add to sheet"); return; }
+  endPlacement();
+  if (doc && doc.id === wsActiveId){
+    wsActive = doc; syncCardMeta(doc);
+    /* append just this section's new reference so an open body editor elsewhere
+       keeps its caret; if the section DOM is missing (folded/rebuilt), fall back
+       to a full re-render */
+    const sec = (doc.sections || []).find(s => s.id === secId);
+    const secEl = $(`#wssections .wssec[data-sec="${cssEsc(secId)}"]`);
+    const newRef = sec && (sec.references || [])[sec.references.length - 1];
+    if (secEl && newRef){
+      let wrap = secEl.querySelector(".wsrefs");
+      if (!wrap){ wrap = document.createElement("div"); wrap.className = "wsrefs";
+        secEl.querySelector(".wssecbody").appendChild(wrap); }
+      wrap.insertAdjacentHTML("beforeend", referenceHTML(newRef));
+    } else {
+      renderWsSheet();
+    }
+    toast("Added to " + (doc.title || "sheet"));
+  }
 }
 
 /* ---- search overlay (G3): open/close, blur, focus trap + restore ----
