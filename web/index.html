@@ -6052,11 +6052,10 @@ function applyRefClamps(scope){
 /* --- persistence: partial PATCH, debounced; newer local text always wins
    because the editor DOM is the source of truth and is never overwritten by a
    save response (we only fold edited_at back into the card metadata). --- */
-function wsPatch(body, key){
-  const send = async () => {
-    try {
-      const doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId),
-        { method: "PATCH", body: JSON.stringify(body) });
+function wsSend(body){
+  return api("/api/sheets/" + encodeURIComponent(wsActiveId),
+    { method: "PATCH", body: JSON.stringify(body) })
+    .then(doc => {
       if (doc && doc.id === wsActiveId){
         if (wsActive) wsActive.edited_at = doc.edited_at;
         const card = wsSheets.find(c => c.id === doc.id);
@@ -6064,17 +6063,35 @@ function wsPatch(body, key){
           card.section_count = (doc.sections || []).length; renderWsCards(); }
       }
       return doc;
-    } catch { toast("Save failed — will retry on next edit"); }
-  };
+    })
+    .catch(() => { toast("Save failed — will retry on next edit"); });
+}
+/* Per-field save serialization: every PATCH for a given field is chained after
+   the previous one for that same key, so the server always applies edits in the
+   order they were issued. A revert (Escape) enqueues on the same key via
+   wsPatchNow, so it can never be overtaken by an earlier in-flight edit. */
+const wsSaveChains = {};
+function wsEnqueue(key, run){
+  const prev = wsSaveChains[key] || Promise.resolve();
+  const next = prev.then(run, run);   /* run in order regardless of the prior save's outcome */
+  wsSaveChains[key] = next.catch(() => {});
+  return next;
+}
+function wsPatch(body, key){
   if (key){
     clearTimeout(wsSaveTimers[key]);
-    wsPending[key] = send;
+    const fire = () => wsEnqueue(key, () => wsSend(body));
+    wsPending[key] = fire;
     return new Promise(res => {
-      wsSaveTimers[key] = setTimeout(() => { delete wsPending[key]; res(send()); }, 1100);
+      wsSaveTimers[key] = setTimeout(() => { delete wsPending[key]; res(fire()); }, 1100);
     });
   }
-  return send();
+  return wsSend(body);
 }
+/* immediate keyed save: cancels any pending debounce for the field and enqueues
+   now, so it lands after any in-flight save for the same field (used by reverts
+   and blur commits) */
+function wsPatchNow(body, key){ wsCancelPending(key); return wsEnqueue(key, () => wsSend(body)); }
 function wsCancelPending(key){ clearTimeout(wsSaveTimers[key]); delete wsPending[key]; }
 function wsFlushPendingSaves(){
   /* on close: fire any debounced field immediately so nothing is lost */
@@ -6124,13 +6141,12 @@ $("#wssheettitle").addEventListener("keydown", e => {
       e.target.value = wsTitleOrig;
       wsActive.title = wsTitleOrig;
       $("#wstitle").textContent = wsTitleOrig || "Memo";
-      wsCancelPending("sheet-title");
-      wsPatch({ title: wsTitleOrig });   /* persist the revert */
+      wsPatchNow({ title: wsTitleOrig }, "sheet-title");   /* persist the revert, ordered after any in-flight edit */
     }
     e.target.blur();
   }
 });
-$("#wssheettitle").addEventListener("blur", () => { if (wsActive) wsPatch({ title: wsActive.title }); });
+$("#wssheettitle").addEventListener("blur", () => { if (wsActive) wsPatchNow({ title: wsActive.title }, "sheet-title"); });
 
 /* navigator: a plain tap opens the memo. Reorder is drag-and-drop (item 6),
    mirroring the pinned-card gesture: wsCardDragging suppresses list rebuilds for
@@ -6245,8 +6261,7 @@ $("#wssections").addEventListener("keydown", e => {
     const orig = wsSecTitleOrig[secId];
     if (s && orig != null){
       t.value = orig; s.title = orig;
-      wsCancelPending("sectitle-" + secId);
-      wsPatch({ section: { id: secId, title: orig } });   /* persist the revert */
+      wsPatchNow({ section: { id: secId, title: orig } }, "sectitle-" + secId);   /* persist the revert, ordered */
     }
     t.blur();
   }
@@ -6272,16 +6287,14 @@ function startBodyEdit(sec){
     ev.preventDefault(); ev.stopPropagation();
     cancelled = true;
     s.body = orig;
-    wsCancelPending("secbody-" + secId);
-    wsPatch({ section: { id: secId, body: orig } });   /* persist the revert */
+    wsPatchNow({ section: { id: secId, body: orig } }, "secbody-" + secId);   /* persist the revert, ordered */
     bodyWrap.innerHTML = sectionBodyInner(s);           /* removing ta fires blur */
     applyRefClamps(bodyWrap);
   });
   ta.addEventListener("blur", async () => {
     if (cancelled) return;   /* Escape already restored the resting body */
     s.body = ta.value;
-    wsCancelPending("secbody-" + secId);
-    await wsPatch({ section: { id: secId, body: ta.value } });
+    await wsPatchNow({ section: { id: secId, body: ta.value } }, "secbody-" + secId);
     bodyWrap.innerHTML = sectionBodyInner(s);
     applyRefClamps(bodyWrap);
   });
@@ -6484,7 +6497,10 @@ function endPlacement(){
    hints. A note lacking a durable uid still yields a usable snapshot — jump-back
    then degrades to the snapshot, which is the documented orphan fallback. */
 function noteSnapshot(nt){
-  const laneId = noteLaneId(nt, {});
+  /* build the same by-timestamp map the Notes pane uses so an anchored comment
+     inherits its parent note's lane instead of snapshotting with no color */
+  const byT = {}; (UI.notes || []).forEach(n => byT[n.t] = n);
+  const laneId = noteLaneId(nt, byT);
   const nd = nt.node ? nodeById(nt.node) : null;
   const speaker = nt.role === "user" ? "you" : nt.role === "assistant" ? "agent" : "";
   return {

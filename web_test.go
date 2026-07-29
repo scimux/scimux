@@ -1807,6 +1807,121 @@ func TestWorkspaceWideLayout(t *testing.T) {
 	}
 }
 
+// Review finding 2: Escape (revert) could lose a race to an already-started
+// autosave — if the earlier edit's PATCH reached the server after the revert
+// PATCH, the cancelled value would persist. The fix serializes every save for a
+// given field: each PATCH is chained after the previous one for the same key, so
+// the server always applies edits in issue order and a revert can never be
+// overtaken. Prove the core serialization guarantee under node.
+func TestWorkspaceSaveSerializedPerField(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	html := mustReadIndex(t)
+	start := strings.Index(html, "const wsSaveChains")
+	if start < 0 {
+		t.Fatal("could not locate wsSaveChains serialization core in web/index.html")
+	}
+	end := strings.Index(html[start:], "\nfunction wsEnqueue")
+	if end < 0 {
+		t.Fatal("could not locate wsEnqueue in web/index.html")
+	}
+	// grab through the end of wsEnqueue's body
+	tail := html[start+end:]
+	fnEnd := strings.Index(tail, "\n}\n")
+	if fnEnd < 0 {
+		t.Fatal("could not locate the end of wsEnqueue in web/index.html")
+	}
+	core := html[start : start+end+fnEnd+2]
+	script := core + `
+const assert = require("assert");
+const order = [];
+let resolveFirst;
+// A slow first save on the field, then a revert on the SAME field. The revert
+// thunk must not run until the first settles, and must complete last.
+const first = wsEnqueue("k", () => new Promise(r => { resolveFirst = () => { order.push("edit"); r(); }; }));
+const revert = wsEnqueue("k", () => { order.push("revert"); return Promise.resolve(); });
+setTimeout(() => {
+  assert.deepStrictEqual(order, [], "nothing may complete while the first save is still in flight — the revert must wait");
+  resolveFirst();
+  Promise.all([first, revert]).then(() => {
+    assert.deepStrictEqual(order, ["edit", "revert"], "the revert must run only after the in-flight edit, so it lands last on the server");
+    console.log("ok");
+  }).catch(e => { console.error(e && e.message || e); process.exit(1); });
+}, 10);
+`
+	f := filepath.Join(t.TempDir(), "wsserialize.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("per-field save serialization broken: %v\n%s", err, out)
+	}
+	// The revert sites must enqueue on the field's key (via wsPatchNow), not fire
+	// an unkeyed immediate wsPatch that bypasses the chain.
+	if !strings.Contains(html, "function wsPatchNow(") {
+		t.Error("wsPatchNow (immediate keyed enqueue) must exist so reverts serialize behind in-flight saves")
+	}
+	for _, unkeyed := range []string{
+		"wsPatch({ title: wsTitleOrig })",
+		"wsPatch({ section: { id: secId, title: orig } })",
+		"wsPatch({ section: { id: secId, body: orig } })",
+	} {
+		if strings.Contains(html, unkeyed) {
+			t.Errorf("revert still uses an unkeyed wsPatch that bypasses per-field ordering: %q", unkeyed)
+		}
+	}
+}
+
+// Review finding 3: an anchored note *comment* embedded into a memo must inherit
+// its parent note's lane in the reference snapshot, exactly like the Notes pane
+// does. The snapshot path fed noteLaneId an empty byT map, so an anchored
+// comment lost its lane color and the memo card missed that lane dot.
+func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS execution check")
+	}
+	html := mustReadIndex(t)
+	laneFn := sliceBetween(t, html, "function noteLaneId(", "\nfunction noteSortKey(")
+	snapFn := sliceBetween(t, html, "function noteSnapshot(", "\nfunction noteSource(")
+	script := `
+const UI = { notes: [ { t: "1", lane: "lane-a" }, { t: "2", anchor: "1" } ] };
+function nodeById(){ return null; }
+function laneColor(id){ return id ? "#c-" + id : ""; }
+` + laneFn + "\n" + snapFn + `
+const assert = require("assert");
+const comment = UI.notes[1];   // anchored to note "1", carries no lane of its own
+const snap = noteSnapshot(comment);
+assert.strictEqual(snap.lane, "#c-lane-a", "an anchored comment must inherit its parent note's lane color in the snapshot");
+console.log("ok");
+`
+	f := filepath.Join(t.TempDir(), "wssnaplane.js")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
+		t.Fatalf("comment lane inheritance in reference snapshot broken: %v\n%s", err, out)
+	}
+}
+
+// sliceBetween returns the text from the occurrence of start up to (but not
+// including) the first occurrence of end after it.
+func sliceBetween(t *testing.T, html, start, end string) string {
+	t.Helper()
+	i := strings.Index(html, start)
+	if i < 0 {
+		t.Fatalf("could not locate %q", start)
+	}
+	rest := html[i:]
+	j := strings.Index(rest, end)
+	if j < 0 {
+		t.Fatalf("could not locate %q after %q", end, start)
+	}
+	return rest[:j]
+}
+
 // mustReadIndex / cssBlock: small helpers shared by the workspace tests.
 func mustReadIndex(t *testing.T) string {
 	t.Helper()
