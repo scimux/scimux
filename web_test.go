@@ -154,6 +154,29 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 	}
 }
 
+// A note captured from an archived search hit carries the durable
+// (uid, segment, record) address but no live node id. The notes-pane jump
+// action must render for such a note — the handler already opens the archived
+// surface via nt.uid — or Phase 0's "jump back after deletion" goal has no
+// affordance. Gate jump on (nt.node || nt.uid); keep comment gated on nt.node.
+func TestNotesJumpActionRendersForUIDOnlyNotes(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `${nt.node || nt.uid ? `+"`"+`<button data-nact="jump"`) {
+		t.Error("notes-pane jump button must render when the note has a durable uid, not only a live node")
+	}
+	if strings.Contains(html, `${nt.node ? `+"`"+`<button data-nact="jump"`) {
+		t.Error("jump button is still gated on nt.node alone — UID-only archived-source notes get no jump affordance")
+	}
+	// The comment action stays live-node-only (it replies into the live chat).
+	if !strings.Contains(html, `${nt.node && !nt.anchor ? `+"`"+`<button data-nact="comment"`) {
+		t.Error("comment action gate changed unexpectedly")
+	}
+}
+
 func TestBubbleCopyLivesInActionRow(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {

@@ -4654,7 +4654,7 @@ function renderNotesPane(){
       <div class="nbubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
       <button class="nmore" data-nmore hidden></button>
       ${openNoteT === nt.t ? `<div class="noteactions">
-        ${nt.node ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
+        ${nt.node || nt.uid ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
         ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this note">${ICON_COMMENT}</button>` : ""}
         <button data-nact="copy" aria-label="copy note">${ICON_COPY}</button>
         <button data-nact="del" aria-label="delete note">${ICON_TRASH}</button>
