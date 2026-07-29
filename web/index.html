@@ -2246,12 +2246,6 @@ const ICON_CHEV_UP = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none
   stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M6 15l6-6 6 6"/>
 </svg>`;
-/* Sheets glyph: fa-regular fa-pen-to-square — "compose/edit a sheet", the
-   synthesis layer's entry point (notes-design.md). Inline SVG constant, never a
-   runtime Font Awesome <i>. */
-const ICON_SHEETS = `<svg width="17" height="17" viewBox="0 0 512 512" fill="currentColor" aria-hidden="true">
-  <path d="M373.1 25 176 222.2c-8.7 8.7-15 19.4-18.3 31.1l-28.6 100c-2.4 8.4-.1 17.4 6.1 23.6s15.2 8.5 23.6 6.1l100-28.6c11.8-3.4 22.5-9.7 31.1-18.3L487 138.9c28.1-28.1 28.1-73.7 0-101.8L474.9 25C446.8-3.1 401.2-3.1 373.1 25zM88 64C39.4 64 0 103.4 0 152l0 272c0 48.6 39.4 88 88 88l272 0c48.6 0 88-39.4 88-88l0-112c0-13.3-10.7-24-24-24s-24 10.7-24 24l0 112c0 22.1-17.9 40-40 40L88 464c-22.1 0-40-17.9-40-40l0-272c0-22.1 17.9-40 40-40l112 0c13.3 0 24-10.7 24-24s-10.7-24-24-24L88 64z"/>
-</svg>`;
 const ICON_MOVE_UP = ICON_CHEV_UP, ICON_MOVE_DOWN = ICON_CHEV_DOWN;
 const ICON_CHEV_RIGHT = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -5088,9 +5082,9 @@ function renderNoteFlags(){
 }
 function renderNotesToggle(){
   const btn = $("#notesbtn");
-  /* closed: the book-bookmark glyph invites opening Bookmarks; open: a › to
-     collapse back to the chat */
-  btn.innerHTML = notesOpen ? "&#8250;" : ICON_BOOKMARK;
+  /* the chevron mirrors the pane it reveals: ‹ (closed) points at the
+     Bookmarks edge to the right; › (open) collapses back to the chat */
+  btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";
   btn.setAttribute("aria-label", notesOpen ? "close bookmarks" : "open bookmarks");
 }
 function setNotesOpen(open){
@@ -6179,7 +6173,7 @@ $("#wsback").addEventListener("click", () => {
 });
 $("#wsnewsheet").addEventListener("click", wsCreate);
 $("#sheetsbtn").addEventListener("click", openWorkspace);
-$("#sheetsbtn").innerHTML = ICON_SHEETS;
+$("#sheetsbtn").innerHTML = ICON_BOOKMARK;
 $("#wsnewsheet").innerHTML = ICON_PLUS;
 $("#wssheetmenu").innerHTML = ICON_MENU_DOTS;
 $("#sheetsworkspace").addEventListener("keydown", e => {

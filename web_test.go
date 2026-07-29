@@ -146,7 +146,7 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 		t.Fatal("closed bookmarks toggle should announce opening bookmarks")
 	}
 	for _, want := range []string{
-		`btn.innerHTML = notesOpen ? "&#8250;" : ICON_BOOKMARK;`,
+		`btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";`,
 		`btn.setAttribute("aria-label", notesOpen ? "close bookmarks" : "open bookmarks");`,
 		"renderNotesToggle();\n  renderNoteFlags();",
 	} {
@@ -1671,10 +1671,17 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 			t.Errorf("missing inlined icon constant %q", want)
 		}
 	}
-	// the Bookmarks pane toggle shows the bookmark glyph
+	// the chat-area toggle (#notesbtn) is the ‹/› chevron mirroring pane state;
+	// the bookmark glyph now lives on the Bookmarks pane's top-right button.
 	tog := sliceBetween(t, html, "function renderNotesToggle(", "\n}\n")
-	if !strings.Contains(tog, "ICON_BOOKMARK") {
-		t.Error("the Bookmarks pane toggle (#notesbtn) must use ICON_BOOKMARK")
+	if strings.Contains(tog, "ICON_BOOKMARK") {
+		t.Error("the chat-area toggle (#notesbtn) must be a chevron, not ICON_BOOKMARK")
+	}
+	if !strings.Contains(tog, `"&#8249;"`) {
+		t.Error("the chat-area toggle (#notesbtn) must restore the ‹ chevron when closed")
+	}
+	if !strings.Contains(html, `$("#sheetsbtn").innerHTML = ICON_BOOKMARK;`) {
+		t.Error("the Bookmarks pane top-right button (#sheetsbtn) must use ICON_BOOKMARK")
 	}
 	// in the note action row, the paperclip (use-in-note) sits just before delete
 	row := sliceBetween(t, html, `<div class="noteactions">`, "</div>")
