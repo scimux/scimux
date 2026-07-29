@@ -140,16 +140,18 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
-	if !strings.Contains(html, `id="notesbtn" aria-label="open notes pane">&#8249;</button>`) {
-		t.Fatal("closed notes toggle should point left and announce opening the notes pane")
+	// the closed Bookmarks toggle announces opening bookmarks (glyph set by
+	// renderNotesToggle, so the static button carries no chevron)
+	if !strings.Contains(html, `id="notesbtn" aria-label="open bookmarks"></button>`) {
+		t.Fatal("closed bookmarks toggle should announce opening bookmarks")
 	}
 	for _, want := range []string{
-		`btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";`,
-		`btn.setAttribute("aria-label", notesOpen ? "close notes pane" : "open notes pane");`,
+		`btn.innerHTML = notesOpen ? "&#8250;" : ICON_BOOKMARK;`,
+		`btn.setAttribute("aria-label", notesOpen ? "close bookmarks" : "open bookmarks");`,
 		"renderNotesToggle();\n  renderNoteFlags();",
 	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("notes toggle state sync missing %q", want)
+			t.Errorf("bookmarks toggle state sync missing %q", want)
 		}
 	}
 }
@@ -1612,29 +1614,104 @@ func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 	}
 }
 
-// Item 3: the product language is Notes (captures) and Memos (synthesis docs).
-// No user-facing "sheet"/"capture" wording may leak into the workspace chrome.
+// Terminology (2026-07-29 iPhone review): the product language became
+// Bookmarks (chat captures) and Notes (synthesis docs, formerly Memos). This is
+// a USER-FACING rename only — code identifiers (note=capture, sheet=synthesis)
+// are deliberately unchanged, see the TERMINOLOGY LEGEND in web/index.html. This
+// test guards the visible vocabulary; it must not assert on code identifiers.
 func TestWorkspaceRenames(t *testing.T) {
 	html := mustReadIndex(t)
+	// stale visible wording that must not leak. Rendered UI forms only — the
+	// legend intentionally keeps "memo" in code comments, so anchor to markup
+	// (tags/aria/labels) rather than bare words.
 	for _, gone := range []string{
-		">Use in sheet<",
-		"No captures yet",
-		"No sheets yet",
-		"Couldn't create sheet",
-		"Add capture here",
-		`aria-label="use in sheet"`,
+		">Use in sheet<", "No captures yet", "No sheets yet", "Couldn't create sheet",
+		"take a note",              // the bubble action is now "bookmark"
+		"Use in memo</span>",       // the inbox action label
+		`aria-label="use in memo"`, // the note-row action
+		"Delete memo</span>", "Couldn't create memo", "Couldn't open memo",
+		"Couldn't add to memo", "No memos yet", "Pick a memo,", "New memo",
+		`placeholder="Memo title"`, `aria-label="memo title"`, `aria-label="memo actions"`,
+		`aria-label="Active memo"`,
+		">Add note here</span>", // the held item is now a bookmark
+		"<h2>Notes</h2>",        // the captures pane heading is now Bookmarks
 	} {
 		if strings.Contains(html, gone) {
-			t.Errorf("stale wording %q must be renamed to Notes/Memos language", gone)
+			t.Errorf("stale visible wording %q must be renamed (Bookmarks/Notes vocabulary)", gone)
 		}
 	}
+	// required new vocabulary
 	for _, want := range []string{
-		"Use in memo",
-		"Delete memo",
+		">bookmark</button>",         // bubble action label
+		"<h2>Bookmarks</h2>",         // captures pane heading
+		"Use in note", "Delete note", // synthesis-doc action + menu
+		"Add bookmark here", "Placing bookmark:",
+		"New note", "Note title", "Pick a note, or make one with +",
+		"No notes yet — make one with +", // notes (memo) card empty state
 	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("expected Memo wording %q not found", want)
+			t.Errorf("expected new vocabulary %q not found", want)
 		}
+	}
+	// the legend documenting the intentional code/UI mismatch must be present so
+	// the next maintainer isn't misled by code `note` meaning UI Bookmark.
+	if !strings.Contains(html, "TERMINOLOGY LEGEND") {
+		t.Error("a TERMINOLOGY LEGEND comment must document the code(note/sheet) vs UI(Bookmark/Note) mismatch")
+	}
+}
+
+// The captures pane became "Bookmarks": its toggle uses a book-bookmark glyph,
+// and the "use in note" action (formerly the pen-to-square that read as "Edit")
+// now uses a paperclip, sitting second-to-last in the note action row (before
+// delete). Icons are inlined SVG per the repo convention — no FA dependency.
+func TestBookmarkIconsAndActionOrder(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, want := range []string{"const ICON_BOOKMARK", "const ICON_CLIP"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("missing inlined icon constant %q", want)
+		}
+	}
+	// the Bookmarks pane toggle shows the bookmark glyph
+	tog := sliceBetween(t, html, "function renderNotesToggle(", "\n}\n")
+	if !strings.Contains(tog, "ICON_BOOKMARK") {
+		t.Error("the Bookmarks pane toggle (#notesbtn) must use ICON_BOOKMARK")
+	}
+	// in the note action row, the paperclip (use-in-note) sits just before delete
+	row := sliceBetween(t, html, `<div class="noteactions">`, "</div>")
+	clip := strings.Index(row, `data-nact="sheet"`)
+	del := strings.Index(row, `data-nact="del"`)
+	if clip < 0 || del < 0 {
+		t.Fatal("note action row must contain both the use-in-note and delete actions")
+	}
+	if !(clip < del) {
+		t.Error("the use-in-note (paperclip) action must sit before delete (second-to-last)")
+	}
+	// and that action renders the paperclip, not the old pen-to-square (SHEETS)
+	act := row[clip:]
+	if end := strings.Index(act, "</button>"); end > 0 {
+		if !strings.Contains(act[:end], "ICON_CLIP") {
+			t.Error("the use-in-note action must render ICON_CLIP (paperclip)")
+		}
+		if strings.Contains(act[:end], "ICON_SHEETS") {
+			t.Error("the use-in-note action must no longer render the pen-to-square ICON_SHEETS")
+		}
+	}
+}
+
+// Swipe R->L on the open Bookmarks pane opens the Notes overview (the workspace).
+// This is the swipe-forward accelerator; a tappable path (#sheetsbtn) remains the
+// discoverable primary per HIG.
+func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
+	html := mustReadIndex(t)
+	// find the global touchend gesture handler
+	i := strings.Index(html, `document.addEventListener("touchend"`)
+	if i < 0 {
+		t.Fatal("could not locate the touchend gesture handler")
+	}
+	body := html[i : i+strings.Index(html[i:], "}, { passive: true });")]
+	// a left-going swipe while the Bookmarks pane is open must open the workspace
+	if !regexp.MustCompile(`dx < 0 && notesOpen\)\s*openWorkspace\(\)`).MatchString(body) {
+		t.Error("swipe R->L on the open Bookmarks pane must call openWorkspace() (Notes overview)")
 	}
 }
 

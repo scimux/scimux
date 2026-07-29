@@ -1159,6 +1159,54 @@ body.notes-open #notespane { transform: translateX(0); }
   body.map-full #map { animation-duration: .12s; }
 }
 
+/* ============================================================================
+   TERMINOLOGY LEGEND (2026-07-29 iPhone review). The USER-FACING vocabulary was
+   renamed, but code identifiers, API paths, ids, CSS classes and the store were
+   INTENTIONALLY left unchanged (the maintainer wants to "feel" the new UI before
+   committing to a deep rename). So there is a deliberate code<->UI mismatch:
+
+       UI "Bookmark"  ==  code `note`   (UI.notes, #notespane, data-nact="note",
+                                         noteSnapshot, expandedNotes, /notes ...)
+       UI "Note"      ==  code `sheet`/`memo`  (wsSheets, /api/sheets, sheetstore,
+                                         "memo" in comments, data-nact="sheet" ...)
+
+   In other words: the visible word "Notes" now means what the code calls
+   *sheets*, and the code word *note* now surfaces to users as "Bookmark". When
+   reading this file, translate: code `note` -> Bookmark, code `sheet` -> Note.
+   Until the rename below is done, do not "fix" the mismatch piecemeal.
+
+   ---------------------------------------------------------------------------
+   IF/WHEN YOU DO THE FULL CODE RENAME (this comment is a breadcrumb, NOT a
+   spec — it is not sufficient on its own to drive the change safely):
+
+   1. ORDERING HAZARD (the killer). The rename is TWO renames: note->bookmark
+      AND sheet/memo->note. They MUST run in that order — rename note->bookmark
+      FIRST, then sheet->note. Do it the other way (or blind-replace both at
+      once) and the new `note` (from sheet) collides with the old `note`
+      (capture) and the code corrupts. No naive find-replace.
+
+   2. PERSISTED DATA / API (the real bite; comment above does NOT cover it):
+      - On disk the store writes <data>/sheets/<id>.json + sheets/archive/
+        (internal/sheetstore: Store.Dir, path(), Delete()). Renaming that dir
+        to notes/ ORPHANS every existing memo unless you migrate the files or
+        keep a back-compat read path.
+      - 7 routes at /api/sheets* in main.go (handleSheet*). Renaming the path
+        is a coordinated, ATOMIC web+server cutover (single-user, so breaking
+        is acceptable, but both sides must change together).
+      - The JSON *field* tags (title/body/order/references/created_at/…) are
+        generic and rename-safe; the record shape does not need to change.
+
+   3. TARGET NAMES ARE UNDECIDED HERE. This legend maps concepts, not concrete
+      identifiers. A real pass needs a full inventory + chosen new names:
+      #notespane, noteSnapshot, expandedNotes, .note CSS, data-nact, wsSheets,
+      sheetstore package, etc. The `...` above is illustrative, not exhaustive.
+
+   4. SCOPE. This note lives only in web/index.html; the Go side (sheetstore,
+      main.go, sheets_http_test.go, ~16 "memo" strings in web_test.go) has no
+      pointer. A comment cannot be executed — write an actual checklist/plan.
+
+   See memory: notes-workspace-review-2-iphone.
+   ============================================================================ */
 /* ---------- Notes workspace (sheets): the synthesis surface ----------
    A singleton overlay (like search) so the sheet editor is mounted once and
    never lives inside a polled render region. Mobile-first: one zone at a time,
@@ -1406,7 +1454,7 @@ body.notes-open #notespane { transform: translateX(0); }
         <span class="dot" id="chatdot"></span>
         <h2 id="chattitle">scimux</h2>
         <button class="headtoggle" id="infobtn" aria-label="show details"></button>
-        <button class="headtoggle" id="notesbtn" aria-label="open notes pane">&#8249;</button>
+        <button class="headtoggle" id="notesbtn" aria-label="open bookmarks"></button>
       </div>
       <div class="mission" id="chatmission"></div>
       <div id="chatdetails" aria-hidden="true">
@@ -1459,12 +1507,12 @@ body.notes-open #notespane { transform: translateX(0); }
   <section id="notespane" class="panel">
     <div class="phead">
       <button class="backbtn" id="notesback">&#8249; Back</button>
-      <h2>Notes</h2>
+      <h2>Bookmarks</h2>
       <span class="spacer"></span>
-      <button class="headtoggle" id="sheetsbtn" aria-label="show memos" title="Memos"></button>
+      <button class="headtoggle" id="sheetsbtn" aria-label="show notes" title="Notes"></button>
     </div>
     <div class="tabs" id="notetabs"></div>
-    <div id="notelist"><div class="empty">No notes yet.</div></div>
+    <div id="notelist"><div class="empty">No bookmarks yet.</div></div>
     <!-- the composer is a singleton outside the polled #notelist region
          (invariant); reply mode shows as the "Reply…" placeholder and is
          canceled by leaving the empty composer (blur/Escape) -->
@@ -1475,8 +1523,8 @@ body.notes-open #notespane { transform: translateX(0); }
       </div>
       <div id="notebarrow">
         <div id="noteprompt" role="textbox" aria-multiline="true" contenteditable="true"
-          data-placeholder="Add a note…"></div>
-        <button id="notesend" aria-label="add note"></button>
+          data-placeholder="Add a bookmark…"></div>
+        <button id="notesend" aria-label="add bookmark"></button>
       </div>
     </div>
   </section>
@@ -1489,14 +1537,14 @@ body.notes-open #notespane { transform: translateX(0); }
 <!-- search overlay (G3): Spotlight-style modal floating over the blurred app.
      A real dialog — aria-modal, focus trapped inside, focus returned to the 🔍
      trigger on close. The grouped feed fills #searchfeed in G4. -->
-<div id="searchoverlay" hidden role="dialog" aria-modal="true" aria-label="Search chats and notes">
+<div id="searchoverlay" hidden role="dialog" aria-modal="true" aria-label="Search chats and bookmarks">
   <div id="searchscrim"></div>
   <div id="searchpanel">
     <div id="searchbar">
       <span class="searchicon" aria-hidden="true">&#128269;</span>
       <input id="searchinput" type="search" autocomplete="off" autocapitalize="off"
-             spellcheck="false" enterkeyhint="search" placeholder="Search chats and notes"
-             aria-label="Search chats and notes" aria-controls="searchfeed">
+             spellcheck="false" enterkeyhint="search" placeholder="Search chats and bookmarks"
+             aria-label="Search chats and bookmarks" aria-controls="searchfeed">
       <button id="searchclose" aria-label="close search">&#10005;</button>
     </div>
     <div id="searchfeed" role="region" aria-live="polite">
@@ -1537,46 +1585,46 @@ body.notes-open #notespane { transform: translateX(0); }
   <div id="wspanel">
     <div id="wstopbar">
       <button id="wsback" class="backbtn" hidden>&#8249;</button>
-      <h2 id="wstitle">Memos</h2>
+      <h2 id="wstitle">Notes</h2>
       <span class="spacer"></span>
       <button id="wsclose" aria-label="close notes workspace">&#10005;</button>
     </div>
-    <!-- placement banner: shown while a captured note is held for "Use in memo".
-         Pick a memo if none is open, then tap "Add note here" on a section. -->
+    <!-- placement banner: shown while a bookmark is held for "Use in note".
+         Pick a note if none is open, then tap "Add bookmark here" on a section. -->
     <div id="wsplacebar">
-      <span class="wsplacelabel">Placing note:</span>
+      <span class="wsplacelabel">Placing bookmark:</span>
       <span id="wsplacetext"></span>
       <span class="spacer" style="flex:1"></span>
       <button id="wsplacecancel">Cancel</button>
     </div>
     <div id="wszones">
-      <!-- left zone (iPad/desktop): the Notes inbox — the capture layer, reused
-           here (same tabs + auto-collapse as the compact pane) so material is
-           visible while composing. On iPhone the compact notes pane is the
-           inbox, so this zone is hidden. -->
-      <div id="wsinbox" role="region" aria-label="Notes">
-        <div id="wsinboxhead"><span>Notes</span></div>
+      <!-- left zone (iPad/desktop): the Bookmarks inbox — the capture layer,
+           reused here (same tabs + auto-collapse as the compact pane) so
+           material is visible while composing. On iPhone the compact bookmarks
+           pane is the inbox, so this zone is hidden. -->
+      <div id="wsinbox" role="region" aria-label="Bookmarks">
+        <div id="wsinboxhead"><span>Bookmarks</span></div>
         <div class="tabs" id="wsinboxtabs"></div>
-        <div id="wsinboxlist"><div class="empty">No notes yet.</div></div>
+        <div id="wsinboxlist"><div class="empty">No bookmarks yet.</div></div>
       </div>
-      <!-- middle zone: sparse memo-card navigator -->
-      <div id="wsnav" role="region" aria-label="Memos">
+      <!-- middle zone: sparse note-card navigator -->
+      <div id="wsnav" role="region" aria-label="Notes">
         <div id="wsnavhead">
-          <span>Memos</span>
+          <span>Notes</span>
           <span class="spacer" style="flex:1"></span>
-          <button id="wsnewsheet" aria-label="new memo" title="New memo"></button>
+          <button id="wsnewsheet" aria-label="new note" title="New note"></button>
         </div>
         <div id="wscards"><div class="empty">loading…</div></div>
       </div>
-      <!-- right zone: the active memo writing surface (built once, patched by
+      <!-- right zone: the active note writing surface (built once, patched by
            explicit user/load actions only — never by the poll) -->
-      <div id="wssheet" role="region" aria-label="Active memo">
+      <div id="wssheet" role="region" aria-label="Active note">
         <div id="wssheethead" hidden>
-          <input id="wssheettitle" aria-label="memo title" placeholder="Memo title">
-          <button id="wssheetmenu" aria-label="memo actions" title="Memo actions"></button>
+          <input id="wssheettitle" aria-label="note title" placeholder="Note title">
+          <button id="wssheetmenu" aria-label="note actions" title="Note actions"></button>
         </div>
         <div id="wssections"></div>
-        <div id="wssheetempty" class="empty">Pick a memo, or make one with +</div>
+        <div id="wssheetempty" class="empty">Pick a note, or make one with +</div>
       </div>
     </div>
   </div>
@@ -2212,6 +2260,21 @@ const ICON_CHEV_RIGHT = `<svg width="18" height="18" viewBox="0 0 24 24" fill="n
 /* overflow/kebab glyph: three vertical dots */
 const ICON_MENU_DOTS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
   <circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/>
+</svg>`;
+/* Bookmarks pane glyph: a book with a bookmark ribbon (fa-book-bookmark in
+   spirit). Drawn in the app's 24x24 stroke idiom to match the line icons it
+   sits beside, rather than a filled FA glyph. */
+const ICON_BOOKMARK = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M6 4a2 2 0 0 1 2-2h11v18H8a2 2 0 0 0-2 2z"/>
+  <path d="M6 20a2 2 0 0 0 2 2h11"/>
+  <path d="M11 2v8l2.5-1.8L16 10V2"/>
+</svg>`;
+/* Use-in-note glyph: paperclip (fa-paperclip in spirit) — "attach this bookmark
+   to a Note". Feather-style stroke path, matching the copy/trash siblings. */
+const ICON_CLIP = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
 </svg>`;
 function agentLogo(agent){
   switch ((agent || "").toLowerCase()){
@@ -4677,7 +4740,7 @@ function renderBubbleActions(){
     `<div class="bubwhen">${esc(fmtBubbleTime(turn.time))}</div>` +
     `<button data-bact="fork"><span>${ICON_BRANCH}</span>fork from here</button>` +
     `<button data-bact="desc"><span class="rot90l">${ICON_INTO}</span>use as description</button>` +
-    `<button data-bact="note"><span>${ICON_INTO}</span>take a note</button>` +
+    `<button data-bact="note"><span>${ICON_INTO}</span>bookmark</button>` +
     `<button data-bact="copy"><span>${ICON_COPY}</span>copy</button>`;
   turnEl.after(row);
 }
@@ -4978,13 +5041,13 @@ function renderNotesPane(){
       <button class="nmore" data-nmore hidden></button>
       ${openNoteT === nt.t ? `<div class="noteactions">
         ${nt.node || nt.uid ? `<button data-nact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
-        <button data-nact="sheet" aria-label="use in memo">${ICON_SHEETS}</button>
-        ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this note">${ICON_COMMENT}</button>` : ""}
-        <button data-nact="copy" aria-label="copy note">${ICON_COPY}</button>
-        <button data-nact="del" aria-label="delete note">${ICON_TRASH}</button>
+        ${nt.node && !nt.anchor ? `<button data-nact="comment" aria-label="comment on this bookmark">${ICON_COMMENT}</button>` : ""}
+        <button data-nact="copy" aria-label="copy bookmark">${ICON_COPY}</button>
+        <button data-nact="sheet" aria-label="use in note">${ICON_CLIP}</button>
+        <button data-nact="del" aria-label="delete bookmark">${ICON_TRASH}</button>
       </div>` : ""}
     </div>`;
-  }).join("") : `<div class="empty">No notes here yet — tap a bubble and “take a note”.</div>`;
+  }).join("") : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
   const sig = hashStr(tabsHtml + "|" + listHtml);
   if (sig === notesSig) return;
   notesSig = sig;
@@ -5015,18 +5078,20 @@ function renderNoteFlags(){
   notes.forEach(nt => byT[nt.t] = nt);
   const laneIds = new Set(notes.map(nt => noteLaneId(nt, byT)));
   const flags = laneList().filter(l => laneIds.has(l.id));
-  const html = flags.map(f => `<button data-flag="${esc(f.id)}" title="${esc(f.name)} notes"
-      aria-label="${esc(f.name)} notes" style="background:${esc(f.color || "")}"></button>`).join("")
-    + (laneIds.has("") ? `<button data-flag="GENERAL" title="General notes"
-      aria-label="General notes" style="background:var(--unlane)"></button>` : "");
+  const html = flags.map(f => `<button data-flag="${esc(f.id)}" title="${esc(f.name)} bookmarks"
+      aria-label="${esc(f.name)} bookmarks" style="background:${esc(f.color || "")}"></button>`).join("")
+    + (laneIds.has("") ? `<button data-flag="GENERAL" title="General bookmarks"
+      aria-label="General bookmarks" style="background:var(--unlane)"></button>` : "");
   if (html === flagsSig) return;
   flagsSig = html;
   $("#noteflags").innerHTML = html;
 }
 function renderNotesToggle(){
   const btn = $("#notesbtn");
-  btn.innerHTML = notesOpen ? "&#8250;" : "&#8249;";
-  btn.setAttribute("aria-label", notesOpen ? "close notes pane" : "open notes pane");
+  /* closed: the book-bookmark glyph invites opening Bookmarks; open: a › to
+     collapse back to the chat */
+  btn.innerHTML = notesOpen ? "&#8250;" : ICON_BOOKMARK;
+  btn.setAttribute("aria-label", notesOpen ? "close bookmarks" : "open bookmarks");
 }
 function setNotesOpen(open){
   notesOpen = open;
@@ -5767,6 +5832,7 @@ document.addEventListener("touchend", e => {
        opens from the chat view itself */
     if (level > 1) setLevel(level - 1); else setNotesOpen(true);
   }
+  else if (!isDesktop() && horiz && dx < 0 && notesOpen) openWorkspace();  /* Bookmarks → swipe R→L → Notes overview (accelerator; #sheetsbtn is the tappable primary) */
   else if (!isDesktop() && horiz && dx > 0 && notesOpen) setNotesOpen(false);
   else if (!touch.localCard && horiz && dx > 0 && touch.edge) setLevel(level + 1);
   else if (!touch.localCard && horiz && dx < 0 && level > 1) setLevel(level - 1);
@@ -5863,9 +5929,9 @@ function renderWsInbox(){
       <div class="wsiwhen">${esc(fmtWhen(nt.t))}${src}</div>
       <div class="wsibubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
       <button class="wsimore" data-wsimore hidden></button>
-      <button class="wsiuse" data-wsiuse>${ICON_SHEETS}<span>Use in memo</span></button>
+      <button class="wsiuse" data-wsiuse>${ICON_CLIP}<span>Use in note</span></button>
     </div>`;
-  }).join("") : `<div class="empty">No notes here yet — tap a bubble and “take a note”.</div>`;
+  }).join("") : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
   const sig = hashStr(tabsHtml + "|" + listHtml);
   if (sig === wsInboxSig) return;
   wsInboxSig = sig;
@@ -5944,7 +6010,7 @@ function renderWsCards(){
   if (wsCardDragging) return;   /* never rebuild the list mid-drag */
   const host = $("#wscards");
   if (!wsSheets.length){
-    host.innerHTML = `<div class="empty">No memos yet — make one with +</div>`;
+    host.innerHTML = `<div class="empty">No notes yet — make one with +</div>`;
     return;
   }
   host.innerHTML = wsSheets.map(c => {
@@ -5961,13 +6027,13 @@ async function wsCreate(){
     const sh = await api("/api/sheets", { method: "POST" });
     await wsLoadCards();
     wsSelect(sh.id);
-  } catch (e){ toast("Couldn't create memo"); }
+  } catch (e){ toast("Couldn't create note"); }
 }
 
 async function wsSelect(id){
   try {
     wsActive = await api("/api/sheets/" + encodeURIComponent(id));
-  } catch { toast("Couldn't open memo"); return; }
+  } catch { toast("Couldn't open note"); return; }
   wsActiveId = id;
   $("#sheetsworkspace").classList.add("sheet-open");
   $("#wsback").hidden = false;
@@ -5980,9 +6046,9 @@ async function wsSelect(id){
    editor is never torn out from under the caret. */
 function renderWsSheet(){
   const empty = $("#wssheetempty"), head = $("#wssheethead"), secWrap = $("#wssections");
-  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Memos"; return; }
+  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Notes"; return; }
   empty.hidden = true; head.hidden = false;
-  $("#wstitle").textContent = wsActive.title || "Memo";
+  $("#wstitle").textContent = wsActive.title || "Note";
   $("#wssheettitle").value = wsActive.title || "";
   const folds = wsFolds();
   const secs = (wsActive.sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
@@ -6005,7 +6071,7 @@ function sectionHTML(s, folded){
     <div class="wssechead">
       <button class="wssecfold" data-secfold aria-label="fold section">${folded ? ICON_CHEV_RIGHT : ICON_CHEV_DOWN}</button>
       <input class="wssectitle" data-sectitle value="${esc(s.title || "")}" aria-label="section title" placeholder="Section title">
-      <button class="wsaddhere" data-addhere aria-label="add the held note to this section">${ICON_PLUS}<span>Add note here</span></button>
+      <button class="wsaddhere" data-addhere aria-label="add the held bookmark to this section">${ICON_PLUS}<span>Add bookmark here</span></button>
       <button class="wssecmenu" data-secmenu aria-label="section actions">${ICON_MENU_DOTS}</button>
     </div>
     <div class="wssecbody">${sectionBodyInner(s)}</div>
@@ -6133,7 +6199,7 @@ $("#wssheettitle").addEventListener("focus", () => { wsTitleOrig = wsActive ? (w
 $("#wssheettitle").addEventListener("input", e => {
   if (!wsActive) return;
   wsActive.title = e.target.value;
-  $("#wstitle").textContent = e.target.value || "Memo";
+  $("#wstitle").textContent = e.target.value || "Note";
   wsPatch({ title: e.target.value }, "sheet-title");
 });
 $("#wssheettitle").addEventListener("keydown", e => {
@@ -6143,7 +6209,7 @@ $("#wssheettitle").addEventListener("keydown", e => {
     if (wsActive && wsTitleOrig != null){
       e.target.value = wsTitleOrig;
       wsActive.title = wsTitleOrig;
-      $("#wstitle").textContent = wsTitleOrig || "Memo";
+      $("#wstitle").textContent = wsTitleOrig || "Note";
       wsPatchNow({ title: wsTitleOrig }, "sheet-title");   /* persist the revert, ordered after any in-flight edit */
     }
     e.target.blur();
@@ -6387,7 +6453,7 @@ $("#wssheetmenu").addEventListener("click", e => {
     `<button data-si="rename">${ICON_PENCIL}<span>Rename</span></button>` +
     `<button data-si="add">${ICON_PLUS}<span>Add section</span></button>` +
     `<div class="sep"></div>` +
-    `<button data-si="del" class="danger">${ICON_TRASH}<span>Delete memo</span></button>`;
+    `<button data-si="del" class="danger">${ICON_TRASH}<span>Delete note</span></button>`;
   $("#wspanel").appendChild(m);
   const r = e.currentTarget.getBoundingClientRect(), pr = $("#wspanel").getBoundingClientRect();
   m.style.top = (r.bottom - pr.top + 4) + "px";
@@ -6526,7 +6592,7 @@ async function placeHeldNote(secId){
     doc = await api("/api/sheets/" + encodeURIComponent(wsActiveId) +
       "/sections/" + encodeURIComponent(secId) + "/references",
       { method: "POST", body: JSON.stringify(body) });
-  } catch { toast("Couldn't add to memo"); return; }
+  } catch { toast("Couldn't add to note"); return; }
   endPlacement();
   if (doc && doc.id === wsActiveId){
     wsActive = doc; syncCardMeta(doc);
@@ -6545,7 +6611,7 @@ async function placeHeldNote(secId){
     } else {
       renderWsSheet();
     }
-    toast("Added to " + (doc.title || "memo"));
+    toast("Added to " + (doc.title || "note"));
   }
 }
 
