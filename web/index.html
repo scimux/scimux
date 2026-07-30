@@ -1209,8 +1209,10 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   background: var(--bg); overflow: hidden;
   animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
 @media (prefers-reduced-motion: reduce) { #wsscrim, #wspanel { animation: none; } }
+/* 10px top/bottom matches #chathead so the header bar is the same height as the
+   chat area's station-title header. */
 #wstopbar { display: flex; align-items: center; gap: 10px; flex: none;
-  padding: 12px 14px; border-bottom: 1px solid var(--hairline); }
+  padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
 /* match the app pane headings (.phead h2) so "Notes" reads the same as
    "Activities" / "Bookmarks" across the app. */
 #wstopbar h2 { font-size: 22px; font-weight: 700; letter-spacing: .01em; }

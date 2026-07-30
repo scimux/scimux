@@ -1621,6 +1621,21 @@ func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
 	}
 }
 
+// Follow-up (2026-07-30 iPad review): the workspace header bar must be the same
+// vertical height as the chat area header. Both rows are driven by 34px controls,
+// so matching the top/bottom padding (10px, from #chathead) makes them identical.
+func TestWorkspaceHeaderHeightMatchesChatHead(t *testing.T) {
+	html := mustReadIndex(t)
+	chat := cssBlock(t, html, "#chathead {")
+	if !strings.Contains(chat, "padding: 10px 16px 10px") {
+		t.Fatalf("#chathead vertical padding baseline changed; got %q", chat)
+	}
+	ws := cssBlock(t, html, "#wstopbar {")
+	if !strings.Contains(ws, "padding: 10px ") {
+		t.Errorf("#wstopbar must use 10px top/bottom padding to match #chathead; got %q", ws)
+	}
+}
+
 // Item 4 (2026-07-30 iPad review): deleting the open note must clear the editor
 // header so no stale title lingers. #wsnotehead sets display:flex, which beats
 // the UA [hidden] rule, so an explicit hidden override is required for
