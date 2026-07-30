@@ -5820,6 +5820,9 @@ document.addEventListener("touchstart", e => {
 }, { passive: true });
 document.addEventListener("touchend", e => {
   if (!touch) return;
+  /* a full-screen overlay owns its own gestures; the app-nav swipe must never
+     move the activities/journeys/chat layers beneath it (iPhone swipe bug). */
+  if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }
   const t = e.changedTouches[0];
   const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
   const horiz = Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy);
@@ -5897,6 +5900,29 @@ function closeWorkspace(){
   if (back && document.contains(back) && back.focus) back.focus();
   else $("#notesbtn").focus();
 }
+/* iPhone swipe-back INSIDE the workspace (L→R), mirroring the iOS edge-back:
+   note editor → notes list → close. The document-level app-nav swipe is
+   suppressed while the workspace is open (see the touchend guard above), so the
+   two never fight and the layers underneath never move. Narrow only — the wide
+   layout shows every zone at once, so there is nothing to step back through.
+   A swipe that begins in a textarea/input is left alone so text selection and
+   caret drags aren't hijacked. */
+let wsTouch = null;
+$("#notesworkspace").addEventListener("touchstart", e => {
+  const t = e.touches[0];
+  wsTouch = { x: t.clientX, y: t.clientY, inEditable: !!e.target.closest("textarea, input") };
+}, { passive: true });
+$("#notesworkspace").addEventListener("touchend", e => {
+  const start = wsTouch; wsTouch = null;
+  if (!start || start.inEditable) return;
+  if (!window.matchMedia("(max-width: 767px)").matches) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - start.x, dy = t.clientY - start.y;
+  if (!(dx > 60 && dx > 2 * Math.abs(dy))) return;   /* L→R back gesture only */
+  if (wsPlacing){ endPlacement(); return; }           /* cancel placement first */
+  if ($("#notesworkspace").classList.contains("note-open")) $("#wsback").click();
+  else closeWorkspace();
+}, { passive: true });
 
 /* --- inbox zone (iPad/desktop): the capture layer, reused as the workspace's
    left column so material is visible while composing. It mirrors the compact

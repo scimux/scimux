@@ -1611,6 +1611,48 @@ func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
 	}
 }
 
+// Follow-up (2026-07-30 iPhone): swipes must stay on the top-most layer. The
+// document-level app-nav swipe (setLevel / setBookmarksOpen) must bail out while
+// a full-screen overlay owns the screen, or a swipe on the workspace moves the
+// activities/journeys/chat layers underneath while the workspace sits still.
+func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
+	html := mustReadIndex(t)
+	// the guard must be inside the document-level touchend handler, before nav.
+	td := strings.Index(html, `document.addEventListener("touchend"`)
+	if td < 0 {
+		t.Fatal("could not locate the document-level touchend handler")
+	}
+	body := html[td:]
+	guard := strings.Index(body, "wsOpen() || searchOpen() || archivedOpen()")
+	nav := strings.Index(body, "setLevel(")
+	if guard < 0 {
+		t.Error("document touchend must bail while a top overlay is open (wsOpen/searchOpen/archivedOpen)")
+	}
+	if guard < 0 || nav < 0 || guard > nav {
+		t.Error("the overlay guard must precede the app-nav (setLevel) so swipes never move layers underneath")
+	}
+}
+
+// Follow-up (2026-07-30 iPhone): the workspace owns its own swipe-back gesture
+// (L→R): note editor → notes list → close, mirroring the iOS edge-back. Without
+// it the swipe fell through to the app underneath.
+func TestWorkspaceHasSwipeBack(t *testing.T) {
+	html := mustReadIndex(t)
+	if !strings.Contains(html, `$("#notesworkspace").addEventListener("touchend"`) {
+		t.Error("the workspace must handle its own touchend swipe-back")
+	}
+	// the two back steps: to the notes list (via #wsback) and out of the workspace.
+	sw := strings.Index(html, `$("#notesworkspace").addEventListener("touchend"`)
+	seg := html[sw:]
+	end := strings.Index(seg, "}, { passive: true });")
+	if end > 0 {
+		seg = seg[:end]
+	}
+	if !strings.Contains(seg, `$("#wsback").click()`) || !strings.Contains(seg, "closeWorkspace()") {
+		t.Error("workspace swipe-back must step note→list (#wsback) then list→closed (closeWorkspace)")
+	}
+}
+
 // Follow-up (2026-07-30 iPad review): the workspace title ("Notes") must render
 // at the same size/weight as the app pane headings ("Activities", "Bookmarks").
 func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
