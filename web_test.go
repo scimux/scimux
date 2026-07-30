@@ -72,6 +72,12 @@ assert.strictEqual(md("line one\nline two"), "<p>line one<br>line two</p>");
 assert.strictEqual(md("a <b> tag\nnext"), "<p>a &lt;b&gt; tag<br>next</p>");
 assert.strictEqual(md("solo"), "<p>solo</p>");
 assert.strictEqual(md("p1 l1\np1 l2\n\np2"), "<p>p1 l1<br>p1 l2</p><p>p2</p>");
+// emphasis: single-asterisk italic renders (was left literal), bold still works,
+// and both nest cleanly. The flanking guard keeps arithmetic/globs literal.
+assert.strictEqual(mdInline("*test*"), "<em>test</em>");
+assert.strictEqual(mdInline("**test**"), "<strong>test</strong>");
+assert.strictEqual(mdInline("a *b* and **c**"), "a <em>b</em> and <strong>c</strong>");
+assert.strictEqual(mdInline("2 * 3 * 4"), "2 * 3 * 4");
 `
 	f := filepath.Join(t.TempDir(), "md.js")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
@@ -1635,6 +1641,29 @@ func TestWorkspaceHeaderHeightMatchesChatHead(t *testing.T) {
 	ws := cssBlock(t, html, "#wstopbar {")
 	if !strings.Contains(ws, "padding: 10px ") {
 		t.Errorf("#wstopbar must use 10px top/bottom padding to match #chathead; got %q", ws)
+	}
+}
+
+// Follow-up (2026-07-30): the section body editor auto-grows to fit its content
+// rather than relying on a manual drag handle. Apple HIG: iOS/iPadOS text views
+// size to their content (Notes/Messages); CSS `resize` is ignored on iOS, so a
+// grabber is not a real control there. It caps at a max-height, then scrolls.
+func TestWorkspaceSectionEditorAutogrows(t *testing.T) {
+	html := mustReadIndex(t)
+	css := cssBlock(t, html, ".wssecedit {")
+	if strings.Contains(css, "resize: vertical") {
+		t.Error(".wssecedit must not depend on the manual resize handle (ignored on iOS) — auto-grow instead")
+	}
+	if !strings.Contains(css, "max-height") {
+		t.Error(".wssecedit must cap growth with a max-height and scroll past it")
+	}
+	start := strings.Index(html, "function startBodyEdit(")
+	end := strings.Index(html, "function openSectionMenu(")
+	if start < 0 || end < 0 || end < start {
+		t.Fatal("could not bound startBodyEdit")
+	}
+	if !strings.Contains(html[start:end], "scrollHeight") {
+		t.Error("startBodyEdit must auto-grow the textarea from its scrollHeight")
 	}
 }
 

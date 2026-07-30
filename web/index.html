@@ -1290,9 +1290,13 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 .wssecrender { font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; cursor: text; }
 .wssecrender:empty::before { content: "Empty — tap to write."; color: var(--dim); }
 .wssecrender p:first-child { margin-top: 0; }
-.wssecedit { display: block; width: 100%; min-height: 96px; font: inherit; font-size: 14px;
+/* auto-grows to fit content (HIG: iOS/iPadOS text views size to their content;
+   CSS `resize` is a no-op on iOS, so no manual grabber). Caps at 60vh, then
+   scrolls internally. Height is driven inline by the autogrow in startBodyEdit. */
+.wssecedit { display: block; width: 100%; min-height: 96px; max-height: 60vh; overflow-y: auto;
+  font: inherit; font-size: 14px;
   line-height: 1.55; color: var(--ink); background: var(--code-bg); border: 1px solid var(--hairline);
-  border-radius: 10px; padding: 10px 12px; outline: none; resize: vertical; }
+  border-radius: 10px; padding: 10px 12px; outline: none; resize: none; }
 .wssecedit:focus { border-color: var(--work); }
 /* section overflow menu (add-below / edit / move / delete) */
 .wsmenu { position: absolute; z-index: 3; min-width: 176px; background: var(--surface);
@@ -2312,7 +2316,11 @@ function esc(s){ const d = document.createElement("div"); d.textContent = s ?? "
 function mdInline(s){
   return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>")
           .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`)
-          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+          /* single-asterisk italic — run after bold so `**` isn't split. The
+             non-space flanking on both ends keeps arithmetic ("2 * 3 * 4") and
+             glob patterns literal, matching Markdown's emphasis rules. */
+          .replace(/\*([^\s*][^*]*?[^\s*]|[^\s*])\*/g, "<em>$1</em>");
 }
 function md(src){
   /* the tmux paste path delivers a multi-line prompt's newlines as \r
@@ -6343,9 +6351,15 @@ function startBodyEdit(sec){
   const ta = document.createElement("textarea");
   ta.className = "wssecedit"; ta.value = orig; ta.setAttribute("aria-label", "section body (Markdown)");
   bodyWrap.innerHTML = ""; bodyWrap.appendChild(ta);
+  /* auto-grow to fit content (HIG): reset to auto, then take the content height.
+     offsetHeight-clientHeight adds the border back (box-sizing:border-box height
+     includes it, scrollHeight doesn't); CSS max-height caps it and scrolls. */
+  const grow = () => { ta.style.height = "auto";
+    ta.style.height = (ta.scrollHeight + ta.offsetHeight - ta.clientHeight) + "px"; };
   ta.focus();
+  grow();   /* multi-line existing bodies open at full height, not clipped to min */
   let cancelled = false;
-  ta.addEventListener("input", () => { s.body = ta.value; wsPatch({ section: { id: secId, body: ta.value } }, "secbody-" + secId); });
+  ta.addEventListener("input", () => { grow(); s.body = ta.value; wsPatch({ section: { id: secId, body: ta.value } }, "secbody-" + secId); });
   ta.addEventListener("keydown", ev => {
     if (ev.key !== "Escape") return;   /* Enter stays a newline in a body */
     ev.preventDefault(); ev.stopPropagation();
