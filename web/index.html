@@ -30,6 +30,12 @@
   --journey-alt-bg: rgba(60,60,67,.03);
   --sbh:       44px;
   --radius:    12px;
+  /* peek: the strip of the neighbour pane a top pane leaves exposed, so the
+     user sees where "back" is (pane-gap-design.md). A deliberate token, not the
+     leftover of #cards' old min(86%,380px) sidebar width. 44px floor keeps it a
+     tappable back control on the narrowest phone; 60px cap stops it wasting
+     width on iPad/Pro Max. Baked into each pane's width so gaps never pile up. */
+  --peek:      clamp(44px, 12%, 60px);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -247,7 +253,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #cards {
   position: fixed; z-index: 30; height: auto;
   top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; left: 0;
-  width: min(86%, 380px);
+  width: calc(100% - var(--peek));   /* left-anchored: peek falls on the right */
   background: var(--bg);
   transform: translateX(-103%);
   transition: transform .34s cubic-bezier(.32,.72,.34,1);
@@ -257,10 +263,11 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 #map {
   position: fixed; z-index: 31; height: auto;
   top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; left: 0;
-  width: 100%;
+  width: calc(100% - var(--peek));   /* left-anchored: peek falls on the right */
   background: var(--bg);
   transform: translateX(-103%);
   transition: transform .34s cubic-bezier(.32,.72,.34,1);
+  box-shadow: 8px 0 32px rgba(0,0,0,.10);
 }
 #map.open { transform: translateX(0); }
 /* full-screen toggle: desktop/iPad only (the phone map is already full-width,
@@ -283,6 +290,16 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   opacity: 0; pointer-events: none; transition: opacity .3s;
 }
 #scrim.on { opacity: 1; pointer-events: auto; }
+/* the Bookmarks pane's left peek, as a tap-catcher: one peek wide, under the
+   pane (z40) but over the chat it exposes, so a tap there steps back to chat
+   (P3, pane-gap-design.md). Transparent — the peek shows the live chat, not a
+   dim; only the left panes' modal scrim dims. Phone/tablet only. */
+#bookmarkpeek {
+  position: fixed; z-index: 39; left: 0; width: var(--peek);
+  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0;
+  display: none;
+}
+body.bookmarks-open #bookmarkpeek { display: block; }
 
 .phead { display: flex; align-items: center; gap: 8px; padding: 10px 16px 8px; }
 .phead h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .01em; }
@@ -1043,13 +1060,19 @@ body.map-full #maptoolbar.on { display: flex; }
    desktop/iPad docks it as a trailing column (see the min-width block) */
 #bookmarkspane { position: fixed; z-index: 40; display: flex;
   top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; right: 0;
-  width: 100%; background: var(--bg);
+  width: calc(100% - var(--peek)); background: var(--bg);  /* right-anchored: peek on the left */
   /* top+bottom define the height; .panel's height:100% would overflow the
      viewport by the status-bar offset and hide the composer */
   height: auto;
   transform: translateX(103%); transition: transform .25s;
   box-shadow: -12px 0 30px rgba(0,0,0,.25); }
 body.bookmarks-open #bookmarkspane { transform: translateX(0); }
+/* the spatial-line slides are motion; honour Reduce Motion (pane-gap-design.md
+   P5). Placed after all three pane definitions so the combined selector never
+   shadows a single-pane rule lookup. */
+@media (prefers-reduced-motion: reduce) {
+  #cards, #map, #bookmarkspane { transition: none; }
+}
 #bookmarksbtn { font-size: 22px; color: var(--work); }
 /* the flags stack on the right edge, thumb-sized (44pt), lane-colored;
    hidden while the pane is open (the notebook is already unfolded) */
@@ -1153,6 +1176,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   body.bookmarks-open #bookmarkspane { display: flex; }
   body:not(.bookmarks-open) #bookmarkflags { display: flex; }
   #scrim { display: none; }
+  #bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }
   .backbtn { display: none; }
   .sheet { left: 50%; right: auto; width: 480px; transform: translate(-50%, 103%); }
   .sheet.open { transform: translate(-50%, 0); }
@@ -1421,11 +1445,13 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   <!-- level 3: metro map -->
   <section id="map" class="panel">
     <div class="phead">
-      <button class="backbtn" id="mapclose">&#8249; Activities</button>
       <h2>Journeys</h2>
       <span class="spacer"></span>
       <button id="farebtn" aria-label="toggle fare details">Fare</button>
       <button id="mapfullbtn" aria-label="full-screen map">&#10530;</button>
+      <!-- back points RIGHT at its parent Activities (R→L returns there); the
+           mirror of #chatback's "‹ Activities", which really is to the left -->
+      <button class="backbtn" id="mapclose">Activities &#8250;</button>
     </div>
     <div class="tabs" id="maptabs"></div>
     <div class="lanechips" id="lanechips"></div>
@@ -1536,6 +1562,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 </div>
 
 <div id="scrim"></div>
+<div id="bookmarkpeek" aria-hidden="true"></div>
 <div id="backdrop"></div>
 
 <!-- search overlay (G3): Spotlight-style modal floating over the blurred app.
@@ -5807,22 +5834,31 @@ function setLevel(n){
   document.body.classList.toggle("cards-open", level >= 2);
   $("#cards").classList.toggle("open", level >= 2);
   $("#map").classList.toggle("open", level >= 3);
-  $("#scrim").classList.toggle("on", level === 2);
+  $("#scrim").classList.toggle("on", level >= 2);
   if (level === 3){ mapSig = ""; renderMap(); $("#mapscroll").scrollTop = 0; }
 }
 $("#chatback").addEventListener("click", () => setLevel(2));
-$("#scrim").addEventListener("click", () => setLevel(1));
+/* the scrim is the left panes' peek made tappable: a tap steps ONE pane back
+   (level 3→2, 2→1), mirroring the swipe — never a jump straight to chat. */
+$("#scrim").addEventListener("click", () => setLevel(level - 1));
+/* the Bookmarks left peek, made tappable the same way (P3) */
+$("#bookmarkpeek").addEventListener("click", () => setBookmarksOpen(false));
 let touch = null;
 document.addEventListener("touchstart", e => {
   const t = e.touches[0];
   touch = { x: t.clientX, y: t.clientY, edge: t.clientX < 28,
-    edgeR: t.clientX > innerWidth - 28, localCard: !!e.target.closest("#cardlist .card") };
+    edgeR: t.clientX > innerWidth - 28, localCard: !!e.target.closest("#cardlist .card"),
+    /* snapshot overlay ownership at START: an overlay's own touchend listener
+       bubbles first and can close itself (wsOpen()→false) before this handler
+       runs, so a live re-check would let the SAME L→R swipe be re-processed as
+       "Bookmarks → back → Chat" — the Notes→back overshoot. (pane-gap-design.md P2) */
+    overlay: wsOpen() || searchOpen() || archivedOpen() };
 }, { passive: true });
 document.addEventListener("touchend", e => {
   if (!touch) return;
   /* a full-screen overlay owns its own gestures; the app-nav swipe must never
      move the activities/journeys/chat layers beneath it (iPhone swipe bug). */
-  if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }
+  if (touch.overlay){ touch = null; return; }
   const t = e.changedTouches[0];
   const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
   const horiz = Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy);

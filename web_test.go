@@ -1623,10 +1623,13 @@ func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
 		t.Fatal("could not locate the document-level touchend handler")
 	}
 	body := html[td:]
-	guard := strings.Index(body, "wsOpen() || searchOpen() || archivedOpen()")
+	// The guard now bails on the touchstart snapshot (touch.overlay), not a live
+	// wsOpen() — see TestAppNavSwipeSnapshotsOverlayAtStart for why the live check
+	// was racy. The invariant is unchanged: bail before any app-nav runs.
+	guard := strings.Index(body, "if (touch.overlay){ touch = null; return; }")
 	nav := strings.Index(body, "setLevel(")
 	if guard < 0 {
-		t.Error("document touchend must bail while a top overlay is open (wsOpen/searchOpen/archivedOpen)")
+		t.Error("document touchend must bail on the overlay snapshot (touch.overlay) while a top overlay owns the gesture")
 	}
 	if guard < 0 || nav < 0 || guard > nav {
 		t.Error("the overlay guard must precede the app-nav (setLevel) so swipes never move layers underneath")
@@ -2240,4 +2243,174 @@ func cssBlock(t *testing.T, html, marker string) string {
 		t.Fatalf("unterminated CSS rule %q", marker)
 	}
 	return html[i : i+end]
+}
+
+// --- Pane gaps (pane-gap-design.md) ------------------------------------------
+
+// P1: the peek is a deliberate token, not the leftover 14% of #cards' old
+// min(86%,380px) sidebar width. It must clear the 44pt tap target on the
+// narrowest phones (10% would not) yet stay capped so it never wastes width on
+// large screens. Each phone pane is full-width-minus-peek, anchored to its home
+// edge: left-side panes (Activities, Journeys) gap right; right-side panes
+// (Bookmarks) gap left. Gaps must not pile up — every pane keeps its own
+// absolute width, so the peek is uniform at any depth.
+func TestPanePeekGapToken(t *testing.T) {
+	html := mustReadIndex(t)
+
+	if !strings.Contains(html, "--peek:") {
+		t.Fatal("no --peek token defined; the peek width must be a deliberate token")
+	}
+	root := cssBlock(t, html, ":root {")
+	// tolerate the block's column alignment (--peek:<pad>clamp(...)).
+	if !strings.Contains(root, "--peek:") || !strings.Contains(root, "clamp(44px, 12%, 60px);") {
+		t.Error("--peek must be clamp(44px, 12%, 60px): 44px floor keeps it tappable on the narrowest phone, 60px cap stops it wasting width on iPad/Pro Max")
+	}
+
+	// Activities: full-width-minus-peek, still left-anchored (gap on the right).
+	cards := cssBlock(t, html, "#cards {")
+	if !strings.Contains(cards, "width: calc(100% - var(--peek));") {
+		t.Error("#cards should be width: calc(100% - var(--peek))")
+	}
+	if strings.Contains(cards, "min(86%, 380px)") {
+		t.Error("#cards still carries the leftover min(86%,380px) sidebar width")
+	}
+	if !strings.Contains(cards, "left: 0;") {
+		t.Error("#cards must stay left-anchored so its peek falls on the right")
+	}
+
+	// Journeys: was full-width (no gap); now gets the same peek, left-anchored.
+	mp := cssBlock(t, html, "#map {")
+	if !strings.Contains(mp, "width: calc(100% - var(--peek));") {
+		t.Error("#map should be width: calc(100% - var(--peek)) (it was width:100% — no gap)")
+	}
+	if !strings.Contains(mp, "left: 0;") {
+		t.Error("#map must stay left-anchored so its peek falls on the right")
+	}
+
+	// Bookmarks: was full-width (no gap); now peek on the LEFT, right-anchored.
+	bm := cssBlock(t, html, "#bookmarkspane {")
+	if !strings.Contains(bm, "width: calc(100% - var(--peek));") {
+		t.Error("#bookmarkspane should be width: calc(100% - var(--peek)) (it was width:100% — no gap)")
+	}
+	if !strings.Contains(bm, "right: 0;") {
+		t.Error("#bookmarkspane must stay right-anchored so its peek falls on the left")
+	}
+}
+
+// P2: the right side is a spatial line — Chat · Bookmarks · Notes. Leaving Notes
+// (L→R) must land on Bookmarks, not overshoot to Chat. The overshoot was a
+// double-consumed gesture: the #notesworkspace touchend listener closes the
+// workspace first (bubbling), flipping wsOpen() to false, so the document
+// touchend guard — which re-checked wsOpen() live — no longer bailed and then
+// processed the SAME L→R swipe as "Bookmarks → back → Chat". Fix: snapshot the
+// overlay-open state at touchstart, and bail on that snapshot, so a gesture that
+// began over an overlay can never be re-processed by the app-nav handler after
+// the overlay's own handler consumes it.
+func TestAppNavSwipeSnapshotsOverlayAtStart(t *testing.T) {
+	html := mustReadIndex(t)
+
+	// touchstart must capture whether an overlay owned the gesture at its START.
+	if !strings.Contains(html, "overlay: wsOpen() || searchOpen() || archivedOpen()") {
+		t.Error("touchstart must snapshot overlay-open state (overlay: wsOpen() || searchOpen() || archivedOpen())")
+	}
+	// touchend must bail on the snapshot, never on a fresh live wsOpen() that a
+	// bubbling overlay handler may already have flipped mid-gesture.
+	if !strings.Contains(html, "if (touch.overlay){ touch = null; return; }") {
+		t.Error("touchend must bail on the touchstart overlay snapshot (touch.overlay)")
+	}
+	if strings.Contains(html, "if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }") {
+		t.Error("touchend still re-checks live wsOpen() — racy: the overlay handler flips it before this bubbles, causing the Notes→L→R overshoot to Chat")
+	}
+}
+
+// P3: the exposed peek strip is a control — tapping it steps one pane back,
+// mirroring the swipe (HIG: an exposed parent is tappable). Left panes reuse the
+// scrim (now shown for any open left pane, stepping ONE level back, not jumping
+// to level 1); the right pane (Bookmarks) gets a left-strip tap-catcher.
+func TestPeekTapStepsBack(t *testing.T) {
+	html := mustReadIndex(t)
+
+	// Left: scrim covers the peek for both open levels and steps exactly one back.
+	if !strings.Contains(html, `$("#scrim").classList.toggle("on", level >= 2);`) {
+		t.Error("scrim must show for any open left pane (level >= 2), so the peek is tappable at level 3 too")
+	}
+	if !strings.Contains(html, `$("#scrim").addEventListener("click", () => setLevel(level - 1));`) {
+		t.Error("scrim tap must step ONE level back (setLevel(level - 1)), mirroring the swipe — not jump to level 1")
+	}
+	if strings.Contains(html, `$("#scrim").addEventListener("click", () => setLevel(1));`) {
+		t.Error("scrim tap still jumps straight to level 1 instead of stepping one back")
+	}
+
+	// Right: a dedicated catcher over the Bookmarks left peek, closing bookmarks.
+	if !strings.Contains(html, `id="bookmarkpeek"`) {
+		t.Error("a #bookmarkpeek tap-catcher must exist over the Bookmarks left peek strip")
+	}
+	if !strings.Contains(html, `$("#bookmarkpeek").addEventListener("click", () => setBookmarksOpen(false));`) {
+		t.Error("tapping the bookmarks peek must close the pane (step back to chat)")
+	}
+	// It occupies only the peek strip, appears with the pane, and never on desktop.
+	peek := cssBlock(t, html, "#bookmarkpeek {")
+	if !strings.Contains(peek, "width: var(--peek);") || !strings.Contains(peek, "left: 0;") {
+		t.Error("#bookmarkpeek must be a left-anchored strip exactly one peek wide")
+	}
+	if !strings.Contains(html, "body.bookmarks-open #bookmarkpeek { display: block; }") {
+		t.Error("#bookmarkpeek must appear only while the bookmarks pane is open")
+	}
+}
+
+// P4: the back-label must point at its destination (HIG reversibility). Journeys
+// is the leftmost pane; its parent Activities sits to the RIGHT and the return
+// gesture is R→L. So the label reads "Activities ›" right-aligned, not the old
+// left-pointing "‹ Activities". The Journeys title moves to the left edge.
+// (#chatback's "‹ Activities" stays: Activities really is left of chat.)
+func TestJourneyBackLabelPointsRight(t *testing.T) {
+	html := mustReadIndex(t)
+
+	mapStart := strings.Index(html, `<section id="map"`)
+	if mapStart < 0 {
+		t.Fatal("could not locate the #map (Journeys) section")
+	}
+	phead := html[mapStart : mapStart+strings.Index(html[mapStart:], "</div>")]
+
+	if !strings.Contains(phead, `id="mapclose">Activities &#8250;`) {
+		t.Error(`Journeys back-label must read "Activities ›" (right chevron &#8250;) to point at its right-side parent`)
+	}
+	if strings.Contains(phead, `&#8249; Activities</button>`) {
+		t.Error(`Journeys back-label still reads "‹ Activities" — the left chevron contradicts the R→L return gesture`)
+	}
+	// Title left, back control right: Journeys h2 precedes the spacer, which
+	// precedes the (now right-aligned) back button.
+	title := strings.Index(phead, `<h2>Journeys</h2>`)
+	spacer := strings.Index(phead, `class="spacer"`)
+	back := strings.Index(phead, `id="mapclose"`)
+	if !(title >= 0 && spacer >= 0 && back >= 0 && title < spacer && spacer < back) {
+		t.Errorf("Journeys header order must be title → spacer → back (got title=%d spacer=%d back=%d)", title, spacer, back)
+	}
+}
+
+// P5: honour prefers-reduced-motion on the pane slides (the three sliding panes
+// animate transform; nothing zeroed them), and guard that the selected-note
+// detail stays a full-cover modal — the one leaf that takes NO peek.
+func TestReducedMotionAndModalNoPeek(t *testing.T) {
+	html := mustReadIndex(t)
+
+	// The sliding panes must not animate under reduced motion.
+	if !strings.Contains(html, "#cards, #map, #bookmarkspane { transition: none; }") {
+		t.Error("prefers-reduced-motion must zero the #cards/#map/#bookmarkspane slide transitions")
+	}
+	rm := strings.LastIndex(html, "@media (prefers-reduced-motion: reduce)")
+	// (presence check above is enough; ensure at least one such block exists)
+	if rm < 0 {
+		t.Error("no prefers-reduced-motion block found")
+	}
+
+	// The selected-note detail host full-covers and never carries a peek — it is a
+	// modal push, not a member of the spatial line.
+	ws := cssBlock(t, html, "#notesworkspace {")
+	if !strings.Contains(ws, "left: 0; right: 0;") {
+		t.Error("#notesworkspace (selected-note modal) must full-cover (left:0; right:0)")
+	}
+	if strings.Contains(ws, "var(--peek)") {
+		t.Error("the selected-note modal must take NO peek — it is a full-cover leaf, not a line pane")
+	}
 }
