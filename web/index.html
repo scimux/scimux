@@ -1211,7 +1211,9 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 @media (prefers-reduced-motion: reduce) { #wsscrim, #wspanel { animation: none; } }
 #wstopbar { display: flex; align-items: center; gap: 10px; flex: none;
   padding: 12px 14px; border-bottom: 1px solid var(--hairline); }
-#wstopbar h2 { font-size: 17px; font-weight: 650; }
+/* match the app pane headings (.phead h2) so "Notes" reads the same as
+   "Activities" / "Bookmarks" across the app. */
+#wstopbar h2 { font-size: 22px; font-weight: 700; letter-spacing: .01em; }
 #wstopbar .spacer { flex: 1; }
 #wsback, #wsclose { flex: none; width: 34px; height: 34px; border-radius: 8px;
   color: var(--dim); display: flex; align-items: center; justify-content: center; font-size: 17px; }

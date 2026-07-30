@@ -1605,6 +1605,22 @@ func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
 	}
 }
 
+// Follow-up (2026-07-30 iPad review): the workspace title ("Notes") must render
+// at the same size/weight as the app pane headings ("Activities", "Bookmarks").
+func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
+	html := mustReadIndex(t)
+	pane := cssBlock(t, html, ".phead h2 {")
+	ws := cssBlock(t, html, "#wstopbar h2 {")
+	for _, want := range []string{"font-size: 22px", "font-weight: 700"} {
+		if !strings.Contains(pane, want) {
+			t.Fatalf(".phead h2 baseline changed, expected %q; got %q", want, pane)
+		}
+		if !strings.Contains(ws, want) {
+			t.Errorf("#wstopbar h2 must match the pane headings (%q); got %q", want, ws)
+		}
+	}
+}
+
 // Item 4 (2026-07-30 iPad review): deleting the open note must clear the editor
 // header so no stale title lingers. #wsnotehead sets display:flex, which beats
 // the UA [hidden] rule, so an explicit hidden override is required for
