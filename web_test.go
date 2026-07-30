@@ -1469,7 +1469,7 @@ assert.strictEqual(bubbleTitle("assistant", null), "agent");
 	}
 }
 
-// --- Stage 2: sticky-note inbox → "Use in sheet" → embedded references ---
+// --- Stage 2: bookmark inbox → "Use in note" → embedded references ---
 
 // provLabel builds an embedded reference's provenance line from its snapshot
 // parts, dropping the empty ones so a reference with only a timestamp still
@@ -1527,8 +1527,8 @@ func TestWebSectionRendersReferences(t *testing.T) {
 	}
 }
 
-// "Use in sheet" is the capture→synthesis bridge. It must be an action on the
-// compact notes pane (the inbox on every device) and route through a shared
+// "Use in note" is the capture→synthesis bridge. It must be an action on the
+// compact Bookmark pane (the inbox on every device) and route through a shared
 // placement path that posts the reference to the section endpoint.
 func TestWebUseInNoteWiring(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
@@ -1537,14 +1537,14 @@ func TestWebUseInNoteWiring(t *testing.T) {
 	}
 	html := string(b)
 	for _, want := range []string{
-		`data-bmact="note"`,        // Use-in-sheet action in the notes-pane action row
+		`data-bmact="note"`,        // Use-in-note action in the Bookmark-pane action row
 		"function startPlacement(", // enters placement mode holding the note
 		`classList.add("placing")`, // placement mode drives the add-here affordances
 		`data-addhere`,             // per-section "add capture here" target
 		`/references`,              // posts to the section references endpoint
 	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("use-in-sheet wiring missing %q", want)
+			t.Errorf("use-in-note wiring missing %q", want)
 		}
 	}
 }
@@ -1567,7 +1567,7 @@ func TestWebSharedJumpResolver(t *testing.T) {
 	}
 }
 
-// --- Notes/Memos workspace feedback (phase 1d review) ---
+// --- Notes workspace feedback (phase 1d review) ---
 // The reviewer inspected the workspace on iPad and filed 20 issues. These
 // tests lock the fixes so they cannot silently regress.
 
@@ -1600,7 +1600,7 @@ func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 			t.Errorf("workspace inbox tabs/clamp wiring missing %q", want)
 		}
 	}
-	// The show-more toggle branch must precede the "Use in memo" branch so a tap
+	// The show-more toggle branch must precede the "Use in note" branch so a tap
 	// on Show more never enters placement mode.
 	dele := strings.Index(html, `$("#wsinboxlist").addEventListener("click"`)
 	if dele < 0 {
@@ -1731,7 +1731,7 @@ func TestWorkspaceInboxNoHorizontalScroll(t *testing.T) {
 	}
 }
 
-// Item 6/9: memo cards reorder by drag-and-drop (the proven pinned-card gesture),
+// Item 6/9: Note cards reorder by drag-and-drop (the proven pinned-card gesture),
 // not by no-op up/down arrows; the redundant reorder-mode toggle is gone.
 func TestWorkspaceNoteCardsDragReorder(t *testing.T) {
 	html := mustReadIndex(t)
@@ -1745,7 +1745,7 @@ func TestWorkspaceNoteCardsDragReorder(t *testing.T) {
 		}
 	}
 	if !strings.Contains(html, `$("#wscards").addEventListener("dragstart"`) {
-		t.Error("memo cards must be reorderable by drag (dragstart handler on #wscards)")
+		t.Error("Note cards must be reorderable by drag (dragstart handler on #wscards)")
 	}
 	// The card template must be draggable.
 	tmpl := html[strings.Index(html, "function renderWsCards("):]
@@ -1838,7 +1838,7 @@ func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
 	}
 }
 
-// Item 16: the memo's overflow (three-dots) menu must actually open — the
+// Item 16: the note's overflow (three-dots) menu must actually open — the
 // document-level close handler was firing on the same click. The handler stops
 // propagation, and the menu offers rename + delete.
 func TestWorkspaceNoteMenuOpens(t *testing.T) {
@@ -1849,7 +1849,7 @@ func TestWorkspaceNoteMenuOpens(t *testing.T) {
 		t.Error("#wsnotemenu handler must stopPropagation so the document close handler doesn't kill the menu")
 	}
 	if !strings.Contains(h, "data-si=\"del\"") {
-		t.Error("memo menu must offer delete")
+		t.Error("Note menu must offer delete")
 	}
 }
 
@@ -1858,7 +1858,7 @@ func TestWorkspaceNoteMenuOpens(t *testing.T) {
 // Escape from bubbling to the workspace-close handler.
 func TestWorkspaceEscCancelsEdit(t *testing.T) {
 	html := mustReadIndex(t)
-	// sheet-title keydown handles Enter (blur) and Escape (revert + stopPropagation)
+	// note-title keydown handles Enter (blur) and Escape (revert + stopPropagation)
 	kd := html[strings.Index(html, `$("#wsnotetitle").addEventListener("keydown"`):]
 	kd = kd[:strings.Index(kd, "\n});")]
 	if !strings.Contains(kd, `"Enter"`) || !strings.Contains(kd, `"Escape"`) {
@@ -1957,10 +1957,10 @@ setTimeout(() => {
 	}
 }
 
-// Review finding 3: an anchored note *comment* embedded into a memo must inherit
-// its parent note's lane in the reference snapshot, exactly like the Notes pane
-// does. The snapshot path fed bookmarkLaneId an empty byT map, so an anchored
-// comment lost its lane color and the memo card missed that lane dot.
+// Review finding 3: an anchored bookmark *comment* embedded into a note must
+// inherit its parent bookmark's lane in the reference snapshot, exactly like the
+// Bookmarks pane does. The snapshot path fed bookmarkLaneId an empty byT map, so
+// an anchored comment lost its lane color and the note card missed that lane dot.
 func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -2005,7 +2005,7 @@ func sliceBetween(t *testing.T, html, start, end string) string {
 	return rest[:j]
 }
 
-// iPhone feedback item 3: when a memo has no sections, the "No sections yet."
+// iPhone feedback item 3: when a note has no sections, the "No sections yet."
 // label duplicates the button beneath it. Drop the label and present just the
 // Add section button, centered vertically and horizontally in the pane.
 func TestWorkspaceEmptySectionStateIsCenteredButtonOnly(t *testing.T) {

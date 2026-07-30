@@ -126,7 +126,7 @@ codex) there is no pane; peek returns a tail of the raw event log.
 ### `GET /api/search?q=<query>`
 
 Full-text search across every conversation in the session-log store — live
-nodes, deleted (archived) logs, and sticky notes — grouped by chat. Returns:
+nodes, deleted (archived) logs, and bookmarks — grouped by chat. Returns:
 
 ```json
 {
@@ -147,15 +147,15 @@ nodes, deleted (archived) logs, and sticky notes — grouped by chat. Returns:
 }
 ```
 
-`kind` is `live | archived | notes`. A `live` group carries the node `id`
+`kind` is `live | archived | bookmarks`. A `live` group carries the node `id`
 (open the normal chat, or fork it); an `archived` group carries only `uid` —
 the deleted log's on-disk identity (a meta UID, or `legacy:<path>` for a
 header-less log) — read via `GET /api/archived`. `forkable` reports whether the
 chat can seed a fork (a live node, or an archived one whose recorded dir still
-exists). Each hit's `role` is `user | assistant | asset | note`; log hits carry
-the stable `(segment, record)` ordinal pair that anchors an archived read, note
-hits carry `note_id` and the referenced `turn_time`; `before`/`match`/`after`
-are the excerpt around the match.
+exists). Each hit's `role` is `user | assistant | asset | bookmark`; log hits
+carry the stable `(segment, record)` ordinal pair that anchors an archived read,
+bookmark hits carry `bookmark_id` and the referenced `turn_time`;
+`before`/`match`/`after` are the excerpt around the match.
 
 A query shorter than 2 runes returns empty `groups` (the field is searched live
 as it is typed); longer queries are clamped to 128 runes. The scan is bounded
@@ -321,7 +321,7 @@ decision is persisted *before* the agent learns the answer.
 
 ### `GET /api/ui` / `PUT /api/ui`
 
-The shared UI document (`~/.scimux/ui.json`: groups, archived cards, notes,
+The shared UI document (`~/.scimux/ui.json`: groups, archived cards, bookmarks,
 lanes). GET sets an `ETag` and honors `If-None-Match`. PUT requires
 `If-Match` (the last ETag, or `*` to bootstrap) — `428` without it, `409` on
 mismatch — and replaces the document atomically. Bodies over the size limit

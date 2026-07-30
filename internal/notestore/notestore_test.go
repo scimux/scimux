@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// A fresh sheet gets an auto title, one starter section, and an opaque id.
+// A fresh note gets an auto title, one starter section, and an opaque id.
 func TestCreateStarterShape(t *testing.T) {
 	s := New(t.TempDir())
 	sh, err := s.Create()
@@ -16,7 +16,7 @@ func TestCreateStarterShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sh.ID == "" {
-		t.Fatal("sheet id is empty; ids must be opaque, stable, non-empty")
+		t.Fatal("note id is empty; ids must be opaque, stable, non-empty")
 	}
 	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$`).MatchString(sh.Title) {
 		t.Errorf("auto title %q does not match YYYY-MM-DD HH:MM", sh.Title)
@@ -51,7 +51,7 @@ func TestCreateReadRoundTrip(t *testing.T) {
 	}
 }
 
-// List returns sheets ordered by the stored order field, never lexical id order.
+// List returns notes ordered by the stored order field, never lexical id order.
 func TestListOrderedByOrderField(t *testing.T) {
 	s := New(t.TempDir())
 	a, _ := s.Create()
@@ -70,7 +70,7 @@ func TestListOrderedByOrderField(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(list) != 3 {
-		t.Fatalf("want 3 sheets, got %d", len(list))
+		t.Fatalf("want 3 notes, got %d", len(list))
 	}
 	want := []string{c.ID, a.ID, b.ID}
 	for i, id := range want {
@@ -250,10 +250,10 @@ func TestDeleteArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, sh.ID+".json")); !os.IsNotExist(err) {
-		t.Error("live sheet file still present after delete")
+		t.Error("live note file still present after delete")
 	}
 	if _, err := s.Get(sh.ID); err == nil {
-		t.Error("Get should fail for a deleted sheet")
+		t.Error("Get should fail for a deleted note")
 	}
 	archived, err := filepath.Glob(filepath.Join(dir, "archive", "*"))
 	if err != nil {
@@ -264,7 +264,7 @@ func TestDeleteArchives(t *testing.T) {
 	}
 	list, _ := s.List()
 	if len(list) != 0 {
-		t.Errorf("deleted sheet still listed: %d remain", len(list))
+		t.Errorf("deleted note still listed: %d remain", len(list))
 	}
 }
 
@@ -290,6 +290,6 @@ func TestListDefensiveSkipsGarbage(t *testing.T) {
 		t.Fatalf("List must not error on garbage: %v", err)
 	}
 	if len(list) != 1 || list[0].ID != good.ID {
-		t.Fatalf("want only the one good sheet, got %d", len(list))
+		t.Fatalf("want only the one good note, got %d", len(list))
 	}
 }
