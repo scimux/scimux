@@ -1571,16 +1571,62 @@ func TestWebSharedJumpResolver(t *testing.T) {
 // The reviewer inspected the workspace on iPad and filed 20 issues. These
 // tests lock the fixes so they cannot silently regress.
 
-// Item 1: the workspace is a full-viewport writing surface (like the metro-map
-// wall map), not a centred card floating on a blurred scrim.
-func TestWorkspaceIsFullScreen(t *testing.T) {
+// Item 1 & 2 (2026-07-30 iPad review): the workspace matches the metro-map wall
+// map — it starts BELOW the status bar (var(--sbh) offset, so the status bar
+// stays visible and can host search later) and paints the same page background
+// (var(--bg)) as #map. It still spans the full width; it is not a centred scrim
+// card.
+func TestWorkspaceMatchesWallMap(t *testing.T) {
 	html := mustReadIndex(t)
-	css := cssBlock(t, html, "#wspanel {")
-	if !strings.Contains(css, "100vw") || !strings.Contains(css, "100dvh") {
-		t.Errorf("#wspanel must fill the viewport (100vw/100dvh); got %q", css)
+	ws := cssBlock(t, html, "#notesworkspace {")
+	if !strings.Contains(ws, "var(--sbh)") {
+		t.Errorf("#notesworkspace must offset below the status bar (var(--sbh)), like #map; got %q", ws)
 	}
-	if strings.Contains(css, "margin: 3vh auto") {
+	panel := cssBlock(t, html, "#wspanel {")
+	if !strings.Contains(panel, "var(--bg)") {
+		t.Errorf("#wspanel must paint the metro-map background var(--bg); got %q", panel)
+	}
+	if strings.Contains(panel, "var(--surface)") {
+		t.Errorf("#wspanel must not use var(--surface) (that differs from the wall map); got %q", panel)
+	}
+	if strings.Contains(panel, "margin: 3vh auto") {
 		t.Error("#wspanel must not be a centred card with a vh margin")
+	}
+}
+
+// Item 3 (2026-07-30 iPad review): on desktop/landscape the two left zones
+// (Bookmarks inbox + Notes list) match the app pane width (340px, same as
+// #cards / #bookmarkspane) so the columns share one rhythm.
+func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
+	html := mustReadIndex(t)
+	css := cssBlock(t, html, "#wsinbox, #wsnav {")
+	if !strings.Contains(css, "340px") {
+		t.Errorf("#wsinbox, #wsnav must be 340px (>=900px) to match the app panes; got %q", css)
+	}
+}
+
+// Item 4 (2026-07-30 iPad review): deleting the open note must clear the editor
+// header so no stale title lingers. #wsnotehead sets display:flex, which beats
+// the UA [hidden] rule, so an explicit hidden override is required for
+// head.hidden = true to actually hide.
+func TestWorkspaceNoteHeadHidesWhenEmpty(t *testing.T) {
+	html := mustReadIndex(t)
+	css := cssBlock(t, html, "#wsnotehead[hidden] {")
+	if !strings.Contains(css, "display: none") {
+		t.Errorf("#wsnotehead[hidden] must force display:none so a deleted note's title clears; got %q", css)
+	}
+}
+
+// Items 5 & 6 (2026-07-30 iPad review): both empty states centre on both axes —
+// the active-note placeholder inside #wsnote and the note-card empty state
+// inside #wscards.
+func TestWorkspaceEmptyStatesCentered(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, sel := range []string{"#wsnoteempty {", "#wscards .empty {"} {
+		css := cssBlock(t, html, sel)
+		if !strings.Contains(css, "align-items: center") || !strings.Contains(css, "justify-content: center") {
+			t.Errorf("%s must centre on both axes (flex align+justify center); got %q", sel, css)
+		}
 	}
 }
 

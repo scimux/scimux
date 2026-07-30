@@ -115,7 +115,10 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
    view (no snapshot machinery — closing just un-blurs and returns focus). The
    scrim blurs whatever is behind it; a reduced-transparency viewer gets an
    opaque scrim instead. #searchfeed is filled by the grouped feed in G4. */
-#searchoverlay { position: fixed; inset: 0; z-index: 100;
+/* above the notes workspace (z110): the workspace now leaves the status bar
+   visible, so its search button is reachable while the workspace is open and
+   the overlay must float over it, not behind. */
+#searchoverlay { position: fixed; inset: 0; z-index: 120;
   display: flex; flex-direction: column; align-items: center; }
 #searchoverlay[hidden] { display: none; }
 #searchscrim { position: absolute; inset: 0;
@@ -1186,7 +1189,10 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
    never lives inside a polled render region. Mobile-first: one zone at a time,
    toggled by #notesworkspace.note-open; the min-width query opens the
    side-by-side navigator + active note. */
-#notesworkspace { position: fixed; inset: 0; z-index: 110; display: flex;
+/* starts BELOW the status bar (same offset as #map's wall map) so the bar stays
+   visible — it hosts search, giving a streamlined UX across map + workspace. */
+#notesworkspace { position: fixed; z-index: 110; display: flex;
+  top: calc(var(--sbh) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
   flex-direction: column; align-items: stretch; }
 #notesworkspace[hidden] { display: none; }
 #wsscrim { position: absolute; inset: 0;
@@ -1199,8 +1205,8 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
 /* full-viewport writing surface (like the metro-map wall map), not a centred
    card — the researcher composes here, so it takes all the screen space. */
 #wspanel { position: relative; z-index: 1; flex: 1; min-height: 0;
-  width: 100vw; height: 100dvh; margin: 0; display: flex; flex-direction: column;
-  background: var(--surface); overflow: hidden;
+  width: 100%; height: 100%; margin: 0; display: flex; flex-direction: column;
+  background: var(--bg); overflow: hidden;
   animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
 @media (prefers-reduced-motion: reduce) { #wsscrim, #wspanel { animation: none; } }
 #wstopbar { display: flex; align-items: center; gap: 10px; flex: none;
@@ -1220,7 +1226,10 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   display: inline-flex; align-items: center; justify-content: center; }
 #wsnewnote:active, #wsnotemenu:active { background: var(--code-bg); }
 #wscards { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
-#wscards .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
+/* the note-card empty state centres on both axes (item 6): fills the scroll
+   area's height so the message sits in the middle, not pinned to the top. */
+#wscards .empty { display: flex; align-items: center; justify-content: center;
+  min-height: 100%; color: var(--dim); text-align: center; padding: 28px 16px; }
 .wscard { position: relative; display: block; width: 100%; text-align: left;
   padding: 11px 12px; border-radius: 12px; border: 1px solid var(--hairline);
   background: var(--surface); color: var(--ink); cursor: grab; margin-top: 8px; }
@@ -1234,9 +1243,12 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   display: flex; align-items: center; gap: 6px; }
 .wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; flex: none; }
 .wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-#wsnote { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
+#wsnote { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
 #wsnotehead { display: flex; align-items: center; gap: 8px; flex: none;
   padding: 12px 18px; border-bottom: 1px solid var(--hairline); }
+/* the id's display:flex beats the UA [hidden] rule, so head.hidden = true would
+   leave a deleted note's title lingering (item 4) — force it hidden explicitly. */
+#wsnotehead[hidden] { display: none; }
 #wsnotetitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
   color: var(--ink); background: none; border: none; outline: none; padding: 3px 4px;
   border-radius: 6px; }
@@ -1253,7 +1265,11 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
   background: color-mix(in srgb, var(--work) 8%, transparent); }
 #wssections .wssecaddempty svg { width: 14px; height: 14px; }
 #wssections .wssecaddempty:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
-#wsnoteempty { color: var(--dim); text-align: center; padding: 15vh 20px; }
+/* the "pick a note" placeholder centres on both axes (item 5): an overlay over
+   the (empty) sections area so sibling flex weights can't push it off-centre. */
+#wsnoteempty { position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; color: var(--dim); text-align: center; padding: 20px; }
+#wsnoteempty[hidden] { display: none; }
 /* section blocks: rendered-markdown resting state, inline edit on tap */
 .wssec { border-bottom: 1px solid var(--hairline); padding: 12px 0; }
 .wssechead { display: flex; align-items: center; gap: 8px; }
@@ -1354,7 +1370,7 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
    there, so the inbox zone is hidden; nav is the resting view and opening a
    sheet slides the sheet in over the nav (a visible Back returns). */
 @media (max-width: 767px) {
-  #wspanel { width: 100vw; height: 100dvh; margin: 0; border-radius: 0; border: none; }
+  #wspanel { width: 100%; height: 100%; margin: 0; border-radius: 0; border: none; }
   #wsinbox { display: none; }
   #wsnote { flex: 1; }
   #notesworkspace:not(.note-open) #wsnote { display: none; }
@@ -1372,6 +1388,12 @@ body.bookmarks-open #bookmarkspane { transform: translateX(0); }
      otherwise defeats both `hidden` and this hide (item 17: the chevron is
      redundant once the X closes the workspace and both zones are visible). */
   #notesworkspace #wsback { display: none; }
+}
+@media (min-width: 900px) {
+  /* item 3: at the desktop/landscape breakpoint the app shows 340px side panes
+     (#cards, #bookmarkspane); the two left workspace zones match that width so
+     the columns share one rhythm. The active note keeps the remaining weight. */
+  #wsinbox, #wsnav { width: 340px; }
 }
 </style>
 </head>
@@ -6014,7 +6036,8 @@ async function wsSelect(id){
    editor is never torn out from under the caret. */
 function renderWsNote(){
   const empty = $("#wsnoteempty"), head = $("#wsnotehead"), secWrap = $("#wssections");
-  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = ""; $("#wstitle").textContent = "Notes"; return; }
+  if (!wsActive){ empty.hidden = false; head.hidden = true; secWrap.innerHTML = "";
+    $("#wsnotetitle").value = ""; $("#wstitle").textContent = "Notes"; return; }
   empty.hidden = true; head.hidden = false;
   $("#wstitle").textContent = wsActive.title || "Note";
   $("#wsnotetitle").value = wsActive.title || "";
