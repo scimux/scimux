@@ -191,8 +191,30 @@ attempt) degrades to `404`.
 
 ### `GET /api/agents`
 
-Detected agent CLIs and their models/efforts, as offered in the new-activity
-dialog.
+Detected agent CLIs and what they offer the new-activity dialog, keyed by
+agent:
+
+```json
+{
+  "claude": { "models": ["fable", "opus", "sonnet", "haiku"] },
+  "codex": {
+    "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"],
+    "efforts": {
+      "gpt-5.6-sol": { "levels": ["low", "medium", "high", "xhigh", "max", "ultra"], "default": "medium" },
+      "gpt-5.5":     { "levels": ["low", "medium", "high", "xhigh"], "default": "xhigh" }
+    }
+  }
+}
+```
+
+`models` is ordered (the configured default first when set); an empty `""` model
+is added client-side to mean "launch with the harness default". `efforts` is
+present only where the CLI advertises per-model reasoning effort (codex, via
+`codex debug models`): a map from model id to that model's accepted `levels` and
+its `default`. Agents without it (claude/pi/opencode), and codex when only the
+static fallback is available, omit `efforts` and the UI uses a static per-agent
+effort list. The list is probed once per process at startup and cached for its
+lifetime; a newly installed CLI or model appears after a restart.
 
 ## Managing nodes
 

@@ -7034,6 +7034,11 @@ const EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex:  ["low", "medium", "high"],
 };
+/* per-agent, per-model effort menus discovered from the CLI ({agent: {modelId:
+   {levels, default}}}). Populated from /api/agents where a harness advertises
+   per-model effort (codex); fillEfforts prefers this over the static EFFORTS
+   above, so each codex model offers exactly the levels it accepts. */
+const MODEL_EFFORTS = {};
 function fillAgents(){
   $("#nc_agent").innerHTML = Object.keys(MODELS).map(a =>
     `<option>${esc(a)}</option>`).join("");
@@ -7048,21 +7053,29 @@ function fillModels(){
     `<option value="${esc(m)}">${esc(m) || dflt}</option>`).join("");
 }
 function fillEfforts(){
-  /* preserve the current selection across an agent switch when it stays valid */
+  /* preserve the current selection across an agent/model switch when it stays valid */
   const cur = $("#nc_effort").value;
-  const list = EFFORTS[$("#nc_agent").value] || ["low", "medium", "high"];
+  const agent = $("#nc_agent").value;
+  /* the selected model's discovered menu wins; else the static per-agent list */
+  const perModel = (MODEL_EFFORTS[agent] || {})[$("#nc_model").value];
+  const list = (perModel && perModel.levels) || EFFORTS[agent] || ["low", "medium", "high"];
+  const dflt = perModel && perModel.default;
   $("#nc_effort").innerHTML = `<option value=""></option>` +
-    list.map(e => `<option>${esc(e)}</option>`).join("");
+    list.map(e => `<option value="${esc(e)}">${esc(e)}${e === dflt ? " (default)" : ""}</option>`).join("");
   if (list.includes(cur)) $("#nc_effort").value = cur;
 }
 $("#nc_agent").addEventListener("change", () => { fillModels(); fillEfforts(); });
+/* effort menu is per-model (codex), so a model switch re-fills it too */
+$("#nc_model").addEventListener("change", fillEfforts);
 fillAgents(); fillModels(); fillEfforts();
 api("/api/agents").then(j => {
   if (!j || !Object.keys(j).length) return;
   Object.keys(MODELS).forEach(k => delete MODELS[k]);
-  for (const [agent, models] of Object.entries(j))
-    MODELS[agent] = ["", ...models];   /* "" = launch with the harness default */
-  fillAgents(); fillModels();
+  for (const [agent, info] of Object.entries(j)){
+    MODELS[agent] = ["", ...(info.models || [])];   /* "" = launch with the harness default */
+    MODEL_EFFORTS[agent] = info.efforts || {};       /* per-model effort menus, where advertised */
+  }
+  fillAgents(); fillModels(); fillEfforts();
 }).catch(() => {});
 /* prepareLaunchConfig: fork is the one path that may change launch config
    (a fork inherits agent/model/effort/dir but never conversation history —

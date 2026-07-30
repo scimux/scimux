@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -208,15 +210,163 @@ func TestClaudeCacheRoundTrip(t *testing.T) {
 
 // detectAgents shells out to whatever harnesses are installed; keep it out
 // of -short runs but exercise the real probes when dogfooding.
+// writeScript drops an executable /bin/sh stub named `name` in dir and returns
+// its path — used to stand in for the real `codex` binary without a PATH dance
+// (codexModelsFromCLI takes the binary path directly).
+func writeScript(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestParseCodexModels(t *testing.T) {
+	// A realistic catalog: list-visible models each carry an effort menu, and
+	// those menus genuinely differ between models (sol advertises ultra, 5.5
+	// tops out at xhigh). The hidden model must contribute nothing.
+	out := []byte(`{"models":[
+		{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list",
+		 "default_reasoning_level":"medium",
+		 "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},
+		{"slug":"gpt-5.5","visibility":"list",
+		 "default_reasoning_level":"xhigh",
+		 "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},
+		{"slug":"codex-auto-review","visibility":"hide",
+		 "supported_reasoning_levels":[{"effort":"low"}]}
+	]}`)
+	info := parseCodexModels(out)
+	if want := []string{"gpt-5.6-sol", "gpt-5.5"}; !reflect.DeepEqual(info.Models, want) {
+		t.Fatalf("models = %v, want %v (hidden must be dropped, order preserved)", info.Models, want)
+	}
+	sol, ok := info.Efforts["gpt-5.6-sol"]
+	if !ok {
+		t.Fatal("gpt-5.6-sol carries no effort menu")
+	}
+	if sol.Default != "medium" {
+		t.Errorf("sol default effort = %q, want medium", sol.Default)
+	}
+	if want := []string{"low", "medium", "high", "xhigh", "max", "ultra"}; !reflect.DeepEqual(sol.Levels, want) {
+		t.Errorf("sol levels = %v, want %v", sol.Levels, want)
+	}
+	if info.Efforts["gpt-5.5"].Default != "xhigh" {
+		t.Errorf("5.5 default effort = %q, want xhigh", info.Efforts["gpt-5.5"].Default)
+	}
+	if _, ok := info.Efforts["codex-auto-review"]; ok {
+		t.Error("hidden model leaked into the effort map")
+	}
+}
+
+func TestParseCodexModelsMalformed(t *testing.T) {
+	// Malformed, empty-object, and empty-catalog inputs all collapse to a zero
+	// agentInfo so detectAgents' fallback takes over — the call site never
+	// distinguishes broken JSON from an unusable catalog.
+	for _, in := range []string{`not json`, `{}`, `{"models":[]}`} {
+		info := parseCodexModels([]byte(in))
+		if len(info.Models) != 0 || info.Efforts != nil {
+			t.Errorf("input %q: want zero agentInfo, got %+v", in, info)
+		}
+	}
+}
+
+func TestParseCodexModelsDefensive(t *testing.T) {
+	// Unknown fields ignored; empty/missing slug and missing visibility dropped;
+	// a model with no reasoning levels yields no effort entry (the UI then falls
+	// back to the static per-agent effort list for it).
+	out := []byte(`{"models":[
+		{"slug":"gpt-5.6-sol","visibility":"list","future":{"x":1},"supported_reasoning_levels":[{"effort":"low"}]},
+		{"slug":"","visibility":"list"},
+		{"visibility":"list"},
+		{"slug":"hidden-no-visibility"},
+		{"slug":"gpt-5.6-luna","visibility":"list"}
+	]}`)
+	info := parseCodexModels(out)
+	if want := []string{"gpt-5.6-sol", "gpt-5.6-luna"}; !reflect.DeepEqual(info.Models, want) {
+		t.Fatalf("models = %v, want %v", info.Models, want)
+	}
+	if _, ok := info.Efforts["gpt-5.6-luna"]; ok {
+		t.Error("a model with no supported_reasoning_levels must have no effort entry")
+	}
+	if e := info.Efforts["gpt-5.6-sol"]; len(e.Levels) != 1 || e.Levels[0] != "low" {
+		t.Errorf("sol effort menu = %+v, want levels [low]", e)
+	}
+}
+
+func TestPrependModel(t *testing.T) {
+	// Configured model floats to the front, deduped, nothing else dropped.
+	got := prependModel("gpt-5.6-terra", []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"})
+	if want := []string{"gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("prependModel = %v, want %v", got, want)
+	}
+	in := []string{"a", "b"}
+	if got := prependModel("", in); !reflect.DeepEqual(got, in) {
+		t.Errorf("empty configured must pass through, got %v", got)
+	}
+	if got := prependModel("x", []string{"a"}); !reflect.DeepEqual(got, []string{"x", "a"}) {
+		t.Errorf("absent configured must be prepended, got %v", got)
+	}
+}
+
+func TestCodexModelsFromCLI(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no ~/.codex/config.toml -> no configured-model prepend
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "models.json")
+	if err := os.WriteFile(fixture, []byte(`{"models":[
+		{"slug":"gpt-5.6-sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}]},
+		{"slug":"gpt-5.6-luna","visibility":"list"},
+		{"slug":"codex-auto-review","visibility":"hide"}
+	]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The stub asserts the exact subcommand and, like the real CLI, prints a
+	// warning to stderr that Output() must ignore.
+	bin := writeScript(t, dir, "codex",
+		`if [ "$1" != "debug" ] || [ "$2" != "models" ]; then echo "bad args: $*" >&2; exit 2; fi
+echo "warning: debug command" >&2
+cat `+fixture)
+	info := codexModelsFromCLI(context.Background(), bin)
+	if want := []string{"gpt-5.6-sol", "gpt-5.6-luna"}; !reflect.DeepEqual(info.Models, want) {
+		t.Fatalf("models = %v, want %v", info.Models, want)
+	}
+	if info.Efforts["gpt-5.6-sol"].Default != "medium" {
+		t.Errorf("per-model efforts not carried through the probe: %+v", info.Efforts)
+	}
+}
+
+func TestCodexModelsFromCLIFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cases := map[string]string{
+		"nonzero":   `exit 3`,
+		"malformed": `echo "not json"`,
+		"timeout":   `sleep 5`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			bin := writeScript(t, t.TempDir(), "codex", body)
+			ctx := context.Background()
+			if name == "timeout" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+			}
+			info := codexModelsFromCLI(ctx, bin)
+			if len(info.Models) != 0 || info.Efforts != nil {
+				t.Errorf("want zero agentInfo on failure, got %+v", info)
+			}
+		})
+	}
+}
+
 func TestDetectAgents(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping harness probes in -short mode")
 	}
 	agents := detectAgents()
-	for name, models := range agents {
-		if models == nil {
+	for name, info := range agents {
+		if info.Models == nil {
 			t.Errorf("agent %q has nil model list", name)
 		}
-		t.Logf("%s: %d models", name, len(models))
+		t.Logf("%s: %d models, %d per-model effort menus", name, len(info.Models), len(info.Efforts))
 	}
 }

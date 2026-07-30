@@ -1991,6 +1991,35 @@ console.log("ok");
 
 // sliceBetween returns the text from the occurrence of start up to (but not
 // including) the first occurrence of end after it.
+// The new-activity effort menu is per-model where the CLI advertises it (codex
+// via `codex debug models`): /api/agents now returns {models, efforts} per
+// agent, the browser stashes the per-model effort menus, and fillEfforts uses
+// the selected model's menu before the static per-agent EFFORTS fallback.
+func TestPerModelEffortWiring(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, want := range []string{
+		"MODEL_EFFORTS", // per-agent → per-model effort store
+		"info.efforts",  // populated from the /api/agents payload
+		`$("#nc_model").addEventListener("change"`, // effort menu follows the model, not just the agent
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("per-model effort wiring missing %q", want)
+		}
+	}
+	// fillEfforts must consult the selected model's menu first, then fall back
+	// to the static per-agent EFFORTS list, and mark the model's default level.
+	fe := sliceBetween(t, html, "function fillEfforts(", "\n}")
+	if !strings.Contains(fe, "MODEL_EFFORTS") {
+		t.Errorf("fillEfforts must consult per-model efforts: %q", fe)
+	}
+	if !strings.Contains(fe, "EFFORTS[") {
+		t.Errorf("fillEfforts must keep the static per-agent EFFORTS fallback: %q", fe)
+	}
+	if !strings.Contains(fe, "(default)") {
+		t.Errorf("fillEfforts should mark the model's default effort level: %q", fe)
+	}
+}
+
 func sliceBetween(t *testing.T, html, start, end string) string {
 	t.Helper()
 	i := strings.Index(html, start)

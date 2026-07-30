@@ -15,13 +15,31 @@ import (
 	"time"
 )
 
+// modelEffort is one model's reasoning-effort menu: the levels its CLI accepts
+// and the level it defaults to. Only agents whose CLI advertises per-model
+// effort (codex) populate this; the rest leave it unset and the UI falls back
+// to a static per-agent effort list.
+type modelEffort struct {
+	Levels  []string `json:"levels"`
+	Default string   `json:"default,omitempty"`
+}
+
+// agentInfo is one harness's offering to the new-activity dialog: an ordered
+// model list plus, where the CLI reports it, a per-model effort menu keyed by
+// model id. Efforts is nil for agents that don't advertise it (claude/pi/
+// opencode) and for codex when only the static fallback is available.
+type agentInfo struct {
+	Models  []string               `json:"models"`
+	Efforts map[string]modelEffort `json:"efforts,omitempty"`
+}
+
 // A harness is probed in two steps: LookPath decides whether it appears at
 // all, then its own list command (where one exists — the CLI is the only
-// party that knows its providers and credentials) supplies the models. A
-// missing list command or a failed probe falls back to a static set: an
-// installed harness must never vanish from the dialog because a list call
-// broke, and an empty model list is still valid (the harness launches with
-// its own default model).
+// party that knows its providers and credentials) supplies the models (and,
+// for codex, the per-model effort menus). A missing list command or a failed
+// probe falls back to a static set: an installed harness must never vanish
+// from the dialog because a list call broke, and an empty model list is still
+// valid (the harness launches with its own default model).
 type harness struct {
 	bin string
 	// require is the executable whose presence gates whether this harness is
@@ -31,37 +49,45 @@ type harness struct {
 	// so offering pi when only `pi` — not `pi-acp` — is installed would present
 	// a selectable agent that cannot start (finding 56).
 	require  string
-	list     func(ctx context.Context, bin string) []string
-	fallback func() []string
+	list     func(ctx context.Context, bin string) agentInfo
+	fallback func() agentInfo
+}
+
+// justModels adapts a model-only lister (pi/opencode, which have no per-model
+// effort data) into the agentInfo contract.
+func justModels(f func(ctx context.Context, bin string) []string) func(ctx context.Context, bin string) agentInfo {
+	return func(ctx context.Context, bin string) agentInfo {
+		return agentInfo{Models: f(ctx, bin)}
+	}
 }
 
 var harnesses = []harness{
 	// claude has no model-list command; these aliases are what `claude
 	// --model` documents (latest model per family).
-	{bin: "claude", fallback: func() []string {
-		return []string{"fable", "opus", "sonnet", "haiku"}
+	{bin: "claude", fallback: func() agentInfo {
+		return agentInfo{Models: []string{"fable", "opus", "sonnet", "haiku"}}
 	}},
-	// codex has no list command either; put the locally configured model
-	// first, then the known current line-up.
-	{bin: "codex", fallback: codexModels},
+	// codex advertises its catalog (models + per-model effort menus) via
+	// `codex debug models`; the static fallback covers a broken/old CLI.
+	{bin: "codex", list: codexModelsFromCLI, fallback: codexModels},
 	// pi is launchable only when its ACP binary `pi-acp` exists; the models
 	// come from `pi --list-models` when that is also present.
-	{bin: "pi", require: "pi-acp", list: piModels},
+	{bin: "pi", require: "pi-acp", list: justModels(piModels)},
 	// opencode exposes ACP as a subcommand of the same binary, so bin suffices.
-	{bin: "opencode", list: opencodeModels},
+	{bin: "opencode", list: justModels(opencodeModels)},
 }
 
 var agentsOnce sync.Once
-var agentsCache map[string][]string
+var agentsCache map[string]agentInfo
 
 // detectAgents probes once per process (a warm-up goroutine in main runs it
 // at startup, so the first dialog open doesn't wait on subprocesses). A
 // harness installed while scimux runs appears after a restart — acceptable
 // for a tool that is itself restarted far more often than agents are
 // installed.
-func detectAgents() map[string][]string {
+func detectAgents() map[string]agentInfo {
 	agentsOnce.Do(func() {
-		res := map[string][]string{}
+		res := map[string]agentInfo{}
 		for _, h := range harnesses {
 			require := h.require
 			if require == "" {
@@ -71,24 +97,27 @@ func detectAgents() map[string][]string {
 			if _, err := exec.LookPath(require); err != nil {
 				continue
 			}
-			var models []string
+			var info agentInfo
 			// Model probing uses bin, which may differ from require and may be
 			// absent on its own — an installed launcher with no lister still
 			// yields an offerable agent that runs on its default model.
 			if h.list != nil {
 				if bin, err := exec.LookPath(h.bin); err == nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-					models = h.list(ctx, bin)
+					info = h.list(ctx, bin)
 					cancel()
 				}
 			}
-			if len(models) == 0 && h.fallback != nil {
-				models = h.fallback()
+			// An empty model list means the probe found nothing usable (or ran
+			// no probe): fall back to the static set, dropping any partial
+			// effort data with it.
+			if len(info.Models) == 0 && h.fallback != nil {
+				info = h.fallback()
 			}
-			if models == nil {
-				models = []string{}
+			if info.Models == nil {
+				info.Models = []string{}
 			}
-			res[h.bin] = models
+			res[h.bin] = info
 		}
 		agentsCache = res
 	})
@@ -183,30 +212,113 @@ func writeClaudeCache(path string, ids map[string]string) error {
 
 var codexConfigModel = regexp.MustCompile(`(?m)^\s*model\s*=\s*"([^"]+)"`)
 
-// codexModels: the model the user configured in ~/.codex/config.toml first
-// (a top-level `model = "…"` line; the regexp cannot match table entries
-// because those keys are quoted or dotted), then a static current line-up.
-func codexModels() []string {
-	known := []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.3-codex"}
+// parseCodexModels reads a `codex debug models` catalog into an agentInfo:
+// list-visible slugs in catalog order, plus each model's effort menu (levels +
+// default) when the catalog advertises one. Defensive like the transcript
+// parsers — only slug/visibility/effort fields are read, unknown shapes are
+// ignored, and any unmarshal failure or empty result yields a zero agentInfo so
+// detectAgents' fallback takes over. Hidden models (visibility != "list") and
+// empty slugs contribute nothing.
+func parseCodexModels(out []byte) agentInfo {
+	var r struct {
+		Models []struct {
+			Slug                     string `json:"slug"`
+			Visibility               string `json:"visibility"`
+			DefaultReasoningLevel    string `json:"default_reasoning_level"`
+			SupportedReasoningLevels []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
+		} `json:"models"`
+	}
+	if json.Unmarshal(out, &r) != nil {
+		return agentInfo{}
+	}
+	var models []string
+	efforts := map[string]modelEffort{}
+	for _, m := range r.Models {
+		if m.Slug == "" || m.Visibility != "list" {
+			continue
+		}
+		models = append(models, m.Slug)
+		var levels []string
+		for _, l := range m.SupportedReasoningLevels {
+			if l.Effort != "" {
+				levels = append(levels, l.Effort)
+			}
+		}
+		if len(levels) > 0 {
+			efforts[m.Slug] = modelEffort{Levels: levels, Default: m.DefaultReasoningLevel}
+		}
+	}
+	if len(models) == 0 {
+		return agentInfo{}
+	}
+	if len(efforts) == 0 {
+		efforts = nil
+	}
+	return agentInfo{Models: models, Efforts: efforts}
+}
+
+// codexModelsFromCLI runs `codex debug models` and returns its catalog. It is a
+// debug command that also prints a warning to stderr, so Output() (stdout only)
+// is deliberate. Any failure — missing binary, timeout, non-zero exit, or
+// unparseable/empty catalog — returns a zero agentInfo so detectAgents falls
+// back to codexModels(). The configured default model is floated to the front,
+// matching the fallback's ordering.
+func codexModelsFromCLI(ctx context.Context, bin string) agentInfo {
+	out, err := exec.CommandContext(ctx, bin, "debug", "models").Output()
+	if err != nil {
+		return agentInfo{}
+	}
+	info := parseCodexModels(out)
+	if len(info.Models) == 0 {
+		return agentInfo{}
+	}
+	info.Models = prependModel(codexConfiguredModel(), info.Models)
+	return info
+}
+
+// codexConfiguredModel reads the user's top-level `model = "…"` line from
+// ~/.codex/config.toml (the regexp cannot match table entries because those
+// keys are quoted or dotted). Empty when unset or unreadable.
+func codexConfiguredModel() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return known
+		return ""
 	}
 	b, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
 	if err != nil {
-		return known
+		return ""
 	}
-	m := codexConfigModel.FindSubmatch(b)
-	if m == nil {
-		return known
+	if m := codexConfigModel.FindSubmatch(b); m != nil {
+		return string(m[1])
 	}
-	out := []string{string(m[1])}
-	for _, k := range known {
-		if k != out[0] {
-			out = append(out, k)
+	return ""
+}
+
+// prependModel floats configured to the front of models, deduped, order of the
+// rest preserved. An empty configured (or one already leading) is a no-op.
+func prependModel(configured string, models []string) []string {
+	if configured == "" {
+		return models
+	}
+	out := []string{configured}
+	for _, m := range models {
+		if m != configured {
+			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// codexModels is the static fallback for a broken or old codex CLI: the
+// configured model first, then the known current line-up. It carries no
+// per-model effort data, so the UI falls back to its static per-agent effort
+// list; keep the model list current enough to be useful but don't rely on it
+// once the live probe works.
+func codexModels() agentInfo {
+	known := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}
+	return agentInfo{Models: prependModel(codexConfiguredModel(), known)}
 }
 
 // piModels parses `pi --list-models`: a column table whose first two fields
