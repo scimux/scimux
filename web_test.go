@@ -1611,7 +1611,9 @@ func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
 	html := mustReadIndex(t)
 	pane := cssBlock(t, html, ".phead h2 {")
 	ws := cssBlock(t, html, "#wstopbar h2 {")
-	for _, want := range []string{"font-size: 22px", "font-weight: 700"} {
+	// margin:0 is essential — without it the UA heading margin inflates the bar's
+	// height (flex items don't collapse margins), so the header renders taller.
+	for _, want := range []string{"font-size: 22px", "font-weight: 700", "margin: 0"} {
 		if !strings.Contains(pane, want) {
 			t.Fatalf(".phead h2 baseline changed, expected %q; got %q", want, pane)
 		}
