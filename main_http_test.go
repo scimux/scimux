@@ -17,10 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/notestore"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -107,37 +105,26 @@ func lastArg(args []string) string {
 
 func newTestApp(t *testing.T, f *fakeTmux) *app {
 	t.Helper()
-	dir := t.TempDir()
-	a := &app{
-		byID:           map[string]*Node{},
-		live:           map[string]string{},
-		attn:           map[string]string{},
-		prevCap:        map[string]string{},
-		lastChg:        map[string]time.Time{},
-		activeSince:    map[string]time.Time{},
-		tailers:        map[string]*transcript.Tailer{},
-		mirrors:        map[string]*mirror{},
-		pathClaims:     map[string]bool{},
-		chatMark:       map[string]chatMark{},
-		staleChat:      map[string]bool{},
-		sendState:      map[string]string{},
-		server:         tmuxsession.NewServerWithRunner("testsock", f.run),
-		acp:            acpManager{acp.NewManager(filepath.Join(dir, "sessions"))},
-		codex:          codexManager{codex.NewManager(filepath.Join(dir, "sessions"))},
-		storePath:      filepath.Join(dir, "nodes.jsonl"),
-		sessionsDir:    filepath.Join(dir, "sessions"),
-		attachmentsDir: filepath.Join(dir, "attachments"),
-		assetsDir:      filepath.Join(dir, "assets"),
-		notes:          notestore.New(filepath.Join(dir, "notes")),
-		home:           dir,
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	data := filepath.Join(root, "data")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a, err := newApp(Config{
+		Home:    home,
+		DataDir: data,
 		// Tiny launch-grace window so failure-detection tests run fast; a marker
 		// in the fake pane is seen on the first poll, success falls through at once.
-		launchGrace: 40 * time.Millisecond,
-		launchPoll:  5 * time.Millisecond,
+		LaunchGrace: 40 * time.Millisecond,
+		LaunchPoll:  5 * time.Millisecond,
+	}, appDeps{Server: tmuxsession.NewServerWithRunner("testsock", f.run)})
+	if err != nil {
+		t.Fatal(err)
 	}
-	a.assetHook = a.ingestAssetHook
-	a.acp.SetAssetHook(a.assetHook)
-	a.codex.SetAssetHook(a.assetHook)
 	return a
 }
 

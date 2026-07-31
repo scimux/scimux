@@ -31,11 +31,8 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
-	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
-	"codeberg.org/chrberger/scimux/internal/notestore"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -51,206 +48,6 @@ var hostname = "scimux"
 
 //go:embed web/index.html web/assets
 var webFS embed.FS
-
-// ---------- model ----------
-
-type Node struct {
-	ID          string `json:"id"`
-	Parent      string `json:"parent,omitempty"`
-	Title       string `json:"title"`
-	Prompt      string `json:"prompt"`                // first prompt == the node's research question
-	Description string `json:"description,omitempty"` // card/map description; defaults to Prompt
-	Rationale   string `json:"rationale,omitempty"`   // why this fork exists (decision evidence)
-	LaneID      string `json:"lane_id,omitempty"`     // immutable topic/lane assignment; empty means unassigned
-	// ForkKind records what a fork did relative to its destination lane, fixed
-	// at creation ("y-stay" | "y-new" | "s"; empty for a root). It is stored
-	// rather than recomputed so a later sibling deletion cannot silently
-	// reclassify the fork on the map (a live recomputation flips S→Y-new when
-	// the older station that made it a crossover is removed). Empty on records
-	// that predate the field; the client falls back to the historical
-	// computation for those.
-	ForkKind string `json:"fork_kind,omitempty"`
-	// EndedAt marks a thread the user deliberately closed via /exit (the "ended"
-	// head state): a dead-end ⊣ cap on the map, kept visible and rideable. This
-	// is a scimux decision, distinct from a *mechanical* process exit — a crash
-	// leaves the node live until /exit is invoked. Empty means not ended.
-	EndedAt    string `json:"ended_at,omitempty"`
-	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode"
-	Model      string `json:"model,omitempty"`
-	Effort     string `json:"effort,omitempty"` // reasoning effort: codex thread config, claude --effort level
-	Dir        string `json:"dir"`
-	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
-	Transcript string `json:"transcript,omitempty"`
-	Adopted    bool   `json:"adopted,omitempty"` // adopted tmux sessions are never killed by scimux
-	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
-	// transcript files, the original path — claude), "acp" (an Agent Client
-	// Protocol subprocess, pi/opencode) or "codex" (codex's app-server protocol
-	// wrapped as a structured bridge). "acp" and "codex" are both structured
-	// subprocess transports (no pane); see procManager. An absent value means
-	// tmux — every stored record predates this field, so migration is "" ==
-	// "tmux" (see transport).
-	Transport string `json:"transport,omitempty"`
-	CreatedAt string `json:"created_at"`
-}
-
-// transport reports the node's supervision mechanism, defaulting an absent
-// value to "tmux" so pre-existing store records replay unchanged.
-func (n *Node) transport() string {
-	if n.Transport == "" {
-		return "tmux"
-	}
-	return n.Transport
-}
-
-// storeRecord is one line of the append-only store file. Node metadata is
-// tiny; chat content lives in the agents' own transcript files.
-type storeRecord struct {
-	Type string `json:"type"` // "node" | "transcript" | "key" | "delete"
-	Node *Node  `json:"node,omitempty"`
-	ID   string `json:"id,omitempty"`
-	Path string `json:"path,omitempty"`
-	// "key" records are the answered-dialog evidence trail: which key was
-	// pressed for a node while what dialog (pane excerpt) was on screen.
-	// Replay ignores them — they carry no node state.
-	Key     string `json:"key,omitempty"`
-	Excerpt string `json:"excerpt,omitempty"`
-	Time    string `json:"time,omitempty"`
-}
-
-type app struct {
-	mu    sync.Mutex
-	nodes []*Node
-	byID  map[string]*Node
-	live  map[string]string // node id -> "active"|"quiet"|"exited"
-	attn  map[string]string // node id -> ""|"approval"|"question"|"inspect"
-	// attnAt: when a.attn[id] was last set by *fresh* evidence (a classification
-	// this tick, or the one-shot peek path) rather than carried over. The
-	// active-branch preserve path (R20.5) keeps attention while the corroborated
-	// check is indeterminate, but only while it is younger than animStallAfter —
-	// otherwise a human answer given in the terminal (which touches nothing) would
-	// leave the card claiming "approval" for the whole runtime of the approved
-	// tool, since the tool-call record stays unresolved until the tool completes
-	// (R21.2). A web-key answer clears attn outright in handleKey.
-	attnAt  map[string]time.Time
-	prevCap map[string]string
-	lastChg map[string]time.Time
-	// activeSince: when the pane last entered the mechanically active state —
-	// the start of the current/most recent working phase. Used to judge at the
-	// active→quiet transition whether the linked transcript carried the phase
-	// (mtime after the phase start) or has gone dead (session rollover).
-	activeSince map[string]time.Time
-	tailers     map[string]*transcript.Tailer
-	// mirrors: per-node transcript→session-log projection state (mirror.go),
-	// so tmux nodes end up with the same on-disk history as structured ones.
-	mirrors map[string]*mirror
-	// pathClaims: transcript paths reserved by an in-flight discovery store
-	// write, so a concurrent adoption cannot publish the same path.
-	pathClaims map[string]bool
-	// chatMark/staleChat: per-node transcript progress at the last
-	// active→quiet pane transition, and whether the file has been growing
-	// without recognizable agent-side records since (degrade the UI to peek).
-	chatMark  map[string]chatMark
-	staleChat map[string]bool
-	// sendState: per-node web prompt delivery state, "submitting" while a
-	// send is in flight, "unconfirmed" when neither the pane nor the
-	// transcript acknowledged the submission. New sends are held (409) until
-	// the state clears, so a delayed Enter can never stack a second prompt
-	// onto an unsubmitted first one.
-	sendState map[string]string
-	// reserved: node ids claimed by an in-flight create whose external launch
-	// runs outside a.mu; uniqueID must not reissue them, like pathClaims for
-	// transcript paths.
-	reserved map[string]bool
-	// anim: per-node pane-change geometry (noteAnim). Tracks whether
-	// successive capture diffs stay confined to the same few lines — the
-	// mechanical signature of a static screen with an animation strip (a
-	// queued tool's spinner under an approval dialog), as opposed to
-	// streaming output. Feeds the active-pane dialog corroboration and the
-	// stalled-wait backstop in poll().
-	anim map[string]*animState
-	// paneSession, when non-nil, replaces the /proc-based session-id lookup
-	// for a pane pid (sessionFromPane). Tests set it: the process tree behind
-	// a fake tmux pane is not reachable through the Runner seam.
-	paneSession func(pid string) string
-
-	// storeMu serializes every append to nodes.jsonl, independent of a.mu (some
-	// callers hold a.mu, some do not). It gives the append-only store one
-	// process-local write point so concurrent audit/transcript/delete records
-	// cannot interleave a partial line, and pairs each append with an fsync —
-	// these records are the durable truth the supervisor replays and audits.
-	storeMu sync.Mutex
-	// uiMu serializes the read-modify-write of the UI-state file (ui.json),
-	// independent of a.mu. The revision check plus the atomic tmp-write+rename
-	// must be one critical section, but they are pure file I/O over a private
-	// document — holding the app-wide a.mu across two syscalls would stall the
-	// poller and every other handler for a write that touches no shared state.
-	uiMu   sync.Mutex
-	server *tmuxsession.Server
-	acp    acpManager
-	codex  codexManager
-	// launchGrace bounds how long a freshly-launched tmux agent is watched for
-	// an immediate failure (a rejected --model, a bad flag). The launch is
-	// wrapped so such a process leaves its error on the pane (wrapLaunch); within
-	// this window awaitLaunch reads it and reports it to the create caller instead
-	// of persisting an unexplained dead node. Zero disables the check. launchPoll
-	// is the capture interval inside that window.
-	launchGrace time.Duration
-	launchPoll  time.Duration
-	// claudeIDs maps the family alias the UI offers (opus/sonnet/haiku/fable) to
-	// the concrete model id the installed claude CLI actually accepts, probed once
-	// at startup (probeClaudeModels) because the CLI mis-resolves its own aliases.
-	// Empty until the probe returns, and empty forever if claude is absent or the
-	// probe fails — in which case launches fall back to passing the bare alias.
-	// Written once by the startup goroutine, read per launch; guarded by claudeMu.
-	claudeIDs       map[string]string
-	claudeMu        sync.Mutex
-	claudeCachePath string // ~/.scimux/claude-models.json; empty disables caching
-	storePath       string
-	uiPath          string
-	// sessionsDir is the unified session-log store: one JSONL file per node,
-	// every transport, one schema (internal/sessionlog). Future readers
-	// (search, consolidation, sharing) scan this one directory. It is also
-	// the chat read path for every transport: handleChat renders from the
-	// log, never from the transcript tailer (phase 3 of the consolidation).
-	sessionsDir string
-	// attachmentsDir holds uploaded files, one subdirectory per node
-	// (~/.scimux/attachments/<node-id>/). Bytes live here; the session log and
-	// nodes.jsonl only ever record a text reference (Attachment) — the
-	// text-only/append-only store invariants forbid binary in either JSONL.
-	attachmentsDir string
-	// assetsDir holds blob-storage session assets, one subdirectory per node
-	// (~/.scimux/assets/<node-id>/, internal/asset.WriteBlob/ResolveBlobPath).
-	// The session log stays the index of record — every blob has an "asset"
-	// event carrying id/name/mime/sha256/blobPath — this directory holds only
-	// the bytes for assets too large to inline. See upload-design.md.
-	assetsDir string
-	// assetHook is the Phase 4 turn-append ingestion hook, called by every
-	// transport (mirror.go for tmux, a.acp/a.codex for ACP/codex — wired via
-	// SetAssetHook at startup) with each turn's scanned local-path candidates.
-	// See asset.IngestFunc and ingestAssetHook (agent_asset.go).
-	assetHook asset.IngestFunc
-	// segCache memoizes each node's parsed current segment so the 1s chat
-	// poll costs a stat, not a reparse, while the log is unchanged.
-	segCache map[string]*sessionlog.Cache
-	// notes is the synthesis-document store (~/.scimux/notes/, one mutable
-	// JSON file per note — internal/notestore). Deliberately separate from the
-	// append-only session log: notes are documents, not an event stream (see
-	// notes-design.md "Storage Model"). noteMu serializes the handler-level
-	// read-modify-write so a section autosave and a rename cannot clobber each
-	// other's untouched fields; the store's own writes are atomic per file.
-	notes  *notestore.Store
-	noteMu sync.Mutex
-	home   string
-	// usage caches subscription-budget snapshots (usage.go). Its own mutex is
-	// independent of a.mu — collectors do file/HTTP I/O. Served cache-only via
-	// /api/usage; refreshed only by successful Claude/Codex prompts.
-	usage *usageCache
-	// Provider source overrides for tests; empty means the real default path
-	// (~/.codex/sessions, ~/.claude/.credentials.json, the OAuth endpoint).
-	codexSessionsDir string
-	claudeCredsPath  string
-	claudeUsageURL   string
-}
 
 // segment returns the node's current conversation — the session log's tail
 // after its last source seam. A /clear appends a seam, so this is what makes
@@ -270,94 +67,6 @@ func (a *app) segment(n *Node) sessionlog.Segment {
 	}
 	a.mu.Unlock()
 	return c.Segment(a.sessionLogPath(n.ID))
-}
-
-// PermOption is one answerable permission/decision choice surfaced to the UI:
-// the key a supervisor presses and its human-readable name.
-type PermOption struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-}
-
-// procManager is the shared surface of scimux's two structured-protocol
-// transports: acp.Manager (pi/opencode over the ACP SDK) and codex.Manager
-// (codex over its app-server protocol). Both drive one subprocess per node,
-// keep the authoritative history in an append-only session log, and answer
-// permission prompts structurally — so the create/poll/chat/send/key/peek paths
-// treat them uniformly. tmux (claude) nodes are not driven through it.
-type procManager interface {
-	Launch(nodeID, agent, dir, model, effort string) (string, error)
-	Send(nodeID, text string) error
-	// Clear is the structured-transport /clear: a fresh protocol session on
-	// the same subprocess, recorded as a source seam in the session log — the
-	// chat surface turns the page, the node and its log file stay.
-	Clear(nodeID string) error
-	Interrupt(nodeID string) error
-	PrepareResolve(nodeID, key string) (optID, evidence string, err error)
-	Deliver(nodeID, optID string) error
-	Pending(nodeID string) (title string, opts []PermOption, ok bool)
-	Turns(nodeID string) []transcript.Turn
-	Peek(nodeID string) string
-	Usage(nodeID string) (used, window int64)
-	Live(nodeID string) string
-	Attention(nodeID string) string
-	LastError(nodeID string) string
-	HasSession(nodeID string) bool
-	Kill(nodeID string) error
-	RecordStartFailure(nodeID string, cause error) error
-	Shutdown()
-	// Conflict reports whether a Send/Resolve error is a client/state conflict
-	// (HTTP 409) rather than a server error (500).
-	Conflict(err error) bool
-}
-
-// acpManager and codexManager adapt the two concrete managers to procManager:
-// each embeds its manager (whose method set already matches) and adds only the
-// two pieces the interface needs but the managers express with package-local
-// types — a PermOption of the shared shape and error classification.
-type acpManager struct{ *acp.Manager }
-
-func (m acpManager) Pending(id string) (string, []PermOption, bool) {
-	title, opts, ok := m.Manager.Pending(id)
-	out := make([]PermOption, len(opts))
-	for i, o := range opts {
-		out[i] = PermOption{Key: o.Key, Name: o.Name}
-	}
-	return title, out, ok
-}
-
-func (m acpManager) Conflict(err error) bool {
-	return err == acp.ErrNoSession || err == acp.ErrNotAlive ||
-		err == acp.ErrTurnActive || err == acp.ErrNoPending || err == acp.ErrNoTurn
-}
-
-type codexManager struct{ *codex.Manager }
-
-func (m codexManager) Pending(id string) (string, []PermOption, bool) {
-	title, opts, ok := m.Manager.Pending(id)
-	out := make([]PermOption, len(opts))
-	for i, o := range opts {
-		out[i] = PermOption{Key: o.Key, Name: o.Name}
-	}
-	return title, out, ok
-}
-
-func (m codexManager) Conflict(err error) bool {
-	return err == codex.ErrNoSession || err == codex.ErrNotAlive ||
-		err == codex.ErrTurnActive || err == codex.ErrNoPending || err == codex.ErrNoTurn
-}
-
-// proc returns the structured-protocol manager for a node, or nil for a tmux
-// (claude) node. It is the single dispatch point that lets the HTTP/poll paths
-// treat ACP and codex-app-server nodes identically.
-func (a *app) proc(n *Node) procManager {
-	switch n.transport() {
-	case "acp":
-		return a.acp
-	case "codex":
-		return a.codex
-	}
-	return nil
 }
 
 // ---------- store ----------
@@ -3749,43 +3458,13 @@ func main() {
 	}
 	// The notes store creates its own directory lazily on first write, so no
 	// MkdirAll here — an empty install has no notes/ until the user makes one.
-	notesDir := filepath.Join(*data, "notes")
-	a := &app{
-		byID:            map[string]*Node{},
-		live:            map[string]string{},
-		attn:            map[string]string{},
-		attnAt:          map[string]time.Time{},
-		prevCap:         map[string]string{},
-		lastChg:         map[string]time.Time{},
-		activeSince:     map[string]time.Time{},
-		tailers:         map[string]*transcript.Tailer{},
-		mirrors:         map[string]*mirror{},
-		pathClaims:      map[string]bool{},
-		chatMark:        map[string]chatMark{},
-		staleChat:       map[string]bool{},
-		sendState:       map[string]string{},
-		reserved:        map[string]bool{},
-		anim:            map[string]*animState{},
-		server:          tmuxsession.NewServer(*socket),
-		launchGrace:     2500 * time.Millisecond,
-		launchPoll:      250 * time.Millisecond,
-		claudeCachePath: filepath.Join(*data, "claude-models.json"),
-		acp:             acpManager{acp.NewManager(sessionsDir)},
-		codex:           codexManager{codex.NewManager(sessionsDir)},
-		storePath:       filepath.Join(*data, "nodes.jsonl"),
-		uiPath:          filepath.Join(*data, "ui.json"),
-		sessionsDir:     sessionsDir,
-		attachmentsDir:  attachmentsDir,
-		assetsDir:       assetsDir,
-		notes:           notestore.New(notesDir),
-		home:            home,
-	}
-	a.assetHook = a.ingestAssetHook
-	a.acp.SetAssetHook(a.assetHook)
-	a.codex.SetAssetHook(a.assetHook)
-	a.usage = newUsageCache(a.collectUsage)
-	if err := a.loadStore(); err != nil {
-		fmt.Fprintln(os.Stderr, "scimux: load store:", err)
+	a, err := NewApp(Config{
+		Home:    home,
+		DataDir: *data,
+		Socket:  *socket,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
