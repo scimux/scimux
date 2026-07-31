@@ -1,40 +1,19 @@
 package main
 
 import (
-	"fmt"
 	"io/fs"
 	"net/http"
 )
 
 func NewHandler(a *app, web fs.FS) (http.Handler, error) {
-	assetsInfo, err := fs.Stat(web, "web/assets")
-	if err != nil {
-		return nil, fmt.Errorf("embedded web/assets missing: %w", err)
-	}
-	if !assetsInfo.IsDir() {
-		return nil, fmt.Errorf("embedded web/assets is not a directory")
-	}
-	assets, err := fs.Sub(web, "web/assets")
-	if err != nil {
-		return nil, fmt.Errorf("embedded web/assets missing: %w", err)
-	}
-	indexHTML, err := csrfIndex(web)
+	webHandlers, err := newWebHandlers(web)
 	if err != nil {
 		return nil, err
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		b := indexHTML
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// The UI is embedded in the binary and changes with every build;
-		// a cached copy after a scimux upgrade is a recurring dogfooding
-		// trap (especially iPad Safari). It's one small local page: always
-		// fetch fresh.
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(b)
-	})
+	mux.Handle("GET /assets/", webHandlers.assets)
+	mux.Handle("GET /{$}", webHandlers.index)
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("GET /api/usage", a.handleUsage)
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)

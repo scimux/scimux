@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
-	"embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,7 +16,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"io/fs"
 	mimepkg "mime"
 	"net/http"
 	"net/url"
@@ -45,9 +43,6 @@ const appSummary = "scimux supervises agent chats from a local web page."
 
 // hostname is resolved once at startup; shown in the UI statusbar.
 var hostname = "scimux"
-
-//go:embed web/index.html web/assets
-var webFS embed.FS
 
 // segment returns the node's current conversation — the session log's tail
 // after its last source seam. A /clear appends a seam, so this is what makes
@@ -313,22 +308,6 @@ func validContentType(r *http.Request) bool {
 	}
 	return mediaType == "application/json"
 }
-
-// csrfIndex reads the embedded index page once and substitutes the per-process
-// CSRF token into its placeholder meta tag. The token is hex, so it is inert in
-// an HTML attribute; the page is served verbatim thereafter.
-func csrfIndex(fsys fs.FS) ([]byte, error) {
-	b, err := fs.ReadFile(fsys, "web/index.html")
-	if err != nil {
-		return nil, fmt.Errorf("embedded web/index.html missing: %w", err)
-	}
-	if !strings.Contains(string(b), csrfPlaceholder) {
-		return nil, fmt.Errorf("web/index.html is missing the %s placeholder", csrfPlaceholder)
-	}
-	return []byte(strings.Replace(string(b), csrfPlaceholder, csrfToken, 1)), nil
-}
-
-const csrfPlaceholder = "__SCIMUX_CSRF__"
 
 // slugStrip collapses any run of characters not allowed in a tmux session name
 // into a single '-'. '.' is excluded from the allow-set on purpose: it is tmux's
