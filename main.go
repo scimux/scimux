@@ -3411,32 +3411,10 @@ func main() {
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
 	flag.Parse()
 
-	// The data directory holds private notes and pane-excerpt evidence:
-	// owner-only. Tighten pre-existing broader modes where we can.
-	if err := os.MkdirAll(*data, 0o700); err != nil {
+	if err := prepareDataDir(*data); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
-	os.Chmod(*data, 0o700)
-	os.Chmod(filepath.Join(*data, "ui.json"), 0o600)
-	os.Chmod(filepath.Join(*data, "nodes.jsonl"), 0o600)
-	sessionsDir := filepath.Join(*data, "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
-	}
-	attachmentsDir := filepath.Join(*data, "attachments")
-	if err := os.MkdirAll(attachmentsDir, 0o700); err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
-	}
-	assetsDir := filepath.Join(*data, "assets")
-	if err := os.MkdirAll(assetsDir, 0o700); err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
-	}
-	// The notes store creates its own directory lazily on first write, so no
-	// MkdirAll here — an empty install has no notes/ until the user makes one.
 	a, err := NewApp(Config{
 		Home:    home,
 		DataDir: *data,
