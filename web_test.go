@@ -2361,6 +2361,9 @@ func TestPeekTapStepsBack(t *testing.T) {
 	if !strings.Contains(html, "body.bookmarks-open #bookmarkpeek { display: block; }") {
 		t.Error("#bookmarkpeek must appear only while the bookmarks pane is open")
 	}
+	if !strings.Contains(html, "#bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }") {
+		t.Error("#bookmarkpeek is phone/tablet-only: the exposed Bookmarks peek must stay unavailable on desktop")
+	}
 }
 
 // P4: the back-label must point at its destination (HIG reversibility). Journeys

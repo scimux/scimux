@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Add missing tools
         run: |
-          apk add --no-cache bash curl file git jq
+          apk add --no-cache bash curl file git jq nodejs
 
       - name: Clone and checkout repository
         run: |
@@ -21,6 +21,11 @@ jobs:
       - name: Run tests (short mode; integration tests need tmux and are skipped)
         run: |
           go test -short ./...
+
+      - name: Run JavaScript tests (Node 22+)
+        run: |
+          node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 22) { console.error(`Node 22+ required; found ${process.versions.node}`); process.exit(1); }'
+          node --test web/test/*.test.js
 
       - name: Build for linux/amd64
         run: |
