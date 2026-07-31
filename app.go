@@ -150,21 +150,6 @@ func (n *Node) transport() string {
 	return n.Transport
 }
 
-// storeRecord is one line of the append-only store file. Node metadata is
-// tiny; chat content lives in the agents' own transcript files.
-type storeRecord struct {
-	Type string `json:"type"` // "node" | "transcript" | "key" | "delete"
-	Node *Node  `json:"node,omitempty"`
-	ID   string `json:"id,omitempty"`
-	Path string `json:"path,omitempty"`
-	// "key" records are the answered-dialog evidence trail: which key was
-	// pressed for a node while what dialog (pane excerpt) was on screen.
-	// Replay ignores them — they carry no node state.
-	Key     string `json:"key,omitempty"`
-	Excerpt string `json:"excerpt,omitempty"`
-	Time    string `json:"time,omitempty"`
-}
-
 type app struct {
 	mu    sync.Mutex
 	nodes []*Node
