@@ -1812,16 +1812,14 @@ func TestWorkspaceRenames(t *testing.T) {
 	}
 }
 
-// The captures pane became "Bookmarks": its toggle uses a book-bookmark glyph,
+// The captures pane became "Bookmarks": the chat-area toggle uses a ‹/› chevron,
 // and the "use in note" action (formerly the pen-to-square that read as "Edit")
 // now uses a paperclip, sitting second-to-last in the note action row (before
 // delete). Icons are inlined SVG per the repo convention — no FA dependency.
 func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	html := mustReadIndex(t)
-	for _, want := range []string{"const ICON_BOOKMARK", "const ICON_CLIP"} {
-		if !strings.Contains(html, want) {
-			t.Errorf("missing inlined icon constant %q", want)
-		}
+	if !strings.Contains(html, "const ICON_CLIP") {
+		t.Error(`missing inlined icon constant "const ICON_CLIP"`)
 	}
 	// the chat-area toggle (#bookmarksbtn) is the ‹/› chevron mirroring pane state;
 	// the bookmark glyph now lives on the Bookmarks pane's top-right button.
@@ -1832,8 +1830,15 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	if !strings.Contains(tog, `"&#8249;"`) {
 		t.Error("the chat-area toggle (#bookmarksbtn) must restore the ‹ chevron when closed")
 	}
-	if !strings.Contains(html, `$("#notesbtn").innerHTML = ICON_BOOKMARK;`) {
-		t.Error("the Bookmarks pane top-right button (#notesbtn) must use ICON_BOOKMARK")
+	// The Bookmarks pane's forward control opens the Notes pane (to its right in
+	// the line), so it names that destination — "Notes ›", the mirror of the
+	// Journeys pane's "Activities ›" — instead of a book-bookmark glyph that named
+	// the pane you were already on. The dead ICON_BOOKMARK const is removed.
+	if !strings.Contains(html, `id="notesbtn" aria-label="show notes" title="Notes">Notes &#8250;</button>`) {
+		t.Error(`#notesbtn must read "Notes ›" (forward label + right chevron) to name the pane it reveals`)
+	}
+	if strings.Contains(html, "ICON_BOOKMARK") {
+		t.Error("ICON_BOOKMARK is dead once #notesbtn is a text label — remove the const and its assignment")
 	}
 	// in the note action row, the paperclip (use-in-note) sits just before delete
 	row := sliceBetween(t, html, `<div class="bookmarkactions">`, "</div>")
