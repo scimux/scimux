@@ -49,7 +49,7 @@ const appSummary = "scimux supervises agent chats from a local web page."
 // hostname is resolved once at startup; shown in the UI statusbar.
 var hostname = "scimux"
 
-//go:embed web/*
+//go:embed web/index.html web/assets
 var webFS embed.FS
 
 // ---------- model ----------
