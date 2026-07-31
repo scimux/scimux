@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,9 +53,21 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 func newCharacterizationHandler(t *testing.T, a *app) http.Handler {
 	t.Helper()
 
-	// Temporary route source for Phase 0 characterization. Packet 1B deletes
-	// this copy when it introduces the production NewHandler router.
+	// Temporary complete route source for Phase 0 characterization. Packet 1B
+	// deletes this copy when production NewHandler becomes authoritative.
 	mux := http.NewServeMux()
+	assets, err := fs.Sub(webFS, "web/assets")
+	if err != nil {
+		t.Fatalf("sub web/assets: %v", err)
+	}
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+	indexHTML := csrfIndex(webFS)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		b := indexHTML
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(b)
+	})
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("GET /api/usage", a.handleUsage)
 	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
