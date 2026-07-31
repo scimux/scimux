@@ -27,7 +27,11 @@ func TestCharacterizationIndexRoute(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `name="scimux-csrf" content="`+csrfToken+`"`) {
 		t.Fatal("GET / body does not contain live CSRF meta token")
 	}
-	if want := csrfIndex(webFS); !bytes.Equal(rec.Body.Bytes(), want) {
+	want, err := csrfIndex(webFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), want) {
 		t.Fatalf("GET / body differs from csrfIndex(webFS): got %d bytes want %d bytes", rec.Body.Len(), len(want))
 	}
 

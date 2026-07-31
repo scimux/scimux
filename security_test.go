@@ -105,7 +105,11 @@ func TestValidContentTypeMultipart(t *testing.T) {
 
 // The served index page must carry the live token, not the placeholder.
 func TestCSRFIndexEmbedsToken(t *testing.T) {
-	page := string(csrfIndex(webFS))
+	b, err := csrfIndex(webFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(b)
 	if strings.Contains(page, csrfPlaceholder) {
 		t.Error("placeholder was not substituted")
 	}

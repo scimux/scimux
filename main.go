@@ -317,15 +317,15 @@ func validContentType(r *http.Request) bool {
 // csrfIndex reads the embedded index page once and substitutes the per-process
 // CSRF token into its placeholder meta tag. The token is hex, so it is inert in
 // an HTML attribute; the page is served verbatim thereafter.
-func csrfIndex(fsys embed.FS) []byte {
-	b, err := fsys.ReadFile("web/index.html")
+func csrfIndex(fsys fs.FS) ([]byte, error) {
+	b, err := fs.ReadFile(fsys, "web/index.html")
 	if err != nil {
-		panic("embedded web/index.html missing: " + err.Error())
+		return nil, fmt.Errorf("embedded web/index.html missing: %w", err)
 	}
 	if !strings.Contains(string(b), csrfPlaceholder) {
-		panic("web/index.html is missing the " + csrfPlaceholder + " placeholder")
+		return nil, fmt.Errorf("web/index.html is missing the %s placeholder", csrfPlaceholder)
 	}
-	return []byte(strings.Replace(string(b), csrfPlaceholder, csrfToken, 1))
+	return []byte(strings.Replace(string(b), csrfPlaceholder, csrfToken, 1)), nil
 }
 
 const csrfPlaceholder = "__SCIMUX_CSRF__"
@@ -3506,56 +3506,11 @@ func main() {
 		a.refreshClaudeModels(ctx)
 	}()
 
-	mux := http.NewServeMux()
-	// The assets tree is compiled in; a Sub failure means the embed layout
-	// changed and must fail loudly at startup, not silently drop the route.
-	assets, err := fs.Sub(webFS, "web/assets")
+	handler, err := NewHandler(a, webFS)
 	if err != nil {
-		panic("embedded web/assets missing: " + err.Error())
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
 	}
-	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
-	indexHTML := csrfIndex(webFS)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		b := indexHTML
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// The UI is embedded in the binary and changes with every build;
-		// a cached copy after a scimux upgrade is a recurring dogfooding
-		// trap (especially iPad Safari). It's one small local page: always
-		// fetch fresh.
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(b)
-	})
-	mux.HandleFunc("GET /api/state", a.handleState)
-	mux.HandleFunc("GET /api/usage", a.handleUsage)
-	mux.HandleFunc("POST /api/nodes", a.handleNewNode)
-	mux.HandleFunc("PATCH /api/nodes/{id}", a.handleUpdateNode)
-	mux.HandleFunc("DELETE /api/nodes/{id}", a.handleDeleteNode)
-	mux.HandleFunc("POST /api/nodes/{id}/exit", a.handleExitNode)
-	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
-	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
-	mux.HandleFunc("POST /api/nodes/{id}/attachments", a.handleUploadAttachments)
-	mux.HandleFunc("GET /api/nodes/{id}/attachments/{name}", a.handleAttachment)
-	mux.HandleFunc("GET /api/nodes/{id}/assets/{assetID}", a.handleAsset)
-	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
-	mux.HandleFunc("POST /api/nodes/{id}/send/interrupt", a.handleSendInterrupt)
-	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
-	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
-	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)
-	mux.HandleFunc("GET /api/notes", a.handleNoteList)
-	mux.HandleFunc("POST /api/notes", a.handleNoteCreate)
-	mux.HandleFunc("GET /api/notes/{id}", a.handleNoteGet)
-	mux.HandleFunc("PATCH /api/notes/{id}", a.handleNotePatch)
-	mux.HandleFunc("DELETE /api/notes/{id}", a.handleNoteDelete)
-	mux.HandleFunc("POST /api/notes/{id}/sections/{sectionID}/references", a.handleNoteAddReference)
-	mux.HandleFunc("DELETE /api/notes/{id}/sections/{sectionID}/references/{refID}", a.handleNoteTrashReference)
-	mux.HandleFunc("GET /api/search", a.handleSearch)
-	mux.HandleFunc("GET /api/archived", a.handleArchived)
-	mux.HandleFunc("GET /api/agents", a.handleAgents)
-	mux.HandleFunc("GET /api/ui", a.handleUIGet)
-	mux.HandleFunc("PUT /api/ui", a.handleUIPut)
-	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
-	mux.HandleFunc("POST /api/update", a.handleUpdateApply)
-	mux.HandleFunc("GET /api/licenses", handleLicenses)
 
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)
@@ -3565,7 +3520,7 @@ func main() {
 	// ReadHeaderTimeout covers the attack that matters.
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           guardMutations(mux),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
