@@ -1,7 +1,7 @@
 // poller.go — mechanical poll loop: pane liveness, needs-input attention,
 // transcript discovery/relink, animation geometry, and tailer ownership.
-// Session-log projection lives in mirror.go; state HTTP projection stays in
-// main.go until Packet 3C.
+// Session-log projection lives in mirror.go; state HTTP projection lives in
+// state_api.go.
 package main
 
 import (
