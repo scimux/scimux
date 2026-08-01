@@ -7,45 +7,53 @@ import (
 	"testing"
 )
 
+// characterizationAPIRoute is the single route inventory for runtime OPTIONS/
+// Allow checks and the source/AST ownership audit (Packet 4F). method+pattern
+// must match router.go registrations; handler is the registered symbol name;
+// home is the expected single production definition file under package main.
 type characterizationAPIRoute struct {
 	method  string
 	pattern string
 	path    string
+	handler string
+	home    string
 }
 
 func characterizationAPIRoutes() []characterizationAPIRoute {
 	return []characterizationAPIRoute{
-		{http.MethodGet, "/api/state", "/api/state"},
-		{http.MethodGet, "/api/usage", "/api/usage"},
-		{http.MethodPost, "/api/nodes", "/api/nodes"},
-		{http.MethodPatch, "/api/nodes/{id}", "/api/nodes/node-1"},
-		{http.MethodDelete, "/api/nodes/{id}", "/api/nodes/node-1"},
-		{http.MethodPost, "/api/nodes/{id}/exit", "/api/nodes/node-1/exit"},
-		{http.MethodPost, "/api/adopt", "/api/adopt"},
-		{http.MethodPost, "/api/nodes/{id}/send", "/api/nodes/node-1/send"},
-		{http.MethodPost, "/api/nodes/{id}/attachments", "/api/nodes/node-1/attachments"},
-		{http.MethodGet, "/api/nodes/{id}/attachments/{name}", "/api/nodes/node-1/attachments/file.txt"},
-		{http.MethodGet, "/api/nodes/{id}/assets/{assetID}", "/api/nodes/node-1/assets/asset-1"},
-		{http.MethodPost, "/api/nodes/{id}/send/resolve", "/api/nodes/node-1/send/resolve"},
-		{http.MethodPost, "/api/nodes/{id}/send/interrupt", "/api/nodes/node-1/send/interrupt"},
-		{http.MethodPost, "/api/nodes/{id}/key", "/api/nodes/node-1/key"},
-		{http.MethodGet, "/api/nodes/{id}/chat", "/api/nodes/node-1/chat"},
-		{http.MethodGet, "/api/nodes/{id}/peek", "/api/nodes/node-1/peek"},
-		{http.MethodGet, "/api/notes", "/api/notes"},
-		{http.MethodPost, "/api/notes", "/api/notes"},
-		{http.MethodGet, "/api/notes/{id}", "/api/notes/note-1"},
-		{http.MethodPatch, "/api/notes/{id}", "/api/notes/note-1"},
-		{http.MethodDelete, "/api/notes/{id}", "/api/notes/note-1"},
-		{http.MethodPost, "/api/notes/{id}/sections/{sectionID}/references", "/api/notes/note-1/sections/section-1/references"},
-		{http.MethodDelete, "/api/notes/{id}/sections/{sectionID}/references/{refID}", "/api/notes/note-1/sections/section-1/references/ref-1"},
-		{http.MethodGet, "/api/search", "/api/search"},
-		{http.MethodGet, "/api/archived", "/api/archived"},
-		{http.MethodGet, "/api/agents", "/api/agents"},
-		{http.MethodGet, "/api/ui", "/api/ui"},
-		{http.MethodPut, "/api/ui", "/api/ui"},
-		{http.MethodGet, "/api/update/check", "/api/update/check"},
-		{http.MethodPost, "/api/update", "/api/update"},
-		{http.MethodGet, "/api/licenses", "/api/licenses"},
+		// Order matches router.go HandleFunc registrations exactly.
+		// Homes: extracted (*_api.go / security.go) vs retained feature files.
+		{http.MethodGet, "/api/state", "/api/state", "handleState", "state_api.go"},                                                                                                     // extracted
+		{http.MethodGet, "/api/usage", "/api/usage", "handleUsage", "usage.go"},                                                                                                         // retained
+		{http.MethodPost, "/api/nodes", "/api/nodes", "handleNewNode", "node_api.go"},                                                                                                   // extracted
+		{http.MethodPatch, "/api/nodes/{id}", "/api/nodes/node-1", "handleUpdateNode", "node_api.go"},                                                                                   // extracted
+		{http.MethodDelete, "/api/nodes/{id}", "/api/nodes/node-1", "handleDeleteNode", "node_api.go"},                                                                                  // extracted
+		{http.MethodPost, "/api/nodes/{id}/exit", "/api/nodes/node-1/exit", "handleExitNode", "node_api.go"},                                                                            // extracted
+		{http.MethodPost, "/api/adopt", "/api/adopt", "handleAdopt", "node_api.go"},                                                                                                     // extracted
+		{http.MethodPost, "/api/nodes/{id}/send", "/api/nodes/node-1/send", "handleSend", "conversation_api.go"},                                                                        // extracted
+		{http.MethodPost, "/api/nodes/{id}/attachments", "/api/nodes/node-1/attachments", "handleUploadAttachments", "attachment_api.go"},                                               // extracted
+		{http.MethodGet, "/api/nodes/{id}/attachments/{name}", "/api/nodes/node-1/attachments/file.txt", "handleAttachment", "attachment_api.go"},                                       // extracted
+		{http.MethodGet, "/api/nodes/{id}/assets/{assetID}", "/api/nodes/node-1/assets/asset-1", "handleAsset", "attachment_api.go"},                                                    // extracted
+		{http.MethodPost, "/api/nodes/{id}/send/resolve", "/api/nodes/node-1/send/resolve", "handleSendResolve", "conversation_api.go"},                                                 // extracted
+		{http.MethodPost, "/api/nodes/{id}/send/interrupt", "/api/nodes/node-1/send/interrupt", "handleSendInterrupt", "conversation_api.go"},                                           // extracted
+		{http.MethodPost, "/api/nodes/{id}/key", "/api/nodes/node-1/key", "handleKey", "conversation_api.go"},                                                                           // extracted
+		{http.MethodGet, "/api/nodes/{id}/chat", "/api/nodes/node-1/chat", "handleChat", "conversation_api.go"},                                                                         // extracted
+		{http.MethodGet, "/api/nodes/{id}/peek", "/api/nodes/node-1/peek", "handlePeek", "conversation_api.go"},                                                                         // extracted
+		{http.MethodGet, "/api/notes", "/api/notes", "handleNoteList", "notes.go"},                                                                                                      // retained
+		{http.MethodPost, "/api/notes", "/api/notes", "handleNoteCreate", "notes.go"},                                                                                                   // retained
+		{http.MethodGet, "/api/notes/{id}", "/api/notes/note-1", "handleNoteGet", "notes.go"},                                                                                           // retained
+		{http.MethodPatch, "/api/notes/{id}", "/api/notes/note-1", "handleNotePatch", "notes.go"},                                                                                       // retained
+		{http.MethodDelete, "/api/notes/{id}", "/api/notes/note-1", "handleNoteDelete", "notes.go"},                                                                                     // retained
+		{http.MethodPost, "/api/notes/{id}/sections/{sectionID}/references", "/api/notes/note-1/sections/section-1/references", "handleNoteAddReference", "notes.go"},                   // retained
+		{http.MethodDelete, "/api/notes/{id}/sections/{sectionID}/references/{refID}", "/api/notes/note-1/sections/section-1/references/ref-1", "handleNoteTrashReference", "notes.go"}, // retained
+		{http.MethodGet, "/api/search", "/api/search", "handleSearch", "search.go"},                                                                                                     // retained
+		{http.MethodGet, "/api/archived", "/api/archived", "handleArchived", "archived.go"},                                                                                             // retained
+		{http.MethodGet, "/api/agents", "/api/agents", "handleAgents", "agents.go"},                                                                                                     // retained
+		{http.MethodGet, "/api/ui", "/api/ui", "handleUIGet", "ui_state_api.go"},                                                                                                        // extracted
+		{http.MethodPut, "/api/ui", "/api/ui", "handleUIPut", "ui_state_api.go"},                                                                                                        // extracted
+		{http.MethodGet, "/api/update/check", "/api/update/check", "handleUpdateCheck", "update.go"},                                                                                    // retained
+		{http.MethodPost, "/api/update", "/api/update", "handleUpdateApply", "update.go"},                                                                                               // retained
+		{http.MethodGet, "/api/licenses", "/api/licenses", "handleLicenses", "update.go"},                                                                                               // retained
 	}
 }
 
