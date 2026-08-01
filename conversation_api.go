@@ -12,8 +12,8 @@
 //     audit success contract is unchanged.
 //   - Peek may only raise corroborated attention (never overwrite/clear).
 //   - Router registration stays in router.go; procManager owns protocol
-//     branching; attachment helpers remain in main.go until Packet 4C;
-//     decodeJSON/writeJSON stay until Packet 4E.
+//     branching; attachment helpers live in attachment_api.go; shared request
+//     decoding and JSON response encoding live in security.go.
 package main
 
 import (

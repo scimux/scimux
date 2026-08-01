@@ -11,7 +11,7 @@
 //   - Response encoding (ETag header + writeJSON) occurs after the successful
 //     atomic replace; the existing contract deliberately does not fsync.
 //   - uiMu/uiPath fields and construction remain in app.go; router registration
-//     remains in router.go; writeJSON stays in main.go until Packet 4E.
+//     remains in router.go; shared JSON response encoding lives in security.go.
 //   - search.go's read-only bookmark scan of uiPath is unchanged.
 package main
 

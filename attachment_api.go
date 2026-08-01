@@ -11,7 +11,7 @@
 //   - node_api.go retains delete sequencing and calls the best-effort
 //     archiveAttachments/archiveAssets helpers only after removeNodeLocked.
 //   - Router registration stays in router.go; outer CSRF/origin/content-type
-//     multipart decisions stay in main.go until Packet 4E.
+//     multipart decisions live in security.go.
 //   - node/refuseEnded, send/chat projection stay in conversation_api.go;
 //     agent-generated path scanning stays in agent_asset.go/internal/asset.
 package main
