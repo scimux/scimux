@@ -15,6 +15,9 @@ func TestWebFSEmbeddedProductionFiles(t *testing.T) {
 		"web/assets/agents/opencode.svg",
 		"web/assets/agents/pi.svg",
 		"web/css/base.css",
+		"web/css/cards.css",
+		"web/css/layout.css",
+		"web/css/map.css",
 		"web/css/tokens.css",
 		"web/index.html",
 	}

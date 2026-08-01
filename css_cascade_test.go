@@ -750,3 +750,294 @@ func TestProductionTokensAndBaseCSSServing(t *testing.T) {
 		}
 	})
 }
+
+// --- Packet 5C: layout + cards + map extraction ------------------------------
+
+// fiveLinkCSSPrefix is the permanent linked stylesheet prefix established by
+// Packet 5C (tokens → base → layout → cards → map). Later packets may extend
+// the prefix further; ownership tests that require exactly these five links
+// must condition on this length so they stay valid after 5D–5F.
+var fiveLinkCSSPrefix = []string{
+	"/css/tokens.css",
+	"/css/base.css",
+	"/css/layout.css",
+	"/css/cards.css",
+	"/css/map.css",
+}
+
+// TestProductionLayoutCardsMapCSSOwnership locks the 5C extraction boundary:
+// layout, cards, and map are the third–fifth linked sheets; each file owns its
+// original contiguous section; moved signatures are absent from the surviving
+// inline source; and cascade order is tokens → base → layout → cards → map → chat.
+func TestProductionLayoutCardsMapCSSOwnership(t *testing.T) {
+	html := mustReadIndex(t)
+	hrefs, err := linkedStylesheetHrefs(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hrefs) < 5 {
+		t.Fatalf("linked stylesheets = %v, want at least the five-link prefix %v", hrefs, fiveLinkCSSPrefix)
+	}
+	for i, want := range fiveLinkCSSPrefix {
+		if hrefs[i] != want {
+			t.Fatalf("linked[%d]=%q, want %q (five-link prefix %v)", i, hrefs[i], want, fiveLinkCSSPrefix)
+		}
+	}
+
+	layout, err := fs.ReadFile(webFS, "web/css/layout.css")
+	if err != nil {
+		t.Fatalf("layout.css missing from embed: %v", err)
+	}
+	cards, err := fs.ReadFile(webFS, "web/css/cards.css")
+	if err != nil {
+		t.Fatalf("cards.css missing from embed: %v", err)
+	}
+	mapCSS, err := fs.ReadFile(webFS, "web/css/map.css")
+	if err != nil {
+		t.Fatalf("map.css missing from embed: %v", err)
+	}
+	lay := string(layout)
+	car := string(cards)
+	mp := string(mapCSS)
+
+	// layout.css: statusbar, search, app-shell, pane transition, scrim, heading, tabs.
+	for _, sig := range []string{
+		"/* ---------- statusbar ---------- */",
+		"#statusbar",
+		"/* ---------- search overlay:",
+		"#searchoverlay",
+		"#searchscrim",
+		"/* ---------- app shell:",
+		"#app {",
+		"#cards {",
+		"#map {",
+		"transform: translateX(-103%);",
+		"#scrim {",
+		".phead {",
+		"/* ---------- browser-style tab rows",
+		".tabs {",
+	} {
+		if !strings.Contains(lay, sig) {
+			t.Fatalf("layout.css missing signature %q", sig)
+		}
+	}
+	// cards.css: card states, pinned/attention/working, actions, fold, empty.
+	for _, sig := range []string{
+		"/* ---------- cards ---------- */",
+		".card {",
+		".card.attention {",
+		".card.working {",
+		".card .actions",
+		".card .pinflag",
+		"@keyframes attentionPulse",
+		".attnfold {",
+		".empty { padding: 60px 20px;",
+	} {
+		if !strings.Contains(car, sig) {
+			t.Fatalf("cards.css missing signature %q", sig)
+		}
+	}
+	// map.css: metro, lane, station, stop, wall-map, map-toolbar.
+	for _, sig := range []string{
+		"/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */",
+		"#mapscroll",
+		".lhead {",
+		".lbody {",
+		".strow {",
+		".strow.stoprow",
+		"/* wall map:",
+		"#maptoolbar",
+		"body.map-full #maptoolbar.on",
+		".lanechip",
+	} {
+		if !strings.Contains(mp, sig) {
+			t.Fatalf("map.css missing signature %q", sig)
+		}
+	}
+
+	// Cross-file rejection: each new file rejects section markers and
+	// representative signatures owned by the other two files and by deferred
+	// chat/sheets/notes concerns. (A few cross-root selectors such as
+	// #chathead .dot.active historically lived inside the cards block; those
+	// travel with their original contiguous section and are not rejections.)
+	layoutReject := []string{
+		"/* ---------- cards ---------- */",
+		".card.attention {",
+		"/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */",
+		"#maptoolbar",
+		"/* ---------- chat ---------- */",
+		"/* ---------- sheets ---------- */",
+		".sheet {",
+		"/* ---------- sticky-notes pane:",
+		"/* ---------- Notes workspace:",
+	}
+	for _, bad := range layoutReject {
+		if strings.Contains(lay, bad) {
+			t.Fatalf("layout.css must not contain %q", bad)
+		}
+	}
+	cardsReject := []string{
+		"/* ---------- statusbar ---------- */",
+		"/* ---------- search overlay:",
+		"/* ---------- app shell:",
+		"/* ---------- browser-style tab rows",
+		"/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */",
+		"#maptoolbar",
+		"/* ---------- chat ---------- */",
+		"/* ---------- sheets ---------- */",
+		"/* ---------- sticky-notes pane:",
+		"/* ---------- Notes workspace:",
+	}
+	for _, bad := range cardsReject {
+		if strings.Contains(car, bad) {
+			t.Fatalf("cards.css must not contain %q", bad)
+		}
+	}
+	mapReject := []string{
+		"/* ---------- statusbar ---------- */",
+		"/* ---------- cards ---------- */",
+		".card.attention {",
+		"/* ---------- chat ---------- */",
+		"/* ---------- sheets ---------- */",
+		"/* ---------- sticky-notes pane:",
+		"/* ---------- Notes workspace:",
+		"#bookmarkspane",
+	}
+	for _, bad := range mapReject {
+		if strings.Contains(mp, bad) {
+			t.Fatalf("map.css must not contain %q", bad)
+		}
+	}
+
+	// Surviving inline style (while present).
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inline string
+	for _, src := range sources {
+		if src.kind == cssSourceInline {
+			inline = src.text
+			break
+		}
+	}
+
+	// Five-link state: nonempty inline begins exactly at the chat section.
+	// Later packets extend the prefix and eventually remove the inline source
+	// without weakening the permanent ownership assertions above.
+	if len(hrefs) == 5 {
+		if inline == "" {
+			t.Fatal("5C five-link state must retain the inline style")
+		}
+		trimmed := strings.TrimLeft(inline, "\n\r\t ")
+		if !strings.HasPrefix(trimmed, "/* ---------- chat ---------- */") {
+			head := trimmed
+			if len(head) > 80 {
+				head = head[:80]
+			}
+			t.Fatalf("5C inline style must begin at chat section; starts with %q", head)
+		}
+	}
+
+	// Moved layout/cards/map signatures must no longer remain inline.
+	for _, moved := range []string{
+		"/* ---------- statusbar ---------- */",
+		"/* ---------- search overlay:",
+		"/* ---------- app shell:",
+		"/* ---------- browser-style tab rows",
+		"/* ---------- cards ---------- */",
+		".card.attention {",
+		"/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */",
+		"#maptoolbar {",
+	} {
+		if strings.Contains(inline, moved) {
+			t.Fatalf("moved signature %q still present in inline style", moved)
+		}
+	}
+
+	// Assembled cascade order: tokens → base → layout → cards → map → chat.
+	cascade := mustCSSCascade(t, html, webFS)
+	markers := []struct {
+		name string
+		sig  string
+	}{
+		{"tokens", "/* ---------- design tokens"},
+		{"base", "* { box-sizing: border-box;"},
+		{"layout", "/* ---------- statusbar ---------- */"},
+		{"cards", "/* ---------- cards ---------- */"},
+		{"map", "/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */"},
+		{"chat", "/* ---------- chat ---------- */"},
+	}
+	prev := -1
+	prevName := ""
+	for _, m := range markers {
+		idx := strings.Index(cascade, m.sig)
+		if idx < 0 {
+			t.Fatalf("cascade missing %s marker %q", m.name, m.sig)
+		}
+		if prev >= 0 && !(prev < idx) {
+			t.Fatalf("cascade order wrong: %s@%d must precede %s@%d", prevName, prev, m.name, idx)
+		}
+		prev = idx
+		prevName = m.name
+	}
+}
+
+// TestProductionLayoutCardsMapCSSServing activates the 5A exact-byte, content-
+// type, cache, nosniff, and negative-path contracts for the three new linked files.
+func TestProductionLayoutCardsMapCSSServing(t *testing.T) {
+	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+
+	for _, href := range []string{"/css/layout.css", "/css/cards.css", "/css/map.css"} {
+		t.Run("ok"+href, func(t *testing.T) {
+			embedPath, err := stylesheetEmbedPath(href)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := fs.ReadFile(webFS, embedPath)
+			if err != nil {
+				t.Fatalf("read embed %s: %v", embedPath, err)
+			}
+			rec := getCharacterization(t, h, href)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status=%d, want 200; body=%q", href, rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
+				t.Fatalf("GET %s Content-Type=%q, want %q", href, got, "text/css; charset=utf-8")
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("GET %s Cache-Control=%q, want no-store", href, got)
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("GET %s X-Content-Type-Options=%q, want nosniff", href, got)
+			}
+			if rec.Body.String() != string(want) {
+				t.Fatalf("GET %s body differs from embedded %s (%d vs %d bytes)", href, embedPath, rec.Body.Len(), len(want))
+			}
+		})
+	}
+
+	for _, path := range []string{
+		"/css/",
+		"/css/missing.css",
+		"/css/sub/layout.css",
+		"/css/%2e%2e/layout.css",
+		"/css/layout.txt",
+		"/css/layout.css.bak",
+		"/web/css/layout.css",
+		"/web/css/cards.css",
+		"/web/css/map.css",
+		"/web/css/",
+	} {
+		t.Run("404"+path, func(t *testing.T) {
+			rec := getCharacterization(t, h, path)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s status=%d, want 404; body=%q", path, rec.Code, rec.Body.String())
+			}
+			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+				t.Fatalf("GET %s exposed a directory listing", path)
+			}
+			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
+		})
+	}
+}
