@@ -164,6 +164,8 @@ func TestNewHandlerConstructsCurrentStaticBehavior(t *testing.T) {
 }
 
 func TestNewHandlerValidationErrors(t *testing.T) {
+	// Each fixture is complete enough to pass every check before the intended
+	// failure so cases stay independently meaningful.
 	tests := []struct {
 		name string
 		web  fs.FS
@@ -172,12 +174,14 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			name: "missing index",
 			web: fstest.MapFS{
 				"web/assets": {Mode: fs.ModeDir},
+				"web/css":    {Mode: fs.ModeDir},
 			},
 		},
 		{
 			name: "missing assets",
 			web: fstest.MapFS{
 				"web/index.html": {Data: []byte(csrfPlaceholder)},
+				"web/css":        {Mode: fs.ModeDir},
 			},
 		},
 		{
@@ -185,6 +189,22 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			web: fstest.MapFS{
 				"web/index.html": {Data: []byte(csrfPlaceholder)},
 				"web/assets":     {Data: []byte("not a dir")},
+				"web/css":        {Mode: fs.ModeDir},
+			},
+		},
+		{
+			name: "missing css",
+			web: fstest.MapFS{
+				"web/index.html": {Data: []byte(csrfPlaceholder)},
+				"web/assets":     {Mode: fs.ModeDir},
+			},
+		},
+		{
+			name: "css not directory",
+			web: fstest.MapFS{
+				"web/index.html": {Data: []byte(csrfPlaceholder)},
+				"web/assets":     {Mode: fs.ModeDir},
+				"web/css":        {Data: []byte("not a dir")},
 			},
 		},
 		{
@@ -192,6 +212,7 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			web: fstest.MapFS{
 				"web/index.html": {Data: []byte("<html></html>")},
 				"web/assets":     {Mode: fs.ModeDir},
+				"web/css":        {Mode: fs.ModeDir},
 			},
 		},
 	}

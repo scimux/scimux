@@ -10,68 +10,9 @@
 <meta name="theme-color" content="#161618" media="(prefers-color-scheme: dark)">
 <link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%231C1C1E"/><path d="M18 12v40M32 12v40M46 12v40" stroke="%23007AFF" stroke-width="4" stroke-linecap="round"/><circle cx="18" cy="22" r="6" fill="%2334C759"/><circle cx="32" cy="34" r="6" fill="%23FF2D55"/><circle cx="46" cy="44" r="6" fill="%23AF52DE"/></svg>'>
 <title>scimux</title>
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/css/base.css">
 <style>
-/* ---------- design tokens (HIG-derived; see experimental-dashboard/demo) ---------- */
-:root {
-  --bg:        #F5F4F1;   /* warm paper */
-  --surface:   #FFFFFF;
-  --ink:       #1C1C1E;
-  --dim:       #6C6C70;   /* ≥4.5:1 on --bg/--surface (WCAG AA for caption text) */
-  --hairline:  rgba(60,60,67,.14);
-  --attn:      #FFCC00;   /* systemYellow — needs you; reserved for attention only */
-  --attn-rgb:  255, 204, 0;
-  --bad:       #FF3B30;   /* systemRed — error/exited */
-  --work:      #0E7C86;   /* petrol accent — agent working */
-  --work-rgb:  14, 124, 134;
-  --unlane:    #C7C7CC;   /* adaptive systemGray3-style unassigned lane */
-  --sb-bg:     rgba(245,244,241,.88);
-  --code-bg:   rgba(60,60,67,.08);
-  --th-bg:     rgba(60,60,67,.05);
-  --journey-alt-bg: rgba(60,60,67,.03);
-  --sbh:       44px;
-  --radius:    12px;
-  /* peek: the strip of the neighbour pane a top pane leaves exposed, so the
-     user sees where "back" is (pane-gap-design.md). A deliberate token, not the
-     leftover of #cards' old min(86%,380px) sidebar width. 44px floor keeps it a
-     tappable back control on the narrowest phone; 60px cap stops it wasting
-     width on iPad/Pro Max. Baked into each pane's width so gaps never pile up. */
-  --peek:      clamp(44px, 12%, 60px);
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:       #161618;
-    --surface:  #242428;
-    --ink:      #F2F2F7;
-    --dim:      #A0A0A6;  /* ≥4.5:1 on the dark surfaces */
-    --hairline: rgba(84,84,88,.48);
-    --attn:     #FFD60A;
-    --attn-rgb: 255, 214, 10;
-    --bad:      #FF453A;
-    --work:     #2FA7B4;
-    --work-rgb: 47, 167, 180;
-    --unlane:   #48484A;
-    --sb-bg:    rgba(22,22,24,.88);
-    --code-bg:  rgba(255,255,255,.09);
-    --th-bg:    rgba(255,255,255,.05);
-    --journey-alt-bg: rgba(255,255,255,.05);
-  }
-}
-* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { height: 100%;
-  /* reading flows one axis: nothing may widen the pannable area. clip (not
-     hidden) forbids horizontal panning without creating a scroll container —
-     the notes sheet parked offscreen right (translateX) must never do what
-     the cards sheet offscreen left cannot (negative coords are unreachable). */
-  overflow-x: clip; overscroll-behavior-x: none; }
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font: 17px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  overscroll-behavior: none;
-}
-button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
-
 /* ---------- statusbar ---------- */
 #statusbar {
   position: fixed; top: 0; left: 0; right: 0; z-index: 40;

@@ -537,3 +537,216 @@ func TestProductionCSSNegativeRootsPreserved(t *testing.T) {
 		})
 	}
 }
+
+// --- Packet 5B: tokens + base extraction ------------------------------------
+
+// TestProductionTokensAndBaseCSSOwnership locks the 5B extraction boundary:
+// tokens.css and base.css are the first two linked sheets; token and reset
+// rules live only in those files; the surviving inline style begins at
+// statusbar; cascade order is tokens → base → statusbar.
+func TestProductionTokensAndBaseCSSOwnership(t *testing.T) {
+	html := mustReadIndex(t)
+	hrefs, err := linkedStylesheetHrefs(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hrefs) < 2 {
+		t.Fatalf("linked stylesheets = %v, want at least tokens and base", hrefs)
+	}
+	if hrefs[0] != "/css/tokens.css" || hrefs[1] != "/css/base.css" {
+		t.Fatalf("first two linked stylesheets = %q, %q; want /css/tokens.css, /css/base.css", hrefs[0], hrefs[1])
+	}
+	tokens, err := fs.ReadFile(webFS, "web/css/tokens.css")
+	if err != nil {
+		t.Fatalf("tokens.css missing from embed: %v", err)
+	}
+	base, err := fs.ReadFile(webFS, "web/css/base.css")
+	if err != nil {
+		t.Fatalf("base.css missing from embed: %v", err)
+	}
+	tok := string(tokens)
+	bas := string(base)
+
+	// tokens.css: complete light/dark custom properties including --peek.
+	for _, sig := range []string{
+		"/* ---------- design tokens",
+		":root {",
+		"--peek:",
+		"clamp(44px, 12%, 60px)",
+		"@media (prefers-color-scheme: dark)",
+		"--bg:",
+		"--surface:",
+		"--ink:",
+		"--sbh:",
+	} {
+		if !strings.Contains(tok, sig) {
+			t.Fatalf("tokens.css missing signature %q", sig)
+		}
+	}
+	// base.css: only the original reset/global element rules.
+	for _, sig := range []string{
+		"* { box-sizing: border-box;",
+		"html, body { height: 100%;",
+		"body {",
+		"button { font: inherit;",
+	} {
+		if !strings.Contains(bas, sig) {
+			t.Fatalf("base.css missing signature %q", sig)
+		}
+	}
+	// base must not absorb design tokens or later component sections.
+	for _, bad := range []string{
+		"/* ---------- design tokens",
+		"--peek:",
+		"/* ---------- statusbar ---------- */",
+		"#statusbar",
+		"/* ---------- search",
+	} {
+		if strings.Contains(bas, bad) {
+			t.Fatalf("base.css must not contain %q", bad)
+		}
+	}
+	// tokens must not absorb element reset rules or later sections.
+	for _, bad := range []string{
+		"* { box-sizing: border-box;",
+		"button { font: inherit;",
+		"/* ---------- statusbar ---------- */",
+		"#statusbar",
+	} {
+		if strings.Contains(tok, bad) {
+			t.Fatalf("tokens.css must not contain %q", bad)
+		}
+	}
+
+	// Surviving inline style begins at the statusbar section.
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inline string
+	for _, src := range sources {
+		if src.kind == cssSourceInline {
+			inline = src.text
+			break
+		}
+	}
+	// While 5B is the current two-link prefix, the surviving inline style must
+	// begin exactly at statusbar. Later packets extend the prefix and eventually
+	// remove the inline source without weakening the permanent tokens/base
+	// ownership assertions below.
+	if len(hrefs) == 2 {
+		if inline == "" {
+			t.Fatal("5B two-link state must retain the inline style")
+		}
+		trimmed := strings.TrimLeft(inline, "\n\r\t ")
+		if !strings.HasPrefix(trimmed, "/* ---------- statusbar ---------- */") {
+			head := trimmed
+			if len(head) > 80 {
+				head = head[:80]
+			}
+			t.Fatalf("5B inline style must begin at statusbar section; starts with %q", head)
+		}
+	}
+
+	// Moved token/base signatures must no longer remain inline.
+	for _, moved := range []string{
+		"/* ---------- design tokens",
+		"--peek:",
+		"* { box-sizing: border-box;",
+		"button { font: inherit;",
+	} {
+		if strings.Contains(inline, moved) {
+			t.Fatalf("moved signature %q still present in inline style", moved)
+		}
+	}
+
+	// Assembled cascade order: tokens → base → statusbar (inline).
+	cascade := mustCSSCascade(t, html, webFS)
+	ti := strings.Index(cascade, "/* ---------- design tokens")
+	bi := strings.Index(cascade, "* { box-sizing: border-box;")
+	si := strings.Index(cascade, "/* ---------- statusbar ---------- */")
+	if ti < 0 || bi < 0 || si < 0 {
+		t.Fatalf("cascade missing tokens/base/statusbar markers: ti=%d bi=%d si=%d", ti, bi, si)
+	}
+	if !(ti < bi && bi < si) {
+		t.Fatalf("cascade order wrong: tokens@%d base@%d statusbar@%d (want tokens < base < statusbar)", ti, bi, si)
+	}
+}
+
+// TestProductionTokensAndBaseCSSServing activates the 5A exact-byte, content-
+// type, cache, nosniff, and negative-path contracts for the two linked files.
+func TestProductionTokensAndBaseCSSServing(t *testing.T) {
+	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+
+	for _, href := range []string{"/css/tokens.css", "/css/base.css"} {
+		t.Run("ok"+href, func(t *testing.T) {
+			embedPath, err := stylesheetEmbedPath(href)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := fs.ReadFile(webFS, embedPath)
+			if err != nil {
+				t.Fatalf("read embed %s: %v", embedPath, err)
+			}
+			rec := getCharacterization(t, h, href)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status=%d, want 200; body=%q", href, rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
+				t.Fatalf("GET %s Content-Type=%q, want %q", href, got, "text/css; charset=utf-8")
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("GET %s Cache-Control=%q, want no-store", href, got)
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("GET %s X-Content-Type-Options=%q, want nosniff", href, got)
+			}
+			if rec.Body.String() != string(want) {
+				t.Fatalf("GET %s body differs from embedded %s (%d vs %d bytes)", href, embedPath, rec.Body.Len(), len(want))
+			}
+		})
+	}
+
+	// Negatives: root, missing, nested, encoded traversal, non-CSS, and raw
+	// /web/css/... paths. Never a directory listing or CSS body.
+	for _, path := range []string{
+		"/css/",
+		"/css/missing.css",
+		"/css/sub/tokens.css",
+		"/css/%2e%2e/tokens.css",
+		"/css/%2e%2e/index.html",
+		"/css/tokens.txt",
+		"/css/tokens.css.bak",
+		"/css/readme.md",
+		"/web/css/tokens.css",
+		"/web/css/base.css",
+		"/web/css/",
+	} {
+		t.Run("404"+path, func(t *testing.T) {
+			rec := getCharacterization(t, h, path)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s status=%d, want 404; body=%q", path, rec.Code, rec.Body.String())
+			}
+			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+				t.Fatalf("GET %s exposed a directory listing", path)
+			}
+			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
+		})
+	}
+
+	// Bare ".." segments are cleaned by net/http.ServeMux into a permanent
+	// redirect before any route handler runs. That must never surface CSS
+	// bytes; following the redirect also fails closed (no /tokens.css route).
+	t.Run("traversal-dotdot-not-served", func(t *testing.T) {
+		rec := getCharacterization(t, h, "/css/../tokens.css")
+		if rec.Code == http.StatusOK {
+			t.Fatalf("GET /css/../tokens.css status=200, want non-OK; body=%q", rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "--peek:") || strings.Contains(rec.Body.String(), "box-sizing: border-box") {
+			t.Fatalf("traversal path served CSS content: status=%d body=%q", rec.Code, rec.Body.String())
+		}
+		if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+			t.Fatal("traversal path exposed a directory listing")
+		}
+	})
+}

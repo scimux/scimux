@@ -13,6 +13,7 @@ func NewHandler(a *app, web fs.FS) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /assets/", webHandlers.assets)
+	mux.Handle("GET /css/", webHandlers.css)
 	mux.Handle("GET /{$}", webHandlers.index)
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("GET /api/usage", a.handleUsage)
