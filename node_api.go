@@ -5,8 +5,8 @@
 //   - Validation, resolve/create/launch, process/session discovery, and
 //     closeOwned stay in node_lifecycle.go; these handlers only sequence them.
 //   - Store append/replay and session-log archival stay in store.go.
-//   - Attachment/asset archive helpers remain with the attachment concern
-//     until Packet 4C; delete only sequences a.archiveAttachments/Assets.
+//   - Attachment/asset archive helpers live in attachment_api.go; delete only
+//     sequences a.archiveAttachments/Assets after removeNodeLocked.
 //   - a.mu: adopt holds the lock across taken-checks, path claim, persist,
 //     and publish; create releases before createNode (which manages its own
 //     lock); update holds through node mutation/persist except the station

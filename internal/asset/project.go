@@ -11,7 +11,7 @@ import (
 // attachRefRE matches the plain-text attachment marker extendPrompt appends
 // to a delivered user turn ("[attached image: /abs/path]" / "[attached
 // file: /abs/path]") — the literal text mirrored/recorded turns carry (see
-// extendPrompt in main.go), not Markdown, so it needs its own pattern
+// extendPrompt in attachment_api.go), not Markdown, so it needs its own pattern
 // rather than reusing ScanMarkdown.
 var attachRefRE = regexp.MustCompile(`\[attached (image|file): ([^\]]+)\]`)
 
