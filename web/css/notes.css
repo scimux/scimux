@@ -1,0 +1,385 @@
+/* ---------- sticky-notes pane: lab-notebook stickies on the right.
+   Present on every device: phone slides it over the chat as a full-width
+   sheet (see below), desktop/iPad dock it as a trailing column. The full-size
+   Notes/Sheets workspace is the part still to come (see notes-design.md).
+   The › toggle in the chat title bar points at the edge it reveals, the
+   same idiom as the ‹ journeys button on the left. */
+/* phone: the pane slides over the chat from the right (full-width sheet);
+   desktop/iPad docks it as a trailing column (see the min-width block) */
+#bookmarkspane { position: fixed; z-index: 40; display: flex;
+  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; right: 0;
+  width: calc(100% - var(--peek)); background: var(--bg);  /* right-anchored: peek on the left */
+  /* top+bottom define the height; .panel's height:100% would overflow the
+     viewport by the status-bar offset and hide the composer */
+  height: auto;
+  transform: translateX(103%); transition: transform .25s;
+  box-shadow: -12px 0 30px rgba(0,0,0,.25); }
+body.bookmarks-open #bookmarkspane { transform: translateX(0); }
+/* the Bookmarks pane's left peek, as a tap-catcher: one peek wide, under the
+   pane (z40) but over the chat it exposes, so a tap there steps back to chat
+   (P3, pane-gap-design.md). Transparent — the peek shows the live chat, not a
+   dim; only the left panes' modal scrim dims. Phone/tablet only. */
+#bookmarkpeek {
+  position: fixed; z-index: 39; left: 0; width: var(--peek);
+  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0;
+  display: none;
+}
+body.bookmarks-open #bookmarkpeek { display: block; }
+#bookmarksbtn { font-size: 22px; color: var(--work); }
+/* the "Notes ›" forward link: same petrol nav-link idiom as the ‹/› back links
+   (.backbtn, 16px), not a .backbtn (that class is display:none on desktop, but
+   this is the only way to reach the Notes workspace there) */
+#notesbtn { color: var(--work); font-size: 16px; white-space: nowrap; }
+/* the flags stack on the right edge, thumb-sized (44pt), lane-colored;
+   hidden while the pane is open (the notebook is already unfolded) */
+#bookmarkflags { display: none; position: fixed; z-index: 25; right: 0;
+  top: calc(var(--sbh) + env(safe-area-inset-top) + 80px);
+  flex-direction: column; gap: 8px; }
+#bookmarkflags button { width: 15px; height: 44px; border-radius: 8px 0 0 8px;
+  opacity: .85; transition: width .15s; }
+#bookmarkflags button:hover { width: 22px; opacity: 1; }
+#bookmarktabs { border-bottom: 1px solid var(--hairline); }
+#bookmarklist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: clip;
+  padding: 6px 14px 12px;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.bookmark { margin: 12px 0; }
+.bookmark .when { font-size: 11px; color: var(--dim); margin: 0 0 3px 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bookmark .nbubble { background: var(--surface); border-radius: 10px; padding: 8px 11px;
+  font-size: 13.5px; line-height: 1.45; border-left: 3px solid var(--unlane);
+  overflow-wrap: break-word; }
+/* a tall noted bubble is clamped behind "Show more"; the mask fades the cut
+   edge without a wrapper element (overflow:hidden would clip a ::after) */
+.bookmark .nbubble.clamped { max-height: 220px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 78%, transparent);
+  mask-image: linear-gradient(#000 78%, transparent); }
+.bookmark .nmore { margin: 4px 2px 0; padding: 2px 0; background: none; border: 0;
+  font-size: 12px; color: var(--dim); cursor: pointer; }
+.bookmark .nmore:active { color: var(--work); }
+.bookmarkactions { display: flex; gap: 8px; padding: 6px 2px 0; }
+.bookmarkactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; background: var(--surface); }
+.bookmarkactions button:active { color: var(--work); }
+/* jump-to-source lands here: briefly ring the target bubble */
+.turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
+/* transient notice (jump-to-source misses); fixed so polled rebuilds can't wipe it */
+#toast { position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom));
+  transform: translateX(-50%); max-width: min(86vw, 420px); z-index: 60;
+  background: var(--ink); color: var(--bg); font-size: 13px; line-height: 1.4;
+  padding: 8px 14px; border-radius: 12px; text-align: center; pointer-events: none; }
+/* comments sort at their anchor and read as a scribble under the sticky */
+.bookmark.comment { margin: 8px 0 8px 26px; }
+#bookmarksback { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bookmarkbar { border-top: 1px solid var(--hairline); background: var(--bg);
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); }
+#chathead .toprow, #chatmission { cursor: pointer; }
+#bookmarkbarrow { display: flex; align-items: flex-end; gap: 8px; }
+#bookmarkchip { display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  padding: 4px 6px 4px 10px; border-radius: 12px; font-size: 12.5px; color: var(--dim);
+  background: color-mix(in srgb, var(--work) 12%, transparent);
+  border-left: 3px solid var(--work); }
+#bookmarkchip[hidden] { display: none; }
+#bookmarkchiptext { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bookmarkchipx { flex: none; width: 20px; height: 20px; border-radius: 10px; font-size: 15px;
+  line-height: 1; color: var(--dim); display: flex; align-items: center; justify-content: center; }
+#bookmarkprompt { flex: 1; font-size: 16px; line-height: 1.4; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 20px;
+  padding: 9px 16px; outline: none; min-height: calc(1.4em + 18px); max-height: 100px;
+  overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  -webkit-user-select: text; user-select: text; }
+#bookmarkprompt:empty::before { content: attr(data-placeholder); color: var(--dim);
+  pointer-events: none; }
+#bookmarkprompt:focus { border-color: color-mix(in srgb, var(--work) 50%, transparent); }
+#bookmarksend { width: 38px; height: 38px; border-radius: 19px; flex: none;
+  background: var(--work); color: #fff;
+  display: flex; align-items: center; justify-content: center; }
+
+/* app chrome is not selectable text */
+#statusbar, #cards, #map, .phead, .sheet .grab { -webkit-user-select: none; user-select: none; }
+.card, .strow, .lanechip { -webkit-touch-callout: none; }
+
+/* ---------- desktop / iPad: columns ---------- */
+@media (min-width: 900px) {
+  #app { display: flex; }
+  #cards, #map {
+    position: static; transform: none; box-shadow: none; transition: none;
+    border-right: 1px solid var(--hairline); height: auto;
+    width: 340px; flex: none;
+  }
+  /* position:relative anchors the floating toolbar; top:auto cancels the base
+     (phone) rule's top offset, which relative — unlike static — would honor */
+  #map { width: 400px; display: none; position: relative; top: auto; }
+  body.map-open #map { display: flex; }
+  #chat { flex: 1; min-width: 0; }
+  #mapfullbtn { display: flex; }
+  /* full screen: the map earns the whole width; cards + chat + notes fold away
+     (chat is one gesture back). Entered independent of map-open. The opacity
+     cross-fade is the whole enter animation (the map is position:static here,
+     so there is no layout transition) — opacity-only is already the
+     Reduce-Motion-safe form the design mandates, so one mechanism serves both;
+     trimmed further under the reduced-motion query below. */
+  /* min-width:0 overrides the flex-item default (min-width:auto = content
+     width): the wall map's fixed-width SVG must scroll inside #mapscroll, not
+     widen #map past the viewport — body's overflow-x:clip would put the phead's
+     right edge (the shrink button) permanently off-screen */
+  body.map-full #map { display: flex; width: auto; flex: 1; min-width: 0;
+    border-right: none; animation: mapfade .26s ease; }
+  body.map-full #cards, body.map-full #chat,
+  body.map-full #bookmarkspane, body.map-full #bookmarkflags { display: none; }
+  #bookmarkspane { position: static; transform: none; transition: none;
+    box-shadow: none; display: none; width: 340px; flex: none;
+    height: auto; border-left: 1px solid var(--hairline); }
+  body.bookmarks-open #bookmarkspane { display: flex; }
+  body:not(.bookmarks-open) #bookmarkflags { display: flex; }
+  #scrim { display: none; }
+  #bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }
+  .backbtn { display: none; }
+  .sheet { left: 50%; right: auto; width: 480px; transform: translate(-50%, 103%); }
+  .sheet.open { transform: translate(-50%, 0); }
+}
+@keyframes mapfade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  body.map-full #map { animation-duration: .12s; }
+}
+
+/* ============================================================================
+   TERMINOLOGY (code == UI, as of the 2026-07-29 rename). Two features:
+
+       "Bookmark" — a chat capture. Code: `bookmark` (UI.bookmarks,
+                    #bookmarkspane, bookmarkSnapshot, data-bmact, the .bookmark
+                    card class; server search.go emits kind/role "bookmark").
+       "Note"     — a synthesis document. Code: `note` (wsNotes,
+                    #notesworkspace, #wsnote*, /api/notes, internal/notestore,
+                    <data>/notes/*.json). This is the workspace below.
+
+   Code identifiers now match the visible words — no translation needed.
+
+   ONE HOMONYM TO WATCH: `.sheet` / `sheet` in this file usually means the
+   iOS-style *bottom-sheet modal* (openSheet/closeSheets/setSheetActive/
+   openTabSheet, class="sheet", the #newchat / #adopt / #sendto / #tabsheet
+   overlays, sheetDisabledByClose) — that is NOT the Note document. Do not
+   "align" those to `note`; they are a generic UI primitive.
+
+   (History: captures were once code `note` and synthesis docs code `sheet`/
+   `memo`, renamed in two ordered passes — bookmark first, then note — to free
+   the `note` identifier. See memory: code-terminology-rename-done.)
+   ============================================================================ */
+/* ---------- Notes workspace: the synthesis surface ----------
+   A singleton overlay (like search) so the note editor is mounted once and
+   never lives inside a polled render region. Mobile-first: one zone at a time,
+   toggled by #notesworkspace.note-open; the min-width query opens the
+   side-by-side navigator + active note. */
+/* starts BELOW the status bar (same offset as #map's wall map) so the bar stays
+   visible — it hosts search, giving a streamlined UX across map + workspace. */
+#notesworkspace { position: fixed; z-index: 110; display: flex;
+  top: calc(var(--sbh) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
+  flex-direction: column; align-items: stretch; }
+#notesworkspace[hidden] { display: none; }
+#wsscrim { position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  backdrop-filter: blur(18px) saturate(1.3); animation: searchfade .16s ease; }
+@media (prefers-reduced-transparency: reduce) {
+  #wsscrim { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+/* full-viewport writing surface (like the metro-map wall map), not a centred
+   card — the researcher composes here, so it takes all the screen space. */
+#wspanel { position: relative; z-index: 1; flex: 1; min-height: 0;
+  width: 100%; height: 100%; margin: 0; display: flex; flex-direction: column;
+  background: var(--bg); overflow: hidden;
+  animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
+@media (prefers-reduced-motion: reduce) { #wsscrim, #wspanel { animation: none; } }
+/* 10px top/bottom matches #chathead so the header bar is the same height as the
+   chat area's station-title header. */
+#wstopbar { display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
+/* match the app pane headings (.phead h2) so "Notes" reads the same as
+   "Activities" / "Bookmarks" across the app. */
+#wstopbar h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .01em; }
+#wstopbar .spacer { flex: 1; }
+#wsback, #wsclose { flex: none; width: 34px; height: 34px; border-radius: 8px;
+  color: var(--dim); display: flex; align-items: center; justify-content: center; font-size: 17px; }
+#wsback:active, #wsclose:active { background: var(--code-bg); }
+#wszones { flex: 1; min-height: 0; display: flex; }
+#wsnav { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1;
+  border-right: 1px solid var(--hairline); }
+#wsnavhead { display: flex; align-items: center; justify-content: space-between;
+  flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .04em; }
+#wsnewnote, #wsnotemenu { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
+  display: inline-flex; align-items: center; justify-content: center; }
+#wsnewnote:active, #wsnotemenu:active { background: var(--code-bg); }
+#wscards { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
+/* the note-card empty state centres on both axes (item 6): fills the scroll
+   area's height so the message sits in the middle, not pinned to the top. */
+#wscards .empty { display: flex; align-items: center; justify-content: center;
+  min-height: 100%; color: var(--dim); text-align: center; padding: 28px 16px; }
+.wscard { position: relative; display: block; width: 100%; text-align: left;
+  padding: 11px 12px; border-radius: 12px; border: 1px solid var(--hairline);
+  background: var(--surface); color: var(--ink); cursor: grab; margin-top: 8px; }
+.wscard:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.wscard.on { border-color: var(--work);
+  background: color-mix(in srgb, var(--work) 8%, transparent); }
+.wscard.dragging { opacity: .5; cursor: grabbing; }
+.wscard .wctitle { font-weight: 600; font-size: 14px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.wscard .wcmeta { font-size: 11px; color: var(--dim); margin-top: 3px;
+  display: flex; align-items: center; gap: 6px; }
+.wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; flex: none; }
+.wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+#wsnote { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
+#wsnotehead { display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 12px 18px; border-bottom: 1px solid var(--hairline); }
+/* the id's display:flex beats the UA [hidden] rule, so head.hidden = true would
+   leave a deleted note's title lingering (item 4) — force it hidden explicitly. */
+#wsnotehead[hidden] { display: none; }
+#wsnotetitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
+  color: var(--ink); background: none; border: none; outline: none; padding: 3px 4px;
+  border-radius: 6px; }
+#wsnotetitle:focus { background: var(--code-bg); }
+#wssections { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; flex: 1;
+  padding: 8px 18px 40px; }
+/* discoverable add control when a note has no sections left (item 7) — the
+   overflow menu alone hid the escape hatch after deleting every section.
+   iPhone item 3: no caption, just the button, centered in the pane. */
+#wssections .wssecempty { display: flex; align-items: center; justify-content: center;
+  min-height: 100%; }
+#wssections .wssecaddempty { display: inline-flex; align-items: center; gap: 6px; margin: 14px 4px;
+  padding: 8px 13px; border-radius: 9px; font-size: 13px; color: var(--work);
+  background: color-mix(in srgb, var(--work) 8%, transparent); }
+#wssections .wssecaddempty svg { width: 14px; height: 14px; }
+#wssections .wssecaddempty:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+/* the "pick a note" placeholder centres on both axes (item 5): an overlay over
+   the (empty) sections area so sibling flex weights can't push it off-centre. */
+#wsnoteempty { position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; color: var(--dim); text-align: center; padding: 20px; }
+#wsnoteempty[hidden] { display: none; }
+/* section blocks: rendered-markdown resting state, inline edit on tap */
+.wssec { border-bottom: 1px solid var(--hairline); padding: 12px 0; }
+.wssechead { display: flex; align-items: center; gap: 8px; }
+.wssecfold { flex: none; width: 26px; height: 26px; border-radius: 6px; color: var(--dim);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wssectitle { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; padding: 3px 4px;
+  border-radius: 6px; color: var(--ink); background: none; border: none; outline: none; }
+.wssectitle:focus { background: var(--code-bg); }
+.wssecmenu { flex: none; width: 28px; height: 28px; border-radius: 6px; color: var(--dim);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wssecmenu:active { background: var(--code-bg); }
+.wssecbody { padding: 6px 4px 2px 30px; }
+.wssec.folded .wssecbody { display: none; }
+.wssecrender { font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; cursor: text; }
+.wssecrender:empty::before { content: "Empty — tap to write."; color: var(--dim); }
+.wssecrender p:first-child { margin-top: 0; }
+/* auto-grows to fit content (HIG: iOS/iPadOS text views size to their content;
+   CSS `resize` is a no-op on iOS, so no manual grabber). Caps at 60vh, then
+   scrolls internally. Height is driven inline by the autogrow in startBodyEdit. */
+.wssecedit { display: block; width: 100%; min-height: 96px; max-height: 60vh; overflow-y: auto;
+  font: inherit; font-size: 14px;
+  line-height: 1.55; color: var(--ink); background: var(--code-bg); border: 1px solid var(--hairline);
+  border-radius: 10px; padding: 10px 12px; outline: none; resize: none; }
+.wssecedit:focus { border-color: var(--work); }
+/* section overflow menu (add-below / edit / move / delete) */
+.wsmenu { position: absolute; z-index: 3; min-width: 176px; background: var(--surface);
+  border: 1px solid var(--hairline); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.28);
+  padding: 6px; }
+.wsmenu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 9px 12px; border-radius: 8px; color: var(--ink); font-size: 14px; }
+.wsmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.wsmenu button.danger { color: var(--attn); }
+.wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
+#notesworkspace .backbtn { display: flex; }
+/* --- inbox zone (left): the reused capture layer --- */
+#wsinbox { display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--hairline); }
+#wsinboxhead { flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .04em; }
+#wsinboxtabs { flex: none; border-bottom: 1px solid var(--hairline); }
+#wsinboxlist { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  padding: 4px 10px 14px; flex: 1; }
+#wsinboxlist .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
+.wsibookmark { border: 1px solid var(--hairline); border-radius: 12px; padding: 9px 11px; margin-top: 8px; }
+.wsiwhen { font-size: 11px; color: var(--dim); }
+.wsibubble { border-left: 3px solid var(--unlane); padding-left: 8px; font-size: 13px;
+  line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
+.wsibubble p:first-child { margin-top: 0; }
+/* a tall capture clamps behind "Show more", same logic as the compact pane
+   (items 5/14); the mask fades the cut edge (overflow:hidden would clip ::after) */
+.wsibubble.clamped { max-height: 220px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 78%, transparent);
+  mask-image: linear-gradient(#000 78%, transparent); }
+.wsimore { margin: 6px 0 0; padding: 2px 0; background: none; border: 0;
+  font-size: 12px; color: var(--dim); cursor: pointer; }
+.wsimore:active { color: var(--work); }
+.wsiuse { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+  padding: 5px 10px; border-radius: 8px; font-size: 12px; color: var(--work);
+  background: color-mix(in srgb, var(--work) 8%, transparent); }
+.wsiuse svg { width: 14px; height: 14px; }
+.wsiuse:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+/* --- embedded chat references inside a section --- */
+.wsrefs { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.wsref { border: 1px solid var(--hairline); border-left: 3px solid var(--unlane);
+  border-radius: 8px; padding: 7px 9px; cursor: pointer;
+  background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.wsrefhead { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.wsrefdot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.wsrefprov { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsrefbody { font-size: 13px; line-height: 1.5; margin-top: 3px; overflow-wrap: anywhere; }
+.wsrefbody p:first-child { margin-top: 0; }
+/* an embedded capture auto-collapses like a Notes bubble (item 14) */
+.wsrefbody.clamped { max-height: 220px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 76%, transparent);
+  mask-image: linear-gradient(#000 76%, transparent); }
+.wsrefmore { margin: 4px 0 0; padding: 2px 0; background: none; border: 0;
+  font-size: 11px; color: var(--dim); cursor: pointer; }
+.wsrefmore:active { color: var(--work); }
+.wsref .wsrefactions { display: none; gap: 6px; margin-top: 7px; }
+.wsref.open .wsrefactions { display: flex; }
+.wsrefactions button { width: 30px; height: 28px; border-radius: 7px; color: var(--dim);
+  background: var(--surface); border: 1px solid var(--hairline);
+  display: inline-flex; align-items: center; justify-content: center; }
+.wsrefactions button svg { width: 15px; height: 15px; }
+.wsrefactions button:active { background: var(--code-bg); }
+/* --- placement mode: banner + per-section "add capture here" target --- */
+#wsplacebar { display: none; align-items: center; gap: 8px; flex: none;
+  padding: 9px 14px; font-size: 13px; border-bottom: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--work) 12%, transparent); }
+#notesworkspace.placing #wsplacebar { display: flex; }
+.wsplacelabel { color: var(--work); font-weight: 600; flex: none; }
+#wsplacetext { color: var(--ink); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 46vw; }
+#wsplacecancel { flex: none; padding: 5px 12px; border-radius: 8px; color: var(--dim);
+  background: var(--surface); border: 1px solid var(--hairline); }
+.wsaddhere { display: none; align-items: center; gap: 6px; padding: 4px 9px;
+  border-radius: 7px; font-size: 12px; color: var(--work);
+  background: color-mix(in srgb, var(--work) 12%, transparent); }
+.wsaddhere svg { width: 13px; height: 13px; }
+#notesworkspace.placing .wsaddhere { display: inline-flex; }
+/* iPhone / narrow: one zone at a time. The compact notes pane is the inbox
+   there, so the inbox zone is hidden; nav is the resting view and opening a
+   sheet slides the sheet in over the nav (a visible Back returns). */
+@media (max-width: 767px) {
+  #wspanel { width: 100%; height: 100%; margin: 0; border-radius: 0; border: none; }
+  #wsinbox { display: none; }
+  #wsnote { flex: 1; }
+  #notesworkspace:not(.note-open) #wsnote { display: none; }
+  #notesworkspace:not(.note-open) #wsback { display: none; }
+  #notesworkspace.note-open #wsnav { display: none; }
+  #wsplacetext { max-width: 40vw; }
+}
+@media (min-width: 768px) {
+  /* three zones (item 2): inbox and nav are narrow and stable, the note gets the
+     weight. The breakpoint reaches iPad portrait so the capture zone is present
+     there too; columns clamp narrower on smaller iPads. */
+  #wsinbox { flex: none; width: clamp(210px, 25vw, 264px); }
+  #wsnav { flex: none; width: clamp(190px, 23vw, 264px); }
+  /* id+id beats the `#notesworkspace .backbtn { display: flex }` above, which
+     otherwise defeats both `hidden` and this hide (item 17: the chevron is
+     redundant once the X closes the workspace and both zones are visible). */
+  #notesworkspace #wsback { display: none; }
+}
+@media (min-width: 900px) {
+  /* item 3: at the desktop/landscape breakpoint the app shows 340px side panes
+     (#cards, #bookmarkspane); the two left workspace zones match that width so
+     the columns share one rhythm. The active note keeps the remaining weight. */
+  #wsinbox, #wsnav { width: 340px; }
+}

@@ -1328,3 +1328,345 @@ func TestProductionChatSheetsCSSServing(t *testing.T) {
 		})
 	}
 }
+
+// --- Packet 5E: notes + accessibility extraction -----------------------------
+
+// nineLinkCSSOrder is the permanent complete Phase 5 stylesheet list established
+// by Packet 5E. Ownership tests require this exact order (not merely a prefix).
+var nineLinkCSSOrder = []string{
+	"/css/tokens.css",
+	"/css/base.css",
+	"/css/layout.css",
+	"/css/cards.css",
+	"/css/map.css",
+	"/css/chat.css",
+	"/css/sheets.css",
+	"/css/notes.css",
+	"/css/accessibility.css",
+}
+
+// TestProductionNotesAccessibilityCSSOwnership locks the 5E extraction
+// boundary: the complete nine-link order with notes eighth and accessibility
+// last; notes.css owns Bookmarks/Notes/desktop/peek rules; layout no longer
+// owns #bookmarkpeek; accessibility.css owns only the cross-component pane
+// reduced-motion override; cascade order and empty-inline 5E state hold.
+func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
+	html := mustReadIndex(t)
+	hrefs, err := linkedStylesheetHrefs(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hrefs) != len(nineLinkCSSOrder) {
+		t.Fatalf("linked stylesheets = %v, want exact nine-link order %v", hrefs, nineLinkCSSOrder)
+	}
+	for i, want := range nineLinkCSSOrder {
+		if hrefs[i] != want {
+			t.Fatalf("linked[%d]=%q, want %q (exact nine-link order %v)", i, hrefs[i], want, nineLinkCSSOrder)
+		}
+	}
+	if hrefs[len(hrefs)-1] != "/css/accessibility.css" {
+		t.Fatalf("accessibility.css must be the final stylesheet; got %q", hrefs[len(hrefs)-1])
+	}
+
+	notesCSS, err := fs.ReadFile(webFS, "web/css/notes.css")
+	if err != nil {
+		t.Fatalf("notes.css missing from embed: %v", err)
+	}
+	a11yCSS, err := fs.ReadFile(webFS, "web/css/accessibility.css")
+	if err != nil {
+		t.Fatalf("accessibility.css missing from embed: %v", err)
+	}
+	layoutCSS, err := fs.ReadFile(webFS, "web/css/layout.css")
+	if err != nil {
+		t.Fatalf("layout.css missing from embed: %v", err)
+	}
+	notes := string(notesCSS)
+	a11y := string(a11yCSS)
+	layout := string(layoutCSS)
+
+	// notes.css: Bookmarks pane, peek ownership, flags/tabs/list/composer,
+	// desktop peek suppression and column overrides, full-cover Notes workspace,
+	// scrim/panel/header/nav/editor, inbox/refs/placement, clamps, menus,
+	// empty states, narrow single-zone and wider three-zone layouts.
+	for _, sig := range []string{
+		"/* ---------- sticky-notes pane:",
+		"#bookmarkspane {",
+		"body.bookmarks-open #bookmarkspane { transform: translateX(0); }",
+		"/* the Bookmarks pane's left peek, as a tap-catcher:",
+		"#bookmarkpeek {",
+		"body.bookmarks-open #bookmarkpeek { display: block; }",
+		"#notesbtn {",
+		"#bookmarkflags {",
+		"#bookmarktabs {",
+		"#bookmarklist {",
+		".bookmark {",
+		".bookmark .nbubble {",
+		".bookmarkactions {",
+		"#bookmarkbar {",
+		"#bookmarkprompt {",
+		"#bookmarksend {",
+		"#bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }",
+		"/* ---------- desktop / iPad: columns ---------- */",
+		"#statusbar, #cards, #map, .phead, .sheet .grab {",
+		"/* ---------- Notes workspace: the synthesis surface ----------",
+		"#notesworkspace {",
+		"#wsscrim {",
+		"#wspanel {",
+		"#wstopbar {",
+		"#wsnav {",
+		"#wsnote {",
+		"#wsinbox {",
+		".wsrefs {",
+		"#wsplacebar {",
+		".wsibubble.clamped {",
+		".wsrefbody.clamped {",
+		".wsmenu {",
+		"#wscards .empty {",
+		"#wsnoteempty {",
+		"@media (max-width: 767px) {",
+		"@media (min-width: 768px) {",
+		"#wsinbox, #wsnav { width: 340px; }",
+	} {
+		if !strings.Contains(notes, sig) {
+			t.Fatalf("notes.css missing signature %q", sig)
+		}
+	}
+
+	// layout.css must no longer own the bookmark-peek block.
+	for _, bad := range []string{
+		"#bookmarkpeek {",
+		"body.bookmarks-open #bookmarkpeek { display: block; }",
+		"/* the Bookmarks pane's left peek, as a tap-catcher:",
+	} {
+		if strings.Contains(layout, bad) {
+			t.Fatalf("layout.css must not contain bookmark-peek ownership %q", bad)
+		}
+	}
+
+	// accessibility.css owns the complete cross-component pane rule and,
+	// apart from its explanatory comment and whitespace, nothing else.
+	a11yComment := "/* the spatial-line slides are motion; honour Reduce Motion (pane-gap-design.md"
+	a11yMedia := "@media (prefers-reduced-motion: reduce) {\n  #cards, #map, #bookmarkspane { transition: none; }\n}"
+	if !strings.Contains(a11y, a11yComment) {
+		t.Fatalf("accessibility.css missing explanatory reduced-motion comment")
+	}
+	if !strings.Contains(a11y, a11yMedia) {
+		t.Fatalf("accessibility.css missing cross-component pane reduced-motion override")
+	}
+	// Strip the required comment/media and remaining whitespace; nothing may remain.
+	rest := a11y
+	// Drop the multi-line comment that ends before the media query.
+	if i := strings.Index(rest, "/* the spatial-line slides are motion;"); i >= 0 {
+		if j := strings.Index(rest[i:], "*/"); j >= 0 {
+			rest = rest[:i] + rest[i+j+2:]
+		}
+	}
+	rest = strings.Replace(rest, a11yMedia, "", 1)
+	if strings.TrimSpace(rest) != "" {
+		t.Fatalf("accessibility.css must contain only the pane reduced-motion comment/block; residual %q", rest)
+	}
+	// notes.css must not still hold the cross-component override.
+	if strings.Contains(notes, "#cards, #map, #bookmarkspane { transition: none; }") {
+		t.Fatal("notes.css must not contain the cross-component pane reduced-motion override")
+	}
+
+	// Component-local accessibility rules remain in their owning files.
+	searchLayout := layout
+	if !strings.Contains(searchLayout, "@media (prefers-reduced-transparency: reduce)") {
+		t.Fatal("layout.css must retain search reduced-transparency rules")
+	}
+	if !strings.Contains(searchLayout, "@media (prefers-reduced-motion: reduce) {\n  #searchscrim, #searchpanel { animation: none; }\n}") &&
+		!strings.Contains(searchLayout, "#searchscrim, #searchpanel { animation: none; }") {
+		t.Fatal("layout.css must retain search reduced-motion rules")
+	}
+	if !strings.Contains(searchLayout, "#mapfullbtn { transition: none; }") {
+		t.Fatal("layout.css must retain mapfull-button local reduced-motion transition rule")
+	}
+	if !strings.Contains(notes, "body.map-full #map { animation-duration: .12s; }") {
+		t.Fatal("notes.css must own map-full reduced-motion duration with the desktop source")
+	}
+	if !strings.Contains(notes, "@media (prefers-reduced-transparency: reduce)") {
+		t.Fatal("notes.css must retain Notes workspace reduced-transparency")
+	}
+	if !strings.Contains(notes, "#wsscrim, #wspanel { animation: none; }") {
+		t.Fatal("notes.css must retain Notes workspace local reduced-motion animation rule")
+	}
+	chatCSS, err := fs.ReadFile(webFS, "web/css/chat.css")
+	if err != nil {
+		t.Fatalf("chat.css missing from embed: %v", err)
+	}
+	chat := string(chatCSS)
+	for _, sig := range []string{
+		"#attadd { transition: none; }",
+		"#attmenu { animation: none; }",
+		".stagechip .spin i { animation: none; }",
+	} {
+		if !strings.Contains(chat, sig) {
+			t.Fatalf("chat.css must retain local reduced-motion signature %q", sig)
+		}
+	}
+
+	// Cascade order: pane transitions before accessibility override; notes
+	// before accessibility; phone peek before desktop suppression; accessibility last.
+	cascade := mustCSSCascade(t, html, webFS)
+	cardsTrans := strings.Index(cascade, "#cards {\n  position: fixed; z-index: 30;")
+	if cardsTrans < 0 {
+		// fall back to transition declaration on #cards block
+		cardsTrans = strings.Index(cascade, "transition: transform .34s cubic-bezier(.32,.72,.34,1);")
+	}
+	mapTrans := strings.Index(cascade, "#map {\n  position: fixed; z-index: 31;")
+	if mapTrans < 0 {
+		mapTrans = strings.LastIndex(cascade, "transition: transform .34s cubic-bezier(.32,.72,.34,1);")
+	}
+	bmTrans := strings.Index(cascade, "transform: translateX(103%); transition: transform .25s;")
+	if bmTrans < 0 {
+		bmTrans = strings.Index(cascade, "#bookmarkspane { position: fixed;")
+	}
+	a11yOverride := strings.Index(cascade, "#cards, #map, #bookmarkspane { transition: none; }")
+	if cardsTrans < 0 || mapTrans < 0 || bmTrans < 0 {
+		t.Fatalf("cascade missing pane transition sources: cards@%d map@%d bookmarkspane@%d", cardsTrans, mapTrans, bmTrans)
+	}
+	if a11yOverride < 0 {
+		t.Fatal("cascade missing cross-component pane reduced-motion override")
+	}
+	if !(cardsTrans < a11yOverride && mapTrans < a11yOverride && bmTrans < a11yOverride) {
+		t.Fatalf("pane transitions must precede accessibility override: cards@%d map@%d bm@%d a11y@%d",
+			cardsTrans, mapTrans, bmTrans, a11yOverride)
+	}
+	notesMarker := strings.Index(cascade, "/* ---------- sticky-notes pane:")
+	a11yMarker := strings.Index(cascade, "/* the spatial-line slides are motion; honour Reduce Motion")
+	if notesMarker < 0 || a11yMarker < 0 {
+		t.Fatalf("cascade missing notes/accessibility markers: notes@%d a11y@%d", notesMarker, a11yMarker)
+	}
+	if !(notesMarker < a11yMarker) {
+		t.Fatalf("notes.css must precede accessibility.css in cascade: notes@%d a11y@%d", notesMarker, a11yMarker)
+	}
+	if a11yMarker != strings.LastIndex(cascade, "/* the spatial-line slides are motion; honour Reduce Motion") {
+		t.Fatal("accessibility reduced-motion comment must appear once at the end of the cascade")
+	}
+	phonePeek := strings.Index(cascade, "body.bookmarks-open #bookmarkpeek { display: block; }")
+	desktopPeek := strings.Index(cascade, "#bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }")
+	if phonePeek < 0 || desktopPeek < 0 {
+		t.Fatalf("cascade missing bookmark-peek rules: phone@%d desktop@%d", phonePeek, desktopPeek)
+	}
+	if !(phonePeek < desktopPeek) {
+		t.Fatalf("phone/tablet bookmark-peek display must precede desktop suppression: phone@%d desktop@%d", phonePeek, desktopPeek)
+	}
+
+	// Moved Notes/Bookmarks signatures must not remain inline or in layout.
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inline string
+	var sawInline bool
+	for _, src := range sources {
+		if src.kind == cssSourceInline {
+			sawInline = true
+			inline = src.text
+			break
+		}
+	}
+	// Nine-link 5E state: style element remains but CSS content is empty/whitespace.
+	if !sawInline {
+		t.Fatal("5E nine-link state must retain the inline <style> element for Packet 5F")
+	}
+	if strings.TrimSpace(inline) != "" {
+		t.Fatalf("5E inline style must be empty or whitespace-only; got %q", inline)
+	}
+	for _, moved := range []string{
+		"/* ---------- sticky-notes pane:",
+		"#bookmarkspane {",
+		"#bookmarkpeek {",
+		"#notesworkspace {",
+		"#notesbtn {",
+		"/* ---------- desktop / iPad: columns ---------- */",
+		"#cards, #map, #bookmarkspane { transition: none; }",
+	} {
+		if strings.Contains(inline, moved) {
+			t.Fatalf("moved signature %q still present in inline style", moved)
+		}
+		if moved == "#bookmarkpeek {" || moved == "/* ---------- sticky-notes pane:" {
+			if strings.Contains(layout, moved) {
+				t.Fatalf("moved signature %q still present in layout.css", moved)
+			}
+		}
+	}
+
+	// --peek remains only in tokens.css.
+	tokensCSS, err := fs.ReadFile(webFS, "web/css/tokens.css")
+	if err != nil {
+		t.Fatalf("tokens.css missing: %v", err)
+	}
+	if !strings.Contains(string(tokensCSS), "--peek:") {
+		t.Fatal("tokens.css must own --peek")
+	}
+	for _, name := range []string{"base.css", "layout.css", "cards.css", "map.css", "chat.css", "sheets.css", "notes.css", "accessibility.css"} {
+		b, err := fs.ReadFile(webFS, "web/css/"+name)
+		if err != nil {
+			t.Fatalf("%s missing: %v", name, err)
+		}
+		if strings.Contains(string(b), "--peek:") {
+			t.Fatalf("--peek must remain only in tokens.css; found declaration in %s", name)
+		}
+	}
+}
+
+// TestProductionNotesAccessibilityCSSServing activates the 5A exact-byte,
+// content-type, cache, nosniff, and negative-path contracts for the two new
+// linked files.
+func TestProductionNotesAccessibilityCSSServing(t *testing.T) {
+	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+
+	for _, href := range []string{"/css/notes.css", "/css/accessibility.css"} {
+		t.Run("ok"+href, func(t *testing.T) {
+			embedPath, err := stylesheetEmbedPath(href)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := fs.ReadFile(webFS, embedPath)
+			if err != nil {
+				t.Fatalf("read embed %s: %v", embedPath, err)
+			}
+			rec := getCharacterization(t, h, href)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status=%d, want 200; body=%q", href, rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
+				t.Fatalf("GET %s Content-Type=%q, want %q", href, got, "text/css; charset=utf-8")
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("GET %s Cache-Control=%q, want no-store", href, got)
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("GET %s X-Content-Type-Options=%q, want nosniff", href, got)
+			}
+			if rec.Body.String() != string(want) {
+				t.Fatalf("GET %s body differs from embedded %s (%d vs %d bytes)", href, embedPath, rec.Body.Len(), len(want))
+			}
+		})
+	}
+
+	for _, path := range []string{
+		"/css/",
+		"/css/missing.css",
+		"/css/sub/notes.css",
+		"/css/%2e%2e/notes.css",
+		"/css/notes.txt",
+		"/css/notes.css.bak",
+		"/web/css/notes.css",
+		"/web/css/accessibility.css",
+		"/web/css/",
+	} {
+		t.Run("404"+path, func(t *testing.T) {
+			rec := getCharacterization(t, h, path)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s status=%d, want 404; body=%q", path, rec.Code, rec.Body.String())
+			}
+			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+				t.Fatalf("GET %s exposed a directory listing", path)
+			}
+			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
+		})
+	}
+}

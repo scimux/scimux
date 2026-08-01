@@ -1817,7 +1817,9 @@ func TestWorkspaceRenames(t *testing.T) {
 	}
 	// a short terminology note must remain, documenting the code==UI mapping and
 	// the one live gotcha: the bottom-sheet `.sheet` primitive is NOT a Note.
-	if !strings.Contains(html, "TERMINOLOGY (code == UI") {
+	// Lives in CSS (now notes.css); read the assembled cascade, not raw HTML.
+	css := mustProductionCSSCascade(t)
+	if !strings.Contains(css, "TERMINOLOGY (code == UI") {
 		t.Error("the terminology comment (code==UI mapping + bottom-sheet homonym warning) must be present")
 	}
 }

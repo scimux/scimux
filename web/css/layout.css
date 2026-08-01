@@ -216,16 +216,6 @@
   opacity: 0; pointer-events: none; transition: opacity .3s;
 }
 #scrim.on { opacity: 1; pointer-events: auto; }
-/* the Bookmarks pane's left peek, as a tap-catcher: one peek wide, under the
-   pane (z40) but over the chat it exposes, so a tap there steps back to chat
-   (P3, pane-gap-design.md). Transparent — the peek shows the live chat, not a
-   dim; only the left panes' modal scrim dims. Phone/tablet only. */
-#bookmarkpeek {
-  position: fixed; z-index: 39; left: 0; width: var(--peek);
-  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0;
-  display: none;
-}
-body.bookmarks-open #bookmarkpeek { display: block; }
 
 .phead { display: flex; align-items: center; gap: 8px; padding: 10px 16px 8px; }
 .phead h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .01em; }

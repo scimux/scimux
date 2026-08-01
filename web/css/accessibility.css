@@ -1,0 +1,6 @@
+/* the spatial-line slides are motion; honour Reduce Motion (pane-gap-design.md
+   P5). Placed after all three pane definitions so the combined selector never
+   shadows a single-pane rule lookup. */
+@media (prefers-reduced-motion: reduce) {
+  #cards, #map, #bookmarkspane { transition: none; }
+}
