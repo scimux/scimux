@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,4 +356,11 @@ func opencodeModels(ctx context.Context, bin string) []string {
 		}
 	}
 	return models
+}
+
+// handleAgents reports the installed harnesses and their models — the
+// new-activity dialog's source of truth (its built-in list is only the
+// fallback for when this call fails).
+func (a *app) handleAgents(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, detectAgents())
 }
