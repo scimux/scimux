@@ -1,0 +1,539 @@
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"path"
+	"strings"
+	"testing"
+	"testing/fstest"
+)
+
+// productionCSSFinalOrder is the exact final Phase 5 stylesheet cascade.
+// Linked production stylesheets must be an exact prefix of this list while
+// inline CSS remains, and must equal the full list once no inline style remains.
+// accessibility.css, whenever present, is always the final linked file.
+var productionCSSFinalOrder = []string{
+	"/css/tokens.css",
+	"/css/base.css",
+	"/css/layout.css",
+	"/css/cards.css",
+	"/css/map.css",
+	"/css/chat.css",
+	"/css/sheets.css",
+	"/css/notes.css",
+	"/css/accessibility.css",
+}
+
+// cssCascadeSeparator joins successive CSS sources. It is not significant CSS
+// and exists only so independent sources do not glue declarations together.
+const cssCascadeSeparator = "\n"
+
+// assembleCSSCascade concatenates every CSS source referenced by html in
+// document order: the text of each <style> block and each same-origin
+// rel=stylesheet link, read from fsys. Non-stylesheet <link> tags (for example
+// the data-URI favicon) are ignored. External URLs, traversal paths, unexpected
+// stylesheet roots, and missing or unreadable linked files return an error.
+// Network resources are never fetched.
+func assembleCSSCascade(html string, fsys fs.FS) (string, error) {
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		return "", err
+	}
+	if len(sources) == 0 {
+		return "", nil
+	}
+	parts := make([]string, 0, len(sources))
+	for _, src := range sources {
+		switch src.kind {
+		case cssSourceInline:
+			parts = append(parts, src.text)
+		case cssSourceLink:
+			embedPath, err := stylesheetEmbedPath(src.href)
+			if err != nil {
+				return "", err
+			}
+			b, err := fs.ReadFile(fsys, embedPath)
+			if err != nil {
+				return "", fmt.Errorf("stylesheet %q unreadable at %s: %w", src.href, embedPath, err)
+			}
+			parts = append(parts, string(b))
+		default:
+			return "", fmt.Errorf("unknown CSS source kind %d", src.kind)
+		}
+	}
+	return strings.Join(parts, cssCascadeSeparator), nil
+}
+
+// mustCSSCascade is the thin testing wrapper around assembleCSSCascade.
+func mustCSSCascade(t *testing.T, html string, fsys fs.FS) string {
+	t.Helper()
+	css, err := assembleCSSCascade(html, fsys)
+	if err != nil {
+		t.Fatalf("assemble CSS cascade: %v", err)
+	}
+	return css
+}
+
+// mustProductionCSSCascade assembles the production cascade from the embedded
+// index and webFS. Prefer this for CSS declaration/media-query assertions.
+func mustProductionCSSCascade(t *testing.T) string {
+	t.Helper()
+	return mustCSSCascade(t, mustReadIndex(t), webFS)
+}
+
+type cssSourceKind int
+
+const (
+	cssSourceInline cssSourceKind = iota + 1
+	cssSourceLink
+)
+
+type cssSource struct {
+	kind cssSourceKind
+	text string // inline only
+	href string // link only
+}
+
+// collectCSSSources walks html in document order and records inline <style>
+// blocks and stylesheet <link> tags. Attribute parsing is intentionally small
+// and case-insensitive; it never fetches anything.
+func collectCSSSources(html string) ([]cssSource, error) {
+	var out []cssSource
+	lower := strings.ToLower(html)
+	i := 0
+	for i < len(html) {
+		styleAt := strings.Index(lower[i:], "<style")
+		linkAt := strings.Index(lower[i:], "<link")
+		if styleAt < 0 && linkAt < 0 {
+			break
+		}
+		// Pick the earlier tag.
+		useStyle := styleAt >= 0 && (linkAt < 0 || styleAt < linkAt)
+		if useStyle {
+			abs := i + styleAt
+			// Require a real tag start: <style or <style> or <style ...>
+			if abs+6 < len(lower) {
+				c := lower[abs+6]
+				if c != '>' && c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '/' {
+					i = abs + 6
+					continue
+				}
+			}
+			openEnd := strings.Index(lower[abs:], ">")
+			if openEnd < 0 {
+				return nil, fmt.Errorf("unterminated <style> open tag")
+			}
+			contentStart := abs + openEnd + 1
+			closeRel := strings.Index(lower[contentStart:], "</style>")
+			if closeRel < 0 {
+				return nil, fmt.Errorf("unterminated <style> block")
+			}
+			out = append(out, cssSource{
+				kind: cssSourceInline,
+				text: html[contentStart : contentStart+closeRel],
+			})
+			i = contentStart + closeRel + len("</style>")
+			continue
+		}
+
+		abs := i + linkAt
+		if abs+5 < len(lower) {
+			c := lower[abs+5]
+			if c != '>' && c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '/' {
+				i = abs + 5
+				continue
+			}
+		}
+		openEnd := strings.Index(lower[abs:], ">")
+		if openEnd < 0 {
+			return nil, fmt.Errorf("unterminated <link> tag")
+		}
+		tag := html[abs : abs+openEnd+1]
+		rel, hasRel := htmlAttr(tag, "rel")
+		href, hasHref := htmlAttr(tag, "href")
+		if hasRel && isStylesheetRel(rel) {
+			if !hasHref || href == "" {
+				return nil, fmt.Errorf("stylesheet <link> missing href: %s", tag)
+			}
+			out = append(out, cssSource{kind: cssSourceLink, href: href})
+		}
+		i = abs + openEnd + 1
+	}
+	return out, nil
+}
+
+func isStylesheetRel(rel string) bool {
+	for _, part := range strings.Fields(strings.ToLower(rel)) {
+		if part == "stylesheet" {
+			return true
+		}
+	}
+	return false
+}
+
+// htmlAttr returns a quoted attribute value from a single HTML tag string.
+func htmlAttr(tag, name string) (string, bool) {
+	lower := strings.ToLower(tag)
+	key := strings.ToLower(name)
+	// Search for name= with a word boundary before the name.
+	for i := 0; i < len(lower); {
+		j := strings.Index(lower[i:], key+"=")
+		if j < 0 {
+			return "", false
+		}
+		abs := i + j
+		if abs > 0 {
+			prev := lower[abs-1]
+			if prev != ' ' && prev != '\t' && prev != '\n' && prev != '\r' && prev != '<' {
+				i = abs + len(key)
+				continue
+			}
+		}
+		valStart := abs + len(key) + 1
+		if valStart >= len(tag) {
+			return "", false
+		}
+		q := tag[valStart]
+		if q != '"' && q != '\'' {
+			// Unquoted attributes are not used in production markup; reject.
+			return "", false
+		}
+		rest := tag[valStart+1:]
+		end := strings.IndexByte(rest, q)
+		if end < 0 {
+			return "", false
+		}
+		return rest[:end], true
+	}
+	return "", false
+}
+
+// stylesheetEmbedPath maps a same-origin stylesheet href to its path inside the
+// production embed FS (web/css/...). External URLs, relative hrefs, traversal,
+// and roots other than /css/<file>.css are rejected.
+func stylesheetEmbedPath(href string) (string, error) {
+	if href == "" {
+		return "", fmt.Errorf("empty stylesheet href")
+	}
+	if strings.Contains(href, "://") || strings.HasPrefix(href, "//") {
+		return "", fmt.Errorf("external stylesheet href %q", href)
+	}
+	if strings.ContainsAny(href, "?#") {
+		return "", fmt.Errorf("stylesheet href must not carry query or fragment: %q", href)
+	}
+	if !strings.HasPrefix(href, "/") {
+		return "", fmt.Errorf("stylesheet href must be an absolute path, got %q", href)
+	}
+	clean := path.Clean(href)
+	if clean != href {
+		return "", fmt.Errorf("stylesheet href is not a clean path: %q", href)
+	}
+	if !strings.HasPrefix(clean, "/css/") {
+		return "", fmt.Errorf("unexpected stylesheet root %q", href)
+	}
+	base := strings.TrimPrefix(clean, "/css/")
+	if base == "" || strings.Contains(base, "/") || !strings.HasSuffix(base, ".css") {
+		return "", fmt.Errorf("unexpected stylesheet path %q", href)
+	}
+	// path.Clean already collapses ".."; a remaining ".." segment would only
+	// appear if the basename itself were "..", which is not a .css file.
+	if base == ".." || strings.Contains(base, "\\") {
+		return "", fmt.Errorf("traversal stylesheet href %q", href)
+	}
+	return "web" + clean, nil
+}
+
+// linkedStylesheetHrefs returns stylesheet hrefs in document order.
+func linkedStylesheetHrefs(html string) ([]string, error) {
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		return nil, err
+	}
+	var hrefs []string
+	for _, src := range sources {
+		if src.kind == cssSourceLink {
+			hrefs = append(hrefs, src.href)
+		}
+	}
+	return hrefs, nil
+}
+
+func hasInlineStyle(html string) bool {
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		return false
+	}
+	for _, src := range sources {
+		if src.kind == cssSourceInline {
+			return true
+		}
+	}
+	return false
+}
+
+// --- cascade helper tests ----------------------------------------------------
+
+func TestAssembleCSSCascadeInlineOnly(t *testing.T) {
+	html := `<!doctype html><head>
+<link rel="icon" href="data:image/svg+xml,<svg></svg>">
+<style>/* a */ body{color:red}</style>
+</head><body></body>`
+	css, err := assembleCSSCascade(html, fstest.MapFS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/* a */ body{color:red}"; css != want {
+		t.Fatalf("inline-only cascade =\n%q\nwant\n%q", css, want)
+	}
+}
+
+func TestAssembleCSSCascadeMixedDocumentOrder(t *testing.T) {
+	fsys := fstest.MapFS{
+		"web/css/tokens.css": &fstest.MapFile{Data: []byte("/* tokens */")},
+		"web/css/base.css":   &fstest.MapFile{Data: []byte("/* base */")},
+	}
+	html := `<head>
+<link rel="stylesheet" href="/css/tokens.css">
+<style>/* mid */</style>
+<link rel="icon" href="/favicon.ico">
+<link href="/css/base.css" rel="stylesheet">
+</head>`
+	css, err := assembleCSSCascade(html, fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/* tokens */" + cssCascadeSeparator + "/* mid */" + cssCascadeSeparator + "/* base */"
+	if css != want {
+		t.Fatalf("mixed cascade =\n%q\nwant\n%q", css, want)
+	}
+}
+
+func TestAssembleCSSCascadeLinkedOnlyDocumentOrder(t *testing.T) {
+	fsys := fstest.MapFS{
+		"web/css/tokens.css": &fstest.MapFile{Data: []byte("T")},
+		"web/css/base.css":   &fstest.MapFile{Data: []byte("B")},
+		"web/css/layout.css": &fstest.MapFile{Data: []byte("L")},
+	}
+	html := `<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/layout.css">`
+	css, err := assembleCSSCascade(html, fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "T" + cssCascadeSeparator + "B" + cssCascadeSeparator + "L"
+	if css != want {
+		t.Fatalf("linked-only cascade =\n%q\nwant\n%q", css, want)
+	}
+}
+
+func TestAssembleCSSCascadeIgnoresNonStylesheetLinks(t *testing.T) {
+	html := `<link rel="icon" href="/favicon.ico">
+<link rel="preload" href="/css/tokens.css" as="style">
+<link rel="apple-touch-icon" href="/icon.png">
+<style>x{}</style>`
+	css, err := assembleCSSCascade(html, fstest.MapFS{
+		"web/css/tokens.css": &fstest.MapFile{Data: []byte("SHOULD-NOT-LOAD")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if css != "x{}" {
+		t.Fatalf("non-stylesheet links must be ignored; got %q", css)
+	}
+	if strings.Contains(css, "SHOULD-NOT-LOAD") {
+		t.Fatal("preload link without rel=stylesheet must not load CSS")
+	}
+}
+
+func TestAssembleCSSCascadeRejectsInvalidHrefs(t *testing.T) {
+	fsys := fstest.MapFS{
+		"web/css/tokens.css": &fstest.MapFile{Data: []byte("ok")},
+	}
+	cases := []struct {
+		name string
+		html string
+	}{
+		{"external-https", `<link rel="stylesheet" href="https://example.com/a.css">`},
+		{"external-protocol-relative", `<link rel="stylesheet" href="//example.com/a.css">`},
+		{"traversal", `<link rel="stylesheet" href="/css/../tokens.css">`},
+		{"unexpected-root-js", `<link rel="stylesheet" href="/js/app.css">`},
+		{"unexpected-root-assets", `<link rel="stylesheet" href="/assets/x.css">`},
+		{"relative", `<link rel="stylesheet" href="css/tokens.css">`},
+		{"nested", `<link rel="stylesheet" href="/css/sub/tokens.css">`},
+		{"missing", `<link rel="stylesheet" href="/css/missing.css">`},
+		{"query", `<link rel="stylesheet" href="/css/tokens.css?v=1">`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := assembleCSSCascade(tt.html, fsys)
+			if err == nil {
+				t.Fatalf("expected error for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestCSSBlockReadsAssembledCascade(t *testing.T) {
+	// Synthetic production-shaped document: CSS only in a linked file, not in
+	// the raw HTML body text that old cssBlock searched.
+	fsys := fstest.MapFS{
+		"web/css/tokens.css": &fstest.MapFile{Data: []byte(":root { --peek: clamp(44px, 12%, 60px); }\n")},
+	}
+	html := `<!doctype html><head>
+<link rel="stylesheet" href="/css/tokens.css">
+</head><body><div id="root">no css here --peek:</div></body>`
+	cascade, err := assembleCSSCascade(html, fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(html, ":root { --peek:") {
+		t.Fatal("test setup broken: rule must not appear in raw HTML")
+	}
+	block := cssBlock(t, cascade, ":root {")
+	if !strings.Contains(block, "--peek: clamp(44px, 12%, 60px);") {
+		t.Fatalf("cssBlock must read the assembled cascade; got %q", block)
+	}
+	// Production helper path: still works for the current inline-only document.
+	prod := mustProductionCSSCascade(t)
+	root := cssBlock(t, prod, ":root {")
+	if !strings.Contains(root, "--peek:") {
+		t.Fatalf("production cascade missing --peek; got %q", root)
+	}
+}
+
+// --- static CSS transition contract -----------------------------------------
+
+func TestProductionCSSTransitionContract(t *testing.T) {
+	html := mustReadIndex(t)
+	cascade := mustCSSCascade(t, html, webFS)
+
+	hrefs, err := linkedStylesheetHrefs(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline := hasInlineStyle(html)
+
+	// Transition rule: linked list is a prefix of the final order while inline
+	// CSS remains; once inline is gone it must equal the complete final list.
+	if inline {
+		if len(hrefs) > len(productionCSSFinalOrder) {
+			t.Fatalf("linked stylesheets (%d) exceed final order (%d)", len(hrefs), len(productionCSSFinalOrder))
+		}
+		for i, href := range hrefs {
+			if href != productionCSSFinalOrder[i] {
+				t.Fatalf("linked[%d]=%q, want prefix of final order %q", i, href, productionCSSFinalOrder[i])
+			}
+		}
+	} else {
+		if len(hrefs) != len(productionCSSFinalOrder) {
+			t.Fatalf("no inline style remains: linked count=%d, want full final order %d", len(hrefs), len(productionCSSFinalOrder))
+		}
+		for i, href := range hrefs {
+			if href != productionCSSFinalOrder[i] {
+				t.Fatalf("linked[%d]=%q, want %q", i, href, productionCSSFinalOrder[i])
+			}
+		}
+	}
+
+	// accessibility.css, whenever present among links, can only be last.
+	for i, href := range hrefs {
+		if href == "/css/accessibility.css" && i != len(hrefs)-1 {
+			t.Fatalf("accessibility.css must be the final linked stylesheet; index %d of %d", i, len(hrefs))
+		}
+	}
+
+	if strings.Contains(strings.ToLower(cascade), "@import") {
+		t.Fatal("assembled production CSS must not contain @import")
+	}
+
+	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+
+	// Currently linked sheets (none in 5A): each must serve exact embedded
+	// bytes with CSS content type, no-store, and nosniff.
+	for _, href := range hrefs {
+		t.Run("serve"+href, func(t *testing.T) {
+			embedPath, err := stylesheetEmbedPath(href)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := fs.ReadFile(webFS, embedPath)
+			if err != nil {
+				t.Fatalf("linked stylesheet %s missing from embed: %v", href, err)
+			}
+			rec := getCharacterization(t, h, href)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status=%d, want 200; body=%q", href, rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/css") {
+				t.Fatalf("GET %s Content-Type=%q, want text/css", href, got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("GET %s Cache-Control=%q, want no-store", href, got)
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("GET %s X-Content-Type-Options=%q, want nosniff", href, got)
+			}
+			if rec.Body.String() != string(want) {
+				t.Fatalf("GET %s body differs from embedded %s", href, embedPath)
+			}
+		})
+	}
+
+	// Target files not yet linked/embedded remain unavailable. /css/ itself
+	// must not expose a directory listing.
+	for _, path := range append([]string{"/css/"}, productionCSSFinalOrder...) {
+		// Skip any that are currently linked and therefore must 200 above.
+		linked := false
+		for _, href := range hrefs {
+			if href == path {
+				linked = true
+				break
+			}
+		}
+		if linked {
+			continue
+		}
+		t.Run("unavailable"+path, func(t *testing.T) {
+			rec := getCharacterization(t, h, path)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s status=%d, want 404 while unlinked", path, rec.Code)
+			}
+			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+				t.Fatalf("GET %s exposed a directory listing", path)
+			}
+			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
+		})
+	}
+}
+
+// TestProductionCSSNegativeRootsPreserved keeps the existing static negative
+// surface green alongside the transition contract without weakening it.
+func TestProductionCSSNegativeRootsPreserved(t *testing.T) {
+	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	for _, path := range []string{
+		"/css/",
+		"/css/app.css",
+		"/js/",
+		"/js/app.js",
+		"/index.html",
+		"/web/index.html",
+		"/package.json",
+		"/web/package.json",
+		"/test/smoke.test.js",
+		"/web/test/smoke.test.js",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := getCharacterization(t, h, path)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s status=%d, want 404; body=%q", path, rec.Code, rec.Body.String())
+			}
+			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
+			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+				t.Fatalf("GET %s exposed a directory listing", path)
+			}
+		})
+	}
+}

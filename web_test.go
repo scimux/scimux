@@ -333,15 +333,10 @@ assert.ok(contrastRatio(relLum(hexRGB("#5856D6")), relLum(hexRGB(contrastText("#
 }
 
 func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 	for _, want := range []string{
 		`<span class="host offline" id="host">scimux</span>`,
-		`#statusbar .host::before`,
-		`#statusbar .host.online::before { background: #34C759; }`,
 		`function setHostOnline(ok){`,
 		`setHostOnline(false); $("#sys").textContent = "server unreachable"; return;`,
 		`setHostOnline(true);`,
@@ -363,6 +358,14 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`#statusbar .host::before`,
+		`#statusbar .host.online::before { background: #34C759; }`,
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("activity card connectivity CSS missing %q", want)
 		}
 	}
 	if strings.Contains(html, `<span class="age">${ageText(n.last_activity)}</span>`) {
@@ -448,11 +451,8 @@ func TestDockedMapStationLongPressEdits(t *testing.T) {
 }
 
 func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 	for _, want := range []string{
 		`let mapFoldKnown = new Set(JSON.parse(localStorage.getItem("scimux-mapfold-known") || "[]"));`,
 		`for (const id of live) if (!mapFoldKnown.has(id)){`,
@@ -467,10 +467,8 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 		`const groups = [...(UI.groups || [])].sort(byNameID);`,
 		`lanes.sort(byNameID);`,
 		`blocks.sort((a, b) => byNameID(a.lane, b.lane));`,
-		`animation: mapAttentionDot 1.65s ease-in-out infinite;`,
 		`class="attnstation-glow"`,
 		`class="attnstation-ring"`,
-		`.lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }`,
 		`mapFold.add(id);`,
 		`setLaneFilter("");`,
 		`mapFold.delete(id);`,
@@ -479,17 +477,25 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 			t.Errorf("journey lane fold/chip wiring missing %q", want)
 		}
 	}
-	chipCSSStart := strings.Index(html, ".lanechip {")
-	chipCSSEnd := strings.Index(html[chipCSSStart:], ".lanechip.selected")
+	// CSS declarations and selectors live in the cascade (inline today; linked
+	// files after Phase 5 extraction).
+	for _, want := range []string{
+		`animation: mapAttentionDot 1.65s ease-in-out infinite;`,
+		`.lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }`,
+		`.lhead .chev { color: var(--dim); font-size: 15px; width: 16px;`,
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("journey lane fold/chip CSS missing %q", want)
+		}
+	}
+	chipCSSStart := strings.Index(css, ".lanechip {")
+	chipCSSEnd := strings.Index(css[chipCSSStart:], ".lanechip.selected")
 	if chipCSSStart < 0 || chipCSSEnd < 0 {
 		t.Fatal("lane chip CSS not found")
 	}
-	chipCSS := html[chipCSSStart : chipCSSStart+chipCSSEnd]
-	if strings.Contains(html, ".lanechip.focused") || strings.Contains(chipCSS, "opacity:") {
+	chipCSS := css[chipCSSStart : chipCSSStart+chipCSSEnd]
+	if strings.Contains(css, ".lanechip.focused") || strings.Contains(chipCSS, "opacity:") {
 		t.Fatal("lane chips should no longer show selection by dimming unselected chips")
-	}
-	if !strings.Contains(html, `.lhead .chev { color: var(--dim); font-size: 15px; width: 16px;`) {
-		t.Fatal("lane fold glyph should be enlarged enough to read as a disclosure control")
 	}
 }
 
@@ -625,11 +631,8 @@ func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 // close, and focus returned to the trigger. The grouped feed itself is G4 — here
 // #searchfeed exists but only carries the blank-state hint.
 func TestSearchOverlayShell(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 
 	// Structure + a11y: trigger and modal dialog.
 	for _, want := range []string{
@@ -648,13 +651,13 @@ func TestSearchOverlayShell(t *testing.T) {
 
 	// The app behind the overlay is blurred, with an opaque fallback when the
 	// viewer asks for reduced transparency (spec: honor Reduce Transparency).
-	if !strings.Contains(html, "backdrop-filter: blur") {
+	if !strings.Contains(css, "backdrop-filter: blur") {
 		t.Error("search scrim should blur the app behind it")
 	}
-	if !strings.Contains(html, "prefers-reduced-transparency: reduce") {
+	if !strings.Contains(css, "prefers-reduced-transparency: reduce") {
 		t.Error("search overlay must honor prefers-reduced-transparency")
 	}
-	if !strings.Contains(html, "prefers-reduced-motion: reduce") {
+	if !strings.Contains(css, "prefers-reduced-motion: reduce") {
 		t.Error("search overlay must honor prefers-reduced-motion")
 	}
 
@@ -1343,17 +1346,20 @@ func TestNoteCollapseWiring(t *testing.T) {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
+	css := mustProductionCSSCascade(t)
 	for _, want := range []string{
 		"let expandedBookmarks = new Set();", // ephemeral, sibling of openBookmarkT
 		"const BOOKMARK_CLAMP_PX",            // the threshold constant
 		"function bookmarkClampState(",       // the decision core
 		"data-nmore",                         // the per-bubble toggle button
 		`class="nmore"`,                      // its markup in the note template
-		".bookmark .nbubble.clamped",         // the CSS clamp
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("note collapse wiring missing %q", want)
 		}
+	}
+	if !strings.Contains(css, ".bookmark .nbubble.clamped") {
+		t.Error("note-collapse CSS clamp is missing")
 	}
 	// The toggle handler is a distinct branch keyed on data-nmore. It must sit
 	// in the #bookmarkspane click delegate BEFORE the generic ".bookmark" tap branch,
@@ -1583,12 +1589,12 @@ func TestWebSharedJumpResolver(t *testing.T) {
 // (var(--bg)) as #map. It still spans the full width; it is not a centred scrim
 // card.
 func TestWorkspaceMatchesWallMap(t *testing.T) {
-	html := mustReadIndex(t)
-	ws := cssBlock(t, html, "#notesworkspace {")
+	css := mustProductionCSSCascade(t)
+	ws := cssBlock(t, css, "#notesworkspace {")
 	if !strings.Contains(ws, "var(--sbh)") {
 		t.Errorf("#notesworkspace must offset below the status bar (var(--sbh)), like #map; got %q", ws)
 	}
-	panel := cssBlock(t, html, "#wspanel {")
+	panel := cssBlock(t, css, "#wspanel {")
 	if !strings.Contains(panel, "var(--bg)") {
 		t.Errorf("#wspanel must paint the metro-map background var(--bg); got %q", panel)
 	}
@@ -1604,10 +1610,10 @@ func TestWorkspaceMatchesWallMap(t *testing.T) {
 // (Bookmarks inbox + Notes list) match the app pane width (340px, same as
 // #cards / #bookmarkspane) so the columns share one rhythm.
 func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
-	html := mustReadIndex(t)
-	css := cssBlock(t, html, "#wsinbox, #wsnav {")
-	if !strings.Contains(css, "340px") {
-		t.Errorf("#wsinbox, #wsnav must be 340px (>=900px) to match the app panes; got %q", css)
+	css := mustProductionCSSCascade(t)
+	block := cssBlock(t, css, "#wsinbox, #wsnav {")
+	if !strings.Contains(block, "340px") {
+		t.Errorf("#wsinbox, #wsnav must be 340px (>=900px) to match the app panes; got %q", block)
 	}
 }
 
@@ -1659,9 +1665,9 @@ func TestWorkspaceHasSwipeBack(t *testing.T) {
 // Follow-up (2026-07-30 iPad review): the workspace title ("Notes") must render
 // at the same size/weight as the app pane headings ("Activities", "Bookmarks").
 func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
-	html := mustReadIndex(t)
-	pane := cssBlock(t, html, ".phead h2 {")
-	ws := cssBlock(t, html, "#wstopbar h2 {")
+	css := mustProductionCSSCascade(t)
+	pane := cssBlock(t, css, ".phead h2 {")
+	ws := cssBlock(t, css, "#wstopbar h2 {")
 	// margin:0 is essential — without it the UA heading margin inflates the bar's
 	// height (flex items don't collapse margins), so the header renders taller.
 	for _, want := range []string{"font-size: 22px", "font-weight: 700", "margin: 0"} {
@@ -1678,12 +1684,12 @@ func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
 // vertical height as the chat area header. Both rows are driven by 34px controls,
 // so matching the top/bottom padding (10px, from #chathead) makes them identical.
 func TestWorkspaceHeaderHeightMatchesChatHead(t *testing.T) {
-	html := mustReadIndex(t)
-	chat := cssBlock(t, html, "#chathead {")
+	css := mustProductionCSSCascade(t)
+	chat := cssBlock(t, css, "#chathead {")
 	if !strings.Contains(chat, "padding: 10px 16px 10px") {
 		t.Fatalf("#chathead vertical padding baseline changed; got %q", chat)
 	}
-	ws := cssBlock(t, html, "#wstopbar {")
+	ws := cssBlock(t, css, "#wstopbar {")
 	if !strings.Contains(ws, "padding: 10px ") {
 		t.Errorf("#wstopbar must use 10px top/bottom padding to match #chathead; got %q", ws)
 	}
@@ -1695,11 +1701,12 @@ func TestWorkspaceHeaderHeightMatchesChatHead(t *testing.T) {
 // grabber is not a real control there. It caps at a max-height, then scrolls.
 func TestWorkspaceSectionEditorAutogrows(t *testing.T) {
 	html := mustReadIndex(t)
-	css := cssBlock(t, html, ".wssecedit {")
-	if strings.Contains(css, "resize: vertical") {
+	css := mustProductionCSSCascade(t)
+	block := cssBlock(t, css, ".wssecedit {")
+	if strings.Contains(block, "resize: vertical") {
 		t.Error(".wssecedit must not depend on the manual resize handle (ignored on iOS) — auto-grow instead")
 	}
-	if !strings.Contains(css, "max-height") {
+	if !strings.Contains(block, "max-height") {
 		t.Error(".wssecedit must cap growth with a max-height and scroll past it")
 	}
 	start := strings.Index(html, "function startBodyEdit(")
@@ -1717,10 +1724,10 @@ func TestWorkspaceSectionEditorAutogrows(t *testing.T) {
 // the UA [hidden] rule, so an explicit hidden override is required for
 // head.hidden = true to actually hide.
 func TestWorkspaceNoteHeadHidesWhenEmpty(t *testing.T) {
-	html := mustReadIndex(t)
-	css := cssBlock(t, html, "#wsnotehead[hidden] {")
-	if !strings.Contains(css, "display: none") {
-		t.Errorf("#wsnotehead[hidden] must force display:none so a deleted note's title clears; got %q", css)
+	css := mustProductionCSSCascade(t)
+	block := cssBlock(t, css, "#wsnotehead[hidden] {")
+	if !strings.Contains(block, "display: none") {
+		t.Errorf("#wsnotehead[hidden] must force display:none so a deleted note's title clears; got %q", block)
 	}
 }
 
@@ -1728,11 +1735,11 @@ func TestWorkspaceNoteHeadHidesWhenEmpty(t *testing.T) {
 // the active-note placeholder inside #wsnote and the note-card empty state
 // inside #wscards.
 func TestWorkspaceEmptyStatesCentered(t *testing.T) {
-	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 	for _, sel := range []string{"#wsnoteempty {", "#wscards .empty {"} {
-		css := cssBlock(t, html, sel)
-		if !strings.Contains(css, "align-items: center") || !strings.Contains(css, "justify-content: center") {
-			t.Errorf("%s must centre on both axes (flex align+justify center); got %q", sel, css)
+		block := cssBlock(t, css, sel)
+		if !strings.Contains(block, "align-items: center") || !strings.Contains(block, "justify-content: center") {
+			t.Errorf("%s must centre on both axes (flex align+justify center); got %q", sel, block)
 		}
 	}
 }
@@ -1741,17 +1748,20 @@ func TestWorkspaceEmptyStatesCentered(t *testing.T) {
 // the same auto-collapse ("Show more"/"Show less") for tall bubbles.
 func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 	for _, want := range []string{
 		`id="wsinboxtabs"`,             // the lane-tab row exists in markup
 		"data-wsitab",                  // per-tab selector
 		"data-wsimore",                 // per-bubble show-more toggle
-		".wsibubble.clamped",           // the CSS clamp on tall capture bubbles
 		"function applyWsInboxClamps(", // the measure/apply pass
 		"expandedWsInbox",              // ephemeral expand state, sibling of expandedBookmarks
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("workspace inbox tabs/clamp wiring missing %q", want)
 		}
+	}
+	if !strings.Contains(css, ".wsibubble.clamped") {
+		t.Error("workspace inbox CSS clamp is missing")
 	}
 	// The show-more toggle branch must precede the "Use in note" branch so a tap
 	// on Show more never enters placement mode.
@@ -1882,10 +1892,10 @@ func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
 // Item 4: the capture list must not scroll horizontally (hard to use on touch);
 // long code fences scroll inside their own <pre>, the list itself does not.
 func TestWorkspaceInboxNoHorizontalScroll(t *testing.T) {
-	html := mustReadIndex(t)
-	css := cssBlock(t, html, "#wsinboxlist {")
-	if !strings.Contains(css, "overflow-x: hidden") && !strings.Contains(css, "overflow-x: clip") {
-		t.Errorf("#wsinboxlist must suppress horizontal scroll; got %q", css)
+	css := mustProductionCSSCascade(t)
+	block := cssBlock(t, css, "#wsinboxlist {")
+	if !strings.Contains(block, "overflow-x: hidden") && !strings.Contains(block, "overflow-x: clip") {
+		t.Errorf("#wsinboxlist must suppress horizontal scroll; got %q", block)
 	}
 }
 
@@ -1917,7 +1927,7 @@ func TestWorkspaceNoteCardsDragReorder(t *testing.T) {
 // Markdown with the same element styling the chat bubbles use — headings, lists,
 // code, and quotes must be styled, not flat text.
 func TestWorkspaceMarkdownStyled(t *testing.T) {
-	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 	// A grouped selector must style headings/lists inside the workspace md
 	// containers (any of the three qualifies the rule).
 	for _, want := range []string{
@@ -1925,7 +1935,7 @@ func TestWorkspaceMarkdownStyled(t *testing.T) {
 		".wssecrender ul",
 		".wssecrender pre",
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(css, want) {
 			t.Errorf("workspace markdown styling missing selector %q", want)
 		}
 	}
@@ -1969,14 +1979,17 @@ assert.strictEqual(sectionSwapPlan(secs, "zzz", "up"), null, "unknown id is a no
 // bubble, with its own Show more/less toggle.
 func TestWorkspaceReferenceClamp(t *testing.T) {
 	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 	for _, want := range []string{
 		"data-refmore",
-		".wsrefbody.clamped",
 		"function applyRefClamps(",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("embedded-reference clamp wiring missing %q", want)
 		}
+	}
+	if !strings.Contains(css, ".wsrefbody.clamped") {
+		t.Error("workspace reference CSS clamp is missing")
 	}
 }
 
@@ -2036,12 +2049,12 @@ func TestWorkspaceEscCancelsEdit(t *testing.T) {
 // Item 17: the wide (iPad/desktop) layout shows all three zones and hides the
 // redundant back chevron. The multi-zone breakpoint reaches iPad portrait.
 func TestWorkspaceWideLayout(t *testing.T) {
-	html := mustReadIndex(t)
-	if !strings.Contains(html, "min-width: 768px") {
+	css := mustProductionCSSCascade(t)
+	if !strings.Contains(css, "min-width: 768px") {
 		t.Error("multi-zone workspace breakpoint must reach iPad portrait (min-width: 768px)")
 	}
 	// #wsback is hidden in the wide layout (the X already closes the workspace).
-	wide := html[strings.Index(html, "@media (min-width: 768px)"):]
+	wide := css[strings.Index(css, "@media (min-width: 768px)"):]
 	wide = wide[:strings.Index(wide, "\n}\n")+2]
 	if !strings.Contains(wide, "#wsback") {
 		t.Error("the wide layout must hide #wsback")
@@ -2214,18 +2227,22 @@ func TestWorkspaceEmptySectionStateIsCenteredButtonOnly(t *testing.T) {
 	}
 	// the wrapper centers its button both axes and fills the pane so it sits
 	// vertically centered, not pinned to the top
-	css := cssBlock(t, html, ".wssecempty {")
+	css := mustProductionCSSCascade(t)
+	block := cssBlock(t, css, ".wssecempty {")
 	for _, want := range []string{"align-items: center", "justify-content: center"} {
-		if !strings.Contains(css, want) {
-			t.Errorf(".wssecempty must center its content (%s); got %q", want, css)
+		if !strings.Contains(block, want) {
+			t.Errorf(".wssecempty must center its content (%s); got %q", want, block)
 		}
 	}
-	if !strings.Contains(css, "min-height") {
-		t.Errorf(".wssecempty must claim the pane height so the button centers vertically; got %q", css)
+	if !strings.Contains(block, "min-height") {
+		t.Errorf(".wssecempty must claim the pane height so the button centers vertically; got %q", block)
 	}
 }
 
-// mustReadIndex / cssBlock: small helpers shared by the workspace tests.
+// mustReadIndex returns the production index HTML. Use it for DOM markup and
+// JavaScript string contracts. CSS declaration/media-query assertions must
+// search the assembled cascade (mustProductionCSSCascade / mustCSSCascade)
+// instead of assuming all CSS is inline in the HTML argument.
 func mustReadIndex(t *testing.T) string {
 	t.Helper()
 	b, err := webFS.ReadFile("web/index.html")
@@ -2236,18 +2253,20 @@ func mustReadIndex(t *testing.T) string {
 }
 
 // cssBlock returns the text of the first CSS rule whose selector line contains
-// marker, from that line to the closing brace.
-func cssBlock(t *testing.T, html, marker string) string {
+// marker, from that line to the closing brace. cascade must be the assembled
+// document CSS (inline <style> plus linked stylesheets in document order), not
+// raw index HTML.
+func cssBlock(t *testing.T, cascade, marker string) string {
 	t.Helper()
-	i := strings.Index(html, marker)
+	i := strings.Index(cascade, marker)
 	if i < 0 {
 		t.Fatalf("could not locate CSS rule %q", marker)
 	}
-	end := strings.Index(html[i:], "}")
+	end := strings.Index(cascade[i:], "}")
 	if end < 0 {
 		t.Fatalf("unterminated CSS rule %q", marker)
 	}
-	return html[i : i+end]
+	return cascade[i : i+end]
 }
 
 // --- Pane gaps (pane-gap-design.md) ------------------------------------------
@@ -2260,19 +2279,19 @@ func cssBlock(t *testing.T, html, marker string) string {
 // (Bookmarks) gap left. Gaps must not pile up — every pane keeps its own
 // absolute width, so the peek is uniform at any depth.
 func TestPanePeekGapToken(t *testing.T) {
-	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 
-	if !strings.Contains(html, "--peek:") {
+	if !strings.Contains(css, "--peek:") {
 		t.Fatal("no --peek token defined; the peek width must be a deliberate token")
 	}
-	root := cssBlock(t, html, ":root {")
+	root := cssBlock(t, css, ":root {")
 	// tolerate the block's column alignment (--peek:<pad>clamp(...)).
 	if !strings.Contains(root, "--peek:") || !strings.Contains(root, "clamp(44px, 12%, 60px);") {
 		t.Error("--peek must be clamp(44px, 12%, 60px): 44px floor keeps it tappable on the narrowest phone, 60px cap stops it wasting width on iPad/Pro Max")
 	}
 
 	// Activities: full-width-minus-peek, still left-anchored (gap on the right).
-	cards := cssBlock(t, html, "#cards {")
+	cards := cssBlock(t, css, "#cards {")
 	if !strings.Contains(cards, "width: calc(100% - var(--peek));") {
 		t.Error("#cards should be width: calc(100% - var(--peek))")
 	}
@@ -2284,7 +2303,7 @@ func TestPanePeekGapToken(t *testing.T) {
 	}
 
 	// Journeys: was full-width (no gap); now gets the same peek, left-anchored.
-	mp := cssBlock(t, html, "#map {")
+	mp := cssBlock(t, css, "#map {")
 	if !strings.Contains(mp, "width: calc(100% - var(--peek));") {
 		t.Error("#map should be width: calc(100% - var(--peek)) (it was width:100% — no gap)")
 	}
@@ -2293,7 +2312,7 @@ func TestPanePeekGapToken(t *testing.T) {
 	}
 
 	// Bookmarks: was full-width (no gap); now peek on the LEFT, right-anchored.
-	bm := cssBlock(t, html, "#bookmarkspane {")
+	bm := cssBlock(t, css, "#bookmarkspane {")
 	if !strings.Contains(bm, "width: calc(100% - var(--peek));") {
 		t.Error("#bookmarkspane should be width: calc(100% - var(--peek)) (it was width:100% — no gap)")
 	}
@@ -2334,6 +2353,7 @@ func TestAppNavSwipeSnapshotsOverlayAtStart(t *testing.T) {
 // to level 1); the right pane (Bookmarks) gets a left-strip tap-catcher.
 func TestPeekTapStepsBack(t *testing.T) {
 	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 
 	// Left: scrim covers the peek for both open levels and steps exactly one back.
 	if !strings.Contains(html, `$("#scrim").classList.toggle("on", level >= 2);`) {
@@ -2354,14 +2374,14 @@ func TestPeekTapStepsBack(t *testing.T) {
 		t.Error("tapping the bookmarks peek must close the pane (step back to chat)")
 	}
 	// It occupies only the peek strip, appears with the pane, and never on desktop.
-	peek := cssBlock(t, html, "#bookmarkpeek {")
+	peek := cssBlock(t, css, "#bookmarkpeek {")
 	if !strings.Contains(peek, "width: var(--peek);") || !strings.Contains(peek, "left: 0;") {
 		t.Error("#bookmarkpeek must be a left-anchored strip exactly one peek wide")
 	}
-	if !strings.Contains(html, "body.bookmarks-open #bookmarkpeek { display: block; }") {
+	if !strings.Contains(css, "body.bookmarks-open #bookmarkpeek { display: block; }") {
 		t.Error("#bookmarkpeek must appear only while the bookmarks pane is open")
 	}
-	if !strings.Contains(html, "#bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }") {
+	if !strings.Contains(css, "#bookmarkpeek, body.bookmarks-open #bookmarkpeek { display: none; }") {
 		t.Error("#bookmarkpeek is phone/tablet-only: the exposed Bookmarks peek must stay unavailable on desktop")
 	}
 }
@@ -2400,13 +2420,13 @@ func TestJourneyBackLabelPointsRight(t *testing.T) {
 // animate transform; nothing zeroed them), and guard that the selected-note
 // detail stays a full-cover modal — the one leaf that takes NO peek.
 func TestReducedMotionAndModalNoPeek(t *testing.T) {
-	html := mustReadIndex(t)
+	css := mustProductionCSSCascade(t)
 
 	// The sliding panes must not animate under reduced motion.
-	if !strings.Contains(html, "#cards, #map, #bookmarkspane { transition: none; }") {
+	if !strings.Contains(css, "#cards, #map, #bookmarkspane { transition: none; }") {
 		t.Error("prefers-reduced-motion must zero the #cards/#map/#bookmarkspane slide transitions")
 	}
-	rm := strings.LastIndex(html, "@media (prefers-reduced-motion: reduce)")
+	rm := strings.LastIndex(css, "@media (prefers-reduced-motion: reduce)")
 	// (presence check above is enough; ensure at least one such block exists)
 	if rm < 0 {
 		t.Error("no prefers-reduced-motion block found")
@@ -2414,7 +2434,7 @@ func TestReducedMotionAndModalNoPeek(t *testing.T) {
 
 	// The selected-note detail host full-covers and never carries a peek — it is a
 	// modal push, not a member of the spatial line.
-	ws := cssBlock(t, html, "#notesworkspace {")
+	ws := cssBlock(t, css, "#notesworkspace {")
 	if !strings.Contains(ws, "left: 0; right: 0;") {
 		t.Error("#notesworkspace (selected-note modal) must full-cover (left:0; right:0)")
 	}
