@@ -115,6 +115,11 @@ func (a *app) loadStore() error {
 	return nil
 }
 
+// removeNodeLocked drops a node and every per-node poll field. Runtime callers
+// hold a.mu; startup replay calls it before the app is published or concurrent.
+// This is a deliberate non-poller cleanup: poller.go owns normal
+// live/attn/anim/tailer/mirror/chatMark writes, while deletion must clear the
+// same maps so a reissued slug never inherits dead poll state.
 func (a *app) removeNodeLocked(id string) {
 	delete(a.byID, id)
 	for i, n := range a.nodes {

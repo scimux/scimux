@@ -1257,6 +1257,9 @@ func (a *app) retireTranscript(n *Node) {
 	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: ""}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: retire transcript for %s: %v\n", n.ID, err)
 	}
+	// Deliberate non-poller reset after durable retirement only: poller-owned
+	// maps must drop the old file's tailer/progress/mirror so the next segment
+	// cannot inherit them. Persist failure returns above without touching these.
 	a.mu.Lock()
 	n.Transcript, n.SessionID = "", ""
 	delete(a.tailers, n.ID)
@@ -1678,9 +1681,10 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	// The human just answered the dialog; clear attention now rather than waiting
-	// for the tool-call record to resolve (it only lands when the approved tool
-	// completes, which for a long tool is minutes away — R21.2). The mechanical
+	// Deliberate non-poller write: successful key delivery clears attn/attnAt
+	// now rather than waiting for the tool-call record to resolve (it only lands
+	// when the approved tool completes, which for a long tool is minutes away —
+	// R21.2). Failures before SendKey must not reach here. The mechanical
 	// pipeline re-raises on the next tick if the dialog is still up, mirroring
 	// what the structured path gets for free from pm.Attention.
 	a.mu.Lock()
@@ -1746,8 +1750,11 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 // the quiet gate cannot see (parallel calls queued behind it keep the pane
 // animating), so automate it at the same moment: one visible capture,
 // transcript corroboration required, attention only ever added — the poller
-// keeps owning clearing. Unlike the poller's tick path this is one-shot and
-// human-triggered, so it skips the confined-animation gate.
+// keeps owning clearing. Deliberate non-poller raise: only unresolved
+// structured evidence plus a visible dialog matcher may set attn/attnAt, and
+// existing attention is never overwritten or restamped. Unlike the poller's
+// tick path this is one-shot and human-triggered, so it skips the
+// confined-animation gate.
 func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
 	tl := a.tailerFor(n)
 	if tl == nil {

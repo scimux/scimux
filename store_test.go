@@ -16,6 +16,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // writeStoreLines builds a nodes.jsonl body. When finalNL is false, the last
@@ -287,8 +290,13 @@ func TestRemoveNodeLocked(t *testing.T) {
 		prevCap:     map[string]string{"a": "cap"},
 		lastChg:     map[string]time.Time{"a": now},
 		activeSince: map[string]time.Time{"a": now},
-		staleChat:   map[string]bool{"a": true},
-		sendState:   map[string]string{"a": "submitting"},
+		tailers:     map[string]*transcript.Tailer{"a": {}, "b": {}},
+		mirrors:     map[string]*mirror{"a": {}, "b": {}},
+		chatMark:    map[string]chatMark{"a": {seen: true, off: 9}, "b": {seen: true, off: 1}},
+		staleChat:   map[string]bool{"a": true, "b": false},
+		sendState:   map[string]string{"a": "submitting", "b": "unconfirmed"},
+		segCache:    map[string]*sessionlog.Cache{"a": {}, "b": {}},
+		anim:        map[string]*animState{"a": {lines: []int{0}}, "b": {lines: []int{1}}},
 	}
 	a.removeNodeLocked("a")
 	if a.byID["a"] != nil {
@@ -297,33 +305,51 @@ func TestRemoveNodeLocked(t *testing.T) {
 	if got := nodeIDs(a); strings.Join(got, ",") != "b" {
 		t.Fatalf("nodes = %v, want [b]", got)
 	}
-	if _, ok := a.live["a"]; ok {
-		t.Error("live not cleared")
+	for _, name := range []string{"live", "attn", "attnAt", "prevCap", "lastChg", "activeSince",
+		"tailers", "mirrors", "chatMark", "staleChat", "sendState", "segCache", "anim"} {
+		var ok bool
+		switch name {
+		case "live":
+			_, ok = a.live["a"]
+		case "attn":
+			_, ok = a.attn["a"]
+		case "attnAt":
+			_, ok = a.attnAt["a"]
+		case "prevCap":
+			_, ok = a.prevCap["a"]
+		case "lastChg":
+			_, ok = a.lastChg["a"]
+		case "activeSince":
+			_, ok = a.activeSince["a"]
+		case "tailers":
+			_, ok = a.tailers["a"]
+		case "mirrors":
+			_, ok = a.mirrors["a"]
+		case "chatMark":
+			_, ok = a.chatMark["a"]
+		case "staleChat":
+			_, ok = a.staleChat["a"]
+		case "sendState":
+			_, ok = a.sendState["a"]
+		case "segCache":
+			_, ok = a.segCache["a"]
+		case "anim":
+			_, ok = a.anim["a"]
+		}
+		if ok {
+			t.Errorf("%s not cleared for removed node", name)
+		}
 	}
-	if _, ok := a.attn["a"]; ok {
-		t.Error("attn not cleared")
-	}
-	if _, ok := a.attnAt["a"]; ok {
-		t.Error("attnAt not cleared")
-	}
-	if _, ok := a.prevCap["a"]; ok {
-		t.Error("prevCap not cleared")
-	}
-	if _, ok := a.lastChg["a"]; ok {
-		t.Error("lastChg not cleared")
-	}
-	if _, ok := a.activeSince["a"]; ok {
-		t.Error("activeSince not cleared")
-	}
-	if _, ok := a.staleChat["a"]; ok {
-		t.Error("staleChat not cleared")
-	}
-	if _, ok := a.sendState["a"]; ok {
-		t.Error("sendState not cleared")
-	}
-	// Other node untouched.
+	// Other node untouched across every poll field removeNodeLocked clears.
 	if a.byID["b"] != nb || a.live["b"] != "active" {
 		t.Fatal("removeNodeLocked disturbed unrelated node")
+	}
+	if a.tailers["b"] == nil || a.mirrors["b"] == nil || !a.chatMark["b"].seen ||
+		a.sendState["b"] != "unconfirmed" || a.anim["b"] == nil {
+		t.Fatal("removeNodeLocked cleared peer node's poll fields")
+	}
+	if _, ok := a.segCache["b"]; !ok {
+		t.Fatal("removeNodeLocked cleared peer segCache")
 	}
 	// Missing id is a no-op.
 	a.removeNodeLocked("missing")

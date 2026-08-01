@@ -31,6 +31,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // ---------- helpers ----------
@@ -391,14 +392,30 @@ func TestRetireTranscriptRecordOrderAndStateCleanup(t *testing.T) {
 			hasTailer, hasMark, hasStale, hasMirror)
 	}
 
-	// Persist failure on the node record aborts before memory mutation.
+	// Persist failure on the node record aborts before memory mutation —
+	// including poller maps (tailer/chatMark/staleChat/mirror), not only the
+	// Node transcript/session fields.
 	n2 := &Node{ID: "c2", Agent: "claude", Transcript: tx, SessionID: "sess2"}
 	a.nodes = append(a.nodes, n2)
 	a.byID[n2.ID] = n2
+	a.tailers[n2.ID] = &transcript.Tailer{Path: tx}
+	a.chatMark[n2.ID] = chatMark{seen: true, off: 7}
+	a.staleChat[n2.ID] = true
+	a.mirrors[n2.ID] = &mirror{path: tx}
 	breakStore(t, a)
 	a.retireTranscript(n2)
 	if n2.Transcript != tx || n2.SessionID != "sess2" {
 		t.Fatalf("persist failure cleared memory: transcript=%q session=%q", n2.Transcript, n2.SessionID)
+	}
+	a.mu.Lock()
+	tl2 := a.tailers[n2.ID]
+	mark2 := a.chatMark[n2.ID]
+	stale2 := a.staleChat[n2.ID]
+	mir2 := a.mirrors[n2.ID]
+	a.mu.Unlock()
+	if tl2 == nil || !mark2.seen || mark2.off != 7 || !stale2 || mir2 == nil || mir2.path != tx {
+		t.Errorf("persist failure mutated poller maps: tailer=%v mark=%+v stale=%v mirror=%+v",
+			tl2, mark2, stale2, mir2)
 	}
 }
 

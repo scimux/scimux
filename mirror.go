@@ -27,8 +27,10 @@ import (
 )
 
 // mirror is one node's projection state. All fields are owned by the poller
-// goroutine (syncMirror is only called from poll); nothing here needs a lock
-// beyond the app-level map access.
+// goroutine: syncMirror is only called from poll (or warmStartup's one-shot
+// poll), and a.mirrors[id] entries are created only on that path under a.mu.
+// retireTranscript and removeNodeLocked deliberately delete map entries;
+// nothing here needs a lock beyond the app-level map access.
 type mirror struct {
 	logw *sessionlog.Writer
 	// path is the transcript file the current source segment mirrors from;
