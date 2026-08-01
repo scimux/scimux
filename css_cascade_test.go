@@ -1345,11 +1345,12 @@ var nineLinkCSSOrder = []string{
 	"/css/accessibility.css",
 }
 
-// TestProductionNotesAccessibilityCSSOwnership locks the 5E extraction
-// boundary: the complete nine-link order with notes eighth and accessibility
-// last; notes.css owns Bookmarks/Notes/desktop/peek rules; layout no longer
-// owns #bookmarkpeek; accessibility.css owns only the cross-component pane
-// reduced-motion override; cascade order and empty-inline 5E state hold.
+// TestProductionNotesAccessibilityCSSOwnership locks the permanent notes and
+// accessibility ownership established in Packet 5E and completed in 5F: the
+// complete nine-link order with notes eighth and accessibility last; notes.css
+// owns Bookmarks/Notes/desktop/peek rules; layout no longer owns #bookmarkpeek;
+// accessibility.css owns only the cross-component pane reduced-motion override;
+// cascade order holds; and the final state has no inline <style> source.
 func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 	html := mustReadIndex(t)
 	hrefs, err := linkedStylesheetHrefs(html)
@@ -1553,43 +1554,20 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 		t.Fatalf("phone/tablet bookmark-peek display must precede desktop suppression: phone@%d desktop@%d", phonePeek, desktopPeek)
 	}
 
-	// Moved Notes/Bookmarks signatures must not remain inline or in layout.
-	sources, err := collectCSSSources(html)
-	if err != nil {
-		t.Fatal(err)
+	// Final linked-only state (Packet 5F): no inline <style> element remains.
+	// Permanent ownership: moved Notes/Bookmarks signatures stay out of layout.
+	if hasInlineStyle(html) {
+		t.Fatal("final Phase 5 state must not retain an inline <style> element")
 	}
-	var inline string
-	var sawInline bool
-	for _, src := range sources {
-		if src.kind == cssSourceInline {
-			sawInline = true
-			inline = src.text
-			break
-		}
-	}
-	// Nine-link 5E state: style element remains but CSS content is empty/whitespace.
-	if !sawInline {
-		t.Fatal("5E nine-link state must retain the inline <style> element for Packet 5F")
-	}
-	if strings.TrimSpace(inline) != "" {
-		t.Fatalf("5E inline style must be empty or whitespace-only; got %q", inline)
+	if strings.Contains(strings.ToLower(html), "<style") {
+		t.Fatal("raw index must not contain a <style> tag after Packet 5F")
 	}
 	for _, moved := range []string{
-		"/* ---------- sticky-notes pane:",
-		"#bookmarkspane {",
 		"#bookmarkpeek {",
-		"#notesworkspace {",
-		"#notesbtn {",
-		"/* ---------- desktop / iPad: columns ---------- */",
-		"#cards, #map, #bookmarkspane { transition: none; }",
+		"/* ---------- sticky-notes pane:",
 	} {
-		if strings.Contains(inline, moved) {
-			t.Fatalf("moved signature %q still present in inline style", moved)
-		}
-		if moved == "#bookmarkpeek {" || moved == "/* ---------- sticky-notes pane:" {
-			if strings.Contains(layout, moved) {
-				t.Fatalf("moved signature %q still present in layout.css", moved)
-			}
+		if strings.Contains(layout, moved) {
+			t.Fatalf("moved signature %q still present in layout.css", moved)
 		}
 	}
 
@@ -1668,5 +1646,58 @@ func TestProductionNotesAccessibilityCSSServing(t *testing.T) {
 			}
 			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
 		})
+	}
+}
+
+// --- Packet 5F: Phase 5 boundary — linked-only final state -------------------
+
+// TestProductionCSSFinalStateLinkedOnly is the Phase 5 boundary audit for the
+// one contract that becomes observable only in 5F: production is linked-only,
+// and assembling its sources is exactly the ordered nine-file concatenation.
+// The permanent transition, ownership, serving, negative-root, and embed tests
+// above retain the rest of the final-state contract.
+func TestProductionCSSFinalStateLinkedOnly(t *testing.T) {
+	html := mustReadIndex(t)
+
+	// No <style> element or inline CSS source.
+	if hasInlineStyle(html) {
+		t.Fatal("final state must have no inline CSS source")
+	}
+	if strings.Contains(strings.ToLower(html), "<style") {
+		t.Fatal("raw index must not contain a <style> tag")
+	}
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != len(productionCSSFinalOrder) {
+		t.Fatalf("CSS sources = %d, want exactly %d linked files", len(sources), len(productionCSSFinalOrder))
+	}
+	for i, src := range sources {
+		if src.kind != cssSourceLink {
+			t.Fatalf("CSS source[%d] kind=%d, want link-only cascade", i, src.kind)
+		}
+		if src.href != productionCSSFinalOrder[i] {
+			t.Fatalf("CSS source[%d] href=%q, want %q", i, src.href, productionCSSFinalOrder[i])
+		}
+	}
+
+	// Linked-only cascade assembly equals concatenation of the nine embed files.
+	cascade := mustCSSCascade(t, html, webFS)
+	parts := make([]string, 0, len(productionCSSFinalOrder))
+	for _, href := range productionCSSFinalOrder {
+		embedPath, err := stylesheetEmbedPath(href)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := fs.ReadFile(webFS, embedPath)
+		if err != nil {
+			t.Fatalf("read embed %s: %v", embedPath, err)
+		}
+		parts = append(parts, string(b))
+	}
+	wantCascade := strings.Join(parts, cssCascadeSeparator)
+	if cascade != wantCascade {
+		t.Fatalf("assembled cascade differs from linked-only concatenation (%d vs %d bytes)", len(cascade), len(wantCascade))
 	}
 }
