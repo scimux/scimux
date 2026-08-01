@@ -765,6 +765,20 @@ var fiveLinkCSSPrefix = []string{
 	"/css/map.css",
 }
 
+// sevenLinkCSSPrefix is the permanent linked stylesheet prefix established by
+// Packet 5D (tokens → base → layout → cards → map → chat → sheets). Later
+// packets may extend the prefix further; ownership tests that require exactly
+// these seven links must condition on this length so they stay valid after 5E–5F.
+var sevenLinkCSSPrefix = []string{
+	"/css/tokens.css",
+	"/css/base.css",
+	"/css/layout.css",
+	"/css/cards.css",
+	"/css/map.css",
+	"/css/chat.css",
+	"/css/sheets.css",
+}
+
 // TestProductionLayoutCardsMapCSSOwnership locks the 5C extraction boundary:
 // layout, cards, and map are the third–fifth linked sheets; each file owns its
 // original contiguous section; moved signatures are absent from the surviving
@@ -1027,6 +1041,279 @@ func TestProductionLayoutCardsMapCSSServing(t *testing.T) {
 		"/web/css/layout.css",
 		"/web/css/cards.css",
 		"/web/css/map.css",
+		"/web/css/",
+	} {
+		t.Run("404"+path, func(t *testing.T) {
+			rec := getCharacterization(t, h, path)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s status=%d, want 404; body=%q", path, rec.Code, rec.Body.String())
+			}
+			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
+				t.Fatalf("GET %s exposed a directory listing", path)
+			}
+			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
+		})
+	}
+}
+
+// --- Packet 5D: chat + sheets extraction -------------------------------------
+
+// TestProductionChatSheetsCSSOwnership locks the 5D extraction boundary: chat
+// and sheets are the sixth–seventh linked sheets; each file owns its original
+// contiguous section (including historical cross-root selectors that lived
+// inside those blocks); moved signatures are absent from the surviving inline
+// source; and cascade order is tokens → base → layout → cards → map → chat →
+// sheets → sticky-notes.
+func TestProductionChatSheetsCSSOwnership(t *testing.T) {
+	html := mustReadIndex(t)
+	hrefs, err := linkedStylesheetHrefs(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hrefs) < 7 {
+		t.Fatalf("linked stylesheets = %v, want at least the seven-link prefix %v", hrefs, sevenLinkCSSPrefix)
+	}
+	for i, want := range sevenLinkCSSPrefix {
+		if hrefs[i] != want {
+			t.Fatalf("linked[%d]=%q, want %q (seven-link prefix %v)", i, hrefs[i], want, sevenLinkCSSPrefix)
+		}
+	}
+
+	chatCSS, err := fs.ReadFile(webFS, "web/css/chat.css")
+	if err != nil {
+		t.Fatalf("chat.css missing from embed: %v", err)
+	}
+	sheetsCSS, err := fs.ReadFile(webFS, "web/css/sheets.css")
+	if err != nil {
+		t.Fatalf("sheets.css missing from embed: %v", err)
+	}
+	ch := string(chatCSS)
+	sh := string(sheetsCSS)
+
+	// chat.css: head/details, gauge, messages/turns/history, work pulse,
+	// conversation tools, Markdown + attachments, peek/key row, prompt/composer,
+	// attachment menu/staging. Historical .sheet validation and Notes-workspace
+	// Markdown selectors that lived in this contiguous block stay here.
+	for _, sig := range []string{
+		"/* ---------- chat ---------- */",
+		"#chathead {",
+		"#chatdetails {",
+		"#gauge {",
+		"#msgs {",
+		".turn {",
+		".turn .bubble {",
+		".histload {",
+		".chatseam {",
+		"#workpulse {",
+		"#convtools {",
+		".bubble p {",
+		".wssecrender p, .wsrefbody p, .wsibubble p {",
+		".attrow {",
+		".attthumb {",
+		".peekblock {",
+		".peek {",
+		"#keyrow {",
+		"#promptbar {",
+		"#sendbtn {",
+		"#attadd {",
+		"#attmenu {",
+		"#attstage {",
+		".stagechip {",
+		".fielderr {",
+		".sheet [aria-invalid=\"true\"]",
+		"#syncwarn {",
+	} {
+		if !strings.Contains(ch, sig) {
+			t.Fatalf("chat.css missing signature %q", sig)
+		}
+	}
+	// sheets.css: sheet primitives, form rows/fields/CTAs, edit/new-node and
+	// menu/license rules, dialog positioning, backdrop.
+	for _, sig := range []string{
+		"/* ---------- sheets ---------- */",
+		".sheet {",
+		".sheet.open {",
+		".sheet .grab {",
+		".sheet .sect {",
+		".sheet .row2 {",
+		".sheet textarea, .sheet select, .sheet input {",
+		".sheet .cta {",
+		".sheet .item {",
+		"#newchat.editing .nc-create-only",
+		"#menu .lic",
+		"#m_lictext",
+		"#backdrop {",
+		"#backdrop.on {",
+	} {
+		if !strings.Contains(sh, sig) {
+			t.Fatalf("sheets.css missing signature %q", sig)
+		}
+	}
+
+	// Cross-file rejection. chat.css must not absorb the sheets section marker
+	// or deferred sticky-notes / Notes workspace sections / unrelated layout
+	// cards/map section markers. Documented historical .sheet validation
+	// selectors inside chat are allowed — do not reject bare ".sheet".
+	chatReject := []string{
+		"/* ---------- sheets ---------- */",
+		"/* ---------- sticky-notes pane:",
+		"/* ---------- Notes workspace:",
+		"/* ---------- statusbar ---------- */",
+		"/* ---------- cards ---------- */",
+		"/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */",
+		"#maptoolbar",
+		".sheet.open {",
+		"#backdrop {",
+	}
+	for _, bad := range chatReject {
+		if strings.Contains(ch, bad) {
+			t.Fatalf("chat.css must not contain %q", bad)
+		}
+	}
+	// sheets.css must not absorb the chat marker or deferred notes sections.
+	sheetsReject := []string{
+		"/* ---------- chat ---------- */",
+		"#chathead {",
+		"#promptbar {",
+		"/* ---------- sticky-notes pane:",
+		"/* ---------- Notes workspace:",
+		"/* ---------- statusbar ---------- */",
+		"/* ---------- cards ---------- */",
+		"/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */",
+	}
+	for _, bad := range sheetsReject {
+		if strings.Contains(sh, bad) {
+			t.Fatalf("sheets.css must not contain %q", bad)
+		}
+	}
+
+	// Surviving inline style (while present).
+	sources, err := collectCSSSources(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inline string
+	for _, src := range sources {
+		if src.kind == cssSourceInline {
+			inline = src.text
+			break
+		}
+	}
+
+	// Seven-link state only: nonempty inline begins exactly at sticky-notes.
+	// Later packets extend the prefix and eventually remove the inline source
+	// without weakening the permanent ownership assertions above.
+	if len(hrefs) == 7 {
+		if inline == "" {
+			t.Fatal("5D seven-link state must retain the inline style")
+		}
+		trimmed := strings.TrimLeft(inline, "\n\r\t ")
+		if !strings.HasPrefix(trimmed, "/* ---------- sticky-notes pane:") {
+			head := trimmed
+			if len(head) > 80 {
+				head = head[:80]
+			}
+			t.Fatalf("5D inline style must begin at sticky-notes section; starts with %q", head)
+		}
+	}
+
+	// Moved chat/sheets signatures must no longer remain inline.
+	// Prefer section markers and rules unique to the extracted contiguous
+	// blocks — later desktop override / shared-chrome rules still mention
+	// .sheet/.sheet.open/.sheet .grab and must not be treated as residual
+	// chat/sheets source.
+	for _, moved := range []string{
+		"/* ---------- chat ---------- */",
+		"#chathead {",
+		"#promptbar {",
+		"#attmenu {",
+		"#workpulse {",
+		"#keyrow {",
+		"/* ---------- sheets ---------- */",
+		"#backdrop {",
+		"#backdrop.on {",
+		"#m_lictext {",
+		"#m_check {",
+	} {
+		if strings.Contains(inline, moved) {
+			t.Fatalf("moved signature %q still present in inline style", moved)
+		}
+	}
+
+	// Assembled cascade order: tokens → base → layout → cards → map → chat →
+	// sheets → sticky-notes.
+	cascade := mustCSSCascade(t, html, webFS)
+	markers := []struct {
+		name string
+		sig  string
+	}{
+		{"tokens", "/* ---------- design tokens"},
+		{"base", "* { box-sizing: border-box;"},
+		{"layout", "/* ---------- statusbar ---------- */"},
+		{"cards", "/* ---------- cards ---------- */"},
+		{"map", "/* ---------- metro map (journeys = fork trees, stations = activities) ---------- */"},
+		{"chat", "/* ---------- chat ---------- */"},
+		{"sheets", "/* ---------- sheets ---------- */"},
+		{"sticky-notes", "/* ---------- sticky-notes pane:"},
+	}
+	prev := -1
+	prevName := ""
+	for _, m := range markers {
+		idx := strings.Index(cascade, m.sig)
+		if idx < 0 {
+			t.Fatalf("cascade missing %s marker %q", m.name, m.sig)
+		}
+		if prev >= 0 && !(prev < idx) {
+			t.Fatalf("cascade order wrong: %s@%d must precede %s@%d", prevName, prev, m.name, idx)
+		}
+		prev = idx
+		prevName = m.name
+	}
+}
+
+// TestProductionChatSheetsCSSServing activates the 5A exact-byte, content-
+// type, cache, nosniff, and negative-path contracts for the two new linked files.
+func TestProductionChatSheetsCSSServing(t *testing.T) {
+	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+
+	for _, href := range []string{"/css/chat.css", "/css/sheets.css"} {
+		t.Run("ok"+href, func(t *testing.T) {
+			embedPath, err := stylesheetEmbedPath(href)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := fs.ReadFile(webFS, embedPath)
+			if err != nil {
+				t.Fatalf("read embed %s: %v", embedPath, err)
+			}
+			rec := getCharacterization(t, h, href)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status=%d, want 200; body=%q", href, rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
+				t.Fatalf("GET %s Content-Type=%q, want %q", href, got, "text/css; charset=utf-8")
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("GET %s Cache-Control=%q, want no-store", href, got)
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("GET %s X-Content-Type-Options=%q, want nosniff", href, got)
+			}
+			if rec.Body.String() != string(want) {
+				t.Fatalf("GET %s body differs from embedded %s (%d vs %d bytes)", href, embedPath, rec.Body.Len(), len(want))
+			}
+		})
+	}
+
+	for _, path := range []string{
+		"/css/",
+		"/css/missing.css",
+		"/css/sub/chat.css",
+		"/css/%2e%2e/chat.css",
+		"/css/chat.txt",
+		"/css/chat.css.bak",
+		"/web/css/chat.css",
+		"/web/css/sheets.css",
 		"/web/css/",
 	} {
 		t.Run("404"+path, func(t *testing.T) {

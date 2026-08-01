@@ -1,0 +1,51 @@
+/* ---------- sheets ---------- */
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  background: var(--surface); border-radius: 16px 16px 0 0;
+  padding: 8px 20px calc(24px + env(safe-area-inset-bottom));
+  transform: translateY(103%); transition: transform .32s cubic-bezier(.32,.72,.34,1);
+  max-height: 82dvh; overflow-y: auto;
+}
+/* shadow only when open: a closed sheet lives just below the viewport, and its
+   upward shadow (z-index 60, above the chat/map) otherwise bleeds ~36px back up
+   as a gray band along the bottom edge */
+.sheet.open { transform: translateY(0); box-shadow: 0 -8px 40px rgba(0,0,0,.16); }
+.sheet .grab { width: 36px; height: 5px; border-radius: 3px; background: var(--hairline);
+  margin: 4px auto 14px; }
+.sheet h3 { margin: 0 0 2px; font-size: 20px; }
+.sheet .sect { margin-top: 16px; }
+/* the new-activity sheet doubles as the edit sheet (map pencil / long-press):
+   in edit mode the immutable launch config + set-once lane are hidden */
+#newchat.editing .nc-create-only { display: none; }
+.sheet .sect .k { font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dim); margin-bottom: 4px; }
+.sheet .sect .v { font-size: 15px; line-height: 1.5; overflow-wrap: break-word; }
+.sheet .sect .v code { font: 13px/1.4 ui-monospace, monospace; background: var(--code-bg);
+  padding: 1px 5px; border-radius: 4px; }
+.sheet .row2 { display: flex; gap: 10px; }
+.sheet .row2 > div { flex: 1; }
+.sheet .row2 label { font-size: 12px; color: var(--dim); }
+.sheet textarea, .sheet select, .sheet input {
+  width: 100%; font-size: 16px; line-height: 1.4; font-family: inherit; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--hairline); border-radius: 10px;
+  padding: 10px 12px; outline: none; margin-top: 4px;
+}
+.sheet .cta { display: block; width: 100%; margin-top: 20px; padding: 13px;
+  background: var(--work); color: #fff; font-weight: 600; font-size: 16px;
+  border-radius: var(--radius); text-align: center; }
+.sheet .cta:disabled { opacity: .55; }
+.sheet .item { display: flex; gap: 10px; align-items: baseline; margin: 8px 0; font-size: 14px; }
+.sheet .item .tag { color: var(--dim); font-size: 12px; margin-left: auto; }
+/* burger menu: update row + about ([hidden] must beat the display rules above) */
+.sheet .item[hidden], .sheet .cta[hidden] { display: none; }
+#m_check { color: var(--work); font-size: 16px; line-height: 1; }
+#menu .lic { text-decoration: underline dotted; }
+#m_notes { max-height: 40dvh; overflow-y: auto; margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid var(--hairline); font-size: 14px; }
+#m_lictext { max-height: 40dvh; overflow-y: auto; margin: 8px 0 0; white-space: pre-wrap;
+  overflow-wrap: break-word; font: 11px/1.5 ui-monospace, monospace; color: var(--dim); }
+.sheet .pos-item { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; font-size: 14px; }
+.sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
+#backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,.25);
+  opacity: 0; pointer-events: none; transition: opacity .3s; }
+#backdrop.on { opacity: 1; pointer-events: auto; }
