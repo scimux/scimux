@@ -54,6 +54,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "/js/format.js"`,
 		`from "/js/lanes.js"`,
 		`from "/js/map-model.js"`,
+		`from "/js/map.js"`,
 		`from "/js/navigation.js"`,
 		`from "/js/state.js"`,
 	}
@@ -421,7 +422,7 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 		`setHostOnline(false); $("#sys").textContent = "server unreachable"; return;`,
 		`setHostOnline(true);`,
 		`createCardsFeature`,
-		`import { cardConfigText, createCardsFeature } from "/js/cards.js";`,
+		`import { createCardsFeature } from "/js/cards.js";`,
 		`function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }`,
 	} {
 		if !strings.Contains(html, want) {
@@ -501,60 +502,75 @@ assert.deepEqual(
 }
 
 func TestDockedMapStationLongPressEdits(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7B: station long-press lives in map.js; Node covers bind/destroy.
+	// Structural: production wires createMapFeature and map.js owns the docked path.
+	html := mustReadIndex(t)
+	if !strings.Contains(html, `from "/js/map.js"`) || !strings.Contains(html, "createMapFeature") {
+		t.Fatal("production must wire map.js for station long-press")
+	}
+	mapJS, err := os.ReadFile("web/js/map.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
-	start := strings.Index(html, `longpress($("#mapwrap"), ".strow"`)
-	if start < 0 {
-		t.Fatal("station long-press handler not found")
-	}
-	end := strings.Index(html[start:], "});")
-	if end < 0 {
-		t.Fatal("station long-press handler not terminated")
-	}
-	block := html[start : start+end]
+	body := string(mapJS)
 	// The docked map must reach the editor — no unconditional mapFull bail-out.
-	if strings.Contains(block, "if (!mapFull) return;") {
+	if strings.Contains(body, "if (!mapFull) return;") {
 		t.Error("station long-press still bails out of the docked (collapsed) map")
 	}
 	// The full-screen-only selection move stays fenced behind mapFull.
-	if !strings.Contains(block, "if (mapFull){") {
+	if !strings.Contains(body, "if (mapFull){") {
 		t.Error("full-screen selection move should be gated on mapFull, not run in the docked map")
 	}
 	// Both maps open the editor scoped to the pressed station's stop.
-	if !strings.Contains(block, "openActivityEditor(id, stop)") {
+	if !strings.Contains(body, "openActivityEditor(id, stop)") {
 		t.Error("station long-press should open the activity editor scoped to the station's stop")
+	}
+	// No residual inline longpress on #mapwrap after extraction.
+	if strings.Contains(html, `longpress($("#mapwrap"), ".strow"`) {
+		t.Error("inline mapwrap station longpress must move into map.js")
 	}
 }
 
 func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
+	// Packet 7B: fold/chip algorithms and markup live in map.js (+ lanes.js pure
+	// helpers). Executable Node coverage is web/test/map.test.js; keep structural
+	// wiring + CSS contracts here.
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
+	if !strings.Contains(html, `from "/js/map.js"`) || !strings.Contains(html, "createMapFeature") {
+		t.Fatal("production must wire map.js for journey fold/chip behavior")
+	}
+	mapJS, err := os.ReadFile("web/js/map.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(mapJS)
 	for _, want := range []string{
-		`let mapFoldKnown = new Set(JSON.parse(localStorage.getItem("scimux-mapfold-known") || "[]"));`,
-		`for (const id of live) if (!mapFoldKnown.has(id)){`,
-		`mapFold.add(id);`,
-		`mapFoldKnown.add(id);`,
-		`localStorage.setItem("scimux-mapfold-known", JSON.stringify([...mapFoldKnown]));`,
-		`if (focusLane && mapFold.has(focusLane)){`,
-		`mapFold.delete(focusLane);`,
+		`MAP_FOLD_KNOWN_KEY = "scimux-mapfold-known"`,
+		`export function applyNewLaneFolds`,
+		`export function unfoldFocusLane`,
+		`export function chipTapPlan`,
+		`export function laneChipStyle`,
 		`class="lanechip ${focusLane === l.id ? "selected" : ""}"`,
-		`style="${laneChipStyle(lm.color(l.id), focusLane === l.id)}"`,
-		`return ` + "`border-color:${c};background:${c};color:${esc(contrastText(color))}`" + `;`,
-		`const groups = [...(UI.groups || [])].sort(byNameID);`,
-		`blocks.sort((a, b) => byNameID(a.lane, b.lane));`,
-		// laneModel sorting lives in lanes.js; production must still import byNameID.
-		`byNameID`,
 		`class="attnstation-glow"`,
 		`class="attnstation-ring"`,
-		`mapFold.add(id);`,
-		`setLaneFilter("");`,
-		`mapFold.delete(id);`,
+		`setLaneFilter("")`,
+		// stack order reuses lanes.js byNameID via buildStackBlocks
+		`byNameID`,
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("journey lane fold/chip wiring missing %q", want)
+		if !strings.Contains(body, want) {
+			t.Errorf("journey lane fold/chip wiring missing from map.js: %q", want)
+		}
+	}
+	// Shell must not retain duplicate fold/chip listeners or implementations.
+	for _, dead := range []string{
+		`longpress($("#lanechips")`,
+		`$("#lanechips").addEventListener`,
+		`let mapFoldKnown = new Set`,
+		`function laneChipStyle(`,
+	} {
+		if strings.Contains(html, dead) {
+			t.Errorf("inline map fold/chip code still present: %q", dead)
 		}
 	}
 	// CSS declarations and selectors live in the cascade (inline today; linked
@@ -650,23 +666,28 @@ assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), null, "deleted pare
 }
 
 func TestWebStackMapKeepsForkCues(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	// Packet 7B: fork cues/goto live in map.js; classification stays in lanes.js.
+	html := mustReadIndex(t)
+	if !strings.Contains(html, `from "/js/map.js"`) {
+		t.Fatal("production must wire map.js for stack fork cues")
 	}
-	html := string(b)
+	mapJS, err := os.ReadFile("web/js/map.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(mapJS)
 	for _, want := range []string{
-		"function forkCueHTML(",   // the caption builder
-		"fork: true,",             // stack renderer opts in
-		"data-goorigin=",          // tap-to-origin target
-		"function gotoStation(",   // …and its handler
-		`forkKind(n) === "y-new"`, // wall map classifies by history
+		"export function forkCueHTML(", // the caption builder
+		"fork: true,",                  // stack renderer opts in
+		"data-goorigin=",               // tap-to-origin target
+		"function gotoStation(",        // …and its handler
+		`forkKind(n) === "y-new"`,      // wall map classifies by history
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("stack fork-topology wiring missing: %q", want)
+		if !strings.Contains(body, want) {
+			t.Errorf("stack fork-topology wiring missing from map.js: %q", want)
 		}
 	}
-	if strings.Contains(html, "laneCount[n.lane_id]") {
+	if strings.Contains(body, "laneCount[n.lane_id]") || strings.Contains(html, "laneCount[n.lane_id]") {
 		t.Error("old population-based Y-new/S classifier still present; must be replaced by forkKind")
 	}
 }

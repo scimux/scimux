@@ -15,6 +15,7 @@ var productionJSURLs = []string{
 	"/js/format.js",
 	"/js/lanes.js",
 	"/js/map-model.js",
+	"/js/map.js",
 	"/js/navigation.js",
 	"/js/state.js",
 }

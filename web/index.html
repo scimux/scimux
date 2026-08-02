@@ -378,24 +378,22 @@
    and DOM effects. No window/global bridge, no second entry (app.js is Phase 7). */
 import {
   esc, mdInline, md, ageText, fmtDur, fmtStamp, fmtBubbleTime, fmtWhen,
-  fmtNoteMeta, bubbleTitle, stampMS, cssRGB as cssRGBMod,
+  fmtNoteMeta, bubbleTitle, cssRGB as cssRGBMod,
   contrastText as contrastTextMod,
 } from "/js/format.js";
 import {
-  hashStr, laneList as laneListMod, byNameID, sortedLaneList as sortedLaneListMod,
+  hashStr, laneList as laneListMod, sortedLaneList as sortedLaneListMod,
   laneById as laneByIdMod, laneName as laneNameMod, laneColor as laneColorMod,
   uniqueLaneID as uniqueLaneIDMod, nextLaneColor as nextLaneColorMod, makeLane as makeLaneMod,
-  servedLanes, laneModel as laneModelMod, groupLanes as groupLanesMod,
-  forkKind as forkKindMod, stopTimes, stopsOf, stopKey, stopLabel,
-  newestFirst, parentStopIndex, laneColumnOrder,
+  laneModel as laneModelMod, stopsOf, stopLabel,
 } from "/js/lanes.js";
 import {
   queueLocalOp, savePendingOps as savePendingOpsMod,
   loadPendingOps as loadPendingOpsMod, saveCachedUI,
 } from "/js/state.js";
 import {
-  hardAttention, statusText, orderedNodes as orderedNodesMod,
-  isArchived as isArchivedMod, headStopKey as headStopKeyMod, toggleMapSelection,
+  hardAttention, orderedNodes as orderedNodesMod,
+  isArchived as isArchivedMod,
 } from "/js/map-model.js";
 import {
   clampLevel, scrimStep, bookmarkPeekClose, captureTouchStart, documentSwipeDecision,
@@ -405,7 +403,8 @@ import {
   withCsrf as withCsrfMod, api as apiMod, pagehidePutRequest,
   loadUIState, flushUIState, pollUIState,
 } from "/js/api.js";
-import { cardConfigText, createCardsFeature } from "/js/cards.js";
+import { createCardsFeature } from "/js/cards.js";
+import { createMapFeature } from "/js/map.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -427,83 +426,7 @@ let termOpen = false;        // terminal unfolded below the last bubble (per sel
 let cardTab = "current";
 let laneFilter = localStorage.getItem("scimux-lanefilter") || "";
 let attnFoldOpen = false;   /* "Input needed" disclosure; folded on scope change */
-let mapTab = localStorage.getItem("scimux-maptab") || "all";
-/* per-device view state, like mapTab: which lane blocks are folded shut */
-let mapFold = new Set(JSON.parse(localStorage.getItem("scimux-mapfold") || "[]"));
-let mapFoldKnown = new Set(JSON.parse(localStorage.getItem("scimux-mapfold-known") || "[]"));
-function saveMapFold(){
-  /* Lanes default collapsed the first time this device sees them; after that,
-     mapFold records only the user's explicit open/closed choices. Prune lanes
-     no longer in use so deleted ids don't accumulate forever. */
-  if (uiLoaded && nodes.length){
-    const live = new Set(laneModel().lanes.map(l => l.id));
-    for (const id of live) if (!mapFoldKnown.has(id)){
-      mapFold.add(id);
-      mapFoldKnown.add(id);
-    }
-    for (const id of mapFold) if (!live.has(id)) mapFold.delete(id);
-    for (const id of mapFoldKnown) if (!live.has(id)) mapFoldKnown.delete(id);
-  }
-  localStorage.setItem("scimux-mapfold", JSON.stringify([...mapFold]));
-  localStorage.setItem("scimux-mapfold-known", JSON.stringify([...mapFoldKnown]));
-}
-/* full-screen "wall map" mode — a desktop/iPad-only toggle that grows #map to
-   fill #app and folds away cards + chat (P1: renders the existing block layout
-   at width; geometry comes in P2). Persisted per-device like mapFold; the class
-   is inert on phone (the map is already full-width there and the styles gate
-   behind the ≥900px query). Independent of body.map-open — entering restores
-   whatever column layout you came from on exit. */
-let mapFull = localStorage.getItem("scimux-mapfull") === "1";
-/* fare toggle (full screen only): dormant unfinished experiment. Do not read the
-   persisted flag while the button is hidden, or old browsers keep showing it. */
-let fareOn = false;
-/* the wall map's OWN selection, independent of `sel` (the open chat). Entering
-   full screen starts clean (content first, HIG deference); a click selects a
-   row (highlight + toolbar), a second click on it deselects. "Open chat" is the
-   explicit act that opens the conversation — selecting never opens it. */
-let mapSel = "";
-/* selection is STOP-scoped on the wall: mapSelKey is the selected row's
-   stop key (nid#i), so an earlier stop can carry the highlight and the
-   toolbar — node-scoped selection always resolved to the head row, making
-   past stations unselectable. mapSel stays the node id (toolbar actions). */
-let mapSelKey = "";
-/* seam time of the selected row when it was an earlier stop — the toolbar's
-   "Open chat" then opens the conversation with history expanded at that
-   surface. Cleared whenever the selection or full-screen mode changes. */
-let mapSelStop = "";
-const headStopKey = id => headStopKeyMod(id, nodes);
-function setMapSel(id, key, stopTime){
-  const next = toggleMapSelection({ id, key, stopTime, mapSelKey, nodes });
-  mapSel = next.mapSel;
-  mapSelKey = next.mapSelKey;
-  /* set the selected stop BEFORE rendering so the toolbar (its title, the
-     "earlier stop" cue, and the edit routing) paints against the real
-     selection — deselect or a head row clears it */
-  mapSelStop = next.mapSelStop;
-  mapSig = ""; renderMap();             /* repaint highlight + refresh toolbar */
-}
-function setMapFull(on){
-  mapFull = !!on;
-  if (mapFull) localStorage.setItem("scimux-mapfull", "1");
-  else localStorage.removeItem("scimux-mapfull");
-  mapSel = ""; mapSelKey = ""; mapSelStop = "";   /* enter clean, leave clean — no stale selection/toolbar */
-  document.body.classList.toggle("map-full", mapFull);
-  syncMapFullBtn();
-  /* preserve scroll + laneFilter: do NOT route through the setLevel push path,
-     which zeroes #mapscroll.scrollTop */
-  mapSig = ""; renderMap();
-  /* exiting renders the stack path (renderWallMap doesn't run), so clear the
-     floating toolbar here — otherwise its inline display keeps it on screen */
-  renderMapToolbar();
-}
-function syncMapFullBtn(){
-  const b = $("#mapfullbtn");
-  if (b){ b.innerHTML = "&#10530;";   /* ⤢ diagonal expand glyph (the one that renders) */
-    /* the exit icon is the same glyph rotated 90° — no dependency on ⤡, whose
-       font coverage is uneven (it rendered blank) */
-    b.classList.toggle("contract", mapFull);
-    b.setAttribute("aria-label", mapFull ? "exit full-screen map" : "full-screen map"); }
-}
+/* mapTab / mapFold / mapFull / fare / mapSel live inside createMapFeature (Packet 7B). */
 const expanded = new Set();
 let actionCard = "";
 let editingDesc = "";
@@ -614,7 +537,7 @@ async function flushUI(){
 /* re-render everything that draws from UI, preserving inputs (the prompt bar
    and sheets are singletons outside these render regions) */
 function applyRemoteUI(){
-  cardsSig = ""; mapSig = ""; bookmarksSig = "";
+  cardsSig = ""; mapFeature.invalidate(); bookmarksSig = "";
   renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderBookmarksPane();
 }
 async function loadUI(){
@@ -1089,7 +1012,6 @@ function readLaneChoice(select, input){
   }
   return { laneID: val };
 }
-/* servedLanes imported from /js/lanes.js */
 const laneModel = () => laneModelMod(nodes, UI.lanes);
 const isArchived = id => isArchivedMod(id, UI.archived);
 
@@ -1153,7 +1075,7 @@ const cardsFeature = createCardsFeature({
   confirm: msg => confirm(msg),
   removeNode: id => { nodes = nodes.filter(x => x.id !== id); },
   invalidateChatSig: () => { chatSig = ""; },
-  invalidateMapSig: () => { mapSig = ""; },
+  invalidateMapSig: () => { mapFeature.invalidate(); },
   invalidateStateEtag: () => { stateEtag = ""; },
   scheduleTick: () => setTimeout(tick, 200),
   startTitleEdit: (id, scope) => startTitleEdit(id, scope),
@@ -1167,7 +1089,7 @@ function setLaneFilter(id){
   attnFoldOpen = false;      /* a new scope starts with the fold closed */
   if (laneFilter) localStorage.setItem("scimux-lanefilter", laneFilter);
   else localStorage.removeItem("scimux-lanefilter");
-  cardsSig = ""; mapSig = "";
+  cardsSig = ""; mapFeature.invalidate();
   renderCards(); renderMap();
 }
 
@@ -1182,185 +1104,11 @@ async function patchRail(id, body){
       method: "PATCH", body: JSON.stringify(body),
     });
     updateLocalNode(n);
-    cardsSig = ""; mapSig = "";
+    cardsSig = ""; mapFeature.invalidate();
     renderCards(); renderMap();
   } catch (err) { alert(err.message); }
 }
 
-/* ---------- metro map: journeys = explicit lanes, stations = activities ----------
-   Only nodes assigned to a lane render here. Fork rationale renders as "why:"
-   under the station; unassigned activities stay solely in Activities. */
-let mapSig = "";
-
-/* maps: logical tabs over the journeys — a viewing filter only.
-   "All" is fixed; user maps are added via (+), removed via the ✕
-   (hover-revealed on pointer, always visible on touch) or from the edit
-   sheet (tap the active tab again). Removing a map never touches a lane.
-   Maps persist server-side in UI.groups: {id, name, lanes:[lane ids]}. */
-const groupLanes = () => groupLanesMod(mapTab, UI.groups);
-function renderMapTabs(){
-  /* validate the saved group only against loaded state — before loadUI
-     resolves, UI.groups is the empty default and would wrongly reset it */
-  if (uiLoaded && mapTab !== "all" && !(UI.groups || []).some(t => t.id === mapTab)) mapTab = "all";
-  const groups = [...(UI.groups || [])].sort(byNameID);
-  $("#maptabs").innerHTML =
-    `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All</button>` +
-    groups.map(t => `<button data-mt="${esc(t.id)}" class="${mapTab === t.id ? "on" : ""}">
-       ${esc(t.name)}<span class="x" data-rm="${esc(t.id)}">&#10005;</span></button>`).join("") +
-    `<button data-mt="+" class="add" aria-label="add map">+</button>`;
-}
-
-function mapVisible(){
-  /* full screen shows the map regardless of the column-mode map-open flag */
-  return isDesktop() ? (mapFull || document.body.classList.contains("map-open")) : level === 3;
-}
-/* one station label row, shared by the stacked map and the full-screen wall
-   map. `others` are the interchange lines named by ⇄ chips; `golane` marks them
-   jump-to-block targets (stack only — the wall has no per-lane block). */
-/* the stack/phone map cannot draw the wall map's cross-lane crossover curves
-   (its lanes are independent, foldable blocks with no shared column geometry),
-   so forks get a compact inline source link. Colour matches the wall map's
-   crossover rule (y-new → child lane, S/y-stay → origin lane). Empty for roots
-   and deleted-parent stations. */
-function forkCueHTML(n, lm){
-  const k = forkKind(n);
-  if (!k) return "";
-  const p = nodeById(n.parent);
-  if (!p) return "";
-  const col = esc(lm.color(k === "y-new" ? n.lane_id : p.lane_id));
-  return `<span class="forkcue" data-goorigin="${esc(p.id)}" style="color:${col}">from ${esc(p.title)}</span>`;
-}
-function stationRowHTML(n, lm, { padLeft, others, dim, golane, current, fork, stop, alt }){
-  /* a history stop (a segment closed by a later /clear) renders as a dim
-     minimal row: the thread's title for orientation plus when that stop began.
-     It still carries data-nid, so tapping it selects/opens the thread — riding
-     back through the history is the chat's scrollback, not the map's. */
-  const label = stop ? stopLabel(stop) : { title: n.title || "", desc: n.description || n.prompt || "" };
-  if (stop && !stop.head)
-    return `
-        <div class="strow stoprow ${alt ? "alt " : ""}${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${esc(n.id)}" data-skey="${esc(stopKey(stop))}" data-stop="${esc(stop.time)}">
-          <div class="lbl"><span class="t">${esc(label.title)}</span></div>
-          <div class="cap">${esc(fmtStamp(stop.time))} &middot; earlier stop &middot; tap to read</div>
-          ${label.desc ? `<div class="desc">${esc(label.desc)}</div>` : ""}
-        </div>`;
-  /* a multi-stop head is positioned by its current stop's start, so its
-     caption leads with that time; created_at stays the thread-start anchor
-     for single-stop threads */
-  const when = stop && stop.i > 0
-    ? `${fmtStamp(stop.time)} · stop ${stop.i + 1}` : fmtStamp(n.created_at);
-  const desc = label.desc;   /* head = live node label; closed stop = its snapshot */
-  /* the selected station keeps only a "you are here" highlight; its actions
-     live in the floating map toolbar (HIG deference — controls never cover the
-     content they act on) */
-  return `
-        <div class="strow ${alt ? "alt " : ""}${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
-             style="padding-left:${padLeft}px" data-nid="${esc(n.id)}"${stop ? ` data-skey="${esc(stopKey(stop))}"` : ""}>
-          <div class="lbl"><span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span><span class="t">${esc(label.title)}</span>${fork ? forkCueHTML(n, lm) : ""}</div>
-          <div class="cap">${esc(when)} · ${esc(cardConfigText(n))} · ${esc(statusText(n))}${
-            others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${esc(l)}"` : ""} style="color:${esc(lm.color(l))}">&#8644; ${esc(lm.name(l))}</span>`).join("")}</div>
-          ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
-          ${fareLineHTML(n)}
-        </div>`;
-}
-/* the fare stat line (full screen + toggle on): start / last active / elapsed,
-   plus the exact context % (co-encodes the canvas arc; high band warms).
-   elapsed is created_at → last_activity — labelled "elapsed", it includes
-   idle, so it is not "worked". */
-function fareLineHTML(n){
-  if (!mapFull || !fareOn) return "";
-  const parts = [];
-  if (n.created_at) parts.push(`start ${esc(fmtStamp(n.created_at))}`);
-  if (n.last_activity) parts.push(`last ${esc(ageText(n.last_activity))}`);
-  const started = Date.parse(n.created_at);
-  if (n.last_activity && !isNaN(started))
-    parts.push(`elapsed ${esc(fmtDur(n.last_activity - started))}`);
-  if (n.ctx_pct != null)
-    parts.push(`<span class="${n.ctx_pct >= 80 ? "high" : ""}">${n.ctx_pct}% ctx</span>`);
-  return parts.length ? `<div class="fare">${parts.join(" · ")}</div>` : "";
-}
-function renderLaneChips(lm, inGroup, focusLane){
-  $("#lanechips").innerHTML = lm.lanes.filter(l => inGroup(l.id)).map(l => `
-    <button class="lanechip ${focusLane === l.id ? "selected" : ""}"
-          style="${laneChipStyle(lm.color(l.id), focusLane === l.id)}"
-          data-chip="${esc(l.id)}">${esc(l.name || l.id)}</button>`).join("");
-}
-function laneChipStyle(color, selected){
-  const c = esc(color);
-  if (!selected) return `border-color:${c};color:${c}`;
-  return `border-color:${c};background:${c};color:${esc(contrastText(color))}`;
-}
-/* the floating selection toolbar — a singleton outside the polled #mapwrap
-   region, so a repaint can never clobber it. Shown only in full screen with a
-   station selected; it names the station and carries Open / Edit / New. */
-function renderMapToolbar(){
-  const bar = $("#maptoolbar");
-  if (!bar) return;
-  const n = (mapFull && mapSel) ? nodeById(mapSel) : null;
-  bar.classList.toggle("on", !!n);
-  if (!n){ bar.innerHTML = ""; bar.style.display = ""; return; }
-  /* the toolbar names the SELECTED stop (an earlier stop keeps its own frozen
-     label), not just the node's head title */
-  const ss = selectedStop();
-  const label = ss ? stopLabel(ss) : { title: n.title || "" };
-  bar.innerHTML = `
-    <span class="mtb-node">
-      <span class="mtb-swatch" style="background:${esc(laneColor(n.lane_id))}"></span>
-      <span class="mtb-title">${esc(label.title)}</span>
-      ${mapSelStop ? `<span class="mtb-stopcue">earlier stop &middot; ${esc(fmtStamp(mapSelStop))}</span>` : ""}
-    </span>
-    <span class="mtb-sep"></span>
-    <button class="sbtn" data-jump="${esc(n.id)}">&#8249; Open chat</button>
-    <button class="sbtn iconbtn" data-medit="${esc(n.id)}" aria-label="edit title & description">${ICON_PENCIL} Edit</button>
-    <button class="sbtn" data-forkbookmark="${esc(n.id)}">Add bookmark</button>
-    <button class="sbtn" data-forkfrom="${esc(n.id)}">+ New</button>
-    ${n.ended_at ? "" : `<button class="sbtn iconbtn" data-mapexit="${esc(n.id)}" aria-label="close thread">${ICON_END} End</button>`}`;
-  positionMapToolbar();
-}
-/* place the toolbar just below the selected row, left-aligned to its label;
-   flip above when there is no room; hide when the row scrolls out of view */
-function positionMapToolbar(){
-  const bar = $("#maptoolbar");
-  if (!bar || !bar.classList.contains("on")) return;
-  /* stop-scoped: the toolbar rides the exact selected row (an earlier stop
-     included), not the node's first (= head) row */
-  const row = $("#mapwrap").querySelector(`.strow[data-skey="${CSS.escape(mapSelKey)}"]`)
-    || $("#mapwrap").querySelector(`.strow[data-nid="${CSS.escape(mapSel)}"]`);
-  const scroll = $("#mapscroll"), mapEl = $("#map");
-  if (!row || !scroll){ bar.style.display = "none"; return; }
-  const rr = row.getBoundingClientRect(), sr = scroll.getBoundingClientRect(), mr = mapEl.getBoundingClientRect();
-  if (rr.bottom < sr.top + 8 || rr.top > sr.bottom - 8){ bar.style.display = "none"; return; }
-  bar.style.display = "flex";
-  const padLeft = parseFloat(getComputedStyle(row).paddingLeft) || 0;
-  let top = rr.bottom - mr.top - 4;              /* just below the row */
-  const maxTop = sr.bottom - mr.top - bar.offsetHeight - 4;
-  if (top > maxTop) top = rr.top - mr.top - bar.offsetHeight + 4;   /* flip above */
-  bar.style.top = Math.max(4, top) + "px";
-  bar.style.left = Math.max(8, rr.left - mr.left + padLeft) + "px";
-}
-$("#mapscroll").addEventListener("scroll", positionMapToolbar, { passive: true });
-addEventListener("resize", positionMapToolbar);
-$("#maptoolbar").addEventListener("click", e => {
-  const j = e.target.closest("[data-jump]");
-  if (j){
-    const st = mapSelStop;   /* setMapFull clears it — read before */
-    select(j.dataset.jump);
-    if (st) loadChatHistory(j.dataset.jump, st);
-    else jumpChatToNow();    /* head station = "go to now" */
-    setMapFull(false);
-    return;
-  }
-  const pe = e.target.closest("[data-medit]");
-  /* read the live selection, not a data- attribute captured at render time:
-     mapSelStop can be set after the toolbar was last painted, which would
-     otherwise route an earlier-stop edit to the node (head) rename path */
-  if (pe){ openActivityEditor(pe.dataset.medit, mapSelStop || ""); return; }
-  const nt = e.target.closest("[data-forkbookmark]");
-  if (nt){ addStationBookmark(nt.dataset.forkbookmark); return; }
-  const fk = e.target.closest("[data-forkfrom]");
-  if (fk){ forkFromStation(fk.dataset.forkfrom); return; }
-  const ex = e.target.closest("[data-mapexit]");
-  if (ex){ exitThread(ex.dataset.mapexit); return; }
-});
 /* /exit: mark a thread ended (dead-end cap, stays on the map) and stop its
    process. Shared by the card action and the map toolbar. */
 async function exitThread(id){
@@ -1378,578 +1126,87 @@ async function exitThread(id){
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(id)}/exit`, { method: "POST" });
     updateLocalNode(res.node);
-    cardsSig = ""; chatSig = ""; mapSig = "";
+    cardsSig = ""; chatSig = ""; mapFeature.invalidate();
     renderCards(); renderChatHead(); renderMap();
     if (res.closed && !res.stopped && res.reason === "kill_failed")
       alert(`"${n.title}" is marked closed, but scimux could not stop its process — it may still be running.`);
   } catch (err) { alert(err.message); }
 }
-/* forkKind: what a station's fork did, fixed at creation time. null → no parent
-   (a root) or the parent was deleted, so there is no glyph to draw. "y-stay" →
-   forked into the parent's own lane (a parallel same-colour thread). "y-new" →
-   forked into a lane that did NOT yet exist at the split (a topic born here).
-   "s" → forked onto a lane that ALREADY had an older station (a crossover onto
-   an existing line). The server now records this at creation (n.fork_kind), so
-   it is stable under later sibling deletion — a live recomputation would flip a
-   historical S to Y-new the moment the older station that made it a crossover
-   was removed. We still gate on the parent existing (no glyph for an orphaned
-   fork) and fall back to the historical computation for records that predate
-   the stored field. Shared by the wall map (crossover colour) and the stack map
-   (fork cue), so both agree on one source of truth. */
-const forkKind = n => forkKindMod(n, nodes);
-/* ---------- stops: a station is one /clear-delimited segment, not a whole
-   thread (attic/metro-map-design.md state machine). The server sends n.stops = the
-   clear-tagged seam times only (relink/rotation noise never adds stations);
-   creation is the first stop, each /clear prolongs the thread's line by one.
-   The newest stop is the thread's head — it carries the full label row and
-   the live/attention/cap glyphs; older stops are dim history dots ("ride
-   back = open the chat and scroll up"). */
-/* stampMS/stopTimes/stopsOf/stopKey/stopLabel imported from modules */
-/* a stop's effective label lives in stopLabel (lanes.js). */
-/* the currently selected map stop object (for the toolbar/editor): the earlier
-   stop matching mapSelStop, else the node's head stop. Null when nothing valid
-   is selected. */
-function selectedStop(){
-  const n = nodeById(mapSel);
-  if (!n) return null;
-  const chain = stopsOf(n);
-  if (mapSelStop) return chain.find(s => s.time === mapSelStop) || null;
-  return chain.find(s => s.head) || null;
-}
-/* newestFirst/parentStopIndex imported from /js/lanes.js */
-const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
-      <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
-function attentionStationSVG(x, y, op){
-  return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="var(--attn)" filter="url(#attnglow)"/>
-          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5"/>`;
-}
-function renderMap(){
-  if (!mapVisible()) return;
-  const lm = laneModel();
-  const grp = groupLanes();
-  const inGroup = laneID => !grp || grp.includes(laneID);
-  const served = servedLanes;
-  const stations = nodes.filter(n => n.lane_id && served(n).some(inGroup));
-  /* dimming is owned by the explicit lane filter alone — if selection also
-     drove it, clearing the filter (chip second tap, scope-tab ✕) would leave
-     the map identically dimmed and the tap would read as a no-op */
-  const focusLane = laneFilter || null;
-  /* full screen renders the integrated network diagram (candidate A); the
-     per-lane stack below is column mode only */
-  if (mapFull && isDesktop()) return renderWallMap(lm, grp, inGroup, served, stations, focusLane);
 
-  /* line diagram: one contiguous, foldable block per lane. A station rides
-     every line it serves, so an interchange repeats in each serving block
-     with a ⇄ chip to the other line. Journey blocks stay alphabetical while
-     stations are newest-first within their journey. */
-  /* rows are STOPS, not threads: each /clear-delimited segment is one
-     station, newest-first by its start time — so a fresh /clear surfaces on
-     top, exactly like a fresh thread */
-  const blocks = lm.lanes.filter(l => inGroup(l.id)).map(l => ({
-    lane: l,
-    rows: stations.filter(n => served(n).includes(l.id))
-      .flatMap(stopsOf).sort(newestFirst),
-  })).filter(b => b.rows.length);
-  saveMapFold();
-  if (focusLane && mapFold.has(focusLane)){
-    mapFold.delete(focusLane);
-    saveMapFold();
-  }
-  const hasAttn = b => b.rows.some(s => s.n.attention) ? 1 : 0;
-  blocks.sort((a, b) => byNameID(a.lane, b.lane));
-
-  /* the signature must cover every rendered field — a description edit (or a
-     model/effort change) has to repaint the station rows. Block order is
-     covered by array position; last_activity itself stays out so an idle
-     repaint doesn't fire every tick. */
-  const sig = JSON.stringify(blocks.map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
-      mapFold.has(b.lane.id), hasAttn(b),
-      b.rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, l.title, l.desc,
-        s.n.agent, s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
-        s.n.live, s.n.attention]; })]))
-    + "|" + focusLane + "|" + mapTab + "|" + mapFull;
-  if (sig === mapSig) return;
-  mapSig = sig;
-
-  const RH = 76, LX = 22, LW = 56;   /* one line column; spur + buffer fit in LW */
-  const y = i => i * RH + RH / 2;
-  /* full strength on every line the station serves */
-  const dimRow = n => focusLane && !served(n).includes(focusLane);
-
-  $("#mapwrap").innerHTML = blocks.map(b => {
-    const col = esc(lm.color(b.lane.id));
-    /* full screen shows all lanes, always — folding stays a stack-only tool
-       (mapFold is neither read nor written here) */
-    const folded = !mapFull && mapFold.has(b.lane.id);
-    const dimBlock = focusLane && b.lane.id !== focusLane;
-    const head = `
-      <button class="lhead ${dimBlock ? "dimmed" : ""}" ${mapFull ? "" : `data-fold="${esc(b.lane.id)}"`}>
-        ${mapFull ? "" : `<span class="chev">${folded ? "&#9656;" : "&#9662;"}</span>`}
-        <span class="lswatch" style="background:${col}"></span>
-        <span class="lname">${esc(b.lane.name || b.lane.id)}</span>
-        <span class="lcount">${new Set(b.rows.map(s => s.n.id)).size}</span>
-        ${hasAttn(b) ? `<span class="lattn"></span>` : ""}
-      </button>`;
-    if (folded) return `<div class="lblock" data-lane="${esc(b.lane.id)}">${head}</div>`;
-
-    let svg = "";
-    if (b.rows.length > 1)
-      svg += `<line x1="${LX}" y1="${y(0)}" x2="${LX}" y2="${y(b.rows.length - 1)}"
-              stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${dimBlock ? .22 : 1}"/>`;
-    b.rows.forEach((s, i) => {
-      const n = s.n;
-      const yy = y(i);
-      const op = dimRow(n) ? .25 : 1;
-      const dotX = LX;
-      /* fork spur: a short branch tick off the dot marks a fork point, colored
-         by the same rule the wall map uses for the crossover (y-new → own lane,
-         S/y-stay → origin lane). Drawn before the dot so the dot sits on top.
-         The caption below the row (forkCueHTML) carries the origin + kind.
-         The fork happened at creation, so the spur rides the FIRST stop. */
-      const fk = s.i === 0 && forkKind(n);
-      if (fk){
-        const fcol = esc(lm.color(fk === "y-new" ? n.lane_id : (nodeById(n.parent)?.lane_id || b.lane.id)));
-        svg += `<path d="M ${dotX} ${yy} q 9 -2 14 -9" fill="none" stroke="${fcol}" stroke-width="2.5" stroke-linecap="round" opacity="${op}"/>`;
-      }
-      /* a history stop (segment closed by a later /clear) is a plain small
-         dot — the /clear itself is a non-event, the line just continues */
-      if (!s.head){
-        svg += `<circle cx="${dotX}" cy="${yy}" r="4" fill="${col}" opacity="${op * .8}"/>`;
-        return;
-      }
-      /* dead-end ⊣ cap: a thread deliberately closed via /exit (co-encoded with
-         the card's "Closed" label). A station is on exactly one lane now — no
-         interchange ring, no siding/terminus tags. */
-      if (n.ended_at)
-        svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
-      if (n.attention) svg += attentionStationSVG(dotX, yy, op);
-      if (n.live === "exited" || n.live === "unavailable")
-        svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
-      else
-        svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
-    });
-
-    return `<div class="lblock" data-lane="${esc(b.lane.id)}">${head}<div class="lbody">
-      <svg width="${LW}" height="${b.rows.length * RH}" viewBox="0 0 ${LW} ${b.rows.length * RH}">${ATTN_GLOW_DEF}${svg}</svg>
-      ${b.rows.map((s, i) => stationRowHTML(s.n, lm, {
-        padLeft: LW + 12,
-        others: [],
-        dim: dimRow(s.n),
-        golane: true,
-        fork: true,
-        stop: s,
-        alt: i % 2 === 1,
-      })).join("")}
-    </div></div>`;
-  }).join("") || `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
-
-  renderLaneChips(lm, inGroup, focusLane);
-}
-
-/* ---------- full-screen "wall map": the integrated network diagram (P2) ----------
-   One SVG spanning all lane columns × all station rows, plus one label row per
-   station in global newest-first order. Columns are lanes (ordered so
-   fork partners sit adjacent); rows carry chronology; a fork onto another lane
-   is an origin-coloured ascending S-crossover from parent dot up to child dot. */
-
-/* order lane columns so fork partners are adjacent (short crossovers): greedy
-   chain over the fork graph (a cross-lane fork links parent lane ↔ child lane),
-   isolated lanes appended newest-first. Columns carry no chronology, so
-   reordering them is free. */
-/* laneColumnOrder imported from /js/lanes.js */
-
-function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
-  const colLanes = lm.lanes.filter(l => inGroup(l.id));
-  const cols = laneColumnOrder(colLanes, stations, lm.byId);
-  const colIdx = {}; cols.forEach((id, c) => colIdx[id] = c);
-  /* rows are STOPS (one per /clear-delimited segment), globally newest-first
-     by stop start — a fresh /clear surfaces its thread's head at the top */
-  const rows = stations.flatMap(stopsOf).sort(newestFirst);
-
-  const sig = "wall|" + cols.join(",") + "|" + focusLane + "|" + mapTab + "|" +
-    mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
-    JSON.stringify(rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, s.n.created_at,
-      l.title, l.desc, s.n.agent,
-      s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
-      s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
-      /* last_activity drives the fare line's "last"/"elapsed"; keep it out of
-         the sig unless fare is on, so an idle map does not repaint each poll */
-      fareOn ? (s.n.last_activity || 0) : 0]; }));
-  if (sig === mapSig) return;
-  mapSig = sig;
-
-  const RH = 76, CW = 46, MX = 24, OFF = 16, GAP = 16;
-  const nCols = cols.length, nRows = rows.length;
-  const colX = c => MX + c * CW;
-  const rowY = i => OFF + i * RH + RH / 2;
-  let colsW = MX + Math.max(0, nCols - 1) * CW + MX;
-  const svgH = OFF + nRows * RH;
-  const dimLane = id => focusLane && id !== focusLane;
-  const dimNode = n => focusLane && n.lane_id !== focusLane;
-
-  if (!nRows){
-    $("#mapwrap").innerHTML = `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
-    renderLaneChips(lm, inGroup, focusLane);
-    return;
-  }
-
-  const rowIdx = {}; rows.forEach((s, i) => rowIdx[stopKey(s)] = i);
-
-  /* Y-stay branch tracks: a same-lane fork is a parallel thread, so it runs on
-     its OWN vertical track beside the lane, not stacked onto the lane line —
-     the fork curve splits off the parent dot onto the branch track (a true Y).
-     Each branch node gets a distinct slot per lane (creation order) so sibling
-     branches never share a track; gated on the parent existing, same as the
-     crossover glyph (an orphaned fork reverts to riding the lane itself). */
-  const BR = 13;
-  const xOff = {};
-  {
-    const slots = {};
-    stations.slice().sort((a, b) => stampMS(a.created_at) - stampMS(b.created_at))
-      .forEach(n => {
-        const p = n.parent && lm.byId[n.parent];
-        if (p && n.lane_id === p.lane_id && colIdx[n.lane_id] != null){
-          slots[n.lane_id] = (slots[n.lane_id] || 0) + 1;
-          xOff[n.id] = slots[n.lane_id] * BR;
-        }
-      });
-  }
-  const nodeX = n => colX(colIdx[n.lane_id]) + (xOff[n.id] || 0);
-  colsW += Math.max(0, ...Object.values(xOff));
-
-  /* lane line spans every on-track dot on its column; branch nodes span their
-     own offset track instead (single membership now — no lifts) */
-  const touch = {}; cols.forEach(id => touch[id] = []);
-  const branchYs = {};
-  rows.forEach((s, i) => {
-    if (colIdx[s.n.lane_id] == null) return;
-    if (xOff[s.n.id]) (branchYs[s.n.id] = branchYs[s.n.id] || []).push(rowY(i));
-    else touch[s.n.lane_id].push(rowY(i));
-  });
-
-  let svg = ATTN_GLOW_DEF;
-  /* 1. lane lines */
-  cols.forEach(id => {
-    const ys = touch[id];
-    if (ys.length < 2) return;
-    const x = colX(colIdx[id]);
-    svg += `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
-            stroke="${esc(lm.color(id))}" stroke-width="3.5" stroke-linecap="round"
-            opacity="${dimLane(id) ? .22 : 1}"/>`;
-  });
-  /* 1b. Y-stay branch tracks: each same-lane fork's own parallel vertical,
-     same colour as its lane, spanning that node's stops. The fork curve
-     (section 2) joins it to the parent dot. */
-  Object.keys(branchYs).forEach(id => {
-    const ys = branchYs[id], n = lm.byId[id];
-    if (ys.length < 2 || !n) return;
-    const x = nodeX(n);
-    svg += `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
-            stroke="${esc(lm.color(n.lane_id))}" stroke-width="3.5" stroke-linecap="round"
-            opacity="${dimNode(n) ? .22 : 1}"/>`;
-  });
-  /* 2. fork crossovers: parent gave rise to child (directional, one-way). The
-     child is newer, so it sits higher (smaller row). Same lane → Y-stay (a
-     parallel same-colour branch stub); different lane → an ascending S from the
-     parent dot up to the child dot, coloured by the origin (parent) lane — or,
-     when the child lane springs into existence at the split (Y-new, its only
-     station), coloured by the new child lane. Missing parent (deleted) → no glyph. */
-  rows.forEach((s, ci) => {
-    if (s.i !== 0) return;   /* the fork landed at the child's creation stop */
-    const n = s.n;
-    const p = n.parent && lm.byId[n.parent];
-    if (!p) return;
-    /* anchor at the parent stop that contained the fork (the newest stop
-       already open when the child was created), not blindly at its head */
-    const cc = colIdx[n.lane_id], cp = colIdx[p.lane_id],
-      pi = rowIdx[p.id + "#" + parentStopIndex(p, n.created_at)];
-    if (cc == null || cp == null || pi == null) return;
-    /* branch-track offsets apply on both ends: a Y-stay child lands on its own
-       parallel track, and a fork OFF a branch node departs from that track */
-    const xC = nodeX(n), yC = rowY(ci), xP = nodeX(p), yP = rowY(pi);
-    const ym = (yP + yC) / 2, op = dimNode(n) ? .25 : 1;
-    if (xC === xP){
-      /* degenerate fallback (both ends on one x — e.g. a legacy record with no
-         track slot): a small arc so the split stays visible at all */
-      const col = esc(lm.color(n.lane_id)), bx = xC + 13;
-      svg += `<path d="M ${xC} ${yP} C ${bx} ${ym} ${bx} ${ym} ${xC} ${yC}"
-              fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
-    } else {
-      /* y-new (topic born at the split) takes the child lane's colour; an S
-         onto an existing line takes the origin (parent) lane's — classified by
-         history, so it never flips as the destination lane grows (finding #2) */
-      const col = esc(lm.color(forkKind(n) === "y-new" ? n.lane_id : p.lane_id));
-      svg += `<path d="M ${xP} ${yP} C ${xP} ${ym} ${xC} ${ym} ${xC} ${yC}"
-              fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
-    }
-  });
-  /* 3. home station glyphs (on top) */
-  rows.forEach((s, i) => {
-    const n = s.n;
-    const a = n.lane_id; if (colIdx[a] == null) return;
-    const yy = rowY(i), col = esc(lm.color(n.lane_id));
-    const op = dimNode(n) ? .25 : 1;
-    let dotX = nodeX(n);
-    /* a history stop (segment closed by a later /clear) is a plain small
-       dot — the /clear itself is a non-event, the line just continues */
-    if (!s.head){
-      svg += `<circle cx="${dotX}" cy="${yy}" r="4" fill="${col}" opacity="${op * .8}"/>`;
-      return;
-    }
-    /* dead-end ⊣ cap: a thread deliberately closed via /exit. A perpendicular
-       buffer bar at the head (top = newest), co-encoded with the "Closed" label. */
-    if (n.ended_at)
-      svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
-    if (n.attention) svg += attentionStationSVG(dotX, yy, op);
-    if (n.live === "exited" || n.live === "unavailable")
-      svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
-    else
-      svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
-    /* context-usage gauge: a filling arc around the dot for live stations
-       (server projects ctx_pct only for active/quiet). Faint full-circle track
-       + a dasharray fill from 12 o'clock clockwise; warms to --attn past 80%.
-       Suppressed under attention — the attention ring owns this radius. */
-    if (n.ctx_pct != null && !n.attention){
-      const R = 9, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
-      svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none" stroke="${col}" stroke-width="2" opacity="${op * .2}"/>`;
-      if (frac > 0)
-        svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none"
-                stroke="${n.ctx_pct >= 80 ? "var(--attn)" : col}" stroke-width="2"
-                stroke-dasharray="${frac * C} ${C}" stroke-linecap="round"
-                transform="rotate(-90 ${dotX} ${yy})" opacity="${op}"/>`;
-    }
-  });
-
-  $("#mapwrap").innerHTML = `<div class="lbody wallbody">
-    <svg width="${colsW}" height="${svgH}" viewBox="0 0 ${colsW} ${svgH}">${svg}</svg>
-    <div style="height:${OFF}px"></div>
-    ${rows.map((s, i) => stationRowHTML(s.n, lm, {
-      padLeft: colsW + GAP,
-      others: [],
-      dim: dimNode(s.n),
-      golane: false,
-      current: stopKey(s) === mapSelKey,
-      fork: true,
-      stop: s,
-      alt: i % 2 === 1,
-    })).join("")}
-  </div>`;
-  renderLaneChips(lm, inGroup, focusLane);
-  renderMapToolbar();
-}
-
-/* group tab handling: select, second-tap edit, ✕ remove, (+) create */
-function removeMapTab(id){
-  const i = (UI.groups || []).findIndex(t => t.id === id);
-  if (i < 0) return;
-  const groups = (UI.groups || []).filter(t => t.id !== id);
-  if (mapTab === id) mapTab = "all";
-  localStorage.setItem("scimux-maptab", mapTab);
-  uiMutate({ k: "groups", groups });
-  renderMapTabs(); mapSig = ""; renderMap();
-}
-let editTab = null;
-function openTabSheet(t){
-  editTab = t || null;
-  $("#tab_head").textContent = t ? "Edit map" : "New map";
-  $("#tab_name").value = t ? t.name : "";
-  const lm = laneModel();
-  $("#tab_lanes").innerHTML = lm.lanes.map(l => `
-    <label style="display:flex;gap:10px;align-items:center;margin:8px 0;font-size:15px">
-      <input type="checkbox" value="${esc(l.id)}" style="width:auto;margin:0"
-        ${t && t.lanes.includes(l.id) ? "checked" : ""}>
-      <span style="width:12px;height:12px;border-radius:6px;flex:none;background:${esc(lm.color(l.id))}"></span>
-      ${esc(l.name || l.id)}</label>`).join("")
-    || `<div style="color:var(--dim);font-size:14px">no journeys yet — an empty map is fine</div>`;
-  $("#tab_save").textContent = t ? "Save map" : "Add map";
-  $("#tab_del").style.display = t ? "block" : "none";
-  openSheet("#tabsheet");
-}
-$("#maptabs").addEventListener("click", e => {
-  const rm = e.target.closest("[data-rm]");
-  if (rm){ e.stopPropagation(); removeMapTab(rm.dataset.rm); return; }
-  const b = e.target.closest("[data-mt]");
-  if (!b) return;
-  if (b.dataset.mt === "+"){ openTabSheet(null); return; }
-  if (b.dataset.mt === mapTab && mapTab !== "all"){       /* second tap = edit */
-    openTabSheet((UI.groups || []).find(t => t.id === mapTab));
-    return;
-  }
-  mapTab = b.dataset.mt;
-  localStorage.setItem("scimux-maptab", mapTab);
-  renderMapTabs(); mapSig = ""; renderMap();
+/* Journeys map feature factory — owns tabs/chips/wrap/toolbar/full/fare + map sheet. */
+const mapFeature = createMapFeature({
+  roots: {
+    maptabs: $("#maptabs"),
+    lanechips: $("#lanechips"),
+    mapwrap: $("#mapwrap"),
+    mapscroll: $("#mapscroll"),
+    maptoolbar: $("#maptoolbar"),
+    mapfullbtn: $("#mapfullbtn"),
+    farebtn: $("#farebtn"),
+    map: $("#map"),
+    tabHead: $("#tab_head"),
+    tabName: $("#tab_name"),
+    tabLanes: $("#tab_lanes"),
+    tabSave: $("#tab_save"),
+    tabDel: $("#tab_del"),
+  },
+  document,
+  window,
+  CSS,
+  storage: localStorage,
+  setTimeout,
+  getComputedStyle,
+  esc,
+  ageText,
+  fmtStamp,
+  fmtDur,
+  contrastText,
+  nodes: () => nodes,
+  groups: () => UI.groups,
+  laneFilter: () => laneFilter,
+  uiLoaded: () => uiLoaded,
+  level: () => level,
+  isDesktop,
+  mapOpen: () => document.body.classList.contains("map-open"),
+  laneModel,
+  laneColor,
+  laneName,
+  laneList,
+  laneById,
+  nodeById: id => nodeById(id),
+  agentLogo,
+  icons: { ICON_PENCIL, ICON_END },
+  uiMutate,
+  selectNode: id => select(id),
+  setLevel,
+  setLaneFilter,
+  loadChatHistory: (id, st) => loadChatHistory(id, st),
+  jumpChatToNow: () => jumpChatToNow(),
+  openActivityEditor: (id, stop) => openActivityEditor(id, stop),
+  forkFromStation: id => forkFromStation(id),
+  addStationBookmark: id => addStationBookmark(id),
+  exitThread: id => exitThread(id),
+  openSheet,
+  closeSheets,
+  renderCards: () => renderCards(),
+  invalidateCardsSig: () => { cardsSig = ""; },
+  longpress: (container, selector, fn) => longpress(container, selector, fn),
+  prompt: (msg, def) => prompt(msg, def),
 });
-$("#tab_save").addEventListener("click", () => {
-  const name = $("#tab_name").value.trim();
-  if (!name) return;
-  const lanes = [...document.querySelectorAll("#tab_lanes input:checked")].map(i => i.value);
-  if (editTab){ editTab.name = name; editTab.lanes = lanes; }
-  else {
-    const id = "g" + Date.now();
-    (UI.groups ||= []).push({ id, name, lanes });
-    mapTab = id;
-    localStorage.setItem("scimux-maptab", mapTab);
-  }
-  uiMutate({ k: "groups", groups: UI.groups || [] });
-  renderMapTabs(); mapSig = ""; renderMap(); closeSheets();
-});
-$("#tab_del").addEventListener("click", () => {
-  if (editTab) removeMapTab(editTab.id);
-  closeSheets();
-});
-$("#lanechips").addEventListener("click", e => {
-  const c = e.target.closest("[data-chip]");
-  if (!c) return;
-  const id = c.dataset.chip;
-  /* tap = focus the lane and unfold its journey; second tap clears the scope
-     and folds that lane again. Activities keeps the existing singular
-     laneFilter behavior. */
-  if (laneFilter === id){
-    mapFold.add(id);
-    saveMapFold();
-    setLaneFilter("");
-    return;
-  }
-  if (mapFold.has(id)){
-    mapFold.delete(id);
-    saveMapFold();
-  }
-  const first = [...nodes]
-    .filter(n => n.lane_id === id)
-    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
-  if (first) select(first.id);
-  setLaneFilter(id);
-  document.querySelector(`#mapwrap .lblock[data-lane="${CSS.escape(id)}"]`)
-    ?.scrollIntoView({ behavior: "smooth", block: "start" });
-});
-longpress($("#lanechips"), ".lanechip", el => {
-  const id = el.dataset.chip;
-  const lane = laneById(id);
-  if (!lane) return;
-  const name = prompt("Rename lane", lane.name || id);
-  if (name == null) return;
-  const clean = name.trim();
-  if (!clean || clean === lane.name) return;
-  const lanes = laneList().map(l => l.id === id ? { ...l, name: clean } : l);
-  uiMutate({ k: "lanes", lanes });
-  mapSig = ""; cardsSig = "";
-  renderCards(); renderMapTabs(); renderMap();
-});
-function toggleMapFold(id){
-  if (mapFold.has(id)) mapFold.delete(id); else mapFold.add(id);
-  saveMapFold();
-  mapSig = ""; renderMap();
-}
-/* jump to a specific station (the fork cue's "from" origin): reveal its block
-   (fall back to "all", unfold if collapsed), scroll it into view, flash it. The
-   stack-map analog of following a crossover curve back to the parent. */
-function gotoStation(id){
-  const n = nodeById(id);
-  if (!n) return;
-  if (mapTab !== "all" &&
-      !document.querySelector(`#mapwrap .strow[data-nid="${CSS.escape(id)}"]`)){
-    mapTab = "all";
-    localStorage.setItem("scimux-maptab", mapTab);
-    mapSig = ""; renderMapTabs(); renderMap();
-  }
-  if (n.lane_id && mapFold.has(n.lane_id)){ mapFold.delete(n.lane_id); saveMapFold(); mapSig = ""; renderMap(); }
-  const row = document.querySelector(`#mapwrap .strow[data-nid="${CSS.escape(id)}"]`);
-  if (row){
-    row.scrollIntoView({ behavior: "smooth", block: "center" });
-    row.classList.add("originflash");
-    setTimeout(() => row.classList.remove("originflash"), 1200);
-  }
-}
-function gotoLaneBlock(id){
-  /* an interchange chip can point to a lane with no block on the current map
-     (an off-map lane on a group tab); jumping there was a silent no-op (R21.3).
-     "All" carries every lane the stations serve, so fall back to it. */
-  if (mapTab !== "all" &&
-      !document.querySelector(`#mapwrap .lblock[data-lane="${CSS.escape(id)}"]`)){
-    mapTab = "all";
-    localStorage.setItem("scimux-maptab", mapTab);
-    mapSig = ""; renderMapTabs(); renderMap();
-  }
-  if (mapFold.has(id)){ mapFold.delete(id); saveMapFold(); mapSig = ""; renderMap(); }
-  document.querySelector(`#mapwrap .lblock[data-lane="${CSS.escape(id)}"]`)
-    ?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-$("#mapwrap").addEventListener("click", e => {
-  const f = e.target.closest("[data-fold]");
-  if (f){ toggleMapFold(f.dataset.fold); return; }
-  /* wall-map selected-row action bar — resolve each button before the row so
-     the tap isn't also read as a re-select */
-  const j = e.target.closest("[data-jump]");
-  if (j){ select(j.dataset.jump); setMapFull(false); return; }   /* jump + exit */
-  const pe = e.target.closest("[data-medit]");
-  if (pe){ openActivityEditor(pe.dataset.medit); return; }
-  const fk = e.target.closest("[data-forkfrom]");
-  if (fk){ forkFromStation(fk.dataset.forkfrom); return; }
-  /* the ⇄ chip sits inside a station row — resolve it before the row */
-  const g = e.target.closest("[data-golane]");
-  if (g){ gotoLaneBlock(g.dataset.golane); return; }
-  /* the fork cue also lives inside a row — jump to the origin, don't open the
-     child's chat */
-  const go = e.target.closest("[data-goorigin]");
-  if (go){ gotoStation(go.dataset.goorigin); return; }
-  const r = e.target.closest("[data-nid]");
-  if (r){
-    /* an earlier stop carries its seam time — opening it expands the chat's
-       history scrolled to that surface ("ride back through the journey") */
-    const st = r.dataset.stop || "";
-    /* full screen: click toggles the map's own selection (highlight + toolbar),
-       never opens the chat — that's the toolbar's "Open chat". Column/phone
-       keeps drilling into the conversation. */
-    if (mapFull){ setMapSel(r.dataset.nid, r.dataset.skey || "", st); }
-    else {
-      select(r.dataset.nid);
-      if (st) loadChatHistory(r.dataset.nid, st);
-      else jumpChatToNow();   /* head station = "go to now" */
-      if (!isDesktop()) setLevel(1);
-    }
-  }
-});
-/* long-press a station opens the editor sheet in one gesture (touch:
-   tap-and-hold; desktop: right-click / Ctrl-click — the HIG secondary-click
-   idiom). In the full-screen wall map it also moves the map's own selection;
-   in the docked (collapsed) column map it just opens the editor, so you can
-   edit a station's title/description while the lane stays on the left and the
-   chat on the right (desktop uses the pencil in full screen too). */
-longpress($("#mapwrap"), ".strow", (el, ev) => {
-  if (ev?.target?.closest("button, a, input")) return;
-  const id = el.dataset.nid;
-  if (!id) return;
-  const stop = el.dataset.stop || "";
-  if (mapFull){
-    const key = el.dataset.skey || headStopKey(id);
-    if (mapSelKey !== key){
-      mapSel = id; mapSelKey = key; mapSelStop = stop;
-      mapSig = ""; renderMap();   /* select + edit in one gesture */
-    }
-  }
-  openActivityEditor(id, stop);
-});
+function renderMap(){ mapFeature.render(); }
+function renderMapTabs(){ mapFeature.renderTabs(); }
+function setMapFull(on){ mapFeature.setFull(on); }
+
+
+/* Shell navigation into/out of Journeys (not map-local chrome). */
 $("#journeybtn").addEventListener("click", () => {
   if (isDesktop()){
     document.body.classList.toggle("map-open");
-    mapSig = ""; renderMap();
+    mapFeature.invalidate(); renderMap();
     restartWorkPulse();
   } else setLevel(3);
 });
 $("#mapclose").addEventListener("click", () => setLevel(2));
-/* full-screen wall-map toggle (desktop/iPad only). ⤢ enters, ⤡ exits back to
-   the column layout you came from (map-open is untouched, so exit restores it).
-   Escape is the keyboard-parity exit (added to the global keydown handler). */
-$("#mapfullbtn").addEventListener("click", () => setMapFull(!mapFull));
-/* fare toggle: shows the per-station timing stats (start/last/elapsed + exact
-   context %). Per-device like mapFull; the context arc is unaffected. */
-$("#farebtn").addEventListener("click", () => {
-  fareOn = !fareOn;
-  if (fareOn) localStorage.setItem("scimux-fare", "1");
-  else localStorage.removeItem("scimux-fare");
-  $("#farebtn").classList.toggle("on", fareOn);
-  mapSig = ""; renderMap();
-});
 
 /* tapping empty space folds back a level — but a scroll-drag (>6px) or a
    tap on anything interactive must never trigger it */
@@ -1967,17 +1224,17 @@ emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-adopt],[dat
     /* iPad/desktop columns: tapping the Activity gutter folds the Journey
        column back, mirroring the same gesture on the map itself */
     document.body.classList.remove("map-open");
-    mapSig = ""; renderMap();
+    mapFeature.invalidate(); renderMap();
     restartWorkPulse();
   } else setLevel(1);
 });
 emptyTap($("#mapscroll"), ".strow,.lanechip,[data-nid],[data-chip],button,a,input,textarea,select", () => {
   /* in full screen a stray tap must never exit the mode (HIG: no accidental
      mode exit — only ⤡ / Escape / a station jump leave) */
-  if (mapFull) return;
+  if (mapFeature.isFull()) return;
   if (isDesktop()){
     document.body.classList.remove("map-open");
-    mapSig = ""; renderMap();
+    mapFeature.invalidate(); renderMap();
     restartWorkPulse();
   } else setLevel(2);
 });
@@ -2005,7 +1262,7 @@ function startTitleEdit(id, scope){
   editingTitleScope = scope || "cards";
   actionCard = "";
   editingDesc = "";
-  cardsSig = ""; chatSig = ""; mapSig = "";
+  cardsSig = ""; chatSig = ""; mapFeature.invalidate();
   renderCards(); renderChatHead(); renderMap();
   focusTitleEditor(id);
 }
@@ -2013,7 +1270,7 @@ function cancelTitleEdit(id){
   if (editingTitle !== id) return;
   editingTitle = "";
   editingTitleScope = "";
-  cardsSig = ""; chatSig = ""; mapSig = "";
+  cardsSig = ""; chatSig = ""; mapFeature.invalidate();
   renderCards(); renderChatHead(); renderMap();
 }
 async function commitTitleEdit(id, raw){
@@ -2028,7 +1285,7 @@ async function commitTitleEdit(id, raw){
   const cur = nodeById(id);
   editingTitle = "";
   editingTitleScope = "";
-  cardsSig = ""; chatSig = ""; mapSig = "";
+  cardsSig = ""; chatSig = ""; mapFeature.invalidate();
   renderCards(); renderChatHead(); renderMap();
   if (cur && cur.title === title) return;
   try {
@@ -2037,7 +1294,7 @@ async function commitTitleEdit(id, raw){
       body: JSON.stringify({ title }),
     });
     updateLocalNode(n);
-    cardsSig = ""; chatSig = ""; mapSig = "";
+    cardsSig = ""; chatSig = ""; mapFeature.invalidate();
     renderCards(); renderChatHead(); renderMap();
   } catch (err) { alert(err.message); }
 }
@@ -2048,7 +1305,7 @@ let selGen = 0;
 /* hashStr imported from /js/lanes.js */
 
 function select(id){
-  if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = "";
+  if (sel !== id){ chatSig = ""; termOpen = false; mapFeature.invalidate(); selGen++; tappedTurn = "";
     chatHist = { node: "", segs: null, scrollTo: "", assets: {} }; }   /* history is per-visit, reloaded on demand */
   sel = id;
   editingChatDesc = false;   /* a pending "use as description" is discarded here */
@@ -2147,7 +1404,7 @@ document.addEventListener("keydown", e => {
      Escape; the earlier edit-field branches already returned. In later phases
      a mode-within-mode field commits/reverts first, then a second Escape
      reaches here. */
-  if (e.key === "Escape" && mapFull &&
+  if (e.key === "Escape" && mapFeature.isFull() &&
       !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable){
     e.preventDefault();
     setMapFull(false);
@@ -2171,7 +1428,7 @@ async function saveChatDescription(){
     editingChatDesc = false;
     chatDetailsOpen = true;
     chatDetailSavedUntil = Date.now() + 2000;
-    cardsSig = ""; chatSig = ""; mapSig = "";
+    cardsSig = ""; chatSig = ""; mapFeature.invalidate();
     renderCards(); renderChatHead(); renderMap();
     setTimeout(() => {
       if (Date.now() >= chatDetailSavedUntil){
@@ -2346,7 +1603,7 @@ async function refreshChat(){
     chromeChanged = true;
   }
   if (chromeChanged){
-    cardsSig = ""; mapSig = "";
+    cardsSig = ""; mapFeature.invalidate();
     renderCards(); renderChatHead(); renderMap();
   }
   /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
@@ -3247,6 +2504,8 @@ function longpress(container, selector, fn){
 longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"));
 /* Card-local listeners (tabs/list/swipe/drag/longpress/age flip). */
 cardsFeature.bind();
+/* Map-local listeners (tabs/chips/wrap/toolbar/full/fare/scroll/resize). */
+mapFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
@@ -3593,7 +2852,7 @@ function setLevel(n){
   $("#cards").classList.toggle("open", level >= 2);
   $("#map").classList.toggle("open", level >= 3);
   $("#scrim").classList.toggle("on", level >= 2);
-  if (level === 3){ mapSig = ""; renderMap(); $("#mapscroll").scrollTop = 0; }
+  if (level === 3){ mapFeature.invalidate(); renderMap(); mapFeature.scrollMapToTop(); }
 }
 function applyNavAction(action){
   if (!action || action.type === "suppress") return;
@@ -5064,7 +4323,7 @@ $("#nc_start").addEventListener("click", async () => {
            confirms it from station_labels */
         if (cur){ (cur.station_labels ||= {})[ncEditStop] = { title: lbl.title || title, desc: lbl.desc || description }; }
         closeSheets();
-        mapSig = ""; renderMap();
+        mapFeature.invalidate(); renderMap();
       } catch (err) {
         fieldError($("#nc_title"), err.message || "Could not save.");
         $("#nc_title").focus();
@@ -5080,7 +4339,7 @@ $("#nc_start").addEventListener("click", async () => {
       const n = await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
       updateLocalNode(n);
       closeSheets();
-      cardsSig = ""; chatSig = ""; mapSig = "";
+      cardsSig = ""; chatSig = ""; mapFeature.invalidate();
       renderCards(); renderChatHead(); renderMap();
     } catch (err) {
       fieldError($("#nc_title"), err.message || "Could not save.");
@@ -5241,11 +4500,8 @@ document.addEventListener("visibilitychange", () => {
   else startPolling();
 });
 setLevel(level);
-/* restore persisted full-screen (desktop/iPad only; the class is inert on
-   phone, but don't apply it there — mapVisible ignores mapFull on phone) */
-if (mapFull && isDesktop()) document.body.classList.add("map-full");
-$("#farebtn").classList.toggle("on", fareOn);
-syncMapFullBtn();
+/* restore persisted full-screen / fare chrome (map feature owns keys + ARIA) */
+mapFeature.restoreChrome();
 renderMapTabs();
 loadUI();
 startPolling();
