@@ -60,6 +60,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "/js/map.js"`,
 		`from "/js/navigation.js"`,
 		`from "/js/notes.js"`,
+		`from "/js/search.js"`,
 		`from "/js/state.js"`,
 	}
 	for _, imp := range wantImports {
@@ -857,43 +858,61 @@ func TestSearchOverlayShell(t *testing.T) {
 		t.Error("search overlay must honor prefers-reduced-motion")
 	}
 
-	// Open/close plumbing: named functions, keyboard open, Escape close, and
-	// focus returned to the trigger on close (focus trap / restore).
+	// Packet 7G: open/close/focus-return live in search.js; shell keeps thin
+	// wrappers and imports the factory. Node search.test.js is authoritative.
+	if !strings.Contains(html, `from "/js/search.js"`) || !strings.Contains(html, "createSearchFeature") {
+		t.Error("production must import and instantiate createSearchFeature from search.js")
+	}
+	if !strings.Contains(html, "function openSearch(") || !strings.Contains(html, "function closeSearch(") {
+		t.Error("shell must retain thin openSearch/closeSearch wrappers for navigation")
+	}
+	if !strings.Contains(html, "searchFeature.bind()") {
+		t.Error("production must bind searchFeature as the Search event owner")
+	}
+	src, err := os.ReadFile("web/js/search.js")
+	if err != nil {
+		t.Fatalf("read search.js: %v", err)
+	}
+	js := string(src)
 	for _, want := range []string{
-		"function openSearch(",
-		"function closeSearch(",
-		`#searchbtn").addEventListener("click"`,
 		"searchReturnFocus",
+		`on(root("searchbtn"), "click", open)`,
+		`on(root("searchclose"), "click", close)`,
+		`on(root("searchscrim"), "click", close)`,
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("search overlay behavior missing %q", want)
+		if !strings.Contains(js, want) {
+			t.Errorf("search.js overlay behavior missing %q", want)
 		}
 	}
 }
 
 // TestSearchSlashShortcut asserts the "/" activation shortcut (spec: search opens
 // on "/" when focus is not in a text field), alongside the existing Cmd/Ctrl-K.
+// Packet 7G: document shortcut ownership lives in search.js bind().
 func TestSearchSlashShortcut(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/search.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read search.js: %v", err)
 	}
-	html := string(b)
-	// The global keydown handler must react to "/", guarded so it stays a literal
-	// slash inside a text field and doesn't fire while the overlay is already open.
-	i := strings.Index(html, `if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k"`)
+	src := string(b)
+	i := strings.Index(src, `if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k"`)
 	if i < 0 {
-		t.Fatal("global search shortcut handler not found")
+		t.Fatal("global search shortcut handler not found in search.js")
 	}
-	handler := html[i : i+strings.Index(html[i:], "\n});")]
+	// Handler is function onDocumentKeydown — take a bounded window.
+	end := i + 600
+	if end > len(src) {
+		end = len(src)
+	}
+	handler := src[i:end]
 	if !strings.Contains(handler, `e.key === "/"`) {
 		t.Error(`the "/" open shortcut is missing`)
 	}
-	if !strings.Contains(handler, "!searchOpen()") {
+	if !strings.Contains(handler, "!isOpen()") {
 		t.Error(`the "/" shortcut must not fire while the overlay is already open`)
 	}
-	if !strings.Contains(handler, `/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)`) ||
-		!strings.Contains(handler, "!e.target.isContentEditable") {
+	if !strings.Contains(handler, `/^(INPUT|TEXTAREA|SELECT)$/.test(e.target && e.target.tagName)`) ||
+		!strings.Contains(handler, "isContentEditable") {
 		t.Error(`the "/" shortcut must be suppressed while a text field is focused`)
 	}
 }
@@ -901,19 +920,20 @@ func TestSearchSlashShortcut(t *testing.T) {
 // TestSearchHitCarriesIdentity asserts each rendered hit carries its stable
 // identity in the DOM — role (so asset actions can be gated) and segment/record
 // (so archived show-to-chat can anchor by ordinal, not timestamp).
+// Packet 7G: hit HTML and actions live in search.js; openArchived stays shell.
 func TestSearchHitCarriesIdentity(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/search.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read search.js: %v", err)
 	}
-	html := string(b)
-	i := strings.Index(html, "function searchHitHTML(")
+	src := string(b)
+	i := strings.Index(src, "export function searchHitHTML(")
 	if i < 0 {
-		t.Fatal("searchHitHTML not found")
+		t.Fatal("searchHitHTML not found in search.js")
 	}
-	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	body := src[i : i+strings.Index(src[i:], "\n}")]
 	for _, want := range []string{
-		`data-role="${esc(h.role`,
+		`data-role="${e(h.role`,
 		`data-segment="${h.segment`,
 		`data-record="${h.record`,
 	} {
@@ -921,15 +941,17 @@ func TestSearchHitCarriesIdentity(t *testing.T) {
 			t.Errorf("hit markup missing stable-identity attribute %q", want)
 		}
 	}
-	// toggleHitBar must feed the role into searchHitActions so an asset hit's
-	// actions are gated.
-	if !strings.Contains(html, "searchHitActions(el.dataset.kind, el.dataset.forkable === \"1\", el.dataset.role)") {
-		t.Error("toggleHitBar must pass the hit role into searchHitActions")
+	// hit bar / action HTML must feed the role so asset hits are gated.
+	if !strings.Contains(src, "hitBarHTML(el.dataset.kind, el.dataset.forkable === \"1\", el.dataset.role)") &&
+		!strings.Contains(src, "searchHitActions(el.dataset.kind, el.dataset.forkable === \"1\", el.dataset.role)") {
+		t.Error("toggleHitBar must pass the hit role into searchHitActions/hitBarHTML")
 	}
 	// Archived show-to-chat must anchor by (segment, record), passed to openArchived.
-	if !strings.Contains(html, "openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") {
+	if !strings.Contains(src, "openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") &&
+		!strings.Contains(src, "d.openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") {
 		t.Error("archived show-to-chat must anchor by seg/rec, not just timestamp")
 	}
+	html := mustReadIndex(t)
 	if !strings.Contains(html, `"&seg=" + encodeURIComponent(seg`) ||
 		!strings.Contains(html, `"&rec=" + encodeURIComponent(rec`) {
 		t.Error("openArchived must send seg/rec to /api/archived")
@@ -1188,82 +1210,73 @@ func TestPinnedDragReorder(t *testing.T) {
 // debounced fetch of /api/search with an AbortController (so a superseded query
 // is dropped) and a client-side min-length gate, and the response renders as
 // per-chat groups with headers (agent, title, lane swatch) and hits.
+// Packet 7G: feed lives in search.js; Node search.test.js is authoritative.
 func TestSearchFeed(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/search.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read search.js: %v", err)
 	}
-	html := string(b)
+	src := string(b)
 	for _, want := range []string{
-		"function runSearch(",
+		"async function runSearch(",
 		"function renderSearchFeed(",
-		"function searchGroupHTML(",
-		"function searchHitHTML(",
-		"new AbortController()",
-		`fetch("/api/search?q=" + encodeURIComponent(`,
-		`$("#searchinput").addEventListener("input"`,
-		"const SEARCH_MIN =",
+		"export function searchGroupHTML(",
+		"export function searchHitHTML(",
+		"new AbortCtrl()",
+		`fetchFn("/api/search?q=" + encodeURIComponent(`,
+		`on(root("searchinput"), "input", onInput)`,
+		"export const SEARCH_MIN =",
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("search feed wiring missing %q", want)
 		}
 	}
-	// Min-length gate (mirrors the server's minSearchQuery) and a superseded-
-	// query guard so out-of-order responses never overwrite a newer render.
-	if !strings.Contains(html, "< SEARCH_MIN") {
+	if !strings.Contains(src, "< SEARCH_MIN") {
 		t.Error("runSearch must gate on the client-side min query length")
 	}
-	// The client query-length cap must mirror the server's maxSearchQuery so a
-	// pasted over-long query stores and fetches only the prefix the server searches.
-	if want := fmt.Sprintf("const SEARCH_MAX = %d;", maxSearchQuery); !strings.Contains(html, want) {
+	if want := fmt.Sprintf("export const SEARCH_MAX = %d;", maxSearchQuery); !strings.Contains(src, want) {
 		t.Errorf("SEARCH_MAX must mirror the server cap: expected %q", want)
 	}
-	if !strings.Contains(html, "searchSeq") {
+	if !strings.Contains(src, "searchSeq") {
 		t.Error("a sequence guard is expected so a stale response can't clobber a newer one")
 	}
-	// The debounced input handler must not fetch on every keystroke.
-	if !strings.Contains(html, "clearTimeout(searchDebounce)") {
-		t.Error("the search input must be debounced (clearTimeout(searchDebounce))")
+	if !strings.Contains(src, "clearTimeoutFn(searchDebounce)") {
+		t.Error("the search input must be debounced (clearTimeout on searchDebounce)")
 	}
-	// G4 renders the feed only; the action bar + jumps are G5, so a hit is not
-	// yet wired to a click handler.
-	if strings.Contains(html, `dataset.searchHit` /* placeholder for a G5-only handler */) {
-		t.Error("G4 should not wire hit clicks yet (action bar is G5)")
+	if strings.Contains(src, `dataset.searchHit` /* placeholder for a G5-only handler */) {
+		t.Error("search feed must not use a dataset.searchHit placeholder")
 	}
 }
 
-// TestSearchExcerptEscaping runs searchHitHTML under node with an esc stub to
-// prove the excerpt escapes before/after and wraps ONLY the match in <mark>.
-// The server sends raw spans (never HTML-escaped) — a double-escape would show
-// literal &lt; to the user and an unescaped span would be an injection.
+// TestSearchExcerptEscaping runs searchHitHTML under node to prove the excerpt
+// escapes before/after and wraps ONLY the match in <mark>. Packet 7G: module
+// import; Node search.test.js is the primary coverage.
 func TestSearchExcerptEscaping(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	tmp := t.TempDir()
+	for _, name := range []string{"search.js", "format.js", "bookmarks.js", "lanes.js"} {
+		src, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	html := string(b)
-	start := strings.Index(html, "function searchHitHTML(")
-	if start < 0 {
-		t.Fatal("could not locate searchHitHTML in web/index.html")
-	}
-	end := strings.Index(html[start:], "function searchGroupHTML(")
-	if end < 0 {
-		t.Fatal("could not locate the end of searchHitHTML in web/index.html")
-	}
-	script := `function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }` + "\n" +
-		html[start:start+end] + `
-const assert = require("assert");
-const out = searchHitHTML({ before: "a <b>", match: "x&y", after: "</b> z", time: "2026-07-26T10:00:00" });
+	script := `
+import assert from "node:assert/strict";
+import { searchHitHTML } from "./search.js";
+import { esc } from "./format.js";
+const out = searchHitHTML({ before: "a <b>", match: "x&y", after: "</b> z", time: "2026-07-26T10:00:00" }, esc);
 assert.ok(out.includes("a &lt;b&gt;<mark>x&amp;y</mark>&lt;/b&gt; z"),
   "excerpt must escape before/after and wrap only the match in <mark>; got: " + out);
 assert.ok(!out.includes("<b>") && !out.includes("</b>"),
   "raw HTML from the excerpt must never survive into the feed; got: " + out);
 `
-	f := filepath.Join(t.TempDir(), "searchhit.js")
+	f := filepath.Join(tmp, "searchhit.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1275,24 +1288,25 @@ assert.ok(!out.includes("<b>") && !out.includes("</b>"),
 // TestSearchActionBar asserts the G5a per-hit action bar: a tap on a hit reveals
 // an adaptive bar (show-to-chat / fork / add-note), show-to-chat exits the
 // overlay and jumps, fork reuses the fork sheet parented to the hit's node, and
-// add-note keeps the overlay open.
+// add-note keeps the overlay open. Packet 7G: actions in search.js; fork sheet shell.
 func TestSearchActionBar(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/search.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read search.js: %v", err)
 	}
-	html := string(b)
+	src := string(b)
 	for _, want := range []string{
-		"function searchHitActions(",
+		"export function searchHitActions(",
 		"function doSearchAction(",
 		"function toggleHitBar(",
-		`$("#searchfeed").addEventListener("click"`,
+		`on(root("searchfeed"), "click", onFeedClick)`,
 		"data-sact",
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("search action bar wiring missing %q", want)
 		}
 	}
+	html := mustReadIndex(t)
 	// fork is parented to the hit's node, not the currently-open chat — so
 	// forkFromTurn must take an explicit parent (default stays sel for callers).
 	if !strings.Contains(html, "function forkFromTurn(text, parent)") {
@@ -1301,82 +1315,85 @@ func TestSearchActionBar(t *testing.T) {
 	if !strings.Contains(html, "ncParent = parent || sel;") {
 		t.Error("forkFromTurn should default the parent to sel to preserve existing callers")
 	}
-	// show-to-chat's live/notes destination is the shared jumpToHitChat helper:
-	// it leaves the overlay and jumps via pendingJump.
-	j := strings.Index(html, "function jumpToHitChat(")
+	// show-to-chat's live destination is jumpToHitChat: leaves overlay + pending jump.
+	j := strings.Index(src, "function jumpToHitChat(")
 	if j < 0 {
-		t.Fatal("jumpToHitChat not found")
+		t.Fatal("jumpToHitChat not found in search.js")
 	}
-	jump := html[j : j+strings.Index(html[j:], "\n}\n")]
-	if !strings.Contains(jump, "closeSearch()") || !strings.Contains(jump, "pendingJump =") {
+	jumpEnd := strings.Index(src[j:], "\n  function ")
+	if jumpEnd < 0 {
+		jumpEnd = strings.Index(src[j:], "\n  async function ")
+	}
+	if jumpEnd < 0 {
+		jumpEnd = 400
+	}
+	jump := src[j : j+jumpEnd]
+	if !strings.Contains(jump, "close()") || !strings.Contains(jump, "setPendingJump") {
 		t.Error("show-to-chat must exit the overlay and jump to the turn")
 	}
-	// Isolate doSearchAction to assert per-action behaviour.
-	i := strings.Index(html, "function doSearchAction(")
+	i := strings.Index(src, "function doSearchAction(")
 	if i < 0 {
 		t.Fatal("doSearchAction not found")
 	}
-	body := html[i : i+strings.Index(html[i:], "\n}\n")]
-	if !strings.Contains(body, "jumpToHitChat(") {
-		t.Error("show action must route live/notes hits through jumpToHitChat")
+	// body until next factory function at same indent
+	rest := src[i:]
+	endRel := strings.Index(rest[len("function doSearchAction("):], "\n  function ")
+	if endRel < 0 {
+		endRel = 1200
+	} else {
+		endRel += len("function doSearchAction(")
 	}
-	// fork: leaves the overlay (before opening the main-view sheet) and reuses
-	// forkFromTurn parented to the hit's node.
-	if !strings.Contains(body, "closeSearch()") || !strings.Contains(body, "forkFromTurn(") {
+	body := rest[:endRel]
+	if !strings.Contains(body, "jumpToHitChat(") {
+		t.Error("show action must route live hits through jumpToHitChat")
+	}
+	if !strings.Contains(body, "close()") || !strings.Contains(body, "forkFromTurn") {
 		t.Error("fork action must exit the overlay and reuse forkFromTurn")
 	}
-	// add-note: files a note op and, being the "stays open" action, its branch
-	// must NOT contain a closeSearch.
 	nb := body[strings.Index(body, `a === "bookmark"`):]
 	if !strings.Contains(nb, `k: "bookmark-add"`) {
 		t.Error("add-note must file a note-add op")
 	}
-	if strings.Contains(nb, "closeSearch()") {
-		t.Error("add-note must keep the overlay open (no closeSearch in its branch)")
+	if strings.Contains(nb, "close()") {
+		t.Error("add-note must keep the overlay open (no close in its branch)")
 	}
 }
 
 // TestSearchHitActionsAdaptive runs searchHitActions under node to prove the
 // per-hit action set is adaptive: every hit can be shown, only a live+forkable
 // hit forks from the feed bar (archived fork lives inside the read-only view,
-// where the launch config is), and notes never fork.
+// where the launch config is), and notes never fork. Packet 7G: search.js module.
 func TestSearchHitActionsAdaptive(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	tmp := t.TempDir()
+	for _, name := range []string{"search.js", "format.js", "bookmarks.js", "lanes.js"} {
+		src, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	html := string(b)
-	start := strings.Index(html, "function searchHitActions(")
-	if start < 0 {
-		t.Fatal("searchHitActions not found")
-	}
-	end := strings.Index(html[start:], "\n}\n")
-	if end < 0 {
-		t.Fatal("end of searchHitActions not found")
-	}
-	script := html[start:start+end] + `
-}
-const assert = require("assert");
+	script := `
+import assert from "node:assert/strict";
+import { searchHitActions } from "./search.js";
 const eq = (a, b) => assert.deepStrictEqual(a, b);
 eq(searchHitActions("live", true),      ["show", "fork", "bookmark"]);
 eq(searchHitActions("live", false),     ["show", "bookmark"]);
 eq(searchHitActions("bookmarks", false),    ["show", "bookmark"]);
-eq(searchHitActions("bookmarks", true),     ["show", "bookmark"]);     // notes never fork
-eq(searchHitActions("archived", true),  ["show", "bookmark"]);     // fork is in the read-only view
+eq(searchHitActions("bookmarks", true),     ["show", "bookmark"]);
+eq(searchHitActions("archived", true),  ["show", "bookmark"]);
 eq(searchHitActions("archived", false), ["show", "bookmark"]);
-// An asset filename hit is show-to-chat ONLY — no fork, no add-note — even in a
-// live, forkable chat (spec §"Session assets").
 eq(searchHitActions("live", true, "asset"),     ["show"]);
 eq(searchHitActions("archived", true, "asset"), ["show"]);
-// A normal (non-asset) role in a forkable live chat keeps the full set.
 eq(searchHitActions("live", true, "user"),      ["show", "fork", "bookmark"]);
 eq(searchHitActions("live", true, "assistant"), ["show", "fork", "bookmark"]);
 `
-	f := filepath.Join(t.TempDir(), "hitactions.js")
+	f := filepath.Join(tmp, "hitactions.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1408,8 +1425,24 @@ func TestArchivedView(t *testing.T) {
 		}
 	}
 	// Archived show-to-chat routes into the read-only surface (not a toast).
-	i := strings.Index(html, "function doSearchAction(")
-	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	// Packet 7G: doSearchAction lives in search.js.
+	searchJS, err := os.ReadFile("web/js/search.js")
+	if err != nil {
+		t.Fatalf("read search.js: %v", err)
+	}
+	sjs := string(searchJS)
+	i := strings.Index(sjs, "function doSearchAction(")
+	if i < 0 {
+		t.Fatal("doSearchAction not found in search.js")
+	}
+	rest := sjs[i:]
+	endRel := strings.Index(rest[len("function doSearchAction("):], "\n  function ")
+	if endRel < 0 {
+		endRel = 1500
+	} else {
+		endRel += len("function doSearchAction(")
+	}
+	body := rest[:endRel]
 	if !strings.Contains(body, "openArchived(") {
 		t.Error("archived show-to-chat must open the read-only surface")
 	}
@@ -1443,33 +1476,30 @@ func TestArchivedView(t *testing.T) {
 
 // TestSearchRecents covers G6: recent searches are kept client-side (localStorage,
 // like drafts), deduped most-recent-first, gated by the same min length as search,
-// hard-capped, and only recorded when the supervisor acts on a hit. It runs the
-// real recents helpers under node with a localStorage + esc stub.
+// hard-capped, and only recorded when the supervisor acts on a hit. Packet 7G:
+// helpers live in search.js; Node search.test.js is the primary coverage.
 func TestSearchRecents(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/search.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read search.js: %v", err)
 	}
-	html := string(b)
+	src := string(b)
 
-	// Wiring: a query is recorded on hit action (not per keystroke), tapping a
-	// recent re-runs it, and Clear wipes the history.
 	for _, want := range []string{
-		"function recordRecent(",
-		"function recentsHTML(",
-		"function clearRecents(",
-		`recordRecent($("#searchinput").value)`, // recorded inside doSearchAction
+		"export function recordRecent(",
+		"export function recentsHTML(",
+		"export function clearRecents(",
+		"recordRecent(input ? input.value : \"\", storage)",
 		`data-recent=`,
-		`e.target.closest("#recentsclear")`,
-		"const RECENTS_CAP =",
-		"const RECENTS_SHOW =",
+		`t.closest("#recentsclear")`,
+		"export const RECENTS_CAP =",
+		"export const RECENTS_SHOW =",
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("recents wiring missing %q", want)
 		}
 	}
-	// recordRecent must gate on the same minimum as search (no 1-char noise).
-	if !strings.Contains(html, "if (query.length < SEARCH_MIN) return;") {
+	if !strings.Contains(src, "if (query.length < SEARCH_MIN) return;") {
 		t.Error("recordRecent must reuse the SEARCH_MIN gate")
 	}
 
@@ -1477,63 +1507,62 @@ func TestSearchRecents(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	start := strings.Index(html, "const RECENTS_KEY =")
-	end := strings.Index(html, "const searchBlank =")
-	if start < 0 || end < 0 || end <= start {
-		t.Fatal("could not locate the recents helper block in web/index.html")
+	tmp := t.TempDir()
+	for _, name := range []string{"search.js", "format.js", "bookmarks.js", "lanes.js"} {
+		data, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	script := `
+import assert from "node:assert/strict";
+import {
+  SEARCH_MIN, SEARCH_MAX, RECENTS_CAP, RECENTS_SHOW, RECENTS_KEY,
+  loadRecents, recordRecent, clearRecents, recentsHTML,
+} from "./search.js";
+import { esc } from "./format.js";
+
 const store = new Map();
-const localStorage = {
+const storage = {
   getItem: k => store.has(k) ? store.get(k) : null,
   setItem: (k, v) => store.set(k, String(v)),
   removeItem: k => store.delete(k),
 };
-function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-const SEARCH_MIN = 2;
-const SEARCH_MAX = 128;
-` + html[start:end] + `
-const assert = require("assert");
 
-// query-length cap: a pasted over-long query is stored only up to SEARCH_MAX
-// (the server searches just that prefix), never as a multi-KB string.
-recordRecent("z".repeat(SEARCH_MAX + 50));
-assert.strictEqual(loadRecents()[0].length, SEARCH_MAX,
-  "an over-long recent must be capped to SEARCH_MAX; got " + loadRecents()[0].length);
+recordRecent("z".repeat(SEARCH_MAX + 50), storage);
+assert.equal(loadRecents(storage)[0].length, SEARCH_MAX);
 store.clear();
 
-// gate: a sub-minimum query is never recorded.
-recordRecent("a");
-assert.deepStrictEqual(loadRecents(), [], "1-char query must not be recorded");
+recordRecent("a", storage);
+assert.deepEqual(loadRecents(storage), []);
 
-// dedup + move-to-front, most-recent-first.
-recordRecent("auth");
-recordRecent(" bug ");            // trimmed
-recordRecent("auth");             // repeat → jumps back to front, no duplicate
-assert.deepStrictEqual(loadRecents(), ["auth", "bug"],
-  "recents must dedup and move the repeat to the front; got " + JSON.stringify(loadRecents()));
+recordRecent("auth", storage);
+recordRecent(" bug ", storage);
+recordRecent("auth", storage);
+assert.deepEqual(loadRecents(storage), ["auth", "bug"]);
 
-// hard cap at RECENTS_CAP.
-for (let i = 0; i < 20; i++) recordRecent("q" + i);
-assert.ok(loadRecents().length <= RECENTS_CAP,
-  "recents must be capped at " + RECENTS_CAP + "; got " + loadRecents().length);
-assert.strictEqual(loadRecents()[0], "q19", "newest query must be first");
+for (let i = 0; i < 20; i++) recordRecent("q" + i, storage);
+assert.ok(loadRecents(storage).length <= RECENTS_CAP);
+assert.equal(loadRecents(storage)[0], "q19");
 
-// blank-state render shows at most RECENTS_SHOW and escapes the query text.
 store.clear();
-recordRecent("<img src=x>");
-recordRecent("hello");
-const html2 = recentsHTML();
-assert.ok(html2.includes("&lt;img src=x&gt;") && !html2.includes("<img src=x>"),
-  "recent query text must be escaped; got " + html2);
-assert.ok(html2.includes('data-recent="hello"'), "recent must carry its query for re-run");
+recordRecent("<img src=x>", storage);
+recordRecent("hello", storage);
+const html2 = recentsHTML(storage, esc);
+assert.ok(html2.includes("&lt;img src=x&gt;") && !html2.includes("<img src=x>"));
+assert.ok(html2.includes('data-recent="hello"'));
+assert.equal(RECENTS_KEY, "scimux-search-recents");
+assert.equal(SEARCH_MIN, 2);
+assert.ok(RECENTS_SHOW <= RECENTS_CAP);
 
-// clear wipes everything → blank state renders nothing (falls back to the prompt).
-clearRecents();
-assert.deepStrictEqual(loadRecents(), [], "clearRecents must empty the history");
-assert.strictEqual(recentsHTML(), "", "no recents → empty render (prompt fallback)");
+clearRecents(storage);
+assert.deepEqual(loadRecents(storage), []);
+assert.equal(recentsHTML(storage, esc), "");
 `
-	f := filepath.Join(t.TempDir(), "recents.js")
+	f := filepath.Join(tmp, "recents.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}

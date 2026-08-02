@@ -415,6 +415,7 @@ import {
   bookmarkClampState as bookmarkClampStateMod,
 } from "/js/bookmarks.js";
 import { createNotesFeature } from "/js/notes.js";
+import { createSearchFeature } from "/js/search.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -1122,12 +1123,13 @@ function setMapFull(on){ mapFeature.setFull(on); }
 
 /* Chat feature factory — owns head/details, msgs, terminal, keys, workpulse. */
 let pendingJump = null;    // jump-to-source in flight (set by bookmarks/search; consumed by chat)
-/* composerFeature / bookmarksFeature / notesFeature are assigned after
-   createChatFeature; chat/bookmarks inject lazy wrappers so effects resolve
-   after construction (Bookmarks must not import notes.js). */
+/* composerFeature / bookmarksFeature / notesFeature / searchFeature are
+   assigned after createChatFeature; chat/bookmarks inject lazy wrappers so
+   effects resolve after construction (Bookmarks must not import notes.js). */
 let composerFeature;
 let bookmarksFeature;
 let notesFeature;
+let searchFeature;
 const chatFeature = createChatFeature({
   roots: {
     chathead: $("#chathead"),
@@ -1366,6 +1368,44 @@ function closeWorkspace(){ notesFeature.close(); }
 function wsOpen(){ return notesFeature.isOpen(); }
 function renderWsInbox(){ notesFeature.renderInbox(); }
 function startPlacement(nt){ notesFeature.startPlacement(nt); }
+
+/* Search overlay — Packet 7G; owns #search* roots, shortcuts, recents, feed. */
+searchFeature = createSearchFeature({
+  roots: {
+    searchoverlay: $("#searchoverlay"),
+    searchscrim: $("#searchscrim"),
+    searchinput: $("#searchinput"),
+    searchclose: $("#searchclose"),
+    searchfeed: $("#searchfeed"),
+    searchbtn: $("#searchbtn"),
+  },
+  document,
+  storage: localStorage,
+  setTimeout,
+  clearTimeout,
+  requestAnimationFrame,
+  fetch,
+  AbortController,
+  createElement: tag => document.createElement(tag),
+  esc,
+  stampAddress: stampAddressMod,
+  nodeById: id => nodeById(id),
+  laneColor: id => laneColor(id),
+  agentLogo: a => agentLogo(a),
+  select: id => select(id),
+  setPendingJump: v => { pendingJump = v; },
+  invalidateChat: () => chatFeature.invalidate(),
+  setBookmarksOpen: o => setBookmarksOpen(o),
+  openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at),
+  forkFromTurn: (text, parent) => forkFromTurn(text, parent),
+  uiMutate: op => uiMutate(op),
+  toast: msg => toast(msg),
+  prompt: msg => prompt(msg),
+  isDesktop: () => isDesktop(),
+});
+function searchOpen(){ return searchFeature.isOpen(); }
+function openSearch(){ searchFeature.open(); }
+function closeSearch(){ searchFeature.close(); }
 
 /* Shell navigation into/out of Journeys (not map-local chrome). */
 $("#journeybtn").addEventListener("click", () => {
@@ -1710,6 +1750,8 @@ composerFeature.bind();
 bookmarksFeature.bind();
 /* Notes workspace listeners (Packet 7F). */
 notesFeature.bind();
+/* Search overlay listeners + document shortcuts (Packet 7G). */
+searchFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
@@ -1804,281 +1846,9 @@ $("#burger").addEventListener("click", () => openSheet("#menu"));
    Shell wrappers openWorkspace/closeWorkspace/wsOpen/renderWsInbox/
    startPlacement are defined next to notesFeature construction above. */
 
-/* ---- search overlay (G3): open/close, blur, focus trap + restore ----
-   A Spotlight-style modal reachable from any view. Opening blurs the app
-   behind the scrim; closing just un-blurs and restores focus to whatever the
-   supervisor was on (the 🔍 trigger for a click/⌘K, or the field that had focus)
-   — no snapshot machinery, the previous view was never torn down. The grouped
-   feed is wired in G4; here the overlay is the shell. */
-let searchReturnFocus = null;
-function searchOpen(){ return !$("#searchoverlay").hidden; }
-function openSearch(){
-  if (searchOpen()) { $("#searchinput").focus(); return; }
-  searchReturnFocus = document.activeElement;
-  const ov = $("#searchoverlay");
-  ov.hidden = false;
-  /* an empty field opens on the blank state, refreshed each time so recents
-     reflect any searches acted on since the overlay was last open (G6). A
-     non-empty field keeps its preserved results (spec: results survive close). */
-  if (($("#searchinput").value || "").trim().length < SEARCH_MIN) searchBlank();
-  /* focus the field after the element is shown so the caret lands correctly */
-  requestAnimationFrame(() => $("#searchinput").focus());
-}
-function closeSearch(){
-  if (!searchOpen()) return;
-  $("#searchoverlay").hidden = true;
-  const back = searchReturnFocus;
-  searchReturnFocus = null;
-  /* restore focus to the trigger (or the previously focused control); fall back
-     to 🔍 so keyboard users are never stranded on document.body */
-  if (back && document.contains(back) && typeof back.focus === "function") back.focus();
-  else $("#searchbtn").focus();
-}
-$("#searchbtn").addEventListener("click", openSearch);
-$("#searchclose").addEventListener("click", closeSearch);
-/* backdrop tap closes; a tap inside the panel does not bubble out to it */
-$("#searchscrim").addEventListener("click", closeSearch);
-/* global open shortcut: ⌘K / Ctrl-K from anywhere. Escape close and the focus
-   trap live in the overlay's own keydown so they win before other handlers. */
-document.addEventListener("keydown", e => {
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")){
-    e.preventDefault(); openSearch();
-    return;
-  }
-  /* "/" opens search too, but only when focus is not in a text field (so it
-     stays a literal slash while composing) and the overlay isn't already up. */
-  if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey && !searchOpen() &&
-      !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable){
-    e.preventDefault(); openSearch();
-  }
-});
-$("#searchoverlay").addEventListener("keydown", e => {
-  if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closeSearch(); return; }
-  if (e.key !== "Tab") return;
-  /* focus trap: only two tabbables (input, ✕); keep Tab/Shift-Tab inside them */
-  const stops = [$("#searchinput"), $("#searchclose")];
-  const first = stops[0], last = stops[stops.length - 1];
-  if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
-  else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
-});
-
-/* ---- G4: grouped search feed ----
-   The input drives /api/search: a min-length gate (mirrors the server's
-   minSearchQuery), a debounce so we don't fetch on every keystroke, and an
-   AbortController + a monotonic sequence so a superseded/out-of-order response
-   can never overwrite a newer render. The response is already grouped by chat
-   and recency-ordered by the server; the client renders it as received — one
-   single-column feed, no rail, lane only as the header swatch. A hit's excerpt
-   arrives RAW (server never HTML-escapes it): escape before/after and wrap only
-   the match in <mark>. Hits are inert here — the action bar + jumps are G5, so
-   each hit carries its identity in data-* now to keep that step a pure wiring. */
-const SEARCH_MIN = 2;
-const SEARCH_MAX = 128;    /* mirror the server's maxSearchQuery: a longer query is only searched by its prefix, so recents and the fetch clamp to match */
-let searchSeq = 0;         /* newest issued query; a lower-seq response is stale */
-let searchAbort = null;    /* cancels the in-flight fetch when superseded */
-let searchDebounce = null;
-
-function searchHitHTML(h){
-  const before = esc(h.before || ""), match = esc(h.match || ""), after = esc(h.after || "");
-  const when = h.turn_time || h.time || "";
-  return `<div class="searchhit" data-kind="${esc(h._kind || "")}" data-id="${esc(h._id || "")}"` +
-    ` data-uid="${esc(h._uid || "")}" data-segment="${h.segment || 0}" data-record="${h.record || 0}"` +
-    ` data-role="${esc(h.role || "")}" data-bookmark-id="${esc(h.bookmark_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
-    ` data-lane="${esc(h._lane || "")}" data-turn="${esc(h.turn_time || h.time || "")}">` +
-    `<span class="ex">${before}<mark>${match}</mark>${after}</span>` +
-    (when ? `<span class="when">${esc(when)}</span>` : "") +
-    `</div>`;
-}
-function searchGroupHTML(g){
-  const swatch = g.lane_id ? `<span class="tabdot" style="background:${esc(laneColor(g.lane_id))}"></span>` : "";
-  const kind = g.kind === "bookmarks" ? "bookmarks" : g.kind === "archived" ? "past" : "";
-  /* stamp the group's identity onto each hit so a G5 tap knows its destination
-     without re-walking the group */
-  const hits = (g.hits || []).map(h =>
-    searchHitHTML(Object.assign({ _kind: g.kind, _id: g.id, _uid: g.uid,
-      _forkable: g.forkable, _lane: g.lane_id }, h))).join("");
-  return `<div class="searchgroup">` +
-    `<div class="sghead">` +
-      `<span class="agent-logo" title="${esc(g.agent || "agent")}">${agentLogo(g.agent)}</span>` +
-      swatch +
-      `<span class="sgtitle">${esc(g.title || "Untitled")}</span>` +
-      (kind ? `<span class="sgkind">${kind}</span>` : "") +
-    `</div>${hits}</div>`;
-}
-function renderSearchFeed(resp){
-  const feed = $("#searchfeed");
-  openHit = null;   /* the feed DOM is about to be replaced — drop the stale bar */
-  const groups = (resp && resp.groups) || [];
-  if (!groups.length){
-    feed.innerHTML = `<div class="empty">No matches.</div>`;
-    return;
-  }
-  feed.innerHTML = groups.map(searchGroupHTML).join("")
-    + (resp.partial ? `<div class="searchmore">Showing the most recent matches — refine to narrow.</div>` : "");
-}
-/* ---- G6: recent searches ----
-   A short handful of past queries, kept client-side per device (like composer
-   drafts — never server state) so they survive reloads. Most-recent-first,
-   deduped, hard-capped; a query is remembered only once the supervisor ACTS on a
-   hit (recordRecent in doSearchAction), which is the unambiguous "this search
-   mattered" signal — recording every debounced keystroke would just fill the
-   list with prefixes of one word. They fill the blank state; tapping one re-runs
-   it, and Clear wipes the history. */
-const RECENTS_KEY = "scimux-search-recents";
-const RECENTS_CAP = 8;    /* hard cap on what we store */
-const RECENTS_SHOW = 5;   /* how many surface in the blank state */
-function loadRecents(){
-  try {
-    const a = JSON.parse(localStorage.getItem(RECENTS_KEY) || "[]");
-    return Array.isArray(a) ? a.filter(s => typeof s === "string") : [];
-  } catch { return []; }
-}
-function recordRecent(q){
-  const query = (q || "").trim().slice(0, SEARCH_MAX);   /* store only what the server would search — never a multi-KB paste */
-  if (query.length < SEARCH_MIN) return;   /* mirror the search gate */
-  const list = loadRecents().filter(s => s !== query);   /* drop a prior copy → move-to-front */
-  list.unshift(query);
-  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(list.slice(0, RECENTS_CAP))); } catch {}
-}
-function clearRecents(){ try { localStorage.removeItem(RECENTS_KEY); } catch {} }
-function recentsHTML(){
-  const list = loadRecents().slice(0, RECENTS_SHOW);
-  if (!list.length) return "";
-  return `<div class="recents"><div class="recentshead">Recent searches` +
-    `<button id="recentsclear" type="button">Clear</button></div>` +
-    list.map(q => `<button class="recent" type="button" data-recent="${esc(q)}">${esc(q)}</button>`).join("") +
-    `</div>`;
-}
-const searchBlank = () => {
-  openHit = null;
-  $("#searchfeed").innerHTML = recentsHTML()
-    || `<div class="empty">Search your current and past chats and notes.</div>`;
-};
-async function runSearch(q){
-  const query = (q || "").trim().slice(0, SEARCH_MAX);   /* the server clamps too, but sending the prefix keeps recents and the fetch identical */
-  if (query.length < SEARCH_MIN){
-    /* below the gate: drop any in-flight query and return to the blank state so
-       a stale feed never lingers under a now-too-short field */
-    searchSeq++;
-    if (searchAbort){ searchAbort.abort(); searchAbort = null; }
-    searchBlank();
-    return;
-  }
-  const seq = ++searchSeq;
-  if (searchAbort) searchAbort.abort();
-  searchAbort = new AbortController();
-  try {
-    const r = await fetch("/api/search?q=" + encodeURIComponent(query), { signal: searchAbort.signal });
-    if (!r.ok) throw new Error("search " + r.status);
-    const resp = await r.json();
-    if (seq !== searchSeq) return;          /* a newer query already went out */
-    renderSearchFeed(resp);
-  } catch (err) {
-    if (err && err.name === "AbortError") return;   /* superseded — not a failure */
-    if (seq === searchSeq) $("#searchfeed").innerHTML = `<div class="empty">Search is unavailable right now.</div>`;
-  }
-}
-$("#searchinput").addEventListener("input", e => {
-  clearTimeout(searchDebounce);
-  const q = e.target.value;
-  searchDebounce = setTimeout(() => runSearch(q), 180);
-});
-
-/* ---- G5a: per-hit action bar ----
-   Tapping a hit reveals an inline action bar under it (metro-toolbar idiom),
-   adaptive by hit kind. Show-to-chat and Fork are terminal — they leave the
-   overlay for the main view; Add note is non-terminal — the overlay stays open
-   so the supervisor can keep searching. In G5a the bar covers everything that
-   needs no server work: live chats (still nodes) jump/fork today, notes reveal
-   in place. Archived (deleted, on-disk-only) hits get Add note now; their
-   show-to-chat + fork arrive in G5b with the bounded read-only surface. */
-let openHit = null;   /* the hit whose bar is showing (transient; not polled) */
-const SACT_LABEL = { show: "Show to chat", fork: "Fork from here", bookmark: "Add bookmark" };
-function searchHitActions(kind, forkable, role){
-  const acts = [];
-  acts.push("show");                                   /* every hit can be shown */
-  /* an asset filename hit is show-to-chat only (spec): it isn't a turn to fork
-     from, and a note belongs on the turn, not the file — so no fork, no note */
-  if (role === "asset") return acts;
-  if (kind === "live" && forkable) acts.push("fork");  /* archived fork lives in the read-only view */
-  acts.push("bookmark");
-  return acts;
-}
-function closeHitBar(){
-  if (!openHit) return;
-  openHit.classList.remove("open");
-  openHit.querySelector(".hitbar")?.remove();
-  openHit = null;
-}
-function toggleHitBar(el){
-  if (openHit === el){ closeHitBar(); return; }
-  closeHitBar();
-  const bar = document.createElement("div");
-  bar.className = "hitbar";
-  bar.innerHTML = searchHitActions(el.dataset.kind, el.dataset.forkable === "1", el.dataset.role)
-    .map(a => `<button data-sact="${a}">${SACT_LABEL[a]}</button>`).join("");
-  el.appendChild(bar);
-  el.classList.add("open");
-  openHit = el;
-}
-/* jumpToHitChat: the shared live/notes show-to-chat destination — leave the
-   overlay, then jump the main chat to the hit's turn. The durable (uid, segment,
-   record) address is the primary key (stable across seams and duplicate
-   timestamps); consumePendingJump falls back to the turn timestamp for hits with
-   no address, and finds either once the chat has rendered. */
-function jumpToHitChat(id, turn, addr){
-  closeSearch();
-  pendingJump = { node: id, turnTime: turn || "", text: "", ts: Date.now(),
-    uid: (addr && addr.uid) || "", segment: addr && +addr.segment, record: addr && +addr.record };
-  chatFeature.invalidate();
-  if (!isDesktop()) setBookmarksOpen(false);
-  select(id);
-}
-function doSearchAction(a, hit){
-  if (!hit) return;
-  recordRecent($("#searchinput").value);   /* acting on a hit means this query mattered (G6) */
-  const kind = hit.dataset.kind, id = hit.dataset.id;
-  const turn = hit.dataset.turn, lane = hit.dataset.lane;
-  const live = id && nodeById(id);
-  if (a === "show"){
-    if (live) jumpToHitChat(id, turn, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
-    else if (kind === "bookmarks"){ closeSearch(); setBookmarksOpen(true); }   /* free-standing note */
-    else if (kind === "archived"){ closeSearch(); openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn); }
-    else toast("This chat is unavailable.");
-    return;
-  }
-  if (a === "fork"){
-    if (!live) return;
-    const ex = hit.querySelector(".ex")?.textContent || "";
-    closeSearch();
-    forkFromTurn(ex, id);   /* parented to the hit's node, not the open chat */
-    return;
-  }
-  if (a === "bookmark"){
-    /* non-terminal: the overlay stays open so search continues */
-    const text = prompt("Add a bookmark");
-    if (text == null) return;
-    const clean = text.trim();
-    if (!clean) return;
-    const bookmark = { t: new Date().toISOString(), text: clean };
-    if (live) bookmark.node = id;
-    if (turn) bookmark.turnTime = turn;
-    if (lane) bookmark.lane = lane;
-    stampAddress(bookmark, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
-    uiMutate({ k: "bookmark-add", bookmark });
-    toast("Bookmark added");
-    closeHitBar();
-  }
-}
-$("#searchfeed").addEventListener("click", e => {
-  if (e.target.closest("#recentsclear")){ clearRecents(); searchBlank(); return; }
-  const rc = e.target.closest("[data-recent]");
-  if (rc){ const q = rc.dataset.recent; $("#searchinput").value = q; runSearch(q); return; }
-  const btn = e.target.closest("[data-sact]");
-  if (btn){ doSearchAction(btn.dataset.sact, btn.closest(".searchhit")); return; }
-  const hit = e.target.closest(".searchhit");
-  if (hit) toggleHitBar(hit);
-});
+/* Search overlay implementation lives in /js/search.js (Packet 7G).
+   Shell wrappers searchOpen/openSearch/closeSearch and searchFeature
+   construction/bind are defined next to notesFeature above. */
 
 /* ---- G5b: read-only surface for a deleted chat ----
    A live search hit opens the normal chat; a DELETED chat has no node to open,
