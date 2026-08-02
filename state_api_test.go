@@ -601,3 +601,183 @@ func TestHandleStateResponseShapeContentTypeAndStableETag(t *testing.T) {
 		t.Errorf("304 body = %q, want empty", rec3.Body.String())
 	}
 }
+
+func TestSysloadOnLinux(t *testing.T) {
+	s := sysload()
+	if s.NCPU <= 0 {
+		t.Errorf("ncpu = %d, want > 0", s.NCPU)
+	}
+	if s.MemTotalGB <= 0 {
+		t.Errorf("mem_total_gb = %f, want > 0", s.MemTotalGB)
+	}
+	if s.MemPct <= 0 || s.MemPct > 100 {
+		t.Errorf("mem_pct = %f, want (0,100]", s.MemPct)
+	}
+	if s.SwapPct < 0 || s.SwapPct > 100 {
+		t.Errorf("swap_pct = %f, want [0,100]", s.SwapPct)
+	}
+	// cached: a second call within the 30 s window returns the same sample
+	if s2 := sysload(); s2 != s {
+		t.Error("sysload not cached within 30s window")
+	}
+}
+
+// --- /api/state ---
+
+func TestHandleStateETagAndUnadopted(t *testing.T) {
+	f := &fakeTmux{list: []string{"node-a", "ghost"}}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "node-a", Title: "A", Agent: "claude", Dir: "/tmp", CreatedAt: "2026-07-14T00:00:00Z"}}
+	a.byID["node-a"] = a.nodes[0]
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("state code = %d", rec.Code)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag header")
+	}
+	var body struct {
+		Unadopted []string `json:"unadopted"`
+		Nodes     []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Nodes) != 1 || body.Nodes[0].ID != "node-a" {
+		t.Errorf("nodes = %+v", body.Nodes)
+	}
+	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
+		t.Errorf("unadopted = %v, want [ghost] (node-a is accounted for)", body.Unadopted)
+	}
+
+	// A matching If-None-Match short-circuits to 304 with no body.
+	req := httptest.NewRequest("GET", "/api/state", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec2 := httptest.NewRecorder()
+	a.handleState(rec2, req)
+	if rec2.Code != http.StatusNotModified {
+		t.Errorf("If-None-Match: code = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("304 must have empty body, got %q", rec2.Body.String())
+	}
+}
+
+// The /api/state unadopted list must not offer a session whose id an
+// in-flight create has reserved: adopting it would race the publish (R20.2).
+func TestHandleStateUnadoptedExcludesReserved(t *testing.T) {
+	f := &fakeTmux{list: []string{"ghost", "pending"}}
+	a := newTestApp(t, f)
+	a.reserved = map[string]bool{"pending": true}
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	var body struct {
+		Unadopted []string `json:"unadopted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
+		t.Errorf("unadopted = %v, want [ghost] (pending is reserved)", body.Unadopted)
+	}
+}
+
+func TestHandleStateReportsLastInteractionFromCurrentSegment(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID["c1"] = []*Node{n}, n
+	a.live["c1"] = "quiet"
+	a.lastChg["c1"] = time.Date(2026, 7, 15, 9, 7, 0, 0, time.UTC)
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
+		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
+		{T: "source", Time: "2026-07-15T09:00:00Z", Source: &sessionlog.SourceEvent{SessionID: "s2", Reason: "clear"}},
+		{T: "assistant", Text: "ready", Time: "2026-07-15T09:01:00Z"},
+		{T: "user", Text: "new question", Time: "2026-07-15T09:05:00Z"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("state code = %d", rec.Code)
+	}
+	var body struct {
+		Nodes []struct {
+			ID              string `json:"id"`
+			LastActivity    int64  `json:"last_activity"`
+			LastInteraction int64  `json:"last_interaction"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", body.Nodes)
+	}
+	if body.Nodes[0].LastActivity != time.Date(2026, 7, 15, 9, 7, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("last_activity = %d", body.Nodes[0].LastActivity)
+	}
+	if body.Nodes[0].LastInteraction != time.Date(2026, 7, 15, 9, 5, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("last_interaction = %d, want current-segment user turn", body.Nodes[0].LastInteraction)
+	}
+}
+
+// handleState projects each node's per-station labels so the map can render a
+// stop with its own name/description rather than the node's single title.
+func TestHandleStateEmitsStationLabels(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "n1", Title: "Head", Agent: "claude", Dir: "/tmp", CreatedAt: "2026-07-01T09:00:00Z"}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "n1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("n1", "claude", "", "", a.home),
+		sessionlog.NewStation("2026-07-01T09:00:00Z", "First", "first desc"),
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("state code = %d", rec.Code)
+	}
+	var body struct {
+		Nodes []struct {
+			StationLabels map[string]struct {
+				Title string `json:"title"`
+				Desc  string `json:"desc"`
+			} `json:"station_labels"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Nodes) != 1 {
+		t.Fatalf("nodes = %d", len(body.Nodes))
+	}
+	got := body.Nodes[0].StationLabels["2026-07-01T09:00:00Z"]
+	if got.Title != "First" || got.Desc != "first desc" {
+		t.Fatalf("station_labels = %+v, want First/first desc", body.Nodes[0].StationLabels)
+	}
+}

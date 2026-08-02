@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/acp/codex"
 )
 
 func TestAgentCommandPiOpencode(t *testing.T) {
@@ -368,5 +371,33 @@ func TestDetectAgents(t *testing.T) {
 			t.Errorf("agent %q has nil model list", name)
 		}
 		t.Logf("%s: %d models, %d per-model effort menus", name, len(info.Models), len(info.Efforts))
+	}
+}
+
+func TestCodexManagerConflictAndPending(t *testing.T) {
+	// Verify the codexManager adapter methods (Conflict, Pending) are correct
+	// (finding 78 — the adapter methods were 0% covered).
+	cm := codexManager{codex.NewManager(t.TempDir())}
+
+	// Conflict must return true for the sentinel errors.
+	if !cm.Conflict(codex.ErrNoSession) {
+		t.Error("Conflict(ErrNoSession) = false, want true")
+	}
+	if !cm.Conflict(codex.ErrNotAlive) {
+		t.Error("Conflict(ErrNotAlive) = false, want true")
+	}
+	if !cm.Conflict(codex.ErrTurnActive) {
+		t.Error("Conflict(ErrTurnActive) = false, want true")
+	}
+	if !cm.Conflict(codex.ErrNoPending) {
+		t.Error("Conflict(ErrNoPending) = false, want true")
+	}
+	if cm.Conflict(errors.New("random")) {
+		t.Error("Conflict(random) = true, want false")
+	}
+
+	// Pending on a node with no session must return ok=false.
+	if title, opts, ok := cm.Pending("ghost"); ok {
+		t.Errorf("Pending(ghost) = (%q, %v, true), want ok=false", title, opts)
 	}
 }

@@ -2,12 +2,13 @@ package main
 
 // Packet 4A public-route coverage for node-management HTTP bindings through
 // NewHandler. Complements — does not replace — the detailed direct-handler
-// matrices in main_http_test.go or the Packet 2E durable-ordering tests in
+// matrices consolidated below or the Packet 2E durable-ordering tests in
 // node_lifecycle_order_test.go.
 
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/asset"
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
 
 // nodeAPIHandler builds the production router for public-route assertions.
@@ -515,5 +517,639 @@ func TestPublicRouteAgents(t *testing.T) {
 	rec = routeRequest(h, http.MethodPost, "/api/agents", `{}`, true)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /api/agents: status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleAdoptValidation(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"live1": true, "dup": true, "claimer": true}}
+	a := newTestApp(t, f)
+	shared := filepath.Join(a.home, ".claude", "projects", "proj", "shared.jsonl")
+	a.nodes = []*Node{{ID: "dup", Title: "dup", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"},
+		{ID: "owner", Title: "owner", Agent: "claude", Transcript: shared, CreatedAt: "2026-07-14T00:00:00Z"}}
+	for _, n := range a.nodes {
+		a.byID[n.ID] = n
+	}
+
+	if rec := adopt(a, `{}`); rec.Code != 400 {
+		t.Errorf("missing session: code = %d, want 400", rec.Code)
+	}
+	if rec := adopt(a, `{"session":"ghost"}`); rec.Code != 404 {
+		t.Errorf("dead session: code = %d, want 404", rec.Code)
+	}
+	if rec := adopt(a, `{"session":"dup"}`); rec.Code != 409 {
+		t.Errorf("duplicate: code = %d, want 409", rec.Code)
+	}
+	// Codex uses the app-server protocol — adoption is rejected with a clear error.
+	if rec := adopt(a, `{"session":"live1","agent":"codex","session_id":"x"}`); rec.Code != 400 {
+		t.Errorf("codex adopt: code = %d, want 400", rec.Code)
+	}
+	// Path claim still enforced for claude.
+	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":`+strconv.Quote(shared)+`}`); rec.Code != 409 {
+		t.Errorf("path claim: code = %d, want 409", rec.Code)
+	}
+	// A transcript override outside the claude root is rejected before any bind.
+	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":"/t/elsewhere.jsonl"}`); rec.Code != 400 {
+		t.Errorf("out-of-root transcript: code = %d, want 400", rec.Code)
+	}
+
+	// Success: a claude session with an explicit id and dir.
+	rec := adopt(a, `{"session":"live1","agent":"claude","session_id":"sid","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("adopt success: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	if _, ok := a.byID["live1"]; !ok {
+		t.Error("adopted node not registered")
+	}
+}
+
+// An id reserved by an in-flight create must be rejected for adoption, and a
+// leftover session log under the slug is a dead node's history the adopt must
+// not bind onto (R20.2, R20.4).
+func TestHandleAdoptRejectsReservedAndDeadSlug(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"pending": true, "deadslug": true}}
+	a := newTestApp(t, f)
+	a.reserved = map[string]bool{"pending": true}
+	if rec := adopt(a, `{"session":"pending","agent":"claude"}`); rec.Code != 409 {
+		t.Errorf("reserved id: code = %d, want 409", rec.Code)
+	}
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(a.sessionsDir, "deadslug.jsonl")
+	if err := os.WriteFile(logPath, []byte(`{"t":"meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := adopt(a, `{"session":"deadslug","agent":"claude"}`)
+	if rec.Code != 409 {
+		t.Errorf("dead-history slug: code = %d body %q, want 409", rec.Code, rec.Body.String())
+	}
+	if _, ok := a.byID["deadslug"]; ok {
+		t.Error("dead-history adopt still registered a node")
+	}
+	if b, err := os.ReadFile(logPath); err != nil || string(b) != `{"t":"meta"}`+"\n" {
+		t.Errorf("dead node's log was touched: %q %v", b, err)
+	}
+}
+
+func TestHandleNewNodeValidationAndCreate(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+
+	if rec := newNode(a, `{bad json`); rec.Code != 400 {
+		t.Errorf("bad json: code = %d, want 400", rec.Code)
+	}
+	if rec := newNode(a, `{"agent":"claude","dir":"`+a.home+`"}`); rec.Code != 400 {
+		t.Errorf("empty title: code = %d, want 400", rec.Code)
+	}
+	if rec := newNode(a, `{"title":"T","prompt":"hi","agent":"martian","dir":"`+a.home+`"}`); rec.Code != 400 {
+		t.Errorf("unknown agent: code = %d, want 400", rec.Code)
+	}
+	// No failing request should have reached tmux new-session.
+	for _, s := range f.subcommands() {
+		if s == "new-session" {
+			t.Fatal("a validation failure launched tmux")
+		}
+	}
+
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	if len(a.nodes) != 1 {
+		t.Fatalf("want 1 node created, got %d", len(a.nodes))
+	}
+	sawNewSession := false
+	for _, s := range f.subcommands() {
+		if s == "new-session" {
+			sawNewSession = true
+		}
+	}
+	if !sawNewSession {
+		t.Error("create did not start a tmux session")
+	}
+	if got := a.nodes[0].Prompt; got != "T" {
+		t.Errorf("prompt default = %q, want title", got)
+	}
+	if got := a.nodes[0].Description; got != "T" {
+		t.Errorf("description default = %q, want first prompt", got)
+	}
+}
+
+// The UI offers the family alias (opus); scimux resolves it to the concrete id
+// the CLI accepts (claude-opus-4-8) at launch, working around the CLI's broken
+// alias resolution. The stored node keeps the durable alias; only the launched
+// command carries the resolved id.
+func TestHandleNewNodeResolvesClaudeModelID(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.claudeIDs = map[string]string{"opus": "claude-opus-4-8"}
+
+	if rec := newNode(a, `{"title":"Fork","agent":"claude","model":"opus","effort":"medium","dir":"`+a.home+`"}`); rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	// Stored node keeps the alias (durable across model-version bumps).
+	if a.nodes[0].Model != "opus" {
+		t.Errorf("stored model = %q, want the alias 'opus'", a.nodes[0].Model)
+	}
+	// The launched command carries the resolved concrete id and the effort flag.
+	var launch string
+	f.mu.Lock()
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "new-session" {
+			launch = strings.Join(c, " ")
+		}
+	}
+	f.mu.Unlock()
+	if !strings.Contains(launch, "--model 'claude-opus-4-8'") {
+		t.Errorf("launch did not resolve the model id: %q", launch)
+	}
+	if !strings.Contains(launch, "--effort 'medium'") {
+		t.Errorf("launch did not pass effort: %q", launch)
+	}
+}
+
+// A launch that dies before its interface is ready (the real-world case: a
+// forked node whose --model the CLI rejects) must surface the agent's own error
+// to the create caller and leave no phantom node behind — not the opaque "dead
+// session that couldn't be adopted" that this replaces. The launch wrapper holds
+// the CLI's message on the pane; awaitLaunch reads it during the grace window.
+func TestHandleNewNodeSurfacesLaunchFailure(t *testing.T) {
+	f := &fakeTmux{capture: "API Error: model claude-4-6-opus is not available\n" +
+		launchFailSentinel + " (status 1)\n"}
+	a := newTestApp(t, f)
+
+	rec := newNode(a, `{"title":"Fork","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code == 200 {
+		t.Fatalf("failed launch must not report success, got 200 body %q", rec.Body.String())
+	}
+	if len(a.nodes) != 0 {
+		t.Fatalf("failed launch must not persist a node, got %d", len(a.nodes))
+	}
+	if !strings.Contains(rec.Body.String(), "claude-4-6-opus") {
+		t.Errorf("error must quote the CLI's own message, got %q", rec.Body.String())
+	}
+	// The lingering session (held open by the wrapper) must be cleaned up.
+	killed := false
+	for _, s := range f.subcommands() {
+		if s == "kill-session" {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Error("failed launch must kill the session the wrapper held open")
+	}
+}
+
+// The launched tmux command must carry the failure-diagnostic wrapper so a
+// launch that exits early is legible; a healthy launch is otherwise untouched.
+func TestHandleNewNodeWrapsLaunchCommand(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if rec := newNode(a, `{"title":"OK","agent":"claude","dir":"`+a.home+`"}`); rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	wrapped := false
+	f.mu.Lock()
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "new-session" && strings.Contains(strings.Join(c, " "), launchFailSentinel) {
+			wrapped = true
+		}
+	}
+	f.mu.Unlock()
+	if !wrapped {
+		t.Error("new-session command was not wrapped with launch diagnostics")
+	}
+}
+
+// A create request supplies launch config only; identity, adoption, the ended
+// cap, and the linked transcript are server-owned and must never be trusted
+// from the body (adopted → an owned session is never killed; ended_at → a node
+// born closed; transcript → an arbitrary mirror bind with no pathClaimed check).
+func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	body := `{"title":"Sneaky","agent":"claude","dir":"` + a.home + `",` +
+		`"id":"pwned","adopted":true,"ended_at":"2020-01-01T00:00:00Z",` +
+		`"transcript":"/etc/shadow","session_id":"forged","fork_kind":"s"}`
+	rec := newNode(a, body)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	if len(a.nodes) != 1 {
+		t.Fatalf("want 1 node, got %d", len(a.nodes))
+	}
+	n := a.nodes[0]
+	if n.Adopted {
+		t.Error("adopted trusted from body — an owned session would then never be killed")
+	}
+	if n.EndedAt != "" {
+		t.Errorf("ended_at trusted from body: %q (node born closed)", n.EndedAt)
+	}
+	if n.Transcript != "" {
+		t.Errorf("transcript trusted from body: %q (arbitrary mirror bind)", n.Transcript)
+	}
+	if n.ID == "pwned" {
+		t.Error("id trusted from body instead of minted server-side")
+	}
+	if n.ForkKind != "" {
+		t.Errorf("fork_kind trusted from body: %q (a root has no fork)", n.ForkKind)
+	}
+	// A claude node's session id is minted server-side, never the forged value.
+	if n.SessionID == "forged" {
+		t.Error("session_id trusted from body")
+	}
+}
+
+// forkKind is fixed at creation so the map cannot reclassify it later when a
+// sibling is deleted: same lane as the parent → y-stay, a lane that already
+// holds a station → s (crossover), an unused lane → y-new.
+func TestForkKindRecordedAtCreation(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if rec := newNode(a, `{"title":"Root","agent":"claude","dir":"`+a.home+`","lane_id":"topic-x"}`); rec.Code != 200 {
+		t.Fatalf("root: %d %s", rec.Code, rec.Body.String())
+	}
+	root := a.nodes[0]
+	if root.ForkKind != "" {
+		t.Errorf("root fork_kind = %q, want empty (a root has no fork)", root.ForkKind)
+	}
+	fork := func(lane string) *Node {
+		body := `{"title":"F","agent":"claude","dir":"` + a.home + `","parent":"` + root.ID + `","lane_id":"` + lane + `"}`
+		rec := newNode(a, body)
+		if rec.Code != 200 {
+			t.Fatalf("fork into %q: %d %s", lane, rec.Code, rec.Body.String())
+		}
+		return a.nodes[len(a.nodes)-1]
+	}
+	if k := fork("topic-x").ForkKind; k != "y-stay" {
+		t.Errorf("fork into the parent's lane: fork_kind = %q, want y-stay", k)
+	}
+	if k := fork("topic-y").ForkKind; k != "y-new" {
+		t.Errorf("fork into an unused lane: fork_kind = %q, want y-new", k)
+	}
+	if k := fork("topic-y").ForkKind; k != "s" {
+		t.Errorf("fork into a lane that now holds a station: fork_kind = %q, want s", k)
+	}
+}
+
+func TestHandleNodeLaneAssignmentIsOneWay(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+
+	req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"lane_id":"lane-a"}`))
+	req.SetPathValue("id", id)
+	up := httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("assign lane: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].LaneID; got != "lane-a" {
+		t.Fatalf("lane = %q, want lane-a", got)
+	}
+
+	req = httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"lane_id":"lane-b"}`))
+	req.SetPathValue("id", id)
+	up = httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 409 {
+		t.Fatalf("reassign lane: code = %d body %q, want 409", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].LaneID; got != "lane-a" {
+		t.Fatalf("lane changed to %q", got)
+	}
+}
+
+// The lane is set-once (immutable once assigned); title and description stay
+// mutable. Interchange and Service are gone — the model derives topology from
+// forks, not hand-tagged fields.
+func TestHandleNodeLaneImmutableAndEditable(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`"}`) // no lane yet
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleUpdateNode(up, req)
+		return up
+	}
+
+	// First assignment sets the lane; a second, different value is rejected.
+	if up := patch(`{"lane_id":"lane-a"}`); up.Code != 200 {
+		t.Fatalf("assign lane: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].LaneID; got != "lane-a" {
+		t.Fatalf("lane_id = %q, want lane-a", got)
+	}
+	if up := patch(`{"lane_id":"lane-b"}`); up.Code != 409 {
+		t.Fatalf("reassign lane: code = %d, want 409", up.Code)
+	}
+
+	// Title and description remain mutable.
+	if up := patch(`{"title":"Renamed","description":"why"}`); up.Code != 200 {
+		t.Fatalf("edit title/desc: code = %d body %q", up.Code, up.Body.String())
+	}
+	if a.nodes[0].Title != "Renamed" || a.nodes[0].Description != "why" {
+		t.Fatalf("title/desc = %q/%q", a.nodes[0].Title, a.nodes[0].Description)
+	}
+}
+
+// /exit marks a thread ended (dead-end cap) and stops its process, but keeps
+// the node on the map — unlike delete, which removes it.
+func TestHandleExitNodeMarksEndedAndKeepsNode(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+
+	req := httptest.NewRequest("POST", "/api/nodes/"+id+"/exit", nil)
+	req.SetPathValue("id", id)
+	up := httptest.NewRecorder()
+	a.handleExitNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("exit: code = %d body %q", up.Code, up.Body.String())
+	}
+	n, ok := a.byID[id]
+	if !ok {
+		t.Fatal("node removed by /exit; want it to stay visible")
+	}
+	if n.EndedAt == "" {
+		t.Fatal("ended_at not stamped")
+	}
+	// Idempotent: a second /exit keeps the original stamp and does not error.
+	first := n.EndedAt
+	up2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/nodes/"+id+"/exit", nil)
+	req2.SetPathValue("id", id)
+	a.handleExitNode(up2, req2)
+	if up2.Code != 200 || a.byID[id].EndedAt != first {
+		t.Fatalf("second exit: code = %d ended_at = %q want %q", up2.Code, a.byID[id].EndedAt, first)
+	}
+}
+
+// /exit must tell the truth about whether it actually stopped the process, so
+// the UI never claims a stop it did not deliver: an owned live tmux session is
+// killed (stopped), an adopted one is deliberately left running, and a failed
+// kill is reported as not stopped. All three still mark the node closed.
+func TestHandleExitNodeReportsProcessOutcome(t *testing.T) {
+	exit := func(a *app, id string) (closed, stopped bool, reason string) {
+		req := httptest.NewRequest("POST", "/api/nodes/"+id+"/exit", nil)
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleExitNode(up, req)
+		if up.Code != 200 {
+			t.Fatalf("exit: code = %d body %q", up.Code, up.Body.String())
+		}
+		var body struct {
+			Closed  bool   `json:"closed"`
+			Stopped bool   `json:"stopped"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal(up.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Closed, body.Stopped, body.Reason
+	}
+	t.Run("owned live session is killed", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{}}
+		a := newTestApp(t, f)
+		newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+		id := a.nodes[0].ID
+		f.alive[id] = true
+		closed, stopped, reason := exit(a, id)
+		if !closed || !stopped || reason != "" {
+			t.Fatalf("owned: closed=%v stopped=%v reason=%q, want closed stopped no-reason", closed, stopped, reason)
+		}
+		if !containsSub(f.subcommands(), "kill-session") {
+			t.Fatal("owned live session was not killed")
+		}
+	})
+	t.Run("adopted session is left running", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{}}
+		a := newTestApp(t, f)
+		newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+		id := a.nodes[0].ID
+		a.byID[id].Adopted = true
+		f.alive[id] = true
+		closed, stopped, reason := exit(a, id)
+		if !closed || stopped || reason != "adopted" {
+			t.Fatalf("adopted: closed=%v stopped=%v reason=%q, want closed not-stopped adopted", closed, stopped, reason)
+		}
+		if containsSub(f.subcommands(), "kill-session") {
+			t.Fatal("adopted session was killed; it must be left running")
+		}
+	})
+	t.Run("failed kill is reported not stopped", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{}, killErr: true}
+		a := newTestApp(t, f)
+		newNode(a, `{"title":"T","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+		id := a.nodes[0].ID
+		f.alive[id] = true
+		closed, stopped, reason := exit(a, id)
+		if !closed || stopped || reason != "kill_failed" {
+			t.Fatalf("kill fail: closed=%v stopped=%v reason=%q, want closed not-stopped kill_failed", closed, stopped, reason)
+		}
+	})
+}
+
+func TestHandleNewNodeInheritsParentLane(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	parent := newNode(a, `{"title":"Parent","agent":"claude","dir":"`+a.home+`","lane_id":"lane-a"}`)
+	if parent.Code != 200 {
+		t.Fatalf("parent: code = %d body %q", parent.Code, parent.Body.String())
+	}
+	child := newNode(a, `{"title":"Child","parent":"`+a.nodes[0].ID+`","description":"follow","agent":"claude","dir":"`+a.home+`"}`)
+	if child.Code != 200 {
+		t.Fatalf("child: code = %d body %q", child.Code, child.Body.String())
+	}
+	if got := a.nodes[1].LaneID; got != "lane-a" {
+		t.Fatalf("child lane = %q, want lane-a", got)
+	}
+}
+
+func TestHandleUpdateAndDeleteNode(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"T": true}}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"T","description":"first","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+
+	req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"description":"edited"}`))
+	req.SetPathValue("id", id)
+	up := httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("update: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].Description; got != "edited" {
+		t.Fatalf("description = %q, want edited", got)
+	}
+	req = httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(`{"title":"Renamed"}`))
+	req.SetPathValue("id", id)
+	up = httptest.NewRecorder()
+	a.handleUpdateNode(up, req)
+	if up.Code != 200 {
+		t.Fatalf("title update: code = %d body %q", up.Code, up.Body.String())
+	}
+	if got := a.nodes[0].Title; got != "Renamed" {
+		t.Fatalf("title = %q, want Renamed", got)
+	}
+
+	delReq := httptest.NewRequest("DELETE", "/api/nodes/"+id, nil)
+	delReq.SetPathValue("id", id)
+	del := httptest.NewRecorder()
+	a.handleDeleteNode(del, delReq)
+	if del.Code != 200 {
+		t.Fatalf("delete: code = %d body %q", del.Code, del.Body.String())
+	}
+	if len(a.nodes) != 0 {
+		t.Fatalf("nodes after delete = %d, want 0", len(a.nodes))
+	}
+	sawKill := false
+	for _, s := range f.subcommands() {
+		if s == "kill-session" {
+			sawKill = true
+		}
+	}
+	if !sawKill {
+		t.Fatal("delete did not close owned tmux session")
+	}
+}
+
+// Phase 6: deleting a node must archive its blob-stored session assets, not
+// leave them dangling under the live assets directory, and the download
+// endpoint must go 404 once the node record itself is gone.
+func TestHandleDeleteNodeArchivesAssets(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := a.ingestAttachmentAsset("n1", "big.bin", "application/octet-stream", "/tmp/uploads/big.bin", make([]byte, assetInlineCap+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Storage != "blob" {
+		t.Fatalf("storage = %q, want blob", ev.Storage)
+	}
+	nodeDir := asset.NodeDir(a.assetsDir, "n1")
+	if _, err := os.Stat(nodeDir); err != nil {
+		t.Fatalf("precondition: node asset dir missing: %v", err)
+	}
+
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 200 {
+		t.Fatalf("delete: code = %d body %q", del.Code, del.Body.String())
+	}
+
+	if _, err := os.Stat(nodeDir); !os.IsNotExist(err) {
+		t.Errorf("node asset dir still present after delete: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(a.assetsDir, "archive"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("archive entries = %d, err=%v, want 1", len(entries), err)
+	}
+
+	rec := serveAsset(a, "n1", ev.ID)
+	if rec.Code != 404 {
+		t.Errorf("download after delete: code = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleNewNodeCodexCreatesNode(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	a, requests := newCodexTestApp(t, "THREAD-HTTP", rollout)
+
+	rec := newNode(a, `{"prompt":"research this","title":"R","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("codex create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	// Node must be registered with transport:"codex".
+	if len(a.nodes) != 1 || a.nodes[0].Transport != "codex" {
+		t.Fatalf("node not registered or wrong transport: %+v", a.nodes)
+	}
+	// Manager must have run both initialize AND thread/start (finding 83):
+	// Launch is synchronous for both calls, so both are recorded before
+	// newNode returns 200.
+	rlist := requests()
+	var sawInit, sawThread bool
+	for _, m := range rlist {
+		if m == "initialize" {
+			sawInit = true
+		}
+		if m == "thread/start" {
+			sawThread = true
+		}
+	}
+	if !sawInit || !sawThread {
+		t.Fatalf("want both initialize and thread/start, got: %v", rlist)
+	}
+	// SessionID must be the thread id from thread/start.
+	if a.nodes[0].SessionID != "THREAD-HTTP" {
+		t.Errorf("session id = %q, want THREAD-HTTP", a.nodes[0].SessionID)
+	}
+}
+
+// Editing an OLD station on the map (PATCH with a station seam) writes a label
+// snapshot for that station only and never touches the node record — so it
+// cannot bleed into the head or any other station (spec E). A PATCH without a
+// station still edits the node (the head path, unchanged).
+func TestHandleUpdateNodeStationOverride(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := newNode(a, `{"title":"Head","description":"head desc","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	id := a.nodes[0].ID
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/nodes/"+id, strings.NewReader(body))
+		req.SetPathValue("id", id)
+		up := httptest.NewRecorder()
+		a.handleUpdateNode(up, req)
+		return up
+	}
+
+	// Edit an old station: writes a station snapshot, node untouched.
+	if up := patch(`{"station":"2026-07-01T09:00:00Z","title":"Old renamed","description":"old desc"}`); up.Code != 200 {
+		t.Fatalf("station edit: code = %d body %q", up.Code, up.Body.String())
+	}
+	if a.nodes[0].Title != "Head" || a.nodes[0].Description != "head desc" {
+		t.Fatalf("node label changed by a station edit: %q/%q", a.nodes[0].Title, a.nodes[0].Description)
+	}
+	seg := sessionlog.ReadSegment(filepath.Join(a.sessionsDir, id+".jsonl"))
+	if got := seg.Stations["2026-07-01T09:00:00Z"]; got.Title != "Old renamed" || got.Desc != "old desc" {
+		t.Fatalf("station snapshot = %+v, want Old renamed/old desc", got)
+	}
+
+	// A PATCH without a station still edits the node (head path).
+	if up := patch(`{"title":"Head2"}`); up.Code != 200 {
+		t.Fatalf("head edit: code = %d body %q", up.Code, up.Body.String())
+	}
+	if a.nodes[0].Title != "Head2" {
+		t.Fatalf("head title = %q, want Head2", a.nodes[0].Title)
 	}
 }

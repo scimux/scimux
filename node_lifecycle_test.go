@@ -1,7 +1,7 @@
 package main
 
 // Packet 2C characterization: pure node-lifecycle matrix covering the gaps
-// left by existing main_test.go / main_http_test.go / agents_test.go coverage.
+// left by the existing lifecycle, API, and agents_test.go coverage.
 // No production code is moved or changed here; Packet 2D extracts
 // node_lifecycle.go against this matrix.
 //
@@ -10,17 +10,20 @@ package main
 // - sessionArgFromCmdline (TestSessionArgFromCmdline)
 // - Claude model cache / probe (agents_test.go)
 // - handler-level create validation, wrapper use, launch failure surfacing
-//   (main_http_test.go)
+//   (node_api_test.go)
 // - session-log dead-slug blocking and post-archive reuse
 //   (TestArchiveSessionLogNamingAndSlugReuse in store_test.go — Packet 2A)
 // - protocol-specific ACP/Codex argv (internal/acp, internal/codex)
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
@@ -496,7 +499,7 @@ func TestResolveNodeValidationFailuresAre400(t *testing.T) {
 
 func TestShellQuoteMatrix(t *testing.T) {
 	// Extends TestShellQuote with empty string and additional metacharacters.
-	// Existing cases in main_test.go remain the primary coverage for the rest.
+	// Existing cases in this file remain the primary coverage for the rest.
 	cases := map[string]string{
 		"":                 "''",
 		"plain":            "'plain'",
@@ -666,4 +669,317 @@ func TestWrapLaunchExactShape(t *testing.T) {
 		t.Errorf("wrapper must sleep launchHoldSeconds (%d)", launchHoldSeconds)
 	}
 	// No real shell execution — this is pure string characterization.
+}
+
+func TestShellQuote(t *testing.T) {
+	cases := map[string]string{
+		"plain":            "'plain'",
+		"two words":        "'two words'",
+		"don't":            `'don'\''t'`,
+		"a'b'c":            `'a'\''b'\''c'`,
+		"line1\nline2":     "'line1\nline2'",
+		"ünïcode 🚗":        "'ünïcode 🚗'",
+		"$HOME `id` \"x\"": "'$HOME `id` \"x\"'", // no expansion inside single quotes
+	}
+	for in, want := range cases {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestAgentCommand(t *testing.T) {
+	claude := &Node{Agent: "claude", SessionID: "uuid-1", Title: "My Session", Model: "opus", Prompt: "hello world"}
+	got, err := agentCommand(claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `claude --session-id uuid-1 --remote-control 'My Session' --model 'opus' 'hello world'` {
+		t.Errorf("claude cmd = %s", got)
+	}
+
+	claudeBare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
+	if got, _ := agentCommand(claudeBare); got != `claude --session-id uuid-2 --remote-control 'p'` {
+		t.Errorf("bare claude cmd = %s", got)
+	}
+
+	// codex no longer launches over tmux — it is supervised through the codex
+	// app-server bridge — so it has no tmux launch command line.
+	codex := &Node{Agent: "codex", Model: "gpt-5.5", Effort: "high", Prompt: "sweep thresholds"}
+	if _, err := agentCommand(codex); err == nil {
+		t.Error("agentCommand should reject codex (no tmux launch path)")
+	}
+
+	// A prompt containing quotes and shell metacharacters must stay inert.
+	tricky := &Node{Agent: "claude", SessionID: "u", Prompt: `don't run $(rm -rf /); echo "done"`}
+	got, _ = agentCommand(tricky)
+	if !strings.Contains(got, `'don'\''t run $(rm -rf /); echo "done"'`) {
+		t.Errorf("tricky prompt not quoted inertly: %s", got)
+	}
+
+	if _, err := agentCommand(&Node{Agent: "gemini", Prompt: "p"}); err == nil {
+		t.Error("unknown agent must error")
+	}
+}
+
+// The claude CLI accepts --effort <level> (low/medium/high/xhigh/max); scimux
+// passes it when set, and omits it entirely otherwise (so a node with no effort
+// launches exactly as before).
+func TestAgentCommandClaudeEffort(t *testing.T) {
+	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"}
+	got, _ := agentCommand(n)
+	if got != `claude --session-id u --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium' 'hi'` {
+		t.Errorf("claude+effort cmd = %s", got)
+	}
+	// No effort -> no --effort flag.
+	n2 := &Node{Agent: "claude", SessionID: "u", Prompt: "hi"}
+	if got, _ := agentCommand(n2); strings.Contains(got, "--effort") {
+		t.Errorf("effort-less claude cmd must omit --effort, got %s", got)
+	}
+}
+
+// A tmux launch is wrapped so that a process which exits before its interface
+// is ready (a rejected --model, a bad flag) leaves its error on the pane long
+// enough for awaitLaunch to read it, instead of the session vanishing into an
+// unexplained dead node. The wrapper must run the original command verbatim
+// first (so the first prompt still rides the command line) and must not touch
+// the clean-exit path.
+func TestWrapLaunchDiagnostics(t *testing.T) {
+	cmd := `claude --session-id u --remote-control 'T' --model 'opus' 'hi'`
+	w := wrapLaunch(cmd)
+	if !strings.HasPrefix(w, cmd+";") {
+		t.Errorf("wrapper must run the original command first, got %q", w)
+	}
+	if !strings.Contains(w, launchFailSentinel) {
+		t.Errorf("wrapper must emit the launch-failed sentinel, got %q", w)
+	}
+	// The sentinel is only printed on a non-zero exit — a clean exit must fall
+	// through untouched (pane closes, session dies, exactly as before).
+	if !strings.Contains(w, `!= 0`) {
+		t.Errorf("wrapper must guard the sentinel behind a non-zero exit, got %q", w)
+	}
+}
+
+// A fork of an old or adopted pi/opencode node whose stored Transport predates
+// the field (empty → tmux) must stay on tmux, not silently flip to the ACP
+// default derived from the agent name (finding 54).
+func TestForkInheritsMigratedTransport(t *testing.T) {
+	a := &app{byID: map[string]*Node{}, home: t.TempDir()}
+	parent := &Node{ID: "root", Agent: "pi", Dir: a.home, Transport: ""}
+	a.byID["root"] = parent
+
+	child := &Node{Title: "T", Parent: "root", Prompt: "keep supervising over tmux"}
+	if status, err := a.resolveNode(child); err != nil {
+		t.Fatalf("resolveNode: %d %v", status, err)
+	}
+	if got := child.transport(); got != "tmux" {
+		t.Errorf("fork of empty-Transport pi parent = %q, want tmux", got)
+	}
+
+	// A parent explicitly on ACP is inherited as ACP.
+	a.byID["acproot"] = &Node{ID: "acproot", Agent: "pi", Dir: a.home, Transport: "acp"}
+	acpChild := &Node{Title: "T", Parent: "acproot", Prompt: "p"}
+	if status, err := a.resolveNode(acpChild); err != nil {
+		t.Fatalf("resolveNode acp: %d %v", status, err)
+	}
+	if got := acpChild.transport(); got != "acp" {
+		t.Errorf("fork of acp parent = %q, want acp", got)
+	}
+}
+
+func TestUniqueID(t *testing.T) {
+	a := &app{byID: map[string]*Node{}}
+	cases := map[string]string{
+		"Sweep thresholds for RQ2": "Sweep-thresholds-for-RQ2",
+		"häßliche Umlaute":         "h-liche-Umlaute",
+		"":                         "chat",
+		"!!!":                      "chat",
+		"--leading-dashes":         "leading-dashes",
+		// A dot is tmux's window.pane target separator: a session named with one
+		// is created but then unaddressable (capture/send/liveness all fail), so
+		// the slug must never contain it. The title itself keeps the dot.
+		"Review notes-design.md - 2": "Review-notes-design-md-2",
+		"v2.0 baseline":              "v2-0-baseline",
+	}
+	for title, want := range cases {
+		got := a.uniqueID(title, nil)
+		if got != want {
+			t.Errorf("uniqueID(%q) = %q, want %q", title, got, want)
+		}
+		if !tmuxsession.ValidName(got) {
+			t.Errorf("uniqueID(%q) = %q is not a valid tmux session name", title, got)
+		}
+	}
+	// Long titles are truncated.
+	long := a.uniqueID(strings.Repeat("x", 100), nil)
+	if len(long) > 40 {
+		t.Errorf("long id not truncated: %d chars", len(long))
+	}
+	// Collisions get numeric suffixes.
+	a.byID["demo"] = &Node{}
+	if got := a.uniqueID("demo", nil); got != "demo-2" {
+		t.Errorf("collision id = %q, want demo-2", got)
+	}
+	a.byID["demo-2"] = &Node{}
+	if got := a.uniqueID("demo", nil); got != "demo-3" {
+		t.Errorf("second collision id = %q, want demo-3", got)
+	}
+	// Unadopted tmux sessions reserve their names too (finding 11).
+	if got := a.uniqueID("adopted", map[string]bool{"adopted": true}); got != "adopted-2" {
+		t.Errorf("session-name collision id = %q, want adopted-2", got)
+	}
+}
+
+func TestFirstWords(t *testing.T) {
+	if got := firstWords("one two three four", 2); got != "one two" {
+		t.Errorf("got %q", got)
+	}
+	if got := firstWords("short", 6); got != "short" {
+		t.Errorf("got %q", got)
+	}
+	if got := firstWords("  spaced\n\tout  words ", 3); got != "spaced out words" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestNewUUID(t *testing.T) {
+	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		id, err := newUUID()
+		if err != nil {
+			t.Fatalf("newUUID: %v", err)
+		}
+		if !re.MatchString(id) {
+			t.Fatalf("not a v4 uuid: %s", id)
+		}
+		if seen[id] {
+			t.Fatalf("duplicate uuid: %s", id)
+		}
+		seen[id] = true
+	}
+}
+
+// A failing RNG must surface as an error, not a zero/partial session id.
+func TestNewUUIDRNGFailure(t *testing.T) {
+	orig := randSource
+	randSource = iotest.ErrReader(errors.New("rng down"))
+	defer func() { randSource = orig }()
+	if _, err := newUUID(); err == nil {
+		t.Fatal("expected error when the RNG fails")
+	}
+}
+
+func TestSessionArgFromCmdline(t *testing.T) {
+	id := "12345678-1234-4234-8234-123456789abc"
+	cases := [][]string{
+		{"claude", "--resume", id},
+		{"claude", "-r", id},
+		{"claude", "--session-id", id, "hello"},
+		{"sh", "-c", "claude --resume " + id},
+		{"/bin/sh", "-c", "claude --model opus --session-id " + id + " 'prompt'"},
+	}
+	for _, args := range cases {
+		if got := sessionArgFromCmdline(args); got != id {
+			t.Errorf("sessionArgFromCmdline(%v) = %q, want %q", args, got, id)
+		}
+	}
+	for _, args := range [][]string{
+		{"claude", "--resume"},               // missing value
+		{"claude", "--resume", "not-a-uuid"}, // bad value
+		{"bash", "--norc"},                   // unrelated
+		{"vim", "notes--resume plan.md"},     // substring red herring
+		nil,
+	} {
+		if got := sessionArgFromCmdline(args); got != "" {
+			t.Errorf("sessionArgFromCmdline(%v) = %q, want empty", args, got)
+		}
+	}
+}
+
+// resolveNode is the single validation/resolution step shared by
+// handleNewNode's snapshot decision and createNode, so the two can never
+// diverge; a request that fails any validation — including an unknown
+// parent combined with an explicit codex agent — resolves to an error
+// before any codex-history walk (findings 22, 25).
+func TestResolveNode(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{
+		"cx": {ID: "cx", Agent: "codex", Model: "gpt-5.5", Effort: "high", Dir: dir},
+		"cl": {ID: "cl", Agent: "claude", Dir: dir},
+	}}
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644) // a file, not a dir
+
+	ok := []struct {
+		n        Node
+		agent, d string
+	}{
+		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex", dir},
+		{Node{Title: "T", Prompt: "p", Parent: "cx"}, "codex", dir},                   // full inheritance
+		{Node{Title: "T", Prompt: "p", Agent: "claude", Parent: "cx"}, "claude", dir}, // explicit beats inherited
+		{Node{Title: "T"}, "claude", dir},                                             // defaults: claude, home, prompt from title
+	}
+	for _, c := range ok {
+		if status, err := a.resolveNode(&c.n); err != nil {
+			t.Errorf("resolveNode(%+v) failed: %d %v", c.n, status, err)
+			continue
+		}
+		if c.n.Agent != c.agent || c.n.Dir != c.d {
+			t.Errorf("resolved agent/dir = %q/%q, want %q/%q", c.n.Agent, c.n.Dir, c.agent, c.d)
+		}
+		if c.n.Description == "" || c.n.Prompt == "" {
+			t.Errorf("resolved prompt/description must be populated, got %q/%q", c.n.Prompt, c.n.Description)
+		}
+	}
+	// Inherited launch config, never the conversation (fresh-context fork).
+	forked := Node{Title: "T", Prompt: "p", Parent: "cx"}
+	a.resolveNode(&forked)
+	if forked.Model != "gpt-5.5" || forked.Effort != "high" {
+		t.Errorf("fork must inherit model/effort, got %q/%q", forked.Model, forked.Effort)
+	}
+
+	bad := []Node{
+		{Prompt: "p"}, // empty title
+		{Title: "T", Prompt: "p", Parent: "missing"},                           // unknown parent
+		{Title: "T", Prompt: "p", Parent: "missing", Agent: "codex", Dir: dir}, // finding 25: must fail before any walk
+		{Title: "T", Prompt: "p", Agent: "gemini"},                             // unknown agent
+		{Title: "T", Prompt: "p", Dir: filepath.Join(dir, "nope")},             // missing dir
+		{Title: "T", Prompt: "p", Dir: filepath.Join(dir, "f")},                // dir is a file
+	}
+	for _, n := range bad {
+		if status, err := a.resolveNode(&n); err == nil || status != 400 {
+			t.Errorf("resolveNode(%+v) = %d, %v; want 400 and error", n, status, err)
+		}
+	}
+}
+
+func TestResolveNodeTransport(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{
+		// A pi node adopted onto tmux (Transport pinned to "tmux"): its forks
+		// must stay tmux, not flip to the agent-derived default.
+		"pi-tmux": {ID: "pi-tmux", Agent: "pi", Transport: "tmux", Dir: dir},
+	}}
+	cases := []struct {
+		n    Node
+		want string
+	}{
+		{Node{Title: "T", Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
+		{Node{Title: "T", Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
+		{Node{Title: "T", Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
+		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
+		{Node{Title: "T", Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport
+	}
+	for _, c := range cases {
+		if status, err := a.resolveNode(&c.n); err != nil {
+			t.Fatalf("resolveNode(%+v) failed: %d %v", c.n, status, err)
+		}
+		if c.n.Transport != c.want {
+			t.Errorf("agent %q parent %q: transport = %q, want %q", c.n.Agent, c.n.Parent, c.n.Transport, c.want)
+		}
+	}
+	// Migration: a stored record with no Transport field is treated as tmux.
+	if got := (&Node{Agent: "pi"}).transport(); got != "tmux" {
+		t.Errorf("absent transport = %q, want tmux (back-compat migration)", got)
+	}
 }

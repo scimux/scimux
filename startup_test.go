@@ -1,8 +1,10 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +147,39 @@ func TestPrepareDataDirAssetsCreationFailure(t *testing.T) {
 	err := prepareDataDir(data)
 	if err == nil {
 		t.Fatal("prepareDataDir returned nil error when assets is a file")
+	}
+}
+
+func TestConfigureUsageIncludesSummary(t *testing.T) {
+	fs := flag.NewFlagSet("scimux", flag.ContinueOnError)
+	var b strings.Builder
+	fs.SetOutput(&b)
+	fs.String("addr", "127.0.0.1:8787", "listen address")
+	configureUsage(fs, "./scimux")
+
+	fs.Usage()
+
+	got := b.String()
+	if !strings.HasPrefix(got, appSummary+"\n\nUsage: ./scimux [options]\n\n") {
+		t.Fatalf("usage header = %q", got)
+	}
+	if !strings.Contains(got, "-addr") {
+		t.Fatalf("usage flags missing from %q", got)
+	}
+}
+
+func TestStartStatusPlainOutput(t *testing.T) {
+	var b strings.Builder
+	status := startStatus(&b, "scimux: preparing chats", false)
+	status.Done()
+	status.Done()
+
+	got := b.String()
+	if !strings.Contains(got, "scimux: preparing chats ...\n") ||
+		!strings.Contains(got, "scimux: preparing chats done (") {
+		t.Fatalf("status output = %q", got)
+	}
+	if strings.Count(got, "done") != 1 {
+		t.Fatalf("Done should be idempotent, got %q", got)
 	}
 }

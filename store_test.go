@@ -3,7 +3,7 @@ package main
 // Packet 2A characterization tests for the append-only node store.
 // These lock current loadStore / appendRecord / session-log archive behavior
 // before the mechanical extraction in Packet 2B. They must not change
-// production code or weaken the existing store tests in main_test.go /
+// production code or weaken the existing store tests consolidated below or in
 // app_test.go.
 
 import (
@@ -607,5 +607,131 @@ func TestArchiveSessionLogNamingAndSlugReuse(t *testing.T) {
 	// Archived file under archive/ must not count as a live leftover.
 	if a.sessionLogExists(slug) {
 		t.Fatal("sessionLogExists true after archive")
+	}
+}
+
+// Replay semantics: corrections are new records — a later node record for an
+// existing ID replaces the value (no duplicates, first-seen order kept), and
+// transcript records apply regardless of ordering (finding 10).
+func TestLoadStoreReplayCorrections(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "nodes.jsonl")
+	lines := []string{
+		`{"type":"transcript","id":"a","path":"/t/early.jsonl"}`, // before its node
+		`{"type":"node","node":{"id":"a","title":"first title","prompt":"p","agent":"claude","dir":"/tmp","created_at":"2026-07-01T08:00:00Z"}}`,
+		`{"type":"node","node":{"id":"b","title":"other","prompt":"q","agent":"codex","dir":"/tmp","created_at":"2026-07-02T08:00:00Z"}}`,
+		`{"type":"node","node":{"id":"a","title":"corrected title","prompt":"p","agent":"claude","dir":"/tmp","created_at":"2026-07-01T08:00:00Z"}}`,
+		`{"type":"transcript","id":"a","path":"/t/late.jsonl"}`,
+	}
+	if err := os.WriteFile(store, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{byID: map[string]*Node{}, storePath: store}
+	if err := a.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.nodes) != 2 {
+		t.Fatalf("want 2 nodes after replay with correction, got %d", len(a.nodes))
+	}
+	if a.nodes[0].ID != "a" || a.nodes[1].ID != "b" {
+		t.Errorf("first-seen order not preserved: %s, %s", a.nodes[0].ID, a.nodes[1].ID)
+	}
+	na := a.byID["a"]
+	if na.Title != "corrected title" {
+		t.Errorf("correction not applied: title = %q", na.Title)
+	}
+	if na.Transcript != "/t/late.jsonl" {
+		t.Errorf("latest transcript record must win regardless of order, got %q", na.Transcript)
+	}
+	if a.nodes[0] != na {
+		t.Error("byID and nodes slice diverged after correction")
+	}
+}
+
+func TestStoreRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	w := &app{byID: map[string]*Node{}, storePath: path}
+	n := &Node{ID: "rq2-sweep", Parent: "rq2-root", Title: "Sweep", Prompt: "sweep it",
+		Rationale: "run 14 failed on low speed", Agent: "codex", Model: "gpt-5.5",
+		Effort: "high", Dir: "/tmp", CreatedAt: "2026-07-11T00:00:00Z"}
+	if err := w.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.appendRecord(storeRecord{Type: "transcript", ID: "rq2-sweep", Path: "/x/rollout.jsonl"}); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt trailing line must be ignored on load.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("{{{ not json\n")
+	f.Close()
+
+	r := &app{byID: map[string]*Node{}, storePath: path}
+	if err := r.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.nodes) != 1 {
+		t.Fatalf("want 1 node, got %d", len(r.nodes))
+	}
+	got := r.byID["rq2-sweep"]
+	if got == nil || got.Rationale != n.Rationale || got.Parent != "rq2-root" || got.Effort != "high" {
+		t.Fatalf("node not round-tripped: %#v", got)
+	}
+	if got.Transcript != "/x/rollout.jsonl" {
+		t.Fatalf("transcript record not applied: %q", got.Transcript)
+	}
+}
+
+// The store holds prompts, working dirs, and pane-excerpt evidence; it must be
+// created owner-only rather than relying on the parent directory's mode
+// (finding 63).
+func TestAppendRecordFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	a := &app{byID: map[string]*Node{}, storePath: path}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: &Node{ID: "n", CreatedAt: "2026-07-14T00:00:00Z"}}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("nodes.jsonl mode = %o, want 600", perm)
+	}
+}
+
+// TestLoadStoreMissingFile: a fresh install has no store yet.
+func TestLoadStoreMissingFile(t *testing.T) {
+	a := &app{byID: map[string]*Node{}, storePath: filepath.Join(t.TempDir(), "absent.jsonl")}
+	if err := a.loadStore(); err != nil {
+		t.Fatalf("missing store must not error: %v", err)
+	}
+	if len(a.nodes) != 0 {
+		t.Fatalf("want 0 nodes, got %d", len(a.nodes))
+	}
+}
+
+func TestArchiveSessionLog(t *testing.T) {
+	sessions := t.TempDir()
+	a := &app{sessionsDir: sessions}
+	a.archiveSessionLog("gone") // missing log: no-op, no archive dir
+	if _, err := os.Stat(filepath.Join(sessions, "archive")); !os.IsNotExist(err) {
+		t.Fatal("archive dir created for a node without a log")
+	}
+	if err := os.WriteFile(filepath.Join(sessions, "n1.jsonl"), []byte("history\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.archiveSessionLog("n1")
+	if _, err := os.Stat(filepath.Join(sessions, "n1.jsonl")); !os.IsNotExist(err) {
+		t.Fatal("live log still present after archive")
+	}
+	matches, _ := filepath.Glob(filepath.Join(sessions, "archive", "n1.*.jsonl"))
+	if len(matches) != 1 {
+		t.Fatalf("want one archived log, got %v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != "history\n" {
+		t.Fatalf("archived content = %q", b)
 	}
 }

@@ -60,19 +60,6 @@ func fixStore(t *testing.T, a *app) {
 	}
 }
 
-func writeClaudeTranscript(t *testing.T, home, sessionID string) string {
-	t.Helper()
-	proj := filepath.Join(home, ".claude", "projects", "-w-proj")
-	if err := os.MkdirAll(proj, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(proj, sessionID+".jsonl")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 func killCount(f *fakeTmux) int {
 	n := 0
 	for _, s := range f.subcommands() {
@@ -766,4 +753,144 @@ func names(entries []os.DirEntry) []string {
 		out[i] = e.Name()
 	}
 	return out
+}
+
+// The delete record must be durable before the agent is torn down: if the
+// store append fails, nothing is killed and the node stays.
+func TestDeletePersistsBeforeKill(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+	// A directory cannot be opened for append, so appendRecord fails.
+	if err := os.Mkdir(a.storePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 500 {
+		t.Fatalf("code=%d, want 500", del.Code)
+	}
+	if _, ok := a.byID["n1"]; !ok {
+		t.Error("node removed despite a failed delete persist")
+	}
+	for _, s := range f.subcommands() {
+		if s == "kill-session" {
+			t.Error("agent killed before the delete was durable")
+		}
+	}
+}
+
+// If the agent survives the delete (kill fails), the node is re-asserted so the
+// durable store replays it as live again — never a killed-but-forgotten node.
+func TestDeleteReassertsNodeOnKillFailure(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}, killErr: true}
+	a := newTestApp(t, f)
+	a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
+	a.byID["n1"] = a.nodes[0]
+	del := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/nodes/n1", nil)
+	r.SetPathValue("id", "n1")
+	a.handleDeleteNode(del, r)
+	if del.Code != 500 {
+		t.Fatalf("code=%d, want 500", del.Code)
+	}
+	if _, ok := a.byID["n1"]; !ok {
+		t.Error("node vanished after a failed kill")
+	}
+	// Replay the store into a fresh app: the delete-then-node ordering must
+	// converge on a live node.
+	b := &app{byID: map[string]*Node{}, storePath: a.storePath}
+	if err := b.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.byID["n1"]; !ok {
+		t.Error("replay dropped the node whose kill failed")
+	}
+}
+
+// If another path publishes the same id while createNode's launch runs with
+// a.mu released, the publish-time re-check must abandon the launch — kill the
+// subprocess, negate the persisted record, archive the log — instead of
+// silently double-publishing the id (R20.2). The interleaving is injected at
+// the spawn seam, which runs exactly inside the unlocked window.
+func TestCreateNodePublishCollisionRollsBack(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	srv := &fakeCodexServer{}
+	base := fakeCodexSpawnBase(srv, "THREAD-COLL", filepath.Join(t.TempDir(), "rollout.jsonl"), nil, nil)
+	var imposter *Node
+	spawn := func(nodeID, dir string) (codex.Transport, error) {
+		a.mu.Lock()
+		imposter = &Node{ID: nodeID, Title: "imposter", Agent: "claude", Adopted: true,
+			CreatedAt: "2026-07-20T00:00:00Z"}
+		a.nodes = append(a.nodes, imposter)
+		a.byID[nodeID] = imposter
+		a.mu.Unlock()
+		return base(nodeID, dir)
+	}
+	a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+
+	rec := newNode(a, `{"title":"T","prompt":"p","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 409 {
+		t.Fatalf("collided create: code = %d body %q, want 409", rec.Code, rec.Body.String())
+	}
+	a.mu.Lock()
+	got := a.byID["T"]
+	count := len(a.nodes)
+	a.mu.Unlock()
+	if got != imposter || count != 1 {
+		t.Fatalf("registry after collision: byID[T]=%p imposter=%p nodes=%d", got, imposter, count)
+	}
+	if a.codex.HasSession("T") {
+		t.Error("abandoned launch left a live codex session")
+	}
+	// The winner owns sessions/T.jsonl; the rollback leaves it intact rather
+	// than archiving it out from under the live node (R21.4).
+	if _, err := os.Stat(filepath.Join(a.sessionsDir, "T.jsonl")); err != nil {
+		t.Errorf("winner's session log was archived by the rollback: stat err = %v", err)
+	}
+	// The store negates the abandoned record and re-asserts the winner's, so a
+	// replay converges on the winner with no manual re-adopt (R21.4). The
+	// winner was published straight to memory in this test, so its only store
+	// record is the one the rollback re-appended.
+	fresh := &app{byID: map[string]*Node{}, storePath: a.storePath,
+		live: map[string]string{}, attn: map[string]string{}}
+	if err := fresh.loadStore(); err != nil {
+		t.Fatal(err)
+	}
+	if got := fresh.byID["T"]; got == nil {
+		t.Error("winner record not converged on store replay")
+	} else if got.Title != "imposter" {
+		t.Errorf("replay converged on the wrong node: title = %q, want imposter", got.Title)
+	}
+}
+
+// A store-append failure after a successful structured launch rolls back the
+// subprocess; the launcher's just-written meta header must be archived with
+// it, or the slug reads as taken-by-dead-history forever (R20.3).
+func TestLaunchNodeRollbackArchivesSessionLog(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	spawn, _ := newFakeCodexSpawn(t, "THREAD-RB", filepath.Join(t.TempDir(), "rollout.jsonl"))
+	a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+	// A directory at the store path makes every node-record append fail.
+	if err := os.Mkdir(a.storePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := newNode(a, `{"title":"T","prompt":"p","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 500 {
+		t.Fatalf("create with broken store: code = %d, want 500", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(a.sessionsDir, "T.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("rolled-back launch left a session log burning the slug: stat err = %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(a.sessionsDir, "archive", "T.*.jsonl"))
+	if len(matches) != 1 {
+		t.Errorf("want the meta-only log archived, got %v", matches)
+	}
 }
