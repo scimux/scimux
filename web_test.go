@@ -47,7 +47,8 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	}
 
 	inline := moduleBlocks[0][1]
-	// Import map: every production module must be imported from /js/<file>.js.
+	// Direct composition imports. Support modules may instead be reached through
+	// this graph (state.js is consumed by api.js and polling.js).
 	wantImports := []string{
 		`from "/js/api.js"`,
 		`from "/js/bookmarks.js"`,
@@ -60,9 +61,9 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "/js/map.js"`,
 		`from "/js/navigation.js"`,
 		`from "/js/notes.js"`,
+		`from "/js/polling.js"`,
 		`from "/js/search.js"`,
 		`from "/js/sheets.js"`,
-		`from "/js/state.js"`,
 	}
 	for _, imp := range wantImports {
 		if !strings.Contains(inline, imp) {
@@ -82,10 +83,6 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		}
 		if !bytes.Equal(embedded, source) {
 			t.Fatalf("embedded bytes for %s differ from source", embedPath)
-		}
-		base := filepath.Base(embedPath)
-		if !strings.Contains(inline, `"/js/`+base+`"`) {
-			t.Errorf("inline module does not import /js/%s", base)
 		}
 		// Syntax-check each production module.
 		if out, err := exec.Command(node, "--check", embedPath).CombinedOutput(); err != nil {
@@ -189,6 +186,42 @@ assert.equal(mdInline("2 * 3 * 4"), "2 * 3 * 4");
 // against is now closed at the source — prepareLaunchConfig rebuilds the
 // selectors and re-seeds them from the parent on every sheet open, so what is
 // visible is never a leftover from a previous open.
+// Packet 7I: state tick + UI-sync coordination live in polling.js.
+func TestPollingModuleWired(t *testing.T) {
+	b, err := os.ReadFile("web/js/polling.js")
+	if err != nil {
+		t.Fatalf("read polling.js: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "export function createPollingFeature") {
+		t.Error("createPollingFeature must live in polling.js")
+	}
+	if !strings.Contains(src, "Packet 7I ownership inventory") {
+		t.Error("polling.js must document Packet 7I ownership inventory")
+	}
+	html := mustReadIndex(t)
+	if !strings.Contains(html, `from "/js/polling.js"`) || !strings.Contains(html, "createPollingFeature") {
+		t.Error("production must import and instantiate createPollingFeature from polling.js")
+	}
+	if !strings.Contains(html, "pollingFeature.bind()") {
+		t.Error("production must bind pollingFeature as the visibility/pagehide/poll-timer owner")
+	}
+	// Old inline owners must not remain in the sole module entry.
+	for _, frag := range []string{
+		"async function tick(){",
+		"function startPolling(){",
+		"async function loadUI(){",
+		"async function flushUI(){",
+		"async function pollUI(){",
+		`addEventListener("pagehide"`,
+		`document.addEventListener("visibilitychange"`,
+	} {
+		if strings.Contains(html, frag) {
+			t.Errorf("inline module still contains old polling/UI-sync owner %q", frag)
+		}
+	}
+}
+
 // Packet 7H: launch/fork decisions live in sheets.js; Node sheets.test.js is
 // authoritative for payload builders.
 func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
@@ -526,19 +559,37 @@ assert.ok(contrastRatio(relLum(hexRGB("#5856D6")), relLum(hexRGB(contrastText("#
 func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
-	// Host connectivity remains shell-owned; card age flip lives in cards.js
-	// (Packet 7A) with executable Node coverage in web/test/cards.test.js.
+	// Host connectivity DOM chrome stays in the shell; tick orchestration and
+	// online/offline/unreachable branches live in polling.js (Packet 7I) with
+	// executable Node coverage in web/test/polling.test.js. Card age flip
+	// lives in cards.js (Packet 7A) with web/test/cards.test.js.
 	for _, want := range []string{
 		`<span class="host offline" id="host">scimux</span>`,
-		`function setHostOnline(ok){`,
-		`setHostOnline(false); $("#sys").textContent = "server unreachable"; return;`,
-		`setHostOnline(true);`,
+		`createPollingFeature`,
+		`import { createPollingFeature } from "/js/polling.js";`,
+		`setHostOnline: ok =>`,
+		`setServerUnreachable: () => { $("#sys").textContent = "server unreachable"; }`,
 		`createCardsFeature`,
 		`import { createCardsFeature } from "/js/cards.js";`,
 		`function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
+		}
+	}
+	poll, err := os.ReadFile("web/js/polling.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := string(poll)
+	for _, want := range []string{
+		`setHostOnline(false)`,
+		`setServerUnreachable()`,
+		`setHostOnline(true)`,
+		`server unreachable`,
+	} {
+		if !strings.Contains(ps, want) {
+			t.Errorf("polling.js host connectivity missing %q", want)
 		}
 	}
 	cards, err := os.ReadFile("web/js/cards.js")
@@ -1030,8 +1081,8 @@ func TestSearchEarlierHistoryJump(t *testing.T) {
 // TestPinnedStoreModel asserts the pinned-cards store model: an ordered
 // UI.pinned array carried through init + normUI, and op-merge cases for
 // pin (new pin to the front → renders at top), unpin, and drag reorder.
-// applyOp lives in web/js/state.js (Packet 6C/6F); cards.js consumes the
-// resulting pinned list through its injected feature state.
+// applyOp lives in web/js/state.js (Packet 6C/6F); the live document is owned
+// by polling.js (Packet 7I); cards.js consumes pinned via injected getters.
 func TestPinnedStoreModel(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -1039,14 +1090,21 @@ func TestPinnedStoreModel(t *testing.T) {
 	}
 	html := string(b)
 	for _, want := range []string{
-		`let UI = { groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] };`,
-		`pinned: []`, // in normUI defaults too
-		`from "/js/state.js"`,
+		`from "/js/polling.js"`,
 		`from "/js/cards.js"`,
+		`pinned: () => getUI().pinned`,
+		`createPollingFeature`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("pinned store model missing %q", want)
 		}
+	}
+	poll, err := os.ReadFile("web/js/polling.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(poll), `emptyUI,`) || !strings.Contains(string(poll), `let UI = emptyUI();`) {
+		t.Error("polling.js must initialize the UI document through state.js emptyUI")
 	}
 	state, err := os.ReadFile("web/js/state.js")
 	if err != nil {

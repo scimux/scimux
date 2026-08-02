@@ -388,10 +388,6 @@ import {
   laneModel as laneModelMod, stopsOf, stopLabel,
 } from "/js/lanes.js";
 import {
-  queueLocalOp, savePendingOps as savePendingOpsMod,
-  loadPendingOps as loadPendingOpsMod, saveCachedUI,
-} from "/js/state.js";
-import {
   hardAttention, orderedNodes as orderedNodesMod,
   isArchived as isArchivedMod,
 } from "/js/map-model.js";
@@ -400,8 +396,7 @@ import {
   captureNotesTouchStart, notesSwipeBackDecision,
 } from "/js/navigation.js";
 import {
-  withCsrf as withCsrfMod, api as apiMod, pagehidePutRequest,
-  loadUIState, flushUIState, pollUIState,
+  withCsrf as withCsrfMod, api as apiMod,
 } from "/js/api.js";
 import { createCardsFeature } from "/js/cards.js";
 import { createMapFeature } from "/js/map.js";
@@ -417,6 +412,7 @@ import {
 import { createNotesFeature } from "/js/notes.js";
 import { createSearchFeature } from "/js/search.js";
 import { createSheetsFeature } from "/js/sheets.js";
+import { createPollingFeature } from "/js/polling.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -447,9 +443,11 @@ let editingTitleScope = "";   /* "cards" | "chat" — the editor renders only wh
 /* chatDetailsOpen / editingChatDesc / chatDetailSavedUntil / chatCtxPct /
    sentEcho / suppressAttentionUntil / chatSig / lastTurns / bubbleTurns
    live inside createChatFeature (Packet 7C). */
-let stateEtag = "";
 let cardsSig = "";
 let sysPrev = null;
+/* pollingFeature owns stateEtag + UI document sync (Packet 7I). Declared early
+   so feature factories can inject lazy uiMutate/tick/getUI wrappers. */
+let pollingFeature;
 
 const isDesktop = () => matchMedia("(min-width: 900px)").matches;
 const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
@@ -461,118 +459,12 @@ const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointe
 const CSRF = document.querySelector('meta[name="scimux-csrf"]')?.content || "";
 const withCsrf = (opts = {}) => withCsrfMod(opts, CSRF);
 const api = (path, opts) => apiMod(path, opts, { fetchImpl: fetch, csrf: CSRF });
-const uiStorage = localStorage;
 
-/* ---------- server-persisted UI state ----------
-   Map group tabs, the archived-card set, and private notes survive scimux
-   restarts and are shared across devices: they live in ~/.scimux/ui.json via
-   GET/PUT /api/ui. localStorage only mirrors them for offline reads;
-   per-device state (drafts, selection) stays purely local.
-
-   Sync protocol: every GET carries an ETag revision; every PUT names the
-   revision it was based on (If-Match) and gets a 409 when another device
-   wrote in between. Local changes are recorded as small operations so a
-   conflict can be resolved by refetching and replaying them on the fresh
-   document — two devices adding notes concurrently keep both notes. The
-   server state is polled on the normal tick, so an open second device sees
-   an archive or note within one interval. Nothing is reported as synced
-   until the server acknowledged it (#syncwarn shows pending/failed saves). */
-let UI = { groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] };
-let uiRev = "";          // last server revision seen (ETag)
-let uiOps = [];          // local operations not yet acknowledged by the server
-/* Pending ops survive the page: the pagehide keepalive PUT is fire-and-forget
-   and can be dropped, and the next load would then fetch the server document
-   and silently overwrite the local edits. Persisted ops replay in loadUI()
-   exactly like ops made before load finished. But a stored op may be stale by
-   the time it replays — the keepalive PUT may have landed, or another device
-   may have edited since — so every op is stamped with the document revision
-   it was built against (op.rev, set in uiMutate) and non-idempotent ops
-   replay only while that revision still matches the fetched document (R20.7):
-   the groups/lanes ops are wholesale list snapshots that would roll back
-   newer cross-device edits, and arch/unarch encode intent against a state
-   that may have moved on. Note ops always replay — they dedupe on timestamp,
-   so a keepalive that did land costs nothing, and a note typed just before
-   pagehide must not be dropped merely because another device wrote since. */
-function savePendingOps(){ savePendingOpsMod(uiOps, uiStorage); }
-function loadPendingOps(){ return loadPendingOpsMod(uiStorage); }
-let uiLoaded = false;    // initial load finished — writes are gated on this
-let uiSaving = false;
-let uiTimer = null;
-
-/* uiMutate: apply an operation locally right away, queue it for the server */
-function uiMutate(op){
-  queueLocalOp(UI, op, uiRev, uiOps);
-  savePendingOps();
-  saveCachedUI(UI, uiStorage);
-  renderSyncState();
-  renderBookmarksPane();   /* signature-guarded; bookmarksFeature.render */
-  renderWsInbox();     /* signature-guarded; the workspace inbox mirrors captures */
-  clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
-  uiTimer = setTimeout(flushUI, 300);
-}
-function renderSyncState(){
-  $("#syncwarn").textContent = uiOps.length ? "syncing…" : "";
-}
-async function flushUI(){
-  if (uiSaving || !uiLoaded || !uiOps.length) return;
-  uiSaving = true;
-  try {
-    /* R21.1 / max-four-attempt policy live in flushUIState (api.js). */
-    const next = await flushUIState(
-      { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: false },
-      { fetchImpl: fetch, csrf: CSRF, storage: uiStorage,
-        onRemoteApplied: next => {
-          UI = next.doc; uiRev = next.rev; uiOps = next.ops;
-          applyRemoteUI();
-        } });
-    UI = next.doc;
-    uiRev = next.rev;
-    uiOps = next.ops;
-  } finally {
-    uiSaving = false;
-    renderSyncState();
-    if (uiOps.length) $("#syncwarn").textContent = "changes not saved yet";
-  }
-}
-/* re-render everything that draws from UI, preserving inputs (the prompt bar
-   and sheets are singletons outside these render regions) */
-function applyRemoteUI(){
-  cardsSig = ""; mapFeature.invalidate(); bookmarksFeature.invalidate();
-  renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderBookmarksPane();
-}
-async function loadUI(){
-  /* Persisted-before-session replay and cache fallback live in loadUIState. */
-  const next = await loadUIState(
-    { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: uiSaving },
-    { fetchImpl: fetch, storage: uiStorage });
-  UI = next.doc;
-  uiRev = next.rev;
-  uiOps = next.ops;
-  uiLoaded = next.loaded;
-  chatFeature.invalidate();
-  applyRemoteUI();
-  if (next.shouldFlush) flushUI();
-}
-/* poll the shared state alongside /api/state; skip while local ops are in
-   flight so a stale remote document cannot clobber them (they replay on 409) */
-async function pollUI(){
-  const next = await pollUIState(
-    { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: uiSaving },
-    { fetchImpl: fetch, storage: uiStorage });
-  uiRev = next.rev;
-  if (next.skipped || next.retained || next.unchanged || !next.applied) return;
-  UI = next.doc;
-  applyRemoteUI();
-}
-/* last-chance flush when the page goes away; keepalive survives unload. With
-   no known revision we cannot PUT safely (If-Match: "*" would clobber a newer
-   document — R21.1); the ops are already persisted to localStorage, so the next
-   load replays the still-valid ones after fetching the current revision. */
-addEventListener("pagehide", () => {
-  const req = pagehidePutRequest(UI, { loaded: uiLoaded, ops: uiOps, rev: uiRev, csrf: CSRF });
-  if (!req) return;
-  try { fetch(req.path, req.opts); } catch {}
-});
+/* UI document + state tick live in createPollingFeature (Packet 7I).
+   Shell reaches the shared document via getUI() / uiMutate / isUILoaded. */
+const uiMutate = op => pollingFeature.uiMutate(op);
+const getUI = () => pollingFeature.getUI();
+const uiLoaded = () => pollingFeature.isUILoaded();
 
 /* copy glyph: fa-regular fa-clone (two offset rounded squares), inlined */
 const ICON_COPY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
@@ -876,10 +768,10 @@ setInterval(readUsage, 30000);
    Lane picker HTML helpers stay here — sheets (new/fork) share them. */
 const orderedNodes = () => orderedNodesMod(nodes);
 const NEW_LANE_VALUE = "__new";
-const laneList = () => laneListMod(UI.lanes);
-const sortedLaneList = () => sortedLaneListMod(UI.lanes);
-const laneById = id => laneByIdMod(id, UI.lanes);
-const laneName = id => laneNameMod(id, UI.lanes);
+const laneList = () => laneListMod(getUI().lanes);
+const sortedLaneList = () => sortedLaneListMod(getUI().lanes);
+const laneById = id => laneByIdMod(id, getUI().lanes);
+const laneName = id => laneNameMod(id, getUI().lanes);
 /* resolveColor for non-hex CSS colors via getComputedStyle (browser only). */
 function resolveCssColor(c){
   if (typeof document === "undefined" || !document.body) return null;
@@ -894,10 +786,10 @@ function resolveCssColor(c){
 }
 const cssRGB = c => cssRGBMod(c, resolveCssColor);
 const contrastText = c => contrastTextMod(c, resolveCssColor);
-const laneColor = id => laneColorMod(id, UI.lanes);
-const uniqueLaneID = name => uniqueLaneIDMod(name, UI.lanes);
-const nextLaneColor = () => nextLaneColorMod(UI.lanes);
-const makeLane = name => makeLaneMod(name, UI.lanes);
+const laneColor = id => laneColorMod(id, getUI().lanes);
+const uniqueLaneID = name => uniqueLaneIDMod(name, getUI().lanes);
+const nextLaneColor = () => nextLaneColorMod(getUI().lanes);
+const makeLane = name => makeLaneMod(name, getUI().lanes);
 function laneOptionsHTML(selected = "", includeUnset = true, disabled = false){
   const unset = includeUnset ? `<option value="" ${!selected ? "selected" : ""}>unset</option>` : "";
   const missing = selected && !laneById(selected)
@@ -937,8 +829,8 @@ function readLaneChoice(select, input){
   }
   return { laneID: val };
 }
-const laneModel = () => laneModelMod(nodes, UI.lanes);
-const isArchived = id => isArchivedMod(id, UI.archived);
+const laneModel = () => laneModelMod(nodes, getUI().lanes);
+const isArchived = id => isArchivedMod(id, getUI().archived);
 
 /* Activities card feature factory — owns #cardtabs/#cardlist only. */
 const cardsFeature = createCardsFeature({
@@ -968,10 +860,10 @@ const cardsFeature = createCardsFeature({
   editingTitleScope: () => editingTitleScope,
   cardsSig: () => cardsSig,
   setCardsSig: v => { cardsSig = v; },
-  pinned: () => UI.pinned,
-  archived: () => UI.archived,
-  lanes: () => UI.lanes,
-  bookmarks: () => UI.bookmarks,
+  pinned: () => getUI().pinned,
+  archived: () => getUI().archived,
+  lanes: () => getUI().lanes,
+  bookmarks: () => getUI().bookmarks,
   agentLogo,
   laneSelectHTML,
   syncLanePicker,
@@ -1001,8 +893,8 @@ const cardsFeature = createCardsFeature({
   removeNode: id => { nodes = nodes.filter(x => x.id !== id); },
   invalidateChatSig: () => { chatFeature.invalidate(); },
   invalidateMapSig: () => { mapFeature.invalidate(); },
-  invalidateStateEtag: () => { stateEtag = ""; },
-  scheduleTick: () => setTimeout(tick, 200),
+  invalidateStateEtag: () => pollingFeature.invalidateStateEtag(),
+  scheduleTick: () => setTimeout(() => pollingFeature.tick(), 200),
   startTitleEdit: (id, scope) => startTitleEdit(id, scope),
   longpress: (container, selector, fn) => longpress(container, selector, fn),
 });
@@ -1087,9 +979,9 @@ const mapFeature = createMapFeature({
   fmtDur,
   contrastText,
   nodes: () => nodes,
-  groups: () => UI.groups,
+  groups: () => getUI().groups,
   laneFilter: () => laneFilter,
-  uiLoaded: () => uiLoaded,
+  uiLoaded: () => uiLoaded(),
   level: () => level,
   isDesktop,
   mapOpen: () => document.body.classList.contains("map-open"),
@@ -1181,7 +1073,7 @@ const chatFeature = createChatFeature({
     ICON_TERM, ICON_CHECK, ICON_CHEV_UP, ICON_CHEV_DOWN,
     ICON_BRANCH, ICON_INTO, ICON_COPY, ICON_DOWNALL, ICON_FILE,
   },
-  bookmarks: () => UI.bookmarks,
+  bookmarks: () => getUI().bookmarks,
   uiMutate,
   stampAddress: (b, t) => stampAddressMod(b, t),
   copyText: s => copyText(s),
@@ -1199,8 +1091,8 @@ const chatFeature = createChatFeature({
   setPendingJump: v => { pendingJump = v; },
   toast: msg => toast(msg),
   alert: msg => alert(msg),
-  tick: () => tick(),
-  scheduleTick: ms => setTimeout(tick, ms),
+  tick: () => pollingFeature.tick(),
+  scheduleTick: ms => setTimeout(() => pollingFeature.tick(), ms),
   isDesktop,
   startTitleEdit: (id, scope) => startTitleEdit(id, scope),
   longpress: (container, selector, fn) => longpress(container, selector, fn),
@@ -1246,8 +1138,8 @@ composerFeature = createComposerFeature({
   getLastTurns: () => chatFeature.getLastTurns(),
   invalidateChat: () => chatFeature.invalidate(),
   refreshChat: () => chatFeature.render(),
-  tick: () => tick(),
-  scheduleTick: ms => setTimeout(tick, ms),
+  tick: () => pollingFeature.tick(),
+  scheduleTick: ms => setTimeout(() => pollingFeature.tick(), ms),
   alert: msg => alert(msg),
 });
 
@@ -1282,7 +1174,7 @@ bookmarksFeature = createBookmarksFeature({
   icons: {
     ICON_JUMP, ICON_COMMENT, ICON_COPY, ICON_CLIP, ICON_TRASH, ICON_SEND,
   },
-  bookmarks: () => UI.bookmarks,
+  bookmarks: () => getUI().bookmarks,
   uiMutate,
   nodeById: id => nodeById(id),
   laneList: () => laneList(),
@@ -1354,7 +1246,7 @@ notesFeature = createNotesFeature({
     ICON_CHEV_RIGHT, ICON_CHEV_DOWN, ICON_PENCIL, ICON_MOVE_UP, ICON_MOVE_DOWN,
   },
   api,
-  bookmarks: () => UI.bookmarks,
+  bookmarks: () => getUI().bookmarks,
   nodeById: id => nodeById(id),
   laneList: () => laneList(),
   laneColor: id => laneColor(id),
@@ -1459,8 +1351,8 @@ sheetsFeature = createSheetsFeature({
   select: id => select(id),
   setLevel,
   isDesktop,
-  tick: () => tick(),
-  invalidateStateEtag: () => { stateEtag = ""; },
+  tick: () => pollingFeature.tick(),
+  invalidateStateEtag: () => pollingFeature.invalidateStateEtag(),
   invalidateCardsSig: () => { cardsSig = ""; },
   invalidateChat: () => chatFeature.invalidate(),
   invalidateMap: () => mapFeature.invalidate(),
@@ -1970,72 +1862,61 @@ document.querySelectorAll("#menu .lic").forEach(b => b.addEventListener("click",
 /* New activity / adopt / agents probe / fieldError / launch-config / plus /
    nc_start / ad_go live in createSheetsFeature (Packet 7H). */
 
-/* ---------- polling: 2 s visible, paused hidden, immediate on return.
-   Non-overlapping: the next tick is scheduled only after the current one
-   completes, and re-entry (e.g. the post-send fast tick) is a no-op. ---------- */
-let ticking = false;
-function setHostOnline(ok){
-  $("#host").classList.toggle("online", ok);
-  $("#host").classList.toggle("offline", !ok);
-}
-async function tick(){
-  if (ticking) return;
-  ticking = true;
-  try {
-    let r;
-    try {
-      r = await fetch("/api/state", { headers: stateEtag ? { "If-None-Match": stateEtag } : {} });
-    } catch { setHostOnline(false); $("#sys").textContent = "server unreachable"; return; }
-    if (r.status === 304){
-      setHostOnline(true);
-      updateCardAges();
-      await refreshChat();   /* transcripts are an independent data source */
-      pollUI();
-      return;
-    }
-    if (!r.ok){ setHostOnline(false); return; }
-    setHostOnline(true);
-    stateEtag = r.headers.get("ETag") || "";
-    const st = await r.json();
+/* ---------- polling + UI-sync (Packet 7I) ----------
+   createPollingFeature owns /api/state tick, generation/cancellation,
+   visibility pause/resume, UI document mutate/load/flush/poll, and pagehide.
+   Usage badge HTML and the 30s cadence stay shell-owned; only the prime is
+   injected as onStartPolling. */
+pollingFeature = createPollingFeature({
+  document,
+  window,
+  storage: localStorage,
+  fetchImpl: fetch,
+  csrf: CSRF,
+  setTimeout,
+  clearTimeout,
+  syncwarnEl: $("#syncwarn"),
+  setHostOnline: ok => {
+    $("#host").classList.toggle("online", ok);
+    $("#host").classList.toggle("offline", !ok);
+  },
+  setServerUnreachable: () => { $("#sys").textContent = "server unreachable"; },
+  setHostname: h => { $("#host").textContent = h; },
+  setVersion: v => { $("#m_version").textContent = v; },
+  publishState: st => {
     nodes = st.nodes || [];
     unadopted = st.unadopted || [];
-    if (st.hostname) $("#host").textContent = st.hostname;
-    if (st.version) $("#m_version").textContent = st.version;
-    renderSys(st.sys);
+  },
+  renderSys,
+  ensureSelection: () => {
     /* a stored sel of "NOTES" (the retired pseudo-activity) falls through
        to the first real node here */
     if (!sel || !nodeById(sel)){
       const first = orderedNodes()[0];
       if (first) select(first.id);
     }
-    renderCards();
-    renderMap();
-    renderBookmarksPane();  /* lanes/titles derive live from nodes; sig-guarded */
-    await refreshChat();
-    pollUI();
-  } finally { ticking = false; }
-}
-let pollTimer = null, pollGen = 0;
-async function pollLoop(gen){
-  await tick();
-  if (!document.hidden && gen === pollGen) pollTimer = setTimeout(() => pollLoop(gen), 2000);
-}
-function startPolling(){
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = null;
-  pollLoop(++pollGen);
-  readUsage();  /* prime the budget slot; then on its own 30s cadence */
-}
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden){ if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
-  else startPolling();
+  },
+  updateCardAges: () => updateCardAges(),
+  renderCards: () => renderCards(),
+  renderMap: () => renderMap(),
+  renderMapTabs: () => renderMapTabs(),
+  renderBookmarksPane: () => renderBookmarksPane(),
+  renderChatHead: () => renderChatHead(),
+  refreshChat: () => refreshChat(),
+  renderWsInbox: () => renderWsInbox(),
+  invalidateCardsSig: () => { cardsSig = ""; },
+  invalidateMap: () => mapFeature.invalidate(),
+  invalidateBookmarks: () => bookmarksFeature.invalidate(),
+  invalidateChat: () => chatFeature.invalidate(),
+  onStartPolling: () => readUsage(), /* prime; 30s cadence stays shell-owned */
 });
+pollingFeature.bind();
 setLevel(level);
 /* restore persisted full-screen / fare chrome (map feature owns keys + ARIA) */
 mapFeature.restoreChrome();
 renderMapTabs();
-loadUI();
-startPolling();
+pollingFeature.loadUI();
+pollingFeature.startPolling();
 </script>
 </body>
 </html>
