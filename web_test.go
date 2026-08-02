@@ -50,6 +50,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	// Import map: every production module must be imported from /js/<file>.js.
 	wantImports := []string{
 		`from "/js/api.js"`,
+		`from "/js/cards.js"`,
 		`from "/js/format.js"`,
 		`from "/js/lanes.js"`,
 		`from "/js/map-model.js"`,
@@ -412,29 +413,37 @@ assert.ok(contrastRatio(relLum(hexRGB("#5856D6")), relLum(hexRGB(contrastText("#
 func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
+	// Host connectivity remains shell-owned; card age flip lives in cards.js
+	// (Packet 7A) with executable Node coverage in web/test/cards.test.js.
 	for _, want := range []string{
 		`<span class="host offline" id="host">scimux</span>`,
 		`function setHostOnline(ok){`,
 		`setHostOnline(false); $("#sys").textContent = "server unreachable"; return;`,
 		`setHostOnline(true);`,
-		`let cardTimeFlip = 0;`,
-		`const CARD_TIME_SWAP_MS = 30000;`,
-		`function cardTimeItems(n){`,
-		`function cardTimeHTML(n){`,
-		`const you = n.last_interaction || 0;`,
-		`Last interaction ${ageText(you)} · last seen ${ageText(seen)}`,
-		`const it = items[cardTimeFlip % items.length];`,
-		`return ` + "`${it.key} ${ageText(it.ms)}`" + `;`,
-		`${cardTimeHTML(n)}`,
-		`function updateCardAges(animate=false){`,
-		`time.classList.add("roll-dn");`,
-		`setInterval(() => {`,
-		`cardTimeFlip++;`,
-		`updateCardAges(true);`,
-		`}, CARD_TIME_SWAP_MS);`,
+		`createCardsFeature`,
+		`import { cardConfigText, createCardsFeature } from "/js/cards.js";`,
+		`function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
+		}
+	}
+	cards, err := os.ReadFile("web/js/cards.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := string(cards)
+	for _, want := range []string{
+		`export const CARD_TIME_SWAP_MS = 30000;`,
+		`export function cardTimeItems(n){`,
+		`export function cardTimeHTML(n,`,
+		`Last interaction ${ageFn(you)} · last seen ${ageFn(seen)}`,
+		`cardTimeFlip++`,
+		`updateCardAges(true)`,
+		`time.classList.add("roll-dn")`,
+	} {
+		if !strings.Contains(cs, want) {
+			t.Errorf("cards.js age wiring missing %q", want)
 		}
 	}
 	for _, want := range []string{
@@ -445,7 +454,8 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 			t.Errorf("activity card connectivity CSS missing %q", want)
 		}
 	}
-	if strings.Contains(html, `<span class="age">${ageText(n.last_activity)}</span>`) {
+	if strings.Contains(html, `<span class="age">${ageText(n.last_activity)}</span>`) ||
+		strings.Contains(cs, `<span class="age">${ageText(n.last_activity)}</span>`) {
 		t.Fatal("folded activity cards should not label pane movement as the primary age")
 	}
 }
@@ -838,8 +848,8 @@ func TestSearchEarlierHistoryJump(t *testing.T) {
 // TestPinnedStoreModel asserts the pinned-cards store model: an ordered
 // UI.pinned array carried through init + normUI, and op-merge cases for
 // pin (new pin to the front → renders at top), unpin, and drag reorder.
-// applyOp lives in web/js/state.js (Packet 6C/6F); production keeps the UI
-// shape and isPinned wrapper.
+// applyOp lives in web/js/state.js (Packet 6C/6F); cards.js consumes the
+// resulting pinned list through its injected feature state.
 func TestPinnedStoreModel(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -849,8 +859,8 @@ func TestPinnedStoreModel(t *testing.T) {
 	for _, want := range []string{
 		`let UI = { groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] };`,
 		`pinned: []`, // in normUI defaults too
-		"const isPinned =",
 		`from "/js/state.js"`,
+		`from "/js/cards.js"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("pinned store model missing %q", want)
@@ -904,24 +914,29 @@ func TestPinnedIcons(t *testing.T) {
 
 // TestPinnedTab asserts a conditional "Pinned" tab sits between the scope tab
 // and "Archived", shows a live count, and appears only when something is pinned.
+// Tab HTML generation lives in cards.js (Packet 7A); Node covers cardTabsHTML.
 func TestPinnedTab(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	html := mustReadIndex(t)
+	// Shell still owns the #cardtabs root.
+	if !strings.Contains(html, `id="cardtabs"`) {
+		t.Fatal("#cardtabs root missing from document shell")
+	}
+	if !strings.Contains(html, `from "/js/cards.js"`) || !strings.Contains(html, "createCardsFeature") {
+		t.Fatal("production must wire cards.js for tab rendering")
+	}
+	cards, err := os.ReadFile("web/js/cards.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
-	i := strings.Index(html, "function renderCardTabs()")
-	if i < 0 {
-		t.Fatal("renderCardTabs not found")
-	}
-	j := strings.Index(html[i:], "\n}")
-	body := html[i : i+j]
+	body := string(cards)
 	for _, want := range []string{
 		`data-tab="pinned"`,
 		"pinnedCount",
+		`data-tab="current"`,
+		`data-tab="archived"`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("renderCardTabs missing %q", want)
+			t.Errorf("cards.js tab markup missing %q", want)
 		}
 	}
 	// Ordering: the Pinned tab must be emitted after the scope tab and before
@@ -936,36 +951,47 @@ func TestPinnedTab(t *testing.T) {
 
 // TestPinnedFilterAndOrder asserts the Pinned tab filters to pinned cards and
 // orders them attention-first, then by pin order (UI.pinned index).
+// Filtering/ordering algorithms stay in map-model.js; cards.js consumes them.
 func TestPinnedFilterAndOrder(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	html := mustReadIndex(t)
+	cards, err := os.ReadFile("web/js/cards.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
-	i := strings.Index(html, "function renderCards()")
-	j := strings.Index(html[i:], "document.title =")
-	body := html[i : i+j]
-	if !strings.Contains(body, `cardTab === "pinned"`) {
-		t.Error("renderCards must special-case the pinned tab")
+	cs := string(cards)
+	if !strings.Contains(cs, `cardTab === "pinned"`) && !strings.Contains(cs, `cardTab: "pinned"`) {
+		// Factory uses g("cardTab"); template uses cardTab === "pinned" for draggable.
+		if !strings.Contains(cs, `cardTab === "pinned"`) {
+			t.Error("cards.js must special-case the pinned tab for draggable cards")
+		}
 	}
-	// pinnedOrder lives in map-model.js; production wrappers must call it.
-	if !strings.Contains(html, "pinnedOrderMod") && !strings.Contains(html, "from \"/js/map-model.js\"") {
-		t.Error("pinnedOrder must come from /js/map-model.js")
+	if !strings.Contains(html, `from "/js/cards.js"`) {
+		t.Error("production must wire cards.js")
 	}
-	if !strings.Contains(html, "pinnedOrder") {
-		t.Error("a pinnedOrder helper (attention-first, then pin order) is expected")
+	if !strings.Contains(cs, "visibleCardLists") {
+		t.Error("cards.js must use visibleCardLists for tab/lane visibility")
+	}
+	mapModel, err := os.ReadFile("web/js/map-model.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mapModel), "export function pinnedOrder") {
+		t.Error("map-model.js must retain attention-first pinned ordering")
 	}
 }
 
 // TestPinnedActionAndFlag asserts the swipe/hover action row leads with a
 // pin/unpin button (leftmost), and a folded card shows a pin flag when pinned.
 func TestPinnedActionAndFlag(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	cards, err := os.ReadFile("web/js/cards.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
+	html := string(cards)
 	i := strings.Index(html, `<div class="actions">`)
+	if i < 0 {
+		t.Fatal("card actions row missing from cards.js")
+	}
 	j := strings.Index(html[i:], "</div>`")
 	actions := html[i : i+j]
 	pin := strings.Index(actions, "data-pin-action")
@@ -981,22 +1007,22 @@ func TestPinnedActionAndFlag(t *testing.T) {
 	if !strings.Contains(html, "pinflag") {
 		t.Error("a pinned card should show a pin flag on the folded card")
 	}
-	// Click handler wires the action.
+	// Click handler wires the action via uiMutate pin/unpin toggle.
 	if !strings.Contains(html, "data-pin-action") ||
-		!strings.Contains(html, `k: isPinned(id) ? "unpin" : "pin"`) {
+		!strings.Contains(html, `isPinned(id) ? "unpin" : "pin"`) {
 		t.Error("pin action handler must toggle pin/unpin via uiMutate")
 	}
 }
 
 // TestPinnedDragReorder asserts drag-to-reorder within the Pinned tab persists
 // order via a pin-order op, and is poll-safe (a drag in progress suppresses the
-// list rebuild).
+// list rebuild). Implementation lives in cards.js (Packet 7A).
 func TestPinnedDragReorder(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	cards, err := os.ReadFile("web/js/cards.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
+	html := string(cards)
 	for _, want := range []string{
 		`k: "pin-order"`,
 		"pinDragging",      // the in-progress-drag guard
@@ -1006,8 +1032,9 @@ func TestPinnedDragReorder(t *testing.T) {
 			t.Errorf("pinned drag reorder missing %q", want)
 		}
 	}
-	// Poll-safe: renderCards must bail while a pin drag is in progress.
-	if !strings.Contains(html, "if (pinDragging) return;") {
+	// Poll-safe: render must bail while a pin drag is in progress.
+	if !strings.Contains(html, "if (pinDragging) return;") &&
+		!strings.Contains(html, "if (pinDragging) return") {
 		t.Error("renderCards must not rebuild the list mid-drag (poll-safe)")
 	}
 }

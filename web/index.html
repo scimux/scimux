@@ -394,10 +394,8 @@ import {
   loadPendingOps as loadPendingOpsMod, saveCachedUI,
 } from "/js/state.js";
 import {
-  hardAttention, cardState, statusText,
-  orderedNodes as orderedNodesMod, pinnedOrder as pinnedOrderMod,
-  isArchived as isArchivedMod, isPinned as isPinnedMod,
-  inLaneScope, visibleCardLists, headStopKey as headStopKeyMod, toggleMapSelection,
+  hardAttention, statusText, orderedNodes as orderedNodesMod,
+  isArchived as isArchivedMod, headStopKey as headStopKeyMod, toggleMapSelection,
 } from "/js/map-model.js";
 import {
   clampLevel, scrimStep, bookmarkPeekClose, captureTouchStart, documentSwipeDecision,
@@ -407,6 +405,7 @@ import {
   withCsrf as withCsrfMod, api as apiMod, pagehidePutRequest,
   loadUIState, flushUIState, pollUIState,
 } from "/js/api.js";
+import { cardConfigText, createCardsFeature } from "/js/cards.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -507,7 +506,6 @@ function syncMapFullBtn(){
 }
 const expanded = new Set();
 let actionCard = "";
-let pinDragging = false;   /* a pinned-card drag is in progress (poll-safe guard) */
 let editingDesc = "";
 let editingTitle = "";
 let editingTitleScope = "";   /* "cards" | "chat" — the editor renders only where it was opened */
@@ -1026,46 +1024,8 @@ setInterval(() => {
 setInterval(readUsage, 30000);
 
 /* ---------- cards ---------- */
-/* ageText/fmtDur/fmtStamp/hardAttention/cardState/statusText from modules */
-function cardConfigText(n){
-  const parts = [n.model || "default"];
-  if (n.effort) parts.push(n.effort);
-  return parts.join("/");
-}
-function cardMetaHTML(n){
-  const state = statusText(n).toLowerCase();
-  return `${esc(cardConfigText(n))} · ${esc(state)} · ${cardTimeHTML(n)}`;
-}
-let cardTimeFlip = 0;
-const CARD_TIME_SWAP_MS = 30000;
-function cardTimeItems(n){
-  const you = n.last_interaction || 0;
-  const seen = n.last_activity || 0;
-  const items = [];
-  if (you) items.push({ key: "you", ms: you });
-  if ((!you && seen) || (you && seen > you + 9000)) items.push({ key: "seen", ms: seen });
-  return items;
-}
-function cardTimeTitle(n){
-  const you = n.last_interaction || 0;
-  const seen = n.last_activity || 0;
-  if (you && seen) return `Last interaction ${ageText(you)} · last seen ${ageText(seen)}`;
-  if (you) return `Last interaction ${ageText(you)}`;
-  return "Last seen";
-}
-function cardTimeText(n){
-  const items = cardTimeItems(n);
-  if (!items.length) return "";
-  const it = items[cardTimeFlip % items.length];
-  return `${it.key} ${ageText(it.ms)}`;
-}
-function cardTimeHTML(n){
-  const txt = cardTimeText(n);
-  if (!txt) {
-    return `<span class="time" title=""></span>`;
-  }
-  return `<span class="time" title="${esc(cardTimeTitle(n))}">${esc(txt)}</span>`;
-}
+/* Card render/time/signature/events live in /js/cards.js (Packet 7A).
+   Lane picker HTML helpers stay here — sheets (new/fork) share them. */
 const orderedNodes = () => orderedNodesMod(nodes);
 const NEW_LANE_VALUE = "__new";
 const laneList = () => laneListMod(UI.lanes);
@@ -1129,146 +1089,79 @@ function readLaneChoice(select, input){
   }
   return { laneID: val };
 }
-/* the lane a thread rides. Single membership now: a thread belongs to exactly
-   one topic/lane; cross-lane structure comes from fork parent edges, not tags. */
 /* servedLanes imported from /js/lanes.js */
-/* laneModel: the shared journey structure. Lanes are explicit assignments;
-   unassigned nodes stay in Activities but do not become Journeys. */
 const laneModel = () => laneModelMod(nodes, UI.lanes);
 const isArchived = id => isArchivedMod(id, UI.archived);
-const isPinned = id => isPinnedMod(id, UI.pinned);
-const pinnedCount = () => (UI.pinned || []).filter(id => nodeById(id)).length;
-/* Pinned-tab order: hard-attention first, then pin order (map-model.js). */
-const pinnedOrder = list => pinnedOrderMod(list, UI.pinned);
 
-function renderCards(){
-  if (pinDragging) return;   /* poll-safe: never rebuild the list mid-drag */
-  /* the Pinned tab is conditional: if the last pin was removed while it was
-     open, fall back to All rather than stranding on a tab that no longer exists */
-  if (cardTab === "pinned" && !pinnedCount()) cardTab = "current";
-  /* Visibility / fold decisions live in visibleCardLists (map-model.js).
-     Archived hard-attention surfaces in Current; Pinned ignores lane scope. */
-  const { tabList, list, foldList } = visibleCardLists(nodes, {
-    cardTab, pinned: UI.pinned, archived: UI.archived,
-    laneFilter, selectedId: sel,
-  });
-  if (!foldList.length) attnFoldOpen = false;
-  const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention, n.model, n.effort, !!n.last_interaction]))
-    + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
-    + "|" + cardTab + "|" + laneFilter + "|" + foldList.length + "|" + attnFoldOpen
-    + "|" + (UI.bookmarks || []).length + "|" + JSON.stringify(UI.lanes || [])
-    + "|" + JSON.stringify(UI.pinned || [])
-    + "|" + actionCard + "|" + editingDesc + "|" + editingTitle;
-  if (sig === cardsSig){ updateCardAges(); return; }
-  cardsSig = sig;
-  renderCardTabs();
-  /* adoptable sessions belong to no journey yet — a lane scope hides them
-     like any other out-of-lane card (they return with "All") */
-  const adoptCards = cardTab !== "current" || laneFilter ? "" : unadopted.map(s => `
-    <div class="card adoptable">
-      <div class="row1"><span class="title">${esc(s)}</span></div>
-      <div class="status">unadopted tmux session</div>
-      <button class="go" data-adopt="${esc(s)}" aria-label="adopt ${esc(s)}"></button>
-    </div>`).join("");
-  /* the fold: out-of-scope attention, one calm pinned row — folded it says
-     "N waiting elsewhere", unfolded the cards work in place (disclosure,
-     not navigation) */
-  const foldHtml = !foldList.length ? "" : `
-    <button class="attnfold ${attnFoldOpen ? "open" : ""}" data-attnfold
-      aria-expanded="${attnFoldOpen}">
-      <span class="attndot"></span>
-      <span class="foldlabel">Input needed (${foldList.length})</span>
-      <span class="foldchev">&#8250;</span>
-    </button>` + (attnFoldOpen ? foldList.map(cardHTML).join("") : "");
-  /* notes retired as a pseudo-activity: they live in the sticky-notes pane */
-  withCardEditsPreserved(() => {
-  $("#cardlist").innerHTML = foldHtml + adoptCards + (list.length ? list.map(cardHTML).join("")
-    : laneFilter
-      ? `<div class="empty">No ${cardTab === "archived" ? "archived " : ""}activities on this journey.</div>`
-      : cardTab === "archived"
-        ? `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`
-        : adoptCards ? "" : `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`);
-  });
-  const waiting = nodes.filter(hardAttention).length;
-  document.title = (waiting ? `(${waiting}) ` : "") + "scimux";
-  document.querySelectorAll("#cardlist [data-lane-select]").forEach(syncLanePicker);
-}
+/* Activities card feature factory — owns #cardtabs/#cardlist only. */
+const cardsFeature = createCardsFeature({
+  roots: { tabs: $("#cardtabs"), list: $("#cardlist") },
+  document,
+  CSS,
+  setInterval,
+  clearInterval,
+  setTimeout,
+  esc,
+  ageText,
+  nodes: () => nodes,
+  unadopted: () => unadopted,
+  sel: () => sel,
+  setSel: v => { sel = v; },
+  cardTab: () => cardTab,
+  setCardTab: v => { cardTab = v; },
+  laneFilter: () => laneFilter,
+  attnFoldOpen: () => attnFoldOpen,
+  setAttnFoldOpen: v => { attnFoldOpen = v; },
+  expanded: () => expanded,
+  actionCard: () => actionCard,
+  setActionCard: v => { actionCard = v; },
+  editingDesc: () => editingDesc,
+  setEditingDesc: v => { editingDesc = v; },
+  editingTitle: () => editingTitle,
+  editingTitleScope: () => editingTitleScope,
+  cardsSig: () => cardsSig,
+  setCardsSig: v => { cardsSig = v; },
+  pinned: () => UI.pinned,
+  archived: () => UI.archived,
+  lanes: () => UI.lanes,
+  bookmarks: () => UI.bookmarks,
+  agentLogo,
+  laneSelectHTML,
+  syncLanePicker,
+  readLaneChoice,
+  laneColor,
+  laneName,
+  laneList,
+  icons: {
+    ICON_CHECK, ICON_PIN, ICON_UNPIN, ICON_END,
+    ICON_ARCHIVE, ICON_RESTORE, ICON_TRASH,
+  },
+  api,
+  uiMutate,
+  updateLocalNode: n => updateLocalNode(n),
+  nodeById: id => nodeById(id),
+  exitThread: id => exitThread(id),
+  openAdopt: s => openAdopt(s),
+  selectNode: id => select(id),
+  setLevel,
+  isDesktop,
+  setLaneFilter,
+  renderChatHead: () => renderChatHead(),
+  renderMap: () => renderMap(),
+  fieldError: (el, msg) => fieldError(el, msg),
+  alert: msg => alert(msg),
+  confirm: msg => confirm(msg),
+  removeNode: id => { nodes = nodes.filter(x => x.id !== id); },
+  invalidateChatSig: () => { chatSig = ""; },
+  invalidateMapSig: () => { mapSig = ""; },
+  invalidateStateEtag: () => { stateEtag = ""; },
+  scheduleTick: () => setTimeout(tick, 200),
+  startTitleEdit: (id, scope) => startTitleEdit(id, scope),
+  longpress: (container, selector, fn) => longpress(container, selector, fn),
+});
+function renderCards(){ cardsFeature.render(); }
+function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }
 
-/* Rail properties on the expanded card, shown once a Journey is set. The lane is
-   read-only (set-once, colours the whole topic). */
-function railboxHTML(n){
-  return `<div class="railbox">
-      <div class="railrow"><span class="k">Journey:</span>
-        <span class="laneswatch" style="background:${esc(laneColor(n.lane_id))}"></span>
-        <span>${esc(laneName(n.lane_id))}</span></div>
-    </div>`;
-}
-
-function cardHTML(n){
-    const desc = n.description || n.prompt || "";
-    const archived = isArchived(n.id);
-    const pinned = isPinned(n.id);
-    return `
-    <div class="card ${cardState(n)} ${sel === n.id ? "selected" : ""} ${expanded.has(n.id) ? "expanded" : ""} ${!n.lane_id ? "lane-edit" : ""} ${actionCard === n.id ? "actions-open" : ""} ${editingDesc === n.id ? "editing" : ""} ${editingTitle === n.id && editingTitleScope === "cards" ? "title-editing" : ""}" ${cardTab === "pinned" ? 'draggable="true" ' : ""}id="card-${esc(n.id)}">
-      <span class="stripe" style="background:${esc(laneColor(n.lane_id))}"></span>
-      <button class="go" data-open="${esc(n.id)}" aria-label="open ${esc(n.title)}"></button>
-      <div class="row1">
-        <span class="agent-logo" title="${esc(n.agent || "agent")}">${agentLogo(n.agent)}</span>
-        ${editingTitle === n.id && editingTitleScope === "cards"
-          ? `<input class="title-edit" data-title-input="${esc(n.id)}" value="${esc(n.title)}">`
-          : `<span class="title" data-title="${esc(n.id)}">${esc(n.title)}</span>`}
-        <button class="save-desc" data-save-desc="${esc(n.id)}" aria-label="save description">${ICON_CHECK}</button>
-        ${pinned ? `<span class="pinflag" title="pinned" aria-label="pinned">${ICON_PIN}</span>` : ""}
-        <button class="chev" data-x="${esc(n.id)}" aria-label="summary">&#8250;</button>
-      </div>
-      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${cardMetaHTML(n)}</span></div>
-      ${!n.lane_id ? `<div class="lanebox" data-card-lane="${esc(n.id)}">
-        <div class="lanepick">
-          <span class="laneswatch"></span>
-          ${laneSelectHTML("", true)}
-        </div>
-        <input data-lane-new="${esc(n.id)}" hidden placeholder="New lane name">
-      </div>` : railboxHTML(n)}
-      <div class="summary" data-desc="${esc(n.id)}">${esc(desc || "No description yet.")}</div>
-      <textarea class="descbox" data-desc-input="${esc(n.id)}">${esc(desc)}</textarea>
-      <div class="actions">
-        <button class="pin" data-pin-action="${esc(n.id)}" aria-label="${pinned ? "unpin" : "pin"}">${pinned ? ICON_UNPIN : ICON_PIN}</button>
-        ${n.ended_at ? "" : `<button class="endthread" data-exit="${esc(n.id)}" aria-label="close thread (mark ended)">${ICON_END}</button>`}
-        <button class="archive" data-arch-action="${esc(n.id)}" aria-label="${archived ? "restore" : "archive"}">${archived ? ICON_RESTORE : ICON_ARCHIVE}</button>
-        <button class="trash" data-trash="${esc(n.id)}" aria-label="remove">${ICON_TRASH}</button>
-      </div>
-    </div>`;
-}
-
-/* The map's lane filter propagated into the Activities pane: the first tab
-   *is* the scope — "All" unfiltered, the lane's dot + name + ✕ when a lane
-   is filtered (same vocabulary as the Journeys "All" tab). Cards outside
-   the lane are hidden (not dimmed — the pane is crowded enough); the open
-   chat's card and the "Input needed" fold are the only exemptions. */
-/* Mirrors the tabList/inScope filtering in renderCards (minus the fold and
-   adoptable-session extras, which aren't "cards" either tab counts) so the
-   badge always matches what selecting the tab would actually show. */
-function cardTabCount(archived){
-  return orderedNodes().filter(n =>
-    (isArchived(n.id) === archived || (!archived && hardAttention(n))) &&
-    inLaneScope(n, { laneFilter, selectedId: sel })).length;
-}
-function renderCardTabs(){
-  /* "All" (no lane scoped) skips the count — it's the whole list, already
-     visible the moment you look, so a badge there is pure noise. A scoped
-     lane tab earns one: it tells you something before you switch to it. */
-  const scope = laneFilter
-    ? `<span class="tabdot" style="background:${esc(laneColor(laneFilter))}"></span>${esc(laneName(laneFilter))} (${cardTabCount(false)})<span class="x" data-clear-scope aria-label="show all activities">&#10005;</span>`
-    : "All";
-  /* the Pinned tab appears only when something is pinned (Apple hides an empty
-     Pinned section); it carries a live count and sits between the scope and
-     Archived */
-  const pc = pinnedCount();
-  $("#cardtabs").innerHTML =
-    `<button data-tab="current" class="${cardTab === "current" ? "on" : ""}">${scope}</button>` +
-    (pc ? `<button data-tab="pinned" class="${cardTab === "pinned" ? "on" : ""}">Pinned (${pc})</button>` : "") +
-    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}">Archived (${cardTabCount(true)})</button>`;
-}
 function setLaneFilter(id){
   laneFilter = id || "";
   attnFoldOpen = false;      /* a new scope starts with the fold closed */
@@ -1278,66 +1171,6 @@ function setLaneFilter(id){
   renderCards(); renderMap();
 }
 
-/* Poll-safe editing: #cardlist is rebuilt whenever its signature changes, and
-   the signature includes every card's volatile live/attention state — so an
-   in-progress edit on one card would be wiped by any other card's state
-   change. Snapshot every edit field's value (and the focused one's cursor)
-   before the rebuild and restore afterwards. This is the input-preservation
-   invariant ("polling must never clobber user input") for the card editors;
-   the composer is a singleton outside all render regions and #chatdescinput
-   guards itself via dataset.node. */
-function cardEditKey(el){
-  if (el.dataset.titleInput != null) return "title:" + el.dataset.titleInput;
-  /* every card carries a (hidden) descbox; only the one being edited may
-     shadow a fresh server value */
-  if (el.dataset.descInput != null)
-    return editingDesc === el.dataset.descInput ? "desc:" + el.dataset.descInput : "";
-  if (el.dataset.laneNew != null) return "lanenew:" + el.dataset.laneNew;
-  if (el.matches("[data-lane-select]"))
-    return "lanesel:" + (el.closest("[data-card-lane]")?.dataset.cardLane || "");
-  return "";
-}
-function withCardEditsPreserved(render){
-  const root = $("#cardlist");
-  const saved = {};
-  let focusKey = "", selStart = 0, selEnd = 0;
-  root.querySelectorAll("input, textarea, select").forEach(el => {
-    const k = cardEditKey(el);
-    if (!k) return;
-    saved[k] = el.value;
-    if (el === document.activeElement){
-      focusKey = k;
-      if (el.setSelectionRange){
-        selStart = el.selectionStart ?? el.value.length;
-        selEnd = el.selectionEnd ?? el.value.length;
-      }
-    }
-  });
-  render();
-  if (!Object.keys(saved).length) return;
-  root.querySelectorAll("input, textarea, select").forEach(el => {
-    const k = cardEditKey(el);
-    if (!k || !(k in saved)) return;
-    if (el.value !== saved[k]) el.value = saved[k];
-    if (el.matches("[data-lane-select]")) syncLanePicker(el);
-    if (k === focusKey){
-      el.focus();
-      if (el.setSelectionRange && el.type !== "select-one"){
-        try { el.setSelectionRange(selStart, selEnd); } catch {}
-      }
-    }
-  });
-}
-$("#cardtabs").addEventListener("click", e => {
-  /* the scope tab's ✕ clears the lane filter, it never switches tabs */
-  if (e.target.closest("[data-clear-scope]")){ setLaneFilter(""); return; }
-  const b = e.target.closest("[data-tab]");
-  if (!b) return;
-  cardTab = b.dataset.tab;
-  actionCard = ""; editingDesc = "";
-  document.querySelectorAll("#cardtabs button").forEach(x => x.classList.toggle("on", x === b));
-  cardsSig = ""; renderCards();
-});
 document.addEventListener("change", e => {
   const sel = e.target.closest("[data-lane-select]");
   if (sel) syncLanePicker(sel);
@@ -1353,131 +1186,6 @@ async function patchRail(id, body){
     renderCards(); renderMap();
   } catch (err) { alert(err.message); }
 }
-function updateCardAges(animate=false){
-  for (const n of nodes){
-    const el = document.getElementById("card-" + CSS.escape(n.id).replace(/\\/g, ""));
-    const card = document.getElementById("card-" + n.id) || el;
-    if (!card) continue;
-    const time = card.querySelector(".time");
-    if (time) {
-      const next = cardTimeText(n);
-      if (time.textContent !== next) {
-        time.textContent = next;
-        if (animate) {
-          time.classList.remove("roll-dn", "roll-up");
-          void time.offsetWidth;
-          time.classList.add("roll-dn");
-        }
-      }
-      time.title = cardTimeTitle(n);
-    }
-  }
-}
-setInterval(() => {
-  cardTimeFlip++;
-  updateCardAges(true);
-}, CARD_TIME_SWAP_MS);
-$("#cardlist").addEventListener("click", async e => {
-  if (e.target.closest("[data-attnfold]")){
-    attnFoldOpen = !attnFoldOpen;
-    cardsSig = ""; renderCards();
-    return;
-  }
-  const save = e.target.closest("[data-save-desc]");
-  if (save){
-    const id = save.dataset.saveDesc;
-    const ta = document.querySelector(`[data-desc-input="${CSS.escape(id)}"]`);
-    const description = ta ? ta.value.trim() : "";
-    const laneBox = document.querySelector(`[data-card-lane="${CSS.escape(id)}"]`);
-    const laneChoice = laneBox
-      ? readLaneChoice(laneBox.querySelector("[data-lane-select]"), laneBox.querySelector("[data-lane-new]"))
-      : {};
-    if (laneChoice.error){
-      fieldError(laneBox.querySelector("[data-lane-new]"), laneChoice.error);
-      laneBox.querySelector("[data-lane-new]")?.focus();
-      return;
-    }
-    const body = { description };
-    if (laneChoice.laneID) body.lane_id = laneChoice.laneID;
-    try {
-      const n = await api(`/api/nodes/${encodeURIComponent(id)}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      if (laneChoice.lane)
-        uiMutate({ k: "lanes", lanes: [...laneList(), laneChoice.lane] });
-      updateLocalNode(n);
-      editingDesc = "";
-      cardsSig = ""; chatSig = ""; mapSig = "";
-      renderCards(); renderChatHead(); renderMap();
-    } catch (err) { alert(err.message); }
-    return;
-  }
-  const pinBtn = e.target.closest("[data-pin-action]");
-  if (pinBtn){
-    const id = pinBtn.dataset.pinAction;
-    uiMutate({ k: isPinned(id) ? "unpin" : "pin", id });
-    actionCard = "";
-    cardsSig = ""; renderCards();
-    return;
-  }
-  const endt = e.target.closest("[data-exit]");
-  if (endt){
-    actionCard = "";
-    exitThread(endt.dataset.exit);
-    return;
-  }
-  const arch = e.target.closest("[data-arch-action]");
-  if (arch){
-    const id = arch.dataset.archAction;
-    uiMutate({ k: isArchived(id) ? "unarch" : "arch", id });
-    actionCard = "";
-    cardsSig = ""; renderCards();
-    return;
-  }
-  const trash = e.target.closest("[data-trash]");
-  if (trash){
-    const id = trash.dataset.trash;
-    const n = nodeById(id);
-    if (!n) return;
-    const msg = n.adopted
-      ? `Remove "${n.title}" from scimux? The adopted tmux session will keep running.`
-      : `Remove "${n.title}" and close its running session/link?`;
-    if (!confirm(msg)) return;
-    try {
-      await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" });
-      if (isArchived(id)) uiMutate({ k: "unarch", id });
-      if (isPinned(id)) uiMutate({ k: "unpin", id });
-      nodes = nodes.filter(x => x.id !== id);
-      if (sel === id) sel = "";
-      actionCard = ""; editingDesc = ""; stateEtag = ""; cardsSig = ""; chatSig = ""; mapSig = "";
-      renderCards(); renderChatHead(); renderMap();
-      setTimeout(tick, 200);
-    } catch (err) { alert(err.message); }
-    return;
-  }
-  const activeCard = e.target.closest(".card.actions-open");
-  if (activeCard){
-    const id = activeCard.querySelector(".go")?.dataset.open;
-    if (id && actionCard === id){
-      actionCard = "";
-      cardsSig = ""; renderCards();
-      return;
-    }
-  }
-  const x = e.target.closest("[data-x]");
-  if (x){
-    const id = x.dataset.x;
-    expanded.has(id) ? expanded.delete(id) : expanded.add(id);
-    actionCard = "";
-    cardsSig = ""; renderCards();
-    return;
-  }
-  const ad = e.target.closest("[data-adopt]");
-  if (ad){ openAdopt(ad.dataset.adopt); return; }
-  const g = e.target.closest("[data-open]");
-  if (g){ actionCard = ""; editingDesc = ""; select(g.dataset.open); if (!isDesktop()) setLevel(1); }
-});
 
 /* ---------- metro map: journeys = explicit lanes, stations = activities ----------
    Only nodes assigned to a lane render here. Fork rationale renders as "why:"
@@ -3482,6 +3190,12 @@ document.addEventListener("click", e => {
 }, true);
 function longpress(container, selector, fn){
   let timer = null;
+  const listeners = [];
+  const on = (event, handler, options) => {
+    container.addEventListener(event, handler, options);
+    listeners.push([event, handler, options]);
+  };
+  const cancel = () => clearTimeout(timer);
   const fire = (el, ev) => {
     lpFired = true;
     setTimeout(() => { lpFired = false; }, 700);  /* don't swallow later taps */
@@ -3492,7 +3206,7 @@ function longpress(container, selector, fn){
      scroll dead zone. The iOS text-selection callout is suppressed by CSS
      instead (.no-callout on the long-press targets), so taps, scrolling,
      and the native click all stay fully native. */
-  container.addEventListener("touchstart", e => {
+  on("touchstart", e => {
     const el = e.target.closest(selector);
     if (!el) return;
     /* touches inside form controls stay fully native (cursor placement in
@@ -3500,60 +3214,42 @@ function longpress(container, selector, fn){
     if (e.target.closest("input, textarea, select, button")) return;
     timer = setTimeout(() => fire(el, e), 500);
   }, { passive: true });
-  ["touchmove","touchend","touchcancel"].forEach(ev =>
-    container.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
+  ["touchmove","touchend","touchcancel"].forEach(ev => on(ev, cancel, { passive: true }));
   /* press-and-hold with a pointer (mouse, iPad trackpad) — synthesized mouse
      events after a touch tap arrive as a quick down/up pair, so the timer
      never fires for those; moving > 6px (text selection, drag) cancels */
   let mstart = null;
-  container.addEventListener("mousedown", e => {
+  on("mousedown", e => {
     const el = e.target.closest(selector);
     if (!el) return;
     mstart = { x: e.clientX, y: e.clientY };
     timer = setTimeout(() => fire(el, e), 500);
   });
-  container.addEventListener("mousemove", e => {
+  on("mousemove", e => {
     if (mstart && Math.abs(e.clientX - mstart.x) + Math.abs(e.clientY - mstart.y) > 6)
       clearTimeout(timer);
   });
-  ["mouseup","mouseleave"].forEach(ev =>
-    container.addEventListener(ev, () => { mstart = null; clearTimeout(timer); }));
-  container.addEventListener("contextmenu", e => {   /* desktop right-click */
+  const cancelMouse = () => { mstart = null; clearTimeout(timer); };
+  ["mouseup","mouseleave"].forEach(ev => on(ev, cancelMouse));
+  on("contextmenu", e => {   /* desktop right-click */
     const el = e.target.closest(selector);
     if (el){ e.preventDefault(); fire(el, e); }
   });
+  return () => {
+    clearTimeout(timer);
+    for (const [event, handler, options] of listeners)
+      container.removeEventListener(event, handler, options);
+  };
 }
 
-/* long-press a title wherever the Activity title is shown -> edit it in place */
-longpress($("#cardlist"), ".card .title", el => startTitleEdit(el.dataset.title, "cards"));
+/* long-press a title wherever the Activity title is shown -> edit it in place.
+   Card-list title long-press is bound by cards.js; chat head stays here. */
 longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"));
+/* Card-local listeners (tabs/list/swipe/drag/longpress/age flip). */
+cardsFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
-
-/* long-press a folded card → reveal archive/restore and remove actions */
-longpress($("#cardlist"), ".card", (el, ev) => {
-  if (el.classList.contains("adoptable")) return;
-  if (el.classList.contains("expanded") || el.closest(".editing")) return;
-  if (ev?.target?.closest(".title,input,textarea,select,button")) return;
-  const id = el.querySelector(".go")?.dataset.open;
-  const n = id && nodeById(id);
-  if (!n) return;
-  actionCard = actionCard === id ? "" : id;
-  editingDesc = "";
-  cardsSig = ""; renderCards();
-});
-
-/* long-press an expanded description → edit it in place */
-longpress($("#cardlist"), ".summary", el => {
-  const id = el.dataset.desc;
-  if (!id) return;
-  expanded.add(id);
-  actionCard = "";
-  editingDesc = id;
-  cardsSig = ""; renderCards();
-  setTimeout(() => document.querySelector(`[data-desc-input="${CSS.escape(id)}"]`)?.focus(), 0);
-});
 
 longpress($("#chathead"), "#chatdesc", () => {
   if (!sel || !nodeById(sel)) return;
@@ -3568,71 +3264,6 @@ longpress($("#chathead"), "#chatdesc", () => {
   }, 0);
 });
 
-let cardSwipe = null;
-$("#cardlist").addEventListener("touchstart", e => {
-  const card = e.target.closest(".card");
-  const id = card?.querySelector(".go")?.dataset.open;
-  if (!id || card.classList.contains("expanded") || card.classList.contains("editing")) return;
-  const t = e.touches[0];
-  cardSwipe = { id, x: t.clientX, y: t.clientY };
-}, { passive: true });
-$("#cardlist").addEventListener("touchend", e => {
-  if (!cardSwipe) return;
-  const t = e.changedTouches[0], dx = t.clientX - cardSwipe.x, dy = t.clientY - cardSwipe.y;
-  const id = cardSwipe.id;
-  cardSwipe = null;
-  if (dx < -46 && Math.abs(dx) > Math.abs(dy) * 1.6){
-    actionCard = id; editingDesc = "";
-    cardsSig = ""; renderCards();
-  }
-}, { passive: true });
-
-/* ---- pinned cards: drag to reorder (pointer/desktop) ----
-   Touch keeps pin/unpin through the swipe action row; manual reorder is
-   pointer-first (HTML5 DnD has no touch story without a dependency). Poll-safe:
-   pinDragging suppresses renderCards for the whole drag so a background poll
-   can't rebuild the list and yank the card out from under the pointer; the new
-   order is read back from the DOM on drop and persisted as one pin-order op. */
-let pinDragEl = null;
-$("#cardlist").addEventListener("dragstart", e => {
-  if (cardTab !== "pinned") return;
-  const card = e.target.closest(".card");
-  if (!card || card.classList.contains("editing") || card.classList.contains("title-editing")) return;
-  pinDragging = true;
-  pinDragEl = card;
-  card.classList.add("dragging");
-  try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", ""); } catch {}
-});
-$("#cardlist").addEventListener("dragover", e => {
-  if (!pinDragging || !pinDragEl) return;
-  e.preventDefault();
-  const over = e.target.closest(".card");
-  if (!over || over === pinDragEl) return;
-  const r = over.getBoundingClientRect();
-  const after = e.clientY > r.top + r.height / 2;
-  over.parentNode.insertBefore(pinDragEl, after ? over.nextSibling : over);
-});
-$("#cardlist").addEventListener("drop", e => { if (pinDragging) e.preventDefault(); });
-$("#cardlist").addEventListener("dragend", () => {
-  if (!pinDragging) return;
-  /* We persist the DOM order verbatim. When a pinned card has live hard-
-     attention, pinnedOrder() has floated it above its pin-order neighbours, so
-     dragging any *other* card bakes that transient float into the stored order:
-     the floated card keeps its raised position after its attention clears.
-     Accepted (rare: needs the Pinned tab open, a live-attention pinned card,
-     and a drag of a different card) — reconciling the drop against pin-order
-     neighbours while ignoring floated cards costs more than the wrinkle. */
-  const order = [...$("#cardlist").querySelectorAll(".card")]
-    .map(c => c.querySelector(".go")?.dataset.open).filter(Boolean);
-  pinDragEl?.classList.remove("dragging");
-  pinDragEl = null;
-  pinDragging = false;
-  /* never lose a pin id that wasn't on screen (defensive; the pinned tab shows
-     them all) — append any survivors after the visible order */
-  const rest = (UI.pinned || []).filter(id => !order.includes(id));
-  uiMutate({ k: "pin-order", pinned: order.concat(rest) });
-  cardsSig = ""; renderCards();
-});
 
 /* long-press a sticky note — forward its text into a chat's draft (moved
    here from the retired Notes activity). Regular chat bubbles have no
