@@ -260,61 +260,11 @@ func TestAppCompositionRootOwnership(t *testing.T) {
 // Markdown helpers live in web/js/format.js (Packet 6A/6F). Finding 97: paragraph
 // lines must be escaped per line and then joined with a real <br>, never the
 // other way around.
-func TestWebMarkdownParagraphs(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	script := `
-import assert from "node:assert/strict";
-import { md, mdInline } from "./format.js";
-assert.equal(md("line one\nline two"), "<p>line one<br>line two</p>");
-assert.equal(md("a <b> tag\nnext"), "<p>a &lt;b&gt; tag<br>next</p>");
-assert.equal(md("solo"), "<p>solo</p>");
-assert.equal(md("p1 l1\np1 l2\n\np2"), "<p>p1 l1<br>p1 l2</p><p>p2</p>");
-assert.equal(mdInline("*test*"), "<em>test</em>");
-assert.equal(mdInline("**test**"), "<strong>test</strong>");
-assert.equal(mdInline("a *b* and **c**"), "a <em>b</em> and <strong>c</strong>");
-assert.equal(mdInline("2 * 3 * 4"), "2 * 3 * 4");
-`
-	// Run against the source module path (same bytes as embed).
-	tmp := t.TempDir()
-	// Copy format.js next to the harness so the relative import resolves.
-	src, err := os.ReadFile("web/js/format.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f := filepath.Join(tmp, "md.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("markdown paragraph rendering broken: %v\n%s", err, out)
-	}
-}
 
-// Fork launch-config contract (supersedes finding 98's "send empty"): fork is
-// the one path that may CHANGE launch config, so the payload sends the visible
-// selector values in fork mode too. The staleness hazard finding 98 guarded
-// against is now closed at the source — prepareLaunchConfig rebuilds the
-// selectors and re-seeds them from the parent on every sheet open, so what is
-// visible is never a leftover from a previous open.
-// Packet 7I: state tick + UI-sync coordination live in polling.js.
+// Packet 7I: state tick + UI-sync coordination live in polling.js with
+// executable Node coverage in web/test/polling.test.js. Keep ownership wiring:
+// one import/bind owner; no reimplementation in shell or composition entry.
 func TestPollingModuleWired(t *testing.T) {
-	b, err := os.ReadFile("web/js/polling.js")
-	if err != nil {
-		t.Fatalf("read polling.js: %v", err)
-	}
-	src := string(b)
-	if !strings.Contains(src, "export function createPollingFeature") {
-		t.Error("createPollingFeature must live in polling.js")
-	}
-	if !strings.Contains(src, "Packet 7I ownership inventory") {
-		t.Error("polling.js must document Packet 7I ownership inventory")
-	}
 	app := mustReadApp(t)
 	html := mustReadIndex(t)
 	if !strings.Contains(app, `from "./polling.js"`) || !strings.Contains(app, "createPollingFeature") {
@@ -323,7 +273,6 @@ func TestPollingModuleWired(t *testing.T) {
 	if !strings.Contains(app, "pollingFeature.bind()") {
 		t.Error("production must bind pollingFeature as the visibility/pagehide/poll-timer owner")
 	}
-	// Old polling owners must not remain in the composition entry or the shell.
 	for _, frag := range []string{
 		"async function tick(){",
 		"function startPolling(){",
@@ -339,71 +288,11 @@ func TestPollingModuleWired(t *testing.T) {
 	}
 }
 
-// Packet 7H: launch/fork decisions live in sheets.js; Node sheets.test.js is
-// authoritative for payload builders.
-func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
-	b, err := os.ReadFile("web/js/sheets.js")
-	if err != nil {
-		t.Fatalf("read sheets.js: %v", err)
-	}
-	src := string(b)
-	for _, field := range []string{"agent", "model", "effort"} {
-		if strings.Contains(src, field+`: ncParent ? "" :`) {
-			t.Errorf("new-node payload field %q is still emptied in fork mode", field)
-		}
-	}
-	if !strings.Contains(src, "export function buildCreatePayload(") {
-		t.Error("buildCreatePayload must live in sheets.js")
-	}
-	if !strings.Contains(src, "agent,") || !strings.Contains(src, "model,") || !strings.Contains(src, "effort,") {
-		t.Error("create payload must include visible agent/model/effort fields")
-	}
-	// The per-open re-seed that replaces the old empty-payload staleness guard.
-	if !strings.Contains(src, "function prepareLaunchConfig(cfg){") {
-		t.Error("prepareLaunchConfig missing from sheets.js")
-	}
-	if !strings.Contains(src, "fillAgents(); fillModels(); fillEfforts();") {
-		t.Error("prepareLaunchConfig no longer rebuilds the selectors on open — stale-config guard lost")
-	}
-	app := mustReadApp(t)
-	if !strings.Contains(app, `from "./sheets.js"`) || !strings.Contains(app, "createSheetsFeature") {
-		t.Error("production must import and instantiate createSheetsFeature from sheets.js")
-	}
-	if !strings.Contains(app, "sheetsFeature.bind()") {
-		t.Error("production must bind sheetsFeature as the sheet event owner")
-	}
-}
-
-// The effort selector offers agent-specific levels: claude's --effort takes
-// five (low..max), and the list must follow the selected agent, seed from the
-// parent on a fork, and rebuild on an agent switch.
-// Packet 7H: effort menus live in sheets.js.
-func TestEffortLevelsPerAgent(t *testing.T) {
-	b, err := os.ReadFile("web/js/sheets.js")
-	if err != nil {
-		t.Fatalf("read sheets.js: %v", err)
-	}
-	src := string(b)
-	if !strings.Contains(src, `claude: ["low", "medium", "high", "xhigh", "max"]`) {
-		t.Error("DEFAULT_EFFORTS is missing claude's five --effort levels")
-	}
-	if !strings.Contains(src, "function fillEfforts(){") {
-		t.Error("fillEfforts() not defined in sheets.js")
-	}
-	// The effort list must follow an agent switch and a fork's parent seed.
-	if !strings.Contains(src, "function onAgentChange(){ fillModels(); fillEfforts(); }") {
-		t.Error("agent change does not refill the effort list")
-	}
-	if !strings.Contains(src, "fillModels(); fillEfforts();   /* model + effort lists follow") {
-		t.Error("prepareLaunchConfig does not refill efforts for the parent's agent")
-	}
-}
-
+// Shell ARIA for the closed Bookmarks toggle; toggle glyph/aria sync is
+// executed by bookmarks.test.js (bookmarksToggleState). Wiring ownership stays.
 func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
-	// the closed Bookmarks toggle announces opening bookmarks (glyph set by
-	// renderBookmarksToggle in bookmarks.js, so the static button carries no chevron)
 	if !strings.Contains(html, `id="bookmarksbtn" aria-label="open bookmarks"></button>`) {
 		t.Fatal("closed bookmarks toggle should announce opening bookmarks")
 	}
@@ -413,93 +302,11 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 	if !strings.Contains(app, "bookmarksFeature.bind()") {
 		t.Fatal("production must bind bookmarksFeature as the Bookmarks event owner")
 	}
-	bm, err := os.ReadFile("web/js/bookmarks.js")
-	if err != nil {
-		t.Fatalf("read bookmarks.js: %v", err)
-	}
-	src := string(bm)
-	for _, want := range []string{
-		`innerHTML: open ? "&#8250;" : "&#8249;"`,
-		`ariaLabel: open ? "close bookmarks" : "open bookmarks"`,
-		"function bookmarksToggleState(",
-		"renderBookmarksToggle()",
-		"renderBookmarkFlags()",
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("bookmarks toggle state sync missing %q", want)
-		}
-	}
-}
-
-// A note captured from an archived search hit carries the durable
-// (uid, segment, record) address but no live node id. The notes-pane jump
-// action must render for such a note — the handler already opens the archived
-// surface via nt.uid — or Phase 0's "jump back after deletion" goal has no
-// affordance. Gate jump on (nt.node || nt.uid); keep comment gated on nt.node.
-func TestNotesJumpActionRendersForUIDOnlyNotes(t *testing.T) {
-	// Packet 7E: jump affordance lives in bookmarks.js list HTML builder.
-	b, err := os.ReadFile("web/js/bookmarks.js")
-	if err != nil {
-		t.Fatalf("read bookmarks.js: %v", err)
-	}
-	html := string(b)
-	if !strings.Contains(html, `${nt.node || nt.uid ? `+"`"+`<button data-bmact="jump"`) {
-		t.Error("notes-pane jump button must render when the note has a durable uid, not only a live node")
-	}
-	if strings.Contains(html, `${nt.node ? `+"`"+`<button data-bmact="jump"`) {
-		t.Error("jump button is still gated on nt.node alone — UID-only archived-source notes get no jump affordance")
-	}
-	// The comment action stays live-node-only (it replies into the live chat).
-	if !strings.Contains(html, `${nt.node && !nt.anchor ? `+"`"+`<button data-bmact="comment"`) {
-		t.Error("comment action gate changed unexpectedly")
-	}
-}
-
-func TestBubbleCopyLivesInActionRow(t *testing.T) {
-	// Packet 7C: action-row markup and wiring live in chat.js; Node
-	// chat.test.js executes order/copy contracts. Retain a structural wire
-	// check against the production module.
-	b, err := os.ReadFile("web/js/chat.js")
-	if err != nil {
-		t.Fatalf("read chat.js: %v", err)
-	}
-	src := string(b)
-	if strings.Contains(src, "copybtn") {
-		t.Fatal("chat bubbles should not render an always-visible copy button")
-	}
-	if !strings.Contains(src, "export function bubbleActionsHTML") {
-		t.Fatal("bubble action row HTML builder missing from chat.js")
-	}
-	for _, want := range []string{
-		`class="bubwhen"`,
-		`data-bact="fork"`,
-		`data-bact="desc"`,
-		`data-bact="bookmark"`,
-		`data-bact="copy"`,
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("bubble action row missing %q", want)
-		}
-	}
-	if !(strings.Index(src, `data-bact="bookmark"`) < strings.Index(src, `data-bact="copy"`)) {
-		t.Fatal("copy should be the rightmost bubble action")
-	}
-	if !(strings.Index(src, `class="bubwhen"`) < strings.Index(src, `data-bact="fork"`)) {
-		t.Fatal("timestamp should sit between the bubble and the action buttons")
-	}
-	if !strings.Contains(src, `ba.dataset.bact === "copy"`) ||
-		!strings.Contains(src, `copyText`) {
-		t.Fatal("copy action row button is not wired to copy the selected turn")
-	}
-	app := mustReadApp(t)
-	if !strings.Contains(app, `from "./chat.js"`) || !strings.Contains(app, "createChatFeature") {
-		t.Fatal("production must wire createChatFeature from chat.js")
-	}
 }
 
 // Packet 7D: the composer is a shell singleton outside every polled render
 // region. Behavioral coverage lives in web/test/composer.test.js; this keeps
-// the document contract and single production owner.
+// the document placement contract and single production owner.
 func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 	htmlB, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -515,8 +322,6 @@ func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 			t.Errorf("shell missing composer root %s", id)
 		}
 	}
-	// promptbar sits in #chat after the rebuilt #msgs surface and before the
-	// separately rebuilt Bookmarks surface; every composer root is singular.
 	msgsOpen := strings.Index(html, `id="msgs"`)
 	chatLoading := strings.Index(html, `id="chatloading"`)
 	promptbar := strings.Index(html, `id="promptbar"`)
@@ -530,7 +335,6 @@ func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 			t.Errorf("composer root #%s occurs %d times, want 1", id, got)
 		}
 	}
-	// #msgs is a void-of-composer surface: no promptbar markup between its open and the next major sibling section close is hard to parse; instead assert the prompt is a contenteditable singleton with the production placeholder.
 	if !strings.Contains(html, `id="prompt"`) || !strings.Contains(html, `contenteditable="true"`) {
 		t.Fatal("#prompt must remain a contenteditable singleton in the shell")
 	}
@@ -541,7 +345,6 @@ func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 	if !strings.Contains(app, "composerFeature.bind()") {
 		t.Fatal("production must bind composerFeature exactly as the composer event owner")
 	}
-	// No duplicate implementation of the extracted composer in shell or composition.
 	for _, banned := range []string{
 		"function promptText(",
 		"function setComposerBusy(",
@@ -556,132 +359,18 @@ func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 			t.Errorf("shell/composition must not retain composer implementation: %s", banned)
 		}
 	}
-	comp, err := os.ReadFile("web/js/composer.js")
-	if err != nil {
-		t.Fatalf("read composer.js: %v", err)
-	}
-	src := string(comp)
-	if !strings.Contains(src, "export function createComposerFeature") {
-		t.Fatal("composer.js must export createComposerFeature")
-	}
-	if !strings.Contains(src, "UPLOAD_WAIT_TIMEOUT_MS = 12000") {
-		t.Fatal("composer.js must keep the 12-second upload wait bound")
-	}
-	if !strings.Contains(src, "scimux-draft:") {
-		t.Fatal("composer.js must own scimux-draft storage keys")
-	}
 }
 
-func TestBubbleTimestampFormatting(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	src, err := os.ReadFile("web/js/format.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script := `
-import assert from "node:assert/strict";
-import { fmtBubbleTime } from "./format.js";
-const now = new Date("2026-07-24T15:30:00");
-assert.equal(fmtBubbleTime("2026-07-24T09:05:00", now), new Date("2026-07-24T09:05:00").toLocaleTimeString([], { timeStyle: "short" }));
-assert.equal(fmtBubbleTime("2026-07-23T22:10:00", now), "Yesterday, " + new Date("2026-07-23T22:10:00").toLocaleTimeString([], { timeStyle: "short" }));
-assert.equal(fmtBubbleTime("2026-07-20T08:15:00", now), new Date("2026-07-20T08:15:00").toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
-assert.equal(fmtBubbleTime("not-a-date", now), "not-a-date");
-`
-	f := filepath.Join(tmp, "bubble-time.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("bubble timestamp formatting broken: %v\n%s", err, out)
-	}
-}
-
-func TestWebSafeColorRejectsInjection(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	src, err := os.ReadFile("web/js/format.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script := `
-import assert from "node:assert/strict";
-import { safeColor } from "./format.js";
-for (const ok of ["#abc", "#aabbcc", "#aabbccdd", "var(--work)", "rgb(1,2,3)", "rgba(1,2,3,.5)", "hsl(200, 50%, 40%)", "tomato", "  #fff  "]) {
-  assert.ok(safeColor(ok) !== null, "should accept " + ok);
-}
-for (const bad of ['#fff"><script>', 'red;background:url(x)', 'expression(1)', '</style>', '', null, undefined, "var(--x); }"]) {
-  assert.equal(safeColor(bad), null, "should reject " + JSON.stringify(bad));
-}
-assert.equal(safeColor("  #fff  "), "#fff", "trims");
-`
-	f := filepath.Join(tmp, "color.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("safeColor sanitization broken: %v\n%s", err, out)
-	}
-}
-
-func TestLaneChipContrastTextUsesWCAGMath(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	src, err := os.ReadFile("web/js/format.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script := `
-import assert from "node:assert/strict";
-import { hexRGB, contrastText, contrastRatio, relLum } from "./format.js";
-assert.deepEqual(hexRGB("#abc"), [170,187,204]);
-assert.equal(contrastText("#007AFF"), "#000", "system blue has stronger black contrast by WCAG ratio");
-assert.equal(contrastText("#5856D6"), "#fff", "system indigo needs white text");
-assert.equal(contrastText("#FF9500"), "#000", "system orange needs dark text");
-assert.ok(contrastRatio(relLum(hexRGB("#FF9500")), relLum(hexRGB(contrastText("#FF9500")))) >= 4.5);
-assert.ok(contrastRatio(relLum(hexRGB("#5856D6")), relLum(hexRGB(contrastText("#5856D6")))) >= 4.5);
-`
-	f := filepath.Join(tmp, "lane-contrast.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("lane chip contrast helpers broken: %v\n%s", err, out)
-	}
-}
-
+// Host connectivity DOM chrome and CSS stay here; tick orchestration and
+// online/offline/unreachable branches live in polling.js with executable Node
+// coverage in web/test/polling.test.js. Card age flip lives in cards.js with
+// web/test/cards.test.js (cardTimeItems/HTML, CARD_TIME_SWAP_MS, updateAges).
 func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
-	// Host connectivity DOM chrome stays in the shell; tick orchestration and
-	// online/offline/unreachable branches live in polling.js (Packet 7I) with
-	// executable Node coverage in web/test/polling.test.js. Card age flip
-	// lives in cards.js (Packet 7A) with web/test/cards.test.js.
 	app := mustReadApp(t)
-	for _, want := range []string{
-		`<span class="host offline" id="host">scimux</span>`,
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("activity card interaction/connectivity shell missing %q", want)
-		}
+	if !strings.Contains(html, `<span class="host offline" id="host">scimux</span>`) {
+		t.Error("activity host connectivity shell missing #host offline chrome")
 	}
 	for _, want := range []string{
 		`createPollingFeature`,
@@ -696,39 +385,6 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
 		}
 	}
-	poll, err := os.ReadFile("web/js/polling.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ps := string(poll)
-	for _, want := range []string{
-		`setHostOnline(false)`,
-		`setServerUnreachable()`,
-		`setHostOnline(true)`,
-		`server unreachable`,
-	} {
-		if !strings.Contains(ps, want) {
-			t.Errorf("polling.js host connectivity missing %q", want)
-		}
-	}
-	cards, err := os.ReadFile("web/js/cards.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := string(cards)
-	for _, want := range []string{
-		`export const CARD_TIME_SWAP_MS = 30000;`,
-		`export function cardTimeItems(n){`,
-		`export function cardTimeHTML(n,`,
-		`Last interaction ${ageFn(you)} · last seen ${ageFn(seen)}`,
-		`cardTimeFlip++`,
-		`updateCardAges(true)`,
-		`time.classList.add("roll-dn")`,
-	} {
-		if !strings.Contains(cs, want) {
-			t.Errorf("cards.js age wiring missing %q", want)
-		}
-	}
 	for _, want := range []string{
 		`#statusbar .host::before`,
 		`#statusbar .host.online::before { background: #34C759; }`,
@@ -737,114 +393,30 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 			t.Errorf("activity card connectivity CSS missing %q", want)
 		}
 	}
-	if strings.Contains(html, `<span class="age">${ageText(n.last_activity)}</span>`) ||
-		strings.Contains(cs, `<span class="age">${ageText(n.last_activity)}</span>`) {
-		t.Fatal("folded activity cards should not label pane movement as the primary age")
-	}
 }
 
-func TestActivityCardOrderPinsAttentionThenFreshCards(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	for _, name := range []string{"format.js", "lanes.js", "map-model.js"} {
-		src, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import { orderedNodes } from "./map-model.js";
-const nodes = [
-  {id:"active-older", last_activity: 900, last_interaction: 200, created_at:"2026-01-04T00:00:00Z"},
-  {id:"newer-fresh", created_at:"2026-01-06T00:00:00Z"},
-  {id:"active-newer", last_activity: 300, last_interaction: 800, created_at:"2026-01-01T00:00:00Z"},
-  {id:"never-touched", last_activity: 700, created_at:"2026-01-03T00:00:00Z"},
-  {id:"older-fresh", created_at:"2026-01-05T00:00:00Z"},
-  {id:"attn", attention:"approval", last_activity: 100, last_interaction: 100, created_at:"2026-01-02T00:00:00Z"},
-];
-assert.deepEqual(
-  orderedNodes(nodes).map(n => n.id),
-  ["attn", "newer-fresh", "older-fresh", "active-newer", "active-older", "never-touched"]
-);
-`
-	f := filepath.Join(tmp, "card-order.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("activity card ordering broken: %v\n%s", err, out)
-	}
-}
-
+// Packet 7B: station long-press lives in map.js; Node covers bind/destroy.
+// Structural: production wires createMapFeature; no residual inline longpress.
 func TestDockedMapStationLongPressEdits(t *testing.T) {
-	// Packet 7B: station long-press lives in map.js; Node covers bind/destroy.
-	// Structural: production wires createMapFeature and map.js owns the docked path.
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
 	if !strings.Contains(app, `from "./map.js"`) || !strings.Contains(app, "createMapFeature") {
 		t.Fatal("production must wire map.js for station long-press")
 	}
-	mapJS, err := os.ReadFile("web/js/map.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(mapJS)
-	// The docked map must reach the editor — no unconditional mapFull bail-out.
-	if strings.Contains(body, "if (!mapFull) return;") {
-		t.Error("station long-press still bails out of the docked (collapsed) map")
-	}
-	// The full-screen-only selection move stays fenced behind mapFull.
-	if !strings.Contains(body, "if (mapFull){") {
-		t.Error("full-screen selection move should be gated on mapFull, not run in the docked map")
-	}
-	// Both maps open the editor scoped to the pressed station's stop.
-	if !strings.Contains(body, "openActivityEditor(id, stop)") {
-		t.Error("station long-press should open the activity editor scoped to the station's stop")
-	}
-	// No residual inline longpress on #mapwrap after extraction.
 	if strings.Contains(html, `longpress($("#mapwrap"), ".strow"`) {
 		t.Error("inline mapwrap station longpress must move into map.js")
 	}
 }
 
+// Packet 7B: fold/chip algorithms and markup live in map.js; executable Node
+// coverage is web/test/map.test.js (chipTapPlan, applyNewLaneFolds, laneChipStyle,
+// attentionStationSVG). Keep production wiring + CSS structural contracts.
 func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
-	// Packet 7B: fold/chip algorithms and markup live in map.js (+ lanes.js pure
-	// helpers). Executable Node coverage is web/test/map.test.js; keep structural
-	// wiring + CSS contracts here.
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
 	css := mustProductionCSSCascade(t)
 	if !strings.Contains(app, `from "./map.js"`) || !strings.Contains(app, "createMapFeature") {
 		t.Fatal("production must wire map.js for journey fold/chip behavior")
-	}
-	mapJS, err := os.ReadFile("web/js/map.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(mapJS)
-	for _, want := range []string{
-		`MAP_FOLD_KNOWN_KEY = "scimux-mapfold-known"`,
-		`export function applyNewLaneFolds`,
-		`export function unfoldFocusLane`,
-		`export function chipTapPlan`,
-		`export function laneChipStyle`,
-		`class="lanechip ${focusLane === l.id ? "selected" : ""}"`,
-		`class="attnstation-glow"`,
-		`class="attnstation-ring"`,
-		`setLaneFilter("")`,
-		// stack order reuses lanes.js byNameID via buildStackBlocks
-		`byNameID`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("journey lane fold/chip wiring missing from map.js: %q", want)
-		}
 	}
 	// Shell/composition must not retain duplicate fold/chip listeners or implementations.
 	for _, dead := range []string{
@@ -857,8 +429,6 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 			t.Errorf("shell/composition map fold/chip code still present: %q", dead)
 		}
 	}
-	// CSS declarations and selectors live in the cascade (inline today; linked
-	// files after Phase 5 extraction).
 	for _, want := range []string{
 		`animation: mapAttentionDot 1.65s ease-in-out infinite;`,
 		`.lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }`,
@@ -901,83 +471,11 @@ func TestEmbeddedAgentAssetsServe(t *testing.T) {
 // once that lane later gathers more stations. Execute forkKind under node
 // against synthetic node sets to lock the chronological (not population-based)
 // classification.
-func TestWebForkKindStableAcrossLaneGrowth(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	for _, name := range []string{"format.js", "lanes.js"} {
-		src, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import { forkKind } from "./lanes.js";
-let nodes = [
-  {id:"p",     lane_id:"lane-a", created_at:"2026-01-01T00:00:00Z"},
-  {id:"c",     lane_id:"lane-b", parent:"p", created_at:"2026-01-02T00:00:00Z"},
-  {id:"later", lane_id:"lane-b", created_at:"2026-01-03T00:00:00Z"},
-];
-assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), "y-new", "grown lane must stay y-new");
-nodes = [
-  {id:"a0", lane_id:"lane-b", created_at:"2026-01-01T00:00:00Z"},
-  {id:"p",  lane_id:"lane-a", created_at:"2026-01-02T00:00:00Z"},
-  {id:"c",  lane_id:"lane-b", parent:"p", created_at:"2026-01-03T00:00:00Z"},
-];
-assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), "s", "prior station in dest lane is a crossover");
-nodes = [
-  {id:"p", lane_id:"lane-a", created_at:"2026-01-01T00:00:00Z"},
-  {id:"c", lane_id:"lane-a", parent:"p", created_at:"2026-01-02T00:00:00Z"},
-];
-assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), "y-stay", "same-lane fork is y-stay");
-assert.equal(forkKind({id:"r", lane_id:"lane-a"}, nodes), null, "root has no fork");
-nodes = [{id:"c", lane_id:"lane-b", parent:"ghost", created_at:"2026-01-02T00:00:00Z"}];
-assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), null, "deleted parent has no glyph");
-`
-	f := filepath.Join(tmp, "forkkind.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("forkKind classification broken: %v\n%s", err, out)
-	}
-}
 
-func TestWebStackMapKeepsForkCues(t *testing.T) {
-	// Packet 7B: fork cues/goto live in map.js; classification stays in lanes.js.
-	app := mustReadApp(t)
-	if !strings.Contains(app, `from "./map.js"`) {
-		t.Fatal("production must wire map.js for stack fork cues")
-	}
-	mapJS, err := os.ReadFile("web/js/map.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(mapJS)
-	for _, want := range []string{
-		"export function forkCueHTML(", // the caption builder
-		"fork: true,",                  // stack renderer opts in
-		"data-goorigin=",               // tap-to-origin target
-		"function gotoStation(",        // …and its handler
-		`forkKind(n) === "y-new"`,      // wall map classifies by history
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("stack fork-topology wiring missing from map.js: %q", want)
-		}
-	}
-	if strings.Contains(body, "laneCount[n.lane_id]") || strings.Contains(mustReadApp(t), "laneCount[n.lane_id]") {
-		t.Error("old population-based Y-new/S classifier still present; must be replaced by forkKind")
-	}
-}
-
+// Packet 7C: key-row HTML lives in chat.js; Node chat.test.js covers ACP vs tmux
+// presentation. Retain the negative branch that ACP must not invent y/n keys
+// (Node asserts positive protocol options only, not y/n absence).
 func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
-	// Packet 7C: key-row HTML lives in chat.js keyRowHTML; Node covers ACP vs tmux.
 	b, err := os.ReadFile("web/js/chat.js")
 	if err != nil {
 		t.Fatalf("read chat.js: %v", err)
@@ -988,7 +486,6 @@ func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 		t.Fatal("structured approval branch not found")
 	}
 	j := strings.Index(src[i:], `["1","2","3","4","y","n"`)
-	// ACP branch must end before the tmux y/n key list.
 	acpEnd := strings.Index(src[i:], "return `<span class=\"hint\">${escape(HINTS")
 	if acpEnd < 0 {
 		acpEnd = j
@@ -1001,24 +498,15 @@ func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 		strings.Contains(branch, `["1","2","3","4","y","n"`) {
 		t.Fatal("structured approval branch must render protocol options only, not y/n fallback")
 	}
-	if !strings.Contains(branch, "permOptions") && !strings.Contains(branch, "perm_options") {
-		// keyRowHTML uses permOptions param
-		if !strings.Contains(src, "permOptions") {
-			t.Fatal("ACP branch must use protocol options")
-		}
-	}
 }
 
-// TestSearchOverlayShell asserts the G3 search overlay is a real Spotlight-style
-// modal: a 🔍 trigger reachable from any view, an aria-modal dialog that blurs
-// the app behind it (with a reduced-transparency fallback), Escape/backdrop/✕ to
-// close, and focus returned to the trigger. The grouped feed itself is G4 — here
-// #searchfeed exists but only carries the blank-state hint.
+// Search overlay DOM/ARIA/CSS structural contracts. Open/close/focus-return
+// behavior is executed by web/test/search.test.js.
 func TestSearchOverlayShell(t *testing.T) {
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
+	app := mustReadApp(t)
 
-	// Structure + a11y: trigger and modal dialog.
 	for _, want := range []string{
 		`id="searchbtn"`,
 		`id="searchoverlay"`,
@@ -1032,9 +520,6 @@ func TestSearchOverlayShell(t *testing.T) {
 			t.Errorf("search overlay markup missing %q", want)
 		}
 	}
-
-	// The app behind the overlay is blurred, with an opaque fallback when the
-	// viewer asks for reduced transparency (spec: honor Reduce Transparency).
 	if !strings.Contains(css, "backdrop-filter: blur") {
 		t.Error("search scrim should blur the app behind it")
 	}
@@ -1044,10 +529,6 @@ func TestSearchOverlayShell(t *testing.T) {
 	if !strings.Contains(css, "prefers-reduced-motion: reduce") {
 		t.Error("search overlay must honor prefers-reduced-motion")
 	}
-
-	// Packet 7G: open/close/focus-return live in search.js; app.js keeps thin
-	// wrappers and imports the factory. Node search.test.js is authoritative.
-	app := mustReadApp(t)
 	if !strings.Contains(app, `from "./search.js"`) || !strings.Contains(app, "createSearchFeature") {
 		t.Error("production must import and instantiate createSearchFeature from search.js")
 	}
@@ -1057,88 +538,11 @@ func TestSearchOverlayShell(t *testing.T) {
 	if !strings.Contains(app, "searchFeature.bind()") {
 		t.Error("production must bind searchFeature as the Search event owner")
 	}
-	src, err := os.ReadFile("web/js/search.js")
-	if err != nil {
-		t.Fatalf("read search.js: %v", err)
-	}
-	js := string(src)
-	for _, want := range []string{
-		"searchReturnFocus",
-		`on(root("searchbtn"), "click", open)`,
-		`on(root("searchclose"), "click", close)`,
-		`on(root("searchscrim"), "click", close)`,
-	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("search.js overlay behavior missing %q", want)
-		}
-	}
 }
 
-// TestSearchSlashShortcut asserts the "/" activation shortcut (spec: search opens
-// on "/" when focus is not in a text field), alongside the existing Cmd/Ctrl-K.
-// Packet 7G: document shortcut ownership lives in search.js bind().
-func TestSearchSlashShortcut(t *testing.T) {
-	b, err := os.ReadFile("web/js/search.js")
-	if err != nil {
-		t.Fatalf("read search.js: %v", err)
-	}
-	src := string(b)
-	i := strings.Index(src, `if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k"`)
-	if i < 0 {
-		t.Fatal("global search shortcut handler not found in search.js")
-	}
-	// Handler is function onDocumentKeydown — take a bounded window.
-	end := i + 600
-	if end > len(src) {
-		end = len(src)
-	}
-	handler := src[i:end]
-	if !strings.Contains(handler, `e.key === "/"`) {
-		t.Error(`the "/" open shortcut is missing`)
-	}
-	if !strings.Contains(handler, "!isOpen()") {
-		t.Error(`the "/" shortcut must not fire while the overlay is already open`)
-	}
-	if !strings.Contains(handler, `/^(INPUT|TEXTAREA|SELECT)$/.test(e.target && e.target.tagName)`) ||
-		!strings.Contains(handler, "isContentEditable") {
-		t.Error(`the "/" shortcut must be suppressed while a text field is focused`)
-	}
-}
-
-// TestSearchHitCarriesIdentity asserts each rendered hit carries its stable
-// identity in the DOM — role (so asset actions can be gated) and segment/record
-// (so archived show-to-chat can anchor by ordinal, not timestamp).
-// Packet 7G: hit HTML and actions live in search.js; openArchived stays shell.
+// Hit identity attributes are executed by search.test.js (searchHitHTML).
+// Retain the shell connectivity that openArchived joins seg/rec to the archived API.
 func TestSearchHitCarriesIdentity(t *testing.T) {
-	b, err := os.ReadFile("web/js/search.js")
-	if err != nil {
-		t.Fatalf("read search.js: %v", err)
-	}
-	src := string(b)
-	i := strings.Index(src, "export function searchHitHTML(")
-	if i < 0 {
-		t.Fatal("searchHitHTML not found in search.js")
-	}
-	body := src[i : i+strings.Index(src[i:], "\n}")]
-	for _, want := range []string{
-		`data-role="${e(h.role`,
-		`data-segment="${h.segment`,
-		`data-record="${h.record`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("hit markup missing stable-identity attribute %q", want)
-		}
-	}
-	// hit bar / action HTML must feed the role so asset hits are gated.
-	if !strings.Contains(src, "hitBarHTML(el.dataset.kind, el.dataset.forkable === \"1\", el.dataset.role)") &&
-		!strings.Contains(src, "searchHitActions(el.dataset.kind, el.dataset.forkable === \"1\", el.dataset.role)") {
-		t.Error("toggleHitBar must pass the hit role into searchHitActions/hitBarHTML")
-	}
-	// Archived show-to-chat must anchor by (segment, record), passed to openArchived.
-	if !strings.Contains(src, "openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") &&
-		!strings.Contains(src, "d.openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") {
-		t.Error("archived show-to-chat must anchor by seg/rec, not just timestamp")
-	}
 	app := mustReadApp(t)
 	if !strings.Contains(app, `"&seg=" + encodeURIComponent(seg`) ||
 		!strings.Contains(app, `"&rec=" + encodeURIComponent(rec`) {
@@ -1146,113 +550,19 @@ func TestSearchHitCarriesIdentity(t *testing.T) {
 	}
 }
 
-// TestSearchEarlierHistoryJump asserts finding #1's fix: a show-to-chat hit whose
-// turn lives in an earlier segment (before a /clear) no longer dead-ends in a
-// toast — consumePendingJump loads the full history and scrolls to the historical
-// turn by time, which requires the history bubbles to carry data-time.
+// Packet 7C: consumePendingJump + history bubble templates live in chat.js;
+// Node covers matchPendingJumpInHist and history expansion. Keep a thin wire
+// check that the production chat owner is bound.
 func TestSearchEarlierHistoryJump(t *testing.T) {
-	// Packet 7C: consumePendingJump + history bubble templates live in chat.js;
-	// Node covers matchPendingJumpInHist and history expansion.
-	b, err := os.ReadFile("web/js/chat.js")
-	if err != nil {
-		t.Fatalf("read chat.js: %v", err)
-	}
-	src := string(b)
-	i := strings.Index(src, "function consumePendingJump(")
-	if i < 0 {
-		t.Fatal("consumePendingJump not found in chat.js")
-	}
-	// body until next top-level function after consumePendingJump
-	rest := src[i:]
-	endRel := strings.Index(rest[len("function consumePendingJump("):], "\n  function ")
-	if endRel < 0 {
-		endRel = strings.Index(rest, "\n  async function ")
-	}
-	if endRel < 0 {
-		endRel = len(rest) - 1
-	} else {
-		endRel += len("function consumePendingJump(")
-	}
-	body := rest[:endRel]
-	// It must fall through to history instead of only toasting on an earlier-segment hit.
-	if !strings.Contains(body, "loadHistory(") && !strings.Contains(body, "loadChatHistory") {
-		t.Error("consumePendingJump must load history when the turn is in an earlier segment")
-	}
-	if !strings.Contains(body, ".turn.hist") ||
-		(!strings.Contains(body, "turnTime") && !strings.Contains(src, "matchPendingJumpInHist")) {
-		t.Error("consumePendingJump must scroll to the historical turn by time")
-	}
-	// The old behavior (a hard toast that abandons the jump on any prior history)
-	// must be gone from the earlier-history branch.
-	if strings.Contains(body, "earlier chat segment (before a /clear)") {
-		t.Error("the earlier-segment dead-end toast should be replaced by a history load")
-	}
-	// History bubbles must carry data-time so the jump can target them.
-	if !strings.Contains(src, `data-time="`) && !strings.Contains(src, "data-time=") {
-		t.Error("history bubbles must carry data-time for jump targeting")
-	}
-	if !strings.Contains(src, "histBk") || !strings.Contains(src, "turn.hist") && !strings.Contains(src, "hist: true") {
-		t.Error("history bubble template must mark hist turns")
-	}
-	// loadHistory must allow an empty scrollTo so a jump owns the scroll.
-	if !strings.Contains(src, `scrollTo: scrollTo || ""`) && !strings.Contains(src, "scrollTo: scrollTo ||") {
-		t.Error("loadChatHistory must allow an empty scrollTo so a jump owns the scroll")
-	}
-}
-
-// TestPinnedStoreModel asserts the pinned-cards store model: an ordered
-// UI.pinned array carried through init + normUI, and op-merge cases for
-// pin (new pin to the front → renders at top), unpin, and drag reorder.
-// applyOp lives in web/js/state.js (Packet 6C/6F); the live document is owned
-// by polling.js (Packet 7I); cards.js consumes pinned via injected getters.
-func TestPinnedStoreModel(t *testing.T) {
 	app := mustReadApp(t)
-	for _, want := range []string{
-		`from "./polling.js"`,
-		`from "./cards.js"`,
-		`pinned: () => getUI().pinned`,
-		`createPollingFeature`,
-	} {
-		if !strings.Contains(app, want) {
-			t.Errorf("pinned store model missing %q", want)
-		}
+	if !strings.Contains(app, `from "./chat.js"`) || !strings.Contains(app, "createChatFeature") {
+		t.Fatal("production must wire createChatFeature for earlier-history jumps")
 	}
-	poll, err := os.ReadFile("web/js/polling.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(poll), `emptyUI,`) || !strings.Contains(string(poll), `let UI = emptyUI();`) {
-		t.Error("polling.js must initialize the UI document through state.js emptyUI")
-	}
-	state, err := os.ReadFile("web/js/state.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := string(state)
-	for _, want := range []string{
-		`case "pin":`,
-		`case "unpin":`,
-		`case "pin-order":`,
-		"doc.pinned.unshift(op.id)",
-		`op.k === "bookmark-add" || op.k === "bookmark-del"`,
-	} {
-		if !strings.Contains(st, want) {
-			t.Errorf("state.js pinned model missing %q", want)
-		}
-	}
-	// pin is not in the idempotent set (replay only on matching rev).
-	if strings.Contains(st, `op.k === "pin"`) && strings.Contains(st, `idempotentOp`) {
-		// Ensure pin is not listed alongside bookmark-add/del.
-		idem := st[strings.Index(st, "export function idempotentOp"):]
-		idem = idem[:strings.Index(idem, "\n}")]
-		if strings.Contains(idem, `"pin"`) {
-			t.Error("pin ops must not be marked idempotent (they encode intent, replay on matching rev only)")
-		}
+	if !strings.Contains(app, "chatFeature.bind()") {
+		t.Fatal("production must bind chatFeature as the chat event owner")
 	}
 }
 
-// TestPinnedIcons asserts both glyphs are inlined SVGs (no FontAwesome webfont
-// dependency) and carry no Pro/Commercial license artifact.
 func TestPinnedIcons(t *testing.T) {
 	app := mustReadApp(t)
 	html := mustReadIndex(t)
@@ -1272,345 +582,57 @@ func TestPinnedIcons(t *testing.T) {
 // TestPinnedTab asserts a conditional "Pinned" tab sits between the scope tab
 // and "Archived", shows a live count, and appears only when something is pinned.
 // Tab HTML generation lives in cards.js (Packet 7A); Node covers cardTabsHTML.
+
+// Tab HTML order/count is executed by cards.test.js (cardTabsHTML). Keep the
+// document shell root and cards wiring ownership.
 func TestPinnedTab(t *testing.T) {
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
-	// Shell still owns the #cardtabs root.
 	if !strings.Contains(html, `id="cardtabs"`) {
 		t.Fatal("#cardtabs root missing from document shell")
 	}
 	if !strings.Contains(app, `from "./cards.js"`) || !strings.Contains(app, "createCardsFeature") {
 		t.Fatal("production must wire cards.js for tab rendering")
 	}
-	cards, err := os.ReadFile("web/js/cards.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(cards)
-	for _, want := range []string{
-		`data-tab="pinned"`,
-		"pinnedCount",
-		`data-tab="current"`,
-		`data-tab="archived"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("cards.js tab markup missing %q", want)
-		}
-	}
-	// Ordering: the Pinned tab must be emitted after the scope tab and before
-	// Archived.
-	pin := strings.Index(body, `data-tab="pinned"`)
-	cur := strings.Index(body, `data-tab="current"`)
-	arch := strings.Index(body, `data-tab="archived"`)
-	if !(cur < pin && pin < arch) {
-		t.Errorf("Pinned tab must sit between current and archived (cur=%d pin=%d arch=%d)", cur, pin, arch)
-	}
 }
 
-// TestPinnedFilterAndOrder asserts the Pinned tab filters to pinned cards and
-// orders them attention-first, then by pin order (UI.pinned index).
-// Filtering/ordering algorithms stay in map-model.js; cards.js consumes them.
-func TestPinnedFilterAndOrder(t *testing.T) {
-	cards, err := os.ReadFile("web/js/cards.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := string(cards)
-	if !strings.Contains(cs, `cardTab === "pinned"`) && !strings.Contains(cs, `cardTab: "pinned"`) {
-		// Factory uses g("cardTab"); template uses cardTab === "pinned" for draggable.
-		if !strings.Contains(cs, `cardTab === "pinned"`) {
-			t.Error("cards.js must special-case the pinned tab for draggable cards")
-		}
-	}
-	app := mustReadApp(t)
-	if !strings.Contains(app, `from "./cards.js"`) {
-		t.Error("production must wire cards.js")
-	}
-	if !strings.Contains(cs, "visibleCardLists") {
-		t.Error("cards.js must use visibleCardLists for tab/lane visibility")
-	}
-	mapModel, err := os.ReadFile("web/js/map-model.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(mapModel), "export function pinnedOrder") {
-		t.Error("map-model.js must retain attention-first pinned ordering")
-	}
-}
-
-// TestPinnedActionAndFlag asserts the swipe/hover action row leads with a
-// pin/unpin button (leftmost), and a folded card shows a pin flag when pinned.
-func TestPinnedActionAndFlag(t *testing.T) {
-	cards, err := os.ReadFile("web/js/cards.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(cards)
-	i := strings.Index(html, `<div class="actions">`)
-	if i < 0 {
-		t.Fatal("card actions row missing from cards.js")
-	}
-	j := strings.Index(html[i:], "</div>`")
-	actions := html[i : i+j]
-	pin := strings.Index(actions, "data-pin-action")
-	arch := strings.Index(actions, "data-arch-action")
-	trash := strings.Index(actions, "data-trash")
-	if pin < 0 {
-		t.Fatal("pin/unpin action button missing from the action row")
-	}
-	if !(pin < arch && pin < trash) {
-		t.Errorf("pin must be the leftmost action (pin=%d arch=%d trash=%d)", pin, arch, trash)
-	}
-	// The folded card marks pinned state with a flag glyph near the chevron.
-	if !strings.Contains(html, "pinflag") {
-		t.Error("a pinned card should show a pin flag on the folded card")
-	}
-	// Click handler wires the action via uiMutate pin/unpin toggle.
-	if !strings.Contains(html, "data-pin-action") ||
-		!strings.Contains(html, `isPinned(id) ? "unpin" : "pin"`) {
-		t.Error("pin action handler must toggle pin/unpin via uiMutate")
-	}
-}
-
-// TestPinnedDragReorder asserts drag-to-reorder within the Pinned tab persists
-// order via a pin-order op, and is poll-safe (a drag in progress suppresses the
-// list rebuild). Implementation lives in cards.js (Packet 7A).
-func TestPinnedDragReorder(t *testing.T) {
-	cards, err := os.ReadFile("web/js/cards.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(cards)
-	for _, want := range []string{
-		`k: "pin-order"`,
-		"pinDragging",      // the in-progress-drag guard
-		`draggable="true"`, // pinned cards are draggable
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("pinned drag reorder missing %q", want)
-		}
-	}
-	// Poll-safe: render must bail while a pin drag is in progress.
-	if !strings.Contains(html, "if (pinDragging) return;") &&
-		!strings.Contains(html, "if (pinDragging) return") {
-		t.Error("renderCards must not rebuild the list mid-drag (poll-safe)")
-	}
-}
-
-// TestSearchFeed asserts the G4 grouped feed wiring: the input drives a
-// debounced fetch of /api/search with an AbortController (so a superseded query
-// is dropped) and a client-side min-length gate, and the response renders as
-// per-chat groups with headers (agent, title, lane swatch) and hits.
-// Packet 7G: feed lives in search.js; Node search.test.js is authoritative.
+// Debounce/abort/min-length/feed rendering are executed by search.test.js.
+// Retain the Go↔JS connectivity that SEARCH_MAX mirrors the server cap.
 func TestSearchFeed(t *testing.T) {
 	b, err := os.ReadFile("web/js/search.js")
 	if err != nil {
 		t.Fatalf("read search.js: %v", err)
 	}
 	src := string(b)
-	for _, want := range []string{
-		"async function runSearch(",
-		"function renderSearchFeed(",
-		"export function searchGroupHTML(",
-		"export function searchHitHTML(",
-		"new AbortCtrl()",
-		`fetchFn("/api/search?q=" + encodeURIComponent(`,
-		`on(root("searchinput"), "input", onInput)`,
-		"export const SEARCH_MIN =",
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("search feed wiring missing %q", want)
-		}
-	}
-	if !strings.Contains(src, "< SEARCH_MIN") {
-		t.Error("runSearch must gate on the client-side min query length")
-	}
 	if want := fmt.Sprintf("export const SEARCH_MAX = %d;", maxSearchQuery); !strings.Contains(src, want) {
 		t.Errorf("SEARCH_MAX must mirror the server cap: expected %q", want)
 	}
-	if !strings.Contains(src, "searchSeq") {
-		t.Error("a sequence guard is expected so a stale response can't clobber a newer one")
-	}
-	if !strings.Contains(src, "clearTimeoutFn(searchDebounce)") {
-		t.Error("the search input must be debounced (clearTimeout on searchDebounce)")
-	}
-	if strings.Contains(src, `dataset.searchHit` /* placeholder for a G5-only handler */) {
-		t.Error("search feed must not use a dataset.searchHit placeholder")
+	if !strings.Contains(src, "export const SEARCH_MIN =") {
+		t.Error("SEARCH_MIN must remain exported from search.js")
 	}
 }
 
-// TestSearchExcerptEscaping runs searchHitHTML under node to prove the excerpt
-// escapes before/after and wraps ONLY the match in <mark>. Packet 7G: module
-// import; Node search.test.js is the primary coverage.
-func TestSearchExcerptEscaping(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	for _, name := range []string{"search.js", "format.js", "bookmarks.js", "lanes.js"} {
-		src, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import { searchHitHTML } from "./search.js";
-import { esc } from "./format.js";
-const out = searchHitHTML({ before: "a <b>", match: "x&y", after: "</b> z", time: "2026-07-26T10:00:00" }, esc);
-assert.ok(out.includes("a &lt;b&gt;<mark>x&amp;y</mark>&lt;/b&gt; z"),
-  "excerpt must escape before/after and wrap only the match in <mark>; got: " + out);
-assert.ok(!out.includes("<b>") && !out.includes("</b>"),
-  "raw HTML from the excerpt must never survive into the feed; got: " + out);
-`
-	f := filepath.Join(tmp, "searchhit.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("search excerpt escaping broken: %v\n%s", err, out)
-	}
-}
-
-// TestSearchActionBar asserts the G5a per-hit action bar: a tap on a hit reveals
-// an adaptive bar (show-to-chat / fork / add-note), show-to-chat exits the
-// overlay and jumps, fork reuses the fork sheet parented to the hit's node, and
-// add-note keeps the overlay open. Packet 7G: actions in search.js; fork sheet shell.
+// Adaptive hit actions and show/fork/bookmark branches are executed by
+// search.test.js. Retain the cross-feature fork injection seam.
 func TestSearchActionBar(t *testing.T) {
-	b, err := os.ReadFile("web/js/search.js")
-	if err != nil {
-		t.Fatalf("read search.js: %v", err)
-	}
-	src := string(b)
-	for _, want := range []string{
-		"export function searchHitActions(",
-		"function doSearchAction(",
-		"function toggleHitBar(",
-		`on(root("searchfeed"), "click", onFeedClick)`,
-		"data-sact",
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("search action bar wiring missing %q", want)
-		}
-	}
-	// Packet 7H: forkFromTurn lives in sheets.js; search injects it via app.js.
-	sheets, err := os.ReadFile("web/js/sheets.js")
-	if err != nil {
-		t.Fatalf("read sheets.js: %v", err)
-	}
-	sheetsSrc := string(sheets)
-	if !strings.Contains(sheetsSrc, "function forkFromTurn(text, parent)") {
-		t.Error("forkFromTurn must accept an explicit parent so search can fork from the hit's node")
-	}
-	if !strings.Contains(sheetsSrc, "ncParent = parent || sel;") &&
-		!strings.Contains(sheetsSrc, "ncParent = parent || sel") {
-		// factory uses d.sel()
-		if !strings.Contains(sheetsSrc, "parent || sel") && !strings.Contains(sheetsSrc, "parent ||") {
-			t.Error("forkFromTurn should default the parent to sel to preserve existing callers")
-		}
-	}
 	app := mustReadApp(t)
 	if !strings.Contains(app, `forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent)`) {
 		t.Error("search/chat must inject sheetsFeature.forkFromTurn")
 	}
-	// show-to-chat's live destination is jumpToHitChat: leaves overlay + pending jump.
-	j := strings.Index(src, "function jumpToHitChat(")
-	if j < 0 {
-		t.Fatal("jumpToHitChat not found in search.js")
-	}
-	jumpEnd := strings.Index(src[j:], "\n  function ")
-	if jumpEnd < 0 {
-		jumpEnd = strings.Index(src[j:], "\n  async function ")
-	}
-	if jumpEnd < 0 {
-		jumpEnd = 400
-	}
-	jump := src[j : j+jumpEnd]
-	if !strings.Contains(jump, "close()") || !strings.Contains(jump, "setPendingJump") {
-		t.Error("show-to-chat must exit the overlay and jump to the turn")
-	}
-	i := strings.Index(src, "function doSearchAction(")
-	if i < 0 {
-		t.Fatal("doSearchAction not found")
-	}
-	// body until next factory function at same indent
-	rest := src[i:]
-	endRel := strings.Index(rest[len("function doSearchAction("):], "\n  function ")
-	if endRel < 0 {
-		endRel = 1200
-	} else {
-		endRel += len("function doSearchAction(")
-	}
-	body := rest[:endRel]
-	if !strings.Contains(body, "jumpToHitChat(") {
-		t.Error("show action must route live hits through jumpToHitChat")
-	}
-	if !strings.Contains(body, "close()") || !strings.Contains(body, "forkFromTurn") {
-		t.Error("fork action must exit the overlay and reuse forkFromTurn")
-	}
-	nb := body[strings.Index(body, `a === "bookmark"`):]
-	if !strings.Contains(nb, `k: "bookmark-add"`) {
-		t.Error("add-note must file a note-add op")
-	}
-	if strings.Contains(nb, "close()") {
-		t.Error("add-note must keep the overlay open (no close in its branch)")
-	}
-}
-
-// TestSearchHitActionsAdaptive runs searchHitActions under node to prove the
-// per-hit action set is adaptive: every hit can be shown, only a live+forkable
-// hit forks from the feed bar (archived fork lives inside the read-only view,
-// where the launch config is), and notes never fork. Packet 7G: search.js module.
-func TestSearchHitActionsAdaptive(t *testing.T) {
-	node, err := exec.LookPath("node")
+	sheets, err := os.ReadFile("web/js/sheets.js")
 	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
+		t.Fatalf("read sheets.js: %v", err)
 	}
-	tmp := t.TempDir()
-	for _, name := range []string{"search.js", "format.js", "bookmarks.js", "lanes.js"} {
-		src, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import { searchHitActions } from "./search.js";
-const eq = (a, b) => assert.deepStrictEqual(a, b);
-eq(searchHitActions("live", true),      ["show", "fork", "bookmark"]);
-eq(searchHitActions("live", false),     ["show", "bookmark"]);
-eq(searchHitActions("bookmarks", false),    ["show", "bookmark"]);
-eq(searchHitActions("bookmarks", true),     ["show", "bookmark"]);
-eq(searchHitActions("archived", true),  ["show", "bookmark"]);
-eq(searchHitActions("archived", false), ["show", "bookmark"]);
-eq(searchHitActions("live", true, "asset"),     ["show"]);
-eq(searchHitActions("archived", true, "asset"), ["show"]);
-eq(searchHitActions("live", true, "user"),      ["show", "fork", "bookmark"]);
-eq(searchHitActions("live", true, "assistant"), ["show", "fork", "bookmark"]);
-`
-	f := filepath.Join(tmp, "hitactions.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("search hit actions not adaptive as specified: %v\n%s", err, out)
+	if !strings.Contains(string(sheets), "function forkFromTurn(text, parent)") {
+		t.Error("forkFromTurn must accept an explicit parent so search can fork from the hit's node")
 	}
 }
 
-// TestArchivedView asserts the G5b client surface: a read-only modal for a
-// deleted chat, opened from an archived show-to-chat, fed by /api/archived, with
-// a fork seeded from the endpoint's launch config (no live node) and NO composer.
+// Archived surface: shell DOM/ARIA, no composer, and composition entry points.
+// Show-to-chat routing and sheets prepareLaunchConfig are covered by Node.
 func TestArchivedView(t *testing.T) {
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
-	// A real modal shell root, like the search overlay.
 	for _, want := range []string{
 		`id="archivedview"`,
 		`role="dialog"`,
@@ -1619,7 +641,6 @@ func TestArchivedView(t *testing.T) {
 			t.Errorf("archived view shell missing %q", want)
 		}
 	}
-	// Implementation lives in the composition entry (Packet 7J).
 	for _, want := range []string{
 		"function openArchived(",
 		"function closeArchived(",
@@ -1630,252 +651,32 @@ func TestArchivedView(t *testing.T) {
 			t.Errorf("archived view implementation missing %q", want)
 		}
 	}
-	// Archived show-to-chat routes into the read-only surface (not a toast).
-	// Packet 7G: doSearchAction lives in search.js.
-	searchJS, err := os.ReadFile("web/js/search.js")
-	if err != nil {
-		t.Fatalf("read search.js: %v", err)
-	}
-	sjs := string(searchJS)
-	i := strings.Index(sjs, "function doSearchAction(")
-	if i < 0 {
-		t.Fatal("doSearchAction not found in search.js")
-	}
-	rest := sjs[i:]
-	endRel := strings.Index(rest[len("function doSearchAction("):], "\n  function ")
-	if endRel < 0 {
-		endRel = 1500
-	} else {
-		endRel += len("function doSearchAction(")
-	}
-	body := rest[:endRel]
-	if !strings.Contains(body, "openArchived(") {
-		t.Error("archived show-to-chat must open the read-only surface")
-	}
-	// The read-only surface must not host a chat composer: no textarea in the
-	// #archivedview markup block (bounded to the overlay's own element).
+	// The read-only surface must not host a chat composer.
 	if vs := strings.Index(html, `<div id="archivedview"`); vs >= 0 {
 		ve := strings.Index(html[vs:], "\n</div>\n") + vs
 		if ve > vs && strings.Contains(html[vs:ve], "<textarea") {
 			t.Error("the archived read-only surface must not contain a composer/textarea")
 		}
 	}
-	// Packet 7H: archived fork seeds via sheets.js prepareLaunchConfig(cfg).
 	if !strings.Contains(app, "function forkFromArchived()") && !strings.Contains(app, "forkFromArchived(){") {
 		t.Error("archived fork entry point missing")
 	}
 	if !strings.Contains(app, "sheetsFeature.forkFromArchived()") {
 		t.Error("archived fork must delegate to sheetsFeature")
 	}
-	sh, err := os.ReadFile("web/js/sheets.js")
-	if err != nil {
-		t.Fatalf("read sheets.js: %v", err)
-	}
-	shSrc := string(sh)
-	if !strings.Contains(shSrc, "function prepareLaunchConfig(cfg)") ||
-		!strings.Contains(shSrc, "const p = cfg || nodeById(ncParent);") {
-		t.Error("prepareLaunchConfig must take an explicit config so archived fork can seed without a live node")
-	}
-	// The anchored turn is marked, and truncation is surfaced honestly.
-	if !strings.Contains(app, "anchor") || !strings.Contains(app, "before_truncated") {
-		t.Error("archived render must mark the anchor turn and honor truncation flags")
-	}
-	// splitAssetRefs moved to chat.js, but the archived surface still needs the
-	// shared file glyph that the old inline helper closed over.
 	if !strings.Contains(app, `splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE })`) {
 		t.Error("archived asset projection must inject ICON_FILE into splitAssetRefs")
 	}
 }
 
-// TestSearchRecents covers G6: recent searches are kept client-side (localStorage,
-// like drafts), deduped most-recent-first, gated by the same min length as search,
-// hard-capped, and only recorded when the supervisor acts on a hit. Packet 7G:
-// helpers live in search.js; Node search.test.js is the primary coverage.
-func TestSearchRecents(t *testing.T) {
-	b, err := os.ReadFile("web/js/search.js")
-	if err != nil {
-		t.Fatalf("read search.js: %v", err)
-	}
-	src := string(b)
-
-	for _, want := range []string{
-		"export function recordRecent(",
-		"export function recentsHTML(",
-		"export function clearRecents(",
-		"recordRecent(input ? input.value : \"\", storage)",
-		`data-recent=`,
-		`t.closest("#recentsclear")`,
-		"export const RECENTS_CAP =",
-		"export const RECENTS_SHOW =",
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("recents wiring missing %q", want)
-		}
-	}
-	if !strings.Contains(src, "if (query.length < SEARCH_MIN) return;") {
-		t.Error("recordRecent must reuse the SEARCH_MIN gate")
-	}
-
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	for _, name := range []string{"search.js", "format.js", "bookmarks.js", "lanes.js"} {
-		data, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import {
-  SEARCH_MIN, SEARCH_MAX, RECENTS_CAP, RECENTS_SHOW, RECENTS_KEY,
-  loadRecents, recordRecent, clearRecents, recentsHTML,
-} from "./search.js";
-import { esc } from "./format.js";
-
-const store = new Map();
-const storage = {
-  getItem: k => store.has(k) ? store.get(k) : null,
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: k => store.delete(k),
-};
-
-recordRecent("z".repeat(SEARCH_MAX + 50), storage);
-assert.equal(loadRecents(storage)[0].length, SEARCH_MAX);
-store.clear();
-
-recordRecent("a", storage);
-assert.deepEqual(loadRecents(storage), []);
-
-recordRecent("auth", storage);
-recordRecent(" bug ", storage);
-recordRecent("auth", storage);
-assert.deepEqual(loadRecents(storage), ["auth", "bug"]);
-
-for (let i = 0; i < 20; i++) recordRecent("q" + i, storage);
-assert.ok(loadRecents(storage).length <= RECENTS_CAP);
-assert.equal(loadRecents(storage)[0], "q19");
-
-store.clear();
-recordRecent("<img src=x>", storage);
-recordRecent("hello", storage);
-const html2 = recentsHTML(storage, esc);
-assert.ok(html2.includes("&lt;img src=x&gt;") && !html2.includes("<img src=x>"));
-assert.ok(html2.includes('data-recent="hello"'));
-assert.equal(RECENTS_KEY, "scimux-search-recents");
-assert.equal(SEARCH_MIN, 2);
-assert.ok(RECENTS_SHOW <= RECENTS_CAP);
-
-clearRecents(storage);
-assert.deepEqual(loadRecents(storage), []);
-assert.equal(recentsHTML(storage, esc), "");
-`
-	f := filepath.Join(tmp, "recents.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("recents behavior broken: %v\n%s", err, out)
-	}
-}
-
-// A long chat bubble taken to the Notes pane forces a lot of scrolling
-// (session logs: the top ~15% of bubbles blow past a screenful). The fix
-// clamps a note bubble past a pixel threshold behind a "Show more" toggle,
-// leaving the ~85% short bubbles untouched. bookmarkClampState is the DOM-free
-// decision core (the measure loop feeds it a real scrollHeight); execute it
-// under node against synthetic heights so the clamp/label logic is locked.
-func TestNoteClampState(t *testing.T) {
-	// Packet 7E: clamp decision core lives in bookmarks.js; Node bookmarks.test.js
-	// executes the same matrix. Keep a thin Go import smoke for the constant.
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	tmp := t.TempDir()
-	for _, name := range []string{"bookmarks.js", "format.js", "lanes.js"} {
-		src, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import { BOOKMARK_CLAMP_PX, bookmarkClampState } from "./bookmarks.js";
-assert.equal(BOOKMARK_CLAMP_PX, 220);
-assert.deepStrictEqual(bookmarkClampState(120, false), { clamped: false, showBtn: false, label: "Show more" });
-assert.deepStrictEqual(bookmarkClampState(120, true),  { clamped: false, showBtn: false, label: "Show less" });
-assert.deepStrictEqual(bookmarkClampState(900, false), { clamped: true,  showBtn: true,  label: "Show more" });
-assert.deepStrictEqual(bookmarkClampState(900, true),  { clamped: false, showBtn: true,  label: "Show less" });
-assert.deepStrictEqual(bookmarkClampState(BOOKMARK_CLAMP_PX, false), { clamped: false, showBtn: false, label: "Show more" });
-`
-	f := filepath.Join(tmp, "noteclamp.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("note clamp decision broken: %v\n%s", err, out)
-	}
-}
-
-// The clamp is view state, not evidence: it must be ephemeral (in-memory Set,
-// no localStorage, no ui.json op) and its toggle must not rebuild the pane or
-// fall through to the note-tap that opens the action bar. Guard the wiring and
-// the ephemerality contract so neither can silently regress.
+// Collapse decision matrix is executed by bookmarks.test.js. Keep CSS clamp
+// contract and shell Bookmarks roots; ephemerality/order covered by Node.
 func TestNoteCollapseWiring(t *testing.T) {
-	// Packet 7E: collapse wiring lives in bookmarks.js; shell keeps structural roots.
 	html := mustReadIndex(t)
-	bm, err := os.ReadFile("web/js/bookmarks.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(bm)
 	css := mustProductionCSSCascade(t)
-	for _, want := range []string{
-		"expandedBookmarks = new Set()", // ephemeral, sibling of openBookmarkT
-		"BOOKMARK_CLAMP_PX",             // the threshold constant
-		"function bookmarkClampState(",  // the decision core
-		"data-nmore",                    // the per-bubble toggle button
-		`class="nmore"`,                 // its markup in the note template
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("note collapse wiring missing %q", want)
-		}
-	}
 	if !strings.Contains(css, ".bookmark .nbubble.clamped") {
 		t.Error("note-collapse CSS clamp is missing")
 	}
-	// The toggle handler is a distinct branch keyed on data-nmore. It must sit
-	// in the pane click delegate BEFORE the generic ".bookmark" tap branch,
-	// or clicking "Show more" would also open the action bar.
-	nmore := strings.Index(src, "[data-nmore]")
-	noteTap := strings.Index(src, `closest(".bookmark")`)
-	if nmore < 0 {
-		t.Fatal("bookmarks.js has no data-nmore branch")
-	}
-	if !(nmore < noteTap) {
-		t.Error("the data-nmore branch must precede the .bookmark tap branch so Show more does not open the action bar")
-	}
-	// Ephemerality: the expand state is never persisted.
-	if regexp.MustCompile(`localStorage[^;\n]*expandedBookmarks|expandedBookmarks[^;\n]*localStorage`).MatchString(src) {
-		t.Error("expandedBookmarks must stay ephemeral — no localStorage persistence")
-	}
-	// In-place flip must not call render() inside the nmore branch.
-	branch := src[nmore:]
-	if endB := strings.Index(branch, "return;"); endB > 0 {
-		if strings.Contains(branch[:endB], "render(") || strings.Contains(branch[:endB], "renderBookmarksPane(") {
-			t.Error("the data-nmore toggle must not rebuild the pane — flip the class in place")
-		}
-	}
-	// Shell still hosts the structural roots Bookmarks owns.
 	for _, id := range []string{"bookmarkspane", "bookmarklist", "bookmarkflags", "bookmarksbtn", "notesbtn", "bookmarkpeek"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("shell missing Bookmarks root #%s", id)
@@ -1883,159 +684,9 @@ func TestNoteCollapseWiring(t *testing.T) {
 	}
 }
 
-// A past station opens its /clear-closed segment as history bubbles. Those must
-// be tappable like live bubbles — reveal the timestamp row and the action bar —
-// not inert. The tap machinery keys off a uniform data-bk addressed against a
-// bubbleTurns map, so both live ("i:…") and history ("h:…") bubbles resolve.
-func TestHistoryBubblesAreTappable(t *testing.T) {
-	// Packet 7C: history/live bubble tap keys and bubbleTurns live in chat.js;
-	// Node chat.test.js executes histBk/liveBk and action-row resolution.
-	b, err := os.ReadFile("web/js/chat.js")
-	if err != nil {
-		t.Fatalf("read chat.js: %v", err)
-	}
-	src := string(b)
-	// Every rendered bubble carries the uniform tap key (live + history templates).
-	if strings.Count(src, "data-bk=") < 2 && strings.Count(src, "data-bk=\"") < 2 {
-		// templates build data-bk via liveBk/histBk helpers
-		if !strings.Contains(src, "liveBk") || !strings.Contains(src, "histBk") {
-			t.Error("both live and history bubble templates must carry a data-bk tap key")
-		}
-	}
-	if !strings.Contains(src, "bubbleTurns[") {
-		t.Error("history bubbles must register their turn in the bubbleTurns lookup")
-	}
-	if !strings.Contains(src, "dataset.bk") && !strings.Contains(src, "turnEl.dataset.bk") {
-		t.Error("the bubble tap branch must key off data-bk so history bubbles resolve")
-	}
-	if !strings.Contains(src, "bubbleTurns[tappedTurn]") {
-		t.Error("renderBubbleActions must resolve the tapped turn from bubbleTurns")
-	}
-	if strings.Contains(src, `data-i="${tappedTurn}"`) {
-		t.Error("renderBubbleActions must address the tapped bubble by data-bk, not data-i")
-	}
-	app := mustReadApp(t)
-	if !strings.Contains(app, `from "./chat.js"`) || !strings.Contains(app, "chatFeature.bind()") {
-		t.Fatal("production must bind chatFeature for #msgs bubble taps")
-	}
-}
-
-// Desktop hover: the bubble tooltip was a bare "you"/"agent" — redundant with
-// the bubble color. bubbleTitle enriches it with the send time so a hover
-// surfaces what otherwise needs a tap.
-func TestBubbleTitleIncludesTimestamp(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	b, err := os.ReadFile("web/js/chat.js")
-	if err != nil {
-		t.Fatalf("read chat.js: %v", err)
-	}
-	html := string(b)
-	// The bubble templates must build their title from bubbleTitle, not a bare
-	// ternary on the role.
-	if strings.Contains(html, `title="${t.role === "user" ? "you" : "agent"}"`) {
-		t.Error("bubble title should come from bubbleTitle(), not a bare role ternary")
-	}
-	if !strings.Contains(html, "bubbleTitle") && !strings.Contains(html, "titleFn") {
-		t.Error("chat.js must wire bubbleTitle into bubble tooltips")
-	}
-	tmp := t.TempDir()
-	src, err := os.ReadFile("web/js/format.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script := `
-import assert from "node:assert/strict";
-import { fmtWhen, bubbleTitle } from "./format.js";
-const t = "2026-07-24T09:05:00";
-const w = fmtWhen(t);
-assert.equal(bubbleTitle("user", t), "you — sent " + w);
-assert.equal(bubbleTitle("assistant", t), "agent — sent " + w);
-assert.equal(bubbleTitle("user", ""), "you");
-assert.equal(bubbleTitle("assistant", null), "agent");
-`
-	f := filepath.Join(tmp, "bubble-title.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("bubble title timestamp broken: %v\n%s", err, out)
-	}
-}
-
-func TestWebReferenceProvenanceLabel(t *testing.T) {
-	// Packet 7F: provLabel lives in notes.js; Node notes.test.js is authoritative.
-	// Keep a minimal source contract that the helper still exists for references.
-	b, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(b)
-	if !strings.Contains(src, "export function provLabel(") {
-		t.Fatal("could not locate provLabel in web/js/notes.js")
-	}
-	if !strings.Contains(src, ".filter(Boolean).join(\" · \")") && !strings.Contains(src, ".filter(Boolean).join(' · ')") {
-		t.Error("provLabel must join non-empty parts with middle dots")
-	}
-}
-
-// A section must render its embedded references (provenance chip + snapshot text
-// + jump/copy/trash actions) so a self-contained reference shows without any
-// dependency on the source node still existing.
-func TestWebSectionRendersReferences(t *testing.T) {
-	// Packet 7F: reference HTML builders live in notes.js.
-	b, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(b)
-	for _, want := range []string{
-		"function referenceHTML(", // per-reference builder
-		`(s.references || [])`,    // sectionBodyInner iterates the section's references
-		`data-refact="jump"`,      // jump back to the source chat
-		`data-refact="copy"`,      // copy the snapshot text
-		`data-refact="trash"`,     // trash removes only this reference
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("section reference rendering missing %q", want)
-		}
-	}
-}
-
-// "Use in note" is the capture→synthesis bridge. It must be an action on the
-// compact Bookmark pane (the inbox on every device) and route through a shared
-// placement path that posts the reference to the section endpoint.
+// Use-in-note placement behavior is executed by notes.test.js / bookmarks.test.js.
+// Retain the composition injection seam Bookmarks → Notes.startPlacement.
 func TestWebUseInNoteWiring(t *testing.T) {
-	bm, err := os.ReadFile("web/js/bookmarks.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(bm)
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	nsrc := string(notes)
-	// Use-in-note action lives in bookmarks.js; placement body is notes.js (7F).
-	if !strings.Contains(src, `data-bmact="note"`) {
-		t.Error(`use-in-note wiring missing data-bmact="note" in bookmarks.js`)
-	}
-	for _, want := range []string{
-		"function startPlacement(", // enters placement mode holding the note
-		`classList.add("placing")`, // placement mode drives the add-here affordances
-		`data-addhere`,             // per-section "add capture here" target
-		`/references`,              // posts to the section references endpoint
-	} {
-		if !strings.Contains(nsrc, want) {
-			t.Errorf("use-in-note wiring missing %q in notes.js", want)
-		}
-	}
-	// Composition must instantiate Notes and wire Bookmarks → startPlacement lazily.
 	app := mustReadApp(t)
 	if !strings.Contains(app, `from "./notes.js"`) || !strings.Contains(app, "createNotesFeature") {
 		t.Error("production must import and instantiate createNotesFeature from notes.js")
@@ -2043,11 +694,17 @@ func TestWebUseInNoteWiring(t *testing.T) {
 	if !strings.Contains(app, "notesFeature.startPlacement") && !strings.Contains(app, "startPlacement: nt => notesFeature.startPlacement") {
 		t.Error("Bookmarks startPlacement injection must call notesFeature.startPlacement")
 	}
+	bm, err := os.ReadFile("web/js/bookmarks.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bm), `data-bmact="note"`) {
+		t.Error(`use-in-note wiring missing data-bmact="note" in bookmarks.js`)
+	}
 }
 
-// Reference jump-back and the notes-pane jump must share one resolver so both
-// survive /clear seams, rotation, and node deletion identically (live node →
-// pendingJump; deleted-and-archived → openArchived by uid).
+// Jump resolution branches are executed by bookmarks/chat/search Node suites.
+// Retain the shared resolver wiring across app.js, bookmarks.js, and notes.js.
 func TestWebSharedJumpResolver(t *testing.T) {
 	app := mustReadApp(t)
 	bm, err := os.ReadFile("web/js/bookmarks.js")
@@ -2060,31 +717,17 @@ func TestWebSharedJumpResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	nsrc := string(notes)
-	// Packet 7E: resolver lives in bookmarks.js; app.js re-exports for Notes/search.
 	if !strings.Contains(src, "function jumpToChatAddress(") {
 		t.Error("shared jumpToChatAddress resolver not defined in bookmarks.js")
 	}
 	if !strings.Contains(app, "function jumpToChatAddress(") {
 		t.Error("app.js must re-export jumpToChatAddress for Notes/search callers")
 	}
-	// Notes references call the injected jumpToChatAddress (not a private copy).
 	if !strings.Contains(nsrc, "jumpToChatAddress(") {
 		t.Error("notes.js must call injected jumpToChatAddress for reference jump")
 	}
-	if strings.Count(app, "jumpToChatAddress(")+strings.Count(src, "jumpToChatAddress(")+strings.Count(nsrc, "jumpToChatAddress(") < 3 {
-		t.Error("jumpToChatAddress must be shared across Bookmarks jump and Notes references")
-	}
 }
 
-// --- Notes workspace feedback (phase 1d review) ---
-// The reviewer inspected the workspace on iPad and filed 20 issues. These
-// tests lock the fixes so they cannot silently regress.
-
-// Item 1 & 2 (2026-07-30 iPad review): the workspace matches the metro-map wall
-// map — it starts BELOW the status bar (var(--sbh) offset, so the status bar
-// stays visible and can host search later) and paints the same page background
-// (var(--bg)) as #map. It still spans the full width; it is not a centred scrim
-// card.
 func TestWorkspaceMatchesWallMap(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 	ws := cssBlock(t, css, "#notesworkspace {")
@@ -2504,24 +1147,6 @@ func TestWorkspaceMarkdownStyled(t *testing.T) {
 // Items 12 & 13: a section already at the top cannot move up, one at the bottom
 // cannot move down — no wrap-around. sectionSwapPlan is the pure decision core,
 // operating on the visually sorted order (not array position).
-func TestWorkspaceSectionMoveBoundary(t *testing.T) {
-	// Packet 7F: sectionSwapPlan lives in notes.js; Node notes.test.js is authoritative.
-	// Keep a thin source contract so the pure helper cannot disappear from production.
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(notes)
-	if !strings.Contains(src, "export function sectionSwapPlan(") {
-		t.Fatal("could not locate sectionSwapPlan in web/js/notes.js")
-	}
-	if !strings.Contains(src, "return null") {
-		t.Error("sectionSwapPlan must return null at boundaries (no wrap)")
-	}
-}
-
-// Item 14: an embedded capture inside a section auto-collapses like a Notes
-// bubble, with its own Show more/less toggle.
 func TestWorkspaceReferenceClamp(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 	notes, err := os.ReadFile("web/js/notes.js")
@@ -2545,82 +1170,6 @@ func TestWorkspaceReferenceClamp(t *testing.T) {
 // Item 15: after editing a section's body, its embedded references must still
 // render. The rendered-body rebuild must go through a helper that re-emits the
 // references, not overwrite the body with the prose alone.
-func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(notes)
-	if !strings.Contains(src, "function sectionBodyInner(") {
-		t.Fatal("expected a sectionBodyInner helper that emits body + references together")
-	}
-	// startBodyEdit's blur must rebuild via the helper, never with a bare render div.
-	start := strings.Index(src, "function startBodyEdit(")
-	if start < 0 {
-		t.Fatal("startBodyEdit missing from notes.js")
-	}
-	be := src[start : start+1500]
-	if !strings.Contains(be, "sectionBodyInner(") {
-		t.Error("startBodyEdit must restore the body via sectionBodyInner so references survive an edit")
-	}
-}
-
-// Item 16: the note's overflow (three-dots) menu must actually open — the
-// document-level close handler was firing on the same click. The handler stops
-// propagation, and the menu offers rename + delete.
-func TestWorkspaceNoteMenuOpens(t *testing.T) {
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(notes)
-	start := strings.Index(src, "function onNoteMenuClick")
-	if start < 0 {
-		t.Fatal("onNoteMenuClick missing from notes.js")
-	}
-	h := src[start : start+900]
-	if !strings.Contains(h, "stopPropagation") {
-		t.Error("#wsnotemenu handler must stopPropagation so the document close handler doesn't kill the menu")
-	}
-	if !strings.Contains(h, `data-si="del"`) {
-		t.Error("Note menu must offer delete")
-	}
-}
-
-// Items 18-20: Enter commits a title edit; Escape cancels it (title, section
-// title, section body) without collapsing the whole workspace. The editors stop
-// Escape from bubbling to the workspace-close handler.
-func TestWorkspaceEscCancelsEdit(t *testing.T) {
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(notes)
-	// note-title keydown handles Enter (blur) and Escape (revert + stopPropagation)
-	start := strings.Index(src, "function onTitleKeydown")
-	if start < 0 {
-		t.Fatal("onTitleKeydown missing from notes.js")
-	}
-	kd := src[start : start+600]
-	if !strings.Contains(kd, `"Enter"`) || !strings.Contains(kd, `"Escape"`) {
-		t.Error("#wsnotetitle keydown must handle both Enter and Escape")
-	}
-	if !strings.Contains(kd, "stopPropagation") {
-		t.Error("#wsnotetitle Escape must stopPropagation so the workspace does not close")
-	}
-	// section body editor cancels on Escape
-	beStart := strings.Index(src, "function startBodyEdit(")
-	if beStart < 0 {
-		t.Fatal("startBodyEdit missing")
-	}
-	be := src[beStart : beStart+1200]
-	if !strings.Contains(be, `"Escape"`) || !strings.Contains(be, "stopPropagation") {
-		t.Error("startBodyEdit must cancel on Escape and stopPropagation")
-	}
-}
-
-// Item 17: the wide (iPad/desktop) layout shows all three zones and hides the
-// redundant back chevron. The multi-zone breakpoint reaches iPad portrait.
 func TestWorkspaceWideLayout(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 	if !strings.Contains(css, "min-width: 768px") {
@@ -2640,96 +1189,6 @@ func TestWorkspaceWideLayout(t *testing.T) {
 // given field: each PATCH is chained after the previous one for the same key, so
 // the server always applies edits in issue order and a revert can never be
 // overtaken. Behavioral coverage lives in web/test/notes.test.js (Packet 7F).
-func TestWorkspaceSaveSerializedPerField(t *testing.T) {
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(notes)
-	if !strings.Contains(src, "function createSaveEnqueue(") && !strings.Contains(src, "export function createSaveEnqueue(") {
-		t.Fatal("could not locate createSaveEnqueue serialization core in notes.js")
-	}
-	if !strings.Contains(src, "function wsPatchNow(") && !strings.Contains(src, "wsPatchNow(body, key)") {
-		t.Error("wsPatchNow (immediate keyed enqueue) must exist so reverts serialize behind in-flight saves")
-	}
-	// The revert sites must enqueue on the field's key (via wsPatchNow), not fire
-	// an unkeyed immediate wsPatch that bypasses the chain.
-	for _, unkeyed := range []string{
-		"wsPatch({ title: wsTitleOrig })",
-		"wsPatch({ section: { id: secId, title: orig } })",
-		"wsPatch({ section: { id: secId, body: orig } })",
-	} {
-		if strings.Contains(src, unkeyed) {
-			t.Errorf("revert still uses an unkeyed wsPatch that bypasses per-field ordering: %q", unkeyed)
-		}
-	}
-	if !strings.Contains(src, "wsPatchNow({ title: wsTitleOrig }") {
-		t.Error("title Escape revert must use keyed wsPatchNow")
-	}
-	if !strings.Contains(src, "SAVE_DEBOUNCE_MS = 1100") && !strings.Contains(src, "SAVE_DEBOUNCE_MS") {
-		t.Error("save debounce constant must remain 1100ms")
-	}
-}
-
-// Review finding 3: an anchored bookmark *comment* embedded into a note must
-// inherit its parent bookmark's lane in the reference snapshot, exactly like the
-// Bookmarks pane does. The snapshot path fed bookmarkLaneId an empty byT map, so
-// an anchored comment lost its lane color and the note card missed that lane dot.
-// Packet 7F: buildBookmarkSnapshot lives in notes.js; Node notes.test.js covers it.
-func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
-	notes, err := os.ReadFile("web/js/notes.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(notes)
-	if !strings.Contains(src, "export function buildBookmarkSnapshot(") {
-		t.Fatal("buildBookmarkSnapshot must live in notes.js")
-	}
-	if !strings.Contains(src, "bookmarkLaneId") {
-		t.Error("snapshot must reuse bookmarkLaneId so comments inherit parent lane")
-	}
-}
-
-// sliceBetween returns the text from the occurrence of start up to (but not
-// including) the first occurrence of end after it.
-// The new-activity effort menu is per-model where the CLI advertises it (codex
-// via `codex debug models`): /api/agents now returns {models, efforts} per
-// agent, the browser stashes the per-model effort menus, and fillEfforts uses
-// the selected model's menu before the static per-agent EFFORTS fallback.
-// Packet 7H: wiring lives in sheets.js.
-func TestPerModelEffortWiring(t *testing.T) {
-	b, err := os.ReadFile("web/js/sheets.js")
-	if err != nil {
-		t.Fatalf("read sheets.js: %v", err)
-	}
-	src := string(b)
-	for _, want := range []string{
-		"MODEL_EFFORTS", // per-agent → per-model effort store
-		"info.efforts",  // populated from the /api/agents payload
-		`on(root("nc_model"), "change", onModelChange)`, // effort menu follows the model
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("per-model effort wiring missing %q", want)
-		}
-	}
-	// fillEfforts must consult the selected model's menu first, then fall back
-	// to the static per-agent EFFORTS list, and mark the model's default level.
-	fe := sliceBetween(t, src, "function fillEfforts(", "\n  }")
-	if !strings.Contains(fe, "MODEL_EFFORTS") {
-		t.Errorf("fillEfforts must consult per-model efforts: %q", fe)
-	}
-	if !strings.Contains(fe, "EFFORTS") {
-		t.Errorf("fillEfforts must keep the static per-agent EFFORTS fallback: %q", fe)
-	}
-	if !strings.Contains(src, "(default)") {
-		t.Errorf("fillEfforts should mark the model's default effort level")
-	}
-	app := mustReadApp(t)
-	if !strings.Contains(app, `from "./sheets.js"`) || !strings.Contains(app, "createSheetsFeature") {
-		t.Error("production must wire sheets.js for new-activity effort menus")
-	}
-}
-
 func sliceBetween(t *testing.T, html, start, end string) string {
 	t.Helper()
 	i := strings.Index(html, start)

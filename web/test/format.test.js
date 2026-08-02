@@ -410,3 +410,16 @@ test("contrastText: dark lane gets light label; light gets dark", () => {
   assert.equal(contrastText("white", () => [255, 255, 255]), "#000");
   assert.equal(contrastText("black", () => [0, 0, 0]), "#fff");
 });
+
+test("contrastText: production system palette keeps WCAG label choices", () => {
+  assert.equal(contrastText("#007AFF"), "#000", "system blue");
+  assert.equal(contrastText("#5856D6"), "#fff", "system indigo");
+  assert.equal(contrastText("#FF9500"), "#000", "system orange");
+  for (const color of ["#007AFF", "#5856D6", "#FF9500"]) {
+    const text = contrastText(color);
+    assert.ok(
+      contrastRatio(relLum(hexRGB(color)), relLum(hexRGB(text))) >= 4.5,
+      `${color} with ${text} must meet WCAG AA`,
+    );
+  }
+});

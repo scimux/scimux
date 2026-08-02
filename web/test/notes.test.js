@@ -1231,11 +1231,49 @@ test("renderNote is not invoked from poll path; drag guards cards", () => {
 });
 
 /* ---------- body edit preserves references via sectionBodyInner ---------- */
-test("body edit path restores via sectionBodyInner", () => {
-  const start = notesSrc.indexOf("function startBodyEdit");
-  assert.ok(start > 0);
-  const chunk = notesSrc.slice(start, start + 1200);
-  assert.match(chunk, /sectionBodyInner/);
-  assert.match(chunk, /"Escape"/);
-  assert.match(chunk, /stopPropagation/);
+test("body edit Escape restores rendered body and references", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{
+          id: "s1", title: "S", body: "original", order: 0,
+          references: [{
+            id: "r1",
+            snapshot: { station: "Alpha", speaker: "you", text: "quoted" },
+          }],
+        }],
+      },
+    },
+  });
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  const body = el("div", { className: "wssecbody" });
+  const render = el("div", { dataset: { secrender: "" } });
+  sec.appendChild(body);
+  body.appendChild(render);
+  ctx.roots.wssections.appendChild(sec);
+  ctx.roots.wssections.dispatch("click", { target: render });
+
+  const textarea = body.querySelector("textarea");
+  assert.ok(textarea, "body click must enter edit mode");
+  textarea.value = "changed";
+  let prevented = false;
+  let stopped = false;
+  textarea.dispatch("keydown", {
+    key: "Escape",
+    preventDefault(){ prevented = true; },
+    stopPropagation(){ stopped = true; },
+  });
+  await settle();
+  assert.equal(prevented, true);
+  assert.equal(stopped, true);
+  assert.match(body.innerHTML, /original/);
+  assert.match(body.innerHTML, /data-ref="r1"/);
+  assert.match(body.innerHTML, /quoted/);
 });

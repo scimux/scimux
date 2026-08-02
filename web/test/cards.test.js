@@ -359,7 +359,7 @@ test("createCardsFeature: skip mid-drag; ages on equal sig; rebuild on change", 
     editingTitleScope: () => "",
     cardsSig: () => cardsSig,
     setCardsSig: v => { cardsSig = v; },
-    pinned: () => [],
+    pinned: () => ["a"],
     archived: () => [],
     lanes: () => [],
     bookmarks: () => [],
@@ -375,6 +375,12 @@ test("createCardsFeature: skip mid-drag; ages on equal sig; rebuild on change", 
   feature.render();
   assert.match(list.innerHTML, /id="card-a"/);
   assert.match(list.innerHTML, /data-pin-action="a"/);
+  assert.match(list.innerHTML, /class="pinflag"/);
+  assert.match(list.innerHTML, /aria-label="unpin"/);
+  const pinAction = list.innerHTML.indexOf("data-pin-action");
+  const archiveAction = list.innerHTML.indexOf("data-arch-action");
+  const trashAction = list.innerHTML.indexOf("data-trash");
+  assert.ok(pinAction > 0 && pinAction < archiveAction && archiveAction < trashAction);
   assert.match(tabs.innerHTML, /data-tab="current"/);
   const firstHTML = list.innerHTML;
   const firstSig = cardsSig;
@@ -535,20 +541,11 @@ test("createCardsFeature: bind is singular; drag skips rebuild; destroy removes 
   assert.equal(clearedTimer, 42);
 });
 
-test("CARD_TIME_SWAP_MS is 30s; pin action markup order pin < archive < trash", () => {
+test("CARD_TIME_SWAP_MS is 30s; drag implementation stays single-owned", () => {
   assert.equal(CARD_TIME_SWAP_MS, 30000);
-  assert.match(cardsSrc, /data-pin-action/);
-  assert.match(cardsSrc, /data-arch-action/);
-  assert.match(cardsSrc, /data-trash/);
-  assert.match(cardsSrc, /pinflag/);
   assert.match(cardsSrc, /if \(pinDragging\) return/);
   assert.match(cardsSrc, /k: "pin-order"/);
   assert.match(cardsSrc, /draggable="true"/);
-  // pin button before archive/trash in template
-  const pin = cardsSrc.indexOf("data-pin-action");
-  const arch = cardsSrc.indexOf("data-arch-action");
-  const trash = cardsSrc.indexOf("data-trash");
-  assert.ok(pin > 0 && pin < arch && arch < trash);
 });
 
 test("archived hard-attention still surfaces via map-model visibleCardLists (not reimplemented)", () => {

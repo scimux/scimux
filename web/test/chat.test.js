@@ -828,6 +828,23 @@ test("history expansion renders prior segs with data-bk hist keys", async () => 
   assert.match(ctx.roots.msgs.innerHTML, /data-time=/);
 });
 
+test("pending jump into an earlier segment starts a full-history load", async () => {
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "new", time: "2026-01-02T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-02T00:00:00Z", prior_turns: 1, assets: {},
+    },
+  });
+  ctx.setPending({
+    node: "n1", uid: "old-uid", segment: 0, record: 1,
+    turnTime: "2026-01-01T00:00:01Z", ts: 999_999,
+  });
+  await ctx.feature.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(ctx.apiCalls.some(c => c.path.includes("/chat?history=1")));
+});
+
 test("terminal toggle enable/disable and scrollend exist", async () => {
   const { feature, roots } = makeFeature({
     chatPayload: {
