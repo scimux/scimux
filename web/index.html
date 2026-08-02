@@ -406,6 +406,7 @@ import {
 import { createCardsFeature } from "/js/cards.js";
 import { createMapFeature } from "/js/map.js";
 import { createChatFeature, splitAssetRefs } from "/js/chat.js";
+import { createComposerFeature } from "/js/composer.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -1113,6 +1114,9 @@ function setMapFull(on){ mapFeature.setFull(on); }
 
 /* Chat feature factory — owns head/details, msgs, terminal, keys, workpulse. */
 let pendingJump = null;    // jump-to-source in flight (set by bookmarks/search; consumed by chat)
+/* composerFeature is assigned immediately after createChatFeature; chat injects
+   lazy wrappers so busy/closed/attach effects resolve after construction. */
+let composerFeature;
 const chatFeature = createChatFeature({
   roots: {
     chathead: $("#chathead"),
@@ -1166,9 +1170,9 @@ const chatFeature = createChatFeature({
   stampAddress: (b, t) => stampAddress(b, t),
   copyText: s => copyText(s),
   forkFromTurn: (text, parent) => forkFromTurn(text, parent),
-  setComposerBusy: v => setComposerBusy(v),
-  setComposerClosed: v => setComposerClosed(v),
-  setAttachAvail: v => setAttachAvail(v),
+  setComposerBusy: v => composerFeature.setComposerBusy(v),
+  setComposerClosed: v => composerFeature.setComposerClosed(v),
+  setAttachAvail: v => composerFeature.setAttachAvail(v),
   setBookmarksBackLabel: t => { $("#bookmarksback").textContent = "‹ " + t; },
   updateLocalNode: n => updateLocalNode(n),
   invalidateCardsSig: () => { cardsSig = ""; },
@@ -1190,7 +1194,46 @@ async function refreshChat(){ return chatFeature.render(); }
 function loadChatHistory(id, st){ return chatFeature.loadHistory(id, st); }
 function jumpChatToNow(){ chatFeature.jumpToNow(); }
 function restartWorkPulse(){ chatFeature.restartWorkPulse(); }
-function paintEchoNow(dest){ chatFeature.paintEcho(dest); }
+
+/* Composer singleton — prompt bar, drafts, staging, attachments, send/interrupt.
+   Outside every polled render region (invariant). */
+composerFeature = createComposerFeature({
+  roots: {
+    promptbar: $("#promptbar"),
+    attstage: $("#attstage"),
+    prompt: $("#prompt"),
+    sendbtn: $("#sendbtn"),
+    attadd: $("#attadd"),
+    attmenu: $("#attmenu"),
+    attimg: $("#attimg"),
+    attfile: $("#attfile"),
+  },
+  document,
+  storage: localStorage,
+  sel: () => sel,
+  nodeById: id => nodeById(id),
+  isPhoneTouch,
+  esc,
+  icons: { ICON_PLUS, ICON_IMAGE, ICON_FILE, ICON_SEND, ICON_STOP },
+  api,
+  withCsrf,
+  fetchImpl: fetch,
+  FormData,
+  URL,
+  setInterval,
+  clearInterval,
+  setTimeout,
+  setSentEcho: e => chatFeature.setSentEcho(e),
+  clearSentEchoFor: id => chatFeature.clearSentEchoFor(id),
+  paintEcho: dest => chatFeature.paintEcho(dest),
+  getChatSig: () => chatFeature.getChatSig(),
+  getLastTurns: () => chatFeature.getLastTurns(),
+  invalidateChat: () => chatFeature.invalidate(),
+  refreshChat: () => chatFeature.render(),
+  tick: () => tick(),
+  scheduleTick: ms => setTimeout(tick, ms),
+  alert: msg => alert(msg),
+});
 
 
 /* Shell navigation into/out of Journeys (not map-local chrome). */
@@ -1307,10 +1350,7 @@ function select(id){
   }
   sel = id;
   localStorage.setItem("scimux-sel", sel);
-  const ta = $("#prompt");
-  setPromptText(localStorage.getItem("scimux-draft:" + sel) || "");
-  setAttachAvail(false);   /* hide + until this node's chat load confirms it has started */
-  renderStage();   /* show this node's staged attachments (per-node, poll-safe) */
+  composerFeature.onSelect(); /* draft + stage restore; hide + until chat has turns */
   /* the selected node's card must be visible: opening an archived chat (map
      toolbar, notes jump) switches the Activities tab to where the card lives —
      same visibility rule as the renderCards filter */
@@ -1826,6 +1866,8 @@ cardsFeature.bind();
 mapFeature.bind();
 /* Chat-local listeners (head/details, msgs, keys, terminal, scroll, longpress). */
 chatFeature.bind();
+/* Composer singleton listeners (prompt, send, attach menu/drop, drafts). */
+composerFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
@@ -1858,281 +1900,10 @@ longpress($("#bookmarklist"), ".bookmark", el => {
   openSheet("#sendto");
 });
 
-/* ---------- prompt bar (singleton; drafts survive everything) ---------- */
-function promptText(){
-  return ($("#prompt").innerText || "").replace(/\u00a0/g, " ");
-}
-function resizePrompt(){
-  const el = $("#prompt");
-  el.style.height = "auto";
-  el.style.height = Math.min(el.scrollHeight, 120) + "px";
-}
-function setPromptText(s){
-  const el = $("#prompt");
-  el.textContent = s || "";
-  resizePrompt();
-}
-function clearPrompt(){
-  setPromptText("");
-}
-/* composerBusy swaps the send button for a stop button while the agent works.
-   Typing stays enabled the whole time: liveness is mechanical and can flap,
-   and disabling the field would clobber a draft in progress (invariant) —
-   Claude Code even accepts queued input mid-turn. Enter still sends; a
-   structured transport that refuses a mid-turn send answers 409 and the
-   draft is preserved by sendPrompt's failure path. */
-let composerBusy = null;
-function setComposerBusy(active){
-  if (composerBusy === !!active) return;   /* poll-safe: no DOM churn per tick */
-  composerBusy = !!active;
-  const btn = $("#sendbtn");
-  $("#promptbar").classList.toggle("busy", composerBusy);
-  btn.classList.toggle("stop", composerBusy);
-  btn.innerHTML = composerBusy ? ICON_STOP : ICON_SEND;
-  btn.setAttribute("aria-label", composerBusy ? "stop agent" : "send");
-  btn.title = composerBusy ? "stop agent" : "send";
-}
-setComposerBusy(false);
-/* A closed thread (/exit) is an immutable dead-end: the server refuses sends,
-   uploads, interrupts, and keys with 409, so the composer disables itself and
-   says so rather than letting the user type a turn that can only bounce.
-   Pick-up is via fork. Poll-safe: DOM churns only on the closed/open edge, and
-   the contenteditable is never rebuilt, so a draft on a still-open node is
-   never clobbered (invariant). */
-let composerClosed = null;
-function setComposerClosed(closed){
-  if (composerClosed === !!closed) return;
-  composerClosed = !!closed;
-  const bar = $("#promptbar"), prompt = $("#prompt");
-  bar.classList.toggle("closed", composerClosed);
-  prompt.setAttribute("contenteditable", composerClosed ? "false" : "true");
-  prompt.dataset.placeholder = composerClosed
-    ? "Thread closed — fork to continue" : "Message the agent…";
-  $("#sendbtn").disabled = composerClosed;
-  $("#attadd").disabled = composerClosed;
-}
-setComposerClosed(false);
-$("#prompt").addEventListener("input", e => {
-  resizePrompt();
-  if (sel) localStorage.setItem("scimux-draft:" + sel, promptText());
-});
-$("#prompt").addEventListener("paste", e => {
-  const files = e.clipboardData?.files;
-  if (files && files.length){ e.preventDefault(); addFiles(files); return; }
-  const text = e.clipboardData?.getData("text/plain");
-  if (text == null) return;
-  e.preventDefault();
-  document.execCommand("insertText", false, text);
-});
-$("#prompt").addEventListener("keydown", e => {
-  if (isPhoneTouch()) return;
-  if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
-    e.preventDefault();
-    sendPrompt();
-  }
-});
-/* drops can carry live HTML into the contenteditable (paste is already
-   sanitized above) — force plain text */
-$("#prompt").addEventListener("beforeinput", e => {
-  if (e.inputType !== "insertFromDrop") return;
-  e.preventDefault();
-  const text = e.dataTransfer?.getData("text/plain");
-  if (text) document.execCommand("insertText", false, text);
-});
-$("#sendbtn").addEventListener("click", () => composerBusy ? interruptPrompt() : sendPrompt());
-async function interruptPrompt(){
-  if (!sel || !nodeById(sel)) return;
-  const dest = sel;
-  try {
-    await api(`/api/nodes/${encodeURIComponent(dest)}/send/interrupt`, { method: "POST" });
-    chatFeature.invalidate();
-    setTimeout(tick, 250);
-  } catch (err) {
-    /* a stop tap racing the turn's natural end 409s ("no turn is in
-       flight") — that is the outcome the user wanted, not an error */
-    if (err.status !== 409) alert(err.message);
-    chatFeature.invalidate();
-    refreshChat();
-  }
-}
-/* ---------- composer attachments (P4) ---------- */
-$("#attadd").innerHTML = ICON_PLUS;
-$("#attmenu").children[0].innerHTML = ICON_IMAGE + "<span>Choose image…</span>";
-$("#attmenu").children[1].innerHTML = ICON_FILE + "<span>Choose file…</span>";
-/* stage: per-node staged files (poll-safe — the composer is a singleton outside
-   every render region; keyed by node id so switching activities keeps each
-   node's picks, like the text draft). In-memory only: a reload resets staging. */
-const stage = {};
-let stageKey = 0;
-function staged(id){ return stage[id] || (stage[id] = []); }
+/* Prompt bar / drafts / staging / send live in createComposerFeature
+   (Packet 7D). Shell calls composerFeature.onSelect on selection change;
+   chat injects setComposerBusy / setComposerClosed / setAttachAvail. */
 
-/* Attachments become available only once the conversation has started (the
-   node then exists with an upload directory). A brand-new activity's opening
-   prompt is text-only — it is the message that *creates* the node, so there is
-   no id to upload against yet. The + simply stays hidden until the first turn
-   lands: cheap, and it teaches the rule without a word of explanation. */
-let canAttach = false;
-function setAttachAvail(on){
-  if (canAttach === on){ $("#attadd").hidden = !on; return; }
-  canAttach = on;
-  $("#attadd").hidden = !on;
-  if (!on) closeAttMenu();
-}
-
-function renderStage(){
-  const box = $("#attstage");
-  const items = sel ? (stage[sel] || []) : [];
-  if (!items.length){ box.hidden = true; box.innerHTML = ""; return; }
-  box.hidden = false;
-  box.innerHTML = items.map(it => {
-    const disp = esc(it.name);
-    const thumb = it.isImage && it.preview
-      ? `<img src="${it.preview}" alt="${disp}">`
-      : `<span class="fico">${ICON_FILE}</span>`;
-    const spin = it.status === "up" ? `<span class="spin"><i></i></span>` : "";
-    return `<div class="stagechip ${it.status}" data-key="${it.key}" title="${disp}">
-        ${thumb}${spin}<span class="snm">${disp}</span>
-        <button class="sx" data-key="${it.key}" aria-label="Remove ${disp}">&times;</button>
-      </div>`;
-  }).join("");
-  box.querySelectorAll(".sx").forEach(b =>
-    b.addEventListener("click", () => removeStaged(b.dataset.key)));
-}
-function removeStaged(key){
-  if (!sel) return;
-  const arr = stage[sel] || [], i = arr.findIndex(x => String(x.key) === String(key));
-  if (i < 0) return;
-  if (arr[i].preview) URL.revokeObjectURL(arr[i].preview);
-  arr.splice(i, 1);
-  renderStage();
-}
-async function uploadOne(it, dest){
-  const fd = new FormData();
-  fd.append("files", it.file, it.name);
-  try {
-    const r = await fetch(`/api/nodes/${encodeURIComponent(dest)}/attachments`, withCsrf({ method: "POST", body: fd }));
-    if (!r.ok) throw new Error((await r.text()) || r.statusText);
-    it.ref = (await r.json()).attachments[0];
-    it.status = "done";
-  } catch (e) { it.status = "err"; it.error = e.message; }
-  if (sel === dest) renderStage();
-}
-function addFiles(files, dest){
-  dest = dest || sel;
-  if (!canAttach || !dest || !files || !files.length) return;   /* gated: only after the first turn */
-  const arr = staged(dest);
-  for (const f of files){
-    const isImage = /^image\//.test(f.type);
-    const it = { key: ++stageKey, file: f, name: f.name || (isImage ? "pasted-image.png" : "file"),
-                 isImage, preview: isImage ? URL.createObjectURL(f) : "", ref: null, status: "up" };
-    arr.push(it);
-    uploadOne(it, dest);
-  }
-  if (sel === dest) renderStage();
-}
-/* the + menu (HIG: one leading control presents its sources) */
-function closeAttMenu(){
-  $("#attmenu").hidden = true;
-  $("#attadd").classList.remove("armed");
-  $("#attadd").setAttribute("aria-expanded", "false");
-}
-$("#attadd").addEventListener("click", e => {
-  e.stopPropagation();
-  const m = $("#attmenu");
-  if (!m.hidden){ closeAttMenu(); return; }
-  m.hidden = false;                                  /* unhide to measure, then place upward */
-  const r = $("#attadd").getBoundingClientRect();
-  m.style.left = r.left + "px";
-  m.style.top = (r.top - m.offsetHeight - 8) + "px";
-  $("#attadd").classList.add("armed");
-  $("#attadd").setAttribute("aria-expanded", "true");
-});
-$("#attmenu").addEventListener("click", e => {
-  const b = e.target.closest("button[data-src]"); if (!b) return;
-  closeAttMenu();
-  (b.dataset.src === "image" ? $("#attimg") : $("#attfile")).click();
-});
-document.addEventListener("click", () => { if (!$("#attmenu").hidden) closeAttMenu(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#attmenu").hidden) closeAttMenu(); });
-$("#attimg").addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
-$("#attfile").addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
-/* drag-drop files onto the composer */
-const _pbar = $("#promptbar");
-["dragover", "dragenter"].forEach(ev => _pbar.addEventListener(ev, e => {
-  if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")){ e.preventDefault(); _pbar.classList.add("drop"); }
-}));
-["dragleave", "dragend", "drop"].forEach(ev => _pbar.addEventListener(ev, () => _pbar.classList.remove("drop")));
-_pbar.addEventListener("drop", e => {
-  if (e.dataTransfer && e.dataTransfer.files.length){ e.preventDefault(); addFiles(e.dataTransfer.files); }
-});
-
-async function sendPrompt(){
-  const text = promptText().trim();
-  if (!sel) return;
-  if (nodeById(sel)?.ended_at) return;   /* closed thread: server would 409 */
-  const dest = sel;   /* capture: selection may change while the send is in flight */
-  const items = (stage[dest] || []).slice();
-  /* wait out any in-flight uploads so their refs ride this turn */
-  if (items.some(x => x.status === "up")){
-    await new Promise(res => {
-      const t = setInterval(() => { if (!items.some(x => x.status === "up")){ clearInterval(t); res(); } }, 150);
-      setTimeout(() => { clearInterval(t); res(); }, 12000);
-    });
-  }
-  const refs = items.filter(x => x.status === "done" && x.ref).map(x => x.ref);
-  if (!text && !refs.length) return;
-  clearPrompt();
-  localStorage.removeItem("scimux-draft:" + dest);
-  stage[dest] = [];                 /* clear the stage optimistically; restore on failure */
-  if (sel === dest) renderStage();
-  /* optimistic echo, painted before the POST even resolves: the store's
-     copy of this turn is seconds away (CLI transcript write + mirror tick
-     + chat poll), and an empty chat after hitting send reads as a swallowed
-     prompt. Translucent until the real turn lands; removed on failure —
-     then the draft returns instead. */
-  /* seen = how many turns were on screen at send time; the next user turn
-     past that index is this send landing. Only trustworthy when the chat has
-     actually rendered for this node (chatSig set after a render, cleared on
-     select) — otherwise leave it null and rely on the text match/timeout. */
-  chatFeature.setSentEcho({ node: dest, text, atts: refs, at: Date.now(),
-               seen: chatFeature.getChatSig() ? chatFeature.getLastTurns().length : null });
-  paintEchoNow(dest);
-  try {
-    const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
-      { method: "POST", body: JSON.stringify({ text, attachments: refs }) });
-    chatFeature.invalidate();
-    items.forEach(x => { if (x.preview) URL.revokeObjectURL(x.preview); });   /* staged files delivered */
-    /* "unconfirmed" is not a failure — the paste+Enter was sent, but the pane
-       never visibly reacted; the decision pane below picks this up via
-       delivery status and offers a recheck, so the draft stays cleared */
-    setTimeout(tick, 400);
-  } catch (err) {
-    /* 409s are turn-state conflicts, not failures: a send already in
-       flight, a previous send unconfirmed, or a structured agent mid-turn.
-       Nothing was lost — hold the text as a draft and let the operator
-       retry once the conflict resolves. Real failures still alert. */
-    if (err.status !== 409) alert(err.message);
-    /* the echo lied — nothing reached the agent; retract it. Only if it is
-       still this send's echo: the user may have switched nodes and sent
-       elsewhere while this POST was in flight, and retracting that newer
-       echo would make the other node's just-sent prompt visibly vanish
-       (R20.8 — dest was captured for exactly this). */
-    chatFeature.clearSentEchoFor(dest);
-    /* nothing typed is ever lost — restored under the node it was written
-       for, and merged in front of anything typed while the send was pending
-       rather than overwriting it */
-    const newer = localStorage.getItem("scimux-draft:" + dest) || "";
-    const merged = newer && newer !== text ? text + "\n\n" + newer : text;
-    if (merged) localStorage.setItem("scimux-draft:" + dest, merged);
-    /* the staged files never reached the agent either — put the chips back so
-       the operator can retry the whole turn (text + attachments) as one. */
-    if (items.length) stage[dest] = (stage[dest] || []).length ? stage[dest].concat(items) : items;
-    if (sel === dest){
-      setPromptText(merged);
-      renderStage();
-    }
-  }
-}
 /* ---------- navigation (phone: cards slide over chat) ---------- */
 function setLevel(n){
   level = clampLevel(n);

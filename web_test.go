@@ -52,6 +52,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "/js/api.js"`,
 		`from "/js/cards.js"`,
 		`from "/js/chat.js"`,
+		`from "/js/composer.js"`,
 		`from "/js/format.js"`,
 		`from "/js/lanes.js"`,
 		`from "/js/map-model.js"`,
@@ -317,6 +318,80 @@ func TestBubbleCopyLivesInActionRow(t *testing.T) {
 	}
 	if !strings.Contains(string(html), `from "/js/chat.js"`) || !strings.Contains(string(html), "createChatFeature") {
 		t.Fatal("production must wire createChatFeature from chat.js")
+	}
+}
+
+// Packet 7D: the composer is a shell singleton outside every polled render
+// region. Behavioral coverage lives in web/test/composer.test.js; this keeps
+// the document contract and single production owner.
+func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
+	htmlB, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	html := string(htmlB)
+	for _, id := range []string{
+		`id="promptbar"`, `id="attstage"`, `id="prompt"`,
+		`id="sendbtn"`, `id="attadd"`, `id="attmenu"`,
+		`id="attimg"`, `id="attfile"`,
+	} {
+		if !strings.Contains(html, id) {
+			t.Errorf("shell missing composer root %s", id)
+		}
+	}
+	// promptbar sits in #chat after the rebuilt #msgs surface and before the
+	// separately rebuilt Bookmarks surface; every composer root is singular.
+	msgsOpen := strings.Index(html, `id="msgs"`)
+	chatLoading := strings.Index(html, `id="chatloading"`)
+	promptbar := strings.Index(html, `id="promptbar"`)
+	bookmarks := strings.Index(html, `id="bookmarklist"`)
+	if msgsOpen < 0 || chatLoading < 0 || promptbar < 0 || bookmarks < 0 ||
+		!(msgsOpen < chatLoading && chatLoading < promptbar && promptbar < bookmarks) {
+		t.Fatal("#promptbar must follow #msgs in the chat shell (singleton after the message list)")
+	}
+	for _, id := range []string{"promptbar", "attstage", "prompt", "sendbtn", "attadd", "attmenu", "attimg", "attfile"} {
+		if got := strings.Count(html, `id="`+id+`"`); got != 1 {
+			t.Errorf("composer root #%s occurs %d times, want 1", id, got)
+		}
+	}
+	// #msgs is a void-of-composer surface: no promptbar markup between its open and the next major sibling section close is hard to parse; instead assert the prompt is a contenteditable singleton with the production placeholder.
+	if !strings.Contains(html, `id="prompt"`) || !strings.Contains(html, `contenteditable="true"`) {
+		t.Fatal("#prompt must remain a contenteditable singleton in the shell")
+	}
+	if !strings.Contains(html, `from "/js/composer.js"`) || !strings.Contains(html, "createComposerFeature") {
+		t.Fatal("production must import and instantiate createComposerFeature from composer.js")
+	}
+	if !strings.Contains(html, "composerFeature.bind()") {
+		t.Fatal("production must bind composerFeature exactly as the composer event owner")
+	}
+	// No duplicate inline implementation of the extracted composer.
+	for _, banned := range []string{
+		"function promptText(",
+		"function setComposerBusy(",
+		"function setComposerClosed(",
+		"function setAttachAvail(",
+		"function sendPrompt(",
+		"async function interruptPrompt(",
+		"function renderStage(",
+		"async function uploadOne(",
+	} {
+		if strings.Contains(html, banned) {
+			t.Errorf("inline composer implementation must not remain: %s", banned)
+		}
+	}
+	comp, err := os.ReadFile("web/js/composer.js")
+	if err != nil {
+		t.Fatalf("read composer.js: %v", err)
+	}
+	src := string(comp)
+	if !strings.Contains(src, "export function createComposerFeature") {
+		t.Fatal("composer.js must export createComposerFeature")
+	}
+	if !strings.Contains(src, "UPLOAD_WAIT_TIMEOUT_MS = 12000") {
+		t.Fatal("composer.js must keep the 12-second upload wait bound")
+	}
+	if !strings.Contains(src, "scimux-draft:") {
+		t.Fatal("composer.js must own scimux-draft storage keys")
 	}
 }
 

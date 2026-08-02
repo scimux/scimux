@@ -13,6 +13,7 @@ var productionJSURLs = []string{
 	"/js/api.js",
 	"/js/cards.js",
 	"/js/chat.js",
+	"/js/composer.js",
 	"/js/format.js",
 	"/js/lanes.js",
 	"/js/map-model.js",
