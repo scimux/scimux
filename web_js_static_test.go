@@ -22,6 +22,7 @@ var productionJSURLs = []string{
 	"/js/navigation.js",
 	"/js/notes.js",
 	"/js/search.js",
+	"/js/sheets.js",
 	"/js/state.js",
 }
 

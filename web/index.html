@@ -416,6 +416,7 @@ import {
 } from "/js/bookmarks.js";
 import { createNotesFeature } from "/js/notes.js";
 import { createSearchFeature } from "/js/search.js";
+import { createSheetsFeature } from "/js/sheets.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -987,14 +988,14 @@ const cardsFeature = createCardsFeature({
   updateLocalNode: n => updateLocalNode(n),
   nodeById: id => nodeById(id),
   exitThread: id => exitThread(id),
-  openAdopt: s => openAdopt(s),
+  openAdopt: s => sheetsFeature.openAdopt(s),
   selectNode: id => select(id),
   setLevel,
   isDesktop,
   setLaneFilter,
   renderChatHead: () => renderChatHead(),
   renderMap: () => renderMap(),
-  fieldError: (el, msg) => fieldError(el, msg),
+  fieldError: (el, msg) => sheetsFeature.fieldError(el, msg),
   alert: msg => alert(msg),
   confirm: msg => confirm(msg),
   removeNode: id => { nodes = nodes.filter(x => x.id !== id); },
@@ -1106,12 +1107,12 @@ const mapFeature = createMapFeature({
   setLaneFilter,
   loadChatHistory: (id, st) => loadChatHistory(id, st),
   jumpChatToNow: () => jumpChatToNow(),
-  openActivityEditor: (id, stop) => openActivityEditor(id, stop),
-  forkFromStation: id => forkFromStation(id),
+  openActivityEditor: (id, stop) => sheetsFeature.openActivityEditor(id, stop),
+  forkFromStation: id => sheetsFeature.forkFromStation(id),
   addStationBookmark: id => addStationBookmark(id),
   exitThread: id => exitThread(id),
-  openSheet,
-  closeSheets,
+  openSheet: id => sheetsFeature.openSheet(id),
+  closeSheets: () => sheetsFeature.closeSheets(),
   renderCards: () => renderCards(),
   invalidateCardsSig: () => { cardsSig = ""; },
   longpress: (container, selector, fn) => longpress(container, selector, fn),
@@ -1123,13 +1124,15 @@ function setMapFull(on){ mapFeature.setFull(on); }
 
 /* Chat feature factory — owns head/details, msgs, terminal, keys, workpulse. */
 let pendingJump = null;    // jump-to-source in flight (set by bookmarks/search; consumed by chat)
-/* composerFeature / bookmarksFeature / notesFeature / searchFeature are
-   assigned after createChatFeature; chat/bookmarks inject lazy wrappers so
-   effects resolve after construction (Bookmarks must not import notes.js). */
+/* composerFeature / bookmarksFeature / notesFeature / searchFeature /
+   sheetsFeature are assigned after createChatFeature; chat/bookmarks/cards/map
+   inject lazy wrappers so effects resolve after construction (Bookmarks must
+   not import notes.js; sheets is Packet 7H). */
 let composerFeature;
 let bookmarksFeature;
 let notesFeature;
 let searchFeature;
+let sheetsFeature;
 const chatFeature = createChatFeature({
   roots: {
     chathead: $("#chathead"),
@@ -1182,7 +1185,7 @@ const chatFeature = createChatFeature({
   uiMutate,
   stampAddress: (b, t) => stampAddressMod(b, t),
   copyText: s => copyText(s),
-  forkFromTurn: (text, parent) => forkFromTurn(text, parent),
+  forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
   setComposerBusy: v => composerFeature.setComposerBusy(v),
   setComposerClosed: v => composerFeature.setComposerClosed(v),
   setAttachAvail: v => composerFeature.setAttachAvail(v),
@@ -1292,8 +1295,8 @@ bookmarksFeature = createBookmarksFeature({
   copyText: s => copyText(s),
   select: id => select(id),
   setLevel: n => setLevel(n),
-  openSheet,
-  closeSheets,
+  openSheet: id => sheetsFeature.openSheet(id),
+  closeSheets: () => sheetsFeature.closeSheets(),
   setPendingJump: v => { pendingJump = v; },
   openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at),
   invalidateChat: () => chatFeature.invalidate(),
@@ -1397,7 +1400,7 @@ searchFeature = createSearchFeature({
   invalidateChat: () => chatFeature.invalidate(),
   setBookmarksOpen: o => setBookmarksOpen(o),
   openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at),
-  forkFromTurn: (text, parent) => forkFromTurn(text, parent),
+  forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
   uiMutate: op => uiMutate(op),
   toast: msg => toast(msg),
   prompt: msg => prompt(msg),
@@ -1406,6 +1409,68 @@ searchFeature = createSearchFeature({
 function searchOpen(){ return searchFeature.isOpen(); }
 function openSearch(){ searchFeature.open(); }
 function closeSearch(){ searchFeature.close(); }
+
+/* Generic sheets + new-activity + adoption — Packet 7H. */
+sheetsFeature = createSheetsFeature({
+  roots: {
+    backdrop: $("#backdrop"),
+    burger: $("#burger"),
+    plusbtn: $("#plusbtn"),
+    newchat: $("#newchat"),
+    nc_head: $("#nc_head"),
+    nc_start: $("#nc_start"),
+    nc_title: $("#nc_title"),
+    nc_prompt: $("#nc_prompt"),
+    nc_agent: $("#nc_agent"),
+    nc_model: $("#nc_model"),
+    nc_effort: $("#nc_effort"),
+    nc_dir: $("#nc_dir"),
+    nc_lane: $("#nc_lane"),
+    nc_lane_new: $("#nc_lane_new"),
+    nc_lane_hint: $("#nc_lane_hint"),
+    adopt: $("#adopt"),
+    ad_title: $("#ad_title"),
+    ad_agent: $("#ad_agent"),
+    ad_sid: $("#ad_sid"),
+    ad_path: $("#ad_path"),
+    ad_titlein: $("#ad_titlein"),
+    ad_prompt: $("#ad_prompt"),
+    ad_go: $("#ad_go"),
+  },
+  document,
+  storage: localStorage,
+  setTimeout,
+  clearTimeout,
+  createElement: tag => document.createElement(tag),
+  esc,
+  api,
+  nodeById: id => nodeById(id),
+  sel: () => sel,
+  laneFilter: () => laneFilter,
+  stopsOf,
+  stopLabel,
+  fillLaneSelect: (select, selected, includeUnset, disabled) =>
+    fillLaneSelect(select, selected, includeUnset, disabled),
+  readLaneChoice: (select, input) => readLaneChoice(select, input),
+  syncLanePicker: select => syncLanePicker(select),
+  laneList: () => laneList(),
+  uiMutate: op => uiMutate(op),
+  updateLocalNode: n => updateLocalNode(n),
+  select: id => select(id),
+  setLevel,
+  isDesktop,
+  tick: () => tick(),
+  invalidateStateEtag: () => { stateEtag = ""; },
+  invalidateCardsSig: () => { cardsSig = ""; },
+  invalidateChat: () => chatFeature.invalidate(),
+  invalidateMap: () => mapFeature.invalidate(),
+  renderCards: () => renderCards(),
+  renderChatHead: () => renderChatHead(),
+  renderMap: () => renderMap(),
+  closeArchived: () => closeArchived(),
+  getArchivedFork: () => archivedFork,
+  alert: msg => alert(msg),
+});
 
 /* Shell navigation into/out of Journeys (not map-local chrome). */
 $("#journeybtn").addEventListener("click", () => {
@@ -1574,45 +1639,9 @@ document.addEventListener("focusout", e => {
    actions, attention suppression, sent-echo, and scroll live in chat.js
    (Packet 7C). Shell keeps document title-edit key handlers above. */
 
-/* forkFromTurn: shared by the tap icon and the long-press sheet — prefill a
-   fresh-context fork from this message as evidence */
-function forkFromTurn(text, parent){
-  ncParent = parent || sel;
-  ncRationale = (text || "").split("\n")[0].slice(0, 140);
-  setNewActivitySubmitting(false);
-  seedForkTitle(text);
-  $("#nc_prompt").value = "Following up on this evidence:\n> " + ncRationale + "\n\n";
-  prepareLaunchConfig();
-  prepareNewActivityLane();
-  openSheet("#newchat");
-}
-/* Seed the fork's title from the source's first line and select-all, so one
-   keystroke renames it. The title is display-only (not the log filename), so a
-   twin label is only a legibility nudge, never a collision. */
-function seedForkTitle(src){
-  const first = (src || "").split("\n").map(s => s.trim()).find(Boolean) || "Follow-up";
-  $("#nc_title").value = first.slice(0, 60);
-  setTimeout(() => { const t = $("#nc_title"); t.focus(); t.select(); }, 0);
-}
-/* wall map: "+ New" on a station forks a fresh-context activity from that node
-   (inherits agent/model/effort/dir, never history). After Start, nc_start
-   selects the new node but leaves map-full on, so we stay on the map. */
-function forkFromStation(id){
-  const n = nodeById(id);
-  if (!n) return;
-  ncEdit = ""; ncEditStop = "";
-  ncParent = id;
-  ncRationale = n.title || "";
-  setNewActivitySubmitting(false);
-  $("#newchat").classList.remove("editing");
-  $("#nc_head").textContent = "New activity";
-  $("#nc_start").textContent = "Start";
-  seedForkTitle(n.description || n.title);
-  $("#nc_prompt").value = "";
-  prepareLaunchConfig();
-  prepareNewActivityLane();
-  openSheet("#newchat");
-}
+/* forkFromTurn / forkFromStation / openActivityEditor / openAdopt / openSheet /
+   closeSheets live in createSheetsFeature (Packet 7H). Map/chat/search/cards
+   reach them through injected sheetsFeature methods. */
 /* wall map: "Add note" files a sticky note for this station. Notes are
    lane-scoped in the store (no per-node anchor), so it lands in the station's
    lane tab of the notes pane — same record the in-chat/notes composer writes. */
@@ -1629,29 +1658,6 @@ function addStationBookmark(id){
   bookmarksFeature.pinBottom();
   renderBookmarksPane();
   toast("Note added" + (n.lane_id ? " to " + laneName(n.lane_id) : ""));
-}
-/* wall map: the pencil / long-press opens the SAME sheet used to add an
-   activity, in edit mode — title + description only (launch config + lane are
-   immutable, so those sections hide). Save PATCHes and stays on the map. */
-function openActivityEditor(id, stopTime){
-  const n = nodeById(id);
-  if (!n) return;
-  ncEdit = id;
-  ncEditStop = stopTime || "";
-  ncParent = "";
-  setNewActivitySubmitting(false);
-  $("#newchat").classList.add("editing");
-  /* an earlier stop is a closed station — the sheet edits that station's frozen
-     label, not the live head; seed it from the stop's own snapshot */
-  const stop = ncEditStop ? stopsOf(n).find(s => s.time === ncEditStop) : null;
-  const label = stop ? stopLabel(stop) : { title: n.title || "", desc: n.description || "" };
-  $("#nc_head").textContent = ncEditStop ? "Edit station" : "Edit activity";
-  $("#nc_start").textContent = "Save";
-  clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt"));
-  $("#nc_title").value = label.title;
-  $("#nc_prompt").value = label.desc;
-  openSheet("#newchat");
-  setTimeout(() => $("#nc_title").focus(), 0);
 }
 /* ---------- sticky-notes / Bookmarks pane ----------
    Packet 7E: rendering, clamp, flags, reply composer, jump, and longpress
@@ -1752,15 +1758,14 @@ bookmarksFeature.bind();
 notesFeature.bind();
 /* Search overlay listeners + document shortcuts (Packet 7G). */
 searchFeature.bind();
+/* Generic sheets + new-activity + adoption (Packet 7H). */
+sheetsFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
 
 
 /* long-press send-to lives in bookmarksFeature.bind (Packet 7E). */
-let ncParent = "", ncRationale = "";
-let ncEdit = "";   /* non-empty = the #newchat sheet is editing this node, not creating */
-let ncEditStop = ""; /* when editing: the earlier-stop seam being edited; "" = the head (node label) */
 
 /* Prompt bar / drafts / staging / send live in createComposerFeature
    (Packet 7D). Shell calls composerFeature.onSelect on selection change;
@@ -1817,30 +1822,11 @@ document.addEventListener("touchend", e => {
   applyNavAction(action);
 }, { passive: true });
 
-/* ---------- sheets ---------- */
-function setSheetActive(sheet, active){
-  sheet.classList.toggle("open", active);
-  sheet.toggleAttribute("inert", !active);
-  sheet.setAttribute("aria-hidden", active ? "false" : "true");
-  sheet.querySelectorAll("input, textarea, select").forEach(el => {
-    if (active){
-      if (el.dataset.sheetDisabledByClose) el.disabled = false;
-      delete el.dataset.sheetDisabledByClose;
-    } else if (!el.disabled) {
-      el.disabled = true;
-      el.dataset.sheetDisabledByClose = "1";
-    }
-  });
-}
-function openSheet(id){
-  $("#backdrop").classList.add("on");
-  document.querySelectorAll(".sheet").forEach(s => setSheetActive(s, s.matches(id)));
-}
-function closeSheets(){ $("#backdrop").classList.remove("on");
-  document.querySelectorAll(".sheet").forEach(s => setSheetActive(s, false)); }
-closeSheets();
-$("#backdrop").addEventListener("click", closeSheets);
-$("#burger").addEventListener("click", () => openSheet("#menu"));
+/* ---------- sheets (Packet 7H) ----------
+   Generic backdrop/open/close, #newchat create/fork/edit, and #adopt live in
+   createSheetsFeature (web/js/sheets.js). Construction and bind are next to
+   searchFeature above. Feature-specific #sendto/#cardact/#tabsheet contents
+   remain in bookmarks/cards/map; #menu update/license contents stay shell. */
 
 /* Notes workspace implementation lives in /js/notes.js (Packet 7F).
    Shell wrappers openWorkspace/closeWorkspace/wsOpen/renderWsInbox/
@@ -1905,25 +1891,9 @@ function closeArchived(){
   archivedReturnFocus = null;
   if (back && document.contains(back) && typeof back.focus === "function") back.focus();
 }
-/* fork a deleted chat: a fresh activity seeded from the log's meta launch config
-   (agent/model/effort/dir) — there is no live parent, so ncParent stays empty and
-   the fork inherits config, never history */
-function forkFromArchived(){
-  if (!archivedFork) return;
-  const cfg = archivedFork;
-  closeArchived();
-  ncEdit = ""; ncEditStop = "";
-  ncParent = "";
-  setNewActivitySubmitting(false);
-  $("#newchat").classList.remove("editing");
-  $("#nc_head").textContent = "New activity";
-  $("#nc_start").textContent = "Start";
-  seedForkTitle(cfg.title || "Follow-up");
-  $("#nc_prompt").value = "";
-  prepareLaunchConfig({ agent: cfg.agent, model: cfg.model, dir: cfg.dir, effort: cfg.effort || "" });
-  prepareNewActivityLane();
-  openSheet("#newchat");
-}
+/* fork a deleted chat: sheetsFeature seeds launch config from the log meta
+   (agent/model/effort/dir) — no live parent; inherits config, never history */
+function forkFromArchived(){ sheetsFeature.forkFromArchived(); }
 $("#archivedclose").addEventListener("click", closeArchived);
 $("#archivedscrim").addEventListener("click", closeArchived);
 $("#archivedforkbtn").addEventListener("click", forkFromArchived);
@@ -1997,303 +1967,8 @@ document.querySelectorAll("#menu .lic").forEach(b => b.addEventListener("click",
 
 /* termtoggle + scrollend listeners live in chat.js bind (Packet 7C). */
 
-
-/* new activity — agent and model lists come from the backend, which probes
-   the installed harness CLIs (GET /api/agents); this static set is only the
-   fallback for when that call fails */
-const MODELS = {
-  claude: ["", "fable", "opus", "sonnet", "haiku"],
-  codex:  ["", "gpt-5.4", "gpt-5.4-mini"],
-};
-/* reasoning-effort levels per agent — claude's --effort takes five levels; the
-   empty option means "no explicit effort" (the agent's own default). Agents not
-   listed fall back to the common three. */
-const EFFORTS = {
-  claude: ["low", "medium", "high", "xhigh", "max"],
-  codex:  ["low", "medium", "high"],
-};
-/* per-agent, per-model effort menus discovered from the CLI ({agent: {modelId:
-   {levels, default}}}). Populated from /api/agents where a harness advertises
-   per-model effort (codex); fillEfforts prefers this over the static EFFORTS
-   above, so each codex model offers exactly the levels it accepts. */
-const MODEL_EFFORTS = {};
-function fillAgents(){
-  $("#nc_agent").innerHTML = Object.keys(MODELS).map(a =>
-    `<option>${esc(a)}</option>`).join("");
-}
-function fillModels(){
-  /* the empty option means "no explicit model" — for a same-agent fork the
-     server inherits the parent's model there, so label it honestly */
-  const p = nodeById(ncParent);
-  const dflt = p && p.agent === $("#nc_agent").value && p.model
-    ? `(inherit: ${esc(p.model)})` : "(default)";
-  $("#nc_model").innerHTML = (MODELS[$("#nc_agent").value] || [""]).map(m =>
-    `<option value="${esc(m)}">${esc(m) || dflt}</option>`).join("");
-}
-function fillEfforts(){
-  /* preserve the current selection across an agent/model switch when it stays valid */
-  const cur = $("#nc_effort").value;
-  const agent = $("#nc_agent").value;
-  /* the selected model's discovered menu wins; else the static per-agent list */
-  const perModel = (MODEL_EFFORTS[agent] || {})[$("#nc_model").value];
-  const list = (perModel && perModel.levels) || EFFORTS[agent] || ["low", "medium", "high"];
-  const dflt = perModel && perModel.default;
-  $("#nc_effort").innerHTML = `<option value=""></option>` +
-    list.map(e => `<option value="${esc(e)}">${esc(e)}${e === dflt ? " (default)" : ""}</option>`).join("");
-  if (list.includes(cur)) $("#nc_effort").value = cur;
-}
-$("#nc_agent").addEventListener("change", () => { fillModels(); fillEfforts(); });
-/* effort menu is per-model (codex), so a model switch re-fills it too */
-$("#nc_model").addEventListener("change", fillEfforts);
-fillAgents(); fillModels(); fillEfforts();
-api("/api/agents").then(j => {
-  if (!j || !Object.keys(j).length) return;
-  Object.keys(MODELS).forEach(k => delete MODELS[k]);
-  for (const [agent, info] of Object.entries(j)){
-    MODELS[agent] = ["", ...(info.models || [])];   /* "" = launch with the harness default */
-    MODEL_EFFORTS[agent] = info.efforts || {};       /* per-model effort menus, where advertised */
-  }
-  fillAgents(); fillModels(); fillEfforts();
-}).catch(() => {});
-/* prepareLaunchConfig: fork is the one path that may change launch config
-   (a fork inherits agent/model/effort/dir but never conversation history —
-   AGENTS.md). So the selectors stay EDITABLE in fork mode and merely start on
-   the parent's values: "same setup, fresh context" is zero taps, "same thread
-   on a different agent/model" is a real choice. The payload sends the visible
-   values; resolveNode backfills anything left empty from the parent. */
-function prepareLaunchConfig(cfg){
-  fillAgents(); fillModels(); fillEfforts();
-  /* seed from an explicit config (archived fork — no live parent) or from the
-     parent node when forking a live chat */
-  const p = cfg || nodeById(ncParent);
-  if (p){
-    const ag = $("#nc_agent");
-    /* the probe list may lack the parent's agent (CLI not installed here) —
-       keep the inherited value selectable instead of silently switching */
-    if (p.agent && ![...ag.options].some(o => o.value === p.agent))
-      ag.insertAdjacentHTML("beforeend", `<option>${esc(p.agent)}</option>`);
-    if (p.agent) ag.value = p.agent;
-    fillModels(); fillEfforts();   /* model + effort lists follow the (possibly re-set) agent */
-    const mo = $("#nc_model");
-    if (p.model && ![...mo.options].some(o => o.value === p.model))
-      mo.insertAdjacentHTML("beforeend", `<option value="${esc(p.model)}">${esc(p.model)}</option>`);
-    mo.value = p.model || "";
-    $("#nc_effort").value = $("#nc_effort").querySelector(`option[value="${esc(p.effort || "")}"]`) ? (p.effort || "") : "";
-    $("#nc_dir").value = p.dir || "";
-  } else {
-    $("#nc_effort").value = "";
-    $("#nc_dir").value = "";
-  }
-  for (const id of ["#nc_agent", "#nc_model", "#nc_effort", "#nc_dir"]){
-    const el = $(id);
-    el.disabled = false;
-    /* authoritative state — the note-open re-enable must not fight it
-       (setSheetActive's marker) */
-    delete el.dataset.sheetDisabledByClose;
-  }
-}
-function prepareNewActivityLane(){
-  const forking = !!ncParent;
-  /* The lane is always EDITABLE — for a fork it is *the* decision that shapes
-     the map: leave it on the parent's topic (Y-stay, a parallel same-colour
-     thread), type a new name (Y-new, a new topic born at the split), or pick
-     another existing topic (S, a crossover onto that line). A fork gets NO
-     preselection so the choice is conscious (a preselected inherited lane reads
-     as "continue this thread", but it actually forks a parallel thread — that's
-     what /clear is for); a plain new activity keeps the scoped preselect. */
-  fillLaneSelect($("#nc_lane"), forking ? "" : laneFilter, true, false);
-  const hint = $("#nc_lane_hint");
-  if (hint) hint.hidden = !forking;
-  $("#nc_lane_new").value = "";
-  clearFieldError($("#nc_lane_new"));
-  clearFieldError($("#nc_lane"));
-  syncLanePicker($("#nc_lane"));
-}
-$("#plusbtn").addEventListener("click", () => {
-  ncParent = ""; ncRationale = ""; ncEdit = ""; ncEditStop = "";   /* a plain + is never a fork or edit */
-  $("#newchat").classList.remove("editing");
-  $("#nc_head").textContent = "New activity";
-  $("#nc_start").textContent = "Start";
-  setNewActivitySubmitting(false);
-  $("#nc_title").value = "";
-  $("#nc_prompt").value = "";
-  prepareLaunchConfig();
-  prepareNewActivityLane();
-  const lastDir = localStorage.getItem("scimux-lastdir");
-  if (lastDir && !$("#nc_dir").value) $("#nc_dir").value = lastDir;
-  openSheet("#newchat");
-});
-function fieldError(el, msg){
-  clearFieldError(el);
-  const id = el.id + "-err";
-  el.setAttribute("aria-invalid", "true");
-  el.setAttribute("aria-describedby", id);
-  const err = document.createElement("div");
-  err.className = "fielderr";
-  err.id = id;
-  err.textContent = msg;
-  el.insertAdjacentElement("afterend", err);
-  const clear = () => { clearFieldError(el); el.removeEventListener("input", clear); };
-  el.addEventListener("input", clear);
-}
-function clearFieldError(el){
-  el.removeAttribute("aria-invalid");
-  el.removeAttribute("aria-describedby");
-  const err = document.getElementById(el.id + "-err");
-  if (err) err.remove();
-}
-let newActivitySubmitting = false;
-function setNewActivitySubmitting(active){
-  newActivitySubmitting = !!active;
-  const btn = $("#nc_start");
-  btn.disabled = newActivitySubmitting;
-  btn.textContent = ncEdit
-    ? (newActivitySubmitting ? "Saving..." : "Save")
-    : (newActivitySubmitting ? "Starting..." : "Start");
-}
-$("#nc_start").addEventListener("click", async () => {
-  if (newActivitySubmitting) return;
-  clearFieldError($("#nc_title")); clearFieldError($("#nc_prompt")); clearFieldError($("#nc_dir")); clearFieldError($("#nc_lane"));
-  const title = $("#nc_title").value.trim();
-  const description = $("#nc_prompt").value.trim();
-  /* edit mode: PATCH title + description on the existing node, stay put */
-  if (ncEdit){
-    if (!title){
-      fieldError($("#nc_title"), "Enter a title.");
-      $("#nc_title").focus(); return;
-    }
-    const id = ncEdit, cur = nodeById(id);
-    /* editing an earlier (closed) station: PATCH its own frozen label via the
-       station key — the node record (the head) is left untouched, so this never
-       bleeds into the active chat or its siblings (spec C/E) */
-    if (ncEditStop){
-      const stop = cur && stopsOf(cur).find(s => s.time === ncEditStop);
-      const prev = stop ? stopLabel(stop) : { title: "", desc: "" };
-      if (title === prev.title && description === (prev.desc || "")){ closeSheets(); return; }
-      setNewActivitySubmitting(true);
-      try {
-        const lbl = await api(`/api/nodes/${encodeURIComponent(id)}`, {
-          method: "PATCH", body: JSON.stringify({ station: ncEditStop, title, description }),
-        });
-        /* optimistic local update so the map repaints immediately; the poll
-           confirms it from station_labels */
-        if (cur){ (cur.station_labels ||= {})[ncEditStop] = { title: lbl.title || title, desc: lbl.desc || description }; }
-        closeSheets();
-        mapFeature.invalidate(); renderMap();
-      } catch (err) {
-        fieldError($("#nc_title"), err.message || "Could not save.");
-        $("#nc_title").focus();
-      } finally { setNewActivitySubmitting(false); }
-      return;
-    }
-    const body = {};
-    if (cur && title !== cur.title) body.title = title;
-    if (cur && description !== (cur.description || "")) body.description = description;
-    if (!Object.keys(body).length){ closeSheets(); return; }
-    setNewActivitySubmitting(true);
-    try {
-      const n = await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
-      updateLocalNode(n);
-      closeSheets();
-      cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
-      renderCards(); renderChatHead(); renderMap();
-    } catch (err) {
-      fieldError($("#nc_title"), err.message || "Could not save.");
-      $("#nc_title").focus();
-    } finally { setNewActivitySubmitting(false); }
-    return;
-  }
-  const laneChoice = readLaneChoice($("#nc_lane"), $("#nc_lane_new"));
-  if (laneChoice.error){
-    fieldError($("#nc_lane_new"), laneChoice.error);
-    $("#nc_lane_new").focus();
-    $("#nc_lane_new").scrollIntoView({ block: "center" });
-    return;
-  }
-  /* A fork must land on a lane — that choice is what makes it Y-stay / Y-new /
-     S on the map, so "unset" is not a valid fork (unlike a plain activity). */
-  if (ncParent && !laneChoice.laneID){
-    fieldError($("#nc_lane"), "Pick a lane for this fork (or use /clear to continue the thread).");
-    $("#nc_lane").focus();
-    $("#nc_lane").scrollIntoView({ block: "center" });
-    return;
-  }
-  const payload = {
-    title,
-    description,
-    prompt: description || title,
-    /* fork mode: the selectors start on the parent's values but stay
-       editable — send what is visible; resolveNode backfills only empty
-       fields from the parent */
-    agent: $("#nc_agent").value,
-    model: $("#nc_model").value,
-    effort: $("#nc_effort").value,
-    dir: $("#nc_dir").value.trim(),
-    /* set by "New activity from here…": fresh-context fork off the evidence */
-    parent: ncParent,
-    rationale: ncParent ? "follow-up on: " + ncRationale : "",
-  };
-  if (laneChoice.laneID) payload.lane_id = laneChoice.laneID;
-  if (!payload.title){
-    fieldError($("#nc_title"), "Enter a title before starting.");
-    $("#nc_title").focus();
-    $("#nc_title").scrollIntoView({ block: "center" });
-    return;
-  }
-  setNewActivitySubmitting(true);
-  try {
-    const n = await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) });
-    if (laneChoice.lane)
-      uiMutate({ k: "lanes", lanes: [...laneList(), laneChoice.lane] });
-    if (payload.dir) localStorage.setItem("scimux-lastdir", payload.dir);
-    $("#nc_prompt").value = ""; $("#nc_title").value = "";
-    closeSheets();
-    stateEtag = "";
-    await tick();
-    select(n.id);
-    if (!isDesktop()) setLevel(1);
-  } catch (err) {
-    const msg = err.message || "Could not start this activity.";
-    const target = /\b(dir|directory|path)\b/i.test(msg) ? $("#nc_dir")
-      : /\btitle\b/i.test(msg) ? $("#nc_title") : $("#nc_prompt");
-    fieldError(target, msg);
-    target.focus();
-    target.scrollIntoView({ block: "center" });
-  } finally {
-    setNewActivitySubmitting(false);
-  }
-});
-
-/* adoption */
-let adoptSession = "";
-function openAdopt(session){
-  adoptSession = session;
-  $("#ad_title").textContent = `Adopt "${session}"`;
-  /* fresh sheet per session: a previous adoption's session-id/transcript
-     must never silently bind to a different tmux session */
-  $("#ad_agent").value = "claude";
-  $("#ad_sid").value = "";
-  $("#ad_path").value = "";
-  $("#ad_titlein").value = "";
-  $("#ad_prompt").value = "";
-  openSheet("#adopt");
-}
-$("#ad_go").addEventListener("click", async () => {
-  try {
-    const n = await api("/api/adopt", { method: "POST", body: JSON.stringify({
-      session: adoptSession,
-      agent: $("#ad_agent").value,
-      session_id: $("#ad_sid").value.trim(),
-      transcript: $("#ad_path").value.trim(),
-      title: $("#ad_titlein").value.trim(),
-      prompt: $("#ad_prompt").value.trim(),
-    })});
-    closeSheets();
-    stateEtag = "";
-    await tick();
-    select(n.id);
-  } catch (err) { alert(err.message); }
-});
+/* New activity / adopt / agents probe / fieldError / launch-config / plus /
+   nc_start / ad_go live in createSheetsFeature (Packet 7H). */
 
 /* ---------- polling: 2 s visible, paused hidden, immediate on return.
    Non-overlapping: the next tick is scheduled only after the current one

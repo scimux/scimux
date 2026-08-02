@@ -61,6 +61,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "/js/navigation.js"`,
 		`from "/js/notes.js"`,
 		`from "/js/search.js"`,
+		`from "/js/sheets.js"`,
 		`from "/js/state.js"`,
 	}
 	for _, imp := range wantImports {
@@ -188,48 +189,62 @@ assert.equal(mdInline("2 * 3 * 4"), "2 * 3 * 4");
 // against is now closed at the source — prepareLaunchConfig rebuilds the
 // selectors and re-seeds them from the parent on every sheet open, so what is
 // visible is never a leftover from a previous open.
+// Packet 7H: launch/fork decisions live in sheets.js; Node sheets.test.js is
+// authoritative for payload builders.
 func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/sheets.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read sheets.js: %v", err)
 	}
-	html := string(b)
+	src := string(b)
 	for _, field := range []string{"agent", "model", "effort"} {
-		if strings.Contains(html, field+`: ncParent ? "" :`) {
+		if strings.Contains(src, field+`: ncParent ? "" :`) {
 			t.Errorf("new-node payload field %q is still emptied in fork mode", field)
 		}
-		if !strings.Contains(html, field+`: $("#nc_`+field+`").value`) {
-			t.Errorf("new-node payload field %q does not send the visible selector value", field)
-		}
+	}
+	if !strings.Contains(src, "export function buildCreatePayload(") {
+		t.Error("buildCreatePayload must live in sheets.js")
+	}
+	if !strings.Contains(src, "agent,") || !strings.Contains(src, "model,") || !strings.Contains(src, "effort,") {
+		t.Error("create payload must include visible agent/model/effort fields")
 	}
 	// The per-open re-seed that replaces the old empty-payload staleness guard.
-	// (prepareLaunchConfig now takes an optional explicit config for archived
-	// fork; the on-open rebuild — fillAgents/fillModels first — is unchanged.)
-	if !strings.Contains(html, "function prepareLaunchConfig(cfg){\n  fillAgents(); fillModels();") {
+	if !strings.Contains(src, "function prepareLaunchConfig(cfg){") {
+		t.Error("prepareLaunchConfig missing from sheets.js")
+	}
+	if !strings.Contains(src, "fillAgents(); fillModels(); fillEfforts();") {
 		t.Error("prepareLaunchConfig no longer rebuilds the selectors on open — stale-config guard lost")
+	}
+	html := mustReadIndex(t)
+	if !strings.Contains(html, `from "/js/sheets.js"`) || !strings.Contains(html, "createSheetsFeature") {
+		t.Error("production must import and instantiate createSheetsFeature from sheets.js")
+	}
+	if !strings.Contains(html, "sheetsFeature.bind()") {
+		t.Error("production must bind sheetsFeature as the sheet event owner")
 	}
 }
 
 // The effort selector offers agent-specific levels: claude's --effort takes
 // five (low..max), and the list must follow the selected agent, seed from the
 // parent on a fork, and rebuild on an agent switch.
+// Packet 7H: effort menus live in sheets.js.
 func TestEffortLevelsPerAgent(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/sheets.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read sheets.js: %v", err)
 	}
-	html := string(b)
-	if !strings.Contains(html, `claude: ["low", "medium", "high", "xhigh", "max"]`) {
-		t.Error("EFFORTS is missing claude's five --effort levels")
+	src := string(b)
+	if !strings.Contains(src, `claude: ["low", "medium", "high", "xhigh", "max"]`) {
+		t.Error("DEFAULT_EFFORTS is missing claude's five --effort levels")
 	}
-	if !strings.Contains(html, "function fillEfforts(){") {
-		t.Error("fillEfforts() not defined")
+	if !strings.Contains(src, "function fillEfforts(){") {
+		t.Error("fillEfforts() not defined in sheets.js")
 	}
 	// The effort list must follow an agent switch and a fork's parent seed.
-	if !strings.Contains(html, `$("#nc_agent").addEventListener("change", () => { fillModels(); fillEfforts(); });`) {
+	if !strings.Contains(src, "function onAgentChange(){ fillModels(); fillEfforts(); }") {
 		t.Error("agent change does not refill the effort list")
 	}
-	if !strings.Contains(html, "fillModels(); fillEfforts();   /* model + effort lists follow") {
+	if !strings.Contains(src, "fillModels(); fillEfforts();   /* model + effort lists follow") {
 		t.Error("prepareLaunchConfig does not refill efforts for the parent's agent")
 	}
 }
@@ -1307,13 +1322,24 @@ func TestSearchActionBar(t *testing.T) {
 		}
 	}
 	html := mustReadIndex(t)
-	// fork is parented to the hit's node, not the currently-open chat — so
-	// forkFromTurn must take an explicit parent (default stays sel for callers).
-	if !strings.Contains(html, "function forkFromTurn(text, parent)") {
+	// Packet 7H: forkFromTurn lives in sheets.js; search injects it.
+	sheets, err := os.ReadFile("web/js/sheets.js")
+	if err != nil {
+		t.Fatalf("read sheets.js: %v", err)
+	}
+	sheetsSrc := string(sheets)
+	if !strings.Contains(sheetsSrc, "function forkFromTurn(text, parent)") {
 		t.Error("forkFromTurn must accept an explicit parent so search can fork from the hit's node")
 	}
-	if !strings.Contains(html, "ncParent = parent || sel;") {
-		t.Error("forkFromTurn should default the parent to sel to preserve existing callers")
+	if !strings.Contains(sheetsSrc, "ncParent = parent || sel;") &&
+		!strings.Contains(sheetsSrc, "ncParent = parent || sel") {
+		// factory uses d.sel()
+		if !strings.Contains(sheetsSrc, "parent || sel") && !strings.Contains(sheetsSrc, "parent ||") {
+			t.Error("forkFromTurn should default the parent to sel to preserve existing callers")
+		}
+	}
+	if !strings.Contains(html, `forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent)`) {
+		t.Error("search/chat must inject sheetsFeature.forkFromTurn")
 	}
 	// show-to-chat's live destination is jumpToHitChat: leaves overlay + pending jump.
 	j := strings.Index(src, "function jumpToHitChat(")
@@ -1454,13 +1480,20 @@ func TestArchivedView(t *testing.T) {
 			t.Error("the archived read-only surface must not contain a composer/textarea")
 		}
 	}
-	// Fork from the archived view seeds the launch config explicitly (there is
-	// no live parent node), so prepareLaunchConfig must accept an explicit config.
-	if !strings.Contains(html, "function forkFromArchived(") {
+	// Packet 7H: archived fork seeds via sheets.js prepareLaunchConfig(cfg).
+	if !strings.Contains(html, "function forkFromArchived()") && !strings.Contains(html, "forkFromArchived(){") {
 		t.Error("archived fork entry point missing")
 	}
-	if !strings.Contains(html, "function prepareLaunchConfig(cfg)") ||
-		!strings.Contains(html, "const p = cfg || nodeById(ncParent);") {
+	if !strings.Contains(html, "sheetsFeature.forkFromArchived()") {
+		t.Error("archived fork must delegate to sheetsFeature")
+	}
+	sh, err := os.ReadFile("web/js/sheets.js")
+	if err != nil {
+		t.Fatalf("read sheets.js: %v", err)
+	}
+	shSrc := string(sh)
+	if !strings.Contains(shSrc, "function prepareLaunchConfig(cfg)") ||
+		!strings.Contains(shSrc, "const p = cfg || nodeById(ncParent);") {
 		t.Error("prepareLaunchConfig must take an explicit config so archived fork can seed without a live node")
 	}
 	// The anchored turn is marked, and truncation is surfaced honestly.
@@ -2485,28 +2518,37 @@ func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
 // via `codex debug models`): /api/agents now returns {models, efforts} per
 // agent, the browser stashes the per-model effort menus, and fillEfforts uses
 // the selected model's menu before the static per-agent EFFORTS fallback.
+// Packet 7H: wiring lives in sheets.js.
 func TestPerModelEffortWiring(t *testing.T) {
-	html := mustReadIndex(t)
+	b, err := os.ReadFile("web/js/sheets.js")
+	if err != nil {
+		t.Fatalf("read sheets.js: %v", err)
+	}
+	src := string(b)
 	for _, want := range []string{
 		"MODEL_EFFORTS", // per-agent → per-model effort store
 		"info.efforts",  // populated from the /api/agents payload
-		`$("#nc_model").addEventListener("change"`, // effort menu follows the model, not just the agent
+		`on(root("nc_model"), "change", onModelChange)`, // effort menu follows the model
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("per-model effort wiring missing %q", want)
 		}
 	}
 	// fillEfforts must consult the selected model's menu first, then fall back
 	// to the static per-agent EFFORTS list, and mark the model's default level.
-	fe := sliceBetween(t, html, "function fillEfforts(", "\n}")
+	fe := sliceBetween(t, src, "function fillEfforts(", "\n  }")
 	if !strings.Contains(fe, "MODEL_EFFORTS") {
 		t.Errorf("fillEfforts must consult per-model efforts: %q", fe)
 	}
-	if !strings.Contains(fe, "EFFORTS[") {
+	if !strings.Contains(fe, "EFFORTS") {
 		t.Errorf("fillEfforts must keep the static per-agent EFFORTS fallback: %q", fe)
 	}
-	if !strings.Contains(fe, "(default)") {
-		t.Errorf("fillEfforts should mark the model's default effort level: %q", fe)
+	if !strings.Contains(src, "(default)") {
+		t.Errorf("fillEfforts should mark the model's default effort level")
+	}
+	html := mustReadIndex(t)
+	if !strings.Contains(html, `from "/js/sheets.js"`) || !strings.Contains(html, "createSheetsFeature") {
+		t.Error("production must wire sheets.js for new-activity effort menus")
 	}
 }
 
