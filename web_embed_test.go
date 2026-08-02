@@ -8,11 +8,12 @@ import (
 	"testing"
 )
 
-// productionJSModules is the exact Packet 6F inventory of flat production
-// JavaScript modules under web/js. Keep in sync with the sole module entry's
-// imports in web/index.html and with jsFileHandler serving.
+// productionJSModules is the exact Packet 7J inventory of flat production
+// JavaScript modules under web/js. Keep in sync with the sole browser entry
+// web/js/app.js, its relative imports, and jsFileHandler serving.
 var productionJSModules = []string{
 	"web/js/api.js",
+	"web/js/app.js",
 	"web/js/bookmarks.js",
 	"web/js/cards.js",
 	"web/js/chat.js",

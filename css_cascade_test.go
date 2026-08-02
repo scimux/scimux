@@ -517,7 +517,6 @@ func TestProductionCSSNegativeRootsPreserved(t *testing.T) {
 		"/css/",
 		"/css/app.css",
 		"/js/",
-		"/js/app.js",
 		"/index.html",
 		"/web/index.html",
 		"/package.json",

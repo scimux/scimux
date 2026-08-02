@@ -133,7 +133,6 @@ func TestCharacterizationStaticNotFoundAndAllowlist(t *testing.T) {
 		"/css/",
 		"/css/app.css",
 		"/js/",
-		"/js/app.js",
 	} {
 		t.Run(path, func(t *testing.T) {
 			rec := getCharacterization(t, h, path)

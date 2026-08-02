@@ -14,11 +14,11 @@ import (
 	"testing"
 )
 
-// Packet 6F: the sole browser entry is one inline <script type="module"> that
-// imports the exact production inventory under /js/. Parse/check that module,
-// node --check every production module, prove imports resolve, and prove
-// web/test + package.json stay out of the embed. A classic-only <script>
-// search is no longer valid.
+// Packet 7J: the sole browser entry is the external module web/js/app.js.
+// Parse/check that entry and every production module, prove relative imports
+// resolve offline (support graph only — app.js is not executed under bare Node),
+// and prove web/test + package.json stay out of the embed. No classic scripts
+// and no inline module implementation body remain in index.html.
 func TestWebIndexScriptsParse(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -30,48 +30,77 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	}
 	html := string(b)
 
-	// Exactly one module entry; no classic app script blocks; no app.js entry.
-	moduleBlocks := regexp.MustCompile(`(?s)<script\s+type="module">(.*?)</script>`).FindAllStringSubmatch(html, -1)
-	if len(moduleBlocks) != 1 {
-		t.Fatalf("want exactly one <script type=\"module\"> entry, got %d", len(moduleBlocks))
-	}
-	// Count every <script opening; only the module form is allowed.
+	// Exactly one external module entry; no classic scripts; no inline body.
 	allScriptOpens := regexp.MustCompile(`(?i)<script\b`).FindAllStringIndex(html, -1)
-	moduleOpens := regexp.MustCompile(`(?i)<script\s+type="module"`).FindAllStringIndex(html, -1)
-	if len(allScriptOpens) != len(moduleOpens) || len(moduleOpens) != 1 {
-		t.Fatalf("script tags: total opens=%d module opens=%d; want exactly one module entry and no classic scripts",
-			len(allScriptOpens), len(moduleOpens))
+	moduleSrc := regexp.MustCompile(`(?i)<script\s+type="module"\s+src="/js/app\.js"\s*>\s*</script>`).FindAllStringIndex(html, -1)
+	inlineModuleBodies := regexp.MustCompile(`(?s)<script\s+type="module">.+?</script>`).FindAllStringIndex(html, -1)
+	if len(allScriptOpens) != 1 || len(moduleSrc) != 1 {
+		t.Fatalf("script tags: total opens=%d external app.js module=%d; want exactly one external module entry",
+			len(allScriptOpens), len(moduleSrc))
 	}
-	if strings.Contains(html, `src="/js/app.js"`) || strings.Contains(html, "web/js/app.js") {
-		t.Fatal("app.js must not be a browser entry in Phase 6")
+	if len(inlineModuleBodies) != 0 {
+		t.Fatalf("index.html must not retain an inline module body; found %d", len(inlineModuleBodies))
 	}
-
-	inline := moduleBlocks[0][1]
-	// Direct composition imports. Support modules may instead be reached through
-	// this graph (state.js is consumed by api.js and polling.js).
-	wantImports := []string{
-		`from "/js/api.js"`,
-		`from "/js/bookmarks.js"`,
-		`from "/js/cards.js"`,
-		`from "/js/chat.js"`,
-		`from "/js/composer.js"`,
-		`from "/js/format.js"`,
-		`from "/js/lanes.js"`,
-		`from "/js/map-model.js"`,
-		`from "/js/map.js"`,
-		`from "/js/navigation.js"`,
-		`from "/js/notes.js"`,
-		`from "/js/polling.js"`,
-		`from "/js/search.js"`,
-		`from "/js/sheets.js"`,
+	if !strings.Contains(html, `<script type="module" src="/js/app.js"></script>`) {
+		t.Fatal(`index.html must load sole entry via <script type="module" src="/js/app.js"></script>`)
 	}
-	for _, imp := range wantImports {
-		if !strings.Contains(inline, imp) {
-			t.Errorf("inline module missing import %q", imp)
+	// No application-global bridge in the declarative shell.
+	for _, banned := range []string{
+		`window.scimux`,
+		`window.app`,
+		`globalThis.`,
+	} {
+		if strings.Contains(html, banned) {
+			t.Fatalf("index.html must not define application global bridge %q", banned)
 		}
 	}
 
-	// Enumerate production JS inventory: exact paths, exact embedded bytes.
+	app, err := webFS.ReadFile("web/js/app.js")
+	if err != nil {
+		t.Fatalf("read embedded web/js/app.js: %v", err)
+	}
+	appSrc := string(app)
+	if !strings.Contains(appSrc, "Packet 7J") {
+		t.Error("app.js must document Packet 7J composition ownership")
+	}
+	for _, banned := range []string{
+		`window.scimux`,
+		`window.app`,
+		`globalThis.scimux`,
+		`globalThis.app`,
+	} {
+		if strings.Contains(appSrc, banned) {
+			t.Fatalf("app.js must not define application global bridge %q", banned)
+		}
+	}
+	// Relative composition imports (support modules may be reached transitively).
+	wantImports := []string{
+		`from "./api.js"`,
+		`from "./bookmarks.js"`,
+		`from "./cards.js"`,
+		`from "./chat.js"`,
+		`from "./composer.js"`,
+		`from "./format.js"`,
+		`from "./lanes.js"`,
+		`from "./map-model.js"`,
+		`from "./map.js"`,
+		`from "./navigation.js"`,
+		`from "./notes.js"`,
+		`from "./polling.js"`,
+		`from "./search.js"`,
+		`from "./sheets.js"`,
+	}
+	for _, imp := range wantImports {
+		if !strings.Contains(appSrc, imp) {
+			t.Errorf("app.js missing import %q", imp)
+		}
+	}
+	// Absolute /js/ imports must not reappear in the composition entry.
+	if strings.Contains(appSrc, `from "/js/`) {
+		t.Error(`app.js must use relative ./module.js imports, not absolute /js/ paths`)
+	}
+
+	// Enumerate production JS inventory: exact paths, exact embedded bytes, syntax.
 	for _, embedPath := range productionJSModules {
 		embedded, err := webFS.ReadFile(embedPath)
 		if err != nil {
@@ -84,7 +113,6 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		if !bytes.Equal(embedded, source) {
 			t.Fatalf("embedded bytes for %s differ from source", embedPath)
 		}
-		// Syntax-check each production module.
 		if out, err := exec.Command(node, "--check", embedPath).CombinedOutput(); err != nil {
 			t.Fatalf("node --check %s: %v\n%s", embedPath, err, out)
 		}
@@ -97,9 +125,9 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		}
 	}
 
-	// Syntax-check the extracted inline module. Strip browser-only top-level
-	// import paths by rewriting /js/… to relative paths under a temp tree so
-	// node --check can resolve them offline.
+	// Offline import smoke for the support-module graph only. app.js is the
+	// browser composition root (document/localStorage/matchMedia); do not
+	// execute it under bare Node.
 	tmp := t.TempDir()
 	jsDir := filepath.Join(tmp, "js")
 	if err := os.MkdirAll(jsDir, 0o755); err != nil {
@@ -114,22 +142,14 @@ func TestWebIndexScriptsParse(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Rewrite absolute /js/ imports to relative ./js/ for offline check.
-	checkSrc := strings.ReplaceAll(inline, `from "/js/`, `from "./js/`)
-	entry := filepath.Join(tmp, "index.module.js")
-	if err := os.WriteFile(entry, []byte(checkSrc), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(node, "--check", entry).CombinedOutput(); err != nil {
-		t.Fatalf("inline module does not parse: %v\n%s", err, out)
-	}
-
-	// Import smoke: resolve every production module graph under Node (no network).
 	smoke := filepath.Join(tmp, "import-smoke.mjs")
 	var smokeBody strings.Builder
 	smokeBody.WriteString("const assert = (await import('node:assert/strict')).default;\n")
 	for _, embedPath := range productionJSModules {
 		base := filepath.Base(embedPath)
+		if base == "app.js" {
+			continue // composition root requires browser seams
+		}
 		smokeBody.WriteString("await import('./js/" + base + "');\n")
 	}
 	smokeBody.WriteString("assert.ok(true);\n")
@@ -138,6 +158,102 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	}
 	if out, err := exec.Command(node, smoke).CombinedOutput(); err != nil {
 		t.Fatalf("production module import smoke failed: %v\n%s", err, out)
+	}
+}
+
+// TestAppCompositionRootOwnership proves app.js is the only composition root
+// and shell-level document-handler owner; polling retains visibility/pagehide,
+// feature factories retain scoped listeners, and index.html has no implementation
+// JS. Factories are constructed once from app.js and not reimplemented there.
+func TestAppCompositionRootOwnership(t *testing.T) {
+	html := mustReadIndex(t)
+	app := mustReadApp(t)
+
+	if strings.Count(html, `<script`) != 1 {
+		t.Fatalf("index.html script tags = %d, want 1", strings.Count(html, `<script`))
+	}
+	if !strings.Contains(html, `src="/js/app.js"`) {
+		t.Fatal("index.html must reference sole entry /js/app.js")
+	}
+	// No inline implementation leftovers in the shell.
+	for _, frag := range []string{
+		"function setLevel(",
+		"createCardsFeature(",
+		"createPollingFeature(",
+		"document.addEventListener(",
+		"localStorage.getItem(",
+		"async function tick(){",
+		"function startPolling(){",
+		"from \"/js/",
+		"from \"./",
+	} {
+		if strings.Contains(html, frag) {
+			t.Errorf("index.html still contains implementation fragment %q", frag)
+		}
+	}
+
+	// Composition root constructs every feature once.
+	for _, want := range []string{
+		"createCardsFeature(",
+		"createMapFeature(",
+		"createChatFeature(",
+		"createComposerFeature(",
+		"createBookmarksFeature(",
+		"createNotesFeature(",
+		"createSearchFeature(",
+		"createSheetsFeature(",
+		"createPollingFeature(",
+		"cardsFeature.bind()",
+		"mapFeature.bind()",
+		"chatFeature.bind()",
+		"composerFeature.bind()",
+		"bookmarksFeature.bind()",
+		"notesFeature.bind()",
+		"searchFeature.bind()",
+		"sheetsFeature.bind()",
+		"pollingFeature.bind()",
+		"setLevel(level)",
+		"mapFeature.restoreChrome()",
+		"renderMapTabs()",
+		"pollingFeature.loadUI()",
+		"pollingFeature.startPolling()",
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js composition missing %q", want)
+		}
+	}
+	// Document-wide shell listeners live only in app.js (features keep their own).
+	for _, want := range []string{
+		`document.addEventListener("touchstart"`,
+		`document.addEventListener("touchend"`,
+		`document.addEventListener("keydown"`,
+		`document.addEventListener("focusout"`,
+		`document.addEventListener("click"`,
+		`document.addEventListener("change"`,
+		`$("#scrim").addEventListener("click"`,
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js document/shell listener missing %q", want)
+		}
+	}
+	// Polling algorithm must remain in polling.js, not reimplemented in app.js.
+	for _, banned := range []string{
+		"async function tick(){",
+		"function startPolling(){",
+		"async function loadUI(){",
+		"async function flushUI(){",
+		"async function pollUI(){",
+		`addEventListener("pagehide"`,
+		`document.addEventListener("visibilitychange"`,
+	} {
+		if strings.Contains(app, banned) {
+			t.Errorf("app.js must not reimplement polling owner %q", banned)
+		}
+	}
+	// Soft-line exception: composition shell may exceed ~500 lines but must
+	// remain free of extracted feature template owners.
+	if !strings.Contains(app, "composition/shell exception") && !strings.Contains(app, "Composition/shell ownership") {
+		t.Error("app.js must document composition/shell ownership when acting as the entry exception")
 	}
 }
 
@@ -199,14 +315,15 @@ func TestPollingModuleWired(t *testing.T) {
 	if !strings.Contains(src, "Packet 7I ownership inventory") {
 		t.Error("polling.js must document Packet 7I ownership inventory")
 	}
+	app := mustReadApp(t)
 	html := mustReadIndex(t)
-	if !strings.Contains(html, `from "/js/polling.js"`) || !strings.Contains(html, "createPollingFeature") {
+	if !strings.Contains(app, `from "./polling.js"`) || !strings.Contains(app, "createPollingFeature") {
 		t.Error("production must import and instantiate createPollingFeature from polling.js")
 	}
-	if !strings.Contains(html, "pollingFeature.bind()") {
+	if !strings.Contains(app, "pollingFeature.bind()") {
 		t.Error("production must bind pollingFeature as the visibility/pagehide/poll-timer owner")
 	}
-	// Old inline owners must not remain in the sole module entry.
+	// Old polling owners must not remain in the composition entry or the shell.
 	for _, frag := range []string{
 		"async function tick(){",
 		"function startPolling(){",
@@ -216,8 +333,8 @@ func TestPollingModuleWired(t *testing.T) {
 		`addEventListener("pagehide"`,
 		`document.addEventListener("visibilitychange"`,
 	} {
-		if strings.Contains(html, frag) {
-			t.Errorf("inline module still contains old polling/UI-sync owner %q", frag)
+		if strings.Contains(app, frag) || strings.Contains(html, frag) {
+			t.Errorf("composition/shell still contains old polling/UI-sync owner %q", frag)
 		}
 	}
 }
@@ -248,11 +365,11 @@ func TestForkPayloadSendsVisibleLaunchConfig(t *testing.T) {
 	if !strings.Contains(src, "fillAgents(); fillModels(); fillEfforts();") {
 		t.Error("prepareLaunchConfig no longer rebuilds the selectors on open — stale-config guard lost")
 	}
-	html := mustReadIndex(t)
-	if !strings.Contains(html, `from "/js/sheets.js"`) || !strings.Contains(html, "createSheetsFeature") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./sheets.js"`) || !strings.Contains(app, "createSheetsFeature") {
 		t.Error("production must import and instantiate createSheetsFeature from sheets.js")
 	}
-	if !strings.Contains(html, "sheetsFeature.bind()") {
+	if !strings.Contains(app, "sheetsFeature.bind()") {
 		t.Error("production must bind sheetsFeature as the sheet event owner")
 	}
 }
@@ -283,20 +400,17 @@ func TestEffortLevelsPerAgent(t *testing.T) {
 }
 
 func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	// the closed Bookmarks toggle announces opening bookmarks (glyph set by
 	// renderBookmarksToggle in bookmarks.js, so the static button carries no chevron)
 	if !strings.Contains(html, `id="bookmarksbtn" aria-label="open bookmarks"></button>`) {
 		t.Fatal("closed bookmarks toggle should announce opening bookmarks")
 	}
-	if !strings.Contains(html, `from "/js/bookmarks.js"`) || !strings.Contains(html, "createBookmarksFeature") {
+	if !strings.Contains(app, `from "./bookmarks.js"`) || !strings.Contains(app, "createBookmarksFeature") {
 		t.Fatal("production must import and instantiate createBookmarksFeature from bookmarks.js")
 	}
-	if !strings.Contains(html, "bookmarksFeature.bind()") {
+	if !strings.Contains(app, "bookmarksFeature.bind()") {
 		t.Fatal("production must bind bookmarksFeature as the Bookmarks event owner")
 	}
 	bm, err := os.ReadFile("web/js/bookmarks.js")
@@ -377,11 +491,8 @@ func TestBubbleCopyLivesInActionRow(t *testing.T) {
 		!strings.Contains(src, `copyText`) {
 		t.Fatal("copy action row button is not wired to copy the selected turn")
 	}
-	html, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read index: %v", err)
-	}
-	if !strings.Contains(string(html), `from "/js/chat.js"`) || !strings.Contains(string(html), "createChatFeature") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./chat.js"`) || !strings.Contains(app, "createChatFeature") {
 		t.Fatal("production must wire createChatFeature from chat.js")
 	}
 }
@@ -423,13 +534,14 @@ func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 	if !strings.Contains(html, `id="prompt"`) || !strings.Contains(html, `contenteditable="true"`) {
 		t.Fatal("#prompt must remain a contenteditable singleton in the shell")
 	}
-	if !strings.Contains(html, `from "/js/composer.js"`) || !strings.Contains(html, "createComposerFeature") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./composer.js"`) || !strings.Contains(app, "createComposerFeature") {
 		t.Fatal("production must import and instantiate createComposerFeature from composer.js")
 	}
-	if !strings.Contains(html, "composerFeature.bind()") {
+	if !strings.Contains(app, "composerFeature.bind()") {
 		t.Fatal("production must bind composerFeature exactly as the composer event owner")
 	}
-	// No duplicate inline implementation of the extracted composer.
+	// No duplicate implementation of the extracted composer in shell or composition.
 	for _, banned := range []string{
 		"function promptText(",
 		"function setComposerBusy(",
@@ -440,8 +552,8 @@ func TestComposerSingletonOutsidePolledRegions(t *testing.T) {
 		"function renderStage(",
 		"async function uploadOne(",
 	} {
-		if strings.Contains(html, banned) {
-			t.Errorf("inline composer implementation must not remain: %s", banned)
+		if strings.Contains(html, banned) || strings.Contains(app, banned) {
+			t.Errorf("shell/composition must not retain composer implementation: %s", banned)
 		}
 	}
 	comp, err := os.ReadFile("web/js/composer.js")
@@ -563,17 +675,24 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 	// online/offline/unreachable branches live in polling.js (Packet 7I) with
 	// executable Node coverage in web/test/polling.test.js. Card age flip
 	// lives in cards.js (Packet 7A) with web/test/cards.test.js.
+	app := mustReadApp(t)
 	for _, want := range []string{
 		`<span class="host offline" id="host">scimux</span>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("activity card interaction/connectivity shell missing %q", want)
+		}
+	}
+	for _, want := range []string{
 		`createPollingFeature`,
-		`import { createPollingFeature } from "/js/polling.js";`,
+		`import { createPollingFeature } from "./polling.js";`,
 		`setHostOnline: ok =>`,
 		`setServerUnreachable: () => { $("#sys").textContent = "server unreachable"; }`,
 		`createCardsFeature`,
-		`import { createCardsFeature } from "/js/cards.js";`,
+		`import { createCardsFeature } from "./cards.js";`,
 		`function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }`,
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(app, want) {
 			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
 		}
 	}
@@ -668,7 +787,8 @@ func TestDockedMapStationLongPressEdits(t *testing.T) {
 	// Packet 7B: station long-press lives in map.js; Node covers bind/destroy.
 	// Structural: production wires createMapFeature and map.js owns the docked path.
 	html := mustReadIndex(t)
-	if !strings.Contains(html, `from "/js/map.js"`) || !strings.Contains(html, "createMapFeature") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./map.js"`) || !strings.Contains(app, "createMapFeature") {
 		t.Fatal("production must wire map.js for station long-press")
 	}
 	mapJS, err := os.ReadFile("web/js/map.js")
@@ -699,8 +819,9 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 	// helpers). Executable Node coverage is web/test/map.test.js; keep structural
 	// wiring + CSS contracts here.
 	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	css := mustProductionCSSCascade(t)
-	if !strings.Contains(html, `from "/js/map.js"`) || !strings.Contains(html, "createMapFeature") {
+	if !strings.Contains(app, `from "./map.js"`) || !strings.Contains(app, "createMapFeature") {
 		t.Fatal("production must wire map.js for journey fold/chip behavior")
 	}
 	mapJS, err := os.ReadFile("web/js/map.js")
@@ -725,15 +846,15 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 			t.Errorf("journey lane fold/chip wiring missing from map.js: %q", want)
 		}
 	}
-	// Shell must not retain duplicate fold/chip listeners or implementations.
+	// Shell/composition must not retain duplicate fold/chip listeners or implementations.
 	for _, dead := range []string{
 		`longpress($("#lanechips")`,
 		`$("#lanechips").addEventListener`,
 		`let mapFoldKnown = new Set`,
 		`function laneChipStyle(`,
 	} {
-		if strings.Contains(html, dead) {
-			t.Errorf("inline map fold/chip code still present: %q", dead)
+		if strings.Contains(html, dead) || strings.Contains(app, dead) {
+			t.Errorf("shell/composition map fold/chip code still present: %q", dead)
 		}
 	}
 	// CSS declarations and selectors live in the cascade (inline today; linked
@@ -830,8 +951,8 @@ assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), null, "deleted pare
 
 func TestWebStackMapKeepsForkCues(t *testing.T) {
 	// Packet 7B: fork cues/goto live in map.js; classification stays in lanes.js.
-	html := mustReadIndex(t)
-	if !strings.Contains(html, `from "/js/map.js"`) {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./map.js"`) {
 		t.Fatal("production must wire map.js for stack fork cues")
 	}
 	mapJS, err := os.ReadFile("web/js/map.js")
@@ -850,7 +971,7 @@ func TestWebStackMapKeepsForkCues(t *testing.T) {
 			t.Errorf("stack fork-topology wiring missing from map.js: %q", want)
 		}
 	}
-	if strings.Contains(body, "laneCount[n.lane_id]") || strings.Contains(html, "laneCount[n.lane_id]") {
+	if strings.Contains(body, "laneCount[n.lane_id]") || strings.Contains(mustReadApp(t), "laneCount[n.lane_id]") {
 		t.Error("old population-based Y-new/S classifier still present; must be replaced by forkKind")
 	}
 }
@@ -924,15 +1045,16 @@ func TestSearchOverlayShell(t *testing.T) {
 		t.Error("search overlay must honor prefers-reduced-motion")
 	}
 
-	// Packet 7G: open/close/focus-return live in search.js; shell keeps thin
+	// Packet 7G: open/close/focus-return live in search.js; app.js keeps thin
 	// wrappers and imports the factory. Node search.test.js is authoritative.
-	if !strings.Contains(html, `from "/js/search.js"`) || !strings.Contains(html, "createSearchFeature") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./search.js"`) || !strings.Contains(app, "createSearchFeature") {
 		t.Error("production must import and instantiate createSearchFeature from search.js")
 	}
-	if !strings.Contains(html, "function openSearch(") || !strings.Contains(html, "function closeSearch(") {
-		t.Error("shell must retain thin openSearch/closeSearch wrappers for navigation")
+	if !strings.Contains(app, "function openSearch(") || !strings.Contains(app, "function closeSearch(") {
+		t.Error("app.js must retain thin openSearch/closeSearch wrappers for navigation")
 	}
-	if !strings.Contains(html, "searchFeature.bind()") {
+	if !strings.Contains(app, "searchFeature.bind()") {
 		t.Error("production must bind searchFeature as the Search event owner")
 	}
 	src, err := os.ReadFile("web/js/search.js")
@@ -1017,9 +1139,9 @@ func TestSearchHitCarriesIdentity(t *testing.T) {
 		!strings.Contains(src, "d.openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn)") {
 		t.Error("archived show-to-chat must anchor by seg/rec, not just timestamp")
 	}
-	html := mustReadIndex(t)
-	if !strings.Contains(html, `"&seg=" + encodeURIComponent(seg`) ||
-		!strings.Contains(html, `"&rec=" + encodeURIComponent(rec`) {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `"&seg=" + encodeURIComponent(seg`) ||
+		!strings.Contains(app, `"&rec=" + encodeURIComponent(rec`) {
 		t.Error("openArchived must send seg/rec to /api/archived")
 	}
 }
@@ -1084,18 +1206,14 @@ func TestSearchEarlierHistoryJump(t *testing.T) {
 // applyOp lives in web/js/state.js (Packet 6C/6F); the live document is owned
 // by polling.js (Packet 7I); cards.js consumes pinned via injected getters.
 func TestPinnedStoreModel(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	app := mustReadApp(t)
 	for _, want := range []string{
-		`from "/js/polling.js"`,
-		`from "/js/cards.js"`,
+		`from "./polling.js"`,
+		`from "./cards.js"`,
 		`pinned: () => getUI().pinned`,
 		`createPollingFeature`,
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(app, want) {
 			t.Errorf("pinned store model missing %q", want)
 		}
 	}
@@ -1136,18 +1254,17 @@ func TestPinnedStoreModel(t *testing.T) {
 // TestPinnedIcons asserts both glyphs are inlined SVGs (no FontAwesome webfont
 // dependency) and carry no Pro/Commercial license artifact.
 func TestPinnedIcons(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	app := mustReadApp(t)
+	html := mustReadIndex(t)
+	if !strings.Contains(app, "const ICON_PIN =") || !strings.Contains(app, "const ICON_UNPIN =") {
+		t.Error("ICON_PIN / ICON_UNPIN inlined glyphs missing from app.js")
 	}
-	html := string(b)
-	if !strings.Contains(html, "const ICON_PIN =") || !strings.Contains(html, "const ICON_UNPIN =") {
-		t.Error("ICON_PIN / ICON_UNPIN inlined glyphs missing")
-	}
-	if strings.Contains(html, "fa-thumbtack") || strings.Contains(html, `class="fa-`) {
+	if strings.Contains(app, "fa-thumbtack") || strings.Contains(app, `class="fa-`) ||
+		strings.Contains(html, "fa-thumbtack") || strings.Contains(html, `class="fa-`) {
 		t.Error("icons must be inlined SVG, not FontAwesome webfont classes")
 	}
-	if strings.Contains(html, "Commercial License") || strings.Contains(html, "Font Awesome Pro") {
+	if strings.Contains(app, "Commercial License") || strings.Contains(app, "Font Awesome Pro") ||
+		strings.Contains(html, "Commercial License") || strings.Contains(html, "Font Awesome Pro") {
 		t.Error("must not embed a Pro/Commercial-licensed glyph artifact")
 	}
 }
@@ -1157,11 +1274,12 @@ func TestPinnedIcons(t *testing.T) {
 // Tab HTML generation lives in cards.js (Packet 7A); Node covers cardTabsHTML.
 func TestPinnedTab(t *testing.T) {
 	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	// Shell still owns the #cardtabs root.
 	if !strings.Contains(html, `id="cardtabs"`) {
 		t.Fatal("#cardtabs root missing from document shell")
 	}
-	if !strings.Contains(html, `from "/js/cards.js"`) || !strings.Contains(html, "createCardsFeature") {
+	if !strings.Contains(app, `from "./cards.js"`) || !strings.Contains(app, "createCardsFeature") {
 		t.Fatal("production must wire cards.js for tab rendering")
 	}
 	cards, err := os.ReadFile("web/js/cards.js")
@@ -1193,7 +1311,6 @@ func TestPinnedTab(t *testing.T) {
 // orders them attention-first, then by pin order (UI.pinned index).
 // Filtering/ordering algorithms stay in map-model.js; cards.js consumes them.
 func TestPinnedFilterAndOrder(t *testing.T) {
-	html := mustReadIndex(t)
 	cards, err := os.ReadFile("web/js/cards.js")
 	if err != nil {
 		t.Fatal(err)
@@ -1205,7 +1322,8 @@ func TestPinnedFilterAndOrder(t *testing.T) {
 			t.Error("cards.js must special-case the pinned tab for draggable cards")
 		}
 	}
-	if !strings.Contains(html, `from "/js/cards.js"`) {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./cards.js"`) {
 		t.Error("production must wire cards.js")
 	}
 	if !strings.Contains(cs, "visibleCardLists") {
@@ -1379,8 +1497,7 @@ func TestSearchActionBar(t *testing.T) {
 			t.Errorf("search action bar wiring missing %q", want)
 		}
 	}
-	html := mustReadIndex(t)
-	// Packet 7H: forkFromTurn lives in sheets.js; search injects it.
+	// Packet 7H: forkFromTurn lives in sheets.js; search injects it via app.js.
 	sheets, err := os.ReadFile("web/js/sheets.js")
 	if err != nil {
 		t.Fatalf("read sheets.js: %v", err)
@@ -1396,7 +1513,8 @@ func TestSearchActionBar(t *testing.T) {
 			t.Error("forkFromTurn should default the parent to sel to preserve existing callers")
 		}
 	}
-	if !strings.Contains(html, `forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent)`) {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent)`) {
 		t.Error("search/chat must inject sheetsFeature.forkFromTurn")
 	}
 	// show-to-chat's live destination is jumpToHitChat: leaves overlay + pending jump.
@@ -1490,22 +1608,26 @@ eq(searchHitActions("live", true, "assistant"), ["show", "fork", "bookmark"]);
 // deleted chat, opened from an archived show-to-chat, fed by /api/archived, with
 // a fork seeded from the endpoint's launch config (no live node) and NO composer.
 func TestArchivedView(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
-	// A real modal, like the search overlay.
+	html := mustReadIndex(t)
+	app := mustReadApp(t)
+	// A real modal shell root, like the search overlay.
 	for _, want := range []string{
 		`id="archivedview"`,
 		`role="dialog"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("archived view shell missing %q", want)
+		}
+	}
+	// Implementation lives in the composition entry (Packet 7J).
+	for _, want := range []string{
 		"function openArchived(",
 		"function closeArchived(",
 		"function renderArchived(",
 		`fetch("/api/archived?uid="`,
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("archived view missing %q", want)
+		if !strings.Contains(app, want) {
+			t.Errorf("archived view implementation missing %q", want)
 		}
 	}
 	// Archived show-to-chat routes into the read-only surface (not a toast).
@@ -1539,10 +1661,10 @@ func TestArchivedView(t *testing.T) {
 		}
 	}
 	// Packet 7H: archived fork seeds via sheets.js prepareLaunchConfig(cfg).
-	if !strings.Contains(html, "function forkFromArchived()") && !strings.Contains(html, "forkFromArchived(){") {
+	if !strings.Contains(app, "function forkFromArchived()") && !strings.Contains(app, "forkFromArchived(){") {
 		t.Error("archived fork entry point missing")
 	}
-	if !strings.Contains(html, "sheetsFeature.forkFromArchived()") {
+	if !strings.Contains(app, "sheetsFeature.forkFromArchived()") {
 		t.Error("archived fork must delegate to sheetsFeature")
 	}
 	sh, err := os.ReadFile("web/js/sheets.js")
@@ -1555,12 +1677,12 @@ func TestArchivedView(t *testing.T) {
 		t.Error("prepareLaunchConfig must take an explicit config so archived fork can seed without a live node")
 	}
 	// The anchored turn is marked, and truncation is surfaced honestly.
-	if !strings.Contains(html, "anchor") || !strings.Contains(html, "before_truncated") {
+	if !strings.Contains(app, "anchor") || !strings.Contains(app, "before_truncated") {
 		t.Error("archived render must mark the anchor turn and honor truncation flags")
 	}
 	// splitAssetRefs moved to chat.js, but the archived surface still needs the
 	// shared file glyph that the old inline helper closed over.
-	if !strings.Contains(html, `splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE })`) {
+	if !strings.Contains(app, `splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE })`) {
 		t.Error("archived asset projection must inject ICON_FILE into splitAssetRefs")
 	}
 }
@@ -1792,11 +1914,8 @@ func TestHistoryBubblesAreTappable(t *testing.T) {
 	if strings.Contains(src, `data-i="${tappedTurn}"`) {
 		t.Error("renderBubbleActions must address the tapped bubble by data-bk, not data-i")
 	}
-	html, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read index: %v", err)
-	}
-	if !strings.Contains(string(html), `from "/js/chat.js"`) || !strings.Contains(string(html), "chatFeature.bind()") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./chat.js"`) || !strings.Contains(app, "chatFeature.bind()") {
 		t.Fatal("production must bind chatFeature for #msgs bubble taps")
 	}
 }
@@ -1892,7 +2011,6 @@ func TestWebSectionRendersReferences(t *testing.T) {
 // compact Bookmark pane (the inbox on every device) and route through a shared
 // placement path that posts the reference to the section endpoint.
 func TestWebUseInNoteWiring(t *testing.T) {
-	html := mustReadIndex(t)
 	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
 		t.Fatal(err)
@@ -1917,11 +2035,12 @@ func TestWebUseInNoteWiring(t *testing.T) {
 			t.Errorf("use-in-note wiring missing %q in notes.js", want)
 		}
 	}
-	// Shell must instantiate Notes and wire Bookmarks → startPlacement lazily.
-	if !strings.Contains(html, `from "/js/notes.js"`) || !strings.Contains(html, "createNotesFeature") {
+	// Composition must instantiate Notes and wire Bookmarks → startPlacement lazily.
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./notes.js"`) || !strings.Contains(app, "createNotesFeature") {
 		t.Error("production must import and instantiate createNotesFeature from notes.js")
 	}
-	if !strings.Contains(html, "notesFeature.startPlacement") && !strings.Contains(html, "startPlacement: nt => notesFeature.startPlacement") {
+	if !strings.Contains(app, "notesFeature.startPlacement") && !strings.Contains(app, "startPlacement: nt => notesFeature.startPlacement") {
 		t.Error("Bookmarks startPlacement injection must call notesFeature.startPlacement")
 	}
 }
@@ -1930,7 +2049,7 @@ func TestWebUseInNoteWiring(t *testing.T) {
 // survive /clear seams, rotation, and node deletion identically (live node →
 // pendingJump; deleted-and-archived → openArchived by uid).
 func TestWebSharedJumpResolver(t *testing.T) {
-	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
 		t.Fatal(err)
@@ -1941,18 +2060,18 @@ func TestWebSharedJumpResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	nsrc := string(notes)
-	// Packet 7E: resolver lives in bookmarks.js; shell re-exports for Notes/search.
+	// Packet 7E: resolver lives in bookmarks.js; app.js re-exports for Notes/search.
 	if !strings.Contains(src, "function jumpToChatAddress(") {
 		t.Error("shared jumpToChatAddress resolver not defined in bookmarks.js")
 	}
-	if !strings.Contains(html, "function jumpToChatAddress(") {
-		t.Error("shell must re-export jumpToChatAddress for Notes/search callers")
+	if !strings.Contains(app, "function jumpToChatAddress(") {
+		t.Error("app.js must re-export jumpToChatAddress for Notes/search callers")
 	}
 	// Notes references call the injected jumpToChatAddress (not a private copy).
 	if !strings.Contains(nsrc, "jumpToChatAddress(") {
 		t.Error("notes.js must call injected jumpToChatAddress for reference jump")
 	}
-	if strings.Count(html, "jumpToChatAddress(")+strings.Count(src, "jumpToChatAddress(")+strings.Count(nsrc, "jumpToChatAddress(") < 3 {
+	if strings.Count(app, "jumpToChatAddress(")+strings.Count(src, "jumpToChatAddress(")+strings.Count(nsrc, "jumpToChatAddress(") < 3 {
 		t.Error("jumpToChatAddress must be shared across Bookmarks jump and Notes references")
 	}
 }
@@ -2000,20 +2119,20 @@ func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
 // a full-screen overlay owns the screen, or a swipe on the workspace moves the
 // activities/journeys/chat layers underneath while the workspace sits still.
 func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
-	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	// the guard must be inside the document-level touchend handler, before nav.
-	td := strings.Index(html, `document.addEventListener("touchend"`)
+	td := strings.Index(app, `document.addEventListener("touchend"`)
 	if td < 0 {
 		t.Fatal("could not locate the document-level touchend handler")
 	}
-	body := html[td:]
+	body := app[td:]
 	// Packet 6F: overlayOwned is snapshotted at touchstart and fed to
 	// documentSwipeDecision; suppress precedes applyNavAction / setLevel.
 	// navigation.js encodes the suppress branch; production must call it.
-	if !strings.Contains(html, "documentSwipeDecision") {
+	if !strings.Contains(app, "documentSwipeDecision") {
 		t.Error("document touchend must use documentSwipeDecision for overlay-owned suppress")
 	}
-	if !strings.Contains(html, "overlayOwned") {
+	if !strings.Contains(app, "overlayOwned") {
 		t.Error("document touchend must bail on the overlay snapshot (overlayOwned) while a top overlay owns the gesture")
 	}
 	// applyNavAction is the only setLevel path from the document swipe.
@@ -2048,8 +2167,8 @@ func TestWorkspaceHasSwipeBack(t *testing.T) {
 	if !strings.Contains(src, "noteToList") || !strings.Contains(src, "closeWorkspace") {
 		t.Error("workspace swipe-back must step note→list then list→closed")
 	}
-	html := mustReadIndex(t)
-	if !strings.Contains(html, "notesFeature.bind()") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, "notesFeature.bind()") {
 		t.Error("production must bind notesFeature as the Notes event owner")
 	}
 }
@@ -2249,12 +2368,13 @@ func TestWorkspaceRenames(t *testing.T) {
 // delete). Icons are inlined SVG per the repo convention — no FA dependency.
 func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(bm)
-	if !strings.Contains(html, "const ICON_CLIP") {
+	if !strings.Contains(app, "const ICON_CLIP") {
 		t.Error(`missing inlined icon constant "const ICON_CLIP"`)
 	}
 	// the chat-area toggle (#bookmarksbtn) is the ‹/› chevron mirroring pane state
@@ -2271,7 +2391,7 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	if !strings.Contains(html, `id="notesbtn" aria-label="show notes" title="Notes">Notes &#8250;</button>`) {
 		t.Error(`#notesbtn must read "Notes ›" (forward label + right chevron) to name the pane it reveals`)
 	}
-	if strings.Contains(html, "ICON_BOOKMARK") || strings.Contains(src, "ICON_BOOKMARK") {
+	if strings.Contains(html, "ICON_BOOKMARK") || strings.Contains(app, "ICON_BOOKMARK") || strings.Contains(src, "ICON_BOOKMARK") {
 		t.Error("ICON_BOOKMARK is dead once #notesbtn is a text label — remove the const and its assignment")
 	}
 	// #notesbtn must not use .backbtn (it is a forward destination label)
@@ -2305,16 +2425,16 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 // This is the swipe-forward accelerator; a tappable path (#notesbtn) remains the
 // discoverable primary per HIG.
 func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
-	html := mustReadIndex(t)
-	// find the global touchend gesture handler
-	i := strings.Index(html, `document.addEventListener("touchend"`)
+	app := mustReadApp(t)
+	// find the global touchend gesture handler in the composition entry
+	i := strings.Index(app, `document.addEventListener("touchend"`)
 	if i < 0 {
 		t.Fatal("could not locate the touchend gesture handler")
 	}
-	body := html[i : i+strings.Index(html[i:], "}, { passive: true });")]
+	body := app[i : i+strings.Index(app[i:], "}, { passive: true });")]
 	// Packet 6F: openWorkspace is applied via applyNavAction("openWorkspace")
 	// when documentSwipeDecision returns that action (Bookmarks R→L).
-	if !strings.Contains(body, "documentSwipeDecision") || !strings.Contains(html, `action.type === "openWorkspace"`) {
+	if !strings.Contains(body, "documentSwipeDecision") || !strings.Contains(app, `action.type === "openWorkspace"`) {
 		t.Error("swipe R->L on the open Bookmarks pane must call openWorkspace() (Notes overview)")
 	}
 	nav, err := os.ReadFile("web/js/navigation.js")
@@ -2604,8 +2724,8 @@ func TestPerModelEffortWiring(t *testing.T) {
 	if !strings.Contains(src, "(default)") {
 		t.Errorf("fillEfforts should mark the model's default effort level")
 	}
-	html := mustReadIndex(t)
-	if !strings.Contains(html, `from "/js/sheets.js"`) || !strings.Contains(html, "createSheetsFeature") {
+	app := mustReadApp(t)
+	if !strings.Contains(app, `from "./sheets.js"`) || !strings.Contains(app, "createSheetsFeature") {
 		t.Error("production must wire sheets.js for new-activity effort menus")
 	}
 }
@@ -2666,15 +2786,29 @@ func TestWorkspaceEmptySectionStateIsCenteredButtonOnly(t *testing.T) {
 	}
 }
 
-// mustReadIndex returns the production index HTML. Use it for DOM markup and
-// JavaScript string contracts. CSS declaration/media-query assertions must
-// search the assembled cascade (mustProductionCSSCascade / mustCSSCascade)
-// instead of assuming all CSS is inline in the HTML argument.
+// mustReadIndex returns the production index HTML. Use it for DOM markup,
+// ARIA, stylesheet, and script-tag contracts only. Implementation JavaScript
+// lives in web/js/app.js (mustReadApp) or the owning feature module.
+// CSS declaration/media-query assertions must search the assembled cascade
+// (mustProductionCSSCascade / mustCSSCascade) instead of assuming all CSS is
+// inline in the HTML argument.
 func mustReadIndex(t *testing.T) string {
 	t.Helper()
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
 		t.Fatalf("read embedded web/index.html: %v", err)
+	}
+	return string(b)
+}
+
+// mustReadApp returns the sole browser composition entry (web/js/app.js).
+// Prefer this for feature wiring, document listeners, boot order, and other
+// implementation contracts that previously searched the inline module in index.
+func mustReadApp(t *testing.T) string {
+	t.Helper()
+	b, err := webFS.ReadFile("web/js/app.js")
+	if err != nil {
+		t.Fatalf("read embedded web/js/app.js: %v", err)
 	}
 	return string(b)
 }
@@ -2758,21 +2892,21 @@ func TestPanePeekGapToken(t *testing.T) {
 // began over an overlay can never be re-processed by the app-nav handler after
 // the overlay's own handler consumes it.
 func TestAppNavSwipeSnapshotsOverlayAtStart(t *testing.T) {
-	html := mustReadIndex(t)
+	app := mustReadApp(t)
 
 	// touchstart must capture whether an overlay owned the gesture at its START
 	// (immutable overlayOwned via captureTouchStart).
-	if !strings.Contains(html, "captureTouchStart") {
+	if !strings.Contains(app, "captureTouchStart") {
 		t.Error("touchstart must use captureTouchStart for the immutable overlay snapshot")
 	}
-	if !strings.Contains(html, "overlayOwned: wsOpen() || searchOpen() || archivedOpen()") {
+	if !strings.Contains(app, "overlayOwned: wsOpen() || searchOpen() || archivedOpen()") {
 		t.Error("touchstart must snapshot overlay-open state (overlayOwned: wsOpen() || searchOpen() || archivedOpen())")
 	}
 	// touchend consults documentSwipeDecision's suppress on that snapshot only.
-	if !strings.Contains(html, "documentSwipeDecision") {
+	if !strings.Contains(app, "documentSwipeDecision") {
 		t.Error("touchend must consult documentSwipeDecision with the touchstart snapshot")
 	}
-	if strings.Contains(html, "if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }") {
+	if strings.Contains(app, "if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }") {
 		t.Error("touchend still re-checks live wsOpen() — racy: the overlay handler flips it before this bubbles, causing the Notes→L→R overshoot to Chat")
 	}
 	nav, err := os.ReadFile("web/js/navigation.js")
@@ -2790,17 +2924,18 @@ func TestAppNavSwipeSnapshotsOverlayAtStart(t *testing.T) {
 // to level 1); the right pane (Bookmarks) gets a left-strip tap-catcher.
 func TestPeekTapStepsBack(t *testing.T) {
 	html := mustReadIndex(t)
+	app := mustReadApp(t)
 	css := mustProductionCSSCascade(t)
 
 	// Left: scrim covers the peek for both open levels and steps exactly one back
 	// via scrimStep → applyNavAction (never a jump to level 1).
-	if !strings.Contains(html, `$("#scrim").classList.toggle("on", level >= 2);`) {
+	if !strings.Contains(app, `$("#scrim").classList.toggle("on", level >= 2);`) {
 		t.Error("scrim must show for any open left pane (level >= 2), so the peek is tappable at level 3 too")
 	}
-	if !strings.Contains(html, `$("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));`) {
+	if !strings.Contains(app, `$("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));`) {
 		t.Error("scrim tap must step ONE level back via scrimStep, mirroring the swipe — not jump to level 1")
 	}
-	if strings.Contains(html, `$("#scrim").addEventListener("click", () => setLevel(1));`) {
+	if strings.Contains(app, `$("#scrim").addEventListener("click", () => setLevel(1));`) {
 		t.Error("scrim tap still jumps straight to level 1 instead of stepping one back")
 	}
 	nav, err := os.ReadFile("web/js/navigation.js")
@@ -2817,11 +2952,11 @@ func TestPeekTapStepsBack(t *testing.T) {
 		t.Error("a #bookmarkpeek tap-catcher must exist over the Bookmarks left peek strip")
 	}
 	// Packet 7E: exactly one owner — bookmarksFeature.bind listens on #bookmarkpeek.
-	if !strings.Contains(html, "bookmarksFeature.bind()") {
+	if !strings.Contains(app, "bookmarksFeature.bind()") {
 		t.Error("bookmarksFeature must bind as the sole #bookmarkpeek event owner")
 	}
-	if strings.Contains(html, `$("#bookmarkpeek").addEventListener`) {
-		t.Error("shell must not also attach a #bookmarkpeek listener (single-owner rule)")
+	if strings.Contains(app, `$("#bookmarkpeek").addEventListener`) {
+		t.Error("app.js must not also attach a #bookmarkpeek listener (single-owner rule)")
 	}
 	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {

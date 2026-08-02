@@ -9,8 +9,10 @@ import (
 )
 
 // productionJSURLs is the flat /js/<file>.js surface served from the embed.
+// Includes the sole browser entry /js/app.js (Packet 7J).
 var productionJSURLs = []string{
 	"/js/api.js",
+	"/js/app.js",
 	"/js/bookmarks.js",
 	"/js/cards.js",
 	"/js/chat.js",
@@ -71,7 +73,6 @@ func TestProductionJSNegativeRoots(t *testing.T) {
 		"/js/format.txt",
 		"/js/format.js.bak",
 		"/js/readme.md",
-		"/js/app.js",
 		"/web/js/format.js",
 		"/web/js/",
 		"/web/js/api.js",
