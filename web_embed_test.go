@@ -22,6 +22,7 @@ var productionJSModules = []string{
 	"web/js/map-model.js",
 	"web/js/map.js",
 	"web/js/navigation.js",
+	"web/js/notes.js",
 	"web/js/state.js",
 }
 

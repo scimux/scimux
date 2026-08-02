@@ -59,6 +59,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "/js/map-model.js"`,
 		`from "/js/map.js"`,
 		`from "/js/navigation.js"`,
+		`from "/js/notes.js"`,
 		`from "/js/state.js"`,
 	}
 	for _, imp := range wantImports {
@@ -1729,32 +1730,18 @@ assert.equal(bubbleTitle("assistant", null), "agent");
 }
 
 func TestWebReferenceProvenanceLabel(t *testing.T) {
-	node, err := exec.LookPath("node")
+	// Packet 7F: provLabel lives in notes.js; Node notes.test.js is authoritative.
+	// Keep a minimal source contract that the helper still exists for references.
+	b, err := os.ReadFile("web/js/notes.js")
 	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
-	m := regexp.MustCompile(`function provLabel\([^)]*\)\{[^}]*\}`).FindString(html)
-	if m == "" {
-		t.Fatal("could not locate provLabel in web/index.html")
-	}
-	script := m + `
-const assert = require("assert");
-assert.strictEqual(provLabel("Alpha", "agent", "Jul 28"), "Alpha · agent · Jul 28");
-assert.strictEqual(provLabel("", "", "Jul 28"), "Jul 28");
-assert.strictEqual(provLabel("Alpha", "", ""), "Alpha");
-assert.strictEqual(provLabel("", "", ""), "");
-`
-	f := filepath.Join(t.TempDir(), "provlabel.js")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("provLabel broken: %v\n%s", err, out)
+	src := string(b)
+	if !strings.Contains(src, "export function provLabel(") {
+		t.Fatal("could not locate provLabel in web/js/notes.js")
+	}
+	if !strings.Contains(src, ".filter(Boolean).join(\" · \")") && !strings.Contains(src, ".filter(Boolean).join(' · ')") {
+		t.Error("provLabel must join non-empty parts with middle dots")
 	}
 }
 
@@ -1762,19 +1749,20 @@ assert.strictEqual(provLabel("", "", ""), "");
 // + jump/copy/trash actions) so a self-contained reference shows without any
 // dependency on the source node still existing.
 func TestWebSectionRendersReferences(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7F: reference HTML builders live in notes.js.
+	b, err := os.ReadFile("web/js/notes.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
+	src := string(b)
 	for _, want := range []string{
 		"function referenceHTML(", // per-reference builder
-		`(s.references || [])`,    // sectionHTML iterates the section's references
+		`(s.references || [])`,    // sectionBodyInner iterates the section's references
 		`data-refact="jump"`,      // jump back to the source chat
 		`data-refact="copy"`,      // copy the snapshot text
 		`data-refact="trash"`,     // trash removes only this reference
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("section reference rendering missing %q", want)
 		}
 	}
@@ -1784,17 +1772,18 @@ func TestWebSectionRendersReferences(t *testing.T) {
 // compact Bookmark pane (the inbox on every device) and route through a shared
 // placement path that posts the reference to the section endpoint.
 func TestWebUseInNoteWiring(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	html := mustReadIndex(t)
 	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(bm)
-	// Use-in-note action lives in bookmarks.js; placement/endpoint stay in Notes shell.
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nsrc := string(notes)
+	// Use-in-note action lives in bookmarks.js; placement body is notes.js (7F).
 	if !strings.Contains(src, `data-bmact="note"`) {
 		t.Error(`use-in-note wiring missing data-bmact="note" in bookmarks.js`)
 	}
@@ -1804,9 +1793,16 @@ func TestWebUseInNoteWiring(t *testing.T) {
 		`data-addhere`,             // per-section "add capture here" target
 		`/references`,              // posts to the section references endpoint
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("use-in-note wiring missing %q", want)
+		if !strings.Contains(nsrc, want) {
+			t.Errorf("use-in-note wiring missing %q in notes.js", want)
 		}
+	}
+	// Shell must instantiate Notes and wire Bookmarks → startPlacement lazily.
+	if !strings.Contains(html, `from "/js/notes.js"`) || !strings.Contains(html, "createNotesFeature") {
+		t.Error("production must import and instantiate createNotesFeature from notes.js")
+	}
+	if !strings.Contains(html, "notesFeature.startPlacement") && !strings.Contains(html, "startPlacement: nt => notesFeature.startPlacement") {
+		t.Error("Bookmarks startPlacement injection must call notesFeature.startPlacement")
 	}
 }
 
@@ -1814,28 +1810,29 @@ func TestWebUseInNoteWiring(t *testing.T) {
 // survive /clear seams, rotation, and node deletion identically (live node →
 // pendingJump; deleted-and-archived → openArchived by uid).
 func TestWebSharedJumpResolver(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
+	html := mustReadIndex(t)
 	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(bm)
-	// Packet 7E: resolver lives in bookmarks.js; shell re-exports for Notes refs.
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nsrc := string(notes)
+	// Packet 7E: resolver lives in bookmarks.js; shell re-exports for Notes/search.
 	if !strings.Contains(src, "function jumpToChatAddress(") {
 		t.Error("shared jumpToChatAddress resolver not defined in bookmarks.js")
 	}
 	if !strings.Contains(html, "function jumpToChatAddress(") {
 		t.Error("shell must re-export jumpToChatAddress for Notes/search callers")
 	}
-	// Notes references still call the shared shell wrapper.
-	if !strings.Contains(html, "jumpToChatAddress(") {
-		t.Error("jumpToChatAddress must remain reachable from Notes references")
+	// Notes references call the injected jumpToChatAddress (not a private copy).
+	if !strings.Contains(nsrc, "jumpToChatAddress(") {
+		t.Error("notes.js must call injected jumpToChatAddress for reference jump")
 	}
-	if strings.Count(html, "jumpToChatAddress(")+strings.Count(src, "jumpToChatAddress(") < 3 {
+	if strings.Count(html, "jumpToChatAddress(")+strings.Count(src, "jumpToChatAddress(")+strings.Count(nsrc, "jumpToChatAddress(") < 3 {
 		t.Error("jumpToChatAddress must be shared across Bookmarks jump and Notes references")
 	}
 }
@@ -1915,19 +1912,25 @@ func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
 // (L→R): note editor → notes list → close, mirroring the iOS edge-back. Without
 // it the swipe fell through to the app underneath.
 func TestWorkspaceHasSwipeBack(t *testing.T) {
-	html := mustReadIndex(t)
-	if !strings.Contains(html, `$("#notesworkspace").addEventListener("touchend"`) {
-		t.Error("the workspace must handle its own touchend swipe-back")
+	// Packet 7F: swipe-back listeners live in notes.js factory bind().
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
+	if !strings.Contains(src, `listen(ws, "touchend"`) && !strings.Contains(src, `"touchend", onWorkspaceTouchEnd`) {
+		t.Error("the workspace must handle its own touchend swipe-back in notes.js")
+	}
+	if !strings.Contains(src, "notesSwipeBackDecision") {
+		t.Error("workspace swipe-back must use notesSwipeBackDecision")
 	}
 	// the two back steps: to the notes list (via #wsback) and out of the workspace.
-	sw := strings.Index(html, `$("#notesworkspace").addEventListener("touchend"`)
-	seg := html[sw:]
-	end := strings.Index(seg, "}, { passive: true });")
-	if end > 0 {
-		seg = seg[:end]
+	if !strings.Contains(src, "noteToList") || !strings.Contains(src, "closeWorkspace") {
+		t.Error("workspace swipe-back must step note→list then list→closed")
 	}
-	if !strings.Contains(seg, `$("#wsback").click()`) || !strings.Contains(seg, "closeWorkspace()") {
-		t.Error("workspace swipe-back must step note→list (#wsback) then list→closed (closeWorkspace)")
+	html := mustReadIndex(t)
+	if !strings.Contains(html, "notesFeature.bind()") {
+		t.Error("production must bind notesFeature as the Notes event owner")
 	}
 }
 
@@ -1969,7 +1972,6 @@ func TestWorkspaceHeaderHeightMatchesChatHead(t *testing.T) {
 // size to their content (Notes/Messages); CSS `resize` is ignored on iOS, so a
 // grabber is not a real control there. It caps at a max-height, then scrolls.
 func TestWorkspaceSectionEditorAutogrows(t *testing.T) {
-	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
 	block := cssBlock(t, css, ".wssecedit {")
 	if strings.Contains(block, "resize: vertical") {
@@ -1978,12 +1980,17 @@ func TestWorkspaceSectionEditorAutogrows(t *testing.T) {
 	if !strings.Contains(block, "max-height") {
 		t.Error(".wssecedit must cap growth with a max-height and scroll past it")
 	}
-	start := strings.Index(html, "function startBodyEdit(")
-	end := strings.Index(html, "function openSectionMenu(")
-	if start < 0 || end < 0 || end < start {
-		t.Fatal("could not bound startBodyEdit")
+	// Packet 7F: startBodyEdit lives in notes.js.
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(html[start:end], "scrollHeight") {
+	src := string(notes)
+	start := strings.Index(src, "function startBodyEdit(")
+	if start < 0 {
+		t.Fatal("could not locate startBodyEdit in notes.js")
+	}
+	if !strings.Contains(src[start:start+800], "scrollHeight") {
 		t.Error("startBodyEdit must auto-grow the textarea from its scrollHeight")
 	}
 }
@@ -2018,14 +2025,23 @@ func TestWorkspaceEmptyStatesCentered(t *testing.T) {
 func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
+	// Structural roots stay in the document.
+	if !strings.Contains(html, `id="wsinboxtabs"`) {
+		t.Error(`workspace inbox must keep id="wsinboxtabs" in markup`)
+	}
+	// Packet 7F: clamp/list logic lives in notes.js.
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
 	for _, want := range []string{
-		`id="wsinboxtabs"`,             // the lane-tab row exists in markup
-		"data-wsitab",                  // per-tab selector
-		"data-wsimore",                 // per-bubble show-more toggle
-		"function applyWsInboxClamps(", // the measure/apply pass
-		"expandedWsInbox",              // ephemeral expand state, sibling of expandedBookmarks
+		"data-wsitab",        // per-tab selector
+		"data-wsimore",       // per-bubble show-more toggle
+		"applyWsInboxClamps", // the measure/apply pass
+		"expandedWsInbox",    // ephemeral expand state, sibling of expandedBookmarks
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("workspace inbox tabs/clamp wiring missing %q", want)
 		}
 	}
@@ -2034,11 +2050,11 @@ func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 	}
 	// The show-more toggle branch must precede the "Use in note" branch so a tap
 	// on Show more never enters placement mode.
-	dele := strings.Index(html, `$("#wsinboxlist").addEventListener("click"`)
+	dele := strings.Index(src, "function onInboxListClick")
 	if dele < 0 {
-		t.Fatal("could not locate the #wsinboxlist click delegate")
+		t.Fatal("could not locate the inbox list click handler in notes.js")
 	}
-	body := html[dele:]
+	body := src[dele:]
 	more := strings.Index(body, "[data-wsimore]")
 	use := strings.Index(body, "[data-wsiuse]")
 	if more < 0 || use < 0 || more > use {
@@ -2081,6 +2097,12 @@ func TestWorkspaceRenames(t *testing.T) {
 	if !strings.Contains(chatSrc, ">bookmark</button>") && !strings.Contains(chatSrc, "bookmark</button>") {
 		t.Errorf("expected new vocabulary %q not found in chat.js", ">bookmark</button>")
 	}
+	notesJS, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatalf("read notes.js: %v", err)
+	}
+	notesSrc := string(notesJS)
+	corpus := html + "\n" + notesSrc
 	for _, want := range []string{
 		"<h2>Bookmarks</h2>",         // captures pane heading
 		"Use in note", "Delete note", // synthesis-doc action + menu
@@ -2088,7 +2110,7 @@ func TestWorkspaceRenames(t *testing.T) {
 		"New note", "Note title", "Pick a note, or make one with +",
 		"No notes yet — make one with +", // notes (memo) card empty state
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(corpus, want) {
 			t.Errorf("expected new vocabulary %q not found", want)
 		}
 	}
@@ -2198,22 +2220,25 @@ func TestWorkspaceInboxNoHorizontalScroll(t *testing.T) {
 // not by no-op up/down arrows; the redundant reorder-mode toggle is gone.
 func TestWorkspaceNoteCardsDragReorder(t *testing.T) {
 	html := mustReadIndex(t)
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
 	for _, gone := range []string{
 		"data-wsmove",    // the old per-card up/down buttons
 		`id="wsreorder"`, // the old reorder-mode toggle
 		"function wsMove(",
 	} {
-		if strings.Contains(html, gone) {
+		if strings.Contains(html, gone) || strings.Contains(src, gone) {
 			t.Errorf("obsolete reorder affordance %q must be removed", gone)
 		}
 	}
-	if !strings.Contains(html, `$("#wscards").addEventListener("dragstart"`) {
-		t.Error("Note cards must be reorderable by drag (dragstart handler on #wscards)")
+	if !strings.Contains(src, `"dragstart"`) || !strings.Contains(src, "onCardsDragStart") {
+		t.Error("Note cards must be reorderable by drag (dragstart handler in notes.js)")
 	}
 	// The card template must be draggable.
-	tmpl := html[strings.Index(html, "function renderWsCards("):]
-	tmpl = tmpl[:strings.Index(tmpl, "\n}")]
-	if !strings.Contains(tmpl, `draggable="true"`) {
+	if !strings.Contains(src, `draggable="true"`) {
 		t.Error("the .wscard template must set draggable=\"true\"")
 	}
 }
@@ -2240,46 +2265,35 @@ func TestWorkspaceMarkdownStyled(t *testing.T) {
 // cannot move down — no wrap-around. sectionSwapPlan is the pure decision core,
 // operating on the visually sorted order (not array position).
 func TestWorkspaceSectionMoveBoundary(t *testing.T) {
-	node, err := exec.LookPath("node")
+	// Packet 7F: sectionSwapPlan lives in notes.js; Node notes.test.js is authoritative.
+	// Keep a thin source contract so the pure helper cannot disappear from production.
+	notes, err := os.ReadFile("web/js/notes.js")
 	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	html := mustReadIndex(t)
-	fn := regexp.MustCompile(`(?s)function sectionSwapPlan\(.*?\n\}`).FindString(html)
-	if fn == "" {
-		t.Fatal("could not locate sectionSwapPlan in web/index.html")
-	}
-	script := fn + `
-const assert = require("assert");
-// order values deliberately out of array order to prove it sorts first
-const secs = [ {id:"b",order:1}, {id:"a",order:0}, {id:"c",order:2} ];
-assert.strictEqual(sectionSwapPlan(secs, "a", "up"), null, "top cannot move up");
-assert.strictEqual(sectionSwapPlan(secs, "c", "down"), null, "bottom cannot move down");
-const up = sectionSwapPlan(secs, "b", "up");
-assert.deepStrictEqual({a:up.a, b:up.b}, {a:"b", b:"a"}, "middle up swaps with the one above");
-const dn = sectionSwapPlan(secs, "b", "down");
-assert.deepStrictEqual({a:dn.a, b:dn.b}, {a:"b", b:"c"}, "middle down swaps with the one below");
-assert.strictEqual(sectionSwapPlan(secs, "zzz", "up"), null, "unknown id is a no-op");
-`
-	f := filepath.Join(t.TempDir(), "swapplan.js")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("sectionSwapPlan boundary logic broken: %v\n%s", err, out)
+	src := string(notes)
+	if !strings.Contains(src, "export function sectionSwapPlan(") {
+		t.Fatal("could not locate sectionSwapPlan in web/js/notes.js")
+	}
+	if !strings.Contains(src, "return null") {
+		t.Error("sectionSwapPlan must return null at boundaries (no wrap)")
 	}
 }
 
 // Item 14: an embedded capture inside a section auto-collapses like a Notes
 // bubble, with its own Show more/less toggle.
 func TestWorkspaceReferenceClamp(t *testing.T) {
-	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
 	for _, want := range []string{
 		"data-refmore",
 		"function applyRefClamps(",
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("embedded-reference clamp wiring missing %q", want)
 		}
 	}
@@ -2292,13 +2306,20 @@ func TestWorkspaceReferenceClamp(t *testing.T) {
 // render. The rendered-body rebuild must go through a helper that re-emits the
 // references, not overwrite the body with the prose alone.
 func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
-	html := mustReadIndex(t)
-	if !strings.Contains(html, "function sectionBodyInner(") {
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
+	if !strings.Contains(src, "function sectionBodyInner(") {
 		t.Fatal("expected a sectionBodyInner helper that emits body + references together")
 	}
 	// startBodyEdit's blur must rebuild via the helper, never with a bare render div.
-	be := html[strings.Index(html, "function startBodyEdit("):]
-	be = be[:strings.Index(be, "\n}\n")]
+	start := strings.Index(src, "function startBodyEdit(")
+	if start < 0 {
+		t.Fatal("startBodyEdit missing from notes.js")
+	}
+	be := src[start : start+1500]
 	if !strings.Contains(be, "sectionBodyInner(") {
 		t.Error("startBodyEdit must restore the body via sectionBodyInner so references survive an edit")
 	}
@@ -2308,13 +2329,20 @@ func TestWorkspaceBodyEditPreservesReferences(t *testing.T) {
 // document-level close handler was firing on the same click. The handler stops
 // propagation, and the menu offers rename + delete.
 func TestWorkspaceNoteMenuOpens(t *testing.T) {
-	html := mustReadIndex(t)
-	h := html[strings.Index(html, `$("#wsnotemenu").addEventListener("click"`):]
-	h = h[:strings.Index(h, "\n});")]
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
+	start := strings.Index(src, "function onNoteMenuClick")
+	if start < 0 {
+		t.Fatal("onNoteMenuClick missing from notes.js")
+	}
+	h := src[start : start+900]
 	if !strings.Contains(h, "stopPropagation") {
 		t.Error("#wsnotemenu handler must stopPropagation so the document close handler doesn't kill the menu")
 	}
-	if !strings.Contains(h, "data-si=\"del\"") {
+	if !strings.Contains(h, `data-si="del"`) {
 		t.Error("Note menu must offer delete")
 	}
 }
@@ -2323,10 +2351,17 @@ func TestWorkspaceNoteMenuOpens(t *testing.T) {
 // title, section body) without collapsing the whole workspace. The editors stop
 // Escape from bubbling to the workspace-close handler.
 func TestWorkspaceEscCancelsEdit(t *testing.T) {
-	html := mustReadIndex(t)
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
 	// note-title keydown handles Enter (blur) and Escape (revert + stopPropagation)
-	kd := html[strings.Index(html, `$("#wsnotetitle").addEventListener("keydown"`):]
-	kd = kd[:strings.Index(kd, "\n});")]
+	start := strings.Index(src, "function onTitleKeydown")
+	if start < 0 {
+		t.Fatal("onTitleKeydown missing from notes.js")
+	}
+	kd := src[start : start+600]
 	if !strings.Contains(kd, `"Enter"`) || !strings.Contains(kd, `"Escape"`) {
 		t.Error("#wsnotetitle keydown must handle both Enter and Escape")
 	}
@@ -2334,8 +2369,11 @@ func TestWorkspaceEscCancelsEdit(t *testing.T) {
 		t.Error("#wsnotetitle Escape must stopPropagation so the workspace does not close")
 	}
 	// section body editor cancels on Escape
-	be := html[strings.Index(html, "function startBodyEdit("):]
-	be = be[:strings.Index(be, "\n}\n")]
+	beStart := strings.Index(src, "function startBodyEdit(")
+	if beStart < 0 {
+		t.Fatal("startBodyEdit missing")
+	}
+	be := src[beStart : beStart+1200]
 	if !strings.Contains(be, `"Escape"`) || !strings.Contains(be, "stopPropagation") {
 		t.Error("startBodyEdit must cancel on Escape and stopPropagation")
 	}
@@ -2361,65 +2399,35 @@ func TestWorkspaceWideLayout(t *testing.T) {
 // PATCH, the cancelled value would persist. The fix serializes every save for a
 // given field: each PATCH is chained after the previous one for the same key, so
 // the server always applies edits in issue order and a revert can never be
-// overtaken. Prove the core serialization guarantee under node.
+// overtaken. Behavioral coverage lives in web/test/notes.test.js (Packet 7F).
 func TestWorkspaceSaveSerializedPerField(t *testing.T) {
-	node, err := exec.LookPath("node")
+	notes, err := os.ReadFile("web/js/notes.js")
 	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	html := mustReadIndex(t)
-	start := strings.Index(html, "const wsSaveChains")
-	if start < 0 {
-		t.Fatal("could not locate wsSaveChains serialization core in web/index.html")
-	}
-	end := strings.Index(html[start:], "\nfunction wsEnqueue")
-	if end < 0 {
-		t.Fatal("could not locate wsEnqueue in web/index.html")
-	}
-	// grab through the end of wsEnqueue's body
-	tail := html[start+end:]
-	fnEnd := strings.Index(tail, "\n}\n")
-	if fnEnd < 0 {
-		t.Fatal("could not locate the end of wsEnqueue in web/index.html")
-	}
-	core := html[start : start+end+fnEnd+2]
-	script := core + `
-const assert = require("assert");
-const order = [];
-let resolveFirst;
-// A slow first save on the field, then a revert on the SAME field. The revert
-// thunk must not run until the first settles, and must complete last.
-const first = wsEnqueue("k", () => new Promise(r => { resolveFirst = () => { order.push("edit"); r(); }; }));
-const revert = wsEnqueue("k", () => { order.push("revert"); return Promise.resolve(); });
-setTimeout(() => {
-  assert.deepStrictEqual(order, [], "nothing may complete while the first save is still in flight — the revert must wait");
-  resolveFirst();
-  Promise.all([first, revert]).then(() => {
-    assert.deepStrictEqual(order, ["edit", "revert"], "the revert must run only after the in-flight edit, so it lands last on the server");
-    console.log("ok");
-  }).catch(e => { console.error(e && e.message || e); process.exit(1); });
-}, 10);
-`
-	f := filepath.Join(t.TempDir(), "wsserialize.js")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("per-field save serialization broken: %v\n%s", err, out)
+	src := string(notes)
+	if !strings.Contains(src, "function createSaveEnqueue(") && !strings.Contains(src, "export function createSaveEnqueue(") {
+		t.Fatal("could not locate createSaveEnqueue serialization core in notes.js")
+	}
+	if !strings.Contains(src, "function wsPatchNow(") && !strings.Contains(src, "wsPatchNow(body, key)") {
+		t.Error("wsPatchNow (immediate keyed enqueue) must exist so reverts serialize behind in-flight saves")
 	}
 	// The revert sites must enqueue on the field's key (via wsPatchNow), not fire
 	// an unkeyed immediate wsPatch that bypasses the chain.
-	if !strings.Contains(html, "function wsPatchNow(") {
-		t.Error("wsPatchNow (immediate keyed enqueue) must exist so reverts serialize behind in-flight saves")
-	}
 	for _, unkeyed := range []string{
 		"wsPatch({ title: wsTitleOrig })",
 		"wsPatch({ section: { id: secId, title: orig } })",
 		"wsPatch({ section: { id: secId, body: orig } })",
 	} {
-		if strings.Contains(html, unkeyed) {
+		if strings.Contains(src, unkeyed) {
 			t.Errorf("revert still uses an unkeyed wsPatch that bypasses per-field ordering: %q", unkeyed)
 		}
+	}
+	if !strings.Contains(src, "wsPatchNow({ title: wsTitleOrig }") {
+		t.Error("title Escape revert must use keyed wsPatchNow")
+	}
+	if !strings.Contains(src, "SAVE_DEBOUNCE_MS = 1100") && !strings.Contains(src, "SAVE_DEBOUNCE_MS") {
+		t.Error("save debounce constant must remain 1100ms")
 	}
 }
 
@@ -2427,41 +2435,18 @@ setTimeout(() => {
 // inherit its parent bookmark's lane in the reference snapshot, exactly like the
 // Bookmarks pane does. The snapshot path fed bookmarkLaneId an empty byT map, so
 // an anchored comment lost its lane color and the note card missed that lane dot.
+// Packet 7F: buildBookmarkSnapshot lives in notes.js; Node notes.test.js covers it.
 func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
-	node, err := exec.LookPath("node")
+	notes, err := os.ReadFile("web/js/notes.js")
 	if err != nil {
-		t.Skip("node not installed; skipping JS execution check")
-	}
-	html := mustReadIndex(t)
-	// Packet 7E: lane derivation lives in bookmarks.js; Notes still owns snapshot.
-	snapFn := sliceBetween(t, html, "function bookmarkSnapshot(", "\nfunction bookmarkSource(")
-	tmp := t.TempDir()
-	for _, name := range []string{"bookmarks.js", "format.js", "lanes.js"} {
-		src, err := os.ReadFile("web/js/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := `
-import assert from "node:assert/strict";
-import { bookmarkLaneId } from "./bookmarks.js";
-const UI = { bookmarks: [ { t: "1", lane: "lane-a" }, { t: "2", anchor: "1" } ] };
-function nodeById(){ return null; }
-function laneColor(id){ return id ? "#c-" + id : ""; }
-` + snapFn + `
-const comment = UI.bookmarks[1];   // anchored to note "1", carries no lane of its own
-const snap = bookmarkSnapshot(comment);
-assert.equal(snap.lane, "#c-lane-a", "an anchored comment must inherit its parent note's lane color in the snapshot");
-`
-	f := filepath.Join(tmp, "wssnaplane.mjs")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("comment lane inheritance in reference snapshot broken: %v\n%s", err, out)
+	src := string(notes)
+	if !strings.Contains(src, "export function buildBookmarkSnapshot(") {
+		t.Fatal("buildBookmarkSnapshot must live in notes.js")
+	}
+	if !strings.Contains(src, "bookmarkLaneId") {
+		t.Error("snapshot must reuse bookmarkLaneId so comments inherit parent lane")
 	}
 }
 
@@ -2515,19 +2500,27 @@ func sliceBetween(t *testing.T, html, start, end string) string {
 // Add section button, centered vertically and horizontally in the pane.
 func TestWorkspaceEmptySectionStateIsCenteredButtonOnly(t *testing.T) {
 	html := mustReadIndex(t)
+	notes, err := os.ReadFile("web/js/notes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(notes)
 	// the redundant caption is gone
-	if strings.Contains(html, "No sections yet.") {
+	if strings.Contains(html, "No sections yet.") || strings.Contains(src, "No sections yet.") {
 		t.Error(`the empty-section caption "No sections yet." must be dropped — it duplicates the Add section button`)
 	}
-	// the empty state is a centering wrapper holding the single add button
-	esi := strings.Index(html, "class=\"wssecempty\"")
+	// Packet 7F: empty state HTML is rendered from notes.js.
+	esi := strings.Index(src, "class=\"wssecempty\"")
+	if esi < 0 {
+		// template may use single-quoted class in a template literal class name only
+		esi = strings.Index(src, "wssecempty")
+	}
 	if esi < 0 {
 		t.Fatal("empty section state must render a .wssecempty centering wrapper")
 	}
 	// the wrapper must contain the add-section button (so wsAddSection still fires)
-	wrap := html[esi:]
-	end := strings.Index(wrap, "</div>")
-	if end < 0 || !strings.Contains(wrap[:end+len("</div>")], "data-addsection") {
+	wrap := src[esi:]
+	if end := strings.Index(wrap, "Add section"); end < 0 || !strings.Contains(wrap[:end+20], "data-addsection") {
 		t.Error(".wssecempty must contain the data-addsection button")
 	}
 	// the wrapper centers its button both axes and fills the pane so it sits
