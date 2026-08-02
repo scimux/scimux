@@ -50,6 +50,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	// Import map: every production module must be imported from /js/<file>.js.
 	wantImports := []string{
 		`from "/js/api.js"`,
+		`from "/js/bookmarks.js"`,
 		`from "/js/cards.js"`,
 		`from "/js/chat.js"`,
 		`from "/js/composer.js"`,
@@ -238,16 +239,29 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 	}
 	html := string(b)
 	// the closed Bookmarks toggle announces opening bookmarks (glyph set by
-	// renderBookmarksToggle, so the static button carries no chevron)
+	// renderBookmarksToggle in bookmarks.js, so the static button carries no chevron)
 	if !strings.Contains(html, `id="bookmarksbtn" aria-label="open bookmarks"></button>`) {
 		t.Fatal("closed bookmarks toggle should announce opening bookmarks")
 	}
+	if !strings.Contains(html, `from "/js/bookmarks.js"`) || !strings.Contains(html, "createBookmarksFeature") {
+		t.Fatal("production must import and instantiate createBookmarksFeature from bookmarks.js")
+	}
+	if !strings.Contains(html, "bookmarksFeature.bind()") {
+		t.Fatal("production must bind bookmarksFeature as the Bookmarks event owner")
+	}
+	bm, err := os.ReadFile("web/js/bookmarks.js")
+	if err != nil {
+		t.Fatalf("read bookmarks.js: %v", err)
+	}
+	src := string(bm)
 	for _, want := range []string{
-		`btn.innerHTML = bookmarksOpen ? "&#8250;" : "&#8249;";`,
-		`btn.setAttribute("aria-label", bookmarksOpen ? "close bookmarks" : "open bookmarks");`,
-		"renderBookmarksToggle();\n  renderBookmarkFlags();",
+		`innerHTML: open ? "&#8250;" : "&#8249;"`,
+		`ariaLabel: open ? "close bookmarks" : "open bookmarks"`,
+		"function bookmarksToggleState(",
+		"renderBookmarksToggle()",
+		"renderBookmarkFlags()",
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("bookmarks toggle state sync missing %q", want)
 		}
 	}
@@ -259,9 +273,10 @@ func TestNotesToggleDirectionMatchesPaneState(t *testing.T) {
 // surface via nt.uid — or Phase 0's "jump back after deletion" goal has no
 // affordance. Gate jump on (nt.node || nt.uid); keep comment gated on nt.node.
 func TestNotesJumpActionRendersForUIDOnlyNotes(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7E: jump affordance lives in bookmarks.js list HTML builder.
+	b, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read bookmarks.js: %v", err)
 	}
 	html := string(b)
 	if !strings.Contains(html, `${nt.node || nt.uid ? `+"`"+`<button data-bmact="jump"`) {
@@ -1533,37 +1548,33 @@ assert.strictEqual(recentsHTML(), "", "no recents → empty render (prompt fallb
 // decision core (the measure loop feeds it a real scrollHeight); execute it
 // under node against synthetic heights so the clamp/label logic is locked.
 func TestNoteClampState(t *testing.T) {
+	// Packet 7E: clamp decision core lives in bookmarks.js; Node bookmarks.test.js
+	// executes the same matrix. Keep a thin Go import smoke for the constant.
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	tmp := t.TempDir()
+	for _, name := range []string{"bookmarks.js", "format.js", "lanes.js"} {
+		src, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	html := string(b)
-	start := strings.Index(html, "const BOOKMARK_CLAMP_PX")
-	if start < 0 {
-		t.Fatal("could not locate BOOKMARK_CLAMP_PX in web/index.html")
-	}
-	end := strings.Index(html[start:], "function renderBookmarksPane(")
-	if end < 0 {
-		t.Fatal("could not locate the end of the clamp core in web/index.html")
-	}
-	script := html[start:start+end] + `
-const assert = require("assert");
-// A short bubble (below the cap) never clamps and never shows the toggle,
-// whatever its (irrelevant) expanded flag — this is the ~85% common case.
-assert.deepStrictEqual(bookmarkClampState(120, false), { clamped: false, showBtn: false, label: "Show more" }, "short/collapsed: no clamp, no button");
-assert.deepStrictEqual(bookmarkClampState(120, true),  { clamped: false, showBtn: false, label: "Show less" }, "short/expanded: still no clamp, no button");
-// A tall bubble, collapsed (default), clamps and offers "Show more".
-assert.deepStrictEqual(bookmarkClampState(900, false), { clamped: true,  showBtn: true,  label: "Show more" }, "tall/collapsed: clamp + Show more");
-// The same tall bubble once the user expanded it: not clamped, toggle reads back.
-assert.deepStrictEqual(bookmarkClampState(900, true),  { clamped: false, showBtn: true,  label: "Show less" }, "tall/expanded: no clamp, Show less");
-// The boundary is exclusive: exactly at the cap is not "tall".
-assert.deepStrictEqual(bookmarkClampState(BOOKMARK_CLAMP_PX, false), { clamped: false, showBtn: false, label: "Show more" }, "at the cap is not tall");
+	script := `
+import assert from "node:assert/strict";
+import { BOOKMARK_CLAMP_PX, bookmarkClampState } from "./bookmarks.js";
+assert.equal(BOOKMARK_CLAMP_PX, 220);
+assert.deepStrictEqual(bookmarkClampState(120, false), { clamped: false, showBtn: false, label: "Show more" });
+assert.deepStrictEqual(bookmarkClampState(120, true),  { clamped: false, showBtn: false, label: "Show less" });
+assert.deepStrictEqual(bookmarkClampState(900, false), { clamped: true,  showBtn: true,  label: "Show more" });
+assert.deepStrictEqual(bookmarkClampState(900, true),  { clamped: false, showBtn: true,  label: "Show less" });
+assert.deepStrictEqual(bookmarkClampState(BOOKMARK_CLAMP_PX, false), { clamped: false, showBtn: false, label: "Show more" });
 `
-	f := filepath.Join(t.TempDir(), "noteclamp.js")
+	f := filepath.Join(tmp, "noteclamp.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1577,20 +1588,22 @@ assert.deepStrictEqual(bookmarkClampState(BOOKMARK_CLAMP_PX, false), { clamped: 
 // fall through to the note-tap that opens the action bar. Guard the wiring and
 // the ephemerality contract so neither can silently regress.
 func TestNoteCollapseWiring(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7E: collapse wiring lives in bookmarks.js; shell keeps structural roots.
+	html := mustReadIndex(t)
+	bm, err := os.ReadFile("web/js/bookmarks.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
+	src := string(bm)
 	css := mustProductionCSSCascade(t)
 	for _, want := range []string{
-		"let expandedBookmarks = new Set();", // ephemeral, sibling of openBookmarkT
-		"const BOOKMARK_CLAMP_PX",            // the threshold constant
-		"function bookmarkClampState(",       // the decision core
-		"data-nmore",                         // the per-bubble toggle button
-		`class="nmore"`,                      // its markup in the note template
+		"expandedBookmarks = new Set()", // ephemeral, sibling of openBookmarkT
+		"BOOKMARK_CLAMP_PX",             // the threshold constant
+		"function bookmarkClampState(",  // the decision core
+		"data-nmore",                    // the per-bubble toggle button
+		`class="nmore"`,                 // its markup in the note template
 	} {
-		if !strings.Contains(html, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("note collapse wiring missing %q", want)
 		}
 	}
@@ -1598,32 +1611,31 @@ func TestNoteCollapseWiring(t *testing.T) {
 		t.Error("note-collapse CSS clamp is missing")
 	}
 	// The toggle handler is a distinct branch keyed on data-nmore. It must sit
-	// in the #bookmarkspane click delegate BEFORE the generic ".bookmark" tap branch,
+	// in the pane click delegate BEFORE the generic ".bookmark" tap branch,
 	// or clicking "Show more" would also open the action bar.
-	dele := strings.Index(html, `$("#bookmarkspane").addEventListener("click"`)
-	if dele < 0 {
-		t.Fatal("could not locate the #bookmarkspane click delegate")
-	}
-	body := html[dele:]
-	nmore := strings.Index(body, "[data-nmore]")
-	noteTap := strings.Index(body, `closest(".bookmark")`)
+	nmore := strings.Index(src, "[data-nmore]")
+	noteTap := strings.Index(src, `closest(".bookmark")`)
 	if nmore < 0 {
-		t.Fatal("the notespane delegate has no data-nmore branch")
+		t.Fatal("bookmarks.js has no data-nmore branch")
 	}
 	if !(nmore < noteTap) {
 		t.Error("the data-nmore branch must precede the .bookmark tap branch so Show more does not open the action bar")
 	}
-	// Ephemerality: the expand state is never persisted. No localStorage key and
-	// no ui op may touch expandedBookmarks.
-	if regexp.MustCompile(`localStorage[^;\n]*expandedBookmarks|expandedBookmarks[^;\n]*localStorage`).MatchString(html) {
+	// Ephemerality: the expand state is never persisted.
+	if regexp.MustCompile(`localStorage[^;\n]*expandedBookmarks|expandedBookmarks[^;\n]*localStorage`).MatchString(src) {
 		t.Error("expandedBookmarks must stay ephemeral — no localStorage persistence")
 	}
-	// The toggle mutates the DOM directly and returns; it must not call
-	// renderBookmarksPane (which would be a needless rebuild) inside its branch.
-	branch := body[nmore:]
+	// In-place flip must not call render() inside the nmore branch.
+	branch := src[nmore:]
 	if endB := strings.Index(branch, "return;"); endB > 0 {
-		if strings.Contains(branch[:endB], "renderBookmarksPane(") {
+		if strings.Contains(branch[:endB], "render(") || strings.Contains(branch[:endB], "renderBookmarksPane(") {
 			t.Error("the data-nmore toggle must not rebuild the pane — flip the class in place")
+		}
+	}
+	// Shell still hosts the structural roots Bookmarks owns.
+	for _, id := range []string{"bookmarkspane", "bookmarklist", "bookmarkflags", "bookmarksbtn", "notesbtn", "bookmarkpeek"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("shell missing Bookmarks root #%s", id)
 		}
 	}
 }
@@ -1777,8 +1789,16 @@ func TestWebUseInNoteWiring(t *testing.T) {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
+	bm, err := os.ReadFile("web/js/bookmarks.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(bm)
+	// Use-in-note action lives in bookmarks.js; placement/endpoint stay in Notes shell.
+	if !strings.Contains(src, `data-bmact="note"`) {
+		t.Error(`use-in-note wiring missing data-bmact="note" in bookmarks.js`)
+	}
 	for _, want := range []string{
-		`data-bmact="note"`,        // Use-in-note action in the Bookmark-pane action row
 		"function startPlacement(", // enters placement mode holding the note
 		`classList.add("placing")`, // placement mode drives the add-here affordances
 		`data-addhere`,             // per-section "add capture here" target
@@ -1799,12 +1819,24 @@ func TestWebSharedJumpResolver(t *testing.T) {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
 	html := string(b)
-	if !strings.Contains(html, "function jumpToChatAddress(") {
-		t.Error("shared jumpToChatAddress resolver not defined")
+	bm, err := os.ReadFile("web/js/bookmarks.js")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The notes pane must delegate to it rather than keep a private copy.
-	if strings.Count(html, "jumpToChatAddress(") < 2 {
-		t.Error("jumpToChatAddress must be called from both the notes pane and references")
+	src := string(bm)
+	// Packet 7E: resolver lives in bookmarks.js; shell re-exports for Notes refs.
+	if !strings.Contains(src, "function jumpToChatAddress(") {
+		t.Error("shared jumpToChatAddress resolver not defined in bookmarks.js")
+	}
+	if !strings.Contains(html, "function jumpToChatAddress(") {
+		t.Error("shell must re-export jumpToChatAddress for Notes/search callers")
+	}
+	// Notes references still call the shared shell wrapper.
+	if !strings.Contains(html, "jumpToChatAddress(") {
+		t.Error("jumpToChatAddress must remain reachable from Notes references")
+	}
+	if strings.Count(html, "jumpToChatAddress(")+strings.Count(src, "jumpToChatAddress(") < 3 {
+		t.Error("jumpToChatAddress must be shared across Bookmarks jump and Notes references")
 	}
 }
 
@@ -2075,16 +2107,19 @@ func TestWorkspaceRenames(t *testing.T) {
 // delete). Icons are inlined SVG per the repo convention — no FA dependency.
 func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	html := mustReadIndex(t)
+	bm, err := os.ReadFile("web/js/bookmarks.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(bm)
 	if !strings.Contains(html, "const ICON_CLIP") {
 		t.Error(`missing inlined icon constant "const ICON_CLIP"`)
 	}
-	// the chat-area toggle (#bookmarksbtn) is the ‹/› chevron mirroring pane state;
-	// the bookmark glyph now lives on the Bookmarks pane's top-right button.
-	tog := sliceBetween(t, html, "function renderBookmarksToggle(", "\n}\n")
-	if strings.Contains(tog, "ICON_BOOKMARK") {
+	// the chat-area toggle (#bookmarksbtn) is the ‹/› chevron mirroring pane state
+	if strings.Contains(src, "ICON_BOOKMARK") {
 		t.Error("the chat-area toggle (#bookmarksbtn) must be a chevron, not ICON_BOOKMARK")
 	}
-	if !strings.Contains(tog, `"&#8249;"`) {
+	if !strings.Contains(src, `"&#8249;"`) {
 		t.Error("the chat-area toggle (#bookmarksbtn) must restore the ‹ chevron when closed")
 	}
 	// The Bookmarks pane's forward control opens the Notes pane (to its right in
@@ -2094,21 +2129,26 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 	if !strings.Contains(html, `id="notesbtn" aria-label="show notes" title="Notes">Notes &#8250;</button>`) {
 		t.Error(`#notesbtn must read "Notes ›" (forward label + right chevron) to name the pane it reveals`)
 	}
-	if strings.Contains(html, "ICON_BOOKMARK") {
+	if strings.Contains(html, "ICON_BOOKMARK") || strings.Contains(src, "ICON_BOOKMARK") {
 		t.Error("ICON_BOOKMARK is dead once #notesbtn is a text label — remove the const and its assignment")
 	}
+	// #notesbtn must not use .backbtn (it is a forward destination label)
+	if strings.Contains(html, `id="notesbtn"`) {
+		notesBtn := sliceBetween(t, html, `id="notesbtn"`, "</button>")
+		if strings.Contains(notesBtn, "backbtn") {
+			t.Error("#notesbtn must not carry .backbtn")
+		}
+	}
 	// in the note action row, the paperclip (use-in-note) sits just before delete
-	row := sliceBetween(t, html, `<div class="bookmarkactions">`, "</div>")
-	clip := strings.Index(row, `data-bmact="note"`)
-	del := strings.Index(row, `data-bmact="del"`)
+	clip := strings.Index(src, `data-bmact="note"`)
+	del := strings.Index(src, `data-bmact="del"`)
 	if clip < 0 || del < 0 {
 		t.Fatal("note action row must contain both the use-in-note and delete actions")
 	}
 	if !(clip < del) {
 		t.Error("the use-in-note (paperclip) action must sit before delete (second-to-last)")
 	}
-	// and that action renders the paperclip, not the old pen-to-square (SHEETS)
-	act := row[clip:]
+	act := src[clip:]
 	if end := strings.Index(act, "</button>"); end > 0 {
 		if !strings.Contains(act[:end], "ICON_CLIP") {
 			t.Error("the use-in-note action must render ICON_CLIP (paperclip)")
@@ -2393,20 +2433,30 @@ func TestWorkspaceReferenceSnapshotInheritsCommentLane(t *testing.T) {
 		t.Skip("node not installed; skipping JS execution check")
 	}
 	html := mustReadIndex(t)
-	laneFn := sliceBetween(t, html, "function bookmarkLaneId(", "\nfunction bookmarkSortKey(")
+	// Packet 7E: lane derivation lives in bookmarks.js; Notes still owns snapshot.
 	snapFn := sliceBetween(t, html, "function bookmarkSnapshot(", "\nfunction bookmarkSource(")
+	tmp := t.TempDir()
+	for _, name := range []string{"bookmarks.js", "format.js", "lanes.js"} {
+		src, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	script := `
+import assert from "node:assert/strict";
+import { bookmarkLaneId } from "./bookmarks.js";
 const UI = { bookmarks: [ { t: "1", lane: "lane-a" }, { t: "2", anchor: "1" } ] };
 function nodeById(){ return null; }
 function laneColor(id){ return id ? "#c-" + id : ""; }
-` + laneFn + "\n" + snapFn + `
-const assert = require("assert");
+` + snapFn + `
 const comment = UI.bookmarks[1];   // anchored to note "1", carries no lane of its own
 const snap = bookmarkSnapshot(comment);
-assert.strictEqual(snap.lane, "#c-lane-a", "an anchored comment must inherit its parent note's lane color in the snapshot");
-console.log("ok");
+assert.equal(snap.lane, "#c-lane-a", "an anchored comment must inherit its parent note's lane color in the snapshot");
 `
-	f := filepath.Join(t.TempDir(), "wssnaplane.js")
+	f := filepath.Join(tmp, "wssnaplane.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2644,8 +2694,23 @@ func TestPeekTapStepsBack(t *testing.T) {
 	if !strings.Contains(html, `id="bookmarkpeek"`) {
 		t.Error("a #bookmarkpeek tap-catcher must exist over the Bookmarks left peek strip")
 	}
-	if !strings.Contains(html, `$("#bookmarkpeek").addEventListener("click", () => applyNavAction(bookmarkPeekClose()));`) {
-		t.Error("tapping the bookmarks peek must close the pane (step back to chat)")
+	// Packet 7E: exactly one owner — bookmarksFeature.bind listens on #bookmarkpeek.
+	if !strings.Contains(html, "bookmarksFeature.bind()") {
+		t.Error("bookmarksFeature must bind as the sole #bookmarkpeek event owner")
+	}
+	if strings.Contains(html, `$("#bookmarkpeek").addEventListener`) {
+		t.Error("shell must not also attach a #bookmarkpeek listener (single-owner rule)")
+	}
+	bm, err := os.ReadFile("web/js/bookmarks.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bm), "listen(roots.bookmarkpeek") &&
+		!strings.Contains(string(bm), "listen(roots.bookmarkpeek,") {
+		// accept either form
+		if !strings.Contains(string(bm), "bookmarkpeek") || !strings.Contains(string(bm), "onPeekClick") {
+			t.Error("bookmarks.js must own the #bookmarkpeek click handler")
+		}
 	}
 	if !strings.Contains(string(nav), `type: "setBookmarksOpen", open: false`) {
 		t.Error("bookmarkPeekClose must emit setBookmarksOpen false")

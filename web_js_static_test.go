@@ -11,6 +11,7 @@ import (
 // productionJSURLs is the flat /js/<file>.js surface served from the embed.
 var productionJSURLs = []string{
 	"/js/api.js",
+	"/js/bookmarks.js",
 	"/js/cards.js",
 	"/js/chat.js",
 	"/js/composer.js",

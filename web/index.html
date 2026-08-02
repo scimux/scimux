@@ -396,7 +396,7 @@ import {
   isArchived as isArchivedMod,
 } from "/js/map-model.js";
 import {
-  clampLevel, scrimStep, bookmarkPeekClose, captureTouchStart, documentSwipeDecision,
+  clampLevel, scrimStep, captureTouchStart, documentSwipeDecision,
   captureNotesTouchStart, notesSwipeBackDecision,
 } from "/js/navigation.js";
 import {
@@ -407,6 +407,13 @@ import { createCardsFeature } from "/js/cards.js";
 import { createMapFeature } from "/js/map.js";
 import { createChatFeature, splitAssetRefs } from "/js/chat.js";
 import { createComposerFeature } from "/js/composer.js";
+import {
+  createBookmarksFeature,
+  stampAddress as stampAddressMod,
+  bookmarkLaneId as bookmarkLaneIdMod,
+  bookmarkSortKey as bookmarkSortKeyMod,
+  bookmarkClampState as bookmarkClampStateMod,
+} from "/js/bookmarks.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -495,7 +502,7 @@ function uiMutate(op){
   savePendingOps();
   saveCachedUI(UI, uiStorage);
   renderSyncState();
-  renderBookmarksPane();   /* signature-guarded; cheap when notes didn't change */
+  renderBookmarksPane();   /* signature-guarded; bookmarksFeature.render */
   renderWsInbox();     /* signature-guarded; the workspace inbox mirrors captures */
   clearTimeout(uiTimer);   /* coalesce bursts (typing notes, dragging tabs) */
   uiTimer = setTimeout(flushUI, 300);
@@ -527,7 +534,7 @@ async function flushUI(){
 /* re-render everything that draws from UI, preserving inputs (the prompt bar
    and sheets are singletons outside these render regions) */
 function applyRemoteUI(){
-  cardsSig = ""; mapFeature.invalidate(); bookmarksSig = "";
+  cardsSig = ""; mapFeature.invalidate(); bookmarksFeature.invalidate();
   renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderBookmarksPane();
 }
 async function loadUI(){
@@ -1114,9 +1121,10 @@ function setMapFull(on){ mapFeature.setFull(on); }
 
 /* Chat feature factory — owns head/details, msgs, terminal, keys, workpulse. */
 let pendingJump = null;    // jump-to-source in flight (set by bookmarks/search; consumed by chat)
-/* composerFeature is assigned immediately after createChatFeature; chat injects
-   lazy wrappers so busy/closed/attach effects resolve after construction. */
+/* composerFeature / bookmarksFeature are assigned after createChatFeature;
+   chat injects lazy wrappers so effects resolve after construction. */
 let composerFeature;
+let bookmarksFeature;
 const chatFeature = createChatFeature({
   roots: {
     chathead: $("#chathead"),
@@ -1167,13 +1175,13 @@ const chatFeature = createChatFeature({
   },
   bookmarks: () => UI.bookmarks,
   uiMutate,
-  stampAddress: (b, t) => stampAddress(b, t),
+  stampAddress: (b, t) => stampAddressMod(b, t),
   copyText: s => copyText(s),
   forkFromTurn: (text, parent) => forkFromTurn(text, parent),
   setComposerBusy: v => composerFeature.setComposerBusy(v),
   setComposerClosed: v => composerFeature.setComposerClosed(v),
   setAttachAvail: v => composerFeature.setAttachAvail(v),
-  setBookmarksBackLabel: t => { $("#bookmarksback").textContent = "‹ " + t; },
+  setBookmarksBackLabel: t => bookmarksFeature.setBackLabel(t),
   updateLocalNode: n => updateLocalNode(n),
   invalidateCardsSig: () => { cardsSig = ""; },
   invalidateMapSig: () => { mapFeature.invalidate(); },
@@ -1235,6 +1243,70 @@ composerFeature = createComposerFeature({
   alert: msg => alert(msg),
 });
 
+/* Bookmarks feature — pane, flags, clamp, reply composer, jump, longpress.
+   openNotes is lazy so Notes workspace (Packet 7F) is never imported here. */
+bookmarksFeature = createBookmarksFeature({
+  roots: {
+    bookmarkspane: $("#bookmarkspane"),
+    bookmarktabs: $("#bookmarktabs"),
+    bookmarklist: $("#bookmarklist"),
+    bookmarkflags: $("#bookmarkflags"),
+    bookmarksbtn: $("#bookmarksbtn"),
+    bookmarksback: $("#bookmarksback"),
+    notesbtn: $("#notesbtn"),
+    bookmarkpeek: $("#bookmarkpeek"),
+    bookmarkbar: $("#bookmarkbar"),
+    bookmarkchip: $("#bookmarkchip"),
+    bookmarkchiptext: $("#bookmarkchiptext"),
+    bookmarkchipx: $("#bookmarkchipx"),
+    bookmarkprompt: $("#bookmarkprompt"),
+    bookmarksend: $("#bookmarksend"),
+  },
+  document,
+  storage: localStorage,
+  setTimeout,
+  clearTimeout,
+  CSS,
+  esc,
+  md,
+  fmtWhen,
+  hashStr,
+  icons: {
+    ICON_JUMP, ICON_COMMENT, ICON_COPY, ICON_CLIP, ICON_TRASH, ICON_SEND,
+  },
+  bookmarks: () => UI.bookmarks,
+  uiMutate,
+  nodeById: id => nodeById(id),
+  laneList: () => laneList(),
+  laneColor: id => laneColor(id),
+  laneModel: () => laneModel(),
+  orderedNodes: () => orderedNodes(),
+  openNotes: () => openWorkspace(),
+  startPlacement: nt => startPlacement(nt),
+  toast: msg => toast(msg),
+  copyText: s => copyText(s),
+  select: id => select(id),
+  setLevel: n => setLevel(n),
+  openSheet,
+  closeSheets,
+  setPendingJump: v => { pendingJump = v; },
+  openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at),
+  invalidateChat: () => chatFeature.invalidate(),
+  wsOpen: () => wsOpen(),
+  closeWorkspace: () => closeWorkspace(),
+  isDesktop,
+  restartWorkPulse: () => restartWorkPulse(),
+  longpress: (container, selector, fn) => longpress(container, selector, fn),
+});
+function renderBookmarksPane(){ bookmarksFeature.render(); }
+function setBookmarksOpen(open){ bookmarksFeature.setOpen(open); }
+function stampAddress(bookmark, src){ stampAddressMod(bookmark, src); }
+function bookmarkLaneId(nt, byT){ return bookmarkLaneIdMod(nt, byT, nodeById); }
+function bookmarkSortKey(nt, byT){ return bookmarkSortKeyMod(nt, byT); }
+function bookmarkClampState(naturalPx, expanded){
+  return bookmarkClampStateMod(naturalPx, expanded);
+}
+function jumpToChatAddress(a){ return bookmarksFeature.jumpToChatAddress(a); }
 
 /* Shell navigation into/out of Journeys (not map-local chrome). */
 $("#journeybtn").addEventListener("click", () => {
@@ -1455,7 +1527,7 @@ function addStationBookmark(id){
   const bookmark = { t: new Date().toISOString(), text: clean };
   if (n.lane_id) bookmark.lane = n.lane_id;
   uiMutate({ k: "bookmark-add", bookmark });
-  bookmarksPin = true;
+  bookmarksFeature.pinBottom();
   renderBookmarksPane();
   toast("Note added" + (n.lane_id ? " to " + laneName(n.lane_id) : ""));
 }
@@ -1482,305 +1554,12 @@ function openActivityEditor(id, stopTime){
   openSheet("#newchat");
   setTimeout(() => $("#nc_title").focus(), 0);
 }
-/* ---------- sticky-notes pane ----------
-   Captured notes are immutable evidence (copy of a bubble + pointer back to
-   its context); manual notes are freeform. Chat-like ordering: oldest top,
-   newest bottom, pinned to the bottom when the view (re)opens. The pane is a
-   polled render region guarded by a signature; tapping a note unfolds its
-   action row (jump-to-source · copy · trash), and that state must survive
-   rebuilds like every other polled element. */
-let bookmarksOpen = localStorage.getItem("scimux-bookmarks") === "1";
-let bookmarkTab = localStorage.getItem("scimux-bookmarktab") || "GENERAL";
-let openBookmarkT = "";        // note whose action row is unfolded
-let expandedBookmarks = new Set();   // note.t values the user expanded — ephemeral view state
-let bookmarksSig = "";
-let bookmarksPin = true;       // scroll to the bottom on the next render
+/* ---------- sticky-notes / Bookmarks pane ----------
+   Packet 7E: rendering, clamp, flags, reply composer, jump, and longpress
+   send-to live in createBookmarksFeature (web/js/bookmarks.js). Pure helpers
+   (stampAddress, bookmarkLaneId, bookmarkSortKey, bookmarkClampState) are
+   re-exported via shell wrappers for Notes inbox / snapshot until Packet 7F. */
 /* pendingJump is declared with the chat feature factory (Packet 7C). */
-
-/* stampAddress copies a source turn's durable address (uid, segment, record)
-   onto a captured note. src can be a chat turn (numeric segment/record) or a
-   search hit's dataset (string values); coerce and stamp only when a real uid
-   is present, so a legacy/tmux turn with no address leaves the note to its
-   node+turnTime live hints rather than a bogus (uid:"", 0, 0) triple. */
-function stampAddress(bookmark, src){
-  if (!src || !src.uid) return;
-  bookmark.uid = src.uid;
-  bookmark.segment = Number(src.segment) || 0;
-  bookmark.record = Number(src.record) || 0;
-}
-
-/* jumpToChatAddress — the one resolver behind both a note's "jump to" and an
-   embedded reference's "jump to chat". a = {node, uid, segment, record,
-   turnTime, text}. A live node resolves in its own log by the durable
-   (segment, record) address (turnTime, then text, are the legacy fallback);
-   a node that was deleted (its log archived to sessions/archive) resolves by
-   uid into the same bounded read-only surface search uses. Returns false only
-   when neither a live node nor a durable uid is available, so the caller can
-   fall back to the captured snapshot. Leaving any full-screen overlay (notes
-   sheet, notes workspace) is part of the jump — the destination must show. */
-function jumpToChatAddress(a){
-  if (a.node && nodeById(a.node)){
-    pendingJump = { node: a.node, turnTime: a.turnTime || "", text: a.text || "",
-      uid: a.uid || "", segment: a.segment, record: a.record, ts: Date.now() };
-    /* select() clears chatSig only on a node *change*; a same-node jump would
-       hit the signature short-circuit before consumePendingJump */
-    chatFeature.invalidate();
-    if (wsOpen()) closeWorkspace();
-    if (!isDesktop()) setBookmarksOpen(false);
-    select(a.node);
-    return true;
-  }
-  if (a.uid){
-    if (wsOpen()) closeWorkspace();
-    openArchived(a.uid, a.segment, a.record, a.turnTime || "");
-    return true;
-  }
-  return false;
-}
-
-/* a note's lane is derived live from its activity (activities gain lanes
-   later; notes follow automatically); the capture-time snapshot is the
-   fallback for deleted activities and the home of manual notes. Comments
-   inherit their anchor's lane so the pair never separates. */
-function bookmarkLaneId(nt, byT){
-  if (nt.anchor && byT && byT[nt.anchor]) nt = byT[nt.anchor];
-  if (!nt.node) return nt.lane || "";
-  const nd = nodeById(nt.node);
-  return nd ? (nd.lane_id || "") : (nt.lane || "");
-}
-/* effective sort key: a comment sorts at its anchor's position, right after
-   it ("~" > every ISO-timestamp character); its own creation time is still
-   what's displayed — revelations may come late, order shows where they belong */
-function bookmarkSortKey(nt, byT){
-  if (nt.anchor && byT[nt.anchor]) return byT[nt.anchor].t + "~" + nt.t;
-  return nt.t + "~";
-}
-/* fmtWhen/bubbleTitle imported from /js/format.js */
-/* Long noted bubbles force a lot of scrolling; clamp the tall ~15% behind a
-   "Show more" toggle and leave the short majority alone. bookmarkClampState is the
-   DOM-free decision core — the measure loop feeds it a real scrollHeight —
-   kept pure so it is unit-testable without layout. BOOKMARK_CLAMP_PX ≈ 12 lines,
-   near the p90 assistant bubble. Expand state is ephemeral view state (like
-   openBookmarkT): an in-memory Set, never persisted, never synced. */
-const BOOKMARK_CLAMP_PX = 220;
-function bookmarkClampState(naturalPx, expanded){
-  const tall = naturalPx > BOOKMARK_CLAMP_PX;
-  return { clamped: tall && !expanded, showBtn: tall, label: expanded ? "Show less" : "Show more" };
-}
-function renderBookmarksPane(){
-  document.body.classList.toggle("bookmarks-open", bookmarksOpen);
-  renderBookmarksToggle();
-  renderBookmarkFlags();
-  if (!bookmarksOpen) return;
-  const bookmarks = UI.bookmarks || [];
-  const byT = {};
-  bookmarks.forEach(nt => byT[nt.t] = nt);
-  const laneOf = {};
-  bookmarks.forEach(nt => laneOf[nt.t] = bookmarkLaneId(nt, byT));
-  const tabs = laneList().filter(l => bookmarks.some(nt => laneOf[nt.t] === l.id));
-  if (bookmarkTab !== "GENERAL" && !tabs.some(l => l.id === bookmarkTab)) bookmarkTab = "GENERAL";
-  const list = bookmarks
-    .filter(nt => (laneOf[nt.t] || "") === (bookmarkTab === "GENERAL" ? "" : bookmarkTab))
-    .sort((a, b) => bookmarkSortKey(a, byT).localeCompare(bookmarkSortKey(b, byT)));
-  const tabsHtml =
-    `<button data-ntab="GENERAL" class="${bookmarkTab === "GENERAL" ? "on" : ""}">General</button>` +
-    tabs.map(l => `<button data-ntab="${esc(l.id)}" class="${bookmarkTab === l.id ? "on" : ""}"
-      ><span class="tabdot" style="background:${esc(laneColor(l.id))}"></span>${esc(l.name)}</button>`).join("");
-  const color = bookmarkTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(bookmarkTab));
-  const listHtml = list.length ? list.map(nt => {
-    const nd = nt.node ? nodeById(nt.node) : null;
-    const src = nd ? " · " + esc(nd.title) : "";
-    return `
-    <div class="bookmark ${nt.anchor ? "comment" : ""}" data-t="${esc(nt.t)}">
-      <div class="when">${esc(fmtWhen(nt.t))}${src}</div>
-      <div class="nbubble" style="border-left-color:${color}">${md(nt.text || "")}</div>
-      <button class="nmore" data-nmore hidden></button>
-      ${openBookmarkT === nt.t ? `<div class="bookmarkactions">
-        ${nt.node || nt.uid ? `<button data-bmact="jump" aria-label="open in activity">${ICON_JUMP}</button>` : ""}
-        ${nt.node && !nt.anchor ? `<button data-bmact="comment" aria-label="comment on this bookmark">${ICON_COMMENT}</button>` : ""}
-        <button data-bmact="copy" aria-label="copy bookmark">${ICON_COPY}</button>
-        <button data-bmact="note" aria-label="use in note">${ICON_CLIP}</button>
-        <button data-bmact="del" aria-label="delete bookmark">${ICON_TRASH}</button>
-      </div>` : ""}
-    </div>`;
-  }).join("") : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
-  const sig = hashStr(tabsHtml + "|" + listHtml);
-  if (sig === bookmarksSig) return;
-  bookmarksSig = sig;
-  $("#bookmarktabs").innerHTML = tabsHtml;
-  $("#bookmarklist").innerHTML = listHtml;
-  applyBookmarkClamps();
-  if (bookmarksPin){ const nl = $("#bookmarklist"); nl.scrollTop = nl.scrollHeight; bookmarksPin = false; }
-}
-/* Measure each rebuilt bubble (scrollHeight reports the full content height
-   even while clamped) and apply the clamp/toggle from bookmarkClampState. Runs
-   after the rebuild, so it re-derives from expandedBookmarks each time — the Set
-   is what carries expand state across polled rebuilds. */
-function applyBookmarkClamps(){
-  $("#bookmarklist").querySelectorAll(".bookmark").forEach(el => {
-    const b = el.querySelector(".nbubble"), btn = el.querySelector(".nmore");
-    if (!b || !btn) return;
-    const st = bookmarkClampState(b.scrollHeight, expandedBookmarks.has(el.dataset.t));
-    b.classList.toggle("clamped", st.clamped);
-    btn.hidden = !st.showBtn;
-    btn.textContent = st.label;
-  });
-}
-/* the flags stack: which lanes currently hold notes (gray = General) */
-let flagsSig = "";
-function renderBookmarkFlags(){
-  const bookmarks = UI.bookmarks || [];
-  const byT = {};
-  bookmarks.forEach(nt => byT[nt.t] = nt);
-  const laneIds = new Set(bookmarks.map(nt => bookmarkLaneId(nt, byT)));
-  const flags = laneList().filter(l => laneIds.has(l.id));
-  const html = flags.map(f => `<button data-flag="${esc(f.id)}" title="${esc(f.name)} bookmarks"
-      aria-label="${esc(f.name)} bookmarks" style="background:${esc(f.color || "")}"></button>`).join("")
-    + (laneIds.has("") ? `<button data-flag="GENERAL" title="General bookmarks"
-      aria-label="General bookmarks" style="background:var(--unlane)"></button>` : "");
-  if (html === flagsSig) return;
-  flagsSig = html;
-  $("#bookmarkflags").innerHTML = html;
-}
-function renderBookmarksToggle(){
-  const btn = $("#bookmarksbtn");
-  /* the chevron mirrors the pane it reveals: ‹ (closed) points at the
-     Bookmarks edge to the right; › (open) collapses back to the chat */
-  btn.innerHTML = bookmarksOpen ? "&#8250;" : "&#8249;";
-  btn.setAttribute("aria-label", bookmarksOpen ? "close bookmarks" : "open bookmarks");
-}
-function setBookmarksOpen(open){
-  bookmarksOpen = open;
-  localStorage.setItem("scimux-bookmarks", open ? "1" : "0");
-  bookmarksSig = ""; bookmarksPin = true;
-  renderBookmarksPane();
-  restartWorkPulse();
-}
-$("#bookmarksbtn").addEventListener("click", () => setBookmarksOpen(!bookmarksOpen));
-$("#bookmarksback").addEventListener("click", () => setBookmarksOpen(false));
-$("#bookmarkflags").addEventListener("click", e => {
-  const f = e.target.closest("[data-flag]");
-  if (!f) return;
-  bookmarkTab = f.dataset.flag;
-  localStorage.setItem("scimux-bookmarktab", bookmarkTab);
-  setBookmarksOpen(true);
-});
-$("#bookmarkspane").addEventListener("click", e => {
-  const more = e.target.closest("[data-nmore]");
-  if (more){
-    /* ephemeral view-state flip: mutate the DOM in place, no rebuild, no
-       persistence. Precedes the .bookmark tap branch so it never opens the
-       action bar. */
-    const el = more.closest(".bookmark"), t = el.dataset.t;
-    expandedBookmarks.has(t) ? expandedBookmarks.delete(t) : expandedBookmarks.add(t);
-    const b = el.querySelector(".nbubble");
-    const st = bookmarkClampState(b.scrollHeight, expandedBookmarks.has(t));
-    b.classList.toggle("clamped", st.clamped);
-    more.textContent = st.label;
-    return;
-  }
-  const tb = e.target.closest("[data-ntab]");
-  if (tb){
-    bookmarkTab = tb.dataset.ntab;
-    localStorage.setItem("scimux-bookmarktab", bookmarkTab);
-    setBookmarkAnchor("");   /* comment mode doesn't survive leaving its tab */
-    openBookmarkT = ""; bookmarksSig = ""; bookmarksPin = true;
-    renderBookmarksPane();
-    return;
-  }
-  const act = e.target.closest("[data-bmact]");
-  if (act){
-    const nt = (UI.bookmarks || []).find(x => x.t === act.closest(".bookmark")?.dataset.t);
-    if (!nt) return;
-    if (act.dataset.bmact === "jump" && (nt.node || nt.uid)){
-      /* the durable (uid, segment, record) address resolves jump-back the same
-         way for a note and an embedded reference — one shared resolver, so both
-         survive /clear seams, rotation, and node deletion identically. A legacy
-         note with no address can only offer its own text to read/copy. */
-      if (!jumpToChatAddress({ node: nt.node, uid: nt.uid, segment: nt.segment,
-          record: nt.record, turnTime: nt.turnTime, text: nt.text }))
-        toast("This note's activity was deleted — the text is still here to read or copy.");
-    } else if (act.dataset.bmact === "note"){
-      startPlacement(nt);
-    } else if (act.dataset.bmact === "comment"){
-      setBookmarkAnchor(nt.t);
-      openBookmarkT = "";
-      renderBookmarksPane();
-      $("#bookmarkprompt").focus();
-    } else if (act.dataset.bmact === "copy"){
-      copyText(nt.text || "");
-      act.innerHTML = "&#10003;";
-      setTimeout(() => { act.innerHTML = ICON_COPY; bookmarksSig = ""; }, 900);
-    } else if (act.dataset.bmact === "del"){
-      openBookmarkT = "";
-      uiMutate({ k: "bookmark-del", t: nt.t });
-    }
-    return;
-  }
-  const bookmarkEl = e.target.closest(".bookmark");
-  if (bookmarkEl){
-    openBookmarkT = openBookmarkT === bookmarkEl.dataset.t ? "" : bookmarkEl.dataset.t;
-    renderBookmarksPane();
-    /* same reveal as chat bubbles: the unfolded action row must be visible
-       after the tap (re-query — the render above rebuilt the list DOM) */
-    if (openBookmarkT)
-      document.querySelector(`#bookmarklist .bookmark[data-t="${CSS.escape(openBookmarkT)}"] .bookmarkactions`)
-        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }
-});
-/* the note composer: always visible, two modes. Default appends a manual
-   note to the current tab's lane; after "comment" it targets a captured
-   note (visible, cancelable chip) and the new note is born anchored. The
-   capture itself is never editable — commenting is the annotation path. */
-let bookmarkAnchor = "";   // t of the capture being commented on
-function setBookmarkAnchor(t){
-  const target = t ? (UI.bookmarks || []).find(x => x.t === t) : null;
-  bookmarkAnchor = target ? t : "";
-  $("#bookmarkprompt").dataset.placeholder = bookmarkAnchor ? "Reply…" : "Add a note…";
-  /* A persistent, dismissible chip — the placeholder alone vanished at the
-     first typed character, so a reply half-written then finished as an intended
-     general note landed silently as a comment on a forgotten capture (R20.10).
-     The chip stays while the anchor is set and offers a keep-the-text cancel
-     that does not require the keyboard. */
-  const chip = $("#bookmarkchip");
-  if (bookmarkAnchor){
-    $("#bookmarkchiptext").textContent = "Replying to: " + (target.text || "").replace(/\s+/g, " ").trim();
-    chip.hidden = false;
-  } else {
-    chip.hidden = true;
-  }
-}
-function addManualBookmark(){
-  const text = $("#bookmarkprompt").innerText.trim();
-  if (!text) return;
-  const bookmark = { t: new Date().toISOString(), text };
-  if (bookmarkAnchor) bookmark.anchor = bookmarkAnchor;
-  else if (bookmarkTab !== "GENERAL") bookmark.lane = bookmarkTab;
-  uiMutate({ k: "bookmark-add", bookmark });
-  $("#bookmarkprompt").textContent = "";
-  setBookmarkAnchor("");
-  bookmarksPin = true;
-  renderBookmarksPane();
-}
-$("#bookmarksend").innerHTML = ICON_SEND;
-$("#bookmarksend").addEventListener("click", addManualBookmark);
-$("#bookmarkprompt").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey){
-    e.preventDefault();
-    addManualBookmark();
-  }
-  if (e.key === "Escape"){ setBookmarkAnchor(""); e.target.blur(); }
-});
-/* walking away from an empty composer ends reply mode — a later plain note
-   must never silently become a comment on a long-forgotten target */
-$("#bookmarkprompt").addEventListener("blur", () => {
-  if (!$("#bookmarkprompt").innerText.trim()) setBookmarkAnchor("");
-});
-/* the chip's dismiss cancels reply mode but keeps whatever is typed — the
-   pointer-reachable equivalent of Escape (R20.10) */
-$("#bookmarkchipx").addEventListener("click", () => { setBookmarkAnchor(""); $("#bookmarkprompt").focus(); });
-
-/* double-tap empty-chat zoom reset lives in chat.js bind (Packet 7C). */
 
 /* transient one-liner, fixed above the composer; outside every polled render
    region so a rebuild cannot wipe it mid-display */
@@ -1868,37 +1647,17 @@ mapFeature.bind();
 chatFeature.bind();
 /* Composer singleton listeners (prompt, send, attach menu/drop, drafts). */
 composerFeature.bind();
+/* Bookmarks pane/flags/composer/peek/longpress (Packet 7E). */
+bookmarksFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
 
 
-/* long-press a sticky note — forward its text into a chat's draft (moved
-   here from the retired Notes activity). Regular chat bubbles have no
-   long-press: the tap-revealed icon row already carries the same actions. */
+/* long-press send-to lives in bookmarksFeature.bind (Packet 7E). */
 let ncParent = "", ncRationale = "";
 let ncEdit = "";   /* non-empty = the #newchat sheet is editing this node, not creating */
 let ncEditStop = ""; /* when editing: the earlier-stop seam being edited; "" = the head (node label) */
-longpress($("#bookmarklist"), ".bookmark", el => {
-  const bookmark = (UI.bookmarks || []).find(x => x.t === el.dataset.t);
-  if (!note) return;
-  const lm = laneModel();
-  $("#sendto_list").innerHTML = orderedNodes().map(n => `
-    <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
-      <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${esc(lm.color(n.lane_id))}"></span>
-      <span>${esc(n.title)}</span>
-    </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
-  $("#sendto_list").onclick = ev => {
-    const b = ev.target.closest("[data-fwd]");
-    if (!b) return;
-    const tgt = b.dataset.fwd;
-    const prev = localStorage.getItem("scimux-draft:" + tgt) || "";
-    localStorage.setItem("scimux-draft:" + tgt, (prev ? prev + "\n\n" : "") + (note.text || ""));
-    closeSheets(); select(tgt); if (!isDesktop()) setLevel(1);
-    $("#prompt").focus();
-  };
-  openSheet("#sendto");
-});
 
 /* Prompt bar / drafts / staging / send live in createComposerFeature
    (Packet 7D). Shell calls composerFeature.onSelect on selection change;
@@ -1930,8 +1689,7 @@ $("#chatback").addEventListener("click", () => setLevel(2));
 /* the scrim is the left panes' peek made tappable: a tap steps ONE pane back
    (level 3→2, 2→1), mirroring the swipe — never a jump straight to chat. */
 $("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));
-/* the Bookmarks left peek, made tappable the same way (P3) */
-$("#bookmarkpeek").addEventListener("click", () => applyNavAction(bookmarkPeekClose()));
+/* #bookmarkpeek listener lives in bookmarksFeature.bind (Packet 7E). */
 let touch = null;
 document.addEventListener("touchstart", e => {
   const t = e.touches[0];
@@ -1950,7 +1708,7 @@ document.addEventListener("touchend", e => {
   if (!start) return;
   const t = e.changedTouches[0];
   const action = documentSwipeDecision(start, { x: t.clientX, y: t.clientY }, {
-    level, bookmarksOpen, isDesktop: isDesktop(),
+    level, bookmarksOpen: bookmarksFeature.isOpen(), isDesktop: isDesktop(),
     editingChatDesc: chatFeature.isEditingDesc(), editingTitle, sel,
   });
   applyNavAction(action);
@@ -2322,7 +2080,7 @@ $("#wsback").addEventListener("click", () => {
   $("#wsback").hidden = true;
 });
 $("#wsnewnote").addEventListener("click", wsCreate);
-$("#notesbtn").addEventListener("click", openWorkspace);
+/* #notesbtn listener lives in bookmarksFeature.bind (Packet 7E); openNotes → openWorkspace. */
 $("#wsnewnote").innerHTML = ICON_PLUS;
 $("#wsnotemenu").innerHTML = ICON_MENU_DOTS;
 $("#notesworkspace").addEventListener("keydown", e => {
