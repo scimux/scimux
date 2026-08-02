@@ -9,13 +9,14 @@ import (
 	"strings"
 )
 
-//go:embed web/index.html web/assets web/css
+//go:embed web/index.html web/assets web/css web/js
 var webFS embed.FS
 
 type webHandlers struct {
 	index  http.Handler
 	assets http.Handler
 	css    http.Handler
+	js     http.Handler
 }
 
 func newWebHandlers(web fs.FS) (webHandlers, error) {
@@ -43,6 +44,18 @@ func newWebHandlers(web fs.FS) (webHandlers, error) {
 		return webHandlers{}, fmt.Errorf("embedded web/css missing: %w", err)
 	}
 
+	jsInfo, err := fs.Stat(web, "web/js")
+	if err != nil {
+		return webHandlers{}, fmt.Errorf("embedded web/js missing: %w", err)
+	}
+	if !jsInfo.IsDir() {
+		return webHandlers{}, fmt.Errorf("embedded web/js is not a directory")
+	}
+	jsRoot, err := fs.Sub(web, "web/js")
+	if err != nil {
+		return webHandlers{}, fmt.Errorf("embedded web/js missing: %w", err)
+	}
+
 	indexHTML, err := csrfIndex(web)
 	if err != nil {
 		return webHandlers{}, err
@@ -51,6 +64,7 @@ func newWebHandlers(web fs.FS) (webHandlers, error) {
 	return webHandlers{
 		assets: http.StripPrefix("/assets/", http.FileServer(http.FS(assets))),
 		css:    cssFileHandler(cssRoot),
+		js:     jsFileHandler(jsRoot),
 		index: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			b := indexHTML
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -68,8 +82,21 @@ func newWebHandlers(web fs.FS) (webHandlers, error) {
 // It never uses http.FileServer: directory requests, nested paths, traversal,
 // and non-CSS names all 404 with no listing.
 func cssFileHandler(cssRoot fs.FS) http.Handler {
+	return flatStaticHandler(cssRoot, "/css/", ".css", "text/css; charset=utf-8")
+}
+
+// jsFileHandler serves only flat *.js files from an embedded web/js root.
+// Parallel to cssFileHandler: no directory listing, no nested/traversal paths,
+// no non-JS names, exact embedded bytes with no-store + nosniff.
+func jsFileHandler(jsRoot fs.FS) http.Handler {
+	return flatStaticHandler(jsRoot, "/js/", ".js", "text/javascript; charset=utf-8")
+}
+
+// flatStaticHandler serves only flat files with a required extension under
+// prefix from an embedded subdirectory root. Directory, nested, traversal,
+// and wrong-extension requests 404 with no listing.
+func flatStaticHandler(root fs.FS, prefix, ext, contentType string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "/css/"
 		p := r.URL.Path
 		if !strings.HasPrefix(p, prefix) {
 			http.NotFound(w, r)
@@ -93,16 +120,16 @@ func cssFileHandler(cssRoot fs.FS) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if !strings.HasSuffix(name, ".css") {
+		if !strings.HasSuffix(name, ext) {
 			http.NotFound(w, r)
 			return
 		}
-		data, err := fs.ReadFile(cssRoot, name)
+		data, err := fs.ReadFile(root, name)
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Write(data)

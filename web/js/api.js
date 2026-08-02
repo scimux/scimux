@@ -199,10 +199,19 @@ export async function loadUIState(state, deps = {}) {
    up to MAX_FLUSH_ATTEMPTS times. 409/428 refetch+replay; offline/5xx keep
    ops. No DOM/render — returns next state plus applied when remote was adopted. */
 export async function flushUIState(state, deps = {}) {
-  const { fetchImpl, csrf = "", storage, HeadersImpl = Headers } = deps;
+  const {
+    fetchImpl,
+    csrf = "",
+    storage,
+    HeadersImpl = Headers,
+    onRemoteApplied = () => {},
+  } = deps;
   let doc = state.doc;
   let rev = state.rev || "";
-  let ops = state.ops ? state.ops.slice() : [];
+  /* Keep the caller's live queue reference until a replay filter deliberately
+     replaces it. uiMutate can append while a fetch is in flight; the inline
+     flush observes those additions before conflict/adoption replay. */
+  let ops = state.ops || [];
   let applied = false;
 
   if (state.saving || !state.loaded || !ops.length) {
@@ -234,6 +243,9 @@ export async function flushUIState(state, deps = {}) {
       doc = adopted.doc;
       ops = adopted.ops;
       applied = true;
+      /* Inline order: publish/render the adopted remote before persisting the
+         queue/cache. A bare cache write may throw after the UI is visible. */
+      onRemoteApplied({ doc, rev, ops });
       if (storage) {
         savePendingOps(ops, storage);
         saveCachedUI(doc, storage);
@@ -273,6 +285,8 @@ export async function flushUIState(state, deps = {}) {
         ops = adopted.ops;
         applied = true;
         if (storage) savePendingOps(ops, storage);
+        /* Conflict order: persist the filtered queue, publish/render, retry. */
+        onRemoteApplied({ doc, rev, ops });
         continue;
       }
       break; /* 5xx/413: keep ops, show unsynced */

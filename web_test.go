@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -13,9 +14,11 @@ import (
 	"testing"
 )
 
-// The whole UI is one embedded HTML file with inline scripts — a stray
-// backtick or brace ships silently in the binary and only surfaces as a
-// blank page on the iPad. Parse the scripts with node when it is available.
+// Packet 6F: the sole browser entry is one inline <script type="module"> that
+// imports the exact production inventory under /js/. Parse/check that module,
+// node --check every production module, prove imports resolve, and prove
+// web/test + package.json stay out of the embed. A classic-only <script>
+// search is no longer valid.
 func TestWebIndexScriptsParse(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -25,26 +28,115 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read embedded web/index.html: %v", err)
 	}
-	blocks := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(string(b), -1)
-	if len(blocks) == 0 {
-		t.Fatal("no inline <script> blocks found in web/index.html")
+	html := string(b)
+
+	// Exactly one module entry; no classic app script blocks; no app.js entry.
+	moduleBlocks := regexp.MustCompile(`(?s)<script\s+type="module">(.*?)</script>`).FindAllStringSubmatch(html, -1)
+	if len(moduleBlocks) != 1 {
+		t.Fatalf("want exactly one <script type=\"module\"> entry, got %d", len(moduleBlocks))
 	}
-	var js strings.Builder
-	for _, m := range blocks {
-		js.WriteString(m[1])
-		js.WriteString("\n;\n")
+	// Count every <script opening; only the module form is allowed.
+	allScriptOpens := regexp.MustCompile(`(?i)<script\b`).FindAllStringIndex(html, -1)
+	moduleOpens := regexp.MustCompile(`(?i)<script\s+type="module"`).FindAllStringIndex(html, -1)
+	if len(allScriptOpens) != len(moduleOpens) || len(moduleOpens) != 1 {
+		t.Fatalf("script tags: total opens=%d module opens=%d; want exactly one module entry and no classic scripts",
+			len(allScriptOpens), len(moduleOpens))
 	}
-	f := filepath.Join(t.TempDir(), "index.js")
-	if err := os.WriteFile(f, []byte(js.String()), 0o644); err != nil {
+	if strings.Contains(html, `src="/js/app.js"`) || strings.Contains(html, "web/js/app.js") {
+		t.Fatal("app.js must not be a browser entry in Phase 6")
+	}
+
+	inline := moduleBlocks[0][1]
+	// Import map: every production module must be imported from /js/<file>.js.
+	wantImports := []string{
+		`from "/js/api.js"`,
+		`from "/js/format.js"`,
+		`from "/js/lanes.js"`,
+		`from "/js/map-model.js"`,
+		`from "/js/navigation.js"`,
+		`from "/js/state.js"`,
+	}
+	for _, imp := range wantImports {
+		if !strings.Contains(inline, imp) {
+			t.Errorf("inline module missing import %q", imp)
+		}
+	}
+
+	// Enumerate production JS inventory: exact paths, exact embedded bytes.
+	for _, embedPath := range productionJSModules {
+		embedded, err := webFS.ReadFile(embedPath)
+		if err != nil {
+			t.Fatalf("production module %s missing from embed: %v", embedPath, err)
+		}
+		source, err := os.ReadFile(embedPath)
+		if err != nil {
+			t.Fatalf("read source %s: %v", embedPath, err)
+		}
+		if !bytes.Equal(embedded, source) {
+			t.Fatalf("embedded bytes for %s differ from source", embedPath)
+		}
+		base := filepath.Base(embedPath)
+		if !strings.Contains(inline, `"/js/`+base+`"`) {
+			t.Errorf("inline module does not import /js/%s", base)
+		}
+		// Syntax-check each production module.
+		if out, err := exec.Command(node, "--check", embedPath).CombinedOutput(); err != nil {
+			t.Fatalf("node --check %s: %v\n%s", embedPath, err, out)
+		}
+	}
+
+	// web/test and package.json remain excluded from the embed.
+	for _, forbidden := range []string{"web/package.json", "web/test/smoke.test.js"} {
+		if _, err := webFS.ReadFile(forbidden); err == nil {
+			t.Fatalf("%s must not be embedded", forbidden)
+		}
+	}
+
+	// Syntax-check the extracted inline module. Strip browser-only top-level
+	// import paths by rewriting /js/… to relative paths under a temp tree so
+	// node --check can resolve them offline.
+	tmp := t.TempDir()
+	jsDir := filepath.Join(tmp, "js")
+	if err := os.MkdirAll(jsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(node, "--check", f).CombinedOutput(); err != nil {
-		t.Fatalf("inline JS does not parse: %v\n%s", err, out)
+	for _, embedPath := range productionJSModules {
+		data, err := webFS.ReadFile(embedPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(jsDir, filepath.Base(embedPath)), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Rewrite absolute /js/ imports to relative ./js/ for offline check.
+	checkSrc := strings.ReplaceAll(inline, `from "/js/`, `from "./js/`)
+	entry := filepath.Join(tmp, "index.module.js")
+	if err := os.WriteFile(entry, []byte(checkSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, "--check", entry).CombinedOutput(); err != nil {
+		t.Fatalf("inline module does not parse: %v\n%s", err, out)
+	}
+
+	// Import smoke: resolve every production module graph under Node (no network).
+	smoke := filepath.Join(tmp, "import-smoke.mjs")
+	var smokeBody strings.Builder
+	smokeBody.WriteString("const assert = (await import('node:assert/strict')).default;\n")
+	for _, embedPath := range productionJSModules {
+		base := filepath.Base(embedPath)
+		smokeBody.WriteString("await import('./js/" + base + "');\n")
+	}
+	smokeBody.WriteString("assert.ok(true);\n")
+	if err := os.WriteFile(smoke, []byte(smokeBody.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, smoke).CombinedOutput(); err != nil {
+		t.Fatalf("production module import smoke failed: %v\n%s", err, out)
 	}
 }
 
-// Extract the pure markdown helpers (mdInline/md) from the embedded page and
-// execute them under node with a DOM-free esc stub. Finding 97: paragraph
+// Markdown helpers live in web/js/format.js (Packet 6A/6F). Finding 97: paragraph
 // lines must be escaped per line and then joined with a real <br>, never the
 // other way around.
 func TestWebMarkdownParagraphs(t *testing.T) {
@@ -52,34 +144,29 @@ func TestWebMarkdownParagraphs(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
-	}
-	html := string(b)
-	start := strings.Index(html, "function mdInline(")
-	if start < 0 {
-		t.Fatal("could not locate mdInline in web/index.html")
-	}
-	end := strings.Index(html[start:], "/* ---------- statusbar")
-	if end < 0 {
-		t.Fatal("could not locate the end of the markdown helpers in web/index.html")
-	}
-	script := `function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }` + "\n" +
-		html[start:start+end] + `
-const assert = require("assert");
-assert.strictEqual(md("line one\nline two"), "<p>line one<br>line two</p>");
-assert.strictEqual(md("a <b> tag\nnext"), "<p>a &lt;b&gt; tag<br>next</p>");
-assert.strictEqual(md("solo"), "<p>solo</p>");
-assert.strictEqual(md("p1 l1\np1 l2\n\np2"), "<p>p1 l1<br>p1 l2</p><p>p2</p>");
-// emphasis: single-asterisk italic renders (was left literal), bold still works,
-// and both nest cleanly. The flanking guard keeps arithmetic/globs literal.
-assert.strictEqual(mdInline("*test*"), "<em>test</em>");
-assert.strictEqual(mdInline("**test**"), "<strong>test</strong>");
-assert.strictEqual(mdInline("a *b* and **c**"), "a <em>b</em> and <strong>c</strong>");
-assert.strictEqual(mdInline("2 * 3 * 4"), "2 * 3 * 4");
+	script := `
+import assert from "node:assert/strict";
+import { md, mdInline } from "./format.js";
+assert.equal(md("line one\nline two"), "<p>line one<br>line two</p>");
+assert.equal(md("a <b> tag\nnext"), "<p>a &lt;b&gt; tag<br>next</p>");
+assert.equal(md("solo"), "<p>solo</p>");
+assert.equal(md("p1 l1\np1 l2\n\np2"), "<p>p1 l1<br>p1 l2</p><p>p2</p>");
+assert.equal(mdInline("*test*"), "<em>test</em>");
+assert.equal(mdInline("**test**"), "<strong>test</strong>");
+assert.equal(mdInline("a *b* and **c**"), "a <em>b</em> and <strong>c</strong>");
+assert.equal(mdInline("2 * 3 * 4"), "2 * 3 * 4");
 `
-	f := filepath.Join(t.TempDir(), "md.js")
+	// Run against the source module path (same bytes as embed).
+	tmp := t.TempDir()
+	// Copy format.js next to the harness so the relative import resolves.
+	src, err := os.ReadFile("web/js/format.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(tmp, "md.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -231,28 +318,24 @@ func TestBubbleTimestampFormatting(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
+	tmp := t.TempDir()
+	src, err := os.ReadFile("web/js/format.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
-	start := strings.Index(html, "function fmtBubbleTime(")
-	if start < 0 {
-		t.Fatal("could not locate fmtBubbleTime in web/index.html")
+	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	end := strings.Index(html[start:], "/* forkFromTurn:")
-	if end < 0 {
-		t.Fatal("could not locate the end of fmtBubbleTime in web/index.html")
-	}
-	script := html[start:start+end] + `
-const assert = require("assert");
+	script := `
+import assert from "node:assert/strict";
+import { fmtBubbleTime } from "./format.js";
 const now = new Date("2026-07-24T15:30:00");
-assert.strictEqual(fmtBubbleTime("2026-07-24T09:05:00", now), new Date("2026-07-24T09:05:00").toLocaleTimeString([], { timeStyle: "short" }));
-assert.strictEqual(fmtBubbleTime("2026-07-23T22:10:00", now), "Yesterday, " + new Date("2026-07-23T22:10:00").toLocaleTimeString([], { timeStyle: "short" }));
-assert.strictEqual(fmtBubbleTime("2026-07-20T08:15:00", now), new Date("2026-07-20T08:15:00").toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
-assert.strictEqual(fmtBubbleTime("not-a-date", now), "not-a-date");
+assert.equal(fmtBubbleTime("2026-07-24T09:05:00", now), new Date("2026-07-24T09:05:00").toLocaleTimeString([], { timeStyle: "short" }));
+assert.equal(fmtBubbleTime("2026-07-23T22:10:00", now), "Yesterday, " + new Date("2026-07-23T22:10:00").toLocaleTimeString([], { timeStyle: "short" }));
+assert.equal(fmtBubbleTime("2026-07-20T08:15:00", now), new Date("2026-07-20T08:15:00").toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+assert.equal(fmtBubbleTime("not-a-date", now), "not-a-date");
 `
-	f := filepath.Join(t.TempDir(), "bubble-time.js")
+	f := filepath.Join(tmp, "bubble-time.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -261,36 +344,31 @@ assert.strictEqual(fmtBubbleTime("not-a-date", now), "not-a-date");
 	}
 }
 
-// R18.1 altitude: a lane color is user-authored and flows into many style=""
-// interpolations. safeColor must return only well-formed color syntax verbatim
-// and reject anything that could break out of an attribute, so the accessor is
-// the single guard rather than every call site's esc() wrap.
 func TestWebSafeColorRejectsInjection(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
+	tmp := t.TempDir()
+	src, err := os.ReadFile("web/js/format.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
-	start := strings.Index(html, "const SAFE_COLOR")
-	end := strings.Index(html, "function laneColor(")
-	if start < 0 || end < 0 || end < start {
-		t.Fatal("could not locate the safeColor helpers in web/index.html")
+	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	script := html[start:end] + `
-const assert = require("assert");
+	script := `
+import assert from "node:assert/strict";
+import { safeColor } from "./format.js";
 for (const ok of ["#abc", "#aabbcc", "#aabbccdd", "var(--work)", "rgb(1,2,3)", "rgba(1,2,3,.5)", "hsl(200, 50%, 40%)", "tomato", "  #fff  "]) {
   assert.ok(safeColor(ok) !== null, "should accept " + ok);
 }
 for (const bad of ['#fff"><script>', 'red;background:url(x)', 'expression(1)', '</style>', '', null, undefined, "var(--x); }"]) {
-  assert.strictEqual(safeColor(bad), null, "should reject " + JSON.stringify(bad));
+  assert.equal(safeColor(bad), null, "should reject " + JSON.stringify(bad));
 }
-assert.strictEqual(safeColor("  #fff  "), "#fff", "trims");
+assert.equal(safeColor("  #fff  "), "#fff", "trims");
 `
-	f := filepath.Join(t.TempDir(), "color.js")
+	f := filepath.Join(tmp, "color.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -304,26 +382,25 @@ func TestLaneChipContrastTextUsesWCAGMath(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
+	tmp := t.TempDir()
+	src, err := os.ReadFile("web/js/format.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatal(err)
 	}
-	html := string(b)
-	start := strings.Index(html, "function hexRGB(")
-	end := strings.Index(html, "function uniqueLaneID(")
-	if start < 0 || end < 0 || end < start {
-		t.Fatal("could not locate lane contrast helpers in web/index.html")
+	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	script := html[start:end] + `
-const assert = require("assert");
-assert.deepStrictEqual(hexRGB("#abc"), [170,187,204]);
-assert.strictEqual(contrastText("#007AFF"), "#000", "system blue has stronger black contrast by WCAG ratio");
-assert.strictEqual(contrastText("#5856D6"), "#fff", "system indigo needs white text");
-assert.strictEqual(contrastText("#FF9500"), "#000", "system orange needs dark text");
+	script := `
+import assert from "node:assert/strict";
+import { hexRGB, contrastText, contrastRatio, relLum } from "./format.js";
+assert.deepEqual(hexRGB("#abc"), [170,187,204]);
+assert.equal(contrastText("#007AFF"), "#000", "system blue has stronger black contrast by WCAG ratio");
+assert.equal(contrastText("#5856D6"), "#fff", "system indigo needs white text");
+assert.equal(contrastText("#FF9500"), "#000", "system orange needs dark text");
 assert.ok(contrastRatio(relLum(hexRGB("#FF9500")), relLum(hexRGB(contrastText("#FF9500")))) >= 4.5);
 assert.ok(contrastRatio(relLum(hexRGB("#5856D6")), relLum(hexRGB(contrastText("#5856D6")))) >= 4.5);
 `
-	f := filepath.Join(t.TempDir(), "lane-contrast.js")
+	f := filepath.Join(tmp, "lane-contrast.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -378,23 +455,20 @@ func TestActivityCardOrderPinsAttentionThenFreshCards(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	tmp := t.TempDir()
+	for _, name := range []string{"format.js", "lanes.js", "map-model.js"} {
+		src, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	html := string(b)
-	start := strings.Index(html, "const hardAttention = ")
-	if start < 0 {
-		t.Fatal("could not locate hardAttention in web/index.html")
-	}
-	end := strings.Index(html[start:], "const LANE_COLORS")
-	if end < 0 {
-		t.Fatal("could not locate the end of orderedNodes in web/index.html")
-	}
-	script := `let nodes = [];
-` + html[start:start+end] + `
-const assert = require("assert");
-nodes = [
+	script := `
+import assert from "node:assert/strict";
+import { orderedNodes } from "./map-model.js";
+const nodes = [
   {id:"active-older", last_activity: 900, last_interaction: 200, created_at:"2026-01-04T00:00:00Z"},
   {id:"newer-fresh", created_at:"2026-01-06T00:00:00Z"},
   {id:"active-newer", last_activity: 300, last_interaction: 800, created_at:"2026-01-01T00:00:00Z"},
@@ -402,12 +476,12 @@ nodes = [
   {id:"older-fresh", created_at:"2026-01-05T00:00:00Z"},
   {id:"attn", attention:"approval", last_activity: 100, last_interaction: 100, created_at:"2026-01-02T00:00:00Z"},
 ];
-assert.deepStrictEqual(
-  orderedNodes().map(n => n.id),
+assert.deepEqual(
+  orderedNodes(nodes).map(n => n.id),
   ["attn", "newer-fresh", "older-fresh", "active-newer", "active-older", "never-touched"]
 );
 `
-	f := filepath.Join(t.TempDir(), "card-order.js")
+	f := filepath.Join(tmp, "card-order.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -416,11 +490,6 @@ assert.deepStrictEqual(
 	}
 }
 
-// A collapsed (docked column) metro map should let you edit a station's title
-// and description without going full-screen: long-press / right-click a station
-// opens the same activity editor the full-screen wall map reaches via its
-// pencil. Earlier that gesture early-returned unless mapFull was set, so the
-// docked map had no edit affordance at all.
 func TestDockedMapStationLongPressEdits(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -465,8 +534,9 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 		`style="${laneChipStyle(lm.color(l.id), focusLane === l.id)}"`,
 		`return ` + "`border-color:${c};background:${c};color:${esc(contrastText(color))}`" + `;`,
 		`const groups = [...(UI.groups || [])].sort(byNameID);`,
-		`lanes.sort(byNameID);`,
 		`blocks.sort((a, b) => byNameID(a.lane, b.lane));`,
+		// laneModel sorting lives in lanes.js; production must still import byNameID.
+		`byNameID`,
 		`class="attnstation-glow"`,
 		`class="attnstation-ring"`,
 		`mapFold.add(id);`,
@@ -526,50 +596,41 @@ func TestWebForkKindStableAcrossLaneGrowth(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+	tmp := t.TempDir()
+	for _, name := range []string{"format.js", "lanes.js"} {
+		src, err := os.ReadFile("web/js/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	html := string(b)
-	start := strings.Index(html, "function forkKind(n){")
-	if start < 0 {
-		t.Fatal("could not locate forkKind in web/index.html")
-	}
-	end := strings.Index(html[start:], "function renderMap(){")
-	if end < 0 {
-		t.Fatal("could not locate the end of forkKind in web/index.html")
-	}
-	script := `let nodes = [];
-function nodeById(id){ return nodes.find(n => n.id === id); }
-` + html[start:start+end] + `
-const assert = require("assert");
-// Y-new: destination lane had no station at fork time; a LATER station in that
-// lane must not flip the historical fork to S.
-nodes = [
+	script := `
+import assert from "node:assert/strict";
+import { forkKind } from "./lanes.js";
+let nodes = [
   {id:"p",     lane_id:"lane-a", created_at:"2026-01-01T00:00:00Z"},
   {id:"c",     lane_id:"lane-b", parent:"p", created_at:"2026-01-02T00:00:00Z"},
   {id:"later", lane_id:"lane-b", created_at:"2026-01-03T00:00:00Z"},
 ];
-assert.strictEqual(forkKind(nodeById("c")), "y-new", "grown lane must stay y-new");
-// S: destination lane already had an older station when the child forked in.
+assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), "y-new", "grown lane must stay y-new");
 nodes = [
   {id:"a0", lane_id:"lane-b", created_at:"2026-01-01T00:00:00Z"},
   {id:"p",  lane_id:"lane-a", created_at:"2026-01-02T00:00:00Z"},
   {id:"c",  lane_id:"lane-b", parent:"p", created_at:"2026-01-03T00:00:00Z"},
 ];
-assert.strictEqual(forkKind(nodeById("c")), "s", "prior station in dest lane is a crossover");
-// Y-stay: same lane as parent.
+assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), "s", "prior station in dest lane is a crossover");
 nodes = [
   {id:"p", lane_id:"lane-a", created_at:"2026-01-01T00:00:00Z"},
   {id:"c", lane_id:"lane-a", parent:"p", created_at:"2026-01-02T00:00:00Z"},
 ];
-assert.strictEqual(forkKind(nodeById("c")), "y-stay", "same-lane fork is y-stay");
-// Root and deleted-parent: no glyph.
-assert.strictEqual(forkKind({id:"r", lane_id:"lane-a"}), null, "root has no fork");
+assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), "y-stay", "same-lane fork is y-stay");
+assert.equal(forkKind({id:"r", lane_id:"lane-a"}, nodes), null, "root has no fork");
 nodes = [{id:"c", lane_id:"lane-b", parent:"ghost", created_at:"2026-01-02T00:00:00Z"}];
-assert.strictEqual(forkKind(nodeById("c")), null, "deleted parent has no glyph");
+assert.equal(forkKind(nodes.find(n => n.id === "c"), nodes), null, "deleted parent has no glyph");
 `
-	f := filepath.Join(t.TempDir(), "forkkind.js")
+	f := filepath.Join(tmp, "forkkind.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -578,11 +639,6 @@ assert.strictEqual(forkKind(nodeById("c")), null, "deleted parent has no glyph")
 	}
 }
 
-// The stack/phone map is the primary map on small screens, so it must keep
-// carrying fork topology (finding #3) even though it cannot draw the wall map's
-// crossover curves: a per-station fork cue, its dot spur, and a tap-to-origin
-// jump. Guard the wiring so it cannot silently regress while the wall map stays
-// correct — and guard that the old population-based classifier is gone.
 func TestWebStackMapKeepsForkCues(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -782,6 +838,8 @@ func TestSearchEarlierHistoryJump(t *testing.T) {
 // TestPinnedStoreModel asserts the pinned-cards store model: an ordered
 // UI.pinned array carried through init + normUI, and op-merge cases for
 // pin (new pin to the front → renders at top), unpin, and drag reorder.
+// applyOp lives in web/js/state.js (Packet 6C/6F); production keeps the UI
+// shape and isPinned wrapper.
 func TestPinnedStoreModel(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -791,24 +849,37 @@ func TestPinnedStoreModel(t *testing.T) {
 	for _, want := range []string{
 		`let UI = { groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] };`,
 		`pinned: []`, // in normUI defaults too
-		`case "pin":`,
-		`case "unpin":`,
-		`case "pin-order":`,
 		"const isPinned =",
+		`from "/js/state.js"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("pinned store model missing %q", want)
 		}
 	}
-	// A new pin goes to the FRONT (unshift) so it lands at the top of the tab.
-	if !strings.Contains(html, "doc.pinned.unshift(op.id)") {
-		t.Error("pin op should unshift (new pins land at the top)")
+	state, err := os.ReadFile("web/js/state.js")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// pin-order (drag) replaces the whole ordered list, like groups/lanes; and
-	// like arch/unarch it is not an always-replay idempotent op.
-	if strings.Contains(html, `op.k === "pin"`) &&
-		!strings.Contains(html, `idempotentOp = op => op.k === "bookmark-add" || op.k === "bookmark-del"`) {
-		t.Error("pin ops must not be marked idempotent (they encode intent, replay on matching rev only)")
+	st := string(state)
+	for _, want := range []string{
+		`case "pin":`,
+		`case "unpin":`,
+		`case "pin-order":`,
+		"doc.pinned.unshift(op.id)",
+		`op.k === "bookmark-add" || op.k === "bookmark-del"`,
+	} {
+		if !strings.Contains(st, want) {
+			t.Errorf("state.js pinned model missing %q", want)
+		}
+	}
+	// pin is not in the idempotent set (replay only on matching rev).
+	if strings.Contains(st, `op.k === "pin"`) && strings.Contains(st, `idempotentOp`) {
+		// Ensure pin is not listed alongside bookmark-add/del.
+		idem := st[strings.Index(st, "export function idempotentOp"):]
+		idem = idem[:strings.Index(idem, "\n}")]
+		if strings.Contains(idem, `"pin"`) {
+			t.Error("pin ops must not be marked idempotent (they encode intent, replay on matching rev only)")
+		}
 	}
 }
 
@@ -877,7 +948,11 @@ func TestPinnedFilterAndOrder(t *testing.T) {
 	if !strings.Contains(body, `cardTab === "pinned"`) {
 		t.Error("renderCards must special-case the pinned tab")
 	}
-	if !strings.Contains(html, "function pinnedOrder(") {
+	// pinnedOrder lives in map-model.js; production wrappers must call it.
+	if !strings.Contains(html, "pinnedOrderMod") && !strings.Contains(html, "from \"/js/map-model.js\"") {
+		t.Error("pinnedOrder must come from /js/map-model.js")
+	}
+	if !strings.Contains(html, "pinnedOrder") {
 		t.Error("a pinnedOrder helper (attention-first, then pin order) is expected")
 	}
 }
@@ -1453,40 +1528,33 @@ func TestBubbleTitleIncludesTimestamp(t *testing.T) {
 	if strings.Contains(html, `title="${t.role === "user" ? "you" : "agent"}"`) {
 		t.Error("bubble title should come from bubbleTitle(), not a bare role ternary")
 	}
-	start := strings.Index(html, "function fmtWhen(")
-	if start < 0 {
-		t.Fatal("could not locate fmtWhen in web/index.html")
+	tmp := t.TempDir()
+	src, err := os.ReadFile("web/js/format.js")
+	if err != nil {
+		t.Fatal(err)
 	}
-	btStart := strings.Index(html, "function bubbleTitle(")
-	if btStart < 0 {
-		t.Fatal("could not locate bubbleTitle in web/index.html")
+	if err := os.WriteFile(filepath.Join(tmp, "format.js"), src, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	btEnd := strings.Index(html[btStart:], "\n}")
-	fmtEnd := strings.Index(html[start:], "\n}")
-	script := html[start:start+fmtEnd+2] + "\n" + html[btStart:btStart+btEnd+2] + `
-const assert = require("assert");
+	script := `
+import assert from "node:assert/strict";
+import { fmtWhen, bubbleTitle } from "./format.js";
 const t = "2026-07-24T09:05:00";
 const w = fmtWhen(t);
-assert.strictEqual(bubbleTitle("user", t), "you — sent " + w);
-assert.strictEqual(bubbleTitle("assistant", t), "agent — sent " + w);
-assert.strictEqual(bubbleTitle("user", ""), "you");
-assert.strictEqual(bubbleTitle("assistant", null), "agent");
+assert.equal(bubbleTitle("user", t), "you — sent " + w);
+assert.equal(bubbleTitle("assistant", t), "agent — sent " + w);
+assert.equal(bubbleTitle("user", ""), "you");
+assert.equal(bubbleTitle("assistant", null), "agent");
 `
-	f := filepath.Join(t.TempDir(), "bubble-title.js")
+	f := filepath.Join(tmp, "bubble-title.mjs")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := exec.Command(node, f).CombinedOutput(); err != nil {
-		t.Fatalf("bubbleTitle broken: %v\n%s", err, out)
+		t.Fatalf("bubble title timestamp broken: %v\n%s", err, out)
 	}
 }
 
-// --- Stage 2: bookmark inbox → "Use in note" → embedded references ---
-
-// provLabel builds an embedded reference's provenance line from its snapshot
-// parts, dropping the empty ones so a reference with only a timestamp still
-// reads cleanly (design: an embedded reference retains lane/station/speaker/time
-// provenance, but a manual capture may lack station or speaker).
 func TestWebReferenceProvenanceLabel(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -1629,16 +1697,24 @@ func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
 		t.Fatal("could not locate the document-level touchend handler")
 	}
 	body := html[td:]
-	// The guard now bails on the touchstart snapshot (touch.overlay), not a live
-	// wsOpen() — see TestAppNavSwipeSnapshotsOverlayAtStart for why the live check
-	// was racy. The invariant is unchanged: bail before any app-nav runs.
-	guard := strings.Index(body, "if (touch.overlay){ touch = null; return; }")
-	nav := strings.Index(body, "setLevel(")
-	if guard < 0 {
-		t.Error("document touchend must bail on the overlay snapshot (touch.overlay) while a top overlay owns the gesture")
+	// Packet 6F: overlayOwned is snapshotted at touchstart and fed to
+	// documentSwipeDecision; suppress precedes applyNavAction / setLevel.
+	// navigation.js encodes the suppress branch; production must call it.
+	if !strings.Contains(html, "documentSwipeDecision") {
+		t.Error("document touchend must use documentSwipeDecision for overlay-owned suppress")
 	}
+	if !strings.Contains(html, "overlayOwned") {
+		t.Error("document touchend must bail on the overlay snapshot (overlayOwned) while a top overlay owns the gesture")
+	}
+	// applyNavAction is the only setLevel path from the document swipe.
+	guard := strings.Index(body, "documentSwipeDecision")
+	nav := strings.Index(body, "applyNavAction")
 	if guard < 0 || nav < 0 || guard > nav {
-		t.Error("the overlay guard must precede the app-nav (setLevel) so swipes never move layers underneath")
+		t.Error("the overlay decision must precede applyNavAction so swipes never move layers underneath")
+	}
+	// Live recheck of overlays at touchend remains forbidden.
+	if strings.Contains(body, "if (wsOpen() || searchOpen() || archivedOpen())") {
+		t.Error("touchend still re-checks live overlay open state")
 	}
 }
 
@@ -1885,9 +1961,17 @@ func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
 		t.Fatal("could not locate the touchend gesture handler")
 	}
 	body := html[i : i+strings.Index(html[i:], "}, { passive: true });")]
-	// a left-going swipe while the Bookmarks pane is open must open the workspace
-	if !regexp.MustCompile(`dx < 0 && bookmarksOpen\)\s*openWorkspace\(\)`).MatchString(body) {
+	// Packet 6F: openWorkspace is applied via applyNavAction("openWorkspace")
+	// when documentSwipeDecision returns that action (Bookmarks R→L).
+	if !strings.Contains(body, "documentSwipeDecision") || !strings.Contains(html, `action.type === "openWorkspace"`) {
 		t.Error("swipe R->L on the open Bookmarks pane must call openWorkspace() (Notes overview)")
+	}
+	nav, err := os.ReadFile("web/js/navigation.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nav), `type: "openWorkspace"`) {
+		t.Error("navigation.js must emit openWorkspace for Bookmarks R→L")
 	}
 }
 
@@ -2335,17 +2419,27 @@ func TestPanePeekGapToken(t *testing.T) {
 func TestAppNavSwipeSnapshotsOverlayAtStart(t *testing.T) {
 	html := mustReadIndex(t)
 
-	// touchstart must capture whether an overlay owned the gesture at its START.
-	if !strings.Contains(html, "overlay: wsOpen() || searchOpen() || archivedOpen()") {
-		t.Error("touchstart must snapshot overlay-open state (overlay: wsOpen() || searchOpen() || archivedOpen())")
+	// touchstart must capture whether an overlay owned the gesture at its START
+	// (immutable overlayOwned via captureTouchStart).
+	if !strings.Contains(html, "captureTouchStart") {
+		t.Error("touchstart must use captureTouchStart for the immutable overlay snapshot")
 	}
-	// touchend must bail on the snapshot, never on a fresh live wsOpen() that a
-	// bubbling overlay handler may already have flipped mid-gesture.
-	if !strings.Contains(html, "if (touch.overlay){ touch = null; return; }") {
-		t.Error("touchend must bail on the touchstart overlay snapshot (touch.overlay)")
+	if !strings.Contains(html, "overlayOwned: wsOpen() || searchOpen() || archivedOpen()") {
+		t.Error("touchstart must snapshot overlay-open state (overlayOwned: wsOpen() || searchOpen() || archivedOpen())")
+	}
+	// touchend consults documentSwipeDecision's suppress on that snapshot only.
+	if !strings.Contains(html, "documentSwipeDecision") {
+		t.Error("touchend must consult documentSwipeDecision with the touchstart snapshot")
 	}
 	if strings.Contains(html, "if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }") {
 		t.Error("touchend still re-checks live wsOpen() — racy: the overlay handler flips it before this bubbles, causing the Notes→L→R overshoot to Chat")
+	}
+	nav, err := os.ReadFile("web/js/navigation.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nav), `if (touch.overlayOwned) return { type: "suppress" }`) {
+		t.Error("navigation.js must suppress app nav when overlayOwned is true")
 	}
 }
 
@@ -2357,23 +2451,35 @@ func TestPeekTapStepsBack(t *testing.T) {
 	html := mustReadIndex(t)
 	css := mustProductionCSSCascade(t)
 
-	// Left: scrim covers the peek for both open levels and steps exactly one back.
+	// Left: scrim covers the peek for both open levels and steps exactly one back
+	// via scrimStep → applyNavAction (never a jump to level 1).
 	if !strings.Contains(html, `$("#scrim").classList.toggle("on", level >= 2);`) {
 		t.Error("scrim must show for any open left pane (level >= 2), so the peek is tappable at level 3 too")
 	}
-	if !strings.Contains(html, `$("#scrim").addEventListener("click", () => setLevel(level - 1));`) {
-		t.Error("scrim tap must step ONE level back (setLevel(level - 1)), mirroring the swipe — not jump to level 1")
+	if !strings.Contains(html, `$("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));`) {
+		t.Error("scrim tap must step ONE level back via scrimStep, mirroring the swipe — not jump to level 1")
 	}
 	if strings.Contains(html, `$("#scrim").addEventListener("click", () => setLevel(1));`) {
 		t.Error("scrim tap still jumps straight to level 1 instead of stepping one back")
+	}
+	nav, err := os.ReadFile("web/js/navigation.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nav), "export function scrimStep") ||
+		!strings.Contains(string(nav), "clampLevel(level - 1)") {
+		t.Error("navigation.js scrimStep must decrement one level")
 	}
 
 	// Right: a dedicated catcher over the Bookmarks left peek, closing bookmarks.
 	if !strings.Contains(html, `id="bookmarkpeek"`) {
 		t.Error("a #bookmarkpeek tap-catcher must exist over the Bookmarks left peek strip")
 	}
-	if !strings.Contains(html, `$("#bookmarkpeek").addEventListener("click", () => setBookmarksOpen(false));`) {
+	if !strings.Contains(html, `$("#bookmarkpeek").addEventListener("click", () => applyNavAction(bookmarkPeekClose()));`) {
 		t.Error("tapping the bookmarks peek must close the pane (step back to chat)")
+	}
+	if !strings.Contains(string(nav), `type: "setBookmarksOpen", open: false`) {
+		t.Error("bookmarkPeekClose must emit setBookmarksOpen false")
 	}
 	// It occupies only the peek strip, appears with the pane, and never on desktop.
 	peek := cssBlock(t, css, "#bookmarkpeek {")

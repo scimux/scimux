@@ -371,8 +371,43 @@
   </div>
 </div>
 
-<script>
+<script type="module">
 "use strict";
+/* Packet 6F: sole browser entry is this inline module. Production algorithms
+   live under /js/*.js; wrappers below supply UI/nodes/selection/fetch/CSRF
+   and DOM effects. No window/global bridge, no second entry (app.js is Phase 7). */
+import {
+  esc, mdInline, md, ageText, fmtDur, fmtStamp, fmtBubbleTime, fmtWhen,
+  fmtNoteMeta, bubbleTitle, stampMS, cssRGB as cssRGBMod,
+  contrastText as contrastTextMod,
+} from "/js/format.js";
+import {
+  hashStr, laneList as laneListMod, byNameID, sortedLaneList as sortedLaneListMod,
+  laneById as laneByIdMod, laneName as laneNameMod, laneColor as laneColorMod,
+  uniqueLaneID as uniqueLaneIDMod, nextLaneColor as nextLaneColorMod, makeLane as makeLaneMod,
+  servedLanes, laneModel as laneModelMod, groupLanes as groupLanesMod,
+  forkKind as forkKindMod, stopTimes, stopsOf, stopKey, stopLabel,
+  newestFirst, parentStopIndex, laneColumnOrder,
+} from "/js/lanes.js";
+import {
+  queueLocalOp, savePendingOps as savePendingOpsMod,
+  loadPendingOps as loadPendingOpsMod, saveCachedUI,
+} from "/js/state.js";
+import {
+  hardAttention, cardState, statusText,
+  orderedNodes as orderedNodesMod, pinnedOrder as pinnedOrderMod,
+  isArchived as isArchivedMod, isPinned as isPinnedMod,
+  inLaneScope, visibleCardLists, headStopKey as headStopKeyMod, toggleMapSelection,
+} from "/js/map-model.js";
+import {
+  clampLevel, scrimStep, bookmarkPeekClose, captureTouchStart, documentSwipeDecision,
+  captureNotesTouchStart, notesSwipeBackDecision,
+} from "/js/navigation.js";
+import {
+  withCsrf as withCsrfMod, api as apiMod, pagehidePutRequest,
+  loadUIState, flushUIState, pollUIState,
+} from "/js/api.js";
+
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
       no render call may rebuild them, so typing is never interrupted.
@@ -437,15 +472,15 @@ let mapSelKey = "";
    "Open chat" then opens the conversation with history expanded at that
    surface. Cleared whenever the selection or full-screen mode changes. */
 let mapSelStop = "";
-const headStopKey = id => { const n = nodeById(id); return id + "#" + (n ? stopTimes(n).length - 1 : 0); };
+const headStopKey = id => headStopKeyMod(id, nodes);
 function setMapSel(id, key, stopTime){
-  key = key || headStopKey(id);
-  if (mapSelKey === key){ mapSel = ""; mapSelKey = ""; }   /* second tap deselects */
-  else { mapSel = id; mapSelKey = key; }
+  const next = toggleMapSelection({ id, key, stopTime, mapSelKey, nodes });
+  mapSel = next.mapSel;
+  mapSelKey = next.mapSelKey;
   /* set the selected stop BEFORE rendering so the toolbar (its title, the
      "earlier stop" cue, and the edit routing) paints against the real
      selection — deselect or a head row clears it */
-  mapSelStop = mapSel ? (stopTime || "") : "";
+  mapSelStop = next.mapSelStop;
   mapSig = ""; renderMap();             /* repaint highlight + refresh toolbar */
 }
 function setMapFull(on){
@@ -503,24 +538,9 @@ const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointe
    it nor forge the custom header, so this is what stops a web page the operator
    happens to open from driving the local API (send/approve/interrupt/update). */
 const CSRF = document.querySelector('meta[name="scimux-csrf"]')?.content || "";
-const UNSAFE = /^(POST|PUT|PATCH|DELETE)$/i;
-function withCsrf(opts = {}){
-  if (!UNSAFE.test(opts.method || "GET")) return opts;
-  const h = new Headers(opts.headers || {});
-  h.set("X-Scimux-CSRF", CSRF);
-  /* JSON bodies are strings; multipart (FormData) sets its own content type */
-  if (typeof opts.body === "string" && !h.has("Content-Type"))
-    h.set("Content-Type", "application/json");
-  return { ...opts, headers: h };
-}
-const api = (path, opts) => fetch(path, withCsrf(opts)).then(async r => {
-  if (!r.ok){
-    const err = new Error(await r.text());
-    err.status = r.status;   /* callers can tell a 409 conflict from a failure */
-    throw err;
-  }
-  return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
-});
+const withCsrf = (opts = {}) => withCsrfMod(opts, CSRF);
+const api = (path, opts) => apiMod(path, opts, { fetchImpl: fetch, csrf: CSRF });
+const uiStorage = localStorage;
 
 /* ---------- server-persisted UI state ----------
    Map group tabs, the archived-card set, and private notes survive scimux
@@ -552,75 +572,17 @@ let uiOps = [];          // local operations not yet acknowledged by the server
    that may have moved on. Note ops always replay — they dedupe on timestamp,
    so a keepalive that did land costs nothing, and a note typed just before
    pagehide must not be dropped merely because another device wrote since. */
-const idempotentOp = op => op.k === "bookmark-add" || op.k === "bookmark-del";
-function savePendingOps(){
-  try { localStorage.setItem("scimux-ui-ops", JSON.stringify(uiOps)); } catch {}
-}
-function loadPendingOps(){
-  try { return JSON.parse(localStorage.getItem("scimux-ui-ops") || "[]") || []; }
-  catch { return []; }
-}
+function savePendingOps(){ savePendingOpsMod(uiOps, uiStorage); }
+function loadPendingOps(){ return loadPendingOpsMod(uiStorage); }
 let uiLoaded = false;    // initial load finished — writes are gated on this
 let uiSaving = false;
 let uiTimer = null;
-const normUI = j => Object.assign({ groups: [], archived: [], bookmarks: [], lanes: [], pinned: [] }, j || {});
 
-function applyOp(doc, op){
-  switch (op.k){
-    case "arch":
-      doc.archived ||= [];
-      if (!doc.archived.includes(op.id)) doc.archived.push(op.id);
-      break;
-    case "unarch":
-      doc.archived = (doc.archived || []).filter(x => x !== op.id);
-      break;
-    case "bookmark-add":
-      doc.bookmarks ||= [];
-      if (!doc.bookmarks.some(n => n.t === op.bookmark.t)) doc.bookmarks.push(op.bookmark);
-      break;
-    case "bookmark-del":
-      /* deleting a capture promotes its anchored comments to standalone
-         notes — neither deleted with it nor stripped of context. They keep
-         the anchor's activity/lane (so they stay on their tab and can still
-         jump); they now sort at their own timestamp. */
-      {
-        const dead = (doc.bookmarks || []).find(n => n.t === op.t);
-        if (dead) for (const c of doc.bookmarks){
-          if (c.anchor !== op.t) continue;
-          delete c.anchor;
-          if (dead.node && !c.node){ c.node = dead.node; if (dead.turnTime) c.turnTime = dead.turnTime; }
-          if (dead.lane && !c.lane) c.lane = dead.lane;
-        }
-      }
-      doc.bookmarks = (doc.bookmarks || []).filter(n => n.t !== op.t);
-      break;
-    case "pin":
-      /* new pins land at the FRONT so a freshly pinned card shows at the top of
-         the Pinned tab (Apple Notes idiom); dedupe keeps the array a set */
-      doc.pinned = (doc.pinned || []).filter(x => x !== op.id);
-      doc.pinned.unshift(op.id);
-      break;
-    case "unpin":
-      doc.pinned = (doc.pinned || []).filter(x => x !== op.id);
-      break;
-    case "pin-order":   /* drag reorder replaces the whole ordered pin list */
-      doc.pinned = op.pinned;
-      break;
-    case "groups":   /* map edits replace the whole tab list (rare, one device) */
-      doc.groups = op.groups;
-      break;
-    case "lanes":    /* lane create/rename replaces the compact lane list */
-      doc.lanes = op.lanes;
-      break;
-  }
-}
 /* uiMutate: apply an operation locally right away, queue it for the server */
 function uiMutate(op){
-  applyOp(UI, op);
-  op.rev = uiRev;   /* the revision this op was built against (R20.7) */
-  uiOps.push(op);
+  queueLocalOp(UI, op, uiRev, uiOps);
   savePendingOps();
-  localStorage.setItem("scimux-ui", JSON.stringify(UI));
+  saveCachedUI(UI, uiStorage);
   renderSyncState();
   renderBookmarksPane();   /* signature-guarded; cheap when notes didn't change */
   renderWsInbox();     /* signature-guarded; the workspace inbox mirrors captures */
@@ -634,57 +596,17 @@ async function flushUI(){
   if (uiSaving || !uiLoaded || !uiOps.length) return;
   uiSaving = true;
   try {
-    /* R21.1: a device whose first fetch failed has uiRev === "" and must never
-       PUT with If-Match: "*" — that unconditionally overwrites another device's
-       newer document, rolling it back with our stale whole-list ops (the exact
-       phone-returns-later loss R20.7 set out to close). Adopt the server's
-       current revision first, keep only ops still valid against it (idempotent
-       note ops always; others only when built against this exact rev, which
-       offline ops never are), replay them, then PUT conditionally. */
-    if (!uiRev){
-      let g;
-      try { g = await fetch("/api/ui"); } catch { return; }  /* still offline: keep ops */
-      if (!g.ok) return;
-      uiRev = g.headers.get("ETag") || "";
-      UI = normUI(await g.json());
-      uiOps = uiOps.filter(op => idempotentOp(op) || op.rev === uiRev);
-      uiOps.forEach(op => applyOp(UI, op));
-      applyRemoteUI();
-      savePendingOps();
-      localStorage.setItem("scimux-ui", JSON.stringify(UI));
-      if (!uiOps.length) return;        /* only rolled-back ops remained */
-    }
-    for (let attempt = 0; attempt < 4 && uiOps.length; attempt++){
-      let r;
-      try {
-        r = await fetch("/api/ui", withCsrf({ method: "PUT",
-          headers: { "If-Match": uiRev, "Content-Type": "application/json" },
-          body: JSON.stringify(UI) }));
-      } catch { break; }               /* offline: keep ops, retry next tick */
-      if (r.ok){
-        uiRev = r.headers.get("ETag") || "";
-        uiOps = [];
-        savePendingOps();
-        localStorage.setItem("scimux-ui", JSON.stringify(UI));
-        break;
-      }
-      if (r.status === 409 || r.status === 428){
-        /* another device wrote first: refetch, replay our still-valid ops on
-           top, retry. Same filter as the load path — a stale whole-list op
-           replayed over newer state would roll it back (R21.1). */
-        let g;
-        try { g = await fetch("/api/ui"); } catch { break; }
-        if (!g.ok) break;
-        uiRev = g.headers.get("ETag") || "";
-        UI = normUI(await g.json());
-        uiOps = uiOps.filter(op => idempotentOp(op) || op.rev === uiRev);
-        uiOps.forEach(op => applyOp(UI, op));
-        savePendingOps();
-        applyRemoteUI();
-        continue;
-      }
-      break;                            /* 5xx/413: keep ops, show unsynced */
-    }
+    /* R21.1 / max-four-attempt policy live in flushUIState (api.js). */
+    const next = await flushUIState(
+      { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: false },
+      { fetchImpl: fetch, csrf: CSRF, storage: uiStorage,
+        onRemoteApplied: next => {
+          UI = next.doc; uiRev = next.rev; uiOps = next.ops;
+          applyRemoteUI();
+        } });
+    UI = next.doc;
+    uiRev = next.rev;
+    uiOps = next.ops;
   } finally {
     uiSaving = false;
     renderSyncState();
@@ -698,44 +620,27 @@ function applyRemoteUI(){
   renderCards(); renderChatHead(); renderMapTabs(); renderMap(); renderBookmarksPane();
 }
 async function loadUI(){
-  try {
-    const r = await fetch("/api/ui");
-    if (!r.ok) throw new Error();
-    uiRev = r.headers.get("ETag") || "";
-    UI = normUI(await r.json());
-    localStorage.setItem("scimux-ui", JSON.stringify(UI));
-  } catch {
-    try { UI = normUI(JSON.parse(localStorage.getItem("scimux-ui") || "{}")); } catch {}
-  }
-  uiLoaded = true;
-  /* ops persisted by a previous page life come before this life's early ones.
-     Idempotent note ops always replay; the rest only when the fetched
-     document is still the revision they were built against — a stale
-     whole-list snapshot replayed over newer cross-device state (and then
-     pushed with a fresh ETag) would silently roll those edits back (R20.7).
-     When the fetch failed (offline, uiRev === "") we render the cached copy
-     the ops were made on, so nothing newer exists to protect: keep them. */
-  uiOps = loadPendingOps().filter(op => idempotentOp(op) || !uiRev || op.rev === uiRev)
-          .concat(uiOps);
-  uiOps.forEach(op => applyOp(UI, op));  /* mutations made before load finished */
+  /* Persisted-before-session replay and cache fallback live in loadUIState. */
+  const next = await loadUIState(
+    { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: uiSaving },
+    { fetchImpl: fetch, storage: uiStorage });
+  UI = next.doc;
+  uiRev = next.rev;
+  uiOps = next.ops;
+  uiLoaded = next.loaded;
   chatSig = "";
   applyRemoteUI();
-  if (uiOps.length) flushUI();
+  if (next.shouldFlush) flushUI();
 }
 /* poll the shared state alongside /api/state; skip while local ops are in
    flight so a stale remote document cannot clobber them (they replay on 409) */
 async function pollUI(){
-  if (!uiLoaded || uiSaving || uiOps.length) return;
-  let r;
-  try {
-    r = await fetch("/api/ui", { headers: uiRev ? { "If-None-Match": uiRev } : {} });
-  } catch { return; }
-  if (r.status === 304 || !r.ok) return;
-  uiRev = r.headers.get("ETag") || "";
-  const remote = normUI(await r.json());
-  if (JSON.stringify(remote) === JSON.stringify(UI)) return;
-  UI = remote;
-  localStorage.setItem("scimux-ui", JSON.stringify(UI));
+  const next = await pollUIState(
+    { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: uiSaving },
+    { fetchImpl: fetch, storage: uiStorage });
+  uiRev = next.rev;
+  if (next.skipped || next.retained || next.unchanged || !next.applied) return;
+  UI = next.doc;
   applyRemoteUI();
 }
 /* last-chance flush when the page goes away; keepalive survives unload. With
@@ -743,12 +648,9 @@ async function pollUI(){
    document — R21.1); the ops are already persisted to localStorage, so the next
    load replays the still-valid ones after fetching the current revision. */
 addEventListener("pagehide", () => {
-  if (!uiLoaded || !uiOps.length || !uiRev) return;
-  try {
-    fetch("/api/ui", withCsrf({ method: "PUT", keepalive: true,
-      headers: { "If-Match": uiRev, "Content-Type": "application/json" },
-      body: JSON.stringify(UI) }));
-  } catch {}
+  const req = pagehidePutRequest(UI, { loaded: uiLoaded, ops: uiOps, rev: uiRev, csrf: CSRF });
+  if (!req) return;
+  try { fetch(req.path, req.opts); } catch {}
 });
 
 /* copy glyph: fa-regular fa-clone (two offset rounded squares), inlined */
@@ -919,85 +821,7 @@ function copyText(s){
   try { document.execCommand("copy"); } finally { ta.remove(); }
 }
 
-/* textContent→innerHTML escapes < > & but not " — add it, since esc() output
-   also lands inside double-quoted attributes. */
-function esc(s){ const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML.replaceAll('"', "&quot;"); }
-
-/* ---------- minimal markdown (escape-first; fenced code, tables, lists) ---------- */
-function mdInline(s){
-  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>")
-          .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`)
-          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-          /* single-asterisk italic — run after bold so `**` isn't split. The
-             non-space flanking on both ends keeps arithmetic ("2 * 3 * 4") and
-             glob patterns literal, matching Markdown's emphasis rules. */
-          .replace(/\*([^\s*][^*]*?[^\s*]|[^\s*])\*/g, "<em>$1</em>");
-}
-function md(src){
-  /* the tmux paste path delivers a multi-line prompt's newlines as \r
-     (terminal Enter), and the CLI transcript records them that way — treat
-     every CR flavor as a line break or the turn renders flattened */
-  const lines = (src || "").replace(/\r\n?/g, "\n").split("\n");
-  let out = [], para = [], table = null, list = null, quote = [];
-  const flushP = () => { if (para.length){ out.push("<p>" + para.map(mdInline).join("<br>") + "</p>"); para = []; } };
-  const flushT = () => { if (table){ out.push(table + "</table>"); table = null; } };
-  const flushL = () => { if (list){ out.push(list.html + `</${list.tag}>`); list = null; } };
-  const flushQ = () => { if (quote.length){ out.push("<blockquote>" + quote.map(mdInline).join("<br>") + "</blockquote>"); quote = []; } };
-  const flushAll = () => { flushP(); flushT(); flushL(); flushQ(); };
-  let code = null;
-  for (const ln of lines){
-    if (code){
-      if (/^\s*```/.test(ln)){
-        out.push(`<pre><code>${esc(code.lines.join("\n"))}</code></pre>`);
-        code = null;
-      } else code.lines.push(ln);
-      continue;
-    }
-    if (/^\s*```/.test(ln)){
-      flushAll();
-      code = { lines: [] };
-      continue;
-    }
-    const h = ln.match(/^(#{1,3})\s+(.+)$/);
-    if (h){
-      flushAll();
-      out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`);
-      continue;
-    }
-    const bq = ln.match(/^\s*>\s?(.*)$/);
-    if (bq){
-      flushP(); flushT(); flushL();
-      quote.push(bq[1]);
-      continue;
-    }
-    flushQ();
-    const li = ln.match(/^(\s*)([-*]|\d+[.])\s+(.+)$/);
-    if (li){
-      flushP(); flushT();
-      const tag = /\d+[.]/.test(li[2]) ? "ol" : "ul";
-      if (!list || list.tag !== tag){ flushL(); list = { tag, html: `<${tag}>` }; }
-      /* keep the author's numbering: continuation text between items splits
-         the <ol>, and a restarted <ol> would renumber everything "1." */
-      list.html += `<li${tag === "ol" ? ` value="${parseInt(li[2], 10)}"` : ""}>${mdInline(li[3])}</li>`;
-      continue;
-    }
-    flushL();
-    if (/^\s*\|.*\|\s*$/.test(ln)){
-      const cells = ln.trim().slice(1, -1).split("|").map(c => c.trim());
-      if (cells.every(c => /^[-: ]+$/.test(c))) continue;
-      flushP();
-      const tag = table ? "td" : "th";
-      if (!table) table = "<table>";
-      table += "<tr>" + cells.map(c => `<${tag}>${mdInline(c)}</${tag}>`).join("") + "</tr>";
-      continue;
-    }
-    flushT();
-    if (!ln.trim()) flushP(); else para.push(ln);
-  }
-  if (code) out.push(`<pre><code>${esc(code.lines.join("\n"))}</code></pre>`);
-  flushAll();
-  return out.join("");
-}
+/* esc / mdInline / md imported from /js/format.js */
 
 /* one attachment tile (thumbnail for images, chip for other files), sourced
    from the raw upload staging path. A tile whose bytes 404 removes itself
@@ -1202,59 +1026,7 @@ setInterval(() => {
 setInterval(readUsage, 30000);
 
 /* ---------- cards ---------- */
-function ageText(ms){
-  if (!ms) return "";
-  const s = Math.max(0, (Date.now() - ms) / 1000);
-  if (s < 10) return "now";
-  if (s < 60) return Math.floor(s) + "s";
-  if (s < 3600) return Math.floor(s / 60) + "m";
-  if (s < 86400) return Math.floor(s / 3600) + "h";
-  return Math.floor(s / 86400) + "d";
-}
-/* a duration span (elapsed = last_activity − created_at): coarse two-field
-   readout, distinct from ageText's "how long ago" single field */
-function fmtDur(ms){
-  if (!ms || ms < 0) return "0m";
-  const s = ms / 1000;
-  if (s < 60) return Math.floor(s) + "s";
-  if (s < 3600) return Math.floor(s / 60) + "m";
-  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
-  return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
-}
-/* map station timestamp — locale-ordered day/month + time (was a fixed
-   MM-DD slice that read as American to European users); the browser locale
-   decides field order (21.07. 14:30 vs 07/21 2:30 PM) */
-function fmtStamp(iso){
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d)) return "";
-  return d.toLocaleString(undefined, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-/* "inspect" is the neutral attention: quiet pane, no structured transcript
-   evidence — worth a look, but never the yellow "needs your decision" alarm */
-const hardAttention = n => n.attention && n.attention !== "inspect";
-function cardState(n){
-  // A deliberately closed thread (/exit) is an immutable dead-end: it takes
-  // precedence over mechanical liveness so a closed-but-adopted or
-  // close-failed thread never renders as working/dead, and never shows a
-  // workdot or attention glow on the card.
-  if (n.ended_at) return "closed";
-  if (hardAttention(n)) return "attention";
-  if (n.live === "active") return "working";
-  if (n.live === "exited" || n.live === "unavailable") return "dead";
-  return "idle";
-}
-function statusText(n){
-  // Closed is a deliberate, durable cap — it wins over mechanical liveness and
-  // any lingering attention flag.
-  if (n.ended_at) return "Closed";
-  if (n.attention === "inspect") return "Quiet · check the terminal";
-  if (n.attention) return `Waiting · needs your ${n.attention}`;
-  if (n.live === "active") return "Running";
-  if (n.live === "exited") return "Exited";
-  if (n.live === "unavailable") return "Unavailable";
-  return "Quiet";
-}
+/* ageText/fmtDur/fmtStamp/hardAttention/cardState/statusText from modules */
 function cardConfigText(n){
   const parts = [n.model || "default"];
   if (n.effort) parts.push(n.effort);
@@ -1294,81 +1066,14 @@ function cardTimeHTML(n){
   }
   return `<span class="time" title="${esc(cardTimeTitle(n))}">${esc(txt)}</span>`;
 }
-function cardCreatedMS(n){
-  const v = Date.parse(n.created_at || "");
-  return isNaN(v) ? 0 : v;
-}
-function cardInteractionMS(n){
-  return n.last_interaction || 0;
-}
-/* The Activities list is tiered by liveness, then by recency within a tier.
-   Liveness — not last_interaction — must decide the tier: last_interaction is
-   the last *human* turn, so a chat where the agent has churned for minutes
-   since you last typed would otherwise sink below an idle chat you touched more
-   recently (the "active chats in the middle" bug). Tiers mirror cardState's
-   precedence exactly (closed > attention > active > dead > idle) so a card's
-   position and its rendered state never disagree. */
-function livenessTier(n){
-  if (n.ended_at) return 4;                                       // closed — immutable dead-end, sinks
-  if (hardAttention(n)) return 0;                                 // needs your decision — top
-  if (n.live === "active") return 1;                              // working now
-  if (n.live === "exited" || n.live === "unavailable") return 3;  // dead — sinks with closed
-  return 2;                                                       // idle / quiet / fresh
-}
-function orderedNodes(){
-  return [...nodes].sort((a, b) => {
-    const ta = livenessTier(a), tb = livenessTier(b);
-    if (ta !== tb) return ta - tb;
-    const freshA = !(a.last_activity || 0), freshB = !(b.last_activity || 0);
-    if (freshA !== freshB) return freshA ? -1 : 1;
-    if (freshA && freshB) return cardCreatedMS(b) - cardCreatedMS(a);
-    return cardInteractionMS(b) - cardInteractionMS(a) ||
-      (b.last_activity || 0) - (a.last_activity || 0) ||
-      cardCreatedMS(b) - cardCreatedMS(a);
-  });
-}
-const LANE_COLORS = ["#007AFF","#5856D6","#AF52DE","#34C759","#FF9500","#FF2D55","#00C7BE"];
+const orderedNodes = () => orderedNodesMod(nodes);
 const NEW_LANE_VALUE = "__new";
-const laneList = () => Array.isArray(UI.lanes) ? UI.lanes : [];
-const byNameID = (a, b) =>
-  (a.name || a.id || "").localeCompare(b.name || b.id || "", undefined, { sensitivity: "base" })
-    || (a.id || "").localeCompare(b.id || "", undefined, { sensitivity: "base" });
-function sortedLaneList(){
-  return [...laneList()].sort(byNameID);
-}
-function laneById(id){
-  return laneList().find(l => l.id === id) || null;
-}
-function laneName(id){
-  return laneById(id)?.name || id || "unset";
-}
-/* A lane color is user-authored (ui.json / the lane editor) and lands in many
-   style="" interpolations. Sanitizing at the accessor — rather than trusting
-   every call site to esc()-wrap it — disarms the injection trap permanently:
-   a crafted color can no longer break out of an attribute even if a future
-   template forgets the wrap (R18.1 altitude). Only well-formed color syntax is
-   returned verbatim; anything else falls back to the deterministic hash color. */
-const SAFE_COLOR = /^(#[0-9a-fA-F]{3,8}|var\(--[a-zA-Z0-9-]+\)|rgba?\([\d.,%\s]+\)|hsla?\([\d.,%\s]+\)|[a-zA-Z]+)$/;
-function safeColor(c){
-  return typeof c === "string" && SAFE_COLOR.test(c.trim()) ? c.trim() : null;
-}
-function laneColor(id){
-  const lane = laneById(id);
-  const c = lane && safeColor(lane.color);
-  if (c) return c;
-  if (!id) return "var(--unlane)";
-  return LANE_COLORS[Math.abs(hashStr(id)) % LANE_COLORS.length];
-}
-function hexRGB(c){
-  if (typeof c !== "string" || !c.startsWith("#")) return null;
-  let h = c.slice(1);
-  if (h.length === 3) h = h.split("").map(x => x + x).join("");
-  if (h.length !== 6 || !/^[0-9a-fA-F]{6}$/.test(h)) return null;
-  return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
-}
-function cssRGB(c){
-  const hex = hexRGB(c);
-  if (hex) return hex;
+const laneList = () => laneListMod(UI.lanes);
+const sortedLaneList = () => sortedLaneListMod(UI.lanes);
+const laneById = id => laneByIdMod(id, UI.lanes);
+const laneName = id => laneNameMod(id, UI.lanes);
+/* resolveColor for non-hex CSS colors via getComputedStyle (browser only). */
+function resolveCssColor(c){
   if (typeof document === "undefined" || !document.body) return null;
   const el = document.createElement("span");
   el.style.color = c;
@@ -1379,41 +1084,12 @@ function cssRGB(c){
   el.remove();
   return m ? [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)] : null;
 }
-function relLum(rgb){
-  const ch = v => {
-    v /= 255;
-    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-  };
-  const [r, g, b] = rgb.map(ch);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-function contrastRatio(a, b){
-  const l1 = Math.max(a, b), l2 = Math.min(a, b);
-  return (l1 + 0.05) / (l2 + 0.05);
-}
-function contrastText(c){
-  const rgb = cssRGB(c);
-  if (!rgb) return "#fff";
-  const lum = relLum(rgb);
-  return contrastRatio(lum, 0) >= contrastRatio(lum, 1) ? "#000" : "#fff";
-}
-function uniqueLaneID(name){
-  const base = (name || "lane").toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "lane";
-  const used = new Set(laneList().map(l => l.id));
-  if (!used.has(base)) return base;
-  for (let i = 2; ; i++){
-    const id = `${base}-${i}`;
-    if (!used.has(id)) return id;
-  }
-}
-function nextLaneColor(){
-  return LANE_COLORS[laneList().length % LANE_COLORS.length];
-}
-function makeLane(name){
-  const clean = name.trim();
-  return { id: uniqueLaneID(clean), name: clean, color: nextLaneColor() };
-}
+const cssRGB = c => cssRGBMod(c, resolveCssColor);
+const contrastText = c => contrastTextMod(c, resolveCssColor);
+const laneColor = id => laneColorMod(id, UI.lanes);
+const uniqueLaneID = name => uniqueLaneIDMod(name, UI.lanes);
+const nextLaneColor = () => nextLaneColorMod(UI.lanes);
+const makeLane = name => makeLaneMod(name, UI.lanes);
 function laneOptionsHTML(selected = "", includeUnset = true, disabled = false){
   const unset = includeUnset ? `<option value="" ${!selected ? "selected" : ""}>unset</option>` : "";
   const missing = selected && !laneById(selected)
@@ -1455,66 +1131,27 @@ function readLaneChoice(select, input){
 }
 /* the lane a thread rides. Single membership now: a thread belongs to exactly
    one topic/lane; cross-lane structure comes from fork parent edges, not tags. */
-const servedLanes = n => [n.lane_id].filter(Boolean);
+/* servedLanes imported from /js/lanes.js */
 /* laneModel: the shared journey structure. Lanes are explicit assignments;
    unassigned nodes stay in Activities but do not become Journeys. */
-function laneModel(){
-  const byId = {};
-  nodes.forEach(n => byId[n.id] = n);
-  const used = new Set(nodes.flatMap(servedLanes));
-  const lanes = laneList().filter(l => used.has(l.id));
-  for (const id of used){
-    if (!lanes.some(l => l.id === id)) lanes.push({ id, name: id, color: laneColor(id) });
-  }
-  lanes.sort(byNameID);
-  return { byId, lanes, color: laneColor, name: laneName };
-}
-const isArchived = id => (UI.archived || []).includes(id);
-const isPinned = id => (UI.pinned || []).includes(id);
+const laneModel = () => laneModelMod(nodes, UI.lanes);
+const isArchived = id => isArchivedMod(id, UI.archived);
+const isPinned = id => isPinnedMod(id, UI.pinned);
 const pinnedCount = () => (UI.pinned || []).filter(id => nodeById(id)).length;
-
-/* Pinned-tab order: hard-attention ("needs you") cards float to the very top —
-   supervision precedence still wins in this view — then the user's pin order
-   (UI.pinned index; a new pin was unshifted to the front, so it lands topmost).
-   Drag reorder rewrites UI.pinned, so the array index IS the manual order. */
-function pinnedOrder(list){
-  const order = UI.pinned || [];
-  return [...list].sort((a, b) => {
-    const aa = hardAttention(a) ? 1 : 0, ba = hardAttention(b) ? 1 : 0;
-    if (aa !== ba) return ba - aa;
-    return order.indexOf(a.id) - order.indexOf(b.id);
-  });
-}
+/* Pinned-tab order: hard-attention first, then pin order (map-model.js). */
+const pinnedOrder = list => pinnedOrderMod(list, UI.pinned);
 
 function renderCards(){
   if (pinDragging) return;   /* poll-safe: never rebuild the list mid-drag */
   /* the Pinned tab is conditional: if the last pin was removed while it was
      open, fall back to All rather than stranding on a tab that no longer exists */
   if (cardTab === "pinned" && !pinnedCount()) cardTab = "current";
-  /* an archived node that needs a decision surfaces in Current anyway —
-     archiving organizes, it must never hide a pending approval/question. The
-     Pinned tab is a flat filter (attention-first, then pin order) and is
-     agnostic to the lane scope — the lane filter is the tool for that. */
-  const tabList = cardTab === "pinned"
-    ? pinnedOrder(nodes.filter(n => isPinned(n.id)))
-    : orderedNodes().filter(n =>
-        isArchived(n.id) === (cardTab === "archived") ||
-        (cardTab === "current" && hardAttention(n)));
-  /* The lane scope hides other journeys' cards, with two exemptions that
-     keep the panes coherent: the open chat's own card always shows (its
-     conversation is on screen — the list must not deny it exists), and
-     out-of-scope cards that need input gather under the pinned "Input
-     needed" fold below instead of interleaving with the focused lane.
-     Invariant: nothing that needs input is ever invisible — it is either
-     in the list (in-lane, or no filter) or in the fold, never neither. */
-  /* a lane's scope is every thread on that lane (single membership now) plus
-     the open chat, which always shows */
-  const inScope = n => !laneFilter || servedLanes(n).includes(laneFilter) || n.id === sel;
-  /* the Pinned tab ignores the lane scope (decision: the lane filter is the
-     tool for lane narrowing); every other tab honours it */
-  const list = cardTab === "pinned" ? tabList : tabList.filter(inScope);
-  const foldList = laneFilter && cardTab === "current"
-    ? tabList.filter(n => !inScope(n) && hardAttention(n)) : [];
+  /* Visibility / fold decisions live in visibleCardLists (map-model.js).
+     Archived hard-attention surfaces in Current; Pinned ignores lane scope. */
+  const { tabList, list, foldList } = visibleCardLists(nodes, {
+    cardTab, pinned: UI.pinned, archived: UI.archived,
+    laneFilter, selectedId: sel,
+  });
   if (!foldList.length) attnFoldOpen = false;
   const sig = JSON.stringify(list.concat(foldList).map(n => [n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention, n.model, n.effort, !!n.last_interaction]))
     + "|" + JSON.stringify(unadopted) + "|" + sel + "|" + [...expanded].join(",")
@@ -1612,9 +1249,9 @@ function cardHTML(n){
    adoptable-session extras, which aren't "cards" either tab counts) so the
    badge always matches what selecting the tab would actually show. */
 function cardTabCount(archived){
-  const inScope = n => !laneFilter || servedLanes(n).includes(laneFilter) || n.id === sel;
   return orderedNodes().filter(n =>
-    (isArchived(n.id) === archived || (!archived && hardAttention(n))) && inScope(n)).length;
+    (isArchived(n.id) === archived || (!archived && hardAttention(n))) &&
+    inLaneScope(n, { laneFilter, selectedId: sel })).length;
 }
 function renderCardTabs(){
   /* "All" (no lane scoped) skips the count — it's the whole list, already
@@ -1852,8 +1489,7 @@ let mapSig = "";
    (hover-revealed on pointer, always visible on touch) or from the edit
    sheet (tap the active tab again). Removing a map never touches a lane.
    Maps persist server-side in UI.groups: {id, name, lanes:[lane ids]}. */
-const groupLanes = () => mapTab === "all" ? null
-  : ((UI.groups || []).find(t => t.id === mapTab)?.lanes ?? null);
+const groupLanes = () => groupLanesMod(mapTab, UI.groups);
 function renderMapTabs(){
   /* validate the saved group only against loaded state — before loadUI
      resolves, UI.groups is the empty default and would wrongly reset it */
@@ -2052,15 +1688,7 @@ async function exitThread(id){
    fork) and fall back to the historical computation for records that predate
    the stored field. Shared by the wall map (crossover colour) and the stack map
    (fork cue), so both agree on one source of truth. */
-function forkKind(n){
-  const p = n.parent && nodeById(n.parent);
-  if (!p) return null;
-  if (n.fork_kind) return n.fork_kind;
-  if (n.lane_id === p.lane_id) return "y-stay";
-  const priorInDest = nodes.some(x => x.id !== n.id && x.lane_id === n.lane_id &&
-    (x.created_at || "") < (n.created_at || ""));
-  return priorInDest ? "s" : "y-new";
-}
+const forkKind = n => forkKindMod(n, nodes);
 /* ---------- stops: a station is one /clear-delimited segment, not a whole
    thread (attic/metro-map-design.md state machine). The server sends n.stops = the
    clear-tagged seam times only (relink/rotation noise never adds stations);
@@ -2068,25 +1696,8 @@ function forkKind(n){
    The newest stop is the thread's head — it carries the full label row and
    the live/attention/cap glyphs; older stops are dim history dots ("ride
    back = open the chat and scroll up"). */
-const stampMS = t => { const v = Date.parse(t || ""); return isNaN(v) ? 0 : v; };
-function stopTimes(n){ return [n.created_at || "", ...(n.stops || [])]; }
-function stopsOf(n){
-  const ts = stopTimes(n);
-  return ts.map((t, i) => ({ n, i, time: t, head: i === ts.length - 1 }));
-}
-const stopKey = s => s.n.id + "#" + s.i;
-/* a stop's effective label. The head reads the node's live title/description —
-   renaming the active chat moves only the head. A closed stop reads its frozen
-   snapshot (server station_labels, keyed by the stop's start time), so a later
-   head rename can never rewrite it; a legacy stop with no snapshot yet falls
-   back to the node's fields. Mirrors the server's projection in handleState. */
-function stopLabel(s){
-  const n = s.n;
-  const fallback = { title: n.title || "", desc: n.description || n.prompt || "" };
-  if (s.head) return fallback;
-  const snap = n.station_labels && n.station_labels[s.time];
-  return snap ? { title: snap.title || "", desc: snap.desc || "" } : fallback;
-}
+/* stampMS/stopTimes/stopsOf/stopKey/stopLabel imported from modules */
+/* a stop's effective label lives in stopLabel (lanes.js). */
 /* the currently selected map stop object (for the toolbar/editor): the earlier
    stop matching mapSelStop, else the node's head stop. Null when nothing valid
    is selected. */
@@ -2097,23 +1708,12 @@ function selectedStop(){
   if (mapSelStop) return chain.find(s => s.time === mapSelStop) || null;
   return chain.find(s => s.head) || null;
 }
-const newestFirst = (a, b) => stampMS(b.time) - stampMS(a.time) ||
-  (b.time || "").localeCompare(a.time || "");
+/* newestFirst/parentStopIndex imported from /js/lanes.js */
 const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
 function attentionStationSVG(x, y, op){
   return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="var(--attn)" filter="url(#attnglow)"/>
           <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5"/>`;
-}
-/* the parent stop a fork grew from: the newest stop that already existed when
-   the child was created (the spec's legacy fallback — no per-edge stop refs
-   are recorded yet, so the containing stop is derived from timestamps) */
-function parentStopIndex(p, childCreated){
-  const ts = stopTimes(p), c = stampMS(childCreated);
-  let idx = 0;
-  for (let i = 1; i < ts.length; i++)
-    if (c && stampMS(ts[i]) <= c) idx = i;
-  return idx;
 }
 function renderMap(){
   if (!mapVisible()) return;
@@ -2248,40 +1848,7 @@ function renderMap(){
    chain over the fork graph (a cross-lane fork links parent lane ↔ child lane),
    isolated lanes appended newest-first. Columns carry no chronology, so
    reordering them is free. */
-function laneColumnOrder(colLanes, stations, byId){
-  const ids = colLanes.map(l => l.id);
-  const inSet = new Set(ids);
-  const w = {}, nbr = {}, rec = {};
-  ids.forEach(id => { nbr[id] = new Set(); rec[id] = 0; });
-  for (const n of stations){
-    const t = Date.parse(n.created_at) || 0;
-    if (inSet.has(n.lane_id) && t > rec[n.lane_id]) rec[n.lane_id] = t;
-    const p = n.parent && byId[n.parent];
-    if (p && n.lane_id !== p.lane_id && inSet.has(n.lane_id) && inSet.has(p.lane_id)){
-      const k = [n.lane_id, p.lane_id].sort().join("|");
-      w[k] = (w[k] || 0) + 1;
-      nbr[n.lane_id].add(p.lane_id); nbr[p.lane_id].add(n.lane_id);
-    }
-  }
-  const wt = (a, b) => w[[a, b].sort().join("|")] || 0;
-  const total = a => [...nbr[a]].reduce((s, b) => s + wt(a, b), 0);
-  const left = new Set(ids), out = [];
-  const bestFree = () => [...left].sort((a, b) => total(b) - total(a) || rec[b] - rec[a])[0];
-  while (left.size){
-    let pick;
-    if (out.length){
-      const last = out[out.length - 1];
-      let best = null, bs = -1;
-      for (const c of left){
-        const s = wt(last, c);
-        if (s > bs || (s === bs && (best === null || rec[c] > rec[best]))){ best = c; bs = s; }
-      }
-      pick = bs > 0 ? best : bestFree();
-    } else pick = bestFree();
-    out.push(pick); left.delete(pick);
-  }
-  return out;
-}
+/* laneColumnOrder imported from /js/lanes.js */
 
 function renderWallMap(lm, grp, inGroup, served, stations, focusLane){
   const colLanes = lm.lanes.filter(l => inGroup(l.id));
@@ -2770,11 +2337,7 @@ async function commitTitleEdit(id, raw){
 /* selGen guards async work: any await that outlives a selection change must
    not touch the DOM for the node the user has already left. */
 let selGen = 0;
-function hashStr(s){
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return h;
-}
+/* hashStr imported from /js/lanes.js */
 
 function select(id){
   if (sel !== id){ chatSig = ""; termOpen = false; mapSig = ""; selGen++; tappedTurn = "";
@@ -3357,17 +2920,7 @@ function renderBubbleActions(){
     `<button data-bact="copy"><span>${ICON_COPY}</span>copy</button>`;
   turnEl.after(row);
 }
-function fmtBubbleTime(t, now = new Date()){
-  const d = new Date(t);
-  if (isNaN(d)) return t || "";
-  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  if (sameDay(d, now)) return d.toLocaleTimeString([], { timeStyle: "short" });
-  const y = new Date(now);
-  y.setDate(now.getDate() - 1);
-  if (sameDay(d, y)) return "Yesterday, " + d.toLocaleTimeString([], { timeStyle: "short" });
-  return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
+/* fmtBubbleTime imported from /js/format.js */
 /* forkFromTurn: shared by the tap icon and the long-press sheet — prefill a
    fresh-context fork from this message as evidence */
 function forkFromTurn(text, parent){
@@ -3602,17 +3155,7 @@ function bookmarkSortKey(nt, byT){
   if (nt.anchor && byT[nt.anchor]) return byT[nt.anchor].t + "~" + nt.t;
   return nt.t + "~";
 }
-function fmtWhen(t){
-  const d = new Date(t);
-  return isNaN(d) ? (t || "") : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
-/* bubble hover title: the colour already tells you who spoke, so the tooltip
-   earns its keep by carrying the send time — the same stamp a tap reveals. */
-function bubbleTitle(role, time){
-  const who = role === "user" ? "you" : "agent";
-  const w = time ? fmtWhen(time) : "";
-  return w ? `${who} — sent ${w}` : who;
-}
+/* fmtWhen/bubbleTitle imported from /js/format.js */
 /* Long noted bubbles force a lot of scrolling; clamp the tall ~15% behind a
    "Show more" toggle and leave the short majority alone. bookmarkClampState is the
    DOM-free decision core — the measure loop feeds it a real scrollHeight —
@@ -4413,7 +3956,7 @@ function paintEchoNow(dest){
 
 /* ---------- navigation (phone: cards slide over chat) ---------- */
 function setLevel(n){
-  level = Math.max(1, Math.min(3, n));
+  level = clampLevel(n);
   if (isDesktop()) return;
   document.body.classList.toggle("cards-open", level >= 2);
   $("#cards").classList.toggle("open", level >= 2);
@@ -4421,47 +3964,47 @@ function setLevel(n){
   $("#scrim").classList.toggle("on", level >= 2);
   if (level === 3){ mapSig = ""; renderMap(); $("#mapscroll").scrollTop = 0; }
 }
-$("#chatback").addEventListener("click", () => setLevel(2));
-/* the scrim is the left panes' peek made tappable: a tap steps ONE pane back
-   (level 3→2, 2→1), mirroring the swipe — never a jump straight to chat. */
-$("#scrim").addEventListener("click", () => setLevel(level - 1));
-/* the Bookmarks left peek, made tappable the same way (P3) */
-$("#bookmarkpeek").addEventListener("click", () => setBookmarksOpen(false));
-let touch = null;
-document.addEventListener("touchstart", e => {
-  const t = e.touches[0];
-  touch = { x: t.clientX, y: t.clientY, edge: t.clientX < 28,
-    edgeR: t.clientX > innerWidth - 28, localCard: !!e.target.closest("#cardlist .card"),
-    /* snapshot overlay ownership at START: an overlay's own touchend listener
-       bubbles first and can close itself (wsOpen()→false) before this handler
-       runs, so a live re-check would let the SAME L→R swipe be re-processed as
-       "Bookmarks → back → Chat" — the Notes→back overshoot. (pane-gap-design.md P2) */
-    overlay: wsOpen() || searchOpen() || archivedOpen() };
-}, { passive: true });
-document.addEventListener("touchend", e => {
-  if (!touch) return;
-  /* a full-screen overlay owns its own gestures; the app-nav swipe must never
-     move the activities/journeys/chat layers beneath it (iPhone swipe bug). */
-  if (touch.overlay){ touch = null; return; }
-  const t = e.changedTouches[0];
-  const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
-  const horiz = Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy);
-  if ((editingChatDesc || editingTitle === sel) && horiz && dx < 0){
+function applyNavAction(action){
+  if (!action || action.type === "suppress") return;
+  if (action.type === "setLevel") setLevel(action.level);
+  else if (action.type === "setBookmarksOpen") setBookmarksOpen(action.open);
+  else if (action.type === "openWorkspace") openWorkspace();
+  else if (action.type === "cancelEditors"){
     if (editingTitle === sel){ editingTitle = ""; editingTitleScope = ""; }
     editingChatDesc = false;
     chatSig = "";
     cardsSig = "";
     renderCards(); renderChatHead();
-  } else if (!isDesktop() && horiz && dx < 0 && touch.edgeR && !bookmarksOpen){
-    /* right-edge swipe navigates back one level first; the notes pane only
-       opens from the chat view itself */
-    if (level > 1) setLevel(level - 1); else setBookmarksOpen(true);
   }
-  else if (!isDesktop() && horiz && dx < 0 && bookmarksOpen) openWorkspace();  /* Bookmarks → swipe R→L → Notes overview (accelerator; #notesbtn is the tappable primary) */
-  else if (!isDesktop() && horiz && dx > 0 && bookmarksOpen) setBookmarksOpen(false);
-  else if (!touch.localCard && horiz && dx > 0 && touch.edge) setLevel(level + 1);
-  else if (!touch.localCard && horiz && dx < 0 && level > 1) setLevel(level - 1);
-  touch = null;
+}
+$("#chatback").addEventListener("click", () => setLevel(2));
+/* the scrim is the left panes' peek made tappable: a tap steps ONE pane back
+   (level 3→2, 2→1), mirroring the swipe — never a jump straight to chat. */
+$("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));
+/* the Bookmarks left peek, made tappable the same way (P3) */
+$("#bookmarkpeek").addEventListener("click", () => applyNavAction(bookmarkPeekClose()));
+let touch = null;
+document.addEventListener("touchstart", e => {
+  const t = e.touches[0];
+  /* snapshot overlay ownership at START: an overlay's own touchend listener
+     bubbles first and can close itself (wsOpen()→false) before this handler
+     runs, so a live re-check would let the SAME L→R swipe be re-processed as
+     "Bookmarks → back → Chat" — the Notes→back overshoot. (pane-gap-design.md P2) */
+  touch = captureTouchStart({
+    x: t.clientX, y: t.clientY, clientWidth: innerWidth,
+    localCard: !!e.target.closest("#cardlist .card"),
+    overlayOwned: wsOpen() || searchOpen() || archivedOpen(),
+  });
+}, { passive: true });
+document.addEventListener("touchend", e => {
+  const start = touch; touch = null;
+  if (!start) return;
+  const t = e.changedTouches[0];
+  const action = documentSwipeDecision(start, { x: t.clientX, y: t.clientY }, {
+    level, bookmarksOpen, isDesktop: isDesktop(),
+    editingChatDesc, editingTitle, sel,
+  });
+  applyNavAction(action);
 }, { passive: true });
 
 /* ---------- sheets ---------- */
@@ -4530,18 +4073,24 @@ function closeWorkspace(){
 let wsTouch = null;
 $("#notesworkspace").addEventListener("touchstart", e => {
   const t = e.touches[0];
-  wsTouch = { x: t.clientX, y: t.clientY, inEditable: !!e.target.closest("textarea, input") };
+  wsTouch = captureNotesTouchStart({
+    x: t.clientX, y: t.clientY,
+    inEditable: !!e.target.closest("textarea, input"),
+  });
 }, { passive: true });
 $("#notesworkspace").addEventListener("touchend", e => {
   const start = wsTouch; wsTouch = null;
-  if (!start || start.inEditable) return;
-  if (!window.matchMedia("(max-width: 767px)").matches) return;
+  if (!start) return;
   const t = e.changedTouches[0];
-  const dx = t.clientX - start.x, dy = t.clientY - start.y;
-  if (!(dx > 60 && dx > 2 * Math.abs(dy))) return;   /* L→R back gesture only */
-  if (wsPlacing){ endPlacement(); return; }           /* cancel placement first */
-  if ($("#notesworkspace").classList.contains("note-open")) $("#wsback").click();
-  else closeWorkspace();
+  const action = notesSwipeBackDecision(start, { x: t.clientX, y: t.clientY }, {
+    isNarrow: window.matchMedia("(max-width: 767px)").matches,
+    placing: !!wsPlacing,
+    noteOpen: $("#notesworkspace").classList.contains("note-open"),
+  });
+  if (!action) return;
+  if (action.type === "endPlacement") endPlacement();
+  else if (action.type === "noteToList") $("#wsback").click();
+  else if (action.type === "closeWorkspace") closeWorkspace();
 }, { passive: true });
 
 /* --- inbox zone (iPad/desktop): the capture layer, reused as the workspace's
@@ -4647,10 +4196,7 @@ async function wsLoadCards(){
   } catch { wsNotes = []; }
   renderWsCards();
 }
-function fmtNoteMeta(c){
-  const n = c.section_count || 0;
-  return `${n} section${n === 1 ? "" : "s"} · ${fmtWhen(c.edited_at || c.created_at || "")}`;
-}
+/* fmtNoteMeta imported from /js/format.js */
 /* Note cards reorder by drag (item 6), the same gesture the pinned cards use —
    no per-card up/down arrows, no separate reorder mode. Each card carries every
    represented lane color as a swatch (item 11: multiple lanes → multiple dots). */

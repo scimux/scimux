@@ -175,6 +175,7 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			web: fstest.MapFS{
 				"web/assets": {Mode: fs.ModeDir},
 				"web/css":    {Mode: fs.ModeDir},
+				"web/js":     {Mode: fs.ModeDir},
 			},
 		},
 		{
@@ -182,6 +183,7 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			web: fstest.MapFS{
 				"web/index.html": {Data: []byte(csrfPlaceholder)},
 				"web/css":        {Mode: fs.ModeDir},
+				"web/js":         {Mode: fs.ModeDir},
 			},
 		},
 		{
@@ -190,6 +192,7 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 				"web/index.html": {Data: []byte(csrfPlaceholder)},
 				"web/assets":     {Data: []byte("not a dir")},
 				"web/css":        {Mode: fs.ModeDir},
+				"web/js":         {Mode: fs.ModeDir},
 			},
 		},
 		{
@@ -197,6 +200,7 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			web: fstest.MapFS{
 				"web/index.html": {Data: []byte(csrfPlaceholder)},
 				"web/assets":     {Mode: fs.ModeDir},
+				"web/js":         {Mode: fs.ModeDir},
 			},
 		},
 		{
@@ -205,6 +209,24 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 				"web/index.html": {Data: []byte(csrfPlaceholder)},
 				"web/assets":     {Mode: fs.ModeDir},
 				"web/css":        {Data: []byte("not a dir")},
+				"web/js":         {Mode: fs.ModeDir},
+			},
+		},
+		{
+			name: "missing js",
+			web: fstest.MapFS{
+				"web/index.html": {Data: []byte(csrfPlaceholder)},
+				"web/assets":     {Mode: fs.ModeDir},
+				"web/css":        {Mode: fs.ModeDir},
+			},
+		},
+		{
+			name: "js not directory",
+			web: fstest.MapFS{
+				"web/index.html": {Data: []byte(csrfPlaceholder)},
+				"web/assets":     {Mode: fs.ModeDir},
+				"web/css":        {Mode: fs.ModeDir},
+				"web/js":         {Data: []byte("not a dir")},
 			},
 		},
 		{
@@ -213,6 +235,7 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 				"web/index.html": {Data: []byte("<html></html>")},
 				"web/assets":     {Mode: fs.ModeDir},
 				"web/css":        {Mode: fs.ModeDir},
+				"web/js":         {Mode: fs.ModeDir},
 			},
 		},
 	}

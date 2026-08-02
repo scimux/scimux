@@ -182,6 +182,35 @@ test("flushUI: writer with no revision first adopts a successful server revision
   assert.deepEqual(out.doc.archived, ["remote"]);
 });
 
+test("flushUI: no-revision adoption publishes before the bare cache write", async () => {
+  const order = [];
+  const storage = {
+    getItem() { return null; },
+    setItem(key) {
+      order.push(key === CACHED_UI_KEY ? "cache" : "pending");
+      if (key === CACHED_UI_KEY) throw new Error("quota");
+    },
+  };
+  const { fetchImpl } = scriptedFetch([
+    jsonResponse({ body: baseDoc(), etag: '"r1"' }),
+  ]);
+  await assert.rejects(
+    () => flushUIState(
+      {
+        doc: baseDoc(), rev: "",
+        ops: [{ k: "bookmark-add", bookmark: { t: 1, text: "x" }, rev: "" }],
+        loaded: true, saving: false,
+      },
+      {
+        fetchImpl, storage,
+        onRemoteApplied() { order.push("publish"); },
+      },
+    ),
+    /quota/,
+  );
+  assert.deepEqual(order, ["publish", "pending", "cache"]);
+});
+
 test("flushUI: never emits If-Match: * on the wire", async () => {
   const { fetchImpl, calls } = scriptedFetch([
     jsonResponse({ body: baseDoc(), etag: '"z"' }),
@@ -283,6 +312,59 @@ test("flushUI: 409 refetches, filters/replays, then retries", async () => {
   assert.equal(out.doc.bookmarks[0].t, 5);
   assert.deepEqual(out.ops, []);
   assert.equal(out.rev, '"r3"');
+});
+
+test("flushUI: conflict replay observes an op appended while PUT is in flight", async () => {
+  const doc = baseDoc({ bookmarks: [{ t: 1, text: "first" }] });
+  const ops = [
+    { k: "bookmark-add", bookmark: { t: 1, text: "first" }, rev: '"r1"' },
+  ];
+  const late = { k: "bookmark-add", bookmark: { t: 2, text: "late" } };
+  const { fetchImpl } = scriptedFetch([
+    () => {
+      // Models uiMutate running after fetch() starts but before its response.
+      queueLocalOp(doc, late, '"r1"', ops);
+      return jsonResponse({ status: 409, ok: false, body: "conflict" });
+    },
+    jsonResponse({ body: baseDoc(), etag: '"r2"' }),
+    jsonResponse({ status: 200, body: {}, etag: '"r3"' }),
+  ]);
+  const out = await flushUIState(
+    { doc, rev: '"r1"', ops, loaded: true, saving: false },
+    { fetchImpl, csrf: "c" },
+  );
+  assert.deepEqual(out.doc.bookmarks.map((b) => b.t), [1, 2]);
+  assert.deepEqual(out.ops, []);
+});
+
+test("flushUI: conflict persists the filtered queue before publishing and retrying", async () => {
+  const order = [];
+  const storage = {
+    getItem() { return null; },
+    setItem(key) {
+      if (key !== CACHED_UI_KEY) order.push("pending");
+    },
+  };
+  const { fetchImpl } = scriptedFetch([
+    jsonResponse({ status: 409, ok: false, body: "conflict" }),
+    jsonResponse({ body: baseDoc(), etag: '"r2"' }),
+    () => {
+      order.push("retry");
+      return jsonResponse({ status: 200, body: {}, etag: '"r3"' });
+    },
+  ]);
+  await flushUIState(
+    {
+      doc: baseDoc(), rev: '"r1"',
+      ops: [{ k: "bookmark-add", bookmark: { t: 1, text: "x" }, rev: '"r1"' }],
+      loaded: true, saving: false,
+    },
+    {
+      fetchImpl, storage,
+      onRemoteApplied() { order.push("publish"); },
+    },
+  );
+  assert.deepEqual(order.slice(0, 3), ["pending", "publish", "retry"]);
 });
 
 test("flushUI: 428 is treated as conflict like 409", async () => {
