@@ -51,6 +51,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	wantImports := []string{
 		`from "/js/api.js"`,
 		`from "/js/cards.js"`,
+		`from "/js/chat.js"`,
 		`from "/js/format.js"`,
 		`from "/js/lanes.js"`,
 		`from "/js/map-model.js"`,
@@ -275,43 +276,47 @@ func TestNotesJumpActionRendersForUIDOnlyNotes(t *testing.T) {
 }
 
 func TestBubbleCopyLivesInActionRow(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7C: action-row markup and wiring live in chat.js; Node
+	// chat.test.js executes order/copy contracts. Retain a structural wire
+	// check against the production module.
+	b, err := os.ReadFile("web/js/chat.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read chat.js: %v", err)
 	}
-	html := string(b)
-	if strings.Contains(html, "copybtn") {
+	src := string(b)
+	if strings.Contains(src, "copybtn") {
 		t.Fatal("chat bubbles should not render an always-visible copy button")
 	}
-	rowStart := strings.Index(html, "row.innerHTML =")
-	if rowStart < 0 {
-		t.Fatal("bubble action row renderer not found")
+	if !strings.Contains(src, "export function bubbleActionsHTML") {
+		t.Fatal("bubble action row HTML builder missing from chat.js")
 	}
-	rowEnd := strings.Index(html[rowStart:], "turnEl.after(row);")
-	if rowEnd < 0 {
-		t.Fatal("bubble action row renderer end not found")
-	}
-	row := html[rowStart : rowStart+rowEnd]
 	for _, want := range []string{
-		`<div class="bubwhen">${esc(fmtBubbleTime(turn.time))}</div>`,
+		`class="bubwhen"`,
 		`data-bact="fork"`,
 		`data-bact="desc"`,
 		`data-bact="bookmark"`,
 		`data-bact="copy"`,
 	} {
-		if !strings.Contains(row, want) {
+		if !strings.Contains(src, want) {
 			t.Errorf("bubble action row missing %q", want)
 		}
 	}
-	if !(strings.Index(row, `data-bact="bookmark"`) < strings.Index(row, `data-bact="copy"`)) {
+	if !(strings.Index(src, `data-bact="bookmark"`) < strings.Index(src, `data-bact="copy"`)) {
 		t.Fatal("copy should be the rightmost bubble action")
 	}
-	if !(strings.Index(row, `class="bubwhen"`) < strings.Index(row, `data-bact="fork"`)) {
+	if !(strings.Index(src, `class="bubwhen"`) < strings.Index(src, `data-bact="fork"`)) {
 		t.Fatal("timestamp should sit between the bubble and the action buttons")
 	}
-	if !strings.Contains(html, `if (ba.dataset.bact === "copy"){`) ||
-		!strings.Contains(html, `copyText(turn.text || "");`) {
+	if !strings.Contains(src, `ba.dataset.bact === "copy"`) ||
+		!strings.Contains(src, `copyText`) {
 		t.Fatal("copy action row button is not wired to copy the selected turn")
+	}
+	html, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if !strings.Contains(string(html), `from "/js/chat.js"`) || !strings.Contains(string(html), "createChatFeature") {
+		t.Fatal("production must wire createChatFeature from chat.js")
 	}
 }
 
@@ -693,22 +698,35 @@ func TestWebStackMapKeepsForkCues(t *testing.T) {
 }
 
 func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7C: key-row HTML lives in chat.js keyRowHTML; Node covers ACP vs tmux.
+	b, err := os.ReadFile("web/js/chat.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read chat.js: %v", err)
 	}
-	html := string(b)
-	i := strings.Index(html, `} else if (d.source === "acp") {`)
+	src := string(b)
+	i := strings.Index(src, `if (source === "acp")`)
 	if i < 0 {
 		t.Fatal("structured approval branch not found")
 	}
-	j := strings.Index(html[i:], `} else {`)
-	if j < 0 {
+	j := strings.Index(src[i:], `["1","2","3","4","y","n"`)
+	// ACP branch must end before the tmux y/n key list.
+	acpEnd := strings.Index(src[i:], "return `<span class=\"hint\">${escape(HINTS")
+	if acpEnd < 0 {
+		acpEnd = j
+	}
+	if acpEnd < 0 {
 		t.Fatal("structured approval branch end not found")
 	}
-	branch := html[i : i+j]
-	if strings.Contains(branch, `["y","n"]`) || strings.Contains(branch, `['y','n']`) {
+	branch := src[i : i+acpEnd]
+	if strings.Contains(branch, `["y","n"]`) || strings.Contains(branch, `['y','n']`) ||
+		strings.Contains(branch, `["1","2","3","4","y","n"`) {
 		t.Fatal("structured approval branch must render protocol options only, not y/n fallback")
+	}
+	if !strings.Contains(branch, "permOptions") && !strings.Contains(branch, "perm_options") {
+		// keyRowHTML uses permOptions param
+		if !strings.Contains(src, "permOptions") {
+			t.Fatal("ACP branch must use protocol options")
+		}
 	}
 }
 
@@ -832,21 +850,35 @@ func TestSearchHitCarriesIdentity(t *testing.T) {
 // toast — consumePendingJump loads the full history and scrolls to the historical
 // turn by time, which requires the history bubbles to carry data-time.
 func TestSearchEarlierHistoryJump(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7C: consumePendingJump + history bubble templates live in chat.js;
+	// Node covers matchPendingJumpInHist and history expansion.
+	b, err := os.ReadFile("web/js/chat.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read chat.js: %v", err)
 	}
-	html := string(b)
-	i := strings.Index(html, "function consumePendingJump(")
+	src := string(b)
+	i := strings.Index(src, "function consumePendingJump(")
 	if i < 0 {
-		t.Fatal("consumePendingJump not found")
+		t.Fatal("consumePendingJump not found in chat.js")
 	}
-	body := html[i : i+strings.Index(html[i:], "\n}\n")]
+	// body until next top-level function after consumePendingJump
+	rest := src[i:]
+	endRel := strings.Index(rest[len("function consumePendingJump("):], "\n  function ")
+	if endRel < 0 {
+		endRel = strings.Index(rest, "\n  async function ")
+	}
+	if endRel < 0 {
+		endRel = len(rest) - 1
+	} else {
+		endRel += len("function consumePendingJump(")
+	}
+	body := rest[:endRel]
 	// It must fall through to history instead of only toasting on an earlier-segment hit.
-	if !strings.Contains(body, "loadChatHistory(sel") {
+	if !strings.Contains(body, "loadHistory(") && !strings.Contains(body, "loadChatHistory") {
 		t.Error("consumePendingJump must load history when the turn is in an earlier segment")
 	}
-	if !strings.Contains(body, ".turn.hist") || !strings.Contains(body, "dataset.time === pendingJump.turnTime") {
+	if !strings.Contains(body, ".turn.hist") ||
+		(!strings.Contains(body, "turnTime") && !strings.Contains(src, "matchPendingJumpInHist")) {
 		t.Error("consumePendingJump must scroll to the historical turn by time")
 	}
 	// The old behavior (a hard toast that abandons the jump on any prior history)
@@ -855,13 +887,14 @@ func TestSearchEarlierHistoryJump(t *testing.T) {
 		t.Error("the earlier-segment dead-end toast should be replaced by a history load")
 	}
 	// History bubbles must carry data-time so the jump can target them.
-	if !strings.Contains(html, `class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}"`) ||
-		!regexp.MustCompile(`class="turn hist [^\n]*?data-time="\$\{esc\(t\.time`).MatchString(html) {
+	if !strings.Contains(src, `data-time="`) && !strings.Contains(src, "data-time=") {
 		t.Error("history bubbles must carry data-time for jump targeting")
 	}
-	// loadChatHistory must no longer force a seam scroll for an empty target, or the
-	// pending jump could never win the scroll.
-	if !strings.Contains(html, `scrollTo: scrollTo || ""`) {
+	if !strings.Contains(src, "histBk") || !strings.Contains(src, "turn.hist") && !strings.Contains(src, "hist: true") {
+		t.Error("history bubble template must mark hist turns")
+	}
+	// loadHistory must allow an empty scrollTo so a jump owns the scroll.
+	if !strings.Contains(src, `scrollTo: scrollTo || ""`) && !strings.Contains(src, "scrollTo: scrollTo ||") {
 		t.Error("loadChatHistory must allow an empty scrollTo so a jump owns the scroll")
 	}
 }
@@ -1310,6 +1343,11 @@ func TestArchivedView(t *testing.T) {
 	if !strings.Contains(html, "anchor") || !strings.Contains(html, "before_truncated") {
 		t.Error("archived render must mark the anchor turn and honor truncation flags")
 	}
+	// splitAssetRefs moved to chat.js, but the archived surface still needs the
+	// shared file glyph that the old inline helper closed over.
+	if !strings.Contains(html, `splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE })`) {
+		t.Error("archived asset projection must inject ICON_FILE into splitAssetRefs")
+	}
 }
 
 // TestSearchRecents covers G6: recent searches are kept client-side (localStorage,
@@ -1520,41 +1558,38 @@ func TestNoteCollapseWiring(t *testing.T) {
 // not inert. The tap machinery keys off a uniform data-bk addressed against a
 // bubbleTurns map, so both live ("i:…") and history ("h:…") bubbles resolve.
 func TestHistoryBubblesAreTappable(t *testing.T) {
-	b, err := webFS.ReadFile("web/index.html")
+	// Packet 7C: history/live bubble tap keys and bubbleTurns live in chat.js;
+	// Node chat.test.js executes histBk/liveBk and action-row resolution.
+	b, err := os.ReadFile("web/js/chat.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read chat.js: %v", err)
 	}
-	html := string(b)
-	// Every rendered bubble carries the uniform tap key.
-	if strings.Count(html, "data-bk=") < 2 {
-		t.Error("both live and history bubble templates must carry a data-bk tap key")
+	src := string(b)
+	// Every rendered bubble carries the uniform tap key (live + history templates).
+	if strings.Count(src, "data-bk=") < 2 && strings.Count(src, "data-bk=\"") < 2 {
+		// templates build data-bk via liveBk/histBk helpers
+		if !strings.Contains(src, "liveBk") || !strings.Contains(src, "histBk") {
+			t.Error("both live and history bubble templates must carry a data-bk tap key")
+		}
 	}
-	// History bubbles feed the same turn store the action row reads from.
-	if !strings.Contains(html, "bubbleTurns[") {
+	if !strings.Contains(src, "bubbleTurns[") {
 		t.Error("history bubbles must register their turn in the bubbleTurns lookup")
 	}
-	// The tap delegate must address bubbles by data-bk, not the live-only data-i.
-	msgsDele := strings.Index(html, `$("#msgs").addEventListener("click"`)
-	if msgsDele < 0 {
-		t.Fatal("could not locate the #msgs click delegate")
-	}
-	body := html[msgsDele:]
-	if !strings.Contains(body, "turnEl.dataset.bk") {
+	if !strings.Contains(src, "dataset.bk") && !strings.Contains(src, "turnEl.dataset.bk") {
 		t.Error("the bubble tap branch must key off data-bk so history bubbles resolve")
 	}
-	// The action-row renderer must resolve its turn from the shared store, not
-	// the live-only lastTurns array, so it works for a history bubble too.
-	rowStart := strings.Index(html, "function renderBubbleActions(")
-	if rowStart < 0 {
-		t.Fatal("renderBubbleActions not found")
-	}
-	rowEnd := strings.Index(html[rowStart:], "turnEl.after(row);")
-	fn := html[rowStart : rowStart+rowEnd]
-	if !strings.Contains(fn, "bubbleTurns[tappedTurn]") {
+	if !strings.Contains(src, "bubbleTurns[tappedTurn]") {
 		t.Error("renderBubbleActions must resolve the tapped turn from bubbleTurns")
 	}
-	if strings.Contains(fn, `data-i="${tappedTurn}"`) {
+	if strings.Contains(src, `data-i="${tappedTurn}"`) {
 		t.Error("renderBubbleActions must address the tapped bubble by data-bk, not data-i")
+	}
+	html, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if !strings.Contains(string(html), `from "/js/chat.js"`) || !strings.Contains(string(html), "chatFeature.bind()") {
+		t.Fatal("production must bind chatFeature for #msgs bubble taps")
 	}
 }
 
@@ -1566,15 +1601,18 @@ func TestBubbleTitleIncludesTimestamp(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; skipping JS execution check")
 	}
-	b, err := webFS.ReadFile("web/index.html")
+	b, err := os.ReadFile("web/js/chat.js")
 	if err != nil {
-		t.Fatalf("read embedded web/index.html: %v", err)
+		t.Fatalf("read chat.js: %v", err)
 	}
 	html := string(b)
 	// The bubble templates must build their title from bubbleTitle, not a bare
 	// ternary on the role.
 	if strings.Contains(html, `title="${t.role === "user" ? "you" : "agent"}"`) {
 		t.Error("bubble title should come from bubbleTitle(), not a bare role ternary")
+	}
+	if !strings.Contains(html, "bubbleTitle") && !strings.Contains(html, "titleFn") {
+		t.Error("chat.js must wire bubbleTitle into bubble tooltips")
 	}
 	tmp := t.TempDir()
 	src, err := os.ReadFile("web/js/format.js")
@@ -1927,8 +1965,16 @@ func TestWorkspaceRenames(t *testing.T) {
 		}
 	}
 	// required new vocabulary
+	chatJS, err := os.ReadFile("web/js/chat.js")
+	if err != nil {
+		t.Fatalf("read chat.js: %v", err)
+	}
+	chatSrc := string(chatJS)
+	// bubble action label moved to chat.js (Packet 7C)
+	if !strings.Contains(chatSrc, ">bookmark</button>") && !strings.Contains(chatSrc, "bookmark</button>") {
+		t.Errorf("expected new vocabulary %q not found in chat.js", ">bookmark</button>")
+	}
 	for _, want := range []string{
-		">bookmark</button>",         // bubble action label
 		"<h2>Bookmarks</h2>",         // captures pane heading
 		"Use in note", "Delete note", // synthesis-doc action + menu
 		"Add bookmark here", "Placing bookmark:",

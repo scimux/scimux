@@ -405,6 +405,7 @@ import {
 } from "/js/api.js";
 import { createCardsFeature } from "/js/cards.js";
 import { createMapFeature } from "/js/map.js";
+import { createChatFeature, splitAssetRefs } from "/js/chat.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -422,7 +423,7 @@ let nodes = [];              // last /api/state nodes
 let unadopted = [];
 let sel = localStorage.getItem("scimux-sel") || "";
 let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
-let termOpen = false;        // terminal unfolded below the last bubble (per selection)
+/* termOpen lives inside createChatFeature (Packet 7C). */
 let cardTab = "current";
 let laneFilter = localStorage.getItem("scimux-lanefilter") || "";
 let attnFoldOpen = false;   /* "Input needed" disclosure; folded on scope change */
@@ -432,24 +433,12 @@ let actionCard = "";
 let editingDesc = "";
 let editingTitle = "";
 let editingTitleScope = "";   /* "cards" | "chat" — the editor renders only where it was opened */
-let chatDetailsOpen = false;
-let editingChatDesc = false;
-let chatDetailSavedUntil = 0;
-/* last context-gauge reading, for the details meta line (per node — a stale
-   value from the previous selection must never show under a new chat) */
-let chatCtxPct = { node: "", pct: null };
-/* optimistic echo of the last sent prompt: the store's copy of a user turn
-   arrives only after the agent CLI logs it and the poller mirrors it (a few
-   seconds on tmux nodes) — until then the sent text renders immediately as a
-   translucent bubble, turning fully opaque when the real turn replaces it */
-let sentEcho = null;   /* {node, text, at} */
-let suppressAttentionUntil = {};
+/* chatDetailsOpen / editingChatDesc / chatDetailSavedUntil / chatCtxPct /
+   sentEcho / suppressAttentionUntil / chatSig / lastTurns / bubbleTurns
+   live inside createChatFeature (Packet 7C). */
 let stateEtag = "";
 let cardsSig = "";
-let chatSig = "";
 let sysPrev = null;
-let lastTurns = [];          // turns behind the rendered bubbles (copy/fork source)
-let bubbleTurns = {};        // data-bk key -> turn, for every rendered bubble (live "i:n" + history "h:seg:turn")
 
 const isDesktop = () => matchMedia("(min-width: 900px)").matches;
 const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
@@ -549,7 +538,7 @@ async function loadUI(){
   uiRev = next.rev;
   uiOps = next.ops;
   uiLoaded = next.loaded;
-  chatSig = "";
+  chatFeature.invalidate();
   applyRemoteUI();
   if (next.shouldFlush) flushUI();
 }
@@ -744,84 +733,9 @@ function copyText(s){
 
 /* esc / mdInline / md imported from /js/format.js */
 
-/* one attachment tile (thumbnail for images, chip for other files), sourced
-   from the raw upload staging path. A tile whose bytes 404 removes itself
-   (onerror) — so a marker pointing outside the node's uploads renders
-   nothing. Used only by the pre-send echo bubble now (refTilesHTML, below);
-   persisted turns render via assetTile/splitAssetRefs instead (P5), since
-   by the time a turn is polled back the upload is already a durable asset. */
-const RASTER_RE = /\.(png|jpe?g|gif|webp)$/i;   /* safe raster types (mirror of the server whitelist) */
-/* Reserve a thumbnail's rendered box once we've measured it (see the #msgs
-   load listener). The chat innerHTML is rebuilt on every poll while the
-   terminal is unfolded, so a freshly created <img loading="lazy"> that
-   collapsed to zero height until its (cached) bytes re-paint would make the
-   whole pane shorten-then-grow each tick — a visible scroll flicker. An
-   explicit box on the anchor keeps the layout height stable across rebuilds;
-   the first render of a never-seen image still reflows once (unavoidable). */
-const tileBox = {};
-const tileStyle = key => {
-  const b = tileBox[key];
-  return b ? ` style="width:${b.w}px;height:${b.h}px"` : "";
-};
-function attTile(nodeId, leaf, isImage){
-  const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
-  const name = leaf.replace(/^[0-9a-f]{8}-/, "");     /* drop the storage token */
-  /* only whitelisted raster types render as a thumbnail; SVG and everything
-     else become a download chip — the server serves them Content-Disposition:
-     attachment, so an <img>/new-tab open would break or download anyway */
-  isImage = isImage && RASTER_RE.test(name);
-  return isImage
-    ? `<a class="attthumb" data-tkey="${esc(leaf)}"${tileStyle(leaf)} href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
-      `<img src="${url}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
-    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
-      `${ICON_FILE}<span>${esc(name)}</span></a>`;
-}
-/* echo path: build tiles straight from the uploaded refs (no marker to parse) */
-function refTilesHTML(refs, nodeId){
-  if (!refs || !refs.length) return "";
-  const tiles = refs.map(r =>
-    attTile(nodeId, (r.path || "").split("/").pop(), /^image\//.test(r.mime || ""))).join("");
-  return `<div class="attrow">${tiles}</div>`;
-}
-
-/* Session-asset render (P5): the server projects attachment/generated-file
-   references into scimux-asset:<id> Markdown at read time (see
-   internal/asset.Project, upload-design.md) rather than rewriting the
-   stored log; the chat response's "assets" map carries the metadata (and,
-   for inline assets, the bytes) needed to render each reference the
-   returned turns actually contain. A reference the server never got to
-   project — an old log written before this mechanism existed — is left as
-   plain Markdown text by the server itself, so there is no separate
-   legacy-marker renderer here either: this is the only path (hard cut).
-   A reference whose ID is missing from the assets map (should not happen
-   in practice, but the design requires a defined outcome for it) renders
-   an inert "unavailable" chip, never a raw path or a broken image. */
-const ASSET_REF_RE = /(!?)\[([^\]]*)\]\(scimux-asset:([\w-]+)\)/g;
-function assetTile(nodeId, id, alt, rec){
-  if (!rec){
-    return `<span class="attfile missing" title="${esc(alt || id)} — unavailable">` +
-           `${ICON_FILE}<span>${esc(alt || "file")} (unavailable)</span></span>`;
-  }
-  const url = `/api/nodes/${encodeURIComponent(nodeId)}/assets/${encodeURIComponent(id)}`;
-  const name = rec.name || alt || "file";
-  const isImage = /^image\//.test(rec.mime || "");
-  const src = rec.inline && rec.data ? rec.data : url;
-  return isImage
-    ? `<a class="attthumb" data-tkey="${esc(id)}"${tileStyle(id)} href="${url}" target="_blank" rel="noopener" title="${esc(name)}">` +
-      `<img src="${src}" alt="${esc(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
-    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${esc(name)}">` +
-      `${ICON_FILE}<span>${esc(name)}</span></a>`;
-}
-function splitAssetRefs(text, nodeId, assets){
-  ASSET_REF_RE.lastIndex = 0;
-  if (!ASSET_REF_RE.test(text)) return { clean: text, html: "" };
-  const tiles = [];
-  const clean = text.replace(ASSET_REF_RE, (_m, _bang, alt, id) => {
-    tiles.push(assetTile(nodeId, id, alt, (assets || {})[id]));
-    return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
-}
+/* Attachment/session-asset tile builders + splitAssetRefs live in chat.js
+   (Packet 7C). The archived read-only surface imports splitAssetRefs for the
+   same inert-missing-chip projection. */
 
 /* ---------- statusbar ---------- */
 function metric(label, disp, pct, prevPct){
@@ -1074,7 +988,7 @@ const cardsFeature = createCardsFeature({
   alert: msg => alert(msg),
   confirm: msg => confirm(msg),
   removeNode: id => { nodes = nodes.filter(x => x.id !== id); },
-  invalidateChatSig: () => { chatSig = ""; },
+  invalidateChatSig: () => { chatFeature.invalidate(); },
   invalidateMapSig: () => { mapFeature.invalidate(); },
   invalidateStateEtag: () => { stateEtag = ""; },
   scheduleTick: () => setTimeout(tick, 200),
@@ -1126,7 +1040,7 @@ async function exitThread(id){
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(id)}/exit`, { method: "POST" });
     updateLocalNode(res.node);
-    cardsSig = ""; chatSig = ""; mapFeature.invalidate();
+    cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
     renderCards(); renderChatHead(); renderMap();
     if (res.closed && !res.stopped && res.reason === "kill_failed")
       alert(`"${n.title}" is marked closed, but scimux could not stop its process — it may still be running.`);
@@ -1197,6 +1111,87 @@ function renderMap(){ mapFeature.render(); }
 function renderMapTabs(){ mapFeature.renderTabs(); }
 function setMapFull(on){ mapFeature.setFull(on); }
 
+/* Chat feature factory — owns head/details, msgs, terminal, keys, workpulse. */
+let pendingJump = null;    // jump-to-source in flight (set by bookmarks/search; consumed by chat)
+const chatFeature = createChatFeature({
+  roots: {
+    chathead: $("#chathead"),
+    chattitle: $("#chattitle"),
+    chatmission: $("#chatmission"),
+    chatdetails: $("#chatdetails"),
+    chatdesc: $("#chatdesc"),
+    chatdescinput: $("#chatdescinput"),
+    chatdot: $("#chatdot"),
+    chatmeta: $("#chatmeta"),
+    chatagentlogo: $("#chatagentlogo"),
+    infobtn: $("#infobtn"),
+    msgs: $("#msgs"),
+    msgwrap: $("#msgwrap"),
+    chatloading: $("#chatloading"),
+    gauge: $("#gauge"),
+    gaugefill: $("#gaugefill"),
+    keyrow: $("#keyrow"),
+    convtools: $("#convtools"),
+    termtoggle: $("#termtoggle"),
+    scrollend: $("#scrollend"),
+    workpulse: $("#workpulse"),
+  },
+  document,
+  window,
+  CSS,
+  setTimeout,
+  clearTimeout,
+  esc,
+  md,
+  fmtWhen,
+  fmtBubbleTime,
+  bubbleTitle,
+  hashStr,
+  api,
+  nodes: () => nodes,
+  sel: () => sel,
+  selGen: () => selGen,
+  nodeById: id => nodeById(id),
+  editingTitle: () => editingTitle,
+  editingTitleScope: () => editingTitleScope,
+  hardAttention,
+  laneColor,
+  agentLogo,
+  icons: {
+    ICON_TERM, ICON_CHECK, ICON_CHEV_UP, ICON_CHEV_DOWN,
+    ICON_BRANCH, ICON_INTO, ICON_COPY, ICON_DOWNALL, ICON_FILE,
+  },
+  bookmarks: () => UI.bookmarks,
+  uiMutate,
+  stampAddress: (b, t) => stampAddress(b, t),
+  copyText: s => copyText(s),
+  forkFromTurn: (text, parent) => forkFromTurn(text, parent),
+  setComposerBusy: v => setComposerBusy(v),
+  setComposerClosed: v => setComposerClosed(v),
+  setAttachAvail: v => setAttachAvail(v),
+  setBookmarksBackLabel: t => { $("#bookmarksback").textContent = "‹ " + t; },
+  updateLocalNode: n => updateLocalNode(n),
+  invalidateCardsSig: () => { cardsSig = ""; },
+  invalidateMapSig: () => { mapFeature.invalidate(); },
+  renderCards: () => renderCards(),
+  renderMap: () => renderMap(),
+  getPendingJump: () => pendingJump,
+  setPendingJump: v => { pendingJump = v; },
+  toast: msg => toast(msg),
+  alert: msg => alert(msg),
+  tick: () => tick(),
+  scheduleTick: ms => setTimeout(tick, ms),
+  isDesktop,
+  startTitleEdit: (id, scope) => startTitleEdit(id, scope),
+  longpress: (container, selector, fn) => longpress(container, selector, fn),
+});
+function renderChatHead(){ chatFeature.renderHead(); }
+async function refreshChat(){ return chatFeature.render(); }
+function loadChatHistory(id, st){ return chatFeature.loadHistory(id, st); }
+function jumpChatToNow(){ chatFeature.jumpToNow(); }
+function restartWorkPulse(){ chatFeature.restartWorkPulse(); }
+function paintEchoNow(dest){ chatFeature.paintEcho(dest); }
+
 
 /* Shell navigation into/out of Journeys (not map-local chrome). */
 $("#journeybtn").addEventListener("click", () => {
@@ -1262,7 +1257,7 @@ function startTitleEdit(id, scope){
   editingTitleScope = scope || "cards";
   actionCard = "";
   editingDesc = "";
-  cardsSig = ""; chatSig = ""; mapFeature.invalidate();
+  cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
   renderCards(); renderChatHead(); renderMap();
   focusTitleEditor(id);
 }
@@ -1270,7 +1265,7 @@ function cancelTitleEdit(id){
   if (editingTitle !== id) return;
   editingTitle = "";
   editingTitleScope = "";
-  cardsSig = ""; chatSig = ""; mapFeature.invalidate();
+  cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
   renderCards(); renderChatHead(); renderMap();
 }
 async function commitTitleEdit(id, raw){
@@ -1285,7 +1280,7 @@ async function commitTitleEdit(id, raw){
   const cur = nodeById(id);
   editingTitle = "";
   editingTitleScope = "";
-  cardsSig = ""; chatSig = ""; mapFeature.invalidate();
+  cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
   renderCards(); renderChatHead(); renderMap();
   if (cur && cur.title === title) return;
   try {
@@ -1294,7 +1289,7 @@ async function commitTitleEdit(id, raw){
       body: JSON.stringify({ title }),
     });
     updateLocalNode(n);
-    cardsSig = ""; chatSig = ""; mapFeature.invalidate();
+    cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
     renderCards(); renderChatHead(); renderMap();
   } catch (err) { alert(err.message); }
 }
@@ -1305,11 +1300,12 @@ let selGen = 0;
 /* hashStr imported from /js/lanes.js */
 
 function select(id){
-  if (sel !== id){ chatSig = ""; termOpen = false; mapFeature.invalidate(); selGen++; tappedTurn = "";
-    chatHist = { node: "", segs: null, scrollTo: "", assets: {} }; }   /* history is per-visit, reloaded on demand */
+  if (sel !== id){ chatFeature.onSelectChange(); mapFeature.invalidate(); selGen++; }   /* history is per-visit, reloaded on demand */
+  else {
+    /* same node re-select still discards a pending "use as description" */
+    chatFeature.onReselect();
+  }
   sel = id;
-  editingChatDesc = false;   /* a pending "use as description" is discarded here */
-  chatDetailSavedUntil = 0;
   localStorage.setItem("scimux-sel", sel);
   const ta = $("#prompt");
   setPromptText(localStorage.getItem("scimux-draft:" + sel) || "");
@@ -1330,56 +1326,6 @@ function select(id){
   renderMap();   /* full-screen wall map: move the selection marker + action bar */
   refreshChat();
 }
-function renderChatHead(){
-  const head = $("#chathead");
-  const toggle = $("#infobtn");
-  const details = $("#chatdetails");
-  head.classList.toggle("details-open", chatDetailsOpen);
-  head.classList.toggle("desc-editing", editingChatDesc);
-  details.hidden = !chatDetailsOpen;
-  details.setAttribute("aria-hidden", details.hidden ? "true" : "false");
-  const n = nodeById(sel);
-  /* Messages-style: tapping the header opens the details, so the "open"
-     chevron is redundant chrome — the button only appears as the collapse
-     control (or the save check while the description is being edited) */
-  const saving = editingChatDesc || Date.now() < chatDetailSavedUntil;
-  toggle.hidden = !n || (!chatDetailsOpen && !saving);
-  if (n && editingTitle === n.id && editingTitleScope === "chat"){
-    /* renderChatHead runs on every poll tick — recreating the input each
-       time would clobber the user's in-progress edit (invariant). Build it
-       once; it carries its own state until commit/cancel. */
-    if (!$("#chattitle").querySelector(`[data-title-input="${CSS.escape(n.id)}"]`))
-      $("#chattitle").innerHTML = `<input class="title-edit" data-title-input="${esc(n.id)}" value="${esc(n.title)}">`;
-  } else {
-    $("#chattitle").textContent = n ? n.title : "scimux";
-  }
-  $("#chatmission").textContent = "";
-  /* the Notes pane's back button names its destination (HIG), like every
-     other back button — that destination is this chat */
-  $("#bookmarksback").textContent = "‹ " + (n ? n.title : "Chat");
-  $("#chatdot").className = "dot " + (n ? (hardAttention(n) ? "attention" : n.live) : "");
-  $("#chatdot").style.background = n && !hardAttention(n) && !["exited","unavailable"].includes(n.live)
-    ? laneColor(n.lane_id) : "";
-  setComposerClosed(!!(n && n.ended_at));
-  if (!n) return;
-  const saved = Date.now() < chatDetailSavedUntil;
-  toggle.innerHTML = editingChatDesc || saved ? ICON_CHECK : (chatDetailsOpen ? ICON_CHEV_UP : ICON_CHEV_DOWN);
-  toggle.classList.toggle("saving", editingChatDesc || saved);
-  toggle.setAttribute("aria-label", editingChatDesc ? "save description" : (chatDetailsOpen ? "hide details" : "show details"));
-  $("#chatagentlogo").innerHTML = agentLogo(n.agent);
-  $("#chatagentlogo").title = n.agent || "agent";
-  const ctx = chatCtxPct.node === n.id && chatCtxPct.pct != null
-    ? `context ${Math.round(chatCtxPct.pct)}%` : "";
-  $("#chatmeta").textContent = [n.agent || "agent", n.model || "default", n.effort || "", ctx].filter(Boolean).join(" · ");
-  const desc = n.description || n.prompt || "";
-  $("#chatdesc").textContent = desc || "No description yet.";
-  const input = $("#chatdescinput");
-  if (!editingChatDesc || input.dataset.node !== n.id){
-    input.value = desc;
-    input.dataset.node = n.id;
-  }
-}
-
 document.addEventListener("keydown", e => {
   const titleInput = e.target.closest("[data-title-input]");
   if (titleInput){
@@ -1394,9 +1340,7 @@ document.addEventListener("keydown", e => {
   }
   if (e.target === $("#chatdescinput") && e.key === "Escape"){
     e.preventDefault();
-    editingChatDesc = false;
-    chatSig = "";
-    renderChatHead();
+    chatFeature.cancelDescEdit();
     return;
   }
   /* Escape exits full-screen (keyboard parity — .backbtn is hidden ≥900px).
@@ -1415,477 +1359,10 @@ document.addEventListener("focusout", e => {
   if (titleInput) commitTitleEdit(titleInput.dataset.titleInput, titleInput.value);
 });
 
-async function saveChatDescription(){
-  if (!sel || !nodeById(sel)) return;
-  const id = sel;
-  const description = $("#chatdescinput").value.trim();
-  try {
-    const n = await api(`/api/nodes/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ description }),
-    });
-    updateLocalNode(n);
-    editingChatDesc = false;
-    chatDetailsOpen = true;
-    chatDetailSavedUntil = Date.now() + 2000;
-    cardsSig = ""; chatSig = ""; mapFeature.invalidate();
-    renderCards(); renderChatHead(); renderMap();
-    setTimeout(() => {
-      if (Date.now() >= chatDetailSavedUntil){
-        chatDetailSavedUntil = 0;
-        renderChatHead();
-      }
-    }, 2000);
-  } catch (err) { alert(err.message); }
-}
+/* Chat head/details, loading chrome, terminal, keyrow, msgs rebuild, bubble
+   actions, attention suppression, sent-echo, and scroll live in chat.js
+   (Packet 7C). Shell keeps document title-edit key handlers above. */
 
-$("#infobtn").addEventListener("click", () => {
-  if (editingChatDesc){ saveChatDescription(); return; }
-  chatDetailsOpen = !chatDetailsOpen;
-  renderChatHead();
-});
-/* tap anywhere on the header row (not its buttons, not the open details
-   region) to toggle the details — the long-press title edit stays distinct
-   via the global lpFired click-swallower */
-$("#chathead").addEventListener("click", e => {
-  if (!nodeById(sel) || editingChatDesc) return;
-  if (e.target.closest("button, input, textarea, a, #chatdetails")) return;
-  if (!e.target.closest(".toprow, #chatmission")) return;
-  chatDetailsOpen = !chatDetailsOpen;
-  renderChatHead();
-});
-
-/* one calm pulse above the prompt — CSS handles the breathing; we only
-   flip the class from the mechanical active state */
-function setWorkPulse(active){ $("#workpulse").classList.toggle("on", !!active); }
-/* the scan bar's translate keyframes are percentages of its own width; a
-   running animation doesn't re-resolve them when a column fold (map/notes)
-   resizes #chat, so it keeps scanning the old width. Folds only change
-   width in the desktop column layout — restart (reflow in between) so the
-   next frame is measured against the new box. */
-function restartWorkPulse(){
-  if (!isDesktop()) return;
-  const el = $("#workpulse");
-  if (!el.classList.contains("on")) return;
-  el.classList.remove("on");
-  void el.offsetWidth;
-  el.classList.add("on");
-}
-let chatLoadTimer = null, chatLoadToken = 0;
-function clearChatLoad(){
-  if (chatLoadTimer) clearTimeout(chatLoadTimer);
-  chatLoadTimer = null;
-  $("#msgwrap").classList.remove("loading");
-  $("#chatloading").hidden = true;
-}
-/* The blur+spinner is a *cold-load* indicator only — a first open or a node
-   switch, where #msgs is empty or still showing the previous node's content
-   and there is a genuine wait with nothing correct to show. `cold` is false on
-   the 2s background poll of an already-rendered node: refreshing that content
-   must never blur it, however slow the network. Blurring on every slow poll is
-   what made the overlay flicker on unstable connections. */
-function beginChatLoad(id, gen, cold){
-  const token = ++chatLoadToken;
-  clearChatLoad();
-  if (cold) chatLoadTimer = setTimeout(() => {
-    if (token !== chatLoadToken || sel !== id || selGen !== gen) return;
-    $("#msgwrap").classList.add("loading");
-    $("#chatloading").hidden = false;
-  }, 300);
-  return () => {
-    if (token !== chatLoadToken) return;
-    clearChatLoad();
-  };
-}
-function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek){
-  setWorkPulse(live === "active" && !mustShowPane);
-  setComposerBusy(live === "active");
-  $("#convtools").hidden = false;
-  const ct = $("#termtoggle");
-  ct.innerHTML = ICON_TERM;
-  ct.classList.toggle("on", showPeek);
-  ct.disabled = forcePeek;                  /* required evidence can't be folded */
-  ct.setAttribute("aria-label", showPeek ? "hide terminal" : "show terminal");
-}
-const DEC_LABELS = {
-  no_transcript: "No transcript yet \u2014 showing the terminal",
-  no_structured_request: "Showing the terminal",
-  pane_active: "Agent is working",
-  waiting_question: "Agent is waiting for your answer",
-  waiting_approval: "Agent needs your approval",
-  quiet_inspect: "Quiet \u2014 inspect the terminal",
-  /* ACP transport (pi/opencode): no pane, so "terminal" reads as the event log */
-  turn_active: "Agent is working",
-  turn_error: "The agent finished without output \u2014 check the log",
-};
-let termFull = false;
-function attentionSuppressed(id){
-  if (!id) return false;
-  if ((suppressAttentionUntil[id] || 0) > Date.now()) return true;
-  delete suppressAttentionUntil[id];
-  return false;
-}
-function collapseAttentionUI(id){
-  suppressAttentionUntil[id] = Date.now() + 2500;
-  $("#keyrow").innerHTML = "";
-  document.querySelectorAll("#msgs .peekblock, #msgs .pending").forEach(el => el.remove());
-}
-
-/* earlier /clear segments, loaded on demand (the polled chat stays
-   segment-scoped — history is a per-tap read, not poll payload): segs = the
-   whole log's surfaces from ?history=1, rendered above the live segment at
-   full contrast; scrollTo = a one-shot scroll target consumed by the next
-   render ("seam" = the live segment's own divider, else an earlier stop's
-   seam time from the metro map) */
-let chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
-async function loadChatHistory(id, scrollTo){
-  try {
-    const d = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
-    if (sel !== id) return;   /* user moved on while it loaded */
-    chatHist = { node: id, segs: d.segments || [], scrollTo: scrollTo || "", assets: d.assets || {} };
-    chatScrollBottom = false;   /* riding back wins over a pending "go to now" */
-    chatSig = "";
-    refreshChat();
-  } catch (err) { alert(err.message); }
-}
-/* head-station tap = "go to now": a deterministic jump to the chat's newest
-   turn. The atBottom heuristic can't do this — after a past-stop ride-back
-   the view is parked at a seam (not at the bottom), and re-selecting the
-   same node often changes no render signature at all. */
-let chatScrollBottom = false;
-/* Pin the chat to the bottom. A late-loading image that reflows the layout
-   is re-pinned by the #msgs "load" listener below (which also measures the
-   tile so later rebuilds reserve its box). */
-function pinChatBottom(el){ el.scrollTop = el.scrollHeight; }
-/* First paint of a never-seen thumbnail grows the pane once; record its
-   rendered box so every subsequent rebuild reserves the same height (no
-   collapse-then-grow flicker), and re-pin to the bottom if the reader is
-   still parked there — same 80px slack as the atBottom heuristic, so a load
-   never yanks back someone who has scrolled up. capture:true because the
-   image "load" event does not bubble. */
-$("#msgs").addEventListener("load", e => {
-  const img = e.target;
-  if (!img || img.tagName !== "IMG") return;
-  const a = img.closest(".attthumb");
-  if (a && a.dataset.tkey && a.offsetHeight){
-    tileBox[a.dataset.tkey] = { w: a.offsetWidth, h: a.offsetHeight };
-  }
-  const el = $("#msgs");
-  if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
-}, true);
-function jumpChatToNow(){
-  chatHist.scrollTo = "";       /* a pending ride-back yields to the newer intent */
-  /* select() clears chatSig only on a node switch — so a non-empty sig means
-     the chat on screen is already this node's: jump immediately and leave no
-     flag behind (a lingering flag would yank a user who scrolled up right
-     after). On a switch the content isn't there yet; the flag is consumed by
-     the next render. */
-  if (chatSig) pinChatBottom($("#msgs"));
-  else chatScrollBottom = true;
-}
-async function refreshChat(){
-  const n = nodeById(sel);
-  if (!n){ setComposerBusy(false); clearChatLoad(); return; }
-  renderChatHead();
-  const gen = selGen;
-  const endChatLoad = beginChatLoad(n.id, gen, !chatSig);
-  let d;
-  try { d = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
-  catch { endChatLoad(); return; }
-  if (gen !== selGen || sel !== n.id) return;   /* selection moved on */
-  let chromeChanged = false;
-  if (d.live && n.live !== d.live){
-    n.live = d.live;
-    chromeChanged = true;
-  }
-  if ((d.attention || "") !== (n.attention || "")){
-    n.attention = d.attention || "";
-    chromeChanged = true;
-  }
-  if (chromeChanged){
-    cardsSig = ""; mapFeature.invalidate();
-    renderCards(); renderChatHead(); renderMap();
-  }
-  /* degrade to the pane snapshot whenever no useful turns exist \u2014 missing,
-     young, unreadable, or format-incompatible transcripts all end up here */
-  const turns = d.turns || [];
-  /* the + appears only once the *current* chat surface has a turn — its opening
-     prompt is text-only (see setAttachAvail). d.turns is the segment after the
-     last source seam, so a /clear turns the page back to an empty surface and
-     the + hides again until the first post-clear prompt lands: same rule as a
-     brand-new activity. */
-  setAttachAvail(turns.length > 0);
-  /* the echo retires once the store serves the turn (or after a generous
-     timeout \u2014 the unconfirmed-delivery flow owns the failure story) */
-  if (sentEcho && sentEcho.node === n.id){
-    /* the store's copy of the turn is not byte-identical to the draft: the
-       tmux paste turns \n into \r, and the CLI may reflow whitespace —
-       compare whitespace-insensitively. And since sends are serialized per
-       node, any user turn that lands after the send *is* this send: retire
-       on arrival even if the text was reshaped beyond recognition. */
-    const norm = s => (s || "").replace(/\s+/g, " ").trim();
-    const iLast = turns.reduce((a, t, i) => t.role === "user" ? i : a, -1);
-    let landed = iLast >= 0 &&
-      (norm(turns[iLast].text) === norm(sentEcho.text) ||
-       (sentEcho.seen != null && iLast >= sentEcho.seen));
-    /* Cold start: on the first send after selecting a node the chat had not
-       rendered yet, so `seen` is null and a CLI-reshaped prompt never
-       text-matches — the echo then lingered beside the real turn until the
-       180s timeout (below-cap 2026-07-20). Sends are serialized per node, so
-       baseline the user-turn count on the first post-send refresh and retire
-       once it grows: the next user turn to appear is unambiguously this send. */
-    if (!landed && sentEcho.seen == null){
-      const users = turns.reduce((a, t) => a + (t.role === "user" ? 1 : 0), 0);
-      if (sentEcho.base == null) sentEcho.base = users;
-      else if (users > sentEcho.base) landed = true;
-    }
-    if (landed || Date.now() - sentEcho.at > 180000) sentEcho = null;
-  }
-  const echo = sentEcho && sentEcho.node === n.id ? sentEcho : null;
-  /* asset IDs are unique per node regardless of which segment minted them,
-     so the live poll's and the on-demand history's asset maps merge freely —
-     a priorSegs turn and a live turn never contend for the same key. */
-  const assets = Object.assign({}, chatHist.assets || {}, d.assets || {});
-  const unconfirmed = d.delivery === "unconfirmed";
-  if (!n.attention) delete suppressAttentionUntil[n.id];
-  const attentionHidden = !!n.attention && attentionSuppressed(n.id);
-  const mustShowPane = !attentionHidden && (!!d.fallback || !!n.attention || unconfirmed);
-  /* a structured node right after a /clear page turn is a calm state — empty
-     segment, quiet, nothing to approve. Don't force the log peek open (it
-     would resurface the dead conversation) and never the attention label */
-  const freshSurface = !turns.length && !mustShowPane &&
-                       d.source === "acp" && (d.prior_turns || 0) > 0;
-  /* forced: the pane is required evidence (blocker) or the only content
-     (no readable turns yet); otherwise the window-maximize toggle governs it */
-  const forcePeek = mustShowPane || (!turns.length && !freshSurface);
-  const showPeek = forcePeek || termOpen;
-  let peekText = "";
-  if (showPeek){
-    try {
-      peekText = await api(`/api/nodes/${encodeURIComponent(n.id)}/peek${mustShowPane ? "?mode=visible" : ""}`);
-    } catch {}
-    if (gen !== selGen || sel !== n.id) return;
-  }
-
-  const gauge = $("#gauge");
-  if (d.ctx_window){
-    gauge.hidden = false;
-    const fill = $("#gaugefill");
-    fill.style.width = Math.min(100, d.ctx_pct || 0) + "%";
-    fill.className = (d.ctx_pct || 0) >= 80 ? "high" : "";
-  } else {
-    gauge.hidden = true;
-  }
-  const pct = d.ctx_window ? Math.min(100, d.ctx_pct || 0) : null;
-  if (chatCtxPct.node !== n.id || chatCtxPct.pct !== pct){
-    chatCtxPct = { node: n.id, pct };
-    renderChatHead();   /* keep the details meta line's context % fresh */
-  }
-  applyChatActivityChrome(d.live, mustShowPane, forcePeek, showPeek);
-
-  /* on-demand history: render every surface that predates the live one; the
-     live segment itself keeps coming from the poll (fresher — history is a
-     snapshot from tap time). Strict < drops the history copy of the live
-     segment: both sides date a surface by the same seam/backdate rule. */
-  const hist = chatHist.node === n.id && chatHist.segs ? chatHist.segs : null;
-  const curT = Date.parse(d.chat_started || "") || Infinity;
-  const priorSegs = hist ? hist.filter(s => (Date.parse(s.start || s.seam || "") || 0) < curT) : [];
-  const sig = [n.id, d.live, n.attention, attentionHidden, d.delivery, showPeek, termOpen, termFull,
-               d.source, d.perm_title, (d.perm_options || []).map(o => o.key + o.name).join(","),
-               d.prior_turns || 0, d.chat_started || "", echo ? hashStr(echo.text) : "",
-               hist ? "h" + priorSegs.length : "",
-               hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
-               hashStr(peekText)].join("|");
-  if (sig === chatSig){
-    /* nothing re-rendered, but a "go to now" tap may still be pending
-       (jumpChatToNow's immediate jump can race an in-flight render) */
-    if (chatScrollBottom){ pinChatBottom($("#msgs")); chatScrollBottom = false; }
-    endChatLoad();
-    return;
-  }
-  chatSig = sig;
-  lastTurns = turns;
-  bubbleTurns = {};   /* rebuilt from the bubbles rendered just below */
-
-  /* the terminal always renders inline as the last block below the bubbles \u2014
-     never a pinned overlay above the chat. When the agent blocks on the
-     operator (attention, fallback, unconfirmed send) or has no readable turns
-     yet, it is forced open, labelled, and cannot be folded; otherwise the
-     window-maximize toggle in the composer row governs it. The key row of
-     answer buttons sits directly beneath, right under the terminal. */
-  const el = $("#msgs");
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  const label = unconfirmed
-    ? "Send unconfirmed \u2014 check the terminal"
-    : (DEC_LABELS[d.reason] || "Needs your attention");
-  el.innerHTML =
-    /* earlier surfaces: a loader pill until fetched, then the prior segments
-       as normal full-contrast bubbles under per-surface seam dividers —
-       reading the journey's past is the metro map's point. History bubbles
-       carry no data-i (the tap-action/copy machinery indexes the live
-       lastTurns only). */
-    (d.prior_turns > 0 && !hist
-      ? `<div class="chatseam"><button class="histload">show earlier history &middot; ${d.prior_turns} turn${d.prior_turns === 1 ? "" : "s"}</button></div>` : "") +
-    priorSegs.map((s, si) =>
-      `<div class="chatseam histseam" data-seam="${esc(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${esc(fmtWhen(s.start))}</span></div>` +
-      s.turns.map((t, ti) => {
-        const h = splitAssetRefs(t.text, n.id, assets);
-        /* history bubbles are tappable like live ones: a stable per-segment key
-           addresses them (times may be missing/duplicated across a segment) and
-           registers the turn so the action row resolves it. */
-        const bk = `h:${si}:${ti}`;
-        bubbleTurns[bk] = t;
-        return `
-      <div class="turn hist ${t.role === "user" ? "user" : "assistant"}${h.html && !h.clean ? " media" : ""}" data-bk="${bk}" data-time="${esc(t.time || "")}" data-uid="${esc(t.uid || "")}" data-segment="${t.segment || 0}" data-record="${t.record || 0}">
-        <div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(h.clean)}${h.html}</div>
-      </div>`;
-      }).join("")
-    ).join("") +
-    /* every chat opens with its start stamp — the same header a /clear
-       page-turn writes, so a fresh chat and a cleared one read alike (the
-       prior history then sits behind the seam in the same log) */
-    (d.chat_started
-      ? `<div class="chatseam curseam"><span>chat started ${esc(fmtWhen(d.chat_started))}</span></div>` : "") +
-    (!turns.length
-      ? (freshSurface
-          ? `<div class="pending">fresh chat \u2014 send a prompt</div>`
-          : `<div class="pending">${d.pending
-              ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
-              : "no readable transcript \u2014 showing the raw terminal below"}</div>`) : "") +
-    turns.map((t, i) => {
-      const a = splitAssetRefs(t.text, n.id, assets);
-      const bk = `i:${i}`;
-      bubbleTurns[bk] = t;
-      return `
-      <div class="turn ${t.role === "user" ? "user" : "assistant"}${a.html && !a.clean ? " media" : ""}" data-i="${i}" data-bk="${bk}">
-        <div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(a.clean)}${a.html}</div>
-      </div>`;
-    }).join("") +
-    (echo ? `
-      <div class="turn user echo">
-        <div class="bubble" title="you — delivering">${md(echo.text)}</div>
-      </div>` : "") +
-    (showPeek && peekText
-      ? `<div class="peekblock">
-           <div class="peekhead">
-             <span class="plabel">${forcePeek ? esc(label) : "Terminal"}</span>
-             <button id="termfull" aria-label="${termFull ? "shrink terminal" : "expand terminal"}">${termFull ? "\u2921 shrink" : "\u2922 expand"}</button>
-           </div>
-           <div class="peek${termFull ? " full" : ""}">${esc(peekText)}</div>` +
-         (unconfirmed
-           ? `<div class="pnotice">Delivery to the terminal could not be confirmed.
-                <button id="decresolve">I checked \u2014 resume sending</button></div>`
-           : "") +
-        `</div>`
-      : "");
-  renderBubbleActions();                    /* re-attach the tapped bubble's icon row */
-  /* one-shot after history loads: land the reader at the requested surface
-     instead of snapping to the bottom. "seam" (the loader pill) parks the
-     live segment's divider at the viewport bottom so the freshly revealed
-     past fills the view; a stop time (metro map) starts at that surface. */
-  let histScrolled = false;
-  if (hist && chatHist.scrollTo){
-    const t = chatHist.scrollTo;
-    let target = null;
-    if (t !== "seam"){
-      /* a stop's surface = the earliest seam at-or-after the stop time.
-         Time comparison, not string equality: a claude /clear writes its
-         clear-tagged seam at retire, but the fresh turns land behind the
-         LATER mechanical relink seam — the stop time never string-matches
-         the surface that actually holds its conversation */
-      const T = Date.parse(t) || 0;
-      target = [...el.querySelectorAll(".histseam")]
-        .find(s2 => (Date.parse(s2.dataset.seam || "") || 0) >= T) || null;
-    }
-    if (!target) target = el.querySelector(".curseam") || el.querySelector(".histseam");
-    if (target){ target.scrollIntoView({ block: t === "seam" ? "end" : "start" }); histScrolled = true; }
-    chatHist.scrollTo = "";
-  }
-  if (chatScrollBottom){ pinChatBottom(el); chatScrollBottom = false; histScrolled = true; }
-  if (!histScrolled && !consumePendingJump(el, turns, d.prior_turns || 0) && (atBottom || forcePeek)) pinChatBottom(el);
-  const pk = el.querySelector(".peek");
-  if (pk) pk.scrollTop = pk.scrollHeight;   /* newest pane lines (the options) */
-
-  const tf = $("#termfull");
-  if (tf) tf.addEventListener("click", () => { termFull = !termFull; chatSig = ""; refreshChat(); });
-  const dr = $("#decresolve");
-  if (dr) dr.addEventListener("click", async () => {
-    try { await api(`/api/nodes/${encodeURIComponent(n.id)}/send/resolve`, { method: "POST" }); }
-    catch {}
-    chatSig = ""; tick();
-  });
-
-  /* key row appears only while the agent blocks on a dialog, or quietly
-     invites a look without claiming a specific question/approval */
-  const KEYS = { Up: "\u2191", Down: "\u2193", Enter: "\u23ce", Escape: "Esc" };
-  const HINTS = {
-    inspect: "The agent has gone quiet \u2014 check the terminal below; keys go straight to it:",
-  };
-  if (!n.attention || attentionHidden) {
-    $("#keyrow").innerHTML = "";
-  } else if (d.source === "acp") {
-    /* ACP prompts are structured: render one button per returned option with
-       its own label, so prompts with more than four options are fully
-       answerable and option names are visible. There is no terminal, so the
-       hint doesn't promise keystrokes go to one. */
-    const opts = d.perm_options || [];
-    const what = d.perm_title ? `for ${esc(d.perm_title)}` : "";
-    $("#keyrow").innerHTML =
-      `<span class="hint">The agent needs your approval ${what} \u2014 choose one:</span>` +
-      (opts.length
-        ? opts.map(o => `<button data-key="${esc(o.key)}">${esc(o.key)}. ${esc(o.name)}</button>`).join("")
-        : `<span class="hint">Waiting for approval options from the agent...</span>`);
-  } else {
-    $("#keyrow").innerHTML =
-      `<span class="hint">${esc(HINTS[n.attention] || `The agent waits for your ${n.attention} \u2014 keys go straight to its terminal:`)}</span>` +
-      ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
-        `<button data-key="${k}">${KEYS[k] || k}</button>`).join("");
-  }
-  endChatLoad();
-}
-
-$("#keyrow").addEventListener("click", async e => {
-  const b = e.target.closest("[data-key]");
-  if (!b || !sel) return;
-  const dest = sel;
-  collapseAttentionUI(dest);
-  try {
-    await api(`/api/nodes/${encodeURIComponent(dest)}/key`,
-      { method: "POST", body: JSON.stringify({ key: b.dataset.key }) });
-    chatSig = "";
-    setTimeout(tick, 400);
-  } catch (err) {
-    delete suppressAttentionUntil[dest];
-    chatSig = "";
-    refreshChat();
-    alert(err.message);
-  }
-});
-
-$("#msgs").addEventListener("scroll", () =>
-  $("#chathead").classList.toggle("compact", $("#msgs").scrollTop > 30));
-
-/* bubble tap actions: one tap on a bubble toggles a small icon row below it
-   (long-press keeps the full context sheet). The row is client-only DOM,
-   re-attached by refreshChat after every #msgs rebuild. */
-let tappedTurn = "";   // data-bk key of the bubble whose action row is open ("" = none)
-function renderBubbleActions(){
-  document.querySelectorAll("#msgs .bubactions").forEach(x => x.remove());
-  if (!tappedTurn) return;
-  const turnEl = document.querySelector(`#msgs .turn[data-bk="${tappedTurn}"]`);
-  const turn = bubbleTurns[tappedTurn];
-  if (!turnEl || !turn){ tappedTurn = ""; return; }
-  const row = document.createElement("div");
-  row.className = "bubactions";
-  row.innerHTML =
-    `<div class="bubwhen">${esc(fmtBubbleTime(turn.time))}</div>` +
-    `<button data-bact="fork"><span>${ICON_BRANCH}</span>fork from here</button>` +
-    `<button data-bact="desc"><span class="rot90l">${ICON_INTO}</span>use as description</button>` +
-    `<button data-bact="bookmark"><span>${ICON_INTO}</span>bookmark</button>` +
-    `<button data-bact="copy"><span>${ICON_COPY}</span>copy</button>`;
-  turnEl.after(row);
-}
-/* fmtBubbleTime imported from /js/format.js */
 /* forkFromTurn: shared by the tap icon and the long-press sheet — prefill a
    fresh-context fork from this message as evidence */
 function forkFromTurn(text, parent){
@@ -1965,88 +1442,6 @@ function openActivityEditor(id, stopTime){
   openSheet("#newchat");
   setTimeout(() => $("#nc_title").focus(), 0);
 }
-/* useTurnAsDescription: open the chat details in description-edit mode seeded
-   with this message; nothing is saved until the ✓ — switching to another
-   activity discards the pending text (select() leaves edit mode). */
-function useTurnAsDescription(text){
-  const n = nodeById(sel);
-  if (!n) return;
-  chatDetailsOpen = true;
-  editingChatDesc = true;
-  const input = $("#chatdescinput");
-  input.value = text || "";
-  input.dataset.node = n.id;
-  chatSig = "";
-  renderChatHead();
-  setTimeout(() => {
-    input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
-  }, 0);
-}
-
-/* bubble action row + history loader */
-$("#msgs").addEventListener("click", e => {
-  const hl = e.target.closest(".histload");
-  if (hl){ if (sel) loadChatHistory(sel, "seam"); return; }
-  const ba = e.target.closest("[data-bact]");
-  if (ba){
-    const turn = bubbleTurns[tappedTurn];
-    if (ba.dataset.bact === "copy"){
-      if (turn) copyText(turn.text || "");
-      ba.innerHTML = "&#10003; copied";
-      setTimeout(() => renderBubbleActions(), 900);
-      return;
-    }
-    if (ba.dataset.bact === "bookmark"){
-      /* capture: a verbatim, immutable copy of the bubble plus its durable
-         source address (uid, segment, record) — the address of record for
-         jump-back, which survives /clear seams, rotation, slug reuse, and node
-         deletion. node + the turn's own timestamp demote to live-render hints
-         (bubble indexes are not stable across relinks); lane is snapshotted only
-         as a fallback for deleted activities, rendering derives it live. */
-      if (!turn) return;
-      const dup = (UI.bookmarks || []).some(n =>
-        n.node === sel && n.turnTime === (turn.time || "") && n.text === (turn.text || ""));
-      if (!dup){
-        const node = nodes.find(x => x.id === sel);
-        const bookmark = {
-          t: new Date().toISOString(), text: turn.text || "",
-          node: sel, lane: node?.lane_id || "", turnTime: turn.time || "",
-        };
-        stampAddress(bookmark, turn);
-        uiMutate({ k: "bookmark-add", bookmark });
-      }
-      ba.innerHTML = "&#10003; noted";
-      setTimeout(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
-      return;
-    }
-    tappedTurn = "";
-    renderBubbleActions();
-    if (!turn) return;
-    if (ba.dataset.bact === "fork") forkFromTurn(turn.text);
-    /* no confirm: nothing is saved until the ✓, and switching away discards —
-       the edit mode itself is the confirmation (HIG: confirmations are for
-       destructive actions) */
-    else if (ba.dataset.bact === "desc") useTurnAsDescription(turn.text);
-    return;
-  }
-  const turnEl = e.target.closest(".turn");
-  /* every bubble carries a data-bk key (live "i:n", history "h:seg:turn") and is
-     registered in bubbleTurns, so a past-station history bubble taps open the
-     same timestamp + action row as a live one. The echo bubble carries no key. */
-  if (turnEl && turnEl.dataset.bk && !e.target.closest("a, button")){
-    const k = turnEl.dataset.bk;
-    tappedTurn = tappedTurn === k ? "" : k;
-    renderBubbleActions();
-    /* the row appears below the bubble — for a tall bubble tapped near the
-       viewport bottom it would land off-screen; reveal it. Only on the tap
-       itself, never on the poll-driven re-attach (polling must not scroll). */
-    if (tappedTurn)
-      document.querySelector("#msgs .bubactions")
-        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }
-});
-
 /* ---------- sticky-notes pane ----------
    Captured notes are immutable evidence (copy of a bubble + pointer back to
    its context); manual notes are freeform. Chat-like ordering: oldest top,
@@ -2060,7 +1455,7 @@ let openBookmarkT = "";        // note whose action row is unfolded
 let expandedBookmarks = new Set();   // note.t values the user expanded — ephemeral view state
 let bookmarksSig = "";
 let bookmarksPin = true;       // scroll to the bottom on the next render
-let pendingJump = null;    // jump-to-source in flight: {node, turnTime, text, ts}
+/* pendingJump is declared with the chat feature factory (Packet 7C). */
 
 /* stampAddress copies a source turn's durable address (uid, segment, record)
    onto a captured note. src can be a chat turn (numeric segment/record) or a
@@ -2089,7 +1484,7 @@ function jumpToChatAddress(a){
       uid: a.uid || "", segment: a.segment, record: a.record, ts: Date.now() };
     /* select() clears chatSig only on a node *change*; a same-node jump would
        hit the signature short-circuit before consumePendingJump */
-    chatSig = "";
+    chatFeature.invalidate();
     if (wsOpen()) closeWorkspace();
     if (!isDesktop()) setBookmarksOpen(false);
     select(a.node);
@@ -2345,25 +1740,7 @@ $("#bookmarkprompt").addEventListener("blur", () => {
    pointer-reachable equivalent of Escape (R20.10) */
 $("#bookmarkchipx").addEventListener("click", () => { setBookmarkAnchor(""); $("#bookmarkprompt").focus(); });
 
-/* double-tap on the empty chat background snaps pinch-zoom back to 1.
-   iOS offers no JS zoom API; momentarily clamping the viewport meta to
-   maximum-scale=1 forces the reset, then the clamp is lifted so pinch
-   zoom stays available. Background only — taps on bubbles keep their
-   meaning (the action row), so this can never double-fire it. */
-let lastBgTap = 0;
-$("#msgs").addEventListener("touchend", e => {
-  if (e.target !== e.currentTarget) return;
-  const now = Date.now();
-  if (now - lastBgTap < 350 && (window.visualViewport?.scale || 1) > 1.01){
-    const vp = document.querySelector('meta[name="viewport"]');
-    const orig = vp.content;
-    vp.content = orig + ", maximum-scale=1";
-    setTimeout(() => { vp.content = orig; }, 120);
-    lastBgTap = 0;
-    return;
-  }
-  lastBgTap = now;
-}, { passive: true });
+/* double-tap empty-chat zoom reset lives in chat.js bind (Packet 7C). */
 
 /* transient one-liner, fixed above the composer; outside every polled render
    region so a rebuild cannot wipe it mid-display */
@@ -2380,63 +1757,7 @@ function toast(msg){
   toastTimer = setTimeout(() => el.remove(), 3000);
 }
 
-/* consume a pending jump once the target activity's chat has rendered:
-   scroll the noted bubble into view and ring it briefly. Returns whether it
-   scrolled (the caller then skips its own bottom-pinning). */
-function scrollAndFlash(target){
-  target.scrollIntoView({ block: "center" });
-  target.classList.add("jumpflash");
-  setTimeout(() => target.classList.remove("jumpflash"), 1600);
-}
-function consumePendingJump(el, turns, priorTurns){
-  if (!pendingJump || pendingJump.node !== sel) return false;
-  if (Date.now() - pendingJump.ts > 15000){ pendingJump = null; return false; }
-  /* 1) the live segment: the durable (uid, segment, record) address first —
-     stable across seams and duplicate timestamps — then turn time, then text. */
-  let idx = -1;
-  if (pendingJump.uid)
-    /* segment/record are omitempty on the wire — an absent field means 0, so
-       coerce both sides or a segment-0 turn (field omitted) never matches. */
-    idx = turns.findIndex(t => t.uid === pendingJump.uid &&
-      (t.segment || 0) === (pendingJump.segment || 0) && (t.record || 0) === (pendingJump.record || 0));
-  if (idx < 0 && pendingJump.turnTime) idx = turns.findIndex(t => t.time === pendingJump.turnTime);
-  if (idx < 0) idx = turns.findIndex(t => t.text === pendingJump.text);
-  if (idx >= 0){
-    pendingJump = null;
-    const target = el.querySelector(`.turn[data-i="${idx}"]`);
-    if (!target) return false;
-    scrollAndFlash(target);
-    return true;
-  }
-  /* 2) earlier history (before a /clear): the live turns are segment-scoped, so a
-     hit in a closed segment isn't here yet. A search hit carries a stable
-     identity, so instead of giving up we load the whole log once and scroll to
-     the historical turn by time. (A note jump reuses the same path.) */
-  if (priorTurns > 0 && (pendingJump.uid || pendingJump.turnTime)){
-    const histReady = chatHist.node === sel && chatHist.segs;
-    if (!histReady){
-      if (!pendingJump.histLoading){
-        pendingJump.histLoading = true;
-        loadChatHistory(sel, "");   /* no seam scroll — the jump owns the scroll */
-      }
-      return false;   /* retry on the post-history render */
-    }
-    const hists = [...el.querySelectorAll(".turn.hist")];
-    let h = pendingJump.uid
-      ? hists.find(t => t.dataset.uid === pendingJump.uid &&
-          (+t.dataset.segment || 0) === (pendingJump.segment || 0) &&
-          (+t.dataset.record || 0) === (pendingJump.record || 0))
-      : null;
-    if (!h && pendingJump.turnTime) h = hists.find(t => t.dataset.time === pendingJump.turnTime);
-    if (h){ pendingJump = null; scrollAndFlash(h); return true; }
-    /* history is loaded but the turn is gone (empty/rewritten surface) — stop
-       cleanly rather than retry forever. */
-    pendingJump = null;
-    toast("Couldn't find that message in this chat.");
-    return false;
-  }
-  return false;  /* the chat may still be loading; retry next render */
-}
+/* pending-jump scroll/flash consumption lives in chat.js (Packet 7C). */
 
 /* ---- long-press (HIG context-menu idiom): delegated helper ----
    A long-press may be followed by a synthesized click on the same element;
@@ -2499,29 +1820,15 @@ function longpress(container, selector, fn){
   };
 }
 
-/* long-press a title wherever the Activity title is shown -> edit it in place.
-   Card-list title long-press is bound by cards.js; chat head stays here. */
-longpress($("#chathead"), "#chattitle", () => startTitleEdit(sel, "chat"));
 /* Card-local listeners (tabs/list/swipe/drag/longpress/age flip). */
 cardsFeature.bind();
 /* Map-local listeners (tabs/chips/wrap/toolbar/full/fare/scroll/resize). */
 mapFeature.bind();
+/* Chat-local listeners (head/details, msgs, keys, terminal, scroll, longpress). */
+chatFeature.bind();
 ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
   if (editingTitle) focusTitleEditorNow(editingTitle);
 }, { passive: true }));
-
-longpress($("#chathead"), "#chatdesc", () => {
-  if (!sel || !nodeById(sel)) return;
-  chatDetailsOpen = true;
-  editingChatDesc = true;
-  chatSig = "";
-  renderChatHead();
-  setTimeout(() => {
-    const input = $("#chatdescinput");
-    input.focus();
-    input.select();
-  }, 0);
-});
 
 
 /* long-press a sticky note — forward its text into a chat's draft (moved
@@ -2638,13 +1945,13 @@ async function interruptPrompt(){
   const dest = sel;
   try {
     await api(`/api/nodes/${encodeURIComponent(dest)}/send/interrupt`, { method: "POST" });
-    chatSig = "";
+    chatFeature.invalidate();
     setTimeout(tick, 250);
   } catch (err) {
     /* a stop tap racing the turn's natural end 409s ("no turn is in
        flight") — that is the outcome the user wanted, not an error */
     if (err.status !== 409) alert(err.message);
-    chatSig = "";
+    chatFeature.invalidate();
     refreshChat();
   }
 }
@@ -2787,13 +2094,13 @@ async function sendPrompt(){
      past that index is this send landing. Only trustworthy when the chat has
      actually rendered for this node (chatSig set after a render, cleared on
      select) — otherwise leave it null and rely on the text match/timeout. */
-  sentEcho = { node: dest, text, atts: refs, at: Date.now(),
-               seen: chatSig ? lastTurns.length : null };
+  chatFeature.setSentEcho({ node: dest, text, atts: refs, at: Date.now(),
+               seen: chatFeature.getChatSig() ? chatFeature.getLastTurns().length : null });
   paintEchoNow(dest);
   try {
     const res = await api(`/api/nodes/${encodeURIComponent(dest)}/send`,
       { method: "POST", body: JSON.stringify({ text, attachments: refs }) });
-    chatSig = "";
+    chatFeature.invalidate();
     items.forEach(x => { if (x.preview) URL.revokeObjectURL(x.preview); });   /* staged files delivered */
     /* "unconfirmed" is not a failure — the paste+Enter was sent, but the pane
        never visibly reacted; the decision pane below picks this up via
@@ -2810,10 +2117,7 @@ async function sendPrompt(){
        elsewhere while this POST was in flight, and retracting that newer
        echo would make the other node's just-sent prompt visibly vanish
        (R20.8 — dest was captured for exactly this). */
-    if (sentEcho && sentEcho.node === dest){
-      sentEcho = null;
-      document.querySelectorAll("#msgs .turn.echo").forEach(x => x.remove());
-    }
+    chatFeature.clearSentEchoFor(dest);
     /* nothing typed is ever lost — restored under the node it was written
        for, and merged in front of anything typed while the send was pending
        rather than overwriting it */
@@ -2829,21 +2133,6 @@ async function sendPrompt(){
     }
   }
 }
-/* paintEchoNow puts the echo bubble on screen synchronously — zero-latency
-   feedback for the tap on send. The next signature-driven rebuild re-renders
-   it from sentEcho, so polling can never clobber it (invariant). */
-function paintEchoNow(dest){
-  if (sel !== dest || !sentEcho) return;
-  const el = $("#msgs");
-  el.querySelectorAll(".turn.echo").forEach(x => x.remove());
-  const div = document.createElement("div");
-  const tiles = refTilesHTML(sentEcho.atts, sentEcho.node);
-  div.className = "turn user echo" + (tiles && !sentEcho.text ? " media" : "");
-  div.innerHTML = `<div class="bubble" title="you — delivering">${md(sentEcho.text)}${tiles}</div>`;
-  el.insertBefore(div, el.querySelector(".peekblock"));   /* null target = append */
-  el.scrollTop = el.scrollHeight;
-}
-
 /* ---------- navigation (phone: cards slide over chat) ---------- */
 function setLevel(n){
   level = clampLevel(n);
@@ -2861,8 +2150,7 @@ function applyNavAction(action){
   else if (action.type === "openWorkspace") openWorkspace();
   else if (action.type === "cancelEditors"){
     if (editingTitle === sel){ editingTitle = ""; editingTitleScope = ""; }
-    editingChatDesc = false;
-    chatSig = "";
+    chatFeature.cancelEditorsForNav();
     cardsSig = "";
     renderCards(); renderChatHead();
   }
@@ -2892,7 +2180,7 @@ document.addEventListener("touchend", e => {
   const t = e.changedTouches[0];
   const action = documentSwipeDecision(start, { x: t.clientX, y: t.clientY }, {
     level, bookmarksOpen, isDesktop: isDesktop(),
-    editingChatDesc, editingTitle, sel,
+    editingChatDesc: chatFeature.isEditingDesc(), editingTitle, sel,
   });
   applyNavAction(action);
 }, { passive: true });
@@ -3931,7 +3219,7 @@ function jumpToHitChat(id, turn, addr){
   closeSearch();
   pendingJump = { node: id, turnTime: turn || "", text: "", ts: Date.now(),
     uid: (addr && addr.uid) || "", segment: addr && +addr.segment, record: addr && +addr.record };
-  chatSig = "";
+  chatFeature.invalidate();
   if (!isDesktop()) setBookmarksOpen(false);
   select(id);
 }
@@ -4019,7 +3307,7 @@ function renderArchived(d){
   const rows = turns.map((t, i) => {
     /* archived blobs aren't served — splitAssetRefs with no asset map renders
        any marker as an inert "unavailable" chip, same as the live projection */
-    const s = splitAssetRefs(t.text || "", "", {});
+    const s = splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE });
     const role = t.role === "user" ? "user" : "assistant";
     return `<div class="turn ${role} ${i === d.anchor ? "anchor" : ""}">` +
       `<div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(s.clean)}${s.html}</div></div>`;
@@ -4126,21 +3414,8 @@ document.querySelectorAll("#menu .lic").forEach(b => b.addEventListener("click",
   pre.hidden = false;
 }));
 
-/* composer tools: window-maximize toggles the terminal below the last bubble;
-   the choice rides through the next prompt (termOpen persists until the
-   selection changes). */
-$("#termtoggle").addEventListener("click", () => {
-  if ($("#termtoggle").disabled) return;      /* forced-open evidence */
-  termOpen = !termOpen; chatSig = ""; refreshChat();
-  if (termOpen) $("#msgs").scrollTop = 1e6;
-});
+/* termtoggle + scrollend listeners live in chat.js bind (Packet 7C). */
 
-/* scroll-to-end: rejoin the newest messages after reading back (rotating the
-   phone lands mid-chat and flick-scrolling a long history is tedious) */
-$("#scrollend").innerHTML = ICON_DOWNALL;
-$("#scrollend").addEventListener("click", () => {
-  $("#msgs").scrollTo({ top: $("#msgs").scrollHeight, behavior: "smooth" });
-});
 
 /* new activity — agent and model lists come from the backend, which probes
    the installed harness CLIs (GET /api/agents); this static set is only the
@@ -4339,7 +3614,7 @@ $("#nc_start").addEventListener("click", async () => {
       const n = await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
       updateLocalNode(n);
       closeSheets();
-      cardsSig = ""; chatSig = ""; mapFeature.invalidate();
+      cardsSig = ""; chatFeature.invalidate(); mapFeature.invalidate();
       renderCards(); renderChatHead(); renderMap();
     } catch (err) {
       fieldError($("#nc_title"), err.message || "Could not save.");

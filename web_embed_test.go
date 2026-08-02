@@ -14,6 +14,7 @@ import (
 var productionJSModules = []string{
 	"web/js/api.js",
 	"web/js/cards.js",
+	"web/js/chat.js",
 	"web/js/format.js",
 	"web/js/lanes.js",
 	"web/js/map-model.js",
