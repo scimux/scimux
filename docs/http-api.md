@@ -73,7 +73,14 @@ status-bar gauge. Returns:
       "source": "codex-session-jsonl"
     },
     "claude": { "available": false, "reason": "usage unavailable",
-                "source": "claude-oauth" }
+                "source": "claude-oauth" },
+    "grok": {
+      "available": true,
+      "plan": "SuperGrok Lite",
+      "weekly_used": 14, "weekly_remaining": 86,
+      "weekly_reset": "2026-08-05T00:00:00Z",
+      "source": "grok-acp-billing"
+    }
   }
 }
 ```
@@ -81,16 +88,18 @@ status-bar gauge. Returns:
 Percentages are `0..100`; `*_remaining` is `100 - used` and is the runway a user
 wants before starting work. Claude may additionally carry
 `extra_usage_enabled | extra_usage_used | extra_usage_limit |
-extra_usage_currency`. Numeric fields are omitted when unknown, so `0` stays
-distinct from missing.
+extra_usage_currency`. Grok reports only the weekly credit window (no five-hour
+bucket). Numeric fields are omitted when unknown, so `0` stays distinct from
+missing.
 
 Two contracts matter. **This read is cache-only:** it never performs provider
-I/O, so opening many tabs cannot fan out into many Claude OAuth calls or Codex
-transcript scans. Collection is prompt-driven instead — a successful
-Claude/Codex prompt refreshes the snapshot at most once every 15 minutes (or
-immediately when it is older than 60 minutes), and stops once no prompt has
-arrived for 15 minutes, so an idle or closed browser never triggers provider
-checks. **It is best-effort and never errors:** an agent with no usable data is
+I/O, so opening many tabs cannot fan out into many Claude OAuth calls, Codex
+transcript scans, or Grok ACP billing probes. Collection is prompt-driven
+instead — a successful Claude/Codex/Grok prompt refreshes the snapshot at most
+once every 15 minutes (or immediately when it is older than 60 minutes), and
+stops once no prompt has arrived for 15 minutes, so an idle or closed browser
+never triggers provider checks. **It is best-effort and never errors:** an
+agent with no usable data is
 returned as `{"available": false, "reason": "usage unavailable"}` rather than
 failing the request. The endpoint always answers `200`; an empty cache reports
 every agent unavailable. There is no `ETag` — the body is small and served from
@@ -107,7 +116,7 @@ fields (`ctx_used`, `ctx_window`, `ctx_pct`), `live`, `attention`, `source`,
 
 For tmux/Claude nodes, `source` is `transcript`, `peek`, `none`, or
 `terminal_only`; `fallback:true` means the UI should degrade to the pane
-snapshot. For structured nodes (`codex`, ACP `pi`/`opencode`), `source` is
+snapshot. For structured nodes (`codex`, ACP `pi`/`opencode`/`grok`), `source` is
 `acp`; there is no pane fallback, and pending approval details are returned as
 `perm_title` and `perm_options`. Structured-node turn failures may also set
 `error`.
@@ -208,13 +217,14 @@ agent:
 ```
 
 `models` is ordered (the configured default first when set); an empty `""` model
-is added client-side to mean "launch with the harness default". `efforts` is
-present only where the CLI advertises per-model reasoning effort (codex, via
-`codex debug models`): a map from model id to that model's accepted `levels` and
-its `default`. Agents without it (claude/pi/opencode), and codex when only the
-static fallback is available, omit `efforts` and the UI uses a static per-agent
-effort list. The list is probed once per process at startup and cached for its
-lifetime; a newly installed CLI or model appears after a restart.
+is added client-side to mean "launch with the harness default". `efforts` is a
+map from model id to that model's accepted `levels` and its `default`. Codex
+obtains it from `codex debug models`; Grok reads its CLI models cache and fills
+missing entries from its static low/medium/high menu. Agents without per-model
+data (claude/pi/opencode), and codex when only its static fallback is available,
+omit `efforts`; the UI then uses its static per-agent list. The catalog is
+probed once per process at startup and cached for its lifetime; a newly
+installed CLI or model appears after a restart.
 
 ## Managing nodes
 

@@ -1,8 +1,7 @@
 /* Pure text / time / markdown / color helpers.
  *
- * Packet 6A: DOM-free copy of the formatting subset currently inlined in
- * web/index.html. Named exports are exercised by Node tests only; production
- * still uses the inline helpers until Packet 6F wires the sole module entry.
+ * Extracted in Packet 6A and wired into the sole browser entry in Packet 6F.
+ * Named exports are exercised directly by Node tests and used by production.
  *
  * Seams (explicit, not silent behavior narrowing):
  * - esc: pure entity encoding that matches the browser esc() contract for

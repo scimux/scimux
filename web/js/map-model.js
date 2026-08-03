@@ -1,8 +1,7 @@
 /* Pure activity-card ordering/status and wall-map selection decisions.
  *
- * Packet 6D: DOM-free copy of the card/map-selection subset currently inlined
- * in web/index.html. Named exports are exercised by Node tests only; production
- * still uses the inline helpers until Packet 6F wires the sole module entry.
+ * Extracted in Packet 6D and wired into the sole browser entry in Packet 6F.
+ * Named exports are exercised directly by Node tests and used by production.
  *
  * Explicit inputs (no UI / nodes / sel / laneFilter / mapSel globals):
  * - node collections are passed as `nodes`

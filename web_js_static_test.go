@@ -27,6 +27,7 @@ var productionJSURLs = []string{
 	"/js/search.js",
 	"/js/sheets.js",
 	"/js/state.js",
+	"/js/usage.js",
 }
 
 // TestProductionJSServeHeadersAndBytes locks exact embedded JS bytes plus

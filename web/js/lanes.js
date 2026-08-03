@@ -1,8 +1,7 @@
 /* Pure lane / fork / stop / column-order model helpers.
  *
- * Packet 6B: DOM-free copy of the lane/fork/stop subset currently inlined in
- * web/index.html. Named exports are exercised by Node tests only; production
- * still uses the inline helpers until Packet 6F wires the sole module entry.
+ * Extracted in Packet 6B and wired into the sole browser entry in Packet 6F.
+ * Named exports are exercised directly by Node tests and used by production.
  *
  * Explicit inputs (no UI / nodes / sel / mapTab globals):
  * - lane configuration arrays are passed as `lanes`

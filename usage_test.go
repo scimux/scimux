@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/acp"
 )
 
 // ---------- collectors ----------
@@ -234,7 +237,7 @@ func TestHandleUsageEmptyCacheUnavailable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, agent := range []string{"codex", "claude"} {
+	for _, agent := range []string{"codex", "claude", "grok"} {
 		if v, ok := snap.Agents[agent]; !ok || v.Available {
 			t.Fatalf("%s = %+v, want present and unavailable", agent, v)
 		}
@@ -268,10 +271,10 @@ func TestMaybeRefreshImmediateWhenStale(t *testing.T) {
 	var calls int32
 	c := newTestUsageCache(&now, &calls)
 	c.notePrompt(now)
-	// No snapshot yet -> stale -> collect both agents.
+	// No snapshot yet -> stale -> collect all budget agents.
 	c.maybeRefresh(context.Background())
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("calls = %d, want 2 (codex+claude) on stale refresh", got)
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("calls = %d, want 3 (codex+claude+grok) on stale refresh", got)
 	}
 	if c.snap.ObservedAt.IsZero() {
 		t.Fatal("snapshot not stored")
@@ -285,8 +288,8 @@ func TestMaybeRefreshOncePerInterval(t *testing.T) {
 	c.notePrompt(now)
 	c.maybeRefresh(context.Background()) // stale (empty) -> refresh
 	first := atomic.LoadInt32(&calls)
-	if first != 2 {
-		t.Fatalf("first refresh calls = %d, want 2", first)
+	if first != 3 {
+		t.Fatalf("first refresh calls = %d, want 3", first)
 	}
 	// Prompts keep coming, but within the 15-min interval: no new collection.
 	now = now.Add(5 * time.Minute)
@@ -299,7 +302,7 @@ func TestMaybeRefreshOncePerInterval(t *testing.T) {
 	now = now.Add(11 * time.Minute)
 	c.notePrompt(now)
 	c.maybeRefresh(context.Background())
-	if got := atomic.LoadInt32(&calls); got != first+2 {
+	if got := atomic.LoadInt32(&calls); got != first+3 {
 		t.Fatalf("calls = %d, want a second refresh after the interval", got)
 	}
 }
@@ -351,9 +354,9 @@ func TestMaybeRefreshConcurrentCollapse(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	wg.Wait()
-	// Exactly one refresh ran: 2 agent collections, not 10.
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("calls = %d, want 2 (one collapsed refresh of both agents)", got)
+	// Exactly one refresh ran: 3 agent collections, not 15.
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("calls = %d, want 3 (one collapsed refresh of all agents)", got)
 	}
 }
 
@@ -417,6 +420,46 @@ func TestNoteUsagePromptFilters(t *testing.T) {
 	c.mu.Unlock()
 	if got.IsZero() {
 		t.Fatal("lastPromptAt not set for claude")
+	}
+	// Grok is a first-class budget agent (weekly credits via _x.ai/billing).
+	a2 := &app{usage: newTestUsageCache(&now, &calls)}
+	a2.noteUsagePrompt("grok")
+	a2.usage.mu.Lock()
+	got = a2.usage.lastPromptAt
+	a2.usage.mu.Unlock()
+	if got.IsZero() {
+		t.Fatal("lastPromptAt not set for grok")
+	}
+}
+
+func TestQueryGrokUsageMapsBilling(t *testing.T) {
+	raw := json.RawMessage(`{"config":{"creditUsagePercent":25.5,"currentPeriod":{"end":"2026-08-01T12:00:00Z"}},"subscription_tier":"SuperGrok"}`)
+	u, err := queryGrokUsage(context.Background(), acp.GrokBillingOptions{
+		Query: func(ctx context.Context) (json.RawMessage, error) { return raw, nil },
+	})
+	if err != nil {
+		t.Fatalf("queryGrokUsage: %v", err)
+	}
+	if u.Agent != "grok" || u.Plan != "SuperGrok" || u.Source != "grok-acp-billing" {
+		t.Fatalf("identity = %+v", u)
+	}
+	if u.WeeklyUsed == nil || *u.WeeklyUsed != 25.5 {
+		t.Fatalf("used = %v, want 25.5", u.WeeklyUsed)
+	}
+	if u.WeeklyRemaining == nil || *u.WeeklyRemaining != 74.5 {
+		t.Fatalf("remaining = %v, want 74.5", u.WeeklyRemaining)
+	}
+	if u.FiveHourUsed != nil || u.FiveHourRemaining != nil {
+		t.Fatalf("five-hour fields must be unset for Grok: %+v", u)
+	}
+	// Injected error stays generic-facing at the collector boundary.
+	_, err = queryGrokUsage(context.Background(), acp.GrokBillingOptions{
+		Query: func(ctx context.Context) (json.RawMessage, error) {
+			return nil, errors.New("secret account detail")
+		},
+	})
+	if err == nil || err.Error() != "usage unavailable" {
+		t.Fatalf("error = %v, want generic usage unavailable", err)
 	}
 }
 

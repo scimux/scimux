@@ -13,21 +13,32 @@ import (
 )
 
 // agentArgv is the pure command-selection seam: pi ships a dedicated binary,
-// opencode exposes ACP as a subcommand, and anything else has no ACP transport
-// and must be rejected rather than silently launched.
+// opencode exposes ACP as a subcommand, grok as `grok agent stdio` (with
+// optional model/effort flags), and anything else has no ACP transport and
+// must be rejected rather than silently launched.
 func TestAgentArgv(t *testing.T) {
 	cases := []struct {
-		agent   string
-		want    []string
-		wantErr bool
+		agent, model, effort string
+		want                 []string
+		wantErr              bool
 	}{
-		{"pi", []string{"pi-acp"}, false},
-		{"opencode", []string{"opencode", "acp"}, false},
-		{"claude", nil, true},
-		{"", nil, true},
+		{agent: "pi", want: []string{"pi-acp"}},
+		{agent: "opencode", want: []string{"opencode", "acp"}},
+		{agent: "grok", want: []string{"grok", "--no-auto-update", "agent", "stdio"}},
+		{agent: "grok", model: "grok-4.5",
+			want: []string{"grok", "--no-auto-update", "agent", "-m", "grok-4.5", "stdio"}},
+		{agent: "grok", effort: "high",
+			want: []string{"grok", "--no-auto-update", "agent", "--reasoning-effort", "high", "stdio"}},
+		{agent: "grok", model: "grok-4.5", effort: "low",
+			want: []string{"grok", "--no-auto-update", "agent", "-m", "grok-4.5", "--reasoning-effort", "low", "stdio"}},
+		// pi/opencode ignore model/effort at argv (session options own them).
+		{agent: "pi", model: "x", effort: "high", want: []string{"pi-acp"}},
+		{agent: "opencode", model: "y", effort: "low", want: []string{"opencode", "acp"}},
+		{agent: "claude", wantErr: true},
+		{agent: "", wantErr: true},
 	}
 	for _, c := range cases {
-		got, err := agentArgv(c.agent)
+		got, err := agentArgv(c.agent, c.model, c.effort)
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("agentArgv(%q): want error, got %v", c.agent, got)
@@ -35,16 +46,16 @@ func TestAgentArgv(t *testing.T) {
 			continue
 		}
 		if err != nil {
-			t.Errorf("agentArgv(%q): unexpected error %v", c.agent, err)
+			t.Errorf("agentArgv(%q,%q,%q): unexpected error %v", c.agent, c.model, c.effort, err)
 			continue
 		}
 		if len(got) != len(c.want) {
-			t.Errorf("agentArgv(%q) = %v, want %v", c.agent, got, c.want)
+			t.Errorf("agentArgv(%q,%q,%q) = %v, want %v", c.agent, c.model, c.effort, got, c.want)
 			continue
 		}
 		for i := range got {
 			if got[i] != c.want[i] {
-				t.Errorf("agentArgv(%q) = %v, want %v", c.agent, got, c.want)
+				t.Errorf("agentArgv(%q,%q,%q) = %v, want %v", c.agent, c.model, c.effort, got, c.want)
 				break
 			}
 		}
@@ -64,7 +75,7 @@ func (p *countingProcess) Wait() error { atomic.AddInt32(&p.waits, 1); return p.
 // countingRunner mirrors fakeRunner but hands back a countingProcess so the
 // caller can observe the launch-failure reaping path.
 func countingRunner(agent *fakeAgent, cp **countingProcess) Runner {
-	return func(nodeID, agentName, dir string) (Process, error) {
+	return func(nodeID, agentName, dir, model, effort string) (Process, error) {
 		r1, w1 := io.Pipe()
 		r2, w2 := io.Pipe()
 		agent.conn = sdk.NewAgentSideConnection(agent, w2, r1)

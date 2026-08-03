@@ -14,20 +14,26 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/acp"
 )
 
 // Subscription-usage observability. Best-effort only: missing fields, failed
 // auth, network errors, and format drift produce "usage unavailable", never a
 // fatal app error. This is a status gauge, not a critical path.
 //
-// Two provider surfaces (see usage-design.md):
+// Three provider surfaces:
 //   - Codex mirrors budget percentages into its local session JSONL; we scan
 //     the newest usable token_count record.
 //   - Claude exposes budget percentages from an undocumented OAuth endpoint;
 //     its local JSONL carries token history, not quota percentages.
+//   - Grok exposes weekly credit usage via the ACP extension `_x.ai/billing`
+//     on a short-lived `grok agent stdio` process (CLI must already be logged
+//     in; scimux never authenticates). The wire/process lives in
+//     internal/acp; this file only maps the narrow result into agentUsage.
 //
-// Collection is expensive (a recursive file walk, an HTTPS call), so it is
-// kept off the /api/state and /api/usage read paths entirely: /api/usage
+// Collection is expensive (a recursive file walk, an HTTPS call, a subprocess),
+// so it is kept off the /api/state and /api/usage read paths entirely: /api/usage
 // serves only a cached snapshot, and collection is driven by successful user
 // prompts (noteUsagePrompt) — never by UI polling or a wall clock. This keeps
 // browser traffic decoupled from provider I/O and avoids overnight polling.
@@ -305,6 +311,30 @@ func parseClaudeUsage(body []byte, observed time.Time) (agentUsage, error) {
 	return u, nil
 }
 
+// ---------- Grok adapter (maps internal/acp billing → agentUsage) ----------
+
+// queryGrokUsage asks the Grok CLI for subscription credit usage via the
+// focused ACP billing seam. Weekly creditUsagePercent maps onto
+// WeeklyUsed/WeeklyRemaining; there is no five-hour window on this surface.
+func queryGrokUsage(ctx context.Context, opts acp.GrokBillingOptions) (agentUsage, error) {
+	shell := agentUsage{Agent: "grok", Source: "grok-acp-billing"}
+	b, err := acp.QueryGrokBilling(ctx, opts)
+	if err != nil {
+		return shell, err
+	}
+	used := b.CreditUsagePercent
+	rem := remainingPercent(used)
+	return agentUsage{
+		Agent:           "grok",
+		Plan:            b.Plan,
+		WeeklyUsed:      &used,
+		WeeklyRemaining: &rem,
+		WeeklyReset:     b.WeeklyReset,
+		ObservedAt:      time.Now().UTC(),
+		Source:          b.Source,
+	}, nil
+}
+
 // ---------- wire shape (/api/usage) ----------
 
 type usageSnapshot struct {
@@ -388,7 +418,7 @@ func newUsageCache(collect func(ctx context.Context, agent string) (agentUsage, 
 	}
 }
 
-// snapshot returns the cached view. An empty cache reports both agents as
+// snapshot returns the cached view. An empty cache reports every budget agent as
 // unavailable rather than an error, so the endpoint always answers 200.
 func (c *usageCache) snapshot() usageSnapshot {
 	c.mu.Lock()
@@ -398,6 +428,7 @@ func (c *usageCache) snapshot() usageSnapshot {
 			Agents: map[string]agentUsageView{
 				"codex":  {Available: false, Reason: "usage unavailable"},
 				"claude": {Available: false, Reason: "usage unavailable"},
+				"grok":   {Available: false, Reason: "usage unavailable"},
 			},
 		}
 	}
@@ -446,12 +477,12 @@ func (c *usageCache) maybeRefresh(ctx context.Context) {
 	c.mu.Unlock()
 }
 
-// refreshNow collects both agents (respecting per-agent backoff, keeping the
-// prior good value when an agent is backed off) and stores the new snapshot.
+// refreshNow collects each known agent (respecting per-agent backoff, keeping
+// the prior good value when an agent is backed off) and stores the new snapshot.
 func (c *usageCache) refreshNow(ctx context.Context) {
 	now := c.now()
 	views := map[string]agentUsageView{}
-	for _, agent := range []string{"codex", "claude"} {
+	for _, agent := range []string{"codex", "claude", "grok"} {
 		c.mu.Lock()
 		until, backed := c.backoff[agent]
 		prev, hadPrev := c.snap.Agents[agent]
@@ -498,14 +529,14 @@ func usageBackoffFor(err error) time.Duration {
 // ---------- app wiring ----------
 
 // noteUsagePrompt records that a budget-consuming prompt was accepted for a
-// Claude or Codex node and kicks a background refresh if the policy allows. It
-// is a no-op for any other agent (and for apps with no usage cache, e.g. bare
-// test apps). /clear is excluded by callers, not here.
+// Claude, Codex, or Grok node and kicks a background refresh if the policy
+// allows. It is a no-op for any other agent (and for apps with no usage cache,
+// e.g. bare test apps). /clear is excluded by callers, not here.
 func (a *app) noteUsagePrompt(agent string) {
 	if a.usage == nil {
 		return
 	}
-	if agent != "claude" && agent != "codex" {
+	if agent != "claude" && agent != "codex" && agent != "grok" {
 		return
 	}
 	a.usage.notePrompt(time.Now())
@@ -535,6 +566,8 @@ func (a *app) collectUsage(ctx context.Context, agent string) (agentUsage, error
 		return queryCodexUsage(a.codexSessionsDir)
 	case "claude":
 		return queryClaudeUsage(ctx, claudeUsageOptions{CredentialsPath: a.claudeCredsPath, UsageURL: a.claudeUsageURL})
+	case "grok":
+		return queryGrokUsage(ctx, a.grokUsageOpts)
 	default:
 		return agentUsage{Agent: agent}, errors.New("usage unavailable")
 	}
@@ -548,6 +581,7 @@ func (a *app) handleUsage(w http.ResponseWriter, r *http.Request) {
 		snap = usageSnapshot{Agents: map[string]agentUsageView{
 			"codex":  {Available: false, Reason: "usage unavailable"},
 			"claude": {Available: false, Reason: "usage unavailable"},
+			"grok":   {Available: false, Reason: "usage unavailable"},
 		}}
 	}
 	writeJSON(w, snap)

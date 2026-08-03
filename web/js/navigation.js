@@ -1,9 +1,8 @@
 /* Pure spatial-navigation decisions (level clamp, scrim/peek, document swipe
  * routing, Notes workspace swipe-back).
  *
- * Packet 6D: DOM-free copy of the decision subset currently inlined in
- * web/index.html. Named exports are exercised by Node tests only; production
- * still uses the inline handlers until Packet 6F wires the sole module entry.
+ * Extracted in Packet 6D and wired into the sole browser entry in Packet 6F.
+ * Named exports are exercised directly by Node tests and used by production.
  *
  * Explicit inputs only — no document, window, fetch, localStorage, navigator,
  * timers, matchMedia, or implicit app state (level / bookmarksOpen / overlays).

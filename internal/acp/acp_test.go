@@ -103,7 +103,7 @@ func (p *fakeProcess) Wait() error { <-p.closed; return nil }
 
 // fakeRunner returns a Runner that stands up the given agent in-process.
 func fakeRunner(agent *fakeAgent) Runner {
-	return func(nodeID, agentName, dir string) (Process, error) {
+	return func(nodeID, agentName, dir, model, effort string) (Process, error) {
 		r1, w1 := io.Pipe() // client -> agent
 		r2, w2 := io.Pipe() // agent -> client
 		ac := sdk.NewAgentSideConnection(agent, w2, r1)
@@ -402,6 +402,148 @@ func TestUsageAndEmptyTurn(t *testing.T) {
 	}
 	if m.LastError("n1") == "" {
 		t.Fatal("expected empty-turn error to be surfaced")
+	}
+}
+
+// Grok reports occupancy only in PromptResponse._meta (no usage_update and no
+// top-level usage field). usageFromMeta + fillUsageOccupancy must turn that
+// into Used/Size so the context gauge can light up.
+func TestUsageFromPromptMeta(t *testing.T) {
+	// Pure parse: nested usage object + window from initialize.
+	meta := map[string]any{
+		"totalTokens": float64(81),
+		"usage": map[string]any{
+			"inputTokens":      float64(70),
+			"outputTokens":     float64(10),
+			"totalTokens":      float64(80),
+			"cachedReadTokens": float64(30),
+		},
+	}
+	ev := usageFromMeta(meta, 500_000)
+	if ev == nil {
+		t.Fatal("expected usage event")
+	}
+	if ev.Used != 80 || ev.Size != 500_000 {
+		t.Fatalf("occupancy = %d/%d, want 80/500000", ev.Used, ev.Size)
+	}
+	if ev.InputTokens != 70 || ev.OutputTokens != 10 || ev.CachedReadTokens != 30 {
+		t.Fatalf("breakdown = %+v", ev)
+	}
+	// Top-level totals alone also work.
+	ev = usageFromMeta(map[string]any{"totalTokens": float64(100)}, 200)
+	if ev == nil || ev.Used != 100 || ev.Size != 200 {
+		t.Fatalf("top-level meta = %+v", ev)
+	}
+	if usageFromMeta(nil, 0) != nil || usageFromMeta(map[string]any{"foo": 1}, 0) != nil {
+		t.Fatal("empty meta must yield nil")
+	}
+	// Standard Usage field: TotalTokens becomes Used when no usage_update ran.
+	total := 42
+	ev = usageFromPrompt(sdk.PromptResponse{Usage: &sdk.Usage{
+		InputTokens: 40, OutputTokens: 2, TotalTokens: total,
+	}}, 1000)
+	if ev == nil || ev.Used != 42 || ev.Size != 1000 {
+		t.Fatalf("prompt usage = %+v", ev)
+	}
+}
+
+func TestContextSizeFromMeta(t *testing.T) {
+	meta := map[string]any{
+		"modelState": map[string]any{
+			"currentModelId": "grok-4.5",
+			"availableModels": []any{
+				map[string]any{
+					"modelId": "other",
+					"_meta":   map[string]any{"totalContextTokens": float64(100_000)},
+				},
+				map[string]any{
+					"modelId": "grok-4.5",
+					"_meta":   map[string]any{"totalContextTokens": float64(500_000)},
+				},
+			},
+		},
+	}
+	if n := contextSizeFromMeta(meta, "grok-4.5"); n != 500_000 {
+		t.Fatalf("matched model size = %d", n)
+	}
+	if n := contextSizeFromMeta(meta, ""); n != 500_000 {
+		// empty model → currentModelId path
+		t.Fatalf("currentModelId size = %d", n)
+	}
+	if n := contextSizeFromMeta(meta, "missing"); n != 100_000 {
+		t.Fatalf("fallback size = %d", n)
+	}
+	if n := contextSizeFromMeta(nil, "x"); n != 0 {
+		t.Fatalf("nil meta = %d", n)
+	}
+}
+
+// End-to-end: a Grok-shaped prompt response with only _meta usage must land
+// in the session log as Used/Size for Manager.Usage.
+func TestGrokMetaUsageEndToEnd(t *testing.T) {
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId,
+				Update: sdk.UpdateAgentMessageText("pong")})
+			return sdk.PromptResponse{
+				StopReason: sdk.StopReasonEndTurn,
+				Meta: map[string]any{
+					"totalTokens": float64(81),
+					"usage": map[string]any{
+						"inputTokens":  float64(70),
+						"outputTokens": float64(10),
+						"totalTokens":  float64(80),
+					},
+				},
+			}, nil
+		},
+	}
+	m := newManager(t, agent)
+	if _, err := m.Launch("n1", "grok", t.TempDir(), "grok-4.5", "low"); err != nil {
+		t.Fatal(err)
+	}
+	// Inject the window the real Grok CLI advertises at initialize — the fake
+	// agent has no modelState meta.
+	if s := m.session("n1"); s != nil {
+		s.ctxSize = 500_000
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	used, window := m.Usage("n1")
+	if used != 80 || window != 500_000 {
+		t.Fatalf("usage = %d/%d, want 80/500000", used, window)
+	}
+}
+
+// Clear must re-launch with the same model/effort the node was created with
+// (fork is the only path that changes launch config).
+func TestClearPropagatesModelEffort(t *testing.T) {
+	var launches [][2]string
+	agent := &fakeAgent{}
+	runner := func(nodeID, agentName, dir, model, effort string) (Process, error) {
+		launches = append(launches, [2]string{model, effort})
+		return fakeRunner(agent)(nodeID, agentName, dir, model, effort)
+	}
+	m := NewManagerWithRunner(t.TempDir(), runner)
+	if _, err := m.Launch("n1", "grok", t.TempDir(), "grok-4.5", "high"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Clear("n1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(launches) != 2 {
+		t.Fatalf("launches = %d, want 2 (Launch+Clear)", len(launches))
+	}
+	for i, got := range launches {
+		if got[0] != "grok-4.5" || got[1] != "high" {
+			t.Errorf("launch %d model/effort = %v, want grok-4.5/high", i, got)
+		}
+	}
+	s := m.session("n1")
+	if s == nil || s.model != "grok-4.5" || s.effort != "high" {
+		t.Fatalf("session after Clear = %+v", s)
 	}
 }
 

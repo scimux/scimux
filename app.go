@@ -123,16 +123,16 @@ type Node struct {
 	// is a scimux decision, distinct from a *mechanical* process exit — a crash
 	// leaves the node live until /exit is invoked. Empty means not ended.
 	EndedAt    string `json:"ended_at,omitempty"`
-	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode"
+	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok"
 	Model      string `json:"model,omitempty"`
-	Effort     string `json:"effort,omitempty"` // reasoning effort: codex thread config, claude --effort level
+	Effort     string `json:"effort,omitempty"` // reasoning effort: claude/grok launch flag or codex thread config
 	Dir        string `json:"dir"`
 	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
 	Transcript string `json:"transcript,omitempty"`
 	Adopted    bool   `json:"adopted,omitempty"` // adopted tmux sessions are never killed by scimux
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
 	// transcript files, the original path — claude), "acp" (an Agent Client
-	// Protocol subprocess, pi/opencode) or "codex" (codex's app-server protocol
+	// Protocol subprocess, pi/opencode/grok) or "codex" (codex's app-server protocol
 	// wrapped as a structured bridge). "acp" and "codex" are both structured
 	// subprocess transports (no pane); see procManager. An absent value means
 	// tmux — every stored record predates this field, so migration is "" ==
@@ -275,14 +275,17 @@ type app struct {
 	noteMu sync.Mutex
 	home   string
 	// usage caches subscription-budget snapshots (usage.go). Its own mutex is
-	// independent of a.mu — collectors do file/HTTP I/O. Served cache-only via
-	// /api/usage; refreshed only by successful Claude/Codex prompts.
+	// independent of a.mu — collectors do file/HTTP I/O (and a short-lived
+	// grok ACP subprocess). Served cache-only via /api/usage; refreshed only
+	// by successful Claude/Codex/Grok prompts.
 	usage *usageCache
 	// Provider source overrides for tests; empty means the real default path
-	// (~/.codex/sessions, ~/.claude/.credentials.json, the OAuth endpoint).
+	// (~/.codex/sessions, ~/.claude/.credentials.json, the OAuth endpoint,
+	// live `grok agent stdio` for billing).
 	codexSessionsDir string
 	claudeCredsPath  string
 	claudeUsageURL   string
+	grokUsageOpts    acp.GrokBillingOptions
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:
@@ -293,7 +296,7 @@ type PermOption struct {
 }
 
 // procManager is the shared surface of scimux's two structured-protocol
-// transports: acp.Manager (pi/opencode over the ACP SDK) and codex.Manager
+// transports: acp.Manager (pi/opencode/grok over the ACP SDK) and codex.Manager
 // (codex over its app-server protocol). Both drive one subprocess per node,
 // keep the authoritative history in an append-only session log, and answer
 // permission prompts structurally — so the create/poll/chat/send/key/peek paths

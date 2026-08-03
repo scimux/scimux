@@ -1,8 +1,7 @@
 /* UI document reducer / merge / replay / storage foundation.
  *
- * Packet 6C: DOM-free copy of the UI-state subset currently inlined in
- * web/index.html. Named exports are exercised by Node tests only; production
- * still uses the inline helpers until Packet 6F wires the sole module entry.
+ * Extracted in Packet 6C and wired into the sole browser entry in Packet 6F.
+ * Named exports are exercised directly by Node tests and used by production.
  *
  * Explicit inputs (no UI / uiOps / uiRev / localStorage / fetch globals):
  * - document objects are passed as `doc`

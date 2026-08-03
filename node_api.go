@@ -69,8 +69,10 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	// Hold adopted agents to the creation allowlist (minus codex): a direct API
 	// client must not persist a node with an agent the rest of the code does not
-	// support. Only tmux-transport agents are adoptable — pi/opencode over ACP
-	// are created, not adopted, but a legacy tmux-run pi/opencode may exist.
+	// support. Only tmux-transport agents are adoptable — ACP agents
+	// (pi/opencode/grok) are created, not adopted, but a legacy tmux-run
+	// pi/opencode may exist. Grok remains non-adoptable: scimux owns its
+	// structured subprocess (same as production Grok nodes).
 	switch agent {
 	case "claude", "pi", "opencode":
 	default:
@@ -215,7 +217,8 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The launch carried the node's first prompt (it rides the agent's command
-	// line), so a successful create is a budget-consuming turn for Claude/Codex.
+	// line), so a successful create is a budget-consuming turn for
+	// Claude/Codex/Grok.
 	if strings.TrimSpace(n.Prompt) != "" {
 		a.noteUsagePrompt(n.Agent)
 	}

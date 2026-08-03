@@ -17,18 +17,18 @@ import (
 )
 
 // modelEffort is one model's reasoning-effort menu: the levels its CLI accepts
-// and the level it defaults to. Only agents whose CLI advertises per-model
-// effort (codex) populate this; the rest leave it unset and the UI falls back
-// to a static per-agent effort list.
+// and the level it defaults to. Codex obtains this from its live catalog; Grok
+// obtains it from its models cache with a static fallback. Other agents leave
+// it unset and the UI falls back to a static per-agent effort list.
 type modelEffort struct {
 	Levels  []string `json:"levels"`
 	Default string   `json:"default,omitempty"`
 }
 
 // agentInfo is one harness's offering to the new-activity dialog: an ordered
-// model list plus, where the CLI reports it, a per-model effort menu keyed by
-// model id. Efforts is nil for agents that don't advertise it (claude/pi/
-// opencode) and for codex when only the static fallback is available.
+// model list plus, where known, a per-model effort menu keyed by model id.
+// Efforts is nil for agents that don't advertise it (claude/pi/opencode) and
+// for codex when only the static fallback is available.
 type agentInfo struct {
 	Models  []string               `json:"models"`
 	Efforts map[string]modelEffort `json:"efforts,omitempty"`
@@ -37,7 +37,7 @@ type agentInfo struct {
 // A harness is probed in two steps: LookPath decides whether it appears at
 // all, then its own list command (where one exists — the CLI is the only
 // party that knows its providers and credentials) supplies the models (and,
-// for codex, the per-model effort menus). A missing list command or a failed
+// for codex/grok, the per-model effort menus). A missing list command or a failed
 // probe falls back to a static set: an installed harness must never vanish
 // from the dialog because a list call broke, and an empty model list is still
 // valid (the harness launches with its own default model).
@@ -76,6 +76,9 @@ var harnesses = []harness{
 	{bin: "pi", require: "pi-acp", list: justModels(piModels)},
 	// opencode exposes ACP as a subcommand of the same binary, so bin suffices.
 	{bin: "opencode", list: justModels(opencodeModels)},
+	// grok exposes ACP as `grok agent stdio`; models come from `grok models`
+	// and per-model effort menus from the CLI's models cache when available.
+	{bin: "grok", list: grokModelsFromCLI, fallback: grokModelsFallback},
 }
 
 var agentsOnce sync.Once
@@ -88,41 +91,48 @@ var agentsCache map[string]agentInfo
 // installed.
 func detectAgents() map[string]agentInfo {
 	agentsOnce.Do(func() {
-		res := map[string]agentInfo{}
-		for _, h := range harnesses {
-			require := h.require
-			if require == "" {
-				require = h.bin
-			}
-			// Presence is gated on the binary creation actually requires.
-			if _, err := exec.LookPath(require); err != nil {
-				continue
-			}
-			var info agentInfo
-			// Model probing uses bin, which may differ from require and may be
-			// absent on its own — an installed launcher with no lister still
-			// yields an offerable agent that runs on its default model.
-			if h.list != nil {
-				if bin, err := exec.LookPath(h.bin); err == nil {
-					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-					info = h.list(ctx, bin)
-					cancel()
-				}
-			}
-			// An empty model list means the probe found nothing usable (or ran
-			// no probe): fall back to the static set, dropping any partial
-			// effort data with it.
-			if len(info.Models) == 0 && h.fallback != nil {
-				info = h.fallback()
-			}
-			if info.Models == nil {
-				info.Models = []string{}
-			}
-			res[h.bin] = info
-		}
-		agentsCache = res
+		agentsCache = probeAgents(harnesses)
 	})
 	return agentsCache
+}
+
+// probeAgents performs one uncached discovery pass. Keeping the cache wrapper
+// separate lets tests supply only local script stubs: the full suite must never
+// invoke whichever real agent CLIs happen to be installed on the host.
+func probeAgents(hs []harness) map[string]agentInfo {
+	res := map[string]agentInfo{}
+	for _, h := range hs {
+		require := h.require
+		if require == "" {
+			require = h.bin
+		}
+		// Presence is gated on the binary creation actually requires.
+		if _, err := exec.LookPath(require); err != nil {
+			continue
+		}
+		var info agentInfo
+		// Model probing uses bin, which may differ from require and may be
+		// absent on its own — an installed launcher with no lister still
+		// yields an offerable agent that runs on its default model.
+		if h.list != nil {
+			if bin, err := exec.LookPath(h.bin); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				info = h.list(ctx, bin)
+				cancel()
+			}
+		}
+		// An empty model list means the probe found nothing usable (or ran
+		// no probe): fall back to the static set, dropping any partial
+		// effort data with it.
+		if len(info.Models) == 0 && h.fallback != nil {
+			info = h.fallback()
+		}
+		if info.Models == nil {
+			info.Models = []string{}
+		}
+		res[h.bin] = info
+	}
+	return res
 }
 
 // claudeModelPrompt asks the running claude harness to enumerate the concrete
@@ -356,6 +366,146 @@ func opencodeModels(ctx context.Context, bin string) []string {
 		}
 	}
 	return models
+}
+
+// grokDefaultEfforts is the static effort menu when the CLI does not expose
+// per-model levels: low/medium/high with high as the public default for
+// grok-4.5 reasoning (https://docs.x.ai/developers/model-capabilities/text/reasoning).
+func grokDefaultEfforts() modelEffort {
+	return modelEffort{Levels: []string{"low", "medium", "high"}, Default: "high"}
+}
+
+// parseGrokModels extracts the default model id and the available-model list
+// from `grok models` human text. Defensive: login banners and blank lines are
+// ignored; bullet lines `* <id>` (optional "(default)") contribute ids; the
+// "Default model:" line supplies the float-to-front default.
+func parseGrokModels(out string) (defaultModel string, models []string) {
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "Default model:"); ok {
+			defaultModel = strings.TrimSpace(rest)
+			continue
+		}
+		// "* grok-4.5" or "* grok-4.5 (default)"
+		if !strings.HasPrefix(line, "*") {
+			continue
+		}
+		id := strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		if i := strings.IndexByte(id, ' '); i >= 0 {
+			id = id[:i]
+		}
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		models = append(models, id)
+	}
+	return defaultModel, models
+}
+
+// grokModelsFallback is the static catalog when `grok models` fails: keep the
+// harness offerable with a known current id and the public effort menu.
+func grokModelsFallback() agentInfo {
+	return withGrokStaticEfforts(agentInfo{Models: []string{"grok-4.5"}})
+}
+
+// withGrokStaticEfforts attaches the default low/medium/high menu to every
+// model that has no effort entry yet.
+func withGrokStaticEfforts(info agentInfo) agentInfo {
+	if len(info.Models) == 0 {
+		return info
+	}
+	if info.Efforts == nil {
+		info.Efforts = map[string]modelEffort{}
+	}
+	def := grokDefaultEfforts()
+	for _, m := range info.Models {
+		if _, ok := info.Efforts[m]; !ok {
+			info.Efforts[m] = def
+		}
+	}
+	return info
+}
+
+// grokModelsFromCLI runs `grok models` and returns its catalog plus per-model
+// effort menus. Efforts are enriched from ~/.grok/models_cache.json when that
+// file is present (the CLI refreshes it on list); otherwise every model gets
+// the static low/medium/high menu. Any failure yields a zero agentInfo so
+// detectAgents falls back to grokModelsFallback.
+func grokModelsFromCLI(ctx context.Context, bin string) agentInfo {
+	out, err := exec.CommandContext(ctx, bin, "models").Output()
+	if err != nil {
+		return agentInfo{}
+	}
+	def, models := parseGrokModels(string(out))
+	if len(models) == 0 {
+		return agentInfo{}
+	}
+	models = prependModel(def, models)
+	info := agentInfo{Models: models, Efforts: grokEffortsFromCache(models)}
+	return withGrokStaticEfforts(info)
+}
+
+// grokEffortsFromCache reads per-model reasoning_efforts from the Grok CLI's
+// models cache. The cache is not a public API — missing/unparseable files and
+// models without effort data simply contribute nothing (caller fills static).
+func grokEffortsFromCache(models []string) map[string]modelEffort {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".grok", "models_cache.json"))
+	if err != nil {
+		return nil
+	}
+	var cache struct {
+		Models map[string]struct {
+			Info struct {
+				SupportsReasoningEffort bool   `json:"supports_reasoning_effort"`
+				ReasoningEffort         string `json:"reasoning_effort"`
+				ReasoningEfforts        []struct {
+					Value   string `json:"value"`
+					Default bool   `json:"default"`
+				} `json:"reasoning_efforts"`
+			} `json:"info"`
+		} `json:"models"`
+	}
+	if json.Unmarshal(b, &cache) != nil || len(cache.Models) == 0 {
+		return nil
+	}
+	efforts := map[string]modelEffort{}
+	for _, id := range models {
+		entry, ok := cache.Models[id]
+		if !ok || !entry.Info.SupportsReasoningEffort {
+			continue
+		}
+		var levels []string
+		def := entry.Info.ReasoningEffort
+		for _, e := range entry.Info.ReasoningEfforts {
+			if e.Value == "" {
+				continue
+			}
+			levels = append(levels, e.Value)
+			if e.Default {
+				def = e.Value
+			}
+		}
+		if len(levels) == 0 {
+			continue
+		}
+		if def == "" {
+			def = "high"
+		}
+		efforts[id] = modelEffort{Levels: levels, Default: def}
+	}
+	if len(efforts) == 0 {
+		return nil
+	}
+	return efforts
 }
 
 // handleAgents reports the installed harnesses and their models — the

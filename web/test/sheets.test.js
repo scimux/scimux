@@ -63,8 +63,32 @@ test("sheets.js exports factory and pure helpers; no later-feature imports", () 
 test("constants: last-dir key and static catalogs", () => {
   assert.equal(LAST_DIR_KEY, "scimux-lastdir");
   assert.deepEqual(DEFAULT_MODELS.claude, ["", "fable", "opus", "sonnet", "haiku"]);
+  assert.deepEqual(DEFAULT_MODELS.grok, ["", "grok-4.5"]);
   assert.deepEqual(DEFAULT_EFFORTS.claude, ["low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(DEFAULT_EFFORTS.codex, ["low", "medium", "high"]);
+  assert.deepEqual(DEFAULT_EFFORTS.grok, ["low", "medium", "high"]);
+});
+
+test("Grok model/effort options and probe replacement", () => {
+  const models = cloneDefaultModels();
+  assert.ok(models.grok.includes("grok-4.5"));
+  const html = modelOptionsHTML(models, "grok", null, esc);
+  assert.match(html, /value="grok-4\.5"/);
+  const efforts = effortLevelsFor("grok", "grok-4.5", {});
+  assert.deepEqual(efforts.list, ["low", "medium", "high"]);
+  // Probe replaces fallbacks wholesale, including Grok.
+  const me = {};
+  applyAgentsProbe(models, me, {
+    grok: {
+      models: ["grok-4.5", "grok-code-fast-1"],
+      efforts: { "grok-4.5": { levels: ["low", "high"], default: "high" } },
+    },
+  });
+  assert.deepEqual(models.grok, ["", "grok-4.5", "grok-code-fast-1"]);
+  assert.deepEqual(
+    effortLevelsFor("grok", "grok-4.5", me),
+    { list: ["low", "high"], default: "high" },
+  );
 });
 
 /* ---------- pure: model/effort options ---------- */

@@ -89,6 +89,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "./polling.js"`,
 		`from "./search.js"`,
 		`from "./sheets.js"`,
+		`from "./usage.js"`,
 	}
 	for _, imp := range wantImports {
 		if !strings.Contains(appSrc, imp) {

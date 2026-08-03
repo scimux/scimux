@@ -1,5 +1,5 @@
-// Package acp is scimux's second transport: instead of driving pi and
-// opencode through a tmux-wrapped TUI and photographing the pane, it speaks
+// Package acp is scimux's second transport: instead of driving pi, opencode,
+// and grok through a tmux-wrapped TUI and photographing the pane, it speaks
 // the Agent Client Protocol (ACP) to them over stdio as local child
 // processes. Streaming updates, tool state, usage and structured permission
 // prompts arrive as typed records — no pane snapshots, no TUI string matching.
@@ -21,6 +21,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -107,7 +108,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	if err := os.MkdirAll(m.logDir, 0o700); err != nil {
 		return "", err
 	}
-	proc, err := m.runner(nodeID, agent, dir)
+	proc, err := m.runner(nodeID, agent, dir, model, effort)
 	if err != nil {
 		return "", err
 	}
@@ -117,6 +118,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		proc:      proc,
 		logw:      &logWriter{Path: m.logPath(nodeID)},
 		dir:       dir,
+		model:     model,
 		effort:    effort,
 		assetHook: m.assetHook,
 		procAlive: true,
@@ -144,17 +146,22 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
 	defer cancel()
 	// Be explicit about capabilities: we decline fs and terminal (plan §2).
-	if _, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
+	initResp, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
 		ProtocolVersion: sdk.ProtocolVersionNumber,
 		ClientCapabilities: sdk.ClientCapabilities{
 			Fs:       sdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
 			Terminal: false,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		killAndReap(proc)
 		discardLog()
 		return "", fmt.Errorf("acp initialize: %w", err)
 	}
+	// Context window for the gauge: Grok (and some others) advertise
+	// totalContextTokens on initialize modelState but never stream
+	// usage_update Used/Size — so remember it for end-of-turn usage records.
+	s.ctxSize = contextSizeFromMeta(initResp.Meta, model)
 	resp, err := s.conn.NewSession(ctx, sdk.NewSessionRequest{Cwd: dir, McpServers: []sdk.McpServer{}})
 	if err != nil {
 		killAndReap(proc)
@@ -162,6 +169,9 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		return "", fmt.Errorf("acp new session: %w", err)
 	}
 	s.sessionID = resp.SessionId
+	if s.ctxSize == 0 {
+		s.ctxSize = contextSizeFromMeta(resp.Meta, model)
+	}
 	s.captureBanner(resp)
 	s.applyEffort(ctx, effort, resp)
 
@@ -234,7 +244,7 @@ func (m *Manager) Clear(nodeID string) error {
 	if _, ok := old.reserveTurn(); !ok {
 		return ErrTurnActive
 	}
-	proc, err := m.runner(nodeID, old.agent, old.dir)
+	proc, err := m.runner(nodeID, old.agent, old.dir, old.model, old.effort)
 	if err != nil {
 		old.abortTurn()
 		return err
@@ -245,7 +255,9 @@ func (m *Manager) Clear(nodeID string) error {
 		proc:      proc,
 		logw:      old.logw, // same file, same writer: stragglers stay serialized
 		dir:       old.dir,
+		model:     old.model,
 		effort:    old.effort,
+		ctxSize:   old.ctxSize, // fall back to prior window until initialize re-probes
 		assetHook: old.assetHook,
 		procAlive: true,
 		done:      make(chan struct{}),
@@ -253,16 +265,20 @@ func (m *Manager) Clear(nodeID string) error {
 	s.conn = sdk.NewClientSideConnection(s, proc.Stdin(), proc.Stdout())
 	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
 	defer cancel()
-	if _, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
+	initResp, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
 		ProtocolVersion: sdk.ProtocolVersionNumber,
 		ClientCapabilities: sdk.ClientCapabilities{
 			Fs:       sdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
 			Terminal: false,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		killAndReap(proc)
 		old.abortTurn()
 		return fmt.Errorf("acp initialize: %w", err)
+	}
+	if n := contextSizeFromMeta(initResp.Meta, s.model); n > 0 {
+		s.ctxSize = n
 	}
 	resp, err := s.conn.NewSession(ctx, sdk.NewSessionRequest{Cwd: s.dir, McpServers: []sdk.McpServer{}})
 	if err != nil {
@@ -271,6 +287,9 @@ func (m *Manager) Clear(nodeID string) error {
 		return fmt.Errorf("acp new session: %w", err)
 	}
 	s.sessionID = resp.SessionId
+	if n := contextSizeFromMeta(resp.Meta, s.model); n > 0 {
+		s.ctxSize = n
+	}
 	s.captureBanner(resp)
 	s.applyEffort(ctx, s.effort, resp)
 	// Retire the old session's writer before the seam goes in: from here its
@@ -476,11 +495,17 @@ type Session struct {
 	proc      Process
 	sessionID sdk.SessionId
 	logw      *logWriter
-	// dir and effort are kept from Launch so Clear can renegotiate a fresh
-	// session under the same conditions (/clear never changes launch config —
-	// fork is the path that can).
+	// dir, model, and effort are kept from Launch so Clear can renegotiate a
+	// fresh session under the same conditions (/clear never changes launch
+	// config — fork is the path that can). model matters for agents that take
+	// it as a process flag (grok); pi/opencode keep it for the meta header only.
+	// ctxSize is the model context window (tokens) when advertised at
+	// initialize/new-session — needed because Grok reports occupancy only as
+	// token counts in PromptResponse._meta, never as a usage_update with size.
 	dir       string
+	model     string
 	effort    string
+	ctxSize   int
 	assetHook asset.IngestFunc
 
 	mu            sync.Mutex
@@ -699,12 +724,11 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flushAssistantLocked()
-	if resp.Usage != nil {
-		u := resp.Usage
-		ev := &UsageEvent{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, TotalTokens: u.TotalTokens}
-		if u.CachedReadTokens != nil {
-			ev.CachedReadTokens = *u.CachedReadTokens
-		}
+	// Context occupancy for the gauge: opencode streams usage_update with
+	// used/size; codex uses its own event; Grok (and the unstable ACP usage
+	// field) land here at turn end. usageFromPrompt also maps token totals
+	// onto Used and fills Size from the window captured at initialize.
+	if ev := usageFromPrompt(resp, s.ctxSize); ev != nil {
 		s.appendLocked(Event{T: "usage", Usage: ev})
 	}
 	switch {
@@ -997,6 +1021,173 @@ func (s *Session) captureBanner(resp sdk.NewSessionResponse) {
 			s.banner = str
 		}
 	}
+}
+
+// usageFromPrompt builds a sessionlog usage record from a PromptResponse.
+// Prefers the unstable top-level Usage field; falls back to Grok-style
+// occupancy nested under _meta (totalTokens / usage{…}). Sets Used for the
+// context gauge from total token counts when the agent never sent a
+// usage_update, and Size from the window captured at initialize when known.
+// Returns nil when nothing usable is present.
+func usageFromPrompt(resp sdk.PromptResponse, ctxSize int) *UsageEvent {
+	if resp.Usage != nil {
+		u := resp.Usage
+		ev := &UsageEvent{
+			InputTokens:  u.InputTokens,
+			OutputTokens: u.OutputTokens,
+			TotalTokens:  u.TotalTokens,
+		}
+		if u.CachedReadTokens != nil {
+			ev.CachedReadTokens = *u.CachedReadTokens
+		}
+		fillUsageOccupancy(ev, ctxSize)
+		return ev
+	}
+	return usageFromMeta(resp.Meta, ctxSize)
+}
+
+// usageFromMeta reads Grok's PromptResponse._meta shape:
+//
+//	{ "totalTokens": N, "inputTokens": …, "outputTokens": …,
+//	  "usage": { "totalTokens": N, "inputTokens": …, … } }
+//
+// Either the nested usage object or the top-level token fields suffice.
+func usageFromMeta(meta map[string]any, ctxSize int) *UsageEvent {
+	if len(meta) == 0 {
+		return nil
+	}
+	ev := &UsageEvent{}
+	if raw, ok := meta["usage"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			ev.InputTokens = intFromAny(m["inputTokens"])
+			ev.OutputTokens = intFromAny(m["outputTokens"])
+			ev.TotalTokens = intFromAny(m["totalTokens"])
+			ev.CachedReadTokens = intFromAny(m["cachedReadTokens"])
+			if amount := floatFromAny(m["costAmount"]); amount > 0 {
+				ev.CostAmount = amount
+				ev.CostCurrency = "USD"
+			}
+			// costUsdTicks is 1e-9 USD units observed on grok agent stdio.
+			if ticks := floatFromAny(m["costUsdTicks"]); ticks > 0 && ev.CostAmount == 0 {
+				ev.CostAmount = ticks / 1e9
+				ev.CostCurrency = "USD"
+			}
+		}
+	}
+	if ev.TotalTokens == 0 {
+		ev.TotalTokens = intFromAny(meta["totalTokens"])
+	}
+	if ev.InputTokens == 0 {
+		ev.InputTokens = intFromAny(meta["inputTokens"])
+	}
+	if ev.OutputTokens == 0 {
+		ev.OutputTokens = intFromAny(meta["outputTokens"])
+	}
+	if ev.CachedReadTokens == 0 {
+		ev.CachedReadTokens = intFromAny(meta["cachedReadTokens"])
+	}
+	if ev.TotalTokens == 0 && ev.InputTokens == 0 && ev.OutputTokens == 0 {
+		return nil
+	}
+	fillUsageOccupancy(ev, ctxSize)
+	return ev
+}
+
+// fillUsageOccupancy maps token totals onto the Used/Size fields the context
+// gauge reads (LatestUsage / segment only look at Used and Size).
+func fillUsageOccupancy(ev *UsageEvent, ctxSize int) {
+	if ev.Used == 0 {
+		if ev.TotalTokens > 0 {
+			ev.Used = ev.TotalTokens
+		} else if n := ev.InputTokens + ev.OutputTokens; n > 0 {
+			ev.Used = n
+		}
+	}
+	if ev.Size == 0 && ctxSize > 0 {
+		ev.Size = ctxSize
+	}
+}
+
+// contextSizeFromMeta pulls totalContextTokens out of an initialize or
+// new-session _meta payload. Grok advertises modelState.availableModels[].
+// _meta.totalContextTokens (and a currentModelId); other agents may omit it.
+func contextSizeFromMeta(meta map[string]any, model string) int {
+	if len(meta) == 0 {
+		return 0
+	}
+	// Direct field (defensive — some agents may put it at the top level).
+	if n := intFromAny(meta["totalContextTokens"]); n > 0 {
+		return n
+	}
+	ms, _ := meta["modelState"].(map[string]any)
+	if ms == nil {
+		return 0
+	}
+	current := model
+	if current == "" {
+		if s, ok := ms["currentModelId"].(string); ok {
+			current = s
+		}
+	}
+	models, _ := ms["availableModels"].([]any)
+	var fallback int
+	for _, raw := range models {
+		m, _ := raw.(map[string]any)
+		if m == nil {
+			continue
+		}
+		id, _ := m["modelId"].(string)
+		mm, _ := m["_meta"].(map[string]any)
+		n := intFromAny(m["totalContextTokens"])
+		if n == 0 && mm != nil {
+			n = intFromAny(mm["totalContextTokens"])
+		}
+		if n <= 0 {
+			continue
+		}
+		if id == current && current != "" {
+			return n
+		}
+		if fallback == 0 {
+			fallback = n
+		}
+	}
+	return fallback
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		i, _ := strconv.Atoi(n)
+		return i
+	}
+	return 0
+}
+
+func floatFromAny(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	}
+	return 0
 }
 
 // applyEffort maps a scimux effort level onto the agent's own control surface:

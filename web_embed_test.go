@@ -28,11 +28,13 @@ var productionJSModules = []string{
 	"web/js/search.js",
 	"web/js/sheets.js",
 	"web/js/state.js",
+	"web/js/usage.js",
 }
 
 func TestWebFSEmbeddedProductionFiles(t *testing.T) {
 	expected := []string{
 		"web/assets/agents/claude.svg",
+		"web/assets/agents/grok.svg",
 		"web/assets/agents/openai.svg",
 		"web/assets/agents/opencode.svg",
 		"web/assets/agents/pi.svg",

@@ -96,7 +96,7 @@ export const DEC_LABELS = {
   waiting_question: "Agent is waiting for your answer",
   waiting_approval: "Agent needs your approval",
   quiet_inspect: "Quiet \u2014 inspect the terminal",
-  /* ACP transport (pi/opencode): no pane, so "terminal" reads as the event log */
+  /* ACP transport (pi/opencode/grok): no pane, so "terminal" reads as the event log */
   turn_active: "Agent is working",
   turn_error: "The agent finished without output \u2014 check the log",
 };

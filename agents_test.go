@@ -30,6 +30,45 @@ func TestAgentCommandPiOpencode(t *testing.T) {
 	if got, _ := agentCommand(bare); got != `pi 'p'` {
 		t.Errorf("bare pi cmd = %s", got)
 	}
+	// grok is ACP in production; agentCommand is only a legacy tmux fallback.
+	g := &Node{Agent: "grok", Model: "grok-4.5", Effort: "low", Prompt: "hello"}
+	if got, _ := agentCommand(g); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
+		t.Errorf("grok cmd = %s", got)
+	}
+}
+
+func TestParseGrokModels(t *testing.T) {
+	out := "You are logged in with grok.com.\n\nDefault model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n  * grok-code-fast-1\n"
+	def, models := parseGrokModels(out)
+	if def != "grok-4.5" {
+		t.Errorf("default = %q, want grok-4.5", def)
+	}
+	want := []string{"grok-4.5", "grok-code-fast-1"}
+	if !reflect.DeepEqual(models, want) {
+		t.Errorf("models = %v, want %v", models, want)
+	}
+	// Banner-only / empty → no models so detectAgents falls back.
+	if _, m := parseGrokModels("You are logged in with grok.com.\n"); len(m) != 0 {
+		t.Errorf("empty catalog = %v, want nil/empty", m)
+	}
+}
+
+func TestWithGrokStaticEfforts(t *testing.T) {
+	info := withGrokStaticEfforts(agentInfo{Models: []string{"grok-4.5", "other"}})
+	for _, id := range info.Models {
+		e, ok := info.Efforts[id]
+		if !ok || !reflect.DeepEqual(e.Levels, []string{"low", "medium", "high"}) || e.Default != "high" {
+			t.Errorf("effort for %s = %+v", id, e)
+		}
+	}
+	// Existing per-model menu is preserved.
+	info = withGrokStaticEfforts(agentInfo{
+		Models:  []string{"m"},
+		Efforts: map[string]modelEffort{"m": {Levels: []string{"low"}, Default: "low"}},
+	})
+	if got := info.Efforts["m"]; !reflect.DeepEqual(got.Levels, []string{"low"}) || got.Default != "low" {
+		t.Errorf("preserved effort = %+v", got)
+	}
 }
 
 func TestPiModelsParse(t *testing.T) {
@@ -211,11 +250,9 @@ func TestClaudeCacheRoundTrip(t *testing.T) {
 	}
 }
 
-// detectAgents shells out to whatever harnesses are installed; keep it out
-// of -short runs but exercise the real probes when dogfooding.
 // writeScript drops an executable /bin/sh stub named `name` in dir and returns
-// its path — used to stand in for the real `codex` binary without a PATH dance
-// (codexModelsFromCLI takes the binary path directly).
+// its path. Agent discovery tests use only these local stubs: the suite must
+// never execute whichever real agent CLIs happen to be installed on the host.
 func writeScript(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -362,15 +399,59 @@ func TestCodexModelsFromCLIFailure(t *testing.T) {
 }
 
 func TestDetectAgents(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping harness probes in -short mode")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := t.TempDir()
+	writeScript(t, binDir, "claude", `exit 0`)
+	writeScript(t, binDir, "codex", `exit 1`)
+	writeScript(t, binDir, "pi-acp", `exit 0`)
+	writeScript(t, binDir, "pi", `
+if [ "$1" != "--list-models" ]; then exit 2; fi
+printf '%s\n' 'provider model' 'anthropic claude-sonnet-4-5'
+`)
+	writeScript(t, binDir, "opencode", `
+if [ "$1" != "models" ]; then exit 2; fi
+printf '%s\n' 'openai/gpt-5.5' 'anthropic/claude-sonnet-4-5'
+`)
+	writeScript(t, binDir, "grok", `
+if [ "$1" != "models" ]; then exit 2; fi
+printf '%s\n' 'Default model: grok-4.5' '* grok-code-fast-1' '* grok-4.5 (default)'
+`)
+	t.Setenv("PATH", binDir)
+
+	cacheDir := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	agents := detectAgents()
+	cache := `{"models":{"grok-4.5":{"info":{"supports_reasoning_effort":true,"reasoning_effort":"medium","reasoning_efforts":[{"value":"low"},{"value":"medium","default":true},{"value":"high"}]}}}}`
+	if err := os.WriteFile(filepath.Join(cacheDir, "models_cache.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agents := probeAgents(harnesses)
+	if got := len(agents); got != len(harnesses) {
+		t.Fatalf("agents = %v, want all %d stubbed harnesses", agents, len(harnesses))
+	}
+	if got := agents["pi"].Models; !reflect.DeepEqual(got, []string{"anthropic/claude-sonnet-4-5"}) {
+		t.Errorf("pi models = %v", got)
+	}
+	if got := agents["opencode"].Models; !reflect.DeepEqual(got, []string{"openai/gpt-5.5", "anthropic/claude-sonnet-4-5"}) {
+		t.Errorf("opencode models = %v", got)
+	}
+	grok := agents["grok"]
+	if want := []string{"grok-4.5", "grok-code-fast-1"}; !reflect.DeepEqual(grok.Models, want) {
+		t.Errorf("grok models = %v, want %v", grok.Models, want)
+	}
+	if got := grok.Efforts["grok-4.5"]; got.Default != "medium" || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
+		t.Errorf("grok-4.5 efforts = %+v", got)
+	}
+	if got := grok.Efforts["grok-code-fast-1"]; got.Default != "high" {
+		t.Errorf("grok-code-fast-1 fallback efforts = %+v", got)
+	}
 	for name, info := range agents {
 		if info.Models == nil {
 			t.Errorf("agent %q has nil model list", name)
 		}
-		t.Logf("%s: %d models, %d per-model effort menus", name, len(info.Models), len(info.Efforts))
 	}
 }
 

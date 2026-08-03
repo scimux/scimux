@@ -1,9 +1,7 @@
 /* CSRF fetch wrapper, response decoding, and /api/ui request contracts.
  *
- * Packet 6E: DOM-free copy of the CSRF/api helpers and UI HTTP sync shapes
- * currently inlined in web/index.html. Named exports are exercised by Node
- * tests only; production still uses the inline helpers until Packet 6F wires
- * the sole module entry.
+ * Extracted in Packet 6E and wired into the sole browser entry in Packet 6F.
+ * Named exports are exercised directly by Node tests and used by production.
  *
  * Explicit inputs (no CSRF global / document / window / localStorage / network):
  * - csrf token is supplied to withCsrf / api / UI put builders

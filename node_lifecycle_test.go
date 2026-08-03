@@ -468,7 +468,6 @@ func TestResolveNodeValidationFailuresAre400(t *testing.T) {
 		{"missing parent", Node{Title: "T", Prompt: "p", Parent: "nope", Dir: dir}},
 		{"missing parent with explicit agent", Node{Title: "T", Prompt: "p", Parent: "nope", Agent: "codex", Dir: dir}},
 		{"unknown agent", Node{Title: "T", Prompt: "p", Agent: "gemini", Dir: dir}},
-		{"unknown agent grok", Node{Title: "T", Prompt: "p", Agent: "grok", Dir: dir}},
 		{"missing directory", Node{Title: "T", Prompt: "p", Dir: filepath.Join(dir, "missing")}},
 		{"file as directory", Node{Title: "T", Prompt: "p", Dir: filePath}},
 	}
@@ -591,6 +590,16 @@ func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 		t.Errorf("bare opencode = %s", got)
 	}
 
+	// grok legacy/forced-tmux fallback: -m and --reasoning-effort like ACP argv.
+	gFull := &Node{Agent: "grok", Model: "grok-4.5", Effort: "low", Prompt: "hello"}
+	if got, _ := agentCommand(gFull); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
+		t.Errorf("grok+model+effort = %s", got)
+	}
+	gBare := &Node{Agent: "grok", Prompt: "p"}
+	if got, _ := agentCommand(gBare); got != `grok 'p'` {
+		t.Errorf("bare grok = %s", got)
+	}
+
 	// Prompt quoting for the fallback path.
 	tricky := &Node{Agent: "pi", Prompt: `don't run $(rm -rf /)`}
 	if got, _ := agentCommand(tricky); !strings.Contains(got, `'don'\''t run $(rm -rf /)'`) {
@@ -603,7 +612,7 @@ func TestAgentCommandRejectsCodexAndUnknown(t *testing.T) {
 	if _, err := agentCommand(&Node{Agent: "codex", Prompt: "p"}); err == nil {
 		t.Error("agentCommand must reject codex")
 	}
-	for _, agent := range []string{"gemini", "grok", "", "Claude"} {
+	for _, agent := range []string{"gemini", "", "Claude"} {
 		if _, err := agentCommand(&Node{Agent: agent, Prompt: "p"}); err == nil {
 			t.Errorf("agentCommand must reject unknown agent %q", agent)
 		}
@@ -966,6 +975,7 @@ func TestResolveNodeTransport(t *testing.T) {
 	}{
 		{Node{Title: "T", Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
 		{Node{Title: "T", Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
+		{Node{Title: "T", Prompt: "p", Agent: "grok", Dir: dir}, "acp"},
 		{Node{Title: "T", Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
 		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
 		{Node{Title: "T", Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport

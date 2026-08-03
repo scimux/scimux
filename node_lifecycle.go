@@ -85,9 +85,10 @@ func agentCommand(n *Node) (string, error) {
 			parts = append(parts, "--effort", shellQuote(n.Effort))
 		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
-	// pi and opencode reach agentCommand only as a legacy/forced tmux fallback
-	// (new pi/opencode nodes resolve to the ACP transport); both take the
-	// "provider/model" form their own list commands emit.
+	// pi, opencode, and grok reach agentCommand only as a legacy/forced tmux
+	// fallback (new nodes resolve to the ACP transport). pi/opencode take the
+	// "provider/model" form their list commands emit; grok takes -m and
+	// --reasoning-effort as on its ACP launch line.
 	case "pi":
 		parts := []string{"pi"}
 		if n.Model != "" {
@@ -100,8 +101,17 @@ func agentCommand(n *Node) (string, error) {
 			parts = append(parts, "--model", shellQuote(n.Model))
 		}
 		return strings.Join(append(parts, "--prompt", shellQuote(n.Prompt)), " "), nil
+	case "grok":
+		parts := []string{"grok"}
+		if n.Model != "" {
+			parts = append(parts, "-m", shellQuote(n.Model))
+		}
+		if n.Effort != "" {
+			parts = append(parts, "--reasoning-effort", shellQuote(n.Effort))
+		}
+		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
 	}
-	return "", fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
+	return "", fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, or grok)", n.Agent)
 }
 
 // launchFailSentinel is printed on the pane by wrapLaunch when the launched
@@ -299,17 +309,17 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		n.Agent = "claude"
 	}
 	switch n.Agent {
-	case "claude", "codex", "pi", "opencode":
+	case "claude", "codex", "pi", "opencode", "grok":
 	default:
-		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, or opencode)", n.Agent)
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, or grok)", n.Agent)
 	}
-	// New nodes pick a transport by agent: pi/opencode over ACP, codex over its
-	// app-server bridge, claude over tmux. Only set this on creation — stored
-	// records with an absent Transport are migrated to tmux by Node.transport,
-	// never rewritten here.
+	// New nodes pick a transport by agent: pi/opencode/grok over ACP, codex over
+	// its app-server bridge, claude over tmux. Only set this on creation —
+	// stored records with an absent Transport are migrated to tmux by
+	// Node.transport, never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
-		case "pi", "opencode":
+		case "pi", "opencode", "grok":
 			n.Transport = "acp"
 		case "codex":
 			n.Transport = "codex"
@@ -436,7 +446,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 }
 
 // launchNode starts the tmux session or structured-protocol subprocess (ACP
-// for pi/opencode, codex app-server for codex) and persists the node record.
+// for pi/opencode/grok, codex app-server for codex) and persists the node record.
 // Runs without a.mu. Persist follows launch: the session/process had to exist
 // first, so a store failure rolls it back (kill) — otherwise a session would
 // run supervised-in-memory but vanish from the registry on restart. The

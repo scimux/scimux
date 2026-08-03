@@ -25,6 +25,7 @@ import {
   fmtNoteMeta, bubbleTitle, cssRGB as cssRGBMod,
   contrastText as contrastTextMod,
 } from "./format.js";
+import { usageBadgeLayout } from "./usage.js";
 import {
   hashStr, laneList as laneListMod, sortedLaneList as sortedLaneListMod,
   laneById as laneByIdMod, laneName as laneNameMod, laneColor as laneColorMod,
@@ -255,6 +256,9 @@ function agentLogo(agent){
     return `<img src="/assets/agents/pi.svg" alt="" aria-hidden="true">`;
   case "opencode":
     return `<img src="/assets/agents/opencode.svg" alt="" aria-hidden="true">`;
+  case "grok":
+    // Mono mark (Lobe Icons / currentColor) via mask so it tracks light/dark ink.
+    return `<span class="mask-logo" style="--logo:url('/assets/agents/grok.svg')" aria-hidden="true"></span>`;
   default:
     return `<svg viewBox="0 0 24 24" aria-hidden="true">
     <circle cx="12" cy="12" r="10" fill="var(--dim)"/>
@@ -316,9 +320,9 @@ function renderSys(sys){
    read at most every 30s while the tab is visible. Numbers are *remaining*
    percentages — runway, the value a user needs before starting work. */
 let usageSnap = null;
-/* The slot cycles: system metrics → Claude budget → Codex budget → repeat.
+/* The slot cycles: system metrics → Claude → Codex → Grok budgets → repeat.
    Each phase is a fixed-shape row so a flip never reflows the bar. */
-const STATUS_PHASES = ["metrics", "claude", "codex"];
+const STATUS_PHASES = ["metrics", "claude", "codex", "grok"];
 let statusPhaseIdx = 0;
 
 function usageResetLabel(iso){
@@ -358,9 +362,9 @@ function fuelGauge(rem){
 }
 function usageBadge(agent, v){
   const logo = `<span class="agent-logo" aria-hidden="true">${agentLogo(agent)}</span>`;
-  const name = agent === "codex" ? "Codex" : agent === "claude" ? "Claude" : esc(agent);
-  if (!v || !v.available){
-    return `<span class="ubadge u-off" title="${name}: usage unavailable">${logo}` +
+  const layout = usageBadgeLayout(agent, v);
+  if (!layout.available){
+    return `<span class="ubadge u-off" title="${layout.tip}">${logo}` +
            `<span class="Lfull">--</span><span class="Labbr">--</span></span>`;
   }
   const fh = v.five_hour_remaining, wk = v.weekly_remaining;
@@ -368,19 +372,33 @@ function usageBadge(agent, v){
   const num = (x) => x == null ? "--" : Math.round(x);
   const fhc = usageRemClass(fh), wkc = usageRemClass(wk);
   const fg = fuelGauge(fh), wg = fuelGauge(wk);
-  const full = `<span class="Lfull">${fg}5h <b class="${fhc}">${num(fh)}%</b>${fhr ? " " + esc(fhr) : ""}` +
-               ` · ${wg}W <b class="${wkc}">${num(wk)}%</b>${wkr ? " " + esc(wkr) : ""}</span>`;
-  /* Phone-compact form: keep the 5h / W labels and % (the status bar has room);
-     drop only the reset times. The bare X/Y was too terse. */
-  const abbr = `<span class="Labbr">${fg}5h <b class="${fhc}">${num(fh)}%</b> · ${wg}W <b class="${wkc}">${num(wk)}%</b></span>`;
-  const tip = `${name}: 5h ${num(fh)}% left${fhr ? ", resets " + fhr : ""}` +
-              ` · weekly ${num(wk)}% left${wkr ? ", resets " + wkr : ""}`;
+  let fullInner = "", abbrInner = "", tip = layout.name + ":";
+  if (layout.has5h) {
+    fullInner += `${fg}5h <b class="${fhc}">${num(fh)}%</b>${fhr ? " " + esc(fhr) : ""}`;
+    abbrInner += `${fg}5h <b class="${fhc}">${num(fh)}%</b>`;
+    tip += ` 5h ${num(fh)}% left${fhr ? ", resets " + fhr : ""}`;
+  }
+  if (layout.has5h && layout.hasW) { fullInner += " · "; abbrInner += " · "; tip += " ·"; }
+  if (layout.hasW) {
+    fullInner += `${wg}W <b class="${wkc}">${num(wk)}%</b>${wkr ? " " + esc(wkr) : ""}`;
+    abbrInner += `${wg}W <b class="${wkc}">${num(wk)}%</b>`;
+    tip += ` weekly ${num(wk)}% left${wkr ? ", resets " + wkr : ""}`;
+  }
+  if (!layout.has5h && !layout.hasW) {
+    fullInner = abbrInner = "--";
+    tip += " usage unavailable";
+  }
+  if (v.plan) tip += ` (${v.plan})`;
+  const full = `<span class="Lfull">${fullInner}</span>`;
+  const abbr = `<span class="Labbr">${abbrInner}</span>`;
   return `<span class="ubadge" title="${esc(tip)}">${logo}${full}${abbr}</span>`;
 }
 function renderUsage(snap){
   const a = (snap && snap.agents) || {};
   $("#sysclaude").innerHTML = snap ? usageBadge("claude", a.claude) : "";
   $("#syscodex").innerHTML  = snap ? usageBadge("codex",  a.codex)  : "";
+  const grokEl = $("#sysgrok");
+  if (grokEl) grokEl.innerHTML = snap ? usageBadge("grok", a.grok) : "";
 }
 function applyStatusPhase(){
   let phase = STATUS_PHASES[statusPhaseIdx];
@@ -390,6 +408,8 @@ function applyStatusPhase(){
   $("#sysmetrics").classList.toggle("on", phase === "metrics");
   $("#sysclaude").classList.toggle("on",  phase === "claude");
   $("#syscodex").classList.toggle("on",   phase === "codex");
+  const grokEl = $("#sysgrok");
+  if (grokEl) grokEl.classList.toggle("on", phase === "grok");
 }
 async function readUsage(){
   if (document.hidden) return;
@@ -1466,7 +1486,7 @@ $("#m_check").addEventListener("click", async () => {
 $("#m_apply").addEventListener("click", async () => {
   if (!updateInfo || !updateInfo.available) return;
   if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and restart scimux?\n\n` +
-    "pi/opencode/codex agents are stopped by the restart; tmux agents keep running.")) return;
+    "pi/opencode/grok/codex agents are stopped by the restart; tmux agents keep running.")) return;
   const btn = $("#m_apply");
   btn.disabled = true;
   btn.textContent = "updating…";

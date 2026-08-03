@@ -81,7 +81,7 @@ type MetaEvent struct {
 	UID     string `json:"uid"`
 	Agent   string `json:"agent"`
 	Model   string `json:"model,omitempty"`
-	Effort  string `json:"effort,omitempty"` // codex reasoning effort; empty for claude
+	Effort  string `json:"effort,omitempty"` // optional agent reasoning-effort selection
 	Dir     string `json:"dir,omitempty"`
 	Created string `json:"created"`
 }

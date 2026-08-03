@@ -147,6 +147,11 @@ func TestPublicRouteAdoptSessionTransportAndTranscript(t *testing.T) {
 		`{"session":"live1","agent":"codex"}`, true); rec.Code != http.StatusBadRequest {
 		t.Fatalf("codex adopt: status = %d, want 400; body=%q", rec.Code, rec.Body.String())
 	}
+	// Grok is a structured ACP subprocess scimux owns — not adoptable.
+	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
+		`{"session":"live1","agent":"grok"}`, true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("grok adopt: status = %d, want 400; body=%q", rec.Code, rec.Body.String())
+	}
 	// Transcript owned by another node → 409.
 	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
 		`{"session":"claimer","agent":"claude","transcript":`+strconv.Quote(shared)+`}`, true); rec.Code != http.StatusConflict {

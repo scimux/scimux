@@ -26,17 +26,34 @@ type Process interface {
 
 // Runner starts the ACP agent subprocess for a node. Injectable so unit tests
 // point at an in-process fake with no agent CLI, no tokens (cf.
-// tmuxsession.NewServerWithRunner).
-type Runner func(nodeID, agent, dir string) (Process, error)
+// tmuxsession.NewServerWithRunner). model and effort are optional launch
+// config: pi/opencode ignore them (they negotiate via ACP session options);
+// grok applies them as CLI flags because its ACP session/new does not expose
+// standard modes/configOptions for those knobs.
+type Runner func(nodeID, agent, dir, model, effort string) (Process, error)
 
 // agentArgv maps a scimux agent name to its ACP launch command. pi ships a
-// dedicated `pi-acp` binary; opencode exposes ACP as `opencode acp`.
-func agentArgv(agent string) ([]string, error) {
+// dedicated `pi-acp` binary; opencode exposes ACP as `opencode acp`; grok
+// exposes ACP as `grok agent stdio` with optional -m / --reasoning-effort
+// on the agent parent (session options do not carry them).
+func agentArgv(agent, model, effort string) ([]string, error) {
 	switch agent {
 	case "pi":
 		return []string{"pi-acp"}, nil
 	case "opencode":
 		return []string{"opencode", "acp"}, nil
+	case "grok":
+		// --no-auto-update: docs recommend it for ACP/scripted runs so a
+		// background update check never races the JSON-RPC stream.
+		argv := []string{"grok", "--no-auto-update", "agent"}
+		if model != "" {
+			argv = append(argv, "-m", model)
+		}
+		if effort != "" {
+			argv = append(argv, "--reasoning-effort", effort)
+		}
+		argv = append(argv, "stdio")
+		return argv, nil
 	}
 	return nil, fmt.Errorf("agent %q has no ACP transport", agent)
 }
@@ -44,8 +61,8 @@ func agentArgv(agent string) ([]string, error) {
 // execRunner is the production Runner: it spawns the agent in its own process
 // group and wires stdin/stdout as the ACP transport. stderr is forwarded so an
 // agent's auth/login guidance is visible to whoever launched scimux.
-func execRunner(nodeID, agent, dir string) (Process, error) {
-	argv, err := agentArgv(agent)
+func execRunner(nodeID, agent, dir, model, effort string) (Process, error) {
+	argv, err := agentArgv(agent, model, effort)
 	if err != nil {
 		return nil, err
 	}

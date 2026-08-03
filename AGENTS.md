@@ -15,8 +15,8 @@ gofmt -w . && go vet ./...
 
 Integration tests create private, randomly named tmux sockets and clean up
 after themselves; they never touch a user's tmux server. Never run a real
-agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
---norc` or `cat`.
+agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests — wrapped
+test commands are `bash --norc` or `cat`.
 
 ## Invariants (deliberate design decisions — do not "improve" them away)
 
@@ -25,7 +25,7 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   one, stop and discuss instead.
   - **One approved exception:** `github.com/coder/acp-go-sdk`, the Agent
     Client Protocol peer, is a deliberate, maintainer-approved dependency
-    **scoped to `internal/acp/` only** (the ACP transport for pi/opencode; see
+    **scoped to `internal/acp/` only** (the ACP transport for pi/opencode/grok; see
     `acp-integration-plan.md`). A hand-rolled bidirectional JSON-RPC peer with
     typed unions was evaluated and rejected as ~600 lines of ongoing schema
     churn. The tmux/transcript core stays stdlib-only; do not let the SDK (or
@@ -71,7 +71,7 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam —
   never a new file, never truncation; the context gauge is segment-scoped.
-  ACP nodes (pi/opencode) implement it as **deterministic process
+  ACP nodes (pi/opencode/grok) implement it as **deterministic process
   replacement** — kill the subprocess, negotiate a fresh one under the same
   node (a second `session/new` on one connection is unproven upstream; a
   fresh PID self-evidently carries no context); codex opens a new thread on
@@ -133,6 +133,12 @@ agent CLI (`claude`, `codex`) in tests — wrapped test commands are `bash
   are personal environment snapshots. Regenerate with
   `scripts/capture-fixtures.sh` (runs one tiny prompt per agent, then scrubs
   system prompts, local tool inventories, and timezone).
-- The committed `claude-session.jsonl` / `codex-rollout.jsonl` fixtures are
-  fully synthetic. Keep them that way; never paste real transcript content
-  into them.
+- `internal/acp/codex/testdata/real-*.ndjson` and
+  `internal/acp/testdata/real-*.ndjson` (Grok ACP wire captures) are likewise
+  **gitignored**. Regenerate Grok with `scripts/capture-grok-acp-fixture.sh`
+  (one tiny prompt over `grok agent stdio`, then drops vendor notifications,
+  skill/path inventories, hostnames, session ids, and secret-shaped strings).
+- The committed fixtures (`claude-session.jsonl`, `codex-rollout.jsonl`,
+  `internal/acp/codex/testdata/synthetic-session.ndjson`,
+  `internal/acp/testdata/synthetic-grok-turn.ndjson`) are fully synthetic.
+  Keep them that way; never paste real transcript or wire content into them.

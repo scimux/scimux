@@ -95,10 +95,14 @@ export const LAST_DIR_KEY = "scimux-lastdir";
 export const DEFAULT_MODELS = {
   claude: ["", "fable", "opus", "sonnet", "haiku"],
   codex:  ["", "gpt-5.4", "gpt-5.4-mini"],
+  // Static fallback when grok is not on PATH or /api/agents has not returned;
+  // probe data replaces this wholesale when the harness is present.
+  grok:   ["", "grok-4.5"],
 };
 export const DEFAULT_EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex:  ["low", "medium", "high"],
+  grok:   ["low", "medium", "high"],
 };
 
 /* ---------- pure: catalogs / options ---------- */
