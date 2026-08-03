@@ -104,6 +104,36 @@ func TestReadAssetsByPathOmitsRecordsWithNoSourcePath(t *testing.T) {
 	}
 }
 
+// Anchored projection: each asset event carries the record index of the turn
+// it was ingested from (the nearest preceding visible turn, or -1 if none), so
+// a path re-ingested with new bytes in a later turn does not retroactively
+// change what an earlier turn resolves to. Assets with no SourcePath are
+// omitted — only path markers are projected.
+func TestReadAnchoredAssets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	w.Append(NewMeta("n", "claude", "", "", ""))                                              // idx 0
+	w.Append(NewAsset(AssetEvent{ID: "a_x", Storage: "inline"}))                              // idx 1: no SourcePath -> omitted
+	w.Append(Event{T: "assistant", Text: "here ![p](preview.png)"})                           // idx 2: turn
+	w.Append(NewAsset(AssetEvent{ID: "a_old", Storage: "inline", SourcePath: "preview.png"})) // idx 3: anchor 2
+	w.Append(Event{T: "assistant", Text: "regenerated ![p](preview.png)"})                    // idx 4: turn
+	w.Append(NewAsset(AssetEvent{ID: "a_new", Storage: "inline", SourcePath: "preview.png"})) // idx 5: anchor 4
+
+	got := ReadAnchoredAssets(path)
+	want := []AnchoredAsset{
+		{Anchor: 2, Asset: AssetEvent{ID: "a_old", Storage: "inline", SourcePath: "preview.png"}},
+		{Anchor: 4, Asset: AssetEvent{ID: "a_new", Storage: "inline", SourcePath: "preview.png"}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d anchored assets, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Anchor != want[i].Anchor || got[i].Asset != want[i].Asset {
+			t.Fatalf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestReadAssetsIgnoresNonAssetRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}

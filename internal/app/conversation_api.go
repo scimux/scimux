@@ -471,10 +471,11 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 		return turns, nil
 	}
 	logPath := a.sessionLogPath(nodeID)
-	byPath := sessionlog.ReadAssetsByPath(logPath)
+	anchored := sessionlog.ReadAnchoredAssets(logPath)
 	out := make([]transcript.Turn, len(turns))
 	referenced := map[string]bool{}
 	for i, t := range turns {
+		byPath := assetsAsOf(anchored, t.Record)
 		t.Text = asset.Project(t.Text, byPath)
 		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
 		for _, id := range asset.ReferencedIDs(t.Text) {
@@ -493,6 +494,22 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 		}
 	}
 	return out, assets
+}
+
+// assetsAsOf builds the SourcePath->asset resolution a turn at record index
+// `record` sees: last-wins over every anchored asset owned at or before it.
+// anchored is in log order, so anchors are non-decreasing and the last write
+// for each path within the window is its newest content. This is the temporal
+// anchor — an earlier turn resolves a path to the content current when it was
+// written, even after a later turn re-ingests the same path with new bytes.
+func assetsAsOf(anchored []sessionlog.AnchoredAsset, record int) map[string]sessionlog.AssetEvent {
+	byPath := map[string]sessionlog.AssetEvent{}
+	for _, aa := range anchored {
+		if aa.Anchor <= record {
+			byPath[aa.Asset.SourcePath] = aa.Asset
+		}
+	}
+	return byPath
 }
 
 // assetSummary builds one entry of the chat response's "assets" map (see

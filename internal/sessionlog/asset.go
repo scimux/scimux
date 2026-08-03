@@ -122,11 +122,50 @@ func ReadAssets(path string) map[string]AssetEvent {
 	return idx
 }
 
+// AnchoredAsset is an asset event tagged with Anchor — the record index of the
+// turn it was ingested from (the nearest preceding visible turn in the log, or
+// -1 if it precedes every turn). Render-time projection resolves each turn
+// against only the assets anchored at or before it, so a path re-ingested with
+// new bytes in a later turn does not retroactively change what an earlier turn
+// shows: the earlier reference keeps its own content, the later one shows the
+// new content, and the two stay comparable.
+type AnchoredAsset struct {
+	Anchor int
+	Asset  AssetEvent
+}
+
+// ReadAnchoredAssets replays a session log into its asset events in log order,
+// each tagged with its owning turn's record index (see AnchoredAsset). The
+// record index matches transcript.Turn.Record (both are indices into
+// ReadEvents), which is what projection compares against. Assets with no
+// SourcePath are omitted — only path markers are projected. Defensive like the
+// other readers: unreadable files and malformed lines yield nothing.
+func ReadAnchoredAssets(path string) []AnchoredAsset {
+	var out []AnchoredAsset
+	lastTurn := -1
+	for i, ev := range ReadEvents(path) {
+		switch ev.T {
+		case "user", "assistant":
+			// Match segmentOf's turn filter: whitespace-only records are not
+			// rendered turns, so they must not anchor an asset either.
+			if strings.TrimSpace(ev.Text) != "" {
+				lastTurn = i
+			}
+		case "asset":
+			if ev.Asset != nil && ev.Asset.SourcePath != "" {
+				out = append(out, AnchoredAsset{Anchor: lastTurn, Asset: *ev.Asset})
+			}
+		}
+	}
+	return out
+}
+
 // ReadAssetsByPath replays a session log into an asset index keyed by
-// SourcePath — the lookup internal/asset.Project uses to resolve a turn's
-// local-path marker to its ingested asset at render time. Assets with no
-// recorded SourcePath are omitted; the same first-wins rule as ReadAssets
-// applies if two records ever carried the same path.
+// SourcePath. Used by ingestion (internal/app) only as a path-presence set for
+// its idempotency check — NOT by render-time projection, which needs the
+// per-turn anchoring of ReadAnchoredAssets: a path can carry different content
+// across turns, and a single first-wins map cannot represent that. Assets with
+// no recorded SourcePath are omitted; first-wins if two records share a path.
 func ReadAssetsByPath(path string) map[string]AssetEvent {
 	idx := make(map[string]AssetEvent)
 	for _, ev := range ReadEvents(path) {
