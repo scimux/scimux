@@ -28,6 +28,7 @@ import {
   stackMapSignature,
   wallMapSignature,
   attentionStationSVG,
+  terminalStationSVG,
   forkCueHTML,
   fareLineHTML,
   stationRowHTML,
@@ -269,6 +270,26 @@ test("attentionStationSVG and ATTN_GLOW_DEF geometry classes", () => {
   assert.match(svg, /cx="10"/);
   assert.match(svg, /cy="20"/);
   assert.match(svg, /--attn-op:0\.5/);
+});
+
+test("terminalStationSVG: spur rises then curves LEFT to a vertical buffer bar", () => {
+  const svg = terminalStationSVG(100, 200, 0.5, "#abc");
+  // an arc (the spur) plus a straight buffer bar
+  assert.match(svg, /<path\b/, "spur is a path");
+  assert.match(svg, /<line\b/, "buffer bar is a line");
+  assert.match(svg, /stroke="#abc"/, "uses the passed lane colour");
+  assert.match(svg, /opacity="0\.5"/, "honours op");
+  // spur starts exactly at the station (100,200) and leaves it vertically
+  // (12 o'clock): the first control point shares the station's x.
+  assert.match(svg, /d="M 100 200 C 100 /, "starts at the station, tangent up");
+  // the tip and buffer bar sit to the LEFT of the station (x < 100) and ABOVE
+  // it (y < 200) — the fork cue hooks right, so the terminus goes left.
+  const bar = svg.match(/<line x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)"/);
+  assert.ok(bar, "buffer bar coordinates present");
+  const [, x1, y1, x2, y2] = bar.map(Number);
+  assert.ok(x1 < 100 && x2 < 100, `buffer bar must be left of the station: x1=${x1} x2=${x2}`);
+  assert.equal(x1, x2, "buffer bar is vertical");
+  assert.ok(y1 < 200 && y2 < 200, `buffer bar must be above the station: y1=${y1} y2=${y2}`);
 });
 
 /* ---------- stack model / signatures ---------- */
@@ -729,4 +750,48 @@ test("invalidate forces next render; signature skip prevents rebuild", () => {
   feature.invalidate();
   feature.render();
   assert.match(mapwrap.innerHTML, /data-nid="a"/);
+});
+
+test("stack renderer draws the terminus (not the old crossbar) for an ended node", () => {
+  const mapwrap = fakeEl("mapwrap");
+  const nodes = [{
+    id: "a", title: "T", description: "", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "2026-01-02T00:00:00Z", live: "quiet",
+    attention: "", created_at: "2026-01-01T00:00:00Z", stops: [],
+  }];
+  const storage = memoryStorage({
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const feature = createMapFeature({
+    roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
+    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: nodes[0] },
+    }),
+    agentLogo: () => "",
+  });
+  feature.render();
+  const html = mapwrap.innerHTML;
+  // The call site must emit exactly what the helper produces for this station
+  // (stack renderer: dotX=LX=22, first row y=38, op=1, lane colour #00f) —
+  // proving the ended path renders the terminus via the shared helper.
+  assert.ok(
+    html.includes(terminalStationSVG(22, 38, 1, "#00f")),
+    "ended node did not render the terminus glyph",
+  );
+  // The old crossbar — a horizontal line at yy-11 through the mainline — must
+  // be gone (that was the "T" this change replaced).
+  assert.doesNotMatch(html, /y1="27"[^>]*y2="27"/, "old crossbar still present");
 });

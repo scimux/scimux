@@ -203,6 +203,20 @@ export function attentionStationSVG(x, y, op){
           <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5"/>`;
 }
 
+// terminalStationSVG marks an ended thread. The station's filled circle stays
+// on the mainline (drawn by the caller); this adds the terminus spur — up out
+// of the station (12 o'clock) then curving LEFT to a short vertical buffer bar
+// (11–10 o'clock, convex bulge top-right). Left, because the fork cue hooks
+// right (see the stack renderer): opposite sides keep a station that is both
+// ended and a fork child uncluttered. Unlike the old crossbar "T", the mainline
+// passes straight through the circle, so a lane continuing north is never
+// crossed. col is the already-escaped lane colour.
+export function terminalStationSVG(x, y, op, col){
+  return `<path d="M ${x} ${y} C ${x} ${y - 14} ${x - 6.3} ${y - 19} ${x - 15} ${y - 24}"
+          fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" opacity="${op}"/>
+          <line x1="${x - 15}" y1="${y - 29}" x2="${x - 15}" y2="${y - 19}" stroke="${col}" stroke-width="3" stroke-linecap="round" opacity="${op}"/>`;
+}
+
 export function forkCueHTML(n, lm, { escape = esc, forkKind, nodeById } = {}){
   const k = forkKind ? forkKind(n) : null;
   if (!k) return "";
@@ -552,7 +566,7 @@ export function createMapFeature(deps){
         return;
       }
       if (n.ended_at)
-        svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
+        svg += terminalStationSVG(dotX, yy, op, col);
       if (n.attention) svg += attentionStationSVG(dotX, yy, op);
       if (n.live === "exited" || n.live === "unavailable")
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
@@ -648,7 +662,7 @@ export function createMapFeature(deps){
           return;
         }
         if (n.ended_at)
-          svg += `<line x1="${dotX - 6.5}" y1="${yy - 11}" x2="${dotX + 6.5}" y2="${yy - 11}" stroke="${col}" stroke-width="3.5" stroke-linecap="round" opacity="${op}"/>`;
+          svg += terminalStationSVG(dotX, yy, op, col);
         if (n.attention) svg += attentionStationSVG(dotX, yy, op);
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
