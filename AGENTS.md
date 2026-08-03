@@ -7,16 +7,31 @@ invariants you must not break and the workflows you need.
 ## Commands
 
 ```sh
-go build -o scimux .   # single static binary; web/index.html is embedded
+go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
-gofmt -w . && go vet ./...
+gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
 Integration tests create private, randomly named tmux sockets and clean up
 after themselves; they never touch a user's tmux server. Never run a real
 agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests — wrapped
 test commands are `bash --norc` or `cat`.
+
+## Layout and dependencies
+
+- `cmd/scimux` is the deliberately thin executable: command-line startup and
+  the linker-stamped version only. Keep product behavior out of it.
+- `internal/app` owns the private application: HTTP routes, node lifecycle,
+  polling, persistence, and their co-located Go tests. Its `testdata/` belongs
+  to that package; do not recreate a repository-wide test directory.
+- `internal/*` packages are private leaf subsystems. `internal/app` may depend
+  on them, but they must not import the application package.
+- `web` contains the checked-in browser source and the small embedding package;
+  `legal` contains the notices embedded in the About sheet. Both are imported
+  by `internal/app`, never the reverse.
+- Keep the repository root for module metadata, documentation, licenses, and
+  top-level directories. Do not add application Go files or tests there.
 
 ## Invariants (deliberate design decisions — do not "improve" them away)
 
