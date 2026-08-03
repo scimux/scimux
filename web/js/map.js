@@ -362,8 +362,11 @@ export function createMapFeature(deps){
   function syncMapFullBtn(){
     const b = mapfullbtn || (doc && doc.querySelector && doc.querySelector("#mapfullbtn"));
     if (b){
-      b.innerHTML = "&#10530;";
-      b.classList.toggle("contract", mapFull);
+      const icons = d.icons || {};
+      /* Distinct out (expand) vs in (contract) FA solids — not a rotated twin. */
+      b.innerHTML = mapFull
+        ? (icons.ICON_MAP_CONTRACT || "")
+        : (icons.ICON_MAP_EXPAND || "");
       const label = mapFull ? "exit full-screen map" : "full-screen map";
       if (typeof b.setAttribute === "function") b.setAttribute("aria-label", label);
       else b["aria-label"] = label;

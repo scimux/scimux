@@ -1479,9 +1479,6 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 		!strings.Contains(searchLayout, "#searchscrim, #searchpanel { animation: none; }") {
 		t.Fatal("layout.css must retain search reduced-motion rules")
 	}
-	if !strings.Contains(searchLayout, "#mapfullbtn { transition: none; }") {
-		t.Fatal("layout.css must retain mapfull-button local reduced-motion transition rule")
-	}
 	if !strings.Contains(notes, "body.map-full #map { animation-duration: .12s; }") {
 		t.Fatal("notes.css must own map-full reduced-motion duration with the desktop source")
 	}

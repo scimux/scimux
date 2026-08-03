@@ -687,9 +687,11 @@ test("new map sheet persists its checked lanes before selecting the group", () =
   feature.destroy();
 });
 
-test("syncMapFullBtn sets aria-label for enter and exit", () => {
+test("syncMapFullBtn sets aria-label and out/in glyphs for enter and exit", () => {
   const mapfullbtn = fakeEl("mapfullbtn");
   const storage = memoryStorage();
+  const expandIcon = "EXPAND_GLYPH";
+  const contractIcon = "CONTRACT_GLYPH";
   const feature = createMapFeature({
     roots: { mapfullbtn, maptoolbar: fakeEl("tb"), mapwrap: fakeEl("w") },
     document: { body: { classList: { toggle(){}, contains: () => false, add(){} } }, querySelector: () => null },
@@ -702,11 +704,14 @@ test("syncMapFullBtn sets aria-label for enter and exit", () => {
     laneFilter: () => "",
     uiLoaded: () => false,
     laneModel: () => ({ lanes: [], color: () => "", name: id => id, byId: {} }),
+    icons: { ICON_MAP_EXPAND: expandIcon, ICON_MAP_CONTRACT: contractIcon },
   });
   feature.setFull(true);
   assert.equal(mapfullbtn.getAttribute("aria-label"), "exit full-screen map");
+  assert.equal(mapfullbtn.innerHTML, contractIcon);
   feature.setFull(false);
   assert.equal(mapfullbtn.getAttribute("aria-label"), "full-screen map");
+  assert.equal(mapfullbtn.innerHTML, expandIcon);
 });
 
 test("invalidate forces next render; signature skip prevents rebuild", () => {

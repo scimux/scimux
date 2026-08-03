@@ -245,6 +245,16 @@ const ICON_CLIP = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
 </svg>`;
+/* Map full-screen pair — Font Awesome Free 7.3.1 classic solid (CC BY 4.0).
+   Expand: up-right-and-down-left-from-center (arrows out). Contract:
+   down-left-and-up-right-to-center (arrows in). Distinct geometries, not a
+   rotated twin of one glyph. */
+const ICON_MAP_EXPAND = `<svg width="16" height="16" viewBox="0 0 512 512" fill="currentColor" aria-hidden="true">
+  <path d="M344 0L488 0c13.3 0 24 10.7 24 24l0 144c0 9.7-5.8 18.5-14.8 22.2s-19.3 1.7-26.2-5.2l-39-39-87 87c-9.4 9.4-24.6 9.4-33.9 0l-32-32c-9.4-9.4-9.4-24.6 0-33.9l87-87-39-39c-6.9-6.9-8.9-17.2-5.2-26.2S334.3 0 344 0zM168 512L24 512c-13.3 0-24-10.7-24-24L0 344c0-9.7 5.8-18.5 14.8-22.2S34.1 320.2 41 327l39 39 87-87c9.4-9.4 24.6-9.4 33.9 0l32 32c9.4 9.4 9.4 24.6 0 33.9l-87 87 39 39c6.9 6.9 8.9 17.2 5.2 26.2S177.7 512 168 512z"/>
+</svg>`;
+const ICON_MAP_CONTRACT = `<svg width="16" height="16" viewBox="0 0 512 512" fill="currentColor" aria-hidden="true">
+  <path d="M439.5 7c9.4-9.4 24.6-9.4 33.9 0l32 32c9.4 9.4 9.4 24.6 0 33.9l-87 87 39 39c6.9 6.9 8.9 17.2 5.2 26.2S450.2 240 440.5 240l-144 0c-13.3 0-24-10.7-24-24l0-144c0-9.7 5.8-18.5 14.8-22.2s19.3-1.7 26.2 5.2l39 39 87-87zM72.5 272l144 0c13.3 0 24 10.7 24 24l0 144c0 9.7-5.8 18.5-14.8 22.2s-19.3 1.7-26.2-5.2l-39-39-87 87c-9.4 9.4-24.6 9.4-33.9 0l-32-32c-9.4-9.4-9.4-24.6 0-33.9l87-87-39-39c-6.9-6.9-8.9-17.2-5.2-26.2S62.8 272 72.5 272z"/>
+</svg>`;
 function agentLogo(agent){
   switch ((agent || "").toLowerCase()){
   case "claude":
@@ -656,7 +666,7 @@ const mapFeature = createMapFeature({
   laneById,
   nodeById: id => nodeById(id),
   agentLogo,
-  icons: { ICON_PENCIL, ICON_END },
+  icons: { ICON_PENCIL, ICON_END, ICON_MAP_EXPAND, ICON_MAP_CONTRACT },
   uiMutate,
   selectNode: id => select(id),
   setLevel,

@@ -197,12 +197,10 @@
 }
 #map.open { transform: translateX(0); }
 /* full-screen toggle: desktop/iPad only (the phone map is already full-width,
-   so the affordance never appears there — shown by the ≥900px block below) */
+   so the affordance never appears there — shown by the ≥900px block below).
+   Glyphs are state-swapped SVGs (expand out / contract in), not a rotate. */
 #mapfullbtn { display: none; color: var(--work); font-size: 20px; line-height: 1;
-  width: 34px; height: 34px; border-radius: 9px; align-items: center; justify-content: center;
-  transition: transform .2s; }
-#mapfullbtn.contract { transform: rotate(90deg); }
-@media (prefers-reduced-motion: reduce) { #mapfullbtn { transition: none; } }
+  width: 34px; height: 34px; border-radius: 9px; align-items: center; justify-content: center; }
 /* fare toggle: unfinished, hidden for now. Keep styles in place so the old
    experiment can be revisited without touching the map layout again. */
 #farebtn { display: none; font-size: 12px; font-weight: 600; padding: 4px 10px;
