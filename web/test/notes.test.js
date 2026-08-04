@@ -38,6 +38,8 @@ import { bookmarkLaneId, bookmarkSortKey, bookmarkClampState } from "../js/bookm
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const notesSrc = readFileSync(join(__dirname, "../js/notes.js"), "utf8");
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
+const tokensSrc = readFileSync(join(__dirname, "../css/tokens.css"), "utf8");
+const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
 
 /* ---------- module shape ---------- */
 test("notes.js exports factory and pure helpers; no later-feature imports", () => {
@@ -61,6 +63,34 @@ test("storage keys, debounce, copy ack constants", () => {
   assert.equal(STORAGE_KEY_INBOX_TAB, "scimux-wsinboxtab");
   assert.equal(SAVE_DEBOUNCE_MS, 1100);
   assert.equal(COPY_ACK_MS, 900);
+});
+
+/* ---------- Phase 1a/1b/1e: --danger token; destructive UI is red ---------- */
+test("--danger token is defined in light and dark; distinct from --attn", () => {
+  /* light :root block owns the first --danger; dark block redefines it. */
+  const lightMatch = tokensSrc.match(/:root\s*\{([\s\S]*?)\n\}/);
+  assert.ok(lightMatch, "tokens.css must declare a light :root block");
+  assert.match(lightMatch[1], /--danger:\s*#FF3B30\s*;/);
+  assert.match(lightMatch[1], /--attn:/);
+  assert.doesNotMatch(lightMatch[1], /--danger:\s*var\(--attn\)/);
+
+  const darkMatch = tokensSrc.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root\s*\{([\s\S]*?)\n\s*\}/);
+  assert.ok(darkMatch, "tokens.css must declare a dark :root block");
+  assert.match(darkMatch[1], /--danger:\s*#FF453A\s*;/);
+  assert.match(darkMatch[1], /--attn:/);
+
+  /* semantic split: attention yellow must not be the destructive colour. */
+  const lightAttn = lightMatch[1].match(/--attn:\s*([^;]+);/);
+  const lightDanger = lightMatch[1].match(/--danger:\s*([^;]+);/);
+  assert.ok(lightAttn && lightDanger);
+  assert.notEqual(lightAttn[1].trim(), lightDanger[1].trim());
+});
+
+test(".wsmenu button.danger uses --danger, not --attn (covers Delete note + Delete section)", () => {
+  /* Section menu data-mi=del and note menu data-si=del both use class="danger". */
+  assert.match(notesSrc, /data-mi="del"[^>]*class="danger"|class="danger"[^>]*data-mi="del"/);
+  assert.match(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
+  assert.doesNotMatch(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
 });
 
 /* ---------- folds ---------- */

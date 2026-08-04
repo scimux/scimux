@@ -285,7 +285,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .wsmenu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   padding: 9px 12px; border-radius: 8px; color: var(--ink); font-size: 14px; }
 .wsmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-.wsmenu button.danger { color: var(--attn); }
+.wsmenu button.danger { color: var(--danger); }
 .wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
 #notesworkspace .backbtn { display: flex; }
 /* --- inbox zone (left): the reused capture layer --- */

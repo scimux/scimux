@@ -7,6 +7,7 @@
   --hairline:  rgba(60,60,67,.14);
   --attn:      #FFCC00;   /* systemYellow — needs you; reserved for attention only */
   --attn-rgb:  255, 204, 0;
+  --danger:    #FF3B30;   /* systemRed — destructive UI (delete, archive) */
   --bad:       #FF3B30;   /* systemRed — error/exited */
   --work:      #0E7C86;   /* petrol accent — agent working */
   --work-rgb:  14, 124, 134;
@@ -33,6 +34,7 @@
     --hairline: rgba(84,84,88,.48);
     --attn:     #FFD60A;
     --attn-rgb: 255, 214, 10;
+    --danger:   #FF453A;
     --bad:      #FF453A;
     --work:     #2FA7B4;
     --work-rgb: 47, 167, 180;
