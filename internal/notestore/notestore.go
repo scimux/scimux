@@ -1,8 +1,10 @@
 // Package notestore owns scimux's synthesis documents ("Notes"): the
 // researcher-composed surface that sits above the append-only capture layer.
-// Each note is one mutable JSON file under <data>/notes/<id>.json, with its
-// sections and their embedded chat references nested inside it. A deleted note
-// is moved to notes/archive/ rather than erased, mirroring the session-log
+// Each note lives in its own folder at <data>/notes/<id>/note.json, with its
+// sections and their embedded chat references nested inside the document. The
+// per-note folder is the unit of isolation (and, later, of optional git
+// versioning). A deleted note's whole folder is moved to
+// notes/archive/<id>.<stamp>/ rather than erased, mirroring the session-log
 // store's delete-is-archive pattern so a reissued id can never collide with
 // live data.
 //
@@ -12,9 +14,10 @@
 // load-bearing for nodes.jsonl and the session log buys nothing here and would
 // cost a full-body copy per autosave plus a compaction pass. Notes are
 // documents, so they are stored as documents (see notes-design.md "Storage
-// Model"). Crash safety comes from tmp-write + rename atomicity, the same
-// pattern ui.json uses; the files stay stdlib-only and greppable
-// (`grep notes/*.json`).
+// Model"). Crash safety comes from tmp-write + rename atomicity (tmp inside
+// the note folder), the same pattern ui.json uses; the files stay stdlib-only
+// and greppable (`grep -r notes/*/note.json`). There is no legacy flat-file
+// read path: stray top-level notes/*.json are ignored by List.
 package notestore
 
 import (
@@ -117,7 +120,11 @@ func newID() string {
 	return fmt.Sprintf("%s-%x", time.Now().UTC().Format("20060102T150405"), b)
 }
 
-func (s *Store) path(id string) string { return filepath.Join(s.Dir, id+".json") }
+// noteDir is the per-note folder notes/<id>/.
+func (s *Store) noteDir(id string) string { return filepath.Join(s.Dir, id) }
+
+// path is the note document notes/<id>/note.json.
+func (s *Store) path(id string) string { return filepath.Join(s.noteDir(id), "note.json") }
 
 // Create writes a fresh note: auto title YYYY-MM-DD HH:MM, a single starter
 // section titled "Section 1", and an order that appends it after existing
@@ -235,14 +242,16 @@ func (s *Store) Get(id string) (Note, error) {
 	return sh, nil
 }
 
-// Save rewrites the note's file atomically (tmp-write + rename), overwriting
-// rather than appending, and stamps edited_at. Write cost is bounded by this
-// one note's size, so autosave frequency never grows the store.
+// Save rewrites the note's file atomically (tmp-write + rename inside the note
+// folder), overwriting rather than appending, and stamps edited_at. Write cost
+// is bounded by this one note's size, so autosave frequency never grows the
+// store.
 func (s *Store) Save(sh Note) error {
 	if sh.ID == "" {
 		return errors.New("notestore: cannot save a note with an empty id")
 	}
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+	// Ensure the per-note folder exists; the data dir itself is created with it.
+	if err := os.MkdirAll(s.noteDir(sh.ID), 0o700); err != nil {
 		return err
 	}
 	sh.Edited = nowStamp()
@@ -253,6 +262,7 @@ func (s *Store) Save(sh Note) error {
 		return err
 	}
 	b = append(b, '\n')
+	// Tmp lives inside the note folder so rename stays same-directory atomic.
 	tmp := s.path(sh.ID) + ".tmp"
 	// 0600: section bodies and captured pane snapshots are as sensitive as the
 	// session log's prompt text.
@@ -266,12 +276,14 @@ func (s *Store) Save(sh Note) error {
 	return nil
 }
 
-// Delete moves the note file into notes/archive/ with a timestamp suffix.
+// Delete moves the whole note folder into notes/archive/<id>.<stamp>/.
 // Nothing is erased; a reissued id can never append onto dead content because
-// the live file is gone. Missing note is ErrNotFound.
+// the live folder is gone. Missing note is ErrNotFound.
 func (s *Store) Delete(id string) error {
-	src := s.path(id)
-	if _, err := os.Stat(src); err != nil {
+	src := s.noteDir(id)
+	// Require the note document (not just an empty dir) so a stray folder is
+	// not treated as a live note.
+	if _, err := os.Stat(s.path(id)); err != nil {
 		if os.IsNotExist(err) {
 			return ErrNotFound
 		}
@@ -282,13 +294,14 @@ func (s *Store) Delete(id string) error {
 		return err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	return os.Rename(src, filepath.Join(dir, id+"."+stamp+".json"))
+	return os.Rename(src, filepath.Join(dir, id+"."+stamp))
 }
 
-// List returns every parseable note in the directory, sorted by the stored
-// Order field (ties broken by id for a stable order). Defensive like the rest
-// of the corpus readers: non-.json entries, the archive subdir, tmp files, and
-// malformed/unparseable files are skipped, never a hard error — a corrupt file
+// List returns every parseable note under notes/<id>/note.json, sorted by the
+// stored Order field (ties broken by id for a stable order). Defensive like
+// the rest of the corpus readers: non-directories (including stray top-level
+// *.json — no legacy flat-file read), the archive subdir, missing/malformed
+// note.json, and tmp files are skipped, never a hard error — a corrupt file
 // must not 500 the whole list.
 func (s *Store) List() ([]Note, error) {
 	entries, err := os.ReadDir(s.Dir)
@@ -300,16 +313,16 @@ func (s *Store) List() ([]Note, error) {
 	}
 	var out []Note
 	for _, e := range entries {
-		if e.IsDir() {
-			continue // skips archive/
+		if !e.IsDir() {
+			continue // ignores stray top-level files (legacy *.json, garbage)
 		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
+		if name == "archive" || strings.HasPrefix(name, ".") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(s.Dir, name))
+		b, err := os.ReadFile(s.path(name))
 		if err != nil {
-			continue
+			continue // missing note.json, permission, etc.
 		}
 		var sh Note
 		if json.Unmarshal(b, &sh) != nil || sh.ID == "" {

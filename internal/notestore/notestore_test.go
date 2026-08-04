@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -35,12 +36,23 @@ func TestCreateStarterShape(t *testing.T) {
 	}
 }
 
-// Create persists the file so Get round-trips it.
+// Create persists the file so Get round-trips it. Notes live at
+// notes/<id>/note.json (per-note folder layout) so each note can later be an
+// independent git repo.
 func TestCreateReadRoundTrip(t *testing.T) {
-	s := New(t.TempDir())
+	dir := t.TempDir()
+	s := New(dir)
 	sh, err := s.Create()
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Folder layout: notes/<id>/note.json — not the legacy flat notes/<id>.json.
+	notePath := filepath.Join(dir, sh.ID, "note.json")
+	if _, err := os.Stat(notePath); err != nil {
+		t.Fatalf("expected note at %s: %v", notePath, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sh.ID+".json")); !os.IsNotExist(err) {
+		t.Error("legacy flat notes/<id>.json must not be written")
 	}
 	got, err := s.Get(sh.ID)
 	if err != nil {
@@ -80,8 +92,8 @@ func TestListOrderedByOrderField(t *testing.T) {
 	}
 }
 
-// Save is an atomic rewrite (tmp-write + rename), not an append, and leaves no
-// stray tmp file behind; edited_at advances on each save.
+// Save is an atomic rewrite (tmp-write + rename inside the note folder), not an
+// append, and leaves no stray tmp file behind; edited_at advances on each save.
 func TestSaveAtomicRewrite(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
@@ -100,7 +112,8 @@ func TestSaveAtomicRewrite(t *testing.T) {
 		t.Errorf("body = %q, want overwrite to %q (must rewrite, not append)", got.Sections[0].Body, "second body")
 	}
 	// The file must be a single valid JSON object (an append would corrupt it).
-	raw, err := os.ReadFile(filepath.Join(dir, sh.ID+".json"))
+	notePath := filepath.Join(dir, sh.ID, "note.json")
+	raw, err := os.ReadFile(notePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,8 +121,8 @@ func TestSaveAtomicRewrite(t *testing.T) {
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		t.Fatalf("file is not a single JSON object (append corruption?): %v", err)
 	}
-	// No leftover tmp file.
-	if _, err := os.Stat(filepath.Join(dir, sh.ID+".json.tmp")); !os.IsNotExist(err) {
+	// No leftover tmp file inside the note folder.
+	if _, err := os.Stat(filepath.Join(dir, sh.ID, "note.json.tmp")); !os.IsNotExist(err) {
 		t.Error("stray .tmp file left after Save")
 	}
 }
@@ -239,8 +252,8 @@ func TestRemoveReferenceIsScoped(t *testing.T) {
 	}
 }
 
-// Delete moves the file into archive/ — nothing erased, and a reissued id can
-// never append onto dead content because the live file is gone.
+// Delete archives the whole note folder to notes/archive/<id>.<stamp>/ —
+// nothing erased, and a reissued id can never append onto dead content.
 func TestDeleteArchives(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
@@ -249,8 +262,8 @@ func TestDeleteArchives(t *testing.T) {
 	if err := s.Delete(sh.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, sh.ID+".json")); !os.IsNotExist(err) {
-		t.Error("live note file still present after delete")
+	if _, err := os.Stat(filepath.Join(dir, sh.ID)); !os.IsNotExist(err) {
+		t.Error("live note folder still present after delete")
 	}
 	if _, err := s.Get(sh.ID); err == nil {
 		t.Error("Get should fail for a deleted note")
@@ -260,7 +273,22 @@ func TestDeleteArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(archived) != 1 {
-		t.Fatalf("want 1 archived file, got %d", len(archived))
+		t.Fatalf("want 1 archived folder, got %d", len(archived))
+	}
+	// Archive target is a directory named <id>.<stamp>, containing note.json.
+	info, err := os.Stat(archived[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("archive entry must be a folder, got file %s", archived[0])
+	}
+	base := filepath.Base(archived[0])
+	if !strings.HasPrefix(base, sh.ID+".") {
+		t.Errorf("archive name %q must start with %q.", base, sh.ID)
+	}
+	if _, err := os.Stat(filepath.Join(archived[0], "note.json")); err != nil {
+		t.Errorf("archived folder missing note.json: %v", err)
 	}
 	list, _ := s.List()
 	if len(list) != 0 {
@@ -268,21 +296,34 @@ func TestDeleteArchives(t *testing.T) {
 	}
 }
 
-// A malformed or unknown-shaped file in the directory is skipped in List, never
-// a hard error (defensive-parse invariant), and the archive subdir is not read.
+// List reads only notes/<id>/note.json folders. Stray top-level *.json (legacy
+// flat layout or garbage) are ignored — no accidental legacy read path.
+// Malformed note.json inside a folder is skipped, never a hard error.
 func TestListDefensiveSkipsGarbage(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
 	good, _ := s.Create()
 
-	// Torn JSON, a non-json file, and a stray tmp file must all be ignored.
+	// Stray top-level *.json must not be listed (proves no legacy flat-file read).
+	legacy := `{"id":"legacy-flat","title":"should be ignored","order":0,"sections":[]}`
+	if err := os.WriteFile(filepath.Join(dir, "legacy-flat.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, good.ID+".json.tmp"), []byte("{}"), 0o600); err != nil {
+	// Torn note.json inside a folder, and a stray tmp, must be skipped.
+	badDir := filepath.Join(dir, "torn-note")
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "note.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, good.ID, "note.json.tmp"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	list, err := s.List()
@@ -290,6 +331,6 @@ func TestListDefensiveSkipsGarbage(t *testing.T) {
 		t.Fatalf("List must not error on garbage: %v", err)
 	}
 	if len(list) != 1 || list[0].ID != good.ID {
-		t.Fatalf("want only the one good note, got %d", len(list))
+		t.Fatalf("want only the one good note (no legacy flat file), got %d: %+v", len(list), list)
 	}
 }
