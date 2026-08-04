@@ -221,12 +221,32 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .wscard.on { border-color: var(--work);
   background: color-mix(in srgb, var(--work) 8%, transparent); }
 .wscard.dragging { opacity: .5; cursor: grabbing; }
+.wscard.renaming { cursor: text; }
 .wscard .wctitle { font-weight: 600; font-size: 14px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
+.wscard .wctitleedit { display: block; width: 100%; font: inherit; font-weight: 600;
+  font-size: 14px; color: var(--ink); background: var(--code-bg); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 2px 6px; outline: none; }
+.wscard .wctitleedit:focus { border-color: var(--work); }
 .wscard .wcmeta { font-size: 11px; color: var(--dim); margin-top: 3px;
   display: flex; align-items: center; gap: 6px; }
 .wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; flex: none; }
 .wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+/* Rename / Delete overlay on the zone-2 card (Phase 1c). Hidden by default;
+   revealed on hover (desktop) / always on touch — same discoverability split as
+   .card .actions and .tabs .x. Positioned bottom-right so the grab/drag area
+   on the title stays free. */
+.wscardactions { display: none; gap: 6px; padding-top: 6px; justify-content: flex-end; }
+.wscardactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; background: var(--surface);
+  border: 1px solid var(--hairline); }
+.wscardactions button:active { color: var(--work); }
+.wscardactions button.danger { color: var(--danger); }
+.wscard:hover .wscardactions,
+.wscard.renaming .wscardactions { display: flex; }
+@media (hover: none) {
+  .wscardactions { display: flex; }
+}
 #wsnote { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
 #wsnotehead { display: flex; align-items: center; gap: 8px; flex: none;
   padding: 12px 18px; border-bottom: 1px solid var(--hairline); }

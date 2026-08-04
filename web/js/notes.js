@@ -258,14 +258,37 @@ export function referenceHTML(r, deps = {}){
   </div>`;
 }
 
+/** Card stays grab-draggable only when not mid-rename (drag would steal the gesture). */
+export function noteCardDragEnabled(renaming){
+  return !renaming;
+}
+
+/** Commit plan for an inline card title rename. */
+export function noteCardRenamePlan({ noteId, activeId, title }){
+  const t = title == null ? "" : String(title);
+  const isActive = noteId === activeId;
+  return {
+    patch: { title: t },
+    updateTopBar: isActive,
+    topBarText: t || "Note",
+    updateActive: isActive,
+  };
+}
+
 export function noteCardHTML(c, activeId, deps = {}){
   const esc = deps.esc || (t => String(t ?? ""));
   const meta = deps.fmtNoteMeta || (() => "");
+  const icons = deps.icons || {};
   const lanes = (c.lanes || []).map(col => `<i style="background:${esc(col)}"></i>`).join("");
-  return `<button class="wscard ${c.id === activeId ? "on" : ""}" draggable="true" data-note="${esc(c.id)}">
+  /* div (not button) so nested Rename/Delete action buttons are valid HTML. */
+  return `<div class="wscard ${c.id === activeId ? "on" : ""}" draggable="true" data-note="${esc(c.id)}" role="button" tabindex="0">
       <div class="wctitle">${esc(c.title || "Untitled")}</div>
       <div class="wcmeta"><span>${esc(meta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
-    </button>`;
+      <div class="wscardactions">
+        <button type="button" data-wcact="rename" aria-label="rename note">${icons.ICON_PENCIL || ""}</button>
+        <button type="button" data-wcact="delete" class="danger" aria-label="delete note">${icons.ICON_TRASH || ""}</button>
+      </div>
+    </div>`;
 }
 
 export function inboxLaneTabs(bookmarks, laneList, bookmarkLaneId, nodeById){
@@ -652,18 +675,81 @@ export function createNotesFeature(deps){
     if (doc){ wsActive = doc; renderNote(); }
   }
 
-  async function wsDeleteNote(){
-    if (!wsActiveId) return;
-    const id = wsActiveId;
+  async function wsDeleteNote(noteId){
+    const id = noteId || wsActiveId;
+    if (!id) return;
     try { await api("/api/notes/" + encodeURIComponent(id), { method: "DELETE" }); }
     catch { toast("Delete failed"); return; }
-    wsActiveId = null; wsActive = null;
-    const ws = root("notesworkspace");
-    if (ws && ws.classList) ws.classList.remove("note-open");
-    const back = root("wsback");
-    if (back) back.hidden = true;
-    renderNote();
-    wsLoadCards();
+    if (id === wsActiveId){
+      wsActiveId = null; wsActive = null;
+      const ws = root("notesworkspace");
+      if (ws && ws.classList) ws.classList.remove("note-open");
+      const back = root("wsback");
+      if (back) back.hidden = true;
+      renderNote();
+    }
+    await wsLoadCards();
+  }
+
+  function startCardRename(card){
+    if (!card || !doc || card.classList.contains("renaming")) return;
+    const noteId = card.dataset.note;
+    const titleEl = card.querySelector(".wctitle");
+    if (!titleEl || !noteId) return;
+    const cardMeta = wsNotes.find(c => c.id === noteId);
+    const orig = (cardMeta && cardMeta.title) || titleEl.textContent || "";
+    card.classList.add("renaming");
+    card.draggable = noteCardDragEnabled(true); /* false while renaming */
+    const input = doc.createElement("input");
+    input.className = "wctitleedit";
+    input.value = orig;
+    input.setAttribute("aria-label", "rename note");
+    if (titleEl.parentNode){
+      titleEl.parentNode.insertBefore(input, titleEl);
+      titleEl.remove();
+    }
+    if (typeof input.focus === "function") input.focus();
+    if (typeof input.select === "function") input.select();
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return;
+      done = true;
+      const next = commit ? input.value : orig;
+      const plan = noteCardRenamePlan({ noteId, activeId: wsActiveId, title: next });
+      try {
+        if (commit && next !== orig){
+          const docu = await api("/api/notes/" + encodeURIComponent(noteId),
+            { method: "PATCH", body: JSON.stringify(plan.patch) });
+          const cardRow = wsNotes.find(c => c.id === noteId);
+          if (cardRow) cardRow.title = plan.patch.title;
+          if (plan.updateActive && wsActive) wsActive.title = plan.patch.title;
+          if (plan.updateTopBar){
+            const h2 = root("wstitle");
+            if (h2) h2.textContent = plan.topBarText;
+            const titleInput = root("wsnotetitle");
+            if (titleInput) titleInput.value = plan.patch.title;
+          }
+          if (docu && docu.edited_at && cardRow) cardRow.edited_at = docu.edited_at;
+        }
+      } catch { toast("Save failed — will retry on next edit"); }
+      card.classList.remove("renaming");
+      card.draggable = noteCardDragEnabled(false); /* true again */
+      /* rebuild this card's title node; full renderCards is fine (not mid-drag) */
+      renderCards();
+    };
+    const onKey = ev => {
+      if (ev.key === "Enter"){
+        ev.preventDefault();
+        finish(true);
+      } else if (ev.key === "Escape"){
+        ev.preventDefault();
+        ev.stopPropagation();
+        finish(false);
+      }
+    };
+    const onBlur = () => { finish(true); };
+    input.addEventListener("keydown", onKey);
+    input.addEventListener("blur", onBlur);
   }
 
   function closeWsMenu(){
@@ -962,12 +1048,27 @@ export function createNotesFeature(deps){
   }
 
   function onCardsClick(e){
+    const act = e.target.closest && e.target.closest("[data-wcact]");
+    if (act){
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
+      if (typeof e.preventDefault === "function") e.preventDefault();
+      const card = act.closest(".wscard");
+      if (!card) return;
+      if (act.dataset.wcact === "rename") startCardRename(card);
+      else if (act.dataset.wcact === "delete") wsDeleteNote(card.dataset.note);
+      return;
+    }
+    if (e.target.closest && e.target.closest(".wctitleedit")) return;
     const card = e.target.closest && e.target.closest(".wscard");
-    if (card) wsSelect(card.dataset.note);
+    if (card && !card.classList.contains("renaming")) wsSelect(card.dataset.note);
   }
   function onCardsDragStart(e){
     const card = e.target.closest && e.target.closest(".wscard");
     if (!card) return;
+    if (!noteCardDragEnabled(card.classList.contains("renaming")) || card.draggable === false){
+      if (typeof e.preventDefault === "function") e.preventDefault();
+      return;
+    }
     wsCardDragging = true; wsCardDragEl = card;
     if (card.classList) card.classList.add("dragging");
     try {

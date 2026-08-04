@@ -25,6 +25,8 @@ import {
   sectionHTML,
   referenceHTML,
   noteCardHTML,
+  noteCardDragEnabled,
+  noteCardRenamePlan,
   inboxLaneTabs,
   resolveInboxTab,
   inboxListModel,
@@ -91,6 +93,11 @@ test(".wsmenu button.danger uses --danger, not --attn (covers Delete note + Dele
   assert.match(notesSrc, /data-mi="del"[^>]*class="danger"|class="danger"[^>]*data-mi="del"/);
   assert.match(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
   assert.doesNotMatch(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
+});
+
+test("card delete action uses --danger (not --attn)", () => {
+  assert.match(notesCssSrc, /\.wscardactions\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
+  assert.doesNotMatch(notesCssSrc, /\.wscardactions\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
 });
 
 /* ---------- folds ---------- */
@@ -290,6 +297,42 @@ test("noteCardHTML active class, draggable, lanes", () => {
   assert.match(html, /draggable="true"/);
   assert.match(html, /data-note="n1"/);
   assert.match(html, /wclanes/);
+});
+
+test("noteCardHTML carries Rename + Delete card actions; delete is danger", () => {
+  const html = noteCardHTML(
+    { id: "n1", title: "Hello", lanes: [] },
+    "n1",
+    { esc: s => s, fmtNoteMeta: () => "meta", icons: { ICON_PENCIL: "P", ICON_TRASH: "T" } },
+  );
+  assert.match(html, /class="wscardactions"/);
+  assert.match(html, /data-wcact="rename"/);
+  assert.match(html, /data-wcact="delete"/);
+  assert.match(html, /data-wcact="delete"[^>]*class="[^"]*danger|class="[^"]*danger[^"]*"[^>]*data-wcact="delete"/);
+  assert.match(html, /aria-label="rename note"/);
+  assert.match(html, /aria-label="delete note"/);
+  /* card must host buttons (not be a <button>) so nested actions stay valid HTML */
+  assert.match(html, /<div class="wscard/);
+  assert.doesNotMatch(html, /<button class="wscard/);
+});
+
+test("noteCardDragEnabled is false while renaming", () => {
+  assert.equal(noteCardDragEnabled(false), true);
+  assert.equal(noteCardDragEnabled(true), false);
+});
+
+test("noteCardRenamePlan: PATCH title; top bar only when active", () => {
+  const active = noteCardRenamePlan({ noteId: "n1", activeId: "n1", title: "New" });
+  assert.deepEqual(active.patch, { title: "New" });
+  assert.equal(active.updateTopBar, true);
+  assert.equal(active.topBarText, "New");
+  assert.equal(active.updateActive, true);
+
+  const other = noteCardRenamePlan({ noteId: "n2", activeId: "n1", title: "" });
+  assert.deepEqual(other.patch, { title: "" });
+  assert.equal(other.updateTopBar, false);
+  assert.equal(other.topBarText, "Note");
+  assert.equal(other.updateActive, false);
 });
 
 /* ---------- inbox lane / order / tabs / clamp reuse ---------- */
@@ -1234,6 +1277,102 @@ test("note menu stopPropagation and offers rename/add/delete", () => {
   assert.match(menu.innerHTML, /data-si="add"/);
   assert.match(menu.innerHTML, /data-si="del"/);
   assert.match(menu.innerHTML, /Delete note/);
+});
+
+/* ---------- Phase 1c: Rename / Delete on zone-2 note cards ---------- */
+test("card rename: not draggable while editing; commit PATCHes title and updates #wstitle", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Orig", order: 0 }],
+    docs: { n1: { id: "n1", title: "Orig", sections: [] } },
+  });
+  const { feature, roots, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+  assert.equal(roots.wstitle.textContent, "Orig");
+
+  /* build a card with actions the way renderCards would (fake DOM has no HTML parse) */
+  const card = el("div", { className: "wscard", dataset: { note: "n1" }, draggable: true });
+  card.dataset.note = "n1";
+  card.draggable = true;
+  const title = el("div", { className: "wctitle", textContent: "Orig" });
+  card.appendChild(title);
+  const renameBtn = el("button", { dataset: { wcact: "rename" } });
+  renameBtn.dataset.wcact = "rename";
+  renameBtn.closest = sel => {
+    if (sel === "[data-wcact]" || sel === "[data-wcact=\"rename\"]") return renameBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+
+  let stopped = false;
+  roots.wscards.dispatch("click", {
+    target: renameBtn,
+    stopPropagation(){ stopped = true; },
+    preventDefault(){},
+  });
+  assert.equal(stopped, true, "action click must not select/reorder");
+  assert.equal(card.draggable, false, "card is not draggable while renaming");
+  assert.equal(noteCardDragEnabled(true), false);
+
+  const input = card.querySelector("input") || card.querySelector(".wctitleedit");
+  assert.ok(input, "rename swaps title for an input");
+  input.value = "Renamed";
+  input.dispatch("keydown", {
+    key: "Enter", target: input,
+    preventDefault(){}, stopPropagation(){},
+  });
+  await settle();
+
+  const patch = apiLog.find(x => x.method === "PATCH" && x.url.includes("/api/notes/n1"));
+  assert.ok(patch, "rename commits a PATCH");
+  assert.equal(JSON.parse(patch.body).title, "Renamed");
+  assert.equal(roots.wstitle.textContent, "Renamed");
+});
+
+test("card delete action calls DELETE for that note id", async () => {
+  const ctx = createFeature({
+    notes: [
+      { id: "n1", title: "Keep", order: 0 },
+      { id: "n2", title: "Gone", order: 1 },
+    ],
+    docs: {
+      n1: { id: "n1", title: "Keep", sections: [] },
+      n2: { id: "n2", title: "Gone", sections: [] },
+    },
+  });
+  const { feature, roots, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const card = el("div", { className: "wscard", dataset: { note: "n2" } });
+  card.dataset.note = "n2";
+  const delBtn = el("button", { className: "danger", dataset: { wcact: "delete" } });
+  delBtn.dataset.wcact = "delete";
+  delBtn.closest = sel => {
+    if (sel === "[data-wcact]" || sel.includes("data-wcact")) return delBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+
+  roots.wscards.dispatch("click", {
+    target: delBtn,
+    stopPropagation(){},
+    preventDefault(){},
+  });
+  await settle();
+
+  const del = apiLog.find(x => x.method === "DELETE" && x.url.includes("/api/notes/n2"));
+  assert.ok(del, "card delete issues DELETE for the card's note");
+  /* active note n1 remains open */
+  assert.equal(roots.wstitle.textContent, "Keep");
 });
 
 /* ---------- title Enter/Escape contract in source ---------- */
