@@ -203,18 +203,33 @@ export function attentionStationSVG(x, y, op){
           <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5"/>`;
 }
 
-// terminalStationSVG marks an ended thread. The station's filled circle stays
-// on the mainline (drawn by the caller); this adds the terminus spur — up out
-// of the station (12 o'clock) then curving LEFT to a short vertical buffer bar
-// (11–10 o'clock, convex bulge top-right). Left, because the fork cue hooks
+// terminalStationSVG marks an ended thread that sits *mid-lane* — the mainline
+// continues north past it (newer stations above). The station's filled circle
+// stays on the mainline (drawn by the caller); this adds the terminus spur — up
+// out of the station (12 o'clock) then curving LEFT to a short vertical buffer
+// bar (11–10 o'clock, convex bulge top-right). Left, because the fork cue hooks
 // right (see the stack renderer): opposite sides keep a station that is both
 // ended and a fork child uncluttered. Unlike the old crossbar "T", the mainline
 // passes straight through the circle, so a lane continuing north is never
-// crossed. col is the already-escaped lane colour.
+// crossed. col is the already-escaped lane colour. For an ended station that is
+// the *north (top) terminus* of its lane — nothing continues past it — use
+// terminalCapSVG instead: a straight buffer stop, not a sideways spur.
 export function terminalStationSVG(x, y, op, col){
   return `<path d="M ${x} ${y} C ${x} ${y - 14} ${x - 6.3} ${y - 19} ${x - 15} ${y - 24}"
           fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" opacity="${op}"/>
           <line x1="${x - 15}" y1="${y - 29}" x2="${x - 15}" y2="${y - 19}" stroke="${col}" stroke-width="3" stroke-linecap="round" opacity="${op}"/>`;
+}
+
+// terminalCapSVG marks an ended thread that is the north (top) terminus of its
+// lane — the topmost station, with no mainline continuing past it. Real metro
+// lines end in a straight buffer stop, so this draws a short vertical stem
+// straight up from the station (12 o'clock) capped by a horizontal buffer bar:
+// a "T" sitting on top of the dot. Because nothing runs north through it, the
+// crossbar is never crossed (the very failure mode that retired the old
+// mid-lane crossbar). col is the already-escaped lane colour.
+export function terminalCapSVG(x, y, op, col){
+  return `<line x1="${x}" y1="${y}" x2="${x}" y2="${y - 13}" stroke="${col}" stroke-width="2.5" stroke-linecap="round" opacity="${op}"/>
+          <line x1="${x - 9}" y1="${y - 13}" x2="${x + 9}" y2="${y - 13}" stroke="${col}" stroke-width="3" stroke-linecap="round" opacity="${op}"/>`;
 }
 
 export function forkCueHTML(n, lm, { escape = esc, forkKind, nodeById } = {}){
@@ -558,6 +573,14 @@ export function createMapFeature(deps){
               fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
       }
     });
+    // North (top) terminus per lane column: the smallest row index (rows are
+    // newest-first, so index 0 is topmost) among stations sharing that lane.
+    const laneTop = {};
+    rows.forEach((s, i) => {
+      const a = s.n.lane_id;
+      if (colIdx[a] == null) return;
+      if (laneTop[a] == null) laneTop[a] = i;
+    });
     rows.forEach((s, i) => {
       const n = s.n;
       const a = n.lane_id; if (colIdx[a] == null) return;
@@ -569,7 +592,8 @@ export function createMapFeature(deps){
         return;
       }
       if (n.ended_at)
-        svg += terminalStationSVG(dotX, yy, op, col);
+        svg += i === laneTop[a] ? terminalCapSVG(dotX, yy, op, col)
+                                : terminalStationSVG(dotX, yy, op, col);
       if (n.attention) svg += attentionStationSVG(dotX, yy, op);
       if (n.live === "exited" || n.live === "unavailable")
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
@@ -665,7 +689,8 @@ export function createMapFeature(deps){
           return;
         }
         if (n.ended_at)
-          svg += terminalStationSVG(dotX, yy, op, col);
+          svg += i === 0 ? terminalCapSVG(dotX, yy, op, col)
+                         : terminalStationSVG(dotX, yy, op, col);
         if (n.attention) svg += attentionStationSVG(dotX, yy, op);
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;

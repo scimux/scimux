@@ -29,6 +29,7 @@ import {
   wallMapSignature,
   attentionStationSVG,
   terminalStationSVG,
+  terminalCapSVG,
   forkCueHTML,
   fareLineHTML,
   stationRowHTML,
@@ -290,6 +291,28 @@ test("terminalStationSVG: spur rises then curves LEFT to a vertical buffer bar",
   assert.ok(x1 < 100 && x2 < 100, `buffer bar must be left of the station: x1=${x1} x2=${x2}`);
   assert.equal(x1, x2, "buffer bar is vertical");
   assert.ok(y1 < 200 && y2 < 200, `buffer bar must be above the station: y1=${y1} y2=${y2}`);
+});
+
+test("terminalCapSVG: straight buffer stop (T) centred on top of the station", () => {
+  const svg = terminalCapSVG(100, 200, 0.5, "#abc");
+  assert.match(svg, /stroke="#abc"/, "uses the passed lane colour");
+  assert.match(svg, /opacity="0\.5"/, "honours op");
+  // No curving spur — the terminus is straight lines only.
+  assert.doesNotMatch(svg, /<path\b/, "cap must not draw a curved spur");
+  const lines = [...svg.matchAll(/<line x1="([\d.-]+)" y1="([\d.-]+)" x2="([\d.-]+)" y2="([\d.-]+)"/g)]
+    .map(m => m.slice(1).map(Number));
+  assert.equal(lines.length, 2, "a vertical stem plus a horizontal bar");
+  const stem = lines.find(([x1, , x2]) => x1 === x2);
+  const bar = lines.find(([x1, , x2]) => x1 !== x2);
+  assert.ok(stem, "vertical stem present");
+  assert.ok(bar, "horizontal buffer bar present");
+  // Stem rises straight up out of the station centre (x stays 100).
+  assert.equal(stem[0], 100, "stem is centred on the station x");
+  assert.ok(stem[1] === 200 && stem[3] < 200, "stem starts at the station and goes up");
+  // Bar sits above the station, is horizontal, and is centred over it.
+  assert.ok(bar[1] < 200 && bar[3] < 200, "bar sits above the station");
+  assert.equal(bar[1], bar[3], "bar is horizontal");
+  assert.ok(bar[0] < 100 && bar[2] > 100, "bar is centred over the station x");
 });
 
 /* ---------- stack model / signatures ---------- */
@@ -757,7 +780,7 @@ test("invalidate forces next render; signature skip prevents rebuild", () => {
   assert.match(mapwrap.innerHTML, /data-nid="a"/);
 });
 
-test("stack renderer draws the terminus (not the old crossbar) for an ended node", () => {
+test("stack renderer caps a top-terminus ended node with the straight buffer (T)", () => {
   const mapwrap = fakeEl("mapwrap");
   const nodes = [{
     id: "a", title: "T", description: "", agent: "x", model: "m", effort: "",
@@ -789,14 +812,71 @@ test("stack renderer draws the terminus (not the old crossbar) for an ended node
   });
   feature.render();
   const html = mapwrap.innerHTML;
-  // The call site must emit exactly what the helper produces for this station
-  // (stack renderer: dotX=LX=22, first row y=38, op=1, lane colour #00f) —
-  // proving the ended path renders the terminus via the shared helper.
+  // The single node is the topmost (north) station of its lane, so the ended
+  // path must emit the straight buffer cap via the shared helper (stack
+  // renderer: dotX=LX=22, first row y=38, op=1, lane colour #00f) — not the
+  // sideways spur, which is reserved for mid-lane ended stations.
   assert.ok(
-    html.includes(terminalStationSVG(22, 38, 1, "#00f")),
-    "ended node did not render the terminus glyph",
+    html.includes(terminalCapSVG(22, 38, 1, "#00f")),
+    "top-terminus ended node did not render the straight buffer cap",
   );
-  // The old crossbar — a horizontal line at yy-11 through the mainline — must
-  // be gone (that was the "T" this change replaced).
-  assert.doesNotMatch(html, /y1="27"[^>]*y2="27"/, "old crossbar still present");
+  assert.ok(
+    !html.includes(terminalStationSVG(22, 38, 1, "#00f")),
+    "top terminus must not render the sideways spur",
+  );
+  // The old crossbar — a horizontal line through the mainline at the dot's y —
+  // must be gone (that was the "T" the spur change replaced).
+  assert.doesNotMatch(html, /y1="38"[^>]*y2="38"/, "old crossbar still present");
+});
+
+test("stack renderer draws the sideways spur for a mid-lane ended node", () => {
+  const mapwrap = fakeEl("mapwrap");
+  // Two stations on lane L: a newer live one on top, an older ended one below.
+  // The ended node is NOT the north terminus, so it keeps the sideways spur.
+  const nodes = [
+    {
+      id: "top", title: "Top", description: "", agent: "x", model: "m", effort: "",
+      lane_id: "L", parent: "", ended_at: "", live: "quiet",
+      attention: "", created_at: "2026-01-03T00:00:00Z", stops: [],
+    },
+    {
+      id: "end", title: "End", description: "", agent: "x", model: "m", effort: "",
+      lane_id: "L", parent: "", ended_at: "2026-01-02T00:00:00Z", live: "quiet",
+      attention: "", created_at: "2026-01-01T00:00:00Z", stops: [],
+    },
+  ];
+  const storage = memoryStorage({
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const feature = createMapFeature({
+    roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
+    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { top: nodes[0], end: nodes[1] },
+    }),
+    agentLogo: () => "",
+  });
+  feature.render();
+  const html = mapwrap.innerHTML;
+  // Rows are newest-first: "end" sits at the second row, y(1)=76+38=114.
+  assert.ok(
+    html.includes(terminalStationSVG(22, 114, 1, "#00f")),
+    "mid-lane ended node did not render the sideways spur",
+  );
+  assert.ok(
+    !html.includes(terminalCapSVG(22, 114, 1, "#00f")),
+    "mid-lane ended node must not render the straight buffer cap",
+  );
 });
