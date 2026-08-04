@@ -1425,7 +1425,9 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 		"#wsnoteempty {",
 		"@media (max-width: 767px) {",
 		"@media (min-width: 768px) {",
-		"#wsinbox, #wsnav { width: 340px; }",
+		".wsdivider {",
+		"#wsinbox { width: var(--wsinbox-w, 340px); }",
+		"#wsnav { width: var(--wsnav-w, 340px); }",
 	} {
 		if !strings.Contains(notes, sig) {
 			t.Fatalf("notes.css missing signature %q", sig)

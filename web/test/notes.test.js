@@ -13,6 +13,9 @@ import {
   STORAGE_KEY_INBOX_TAB,
   STORAGE_KEY_WS_LAYOUT,
   COPY_ACK_MS,
+  WS_LAYOUT_MINS,
+  WS_LAYOUT_PEEK,
+  WS_DIVIDER_NUDGE,
   parseNoteFolds,
   foldsAfterSet,
   parseWorkspaceLayout,
@@ -72,6 +75,11 @@ test("storage keys, debounce, copy ack constants", () => {
   assert.equal(STORAGE_KEY_WS_LAYOUT, "scimux-wslayout");
   assert.equal(SAVE_DEBOUNCE_MS, 1100);
   assert.equal(COPY_ACK_MS, 900);
+  assert.equal(WS_LAYOUT_PEEK, 48);
+  assert.equal(WS_DIVIDER_NUDGE, 20);
+  assert.equal(WS_LAYOUT_MINS.inbox, 210);
+  assert.equal(WS_LAYOUT_MINS.nav, 190);
+  assert.equal(WS_LAYOUT_MINS.note, 280);
 });
 
 /* ---------- Phase 1a/1b/1e: --danger token; destructive UI is red ---------- */
@@ -648,6 +656,16 @@ function classList(el){
   };
 }
 
+function makeStyle(){
+  const props = Object.create(null);
+  return {
+    setProperty(k, v){ props[k] = String(v); },
+    removeProperty(k){ delete props[k]; },
+    getPropertyValue(k){ return props[k] || ""; },
+    get _props(){ return props; },
+  };
+}
+
 function el(tag, props = {}){
   const listeners = {};
   const node = {
@@ -658,7 +676,7 @@ function el(tag, props = {}){
     textContent: props.textContent || "",
     value: props.value || "",
     dataset: Object.assign({}, props.dataset || {}),
-    style: {},
+    style: makeStyle(),
     children: [],
     parentNode: null,
     parentElement: null,
@@ -679,7 +697,13 @@ function el(tag, props = {}){
         type, target: node, currentTarget: node, preventDefault(){}, stopPropagation(){},
       }, ev);
       if (!e.target) e.target = node;
-      (listeners[type] || []).forEach(fn => fn(e));
+      /* bubble to ancestors (pointer events on dividers are bound on #wszones) */
+      let cur = node;
+      while (cur){
+        const list = cur._listeners && cur._listeners[type];
+        if (list) list.forEach(fn => fn(e));
+        cur = cur.parentNode;
+      }
     },
     focus(){ node._focused = true; documentRef.activeElement = node; },
     blur(){ node._focused = false; },
@@ -720,8 +744,10 @@ function el(tag, props = {}){
       return child;
     },
     getBoundingClientRect(){
-      return node._rect || { top: 0, left: 0, bottom: 20, height: 20, width: 100 };
+      return node._rect || { top: 0, left: 0, bottom: 20, right: 100, height: 20, width: 100 };
     },
+    setPointerCapture(){ node._captured = true; },
+    releasePointerCapture(){ node._captured = false; },
     setAttribute(k, v){ node[k] = v; },
     insertAdjacentHTML(pos, html){
       if (pos === "beforeend") node.innerHTML = (node.innerHTML || "") + html;
@@ -729,6 +755,7 @@ function el(tag, props = {}){
     get _listeners(){ return listeners; },
   };
   if (props.id) node.id = props.id;
+  if (props.dataset) Object.assign(node.dataset, props.dataset);
   return node;
 }
 
@@ -789,13 +816,25 @@ function makeRoots(){
   const wsclose = el("button", { id: "wsclose" });
   const wsplacetext = el("span", { id: "wsplacetext" });
   const wsplacecancel = el("button", { id: "wsplacecancel" });
+  const wszones = el("div", { id: "wszones" });
+  const wsinbox = el("div", { id: "wsinbox" });
+  const wsnav = el("div", { id: "wsnav" });
+  const wsnote = el("div", { id: "wsnote" });
   const wsinboxtabs = el("div", { id: "wsinboxtabs" });
   const wsinboxlist = el("div", { id: "wsinboxlist" });
   const wscards = el("div", { id: "wscards" });
   const wsnewnote = el("button", { id: "wsnewnote" });
   const wssections = el("div", { id: "wssections" });
   const wsnoteempty = el("div", { id: "wsnoteempty" });
+  const divInbox = el("div", { className: "wsdivider", dataset: { boundary: "inbox" } });
+  const divNav = el("div", { className: "wsdivider", dataset: { boundary: "nav" } });
   const notesbtn = el("button", { id: "notesbtn" });
+
+  /* zone rects: inbox 240 | nav 220 | note 440 (total 900) — desktop three-zone */
+  wsinbox._rect = { top: 0, left: 0, width: 240, height: 400, right: 240, bottom: 400 };
+  wsnav._rect = { top: 0, left: 240, width: 220, height: 400, right: 460, bottom: 400 };
+  wsnote._rect = { top: 0, left: 460, width: 440, height: 400, right: 900, bottom: 400 };
+  wszones._rect = { top: 0, left: 0, width: 900, height: 400, right: 900, bottom: 400 };
 
   notesworkspace.appendChild(wsscrim);
   notesworkspace.appendChild(wspanel);
@@ -804,12 +843,18 @@ function makeRoots(){
   wspanel.appendChild(wsclose);
   wspanel.appendChild(wsplacetext);
   wspanel.appendChild(wsplacecancel);
-  wspanel.appendChild(wsinboxtabs);
-  wspanel.appendChild(wsinboxlist);
-  wspanel.appendChild(wscards);
-  wspanel.appendChild(wsnewnote);
-  wspanel.appendChild(wssections);
-  wspanel.appendChild(wsnoteempty);
+  wspanel.appendChild(wszones);
+  wszones.appendChild(wsinbox);
+  wszones.appendChild(divInbox);
+  wszones.appendChild(wsnav);
+  wszones.appendChild(divNav);
+  wszones.appendChild(wsnote);
+  wsinbox.appendChild(wsinboxtabs);
+  wsinbox.appendChild(wsinboxlist);
+  wsnav.appendChild(wscards);
+  wsnav.appendChild(wsnewnote);
+  wsnote.appendChild(wssections);
+  wsnote.appendChild(wsnoteempty);
 
   documentRef = {
     activeElement: null,
@@ -832,8 +877,9 @@ function makeRoots(){
   return {
     roots: {
       notesworkspace, wsscrim, wspanel, wstitle, wsback, wsclose,
-      wsplacetext, wsplacecancel, wsinboxtabs, wsinboxlist, wscards,
-      wsnewnote, wssections, wsnoteempty,
+      wsplacetext, wsplacecancel, wszones, wsinbox, wsnav, wsnote,
+      wsinboxtabs, wsinboxlist, wscards, wsnewnote, wssections, wsnoteempty,
+      divInbox, divNav,
     },
     document: documentRef,
     notesbtn,
@@ -1945,4 +1991,198 @@ test("body edit Escape restores rendered body and references", async () => {
   assert.match(body.innerHTML, /original/);
   assert.match(body.innerHTML, /data-ref="r1"/);
   assert.match(body.innerHTML, /quoted/);
+});
+
+/* ---------- Phase 2b/2c: dividers, collapse-to-peek, localStorage ---------- */
+
+function syncZoneRects(roots){
+  const iw = parseFloat(roots.wszones.style.getPropertyValue("--wsinbox-w")) || 240;
+  const nw = parseFloat(roots.wszones.style.getPropertyValue("--wsnav-w")) || 220;
+  const noteW = 900 - iw - nw;
+  roots.wsinbox._rect = { top: 0, left: 0, width: iw, height: 400, right: iw, bottom: 400 };
+  roots.wsnav._rect = { top: 0, left: iw, width: nw, height: 400, right: iw + nw, bottom: 400 };
+  roots.wsnote._rect = { top: 0, left: iw + nw, width: noteW, height: 400, right: 900, bottom: 400 };
+}
+
+test("index.html has two vertical separators; CSS uses custom-prop widths ≥768", () => {
+  assert.match(indexSrc, /class="wsdivider"[^>]*data-boundary="inbox"|data-boundary="inbox"[^>]*class="wsdivider"/);
+  assert.match(indexSrc, /data-boundary="nav"/);
+  assert.match(indexSrc, /role="separator"/);
+  assert.match(indexSrc, /aria-orientation="vertical"/);
+  assert.match(notesCssSrc, /--wsinbox-w/);
+  assert.match(notesCssSrc, /--wsnav-w/);
+  assert.match(notesCssSrc, /\.wsdivider/);
+  assert.match(notesCssSrc, /cursor:\s*col-resize/);
+  assert.match(notesCssSrc, /touch-action:\s*none/);
+  /* collapsed rail uses peek; dividers only in min-width 768 block as display:block */
+  assert.match(notesCssSrc, /#wsinbox\.collapsed|#wsnav\.collapsed/);
+  assert.match(notesCssSrc, /var\(--peek\)/);
+  const m768 = notesCssSrc.match(/@media\s*\(min-width:\s*768px\)\s*\{([\s\S]*?)@media\s*\(min-width:\s*900px\)/);
+  assert.ok(m768, "768px media block present");
+  assert.match(m768[1], /\.wsdivider\s*\{[^}]*display:\s*block/);
+  assert.match(m768[1], /var\(--wsinbox-w,\s*clamp/);
+  assert.match(m768[1], /var\(--wsnav-w,\s*clamp/);
+  /* phone: divider default is display:none outside the media query */
+  assert.match(notesCssSrc, /\.wsdivider\s*\{[^}]*display:\s*none/);
+});
+
+test("divider drag reallocates live and persists layout on pointerup", async () => {
+  const ctx = createFeature({});
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  const handle = roots.divInbox;
+  /* drag inbox boundary right by 20px → inbox 260, nav 200 (both ≥ mins) */
+  handle.dispatch("pointerdown", {
+    target: handle, pointerId: 1, clientX: 240, button: 0,
+    preventDefault(){},
+  });
+  handle.dispatch("pointermove", {
+    target: handle, pointerId: 1, clientX: 260,
+  });
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), "260px");
+  assert.equal(roots.wszones.style.getPropertyValue("--wsnav-w"), "200px");
+  assert.equal(roots.wsinbox.classList.contains("collapsed"), false);
+  assert.equal(roots.wsnav.classList.contains("collapsed"), false);
+
+  handle.dispatch("pointerup", { target: handle, pointerId: 1, clientX: 260 });
+  const raw = storage.getItem(STORAGE_KEY_WS_LAYOUT);
+  assert.ok(raw, "layout persisted");
+  const L = JSON.parse(raw);
+  assert.equal(L.inboxW, 260);
+  assert.equal(L.navW, 200);
+  assert.equal(L.inboxCollapsed, false);
+  assert.equal(L.navCollapsed, false);
+});
+
+test("divider drag past min collapses to peek; tap rail restores", async () => {
+  const ctx = createFeature({});
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  const handle = roots.divInbox;
+  handle.dispatch("pointerdown", {
+    target: handle, pointerId: 1, clientX: 240, button: 0, preventDefault(){},
+  });
+  handle.dispatch("pointermove", {
+    target: handle, pointerId: 1, clientX: 80, /* well below min 210 */
+  });
+  assert.equal(roots.wsinbox.classList.contains("collapsed"), true);
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), WS_LAYOUT_PEEK + "px");
+  handle.dispatch("pointerup", { target: handle, pointerId: 1, clientX: 80 });
+
+  let L = JSON.parse(storage.getItem(STORAGE_KEY_WS_LAYOUT));
+  assert.equal(L.inboxCollapsed, true);
+  assert.equal(L.inboxW, 240); /* last expanded remembered */
+
+  /* clear suppress-click from drag, then tap the collapsed rail */
+  syncZoneRects(roots);
+  roots.wszones.dispatch("click", { target: roots.wsinbox }); /* eat suppress */
+  roots.wsinbox.dispatch("click", { target: roots.wsinbox });
+  assert.equal(roots.wsinbox.classList.contains("collapsed"), false);
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), "240px");
+  L = JSON.parse(storage.getItem(STORAGE_KEY_WS_LAYOUT));
+  assert.equal(L.inboxCollapsed, false);
+  assert.equal(L.inboxW, 240);
+});
+
+test("arrow keys on focused separator nudge width and persist", async () => {
+  const ctx = createFeature({});
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  const handle = roots.divInbox;
+  handle.dispatch("keydown", {
+    target: handle, key: "ArrowRight", preventDefault(){},
+  });
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), (240 + WS_DIVIDER_NUDGE) + "px");
+  const L = JSON.parse(storage.getItem(STORAGE_KEY_WS_LAYOUT));
+  assert.equal(L.inboxW, 240 + WS_DIVIDER_NUDGE);
+
+  handle.dispatch("keydown", {
+    target: handle, key: "ArrowLeft", preventDefault(){},
+  });
+  /* back toward start (may not be exact if measure uses style) */
+  assert.ok(parseFloat(roots.wszones.style.getPropertyValue("--wsinbox-w")) < 240 + WS_DIVIDER_NUDGE);
+});
+
+test("workspace open hydrates layout from localStorage; garbage → defaults", async () => {
+  const stored = {
+    inboxW: 260, navW: 200, inboxCollapsed: true, navCollapsed: false,
+  };
+  const ctx = createFeature({
+    storageInit: { [STORAGE_KEY_WS_LAYOUT]: JSON.stringify(stored) },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  assert.equal(roots.wsinbox.classList.contains("collapsed"), true);
+  assert.equal(roots.wsnav.classList.contains("collapsed"), false);
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), WS_LAYOUT_PEEK + "px");
+  /* nav expanded with stored width */
+  assert.equal(roots.wszones.style.getPropertyValue("--wsnav-w"), "200px");
+
+  /* garbage storage: no throw, no collapsed, no custom props (clamp defaults) */
+  const bad = createFeature({
+    storageInit: { [STORAGE_KEY_WS_LAYOUT]: "not-json{{{" },
+  });
+  bad.feature.bind();
+  bad.feature.open();
+  await settle();
+  assert.equal(bad.roots.wsinbox.classList.contains("collapsed"), false);
+  assert.equal(bad.roots.wsnav.classList.contains("collapsed"), false);
+  assert.equal(bad.roots.wszones.style.getPropertyValue("--wsinbox-w"), "");
+  assert.equal(bad.roots.wszones.style.getPropertyValue("--wsnav-w"), "");
+});
+
+test("dividers are inert when narrow (<768)", async () => {
+  const ctx = createFeature({ isNarrow: true });
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  const handle = roots.divInbox;
+  handle.dispatch("pointerdown", {
+    target: handle, pointerId: 1, clientX: 240, button: 0, preventDefault(){},
+  });
+  handle.dispatch("pointermove", {
+    target: handle, pointerId: 1, clientX: 100,
+  });
+  handle.dispatch("pointerup", { target: handle, pointerId: 1, clientX: 100 });
+  assert.equal(storage.getItem(STORAGE_KEY_WS_LAYOUT), null);
+  assert.equal(roots.wsinbox.classList.contains("collapsed"), false);
+
+  handle.dispatch("keydown", {
+    target: handle, key: "ArrowRight", preventDefault(){},
+  });
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), "");
+});
+
+test("#wsnote never receives .collapsed; note flex stays 2.1", async () => {
+  assert.match(notesCssSrc, /#wsnote\s*\{[^}]*flex:\s*2\.1/);
+  assert.doesNotMatch(notesCssSrc, /#wsnote\.collapsed/);
+  const ctx = createFeature({});
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  /* collapse nav hard against note — note must not collapse */
+  const handle = roots.divNav;
+  handle.dispatch("pointerdown", {
+    target: handle, pointerId: 2, clientX: 460, button: 0, preventDefault(){},
+  });
+  handle.dispatch("pointermove", {
+    target: handle, pointerId: 2, clientX: 250, /* shrink nav hard */
+  });
+  handle.dispatch("pointerup", { target: handle, pointerId: 2, clientX: 250 });
+  assert.equal(roots.wsnote.classList.contains("collapsed"), false);
+  assert.equal(roots.wsnav.classList.contains("collapsed"), true);
 });

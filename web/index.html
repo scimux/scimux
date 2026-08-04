@@ -231,6 +231,9 @@
         <div class="tabs" id="wsinboxtabs"></div>
         <div id="wsinboxlist"><div class="empty">No bookmarks yet.</div></div>
       </div>
+      <!-- resizable divider (iPad/desktop ≥768 only): inbox | nav -->
+      <div class="wsdivider" data-boundary="inbox" role="separator"
+        aria-orientation="vertical" tabindex="0" aria-label="Resize bookmarks column"></div>
       <!-- middle zone: sparse note-card navigator -->
       <div id="wsnav" role="region" aria-label="Notes">
         <div id="wsnavhead">
@@ -240,6 +243,9 @@
         </div>
         <div id="wscards"><div class="empty">loading…</div></div>
       </div>
+      <!-- resizable divider: nav | note (#wsnote never collapses) -->
+      <div class="wsdivider" data-boundary="nav" role="separator"
+        aria-orientation="vertical" tabindex="0" aria-label="Resize notes list column"></div>
       <!-- right zone: the active note writing surface (built once, patched by
            explicit user/load actions only — never by the poll) -->
       <div id="wsnote" role="region" aria-label="Active note">

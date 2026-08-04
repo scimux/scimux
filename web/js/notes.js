@@ -9,6 +9,7 @@
  *   - #wsplacebar / #wsplacetext / #wsplacecancel
  *   - #wsinboxtabs / #wsinboxlist (mirrored Bookmarks inbox; polled safe)
  *   - #wscards / #wsnewnote (sparse navigator; drag reorder)
+ *   - #wszones / .wsdivider / #wsinbox / #wsnav / #wsnote (resizable columns)
  *   - #wssections / #wsnoteempty (active note; title lives only in #wstitle)
  *
  * Explicit non-ownership:
@@ -114,6 +115,11 @@ export const STORAGE_KEY_FOLDS = "scimux-notefolds";
 export const STORAGE_KEY_INBOX_TAB = "scimux-wsinboxtab";
 export const STORAGE_KEY_WS_LAYOUT = "scimux-wslayout";
 export const COPY_ACK_MS = 900;
+/* Default mins match the clamp() lower ends in notes.css @media 768px;
+ * peek matches the practical midpoint of --peek (clamp(44px, 12%, 60px)). */
+export const WS_LAYOUT_MINS = { inbox: 210, nav: 190, note: 280 };
+export const WS_LAYOUT_PEEK = 48;
+export const WS_DIVIDER_NUDGE = 20;
 
 /* ---------- pure: folds ---------- */
 
@@ -682,6 +688,136 @@ export function createNotesFeature(deps){
   const cleanups = [];
   let copyTimer = null;
   const bodyEditCleanups = [];
+  /* Phase 2: device-scoped column layout (localStorage, never poll). */
+  let wsLayout = readWsLayoutInitial();
+  let wsDrag = null; /* { boundary, pointerId, startX, startZones, startCollapsed, startLast, moved } */
+  let wsSuppressClick = false;
+
+  function readWsLayoutInitial(){
+    try {
+      return parseWorkspaceLayout(storage ? storage.getItem(STORAGE_KEY_WS_LAYOUT) : null);
+    } catch {
+      return parseWorkspaceLayout(null);
+    }
+  }
+  function readWsLayout(){
+    try {
+      return parseWorkspaceLayout(storage ? storage.getItem(STORAGE_KEY_WS_LAYOUT) : null);
+    } catch {
+      return parseWorkspaceLayout(null);
+    }
+  }
+  function persistWsLayout(layout){
+    wsLayout = layout || parseWorkspaceLayout(null);
+    if (!storage) return;
+    try { storage.setItem(STORAGE_KEY_WS_LAYOUT, JSON.stringify(wsLayout)); }
+    catch { /* quota / private mode */ }
+  }
+  function setZoneWidthProp(zonesEl, prop, px, collapsed){
+    if (!zonesEl || !zonesEl.style) return;
+    if (collapsed || px == null || !(px > 0)){
+      if (typeof zonesEl.style.removeProperty === "function")
+        zonesEl.style.removeProperty(prop);
+      else delete zonesEl.style[prop];
+      return;
+    }
+    const v = Math.round(px) + "px";
+    if (typeof zonesEl.style.setProperty === "function")
+      zonesEl.style.setProperty(prop, v);
+    else zonesEl.style[prop] = v;
+  }
+  /* Apply persisted layout → custom props + .collapsed on zone rails. */
+  function applyWsLayout(layout){
+    const L = layout || wsLayout || parseWorkspaceLayout(null);
+    wsLayout = L;
+    const zonesEl = root("wszones");
+    const inbox = root("wsinbox");
+    const nav = root("wsnav");
+    if (zonesEl){
+      /* collapsed: CSS .collapsed → var(--peek); still write peek px for measure */
+      if (L.inboxCollapsed) setZoneWidthProp(zonesEl, "--wsinbox-w", WS_LAYOUT_PEEK, false);
+      else if (L.inboxW) setZoneWidthProp(zonesEl, "--wsinbox-w", L.inboxW, false);
+      else setZoneWidthProp(zonesEl, "--wsinbox-w", null, true);
+      if (L.navCollapsed) setZoneWidthProp(zonesEl, "--wsnav-w", WS_LAYOUT_PEEK, false);
+      else if (L.navW) setZoneWidthProp(zonesEl, "--wsnav-w", L.navW, false);
+      else setZoneWidthProp(zonesEl, "--wsnav-w", null, true);
+    }
+    if (inbox && inbox.classList)
+      inbox.classList.toggle("collapsed", !!L.inboxCollapsed);
+    if (nav && nav.classList)
+      nav.classList.toggle("collapsed", !!L.navCollapsed);
+  }
+  function applyPlanLive(plan){
+    if (!plan || !plan.widths) return;
+    const zonesEl = root("wszones");
+    const inbox = root("wsinbox");
+    const nav = root("wsnav");
+    const col = plan.collapsed || {};
+    if (zonesEl){
+      setZoneWidthProp(zonesEl, "--wsinbox-w", plan.widths.inbox, false);
+      setZoneWidthProp(zonesEl, "--wsnav-w", plan.widths.nav, false);
+    }
+    if (inbox && inbox.classList) inbox.classList.toggle("collapsed", !!col.inbox);
+    if (nav && nav.classList) nav.classList.toggle("collapsed", !!col.nav);
+    wsLayout = layoutAfterPlan(wsLayout, plan);
+  }
+  function measureZones(){
+    const inbox = root("wsinbox");
+    const nav = root("wsnav");
+    const note = root("wsnote");
+    const empty = { inbox: 0, nav: 0, note: 0 };
+    if (!inbox || !nav || !note) return { widths: empty, total: 0 };
+    const iw = (inbox.getBoundingClientRect && inbox.getBoundingClientRect().width) || 0;
+    const nw = (nav.getBoundingClientRect && nav.getBoundingClientRect().width) || 0;
+    const noteW = (note.getBoundingClientRect && note.getBoundingClientRect().width) || 0;
+    /* fall back to last known / defaults when rects are zero (hidden / test) */
+    const widths = {
+      inbox: iw > 0 ? iw : (wsLayout.inboxCollapsed ? WS_LAYOUT_PEEK : (wsLayout.inboxW || WS_LAYOUT_MINS.inbox)),
+      nav: nw > 0 ? nw : (wsLayout.navCollapsed ? WS_LAYOUT_PEEK : (wsLayout.navW || WS_LAYOUT_MINS.nav)),
+      note: noteW > 0 ? noteW : WS_LAYOUT_MINS.note,
+    };
+    return { widths, total: widths.inbox + widths.nav + widths.note };
+  }
+  function planFromPointer(boundary, pointerX, base){
+    return dividerResizePlan({
+      boundary,
+      pointerX,
+      zones: base.zones,
+      mins: WS_LAYOUT_MINS,
+      peek: WS_LAYOUT_PEEK,
+      total: base.total,
+      collapsed: base.collapsed,
+      last: base.last,
+    });
+  }
+  function layoutBaseFromCurrent(){
+    const m = measureZones();
+    return {
+      zones: m.widths,
+      total: m.total,
+      collapsed: {
+        inbox: !!(wsLayout && wsLayout.inboxCollapsed),
+        nav: !!(wsLayout && wsLayout.navCollapsed),
+      },
+      last: {
+        inbox: (wsLayout && wsLayout.inboxW) || m.widths.inbox,
+        nav: (wsLayout && wsLayout.navW) || m.widths.nav,
+      },
+    };
+  }
+  function restoreCollapsedZone(zone){
+    if (zone !== "inbox" && zone !== "nav") return;
+    const base = layoutBaseFromCurrent();
+    if (zone === "inbox" && !base.collapsed.inbox) return;
+    if (zone === "nav" && !base.collapsed.nav) return;
+    const target = zone === "inbox"
+      ? (base.last.inbox || WS_LAYOUT_MINS.inbox)
+      : base.zones.inbox + (base.last.nav || WS_LAYOUT_MINS.nav);
+    const boundary = zone === "inbox" ? "inbox" : "nav";
+    const plan = planFromPointer(boundary, target, base);
+    applyPlanLive(plan);
+    persistWsLayout(wsLayout);
+  }
 
   function $(sel){
     if (roots[sel]) return roots[sel];
@@ -761,6 +897,9 @@ export function createNotesFeature(deps){
     wsReturnFocus = activeEl();
     const ws = root("notesworkspace");
     if (ws) ws.hidden = false;
+    /* hydrate column widths/collapse from device-scoped localStorage */
+    wsLayout = readWsLayout();
+    applyWsLayout(wsLayout);
     wsLoadCards();
     renderInbox();
     rAF(() => {
@@ -1486,6 +1625,101 @@ export function createNotesFeature(deps){
       closeWsMenu();
   }
 
+  /* ---- Phase 2: divider drag + collapse-to-peek (iPad/desktop only) ---- */
+  function onDividerPointerDown(e){
+    if (isNarrow()) return;
+    const t = e.target;
+    const handle = t && t.closest ? t.closest(".wsdivider") : null;
+    if (!handle) return;
+    const boundary = handle.dataset && handle.dataset.boundary;
+    if (boundary !== "inbox" && boundary !== "nav") return;
+    if (e.button != null && e.button !== 0) return;
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    const base = layoutBaseFromCurrent();
+    wsDrag = {
+      boundary,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startZones: base.zones,
+      startTotal: base.total,
+      startCollapsed: base.collapsed,
+      startLast: base.last,
+      moved: false,
+      handle,
+    };
+    if (typeof handle.setPointerCapture === "function" && e.pointerId != null){
+      try { handle.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+  }
+  function onDividerPointerMove(e){
+    if (!wsDrag) return;
+    if (wsDrag.pointerId != null && e.pointerId != null && e.pointerId !== wsDrag.pointerId)
+      return;
+    const delta = (e.clientX || 0) - wsDrag.startX;
+    if (Math.abs(delta) > 2) wsDrag.moved = true;
+    const pointerX = wsDrag.boundary === "inbox"
+      ? wsDrag.startZones.inbox + delta
+      : wsDrag.startZones.inbox + wsDrag.startZones.nav + delta;
+    const plan = planFromPointer(wsDrag.boundary, pointerX, {
+      zones: wsDrag.startZones,
+      total: wsDrag.startTotal,
+      collapsed: wsDrag.startCollapsed,
+      last: wsDrag.startLast,
+    });
+    applyPlanLive(plan);
+  }
+  function onDividerPointerUp(e){
+    if (!wsDrag) return;
+    if (wsDrag.pointerId != null && e.pointerId != null && e.pointerId !== wsDrag.pointerId)
+      return;
+    if (wsDrag.moved){
+      persistWsLayout(wsLayout);
+      wsSuppressClick = true;
+    }
+    const handle = wsDrag.handle;
+    if (handle && typeof handle.releasePointerCapture === "function" && wsDrag.pointerId != null){
+      try { handle.releasePointerCapture(wsDrag.pointerId); } catch { /* ignore */ }
+    }
+    wsDrag = null;
+  }
+  function onDividerKeydown(e){
+    if (isNarrow()) return;
+    const t = e.target;
+    const handle = t && t.closest ? t.closest(".wsdivider") : (t && t.classList && t.classList.contains("wsdivider") ? t : null);
+    if (!handle) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    const boundary = handle.dataset && handle.dataset.boundary;
+    if (boundary !== "inbox" && boundary !== "nav") return;
+    const base = layoutBaseFromCurrent();
+    const delta = e.key === "ArrowLeft" ? -WS_DIVIDER_NUDGE : WS_DIVIDER_NUDGE;
+    const pointerX = boundary === "inbox"
+      ? base.zones.inbox + delta
+      : base.zones.inbox + base.zones.nav + delta;
+    const plan = planFromPointer(boundary, pointerX, base);
+    applyPlanLive(plan);
+    persistWsLayout(wsLayout);
+  }
+  function onZonesClick(e){
+    if (isNarrow()) return;
+    if (wsSuppressClick){ wsSuppressClick = false; return; }
+    if (wsDrag) return;
+    const t = e.target;
+    if (!t) return;
+    /* collapsed rail is a tap-catcher (bookmarkpeek idiom) */
+    let zone = null;
+    if (t.closest){
+      const inbox = t.closest("#wsinbox");
+      const nav = t.closest("#wsnav");
+      if (inbox && inbox.classList && inbox.classList.contains("collapsed")) zone = "inbox";
+      else if (nav && nav.classList && nav.classList.contains("collapsed")) zone = "nav";
+    } else if (t.classList && t.classList.contains("collapsed")){
+      if (t.id === "wsinbox") zone = "inbox";
+      else if (t.id === "wsnav") zone = "nav";
+    }
+    if (zone) restoreCollapsedZone(zone);
+  }
+
   function listen(target, type, fn, opts){
     if (!target || typeof target.addEventListener !== "function") return;
     target.addEventListener(type, fn, opts);
@@ -1505,6 +1739,7 @@ export function createNotesFeature(deps){
     bound = true;
     initIcons();
     const ws = root("notesworkspace");
+    const zones = root("wszones");
     listen(root("wsclose"), "click", onCloseClick);
     listen(root("wsscrim"), "click", onCloseClick);
     listen(root("wsback"), "click", onBackClick);
@@ -1526,6 +1761,13 @@ export function createNotesFeature(deps){
     listen(root("wssections"), "focusin", onSectionsFocusIn);
     listen(root("wssections"), "keydown", onSectionsKeydown);
     listen(doc, "click", onDocClick);
+    /* dividers: pointer drag + keyboard nudge; collapsed rails restore on tap */
+    listen(zones, "pointerdown", onDividerPointerDown);
+    listen(zones, "pointermove", onDividerPointerMove);
+    listen(zones, "pointerup", onDividerPointerUp);
+    listen(zones, "pointercancel", onDividerPointerUp);
+    listen(zones, "keydown", onDividerKeydown);
+    listen(zones, "click", onZonesClick);
   }
 
   function destroy(){

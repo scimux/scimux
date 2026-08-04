@@ -748,13 +748,25 @@ func TestWorkspaceMatchesWallMap(t *testing.T) {
 }
 
 // Item 3 (2026-07-30 iPad review): on desktop/landscape the two left zones
-// (Bookmarks inbox + Notes list) match the app pane width (340px, same as
-// #cards / #bookmarkspane) so the columns share one rhythm.
+// (Bookmarks inbox + Notes list) default to the app pane width (340px, same as
+// #cards / #bookmarkspane) so the columns share one rhythm. Phase 2: widths are
+// CSS custom props with a 340px fallback when the user has not resized.
 func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
 	css := mustProductionCSSCascade(t)
-	block := cssBlock(t, css, "#wsinbox, #wsnav {")
-	if !strings.Contains(block, "340px") {
-		t.Errorf("#wsinbox, #wsnav must be 340px (>=900px) to match the app panes; got %q", block)
+	inbox := cssBlock(t, css, "#wsinbox { width: var(--wsinbox-w, 340px);")
+	if !strings.Contains(inbox, "340px") {
+		t.Errorf("#wsinbox default width must fall back to 340px (>=900px); got %q", inbox)
+	}
+	nav := cssBlock(t, css, "#wsnav { width: var(--wsnav-w, 340px);")
+	if !strings.Contains(nav, "340px") {
+		t.Errorf("#wsnav default width must fall back to 340px (>=900px); got %q", nav)
+	}
+	// Resizable dividers are part of the same three-zone desktop contract.
+	if !strings.Contains(css, ".wsdivider") {
+		t.Error("notes cascade must define .wsdivider for zone resize handles")
+	}
+	if !strings.Contains(css, "--wsinbox-w") || !strings.Contains(css, "--wsnav-w") {
+		t.Error("notes cascade must expose --wsinbox-w / --wsnav-w custom props")
 	}
 }
 
