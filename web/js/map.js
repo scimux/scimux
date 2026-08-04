@@ -573,13 +573,16 @@ export function createMapFeature(deps){
               fill="none" stroke="${col}" stroke-width="2.5" opacity="${op}"/>`;
       }
     });
-    // North (top) terminus per lane column: the smallest row index (rows are
-    // newest-first, so index 0 is topmost) among stations sharing that lane.
-    const laneTop = {};
+    // North (top) terminus per *drawn line*: the smallest row index (rows are
+    // newest-first, so index 0 is topmost) among stations sharing an x. Keying
+    // by nodeX, not lane_id, keeps each y-stay branch spur (its own x offset)
+    // separate from the lane's main column, so a branch that dead-ends is
+    // recognised as its own line-end and gets the straight buffer cap.
+    const lineTop = {};
     rows.forEach((s, i) => {
-      const a = s.n.lane_id;
-      if (colIdx[a] == null) return;
-      if (laneTop[a] == null) laneTop[a] = i;
+      if (colIdx[s.n.lane_id] == null) return;
+      const kx = nodeX(s.n);
+      if (lineTop[kx] == null) lineTop[kx] = i;
     });
     rows.forEach((s, i) => {
       const n = s.n;
@@ -592,8 +595,8 @@ export function createMapFeature(deps){
         return;
       }
       if (n.ended_at)
-        svg += i === laneTop[a] ? terminalCapSVG(dotX, yy, op, col)
-                                : terminalStationSVG(dotX, yy, op, col);
+        svg += i === lineTop[dotX] ? terminalCapSVG(dotX, yy, op, col)
+                                   : terminalStationSVG(dotX, yy, op, col);
       if (n.attention) svg += attentionStationSVG(dotX, yy, op);
       if (n.live === "exited" || n.live === "unavailable")
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;

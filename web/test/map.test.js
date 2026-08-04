@@ -880,3 +880,64 @@ test("stack renderer draws the sideways spur for a mid-lane ended node", () => {
     "mid-lane ended node must not render the straight buffer cap",
   );
 });
+
+test("wall map caps a y-stay branch terminus with the straight buffer (T)", () => {
+  const mapwrap = fakeEl("mapwrap");
+  // Lane L, newest-first: a main-column root at top (T), a y-stay branch child
+  // that dead-ends on its own x offset (must also get the T — the bug was that
+  // the branch head, not being the lane's main-column top, fell to the spur),
+  // and an older main-column root below the top (interior → keeps the spur).
+  const nodes = [
+    {
+      id: "main-top", title: "Main top", description: "", agent: "x", model: "m",
+      effort: "", lane_id: "L", parent: "", ended_at: "2026-01-05T00:00:00Z",
+      live: "quiet", attention: "", created_at: "2026-01-05T00:00:00Z", stops: [],
+    },
+    {
+      id: "branch", title: "Branch", description: "", agent: "x", model: "m",
+      effort: "", lane_id: "L", parent: "main-top", fork_kind: "y-stay",
+      ended_at: "2026-01-03T00:00:00Z", live: "quiet", attention: "",
+      created_at: "2026-01-03T00:00:00Z", stops: [],
+    },
+    {
+      id: "main-mid", title: "Main mid", description: "", agent: "x", model: "m",
+      effort: "", lane_id: "L", parent: "", ended_at: "2026-01-01T00:00:00Z",
+      live: "quiet", attention: "", created_at: "2026-01-01T00:00:00Z", stops: [],
+    },
+  ];
+  const byId = { "main-top": nodes[0], branch: nodes[1], "main-mid": nodes[2] };
+  const storage = memoryStorage({ [MAP_FULL_KEY]: "1" });
+  const feature = createMapFeature({
+    roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
+    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#0a0",
+      name: () => "Lane",
+      byId,
+    }),
+    agentLogo: () => "",
+  });
+  feature.render();
+  const html = mapwrap.innerHTML;
+  // Geometry: colX(0)=24, BR=13; rowY(i)=54+76i. Main column x=24, branch x=37.
+  // Main-column top (row 0) → cap.
+  assert.ok(html.includes(terminalCapSVG(24, 54, 1, "#0a0")),
+    "main-column top terminus did not render the cap");
+  // Branch head (row 1, x=37) is the top of its own line → cap, not spur.
+  assert.ok(html.includes(terminalCapSVG(37, 130, 1, "#0a0")),
+    "branch terminus did not render the straight buffer cap");
+  assert.ok(!html.includes(terminalStationSVG(37, 130, 1, "#0a0")),
+    "branch terminus must not render the sideways spur");
+  // Interior main-column root (row 2) keeps the spur.
+  assert.ok(html.includes(terminalStationSVG(24, 206, 1, "#0a0")),
+    "interior main-column ended node did not render the spur");
+});
