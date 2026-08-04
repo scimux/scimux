@@ -895,9 +895,9 @@ func TestWorkspaceNoteHeadRemoved(t *testing.T) {
 	}
 }
 
-// Items 5 & 6 (2026-07-30 iPad review): both empty states centre on both axes —
-// the active-note placeholder inside #wsnote and the note-card empty state
-// inside #wscards.
+// Phase 1h: zone-2 and zone-3 empty states share a vertical centre — both are
+// absolute full-column overlays of equal-height sibling columns (#wsnav /
+// #wsnote), not one pinned below its header.
 func TestWorkspaceEmptyStatesCentered(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 	for _, sel := range []string{"#wsnoteempty {", "#wscards .empty {"} {
@@ -905,6 +905,17 @@ func TestWorkspaceEmptyStatesCentered(t *testing.T) {
 		if !strings.Contains(block, "align-items: center") || !strings.Contains(block, "justify-content: center") {
 			t.Errorf("%s must centre on both axes (flex align+justify center); got %q", sel, block)
 		}
+		if !strings.Contains(block, "position: absolute") || !strings.Contains(block, "inset: 0") {
+			t.Errorf("%s must be an absolute full-column overlay (position:absolute; inset:0); got %q", sel, block)
+		}
+	}
+	nav := cssBlock(t, css, "#wsnav {")
+	note := cssBlock(t, css, "#wsnote {")
+	if !strings.Contains(nav, "position: relative") {
+		t.Errorf("#wsnav must be the positioned ancestor for the zone-2 empty overlay; got %q", nav)
+	}
+	if !strings.Contains(note, "position: relative") {
+		t.Errorf("#wsnote must be the positioned ancestor for #wsnoteempty; got %q", note)
 	}
 }
 

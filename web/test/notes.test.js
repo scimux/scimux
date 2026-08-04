@@ -1315,6 +1315,24 @@ test("fold storage get/set errors are swallowed", async () => {
   assert.doesNotThrow(() => roots.wssections.dispatch("click", { target: foldBtn }));
 });
 
+/* ---------- Phase 1h: empty states share vertical centre across zones 2 & 3 ---------- */
+test("zone-2 and zone-3 empty states share absolute full-column centring", () => {
+  /* #wsnav and #wsnote are the positioned ancestors of equal-height columns. */
+  assert.match(notesCssSrc, /#wsnav\s*\{[^}]*position:\s*relative/);
+  assert.match(notesCssSrc, /#wsnote\s*\{[^}]*position:\s*relative/);
+
+  const navEmpty = notesCssSrc.match(/#wscards\s+\.empty\s*\{([^}]*)\}/);
+  const noteEmpty = notesCssSrc.match(/#wsnoteempty\s*\{([^}]*)\}/);
+  assert.ok(navEmpty, "#wscards .empty rule present");
+  assert.ok(noteEmpty, "#wsnoteempty rule present");
+  for (const [name, block] of [["#wscards .empty", navEmpty[1]], ["#wsnoteempty", noteEmpty[1]]]) {
+    assert.match(block, /position:\s*absolute/, `${name} is absolute overlay`);
+    assert.match(block, /inset:\s*0/, `${name} fills the column`);
+    assert.match(block, /align-items:\s*center/);
+    assert.match(block, /justify-content:\s*center/);
+  }
+});
+
 /* ---------- Phase 1g: zone-3 header removed; top bar is sole title home ---------- */
 test("no #wsnotehead / #wsnotetitle / #wsnotemenu; #wstitle shows note title", async () => {
   assert.doesNotMatch(indexSrc, /id="wsnotehead"/);
