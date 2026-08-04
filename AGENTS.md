@@ -127,6 +127,22 @@ test commands are `bash --norc` or `cat`.
   focus, and cursor intact (`withCardEditsPreserved` for the card editors,
   build-once + `dataset.node` guards for the chat-head editors — see
   web/index.html). Any new polled UI element must respect this.
+- **Notes are mutable documents with optional, isolated git plumbing.**
+  Each note lives at `~/.scimux/notes/<id>/note.json` (per-note folder so a
+  note can later be an independent repo; delete archives the whole folder to
+  `notes/archive/<id>.<stamp>/`). The JSON file is always the source of
+  truth. Optional versioning shells out to the **`git` binary** (same pattern
+  as tmux — **never a Go module**, respects zero build dependencies) into a
+  private `notes/<id>/.git` with forced identity
+  (`-c user.name=scimux -c user.email=scimux@localhost`); it never opens the
+  user's own repos or depends on their global git config. Commit boundaries
+  are structural mutations and client-signalled body-edit completion
+  (`section.commit`); mid-edit debounced autosaves do not commit. If `git`
+  is absent or fails, note operations succeed unchanged — degrade silently.
+  This **reverses the earlier deliberate "no version control" stance** for
+  notes only; do not remove it as an accidental invariant violation, and do
+  not expand it into a history UI without an explicit phase. There is no
+  legacy flat-file migration path.
 - The README's **Non-goals** section is a hard scope fence; features listed
   there need explicit maintainer approval, not code.
 
