@@ -9,7 +9,7 @@
  *   - #wsplacebar / #wsplacetext / #wsplacecancel
  *   - #wsinboxtabs / #wsinboxlist (mirrored Bookmarks inbox; polled safe)
  *   - #wscards / #wsnewnote (sparse navigator; drag reorder)
- *   - #wsnotehead / #wsnotetitle / #wsnotemenu / #wssections / #wsnoteempty
+ *   - #wssections / #wsnoteempty (active note; title lives only in #wstitle)
  *
  * Explicit non-ownership:
  *   - #notesbtn (Bookmarks-owned; lazy openNotes → this.open)
@@ -28,7 +28,7 @@
  *   - wsSaveTimers / wsPending / wsSaveChains (per-field serialization)
  *   - wsInboxSig / wsInboxTab / expandedWsInbox / expandedRefs
  *   - wsCardDragging / wsCardDragEl / wsTouch / wsPlacing
- *   - wsTitleOrig / wsSecTitleOrig / wsMenuEl
+ *   - wsSecTitleOrig / wsMenuEl
  *
  * Server calls (via injected api):
  *   - GET    /api/notes
@@ -40,7 +40,8 @@
  *   - DELETE /api/notes/:id/sections/:sid/references/:rid
  *
  * Save timers / serialization:
- *   - Debounce 1100ms per field key (note-title, sectitle-*, secbody-*)
+ *   - Debounce 1100ms per field key (sectitle-*, secbody-*); note title is
+ *     card-rename with an immediate PATCH (no debounce key)
  *   - Per-key promise chain: issue order always; Escape reverts enqueue after
  *     in-flight; close flushes every pending debounce immediately
  *   - DOM text is authoritative while saves are pending; save response only
@@ -385,7 +386,6 @@ export function createNotesFeature(deps){
   let wsCardDragging = false, wsCardDragEl = null;
   let wsTouch = null;
   let wsPlacing = null;
-  let wsTitleOrig = null;
   const wsSecTitleOrig = {};
   let wsMenuEl = null;
   let bound = false;
@@ -587,32 +587,28 @@ export function createNotesFeature(deps){
   }
 
   function renderNote(){
-    const empty = root("wsnoteempty"), head = root("wsnotehead"), secWrap = root("wssections");
-    const titleEl = root("wsnotetitle"), h2 = root("wstitle");
+    const empty = root("wsnoteempty"), secWrap = root("wssections");
+    const h2 = root("wstitle");
     if (!wsActive){
       if (empty) empty.hidden = false;
-      if (head) head.hidden = true;
       if (secWrap) secWrap.innerHTML = "";
-      if (titleEl) titleEl.value = "";
       if (h2) h2.textContent = "Notes";
       return;
     }
     if (empty) empty.hidden = true;
-    if (head) head.hidden = false;
     if (h2) h2.textContent = wsActive.title || "Note";
-    if (titleEl) titleEl.value = wsActive.title || "";
     const folds = wsFolds();
     const secs = (wsActive.sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
     if (secWrap){
-      const addBtn =
-        `<button type="button" class="wssecaddempty" data-addsection>${icons.ICON_PLUS || ""}<span>Add section</span></button>`;
       if (!secs.length){
-        /* zero sections: keep the centred empty-state variant */
-        secWrap.innerHTML = `<div class="wssecempty">${addBtn}</div>`;
+        /* zero sections: centred empty-state variant (button markup inlined so
+           characterization tests can see data-addsection inside .wssecempty) */
+        secWrap.innerHTML =
+          `<div class="wssecempty"><button type="button" class="wssecaddempty" data-addsection>${icons.ICON_PLUS || ""}<span>Add section</span></button></div>`;
       } else {
         /* always-present trailing control — not only when empty (Phase 1f) */
         secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id], htmlDeps())).join("") +
-          `<div class="wssecaddtrail">${addBtn}</div>`;
+          `<div class="wssecaddtrail"><button type="button" class="wssecaddempty" data-addsection>${icons.ICON_PLUS || ""}<span>Add section</span></button></div>`;
       }
       applyRefClamps(secWrap);
     }
@@ -762,8 +758,6 @@ export function createNotesFeature(deps){
           if (plan.updateTopBar){
             const h2 = root("wstitle");
             if (h2) h2.textContent = plan.topBarText;
-            const titleInput = root("wsnotetitle");
-            if (titleInput) titleInput.value = plan.patch.title;
           }
           if (docu && docu.edited_at && cardRow) cardRow.edited_at = docu.edited_at;
         }
@@ -1055,34 +1049,6 @@ export function createNotesFeature(deps){
     if (nt) startPlacement(nt);
   }
 
-  function onTitleFocus(){
-    wsTitleOrig = wsActive ? (wsActive.title || "") : null;
-  }
-  function onTitleInput(e){
-    if (!wsActive) return;
-    wsActive.title = e.target.value;
-    const h2 = root("wstitle");
-    if (h2) h2.textContent = e.target.value || "Note";
-    wsPatch({ title: e.target.value }, "note-title");
-  }
-  function onTitleKeydown(e){
-    if (e.key === "Enter"){ e.preventDefault(); e.target.blur(); return; }
-    if (e.key === "Escape"){
-      e.preventDefault(); e.stopPropagation();
-      if (wsActive && wsTitleOrig != null){
-        e.target.value = wsTitleOrig;
-        wsActive.title = wsTitleOrig;
-        const h2 = root("wstitle");
-        if (h2) h2.textContent = wsTitleOrig || "Note";
-        wsPatchNow({ title: wsTitleOrig }, "note-title");
-      }
-      e.target.blur();
-    }
-  }
-  function onTitleBlur(){
-    if (wsActive) wsPatchNow({ title: wsActive.title }, "note-title");
-  }
-
   function onCardsClick(e){
     const act = e.target.closest && e.target.closest("[data-wcact]");
     if (act){
@@ -1210,39 +1176,6 @@ export function createNotesFeature(deps){
     }
   }
 
-  function onNoteMenuClick(e){
-    e.stopPropagation();
-    closeWsMenu();
-    if (!doc) return;
-    const m = doc.createElement("div");
-    m.className = "wsmenu";
-    m.innerHTML =
-      `<button data-si="rename">${icons.ICON_PENCIL || ""}<span>Rename</span></button>` +
-      `<div class="sep"></div>` +
-      `<button data-si="del" class="danger">${icons.ICON_TRASH || ""}<span>Delete note</span></button>`;
-    const panel = root("wspanel");
-    if (panel) panel.appendChild(m);
-    const tgt = e.currentTarget || root("wsnotemenu");
-    const r = tgt && tgt.getBoundingClientRect
-      ? tgt.getBoundingClientRect() : { bottom: 0, left: 0 };
-    const pr = panel && panel.getBoundingClientRect
-      ? panel.getBoundingClientRect() : { top: 0, left: 0, width: 400 };
-    m.style.top = (r.bottom - pr.top + 4) + "px";
-    m.style.left = Math.max(8, Math.min(r.left - pr.left - 150, pr.width - 190)) + "px";
-    wsMenuEl = m;
-    m.addEventListener("click", async ev => {
-      const mi = ev.target.closest("[data-si]"); if (!mi) return;
-      closeWsMenu();
-      if (mi.dataset.si === "rename"){
-        const t = root("wsnotetitle");
-        if (t){ t.focus(); if (t.select) t.select(); }
-      } else if (mi.dataset.si === "del"){
-        /* menu path kept until 1g removes #wsnotemenu; still confirm+archive */
-        if (wsActiveId) openDeleteConfirm(tgt, wsActiveId);
-      }
-    });
-  }
-
   function onDocClick(e){
     if (wsMenuEl && e.target && !e.target.closest(".wsmenu") && !e.target.closest("[data-secmenu]"))
       closeWsMenu();
@@ -1260,8 +1193,6 @@ export function createNotesFeature(deps){
   function initIcons(){
     const nn = root("wsnewnote");
     if (nn) nn.innerHTML = icons.ICON_PLUS || "";
-    const nm = root("wsnotemenu");
-    if (nm) nm.innerHTML = icons.ICON_MENU_DOTS || "";
   }
 
   function bind(){
@@ -1279,10 +1210,6 @@ export function createNotesFeature(deps){
     listen(ws, "touchend", onWorkspaceTouchEnd, { passive: true });
     listen(root("wsinboxtabs"), "click", onInboxTabsClick);
     listen(root("wsinboxlist"), "click", onInboxListClick);
-    listen(root("wsnotetitle"), "focus", onTitleFocus);
-    listen(root("wsnotetitle"), "input", onTitleInput);
-    listen(root("wsnotetitle"), "keydown", onTitleKeydown);
-    listen(root("wsnotetitle"), "blur", onTitleBlur);
     listen(root("wscards"), "click", onCardsClick);
     listen(root("wscards"), "dragstart", onCardsDragStart);
     listen(root("wscards"), "dragover", onCardsDragOver);
@@ -1292,7 +1219,6 @@ export function createNotesFeature(deps){
     listen(root("wssections"), "input", onSectionsInput);
     listen(root("wssections"), "focusin", onSectionsFocusIn);
     listen(root("wssections"), "keydown", onSectionsKeydown);
-    listen(root("wsnotemenu"), "click", onNoteMenuClick);
     listen(doc, "click", onDocClick);
   }
 

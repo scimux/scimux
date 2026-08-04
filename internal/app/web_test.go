@@ -878,15 +878,20 @@ func TestWorkspaceSectionEditorAutogrows(t *testing.T) {
 	}
 }
 
-// Item 4 (2026-07-30 iPad review): deleting the open note must clear the editor
-// header so no stale title lingers. #wsnotehead sets display:flex, which beats
-// the UA [hidden] rule, so an explicit hidden override is required for
-// head.hidden = true to actually hide.
-func TestWorkspaceNoteHeadHidesWhenEmpty(t *testing.T) {
+// Phase 1g: zone-3 header removed; top bar #wstitle is the sole title home.
+// Guard against the dead #wsnotehead / #wsnotetitle / #wsnotemenu chrome.
+func TestWorkspaceNoteHeadRemoved(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, id := range []string{"wsnotehead", "wsnotetitle", "wsnotemenu"} {
+		if strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html must not contain #%s after Phase 1g", id)
+		}
+	}
 	css := mustProductionCSSCascade(t)
-	block := cssBlock(t, css, "#wsnotehead[hidden] {")
-	if !strings.Contains(block, "display: none") {
-		t.Errorf("#wsnotehead[hidden] must force display:none so a deleted note's title clears; got %q", block)
+	for _, sel := range []string{"#wsnotehead", "#wsnotetitle", "#wsnotemenu"} {
+		if strings.Contains(css, sel) {
+			t.Errorf("CSS cascade must not style %s after Phase 1g", sel)
+		}
 	}
 }
 
@@ -988,9 +993,9 @@ func TestWorkspaceRenames(t *testing.T) {
 	corpus := html + "\n" + notesSrc
 	for _, want := range []string{
 		"<h2>Bookmarks</h2>",         // captures pane heading
-		"Use in note", "Delete note", // synthesis-doc action + menu
+		"Use in note", "Delete note", // synthesis-doc action + archive confirm
 		"Add bookmark here", "Placing bookmark:",
-		"New note", "Note title", "Pick a note, or make one with +",
+		"New note", "rename note", "Pick a note, or make one with +",
 		"No notes yet — make one with +", // notes (memo) card empty state
 	} {
 		if !strings.Contains(corpus, want) {

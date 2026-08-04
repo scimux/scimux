@@ -206,9 +206,9 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 #wsnavhead { display: flex; align-items: center; justify-content: space-between;
   flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
   text-transform: uppercase; letter-spacing: .04em; }
-#wsnewnote, #wsnotemenu { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
+#wsnewnote { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
   display: inline-flex; align-items: center; justify-content: center; }
-#wsnewnote:active, #wsnotemenu:active { background: var(--code-bg); }
+#wsnewnote:active { background: var(--code-bg); }
 #wscards { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 4px 10px 14px; flex: 1; }
 /* the note-card empty state centres on both axes (item 6): fills the scroll
    area's height so the message sits in the middle, not pinned to the top. */
@@ -248,17 +248,10 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   .wscardactions { display: flex; }
 }
 #wsnote { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
-#wsnotehead { display: flex; align-items: center; gap: 8px; flex: none;
-  padding: 12px 18px; border-bottom: 1px solid var(--hairline); }
-/* the id's display:flex beats the UA [hidden] rule, so head.hidden = true would
-   leave a deleted note's title lingering (item 4) — force it hidden explicitly. */
-#wsnotehead[hidden] { display: none; }
-#wsnotetitle { flex: 1; min-width: 0; font: inherit; font-size: 20px; font-weight: 650;
-  color: var(--ink); background: none; border: none; outline: none; padding: 3px 4px;
-  border-radius: 6px; }
-#wsnotetitle:focus { background: var(--code-bg); }
+/* top padding replaces the removed zone-3 header so the first section isn't
+   jammed under the top bar (Phase 1g: #wstitle is the sole title home). */
 #wssections { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; flex: 1;
-  padding: 8px 18px 40px; }
+  padding: 16px 18px 40px; }
 /* discoverable add control when a note has no sections left (item 7) — the
    overflow menu alone hid the escape hatch after deleting every section.
    iPhone item 3: no caption, just the button, centered in the pane. */

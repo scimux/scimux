@@ -243,10 +243,7 @@
       <!-- right zone: the active note writing surface (built once, patched by
            explicit user/load actions only — never by the poll) -->
       <div id="wsnote" role="region" aria-label="Active note">
-        <div id="wsnotehead" hidden>
-          <input id="wsnotetitle" aria-label="note title" placeholder="Note title">
-          <button id="wsnotemenu" aria-label="note actions" title="Note actions"></button>
-        </div>
+        <!-- title lives only in #wstitle (top bar); rename/delete on zone-2 cards -->
         <div id="wssections"></div>
         <div id="wsnoteempty" class="empty">Pick a note, or make one with +</div>
       </div>

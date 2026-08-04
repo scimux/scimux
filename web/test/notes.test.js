@@ -42,6 +42,7 @@ const notesSrc = readFileSync(join(__dirname, "../js/notes.js"), "utf8");
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
 const tokensSrc = readFileSync(join(__dirname, "../css/tokens.css"), "utf8");
 const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
+const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
 
 /* ---------- module shape ---------- */
 test("notes.js exports factory and pure helpers; no later-feature imports", () => {
@@ -88,8 +89,8 @@ test("--danger token is defined in light and dark; distinct from --attn", () => 
   assert.notEqual(lightAttn[1].trim(), lightDanger[1].trim());
 });
 
-test(".wsmenu button.danger uses --danger, not --attn (covers Delete note + Delete section)", () => {
-  /* Section menu data-mi=del and note menu data-si=del both use class="danger". */
+test(".wsmenu button.danger uses --danger, not --attn (covers Delete section)", () => {
+  /* Section menu data-mi=del uses class="danger"; note delete is on the card. */
   assert.match(notesSrc, /data-mi="del"[^>]*class="danger"|class="danger"[^>]*data-mi="del"/);
   assert.match(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
   assert.doesNotMatch(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
@@ -546,9 +547,6 @@ function makeRoots(){
   const wsinboxlist = el("div", { id: "wsinboxlist" });
   const wscards = el("div", { id: "wscards" });
   const wsnewnote = el("button", { id: "wsnewnote" });
-  const wsnotehead = el("div", { id: "wsnotehead", hidden: true });
-  const wsnotetitle = el("input", { id: "wsnotetitle" });
-  const wsnotemenu = el("button", { id: "wsnotemenu" });
   const wssections = el("div", { id: "wssections" });
   const wsnoteempty = el("div", { id: "wsnoteempty" });
   const notesbtn = el("button", { id: "notesbtn" });
@@ -564,9 +562,6 @@ function makeRoots(){
   wspanel.appendChild(wsinboxlist);
   wspanel.appendChild(wscards);
   wspanel.appendChild(wsnewnote);
-  wspanel.appendChild(wsnotehead);
-  wspanel.appendChild(wsnotetitle);
-  wspanel.appendChild(wsnotemenu);
   wspanel.appendChild(wssections);
   wspanel.appendChild(wsnoteempty);
 
@@ -592,7 +587,7 @@ function makeRoots(){
     roots: {
       notesworkspace, wsscrim, wspanel, wstitle, wsback, wsclose,
       wsplacetext, wsplacecancel, wsinboxtabs, wsinboxlist, wscards,
-      wsnewnote, wsnotehead, wsnotetitle, wsnotemenu, wssections, wsnoteempty,
+      wsnewnote, wssections, wsnoteempty,
     },
     document: documentRef,
     notesbtn,
@@ -809,11 +804,11 @@ async function openNote(ctx, id){
   await settle();
 }
 
-test("save debounce 1100ms, same-field serialize, close flush", async () => {
+test("save debounce 1100ms, same-field serialize, close flush (section title)", async () => {
   const ctx = createFeature({
     notes: [{ id: "n1", title: "T", order: 0 }],
     docs: {
-      n1: { id: "n1", title: "T", sections: [{ id: "s1", title: "", body: "b", order: 0, references: [] }] },
+      n1: { id: "n1", title: "T", sections: [{ id: "s1", title: "S", body: "b", order: 0, references: [] }] },
     },
   });
   const { feature, roots, apiLog, flush } = ctx;
@@ -821,54 +816,80 @@ test("save debounce 1100ms, same-field serialize, close flush", async () => {
   feature.open();
   await settle();
   await openNote(ctx, "n1");
-  assert.equal(roots.wsnotetitle.value, "T");
+  assert.equal(roots.wstitle.textContent, "T");
 
-  roots.wsnotetitle.dispatch("focus");
-  roots.wsnotetitle.value = "A";
-  roots.wsnotetitle.dispatch("input", { target: roots.wsnotetitle });
-  roots.wsnotetitle.value = "B";
-  roots.wsnotetitle.dispatch("input", { target: roots.wsnotetitle });
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const title = el("input", { dataset: { sectitle: "" }, value: "S" });
+  title.dataset.sectitle = "";
+  title.value = "S";
+  title.closest = sel => {
+    if (sel === "[data-sectitle]") return title;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  sec.appendChild(title);
+  roots.wssections.appendChild(sec);
+
+  roots.wssections.dispatch("focusin", { target: title });
+  title.value = "A";
+  roots.wssections.dispatch("input", { target: title });
+  title.value = "B";
+  roots.wssections.dispatch("input", { target: title });
 
   const patchesBefore = apiLog.filter(x => x.method === "PATCH");
   assert.equal(patchesBefore.length, 0, "debounced — no PATCH yet");
 
   flush(1100);
   await settle();
-  const afterDebounce = apiLog.filter(x => x.method === "PATCH" && x.body && x.body.includes('"title"'));
+  const afterDebounce = apiLog.filter(x => x.method === "PATCH" && x.body && x.body.includes("section"));
   assert.ok(afterDebounce.length >= 1);
   const last = JSON.parse(afterDebounce[afterDebounce.length - 1].body);
-  assert.equal(last.title, "B", "last debounced value wins");
+  assert.equal(last.section.title, "B", "last debounced value wins");
 
-  /* pending at close: type again and close before debounce */
-  roots.wsnotetitle.value = "C";
-  roots.wsnotetitle.dispatch("input", { target: roots.wsnotetitle });
+  title.value = "C";
+  roots.wssections.dispatch("input", { target: title });
   const beforeClose = apiLog.length;
   feature.close();
   await settle();
   const flushed = apiLog.slice(beforeClose).filter(x => x.method === "PATCH");
   assert.ok(flushed.length >= 1, "close flushes pending save");
-  assert.equal(JSON.parse(flushed[flushed.length - 1].body).title, "C");
+  assert.equal(JSON.parse(flushed[flushed.length - 1].body).section.title, "C");
 });
 
-test("Escape title revert enqueues after in-flight via PatchNow path", async () => {
+test("Escape section title revert enqueues after in-flight via PatchNow path", async () => {
   const pending = [];
   const ctx = createFeature({
     notes: [{ id: "n1", title: "Orig", order: 0 }],
     docs: {
-      n1: { id: "n1", title: "Orig", sections: [] },
+      n1: {
+        id: "n1", title: "Orig",
+        sections: [{ id: "s1", title: "OrigSec", body: "", order: 0, references: [] }],
+      },
     },
     api: async (url, opts) => {
       if (opts && opts.method === "PATCH"){
         return new Promise(r => {
           pending.push(() => {
             const body = JSON.parse(opts.body);
-            r({ id: "n1", title: body.title, sections: [], edited_at: "e" });
+            r({
+              id: "n1", title: "Orig",
+              sections: [{
+                id: "s1",
+                title: (body.section && body.section.title) || "OrigSec",
+                body: "", order: 0, references: [],
+              }],
+              edited_at: "e",
+            });
           });
         });
       }
       if (url === "/api/notes") return { notes: [{ id: "n1", title: "Orig", order: 0 }] };
       if (url.includes("/api/notes/n1") && (!opts || !opts.method || opts.method === "GET"))
-        return { id: "n1", title: "Orig", sections: [] };
+        return {
+          id: "n1", title: "Orig",
+          sections: [{ id: "s1", title: "OrigSec", body: "", order: 0, references: [] }],
+        };
       return null;
     },
   });
@@ -877,20 +898,32 @@ test("Escape title revert enqueues after in-flight via PatchNow path", async () 
   feature.open();
   await settle();
   await openNote(ctx, "n1");
-  assert.equal(roots.wsnotetitle.value, "Orig");
 
-  roots.wsnotetitle.dispatch("focus");
-  roots.wsnotetitle.value = "Edited";
-  roots.wsnotetitle.dispatch("input", { target: roots.wsnotetitle });
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const title = el("input", { dataset: { sectitle: "" }, value: "OrigSec" });
+  title.dataset.sectitle = "";
+  title.value = "OrigSec";
+  title.closest = sel => {
+    if (sel === "[data-sectitle]") return title;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  sec.appendChild(title);
+  roots.wssections.appendChild(sec);
+
+  roots.wssections.dispatch("focusin", { target: title });
+  title.value = "Edited";
+  roots.wssections.dispatch("input", { target: title });
   flush(1100);
   await settle();
   assert.equal(pending.length, 1, "in-flight edit");
 
-  roots.wsnotetitle.dispatch("keydown", {
-    key: "Escape", target: roots.wsnotetitle,
+  roots.wssections.dispatch("keydown", {
+    key: "Escape", target: title,
     preventDefault(){}, stopPropagation(){},
   });
-  assert.equal(roots.wsnotetitle.value, "Orig");
+  assert.equal(title.value, "OrigSec");
   pending[0]();
   await settle();
   assert.ok(pending.length >= 2, "revert enqueued after in-flight");
@@ -1214,10 +1247,22 @@ test("bind is idempotent; destroy cleans document listener and timers", async ()
   flush(0); /* drain open rAF so only save timers remain pending later */
   await settle();
   await openNote(ctx, "n1");
+  /* schedule a debounced section-title save to prove destroy clears timers */
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const title = el("input", { dataset: { sectitle: "" }, value: "S" });
+  title.dataset.sectitle = "";
+  title.closest = sel => {
+    if (sel === "[data-sectitle]") return title;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  sec.appendChild(title);
+  roots.wssections.appendChild(sec);
   const timerCountBefore = timers.length;
-  roots.wsnotetitle.dispatch("focus");
-  roots.wsnotetitle.value = "X";
-  roots.wsnotetitle.dispatch("input", { target: roots.wsnotetitle });
+  roots.wssections.dispatch("focusin", { target: title });
+  title.value = "X";
+  roots.wssections.dispatch("input", { target: title });
   const saveTimers = timers.slice(timerCountBefore).filter(t => !t.cleared);
   assert.ok(saveTimers.length >= 1, "debounce timer scheduled");
   feature.destroy();
@@ -1270,24 +1315,27 @@ test("fold storage get/set errors are swallowed", async () => {
   assert.doesNotThrow(() => roots.wssections.dispatch("click", { target: foldBtn }));
 });
 
-/* ---------- menu stopPropagation contract (note menu) ---------- */
-test("note menu stopPropagation and offers rename/add/delete", () => {
-  const ctx = createFeature();
-  const { feature, roots } = ctx;
-  feature.bind();
-  let stopped = false;
-  roots.wsnotemenu.dispatch("click", {
-    target: roots.wsnotemenu,
-    currentTarget: roots.wsnotemenu,
-    stopPropagation(){ stopped = true; },
+/* ---------- Phase 1g: zone-3 header removed; top bar is sole title home ---------- */
+test("no #wsnotehead / #wsnotetitle / #wsnotemenu; #wstitle shows note title", async () => {
+  assert.doesNotMatch(indexSrc, /id="wsnotehead"/);
+  assert.doesNotMatch(indexSrc, /id="wsnotetitle"/);
+  assert.doesNotMatch(indexSrc, /id="wsnotemenu"/);
+  assert.doesNotMatch(notesSrc, /wsnotehead|wsnotetitle|wsnotemenu|onNoteMenuClick|data-si=/);
+  assert.doesNotMatch(notesCssSrc, /#wsnotehead|#wsnotetitle|#wsnotemenu/);
+
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Alpha", order: 0 }],
+    docs: { n1: { id: "n1", title: "Alpha", sections: [] } },
   });
-  assert.equal(stopped, true);
-  const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
-  assert.ok(menu);
-  assert.match(menu.innerHTML, /data-si="rename"/);
-  assert.doesNotMatch(menu.innerHTML, /data-si="add"/, "Add section is inline only, not menu-mirrored");
-  assert.match(menu.innerHTML, /data-si="del"/);
-  assert.match(menu.innerHTML, /Delete note/);
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  assert.equal(ctx.roots.wstitle.textContent, "Notes");
+  await openNote(ctx, "n1");
+  assert.equal(ctx.roots.wstitle.textContent, "Alpha");
+  assert.equal(ctx.roots.wsnotehead, undefined);
+  assert.equal(ctx.roots.wsnotetitle, undefined);
+  assert.equal(ctx.roots.wsnotemenu, undefined);
 });
 
 /* ---------- Phase 1c: Rename / Delete on zone-2 note cards ---------- */
@@ -1452,15 +1500,15 @@ test("card delete confirm issues DELETE for that note id", async () => {
   assert.equal(roots.wstitle.textContent, "Keep");
 });
 
-/* ---------- title Enter/Escape contract in source ---------- */
+/* ---------- section title Enter/Escape contract in source ---------- */
 test("source: debounce 1100, PatchNow reverts, sectionBodyInner on blur", () => {
   assert.match(notesSrc, /SAVE_DEBOUNCE_MS = 1100/);
-  assert.match(notesSrc, /wsPatchNow\(\{ title: wsTitleOrig \}/);
   assert.match(notesSrc, /wsPatchNow\(\{ section: \{ id: secId, title: orig \}/);
   assert.match(notesSrc, /wsPatchNow\(\{ section: \{ id: secId, body: orig \}/);
   assert.match(notesSrc, /sectionBodyInner\(s/);
   assert.match(notesSrc, /scrollHeight/);
-  assert.doesNotMatch(notesSrc, /wsPatch\(\{ title: wsTitleOrig \}\)/);
+  /* note title is card-rename only (immediate PATCH), not debounced zone-3 input */
+  assert.doesNotMatch(notesSrc, /wsTitleOrig|note-title/);
 });
 
 /* ---------- lazy Bookmarks callbacks without import cycle ---------- */
