@@ -22,6 +22,7 @@
  * Persistent state (localStorage, exact keys):
  *   - "scimux-notefolds"   — { [secId]: 1 } fold map
  *   - "scimux-wsinboxtab"  — active inbox tab id or "GENERAL"
+ *   - "scimux-wslayout"    — { inboxW, navW, inboxCollapsed, navCollapsed }
  *
  * Ephemeral view state (never ui.json):
  *   - wsNotes / wsActiveId / wsActive / wsReturnFocus
@@ -111,6 +112,7 @@ import {
 export const SAVE_DEBOUNCE_MS = 1100;
 export const STORAGE_KEY_FOLDS = "scimux-notefolds";
 export const STORAGE_KEY_INBOX_TAB = "scimux-wsinboxtab";
+export const STORAGE_KEY_WS_LAYOUT = "scimux-wslayout";
 export const COPY_ACK_MS = 900;
 
 /* ---------- pure: folds ---------- */
@@ -125,6 +127,284 @@ export function foldsAfterSet(folds, secId, folded){
   const f = Object.assign({}, folds || {});
   if (folded) f[secId] = 1; else delete f[secId];
   return f;
+}
+
+/* ---------- pure: workspace layout + divider resize (Phase 2) ---------- */
+
+/** Default persisted layout: null widths → CSS clamp() fallbacks. */
+export const DEFAULT_WS_LAYOUT = {
+  inboxW: null,
+  navW: null,
+  inboxCollapsed: false,
+  navCollapsed: false,
+};
+
+function wsPosNum(v){
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function wsNum(v, fallback){
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/* parseWorkspaceLayout reads {inboxW,navW,inboxCollapsed,navCollapsed};
+ * absent/garbage → defaults (null widths = CSS clamp). */
+export function parseWorkspaceLayout(raw){
+  const def = {
+    inboxW: null, navW: null,
+    inboxCollapsed: false, navCollapsed: false,
+  };
+  try {
+    const o = JSON.parse(raw == null || raw === "" ? "null" : raw);
+    if (!o || typeof o !== "object" || Array.isArray(o)) return def;
+    return {
+      inboxW: wsPosNum(o.inboxW),
+      navW: wsPosNum(o.navW),
+      inboxCollapsed: !!o.inboxCollapsed,
+      navCollapsed: !!o.navCollapsed,
+    };
+  } catch {
+    return def;
+  }
+}
+
+/* layoutAfterPlan merges a dividerResizePlan result into the persisted shape.
+ * last.* stores the most recent non-collapsed width for restore. */
+export function layoutAfterPlan(layout, plan){
+  const prev = layout && typeof layout === "object" ? layout : DEFAULT_WS_LAYOUT;
+  if (!plan || typeof plan !== "object"){
+    return {
+      inboxW: wsPosNum(prev.inboxW),
+      navW: wsPosNum(prev.navW),
+      inboxCollapsed: !!prev.inboxCollapsed,
+      navCollapsed: !!prev.navCollapsed,
+    };
+  }
+  const last = plan.last || {};
+  const col = plan.collapsed || {};
+  return {
+    inboxW: wsPosNum(last.inbox) ?? wsPosNum(prev.inboxW),
+    navW: wsPosNum(last.nav) ?? wsPosNum(prev.navW),
+    inboxCollapsed: !!col.inbox,
+    navCollapsed: !!col.nav,
+  };
+}
+
+/**
+ * dividerResizePlan — pure reallocation + collapse-to-peek for #wszones.
+ *
+ * boundary "inbox": divider between inbox|nav; pointerX = target inbox width
+ *   (absolute from zones left). Reallocates those two; note stays put when
+ *   possible, but yields down to mins.note so a collapsed peer can restore.
+ * boundary "nav": divider between nav|note; pointerX = absolute x of the
+ *   divider (inbox + nav). Note never collapses and always keeps ≥ mins.note.
+ *
+ * Collapsed collapsible zones snap to `peek` (always tappable). Both may be
+ * collapsed at once; neither may go to width 0.
+ *
+ * @returns {{widths:{inbox,nav,note}, collapsed:{inbox,nav}, last:{inbox,nav}}}
+ */
+export function dividerResizePlan(p = {}){
+  const mins = {
+    inbox: Math.max(0, wsNum(p.mins && p.mins.inbox, 0)),
+    nav: Math.max(0, wsNum(p.mins && p.mins.nav, 0)),
+    note: Math.max(0, wsNum(p.mins && p.mins.note, 0)),
+  };
+  const peek = Math.max(0, wsNum(p.peek, 0));
+  const z = {
+    inbox: Math.max(0, wsNum(p.zones && p.zones.inbox, 0)),
+    nav: Math.max(0, wsNum(p.zones && p.zones.nav, 0)),
+    note: Math.max(0, wsNum(p.zones && p.zones.note, 0)),
+  };
+  const total = Math.max(0, wsNum(p.total, z.inbox + z.nav + z.note));
+  let colI = !!(p.collapsed && p.collapsed.inbox);
+  let colN = !!(p.collapsed && p.collapsed.nav);
+  let lastI = wsPosNum(p.last && p.last.inbox);
+  let lastN = wsPosNum(p.last && p.last.nav);
+  if (lastI == null) lastI = colI ? mins.inbox : (z.inbox || mins.inbox);
+  if (lastN == null) lastN = colN ? mins.nav : (z.nav || mins.nav);
+  if (lastI < mins.inbox) lastI = mins.inbox;
+  if (lastN < mins.nav) lastN = mins.nav;
+
+  let inboxW = colI ? peek : z.inbox;
+  let navW = colN ? peek : z.nav;
+  let noteW = Math.max(z.note, mins.note);
+
+  const boundary = p.boundary;
+  const px = wsNum(p.pointerX, NaN);
+
+  function finish(){
+    /* hard floors: collapsible zones never vanish; note never below min */
+    if (colI) inboxW = peek; else if (inboxW < mins.inbox) inboxW = mins.inbox;
+    if (colN) navW = peek; else if (navW < mins.nav) navW = mins.nav;
+    if (noteW < mins.note) noteW = mins.note;
+    /* re-normalize sum → total, preferring to adjust note then the non-primary */
+    let sum = inboxW + navW + noteW;
+    if (sum !== total){
+      noteW += total - sum;
+      if (noteW < mins.note){
+        const d = mins.note - noteW;
+        noteW = mins.note;
+        if (boundary === "nav" && !colN) navW = Math.max(colN ? peek : mins.nav, navW - d);
+        else if (!colI) inboxW = Math.max(colI ? peek : mins.inbox, inboxW - d);
+        else if (!colN) navW = Math.max(mins.nav, navW - d);
+        /* final sum fix */
+        const s2 = inboxW + navW + noteW;
+        if (s2 !== total) noteW += total - s2;
+      }
+    }
+    if (!colI) lastI = Math.max(inboxW, mins.inbox);
+    if (!colN) lastN = Math.max(navW, mins.nav);
+    return {
+      widths: { inbox: inboxW, nav: navW, note: noteW },
+      collapsed: { inbox: colI, nav: colN },
+      last: { inbox: lastI, nav: lastN },
+    };
+  }
+
+  if (boundary !== "inbox" && boundary !== "nav"){
+    return {
+      widths: { inbox: z.inbox, nav: z.nav, note: z.note },
+      collapsed: { inbox: colI, nav: colN },
+      last: { inbox: lastI, nav: lastN },
+    };
+  }
+
+  if (boundary === "inbox"){
+    /* pointerX = target inbox width (zones-left origin) */
+    let want = Number.isFinite(px) ? px : inboxW;
+    if (colI){
+      if (want < mins.inbox){
+        inboxW = peek;
+      } else {
+        colI = false;
+        inboxW = Math.max(want, mins.inbox);
+      }
+    } else if (want < mins.inbox){
+      lastI = Math.max(z.inbox, mins.inbox);
+      colI = true;
+      inboxW = peek;
+    } else {
+      inboxW = want;
+    }
+
+    /* Partner nav + note share the remainder. Prefer keeping note stable;
+       if nav is collapsed it stays at peek and note absorbs. */
+    const rest = total - inboxW;
+    const navFloor = colN ? peek : mins.nav;
+    if (colN){
+      navW = peek;
+      noteW = rest - navW;
+      if (noteW < mins.note){
+        noteW = mins.note;
+        /* cannot grow nav above peek while "collapsed" if note is floored —
+           uncollapse only when there's room for mins.nav */
+        const room = rest - mins.note;
+        if (room >= mins.nav){
+          colN = false;
+          navW = room;
+          noteW = mins.note;
+        } else {
+          navW = Math.max(peek, room);
+          noteW = rest - navW;
+          if (noteW < mins.note){ noteW = mins.note; navW = rest - noteW; }
+          if (navW >= mins.nav) colN = false;
+          else { colN = true; navW = peek; noteW = rest - navW; }
+        }
+      }
+    } else {
+      /* keep note as close to current as possible */
+      const maxNote = rest - mins.nav;
+      const preferNote = Math.min(Math.max(z.note, mins.note), Math.max(mins.note, maxNote));
+      noteW = preferNote;
+      navW = rest - noteW;
+      if (navW < mins.nav){
+        lastN = Math.max(z.nav, mins.nav);
+        colN = true;
+        navW = peek;
+        noteW = rest - navW;
+        if (noteW < mins.note){
+          noteW = mins.note;
+          navW = rest - noteW;
+          if (navW >= mins.nav) colN = false;
+          else { navW = peek; noteW = rest - navW; }
+        }
+      }
+    }
+    /* Cap expanded inbox so note ≥ min and nav ≥ floor */
+    if (!colI){
+      const navFl = colN ? peek : mins.nav;
+      const maxInbox = total - mins.note - navFl;
+      if (inboxW > maxInbox){
+        inboxW = Math.max(mins.inbox, maxInbox);
+        const r2 = total - inboxW;
+        navW = colN ? peek : Math.max(mins.nav, r2 - mins.note);
+        if (!colN && navW < mins.nav){
+          colN = true; navW = peek;
+        }
+        noteW = total - inboxW - navW;
+      }
+    }
+    return finish();
+  }
+
+  /* boundary === "nav": pointerX = absolute divider x (= inbox + nav) */
+  inboxW = colI ? peek : z.inbox;
+  let wantNav = Number.isFinite(px) ? (px - inboxW) : navW;
+  if (colN){
+    if (wantNav < mins.nav){
+      navW = peek;
+    } else {
+      colN = false;
+      navW = Math.max(wantNav, mins.nav);
+    }
+  } else if (wantNav < mins.nav){
+    lastN = Math.max(z.nav, mins.nav);
+    colN = true;
+    navW = peek;
+  } else {
+    navW = wantNav;
+  }
+
+  /* note takes the rest; never below min; never collapsed */
+  noteW = total - inboxW - navW;
+  if (noteW < mins.note){
+    noteW = mins.note;
+    navW = total - inboxW - noteW;
+    if (colN){
+      /* expanding against note floor while collapsed: stay collapsed at peek
+         only if nav would be below min; else the clamp un-collapsed us */
+      if (navW >= mins.nav){
+        colN = false;
+      } else {
+        navW = peek;
+        noteW = total - inboxW - navW;
+        /* if still tight, prefer note min and a peek nav */
+        if (noteW < mins.note){
+          noteW = mins.note;
+          navW = total - inboxW - noteW;
+          if (navW >= mins.nav) colN = false;
+        }
+      }
+    } else {
+      /* expanded nav hit note floor — stay expanded at the max that fits */
+      if (navW < mins.nav){
+        navW = Math.max(0, total - inboxW - mins.note);
+        noteW = total - inboxW - navW;
+        /* still expanded (not collapsed): collapse is only for drag-below-min
+           on the nav side, not for note-floor pressure from the other side */
+        if (navW < mins.nav){
+          /* total too small for mins; keep note at min, nav gets remainder */
+          noteW = mins.note;
+          navW = total - inboxW - noteW;
+        }
+        colN = false;
+      }
+    }
+  }
+  return finish();
 }
 
 /* ---------- pure: provenance / section move / card reorder ---------- */

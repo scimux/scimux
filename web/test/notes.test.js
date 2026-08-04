@@ -11,9 +11,13 @@ import {
   SAVE_DEBOUNCE_MS,
   STORAGE_KEY_FOLDS,
   STORAGE_KEY_INBOX_TAB,
+  STORAGE_KEY_WS_LAYOUT,
   COPY_ACK_MS,
   parseNoteFolds,
   foldsAfterSet,
+  parseWorkspaceLayout,
+  layoutAfterPlan,
+  dividerResizePlan,
   provLabel,
   sectionSwapPlan,
   noteCardReorderPlan,
@@ -65,6 +69,7 @@ test("notes.js exports factory and pure helpers; no later-feature imports", () =
 test("storage keys, debounce, copy ack constants", () => {
   assert.equal(STORAGE_KEY_FOLDS, "scimux-notefolds");
   assert.equal(STORAGE_KEY_INBOX_TAB, "scimux-wsinboxtab");
+  assert.equal(STORAGE_KEY_WS_LAYOUT, "scimux-wslayout");
   assert.equal(SAVE_DEBOUNCE_MS, 1100);
   assert.equal(COPY_ACK_MS, 900);
 });
@@ -116,6 +121,236 @@ test("foldsAfterSet set and clear", () => {
   assert.deepEqual(foldsAfterSet({}, "a", true), { a: 1 });
   assert.deepEqual(foldsAfterSet({ a: 1, b: 1 }, "a", false), { b: 1 });
   assert.deepEqual(foldsAfterSet({ a: 1 }, "a", true), { a: 1 });
+});
+
+/* ---------- Phase 2a: workspace layout + dividerResizePlan ---------- */
+
+const WS_MINS = { inbox: 180, nav: 160, note: 280 };
+const WS_PEEK = 48;
+const WS_TOTAL = 900;
+const WS_ZONES = { inbox: 240, nav: 220, note: 440 }; /* 240+220+440 = 900 */
+
+function resizeArgs(over = {}){
+  return {
+    boundary: "inbox",
+    pointerX: 240,
+    zones: { ...WS_ZONES },
+    mins: { ...WS_MINS },
+    peek: WS_PEEK,
+    total: WS_TOTAL,
+    collapsed: { inbox: false, nav: false },
+    last: { inbox: 240, nav: 220 },
+    ...over,
+    zones: { ...WS_ZONES, ...(over.zones || {}) },
+    mins: { ...WS_MINS, ...(over.mins || {}) },
+    collapsed: { inbox: false, nav: false, ...(over.collapsed || {}) },
+    last: { inbox: 240, nav: 220, ...(over.last || {}) },
+  };
+}
+
+function assertTotal(plan, total = WS_TOTAL){
+  const w = plan.widths;
+  assert.equal(w.inbox + w.nav + w.note, total);
+}
+
+test("parseWorkspaceLayout: empty, valid, corrupt → defaults", () => {
+  const def = { inboxW: null, navW: null, inboxCollapsed: false, navCollapsed: false };
+  assert.deepEqual(parseWorkspaceLayout(null), def);
+  assert.deepEqual(parseWorkspaceLayout(""), def);
+  assert.deepEqual(parseWorkspaceLayout("not-json"), def);
+  assert.deepEqual(parseWorkspaceLayout("null"), def);
+  assert.deepEqual(parseWorkspaceLayout("[]"), def);
+  assert.deepEqual(parseWorkspaceLayout("0"), def);
+  assert.deepEqual(parseWorkspaceLayout("{}"), def);
+  assert.deepEqual(parseWorkspaceLayout('{"inboxW":240,"navW":200,"inboxCollapsed":true,"navCollapsed":false}'), {
+    inboxW: 240, navW: 200, inboxCollapsed: true, navCollapsed: false,
+  });
+  /* garbage field types fall back per-field */
+  assert.deepEqual(parseWorkspaceLayout('{"inboxW":"wide","navW":-3,"inboxCollapsed":1,"navCollapsed":"yes"}'), {
+    inboxW: null, navW: null, inboxCollapsed: true, navCollapsed: true,
+  });
+});
+
+test("layoutAfterPlan merges plan into persisted layout shape", () => {
+  const prev = { inboxW: 240, navW: 220, inboxCollapsed: false, navCollapsed: false };
+  const plan = {
+    widths: { inbox: 48, nav: 412, note: 440 },
+    collapsed: { inbox: true, nav: false },
+    last: { inbox: 240, nav: 220 },
+  };
+  assert.deepEqual(layoutAfterPlan(prev, plan), {
+    inboxW: 240, navW: 220, inboxCollapsed: true, navCollapsed: false,
+  });
+  /* expand nav after resize: last tracks expanded widths */
+  const plan2 = {
+    widths: { inbox: 240, nav: 300, note: 360 },
+    collapsed: { inbox: false, nav: false },
+    last: { inbox: 240, nav: 300 },
+  };
+  assert.deepEqual(layoutAfterPlan(prev, plan2), {
+    inboxW: 240, navW: 300, inboxCollapsed: false, navCollapsed: false,
+  });
+  /* null plan / absent prev tolerate */
+  assert.deepEqual(layoutAfterPlan(null, null), {
+    inboxW: null, navW: null, inboxCollapsed: false, navCollapsed: false,
+  });
+});
+
+test("dividerResizePlan: reallocate within range preserves total (inbox|nav)", () => {
+  const plan = dividerResizePlan(resizeArgs({ boundary: "inbox", pointerX: 300 }));
+  assert.equal(plan.widths.inbox, 300);
+  assert.equal(plan.widths.nav, 160); /* 220 - 60 */
+  assert.equal(plan.widths.note, 440);
+  assert.deepEqual(plan.collapsed, { inbox: false, nav: false });
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: reallocate within range preserves total (nav|note)", () => {
+  /* divider at inbox+nav = 460; pointerX is absolute from zones left */
+  const plan = dividerResizePlan(resizeArgs({ boundary: "nav", pointerX: 500 }));
+  /* desired nav = 500 - 240 = 260; note = 900 - 240 - 260 = 400 */
+  assert.equal(plan.widths.inbox, 240);
+  assert.equal(plan.widths.nav, 260);
+  assert.equal(plan.widths.note, 400);
+  assert.deepEqual(plan.collapsed, { inbox: false, nav: false });
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: drag zone below min snaps to collapsed (peek)", () => {
+  const plan = dividerResizePlan(resizeArgs({ boundary: "inbox", pointerX: 100 }));
+  assert.equal(plan.widths.inbox, WS_PEEK);
+  assert.equal(plan.widths.nav, WS_TOTAL - WS_PEEK - 440);
+  assert.equal(plan.widths.note, 440);
+  assert.equal(plan.collapsed.inbox, true);
+  assert.equal(plan.collapsed.nav, false);
+  assert.equal(plan.last.inbox, 240); /* remembered pre-collapse width */
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: drag nav below min snaps to collapsed (peek)", () => {
+  const plan = dividerResizePlan(resizeArgs({ boundary: "nav", pointerX: 240 + 50 }));
+  assert.equal(plan.widths.inbox, 240);
+  assert.equal(plan.widths.nav, WS_PEEK);
+  assert.equal(plan.widths.note, WS_TOTAL - 240 - WS_PEEK);
+  assert.equal(plan.collapsed.nav, true);
+  assert.equal(plan.collapsed.inbox, false);
+  assert.equal(plan.last.nav, 220);
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: inverse drag restores collapsed zone to last width", () => {
+  const collapsedZones = { inbox: WS_PEEK, nav: WS_TOTAL - WS_PEEK - 440, note: 440 };
+  /* pointer at last width → restore */
+  const plan = dividerResizePlan(resizeArgs({
+    boundary: "inbox",
+    pointerX: 240,
+    zones: collapsedZones,
+    collapsed: { inbox: true, nav: false },
+    last: { inbox: 240, nav: 220 },
+  }));
+  assert.equal(plan.collapsed.inbox, false);
+  assert.equal(plan.widths.inbox, 240);
+  assert.equal(plan.widths.nav, 220);
+  assert.equal(plan.widths.note, 440);
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: restore nav from collapsed via inverse drag", () => {
+  const collapsedZones = { inbox: 240, nav: WS_PEEK, note: WS_TOTAL - 240 - WS_PEEK };
+  const plan = dividerResizePlan(resizeArgs({
+    boundary: "nav",
+    pointerX: 240 + 220,
+    zones: collapsedZones,
+    collapsed: { inbox: false, nav: true },
+    last: { inbox: 240, nav: 220 },
+  }));
+  assert.equal(plan.collapsed.nav, false);
+  assert.equal(plan.widths.nav, 220);
+  assert.equal(plan.widths.inbox, 240);
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: zone-3 (note) never collapses and keeps ≥ min", () => {
+  /* try to grow nav so note would fall below min */
+  const plan = dividerResizePlan(resizeArgs({
+    boundary: "nav",
+    pointerX: 240 + 700, /* absurd: want nav=700 */
+  }));
+  assert.ok(plan.widths.note >= WS_MINS.note);
+  assert.equal(plan.widths.note, WS_MINS.note);
+  assert.equal(plan.widths.nav, WS_TOTAL - 240 - WS_MINS.note);
+  assert.equal(plan.collapsed.nav, false); /* note never collapses; nav stays expanded at max */
+  assert.equal("note" in plan.collapsed, false); /* only inbox/nav in collapsed map */
+  assertTotal(plan);
+
+  /* shrinking note via tiny pointer still floors note at min when expanded nav hits its floor…
+     if nav would go below min it collapses, note takes the free width (≥ min). */
+  const plan2 = dividerResizePlan(resizeArgs({
+    boundary: "nav",
+    pointerX: 240 + 10,
+  }));
+  assert.ok(plan2.widths.note >= WS_MINS.note);
+  assert.equal(plan2.collapsed.nav, true);
+  assert.equal(plan2.widths.nav, WS_PEEK);
+  assertTotal(plan2);
+});
+
+test("dividerResizePlan: never leave both collapsible zones without a tappable peek", () => {
+  /* collapse inbox first */
+  const p1 = dividerResizePlan(resizeArgs({ boundary: "inbox", pointerX: 20 }));
+  assert.equal(p1.collapsed.inbox, true);
+  assert.equal(p1.widths.inbox, WS_PEEK);
+  /* then collapse nav — both stay at peek (tappable), never width 0 */
+  const p2 = dividerResizePlan(resizeArgs({
+    boundary: "nav",
+    pointerX: WS_PEEK + 10,
+    zones: p1.widths,
+    collapsed: p1.collapsed,
+    last: p1.last,
+  }));
+  assert.equal(p2.collapsed.inbox, true);
+  assert.equal(p2.collapsed.nav, true);
+  assert.equal(p2.widths.inbox, WS_PEEK);
+  assert.equal(p2.widths.nav, WS_PEEK);
+  assert.ok(p2.widths.inbox > 0 && p2.widths.nav > 0);
+  assert.ok(p2.widths.note >= WS_MINS.note);
+  assertTotal(p2);
+
+  /* trying to drive a zone to zero still yields peek */
+  const p3 = dividerResizePlan(resizeArgs({
+    boundary: "inbox",
+    pointerX: 0,
+    zones: p2.widths,
+    collapsed: p2.collapsed,
+    last: p2.last,
+  }));
+  assert.equal(p3.widths.inbox, WS_PEEK);
+  assert.equal(p3.widths.nav, WS_PEEK);
+  assertTotal(p3);
+});
+
+test("dividerResizePlan: expanding one collapsed zone leaves the other collapsed", () => {
+  const both = {
+    zones: { inbox: WS_PEEK, nav: WS_PEEK, note: WS_TOTAL - 2 * WS_PEEK },
+    collapsed: { inbox: true, nav: true },
+    last: { inbox: 240, nav: 220 },
+  };
+  const plan = dividerResizePlan(resizeArgs({
+    ...both,
+    boundary: "inbox",
+    pointerX: 240,
+  }));
+  assert.equal(plan.collapsed.inbox, false);
+  assert.equal(plan.collapsed.nav, true);
+  assert.equal(plan.widths.inbox, 240);
+  assert.equal(plan.widths.nav, WS_PEEK);
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: unknown boundary is a no-op", () => {
+  const plan = dividerResizePlan(resizeArgs({ boundary: "note", pointerX: 100 }));
+  assert.deepEqual(plan.widths, WS_ZONES);
+  assert.deepEqual(plan.collapsed, { inbox: false, nav: false });
 });
 
 /* ---------- provenance ---------- */
