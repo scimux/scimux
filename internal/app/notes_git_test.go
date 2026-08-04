@@ -142,6 +142,34 @@ func TestNoteGitCommitBoundaries(t *testing.T) {
 	}
 }
 
+// A user global gitconfig with commit.gpgsign=true must not break scimux
+// versioning: gitIsolatedEnv points GLOBAL/SYSTEM config at os.DevNull so
+// only the forced -c identity applies. Without that isolation, every commit
+// would fail (no signing key) and versioning would silently never land.
+func TestNoteGitIgnoresUserGlobalConfig(t *testing.T) {
+	requireGit(t)
+
+	// Process HOME is what gitIsolatedEnv still forwards; point it at a
+	// throwaway tree whose .gitconfig would otherwise force GPG signing.
+	userHome := t.TempDir()
+	cfg := filepath.Join(userHome, ".gitconfig")
+	if err := os.WriteFile(cfg, []byte("[commit]\n\tgpgsign = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", userHome)
+
+	a := newTestApp(t, &fakeTmux{})
+	sh := createNote(t, a)
+	dir := noteGitDir(a, sh.ID)
+
+	if rec := patchNote(a, sh.ID, `{"title":"Signed-or-not"}`); rec.Code != 200 {
+		t.Fatalf("structural title patch: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := gitCommitCount(t, dir); n != 1 {
+		t.Fatalf("commit must land despite user commit.gpgsign=true: want 1, got %d", n)
+	}
+}
+
 // Without git on PATH, note mutations still succeed and leave no repo.
 func TestNoteGitAbsentDegrades(t *testing.T) {
 	if testing.Short() {

@@ -24,8 +24,9 @@ func SetFindGitForTest(fn func() (string, error)) (restore func()) {
 // (note.json) is always the source of truth: a git failure is logged and never
 // returned as an error. If git is absent, this is a silent no-op. The repo
 // lives inside notes/<id>/.git only — never the user's own repositories and
-// never notes/ as a whole. Identity is forced via -c so the user's global
-// git config is never read or required.
+// never notes/ as a whole. Identity is forced via -c, and global/system
+// gitconfig are redirected to os.DevNull, so the user's commit.gpgsign,
+// hooksPath, includeIf, etc. never apply.
 func (s *Store) TryCommit(id, message string) {
 	if id == "" {
 		return
@@ -64,7 +65,7 @@ func (s *Store) TryCommit(id, message string) {
 }
 
 // runGit executes git -C <dir> with a fixed scimux identity so commits never
-// depend on (or write through) the user's global git config.
+// depend on (or write through) the user's global or system git config.
 func runGit(bin, dir string, args ...string) ([]byte, error) {
 	full := append([]string{
 		"-c", "user.name=scimux",
@@ -72,13 +73,16 @@ func runGit(bin, dir string, args ...string) ([]byte, error) {
 		"-C", dir,
 	}, args...)
 	cmd := exec.Command(bin, full...)
-	// Clear GIT_* that could redirect into the user's repos or templates.
+	// Isolate repo location and config: no user GIT_* redirects, no global
+	// or system gitconfig (gpgsign, hooks, includes).
 	cmd.Env = gitIsolatedEnv()
 	return cmd.CombinedOutput()
 }
 
-// gitIsolatedEnv is the process environment minus variables that would let a
-// scimux-owned commit touch or inherit the user's git setup.
+// gitIsolatedEnv is the process environment with git repo-location and config
+// isolated from the user's setup. Drops GIT_* (so -C dir is the only repo)
+// and forces GLOBAL/SYSTEM config to os.DevNull so ~/.gitconfig and
+// /etc/gitconfig never apply. Identity comes solely from -c user.* flags.
 func gitIsolatedEnv() []string {
 	var out []string
 	for _, e := range os.Environ() {
@@ -89,6 +93,12 @@ func gitIsolatedEnv() []string {
 		}
 		out = append(out, e)
 	}
+	// Hermetic config: ignore user global and system gitconfig
+	// (commit.gpgsign, core.hooksPath, includeIf, …).
+	out = append(out,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+	)
 	return out
 }
 
