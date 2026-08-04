@@ -307,6 +307,8 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .wsmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .wsmenu button.danger { color: var(--danger); }
 .wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
+.wsmenu .wsconfirmmsg { padding: 8px 12px 10px; font-size: 13px; line-height: 1.4;
+  color: var(--ink); max-width: 220px; }
 #notesworkspace .backbtn { display: flex; }
 /* --- inbox zone (left): the reused capture layer --- */
 #wsinbox { display: flex; flex-direction: column; min-height: 0;

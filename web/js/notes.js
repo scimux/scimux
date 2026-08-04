@@ -691,6 +691,34 @@ export function createNotesFeature(deps){
     await wsLoadCards();
   }
 
+  /** In-workspace confirm before archive-delete (no window.confirm — blocked in iOS PWA). */
+  function openDeleteConfirm(anchor, noteId){
+    if (!doc || !noteId) return;
+    closeWsMenu();
+    const m = doc.createElement("div");
+    m.className = "wsmenu wsconfirm";
+    m.innerHTML =
+      `<div class="wsconfirmmsg">Delete note? It moves to the archive.</div>` +
+      `<button type="button" data-wconfirm="cancel">Cancel</button>` +
+      `<button type="button" data-wconfirm="ok" class="danger">Delete</button>`;
+    const panel = root("wspanel");
+    if (panel) panel.appendChild(m);
+    const tgt = anchor || null;
+    const r = tgt && tgt.getBoundingClientRect
+      ? tgt.getBoundingClientRect() : { bottom: 0, left: 0 };
+    const pr = panel && panel.getBoundingClientRect
+      ? panel.getBoundingClientRect() : { top: 0, left: 0, width: 400 };
+    m.style.top = (r.bottom - pr.top + 4) + "px";
+    m.style.left = Math.max(8, Math.min(r.left - pr.left - 40, pr.width - 190)) + "px";
+    wsMenuEl = m;
+    m.addEventListener("click", async ev => {
+      const btn = ev.target.closest && ev.target.closest("[data-wconfirm]");
+      if (!btn) return;
+      closeWsMenu();
+      if (btn.dataset.wconfirm === "ok") await wsDeleteNote(noteId);
+    });
+  }
+
   function startCardRename(card){
     if (!card || !doc || card.classList.contains("renaming")) return;
     const noteId = card.dataset.note;
@@ -1055,7 +1083,7 @@ export function createNotesFeature(deps){
       const card = act.closest(".wscard");
       if (!card) return;
       if (act.dataset.wcact === "rename") startCardRename(card);
-      else if (act.dataset.wcact === "delete") wsDeleteNote(card.dataset.note);
+      else if (act.dataset.wcact === "delete") openDeleteConfirm(act, card.dataset.note);
       return;
     }
     if (e.target.closest && e.target.closest(".wctitleedit")) return;
@@ -1202,7 +1230,10 @@ export function createNotesFeature(deps){
         const t = root("wsnotetitle");
         if (t){ t.focus(); if (t.select) t.select(); }
       } else if (mi.dataset.si === "add"){ await wsAddSection(); }
-      else if (mi.dataset.si === "del"){ await wsDeleteNote(); }
+      else if (mi.dataset.si === "del"){
+        /* menu path kept until 1g removes #wsnotemenu; still confirm+archive */
+        if (wsActiveId) openDeleteConfirm(tgt, wsActiveId);
+      }
     });
   }
 

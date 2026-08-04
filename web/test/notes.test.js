@@ -941,17 +941,28 @@ test("delete note success clears editor", async () => {
   await Promise.resolve();
   assert.ok(roots.notesworkspace.classList.contains("note-open"));
 
-  roots.wsnotemenu.dispatch("click", {
-    target: roots.wsnotemenu, currentTarget: roots.wsnotemenu, stopPropagation(){},
+  /* card Delete → archive-aware confirm → ok */
+  const delBtn = el("button", { className: "danger", dataset: { wcact: "delete" } });
+  delBtn.dataset.wcact = "delete";
+  delBtn.closest = sel => {
+    if (sel === "[data-wcact]" || sel.includes("data-wcact")) return delBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  delBtn.getBoundingClientRect = () => ({ top: 10, left: 10, bottom: 50, height: 40, width: 44 });
+  roots.wspanel.getBoundingClientRect = () => ({ top: 0, left: 0, width: 400, height: 600 });
+  roots.wscards.dispatch("click", {
+    target: delBtn, stopPropagation(){}, preventDefault(){},
   });
-  assert.ok(roots.wspanel.children.some(c => (c.className || "").includes("wsmenu")));
-  const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
-  const del = el("button", { dataset: { si: "del" } });
-  del.dataset.si = "del";
-  del.closest = sel => (sel === "[data-si]" ? del : menu.closest ? menu.closest(sel) : null);
-  menu.dispatch("click", { target: del });
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
+  assert.equal(apiLog.some(x => x.method === "DELETE"), false, "await confirm");
+  const confirm = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
+  assert.ok(confirm);
+  const ok = el("button", { dataset: { wconfirm: "ok" } });
+  ok.dataset.wconfirm = "ok";
+  ok.closest = sel => (sel === "[data-wconfirm]" || sel.includes("data-wconfirm") ? ok : null);
+  confirm.dispatch("click", { target: ok });
+  await settle();
   assert.ok(apiLog.some(x => x.method === "DELETE"));
   assert.equal(roots.notesworkspace.classList.contains("note-open"), false);
 });
@@ -1333,7 +1344,7 @@ test("card rename: not draggable while editing; commit PATCHes title and updates
   assert.equal(roots.wstitle.textContent, "Renamed");
 });
 
-test("card delete action calls DELETE for that note id", async () => {
+test("card delete opens archive-aware confirm; cancel skips DELETE", async () => {
   const ctx = createFeature({
     notes: [
       { id: "n1", title: "Keep", order: 0 },
@@ -1359,8 +1370,10 @@ test("card delete action calls DELETE for that note id", async () => {
     if (sel === ".wscard") return card;
     return null;
   };
+  delBtn.getBoundingClientRect = () => ({ top: 10, left: 10, bottom: 50, height: 40, width: 44 });
   card.closest = sel => (sel === ".wscard" ? card : null);
   roots.wscards.appendChild(card);
+  roots.wspanel.getBoundingClientRect = () => ({ top: 0, left: 0, width: 400, height: 600 });
 
   roots.wscards.dispatch("click", {
     target: delBtn,
@@ -1369,9 +1382,73 @@ test("card delete action calls DELETE for that note id", async () => {
   });
   await settle();
 
+  assert.equal(
+    apiLog.some(x => x.method === "DELETE"),
+    false,
+    "delete must not fire before confirm",
+  );
+  const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
+  assert.ok(menu, "confirm popover opens");
+  assert.match(menu.innerHTML, /archive/i);
+  assert.match(menu.innerHTML, /data-wconfirm="cancel"/);
+  assert.match(menu.innerHTML, /data-wconfirm="ok"/);
+
+  const cancel = el("button", { dataset: { wconfirm: "cancel" } });
+  cancel.dataset.wconfirm = "cancel";
+  cancel.closest = sel => (sel === "[data-wconfirm]" || sel.includes("data-wconfirm") ? cancel : null);
+  menu.dispatch("click", { target: cancel });
+  await settle();
+  assert.equal(apiLog.some(x => x.method === "DELETE"), false, "cancel skips DELETE");
+});
+
+test("card delete confirm issues DELETE for that note id", async () => {
+  const ctx = createFeature({
+    notes: [
+      { id: "n1", title: "Keep", order: 0 },
+      { id: "n2", title: "Gone", order: 1 },
+    ],
+    docs: {
+      n1: { id: "n1", title: "Keep", sections: [] },
+      n2: { id: "n2", title: "Gone", sections: [] },
+    },
+  });
+  const { feature, roots, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const card = el("div", { className: "wscard", dataset: { note: "n2" } });
+  card.dataset.note = "n2";
+  const delBtn = el("button", { className: "danger", dataset: { wcact: "delete" } });
+  delBtn.dataset.wcact = "delete";
+  delBtn.closest = sel => {
+    if (sel === "[data-wcact]" || sel.includes("data-wcact")) return delBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  delBtn.getBoundingClientRect = () => ({ top: 10, left: 10, bottom: 50, height: 40, width: 44 });
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+  roots.wspanel.getBoundingClientRect = () => ({ top: 0, left: 0, width: 400, height: 600 });
+
+  roots.wscards.dispatch("click", {
+    target: delBtn,
+    stopPropagation(){},
+    preventDefault(){},
+  });
+  await settle();
+
+  const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
+  assert.ok(menu);
+  const ok = el("button", { dataset: { wconfirm: "ok" } });
+  ok.dataset.wconfirm = "ok";
+  ok.closest = sel => (sel === "[data-wconfirm]" || sel.includes("data-wconfirm") ? ok : null);
+  menu.dispatch("click", { target: ok });
+  await settle();
+
   const del = apiLog.find(x => x.method === "DELETE" && x.url.includes("/api/notes/n2"));
-  assert.ok(del, "card delete issues DELETE for the card's note");
-  /* active note n1 remains open */
+  assert.ok(del, "confirm issues DELETE for the card's note");
   assert.equal(roots.wstitle.textContent, "Keep");
 });
 
