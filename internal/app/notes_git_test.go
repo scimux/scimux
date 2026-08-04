@@ -170,6 +170,49 @@ func TestNoteGitIgnoresUserGlobalConfig(t *testing.T) {
 	}
 }
 
+// Section-title edits: mid-edit autosave (no commit marker) must not version;
+// a completing PATCH with "commit":true produces exactly one new commit.
+// Mirrors the body-edit boundary already covered in TestNoteGitCommitBoundaries.
+func TestNoteGitSectionTitleCommitBoundary(t *testing.T) {
+	requireGit(t)
+	a := newTestApp(t, &fakeTmux{})
+	sh := createNote(t, a)
+	dir := noteGitDir(a, sh.ID)
+	sid := sh.Sections[0].ID
+
+	// Baseline structural commit so rev-list has a HEAD to count from.
+	if rec := patchNote(a, sh.ID, `{"title":"Baseline"}`); rec.Code != 200 {
+		t.Fatalf("baseline title: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := gitCommitCount(t, dir); n != 1 {
+		t.Fatalf("baseline: want 1 commit, got %d", n)
+	}
+
+	// Mid-edit section-title autosave (no commit marker) → no new commit.
+	if rec := patchNote(a, sh.ID, `{"section":{"id":"`+sid+`","title":"Draft title"}}`); rec.Code != 200 {
+		t.Fatalf("title autosave: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := gitCommitCount(t, dir); n != 1 {
+		t.Fatalf("mid-edit section-title autosave must not commit: got %d", n)
+	}
+	got := createGet(t, a, sh.ID)
+	if got.Sections[0].Title != "Draft title" {
+		t.Fatalf("autosave title not persisted: %q", got.Sections[0].Title)
+	}
+
+	// Completing section-title PATCH with commit:true → exactly one new commit.
+	if rec := patchNote(a, sh.ID, `{"section":{"id":"`+sid+`","title":"Final title","commit":true}}`); rec.Code != 200 {
+		t.Fatalf("title commit: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := gitCommitCount(t, dir); n != 2 {
+		t.Fatalf("after section-title commit:true: want 2 commits, got %d", n)
+	}
+	got = createGet(t, a, sh.ID)
+	if got.Sections[0].Title != "Final title" {
+		t.Fatalf("committed title not persisted: %q", got.Sections[0].Title)
+	}
+}
+
 // Without git on PATH, note mutations still succeed and leave no repo.
 func TestNoteGitAbsentDegrades(t *testing.T) {
 	if testing.Short() {

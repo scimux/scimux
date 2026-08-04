@@ -1996,6 +1996,63 @@ test("body edit: mid-edit autosave omits commit; blur completing PATCH sets comm
   assert.equal(last.section.commit, true, "completing body PATCH must set commit:true");
 });
 
+/* ---------- Phase 3 follow-up: section-title completion signals commit ---------- */
+test("section title: mid-edit autosave omits commit; blur completing PATCH sets commit:true", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{ id: "s1", title: "Original", body: "b", order: 0, references: [] }],
+      },
+    },
+  });
+  const { feature, roots, apiLog, flush } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const title = el("input", { dataset: { sectitle: "" }, value: "Original" });
+  title.dataset.sectitle = "";
+  title.value = "Original";
+  title.closest = sel => {
+    if (sel === "[data-sectitle]") return title;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  sec.appendChild(title);
+  roots.wssections.appendChild(sec);
+
+  roots.wssections.dispatch("focusin", { target: title });
+  const before = apiLog.length;
+  title.value = "Draft mid-edit";
+  roots.wssections.dispatch("input", { target: title });
+  flush(SAVE_DEBOUNCE_MS);
+  await settle();
+
+  const mid = apiLog.slice(before).filter(x => x.method === "PATCH");
+  assert.ok(mid.length >= 1, "debounced section-title autosave fires");
+  for (const p of mid){
+    const parsed = JSON.parse(p.body);
+    assert.equal(parsed.section.title, "Draft mid-edit");
+    assert.equal(parsed.section.commit, undefined, "mid-edit title autosave must omit commit");
+  }
+
+  const beforeBlur = apiLog.length;
+  title.value = "Final title";
+  /* focusout is the delegated completion path (Enter already blurs). */
+  roots.wssections.dispatch("focusout", { target: title });
+  await settle();
+  const completing = apiLog.slice(beforeBlur).filter(x => x.method === "PATCH");
+  assert.ok(completing.length >= 1, "focusout issues completing section-title PATCH");
+  const last = JSON.parse(completing[completing.length - 1].body);
+  assert.equal(last.section.title, "Final title");
+  assert.equal(last.section.commit, true, "completing section-title PATCH must set commit:true");
+});
+
 /* ---------- body edit preserves references via sectionBodyInner ---------- */
 test("body edit Escape restores rendered body and references", async () => {
   const ctx = createFeature({

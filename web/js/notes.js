@@ -1599,12 +1599,24 @@ export function createNotesFeature(deps){
       const secId = t.closest(".wssec").dataset.sec;
       const s = wsActive && (wsActive.sections || []).find(x => x.id === secId);
       if (s) s.title = t.value;
+      // Mid-edit: debounced autosave without commit marker (crash-safety only).
       wsPatch({ section: { id: secId, title: t.value } }, "sectitle-" + secId);
     }
   }
   function onSectionsFocusIn(e){
     const t = e.target.closest && e.target.closest("[data-sectitle]");
     if (t){ wsSecTitleOrig[t.closest(".wssec").dataset.sec] = t.value; }
+  }
+  function onSectionsFocusOut(e){
+    const t = e.target.closest && e.target.closest("[data-sectitle]");
+    if (!t) return;
+    const secId = t.closest(".wssec").dataset.sec;
+    const s = wsActive && (wsActive.sections || []).find(x => x.id === secId);
+    if (s) s.title = t.value;
+    // commit:true marks edit completion for optional git versioning; mid-edit
+    // debounced autosaves (onSectionsInput) omit it so keystroke saves do not
+    // each become a commit. Enter already blurs into this path.
+    wsPatchNow({ section: { id: secId, title: t.value, commit: true } }, "sectitle-" + secId);
   }
   function onSectionsKeydown(e){
     const t = e.target.closest && e.target.closest("[data-sectitle]");
@@ -1762,6 +1774,7 @@ export function createNotesFeature(deps){
     listen(root("wssections"), "click", onSectionsClick);
     listen(root("wssections"), "input", onSectionsInput);
     listen(root("wssections"), "focusin", onSectionsFocusIn);
+    listen(root("wssections"), "focusout", onSectionsFocusOut);
     listen(root("wssections"), "keydown", onSectionsKeydown);
     listen(doc, "click", onDocClick);
     /* dividers: pointer drag + keyboard nudge; collapsed rails restore on tap */
