@@ -269,6 +269,8 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   background: color-mix(in srgb, var(--work) 8%, transparent); }
 #wssections .wssecaddempty svg { width: 14px; height: 14px; }
 #wssections .wssecaddempty:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+/* trailing "+ Add Section" after the last section (Phase 1f) — same button, not centred */
+#wssections .wssecaddtrail { padding: 4px 0 8px; }
 /* the "pick a note" placeholder centres on both axes (item 5): an overlay over
    the (empty) sections area so sibling flex weights can't push it off-centre. */
 #wsnoteempty { position: absolute; inset: 0; display: flex; align-items: center;

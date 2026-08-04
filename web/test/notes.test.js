@@ -1285,7 +1285,7 @@ test("note menu stopPropagation and offers rename/add/delete", () => {
   const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
   assert.ok(menu);
   assert.match(menu.innerHTML, /data-si="rename"/);
-  assert.match(menu.innerHTML, /data-si="add"/);
+  assert.doesNotMatch(menu.innerHTML, /data-si="add"/, "Add section is inline only, not menu-mirrored");
   assert.match(menu.innerHTML, /data-si="del"/);
   assert.match(menu.innerHTML, /Delete note/);
 });
@@ -1474,6 +1474,68 @@ test("bookmarks does not import notes; notes may import bookmark pure helpers", 
 test("renderNote is not invoked from poll path; drag guards cards", () => {
   assert.match(notesSrc, /if \(wsCardDragging\) return/);
   assert.match(notesSrc, /DOM text is authoritative|never rebuilds\s+focused editors|Editors never rebuilt by polling/i);
+});
+
+/* ---------- Phase 1f: always-present trailing Add Section ---------- */
+test("sections render always includes trailing data-addsection (even with sections)", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [
+          { id: "s1", title: "One", body: "a", order: 0, references: [] },
+          { id: "s2", title: "Two", body: "b", order: 1, references: [] },
+        ],
+      },
+    },
+  });
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+  const html = ctx.roots.wssections.innerHTML;
+  assert.match(html, /data-addsection/);
+  assert.match(html, /Add section/i);
+  const lastSec = html.lastIndexOf("data-sec=");
+  const add = html.lastIndexOf("data-addsection");
+  assert.ok(add > lastSec, "Add Section is the trailing block after sections");
+  /* empty (zero-section) path still offers the control */
+  const emptyCtx = createFeature({
+    notes: [{ id: "n2", title: "E", order: 0 }],
+    docs: { n2: { id: "n2", title: "E", sections: [] } },
+  });
+  emptyCtx.feature.bind();
+  emptyCtx.feature.open();
+  await settle();
+  await openNote(emptyCtx, "n2");
+  assert.match(emptyCtx.roots.wssections.innerHTML, /data-addsection/);
+});
+
+test("trailing Add Section PATCHes add_section", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{ id: "s1", title: "One", body: "", order: 0, references: [] }],
+      },
+    },
+  });
+  const { feature, roots, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const btn = el("button", { dataset: { addsection: "" } });
+  btn.dataset.addsection = "";
+  btn.closest = sel => (sel === "[data-addsection]" ? btn : null);
+  roots.wssections.dispatch("click", { target: btn });
+  await settle();
+  const patch = apiLog.find(x => x.method === "PATCH" && x.url.includes("/api/notes/n1"));
+  assert.ok(patch);
+  assert.equal(JSON.parse(patch.body).add_section, "");
 });
 
 /* ---------- body edit preserves references via sectionBodyInner ---------- */

@@ -604,8 +604,16 @@ export function createNotesFeature(deps){
     const folds = wsFolds();
     const secs = (wsActive.sections || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
     if (secWrap){
-      secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id], htmlDeps())).join("") ||
-        `<div class="wssecempty"><button class="wssecaddempty" data-addsection>${icons.ICON_PLUS || ""}<span>Add section</span></button></div>`;
+      const addBtn =
+        `<button type="button" class="wssecaddempty" data-addsection>${icons.ICON_PLUS || ""}<span>Add section</span></button>`;
+      if (!secs.length){
+        /* zero sections: keep the centred empty-state variant */
+        secWrap.innerHTML = `<div class="wssecempty">${addBtn}</div>`;
+      } else {
+        /* always-present trailing control — not only when empty (Phase 1f) */
+        secWrap.innerHTML = secs.map(s => sectionHTML(s, !!folds[s.id], htmlDeps())).join("") +
+          `<div class="wssecaddtrail">${addBtn}</div>`;
+      }
       applyRefClamps(secWrap);
     }
   }
@@ -1210,7 +1218,6 @@ export function createNotesFeature(deps){
     m.className = "wsmenu";
     m.innerHTML =
       `<button data-si="rename">${icons.ICON_PENCIL || ""}<span>Rename</span></button>` +
-      `<button data-si="add">${icons.ICON_PLUS || ""}<span>Add section</span></button>` +
       `<div class="sep"></div>` +
       `<button data-si="del" class="danger">${icons.ICON_TRASH || ""}<span>Delete note</span></button>`;
     const panel = root("wspanel");
@@ -1229,8 +1236,7 @@ export function createNotesFeature(deps){
       if (mi.dataset.si === "rename"){
         const t = root("wsnotetitle");
         if (t){ t.focus(); if (t.select) t.select(); }
-      } else if (mi.dataset.si === "add"){ await wsAddSection(); }
-      else if (mi.dataset.si === "del"){
+      } else if (mi.dataset.si === "del"){
         /* menu path kept until 1g removes #wsnotemenu; still confirm+archive */
         if (wsActiveId) openDeleteConfirm(tgt, wsActiveId);
       }
