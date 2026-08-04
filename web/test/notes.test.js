@@ -27,6 +27,7 @@ import {
   noteCardHTML,
   noteCardDragEnabled,
   noteCardRenamePlan,
+  noteCardKeySelects,
   inboxLaneTabs,
   resolveInboxTab,
   inboxListModel,
@@ -334,6 +335,16 @@ test("noteCardRenamePlan: PATCH title; top bar only when active", () => {
   assert.equal(other.updateTopBar, false);
   assert.equal(other.topBarText, "Note");
   assert.equal(other.updateActive, false);
+});
+
+test("noteCardKeySelects: Enter/Space open the card; ignore edit/actions/rename", () => {
+  assert.equal(noteCardKeySelects({ key: "Enter" }), true);
+  assert.equal(noteCardKeySelects({ key: " " }), true);
+  assert.equal(noteCardKeySelects({ key: "Spacebar" }), true);
+  assert.equal(noteCardKeySelects({ key: "a" }), false);
+  assert.equal(noteCardKeySelects({ key: "Enter", inTitleEdit: true }), false);
+  assert.equal(noteCardKeySelects({ key: "Enter", onAction: true }), false);
+  assert.equal(noteCardKeySelects({ key: " ", renaming: true }), false);
 });
 
 /* ---------- inbox lane / order / tabs / clamp reuse ---------- */
@@ -1357,6 +1368,55 @@ test("no #wsnotehead / #wsnotetitle / #wsnotemenu; #wstitle shows note title", a
 });
 
 /* ---------- Phase 1c: Rename / Delete on zone-2 note cards ---------- */
+test("card Enter/Space activates wsSelect (keyboard a11y after div role=button)", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Alpha", order: 0 }],
+    docs: { n1: { id: "n1", title: "Alpha", sections: [] } },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  assert.equal(roots.wstitle.textContent, "Notes");
+
+  const card = el("div", { className: "wscard", dataset: { note: "n1" } });
+  card.dataset.note = "n1";
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+
+  let prevented = false;
+  roots.wscards.dispatch("keydown", {
+    key: "Enter",
+    target: card,
+    preventDefault(){ prevented = true; },
+  });
+  await settle();
+  assert.equal(prevented, true);
+  assert.equal(roots.wstitle.textContent, "Alpha");
+
+  /* Space also works; action buttons / title edit must not re-select */
+  const card2 = el("div", { className: "wscard", dataset: { note: "n1" } });
+  card2.dataset.note = "n1";
+  card2.closest = sel => (sel === ".wscard" ? card2 : null);
+  const act = el("button", { dataset: { wcact: "rename" } });
+  act.dataset.wcact = "rename";
+  act.closest = sel => {
+    if (sel === "[data-wcact]" || String(sel).includes("data-wcact")) return act;
+    if (sel === ".wscard") return card2;
+    if (sel === ".wctitleedit") return null;
+    return null;
+  };
+  roots.wscards.appendChild(card2);
+  roots.wscards.dispatch("keydown", {
+    key: " ",
+    target: act,
+    preventDefault(){},
+  });
+  await settle();
+  /* action keydown must not force select; no throw, title still Alpha from prior select */
+  assert.equal(roots.wstitle.textContent, "Alpha");
+});
+
 test("card rename: not draggable while editing; commit PATCHes title and updates #wstitle", async () => {
   const ctx = createFeature({
     notes: [{ id: "n1", title: "Orig", order: 0 }],

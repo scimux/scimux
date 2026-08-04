@@ -276,6 +276,16 @@ export function noteCardRenamePlan({ noteId, activeId, title }){
   };
 }
 
+/**
+ * Keyboard activation for a focused .wscard (div role=button).
+ * Enter/Space select the note — same as a native <button> — unless focus is on
+ * the rename input, an action control, or the card is mid-rename.
+ */
+export function noteCardKeySelects({ key, inTitleEdit, onAction, renaming } = {}){
+  if (inTitleEdit || onAction || renaming) return false;
+  return key === "Enter" || key === " " || key === "Spacebar";
+}
+
 export function noteCardHTML(c, activeId, deps = {}){
   const esc = deps.esc || (t => String(t ?? ""));
   const meta = deps.fmtNoteMeta || (() => "");
@@ -1064,6 +1074,21 @@ export function createNotesFeature(deps){
     const card = e.target.closest && e.target.closest(".wscard");
     if (card && !card.classList.contains("renaming")) wsSelect(card.dataset.note);
   }
+  function onCardsKeydown(e){
+    const tgt = e.target;
+    const card = tgt && tgt.closest && tgt.closest(".wscard");
+    if (!card) return;
+    const inTitleEdit = !!(tgt.closest && tgt.closest(".wctitleedit"));
+    const onAction = !!(tgt.closest && tgt.closest("[data-wcact]"));
+    if (!noteCardKeySelects({
+      key: e.key,
+      inTitleEdit,
+      onAction,
+      renaming: card.classList.contains("renaming"),
+    })) return;
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    wsSelect(card.dataset.note);
+  }
   function onCardsDragStart(e){
     const card = e.target.closest && e.target.closest(".wscard");
     if (!card) return;
@@ -1211,6 +1236,7 @@ export function createNotesFeature(deps){
     listen(root("wsinboxtabs"), "click", onInboxTabsClick);
     listen(root("wsinboxlist"), "click", onInboxListClick);
     listen(root("wscards"), "click", onCardsClick);
+    listen(root("wscards"), "keydown", onCardsKeydown);
     listen(root("wscards"), "dragstart", onCardsDragStart);
     listen(root("wscards"), "dragover", onCardsDragOver);
     listen(root("wscards"), "drop", onCardsDrop);
