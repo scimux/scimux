@@ -1945,6 +1945,57 @@ test("trailing Add Section PATCHes add_section", async () => {
   assert.equal(JSON.parse(patch.body).add_section, "");
 });
 
+/* ---------- Phase 3b: body edit completion signals commit for git ---------- */
+test("body edit: mid-edit autosave omits commit; blur completing PATCH sets commit:true", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{ id: "s1", title: "S", body: "original", order: 0, references: [] }],
+      },
+    },
+  });
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  const body = el("div", { className: "wssecbody" });
+  const render = el("div", { dataset: { secrender: "" } });
+  sec.appendChild(body);
+  body.appendChild(render);
+  ctx.roots.wssections.appendChild(sec);
+  ctx.roots.wssections.dispatch("click", { target: render });
+
+  const textarea = body.querySelector("textarea");
+  assert.ok(textarea, "body click must enter edit mode");
+  const before = ctx.apiLog.length;
+  textarea.value = "draft mid-edit";
+  textarea.dispatch("input", { target: textarea });
+  ctx.flush(SAVE_DEBOUNCE_MS);
+  await settle();
+
+  const mid = ctx.apiLog.slice(before).filter(x => x.method === "PATCH");
+  assert.ok(mid.length >= 1, "debounced autosave fires");
+  for (const p of mid){
+    const parsed = JSON.parse(p.body);
+    assert.equal(parsed.section.body, "draft mid-edit");
+    assert.equal(parsed.section.commit, undefined, "mid-edit autosave must omit commit");
+  }
+
+  const beforeBlur = ctx.apiLog.length;
+  textarea.value = "final body";
+  textarea.dispatch("blur", { target: textarea });
+  await settle();
+  const completing = ctx.apiLog.slice(beforeBlur).filter(x => x.method === "PATCH");
+  assert.ok(completing.length >= 1, "blur issues completing PATCH");
+  const last = JSON.parse(completing[completing.length - 1].body);
+  assert.equal(last.section.body, "final body");
+  assert.equal(last.section.commit, true, "completing body PATCH must set commit:true");
+});
+
 /* ---------- body edit preserves references via sectionBodyInner ---------- */
 test("body edit Escape restores rendered body and references", async () => {
   const ctx = createFeature({

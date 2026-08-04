@@ -18,6 +18,12 @@
 // the note folder), the same pattern ui.json uses; the files stay stdlib-only
 // and greppable (`grep -r notes/*/note.json`). There is no legacy flat-file
 // read path: stray top-level notes/*.json are ignored by List.
+//
+// Optional git versioning (TryCommit) shells out to the git binary — never a
+// Go module — and keeps a private repo at notes/<id>/.git. It is best-effort:
+// git absent or failing never fails a Save; note.json remains the source of
+// truth. Callers decide commit boundaries (structural edits and explicit
+// client completion markers); mid-edit autosaves must not call TryCommit.
 package notestore
 
 import (

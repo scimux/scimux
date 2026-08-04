@@ -105,13 +105,18 @@ type notePatch struct {
 }
 
 // sectionEdit targets one existing section by id: delete removes it, otherwise
-// only the provided (non-nil) fields are changed.
+// only the provided (non-nil) fields are changed. Commit is the client signal
+// that a body (or other non-structural) edit has completed — mid-edit
+// debounced autosaves omit it so optional git versioning does not snapshot
+// every keystroke; the server commits only when Commit is true or the patch
+// is structural (see notePatchWantsCommit).
 type sectionEdit struct {
 	ID     string  `json:"id"`
 	Title  *string `json:"title"`
 	Body   *string `json:"body"`
 	Order  *int    `json:"order"`
 	Delete bool    `json:"delete"`
+	Commit bool    `json:"commit"`
 }
 
 func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +158,48 @@ func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save note: "+err.Error(), 500)
 		return
 	}
+	// Optional per-note git: best-effort after a successful Save. Never fails
+	// the HTTP write — note.json is the source of truth.
+	if notePatchWantsCommit(body) {
+		a.notes.TryCommit(id, notePatchCommitMessage(body))
+	}
 	writeJSON(w, sh)
+}
+
+// notePatchWantsCommit reports whether this mutation is a versioning boundary.
+// Structural changes commit immediately; body-only edits commit only when the
+// client sets section.commit (edit completion). Mid-edit autosaves omit it.
+func notePatchWantsCommit(p notePatch) bool {
+	if p.Title != nil || p.Order != nil || p.AddSection != nil {
+		return true
+	}
+	if p.Section == nil {
+		return false
+	}
+	sec := p.Section
+	if sec.Delete || sec.Order != nil || sec.Commit {
+		return true
+	}
+	return false
+}
+
+func notePatchCommitMessage(p notePatch) string {
+	switch {
+	case p.AddSection != nil:
+		return "add section"
+	case p.Title != nil:
+		return "rename note"
+	case p.Order != nil:
+		return "reorder note"
+	case p.Section != nil && p.Section.Delete:
+		return "delete section"
+	case p.Section != nil && p.Section.Order != nil:
+		return "reorder section"
+	case p.Section != nil && p.Section.Commit:
+		return "edit section"
+	default:
+		return "update"
+	}
 }
 
 // applySectionEdit mutates the named section in place: delete removes it,
@@ -215,6 +261,8 @@ func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save note: "+err.Error(), 500)
 		return
 	}
+	// Reference add is structural: one commit per successful save.
+	a.notes.TryCommit(r.PathValue("id"), "add reference")
 	writeJSON(w, sh)
 }
 
@@ -237,6 +285,8 @@ func (a *app) handleNoteTrashReference(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save note: "+err.Error(), 500)
 		return
 	}
+	// Reference remove is structural: one commit per successful save.
+	a.notes.TryCommit(r.PathValue("id"), "remove reference")
 	writeJSON(w, sh)
 }
 

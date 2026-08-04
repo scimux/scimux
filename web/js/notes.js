@@ -1302,7 +1302,10 @@ export function createNotesFeature(deps){
     const onBlur = async () => {
       if (cancelled) return;
       s.body = ta.value;
-      await wsPatchNow({ section: { id: secId, body: ta.value } }, "secbody-" + secId);
+      // commit:true marks edit completion for optional git versioning; mid-edit
+      // debounced autosaves (onInput) omit it so crash-safety writes do not
+      // each become a commit.
+      await wsPatchNow({ section: { id: secId, body: ta.value, commit: true } }, "secbody-" + secId);
       bodyWrap.innerHTML = sectionBodyInner(s, htmlDeps());
       applyRefClamps(bodyWrap);
     };
