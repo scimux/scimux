@@ -292,3 +292,100 @@ func TestMirrorNoTranscriptIsNoop(t *testing.T) {
 		t.Fatal("mirror created a log for a node without a transcript")
 	}
 }
+
+// --- Phase 3: Claude breakdown projection into sessionlog (fare-design.md) ---
+
+func TestMirror_WritesClaudeBreakdown(t *testing.T) {
+	// §2.2 / §2.3: Claude input is fresh-direct; cache-creation is cache-write.
+	// After projection, UsageEvent carries the split and ReadFare yields
+	// FreshIn:2, CacheWrite:25437, CacheRead:0, Out:410.
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp, `{"type":"assistant","timestamp":"t1","requestId":"req-xyz","message":{"id":"msg-abc","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":25437,"cache_read_input_tokens":0,"output_tokens":410}}}`+"\n")
+	n := &Node{ID: "n1", Agent: "claude", Model: "opus", Transcript: tp}
+	a.syncMirror(n)
+
+	var usage *sessionlog.UsageEvent
+	for _, ev := range logEvents(t, a, "n1") {
+		if ev.T == "usage" && ev.Usage != nil {
+			usage = ev.Usage
+		}
+	}
+	if usage == nil {
+		t.Fatal("no usage event projected")
+	}
+	if usage.InputTokens != 2 {
+		t.Errorf("InputTokens = %d, want 2", usage.InputTokens)
+	}
+	if usage.OutputTokens != 410 {
+		t.Errorf("OutputTokens = %d, want 410", usage.OutputTokens)
+	}
+	if usage.CachedReadTokens != 0 {
+		t.Errorf("CachedReadTokens = %d, want 0", usage.CachedReadTokens)
+	}
+	if usage.CacheCreationTokens != 25437 {
+		t.Errorf("CacheCreationTokens = %d, want 25437", usage.CacheCreationTokens)
+	}
+	if usage.TurnID != "msg-abc:req-xyz" {
+		t.Errorf("TurnID = %q, want %q", usage.TurnID, "msg-abc:req-xyz")
+	}
+	// Occupancy Used still the flat sum (2+0+25437+410).
+	if usage.Used != 25849 {
+		t.Errorf("Used = %d, want 25849 (occupancy sum)", usage.Used)
+	}
+
+	logPath := filepath.Join(a.sessionsDir, "n1.jsonl")
+	fare := sessionlog.ReadFare(logPath)
+	if fare.FreshIn != 2 {
+		t.Errorf("ReadFare FreshIn = %d, want 2 (claude direct)", fare.FreshIn)
+	}
+	if fare.CacheWrite != 25437 {
+		t.Errorf("ReadFare CacheWrite = %d, want 25437", fare.CacheWrite)
+	}
+	if fare.CacheRead != 0 {
+		t.Errorf("ReadFare CacheRead = %d, want 0", fare.CacheRead)
+	}
+	if fare.Out != 410 {
+		t.Errorf("ReadFare Out = %d, want 410", fare.Out)
+	}
+	if fare.Turns != 1 {
+		t.Errorf("ReadFare Turns = %d, want 1", fare.Turns)
+	}
+}
+
+func TestMirror_UsageChangeGateStillHolds(t *testing.T) {
+	// Only emit on occupancy change (used/win). Unchanged usage must not
+	// append extra records; a real change still produces exactly one new one.
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp, `{"type":"assistant","timestamp":"t1","requestId":"req-1","message":{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":90,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`+"\n")
+	n := &Node{ID: "n1", Agent: "claude", Transcript: tp}
+	a.syncMirror(n)
+	a.syncMirror(n) // idle: no second usage
+
+	countUsage := func() int {
+		n := 0
+		for _, ev := range logEvents(t, a, "n1") {
+			if ev.T == "usage" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countUsage(); got != 1 {
+		t.Fatalf("after idle ticks: usage events = %d, want 1", got)
+	}
+
+	// Different occupancy → exactly one new usage event (with breakdown).
+	appendFile(t, tp, `{"type":"assistant","timestamp":"t2","requestId":"req-2","message":{"id":"msg-2","role":"assistant","content":[{"type":"text","text":"more"}],"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`+"\n")
+	a.syncMirror(n)
+	if got := countUsage(); got != 2 {
+		t.Fatalf("after usage change: usage events = %d, want 2", got)
+	}
+	a.syncMirror(n) // still settled
+	if got := countUsage(); got != 2 {
+		t.Fatalf("after second idle: usage events = %d, want 2 (gate held)", got)
+	}
+}

@@ -162,6 +162,27 @@ type Tailer struct {
 	// Purely informational — never part of health or progress signals.
 	ctxUsed   int64
 	ctxWindow int64
+	// last* retain the latest Claude (assistant) usage breakdown for fare
+	// projection (fare-design.md Phase 3). Occupancy (ctxUsed) is still the
+	// flat sum only; these fields ride alongside and never feed liveness.
+	lastIn          int64
+	lastOut         int64
+	lastCacheRead   int64
+	lastCacheCreate int64
+	lastTurnID      string
+}
+
+// UsageBreakdown is the latest per-turn token split retained from a Claude
+// assistant usage block (or zero when none has been seen / shape unknown).
+// InputTokens is Claude-fresh; CacheCreationTokens covers both the flat
+// cache_creation_input_tokens field and the nested ephemeral object.
+// TurnID is message.id + ":" + requestId (ccusage/D3 dedup identity).
+type UsageBreakdown struct {
+	InputTokens         int64
+	OutputTokens        int64
+	CachedReadTokens    int64
+	CacheCreationTokens int64
+	TurnID              string
 }
 
 // unparseableThreshold is how many consecutive structurally-unrecognizable
@@ -300,17 +321,36 @@ func (t *Tailer) Usage() (used, window int64) {
 	return t.ctxUsed, t.ctxWindow
 }
 
+// UsageBreakdown reports the latest Claude per-turn token split retained by
+// noteUsage. Zero values mean "not reported" — never an error. Callers
+// (mirror projection) copy these into sessionlog.UsageEvent; occupancy
+// still comes from Usage().
+func (t *Tailer) UsageBreakdown() UsageBreakdown {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return UsageBreakdown{
+		InputTokens:         t.lastIn,
+		OutputTokens:        t.lastOut,
+		CachedReadTokens:    t.lastCacheRead,
+		CacheCreationTokens: t.lastCacheCreate,
+		TurnID:              t.lastTurnID,
+	}
+}
+
 // noteUsage extracts context usage from one JSONL line. Defensive like all
 // other parsing: unknown shapes leave the previous values standing.
 func (t *Tailer) noteUsage(line []byte) {
 	var g struct {
-		Type    string `json:"type"`
-		Message struct {
+		Type      string `json:"type"`
+		RequestID string `json:"requestId"`
+		Message   struct {
+			ID    string `json:"id"`
 			Usage struct {
-				InputTokens              int64 `json:"input_tokens"`
-				CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-				CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-				OutputTokens             int64 `json:"output_tokens"`
+				InputTokens              int64           `json:"input_tokens"`
+				CacheReadInputTokens     int64           `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int64           `json:"cache_creation_input_tokens"`
+				OutputTokens             int64           `json:"output_tokens"`
+				CacheCreation            json.RawMessage `json:"cache_creation"`
 			} `json:"usage"`
 		} `json:"message"`
 		Payload struct {
@@ -332,9 +372,33 @@ func (t *Tailer) noteUsage(line []byte) {
 	case "assistant": // Claude: usage rides on every assistant record
 		u := g.Message.Usage
 		// Context occupancy after this turn: everything the request carried
-		// in (fresh + cached) plus what the model produced.
+		// in (fresh + cached) plus what the model produced. Flat
+		// cache_creation_input_tokens only — nested ephemeral does not
+		// change this sum (Phase 3: occupancy formula byte-for-byte).
 		if used := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens; used > 0 {
 			t.ctxUsed = used
+		}
+		// Fare breakdown rides alongside occupancy. Cache-creation prefers
+		// the flat field; if absent/zero, sum nested ephemeral shapes
+		// (ephemeral_5m / ephemeral_1h or *_input_tokens variants).
+		create := u.CacheCreationInputTokens
+		if create == 0 {
+			create = sumCacheCreationNested(u.CacheCreation)
+		}
+		if u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadInputTokens != 0 || create != 0 {
+			t.lastIn = u.InputTokens
+			t.lastOut = u.OutputTokens
+			t.lastCacheRead = u.CacheReadInputTokens
+			t.lastCacheCreate = create
+			if g.Message.ID != "" && g.RequestID != "" {
+				t.lastTurnID = g.Message.ID + ":" + g.RequestID
+			} else if g.Message.ID != "" {
+				t.lastTurnID = g.Message.ID
+			} else if g.RequestID != "" {
+				t.lastTurnID = g.RequestID
+			} else {
+				t.lastTurnID = ""
+			}
 		}
 	case "event_msg": // Codex: explicit token_count events
 		if g.Payload.Type != "token_count" {
@@ -348,6 +412,24 @@ func (t *Tailer) noteUsage(line []byte) {
 			t.ctxWindow = g.Payload.Info.ModelContextWindow
 		}
 	}
+}
+
+// sumCacheCreationNested sums numeric values inside Claude's nested
+// cache_creation object (ephemeral_5m / ephemeral_1h, or the longer
+// ephemeral_*_input_tokens names seen on the wire). Unknown shapes yield 0.
+func sumCacheCreationNested(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var m map[string]int64
+	if json.Unmarshal(raw, &m) != nil {
+		return 0
+	}
+	var sum int64
+	for _, v := range m {
+		sum += v
+	}
+	return sum
 }
 
 // PendingCount reports how many logged tool calls still lack a result.
@@ -474,6 +556,8 @@ func (t *Tailer) Poll() []Turn {
 		t.offset, t.buf, t.Turns, t.pending = 0, nil, nil, nil
 		t.unknownStreak, t.progress = 0, 0
 		t.ctxUsed, t.ctxWindow = 0, 0
+		t.lastIn, t.lastOut, t.lastCacheRead, t.lastCacheCreate = 0, 0, 0, 0
+		t.lastTurnID = ""
 	}
 	if st.Size() == t.offset {
 		return t.Turns

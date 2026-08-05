@@ -446,3 +446,99 @@ func TestTailerUsageCodex(t *testing.T) {
 		t.Fatalf("token_count counted as agent progress: %d", prog)
 	}
 }
+
+// --- Phase 3: Claude usage breakdown retention (fare-design.md §2.2, Phase 3) ---
+// Synthetic assistant records only. The four billable fields must be retained
+// alongside the occupancy sum; ctxUsed formula is unchanged.
+
+func TestTailer_UsageBreakdownRetainsSplit(t *testing.T) {
+	// §2.2 live shape: fresh input, cache-create, cache-read, output.
+	// Occupancy sum must stay input+cache_read+cache_create+output (52310).
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	f, _ := os.Create(p)
+	defer f.Close()
+	tl := &Tailer{Path: p}
+	f.WriteString(`{"type":"assistant","timestamp":"t1","message":{"id":"msg_split","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"cache_read_input_tokens":50000,"cache_creation_input_tokens":2000,"output_tokens":300}}}` + "\n")
+	tl.Poll()
+
+	// Occupancy sum is byte-for-byte the pre-Phase-3 formula.
+	if used, _ := tl.Usage(); used != 52310 {
+		t.Fatalf("ctxUsed = %d, want 52310 (occupancy sum unchanged)", used)
+	}
+	bd := tl.UsageBreakdown()
+	if bd.InputTokens != 10 {
+		t.Errorf("InputTokens = %d, want 10 (fresh)", bd.InputTokens)
+	}
+	if bd.OutputTokens != 300 {
+		t.Errorf("OutputTokens = %d, want 300", bd.OutputTokens)
+	}
+	if bd.CachedReadTokens != 50000 {
+		t.Errorf("CachedReadTokens = %d, want 50000", bd.CachedReadTokens)
+	}
+	if bd.CacheCreationTokens != 2000 {
+		t.Errorf("CacheCreationTokens = %d, want 2000", bd.CacheCreationTokens)
+	}
+}
+
+func TestTailer_CacheCreationFlatShape(t *testing.T) {
+	// Flat field: cache_creation_input_tokens:25437 (the common Claude shape).
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	f, _ := os.Create(p)
+	defer f.Close()
+	tl := &Tailer{Path: p}
+	f.WriteString(`{"type":"assistant","timestamp":"t1","message":{"id":"msg_flat","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":25437,"cache_read_input_tokens":0,"output_tokens":410}}}` + "\n")
+	tl.Poll()
+	bd := tl.UsageBreakdown()
+	if bd.CacheCreationTokens != 25437 {
+		t.Fatalf("CacheCreationTokens = %d, want 25437 (flat shape)", bd.CacheCreationTokens)
+	}
+	// Occupancy still uses the flat field in its sum: 2+0+25437+410 = 25849.
+	if used, _ := tl.Usage(); used != 25849 {
+		t.Fatalf("ctxUsed = %d, want 25849", used)
+	}
+}
+
+func TestTailer_CacheCreationEphemeralShape(t *testing.T) {
+	// Nested shape only: cache_creation:{ephemeral_5m:100, ephemeral_1h:20} → 120.
+	// Flat field absent. Breakdown must sum nested; ctxUsed stays flat-only
+	// (no cache-create contribution → 2+0+0+10 = 12), matching pre-Phase-3.
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	f, _ := os.Create(p)
+	defer f.Close()
+	tl := &Tailer{Path: p}
+	f.WriteString(`{"type":"assistant","timestamp":"t1","message":{"id":"msg_eph","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2,"cache_read_input_tokens":0,"output_tokens":10,"cache_creation":{"ephemeral_5m":100,"ephemeral_1h":20}}}}` + "\n")
+	tl.Poll()
+	bd := tl.UsageBreakdown()
+	if bd.CacheCreationTokens != 120 {
+		t.Fatalf("CacheCreationTokens = %d, want 120 (ephemeral sum)", bd.CacheCreationTokens)
+	}
+	if used, _ := tl.Usage(); used != 12 {
+		t.Fatalf("ctxUsed = %d, want 12 (flat-only occupancy formula unchanged)", used)
+	}
+}
+
+func TestTailer_TurnIDFromMessageAndRequest(t *testing.T) {
+	// ccusage dedup identity: message id + request id (D3). Must be stable
+	// across an independent re-read of the same record.
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	line := `{"type":"assistant","timestamp":"t1","requestId":"req-xyz","message":{"id":"msg-abc","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}` + "\n"
+	if err := os.WriteFile(p, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tl1 := &Tailer{Path: p}
+	tl1.Poll()
+	id1 := tl1.UsageBreakdown().TurnID
+	if id1 == "" {
+		t.Fatal("TurnID empty; want message id + request id")
+	}
+	if id1 != "msg-abc:req-xyz" {
+		t.Fatalf("TurnID = %q, want %q", id1, "msg-abc:req-xyz")
+	}
+	// Independent re-read of the same file yields the same TurnID.
+	tl2 := &Tailer{Path: p}
+	tl2.Poll()
+	id2 := tl2.UsageBreakdown().TurnID
+	if id2 != id1 {
+		t.Fatalf("TurnID not stable across re-read: %q vs %q", id1, id2)
+	}
+}

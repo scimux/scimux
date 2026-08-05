@@ -104,13 +104,14 @@ func (a *app) syncMirror(n *Node) {
 	}
 	turns := tl.Poll()
 	used, win := tl.Usage()
-	m.sync(a, n, tl.Path, turns, used, win)
+	bd := tl.UsageBreakdown()
+	m.sync(a, n, tl.Path, turns, used, win, bd)
 }
 
 // sync appends any new turns/usage to the log and re-persists the transcript
 // size watermark. The caller has already recovered durable state and confirmed
 // the transcript changed (or is new). Fields are owned by the poller goroutine.
-func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, used, win int64) {
+func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, used, win int64, bd transcript.UsageBreakdown) {
 	if tpath == "" {
 		return
 	}
@@ -144,9 +145,17 @@ func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, us
 			}
 		}
 	}
+	// Occupancy gate unchanged (used/win only). Breakdown fields ride on the
+	// same usage record when occupancy changes — no extra emissions (Phase 3).
 	if used > 0 && (used != m.lastUsed || win != m.lastWin) {
 		if err := m.logw.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{
-			Used: int(used), Size: int(win),
+			Used:                int(used),
+			Size:                int(win),
+			InputTokens:         int(bd.InputTokens),
+			OutputTokens:        int(bd.OutputTokens),
+			CachedReadTokens:    int(bd.CachedReadTokens),
+			CacheCreationTokens: int(bd.CacheCreationTokens),
+			TurnID:              bd.TurnID,
 		}}); err != nil {
 			return
 		}
