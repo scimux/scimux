@@ -500,8 +500,9 @@ type Session struct {
 	// config — fork is the path that can). model matters for agents that take
 	// it as a process flag (grok); pi/opencode keep it for the meta header only.
 	// ctxSize is the model context window (tokens) when advertised at
-	// initialize/new-session — needed because Grok reports occupancy only as
-	// token counts in PromptResponse._meta, never as a usage_update with size.
+	// initialize/new-session. Grok never sends usage_update with size; the
+	// gauge Size comes from this window while Used comes from _meta Layer A
+	// last-call tokens (fare-design §2.5 / D10) — not nested spend.
 	dir       string
 	model     string
 	effort    string
@@ -725,9 +726,10 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 	defer s.mu.Unlock()
 	s.flushAssistantLocked()
 	// Context occupancy for the gauge: opencode streams usage_update with
-	// used/size; codex uses its own event; Grok (and the unstable ACP usage
-	// field) land here at turn end. usageFromPrompt also maps token totals
-	// onto Used and fills Size from the window captured at initialize.
+	// used/size; codex uses its own event; Grok lands here at turn end via
+	// PromptResponse._meta. usageFromPrompt splits Grok's two layers
+	// (fare-design §2.5 / D10): Layer A last-call → Used, nested Layer B →
+	// spend breakdown/cost; Size from ctxSize captured at initialize.
 	if ev := usageFromPrompt(resp, s.ctxSize); ev != nil {
 		s.appendLocked(Event{T: "usage", Usage: ev})
 	}
@@ -1024,10 +1026,9 @@ func (s *Session) captureBanner(resp sdk.NewSessionResponse) {
 }
 
 // usageFromPrompt builds a sessionlog usage record from a PromptResponse.
-// Prefers the unstable top-level Usage field; falls back to Grok-style
-// occupancy nested under _meta (totalTokens / usage{…}). Sets Used for the
-// context gauge from total token counts when the agent never sent a
-// usage_update, and Size from the window captured at initialize when known.
+// Prefers the unstable top-level Usage field (opencode-style); falls back to
+// Grok-style dual-layer _meta (usageFromMeta). Standard Usage still maps
+// TotalTokens → Used via fillUsageOccupancy; Grok meta does not — see D10.
 // Returns nil when nothing usable is present.
 func usageFromPrompt(resp sdk.PromptResponse, ctxSize int) *UsageEvent {
 	if resp.Usage != nil {
@@ -1046,19 +1047,28 @@ func usageFromPrompt(resp sdk.PromptResponse, ctxSize int) *UsageEvent {
 	return usageFromMeta(resp.Meta, ctxSize)
 }
 
-// usageFromMeta reads Grok's PromptResponse._meta shape:
+// usageFromMeta reads Grok's PromptResponse._meta two-layer shape
+// (fare-design §2.5 / D10):
 //
-//	{ "totalTokens": N, "inputTokens": …, "outputTokens": …,
-//	  "usage": { "totalTokens": N, "inputTokens": …, … } }
+//	Layer A (top-level): totalTokens / inputTokens / outputTokens
+//	  → last model call of this prompt → gauge Used (occupancy tank)
+//	Layer B (nested usage{}): same fields + costUsdTicks + modelCalls
+//	  → per-prompt spend summed over internal rounds → breakdown + cost
+//	  (fare meter telemetry; never drives Used)
 //
-// Either the nested usage object or the top-level token fields suffice.
+// Size comes from ctxSize (initialize totalContextTokens). Used is set only
+// from top-level; if top-level is empty we do not fall back to nested for
+// Used. If Used > Size > 0 the occupancy is cleared (never paint full).
+// Nested totals are never routed through fillUsageOccupancy.
 func usageFromMeta(meta map[string]any, ctxSize int) *UsageEvent {
 	if len(meta) == 0 {
 		return nil
 	}
 	ev := &UsageEvent{}
+	hasNested := false
 	if raw, ok := meta["usage"]; ok {
 		if m, ok := raw.(map[string]any); ok {
+			// Layer B — spend telemetry / future fare source.
 			ev.InputTokens = intFromAny(m["inputTokens"])
 			ev.OutputTokens = intFromAny(m["outputTokens"])
 			ev.TotalTokens = intFromAny(m["totalTokens"])
@@ -1072,29 +1082,55 @@ func usageFromMeta(meta map[string]any, ctxSize int) *UsageEvent {
 				ev.CostAmount = ticks / 1e9
 				ev.CostCurrency = "USD"
 			}
+			if ev.TotalTokens > 0 || ev.InputTokens > 0 || ev.OutputTokens > 0 {
+				hasNested = true
+			}
 		}
 	}
-	if ev.TotalTokens == 0 {
-		ev.TotalTokens = intFromAny(meta["totalTokens"])
+
+	// Layer A — last-call occupancy for the context gauge.
+	topTotal := intFromAny(meta["totalTokens"])
+	topIn := intFromAny(meta["inputTokens"])
+	topOut := intFromAny(meta["outputTokens"])
+	if topTotal > 0 {
+		ev.Used = topTotal
+	} else if n := topIn + topOut; n > 0 {
+		ev.Used = n
 	}
-	if ev.InputTokens == 0 {
-		ev.InputTokens = intFromAny(meta["inputTokens"])
+	// When nested Layer B is absent, top-level fields also fill breakdown
+	// (top-only meta shapes). Never overwrite nested spend with last-call.
+	if !hasNested {
+		if ev.TotalTokens == 0 {
+			ev.TotalTokens = topTotal
+		}
+		if ev.InputTokens == 0 {
+			ev.InputTokens = topIn
+		}
+		if ev.OutputTokens == 0 {
+			ev.OutputTokens = topOut
+		}
+		if ev.CachedReadTokens == 0 {
+			ev.CachedReadTokens = intFromAny(meta["cachedReadTokens"])
+		}
 	}
-	if ev.OutputTokens == 0 {
-		ev.OutputTokens = intFromAny(meta["outputTokens"])
-	}
-	if ev.CachedReadTokens == 0 {
-		ev.CachedReadTokens = intFromAny(meta["cachedReadTokens"])
-	}
-	if ev.TotalTokens == 0 && ev.InputTokens == 0 && ev.OutputTokens == 0 {
+
+	if ev.Used == 0 && ev.TotalTokens == 0 && ev.InputTokens == 0 && ev.OutputTokens == 0 {
 		return nil
 	}
-	fillUsageOccupancy(ev, ctxSize)
+	if ctxSize > 0 {
+		ev.Size = ctxSize
+	}
+	// Nonsense occupancy must not paint the gauge full (D10).
+	if ev.Used > 0 && ev.Size > 0 && ev.Used > ev.Size {
+		ev.Used = 0
+	}
 	return ev
 }
 
 // fillUsageOccupancy maps token totals onto the Used/Size fields the context
-// gauge reads (LatestUsage / segment only look at Used and Size).
+// gauge reads (LatestUsage / segment only look at Used and Size). Used for
+// the standard PromptResponse.Usage path and usage_update-shaped records —
+// not for Grok dual-layer _meta (usageFromMeta handles that split itself).
 func fillUsageOccupancy(ev *UsageEvent, ctxSize int) {
 	if ev.Used == 0 {
 		if ev.TotalTokens > 0 {

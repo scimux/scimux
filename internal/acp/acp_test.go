@@ -405,11 +405,74 @@ func TestUsageAndEmptyTurn(t *testing.T) {
 	}
 }
 
-// Grok reports occupancy only in PromptResponse._meta (no usage_update and no
-// top-level usage field). usageFromMeta + fillUsageOccupancy must turn that
-// into Used/Size so the context gauge can light up.
+// Independently synthetic Grok usage examples. Invented counters and identities
+// exercise the two token layers without retaining any captured session data.
+
+func mockGrokMetaN1() map[string]any { // single-call, top 121 vs nest 120
+	return map[string]any{"modelId": "grok-4.5",
+		"totalTokens": float64(121), "inputTokens": float64(100),
+		"outputTokens": float64(20), "cachedReadTokens": float64(40),
+		"reasoningTokens": float64(5),
+		"usage": map[string]any{"inputTokens": float64(100), "outputTokens": float64(20),
+			"totalTokens": float64(120), "cachedReadTokens": float64(40),
+			"cacheCreationTokens": float64(0), "reasoningTokens": float64(5),
+			"modelCalls": float64(1), "numTurns": float64(1), "costUsdTicks": float64(125000000)}}
+}
+
+func mockGrokMetaN3() map[string]any { // spontaneous tool, nest≈2×top
+	return map[string]any{"modelId": "grok-4.5",
+		"totalTokens": float64(241), "inputTokens": float64(220),
+		"outputTokens": float64(20), "cachedReadTokens": float64(100), "reasoningTokens": float64(7),
+		"usage": map[string]any{"inputTokens": float64(420), "outputTokens": float64(40),
+			"totalTokens": float64(460), "cachedReadTokens": float64(200),
+			"cacheCreationTokens": float64(0), "modelCalls": float64(2), "costUsdTicks": float64(250000000)}}
+}
+
+func mockGrokMetaT1() map[string]any { // primary red fixture — forced tool, dual-layer
+	return map[string]any{"sessionId": "synthetic-grok-session",
+		"requestId": "synthetic-grok-request", "modelId": "grok-4.5",
+		"totalTokens": float64(501), "inputTokens": float64(480),
+		"outputTokens": float64(20), "cachedReadTokens": float64(100), "reasoningTokens": float64(5),
+		"usage": map[string]any{"inputTokens": float64(900), "outputTokens": float64(60),
+			"totalTokens": float64(960), "cachedReadTokens": float64(200),
+			"cacheCreationTokens": float64(0), "reasoningTokens": float64(12),
+			"modelCalls": float64(2), "numTurns": float64(2), "costUsdTicks": float64(625000000)}}
+}
+
+func mockGrokMetaT6() map[string]any { // top-level cache 0
+	return map[string]any{"modelId": "grok-4.5",
+		"totalTokens": float64(701), "inputTokens": float64(680),
+		"outputTokens": float64(20), "cachedReadTokens": float64(0), "reasoningTokens": float64(9),
+		"usage": map[string]any{"inputTokens": float64(1300), "outputTokens": float64(40),
+			"totalTokens": float64(1340), "cachedReadTokens": float64(600),
+			"modelCalls": float64(2), "costUsdTicks": float64(375000000)}}
+}
+
+func mockGrokMetaT10() map[string]any {
+	return map[string]any{"modelId": "grok-4.5",
+		"totalTokens": float64(901), "inputTokens": float64(880),
+		"outputTokens": float64(20), "cachedReadTokens": float64(800), "reasoningTokens": float64(3),
+		"usage": map[string]any{"inputTokens": float64(1700), "outputTokens": float64(40),
+			"totalTokens": float64(1740), "cachedReadTokens": float64(1500),
+			"modelCalls": float64(2), "costUsdTicks": float64(500000000)}}
+}
+
+func mockGrokMetaNestedOnlyMega() map[string]any { // hardening: no top-level → Used=0
+	return map[string]any{"modelId": "grok-4.5",
+		"usage": map[string]any{"inputTokens": float64(2_000_000), "outputTokens": float64(50_000),
+			"totalTokens": float64(2_050_000), "cachedReadTokens": float64(1_000_000),
+			"modelCalls": float64(10), "numTurns": float64(10)}}
+}
+
+func mockGrokMetaTopOnly() map[string]any {
+	return map[string]any{"totalTokens": float64(100), "inputTokens": float64(90), "outputTokens": float64(10)}
+}
+
+// Grok reports two token layers in PromptResponse._meta (fare-design §2.5 / D10):
+// Layer A top-level last-call → gauge Used; Layer B nested per-prompt spend →
+// breakdown+cost (fare). usageFromMeta must never drive Used from nested spend.
 func TestUsageFromPromptMeta(t *testing.T) {
-	// Pure parse: nested usage object + window from initialize.
+	// Single-call off-by-one lineage: top 81 vs nest 80 → Used is top.
 	meta := map[string]any{
 		"totalTokens": float64(81),
 		"usage": map[string]any{
@@ -423,11 +486,14 @@ func TestUsageFromPromptMeta(t *testing.T) {
 	if ev == nil {
 		t.Fatal("expected usage event")
 	}
-	if ev.Used != 80 || ev.Size != 500_000 {
-		t.Fatalf("occupancy = %d/%d, want 80/500000", ev.Used, ev.Size)
+	if ev.Used != 81 || ev.Size != 500_000 {
+		t.Fatalf("occupancy = %d/%d, want 81/500000 (top-level last-call)", ev.Used, ev.Size)
 	}
 	if ev.InputTokens != 70 || ev.OutputTokens != 10 || ev.CachedReadTokens != 30 {
 		t.Fatalf("breakdown = %+v", ev)
+	}
+	if ev.TotalTokens != 80 {
+		t.Fatalf("TotalTokens (Layer B spend) = %d, want 80", ev.TotalTokens)
 	}
 	// Top-level totals alone also work.
 	ev = usageFromMeta(map[string]any{"totalTokens": float64(100)}, 200)
@@ -444,6 +510,117 @@ func TestUsageFromPromptMeta(t *testing.T) {
 	}}, 1000)
 	if ev == nil || ev.Used != 42 || ev.Size != 1000 {
 		t.Fatalf("prompt usage = %+v", ev)
+	}
+}
+
+// TestUsageFromMetaLastCallNotPromptSpend distinguishes last-call occupancy
+// (501) from accumulated prompt spend (960), which is retained for fare.
+func TestUsageFromMetaLastCallNotPromptSpend(t *testing.T) {
+	ev := usageFromMeta(mockGrokMetaT1(), 500_000)
+	if ev == nil {
+		t.Fatal("expected usage event")
+	}
+	if ev.Used != 501 {
+		t.Fatalf("Used = %d, want 501 (top-level last-call, not nested spend 960)", ev.Used)
+	}
+	if ev.Size != 500_000 {
+		t.Fatalf("Size = %d, want 500000", ev.Size)
+	}
+	// Layer B spend telemetry still present for fare.
+	if ev.TotalTokens != 960 {
+		t.Fatalf("TotalTokens (nested spend) = %d, want 960", ev.TotalTokens)
+	}
+	if ev.InputTokens != 900 || ev.OutputTokens != 60 || ev.CachedReadTokens != 200 {
+		t.Fatalf("nested breakdown = in=%d out=%d cache=%d",
+			ev.InputTokens, ev.OutputTokens, ev.CachedReadTokens)
+	}
+	wantCost := 625000000.0 / 1e9
+	if ev.CostAmount != wantCost {
+		t.Fatalf("CostAmount = %v, want %v", ev.CostAmount, wantCost)
+	}
+	if ev.CostCurrency != "USD" {
+		t.Fatalf("CostCurrency = %q, want USD", ev.CostCurrency)
+	}
+
+	// Off-by-one (N1): top 121 vs nested 120 → top wins.
+	ev = usageFromMeta(mockGrokMetaN1(), 500_000)
+	if ev == nil || ev.Used != 121 {
+		t.Fatalf("N1 Used = %v, want 121 (top wins off-by-one)", ev)
+	}
+
+	// Nested-only mega: no top-level → Used must stay 0 (never 2_050_000).
+	ev = usageFromMeta(mockGrokMetaNestedOnlyMega(), 500_000)
+	if ev == nil {
+		t.Fatal("nested-only mega: expected event with spend telemetry")
+	}
+	if ev.Used != 0 {
+		t.Fatalf("nested-only mega Used = %d, want 0 (never fall back to nested for gauge)", ev.Used)
+	}
+	if ev.TotalTokens != 2_050_000 {
+		t.Fatalf("nested-only mega TotalTokens = %d, want 2050000 (spend retained)", ev.TotalTokens)
+	}
+	if ev.Size != 500_000 {
+		t.Fatalf("nested-only mega Size = %d, want 500000 (window still known)", ev.Size)
+	}
+	// Gauge must not clamp to 100%: Used/Size with Used=0 is empty, not full.
+	if ev.Size > 0 && ev.Used >= ev.Size {
+		t.Fatalf("gauge would paint full: Used=%d Size=%d", ev.Used, ev.Size)
+	}
+}
+
+// Occupancy comes from Layer A only across synthetic usage examples.
+func TestUsageFromMetaTable(t *testing.T) {
+	cases := []struct {
+		name               string
+		meta               map[string]any
+		ctxSize            int
+		wantUsed, wantSize int
+		// wantNil when meta carries nothing usable.
+		wantNil bool
+	}{
+		{"N1_single", mockGrokMetaN1(), 500_000, 121, 500_000, false},
+		{"N3_tool_double", mockGrokMetaN3(), 500_000, 241, 500_000, false},
+		{"T1_tool_double", mockGrokMetaT1(), 500_000, 501, 500_000, false},
+		{"T6_zero_top_cache", mockGrokMetaT6(), 500_000, 701, 500_000, false},
+		{"T10_late_tool", mockGrokMetaT10(), 500_000, 901, 500_000, false},
+		{"nested_only_mega", mockGrokMetaNestedOnlyMega(), 500_000, 0, 500_000, false},
+		{"top_only", mockGrokMetaTopOnly(), 200, 100, 200, false},
+		{"empty", map[string]any{"foo": 1}, 500_000, 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := usageFromMeta(tc.meta, tc.ctxSize)
+			if tc.wantNil {
+				if ev != nil {
+					t.Fatalf("got %+v, want nil", ev)
+				}
+				return
+			}
+			if ev == nil {
+				t.Fatal("expected usage event")
+			}
+			if ev.Used != tc.wantUsed || ev.Size != tc.wantSize {
+				t.Fatalf("occupancy = %d/%d, want %d/%d", ev.Used, ev.Size, tc.wantUsed, tc.wantSize)
+			}
+		})
+	}
+}
+
+// Used > Size must never paint the gauge full (D10 hardening).
+func TestUsageFromMetaUsedExceedsSizeCleared(t *testing.T) {
+	ev := usageFromMeta(map[string]any{
+		"totalTokens":  float64(600_000),
+		"inputTokens":  float64(599_000),
+		"outputTokens": float64(1000),
+	}, 500_000)
+	if ev == nil {
+		t.Fatal("expected event")
+	}
+	if ev.Used != 0 {
+		t.Fatalf("Used = %d, want 0 when Used>Size (never paint full)", ev.Used)
+	}
+	if ev.Size != 500_000 {
+		t.Fatalf("Size = %d, want 500000", ev.Size)
 	}
 }
 
@@ -478,8 +655,8 @@ func TestContextSizeFromMeta(t *testing.T) {
 	}
 }
 
-// End-to-end: a Grok-shaped prompt response with only _meta usage must land
-// in the session log as Used/Size for Manager.Usage.
+// End-to-end: synthetic dual-layer Grok _meta (modelCalls:2) must land
+// last-call Used + window Size in Manager.Usage — not nested spend.
 func TestGrokMetaUsageEndToEnd(t *testing.T) {
 	agent := &fakeAgent{
 		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
@@ -487,14 +664,7 @@ func TestGrokMetaUsageEndToEnd(t *testing.T) {
 				Update: sdk.UpdateAgentMessageText("pong")})
 			return sdk.PromptResponse{
 				StopReason: sdk.StopReasonEndTurn,
-				Meta: map[string]any{
-					"totalTokens": float64(81),
-					"usage": map[string]any{
-						"inputTokens":  float64(70),
-						"outputTokens": float64(10),
-						"totalTokens":  float64(80),
-					},
-				},
+				Meta:       mockGrokMetaT1(),
 			}, nil
 		},
 	}
@@ -512,8 +682,8 @@ func TestGrokMetaUsageEndToEnd(t *testing.T) {
 	}
 	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
 	used, window := m.Usage("n1")
-	if used != 80 || window != 500_000 {
-		t.Fatalf("usage = %d/%d, want 80/500000", used, window)
+	if used != 501 || window != 500_000 {
+		t.Fatalf("usage = %d/%d, want 501/500000 (last-call, not nested 960)", used, window)
 	}
 }
 
