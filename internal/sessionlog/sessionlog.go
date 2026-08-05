@@ -59,6 +59,10 @@ type ToolEvent struct {
 // UsageEvent carries both observed usage shapes (opencode streams the first
 // four fields via usage_update; the token breakdown arrives only in the final
 // PromptResponse.usage). Any subset may be present.
+//
+// CacheCreationTokens, ReasoningTokens, Model, and TurnID are additive
+// (fare-design.md §4.1): all omitempty so legacy {"used":N} records stay
+// greppable and parse without migration.
 type UsageEvent struct {
 	Used             int     `json:"used,omitempty"`
 	Size             int     `json:"size,omitempty"`
@@ -68,6 +72,21 @@ type UsageEvent struct {
 	OutputTokens     int     `json:"outputTokens,omitempty"`
 	CachedReadTokens int     `json:"cachedReadTokens,omitempty"`
 	TotalTokens      int     `json:"totalTokens,omitempty"`
+	// Fare-oriented extensions (Phase 1). Existing fields keep their meaning.
+	CacheCreationTokens int    `json:"cacheCreationTokens,omitempty"` // claude, pi, opencode-DB, grok(≈0)
+	ReasoningTokens     int    `json:"reasoningTokens,omitempty"`     // pi, grok, claude
+	Model               string `json:"model,omitempty"`               // per-turn (D6)
+	TurnID              string `json:"turnId,omitempty"`              // dedup identity (D3)
+}
+
+// String formats occupancy fields for peek/log lines. Model is included only
+// when set so empty Model leaves the pre-Phase-1 output unchanged.
+func (u UsageEvent) String() string {
+	s := "used=" + itoa(u.Used) + " size=" + itoa(u.Size)
+	if u.Model != "" {
+		s += " model=" + u.Model
+	}
+	return s
 }
 
 // MetaEvent is the self-describing header written as a log's first record.
@@ -364,7 +383,7 @@ func formatEvent(ev Event) string {
 		return "· tool"
 	case "usage":
 		if ev.Usage != nil {
-			return "· usage used=" + itoa(ev.Usage.Used) + " size=" + itoa(ev.Usage.Size)
+			return "· usage " + ev.Usage.String()
 		}
 		return "· usage"
 	case "stop":
