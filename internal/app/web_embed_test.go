@@ -19,6 +19,7 @@ var productionJSModules = []string{
 	"web/js/chat.js",
 	"web/js/composer.js",
 	"web/js/format.js",
+	"web/js/insets.js",
 	"web/js/lanes.js",
 	"web/js/map-model.js",
 	"web/js/map.js",

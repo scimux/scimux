@@ -58,6 +58,7 @@ import { createNotesFeature } from "./notes.js";
 import { createSearchFeature } from "./search.js";
 import { createSheetsFeature } from "./sheets.js";
 import { createPollingFeature } from "./polling.js";
+import { INSET_TARGETS, installInsetRefresh } from "./insets.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -1586,6 +1587,15 @@ pollingFeature = createPollingFeature({
   onStartPolling: () => readUsage(), /* prime; 30s cadence stays shell-owned */
 });
 pollingFeature.bind();
+/* iOS keeps the landscape top inset on the fixed shell after rotating back to
+   portrait, sliding the status bar under the clock — re-resolve env() then. */
+installInsetRefresh({
+  win: window,
+  query: () => document.querySelectorAll(INSET_TARGETS.join(", ")),
+  read: () => document.documentElement.offsetHeight,
+  raf: fn => requestAnimationFrame(fn),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+});
 setLevel(level);
 /* restore persisted full-screen / fare chrome (map feature owns keys + ARIA) */
 mapFeature.restoreChrome();
