@@ -1,0 +1,4 @@
+{"t":"meta","time":"2026-08-01T13:00:00Z","meta":{"node":"fare-dedup","uid":"dedup001","agent":"claude","created":"2026-08-01T13:00:00Z"}}
+{"t":"usage","time":"2026-08-01T13:00:01Z","usage":{"inputTokens":100,"outputTokens":10,"turnId":"same-id"}}
+{"t":"usage","time":"2026-08-01T13:00:02Z","usage":{"inputTokens":100,"outputTokens":10,"turnId":"same-id"}}
+{"t":"usage","time":"2026-08-01T13:00:03Z","usage":{"inputTokens":50,"outputTokens":5,"turnId":"other-id"}}

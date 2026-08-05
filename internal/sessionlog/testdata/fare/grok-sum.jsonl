@@ -1,0 +1,3 @@
+{"t":"meta","time":"2026-08-01T11:00:00Z","meta":{"node":"fare-grok","uid":"grok0001","agent":"grok","model":"grok-4.5","created":"2026-08-01T11:00:00Z"}}
+{"t":"usage","time":"2026-08-01T11:00:01Z","usage":{"inputTokens":1000,"cachedReadTokens":300,"outputTokens":50,"turnId":"g-t1","model":"grok-4.5","costAmount":0.01}}
+{"t":"usage","time":"2026-08-01T11:00:02Z","usage":{"inputTokens":500,"cachedReadTokens":100,"outputTokens":25,"turnId":"g-t2","model":"grok-4.5","costAmount":0.005}}

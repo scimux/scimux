@@ -1,0 +1,8 @@
+{"t":"meta","time":"2026-08-01T16:00:00Z","meta":{"node":"fare-seg","uid":"seg00001","agent":"claude","created":"2026-08-01T16:00:00Z"}}
+{"t":"source","time":"2026-08-01T16:00:00.1Z","source":{"path":"/tmp/synth/a.jsonl","sessionId":"s-a"}}
+{"t":"usage","time":"2026-08-01T16:00:01Z","usage":{"inputTokens":100,"outputTokens":10,"turnId":"seg-a"}}
+{"t":"source","time":"2026-08-01T16:10:00Z","source":{"path":"","sessionId":"s-b","reason":"clear"}}
+{"t":"usage","time":"2026-08-01T16:10:01Z","usage":{"inputTokens":200,"outputTokens":20,"turnId":"seg-b"}}
+{"t":"source","time":"2026-08-01T16:15:00Z","source":{"path":"/tmp/synth/b.jsonl","sessionId":"s-b"}}
+{"t":"usage","time":"2026-08-01T16:15:01Z","usage":{"inputTokens":200,"outputTokens":20,"turnId":"seg-b"}}
+{"t":"usage","time":"2026-08-01T16:15:02Z","usage":{"inputTokens":50,"outputTokens":5,"turnId":"seg-c"}}

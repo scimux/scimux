@@ -1,0 +1,8 @@
+{"t":"meta","time":"2026-08-01T14:00:00Z","meta":{"node":"fare-rot","uid":"rot00001","agent":"claude","created":"2026-08-01T14:00:00Z"}}
+{"t":"source","time":"2026-08-01T14:00:00.1Z","source":{"path":"/tmp/synth/session.jsonl","sessionId":"sess-rot"}}
+{"t":"usage","time":"2026-08-01T14:00:01Z","usage":{"inputTokens":100,"outputTokens":10,"turnId":"t0"}}
+{"t":"usage","time":"2026-08-01T14:00:02Z","usage":{"inputTokens":200,"outputTokens":20,"turnId":"t1"}}
+{"t":"source","time":"2026-08-01T14:05:00Z","source":{"path":"/tmp/synth/session.jsonl","sessionId":"sess-rot"}}
+{"t":"usage","time":"2026-08-01T14:05:01Z","usage":{"inputTokens":100,"outputTokens":10,"turnId":"t0"}}
+{"t":"usage","time":"2026-08-01T14:05:02Z","usage":{"inputTokens":200,"outputTokens":20,"turnId":"t1"}}
+{"t":"usage","time":"2026-08-01T14:05:03Z","usage":{"inputTokens":50,"outputTokens":5,"turnId":"t2"}}

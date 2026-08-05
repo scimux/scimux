@@ -1,0 +1,3 @@
+{"t":"meta","time":"2026-08-01T19:30:00Z","meta":{"node":"fare-cost-inc","uid":"costinc1","agent":"grok","created":"2026-08-01T19:30:00Z"}}
+{"t":"usage","time":"2026-08-01T19:30:01Z","usage":{"inputTokens":100,"outputTokens":10,"turnId":"cost-1","costAmount":0.5}}
+{"t":"usage","time":"2026-08-01T19:30:02Z","usage":{"inputTokens":50,"outputTokens":5,"turnId":"cost-2"}}

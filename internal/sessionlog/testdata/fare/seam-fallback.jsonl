@@ -1,0 +1,5 @@
+{"t":"meta","time":"2026-08-01T15:00:00Z","meta":{"node":"fare-seam","uid":"seam0001","agent":"claude","created":"2026-08-01T15:00:00Z"}}
+{"t":"source","time":"2026-08-01T15:00:00.1Z","source":{"path":"/tmp/synth/no-id.jsonl","sessionId":"sess-noid"}}
+{"t":"usage","time":"2026-08-01T15:00:01Z","usage":{"inputTokens":100,"outputTokens":10}}
+{"t":"source","time":"2026-08-01T15:05:00Z","source":{"path":"/tmp/synth/no-id.jsonl","sessionId":"sess-noid"}}
+{"t":"usage","time":"2026-08-01T15:05:01Z","usage":{"inputTokens":100,"outputTokens":10}}

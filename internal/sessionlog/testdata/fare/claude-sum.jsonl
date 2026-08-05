@@ -1,0 +1,3 @@
+{"t":"meta","time":"2026-08-01T10:00:00Z","meta":{"node":"fare-claude","uid":"claude01","agent":"claude","model":"opus","created":"2026-08-01T10:00:00Z"}}
+{"t":"usage","time":"2026-08-01T10:00:01Z","usage":{"inputTokens":2,"outputTokens":410,"cacheCreationTokens":25437,"turnId":"c-t1","model":"opus"}}
+{"t":"usage","time":"2026-08-01T10:00:02Z","usage":{"inputTokens":100,"outputTokens":50,"cacheCreationTokens":200,"turnId":"c-t2","model":"opus"}}
