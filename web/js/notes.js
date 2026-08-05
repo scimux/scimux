@@ -358,6 +358,13 @@ export function dividerResizePlan(p = {}){
 
   /* boundary === "nav": pointerX = absolute divider x (= inbox + nav) */
   inboxW = colI ? peek : z.inbox;
+  /* Un-cascade: with both collapsed, rightward travel restores in reverse
+     collapse order — inbox first, capped at its remembered width — so dragging
+     back to where the gesture started returns the layout it started with. */
+  if (Number.isFinite(px) && colI && colN){
+    const wantInbox = Math.min(px - peek, lastI);
+    if (wantInbox >= mins.inbox){ colI = false; inboxW = wantInbox; }
+  }
   let wantNav = Number.isFinite(px) ? (px - inboxW) : navW;
   if (colN){
     if (wantNav < mins.nav){
@@ -372,6 +379,22 @@ export function dividerResizePlan(p = {}){
     navW = peek;
   } else {
     navW = wantNav;
+  }
+
+  /* Cascade: nav is at peek and the pointer is still travelling left, so the
+     inbox gives ground next (and collapses in its turn). Only ever shrinks —
+     leftward travel must not widen the inbox. */
+  if (colN && !colI && Number.isFinite(px)){
+    const wantInbox = px - peek;
+    if (wantInbox < inboxW){
+      if (wantInbox < mins.inbox){
+        lastI = Math.max(z.inbox, mins.inbox);
+        colI = true;
+        inboxW = peek;
+      } else {
+        inboxW = wantInbox;
+      }
+    }
   }
 
   /* note takes the rest; never below min; never collapsed */
@@ -1662,6 +1685,7 @@ export function createNotesFeature(deps){
       moved: false,
       handle,
     };
+    if (handle.classList) handle.classList.add("dragging");
     if (typeof handle.setPointerCapture === "function" && e.pointerId != null){
       try { handle.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     }
@@ -1692,6 +1716,7 @@ export function createNotesFeature(deps){
       wsSuppressClick = true;
     }
     const handle = wsDrag.handle;
+    if (handle && handle.classList) handle.classList.remove("dragging");
     if (handle && typeof handle.releasePointerCapture === "function" && wsDrag.pointerId != null){
       try { handle.releasePointerCapture(wsDrag.pointerId); } catch { /* ignore */ }
     }

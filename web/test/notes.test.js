@@ -355,6 +355,74 @@ test("dividerResizePlan: expanding one collapsed zone leaves the other collapsed
   assertTotal(plan);
 });
 
+/* Cascade (pill-2 drag): past nav's collapse the gesture keeps travelling and
+   starts shrinking, then collapsing, the inbox. Dragging back restores in
+   reverse order — inbox first (to its remembered width), then nav — so a drag
+   out and back returns the layout you started with. */
+test("dividerResizePlan: pill-2 leftwards cascades from nav into inbox", () => {
+  /* far enough left that nav is collapsed and inbox must give ground */
+  const plan = dividerResizePlan(resizeArgs({ boundary: "nav", pointerX: 250 }));
+  assert.equal(plan.collapsed.nav, true);
+  assert.equal(plan.widths.nav, WS_PEEK);
+  assert.equal(plan.collapsed.inbox, false);
+  assert.equal(plan.widths.inbox, 250 - WS_PEEK); /* pill stays under the pointer */
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: pill-2 leftwards past inbox min collapses inbox too", () => {
+  const plan = dividerResizePlan(resizeArgs({ boundary: "nav", pointerX: 200 }));
+  assert.equal(plan.collapsed.nav, true);
+  assert.equal(plan.collapsed.inbox, true);
+  assert.equal(plan.widths.inbox, WS_PEEK);
+  assert.equal(plan.widths.nav, WS_PEEK);
+  assert.equal(plan.last.inbox, 240); /* remembered pre-collapse width */
+  assert.equal(plan.last.nav, 220);
+  assert.equal(plan.widths.note, WS_TOTAL - 2 * WS_PEEK);
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: pill-2 cascade floors at two peeks", () => {
+  const plan = dividerResizePlan(resizeArgs({ boundary: "nav", pointerX: 0 }));
+  assert.equal(plan.widths.inbox, WS_PEEK);
+  assert.equal(plan.widths.nav, WS_PEEK);
+  assert.ok(plan.widths.note >= WS_MINS.note);
+  assertTotal(plan);
+});
+
+test("dividerResizePlan: pill-2 rightwards un-cascades inbox before nav", () => {
+  const both = {
+    zones: { inbox: WS_PEEK, nav: WS_PEEK, note: WS_TOTAL - 2 * WS_PEEK },
+    collapsed: { inbox: true, nav: true },
+    last: { inbox: 240, nav: 220 },
+  };
+  /* partway back: inbox restores, nav is still too narrow to expand */
+  const mid = dividerResizePlan(resizeArgs({ ...both, boundary: "nav", pointerX: 250 }));
+  assert.equal(mid.collapsed.inbox, false);
+  assert.equal(mid.widths.inbox, 250 - WS_PEEK);
+  assert.equal(mid.collapsed.nav, true);
+  assert.equal(mid.widths.nav, WS_PEEK);
+  assertTotal(mid);
+
+  /* all the way back to where the drag began: original layout is restored */
+  const back = dividerResizePlan(resizeArgs({ ...both, boundary: "nav", pointerX: 240 + 220 }));
+  assert.deepEqual(back.collapsed, { inbox: false, nav: false });
+  assert.equal(back.widths.inbox, 240);
+  assert.equal(back.widths.nav, 220);
+  assert.equal(back.widths.note, 440);
+  assertTotal(back);
+});
+
+test("dividerResizePlan: pill-1 rightwards collapses nav, then yields note to its min", () => {
+  /* zone-3 never collapses: the cascade stops at mins.note */
+  const plan = dividerResizePlan(resizeArgs({ boundary: "inbox", pointerX: 800 }));
+  assert.equal(plan.collapsed.nav, true);
+  assert.equal(plan.widths.nav, WS_PEEK);
+  assert.equal(plan.widths.note, WS_MINS.note);
+  assert.equal(plan.widths.inbox, WS_TOTAL - WS_PEEK - WS_MINS.note);
+  assert.equal(plan.collapsed.inbox, false);
+  assertTotal(plan);
+});
+
 test("dividerResizePlan: unknown boundary is a no-op", () => {
   const plan = dividerResizePlan(resizeArgs({ boundary: "note", pointerX: 100 }));
   assert.deepEqual(plan.widths, WS_ZONES);
@@ -2132,6 +2200,25 @@ test("index.html has two vertical separators; CSS uses custom-prop widths ≥768
   assert.match(m768[1], /var\(--wsnav-w,\s*clamp/);
   /* phone: divider default is display:none outside the media query */
   assert.match(notesCssSrc, /\.wsdivider\s*\{[^}]*display:\s*none/);
+});
+
+test("each divider carries a centred grab pill as its only affordance", () => {
+  /* ::after is the hairline; ::before is the pill the user aims at. */
+  const pill = notesCssSrc.match(/\.wsdivider::before\s*\{([^}]*)\}/);
+  assert.ok(pill, ".wsdivider::before pill rule present");
+  assert.match(pill[1], /border-radius/);
+  /* vertically centred on the frame line */
+  assert.match(pill[1], /top:\s*50%/);
+  assert.match(pill[1], /left:\s*50%/);
+  assert.match(pill[1], /translate\(\s*-50%\s*,\s*-50%\s*\)/);
+  /* the pill is decoration: the whole divider stays the hit target */
+  assert.match(pill[1], /pointer-events:\s*none/);
+  /* no chevron/collapse buttons on the frame lines — the pill is it */
+  const dividers = indexSrc.match(/<div class="wsdivider"[\s\S]*?<\/div>/g) || [];
+  assert.equal(dividers.length, 2);
+  for (const d of dividers){
+    assert.equal(/<button|chevron/.test(d), false, "divider carries no buttons");
+  }
 });
 
 test("divider drag reallocates live and persists layout on pointerup", async () => {
