@@ -554,6 +554,12 @@ export function createChatFeature(deps){
 
   function onSelectChange(){
     chatSig = "";
+    /* A new chat always opens at its newest bubble. #msgs is a singleton
+       reused across nodes, so without this the rebuild inherits the scroll
+       offset of the chat we just left: `atBottom` was measured on the old
+       content, and a reader who had scrolled up (or a shorter/longer other
+       chat) lands mid-history with the latest turns off-screen. */
+    chatScrollBottom = true;
     termOpen = false;
     tappedTurn = "";
     chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
@@ -969,7 +975,12 @@ export function createChatFeature(deps){
       }
       chatHist.scrollTo = "";
     }
-    if (chatScrollBottom){ pinChatBottom(el); chatScrollBottom = false; histScrolled = true; }
+    /* a jump-to-source (note/search/map) aims at one bubble — it outranks the
+       open-at-newest pin that a plain selection change asks for */
+    const jumpAimed = !!(getPendingJump() && getPendingJump().node === g("sel", ""));
+    if (chatScrollBottom && !jumpAimed){
+      pinChatBottom(el); chatScrollBottom = false; histScrolled = true;
+    }
     if (!histScrolled && !consumePendingJump(el, turns, data.prior_turns || 0) && (atBottom || forcePeek))
       pinChatBottom(el);
     const pk = q(el, ".peek");

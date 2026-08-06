@@ -887,6 +887,43 @@ test("chat rebuild pins a near-bottom reader but preserves a reader scrolled up"
   assert.equal(up.roots.msgs.scrollTop, 500);
 });
 
+test("switching to another chat lands at the newest bubble even if the reader was scrolled up", async () => {
+  const { feature, roots } = makeFeature();
+  roots.msgs.scrollHeight = 1000;
+  roots.msgs.clientHeight = 200;
+  roots.msgs.scrollTop = 500; // reading back in the chat we are leaving
+  await feature.render();
+  assert.equal(roots.msgs.scrollTop, 500, "reader scrolled up in the same chat stays put");
+
+  feature.onSelectChange();          // select() calls this before refreshChat
+  roots.msgs.scrollHeight = 2400;    // the other chat is a different length
+  await feature.render();
+  assert.equal(roots.msgs.scrollTop, 2400);
+});
+
+test("a jump-to-source outranks the open-at-newest pin of the selection change", async () => {
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "new", time: "2026-01-02T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-02T00:00:00Z", prior_turns: 1, assets: {},
+    },
+  });
+  ctx.roots.msgs.scrollHeight = 1000;
+  ctx.roots.msgs.clientHeight = 200;
+  ctx.roots.msgs.scrollTop = 500;
+  ctx.setPending({
+    node: "n1", uid: "old-uid", segment: 0, record: 1,
+    turnTime: "2026-01-01T00:00:01Z", ts: Date.now(),
+  });
+  ctx.feature.onSelectChange();   // notes/search jump: setPendingJump then select()
+  await ctx.feature.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(ctx.apiCalls.some(c => c.path.includes("/chat?history=1")),
+    "the jump still reaches for its segment instead of being pinned to the bottom");
+  assert.equal(ctx.roots.msgs.scrollTop, 500, "no bottom pin while the jump is aiming");
+});
+
 test("loading/empty state when no selection", async () => {
   const { feature, effects } = makeFeature({ sel: "" });
   await feature.render();
