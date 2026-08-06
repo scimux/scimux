@@ -42,6 +42,56 @@ func (a *app) piSessionMapPath() string {
 	return filepath.Join(a.home, ".pi", "pi-acp", "session-map.json")
 }
 
+// piModelsFilePath is pi's models.json (id → contextWindow). Overridable via
+// a.piModelsPath for tests; default is <home>/.pi/agent/models.json.
+func (a *app) piModelsFilePath() string {
+	if a != nil && a.piModelsPath != "" {
+		return a.piModelsPath
+	}
+	if a == nil {
+		return ""
+	}
+	return filepath.Join(a.home, ".pi", "agent", "models.json")
+}
+
+// piContextWindow returns the contextWindow for modelID from the cached
+// models.json view, or 0 when unknown. Never errors.
+func (a *app) piContextWindow(modelID string) int {
+	if a == nil || modelID == "" {
+		return 0
+	}
+	path := a.piModelsFilePath()
+	if path == "" {
+		return 0
+	}
+	// Lazily bind / rebind the cache when the path changes (test override).
+	if a.piModels == nil || a.piModels.Path != path {
+		a.piModels = &transcript.PiModels{Path: path}
+	}
+	return a.piModels.Window(modelID)
+}
+
+// piOccupancy maps a native pi usage turn onto Used/Size for the context tank
+// (D1). Used = totalTokens (fallback sum of parts) — same occupancy shape as
+// Claude. Size = models.json contextWindow for the turn's model. Occupancy is
+// set only when the window is known (>0); otherwise both stay zero (fare-only,
+// never a denominator-less tank). If Used > Size > 0, Used is cleared (D10:
+// never paint the gauge full). Cost rates from models.json are never read.
+func piOccupancy(u transcript.PiUsage, window int) (used, size int) {
+	if window <= 0 {
+		return 0, 0
+	}
+	size = window
+	used = u.TotalTokens
+	if used == 0 {
+		used = u.InputTokens + u.OutputTokens + u.CachedReadTokens + u.CacheCreationTokens
+	}
+	if used > size {
+		used = 0 // D10: nonsense occupancy must not paint full
+	}
+	return used, size
+}
+
 // liveSessionID prefers the live ACP session id (correct after /clear) and
 // falls back to the durable Node.SessionID.
 func (a *app) liveSessionID(n *Node) string {
@@ -137,7 +187,13 @@ func (a *app) syncPiFare(n *Node) {
 		if u.TurnID != "" && m.seenTurnIDs[u.TurnID] {
 			continue
 		}
+		// Occupancy tank (Phase 4a): Size from models.json contextWindow for
+		// u.Model (id join); Used = totalTokens when the window is known.
+		// Fare fields below are independent (D1); ReadFare never sums Used.
+		occUsed, occSize := piOccupancy(u, a.piContextWindow(u.Model))
 		ev := sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{
+			Used:                occUsed,
+			Size:                occSize,
 			InputTokens:         u.InputTokens,
 			OutputTokens:        u.OutputTokens,
 			CachedReadTokens:    u.CachedReadTokens,
@@ -148,11 +204,6 @@ func (a *app) syncPiFare(n *Node) {
 			CostCurrency:        u.CostCurrency,
 			Model:               u.Model,
 			TurnID:              u.TurnID,
-			// No Used/Size: pi advertises no context window (neither ACP
-			// initialize nor the native store carries one), so pi has a fare
-			// meter but no occupancy tank — the two gauges are independent
-			// by design (D1). Do not synthesize a tank from spend-shaped
-			// totalTokens; a real pi tank needs a window source it lacks.
 		}}
 		if err := m.logw.Append(ev); err != nil {
 			return // retry next tick

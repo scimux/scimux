@@ -184,6 +184,13 @@ type app struct {
 	// piMapPath overrides the pi-acp session-map.json path (tests). Empty
 	// means <home>/.pi/pi-acp/session-map.json.
 	piMapPath string
+	// piModelsPath overrides pi's models.json path (tests). Empty means
+	// <home>/.pi/agent/models.json. Used for the occupancy tank Size
+	// (Phase 4a); never for cost rates (D8).
+	piModelsPath string
+	// piModels is the mtime-cached id→contextWindow view of models.json.
+	// Lazily created by piContextWindow; not shared across apps.
+	piModels *transcript.PiModels
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool

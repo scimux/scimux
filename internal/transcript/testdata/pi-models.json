@@ -1,0 +1,57 @@
+{
+  "providers": {
+    "ollama-local": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "smollm2:1.7b",
+          "name": "smollm2",
+          "contextWindow": 8192,
+          "maxTokens": 8192,
+          "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        }
+      ]
+    },
+    "mylmstudio": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "gpt-oss-safeguard-120b-mlx",
+          "name": "gpt-oss-mlx",
+          "contextWindow": 32768,
+          "maxTokens": 4096
+        }
+      ]
+    },
+    "mistral": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "mistral-small-latest",
+          "name": "mistral-small",
+          "contextWindow": 32000
+        },
+        {
+          "id": "dup-id",
+          "name": "dup-first",
+          "contextWindow": 1000
+        }
+      ]
+    },
+    "other-provider": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "dup-id",
+          "name": "dup-second",
+          "contextWindow": 9999
+        },
+        {
+          "id": "zero-window",
+          "name": "zero",
+          "contextWindow": 0
+        }
+      ]
+    }
+  }
+}

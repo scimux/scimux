@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeSessionMap(t *testing.T, dir string, sessions map[string]map[string]string) string {
@@ -171,5 +172,98 @@ func TestPiNative_FixtureFileParsesBothTurns(t *testing.T) {
 	// Second poll of an unchanged file yields nothing new.
 	if again := tl.Poll(); len(again) != 0 {
 		t.Fatalf("idle poll returned %d events", len(again))
+	}
+}
+
+// --- Phase 4a: pi models.json → contextWindow by model id ---
+
+func TestPiModels_ParsesContextWindowByID(t *testing.T) {
+	// Multi-provider fixture: join on id (not name). Local-endpoint models
+	// included. Duplicate id → first-wins, no error. Missing/corrupt → empty map.
+	path := "testdata/pi-models.json"
+	got := LoadPiModelWindows(path)
+	if got == nil {
+		t.Fatal("LoadPiModelWindows returned nil; want empty-or-populated map")
+	}
+	// id→window (not name): smollm2:1.7b is the id; name is smollm2.
+	if got["smollm2:1.7b"] != 8192 {
+		t.Errorf("smollm2:1.7b = %d, want 8192 (local ollama model by id)", got["smollm2:1.7b"])
+	}
+	if _, ok := got["smollm2"]; ok {
+		t.Error("must key by id, not name: found name key smollm2")
+	}
+	if got["gpt-oss-safeguard-120b-mlx"] != 32768 {
+		t.Errorf("gpt-oss-safeguard-120b-mlx = %d, want 32768", got["gpt-oss-safeguard-120b-mlx"])
+	}
+	if got["mistral-small-latest"] != 32000 {
+		t.Errorf("mistral-small-latest = %d, want 32000", got["mistral-small-latest"])
+	}
+	// Same id under two providers: first-wins (1000, not 9999).
+	if got["dup-id"] != 1000 {
+		t.Errorf("dup-id = %d, want 1000 (first-wins across providers)", got["dup-id"])
+	}
+	// contextWindow == 0 entries may be present or omitted; Lookup treats 0 as unknown.
+	// Missing file → empty map, no crash.
+	empty := LoadPiModelWindows(filepath.Join(t.TempDir(), "no-such-models.json"))
+	if empty == nil {
+		t.Fatal("missing file must return empty map, not nil")
+	}
+	if len(empty) != 0 {
+		t.Errorf("missing file map len = %d, want 0", len(empty))
+	}
+	// Corrupt JSON → empty, no error.
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte("not-json{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := LoadPiModelWindows(bad)
+	if corrupt == nil || len(corrupt) != 0 {
+		t.Errorf("corrupt JSON: got %#v, want empty map", corrupt)
+	}
+}
+
+func TestPiModels_ReloadsOnChange(t *testing.T) {
+	// Editing models.json (new mtime) must pick up a changed window.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "models.json")
+	write := func(window int) {
+		t.Helper()
+		body := map[string]any{
+			"providers": map[string]any{
+				"p": map[string]any{
+					"models": []any{
+						map[string]any{"id": "m1", "name": "m1", "contextWindow": window},
+					},
+				},
+			},
+		}
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(1000)
+	cache := &PiModels{Path: path}
+	if w := cache.Window("m1"); w != 1000 {
+		t.Fatalf("initial Window(m1) = %d, want 1000", w)
+	}
+	// Ensure mtime advances on some filesystems (1s resolution).
+	// Touch content change is enough on most systems; sleep if needed.
+	write(2000)
+	info1, _ := os.Stat(path)
+	// Force a distinct mtime if the FS is coarse.
+	future := info1.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if w := cache.Window("m1"); w != 2000 {
+		t.Fatalf("after edit Window(m1) = %d, want 2000 (mtime reload)", w)
+	}
+	// Unknown model → 0.
+	if w := cache.Window("nope"); w != 0 {
+		t.Errorf("unknown model Window = %d, want 0", w)
 	}
 }
