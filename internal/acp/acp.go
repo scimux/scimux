@@ -99,6 +99,17 @@ func (m *Manager) session(nodeID string) *Session {
 	return m.sessions[nodeID]
 }
 
+// SessionID returns the live ACP session id for nodeID, or "" if none.
+// Used by the pi native fare re-source (fare-design Phase 4) so the join
+// key stays correct after /clear even when the node record is not rewritten.
+func (m *Manager) SessionID(nodeID string) string {
+	s := m.session(nodeID)
+	if s == nil {
+		return ""
+	}
+	return string(s.sessionID)
+}
+
 // Launch spawns the agent, negotiates the protocol, opens a session, and
 // applies effort. It does NOT send the first prompt — ACP's first prompt is
 // an ordinary Send, fired after the node is persisted. On any failure the

@@ -56,6 +56,11 @@ func (a *app) poll() {
 				a.lastChg[n.ID] = time.Now()
 			}
 			a.mu.Unlock()
+			// Phase 4: re-source pi fare from the native JSONL (session-map
+			// join). Other structured agents keep ACP/app-server usage only.
+			if n.Agent == "pi" {
+				a.syncPiFare(n)
+			}
 			continue
 		}
 		s := a.server.Session(n.ID)

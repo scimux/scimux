@@ -152,6 +152,13 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), code)
 				return
 			}
+			// Keep node.session_id on the post-clear ACP/thread id so the pi
+			// native fare join (session-map.json) stays one hop (Phase 4).
+			if sid := a.liveSessionID(n); sid != "" && sid != n.SessionID {
+				a.mu.Lock()
+				n.SessionID = sid
+				a.mu.Unlock()
+			}
 			writeJSON(w, map[string]string{"status": "acknowledged"})
 			return
 		}
@@ -294,6 +301,7 @@ func (a *app) retireTranscript(n *Node) {
 	// (which now ends in the seam below), exactly like after a restart — so
 	// a relink can never attribute pre-/clear turns to the fresh segment.
 	delete(a.mirrors, n.ID)
+	delete(a.piMirrors, n.ID)
 	a.mu.Unlock()
 	// A known rollover also turns the page in the session log: a path-less
 	// "detached" seam makes the fresh chat surface immediate (the reader

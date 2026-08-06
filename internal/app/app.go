@@ -67,6 +67,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		activeSince:     map[string]time.Time{},
 		tailers:         map[string]*transcript.Tailer{},
 		mirrors:         map[string]*mirror{},
+		piMirrors:       map[string]*piFareMirror{},
 		pathClaims:      map[string]bool{},
 		chatMark:        map[string]chatMark{},
 		staleChat:       map[string]bool{},
@@ -176,6 +177,13 @@ type app struct {
 	// mirrors: per-node transcript→session-log projection state (mirror.go),
 	// so tmux nodes end up with the same on-disk history as structured ones.
 	mirrors map[string]*mirror
+	// piMirrors: per-node pi native JSONL → session-log usage projection
+	// (pi_fare.go / fare-design Phase 4). Separate from mirrors so tmux and
+	// pi native state never collide on the same node id.
+	piMirrors map[string]*piFareMirror
+	// piMapPath overrides the pi-acp session-map.json path (tests). Empty
+	// means <home>/.pi/pi-acp/session-map.json.
+	piMapPath string
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool

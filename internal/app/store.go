@@ -136,6 +136,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.activeSince, id)
 	delete(a.tailers, id)
 	delete(a.mirrors, id)
+	delete(a.piMirrors, id)
 	delete(a.chatMark, id)
 	delete(a.staleChat, id)
 	delete(a.sendState, id)
