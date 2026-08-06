@@ -532,6 +532,11 @@ type Session struct {
 	lastError     string
 	banner        string
 	bannerDone    bool
+	// shellUsed/shellSize remember the latest usage_update occupancy for the
+	// in-flight turn so endTurn can pair it with PromptResponse.usage
+	// (opencode two-shape; fare-design §2.1 / D5). Cleared at turn end.
+	shellUsed int
+	shellSize int
 
 	done     chan struct{} // closed on exit/stop; unblocks a pending permission
 	doneOnce sync.Once
@@ -587,12 +592,25 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 			s.turnHadOutput = true
 		}
 	case u.UsageUpdate != nil:
+		// Occupancy shell (opencode streams these; see fare-design §2.1).
+		// Drop empty {} — contribute nothing. Cost amount is only recorded
+		// when >0 (currency-only is fine; never fabricate a dollar figure).
 		uu := u.UsageUpdate
+		if uu.Used == 0 && uu.Size == 0 {
+			break
+		}
 		ev := &UsageEvent{Used: uu.Used, Size: uu.Size}
 		if uu.Cost != nil {
-			ev.CostAmount = uu.Cost.Amount
-			ev.CostCurrency = uu.Cost.Currency
+			if uu.Cost.Amount > 0 {
+				ev.CostAmount = uu.Cost.Amount
+			}
+			if uu.Cost.Currency != "" {
+				ev.CostCurrency = uu.Cost.Currency
+			}
 		}
+		// Stash for turn-end pairing with PromptResponse.usage (opencode).
+		s.shellUsed = uu.Used
+		s.shellSize = uu.Size
 		s.appendLocked(Event{T: "usage", Usage: ev})
 	default:
 		// Thoughts, plans, mode/config/info updates, and any future variant:
@@ -741,8 +759,19 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 	// PromptResponse._meta. usageFromPrompt splits Grok's two layers
 	// (fare-design §2.5 / D10): Layer A last-call → Used, nested Layer B →
 	// spend breakdown/cost; Size from ctxSize captured at initialize.
+	//
+	// opencode (D5): two-shape pairing — shell feeds Used/Size, breakdown
+	// feeds fare. Shell occupancy was already written for the live gauge;
+	// the turn-end record must not overwrite Used with totalTokens.
+	shellUsed, shellSize := s.shellUsed, s.shellSize
+	s.shellUsed, s.shellSize = 0, 0
 	if ev := usageFromPrompt(resp, s.ctxSize); ev != nil {
-		s.appendLocked(Event{T: "usage", Usage: ev})
+		if s.agent == "opencode" {
+			ev = applyOpencodeUsagePairing(ev, shellUsed, shellSize)
+		}
+		if ev != nil {
+			s.appendLocked(Event{T: "usage", Usage: ev})
+		}
 	}
 	switch {
 	case err != nil:
@@ -1040,7 +1069,12 @@ func (s *Session) captureBanner(resp sdk.NewSessionResponse) {
 // Prefers the unstable top-level Usage field (opencode-style); falls back to
 // Grok-style dual-layer _meta (usageFromMeta). Standard Usage still maps
 // TotalTokens → Used via fillUsageOccupancy; Grok meta does not — see D10.
-// Returns nil when nothing usable is present.
+// Empty {} Usage is dropped (nil). Returns nil when nothing usable is present.
+//
+// Deliberately does not map Usage.CachedWriteTokens: opencode's ACP path has
+// no cache-write (fare-design D5 — baseline is 3-quantity fare; Phase 5b
+// SQLite enrichment for cache-write/cost is paused and must not be re-opened
+// here).
 func usageFromPrompt(resp sdk.PromptResponse, ctxSize int) *UsageEvent {
 	if resp.Usage != nil {
 		u := resp.Usage
@@ -1052,10 +1086,52 @@ func usageFromPrompt(resp sdk.PromptResponse, ctxSize int) *UsageEvent {
 		if u.CachedReadTokens != nil {
 			ev.CachedReadTokens = *u.CachedReadTokens
 		}
+		// Drop empty {} — no billable fields at all.
+		if ev.InputTokens == 0 && ev.OutputTokens == 0 &&
+			ev.CachedReadTokens == 0 && ev.TotalTokens == 0 {
+			return nil
+		}
 		fillUsageOccupancy(ev, ctxSize)
 		return ev
 	}
 	return usageFromMeta(resp.Meta, ctxSize)
+}
+
+// applyOpencodeUsagePairing implements fare-design D5 / Phase 5 for the
+// opencode ACP path (Tier B→B+, zero dependency).
+//
+// opencode emits two shapes per turn (§2.1): a streamed occupancy shell
+// {used,size,costCurrency} and a turn-end breakdown
+// {inputTokens,outputTokens,cachedReadTokens,totalTokens}. Pair them so:
+//   - Used/Size (tank) come from the shell, never from totalTokens
+//   - fare quantities come from the breakdown only
+//   - never double-count (shell has no breakdown fields; this record is the
+//     single fare hit for the turn)
+//   - no cache-write and no cost amount are invented (absent, not zero-as-real)
+//
+// On unexpected/missing breakdown the caller already left the shell in the
+// log (occupancy-only degrade); we never error. SQLite / opencode.db is out
+// of scope here — that is the paused Phase 5b enrichment, not correctness.
+func applyOpencodeUsagePairing(breakdown *UsageEvent, shellUsed, shellSize int) *UsageEvent {
+	if breakdown == nil {
+		return nil
+	}
+	// Never invent cache-write or reported cost on the ACP baseline.
+	breakdown.CacheCreationTokens = 0
+	breakdown.CostAmount = 0
+	// CostCurrency alone is not a fabricated dollar figure; leave empty on
+	// the breakdown so the fare hit is clearly "no cost reported".
+	breakdown.CostCurrency = ""
+
+	// Tank from shell when present. totalTokens is a spend sum, not occupancy;
+	// fillUsageOccupancy would otherwise paint Used = totalTokens.
+	if shellUsed > 0 {
+		breakdown.Used = shellUsed
+	}
+	if shellSize > 0 {
+		breakdown.Size = shellSize
+	}
+	return breakdown
 }
 
 // usageFromMeta reads Grok's PromptResponse._meta two-layer shape
