@@ -141,6 +141,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.staleChat, id)
 	delete(a.sendState, id)
 	delete(a.segCache, id)
+	delete(a.fareCache, id)
 	delete(a.anim, id)
 }
 

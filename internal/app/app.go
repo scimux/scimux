@@ -88,6 +88,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		assetsDir:       filepath.Join(cfg.DataDir, "assets"),
 		assetHook:       nil,
 		segCache:        map[string]*sessionlog.Cache{},
+		fareCache:       map[string]*sessionlog.FareCache{},
 		notes:           notestore.New(notesDir),
 		home:            cfg.Home,
 	}
@@ -280,6 +281,10 @@ type app struct {
 	// segCache memoizes each node's parsed current segment so the 1s chat
 	// poll costs a stat, not a reparse, while the log is unchanged.
 	segCache map[string]*sessionlog.Cache
+	// fareCache memoizes each node's whole-journey FareTotals (ReadFare) so
+	// the 1s state poll folds only when the session log grows (Phase 7).
+	// Same size/mtime key as segCache; never holds history segments.
+	fareCache map[string]*sessionlog.FareCache
 	// notes is the synthesis-document store (~/.scimux/notes/, one mutable
 	// JSON file per note — internal/notestore). Deliberately separate from the
 	// append-only session log: notes are documents, not an event stream (see

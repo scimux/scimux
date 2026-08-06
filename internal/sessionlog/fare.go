@@ -1,8 +1,51 @@
 package sessionlog
 
 import (
+	"os"
+	"sync"
+	"time"
+
 	"codeberg.org/chrberger/scimux/internal/fare"
 )
+
+// FareCache memoizes one node's ReadFare fold keyed by the file's (size, mtime).
+// Same invalidation contract as Cache (segment.go): the 1s poll path costs a
+// stat on an unchanged log, not a full-journey re-walk (Phase 7 fold-on-growth).
+type FareCache struct {
+	mu    sync.Mutex
+	path  string
+	size  int64
+	mtime time.Time
+	fare  fare.FareTotals
+	folds int // times ReadFare ran (test spy for fold-on-growth)
+}
+
+// Fare returns the cached whole-journey totals, re-folding only when path,
+// size, or mtime advances. A missing/unreadable file yields zero totals
+// (Turns==0 → fare unavailable at the projector) and does not error.
+func (c *FareCache) Fare(path string) fare.FareTotals {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fare.FareTotals{ReportedCostComplete: true}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.path == path && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
+		return c.fare
+	}
+	f := ReadFare(path)
+	c.path, c.size, c.mtime, c.fare = path, st.Size(), st.ModTime(), f
+	c.folds++
+	return f
+}
+
+// Folds is the number of times ReadFare was invoked through this cache.
+// Used by Phase 7 tests to prove fold-on-growth (not per-poll unconditional).
+func (c *FareCache) Folds() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.folds
+}
 
 // ReadFare folds the whole session-log journey into canonical fare totals:
 // §2.3 normalization via meta.agent, TurnID dedup (D3) with source-seam

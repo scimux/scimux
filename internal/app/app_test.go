@@ -60,6 +60,7 @@ func TestNewAppInitializesMutableMaps(t *testing.T) {
 		"anim":        a.anim != nil,
 		"claudeIDs":   a.claudeIDs != nil,
 		"segCache":    a.segCache != nil,
+		"fareCache":   a.fareCache != nil,
 	}
 	for name, ok := range maps {
 		if !ok {

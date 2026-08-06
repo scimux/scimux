@@ -102,6 +102,20 @@ type nodeView struct {
 	// Title/Description. Keyed exactly as the client builds the stop chain
 	// (created_at + each Stops entry), so no parsing is needed to match.
 	StationLabels map[string]sessionlog.StationLabel `json:"station_labels,omitempty"`
+	// Fare fields — whole-journey token meter (fare-design.md Phase 7, D1).
+	// Distinct from CtxPct (segment-scoped tank). Omitted entirely when
+	// ReadFare.Turns==0 (absent ≠ zero). fare_cost only meaningful with
+	// fare_cost_complete (D8). Pointers so a genuine 0 still serializes when
+	// fare is available.
+	FareFreshIn      *int     `json:"fare_fresh_in,omitempty"`
+	FareCacheRead    *int     `json:"fare_cache_read,omitempty"`
+	FareCacheWrite   *int     `json:"fare_cache_write,omitempty"`
+	FareOut          *int     `json:"fare_out,omitempty"`
+	FareTotal        *int     `json:"fare_total,omitempty"`
+	FareTurns        *int     `json:"fare_turns,omitempty"`
+	FareCost         *float64 `json:"fare_cost,omitempty"`
+	FareCostComplete *bool    `json:"fare_cost_complete,omitempty"`
+	FareModel        string   `json:"fare_model,omitempty"`
 }
 
 func unixMSStamp(s string) int64 {
@@ -177,6 +191,10 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	// only after the unlock (a.segment takes a.mu itself, so calling it inside
 	// the loop above would deadlock). segment() is cache-backed, so a quiet
 	// node whose log is unchanged re-parses nothing.
+	//
+	// Fare (journey meter) is projected for every node, also cache-backed
+	// (fold-on-growth). It is whole-journey ReadFare — never segment history
+	// and never merged into ctx_pct (D1). Missing/empty fare → fields omitted.
 	for i := range views {
 		v := &views[i]
 		// Every node reports its stop chain (the map draws stations for dead
@@ -188,6 +206,9 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 			v.StationLabels = seg.Stations
 		}
 		v.LastInteraction = lastInteractionMS(v.Node, seg)
+		// Fare meter: independent of live state (journey total still meaningful
+		// on exited threads). applyFare no-ops when Turns==0.
+		applyFare(v, a.fare(v.Node))
 		if v.Live == "exited" || v.Live == "unavailable" {
 			continue // gauge is live-only
 		}

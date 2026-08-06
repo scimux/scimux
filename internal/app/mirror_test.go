@@ -389,3 +389,58 @@ func TestMirror_UsageChangeGateStillHolds(t *testing.T) {
 		t.Fatalf("after second idle: usage events = %d, want 2 (gate held)", got)
 	}
 }
+
+// TestMirror_EmitsOnTurnIDChangeAtSameOccupancy: Phase-3 gate gap fix.
+// Claude's mirror used to emit only when used/win changed, so two consecutive
+// turns with an identical Used snapshot dropped the second turn from fare.
+// ReadFare dedups by TurnID, so more emissions are harmless — fire also when
+// TurnID advances at the same occupancy.
+func TestMirror_EmitsOnTurnIDChangeAtSameOccupancy(t *testing.T) {
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	// used = input+cache_read+cache_creation+output = 90+0+0+10 = 100 for both.
+	appendFile(t, tp, `{"type":"assistant","timestamp":"t1","requestId":"req-1","message":{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":90,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`+"\n")
+	n := &Node{ID: "n1", Agent: "claude", Transcript: tp}
+	a.syncMirror(n)
+
+	countUsage := func() int {
+		n := 0
+		for _, ev := range logEvents(t, a, "n1") {
+			if ev.T == "usage" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countUsage(); got != 1 {
+		t.Fatalf("after first turn: usage events = %d, want 1", got)
+	}
+
+	// Same occupancy (used still 100), different TurnID.
+	appendFile(t, tp, `{"type":"assistant","timestamp":"t2","requestId":"req-2","message":{"id":"msg-2","role":"assistant","content":[{"type":"text","text":"again"}],"usage":{"input_tokens":80,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`+"\n")
+	a.syncMirror(n)
+	if got := countUsage(); got != 2 {
+		t.Fatalf("after same-occupancy new turn: usage events = %d, want 2 (TurnID gate)", got)
+	}
+
+	// Distinct turn IDs on the two usage records.
+	var turnIDs []string
+	for _, ev := range logEvents(t, a, "n1") {
+		if ev.T == "usage" && ev.Usage != nil {
+			turnIDs = append(turnIDs, ev.Usage.TurnID)
+		}
+	}
+	if len(turnIDs) != 2 || turnIDs[0] == turnIDs[1] {
+		t.Fatalf("turn IDs = %v, want two distinct ids", turnIDs)
+	}
+	if turnIDs[0] != "msg-1:req-1" || turnIDs[1] != "msg-2:req-2" {
+		t.Errorf("turn IDs = %v, want [msg-1:req-1 msg-2:req-2]", turnIDs)
+	}
+
+	// Occupancy gate still held: idle re-sync does not emit again.
+	a.syncMirror(n)
+	if got := countUsage(); got != 2 {
+		t.Fatalf("after idle: usage events = %d, want 2 (no spurious emission)", got)
+	}
+}

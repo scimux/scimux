@@ -296,6 +296,7 @@ func TestRemoveNodeLocked(t *testing.T) {
 		staleChat:   map[string]bool{"a": true, "b": false},
 		sendState:   map[string]string{"a": "submitting", "b": "unconfirmed"},
 		segCache:    map[string]*sessionlog.Cache{"a": {}, "b": {}},
+		fareCache:   map[string]*sessionlog.FareCache{"a": {}, "b": {}},
 		anim:        map[string]*animState{"a": {lines: []int{0}}, "b": {lines: []int{1}}},
 	}
 	a.removeNodeLocked("a")
@@ -306,7 +307,7 @@ func TestRemoveNodeLocked(t *testing.T) {
 		t.Fatalf("nodes = %v, want [b]", got)
 	}
 	for _, name := range []string{"live", "attn", "attnAt", "prevCap", "lastChg", "activeSince",
-		"tailers", "mirrors", "chatMark", "staleChat", "sendState", "segCache", "anim"} {
+		"tailers", "mirrors", "chatMark", "staleChat", "sendState", "segCache", "fareCache", "anim"} {
 		var ok bool
 		switch name {
 		case "live":
@@ -333,6 +334,8 @@ func TestRemoveNodeLocked(t *testing.T) {
 			_, ok = a.sendState["a"]
 		case "segCache":
 			_, ok = a.segCache["a"]
+		case "fareCache":
+			_, ok = a.fareCache["a"]
 		case "anim":
 			_, ok = a.anim["a"]
 		}
@@ -350,6 +353,9 @@ func TestRemoveNodeLocked(t *testing.T) {
 	}
 	if _, ok := a.segCache["b"]; !ok {
 		t.Fatal("removeNodeLocked cleared peer segCache")
+	}
+	if _, ok := a.fareCache["b"]; !ok {
+		t.Fatal("removeNodeLocked cleared peer fareCache")
 	}
 	// Missing id is a no-op.
 	a.removeNodeLocked("missing")

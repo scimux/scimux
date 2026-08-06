@@ -41,6 +41,12 @@ type mirror struct {
 	mirrored int
 	lastUsed int64
 	lastWin  int64
+	// lastTurnID is the TurnID of the last emitted usage record. Together with
+	// lastUsed/lastWin it forms the emission gate: occupancy change still
+	// fires, and a new TurnID at the same occupancy also fires so Claude fare
+	// does not drop consecutive turns with an identical Used snapshot
+	// (Phase 7 bundled fix; ReadFare dedups by TurnID so extras are harmless).
+	lastTurnID string
 	// tsize is the transcript byte size mirrored so far — the restart fast
 	// path's watermark. Recovered from the last "mark" record and re-persisted
 	// as mirroring advances; a stat equal to it means "nothing new, skip".
@@ -80,7 +86,8 @@ func (a *app) syncMirror(n *Node) {
 	if m.logw == nil || m.logw.Path != logPath {
 		m.logw = &sessionlog.Writer{Path: logPath}
 		st := replayMirrorState(logPath)
-		m.path, m.mirrored, m.lastUsed, m.lastWin, m.tsize = st.path, st.mirrored, st.used, st.win, st.size
+		m.path, m.mirrored, m.lastUsed, m.lastWin, m.lastTurnID, m.tsize =
+			st.path, st.mirrored, st.used, st.win, st.turnID, st.size
 		if !st.hasMeta {
 			if err := m.logw.Append(sessionlog.NewMeta(n.ID, n.Agent, n.Model, n.Effort, n.Dir)); err != nil {
 				m.logw = nil // retry next tick; don't advance state past a failed write
@@ -145,9 +152,11 @@ func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, us
 			}
 		}
 	}
-	// Occupancy gate unchanged (used/win only). Breakdown fields ride on the
-	// same usage record when occupancy changes — no extra emissions (Phase 3).
-	if used > 0 && (used != m.lastUsed || win != m.lastWin) {
+	// Emission gate: occupancy change (used/win) OR a new TurnID at the same
+	// occupancy. Phase 3 only gated on occupancy, which dropped Claude turns
+	// whose Used snapshot matched the previous turn; Phase 7 widens the gate
+	// so fare is complete. ReadFare dedups by TurnID — extra emissions safe.
+	if used > 0 && (used != m.lastUsed || win != m.lastWin || bd.TurnID != m.lastTurnID) {
 		if err := m.logw.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{
 			Used:                int(used),
 			Size:                int(win),
@@ -159,7 +168,7 @@ func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, us
 		}}); err != nil {
 			return
 		}
-		m.lastUsed, m.lastWin = used, win
+		m.lastUsed, m.lastWin, m.lastTurnID = used, win, bd.TurnID
 	}
 	// Persist the consumed transcript size so a restart can skip this file if it
 	// has not grown. Only when it advances, so a settled node writes no marks;
@@ -181,7 +190,8 @@ type mirrorState struct {
 	mirrored int
 	used     int64
 	win      int64
-	size     int64 // transcript byte size at the last mark of the current segment
+	turnID   string // last usage TurnID in the current segment (emission gate)
+	size     int64  // transcript byte size at the last mark of the current segment
 }
 
 // replayMirrorState derives the mirror's resume point from the log file —
@@ -207,6 +217,7 @@ func replayMirrorState(logPath string) mirrorState {
 		case "usage":
 			if ev.Usage != nil {
 				st.used, st.win = int64(ev.Usage.Used), int64(ev.Usage.Size)
+				st.turnID = ev.Usage.TurnID
 			}
 		case "mark":
 			if ev.Mark != nil {
