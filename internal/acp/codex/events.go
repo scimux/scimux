@@ -58,8 +58,15 @@ func decodeStatus(params json.RawMessage) string {
 // decodeTokenUsage folds a thread/tokenUsage/updated notification into a
 // UsageEvent. The "last" block is the just-finished turn (the leg boundary fare
 // telemetry needs); modelContextWindow becomes Size.
-func decodeTokenUsage(params json.RawMessage) *UsageEvent {
+//
+// sessionModel is the session's effective model (log meta.model / thread/start).
+// O4 (Phase 6): the codex app-server tokenUsage notification has no per-turn
+// model field — fall back to sessionModel. TurnID comes from params.turnId when
+// present; absent → empty so ReadFare uses the source-seam watermark (D3).
+// Identity fields are additive; occupancy and token breakdown are unchanged.
+func decodeTokenUsage(params json.RawMessage, sessionModel string) *UsageEvent {
 	var t struct {
+		TurnID     string `json:"turnId"`
 		TokenUsage struct {
 			Last struct {
 				TotalTokens       int `json:"totalTokens"`
@@ -81,6 +88,9 @@ func decodeTokenUsage(params json.RawMessage) *UsageEvent {
 		OutputTokens:     last.OutputTokens,
 		CachedReadTokens: last.CachedInputTokens,
 		TotalTokens:      last.TotalTokens,
+		// O4: no per-turn model on this notification — session meta.model fallback.
+		Model:  sessionModel,
+		TurnID: t.TurnID,
 	}
 }
 

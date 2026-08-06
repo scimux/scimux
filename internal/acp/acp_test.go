@@ -655,6 +655,99 @@ func TestContextSizeFromMeta(t *testing.T) {
 	}
 }
 
+// Phase 6 — Model + TurnID identity fields on grok UsageEvents (D3, D6).
+
+// TestGrok_ModelFromMeta: usageFromMeta sets Model from _meta.modelId.
+// The synthetic dual-layer mock carries "modelId":"grok-4.5".
+func TestGrok_ModelFromMeta(t *testing.T) {
+	ev := usageFromMeta(mockGrokMetaT1(), 500_000)
+	if ev == nil {
+		t.Fatal("expected usage event")
+	}
+	if ev.Model != "grok-4.5" {
+		t.Fatalf("Model = %q, want %q (_meta.modelId)", ev.Model, "grok-4.5")
+	}
+	// Occupancy must stay Layer-A (Phase G) — Model is additive only.
+	if ev.Used != 501 {
+		t.Fatalf("Used = %d, want 501 (Phase-G occupancy must not change)", ev.Used)
+	}
+}
+
+// TestGrok_TurnIDFromRequestId: usageFromMeta sets TurnID from _meta.requestId
+// when present; absent → empty (seam fallback), never a crash.
+func TestGrok_TurnIDFromRequestId(t *testing.T) {
+	ev := usageFromMeta(mockGrokMetaT1(), 500_000)
+	if ev == nil {
+		t.Fatal("expected usage event")
+	}
+	wantID := "synthetic-grok-request"
+	if ev.TurnID != wantID {
+		t.Fatalf("TurnID = %q, want %q (_meta.requestId)", ev.TurnID, wantID)
+	}
+
+	// N1 has modelId but no requestId → empty TurnID (D3 seam fallback).
+	ev = usageFromMeta(mockGrokMetaN1(), 500_000)
+	if ev == nil {
+		t.Fatal("N1: expected usage event")
+	}
+	if ev.TurnID != "" {
+		t.Fatalf("TurnID = %q, want empty when requestId absent (seam fallback)", ev.TurnID)
+	}
+}
+
+// TestGrok_ReportedCostFlowsToFare: a grok turn projected into the session log
+// reaches ReadFare with ReportedCostUSD (costUsdTicks/1e9) and PerModel["grok-4.5"]
+// (D6 + D8). Extends Phase-G Layer-B cost linkage.
+func TestGrok_ReportedCostFlowsToFare(t *testing.T) {
+	ev := usageFromMeta(mockGrokMetaT1(), 500_000)
+	if ev == nil {
+		t.Fatal("expected usage event")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "grok-fare.jsonl")
+	w := &sessionlog.Writer{Path: path}
+	if err := w.Append(sessionlog.NewMeta("g1", "grok", "grok-4.5", "low", dir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.Event{T: "usage", Usage: ev}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := sessionlog.ReadFare(path)
+	// Layer B T1: fresh_in = 900 − 200 = 700; out=60; cache_read=200
+	if f.FreshIn != 700 {
+		t.Errorf("FreshIn = %d, want 700 (900−200 subtract)", f.FreshIn)
+	}
+	if f.CacheRead != 200 {
+		t.Errorf("CacheRead = %d, want 200", f.CacheRead)
+	}
+	if f.Out != 60 {
+		t.Errorf("Out = %d, want 60", f.Out)
+	}
+	wantCost := 625000000.0 / 1e9
+	if f.ReportedCostUSD < wantCost-1e-12 || f.ReportedCostUSD > wantCost+1e-12 {
+		t.Errorf("ReportedCostUSD = %v, want %v (costUsdTicks/1e9)", f.ReportedCostUSD, wantCost)
+	}
+	if !f.ReportedCostComplete {
+		t.Error("ReportedCostComplete = false, want true")
+	}
+	pm, ok := f.PerModel["grok-4.5"]
+	if !ok {
+		t.Fatal(`PerModel["grok-4.5"] missing (D6: Model must land on UsageEvent)`)
+	}
+	if pm.FreshIn != 700 || pm.Out != 60 || pm.CacheRead != 200 {
+		t.Errorf("PerModel[grok-4.5] = fresh=%d cache=%d out=%d, want 700/200/60",
+			pm.FreshIn, pm.CacheRead, pm.Out)
+	}
+	if pm.ReportedCostUSD < wantCost-1e-12 || pm.ReportedCostUSD > wantCost+1e-12 {
+		t.Errorf("PerModel cost = %v, want %v", pm.ReportedCostUSD, wantCost)
+	}
+	// Occupancy is never summed into fare (D1).
+	if f.Turns != 1 {
+		t.Errorf("Turns = %d, want 1", f.Turns)
+	}
+}
+
 // End-to-end: synthetic dual-layer Grok _meta (modelCalls:2) must land
 // last-call Used + window Size in Manager.Usage — not nested spend.
 func TestGrokMetaUsageEndToEnd(t *testing.T) {

@@ -1,6 +1,11 @@
 package codex
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
+)
 
 func TestDecodeAgentDelta(t *testing.T) {
 	if _, got := decodeAgentDelta([]byte(`{"delta":"pon"}`)); got != "pon" {
@@ -24,7 +29,7 @@ func TestDecodeStatus(t *testing.T) {
 func TestDecodeTokenUsage(t *testing.T) {
 	// Synthetic last-turn counters deliberately differ from cumulative counters.
 	raw := []byte(`{"threadId":"t","turnId":"u","tokenUsage":{"total":{"totalTokens":360,"inputTokens":300,"cachedInputTokens":120,"outputTokens":60,"reasoningOutputTokens":0},"last":{"totalTokens":120,"inputTokens":100,"cachedInputTokens":40,"outputTokens":20,"reasoningOutputTokens":0},"modelContextWindow":1000}}`)
-	u := decodeTokenUsage(raw)
+	u := decodeTokenUsage(raw, "")
 	if u == nil {
 		t.Fatal("nil usage")
 	}
@@ -34,8 +39,95 @@ func TestDecodeTokenUsage(t *testing.T) {
 	if u.InputTokens != 100 || u.OutputTokens != 20 || u.CachedReadTokens != 40 || u.TotalTokens != 120 {
 		t.Fatalf("token breakdown wrong: %+v", u)
 	}
-	if decodeTokenUsage([]byte(`not json`)) != nil {
+	if decodeTokenUsage([]byte(`not json`), "") != nil {
 		t.Fatal("garbage usage should be nil")
+	}
+}
+
+// Phase 6 — Model + TurnID on codex UsageEvents (O4, D3, D6).
+// Live wire shape carries turnId on tokenUsage/updated params; no per-turn
+// model → sessionModel (meta.model) fallback.
+func TestCodexEvents_ModelAndTurnID(t *testing.T) {
+	// Synthetic identity envelope: turnId is at params top-level.
+	raw := []byte(`{"threadId":"t","turnId":"u","tokenUsage":{"total":{"totalTokens":360,"inputTokens":300,"cachedInputTokens":120,"outputTokens":60,"reasoningOutputTokens":0},"last":{"totalTokens":120,"inputTokens":100,"cachedInputTokens":40,"outputTokens":20,"reasoningOutputTokens":0},"modelContextWindow":1000}}`)
+	u := decodeTokenUsage(raw, "gpt-5.5")
+	if u == nil {
+		t.Fatal("nil usage")
+	}
+	if u.TurnID != "u" {
+		t.Fatalf("TurnID = %q, want %q (params.turnId)", u.TurnID, "u")
+	}
+	// O4: no per-turn model on tokenUsage → session meta.model fallback.
+	if u.Model != "gpt-5.5" {
+		t.Fatalf("Model = %q, want %q (session meta.model fallback, O4)", u.Model, "gpt-5.5")
+	}
+	// Occupancy / breakdown unchanged (additive identity fields only).
+	if u.Used != 120 || u.InputTokens != 100 || u.CachedReadTokens != 40 {
+		t.Fatalf("breakdown/occupancy changed: %+v", u)
+	}
+
+	// Absent turnId → empty TurnID (seam fallback, D3); never invent one.
+	noID := []byte(`{"tokenUsage":{"last":{"totalTokens":77,"inputTokens":60,"cachedInputTokens":0,"outputTokens":17},"modelContextWindow":128000}}`)
+	u = decodeTokenUsage(noID, "codex-o4-mini")
+	if u == nil {
+		t.Fatal("nil usage for no-turnId shape")
+	}
+	if u.TurnID != "" {
+		t.Fatalf("TurnID = %q, want empty when params.turnId absent", u.TurnID)
+	}
+	if u.Model != "codex-o4-mini" {
+		t.Fatalf("Model = %q, want session fallback", u.Model)
+	}
+
+	// Empty session model → Model empty (degrade, never invent).
+	u = decodeTokenUsage(raw, "")
+	if u == nil || u.Model != "" {
+		t.Fatalf("empty sessionModel: Model = %q, want empty", u.Model)
+	}
+}
+
+// TestCodex_SubtractNormalizationEndToEnd: codex fixture with
+// {inputTokens, cachedReadTokens} → after ReadFare, FreshIn == input − cache
+// (clamped ≥0), proving §2.3 subtract flows through fare.Normalize for codex.
+func TestCodex_SubtractNormalizationEndToEnd(t *testing.T) {
+	// Same synthetic counters as TestDecodeTokenUsage: input=100, cached=40.
+	raw := []byte(`{"threadId":"t","turnId":"turn-e2e","tokenUsage":{"last":{"totalTokens":120,"inputTokens":100,"cachedInputTokens":40,"outputTokens":20},"modelContextWindow":1000}}`)
+	u := decodeTokenUsage(raw, "gpt-5.5")
+	if u == nil {
+		t.Fatal("nil usage")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-fare.jsonl")
+	w := &sessionlog.Writer{Path: path}
+	if err := w.Append(sessionlog.NewMeta("c1", "codex", "gpt-5.5", "high", dir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.Event{T: "usage", Usage: u}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := sessionlog.ReadFare(path)
+	wantFresh := 100 - 40 // 60
+	if f.FreshIn != wantFresh {
+		t.Errorf("FreshIn = %d, want %d (inputTokens − cachedReadTokens via fare.Normalize)", f.FreshIn, wantFresh)
+	}
+	if f.CacheRead != 40 {
+		t.Errorf("CacheRead = %d, want 40", f.CacheRead)
+	}
+	if f.Out != 20 {
+		t.Errorf("Out = %d, want 20", f.Out)
+	}
+	if f.Turns != 1 {
+		t.Errorf("Turns = %d, want 1", f.Turns)
+	}
+	// D6: PerModel keyed by session-model fallback.
+	pm, ok := f.PerModel["gpt-5.5"]
+	if !ok {
+		t.Fatal(`PerModel["gpt-5.5"] missing`)
+	}
+	if pm.FreshIn != wantFresh {
+		t.Errorf("PerModel FreshIn = %d, want %d", pm.FreshIn, wantFresh)
 	}
 }
 

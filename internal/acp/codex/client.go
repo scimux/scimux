@@ -43,6 +43,11 @@ type Client struct {
 	// agentMessage in the completed notification — finding 76).
 	deltas map[string]*strings.Builder
 
+	// model is the effective model from the last thread/start (server-reported,
+	// else the request override). Stamped onto UsageEvents as O4 meta.model
+	// fallback — tokenUsage/updated carries no per-turn model field.
+	model string
+
 	done     chan struct{} // closed once the read loop exits (transport gone)
 	doneOnce sync.Once
 }
@@ -168,6 +173,15 @@ func (c *Client) StartThread(ctx context.Context, p StartThreadParams) (ThreadIn
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return ThreadInfo{}, fmt.Errorf("decode thread/start: %w", err)
 	}
+	// Remember effective model for usage Model fallback (O4 / Phase 6).
+	// Prefer the server's reported model; fall back to the request override.
+	model := r.Model
+	if model == "" {
+		model = p.Model
+	}
+	c.mu.Lock()
+	c.model = model
+	c.mu.Unlock()
 	return ThreadInfo{
 		ID: r.Thread.ID, Path: r.Thread.Path, Model: r.Model,
 		EffectivePolicy: r.ApprovalPolicy, SandboxType: r.Sandbox.Type,
@@ -370,7 +384,10 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 		}
 		c.emit(*ev)
 	case "thread/tokenUsage/updated":
-		if u := decodeTokenUsage(params); u != nil {
+		c.mu.Lock()
+		sessionModel := c.model
+		c.mu.Unlock()
+		if u := decodeTokenUsage(params, sessionModel); u != nil {
 			c.emit(Event{T: "usage", Usage: u})
 		}
 	case "turn/started":

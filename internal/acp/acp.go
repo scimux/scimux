@@ -1125,6 +1125,16 @@ func usageFromMeta(meta map[string]any, ctxSize int) *UsageEvent {
 		}
 	}
 
+	// Phase 6 identity (D3/D6, O4): additive only — do not touch Layer A/B split.
+	// modelId is per-turn on the wire; requestId (==promptId) is the turn id.
+	// Absent → empty (ReadFare seam fallback / no PerModel key); never error.
+	if s, ok := meta["modelId"].(string); ok {
+		ev.Model = s
+	}
+	if s, ok := meta["requestId"].(string); ok {
+		ev.TurnID = s
+	}
+
 	if ev.Used == 0 && ev.TotalTokens == 0 && ev.InputTokens == 0 && ev.OutputTokens == 0 {
 		return nil
 	}
