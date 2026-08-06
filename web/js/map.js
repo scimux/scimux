@@ -17,9 +17,10 @@
  *
  * Outputs:
  *   - HTML into maptabs / lanechips / mapwrap / maptoolbar
- *   - body.map-full class; mapfullbtn ARIA/glyph; farebtn.on
+ *   - body.map-full class; mapfullbtn ARIA/glyph; farebtn.on + aria-pressed
+ *     + on/off layer-group SVG (fare layer; revealed only under body.map-full)
  *   - localStorage: scimux-maptab, scimux-mapfold, scimux-mapfold-known,
- *     scimux-mapfull, scimux-fare (fare write only; read stays dormant)
+ *     scimux-mapfull, scimux-fare
  *   - uiMutate groups/lanes; callbacks: select, setLevel, setLaneFilter,
  *     loadChatHistory, jumpChatToNow, openActivityEditor, forkFromStation,
  *     addStationBookmark, exitThread, openSheet/closeSheets, renderCards
@@ -47,14 +48,14 @@
  *   lanes.js: groupLanes, servedLanes, forkKind, stopsOf, stopKey, stopLabel,
  *     newestFirst, parentStopIndex, laneColumnOrder, byNameID, stampMS
  *   map-model.js: statusText, headStopKey, toggleMapSelection
- *   format.js: esc, ageText, fmtStamp, fmtDur, contrastText
+ *   format.js: esc, fmtStamp, stampMS, contrastText
  *   cards.js: cardConfigText (station caption only)
  *
  * Module size: above the ~500-line soft guide — one factory owns the complete
  * Journeys surface (stack + wall SVG + selection toolbar + fold/tab state).
  */
 
-import { esc, ageText, fmtStamp, fmtDur, stampMS, contrastText as contrastTextPure } from "./format.js";
+import { esc, fmtStamp, stampMS, contrastText as contrastTextPure } from "./format.js";
 import {
   byNameID,
   groupLanes,
@@ -188,6 +189,18 @@ export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull,
     + "|" + focusLane + "|" + mapTab + "|" + mapFull;
 }
 
+/* Fare fingerprint for wall re-render when the overlay is on. Uses fare_*
+   totals (not last_activity) so a token/cost poll update actually rebuilds
+   the meter; fareOff keeps the field inert so idle polls stay skip-able. */
+function fareFingerprint(n){
+  if (!n) return "";
+  return [
+    n.fare_total ?? "",
+    n.fare_turns ?? "",
+    n.fare_cost_complete ? 1 : 0,
+  ].join(",");
+}
+
 export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn } = {}){
   return "wall|" + (cols || []).join(",") + "|" + focusLane + "|" + mapTab + "|" +
     mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
@@ -195,7 +208,7 @@ export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSel
       l.title, l.desc, s.n.agent,
       s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
       s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
-      fareOn ? (s.n.last_activity || 0) : 0]; }));
+      fareOn ? fareFingerprint(s.n) : 0]; }));
 }
 
 export function attentionStationSVG(x, y, op){
@@ -241,17 +254,51 @@ export function forkCueHTML(n, lm, { escape = esc, forkKind, nodeById } = {}){
   return `<span class="forkcue" data-goorigin="${escape(p.id)}" style="color:${col}">from ${escape(p.title)}</span>`;
 }
 
-export function fareLineHTML(n, { mapFull, fareOn, escape = esc, stamp = fmtStamp, age = ageText, dur = fmtDur } = {}){
-  if (!mapFull || !fareOn) return "";
-  const parts = [];
-  if (n.created_at) parts.push(`start ${escape(stamp(n.created_at))}`);
-  if (n.last_activity) parts.push(`last ${escape(age(n.last_activity))}`);
-  const started = Date.parse(n.created_at);
-  if (n.last_activity && !isNaN(started))
-    parts.push(`elapsed ${escape(dur(n.last_activity - started))}`);
-  if (n.ctx_pct != null)
-    parts.push(`<span class="${n.ctx_pct >= 80 ? "high" : ""}">${n.ctx_pct}% ctx</span>`);
-  return parts.length ? `<div class="fare">${parts.join(" · ")}</div>` : "";
+/* Compact token count for the fare meter (32.8k / 1.2M). Pure; tests pin
+   label presence, not exact glyphs. */
+export function fmtFareTokens(n){
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "0";
+  const a = Math.abs(v);
+  if (a >= 1_000_000){
+    const s = (v / 1_000_000).toFixed(1);
+    return s.replace(/\.0$/, "") + "M";
+  }
+  if (a >= 1000){
+    const s = (v / 1000).toFixed(1);
+    return s.replace(/\.0$/, "") + "k";
+  }
+  return String(Math.round(v));
+}
+
+function fmtFareCost(c){
+  const v = Number(c);
+  if (!Number.isFinite(v)) return "";
+  return "$" + v.toFixed(2);
+}
+
+/* Journey token meter (fare-design.md Phase 8 / D1 / D8). Full-screen + fareOn
+   only. Distinct from the ctx_pct tank ring on the wall SVG — never merges
+   occupancy into this line. Cost only when fare_cost_complete (D8). Absent
+   fare_* fields → empty (never 0·0·0). */
+export function fareLineHTML(n, { mapFull, fareOn, escape = esc } = {}){
+  if (!mapFull || !fareOn || !n) return "";
+  const hasFare = n.fare_fresh_in != null || n.fare_out != null
+    || n.fare_cache_write != null || n.fare_cache_read != null
+    || n.fare_total != null || n.fare_turns != null;
+  if (!hasFare) return "";
+  const parts = [
+    `fresh ${fmtFareTokens(n.fare_fresh_in ?? 0)}`,
+    `out ${fmtFareTokens(n.fare_out ?? 0)}`,
+    `cache-wr ${fmtFareTokens(n.fare_cache_write ?? 0)}`,
+    `cache-rd ${fmtFareTokens(n.fare_cache_read ?? 0)}`,
+  ];
+  if (n.fare_model) parts.push(escape(n.fare_model));
+  if (n.fare_turns != null) parts.push(`${Number(n.fare_turns)} turns`);
+  // D8: reported-or-omitted — no $, no number, no estimate unless complete
+  if (n.fare_cost_complete && n.fare_cost != null)
+    parts.push(fmtFareCost(n.fare_cost));
+  return `<div class="fare">${parts.join(" · ")}</div>`;
 }
 
 export function stationRowHTML(n, lm, opts = {}){
@@ -306,18 +353,17 @@ export function createMapFeature(deps){
   const CSSRef = d.CSS || (typeof CSS !== "undefined" ? CSS : { escape: s => String(s) });
   const storage = d.storage || (typeof localStorage !== "undefined" ? localStorage : null);
   const escape = d.esc || esc;
-  const ageFn = d.ageText || ageText;
   const stampFn = d.fmtStamp || fmtStamp;
-  const durFn = d.fmtDur || fmtDur;
   const contrastFn = d.contrastText || contrastTextPure;
 
   let mapTab = (storage && storage.getItem(MAP_TAB_KEY)) || "all";
   let mapFold = new Set(JSON.parse((storage && storage.getItem(MAP_FOLD_KEY)) || "[]"));
   let mapFoldKnown = new Set(JSON.parse((storage && storage.getItem(MAP_FOLD_KNOWN_KEY)) || "[]"));
   let mapFull = !!(storage && storage.getItem(MAP_FULL_KEY) === "1");
-  /* fare toggle: dormant unfinished experiment — do not read the persisted
-     flag while the button is hidden, or old browsers keep showing it. */
-  let fareOn = false;
+  /* fare overlay: restored from localStorage; the control itself is CSS-hidden
+     until body.map-full, so a persisted-on flag never shows a button where the
+     overlay can't render. */
+  let fareOn = !!(storage && storage.getItem(MAP_FARE_KEY) === "1");
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
@@ -424,9 +470,7 @@ export function createMapFeature(deps){
   }
 
   function stationHTML(n, model, opts){
-    const fareHTML = fareLineHTML(n, {
-      mapFull, fareOn, escape, stamp: stampFn, age: ageFn, dur: durFn,
-    });
+    const fareHTML = fareLineHTML(n, { mapFull, fareOn, escape });
     const forkCue = opts.fork ? forkCueHTML(n, model, {
       escape, forkKind, nodeById,
     }) : "";
@@ -926,11 +970,26 @@ export function createMapFeature(deps){
 
   function onMapFullClick(){ setMapFull(!mapFull); }
 
+  function syncFareBtn(){
+    if (!farebtn) return;
+    const icons = d.icons || {};
+    // Inlined SVG glyphs (no FA webfont classes — TestPinnedIcons). On/off
+    // state is .on + aria-pressed + data-fare marker on the glyph.
+    farebtn.innerHTML = fareOn
+      ? (icons.ICON_FARE_ON || "")
+      : (icons.ICON_FARE_OFF || "");
+    farebtn.classList.toggle("on", fareOn);
+    if (typeof farebtn.setAttribute === "function"){
+      farebtn.setAttribute("aria-pressed", fareOn ? "true" : "false");
+      farebtn.setAttribute("aria-label", "toggle fare overlay");
+    }
+  }
+
   function onFareClick(){
     fareOn = !fareOn;
     if (fareOn) storeSet(MAP_FARE_KEY, "1");
     else storeRemove(MAP_FARE_KEY);
-    if (farebtn) farebtn.classList.toggle("on", fareOn);
+    syncFareBtn();
     mapSig = "";
     renderMap();
   }
@@ -1000,6 +1059,8 @@ export function createMapFeature(deps){
         if (typeof c === "function") cleanups.push(c);
       }
     }
+    syncFareBtn();
+    syncMapFullBtn();
   }
 
   function destroy(){
@@ -1013,7 +1074,7 @@ export function createMapFeature(deps){
 
   function restoreChrome(){
     if (mapFull && isDesktop() && doc && doc.body) doc.body.classList.add("map-full");
-    if (farebtn) farebtn.classList.toggle("on", fareOn);
+    syncFareBtn();
     syncMapFullBtn();
   }
 

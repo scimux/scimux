@@ -182,23 +182,130 @@ test("mapTabsHTML All / groups / add button order and ARIA", () => {
   assert.match(html, /data-rm="g1"/);
 });
 
-test("fareLineHTML only when full + fareOn; warms high ctx", () => {
-  assert.equal(fareLineHTML({ created_at: "2026-01-01T00:00:00Z" }, { mapFull: true, fareOn: false }), "");
-  assert.equal(fareLineHTML({ created_at: "2026-01-01T00:00:00Z" }, { mapFull: false, fareOn: true }), "");
-  const html = fareLineHTML({
-    created_at: "2026-01-01T00:00:00Z",
-    last_activity: Date.parse("2026-01-01T01:00:00Z"),
-    ctx_pct: 85,
-  }, {
-    mapFull: true, fareOn: true,
-    escape: s => s, stamp: () => "S", age: () => "A", dur: () => "D",
-  });
+/* ---------- Phase 8: fare meter (journey tokens) + full-screen toggle ---------- */
+
+const FARE_NODE = {
+  fare_fresh_in: 32800,
+  fare_out: 410,
+  fare_cache_write: 25400,
+  fare_cache_read: 1200,
+  fare_total: 59810,
+  fare_turns: 3,
+  fare_cost: 0.6215,
+  fare_cost_complete: true,
+  fare_model: "claude-sonnet",
+  ctx_pct: 42, // tank lives on the wall SVG ring, not the meter
+};
+
+test("fareLineHTML empty unless mapFull && fareOn", () => {
+  assert.equal(fareLineHTML(FARE_NODE, { mapFull: true, fareOn: false }), "");
+  assert.equal(fareLineHTML(FARE_NODE, { mapFull: false, fareOn: true }), "");
+  assert.equal(fareLineHTML(FARE_NODE, { mapFull: false, fareOn: false }), "");
+  const html = fareLineHTML(FARE_NODE, { mapFull: true, fareOn: true });
   assert.match(html, /class="fare"/);
-  assert.match(html, /start S/);
-  assert.match(html, /last A/);
-  assert.match(html, /elapsed D/);
-  assert.match(html, /class="high"/);
-  assert.match(html, /85% ctx/);
+});
+
+test("fareLineHTML shows cumulative tokens", () => {
+  const html = fareLineHTML(FARE_NODE, { mapFull: true, fareOn: true, escape: s => s });
+  assert.match(html, /class="fare"/);
+  // four canonical quantities labeled — pin presence/label, not exact glyphs
+  assert.match(html, /fresh/i);
+  assert.match(html, /out/i);
+  assert.match(html, /cache-wr|cache.?wr|wr/i);
+  assert.match(html, /cache-rd|cache.?rd|rd/i);
+  // values appear in some form (compact k-suffix ok)
+  assert.match(html, /32\.?8?\s*k|32800/i);
+  assert.match(html, /410/);
+  assert.match(html, /25\.?4?\s*k|25400/i);
+  assert.match(html, /1\.?2?\s*k|1200/i);
+  // optional annotations
+  assert.match(html, /claude-sonnet|sonnet/i);
+  assert.match(html, /3/);
+});
+
+test("fareLineHTML omits cost when not reported", () => {
+  const incomplete = { ...FARE_NODE, fare_cost_complete: false, fare_cost: 0.99 };
+  const noCost = fareLineHTML(incomplete, { mapFull: true, fareOn: true, escape: s => s });
+  assert.doesNotMatch(noCost, /\$/);
+  assert.doesNotMatch(noCost, /0\.99|0\.621/);
+  // no estimate language either
+  assert.doesNotMatch(noCost, /estimat/i);
+
+  const complete = fareLineHTML(
+    { ...FARE_NODE, fare_cost_complete: true, fare_cost: 0.6215 },
+    { mapFull: true, fareOn: true, escape: s => s },
+  );
+  assert.match(complete, /\$/);
+  assert.match(complete, /0\.62/);
+});
+
+test("fareLineHTML absent when no fare fields", () => {
+  const bare = { id: "n", title: "T", ctx_pct: 50, created_at: "2026-01-01T00:00:00Z" };
+  const html = fareLineHTML(bare, { mapFull: true, fareOn: true });
+  // nothing, or a subtle dash — never zeroed quantities
+  assert.ok(html === "" || /class="fare">\s*(—|&mdash;|–|-)\s*<\/div>/.test(html),
+    `want empty or subtle dash, got ${JSON.stringify(html)}`);
+  assert.doesNotMatch(html, /0\s*·\s*0\s*·\s*0/);
+  assert.doesNotMatch(html, /fresh[^<]*\b0\b.*out[^<]*\b0\b/i);
+});
+
+test("ctx_pct still rendered as tank, unchanged", () => {
+  // Tank is the wall-map occupancy ring (D1) — distinct from the fare meter.
+  // Pin the SVG occupancy path byte-for-byte so a merge into fareLineHTML is caught.
+  const tankSnippet = `if (n.ctx_pct != null && !n.attention){
+        const R = 9, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
+        svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;
+        if (frac > 0)
+          svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none"
+                stroke="\${n.ctx_pct >= 80 ? "var(--attn)" : col}" stroke-width="2"
+                stroke-dasharray="\${frac * C} \${C}" stroke-linecap="round"
+                transform="rotate(-90 \${dotX} \${yy})" opacity="\${op}"/>\`;
+      }`;
+  assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
+  // Meter must not re-absorb occupancy as "% ctx"
+  const meter = fareLineHTML(FARE_NODE, { mapFull: true, fareOn: true });
+  assert.doesNotMatch(meter, /% ctx/);
+  assert.doesNotMatch(meter, /class="high"/);
+});
+
+test("wall signature changes when fare fields change (fareOn)", () => {
+  const base = {
+    id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+    created_at: "2026-01-01T00:00:00Z", last_activity: 100, ctx_pct: 10,
+    fare_total: 1000, fare_turns: 2, fare_cost_complete: false,
+    stops: [],
+  };
+  const rows1 = stopsOf(base).sort(newestFirst);
+  const w1 = wallMapSignature(rows1, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: true,
+  });
+  const grown = { ...base, fare_total: 2500, fare_turns: 4, fare_cost_complete: true };
+  const rows2 = stopsOf(grown).sort(newestFirst);
+  const w2 = wallMapSignature(rows2, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: true,
+  });
+  assert.notEqual(w1, w2, "fare fingerprint must re-render when fare fields change");
+  // last_activity alone is not the proxy — same last_activity, different fare still changes
+  assert.equal(base.last_activity, grown.last_activity);
+});
+
+test("wall signature unchanged when fareOff even if fare fields change", () => {
+  const base = {
+    id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+    created_at: "2026-01-01T00:00:00Z", last_activity: 100, ctx_pct: 10,
+    fare_total: 1000, fare_turns: 2, fare_cost_complete: false,
+    stops: [],
+  };
+  const w1 = wallMapSignature(stopsOf(base).sort(newestFirst), ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: false,
+  });
+  const grown = { ...base, fare_total: 99999, fare_turns: 99, fare_cost_complete: true };
+  const w2 = wallMapSignature(stopsOf(grown).sort(newestFirst), ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: false,
+  });
+  assert.equal(w1, w2, "fare fields must not affect signature when fare overlay is off");
 });
 
 test("forkCueHTML uses y-new vs origin lane color; empty without parent", () => {
@@ -345,6 +452,7 @@ test("stack and wall signatures change on fare/fold/selection fields", () => {
     id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
     lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
     created_at: "2026-01-01T00:00:00Z", last_activity: 100, ctx_pct: 10,
+    fare_total: 500, fare_turns: 1, fare_cost_complete: false,
     stops: [],
   };
   const rows = stopsOf(n).sort(newestFirst);
@@ -940,4 +1048,157 @@ test("wall map caps a y-stay branch terminus with the straight buffer (T)", () =
   // Interior main-column root (row 2) keeps the spur.
   assert.ok(html.includes(terminalStationSVG(24, 206, 1, "#0a0")),
     "interior main-column ended node did not render the spur");
+});
+
+/* ---------- Phase 8: farebtn icon + wall re-render polling invariant ---------- */
+
+test("farebtn is icon toggle with aria-pressed and on/off glyph state", () => {
+  // Production uses inlined SVG (no FA webfont classes — TestPinnedIcons).
+  // On/off = .on + aria-pressed + distinct glyph (data-fare marker).
+  const farebtn = fakeEl("farebtn");
+  const storage = memoryStorage();
+  const body = {
+    classList: {
+      _set: new Set(),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+    },
+  };
+  const feature = createMapFeature({
+    roots: {
+      farebtn, mapfullbtn: fakeEl("mapfullbtn"),
+      maptoolbar: fakeEl("tb"), mapwrap: fakeEl("w"),
+    },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({ lanes: [], color: () => "", name: id => id, byId: {} }),
+    icons: {
+      ICON_FARE_ON: `<svg data-fare="on" aria-hidden="true">ON</svg>`,
+      ICON_FARE_OFF: `<svg data-fare="off" aria-hidden="true">OFF</svg>`,
+    },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  assert.equal(farebtn.getAttribute("aria-label"), "toggle fare overlay");
+  assert.equal(farebtn.getAttribute("aria-pressed"), "false");
+  assert.equal(farebtn.classList.contains("on"), false);
+  assert.match(farebtn.innerHTML, /data-fare="off"/);
+  assert.doesNotMatch(farebtn.innerHTML, /data-fare="on"/);
+
+  firstListener(farebtn, "click")();
+  assert.equal(farebtn.getAttribute("aria-pressed"), "true");
+  assert.equal(farebtn.classList.contains("on"), true);
+  assert.equal(storage.getItem(MAP_FARE_KEY), "1");
+  assert.match(farebtn.innerHTML, /data-fare="on"/);
+
+  firstListener(farebtn, "click")();
+  assert.equal(farebtn.getAttribute("aria-pressed"), "false");
+  assert.equal(farebtn.classList.contains("on"), false);
+  assert.equal(storage.getItem(MAP_FARE_KEY), null);
+  assert.match(farebtn.innerHTML, /data-fare="off"/);
+  feature.destroy();
+});
+
+test("farebtn chrome CSS: full-screen-only reveal, mapfullbtn sizing", () => {
+  const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
+  assert.match(layoutCss, /#farebtn\s*\{[^}]*display:\s*none/s);
+  assert.match(layoutCss, /body\.map-full\s+#farebtn\s*\{[^}]*display:\s*inline-flex/s);
+  // sized like #mapfullbtn
+  assert.match(layoutCss, /#farebtn\s*\{[^}]*width:\s*34px/s);
+  assert.match(layoutCss, /#farebtn\s*\{[^}]*height:\s*34px/s);
+  assert.match(layoutCss, /#farebtn\s*\{[^}]*border-radius:\s*9px/s);
+  const indexHtml = readFileSync(join(__dirname, "../index.html"), "utf8");
+  // farebtn immediately left of mapfullbtn
+  assert.match(indexHtml, /id="farebtn"[^>]*>[\s\S]*?id="mapfullbtn"/);
+  assert.match(indexHtml, /aria-label="toggle fare overlay"/);
+});
+
+test("wall re-render on fare change preserves external composer draft (polling invariant)", () => {
+  // Composer is a singleton outside all polled render regions. A fare-driven
+  // wall rebuild must only touch #mapwrap — never reset drafts or steal focus.
+  const mapwrap = fakeEl("mapwrap");
+  const composer = fakeEl("prompt");
+  composer.value = "my draft stays";
+  composer._focused = true;
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+    },
+  };
+  const node = {
+    id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
+    ctx_pct: 30, stops: [],
+    fare_fresh_in: 100, fare_out: 20, fare_cache_write: 0, fare_cache_read: 50,
+    fare_total: 170, fare_turns: 1, fare_cost_complete: false,
+  };
+  const nodes = [node];
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FARE_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const farebtn = fakeEl("farebtn");
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, farebtn, mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+    },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    agentLogo: () => "",
+    icons: {
+      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
+      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+    },
+  });
+  // fareOn must be restored from storage (no longer dormant)
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+  assert.match(mapwrap.innerHTML, /class="fare"/);
+  assert.match(mapwrap.innerHTML, /fresh/i);
+  assert.equal(composer.value, "my draft stays");
+  assert.equal(composer._focused, true);
+
+  // Poll-like fare growth: mutate node fare fields, re-render
+  node.fare_total = 9000;
+  node.fare_turns = 5;
+  node.fare_fresh_in = 8000;
+  feature.render(); // signature must notice fare fingerprint and rebuild
+  assert.match(mapwrap.innerHTML, /class="fare"/);
+  assert.match(mapwrap.innerHTML, /8\s*k|8000/i);
+  // composer singleton untouched
+  assert.equal(composer.value, "my draft stays");
+  assert.equal(composer._focused, true);
+  // map never owns the composer
+  assert.doesNotMatch(mapSrc, /from "\.\/composer\.js"/);
+  assert.doesNotMatch(mapSrc, /#prompt\b|getElementById\(["']prompt/);
+  feature.destroy();
 });

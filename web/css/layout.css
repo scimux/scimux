@@ -201,14 +201,18 @@
    Glyphs are state-swapped SVGs (expand out / contract in), not a rotate. */
 #mapfullbtn { display: none; color: var(--work); font-size: 20px; line-height: 1;
   width: 34px; height: 34px; border-radius: 9px; align-items: center; justify-content: center; }
-/* fare toggle: unfinished, hidden for now. Keep styles in place so the old
-   experiment can be revisited without touching the map layout again. */
-#farebtn { display: none; font-size: 12px; font-weight: 600; padding: 4px 10px;
-  border-radius: 12px; border: 1px solid var(--hairline); color: var(--dim);
-  background: none; line-height: 1; }
-#farebtn.on { color: var(--work); border-color: var(--work); }
-.fare { font-size: 11px; color: var(--dim); margin-top: 2px; letter-spacing: .2px; }
-.fare .high { color: var(--attn); font-weight: 600; }
+/* fare layer toggle: full-screen map only (body.map-full). Matches #mapfullbtn
+   size/shape; inlined layer-group SVG swapped by JS (on/off). A control never
+   appears where its overlay can't render. */
+#farebtn { display: none; color: var(--dim); font-size: 16px; line-height: 1;
+  width: 34px; height: 34px; border-radius: 9px; align-items: center; justify-content: center;
+  border: none; background: none; padding: 0; }
+#farebtn.on { color: var(--work); }
+#farebtn svg { width: 16px; height: 16px; display: block; }
+body.map-full #farebtn { display: inline-flex; }
+/* journey token meter (distinct from the ctx_pct tank ring on the wall SVG) */
+.fare { font-size: 11px; color: var(--dim); margin-top: 2px; letter-spacing: .2px;
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #scrim {
   position: fixed; inset: 0; z-index: 25; background: rgba(0,0,0,.18);
   opacity: 0; pointer-events: none; transition: opacity .3s;
