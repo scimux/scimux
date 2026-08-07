@@ -1,8 +1,8 @@
 /* ---------- statusbar ---------- */
 #statusbar {
   position: fixed; top: 0; left: 0; right: 0; z-index: 40;
-  height: calc(var(--sbh) + env(safe-area-inset-top));
-  padding: env(safe-area-inset-top) 16px 0 16px;
+  height: calc(var(--sbh) + var(--sat));
+  padding: var(--sat) 16px 0 16px;
   display: flex; align-items: center; gap: 14px;
   background: var(--sb-bg);
   -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
@@ -170,7 +170,7 @@
 }
 
 /* ---------- app shell: chat is the base layer, cards slide over (phone) ---------- */
-#app { height: 100dvh; padding-top: calc(var(--sbh) + env(safe-area-inset-top)); }
+#app { height: 100dvh; padding-top: calc(var(--sbh) + var(--sat)); }
 .panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 #chat { position: relative; }
 /* .panel's height:100% would beat bottom:0 here (over-constrained fixed
@@ -178,7 +178,7 @@
    height and clipping the list's last card — let top+bottom size the pane */
 #cards {
   position: fixed; z-index: 30; height: auto;
-  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; left: 0;
+  top: calc(var(--sbh) + var(--sat)); bottom: 0; left: 0;
   width: calc(100% - var(--peek));   /* left-anchored: peek falls on the right */
   background: var(--bg);
   transform: translateX(-103%);
@@ -188,7 +188,7 @@
 #cards.open { transform: translateX(0); }
 #map {
   position: fixed; z-index: 31; height: auto;
-  top: calc(var(--sbh) + env(safe-area-inset-top)); bottom: 0; left: 0;
+  top: calc(var(--sbh) + var(--sat)); bottom: 0; left: 0;
   width: calc(100% - var(--peek));   /* left-anchored: peek falls on the right */
   background: var(--bg);
   transform: translateX(-103%);

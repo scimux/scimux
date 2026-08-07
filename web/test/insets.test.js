@@ -1,46 +1,50 @@
-/* Safe-area inset refresh after rotation (insets.js).
+/* Top-displacement compensation after a rotation round-trip (insets.js).
  *
- * WebKit keeps the previous orientation's env(safe-area-inset-*) on fixed
- * elements after a portrait→landscape→portrait round-trip, which drops the
- * status bar under the iOS clock. These tests pin the mechanical contract of
- * the workaround: which elements get re-laid-out, that their inline display is
- * restored exactly, and that a rotation schedules passes without stacking.
+ * Measured on an iPhone (375x667, Home Screen web app, status-bar-style
+ * "default") with a temporary on-device readout:
  *
- * Fake window/elements only; no real DOM, timers, or matchMedia. */
+ *   healthy portrait  inner 375x647  client647  visual top0   bar top0
+ *   landscape         inner 667x375  client375  visual top-20 bar top20
+ *   broken portrait   inner 375x647  client667  visual top20  bar top-20
+ *
+ * The window is inset correctly in all three; what goes stale on the way back
+ * is the layout viewport, which keeps the landscape height (667). Fixed
+ * elements are pinned to that stale box, so they render 20px — the status bar
+ * height — above the visible area. clientHeight - innerHeight is exactly that
+ * displacement, and zero whenever the viewport is sane.
+ *
+ * Fakes only; no real DOM, timers, or matchMedia. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  INSET_TARGETS,
+  MAX_TOP_DISPLACEMENT,
   INSET_REFRESH_DELAY_MS,
-  nudgeInsets,
+  topDisplacement,
   installInsetRefresh,
 } from "../js/insets.js";
+import { readFileSync } from "node:fs";
 
 /* ---------- fakes ---------- */
 
-function fakeEl(display = ""){
-  return { style: { display }, hidden: false };
-}
-
-function fakeWin({ mql = null } = {}){
+function fakeWin({ innerHeight = 647, mql = null, vv = null } = {}){
   const listeners = new Map();
   return {
+    innerHeight,
+    visualViewport: vv,
+    matchMedia: mql ? () => mql : undefined,
     listeners,
     addEventListener(ev, fn){
       if (!listeners.has(ev)) listeners.set(ev, new Set());
       listeners.get(ev).add(fn);
     },
-    removeEventListener(ev, fn){
-      listeners.get(ev)?.delete(fn);
-    },
-    matchMedia: mql ? () => mql : undefined,
-    fire(ev){
-      for (const fn of [...(listeners.get(ev) || [])]) fn({ type: ev });
-    },
-    count(ev){
-      return listeners.get(ev)?.size || 0;
-    },
+    removeEventListener(ev, fn){ listeners.get(ev)?.delete(fn); },
+    fire(ev){ for (const fn of [...(listeners.get(ev) || [])]) fn({ type: ev }); },
+    count(ev){ return listeners.get(ev)?.size || 0; },
   };
+}
+
+function fakeDoc(clientHeight = 647){
+  return { documentElement: { clientHeight, scrollHeight: clientHeight } };
 }
 
 function fakeMQL(){
@@ -54,116 +58,152 @@ function fakeMQL(){
   };
 }
 
-/* Deferred scheduler: nothing runs until flush() is called, so a test can
-   observe how many passes a single rotation queued. */
+function fakeVV(){
+  const listeners = new Map();
+  return {
+    width: 375, height: 647, offsetTop: 0, pageTop: 0, scale: 1,
+    addEventListener(ev, fn){
+      if (!listeners.has(ev)) listeners.set(ev, new Set());
+      listeners.get(ev).add(fn);
+    },
+    removeEventListener(ev, fn){ listeners.get(ev)?.delete(fn); },
+    fire(ev){ for (const fn of [...(listeners.get(ev) || [])]) fn({ type: ev }); },
+    count(){ return [...listeners.values()].reduce((n, s) => n + s.size, 0); },
+  };
+}
+
 function scheduler(){
   const queue = [];
   return {
     queue,
     raf(fn){ queue.push({ kind: "raf", fn }); return queue.length; },
     timer(fn, ms){ queue.push({ kind: "timer", ms, fn }); return queue.length; },
-    flush(){
-      while (queue.length) queue.shift().fn();
-    },
+    flush(){ while (queue.length) queue.shift().fn(); },
     kinds(){ return queue.map(q => q.kind); },
   };
 }
 
-function harness({ els, mql } = {}){
-  const elements = els || [fakeEl(), fakeEl()];
+function harness({ innerHeight = 647, clientHeight = 647, mql, vv } = {}){
+  const win = fakeWin({ innerHeight, mql, vv });
+  const doc = fakeDoc(clientHeight);
   const s = scheduler();
-  const reads = [];
-  const win = fakeWin({ mql });
+  const applied = [];
   const cleanup = installInsetRefresh({
-    win,
-    query: () => elements,
-    read: () => reads.push(elements.map(e => e.style.display)),
+    win, doc,
+    apply: px => applied.push(px),
     raf: s.raf,
     setTimeout: s.timer,
   });
-  return { elements, s, reads, win, cleanup };
+  return { win, doc, s, applied, cleanup };
 }
 
-/* ---------- targets ---------- */
+/* ---------- topDisplacement ---------- */
 
-test("INSET_TARGETS covers every fixed element positioned off the top inset", () => {
-  for (const sel of ["#statusbar", "#app", "#cards", "#map",
-                     "#bookmarkspane", "#bookmarkpeek", "#bookmarkflags",
-                     "#notesworkspace"]) {
-    assert.ok(INSET_TARGETS.includes(sel), `${sel} missing from INSET_TARGETS`);
-  }
+test("topDisplacement reads the stale layout viewport as the status bar height", () => {
+  assert.equal(topDisplacement({ innerHeight: 647, clientHeight: 667 }), 20);
 });
 
-/* ---------- nudgeInsets ---------- */
-
-test("nudgeInsets hides every element, forces one read, restores inline display", () => {
-  const a = fakeEl("");        // no inline display
-  const b = fakeEl("flex");    // inline display set by feature code
-  let seen = null;
-  const n = nudgeInsets([a, b], () => { seen = [a.style.display, b.style.display]; });
-  assert.equal(n, 2);
-  assert.deepEqual(seen, ["none", "none"], "layout is read while hidden");
-  assert.equal(a.style.display, "");
-  assert.equal(b.style.display, "flex", "pre-existing inline display is restored");
+test("topDisplacement is zero whenever the viewport is sane", () => {
+  assert.equal(topDisplacement({ innerHeight: 647, clientHeight: 647 }), 0, "healthy portrait");
+  assert.equal(topDisplacement({ innerHeight: 375, clientHeight: 375 }), 0, "landscape");
+  assert.equal(topDisplacement({ innerHeight: 852, clientHeight: 852 }), 0, "notched portrait");
 });
 
-test("nudgeInsets tolerates missing elements and a missing reader", () => {
-  const a = fakeEl();
-  assert.equal(nudgeInsets([null, undefined, {}, a]), 1);
-  assert.equal(a.style.display, "");
+test("topDisplacement never compensates a negative or absurd delta", () => {
+  assert.equal(topDisplacement({ innerHeight: 700, clientHeight: 647 }), 0,
+    "client smaller than window (desktop scrollbars) is not a displacement");
+  assert.equal(topDisplacement({ innerHeight: 100, clientHeight: 900 }),
+    MAX_TOP_DISPLACEMENT, "a wild delta is clamped, never a huge blank band");
+  assert.equal(topDisplacement({}), 0);
+  assert.equal(topDisplacement(), 0);
+});
+
+test("topDisplacement rounds sub-pixel viewport heights", () => {
+  assert.equal(topDisplacement({ innerHeight: 646.5, clientHeight: 667 }), 21);
 });
 
 /* ---------- installInsetRefresh ---------- */
 
-test("installInsetRefresh listens for rotation and unbinds on cleanup", () => {
-  const mql = fakeMQL();
-  const { win, cleanup } = harness({ mql });
-  assert.equal(win.count("orientationchange"), 1);
-  assert.equal(mql.count(), 1, "orientation media query is a second, non-deprecated signal");
-  cleanup();
-  assert.equal(win.count("orientationchange"), 0);
-  assert.equal(mql.count(), 0);
+test("the displacement is measured once at boot, before any rotation", () => {
+  const { applied } = harness({ innerHeight: 647, clientHeight: 667 });
+  assert.deepEqual(applied, [20], "a page loaded into the broken state self-corrects");
 });
 
-test("a rotation schedules a frame pass and a settled pass", () => {
-  const { s, reads, win } = harness();
+test("a rotation re-measures on the next frame and once settled", () => {
+  const { win, doc, s, applied } = harness();
+  assert.deepEqual(applied, [0]);
   win.fire("orientationchange");
   assert.deepEqual(s.kinds(), ["raf", "timer"]);
   assert.equal(s.queue[1].ms, INSET_REFRESH_DELAY_MS);
+  doc.documentElement.clientHeight = 667;   // iOS leaves the stale box behind
   s.flush();
-  assert.equal(reads.length, 2, "both passes re-lay-out the targets");
-  assert.deepEqual(reads[0], ["none", "none"]);
+  assert.deepEqual(applied, [0, 20, 20]);
+});
+
+test("an unchanged measurement is still applied idempotently, not skipped", () => {
+  const { win, s, applied } = harness();
+  win.fire("orientationchange");
+  s.flush();
+  assert.deepEqual(applied, [0, 0, 0]);
 });
 
 test("repeat rotation events while passes are pending do not stack", () => {
-  const { s, win } = harness();
+  const { win, s } = harness();
   win.fire("orientationchange");
   win.fire("orientationchange");
   win.fire("orientationchange");
   assert.deepEqual(s.kinds(), ["raf", "timer"]);
 });
 
-test("a rotation after the passes ran schedules a fresh pair", () => {
-  const { s, reads, win } = harness();
-  win.fire("orientationchange");
-  s.flush();
-  win.fire("orientationchange");
-  s.flush();
-  assert.equal(reads.length, 4);
-});
-
-test("the orientation media query triggers the same refresh", () => {
-  const mql = fakeMQL();
-  const { s, reads } = harness({ mql });
+test("the orientation media query and visualViewport also re-measure", () => {
+  const mql = fakeMQL(), vv = fakeVV();
+  const { doc, s, applied } = harness({ mql, vv });
+  doc.documentElement.clientHeight = 667;
   mql.fire();
   s.flush();
-  assert.equal(reads.length, 2);
+  assert.deepEqual(applied.slice(1), [20, 20]);
+  vv.fire("resize");
+  s.flush();
+  assert.equal(applied.length, 5);
 });
 
-test("installInsetRefresh degrades on a window without matchMedia", () => {
-  const { s, reads, win, cleanup } = harness({ mql: null });
-  win.fire("orientationchange");
-  s.flush();
-  assert.equal(reads.length, 2);
+test("every listener is released on cleanup", () => {
+  const mql = fakeMQL(), vv = fakeVV();
+  const { win, mql: _m, cleanup } = { ...harness({ mql, vv }), mql };
+  assert.equal(win.count("orientationchange"), 1);
+  assert.equal(mql.count(), 1);
+  assert.equal(vv.count(), 2, "visualViewport resize + scroll");
   cleanup();
+  assert.equal(win.count("orientationchange"), 0);
+  assert.equal(mql.count(), 0);
+  assert.equal(vv.count(), 0);
+});
+
+test("installInsetRefresh degrades on a bare window", () => {
+  const cleanup = installInsetRefresh({ win: {}, doc: fakeDoc() });
+  assert.equal(typeof cleanup, "function");
+  cleanup();
+});
+
+/* ---------- the CSS contract the fix depends on ---------- */
+
+test("the shell offsets the top by --sat, not by env() alone", () => {
+  const tokens = readFileSync(new URL("../css/tokens.css", import.meta.url), "utf8");
+  assert.match(tokens, /--vvtop:\s*0px/,
+    "the JS-measured displacement needs a declared default");
+  assert.match(tokens, /--sat:\s*calc\(env\(safe-area-inset-top\)\s*\+\s*var\(--vvtop[^)]*\)\)/,
+    "--sat must fold the OS inset and the measured displacement together");
+  for (const file of ["../css/layout.css", "../css/notes.css"]) {
+    const css = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.doesNotMatch(css, /env\(safe-area-inset-top\)/,
+      `${file} must offset the top with var(--sat) so compensation reaches it`);
+    assert.match(css, /var\(--sat\)/, `${file} must use var(--sat)`);
+  }
+});
+
+test("base.css keeps the document unscrollable on both axes", () => {
+  const css = readFileSync(new URL("../css/base.css", import.meta.url), "utf8");
+  const rule = css.match(/html,\s*body\s*\{[^}]*\}/);
+  assert.ok(rule, "html, body rule not found");
+  assert.match(rule[0], /overflow:\s*clip/);
 });

@@ -1,89 +1,102 @@
-/* Safe-area inset refresh after a rotation round-trip.
+/* Top-displacement compensation after a rotation round-trip.
  *
- * The whole shell is positioned off the top inset — the status bar grows by
- * env(safe-area-inset-top) and every fixed pane starts below it (layout.css,
- * notes.css). WebKit resolves those env() values against viewport constants it
- * does not re-apply to already-laid-out fixed elements when the phone rotates
- * back: portrait → landscape (top inset 0) → portrait leaves the bar 44px tall
- * with no top padding, i.e. drawn underneath the iOS clock/battery. Rotations
- * that don't change the top inset (portrait ↔ upside-down, landscape ↔
- * landscape) never show it.
+ * The whole shell hangs off the top inset: the status bar grows by it and every
+ * fixed pane starts below it (layout.css, notes.css, via var(--sat)).
  *
- * The fix is mechanical and layout-only: hide the affected elements, force one
- * layout read while they are out of the box tree, put them back. WebKit then
- * re-resolves env() with the current constants. Hiding and restoring happen in
- * the same task with a single read for the whole batch, so there is no frame
- * where the user sees a gap and no transition is retriggered.
+ * On iOS, rotating portrait → landscape → portrait leaves the *layout viewport*
+ * at the landscape height while the window is resized back correctly. Fixed
+ * elements are pinned to that stale box, so they render above the visible area
+ * by exactly the status bar height and disappear under the OS clock. Measured
+ * on a 375x667 Home Screen web app (temporary on-device readout):
  *
- * Explicit inputs only — window, element lookup, layout read, and the two
- * schedulers are injected, so the whole thing is exercised by Node tests. */
+ *   healthy portrait  inner 375x647  client647  visual top0   bar top0
+ *   landscape         inner 667x375  client375  visual top-20 bar top20
+ *   broken portrait   inner 375x647  client667  visual top20  bar top-20
+ *
+ * env(safe-area-inset-top) is 0 in all three — with status-bar-style "default"
+ * the OS keeps the web view clear of the status bar by sizing the window, so
+ * there is no inset for CSS to read and nothing about env() to re-resolve. The
+ * only signal is the disagreement between the two viewports:
+ *
+ *   displacement = documentElement.clientHeight - window.innerHeight
+ *
+ * which is 0 whenever the viewport is sane and equals the missing offset when
+ * it is not. It is fed back as --vvtop, which --sat adds to the OS inset, so a
+ * displaced viewport pushes the shell down by exactly what it lost.
+ *
+ * Explicit inputs only — window, document, the applier and both schedulers are
+ * injected, so the whole thing is exercised by Node tests. The device is still
+ * the only place the bug itself reproduces. */
 
-/* Every fixed element whose top edge is calc(var(--sbh) + env(safe-area-inset-top))
-   or otherwise offset by the inset. Keep in sync with layout.css / notes.css. */
-export const INSET_TARGETS = [
-  "#statusbar",
-  "#app",
-  "#cards",
-  "#map",
-  "#bookmarkspane",
-  "#bookmarkpeek",
-  "#bookmarkflags",
-  "#notesworkspace",
-];
+/* A displacement is a status/nav bar height (20-60pt). Anything larger is a
+   viewport we do not understand; compensating it would hang a blank band under
+   the OS chrome, which is worse than the bug. */
+export const MAX_TOP_DISPLACEMENT = 64;
 
-/* iOS reports the rotation before the inset settles: the frame pass catches the
-   common case, this one catches the tail (rotation lock prompts, slow devices). */
+/* iOS reports the rotation before the viewport settles: the frame pass catches
+   the common case, this one catches the tail (slow devices, rotation prompts). */
 export const INSET_REFRESH_DELAY_MS = 400;
 
-/* Hide → read → restore. Returns how many elements were nudged. Inline display
-   is saved and restored per element, so features that set it themselves
-   (#bookmarkflags, #notesworkspace) keep whatever they had. */
-export function nudgeInsets(els, read){
-  const prior = [];
-  for (const el of els || []){
-    if (!el || !el.style) continue;
-    prior.push([el, el.style.display]);
-    el.style.display = "none";
-  }
-  if (prior.length && typeof read === "function") read();
-  for (const [el, display] of prior) el.style.display = display;
-  return prior.length;
+/* How far above the visible area the fixed shell is pinned, in CSS px. */
+export function topDisplacement({ innerHeight = 0, clientHeight = 0 } = {}){
+  const d = Math.round((clientHeight || 0) - (innerHeight || 0));
+  if (!Number.isFinite(d) || d <= 0) return 0;
+  return Math.min(d, MAX_TOP_DISPLACEMENT);
 }
 
-/* Binds the rotation signals and returns a cleanup function.
-   `orientationchange` is deprecated but is what iOS Safari reliably fires; the
-   orientation media query is the standard signal. Both funnel into one pending
-   guard so a rotation schedules exactly one frame pass and one settled pass. */
+/* Measures now, on every rotation signal, and whenever the visual viewport
+   moves; returns a cleanup function. Measurement is idempotent and cheap (two
+   layout reads), so passes always apply rather than diffing — a skipped apply
+   after a missed event would leave the shell under the clock. */
 export function installInsetRefresh({
   win,
-  query,
-  read,
+  doc,
+  apply,
   raf,
   setTimeout: setTimer,
 } = {}){
-  if (!win || typeof win.addEventListener !== "function") return () => {};
+  const w = win || {};
+  const de = (doc && doc.documentElement) || {};
   const frame = typeof raf === "function" ? raf : fn => fn();
   const timer = typeof setTimer === "function" ? setTimer : fn => fn();
-  const targets = typeof query === "function" ? query : () => [];
+  const applyPx = typeof apply === "function" ? apply : () => {};
+
+  const measure = () => applyPx(topDisplacement({
+    innerHeight: w.innerHeight,
+    clientHeight: de.clientHeight,
+  }));
 
   let pending = false;
-  const pass = () => nudgeInsets(targets(), read);
   const schedule = () => {
     if (pending) return;
     pending = true;
-    frame(() => { pending = false; pass(); });
-    timer(pass, INSET_REFRESH_DELAY_MS);
+    frame(() => { pending = false; measure(); });
+    timer(measure, INSET_REFRESH_DELAY_MS);
   };
 
-  win.addEventListener("orientationchange", schedule);
-  const cleanups = [() => win.removeEventListener("orientationchange", schedule)];
+  const cleanups = [];
+  if (typeof w.addEventListener === "function"){
+    /* orientationchange is deprecated but is what iOS reliably fires; the
+       orientation media query is the standard signal. Both funnel into one
+       pending guard, so a rotation schedules exactly one pair of passes. */
+    w.addEventListener("orientationchange", schedule);
+    cleanups.push(() => w.removeEventListener("orientationchange", schedule));
 
-  const mql = typeof win.matchMedia === "function"
-    ? win.matchMedia("(orientation: portrait)") : null;
-  if (mql && typeof mql.addEventListener === "function"){
-    mql.addEventListener("change", schedule);
-    cleanups.push(() => mql.removeEventListener("change", schedule));
+    const mql = typeof w.matchMedia === "function"
+      ? w.matchMedia("(orientation: portrait)") : null;
+    if (mql && typeof mql.addEventListener === "function"){
+      mql.addEventListener("change", schedule);
+      cleanups.push(() => mql.removeEventListener("change", schedule));
+    }
+  }
+  const vv = w.visualViewport;
+  if (vv && typeof vv.addEventListener === "function"){
+    for (const ev of ["resize", "scroll"]){
+      vv.addEventListener(ev, schedule);
+      cleanups.push(() => vv.removeEventListener(ev, schedule));
+    }
   }
 
+  measure();   /* a page loaded straight into the broken state self-corrects */
   return () => { for (const fn of cleanups) fn(); };
 }

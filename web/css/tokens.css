@@ -21,6 +21,13 @@
   --journey-alt-bg: rgba(60,60,67,.03);
   --sbh:       44px;
   --radius:    12px;
+  /* the top offset every fixed surface hangs off. Two summands, because two
+     different things can hold the shell clear of the OS clock: the safe-area
+     inset when the web view spans the status bar, and --vvtop when it does not
+     but iOS has left the layout viewport pinned above the visible area after a
+     rotation (insets.js measures and sets it; 0 in every healthy state). */
+  --vvtop:     0px;
+  --sat:       calc(env(safe-area-inset-top) + var(--vvtop));
   /* peek: the strip of the neighbour pane a top pane leaves exposed, so the
      user sees where "back" is (pane-gap-design.md). A deliberate token, not the
      leftover of #cards' old min(86%,380px) sidebar width. 44px floor keeps it a

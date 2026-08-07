@@ -58,7 +58,7 @@ import { createNotesFeature } from "./notes.js";
 import { createSearchFeature } from "./search.js";
 import { createSheetsFeature } from "./sheets.js";
 import { createPollingFeature } from "./polling.js";
-import { INSET_TARGETS, installInsetRefresh } from "./insets.js";
+import { installInsetRefresh } from "./insets.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -1593,12 +1593,13 @@ pollingFeature = createPollingFeature({
   onStartPolling: () => readUsage(), /* prime; 30s cadence stays shell-owned */
 });
 pollingFeature.bind();
-/* iOS keeps the landscape top inset on the fixed shell after rotating back to
-   portrait, sliding the status bar under the clock — re-resolve env() then. */
+/* iOS leaves the layout viewport at the landscape height after rotating back to
+   portrait, pinning the fixed shell above the visible area and sliding the
+   status bar under the OS clock. Feed the measured shortfall back as --vvtop. */
 installInsetRefresh({
   win: window,
-  query: () => document.querySelectorAll(INSET_TARGETS.join(", ")),
-  read: () => document.documentElement.offsetHeight,
+  doc: document,
+  apply: px => document.documentElement.style.setProperty("--vvtop", px + "px"),
   raf: fn => requestAnimationFrame(fn),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
 });
