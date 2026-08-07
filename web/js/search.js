@@ -1,5 +1,5 @@
 /* Search overlay feature: open/close, shortcuts, debounced /api/search,
- * recents, grouped hit feed, and per-hit action bar.
+ * recents, and the grouped hit feed.
  *
  * Packet 7G ownership inventory
  * -----------------------------
@@ -13,19 +13,17 @@
  *   - #searchbtn (🔍 trigger; open)
  *
  * Explicit non-ownership:
- *   - Archived read-only surface (#archivedview, openArchived body) — shell
- *   - Generic sheets / new-node / forkFromTurn sheet body — shell (fork effect
- *     injected)
+ *   - Chat preview surface (#previewview, openPreview body) — shell
+ *   - Generic sheets / new-node / fork — shell (this module no longer forks)
  *   - Top-level document touch gestures and immutable overlayOwned snapshot
  *   - cards, map, chat, composer, Bookmarks, Notes, polling, app.js
- *   - format.js / bookmarks stampAddress algorithms (reused, not duplicated)
+ *   - format.js esc (reused, not duplicated)
  *
  * Ephemeral state (never ui.json, never localStorage except recents):
  *   - searchReturnFocus
  *   - searchSeq (monotonic; stale-response suppression)
  *   - searchAbort (AbortController for in-flight fetch)
  *   - searchDebounce (180ms timer)
- *   - openHit (transient hit-bar owner)
  *
  * Persistent state (localStorage, exact key):
  *   - "scimux-search-recents" — string[] most-recent-first, cap 8; blank
@@ -37,12 +35,12 @@
  * Injected effects / seams:
  *   - nodeById, laneColor, agentLogo
  *   - select, setPendingJump, invalidateChat
- *   - setBookmarksOpen, openArchived, forkFromTurn
- *   - uiMutate, toast, isDesktop, icons
- *   - now / nowISO (clock), storage, fetch, AbortController
+ *   - setBookmarksOpen, openPreview
+ *   - toast, isDesktop
+ *   - now (clock), storage, fetch, AbortController
  *   - setTimeout / clearTimeout / requestAnimationFrame
- *   - document, activeElement, createElement, focus
- *   - esc, stampAddress (defaults from format.js / bookmarks.js)
+ *   - document, activeElement, focus
+ *   - esc (default from format.js)
  *
  * Document shortcut ownership (bind):
  *   - Cmd/Ctrl-K → open (anywhere)
@@ -51,7 +49,7 @@
  *
  * Lifecycle:
  *   - bind() idempotent; owns every Search root listener + document shortcut
- *   - destroy() removes listeners, clears debounce, aborts in-flight, closes bar
+ *   - destroy() removes listeners, clears debounce, aborts in-flight
  *
  * Contracts preserved:
  *   - SEARCH_MIN=2, SEARCH_MAX=128
@@ -59,17 +57,15 @@
  *   - Superseding requests abort older; stale seq never renders
  *   - AbortError silent; current-request failure → empty message
  *   - Results survive close; blank refreshes recents on open when field short
- *   - Asset hits show-only; fork only live+forkable; bookmark non-terminal
- *   - Durable address stamping; live/Bookmarks/archived/unavailable routing
+ *   - One gesture: a hit opens the preview; unaddressed bookmark hits open the
+ *     pane; an addressless live hit jumps; nothing else is offered here
  *
  * Reuses (no algorithm duplication):
  *   format.js: esc
- *   bookmarks.js: stampAddress
  * Does not import sheets.js, polling.js, app.js, or later features.
  */
 
 import { esc as escDefault } from "./format.js";
-import { stampAddress as stampAddressDefault } from "./bookmarks.js";
 
 /* ---------- public constants ---------- */
 
@@ -79,14 +75,6 @@ export const SEARCH_DEBOUNCE_MS = 180;
 export const RECENTS_KEY = "scimux-search-recents";
 export const RECENTS_CAP = 8;
 export const RECENTS_SHOW = 5;
-/* One action, one wording, everywhere: the wall-map station toolbar and the
-   Bookmarks pane both call this "Open chat", so the overlay does too (UI
-   review item 14). The old hit-bar wording was a third phrasing for one jump. */
-export const SACT_LABEL = {
-  show: "Open chat",
-  fork: "Fork from here",
-  bookmark: "Add bookmark",
-};
 
 /* ---------- pure: query ---------- */
 
@@ -152,7 +140,7 @@ export function searchHitHTML(h, esc){
   const when = h.turn_time || h.time || "";
   return `<div class="searchhit" data-kind="${e(h._kind || "")}" data-id="${e(h._id || "")}"` +
     ` data-uid="${e(h._uid || "")}" data-segment="${h.segment || 0}" data-record="${h.record || 0}"` +
-    ` data-role="${e(h.role || "")}" data-bookmark-id="${e(h.bookmark_id || "")}" data-forkable="${h._forkable ? 1 : 0}"` +
+    ` data-role="${e(h.role || "")}" data-bookmark-id="${e(h.bookmark_id || "")}"` +
     ` data-lane="${e(h._lane || "")}" data-turn="${e(h.turn_time || h.time || "")}">` +
     `<span class="ex">${before}<mark>${match}</mark>${after}</span>` +
     (when ? `<span class="when">${e(when)}</span>` : "") +
@@ -166,9 +154,11 @@ export function searchGroupHTML(g, deps){
   const agentLogo = typeof d.agentLogo === "function" ? d.agentLogo : () => "";
   const swatch = g.lane_id ? `<span class="tabdot" style="background:${e(laneColor(g.lane_id))}"></span>` : "";
   const kind = g.kind === "bookmarks" ? "bookmarks" : g.kind === "archived" ? "past" : "";
+  /* A bookmark carries its own stamped address and the Bookmarks bucket has no
+     group address to lend, so the hit's uid wins where it has one. */
   const hits = (g.hits || []).map(h =>
-    searchHitHTML(Object.assign({ _kind: g.kind, _id: g.id, _uid: g.uid,
-      _forkable: g.forkable, _lane: g.lane_id }, h), e)).join("");
+    searchHitHTML(Object.assign({ _kind: g.kind, _id: g.id, _uid: h.uid || g.uid,
+      _lane: g.lane_id }, h), e)).join("");
   return `<div class="searchgroup">` +
     `<div class="sghead">` +
       `<span class="agent-logo" title="${e(g.agent || "agent")}">${agentLogo(g.agent)}</span>` +
@@ -186,28 +176,7 @@ export function searchFeedHTML(resp, deps){
     + (resp.partial ? `<div class="searchmore">Showing the most recent matches — refine to narrow.</div>` : "");
 }
 
-/* ---------- pure: actions ---------- */
-
-/* Adaptive action list: every hit can be shown; asset → show only;
-   fork only for live+forkable; bookmark for non-asset. */
-export function searchHitActions(kind, forkable, role){
-  const acts = [];
-  acts.push("show");
-  if (role === "asset") return acts;
-  if (kind === "live" && forkable) acts.push("fork");
-  acts.push("bookmark");
-  return acts;
-}
-
-/* The jump carries the shared glyph as well as the shared words, so the same
-   control is recognisable across the overlay, the pane and the wall map.
-   Icons arrive as a dep — this module holds no inline SVG. */
-export function hitBarHTML(kind, forkable, role, icons){
-  const jump = (icons && icons.ICON_JUMP) || "";
-  return searchHitActions(kind, forkable, role)
-    .map(a => `<button data-sact="${a}">${a === "show" && jump ? jump + " " : ""}${SACT_LABEL[a]}</button>`)
-    .join("");
-}
+/* ---------- pure: the jump address ---------- */
 
 export function buildPendingJump(id, turn, addr, now){
   return {
@@ -221,25 +190,6 @@ export function buildPendingJump(id, turn, addr, now){
   };
 }
 
-export function buildSearchBookmark(fields, stampAddress){
-  const f = fields || {};
-  const stamp = stampAddress || stampAddressDefault;
-  const bookmark = { t: f.t, text: f.text };
-  if (f.node) bookmark.node = f.node;
-  if (f.turnTime) bookmark.turnTime = f.turnTime;
-  if (f.lane) bookmark.lane = f.lane;
-  stamp(bookmark, { uid: f.uid, segment: f.segment, record: f.record });
-  return bookmark;
-}
-
-/* show destination for a hit given live node presence and kind. */
-export function showActionDecision(kind, live){
-  if (live) return "live";
-  if (kind === "bookmarks") return "bookmarks";
-  if (kind === "archived") return "archived";
-  return "unavailable";
-}
-
 /* ---------- factory ---------- */
 
 export function createSearchFeature(deps){
@@ -248,8 +198,6 @@ export function createSearchFeature(deps){
   const doc = d.document || (typeof document !== "undefined" ? document : null);
   const storage = d.storage || null;
   const esc = d.esc || escDefault;
-  const icons = d.icons || {};
-  const stampAddress = d.stampAddress || stampAddressDefault;
   const setTimeoutFn = d.setTimeout || setTimeout;
   const clearTimeoutFn = d.clearTimeout || clearTimeout;
   const rAF = d.requestAnimationFrame || (typeof requestAnimationFrame !== "undefined"
@@ -257,14 +205,11 @@ export function createSearchFeature(deps){
   const fetchFn = typeof d.fetch === "function" ? d.fetch
     : (typeof fetch !== "undefined" ? fetch.bind(globalThis) : null);
   const AbortCtrl = d.AbortController || (typeof AbortController !== "undefined" ? AbortController : null);
-  const createEl = typeof d.createElement === "function" ? d.createElement
-    : (tag => (doc && doc.createElement ? doc.createElement(tag) : null));
 
   let searchReturnFocus = null;
   let searchSeq = 0;
   let searchAbort = null;
   let searchDebounce = null;
-  let openHit = null;
   let bound = false;
   const cleanups = [];
 
@@ -292,11 +237,6 @@ export function createSearchFeature(deps){
     return Date.now();
   }
 
-  function nowISO(){
-    if (typeof d.nowISO === "function") return d.nowISO();
-    return new Date().toISOString();
-  }
-
   function nodeById(id){
     return typeof d.nodeById === "function" ? d.nodeById(id) : null;
   }
@@ -316,7 +256,6 @@ export function createSearchFeature(deps){
   }
 
   function searchBlank(){
-    openHit = null;
     const feed = root("searchfeed");
     if (feed) feed.innerHTML = searchBlankHTML(storage, esc);
   }
@@ -324,32 +263,7 @@ export function createSearchFeature(deps){
   function renderSearchFeed(resp){
     const feed = root("searchfeed");
     if (!feed) return;
-    openHit = null;
     feed.innerHTML = searchFeedHTML(resp, htmlDeps());
-  }
-
-  function closeHitBar(){
-    if (!openHit) return;
-    if (openHit.classList) openHit.classList.remove("open");
-    else if (openHit.className)
-      openHit.className = String(openHit.className).replace(/\bopen\b/g, "").trim();
-    if (typeof openHit.querySelector === "function")
-      openHit.querySelector(".hitbar")?.remove();
-    openHit = null;
-  }
-
-  function toggleHitBar(el){
-    if (!el) return;
-    if (openHit === el){ closeHitBar(); return; }
-    closeHitBar();
-    const bar = createEl("div");
-    if (!bar) return;
-    bar.className = "hitbar";
-    bar.innerHTML = hitBarHTML(el.dataset.kind, el.dataset.forkable === "1", el.dataset.role, icons);
-    if (typeof el.appendChild === "function") el.appendChild(bar);
-    if (el.classList) el.classList.add("open");
-    else el.className = ((el.className || "") + " open").trim();
-    openHit = el;
   }
 
   function focusInput(){
@@ -422,60 +336,41 @@ export function createSearchFeature(deps){
     if (typeof d.select === "function") d.select(id);
   }
 
-  function doSearchAction(a, hit){
+  /* The only thing a result row does. Every hit opens its surrounding
+     conversation in the preview — the same gesture, the same destination,
+     whether the chat is still running or was deleted months ago, because the
+     row itself gives the user no way to tell those apart and the old adaptive
+     action bar made them find out by tapping.
+
+     Two hits cannot be previewed, and both fall back to something true rather
+     than to a disabled control. A bookmark filed as free-standing commentary
+     points at no turn in any log, so it opens in the pane where it lives. A
+     live chat whose log predates the meta header has no address to resolve, but
+     the chat itself is right there — so the tap goes into it, which is what
+     every live hit used to do. */
+  function openHitPreview(hit){
     if (!hit) return;
     const input = root("searchinput");
     recordRecent(input ? input.value : "", storage);
-    const kind = hit.dataset.kind, id = hit.dataset.id;
-    const turn = hit.dataset.turn, lane = hit.dataset.lane;
-    const live = id && nodeById(id);
-    if (a === "show"){
-      const dest = showActionDecision(kind, live);
-      if (dest === "live")
-        jumpToHitChat(id, turn, { uid: hit.dataset.uid, segment: hit.dataset.segment, record: hit.dataset.record });
-      else if (dest === "bookmarks"){
-        close();
-        if (typeof d.setBookmarksOpen === "function") d.setBookmarksOpen(true);
-      } else if (dest === "archived"){
-        close();
-        if (typeof d.openArchived === "function")
-          d.openArchived(hit.dataset.uid, hit.dataset.segment, hit.dataset.record, turn);
-      } else if (typeof d.toast === "function"){
-        d.toast("This chat is unavailable.");
-      }
-      return;
-    }
-    if (a === "fork"){
-      if (!live) return;
-      const ex = (typeof hit.querySelector === "function"
-        ? hit.querySelector(".ex")?.textContent : "") || "";
+    const uid = hit.dataset.uid;
+    const id = hit.dataset.id;
+    const turn = hit.dataset.turn;
+    if (uid){
       close();
-      if (typeof d.forkFromTurn === "function") d.forkFromTurn(ex, id);
+      if (typeof d.openPreview === "function")
+        d.openPreview(uid, hit.dataset.segment, hit.dataset.record, turn);
       return;
     }
-    if (a === "bookmark"){
-      /* The hit the finger landed on *is* the bookmark (UI review item 15).
-         A modal asking for text made the user retype what they were already
-         reading, and filed the answer as a free-standing note. Commentary
-         still exists — you reply to the bookmark in the pane, afterwards. */
-      const clean = ((typeof hit.querySelector === "function"
-        ? hit.querySelector(".ex")?.textContent : "") || "").trim();
-      if (!clean) return;
-      const bookmark = buildSearchBookmark({
-        t: nowISO(),
-        text: clean,
-        node: live ? id : "",
-        turnTime: turn || "",
-        lane: lane || "",
-        uid: hit.dataset.uid,
-        segment: hit.dataset.segment,
-        record: hit.dataset.record,
-      }, stampAddress);
-      if (typeof d.uiMutate === "function")
-        d.uiMutate({ k: "bookmark-add", bookmark });
-      if (typeof d.toast === "function") d.toast("Bookmark added");
-      closeHitBar();
+    if (hit.dataset.kind === "bookmarks"){
+      close();
+      if (typeof d.setBookmarksOpen === "function") d.setBookmarksOpen(true);
+      return;
     }
+    if (id && nodeById(id)){
+      jumpToHitChat(id, turn, { uid: "", segment: hit.dataset.segment, record: hit.dataset.record });
+      return;
+    }
+    if (typeof d.toast === "function") d.toast("This chat is unavailable.");
   }
 
   function onDocumentKeydown(e){
@@ -521,13 +416,8 @@ export function createSearchFeature(deps){
       runSearch(q);
       return;
     }
-    const btn = typeof t.closest === "function" ? t.closest("[data-sact]") : null;
-    if (btn){
-      doSearchAction(btn.dataset.sact, typeof btn.closest === "function" ? btn.closest(".searchhit") : null);
-      return;
-    }
     const hit = typeof t.closest === "function" ? t.closest(".searchhit") : null;
-    if (hit) toggleHitBar(hit);
+    if (hit) openHitPreview(hit);
   }
 
   function on(el, type, fn, opts){
@@ -558,7 +448,6 @@ export function createSearchFeature(deps){
     searchDebounce = null;
     searchSeq++; /* invalidate a response even when an injected fetch ignores abort */
     if (searchAbort){ try { searchAbort.abort(); } catch {} searchAbort = null; }
-    closeHitBar();
     searchReturnFocus = null;
   }
 

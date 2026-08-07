@@ -23,7 +23,7 @@
  *   - #cardact contents/listeners (cards.js)
  *   - #tabsheet contents/listeners (map.js)
  *   - #menu update check / apply / license texts (shell)
- *   - Archived read-only surface (#archivedview body)
+ *   - Read-only chat preview (#previewview body)
  *   - Top-level gestures, toast implementation, polling/tick body
  *   - Shared lane-picker algorithms (fillLaneSelect / readLaneChoice / syncLanePicker)
  *   - app.js / polling.js
@@ -57,7 +57,6 @@
  *   - laneList, uiMutate, updateLocalNode
  *   - select, setLevel, isDesktop, tick, invalidateStateEtag
  *   - invalidateCards/Chat/Map + renderCards/ChatHead/Map
- *   - closeArchived, getArchivedFork
  *   - esc, api, storage, document, querySelectorAll, setTimeout/clearTimeout
  *   - alert (adoption failure only)
  *
@@ -607,29 +606,6 @@ export function createSheetsFeature(deps = {}){
     openSheet("#newchat");
   }
 
-  function forkFromArchivedConfig(cfg){
-    if (!cfg) return;
-    ncEdit = ""; ncEditStop = "";
-    ncParent = "";
-    setNewActivitySubmitting(false);
-    resetCreateChrome();
-    seedForkTitle(cfg.title || "Follow-up");
-    const prompt = root("nc_prompt");
-    if (prompt) prompt.value = "";
-    prepareLaunchConfig({
-      agent: cfg.agent, model: cfg.model, dir: cfg.dir, effort: cfg.effort || "",
-    });
-    prepareNewActivityLane();
-    openSheet("#newchat");
-  }
-
-  function forkFromArchived(){
-    const cfg = typeof d.getArchivedFork === "function" ? d.getArchivedFork() : null;
-    if (!cfg) return;
-    if (typeof d.closeArchived === "function") d.closeArchived();
-    forkFromArchivedConfig(cfg);
-  }
-
   function openActivityEditor(id, stopTime){
     const n = nodeById(id);
     if (!n) return;
@@ -914,7 +890,6 @@ export function createSheetsFeature(deps = {}){
     openActivityEditor,
     forkFromTurn,
     forkFromStation,
-    forkFromArchived,
     fieldError,
   };
 }

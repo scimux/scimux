@@ -177,26 +177,29 @@
   </div>
 </div>
 
-<!-- read-only surface for a DELETED chat (G5b): a bounded window of turns around
-     a search hit, opened by an archived show-to-chat. No composer, no polling —
-     it reads from /api/archived, never the live chat endpoint. Fork (when the
-     dir survives) reuses the new-activity sheet seeded from the log's meta. -->
-<div id="archivedview" hidden role="dialog" aria-modal="true" aria-label="Deleted chat (read-only)">
-  <div id="archivedscrim"></div>
-  <div id="archivedpanel">
-    <div id="archivedhead">
+<!-- read-only window onto the conversation around a hit, live or deleted alike.
+     Drawn in the search overlay's own panel geometry so a tap reads as "the
+     results became a chat", not "a dialog appeared". It reads from /api/preview
+     — never the live chat endpoint: no composer, no polling, no history. The
+     head carries the only two ways out that go anywhere: back to the results,
+     and onward into the real chat when one still exists. -->
+<div id="previewview" hidden role="dialog" aria-modal="true" aria-label="Chat preview (read-only)">
+  <div id="previewscrim"></div>
+  <div id="previewpanel">
+    <div id="previewhead">
       <!-- leading return, shown only when a surface presented this modal (the
            search overlay does; the Bookmarks pane stays open behind it) -->
-      <button id="archivedback" hidden></button>
-      <div class="ahtext">
-        <div id="archivedtitle"></div>
-        <div id="archivedsub"></div>
+      <button id="previewback" hidden></button>
+      <div class="phtext">
+        <div id="previewtitle"></div>
+        <div id="previewsub"></div>
       </div>
-      <button id="archivedforkbtn" hidden>Fork from here</button>
-      <button id="archivedclose" aria-label="close">&#10005;</button>
+      <!-- the way onward, shown only while there is a chat to go into -->
+      <button id="previewopen" hidden></button>
+      <button id="previewclose" aria-label="close">&#10005;</button>
     </div>
-    <div id="archivedbody" role="region" aria-live="polite"></div>
-    <div id="archivednote">Read-only — this chat was deleted. Its history is preserved here.</div>
+    <div id="previewbody" role="region" aria-live="polite"></div>
+    <div id="previewnote"></div>
   </div>
 </div>
 

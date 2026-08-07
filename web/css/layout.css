@@ -68,6 +68,10 @@
   background: var(--surface); border: 1px solid var(--hairline);
   border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.28);
   overflow: hidden; animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
+/* Returning from the preview re-opens this overlay onto a panel the user just
+   watched sit still. Replaying the entry pop would announce it as a new
+   surface; the results are meant to read as having been there all along. */
+#searchpanel.nopop { animation: none; }
 @keyframes searchfade { from { opacity: 0; } }
 @keyframes searchpop { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
 @media (prefers-reduced-motion: reduce) {
@@ -108,11 +112,6 @@
 .searchhit .ex mark { background: color-mix(in srgb, var(--attn) 40%, transparent);
   color: inherit; border-radius: 3px; padding: 0 1px; }
 .searchhit .when { display: block; font-size: 11px; color: var(--dim); margin-top: 2px; }
-/* inline action bar revealed under a tapped hit (metro-toolbar placement) */
-.searchhit .hitbar { display: flex; gap: 8px; margin-top: 8px; }
-.searchhit .hitbar button { font-size: 13px; padding: 6px 12px; border-radius: 8px;
-  border: 1px solid var(--hairline); color: var(--work); background: var(--surface); }
-.searchhit .hitbar button:active { background: var(--code-bg); }
 .searchmore { color: var(--dim); text-align: center; font-size: 12px; padding: 10px 16px; }
 /* G6 recents: recent searches fill the blank state (client-side, per-device,
    persisted like drafts). Tapping one re-runs it; Clear wipes the history. */
@@ -125,36 +124,44 @@
 .recent { display: block; width: 100%; text-align: left; padding: 9px 16px;
   color: var(--ink); font-size: 15px; cursor: pointer; overflow-wrap: anywhere; }
 .recent:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
-/* read-only archived-chat surface (G5b): same Spotlight material as search */
-#archivedview { position: fixed; inset: 0; z-index: 110;
+/* read-only chat preview: the same Spotlight material as search, and
+   deliberately the same panel box. Width, offset and height are copied from
+   #searchpanel and there is no entry animation, so tapping a hit swaps the
+   contents of a panel that never moves — the tap reads as "these results
+   became a chat", which is what makes "‹ Results" believable. */
+#previewview { position: fixed; inset: 0; z-index: 110;
   display: flex; flex-direction: column; align-items: center; }
-#archivedview[hidden] { display: none; }
-#archivedscrim { position: absolute; inset: 0;
+#previewview[hidden] { display: none; }
+#previewscrim { position: absolute; inset: 0;
   background: color-mix(in srgb, var(--bg) 55%, transparent);
   -webkit-backdrop-filter: blur(20px) saturate(1.3); backdrop-filter: blur(20px) saturate(1.3); }
 @media (prefers-reduced-transparency: reduce) {
-  #archivedscrim { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  #previewscrim { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
-#archivedpanel { position: relative; z-index: 1;
-  width: min(680px, 92vw); margin-top: min(8vh, 64px); max-height: 84dvh;
+#previewpanel { position: relative; z-index: 1;
+  width: min(680px, 92vw); margin-top: min(12vh, 88px); max-height: 80dvh;
   display: flex; flex-direction: column; background: var(--surface);
   border: 1px solid var(--hairline); border-radius: 16px;
   box-shadow: 0 20px 60px rgba(0,0,0,.28); overflow: hidden; }
-#archivedhead { display: flex; align-items: center; gap: 10px;
+#previewhead { display: flex; align-items: center; gap: 10px;
   padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--hairline); }
-#archivedhead .ahtext { flex: 1; min-width: 0; }
-#archivedtitle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#archivedsub { font-size: 12px; color: var(--dim); }
-#archivedforkbtn { flex: none; font-size: 13px; padding: 6px 12px; border-radius: 8px;
+#previewhead .phtext { flex: 1; min-width: 0; }
+#previewtitle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#previewsub { font-size: 12px; color: var(--dim); }
+/* the way onward, not the way back: bordered like the head's other affordances
+   but never a pill, so it cannot be mistaken for the return */
+#previewopen { flex: none; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 13px; padding: 6px 12px; border-radius: 8px;
   border: 1px solid var(--hairline); color: var(--work); }
-#archivedforkbtn[hidden] { display: none; }
-#archivedclose { flex: none; width: 32px; height: 32px; border-radius: 8px; color: var(--dim);
+#previewopen:active { background: var(--code-bg); }
+#previewopen[hidden] { display: none; }
+#previewclose { flex: none; width: 32px; height: 32px; border-radius: 8px; color: var(--dim);
   display: flex; align-items: center; justify-content: center; }
-#archivedbody { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px; }
-#archivedbody .turn.anchor .bubble {
+#previewbody { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px; }
+#previewbody .turn.anchor .bubble {
   outline: 2px solid color-mix(in srgb, var(--attn) 55%, transparent); outline-offset: 2px; }
-.archtrunc { color: var(--dim); text-align: center; font-size: 12px; padding: 8px; font-style: italic; }
-#archivednote { flex: none; padding: 8px 16px; border-top: 1px solid var(--hairline);
+.previewtrunc { color: var(--dim); text-align: center; font-size: 12px; padding: 8px; font-style: italic; }
+#previewnote { flex: none; padding: 8px 16px; border-top: 1px solid var(--hairline);
   font-size: 11px; color: var(--dim); }
 .a-flat   { color: var(--dim); }
 .roll-dn { animation: rolldn .4s ease; }
@@ -239,20 +246,20 @@ body.map-full #farebtn { display: inline-flex; }
    back control is hidden on desktop, but a jump out of the wall map or the
    search overlay lands on a chat that is visible there (UI review item 18).
    id+class beats the breakpoint's display:none by specificity.
-   #archivedback is the same promise on a pushed modal — a past search hit opens
-   the read-only window in the search overlay's own panel geometry — so it is
-   the same control, not a lookalike. */
-#chatback.hasreturn, #archivedback { display: inline-flex; align-items: center; gap: 4px;
+   #previewback is the same promise on a pushed modal — a search hit opens the
+   read-only window in the search overlay's own panel geometry — so it is the
+   same control, not a lookalike. */
+#chatback.hasreturn, #previewback { display: inline-flex; align-items: center; gap: 4px;
   font-size: 14px; font-weight: 600; padding: 5px 12px; margin-right: 6px;
   border: 1px solid color-mix(in srgb, var(--work) 35%, transparent);
   border-radius: 999px; background: color-mix(in srgb, var(--work) 8%, transparent);
   max-width: 52vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#chatback.hasreturn:active, #archivedback:active {
+#chatback.hasreturn:active, #previewback:active {
   background: color-mix(in srgb, var(--work) 16%, transparent); }
 /* the pill's display: would otherwise beat the hidden attribute and leave an
    empty control sitting in the head */
-#archivedback { flex: none; color: var(--work); }
-#archivedback[hidden] { display: none; }
+#previewback { flex: none; color: var(--work); }
+#previewback[hidden] { display: none; }
 /* "‹" opens the next-deeper overlay pane — the pointer stand-in for the
    phone's edge-swipe, so it only exists on iPad/desktop */
 .navnext { display: none; color: var(--work); font-size: 22px;

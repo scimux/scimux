@@ -82,20 +82,41 @@ export function chatBackState(ctx){
   };
 }
 
-/* The same pill on a *pushed modal*. The read-only archived chat is presented
-   by the search overlay, in the search overlay's own panel geometry — from the
-   user's seat the results simply became a chat — so its dismissal has to land
-   back on the results, and it has to say so before the tap.
+/* What the *inside* of a presenting surface is called. The chat preview is drawn
+   in the search overlay's own panel — same width, same offset, no entry
+   animation — so a tap does not read as "a dialog opened" but as "the results
+   became a chat". One level up from there is not "Search" as a whole, it is the
+   list of results, and that is the shortest true name for where the dismissal
+   lands. */
+const MODAL_LABEL = {
+  [RETURN_MAP]: "Map",
+  [RETURN_SEARCH]: "Results",
+  [RETURN_NOTE]: "Note",
+};
 
-   The one difference from #chatback: there is no parent-pane fallback. A chat
-   always has "Activities" above it; a modal with no presenter to name has
-   nothing above it but the surface it was dropped onto, and offering to "go
-   back" there would send the user somewhere they never came from. So the
-   control does not exist rather than lying. */
+/* The same pill on a *pushed modal*, with two deliberate differences from
+   #chatback.
+
+   It drops the verb. HIG's plain rule — title the back button with the previous
+   screen — works here because the trip is one level inside one panel; #chatback
+   needs "Return to Search" only because it crosses screens and sits beside the
+   chat's own title, where a bare word went unnoticed (review 2, item 3).
+
+   And it has no parent-pane fallback. A chat always has "Activities" above it;
+   a modal with no presenter to name has nothing above it but the surface it was
+   dropped onto, and offering to "go back" there would send the user somewhere
+   they never came from. So the control does not exist rather than lying. */
 export function returnPillState(ctx){
-  const st = chatBackState(ctx);
-  if (!st.hasReturn) return { hasReturn: false, label: "", html: "", ariaLabel: "" };
-  return st;
+  if (!ctx || !ctx.kind) return { hasReturn: false, label: "", html: "", ariaLabel: "" };
+  /* Never the note's own title: the modal shows a chat, and two document names
+     side by side in one head make the user work out which is which. */
+  const label = MODAL_LABEL[ctx.kind] || DEFAULT_BACK_LABEL;
+  return {
+    hasReturn: true,
+    label,
+    html: "&#8249; " + esc(label),
+    ariaLabel: "back to " + label.toLowerCase(),
+  };
 }
 
 /* The invalidation rule. `how` is why the chat became selected: only "jump"

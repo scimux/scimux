@@ -161,7 +161,7 @@ func TestUseInNoteIsGatedOnTheWorkspaceBeingVisible(t *testing.T) {
 
 // A bookmark filed from the search overlay did toast, but #toast sat at
 // z-index 60 — below the search overlay (120), the Notes workspace (110) and
-// the archived view (110), so the confirmation was painted underneath the
+// the chat preview (110), so the confirmation was painted underneath the
 // surface that triggered it. The toast is the topmost layer by definition:
 // it confirms actions taken anywhere, including inside a full-screen overlay.
 func TestToastPaintsAboveEveryOverlay(t *testing.T) {
@@ -182,7 +182,7 @@ func TestToastPaintsAboveEveryOverlay(t *testing.T) {
 	}
 
 	toast := z("#toast")
-	for _, overlay := range []string{"#searchoverlay", "#notesworkspace", "#archivedview"} {
+	for _, overlay := range []string{"#searchoverlay", "#notesworkspace", "#previewview"} {
 		if got := z(overlay); toast <= got {
 			t.Errorf("#toast (z-index %d) must paint above %s (z-index %d): a confirmation raised from an overlay is invisible below it",
 				toast, overlay, got)

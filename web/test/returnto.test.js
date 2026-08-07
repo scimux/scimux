@@ -105,11 +105,35 @@ test("chatBackState escapes a note title so it cannot inject markup", () => {
 
 /* ---------- returnPillState: the same idiom on a pushed modal ---------- */
 
-test("a pushed modal names its presenter with the same pill as #chatback", () => {
+/* HIG's plain rule — a back button is titled with the previous screen — applies
+   cleanly here, unlike on #chatback. The chat's pill has to shout "Return to
+   Search" because it crosses a real distance: the user is in a different screen
+   than the one they left, with the chat's own title beside it. The preview never
+   left: it is drawn in the search overlay's own panel, at the same width and the
+   same offset, so from the seat the results simply became a chat. One level up
+   is the results, and the shortest true name for them is what the pill says. */
+test("a pushed modal names the screen underneath it, plainly", () => {
   const st = returnPillState(makeReturnContext(RETURN_SEARCH));
   assert.equal(st.hasReturn, true);
-  assert.equal(st.html, chatBackState(makeReturnContext(RETURN_SEARCH)).html);
-  assert.match(st.html, /Return to Search/);
+  assert.equal(st.label, "Results");
+  assert.match(st.html, /^&#8249; Results$/);
+  assert.equal(st.ariaLabel, "back to results");
+});
+
+test("the modal pill is shorter than the chat's — different distances, different words", () => {
+  const ctx = makeReturnContext(RETURN_SEARCH);
+  assert.match(chatBackState(ctx).html, /Return to Search/);
+  assert.ok(!returnPillState(ctx).html.includes("Return to"),
+    "a one-level dismissal inside the same panel does not need the verb");
+});
+
+test("a note-presented modal names the note generically, not the note's own title", () => {
+  /* The preview shows a *chat*. Titling its back button with the note's name
+     would put two document names side by side in one head and make the user
+     work out which one they are reading. */
+  const st = returnPillState(makeReturnContext(RETURN_NOTE, { title: "Fare study" }));
+  assert.equal(st.label, "Note");
+  assert.match(st.html, /^&#8249; Note$/);
 });
 
 test("with no presenter to name, a pushed modal shows no return control at all", () => {

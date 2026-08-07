@@ -617,7 +617,7 @@ function createFeature(overrides = {}){
     openSheet: [],
     closeSheets: [],
     setPendingJump: [],
-    openArchived: [],
+    openPreview: [],
     invalidateChat: 0,
     closeWorkspace: 0,
     restartWorkPulse: 0,
@@ -673,7 +673,7 @@ function createFeature(overrides = {}){
     openSheet: id => effects.openSheet.push(id),
     closeSheets: () => effects.closeSheets.push(1),
     setPendingJump: v => effects.setPendingJump.push(v),
-    openArchived: (...a) => effects.openArchived.push(a),
+    openPreview: (...a) => effects.openPreview.push(a),
     invalidateChat: () => { effects.invalidateChat++; },
     wsOpen: () => !!overrides.wsOpen,
     closeWorkspace: () => { effects.closeWorkspace++; },
@@ -937,7 +937,7 @@ test("action dispatch: jump live, copy timer, delete, comment, use-in-note", () 
   assert.equal(ctx.roots.bookmarkprompt.dataset.placeholder, "Reply…");
 });
 
-test("jump archived and fail toast; desktop keeps pane open", () => {
+test("jump to a deleted source opens the preview; fail toast; desktop keeps pane open", () => {
   const arch = createFeature({
     isDesktop: true,
     bookmarks: [{ t: "t1", text: "x", uid: "uid-1", segment: 5, record: 6 }],
@@ -954,7 +954,7 @@ test("jump archived and fail toast; desktop keeps pane open", () => {
     return null;
   };
   arch.roots.bookmarkspane.dispatch("click", { target: jump });
-  assert.deepEqual(arch.effects.openArchived[0], ["uid-1", 5, 6, ""]);
+  assert.deepEqual(arch.effects.openPreview[0], ["uid-1", 5, 6, ""]);
   assert.equal(arch.feature.isOpen(), true); /* desktop */
 
   const fail = createFeature({

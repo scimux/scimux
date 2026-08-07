@@ -54,7 +54,7 @@
  * Injected node / lane / chat / Notes / sheet / navigation effects:
  *   - nodeById, orderedNodes, laneList, laneColor, laneModel
  *   - uiMutate, bookmarks getter (UI.bookmarks)
- *   - jump deps: setPendingJump, invalidateChat, select, openArchived,
+ *   - jump deps: setPendingJump, invalidateChat, select, openPreview,
  *     wsOpen, closeWorkspace, isDesktop, singleZone
  *   - startPlacement (Notes use-in-note — Notes owns workspace; 7F)
  *   - openNotes lazy (Notes › / workspace)
@@ -74,7 +74,7 @@
  *     bookmarkSource / startPlacement body (Packet 7F)
  *   - Document swipe decisions, #scrim, overlayOwned snapshot (shell /
  *     navigation.js)
- *   - Search, archived openArchived implementation, map station capture
+ *   - Search, the openPreview implementation, map station capture
  *     (addStationBookmark shell), chat bubble capture (chat.js)
  *   - Composer #promptbar (composer.js), generic sheets, polling tick body
  *   - Shared longpress helper implementation (shell injects)
@@ -496,8 +496,8 @@ export function createBookmarksFeature(deps){
     if (decision.kind === "archived"){
       if (typeof d.wsOpen === "function" && d.wsOpen() && typeof d.closeWorkspace === "function")
         d.closeWorkspace();
-      if (typeof d.openArchived === "function")
-        d.openArchived(decision.uid, decision.segment, decision.record, decision.turnTime || "");
+      if (typeof d.openPreview === "function")
+        d.openPreview(decision.uid, decision.segment, decision.record, decision.turnTime || "");
       return true;
     }
     return false;

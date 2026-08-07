@@ -327,6 +327,7 @@ func TestStationTitleIsSemibold(t *testing.T) {
 func TestOpenChatControlIsConsistent(t *testing.T) {
 	mapSrc := mustReadWeb(t, "web/js/map.js")
 	search := mustReadWeb(t, "web/js/search.js")
+	app := mustReadWeb(t, "web/js/app.js")
 
 	if strings.Contains(mapSrc, "&#8249; Open chat") {
 		t.Error("the wall-map toolbar must not use a bare chevron for Open chat — it must use ICON_JUMP like every other surface")
@@ -346,14 +347,15 @@ func TestOpenChatControlIsConsistent(t *testing.T) {
 		t.Errorf("the wall-map jump control must read exactly \"Open chat\"; got %q", btn)
 	}
 
-	if strings.Contains(search, "Show to chat") {
-		t.Error(`the search hit bar must read "Open chat", the same words as the wall map (item 14)`)
+	// The search overlay no longer has a per-hit action bar to harmonise — a hit
+	// just opens the preview. The words and the icon moved to the preview head,
+	// which is now the third surface offering the same control, and it must say
+	// and look like the other two.
+	if strings.Contains(search, "Show to chat") || strings.Contains(search, "Open chat") {
+		t.Error("the search overlay must not offer its own Open chat; the preview head owns it")
 	}
-	if !strings.Contains(search, `show: "Open chat"`) {
-		t.Error(`SACT_LABEL.show must be "Open chat"`)
-	}
-	if !strings.Contains(search, "ICON_JUMP") {
-		t.Error("the search hit's Open chat button must carry ICON_JUMP, like the Bookmarks pane")
+	if !strings.Contains(app, `ICON_JUMP + " Open chat"`) {
+		t.Error(`the preview head's control must read "Open chat" and carry ICON_JUMP, like the wall map and the Bookmarks pane`)
 	}
 }
 

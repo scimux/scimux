@@ -577,7 +577,6 @@ function createFeature(overrides = {}){
     updateLocal: [],
     uiMutate: [],
     alert: [],
-    closeArchived: 0,
     fillLane: [],
   };
 
@@ -639,8 +638,6 @@ function createFeature(overrides = {}){
     renderCards: () => { effects.renderCards++; },
     renderChatHead: () => { effects.renderChatHead++; },
     renderMap: () => { effects.renderMap++; },
-    closeArchived: () => { effects.closeArchived++; },
-    getArchivedFork: () => overrides.archivedFork || null,
     alert: msg => effects.alert.push(msg),
     ...overrides.deps,
   });
@@ -770,21 +767,17 @@ test("live turn fork seeds parent, title select timer, prompt, conscious lane", 
   assert.equal(ctx.byId.nc_title._selected, true);
 });
 
-test("live station fork and archived-config fork", () => {
-  const ctx = createFeature({
-    archivedFork: { title: "Old", agent: "codex", model: "gpt-5.4", effort: "low", dir: "/arch" },
-  });
+/* Fork seeds itself from a LIVE parent, and only from a live parent. The
+   deleted-chat fork is gone with the search overlay's action bar: a chat you
+   cannot open is a chat you cannot fork, and offering it was the one place the
+   UI claimed otherwise. */
+test("live station fork seeds from the parent node", () => {
+  const ctx = createFeature();
   ctx.feature.bind();
   ctx.feature.forkFromStation("p1");
   assert.equal(ctx.byId.nc_prompt.value, "");
   assert.equal(ctx.byId.nc_dir.value, "/parent");
   assert.equal(ctx.effects.fillLane.at(-1).selected, "");
-
-  ctx.feature.forkFromArchived();
-  assert.equal(ctx.effects.closeArchived, 1);
-  assert.equal(ctx.byId.nc_dir.value, "/arch");
-  assert.equal(ctx.byId.nc_agent.value, "codex");
-  assert.equal(ctx.byId.nc_title.value, "Old");
 });
 
 test("title selection timing uses setTimeout 0", () => {
@@ -1144,7 +1137,6 @@ test("public factory API has no mutable test accessors", () => {
     "closeSheets",
     "destroy",
     "fieldError",
-    "forkFromArchived",
     "forkFromStation",
     "forkFromTurn",
     "openActivityEditor",

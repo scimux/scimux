@@ -542,12 +542,12 @@ func TestSearchOverlayShell(t *testing.T) {
 }
 
 // Hit identity attributes are executed by search.test.js (searchHitHTML).
-// Retain the shell connectivity that openArchived joins seg/rec to the archived API.
+// Retain the shell connectivity that openPreview joins seg/rec to the preview API.
 func TestSearchHitCarriesIdentity(t *testing.T) {
 	app := mustReadApp(t)
 	if !strings.Contains(app, `"&seg=" + encodeURIComponent(seg`) ||
 		!strings.Contains(app, `"&rec=" + encodeURIComponent(rec`) {
-		t.Error("openArchived must send seg/rec to /api/preview")
+		t.Error("openPreview must send seg/rec to /api/preview")
 	}
 }
 
@@ -629,44 +629,41 @@ func TestSearchActionBar(t *testing.T) {
 	}
 }
 
-// Archived surface: shell DOM/ARIA, no composer, and composition entry points.
-// Show-to-chat routing and sheets prepareLaunchConfig are covered by Node.
-func TestArchivedView(t *testing.T) {
+// Preview surface: shell DOM/ARIA, no composer, and its entry points.
+// Hit routing and the head's two controls are covered by Node and by
+// ui_search_preview_test.go.
+func TestPreviewView(t *testing.T) {
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
 	for _, want := range []string{
-		`id="archivedview"`,
+		`id="previewview"`,
 		`role="dialog"`,
 	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("archived view shell missing %q", want)
+			t.Errorf("preview shell missing %q", want)
 		}
 	}
 	for _, want := range []string{
-		"function openArchived(",
-		"function closeArchived(",
-		"function renderArchived(",
+		"function openPreview(",
+		"function closePreview(",
+		"function renderPreview(",
 		`fetch("/api/preview?uid="`,
 	} {
 		if !strings.Contains(app, want) {
-			t.Errorf("archived view implementation missing %q", want)
+			t.Errorf("preview implementation missing %q", want)
 		}
 	}
 	// The read-only surface must not host a chat composer.
-	if vs := strings.Index(html, `<div id="archivedview"`); vs >= 0 {
+	if vs := strings.Index(html, `<div id="previewview"`); vs >= 0 {
 		ve := strings.Index(html[vs:], "\n</div>\n") + vs
 		if ve > vs && strings.Contains(html[vs:ve], "<textarea") {
-			t.Error("the archived read-only surface must not contain a composer/textarea")
+			t.Error("the read-only preview must not contain a composer/textarea")
 		}
 	}
-	if !strings.Contains(app, "function forkFromArchived()") && !strings.Contains(app, "forkFromArchived(){") {
-		t.Error("archived fork entry point missing")
-	}
-	if !strings.Contains(app, "sheetsFeature.forkFromArchived()") {
-		t.Error("archived fork must delegate to sheetsFeature")
-	}
-	if !strings.Contains(app, `splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE })`) {
-		t.Error("archived asset projection must inject ICON_FILE into splitAssetRefs")
+	// A live chat's assets resolve here exactly as in the chat — same node, same
+	// asset map — or the same turn would read "unavailable" one tap apart.
+	if !strings.Contains(app, `splitAssetRefs(t.text || "", previewNode, d.assets || {}, { iconFile: ICON_FILE })`) {
+		t.Error("preview asset projection must pass the node, its assets, and ICON_FILE")
 	}
 }
 
@@ -801,7 +798,7 @@ func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
 		t.Error("the overlay decision must precede applyNavAction so swipes never move layers underneath")
 	}
 	// Live recheck of overlays at touchend remains forbidden.
-	if strings.Contains(body, "if (wsOpen() || searchOpen() || archivedOpen())") {
+	if strings.Contains(body, "if (wsOpen() || searchOpen() || previewOpen())") {
 		t.Error("touchend still re-checks live overlay open state")
 	}
 }
@@ -1390,14 +1387,14 @@ func TestAppNavSwipeSnapshotsOverlayAtStart(t *testing.T) {
 	if !strings.Contains(app, "captureTouchStart") {
 		t.Error("touchstart must use captureTouchStart for the immutable overlay snapshot")
 	}
-	if !strings.Contains(app, "overlayOwned: wsOpen() || searchOpen() || archivedOpen()") {
-		t.Error("touchstart must snapshot overlay-open state (overlayOwned: wsOpen() || searchOpen() || archivedOpen())")
+	if !strings.Contains(app, "overlayOwned: wsOpen() || searchOpen() || previewOpen()") {
+		t.Error("touchstart must snapshot overlay-open state (overlayOwned: wsOpen() || searchOpen() || previewOpen())")
 	}
 	// touchend consults documentSwipeDecision's suppress on that snapshot only.
 	if !strings.Contains(app, "documentSwipeDecision") {
 		t.Error("touchend must consult documentSwipeDecision with the touchstart snapshot")
 	}
-	if strings.Contains(app, "if (wsOpen() || searchOpen() || archivedOpen()){ touch = null; return; }") {
+	if strings.Contains(app, "if (wsOpen() || searchOpen() || previewOpen()){ touch = null; return; }") {
 		t.Error("touchend still re-checks live wsOpen() — racy: the overlay handler flips it before this bubbles, causing the Notes→L→R overshoot to Chat")
 	}
 	nav, err := os.ReadFile(webSourcePath("web/js/navigation.js"))

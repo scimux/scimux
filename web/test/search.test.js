@@ -13,7 +13,6 @@ import {
   RECENTS_KEY,
   RECENTS_CAP,
   RECENTS_SHOW,
-  SACT_LABEL,
   normalizeSearchQuery,
   isSearchQueryReady,
   loadRecents,
@@ -24,15 +23,10 @@ import {
   searchHitHTML,
   searchGroupHTML,
   searchFeedHTML,
-  searchHitActions,
-  hitBarHTML,
   buildPendingJump,
-  buildSearchBookmark,
-  showActionDecision,
   createSearchFeature,
 } from "../js/search.js";
 import { esc } from "../js/format.js";
-import { stampAddress } from "../js/bookmarks.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const searchSrc = readFileSync(join(__dirname, "../js/search.js"), "utf8");
@@ -41,7 +35,7 @@ const searchSrc = readFileSync(join(__dirname, "../js/search.js"), "utf8");
 test("search.js exports factory and pure helpers; no later-feature imports", () => {
   assert.match(searchSrc, /export function createSearchFeature/);
   assert.match(searchSrc, /from "\.\/format\.js"/);
-  assert.match(searchSrc, /from "\.\/bookmarks\.js"/);
+  assert.doesNotMatch(searchSrc, /from "\.\/bookmarks\.js"/);
   assert.doesNotMatch(searchSrc, /from "\.\/sheets\.js"/);
   assert.doesNotMatch(searchSrc, /from "\.\/polling\.js"/);
   assert.doesNotMatch(searchSrc, /from "\.\/app\.js"/);
@@ -60,13 +54,6 @@ test("constants: min/max/debounce/recents caps and labels", () => {
   assert.equal(RECENTS_KEY, "scimux-search-recents");
   assert.equal(RECENTS_CAP, 8);
   assert.equal(RECENTS_SHOW, 5);
-  /* item 14: the overlay reads exactly like the metro-map station toolbar —
-     one wording for one action across every surface. */
-  assert.deepEqual(SACT_LABEL, {
-    show: "Open chat",
-    fork: "Fork from here",
-    bookmark: "Add bookmark",
-  });
 });
 
 /* ---------- query clamp/gate ---------- */
@@ -172,14 +159,14 @@ test("searchHitHTML escapes excerpt and stamps identity attributes", () => {
     before: "a <b>", match: "x&y", after: "</b> z",
     time: "2026-07-26T10:00:00",
     role: "user", segment: 2, record: 3,
-    _kind: "live", _id: "n1", _uid: "u1", _forkable: true, _lane: "L",
+    _kind: "live", _id: "n1", _uid: "u1", _lane: "L",
   }, esc);
   assert.ok(out.includes("a &lt;b&gt;<mark>x&amp;y</mark>&lt;/b&gt; z"));
   assert.ok(!out.includes("<b>") && !out.includes("</b>"));
   assert.match(out, /data-role="user"/);
   assert.match(out, /data-segment="2"/);
   assert.match(out, /data-record="3"/);
-  assert.match(out, /data-forkable="1"/);
+  assert.doesNotMatch(out, /data-forkable/);
   assert.match(out, /data-kind="live"/);
   assert.match(out, /data-id="n1"/);
   assert.match(out, /data-uid="u1"/);
@@ -188,7 +175,7 @@ test("searchHitHTML escapes excerpt and stamps identity attributes", () => {
 
 test("searchGroupHTML stamps group identity onto hits; kind labels", () => {
   const g = {
-    kind: "archived", id: "gone", uid: "u9", forkable: true, lane_id: "lane1",
+    kind: "archived", id: "gone", uid: "u9", lane_id: "lane1",
     agent: "claude", title: "Old <x>",
     hits: [{ before: "hi ", match: "there", after: "", turn_time: "T1", role: "assistant", segment: 1, record: 4 }],
   };
@@ -204,9 +191,30 @@ test("searchGroupHTML stamps group identity onto hits; kind labels", () => {
   assert.match(html, /Old &lt;x&gt;/);
   assert.match(html, /data-kind="archived"/);
   assert.match(html, /data-uid="u9"/);
-  assert.match(html, /data-forkable="1"/);
   const bm = searchGroupHTML({ kind: "bookmarks", id: "b", hits: [{ match: "n" }] }, { esc, laneColor: () => "", agentLogo: () => "" });
   assert.match(bm, /sgkind">bookmarks</);
+});
+
+/* A bookmark carries its own stamped address, and in the Bookmarks bucket there
+   is no group address to inherit — the bucket is a bag of bookmarks from
+   everywhere. Reading the uid off the group there threw the address away, which
+   went unnoticed while the tap only ever opened the pane. Now the tap previews
+   the source turn, so the hit's own address has to win. */
+test("a hit's own address outranks its group's", () => {
+  const bucket = searchGroupHTML({
+    kind: "bookmarks", title: "Bookmarks",
+    hits: [{ match: "n", uid: "u-own", segment: 2, record: 7 }],
+  }, { esc, laneColor: () => "", agentLogo: () => "" });
+  assert.match(bucket, /data-uid="u-own"/);
+  assert.match(bucket, /data-segment="2"/);
+  assert.match(bucket, /data-record="7"/);
+
+  /* A log hit has no uid of its own and still inherits the group's. */
+  const live = searchGroupHTML({
+    kind: "live", id: "n1", uid: "u-group",
+    hits: [{ match: "n", segment: 0, record: 1 }],
+  }, { esc, laneColor: () => "", agentLogo: () => "" });
+  assert.match(live, /data-uid="u-group"/);
 });
 
 test("searchFeedHTML: empty, groups, partial footer", () => {
@@ -221,55 +229,30 @@ test("searchFeedHTML: empty, groups, partial footer", () => {
   assert.match(html, /Showing the most recent matches/);
 });
 
-/* ---------- action list / address / bookmark ---------- */
-test("searchHitActions adaptive by kind/forkable/role", () => {
-  assert.deepEqual(searchHitActions("live", true), ["show", "fork", "bookmark"]);
-  assert.deepEqual(searchHitActions("live", false), ["show", "bookmark"]);
-  assert.deepEqual(searchHitActions("bookmarks", false), ["show", "bookmark"]);
-  assert.deepEqual(searchHitActions("bookmarks", true), ["show", "bookmark"]);
-  assert.deepEqual(searchHitActions("archived", true), ["show", "bookmark"]);
-  assert.deepEqual(searchHitActions("archived", false), ["show", "bookmark"]);
-  assert.deepEqual(searchHitActions("live", true, "asset"), ["show"]);
-  assert.deepEqual(searchHitActions("archived", true, "asset"), ["show"]);
-  assert.deepEqual(searchHitActions("live", true, "user"), ["show", "fork", "bookmark"]);
-  assert.deepEqual(searchHitActions("live", true, "assistant"), ["show", "fork", "bookmark"]);
+/* ---------- no action bar at all ----------
+   The per-hit bar was the whole confusion. It appeared only after the tap, and
+   what it contained depended on facts the user could not see: three buttons for
+   a live chat whose directory still existed, two if the directory was gone, two
+   for a past chat, one for an asset. Nobody outside the project could explain
+   why one hit offered "Fork from here" and its neighbour did not — and the
+   explanation, once given, was about scimux's bookkeeping, not about the search.
+
+   So the bar is gone, not rearranged. A hit does one thing. */
+test("search.js builds no per-hit action bar", () => {
+  assert.doesNotMatch(searchSrc, /data-sact/, "the action bar's contract is retired");
+  assert.doesNotMatch(searchSrc, /hitbar/, "no bar element is constructed any more");
+  assert.doesNotMatch(searchSrc, /SACT_LABEL|searchHitActions|hitBarHTML|showActionDecision/,
+    "the adaptive-action vocabulary must not survive as dead exports");
 });
 
-test("hitBarHTML uses SACT_LABEL buttons", () => {
-  const html = hitBarHTML("live", true, "user");
-  assert.match(html, /data-sact="show"/);
-  assert.match(html, /Open chat/);
-  assert.match(html, /data-sact="fork"/);
-  assert.match(html, /Fork from here/);
-  assert.match(html, /data-sact="bookmark"/);
-  assert.match(html, /Add bookmark/);
-  assert.equal(hitBarHTML("live", true, "asset"),
-    `<button data-sact="show">Open chat</button>`);
-});
-
-/* item 14: the "open chat" control carries the shared jump glyph, exactly as
-   the Bookmarks pane and the station toolbar do. Icons arrive as a dep so the
-   module stays free of inline SVG. */
-test("hitBarHTML renders the shared jump icon before the Open chat label", () => {
-  const icons = { ICON_JUMP: "<svg id='jump'></svg>" };
-  const html = hitBarHTML("live", true, "user", icons);
-  assert.match(html, /data-sact="show"><svg id='jump'><\/svg> Open chat</);
-  assert.equal(hitBarHTML("live", true, "asset", icons),
-    `<button data-sact="show"><svg id='jump'></svg> Open chat</button>`);
-});
-
-test("hitBarHTML degrades to the bare label when no icon set is supplied", () => {
-  assert.equal(hitBarHTML("live", false, "asset", {}),
-    `<button data-sact="show">Open chat</button>`);
-  assert.equal(hitBarHTML("live", false, "asset"),
-    `<button data-sact="show">Open chat</button>`);
-});
-
-test("only the open-chat action is iconised; fork and bookmark stay text", () => {
-  const html = hitBarHTML("live", true, "user", { ICON_JUMP: "<svg id='jump'></svg>" });
-  assert.equal(html.match(/<svg id='jump'>/g).length, 1);
-  assert.match(html, /data-sact="fork">Fork from here</);
-  assert.match(html, /data-sact="bookmark">Add bookmark</);
+/* Fork went with it, and not merely because the bar did. A deleted chat cannot
+   be opened — the node is gone, which the UI states plainly — so offering to
+   fork one was the same impossibility with a friendlier verb. Fork now lives
+   exactly where the other per-turn actions live: inside a real chat. */
+test("search.js neither forks nor files bookmarks", () => {
+  assert.doesNotMatch(searchSrc, /forkFromTurn/, "forking is a chat action, not a search result action");
+  assert.doesNotMatch(searchSrc, /buildSearchBookmark|uiMutate|stampAddress/,
+    "filing a bookmark belongs to the chat the hit points at");
 });
 
 test("buildPendingJump durable address + clock", () => {
@@ -282,29 +265,6 @@ test("buildPendingJump durable address + clock", () => {
     node: "n1", turnTime: "", text: "", ts: 1,
     uid: "", segment: null, record: null,
   });
-});
-
-test("buildSearchBookmark stamps address; omits blank node/turn/lane", () => {
-  const b = buildSearchBookmark({
-    t: "2026-01-01T00:00:00.000Z", text: "note",
-    node: "n1", turnTime: "T", lane: "L",
-    uid: "u1", segment: "1", record: "2",
-  }, stampAddress);
-  assert.equal(b.text, "note");
-  assert.equal(b.node, "n1");
-  assert.equal(b.uid, "u1");
-  assert.equal(b.segment, 1);
-  assert.equal(b.record, 2);
-  const bare = buildSearchBookmark({ t: "t", text: "x" }, stampAddress);
-  assert.equal(bare.node, undefined);
-  assert.equal(bare.uid, undefined);
-});
-
-test("showActionDecision routes live/bookmarks/archived/unavailable", () => {
-  assert.equal(showActionDecision("live", { id: "n" }), "live");
-  assert.equal(showActionDecision("bookmarks", null), "bookmarks");
-  assert.equal(showActionDecision("archived", null), "archived");
-  assert.equal(showActionDecision("live", null), "unavailable");
 });
 
 /* ---------- fake DOM / factory harness ---------- */
@@ -493,9 +453,7 @@ function createFeature(overrides = {}){
     selects: [],
     toasts: [],
     bookmarksOpen: [],
-    archived: [],
-    forks: [],
-    mutates: [],
+    preview: [],
     chatInvalidations: 0,
   };
 
@@ -520,9 +478,7 @@ function createFeature(overrides = {}){
     activeElement: () => document.activeElement,
     contains: n => document.contains(n),
     esc,
-    stampAddress,
     now: () => overrides.now ?? 1000,
-    nowISO: () => overrides.nowISO || "2026-07-01T12:00:00.000Z",
     nodeById: overrides.nodeById || (() => null),
     laneColor: overrides.laneColor || (() => "#00f"),
     agentLogo: overrides.agentLogo || (() => "LOGO"),
@@ -530,11 +486,8 @@ function createFeature(overrides = {}){
     setPendingJump: v => effects.pendingJumps.push(v),
     invalidateChat: () => { effects.chatInvalidations++; },
     setBookmarksOpen: o => effects.bookmarksOpen.push(o),
-    openArchived: (...a) => effects.archived.push(a),
-    forkFromTurn: (...a) => effects.forks.push(a),
-    uiMutate: op => effects.mutates.push(op),
+    openPreview: (...a) => effects.preview.push(a),
     toast: m => effects.toasts.push(m),
-    prompt: overrides.prompt || (() => null),
     isDesktop: overrides.isDesktop || (() => false),
     ...overrides.extraDeps,
   });
@@ -799,167 +752,74 @@ test("recents click re-runs; clear wipes and blanks", async () => {
   assert.match(h.roots.searchfeed.innerHTML, /Search your current and past chats/);
 });
 
-/* ---------- hit bar toggle / actions ---------- */
-test("hit-bar toggle single ownership", () => {
-  const h = createFeature();
-  h.feature.bind();
-  h.feature.open();
-  const hit1 = makeHit({ kind: "live", forkable: "1", role: "user", id: "n1" });
-  const hit2 = makeHit({ kind: "live", forkable: "1", role: "user", id: "n2" });
-  h.roots.searchfeed.appendChild(hit1);
-  h.roots.searchfeed.appendChild(hit2);
-  h.roots.searchfeed.dispatch("click", { target: hit1 });
-  assert.ok(hit1.classList.contains("open"));
-  assert.equal(hit1.querySelector(".hitbar") != null, true);
-  h.roots.searchfeed.dispatch("click", { target: hit2 });
-  assert.ok(!hit1.classList.contains("open"));
-  assert.ok(hit2.classList.contains("open"));
-  h.roots.searchfeed.dispatch("click", { target: hit2 });
-  assert.ok(!hit2.classList.contains("open"));
-});
+/* ---------- one gesture ---------- */
 
-test("show: live / bookmarks / archived / unavailable", () => {
-  const nodes = { n1: { id: "n1" } };
-  const h = createFeature({ nodeById: id => nodes[id] || null });
+/* A tap opens the surrounding conversation. That is the entire interaction, and
+   it is the same interaction whether the chat is still running or was deleted
+   last month — because the user cannot tell those apart from a result row, and
+   should not have to before deciding whether to tap. */
+test("tapping a hit opens the preview — live and past alike, same call", () => {
+  const h = createFeature({ nodeById: id => id === "n1" ? { id: "n1" } : null });
   h.feature.bind();
   h.feature.open();
   h.roots.searchinput.value = "ab";
 
-  const live = makeHit({
-    kind: "live", id: "n1", uid: "u1", segment: "1", record: "2", turn: "T1",
-  });
-  const showBtn = el("button", { dataset: { sact: "show" } });
-  showBtn.dataset.sact = "show";
-  live.appendChild(showBtn);
-  /* closest from button to hit */
+  const live = makeHit({ kind: "live", id: "n1", uid: "u1", segment: "1", record: "2", turn: "T1" });
   h.roots.searchfeed.appendChild(live);
-  h.roots.searchfeed.dispatch("click", { target: showBtn });
-  assert.equal(h.effects.selects[0], "n1");
-  assert.equal(h.effects.pendingJumps[0].uid, "u1");
-  assert.equal(h.effects.pendingJumps[0].segment, 1);
-  assert.equal(h.effects.chatInvalidations, 1);
-  assert.equal(h.effects.bookmarksOpen[0], false);
+  h.roots.searchfeed.dispatch("click", { target: live });
+  assert.deepEqual(h.effects.preview[0], ["u1", "1", "2", "T1"]);
+  /* The overlay steps aside; the preview is drawn in its place. */
   assert.equal(h.feature.isOpen(), false);
+  /* No jump happened: reading a hit is not the same as leaving for the chat. */
+  assert.equal(h.effects.selects.length, 0);
   assert.deepEqual(loadRecents(h.storage), ["ab"]);
 
-  /* bookmarks free-standing */
   h.feature.open();
-  const bm = makeHit({ kind: "bookmarks", id: "" });
-  const bShow = el("button"); bShow.dataset.sact = "show";
-  bm.appendChild(bShow);
-  h.roots.searchfeed.appendChild(bm);
-  h.roots.searchfeed.dispatch("click", { target: bShow });
-  assert.equal(h.effects.bookmarksOpen.at(-1), true);
-
-  /* archived */
-  h.feature.open();
-  const ar = makeHit({ kind: "archived", id: "", uid: "u9", segment: "3", record: "4", turn: "TA" });
-  const aShow = el("button"); aShow.dataset.sact = "show";
-  ar.appendChild(aShow);
-  h.roots.searchfeed.appendChild(ar);
-  h.roots.searchfeed.dispatch("click", { target: aShow });
-  assert.deepEqual(h.effects.archived[0], ["u9", "3", "4", "TA"]);
-
-  /* unavailable */
-  h.feature.open();
-  const gone = makeHit({ kind: "live", id: "missing" });
-  const gShow = el("button"); gShow.dataset.sact = "show";
-  gone.appendChild(gShow);
-  h.roots.searchfeed.appendChild(gone);
-  h.roots.searchfeed.dispatch("click", { target: gShow });
-  assert.equal(h.effects.toasts.at(-1), "This chat is unavailable.");
+  const past = makeHit({ kind: "archived", id: "", uid: "u9", segment: "3", record: "4", turn: "TA" });
+  h.roots.searchfeed.appendChild(past);
+  h.roots.searchfeed.dispatch("click", { target: past });
+  assert.deepEqual(h.effects.preview[1], ["u9", "3", "4", "TA"]);
+  assert.equal(h.effects.preview.length, 2, "one code path, not two");
 });
 
-test("fork parent and excerpt; no-op without live node", () => {
+/* The one hit that cannot be previewed: a bookmark filed as free-standing
+   commentary, which points at no turn in any log. Its home is the pane. */
+test("an unaddressed bookmark hit still opens the Bookmarks pane", () => {
+  const h = createFeature();
+  h.feature.bind();
+  h.feature.open();
+  const bm = makeHit({ kind: "bookmarks", id: "", uid: "" });
+  h.roots.searchfeed.appendChild(bm);
+  h.roots.searchfeed.dispatch("click", { target: bm });
+  assert.equal(h.effects.bookmarksOpen.at(-1), true);
+  assert.equal(h.effects.preview.length, 0);
+});
+
+/* A live chat whose log predates the meta header has no uid to preview by. It
+   is not unavailable — the chat is right there — so the tap goes straight in,
+   which is exactly what it used to do for every live hit. */
+test("a live hit with no log address jumps into the chat instead", () => {
   const h = createFeature({ nodeById: id => id === "n1" ? { id: "n1" } : null });
   h.feature.bind();
   h.feature.open();
-  h.roots.searchinput.value = "forkme";
-  const hit = makeHit({ kind: "live", id: "n1", forkable: "1", role: "user" }, "parent excerpt");
-  const btn = el("button"); btn.dataset.sact = "fork";
-  hit.appendChild(btn);
+  const hit = makeHit({ kind: "live", id: "n1", uid: "", turn: "T1" });
   h.roots.searchfeed.appendChild(hit);
-  h.roots.searchfeed.dispatch("click", { target: btn });
-  assert.deepEqual(h.effects.forks[0], ["parent excerpt", "n1"]);
+  h.roots.searchfeed.dispatch("click", { target: hit });
+  assert.equal(h.effects.preview.length, 0);
+  assert.equal(h.effects.selects[0], "n1");
+  assert.equal(h.effects.chatInvalidations, 1);
   assert.equal(h.feature.isOpen(), false);
-
-  h.feature.open();
-  const dead = makeHit({ kind: "live", id: "gone" });
-  const f2 = el("button"); f2.dataset.sact = "fork";
-  dead.appendChild(f2);
-  h.roots.searchfeed.appendChild(dead);
-  h.roots.searchfeed.dispatch("click", { target: f2 });
-  assert.equal(h.effects.forks.length, 1);
-  assert.equal(h.feature.isOpen(), true);
 });
 
-/* item 15 (MUST FIX): "Add bookmark" no longer interrogates the user. The hit
-   the finger landed on *is* the bookmark — its excerpt is the text and its
-   dataset is the address. A modal prompt here asked the user to retype what
-   they were already looking at, and filed a comment with no way back. */
-test("bookmark files the hit itself — no prompt, no dialog", () => {
-  const h = createFeature({
-    nodeById: id => id === "n1" ? { id: "n1" } : null,
-    prompt: () => { throw new Error("the bookmark path must not prompt"); },
-  });
-  h.feature.bind();
-  h.feature.open();
-  h.roots.searchinput.value = "noteq";
-  const hit = makeHit({
-    kind: "live", id: "n1", turn: "T", lane: "L",
-    uid: "u1", segment: "5", record: "6", role: "user",
-  }, "  the matched excerpt  ");
-  const btn = el("button"); btn.dataset.sact = "bookmark";
-  hit.appendChild(btn);
-  h.roots.searchfeed.appendChild(hit);
-
-  h.roots.searchfeed.dispatch("click", { target: btn });
-  assert.equal(h.effects.mutates.length, 1);
-  const op = h.effects.mutates[0];
-  assert.equal(op.k, "bookmark-add");
-  assert.equal(op.bookmark.text, "the matched excerpt");
-  assert.equal(op.bookmark.node, "n1");
-  assert.equal(op.bookmark.turnTime, "T");
-  assert.equal(op.bookmark.lane, "L");
-  assert.equal(op.bookmark.uid, "u1");
-  assert.equal(op.bookmark.segment, 5);
-  assert.equal(op.bookmark.record, 6);
-  assert.equal(h.effects.toasts.at(-1), "Bookmark added");
-  assert.equal(h.feature.isOpen(), true);   // still non-terminal
-  assert.deepEqual(loadRecents(h.storage), ["noteq"]);
-});
-
-test("bookmark of an archived hit keeps the address but no live node", () => {
+test("a hit with neither an address nor a live chat says so", () => {
   const h = createFeature({ nodeById: () => null });
   h.feature.bind();
   h.feature.open();
-  const hit = makeHit({
-    kind: "archived", id: "gone", turn: "T2", lane: "L2",
-    uid: "u9", segment: "1", record: "2", role: "assistant",
-  }, "archived excerpt");
-  const btn = el("button"); btn.dataset.sact = "bookmark";
-  hit.appendChild(btn);
-  h.roots.searchfeed.appendChild(hit);
-
-  h.roots.searchfeed.dispatch("click", { target: btn });
-  const op = h.effects.mutates.at(-1);
-  assert.equal(op.bookmark.text, "archived excerpt");
-  assert.ok(!("node" in op.bookmark), "a dead thread must not be recorded as a live address");
-  assert.equal(op.bookmark.uid, "u9");
-});
-
-test("a hit with an empty excerpt files nothing rather than a blank bookmark", () => {
-  const h = createFeature({ nodeById: id => ({ id }) });
-  h.feature.bind();
-  h.feature.open();
-  const hit = makeHit({ kind: "live", id: "n1", role: "user" }, "   ");
-  const btn = el("button"); btn.dataset.sact = "bookmark";
-  hit.appendChild(btn);
-  h.roots.searchfeed.appendChild(hit);
-
-  h.roots.searchfeed.dispatch("click", { target: btn });
-  assert.equal(h.effects.mutates.length, 0);
-  assert.equal(h.feature.isOpen(), true);
+  const gone = makeHit({ kind: "live", id: "missing", uid: "" });
+  h.roots.searchfeed.appendChild(gone);
+  h.roots.searchfeed.dispatch("click", { target: gone });
+  assert.equal(h.effects.toasts.at(-1), "This chat is unavailable.");
+  assert.equal(h.effects.preview.length, 0);
 });
 
 test("search.js has no prompt dependency left at all", () => {

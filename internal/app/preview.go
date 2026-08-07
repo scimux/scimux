@@ -12,34 +12,42 @@ import (
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
-// The read-only surface for a DELETED chat. A search hit on a live node opens
-// the normal chat (that read path already exists); only a deleted node — dropped
-// from a.byID, its log moved to sessions/archive/ — needs this bounded window.
-// It is deliberately NOT /api/nodes/{id}/chat: there is no node, no process, no
-// composer, no polling — just a photo of the turns around the hit so the
-// supervisor can read what was said and, if the dir survives, fork from it.
+// The read-only window a search hit opens onto its surrounding conversation —
+// for EVERY hit, live or deleted. The overlay used to split them: a live hit
+// jumped straight into the chat, a past hit landed here, and the only way to
+// learn which you were about to get was to tap and read the action bar that
+// appeared. One surface removes the guess. The difference that actually matters
+// — whether the chat still exists — is reported as Node and shows up in the head
+// as the presence or absence of "Open chat".
+//
+// It stays deliberately NOT /api/nodes/{id}/chat even for a live node: no
+// composer, no polling, no history, no mechanics — just a photo of the turns
+// around the hit. Acting on the conversation is what "Open chat" is for.
 const (
 	previewWindowBefore = 8 // turns kept before the anchor
 	previewWindowAfter  = 8 // turns kept after the anchor
 )
 
 type previewResponse struct {
-	UID             string            `json:"uid"`
+	UID string `json:"uid"`
+	// Node is the live node owning this log, empty when the chat is deleted.
+	// The client needs nothing else to decide whether the head can offer a jump.
+	Node            string            `json:"node,omitempty"`
 	Title           string            `json:"title"`
 	Agent           string            `json:"agent,omitempty"`
 	Model           string            `json:"model,omitempty"`
-	Effort          string            `json:"effort,omitempty"`
-	Dir             string            `json:"dir,omitempty"`
-	Forkable        bool              `json:"forkable"`
 	Turns           []transcript.Turn `json:"turns"`
+	Assets          map[string]any    `json:"assets,omitempty"`
 	Anchor          int               `json:"anchor"` // index into Turns of the hit turn
 	BeforeTruncated bool              `json:"before_truncated"`
 	AfterTruncated  bool              `json:"after_truncated"`
 }
 
 // handlePreview serves GET /api/preview?uid=<uid>&seg=<n>&rec=<n>&at=<turnTime>.
-// uid is the deleted log's on-disk identity (a meta UID, or "legacy:<ref>" for a
-// header-less log). The hit is anchored by its stable (seg, rec) ordinal pair —
+// uid is the log's on-disk identity (a meta UID, or "legacy:<ref>" for a
+// header-less archived log) — one identifier for live and deleted alike, because
+// a bookmark's stamped address only ever carries a uid. The hit is anchored by
+// its stable (seg, rec) ordinal pair —
 // the same identity ScanLog emits — resolved to a bounded turn window by
 // ReadTurnWindow, so a duplicate or empty timestamp can never pick the wrong turn
 // and a click never materializes the whole archived log. `at` remains a defensive
@@ -54,7 +62,7 @@ func (a *app) handlePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uid required", 400)
 		return
 	}
-	path, meta, ok := a.resolveArchived(uid)
+	path, meta, nodeID, title, ok := a.resolvePreview(uid)
 	if !ok {
 		http.Error(w, "not found", 404)
 		return
@@ -102,30 +110,35 @@ func (a *app) handlePreview(w http.ResponseWriter, r *http.Request) {
 		afterTruncated = hi < len(turns)
 	}
 
-	// Neutralize asset markers over the window only: archived blobs are not served
-	// in v1 (a deleted node's assets are archived away), so any scimux-asset marker
-	// or raw agent path degrades to an inert "unavailable" chip — same projection
-	// the live chat applies, with an empty asset set.
-	empty := map[string]sessionlog.AssetEvent{}
-	for i := range window {
-		window[i].Text = asset.Project(window[i].Text, empty)
-		window[i].Text = asset.ProjectAgentPaths(window[i].Text, empty)
+	// Assets. A live node's blobs are still served, so the window gets the same
+	// projection the chat read path applies — otherwise the identical turn would
+	// read "unavailable" in the preview and fine one tap later, which teaches the
+	// user that the preview lies. A deleted node's assets were archived away with
+	// it, so there the marker degrades to an inert chip, as before.
+	var assets map[string]any
+	if nodeID != "" {
+		window, assets = a.projectTurns(nodeID, window)
+	} else {
+		empty := map[string]sessionlog.AssetEvent{}
+		for i := range window {
+			window[i].Text = asset.Project(window[i].Text, empty)
+			window[i].Text = asset.ProjectAgentPaths(window[i].Text, empty)
+		}
 	}
 
 	resp := previewResponse{
 		UID:             uid,
+		Node:            nodeID,
+		Title:           title,
 		Turns:           window,
+		Assets:          assets,
 		Anchor:          anchor,
 		BeforeTruncated: beforeTruncated,
 		AfterTruncated:  afterTruncated,
 	}
 	if meta != nil {
-		resp.Title = meta.Node
 		resp.Agent = meta.Agent
 		resp.Model = meta.Model
-		resp.Effort = meta.Effort
-		resp.Dir = meta.Dir
-		resp.Forkable = meta.Agent != "" && meta.Dir != "" && dirExists(meta.Dir)
 	}
 	if resp.Title == "" {
 		resp.Title = "Deleted chat"
@@ -133,32 +146,60 @@ func (a *app) handlePreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// resolveArchived maps a uid to its archive file. A "legacy:<ref>" uid carries a
-// path *relative* to the archive directory (header-less logs have no UID to match
-// on) — never an absolute path, which would leak the local data dir. The ref is
-// never trusted raw: it is joined onto the archive dir and must resolve back
-// inside it, or the log is treated as not found (traversal guard). A hex/tN uid
-// is matched against the meta header of each archived log.
-func (a *app) resolveArchived(uid string) (string, *sessionlog.MetaEvent, bool) {
+// resolvePreview maps a uid to the log file behind it, live logs first and the
+// archive second, and reports which of the two it found.
+//
+// Live logs are matched by walking a.nodes rather than by scanning sessionsDir:
+// the node list is the authority on what still exists, so a stray leftover file
+// can never advertise "Open chat" for a node that is gone. A live chat's title
+// comes from the node, not from the meta header — the header froze the slug at
+// creation and chats get renamed.
+//
+// A "legacy:<ref>" uid carries a path *relative* to the archive directory
+// (header-less logs have no UID to match on) — never an absolute path, which
+// would leak the local data dir. The ref is never trusted raw: it is joined onto
+// the archive dir and must resolve back inside it, or the log is treated as not
+// found (traversal guard).
+func (a *app) resolvePreview(uid string) (path string, meta *sessionlog.MetaEvent, nodeID, title string, ok bool) {
 	if a.sessionsDir == "" {
-		return "", nil, false
+		return "", nil, "", "", false
 	}
 	archiveDir := filepath.Join(a.sessionsDir, "archive")
 
-	if ref, ok := strings.CutPrefix(uid, "legacy:"); ok {
+	if ref, cut := strings.CutPrefix(uid, "legacy:"); cut {
 		clean := filepath.Join(archiveDir, filepath.Clean("/"+ref))
 		if !withinDir(archiveDir, clean) {
-			return "", nil, false
+			return "", nil, "", "", false
 		}
 		if st, err := os.Stat(clean); err != nil || st.IsDir() {
-			return "", nil, false
+			return "", nil, "", "", false
 		}
-		return clean, readLogMeta(clean), true
+		m := readLogMeta(clean)
+		return clean, m, "", metaTitle(m), true
+	}
+
+	// Snapshot id+title under the lock; readLogMeta touches the disk and must not
+	// hold it.
+	a.mu.Lock()
+	live := make([][2]string, 0, len(a.nodes))
+	for _, n := range a.nodes {
+		live = append(live, [2]string{n.ID, n.Title})
+	}
+	a.mu.Unlock()
+	for _, n := range live {
+		p := a.sessionLogPath(n[0])
+		if m := readLogMeta(p); m != nil && m.UID == uid {
+			t := n[1]
+			if t == "" {
+				t = metaTitle(m)
+			}
+			return p, m, n[0], t, true
+		}
 	}
 
 	entries, err := os.ReadDir(archiveDir)
 	if err != nil {
-		return "", nil, false
+		return "", nil, "", "", false
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
@@ -166,10 +207,19 @@ func (a *app) resolveArchived(uid string) (string, *sessionlog.MetaEvent, bool) 
 		}
 		p := filepath.Join(archiveDir, e.Name())
 		if m := readLogMeta(p); m != nil && m.UID == uid {
-			return p, m, true
+			return p, m, "", metaTitle(m), true
 		}
 	}
-	return "", nil, false
+	return "", nil, "", "", false
+}
+
+// metaTitle is the only name a deleted chat has left: the title slug its meta
+// header froze at creation.
+func metaTitle(m *sessionlog.MetaEvent) string {
+	if m == nil {
+		return ""
+	}
+	return m.Node
 }
 
 // atoiOK parses a non-negative decimal query param. ok is false for an empty or

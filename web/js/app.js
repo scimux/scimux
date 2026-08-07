@@ -8,7 +8,7 @@
  * dependency injection, selection/title-edit coordination, shared lane-picker
  * seams, status/usage rendering and existing timers, node rail helpers, station
  * bookmark/toast/longpress helpers, feature bind order, spatial navigation and
- * document gestures, the archived read-only surface, update/license menu
+ * document gestures, the read-only chat preview, update/license menu
  * actions, polling construction/bind, and final boot order.
  *
  * Feature modules under ./ retain all feature HTML templates and feature-owned
@@ -55,7 +55,7 @@ import {
   bookmarkClampState as bookmarkClampStateMod,
 } from "./bookmarks.js";
 import { createNotesFeature } from "./notes.js";
-import { createSearchFeature } from "./search.js";
+import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
   makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
@@ -312,7 +312,7 @@ function copyText(s){
 /* esc / mdInline / md imported from /js/format.js */
 
 /* Attachment/session-asset tile builders + splitAssetRefs live in chat.js
-   (Packet 7C). The archived read-only surface imports splitAssetRefs for the
+   (Packet 7C). The read-only chat preview imports splitAssetRefs for the
    same inert-missing-chip projection. */
 
 /* ---------- statusbar ---------- */
@@ -886,7 +886,7 @@ bookmarksFeature = createBookmarksFeature({
   openSheet: id => sheetsFeature.openSheet(id),
   closeSheets: () => sheetsFeature.closeSheets(),
   setPendingJump: v => { pendingJump = v; },
-  openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at),
+  openPreview: (uid, seg, rec, at) => openPreview(uid, seg, rec, at),
   invalidateChat: () => chatFeature.invalidate(),
   wsOpen: () => notesFeature.isOpen(),
   closeWorkspace: () => notesFeature.close(),
@@ -996,7 +996,7 @@ searchFeature = createSearchFeature({
   invalidateChat: () => chatFeature.invalidate(),
   setBookmarksOpen: o => setBookmarksOpen(o),
   /* the overlay hides itself to show this, so the modal owes it a way back */
-  openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at, RETURN_SEARCH),
+  openPreview: (uid, seg, rec, at) => openPreview(uid, seg, rec, at, RETURN_SEARCH),
   forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
   uiMutate: op => uiMutate(op),
   toast: msg => toast(msg),
@@ -1064,8 +1064,6 @@ sheetsFeature = createSheetsFeature({
   renderCards: () => renderCards(),
   renderChatHead: () => renderChatHead(),
   renderMap: () => renderMap(),
-  closeArchived: () => closeArchived(),
-  getArchivedFork: () => archivedFork,
   alert: msg => alert(msg),
 });
 
@@ -1455,7 +1453,7 @@ document.addEventListener("touchstart", e => {
   touch = captureTouchStart({
     x: t.clientX, y: t.clientY, clientWidth: innerWidth,
     localCard: !!e.target.closest("#cardlist .card"),
-    overlayOwned: wsOpen() || searchOpen() || archivedOpen(),
+    overlayOwned: wsOpen() || searchOpen() || previewOpen(),
   });
 }, { passive: true });
 document.addEventListener("touchend", e => {
@@ -1483,92 +1481,140 @@ document.addEventListener("touchend", e => {
    Shell wrappers searchOpen/openSearch/closeSearch and searchFeature
    construction/bind are defined next to notesFeature above. */
 
-/* ---- G5b: read-only surface for a deleted chat ----
-   A live search hit opens the normal chat; a DELETED chat has no node to open,
-   so its on-disk log is shown here as a bounded window of turns around the hit
-   (GET /api/preview — never the live chat endpoint, no composer, no polling).
-   Fork (when the dir survives) reuses the new-activity sheet, seeded from the
-   log's meta launch config rather than a live parent. */
-let archivedFork = null;         /* {title,agent,model,effort,dir} when the log is forkable */
-let archivedReturnFocus = null;  /* focus restore on close */
+/* ---- the chat preview: what a search hit opens ----
+   Every hit, live or deleted, opens the same read-only window of turns around
+   itself (GET /api/preview — never the live chat endpoint, no composer, no
+   polling). The overlay used to branch here, and the branch was invisible until
+   after the tap; now the one fact that differs — whether a chat still exists —
+   is a control in the head rather than a rule the user has to learn. */
+let previewNode = null;        /* the live node behind this log, "" when deleted */
+let previewReturnFocus = null; /* focus restore on close */
 /* Which surface presented this modal, when one did. The search overlay hides
-   itself to show the archived window — and shows it in the overlay's own panel
+   itself to show the preview — and shows it in the overlay's own panel
    geometry, so the results appear to have *become* the chat — which makes a
    plain ✕ a trapdoor out of the search. The Bookmarks pane, the other caller,
    stays open behind and needs none of this. */
-let archivedReturn = null;
-function archivedOpen(){ return !$("#archivedview").hidden; }
-async function openArchived(uid, seg, rec, at, from){
-  archivedReturnFocus = document.activeElement;
-  archivedReturn = makeReturnContext(from);
-  renderArchivedBack();
-  $("#archivedtitle").textContent = "Deleted chat";
-  $("#archivedsub").textContent = "";
-  $("#archivedforkbtn").hidden = true;
-  archivedFork = null;
-  $("#archivedbody").innerHTML = `<div class="archtrunc">Loading…</div>`;
-  $("#archivedview").hidden = false;
+let previewReturn = null;
+/* The address the window was opened at, so "Open chat" can land the real chat on
+   the very turn the user was reading rather than at the bottom. */
+let previewAddr = null;
+function previewOpen(){ return !$("#previewview").hidden; }
+async function openPreview(uid, seg, rec, at, from){
+  previewReturnFocus = document.activeElement;
+  previewReturn = makeReturnContext(from);
+  previewAddr = { uid, segment: seg, record: rec, turnTime: at || "" };
+  renderPreviewBack();
+  $("#previewtitle").textContent = "Chat";
+  $("#previewsub").textContent = "";
+  $("#previewopen").hidden = true;
+  previewNode = null;
+  $("#previewbody").innerHTML = `<div class="previewtrunc">Loading…</div>`;
+  $("#previewnote").textContent = "";
+  $("#previewview").hidden = false;
   try {
     /* anchor by the hit's stable (seg, rec) ordinal — duplicate/empty timestamps
        can't mis-anchor the window; `at` rides along only as a server-side fallback */
     const r = await fetch("/api/preview?uid=" + encodeURIComponent(uid) +
       "&seg=" + encodeURIComponent(seg || 0) + "&rec=" + encodeURIComponent(rec || 0) +
       "&at=" + encodeURIComponent(at || ""));
-    if (!r.ok) throw new Error("archived " + r.status);
-    renderArchived(await r.json());
+    if (!r.ok) throw new Error("preview " + r.status);
+    renderPreview(await r.json());
   } catch {
-    $("#archivedbody").innerHTML = `<div class="archtrunc">This chat could not be loaded.</div>`;
+    $("#previewbody").innerHTML = `<div class="previewtrunc">This chat could not be loaded.</div>`;
   }
 }
-function renderArchived(d){
-  archivedFork = d.forkable ? { title: d.title, agent: d.agent, model: d.model, effort: d.effort, dir: d.dir } : null;
-  $("#archivedtitle").textContent = d.title || "Deleted chat";
-  $("#archivedsub").textContent = [d.agent, d.model].filter(Boolean).join(" · ");
-  $("#archivedforkbtn").hidden = !d.forkable;
+function renderPreview(d){
+  previewNode = d.node || "";
+  $("#previewtitle").textContent = d.title || "Deleted chat";
+  $("#previewsub").textContent = [d.agent, d.model].filter(Boolean).join(" · ");
+  /* The only asymmetry left, and it is stated rather than discovered: a chat
+     that still exists gets a way into it; one that does not, simply has no
+     button where the button would be. */
+  const openBtn = $("#previewopen");
+  openBtn.hidden = !previewNode;
+  openBtn.innerHTML = ICON_JUMP + " Open chat";
+  openBtn.setAttribute("aria-label", "open chat");
   const turns = d.turns || [];
   const rows = turns.map((t, i) => {
-    /* archived blobs aren't served — splitAssetRefs with no asset map renders
-       any marker as an inert "unavailable" chip, same as the live projection */
-    const s = splitAssetRefs(t.text || "", "", {}, { iconFile: ICON_FILE });
+    /* a live node's blobs are still served, so its markers resolve exactly as in
+       the chat; a deleted node's were archived with it and degrade to an inert
+       "unavailable" chip */
+    const s = splitAssetRefs(t.text || "", previewNode, d.assets || {}, { iconFile: ICON_FILE });
     const role = t.role === "user" ? "user" : "assistant";
     return `<div class="turn ${role} ${i === d.anchor ? "anchor" : ""}">` +
       `<div class="bubble" title="${esc(bubbleTitle(t.role, t.time))}">${md(s.clean)}${s.html}</div></div>`;
   }).join("");
-  const before = d.before_truncated ? `<div class="archtrunc">Earlier turns not shown</div>` : "";
-  const after = d.after_truncated ? `<div class="archtrunc">Later turns not shown</div>` : "";
-  $("#archivedbody").innerHTML = before + rows + after;
-  $("#archivedbody").querySelector(".turn.anchor")?.scrollIntoView({ block: "center" });
+  const before = d.before_truncated ? `<div class="previewtrunc">Earlier turns not shown</div>` : "";
+  const after = d.after_truncated ? `<div class="previewtrunc">Later turns not shown</div>` : "";
+  $("#previewbody").innerHTML = before + rows + after;
+  $("#previewbody").querySelector(".turn.anchor")?.scrollIntoView({ block: "center" });
+  /* Say why this is read-only, and say the true reason — "the chat was deleted"
+     on a live chat would be a lie the Open chat button immediately contradicts. */
+  $("#previewnote").textContent = previewNode
+    ? "Read-only excerpt — open the chat to reply, fork, or bookmark."
+    : "Read-only — this chat was deleted. Its history is preserved here.";
 }
-function renderArchivedBack(){
-  const btn = $("#archivedback");
+function renderPreviewBack(){
+  const btn = $("#previewback");
   if (!btn) return;
-  const st = returnPillState(archivedReturn);
+  const st = returnPillState(previewReturn);
   btn.hidden = !st.hasReturn;
   btn.innerHTML = st.html;
   btn.setAttribute("aria-label", st.ariaLabel);
 }
 /* Every exit is the same exit: the button, the ✕, the scrim and Escape all
    dismiss a pushed modal, and a pushed modal dismisses back to its presenter.
-   Labelling only one of them would make the other three the trapdoor again. */
-function closeArchived(){
-  if (!archivedOpen()) return;
-  $("#archivedview").hidden = true;
-  const to = archivedReturn;
-  const back = archivedReturnFocus;
-  archivedReturn = null;
-  archivedReturnFocus = null;
-  if (to && to.kind === RETURN_SEARCH){ openSearch(); return; }  /* it focuses its own field */
+   Labelling only one of them would make the other three the trapdoor again.
+
+   Reopening the overlay suppresses its entry animation for one frame: the panel
+   the user is looking at never moved, so popping the results back in would
+   announce a new surface where nothing new happened. */
+function closePreview(){
+  if (!previewOpen()) return;
+  $("#previewview").hidden = true;
+  const to = previewReturn;
+  const back = previewReturnFocus;
+  previewReturn = null;
+  previewReturnFocus = null;
+  previewAddr = null;
+  if (to && to.kind === RETURN_SEARCH){
+    const panel = $("#searchpanel");
+    if (panel){
+      panel.classList.add("nopop");
+      requestAnimationFrame(() => panel.classList.remove("nopop"));
+    }
+    openSearch();   /* it focuses its own field */
+    return;
+  }
   if (back && document.contains(back) && typeof back.focus === "function") back.focus();
 }
-/* fork a deleted chat: sheetsFeature seeds launch config from the log meta
-   (agent/model/effort/dir) — no live parent; inherits config, never history */
-function forkFromArchived(){ sheetsFeature.forkFromArchived(); }
-$("#archivedback").addEventListener("click", closeArchived);
-$("#archivedclose").addEventListener("click", closeArchived);
-$("#archivedscrim").addEventListener("click", closeArchived);
-$("#archivedforkbtn").addEventListener("click", forkFromArchived);
-$("#archivedview").addEventListener("keydown", e => {
-  if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closeArchived(); }
+/* The way onward. This is a jump, not a dismissal: the preview is a photo, and
+   everything you might want to *do* with a turn — reply, fork, bookmark, copy —
+   lives in the real chat. The address rides along so the chat opens on the turn
+   that was being read, and the chat's own back button inherits the search trail
+   so the trip is still reversible one control at a time. */
+function openPreviewChat(){
+  const node = previewNode;
+  if (!node) return;
+  const addr = previewAddr || {};
+  const from = previewReturn;
+  previewReturn = null;              /* leaving, not returning: the overlay stays shut */
+  closePreview();
+  pendingJump = buildPendingJump(node, addr.turnTime || "", addr, Date.now());
+  chatFeature.invalidate();
+  if (!isDesktop()) setBookmarksOpen(false);
+  /* Only the search trail survives the hop. The Bookmarks pane — the other
+     presenter — stays open behind the preview and is already where its own ✕
+     lands, so a chat reached from there needs no second promise. */
+  if (from && from.kind === RETURN_SEARCH) setReturnContext(RETURN_SEARCH, from);
+  select(node, "jump");
+}
+$("#previewback").addEventListener("click", closePreview);
+$("#previewclose").addEventListener("click", closePreview);
+$("#previewscrim").addEventListener("click", closePreview);
+$("#previewopen").addEventListener("click", openPreviewChat);
+$("#previewview").addEventListener("keydown", e => {
+  if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closePreview(); }
 });
 
 /* ---- burger menu: manual update check + self-update + about ----

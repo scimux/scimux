@@ -1,10 +1,12 @@
 package app
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -13,16 +15,17 @@ import (
 
 // previewResp mirrors the /api/preview JSON so tests read fields by name.
 type previewResp struct {
-	UID             string `json:"uid"`
-	Title           string `json:"title"`
-	Agent           string `json:"agent"`
-	Model           string `json:"model"`
-	Effort          string `json:"effort"`
-	Dir             string `json:"dir"`
-	Forkable        bool   `json:"forkable"`
-	Anchor          int    `json:"anchor"`
-	BeforeTruncated bool   `json:"before_truncated"`
-	AfterTruncated  bool   `json:"after_truncated"`
+	UID string `json:"uid"`
+	// Node names the live node owning this log, empty when the chat is deleted.
+	// It is the whole of the live/deleted distinction the client can see.
+	Node            string         `json:"node"`
+	Title           string         `json:"title"`
+	Agent           string         `json:"agent"`
+	Model           string         `json:"model"`
+	Assets          map[string]any `json:"assets"`
+	Anchor          int            `json:"anchor"`
+	BeforeTruncated bool           `json:"before_truncated"`
+	AfterTruncated  bool           `json:"after_truncated"`
 	Turns           []struct {
 		Role string `json:"role"`
 		Text string `json:"text"`
@@ -42,21 +45,29 @@ func doPreviewSegRec(t *testing.T, a *app, uid string, seg, rec int, at string) 
 
 func doPreviewURL(t *testing.T, a *app, u string) (int, previewResp) {
 	t.Helper()
+	code, out, _ := doPreviewRaw(t, a, u)
+	return code, out
+}
+
+// doPreviewRaw also hands back the undecoded body, for assertions about fields
+// that must NOT be there — a struct can only see what it declares.
+func doPreviewRaw(t *testing.T, a *app, u string) (int, previewResp, string) {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	a.handlePreview(rec, httptest.NewRequest("GET", u, nil))
 	var out previewResp
 	if rec.Code == 200 {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatalf("decode archived body: %v (%s)", err, rec.Body.String())
+			t.Fatalf("decode preview body: %v (%s)", err, rec.Body.String())
 		}
 	}
-	return rec.Code, out
+	return rec.Code, out, rec.Body.String()
 }
 
 // A deleted chat's on-disk log serves a bounded window of turns around the hit,
 // anchored by the hit's turn time, with truncation flags when turns fall outside
 // the window. The response also carries the meta's launch config for fork.
-func TestHandleArchivedWindowsAroundHit(t *testing.T) {
+func TestPreviewWindowsAroundHit(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 
@@ -103,20 +114,21 @@ func TestHandleArchivedWindowsAroundHit(t *testing.T) {
 	if !ar.BeforeTruncated || !ar.AfterTruncated {
 		t.Errorf("truncation flags = before %v after %v, want both true", ar.BeforeTruncated, ar.AfterTruncated)
 	}
-	// Launch config from the meta header rides along for the fork step — including
-	// effort, so a fork from a deleted codex chat keeps its reasoning level (G5c).
-	if ar.Agent != "codex" || ar.Model != "sonnet" || ar.Effort != "high" || ar.Dir != a.home {
+	// Agent and model ride along from the meta header — they are the subtitle,
+	// the one thing the head can say about a chat that no longer exists.
+	if ar.Agent != "codex" || ar.Model != "sonnet" {
 		t.Errorf("launch config = %+v", ar)
 	}
-	if !ar.Forkable {
-		t.Error("a meta with agent + existing dir should be forkable")
+	// Deleted: there is no node to go into, and the head must not offer one.
+	if ar.Node != "" {
+		t.Errorf("a deleted chat named node %q", ar.Node)
 	}
 }
 
 // The window is anchored by the hit's stable (seg, rec) ordinal, not its
 // timestamp: when several turns share one timestamp, only the ordinal picks the
 // right one. Time anchoring would land on the first turn with that time.
-func TestHandleArchivedAnchorsBySegRec(t *testing.T) {
+func TestPreviewAnchorsBySegRec(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 
@@ -162,7 +174,7 @@ func TestHandleArchivedAnchorsBySegRec(t *testing.T) {
 }
 
 // An empty `at` anchors at the start of the log (window from turn zero).
-func TestHandleArchivedNoAnchor(t *testing.T) {
+func TestPreviewNoAnchor(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
@@ -183,7 +195,7 @@ func TestHandleArchivedNoAnchor(t *testing.T) {
 // A header-less (legacy) log is servable when its path resolves inside the
 // archive dir, but a legacy uid whose path escapes the archive dir is refused —
 // the embedded path is never trusted raw (traversal guard).
-func TestHandleArchivedLegacyConfined(t *testing.T) {
+func TestPreviewLegacyConfined(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	appendLog(t, a, filepath.Join("archive", "ancient.jsonl"),
@@ -194,8 +206,8 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 	legacyUID := "legacy:ancient.jsonl"
 	if code, ar := doPreview(t, a, legacyUID, ""); code != 200 || len(ar.Turns) != 1 {
 		t.Fatalf("legacy log should serve: code=%d turns=%d", code, len(ar.Turns))
-	} else if ar.Forkable {
-		t.Error("a header-less legacy log must be non-forkable")
+	} else if ar.Node != "" {
+		t.Errorf("a header-less archived log named node %q", ar.Node)
 	}
 
 	// A traversal attempt must not escape the archive directory.
@@ -255,7 +267,92 @@ func TestNoteAddressResolvesAfterDeletion(t *testing.T) {
 	}
 }
 
-func TestHandleArchivedNotFound(t *testing.T) {
+// The surface is no longer "the deleted-chat window": every search hit opens it,
+// so a LIVE chat's log must be previewable by uid too. What differs is the one
+// fact the head needs — whether there is still a node to walk into — and it is
+// reported as a field, not inferred by the client from a 404.
+func TestPreviewServesALiveChatAndNamesItsNode(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha study", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"})
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "opus", "", a.home),
+		sessionlog.Event{T: "user", Text: "the live needle", Time: "2026-07-14T01:00:00Z"},
+		sessionlog.Event{T: "assistant", Text: "an answer", Time: "2026-07-14T01:01:00Z"},
+	)
+	uid := readLogMeta(a.sessionLogPath("alpha")).UID
+
+	code, pr := doPreview(t, a, uid, "2026-07-14T01:00:00Z")
+	if code != 200 {
+		t.Fatalf("live preview code = %d, want 200", code)
+	}
+	if len(pr.Turns) != 2 {
+		t.Fatalf("live preview turns = %d, want 2", len(pr.Turns))
+	}
+	if pr.Node != "alpha" {
+		t.Errorf("node = %q, want alpha — the head has no other way to offer Open chat", pr.Node)
+	}
+	// The node's *current* title, not the slug the meta header froze at creation:
+	// chats get renamed, and the preview must agree with the chat it opens into.
+	if pr.Title != "Alpha study" {
+		t.Errorf("title = %q, want the node's current title", pr.Title)
+	}
+}
+
+// A live chat's assets resolve in the preview exactly as they do in the chat.
+// Without this the same turn reads "unavailable" here and fine one tap later,
+// which would teach the user that the preview is lying to them.
+func TestPreviewResolvesAssetsOnALiveChat(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	liveNode(a, &Node{ID: "alpha", Title: "Alpha", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"})
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n"))
+	appendLog(t, a, "alpha.jsonl",
+		sessionlog.NewMeta("alpha", "claude", "", "", a.home),
+		sessionlog.NewAsset(sessionlog.AssetEvent{
+			ID: "a_1", Name: "chart.png", Mime: "image/png", Storage: "inline", Bytes: png,
+		}),
+		sessionlog.Event{T: "user", Text: "look at scimux-asset:a_1 needle", Time: "2026-07-14T01:00:00Z"},
+	)
+	uid := readLogMeta(a.sessionLogPath("alpha")).UID
+
+	code, pr := doPreview(t, a, uid, "2026-07-14T01:00:00Z")
+	if code != 200 || len(pr.Turns) == 0 {
+		t.Fatalf("live preview code = %d turns = %d", code, len(pr.Turns))
+	}
+	if !strings.Contains(pr.Turns[pr.Anchor].Text, "scimux-asset:a_1") {
+		t.Errorf("anchor text = %q, want the marker preserved for the client to render",
+			pr.Turns[pr.Anchor].Text)
+	}
+	if pr.Assets["a_1"] == nil {
+		t.Errorf("assets = %+v, want a_1 described so the chip is not inert", pr.Assets)
+	}
+}
+
+// Fork is retired from this surface. The payload must not even describe it:
+// a dir and an effort exist only to seed a fork sheet, and shipping them would
+// invite the control back.
+func TestPreviewOffersNoFork(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
+		sessionlog.NewMeta("dead", "codex", "sonnet", "high", a.home),
+		sessionlog.Event{T: "user", Text: "hello needle", Time: "2026-07-10T00:00:00Z"},
+	)
+	uid := doSearch(t, a, "needle").Groups[0].UID
+
+	code, _, body := doPreviewRaw(t, a, "/api/preview?uid="+uid)
+	if code != 200 {
+		t.Fatalf("code = %d", code)
+	}
+	for _, gone := range []string{`"forkable"`, `"dir"`, `"effort"`} {
+		if strings.Contains(body, gone) {
+			t.Errorf("preview payload still carries %s: %s", gone, body)
+		}
+	}
+}
+
+func TestPreviewNotFound(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	appendLog(t, a, filepath.Join("archive", "dead.jsonl"),
