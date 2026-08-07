@@ -313,7 +313,7 @@ export function stationRowHTML(n, lm, opts = {}){
     return `
         <div class="strow stoprow ${alt ? "alt " : ""}${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${escape(n.id)}" data-skey="${escape(stopKey(stop))}" data-stop="${escape(stop.time)}">
           <div class="lbl"><span class="t">${escape(label.title)}</span></div>
-          <div class="cap">${escape(stamp(stop.time))} &middot; earlier stop &middot; tap to read</div>
+          <div class="cap">${escape(stamp(stop.time))} &middot; earlier stop</div>
           ${label.desc ? `<div class="desc">${escape(label.desc)}</div>` : ""}
         </div>`;
   const when = stop && stop.i > 0
@@ -520,7 +520,7 @@ export function createMapFeature(deps){
       ${mapSelStop ? `<span class="mtb-stopcue">earlier stop &middot; ${escape(stampFn(mapSelStop))}</span>` : ""}
     </span>
     <span class="mtb-sep"></span>
-    <button class="sbtn" data-jump="${escape(n.id)}">&#8249; Open chat</button>
+    <button class="sbtn iconbtn" data-jump="${escape(n.id)}">${icons.ICON_JUMP || ""} Open chat</button>
     <button class="sbtn iconbtn" data-medit="${escape(n.id)}" aria-label="edit title & description">${icons.ICON_PENCIL || ""} Edit</button>
     <button class="sbtn" data-forkbookmark="${escape(n.id)}">Add bookmark</button>
     <button class="sbtn" data-forkfrom="${escape(n.id)}">+ New</button>
@@ -903,7 +903,7 @@ export function createMapFeature(deps){
     if (f){ toggleMapFold(f.dataset.fold); return; }
     const j = e.target.closest("[data-jump]");
     if (j){
-      if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump);
+      if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump, "jump");
       setMapFull(false);
       return;
     }
@@ -939,7 +939,7 @@ export function createMapFeature(deps){
     const j = e.target.closest("[data-jump]");
     if (j){
       const st = mapSelStop;
-      if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump);
+      if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump, "jump");
       if (st){
         if (typeof d.loadChatHistory === "function") d.loadChatHistory(j.dataset.jump, st);
       } else if (typeof d.jumpChatToNow === "function") d.jumpChatToNow();
@@ -953,7 +953,8 @@ export function createMapFeature(deps){
     }
     const nt = e.target.closest("[data-forkbookmark]");
     if (nt){
-      if (typeof d.addStationBookmark === "function") d.addStationBookmark(nt.dataset.forkbookmark);
+      if (typeof d.addStationBookmark === "function")
+        d.addStationBookmark(nt.dataset.forkbookmark, mapSelStop);
       return;
     }
     const fk = e.target.closest("[data-forkfrom]");

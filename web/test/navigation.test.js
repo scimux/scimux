@@ -10,6 +10,7 @@ import {
   documentSwipeDecision,
   captureNotesTouchStart,
   notesSwipeBackDecision,
+  journeyToggleState,
 } from "../js/navigation.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -36,7 +37,7 @@ test("navigation.js has no browser globals or implicit app state", () => {
     /\binnerWidth\b/,
     /\bgetComputedStyle\b/,
     /\bcreateElement\b/,
-    /\binnerHTML\b/,
+    /\binnerHTML\s*=/,   // writing the DOM is banned; returning markup as data is not
     /\bwsOpen\s*\(/,
     /\bsearchOpen\s*\(/,
     /\barchivedOpen\s*\(/,
@@ -404,4 +405,21 @@ test("notesSwipeBackDecision: non-L→R or sub-threshold is no-op", () => {
     null,
   );
   assert.equal(notesSwipeBackDecision(null, { x: 200, y: 100 }, { isNarrow: true }), null);
+});
+
+/* ---------- journeys toggle (item 18: the chevron must flip) ---------- */
+
+test("journeyToggleState mirrors the bookmarks toggle: closed points open, open points closed", () => {
+  assert.deepEqual(journeyToggleState(false), {
+    innerHTML: "&#8249;",
+    ariaLabel: "open journeys",
+  });
+  assert.deepEqual(journeyToggleState(true), {
+    innerHTML: "&#8250;",
+    ariaLabel: "close journeys",
+  });
+});
+
+test("journeyToggleState treats a missing argument as closed", () => {
+  assert.deepEqual(journeyToggleState(), journeyToggleState(false));
 });

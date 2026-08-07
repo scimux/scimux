@@ -217,15 +217,30 @@ export function bookmarkListHTML(opts){
       <div class="when">${e(when(nt.t))}${src}</div>
       <div class="nbubble" style="border-left-color:${color}">${renderMd(nt.text || "")}</div>
       <button class="nmore" data-nmore hidden></button>
-      ${openBookmarkT === nt.t ? `<div class="bookmarkactions">
-        ${nt.node || nt.uid ? `<button data-bmact="jump" aria-label="open in activity">${icons.ICON_JUMP || ""}</button>` : ""}
-        ${nt.node && !nt.anchor ? `<button data-bmact="comment" aria-label="comment on this bookmark">${icons.ICON_COMMENT || ""}</button>` : ""}
-        <button data-bmact="copy" aria-label="copy bookmark">${icons.ICON_COPY || ""}</button>
-        <button data-bmact="note" aria-label="use in note">${icons.ICON_CLIP || ""}</button>
-        <button data-bmact="del" aria-label="delete bookmark">${icons.ICON_TRASH || ""}</button>
-      </div>` : ""}
+      ${openBookmarkT === nt.t ? bookmarkActionsHTML(nt, { icons, context: "pane" }) : ""}
     </div>`;
   }).join("");
+}
+
+/* The one action row a bookmark gets, wherever it is shown (UI review items
+   5, 6, 8, 9). Both the compact Bookmarks pane and the Notes workspace inbox
+   render this, so the two can no longer drift apart in geometry, order, or
+   which actions exist at all — the inbox used to offer only "Use in note",
+   which meant reaching the chat required first placing the bookmark into a
+   section. `context` withholds exactly one action: comment is pane-only,
+   because its reply composer (#bookmarkprompt) lives only there. */
+export function bookmarkActionsHTML(nt, opts){
+  const { icons = {}, context = "pane" } = opts || {};
+  const b = (act, label, icon, extra = "") =>
+    `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
+  return `<div class="actionbar">
+        ${nt.node || nt.uid ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
+        ${context === "pane" && nt.node && !nt.anchor
+          ? b("comment", "comment on this bookmark", icons.ICON_COMMENT) : ""}
+        ${b("copy", "copy bookmark", icons.ICON_COPY)}
+        ${b("note", "use in note", icons.ICON_CLIP)}
+        ${b("del", "delete bookmark", icons.ICON_TRASH, " danger")}
+      </div>`;
 }
 
 export function bookmarkFlagsHTML(flags, hasGeneral, esc){
@@ -457,7 +472,7 @@ export function createBookmarksFeature(deps){
       if (typeof d.wsOpen === "function" && d.wsOpen() && typeof d.closeWorkspace === "function")
         d.closeWorkspace();
       if (typeof d.isDesktop === "function" && !d.isDesktop()) setOpen(false);
-      if (typeof d.select === "function") d.select(a.node);
+      if (typeof d.select === "function") d.select(a.node, "jump");
       return true;
     }
     if (decision.kind === "archived"){
@@ -601,7 +616,7 @@ export function createBookmarksFeature(deps){
       if (openBookmarkT && doc && typeof doc.querySelector === "function"){
         const escT = CSSObj.escape ? CSSObj.escape(openBookmarkT) : openBookmarkT;
         const row = doc.querySelector(
-          `#bookmarklist .bookmark[data-t="${escT}"] .bookmarkactions`,
+          `#bookmarklist .bookmark[data-t="${escT}"] .actionbar`,
         );
         if (row && typeof row.scrollIntoView === "function")
           row.scrollIntoView({ block: "nearest", behavior: "smooth" });

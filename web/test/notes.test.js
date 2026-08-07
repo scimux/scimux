@@ -50,6 +50,7 @@ const notesSrc = readFileSync(join(__dirname, "../js/notes.js"), "utf8");
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
 const tokensSrc = readFileSync(join(__dirname, "../css/tokens.css"), "utf8");
 const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
+const baseCssSrc = readFileSync(join(__dirname, "../css/base.css"), "utf8");
 const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
 
 /* ---------- module shape ---------- */
@@ -71,7 +72,9 @@ test("notes.js exports factory and pure helpers; no later-feature imports", () =
 
 test("storage keys, debounce, copy ack constants", () => {
   assert.equal(STORAGE_KEY_FOLDS, "scimux-notefolds");
-  assert.equal(STORAGE_KEY_INBOX_TAB, "scimux-wsinboxtab");
+  /* item 17: the inbox does not own a tab key — it shares the Bookmarks
+     pane's, so opening the workspace lands on the lane you were reading */
+  assert.equal(STORAGE_KEY_INBOX_TAB, "scimux-bookmarktab");
   assert.equal(STORAGE_KEY_WS_LAYOUT, "scimux-wslayout");
   assert.equal(SAVE_DEBOUNCE_MS, 1100);
   assert.equal(COPY_ACK_MS, 900);
@@ -111,8 +114,10 @@ test(".wsmenu button.danger uses --danger, not --attn (covers Delete section)", 
 });
 
 test("card delete action uses --danger (not --attn)", () => {
-  assert.match(notesCssSrc, /\.wscardactions\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
-  assert.doesNotMatch(notesCssSrc, /\.wscardactions\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
+  /* the geometry moved to the shared .actionbar/.btn-plain ladder in base.css
+     (UI review items 6 + 9); danger stays a modifier on a tier, never a tier */
+  assert.match(baseCssSrc, /\.btn-plain\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
+  assert.doesNotMatch(baseCssSrc, /\.btn-plain\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
 });
 
 /* ---------- folds ---------- */
@@ -618,7 +623,7 @@ test("noteCardHTML carries Rename + Delete card actions; delete is danger", () =
     "n1",
     { esc: s => s, fmtNoteMeta: () => "meta", icons: { ICON_PENCIL: "P", ICON_TRASH: "T" } },
   );
-  assert.match(html, /class="wscardactions"/);
+  assert.match(html, /class="wscardactions actionbar"/);
   assert.match(html, /data-wcact="rename"/);
   assert.match(html, /data-wcact="delete"/);
   assert.match(html, /data-wcact="delete"[^>]*class="[^"]*danger|class="[^"]*danger[^"]*"[^>]*data-wcact="delete"/);
@@ -685,7 +690,13 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
     esc: s => s, md: s => s, fmtWhen: s => "W", nodeById: () => ({ title: "Alpha" }),
     icons: { ICON_CLIP: "L" },
   });
-  assert.match(item, /data-wsiuse/);
+  /* item 5: the inbox card carries the pane's whole action row, so reaching
+     the chat no longer requires first placing the bookmark into a section */
+  assert.match(item, /class="actionbar"/);
+  for (const act of ["jump", "copy", "note", "del"]) {
+    assert.match(item, new RegExp(`data-bmact="${act}"`), act);
+  }
+  assert.doesNotMatch(item, /data-bmact="comment"/);
   assert.match(item, /data-wsimore/);
   assert.match(item, /Alpha/);
 });
@@ -1405,14 +1416,14 @@ test("inbox tabs/list render; use-in-note starts placement", async () => {
   assert.match(roots.wsinboxtabs.innerHTML, /data-wsitab="GENERAL"/);
   assert.match(roots.wsinboxtabs.innerHTML, /data-wsitab="lane-a"/);
   assert.match(roots.wsinboxlist.innerHTML, /hello bookmark/);
-  assert.match(roots.wsinboxlist.innerHTML, /data-wsiuse/);
+  assert.match(roots.wsinboxlist.innerHTML, /data-bmact="note"/);
 
   const use = el("button");
-  use.dataset.wsiuse = "";
+  use.dataset.bmact = "note";
   const row = el("div", { className: "wsibookmark", dataset: { t: "1" } });
   row.dataset.t = "1";
   use.closest = sel => {
-    if (sel === "[data-wsiuse]") return use;
+    if (sel === "[data-bmact]") return use;
     if (sel === ".wsibookmark") return row;
     return null;
   };

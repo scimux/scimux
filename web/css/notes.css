@@ -42,24 +42,31 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 #bookmarklist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: clip;
   padding: 6px 14px 12px;
   -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-.bookmark { margin: 12px 0; }
-.bookmark .when { font-size: 11px; color: var(--dim); margin: 0 0 3px 2px;
+/* A bookmark is a card, so its actions belong *inside* it as a hairline
+   footer rather than floating underneath (UI review item 7). The card is the
+   only surface here; the bubble inside it keeps just the lane stripe. */
+.bookmark { margin: 12px 0; background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: var(--radius); overflow: hidden; }
+.bookmark .when { font-size: 11px; color: var(--dim); margin: 0; padding: 8px 12px 0 15px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bookmark .nbubble { background: var(--surface); border-radius: 10px; padding: 8px 11px;
-  font-size: 13.5px; line-height: 1.45; border-left: 3px solid var(--unlane);
-  overflow-wrap: break-word; }
+.bookmark .nbubble { padding: 4px 12px 9px; font-size: 13.5px; line-height: 1.45;
+  border-left: 3px solid var(--unlane); overflow-wrap: break-word; }
 /* a tall noted bubble is clamped behind "Show more"; the mask fades the cut
-   edge without a wrapper element (overflow:hidden would clip a ::after) */
+   edge without a wrapper element (overflow:hidden would clip a ::after).
+   The clamp is deliberately scoped to the text region and never to .bookmark
+   itself — clamping the card would cut off the footer actions. */
 .bookmark .nbubble.clamped { max-height: 220px; overflow: hidden;
   -webkit-mask-image: linear-gradient(#000 78%, transparent);
   mask-image: linear-gradient(#000 78%, transparent); }
-.bookmark .nmore { margin: 4px 2px 0; padding: 2px 0; background: none; border: 0;
+.bookmark .nmore { margin: 0; padding: 0 12px 6px 15px; background: none; border: 0;
   font-size: 12px; color: var(--dim); cursor: pointer; }
 .bookmark .nmore:active { color: var(--work); }
-.bookmarkactions { display: flex; gap: 8px; padding: 6px 2px 0; }
-.bookmarkactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
-  display: flex; align-items: center; justify-content: center; background: var(--surface); }
-.bookmarkactions button:active { color: var(--work); }
+.bookmark .actionbar { border-top: 1px solid var(--hairline); padding: 4px 8px; }
+/* inside the card the chips would double the card's own border, so they drop
+   to a borderless tap target; the ladder's colour and radius stay */
+.bookmark .actionbar .btn-plain,
+.wsibookmark .actionbar .btn-plain,
+.wsref .actionbar .btn-plain { background: none; border-color: transparent; }
 /* jump-to-source lands here: briefly ring the target bubble */
 .turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
 /* transient notice (jump-to-source misses); fixed so polled rebuilds can't wipe it */
@@ -235,8 +242,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 #wsnav { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1;
   border-right: 1px solid var(--hairline); }
 #wsnavhead { display: flex; align-items: center; justify-content: space-between;
-  flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
-  text-transform: uppercase; letter-spacing: .04em; }
+  flex: none; padding: 12px 16px 8px; }
 #wsnewnote { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
   display: inline-flex; align-items: center; justify-content: center; }
 #wsnewnote:active { background: var(--code-bg); }
@@ -272,12 +278,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
    revealed on hover (desktop) / always on touch — same discoverability split as
    .card .actions and .tabs .x. Positioned bottom-right so the grab/drag area
    on the title stays free. */
-.wscardactions { display: none; gap: 6px; padding-top: 6px; justify-content: flex-end; }
-.wscardactions button { width: 44px; height: 40px; border-radius: 12px; color: var(--dim);
-  display: flex; align-items: center; justify-content: center; background: var(--surface);
-  border: 1px solid var(--hairline); }
-.wscardactions button:active { color: var(--work); }
-.wscardactions button.danger { color: var(--danger); }
+.wscardactions { display: none; padding-top: 6px; }
 .wscard:hover .wscardactions,
 .wscard.renaming .wscardactions { display: flex; }
 @media (hover: none) {
@@ -298,8 +299,10 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   background: color-mix(in srgb, var(--work) 8%, transparent); }
 #wssections .wssecaddempty svg { width: 14px; height: 14px; }
 #wssections .wssecaddempty:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
-/* trailing "+ Add Section" after the last section (Phase 1f) — same button, not centred */
-#wssections .wssecaddtrail { padding: 4px 0 8px; }
+/* trailing "+ Add section" after the last section (Phase 1f) — same button and,
+   since UI review item 4, the same centring as the empty state, so the control
+   does not jump across the pane depending on whether a section exists yet */
+#wssections .wssecaddtrail { display: flex; justify-content: center; padding: 4px 0 8px; }
 /* the "pick a note" placeholder centres on both axes (item 5): an overlay over
    the (empty) sections area so sibling flex weights can't push it off-centre. */
 #wsnoteempty { position: absolute; inset: 0; display: flex; align-items: center;
@@ -344,30 +347,29 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 /* --- inbox zone (left): the reused capture layer --- */
 #wsinbox { display: flex; flex-direction: column; min-height: 0;
   border-right: 1px solid var(--hairline); }
-#wsinboxhead { flex: none; padding: 12px 16px 8px; font-size: 11px; color: var(--dim);
-  text-transform: uppercase; letter-spacing: .04em; }
+#wsinboxhead { flex: none; padding: 12px 16px 8px; }
 #wsinboxtabs { flex: none; border-bottom: 1px solid var(--hairline); }
 #wsinboxlist { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
   padding: 4px 10px 14px; flex: 1; }
 #wsinboxlist .empty { color: var(--dim); text-align: center; padding: 28px 16px; }
-.wsibookmark { border: 1px solid var(--hairline); border-radius: 12px; padding: 9px 11px; margin-top: 8px; }
-.wsiwhen { font-size: 11px; color: var(--dim); }
-.wsibubble { border-left: 3px solid var(--unlane); padding-left: 8px; font-size: 13px;
-  line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
+.wsibookmark { background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: var(--radius); margin-top: 8px; overflow: hidden; }
+.wsiwhen { font-size: 11px; color: var(--dim); padding: 9px 11px 0; }
+.wsibubble { border-left: 3px solid var(--unlane); padding: 0 11px 0 8px; font-size: 13px;
+  line-height: 1.5; margin: 4px 0 8px 8px; overflow-wrap: anywhere; }
 .wsibubble p:first-child { margin-top: 0; }
 /* a tall capture clamps behind "Show more", same logic as the compact pane
    (items 5/14); the mask fades the cut edge (overflow:hidden would clip ::after) */
 .wsibubble.clamped { max-height: 220px; overflow: hidden;
   -webkit-mask-image: linear-gradient(#000 78%, transparent);
   mask-image: linear-gradient(#000 78%, transparent); }
-.wsimore { margin: 6px 0 0; padding: 2px 0; background: none; border: 0;
+.wsimore { margin: 0; padding: 0 11px 6px 19px; background: none; border: 0;
   font-size: 12px; color: var(--dim); cursor: pointer; }
 .wsimore:active { color: var(--work); }
-.wsiuse { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
-  padding: 5px 10px; border-radius: 8px; font-size: 12px; color: var(--work);
-  background: color-mix(in srgb, var(--work) 8%, transparent); }
-.wsiuse svg { width: 14px; height: 14px; }
-.wsiuse:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+/* item 5: the inbox bookmark carries the same footer action row as the compact
+   pane, always visible — the complaint was about extra steps, so hiding the
+   actions behind a first tap here would reintroduce one. */
+.wsibookmark .actionbar { border-top: 1px solid var(--hairline); padding: 4px 6px; }
 /* --- embedded chat references inside a section --- */
 .wsrefs { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .wsref { border: 1px solid var(--hairline); border-left: 3px solid var(--unlane);
@@ -385,28 +387,50 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .wsrefmore { margin: 4px 0 0; padding: 2px 0; background: none; border: 0;
   font-size: 11px; color: var(--dim); cursor: pointer; }
 .wsrefmore:active { color: var(--work); }
-.wsref .wsrefactions { display: none; gap: 6px; margin-top: 7px; }
-.wsref.open .wsrefactions { display: flex; }
-.wsrefactions button { width: 30px; height: 28px; border-radius: 7px; color: var(--dim);
-  background: var(--surface); border: 1px solid var(--hairline);
-  display: inline-flex; align-items: center; justify-content: center; }
-.wsrefactions button svg { width: 15px; height: 15px; }
-.wsrefactions button:active { background: var(--code-bg); }
-/* --- placement mode: banner + per-section "add capture here" target --- */
-#wsplacebar { display: none; align-items: center; gap: 8px; flex: none;
-  padding: 9px 14px; font-size: 13px; border-bottom: 1px solid var(--hairline);
-  background: color-mix(in srgb, var(--work) 12%, transparent); }
-#notesworkspace.placing #wsplacebar { display: flex; }
+.wsref .actionbar { display: none; margin-top: 6px; border-top: 1px solid var(--hairline);
+  padding-top: 2px; }
+.wsref.open .actionbar { display: flex; }
+/* --- placement mode: floating pill + per-section "add bookmark here" target ---
+   This was a full-bleed tinted strip that pushed the layout down and read as a
+   warning banner (UI review item 10). It cannot simply be deleted: HIG requires
+   an active mode to stay visible and to offer a clear exit, the way the
+   call-in-progress and screen-recording pills do. So it shrinks to a pill that
+   floats over the workspace — same information, same ✕, none of the alarm —
+   and the *destinations* now carry the invitation instead. */
+#wsplacepill { display: none; align-items: center; gap: 8px; position: absolute;
+  z-index: 4; left: 50%; transform: translateX(-50%);
+  top: calc(12px + var(--sat)); max-width: min(86%, 460px);
+  padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px;
+  color: var(--ink); background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--work) 40%, var(--hairline));
+  box-shadow: 0 8px 28px rgba(0,0,0,.22); }
+#notesworkspace.placing #wsplacepill { display: flex; }
 .wsplacelabel { color: var(--work); font-weight: 600; flex: none; }
 #wsplacetext { color: var(--ink); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; max-width: 46vw; }
-#wsplacecancel { flex: none; padding: 5px 12px; border-radius: 8px; color: var(--dim);
-  background: var(--surface); border: 1px solid var(--hairline); }
+#wsplacecancel { flex: none; width: 26px; height: 26px; border-radius: 13px; color: var(--dim);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--code-bg); }
+#wsplacecancel:active { color: var(--work); }
+/* the destinations glow *once* on entry: HIG discourages indefinitely looping
+   animation, and a pulse that never stops turns into visual noise within
+   seconds. Two beats is enough to say "these are the places you can drop it". */
 .wsaddhere { display: none; align-items: center; gap: 6px; padding: 4px 9px;
   border-radius: 7px; font-size: 12px; color: var(--work);
   background: color-mix(in srgb, var(--work) 12%, transparent); }
 .wsaddhere svg { width: 13px; height: 13px; }
-#notesworkspace.placing .wsaddhere { display: inline-flex; }
+#notesworkspace.placing .wsaddhere { display: inline-flex;
+  animation: wsaddglow .9s ease-out 2; }
+@keyframes wsaddglow {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--work) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+/* the placement-mode attention glow is decoration; the .wsaddhere targets stay
+   fully visible without it (UI review item 10) */
+@media (prefers-reduced-motion: reduce) {
+  #notesworkspace.placing .wsaddhere { animation: none; }
+}
 /* iPhone / narrow: one zone at a time. The compact notes pane is the inbox
    there, so the inbox zone is hidden; nav is the resting view and opening a
    sheet slides the sheet in over the nav (a visible Back returns). */

@@ -38,7 +38,7 @@
  *   - nodeById, laneColor, agentLogo
  *   - select, setPendingJump, invalidateChat
  *   - setBookmarksOpen, openArchived, forkFromTurn
- *   - uiMutate, toast, prompt, isDesktop
+ *   - uiMutate, toast, isDesktop, icons
  *   - now / nowISO (clock), storage, fetch, AbortController
  *   - setTimeout / clearTimeout / requestAnimationFrame
  *   - document, activeElement, createElement, focus
@@ -79,8 +79,11 @@ export const SEARCH_DEBOUNCE_MS = 180;
 export const RECENTS_KEY = "scimux-search-recents";
 export const RECENTS_CAP = 8;
 export const RECENTS_SHOW = 5;
+/* One action, one wording, everywhere: the wall-map station toolbar and the
+   Bookmarks pane both call this "Open chat", so the overlay does too (UI
+   review item 14). The old hit-bar wording was a third phrasing for one jump. */
 export const SACT_LABEL = {
-  show: "Show to chat",
+  show: "Open chat",
   fork: "Fork from here",
   bookmark: "Add bookmark",
 };
@@ -196,9 +199,14 @@ export function searchHitActions(kind, forkable, role){
   return acts;
 }
 
-export function hitBarHTML(kind, forkable, role){
+/* The jump carries the shared glyph as well as the shared words, so the same
+   control is recognisable across the overlay, the pane and the wall map.
+   Icons arrive as a dep — this module holds no inline SVG. */
+export function hitBarHTML(kind, forkable, role, icons){
+  const jump = (icons && icons.ICON_JUMP) || "";
   return searchHitActions(kind, forkable, role)
-    .map(a => `<button data-sact="${a}">${SACT_LABEL[a]}</button>`).join("");
+    .map(a => `<button data-sact="${a}">${a === "show" && jump ? jump + " " : ""}${SACT_LABEL[a]}</button>`)
+    .join("");
 }
 
 export function buildPendingJump(id, turn, addr, now){
@@ -240,6 +248,7 @@ export function createSearchFeature(deps){
   const doc = d.document || (typeof document !== "undefined" ? document : null);
   const storage = d.storage || null;
   const esc = d.esc || escDefault;
+  const icons = d.icons || {};
   const stampAddress = d.stampAddress || stampAddressDefault;
   const setTimeoutFn = d.setTimeout || setTimeout;
   const clearTimeoutFn = d.clearTimeout || clearTimeout;
@@ -336,7 +345,7 @@ export function createSearchFeature(deps){
     const bar = createEl("div");
     if (!bar) return;
     bar.className = "hitbar";
-    bar.innerHTML = hitBarHTML(el.dataset.kind, el.dataset.forkable === "1", el.dataset.role);
+    bar.innerHTML = hitBarHTML(el.dataset.kind, el.dataset.forkable === "1", el.dataset.role, icons);
     if (typeof el.appendChild === "function") el.appendChild(bar);
     if (el.classList) el.classList.add("open");
     else el.className = ((el.className || "") + " open").trim();
@@ -445,10 +454,12 @@ export function createSearchFeature(deps){
       return;
     }
     if (a === "bookmark"){
-      const text = typeof d.prompt === "function" ? d.prompt("Add a bookmark")
-        : (typeof prompt !== "undefined" ? prompt("Add a bookmark") : null);
-      if (text == null) return;
-      const clean = String(text).trim();
+      /* The hit the finger landed on *is* the bookmark (UI review item 15).
+         A modal asking for text made the user retype what they were already
+         reading, and filed the answer as a free-standing note. Commentary
+         still exists — you reply to the bookmark in the pane, afterwards. */
+      const clean = ((typeof hit.querySelector === "function"
+        ? hit.querySelector(".ex")?.textContent : "") || "").trim();
       if (!clean) return;
       const bookmark = buildSearchBookmark({
         t: nowISO(),

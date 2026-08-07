@@ -18,6 +18,7 @@ import {
   visibleCardLists,
   headStopKey,
   toggleMapSelection,
+  stationLatestTurn,
 } from "../js/map-model.js";
 import { stopTimes, servedLanes, stopKey } from "../js/lanes.js";
 import { readFileSync } from "node:fs";
@@ -400,4 +401,65 @@ test("toggleMapSelection: switching stops replaces selection (no deselect)", () 
 test("toggleMapSelection: missing node still produces key via headStopKey fallback", () => {
   const s = toggleMapSelection({ id: "ghost", mapSelKey: "", nodes: [] });
   assert.deepEqual(s, { mapSel: "ghost", mapSelKey: "ghost#0", mapSelStop: "" });
+});
+
+/* ---------- stationLatestTurn (item 13: bookmark the station's newest bubble)
+   The wall map knows only a node id and, for an earlier stop, that stop's
+   time. A bookmark needs a real turn (text + uid/segment/record) so it can
+   later jump back. This picks it without a server change: the live segment
+   for a head stop, the temporally nearest history surface otherwise. */
+
+const T = (role, text, uid, seg, rec, time) =>
+  ({ role, text, uid, segment: seg, record: rec, time });
+
+test("stationLatestTurn with no stop time takes the newest live turn", () => {
+  const live = [T("user", "hi", "u1", 0, 1), T("assistant", "hello", "u2", 0, 2)];
+  assert.deepEqual(stationLatestTurn([], live, ""), live[1]);
+  assert.deepEqual(stationLatestTurn([], live), live[1]);
+});
+
+test("stationLatestTurn ignores history when the head stop is asked for", () => {
+  const segs = [{ start: "2026-08-01T10:00:00Z", turns: [T("assistant", "old", "o1", 0, 9)] }];
+  const live = [T("assistant", "new", "n1", 1, 3)];
+  assert.equal(stationLatestTurn(segs, live, "").uid, "n1");
+});
+
+test("stationLatestTurn picks the segment nearest the stop time, newest turn in it", () => {
+  const segs = [
+    { start: "2026-08-01T10:00:00Z", turns: [T("user", "a", "a1", 0, 1), T("assistant", "b", "a2", 0, 2)] },
+    { start: "2026-08-02T10:00:00Z", turns: [T("user", "c", "b1", 1, 1), T("assistant", "d", "b2", 1, 2)] },
+    { start: "2026-08-03T10:00:00Z", turns: [T("user", "e", "c1", 2, 1)] },
+  ];
+  assert.equal(stationLatestTurn(segs, [], "2026-08-02T10:00:00Z").uid, "b2");
+  // nearest wins even when the stamp is not an exact segment start
+  assert.equal(stationLatestTurn(segs, [], "2026-08-02T23:00:00Z").uid, "c1");
+  assert.equal(stationLatestTurn(segs, [], "2026-08-01T02:00:00Z").uid, "a2");
+});
+
+test("stationLatestTurn skips surfaces that render no turns", () => {
+  const segs = [
+    { start: "2026-08-02T10:00:00Z", turns: [] },
+    { start: "2026-08-01T10:00:00Z", turns: [T("assistant", "kept", "k1", 0, 4)] },
+  ];
+  assert.equal(stationLatestTurn(segs, [], "2026-08-02T10:00:00Z").uid, "k1");
+});
+
+test("stationLatestTurn falls back to the live segment when history is unusable", () => {
+  const live = [T("assistant", "live", "l1", 0, 1)];
+  assert.equal(stationLatestTurn([], live, "2026-08-02T10:00:00Z").uid, "l1");
+  assert.equal(stationLatestTurn(null, live, "2026-08-02T10:00:00Z").uid, "l1");
+  assert.equal(stationLatestTurn([{ start: "x", turns: [] }], live, "2026-08-02T10:00:00Z").uid, "l1");
+});
+
+test("stationLatestTurn returns null when there is nothing to bookmark", () => {
+  assert.equal(stationLatestTurn([], [], ""), null);
+  assert.equal(stationLatestTurn(null, null, "2026-08-02T10:00:00Z"), null);
+});
+
+test("stationLatestTurn tolerates an unparseable segment start", () => {
+  const segs = [
+    { start: "not-a-date", turns: [T("assistant", "junk", "j1", 0, 1)] },
+    { start: "2026-08-02T10:00:00Z", turns: [T("assistant", "good", "g1", 1, 1)] },
+  ];
+  assert.equal(stationLatestTurn(segs, [], "2026-08-02T09:00:00Z").uid, "g1");
 });

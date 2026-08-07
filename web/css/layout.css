@@ -219,10 +219,27 @@ body.map-full #farebtn { display: inline-flex; }
 }
 #scrim.on { opacity: 1; pointer-events: auto; }
 
+/* ---------- two header type roles ----------
+   A pane title and an in-view column header used to differ on *casing* — the
+   column headers were 11px all-caps, the iOS 6-12 micro-caps idiom Apple
+   dropped in iOS 13 — while the real hierarchy should live in size and weight
+   (UI review item 3, HIG Typography). Both are sentence case now; the rank is
+   visible from the type scale alone. The first role below is the pane/view
+   title ("Activities", "Journeys", "Notes"); the second labels a zone inside
+   one ("Bookmarks" and "Notes" over the workspace columns). */
+.panetitle { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .01em; }
+.columnhead { font-size: 13px; font-weight: 600; color: var(--dim);
+  text-transform: none; letter-spacing: 0; }
+
 .phead { display: flex; align-items: center; gap: 8px; padding: 10px 16px 8px; }
 .phead h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .01em; }
 .phead .spacer { flex: 1; }
 .backbtn { color: var(--work); font-size: 16px; padding: 6px 8px 6px 0; }
+/* a chat reached by jumping keeps its way back at every breakpoint: the plain
+   back control is hidden on desktop, but a jump out of the wall map or the
+   search overlay lands on a chat that is visible there (UI review item 18).
+   id+class beats the breakpoint's display:none by specificity. */
+#chatback.hasreturn { display: inline-flex; align-items: center; gap: 2px; }
 /* "‹" opens the next-deeper overlay pane — the pointer stand-in for the
    phone's edge-swipe, so it only exists on iPad/desktop */
 .navnext { display: none; color: var(--work); font-size: 22px;

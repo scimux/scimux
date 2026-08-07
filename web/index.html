@@ -36,7 +36,7 @@
   <!-- level 3: metro map -->
   <section id="map" class="panel">
     <div class="phead">
-      <h2>Journeys</h2>
+      <h2 class="panetitle">Journeys</h2>
       <span class="spacer"></span>
       <button id="farebtn" aria-label="toggle fare overlay" aria-pressed="false"></button>
       <button id="mapfullbtn" aria-label="full-screen map"></button>
@@ -56,7 +56,7 @@
   <section id="cards" class="panel">
     <div class="phead">
       <button class="navnext" id="journeybtn" aria-label="open journeys">&#8249;</button>
-      <h2>Activities</h2>
+      <h2 class="panetitle">Activities</h2>
       <span class="spacer"></span>
       <button class="plus" id="plusbtn" aria-label="new activity">+</button>
     </div>
@@ -128,7 +128,7 @@
   <section id="bookmarkspane" class="panel">
     <div class="phead">
       <button class="backbtn" id="bookmarksback">&#8249; Back</button>
-      <h2>Bookmarks</h2>
+      <h2 class="panetitle">Bookmarks</h2>
       <span class="spacer"></span>
       <!-- forward control: names the pane it reveals ("Notes" is right of
            Bookmarks in the line), mirroring the Journeys pane's "Activities ›" -->
@@ -209,17 +209,18 @@
   <div id="wspanel">
     <div id="wstopbar">
       <button id="wsback" class="backbtn" hidden>&#8249;</button>
-      <h2 id="wstitle">Notes</h2>
+      <h2 id="wstitle" class="panetitle">Notes</h2>
       <span class="spacer"></span>
       <button id="wsclose" aria-label="close notes workspace">&#10005;</button>
     </div>
-    <!-- placement banner: shown while a bookmark is held for "Use in note".
-         Pick a note if none is open, then tap "Add bookmark here" on a section. -->
-    <div id="wsplacebar">
-      <span class="wsplacelabel">Placing bookmark:</span>
+    <!-- placement pill: floats while a bookmark is held for "Use in note".
+         Pick a note if none is open, then tap "Add bookmark here" on a section.
+         A pill rather than a banner (UI review item 10): the mode must stay
+         visible with an obvious exit, but it is not a warning. -->
+    <div id="wsplacepill">
+      <span class="wsplacelabel">Placing</span>
       <span id="wsplacetext"></span>
-      <span class="spacer" style="flex:1"></span>
-      <button id="wsplacecancel">Cancel</button>
+      <button id="wsplacecancel" aria-label="cancel placing bookmark" title="Cancel">&#10005;</button>
     </div>
     <div id="wszones">
       <!-- left zone (iPad/desktop): the Bookmarks inbox — the capture layer,
@@ -227,7 +228,7 @@
            material is visible while composing. On iPhone the compact bookmarks
            pane is the inbox, so this zone is hidden. -->
       <div id="wsinbox" role="region" aria-label="Bookmarks">
-        <div id="wsinboxhead"><span>Bookmarks</span></div>
+        <div id="wsinboxhead" class="columnhead"><span>Bookmarks</span></div>
         <div class="tabs" id="wsinboxtabs"></div>
         <div id="wsinboxlist"><div class="empty">No bookmarks yet.</div></div>
       </div>
@@ -236,7 +237,7 @@
         aria-orientation="vertical" tabindex="0" aria-label="Resize bookmarks column"></div>
       <!-- middle zone: sparse note-card navigator -->
       <div id="wsnav" role="region" aria-label="Notes">
-        <div id="wsnavhead">
+        <div id="wsnavhead" class="columnhead">
           <span>Notes</span>
           <span class="spacer" style="flex:1"></span>
           <button id="wsnewnote" aria-label="new note" title="New note"></button>

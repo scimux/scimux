@@ -60,8 +60,10 @@ test("constants: min/max/debounce/recents caps and labels", () => {
   assert.equal(RECENTS_KEY, "scimux-search-recents");
   assert.equal(RECENTS_CAP, 8);
   assert.equal(RECENTS_SHOW, 5);
+  /* item 14: the overlay reads exactly like the metro-map station toolbar —
+     one wording for one action across every surface. */
   assert.deepEqual(SACT_LABEL, {
-    show: "Show to chat",
+    show: "Open chat",
     fork: "Fork from here",
     bookmark: "Add bookmark",
   });
@@ -236,13 +238,38 @@ test("searchHitActions adaptive by kind/forkable/role", () => {
 test("hitBarHTML uses SACT_LABEL buttons", () => {
   const html = hitBarHTML("live", true, "user");
   assert.match(html, /data-sact="show"/);
-  assert.match(html, /Show to chat/);
+  assert.match(html, /Open chat/);
   assert.match(html, /data-sact="fork"/);
   assert.match(html, /Fork from here/);
   assert.match(html, /data-sact="bookmark"/);
   assert.match(html, /Add bookmark/);
   assert.equal(hitBarHTML("live", true, "asset"),
-    `<button data-sact="show">Show to chat</button>`);
+    `<button data-sact="show">Open chat</button>`);
+});
+
+/* item 14: the "open chat" control carries the shared jump glyph, exactly as
+   the Bookmarks pane and the station toolbar do. Icons arrive as a dep so the
+   module stays free of inline SVG. */
+test("hitBarHTML renders the shared jump icon before the Open chat label", () => {
+  const icons = { ICON_JUMP: "<svg id='jump'></svg>" };
+  const html = hitBarHTML("live", true, "user", icons);
+  assert.match(html, /data-sact="show"><svg id='jump'><\/svg> Open chat</);
+  assert.equal(hitBarHTML("live", true, "asset", icons),
+    `<button data-sact="show"><svg id='jump'></svg> Open chat</button>`);
+});
+
+test("hitBarHTML degrades to the bare label when no icon set is supplied", () => {
+  assert.equal(hitBarHTML("live", false, "asset", {}),
+    `<button data-sact="show">Open chat</button>`);
+  assert.equal(hitBarHTML("live", false, "asset"),
+    `<button data-sact="show">Open chat</button>`);
+});
+
+test("only the open-chat action is iconised; fork and bookmark stay text", () => {
+  const html = hitBarHTML("live", true, "user", { ICON_JUMP: "<svg id='jump'></svg>" });
+  assert.equal(html.match(/<svg id='jump'>/g).length, 1);
+  assert.match(html, /data-sact="fork">Fork from here</);
+  assert.match(html, /data-sact="bookmark">Add bookmark</);
 });
 
 test("buildPendingJump durable address + clock", () => {
@@ -866,11 +893,14 @@ test("fork parent and excerpt; no-op without live node", () => {
   assert.equal(h.feature.isOpen(), true);
 });
 
-test("bookmark cancel/blank/success; non-terminal", () => {
-  let promptVal = null;
+/* item 15 (MUST FIX): "Add bookmark" no longer interrogates the user. The hit
+   the finger landed on *is* the bookmark — its excerpt is the text and its
+   dataset is the address. A modal prompt here asked the user to retype what
+   they were already looking at, and filed a comment with no way back. */
+test("bookmark files the hit itself — no prompt, no dialog", () => {
   const h = createFeature({
     nodeById: id => id === "n1" ? { id: "n1" } : null,
-    prompt: () => promptVal,
+    prompt: () => { throw new Error("the bookmark path must not prompt"); },
   });
   h.feature.bind();
   h.feature.open();
@@ -878,26 +908,16 @@ test("bookmark cancel/blank/success; non-terminal", () => {
   const hit = makeHit({
     kind: "live", id: "n1", turn: "T", lane: "L",
     uid: "u1", segment: "5", record: "6", role: "user",
-  });
+  }, "  the matched excerpt  ");
   const btn = el("button"); btn.dataset.sact = "bookmark";
   hit.appendChild(btn);
   h.roots.searchfeed.appendChild(hit);
 
-  promptVal = null;
-  h.roots.searchfeed.dispatch("click", { target: btn });
-  assert.equal(h.effects.mutates.length, 0);
-  assert.equal(h.feature.isOpen(), true);
-
-  promptVal = "   ";
-  h.roots.searchfeed.dispatch("click", { target: btn });
-  assert.equal(h.effects.mutates.length, 0);
-
-  promptVal = "  hello note  ";
   h.roots.searchfeed.dispatch("click", { target: btn });
   assert.equal(h.effects.mutates.length, 1);
   const op = h.effects.mutates[0];
   assert.equal(op.k, "bookmark-add");
-  assert.equal(op.bookmark.text, "hello note");
+  assert.equal(op.bookmark.text, "the matched excerpt");
   assert.equal(op.bookmark.node, "n1");
   assert.equal(op.bookmark.turnTime, "T");
   assert.equal(op.bookmark.lane, "L");
@@ -905,8 +925,46 @@ test("bookmark cancel/blank/success; non-terminal", () => {
   assert.equal(op.bookmark.segment, 5);
   assert.equal(op.bookmark.record, 6);
   assert.equal(h.effects.toasts.at(-1), "Bookmark added");
-  assert.equal(h.feature.isOpen(), true);
+  assert.equal(h.feature.isOpen(), true);   // still non-terminal
   assert.deepEqual(loadRecents(h.storage), ["noteq"]);
+});
+
+test("bookmark of an archived hit keeps the address but no live node", () => {
+  const h = createFeature({ nodeById: () => null });
+  h.feature.bind();
+  h.feature.open();
+  const hit = makeHit({
+    kind: "archived", id: "gone", turn: "T2", lane: "L2",
+    uid: "u9", segment: "1", record: "2", role: "assistant",
+  }, "archived excerpt");
+  const btn = el("button"); btn.dataset.sact = "bookmark";
+  hit.appendChild(btn);
+  h.roots.searchfeed.appendChild(hit);
+
+  h.roots.searchfeed.dispatch("click", { target: btn });
+  const op = h.effects.mutates.at(-1);
+  assert.equal(op.bookmark.text, "archived excerpt");
+  assert.ok(!("node" in op.bookmark), "a dead thread must not be recorded as a live address");
+  assert.equal(op.bookmark.uid, "u9");
+});
+
+test("a hit with an empty excerpt files nothing rather than a blank bookmark", () => {
+  const h = createFeature({ nodeById: id => ({ id }) });
+  h.feature.bind();
+  h.feature.open();
+  const hit = makeHit({ kind: "live", id: "n1", role: "user" }, "   ");
+  const btn = el("button"); btn.dataset.sact = "bookmark";
+  hit.appendChild(btn);
+  h.roots.searchfeed.appendChild(hit);
+
+  h.roots.searchfeed.dispatch("click", { target: btn });
+  assert.equal(h.effects.mutates.length, 0);
+  assert.equal(h.feature.isOpen(), true);
+});
+
+test("search.js has no prompt dependency left at all", () => {
+  assert.equal(/\bprompt\b/.test(searchSrc), false,
+    "item 15: the search overlay must not open a modal text prompt");
 });
 
 /* ---------- bind / destroy ---------- */

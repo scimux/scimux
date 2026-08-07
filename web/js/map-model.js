@@ -178,3 +178,34 @@ export function toggleMapSelection({ id, key, stopTime, mapSelKey, nodes } = {})
   const mapSelStop = nextSel ? (stopTime || "") : "";
   return { mapSel: nextSel, mapSelKey: nextKey, mapSelStop };
 }
+
+/* Which turn a wall-map station bookmark should capture (UI review item 13).
+   The map knows a node id and, for an earlier stop, that stop's time — but a
+   bookmark needs a real turn so its "Open chat" can resolve later. The rule:
+   a head stop bookmarks the newest live turn; an earlier stop bookmarks the
+   newest turn of the history surface closest in time to that stop, because a
+   stop *is* a seam and the seam's timestamp is the surface's start.
+   History that yields nothing readable (back-to-back mechanical seams) falls
+   back to the live segment; nothing readable anywhere returns null and the
+   caller declines to file a bookmark. */
+export function stationLatestTurn(segments, liveTurns, stopTime){
+  const live = Array.isArray(liveTurns) ? liveTurns : [];
+  const liveLast = live.length ? live[live.length - 1] : null;
+  if (!stopTime) return liveLast;
+
+  const segs = (Array.isArray(segments) ? segments : [])
+    .filter(s => s && Array.isArray(s.turns) && s.turns.length);
+  if (!segs.length) return liveLast;
+
+  const target = Date.parse(stopTime);
+  let best = segs[0], bestGap = Infinity;
+  for (const s of segs){
+    const start = Date.parse(s.start);
+    /* an unparseable seam stamp cannot be compared; it stays a candidate of
+       last resort rather than poisoning the choice with NaN */
+    const gap = Number.isFinite(start) && Number.isFinite(target)
+      ? Math.abs(start - target) : Infinity;
+    if (gap < bestGap){ best = s; bestGap = gap; }
+  }
+  return best.turns[best.turns.length - 1];
+}

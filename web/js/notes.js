@@ -6,7 +6,7 @@
  * Owned DOM roots / controls (all under #notesworkspace):
  *   - #notesworkspace (dialog overlay; .note-open / .placing classes)
  *   - #wsscrim / #wspanel / #wstopbar / #wstitle / #wsback / #wsclose
- *   - #wsplacebar / #wsplacetext / #wsplacecancel
+ *   - #wsplacepill / #wsplacetext / #wsplacecancel
  *   - #wsinboxtabs / #wsinboxlist (mirrored Bookmarks inbox; polled safe)
  *   - #wscards / #wsnewnote (sparse navigator; drag reorder)
  *   - #wszones / .wsdivider / #wsinbox / #wsnav / #wsnote (resizable columns)
@@ -22,7 +22,9 @@
  *
  * Persistent state (localStorage, exact keys):
  *   - "scimux-notefolds"   — { [secId]: 1 } fold map
- *   - "scimux-wsinboxtab"  — active inbox tab id or "GENERAL"
+ *   - the shared bookmark lane tab (bookmarks.js STORAGE_KEY_TAB): the
+ *     compact pane and this inbox are one concept to the user, so they are
+ *     one key — opening the workspace lands on the tab you were reading
  *   - "scimux-wslayout"    — { inboxW, navW, inboxCollapsed, navCollapsed }
  *
  * Ephemeral view state (never ui.json):
@@ -99,9 +101,11 @@ import {
 } from "./format.js";
 import { hashStr as hashStrDefault } from "./lanes.js";
 import {
+  STORAGE_KEY_TAB,
   bookmarkLaneId as bookmarkLaneIdDefault,
   bookmarkSortKey as bookmarkSortKeyDefault,
   bookmarkClampState as bookmarkClampStateDefault,
+  bookmarkActionsHTML as bookmarkActionsHTMLDefault,
 } from "./bookmarks.js";
 import {
   captureNotesTouchStart as captureNotesTouchStartDefault,
@@ -112,7 +116,11 @@ import {
 
 export const SAVE_DEBOUNCE_MS = 1100;
 export const STORAGE_KEY_FOLDS = "scimux-notefolds";
-export const STORAGE_KEY_INBOX_TAB = "scimux-wsinboxtab";
+/* The inbox does not own a tab key: it shares the Bookmarks pane's, so
+   opening the workspace from the pane lands on the lane you were reading
+   (UI review item 17). Re-exported under the old name only so callers that
+   ask "which key is the inbox tab in" keep getting a truthful answer. */
+export const STORAGE_KEY_INBOX_TAB = STORAGE_KEY_TAB;
 export const STORAGE_KEY_WS_LAYOUT = "scimux-wslayout";
 export const COPY_ACK_MS = 900;
 /* Default mins match the clamp() lower ends in notes.css @media 768px;
@@ -560,10 +568,10 @@ export function referenceHTML(r, deps = {}){
     <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
     <div class="wsrefbody">${mdFn(snap.text || "")}</div>
     <button class="wsrefmore" data-refmore hidden></button>
-    <div class="wsrefactions">
-      <button data-refact="jump" aria-label="jump to chat">${icons.ICON_JUMP || ""}</button>
-      <button data-refact="copy" aria-label="copy reference text">${icons.ICON_COPY || ""}</button>
-      <button data-refact="trash" aria-label="remove reference">${icons.ICON_TRASH || ""}</button>
+    <div class="actionbar">
+      <button class="btn-plain" data-refact="jump" aria-label="jump to chat">${icons.ICON_JUMP || ""}</button>
+      <button class="btn-plain" data-refact="copy" aria-label="copy reference text">${icons.ICON_COPY || ""}</button>
+      <button class="btn-plain danger" data-refact="trash" aria-label="remove reference">${icons.ICON_TRASH || ""}</button>
     </div>
   </div>`;
 }
@@ -604,9 +612,9 @@ export function noteCardHTML(c, activeId, deps = {}){
   return `<div class="wscard ${c.id === activeId ? "on" : ""}" draggable="true" data-note="${esc(c.id)}" role="button" tabindex="0">
       <div class="wctitle">${esc(c.title || "Untitled")}</div>
       <div class="wcmeta"><span>${esc(meta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
-      <div class="wscardactions">
-        <button type="button" data-wcact="rename" aria-label="rename note">${icons.ICON_PENCIL || ""}</button>
-        <button type="button" data-wcact="delete" class="danger" aria-label="delete note">${icons.ICON_TRASH || ""}</button>
+      <div class="wscardactions actionbar">
+        <button type="button" class="btn-plain" data-wcact="rename" aria-label="rename note">${icons.ICON_PENCIL || ""}</button>
+        <button type="button" class="btn-plain danger" data-wcact="delete" aria-label="delete note">${icons.ICON_TRASH || ""}</button>
       </div>
     </div>`;
 }
@@ -638,11 +646,17 @@ export function inboxTabsHTML(tab, tabs, esc, laneColor){
       ><span class="tabdot" style="background:${esc(laneColor(l.id))}"></span>${esc(l.name)}</button>`).join("");
 }
 
+/* The inbox bookmark is the same card as the compact pane's, down to the
+   action row (UI review item 5). It used to offer only "Use in note", so
+   reaching the chat a bookmark came from meant first placing it into a
+   section — an extra step that bought the user nothing. The row is always
+   visible here rather than tap-to-reveal, for the same reason. */
 export function inboxItemHTML(nt, color, deps = {}){
   const esc = deps.esc || (t => String(t ?? ""));
   const mdFn = deps.md || (t => String(t ?? ""));
   const whenFn = deps.fmtWhen || (t => String(t ?? ""));
   const icons = deps.icons || {};
+  const actions = deps.bookmarkActionsHTML || bookmarkActionsHTMLDefault;
   const nodeById = deps.nodeById || (() => null);
   const nd = nt.node ? nodeById(nt.node) : null;
   const src = nd ? " · " + esc(nd.title) : "";
@@ -650,7 +664,7 @@ export function inboxItemHTML(nt, color, deps = {}){
       <div class="wsiwhen">${esc(whenFn(nt.t))}${src}</div>
       <div class="wsibubble" style="border-left-color:${color}">${mdFn(nt.text || "")}</div>
       <button class="wsimore" data-wsimore hidden></button>
-      <button class="wsiuse" data-wsiuse>${icons.ICON_CLIP || ""}<span>Use in note</span></button>
+      ${actions(nt, { icons, context: "inbox" })}
     </div>`;
 }
 
@@ -699,7 +713,7 @@ export function createNotesFeature(deps){
   const wsPending = {};
   const { enqueue: wsEnqueue } = createSaveEnqueue();
   let wsInboxSig = "";
-  let wsInboxTab = (storage && storage.getItem(STORAGE_KEY_INBOX_TAB)) || "GENERAL";
+  let wsInboxTab = (storage && storage.getItem(STORAGE_KEY_TAB)) || "GENERAL";
   const expandedWsInbox = new Set();
   const expandedRefs = new Set();
   let wsCardDragging = false, wsCardDragEl = null;
@@ -710,6 +724,7 @@ export function createNotesFeature(deps){
   let bound = false;
   const cleanups = [];
   let copyTimer = null;
+  let wsInboxCopyTimer = null;
   const bodyEditCleanups = [];
   /* Phase 2: device-scoped column layout (localStorage, never poll). */
   let wsLayout = readWsLayoutInitial();
@@ -877,6 +892,9 @@ export function createNotesFeature(deps){
   function jumpToChatAddress(a){
     return typeof d.jumpToChatAddress === "function" ? d.jumpToChatAddress(a) : false;
   }
+  function uiMutate(op){
+    if (typeof d.uiMutate === "function") d.uiMutate(op);
+  }
   function isNarrow(){
     if (typeof d.isNarrow === "function") return !!d.isNarrow();
     if (typeof d.matchMedia === "function")
@@ -924,6 +942,7 @@ export function createNotesFeature(deps){
     wsLayout = readWsLayout();
     applyWsLayout(wsLayout);
     wsLoadCards();
+    adoptSharedBookmarkTab();
     renderInbox();
     rAF(() => {
       const btn = root("wsnewnote");
@@ -963,6 +982,14 @@ export function createNotesFeature(deps){
   }
 
   /* --- inbox --- */
+  /* item 17: the pane and the inbox share one key, so the inbox must re-read
+     it on every open — the value it captured at feature-construction time is
+     from before the user had picked any tab. */
+  function adoptSharedBookmarkTab(){
+    const t = storage && storage.getItem(STORAGE_KEY_TAB);
+    if (t && t !== wsInboxTab){ wsInboxTab = t; wsInboxSig = ""; }
+  }
+
   function renderInbox(){
     if (!isOpen()) return;
     const bms = bookmarks().slice();
@@ -1481,7 +1508,7 @@ export function createNotesFeature(deps){
     const tb = e.target.closest && e.target.closest("[data-wsitab]");
     if (!tb) return;
     wsInboxTab = tb.dataset.wsitab;
-    if (storage) storage.setItem(STORAGE_KEY_INBOX_TAB, wsInboxTab);
+    if (storage) storage.setItem(STORAGE_KEY_TAB, wsInboxTab);
     wsInboxSig = "";
     renderInbox();
   }
@@ -1497,11 +1524,36 @@ export function createNotesFeature(deps){
       more.textContent = st.label;
       return;
     }
-    const use = e.target.closest && e.target.closest("[data-wsiuse]");
-    if (!use) return;
-    const t = use.closest(".wsibookmark").dataset.t;
-    const nt = bookmarks().find(x => x.t === t);
-    if (nt) startPlacement(nt);
+    /* the inbox card now carries the pane's own action row (item 5); "note"
+       is what "Use in note" used to be, the rest are new here */
+    const act = e.target.closest && e.target.closest("[data-bmact]");
+    if (!act) return;
+    const card = act.closest(".wsibookmark");
+    if (!card) return;
+    const nt = bookmarks().find(x => x.t === card.dataset.t);
+    if (!nt) return;
+    switch (act.dataset.bmact){
+      case "jump":
+        /* jumpToChatAddress closes this workspace itself when it resolves */
+        if (!(nt.node || nt.uid)) return;
+        if (!jumpToChatAddress({
+          node: nt.node, uid: nt.uid, segment: nt.segment,
+          record: nt.record, turnTime: nt.turnTime, text: nt.text,
+        })) toast("That chat is no longer available.");
+        return;
+      case "copy":
+        copyText(nt.text || "");
+        act.innerHTML = "&#10003;";
+        if (wsInboxCopyTimer) clearTimeoutFn(wsInboxCopyTimer);
+        wsInboxCopyTimer = setTimeoutFn(() => { wsInboxSig = ""; renderInbox(); }, COPY_ACK_MS);
+        return;
+      case "note":
+        startPlacement(nt);
+        return;
+      case "del":
+        uiMutate({ k: "bookmark-del", t: nt.t });
+        return;
+    }
   }
 
   function onCardsClick(e){
@@ -1835,6 +1887,7 @@ export function createNotesFeature(deps){
     open,
     close,
     isOpen,
+    activeTitle: () => (wsActive && wsActive.title) || "",
     startPlacement,
     endPlacement,
     renderInbox,

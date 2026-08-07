@@ -699,8 +699,11 @@ func TestWebUseInNoteWiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bm), `data-bmact="note"`) {
-		t.Error(`use-in-note wiring missing data-bmact="note" in bookmarks.js`)
+	// the action row is now one shared builder (bookmarkActionsHTML), so the
+	// attribute is templated; the "note" action itself must still be wired.
+	if !strings.Contains(string(bm), `data-bmact="${act}"`) ||
+		!strings.Contains(string(bm), `b("note", "use in note"`) {
+		t.Error(`use-in-note wiring missing the "note" action in bookmarks.js`)
 	}
 }
 
@@ -959,17 +962,17 @@ func TestWorkspaceInboxHasTabsAndClamp(t *testing.T) {
 	if !strings.Contains(css, ".wsibubble.clamped") {
 		t.Error("workspace inbox CSS clamp is missing")
 	}
-	// The show-more toggle branch must precede the "Use in note" branch so a tap
-	// on Show more never enters placement mode.
+	// The show-more toggle branch must precede the bookmark-action branch so a
+	// tap on Show more never enters placement mode.
 	dele := strings.Index(src, "function onInboxListClick")
 	if dele < 0 {
 		t.Fatal("could not locate the inbox list click handler in notes.js")
 	}
 	body := src[dele:]
 	more := strings.Index(body, "[data-wsimore]")
-	use := strings.Index(body, "[data-wsiuse]")
+	use := strings.Index(body, "[data-bmact]")
 	if more < 0 || use < 0 || more > use {
-		t.Error("the data-wsimore toggle branch must precede the data-wsiuse branch")
+		t.Error("the data-wsimore toggle branch must precede the data-bmact branch")
 	}
 }
 
@@ -1015,9 +1018,9 @@ func TestWorkspaceRenames(t *testing.T) {
 	notesSrc := string(notesJS)
 	corpus := html + "\n" + notesSrc
 	for _, want := range []string{
-		"<h2>Bookmarks</h2>",         // captures pane heading
-		"Use in note", "Delete note", // synthesis-doc action + archive confirm
-		"Add bookmark here", "Placing bookmark:",
+		`<h2 class="panetitle">Bookmarks</h2>`, // captures pane heading
+		"Use in note", "Delete note",           // synthesis-doc action + archive confirm
+		"Add bookmark here", "cancel placing bookmark",
 		"New note", "rename note", "Pick a note, or make one with +",
 		"No notes yet — make one with +", // notes (memo) card empty state
 	} {
@@ -1074,8 +1077,8 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 		}
 	}
 	// in the note action row, the paperclip (use-in-note) sits just before delete
-	clip := strings.Index(src, `data-bmact="note"`)
-	del := strings.Index(src, `data-bmact="del"`)
+	clip := strings.Index(src, `b("note",`)
+	del := strings.Index(src, `b("del",`)
 	if clip < 0 || del < 0 {
 		t.Fatal("note action row must contain both the use-in-note and delete actions")
 	}
@@ -1083,7 +1086,7 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 		t.Error("the use-in-note (paperclip) action must sit before delete (second-to-last)")
 	}
 	act := src[clip:]
-	if end := strings.Index(act, "</button>"); end > 0 {
+	if end := strings.Index(act, ")"); end > 0 {
 		if !strings.Contains(act[:end], "ICON_CLIP") {
 			t.Error("the use-in-note action must render ICON_CLIP (paperclip)")
 		}
@@ -1495,7 +1498,7 @@ func TestJourneyBackLabelPointsRight(t *testing.T) {
 	}
 	// Title left, back control right: Journeys h2 precedes the spacer, which
 	// precedes the (now right-aligned) back button.
-	title := strings.Index(phead, `<h2>Journeys</h2>`)
+	title := strings.Index(phead, `>Journeys</h2>`)
 	spacer := strings.Index(phead, `class="spacer"`)
 	back := strings.Index(phead, `id="mapclose"`)
 	if !(title >= 0 && spacer >= 0 && back >= 0 && title < spacer && spacer < back) {

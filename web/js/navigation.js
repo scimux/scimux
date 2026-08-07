@@ -134,3 +134,15 @@ export function notesSwipeBackDecision(start, end, state = {}){
   if (state.noteOpen) return { type: "noteToList" };
   return { type: "closeWorkspace" };
 }
+
+/* Chevron + aria for #journeybtn, mirroring bookmarksToggleState. The control
+   must point at what the tap will do: it used to be a permanent left chevron
+   even while the tap would close the pane (UI review item 18). On the phone the
+   Journeys pane is a forward level rather than a toggle, so the shell simply
+   never reports `open` there and the arrow stays "open journeys". */
+export function journeyToggleState(open){
+  return {
+    innerHTML: open ? "&#8250;" : "&#8249;",
+    ariaLabel: open ? "close journeys" : "open journeys",
+  };
+}

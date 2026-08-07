@@ -37,7 +37,9 @@
   height: 76px; padding-right: 16px; cursor: pointer; overflow: hidden; }
 .strow.alt { background: var(--journey-alt-bg); }
 .strow:active { background: var(--th-bg); }
-.strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 500;
+/* the station title carries the row; the description below it is secondary
+   (UI review item 11) — semibold separates the two at a glance */
+.strow .lbl { font-size: 14px; line-height: 1.3; font-weight: 600;
   display: flex; gap: 6px; align-items: baseline; min-width: 0; }
 /* the agent logo sits left of the title, sized to the first text line */
 .strow .lbl .agent-logo { width: 16px; height: 16px; margin-top: 1px; align-self: flex-start; }

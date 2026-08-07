@@ -20,6 +20,7 @@ import {
   bookmarkListModel,
   bookmarkTabsHTML,
   bookmarkListHTML,
+  bookmarkActionsHTML,
   bookmarkFlagsHTML,
   bookmarksToggleState,
   mergeBookmarkIntoDraft,
@@ -1156,4 +1157,65 @@ test("tab change clears reply anchor and re-pins", () => {
   ctx.roots.bookmarkspane.dispatch("click", { target: tab });
   assert.equal(ctx.roots.bookmarkchip.hidden, true);
   assert.equal(ctx.storage.getItem(STORAGE_KEY_TAB), "lane-a");
+});
+
+/* ---------- item 5/6/7/9: the shared action-bar builder ---------- */
+
+const ICONS = {
+  ICON_JUMP: "<svg id=j/>", ICON_COMMENT: "<svg id=c/>", ICON_COPY: "<svg id=y/>",
+  ICON_CLIP: "<svg id=p/>", ICON_TRASH: "<svg id=t/>",
+};
+
+test("bookmarkActionsHTML renders the pane's full action set in order", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane" });
+  const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["jump", "comment", "copy", "note", "del"]);
+});
+
+test("bookmarkActionsHTML omits comment in the workspace inbox — the reply composer is pane-only", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
+  const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["jump", "copy", "note", "del"]);
+});
+
+test("bookmarkActionsHTML offers jump in the inbox whenever the bookmark is addressable (item 5)", () => {
+  /* the whole point of item 5: reaching the chat must not require first
+     placing the bookmark into a section */
+  const live = bookmarkActionsHTML({ t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
+  assert.match(live, /data-bmact="jump"/);
+  const archived = bookmarkActionsHTML({ t: "1", text: "x", uid: "u1" }, { icons: ICONS, context: "inbox" });
+  assert.match(archived, /data-bmact="jump"/);
+});
+
+test("bookmarkActionsHTML drops jump only when the bookmark has no address at all", () => {
+  const manual = bookmarkActionsHTML({ t: "1", text: "typed by hand" }, { icons: ICONS, context: "pane" });
+  assert.ok(!manual.includes(`data-bmact="jump"`));
+});
+
+test("bookmarkActionsHTML withholds comment from a comment (no nesting)", () => {
+  const html = bookmarkActionsHTML(
+    { t: "2", text: "x", node: "n1", anchor: "1" }, { icons: ICONS, context: "pane" });
+  assert.ok(!html.includes(`data-bmact="comment"`));
+});
+
+test("bookmarkActionsHTML uses the shared .actionbar/.btn-plain classes, not per-surface geometry", () => {
+  const html = bookmarkActionsHTML({ t: "1", text: "x", node: "n1" }, { icons: ICONS });
+  assert.match(html, /class="actionbar"/);
+  assert.match(html, /class="btn-plain"/);
+  assert.ok(!html.includes("bookmarkactions"),
+    "the old per-surface class must be gone so pane and inbox cannot drift apart");
+});
+
+test("bookmarkListHTML emits the shared action bar for the open bookmark", () => {
+  const html = bookmarkListHTML({
+    list: [{ t: "1", text: "hello", node: "n1" }],
+    bookmarkTab: "GENERAL",
+    openBookmarkT: "1",
+    nodeById: () => ({ id: "n1", title: "Act" }),
+    icons: ICONS,
+  });
+  assert.match(html, /class="actionbar"/);
+  assert.match(html, /data-bmact="jump"/);
 });

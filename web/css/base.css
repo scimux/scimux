@@ -18,3 +18,37 @@ body {
   overscroll-behavior: none;
 }
 button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
+
+/* ---------- control ladder (HIG: filled -> tinted -> plain) ----------
+   Three tiers already existed by copy-paste — solid petrol for a committing
+   action, a petrol tint for a constructive one, a neutral surface chip for the
+   secondary row — but nothing named them, so every new control picked a tier
+   by looking at whatever was nearby (UI review item 6). Naming them is the
+   whole fix: a control declares its rank, the rank owns the look.
+   Destructive is a *modifier* on a tier, never a fourth tier: "delete" is
+   still a secondary action, it is just red. */
+.btn-filled { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 16px; border-radius: var(--radius); font-size: 15px; font-weight: 600;
+  background: var(--work); color: #fff; }
+.btn-filled:disabled { opacity: .55; }
+.btn-tinted { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 13px; border-radius: 9px; font-size: 13px;
+  background: color-mix(in srgb, var(--work) 8%, transparent); color: var(--work); }
+.btn-tinted:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+.btn-tinted svg { width: 14px; height: 14px; }
+.btn-plain { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 0 10px; border-radius: 12px; font-size: 13px; color: var(--dim);
+  background: var(--surface); border: 1px solid var(--hairline); }
+.btn-plain:active { color: var(--work); background: var(--code-bg); }
+.btn-plain.danger { color: var(--danger); }
+.btn-plain.danger:active { color: var(--danger); }
+
+/* ---------- action bar: one geometry for every per-item action row ----------
+   The Bookmarks pane used 44x40, the in-section reference card 30x28 — two
+   sizes for the same five verbs, and both under the 44pt minimum touch target
+   (UI review items 8 + 9). One class now, and the buttons are *distributed*
+   rather than clumped left or centred: that is the HIG toolbar idiom, and it
+   keeps each target's slack area away from its neighbour's. */
+.actionbar { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.actionbar button { width: 44px; height: 44px; padding: 0; flex: none; }
+.actionbar button svg { width: 15px; height: 15px; }

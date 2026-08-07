@@ -34,11 +34,11 @@ import {
 } from "./lanes.js";
 import {
   hardAttention, orderedNodes as orderedNodesMod,
-  isArchived as isArchivedMod,
+  isArchived as isArchivedMod, stationLatestTurn,
 } from "./map-model.js";
 import {
   clampLevel, scrimStep, captureTouchStart, documentSwipeDecision,
-  captureNotesTouchStart, notesSwipeBackDecision,
+  captureNotesTouchStart, notesSwipeBackDecision, journeyToggleState,
 } from "./navigation.js";
 import {
   withCsrf as withCsrfMod, api as apiMod,
@@ -56,6 +56,10 @@ import {
 } from "./bookmarks.js";
 import { createNotesFeature } from "./notes.js";
 import { createSearchFeature } from "./search.js";
+import {
+  makeReturnContext, returnAfterSelection, chatBackState,
+  RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
+} from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
@@ -675,14 +679,19 @@ const mapFeature = createMapFeature({
   agentLogo,
   icons: { ICON_PENCIL, ICON_END, ICON_MAP_EXPAND, ICON_MAP_CONTRACT, ICON_FARE_ON, ICON_FARE_OFF },
   uiMutate,
-  selectNode: id => select(id),
+  selectNode: (id, how) => {
+    /* a wall-map "Open chat" is a jump: remember the map so #chatback leads
+       back into it (UI review item 18) */
+    if (how === "jump") setReturnContext(RETURN_MAP, { node: id });
+    select(id, how);
+  },
   setLevel,
   setLaneFilter,
   loadChatHistory: (id, st) => loadChatHistory(id, st),
   jumpChatToNow: () => jumpChatToNow(),
   openActivityEditor: (id, stop) => sheetsFeature.openActivityEditor(id, stop),
   forkFromStation: id => sheetsFeature.forkFromStation(id),
-  addStationBookmark: id => addStationBookmark(id),
+  addStationBookmark: (id, stop) => addStationBookmark(id, stop),
   exitThread: id => exitThread(id),
   openSheet: id => sheetsFeature.openSheet(id),
   closeSheets: () => sheetsFeature.closeSheets(),
@@ -866,7 +875,7 @@ bookmarksFeature = createBookmarksFeature({
   startPlacement: nt => notesFeature.startPlacement(nt),
   toast: msg => toast(msg),
   copyText: s => copyText(s),
-  select: id => select(id),
+  select: (id, how) => select(id, how),
   setLevel: n => setLevel(n),
   openSheet: id => sheetsFeature.openSheet(id),
   closeSheets: () => sheetsFeature.closeSheets(),
@@ -934,7 +943,12 @@ notesFeature = createNotesFeature({
   laneColor: id => laneColor(id),
   toast: msg => toast(msg),
   copyText: s => copyText(s),
-  jumpToChatAddress: a => jumpToChatAddress(a),
+  jumpToChatAddress: a => {
+    setReturnContext(RETURN_NOTE, { title: notesFeature.activeTitle() });
+    const ok = jumpToChatAddress(a);
+    if (!ok){ returnCtx = null; renderChatBack(); }
+    return ok;
+  },
   isNarrow: () => window.matchMedia("(max-width: 767px)").matches,
   notesbtn: () => $("#notesbtn"),
   captureNotesTouchStart,
@@ -969,7 +983,7 @@ searchFeature = createSearchFeature({
   nodeById: id => nodeById(id),
   laneColor: id => laneColor(id),
   agentLogo: a => agentLogo(a),
-  select: id => select(id),
+  select: id => { setReturnContext(RETURN_SEARCH); select(id, "jump"); },
   setPendingJump: v => { pendingJump = v; },
   invalidateChat: () => chatFeature.invalidate(),
   setBookmarksOpen: o => setBookmarksOpen(o),
@@ -1047,9 +1061,20 @@ sheetsFeature = createSheetsFeature({
 });
 
 /* Shell navigation into/out of Journeys (not map-local chrome). */
+/* the chevron must describe the tap: on desktop the button is a toggle, so it
+   flips with the pane; on the phone Journeys is a forward level and never
+   reports open (UI review item 18). */
+function renderJourneyToggle(){
+  const btn = $("#journeybtn");
+  if (!btn) return;
+  const st = journeyToggleState(isDesktop() && document.body.classList.contains("map-open"));
+  btn.innerHTML = st.innerHTML;
+  btn.setAttribute("aria-label", st.ariaLabel);
+}
 $("#journeybtn").addEventListener("click", () => {
   if (isDesktop()){
     document.body.classList.toggle("map-open");
+    renderJourneyToggle();
     mapFeature.invalidate(); renderMap();
     restartWorkPulse();
   } else setLevel(3);
@@ -1072,6 +1097,7 @@ emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-adopt],[dat
     /* iPad/desktop columns: tapping the Activity gutter folds the Journey
        column back, mirroring the same gesture on the map itself */
     document.body.classList.remove("map-open");
+    renderJourneyToggle();
     mapFeature.invalidate(); renderMap();
     restartWorkPulse();
   } else setLevel(1);
@@ -1082,6 +1108,7 @@ emptyTap($("#mapscroll"), ".strow,.lanechip,[data-nid],[data-chip],button,a,inpu
   if (mapFeature.isFull()) return;
   if (isDesktop()){
     document.body.classList.remove("map-open");
+    renderJourneyToggle();
     mapFeature.invalidate(); renderMap();
     restartWorkPulse();
   } else setLevel(2);
@@ -1152,7 +1179,34 @@ async function commitTitleEdit(id, raw){
 let selGen = 0;
 /* hashStr imported from /js/lanes.js */
 
-function select(id){
+/* Contextual return (UI review item 18) — a jump out of the wall map, the
+   search overlay or a note remembers where it came from so #chatback can lead
+   back there. Selecting a chat any other way is a deviation from that
+   trajectory and drops the context (returnAfterSelection). */
+let returnCtx = null;
+function setReturnContext(kind, payload){ returnCtx = makeReturnContext(kind, payload); }
+function renderChatBack(){
+  const btn = $("#chatback");
+  if (!btn) return;
+  const st = chatBackState(returnCtx);
+  btn.innerHTML = st.html;
+  btn.setAttribute("aria-label", st.ariaLabel);
+  btn.classList.toggle("hasreturn", st.hasReturn);
+}
+function returnFromChat(){
+  const ctx = returnCtx;
+  returnCtx = null;
+  renderChatBack();
+  if (!ctx){ setLevel(2); return; }
+  if (ctx.kind === RETURN_MAP){ setMapFull(true); return; }
+  if (ctx.kind === RETURN_SEARCH){ openSearch(); return; }
+  if (ctx.kind === RETURN_NOTE){ openWorkspace(); return; }
+  setLevel(2);
+}
+
+function select(id, how){
+  returnCtx = returnAfterSelection(returnCtx, how);
+  renderChatBack();
   if (sel !== id){ chatFeature.onSelectChange(); mapFeature.invalidate(); selGen++; }   /* history is per-visit, reloaded on demand */
   else {
     /* same node re-select still discards a pending "use as description" */
@@ -1219,19 +1273,29 @@ document.addEventListener("focusout", e => {
 /* wall map: "Add note" files a sticky note for this station. Notes are
    lane-scoped in the store (no per-node anchor), so it lands in the station's
    lane tab of the notes pane — same record the in-chat/notes composer writes. */
-function addStationBookmark(id){
+async function addStationBookmark(id, stopTime){
   const n = nodeById(id);
   if (!n) return;
-  const text = prompt(`Add a bookmark — ${n.title}`);
-  if (text == null) return;
-  const clean = text.trim();
-  if (!clean) return;
-  const bookmark = { t: new Date().toISOString(), text: clean };
+  /* item 13: no dialog. The station stands for a chat, so the bookmark is that
+     chat's latest turn — the head stop takes the live tail, an earlier stop the
+     last turn of the segment it marks. The durable address is stamped so the
+     bookmark's "Open chat" lands back on the turn it was taken from. */
+  let turn = null;
+  try {
+    const q = stopTime ? "?history=1" : "";
+    const data = await api(`/api/nodes/${encodeURIComponent(id)}/chat${q}`);
+    turn = stationLatestTurn(data.segments, data.turns, stopTime);
+  } catch (err) { turn = null; }
+  const clean = ((turn && turn.text) || "").trim();
+  if (!clean){ toast("Nothing to bookmark here yet."); return; }
+  const bookmark = { t: new Date().toISOString(), text: clean, node: id };
+  if (turn.time) bookmark.turnTime = turn.time;
   if (n.lane_id) bookmark.lane = n.lane_id;
+  stampAddress(bookmark, turn);
   uiMutate({ k: "bookmark-add", bookmark });
   bookmarksFeature.pinBottom();
   renderBookmarksPane();
-  toast("Note added" + (n.lane_id ? " to " + laneName(n.lane_id) : ""));
+  toast("Bookmark added" + (n.lane_id ? " to " + laneName(n.lane_id) : ""));
 }
 /* ---------- sticky-notes / Bookmarks pane ----------
    Packet 7E: rendering, clamp, flags, reply composer, jump, and longpress
@@ -1367,7 +1431,7 @@ function applyNavAction(action){
     renderCards(); renderChatHead();
   }
 }
-$("#chatback").addEventListener("click", () => setLevel(2));
+$("#chatback").addEventListener("click", returnFromChat);
 /* the scrim is the left panes' peek made tappable: a tap steps ONE pane back
    (level 3→2, 2→1), mirroring the swipe — never a jump straight to chat. */
 $("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));
@@ -1604,6 +1668,11 @@ installInsetRefresh({
   setTimeout: (fn, ms) => setTimeout(fn, ms),
 });
 setLevel(level);
+renderJourneyToggle();
+renderChatBack();
+/* the Journeys chevron is breakpoint-dependent: the desktop toggle becomes a
+   phone forward-arrow when the pane stops being a toggle */
+window.addEventListener("resize", renderJourneyToggle);
 /* restore persisted full-screen / fare chrome (map feature owns keys + ARIA) */
 mapFeature.restoreChrome();
 renderMapTabs();

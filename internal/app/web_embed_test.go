@@ -26,6 +26,7 @@ var productionJSModules = []string{
 	"web/js/navigation.js",
 	"web/js/notes.js",
 	"web/js/polling.js",
+	"web/js/returnto.js",
 	"web/js/search.js",
 	"web/js/sheets.js",
 	"web/js/state.js",
