@@ -55,7 +55,7 @@
  *   - nodeById, orderedNodes, laneList, laneColor, laneModel
  *   - uiMutate, bookmarks getter (UI.bookmarks)
  *   - jump deps: setPendingJump, invalidateChat, select, openArchived,
- *     wsOpen, closeWorkspace, isDesktop
+ *     wsOpen, closeWorkspace, isDesktop, singleZone
  *   - startPlacement (Notes use-in-note — Notes owns workspace; 7F)
  *   - openNotes lazy (Notes › / workspace)
  *   - openSheet / closeSheets, setLevel, restartWorkPulse
@@ -199,7 +199,8 @@ export function bookmarkTabsHTML(bookmarkTab, tabs, esc, laneColor){
 export function bookmarkListHTML(opts){
   const {
     list, bookmarkTab, openBookmarkT,
-    nodeById, esc, md, fmtWhen, laneColor, icons = {}, workspaceOpen = false,
+    nodeById, esc, md, fmtWhen, laneColor, icons = {},
+    workspaceOpen = false, singleZone = false,
   } = opts || {};
   const e = esc || (s => String(s ?? ""));
   const renderMd = md || (s => String(s ?? ""));
@@ -218,7 +219,7 @@ export function bookmarkListHTML(opts){
       <div class="nbubble" style="border-left-color:${color}">${renderMd(nt.text || "")}</div>
       <button class="nmore" data-nmore hidden></button>
       ${openBookmarkT === nt.t
-        ? bookmarkActionsHTML(nt, { icons, context: "pane", workspaceOpen }) : ""}
+        ? bookmarkActionsHTML(nt, { icons, context: "pane", workspaceOpen, singleZone }) : ""}
     </div>`;
   }).join("");
 }
@@ -235,10 +236,15 @@ export function bookmarkListHTML(opts){
    (review 2, item 4): it arms placement mode, whose only targets are the
    section rows inside that workspace, so from the compact pane it armed a mode
    with nothing visible to complete it. The inbox lives inside the workspace and
-   therefore always offers it. */
+   therefore always offers it. `singleZone` is the phone exception: with the
+   workspace's zones shown one at a time there is no inbox alongside the pane,
+   so the pane's paperclip IS the route into placement (it opens the workspace
+   in placing mode) and the armed mode is the next screen, not an invisible one. */
 export function bookmarkActionsHTML(nt, opts){
-  const { icons = {}, context = "pane", workspaceOpen = false } = opts || {};
-  const canPlace = context === "inbox" || workspaceOpen;
+  const {
+    icons = {}, context = "pane", workspaceOpen = false, singleZone = false,
+  } = opts || {};
+  const canPlace = context === "inbox" || workspaceOpen || singleZone;
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
   return `<div class="actionbar">
@@ -446,8 +452,10 @@ export function createBookmarksFeature(deps){
       fmtWhen,
       laneColor,
       icons,
-      /* "use in note" only exists while its placement targets do (item 4) */
+      /* "use in note" only exists while its placement targets do (item 4),
+         except on the single-zone phone layout where it is the way in */
       workspaceOpen: typeof d.wsOpen === "function" && d.wsOpen(),
+      singleZone: typeof d.singleZone === "function" && d.singleZone(),
     });
     const sig = hashStr(tabsHtml + "|" + listHtml);
     if (sig === bookmarksSig) return;

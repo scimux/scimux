@@ -100,6 +100,12 @@ let sysPrev = null;
 let pollingFeature;
 
 const isDesktop = () => matchMedia("(min-width: 900px)").matches;
+/* The Notes workspace shows its zones side by side from 768px up (notes.css);
+   below that it is one zone at a time, which is what decides whether the
+   Bookmarks pane still offers "use in note" (review 2, item 4). Mirrors the
+   workspace's own breakpoint, not the 900px shell/desktop one. */
+const SINGLE_ZONE_QUERY = "(max-width: 767px)";
+const singleZone = () => matchMedia(SINGLE_ZONE_QUERY).matches;
 const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
 
 /* Per-process CSRF token, embedded in the page by the server. Every unsafe
@@ -885,6 +891,7 @@ bookmarksFeature = createBookmarksFeature({
   wsOpen: () => notesFeature.isOpen(),
   closeWorkspace: () => notesFeature.close(),
   isDesktop,
+  singleZone,
   restartWorkPulse: () => restartWorkPulse(),
   longpress: (container, selector, fn) => longpress(container, selector, fn),
 });
@@ -1674,6 +1681,12 @@ renderChatBack();
 /* the Journeys chevron is breakpoint-dependent: the desktop toggle becomes a
    phone forward-arrow when the pane stops being a toggle */
 window.addEventListener("resize", renderJourneyToggle);
+/* crossing the workspace's zone breakpoint changes which actions a bookmark
+   row offers, so re-render the pane on the edge rather than on every resize */
+matchMedia(SINGLE_ZONE_QUERY).addEventListener("change", () => {
+  bookmarksFeature.invalidate();
+  renderBookmarksPane();
+});
 /* restore persisted full-screen / fare chrome (map feature owns keys + ARIA) */
 mapFeature.restoreChrome();
 renderMapTabs();

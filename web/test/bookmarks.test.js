@@ -1231,6 +1231,38 @@ test("bookmarkActionsHTML offers use-in-note from the pane once the workspace is
   assert.match(html, /data-bmact="note"/);
 });
 
+/* ...but the phone has no side-by-side workspace to reach the inbox in: its
+   zones are shown one at a time, so the pane's paperclip is the direct route
+   into placement (it opens the workspace in placing mode). The gate is about
+   an invisible armed mode, and on a single-zone layout the mode is not
+   invisible — it is the next screen. */
+test("bookmarkActionsHTML keeps use-in-note in the pane on a single-zone (phone) layout", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: false, singleZone: true });
+  assert.match(html, /data-bmact="note"/);
+});
+
+test("the single-zone exception does not leak to the multi-zone layout", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: false, singleZone: false });
+  assert.ok(!html.includes(`data-bmact="note"`));
+});
+
+test("bookmarkListHTML carries the single-zone exception through to the row", () => {
+  const html = bookmarkListHTML({
+    list: [{ t: "1", text: "hello", node: "n1" }],
+    bookmarkTab: "GENERAL",
+    openBookmarkT: "1",
+    nodeById: () => ({ id: "n1", title: "Act" }),
+    icons: ICONS,
+    workspaceOpen: false,
+    singleZone: true,
+  });
+  assert.match(html, /data-bmact="note"/);
+});
+
 test("the inbox offers use-in-note regardless of the flag: it lives in the workspace", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });

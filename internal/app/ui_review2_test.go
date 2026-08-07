@@ -87,15 +87,24 @@ func TestReturnControlIsALabelledPill(t *testing.T) {
 
 // "Use in note" arms placement mode, whose only targets are the section rows
 // inside the Notes workspace. Offering it from the compact Bookmarks pane while
-// that workspace is closed arms a mode with no visible target.
+// that workspace is closed arms a mode with no visible target — on the
+// multi-zone layout (>=768px), where the workspace's own inbox is the natural
+// route. The phone shows one zone at a time and has no such inbox in view, so
+// there the pane's paperclip IS the route and must stay.
 func TestUseInNoteIsGatedOnTheWorkspaceBeingVisible(t *testing.T) {
 	bm := mustReadWeb(t, "web/js/bookmarks.js")
 	if !strings.Contains(bm, "workspaceOpen") {
 		t.Error("the shared action row must know whether the Notes workspace is open")
 	}
-	// The pane's own render must feed the live flag, not a constant.
+	if !strings.Contains(bm, "singleZone") {
+		t.Error("the shared action row must keep the phone's single-zone exception")
+	}
+	// The pane's own render must feed the live flags, not constants.
 	if !strings.Contains(bm, "wsOpen") {
 		t.Error("the Bookmarks pane must read the workspace state (d.wsOpen) when rendering its rows")
+	}
+	if !strings.Contains(bm, "d.singleZone") {
+		t.Error("the Bookmarks pane must read the live layout (d.singleZone) when rendering its rows")
 	}
 
 	// The workspace can be dismissed by the scrim, a swipe or Escape as well as
@@ -127,6 +136,24 @@ func TestUseInNoteIsGatedOnTheWorkspaceBeingVisible(t *testing.T) {
 	}
 	if !strings.Contains(hook, "invalidateBookmarks") && !strings.Contains(hook, "bookmarksFeature.invalidate") {
 		t.Errorf("the workspace visibility hook must invalidate the Bookmarks pane; got %q", hook)
+	}
+
+	// The exception is a breakpoint, so crossing it must re-render the pane —
+	// and the breakpoint must be the one the workspace itself switches at
+	// (768px), not the shell's desktop query.
+	if !strings.Contains(app, "SINGLE_ZONE_QUERY") {
+		t.Error("the shell must name the single-zone breakpoint so it cannot drift from the workspace CSS")
+	}
+	if !strings.Contains(app, "(max-width: 767px)") {
+		t.Errorf("the single-zone query must be the workspace's own breakpoint (>=768px is multi-zone)")
+	}
+	if !strings.Contains(app, `matchMedia(SINGLE_ZONE_QUERY).addEventListener("change"`) {
+		t.Error("crossing the single-zone breakpoint must re-render the Bookmarks pane, not wait for the next poll")
+	}
+
+	notesCSS := mustReadWeb(t, "web/css/notes.css")
+	if !strings.Contains(notesCSS, "@media (min-width: 768px) {") {
+		t.Error("the workspace's multi-zone layout must still start at 768px; the shell query mirrors it")
 	}
 }
 
