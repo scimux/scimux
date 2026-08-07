@@ -30,13 +30,59 @@ func TestTicketTearLineIsASharedDecoration(t *testing.T) {
 		t.Errorf("the perforation run must be a repeating radial-gradient dot; got %q", run)
 	}
 
-	// The two larger punched holes, one at each end.
-	holes := cssBlock(t, css, ".actionbar.tear::after {")
-	if strings.Count(holes, "radial-gradient") != 2 {
-		t.Errorf("exactly two punched holes (left and right) belong on the tear line; got %q", holes)
+	// The row's height is the coordinate the card's punches are measured from,
+	// so it cannot be left to drift with padding.
+	if !strings.Contains(tear, "height: var(--tearrow") {
+		t.Errorf("the torn row's height must be the shared constant the punches are placed against; got %q", tear)
 	}
-	if !strings.Contains(holes, "calc(100%") {
-		t.Errorf("the second hole must be anchored to the right end, not a fixed offset; got %q", holes)
+
+	// The end punches are cut, not drawn: nothing may paint circles on top.
+	if strings.Contains(css, ".actionbar.tear::after") {
+		t.Error("the end punches must remove material from the card, not paint discs over it")
+	}
+}
+
+// The two larger punches are real bites out of the card's outer frame — half
+// circles split on the border line, material missing the way a conductor's
+// punch takes it out of the paper. Painting filled discs inside the frame
+// (the first attempt) reads as decoration sitting ON the ticket; only removing
+// the card's own background and border reads as paper that is gone.
+func TestTicketPunchesRemoveMaterialFromTheCardEdge(t *testing.T) {
+	css := mustProductionCSSCascade(t)
+	punch := cssBlock(t, css, ".bookmark, .wsibookmark, .wsref.open {")
+
+	// A mask cuts the element's own background AND border, which a pseudo
+	// element inside the padding box can never reach.
+	for _, want := range []string{"-webkit-mask-image", "mask-image"} {
+		if !strings.Contains(punch, want) {
+			t.Errorf("the punches must be masked out of the card (%s); got %q", want, punch)
+		}
+	}
+	// One hole per end, each a transparent disc centred ON the edge so exactly
+	// half of it falls outside the card.
+	if strings.Count(punch, "at 0 var(--teary)") != 2 || strings.Count(punch, "at 100% var(--teary)") != 2 {
+		t.Errorf("one punch must sit on the left edge and one on the right, both prefixed and not; got %q", punch)
+	}
+	if !strings.Contains(punch, "transparent") {
+		t.Errorf("the punch must be a hole in the mask, not an opaque shape; got %q", punch)
+	}
+	// Two "everything but a hole" layers only leave two holes when intersected;
+	// the default (add) would cover each other's hole and show no punch at all —
+	// which is also the safe degradation on an engine without mask-composite.
+	if !strings.Contains(punch, "mask-composite: intersect") {
+		t.Errorf("the two mask layers must be intersected or neither hole survives; got %q", punch)
+	}
+	// Anchored to the bottom edge, because that is what the row height fixes.
+	if !strings.Contains(punch, "calc(100% - var(--tearrow)") {
+		t.Errorf("the punch line must be measured up from the card's bottom; got %q", punch)
+	}
+
+	// A reference card carries extra padding below its row, and shows the row
+	// only when open — so it must restate the offset rather than inherit a
+	// constant that would place its punches inside the card body.
+	ref := cssBlock(t, css, ".wsref.open { --tearpad")
+	if !strings.Contains(ref, "--tearpad") {
+		t.Errorf("the reference card must declare its own padding below the torn row; got %q", ref)
 	}
 }
 

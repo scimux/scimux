@@ -57,22 +57,19 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
    Where an action row hangs under a captured chat bubble, the pair reads as a
    fare-ticket stub: the quote on top, the verbs torn off below. The seam was a
    plain hairline; it is now the perforation of a vintage paper ticket — a run
-   of small punches with a larger one at each end. Purely decorative: it
-   replaces the border, adds no geometry and encodes nothing the user must
-   read. The punches are drawn *inside* the card rather than notched out of its
-   edges, because these cards clip their content and a half-circle bitten out
-   of a 1px border reads as a rendering fault, not as paper.
-   Applied only by the builders that emit a bubble-attached row, so a note
-   card's own toolbar never claims to be a stub. */
-.actionbar.tear { position: relative; border-top: none; }
+   of small punches with a larger one bitten out of each edge. Purely
+   decorative: it replaces the border, adds no geometry and encodes nothing the
+   user must read. Applied only by the builders that emit a bubble-attached
+   row, so a note card's own toolbar never claims to be a stub.
+
+   Two coordinate systems have to agree, so the row's height is a constant
+   rather than the sum of its padding: the small run is drawn by the row, the
+   end punches are cut out of the CARD (see .tearcard below) and are placed by
+   measuring that constant up from the card's bottom edge. */
+.actionbar.tear { position: relative; border-top: none;
+  box-sizing: border-box; height: var(--tearrow, 53px); }
 /* the run between the end punches, inset far enough to clear them */
-.actionbar.tear::before { content: ""; position: absolute; left: 18px; right: 18px;
+.actionbar.tear::before { content: ""; position: absolute; left: 14px; right: 14px;
   top: 0; height: 3px; pointer-events: none;
   background: radial-gradient(circle, var(--hairline) 0 1.1px, transparent 1.4px) repeat-x;
   background-size: 5px 3px; }
-/* the two larger punches, pinned to the ends so any row width stays a ticket */
-.actionbar.tear::after { content: ""; position: absolute; left: 0; right: 0;
-  top: -2px; height: 7px; pointer-events: none;
-  background:
-    radial-gradient(circle at 7px 50%, var(--hairline) 0 2.4px, transparent 2.8px) no-repeat,
-    radial-gradient(circle at calc(100% - 7px) 50%, var(--hairline) 0 2.4px, transparent 2.8px) no-repeat; }

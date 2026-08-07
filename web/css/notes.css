@@ -62,6 +62,33 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   font-size: 12px; color: var(--dim); cursor: pointer; }
 .bookmark .nmore:active { color: var(--work); }
 .bookmark .actionbar { padding: 5px 8px 4px; }
+/* the ticket's two end punches. They are *bites* — half circles split on the
+   card's own outer frame, so material is missing rather than drawn (a filled
+   disc inside the frame reads as decoration sitting on the ticket). Nothing
+   inside the card can do that: a child is clipped to the padding box and can
+   never reach the border. A mask can, because it cuts the element's own
+   background and border together.
+   Placed by measuring the torn row up from the bottom edge, which is why that
+   row's height is a constant. Each layer is "opaque except one hole"; they
+   must be intersected or each covers the other's hole — and an engine without
+   mask-composite falls back to that union, i.e. an intact card with just the
+   perforation run, which is a safe place to land. */
+.bookmark, .wsibookmark, .wsref.open {
+  --tearrow: 53px; --tearpad: 0px; --tearhole: 5px;
+  --teary: calc(100% - var(--tearrow) - var(--tearpad) + 1.5px);
+  -webkit-mask-image:
+    radial-gradient(circle var(--tearhole) at 0 var(--teary),
+      transparent 0 calc(var(--tearhole) - 0.5px), #000 var(--tearhole)),
+    radial-gradient(circle var(--tearhole) at 100% var(--teary),
+      transparent 0 calc(var(--tearhole) - 0.5px), #000 var(--tearhole));
+  mask-image:
+    radial-gradient(circle var(--tearhole) at 0 var(--teary),
+      transparent 0 calc(var(--tearhole) - 0.5px), #000 var(--tearhole)),
+    radial-gradient(circle var(--tearhole) at 100% var(--teary),
+      transparent 0 calc(var(--tearhole) - 0.5px), #000 var(--tearhole));
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-composite: source-in; mask-composite: intersect;
+}
 /* inside the card the chips would double the card's own border, so they drop
    to a borderless tap target; the ladder's colour and radius stay */
 .bookmark .actionbar .btn-plain,
@@ -393,6 +420,9 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .wsrefmore:active { color: var(--work); }
 .wsref .actionbar { display: none; margin-top: 6px; padding-top: 5px; }
 .wsref.open .actionbar { display: flex; }
+/* unlike the two bookmark cards this one keeps its own padding below the torn
+   row, so its punches sit that much higher */
+.wsref.open { --tearpad: 7px; }
 /* --- placement mode: floating pill + per-section "add bookmark here" target ---
    This was a full-bleed tinted strip that pushed the layout down and read as a
    warning banner (UI review item 10). It cannot simply be deleted: HIG requires
