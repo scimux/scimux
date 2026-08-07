@@ -384,11 +384,13 @@ let documentRef = { activeElement: null, contains: () => true, _listeners: {} };
 function makeRoots(){
   const searchoverlay = el("div", { id: "searchoverlay", hidden: true });
   const searchscrim = el("div", { id: "searchscrim" });
+  const searchpanel = el("div", { id: "searchpanel" });
   const searchinput = el("input", { id: "searchinput" });
   const searchclose = el("button", { id: "searchclose" });
   const searchfeed = el("div", { id: "searchfeed" });
   const searchbtn = el("button", { id: "searchbtn" });
   searchoverlay.appendChild(searchscrim);
+  searchoverlay.appendChild(searchpanel);
   searchoverlay.appendChild(searchinput);
   searchoverlay.appendChild(searchclose);
   searchoverlay.appendChild(searchfeed);
@@ -410,7 +412,7 @@ function makeRoots(){
   };
 
   return {
-    roots: { searchoverlay, searchscrim, searchinput, searchclose, searchfeed, searchbtn },
+    roots: { searchoverlay, searchscrim, searchpanel, searchinput, searchclose, searchfeed, searchbtn },
     document: documentRef,
   };
 }
@@ -866,6 +868,34 @@ test("bind is idempotent; destroy cleans listeners, timer, abort", async () => {
   /* re-bind works */
   h.feature.bind();
   assert.equal(h.roots.searchbtn._listeners.click.length, 1);
+});
+
+/* Returning from the preview reopens an overlay whose panel never moved, so
+   both of its entry animations have to sit out that one showing: searchpop
+   would re-pop the panel, and searchfade would fade the backdrop blur up from
+   transparent — which, with the preview's own scrim vanishing in the same
+   frame, reads as the whole surface blinking out and back.
+
+   The flag is applied per open, while the overlay is still hidden. That is what
+   keeps it to one showing: clearing the class on a live, on-screen overlay would
+   hand the element a brand-new animation and replay exactly what was suppressed. */
+test("a quiet open suppresses both entry animations, and only for that open", () => {
+  const h = createFeature();
+  h.feature.bind();
+
+  h.feature.open({ nopop: true });
+  h.flush(0);
+  assert.equal(h.feature.isOpen(), true);
+  assert.ok(h.roots.searchpanel.classList.contains("nopop"));
+  assert.ok(h.roots.searchscrim.classList.contains("nopop"),
+    "the blur must not fade back in — that is the flicker");
+
+  h.feature.close();
+  h.roots.searchbtn.dispatch("click");
+  h.flush(0);
+  assert.ok(!h.roots.searchpanel.classList.contains("nopop"),
+    "an ordinary open gets its animation back");
+  assert.ok(!h.roots.searchscrim.classList.contains("nopop"));
 });
 
 test("searchbtn/scrim/close click open and close", () => {

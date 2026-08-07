@@ -69,9 +69,12 @@
   border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.28);
   overflow: hidden; animation: searchpop .18s cubic-bezier(.2,.7,.3,1); }
 /* Returning from the preview re-opens this overlay onto a panel the user just
-   watched sit still. Replaying the entry pop would announce it as a new
-   surface; the results are meant to read as having been there all along. */
-#searchpanel.nopop { animation: none; }
+   watched sit still, so both entry animations sit out that one showing.
+   searchpop would announce a stationary panel as a new surface; searchfade
+   would fade the backdrop blur up from transparent while the preview's
+   identical scrim disappears in the same frame, which reads as the whole
+   surface blinking out and back. */
+#searchpanel.nopop, #searchscrim.nopop { animation: none; }
 @keyframes searchfade { from { opacity: 0; } }
 @keyframes searchpop { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
 @media (prefers-reduced-motion: reduce) {

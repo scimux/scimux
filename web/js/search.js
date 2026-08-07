@@ -5,8 +5,8 @@
  * -----------------------------
  * Owned DOM roots / controls:
  *   - #searchoverlay (dialog; hidden toggle)
- *   - #searchscrim (backdrop close)
- *   - #searchpanel / #searchbar (structure only; no listeners)
+ *   - #searchscrim (backdrop close; the per-open "nopop" class)
+ *   - #searchpanel / #searchbar (structure + the per-open "nopop" class; no listeners)
  *   - #searchinput (query field; debounced input)
  *   - #searchclose (✕)
  *   - #searchfeed (recents / groups / empty / error; delegated clicks)
@@ -271,9 +271,25 @@ export function createSearchFeature(deps){
     if (input && typeof input.focus === "function") input.focus();
   }
 
-  function open(){
+  /* opts.nopop opens the overlay without its entry animations. The chat preview
+     is drawn in this panel's own geometry, so returning from it reveals a
+     surface that never moved: replaying searchpop would re-pop a stationary
+     panel, and replaying searchfade would fade the backdrop blur up from
+     transparent while the preview's identical scrim vanishes in the same frame
+     — together they read as the whole overlay blinking out and back.
+
+     The flag is applied on every open, while the overlay is still hidden, and
+     that timing is the point. Clearing the class on a live, on-screen overlay
+     would give the element a brand-new animation and play the very pop this
+     suppressed, one frame late. */
+  function open(opts){
     if (isOpen()){ focusInput(); return; }
     searchReturnFocus = activeEl();
+    const quiet = !!(opts && opts.nopop);
+    for (const name of ["searchpanel", "searchscrim"]){
+      const el = root(name);
+      if (el && el.classList) el.classList.toggle("nopop", quiet);
+    }
     const ov = root("searchoverlay");
     if (ov) ov.hidden = false;
     const input = root("searchinput");

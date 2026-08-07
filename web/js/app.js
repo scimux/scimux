@@ -1004,7 +1004,7 @@ searchFeature = createSearchFeature({
   isDesktop: () => isDesktop(),
 });
 function searchOpen(){ return searchFeature.isOpen(); }
-function openSearch(){ searchFeature.open(); }
+function openSearch(opts){ searchFeature.open(opts); }
 function closeSearch(){ searchFeature.close(); }
 
 /* Generic sheets + new-activity + adoption — Packet 7H. */
@@ -1577,15 +1577,9 @@ function closePreview(){
   previewReturn = null;
   previewReturnFocus = null;
   previewAddr = null;
-  if (to && to.kind === RETURN_SEARCH){
-    const panel = $("#searchpanel");
-    if (panel){
-      panel.classList.add("nopop");
-      requestAnimationFrame(() => panel.classList.remove("nopop"));
-    }
-    openSearch();   /* it focuses its own field */
-    return;
-  }
+  /* Quietly: the panel underneath never moved, so neither of the overlay's
+     entry animations may run. See search.js open(). */
+  if (to && to.kind === RETURN_SEARCH){ openSearch({ nopop: true }); return; }  /* it focuses its own field */
   if (back && document.contains(back) && typeof back.focus === "function") back.focus();
 }
 /* The way onward. This is a jump, not a dismissal: the preview is a photo, and

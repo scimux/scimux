@@ -82,8 +82,7 @@ func TestASearchHitOpensThePreview(t *testing.T) {
 	}
 
 	// Every dismissal, not just the labelled one.
-	closeFn := afterMarker(app, "function closePreview()")
-	if !strings.Contains(closeFn, "openSearch()") {
+	if !strings.Contains(previewFnBody(app, "closePreview"), "openSearch(") {
 		t.Error("dismissing the preview must restore the surface that presented it")
 	}
 	if !strings.Contains(app, "returnPillState") {
@@ -98,10 +97,7 @@ func TestASearchHitOpensThePreview(t *testing.T) {
 func TestOpenChatFromThePreviewJumpsAndKeepsTheSearchTrail(t *testing.T) {
 	app := mustReadWeb(t, "web/js/app.js")
 
-	fn := afterMarker(app, "function openPreviewChat()")
-	if i := strings.Index(fn, "\n}\n"); i >= 0 {
-		fn = fn[:i]
-	}
+	fn := previewFnBody(app, "openPreviewChat")
 	if fn == "" {
 		t.Fatal("the preview head's Open chat needs a handler")
 	}
@@ -141,21 +137,44 @@ func TestThePreviewIsDrawnInTheSearchPanelsPlace(t *testing.T) {
 	}
 }
 
-// Coming back has the same problem in reverse: reopening the overlay would
-// replay searchpop, so the results would pop in over a panel the user watched
-// stay put. The return suppresses it.
-func TestReturningToTheResultsDoesNotReplayThePop(t *testing.T) {
+// Coming back has the same problem in reverse, and BOTH of the overlay's entry
+// animations cause it. searchpop would re-pop a panel the user watched stay put;
+// searchfade would fade the backdrop blur up from transparent, which reads as
+// the whole surface blinking out and back — the preview's scrim vanishes in the
+// same frame, so for 160ms there is nothing behind the results. Suppressing only
+// the panel left the flicker in place. Both are cancelled together.
+func TestReturningToTheResultsDoesNotReplayTheEntryAnimations(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 	app := mustReadWeb(t, "web/js/app.js")
+	search := mustReadWeb(t, "web/js/search.js")
 
-	if !strings.Contains(css, "#searchpanel.nopop") {
-		t.Error("returning from the preview needs a way to open the overlay without the entry animation")
+	for _, sel := range []string{"#searchpanel.nopop", "#searchscrim.nopop"} {
+		if !strings.Contains(css, sel) {
+			t.Fatalf("returning from the preview needs %s to open the overlay quietly", sel)
+		}
+		if !strings.Contains(cssBlock(t, css, sel), "animation: none") {
+			t.Errorf("%s must cancel its entry animation", sel)
+		}
 	}
-	if !strings.Contains(cssBlock(t, css, "#searchpanel.nopop"), "animation: none") {
-		t.Error("#searchpanel.nopop must cancel searchpop")
+
+	// The shell asks; the module does it. search.js owns the overlay's roots, so
+	// it is the only place allowed to put the class on them — and it must set the
+	// flag on EVERY open, so a normal open after a return gets its pop back.
+	closeFn := previewFnBody(app, "closePreview")
+	if !strings.Contains(closeFn, "openSearch({ nopop: true })") {
+		t.Error("the preview's return is the caller that asks for a quiet open")
 	}
-	if !strings.Contains(afterMarker(app, "function closePreview()"), "nopop") {
-		t.Error("the preview's return is the caller that suppresses the pop")
+	if strings.Contains(closeFn, "classList") {
+		t.Errorf("the shell must not reach into search.js's roots to set the class itself; got %q", closeFn)
+	}
+	if !strings.Contains(search, "function open(opts)") {
+		t.Error("search.js open() must accept the quiet-open flag")
+	}
+	// Toggling — not adding — is what makes the suppression last exactly one
+	// showing. Removing the class while the overlay is on screen would hand the
+	// element a fresh animation and replay the very pop it was suppressing.
+	if !strings.Contains(search, `classList.toggle("nopop"`) {
+		t.Error("the class must be toggled per open, while the overlay is still hidden")
 	}
 }
 
@@ -174,4 +193,15 @@ func TestTheReturnPillIsSharedBetweenChatAndPreview(t *testing.T) {
 	if !strings.Contains(css, "#previewback[hidden]") {
 		t.Error("a display: on the pill overrides the hidden attribute unless it is restated")
 	}
+}
+
+// previewFnBody returns just the body of a top-level `function name()` in app.js,
+// so an assertion about what a function does — or does not — cannot be satisfied
+// or spoiled by the rest of the file.
+func previewFnBody(src, name string) string {
+	body := afterMarker(src, "function "+name+"()")
+	if i := strings.Index(body, "\n}\n"); i >= 0 {
+		return body[:i]
+	}
+	return body
 }
