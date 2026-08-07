@@ -15,6 +15,7 @@ import {
   makeReturnContext,
   returnLabel,
   chatBackState,
+  returnPillState,
   returnAfterSelection,
 } from "../js/returnto.js";
 
@@ -100,6 +101,25 @@ test("chatBackState escapes a note title so it cannot inject markup", () => {
   assert.ok(!st.html.includes("<b>"), `raw markup leaked into the back button: ${st.html}`);
   assert.ok(st.html.includes("&lt;b&gt;"), `title must be escaped: ${st.html}`);
   assert.ok(st.html.includes("&amp;c"), `ampersand must be escaped: ${st.html}`);
+});
+
+/* ---------- returnPillState: the same idiom on a pushed modal ---------- */
+
+test("a pushed modal names its presenter with the same pill as #chatback", () => {
+  const st = returnPillState(makeReturnContext(RETURN_SEARCH));
+  assert.equal(st.hasReturn, true);
+  assert.equal(st.html, chatBackState(makeReturnContext(RETURN_SEARCH)).html);
+  assert.match(st.html, /Return to Search/);
+});
+
+test("with no presenter to name, a pushed modal shows no return control at all", () => {
+  /* #chatback falls back to its parent pane ("‹ Activities"); a modal has no
+     parent pane, and offering one would send the user somewhere they never
+     came from. */
+  const st = returnPillState(null);
+  assert.equal(st.hasReturn, false);
+  assert.equal(st.html, "");
+  assert.ok(!st.html.includes(DEFAULT_BACK_LABEL));
 });
 
 /* ---------- returnAfterSelection: the invalidation rule ---------- */

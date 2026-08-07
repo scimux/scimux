@@ -57,7 +57,7 @@ import {
 import { createNotesFeature } from "./notes.js";
 import { createSearchFeature } from "./search.js";
 import {
-  makeReturnContext, returnAfterSelection, chatBackState,
+  makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
@@ -995,7 +995,8 @@ searchFeature = createSearchFeature({
   setPendingJump: v => { pendingJump = v; },
   invalidateChat: () => chatFeature.invalidate(),
   setBookmarksOpen: o => setBookmarksOpen(o),
-  openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at),
+  /* the overlay hides itself to show this, so the modal owes it a way back */
+  openArchived: (uid, seg, rec, at) => openArchived(uid, seg, rec, at, RETURN_SEARCH),
   forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
   uiMutate: op => uiMutate(op),
   toast: msg => toast(msg),
@@ -1490,9 +1491,17 @@ document.addEventListener("touchend", e => {
    log's meta launch config rather than a live parent. */
 let archivedFork = null;         /* {title,agent,model,effort,dir} when the log is forkable */
 let archivedReturnFocus = null;  /* focus restore on close */
+/* Which surface presented this modal, when one did. The search overlay hides
+   itself to show the archived window — and shows it in the overlay's own panel
+   geometry, so the results appear to have *become* the chat — which makes a
+   plain ✕ a trapdoor out of the search. The Bookmarks pane, the other caller,
+   stays open behind and needs none of this. */
+let archivedReturn = null;
 function archivedOpen(){ return !$("#archivedview").hidden; }
-async function openArchived(uid, seg, rec, at){
+async function openArchived(uid, seg, rec, at, from){
   archivedReturnFocus = document.activeElement;
+  archivedReturn = makeReturnContext(from);
+  renderArchivedBack();
   $("#archivedtitle").textContent = "Deleted chat";
   $("#archivedsub").textContent = "";
   $("#archivedforkbtn").hidden = true;
@@ -1530,16 +1539,31 @@ function renderArchived(d){
   $("#archivedbody").innerHTML = before + rows + after;
   $("#archivedbody").querySelector(".turn.anchor")?.scrollIntoView({ block: "center" });
 }
+function renderArchivedBack(){
+  const btn = $("#archivedback");
+  if (!btn) return;
+  const st = returnPillState(archivedReturn);
+  btn.hidden = !st.hasReturn;
+  btn.innerHTML = st.html;
+  btn.setAttribute("aria-label", st.ariaLabel);
+}
+/* Every exit is the same exit: the button, the ✕, the scrim and Escape all
+   dismiss a pushed modal, and a pushed modal dismisses back to its presenter.
+   Labelling only one of them would make the other three the trapdoor again. */
 function closeArchived(){
   if (!archivedOpen()) return;
   $("#archivedview").hidden = true;
+  const to = archivedReturn;
   const back = archivedReturnFocus;
+  archivedReturn = null;
   archivedReturnFocus = null;
+  if (to && to.kind === RETURN_SEARCH){ openSearch(); return; }  /* it focuses its own field */
   if (back && document.contains(back) && typeof back.focus === "function") back.focus();
 }
 /* fork a deleted chat: sheetsFeature seeds launch config from the log meta
    (agent/model/effort/dir) — no live parent; inherits config, never history */
 function forkFromArchived(){ sheetsFeature.forkFromArchived(); }
+$("#archivedback").addEventListener("click", closeArchived);
 $("#archivedclose").addEventListener("click", closeArchived);
 $("#archivedscrim").addEventListener("click", closeArchived);
 $("#archivedforkbtn").addEventListener("click", forkFromArchived);

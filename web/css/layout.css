@@ -238,13 +238,21 @@ body.map-full #farebtn { display: inline-flex; }
 /* a chat reached by jumping keeps its way back at every breakpoint: the plain
    back control is hidden on desktop, but a jump out of the wall map or the
    search overlay lands on a chat that is visible there (UI review item 18).
-   id+class beats the breakpoint's display:none by specificity. */
-#chatback.hasreturn { display: inline-flex; align-items: center; gap: 4px;
+   id+class beats the breakpoint's display:none by specificity.
+   #archivedback is the same promise on a pushed modal — a past search hit opens
+   the read-only window in the search overlay's own panel geometry — so it is
+   the same control, not a lookalike. */
+#chatback.hasreturn, #archivedback { display: inline-flex; align-items: center; gap: 4px;
   font-size: 14px; font-weight: 600; padding: 5px 12px; margin-right: 6px;
   border: 1px solid color-mix(in srgb, var(--work) 35%, transparent);
   border-radius: 999px; background: color-mix(in srgb, var(--work) 8%, transparent);
   max-width: 52vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#chatback.hasreturn:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
+#chatback.hasreturn:active, #archivedback:active {
+  background: color-mix(in srgb, var(--work) 16%, transparent); }
+/* the pill's display: would otherwise beat the hidden attribute and leave an
+   empty control sitting in the head */
+#archivedback { flex: none; color: var(--work); }
+#archivedback[hidden] { display: none; }
 /* "‹" opens the next-deeper overlay pane — the pointer stand-in for the
    phone's edge-swipe, so it only exists on iPad/desktop */
 .navnext { display: none; color: var(--work); font-size: 22px;

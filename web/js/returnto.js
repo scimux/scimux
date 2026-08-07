@@ -82,6 +82,22 @@ export function chatBackState(ctx){
   };
 }
 
+/* The same pill on a *pushed modal*. The read-only archived chat is presented
+   by the search overlay, in the search overlay's own panel geometry — from the
+   user's seat the results simply became a chat — so its dismissal has to land
+   back on the results, and it has to say so before the tap.
+
+   The one difference from #chatback: there is no parent-pane fallback. A chat
+   always has "Activities" above it; a modal with no presenter to name has
+   nothing above it but the surface it was dropped onto, and offering to "go
+   back" there would send the user somewhere they never came from. So the
+   control does not exist rather than lying. */
+export function returnPillState(ctx){
+  const st = chatBackState(ctx);
+  if (!st.hasReturn) return { hasReturn: false, label: "", html: "", ariaLabel: "" };
+  return st;
+}
+
 /* The invalidation rule. `how` is why the chat became selected: only "jump"
    keeps the context alive. Anything else — a card tap, a sticky-note flag, a
    freshly forked thread — is the user deviating from the trajectory, and the
