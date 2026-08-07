@@ -295,12 +295,17 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   pointer-events: none; }
 .wscard { position: relative; display: block; width: 100%; text-align: left;
   padding: 11px 12px; border-radius: 12px; border: 1px solid var(--hairline);
-  background: var(--surface); color: var(--ink); cursor: grab; margin-top: 8px; }
+  background: var(--surface); color: var(--ink); cursor: grab; margin-top: 8px;
+  /* two 40px buttons, their 8px gap and the cluster's own 8px inset, plus a
+     little air — reserved only on touch, where the cluster stands (below) */
+  --rowacts-gutter: 104px; }
 .wscard:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
 .wscard.on { border-color: var(--work);
   background: color-mix(in srgb, var(--work) 8%, transparent); }
 .wscard.dragging { opacity: .5; cursor: grabbing; }
-.wscard.renaming { cursor: text; }
+/* Renaming replaces the title with a full-width input, which the standing
+   cluster would float across, so the row reserves the same gutter touch does. */
+.wscard.renaming { cursor: text; padding-right: var(--rowacts-gutter); }
 .wscard .wctitle { font-weight: 600; font-size: 14px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .wscard .wctitleedit { display: block; width: 100%; font: inherit; font-weight: 600;
@@ -311,15 +316,24 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   display: flex; align-items: center; gap: 6px; }
 .wscard .wclanes { display: inline-flex; gap: 3px; margin-left: auto; flex: none; }
 .wscard .wclanes i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-/* Rename / Delete overlay on the zone-2 card (Phase 1c). Hidden by default;
-   revealed on hover (desktop) / always on touch — same discoverability split as
-   .card .actions and .tabs .x. Positioned bottom-right so the grab/drag area
-   on the title stays free. */
-.wscardactions { display: none; padding-top: 6px; }
+/* Rename / Delete on the zone-2 card (Phase 1c). Hidden by default; revealed on
+   hover (desktop) / always on touch — same discoverability split as
+   .card .actions and .tabs .x. The shape is .roundactions (base.css): a cluster
+   floating over the row's trailing edge, exactly as on an Activities card. It
+   used to be a flat .actionbar that grew the row downwards, which made this
+   list look like a different application from the one next to it. */
 .wscard:hover .wscardactions,
 .wscard.renaming .wscardactions { display: flex; }
+/* Constructive verb in petrol, destructive in red — the Activities cards'
+   colouring, since it is now the same cluster. */
+.wscardactions [data-wcact="rename"] { color: var(--work); }
 @media (hover: none) {
+  /* No long-press or swipe on this list, so the cluster simply stands there —
+     and a standing cluster must not sit on top of the title and the lane dots.
+     The row reserves its width instead. On a pointer, where hover reveals it
+     for a moment, the same gutter would only be dead space. */
   .wscardactions { display: flex; }
+  .wscard { padding-right: var(--rowacts-gutter); }
 }
 #wsnote { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 2.1; }
 /* top padding replaces the removed zone-3 header so the first section isn't

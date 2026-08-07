@@ -53,6 +53,29 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .actionbar button { width: 44px; height: 44px; padding: 0; flex: none; }
 .actionbar button svg { width: 15px; height: 15px; }
 
+/* ---------- round overlay actions: one shape for a list row's verbs ----------
+   A list row's actions float over its trailing edge as a cluster of circular
+   buttons, and the row itself never changes size. Activities' folded cards had
+   this; the Notes workspace's zone-2 list grew the row downwards instead, to
+   make space for a flat bar pushed out to the row's two outer edges — so the
+   same two lists answered the same gesture in two different shapes, and
+   reaching for "delete" reflowed everything below it.
+
+   Only the *look* is shared. When the cluster appears stays with each list,
+   because the gestures differ: Activities has long-press and swipe on touch,
+   the notes list has neither. Each list also sets --rowacts-inset to clear
+   whatever accessory already occupies its trailing edge. */
+.roundactions { position: absolute; right: var(--rowacts-inset, 8px); top: 50%;
+  transform: translateY(-50%); display: none; gap: 8px; z-index: 4; }
+.roundactions button {
+  width: 40px; height: 40px; border-radius: 20px; padding: 0; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--hairline);
+  box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+.roundactions button svg { width: 15px; height: 15px; }
+.roundactions button.danger { color: var(--danger); }
+
 /* ---------- the tear line ----------
    Where an action row hangs under a captured chat bubble, the pair reads as a
    fare-ticket stub: the quote on top, the verbs torn off below. The seam was a

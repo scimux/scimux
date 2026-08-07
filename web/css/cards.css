@@ -90,10 +90,12 @@
 .card.expanded.lane-edit .save-desc { display: flex; }
 .card .go { position: absolute; inset: 0; }
 .card.actions-open .go, .card.expanded .go, .card.editing .go, .card.title-editing .go { display: none; }
-.card .actions {
-  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-  display: none; gap: 8px; z-index: 4;
-}
+/* Geometry from .roundactions (base.css); only the trailing inset is this
+   list's own. The unfold chevron already lives at the card's trailing edge —
+   40px wide, pulled outward by its negative margin to within 4px of the card
+   border — and the cluster's last button covered it exactly, hiding the one
+   control that says there is more inside. Start clear of it. */
+.card .actions { --rowacts-inset: 52px; }
 .card.actions-open .actions { display: flex; }
 /* Desktop has no long-press or swipe. Hovering a folded card reveals the same
    archive/remove row (same hover idiom as the bubble copy button), so pointer
@@ -103,12 +105,6 @@
    expanded, or in-edit cards. */
 @media (hover: hover) and (pointer: fine) {
   .card:not(.adoptable):not(.expanded):not(.editing):not(.title-editing):hover .actions { display: flex; }
-}
-.card .actions button {
-  width: 40px; height: 40px; border-radius: 20px;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--surface); border: 1px solid var(--hairline);
-  box-shadow: 0 2px 8px rgba(0,0,0,.12);
 }
 .card .actions .pin { color: var(--work); }
 .card .actions .endthread { color: var(--dim); }

@@ -623,7 +623,10 @@ test("noteCardHTML carries Rename + Delete card actions; delete is danger", () =
     "n1",
     { esc: s => s, fmtNoteMeta: () => "meta", icons: { ICON_PENCIL: "P", ICON_TRASH: "T" } },
   );
-  assert.match(html, /class="wscardactions actionbar"/);
+  /* the shared floating cluster (Activities' idiom), not the in-card footer bar
+     that used to grow the row downwards */
+  assert.match(html, /class="wscardactions roundactions"/);
+  assert.doesNotMatch(html, /actionbar/);
   assert.match(html, /data-wcact="rename"/);
   assert.match(html, /data-wcact="delete"/);
   assert.match(html, /data-wcact="delete"[^>]*class="[^"]*danger|class="[^"]*danger[^"]*"[^>]*data-wcact="delete"/);

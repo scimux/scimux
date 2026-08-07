@@ -364,7 +364,7 @@ export function createCardsFeature(deps){
       </div>` : railboxHTML(n)}
       <div class="summary" data-desc="${escape(n.id)}">${escape(desc || "No description yet.")}</div>
       <textarea class="descbox" data-desc-input="${escape(n.id)}">${escape(desc)}</textarea>
-      <div class="actions">
+      <div class="actions roundactions">
         <button class="pin" data-pin-action="${escape(n.id)}" aria-label="${pinned ? "unpin" : "pin"}">${pinned ? (icons.ICON_UNPIN || "") : (icons.ICON_PIN || "")}</button>
         ${n.ended_at ? "" : `<button class="endthread" data-exit="${escape(n.id)}" aria-label="close thread (mark ended)">${icons.ICON_END || ""}</button>`}
         <button class="archive" data-arch-action="${escape(n.id)}" aria-label="${archived ? "restore" : "archive"}">${archived ? (icons.ICON_RESTORE || "") : (icons.ICON_ARCHIVE || "")}</button>

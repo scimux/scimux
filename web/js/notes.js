@@ -612,9 +612,9 @@ export function noteCardHTML(c, activeId, deps = {}){
   return `<div class="wscard ${c.id === activeId ? "on" : ""}" draggable="true" data-note="${esc(c.id)}" role="button" tabindex="0">
       <div class="wctitle">${esc(c.title || "Untitled")}</div>
       <div class="wcmeta"><span>${esc(meta(c))}</span>${lanes ? `<span class="wclanes">${lanes}</span>` : ""}</div>
-      <div class="wscardactions actionbar">
-        <button type="button" class="btn-plain" data-wcact="rename" aria-label="rename note">${icons.ICON_PENCIL || ""}</button>
-        <button type="button" class="btn-plain danger" data-wcact="delete" aria-label="delete note">${icons.ICON_TRASH || ""}</button>
+      <div class="wscardactions roundactions">
+        <button type="button" data-wcact="rename" aria-label="rename note">${icons.ICON_PENCIL || ""}</button>
+        <button type="button" class="danger" data-wcact="delete" aria-label="delete note">${icons.ICON_TRASH || ""}</button>
       </div>
     </div>`;
 }
