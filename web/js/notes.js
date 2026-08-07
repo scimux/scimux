@@ -933,6 +933,13 @@ export function createNotesFeature(deps){
     try { storage.setItem(STORAGE_KEY_FOLDS, JSON.stringify(f)); } catch { /* quota / private mode */ }
   }
 
+  /* Surfaces that render differently depending on whether this workspace is
+     visible (the Bookmarks pane's "use in note") learn about it here — open()
+     and close() are the one funnel every dismissal path goes through. */
+  function onVisibilityChange(){
+    if (typeof d.onVisibilityChange === "function") d.onVisibilityChange(isOpen());
+  }
+
   function open(){
     if (isOpen()) return;
     wsReturnFocus = activeEl();
@@ -948,6 +955,7 @@ export function createNotesFeature(deps){
       const btn = root("wsnewnote");
       if (btn && typeof btn.focus === "function") btn.focus();
     });
+    onVisibilityChange();
   }
 
   function close(){
@@ -963,6 +971,7 @@ export function createNotesFeature(deps){
       const nb = notesbtn();
       if (nb && typeof nb.focus === "function") nb.focus();
     }
+    onVisibilityChange();
   }
 
   function endPlacement(){

@@ -182,6 +182,7 @@ test("bookmarkListHTML: empty, jump gate, comment class, action order", () => {
     md: s => `<p>${s}</p>`,
     fmtWhen: s => "WHEN",
     laneColor: () => "#abc",
+    workspaceOpen: true,
     icons: {
       ICON_JUMP: "J", ICON_COMMENT: "C", ICON_COPY: "P",
       ICON_CLIP: "L", ICON_TRASH: "T",
@@ -1168,7 +1169,10 @@ const ICONS = {
 
 test("bookmarkActionsHTML renders the pane's full action set in order", () => {
   const html = bookmarkActionsHTML(
-    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane" });
+    { t: "1", text: "x", node: "n1" },
+    /* the pane's FULL set is what it shows with the Notes workspace open;
+       "use in note" is withheld while that workspace is closed (item 4) */
+    { icons: ICONS, context: "pane", workspaceOpen: true });
   const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
   assert.deepEqual(order, ["jump", "comment", "copy", "note", "del"]);
 });
@@ -1206,6 +1210,55 @@ test("bookmarkActionsHTML uses the shared .actionbar/.btn-plain classes, not per
   assert.match(html, /class="btn-plain"/);
   assert.ok(!html.includes("bookmarkactions"),
     "the old per-surface class must be gone so pane and inbox cannot drift apart");
+});
+
+/* review 2, item 4: "use in note" starts placement mode, whose targets are the
+   section rows INSIDE the Notes workspace. Offering it from the compact pane
+   while that workspace is closed arms a mode the user cannot see or complete;
+   the inbox (which only exists inside the workspace) always offers it. */
+test("bookmarkActionsHTML withholds use-in-note from the pane while the workspace is closed", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane", workspaceOpen: false });
+  assert.ok(!html.includes(`data-bmact="note"`),
+    "placement has no visible target while the Notes workspace is closed");
+  assert.match(html, /data-bmact="jump"/, "the other pane actions must survive");
+  assert.match(html, /data-bmact="del"/);
+});
+
+test("bookmarkActionsHTML offers use-in-note from the pane once the workspace is open", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane", workspaceOpen: true });
+  assert.match(html, /data-bmact="note"/);
+});
+
+test("the inbox offers use-in-note regardless of the flag: it lives in the workspace", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
+  assert.match(html, /data-bmact="note"/);
+});
+
+test("bookmarkListHTML withholds use-in-note when the workspace is closed", () => {
+  const html = bookmarkListHTML({
+    list: [{ t: "1", text: "hello", node: "n1" }],
+    bookmarkTab: "GENERAL",
+    openBookmarkT: "1",
+    nodeById: () => ({ id: "n1", title: "Act" }),
+    icons: ICONS,
+    workspaceOpen: false,
+  });
+  assert.ok(!html.includes(`data-bmact="note"`));
+});
+
+test("bookmarkListHTML passes an open workspace through to the action row", () => {
+  const html = bookmarkListHTML({
+    list: [{ t: "1", text: "hello", node: "n1" }],
+    bookmarkTab: "GENERAL",
+    openBookmarkT: "1",
+    nodeById: () => ({ id: "n1", title: "Act" }),
+    icons: ICONS,
+    workspaceOpen: true,
+  });
+  assert.match(html, /data-bmact="note"/);
 });
 
 test("bookmarkListHTML emits the shared action bar for the open bookmark", () => {

@@ -59,14 +59,26 @@ export function returnLabel(ctx){
 
 /* The single decision behind #chatback: label, markup, assistive name, and
    whether the shell should treat a tap as "restore the origin" (hasReturn) or
-   as the ordinary one-level-back. */
+   as the ordinary one-level-back.
+
+   A return control reads "Return to <origin>", not just the origin's name: sat
+   beside the chat title, the bare "‹ Map" was too quiet to find (review 2,
+   item 3), and the shell frames it as a pill. A note's origin is a name the
+   user gave it, so it is quoted; Map and Search are places in the UI and are
+   not. Without a context the control stays the plain parent-pane back button. */
 export function chatBackState(ctx){
   const label = returnLabel(ctx);
+  const hasReturn = !!(ctx && ctx.kind);
+  if (!hasReturn){
+    return { hasReturn, label, html: "&#8249; " + esc(label), ariaLabel: "back to " + label };
+  }
+  const named = ctx.kind === RETURN_NOTE && label !== GENERIC_LABEL[RETURN_NOTE];
+  const shown = named ? "&#8220;" + esc(label) + "&#8221;" : esc(label);
   return {
-    hasReturn: !!(ctx && ctx.kind),
+    hasReturn,
     label,
-    html: "&#8249; " + esc(label),
-    ariaLabel: "back to " + label,
+    html: "&#8249; Return to " + shown,
+    ariaLabel: "return to " + label,
   };
 }
 

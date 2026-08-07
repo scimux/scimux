@@ -71,7 +71,11 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .turn.jumpflash .bubble { box-shadow: 0 0 0 2px var(--work); }
 /* transient notice (jump-to-source misses); fixed so polled rebuilds can't wipe it */
 #toast { position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom));
-  transform: translateX(-50%); max-width: min(86vw, 420px); z-index: 60;
+  transform: translateX(-50%); max-width: min(86vw, 420px);
+  /* topmost by definition: it confirms actions taken anywhere, including from
+     inside a full-screen overlay (search 120, workspace/archived 110), where a
+     lower toast was painted underneath the surface that raised it. */
+  z-index: 200;
   background: var(--ink); color: var(--bg); font-size: 13px; line-height: 1.4;
   padding: 8px 14px; border-radius: 12px; text-align: center; pointer-events: none; }
 /* comments sort at their anchor and read as a scribble under the sticky */

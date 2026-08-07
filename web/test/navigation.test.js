@@ -12,6 +12,7 @@ import {
   notesSwipeBackDecision,
   journeyToggleState,
 } from "../js/navigation.js";
+import { bookmarksToggleState } from "../js/bookmarks.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -409,15 +410,25 @@ test("notesSwipeBackDecision: non-L→R or sub-threshold is no-op", () => {
 
 /* ---------- journeys toggle (item 18: the chevron must flip) ---------- */
 
-test("journeyToggleState mirrors the bookmarks toggle: closed points open, open points closed", () => {
+/* The chevron points the way the PANE travels, which is the mirror image of the
+   right-hand bookmarks toggle: Journeys lives left of Activities, so opening it
+   moves content rightward (›) and closing it moves left (‹). Copying the
+   bookmarks mapping verbatim read as semantically flipped (review 2, item 2). */
+test("journeyToggleState points the way the left-hand pane travels", () => {
   assert.deepEqual(journeyToggleState(false), {
-    innerHTML: "&#8249;",
+    innerHTML: "&#8250;",
     ariaLabel: "open journeys",
   });
   assert.deepEqual(journeyToggleState(true), {
-    innerHTML: "&#8250;",
+    innerHTML: "&#8249;",
     ariaLabel: "close journeys",
   });
+});
+
+test("journeyToggleState is the mirror of the right-hand bookmarks toggle", () => {
+  assert.notEqual(journeyToggleState(true).innerHTML, journeyToggleState(false).innerHTML);
+  assert.equal(journeyToggleState(true).innerHTML, bookmarksToggleState(false).innerHTML);
+  assert.equal(journeyToggleState(false).innerHTML, bookmarksToggleState(true).innerHTML);
 });
 
 test("journeyToggleState treats a missing argument as closed", () => {

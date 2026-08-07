@@ -199,7 +199,7 @@ export function bookmarkTabsHTML(bookmarkTab, tabs, esc, laneColor){
 export function bookmarkListHTML(opts){
   const {
     list, bookmarkTab, openBookmarkT,
-    nodeById, esc, md, fmtWhen, laneColor, icons = {},
+    nodeById, esc, md, fmtWhen, laneColor, icons = {}, workspaceOpen = false,
   } = opts || {};
   const e = esc || (s => String(s ?? ""));
   const renderMd = md || (s => String(s ?? ""));
@@ -217,7 +217,8 @@ export function bookmarkListHTML(opts){
       <div class="when">${e(when(nt.t))}${src}</div>
       <div class="nbubble" style="border-left-color:${color}">${renderMd(nt.text || "")}</div>
       <button class="nmore" data-nmore hidden></button>
-      ${openBookmarkT === nt.t ? bookmarkActionsHTML(nt, { icons, context: "pane" }) : ""}
+      ${openBookmarkT === nt.t
+        ? bookmarkActionsHTML(nt, { icons, context: "pane", workspaceOpen }) : ""}
     </div>`;
   }).join("");
 }
@@ -228,9 +229,16 @@ export function bookmarkListHTML(opts){
    which actions exist at all — the inbox used to offer only "Use in note",
    which meant reaching the chat required first placing the bookmark into a
    section. `context` withholds exactly one action: comment is pane-only,
-   because its reply composer (#bookmarkprompt) lives only there. */
+   because its reply composer (#bookmarkprompt) lives only there.
+
+   "use in note" is withheld from the pane while the Notes workspace is closed
+   (review 2, item 4): it arms placement mode, whose only targets are the
+   section rows inside that workspace, so from the compact pane it armed a mode
+   with nothing visible to complete it. The inbox lives inside the workspace and
+   therefore always offers it. */
 export function bookmarkActionsHTML(nt, opts){
-  const { icons = {}, context = "pane" } = opts || {};
+  const { icons = {}, context = "pane", workspaceOpen = false } = opts || {};
+  const canPlace = context === "inbox" || workspaceOpen;
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
   return `<div class="actionbar">
@@ -238,7 +246,7 @@ export function bookmarkActionsHTML(nt, opts){
         ${context === "pane" && nt.node && !nt.anchor
           ? b("comment", "comment on this bookmark", icons.ICON_COMMENT) : ""}
         ${b("copy", "copy bookmark", icons.ICON_COPY)}
-        ${b("note", "use in note", icons.ICON_CLIP)}
+        ${canPlace ? b("note", "use in note", icons.ICON_CLIP) : ""}
         ${b("del", "delete bookmark", icons.ICON_TRASH, " danger")}
       </div>`;
 }
@@ -438,6 +446,8 @@ export function createBookmarksFeature(deps){
       fmtWhen,
       laneColor,
       icons,
+      /* "use in note" only exists while its placement targets do (item 4) */
+      workspaceOpen: typeof d.wsOpen === "function" && d.wsOpen(),
     });
     const sig = hashStr(tabsHtml + "|" + listHtml);
     if (sig === bookmarksSig) return;

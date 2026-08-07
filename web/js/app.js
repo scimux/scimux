@@ -943,6 +943,7 @@ notesFeature = createNotesFeature({
   laneColor: id => laneColor(id),
   toast: msg => toast(msg),
   copyText: s => copyText(s),
+  onVisibilityChange: () => { bookmarksFeature.invalidate(); renderBookmarksPane(); },
   jumpToChatAddress: a => {
     setReturnContext(RETURN_NOTE, { title: notesFeature.activeTitle() });
     const ok = jumpToChatAddress(a);

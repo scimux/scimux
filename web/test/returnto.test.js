@@ -75,12 +75,24 @@ test("chatBackState with no context is the ordinary Activities back button", () 
   assert.match(st.ariaLabel, /Activities/);
 });
 
-test("chatBackState with a context names the origin and marks itself a return", () => {
+/* A bare "‹ Map" next to the chat title was too quiet to find (review 2,
+   item 3): the control has to say what it does, in a framed pill. */
+test("chatBackState with a context spells out the return and marks itself", () => {
   const st = chatBackState(makeReturnContext(RETURN_MAP));
   assert.equal(st.hasReturn, true);
   assert.equal(st.label, "Map");
-  assert.equal(st.html, "&#8249; Map");
-  assert.match(st.ariaLabel, /back to Map/i);
+  assert.equal(st.html, "&#8249; Return to Map");
+  assert.match(st.ariaLabel, /return to Map/i);
+});
+
+test("a note origin is quoted, because the label is a name the user gave it", () => {
+  const st = chatBackState(makeReturnContext(RETURN_NOTE, { title: "Fare plan" }));
+  assert.equal(st.label, "Fare plan");
+  assert.equal(st.html, "&#8249; Return to &#8220;Fare plan&#8221;");
+});
+
+test("a generic origin is not quoted: Map and Search are UI places, not names", () => {
+  assert.ok(!chatBackState(makeReturnContext(RETURN_SEARCH)).html.includes("&#8220;"));
 });
 
 test("chatBackState escapes a note title so it cannot inject markup", () => {

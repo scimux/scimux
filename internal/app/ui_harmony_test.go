@@ -305,12 +305,12 @@ func TestStationTitleIsSemibold(t *testing.T) {
 	if !strings.Contains(block, "font-weight: 600") {
 		t.Errorf(".strow .lbl must be semibold so the title separates from the description line; got %q", block)
 	}
-	// Past/dead stops keep their deliberate de-emphasis.
-	for _, sel := range []string{".strow.stoprow .lbl", ".strow.dead .lbl"} {
-		b := cssBlock(t, css, sel)
-		if !strings.Contains(b, "font-weight: 400") {
-			t.Errorf("%s must stay regular weight — past stops are deliberately secondary; got %q", sel, b)
-		}
+	// A past stop is a segment marker, not a chat title: it has no description
+	// line under it and stays deliberately secondary. An EXITED thread is still a
+	// chat title and keeps the weight — see TestStationTitleStaysBoldWhenTheThreadIsDead.
+	stop := cssBlock(t, css, ".strow.stoprow .lbl")
+	if !strings.Contains(stop, "font-weight: 400") {
+		t.Errorf(".strow.stoprow .lbl must stay regular weight — past stops are deliberately secondary; got %q", stop)
 	}
 }
 

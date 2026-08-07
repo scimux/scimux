@@ -239,7 +239,12 @@ body.map-full #farebtn { display: inline-flex; }
    back control is hidden on desktop, but a jump out of the wall map or the
    search overlay lands on a chat that is visible there (UI review item 18).
    id+class beats the breakpoint's display:none by specificity. */
-#chatback.hasreturn { display: inline-flex; align-items: center; gap: 2px; }
+#chatback.hasreturn { display: inline-flex; align-items: center; gap: 4px;
+  font-size: 14px; font-weight: 600; padding: 5px 12px; margin-right: 6px;
+  border: 1px solid color-mix(in srgb, var(--work) 35%, transparent);
+  border-radius: 999px; background: color-mix(in srgb, var(--work) 8%, transparent);
+  max-width: 52vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#chatback.hasreturn:active { background: color-mix(in srgb, var(--work) 16%, transparent); }
 /* "‹" opens the next-deeper overlay pane — the pointer stand-in for the
    phone's edge-swipe, so it only exists on iPad/desktop */
 .navnext { display: none; color: var(--work); font-size: 22px;

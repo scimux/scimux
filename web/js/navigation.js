@@ -135,14 +135,17 @@ export function notesSwipeBackDecision(start, end, state = {}){
   return { type: "closeWorkspace" };
 }
 
-/* Chevron + aria for #journeybtn, mirroring bookmarksToggleState. The control
+/* Chevron + aria for #journeybtn — the MIRROR of bookmarksToggleState, not a
+   copy: Journeys sits left of Activities, so opening it moves content rightward
+   (›) and closing it moves left (‹). The control
    must point at what the tap will do: it used to be a permanent left chevron
-   even while the tap would close the pane (UI review item 18). On the phone the
+   even while the tap would close the pane (UI review item 18); copying the
+   right-hand pane's mapping then read as flipped (review 2, item 2). On the phone the
    Journeys pane is a forward level rather than a toggle, so the shell simply
    never reports `open` there and the arrow stays "open journeys". */
 export function journeyToggleState(open){
   return {
-    innerHTML: open ? "&#8250;" : "&#8249;",
+    innerHTML: open ? "&#8249;" : "&#8250;",
     ariaLabel: open ? "close journeys" : "open journeys",
   };
 }
