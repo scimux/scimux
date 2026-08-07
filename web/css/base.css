@@ -68,8 +68,14 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
    measuring that constant up from the card's bottom edge. */
 .actionbar.tear { position: relative; border-top: none;
   box-sizing: border-box; height: var(--tearrow, 53px); }
-/* the run between the end punches, inset far enough to clear them */
-.actionbar.tear::before { content: ""; position: absolute; left: 14px; right: 14px;
-  top: 0; height: 3px; pointer-events: none;
-  background: radial-gradient(circle, var(--hairline) 0 1.1px, transparent 1.4px) repeat-x;
-  background-size: 5px 3px; }
+/* The run between the end punches, inset far enough to clear them — derived
+   from the punch radius, so growing the punches cannot push the run underneath
+   them. A conductor's punch is coarse: each dot is 5px across (the diameter the
+   end punches used to have) on a 9px pitch, and the strip straddles the row's
+   top edge so the dots sit centred ON the seam rather than just below it — the
+   card's end punches are centred on that same line. */
+.actionbar.tear::before { content: ""; position: absolute;
+  left: calc(var(--tearhole, 12px) + 8px); right: calc(var(--tearhole, 12px) + 8px);
+  top: -3px; height: 6px; pointer-events: none;
+  background: radial-gradient(circle, var(--perf) 0 2.5px, transparent 2.9px) repeat-x;
+  background-size: 9px 6px; }

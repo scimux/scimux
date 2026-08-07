@@ -686,10 +686,20 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
   assert.match(th, /data-wsitab="GENERAL"[^>]*class="on"/);
   assert.match(th, /data-wsitab="lane-a"/);
 
-  const item = inboxItemHTML({ t: "1", text: "hi", node: "n1" }, "var(--unlane)", {
+  const deps = {
     esc: s => s, md: s => s, fmtWhen: s => "W", nodeById: () => ({ title: "Alpha" }),
     icons: { ICON_CLIP: "L" },
-  });
+  };
+  const closed = inboxItemHTML({ t: "1", text: "hi", node: "n1" }, "var(--unlane)", deps);
+  /* the row is tap-to-reveal, like the compact pane's card and the embedded
+     reference — the three bookmark surfaces answer a tap the same way */
+  assert.doesNotMatch(closed, /class="actionbar tear"/);
+  assert.doesNotMatch(closed, /data-bmact=/);
+  assert.match(closed, /data-wsimore/);
+  assert.match(closed, /Alpha/);
+
+  const item = inboxItemHTML({ t: "1", text: "hi", node: "n1" }, "var(--unlane)",
+    { ...deps, open: true });
   /* item 5: the inbox card carries the pane's whole action row, so reaching
      the chat no longer requires first placing the bookmark into a section */
   assert.match(item, /class="actionbar tear"/);
@@ -697,8 +707,6 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
     assert.match(item, new RegExp(`data-bmact="${act}"`), act);
   }
   assert.doesNotMatch(item, /data-bmact="comment"/);
-  assert.match(item, /data-wsimore/);
-  assert.match(item, /Alpha/);
 });
 
 test("bookmarkClampState reused at inbox/reference boundaries", () => {
@@ -1416,7 +1424,17 @@ test("inbox tabs/list render; use-in-note starts placement", async () => {
   assert.match(roots.wsinboxtabs.innerHTML, /data-wsitab="GENERAL"/);
   assert.match(roots.wsinboxtabs.innerHTML, /data-wsitab="lane-a"/);
   assert.match(roots.wsinboxlist.innerHTML, /hello bookmark/);
+  /* closed until tapped: the actions arrive with the first tap on the card */
+  assert.doesNotMatch(roots.wsinboxlist.innerHTML, /data-bmact="note"/);
+
+  const card = el("div", { className: "wsibookmark", dataset: { t: "1" } });
+  const tap = { closest: sel => (sel === ".wsibookmark" ? card : null) };
+  roots.wsinboxlist.dispatch("click", { target: tap });
   assert.match(roots.wsinboxlist.innerHTML, /data-bmact="note"/);
+  /* and a second tap on the same card folds it away again */
+  roots.wsinboxlist.dispatch("click", { target: tap });
+  assert.doesNotMatch(roots.wsinboxlist.innerHTML, /data-bmact="note"/);
+  roots.wsinboxlist.dispatch("click", { target: tap });
 
   const use = el("button");
   use.dataset.bmact = "note";

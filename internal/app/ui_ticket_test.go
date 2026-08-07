@@ -1,9 +1,16 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// The one selector that punches a card. Both bookmark cards — the compact
+// pane's and the workspace inbox's — render their action row only for the card
+// the user tapped open, so the punches cannot key off the card: they key off
+// the torn row actually being there.
+const ticketPunchSelector = ":is(.bookmark, .wsibookmark):has(.actionbar.tear), .wsref.open"
 
 // The ticket tear line. scimux's whole map vocabulary is a fare metaphor —
 // journeys, lanes, stations, stops, a fare meter — and a captured turn is
@@ -49,7 +56,7 @@ func TestTicketTearLineIsASharedDecoration(t *testing.T) {
 // the card's own background and border reads as paper that is gone.
 func TestTicketPunchesRemoveMaterialFromTheCardEdge(t *testing.T) {
 	css := mustProductionCSSCascade(t)
-	punch := cssBlock(t, css, ".bookmark, .wsibookmark, .wsref.open {")
+	punch := cssBlock(t, css, ticketPunchSelector+" {")
 
 	// A mask cuts the element's own background AND border, which a pseudo
 	// element inside the padding box can never reach.
@@ -126,4 +133,131 @@ func TestTicketTearLineIsScopedToBubbleAttachedRows(t *testing.T) {
 	if strings.Contains(chat, "actionbar tear") || strings.Contains(chat, "bubactions tear") {
 		t.Error("the live chat's bubble actions have no card seam to perforate")
 	}
+}
+
+// A punched hole without a perforation to lead into it is not a ticket, it is
+// a damaged card. Both bookmark cards emit the torn row only for the card the
+// user tapped open, so a card-wide punch left every closed card bitten at both
+// edges with no seam between them. The mask must therefore be conditioned on
+// the row's presence, not on the card's identity — `:has()` keeps the two from
+// drifting apart the way a hand-set class would.
+func TestTicketPunchesOnlyAppearWithTheTornRow(t *testing.T) {
+	css := mustProductionCSSCascade(t)
+
+	if !strings.Contains(css, ticketPunchSelector+" {") {
+		t.Fatalf("the punch rule must be gated on the torn row: expected selector %q", ticketPunchSelector)
+	}
+	// A card class standing alone in a punch rule is the regression: it
+	// punches every card, tapped open or not.
+	for _, bad := range []string{
+		".bookmark, .wsibookmark, .wsref.open {",
+		".bookmark, .wsibookmark {",
+		".bookmark:has(.actionbar.tear), .wsibookmark, .wsref.open {",
+	} {
+		if strings.Contains(css, bad) {
+			t.Errorf("%q punches closed cards too — both bookmark rows are tap-to-reveal", bad)
+		}
+	}
+
+	// The gate is only correct if both cards really are tap-to-reveal; if
+	// either flips back to an always-visible row, this rule has to be revisited.
+	bm := mustReadWeb(t, "web/js/bookmarks.js")
+	if !strings.Contains(bm, "openBookmarkT === nt.t") {
+		t.Error("the pane card's action row is expected to render only when that card is open")
+	}
+	notes := mustReadWeb(t, "web/js/notes.js")
+	inbox := afterMarker(notes, "export function inboxItemHTML")
+	if !strings.Contains(inbox, "deps.open") {
+		t.Error("the workspace inbox card's action row must be conditional on the card being open")
+	}
+}
+
+// Contrast. The punch is a hole, so on the light theme it shows --bg (warm
+// paper) through a --surface (white) card: nearly nothing. The hairline the run
+// borrowed is tuned for borders between adjacent surfaces, not for a mark that
+// has to read as ink on paper. The perforation gets its own token — stronger
+// than --hairline, well short of --ink — and the hole gets a punched edge drawn
+// in it, so the bite reads even where card and page are near-identical.
+func TestTicketPerforationHasItsOwnContrastToken(t *testing.T) {
+	css := mustProductionCSSCascade(t)
+
+	root := cssBlock(t, css, ":root {")
+	if !strings.Contains(root, "--perf:") {
+		t.Errorf("the perforation needs a token of its own, not --hairline; got %q", root)
+	}
+	dark := afterMarker(css, "@media (prefers-color-scheme: dark)")
+	if !strings.Contains(dark, "--perf:") {
+		t.Error("the perforation token must be restated for the dark theme — one value cannot serve both")
+	}
+
+	run := cssBlock(t, css, ".actionbar.tear::before {")
+	if !strings.Contains(run, "var(--perf)") {
+		t.Errorf("the perforation run must use the perforation token; got %q", run)
+	}
+	if strings.Contains(run, "var(--hairline)") {
+		t.Errorf("the run must not fall back to the border hairline; got %q", run)
+	}
+
+	// The punched edge: a ring painted just outside the masked hole, so what
+	// survives the mask is an arc around the bite.
+	edge := cssBlock(t, css, ticketPunchSelector+" { background-image")
+	if !strings.Contains(edge, "var(--perf)") || !strings.Contains(edge, "radial-gradient") {
+		t.Errorf("the bite needs a drawn edge or it vanishes when card and page match; got %q", edge)
+	}
+	if !strings.Contains(edge, "var(--tearhole)") {
+		t.Errorf("the punched edge must be placed on the same hole radius as the mask; got %q", edge)
+	}
+}
+
+// Size. At a 5px hole and 2.2px dots the ticket read as a faint dotted rule.
+// A conductor's punch is a coarse thing: the run's dots take the diameter the
+// end punches used to have, and the end punches grow well past double.
+func TestTicketPunchesAreCoarseEnoughToReadAsPaper(t *testing.T) {
+	css := mustProductionCSSCascade(t)
+
+	punch := cssBlock(t, css, ticketPunchSelector+" {")
+	hole := cssValue(t, punch, "--tearhole")
+	if px(t, hole) < 10 {
+		t.Errorf("the end punches must be at least double the original 5px; got --tearhole: %s", hole)
+	}
+
+	run := cssBlock(t, css, ".actionbar.tear::before {")
+	// The run's dots must clear the old 1.1px radius by a wide margin: the dot
+	// diameter is now the size the end punch used to be.
+	if strings.Contains(run, "1.1px") {
+		t.Errorf("the run still uses the original hairline-thin dot; got %q", run)
+	}
+	if !strings.Contains(run, "2.5px") {
+		t.Errorf("the run's dots should be 5px across (2.5px radius); got %q", run)
+	}
+	// And the run has to be inset past the bigger end punches instead of the
+	// hard-coded 14px that cleared only a 5px hole.
+	if !strings.Contains(run, "var(--tearhole") {
+		t.Errorf("the run's inset must be derived from the punch radius, not hard-coded; got %q", run)
+	}
+}
+
+// cssValue reads a single declaration out of an already-extracted rule body.
+func cssValue(t *testing.T, block, prop string) string {
+	t.Helper()
+	i := strings.Index(block, prop+":")
+	if i < 0 {
+		t.Fatalf("no %s declaration in %q", prop, block)
+	}
+	rest := block[i+len(prop)+1:]
+	if j := strings.Index(rest, ";"); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// px parses a plain "12px" length; anything else fails the test loudly rather
+// than silently comparing zero.
+func px(t *testing.T, v string) float64 {
+	t.Helper()
+	n, err := strconv.ParseFloat(strings.TrimSuffix(v, "px"), 64)
+	if err != nil {
+		t.Fatalf("expected a plain px length, got %q", v)
+	}
+	return n
 }

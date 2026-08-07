@@ -72,10 +72,16 @@ body.bookmarks-open #bookmarkpeek { display: block; }
    row's height is a constant. Each layer is "opaque except one hole"; they
    must be intersected or each covers the other's hole — and an engine without
    mask-composite falls back to that union, i.e. an intact card with just the
-   perforation run, which is a safe place to land. */
-.bookmark, .wsibookmark, .wsref.open {
-  --tearrow: 53px; --tearpad: 0px; --tearhole: 5px;
-  --teary: calc(100% - var(--tearrow) - var(--tearpad) + 1.5px);
+   perforation run, which is a safe place to land.
+   Gated on the torn row actually being present, not on the card: both bookmark
+   cards render their action row only for the card the user tapped open, so
+   keying off the card class bit both edges out of every closed card with no
+   seam between them. `:has()` cannot drift from the builder the way a
+   hand-set class would. (.wsref is the exception because it keeps its row in
+   the DOM and hides it, so there the open class *is* the fact.) */
+:is(.bookmark, .wsibookmark):has(.actionbar.tear), .wsref.open {
+  --tearrow: 53px; --tearpad: 0px; --tearhole: 12px;
+  --teary: calc(100% - var(--tearrow) - var(--tearpad));
   -webkit-mask-image:
     radial-gradient(circle var(--tearhole) at 0 var(--teary),
       transparent 0 calc(var(--tearhole) - 0.5px), #000 var(--tearhole)),
@@ -398,8 +404,9 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   font-size: 12px; color: var(--dim); cursor: pointer; }
 .wsimore:active { color: var(--work); }
 /* item 5: the inbox bookmark carries the same footer action row as the compact
-   pane, always visible — the complaint was about extra steps, so hiding the
-   actions behind a first tap here would reintroduce one. */
+   pane, and reveals it on the same tap — the card is the affordance, so it has
+   to behave like one on every surface it appears. */
+.wsibookmark { cursor: pointer; }
 .wsibookmark .actionbar { padding: 5px 6px 4px; }
 /* --- embedded chat references inside a section --- */
 .wsrefs { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
@@ -423,6 +430,23 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 /* unlike the two bookmark cards this one keeps its own padding below the torn
    row, so its punches sit that much higher */
 .wsref.open { --tearpad: 7px; }
+/* The punched edge. A bite alone is only visible where the page behind differs
+   from the card, and on the light theme it does not: white card, warm-paper
+   page. So the card paints a thin ring just OUTSIDE the masked hole; the mask
+   removes everything inside, and what survives is an arc around the bite — the
+   burr a punch leaves in paper. Background layers, not a child element: these
+   cards clip their content, and only the card's own painting reaches the
+   border. Stated here rather than in the mask rule above because both
+   .wsibookmark and .wsref set `background` later in this file, and the
+   shorthand would reset the image. */
+:is(.bookmark, .wsibookmark):has(.actionbar.tear), .wsref.open { background-image:
+    radial-gradient(circle calc(var(--tearhole) + 1px) at 0 var(--teary),
+      transparent 0 var(--tearhole), var(--perf) var(--tearhole) calc(var(--tearhole) + 1px),
+      transparent calc(var(--tearhole) + 1px)),
+    radial-gradient(circle calc(var(--tearhole) + 1px) at 100% var(--teary),
+      transparent 0 var(--tearhole), var(--perf) var(--tearhole) calc(var(--tearhole) + 1px),
+      transparent calc(var(--tearhole) + 1px));
+}
 /* --- placement mode: floating pill + per-section "add bookmark here" target ---
    This was a full-bleed tinted strip that pushed the layout down and read as a
    warning banner (UI review item 10). It cannot simply be deleted: HIG requires

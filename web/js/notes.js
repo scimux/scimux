@@ -649,8 +649,12 @@ export function inboxTabsHTML(tab, tabs, esc, laneColor){
 /* The inbox bookmark is the same card as the compact pane's, down to the
    action row (UI review item 5). It used to offer only "Use in note", so
    reaching the chat a bookmark came from meant first placing it into a
-   section — an extra step that bought the user nothing. The row is always
-   visible here rather than tap-to-reveal, for the same reason. */
+   section — an extra step that bought the user nothing.
+   The row is tap-to-reveal, like the pane's card and the embedded reference:
+   three surfaces showing the same bookmark must answer a tap the same way, and
+   a card that only *sometimes* responds reads as broken. The extra step item 5
+   removed was a mode change (place into a section, then chase the chat); one
+   tap that unfolds in place is not that. */
 export function inboxItemHTML(nt, color, deps = {}){
   const esc = deps.esc || (t => String(t ?? ""));
   const mdFn = deps.md || (t => String(t ?? ""));
@@ -664,7 +668,7 @@ export function inboxItemHTML(nt, color, deps = {}){
       <div class="wsiwhen">${esc(whenFn(nt.t))}${src}</div>
       <div class="wsibubble" style="border-left-color:${color}">${mdFn(nt.text || "")}</div>
       <button class="wsimore" data-wsimore hidden></button>
-      ${actions(nt, { icons, context: "inbox" })}
+      ${deps.open ? actions(nt, { icons, context: "inbox" }) : ""}
     </div>`;
 }
 
@@ -714,6 +718,9 @@ export function createNotesFeature(deps){
   const { enqueue: wsEnqueue } = createSaveEnqueue();
   let wsInboxSig = "";
   let wsInboxTab = (storage && storage.getItem(STORAGE_KEY_TAB)) || "GENERAL";
+  /* the one card whose action row is unfolded — state, not a DOM class, because
+     the list is polled and rebuilt wholesale whenever its signature changes */
+  let wsInboxOpenT = "";
   const expandedWsInbox = new Set();
   const expandedRefs = new Set();
   let wsCardDragging = false, wsCardDragEl = null;
@@ -1008,7 +1015,9 @@ export function createNotesFeature(deps){
     const tabsHtml = inboxTabsHTML(wsInboxTab, tabs, esc, laneColor);
     const color = wsInboxTab === "GENERAL" ? "var(--unlane)" : esc(laneColor(wsInboxTab));
     const listHtml = list.length
-      ? list.map(nt => inboxItemHTML(nt, color, { esc, md, fmtWhen, icons, nodeById })).join("")
+      ? list.map(nt => inboxItemHTML(nt, color, {
+        esc, md, fmtWhen, icons, nodeById, open: nt.t === wsInboxOpenT,
+      })).join("")
       : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
     const sig = hashStr(tabsHtml + "|" + listHtml);
     if (sig === wsInboxSig) return;
@@ -1518,6 +1527,7 @@ export function createNotesFeature(deps){
     if (!tb) return;
     wsInboxTab = tb.dataset.wsitab;
     if (storage) storage.setItem(STORAGE_KEY_TAB, wsInboxTab);
+    wsInboxOpenT = "";   /* an unfolded row doesn't survive leaving its tab */
     wsInboxSig = "";
     renderInbox();
   }
@@ -1536,7 +1546,17 @@ export function createNotesFeature(deps){
     /* the inbox card now carries the pane's own action row (item 5); "note"
        is what "Use in note" used to be, the rest are new here */
     const act = e.target.closest && e.target.closest("[data-bmact]");
-    if (!act) return;
+    if (!act){
+      /* anywhere else on the card folds its action row in or out, the same tap
+         the compact pane and the embedded reference answer */
+      const tapped = e.target.closest && e.target.closest(".wsibookmark");
+      if (!tapped) return;
+      wsInboxOpenT = wsInboxOpenT === tapped.dataset.t ? "" : tapped.dataset.t;
+      wsInboxSig = "";
+      renderInbox();
+      revealInboxRow();
+      return;
+    }
     const card = act.closest(".wsibookmark");
     if (!card) return;
     const nt = bookmarks().find(x => x.t === card.dataset.t);
@@ -1560,9 +1580,22 @@ export function createNotesFeature(deps){
         startPlacement(nt);
         return;
       case "del":
+        wsInboxOpenT = "";
         uiMutate({ k: "bookmark-del", t: nt.t });
         return;
     }
+  }
+
+  /* the unfolded row must be on screen after the tap that unfolded it — the
+     card may sit at the bottom of the zone, and renderInbox has just rebuilt
+     the list DOM, so the element has to be re-queried. */
+  function revealInboxRow(){
+    if (!wsInboxOpenT || !doc || typeof doc.querySelector !== "function") return;
+    const CSSObj = (d.CSS || (typeof CSS !== "undefined" ? CSS : null)) || {};
+    const t = CSSObj.escape ? CSSObj.escape(wsInboxOpenT) : wsInboxOpenT;
+    const row = doc.querySelector(`#wsinboxlist .wsibookmark[data-t="${t}"] .actionbar`);
+    if (row && typeof row.scrollIntoView === "function")
+      row.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   function onCardsClick(e){

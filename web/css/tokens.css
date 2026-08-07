@@ -5,6 +5,11 @@
   --ink:       #1C1C1E;
   --dim:       #6C6C70;   /* ≥4.5:1 on --bg/--surface (WCAG AA for caption text) */
   --hairline:  rgba(60,60,67,.14);
+  /* the ticket perforation. --hairline is tuned for a border between adjacent
+     surfaces; the punch line has to read as ink on paper, across a white card
+     sitting on warm paper where the hole itself is nearly the card's own
+     colour. Stronger than the hairline, well short of --ink. */
+  --perf:      rgba(60,60,67,.34);
   --attn:      #FFCC00;   /* systemYellow — needs you; reserved for attention only */
   --attn-rgb:  255, 204, 0;
   /* --danger and --bad share systemRed values on purpose: destructive controls
@@ -42,6 +47,8 @@
     --ink:      #F2F2F7;
     --dim:      #A0A0A6;  /* ≥4.5:1 on the dark surfaces */
     --hairline: rgba(84,84,88,.48);
+    /* inverted: on the dark card the perforation is light, not a darker grey */
+    --perf:     rgba(235,235,245,.34);
     --attn:     #FFD60A;
     --attn-rgb: 255, 214, 10;
     --danger:   #FF453A;
