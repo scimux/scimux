@@ -101,7 +101,7 @@ func TestRouterAPIRouteOwnership(t *testing.T) {
 	for _, home := range []string{
 		"state_api.go", "node_api.go", "conversation_api.go",
 		"attachment_api.go", "ui_state_api.go", "security.go",
-		"usage.go", "notes.go", "search.go", "archived.go", "agents.go", "update.go",
+		"usage.go", "notes.go", "search.go", "preview.go", "agents.go", "update.go",
 	} {
 		if _, err := os.Stat(home); err != nil {
 			t.Errorf("expected home %s: %v", home, err)

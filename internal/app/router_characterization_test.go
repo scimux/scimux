@@ -47,7 +47,7 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodPost, "/api/notes/{id}/sections/{sectionID}/references", "/api/notes/note-1/sections/section-1/references", "handleNoteAddReference", "notes.go"},                   // retained
 		{http.MethodDelete, "/api/notes/{id}/sections/{sectionID}/references/{refID}", "/api/notes/note-1/sections/section-1/references/ref-1", "handleNoteTrashReference", "notes.go"}, // retained
 		{http.MethodGet, "/api/search", "/api/search", "handleSearch", "search.go"},                                                                                                     // retained
-		{http.MethodGet, "/api/archived", "/api/archived", "handleArchived", "archived.go"},                                                                                             // retained
+		{http.MethodGet, "/api/preview", "/api/preview", "handlePreview", "preview.go"},                                                                                                 // retained
 		{http.MethodGet, "/api/agents", "/api/agents", "handleAgents", "agents.go"},                                                                                                     // retained
 		{http.MethodGet, "/api/ui", "/api/ui", "handleUIGet", "ui_state_api.go"},                                                                                                        // extracted
 		{http.MethodPut, "/api/ui", "/api/ui", "handleUIPut", "ui_state_api.go"},                                                                                                        // extracted
@@ -102,7 +102,7 @@ func TestCharacterizationRepresentativeBindings(t *testing.T) {
 		{"usage", http.MethodGet, "/api/usage", "", "", false, http.StatusOK},
 		{"notes", http.MethodGet, "/api/notes", "", "", false, http.StatusOK},
 		{"search too short", http.MethodGet, "/api/search?q=a", "", "", false, http.StatusOK},
-		{"archived missing uid", http.MethodGet, "/api/archived", "", "", false, http.StatusBadRequest},
+		{"preview missing target", http.MethodGet, "/api/preview", "", "", false, http.StatusBadRequest},
 		{"licenses", http.MethodGet, "/api/licenses", "", "", false, http.StatusOK},
 		{"new node invalid", http.MethodPost, "/api/nodes", `{}`, "application/json", true, http.StatusBadRequest},
 		{"adopt invalid", http.MethodPost, "/api/adopt", `{}`, "application/json", true, http.StatusBadRequest},

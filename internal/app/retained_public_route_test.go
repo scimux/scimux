@@ -14,7 +14,7 @@ package app
 //	state     — TestCharacterizationRepresentativeBindings, state_api_test.go
 //	usage     — TestCharacterizationRepresentativeBindings, usage_test.go
 //	search    — TestCharacterizationRepresentativeBindings, search_test.go
-//	archived  — TestCharacterizationRepresentativeBindings, archived_test.go
+//	preview   — TestCharacterizationRepresentativeBindings, preview_test.go
 //	agents    — TestPublicRouteAgents (node_api_test.go)
 //	UI state  — ui_state_api_test.go public suite
 //	licenses  — TestCharacterizationRepresentativeBindings, TestLicensesEmbedded,
@@ -241,7 +241,7 @@ func TestPublicRouteRetainedRepresentatives(t *testing.T) {
 		{"state", http.MethodGet, "/api/state", "", false, http.StatusOK},
 		{"usage", http.MethodGet, "/api/usage", "", false, http.StatusOK},
 		{"search short", http.MethodGet, "/api/search?q=a", "", false, http.StatusOK},
-		{"archived missing uid", http.MethodGet, "/api/archived", "", false, http.StatusBadRequest},
+		{"preview missing target", http.MethodGet, "/api/preview", "", false, http.StatusBadRequest},
 		{"licenses", http.MethodGet, "/api/licenses", "", false, http.StatusOK},
 		{"ui get bootstrap", http.MethodGet, "/api/ui", "", false, http.StatusOK},
 	}

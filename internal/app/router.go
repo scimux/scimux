@@ -40,7 +40,7 @@ func NewHandler(a *app, web fs.FS) (http.Handler, error) {
 	mux.HandleFunc("POST /api/notes/{id}/sections/{sectionID}/references", a.handleNoteAddReference)
 	mux.HandleFunc("DELETE /api/notes/{id}/sections/{sectionID}/references/{refID}", a.handleNoteTrashReference)
 	mux.HandleFunc("GET /api/search", a.handleSearch)
-	mux.HandleFunc("GET /api/archived", a.handleArchived)
+	mux.HandleFunc("GET /api/preview", a.handlePreview)
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
 	mux.HandleFunc("GET /api/ui", a.handleUIGet)
 	mux.HandleFunc("PUT /api/ui", a.handleUIPut)

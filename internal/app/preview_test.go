@@ -11,8 +11,8 @@ import (
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
-// archivedResp mirrors the /api/archived JSON so tests read fields by name.
-type archivedResp struct {
+// previewResp mirrors the /api/preview JSON so tests read fields by name.
+type previewResp struct {
 	UID             string `json:"uid"`
 	Title           string `json:"title"`
 	Agent           string `json:"agent"`
@@ -30,21 +30,21 @@ type archivedResp struct {
 	} `json:"turns"`
 }
 
-func doArchived(t *testing.T, a *app, uid, at string) (int, archivedResp) {
+func doPreview(t *testing.T, a *app, uid, at string) (int, previewResp) {
 	t.Helper()
-	return doArchivedURL(t, a, "/api/archived?uid="+uid+"&at="+at)
+	return doPreviewURL(t, a, "/api/preview?uid="+uid+"&at="+at)
 }
 
-func doArchivedSegRec(t *testing.T, a *app, uid string, seg, rec int, at string) (int, archivedResp) {
+func doPreviewSegRec(t *testing.T, a *app, uid string, seg, rec int, at string) (int, previewResp) {
 	t.Helper()
-	return doArchivedURL(t, a, fmt.Sprintf("/api/archived?uid=%s&seg=%d&rec=%d&at=%s", uid, seg, rec, at))
+	return doPreviewURL(t, a, fmt.Sprintf("/api/preview?uid=%s&seg=%d&rec=%d&at=%s", uid, seg, rec, at))
 }
 
-func doArchivedURL(t *testing.T, a *app, u string) (int, archivedResp) {
+func doPreviewURL(t *testing.T, a *app, u string) (int, previewResp) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	a.handleArchived(rec, httptest.NewRequest("GET", u, nil))
-	var out archivedResp
+	a.handlePreview(rec, httptest.NewRequest("GET", u, nil))
+	var out previewResp
 	if rec.Code == 200 {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatalf("decode archived body: %v (%s)", err, rec.Body.String())
@@ -85,7 +85,7 @@ func TestHandleArchivedWindowsAroundHit(t *testing.T) {
 		t.Fatal("archived group carried no uid")
 	}
 
-	code, ar := doArchived(t, a, uid, at)
+	code, ar := doPreview(t, a, uid, at)
 	if code != 200 {
 		t.Fatalf("archived code = %d", code)
 	}
@@ -145,7 +145,7 @@ func TestHandleArchivedAnchorsBySegRec(t *testing.T) {
 
 	// Anchor by ordinal — must land on the needle (the 4th turn, index 3), even
 	// though four other turns share its timestamp.
-	code, ar := doArchivedSegRec(t, a, uid, hit.Segment, hit.Record, hit.Time)
+	code, ar := doPreviewSegRec(t, a, uid, hit.Segment, hit.Record, hit.Time)
 	if code != 200 {
 		t.Fatalf("archived code = %d", code)
 	}
@@ -155,7 +155,7 @@ func TestHandleArchivedAnchorsBySegRec(t *testing.T) {
 
 	// The old time-only anchoring would land on the FIRST shared-time turn — prove
 	// the ordinal path did something different (a real correctness gain, not a tie).
-	_, atOnly := doArchived(t, a, uid, dupTime)
+	_, atOnly := doPreview(t, a, uid, dupTime)
 	if atOnly.Turns[atOnly.Anchor].Text == "the needle is here" {
 		t.Fatal("test is not exercising the ordinal path: time anchoring already lands on the needle")
 	}
@@ -171,7 +171,7 @@ func TestHandleArchivedNoAnchor(t *testing.T) {
 		sessionlog.Event{T: "assistant", Text: "second line", Time: "2026-07-10T01:00:00Z"},
 	)
 	uid := doSearch(t, a, "needle").Groups[0].UID
-	code, ar := doArchived(t, a, uid, "")
+	code, ar := doPreview(t, a, uid, "")
 	if code != 200 {
 		t.Fatalf("code = %d", code)
 	}
@@ -192,7 +192,7 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 	// The real legacy uid the search path emits for a header-less log: a path
 	// relative to the archive dir, not the absolute on-disk path.
 	legacyUID := "legacy:ancient.jsonl"
-	if code, ar := doArchived(t, a, legacyUID, ""); code != 200 || len(ar.Turns) != 1 {
+	if code, ar := doPreview(t, a, legacyUID, ""); code != 200 || len(ar.Turns) != 1 {
 		t.Fatalf("legacy log should serve: code=%d turns=%d", code, len(ar.Turns))
 	} else if ar.Forkable {
 		t.Error("a header-less legacy log must be non-forkable")
@@ -200,7 +200,7 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 
 	// A traversal attempt must not escape the archive directory.
 	esc := "legacy:" + filepath.Join("..", "..", "secret.jsonl")
-	if code, _ := doArchived(t, a, esc, ""); code != 404 {
+	if code, _ := doPreview(t, a, esc, ""); code != 404 {
 		t.Errorf("path-escaping legacy uid code = %d, want 404", code)
 	}
 }
@@ -209,7 +209,7 @@ func TestHandleArchivedLegacyConfined(t *testing.T) {
 // TestNoteAddressResolvesAfterDeletion is the load-bearing Phase 0d contract:
 // the durable address a note stamps at capture time — read straight off the
 // chat read path (a.segment), exactly as the client copies it — resolves the
-// same source turn through /api/archived after the source node is deleted and
+// same source turn through /api/preview after the source node is deleted and
 // its log archived. This is what lets a notes-pane jump survive node deletion,
 // where the old node+turnTime scan gave up entirely. It also proves the read
 // path (0a) and the archived resolver name a turn by the same (uid, seg, rec).
@@ -246,7 +246,7 @@ func TestNoteAddressResolvesAfterDeletion(t *testing.T) {
 	// Resolving the stamped triple through the archived surface lands on the
 	// exact captured turn — not the same-segment neighbour, not the pre-clear
 	// turn — even though the live node no longer exists.
-	code, ar := doArchivedSegRec(t, a, captured.UID, captured.Segment, captured.Record, captured.Time)
+	code, ar := doPreviewSegRec(t, a, captured.UID, captured.Segment, captured.Record, captured.Time)
 	if code != 200 {
 		t.Fatalf("archived resolve code = %d", code)
 	}
@@ -262,10 +262,10 @@ func TestHandleArchivedNotFound(t *testing.T) {
 		sessionlog.NewMeta("dead", "claude", "", "", a.home),
 		sessionlog.Event{T: "user", Text: "hello", Time: "2026-07-10T00:00:00Z"},
 	)
-	if code, _ := doArchived(t, a, "nope-not-a-real-uid", ""); code != 404 {
+	if code, _ := doPreview(t, a, "nope-not-a-real-uid", ""); code != 404 {
 		t.Errorf("unknown uid code = %d, want 404", code)
 	}
-	if code, _ := doArchived(t, a, "", ""); code != 400 {
+	if code, _ := doPreview(t, a, "", ""); code != 400 {
 		t.Errorf("missing uid code = %d, want 400", code)
 	}
 }

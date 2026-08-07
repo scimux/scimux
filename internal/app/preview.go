@@ -19,11 +19,11 @@ import (
 // composer, no polling — just a photo of the turns around the hit so the
 // supervisor can read what was said and, if the dir survives, fork from it.
 const (
-	archivedWindowBefore = 8 // turns kept before the anchor
-	archivedWindowAfter  = 8 // turns kept after the anchor
+	previewWindowBefore = 8 // turns kept before the anchor
+	previewWindowAfter  = 8 // turns kept after the anchor
 )
 
-type archivedResponse struct {
+type previewResponse struct {
 	UID             string            `json:"uid"`
 	Title           string            `json:"title"`
 	Agent           string            `json:"agent,omitempty"`
@@ -37,7 +37,7 @@ type archivedResponse struct {
 	AfterTruncated  bool              `json:"after_truncated"`
 }
 
-// handleArchived serves GET /api/archived?uid=<uid>&seg=<n>&rec=<n>&at=<turnTime>.
+// handlePreview serves GET /api/preview?uid=<uid>&seg=<n>&rec=<n>&at=<turnTime>.
 // uid is the deleted log's on-disk identity (a meta UID, or "legacy:<ref>" for a
 // header-less log). The hit is anchored by its stable (seg, rec) ordinal pair —
 // the same identity ScanLog emits — resolved to a bounded turn window by
@@ -45,7 +45,7 @@ type archivedResponse struct {
 // and a click never materializes the whole archived log. `at` remains a defensive
 // fallback for a caller that has only the time. Every failure degrades to 404,
 // never a 500 or a leak.
-func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
+func (a *app) handlePreview(w http.ResponseWriter, r *http.Request) {
 	uid := r.URL.Query().Get("uid")
 	at := r.URL.Query().Get("at")
 	seg, haveSeg := atoiOK(r.URL.Query().Get("seg"))
@@ -70,7 +70,7 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 		resolved                        bool
 	)
 	if haveSeg && haveRec {
-		if w, aIdx, bt, af, ok := sessionlog.ReadTurnWindow(path, seg, rec, archivedWindowBefore, archivedWindowAfter); ok {
+		if w, aIdx, bt, af, ok := sessionlog.ReadTurnWindow(path, seg, rec, previewWindowBefore, previewWindowAfter); ok {
 			window, anchor, beforeTruncated, afterTruncated, resolved = w, aIdx, bt, af, true
 		}
 	}
@@ -88,11 +88,11 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 		if a >= len(turns) {
 			a = 0
 		}
-		lo := a - archivedWindowBefore
+		lo := a - previewWindowBefore
 		if lo < 0 {
 			lo = 0
 		}
-		hi := a + archivedWindowAfter + 1
+		hi := a + previewWindowAfter + 1
 		if hi > len(turns) {
 			hi = len(turns)
 		}
@@ -112,7 +112,7 @@ func (a *app) handleArchived(w http.ResponseWriter, r *http.Request) {
 		window[i].Text = asset.ProjectAgentPaths(window[i].Text, empty)
 	}
 
-	resp := archivedResponse{
+	resp := previewResponse{
 		UID:             uid,
 		Turns:           window,
 		Anchor:          anchor,

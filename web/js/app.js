@@ -1486,7 +1486,7 @@ document.addEventListener("touchend", e => {
 /* ---- G5b: read-only surface for a deleted chat ----
    A live search hit opens the normal chat; a DELETED chat has no node to open,
    so its on-disk log is shown here as a bounded window of turns around the hit
-   (GET /api/archived — never the live chat endpoint, no composer, no polling).
+   (GET /api/preview — never the live chat endpoint, no composer, no polling).
    Fork (when the dir survives) reuses the new-activity sheet, seeded from the
    log's meta launch config rather than a live parent. */
 let archivedFork = null;         /* {title,agent,model,effort,dir} when the log is forkable */
@@ -1511,7 +1511,7 @@ async function openArchived(uid, seg, rec, at, from){
   try {
     /* anchor by the hit's stable (seg, rec) ordinal — duplicate/empty timestamps
        can't mis-anchor the window; `at` rides along only as a server-side fallback */
-    const r = await fetch("/api/archived?uid=" + encodeURIComponent(uid) +
+    const r = await fetch("/api/preview?uid=" + encodeURIComponent(uid) +
       "&seg=" + encodeURIComponent(seg || 0) + "&rec=" + encodeURIComponent(rec || 0) +
       "&at=" + encodeURIComponent(at || ""));
     if (!r.ok) throw new Error("archived " + r.status);

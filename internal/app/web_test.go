@@ -547,7 +547,7 @@ func TestSearchHitCarriesIdentity(t *testing.T) {
 	app := mustReadApp(t)
 	if !strings.Contains(app, `"&seg=" + encodeURIComponent(seg`) ||
 		!strings.Contains(app, `"&rec=" + encodeURIComponent(rec`) {
-		t.Error("openArchived must send seg/rec to /api/archived")
+		t.Error("openArchived must send seg/rec to /api/preview")
 	}
 }
 
@@ -646,7 +646,7 @@ func TestArchivedView(t *testing.T) {
 		"function openArchived(",
 		"function closeArchived(",
 		"function renderArchived(",
-		`fetch("/api/archived?uid="`,
+		`fetch("/api/preview?uid="`,
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("archived view implementation missing %q", want)
