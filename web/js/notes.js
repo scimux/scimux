@@ -568,7 +568,7 @@ export function referenceHTML(r, deps = {}){
     <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
     <div class="wsrefbody">${mdFn(snap.text || "")}</div>
     <button class="wsrefmore" data-refmore hidden></button>
-    <div class="actionbar">
+    <div class="actionbar tear">
       <button class="btn-plain" data-refact="jump" aria-label="jump to chat">${icons.ICON_JUMP || ""}</button>
       <button class="btn-plain" data-refact="copy" aria-label="copy reference text">${icons.ICON_COPY || ""}</button>
       <button class="btn-plain danger" data-refact="trash" aria-label="remove reference">${icons.ICON_TRASH || ""}</button>

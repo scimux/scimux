@@ -692,7 +692,7 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
   });
   /* item 5: the inbox card carries the pane's whole action row, so reaching
      the chat no longer requires first placing the bookmark into a section */
-  assert.match(item, /class="actionbar"/);
+  assert.match(item, /class="actionbar tear"/);
   for (const act of ["jump", "copy", "note", "del"]) {
     assert.match(item, new RegExp(`data-bmact="${act}"`), act);
   }

@@ -247,7 +247,7 @@ export function bookmarkActionsHTML(nt, opts){
   const canPlace = context === "inbox" || workspaceOpen || singleZone;
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
-  return `<div class="actionbar">
+  return `<div class="actionbar tear">
         ${nt.node || nt.uid ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
         ${context === "pane" && nt.node && !nt.anchor
           ? b("comment", "comment on this bookmark", icons.ICON_COMMENT) : ""}

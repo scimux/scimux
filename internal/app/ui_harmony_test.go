@@ -170,11 +170,16 @@ func TestBookmarkIsACardWithInsideActions(t *testing.T) {
 		}
 	}
 
-	// The footer row is separated from the body by a hairline — the visual cue
-	// that it belongs to the card rather than floating under it.
-	foot := cssBlock(t, css, ".bookmark .actionbar")
-	if !strings.Contains(foot, "border-top") {
-		t.Errorf(".bookmark's action row must be hairline-separated inside the card; got %q", foot)
+	// The footer row is separated from the body by a drawn seam — the visual cue
+	// that it belongs to the card rather than floating under it. That seam began
+	// as a hairline border and is now the ticket perforation (ui_ticket_test.go),
+	// which the builder attaches as a class; either way the row must not float.
+	bm := mustReadWeb(t, "web/js/bookmarks.js")
+	if !strings.Contains(bm, `class="actionbar tear"`) {
+		foot := cssBlock(t, css, ".bookmark .actionbar")
+		if !strings.Contains(foot, "border-top") {
+			t.Errorf(".bookmark's action row must be seam-separated inside the card; got %q", foot)
+		}
 	}
 
 	// The clamp must stay scoped to the text region only, so a collapsed card

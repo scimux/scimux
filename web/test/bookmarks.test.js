@@ -1206,7 +1206,7 @@ test("bookmarkActionsHTML withholds comment from a comment (no nesting)", () => 
 
 test("bookmarkActionsHTML uses the shared .actionbar/.btn-plain classes, not per-surface geometry", () => {
   const html = bookmarkActionsHTML({ t: "1", text: "x", node: "n1" }, { icons: ICONS });
-  assert.match(html, /class="actionbar"/);
+  assert.match(html, /class="actionbar tear"/);
   assert.match(html, /class="btn-plain"/);
   assert.ok(!html.includes("bookmarkactions"),
     "the old per-surface class must be gone so pane and inbox cannot drift apart");
@@ -1301,6 +1301,6 @@ test("bookmarkListHTML emits the shared action bar for the open bookmark", () =>
     nodeById: () => ({ id: "n1", title: "Act" }),
     icons: ICONS,
   });
-  assert.match(html, /class="actionbar"/);
+  assert.match(html, /class="actionbar tear"/);
   assert.match(html, /data-bmact="jump"/);
 });

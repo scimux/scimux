@@ -61,7 +61,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .bookmark .nmore { margin: 0; padding: 0 12px 6px 15px; background: none; border: 0;
   font-size: 12px; color: var(--dim); cursor: pointer; }
 .bookmark .nmore:active { color: var(--work); }
-.bookmark .actionbar { border-top: 1px solid var(--hairline); padding: 4px 8px; }
+.bookmark .actionbar { padding: 5px 8px 4px; }
 /* inside the card the chips would double the card's own border, so they drop
    to a borderless tap target; the ladder's colour and radius stay */
 .bookmark .actionbar .btn-plain,
@@ -373,7 +373,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 /* item 5: the inbox bookmark carries the same footer action row as the compact
    pane, always visible — the complaint was about extra steps, so hiding the
    actions behind a first tap here would reintroduce one. */
-.wsibookmark .actionbar { border-top: 1px solid var(--hairline); padding: 4px 6px; }
+.wsibookmark .actionbar { padding: 5px 6px 4px; }
 /* --- embedded chat references inside a section --- */
 .wsrefs { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .wsref { border: 1px solid var(--hairline); border-left: 3px solid var(--unlane);
@@ -391,8 +391,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 .wsrefmore { margin: 4px 0 0; padding: 2px 0; background: none; border: 0;
   font-size: 11px; color: var(--dim); cursor: pointer; }
 .wsrefmore:active { color: var(--work); }
-.wsref .actionbar { display: none; margin-top: 6px; border-top: 1px solid var(--hairline);
-  padding-top: 2px; }
+.wsref .actionbar { display: none; margin-top: 6px; padding-top: 5px; }
 .wsref.open .actionbar { display: flex; }
 /* --- placement mode: floating pill + per-section "add bookmark here" target ---
    This was a full-bleed tinted strip that pushed the layout down and read as a
