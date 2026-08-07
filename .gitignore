@@ -18,6 +18,7 @@ internal/acp/testdata/real-*.ndjson
 !AGENTS.md
 !CLAUDE.md
 !docs/http-api.md
+!docs/fare-v2-p1-grounding.md
 
 attic/
 
