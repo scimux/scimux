@@ -301,7 +301,7 @@ test("peekBlockHTML and keyRowHTML presentation contracts", () => {
   const tmux = keyRowHTML({ attention: "question" });
   assert.match(tmux, /data-key="y"/);
   assert.match(tmux, /data-key="Enter"/);
-  assert.match(tmux, /class="permbtns"/, "tmux keys share the pinned .permbtns container");
+  assert.match(tmux, /class="permbtns keys"/, "tmux keys use .permbtns.keys wrap layout");
   const waiting = keyRowHTML({
     attention: "approval", source: "acp", permTitle: "X", permOptions: [],
   });
@@ -478,11 +478,121 @@ test("approval keyrow CSS pins .permbtns and meets 44px touch target", () => {
   const btns = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
   assert.ok(btns, ".permbtns rule present");
   assert.match(btns[1], /flex:\s*0\s*0\s*auto/, ".permbtns is flex: 0 0 auto (the pin guarantee)");
+  assert.match(btns[1], /flex-direction:\s*column/, ".permbtns keeps column stack for ACP labels");
   const btn = chatCssSrc.match(/\.permbtn\s*\{([^}]+)\}/);
   assert.ok(btn, ".permbtn rule present");
   const mh = btn[1].match(/min-height:\s*(\d+)px/);
   assert.ok(mh, ".permbtn declares min-height");
   assert.ok(Number(mh[1]) >= 44, "min-height at least 44px for touch");
+});
+
+/* ---------- P5: tmux keys wrap; show-all outside clamp; restore ACP hint ---------- */
+
+/* Extract the .permask element body (between its open tag and its balanced
+   closing </div>). Nested <div>s inside the mask (verb, prose) are handled
+   by depth counting on div tags only. Returns null if no .permask. */
+function permaskInnerAndRest(html){
+  const open = /<div class="permask(?:\s+[^"]*)?">/.exec(html);
+  if (!open) return null;
+  let i = open.index + open[0].length;
+  let depth = 1;
+  while (i < html.length && depth > 0){
+    const openAt = html.indexOf("<div", i);
+    const closeAt = html.indexOf("</div>", i);
+    if (closeAt < 0) return null;
+    if (openAt >= 0 && openAt < closeAt){
+      depth++;
+      i = openAt + 4;
+    } else {
+      depth--;
+      if (depth === 0){
+        return {
+          inner: html.slice(open.index + open[0].length, closeAt),
+          after: html.slice(closeAt + "</div>".length),
+          before: html.slice(0, open.index),
+        };
+      }
+      i = closeAt + 6;
+    }
+  }
+  return null;
+}
+
+test("keyRowHTML: tmux .permbtns has keys; ACP .permbtns does not", () => {
+  const tmux = keyRowHTML({ attention: "question" });
+  const tmuxBtns = tmux.match(/class="(permbtns[^"]*)"/);
+  assert.ok(tmuxBtns, "tmux emits .permbtns");
+  assert.match(tmuxBtns[1], /\bkeys\b/, "tmux container class list contains keys");
+
+  const acp = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Edit `/x`",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+  });
+  const acpBtns = acp.match(/class="(permbtns[^"]*)"/);
+  assert.ok(acpBtns, "ACP emits .permbtns");
+  assert.doesNotMatch(acpBtns[1], /\bkeys\b/, "ACP .permbtns must not carry keys");
+});
+
+test("CSS: .permbtns.keys wraps in a row; base .permbtns stays column pin", () => {
+  // Base pin (column + non-shrink) — already asserted above; re-pin direction here.
+  const base = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(base, ".permbtns rule present");
+  assert.match(base[1], /flex-direction:\s*column/);
+  assert.match(base[1], /flex:\s*0\s*0\s*auto/);
+
+  const keys = chatCssSrc.match(/\.permbtns\.keys\s*\{([^}]+)\}/);
+  assert.ok(keys, ".permbtns.keys rule present");
+  assert.match(keys[1], /flex-direction:\s*row/, "tmux keys lay out in a row");
+  assert.match(keys[1], /flex-wrap:\s*wrap/, "tmux keys wrap to multiple rows");
+
+  const keyBtn = chatCssSrc.match(/\.permbtns\.keys\s+\.permbtn\s*\{([^}]+)\}/);
+  assert.ok(keyBtn, ".permbtns.keys .permbtn rule present");
+  assert.match(keyBtn[1], /width:\s*auto/, "key buttons are auto-width, not full-width stack");
+  assert.match(keyBtn[1], /min-width:\s*44px/, "key buttons keep 44px touch target");
+});
+
+test("keyRowHTML: .permmore is a sibling of .permask, not inside it", () => {
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `ls -la /very/long/path && echo done`",
+    permToolKind: "execute",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: false,
+  });
+  const parts = permaskInnerAndRest(html);
+  assert.ok(parts, "emits a .permask element");
+  assert.doesNotMatch(parts.inner, /permmore/, ".permmore must not live inside the clamp");
+  assert.match(parts.after, /permmore/, ".permmore must appear after .permask closes");
+  // Order inside #keyrow: ask → show-all → buttons
+  const moreAt = parts.after.indexOf("permmore");
+  const btnsAt = parts.after.indexOf("permbtns");
+  assert.ok(moreAt >= 0 && btnsAt > moreAt, ".permmore sits between .permask and .permbtns");
+});
+
+test("keyRowHTML: ACP branch restores the approval hint above .permask", () => {
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `cmd`",
+    permToolKind: "execute",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+  });
+  assert.match(html, /class="hint"/, "ACP approval emits a hint");
+  assert.match(
+    html,
+    /The agent needs your approval\s*(?:&mdash;|\u2014|—)\s*choose one:/,
+    "restored wording: The agent needs your approval — choose one:",
+  );
+  // Must not re-introduce the tool title into the hint (title is the ask below).
+  assert.doesNotMatch(
+    html,
+    /class="hint"[^>]*>[^<]*Execute/,
+    "hint must not mention the tool title",
+  );
+  const parts = permaskInnerAndRest(html);
+  assert.ok(parts, "emits .permask");
+  assert.match(parts.before, /class="hint"/, "hint appears before .permask");
+  assert.doesNotMatch(parts.inner, /class="hint"/, "hint is outside the clamp");
 });
 
 test("source guard: keyrow call site reads per-node expanded, not hardcoded false", () => {
