@@ -309,10 +309,21 @@ type app struct {
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:
-// the key a supervisor presses and its human-readable name.
+// the key a supervisor presses, its human-readable name, and its role kind
+// when known ("allow" | "allow_always" | "reject" | "reject_always" | "").
+// Empty Kind means "unknown" — never an error, never a guess.
 type PermOption struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
+}
+
+// PendingPermission is the UI-facing view of one outstanding approval on a
+// structured-transport node. Empty ToolKind means "unknown".
+type PendingPermission struct {
+	Title    string
+	ToolKind string
+	Options  []PermOption
 }
 
 // procManager is the shared surface of scimux's two structured-protocol
@@ -331,7 +342,7 @@ type procManager interface {
 	Interrupt(nodeID string) error
 	PrepareResolve(nodeID, key string) (optID, evidence string, err error)
 	Deliver(nodeID, optID string) error
-	Pending(nodeID string) (title string, opts []PermOption, ok bool)
+	Pending(nodeID string) (PendingPermission, bool)
 	Turns(nodeID string) []transcript.Turn
 	Peek(nodeID string) string
 	Usage(nodeID string) (used, window int64)
@@ -353,13 +364,16 @@ type procManager interface {
 // types — a PermOption of the shared shape and error classification.
 type acpManager struct{ *acp.Manager }
 
-func (m acpManager) Pending(id string) (string, []PermOption, bool) {
-	title, opts, ok := m.Manager.Pending(id)
-	out := make([]PermOption, len(opts))
-	for i, o := range opts {
-		out[i] = PermOption{Key: o.Key, Name: o.Name}
+func (m acpManager) Pending(id string) (PendingPermission, bool) {
+	p, ok := m.Manager.Pending(id)
+	if !ok {
+		return PendingPermission{}, false
 	}
-	return title, out, ok
+	out := make([]PermOption, len(p.Options))
+	for i, o := range p.Options {
+		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
+	}
+	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Options: out}, true
 }
 
 func (m acpManager) Conflict(err error) bool {
@@ -369,13 +383,16 @@ func (m acpManager) Conflict(err error) bool {
 
 type codexManager struct{ *codex.Manager }
 
-func (m codexManager) Pending(id string) (string, []PermOption, bool) {
-	title, opts, ok := m.Manager.Pending(id)
-	out := make([]PermOption, len(opts))
-	for i, o := range opts {
-		out[i] = PermOption{Key: o.Key, Name: o.Name}
+func (m codexManager) Pending(id string) (PendingPermission, bool) {
+	p, ok := m.Manager.Pending(id)
+	if !ok {
+		return PendingPermission{}, false
 	}
-	return title, out, ok
+	out := make([]PermOption, len(p.Options))
+	for i, o := range p.Options {
+		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
+	}
+	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Options: out}, true
 }
 
 func (m codexManager) Conflict(err error) bool {

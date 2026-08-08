@@ -630,7 +630,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg sessionlog.Segment) {
 	live := pm.Live(n.ID)
 	lastErr := pm.LastError(n.ID)
-	permTitle, permOptions, hasPerm := pm.Pending(n.ID)
+	pending, hasPerm := pm.Pending(n.ID)
 	attn := ""
 	if hasPerm {
 		attn = "approval"
@@ -655,13 +655,14 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	resp["watermark"] = int64(0)
 	resp["progress"] = len(seg.Turns)
 	resp["pending_calls"] = 0
-	resp["waiting_on"] = permTitle
+	resp["waiting_on"] = pending.Title
 	resp["ctx_used"] = seg.Used
 	resp["ctx_window"] = seg.Size
 	resp["ctx_pct"] = ctxPct
 	resp["error"] = lastErr
-	resp["perm_title"] = permTitle
-	resp["perm_options"] = permOptions
+	resp["perm_title"] = pending.Title
+	resp["perm_options"] = pending.Options
+	resp["perm_tool_kind"] = pending.ToolKind
 }
 
 // handleKey presses one whitelisted key in the node's pane — answering an

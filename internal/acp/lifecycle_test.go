@@ -120,7 +120,7 @@ func TestRequestPermissionCancelledOnDone(t *testing.T) {
 		})
 		respCh <- resp
 	}()
-	waitFor(t, "pending registered", func() bool { _, _, ok := s.pendingInfo(); return ok })
+	waitFor(t, "pending registered", func() bool { _, ok := s.pendingInfo(); return ok })
 
 	s.closeDone() // what stop()/Shutdown() do on teardown
 

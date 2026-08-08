@@ -474,12 +474,12 @@ func TestPublicRouteKeyWhitelistAndAuditOrder(t *testing.T) {
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, _, ok := a.codex.Pending(n.ID); ok {
+			if _, ok := a.codex.Pending(n.ID); ok {
 				break
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		if _, _, ok := a.codex.Pending(n.ID); !ok {
+		if _, ok := a.codex.Pending(n.ID); !ok {
 			t.Fatal("pending approval never appeared")
 		}
 
@@ -1196,10 +1196,14 @@ func TestHandleChatCodexSourceACP(t *testing.T) {
 		t.Fatalf("chat: code = %d %s", rec2.Code, rec2.Body)
 	}
 	var body struct {
-		Source  string       `json:"source"`
-		Turns   []any        `json:"turns"`
-		Pending bool         `json:"pending"`
-		Perms   []PermOption `json:"perm_options"`
+		Source       string       `json:"source"`
+		Turns        []any        `json:"turns"`
+		Pending      bool         `json:"pending"`
+		Perms        []PermOption `json:"perm_options"`
+		PermTitle    string       `json:"perm_title"`
+		PermToolKind string       `json:"perm_tool_kind"`
+		Attention    string       `json:"attention"`
+		WaitingOn    string       `json:"waiting_on"`
 	}
 	if err := json.Unmarshal(rec2.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -1209,6 +1213,102 @@ func TestHandleChatCodexSourceACP(t *testing.T) {
 	}
 	if body.Pending {
 		t.Error("pending must be false for structured node")
+	}
+	// No outstanding approval: title/attention empty, tool kind present as "".
+	if body.PermTitle != "" || body.WaitingOn != "" || body.Attention != "" {
+		t.Errorf("idle chat: perm_title=%q waiting_on=%q attention=%q, want empty",
+			body.PermTitle, body.WaitingOn, body.Attention)
+	}
+	if body.PermToolKind != "" {
+		t.Errorf("idle chat: perm_tool_kind = %q, want \"\"", body.PermToolKind)
+	}
+}
+
+// Chat JSON for a live codex approval must carry option role kinds and the
+// tool kind so the keyrow can style reject without parsing labels. Existing
+// perm_title / attention / waiting_on fields stay byte-identical in meaning.
+func TestHandleChatCodexPendingKinds(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	spawn, approvalDispatched, _ := newApprovalFakeCodexSpawn(t, "THREAD-CHAT-PERM", rollout)
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
+	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+
+	rec := newNode(a, `{"title":"Q","prompt":"q","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d %s", rec.Code, rec.Body)
+	}
+	n := a.nodes[0]
+
+	select {
+	case <-approvalDispatched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approval")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := a.codex.Pending(n.ID); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := a.codex.Pending(n.ID); !ok {
+		t.Fatal("pending approval never appeared")
+	}
+
+	req := httptest.NewRequest("GET", "/api/nodes/"+n.ID+"/chat", nil)
+	req.SetPathValue("id", n.ID)
+	rec2 := httptest.NewRecorder()
+	a.handleChat(rec2, req)
+	if rec2.Code != 200 {
+		t.Fatalf("chat: code = %d %s", rec2.Code, rec2.Body)
+	}
+	var body struct {
+		Source       string       `json:"source"`
+		Pending      bool         `json:"pending"`
+		Perms        []PermOption `json:"perm_options"`
+		PermTitle    string       `json:"perm_title"`
+		PermToolKind string       `json:"perm_tool_kind"`
+		Attention    string       `json:"attention"`
+		WaitingOn    string       `json:"waiting_on"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Source != "acp" {
+		t.Errorf("source = %q, want acp", body.Source)
+	}
+	if body.Pending {
+		t.Error("pending must be false for structured node (flag is tmux-only)")
+	}
+	// Existing fields: title, attention, waiting_on describe the live approval.
+	if body.Attention != "approval" {
+		t.Errorf("attention = %q, want approval", body.Attention)
+	}
+	if body.PermTitle == "" || body.WaitingOn == "" {
+		t.Errorf("perm_title=%q waiting_on=%q, want non-empty", body.PermTitle, body.WaitingOn)
+	}
+	if body.PermTitle != body.WaitingOn {
+		t.Errorf("perm_title (%q) and waiting_on (%q) must match", body.PermTitle, body.WaitingOn)
+	}
+	// New fields: tool kind from command approvals, option kinds from decisions.
+	if body.PermToolKind != "execute" {
+		t.Errorf("perm_tool_kind = %q, want execute (command approval)", body.PermToolKind)
+	}
+	if len(body.Perms) < 2 {
+		t.Fatalf("perm_options = %d, want at least accept+cancel", len(body.Perms))
+	}
+	byName := map[string]string{}
+	for _, o := range body.Perms {
+		byName[o.Name] = o.Kind
+	}
+	if byName["accept"] != "allow" {
+		t.Errorf("accept kind = %q, want allow", byName["accept"])
+	}
+	if byName["cancel"] != "reject" {
+		t.Errorf("cancel kind = %q, want reject", byName["cancel"])
 	}
 }
 
@@ -1322,12 +1422,12 @@ func TestHandleKeyCodexAuditPositive(t *testing.T) {
 	// s.pending.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, ok := a.codex.Pending(n.ID); ok {
+		if _, ok := a.codex.Pending(n.ID); ok {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, _, ok := a.codex.Pending(n.ID); !ok {
+	if _, ok := a.codex.Pending(n.ID); !ok {
 		t.Fatal("timed out waiting for pending approval to appear")
 	}
 

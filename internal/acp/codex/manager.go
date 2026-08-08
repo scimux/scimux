@@ -281,20 +281,31 @@ func (m *Manager) Deliver(nodeID, optID string) error {
 
 // Pending reports the outstanding approval, if any: the tool/command title and
 // the server-enumerated decisions rendered as answerable options.
-func (m *Manager) Pending(nodeID string) (title string, opts []PermOption, ok bool) {
+func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 	s := m.session(nodeID)
 	if s == nil {
-		return "", nil, false
+		return PendingPermission{}, false
 	}
 	return s.pendingInfo()
 }
 
-// PermOption is one answerable decision: the key a supervisor presses and the
-// decision's name (the codex decision enum, e.g. "accept"). Shape matches
-// acp.PermOption so the HTTP/UI layer treats both transports identically.
+// PendingPermission is the UI-facing view of one outstanding approval: a title,
+// the tool's kind when known, and the answerable options. Empty ToolKind or
+// option Kind means "unknown" — never an error, never a guess.
+type PendingPermission struct {
+	Title    string
+	ToolKind string
+	Options  []PermOption
+}
+
+// PermOption is one answerable decision: the key a supervisor presses, the
+// decision's name (the codex decision enum, e.g. "accept"), and the option's
+// role kind when known ("allow" | "reject" | ""). Shape matches acp.PermOption
+// so the HTTP/UI layer treats both transports identically.
 type PermOption struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // RecordStartFailure marks a node whose first prompt could not be delivered
@@ -569,18 +580,41 @@ func (s *Session) deliver(optID string) error {
 	}
 }
 
-func (s *Session) pendingInfo() (string, []PermOption, bool) {
+func (s *Session) pendingInfo() (PendingPermission, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.pending) == 0 {
-		return "", nil, false
+		return PendingPermission{}, false
 	}
-	ds := s.pending[0].approval.AvailableDecisions
+	a := s.pending[0].approval
+	ds := a.AvailableDecisions
 	opts := make([]PermOption, 0, len(ds))
 	for i, d := range ds {
+		// RED stub: Kind left empty until feat maps Decision.IsRejection().
 		opts = append(opts, PermOption{Key: strconv.Itoa(i + 1), Name: d.Key})
 	}
-	return approvalTitle(s.pending[0].approval), opts, true
+	return PendingPermission{
+		Title:    approvalTitle(a),
+		ToolKind: mapApprovalToolKind(a),
+		Options:  opts,
+	}, true
+}
+
+// mapDecisionKind projects a codex decision into scimux option vocabulary.
+// Rejections become "reject"; everything else is "allow". Always/session
+// variants are intentionally not distinguished — no grounded evidence for that
+// enum yet, and a wrong guess would mislabel a persistent grant as a one-shot.
+func mapDecisionKind(d Decision) string {
+	// RED stub: always unknown until the green commit.
+	_ = d
+	return ""
+}
+
+// mapApprovalToolKind is "execute" when the approval carries a command, else "".
+func mapApprovalToolKind(a Approval) string {
+	// RED stub: always unknown until the green commit.
+	_ = a
+	return ""
 }
 
 func (s *Session) removePending(p *pendingPermission) {

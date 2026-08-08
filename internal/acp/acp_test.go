@@ -215,9 +215,9 @@ func TestPermissionApprove(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "permission prompt", func() bool { return m.Attention("n1") == "approval" })
-	title, opts, ok := m.Pending("n1")
-	if !ok || title != "run bash" || len(opts) != 2 {
-		t.Fatalf("unexpected pending: %q %+v ok=%v", title, opts, ok)
+	pending, ok := m.Pending("n1")
+	if !ok || pending.Title != "run bash" || len(pending.Options) != 2 {
+		t.Fatalf("unexpected pending: %+v ok=%v", pending, ok)
 	}
 	evidence, err := m.Resolve("n1", "y")
 	if err != nil {
@@ -283,7 +283,7 @@ func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
 	if !strings.Contains(evidence, "run bash") {
 		t.Errorf("evidence = %q, want it to carry the tool title as decision context", evidence)
 	}
-	if _, _, ok := m.Pending("n1"); !ok {
+	if _, ok := m.Pending("n1"); !ok {
 		t.Error("PrepareResolve must not consume the pending request")
 	}
 
@@ -292,7 +292,7 @@ func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
 	if err := m.Deliver("n1", "opt_bogus"); err == nil {
 		t.Error("Deliver of an unmapped option should be refused")
 	}
-	if _, _, ok := m.Pending("n1"); !ok {
+	if _, ok := m.Pending("n1"); !ok {
 		t.Error("a refused delivery must leave the request pending")
 	}
 
@@ -947,6 +947,139 @@ func TestRecordStartFailureReportsUndurableLog(t *testing.T) {
 	}
 }
 
+// Pending must carry each option's role kind and the tool's kind so the UI can
+// style reject differently without parsing labels. SDK kinds map into scimux
+// vocabulary; unknown/nil stay "" (defensive-parsing contract).
+func TestPendingMapsOptionAndToolKind(t *testing.T) {
+	s := &Session{nodeID: "n1", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
+	exec := sdk.ToolKindExecute
+	s.pending = &pendingPermission{
+		toolTitle: "run bash",
+		toolKind:  string(exec),
+		options: []sdk.PermissionOption{
+			{OptionId: "a", Name: "Allow once", Kind: sdk.PermissionOptionKindAllowOnce},
+			{OptionId: "b", Name: "Allow always", Kind: sdk.PermissionOptionKindAllowAlways},
+			{OptionId: "c", Name: "Reject once", Kind: sdk.PermissionOptionKindRejectOnce},
+			{OptionId: "d", Name: "Reject always", Kind: sdk.PermissionOptionKindRejectAlways},
+			{OptionId: "e", Name: "Future", Kind: sdk.PermissionOptionKind("future_kind")},
+		},
+		ch: make(chan sdk.PermissionOptionId, 1),
+	}
+	p, ok := s.pendingInfo()
+	if !ok {
+		t.Fatal("expected pending")
+	}
+	if p.Title != "run bash" {
+		t.Errorf("Title = %q, want run bash", p.Title)
+	}
+	if p.ToolKind != "execute" {
+		t.Errorf("ToolKind = %q, want execute", p.ToolKind)
+	}
+	wantKinds := []string{"allow", "allow_always", "reject", "reject_always", ""}
+	if len(p.Options) != len(wantKinds) {
+		t.Fatalf("options = %d, want %d", len(p.Options), len(wantKinds))
+	}
+	for i, want := range wantKinds {
+		if p.Options[i].Kind != want {
+			t.Errorf("option[%d].Kind = %q, want %q (name=%q)", i, p.Options[i].Kind, want, p.Options[i].Name)
+		}
+	}
+
+	// Nil tool kind → "" (unknown), never an error or a guess.
+	s.pending = &pendingPermission{
+		toolTitle: "read file",
+		toolKind:  "",
+		options:   []sdk.PermissionOption{{OptionId: "a", Name: "Allow", Kind: sdk.PermissionOptionKindAllowOnce}},
+		ch:        make(chan sdk.PermissionOptionId, 1),
+	}
+	p, ok = s.pendingInfo()
+	if !ok {
+		t.Fatal("expected pending with empty tool kind")
+	}
+	if p.ToolKind != "" {
+		t.Errorf("nil ToolCall.Kind must surface as ToolKind \"\", got %q", p.ToolKind)
+	}
+}
+
+// mapOptionKind is the pure boundary map from SDK option kinds to scimux vocab.
+func TestMapOptionKind(t *testing.T) {
+	cases := []struct {
+		in   sdk.PermissionOptionKind
+		want string
+	}{
+		{sdk.PermissionOptionKindAllowOnce, "allow"},
+		{sdk.PermissionOptionKindAllowAlways, "allow_always"},
+		{sdk.PermissionOptionKindRejectOnce, "reject"},
+		{sdk.PermissionOptionKindRejectAlways, "reject_always"},
+		{sdk.PermissionOptionKind("future_kind"), ""},
+		{sdk.PermissionOptionKind(""), ""},
+	}
+	for _, tc := range cases {
+		if got := mapOptionKind(tc.in); got != tc.want {
+			t.Errorf("mapOptionKind(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// RequestPermission must project ToolCall.Kind into pending.toolKind (nil → "").
+func TestRequestPermissionStoresToolKind(t *testing.T) {
+	s := &Session{done: make(chan struct{}), logw: &logWriter{Path: filepath.Join(t.TempDir(), "n.jsonl")}}
+	exec := sdk.ToolKindExecute
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = s.RequestPermission(context.Background(), sdk.RequestPermissionRequest{
+			ToolCall: sdk.ToolCallUpdate{
+				ToolCallId: "t1",
+				Title:      sdk.Ptr("run bash"),
+				Kind:       &exec,
+			},
+			Options: []sdk.PermissionOption{
+				{OptionId: "opt_allow", Name: "Allow", Kind: sdk.PermissionOptionKindAllowOnce},
+			},
+		})
+	}()
+	waitFor(t, "pending registered", func() bool { _, ok := s.pendingInfo(); return ok })
+	p, ok := s.pendingInfo()
+	if !ok {
+		t.Fatal("expected pending")
+	}
+	if p.ToolKind != "execute" {
+		t.Errorf("ToolKind = %q, want execute (from ToolCall.Kind)", p.ToolKind)
+	}
+	if len(p.Options) != 1 || p.Options[0].Kind != "allow" {
+		t.Errorf("options = %+v, want one allow", p.Options)
+	}
+	s.closeDone()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RequestPermission did not unblock after done")
+	}
+
+	// Nil Kind → "".
+	s2 := &Session{done: make(chan struct{}), logw: &logWriter{Path: filepath.Join(t.TempDir(), "n2.jsonl")}}
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		_, _ = s2.RequestPermission(context.Background(), sdk.RequestPermissionRequest{
+			ToolCall: sdk.ToolCallUpdate{ToolCallId: "t2", Title: sdk.Ptr("read")},
+			Options:  []sdk.PermissionOption{{OptionId: "a", Name: "Allow", Kind: sdk.PermissionOptionKindAllowOnce}},
+		})
+	}()
+	waitFor(t, "pending without kind", func() bool { _, ok := s2.pendingInfo(); return ok })
+	p2, _ := s2.pendingInfo()
+	if p2.ToolKind != "" {
+		t.Errorf("nil ToolCall.Kind → ToolKind %q, want \"\"", p2.ToolKind)
+	}
+	s2.closeDone()
+	select {
+	case <-done2:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second RequestPermission did not unblock")
+	}
+}
+
 // Delivering an option that no longer matches the current pending request is
 // refused rather than answering a since-replaced prompt (finding 53).
 func TestDeliverRejectsStaleOption(t *testing.T) {
@@ -963,7 +1096,7 @@ func TestDeliverRejectsStaleOption(t *testing.T) {
 	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != nil {
 		t.Fatalf("valid deliver failed: %v", err)
 	}
-	if _, _, ok := s.pendingInfo(); ok {
+	if _, ok := s.pendingInfo(); ok {
 		t.Error("pending should be cleared after a successful deliver")
 	}
 	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != ErrNoPending {

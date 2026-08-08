@@ -224,9 +224,9 @@ func TestManagerApprovalResolve(t *testing.T) {
 
 	// The approval becomes visible as pending attention with rendered options.
 	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
-	title, opts, ok := m.Pending("n1")
-	if !ok || len(opts) != 3 || title == "" {
-		t.Fatalf("pending = %q %+v %v", title, opts, ok)
+	pending, ok := m.Pending("n1")
+	if !ok || len(pending.Options) != 3 || pending.Title == "" {
+		t.Fatalf("pending = %+v %v", pending, ok)
 	}
 
 	// Answer "1" → the first decision ("accept"): map, then deliver.
@@ -258,11 +258,11 @@ func TestManagerFileChangeApprovalResolve(t *testing.T) {
 	ms.serverRequest(t, 0, "item/fileChange/requestApproval", `{"threadId":"THREAD-1","turnId":"turn-1","itemId":"patch-1","startedAtMs":1,"reason":"write file","grantRoot":"/w"}`)
 
 	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
-	title, opts, ok := m.Pending("n1")
-	if !ok || title != "item/fileChange/requestApproval" {
-		t.Fatalf("pending = %q %+v %v", title, opts, ok)
+	pending, ok := m.Pending("n1")
+	if !ok || pending.Title != "item/fileChange/requestApproval" {
+		t.Fatalf("pending = %+v %v", pending, ok)
 	}
-	if got := optionNames(opts); strings.Join(got, ",") != "accept,acceptForSession,decline,cancel" {
+	if got := optionNames(pending.Options); strings.Join(got, ",") != "accept,acceptForSession,decline,cancel" {
 		t.Fatalf("file-change options = %v", got)
 	}
 
@@ -289,8 +289,8 @@ func TestManagerQueuesConcurrentApprovals(t *testing.T) {
 	ms.serverRequest(t, 1, "item/commandExecution/requestApproval", syntheticApproval)
 
 	waitFor(t, func() bool {
-		_, opts, ok := m.Pending("n1")
-		return ok && len(opts) == 3
+		p, ok := m.Pending("n1")
+		return ok && len(p.Options) == 3
 	})
 	ms.serverRequest(t, 2, "item/fileChange/requestApproval", `{"threadId":"THREAD-1","turnId":"turn-1","itemId":"patch-1","startedAtMs":1}`)
 
@@ -307,8 +307,8 @@ func TestManagerQueuesConcurrentApprovals(t *testing.T) {
 	}
 
 	waitFor(t, func() bool {
-		title, opts, ok := m.Pending("n1")
-		return ok && title == "item/fileChange/requestApproval" && len(opts) == 4
+		p, ok := m.Pending("n1")
+		return ok && p.Title == "item/fileChange/requestApproval" && len(p.Options) == 4
 	})
 	optID, _, err = m.PrepareResolve("n1", "4")
 	if err != nil {
@@ -331,6 +331,97 @@ func TestManagerNoPendingResolve(t *testing.T) {
 	}
 	if _, _, err := m.PrepareResolve("missing", "1"); err != ErrNoSession {
 		t.Fatalf("want ErrNoSession, got %v", err)
+	}
+}
+
+// Pending must tag rejections as "reject" and everything else as "allow", and
+// set tool kind to "execute" only when the approval carries a command. Always/
+// session variants are intentionally not distinguished.
+func TestPendingMapsDecisionAndToolKind(t *testing.T) {
+	s := &Session{nodeID: "n1", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
+
+	// Command approval: tool kind "execute", mixed allow/reject decisions.
+	s.pending = []*pendingPermission{{
+		seq: 1,
+		approval: Approval{
+			Method:  "item/commandExecution/requestApproval",
+			Command: "/bin/bash -lc curl",
+			AvailableDecisions: []Decision{
+				{Key: "accept"},
+				{Key: "acceptForSession"},
+				{Key: "cancel"},
+				{Key: "decline"},
+				{Key: "denied"},
+				{Key: "abort"},
+				{Key: "declinePermissions"},
+			},
+		},
+		ch: make(chan chosen, 1),
+	}}
+	p, ok := s.pendingInfo()
+	if !ok {
+		t.Fatal("expected pending")
+	}
+	if p.ToolKind != "execute" {
+		t.Errorf("ToolKind = %q, want execute when Command is set", p.ToolKind)
+	}
+	want := map[string]string{
+		"accept":             "allow",
+		"acceptForSession":   "allow",
+		"cancel":             "reject",
+		"decline":            "reject",
+		"denied":             "reject",
+		"abort":              "reject",
+		"declinePermissions": "reject",
+	}
+	if len(p.Options) != len(want) {
+		t.Fatalf("options = %d, want %d", len(p.Options), len(want))
+	}
+	for _, o := range p.Options {
+		if got, ok := want[o.Name]; !ok {
+			t.Errorf("unexpected option %q", o.Name)
+		} else if o.Kind != got {
+			t.Errorf("option %q Kind = %q, want %q", o.Name, o.Kind, got)
+		}
+	}
+
+	// No command (file-change / permissions): tool kind stays "".
+	s.pending = []*pendingPermission{{
+		seq: 2,
+		approval: Approval{
+			Method:             "item/fileChange/requestApproval",
+			AvailableDecisions: []Decision{{Key: "accept"}, {Key: "decline"}},
+		},
+		ch: make(chan chosen, 1),
+	}}
+	p, ok = s.pendingInfo()
+	if !ok {
+		t.Fatal("expected pending without command")
+	}
+	if p.ToolKind != "" {
+		t.Errorf("ToolKind = %q, want \"\" when Command is empty", p.ToolKind)
+	}
+	if p.Options[0].Kind != "allow" || p.Options[1].Kind != "reject" {
+		t.Errorf("file-change kinds = %q/%q, want allow/reject", p.Options[0].Kind, p.Options[1].Kind)
+	}
+}
+
+func TestMapDecisionKindAndToolKind(t *testing.T) {
+	for _, k := range []string{"cancel", "decline", "denied", "abort", "declinePermissions"} {
+		if got := mapDecisionKind(Decision{Key: k}); got != "reject" {
+			t.Errorf("mapDecisionKind(%q) = %q, want reject", k, got)
+		}
+	}
+	for _, k := range []string{"accept", "acceptForSession", "approved", "approved_for_session", "allowForTurn", "allowForSession"} {
+		if got := mapDecisionKind(Decision{Key: k}); got != "allow" {
+			t.Errorf("mapDecisionKind(%q) = %q, want allow", k, got)
+		}
+	}
+	if got := mapApprovalToolKind(Approval{Command: "ls"}); got != "execute" {
+		t.Errorf("mapApprovalToolKind(command) = %q, want execute", got)
+	}
+	if got := mapApprovalToolKind(Approval{}); got != "" {
+		t.Errorf("mapApprovalToolKind(empty) = %q, want \"\"", got)
 	}
 }
 

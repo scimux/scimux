@@ -478,7 +478,7 @@ func TestCodexManagerConflictAndPending(t *testing.T) {
 	}
 
 	// Pending on a node with no session must return ok=false.
-	if title, opts, ok := cm.Pending("ghost"); ok {
-		t.Errorf("Pending(ghost) = (%q, %v, true), want ok=false", title, opts)
+	if p, ok := cm.Pending("ghost"); ok {
+		t.Errorf("Pending(ghost) = (%+v, true), want ok=false", p)
 	}
 }

@@ -400,19 +400,30 @@ func (m *Manager) RecordStartFailure(nodeID string, cause error) error {
 
 // Pending reports the outstanding permission request, if any, so the UI can
 // render answer keys and the audit trail can capture the decision context.
-func (m *Manager) Pending(nodeID string) (title string, opts []PermOption, ok bool) {
+func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 	s := m.session(nodeID)
 	if s == nil {
-		return "", nil, false
+		return PendingPermission{}, false
 	}
 	return s.pendingInfo()
 }
 
-// PermOption is one answerable permission choice: the key a supervisor presses
-// and the agent's human-readable label for it.
+// PendingPermission is the UI-facing view of one outstanding approval: a title,
+// the tool's kind when known, and the answerable options. Empty ToolKind or
+// option Kind means "unknown" — never an error, never a guess.
+type PendingPermission struct {
+	Title    string
+	ToolKind string
+	Options  []PermOption
+}
+
+// PermOption is one answerable permission choice: the key a supervisor presses,
+// the agent's human-readable label, and the option's role kind when known
+// ("allow" | "allow_always" | "reject" | "reject_always" | "").
 type PermOption struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // HasSession reports whether a live subprocess backs this node (vs read-only
@@ -547,6 +558,7 @@ type Session struct {
 // resolves it, or done closes (cancel/shutdown → cancelled outcome).
 type pendingPermission struct {
 	toolTitle string
+	toolKind  string // ACP ToolKind string, or "" when unknown
 	options   []sdk.PermissionOption
 	ch        chan sdk.PermissionOptionId
 }
@@ -944,17 +956,30 @@ func (s *Session) deliver(id sdk.PermissionOptionId) error {
 	}
 }
 
-func (s *Session) pendingInfo() (string, []PermOption, bool) {
+func (s *Session) pendingInfo() (PendingPermission, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pending == nil {
-		return "", nil, false
+		return PendingPermission{}, false
 	}
 	opts := make([]PermOption, 0, len(s.pending.options))
 	for i, o := range s.pending.options {
+		// RED stub: Kind left empty until feat maps sdk.PermissionOption.Kind.
 		opts = append(opts, PermOption{Key: strconv.Itoa(i + 1), Name: o.Name})
 	}
-	return s.pending.toolTitle, opts, true
+	return PendingPermission{
+		Title:    s.pending.toolTitle,
+		ToolKind: s.pending.toolKind,
+		Options:  opts,
+	}, true
+}
+
+// mapOptionKind projects an SDK permission-option kind into scimux vocabulary.
+// Unknown/empty values stay "" (defensive-parsing contract).
+func mapOptionKind(k sdk.PermissionOptionKind) string {
+	// RED stub: always unknown until the green commit.
+	_ = k
+	return ""
 }
 
 func (s *Session) clearPending() {
