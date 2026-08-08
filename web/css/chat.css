@@ -285,6 +285,10 @@ body.cards-open #msgs { overflow: hidden; }
 .permbtn { min-height: 44px; width: 100%; padding: 0 12px;
   background: var(--surface); border: 1.5px solid var(--attn); border-radius: 10px;
   font-size: 15px; font-weight: 600; color: var(--ink); text-align: left; }
+/* Tmux: ten short keys — wrap into rows instead of a 500px+ vertical stack
+   that crushes the transcript (portrait) or falls off-screen (landscape). */
+.permbtns.keys { flex-direction: row; flex-wrap: wrap; }
+.permbtns.keys .permbtn { width: auto; min-width: 44px; }
 .permbtn.allow, .permbtn.allow-always { border-color: var(--attn); }
 .permbtn.reject, .permbtn.reject-always { border-color: var(--danger); color: var(--danger); }
 .permbtn.unknown { border-color: var(--hairline); color: var(--ink); }
