@@ -17,10 +17,11 @@
  *
  * Outputs:
  *   - HTML into maptabs / lanechips / mapwrap / maptoolbar
- *   - body.map-full class; mapfullbtn ARIA/glyph; farebtn.on + aria-pressed
- *     + on/off layer-group SVG (fare layer; revealed only under body.map-full)
+ *   - body.map-full / body.map-dock classes; mapfullbtn ARIA/glyph; farebtn.on
+ *     + aria-pressed + on/off layer-group SVG (fare layer; revealed only under
+ *     body.map-full)
  *   - localStorage: scimux-maptab, scimux-mapfold, scimux-mapfold-known,
- *     scimux-mapfull, scimux-fare
+ *     scimux-mapfull, scimux-fare, scimux-mapdock
  *   - uiMutate groups/lanes; callbacks: select, setLevel, setLaneFilter,
  *     loadChatHistory, jumpChatToNow, openActivityEditor, forkFromStation,
  *     addStationBookmark, exitThread, openSheet/closeSheets, renderCards
@@ -78,6 +79,9 @@ export const MAP_FOLD_KEY = "scimux-mapfold";
 export const MAP_FOLD_KNOWN_KEY = "scimux-mapfold-known";
 export const MAP_FULL_KEY = "scimux-mapfull";
 export const MAP_FARE_KEY = "scimux-fare";
+/* Dock (wall map on top + real chat below) is a separate flag from full-screen
+   wall mode. Do not reuse MAP_FULL_KEY / MAP_FOLD_KEY / MAP_FARE_KEY. */
+export const MAP_DOCK_KEY = "scimux-mapdock";
 
 export const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
@@ -87,6 +91,15 @@ export const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" widt
 /* full screen shows the map regardless of the column-mode map-open flag */
 export function mapIsVisible({ isDesktop, mapFull, mapOpen, level } = {}){
   return isDesktop ? (!!mapFull || !!mapOpen) : level === 3;
+}
+
+/* Pure layout mode for the map/chat arrangement. Phone never docks (the wall
+   itself is desktop-only); dock requires both full-screen and the dock flag. */
+export function dockArrangement({ mapFull, mapDock, isDesktop } = {}){
+  if (!isDesktop) return "stack";
+  if (mapFull && mapDock) return "dock";
+  if (mapFull) return "wall";
+  return "stack";
 }
 
 /* validate the saved group only against loaded state — before loadUI
@@ -778,6 +791,9 @@ export function createMapFeature(deps){
      until body.map-full, so a persisted-on flag never shows a button where the
      overlay can't render. */
   let fareOn = !!(storage && storage.getItem(MAP_FARE_KEY) === "1");
+  /* Dock: wall map on top + existing #chat below. Independent of map selection
+     (the selection is what the dock points at). Cleared when leaving full. */
+  let mapDock = !!(storage && storage.getItem(MAP_DOCK_KEY) === "1");
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
@@ -852,12 +868,29 @@ export function createMapFeature(deps){
     mapFull = !!on;
     if (mapFull) storeSet(MAP_FULL_KEY, "1");
     else storeRemove(MAP_FULL_KEY);
+    /* Leaving full screen also leaves the dock — the dock is only meaningful
+       under body.map-full, and the CSS selector is the conjunction. */
+    if (!mapFull){
+      mapDock = false;
+      storeRemove(MAP_DOCK_KEY);
+      if (doc && doc.body) doc.body.classList.toggle("map-dock", false);
+    }
     const cleared = clearMapSelection();
     mapSel = cleared.mapSel; mapSelKey = cleared.mapSelKey; mapSelStop = cleared.mapSelStop;
     if (doc && doc.body) doc.body.classList.toggle("map-full", mapFull);
     syncMapFullBtn();
     mapSig = "";
     renderMap();
+    renderMapToolbar();
+  }
+
+  /* Enter/leave the dock under an already-full wall map. Must NOT clear the
+     map selection — the selection is what the docked chat is pointed at. */
+  function setMapDock(on){
+    mapDock = !!on;
+    if (mapDock) storeSet(MAP_DOCK_KEY, "1");
+    else storeRemove(MAP_DOCK_KEY);
+    if (doc && doc.body) doc.body.classList.toggle("map-dock", mapDock);
     renderMapToolbar();
   }
 
@@ -1366,7 +1399,9 @@ export function createMapFeature(deps){
     const j = e.target.closest("[data-jump]");
     if (j){
       if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump, "jump");
-      setMapFull(false);
+      /* Full wall → dock and stay; stack/column map → leave full as today. */
+      if (mapFull) setMapDock(true);
+      else setMapFull(false);
       return;
     }
     const pe = e.target.closest("[data-medit]");
@@ -1405,7 +1440,9 @@ export function createMapFeature(deps){
       if (st){
         if (typeof d.loadChatHistory === "function") d.loadChatHistory(j.dataset.jump, st);
       } else if (typeof d.jumpChatToNow === "function") d.jumpChatToNow();
-      setMapFull(false);
+      /* Full wall → dock and stay; stack/column map → leave full as today. */
+      if (mapFull) setMapDock(true);
+      else setMapFull(false);
       return;
     }
     const pe = e.target.closest("[data-medit]");
@@ -1536,7 +1573,10 @@ export function createMapFeature(deps){
   function invalidate(){ mapSig = ""; }
 
   function restoreChrome(){
-    if (mapFull && isDesktop() && doc && doc.body) doc.body.classList.add("map-full");
+    if (mapFull && isDesktop() && doc && doc.body){
+      doc.body.classList.add("map-full");
+      if (mapDock) doc.body.classList.add("map-dock");
+    }
     syncFareBtn();
     syncMapFullBtn();
   }
@@ -1553,6 +1593,8 @@ export function createMapFeature(deps){
     invalidate,
     setFull: setMapFull,
     isFull: () => mapFull,
+    setDock: setMapDock,
+    isDock: () => mapDock,
     restoreChrome,
     scrollMapToTop,
   };

@@ -648,7 +648,9 @@ test("earlier-stop toolbar opens history and docks without leaving full-screen",
   });
   const body = {
     classList: {
-      _set: new Set(),
+      /* Seeded as map-full: storage restores mapFull, and restoreChrome (or a
+         prior setFull) would have put the class on body in a real session. */
+      _set: new Set(["map-full"]),
       toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
       contains(name){ return this._set.has(name); },
       add(name){ this._set.add(name); },

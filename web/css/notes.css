@@ -170,7 +170,19 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     border-right: none; animation: mapfade .26s ease; }
   body.map-full #cards, body.map-full #chat,
   body.map-full #bookmarkspane, body.map-full #bookmarkflags { display: none; }
-  #bookmarkspane { position: static; transform: none; transition: none;
+  /* P1 dock shell: wall map on top + existing #chat below. No DOM reparent —
+     #map and #chat are already siblings in #app; this is a flex-direction
+     change and an un-hide. Fixed 55/45 until P2's divider.
+     Load-bearing: height:auto on #map overrides .panel's height:100%;
+     min-height:0 on #chat lets the flex item shrink so #promptbar stays in
+     view (children are flex:none — same failure class as approval P7). */
+  body.map-full.map-dock #app { flex-direction: column; }
+  body.map-full.map-dock #map {
+    flex: 0 0 var(--dockmap, 55%); height: auto; min-height: 0;
+    border-right: none; border-bottom: 1px solid var(--hairline);
+  }
+  body.map-full.map-dock #chat { display: flex; flex: 1 1 auto; min-height: 0; }
+  #bookmarkspane { position: static; transform: none; transition: none; }
     box-shadow: none; display: none; width: 340px; flex: none;
     height: auto; border-left: 1px solid var(--hairline); }
   body.bookmarks-open #bookmarkspane { display: flex; }
