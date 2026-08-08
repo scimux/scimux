@@ -629,6 +629,54 @@ func TestSearchActionBar(t *testing.T) {
 	}
 }
 
+// Send-to is one dialogue shared by the chat bubble action and the bookmark
+// long-press: a single #sendto sheet, a single owner (bookmarks.js), and a
+// single filter/order helper. Behaviour is executed by bookmarks.test.js and
+// map-model.test.js; retain the shell and the cross-feature injection seam.
+func TestSendToPicker(t *testing.T) {
+	html := mustReadIndex(t)
+	app := mustReadApp(t)
+	for _, want := range []string{
+		`id="sendto"`,
+		`id="sendto_title"`,
+		`id="sendto_list"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("send-to sheet missing %q", want)
+		}
+	}
+	if strings.Count(html, `class="sheet" id="sendto`) != 1 {
+		t.Error("send-to must stay one sheet, reused by both call sites")
+	}
+	if !strings.Contains(app, `openSendTo: opts => bookmarksFeature.openSendTo(opts)`) {
+		t.Error("chat must inject bookmarksFeature.openSendTo (bookmarks owns #sendto)")
+	}
+	if !strings.Contains(app, `pinned: () => getUI().pinned`) {
+		t.Error("bookmarks needs the pin order to rank send-to targets")
+	}
+	chat, err := os.ReadFile(webSourcePath("web/js/chat.js"))
+	if err != nil {
+		t.Fatalf("read chat.js: %v", err)
+	}
+	if strings.Contains(string(chat), "sendableNodes") {
+		t.Error("chat must not re-derive the target list; the picker owns it")
+	}
+	bookmarks, err := os.ReadFile(webSourcePath("web/js/bookmarks.js"))
+	if err != nil {
+		t.Fatalf("read bookmarks.js: %v", err)
+	}
+	if !strings.Contains(string(bookmarks), "sendableNodes") {
+		t.Error("bookmarks must rank send-to targets via map-model's sendableNodes")
+	}
+	css, err := os.ReadFile(webSourcePath("web/css/chat.css"))
+	if err != nil {
+		t.Fatalf("read chat.css: %v", err)
+	}
+	if !strings.Contains(string(css), ".rot180") {
+		t.Error("the send-to glyph needs its 180° rotation rule")
+	}
+}
+
 // Preview surface: shell DOM/ARIA, no composer, and its entry points.
 // Hit routing and the head's two controls are covered by Node and by
 // ui_search_preview_test.go.

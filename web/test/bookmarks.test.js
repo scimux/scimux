@@ -459,6 +459,7 @@ function makeRoots(){
     body,
     querySelector(sel){
       if (sel === "#sendto_list") return roots.sendtoList;
+      if (sel === "#sendto_title") return roots.sendtoTitle;
       if (sel === "#prompt") return roots.chatPrompt;
       if (sel.startsWith("#bookmarklist")){
         /* support #bookmarklist .bookmark[data-t="…"] .bookmarkactions */
@@ -498,6 +499,7 @@ function makeRoots(){
     }),
     bookmarksend: el("button", { id: "bookmarksend" }),
     sendtoList: el("div", { id: "sendto_list" }),
+    sendtoTitle: el("h3", { id: "sendto_title", textContent: "" }),
     chatPrompt: el("div", { id: "prompt" }),
   };
   roots.bookmarkprompt.dataset = { placeholder: "Add a bookmark…" };
@@ -680,7 +682,9 @@ function createFeature(overrides = {}){
     isDesktop: () => !!overrides.isDesktop,
     restartWorkPulse: () => { effects.restartWorkPulse++; },
     sendtoList: roots.sendtoList,
+    sendtoTitle: roots.sendtoTitle,
     chatPrompt: roots.chatPrompt,
+    pinned: () => overrides.pinned || [],
     longpress: (container, selector, fn) => {
       container._lp = { selector, fn };
       return () => { container._lp = null; };
@@ -1074,6 +1078,95 @@ test("longpress send-to uses bookmark (not undeclared note); merges draft; navig
   assert.deepEqual(effects.select, ["n2"]);
   assert.deepEqual(effects.setLevel, [1]);
   assert.equal(roots.chatPrompt._focused, true);
+});
+
+/* ---------- send-to picker: one dialogue, shared by bubbles and bookmarks ---------- */
+
+const sendtoNodes = {
+  /* titles deliberately avoid the words "Pinned"/"Recent" so the group-label
+     assertions below cannot pass on a node title */
+  ok:     { id: "ok",     title: "Ok",     lane_id: "lane-a", live: "quiet",  last_interaction: 10 },
+  recent: { id: "recent", title: "Newest", lane_id: "lane-b", live: "active", last_interaction: 90 },
+  pin:    { id: "pin",    title: "Starred", lane_id: "lane-a", live: "quiet", last_interaction: 1 },
+  dead:   { id: "dead",   title: "Dead",   lane_id: "lane-a", live: "exited" },
+  closed: { id: "closed", title: "Closed", lane_id: "lane-a", live: "quiet", ended_at: "2026-08-01T00:00:00Z" },
+  self:   { id: "self",   title: "Self",   lane_id: "lane-a", live: "quiet",  last_interaction: 99 },
+};
+
+test("openSendTo lists only chats that can receive, pinned first then recency", () => {
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: ["pin"] });
+  const { feature, roots, effects } = ctx;
+  feature.bind();
+
+  feature.openSendTo({ text: "hello", exceptId: "self", title: "Send to chat…" });
+
+  assert.equal(effects.openSheet[0], "#sendto");
+  const html = roots.sendtoList.innerHTML;
+  for (const gone of ["dead", "closed", "self"])
+    assert.doesNotMatch(html, new RegExp(`data-fwd="${gone}"`), `${gone} must not be a target`);
+  const order = [...html.matchAll(/data-fwd="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["pin", "recent", "ok"]);
+});
+
+test("openSendTo labels the two groups only when both are populated", () => {
+  const both = createFeature({ nodes: sendtoNodes, pinned: ["pin"] });
+  both.feature.bind();
+  both.feature.openSendTo({ text: "x", exceptId: "self" });
+  assert.match(both.roots.sendtoList.innerHTML, /Pinned/);
+  assert.match(both.roots.sendtoList.innerHTML, /Recent/);
+
+  const noPins = createFeature({ nodes: sendtoNodes, pinned: [] });
+  noPins.feature.bind();
+  noPins.feature.openSendTo({ text: "x", exceptId: "self" });
+  assert.doesNotMatch(noPins.roots.sendtoList.innerHTML, /Pinned/);
+  assert.doesNotMatch(noPins.roots.sendtoList.innerHTML, /Recent/,
+    "a single ungrouped list needs no header");
+});
+
+test("openSendTo sets the sheet title per caller and merges into the target draft", () => {
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: [], isDesktop: false });
+  const { feature, roots, effects, storage } = ctx;
+  storage.setItem(DRAFT_KEY_PREFIX + "ok", "existing");
+  feature.bind();
+  feature.openSendTo({ text: "carried over", exceptId: "self", title: "Send to chat…" });
+  assert.equal(roots.sendtoTitle.textContent, "Send to chat…");
+
+  const fwd = el("button", { dataset: { fwd: "ok" } });
+  fwd.dataset.fwd = "ok";
+  fwd.closest = sel => sel === "[data-fwd]" ? fwd : null;
+  roots.sendtoList.onclick({ target: fwd });
+
+  /* append, never clobber — the target may hold a half-typed draft */
+  assert.equal(storage.getItem(DRAFT_KEY_PREFIX + "ok"), "existing\n\ncarried over");
+  assert.deepEqual(effects.select, ["ok"]);
+  assert.equal(roots.chatPrompt._focused, true);
+});
+
+test("openSendTo shows an explicit empty state when nothing can receive", () => {
+  const ctx = createFeature({ nodes: { dead: sendtoNodes.dead }, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "" });
+  assert.doesNotMatch(ctx.roots.sendtoList.innerHTML, /data-fwd=/);
+  assert.match(ctx.roots.sendtoList.innerHTML, /no (running|live|open) chat/i);
+});
+
+test("bookmark longpress reuses openSendTo — the crowded picker is filtered too", () => {
+  const ctx = createFeature({
+    nodes: sendtoNodes,
+    pinned: ["pin"],
+    bookmarks: [{ t: "t1", text: "send me" }],
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.setOpen(true);
+  const bmEl = el("div", { className: "bookmark", dataset: { t: "t1" } });
+  bmEl.dataset.t = "t1";
+  roots.bookmarklist._lp.fn(bmEl);
+
+  const order = [...roots.sendtoList.innerHTML.matchAll(/data-fwd="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["pin", "self", "recent", "ok"],
+    "same filter and order as the bubble picker (no source chat to exclude here)");
+  assert.match(roots.sendtoTitle.textContent, /bookmark/i);
 });
 
 test("longpress no-ops when bookmark t missing", () => {

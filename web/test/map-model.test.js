@@ -11,6 +11,8 @@ import {
   livenessTier,
   orderedNodes,
   pinnedOrder,
+  canReceiveSend,
+  sendableNodes,
   isArchived,
   isPinned,
   tabListForCards,
@@ -70,7 +72,7 @@ test("map-model.js exports named pure helpers", async () => {
   for (const name of [
     "hardAttention", "cardState", "statusText",
     "cardCreatedMS", "cardInteractionMS", "livenessTier",
-    "orderedNodes", "pinnedOrder",
+    "orderedNodes", "pinnedOrder", "canReceiveSend", "sendableNodes",
     "isArchived", "isPinned", "tabListForCards", "inLaneScope", "visibleCardLists",
     "headStopKey", "toggleMapSelection",
   ]) {
@@ -241,6 +243,113 @@ test("pinnedOrder: inspect does not float (not hard attention)", () => {
     { id: "b", attention: "inspect" },
   ];
   assert.deepEqual(pinnedOrder(list, pinned).map(n => n.id), ["a", "b"]);
+});
+
+/* ---------- send-to targets: who can receive a chat bubble ---------- */
+
+test("canReceiveSend: only a live, open chat can receive", () => {
+  assert.equal(canReceiveSend({ id: "a", live: "quiet" }), true);
+  assert.equal(canReceiveSend({ id: "a", live: "active" }), true);
+  assert.equal(canReceiveSend({ id: "a", attention: "approval", live: "quiet" }), true);
+  assert.equal(canReceiveSend({ id: "a", live: "exited" }), false);
+  assert.equal(canReceiveSend({ id: "a", live: "unavailable" }), false);
+  assert.equal(canReceiveSend({ id: "a", live: "quiet", ended_at: "2026-08-01T00:00:00Z" }), false);
+  /* a node with no poll state yet (fresh) is not provably dead — allow it */
+  assert.equal(canReceiveSend({ id: "a" }), true);
+});
+
+test("sendableNodes: drops dead, closed, and the source chat itself", () => {
+  const nodes = [
+    { id: "self", live: "quiet" },
+    { id: "ok", live: "active" },
+    { id: "dead", live: "exited" },
+    { id: "gone", live: "unavailable" },
+    { id: "closed", live: "quiet", ended_at: "2026-08-01T00:00:00Z" },
+  ];
+  const g = sendableNodes(nodes, { exceptId: "self" });
+  assert.deepEqual(g.pinned.map(n => n.id), []);
+  assert.deepEqual(g.recent.map(n => n.id), ["ok"]);
+});
+
+test("sendableNodes: pinned block first, in the user's pin order", () => {
+  const nodes = [
+    { id: "a", live: "quiet", last_interaction: 10 },
+    { id: "b", live: "quiet", last_interaction: 90 },
+    { id: "c", live: "quiet", last_interaction: 50 },
+  ];
+  const g = sendableNodes(nodes, { pinned: ["c", "a"] });
+  assert.deepEqual(g.pinned.map(n => n.id), ["c", "a"]);
+  assert.deepEqual(g.recent.map(n => n.id), ["b"]);
+});
+
+test("sendableNodes: attention never reorders the picker under the finger", () => {
+  /* pinnedOrder floats hard attention for the Pinned *tab* (triage). A
+     destination picker must stay positionally stable, or the chat you were
+     about to tap moves the instant an agent asks a question. */
+  const nodes = [
+    { id: "a", live: "quiet" },
+    { id: "b", live: "quiet", attention: "approval" },
+  ];
+  assert.deepEqual(sendableNodes(nodes, { pinned: ["a", "b"] }).pinned.map(n => n.id), ["a", "b"]);
+});
+
+test("sendableNodes: unpinned targets sort by last human interaction, newest first", () => {
+  const nodes = [
+    { id: "old", live: "quiet", last_interaction: 10, last_activity: 999 },
+    { id: "new", live: "quiet", last_interaction: 90, last_activity: 1 },
+  ];
+  /* last_interaction (last human turn), not last_activity (agent churn) */
+  assert.deepEqual(sendableNodes(nodes, {}).recent.map(n => n.id), ["new", "old"]);
+});
+
+test("sendableNodes: no pins degenerates to pure recency (no second rule)", () => {
+  const nodes = [
+    { id: "a", live: "quiet", last_interaction: 1 },
+    { id: "b", live: "quiet", last_interaction: 2 },
+  ];
+  const g = sendableNodes(nodes, { pinned: [] });
+  assert.deepEqual(g.pinned, []);
+  assert.deepEqual(g.recent.map(n => n.id), ["b", "a"]);
+});
+
+test("sendableNodes: a pinned chat that died is still excluded", () => {
+  const nodes = [
+    { id: "pin-dead", live: "exited" },
+    { id: "pin-closed", live: "quiet", ended_at: "2026-08-01T00:00:00Z" },
+    { id: "pin-ok", live: "quiet" },
+  ];
+  const g = sendableNodes(nodes, { pinned: ["pin-dead", "pin-closed", "pin-ok"] });
+  assert.deepEqual(g.pinned.map(n => n.id), ["pin-ok"]);
+  assert.deepEqual(g.recent, []);
+});
+
+test("sendableNodes: lane-agnostic — no lane filter is applied or accepted", () => {
+  /* Same rule as the Pinned tab (tabListForCards skips lane scope): a target
+     that vanishes on some lane filters would be inexplicable to the user. */
+  const nodes = [
+    { id: "a", live: "quiet", lane_id: "L1", last_interaction: 2 },
+    { id: "b", live: "quiet", lane_id: "L2", last_interaction: 1 },
+  ];
+  const g = sendableNodes(nodes, { pinned: ["b"], laneFilter: "L1" });
+  assert.deepEqual(g.pinned.map(n => n.id), ["b"]);
+  assert.deepEqual(g.recent.map(n => n.id), ["a"]);
+  assert.equal(/laneFilter|inLaneScope|servedLanes/.test(
+    mapSrc.slice(mapSrc.indexOf("export function sendableNodes"),
+      mapSrc.indexOf("export function sendableNodes") + 900)), false,
+    "sendableNodes must not consult lane scope");
+});
+
+test("sendableNodes: pure — never mutates or aliases the input array", () => {
+  const nodes = [
+    { id: "a", live: "quiet", last_interaction: 1 },
+    { id: "b", live: "quiet", last_interaction: 2 },
+  ];
+  const before = nodes.map(n => n.id);
+  const g = sendableNodes(nodes, {});
+  assert.deepEqual(nodes.map(n => n.id), before);
+  assert.notEqual(g.recent, nodes);
+  assert.deepEqual(sendableNodes(null, {}), { pinned: [], recent: [] });
+  assert.deepEqual(sendableNodes([], undefined), { pinned: [], recent: [] });
 });
 
 /* ---------- visibility: current/archived/pinned + lane scope ---------- */

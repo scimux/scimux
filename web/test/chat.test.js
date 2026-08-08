@@ -140,18 +140,46 @@ test("turnRoleClass and bk keys cover live and history", () => {
   assert.equal(histBk(1, 2), "h:1:2");
 });
 
-test("bubbleActionsHTML order: when, fork, desc, bookmark, copy", () => {
+test("bubbleActionsHTML order: when, fork, sendto, desc, bookmark, copy", () => {
   const html = bubbleActionsHTML({ time: "2026-07-24T09:05:00" }, {
     iconBranch: "B", iconInto: "I", iconCopy: "C",
   });
   assert.match(html, /class="bubwhen"/);
   assert.match(html, /data-bact="fork"/);
+  assert.match(html, /data-bact="sendto"/);
   assert.match(html, /data-bact="desc"/);
   assert.match(html, /data-bact="bookmark"/);
   assert.match(html, /data-bact="copy"/);
   assert.ok(html.indexOf("bubwhen") < html.indexOf('data-bact="fork"'));
+  /* send-to sits next to fork: both take this text elsewhere, fork creates
+     and send-to reuses */
+  assert.ok(html.indexOf('data-bact="fork"') < html.indexOf('data-bact="sendto"'));
+  assert.ok(html.indexOf('data-bact="sendto"') < html.indexOf('data-bact="desc"'));
   assert.ok(html.indexOf('data-bact="bookmark"') < html.indexOf('data-bact="copy"'));
   assert.doesNotMatch(html, /copybtn/);
+});
+
+test("bubbleActionsHTML: send-to is labelled with an ellipsis and the 180° into glyph", () => {
+  const html = bubbleActionsHTML({ time: "2026-07-24T09:05:00" }, {
+    iconBranch: "B", iconInto: "I", iconCopy: "C",
+  });
+  const btn = html.match(/<button data-bact="sendto">([\s\S]*?)<\/button>/);
+  assert.ok(btn, "send-to button present");
+  /* HIG: an action that needs further input before anything happens takes an
+     ellipsis. It must not be called "copy" — that label is the clipboard
+     action two slots away. */
+  assert.match(btn[1], /send to&#8230;|send to…/);
+  assert.doesNotMatch(btn[1], /copy/i);
+  assert.match(btn[1], /class="rot180"/);
+});
+
+test("chat.js send-to: strips asset refs and excludes the source chat", () => {
+  /* scimux-asset: markers are node-scoped — the fork path already strips them
+     (they would be dead markdown in the target). Send-to must too. */
+  assert.match(chatSrc, /openSendTo\(/);
+  const call = chatSrc.slice(chatSrc.indexOf('bact === "sendto"'));
+  assert.match(call.slice(0, 400), /stripAssetRefs\s*\(/);
+  assert.match(call.slice(0, 400), /exceptId/);
 });
 
 test("bubbleTitle from format is used for tooltips (accepted helper)", () => {
