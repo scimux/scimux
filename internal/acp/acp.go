@@ -640,6 +640,10 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 	if p.ToolCall.Title != nil {
 		title = *p.ToolCall.Title
 	}
+	toolKind := ""
+	if p.ToolCall.Kind != nil {
+		toolKind = string(*p.ToolCall.Kind)
+	}
 	ch := make(chan sdk.PermissionOptionId, 1)
 	s.mu.Lock()
 	if s.pending != nil {
@@ -652,7 +656,7 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 		s.mu.Unlock()
 		return cancelledPermission(), nil
 	}
-	s.pending = &pendingPermission{toolTitle: title, options: p.Options, ch: ch}
+	s.pending = &pendingPermission{toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch}
 	s.mu.Unlock()
 
 	defer s.clearPending()
@@ -964,8 +968,11 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 	}
 	opts := make([]PermOption, 0, len(s.pending.options))
 	for i, o := range s.pending.options {
-		// RED stub: Kind left empty until feat maps sdk.PermissionOption.Kind.
-		opts = append(opts, PermOption{Key: strconv.Itoa(i + 1), Name: o.Name})
+		opts = append(opts, PermOption{
+			Key:  strconv.Itoa(i + 1),
+			Name: o.Name,
+			Kind: mapOptionKind(o.Kind),
+		})
 	}
 	return PendingPermission{
 		Title:    s.pending.toolTitle,
@@ -977,9 +984,18 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 // mapOptionKind projects an SDK permission-option kind into scimux vocabulary.
 // Unknown/empty values stay "" (defensive-parsing contract).
 func mapOptionKind(k sdk.PermissionOptionKind) string {
-	// RED stub: always unknown until the green commit.
-	_ = k
-	return ""
+	switch k {
+	case sdk.PermissionOptionKindAllowOnce:
+		return "allow"
+	case sdk.PermissionOptionKindAllowAlways:
+		return "allow_always"
+	case sdk.PermissionOptionKindRejectOnce:
+		return "reject"
+	case sdk.PermissionOptionKindRejectAlways:
+		return "reject_always"
+	default:
+		return ""
+	}
 }
 
 func (s *Session) clearPending() {

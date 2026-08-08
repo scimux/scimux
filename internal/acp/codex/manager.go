@@ -590,8 +590,11 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 	ds := a.AvailableDecisions
 	opts := make([]PermOption, 0, len(ds))
 	for i, d := range ds {
-		// RED stub: Kind left empty until feat maps Decision.IsRejection().
-		opts = append(opts, PermOption{Key: strconv.Itoa(i + 1), Name: d.Key})
+		opts = append(opts, PermOption{
+			Key:  strconv.Itoa(i + 1),
+			Name: d.Key,
+			Kind: mapDecisionKind(d),
+		})
 	}
 	return PendingPermission{
 		Title:    approvalTitle(a),
@@ -605,15 +608,17 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 // variants are intentionally not distinguished — no grounded evidence for that
 // enum yet, and a wrong guess would mislabel a persistent grant as a one-shot.
 func mapDecisionKind(d Decision) string {
-	// RED stub: always unknown until the green commit.
-	_ = d
-	return ""
+	if d.IsRejection() {
+		return "reject"
+	}
+	return "allow"
 }
 
 // mapApprovalToolKind is "execute" when the approval carries a command, else "".
 func mapApprovalToolKind(a Approval) string {
-	// RED stub: always unknown until the green commit.
-	_ = a
+	if a.Command != "" {
+		return "execute"
+	}
 	return ""
 }
 
