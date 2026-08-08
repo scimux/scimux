@@ -46,10 +46,19 @@ import {
   wallLaneTrackSVG,
   // V2-P4 capsule + callout
   fareOverlayEnabled,
-  selectedSegmentRef,
   fmtRideMs,
   fareCapsuleHTML,
-  fareCalloutHTML,
+  // V2-P5 fare ticket
+  wallHeatOn,
+  segmentNewTokens,
+  gapSegmentRef,
+  wallCapsuleSpots,
+  ticketTokenRows,
+  ticketSplitParts,
+  journeySplitParts,
+  journeyTicketTotals,
+  fareTicketContext,
+  fareTicketHTML,
 } from "../js/map.js";
 import { toggleMapSelection, headStopKey } from "../js/map-model.js";
 import { forkKind, stopsOf, stopKey, newestFirst } from "../js/lanes.js";
@@ -1466,8 +1475,9 @@ test("V2-P3 wall render uses wallLaneTrackSVG under fareOn; base track when fare
   // A bare export is not enough — renderWallMap must invoke it.
   assert.match(mapSrc, /svg \+= wallLaneTrackSVG\(/,
     "renderWallMap must draw tracks via wallLaneTrackSVG");
-  // heatOn gated on fareOn inside the wall path (wall is already mapFull)
-  assert.match(mapSrc, /heatOn:\s*fareOn/);
+  // V2-P5: the heat gate moved behind wallHeatOn() so the UI can be parked
+  // without deleting the implementation. Call sites stay, gate is off.
+  assert.match(mapSrc, /heatOn:\s*wallHeatOn\(fareOn\)/);
   // V2-P3 left fareLineHTML; V2-P4 retires it (see V2-P4 suite below).
   // Keep heat integration pin only — do not re-pin the v1 text line here.
 });
@@ -1514,46 +1524,6 @@ test("V2-P4 fareOverlayEnabled only under mapFull && fareOn", () => {
   assert.equal(fareOverlayEnabled({ mapFull: false, fareOn: false }), false);
 });
 
-test("V2-P4 selectedSegmentRef maps wall stop selection to fare_segments[i]", () => {
-  const n = {
-    id: "a",
-    created_at: "2026-01-01T00:00:00Z",
-    stops: ["2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"],
-    fare_segments: [
-      { total: 1000, fresh_in: 800, out: 200 },
-      { total: 5000, fresh_in: 4000, out: 1000 },
-    ],
-  };
-  const chain = stopsOf(n);
-  // stop i=0 creation → outbound segment 0
-  assert.deepEqual(
-    selectedSegmentRef(chain[0]),
-    { nodeId: "a", segIdx: 0, seg: n.fare_segments[0] },
-  );
-  // stop i=1 intermediate → arrival segment 0
-  assert.deepEqual(
-    selectedSegmentRef(chain[1]),
-    { nodeId: "a", segIdx: 0, seg: n.fare_segments[0] },
-  );
-  // stop i=2 head → arrival segment 1
-  assert.deepEqual(
-    selectedSegmentRef(chain[2]),
-    { nodeId: "a", segIdx: 1, seg: n.fare_segments[1] },
-  );
-
-  // single-stop node: no track gap → null
-  const lone = { id: "b", created_at: "2026-01-01T00:00:00Z", stops: [], fare_segments: [SEG_FULL] };
-  assert.equal(selectedSegmentRef(stopsOf(lone)[0]), null);
-
-  // no fare_segments → null
-  const bare = { id: "c", created_at: "2026-01-01T00:00:00Z", stops: ["2026-01-02T00:00:00Z"] };
-  assert.equal(selectedSegmentRef(stopsOf(bare)[1]), null);
-
-  // null / missing stop
-  assert.equal(selectedSegmentRef(null), null);
-  assert.equal(selectedSegmentRef(undefined), null);
-});
-
 test("V2-P4 fmtRideMs compact wall-clock labels", () => {
   assert.equal(fmtRideMs(null), "");
   assert.equal(fmtRideMs(undefined), "");
@@ -1564,93 +1534,47 @@ test("V2-P4 fmtRideMs compact wall-clock labels", () => {
   assert.match(fmtRideMs(125_000), /2\s*m|125\s*s/);
 });
 
-test("V2-P4 fareCapsuleHTML: headline tokens only; empty without segment", () => {
+test("V2-P5 fareCapsuleHTML: new-token headline + segment identity; empty without segment", () => {
   assert.equal(fareCapsuleHTML(null, { x: 24, y: 50 }), "");
   assert.equal(fareCapsuleHTML(undefined, { x: 24, y: 50 }), "");
 
-  const html = fareCapsuleHTML(SEG_FULL, { x: 24, y: 92, escape: s => s });
+  const html = fareCapsuleHTML(SEG_FULL, {
+    x: 24, y: 92, nodeId: "a", segIdx: 1, escape: s => s,
+  });
   assert.match(html, /fare-capsule|data-fare-capsule/, "capsule marker");
-  // headline is the segment token fare (compact k ok)
-  assert.match(html, /59\.?8?\s*k|59810/i);
-  // at rest: no four-quantity breakdown, no time split in the capsule itself
+  // headline is fresh + out (32800 + 410 = 33210) — cache excluded
+  assert.match(html, /33\.?2?\s*k|33210/i);
+  assert.doesNotMatch(html, /59\.?8\s*k|59810/, "must not headline the cache-inflated total");
+  // the tap target must carry which segment it is, for the ticket
+  assert.match(html, /data-fare-node="a"/);
+  assert.match(html, /data-fare-seg="1"/);
+  // at rest: no breakdown, no time split, and no anchored callout any more
   assert.doesNotMatch(html, /fresh/i);
   assert.doesNotMatch(html, /cache-wr|cache-rd/i);
   assert.doesNotMatch(html, /agent|tools|wait/i);
+  assert.doesNotMatch(html, /fare-callout/);
   // position anchors (midpoint)
   assert.match(html, /24|top|left|translate/i);
-  // opaque surface — class or fill using surface/bg token
-  assert.match(html, /fare-capsule|surface|--bg|--surface/i);
 });
 
-test("V2-P4 fareCalloutHTML: four tokens + real (agent·tools·wait); absent≠zero; D8 cost", () => {
-  const full = fareCalloutHTML(SEG_FULL, { escape: s => s });
-  assert.match(full, /fare-callout|data-fare-callout/);
-  // four canonical quantities
-  assert.match(full, /fresh/i);
-  assert.match(full, /out/i);
-  assert.match(full, /cache-wr|cache.?wr|wr/i);
-  assert.match(full, /cache-rd|cache.?rd|rd/i);
-  assert.match(full, /32\.?8?\s*k|32800/i);
-  assert.match(full, /410/);
-  // time: real with split
-  assert.match(full, /real/i);
-  assert.match(full, /agent/i);
-  assert.match(full, /tools/i);
-  assert.match(full, /wait/i);
-  // cost when complete
-  assert.match(full, /\$/);
-  assert.match(full, /0\.62/);
-
-  // no split → real alone, never fabricated agent/tools/wait zeros
-  const noSplit = fareCalloutHTML(SEG_NO_SPLIT, { escape: s => s });
-  assert.match(noSplit, /real/i);
-  assert.doesNotMatch(noSplit, /\bagent\b/i);
-  assert.doesNotMatch(noSplit, /\btools\b/i);
-  assert.doesNotMatch(noSplit, /\bwait\b/i);
-  // still shows tokens
-  assert.match(noSplit, /fresh/i);
-
-  // incomplete cost → no $
-  const noCost = fareCalloutHTML(SEG_NO_COST, { escape: s => s });
-  assert.doesNotMatch(noCost, /\$/);
-  assert.doesNotMatch(noCost, /0\.99|estimat/i);
-
-  assert.equal(fareCalloutHTML(null), "");
-});
-
-test("V2-P4 fareCapsuleHTML with calloutOpen includes callout body", () => {
-  const closed = fareCapsuleHTML(SEG_FULL, { x: 10, y: 20, calloutOpen: false, escape: s => s });
-  assert.doesNotMatch(closed, /fare-callout|data-fare-callout/);
-
-  const open = fareCapsuleHTML(SEG_FULL, { x: 10, y: 20, calloutOpen: true, escape: s => s });
-  assert.match(open, /fare-capsule|data-fare-capsule/);
-  assert.match(open, /fare-callout|data-fare-callout/);
-  assert.match(open, /fresh/i);
-  assert.match(open, /real/i);
-});
-
-test("V2-P4 wallMapSignature folds callout-open so idle poll skips", () => {
+test("V2-P5 wallMapSignature folds per-segment new tokens so idle poll skips", () => {
   const n = {
     id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
     lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
     created_at: "2026-01-01T00:00:00Z", last_activity: 100, ctx_pct: 10,
     fare_total: 170, fare_turns: 1, fare_cost_complete: false,
     stops: ["2026-01-02T00:00:00Z"],
-    fare_segments: [SEG_NO_SPLIT, { total: 50, fresh_in: 40, out: 10, real_ms: 1000 }],
+    fare_segments: [{ total: 170, fresh_in: 100, out: 20, real_ms: 1000 }],
   };
   const rows = stopsOf(n).sort(newestFirst);
-  const base = {
-    focusLane: null, mapTab: "all", mapSel: "a", mapSelKey: "a#1", fareOn: true,
-  };
-  const wClosed = wallMapSignature(rows, ["L"], { ...base, fareCalloutOpen: false });
-  const wOpen = wallMapSignature(rows, ["L"], { ...base, fareCalloutOpen: true });
-  assert.notEqual(wClosed, wOpen, "callout open/closed must change signature");
-  // stable under unchanged poll
-  assert.equal(
-    wallMapSignature(rows, ["L"], { ...base, fareCalloutOpen: true }),
-    wOpen,
-  );
-  assert.equal(mapRenderDecision(wOpen, wOpen), "skip");
+  const base = { focusLane: null, mapTab: "all", mapSel: "a", mapSelKey: "a#1", fareOn: true };
+  const before = wallMapSignature(rows, ["L"], base);
+  assert.equal(wallMapSignature(rows, ["L"], base), before, "stable under unchanged poll");
+  assert.equal(mapRenderDecision(before, before), "skip");
+
+  // a ride that spends more must rebuild the wall (capsule label changes)
+  n.fare_segments = [{ total: 170, fresh_in: 140, out: 30, real_ms: 1000 }];
+  assert.notEqual(wallMapSignature(rows, ["L"], base), before);
 });
 
 test("V2-P4 v1 fareLineHTML fully retired — no export, no call site, no always-on fare row", () => {
@@ -1663,15 +1587,31 @@ test("V2-P4 v1 fareLineHTML fully retired — no export, no call site, no always
   assert.doesNotMatch(mapSrc, /class="fare"/);
   // helpers that replace it must exist
   assert.match(mapSrc, /export function fareCapsuleHTML\b/);
-  assert.match(mapSrc, /export function fareCalloutHTML\b/);
-  assert.match(mapSrc, /export function selectedSegmentRef\b/);
 });
 
-test("V2-P4 wall: capsule only on selected segment; none when nothing selected", () => {
+test("V2-P5 anchored callout fully retired — the sheet replaces it", () => {
+  assert.doesNotMatch(mapSrc, /export function fareCalloutHTML\b/,
+    "fareCalloutHTML export must be removed");
+  assert.doesNotMatch(mapSrc, /fareCalloutHTML\s*\(/, "no callout call sites");
+  assert.doesNotMatch(mapSrc, /fareCalloutOpen/, "no callout open state");
+  assert.doesNotMatch(mapSrc, /selectedSegmentRef/, "selection-only capsule path retired");
+  assert.doesNotMatch(mapSrc, /fare-callout/, "no callout markup");
+  const css = readFileSync(join(__dirname, "../css/map.css"), "utf8");
+  assert.doesNotMatch(css, /\.fare-callout/, "callout CSS (the clipped anchor) must be gone");
+  // the ticket sheet exists in its place
+  assert.match(mapSrc, /export function fareTicketHTML\b/);
+  const html = readFileSync(join(__dirname, "../index.html"), "utf8");
+  assert.match(html, /id="faresheet"/, "ticket bottom sheet must exist");
+  assert.match(html, /id="fare_ticket"/, "ticket body container must exist");
+});
+
+test("V2-P5 wall: a capsule on every segment; tap opens the ticket sheet", () => {
   const mapwrap = fakeEl("mapwrap");
+  const fareticket = fakeEl("fare_ticket");
   const composer = fakeEl("prompt");
   composer.value = "draft stays for capsule";
   composer._focused = true;
+  const opened = [];
   const body = {
     classList: {
       _set: new Set(["map-full"]),
@@ -1680,18 +1620,19 @@ test("V2-P4 wall: capsule only on selected segment; none when nothing selected",
       add(name){ this._set.add(name); },
     },
   };
+  // creation + two /clear stops = three stations = two track gaps
   const node = {
-    id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
-    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    id: "a", title: "Alpha", description: "d", agent: "claude", model: "opus-5",
+    effort: "high", lane_id: "L", parent: "", ended_at: "", live: "quiet",
     attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
-    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
-    fare_fresh_in: 100, fare_out: 20, fare_cache_write: 0, fare_cache_read: 50,
-    fare_total: 170, fare_turns: 2, fare_cost_complete: false,
+    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"],
+    fare_fresh_in: 130, fare_out: 40, fare_cache_write: 0, fare_cache_read: 50,
+    fare_total: 220, fare_turns: 4, fare_cost_complete: false,
     fare_segments: [
       { total: 100, fresh_in: 80, cache_read: 0, cache_write: 0, out: 20,
-        real_ms: 5000, agent_ms: 3000, tools_ms: 1000, wait_ms: 1000 },
+        real_ms: 5000, agent_ms: 3000, tools_ms: 1000, wait_ms: 1000, turns: 2 },
       { total: 70, fresh_in: 50, cache_read: 0, cache_write: 0, out: 20,
-        real_ms: 2000 },
+        real_ms: 2000, turns: 2 },
     ],
   };
   const nodes = [node];
@@ -1703,7 +1644,7 @@ test("V2-P4 wall: capsule only on selected segment; none when nothing selected",
   });
   const feature = createMapFeature({
     roots: {
-      mapwrap, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
+      mapwrap, fareticket, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
     document: { body, querySelector: () => null },
@@ -1722,6 +1663,7 @@ test("V2-P4 wall: capsule only on selected segment; none when nothing selected",
       byId: { a: node },
     }),
     agentLogo: () => "",
+    openSheet: id => opened.push(id),
     icons: {
       ICON_FARE_ON: `<svg data-fare="on"></svg>`,
       ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
@@ -1731,77 +1673,64 @@ test("V2-P4 wall: capsule only on selected segment; none when nothing selected",
   feature.restoreChrome();
   feature.render();
 
-  // Nothing selected → heat may be on, but no capsule and no always-on fare text row
-  assert.doesNotMatch(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/);
+  // Both segments carry a capsule with no selection at all (that was V2-P4)
+  const caps = mapwrap.innerHTML.match(/data-fare-capsule/g) || [];
+  assert.equal(caps.length, 2, "one capsule per inter-station gap");
+  assert.match(mapwrap.innerHTML, /data-fare-seg="0"/);
+  assert.match(mapwrap.innerHTML, /data-fare-seg="1"/);
+  // headline is fresh + out, not the cache-inflated total
+  assert.match(mapwrap.innerHTML, /\b100\b|0\.1\s*k/i);
+  // lane heat is parked: every track stroke stays at the base width
+  assert.doesNotMatch(mapwrap.innerHTML, /data-heat=/);
+  // no always-on fare text row, no anchored callout
   assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
+  assert.doesNotMatch(mapwrap.innerHTML, /fare-callout/);
   assert.equal(composer.value, "draft stays for capsule");
   assert.equal(composer._focused, true);
 
-  // Select head stop via wall click simulation (data-nid + data-skey)
-  const headKey = "a#1";
-  const fakeRow = {
-    dataset: { nid: "a", skey: headKey, stop: "" },
-    closest(sel){
-      if (sel === "[data-nid]") return this;
-      if (sel === "[data-fold]" || sel === "[data-jump]" || sel === "[data-medit]"
-        || sel === "[data-forkfrom]" || sel === "[data-golane]" || sel === "[data-goorigin]"
-        || sel === "[data-fare-capsule]") return null;
-      return null;
-    },
-  };
-  const clickEv = { target: { closest(sel){ return fakeRow.closest(sel); } } };
-  firstListener(mapwrap, "click")(clickEv);
-
-  assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
-    "capsule appears on selected segment");
-  // headline tokens for the arrival segment of head (seg 0: total 100)
-  assert.match(mapwrap.innerHTML, /\b100\b|0\.1\s*k/i);
-  // no always-on fare text meter
-  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
-  // callout closed at rest
-  assert.doesNotMatch(mapwrap.innerHTML, /fare-callout|data-fare-callout/);
-
-  // Tap capsule → callout opens with breakdown
+  // Tap a capsule → ticket rendered into the sheet body, sheet opened
   const capsuleEl = {
-    dataset: { fareCapsule: "1" },
-    closest(sel){
-      if (sel === "[data-fare-capsule]") return this;
-      return null;
-    },
+    dataset: { fareCapsule: "1", fareNode: "a", fareSeg: "0" },
+    closest(sel){ return sel === "[data-fare-capsule]" ? this : null; },
   };
   firstListener(mapwrap, "click")({
     target: { closest(sel){ return capsuleEl.closest(sel); } },
     stopPropagation(){},
     preventDefault(){},
   });
-  assert.match(mapwrap.innerHTML, /fare-callout|data-fare-callout/);
-  assert.match(mapwrap.innerHTML, /fresh/i);
-  assert.match(mapwrap.innerHTML, /real/i);
-  assert.match(mapwrap.innerHTML, /agent/i);
+  assert.deepEqual(opened, ["#faresheet"], "capsule tap opens the ticket sheet");
+  const ticket = fareticket.innerHTML;
+  assert.match(ticket, /fare-ticket/, "ticket markup");
+  assert.match(ticket, /Alpha/, "station name, not just a stop number");
+  assert.match(ticket, /claude/i);
+  assert.match(ticket, /opus-5/i);
+  assert.match(ticket, /high/i, "effort when the agent reports one");
+  assert.match(ticket, /\b100\b|0\.1\s*k/, "segment new tokens");
+  assert.match(ticket, /170|0\.17\s*k/, "cumulative journey total (130 + 40)");
+  // the tapped segment has a split; the journey does not (segment 1 lacks it)
+  assert.match(ticket, /ticket-bar/, "segment gauge");
+  assert.equal((ticket.match(/ticket-bar/g) || []).length, 1,
+    "no cumulative gauge while any ride lacks the split");
+  // wall must not have been disturbed by opening the sheet
+  assert.equal(composer.value, "draft stays for capsule");
 
-  // Poll: segment tokens grow; capsule text updates; composer + callout state survive
-  node.fare_segments = [
-    { total: 9000, fresh_in: 8000, cache_read: 0, cache_write: 0, out: 1000,
-      real_ms: 5000, agent_ms: 3000, tools_ms: 1000, wait_ms: 1000 },
-    { total: 70, fresh_in: 50, cache_read: 0, cache_write: 0, out: 20, real_ms: 2000 },
-  ];
+  // Poll: tokens grow, capsule label follows, composer survives
+  node.fare_segments[0] = {
+    ...node.fare_segments[0], fresh_in: 8000, out: 1000, total: 9000,
+  };
   feature.render();
-  assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/);
   assert.match(mapwrap.innerHTML, /9\s*k|9000/i);
-  assert.match(mapwrap.innerHTML, /fare-callout|data-fare-callout/,
-    "callout open state survives poll rebuild");
   assert.equal(composer.value, "draft stays for capsule");
   assert.equal(composer._focused, true);
 
   feature.destroy();
 });
 
-test("V2-P4 gated off when !fareOn or not full-screen; no dangling fareLineHTML", () => {
-  // Pure gate already covered; pin wall path wiring + retirement.
+test("V2-P5 capsules gated off when !fareOn; heat call sites stay parked", () => {
   assert.match(mapSrc, /fareCapsuleHTML\s*\(/,
-    "renderWallMap must draw the capsule via fareCapsuleHTML");
-  assert.match(mapSrc, /selectedSegmentRef\s*\(/,
-    "segment selection must use selectedSegmentRef from wall selection");
+    "renderWallMap must draw capsules via fareCapsuleHTML");
+  assert.match(mapSrc, /wallCapsuleSpots\s*\(/,
+    "renderWallMap must place capsules from wallCapsuleSpots");
   assert.doesNotMatch(mapSrc, /export function fareLineHTML\b/);
   assert.doesNotMatch(mapSrc, /fareLineHTML\s*\(/);
 
@@ -1820,10 +1749,7 @@ test("V2-P4 gated off when !fareOn or not full-screen; no dangling fareLineHTML"
     attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
     ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
     fare_total: 170, fare_turns: 2, fare_cost_complete: false,
-    fare_segments: [
-      { total: 100, fresh_in: 80, out: 20, real_ms: 5000 },
-      { total: 70, fresh_in: 50, out: 20, real_ms: 2000 },
-    ],
+    fare_segments: [{ total: 100, fresh_in: 80, out: 20, real_ms: 5000 }],
   };
   const storage = memoryStorage({
     [MAP_FULL_KEY]: "1",
@@ -1834,8 +1760,9 @@ test("V2-P4 gated off when !fareOn or not full-screen; no dangling fareLineHTML"
   const farebtn = fakeEl("farebtn");
   const feature = createMapFeature({
     roots: {
-      mapwrap, farebtn, mapfullbtn: fakeEl("mapfullbtn"),
-      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+      mapwrap, fareticket: fakeEl("fare_ticket"), farebtn,
+      mapfullbtn: fakeEl("mapfullbtn"), lanechips: fakeEl("chips"),
+      maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
     document: { body, querySelector: () => null },
     storage,
@@ -1853,6 +1780,7 @@ test("V2-P4 gated off when !fareOn or not full-screen; no dangling fareLineHTML"
       byId: { a: node },
     }),
     agentLogo: () => "",
+    openSheet: () => {},
     icons: {
       ICON_FARE_ON: `<svg data-fare="on"></svg>`,
       ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
@@ -1861,26 +1789,317 @@ test("V2-P4 gated off when !fareOn or not full-screen; no dangling fareLineHTML"
   feature.bind();
   feature.restoreChrome();
   feature.render();
-  // select a stop while fare is off
-  const fakeRow = {
-    dataset: { nid: "a", skey: "a#1", stop: "" },
-    closest(sel){
-      if (sel === "[data-nid]") return this;
-      if (sel === "[data-fare-capsule]") return null;
-      return null;
-    },
-  };
-  firstListener(mapwrap, "click")({
-    target: { closest(sel){ return fakeRow.closest(sel); } },
-  });
   assert.doesNotMatch(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
     "no capsule when fareOff");
   assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
 
-  // turn fare on → capsule appears for selection
+  // turn fare on → capsule appears without any selection
   firstListener(farebtn, "click")();
   feature.render();
   assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
-    "capsule when fareOn + selection");
+    "capsule when fareOn, no selection needed");
+  assert.doesNotMatch(mapwrap.innerHTML, /data-heat=/, "heat stays parked");
   feature.destroy();
+});
+
+
+/* ---------- V2-P5: lane heat parked, capsule per segment, ticket sheet
+ * (fare-design.md v2 follow-up). The anchored callout is retired; the
+ * breakdown moves into a bottom sheet styled as a paper fare ticket, and
+ * every block hides itself when its data was never reported. */
+
+const SEG_TICKET = {
+  fresh_in: 12300, cache_read: 130000, cache_write: 8000, out: 4100,
+  total: 154400, turns: 3,
+  real_ms: 200_000, agent_ms: 40_000, tools_ms: 120_000, wait_ms: 40_000,
+  cost: 0.14, cost_complete: true,
+};
+
+const SEG_SPARSE = {
+  // codex app-server: no cache write, no cost, no tool timing
+  fresh_in: 7400, cache_read: 88000, cache_write: 0, out: 2400,
+  total: 97800, turns: 2, real_ms: 291_000,
+};
+
+test("V2-P5 lane heat hidden in the UI, implementation kept", () => {
+  assert.equal(wallHeatOn(true), false, "heat off even when the fare layer is on");
+  assert.equal(wallHeatOn(false), false);
+  // parked, not deleted — the maintainer wants to revisit it
+  assert.match(mapSrc, /export function heatStrokeWidth\b/);
+  assert.match(mapSrc, /export function heatEnabled\b/);
+  assert.match(mapSrc, /export function heatOpacity\b/);
+  assert.doesNotMatch(mapSrc, /heatOn:\s*fareOn\b/, "wall must not feed fareOn into heat");
+});
+
+test("V2-P5 segmentNewTokens = fresh + out; absent ≠ zero", () => {
+  assert.equal(segmentNewTokens(SEG_TICKET), 16400);
+  assert.equal(segmentNewTokens({ fresh_in: 0, out: 0 }), 0, "reported zero is a value");
+  assert.equal(segmentNewTokens({ fresh_in: 5 }), 5, "one side present is enough");
+  assert.equal(segmentNewTokens({ cache_read: 500 }), null, "cache alone is not a fare");
+  assert.equal(segmentNewTokens(null), null);
+  assert.equal(segmentNewTokens(undefined), null);
+});
+
+test("V2-P5 gapSegmentRef bridges consecutive stops of one node", () => {
+  const n = {
+    id: "a", created_at: "2026-01-01T00:00:00Z",
+    stops: ["2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"],
+    fare_segments: [{ fresh_in: 1, out: 1 }, { fresh_in: 2, out: 2 }],
+  };
+  const chain = stopsOf(n);
+  assert.deepEqual(gapSegmentRef(chain[0], chain[1]),
+    { nodeId: "a", segIdx: 0, seg: n.fare_segments[0] });
+  assert.deepEqual(gapSegmentRef(chain[1], chain[2]),
+    { nodeId: "a", segIdx: 1, seg: n.fare_segments[1] });
+  // order-insensitive (wall rows are newest-first)
+  assert.deepEqual(gapSegmentRef(chain[2], chain[1]),
+    { nodeId: "a", segIdx: 1, seg: n.fare_segments[1] });
+  // non-adjacent, cross-node, missing segment → null
+  assert.equal(gapSegmentRef(chain[0], chain[2]), null);
+  const other = { id: "b", created_at: "2026-01-01T00:00:00Z", stops: [] };
+  assert.equal(gapSegmentRef(chain[0], stopsOf(other)[0]), null);
+  assert.equal(gapSegmentRef(null, chain[0]), null);
+});
+
+test("V2-P5 wallCapsuleSpots: one midpoint per priced gap", () => {
+  const n = {
+    id: "a", created_at: "2026-01-01T00:00:00Z",
+    stops: ["2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"],
+    fare_segments: [{ fresh_in: 80, out: 20 }, { fresh_in: 50, out: 20 }],
+  };
+  const chain = stopsOf(n);
+  const pts = [
+    { y: 300, stop: chain[0] },
+    { y: 200, stop: chain[1] },
+    { y: 100, stop: chain[2] },
+  ];
+  const spots = wallCapsuleSpots(pts, 46);
+  assert.equal(spots.length, 2);
+  assert.deepEqual(spots.map(s => s.y).sort((a, b) => a - b), [150, 250],
+    "vertically centred between the two stations");
+  assert.ok(spots.every(s => s.x === 46));
+  assert.deepEqual(spots.map(s => s.segIdx).sort(), [0, 1]);
+  // fewer than two points, or no fare data → nothing
+  assert.deepEqual(wallCapsuleSpots([pts[0]], 46), []);
+  assert.deepEqual(wallCapsuleSpots([], 46), []);
+  const bare = { id: "c", created_at: "2026-01-01T00:00:00Z", stops: ["2026-01-02T00:00:00Z"] };
+  const bareChain = stopsOf(bare);
+  assert.deepEqual(
+    wallCapsuleSpots([{ y: 10, stop: bareChain[0] }, { y: 90, stop: bareChain[1] }], 46),
+    [], "no fare_segments → no capsule");
+});
+
+test("V2-P5 ticketTokenRows hides quantities that were never reported", () => {
+  const full = ticketTokenRows(SEG_TICKET);
+  assert.deepEqual(full.map(r => r.label),
+    ["new input", "reply", "cache reused", "cache written"]);
+  assert.deepEqual(full.map(r => r.counted), [true, true, false, false],
+    "only fresh + reply count toward the fare");
+  assert.match(String(full[0].value), /12\.?3?\s*k|12300/);
+
+  // codex: cache_write 0 → the row disappears rather than printing a zero
+  const sparse = ticketTokenRows(SEG_SPARSE);
+  assert.deepEqual(sparse.map(r => r.label), ["new input", "reply", "cache reused"]);
+
+  assert.deepEqual(ticketTokenRows(null), []);
+  assert.deepEqual(ticketTokenRows({}), []);
+});
+
+test("V2-P5 ticketSplitParts: bar only when the transport stamped the split", () => {
+  const parts = ticketSplitParts(SEG_TICKET);
+  assert.equal(parts.length, 3);
+  assert.deepEqual(parts.map(p => p.key), ["agent", "tools", "wait"]);
+  assert.deepEqual(parts.map(p => p.ms), [40_000, 120_000, 40_000]);
+  // fractions partition the whole (v2-D1: parts never exceed real)
+  const sum = parts.reduce((a, p) => a + p.frac, 0);
+  assert.ok(Math.abs(sum - 1) < 1e-6, "fractions sum to 1");
+  assert.match(parts[2].label, /wait/i);
+
+  assert.equal(ticketSplitParts(SEG_SPARSE), null, "no split → no bar, never zeros");
+  assert.equal(ticketSplitParts(null), null);
+});
+
+test("V2-P5 journeySplitParts hides the cumulative gauge on mixed journeys", () => {
+  const split = journeySplitParts([SEG_TICKET, { ...SEG_TICKET, agent_ms: 1000, tools_ms: 2000, wait_ms: 3000 }]);
+  assert.equal(split.length, 3);
+  assert.deepEqual(split.map(p => p.ms), [41_000, 122_000, 43_000], "summed across rides");
+
+  // one unsplit ride and the sum would silently under-report the journey
+  assert.equal(journeySplitParts([SEG_TICKET, SEG_SPARSE]), null);
+  assert.equal(journeySplitParts([]), null);
+  assert.equal(journeySplitParts(null), null);
+});
+
+test("V2-P5 journeyTicketTotals sums the line, D8 cost, absent ≠ zero", () => {
+  const n = {
+    fare_fresh_in: 120000, fare_out: 18200, fare_turns: 7,
+    fare_cost: 1.06, fare_cost_complete: true,
+    stops: ["s1", "s2"],
+    fare_segments: [SEG_TICKET, { ...SEG_SPARSE, real_ms: 100_000 }],
+  };
+  const t = journeyTicketTotals(n);
+  assert.equal(t.newTokens, 138200);
+  assert.equal(t.realMS, 300_000, "sum of ride durations, not wall clock");
+  assert.equal(t.rides, 7);
+  assert.equal(t.stops, 3, "creation + two /clear stops");
+  assert.equal(t.cost, 1.06);
+
+  // incomplete cost → omitted, never a partial sum passed off as the total
+  assert.equal(journeyTicketTotals({ ...n, fare_cost_complete: false }).cost, null);
+  // no fare at all
+  assert.equal(journeyTicketTotals({}).newTokens, null);
+  assert.equal(journeyTicketTotals(null), null);
+});
+
+test("V2-P5 fareTicketContext gathers stations, agent and totals", () => {
+  const n = {
+    id: "a", title: "Head", agent: "claude", model: "opus-5", effort: "high",
+    created_at: "2026-01-01T09:00:00Z",
+    stops: ["2026-01-01T10:00:00Z", "2026-01-01T11:00:00Z"],
+    fare_fresh_in: 100, fare_out: 20, fare_turns: 3,
+    fare_segments: [SEG_TICKET, SEG_SPARSE],
+    station_labels: { "2026-01-01T09:00:00Z": { title: "First station" } },
+  };
+  const ctx = fareTicketContext(n, 0, {
+    stopLabel: st => ({ title: st.i === 0 ? "First station" : "Second station" }),
+    timeLabel: iso => "T" + iso.slice(11, 16),
+  });
+  assert.equal(ctx.from.title, "First station");
+  assert.equal(ctx.to.title, "Second station");
+  assert.equal(ctx.from.time, "T09:00");
+  assert.equal(ctx.to.time, "T10:00");
+  assert.equal(ctx.from.index, 1, "stations are numbered from 1 on the ticket");
+  assert.equal(ctx.to.index, 2);
+  assert.equal(ctx.agent, "claude");
+  assert.equal(ctx.model, "opus-5");
+  assert.equal(ctx.effort, "high");
+  assert.equal(ctx.seg, n.fare_segments[0]);
+  assert.equal(ctx.totals.rides, 3);
+
+  // out-of-range or fare-less segment → no ticket
+  assert.equal(fareTicketContext(n, 9, {}), null);
+  assert.equal(fareTicketContext(null, 0, {}), null);
+});
+
+test("V2-P5 fareTicketHTML: full ticket", () => {
+  const ctx = {
+    nodeId: "a", segIdx: 0, seg: SEG_TICKET,
+    from: { title: "Wiring the fare sheet", time: "14:32", index: 2 },
+    to: { title: "Retiring the callout", time: "14:35", index: 3 },
+    agent: "claude", model: "opus-5", effort: "high",
+    totals: { newTokens: 138200, realMS: 2_472_000, cost: 1.06, rides: 7, stops: 3 },
+    segments: [SEG_TICKET, { ...SEG_TICKET }],
+  };
+  const html = fareTicketHTML(ctx, { escape: s => s });
+  assert.match(html, /fare-ticket/);
+  // stations, not stop numbers alone
+  assert.match(html, /Wiring the fare sheet/);
+  assert.match(html, /Retiring the callout/);
+  assert.match(html, /14:32/);
+  assert.match(html, /14:35/);
+  // agent · model · effort above the fare
+  assert.match(html, /claude/i);
+  assert.match(html, /opus-5/i);
+  assert.match(html, /high/i);
+  // headline = new tokens, cache excluded
+  assert.match(html, /16\.?4?\s*k|16400/i);
+  assert.match(html, /new tokens/i);
+  // breakdown + the line that explains why cache is not in the fare
+  assert.match(html, /new input/i);
+  assert.match(html, /cache reused/i);
+  assert.match(html, /cache written/i);
+  // journey time: duration + split bar + legend
+  assert.match(html, /ticket-bar/);
+  assert.match(html, /waiting/i, "wait is spelled out, not time(1) jargon");
+  // cost stamp (D8: reported)
+  assert.match(html, /0\.14/);
+  // cumulative foot
+  assert.match(html, /138\.?2?\s*k|138200/i);
+  assert.match(html, /7 rides|7\s*·\s*rides|rides/i);
+  // both gauges present when the whole journey carries the split
+  assert.equal((html.match(/ticket-bar/g) || []).length, 2);
+});
+
+test("V2-P5 fareTicketHTML: sparse ticket hides what was never reported", () => {
+  const ctx = {
+    nodeId: "b", segIdx: 0, seg: SEG_SPARSE,
+    from: { title: "Codex probe", time: "09:14", index: 1 },
+    to: { title: "Second turn", time: "09:19", index: 2 },
+    agent: "codex", model: "gpt-5.3-codex", effort: "",
+    totals: { newTokens: 61700, realMS: 1_323_000, cost: null, rides: 4, stops: 2 },
+    segments: [SEG_SPARSE, SEG_SPARSE],
+  };
+  const html = fareTicketHTML(ctx, { escape: s => s });
+  // no effort word when the agent reports none
+  assert.doesNotMatch(html, /effort/i);
+  // no cache-written row (0 / never reported)
+  assert.doesNotMatch(html, /cache written/i);
+  assert.match(html, /cache reused/i, "what was reported still shows");
+  // no split → no bar anywhere, but the duration survives
+  assert.doesNotMatch(html, /ticket-bar/);
+  assert.doesNotMatch(html, /\bagent\b/i);
+  assert.match(html, /4m 51s|291|duration|journey time/i);
+  // no reported cost → no stamp, no dollar figure at all
+  assert.doesNotMatch(html, /\$/);
+  assert.doesNotMatch(html, /estimat/i);
+  // cumulative tokens still shown
+  assert.match(html, /61\.?7?\s*k|61700/i);
+
+  assert.equal(fareTicketHTML(null), "");
+  assert.equal(fareTicketHTML({ seg: null }), "");
+});
+
+/* ---------- V2-P5 review fixes (live iPad review, 2026-08-08) ---------- */
+
+test("V2-P5 fmtRideMs climbs units — no 1300m 51s", () => {
+  // short scales unchanged
+  assert.match(fmtRideMs(45_000), /^45s$/);
+  assert.equal(fmtRideMs(125_000), "2m 5s");
+  assert.equal(fmtRideMs(600_000), "10m");
+
+  // an hour and beyond: minutes, not a four-digit minute count
+  assert.equal(fmtRideMs(3_600_000), "1h");
+  assert.equal(fmtRideMs(3_599_999), "1h", "rounds up across the boundary, never 60m");
+  assert.equal(fmtRideMs(28_063_000), "7h 48m", "was 467m 43s");
+  assert.equal(fmtRideMs(78_051_000), "21h 41m", "was 1300m 51s");
+
+  // a day and beyond (a journey's cumulative time reaches this)
+  assert.equal(fmtRideMs(86_400_000), "1d");
+  assert.equal(fmtRideMs(90_000_000), "1d 1h");
+  assert.equal(fmtRideMs(8 * 86_400_000 + 5 * 3_600_000), "8d 5h");
+
+  // the seam must never print a zero small unit
+  assert.doesNotMatch(fmtRideMs(7_200_000), /0m/);
+  assert.doesNotMatch(fmtRideMs(172_800_000), /0h/);
+});
+
+test("V2-P5 the ticket perforation IS the actionbar perforation", () => {
+  /* Reviewed on an iPad: the ticket's punches read weaker than the bubble
+     stub's in both themes. The ink and geometry were already identical — what
+     differed was that .tk-tear also painted a solid --hairline rule *behind*
+     the run, filling the gaps so the seam read as a bumpy line instead of a
+     row of holes. .actionbar.tear sets `border-top: none` for exactly that
+     reason. Same motif = same declaration, no ticket-only variant. */
+  const tokens = readFileSync(join(__dirname, "../css/tokens.css"), "utf8");
+  const css = readFileSync(join(__dirname, "../css/map.css"), "utf8");
+  const base = readFileSync(join(__dirname, "../css/base.css"), "utf8");
+
+  const punch = /radial-gradient\(circle, var\(--perf\) 0 2\.5px, transparent 2\.9px\) repeat-x;\s*\n?\s*background-size: 9px 6px;/;
+  assert.match(base, punch, "the actionbar run is the reference");
+  assert.match(css, punch, "the ticket must use the identical run");
+  assert.doesNotMatch(tokens, /--fare-perf/, "no ticket-only punch token");
+  assert.doesNotMatch(css, /--fare-perf/);
+
+  // no continuous rule behind the punches (that was the whole defect)
+  const tear = css.match(/\.fare-ticket \.tk-tear \{[^}]*\}/);
+  assert.ok(tear, ".tk-tear rule present");
+  assert.doesNotMatch(tear[0], /background:\s*var\(--hairline\)/,
+    "a solid line through the run kills the perforation");
+  assert.doesNotMatch(tear[0], /border-top:\s*1px/);
+
+  // end bites match the card's --tearhole radius, and the run clears them by
+  // the same 8px the actionbar uses
+  assert.match(css, /\.tk-tear::after[\s\S]*?12px/, "12px end bites, as .tearcard");
+  assert.match(css, /\.tk-tear::before[\s\S]*?left: 20px; right: 20px/,
+    "run inset = tearhole 12px + 8px");
 });
