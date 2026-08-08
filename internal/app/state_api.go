@@ -107,15 +107,16 @@ type nodeView struct {
 	// ReadFare.Turns==0 (absent ≠ zero). fare_cost only meaningful with
 	// fare_cost_complete (D8). Pointers so a genuine 0 still serializes when
 	// fare is available.
-	FareFreshIn      *int     `json:"fare_fresh_in,omitempty"`
-	FareCacheRead    *int     `json:"fare_cache_read,omitempty"`
-	FareCacheWrite   *int     `json:"fare_cache_write,omitempty"`
-	FareOut          *int     `json:"fare_out,omitempty"`
-	FareTotal        *int     `json:"fare_total,omitempty"`
-	FareTurns        *int     `json:"fare_turns,omitempty"`
-	FareCost         *float64 `json:"fare_cost,omitempty"`
-	FareCostComplete *bool    `json:"fare_cost_complete,omitempty"`
-	FareModel        string   `json:"fare_model,omitempty"`
+	FareFreshIn      *int          `json:"fare_fresh_in,omitempty"`
+	FareCacheRead    *int          `json:"fare_cache_read,omitempty"`
+	FareCacheWrite   *int          `json:"fare_cache_write,omitempty"`
+	FareOut          *int          `json:"fare_out,omitempty"`
+	FareTotal        *int          `json:"fare_total,omitempty"`
+	FareTurns        *int          `json:"fare_turns,omitempty"`
+	FareCost         *float64      `json:"fare_cost,omitempty"`
+	FareCostComplete *bool         `json:"fare_cost_complete,omitempty"`
+	FareModel        string        `json:"fare_model,omitempty"`
+	FareSegments     []fareSegView `json:"fare_segments,omitempty"`
 }
 
 func unixMSStamp(s string) int64 {

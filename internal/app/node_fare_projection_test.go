@@ -346,3 +346,140 @@ func buildPaddedFareLog(t *testing.T, id, home string, freshIn, out, wantSize in
 	}
 	return b[:wantSize]
 }
+
+// --- V2-P2: per-segment ride projection ---
+
+func TestNodeProjection_FareSegmentsWithSplit(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{
+		ID: "ride-split", Title: "r", Agent: "grok", Model: "g",
+		Dir: "/tmp", CreatedAt: "2026-07-14T00:00:00Z",
+	}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.live[n.ID] = "quiet"
+
+	// Real 10s, tools 3s, wait 2s → agent 5s. Tokens present.
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, "grok", "g", "", a.home),
+		{T: "user", Time: "2026-08-01T10:00:00Z", Text: "go"},
+		{T: "tool", Time: "2026-08-01T10:00:01Z", Tool: &sessionlog.ToolEvent{ID: "t1", Title: "Bash", Status: "pending"}},
+		{T: "tool", Time: "2026-08-01T10:00:04Z", Tool: &sessionlog.ToolEvent{ID: "t1", Status: "completed"}},
+		{T: "attention", Time: "2026-08-01T10:00:05Z", Attention: &sessionlog.AttentionEvent{Kind: "approval", Status: "start"}},
+		{T: "attention", Time: "2026-08-01T10:00:07Z", Attention: &sessionlog.AttentionEvent{Kind: "approval", Status: "end"}},
+		{T: "assistant", Time: "2026-08-01T10:00:10Z", Text: "done"},
+		{T: "usage", Time: "2026-08-01T10:00:10Z", Usage: &sessionlog.UsageEvent{
+			InputTokens: 100, OutputTokens: 20, CachedReadTokens: 10,
+			CostAmount: 0.05, Model: "g", TurnID: "r1",
+		}},
+	})
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code = %d body %q", rec.Code, rec.Body.String())
+	}
+	node := stateNodeByID(t, rec.Body.Bytes(), n.ID)
+
+	// Whole-journey fare still present (v1 fields).
+	assertJSONInt(t, node, "fare_turns", 1)
+
+	segs, ok := node["fare_segments"].([]any)
+	if !ok || len(segs) == 0 {
+		t.Fatalf("fare_segments missing or empty: %v", node["fare_segments"])
+	}
+	seg, ok := segs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("seg type %T", segs[0])
+	}
+	// Real = 10s = 10000ms
+	assertJSONInt(t, seg, "real_ms", 10000)
+	assertJSONInt(t, seg, "tools_ms", 3000)
+	assertJSONInt(t, seg, "wait_ms", 2000)
+	assertJSONInt(t, seg, "agent_ms", 5000)
+	assertJSONInt(t, seg, "fresh_in", 90) // grok: input−cache = 100−10
+	assertJSONInt(t, seg, "out", 20)
+	// Partition identity in ms.
+	agent := int(seg["agent_ms"].(float64))
+	tools := int(seg["tools_ms"].(float64))
+	wait := int(seg["wait_ms"].(float64))
+	real := int(seg["real_ms"].(float64))
+	if agent+tools+wait != real {
+		t.Errorf("agent+tools+wait = %d ≠ real %d", agent+tools+wait, real)
+	}
+}
+
+func TestNodeProjection_HistoricalSegmentRealOnly(t *testing.T) {
+	// No tools, no attention → split fields omitted (absent ≠ zero).
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{
+		ID: "ride-hist", Title: "h", Agent: "claude", Model: "c",
+		Dir: "/tmp", CreatedAt: "2026-07-14T00:00:00Z",
+	}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.live[n.ID] = "quiet"
+
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, "claude", "c", "", a.home),
+		{T: "user", Time: "2026-08-01T10:00:00Z", Text: "hi"},
+		{T: "assistant", Time: "2026-08-01T10:00:05Z", Text: "hello"},
+		{T: "usage", Time: "2026-08-01T10:00:05Z", Usage: &sessionlog.UsageEvent{
+			InputTokens: 10, OutputTokens: 5, TurnID: "h1", CostAmount: 0.01,
+		}},
+	})
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	node := stateNodeByID(t, rec.Body.Bytes(), n.ID)
+
+	segs, ok := node["fare_segments"].([]any)
+	if !ok || len(segs) == 0 {
+		t.Fatalf("fare_segments missing: %v", node["fare_segments"])
+	}
+	seg := segs[0].(map[string]any)
+	if _, ok := seg["real_ms"]; !ok {
+		t.Fatal("real_ms missing on historical segment")
+	}
+	for _, k := range []string{"agent_ms", "tools_ms", "wait_ms"} {
+		if v, ok := seg[k]; ok {
+			t.Errorf("%s = %v, want omitted (absent ≠ zero)", k, v)
+		}
+	}
+}
+
+func TestNodeProjection_CompleteOnlyToolsNoSplit(t *testing.T) {
+	// codex app-server: complete-only tool stamps → no split fields.
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{
+		ID: "ride-codex", Title: "cx", Agent: "codex", Model: "gpt",
+		Dir: "/tmp", CreatedAt: "2026-07-14T00:00:00Z",
+	}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.live[n.ID] = "quiet"
+
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, "codex", "gpt", "", a.home),
+		{T: "user", Time: "2026-08-01T10:00:00Z", Text: "run"},
+		{T: "tool", Time: "2026-08-01T10:00:05Z", Tool: &sessionlog.ToolEvent{
+			ID: "item-1", Title: "shell", Status: "completed", Kind: "commandExecution",
+		}},
+		{T: "assistant", Time: "2026-08-01T10:00:10Z", Text: "ok"},
+		{T: "usage", Time: "2026-08-01T10:00:10Z", Usage: &sessionlog.UsageEvent{
+			InputTokens: 5, OutputTokens: 2, TurnID: "c1",
+		}},
+	})
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	node := stateNodeByID(t, rec.Body.Bytes(), n.ID)
+	segs := node["fare_segments"].([]any)
+	seg := segs[0].(map[string]any)
+	assertJSONInt(t, seg, "real_ms", 10000)
+	for _, k := range []string{"agent_ms", "tools_ms", "wait_ms"} {
+		if v, ok := seg[k]; ok {
+			t.Errorf("%s = %v, want omitted for complete-only tools", k, v)
+		}
+	}
+}

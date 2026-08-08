@@ -188,6 +188,7 @@ type mirrorState struct {
 	hasMeta  bool
 	path     string
 	mirrored int
+	tools    int // tool records in the current source segment (V2-P2 watermark)
 	used     int64
 	win      int64
 	turnID   string // last usage TurnID in the current segment (emission gate)

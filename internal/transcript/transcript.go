@@ -41,6 +41,11 @@ type Turn struct {
 	Record  int    `json:"record,omitempty"`
 }
 
+// ToolStamp is one tool call or result for the mirror (V2-P2). STUB surface for red tests.
+type ToolStamp struct {
+	ID, Title, Status, Time string
+}
+
 // ParseLine extracts a turn from one JSONL line of either format.
 // ok is false for anything that is not a visible chat message: tool calls,
 // tool results, reasoning items, meta records, or unparseable input.
@@ -141,6 +146,7 @@ type pendingCall struct{ id, name string }
 type Tailer struct {
 	Path    string
 	Turns   []Turn
+	Tools   []ToolStamp
 	mu      sync.Mutex
 	offset  int64
 	buf     []byte
@@ -325,6 +331,12 @@ func (t *Tailer) Usage() (used, window int64) {
 // noteUsage. Zero values mean "not reported" — never an error. Callers
 // (mirror projection) copy these into sessionlog.UsageEvent; occupancy
 // still comes from Usage().
+func (t *Tailer) ToolStamps() []ToolStamp {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return nil // STUB: red — no tool extraction yet
+}
+
 func (t *Tailer) UsageBreakdown() UsageBreakdown {
 	t.mu.Lock()
 	defer t.mu.Unlock()

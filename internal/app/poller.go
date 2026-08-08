@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
@@ -568,3 +569,7 @@ func (a *app) tailerFor(n *Node) *transcript.Tailer {
 	delete(a.staleChat, n.ID)
 	return nt
 }
+
+// STUB (red): V2-P2 attention edges — no persistence yet.
+func (a *app) persistAttentionTransition(n *Node, prev, next string)   {}
+func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error { return nil }

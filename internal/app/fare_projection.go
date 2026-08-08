@@ -78,3 +78,20 @@ func dominantFareModel(f fare.FareTotals) string {
 	}
 	return best
 }
+
+// fareSegView STUB surface for red tests.
+type fareSegView struct {
+	FreshIn, CacheRead, CacheWrite, Out, Total, Turns int
+	Cost                                              *float64 `json:"cost,omitempty"`
+	CostComplete                                      *bool    `json:"cost_complete,omitempty"`
+	RealMS                                            int64    `json:"real_ms"`
+	AgentMS, ToolsMS, WaitMS                          *int64   `json:"agent_ms,omitempty"`
+}
+
+func (a *app) fareAndRides(n *Node) (fare.FareTotals, []fare.Ride) {
+	return a.fare(n), nil // STUB: no per-segment rides yet
+}
+
+func applyFareRides(v *nodeView, rides []fare.Ride) {
+	// STUB: red — no projection
+}

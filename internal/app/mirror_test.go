@@ -444,3 +444,162 @@ func TestMirror_EmitsOnTurnIDChangeAtSameOccupancy(t *testing.T) {
 		t.Fatalf("after idle: usage events = %d, want 2 (no spurious emission)", got)
 	}
 }
+
+// --- V2-P2 / O6: tool call+result projection into sessionlog ---
+
+func TestMirror_ProjectsClaudeToolCallAndResult(t *testing.T) {
+	// Synthetic Claude shape from V2-P1 grounding: tool_use t1 @09:00:05,
+	// tool_result @09:00:06. Mirror must project pending→completed with CLI times.
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp,
+		`{"type":"user","timestamp":"2026-07-11T09:00:00.000Z","message":{"role":"user","content":"Hello agent, analyze run 42"}}`+"\n"+
+			`{"type":"assistant","timestamp":"2026-07-11T09:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Looking."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}`+"\n"+
+			`{"type":"user","timestamp":"2026-07-11T09:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"results.json"}]}}`+"\n"+
+			`{"type":"assistant","timestamp":"2026-07-11T09:00:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}`+"\n")
+	n := &Node{ID: "n1", Agent: "claude", Transcript: tp}
+	a.syncMirror(n)
+
+	var tools []sessionlog.Event
+	turns := 0
+	for _, ev := range logEvents(t, a, "n1") {
+		switch ev.T {
+		case "tool":
+			tools = append(tools, ev)
+		case "user", "assistant":
+			turns++
+		}
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tool events = %d, want 2 (call+result); events=%v", len(tools), kinds(logEvents(t, a, "n1")))
+	}
+	if tools[0].Tool == nil || tools[0].Tool.ID != "t1" || tools[0].Tool.Status != "pending" {
+		t.Fatalf("call = %+v, want id=t1 status=pending", tools[0].Tool)
+	}
+	if tools[0].Tool.Title != "Bash" {
+		t.Errorf("call title = %q, want Bash", tools[0].Tool.Title)
+	}
+	if tools[0].Time != "2026-07-11T09:00:05.000Z" {
+		t.Errorf("call time = %q, want transcript timestamp", tools[0].Time)
+	}
+	if tools[1].Tool == nil || tools[1].Tool.ID != "t1" || tools[1].Tool.Status != "completed" {
+		t.Fatalf("result = %+v, want id=t1 status=completed", tools[1].Tool)
+	}
+	if tools[1].Time != "2026-07-11T09:00:06.000Z" {
+		t.Errorf("result time = %q, want transcript timestamp", tools[1].Time)
+	}
+	// Turn count: user + assistant(text) + assistant(done) = 3 visible turns
+	// (tool_result-only user has no text → ParseLine drops it).
+	if turns < 2 {
+		t.Errorf("turns = %d, want ≥2 chat turns", turns)
+	}
+}
+
+func TestMirror_ProjectsCodexFunctionCallAndOutput(t *testing.T) {
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "rollout-1.jsonl")
+	appendFile(t, tp,
+		`{"timestamp":"2026-07-11T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello codex"}]}}`+"\n"+
+			`{"timestamp":"2026-07-11T10:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{}"}}`+"\n"+
+			`{"timestamp":"2026-07-11T10:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}`+"\n"+
+			`{"timestamp":"2026-07-11T10:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`+"\n")
+	n := &Node{ID: "n1", Agent: "codex", Transcript: tp}
+	a.syncMirror(n)
+
+	var tools []sessionlog.Event
+	for _, ev := range logEvents(t, a, "n1") {
+		if ev.T == "tool" {
+			tools = append(tools, ev)
+		}
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tool events = %d, want 2; kinds=%v", len(tools), kinds(logEvents(t, a, "n1")))
+	}
+	if tools[0].Tool.ID != "c1" || tools[0].Tool.Status != "pending" || tools[0].Tool.Title != "shell" {
+		t.Fatalf("call = %+v", tools[0].Tool)
+	}
+	if tools[0].Time != "2026-07-11T10:00:04.000Z" {
+		t.Errorf("call time = %q", tools[0].Time)
+	}
+	if tools[1].Tool.ID != "c1" || tools[1].Tool.Status != "completed" {
+		t.Fatalf("result = %+v", tools[1].Tool)
+	}
+}
+
+func TestMirror_ToolsDoNotInflateTurnCounter(t *testing.T) {
+	// After tools are projected, restart must not re-project turns.
+	// replayMirrorState counts only user/assistant for the turn watermark.
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"q"}}`+"\n"+
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"tool_use","id":"tu","name":"Bash","input":{}}]}}`+"\n"+
+			`{"type":"user","timestamp":"t3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu","content":"ok"}]}}`+"\n")
+	n := &Node{ID: "n1", Agent: "claude", Transcript: tp}
+	a.syncMirror(n)
+
+	st := replayMirrorState(filepath.Join(a.sessionsDir, "n1.jsonl"))
+	if st.mirrored != 2 { // user + assistant text; tool_result user has no text
+		t.Fatalf("mirrored turns = %d, want 2 (tools must not inflate)", st.mirrored)
+	}
+	if st.tools != 2 {
+		t.Fatalf("mirrored tools = %d, want 2", st.tools)
+	}
+
+	// Restart: no duplication.
+	b := mirrorTestApp(t)
+	b.sessionsDir = a.sessionsDir
+	b.syncMirror(n)
+	evs := contentEvents(logEvents(t, b, "n1"))
+	toolN, turnN := 0, 0
+	for _, ev := range evs {
+		switch ev.T {
+		case "tool":
+			toolN++
+		case "user", "assistant":
+			turnN++
+		}
+	}
+	if toolN != 2 {
+		t.Errorf("after restart tools = %d, want 2 (no dup)", toolN)
+	}
+	if turnN != 2 {
+		t.Errorf("after restart turns = %d, want 2 (no dup)", turnN)
+	}
+}
+
+func TestMirror_ToolIncrementAndIdle(t *testing.T) {
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	appendFile(t, tp, claudeTurn("user", "q", "t1"))
+	n := &Node{ID: "n1", Agent: "claude", Transcript: tp}
+	a.syncMirror(n)
+	a.syncMirror(n) // idle
+
+	appendFile(t, tp,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Bash","input":{}}]}}`+"\n")
+	a.syncMirror(n)
+	tools := 0
+	for _, ev := range logEvents(t, a, "n1") {
+		if ev.T == "tool" {
+			tools++
+		}
+	}
+	if tools != 1 {
+		t.Fatalf("tools after increment = %d, want 1", tools)
+	}
+	a.syncMirror(n)
+	tools = 0
+	for _, ev := range logEvents(t, a, "n1") {
+		if ev.T == "tool" {
+			tools++
+		}
+	}
+	if tools != 1 {
+		t.Fatalf("idle tick re-projected tools: %d", tools)
+	}
+}

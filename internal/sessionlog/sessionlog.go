@@ -31,18 +31,30 @@ import (
 // record types they don't know, so the schema can grow without breaking
 // old binaries or old files.
 type Event struct {
-	T          string        `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset"
-	Time       string        `json:"time"`
-	Text       string        `json:"text,omitempty"`       // user / assistant
-	Tool       *ToolEvent    `json:"tool,omitempty"`       // tool
-	Usage      *UsageEvent   `json:"usage,omitempty"`      // usage
-	Meta       *MetaEvent    `json:"meta,omitempty"`       // meta
-	Source     *SourceEvent  `json:"source,omitempty"`     // source
-	Mark       *MarkEvent    `json:"mark,omitempty"`       // mark
-	Asset      *AssetEvent   `json:"asset,omitempty"`      // asset
-	Station    *StationEvent `json:"station,omitempty"`    // station
-	StopReason string        `json:"stopReason,omitempty"` // stop
-	Error      string        `json:"error,omitempty"`      // error
+	T          string          `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset" | "attention"
+	Time       string          `json:"time"`
+	Text       string          `json:"text,omitempty"`       // user / assistant
+	Tool       *ToolEvent      `json:"tool,omitempty"`       // tool
+	Usage      *UsageEvent     `json:"usage,omitempty"`      // usage
+	Meta       *MetaEvent      `json:"meta,omitempty"`       // meta
+	Source     *SourceEvent    `json:"source,omitempty"`     // source
+	Mark       *MarkEvent      `json:"mark,omitempty"`       // mark
+	Asset      *AssetEvent     `json:"asset,omitempty"`      // asset
+	Station    *StationEvent   `json:"station,omitempty"`    // station
+	Attention  *AttentionEvent `json:"attention,omitempty"`  // attention (needs-input edge)
+	StopReason string          `json:"stopReason,omitempty"` // stop
+	Error      string          `json:"error,omitempty"`      // error
+}
+
+// AttentionEvent brackets a needs-input interval (V2-P2). Status is "start" or "end".
+type AttentionEvent struct {
+	Kind   string `json:"kind,omitempty"`
+	Status string `json:"status"`
+}
+
+// NewAttentionEdge builds a durable needs-input start or end record.
+func NewAttentionEdge(kind, status string) Event {
+	return Event{T: "attention", Attention: &AttentionEvent{Kind: kind, Status: status}}
 }
 
 // ToolEvent is the tool-call state assembled by toolCallId. rawInput carries

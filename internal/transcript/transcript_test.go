@@ -542,3 +542,58 @@ func TestTailer_TurnIDFromMessageAndRequest(t *testing.T) {
 		t.Fatalf("TurnID not stable across re-read: %q vs %q", id1, id2)
 	}
 }
+
+// --- V2-P2: tool stamps for mirror widen ---
+
+func TestTailer_ToolStampsClaude(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"type":"assistant","timestamp":"2026-07-11T09:00:05.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}` + "\n")
+	f.WriteString(`{"type":"user","timestamp":"2026-07-11T09:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}` + "\n")
+	f.Close()
+
+	tl := &Tailer{Path: path}
+	tl.Poll()
+	stamps := tl.ToolStamps()
+	if len(stamps) != 2 {
+		t.Fatalf("ToolStamps = %d, want 2: %+v", len(stamps), stamps)
+	}
+	if stamps[0].ID != "t1" || stamps[0].Status != "pending" || stamps[0].Title != "Bash" {
+		t.Errorf("call = %+v", stamps[0])
+	}
+	if stamps[0].Time != "2026-07-11T09:00:05.000Z" {
+		t.Errorf("call time = %q", stamps[0].Time)
+	}
+	if stamps[1].ID != "t1" || stamps[1].Status != "completed" {
+		t.Errorf("result = %+v", stamps[1])
+	}
+}
+
+func TestTailer_ToolStampsCodex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"timestamp":"t1","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{}"}}` + "\n")
+	f.WriteString(`{"timestamp":"t2","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}` + "\n")
+	f.Close()
+
+	tl := &Tailer{Path: path}
+	tl.Poll()
+	stamps := tl.ToolStamps()
+	if len(stamps) != 2 {
+		t.Fatalf("ToolStamps = %d, want 2: %+v", len(stamps), stamps)
+	}
+	if stamps[0].ID != "c1" || stamps[0].Status != "pending" || stamps[0].Title != "exec_command" {
+		t.Errorf("call = %+v", stamps[0])
+	}
+	if stamps[1].ID != "c1" || stamps[1].Status != "completed" {
+		t.Errorf("result = %+v", stamps[1])
+	}
+}
