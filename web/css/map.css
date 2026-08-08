@@ -105,10 +105,11 @@ body.map-full #maptoolbar.on { display: flex; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lanechip.selected { box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
 
-/* V2-P4: selected-segment fare capsule (Apple Maps route-time). Opaque surface
-   so the heat track reads behind it. HTML overlay (not SVG) so it stays
-   pointer-events:auto while .lbody > svg is pointer-events:none. Fixed left/top
-   geometry → poll rebuilds update the label in place with no reflow jump. */
+/* V2-P4/P5: fare capsule on every priced inter-station gap (Apple Maps
+   route-time). Opaque surface so the track reads behind it. HTML overlay (not
+   SVG) so it stays pointer-events:auto while .lbody > svg is
+   pointer-events:none. Fixed left/top geometry → poll rebuilds update the
+   label in place with no reflow jump. */
 .fare-capsule {
   position: absolute; z-index: 3;
   transform: translate(-50%, -50%);
@@ -126,19 +127,112 @@ body.map-full #maptoolbar.on { display: flex; }
 }
 .fare-capsule:active { background: var(--th-bg, var(--surface, var(--bg))); }
 .fare-capsule-val { pointer-events: none; }
-.fare-callout-anchor {
-  position: absolute; z-index: 4;
-  transform: translate(-50%, calc(-50% - 28px));
-  pointer-events: none;
-  max-width: min(280px, 70vw);
-}
-.fare-callout {
-  padding: 6px 10px; border-radius: 10px;
-  border: 1px solid var(--hairline);
-  background: var(--surface, var(--bg));
-  color: var(--dim);
-  font-size: 11px; font-variant-numeric: tabular-nums;
-  letter-spacing: .15px; line-height: 1.35;
-  box-shadow: 0 4px 14px rgba(0,0,0,.18);
-  white-space: normal; word-break: break-word;
-}
+
+/* ---------- V2-P5: the fare ticket ----------
+   The V2-P4 anchored callout is gone: centred on the lane's x it was clipped
+   by the viewport on the leftmost column, and eight quantities on one
+   dot-separated line were unreadable. The breakdown now lives in a bottom
+   sheet drawn as a vintage paper fare ticket — the tokens a ride cost ARE the
+   ticket's price, so they get the ticket's biggest type. Perforations reuse
+   the .actionbar.tear punch geometry (5px punches on a 9px pitch). */
+#faresheet { padding-left: 0; padding-right: 0; }
+#faresheet .grab { margin-bottom: 10px; }
+.fare-ticket { padding: 0 20px; font-variant-numeric: tabular-nums; }
+.fare-ticket .tk-cap { font-size: 10px; font-weight: 700; letter-spacing: .12em;
+  color: var(--dim); text-transform: uppercase; }
+.fare-ticket .tk-head { display: flex; justify-content: space-between; gap: 12px;
+  font-size: 10px; font-weight: 700; letter-spacing: .12em; color: var(--dim);
+  text-transform: uppercase; }
+.fare-ticket .tk-rule { margin: 6px 0 0; border-top: 1.6px solid var(--ink);
+  border-bottom: 1px solid var(--hairline); height: 4px; }
+.fare-ticket .tk-rule-b { border-top: 1px solid var(--hairline);
+  border-bottom: 1.6px solid var(--ink); }
+
+/* FROM → TO. Station titles, not "02 → 03": the name is what the user
+   recognises. Two lines max, then ellipsis — a long title must not push the
+   fare off the first screen. */
+.fare-ticket .tk-route { display: flex; align-items: flex-start; gap: 12px; margin-top: 16px; }
+.fare-ticket .tk-stn { flex: 1 1 0; min-width: 0; }
+.fare-ticket .tk-arrow { flex: none; color: var(--dim); font-size: 15px; padding-top: 18px; }
+.fare-ticket .tk-name { font-size: 15px; font-weight: 700; line-height: 1.25; margin-top: 3px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.fare-ticket .tk-sub { font-size: 11px; color: var(--dim); margin-top: 3px; }
+.fare-ticket .tk-line { margin-top: 14px; font-size: 11px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--work); }
+
+/* the fare itself + the reported-cost stamp */
+.fare-ticket .tk-fare { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-top: 6px; }
+.fare-ticket .tk-figrow { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.fare-ticket .tk-fig { font-size: 30px; font-weight: 800; letter-spacing: -.02em; }
+.fare-ticket .tk-fig-lg { font-size: 56px; line-height: 1; }
+.fare-ticket .tk-fig-unit { font-size: 14px; font-weight: 700; color: var(--dim); }
+.fare-ticket .tk-note { font-size: 11px; color: var(--dim); margin-top: 6px; line-height: 1.35; }
+/* rubber stamp, rotated: it marks a cost the agent REPORTED. scimux never
+   estimates one (v2-D8), so the stamp's presence is itself the claim. */
+.fare-ticket .tk-stamp { flex: none; margin-top: 6px; text-align: center;
+  color: var(--fare-stamp); border: 2px solid currentColor; border-radius: 50%;
+  width: 78px; height: 78px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px;
+  box-shadow: inset 0 0 0 3px var(--surface), inset 0 0 0 5px currentColor;
+  transform: rotate(-9deg); opacity: .85; }
+.fare-ticket .tk-stamp b { font-size: 15px; font-weight: 800; }
+.fare-ticket .tk-stamp span { font-size: 8px; font-weight: 700; letter-spacing: .14em; }
+
+/* perforation between the ticket's parts — the SAME declaration as
+   .actionbar.tear (base.css): a 5px punch on a 9px pitch in --perf, the run
+   inset by --tearhole + 8px so it clears the end bites, and — the part that
+   matters — no rule behind it. A solid hairline through the run fills the gaps
+   and the seam reads as a bumpy line rather than a row of holes; the actionbar
+   drops its border-top for exactly this reason. The bites are cut out of the
+   sheet's edges here, the way .tearcard cuts them out of a bubble card. */
+.fare-ticket .tk-tear { position: relative; height: 1px; margin: 18px -20px; }
+.fare-ticket .tk-tear::before { content: ""; position: absolute; left: 20px; right: 20px;
+  top: -3px; height: 6px; pointer-events: none;
+  background: radial-gradient(circle, var(--perf) 0 2.5px, transparent 2.9px) repeat-x;
+  background-size: 9px 6px; }
+.fare-ticket .tk-tear::after { content: ""; position: absolute; left: -12px; right: -12px;
+  top: -12px; height: 24px; pointer-events: none;
+  background:
+    radial-gradient(circle 12px at 12px 12px, var(--bg) 99%, transparent 100%) left top no-repeat,
+    radial-gradient(circle 12px at calc(100% - 12px) 12px, var(--bg) 99%, transparent 100%) right top no-repeat;
+  background-size: 24px 24px; }
+
+/* breakdown: dotted leaders, uncounted quantities dimmed (they are carried,
+   not bought) */
+.fare-ticket .tk-rows { margin-top: 12px; }
+.fare-ticket .tk-row { display: flex; align-items: baseline; gap: 6px; padding: 4px 0;
+  font-size: 14px; }
+.fare-ticket .tk-row.tk-off { color: var(--dim); }
+.fare-ticket .tk-lead { flex: 1 1 auto; height: 1px; align-self: flex-end; margin-bottom: 4px;
+  background: radial-gradient(circle, var(--hairline) 0 1px, transparent 1.4px) repeat-x;
+  background-size: 5px 2px; }
+.fare-ticket .tk-rval { font-weight: 700; }
+
+.fare-ticket .tk-caprow { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.fare-ticket .tk-clock { font-size: 11px; color: var(--dim); }
+.fare-ticket .tk-dur { margin-top: 6px; font-size: 15px; font-weight: 700;
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.fare-ticket .tk-nosplit { font-size: 11px; font-weight: 400; color: var(--dim); }
+
+/* time gauge: real = thinking + tools + waiting. Drawn only where the
+   transport stamped the split — a fabricated one would quietly bill approval
+   waiting as tool time. */
+.fare-ticket .ticket-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden;
+  margin-top: 12px; background: var(--hairline); }
+.fare-ticket .tk-part { display: block; height: 100%; }
+.fare-ticket .tk-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px;
+  font-size: 12px; color: var(--dim); }
+.fare-ticket .tk-key { display: inline-flex; align-items: center; gap: 6px; }
+.fare-ticket .tk-dot { width: 8px; height: 8px; border-radius: 4px; }
+.fare-ticket .tk-work { background: var(--work); }
+.fare-ticket .tk-tools { background: var(--fare-tools); }
+.fare-ticket .tk-attn { background: var(--attn); }
+
+/* receipt foot: the cumulative journey — clicking every capsule and adding
+   them up by hand is the thing this exists to prevent */
+.fare-ticket .tk-foot { margin-top: 22px; }
+.fare-ticket .tk-foot .tk-cap { margin-top: 12px; display: block; }
+.fare-ticket .tk-totrow { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin-top: 4px; }
+.fare-ticket .tk-totside { font-size: 15px; font-weight: 700; white-space: nowrap; }

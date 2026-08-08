@@ -19,6 +19,12 @@
   --bad:       #FF3B30;   /* systemRed — error/exited */
   --work:      #0E7C86;   /* petrol accent — agent working */
   --work-rgb:  14, 124, 134;
+  /* fare-ticket only: the time gauge needs a third band next to --work and
+     --attn (thinking / tools / waiting), and the reported-cost stamp needs the
+     faded red-brown of a rubber stamp on paper. Neither carries state, so they
+     stay out of the semantic palette above. */
+  --fare-tools: #7CB8BE;  /* --work, washed out — tools are the agent's hands */
+  --fare-stamp: #B06A3A;
   --unlane:    #C7C7CC;   /* adaptive systemGray3-style unassigned lane */
   --sb-bg:     rgba(245,244,241,.88);
   --code-bg:   rgba(60,60,67,.08);
@@ -55,6 +61,8 @@
     --bad:      #FF453A;
     --work:     #2FA7B4;
     --work-rgb: 47, 167, 180;
+    --fare-tools: #2A6E75;
+    --fare-stamp: #D08A55;
     --unlane:   #48484A;
     --sb-bg:    rgba(22,22,24,.88);
     --code-bg:  rgba(255,255,255,.09);

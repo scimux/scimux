@@ -190,23 +190,22 @@ export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull,
 }
 
 /* Fare fingerprint for wall re-render when the overlay is on. Uses fare_*
-   totals + per-segment heat/capsule costs (not last_activity) so a token/cost
-   poll update rebuilds lane heat and the selected capsule; fareOff keeps the
-   field inert so idle polls stay skip-able. */
+   totals + the per-segment new-token figures the capsules print (not
+   last_activity) so a token/cost poll update rebuilds the capsule labels;
+   fareOff keeps the field inert so idle polls stay skip-able. */
 function fareFingerprint(n){
   if (!n) return "";
   return [
     n.fare_total ?? "",
     n.fare_turns ?? "",
     n.fare_cost_complete ? 1 : 0,
-    heatSegmentsFingerprint(n),
+    fareSegmentsFingerprint(n),
   ].join(",");
 }
 
-export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn, fareCalloutOpen } = {}){
+export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn } = {}){
   return "wall|" + (cols || []).join(",") + "|" + focusLane + "|" + mapTab + "|" +
-    mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") +
-    (fareCalloutOpen ? "C" : "") + "|" +
+    mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify((rows || []).map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, s.n.created_at,
       l.title, l.desc, s.n.agent,
       s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
@@ -227,6 +226,16 @@ export const HEAT_COST_CAP = 200_000;
 /* Heat only on the full-screen wall when the fare layer is on. */
 export function heatEnabled({ mapFull, fareOn } = {}){
   return !!(mapFull && fareOn);
+}
+
+/* V2-P5: heat is *parked in the UI*, not removed. Reviewed live, lane
+   thickness read as noise — it tracks context size x turns (cache reads are
+   ~99% of the token total on a long chat), not work spent. The maintainer
+   wants to revisit the encoding before deleting the implementation, so the
+   render gate is a single named constant instead of a code deletion. */
+export const HEAT_IN_UI = false;
+export function wallHeatOn(fareOn){
+  return HEAT_IN_UI && !!fareOn;
 }
 
 /* Token heat magnitude from one fare_segments entry: the four canonical
@@ -384,34 +393,24 @@ function fmtFareCost(c){
   return "$" + v.toFixed(2);
 }
 
-/* ---------- V2-P4 centered capsule + callout (fare-design.md v2.3 / V2-P4)
-   Capsule on the *selected* segment only; tap opens anchored callout.
-   Replaces the v1 fareLineHTML text row (retired). Same mapFull && fareOn
-   gate as heat. */
+/* ---------- V2-P4/P5 centered capsule + fare ticket (fare-design.md v2.3)
+   A capsule rides the midpoint of *every* priced inter-station gap; tapping
+   one opens the fare ticket bottom sheet. The V2-P4 anchored callout is
+   retired: centred on the leftmost lane's x it was clipped by the viewport,
+   and a one-line dot-separated dump of eight quantities was unreadable. Same
+   mapFull && fareOn gate as heat. */
 
 /* Same gate as heat: full-screen wall + fare layer on. */
 export function fareOverlayEnabled({ mapFull, fareOn } = {}){
   return !!(mapFull && fareOn);
 }
 
-/* Map a wall-selected stop to a fare_segments entry.
-   fare_segments[i] bridges stop i → stop i+1. Selected stop i>0 → arrival
-   segment i-1; creation stop (i=0) → outbound segment 0 when present.
-   null when no multi-stop track gap or no segment data. */
-export function selectedSegmentRef(stop){
-  if (!stop || !stop.n) return null;
-  const n = stop.n;
-  const segs = n.fare_segments;
-  if (!Array.isArray(segs) || !segs.length) return null;
-  // creation + each /clear entry = stop chain length; need ≥2 for a gap
-  const nStops = 1 + (Array.isArray(n.stops) ? n.stops.length : 0);
-  if (nStops < 2) return null;
-  const idx = stop.i > 0 ? stop.i - 1 : 0;
-  if (idx < 0 || idx >= segs.length || segs[idx] == null) return null;
-  return { nodeId: n.id, segIdx: idx, seg: segs[idx] };
-}
-
-/* Compact wall-clock duration for the callout (45s / 1m 23s / 12ms). */
+/* Compact wall-clock duration for a ride (12ms / 45s / 1m 23s / 7h 48m /
+   2d 5h). The unit pair climbs with the magnitude: a supervised chat runs for
+   hours and a journey's cumulative time for days, and "1300m 51s" is a number
+   nobody can relate to a clock. The smaller unit is dropped when it is zero,
+   and each scale rounds before it is split so the seam can never print "60m"
+   or "24h". */
 export function fmtRideMs(ms){
   if (ms == null || ms === "") return "";
   const v = Number(ms);
@@ -420,74 +419,300 @@ export function fmtRideMs(ms){
   if (v < 60_000){
     const s = v / 1000;
     if (s >= 10) return Math.round(s) + "s";
-    const t = s.toFixed(1).replace(/\.0$/, "");
-    return t + "s";
+    return s.toFixed(1).replace(/\.0$/, "") + "s";
   }
-  const m = Math.floor(v / 60_000);
-  const s = Math.round((v % 60_000) / 1000);
-  return s ? `${m}m ${s}s` : `${m}m`;
+  const pair = (big, small, ub, us) => small ? `${big}${ub} ${small}${us}` : `${big}${ub}`;
+  const sec = Math.round(v / 1000);
+  if (sec < 3600) return pair(Math.floor(sec / 60), sec % 60, "m", "s");
+  const min = Math.round(v / 60_000);
+  if (min < 1440) return pair(Math.floor(min / 60), min % 60, "h", "m");
+  const hr = Math.round(v / 3_600_000);
+  return pair(Math.floor(hr / 24), hr % 24, "d", "h");
 }
 
-/* Headline token total for a segment (prefers shipped total). */
-function segmentHeadlineTokens(seg){
-  if (!seg || typeof seg !== "object") return null;
-  const cost = segmentTokenCost(seg);
-  return cost;
-}
-
-/* Callout body: four token quantities + real (agent · tools · wait).
-   Time split omitted when agent/tools/wait absent (≠ zero). Cost only when
-   seg.cost_complete (D8). */
-export function fareCalloutHTML(seg, opts = {}){
-  if (!seg || typeof seg !== "object") return "";
-  const escape = opts.escape || esc;
-  const parts = [
-    `fresh ${fmtFareTokens(seg.fresh_in ?? 0)}`,
-    `out ${fmtFareTokens(seg.out ?? 0)}`,
-    `cache-wr ${fmtFareTokens(seg.cache_write ?? 0)}`,
-    `cache-rd ${fmtFareTokens(seg.cache_read ?? 0)}`,
-  ];
-  // real always when present; split only when any of agent/tools/wait shipped
-  if (seg.real_ms != null && Number.isFinite(Number(seg.real_ms))){
-    const real = fmtRideMs(seg.real_ms);
-    const hasSplit = seg.agent_ms != null || seg.tools_ms != null || seg.wait_ms != null;
-    if (hasSplit){
-      const a = fmtRideMs(seg.agent_ms ?? 0);
-      const t = fmtRideMs(seg.tools_ms ?? 0);
-      const w = fmtRideMs(seg.wait_ms ?? 0);
-      parts.push(`real ${real} (agent ${a} · tools ${t} · wait ${w})`);
-    } else {
-      parts.push(`real ${real}`);
+/* The fare a ride actually cost: fresh input + reply. Cache reads are
+   *carried*, not bought — they are re-sent context, and on a long chat they
+   are ~99% of the token total, which is why the v1 headline (and the heat
+   encoding) read as noise. null = neither side was ever reported (≠ zero:
+   a reported 0 is a value). */
+export function segmentNewTokens(seg){
+  if (seg == null || typeof seg !== "object") return null;
+  let any = false, sum = 0;
+  for (const k of ["fresh_in", "out"]){
+    if (seg[k] != null){
+      const v = Number(seg[k]);
+      if (Number.isFinite(v)){ any = true; sum += v; }
     }
   }
-  // D8: reported-or-omitted — never an estimate
-  if (seg.cost_complete && seg.cost != null)
-    parts.push(fmtFareCost(seg.cost));
-  return `<div class="fare-callout" data-fare-callout>${parts.map(p => escape(p)).join(" · ")}</div>`;
+  return any ? Math.max(0, sum) : null;
 }
 
-/* Opaque-surface capsule at (x, y) midpoint — headline token fare only.
-   Empty without a segment. calloutOpen appends the breakdown. Position is
-   fixed geometry so poll rebuilds update text in place (no jump). */
+/* Per-segment new-token fingerprint for wallMapSignature: what the capsules
+   actually print, so a poll that only moves cache reads stays skip-able. */
+function fareSegmentsFingerprint(n){
+  if (!n || !Array.isArray(n.fare_segments) || !n.fare_segments.length) return "";
+  return n.fare_segments.map(s => {
+    const v = segmentNewTokens(s);
+    return v == null ? "" : String(v);
+  }).join(";");
+}
+
+/* The fare_segments entry bridging two adjacent stops of one node.
+   fare_segments[i] spans stop i → stop i+1. Order-insensitive (wall rows are
+   newest-first). null across nodes, across non-adjacent stops, or with no
+   segment data. */
+export function gapSegmentRef(a, b){
+  if (!a || !b || !a.n || !b.n || a.n.id !== b.n.id) return null;
+  if (Math.abs(a.i - b.i) !== 1) return null;
+  const i = Math.min(a.i, b.i);
+  const segs = a.n.fare_segments;
+  if (!Array.isArray(segs) || segs[i] == null) return null;
+  return { nodeId: a.n.id, segIdx: i, seg: segs[i] };
+}
+
+/* Capsule placements for one drawn line: the vertical midpoint of every gap
+   that has a fare. pts: [{y, stop}, ...] in draw order. */
+export function wallCapsuleSpots(pts, x){
+  const out = [];
+  if (!Array.isArray(pts) || pts.length < 2) return out;
+  for (let k = 0; k < pts.length - 1; k++){
+    const a = pts[k], b = pts[k + 1];
+    const ref = gapSegmentRef(a.stop, b.stop);
+    if (!ref || segmentNewTokens(ref.seg) == null) continue;
+    out.push({ x, y: (a.y + b.y) / 2, ...ref });
+  }
+  return out;
+}
+
+/* Opaque-surface capsule at the (x, y) track midpoint — the ride's fare and
+   nothing else. Carries its node + segment index so the tap can build the
+   ticket. Position is fixed geometry so poll rebuilds update the label in
+   place (no jump). Empty without a segment. */
 export function fareCapsuleHTML(seg, opts = {}){
   if (!seg || typeof seg !== "object") return "";
   const escape = opts.escape || esc;
-  const x = Number(opts.x);
-  const y = Number(opts.y);
+  const x = Number(opts.x), y = Number(opts.y);
   const px = Number.isFinite(x) ? x : 0;
   const py = Number.isFinite(y) ? y : 0;
-  const tokens = segmentHeadlineTokens(seg);
+  const tokens = segmentNewTokens(seg);
   const label = tokens == null ? "—" : fmtFareTokens(tokens);
-  const open = !!opts.calloutOpen;
-  const callout = open ? fareCalloutHTML(seg, { escape }) : "";
   // translate(-50%,-50%) centres the capsule on the track midpoint; opaque
-  // surface bg so the heat track reads as passing behind (Apple Maps style).
+  // surface bg so the line reads as passing behind (Apple Maps style).
   return `<button type="button" class="fare-capsule" data-fare-capsule
+    data-fare-node="${escape(opts.nodeId || "")}"
+    data-fare-seg="${escape(String(opts.segIdx ?? ""))}"
     style="left:${px}px;top:${py}px"
-    aria-expanded="${open ? "true" : "false"}"
-    aria-label="segment fare ${escape(label)}">
+    aria-label="fare ${escape(label)} new tokens — open ticket">
     <span class="fare-capsule-val">${escape(label)}</span>
-  </button>${callout ? `<div class="fare-callout-anchor" style="left:${px}px;top:${py}px">${callout}</div>` : ""}`;
+  </button>`;
+}
+
+/* ---------- V2-P5 fare ticket (the capsule's bottom sheet) ----------
+   A vintage paper fare ticket: the tokens spent are the ticket's price, so
+   they get the ticket's biggest type. Every block is data-conditional —
+   a quantity the transport never reported hides its own row, bar or stamp
+   rather than printing a zero (v2-D8 absent != zero). Perforations reuse the
+   .actionbar.tear geometry. */
+
+/* Breakdown rows. Zero is indistinguishable from "never reported" in the
+   int-valued wire shape, so a 0 hides its row too (a codex ride genuinely
+   has no cache write; printing "cache written 0" invents a fact). `counted`
+   marks the two quantities that make up the fare. */
+export function ticketTokenRows(seg){
+  if (!seg || typeof seg !== "object") return [];
+  const defs = [
+    ["fresh_in", "new input", true],
+    ["out", "reply", true],
+    ["cache_read", "cache reused", false],
+    ["cache_write", "cache written", false],
+  ];
+  const rows = [];
+  for (const [k, label, counted] of defs){
+    const v = Number(seg[k]);
+    if (seg[k] == null || !Number.isFinite(v) || v <= 0) continue;
+    rows.push({ key: k, label, counted, tokens: v, value: fmtFareTokens(v) });
+  }
+  return rows;
+}
+
+const SPLIT_DEFS = [
+  ["agent", "agent_ms", "thinking", "work"],
+  ["tools", "tools_ms", "tools", "tools"],
+  ["wait", "wait_ms", "waiting for you", "attn"],
+];
+
+function splitPartsFrom(ms){
+  const total = ms.reduce((a, v) => a + v, 0);
+  if (!(total > 0)) return null;
+  return SPLIT_DEFS.map(([key, , label, tone], i) => ({
+    key, label, tone, ms: ms[i], frac: ms[i] / total,
+  }));
+}
+
+/* Stacked-bar parts for one ride. Only when the transport stamped the split
+   (v2-P2 records); a historical ride is real-only and a fabricated split
+   would silently attribute approval waiting to tool time. */
+export function ticketSplitParts(seg){
+  if (!seg || typeof seg !== "object") return null;
+  if (!SPLIT_DEFS.some(([, f]) => seg[f] != null)) return null;
+  return splitPartsFrom(SPLIT_DEFS.map(([, f]) => {
+    const v = Number(seg[f]);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }));
+}
+
+/* Same partition for the whole line. Hidden outright when *any* ride lacks
+   the split: summing only the split rides would under-report the journey and
+   read as a complete picture. */
+export function journeySplitParts(segs){
+  if (!Array.isArray(segs) || !segs.length) return null;
+  const sum = [0, 0, 0];
+  for (const s of segs){
+    const p = ticketSplitParts(s);
+    if (!p) return null;
+    p.forEach((part, i) => { sum[i] += part.ms; });
+  }
+  return splitPartsFrom(sum);
+}
+
+/* Whole-journey figures for the receipt foot. The whole point of the foot is
+   that summing the capsules by hand is a waste of time. */
+export function journeyTicketTotals(n){
+  if (!n || typeof n !== "object") return null;
+  const segs = Array.isArray(n.fare_segments) ? n.fare_segments : [];
+  const newTokens = segmentNewTokens({ fresh_in: n.fare_fresh_in, out: n.fare_out });
+  let realMS = null;
+  for (const s of segs){
+    if (!s || s.real_ms == null) continue;
+    const v = Number(s.real_ms);
+    if (Number.isFinite(v)) realMS = (realMS || 0) + v;
+  }
+  const rides = n.fare_turns == null ? null : Number(n.fare_turns);
+  return {
+    newTokens,
+    realMS,
+    // D8: a cost is printed only when the agent reported every turn's cost
+    cost: n.fare_cost_complete && n.fare_cost != null ? Number(n.fare_cost) : null,
+    rides: Number.isFinite(rides) ? rides : null,
+    stops: 1 + (Array.isArray(n.stops) ? n.stops.length : 0),
+    segments: segs,
+  };
+}
+
+/* Everything the ticket prints, gathered from the node + stop chain.
+   fare_segments carries no timestamps, so departure/arrival come from the
+   stops the segment bridges. */
+export function fareTicketContext(n, segIdx, opts = {}){
+  if (!n || typeof n !== "object") return null;
+  const i = Number(segIdx);
+  const segs = Array.isArray(n.fare_segments) ? n.fare_segments : [];
+  if (!Number.isInteger(i) || i < 0 || i >= segs.length || segs[i] == null) return null;
+  const label = opts.stopLabel || stopLabel;
+  const time = opts.timeLabel || fmtStamp;
+  const chain = (opts.stopsOf || stopsOf)(n);
+  if (chain.length < i + 2) return null;
+  const station = k => {
+    const st = chain[k];
+    const l = label(st) || {};
+    return { title: l.title || "", desc: l.desc || "", index: k + 1, time: st.time ? time(st.time) : "" };
+  };
+  const totals = journeyTicketTotals(n);
+  return {
+    nodeId: n.id, segIdx: i, seg: segs[i],
+    from: station(i), to: station(i + 1),
+    agent: n.agent || "", model: n.fare_model || n.model || "", effort: n.effort || "",
+    totals, segments: segs,
+  };
+}
+
+function ticketFigure(tokens, big){
+  const label = tokens == null ? "—" : fmtFareTokens(tokens);
+  return `<span class="tk-fig ${big ? "tk-fig-lg" : ""}">${label}</span>` +
+    `<span class="tk-fig-unit">new tokens</span>`;
+}
+
+function ticketBarHTML(parts, escape){
+  if (!parts) return "";
+  const seg = parts.map(p =>
+    `<i class="tk-part tk-${p.tone}" style="flex:${p.frac.toFixed(4)}"></i>`).join("");
+  const key = parts.map(p =>
+    `<span class="tk-key"><i class="tk-dot tk-${p.tone}"></i>${escape(p.label)} ${escape(fmtRideMs(p.ms))}</span>`).join("");
+  return `<div class="ticket-bar">${seg}</div><div class="tk-legend">${key}</div>`;
+}
+
+/* Render one ticket. `ctx` comes from fareTicketContext (or a test double).
+   Empty string without a segment — never a skeleton. */
+export function fareTicketHTML(ctx, opts = {}){
+  if (!ctx || !ctx.seg || typeof ctx.seg !== "object") return "";
+  const escape = (opts && opts.escape) || esc;
+  const seg = ctx.seg;
+  const from = ctx.from || {}, to = ctx.to || {};
+  const t = ctx.totals || {};
+  const stopNo = s => s.index == null ? "" : "stop " + String(s.index).padStart(2, "0");
+  const sub = (s, verb) => {
+    const bits = [stopNo(s), s.time ? verb + " " + s.time : ""].filter(Boolean);
+    return bits.length ? `<div class="tk-sub">${escape(bits.join(" · "))}</div>` : "";
+  };
+  const line = [ctx.agent, ctx.model, ctx.effort].filter(Boolean).join(" · ");
+  const rows = ticketTokenRows(seg);
+  const split = ticketSplitParts(seg);
+  const jsplit = journeySplitParts(ctx.segments);
+  const clock = [from.time, to.time].filter(Boolean).join(" → ");
+  const cost = seg.cost_complete && seg.cost != null ? fmtFareCost(seg.cost) : "";
+  const foot = [t.realMS == null ? "" : fmtRideMs(t.realMS),
+    t.cost == null ? "" : fmtFareCost(t.cost)].filter(Boolean).join(" · ");
+  const rides = [t.rides == null ? "" : t.rides + (t.rides === 1 ? " ride" : " rides"),
+    t.stops == null ? "" : t.stops + (t.stops === 1 ? " stop" : " stops")]
+    .filter(Boolean).join(" · ");
+  return `<div class="fare-ticket" data-fare-node="${escape(ctx.nodeId || "")}"
+    data-fare-seg="${escape(String(ctx.segIdx ?? ""))}">
+  <div class="tk-head"><span>SCIMUX · FARE</span><span>${escape(rides)}</span></div>
+  <div class="tk-rule"></div>
+  <div class="tk-route">
+    <div class="tk-stn">
+      <div class="tk-cap">FROM</div>
+      <div class="tk-name">${escape(from.title || "")}</div>
+      ${sub(from, "dep")}
+    </div>
+    <div class="tk-arrow">→</div>
+    <div class="tk-stn">
+      <div class="tk-cap">TO</div>
+      <div class="tk-name">${escape(to.title || "")}</div>
+      ${sub(to, "arr")}
+    </div>
+  </div>
+  ${line ? `<div class="tk-line">${escape(line)}</div>` : ""}
+  <div class="tk-fare">
+    <div class="tk-figrow">${ticketFigure(segmentNewTokens(seg), true)}</div>
+    ${cost ? `<div class="tk-stamp"><b>${escape(cost)}</b><span>REPORTED</span></div>` : ""}
+  </div>
+  <div class="tk-note">fresh input + reply · cache excluded</div>
+  <div class="tk-tear"></div>
+  ${rows.length ? `<div class="tk-cap">FARE BREAKDOWN</div>
+  <div class="tk-rows">${rows.map(r => `<div class="tk-row ${r.counted ? "" : "tk-off"}">
+      <span class="tk-rlabel">${escape(r.label)}</span>
+      <span class="tk-lead"></span>
+      <span class="tk-rval">${escape(r.value)}</span>
+    </div>`).join("")}</div>
+  <div class="tk-note">cache reads are carried, not bought — they don't count toward the fare</div>
+  <div class="tk-tear"></div>` : ""}
+  ${seg.real_ms == null ? "" : `<div class="tk-caprow">
+    <span class="tk-cap">JOURNEY TIME</span>${clock ? `<span class="tk-clock">${escape(clock)}</span>` : ""}
+  </div>
+  <div class="tk-dur">${escape(fmtRideMs(seg.real_ms))}${
+    split ? "" : `<span class="tk-nosplit">tool timing not stamped for this ride</span>`}</div>
+  ${ticketBarHTML(split, escape)}`}
+  <div class="tk-foot">
+    <div class="tk-rule tk-rule-b"></div>
+    <div class="tk-cap">TOTAL · WHOLE JOURNEY</div>
+    <div class="tk-totrow">
+      <div class="tk-figrow">${ticketFigure(t.newTokens, false)}</div>
+      ${foot ? `<div class="tk-totside">${escape(foot)}</div>` : ""}
+    </div>
+    ${jsplit ? ticketBarHTML(jsplit, escape)
+      : `<div class="tk-note">split unavailable for some rides — total time only</div>`}
+  </div>
+</div>`;
 }
 
 export function stationRowHTML(n, lm, opts = {}){
@@ -530,6 +755,7 @@ export function createMapFeature(deps){
   const maptoolbar = roots.maptoolbar;
   const mapfullbtn = roots.mapfullbtn;
   const farebtn = roots.farebtn;
+  const fareticket = roots.fareticket;
   const mapEl = roots.map;
   const tabHead = roots.tabHead;
   const tabName = roots.tabName;
@@ -555,9 +781,6 @@ export function createMapFeature(deps){
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
-  /* V2-P4: callout open state for the selected segment capsule. Survives an
-     unchanged poll via wallMapSignature; cleared when selection clears. */
-  let fareCalloutOpen = false;
   let mapSig = "";
   let editTab = null;
   let bound = false;
@@ -604,13 +827,9 @@ export function createMapFeature(deps){
 
   function setMapSel(id, key, stopTime){
     const next = toggleMapSelection({ id, key, stopTime, mapSelKey, nodes: g("nodes", []) });
-    const changed = next.mapSelKey !== mapSelKey;
     mapSel = next.mapSel;
     mapSelKey = next.mapSelKey;
     mapSelStop = next.mapSelStop;
-    // New selection or deselection closes the callout; same-key re-tap already
-    // deselects via toggleMapSelection.
-    if (changed) fareCalloutOpen = false;
     mapSig = "";
     renderMap();
   }
@@ -635,7 +854,6 @@ export function createMapFeature(deps){
     else storeRemove(MAP_FULL_KEY);
     const cleared = clearMapSelection();
     mapSel = cleared.mapSel; mapSelKey = cleared.mapSelKey; mapSelStop = cleared.mapSelStop;
-    fareCalloutOpen = false;
     if (doc && doc.body) doc.body.classList.toggle("map-full", mapFull);
     syncMapFullBtn();
     mapSig = "";
@@ -730,7 +948,7 @@ export function createMapFeature(deps){
     const rows = stations.flatMap(stopsOf).sort(newestFirst);
 
     const sig = wallMapSignature(rows, cols, {
-      focusLane, mapTab, mapSel, mapSelKey, fareOn, fareCalloutOpen,
+      focusLane, mapTab, mapSel, mapSelKey, fareOn,
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
@@ -788,7 +1006,7 @@ export function createMapFeature(deps){
         x,
         color: escape(model.color(id)),
         opacity: dimLane(id) ? .22 : 1,
-        heatOn: fareOn,
+        heatOn: wallHeatOn(fareOn),
       });
     });
     Object.keys(branchStops).forEach(id => {
@@ -799,7 +1017,7 @@ export function createMapFeature(deps){
         x,
         color: escape(model.color(n.lane_id)),
         opacity: dimNode(n) ? .22 : 1,
-        heatOn: fareOn,
+        heatOn: wallHeatOn(fareOn),
       });
     });
     rows.forEach((s, ci) => {
@@ -862,23 +1080,23 @@ export function createMapFeature(deps){
       }
     });
 
-    // V2-P4: capsule on the selected segment only (density control). Heat stays
-    // on every gap; the capsule is the progressive-disclosure headline.
+    /* V2-P5: a capsule on the midpoint of every priced gap — the fare layer
+       is a map legend, not a selection detail. Tapping one opens the ticket
+       sheet (progressive disclosure moved out of the clipped anchor). */
     let capsuleHTML = "";
-    if (fareOn && mapSelKey){
-      const selStop = rows.find(s => stopKey(s) === mapSelKey);
-      const ref = selectedSegmentRef(selStop);
-      if (ref){
-        const ia = rows.findIndex(s => s.n.id === ref.nodeId && s.i === ref.segIdx);
-        const ib = rows.findIndex(s => s.n.id === ref.nodeId && s.i === ref.segIdx + 1);
-        if (ia >= 0 && ib >= 0){
-          const midY = (rowY(ia) + rowY(ib)) / 2;
-          const x = nodeX(selStop.n);
-          capsuleHTML = fareCapsuleHTML(ref.seg, {
-            x, y: midY, calloutOpen: fareCalloutOpen, escape,
-          });
-        }
-      }
+    if (fareOn){
+      const spots = [];
+      cols.forEach(id => {
+        const pts = touchStops[id];
+        if (pts) spots.push(...wallCapsuleSpots(pts, colX(colIdx[id])));
+      });
+      Object.keys(branchStops).forEach(id => {
+        const n = model.byId[id];
+        if (n) spots.push(...wallCapsuleSpots(branchStops[id], nodeX(n)));
+      });
+      capsuleHTML = spots.map(sp => fareCapsuleHTML(sp.seg, {
+        x: sp.x, y: sp.y, nodeId: sp.nodeId, segIdx: sp.segIdx, escape,
+      })).join("");
     }
 
     if (mapwrap) mapwrap.innerHTML = `<div class="lbody wallbody">
@@ -1123,16 +1341,24 @@ export function createMapFeature(deps){
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function openFareTicket(nodeId, segIdx){
+    const n = nodeById(nodeId);
+    const ctx = fareTicketContext(n, Number(segIdx), { timeLabel: stampFn });
+    if (!ctx) return;
+    if (fareticket) fareticket.innerHTML = fareTicketHTML(ctx, { escape });
+    if (typeof d.openSheet === "function") d.openSheet("#faresheet");
+  }
+
   function onMapWrapClick(e){
-    // V2-P4: capsule tap toggles the anchored callout (progressive disclosure).
-    // Handle before station rows so the button does not re-toggle mapSel.
+    /* V2-P5: capsule tap opens the fare ticket sheet. Handled before station
+       rows so the button does not also re-toggle mapSel — and note it does
+       *not* touch mapSig: the sheet is outside the polled render region, so
+       the wall is never rebuilt (nor the composer disturbed) by a tap. */
     const cap = e.target.closest("[data-fare-capsule]");
     if (cap){
       if (typeof e.stopPropagation === "function") e.stopPropagation();
       if (typeof e.preventDefault === "function") e.preventDefault();
-      fareCalloutOpen = !fareCalloutOpen;
-      mapSig = "";
-      renderMap();
+      openFareTicket(cap.dataset.fareNode, cap.dataset.fareSeg);
       return;
     }
     const f = e.target.closest("[data-fold]");
@@ -1259,7 +1485,6 @@ export function createMapFeature(deps){
       const key = el.dataset.skey || headStopKey(id, g("nodes", []));
       if (mapSelKey !== key){
         mapSel = id; mapSelKey = key; mapSelStop = stop;
-        fareCalloutOpen = false;
         mapSig = ""; renderMap();
       }
     }

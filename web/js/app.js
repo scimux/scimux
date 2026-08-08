@@ -651,6 +651,7 @@ const mapFeature = createMapFeature({
     maptoolbar: $("#maptoolbar"),
     mapfullbtn: $("#mapfullbtn"),
     farebtn: $("#farebtn"),
+    fareticket: $("#fare_ticket"),
     map: $("#map"),
     tabHead: $("#tab_head"),
     tabName: $("#tab_name"),
