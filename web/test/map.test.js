@@ -2201,16 +2201,21 @@ test("P1: CSS body.map-full.map-dock #map sets flex:0 0 … and height:auto", ()
 });
 
 test("P1: CSS dock rules live only inside @media (min-width: 900px)", () => {
+  /* Strengthened (P1a): containment is proven by brace-depth extraction of the
+     media body, not by "the rule text appears after the @media line". A stray
+     } can close the media block early while dock rules above the break still
+     look "inside" to a naive after-media slice — this path uses the true match. */
   const mediaBody = notesDesktopMediaBody(notesCssSrc);
   assert.ok(mediaBody, "@media (min-width: 900px) block present in notes.css");
   assert.match(mediaBody, /body\.map-full\.map-dock\s+#app\s*\{/, "#app dock rule in desktop media");
   assert.match(mediaBody, /body\.map-full\.map-dock\s+#map\s*\{/, "#map dock rule in desktop media");
   assert.match(mediaBody, /body\.map-full\.map-dock\s+#chat\s*\{/, "#chat dock rule in desktop media");
 
-  // Outside the media block the dock must not exist (phone has no wall → no dock).
+  // Outside = everything not in the brace-matched media span (phone has no wall → no dock).
   const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(notesCssSrc);
+  assert.ok(m, "media query present");
   const open = m.index + m[0].length - 1;
-  let depth = 0, end = open;
+  let depth = 0, end = -1;
   for (let i = open; i < notesCssSrc.length; i++){
     if (notesCssSrc[i] === "{") depth++;
     else if (notesCssSrc[i] === "}"){
@@ -2218,6 +2223,10 @@ test("P1: CSS dock rules live only inside @media (min-width: 900px)", () => {
       if (depth === 0){ end = i; break; }
     }
   }
+  assert.ok(end > open, "media block has a matching close brace");
+  // mediaBody must equal the slice between the matched braces (single source of truth).
+  assert.equal(mediaBody, notesCssSrc.slice(open + 1, end),
+    "notesDesktopMediaBody matches the brace-walked span exactly");
   const outside = notesCssSrc.slice(0, m.index) + notesCssSrc.slice(end + 1);
   assert.doesNotMatch(outside, /body\.map-full\.map-dock/,
     "dock rules must not appear outside the desktop media query");

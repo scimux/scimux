@@ -2413,3 +2413,61 @@ test("#wsnote never receives .collapsed; note flex stays 2.1", async () => {
   assert.equal(roots.wsnote.classList.contains("collapsed"), false);
   assert.equal(roots.wsnav.classList.contains("collapsed"), true);
 });
+
+/* ---------- P1a: desktop media-block structural integrity ---------- */
+
+/**
+ * Extract the body of `@media (min-width: 900px)` by counting braces from the
+ * opening `{` to its true match. Do NOT slice on the next `}` or on text order
+ * — a premature `}` inside the block is exactly the failure class this guards.
+ */
+function desktopMedia900Body(css){
+  const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(css);
+  if (!m) return null;
+  const open = m.index + m[0].length - 1; // index of '{'
+  let depth = 0;
+  for (let i = open; i < css.length; i++){
+    const ch = css[i];
+    if (ch === "{") depth++;
+    else if (ch === "}"){
+      depth--;
+      if (depth === 0) return css.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+test("P1a: desktop-only shell rules live inside @media (min-width: 900px)", () => {
+  /* Blast radius of a truncated desktop media block: these rules hide phone
+     chrome (.backbtn = "‹ Activities") and restyle sheets to a 480px centred
+     box. They must never apply at phone widths. */
+  const mediaBody = desktopMedia900Body(notesCssSrc);
+  assert.ok(mediaBody, "@media (min-width: 900px) block present in notes.css");
+
+  assert.match(mediaBody, /\.backbtn\s*\{\s*display:\s*none\s*;?\s*\}/,
+    ".backbtn { display: none } is desktop-only (phone primary nav)");
+  assert.match(mediaBody, /\.sheet\s*\{[^}]*width:\s*480px/,
+    ".sheet desktop centering is inside the 900px block");
+  assert.match(mediaBody, /\.sheet\.open\s*\{[^}]*transform:\s*translate\(\s*-50%\s*,\s*0\s*\)/,
+    ".sheet.open desktop rule is inside the 900px block");
+  assert.match(mediaBody, /#scrim\s*\{\s*display:\s*none\s*;?\s*\}/,
+    "#scrim { display: none } is desktop-only");
+  assert.match(mediaBody, /#bookmarkpeek\b[^\{]*\{[^}]*display:\s*none/,
+    "#bookmarkpeek hide rule is desktop-only");
+});
+
+test("P1a: desktop #bookmarkspane rule keeps display:none, width:340px, flex:none", () => {
+  /* The desktop #bookmarkspane override must remain a single complete rule
+     inside the 900px block. A stray } after the first three decls orphans
+     display:none / width / flex:none and leaves the pane as a permanent
+     flex column — disfiguring the dock and the whole desktop row. */
+  const mediaBody = desktopMedia900Body(notesCssSrc);
+  assert.ok(mediaBody, "@media (min-width: 900px) block present in notes.css");
+  // Standalone #bookmarkspane (not body.map-full #bookmarkspane / body.bookmarks-open …).
+  const rule = mediaBody.match(/(?:^|\n)\s*#bookmarkspane\s*\{([^}]+)\}/);
+  assert.ok(rule, "desktop #bookmarkspane rule present inside 900px media");
+  assert.match(rule[1], /position:\s*static/, "desktop pane is in the flex row flow");
+  assert.match(rule[1], /display:\s*none/, "pane stays hidden until bookmarks-open");
+  assert.match(rule[1], /width:\s*340px/, "pane column width");
+  assert.match(rule[1], /flex:\s*none/, "pane does not grow/shrink in the row");
+});
