@@ -113,6 +113,24 @@ test("buildChatSignature is stable and order-sensitive", () => {
   );
 });
 
+test("buildChatSignature includes expanded; flip rebuilds", () => {
+  const base = {
+    nodeId: "n1", live: "quiet", attention: "approval", attentionHidden: false,
+    delivery: "ok", showPeek: false, termOpen: false, termFull: false,
+    source: "acp", permTitle: "Execute `ls`", permOptionsKey: "1Allowallow",
+    priorTurns: 0, chatStarted: "2026-01-01T00:00:00Z", echoHash: "",
+    histKey: "", turnsHash: "t", peekHash: "p", expanded: false,
+  };
+  const collapsed = buildChatSignature(base);
+  const open = buildChatSignature({ ...base, expanded: true });
+  assert.notEqual(collapsed, open, "expanded flip must change the signature");
+  assert.equal(buildChatSignature(base), collapsed);
+  assert.equal(buildChatSignature({ ...base, expanded: true }), open);
+  assert.equal(chatRenderDecision(open, collapsed), "rebuild");
+  assert.equal(chatRenderDecision(collapsed, open), "rebuild");
+  assert.equal(chatRenderDecision(open, open), "skip");
+});
+
 /* ---------- bubble roles / titles / actions / assets ---------- */
 test("turnRoleClass and bk keys cover live and history", () => {
   assert.equal(turnRoleClass("user"), "turn user");
@@ -467,6 +485,21 @@ test("approval keyrow CSS pins .permbtns and meets 44px touch target", () => {
   assert.ok(Number(mh[1]) >= 44, "min-height at least 44px for touch");
 });
 
+test("source guard: keyrow call site reads per-node expanded, not hardcoded false", () => {
+  // P3 left expanded: false with a P4 ownership comment; P4 must wire the flag.
+  assert.doesNotMatch(
+    chatSrc,
+    /expanded:\s*false\s*,\s*\/\*\s*P4 owns the expanded flag/,
+    "call site must not hardcode expanded: false with the P4 stub comment",
+  );
+  assert.match(
+    chatSrc,
+    /expanded:\s*permExpanded\.node\s*===\s*\w+\.id\s*&&\s*permExpanded\.open/,
+    "call site must pass expanded from the per-node flag",
+  );
+  assert.match(chatSrc, /let\s+permExpanded\s*=\s*\{\s*node:\s*""\s*,\s*open:\s*false\s*\}/);
+});
+
 /* ---------- sentEcho ---------- */
 test("retireSentEcho: text match, seen index, base growth, timeout", () => {
   const now = 1_000_000;
@@ -660,6 +693,8 @@ function el(tag, attrs = {}){
     closest(sel){
       if (sel.includes("button") && this.tagName === "BUTTON") return this;
       if (sel.includes(".histload") && this.classList.contains("histload")) return this;
+      if (sel.includes(".permmore") && this.classList.contains("permmore")) return this;
+      if (sel.includes(".permask") && this.classList.contains("permask")) return this;
       if (sel.includes("[data-bact]") && this.dataset?.bact) return this;
       if (sel.includes("[data-key]") && this.dataset?.key) return this;
       if (sel.includes(".turn") && this.classList.contains("turn")) return this;
@@ -701,6 +736,31 @@ function el(tag, attrs = {}){
   return node;
 }
 
+/* keyrow harness: assign innerHTML → materialise .permask child so scrollTop
+   snapshot/restore (and querySelector) work the same way as a real DOM. */
+function makeKeyrow(){
+  const node = el("div", { id: "keyrow" });
+  let html = "";
+  Object.defineProperty(node, "innerHTML", {
+    configurable: true,
+    get(){ return html; },
+    set(v){
+      html = String(v);
+      node.children = [];
+      const m = html.match(/class="(permask(?:\s+clamped)?)"/);
+      if (!m) return;
+      const mask = el("div", { className: m[1] });
+      mask.scrollHeight = 1000;
+      mask.clientHeight = 200;
+      mask.scrollTop = 0;
+      node.appendChild(mask);
+    },
+  });
+  // seed empty so later assignments always go through the setter
+  node.innerHTML = "";
+  return node;
+}
+
 function makeRoots(){
   const msgs = el("div", { id: "msgs", scrollHeight: 500, clientHeight: 400 });
   // make near-bottom true by default
@@ -721,12 +781,39 @@ function makeRoots(){
     chatloading: el("div", { id: "chatloading", hidden: true }),
     gauge: el("div", { id: "gauge", hidden: true }),
     gaugefill: el("i", { id: "gaugefill" }),
-    keyrow: el("div", { id: "keyrow" }),
+    keyrow: makeKeyrow(),
     convtools: el("div", { id: "convtools", hidden: true }),
     termtoggle: el("button", { id: "termtoggle" }),
     scrollend: el("button", { id: "scrollend" }),
     workpulse: el("div", { id: "workpulse" }),
   };
+}
+
+function acpApprovalPayload(overrides = {}){
+  return {
+    turns: [{ role: "user", text: "run it" }],
+    live: "quiet",
+    delivery: "ok",
+    source: "acp",
+    attention: "approval",
+    perm_title: "Execute `#!/bin/bash\n" + "x".repeat(200) + "\necho done`",
+    perm_options: [
+      { key: "1", name: "Allow once", kind: "allow" },
+      { key: "2", name: "Reject once", kind: "reject" },
+    ],
+    perm_tool_kind: "execute",
+    chat_started: "2026-01-01T00:00:00Z",
+    prior_turns: 0,
+    assets: {},
+    ...overrides,
+  };
+}
+
+function acpApprovalNodes(id = "n1"){
+  return [{
+    id, title: "Grok", agent: "grok", model: "grok",
+    live: "quiet", attention: "approval", lane_id: "", description: "",
+  }];
 }
 
 function firstListener(node, type){
@@ -1226,4 +1313,112 @@ test("render-owned terminal listeners are singular and removed on destroy", asyn
   ctx.feature.destroy();
   assert.equal(termfull.listenerCount("click"), 0);
   assert.equal(decresolve.listenerCount("click"), 0);
+});
+
+/* ---------- P4: expand ask in place + preserve .permask scrollTop ---------- */
+
+test("click .permmore expands keyrow for that node without POSTing /key", async () => {
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(),
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permask clamped"/);
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permmore"/);
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permbtns"/);
+
+  const beforeKeys = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  const more = el("button", { className: "permmore" });
+  firstListener(ctx.roots.keyrow, "click")({ target: more });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /clamped/, "expanded drops .clamped");
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /permmore/, "expanded omits show-all");
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permask"/);
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permbtn allow"/);
+  assert.equal(
+    ctx.apiCalls.filter(c => c.path.includes("/key")).length,
+    beforeKeys,
+    ".permmore must not POST /key",
+  );
+  // keyrow still painted — attention was not collapsed
+  assert.notEqual(ctx.roots.keyrow.innerHTML, "");
+  ctx.feature.destroy();
+});
+
+test("expand state clears on node switch and on attention leave", async () => {
+  const nodes = [
+    ...acpApprovalNodes("n1"),
+    ...acpApprovalNodes("n2").map(n => ({ ...n, title: "Other" })),
+  ];
+  let payload = acpApprovalPayload();
+  const ctx = makeFeature({
+    nodes,
+    api: async (path) => {
+      if (path.includes("/peek")) return "p";
+      if (path.includes("/chat")) return payload;
+      return {};
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  firstListener(ctx.roots.keyrow, "click")({ target: el("button", { className: "permmore" }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /clamped/);
+
+  // switch away → collapsed when we come back
+  ctx.setSel("n2");
+  ctx.feature.onSelectChange();
+  await ctx.feature.render();
+  ctx.setSel("n1");
+  ctx.feature.onSelectChange();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permask clamped"/,
+    "reselect after switch starts collapsed");
+  assert.match(ctx.roots.keyrow.innerHTML, /permmore/);
+
+  // expand again, then attention clears
+  firstListener(ctx.roots.keyrow, "click")({ target: el("button", { className: "permmore" }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /clamped/);
+
+  payload = acpApprovalPayload({ attention: "", perm_options: [], perm_title: "" });
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.equal(ctx.roots.keyrow.innerHTML, "", "no attention → empty keyrow");
+
+  // attention returns → starts collapsed again
+  payload = acpApprovalPayload();
+  nodes[0].attention = "approval";
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permask clamped"/,
+    "attention return after clear starts collapsed");
+  ctx.feature.destroy();
+});
+
+test("expanded rebuild restores non-zero .permask scrollTop", async () => {
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(),
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  firstListener(ctx.roots.keyrow, "click")({ target: el("button", { className: "permmore" }) });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const mask = ctx.roots.keyrow.querySelector(".permask");
+  assert.ok(mask, "expanded render materialises .permask");
+  assert.equal(mask.classList.contains("clamped"), false);
+  mask.scrollTop = 240;
+
+  // poll-equivalent rebuild: clear sig, same payload
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  const after = ctx.roots.keyrow.querySelector(".permask");
+  assert.ok(after, "rebuild keeps .permask");
+  assert.equal(after.classList.contains("clamped"), false);
+  assert.equal(after.scrollTop, 240, "scrollTop survives keyrow.innerHTML reassignment");
+  ctx.feature.destroy();
 });
