@@ -514,6 +514,24 @@ test("approval keyrow CSS pins .permbtns and meets 44px touch target", () => {
   assert.ok(Number(mh[1]) >= 44, "min-height at least 44px for touch");
 });
 
+test("tmux key labels centre in their button; ACP option labels stay left", () => {
+  /* The ten tmux keys are content-sized with min-width: 44px, so a one-glyph
+     label ("1", "y", "↑") fills only ~31px of the box. Inheriting .permbtn's
+     text-align: left from the ACP option buttons pushes every short label
+     off-centre by the leftover width. Centre the keys variant only — long ACP
+     labels still read better flush left. */
+  const keys = chatCssSrc.match(/\.permbtns\.keys\s+\.permbtn\s*\{([^}]+)\}/);
+  assert.ok(keys, ".permbtns.keys .permbtn rule present");
+  assert.match(keys[1], /text-align:\s*center/, "short key labels are centred");
+  assert.match(keys[1], /justify-content:\s*center/, "centred along the flex axis too");
+  assert.match(keys[1], /display:\s*(inline-)?flex/, "flex box so justify/align apply");
+  assert.match(keys[1], /align-items:\s*center/, "and vertically inside the 44px target");
+  assert.match(keys[1], /min-width:\s*44px/, "the 44px touch target survives the fix");
+
+  const btn = chatCssSrc.match(/\.permbtn\s*\{([^}]+)\}/);
+  assert.match(btn[1], /text-align:\s*left/, "ACP option buttons keep their left alignment");
+});
+
 /* ---------- P5: tmux keys wrap; show-all outside clamp; restore ACP hint ---------- */
 
 /* Extract the .permask element body (between its open tag and its balanced
