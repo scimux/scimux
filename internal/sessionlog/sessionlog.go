@@ -46,10 +46,14 @@ type Event struct {
 	Error      string          `json:"error,omitempty"`      // error
 }
 
-// AttentionEvent brackets a needs-input interval (V2-P2). Status is "start" or "end".
+// AttentionEvent brackets a needs-input interval (approval / question /
+// inspect / dialog). Status is "start" or "end". Kind is the attention
+// class from the existing mechanical signal — never a new attention source
+// (fare-design.md V2-P2; reuses poller's a.attn / ACP Attention()).
+// Append-only edges; historical wait is unrecoverable without these.
 type AttentionEvent struct {
-	Kind   string `json:"kind,omitempty"`
-	Status string `json:"status"`
+	Kind   string `json:"kind,omitempty"` // "approval" | "question" | "inspect" | "dialog"
+	Status string `json:"status"`         // "start" | "end"
 }
 
 // NewAttentionEdge builds a durable needs-input start or end record.
@@ -393,6 +397,11 @@ func formatEvent(ev Event) string {
 			return "· tool " + ev.Tool.Title + " [" + ev.Tool.Status + "]"
 		}
 		return "· tool"
+	case "attention":
+		if ev.Attention != nil {
+			return "· wait " + ev.Attention.Kind + " [" + ev.Attention.Status + "]"
+		}
+		return "· wait"
 	case "usage":
 		if ev.Usage != nil {
 			return "· usage " + ev.Usage.String()

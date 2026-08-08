@@ -738,9 +738,12 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	// pipeline re-raises on the next tick if the dialog is still up, mirroring
 	// what the structured path gets for free from pm.Attention.
 	a.mu.Lock()
+	prevAttn := a.attn[n.ID]
 	a.attn[n.ID] = ""
 	delete(a.attnAt, n.ID)
 	a.mu.Unlock()
+	// V2-P2: closing the wait edge on web-key answer (same mechanical signal).
+	a.persistAttentionTransition(n, prevAttn, "")
 	// The audit record is part of the operation's success contract: a keypress
 	// whose evidence cannot be persisted must not report plain success. The key
 	// is already delivered (cannot be unsent), so say exactly that.

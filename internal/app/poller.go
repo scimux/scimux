@@ -50,13 +50,18 @@ func (a *app) poll() {
 		// (process alive, turn in flight, pending permission), not pane-change
 		// detection. No capture, no transcript discovery.
 		if pm := a.proc(n); pm != nil {
+			attn := pm.Attention(n.ID)
 			a.mu.Lock()
+			prevAttn := a.attn[n.ID]
 			a.live[n.ID] = pm.Live(n.ID)
-			a.attn[n.ID] = pm.Attention(n.ID)
+			a.attn[n.ID] = attn
 			if a.live[n.ID] == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
 			a.mu.Unlock()
+			// V2-P2: persist needs-input start→end edges from the existing
+			// mechanical Attention() signal only — no new regex / source.
+			a.persistAttentionTransition(n, prevAttn, attn)
 			// Phase 4: re-source pi fare from the native JSONL (session-map
 			// join). Other structured agents keep ACP/app-server usage only.
 			if n.Agent == "pi" {
@@ -200,6 +205,7 @@ func (a *app) poll() {
 			}
 		}
 		a.mu.Lock()
+		prevAttn := a.attn[n.ID]
 		a.live[n.ID] = state
 		if freshAttn && attn != "" {
 			if a.attnAt == nil { // tests build app literals without the map
@@ -209,6 +215,9 @@ func (a *app) poll() {
 		}
 		a.attn[n.ID] = attn
 		a.mu.Unlock()
+		// V2-P2: durable wait edges from the existing mechanical needs-input
+		// signal (WaitingOn + quiet/confined-anim; no new regex).
+		a.persistAttentionTransition(n, prevAttn, attn)
 		// A whole working phase just ended: if the linked transcript never
 		// carried it, the pane's claude has moved to a new session file
 		// (/clear, relaunch) — re-run discovery. Mechanical signal only.
@@ -218,6 +227,44 @@ func (a *app) poll() {
 		a.discoverTranscript(n)
 		a.syncMirror(n)
 	}
+}
+
+// persistAttentionTransition appends a session-log attention start/end edge
+// when the mechanical needs-input signal transitions empty↔non-empty.
+// Append-only; never rewrites. No-op when sessionsDir is unset (bare tests)
+// or the signal is unchanged. Reuses only the existing attention class —
+// never invents a new source (fare-design.md V2-P2, v2.5 ⑦).
+func (a *app) persistAttentionTransition(n *Node, prev, next string) {
+	if a.sessionsDir == "" || n == nil || prev == next {
+		return
+	}
+	var ev sessionlog.Event
+	switch {
+	case prev == "" && next != "":
+		ev = sessionlog.NewAttentionEdge(next, "start")
+	case prev != "" && next == "":
+		ev = sessionlog.NewAttentionEdge(prev, "end")
+	default:
+		// Kind change while still needing input (e.g. inspect→approval):
+		// close the old interval and open the new one so wait union stays
+		// honest. Two appends, still append-only.
+		if err := a.appendSessionEvent(n.ID, sessionlog.NewAttentionEdge(prev, "end")); err != nil {
+			return
+		}
+		ev = sessionlog.NewAttentionEdge(next, "start")
+	}
+	_ = a.appendSessionEvent(n.ID, ev)
+}
+
+// appendSessionEvent appends one record to the node's session log. Creates
+// no meta/source — callers only fire after a log already exists (or the
+// write is best-effort for wait edges on a young node).
+func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error {
+	if a.sessionsDir == "" {
+		return nil
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath(id)}
+	return w.Append(ev)
 }
 
 // maybeRelinkTranscript re-runs transcript discovery for a tmux claude node
@@ -569,7 +616,3 @@ func (a *app) tailerFor(n *Node) *transcript.Tailer {
 	delete(a.staleChat, n.ID)
 	return nt
 }
-
-// STUB (red): V2-P2 attention edges — no persistence yet.
-func (a *app) persistAttentionTransition(n *Node, prev, next string)   {}
-func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error { return nil }

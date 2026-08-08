@@ -41,9 +41,15 @@ type Turn struct {
 	Record  int    `json:"record,omitempty"`
 }
 
-// ToolStamp is one tool call or result for the mirror (V2-P2). STUB surface for red tests.
+// ToolStamp is one tool call or result extracted from a transcript line for
+// the session-log mirror (fare-design.md V2-P2 / O6). Status is "pending"
+// (call) or "completed" (result). Time is the CLI's line timestamp so tool
+// intervals match agent time, not scimux append clock.
 type ToolStamp struct {
-	ID, Title, Status, Time string
+	ID     string // join key: claude tool_use.id / codex call_id
+	Title  string // tool name when known (call side)
+	Status string // "pending" | "completed"
+	Time   string // raw transcript timestamp
 }
 
 // ParseLine extracts a turn from one JSONL line of either format.
@@ -144,8 +150,11 @@ type pendingCall struct{ id, name string }
 // offset between polls and buffering partial trailing lines. It is safe for
 // concurrent use (the poller and the chat handler both poll it).
 type Tailer struct {
-	Path    string
-	Turns   []Turn
+	Path  string
+	Turns []Turn
+	// Tools accumulates call+result stamps in file order for the mirror's
+	// V2-P2 tool projection. Parallel to Turns — does not affect Poll's
+	// return value or the turn watermark.
 	Tools   []ToolStamp
 	mu      sync.Mutex
 	offset  int64
@@ -331,12 +340,6 @@ func (t *Tailer) Usage() (used, window int64) {
 // noteUsage. Zero values mean "not reported" — never an error. Callers
 // (mirror projection) copy these into sessionlog.UsageEvent; occupancy
 // still comes from Usage().
-func (t *Tailer) ToolStamps() []ToolStamp {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return nil // STUB: red — no tool extraction yet
-}
-
 func (t *Tailer) UsageBreakdown() UsageBreakdown {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -347,6 +350,19 @@ func (t *Tailer) UsageBreakdown() UsageBreakdown {
 		CacheCreationTokens: t.lastCacheCreate,
 		TurnID:              t.lastTurnID,
 	}
+}
+
+// ToolStamps returns a snapshot of tool call/result stamps accumulated by
+// Poll (V2-P2 mirror widen). The slice is a copy — safe after unlock.
+func (t *Tailer) ToolStamps() []ToolStamp {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.Tools) == 0 {
+		return nil
+	}
+	out := make([]ToolStamp, len(t.Tools))
+	copy(out, t.Tools)
+	return out
 }
 
 // noteUsage extracts context usage from one JSONL line. Defensive like all
@@ -464,13 +480,16 @@ func (t *Tailer) WaitingOn() (name string, ok bool) {
 	return t.pending[len(t.pending)-1].name, true
 }
 
-// notePending updates the pending-call set from one JSONL line.
+// notePending updates the pending-call set from one JSONL line and appends
+// ToolStamp entries for the mirror (V2-P2). Pending tracking and tool
+// stamping share one parse so join keys stay identical.
 func (t *Tailer) notePending(line []byte) {
 	var generic struct {
-		Type    string          `json:"type"`
-		Message json.RawMessage `json:"message"`
-		Payload json.RawMessage `json:"payload"`
-		IsMeta  bool            `json:"isMeta"`
+		Type      string          `json:"type"`
+		Timestamp string          `json:"timestamp"`
+		Message   json.RawMessage `json:"message"`
+		Payload   json.RawMessage `json:"payload"`
+		IsMeta    bool            `json:"isMeta"`
 	}
 	if json.Unmarshal(line, &generic) != nil {
 		return
@@ -504,8 +523,18 @@ func (t *Tailer) notePending(line []byte) {
 			switch b.Type {
 			case "tool_use":
 				t.pending = append(t.pending, pendingCall{b.ID, b.Name})
+				if b.ID != "" {
+					t.Tools = append(t.Tools, ToolStamp{
+						ID: b.ID, Title: b.Name, Status: "pending", Time: generic.Timestamp,
+					})
+				}
 			case "tool_result":
 				t.resolve(b.ToolUseID)
+				if b.ToolUseID != "" {
+					t.Tools = append(t.Tools, ToolStamp{
+						ID: b.ToolUseID, Status: "completed", Time: generic.Timestamp,
+					})
+				}
 			case "text":
 				if generic.Type == "user" {
 					t.pending = nil
@@ -524,8 +553,18 @@ func (t *Tailer) notePending(line []byte) {
 		switch p.Type {
 		case "function_call", "custom_tool_call":
 			t.pending = append(t.pending, pendingCall{p.CallID, p.Name})
+			if p.CallID != "" {
+				t.Tools = append(t.Tools, ToolStamp{
+					ID: p.CallID, Title: p.Name, Status: "pending", Time: generic.Timestamp,
+				})
+			}
 		case "function_call_output", "custom_tool_call_output":
 			t.resolve(p.CallID)
+			if p.CallID != "" {
+				t.Tools = append(t.Tools, ToolStamp{
+					ID: p.CallID, Status: "completed", Time: generic.Timestamp,
+				})
+			}
 		}
 	case "event_msg": // Codex marks turn boundaries explicitly
 		var p struct {
@@ -565,7 +604,7 @@ func (t *Tailer) Poll() []Turn {
 		return t.Turns
 	}
 	if st.Size() < t.offset {
-		t.offset, t.buf, t.Turns, t.pending = 0, nil, nil, nil
+		t.offset, t.buf, t.Turns, t.Tools, t.pending = 0, nil, nil, nil, nil
 		t.unknownStreak, t.progress = 0, 0
 		t.ctxUsed, t.ctxWindow = 0, 0
 		t.lastIn, t.lastOut, t.lastCacheRead, t.lastCacheCreate = 0, 0, 0, 0

@@ -107,16 +107,20 @@ type nodeView struct {
 	// ReadFare.Turns==0 (absent ≠ zero). fare_cost only meaningful with
 	// fare_cost_complete (D8). Pointers so a genuine 0 still serializes when
 	// fare is available.
-	FareFreshIn      *int          `json:"fare_fresh_in,omitempty"`
-	FareCacheRead    *int          `json:"fare_cache_read,omitempty"`
-	FareCacheWrite   *int          `json:"fare_cache_write,omitempty"`
-	FareOut          *int          `json:"fare_out,omitempty"`
-	FareTotal        *int          `json:"fare_total,omitempty"`
-	FareTurns        *int          `json:"fare_turns,omitempty"`
-	FareCost         *float64      `json:"fare_cost,omitempty"`
-	FareCostComplete *bool         `json:"fare_cost_complete,omitempty"`
-	FareModel        string        `json:"fare_model,omitempty"`
-	FareSegments     []fareSegView `json:"fare_segments,omitempty"`
+	FareFreshIn      *int     `json:"fare_fresh_in,omitempty"`
+	FareCacheRead    *int     `json:"fare_cache_read,omitempty"`
+	FareCacheWrite   *int     `json:"fare_cache_write,omitempty"`
+	FareOut          *int     `json:"fare_out,omitempty"`
+	FareTotal        *int     `json:"fare_total,omitempty"`
+	FareTurns        *int     `json:"fare_turns,omitempty"`
+	FareCost         *float64 `json:"fare_cost,omitempty"`
+	FareCostComplete *bool    `json:"fare_cost_complete,omitempty"`
+	FareModel        string   `json:"fare_model,omitempty"`
+	// FareSegments is the V2-P2 per-segment ride projection (tokens + time
+	// model). Omitted when empty. Split fields (agent/tools/wait) are absent
+	// on historical / complete-only segments — real_ms still present.
+	// UI (lane heat / capsule) lands in V2-P3/P4; this is data plumbing only.
+	FareSegments []fareSegView `json:"fare_segments,omitempty"`
 }
 
 func unixMSStamp(s string) int64 {
@@ -208,8 +212,11 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 		v.LastInteraction = lastInteractionMS(v.Node, seg)
 		// Fare meter: independent of live state (journey total still meaningful
-		// on exited threads). applyFare no-ops when Turns==0.
-		applyFare(v, a.fare(v.Node))
+		// on exited threads). applyFare no-ops when Turns==0. Per-segment rides
+		// (V2-P2) share the same fold-on-growth cache.
+		f, rides := a.fareAndRides(v.Node)
+		applyFare(v, f)
+		applyFareRides(v, rides)
 		if v.Live == "exited" || v.Live == "unavailable" {
 			continue // gauge is live-only
 		}

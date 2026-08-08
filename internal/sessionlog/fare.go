@@ -8,39 +8,56 @@ import (
 	"codeberg.org/chrberger/scimux/internal/fare"
 )
 
-// FareCache memoizes one node's ReadFare fold keyed by the file's (size, mtime).
-// Same invalidation contract as Cache (segment.go): the 1s poll path costs a
-// stat on an unchanged log, not a full-journey re-walk (Phase 7 fold-on-growth).
+// FareCache memoizes one node's ReadFare / ReadRidesBySegment fold keyed by
+// the file's (size, mtime). Same invalidation contract as Cache (segment.go):
+// the 1s poll path costs a stat on an unchanged log, not a full-journey
+// re-walk (Phase 7 fold-on-growth; V2-P2 extends to per-segment rides).
 type FareCache struct {
 	mu    sync.Mutex
 	path  string
 	size  int64
 	mtime time.Time
 	fare  fare.FareTotals
-	folds int // times ReadFare ran (test spy for fold-on-growth)
+	rides []fare.Ride
+	folds int // times the fold ran (test spy for fold-on-growth)
 }
 
 // Fare returns the cached whole-journey totals, re-folding only when path,
 // size, or mtime advances. A missing/unreadable file yields zero totals
 // (Turns==0 → fare unavailable at the projector) and does not error.
 func (c *FareCache) Fare(path string) fare.FareTotals {
+	f, _ := c.FareAndRides(path)
+	return f
+}
+
+// Rides returns the cached per-segment rides (tokens + time model), re-folding
+// only when path/size/mtime advances (V2-P2).
+func (c *FareCache) Rides(path string) []fare.Ride {
+	_, rides := c.FareAndRides(path)
+	return rides
+}
+
+// FareAndRides returns whole-journey totals and per-segment rides from one
+// fold, sharing the size/mtime cache key.
+func (c *FareCache) FareAndRides(path string) (fare.FareTotals, []fare.Ride) {
 	st, err := os.Stat(path)
 	if err != nil {
-		return fare.FareTotals{ReportedCostComplete: true}
+		return fare.FareTotals{ReportedCostComplete: true}, nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.path == path && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
-		return c.fare
+		return c.fare, c.rides
 	}
-	f := ReadFare(path)
-	c.path, c.size, c.mtime, c.fare = path, st.Size(), st.ModTime(), f
+	// One event walk for tokens + time model (foldRides calls foldFareFromEvents).
+	f, rides := foldRides(path)
+	c.path, c.size, c.mtime, c.fare, c.rides = path, st.Size(), st.ModTime(), f.Totals, rides
 	c.folds++
-	return f
+	return c.fare, c.rides
 }
 
-// Folds is the number of times ReadFare was invoked through this cache.
-// Used by Phase 7 tests to prove fold-on-growth (not per-poll unconditional).
+// Folds is the number of times the fare/ride fold was invoked through this
+// cache. Used by Phase 7 / V2-P2 tests to prove fold-on-growth.
 func (c *FareCache) Folds() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -52,7 +69,7 @@ func (c *FareCache) Folds() int {
 // watermark fallback when ids are absent, occupancy shells/empties skipped,
 // Used never summed. Defensive: missing/garbled files yield zero totals.
 func ReadFare(path string) fare.FareTotals {
-	whole, _ := foldFare(path)
+	whole, _ := foldFareFromEvents(ReadEvents(path))
 	return whole
 }
 
@@ -60,7 +77,7 @@ func ReadFare(path string) fare.FareTotals {
 // (same delimiters as segment.go / ReadHistory). Dedup is consistent with
 // ReadFare: the sum of segment Total()s equals ReadFare().Total().
 func ReadFareBySegment(path string) []fare.FareTotals {
-	_, segs := foldFare(path)
+	_, segs := foldFareFromEvents(ReadEvents(path))
 	return segs
 }
 
@@ -68,43 +85,6 @@ func ReadFareBySegment(path string) []fare.FareTotals {
 type usageHit struct {
 	u      UsageEvent
 	segIdx int
-}
-
-// foldFare is the shared reduce for ReadFare and ReadFareBySegment.
-//
-// Dedup (D3):
-//   - TurnID present → first occurrence wins globally (rotation re-mirror safe).
-//   - TurnID absent  → source-seam watermark: within each clear-bounded epoch,
-//     only the last segment's no-id records count (mechanical re-mirrors
-//     supersede; /clear starts a fresh additive epoch).
-func foldFare(path string) (fare.FareTotals, []fare.FareTotals) {
-	evs := ReadEvents(path)
-	agent, hits, openReasons := collectFareHits(evs)
-	nSeg := len(openReasons)
-	if nSeg == 0 {
-		// No events at all.
-		z := fare.FareTotals{ReportedCostComplete: true}
-		return z, nil
-	}
-
-	count := markCounted(hits, openReasons)
-
-	segs := make([]fare.FareTotals, nSeg)
-	for i := range segs {
-		segs[i].ReportedCostComplete = true
-	}
-	whole := fare.FareTotals{ReportedCostComplete: true}
-
-	for i, h := range hits {
-		if !count[i] {
-			continue
-		}
-		raw := rawFromUsage(h.u)
-		can := fare.Normalize(agent, raw)
-		addCanonical(&whole, can, h.u)
-		addCanonical(&segs[h.segIdx], can, h.u)
-	}
-	return whole, segs
 }
 
 // collectFareHits walks the log once: meta.agent, source-seam segment index,

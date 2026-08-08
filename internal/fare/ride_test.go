@@ -69,9 +69,7 @@ func TestResidualAgent_Partition(t *testing.T) {
 
 func TestResidualAgent_ClampWhenPartsExceedReal(t *testing.T) {
 	// Overlapping tools∪wait can exceed real; residual clamps so parts never
-	// report a negative agent. Sum is still real only when tools+wait ≤ real;
-	// when they exceed, agent=0 and tools+wait may exceed real — residual
-	// still guarantees agent ≥ 0 (v2-D1 "never exceeds the whole" for agent).
+	// report a negative agent.
 	agent := ResidualAgent(5*time.Second, 4*time.Second, 3*time.Second)
 	if agent != 0 {
 		t.Errorf("agent = %v, want 0 (clamped)", agent)

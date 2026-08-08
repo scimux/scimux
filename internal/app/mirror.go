@@ -39,8 +39,12 @@ type mirror struct {
 	// restart can never duplicate or drop turns.
 	path     string
 	mirrored int
-	lastUsed int64
-	lastWin  int64
+	// mirroredTools counts tool stamps of the current source segment already
+	// projected. Independent of the turn watermark so tool rows never inflate
+	// the turn counter (V2-P2 / O6; same discipline as Phase-3 usage widen).
+	mirroredTools int
+	lastUsed      int64
+	lastWin       int64
 	// lastTurnID is the TurnID of the last emitted usage record. Together with
 	// lastUsed/lastWin it forms the emission gate: occupancy change still
 	// fires, and a new TurnID at the same occupancy also fires so Claude fare
@@ -86,8 +90,8 @@ func (a *app) syncMirror(n *Node) {
 	if m.logw == nil || m.logw.Path != logPath {
 		m.logw = &sessionlog.Writer{Path: logPath}
 		st := replayMirrorState(logPath)
-		m.path, m.mirrored, m.lastUsed, m.lastWin, m.lastTurnID, m.tsize =
-			st.path, st.mirrored, st.used, st.win, st.turnID, st.size
+		m.path, m.mirrored, m.mirroredTools, m.lastUsed, m.lastWin, m.lastTurnID, m.tsize =
+			st.path, st.mirrored, st.tools, st.used, st.win, st.turnID, st.size
 		if !st.hasMeta {
 			if err := m.logw.Append(sessionlog.NewMeta(n.ID, n.Agent, n.Model, n.Effort, n.Dir)); err != nil {
 				m.logw = nil // retry next tick; don't advance state past a failed write
@@ -110,27 +114,31 @@ func (a *app) syncMirror(n *Node) {
 		return
 	}
 	turns := tl.Poll()
+	tools := tl.ToolStamps() // locked snapshot; Poll already advanced Tools
 	used, win := tl.Usage()
 	bd := tl.UsageBreakdown()
-	m.sync(a, n, tl.Path, turns, used, win, bd)
+	m.sync(a, n, tl.Path, turns, tools, used, win, bd)
 }
 
-// sync appends any new turns/usage to the log and re-persists the transcript
-// size watermark. The caller has already recovered durable state and confirmed
-// the transcript changed (or is new). Fields are owned by the poller goroutine.
-func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, used, win int64, bd transcript.UsageBreakdown) {
+// sync appends any new turns/tools/usage to the log and re-persists the
+// transcript size watermark. The caller has already recovered durable state
+// and confirmed the transcript changed (or is new). Fields are owned by the
+// poller goroutine.
+func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, tools []transcript.ToolStamp, used, win int64, bd transcript.UsageBreakdown) {
 	if tpath == "" {
 		return
 	}
 	// A different transcript file (first link, /clear rollover, corrected
 	// adoption, relink) or a rebuilt one (rotation: the tailer reset and now
 	// reports fewer turns than we mirrored) starts a new source segment.
-	if tpath != m.path || len(turns) < m.mirrored {
+	// Tools are also reset: a shorter tool list after rotation means the
+	// tailer rewound, same signal as turns.
+	if tpath != m.path || len(turns) < m.mirrored || len(tools) < m.mirroredTools {
 		sid := strings.TrimSuffix(filepath.Base(tpath), ".jsonl")
 		if err := m.logw.Append(sessionlog.NewSource(tpath, sid)); err != nil {
 			return
 		}
-		m.path, m.mirrored, m.tsize = tpath, 0, 0
+		m.path, m.mirrored, m.mirroredTools, m.tsize = tpath, 0, 0, 0
 	}
 	for _, t := range turns[m.mirrored:] {
 		// Role is "user"/"assistant" (transcript.ParseLine yields nothing
@@ -140,17 +148,37 @@ func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, us
 			return // watermark stays; the failed turn is retried next tick
 		}
 		m.mirrored++
-		// Phase 4 ingestion point: tmux transcripts carry only chat text (the
-		// tailer discards tool records, see transcript.ParseLine), so only
-		// Markdown-mention scanning applies here — the tool-call scanner is
-		// exercised by the ACP/codex managers, which log ToolEvent records
-		// directly. Runs at turn-append time, matching the eager-ingestion
-		// rule (upload-design.md, "Ingestion Timing").
+		// Markdown-mention scanning at turn-append time (upload-design.md,
+		// "Ingestion Timing"). Tool rows are projected separately below —
+		// rawInput is omitted from the mirror to keep the sensitivity surface
+		// equal to today's chat-only mirror (file is still 0600).
 		if a.assetHook != nil {
 			if cands := asset.ScanMarkdown(t.Text); len(cands) > 0 {
 				a.assetHook(n.ID, n.Dir, cands)
 			}
 		}
+	}
+	// V2-P2 / O6: project tool call+result stamps with CLI timestamps.
+	// Does not advance m.mirrored (turn counter); replayMirrorState only
+	// counts user/assistant for that watermark. P2 ride fold dedups so
+	// extra tool records are harmless.
+	for _, tool := range tools[m.mirroredTools:] {
+		if tool.ID == "" {
+			m.mirroredTools++
+			continue
+		}
+		if err := m.logw.Append(sessionlog.Event{
+			T:    "tool",
+			Time: tool.Time,
+			Tool: &sessionlog.ToolEvent{
+				ID:     tool.ID,
+				Title:  tool.Title,
+				Status: tool.Status,
+			},
+		}); err != nil {
+			return
+		}
+		m.mirroredTools++
 	}
 	// Emission gate: occupancy change (used/win) OR a new TurnID at the same
 	// occupancy. Phase 3 only gated on occupancy, which dropped Claude turns
@@ -188,7 +216,7 @@ type mirrorState struct {
 	hasMeta  bool
 	path     string
 	mirrored int
-	tools    int // tool records in the current source segment (V2-P2 watermark)
+	tools    int // tool records in the current source segment
 	used     int64
 	win      int64
 	turnID   string // last usage TurnID in the current segment (emission gate)
@@ -198,7 +226,8 @@ type mirrorState struct {
 // replayMirrorState derives the mirror's resume point from the log file —
 // the log is the only durable watermark, so restarts are idempotent by
 // construction. A missing or unreadable file yields the zero state (fresh
-// log, meta pending).
+// log, meta pending). Turn watermark counts only user/assistant — tool
+// rows never inflate it (V2-P2).
 func replayMirrorState(logPath string) mirrorState {
 	var st mirrorState
 	if _, err := os.Stat(logPath); err != nil {
@@ -210,11 +239,13 @@ func replayMirrorState(logPath string) mirrorState {
 			st.hasMeta = true
 		case "source":
 			if ev.Source != nil {
-				// a new segment resets the size watermark with the turn count
-				st.path, st.mirrored, st.size = ev.Source.Path, 0, 0
+				// a new segment resets watermarks
+				st.path, st.mirrored, st.tools, st.size = ev.Source.Path, 0, 0, 0
 			}
 		case "user", "assistant":
 			st.mirrored++
+		case "tool":
+			st.tools++
 		case "usage":
 			if ev.Usage != nil {
 				st.used, st.win = int64(ev.Usage.Used), int64(ev.Usage.Size)
