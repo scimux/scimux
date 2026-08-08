@@ -3,7 +3,7 @@
  * No browser emulator; no mutable production test/debug accessors. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
@@ -23,7 +23,7 @@ import {
   forkRequiresLane,
   seedForkTitleText,
   forkRationaleFromTurn,
-  forkPromptFromRationale,
+  forkPromptFromTurn,
   buildCreatePayload,
   buildHeadEditBody,
   isNoOpEditBody,
@@ -241,9 +241,41 @@ test("seedForkTitleText / rationale / prompt", () => {
   assert.equal(seedForkTitleText("  Hello\nworld"), "Hello");
   assert.equal(seedForkTitleText(""), "Follow-up");
   assert.equal(seedForkTitleText("x".repeat(100)).length, 60);
+  /* forkRationaleFromTurn: edge label only — first line, 140-char cap. */
+  assert.equal(forkRationaleFromTurn("a\nb"), "a");
   assert.equal(forkRationaleFromTurn("a\nb").length, 1);
   assert.equal(forkRationaleFromTurn("line".repeat(50)).length, 140);
-  assert.match(forkPromptFromRationale("ev"), /Following up on this evidence:\n> ev\n\n/);
+  assert.equal(forkRationaleFromTurn("a".repeat(200)), "a".repeat(140));
+  /* forkPromptFromTurn: full turn body, every line quoted; no 140-char cap. */
+  assert.equal(
+    forkPromptFromTurn("a\nb\nc"),
+    "Following up on:\n> a\n> b\n> c\n\n",
+  );
+  const long = "x".repeat(500);
+  assert.equal(forkPromptFromTurn(long), "Following up on:\n> " + long + "\n\n");
+  assert.ok(forkPromptFromTurn(long).includes(long));
+  assert.equal(forkPromptFromTurn(""), "");
+  assert.equal(forkPromptFromTurn("   \n  \t  "), "");
+  /* Trailing whitespace trimmed — no dangling "> " line at the end. */
+  assert.equal(forkPromptFromTurn("hello\n\n  "), "Following up on:\n> hello\n\n");
+  assert.doesNotMatch(forkPromptFromTurn("hello\n\n  "), /> \n\n$/);
+  /* Source guard: old excerpt helper is gone from sheets.js and all of web/.
+     Name assembled so this test file itself is not a false hit. */
+  const oldHelper = "forkPrompt" + "FromRationale";
+  assert.equal(sheetsSrc.includes(oldHelper), false, "sheets.js must not define " + oldHelper);
+  const webRoot = join(__dirname, "..");
+  const hits = [];
+  (function walk(dir){
+    for (const name of readdirSync(dir)) {
+      if (name === "node_modules") continue;
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.(js|html|css|md)$/.test(name)) {
+        if (readFileSync(p, "utf8").includes(oldHelper)) hits.push(p);
+      }
+    }
+  })(webRoot);
+  assert.deepEqual(hits, [], oldHelper + " must not be referenced under web/");
 });
 
 test("last-dir get/set preserves throw semantics", () => {
@@ -755,7 +787,11 @@ test("live turn fork seeds parent, title select timer, prompt, conscious lane", 
   ctx.feature.forkFromTurn("Evidence line\nmore", "p1");
   assert.ok(ctx.byId.newchat.classList.contains("open"));
   assert.equal(ctx.byId.nc_title.value, "Evidence line");
-  assert.match(ctx.byId.nc_prompt.value, /Evidence line/);
+  /* Full multi-line turn text lands in #nc_prompt (not a 140-char first-line excerpt). */
+  assert.equal(
+    ctx.byId.nc_prompt.value,
+    "Following up on:\n> Evidence line\n> more\n\n",
+  );
   assert.equal(ctx.byId.nc_agent.value, "claude");
   assert.equal(ctx.byId.nc_model.value, "opus");
   assert.equal(ctx.byId.nc_effort.value, "high");
