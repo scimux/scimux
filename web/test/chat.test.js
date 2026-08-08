@@ -612,6 +612,65 @@ test("source guard: keyrow call site reads per-node expanded, not hardcoded fals
   assert.match(chatSrc, /let\s+permExpanded\s*=\s*\{\s*node:\s*""\s*,\s*open:\s*false\s*\}/);
 });
 
+/* ---------- P6: landscape height budget — wrap options; ask absorbs squeeze ---------- */
+
+test("CSS: @media (max-height: 500px) wraps .permbtns; unmediated stays column pin", () => {
+  // Base pin must survive — portrait ACP column stack is the phone-portrait shape.
+  const base = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(base, ".permbtns rule present");
+  assert.match(base[1], /flex-direction:\s*column/, "unmediated .permbtns stays column");
+  assert.match(base[1], /flex:\s*0\s*0\s*auto/, "unmediated .permbtns stays flex: 0 0 auto");
+
+  const mediaIdx = chatCssSrc.search(/@media\s*\(\s*max-height:\s*500px\s*\)/);
+  assert.ok(mediaIdx >= 0, "@media (max-height: 500px) block exists");
+  // Window after the query opener covers both .permbtns and .permbtn rules.
+  const win = chatCssSrc.slice(mediaIdx, mediaIdx + 500);
+  const mediaBtns = win.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(mediaBtns, "media block styles .permbtns");
+  assert.match(mediaBtns[1], /flex-direction:\s*row/, "short viewports lay options in a row");
+  assert.match(mediaBtns[1], /flex-wrap:\s*wrap/, "short viewports wrap options");
+  const mediaBtn = win.match(/\.permbtns\s+\.permbtn\s*\{([^}]+)\}/);
+  assert.ok(mediaBtn, "media block styles .permbtns .permbtn");
+  assert.match(mediaBtn[1], /width:\s*auto/, "short-viewport .permbtn is width: auto");
+});
+
+test("CSS: #keyrow max-height; .permask flex absorbs the squeeze", () => {
+  const keyrow = chatCssSrc.match(/#keyrow\s*\{([^}]+)\}/);
+  assert.ok(keyrow, "#keyrow rule present");
+  assert.match(keyrow[1], /max-height:/, "#keyrow declares max-height (the keyrow cap)");
+
+  const mask = chatCssSrc.match(/\.permask\s*\{([^}]+)\}/);
+  assert.ok(mask, ".permask rule present");
+  assert.match(mask[1], /flex:\s*1\s*1\s*auto/, ".permask is flex: 1 1 auto under pressure");
+  assert.match(mask[1], /min-height:\s*0/, ".permask min-height: 0 so it can shrink");
+  // Cap stays — the ask scrolls internally; it does not grow unbound.
+  assert.match(mask[1], /max-height:\s*30dvh/, ".permask keeps max-height: 30dvh");
+});
+
+test("keyRowHTML: ACP branch order is hint → .permask → .permmore → .permbtns", () => {
+  // P6 is CSS-only — HTML order is the contract a later CSS-only phase must not
+  // silently re-order around. Guard the full chain, not just pairwise siblings.
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `cmd`",
+    permToolKind: "execute",
+    permOptions: [
+      { key: "1", name: "Allow once", kind: "allow" },
+      { key: "2", name: "Allow always", kind: "allow-always" },
+      { key: "3", name: "Reject", kind: "reject" },
+    ],
+    expanded: false,
+  });
+  const hintAt = html.search(/class="hint"/);
+  const maskAt = html.search(/class="permask/);
+  const moreAt = html.search(/class="permmore"/);
+  const btnsAt = html.search(/class="permbtns"/);
+  assert.ok(hintAt >= 0, "emits hint");
+  assert.ok(maskAt > hintAt, "hint before .permask");
+  assert.ok(moreAt > maskAt, ".permask before .permmore");
+  assert.ok(btnsAt > moreAt, ".permmore before .permbtns");
+});
+
 /* ---------- sentEcho ---------- */
 test("retireSentEcho: text match, seen index, base growth, timeout", () => {
   const now = 1_000_000;
