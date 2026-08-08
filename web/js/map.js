@@ -386,7 +386,9 @@ function fmtFareCost(c){
 /* Journey token meter (fare-design.md Phase 8 / D1 / D8). Full-screen + fareOn
    only. Distinct from the ctx_pct tank ring on the wall SVG — never merges
    occupancy into this line. Cost only when fare_cost_complete (D8). Absent
-   fare_* fields → empty (never 0·0·0). */
+   fare_* fields → empty (never 0·0·0).
+   V2-P4 retires this text line (capsule + callout); kept until the green
+   commit removes it so red tests can pin its absence. */
 export function fareLineHTML(n, { mapFull, fareOn, escape = esc } = {}){
   if (!mapFull || !fareOn || !n) return "";
   const hasFare = n.fare_fresh_in != null || n.fare_out != null
@@ -405,6 +407,47 @@ export function fareLineHTML(n, { mapFull, fareOn, escape = esc } = {}){
   if (n.fare_cost_complete && n.fare_cost != null)
     parts.push(fmtFareCost(n.fare_cost));
   return `<div class="fare">${parts.join(" · ")}</div>`;
+}
+
+/* ---------- V2-P4 centered capsule + callout (fare-design.md v2.3 / V2-P4)
+   Capsule on the *selected* segment only; tap opens anchored callout; retire
+   v1 fareLineHTML. Stubs below intentionally fail the red tests; green fills
+   them in and removes fareLineHTML. */
+
+/* Same gate as heat: full-screen wall + fare layer on. */
+export function fareOverlayEnabled({ mapFull, fareOn } = {}){
+  // RED stub: always false.
+  return false;
+}
+
+/* Map a wall-selected stop to a fare_segments index.
+   fare_segments[i] bridges stop i → stop i+1. Selected stop i>0 → arrival
+   segment i-1; creation stop (i=0) → outbound segment 0 when present.
+   null when no multi-stop track gap or no segment data. */
+export function selectedSegmentRef(stop){
+  // RED stub.
+  return null;
+}
+
+/* Compact wall-clock duration for the callout (45s / 1m 23s / 12ms). */
+export function fmtRideMs(ms){
+  // RED stub.
+  return "";
+}
+
+/* Opaque-surface capsule at (x, y) midpoint — headline token fare only.
+   Empty when overlay off / no segment. calloutOpen appends the breakdown. */
+export function fareCapsuleHTML(seg, opts = {}){
+  // RED stub.
+  return "";
+}
+
+/* Callout body: four token quantities + real (agent · tools · wait).
+   Time split omitted when agent/tools/wait absent (≠ zero). Cost only when
+   seg.cost_complete (D8). */
+export function fareCalloutHTML(seg, opts = {}){
+  // RED stub.
+  return "";
 }
 
 export function stationRowHTML(n, lm, opts = {}){

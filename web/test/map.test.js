@@ -45,6 +45,12 @@ import {
   heatSegmentsFingerprint,
   gapTokenCost,
   wallLaneTrackSVG,
+  // V2-P4 capsule + callout
+  fareOverlayEnabled,
+  selectedSegmentRef,
+  fmtRideMs,
+  fareCapsuleHTML,
+  fareCalloutHTML,
 } from "../js/map.js";
 import { toggleMapSelection, headStopKey } from "../js/map-model.js";
 import { forkKind, stopsOf, stopKey, newestFirst } from "../js/lanes.js";
@@ -1522,7 +1528,419 @@ test("V2-P3 wall render uses wallLaneTrackSVG under fareOn; base track when fare
     "renderWallMap must draw tracks via wallLaneTrackSVG");
   // heatOn gated on fareOn inside the wall path (wall is already mapFull)
   assert.match(mapSrc, /heatOn:\s*fareOn/);
-  // fareLineHTML not removed in P3
-  assert.match(mapSrc, /export function fareLineHTML\b/);
-  assert.match(mapSrc, /fareLineHTML\(n,/);
+  // V2-P3 left fareLineHTML; V2-P4 retires it (see V2-P4 suite below).
+  // Keep heat integration pin only — do not re-pin the v1 text line here.
+});
+
+/* ---------- V2-P4: centered capsule + tap callout; retire fareLineHTML
+ * (fare-design.md v2.3 / V2-P4 / v2.5 ④⑤⑥). Red stubs fail until green. */
+
+const SEG_FULL = {
+  fresh_in: 32800,
+  cache_read: 1200,
+  cache_write: 25400,
+  out: 410,
+  total: 59810,
+  turns: 3,
+  real_ms: 125_000,
+  agent_ms: 90_000,
+  tools_ms: 25_000,
+  wait_ms: 10_000,
+  cost: 0.6215,
+  cost_complete: true,
+};
+
+const SEG_NO_SPLIT = {
+  fresh_in: 100,
+  cache_read: 50,
+  cache_write: 0,
+  out: 20,
+  total: 170,
+  turns: 1,
+  real_ms: 10_000,
+  // agent/tools/wait intentionally absent (historical / codex-app-server)
+};
+
+const SEG_NO_COST = {
+  ...SEG_FULL,
+  cost: 0.99,
+  cost_complete: false,
+};
+
+test("V2-P4 fareOverlayEnabled only under mapFull && fareOn", () => {
+  assert.equal(fareOverlayEnabled({ mapFull: true, fareOn: true }), true);
+  assert.equal(fareOverlayEnabled({ mapFull: true, fareOn: false }), false, "off when !fareOn");
+  assert.equal(fareOverlayEnabled({ mapFull: false, fareOn: true }), false, "off when not full-screen");
+  assert.equal(fareOverlayEnabled({ mapFull: false, fareOn: false }), false);
+});
+
+test("V2-P4 selectedSegmentRef maps wall stop selection to fare_segments[i]", () => {
+  const n = {
+    id: "a",
+    created_at: "2026-01-01T00:00:00Z",
+    stops: ["2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"],
+    fare_segments: [
+      { total: 1000, fresh_in: 800, out: 200 },
+      { total: 5000, fresh_in: 4000, out: 1000 },
+    ],
+  };
+  const chain = stopsOf(n);
+  // stop i=0 creation → outbound segment 0
+  assert.deepEqual(
+    selectedSegmentRef(chain[0]),
+    { nodeId: "a", segIdx: 0, seg: n.fare_segments[0] },
+  );
+  // stop i=1 intermediate → arrival segment 0
+  assert.deepEqual(
+    selectedSegmentRef(chain[1]),
+    { nodeId: "a", segIdx: 0, seg: n.fare_segments[0] },
+  );
+  // stop i=2 head → arrival segment 1
+  assert.deepEqual(
+    selectedSegmentRef(chain[2]),
+    { nodeId: "a", segIdx: 1, seg: n.fare_segments[1] },
+  );
+
+  // single-stop node: no track gap → null
+  const lone = { id: "b", created_at: "2026-01-01T00:00:00Z", stops: [], fare_segments: [SEG_FULL] };
+  assert.equal(selectedSegmentRef(stopsOf(lone)[0]), null);
+
+  // no fare_segments → null
+  const bare = { id: "c", created_at: "2026-01-01T00:00:00Z", stops: ["2026-01-02T00:00:00Z"] };
+  assert.equal(selectedSegmentRef(stopsOf(bare)[1]), null);
+
+  // null / missing stop
+  assert.equal(selectedSegmentRef(null), null);
+  assert.equal(selectedSegmentRef(undefined), null);
+});
+
+test("V2-P4 fmtRideMs compact wall-clock labels", () => {
+  assert.equal(fmtRideMs(null), "");
+  assert.equal(fmtRideMs(undefined), "");
+  assert.equal(fmtRideMs(NaN), "");
+  assert.match(fmtRideMs(12), /12\s*ms|0(\.0)?s/);
+  assert.match(fmtRideMs(1_500), /1\.5\s*s|2\s*s/);
+  assert.match(fmtRideMs(45_000), /45\s*s/);
+  assert.match(fmtRideMs(125_000), /2\s*m|125\s*s/);
+});
+
+test("V2-P4 fareCapsuleHTML: headline tokens only; empty without segment", () => {
+  assert.equal(fareCapsuleHTML(null, { x: 24, y: 50 }), "");
+  assert.equal(fareCapsuleHTML(undefined, { x: 24, y: 50 }), "");
+
+  const html = fareCapsuleHTML(SEG_FULL, { x: 24, y: 92, escape: s => s });
+  assert.match(html, /fare-capsule|data-fare-capsule/, "capsule marker");
+  // headline is the segment token fare (compact k ok)
+  assert.match(html, /59\.?8?\s*k|59810/i);
+  // at rest: no four-quantity breakdown, no time split in the capsule itself
+  assert.doesNotMatch(html, /fresh/i);
+  assert.doesNotMatch(html, /cache-wr|cache-rd/i);
+  assert.doesNotMatch(html, /agent|tools|wait/i);
+  // position anchors (midpoint)
+  assert.match(html, /24|top|left|translate/i);
+  // opaque surface — class or fill using surface/bg token
+  assert.match(html, /fare-capsule|surface|--bg|--surface/i);
+});
+
+test("V2-P4 fareCalloutHTML: four tokens + real (agent·tools·wait); absent≠zero; D8 cost", () => {
+  const full = fareCalloutHTML(SEG_FULL, { escape: s => s });
+  assert.match(full, /fare-callout|data-fare-callout/);
+  // four canonical quantities
+  assert.match(full, /fresh/i);
+  assert.match(full, /out/i);
+  assert.match(full, /cache-wr|cache.?wr|wr/i);
+  assert.match(full, /cache-rd|cache.?rd|rd/i);
+  assert.match(full, /32\.?8?\s*k|32800/i);
+  assert.match(full, /410/);
+  // time: real with split
+  assert.match(full, /real/i);
+  assert.match(full, /agent/i);
+  assert.match(full, /tools/i);
+  assert.match(full, /wait/i);
+  // cost when complete
+  assert.match(full, /\$/);
+  assert.match(full, /0\.62/);
+
+  // no split → real alone, never fabricated agent/tools/wait zeros
+  const noSplit = fareCalloutHTML(SEG_NO_SPLIT, { escape: s => s });
+  assert.match(noSplit, /real/i);
+  assert.doesNotMatch(noSplit, /\bagent\b/i);
+  assert.doesNotMatch(noSplit, /\btools\b/i);
+  assert.doesNotMatch(noSplit, /\bwait\b/i);
+  // still shows tokens
+  assert.match(noSplit, /fresh/i);
+
+  // incomplete cost → no $
+  const noCost = fareCalloutHTML(SEG_NO_COST, { escape: s => s });
+  assert.doesNotMatch(noCost, /\$/);
+  assert.doesNotMatch(noCost, /0\.99|estimat/i);
+
+  assert.equal(fareCalloutHTML(null), "");
+});
+
+test("V2-P4 fareCapsuleHTML with calloutOpen includes callout body", () => {
+  const closed = fareCapsuleHTML(SEG_FULL, { x: 10, y: 20, calloutOpen: false, escape: s => s });
+  assert.doesNotMatch(closed, /fare-callout|data-fare-callout/);
+
+  const open = fareCapsuleHTML(SEG_FULL, { x: 10, y: 20, calloutOpen: true, escape: s => s });
+  assert.match(open, /fare-capsule|data-fare-capsule/);
+  assert.match(open, /fare-callout|data-fare-callout/);
+  assert.match(open, /fresh/i);
+  assert.match(open, /real/i);
+});
+
+test("V2-P4 wallMapSignature folds callout-open so idle poll skips", () => {
+  const n = {
+    id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+    created_at: "2026-01-01T00:00:00Z", last_activity: 100, ctx_pct: 10,
+    fare_total: 170, fare_turns: 1, fare_cost_complete: false,
+    stops: ["2026-01-02T00:00:00Z"],
+    fare_segments: [SEG_NO_SPLIT, { total: 50, fresh_in: 40, out: 10, real_ms: 1000 }],
+  };
+  const rows = stopsOf(n).sort(newestFirst);
+  const base = {
+    focusLane: null, mapTab: "all", mapSel: "a", mapSelKey: "a#1", fareOn: true,
+  };
+  const wClosed = wallMapSignature(rows, ["L"], { ...base, fareCalloutOpen: false });
+  const wOpen = wallMapSignature(rows, ["L"], { ...base, fareCalloutOpen: true });
+  assert.notEqual(wClosed, wOpen, "callout open/closed must change signature");
+  // stable under unchanged poll
+  assert.equal(
+    wallMapSignature(rows, ["L"], { ...base, fareCalloutOpen: true }),
+    wOpen,
+  );
+  assert.equal(mapRenderDecision(wOpen, wOpen), "skip");
+});
+
+test("V2-P4 v1 fareLineHTML fully retired — no export, no call site, no always-on fare row", () => {
+  // ⑤ no orphaned always-on text row
+  assert.doesNotMatch(mapSrc, /export function fareLineHTML\b/,
+    "fareLineHTML export must be removed");
+  assert.doesNotMatch(mapSrc, /fareLineHTML\s*\(/,
+    "no fareLineHTML call sites");
+  // stationHTML / wall must not inject class="fare" meter
+  assert.doesNotMatch(mapSrc, /class="fare"/);
+  // helpers that replace it must exist
+  assert.match(mapSrc, /export function fareCapsuleHTML\b/);
+  assert.match(mapSrc, /export function fareCalloutHTML\b/);
+  assert.match(mapSrc, /export function selectedSegmentRef\b/);
+});
+
+test("V2-P4 wall: capsule only on selected segment; none when nothing selected", () => {
+  const mapwrap = fakeEl("mapwrap");
+  const composer = fakeEl("prompt");
+  composer.value = "draft stays for capsule";
+  composer._focused = true;
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+    },
+  };
+  const node = {
+    id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
+    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
+    fare_fresh_in: 100, fare_out: 20, fare_cache_write: 0, fare_cache_read: 50,
+    fare_total: 170, fare_turns: 2, fare_cost_complete: false,
+    fare_segments: [
+      { total: 100, fresh_in: 80, cache_read: 0, cache_write: 0, out: 20,
+        real_ms: 5000, agent_ms: 3000, tools_ms: 1000, wait_ms: 1000 },
+      { total: 70, fresh_in: 50, cache_read: 0, cache_write: 0, out: 20,
+        real_ms: 2000 },
+    ],
+  };
+  const nodes = [node];
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FARE_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+    },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    agentLogo: () => "",
+    icons: {
+      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
+      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+    },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+
+  // Nothing selected → heat may be on, but no capsule and no always-on fare text row
+  assert.doesNotMatch(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/);
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
+  assert.equal(composer.value, "draft stays for capsule");
+  assert.equal(composer._focused, true);
+
+  // Select head stop via wall click simulation (data-nid + data-skey)
+  const headKey = "a#1";
+  const fakeRow = {
+    dataset: { nid: "a", skey: headKey, stop: "" },
+    closest(sel){
+      if (sel === "[data-nid]") return this;
+      if (sel === "[data-fold]" || sel === "[data-jump]" || sel === "[data-medit]"
+        || sel === "[data-forkfrom]" || sel === "[data-golane]" || sel === "[data-goorigin]"
+        || sel === "[data-fare-capsule]") return null;
+      return null;
+    },
+  };
+  const clickEv = { target: { closest(sel){ return fakeRow.closest(sel); } } };
+  firstListener(mapwrap, "click")(clickEv);
+
+  assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
+    "capsule appears on selected segment");
+  // headline tokens for the arrival segment of head (seg 0: total 100)
+  assert.match(mapwrap.innerHTML, /\b100\b|0\.1\s*k/i);
+  // no always-on fare text meter
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
+  // callout closed at rest
+  assert.doesNotMatch(mapwrap.innerHTML, /fare-callout|data-fare-callout/);
+
+  // Tap capsule → callout opens with breakdown
+  const capsuleEl = {
+    dataset: { fareCapsule: "1" },
+    closest(sel){
+      if (sel === "[data-fare-capsule]") return this;
+      return null;
+    },
+  };
+  firstListener(mapwrap, "click")({
+    target: { closest(sel){ return capsuleEl.closest(sel); } },
+    stopPropagation(){},
+    preventDefault(){},
+  });
+  assert.match(mapwrap.innerHTML, /fare-callout|data-fare-callout/);
+  assert.match(mapwrap.innerHTML, /fresh/i);
+  assert.match(mapwrap.innerHTML, /real/i);
+  assert.match(mapwrap.innerHTML, /agent/i);
+
+  // Poll: segment tokens grow; capsule text updates; composer + callout state survive
+  node.fare_segments = [
+    { total: 9000, fresh_in: 8000, cache_read: 0, cache_write: 0, out: 1000,
+      real_ms: 5000, agent_ms: 3000, tools_ms: 1000, wait_ms: 1000 },
+    { total: 70, fresh_in: 50, cache_read: 0, cache_write: 0, out: 20, real_ms: 2000 },
+  ];
+  feature.render();
+  assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/);
+  assert.match(mapwrap.innerHTML, /9\s*k|9000/i);
+  assert.match(mapwrap.innerHTML, /fare-callout|data-fare-callout/,
+    "callout open state survives poll rebuild");
+  assert.equal(composer.value, "draft stays for capsule");
+  assert.equal(composer._focused, true);
+
+  feature.destroy();
+});
+
+test("V2-P4 gated off when !fareOn or not full-screen; no dangling fareLineHTML", () => {
+  // Pure gate already covered; pin wall path wiring + retirement.
+  assert.match(mapSrc, /fareCapsuleHTML\s*\(/,
+    "renderWallMap must draw the capsule via fareCapsuleHTML");
+  assert.match(mapSrc, /selectedSegmentRef\s*\(/,
+    "segment selection must use selectedSegmentRef from wall selection");
+  assert.doesNotMatch(mapSrc, /export function fareLineHTML\b/);
+  assert.doesNotMatch(mapSrc, /fareLineHTML\s*\(/);
+
+  const mapwrap = fakeEl("mapwrap");
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+    },
+  };
+  const node = {
+    id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
+    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
+    fare_total: 170, fare_turns: 2, fare_cost_complete: false,
+    fare_segments: [
+      { total: 100, fresh_in: 80, out: 20, real_ms: 5000 },
+      { total: 70, fresh_in: 50, out: 20, real_ms: 2000 },
+    ],
+  };
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    // fare OFF
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const farebtn = fakeEl("farebtn");
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, farebtn, mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+    },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [node],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    agentLogo: () => "",
+    icons: {
+      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
+      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+    },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+  // select a stop while fare is off
+  const fakeRow = {
+    dataset: { nid: "a", skey: "a#1", stop: "" },
+    closest(sel){
+      if (sel === "[data-nid]") return this;
+      if (sel === "[data-fare-capsule]") return null;
+      return null;
+    },
+  };
+  firstListener(mapwrap, "click")({
+    target: { closest(sel){ return fakeRow.closest(sel); } },
+  });
+  assert.doesNotMatch(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
+    "no capsule when fareOff");
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
+
+  // turn fare on → capsule appears for selection
+  firstListener(farebtn, "click")();
+  feature.render();
+  assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
+    "capsule when fareOn + selection");
+  feature.destroy();
 });
