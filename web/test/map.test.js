@@ -2102,4 +2102,17 @@ test("V2-P5 the ticket perforation IS the actionbar perforation", () => {
   assert.match(css, /\.tk-tear::after[\s\S]*?12px/, "12px end bites, as .tearcard");
   assert.match(css, /\.tk-tear::before[\s\S]*?left: 20px; right: 20px/,
     "run inset = tearhole 12px + 8px");
+
+  /* The card's bite is a real hole (mask-image) with a --perf burr arc drawn
+     around it — see notes.css. The ticket cannot mask its sheet (tear
+     positions move with content), so it paints the bite; but a plain --bg
+     disc on --surface is a 3% difference in light mode and vanished, which is
+     why the seam lost the two anchors that sell the motif and why dark, where
+     --bg is much darker than --surface, always looked fine. Painted bites
+     therefore need both a hole-toned fill and the burr. */
+  const bite = css.match(/\.fare-ticket \.tk-tear::after \{[^}]*\}/);
+  assert.ok(bite, ".tk-tear::after rule present");
+  assert.match(bite[0], /var\(--perf\)/, "burr arc around the bite, as on the card");
+  assert.match(bite[0], /color-mix\([^)]*var\(--ink\)[^)]*var\(--bg\)/,
+    "bite reads as a hole, not as page colour laid on the sheet");
 });
