@@ -294,8 +294,13 @@ body.cards-open #msgs { overflow: hidden; }
 .permbtns.keys { flex-direction: row; flex-wrap: wrap; }
 .permbtns.keys .permbtn { width: auto; min-width: 44px; flex: 0 0 auto; }
 /* Short viewports (landscape phones): ACP labels are short enough for two
-   per line. Portrait keeps the column stack above. */
+   per line. Portrait keeps the column stack above. Reclaim optional chrome
+   so the 55dvh keyrow cap still holds past four options (phase 7): the hint
+   is redundant next to the yellow buttons, and the ask tightens rather than
+   collapsing to 0 under three answer rows. 44px targets and the pin stay. */
 @media (max-height: 500px) {
+  #keyrow .hint { display: none; }
+  .permask { max-height: 20dvh; }
   .permbtns { flex-direction: row; flex-wrap: wrap; }
   .permbtns .permbtn { width: auto; flex: 1 1 45%; }
 }
