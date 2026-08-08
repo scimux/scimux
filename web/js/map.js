@@ -199,7 +199,6 @@ function fareFingerprint(n){
     n.fare_total ?? "",
     n.fare_turns ?? "",
     n.fare_cost_complete ? 1 : 0,
-    // V2-P3: per-segment heat fingerprint (stub until green — see heatSegmentsFingerprint)
     heatSegmentsFingerprint(n),
   ].join(",");
 }
@@ -217,8 +216,7 @@ export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSel
 /* ---------- V2-P3 lane heat (fare-design.md v2.3 / V2-P3) ----------
    Encode per-segment token cost as track stroke-width (+opacity). Thickness
    is the accessible channel — never colour alone. Always-on under
-   mapFull && fareOn (wall-map eye-candy only). Stubs below intentionally
-   fail the red tests; green commit fills them in. */
+   mapFull && fareOn (wall-map eye-candy only). */
 
 export const TRACK_STROKE_BASE = 3.5;
 export const TRACK_STROKE_MAX = 11;
@@ -227,42 +225,68 @@ export const HEAT_COST_CAP = 200_000;
 
 /* Heat only on the full-screen wall when the fare layer is on. */
 export function heatEnabled({ mapFull, fareOn } = {}){
-  // RED stub: always false so gate tests fail until green.
-  return false;
+  return !!(mapFull && fareOn);
 }
 
 /* Token heat magnitude from one fare_segments entry: the four canonical
-   quantities (or shipped `total`). null = absent (≠ zero). */
+   quantities (or shipped `total`). null = absent (≠ zero). Time parts
+   (agent/tools/wait) never drive heat — those surface in V2-P4's callout. */
 export function segmentTokenCost(seg){
-  // RED stub: always absent.
-  return null;
+  if (seg == null || typeof seg !== "object") return null;
+  if (seg.total != null){
+    const t = Number(seg.total);
+    if (Number.isFinite(t)) return Math.max(0, t);
+  }
+  const keys = ["fresh_in", "cache_read", "cache_write", "out"];
+  let any = false, sum = 0;
+  for (const k of keys){
+    if (seg[k] != null){
+      const v = Number(seg[k]);
+      if (Number.isFinite(v)){ any = true; sum += v; }
+    }
+  }
+  return any ? Math.max(0, sum) : null;
 }
 
 /* Bounded monotonic stroke-width from a token cost. Absent/non-finite/≤0 →
-   base track (never zero-width or missing). Huge costs clamp at max. */
+   base track (never zero-width or missing). Huge costs clamp at max.
+   Rounded to 2dp so SVG attributes stay stable under poll. */
 export function heatStrokeWidth(cost){
-  // RED stub: constant base — no scaling.
-  return TRACK_STROKE_BASE;
+  if (cost == null || !Number.isFinite(cost) || cost <= 0) return TRACK_STROKE_BASE;
+  const t = Math.min(1, cost / HEAT_COST_CAP);
+  const w = TRACK_STROKE_BASE + t * (TRACK_STROKE_MAX - TRACK_STROKE_BASE);
+  return Math.round(w * 100) / 100;
 }
 
-/* Mild opacity ramp with cost (redundant channel). Dim-lane baseOp is
-   preserved as a multiplier. */
+/* Mild opacity ramp with cost (redundant channel; thickness is primary).
+   Dim-lane baseOp is preserved as a multiplier. */
 export function heatOpacity(cost, baseOp = 1){
-  // RED stub: ignore cost.
-  return baseOp;
+  const base = Number(baseOp);
+  const b = Number.isFinite(base) ? base : 1;
+  if (cost == null || !Number.isFinite(cost) || cost <= 0) return b;
+  const t = Math.min(1, cost / HEAT_COST_CAP);
+  // 0.85 → 1.0 of baseOp so dim lanes stay dim and heat still reads.
+  return b * (0.85 + 0.15 * t);
 }
 
 /* Per-segment heat fingerprint for wallMapSignature. */
 export function heatSegmentsFingerprint(n){
-  // RED stub: empty so segment cost changes do not affect the signature.
-  return "";
+  if (!n || !Array.isArray(n.fare_segments) || !n.fare_segments.length) return "";
+  return n.fare_segments.map(s => {
+    const c = segmentTokenCost(s);
+    return c == null ? "" : String(c);
+  }).join(";");
 }
 
 /* Token cost for the track gap between two stops. Same node + consecutive
    stop indices → fare_segments[min(i)]; otherwise absent. */
 export function gapTokenCost(a, b){
-  // RED stub.
-  return null;
+  if (!a || !b || !a.n || !b.n || a.n.id !== b.n.id) return null;
+  if (Math.abs(a.i - b.i) !== 1) return null;
+  const i = Math.min(a.i, b.i);
+  const segs = a.n.fare_segments;
+  if (!Array.isArray(segs) || segs[i] == null) return null;
+  return segmentTokenCost(segs[i]);
 }
 
 /* Vertical track SVG for one lane/branch line. stops: [{y, stop}, ...]
@@ -270,12 +294,27 @@ export function gapTokenCost(a, b){
    stroke-width from fare_segments; otherwise a single base-width line.
    Absent cost → base track (line still drawn). */
 export function wallLaneTrackSVG(stops, { x, color, opacity = 1, heatOn = false } = {}){
-  // RED stub: always base continuous line, ignore heatOn.
   if (!stops || stops.length < 2) return "";
-  const ys = stops.map(s => s.y);
-  return `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
+  if (!heatOn){
+    const ys = stops.map(s => s.y);
+    return `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
             stroke="${color}" stroke-width="${TRACK_STROKE_BASE}" stroke-linecap="round"
             opacity="${opacity}"/>`;
+  }
+  const sorted = [...stops].sort((a, b) => a.y - b.y || 0);
+  let out = "";
+  for (let i = 0; i < sorted.length - 1; i++){
+    const a = sorted[i], b = sorted[i + 1];
+    if (a.y === b.y) continue;
+    const cost = gapTokenCost(a.stop, b.stop);
+    const sw = heatStrokeWidth(cost);
+    const op = heatOpacity(cost, opacity);
+    const heatAttr = cost != null ? ` data-heat="${cost}"` : "";
+    out += `<line x1="${x}" y1="${a.y}" x2="${x}" y2="${b.y}"
+            stroke="${color}" stroke-width="${sw}" stroke-linecap="round"
+            opacity="${op}"${heatAttr}/>`;
+  }
+  return out;
 }
 
 export function attentionStationSVG(x, y, op){
@@ -639,30 +678,40 @@ export function createMapFeature(deps){
     const nodeX = n => colX(colIdx[n.lane_id]) + (xOff[n.id] || 0);
     colsW += Math.max(0, ...Object.values(xOff));
 
-    const touch = {}; cols.forEach(id => touch[id] = []);
-    const branchYs = {};
+    // Per-line station points (y + stop) so heat can encode each inter-station
+    // gap from fare_segments. Mainline vs y-stay branch (x offset) stay separate.
+    const touchStops = {}; cols.forEach(id => touchStops[id] = []);
+    const branchStops = {};
     rows.forEach((s, i) => {
       if (colIdx[s.n.lane_id] == null) return;
-      if (xOff[s.n.id]) (branchYs[s.n.id] = branchYs[s.n.id] || []).push(rowY(i));
-      else touch[s.n.lane_id].push(rowY(i));
+      const pt = { y: rowY(i), stop: s };
+      if (xOff[s.n.id]) (branchStops[s.n.id] = branchStops[s.n.id] || []).push(pt);
+      else touchStops[s.n.lane_id].push(pt);
     });
 
     let svg = ATTN_GLOW_DEF;
+    // Wall is already mapFull; fareOn is the layer toggle (heatEnabled).
     cols.forEach(id => {
-      const ys = touch[id];
-      if (ys.length < 2) return;
+      const pts = touchStops[id];
+      if (!pts || pts.length < 2) return;
       const x = colX(colIdx[id]);
-      svg += `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
-            stroke="${escape(model.color(id))}" stroke-width="3.5" stroke-linecap="round"
-            opacity="${dimLane(id) ? .22 : 1}"/>`;
+      svg += wallLaneTrackSVG(pts, {
+        x,
+        color: escape(model.color(id)),
+        opacity: dimLane(id) ? .22 : 1,
+        heatOn: fareOn,
+      });
     });
-    Object.keys(branchYs).forEach(id => {
-      const ys = branchYs[id], n = model.byId[id];
-      if (ys.length < 2 || !n) return;
+    Object.keys(branchStops).forEach(id => {
+      const pts = branchStops[id], n = model.byId[id];
+      if (!pts || pts.length < 2 || !n) return;
       const x = nodeX(n);
-      svg += `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
-            stroke="${escape(model.color(n.lane_id))}" stroke-width="3.5" stroke-linecap="round"
-            opacity="${dimNode(n) ? .22 : 1}"/>`;
+      svg += wallLaneTrackSVG(pts, {
+        x,
+        color: escape(model.color(n.lane_id)),
+        opacity: dimNode(n) ? .22 : 1,
+        heatOn: fareOn,
+      });
     });
     rows.forEach((s, ci) => {
       if (s.i !== 0) return;
