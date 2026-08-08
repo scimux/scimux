@@ -326,11 +326,17 @@ export function splitAssetRefs(text, nodeId, assets, deps = {}){
   return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
 }
 
-/* stripAssetRefs: pure. Replace ![alt](scimux-asset:id) markers with their alt
-   text (drop when alt empty) so fork seeds never ship dead asset markdown.
-   RED stub — product body lands in fix(fork). */
+/* stripAssetRefs: pure. Replace ![alt](scimux-asset:id) / [alt](scimux-asset:id)
+   markers with their alt text (drop when alt is empty) so a forked prompt
+   never ships dead asset markdown the new node cannot resolve. Reuses
+   ASSET_REF_RE (reset lastIndex — it is a /g regex). Sheets stays free of
+   asset knowledge; the chat caller owns the strip. */
 export function stripAssetRefs(text){
-  return text || "";
+  const re = ASSET_REF_RE;
+  re.lastIndex = 0;
+  return (text || "")
+    .replace(re, (_m, _bang, alt) => alt || "")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
@@ -1176,7 +1182,7 @@ export function createChatFeature(deps){
       renderBubbleActions();
       if (!turn) return;
       if (ba.dataset.bact === "fork" && typeof d.forkFromTurn === "function")
-        d.forkFromTurn(turn.text);
+        d.forkFromTurn(stripAssetRefs(turn.text));
       else if (ba.dataset.bact === "desc")
         useTurnAsDescription(turn.text);
       return;
