@@ -265,12 +265,14 @@ body.cards-open #msgs { overflow: hidden; }
 /* Approval keyrow: column stack so a long perm_title can never push the
    answer buttons off-screen. .permbtns is flex: 0 0 auto — the pin guarantee.
    Expanded state + .permmore click live in chat.js (permExpanded); clamped
-   shows ~3 lines + "show all", expanded is max-height: 30dvh + internal scroll. */
+   shows ~3 lines + "show all", expanded is max-height: 30dvh + internal scroll.
+   max-height: 55dvh caps the whole row; .permask flex-shrinks under pressure
+   so answer buttons keep their 44px targets (landscape budget, phase 6). */
 #keyrow { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-  padding: 8px 14px; border-top: 1px solid var(--hairline); }
+  padding: 8px 14px; border-top: 1px solid var(--hairline); max-height: 55dvh; }
 #keyrow:empty { display: none; }
 #keyrow .hint { font-size: 12px; color: var(--dim); }
-.permask { min-height: 0; max-height: 30dvh; overflow-y: auto;
+.permask { flex: 1 1 auto; min-height: 0; max-height: 30dvh; overflow-y: auto;
   overflow-wrap: anywhere; }
 .permask.clamped { display: -webkit-box; -webkit-line-clamp: 3;
   -webkit-box-orient: vertical; overflow: hidden; }
@@ -286,9 +288,17 @@ body.cards-open #msgs { overflow: hidden; }
   background: var(--surface); border: 1.5px solid var(--attn); border-radius: 10px;
   font-size: 15px; font-weight: 600; color: var(--ink); text-align: left; }
 /* Tmux: ten short keys — wrap into rows instead of a 500px+ vertical stack
-   that crushes the transcript (portrait) or falls off-screen (landscape). */
+   that crushes the transcript (portrait) or falls off-screen (landscape).
+   flex: 0 0 auto keeps the short digits content-sized so the short-viewport
+   ACP rule below cannot force them into half-width pairs. */
 .permbtns.keys { flex-direction: row; flex-wrap: wrap; }
-.permbtns.keys .permbtn { width: auto; min-width: 44px; }
+.permbtns.keys .permbtn { width: auto; min-width: 44px; flex: 0 0 auto; }
+/* Short viewports (landscape phones): ACP labels are short enough for two
+   per line. Portrait keeps the column stack above. */
+@media (max-height: 500px) {
+  .permbtns { flex-direction: row; flex-wrap: wrap; }
+  .permbtns .permbtn { width: auto; flex: 1 1 45%; }
+}
 .permbtn.allow, .permbtn.allow-always { border-color: var(--attn); }
 .permbtn.reject, .permbtn.reject-always { border-color: var(--danger); color: var(--danger); }
 .permbtn.unknown { border-color: var(--hairline); color: var(--ink); }
