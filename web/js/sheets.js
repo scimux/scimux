@@ -192,8 +192,10 @@ export function forkRationaleFromTurn(text){
   return (text || "").split("\n")[0].slice(0, 140);
 }
 
-export function forkPromptFromRationale(rationale){
-  return "Following up on this evidence:\n> " + rationale + "\n\n";
+export function forkPromptFromTurn(text){
+  const body = (text || "").replace(/\s+$/, "");
+  return body ? "Following up on:\n" +
+    body.split("\n").map(l => "> " + l).join("\n") + "\n\n" : "";
 }
 
 /* ---------- pure: payloads ---------- */
@@ -584,7 +586,7 @@ export function createSheetsFeature(deps = {}){
     setNewActivitySubmitting(false);
     seedForkTitle(text);
     const prompt = root("nc_prompt");
-    if (prompt) prompt.value = forkPromptFromRationale(ncRationale);
+    if (prompt) prompt.value = forkPromptFromTurn(text);
     prepareLaunchConfig();
     prepareNewActivityLane();
     openSheet("#newchat");
