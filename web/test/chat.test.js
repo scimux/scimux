@@ -37,6 +37,8 @@ import {
   refTilesHTML,
   assetTileHTML,
   splitAssetRefs,
+  stripAssetRefs,
+  splitPermTitle,
   bubbleActionsHTML,
   keyRowHTML,
   peekBlockHTML,
@@ -47,6 +49,7 @@ import { bubbleTitle, fmtBubbleTime } from "../js/format.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const chatSrc = readFileSync(join(__dirname, "../js/chat.js"), "utf8");
+const chatCssSrc = readFileSync(join(__dirname, "../css/chat.css"), "utf8");
 
 /* ---------- module shape / no later features ---------- */
 test("chat.js exports factory and pure helpers; reuses format/lanes/map-model", () => {
@@ -98,8 +101,16 @@ test("buildChatSignature is stable and order-sensitive", () => {
   const b = buildChatSignature({ ...base, live: "active" });
   assert.equal(a, buildChatSignature(base));
   assert.notEqual(a, b);
-  // production: (opts).map(o => o.key + o.name).join(",")
+  // production includes kind so a kind change re-renders the keyrow
   assert.equal(permOptionsKey([{ key: "1", name: "Yes" }, { key: "2", name: "No" }]), "1Yes,2No");
+  assert.equal(
+    permOptionsKey([{ key: "1", name: "Allow", kind: "allow" }, { key: "2", name: "Reject", kind: "reject" }]),
+    "1Allowallow,2Rejectreject",
+  );
+  assert.notEqual(
+    permOptionsKey([{ key: "1", name: "Allow", kind: "allow" }]),
+    permOptionsKey([{ key: "1", name: "Allow", kind: "reject" }]),
+  );
 });
 
 /* ---------- bubble roles / titles / actions / assets ---------- */
@@ -272,6 +283,188 @@ test("peekBlockHTML and keyRowHTML presentation contracts", () => {
   const tmux = keyRowHTML({ attention: "question" });
   assert.match(tmux, /data-key="y"/);
   assert.match(tmux, /data-key="Enter"/);
+  assert.match(tmux, /class="permbtns"/, "tmux keys share the pinned .permbtns container");
+  const waiting = keyRowHTML({
+    attention: "approval", source: "acp", permTitle: "X", permOptions: [],
+  });
+  assert.match(waiting, /Waiting for approval options/);
+  assert.doesNotMatch(waiting, /permbtns/);
+});
+
+/* ---------- P3 approval reachability: pure helpers + keyrow structure ---------- */
+
+test("splitPermTitle: verb+backtick shapes vs fallthrough", () => {
+  assert.deepEqual(splitPermTitle("Execute `ls -la`"), { verb: "Execute", code: "ls -la" });
+  assert.deepEqual(splitPermTitle("Read `/abs/path`"), { verb: "Read", code: "/abs/path" });
+  assert.deepEqual(splitPermTitle("Edit `/abs/path`"), { verb: "Edit", code: "/abs/path" });
+  assert.deepEqual(splitPermTitle("Search `foo.*bar`"), { verb: "Search", code: "foo.*bar" });
+  // bare regex / prose / empty / null — never throw, never null
+  assert.deepEqual(splitPermTitle("foo.*bar"), { verb: "", code: "foo.*bar" });
+  assert.deepEqual(splitPermTitle("thinking hard about it"), { verb: "", code: "thinking hard about it" });
+  assert.deepEqual(splitPermTitle(""), { verb: "", code: "" });
+  assert.deepEqual(splitPermTitle(null), { verb: "", code: "" });
+  assert.deepEqual(splitPermTitle(undefined), { verb: "", code: "" });
+  // 6 KB multi-line payload survives byte-identical (the phone overflow case)
+  const payload = "#!/bin/bash\n" + "x".repeat(6000) + "\n# heading\n* bullet\n| a | b |\necho done";
+  const r = splitPermTitle("Execute `" + payload + "`");
+  assert.equal(r.verb, "Execute");
+  assert.equal(r.code, payload);
+});
+
+test("keyRowHTML: never md() on perm_title; payload escapes; structure and kinds", () => {
+  // md() regression pin: title with heading/bullet/table lines must stay
+  // verbatim inside <pre> — no <h1>/<li>/<table> from the markdown path.
+  const poison = "# heading\n* bullet\n| a | b |\n<script>x</script>";
+  const html = keyRowHTML({
+    attention: "approval",
+    source: "acp",
+    permTitle: "Execute `" + poison + "`",
+    permToolKind: "execute",
+    permOptions: [
+      { key: "1", name: "Allow once", kind: "allow" },
+      { key: "2", name: "Allow always", kind: "allow_always" },
+      { key: "3", name: "Reject once", kind: "reject" },
+      { key: "4", name: "Reject always", kind: "reject_always" },
+      { key: "5", name: "Maybe", kind: "" },
+    ],
+    expanded: false,
+  });
+  assert.doesNotMatch(html, /<h[1-3][\s>]/i, "no heading tags from md()");
+  assert.doesNotMatch(html, /<li[\s>]/i, "no list items from md()");
+  assert.doesNotMatch(html, /<table[\s>]/i, "no table from md()");
+  assert.doesNotMatch(html, /<script>/i, "payload must be escaped");
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /# heading/);
+  assert.match(html, /\* bullet/);
+  assert.match(html, /\| a \| b \|/);
+  assert.match(html, /<pre class="permcode">/);
+  assert.match(html, /class="permverb"[^>]*>Execute</);
+  assert.match(html, /class="permask clamped"/);
+  assert.match(html, /class="permmore"/);
+  assert.match(html, /show all/);
+
+  // .permbtns: one button per option, agent order, digit prefixes, kind classes
+  assert.match(html, /class="permbtns"/);
+  const btnOrder = [...html.matchAll(/data-key="(\d+)"[^>]*class="([^"]+)"[^>]*>([^<]+)</g)];
+  // class may come before or after data-key — match more loosely
+  const labels = [...html.matchAll(/data-key="(\d+)"[^>]*>([^<]+)</g)].map(m => [m[1], m[2].trim()]);
+  assert.deepEqual(labels.map(l => l[0]), ["1", "2", "3", "4", "5"]);
+  assert.match(labels[0][1], /^1\.\s+Allow once$/);
+  assert.match(labels[1][1], /^2\.\s+Allow always$/);
+  assert.match(labels[2][1], /^3\.\s+Reject once$/);
+  assert.match(labels[3][1], /^4\.\s+Reject always$/);
+  assert.match(labels[4][1], /^5\.\s+Maybe$/);
+  assert.match(html, /class="permbtn allow"/);
+  assert.match(html, /class="permbtn allow-always"/);
+  assert.match(html, /class="permbtn reject"/);
+  assert.match(html, /class="permbtn reject-always"/);
+  assert.match(html, /class="permbtn unknown"/);
+
+  // expanded=true: no clamp, no show-all
+  const open = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `cmd`",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: true,
+  });
+  assert.doesNotMatch(open, /clamped/);
+  assert.doesNotMatch(open, /permmore/);
+});
+
+test("keyRowHTML: code vs prose and codex label fallback", () => {
+  // codex bare command + permToolKind execute → <pre class="permcode">
+  const codex = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "npm install left-pad",
+    permToolKind: "execute",
+    permOptions: [{ key: "1", name: "accept", kind: "allow" }],
+    expanded: true,
+  });
+  assert.match(codex, /<pre class="permcode">/);
+  assert.doesNotMatch(codex, /class="permverb"/, "no verb when title has no backticks");
+  assert.match(codex, /npm install left-pad/);
+  // enum-looking name + known kind → readable label; raw enum in title=
+  assert.match(codex, /title="accept"/);
+  assert.match(codex, />1\. Allow</);
+
+  // think/prose → .permtext, not pre
+  const think = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "thinking about the plan",
+    permToolKind: "think",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: true,
+  });
+  assert.match(think, /class="permtext"/);
+  assert.doesNotMatch(think, /<pre class="permcode">/);
+
+  // already-human Name (has a space) is left alone; no forced title=
+  const human = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Edit `/x`",
+    permToolKind: "edit",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: true,
+  });
+  assert.match(human, />1\. Allow once</);
+  assert.doesNotMatch(human, /title="Allow once"/);
+
+  // unknown kind + enum-looking name → show name as-is
+  const unk = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "x",
+    permOptions: [{ key: "1", name: "declinePermissions", kind: "" }],
+    expanded: true,
+  });
+  assert.match(unk, />1\. declinePermissions</);
+  assert.match(unk, /class="permbtn unknown"/);
+
+  // reject_always enum fallback
+  const rej = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "x",
+    permOptions: [
+      { key: "1", name: "cancel", kind: "reject" },
+      { key: "2", name: "declinePermissions", kind: "reject_always" },
+    ],
+    expanded: true,
+  });
+  assert.match(rej, /title="cancel"/);
+  assert.match(rej, />1\. Reject</);
+  assert.match(rej, /title="declinePermissions"/);
+  assert.match(rej, />2\. Reject always</);
+});
+
+test("stripAssetRefs: marker→alt, empty dropped, other markdown untouched", () => {
+  assert.equal(stripAssetRefs("see ![shot](scimux-asset:a_1) here"), "see shot here");
+  assert.equal(stripAssetRefs("x ![](scimux-asset:a_1) y"), "x  y");
+  assert.equal(
+    stripAssetRefs("keep [link](https://example.com) and ![img](https://example.com/a.png)"),
+    "keep [link](https://example.com) and ![img](https://example.com/a.png)",
+  );
+  // blank lines left by a dropped marker collapse
+  assert.equal(
+    stripAssetRefs("before\n\n![](scimux-asset:z)\n\n\nafter"),
+    "before\n\nafter",
+  );
+  const multi = stripAssetRefs("a ![one](scimux-asset:1) b [two](scimux-asset:2) c");
+  assert.equal(multi, "a one b two c");
+  assert.doesNotMatch(stripAssetRefs("![x](scimux-asset:a) ![y](scimux-asset:b)"), /scimux-asset:/);
+  assert.equal(stripAssetRefs(""), "");
+  assert.equal(stripAssetRefs(null), "");
+  // fork call site must strip before handing text to sheets
+  assert.match(chatSrc, /forkFromTurn\(\s*stripAssetRefs\s*\(/);
+});
+
+test("approval keyrow CSS pins .permbtns and meets 44px touch target", () => {
+  const btns = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(btns, ".permbtns rule present");
+  assert.match(btns[1], /flex:\s*0\s*0\s*auto/, ".permbtns is flex: 0 0 auto (the pin guarantee)");
+  const btn = chatCssSrc.match(/\.permbtn\s*\{([^}]+)\}/);
+  assert.ok(btn, ".permbtn rule present");
+  const mh = btn[1].match(/min-height:\s*(\d+)px/);
+  assert.ok(mh, ".permbtn declares min-height");
+  assert.ok(Number(mh[1]) >= 44, "min-height at least 44px for touch");
 });
 
 /* ---------- sentEcho ---------- */

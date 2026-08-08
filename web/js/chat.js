@@ -326,6 +326,20 @@ export function splitAssetRefs(text, nodeId, assets, deps = {}){
   return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
 }
 
+/* stripAssetRefs: pure. Replace ![alt](scimux-asset:id) markers with their alt
+   text (drop when alt empty) so fork seeds never ship dead asset markdown.
+   RED stub — product body lands in fix(fork). */
+export function stripAssetRefs(text){
+  return text || "";
+}
+
+/* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
+   else falls through as { verb: "", code: <whole> }. Never throws, never null.
+   RED stub — product body lands in feat(approval). */
+export function splitPermTitle(title){
+  return { verb: "", code: "" };
+}
+
 /* ---------- bubble / keyrow HTML ---------- */
 
 export function bubbleActionsHTML(turn, {
