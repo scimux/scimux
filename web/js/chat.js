@@ -192,6 +192,7 @@ export function buildChatSignature(parts){
     p.histKey || "",
     p.turnsHash || "",
     p.peekHash || "",
+    p.expanded ? "1" : "0",
   ].join("|");
 }
 
@@ -508,6 +509,11 @@ export function createChatFeature(deps){
   let editingChatDesc = false;
   let chatDetailSavedUntil = 0;
   let chatCtxPct = { node: "", pct: null };
+  /* Per-node "show all" for the approval ask. Only meaningful while this node
+     still has a live acp permission row; cleared on select change or when
+     attention leaves. Pure keyRowHTML stays pure — the call site computes
+     expanded from this flag. */
+  let permExpanded = { node: "", open: false };
   let chatLoadTimer = null;
   let chatLoadToken = 0;
   const tileBox = {};
@@ -637,6 +643,7 @@ export function createChatFeature(deps){
     chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
     editingChatDesc = false;
     chatDetailSavedUntil = 0;
+    permExpanded = { node: "", open: false };
   }
 
   function onReselect(){
@@ -961,6 +968,14 @@ export function createChatFeature(deps){
 
     const hist = chatHist.node === n.id && chatHist.segs ? chatHist.segs : null;
     const priorSegs = priorSegsFromHistory(hist, data.chat_started);
+    /* Leave expand when this node no longer has a live acp approval row. */
+    const acpOpts = (data.source === "acp" && (data.perm_options || []).length)
+      ? data.perm_options : null;
+    if (permExpanded.node === n.id &&
+        (!n.attention || attentionHidden || !acpOpts)){
+      permExpanded = { node: "", open: false };
+    }
+    const expanded = permExpanded.node === n.id && permExpanded.open;
     const sig = buildChatSignature({
       nodeId: n.id,
       live: data.live,
@@ -977,6 +992,7 @@ export function createChatFeature(deps){
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hash(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
       peekHash: hash(peekText),
+      expanded,
     });
     if (chatRenderDecision(sig, chatSig) === "skip"){
       if (chatScrollBottom){ pinChatBottom(msgs); chatScrollBottom = false; }
@@ -1074,6 +1090,19 @@ export function createChatFeature(deps){
     });
 
     if (keyrow){
+      /* Preserve .permask scrollTop across poll rebuilds (expanded path only).
+         Same spirit as withCardEditsPreserved: snapshot before innerHTML write,
+         restore after if still the same node and still expanded. Clamped mode
+         has overflow:hidden — no meaningful scroll. */
+      let permScroll = null;
+      const prevMask = q(keyrow, ".permask");
+      if (prevMask && expanded){
+        permScroll = {
+          nodeId: n.id,
+          scrollTop: prevMask.scrollTop || 0,
+          expanded: true,
+        };
+      }
       keyrow.innerHTML = keyRowHTML({
         attention: n.attention,
         attentionHidden,
@@ -1081,9 +1110,16 @@ export function createChatFeature(deps){
         permTitle: data.perm_title,
         permOptions: data.perm_options,
         permToolKind: data.perm_tool_kind || "",
-        expanded: false, /* P4 owns the expanded flag + .permmore wiring */
+        expanded,
         escape,
       });
+      if (permScroll && permScroll.nodeId === n.id && expanded){
+        const nextMask = q(keyrow, ".permask");
+        if (nextMask){
+          const max = Math.max(0, (nextMask.scrollHeight || 0) - (nextMask.clientHeight || 0));
+          nextMask.scrollTop = Math.min(permScroll.scrollTop, max || permScroll.scrollTop);
+        }
+      }
     }
     endChatLoad();
   }
@@ -1122,8 +1158,17 @@ export function createChatFeature(deps){
   }
 
   function onKeyrowClick(e){
-    const b = e.target.closest && e.target.closest("[data-key]");
     const sel = g("sel", "");
+    /* "show all" expands the ask in place — no key send, no attention collapse. */
+    const more = e.target.closest && e.target.closest(".permmore");
+    if (more){
+      if (!sel) return;
+      permExpanded = { node: sel, open: true };
+      chatSig = "";
+      refreshChat();
+      return;
+    }
+    const b = e.target.closest && e.target.closest("[data-key]");
     if (!b || !sel) return;
     const dest = sel;
     collapseAttentionUI(dest);

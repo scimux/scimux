@@ -494,9 +494,11 @@ test("source guard: keyrow call site reads per-node expanded, not hardcoded fals
   );
   assert.match(
     chatSrc,
-    /expanded:\s*permExpanded\.node\s*===\s*\w+\.id\s*&&\s*permExpanded\.open/,
-    "call site must pass expanded from the per-node flag",
+    /const\s+expanded\s*=\s*permExpanded\.node\s*===\s*n\.id\s*&&\s*permExpanded\.open/,
+    "call site computes expanded from the per-node flag",
   );
+  // keyRowHTML call receives that local (object shorthand), not a literal false
+  assert.match(chatSrc, /keyRowHTML\(\{[\s\S]*?\bexpanded,[\s\S]*?\}\)/);
   assert.match(chatSrc, /let\s+permExpanded\s*=\s*\{\s*node:\s*""\s*,\s*open:\s*false\s*\}/);
 });
 

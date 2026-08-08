@@ -264,7 +264,8 @@ body.cards-open #msgs { overflow: hidden; }
 .pnotice button { color: var(--work); font-weight: 600; padding: 2px 0 0; display: block; }
 /* Approval keyrow: column stack so a long perm_title can never push the
    answer buttons off-screen. .permbtns is flex: 0 0 auto — the pin guarantee.
-   Expanded flag / .permmore wiring live in P4; this phase only styles. */
+   Expanded state + .permmore click live in chat.js (permExpanded); clamped
+   shows ~3 lines + "show all", expanded is max-height: 30dvh + internal scroll. */
 #keyrow { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
   padding: 8px 14px; border-top: 1px solid var(--hairline); }
 #keyrow:empty { display: none; }
