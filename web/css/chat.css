@@ -293,7 +293,13 @@ body.cards-open #msgs { overflow: hidden; }
    flex: 0 0 auto keeps the short digits content-sized so the short-viewport
    ACP rule below cannot force them into half-width pairs. */
 .permbtns.keys { flex-direction: row; flex-wrap: wrap; }
-.permbtns.keys .permbtn { width: auto; min-width: 44px; flex: 0 0 auto; }
+/* Centre the short labels: these buttons are content-sized against a 44px
+   minimum, so a one-glyph key ("1", "y", "\2191") leaves ~13px of slack that
+   .permbtn's text-align: left would push entirely to the right. The ACP
+   option buttons keep left alignment — their labels are sentences. */
+.permbtns.keys .permbtn { width: auto; min-width: 44px; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  text-align: center; }
 /* Short viewports (landscape phones): ACP labels are short enough for two
    per line. Portrait keeps the column stack above. Reclaim optional chrome
    so the 55dvh keyrow cap still holds past four options (phase 7): the hint
