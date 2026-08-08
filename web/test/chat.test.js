@@ -671,6 +671,74 @@ test("keyRowHTML: ACP branch order is hint → .permask → .permmore → .permb
   assert.ok(btnsAt > moreAt, ".permmore before .permbtns");
 });
 
+/* ---------- P7: reclaim optional chrome so the keyrow cap holds ---------- */
+
+test("CSS: short viewports hide #keyrow .hint and tighten .permask; unmediated rules stay", () => {
+  // Unmediated rules — portrait and desktop keep the hint and the 30dvh ask.
+  assert.match(
+    chatCssSrc,
+    /#keyrow\s+\.hint\s*\{[^}]*font-size:/,
+    "unmediated #keyrow .hint rule still exists",
+  );
+  const mask = chatCssSrc.match(/\.permask\s*\{([^}]+)\}/);
+  assert.ok(mask, "unmediated .permask rule present");
+  assert.match(mask[1], /max-height:\s*30dvh/, "unmediated .permask keeps max-height: 30dvh");
+
+  const mediaIdx = chatCssSrc.search(/@media\s*\(\s*max-height:\s*500px\s*\)/);
+  assert.ok(mediaIdx >= 0, "@media (max-height: 500px) block exists");
+  const win = chatCssSrc.slice(mediaIdx, mediaIdx + 800);
+
+  const mediaHint = win.match(/#keyrow\s+\.hint\s*\{([^}]+)\}/);
+  assert.ok(mediaHint, "media block styles #keyrow .hint");
+  assert.match(mediaHint[1], /display:\s*none/, "short viewports hide the approval hint");
+
+  const mediaMask = win.match(/\.permask\s*\{([^}]+)\}/);
+  assert.ok(mediaMask, "media block styles .permask");
+  assert.match(mediaMask[1], /max-height:\s*20dvh/, "short viewports tighten .permask to 20dvh");
+});
+
+test("CSS: P6 pins survive P7 — .permbtns pin + short-viewport row/wrap", () => {
+  const base = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(base, ".permbtns rule present");
+  assert.match(base[1], /flex:\s*0\s*0\s*auto/, "unmediated .permbtns stays flex: 0 0 auto");
+
+  const mediaIdx = chatCssSrc.search(/@media\s*\(\s*max-height:\s*500px\s*\)/);
+  assert.ok(mediaIdx >= 0, "@media (max-height: 500px) block exists");
+  const win = chatCssSrc.slice(mediaIdx, mediaIdx + 800);
+  const mediaBtns = win.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(mediaBtns, "media block styles .permbtns");
+  assert.match(mediaBtns[1], /flex-direction:\s*row/, "media block still sets row");
+  assert.match(mediaBtns[1], /flex-wrap:\s*wrap/, "media block still sets wrap");
+});
+
+test("keyRowHTML: ACP still emits the hint unconditionally (CSS-only concealment)", () => {
+  // Portrait and desktop keep the sentence; landscape only hides it via CSS.
+  // Markup must not grow a max-height branch or drop the hint for "short".
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `cmd`",
+    permToolKind: "execute",
+    permOptions: [
+      { key: "1", name: "Allow once", kind: "allow" },
+      { key: "2", name: "Allow always", kind: "allow-always" },
+      { key: "3", name: "Reject", kind: "reject" },
+      { key: "4", name: "Reject always", kind: "reject-always" },
+      { key: "5", name: "Ask me", kind: "unknown" },
+      { key: "6", name: "Skip", kind: "unknown" },
+    ],
+    expanded: false,
+  });
+  assert.match(html, /class="hint"/, "ACP with options still emits .hint in markup");
+  assert.match(
+    html,
+    /The agent needs your approval\s*(?:&mdash;|\u2014|—)\s*choose one:/,
+    "hint wording stays so portrait/desktop keep the sentence",
+  );
+  // Pure helper has no viewport signal — concealment is CSS-only.
+  assert.doesNotMatch(chatSrc, /max-height.*hint|hint.*max-height|hideHint|shortViewport/,
+    "keyRowHTML / chat.js must not branch on viewport height for the hint");
+});
+
 /* ---------- sentEcho ---------- */
 test("retireSentEcho: text match, seen index, base growth, timeout", () => {
   const now = 1_000_000;
