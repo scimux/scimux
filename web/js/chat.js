@@ -196,7 +196,7 @@ export function buildChatSignature(parts){
 }
 
 export function permOptionsKey(opts){
-  return (opts || []).map(o => o.key + o.name).join(",");
+  return (opts || []).map(o => o.key + o.name + (o.kind || "")).join(",");
 }
 
 export function nearBottom(scrollHeight, scrollTop, clientHeight, slack = SCROLL_NEAR_BOTTOM_PX){
@@ -334,10 +334,11 @@ export function stripAssetRefs(text){
 }
 
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
-   else falls through as { verb: "", code: <whole> }. Never throws, never null.
-   RED stub — product body lands in feat(approval). */
+   else (codex bare commands, search regexes, think prose, future agents) falls
+   through as { verb: "", code: <whole title> }. Never throws, never null. */
 export function splitPermTitle(title){
-  return { verb: "", code: "" };
+  const m = /^([A-Za-z][\w ]{0,20})\s+`([\s\S]+)`\s*$/.exec(title || "");
+  return m ? { verb: m[1], code: m[2] } : { verb: "", code: title || "" };
 }
 
 /* ---------- bubble / keyrow HTML ---------- */
@@ -353,22 +354,73 @@ export function bubbleActionsHTML(turn, {
     `<button data-bact="copy"><span>${iconCopy}</span>copy</button>`;
 }
 
+/* Kind → CSS class. Underscores become hyphens; empty → "unknown". */
+const PERM_KIND_CLASS = {
+  allow: "allow",
+  allow_always: "allow-always",
+  reject: "reject",
+  reject_always: "reject-always",
+};
+
+/* Codex ships Decision.Key enums ("accept", "cancel"); ACP ships human labels
+   ("Allow once"). When Name is a single token and kind is known, render a
+   readable label and keep the raw enum in title= for inspection. */
+const PERM_KIND_LABEL = {
+  allow: "Allow",
+  allow_always: "Allow always",
+  reject: "Reject",
+  reject_always: "Reject always",
+};
+
+const PERM_CODE_KINDS = new Set(["execute", "edit", "read", "search"]);
+
+function permOptionLabel(o){
+  const name = o && o.name != null ? String(o.name) : "";
+  const kind = (o && o.kind) || "";
+  const looksEnum = name.length > 0 && !/\s/.test(name);
+  if (looksEnum && PERM_KIND_LABEL[kind]){
+    return { label: PERM_KIND_LABEL[kind], title: name };
+  }
+  return { label: name, title: "" };
+}
+
+function permOptionClass(kind){
+  return PERM_KIND_CLASS[kind] || "unknown";
+}
+
 export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
+  permToolKind = "", expanded = false,
   escape = esc,
 } = {}){
   if (!attention || attentionHidden) return "";
   if (source === "acp"){
     const opts = permOptions || [];
-    const what = permTitle ? `for ${escape(permTitle)}` : "";
-    return `<span class="hint">The agent needs your approval ${what} \u2014 choose one:</span>` +
-      (opts.length
-        ? opts.map(o => `<button data-key="${escape(o.key)}">${escape(o.key)}. ${escape(o.name)}</button>`).join("")
-        : `<span class="hint">Waiting for approval options from the agent...</span>`);
+    if (!opts.length){
+      return `<span class="hint">Waiting for approval options from the agent...</span>`;
+    }
+    const { verb, code } = splitPermTitle(permTitle);
+    const asCode = !!verb || PERM_CODE_KINDS.has(permToolKind || "");
+    const body = asCode
+      ? `<pre class="permcode">${escape(code)}</pre>`
+      : `<div class="permtext">${escape(code)}</div>`;
+    const clamp = expanded ? "" : " clamped";
+    const more = expanded ? "" : `<button class="permmore">show all</button>`;
+    const verbEl = verb ? `<div class="permverb">${escape(verb)}</div>` : "";
+    const mask = `<div class="permask${clamp}">${verbEl}${body}${more}</div>`;
+    const btns = `<div class="permbtns">${opts.map(o => {
+      const { label, title } = permOptionLabel(o);
+      const cls = permOptionClass(o.kind);
+      const titleAttr = title ? ` title="${escape(title)}"` : "";
+      return `<button data-key="${escape(o.key)}" class="permbtn ${cls}"${titleAttr}>${escape(o.key)}. ${escape(label)}</button>`;
+    }).join("")}</div>`;
+    return mask + btns;
   }
   return `<span class="hint">${escape(HINTS[attention] || `The agent waits for your ${attention} \u2014 keys go straight to its terminal:`)}</span>` +
+    `<div class="permbtns">` +
     ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
-      `<button data-key="${k}">${KEYS[k] || k}</button>`).join("");
+      `<button data-key="${k}" class="permbtn">${KEYS[k] || k}</button>`).join("") +
+    `</div>`;
 }
 
 export function peekBlockHTML({
@@ -1022,6 +1074,8 @@ export function createChatFeature(deps){
         source: data.source,
         permTitle: data.perm_title,
         permOptions: data.perm_options,
+        permToolKind: data.perm_tool_kind || "",
+        expanded: false, /* P4 owns the expanded flag + .permmore wiring */
         escape,
       });
     }

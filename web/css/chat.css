@@ -262,15 +262,31 @@ body.cards-open #msgs { overflow: hidden; }
 .peek.hidden { display: none; }
 .pnotice { padding: 6px 2px 0; font-size: 13px; color: var(--bad); }
 .pnotice button { color: var(--work); font-weight: 600; padding: 2px 0 0; display: block; }
-#keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+/* Approval keyrow: column stack so a long perm_title can never push the
+   answer buttons off-screen. .permbtns is flex: 0 0 auto — the pin guarantee.
+   Expanded flag / .permmore wiring live in P4; this phase only styles. */
+#keyrow { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
   padding: 8px 14px; border-top: 1px solid var(--hairline); }
 #keyrow:empty { display: none; }
-#keyrow .hint { font-size: 12px; color: var(--dim); flex-basis: 100%; }
-#keyrow button {
-  min-width: 44px; height: 40px; padding: 0 12px;
+#keyrow .hint { font-size: 12px; color: var(--dim); }
+.permask { min-height: 0; max-height: 30dvh; overflow-y: auto;
+  overflow-wrap: anywhere; }
+.permask.clamped { display: -webkit-box; -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.permverb { font-size: 12px; color: var(--dim); }
+.permcode { font: 12px/1.5 ui-monospace, "SF Mono", monospace;
+  white-space: pre; overflow-x: auto; border-radius: 8px;
+  padding: 10px 12px; background: var(--code-bg); margin: 0; }
+.permtext { font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.permmore { font-size: 12px; font-weight: 600; color: var(--work);
+  padding: 2px 0; align-self: flex-start; background: none; border: 0; }
+.permbtns { flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; }
+.permbtn { min-height: 44px; width: 100%; padding: 0 12px;
   background: var(--surface); border: 1.5px solid var(--attn); border-radius: 10px;
-  font-size: 15px; font-weight: 600;
-}
+  font-size: 15px; font-weight: 600; color: var(--ink); text-align: left; }
+.permbtn.allow, .permbtn.allow-always { border-color: var(--attn); }
+.permbtn.reject, .permbtn.reject-always { border-color: var(--danger); color: var(--danger); }
+.permbtn.unknown { border-color: var(--hairline); color: var(--ink); }
 
 #promptbar {
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
