@@ -191,12 +191,19 @@ body.map-full #maptoolbar.on { display: flex; }
   top: -3px; height: 6px; pointer-events: none;
   background: radial-gradient(circle, var(--perf) 0 2.5px, transparent 2.9px) repeat-x;
   background-size: 9px 6px; }
-.fare-ticket .tk-tear::after { content: ""; position: absolute; left: -12px; right: -12px;
-  top: -12px; height: 24px; pointer-events: none;
+/* End bites. The card masks a real hole and rims it with --perf (notes.css);
+   the ticket's tears move with content, so it paints them instead — but a
+   plain --bg disc on --surface is invisible in light mode. Tone the fill like
+   a hole and keep the card's 1px burr, so both themes read the same. */
+.fare-ticket .tk-tear::after { content: ""; position: absolute; left: -13px; right: -13px;
+  top: -13px; height: 26px; pointer-events: none;
+  --tk-bite: color-mix(in srgb, var(--ink) 12%, var(--bg));
   background:
-    radial-gradient(circle 12px at 12px 12px, var(--bg) 99%, transparent 100%) left top no-repeat,
-    radial-gradient(circle 12px at calc(100% - 12px) 12px, var(--bg) 99%, transparent 100%) right top no-repeat;
-  background-size: 24px 24px; }
+    radial-gradient(circle 13px at 13px 13px, var(--tk-bite) 0 12px,
+      var(--perf) 12px 13px, transparent 13px) left top no-repeat,
+    radial-gradient(circle 13px at calc(100% - 13px) 13px, var(--tk-bite) 0 12px,
+      var(--perf) 12px 13px, transparent 13px) right top no-repeat;
+  background-size: 26px 26px; }
 
 /* breakdown: dotted leaders, uncounted quantities dimmed (they are carried,
    not bought) */
