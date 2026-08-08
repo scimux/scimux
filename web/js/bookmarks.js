@@ -13,6 +13,8 @@
  *   - #notesbtn (visible "Notes ›" inside Bookmarks root — listener only;
  *     openNotes is a lazy injected closure; never import notes.js)
  *   - #bookmarkpeek (externally passed tap-catcher; exactly one listener)
+ *   - #sendto_title / #sendto_list (the one send-to dialogue; chat.js drives it
+ *     through the injected openSendTo, never by touching these roots)
  *
  * Persisted state (localStorage, exact keys):
  *   - "scimux-bookmarks"     — "1" / "0" for pane open
@@ -43,6 +45,8 @@
  *   - Manual bookmark creation (general / lane / comment-anchor)
  *   - Reply chip, blur empty-cancel, Escape, chip dismiss
  *   - Longpress send-to draft merge + sheet/navigation
+ *   - openSendTo: shared picker for bookmark longpress AND chat bubbles —
+ *     live/open targets only, pinned block (manual order) then recency
  *
  * Timers / clipboard / scrolling / layout seams:
  *   - copy acknowledgement 900ms timer (restores ICON_COPY; clears sig)
@@ -52,7 +56,7 @@
  *   - body.bookmarks-open class toggle
  *
  * Injected node / lane / chat / Notes / sheet / navigation effects:
- *   - nodeById, orderedNodes, laneList, laneColor, laneModel
+ *   - nodeById, orderedNodes, pinned, laneList, laneColor, laneModel
  *   - uiMutate, bookmarks getter (UI.bookmarks)
  *   - jump deps: setPendingJump, invalidateChat, select, openPreview,
  *     wsOpen, closeWorkspace, isDesktop, singleZone
@@ -83,6 +87,7 @@
  * Reuses (no algorithm duplication):
  *   format.js: esc, md, fmtWhen
  *   lanes.js: hashStr
+ *   map-model.js: sendableNodes (send-to eligibility + ranking)
  *
  * Pre-existing bug fixed in 7E (reported separately):
  *   Longpress resolved `bookmark` but checked/used undeclared `note`.
@@ -102,6 +107,7 @@
 
 import { esc as escDefault, md as mdDefault, fmtWhen as fmtWhenDefault } from "./format.js";
 import { hashStr as hashStrDefault } from "./lanes.js";
+import { sendableNodes } from "./map-model.js";
 
 /* ---------- public constants ---------- */
 
@@ -669,20 +675,33 @@ export function createBookmarksFeature(deps){
       roots.bookmarkprompt.focus();
   }
 
-  function onLongpress(el){
-    const bookmark = bookmarks().find(x => x.t === el.dataset.t);
-    /* Pre-existing defect fixed in 7E: production resolved `bookmark` but
-       checked/used undeclared `note`. Intended contract uses `bookmark`. */
-    if (!bookmark) return;
+  /* The one send-to dialogue. Both entry points — a chat bubble's "send to…"
+     and a bookmark long-press — land here, so the target filter and order can
+     never drift apart between them. Only the sheet title differs. */
+  function openSendTo({ text = "", exceptId = "", title = "" } = {}){
     const lm = typeof d.laneModel === "function" ? d.laneModel() : { color: () => "" };
     const nodes = typeof d.orderedNodes === "function" ? d.orderedNodes() : [];
+    const pins = typeof d.pinned === "function" ? d.pinned() : [];
     const listEl = d.sendtoList || (doc && doc.querySelector && doc.querySelector("#sendto_list"));
     if (!listEl) return;
-    listEl.innerHTML = nodes.map(n => `
+    const titleEl = d.sendtoTitle ||
+      (doc && doc.querySelector && doc.querySelector("#sendto_title"));
+    if (titleEl && title) titleEl.textContent = title;
+    const groups = sendableNodes(nodes, { exceptId, pinned: pins });
+    const item = n => `
     <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
       <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${esc(lm.color(n.lane_id))}"></span>
       <span>${esc(n.title)}</span>
-    </button>`).join("") || `<div style="color:var(--dim);font-size:14px">no activities yet</div>`;
+    </button>`;
+    /* Label the blocks only when both exist: with one block the order needs no
+       explanation, with two an unlabelled split looks arbitrary. */
+    const labelled = groups.pinned.length > 0 && groups.recent.length > 0;
+    const section = (label, list) =>
+      (list.length && labelled ? `<div class="sendto-group">${label}</div>` : "") +
+      list.map(item).join("");
+    listEl.innerHTML =
+      (section("Pinned", groups.pinned) + section("Recent", groups.recent)) ||
+      `<div style="color:var(--dim);font-size:14px">no live chat can receive this</div>`;
     if (sendtoListWithHandler && sendtoListWithHandler !== listEl &&
         sendtoListWithHandler.onclick === sendtoClickHandler)
       sendtoListWithHandler.onclick = null;
@@ -692,7 +711,7 @@ export function createBookmarksFeature(deps){
       const tgt = b.dataset.fwd;
       const prev = (storage && storage.getItem(DRAFT_KEY_PREFIX + tgt)) || "";
       if (storage)
-        storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, bookmark.text || ""));
+        storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, text || ""));
       if (typeof d.closeSheets === "function") d.closeSheets();
       if (typeof d.select === "function") d.select(tgt);
       if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
@@ -703,6 +722,14 @@ export function createBookmarksFeature(deps){
     listEl.onclick = sendtoClickHandler;
     sendtoListWithHandler = listEl;
     if (typeof d.openSheet === "function") d.openSheet("#sendto");
+  }
+
+  function onLongpress(el){
+    const bookmark = bookmarks().find(x => x.t === el.dataset.t);
+    /* Pre-existing defect fixed in 7E: production resolved `bookmark` but
+       checked/used undeclared `note`. Intended contract uses `bookmark`. */
+    if (!bookmark) return;
+    openSendTo({ text: bookmark.text || "", title: "Send bookmark to…" });
   }
 
   function listen(target, type, fn, opts){
@@ -773,6 +800,7 @@ export function createBookmarksFeature(deps){
     pinBottom,
     setBackLabel,
     jumpToChatAddress,
+    openSendTo,
     setBookmarkAnchor,
     addManualBookmark,
   };

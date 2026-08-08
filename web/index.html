@@ -326,10 +326,11 @@
   <button class="cta" id="ad_go">Adopt</button>
 </div>
 
-<!-- notes: long-press forwards a bookmark into a chat's draft -->
+<!-- one send-to dialogue: a chat bubble's "send to…" and a bookmark long-press
+     both fill it; only the title differs. Targets are live, open chats only. -->
 <div class="sheet" id="sendto">
   <div class="grab"></div>
-  <h3 style="font-size:17px">Send bookmark to&#8230;</h3>
+  <h3 style="font-size:17px" id="sendto_title">Send to&#8230;</h3>
   <div class="sect" id="sendto_list"></div>
 </div>
 

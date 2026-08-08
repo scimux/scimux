@@ -170,6 +170,7 @@ body.cards-open #msgs { overflow: hidden; }
 .bubactions button:active { color: var(--work); }
 .bubactions .rot180 { display: inline-flex; transform: rotate(180deg); }
 .bubactions .rot90l { display: inline-flex; transform: rotate(-90deg); }
+.bubactions .rot180 { display: inline-flex; transform: rotate(180deg); }
 
 .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin: 0; }
 .bubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; background: var(--code-bg);

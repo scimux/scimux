@@ -59,6 +59,8 @@
  *   - document Escape for map-full (app-level)
  *   - select() orchestration, polling tick, shell spatial gestures/scrim
  *   - forkFromTurn / openSheet / new-activity configuration (sheets)
+ *   - openSendTo: the send-to picker and its target list (bookmarks owns
+ *     #sendto; the bubble action only supplies text + the source node id)
  *   - jumpToChatAddress / pendingJump creation (bookmarks/search set them)
  *   - stampAddress pure helper (shell; bubble action injects it)
  *   - archived read-only surface (imports splitAssetRefs only)
@@ -356,6 +358,10 @@ export function bubbleActionsHTML(turn, {
 } = {}){
   return `<div class="bubwhen">${escape(fmtTime(turn && turn.time))}</div>` +
     `<button data-bact="fork"><span>${iconBranch}</span>fork from here</button>` +
+    /* send-to sits beside fork — both take this text elsewhere, fork into a new
+       chat, send-to into an existing one. The ellipsis is the HIG signal that a
+       picker follows; "copy" would collide with the clipboard action below. */
+    `<button data-bact="sendto"><span class="rot180">${iconInto}</span>send to&#8230;</button>` +
     `<button data-bact="desc"><span class="rot90l">${iconInto}</span>use as description</button>` +
     `<button data-bact="bookmark"><span>${iconInto}</span>bookmark</button>` +
     `<button data-bact="copy"><span>${iconCopy}</span>copy</button>`;
@@ -1233,6 +1239,14 @@ export function createChatFeature(deps){
       if (!turn) return;
       if (ba.dataset.bact === "fork" && typeof d.forkFromTurn === "function")
         d.forkFromTurn(stripAssetRefs(turn.text));
+      else if (ba.dataset.bact === "sendto" && typeof d.openSendTo === "function")
+        /* strip for the same reason fork does: scimux-asset: markers are
+           node-scoped and would land as dead markdown in the target */
+        d.openSendTo({
+          text: stripAssetRefs(turn.text),
+          exceptId: g("sel", ""),
+          title: "Send to chat…",
+        });
       else if (ba.dataset.bact === "desc")
         useTurnAsDescription(turn.text);
       return;

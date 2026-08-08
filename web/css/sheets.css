@@ -46,6 +46,13 @@
   overflow-wrap: break-word; font: 11px/1.5 ui-monospace, monospace; color: var(--dim); }
 .sheet .pos-item { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; font-size: 14px; }
 .sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
+/* send-to group headers — rendered only when both blocks exist, so the split
+   between pinned and recent targets never looks arbitrary */
+.sheet .sendto-group {
+  color: var(--dim); font-size: 12px; text-transform: uppercase;
+  letter-spacing: .04em; margin: 12px 0 4px;
+}
+.sheet .sendto-group:first-child { margin-top: 0; }
 #backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,.25);
   opacity: 0; pointer-events: none; transition: opacity .3s; }
 #backdrop.on { opacity: 1; pointer-events: auto; }

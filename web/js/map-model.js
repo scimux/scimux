@@ -104,6 +104,42 @@ export function pinnedOrder(list, pinned){
   });
 }
 
+/* ---------- send-to targets (chat bubble / bookmark → another chat) ---------- */
+
+/* Who can still receive text: a chat with a process left to type into.
+   Closed (/exit) is a deliberate, immutable dead end and dead liveness means
+   the tmux session is gone — neither can ever accept a prompt again, so they
+   are omitted from the picker rather than shown disabled. A node with no poll
+   state yet (freshly created) is not provably dead and stays eligible. */
+export function canReceiveSend(n){
+  if (!n || n.ended_at) return false;
+  return n.live !== "exited" && n.live !== "unavailable";
+}
+
+/* Destination list for the send-to sheet, as { pinned, recent }.
+   Pinned targets keep the user's manual pin order — deliberately NOT
+   pinnedOrder, whose hard-attention float is right for the Pinned tab
+   (supervision triage) and wrong for a picker: a list that reshuffles the
+   moment an agent asks a question moves the row out from under your finger.
+   Everything else ranks by the last *human* turn (cardInteractionMS answers
+   "where was I typing"), not last_activity (agent churn). With nothing
+   pinned this degenerates to pure recency — one rule, not two.
+   Lane-agnostic on purpose, exactly as the Pinned tab ignores lane scope:
+   a target that appeared only under some journey selections would be
+   inexplicable to the user. */
+export function sendableNodes(nodes, { exceptId = "", pinned = [] } = {}){
+  const eligible = (nodes || []).filter(n => n && n.id !== exceptId && canReceiveSend(n));
+  const order = pinned || [];
+  const isPin = n => order.indexOf(n.id) >= 0;
+  return {
+    pinned: eligible.filter(isPin)
+      .sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)),
+    recent: eligible.filter(n => !isPin(n))
+      .sort((a, b) => cardInteractionMS(b) - cardInteractionMS(a) ||
+        cardCreatedMS(b) - cardCreatedMS(a)),
+  };
+}
+
 /* ---------- visibility (current / archived / pinned + lane scope) ---------- */
 
 export function isArchived(id, archived){

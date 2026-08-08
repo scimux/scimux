@@ -774,6 +774,8 @@ const chatFeature = createChatFeature({
   stampAddress: (b, t) => stampAddressMod(b, t),
   copyText: s => copyText(s),
   forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
+  /* bookmarks owns #sendto; the bubble action reuses that one dialogue */
+  openSendTo: opts => bookmarksFeature.openSendTo(opts),
   setComposerBusy: v => composerFeature.setComposerBusy(v),
   setComposerClosed: v => composerFeature.setComposerClosed(v),
   setAttachAvail: v => composerFeature.setAttachAvail(v),
@@ -877,6 +879,7 @@ bookmarksFeature = createBookmarksFeature({
   laneColor: id => laneColor(id),
   laneModel: () => laneModel(),
   orderedNodes: () => orderedNodes(),
+  pinned: () => getUI().pinned,
   openNotes: () => notesFeature.open(),
   startPlacement: nt => notesFeature.startPlacement(nt),
   toast: msg => toast(msg),
