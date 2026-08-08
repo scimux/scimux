@@ -60,11 +60,16 @@ import {
   fareTicketContext,
   fareTicketHTML,
 } from "../js/map.js";
+/* Namespace import so P1 red tests can assert on MAP_DOCK_KEY / dockArrangement
+   before those names exist as named exports (a missing named import would abort
+   the whole file at load time and hide the per-test failure reasons). */
+import * as mapExports from "../js/map.js";
 import { toggleMapSelection, headStopKey } from "../js/map-model.js";
 import { forkKind, stopsOf, stopKey, newestFirst } from "../js/lanes.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const mapSrc = readFileSync(join(__dirname, "../js/map.js"), "utf8");
+const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
 
 /* ---------- module shape / no later features ---------- */
 test("map.js exports factory and pure helpers; reuses lanes/map-model", () => {
@@ -630,7 +635,10 @@ test("setFull clears selection, persists key, toggles body class", () => {
   assert.equal(mapfullbtn.getAttribute("aria-label"), "full-screen map");
 });
 
-test("earlier-stop toolbar opens history before full-map selection is cleared", () => {
+test("earlier-stop toolbar opens history and docks without leaving full-screen", () => {
+  /* P1: Open chat from the wall stays in full screen and docks the real chat
+     under the map. loadChatHistory must still run against mapSelStop *before*
+     any state change — same order pin as before, new destination is dock. */
   const mapwrap = fakeEl("mapwrap");
   const maptoolbar = fakeEl("maptoolbar");
   const storage = memoryStorage({
@@ -692,9 +700,11 @@ test("earlier-stop toolbar opens history before full-map selection is cleared", 
   };
   firstListener(maptoolbar, "click")({ target: jump });
   assert.deepEqual(calls, [["select", "a"], ["history", "a", stop]]);
-  assert.equal(feature.isFull(), false);
-  assert.equal(storage.getItem(MAP_FULL_KEY), null);
-  assert.equal(body.classList.contains("map-full"), false);
+  assert.equal(feature.isFull(), true, "Open chat from the wall stays in full screen");
+  assert.equal(storage.getItem(MAP_FULL_KEY), "1");
+  assert.equal(body.classList.contains("map-full"), true);
+  assert.equal(storage.getItem(mapExports.MAP_DOCK_KEY || "scimux-mapdock"), "1");
+  assert.equal(body.classList.contains("map-dock"), true);
   feature.destroy();
 });
 
@@ -2115,4 +2125,260 @@ test("V2-P5 the ticket perforation IS the actionbar perforation", () => {
   assert.match(bite[0], /var\(--perf\)/, "burr arc around the bite, as on the card");
   assert.match(bite[0], /color-mix\([^)]*var\(--ink\)[^)]*var\(--bg\)/,
     "bite reads as a hole, not as page colour laid on the sheet");
+});
+
+/* ---------- P1: map dock shell (body.map-full.map-dock) ---------- */
+
+/** Extract the @media (min-width: 900px) block body from notes.css by brace depth. */
+function notesDesktopMediaBody(css){
+  const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(css);
+  if (!m) return null;
+  const open = m.index + m[0].length - 1; // position of '{'
+  let depth = 0;
+  for (let i = open; i < css.length; i++){
+    const ch = css[i];
+    if (ch === "{") depth++;
+    else if (ch === "}"){
+      depth--;
+      if (depth === 0) return css.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+test("P1: MAP_DOCK_KEY is scimux-mapdock and distinct from every existing map key", () => {
+  assert.equal(mapExports.MAP_DOCK_KEY, "scimux-mapdock");
+  const existing = [MAP_TAB_KEY, MAP_FOLD_KEY, MAP_FOLD_KNOWN_KEY, MAP_FULL_KEY, MAP_FARE_KEY];
+  for (const k of existing){
+    assert.notEqual(mapExports.MAP_DOCK_KEY, k, `MAP_DOCK_KEY must not reuse ${k}`);
+  }
+});
+
+test("P1: dockArrangement truth table; isDesktop:false never returns dock", () => {
+  const dockArrangement = mapExports.dockArrangement;
+  assert.equal(typeof dockArrangement, "function", "dockArrangement is exported");
+
+  assert.equal(dockArrangement({ mapFull: false, mapDock: false, isDesktop: true }), "stack");
+  assert.equal(dockArrangement({ mapFull: false, mapDock: true, isDesktop: true }), "stack");
+  assert.equal(dockArrangement({ mapFull: true, mapDock: false, isDesktop: true }), "wall");
+  assert.equal(dockArrangement({ mapFull: true, mapDock: true, isDesktop: true }), "dock");
+
+  // Phone never docks — every (mapFull, mapDock) combo on !isDesktop is not "dock".
+  for (const mapFull of [false, true]){
+    for (const mapDock of [false, true]){
+      const arr = dockArrangement({ mapFull, mapDock, isDesktop: false });
+      assert.notEqual(arr, "dock",
+        `isDesktop:false must never yield dock (mapFull=${mapFull}, mapDock=${mapDock})`);
+    }
+  }
+});
+
+test("P1: CSS body.map-full.map-dock #app sets flex-direction: column", () => {
+  const rule = notesCssSrc.match(/body\.map-full\.map-dock\s+#app\s*\{([^}]+)\}/);
+  assert.ok(rule, "body.map-full.map-dock #app rule present");
+  assert.match(rule[1], /flex-direction:\s*column/, "#app stacks map over chat in the dock");
+});
+
+test("P1: CSS body.map-full.map-dock #chat sets display:flex AND min-height:0", () => {
+  /* Load-bearing: without min-height:0 the flex item won't shrink below its
+     children's intrinsic height (.panel height:100% + flex:none children) and
+     the composer is pushed off-screen — same failure class as approval P7. */
+  const rule = notesCssSrc.match(/body\.map-full\.map-dock\s+#chat\s*\{([^}]+)\}/);
+  assert.ok(rule, "body.map-full.map-dock #chat rule present");
+  assert.match(rule[1], /display:\s*flex/, "#chat is un-hidden in the dock");
+  assert.match(rule[1], /min-height:\s*0/, "#chat can shrink so the composer stays in view");
+});
+
+test("P1: CSS body.map-full.map-dock #map sets flex:0 0 … and height:auto", () => {
+  /* height:auto overrides .panel's height:100% so the map takes the dock's
+     fixed top share instead of claiming the full viewport. */
+  const rule = notesCssSrc.match(/body\.map-full\.map-dock\s+#map\s*\{([^}]+)\}/);
+  assert.ok(rule, "body.map-full.map-dock #map rule present");
+  assert.match(rule[1], /flex:\s*0\s+0\b/, "#map is a fixed flex basis (55% share)");
+  assert.match(rule[1], /height:\s*auto/, "#map does not inherit .panel height:100%");
+});
+
+test("P1: CSS dock rules live only inside @media (min-width: 900px)", () => {
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "@media (min-width: 900px) block present in notes.css");
+  assert.match(mediaBody, /body\.map-full\.map-dock\s+#app\s*\{/, "#app dock rule in desktop media");
+  assert.match(mediaBody, /body\.map-full\.map-dock\s+#map\s*\{/, "#map dock rule in desktop media");
+  assert.match(mediaBody, /body\.map-full\.map-dock\s+#chat\s*\{/, "#chat dock rule in desktop media");
+
+  // Outside the media block the dock must not exist (phone has no wall → no dock).
+  const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(notesCssSrc);
+  const open = m.index + m[0].length - 1;
+  let depth = 0, end = open;
+  for (let i = open; i < notesCssSrc.length; i++){
+    if (notesCssSrc[i] === "{") depth++;
+    else if (notesCssSrc[i] === "}"){
+      depth--;
+      if (depth === 0){ end = i; break; }
+    }
+  }
+  const outside = notesCssSrc.slice(0, m.index) + notesCssSrc.slice(end + 1);
+  assert.doesNotMatch(outside, /body\.map-full\.map-dock/,
+    "dock rules must not appear outside the desktop media query");
+});
+
+test("P1: [data-jump] docks when full, setMapFull(false) when not", () => {
+  const stop = "2026-01-01T00:00:00Z";
+  const node = {
+    id: "a", title: "Alpha", description: "", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-02T00:00:00Z", stops: [stop],
+  };
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+      remove(name){ this._set.delete(name); },
+    },
+  };
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const calls = [];
+  const mapwrap = fakeEl("mapwrap");
+  const maptoolbar = fakeEl("maptoolbar");
+  const feature = createMapFeature({
+    roots: { mapwrap, maptoolbar, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [node],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    laneColor: () => "#00f",
+    agentLogo: () => "",
+    selectNode: (id, why) => calls.push(["select", id, why]),
+    loadChatHistory: (id, at) => calls.push(["history", id, at]),
+    jumpChatToNow: () => calls.push(["now"]),
+  });
+  feature.bind();
+
+  // Select a station so the toolbar has [data-jump].
+  firstListener(mapwrap, "click")({
+    target: {
+      dataset: { nid: "a", skey: "a#0", stop },
+      closest(selector){ return selector === "[data-nid]" ? this : null; },
+    },
+  });
+  assert.match(maptoolbar.innerHTML, /data-jump="a"/);
+
+  // Full → Open chat docks and stays full.
+  firstListener(maptoolbar, "click")({
+    target: {
+      dataset: { jump: "a" },
+      closest(selector){ return selector === "[data-jump]" ? this : null; },
+    },
+  });
+  assert.ok(calls.some(c => c[0] === "select" && c[1] === "a"), "selectNode called");
+  assert.equal(feature.isFull(), true, "mapFull stays true when docking");
+  assert.equal(body.classList.contains("map-full"), true);
+  assert.equal(body.classList.contains("map-dock"), true);
+  assert.equal(storage.getItem(mapExports.MAP_DOCK_KEY || "scimux-mapdock"), "1");
+
+  // Not full → Open chat still exits via setMapFull(false) (no dock).
+  // Leave full (also clears dock per the leave-full-leaves-dock rule), then
+  // fire a wrap-level [data-jump] as the non-full path.
+  feature.setFull(false);
+  assert.equal(feature.isFull(), false);
+  assert.equal(body.classList.contains("map-dock"), false);
+  calls.length = 0;
+  firstListener(mapwrap, "click")({
+    target: {
+      dataset: { jump: "a" },
+      closest(selector){ return selector === "[data-jump]" ? this : null; },
+    },
+  });
+  assert.ok(calls.some(c => c[0] === "select" && c[1] === "a"), "selectNode still called when not full");
+  assert.equal(feature.isFull(), false, "setMapFull(false) path leaves mapFull false");
+  assert.equal(body.classList.contains("map-dock"), false, "non-full jump does not dock");
+  assert.equal(storage.getItem(MAP_FULL_KEY), null);
+  feature.destroy();
+});
+
+test("P1: setMapDock(true) does not clear mapSel / mapSelKey / mapSelStop", () => {
+  const stop = "2026-01-01T00:00:00Z";
+  const node = {
+    id: "a", title: "Alpha", description: "", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-02T00:00:00Z", stops: [stop],
+  };
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+      remove(name){ this._set.delete(name); },
+    },
+  };
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const mapwrap = fakeEl("mapwrap");
+  const maptoolbar = fakeEl("maptoolbar");
+  const feature = createMapFeature({
+    roots: { mapwrap, maptoolbar, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [node],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    laneColor: () => "#00f",
+    agentLogo: () => "",
+  });
+  feature.bind();
+
+  // Establish selection (mapSel=a, mapSelKey=a#0, mapSelStop=stop) via wall tap.
+  firstListener(mapwrap, "click")({
+    target: {
+      dataset: { nid: "a", skey: "a#0", stop },
+      closest(selector){ return selector === "[data-nid]" ? this : null; },
+    },
+  });
+  assert.match(maptoolbar.innerHTML, /data-jump="a"/, "selection paints the toolbar");
+  assert.match(maptoolbar.innerHTML, /earlier stop/, "mapSelStop is live in the toolbar");
+  const htmlBefore = maptoolbar.innerHTML;
+
+  assert.equal(typeof feature.setDock, "function", "setDock is on the factory API");
+  feature.setDock(true);
+
+  // Selection is what the dock points at — setMapDock must not clearMapSelection.
+  assert.match(maptoolbar.innerHTML, /data-jump="a"/, "mapSel survives setMapDock");
+  assert.match(maptoolbar.innerHTML, /earlier stop/, "mapSelStop survives setMapDock");
+  assert.equal(maptoolbar.innerHTML, htmlBefore, "toolbar selection chrome is unchanged");
+  assert.equal(body.classList.contains("map-dock"), true);
+  assert.equal(storage.getItem(mapExports.MAP_DOCK_KEY || "scimux-mapdock"), "1");
+  // Contrast: setFull clears selection (existing contract).
+  feature.setFull(true); // still full, but clears selection
+  assert.equal(maptoolbar.innerHTML, "", "setFull clears selection; setDock must not");
+  feature.destroy();
 });
