@@ -190,14 +190,17 @@ export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull,
 }
 
 /* Fare fingerprint for wall re-render when the overlay is on. Uses fare_*
-   totals (not last_activity) so a token/cost poll update actually rebuilds
-   the meter; fareOff keeps the field inert so idle polls stay skip-able. */
+   totals + per-segment heat costs (not last_activity) so a token/cost poll
+   update rebuilds the meter and lane heat; fareOff keeps the field inert so
+   idle polls stay skip-able. */
 function fareFingerprint(n){
   if (!n) return "";
   return [
     n.fare_total ?? "",
     n.fare_turns ?? "",
     n.fare_cost_complete ? 1 : 0,
+    // V2-P3: per-segment heat fingerprint (stub until green — see heatSegmentsFingerprint)
+    heatSegmentsFingerprint(n),
   ].join(",");
 }
 
@@ -209,6 +212,70 @@ export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSel
       s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
       s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
       fareOn ? fareFingerprint(s.n) : 0]; }));
+}
+
+/* ---------- V2-P3 lane heat (fare-design.md v2.3 / V2-P3) ----------
+   Encode per-segment token cost as track stroke-width (+opacity). Thickness
+   is the accessible channel — never colour alone. Always-on under
+   mapFull && fareOn (wall-map eye-candy only). Stubs below intentionally
+   fail the red tests; green commit fills them in. */
+
+export const TRACK_STROKE_BASE = 3.5;
+export const TRACK_STROKE_MAX = 11;
+/** Cost (token total) at which stroke-width reaches TRACK_STROKE_MAX. */
+export const HEAT_COST_CAP = 200_000;
+
+/* Heat only on the full-screen wall when the fare layer is on. */
+export function heatEnabled({ mapFull, fareOn } = {}){
+  // RED stub: always false so gate tests fail until green.
+  return false;
+}
+
+/* Token heat magnitude from one fare_segments entry: the four canonical
+   quantities (or shipped `total`). null = absent (≠ zero). */
+export function segmentTokenCost(seg){
+  // RED stub: always absent.
+  return null;
+}
+
+/* Bounded monotonic stroke-width from a token cost. Absent/non-finite/≤0 →
+   base track (never zero-width or missing). Huge costs clamp at max. */
+export function heatStrokeWidth(cost){
+  // RED stub: constant base — no scaling.
+  return TRACK_STROKE_BASE;
+}
+
+/* Mild opacity ramp with cost (redundant channel). Dim-lane baseOp is
+   preserved as a multiplier. */
+export function heatOpacity(cost, baseOp = 1){
+  // RED stub: ignore cost.
+  return baseOp;
+}
+
+/* Per-segment heat fingerprint for wallMapSignature. */
+export function heatSegmentsFingerprint(n){
+  // RED stub: empty so segment cost changes do not affect the signature.
+  return "";
+}
+
+/* Token cost for the track gap between two stops. Same node + consecutive
+   stop indices → fare_segments[min(i)]; otherwise absent. */
+export function gapTokenCost(a, b){
+  // RED stub.
+  return null;
+}
+
+/* Vertical track SVG for one lane/branch line. stops: [{y, stop}, ...]
+   with at least 2 points. When heatOn, each inter-station gap gets its own
+   stroke-width from fare_segments; otherwise a single base-width line.
+   Absent cost → base track (line still drawn). */
+export function wallLaneTrackSVG(stops, { x, color, opacity = 1, heatOn = false } = {}){
+  // RED stub: always base continuous line, ignore heatOn.
+  if (!stops || stops.length < 2) return "";
+  const ys = stops.map(s => s.y);
+  return `<line x1="${x}" y1="${Math.min(...ys)}" x2="${x}" y2="${Math.max(...ys)}"
+            stroke="${color}" stroke-width="${TRACK_STROKE_BASE}" stroke-linecap="round"
+            opacity="${opacity}"/>`;
 }
 
 export function attentionStationSVG(x, y, op){

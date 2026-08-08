@@ -34,6 +34,17 @@ import {
   fareLineHTML,
   stationRowHTML,
   createMapFeature,
+  // V2-P3 lane heat
+  TRACK_STROKE_BASE,
+  TRACK_STROKE_MAX,
+  HEAT_COST_CAP,
+  heatEnabled,
+  segmentTokenCost,
+  heatStrokeWidth,
+  heatOpacity,
+  heatSegmentsFingerprint,
+  gapTokenCost,
+  wallLaneTrackSVG,
 } from "../js/map.js";
 import { toggleMapSelection, headStopKey } from "../js/map-model.js";
 import { forkKind, stopsOf, stopKey, newestFirst } from "../js/lanes.js";
@@ -1201,4 +1212,317 @@ test("wall re-render on fare change preserves external composer draft (polling i
   assert.doesNotMatch(mapSrc, /from "\.\/composer\.js"/);
   assert.doesNotMatch(mapSrc, /#prompt\b|getElementById\(["']prompt/);
   feature.destroy();
+});
+
+/* ---------- V2-P3: lane heat overlay (fare-design.md v2.3 / V2-P3) ----------
+ * Heat only. No capsule, no callout, fareLineHTML stays (V2-P4). */
+
+test("V2-P3 heatEnabled only under mapFull && fareOn", () => {
+  assert.equal(heatEnabled({ mapFull: true, fareOn: true }), true);
+  assert.equal(heatEnabled({ mapFull: true, fareOn: false }), false, "off when !fareOn");
+  assert.equal(heatEnabled({ mapFull: false, fareOn: true }), false, "off when not full-screen");
+  assert.equal(heatEnabled({ mapFull: false, fareOn: false }), false);
+});
+
+test("V2-P3 segmentTokenCost uses token fare (four quantities / total)", () => {
+  assert.equal(segmentTokenCost(null), null, "absent → null");
+  assert.equal(segmentTokenCost(undefined), null);
+  assert.equal(segmentTokenCost({}), null, "empty object is absent");
+  // shipped total wins
+  assert.equal(segmentTokenCost({
+    total: 59810, fresh_in: 1, cache_read: 2, cache_write: 3, out: 4,
+  }), 59810);
+  // sum of four when total missing
+  assert.equal(segmentTokenCost({
+    fresh_in: 100, cache_read: 50, cache_write: 20, out: 30,
+  }), 200);
+  // partial fields still sum (zeros allowed; presence of any field counts)
+  assert.equal(segmentTokenCost({ fresh_in: 0, out: 10 }), 10);
+  // time parts must not drive heat magnitude
+  assert.equal(segmentTokenCost({
+    total: 100, real_ms: 99999, agent_ms: 1, tools_ms: 2, wait_ms: 3,
+  }), 100);
+});
+
+test("V2-P3 heatStrokeWidth scales monotonically with cost; absent → base", () => {
+  assert.equal(TRACK_STROKE_BASE, 3.5, "base track matches v1 wall stroke");
+  assert.ok(TRACK_STROKE_MAX > TRACK_STROKE_BASE);
+  assert.ok(HEAT_COST_CAP > 0);
+
+  // Absent / non-finite / ≤0 → base track (never zero-width)
+  assert.equal(heatStrokeWidth(null), TRACK_STROKE_BASE);
+  assert.equal(heatStrokeWidth(undefined), TRACK_STROKE_BASE);
+  assert.equal(heatStrokeWidth(NaN), TRACK_STROKE_BASE);
+  assert.equal(heatStrokeWidth(0), TRACK_STROKE_BASE);
+  assert.equal(heatStrokeWidth(-5), TRACK_STROKE_BASE);
+
+  const wSmall = heatStrokeWidth(1_000);
+  const wMid = heatStrokeWidth(50_000);
+  const wBig = heatStrokeWidth(HEAT_COST_CAP);
+  const wHuge = heatStrokeWidth(HEAT_COST_CAP * 10);
+
+  assert.ok(wSmall > TRACK_STROKE_BASE, "positive cost thickens above base");
+  assert.ok(wMid > wSmall, "mid > small (monotonic)");
+  assert.ok(wBig > wMid, "cap cost > mid (monotonic)");
+  assert.equal(wBig, TRACK_STROKE_MAX, "cost at cap hits max");
+  assert.equal(wHuge, TRACK_STROKE_MAX, "huge cost clamps — cannot swamp the lane");
+  // never zero or negative
+  for (const w of [wSmall, wMid, wBig, wHuge, heatStrokeWidth(null)]) {
+    assert.ok(w >= TRACK_STROKE_BASE, `width ${w} must be ≥ base`);
+  }
+});
+
+test("V2-P3 heatOpacity is a mild ramp; thickness remains the channel", () => {
+  // Colour is not the encoding channel — opacity may vary mildly with cost.
+  const o0 = heatOpacity(null, 1);
+  const o1 = heatOpacity(1_000, 1);
+  const o2 = heatOpacity(HEAT_COST_CAP, 1);
+  assert.equal(o0, 1, "absent keeps base opacity");
+  assert.ok(o1 <= 1 && o1 > 0);
+  assert.ok(o2 <= 1 && o2 >= o1, "opacity non-decreasing with cost");
+  // dim-lane baseOp is multiplied through
+  assert.ok(Math.abs(heatOpacity(HEAT_COST_CAP, 0.22) - 0.22 * o2) < 1e-9);
+});
+
+test("V2-P3 gapTokenCost maps consecutive same-node stops to fare_segments[i]", () => {
+  const n = {
+    id: "a",
+    fare_segments: [
+      { total: 1000, fresh_in: 800, out: 200 },
+      { total: 5000, fresh_in: 4000, out: 1000 },
+    ],
+  };
+  const s0 = { n, i: 0, time: "t0", head: false };
+  const s1 = { n, i: 1, time: "t1", head: true };
+  assert.equal(gapTokenCost(s0, s1), 1000, "gap 0→1 uses segments[0]");
+  assert.equal(gapTokenCost(s1, s0), 1000, "order-independent");
+
+  // Non-consecutive stops → absent
+  const s2 = { n, i: 2, time: "t2", head: true };
+  n.fare_segments.push({ total: 99 });
+  assert.equal(gapTokenCost(s0, s2), null);
+
+  // Different nodes → absent
+  const other = { n: { id: "b", fare_segments: [{ total: 999 }] }, i: 0, time: "x", head: true };
+  assert.equal(gapTokenCost(s0, other), null);
+
+  // Missing segment entry → absent (not zero)
+  const bare = { n: { id: "c", fare_segments: [] }, i: 0, time: "u", head: false };
+  const bare1 = { n: bare.n, i: 1, time: "v", head: true };
+  assert.equal(gapTokenCost(bare, bare1), null);
+
+  // No fare_segments at all → absent
+  const noSeg = { n: { id: "d" }, i: 0, time: "u", head: false };
+  const noSeg1 = { n: noSeg.n, i: 1, time: "v", head: true };
+  assert.equal(gapTokenCost(noSeg, noSeg1), null);
+});
+
+test("V2-P3 wallLaneTrackSVG: heat off → single base track; heat on → per-gap width", () => {
+  const n = {
+    id: "a",
+    fare_segments: [
+      { total: 1_000 },
+      { total: HEAT_COST_CAP },
+    ],
+  };
+  const stops = [
+    { y: 10, stop: { n, i: 0, time: "t0", head: false } },
+    { y: 50, stop: { n, i: 1, time: "t1", head: false } },
+    { y: 90, stop: { n, i: 2, time: "t2", head: true } },
+  ];
+
+  // Heat off: one continuous base-width line (no per-gap thickening)
+  const off = wallLaneTrackSVG(stops, { x: 24, color: "#00f", opacity: 1, heatOn: false });
+  assert.match(off, /<line\b/);
+  assert.match(off, /stroke-width="3\.5"/);
+  assert.doesNotMatch(off, /data-heat=/);
+  // single line covering full span
+  assert.match(off, /y1="10"/);
+  assert.match(off, /y2="90"/);
+  const offLines = off.match(/<line\b/g) || [];
+  assert.equal(offLines.length, 1, "heat off: one continuous track");
+
+  // Heat on: two sub-segments with distinct widths
+  const on = wallLaneTrackSVG(stops, { x: 24, color: "#00f", opacity: 1, heatOn: true });
+  const onLines = on.match(/<line\b[^/]*\/>/g) || on.match(/<line\b[^>]*>/g) || [];
+  assert.ok(onLines.length >= 2, `heat on: per-gap lines, got ${onLines.length}`);
+  const wLow = heatStrokeWidth(1_000);
+  const wHigh = heatStrokeWidth(HEAT_COST_CAP);
+  assert.ok(wHigh > wLow);
+  assert.match(on, new RegExp(`stroke-width="${String(wLow).replace(".", "\\.")}"`));
+  assert.match(on, new RegExp(`stroke-width="${String(wHigh).replace(".", "\\.")}"`));
+  // lane colour preserved (not colour-encoding cost)
+  assert.match(on, /stroke="#00f"/);
+});
+
+test("V2-P3 wallLaneTrackSVG: absent cost → base track, never missing/zero-width", () => {
+  // Two stations, no fare_segments → still a drawn base line when heatOn
+  const n = { id: "a" };
+  const stops = [
+    { y: 20, stop: { n, i: 0, time: "t0", head: false } },
+    { y: 80, stop: { n, i: 1, time: "t1", head: true } },
+  ];
+  const svg = wallLaneTrackSVG(stops, { x: 10, color: "#abc", opacity: 0.5, heatOn: true });
+  assert.match(svg, /<line\b/, "line must still render");
+  assert.match(svg, /stroke-width="3\.5"/, "absent cost uses base width");
+  assert.doesNotMatch(svg, /stroke-width="0"/);
+  assert.match(svg, /stroke="#abc"/);
+  assert.match(svg, /opacity="0\.5"/);
+
+  // empty / single stop → no line (nothing between)
+  assert.equal(wallLaneTrackSVG([], { x: 0, color: "#x", heatOn: true }), "");
+  assert.equal(wallLaneTrackSVG(stops.slice(0, 1), { x: 0, color: "#x", heatOn: true }), "");
+});
+
+test("V2-P3 heatSegmentsFingerprint and wallMapSignature reflect segment cost", () => {
+  const base = {
+    id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+    created_at: "2026-01-01T00:00:00Z", last_activity: 100, ctx_pct: 10,
+    fare_total: 6000, fare_turns: 2, fare_cost_complete: false,
+    stops: ["2026-01-02T00:00:00Z"],
+    fare_segments: [
+      { total: 1000, fresh_in: 800, out: 200 },
+      { total: 5000, fresh_in: 4000, out: 1000 },
+    ],
+  };
+  const fp1 = heatSegmentsFingerprint(base);
+  assert.ok(fp1.length > 0, "fingerprint non-empty when segments present");
+  assert.match(fp1, /1000/);
+  assert.match(fp1, /5000/);
+
+  const grown = {
+    ...base,
+    fare_segments: [
+      { total: 1000, fresh_in: 800, out: 200 },
+      { total: 9000, fresh_in: 8000, out: 1000 }, // segment cost changed
+    ],
+  };
+  // whole-journey totals unchanged — only segment heat differs
+  assert.equal(base.fare_total, grown.fare_total);
+  assert.notEqual(heatSegmentsFingerprint(base), heatSegmentsFingerprint(grown));
+
+  const rows1 = stopsOf(base).sort(newestFirst);
+  const rows2 = stopsOf(grown).sort(newestFirst);
+  const w1 = wallMapSignature(rows1, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: true,
+  });
+  const w2 = wallMapSignature(rows2, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: true,
+  });
+  assert.notEqual(w1, w2, "signature must change when a segment's cost changes");
+
+  // Unchanged poll → stable signature
+  const w1b = wallMapSignature(rows1, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: true,
+  });
+  assert.equal(w1, w1b, "unchanged poll → stable signature");
+  assert.equal(mapRenderDecision(w1, w1b), "skip");
+
+  // fareOff: segment heat must not affect signature
+  const wOff1 = wallMapSignature(rows1, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: false,
+  });
+  const wOff2 = wallMapSignature(rows2, ["L"], {
+    focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: false,
+  });
+  assert.equal(wOff1, wOff2, "fareOff: segment cost changes are inert");
+});
+
+test("V2-P3 wall heat re-render preserves composer (polling invariant)", () => {
+  // Heat-driven signature change rebuilds #mapwrap only; composer is outside
+  // every polled render region (AGENTS.md polling-never-clobbers-input).
+  const mapwrap = fakeEl("mapwrap");
+  const composer = fakeEl("prompt");
+  composer.value = "draft across heat update";
+  composer._focused = true;
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+    },
+  };
+  // Two stops so the wall draws a track that can carry heat
+  const node = {
+    id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
+    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
+    fare_fresh_in: 100, fare_out: 20, fare_cache_write: 0, fare_cache_read: 50,
+    fare_total: 170, fare_turns: 2, fare_cost_complete: false,
+    fare_segments: [
+      { total: 100, fresh_in: 80, out: 20 },
+      { total: 70, fresh_in: 50, out: 20 },
+    ],
+  };
+  const nodes = [node];
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FARE_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+    },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    agentLogo: () => "",
+    icons: {
+      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
+      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+    },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+  assert.equal(composer.value, "draft across heat update");
+  assert.equal(composer._focused, true);
+  // Wall track present
+  assert.match(mapwrap.innerHTML, /<line\b/);
+  // fareLineHTML still present (V2-P4 retires it — not this phase)
+  assert.match(mapwrap.innerHTML, /class="fare"/);
+
+  // Poll: only segment heat grows (whole-journey fields can stay put)
+  node.fare_segments = [
+    { total: 100, fresh_in: 80, out: 20 },
+    { total: 80_000, fresh_in: 70_000, out: 10_000 },
+  ];
+  feature.render();
+  assert.equal(composer.value, "draft across heat update");
+  assert.equal(composer._focused, true);
+  assert.match(mapwrap.innerHTML, /<line\b/);
+  assert.match(mapwrap.innerHTML, /class="fare"/);
+  // map still does not own the composer
+  assert.doesNotMatch(mapSrc, /from "\.\/composer\.js"/);
+  feature.destroy();
+});
+
+test("V2-P3 wall render uses wallLaneTrackSVG under fareOn; base track when fareOff", () => {
+  // Integration: wall path must call the heat track helper (not only pure unit).
+  // A bare export is not enough — renderWallMap must invoke it.
+  assert.match(mapSrc, /svg \+= wallLaneTrackSVG\(/,
+    "renderWallMap must draw tracks via wallLaneTrackSVG");
+  // heatOn gated on fareOn inside the wall path (wall is already mapFull)
+  assert.match(mapSrc, /heatOn:\s*fareOn/);
+  // fareLineHTML not removed in P3
+  assert.match(mapSrc, /export function fareLineHTML\b/);
+  assert.match(mapSrc, /fareLineHTML\(n,/);
 });
