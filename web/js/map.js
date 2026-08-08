@@ -190,9 +190,9 @@ export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull,
 }
 
 /* Fare fingerprint for wall re-render when the overlay is on. Uses fare_*
-   totals + per-segment heat costs (not last_activity) so a token/cost poll
-   update rebuilds the meter and lane heat; fareOff keeps the field inert so
-   idle polls stay skip-able. */
+   totals + per-segment heat/capsule costs (not last_activity) so a token/cost
+   poll update rebuilds lane heat and the selected capsule; fareOff keeps the
+   field inert so idle polls stay skip-able. */
 function fareFingerprint(n){
   if (!n) return "";
   return [
@@ -203,9 +203,10 @@ function fareFingerprint(n){
   ].join(",");
 }
 
-export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn } = {}){
+export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn, fareCalloutOpen } = {}){
   return "wall|" + (cols || []).join(",") + "|" + focusLane + "|" + mapTab + "|" +
-    mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
+    mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") +
+    (fareCalloutOpen ? "C" : "") + "|" +
     JSON.stringify((rows || []).map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, s.n.created_at,
       l.title, l.desc, s.n.agent,
       s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
@@ -383,71 +384,110 @@ function fmtFareCost(c){
   return "$" + v.toFixed(2);
 }
 
-/* Journey token meter (fare-design.md Phase 8 / D1 / D8). Full-screen + fareOn
-   only. Distinct from the ctx_pct tank ring on the wall SVG — never merges
-   occupancy into this line. Cost only when fare_cost_complete (D8). Absent
-   fare_* fields → empty (never 0·0·0).
-   V2-P4 retires this text line (capsule + callout); kept until the green
-   commit removes it so red tests can pin its absence. */
-export function fareLineHTML(n, { mapFull, fareOn, escape = esc } = {}){
-  if (!mapFull || !fareOn || !n) return "";
-  const hasFare = n.fare_fresh_in != null || n.fare_out != null
-    || n.fare_cache_write != null || n.fare_cache_read != null
-    || n.fare_total != null || n.fare_turns != null;
-  if (!hasFare) return "";
-  const parts = [
-    `fresh ${fmtFareTokens(n.fare_fresh_in ?? 0)}`,
-    `out ${fmtFareTokens(n.fare_out ?? 0)}`,
-    `cache-wr ${fmtFareTokens(n.fare_cache_write ?? 0)}`,
-    `cache-rd ${fmtFareTokens(n.fare_cache_read ?? 0)}`,
-  ];
-  if (n.fare_model) parts.push(escape(n.fare_model));
-  if (n.fare_turns != null) parts.push(`${Number(n.fare_turns)} turns`);
-  // D8: reported-or-omitted — no $, no number, no estimate unless complete
-  if (n.fare_cost_complete && n.fare_cost != null)
-    parts.push(fmtFareCost(n.fare_cost));
-  return `<div class="fare">${parts.join(" · ")}</div>`;
-}
-
 /* ---------- V2-P4 centered capsule + callout (fare-design.md v2.3 / V2-P4)
-   Capsule on the *selected* segment only; tap opens anchored callout; retire
-   v1 fareLineHTML. Stubs below intentionally fail the red tests; green fills
-   them in and removes fareLineHTML. */
+   Capsule on the *selected* segment only; tap opens anchored callout.
+   Replaces the v1 fareLineHTML text row (retired). Same mapFull && fareOn
+   gate as heat. */
 
 /* Same gate as heat: full-screen wall + fare layer on. */
 export function fareOverlayEnabled({ mapFull, fareOn } = {}){
-  // RED stub: always false.
-  return false;
+  return !!(mapFull && fareOn);
 }
 
-/* Map a wall-selected stop to a fare_segments index.
+/* Map a wall-selected stop to a fare_segments entry.
    fare_segments[i] bridges stop i → stop i+1. Selected stop i>0 → arrival
    segment i-1; creation stop (i=0) → outbound segment 0 when present.
    null when no multi-stop track gap or no segment data. */
 export function selectedSegmentRef(stop){
-  // RED stub.
-  return null;
+  if (!stop || !stop.n) return null;
+  const n = stop.n;
+  const segs = n.fare_segments;
+  if (!Array.isArray(segs) || !segs.length) return null;
+  // creation + each /clear entry = stop chain length; need ≥2 for a gap
+  const nStops = 1 + (Array.isArray(n.stops) ? n.stops.length : 0);
+  if (nStops < 2) return null;
+  const idx = stop.i > 0 ? stop.i - 1 : 0;
+  if (idx < 0 || idx >= segs.length || segs[idx] == null) return null;
+  return { nodeId: n.id, segIdx: idx, seg: segs[idx] };
 }
 
 /* Compact wall-clock duration for the callout (45s / 1m 23s / 12ms). */
 export function fmtRideMs(ms){
-  // RED stub.
-  return "";
+  if (ms == null || ms === "") return "";
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v < 0) return "";
+  if (v < 1000) return Math.round(v) + "ms";
+  if (v < 60_000){
+    const s = v / 1000;
+    if (s >= 10) return Math.round(s) + "s";
+    const t = s.toFixed(1).replace(/\.0$/, "");
+    return t + "s";
+  }
+  const m = Math.floor(v / 60_000);
+  const s = Math.round((v % 60_000) / 1000);
+  return s ? `${m}m ${s}s` : `${m}m`;
 }
 
-/* Opaque-surface capsule at (x, y) midpoint — headline token fare only.
-   Empty when overlay off / no segment. calloutOpen appends the breakdown. */
-export function fareCapsuleHTML(seg, opts = {}){
-  // RED stub.
-  return "";
+/* Headline token total for a segment (prefers shipped total). */
+function segmentHeadlineTokens(seg){
+  if (!seg || typeof seg !== "object") return null;
+  const cost = segmentTokenCost(seg);
+  return cost;
 }
 
 /* Callout body: four token quantities + real (agent · tools · wait).
    Time split omitted when agent/tools/wait absent (≠ zero). Cost only when
    seg.cost_complete (D8). */
 export function fareCalloutHTML(seg, opts = {}){
-  // RED stub.
-  return "";
+  if (!seg || typeof seg !== "object") return "";
+  const escape = opts.escape || esc;
+  const parts = [
+    `fresh ${fmtFareTokens(seg.fresh_in ?? 0)}`,
+    `out ${fmtFareTokens(seg.out ?? 0)}`,
+    `cache-wr ${fmtFareTokens(seg.cache_write ?? 0)}`,
+    `cache-rd ${fmtFareTokens(seg.cache_read ?? 0)}`,
+  ];
+  // real always when present; split only when any of agent/tools/wait shipped
+  if (seg.real_ms != null && Number.isFinite(Number(seg.real_ms))){
+    const real = fmtRideMs(seg.real_ms);
+    const hasSplit = seg.agent_ms != null || seg.tools_ms != null || seg.wait_ms != null;
+    if (hasSplit){
+      const a = fmtRideMs(seg.agent_ms ?? 0);
+      const t = fmtRideMs(seg.tools_ms ?? 0);
+      const w = fmtRideMs(seg.wait_ms ?? 0);
+      parts.push(`real ${real} (agent ${a} · tools ${t} · wait ${w})`);
+    } else {
+      parts.push(`real ${real}`);
+    }
+  }
+  // D8: reported-or-omitted — never an estimate
+  if (seg.cost_complete && seg.cost != null)
+    parts.push(fmtFareCost(seg.cost));
+  return `<div class="fare-callout" data-fare-callout>${parts.map(p => escape(p)).join(" · ")}</div>`;
+}
+
+/* Opaque-surface capsule at (x, y) midpoint — headline token fare only.
+   Empty without a segment. calloutOpen appends the breakdown. Position is
+   fixed geometry so poll rebuilds update text in place (no jump). */
+export function fareCapsuleHTML(seg, opts = {}){
+  if (!seg || typeof seg !== "object") return "";
+  const escape = opts.escape || esc;
+  const x = Number(opts.x);
+  const y = Number(opts.y);
+  const px = Number.isFinite(x) ? x : 0;
+  const py = Number.isFinite(y) ? y : 0;
+  const tokens = segmentHeadlineTokens(seg);
+  const label = tokens == null ? "—" : fmtFareTokens(tokens);
+  const open = !!opts.calloutOpen;
+  const callout = open ? fareCalloutHTML(seg, { escape }) : "";
+  // translate(-50%,-50%) centres the capsule on the track midpoint; opaque
+  // surface bg so the heat track reads as passing behind (Apple Maps style).
+  return `<button type="button" class="fare-capsule" data-fare-capsule
+    style="left:${px}px;top:${py}px"
+    aria-expanded="${open ? "true" : "false"}"
+    aria-label="segment fare ${escape(label)}">
+    <span class="fare-capsule-val">${escape(label)}</span>
+  </button>${callout ? `<div class="fare-callout-anchor" style="left:${px}px;top:${py}px">${callout}</div>` : ""}`;
 }
 
 export function stationRowHTML(n, lm, opts = {}){
@@ -455,7 +495,7 @@ export function stationRowHTML(n, lm, opts = {}){
     padLeft = 0, others = [], dim = false, golane = false, current = false,
     fork = false, stop = null, alt = false,
     escape = esc, stamp = fmtStamp, status = statusText, configText = cardConfigText,
-    fareHTML = "", forkCue = "",
+    forkCue = "",
   } = opts;
   const label = stop ? stopLabel(stop) : { title: n.title || "", desc: n.description || n.prompt || "" };
   if (stop && !stop.head)
@@ -475,7 +515,6 @@ export function stationRowHTML(n, lm, opts = {}){
           <div class="cap">${escape(when)} · ${escape(configText(n))} · ${escape(status(n))}${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${escape(l)}"` : ""} style="color:${escape(lm.color(l))}">&#8644; ${escape(lm.name(l))}</span>`).join("")}</div>
           ${desc ? `<div class="desc">${escape(desc)}</div>` : ""}
-          ${fareHTML}
         </div>`;
 }
 
@@ -516,6 +555,9 @@ export function createMapFeature(deps){
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
+  /* V2-P4: callout open state for the selected segment capsule. Survives an
+     unchanged poll via wallMapSignature; cleared when selection clears. */
+  let fareCalloutOpen = false;
   let mapSig = "";
   let editTab = null;
   let bound = false;
@@ -562,9 +604,13 @@ export function createMapFeature(deps){
 
   function setMapSel(id, key, stopTime){
     const next = toggleMapSelection({ id, key, stopTime, mapSelKey, nodes: g("nodes", []) });
+    const changed = next.mapSelKey !== mapSelKey;
     mapSel = next.mapSel;
     mapSelKey = next.mapSelKey;
     mapSelStop = next.mapSelStop;
+    // New selection or deselection closes the callout; same-key re-tap already
+    // deselects via toggleMapSelection.
+    if (changed) fareCalloutOpen = false;
     mapSig = "";
     renderMap();
   }
@@ -589,6 +635,7 @@ export function createMapFeature(deps){
     else storeRemove(MAP_FULL_KEY);
     const cleared = clearMapSelection();
     mapSel = cleared.mapSel; mapSelKey = cleared.mapSelKey; mapSelStop = cleared.mapSelStop;
+    fareCalloutOpen = false;
     if (doc && doc.body) doc.body.classList.toggle("map-full", mapFull);
     syncMapFullBtn();
     mapSig = "";
@@ -619,7 +666,6 @@ export function createMapFeature(deps){
   }
 
   function stationHTML(n, model, opts){
-    const fareHTML = fareLineHTML(n, { mapFull, fareOn, escape });
     const forkCue = opts.fork ? forkCueHTML(n, model, {
       escape, forkKind, nodeById,
     }) : "";
@@ -627,7 +673,7 @@ export function createMapFeature(deps){
     return stationRowHTML(n, model, {
       ...opts,
       escape, stamp: stampFn, status: statusText, configText: cardConfigText,
-      fareHTML, forkCue, agentLogo,
+      forkCue, agentLogo,
     });
   }
 
@@ -684,7 +730,7 @@ export function createMapFeature(deps){
     const rows = stations.flatMap(stopsOf).sort(newestFirst);
 
     const sig = wallMapSignature(rows, cols, {
-      focusLane, mapTab, mapSel, mapSelKey, fareOn,
+      focusLane, mapTab, mapSel, mapSelKey, fareOn, fareCalloutOpen,
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
@@ -816,8 +862,28 @@ export function createMapFeature(deps){
       }
     });
 
+    // V2-P4: capsule on the selected segment only (density control). Heat stays
+    // on every gap; the capsule is the progressive-disclosure headline.
+    let capsuleHTML = "";
+    if (fareOn && mapSelKey){
+      const selStop = rows.find(s => stopKey(s) === mapSelKey);
+      const ref = selectedSegmentRef(selStop);
+      if (ref){
+        const ia = rows.findIndex(s => s.n.id === ref.nodeId && s.i === ref.segIdx);
+        const ib = rows.findIndex(s => s.n.id === ref.nodeId && s.i === ref.segIdx + 1);
+        if (ia >= 0 && ib >= 0){
+          const midY = (rowY(ia) + rowY(ib)) / 2;
+          const x = nodeX(selStop.n);
+          capsuleHTML = fareCapsuleHTML(ref.seg, {
+            x, y: midY, calloutOpen: fareCalloutOpen, escape,
+          });
+        }
+      }
+    }
+
     if (mapwrap) mapwrap.innerHTML = `<div class="lbody wallbody">
     <svg width="${colsW}" height="${svgH}" viewBox="0 0 ${colsW} ${svgH}">${svg}</svg>
+    ${capsuleHTML}
     <div style="height:${OFF}px"></div>
     ${rows.map((s, i) => stationHTML(s.n, model, {
       padLeft: colsW + GAP,
@@ -1058,6 +1124,17 @@ export function createMapFeature(deps){
   }
 
   function onMapWrapClick(e){
+    // V2-P4: capsule tap toggles the anchored callout (progressive disclosure).
+    // Handle before station rows so the button does not re-toggle mapSel.
+    const cap = e.target.closest("[data-fare-capsule]");
+    if (cap){
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
+      if (typeof e.preventDefault === "function") e.preventDefault();
+      fareCalloutOpen = !fareCalloutOpen;
+      mapSig = "";
+      renderMap();
+      return;
+    }
     const f = e.target.closest("[data-fold]");
     if (f){ toggleMapFold(f.dataset.fold); return; }
     const j = e.target.closest("[data-jump]");
@@ -1182,6 +1259,7 @@ export function createMapFeature(deps){
       const key = el.dataset.skey || headStopKey(id, g("nodes", []));
       if (mapSelKey !== key){
         mapSel = id; mapSelKey = key; mapSelStop = stop;
+        fareCalloutOpen = false;
         mapSig = ""; renderMap();
       }
     }

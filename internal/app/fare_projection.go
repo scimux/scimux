@@ -4,8 +4,8 @@ package app
 // /api/state poll payload (fare-design.md Phase 7 + V2-P2, D1, D8). Cached
 // fold-on-growth mirrors segCache: ReadFare/ReadRidesBySegment only re-run
 // when the session log's size or mtime advances. Occupancy (ctx_pct) stays
-// on the segment path and is never merged with fare. No UI this phase —
-// fareLineHTML remains for V2-P4.
+// on the segment path and is never merged with fare. UI: wall heat (V2-P3)
+// + selected-segment capsule/callout (V2-P4); v1 fareLineHTML is retired.
 
 import (
 	"codeberg.org/chrberger/scimux/internal/fare"

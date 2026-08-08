@@ -31,7 +31,6 @@ import {
   terminalStationSVG,
   terminalCapSVG,
   forkCueHTML,
-  fareLineHTML,
   stationRowHTML,
   createMapFeature,
   // V2-P3 lane heat
@@ -199,76 +198,11 @@ test("mapTabsHTML All / groups / add button order and ARIA", () => {
   assert.match(html, /data-rm="g1"/);
 });
 
-/* ---------- Phase 8: fare meter (journey tokens) + full-screen toggle ---------- */
+/* ---------- Phase 8: fare layer toggle + D1 tank (v1 meter retired in V2-P4) ---------- */
 
-const FARE_NODE = {
-  fare_fresh_in: 32800,
-  fare_out: 410,
-  fare_cache_write: 25400,
-  fare_cache_read: 1200,
-  fare_total: 59810,
-  fare_turns: 3,
-  fare_cost: 0.6215,
-  fare_cost_complete: true,
-  fare_model: "claude-sonnet",
-  ctx_pct: 42, // tank lives on the wall SVG ring, not the meter
-};
-
-test("fareLineHTML empty unless mapFull && fareOn", () => {
-  assert.equal(fareLineHTML(FARE_NODE, { mapFull: true, fareOn: false }), "");
-  assert.equal(fareLineHTML(FARE_NODE, { mapFull: false, fareOn: true }), "");
-  assert.equal(fareLineHTML(FARE_NODE, { mapFull: false, fareOn: false }), "");
-  const html = fareLineHTML(FARE_NODE, { mapFull: true, fareOn: true });
-  assert.match(html, /class="fare"/);
-});
-
-test("fareLineHTML shows cumulative tokens", () => {
-  const html = fareLineHTML(FARE_NODE, { mapFull: true, fareOn: true, escape: s => s });
-  assert.match(html, /class="fare"/);
-  // four canonical quantities labeled — pin presence/label, not exact glyphs
-  assert.match(html, /fresh/i);
-  assert.match(html, /out/i);
-  assert.match(html, /cache-wr|cache.?wr|wr/i);
-  assert.match(html, /cache-rd|cache.?rd|rd/i);
-  // values appear in some form (compact k-suffix ok)
-  assert.match(html, /32\.?8?\s*k|32800/i);
-  assert.match(html, /410/);
-  assert.match(html, /25\.?4?\s*k|25400/i);
-  assert.match(html, /1\.?2?\s*k|1200/i);
-  // optional annotations
-  assert.match(html, /claude-sonnet|sonnet/i);
-  assert.match(html, /3/);
-});
-
-test("fareLineHTML omits cost when not reported", () => {
-  const incomplete = { ...FARE_NODE, fare_cost_complete: false, fare_cost: 0.99 };
-  const noCost = fareLineHTML(incomplete, { mapFull: true, fareOn: true, escape: s => s });
-  assert.doesNotMatch(noCost, /\$/);
-  assert.doesNotMatch(noCost, /0\.99|0\.621/);
-  // no estimate language either
-  assert.doesNotMatch(noCost, /estimat/i);
-
-  const complete = fareLineHTML(
-    { ...FARE_NODE, fare_cost_complete: true, fare_cost: 0.6215 },
-    { mapFull: true, fareOn: true, escape: s => s },
-  );
-  assert.match(complete, /\$/);
-  assert.match(complete, /0\.62/);
-});
-
-test("fareLineHTML absent when no fare fields", () => {
-  const bare = { id: "n", title: "T", ctx_pct: 50, created_at: "2026-01-01T00:00:00Z" };
-  const html = fareLineHTML(bare, { mapFull: true, fareOn: true });
-  // nothing, or a subtle dash — never zeroed quantities
-  assert.ok(html === "" || /class="fare">\s*(—|&mdash;|–|-)\s*<\/div>/.test(html),
-    `want empty or subtle dash, got ${JSON.stringify(html)}`);
-  assert.doesNotMatch(html, /0\s*·\s*0\s*·\s*0/);
-  assert.doesNotMatch(html, /fresh[^<]*\b0\b.*out[^<]*\b0\b/i);
-});
-
-test("ctx_pct still rendered as tank, unchanged", () => {
-  // Tank is the wall-map occupancy ring (D1) — distinct from the fare meter.
-  // Pin the SVG occupancy path byte-for-byte so a merge into fareLineHTML is caught.
+test("ctx_pct still rendered as tank, unchanged (D1)", () => {
+  // Tank is the wall-map occupancy ring (D1) — distinct from the fare capsule.
+  // Pin the SVG occupancy path byte-for-byte so a merge into the fare overlay is caught.
   const tankSnippet = `if (n.ctx_pct != null && !n.attention){
         const R = 9, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;
@@ -279,10 +213,8 @@ test("ctx_pct still rendered as tank, unchanged", () => {
                 transform="rotate(-90 \${dotX} \${yy})" opacity="\${op}"/>\`;
       }`;
   assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
-  // Meter must not re-absorb occupancy as "% ctx"
-  const meter = fareLineHTML(FARE_NODE, { mapFull: true, fareOn: true });
-  assert.doesNotMatch(meter, /% ctx/);
-  assert.doesNotMatch(meter, /class="high"/);
+  // Capsule/callout must not re-absorb occupancy as "% ctx"
+  assert.doesNotMatch(mapSrc, /% ctx/);
 });
 
 test("wall signature changes when fare fields change (fareOn)", () => {
@@ -376,7 +308,6 @@ test("stationRowHTML earlier stop vs head markup contracts", () => {
     configText: x => `${x.model}/${x.effort}`,
     forkCue: `<span class="forkcue">cue</span>`,
     agentLogo: "LOGO",
-    fareHTML: `<div class="fare">F</div>`,
   });
   assert.match(head, /data-nid="a"/);
   assert.match(head, /data-skey="a#1"/);
@@ -384,7 +315,8 @@ test("stationRowHTML earlier stop vs head markup contracts", () => {
   assert.match(head, /forkcue/);
   assert.match(head, /data-golane="L2"/);
   assert.match(head, /m\/high · Quiet/);
-  assert.match(head, /class="fare"/);
+  // V2-P4: no always-on fare text row on station cards
+  assert.doesNotMatch(head, /class="fare"/);
 });
 
 test("attentionStationSVG and ATTN_GLOW_DEF geometry classes", () => {
@@ -1141,6 +1073,7 @@ test("farebtn chrome CSS: full-screen-only reveal, mapfullbtn sizing", () => {
 test("wall re-render on fare change preserves external composer draft (polling invariant)", () => {
   // Composer is a singleton outside all polled render regions. A fare-driven
   // wall rebuild must only touch #mapwrap — never reset drafts or steal focus.
+  // V2-P4: no always-on fare text row; heat + optional capsule are the overlay.
   const mapwrap = fakeEl("mapwrap");
   const composer = fakeEl("prompt");
   composer.value = "my draft stays";
@@ -1157,9 +1090,13 @@ test("wall re-render on fare change preserves external composer draft (polling i
     id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
     effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
     attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
-    ctx_pct: 30, stops: [],
+    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
     fare_fresh_in: 100, fare_out: 20, fare_cache_write: 0, fare_cache_read: 50,
-    fare_total: 170, fare_turns: 1, fare_cost_complete: false,
+    fare_total: 170, fare_turns: 2, fare_cost_complete: false,
+    fare_segments: [
+      { total: 100, fresh_in: 80, out: 20, real_ms: 1000 },
+      { total: 70, fresh_in: 50, out: 20, real_ms: 500 },
+    ],
   };
   const nodes = [node];
   const storage = memoryStorage({
@@ -1199,18 +1136,22 @@ test("wall re-render on fare change preserves external composer draft (polling i
   feature.bind();
   feature.restoreChrome();
   feature.render();
-  assert.match(mapwrap.innerHTML, /class="fare"/);
-  assert.match(mapwrap.innerHTML, /fresh/i);
+  // v1 always-on fare row is gone; wall track still draws under fareOn
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
+  assert.match(mapwrap.innerHTML, /<line\b/);
   assert.equal(composer.value, "my draft stays");
   assert.equal(composer._focused, true);
 
-  // Poll-like fare growth: mutate node fare fields, re-render
+  // Poll-like fare growth: mutate segment costs, re-render
   node.fare_total = 9000;
   node.fare_turns = 5;
-  node.fare_fresh_in = 8000;
+  node.fare_segments = [
+    { total: 8000, fresh_in: 7000, out: 1000, real_ms: 1000 },
+    { total: 1000, fresh_in: 900, out: 100, real_ms: 500 },
+  ];
   feature.render(); // signature must notice fare fingerprint and rebuild
-  assert.match(mapwrap.innerHTML, /class="fare"/);
-  assert.match(mapwrap.innerHTML, /8\s*k|8000/i);
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
+  assert.match(mapwrap.innerHTML, /<line\b/);
   // composer singleton untouched
   assert.equal(composer.value, "my draft stays");
   assert.equal(composer._focused, true);
@@ -1221,7 +1162,7 @@ test("wall re-render on fare change preserves external composer draft (polling i
 });
 
 /* ---------- V2-P3: lane heat overlay (fare-design.md v2.3 / V2-P3) ----------
- * Heat only. No capsule, no callout, fareLineHTML stays (V2-P4). */
+ * Heat only. Capsule/callout/fareLineHTML retirement are V2-P4. */
 
 test("V2-P3 heatEnabled only under mapFull && fareOn", () => {
   assert.equal(heatEnabled({ mapFull: true, fareOn: true }), true);
@@ -1501,10 +1442,9 @@ test("V2-P3 wall heat re-render preserves composer (polling invariant)", () => {
   feature.render();
   assert.equal(composer.value, "draft across heat update");
   assert.equal(composer._focused, true);
-  // Wall track present
+  // Wall track present; v1 fare text row retired
   assert.match(mapwrap.innerHTML, /<line\b/);
-  // fareLineHTML still present (V2-P4 retires it — not this phase)
-  assert.match(mapwrap.innerHTML, /class="fare"/);
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
 
   // Poll: only segment heat grows (whole-journey fields can stay put)
   node.fare_segments = [
@@ -1515,7 +1455,7 @@ test("V2-P3 wall heat re-render preserves composer (polling invariant)", () => {
   assert.equal(composer.value, "draft across heat update");
   assert.equal(composer._focused, true);
   assert.match(mapwrap.innerHTML, /<line\b/);
-  assert.match(mapwrap.innerHTML, /class="fare"/);
+  assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
   // map still does not own the composer
   assert.doesNotMatch(mapSrc, /from "\.\/composer\.js"/);
   feature.destroy();

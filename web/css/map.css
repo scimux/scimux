@@ -104,3 +104,41 @@ body.map-full #maptoolbar.on { display: flex; }
   border: 1.5px solid transparent; max-width: 160px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lanechip.selected { box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
+
+/* V2-P4: selected-segment fare capsule (Apple Maps route-time). Opaque surface
+   so the heat track reads behind it. HTML overlay (not SVG) so it stays
+   pointer-events:auto while .lbody > svg is pointer-events:none. Fixed left/top
+   geometry → poll rebuilds update the label in place with no reflow jump. */
+.fare-capsule {
+  position: absolute; z-index: 3;
+  transform: translate(-50%, -50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 36px; height: 22px; padding: 0 8px;
+  border-radius: 11px;
+  border: 1px solid var(--hairline);
+  background: var(--surface, var(--bg));
+  color: var(--ink);
+  font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+  letter-spacing: .2px; line-height: 1;
+  box-shadow: 0 1px 4px rgba(0,0,0,.14);
+  cursor: pointer; white-space: nowrap;
+  pointer-events: auto;
+}
+.fare-capsule:active { background: var(--th-bg, var(--surface, var(--bg))); }
+.fare-capsule-val { pointer-events: none; }
+.fare-callout-anchor {
+  position: absolute; z-index: 4;
+  transform: translate(-50%, calc(-50% - 28px));
+  pointer-events: none;
+  max-width: min(280px, 70vw);
+}
+.fare-callout {
+  padding: 6px 10px; border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--surface, var(--bg));
+  color: var(--dim);
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  letter-spacing: .15px; line-height: 1.35;
+  box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  white-space: normal; word-break: break-word;
+}
