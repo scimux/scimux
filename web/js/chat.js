@@ -438,9 +438,21 @@ function permOptionClass(kind){
 
 /* Pure core for the approval "show all" measure pass. Vertical overflow only:
    .permcode is white-space:pre; overflow-x:auto, so a long single-line command
-   can be wide without needing expand (expand only lifts the vertical clamp). */
-export function permMoreShouldShow(scrollHeight, clientHeight){
-  return (scrollHeight || 0) > (clientHeight || 0);
+   can be wide without needing expand (expand only lifts the vertical clamp).
+
+   Three states, not two. With no layout box — body.map-full hides #chat while
+   polling keeps rendering it — the element measures 0x0, and reading that as
+   "nothing to show" hides the only way to read a long ask. An unmeasured row
+   is not a measured one; the caller waits for a box instead of deciding.
+   Same rule as pinDecision's clientHeight-0 case. */
+export const PERM_MORE_SHOW = "show";
+export const PERM_MORE_HIDE = "hide";
+export const PERM_MORE_UNKNOWN = "unknown";
+
+export function permMoreDecision(scrollHeight, clientHeight){
+  const ch = clientHeight || 0;
+  if (ch <= 0) return PERM_MORE_UNKNOWN;
+  return (scrollHeight || 0) > ch ? PERM_MORE_SHOW : PERM_MORE_HIDE;
 }
 
 export function keyRowHTML({
@@ -585,6 +597,9 @@ export function createChatFeature(deps){
   const renderedCleanups = [];
   /* Bottom-pin re-assert: rAF + ResizeObserver, both via deps (no-op headless). */
   let pinObserver = null;
+  /* Approval "show all": a second, separate observer — it waits for .permask to
+     gain a box, which is a different question from the scroller's geometry. */
+  let permMoreObserver = null;
   let pinRafQueued = false;
 
   function g(name, fallback){
@@ -1329,11 +1344,48 @@ export function createChatFeature(deps){
   }
 
   function revealPermMoreIfNeeded(){
+    clearPermMoreObserver();
     if (!keyrow) return;
     const mask = q(keyrow, ".permask");
     const more = q(keyrow, ".permmore");
     if (!mask || !more) return;
-    more.hidden = !permMoreShouldShow(mask.scrollHeight, mask.clientHeight);
+    const decision = permMoreDecision(mask.scrollHeight, mask.clientHeight);
+    if (decision === PERM_MORE_UNKNOWN){
+      /* No box yet (the chat is hidden under the wall map). The keyrow is
+         written once and the skip path never rewrites it, so an observer is
+         the only thing left that can decide. Without one, fail open: a dead
+         control is a nuisance, an unreadable approval is a dead end. */
+      if (!armPermMoreObserver(mask)) more.hidden = false;
+      return;
+    }
+    more.hidden = decision !== PERM_MORE_SHOW;
+  }
+
+  function armPermMoreObserver(mask){
+    const RO = d.ResizeObserver;
+    if (typeof RO !== "function") return false;
+    try {
+      const obs = new RO(() => {
+        /* Still no box: keep waiting. Re-entering while unmeasurable would
+           disconnect and re-observe, and observe() always delivers an initial
+           callback — that is a spin, not a retry. */
+        if (!(mask.clientHeight > 0)) return;
+        revealPermMoreIfNeeded();
+      });
+      obs.observe(mask);
+      permMoreObserver = obs;
+      return true;
+    } catch {
+      permMoreObserver = null;
+      return false;
+    }
+  }
+
+  function clearPermMoreObserver(){
+    if (permMoreObserver && typeof permMoreObserver.disconnect === "function"){
+      try { permMoreObserver.disconnect(); } catch { /* ignore */ }
+    }
+    permMoreObserver = null;
   }
 
   /* ---- event handlers ---- */
@@ -1562,6 +1614,7 @@ export function createChatFeature(deps){
     clearRenderedListeners();
     clearChatLoad();
     clearPinObserver();
+    clearPermMoreObserver();
     bound = false;
   }
 
