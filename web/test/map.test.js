@@ -2676,7 +2676,7 @@ test("P2: CSS #mapdivider mirrors .wsdivider (row-resize, pill, hairline, focus)
   const pill = notesCssSrc.match(/#mapdivider::before\s*\{([^}]+)\}/);
   assert.ok(pill, "#mapdivider::before grab pill present");
   assert.match(pill[1], /pointer-events:\s*none/,
-    "pill is decoration; whole 12px strip stays the hit target");
+    "pill is decoration; the whole grab strip stays the hit target");
 
   const hair = notesCssSrc.match(/#mapdivider::after\s*\{([^}]+)\}/);
   assert.ok(hair, "#mapdivider::after hairline present");
@@ -2697,8 +2697,13 @@ test("P2: CSS #mapdivider size/appearance inside 900px; outside only base hide",
 
   const desk = mediaBody.match(/(?:^|\n)\s*#mapdivider\s*\{([^}]+)\}/);
   assert.ok(desk, "#mapdivider sizing rule inside desktop media");
-  assert.match(desk[1], /height:\s*12px/, "12px grab inside 900px");
-  assert.match(desk[1], /margin:\s*-5px\s+0/, "negative margin grab expand inside 900px");
+  /* Thickness comes from --grab so the dock divider and both workspace
+     dividers can never drift apart (12px was too fine to hit with a mouse —
+     found in acceptance). The negative margin is derived from the same token
+     so the visible footprint stays 2px however --grab changes. */
+  assert.match(desk[1], /height:\s*var\(--grab\)/, "grab thickness from --grab");
+  assert.match(desk[1], /margin:\s*calc\(\(var\(--grab\)\s*-\s*2px\)\s*\/\s*-2\)\s+0/,
+    "negative margin derived from --grab, not a literal");
   assert.match(desk[1], /cursor:\s*row-resize/, "row-resize inside 900px");
   assert.match(desk[1], /touch-action:\s*none/, "touch-action inside 900px");
   assert.match(mediaBody, /body\.map-full\.map-dock\s+#mapdivider\s*\{[^}]*display:\s*block/,
@@ -3522,4 +3527,23 @@ test("P5a: #maprail is an announced landmark, not a bare labelled div", () => {
   assert.ok(tag, "#maprail present in index.html");
   assert.match(tag[0], /role="navigation"/, "rail is a navigation landmark");
   assert.match(tag[0], /aria-label="[^"]+"/, "landmark is named");
+});
+
+test("P5b: --grab is one token for all three dividers, comfortably mouse-sized", () => {
+  /* Three divider instances, two idioms: #mapdivider (dock) and .wsdivider on
+     the workspace's inbox|nav and nav|note boundaries. 12px was hard to point
+     at with a mouse; the token keeps them in step and the derived margins keep
+     the visible footprint at 2px so no layout moved. */
+  const tokens = readFileSync(join(__dirname, "../css/tokens.css"), "utf8");
+  const grab = tokens.match(/--grab:\s*([0-9]+)px/);
+  assert.ok(grab, "--grab token defined in tokens.css");
+  assert.ok(Number(grab[1]) >= 20,
+    `--grab is ${grab[1]}px; a mouse-pointable divider needs >= 20px`);
+
+  const ws = notesCssSrc.match(/(?:^|\n)\.wsdivider\s*\{([^}]+)\}/);
+  assert.ok(ws, ".wsdivider base rule present");
+  assert.match(ws[1], /width:\s*var\(--grab\)/, ".wsdivider width from --grab");
+  assert.match(ws[1], /margin:\s*0\s+calc\(\(var\(--grab\)\s*-\s*2px\)\s*\/\s*-2\)/,
+    ".wsdivider margin derived from --grab");
+  assert.doesNotMatch(ws[1], /width:\s*12px/, "no stale 12px literal");
 });
