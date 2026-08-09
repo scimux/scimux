@@ -1032,10 +1032,13 @@ function el(tag, attrs = {}){
   return node;
 }
 
-/* keyrow harness: assign innerHTML → materialise .permask child so scrollTop
-   snapshot/restore (and querySelector) work the same way as a real DOM. */
+/* keyrow harness: assign innerHTML → materialise .permask / .permmore children
+   so scrollTop snapshot/restore, the P2 measure pass, and querySelector work
+   the same way as a real DOM. _permMaskMetrics is overridable per test so the
+   suite can drive overflow vs no-overflow without a layout engine. */
 function makeKeyrow(){
   const node = el("div", { id: "keyrow" });
+  node._permMaskMetrics = { scrollHeight: 1000, clientHeight: 200 };
   let html = "";
   Object.defineProperty(node, "innerHTML", {
     configurable: true,
@@ -1044,12 +1047,20 @@ function makeKeyrow(){
       html = String(v);
       node.children = [];
       const m = html.match(/class="(permask(?:\s+clamped)?)"/);
-      if (!m) return;
-      const mask = el("div", { className: m[1] });
-      mask.scrollHeight = 1000;
-      mask.clientHeight = 200;
-      mask.scrollTop = 0;
-      node.appendChild(mask);
+      if (m){
+        const mask = el("div", { className: m[1] });
+        const met = node._permMaskMetrics || {};
+        mask.scrollHeight = met.scrollHeight ?? 1000;
+        mask.clientHeight = met.clientHeight ?? 200;
+        mask.scrollTop = 0;
+        node.appendChild(mask);
+      }
+      const moreTag = html.match(/<button\b[^>]*class="permmore"[^>]*>/);
+      if (moreTag){
+        const more = el("button", { className: "permmore" });
+        more.hidden = /\bhidden\b/.test(moreTag[0]);
+        node.appendChild(more);
+      }
     },
   });
   // seed empty so later assignments always go through the setter
@@ -1723,6 +1734,118 @@ test("expanded rebuild restores non-zero .permask scrollTop", async () => {
   assert.equal(after.scrollTop, 240, "scrollTop survives keyrow.innerHTML reassignment");
   ctx.feature.destroy();
 });
+
+/* ---------- P2: the approval row — reject colour + conditional "show all" ----------
+ * (a) .permbtn.reject must not shout --danger: declining is the safe branch;
+ *     --attn is the attention surface; --danger stays for delete/archive.
+ * (b) .permmore starts hidden and is revealed only when .permask overflows
+ *     vertically (horizontal overflow of a long single-line .permcode must not
+ *     unhide it). Case 8 is the existing expanded:true test above — stays green. */
+
+const baseCssSrc = readFileSync(join(__dirname, "../css/base.css"), "utf8");
+
+function rejectRuleBody(css){
+  /* Shared rule: .permbtn.reject, .permbtn.reject-always { … } */
+  const m = css.match(/\.permbtn\.reject\s*,\s*\.permbtn\.reject-always\s*\{([^}]+)\}/);
+  assert.ok(m, ".permbtn.reject, .permbtn.reject-always rule present");
+  return m[1];
+}
+
+function allowRuleBody(css){
+  const m = css.match(/\.permbtn\.allow\s*,\s*\.permbtn\.allow-always\s*\{([^}]+)\}/);
+  assert.ok(m, ".permbtn.allow, .permbtn.allow-always rule present");
+  return m[1];
+}
+
+test("P2 1: .permbtn.reject rule body uses --attn, not --danger", () => {
+  const body = rejectRuleBody(chatCssSrc);
+  assert.match(body, /border-color\s*:\s*var\(--attn\)/,
+    "reject border is the attention surface, not destructive red");
+  assert.doesNotMatch(body, /--danger/,
+    "declining a tool call is not delete/archive");
+  assert.doesNotMatch(body, /(?:^|[^-])color\s*:/,
+    "no color override — label inherits --ink like every other option");
+});
+
+test("P2 2: .permbtn.reject-always rule body uses --attn, not --danger", () => {
+  /* Same shared rule as case 1 — both selectors must land on the non-danger body. */
+  const body = rejectRuleBody(chatCssSrc);
+  assert.match(body, /border-color\s*:\s*var\(--attn\)/);
+  assert.doesNotMatch(body, /--danger/);
+  assert.doesNotMatch(body, /(?:^|[^-])color\s*:/);
+  assert.match(chatCssSrc, /\.permbtn\.reject-always/,
+    "reject-always still co-selects the shared rule");
+});
+
+test("P2 3: .permbtn.allow rule body is unchanged", () => {
+  const body = allowRuleBody(chatCssSrc);
+  assert.match(body, /border-color\s*:\s*var\(--attn\)/);
+  assert.doesNotMatch(body, /--danger/);
+  /* allow does not set a color override either — inherits --ink from .permbtn */
+  assert.doesNotMatch(body, /(?:^|[^-])color\s*:/);
+});
+
+test("P2 4: --danger still used by a delete/archive control elsewhere", () => {
+  /* Stripping red from reject must not orphan the token. */
+  const danger = baseCssSrc.match(/\.btn-plain\.danger\s*\{([^}]+)\}/);
+  assert.ok(danger, ".btn-plain.danger is a delete/archive control");
+  assert.match(danger[1], /color\s*:\s*var\(--danger\)/,
+    "--danger remains live for destructive UI");
+  assert.doesNotMatch(rejectRuleBody(chatCssSrc), /--danger/,
+    "approval reject no longer claims the destructive token");
+});
+
+test("P2 5: keyRowHTML expanded:false emits .permmore with hidden", () => {
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `echo hi`",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: false,
+  });
+  const more = html.match(/<button\b[^>]*class="permmore"[^>]*>/);
+  assert.ok(more, ".permmore is rendered when collapsed");
+  assert.match(more[0], /\bhidden\b/,
+    "starts hidden; the measure pass reveals only when the ask overflows");
+  assert.match(html, /show all/);
+});
+
+test("P2 6: measure pass keeps .permmore hidden when .permask does not overflow", async () => {
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload({
+      /* short single-line command — vertical height fits the clamp */
+      perm_title: "Execute `echo hi`",
+    }),
+  });
+  /* No vertical overflow: scrollHeight == clientHeight. A long *wide* line
+     would still look like this on the vertical axis (the whole point of the fix). */
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 48, clientHeight: 48 };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const more = ctx.roots.keyrow.querySelector(".permmore");
+  assert.ok(more, ".permmore is in the tree so the measure pass can toggle it");
+  assert.equal(more.hidden, true,
+    "single-line / non-overflowing ask must not offer a useless control");
+  ctx.feature.destroy();
+});
+
+test("P2 7: measure pass reveals .permmore when .permask overflows vertically", async () => {
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(), /* multi-line title; harness defaults overflow */
+  });
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 1000, clientHeight: 200 };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const more = ctx.roots.keyrow.querySelector(".permmore");
+  assert.ok(more, ".permmore present");
+  assert.equal(more.hidden, false,
+    "vertical overflow unhides show all after the keyrow write");
+  ctx.feature.destroy();
+});
+
+/* P2 8: expanded:true omits .permmore — covered by the existing test
+ * "keyRowHTML: never md() on perm_title…" (assert.doesNotMatch(open, /permmore/)). */
 
 /* ---------- the terminal peek is not part of the transcript ----------
  * peekText is a live tmux capture: while an agent animates a spinner it
