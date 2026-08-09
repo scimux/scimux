@@ -85,6 +85,7 @@
 
 import { esc as escDefault } from "./format.js";
 import { stopsOf as stopsOfDefault, stopLabel as stopLabelDefault } from "./lanes.js";
+import { focusAtEnd } from "./caret.js";
 
 /* ---------- public constants ---------- */
 
@@ -558,8 +559,14 @@ export function createSheetsFeature(deps = {}){
       titleTimer = null;
       const t = root("nc_title");
       if (!t) return;
-      if (typeof t.focus === "function") t.focus();
-      if (selectAll && typeof t.select === "function") t.select();
+      /* selectAll survives only for seedForkTitle — a machine-generated guess
+         the user is expected to replace wholesale (HIG select-all case). */
+      if (selectAll){
+        if (typeof t.focus === "function") t.focus();
+        if (typeof t.select === "function") t.select();
+        return;
+      }
+      focusAtEnd(t);
     }, 0);
   }
 

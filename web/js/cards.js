@@ -66,6 +66,7 @@ import {
   inLaneScope,
   visibleCardLists,
 } from "./map-model.js";
+import { focusAtEnd } from "./caret.js";
 
 export const CARD_TIME_SWAP_MS = 30000;
 
@@ -909,7 +910,10 @@ export function createCardsFeature(deps){
         invalidate();
         renderCards();
         const t = d.setTimeout || setTimeout;
-        t(() => doc?.querySelector?.(`[data-desc-input="${CSSRef.escape(id)}"]`)?.focus(), 0);
+        t(() => {
+          const input = doc?.querySelector?.(`[data-desc-input="${CSSRef.escape(id)}"]`);
+          if (input) focusAtEnd(input);
+        }, 0);
       });
       if (typeof summaryCleanup === "function") cleanups.push(summaryCleanup);
     }

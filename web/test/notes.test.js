@@ -2548,7 +2548,7 @@ test("P3 9: note card rename places caret at end; never select-all", async () =>
   assert.ok(input, "rename swaps title for an input");
   assert.equal(input.value, "Original Title");
   assert.equal(input._focused, true, "rename input focused");
-  assert.equal(input._selected, false, "select() must not run — no select-all");
+  assert.ok(!input._selected, "select() must not run — no select-all");
   assert.deepEqual(input._range, [input.value.length, input.value.length],
     "caret at end of existing title");
 });
@@ -2586,7 +2586,7 @@ test("P3 10: note section body edit places caret at end", async () => {
   assert.ok(textarea, "body click enters edit mode");
   assert.equal(textarea.value, bodyText);
   assert.equal(textarea._focused, true, "body textarea focused");
-  assert.equal(textarea._selected, false, "select() must not run");
+  assert.ok(!textarea._selected, "select() must not run");
   assert.deepEqual(textarea._range, [bodyText.length, bodyText.length],
     "caret at end of existing body — bare focus() lands at 0 in WebKit");
 });

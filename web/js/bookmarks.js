@@ -108,6 +108,7 @@
 import { esc as escDefault, md as mdDefault, fmtWhen as fmtWhenDefault } from "./format.js";
 import { hashStr as hashStrDefault } from "./lanes.js";
 import { sendableNodes } from "./map-model.js";
+import { focusAtEnd } from "./caret.js";
 
 /* ---------- public constants ---------- */
 
@@ -716,8 +717,12 @@ export function createBookmarksFeature(deps){
       if (typeof d.select === "function") d.select(tgt);
       if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
         d.setLevel(1);
+      /* Draft is already in storage (above) and select() has run
+         composer.onSelect → setPromptText, so #prompt holds the merged text
+         before we place the caret. focusAtEnd on empty content is a no-op
+         lookalike of bare focus. */
       const prompt = d.chatPrompt || (doc && doc.querySelector && doc.querySelector("#prompt"));
-      if (prompt && typeof prompt.focus === "function") prompt.focus();
+      if (prompt) focusAtEnd(prompt);
     };
     listEl.onclick = sendtoClickHandler;
     sendtoListWithHandler = listEl;

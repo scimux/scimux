@@ -64,6 +64,7 @@ import {
 import { createSheetsFeature } from "./sheets.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
+import { focusAtEnd } from "./caret.js";
 
 /* Rendering discipline (the port contract):
    1. The prompt bar and key row are singletons outside every render region —
@@ -1148,7 +1149,7 @@ function focusTitleEditorNow(id){
      open — focusing its (invisible) input would edit into the void */
   const input = document.querySelector(`${titleEditorRoot()}[data-title-input="${CSS.escape(id)}"]`)
     || document.querySelector(`[data-title-input="${CSS.escape(id)}"]`);
-  if (input){ input.focus(); input.select(); }
+  if (input) focusAtEnd(input);
 }
 function focusTitleEditor(id){ setTimeout(() => focusTitleEditorNow(id), 0); }
 function startTitleEdit(id, scope){

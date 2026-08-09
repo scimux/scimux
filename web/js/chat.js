@@ -78,6 +78,7 @@
 import { esc, md, fmtWhen, fmtBubbleTime, bubbleTitle } from "./format.js";
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod } from "./map-model.js";
+import { focusAtEnd } from "./caret.js";
 
 /* ---------- public constants ---------- */
 
@@ -972,9 +973,7 @@ export function createChatFeature(deps){
     renderChatHead();
     setTimeoutFn(() => {
       if (!chatdescinput) return;
-      chatdescinput.focus();
-      if (typeof chatdescinput.setSelectionRange === "function")
-        chatdescinput.setSelectionRange(chatdescinput.value.length, chatdescinput.value.length);
+      focusAtEnd(chatdescinput);
     }, 0);
   }
 
@@ -1563,8 +1562,7 @@ export function createChatFeature(deps){
     renderChatHead();
     setTimeoutFn(() => {
       if (!chatdescinput) return;
-      chatdescinput.focus();
-      if (typeof chatdescinput.select === "function") chatdescinput.select();
+      focusAtEnd(chatdescinput);
     }, 0);
   }
 

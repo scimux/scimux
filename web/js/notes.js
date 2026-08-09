@@ -111,6 +111,7 @@ import {
   captureNotesTouchStart as captureNotesTouchStartDefault,
   notesSwipeBackDecision as notesSwipeBackDecisionDefault,
 } from "./navigation.js";
+import { focusAtEnd } from "./caret.js";
 
 /* ---------- public constants ---------- */
 
@@ -1237,8 +1238,7 @@ export function createNotesFeature(deps){
       titleEl.parentNode.insertBefore(input, titleEl);
       titleEl.remove();
     }
-    if (typeof input.focus === "function") input.focus();
-    if (typeof input.select === "function") input.select();
+    focusAtEnd(input);
     let done = false;
     const finish = async (commit) => {
       if (done) return;
@@ -1351,7 +1351,7 @@ export function createNotesFeature(deps){
       ta.style.height = "auto";
       ta.style.height = (ta.scrollHeight + ta.offsetHeight - ta.clientHeight) + "px";
     };
-    if (typeof ta.focus === "function") ta.focus();
+    focusAtEnd(ta);
     grow();
     let cancelled = false;
     const onInput = () => {
