@@ -182,7 +182,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     border-right: none; border-bottom: 1px solid var(--hairline);
   }
   body.map-full.map-dock #chat { display: flex; flex: 1 1 auto; min-height: 0; }
-  #bookmarkspane { position: static; transform: none; transition: none; }
+  #bookmarkspane { position: static; transform: none; transition: none;
     box-shadow: none; display: none; width: 340px; flex: none;
     height: auto; border-left: 1px solid var(--hairline); }
   body.bookmarks-open #bookmarkspane { display: flex; }
