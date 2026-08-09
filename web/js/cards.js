@@ -400,25 +400,33 @@ export function createCardsFeature(deps){
     });
   }
 
+  /* Runs on both poll branches, including the 304 short-circuit that is
+     supposed to make an unchanged fleet nearly free — so it is driven by the
+     cards actually in the DOM, not by the fleet. The card's element id is
+     "card-" + the raw node id, so it round-trips without CSS.escape. */
+  const CARD_ID_PREFIX = "card-";
   function updateCardAges(animate = false){
-    const nodes = g("nodes", []) || [];
-    for (const n of nodes){
-      const el = doc?.getElementById?.("card-" + CSSRef.escape(n.id).replace(/\\/g, ""));
-      const card = doc?.getElementById?.("card-" + n.id) || el;
-      if (!card) continue;
+    const cards = list?.querySelectorAll?.(".card");
+    if (!cards || !cards.length) return;
+    const byId = new Map((g("nodes", []) || []).map(n => [n.id, n]));
+    for (const card of cards){
+      const n = byId.get(String(card.id || "").slice(CARD_ID_PREFIX.length));
+      if (!n) continue;
       const time = card.querySelector?.(".time");
-      if (time) {
-        const next = cardTimeText(n, cardTimeFlip, ageFn);
-        if (time.textContent !== next) {
-          time.textContent = next;
-          if (animate) {
-            time.classList.remove("roll-dn", "roll-up");
-            void time.offsetWidth;
-            time.classList.add("roll-dn");
-          }
+      if (!time) continue;
+      const next = cardTimeText(n, cardTimeFlip, ageFn);
+      if (time.textContent !== next) {
+        time.textContent = next;
+        if (animate) {
+          time.classList.remove("roll-dn", "roll-up");
+          void time.offsetWidth;
+          time.classList.add("roll-dn");
         }
-        time.title = cardTimeTitle(n, ageFn);
       }
+      /* Guarded like the text above it: an attribute write per card per tick
+         is style invalidation for a value that changes once a minute. */
+      const title = cardTimeTitle(n, ageFn);
+      if (time.title !== title) time.title = title;
     }
   }
 
