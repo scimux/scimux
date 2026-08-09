@@ -730,6 +730,8 @@ test("packCardsSig round-trips both halves through the one app-level slot", () =
   assert.deepEqual(splitCardsSig(packed), { shape: "SHAPE", full: "FULL" });
   assert.deepEqual(splitCardsSig(""), { shape: "", full: "" },
     "a cleared slot must read as no shape and no full — never as a match");
+  assert.deepEqual(splitCardsSig("legacy-unpacked"), { shape: "", full: "legacy-unpacked" },
+    "an unpacked value has no shape half — it must never be mistaken for one");
   assert.notEqual(splitCardsSig("").shape, splitCardsSig(packed).shape);
 });
 
@@ -752,6 +754,15 @@ test("reorderPlan lifts one card to the front with a single insertBefore", () =>
   /* The common case: an agent starts a turn, livenessTier promotes it. */
   const plan = reorderPlan(["a", "b", "c", "d"], ["c", "a", "b", "d"]);
   assert.deepEqual(plan, [{ key: "c", before: "a" }]);
+});
+
+test("reorderPlan tolerates the id-less adoptable cards sharing a key", () => {
+  /* Adoptable tmux sessions render as .card with no id, so several children
+     can key as "". permuteSlots never moves them, so they hold the same slots
+     in both lists — and the planner must read that as "already in place"
+     rather than shuffling one arbitrary twin. */
+  const plan = reorderPlan(["", "", "card-a", "card-b"], ["", "", "card-b", "card-a"]);
+  assert.deepEqual(plan, [{ key: "card-b", before: "card-a" }]);
 });
 
 test("reorderPlan's moves actually produce the desired order", () => {
@@ -786,8 +797,15 @@ test("permuteSlots reorders one block and leaves every other child alone", () =>
   assert.deepEqual(permuteSlots(current, ["card-b", "card-a"]),
     ["attnfold", "card-b", "card-a", "adopt-x", "card-c"]);
   assert.deepEqual(permuteSlots(current, []), current, "an empty block changes nothing");
-  assert.deepEqual(permuteSlots(current, ["card-a", "card-zz"]), current,
-    "a block whose members are not all present is left untouched");
+  /* A block that does not line up with its slots would otherwise write a key
+     into a slot that is not its own — inventing a child that is not there, or
+     dropping one that is. */
+  assert.deepEqual(permuteSlots(["x", "card-a", "card-b"], ["card-zz", "card-a"]),
+    ["x", "card-a", "card-b"],
+    "a member that is not in the DOM must not displace one that is");
+  assert.deepEqual(permuteSlots(["x", "card-a", "card-b"], ["card-b"]),
+    ["x", "card-a", "card-b"],
+    "a block shorter than its slots must not leave a hole");
 });
 
 test("cardStatusHTML is the one source the build and the patch share", () => {
@@ -807,7 +825,7 @@ test("cardStatusHTML is the one source the build and the patch share", () => {
 
 /* A fake #cardlist that models the parts a patch touches: children in order,
    a classList per card, a .status and a .time, and insertBefore as a move. */
-function fakeCardList(ids){
+function fakeCardList(ids, leadIds = []){
   const mk = id => {
     const classes = new Set(["card", "idle"]);
     const status = { innerHTML: "" };
@@ -823,13 +841,18 @@ function fakeCardList(ids){
       _classes: classes, _status: status, _time: time,
     };
   };
-  const children = ids.map(mk);
+  /* Children that are not cards — the attention-fold button, an adoptable
+     session, the empty state. They must come back out where they went in. */
+  const leads = leadIds.map(id => ({ id, querySelector: () => null }));
+  const children = leads.concat(ids.map(mk));
   const moves = [];
   return {
     innerHTML: "",
     children,
     moves,
-    querySelectorAll(sel){ return sel === ".card" ? children.slice() : []; },
+    querySelectorAll(sel){
+      return sel === ".card" ? children.filter(c => !leads.includes(c)) : [];
+    },
     insertBefore(el, before){
       moves.push([el.id, before ? before.id : null]);
       const at = children.indexOf(el);
@@ -843,8 +866,9 @@ function fakeCardList(ids){
   };
 }
 
-function patchFeature(nodes, list){
+function patchFeature(nodes, list, opts = {}){
   let cardsSig = "", cardTab = "current";
+  let attnFoldOpen = !!opts.attnFoldOpen;
   return createCardsFeature({
     roots: { tabs: { innerHTML: "", querySelectorAll: () => [], addEventListener(){}, removeEventListener(){} }, list },
     document: { title: "", getElementById: () => null, querySelector: () => null },
@@ -853,9 +877,9 @@ function patchFeature(nodes, list){
     sel: () => "",
     cardTab: () => cardTab,
     setCardTab: v => { cardTab = v; },
-    laneFilter: () => "",
-    attnFoldOpen: () => false,
-    setAttnFoldOpen: () => {},
+    laneFilter: () => opts.laneFilter || "",
+    attnFoldOpen: () => attnFoldOpen,
+    setAttnFoldOpen: v => { attnFoldOpen = v; },
     expanded: () => new Set(),
     actionCard: () => "",
     setActionCard: () => {},
@@ -893,8 +917,9 @@ test("a liveness flip patches the cards in place instead of rebuilding them", ()
   const built = list.innerHTML;
   assert.match(built, /id="card-a"/, "the first render still builds the list");
 
-  /* Hand the feature the DOM that render would have produced. */
-  const dom = fakeCardList(["a", "b"]);
+  /* Hand the feature the DOM that render would have produced, with one child
+     that is not a card sitting in front of them. */
+  const dom = fakeCardList(["a", "b"], ["attnfold"]);
   Object.defineProperty(list, "children", { get: () => dom.children, configurable: true });
   list.querySelectorAll = sel => dom.querySelectorAll(sel);
   list.insertBefore = (el, before) => dom.insertBefore(el, before);
@@ -915,9 +940,45 @@ test("a liveness flip patches the cards in place instead of rebuilding them", ()
   assert.ok(byId["card-a"]._classes.has("idle"), "the quiet card keeps its own");
   assert.match(byId["card-b"]._status.innerHTML, /workdot/, "and its status line is repainted");
   assert.match(byId["card-b"]._status.innerHTML, /running/);
-  assert.deepEqual(dom.children.map(c => c.id), ["card-b", "card-a"],
-    "livenessTier promotes it, so the patch must move it too");
+  assert.deepEqual(dom.children.map(c => c.id), ["attnfold", "card-b", "card-a"],
+    "livenessTier promotes it, so the patch must move it — around the fold button, not over it");
   assert.deepEqual(dom.moves, [["card-b", "card-a"]], "with one insertBefore, not a re-append of each");
+  assert.equal(byId["card-b"]._time.textContent, "you A2",
+    "the patch still owes the list its age refresh");
+});
+
+test("the attention fold is its own tiered block and reorders on its own", () => {
+  /* With a journey filter on, out-of-scope cards that need input ride in the
+     fold above the list. Both blocks are ordered, both can move under a patch,
+     and neither may reach into the other's slots. */
+  const nodes = [
+    { id: "in", title: "In", description: "", lane_id: "l1", live: "quiet", model: "m", last_interaction: 9 },
+    { id: "f1", title: "F1", description: "", lane_id: "l2", live: "quiet", attention: "approval", model: "m", last_interaction: 5, last_activity: 5 },
+    { id: "f2", title: "F2", description: "", lane_id: "l2", live: "quiet", attention: "approval", model: "m", last_interaction: 4, last_activity: 4 },
+  ];
+  const list = fakeCardList([]);
+  const feature = patchFeature(nodes, list, { laneFilter: "l1", attnFoldOpen: true });
+  feature.render();
+  assert.match(list.innerHTML, /data-attnfold/, "the fold button is built");
+
+  const dom = fakeCardList(["f1", "f2", "in"], []);
+  dom.children.splice(0, 0, { id: "attnfold", querySelector: () => null });
+  Object.defineProperty(list, "children", { get: () => dom.children, configurable: true });
+  list.querySelectorAll = sel => (sel === ".card" ? dom.children.filter(c => c.id !== "attnfold") : []);
+  list.insertBefore = (el, before) => dom.insertBefore(el, before);
+  let writes = 0;
+  const built = list.innerHTML;
+  Object.defineProperty(list, "innerHTML", {
+    configurable: true, get(){ return built; }, set(){ writes++; },
+  });
+
+  /* f2 answers more recently than f1 — same tier, so recency reorders them. */
+  nodes[2].last_interaction = 7;
+  feature.render();
+
+  assert.equal(writes, 0, "recency inside a tier is not a shape change");
+  assert.deepEqual(dom.children.map(c => c.id), ["attnfold", "card-f2", "card-f1", "card-in"],
+    "the fold block reorders and the main card keeps its slot");
 });
 
 test("a shape change still rebuilds, and a settled fleet still only ages", () => {

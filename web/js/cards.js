@@ -19,6 +19,9 @@
  *   - HTML into #cardtabs / #cardlist
  *   - document.title attention prefix
  *   - age textContent refresh on signature equality
+ *   - in-place state class / status line / order patch when only liveness moved
+ *     (cardShapeSignature unchanged): no HTML is parsed and no card element is
+ *     replaced, so editors, thumbnails and scroll survive the 2s poll
  *   - uiMutate pin/unpin/arch/unarch/pin-order; PATCH description+lane; DELETE node
  *   - callbacks: exitThread, openAdopt, selectNode, setLevel, setLaneFilter,
  *     renderChatHead, renderMap, updateLocalNode, scheduleTick
@@ -106,6 +109,19 @@ export function cardTimeHTML(n, flip = 0, { escape = esc, ageFn = ageText } = {}
   return `<span class="time" title="${escape(cardTimeTitle(n, ageFn))}">${escape(txt)}</span>`;
 }
 
+/* Every token cardState can put on a card. The patch clears all of them before
+   setting the current one, so the list must stay complete. */
+export const CARD_STATES = ["closed", "attention", "working", "dead", "idle"];
+
+/* The one volatile line of a card: the work dot and the status text, both
+   derived from mechanical liveness. cardHTML emits it at build time and the
+   patch writes it back on a liveness flip — same function, so the two can
+   never disagree about what the card should say. */
+export function cardStatusHTML(n, flip = 0, deps = {}){
+  const dot = cardState(n) === "working" ? '<span class="workdot"></span>' : "";
+  return `${dot}<span class="st">${cardMetaHTML(n, flip, deps)}</span>`;
+}
+
 export function cardMetaHTML(n, flip = 0, deps = {}){
   const escape = deps.escape || esc;
   const ageFn = deps.ageFn || ageText;
@@ -127,22 +143,18 @@ export function pinnedLiveCount(pinned, nodes){
   return (pinned || []).filter(id => byId.has(id)).length;
 }
 
-export function computeCardsSignature({
-  list, foldList, unadopted, sel, expanded, cardTab, laneFilter,
+/* Everything outside the cards themselves. Shared by both signatures so the
+   two can never drift apart on a field only one of them remembers. */
+function cardsSignatureTail({
+  unadopted, sel, expanded, cardTab, laneFilter, foldLen,
   attnFoldOpen, bookmarksLen, lanes, pinned, actionCard, editingDesc, editingTitle,
 }){
-  const main = list || [];
-  const fold = foldList || [];
-  return JSON.stringify(main.concat(fold).map(n => [
-    n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention,
-    n.model, n.effort, !!n.last_interaction,
-  ]))
-    + "|" + JSON.stringify(unadopted || [])
+  return "|" + JSON.stringify(unadopted || [])
     + "|" + (sel || "")
     + "|" + [...(expanded || [])].join(",")
     + "|" + cardTab
     + "|" + laneFilter
-    + "|" + fold.length
+    + "|" + foldLen
     + "|" + attnFoldOpen
     + "|" + (bookmarksLen || 0)
     + "|" + JSON.stringify(lanes || [])
@@ -152,10 +164,99 @@ export function computeCardsSignature({
     + "|" + editingTitle;
 }
 
+export function computeCardsSignature(args){
+  const main = args.list || [];
+  const fold = args.foldList || [];
+  return JSON.stringify(main.concat(fold).map(n => [
+    n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention,
+    n.model, n.effort, !!n.last_interaction,
+  ])) + cardsSignatureTail({ ...args, foldLen: fold.length });
+}
+
+/* The same signature with the two volatile things removed: each card's
+   mechanical liveness, and the order livenessTier derives from it. What is
+   left is what the card's HTML actually is — so when only this is unchanged,
+   the DOM already holds every card and the render can patch instead of
+   rebuild. Attention stays in: it moves a card between the list and the
+   attention fold, which is structure, and it is a human-paced event anyway. */
+export function cardShapeSignature(args){
+  const main = args.list || [];
+  const fold = args.foldList || [];
+  const rows = main.concat(fold).map(n => [
+    n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.attention,
+    n.model, n.effort, !!n.last_interaction,
+  ]);
+  rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  return JSON.stringify(rows) + cardsSignatureTail({ ...args, foldLen: fold.length });
+}
+
+/* app.js clears cardsSig directly in a dozen places to force a rebuild. The
+   shape half therefore rides inside the same string rather than in a second
+   slot those clears would miss. U+0001 cannot occur in either half (both are
+   JSON plus printable separators). */
+const CARDS_SIG_SEP = "\u0001";
+
+export function packCardsSig(shapeSig, sig){
+  return shapeSig + CARDS_SIG_SEP + sig;
+}
+
+export function splitCardsSig(packed){
+  const s = packed || "";
+  const at = s.indexOf(CARDS_SIG_SEP);
+  if (at < 0) return { shape: "", full: s };
+  return { shape: s.slice(0, at), full: s.slice(at + 1) };
+}
+
 export function cardsRenderDecision(sig, cardsSig, pinDragging){
   if (pinDragging) return "skip";
   if (sig === cardsSig) return "ages";
   return "rebuild";
+}
+
+export function cardsRenderPlan({ sig, cardsSig, shapeSig, cardsShapeSig, pinDragging } = {}){
+  if (pinDragging) return "skip";
+  if (sig === cardsSig) return "ages";
+  /* An empty stored shape means nothing has been rendered (or something
+     invalidated); there is no DOM to patch, so it can never match. */
+  if (shapeSig && shapeSig === cardsShapeSig) return "patch";
+  return "rebuild";
+}
+
+/* ---------- in-place reordering ---------- */
+
+/* Minimal insertBefore plan turning `current` into `desired`. Each entry is
+   "move key in front of before" (before === null → append). Emits nothing when
+   the order already holds, and one move for the ordinary case of a single card
+   being promoted or demoted a tier. */
+export function reorderPlan(current, desired){
+  const cur = (current || []).slice();
+  const want = desired || [];
+  const plan = [];
+  for (let i = 0; i < want.length; i++){
+    const key = want[i];
+    if (cur[i] === key) continue;
+    const before = i < cur.length ? cur[i] : null;
+    const at = cur.indexOf(key);
+    if (at >= 0) cur.splice(at, 1);
+    cur.splice(i, 0, key);
+    plan.push({ key, before });
+  }
+  return plan;
+}
+
+/* Rewrite only the slots `order`'s members already occupy, leaving every other
+   child in place. #cardlist also holds the attention-fold button, adoptable
+   sessions and the empty state; those are structure, so under a patch they
+   have not moved and must not be touched. A block whose members are not all
+   present is left alone rather than guessed at. */
+export function permuteSlots(current, order){
+  const cur = current || [];
+  const want = order || [];
+  const set = new Set(want);
+  const slots = cur.reduce((a, k) => a + (set.has(k) ? 1 : 0), 0);
+  if (slots !== want.length) return cur.slice();
+  let i = 0;
+  return cur.map(k => set.has(k) ? want[i++] : k);
 }
 
 /* Mirrors the tabList/inScope filtering used for badges (not fold/adoptable). */
@@ -354,7 +455,7 @@ export function createCardsFeature(deps){
         ${pinned ? `<span class="pinflag" title="pinned" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}
         <button class="chev" data-x="${escape(n.id)}" aria-label="summary">&#8250;</button>
       </div>
-      <div class="status">${cardState(n) === "working" ? '<span class="workdot"></span>' : ""}<span class="st">${cardMetaHTML(n, flip, { escape, ageFn, statusText })}</span></div>
+      <div class="status">${cardStatusHTML(n, flip, { escape, ageFn, statusText })}</div>
       ${!n.lane_id ? `<div class="lanebox" data-card-lane="${escape(n.id)}">
         <div class="lanepick">
           <span class="laneswatch"></span>
@@ -430,6 +531,45 @@ export function createCardsFeature(deps){
     }
   }
 
+  /* Repaint the volatile half of a list the DOM already holds: each card's
+     state class and status line, then the order those states imply. No HTML is
+     parsed, no element is destroyed — so the open editors, the loaded
+     thumbnails and the scroll position all survive untouched, and
+     withCardEditsPreserved has nothing to put back. */
+  function patchCards(cardArr, foldList){
+    if (!list) return;
+    const byId = new Map([...(foldList || []), ...(cardArr || [])].map(n => [n.id, n]));
+    const cards = list.querySelectorAll?.(".card") || [];
+    for (const el of cards){
+      const n = byId.get(String(el.id || "").slice(CARD_ID_PREFIX.length));
+      if (!n) continue;
+      const state = cardState(n);
+      for (const s of CARD_STATES) if (s !== state) el.classList?.remove?.(s);
+      el.classList?.add?.(state);
+      const status = el.querySelector?.(".status");
+      if (!status) continue;
+      const next = cardStatusHTML(n, cardTimeFlip, { escape, ageFn, statusText });
+      if (status.innerHTML !== next) status.innerHTML = next;
+    }
+    /* Every child, not just the cards: the fold button and the empty state
+       hold slots too. Adoptable sessions are cards with no id, so several can
+       key as "" — permuteSlots never moves them, which leaves them in the same
+       slots on both sides and reorderPlan reads that as already in place. */
+    const children = Array.from(list.children || []);
+    const current = children.map(el => el.id || "");
+    const byKey = new Map(children.map(el => [el.id || "", el]));
+    const keys = arr => (arr || []).map(n => CARD_ID_PREFIX + n.id);
+    /* The fold cards and the main cards are two independently tiered blocks;
+       everything else in #cardlist is structure and stays in its slot. */
+    let desired = permuteSlots(current, keys(foldList));
+    desired = permuteSlots(desired, keys(cardArr));
+    for (const mv of reorderPlan(current, desired)){
+      const el = byKey.get(mv.key);
+      if (el) list.insertBefore?.(el, (mv.before && byKey.get(mv.before)) || null);
+    }
+    updateCardAges();
+  }
+
   function renderCards(){
     if (pinDragging) return;
     let cardTab = g("cardTab", "current");
@@ -465,10 +605,23 @@ export function createCardsFeature(deps){
       editingDesc: g("editingDesc", ""),
       editingTitle: g("editingTitle", ""),
     });
-    const cardsSig = g("cardsSig", "");
-    const decision = cardsRenderDecision(sig, cardsSig, false);
+    const shapeSig = cardShapeSignature({
+      list: cardArr, foldList, unadopted, sel, expanded, cardTab, laneFilter,
+      attnFoldOpen,
+      bookmarksLen: (g("bookmarks", []) || []).length,
+      lanes: g("lanes", []),
+      pinned,
+      actionCard: g("actionCard", ""),
+      editingDesc: g("editingDesc", ""),
+      editingTitle: g("editingTitle", ""),
+    });
+    const prev = splitCardsSig(g("cardsSig", ""));
+    const decision = cardsRenderPlan({
+      sig, cardsSig: prev.full, shapeSig, cardsShapeSig: prev.shape, pinDragging: false,
+    });
     if (decision === "ages"){ updateCardAges(); return; }
-    set("cardsSig", sig);
+    set("cardsSig", packCardsSig(shapeSig, sig));
+    if (decision === "patch"){ patchCards(cardArr, foldList); return; }
     renderCardTabs();
     const adoptCards = adoptCardsHTML(unadopted, { cardTab, laneFilter, escape });
     const foldHtml = !foldList.length ? "" : (
