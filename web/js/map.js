@@ -1011,18 +1011,29 @@ export function createMapFeature(deps){
   function storeSet(key, val){ if (storage) storage.setItem(key, val); }
   function storeRemove(key){ if (storage) storage.removeItem(key); }
 
-  function saveMapFold(){
+  /* What was last written, so an unchanged fold set costs no storage write.
+     localStorage.setItem is synchronous main-thread I/O and this runs on the
+     render path, ahead of the signature guard, on every poll. */
+  let foldWritten = null, foldKnownWritten = null;
+
+  /* `model` is the caller's lane model. The render path already holds one;
+     rebuilding it here is a second O(fleet) pass per tick (a third when a
+     focused lane forces the second call). Omitted only by the handful of
+     interaction paths that have none. */
+  function saveMapFold(model){
     /* new journeys default folded (mapFoldKnown tracks every lane ever seen;
        mapFold records only the user's explicit open/closed choices). Prune lanes
        that no longer exist so a recreated id starts folded again. */
     if (uiLoaded() && (g("nodes", []) || []).length){
-      const live = new Set(lm().lanes.map(l => l.id));
+      const live = new Set((model || lm()).lanes.map(l => l.id));
       const next = applyNewLaneFolds(mapFold, mapFoldKnown, live);
       mapFold = next.mapFold;
       mapFoldKnown = next.mapFoldKnown;
     }
-    storeSet(MAP_FOLD_KEY, JSON.stringify([...mapFold]));
-    storeSet(MAP_FOLD_KNOWN_KEY, JSON.stringify([...mapFoldKnown]));
+    const fold = JSON.stringify([...mapFold]);
+    if (fold !== foldWritten){ storeSet(MAP_FOLD_KEY, fold); foldWritten = fold; }
+    const known = JSON.stringify([...mapFoldKnown]);
+    if (known !== foldKnownWritten){ storeSet(MAP_FOLD_KNOWN_KEY, known); foldKnownWritten = known; }
   }
 
   function setMapSel(id, key, stopTime){
@@ -1527,10 +1538,10 @@ export function createMapFeature(deps){
     if (mapFull && isDesktop()) return renderWallMap(model, grp, inGroup, served, stations, focusLane);
 
     let blocks = buildStackBlocks(model.lanes, stations, { served, inGroup });
-    saveMapFold();
+    saveMapFold(model);
     if (focusLane && mapFold.has(focusLane)){
       mapFold = unfoldFocusLane(mapFold, focusLane);
-      saveMapFold();
+      saveMapFold(model);
     }
 
     const sig = stackMapSignature(blocks, {

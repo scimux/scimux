@@ -3573,9 +3573,11 @@ test("the wall's skip path patches volatile state instead of returning blind", (
  * localStorage writes of byte-identical values. */
 
 test("an unchanged fold set costs no storage write and no second lane model", () => {
+  // Seeded with no known lanes, so "L" can only appear if the reconciliation
+  // actually ran — seeding it here would make the last assertion vacuous.
   const storage = memoryStorage({
     [MAP_FOLD_KEY]: JSON.stringify([]),
-    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify([]),
   });
   let writes = 0;
   const rawSet = storage.setItem.bind(storage);
@@ -3614,7 +3616,9 @@ test("an unchanged fold set costs no storage write and no second lane model", ()
 
   // The reconciliation itself must still happen — a lane the user has never
   // seen defaults to folded, and that has to land before the signature reads it.
-  assert.equal(JSON.parse(storage.getItem(MAP_FOLD_KNOWN_KEY)).includes("L"), true);
+  assert.deepEqual(JSON.parse(storage.getItem(MAP_FOLD_KNOWN_KEY)), ["L"],
+    "an unseen journey must be recorded, or it would unfold itself every session");
+  assert.ok(afterFirst > 0, "the first render still has to persist that reconciliation");
 });
 
 test("saveMapFold reuses the caller's lane model on the render path", () => {
