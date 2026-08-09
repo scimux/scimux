@@ -3564,3 +3564,64 @@ test("the wall's skip path patches volatile state instead of returning blind", (
   assert.match(skip, /wallVol(atile)? *= *wallVolatile\(/,
     "a rebuild must record the frame the next patch diffs against");
 });
+
+/* ---------- poll-path cost: reconcile without paying for it ----------
+ * saveMapFold reconciles fold state (new journeys default folded, deleted
+ * lanes are pruned) and must keep running before the signature — the
+ * signature reads mapFold. What must not run every tick is its *cost*: a
+ * second full lane-model build over the whole fleet, and two synchronous
+ * localStorage writes of byte-identical values. */
+
+test("an unchanged fold set costs no storage write and no second lane model", () => {
+  const storage = memoryStorage({
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+  });
+  let writes = 0;
+  const rawSet = storage.setItem.bind(storage);
+  storage.setItem = (k, v) => { writes++; rawSet(k, v); };
+  let models = 0;
+  const feature = createMapFeature({
+    roots: { mapwrap: fakeEl("mapwrap"), maptoolbar: fakeEl("tb"), lanechips: fakeEl("chips") },
+    document: { body: { classList: { contains: () => false, toggle(){}, add(){} } }, querySelector: () => null },
+    storage,
+    isDesktop: () => false,
+    mapOpen: () => true,
+    level: () => 3,
+    nodes: () => [{
+      id: "a", title: "A", description: "", agent: "claude", model: "m", effort: "",
+      lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+      created_at: "2026-01-01T00:00:00Z", stops: [],
+    }],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => {
+      models++;
+      return { lanes: [{ id: "L", name: "Lane" }], color: () => "#00f", name: () => "Lane", byId: {} };
+    },
+    agentLogo: () => "",
+  });
+
+  feature.render();
+  assert.equal(models, 1, "one lane model per render — renderMap already built one");
+  const afterFirst = writes;
+  feature.render();
+  feature.render();
+  assert.equal(writes, afterFirst,
+    "an unchanged fold set must not write localStorage on every poll");
+  assert.equal(models, 3, "still exactly one lane model per render");
+
+  // The reconciliation itself must still happen — a lane the user has never
+  // seen defaults to folded, and that has to land before the signature reads it.
+  assert.equal(JSON.parse(storage.getItem(MAP_FOLD_KNOWN_KEY)).includes("L"), true);
+});
+
+test("saveMapFold reuses the caller's lane model on the render path", () => {
+  const body = mapSrc.slice(mapSrc.indexOf("function saveMapFold("));
+  assert.match(body.slice(0, body.indexOf("\n  }")), /saveMapFold\(model\)|\bmodel \|\| lm\(\)/,
+    "the render path already holds a lane model; building a second is O(fleet) per tick");
+  const render = mapSrc.slice(mapSrc.indexOf("let blocks = buildStackBlocks("));
+  assert.doesNotMatch(render.slice(0, render.indexOf("const sig = stackMapSignature")), /saveMapFold\(\)/,
+    "the per-tick calls must pass the model they already have");
+});
