@@ -225,11 +225,11 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   }
   /* P2 dock divider — same control as .wsdivider, rotated 90°:
      vertical drag (clientY), row-resize, horizontal pill, one boundary.
-     12px grab + margin:-5px 0 (not 44px — dock is desktop/iPad-only and the
-     repo already settled this at 12px for the same class of control).
+     grab strip from --grab, with all but 2px of it cancelled by the derived
+     negative margin (same arithmetic as .wsdivider, on the other axis).
      Base hide is global (above); reveal only under body.map-full.map-dock. */
   #mapdivider {
-    flex: none; height: 12px; margin: -5px 0; padding: 0;
+    flex: none; height: var(--grab); margin: calc((var(--grab) - 2px) / -2) 0; padding: 0;
     cursor: row-resize; touch-action: none; position: relative; z-index: 2;
     width: auto; align-self: stretch; background: transparent; flex-shrink: 0;
   }
@@ -332,11 +332,13 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   color: var(--dim); display: flex; align-items: center; justify-content: center; font-size: 17px; }
 #wsback:active, #wsclose:active { background: var(--code-bg); }
 #wszones { flex: 1; min-height: 0; display: flex; }
-/* Zone dividers (Phase 2): 1px hairline inside a ~12px grab; hidden on phone
-   where the workspace is one-zone-at-a-time. Custom widths live on #wszones
+/* Zone dividers (Phase 2): 1px hairline inside a --grab-wide grab strip;
+   hidden on phone where the workspace is one-zone-at-a-time. The negative
+   margin cancels all but 2px of the strip, so the zones keep their old
+   spacing however wide the grab gets. Custom widths live on #wszones
    as --wsinbox-w / --wsnav-w (localStorage, never the poll). */
 .wsdivider {
-  display: none; flex: none; width: 12px; margin: 0 -5px; padding: 0;
+  display: none; flex: none; width: var(--grab); margin: 0 calc((var(--grab) - 2px) / -2); padding: 0;
   cursor: col-resize; touch-action: none; position: relative; z-index: 2;
   align-self: stretch; background: transparent; flex-shrink: 0;
 }

@@ -45,6 +45,14 @@
      tappable back control on the narrowest phone; 60px cap stops it wasting
      width on iPad/Pro Max. Baked into each pane's width so gaps never pile up. */
   --peek:      clamp(44px, 12%, 60px);
+  /* grab: how thick a drag divider is to the pointer. The dividers *look* like
+     a 1px hairline with a small pill; this is the invisible strip around it
+     that catches the press. The old 12px was a guess and acceptance found it:
+     hard to hit with a mouse. One token because there are three dividers in
+     two idioms (#mapdivider is horizontal, .wsdivider vertical) and they must
+     stay in step. Each rule cancels all but 2px of it with a derived negative
+     margin, so growing this number costs no layout. */
+  --grab:      20px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
