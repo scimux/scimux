@@ -58,6 +58,7 @@ import { createNotesFeature } from "./notes.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
   makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
+  mapJumpReturnKind,
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
@@ -690,8 +691,12 @@ const mapFeature = createMapFeature({
   uiMutate,
   selectNode: (id, how) => {
     /* a wall-map "Open chat" is a jump: remember the map so #chatback leads
-       back into it (UI review item 18) */
-    if (how === "jump") setReturnContext(RETURN_MAP, { node: id });
+       back into it (UI review item 18) — but only when the map actually left.
+       Under the dock it keeps the top half, so a "Return to Map" control would
+       point at what the user is already looking at (P5a). */
+    const docked = isDesktop() && mapFeature.isFull() && mapFeature.isDock();
+    const kind = mapJumpReturnKind({ how, docked });
+    if (kind) setReturnContext(kind, { node: id });
     select(id, how);
   },
   setLevel,

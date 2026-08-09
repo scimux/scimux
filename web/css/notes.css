@@ -177,6 +177,13 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     border-right: none; animation: mapfade .26s ease; }
   body.map-full #cards, body.map-full #chat,
   body.map-full #bookmarkspane, body.map-full #bookmarkflags { display: none; }
+  /* P5a: `body.bookmarks-open #bookmarkspane { display: flex }` below has the
+     same specificity as the hide above, so source order alone kept the pane
+     out — and it lost, sliding the pane in over the wall. Make the full-screen
+     hide explicit so order can never decide it, and hide the chevron that
+     opens it: a control whose surface cannot appear is a dead control. */
+  body.map-full.bookmarks-open #bookmarkspane { display: none; }
+  body.map-full #bookmarksbtn { display: none; }
   /* P1 dock shell: wall map on top + existing #chat below. No DOM reparent —
      #map and #chat are already siblings in #app; this is a flex-direction
      change and an un-hide. --dockmap defaults to 55%; P2's divider writes it.

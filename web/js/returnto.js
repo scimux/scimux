@@ -47,6 +47,18 @@ export function makeReturnContext(kind, payload){
   return { kind, ...(payload || {}) };
 }
 
+/* Whether a wall-map selection should remember the map at all.
+
+   A return control only earns its place when the origin actually left the
+   screen. Under the dock (body.map-full.map-dock) the map keeps the top half,
+   so "Return to Map" would point at what the user is already looking at — and
+   because #chatback.hasreturn outspecifies .backbtn's desktop display:none, it
+   re-appears there rather than staying hidden. A dock open is not a jump; the
+   user never went anywhere. */
+export function mapJumpReturnKind({ how, docked } = {}){
+  return how === "jump" && !docked ? RETURN_MAP : null;
+}
+
 /* The destination's name, never a generic "Back". */
 export function returnLabel(ctx){
   if (!ctx || !ctx.kind) return DEFAULT_BACK_LABEL;
