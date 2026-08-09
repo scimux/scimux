@@ -1888,8 +1888,15 @@ function loadingMsgsRuleBody(css){
   return m[1];
 }
 
+/* nearBottom alone cannot see the symptom P1 exists to fix: its
+   scrollHeight - scrollTop - clientHeight goes *negative* when the reader is
+   stranded past the end, which reads as "well within the fence". A reader
+   marooned 5000px below the last bubble would satisfy it. So bound the offset
+   from above as well — at the bottom means at the bottom, not beyond it. */
 function atBottom(el){
-  return nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight, SCROLL_NEAR_BOTTOM_PX);
+  const max = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
+  return nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight, SCROLL_NEAR_BOTTOM_PX)
+    && (el.scrollTop || 0) <= max;
 }
 
 test("P1 A1: base #msgs has no -webkit-overflow-scrolling", () => {
