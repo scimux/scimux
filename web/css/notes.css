@@ -150,8 +150,12 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 #mapdivider { display: none; }
 /* The dock's close control: hide-global / reveal-scoped, same as #mapdivider
    and #maptoolbar — outside the dock there is no pop-out to close, and
-   display:none is what keeps it out of the tab order. */
-#dockclose { display: none; }
+   display:none is what keeps it out of the tab order.
+   Scoped to #chathead rather than a bare #dockclose: chat.css gives
+   `#chathead .headtoggle` display flex, and an id-plus-class selector outranks
+   a lone id — so the bare form lost, and the × showed up in the ordinary chat
+   head beside the bookmarks chevron. The reveal below clears the same bar. */
+#chathead #dockclose { display: none; }
 
 /* ---------- desktop / iPad: columns ---------- */
 @media (min-width: 900px) {
@@ -203,7 +207,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   /* Acceptance retired the fold-to-title-strip state: it is neither reading
      the chat nor reading the map. The × in the chat head closes the pop-out
      outright; the divider still tunes the split between the two. */
-  body.map-full.map-dock #dockclose { display: flex; }
+  body.map-full.map-dock #chathead #dockclose { display: flex; }
   /* The dock hides #cards, so the chat runs edge to edge and drops (+) and
      send into the two bottom corners — exactly where iPadOS parks its
      input-source pill with a hardware keyboard attached, covering one or the

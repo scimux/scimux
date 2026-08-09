@@ -3434,6 +3434,21 @@ function displayRuleFor(src, id, value){
   return m ? m[1].trim() : null;
 }
 
+test("cascadeWins ranks specificity first, stylesheet order only on a tie", () => {
+  /* Specificity has to be decided before order, or a more specific rule in an
+     earlier sheet reads as the loser — which is precisely the fight the dock ×
+     lost. */
+  assert.equal(cascadeWins({ sel: "#chathead #dockclose", file: "chat" },
+                           { sel: "#chathead .headtoggle", file: "notes" }), true,
+    "the more specific rule wins from an earlier sheet");
+  assert.equal(cascadeWins({ sel: "#dockclose", file: "notes" },
+                           { sel: "#chathead .headtoggle", file: "chat" }), false,
+    "and loses from a later one");
+  assert.equal(cascadeWins({ sel: "#a", file: "notes" }, { sel: "#b", file: "chat" }), true,
+    "equal specificity: the later sheet wins");
+  assert.equal(cascadeWins({ sel: "#a", file: "chat" }, { sel: "#b", file: "notes" }), false);
+});
+
 test("cssSpecificity counts ids, classes and elements", () => {
   assert.deepEqual(cssSpecificity("#dockclose"), [1, 0, 0]);
   assert.deepEqual(cssSpecificity("#chathead .headtoggle"), [1, 1, 0]);
