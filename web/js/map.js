@@ -952,8 +952,12 @@ export function createMapFeature(deps){
     if (persist) storeSet(MAP_DOCK_H_KEY, String(dockFrac));
   }
 
-  /* ---- P2: dock divider — same handler shape as notes.js onDivider* ---- */
+  /* ---- P2: dock divider — same handler shape as notes.js onDivider* ----
+     P2a: no-op when !isDesktop (notes.js uses isNarrow the same way). CSS
+     already hides the control on phone; the guard stops --dockmap writes if
+     focus somehow reaches the element. */
   function onDockDividerPointerDown(e){
+    if (!isDesktop()) return;
     const handle = dividerEl();
     if (!handle) return;
     const t = e.target;
@@ -1003,6 +1007,7 @@ export function createMapFeature(deps){
     dockDrag = null;
   }
   function onDockDividerKeydown(e){
+    if (!isDesktop()) return;
     const handle = dividerEl();
     if (!handle) return;
     const t = e.target;

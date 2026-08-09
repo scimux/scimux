@@ -142,6 +142,13 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 #statusbar, #cards, #map, .phead, .sheet .grab { -webkit-user-select: none; user-select: none; }
 .card, .strow, .lanechip { -webkit-touch-callout: none; }
 
+/* Dock divider: static singleton in index.html on every device (like
+   #maptoolbar), but the dock does not exist on phone. Global display:none
+   removes it from the tab order and a11y tree; the ≥900px block sizes it and
+   the full-screen dock body class reveals it. Hide-global / reveal-scoped —
+   same pattern as .wsdivider and #maptoolbar. */
+#mapdivider { display: none; }
+
 /* ---------- desktop / iPad: columns ---------- */
 @media (min-width: 900px) {
   #app { display: flex; }
@@ -186,9 +193,9 @@ body.bookmarks-open #bookmarkpeek { display: block; }
      vertical drag (clientY), row-resize, horizontal pill, one boundary.
      12px grab + margin:-5px 0 (not 44px — dock is desktop/iPad-only and the
      repo already settled this at 12px for the same class of control).
-     display:none until body.map-full.map-dock; phone never sees a dock. */
+     Base hide is global (above); reveal only under body.map-full.map-dock. */
   #mapdivider {
-    display: none; flex: none; height: 12px; margin: -5px 0; padding: 0;
+    flex: none; height: 12px; margin: -5px 0; padding: 0;
     cursor: row-resize; touch-action: none; position: relative; z-index: 2;
     width: auto; align-self: stretch; background: transparent; flex-shrink: 0;
   }
