@@ -17,7 +17,15 @@ import {
   resolvePinnedTabFallback,
   pinnedLiveCount,
   computeCardsSignature,
+  cardShapeSignature,
+  packCardsSig,
+  splitCardsSig,
   cardsRenderDecision,
+  cardsRenderPlan,
+  reorderPlan,
+  permuteSlots,
+  cardStatusHTML,
+  CARD_STATES,
   cardTabCount,
   emptyCardsHTML,
   adoptCardsHTML,
@@ -682,4 +690,256 @@ test("the attention card pulses a static shadow's opacity, not the shadow", () =
   assert.ok(kf, "@keyframes attentionPulse must still exist");
   assert.doesNotMatch(kf[1], /box-shadow/, "the pulse must be opacity-only");
   assert.match(kf[1], /opacity/, "and it must still pulse");
+});
+
+/* ---------- A: a liveness flip patches the list, it does not rebuild it ---------- */
+
+test("cardShapeSignature ignores liveness and card order", () => {
+  /* live flips on the 2s poll for every working agent, and livenessTier turns
+     that flip into a reorder — so folding either into the shape signature
+     means the list is rebuilt from scratch for as long as anything is running. */
+  const base = { unadopted: [], sel: "a", expanded: new Set(), cardTab: "current",
+    laneFilter: "", attnFoldOpen: false, bookmarksLen: 0, lanes: [], pinned: [],
+    actionCard: "", editingDesc: "", editingTitle: "" };
+  const a = { id: "a", title: "A", description: "d", lane_id: "l", live: "quiet", attention: "", model: "m" };
+  const b = { id: "b", title: "B", description: "e", lane_id: "l", live: "quiet", attention: "", model: "m" };
+  const sig = l => cardShapeSignature({ ...base, list: l, foldList: [] });
+
+  assert.equal(sig([a, b]), sig([{ ...a, live: "active" }, b]), "liveness is not shape");
+  assert.equal(sig([a, b]), sig([b, a]), "order is not shape");
+
+  assert.notEqual(sig([a, b]), sig([{ ...a, title: "A2" }, b]), "a retitle is shape");
+  assert.notEqual(sig([a, b]), sig([{ ...a, attention: "approval" }, b]),
+    "attention is shape — it moves a card between the list and the fold");
+  assert.notEqual(sig([a, b]), sig([{ ...a, ended_at: "t" }, b]), "closing is shape");
+  assert.notEqual(sig([a, b]), sig([a]), "losing a card is shape");
+  assert.notEqual(sig([a, b]), cardShapeSignature({ ...base, list: [a, b], foldList: [], sel: "b" }),
+    "selection is shape");
+
+  /* The full signature must still see everything the shape one drops, or the
+     patch would never be triggered. */
+  const full = l => computeCardsSignature({ ...base, list: l, foldList: [] });
+  assert.notEqual(full([a, b]), full([{ ...a, live: "active" }, b]));
+  assert.notEqual(full([a, b]), full([b, a]));
+});
+
+test("packCardsSig round-trips both halves through the one app-level slot", () => {
+  /* app.js clears cardsSig directly in a dozen places. Carrying the shape half
+     inside the same string is what makes those clears invalidate both. */
+  const packed = packCardsSig("SHAPE", "FULL");
+  assert.deepEqual(splitCardsSig(packed), { shape: "SHAPE", full: "FULL" });
+  assert.deepEqual(splitCardsSig(""), { shape: "", full: "" },
+    "a cleared slot must read as no shape and no full — never as a match");
+  assert.notEqual(splitCardsSig("").shape, splitCardsSig(packed).shape);
+});
+
+test("cardsRenderPlan: skip, then ages, then patch, then rebuild", () => {
+  const P = cardsRenderPlan;
+  assert.equal(P({ sig: "s", cardsSig: "s", shapeSig: "h", cardsShapeSig: "h", pinDragging: true }), "skip");
+  assert.equal(P({ sig: "s", cardsSig: "s", shapeSig: "h", cardsShapeSig: "h" }), "ages");
+  assert.equal(P({ sig: "s2", cardsSig: "s", shapeSig: "h", cardsShapeSig: "h" }), "patch");
+  assert.equal(P({ sig: "s2", cardsSig: "s", shapeSig: "h2", cardsShapeSig: "h" }), "rebuild");
+  assert.equal(P({ sig: "s", cardsSig: "", shapeSig: "", cardsShapeSig: "" }), "rebuild",
+    "an empty shape must never match an empty stored shape — nothing is in the DOM yet");
+});
+
+test("reorderPlan emits no move when the order already holds", () => {
+  assert.deepEqual(reorderPlan(["a", "b", "c"], ["a", "b", "c"]), []);
+  assert.deepEqual(reorderPlan([], []), []);
+});
+
+test("reorderPlan lifts one card to the front with a single insertBefore", () => {
+  /* The common case: an agent starts a turn, livenessTier promotes it. */
+  const plan = reorderPlan(["a", "b", "c", "d"], ["c", "a", "b", "d"]);
+  assert.deepEqual(plan, [{ key: "c", before: "a" }]);
+});
+
+test("reorderPlan's moves actually produce the desired order", () => {
+  const apply = (current, plan) => {
+    const cur = current.slice();
+    for (const { key, before } of plan){
+      const at = cur.indexOf(key);
+      if (at >= 0) cur.splice(at, 1);
+      const b = before == null ? -1 : cur.indexOf(before);
+      cur.splice(b < 0 ? cur.length : b, 0, key);
+    }
+    return cur;
+  };
+  const perms = [
+    [["a", "b", "c"], ["c", "b", "a"]],
+    [["a", "b", "c"], ["b", "c", "a"]],
+    [["a", "b", "c", "d", "e"], ["e", "d", "a", "c", "b"]],
+    [["a"], ["a"]],
+    [["a", "b"], ["b", "a"]],
+  ];
+  for (const [cur, want] of perms){
+    const plan = reorderPlan(cur, want);
+    assert.deepEqual(apply(cur, plan), want, `plan for ${want.join("")} is wrong`);
+    assert.ok(plan.length <= want.length, "a plan may never exceed one move per key");
+  }
+});
+
+test("permuteSlots reorders one block and leaves every other child alone", () => {
+  /* #cardlist also holds the attention-fold button, adoptable sessions and the
+     empty state. Only the card blocks are tiered, so only their slots move. */
+  const current = ["attnfold", "card-a", "card-b", "adopt-x", "card-c"];
+  assert.deepEqual(permuteSlots(current, ["card-b", "card-a"]),
+    ["attnfold", "card-b", "card-a", "adopt-x", "card-c"]);
+  assert.deepEqual(permuteSlots(current, []), current, "an empty block changes nothing");
+  assert.deepEqual(permuteSlots(current, ["card-a", "card-zz"]), current,
+    "a block whose members are not all present is left untouched");
+});
+
+test("cardStatusHTML is the one source the build and the patch share", () => {
+  const deps = { escape: s => String(s), ageFn: ms => `A${ms}` };
+  const working = { id: "a", title: "A", live: "active", model: "m", last_interaction: 5 };
+  const idle = { ...working, live: "quiet" };
+  assert.match(cardStatusHTML(working, 0, deps), /^<span class="workdot"><\/span>/,
+    "a working card carries the pulse dot");
+  assert.doesNotMatch(cardStatusHTML(idle, 0, deps), /workdot/);
+  assert.match(cardStatusHTML(idle, 0, deps), /<span class="st">.*quiet.*<\/span>/);
+  assert.match(cardsSrc, /<div class="status">\$\{cardStatusHTML\(/,
+    "cardHTML must emit exactly what the patch writes back");
+  assert.ok(CARD_STATES.includes("working") && CARD_STATES.includes("idle") &&
+    CARD_STATES.includes("attention") && CARD_STATES.includes("closed") &&
+    CARD_STATES.includes("dead"), "every cardState token must be swappable off the card");
+});
+
+/* A fake #cardlist that models the parts a patch touches: children in order,
+   a classList per card, a .status and a .time, and insertBefore as a move. */
+function fakeCardList(ids){
+  const mk = id => {
+    const classes = new Set(["card", "idle"]);
+    const status = { innerHTML: "" };
+    const time = { textContent: "", title: "" };
+    return {
+      id: "card-" + id,
+      classList: {
+        add: (...c) => c.forEach(x => classes.add(x)),
+        remove: (...c) => c.forEach(x => classes.delete(x)),
+        contains: c => classes.has(c),
+      },
+      querySelector: sel => sel === ".status" ? status : sel === ".time" ? time : null,
+      _classes: classes, _status: status, _time: time,
+    };
+  };
+  const children = ids.map(mk);
+  const moves = [];
+  return {
+    innerHTML: "",
+    children,
+    moves,
+    querySelectorAll(sel){ return sel === ".card" ? children.slice() : []; },
+    insertBefore(el, before){
+      moves.push([el.id, before ? before.id : null]);
+      const at = children.indexOf(el);
+      if (at >= 0) children.splice(at, 1);
+      const b = before ? children.indexOf(before) : -1;
+      children.splice(b < 0 ? children.length : b, 0, el);
+      return el;
+    },
+    appendChild(el){ return this.insertBefore(el, null); },
+    addEventListener(){}, removeEventListener(){},
+  };
+}
+
+function patchFeature(nodes, list){
+  let cardsSig = "", cardTab = "current";
+  return createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll: () => [], addEventListener(){}, removeEventListener(){} }, list },
+    document: { title: "", getElementById: () => null, querySelector: () => null },
+    nodes: () => nodes,
+    unadopted: () => [],
+    sel: () => "",
+    cardTab: () => cardTab,
+    setCardTab: v => { cardTab = v; },
+    laneFilter: () => "",
+    attnFoldOpen: () => false,
+    setAttnFoldOpen: () => {},
+    expanded: () => new Set(),
+    actionCard: () => "",
+    setActionCard: () => {},
+    editingDesc: () => "",
+    setEditingDesc: () => {},
+    editingTitle: () => "",
+    editingTitleScope: () => "",
+    cardsSig: () => cardsSig,
+    setCardsSig: v => { cardsSig = v; },
+    pinned: () => [],
+    archived: () => [],
+    lanes: () => [],
+    bookmarks: () => [],
+    agentLogo: () => "",
+    laneSelectHTML: () => "",
+    laneColor: () => "#000",
+    laneName: () => "",
+    icons: {},
+    CSS: { escape: s => s },
+    ageText: ms => `A${ms}`,
+    setInterval: () => 0,
+    clearInterval: () => {},
+  });
+}
+
+test("a liveness flip patches the cards in place instead of rebuilding them", () => {
+  const nodes = [
+    { id: "a", title: "A", description: "", lane_id: "l", live: "quiet", model: "m", last_interaction: 3, last_activity: 3 },
+    { id: "b", title: "B", description: "", lane_id: "l", live: "quiet", model: "m", last_interaction: 2, last_activity: 2 },
+  ];
+  const list = fakeCardList([]);
+  const feature = patchFeature(nodes, list);
+
+  feature.render();
+  const built = list.innerHTML;
+  assert.match(built, /id="card-a"/, "the first render still builds the list");
+
+  /* Hand the feature the DOM that render would have produced. */
+  const dom = fakeCardList(["a", "b"]);
+  Object.defineProperty(list, "children", { get: () => dom.children, configurable: true });
+  list.querySelectorAll = sel => dom.querySelectorAll(sel);
+  list.insertBefore = (el, before) => dom.insertBefore(el, before);
+  let writes = 0;
+  Object.defineProperty(list, "innerHTML", {
+    configurable: true,
+    get(){ return built; },
+    set(){ writes++; },
+  });
+
+  nodes[1].live = "active";
+  feature.render();
+
+  assert.equal(writes, 0, "a liveness flip must not rewrite #cardlist");
+  const byId = Object.fromEntries(dom.children.map(c => [c.id, c]));
+  assert.ok(byId["card-b"]._classes.has("working"), "the started card takes the working class");
+  assert.ok(!byId["card-b"]._classes.has("idle"), "and loses the state it had");
+  assert.ok(byId["card-a"]._classes.has("idle"), "the quiet card keeps its own");
+  assert.match(byId["card-b"]._status.innerHTML, /workdot/, "and its status line is repainted");
+  assert.match(byId["card-b"]._status.innerHTML, /running/);
+  assert.deepEqual(dom.children.map(c => c.id), ["card-b", "card-a"],
+    "livenessTier promotes it, so the patch must move it too");
+  assert.deepEqual(dom.moves, [["card-b", "card-a"]], "with one insertBefore, not a re-append of each");
+});
+
+test("a shape change still rebuilds, and a settled fleet still only ages", () => {
+  const nodes = [
+    { id: "a", title: "A", description: "", lane_id: "l", live: "quiet", model: "m", last_interaction: 3 },
+  ];
+  const list = fakeCardList([]);
+  const feature = patchFeature(nodes, list);
+  feature.render();
+
+  let writes = 0;
+  const built = list.innerHTML;
+  Object.defineProperty(list, "innerHTML", {
+    configurable: true,
+    get(){ return built; },
+    set(){ writes++; },
+  });
+
+  feature.render();
+  assert.equal(writes, 0, "nothing changed — ages only");
+
+  nodes[0].title = "renamed";
+  feature.render();
+  assert.equal(writes, 1, "a retitle is shape, so the list is rebuilt");
 });
