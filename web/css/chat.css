@@ -324,7 +324,10 @@ body.cards-open #msgs { overflow: hidden; }
   .permbtns .permbtn { width: auto; flex: 1 1 45%; }
 }
 .permbtn.allow, .permbtn.allow-always { border-color: var(--attn); }
-.permbtn.reject, .permbtn.reject-always { border-color: var(--danger); color: var(--danger); }
+/* Reject is the safe/reversible branch (and often a redirect, not a decline).
+   --danger is reserved for delete/archive; the attention surface is --attn.
+   No color override — label inherits --ink like every other option. */
+.permbtn.reject, .permbtn.reject-always { border-color: var(--attn); }
 .permbtn.unknown { border-color: var(--hairline); color: var(--ink); }
 
 #promptbar {

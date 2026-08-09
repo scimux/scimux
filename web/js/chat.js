@@ -436,6 +436,13 @@ function permOptionClass(kind){
   return PERM_KIND_CLASS[kind] || "unknown";
 }
 
+/* Pure core for the approval "show all" measure pass. Vertical overflow only:
+   .permcode is white-space:pre; overflow-x:auto, so a long single-line command
+   can be wide without needing expand (expand only lifts the vertical clamp). */
+export function permMoreShouldShow(scrollHeight, clientHeight){
+  return (scrollHeight || 0) > (clientHeight || 0);
+}
+
 export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
   permToolKind = "", expanded = false,
@@ -453,7 +460,9 @@ export function keyRowHTML({
       ? `<pre class="permcode">${escape(code)}</pre>`
       : `<div class="permtext">${escape(code)}</div>`;
     const clamp = expanded ? "" : " clamped";
-    const more = expanded ? "" : `<button class="permmore">show all</button>`;
+    /* Start hidden; revealPermMoreIfNeeded unhides only when .permask overflows
+       vertically. Single-line asks must not get a dead control. */
+    const more = expanded ? "" : `<button class="permmore" hidden>show all</button>`;
     const verbEl = verb ? `<div class="permverb">${escape(verb)}</div>` : "";
     /* .permmore is a sibling of .permask — inside the clamp it is clipped
        whenever the ask exceeds three lines (the exact moment it is needed). */
@@ -1311,8 +1320,20 @@ export function createChatFeature(deps){
           nextMask.scrollTop = Math.min(permScroll.scrollTop, max || permScroll.scrollTop);
         }
       }
+      /* One-element measure pass: unhide .permmore only when .permask overflows
+         its clamp vertically. Runs here only — not on the skip path, not a
+         second render. Same pattern as bookmarkClampState + applyRefClamps. */
+      revealPermMoreIfNeeded();
     }
     endChatLoad();
+  }
+
+  function revealPermMoreIfNeeded(){
+    if (!keyrow) return;
+    const mask = q(keyrow, ".permask");
+    const more = q(keyrow, ".permmore");
+    if (!mask || !more) return;
+    more.hidden = !permMoreShouldShow(mask.scrollHeight, mask.clientHeight);
   }
 
   /* ---- event handlers ---- */
