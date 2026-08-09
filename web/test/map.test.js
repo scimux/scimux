@@ -2452,17 +2452,21 @@ function createDockDividerFeature(opts = {}){
   }));
   const mapwrap = opts.mapwrap || fakeEl("mapwrap");
   const maptoolbar = opts.maptoolbar || fakeEl("maptoolbar");
+  /* #chat is a static singleton (composer lives here). Peek strip listens on it. */
+  const chat = opts.chat || fakeEl("chat");
   const feature = createMapFeature({
     roots: {
       mapdivider, mapwrap, maptoolbar,
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
       mapfullbtn: fakeEl("mapfullbtn"),
+      chat,
     },
     document: {
       body,
       querySelector(sel){
         if (sel === "#app") return app;
         if (sel === "#mapdivider") return mapdivider;
+        if (sel === "#chat") return chat;
         return null;
       },
     },
@@ -2483,7 +2487,7 @@ function createDockDividerFeature(opts = {}){
     agentLogo: () => "",
     ...opts.deps,
   });
-  return { feature, body, storage, mapdivider, app, mapwrap, maptoolbar };
+  return { feature, body, storage, mapdivider, app, mapwrap, maptoolbar, chat };
 }
 
 test("P2: clampDockFrac clamps to 0.30–0.75; non-finite → 0.55", () => {
@@ -2792,5 +2796,309 @@ test("P2a: divider handlers no-op when isDesktop is false", () => {
     "phone pointer drag must not write --dockmap");
   assert.equal(storage.getItem(hKey()), null,
     "phone pointer drag must not persist scimux-mapdockh");
+  feature.destroy();
+});
+
+/* ---------- P3: dock peek + Escape ladder ---------- */
+
+const appSrcForDock = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+
+/** Mirror of the app.js Escape dispatch (P3). Tests drive the ladder through
+ *  the same pure step + feature API the shell wires — no second document listener. */
+function appEscapeDockDispatch(feature){
+  const step = mapExports.escapeDockStep({
+    mapFull: feature.isFull(),
+    mapDock: feature.isDock(),
+    dockPeek: typeof feature.isPeek === "function" ? feature.isPeek() : false,
+  });
+  if (step === "peek") feature.setPeek(true);
+  else if (step === "undock") feature.setDock(false);
+  else if (step === "exit-full") feature.setFull(false);
+  return step;
+}
+
+test("P3: escapeDockStep full truth table", () => {
+  const step = mapExports.escapeDockStep;
+  assert.equal(typeof step, "function", "escapeDockStep is exported");
+
+  // mapFull:false → "none" at every (mapDock, dockPeek) input (phone / not full).
+  for (const mapDock of [false, true]){
+    for (const dockPeek of [false, true]){
+      assert.equal(step({ mapFull: false, mapDock, dockPeek }), "none",
+        `mapFull:false → none (mapDock=${mapDock}, dockPeek=${dockPeek})`);
+    }
+  }
+
+  // Ladder under full screen: dock open → peek → undock → exit-full.
+  assert.equal(step({ mapFull: true, mapDock: true, dockPeek: false }), "peek");
+  assert.equal(step({ mapFull: true, mapDock: true, dockPeek: true }), "undock");
+  assert.equal(step({ mapFull: true, mapDock: false, dockPeek: false }), "exit-full");
+  // Defensive: peek flag without dock is not a real state → exit full screen.
+  assert.equal(step({ mapFull: true, mapDock: false, dockPeek: true }), "exit-full");
+});
+
+test("P3: MAP_DOCK_PEEK_KEY and DOCK_PEEK_SNAP constants", () => {
+  assert.equal(mapExports.MAP_DOCK_PEEK_KEY, "scimux-mapdockpeek");
+  assert.equal(mapExports.DOCK_PEEK_SNAP, 0.06);
+  const existing = [
+    MAP_TAB_KEY, MAP_FOLD_KEY, MAP_FOLD_KNOWN_KEY, MAP_FULL_KEY, MAP_FARE_KEY,
+    mapExports.MAP_DOCK_KEY, mapExports.MAP_DOCK_H_KEY,
+  ];
+  for (const k of existing){
+    assert.notEqual(mapExports.MAP_DOCK_PEEK_KEY, k,
+      `MAP_DOCK_PEEK_KEY must not reuse ${k}`);
+  }
+  // Existing clamp constants must not change (P3 fence).
+  assert.equal(mapExports.DOCK_FRAC_MIN, 0.30);
+  assert.equal(mapExports.DOCK_FRAC_MAX, 0.75);
+  assert.equal(mapExports.DOCK_FRAC_DEFAULT, 0.55);
+  assert.equal(mapExports.DOCK_FRAC_NUDGE, 0.05);
+});
+
+test("P3: CSS .dock-peek #chat height from var(--peek); msgwrap/promptbar/keyrow hidden; #map takes remainder", () => {
+  /* Geometry via extracted declarations (§0) — no layout engine. All rules live
+     inside the brace-matched 900px media block (phone has no dock). */
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "900px media block present");
+
+  const chatRule = mediaBody.match(
+    /body\.map-full\.map-dock\.dock-peek\s+#chat\s*\{([^}]+)\}/);
+  assert.ok(chatRule, "dock-peek #chat rule inside desktop media");
+  assert.match(chatRule[1], /var\(--peek\)/, "#chat height/flex basis from --peek");
+  assert.match(chatRule[1], /overflow:\s*hidden/, "strip clips content");
+  assert.match(chatRule[1], /cursor:\s*pointer/, "whole strip is the tap target");
+
+  const mapRule = mediaBody.match(
+    /body\.map-full\.map-dock\.dock-peek\s+#map\s*\{([^}]+)\}/);
+  assert.ok(mapRule, "dock-peek #map rule inside desktop media");
+  assert.match(mapRule[1], /flex:\s*1\s+1\s+auto/,
+    "#map takes the remainder (not pinned to --dockmap)");
+
+  // Hidden regions — display:none, never removed from the DOM.
+  for (const id of ["#msgwrap", "#promptbar", "#keyrow", "#chatmission",
+    "#chatdetails", "#gauge", "#convtools", "#workpulse"]){
+    assert.match(mediaBody,
+      new RegExp(`body\\.map-full\\.map-dock\\.dock-peek\\s+${id.replace("#", "#")}`),
+      `${id} hidden under dock-peek`);
+    const hide = mediaBody.match(
+      new RegExp(`body\\.map-full\\.map-dock\\.dock-peek\\s+${id}\\s*\\{([^}]+)\\}`));
+    if (hide){
+      assert.match(hide[1], /display:\s*none/, `${id} is display:none under dock-peek`);
+    }
+  }
+  // Comma-grouped selectors are fine: assert each id appears with display:none
+  // in the same rule body via a broader scan.
+  const peekHideBlock = mediaBody.match(
+    /body\.map-full\.map-dock\.dock-peek\s+#msgwrap[\s\S]*?\{([^}]+)\}/);
+  assert.ok(peekHideBlock, "peek hide rule covering #msgwrap present");
+  assert.match(peekHideBlock[1], /display:\s*none/);
+
+  // Containment: no dock-peek layout rules outside the 900px media block.
+  const outside = notesDesktopMediaOutside(notesCssSrc);
+  assert.ok(outside != null, "brace-matched outside of 900px media");
+  assert.doesNotMatch(outside, /body\.map-full\.map-dock\.dock-peek\s+#chat\s*\{[^}]*flex/,
+    "peek #chat flex geometry must not leak outside 900px");
+  assert.doesNotMatch(outside, /body\.map-full\.map-dock\.dock-peek\s+#map\s*\{/,
+    "peek #map rule must not leak outside 900px");
+});
+
+test("P3: tap on the peek strip restores the PERSISTED fraction (not default 55%)", () => {
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const peekKey = () => mapExports.MAP_DOCK_PEEK_KEY || "scimux-mapdockpeek";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [hKey()]: "0.42",
+    [peekKey()]: "1",
+  });
+  const body = fakeDockBody(["map-full", "map-dock", "dock-peek"]);
+  const { feature, chat } = createDockDividerFeature({ storage, body });
+  feature.bind();
+  // Peek restore must re-open the user's 42% split, never the 55% default.
+  assert.equal(body.style.getPropertyValue("--dockmap"), "42%",
+    "bind restores the persisted fraction under --dockmap");
+  assert.equal(body.classList.contains("dock-peek"), true,
+    "bind restores dock-peek from storage");
+
+  const click = firstListener(chat, "click");
+  assert.ok(click, "click listener on static #chat for strip restore");
+  click({ target: chat, preventDefault(){} });
+
+  assert.equal(body.classList.contains("dock-peek"), false,
+    "tap leaves peek");
+  assert.equal(body.style.getPropertyValue("--dockmap"), "42%",
+    "tap restores persisted 42%, not DOCK_FRAC_DEFAULT 55%");
+  assert.equal(storage.getItem(hKey()), "0.42",
+    "tap does not rewrite the stored fraction");
+  feature.destroy();
+});
+
+test("P3: drag past MAX+SNAP enters peek; leaves scimux-mapdockh untouched", () => {
+  /* dockFrac is the MAP height share. Dragging the divider DOWN grows the
+     fraction; peek is entered past DOCK_FRAC_MAX + DOCK_PEEK_SNAP (0.81), not
+     below MIN. Plan §3 P3 text about "below 0.30" is wrong — this pins the
+     corrected direction. */
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [hKey()]: "0.42",
+  });
+  const { feature, body, mapdivider } = createDockDividerFeature({ storage });
+  feature.bind();
+  assert.equal(body.style.getPropertyValue("--dockmap"), "42%");
+  assert.equal(body.classList.contains("dock-peek"), false);
+
+  // appTop=100, appHeight=1000 → raw = (clientY-100)/1000.
+  // MAX+SNAP = 0.81 → clientY >= 910 enters peek.
+  firstListener(mapdivider, "pointerdown")({
+    target: mapdivider, pointerId: 1, clientY: 520, button: 0,
+    preventDefault(){},
+  });
+  firstListener(mapdivider, "pointermove")({
+    target: mapdivider, pointerId: 1, clientY: 920, // raw 0.82 ≥ 0.81
+  });
+  assert.equal(body.classList.contains("dock-peek"), true,
+    "raw fraction past MAX+SNAP sets dock-peek");
+  assert.equal(storage.getItem(hKey()), "0.42",
+    "entering peek must not overwrite scimux-mapdockh");
+
+  firstListener(mapdivider, "pointerup")({
+    target: mapdivider, pointerId: 1, clientY: 920,
+  });
+  // Still no persist of a clamped 0.75 — peek is distinct from fraction 0.95.
+  assert.equal(storage.getItem(hKey()), "0.42",
+    "pointerup in peek leaves scimux-mapdockh untouched");
+  assert.equal(body.classList.contains("dock-peek"), true);
+  // Not "pinning --dockmap at 75%" as the peek stand-in: after the gesture the
+  // CSS var reflects the last committed split (0.42), not the clamp ceiling.
+  assert.equal(body.style.getPropertyValue("--dockmap"), "42%",
+    "peek does not pin --dockmap at 75%");
+  feature.destroy();
+});
+
+test("P3: peek persists and restores across bind()", () => {
+  const peekKey = () => mapExports.MAP_DOCK_PEEK_KEY || "scimux-mapdockpeek";
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [hKey()]: "0.60",
+  });
+  const { feature, body, mapdivider } = createDockDividerFeature({ storage });
+  feature.bind();
+
+  // Enter peek via keyboard parity: ArrowDown at MAX.
+  // Nudge from 0.60 up to the clamp, then one more Down enters peek.
+  const key = firstListener(mapdivider, "keydown");
+  assert.ok(key, "keydown on #mapdivider");
+  key({ target: mapdivider, key: "ArrowDown", preventDefault(){} }); // 0.65
+  key({ target: mapdivider, key: "ArrowDown", preventDefault(){} }); // 0.70
+  key({ target: mapdivider, key: "ArrowDown", preventDefault(){} }); // 0.75
+  key({ target: mapdivider, key: "ArrowDown", preventDefault(){} }); // peek
+  assert.equal(body.classList.contains("dock-peek"), true,
+    "ArrowDown at MAX enters peek");
+  assert.equal(storage.getItem(peekKey()), "1", "peek is persisted");
+  assert.equal(storage.getItem(hKey()), "0.75",
+    "fraction at MAX is the last non-peek value (still persisted)");
+  feature.destroy();
+
+  // New feature instance + bind (device reopen) restores peek.
+  const again = createDockDividerFeature({
+    storage,
+    body: fakeDockBody(["map-full", "map-dock"]),
+  });
+  again.feature.bind();
+  assert.equal(again.body.classList.contains("dock-peek"), true,
+    "bind restores dock-peek from storage");
+  again.feature.restoreChrome();
+  assert.equal(again.body.classList.contains("dock-peek"), true,
+    "restoreChrome keeps dock-peek");
+  // ArrowUp from peek restores the split (keyboard parity).
+  firstListener(again.mapdivider, "keydown")({
+    target: again.mapdivider, key: "ArrowUp", preventDefault(){},
+  });
+  assert.equal(again.body.classList.contains("dock-peek"), false,
+    "ArrowUp from peek leaves peek");
+  assert.equal(again.storage.getItem(peekKey()), null,
+    "leaving peek clears the peek key");
+  again.feature.destroy();
+});
+
+test("P3: Escape ladder end-to-end — peek → undock → exit-full → none", () => {
+  /* app.js owns the single document Escape site; it must dispatch via
+     escapeDockStep (not bare setMapFull(false)). Behaviour is exercised
+     through the same step + feature API the shell wires. */
+  assert.match(appSrcForDock, /escapeDockStep/,
+    "app.js imports/uses escapeDockStep for Escape");
+  assert.match(appSrcForDock, /setPeek|isPeek/,
+    "app.js reaches peek state through the map feature API");
+
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const peekKey = () => mapExports.MAP_DOCK_PEEK_KEY || "scimux-mapdockpeek";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [hKey()]: "0.55",
+  });
+  const { feature, body } = createDockDividerFeature({ storage });
+  feature.bind();
+  assert.equal(feature.isFull(), true);
+  assert.equal(feature.isDock(), true);
+  assert.equal(typeof feature.isPeek, "function", "isPeek on factory API");
+  assert.equal(feature.isPeek(), false);
+
+  // 1st Escape: dock open → peek
+  assert.equal(appEscapeDockDispatch(feature), "peek");
+  assert.equal(feature.isPeek(), true);
+  assert.equal(body.classList.contains("dock-peek"), true);
+  assert.equal(feature.isFull(), true);
+  assert.equal(feature.isDock(), true);
+
+  // 2nd Escape: peek → undock (stay full)
+  assert.equal(appEscapeDockDispatch(feature), "undock");
+  assert.equal(feature.isDock(), false);
+  assert.equal(feature.isPeek(), false, "undock clears peek");
+  assert.equal(body.classList.contains("map-dock"), false);
+  assert.equal(body.classList.contains("dock-peek"), false);
+  assert.equal(feature.isFull(), true);
+  assert.equal(storage.getItem(peekKey()), null);
+
+  // 3rd Escape: full wall → exit full screen
+  assert.equal(appEscapeDockDispatch(feature), "exit-full");
+  assert.equal(feature.isFull(), false);
+  assert.equal(body.classList.contains("map-full"), false);
+
+  // 4th Escape: no-op
+  assert.equal(appEscapeDockDispatch(feature), "none");
+  assert.equal(feature.isFull(), false);
+  feature.destroy();
+});
+
+test("P3: setMapFull(false) clears both map-dock and dock-peek", () => {
+  const peekKey = () => mapExports.MAP_DOCK_PEEK_KEY || "scimux-mapdockpeek";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [peekKey()]: "1",
+  });
+  const body = fakeDockBody(["map-full", "map-dock", "dock-peek"]);
+  const { feature } = createDockDividerFeature({ storage, body });
+  feature.bind();
+  assert.equal(body.classList.contains("dock-peek"), true);
+  assert.equal(body.classList.contains("map-dock"), true);
+
+  feature.setFull(false);
+
+  assert.equal(feature.isFull(), false);
+  assert.equal(feature.isDock(), false);
+  assert.equal(typeof feature.isPeek === "function" && feature.isPeek(), false);
+  assert.equal(body.classList.contains("map-full"), false);
+  assert.equal(body.classList.contains("map-dock"), false,
+    "setMapFull(false) clears map-dock");
+  assert.equal(body.classList.contains("dock-peek"), false,
+    "setMapFull(false) clears dock-peek — no stale class into a non-dock arrangement");
+  assert.equal(storage.getItem(mapExports.MAP_DOCK_KEY || "scimux-mapdock"), null);
+  assert.equal(storage.getItem(peekKey()), null);
   feature.destroy();
 });
