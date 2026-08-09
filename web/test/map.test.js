@@ -2963,17 +2963,25 @@ test("P3: drag past MAX+SNAP enters peek; leaves scimux-mapdockh untouched", () 
   assert.equal(storage.getItem(hKey()), "0.42",
     "entering peek must not overwrite scimux-mapdockh");
 
-  firstListener(mapdivider, "pointerup")({
-    target: mapdivider, pointerId: 1, clientY: 920,
+  /* P3 hole: leave-peek hysteresis on the same gesture. Without this move-back
+     assertion, `if (raw <= DOCK_FRAC_MAX)` can be stubbed to `if (false)` and
+     the suite still goes green — peek becomes a one-way latch. */
+  firstListener(mapdivider, "pointermove")({
+    target: mapdivider, pointerId: 1, clientY: 800, // raw 0.70 ≤ MAX 0.75
   });
-  // Still no persist of a clamped 0.75 — peek is distinct from fraction 0.95.
-  assert.equal(storage.getItem(hKey()), "0.42",
-    "pointerup in peek leaves scimux-mapdockh untouched");
-  assert.equal(body.classList.contains("dock-peek"), true);
-  // Not "pinning --dockmap at 75%" as the peek stand-in: after the gesture the
-  // CSS var reflects the last committed split (0.42), not the clamp ceiling.
-  assert.equal(body.style.getPropertyValue("--dockmap"), "42%",
-    "peek does not pin --dockmap at 75%");
+  assert.equal(body.classList.contains("dock-peek"), false,
+    "raw ≤ MAX leaves peek on the same gesture (hysteresis band)");
+  assert.equal(body.style.getPropertyValue("--dockmap"), "70%",
+    "--dockmap tracks the live raw fraction after leaving peek");
+
+  firstListener(mapdivider, "pointerup")({
+    target: mapdivider, pointerId: 1, clientY: 800,
+  });
+  // pointerup outside peek persists the last non-peek fraction (String(0.7)).
+  assert.equal(storage.getItem(hKey()), "0.7",
+    "pointerup after leave-peek persists the live fraction");
+  assert.equal(body.classList.contains("dock-peek"), false);
+  assert.equal(body.style.getPropertyValue("--dockmap"), "70%");
   feature.destroy();
 });
 
@@ -3100,5 +3108,176 @@ test("P3: setMapFull(false) clears both map-dock and dock-peek", () => {
     "setMapFull(false) clears dock-peek — no stale class into a non-dock arrangement");
   assert.equal(storage.getItem(mapExports.MAP_DOCK_KEY || "scimux-mapdock"), null);
   assert.equal(storage.getItem(peekKey()), null);
+  feature.destroy();
+});
+
+/* ---------- P4: scroll anchoring across poll rebuilds ---------- */
+
+/** One stop per node (created_at only) so row indices are trivial: newest first. */
+function p4Node(id, createdAt, title){
+  return {
+    id, title: title || id, description: "", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: createdAt, stops: [],
+  };
+}
+
+/** Wall-map harness with #mapscroll for P4 scrollTop assertions. */
+function createWallScrollFeature(nodes, opts = {}){
+  const mapwrap = fakeEl("mapwrap");
+  const mapscroll = fakeEl("mapscroll");
+  const maptoolbar = fakeEl("maptoolbar");
+  const body = {
+    classList: {
+      _set: new Set(["map-full"]),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+      remove(name){ this._set.delete(name); },
+    },
+  };
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+    ...(opts.storageSeed || {}),
+  });
+  const byId = {};
+  for (const n of nodes) byId[n.id] = n;
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, mapscroll, maptoolbar,
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
+      mapfullbtn: fakeEl("mapfullbtn"),
+    },
+    document: { body, querySelector: () => null },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId,
+    }),
+    laneColor: () => "#00f",
+    agentLogo: () => "",
+  });
+  feature.bind();
+  feature.restoreChrome();
+  return { feature, mapwrap, mapscroll, maptoolbar, body, storage, nodes, byId };
+}
+
+function selectWallStop(mapwrap, { nid, skey, stop }){
+  firstListener(mapwrap, "click")({
+    target: {
+      dataset: { nid, skey, stop: stop || "" },
+      closest(selector){ return selector === "[data-nid]" ? this : null; },
+    },
+  });
+}
+
+test("P4: anchoredScrollTop pure arithmetic — insert/remove/unchanged/null/clamp", () => {
+  const fn = mapExports.anchoredScrollTop;
+  assert.equal(typeof fn, "function", "anchoredScrollTop is exported");
+
+  // One newer row inserted above: selection index 1 → 2, scroll +76.
+  assert.equal(fn({ prevTop: 100, prevIndex: 1, nextIndex: 2, rowHeight: 76 }), 176);
+  // One row removed above: index 2 → 1, scroll −76.
+  assert.equal(fn({ prevTop: 176, prevIndex: 2, nextIndex: 1, rowHeight: 76 }), 100);
+  // Unchanged index: no movement.
+  assert.equal(fn({ prevTop: 50, prevIndex: 3, nextIndex: 3, rowHeight: 76 }), 50);
+  // Missing selection / vanished stop → leave prevTop alone.
+  assert.equal(fn({ prevTop: 40, prevIndex: null, nextIndex: 1, rowHeight: 76 }), 40);
+  assert.equal(fn({ prevTop: 40, prevIndex: undefined, nextIndex: 1, rowHeight: 76 }), 40);
+  assert.equal(fn({ prevTop: 40, prevIndex: 1, nextIndex: null, rowHeight: 76 }), 40);
+  assert.equal(fn({ prevTop: 40, prevIndex: 1, nextIndex: undefined, rowHeight: 76 }), 40);
+  // Would go negative → clamp to 0.
+  assert.equal(fn({ prevTop: 10, prevIndex: 2, nextIndex: 0, rowHeight: 76 }), 0);
+});
+
+test("P4: WALL_ROW_H exported as 76; renderWallMap uses it (not a second literal)", () => {
+  assert.equal(mapExports.WALL_ROW_H, 76, "WALL_ROW_H is the shared row height");
+  // Wall geometry must share the constant; stack map keeps its own RH = 76.
+  assert.match(mapSrc, /const RH = WALL_ROW_H\b/,
+    "renderWallMap must set RH from WALL_ROW_H");
+  assert.match(mapSrc, /const RH = 76\b/,
+    "stack map keeps its own RH = 76 literal (do not widen the diff)");
+
+  const a = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  const b = p4Node("b", "2026-01-02T00:00:00Z", "Beta");
+  const { feature, mapwrap } = createWallScrollFeature([a, b]);
+  feature.render();
+  // svgH = OFF(16) + nRows * WALL_ROW_H(76). Two rows → 16 + 152 = 168.
+  const rh = mapExports.WALL_ROW_H || 76;
+  const expectedH = 16 + 2 * rh;
+  assert.match(mapwrap.innerHTML, new RegExp(`height="${expectedH}"`),
+    "wall SVG height is OFF + nRows * WALL_ROW_H (geometry matches the constant)");
+  assert.match(mapwrap.innerHTML, /class="strow/, "wall rows rendered");
+  feature.destroy();
+});
+
+test("P4: re-render with one newer row anchors scrollTop by +76 (selection unchanged)", () => {
+  const a = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  const b = p4Node("b", "2026-01-02T00:00:00Z", "Beta");
+  const nodes = [a, b];
+  const { feature, mapwrap, mapscroll, maptoolbar, byId } = createWallScrollFeature(nodes);
+  feature.render();
+  // Select the older station (a#0). Newest-first: b at 0, a at 1.
+  selectWallStop(mapwrap, { nid: "a", skey: "a#0", stop: a.created_at });
+  assert.match(maptoolbar.innerHTML, /data-jump="a"/, "selection is live");
+  mapscroll.scrollTop = 100;
+
+  // Poll: a newer stop appears at the top → a moves from index 1 → 2.
+  const c = p4Node("c", "2026-01-03T00:00:00Z", "Gamma");
+  nodes.push(c);
+  byId.c = c;
+  feature.render();
+
+  assert.equal(mapscroll.scrollTop, 176,
+    "one row inserted above moves scrollTop by exactly WALL_ROW_H (76)");
+  assert.match(maptoolbar.innerHTML, /data-jump="a"/,
+    "selection key is unchanged across the poll rebuild");
+  feature.destroy();
+});
+
+test("P4: selection change leaves scrollTop untouched", () => {
+  const a = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  const b = p4Node("b", "2026-01-02T00:00:00Z", "Beta");
+  const { feature, mapwrap, mapscroll, maptoolbar } = createWallScrollFeature([a, b]);
+  feature.render();
+  selectWallStop(mapwrap, { nid: "a", skey: "a#0", stop: a.created_at });
+  mapscroll.scrollTop = 100;
+
+  // Tap a different station — prevIndex/nextIndex describe two different stops;
+  // the delta is meaningless and must not yank the viewport.
+  selectWallStop(mapwrap, { nid: "b", skey: "b#0", stop: b.created_at });
+  assert.match(maptoolbar.innerHTML, /data-jump="b"/, "selection moved to b");
+  assert.equal(mapscroll.scrollTop, 100,
+    "changing mapSelKey must not apply anchor arithmetic");
+  feature.destroy();
+});
+
+test("P4: no selection leaves scrollTop untouched on rebuild", () => {
+  const a = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  const b = p4Node("b", "2026-01-02T00:00:00Z", "Beta");
+  const nodes = [a, b];
+  const { feature, mapscroll, maptoolbar, byId } = createWallScrollFeature(nodes);
+  feature.render();
+  assert.equal(maptoolbar.innerHTML, "", "no selection");
+  mapscroll.scrollTop = 55;
+
+  const c = p4Node("c", "2026-01-03T00:00:00Z", "Gamma");
+  nodes.push(c);
+  byId.c = c;
+  feature.render();
+
+  assert.equal(mapscroll.scrollTop, 55,
+    "without a selection, poll rebuild must not fight the user's scroll");
   feature.destroy();
 });
