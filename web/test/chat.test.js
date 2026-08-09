@@ -45,6 +45,11 @@ import {
   echoBubbleHTML,
   createChatFeature,
 } from "../js/chat.js";
+/* Namespace import for symbols a red commit adds: a missing *named* import is a
+   module-resolution error that takes the whole file down with it, which hides
+   the ~100 tests that were meant to stay green. Through the namespace the same
+   absence shows up as failures in exactly the cases that pin it. */
+import * as chatmod from "../js/chat.js";
 import { bubbleTitle, fmtBubbleTime } from "../js/format.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1846,6 +1851,131 @@ test("P2 7: measure pass reveals .permmore when .permask overflows vertically", 
 
 /* P2 8: expanded:true omits .permmore — covered by the existing test
  * "keyRowHTML: never md() on perm_title…" (assert.doesNotMatch(open, /permmore/)). */
+
+/* ---------- P2b: a measurement that never happened is not a "no" ----------
+ * revealPermMoreIfNeeded runs once, after the keyrow write. Polling keeps
+ * rendering the chat while body.map-full hides #chat outright (notes.css:186),
+ * so the keyrow can be built at 0x0 — and the poll's skip path never writes it
+ * again, so nothing re-measures when the dock opens. A long approval then sits
+ * clamped to three lines with no way to expand it. Same rule as P1's
+ * pinDecision case 1: no box means "unknown", never "no". */
+
+function roSpy(){
+  const observers = [];
+  class RO {
+    constructor(cb){ this.cb = cb; this.targets = []; this.disconnected = false; observers.push(this); }
+    observe(t){ this.targets.push(t); }
+    unobserve(){}
+    disconnect(){ this.disconnected = true; }
+  }
+  const forMask = () => observers.find(o =>
+    o.targets.some(t => String(t && t.className || "").includes("permask")));
+  return { RO, observers, forMask };
+}
+
+test("P2b 1: permMoreDecision cannot decide without a layout box", () => {
+  assert.equal(chatmod.permMoreDecision(0, 0), chatmod.PERM_MORE_UNKNOWN,
+    "display:none measures 0x0 — that is unknown, not 'nothing to show'");
+  assert.equal(chatmod.permMoreDecision(1000, 0), chatmod.PERM_MORE_UNKNOWN);
+  assert.equal(chatmod.permMoreDecision(0, undefined), chatmod.PERM_MORE_UNKNOWN);
+});
+
+test("P2b 2: permMoreDecision still decides normally once there is a box", () => {
+  assert.equal(chatmod.permMoreDecision(1000, 200), chatmod.PERM_MORE_SHOW);
+  assert.equal(chatmod.permMoreDecision(48, 48), chatmod.PERM_MORE_HIDE);
+  assert.equal(chatmod.permMoreDecision(0, 200), chatmod.PERM_MORE_HIDE);
+});
+
+test("P2b 3: a keyrow built while the chat is hidden decides when the box arrives", async () => {
+  const spy = roSpy();
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(),        /* the long, multi-line ask */
+    deps: { ResizeObserver: spy.RO, requestAnimationFrame: () => 0 },
+  });
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 0, clientHeight: 0 };
+  ctx.feature.bind();
+  await ctx.feature.render();                  /* body.map-full: #chat display:none */
+
+  const obs = spy.forMask();
+  assert.ok(obs, "an unmeasurable ask must arm an observer on .permask");
+  const mask = ctx.roots.keyrow.querySelector(".permask");
+
+  /* The user opens the dock / leaves full screen: #chat gains a box. Nothing
+     invalidates chatSig, so the next poll takes the skip path — the observer is
+     the only thing that can still decide. */
+  mask.scrollHeight = 1000;
+  mask.clientHeight = 200;
+  obs.cb([]);
+  assert.equal(ctx.roots.keyrow.querySelector(".permmore").hidden, false,
+    "a long ask must become expandable once it can be measured");
+  assert.equal(obs.disconnected, true, "decided — stop observing");
+
+  await ctx.feature.render();                  /* skip path must not undo it */
+  assert.equal(ctx.roots.keyrow.querySelector(".permmore").hidden, false);
+  ctx.feature.destroy();
+});
+
+test("P2b 4: with no ResizeObserver, an unmeasurable ask fails open", async () => {
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(),
+  });
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 0, clientHeight: 0 };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.equal(ctx.roots.keyrow.querySelector(".permmore").hidden, false,
+    "a dead control is a nuisance; an unreadable approval is a dead end");
+  ctx.feature.destroy();
+});
+
+test("P2b 5: a pending measure observer is released on destroy", async () => {
+  const spy = roSpy();
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(),
+    deps: { ResizeObserver: spy.RO, requestAnimationFrame: () => 0 },
+  });
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 0, clientHeight: 0 };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const obs = spy.forMask();
+  assert.ok(obs && !obs.disconnected, "observer is live while undecided");
+  ctx.feature.destroy();
+  assert.equal(obs.disconnected, true, "destroy must not leak the observer");
+});
+
+test("P2b 6: an observer firing on a still-empty box must not spin", async () => {
+  const observers = [];
+  class RO {
+    constructor(cb){ this.cb = cb; this.disconnected = false; observers.push(this); }
+    /* A real ResizeObserver delivers one callback on observe(). If the measure
+       re-arms while the box is still 0x0, that initial delivery is recursion,
+       not a retry — the guard is what makes waiting possible at all. */
+    observe(t){ this.target = t; this.cb([]); }
+    unobserve(){}
+    disconnect(){ this.disconnected = true; }
+  }
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload(),
+    deps: { ResizeObserver: RO, requestAnimationFrame: () => 0 },
+  });
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 0, clientHeight: 0 };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  /* The bottom-pin observer shares the injected class — count only this one. */
+  const onMask = observers.filter(o =>
+    String(o.target && o.target.className || "").includes("permask"));
+  assert.equal(onMask.length, 1,
+    `armed once and waited; re-arming on an unmeasurable box is a spin (got ${onMask.length})`);
+  const mask = ctx.roots.keyrow.querySelector(".permask");
+  mask.scrollHeight = 1000;
+  mask.clientHeight = 200;
+  onMask[0].cb([]);
+  assert.equal(ctx.roots.keyrow.querySelector(".permmore").hidden, false);
+  ctx.feature.destroy();
+});
 
 /* ---------- the terminal peek is not part of the transcript ----------
  * peekText is a live tmux capture: while an agent animates a spinner it
