@@ -3761,3 +3761,33 @@ test("the wall's title clamp is a class the builder sets, not a :has() scan", ()
   assert.match(stopRow, /stoprow/, "the earlier-stop branch was exercised");
   assert.match(stopRow, /class="lbl hasdesc"/, "an earlier stop with a description is marked too");
 });
+
+test("the dock's content column is one column — the approval row included", () => {
+  /* The dock hides #cards, so #msgs and #promptbar are given back the width
+     they have beside the Activities pane. #keyrow and #convtools are in the
+     same column and were left out: an approval — the one moment the chat is
+     asking you for something — arrived flush against the window edge while
+     the transcript above it sat inset by half a pane. Chrome that spans (the
+     gauge, the head's hairline, the composer's top border) is deliberate and
+     stays out of the rule. */
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "@media (min-width: 900px) block present in notes.css");
+  const body = mediaBody.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const rules = [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(m => /padding-inline:\s*calc\(\s*var\(--pane\)\s*\/\s*2\s*\)/.test(m[2]));
+  assert.equal(rules.length, 1, "one rule sets the dock column's inset");
+
+  const selectors = rules[0][1].split(",").map(s => s.trim()).filter(Boolean);
+  for (const sel of selectors){
+    assert.match(sel, /^body\.map-full\.map-dock\s+#/,
+      `the inset must stay scoped to the dock (${sel})`);
+  }
+  const ids = selectors.map(s => s.slice(s.lastIndexOf("#")));
+  for (const id of ["#msgs", "#keyrow", "#convtools", "#promptbar"]){
+    assert.ok(ids.includes(id), `${id} is content and must share the column`);
+  }
+  for (const id of ["#gauge", "#chathead"]){
+    assert.ok(!ids.includes(id), `${id} is chrome and must still span`);
+  }
+});
