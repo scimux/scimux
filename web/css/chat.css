@@ -155,6 +155,9 @@ body.cards-open #msgs { overflow: hidden; }
 
 @media (prefers-reduced-motion: reduce) {
   .roll-dn, .roll-up, .lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }
+  /* the lane dot's halo is static now (it used to exist only at the pulse's
+     peak), so stopping the pulse has to take it away as well */
+  .lhead .lattn { box-shadow: none; }
 }
 
 /* bubble tap actions: one tap on a bubble reveals a small icon row directly

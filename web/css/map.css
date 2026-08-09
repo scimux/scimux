@@ -11,17 +11,20 @@
 .lhead .lswatch { width: 18px; height: 6px; border-radius: 3px; flex: none; }
 .lhead .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lhead .lcount { color: var(--dim); font-weight: 500; }
+/* Same trade as .card.attention::after: a static halo, faded and scaled by the
+   dot's own compositor animation. A keyframed box-shadow repaints every frame
+   for as long as the journey has someone asking. */
 .lhead .lattn { width: 8px; height: 8px; border-radius: 4px; background: var(--attn); flex: none;
   transform: translateZ(0) scale(.85); transform-origin: center;
-  box-shadow: 0 0 0 0 rgba(var(--attn-rgb), .34);
-  will-change: transform, opacity, box-shadow; animation: mapAttentionDot 1.65s ease-in-out infinite; }
+  box-shadow: 0 0 12px 3px rgba(var(--attn-rgb), .38);
+  will-change: transform, opacity; animation: mapAttentionDot 1.65s ease-in-out infinite; }
 .attnstation-glow, .attnstation-ring { transform-box: fill-box; transform-origin: center;
   will-change: transform, opacity; }
 .attnstation-glow { animation: mapAttentionGlow 1.65s ease-in-out infinite; }
 .attnstation-ring { animation: mapAttentionRing 1.65s ease-in-out infinite; }
 @keyframes mapAttentionDot {
-  0%, 100% { opacity: .45; transform: translateZ(0) scale(.76); box-shadow: 0 0 0 0 rgba(var(--attn-rgb), .20); }
-  50%      { opacity: 1; transform: translateZ(0) scale(1.28); box-shadow: 0 0 12px 3px rgba(var(--attn-rgb), .38); }
+  0%, 100% { opacity: .45; transform: translateZ(0) scale(.76); }
+  50%      { opacity: 1; transform: translateZ(0) scale(1.28); }
 }
 @keyframes mapAttentionGlow {
   0%, 100% { opacity: calc(var(--attn-op) * .18); transform: scale(.88); }

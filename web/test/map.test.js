@@ -3643,3 +3643,16 @@ test("the lane attention dot pulses without repainting its halo", () => {
   assert.doesNotMatch(kf[1], /box-shadow/, "the pulse must be opacity/transform only");
   assert.match(kf[1], /opacity/, "and it must still pulse");
 });
+
+test("reduced motion loses the halo with the pulse", () => {
+  /* The halo used to live only at the pulse's peak, so stopping the animation
+     removed it. Now that it is static, the reduced-motion rule that stops
+     .lattn would otherwise freeze it at full glow — a brighter dot than these
+     users ever saw. */
+  const chatCss = readFileSync(join(__dirname, "../css/chat.css"), "utf8");
+  const rm = chatCss.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g) || [];
+  const stops = rm.filter(b => /\.lhead\s+\.lattn/.test(b));
+  assert.ok(stops.length, "the reduced-motion block must still stop .lattn");
+  assert.ok(stops.some(b => /box-shadow:\s*none/.test(b)),
+    "stopping the pulse must drop the static halo too");
+});

@@ -127,30 +127,24 @@
   border-radius: inherit;
   pointer-events: none;
   z-index: 1;
+  /* The shadow stands still at its peak and the layer's opacity does the
+     pulsing: opacity composites, box-shadow repaints. Animating the shadow
+     itself re-rasterised a blurred ring at 60fps for as long as the node was
+     asking — the app's whole idle cost on a phone. Fading a static peak is
+     very nearly the same picture (at the trough the ring lands on the same
+     alpha it had before; the glow is a touch softer and wider). */
   box-shadow:
-    inset 0 0 0 2px rgba(var(--attn-rgb), .95),
-    inset 0 0 18px rgba(var(--attn-rgb), .34),
-    0 0 14px rgba(var(--attn-rgb), .42);
+    inset 0 0 0 2px rgba(var(--attn-rgb), 1),
+    inset 0 0 22px rgba(var(--attn-rgb), .45),
+    0 0 18px rgba(var(--attn-rgb), .55);
   opacity: .45;
   transform: translateZ(0);
-  will-change: opacity, box-shadow;
+  will-change: opacity;
   animation: attentionPulse 1.65s ease-in-out infinite;
 }
 @keyframes attentionPulse {
-  0%, 100% {
-    opacity: .42;
-    box-shadow:
-      inset 0 0 0 2px rgba(var(--attn-rgb), .75),
-      inset 0 0 10px rgba(var(--attn-rgb), .20),
-      0 0 8px rgba(var(--attn-rgb), .24);
-  }
-  50% {
-    opacity: 1;
-    box-shadow:
-      inset 0 0 0 2px rgba(var(--attn-rgb), 1),
-      inset 0 0 22px rgba(var(--attn-rgb), .45),
-      0 0 18px rgba(var(--attn-rgb), .55);
-  }
+  0%, 100% { opacity: .32; }
+  50%      { opacity: 1; }
 }
 .card.working { border-color: rgba(var(--work-rgb), .55); box-shadow: 0 0 12px 0 rgba(var(--work-rgb), .28); }
 .card.selected .title { color: var(--work); }

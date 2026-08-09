@@ -61,21 +61,48 @@ function keyframeBlocks(src){
   return out;
 }
 
-test("no keyframe animates a paint-only property", () => {
+/** Keyframe names this file runs with `infinite` — i.e. forever. */
+function endlessKeyframeNames(src){
+  const out = new Set();
+  for (const m of src.matchAll(/animation:\s*([^;}]+)/g)){
+    if (!/\binfinite\b/.test(m[1])) continue;
+    for (const word of m[1].split(/[\s,]+/)){
+      if (/^[a-zA-Z][\w-]*$/.test(word) && !/^(infinite|alternate|reverse|both|forwards|backwards|none|linear|ease|ease-in|ease-out|ease-in-out|paused|running|normal|step-start|step-end)$/.test(word))
+        out.add(word);
+    }
+  }
+  return out;
+}
+
+test("no endless keyframe animates a paint-only property", () => {
   /* The attention pulses run infinite, at 60fps, for as long as any node is
      asking — on a phone that is the app's whole idle cost. opacity and
      transform hand the animation to the compositor and cost nothing per frame;
      box-shadow, filter and backdrop-filter cannot be composited, so each frame
      repaints a blurred shadow. will-change does not change that. Pulse by
-     animating the opacity of a layer that carries a *static* shadow. */
+     animating the opacity of a layer that carries a *static* shadow.
+     Finite animations (a two-beat ripple on a tap) are not the concern. */
   const banned = /(^|[;{\s])(box-shadow|filter|backdrop-filter|-webkit-backdrop-filter)\s*:/;
   const files = readdirSync(cssDir).filter(f => f.endsWith(".css")).sort();
+  let checked = 0;
   for (const name of files){
-    for (const { name: kf, body } of keyframeBlocks(stripCssComments(readFileSync(join(cssDir, name), "utf8")))){
+    const src = stripCssComments(readFileSync(join(cssDir, name), "utf8"));
+    const endless = endlessKeyframeNames(src);
+    for (const { name: kf, body } of keyframeBlocks(src)){
+      if (!endless.has(kf)) continue;
+      checked++;
       const hit = body.match(banned);
-      assert.ok(!hit, `${name}: @keyframes ${kf} animates ${hit && hit[2]}`);
+      assert.ok(!hit, `${name}: @keyframes ${kf} runs forever and animates ${hit && hit[2]}`);
     }
   }
+  assert.ok(checked >= 4, `expected the endless pulses to be found, saw ${checked}`);
+});
+
+test("endlessKeyframeNames picks the name out of an animation shorthand", () => {
+  const s = endlessKeyframeNames(".a { animation: breathe 1.25s ease-in-out infinite; }" +
+    ".b { animation: wsaddglow .9s ease-out 2; }" +
+    ".c { animation: workscan 1.25s ease-in-out infinite alternate; }");
+  assert.deepEqual([...s].sort(), ["breathe", "workscan"]);
 });
 
 test("keyframeBlocks brace-matches nested stop blocks", () => {
