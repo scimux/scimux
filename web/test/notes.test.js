@@ -2468,6 +2468,36 @@ test("P1a: desktop #bookmarkspane rule keeps display:none, width:340px, flex:non
   assert.ok(rule, "desktop #bookmarkspane rule present inside 900px media");
   assert.match(rule[1], /position:\s*static/, "desktop pane is in the flex row flow");
   assert.match(rule[1], /display:\s*none/, "pane stays hidden until bookmarks-open");
-  assert.match(rule[1], /width:\s*340px/, "pane column width");
+  assert.match(rule[1], /width:\s*var\(--pane\)/, "pane column width from the shared token");
   assert.match(rule[1], /flex:\s*none/, "pane does not grow/shrink in the row");
+});
+
+test("--pane is one token for every side column, and half of it insets the docked chat", () => {
+  /* The 340px side-column width was written out four times (#cards, #map's
+     override, #bookmarkspane, and the two workspace zone defaults) with a
+     comment saying they deliberately share one rhythm — exactly the drift
+     the --grab extraction just fixed on the dividers. */
+  const pane = tokensSrc.match(/--pane:\s*([0-9]+)px/);
+  assert.ok(pane, "--pane token defined in tokens.css");
+  assert.equal(pane[1], "340", "--pane keeps the established side-column width");
+
+  const mediaBody = desktopMedia900Body(notesCssSrc);
+  const cards = mediaBody.match(/(?:^|\n)\s*#cards,\s*#map\s*\{([^}]+)\}/);
+  assert.ok(cards, "#cards, #map desktop rule present");
+  assert.match(cards[1], /width:\s*var\(--pane\)/, "#cards width from --pane");
+  assert.doesNotMatch(mediaBody, /width:\s*340px/, "no stale 340px literal in the 900px block");
+  assert.match(notesCssSrc, /#wsinbox\s*\{\s*width:\s*var\(--wsinbox-w,\s*var\(--pane\)\)/,
+    "#wsinbox default from --pane");
+  assert.match(notesCssSrc, /#wsnav\s*\{\s*width:\s*var\(--wsnav-w,\s*var\(--pane\)\)/,
+    "#wsnav default from --pane");
+
+  /* Under the dock #cards is hidden, so the chat runs edge to edge and puts
+     (+) and send in the two bottom corners where iPadOS parks its
+     input-source pill. Give the content column back the width it has beside
+     the Activities pane — half that pane per side. */
+  const inset = mediaBody.match(
+    /body\.map-full\.map-dock\s+#msgs,\s*\n?\s*body\.map-full\.map-dock\s+#promptbar\s*\{([^}]+)\}/);
+  assert.ok(inset, "docked #msgs + #promptbar inset rule present inside the 900px block");
+  assert.match(inset[1], /padding-inline:\s*calc\(var\(--pane\)\s*\/\s*2\)/,
+    "inset is half a pane per side, derived not literal");
 });

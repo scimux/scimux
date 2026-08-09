@@ -6,6 +6,11 @@
  * stack stops being valid. These tests pin exactly those three properties. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 import {
   RETURN_MAP,
   RETURN_SEARCH,
@@ -170,27 +175,39 @@ test("returnAfterSelection on an already-empty context stays empty", () => {
 
 /* The wall map's "Open chat" used to always remember RETURN_MAP, so #chatback
    re-appeared as "‹ Return to Map" (#chatback.hasreturn beats .backbtn's
-   desktop display:none). Under the dock the map never left the screen, so that
-   control is a no-op that points at what you are already looking at. The
-   context is documented as surviving "a jump and nothing else" — opening into
-   the dock is not a jump. */
+   desktop display:none). P5a asked "am I docked?" — but map.js calls
+   selectNode *before* setMapDock(true), so the flag was still false and the
+   pill appeared on every first open. The real question is whether the map
+   will still be on screen afterwards, which on the desktop wall it always
+   is: full → dock. Hence mapStays, evaluated before the transition. */
 import * as returnto from "../js/returnto.js";
 
-test("P5a: a wall jump remembers the map only when the map actually left", () => {
-  assert.equal(returnto.mapJumpReturnKind({ how: "jump", docked: false }), RETURN_MAP);
-  assert.equal(returnto.mapJumpReturnKind({ how: "jump", docked: true }), null,
-    "docked: the map is still on screen, so there is nothing to return to");
+test("a wall jump remembers the map only when the map actually left", () => {
+  assert.equal(returnto.mapJumpReturnKind({ how: "jump", mapStays: false }), RETURN_MAP);
+  assert.equal(returnto.mapJumpReturnKind({ how: "jump", mapStays: true }), null,
+    "the map stays on screen, so there is nothing to return to");
 });
 
-test("P5a: only a jump is remembered — other selections never are", () => {
+test("only a jump is remembered — other selections never are", () => {
   for (const how of ["card", "flag", "new", "", undefined]){
-    assert.equal(returnto.mapJumpReturnKind({ how, docked: false }), null,
+    assert.equal(returnto.mapJumpReturnKind({ how, mapStays: false }), null,
       `how=${String(how)} is not a jump`);
-    assert.equal(returnto.mapJumpReturnKind({ how, docked: true }), null,
-      `how=${String(how)} is not a jump (docked)`);
+    assert.equal(returnto.mapJumpReturnKind({ how, mapStays: true }), null,
+      `how=${String(how)} is not a jump (map stays)`);
   }
 });
 
-test("P5a: mapJumpReturnKind tolerates a missing argument", () => {
+test("mapJumpReturnKind tolerates a missing argument", () => {
   assert.equal(returnto.mapJumpReturnKind(), null);
+});
+
+test("app.js decides mapStays before the dock transition, from isFull() alone", () => {
+  /* The bug was ordering, so the fix has to be pinned at the call site: if
+     this ever consults isDock() again the pill comes back on first open. */
+  const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+  const call = appSrc.match(/mapStays\s*=\s*([^;]+);/);
+  assert.ok(call, "app.js computes mapStays");
+  assert.match(call[1], /mapFeature\.isFull\(\)/, "asks whether the wall is full-screen");
+  assert.doesNotMatch(call[1], /isDock\(\)/,
+    "must not consult isDock() — it is still false when selectNode runs");
 });
