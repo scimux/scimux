@@ -1520,3 +1520,198 @@ test("P3 13: openSendTo places the caret after the merged draft in #prompt", () 
   assert.equal(r.startContainer, textNode, "caret on the draft text node");
   assert.equal(r.startOffset, merged.length, "caret AFTER the text you just sent");
 });
+
+/* ---------- P4: Start new chat… in the Send-to picker ---------- */
+
+/** Click target that resolves [data-newchat] before [data-fwd] (handler order). */
+function newChatClickTarget(){
+  const btn = el("button", { dataset: { newchat: "" } });
+  btn.dataset.newchat = "";
+  btn.closest = sel => {
+    if (sel === "[data-newchat]") return btn;
+    if (sel === "[data-fwd]") return null;
+    return null;
+  };
+  return btn;
+}
+
+/** Harness with openNewActivity spy + optional field stubs for cases 4–6. */
+function createSendToWithNewChat(overrides = {}){
+  const openNewActivityCalls = [];
+  const forkFromTurnCalls = [];
+  const nc_title = el("input", { id: "nc_title", value: "stale-title" });
+  const nc_prompt = el("textarea", { id: "nc_prompt", value: "stale-prompt" });
+  /* Simulate sheets.openNewActivity: clear parent/rationale, set prompt, focus title. */
+  let ncParent = overrides.staleParent || "stale-parent";
+  let ncRationale = overrides.staleRationale || "stale-rationale";
+  const ctx = createFeature({
+    ...overrides,
+    deps: {
+      ...(overrides.deps || {}),
+      openNewActivity: (opts = {}) => {
+        const { prompt = "", focusTitle = false } = opts;
+        openNewActivityCalls.push(opts);
+        /* Mirror the real function's clears — bookmarks only wins if it calls this. */
+        ncParent = "";
+        ncRationale = "";
+        nc_title.value = "";
+        nc_prompt.value = prompt;
+        if (focusTitle){
+          nc_title._focused = true;
+        }
+        ctx.effects.openSheet.push("#newchat");
+      },
+      forkFromTurn: (...a) => { forkFromTurnCalls.push(a); },
+    },
+  });
+  return {
+    ...ctx,
+    openNewActivityCalls,
+    forkFromTurnCalls,
+    nc_title,
+    nc_prompt,
+    getNcParent: () => ncParent,
+    getNcRationale: () => ncRationale,
+  };
+}
+
+test("P4 case 1: with eligible targets, Start new chat… is the last entry", () => {
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: ["pin"] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "hello", exceptId: "self", title: "Send to chat…" });
+  const html = ctx.roots.sendtoList.innerHTML;
+  assert.match(html, /Start new chat…|Start new chat\u2026/,
+    "trailing entry labelled Start new chat…");
+  assert.match(html, /data-newchat/, "new-chat entry uses a distinct attribute");
+  /* Last interactive entry is the new-chat button, after every data-fwd target. */
+  const lastFwd = html.lastIndexOf("data-fwd=");
+  const lastNew = Math.max(html.lastIndexOf("data-newchat"), html.lastIndexOf("Start new chat"));
+  assert.ok(lastNew > lastFwd, "Start new chat… is after all eligible targets");
+  /* Visually separated from the target list. */
+  assert.ok(
+    /sendto-new|sendto-sep|border-top|role="separator"/.test(html),
+    "new-chat entry is visually separated",
+  );
+});
+
+test("P4 case 2: no eligible targets — entry still present; dead-end message gone", () => {
+  const ctx = createFeature({ nodes: { dead: sendtoNodes.dead }, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "" });
+  const html = ctx.roots.sendtoList.innerHTML;
+  assert.match(html, /data-newchat/);
+  assert.match(html, /Start new chat…|Start new chat\u2026/);
+  assert.doesNotMatch(html, /no (running|live|open) chat/i,
+    "bare dead-end message is replaced by Start new chat…");
+  assert.doesNotMatch(html, /data-fwd=/);
+});
+
+test("P4 case 3: tap closes #sendto and opens #newchat", () => {
+  const ctx = createSendToWithNewChat({
+    nodes: sendtoNodes, pinned: [], isDesktop: true,
+  });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "carried", exceptId: "self" });
+  assert.equal(ctx.effects.openSheet[0], "#sendto");
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.ok(ctx.effects.closeSheets.length >= 1, "picker closes");
+  assert.ok(ctx.effects.openSheet.includes("#newchat"), "#newchat opens");
+  /* closeSheets before openNewActivity — never reverse. */
+  const closeAt = 0; /* closeSheets is a count push; openNewActivity after it */
+  assert.equal(ctx.effects.closeSheets.length, 1);
+  assert.equal(ctx.openNewActivityCalls.length, 1);
+});
+
+test("P4 case 4: tap prefills nc_prompt from the carried text", () => {
+  const ctx = createSendToWithNewChat({ nodes: sendtoNodes, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "bubble text here", exceptId: "self" });
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.equal(ctx.openNewActivityCalls.length, 1);
+  assert.equal(ctx.openNewActivityCalls[0].prompt, "bubble text here");
+  assert.equal(ctx.nc_prompt.value, "bubble text here");
+});
+
+test("P4 case 5: tap leaves nc_title empty and focused", () => {
+  const ctx = createSendToWithNewChat({ nodes: sendtoNodes, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "self" });
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.equal(ctx.openNewActivityCalls[0].focusTitle, true);
+  assert.equal(ctx.nc_title.value, "");
+  assert.equal(ctx.nc_title._focused, true);
+});
+
+test("P4 case 6: tap leaves ncParent and ncRationale empty (no lineage)", () => {
+  const ctx = createSendToWithNewChat({
+    nodes: sendtoNodes, pinned: [],
+    staleParent: "would-be-parent",
+    staleRationale: "would-be-rationale",
+  });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "self" });
+  assert.equal(ctx.getNcParent(), "would-be-parent", "precondition: stale parent");
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.equal(ctx.openNewActivityCalls.length, 1,
+    "path goes through openNewActivity (structural no-parent)");
+  assert.equal(ctx.getNcParent(), "");
+  assert.equal(ctx.getNcRationale(), "");
+  assert.equal(ctx.effects.select.length, 0, "no select — there is no node yet");
+});
+
+test("P4 case 8: Start new chat never calls forkFromTurn", () => {
+  const ctx = createSendToWithNewChat({ nodes: sendtoNodes, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "from bubble", exceptId: "self", title: "Send to chat…" });
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.equal(ctx.forkFromTurnCalls.length, 0);
+  assert.equal(ctx.openNewActivityCalls.length, 1);
+  /* Product must not import sheets or call forkFromTurn from bookmarks. */
+  assert.doesNotMatch(bookmarksSrc, /forkFromTurn/);
+  assert.doesNotMatch(bookmarksSrc, /from "\.\/sheets\.js"/);
+});
+
+test("P4 case 9: existing targets keep order and filtering (regression — pass at red)", () => {
+  /* sendableNodes is untouched; this locks the pre-P4 target list. */
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: ["pin"] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "hello", exceptId: "self", title: "Send to chat…" });
+  const html = ctx.roots.sendtoList.innerHTML;
+  for (const gone of ["dead", "closed", "self"])
+    assert.doesNotMatch(html, new RegExp(`data-fwd="${gone}"`), `${gone} must not be a target`);
+  const order = [...html.matchAll(/data-fwd="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["pin", "recent", "ok"]);
+});
+
+test("P4 new-chat entry is a keyboard-reachable button with pos-item class", () => {
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "self" });
+  const html = ctx.roots.sendtoList.innerHTML;
+  assert.match(html, /<button\b[^>]*class="pos-item"[^>]*data-newchat/,
+    "button.pos-item[data-newchat] — same 44px path as other .pos-item rows");
+});
+
+test("P4 phone path: Start new chat sets level 1 like send-to switch", () => {
+  const ctx = createSendToWithNewChat({
+    nodes: sendtoNodes, pinned: [], isDesktop: false,
+  });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "self" });
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.deepEqual(ctx.effects.setLevel, [1]);
+});
+
+test("P4 data-newchat branch runs before data-fwd (no phantom chat id)", () => {
+  /* If the entry carried data-fwd, select() would open a chat named after it. */
+  const ctx = createSendToWithNewChat({ nodes: sendtoNodes, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "self" });
+  const html = ctx.roots.sendtoList.innerHTML;
+  const newChatChunk = html.slice(html.indexOf("data-newchat") - 80);
+  assert.doesNotMatch(newChatChunk, /data-fwd=/,
+    "new-chat entry must not carry data-fwd");
+  ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
+  assert.equal(ctx.effects.select.length, 0);
+  assert.equal(ctx.openNewActivityCalls.length, 1);
+});

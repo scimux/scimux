@@ -1223,3 +1223,65 @@ test("P3 activity/station editor title places caret at end (scheduleTitleFocus f
   assert.deepEqual(title._range, [title.value.length, title.value.length],
     "caret at end of existing activity title");
 });
+
+/* ---------- P4: openNewActivity options + no-parent create + plusbtn trap ---------- */
+
+test("P4 case 7: create after openNewActivity carries no parent (even after a fork)", async () => {
+  const ctx = createFeature();
+  ctx.feature.bind();
+  /* Seed parent via fork, then Start new chat must wipe lineage. */
+  ctx.feature.forkFromTurn("Evidence", "p1");
+  assert.ok(typeof ctx.feature.openNewActivity === "function",
+    "openNewActivity is exported for bookmarks injection");
+  ctx.feature.openNewActivity({ prompt: "from send-to picker", focusTitle: true });
+  assert.equal(ctx.byId.nc_prompt.value, "from send-to picker");
+  assert.equal(ctx.byId.nc_title.value, "");
+  ctx.byId.nc_title.value = "Standalone";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  assert.ok(post, "create POSTed");
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.parent, "", "create payload carries no parent");
+  assert.equal(body.rationale, "", "no fork rationale either");
+  assert.equal(body.title, "Standalone");
+  assert.equal(body.prompt, "from send-to picker");
+});
+
+test("P4 openNewActivity({ prompt, focusTitle }) prefills prompt and focuses title at end", () => {
+  const ctx = createFeature();
+  ctx.feature.bind();
+  ctx.byId.nc_title.value = "old";
+  ctx.byId.nc_prompt.value = "old";
+  ctx.feature.openNewActivity({ prompt: "carried bubble text", focusTitle: true });
+  assert.equal(ctx.byId.nc_prompt.value, "carried bubble text");
+  assert.equal(ctx.byId.nc_title.value, "");
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+  ctx.flush(0);
+  assert.equal(ctx.byId.nc_title._focused, true, "title focused via scheduleTitleFocus");
+  assert.equal(ctx.byId.nc_title._selected, undefined,
+    "focusTitle reuses caret-at-end path, not select-all");
+});
+
+test("P4 plusbtn click leaves nc_prompt empty (openNewActivity ignores the Event)", () => {
+  /* Trap: on(plusbtn, "click", openNewActivity) would pass the MouseEvent as
+     the first argument. With options destructuring that becomes a silent
+     no-default object. Binding must be () => openNewActivity(). */
+  assert.match(sheetsSrc, /on\(root\("plusbtn"\),\s*"click",\s*\(\)\s*=>\s*openNewActivity\(\)\)/,
+    "plusbtn bound as () => openNewActivity() so the click Event is never options");
+  assert.doesNotMatch(sheetsSrc, /on\(root\("plusbtn"\),\s*"click",\s*openNewActivity\)/,
+    "must not pass openNewActivity bare as the click listener");
+  const ctx = createFeature();
+  ctx.feature.bind();
+  ctx.byId.nc_prompt.value = "should be cleared";
+  ctx.byId.nc_title.value = "should be cleared";
+  /* dispatch passes { target: plusbtn } — same shape as a click Event. */
+  ctx.byId.plusbtn.dispatch("click");
+  assert.equal(ctx.byId.nc_prompt.value, "",
+    "plusbtn must not feed the click Event into openNewActivity options");
+  assert.equal(ctx.byId.nc_title.value, "");
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+});
