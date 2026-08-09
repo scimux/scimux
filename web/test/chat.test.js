@@ -1447,7 +1447,9 @@ test("jumpToNow with rendered chat pins bottom", async () => {
   await feature.render();
   roots.msgs.scrollTop = 0;
   feature.jumpToNow();
-  assert.equal(roots.msgs.scrollTop, roots.msgs.scrollHeight);
+  // pinDecision lands at max = scrollHeight - clientHeight (the browser clamps)
+  assert.equal(roots.msgs.scrollTop, 800);
+  assert.ok(nearBottom(roots.msgs.scrollHeight, roots.msgs.scrollTop, roots.msgs.clientHeight));
 });
 
 test("chat rebuild pins a near-bottom reader but preserves a reader scrolled up", async () => {
@@ -1456,7 +1458,7 @@ test("chat rebuild pins a near-bottom reader but preserves a reader scrolled up"
   near.roots.msgs.clientHeight = 200;
   near.roots.msgs.scrollTop = 750; // 50px from bottom, inside the 80px fence
   await near.feature.render();
-  assert.equal(near.roots.msgs.scrollTop, 1000);
+  assert.equal(near.roots.msgs.scrollTop, 800);
 
   const up = makeFeature();
   up.roots.msgs.scrollHeight = 1000;
@@ -1477,7 +1479,7 @@ test("switching to another chat lands at the newest bubble even if the reader wa
   feature.onSelectChange();          // select() calls this before refreshChat
   roots.msgs.scrollHeight = 2400;    // the other chat is a different length
   await feature.render();
-  assert.equal(roots.msgs.scrollTop, 2400);
+  assert.equal(roots.msgs.scrollTop, 2200); // max = 2400 - 200
 });
 
 test("a jump-to-source outranks the open-at-newest pin of the selection change", async () => {

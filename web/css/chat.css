@@ -52,14 +52,19 @@
      into a sideways scroller whenever any child is wide (peek lines, code).
      Reading flows one axis: clip x here; code/peek blocks scroll internally. */
   overflow-x: clip;
-  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
-  transition: filter .16s ease, opacity .16s ease; }
+  /* No momentum-scroll prefix (no-op since iOS 13) and no filter/opacity
+     transition: both promote #msgs to its own layer, and swapping innerHTML
+     mid-transition leaves a stale empty backing store on WebKit (the blank
+     chat that scrolling or typing "fixes"). Cold-load dimming is on
+     #chatloading alone. */
+  overscroll-behavior: contain; }
 body.cards-open #msgs { overflow: hidden; }
 /* the terminal pane's own render region: a permanent last child of #msgs so
    a moving pane never rewrites a bubble. #msgs is a flex column with a gap,
    so an empty host would otherwise push a 12px hole under the last turn. */
 #peekhost:empty { display: none; }
-#msgwrap.loading #msgs { filter: blur(2px); opacity: .58; pointer-events: none; }
+/* pointer-events only — never filter/opacity on the scroller (see #msgs). */
+#msgwrap.loading #msgs { pointer-events: none; }
 #chatloading {
   position: absolute; inset: 0; z-index: 2;
   display: flex; align-items: center; justify-content: center;
@@ -74,7 +79,7 @@ body.cards-open #msgs { overflow: hidden; }
   animation: spin .85s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  #msgs { transition: none; }
+  /* vestigial #msgs { transition: none } removed with the scroller transition */
   #chatloading .spin { animation: none; }
 }
 /* no "you/agent" labels — side + color already carry the role */

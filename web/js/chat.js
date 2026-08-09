@@ -223,6 +223,24 @@ export function nearBottom(scrollHeight, scrollTop, clientHeight, slack = SCROLL
   return scrollHeight - scrollTop - clientHeight < slack;
 }
 
+/* Pure scroll decision for the chat scroller. `want` is the open-at-newest
+   intent (chatScrollBottom); when the box has no layout the intent stays
+   pending so a later frame / resize can re-assert. Overscroll always clamps.
+   A reader who scrolled up (want false, scrollTop below max) is never yanked. */
+export function pinDecision({ scrollTop = 0, scrollHeight = 0, clientHeight = 0, want = false } = {}){
+  const st = scrollTop || 0;
+  const sh = scrollHeight || 0;
+  const ch = clientHeight || 0;
+  const max = Math.max(0, sh - ch);
+  if (want){
+    if (ch === 0) return { action: "none", scrollTop: st, pending: true };
+    return { action: "pin", scrollTop: max, pending: false };
+  }
+  if (st > max) return { action: "clamp", scrollTop: max, pending: false };
+  if (st < 0) return { action: "clamp", scrollTop: 0, pending: false };
+  return { action: "none", scrollTop: st, pending: false };
+}
+
 export function liveBk(i){ return `i:${i}`; }
 export function histBk(si, ti){ return `h:${si}:${ti}`; }
 
@@ -556,6 +574,9 @@ export function createChatFeature(deps){
   let bound = false;
   const cleanups = [];
   const renderedCleanups = [];
+  /* Bottom-pin re-assert: rAF + ResizeObserver, both via deps (no-op headless). */
+  let pinObserver = null;
+  let pinRafQueued = false;
 
   function g(name, fallback){
     const v = d[name];
@@ -701,8 +722,67 @@ export function createChatFeature(deps){
     if (msgs) qa(msgs, ".peekblock, .pending").forEach(el => el.remove());
   }
 
+  /* Apply a pinDecision to a scroller element. Returns the decision so callers
+     can clear chatScrollBottom only on a verified "pin". */
+  function applyScrollDecision(el, want){
+    if (!el) return { action: "none", scrollTop: 0, pending: !!want };
+    const decision = pinDecision({
+      scrollTop: el.scrollTop || 0,
+      scrollHeight: el.scrollHeight || 0,
+      clientHeight: el.clientHeight || 0,
+      want: !!want,
+    });
+    if (decision.action === "pin" || decision.action === "clamp")
+      el.scrollTop = decision.scrollTop;
+    return decision;
+  }
+
   function pinChatBottom(el){
-    if (el) el.scrollTop = el.scrollHeight;
+    return applyScrollDecision(el, true);
+  }
+
+  function clampChatScroll(el){
+    return applyScrollDecision(el, false);
+  }
+
+  function ensurePinObserver(){
+    const RO = d.ResizeObserver;
+    if (!RO || !msgs || pinObserver) return;
+    try {
+      pinObserver = new RO(() => { reassertPin(); });
+      pinObserver.observe(msgs);
+    } catch {
+      pinObserver = null;
+    }
+  }
+
+  function schedulePinReassert(){
+    ensurePinObserver();
+    const raf = d.requestAnimationFrame;
+    if (typeof raf !== "function" || pinRafQueued) return;
+    pinRafQueued = true;
+    raf(() => {
+      pinRafQueued = false;
+      reassertPin();
+    });
+  }
+
+  function reassertPin(){
+    if (!msgs) return;
+    if (chatScrollBottom){
+      const decision = pinChatBottom(msgs);
+      if (decision.action === "pin") chatScrollBottom = false;
+    } else {
+      clampChatScroll(msgs);
+    }
+  }
+
+  function clearPinObserver(){
+    if (pinObserver && typeof pinObserver.disconnect === "function"){
+      try { pinObserver.disconnect(); } catch { /* ignore */ }
+    }
+    pinObserver = null;
+    pinRafQueued = false;
   }
 
   function invalidate(){ chatSig = ""; }
@@ -739,8 +819,14 @@ export function createChatFeature(deps){
 
   function jumpToNow(){
     chatHist.scrollTo = "";
-    if (chatSig) pinChatBottom(msgs);
-    else chatScrollBottom = true;
+    if (chatSig){
+      const decision = pinChatBottom(msgs);
+      /* No layout yet — keep the intent so a later re-assert can finish the job. */
+      if (decision.pending) chatScrollBottom = true;
+      if (decision.pending) schedulePinReassert();
+    } else {
+      chatScrollBottom = true;
+    }
   }
 
   async function loadHistory(id, scrollTo){
@@ -1073,10 +1159,25 @@ export function createChatFeature(deps){
       ? "Send unconfirmed \u2014 check the terminal"
       : (DEC_LABELS[data.reason] || "Needs your attention");
     const paneState = { showPeek, peekText, forcePeek, label, termFull, unconfirmed };
+    ensurePinObserver();
     if (chatRenderDecision(sig, chatSig) === "skip"){
-      /* The transcript stands; only the pane may have moved. */
+      /* The transcript stands; only the pane may have moved. Measure atBottom
+         before the peek write — a growing pane changes scrollHeight and used
+         to push a bottom-reader off with no re-pin (0eee686 regression). */
+      const el = msgs;
+      const wasAtBottom = !!(el && nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
       renderPeekHost(n, paneState);
-      if (chatScrollBottom){ pinChatBottom(msgs); chatScrollBottom = false; }
+      if (el){
+        if (chatScrollBottom){
+          const decision = pinChatBottom(el);
+          if (decision.action === "pin") chatScrollBottom = false;
+          else if (decision.pending) schedulePinReassert();
+        } else if (wasAtBottom){
+          pinChatBottom(el);
+        } else {
+          clampChatScroll(el);
+        }
+      }
       endChatLoad();
       return;
     }
@@ -1089,6 +1190,14 @@ export function createChatFeature(deps){
     const atBottom = nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
 
     clearRenderedListeners();
+    /* A jump-to-source aims at one bubble and outranks the open-at-newest pin.
+       Resolved before the write so we neither zero the offset nor bottom-pin
+       when a pendingJump is aiming at this node. */
+    const jumpAimed = !!(getPendingJump() && getPendingJump().node === g("sel", ""));
+    /* Zero any inherited offset before the write on a node switch so deferred
+       momentum / a stale large scrollTop from the chat we left cannot land
+       outside the new content's range. */
+    if (chatScrollBottom && !jumpAimed) el.scrollTop = 0;
     el.innerHTML =
       (data.prior_turns > 0 && !hist ? histLoadHTML(data.prior_turns) : "") +
       priorSegs.map((s, si) =>
@@ -1151,14 +1260,21 @@ export function createChatFeature(deps){
       }
       chatHist.scrollTo = "";
     }
-    /* a jump-to-source (note/search/map) aims at one bubble — it outranks the
-       open-at-newest pin that a plain selection change asks for */
-    const jumpAimed = !!(getPendingJump() && getPendingJump().node === g("sel", ""));
+    /* jumpAimed was computed before the write (see above) */
     if (chatScrollBottom && !jumpAimed){
-      pinChatBottom(el); chatScrollBottom = false; histScrolled = true;
+      const decision = pinChatBottom(el);
+      if (decision.action === "pin"){
+        chatScrollBottom = false;
+        histScrolled = true;
+      } else if (decision.pending){
+        schedulePinReassert();
+      }
     }
     if (!histScrolled && !consumePendingJump(el, turns, data.prior_turns || 0) && (atBottom || forcePeek))
       pinChatBottom(el);
+    /* Unconditional clamp backstop after every rebuild — overscroll from a
+       shrink or a stale offset never leaves a blank viewport. */
+    clampChatScroll(el);
     const onRendered = (node, event, handler) => {
       if (!node || typeof node.addEventListener !== "function") return;
       node.addEventListener(event, handler);
@@ -1424,6 +1540,7 @@ export function createChatFeature(deps){
     }
     clearRenderedListeners();
     clearChatLoad();
+    clearPinObserver();
     bound = false;
   }
 
