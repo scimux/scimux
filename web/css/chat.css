@@ -55,6 +55,10 @@
   -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
   transition: filter .16s ease, opacity .16s ease; }
 body.cards-open #msgs { overflow: hidden; }
+/* the terminal pane's own render region: a permanent last child of #msgs so
+   a moving pane never rewrites a bubble. #msgs is a flex column with a gap,
+   so an empty host would otherwise push a 12px hole under the last turn. */
+#peekhost:empty { display: none; }
 #msgwrap.loading #msgs { filter: blur(2px); opacity: .58; pointer-events: none; }
 #chatloading {
   position: absolute; inset: 0; z-index: 2;

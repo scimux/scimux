@@ -98,7 +98,9 @@ test("buildChatSignature is stable and order-sensitive", () => {
     turnsHash: "t", peekHash: "p",
   };
   const a = buildChatSignature(base);
-  const b = buildChatSignature({ ...base, live: "active" });
+  /* live and peekHash deliberately do not appear — they belong to the pane,
+     which has its own host and its own signature. */
+  const b = buildChatSignature({ ...base, delivery: "unconfirmed" });
   assert.equal(a, buildChatSignature(base));
   assert.notEqual(a, b);
   // production includes kind so a kind change re-renders the keyrow
@@ -906,7 +908,7 @@ function el(tag, attrs = {}){
     hidden: !!attrs.hidden,
     disabled: !!attrs.disabled,
     textContent: attrs.textContent || "",
-    innerHTML: attrs.innerHTML || "",
+    _html: attrs.innerHTML || "",
     value: attrs.value || "",
     scrollTop: 0,
     scrollHeight: attrs.scrollHeight || 0,
@@ -1018,6 +1020,15 @@ function el(tag, attrs = {}){
     listenerCount(type){ return (listeners.get(type) || []).length; },
   };
   if (attrs.id) node.id = attrs.id;
+  /* A real innerHTML write replaces the element's whole subtree. The fake keeps
+     children in an array that a plain data property would leave untouched, so
+     stale nodes (e.g. a previous #peekhost) would survive a rebuild here but
+     not in a browser. */
+  Object.defineProperty(node, "innerHTML", {
+    configurable: true,
+    get(){ return node._html; },
+    set(v){ node._html = v; node.children.length = 0; },
+  });
   return node;
 }
 
@@ -1248,7 +1259,10 @@ test("refreshChat builds bubbles, signature-skips rebuild, preserves empty/loadi
   // force rebuild via term toggle path
   firstListener(roots.termtoggle, "click")();
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(roots.msgs.innerHTML, /peekblock|Terminal/);
+  /* the pane renders into its own host inside #msgs, never into the bubbles */
+  const host = roots.msgs.children.find(c => c.id === "peekhost");
+  assert.ok(host, "the pane host must exist after a rebuild");
+  assert.match(host.innerHTML, /peekblock|Terminal/);
   feature.destroy();
 });
 
@@ -1731,7 +1745,7 @@ function peekingFeature(peek){
       if (path.includes("/chat")) return {
         turns: [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
                 { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }],
-        live: "quiet", delivery: "ok", source: "tmux",
+        live: "quiet", delivery: "ok", source: "tmux", attention: "approval",
         chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
       };
       return {};
@@ -1741,7 +1755,9 @@ function peekingFeature(peek){
   Object.defineProperty(made.roots.msgs, "innerHTML", {
     configurable: true,
     get(){ return html; },
-    set(v){ writes++; html = v; },
+    /* a real innerHTML write discards the element's children — the fake node
+       keeps an array, so model it here or a stale host would survive. */
+    set(v){ writes++; html = v; made.roots.msgs.children.length = 0; },
   });
   return {
     ...made,
@@ -1813,7 +1829,7 @@ test("a real transcript change still rebuilds, and re-hosts the pane", async () 
     api: async (path) => {
       if (path.includes("/peek")) return pane;
       if (path.includes("/chat")) return {
-        turns, live: "quiet", delivery: "ok", source: "tmux",
+        turns, live: "quiet", delivery: "ok", source: "tmux", attention: "approval",
         chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
       };
       return {};

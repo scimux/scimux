@@ -174,11 +174,14 @@ export function priorSegsFromHistory(histSegs, chatStarted){
   return histSegs.filter(s => (Date.parse(s.start || s.seam || "") || 0) < curT);
 }
 
+/* The transcript's signature. Deliberately blind to two things that move on
+   the poll cadence: the terminal pane capture (which has its own host and its
+   own signature below) and mechanical liveness, which never reaches this
+   markup at all — it drives applyChatActivityChrome, outside the region. */
 export function buildChatSignature(parts){
   const p = parts || {};
   return [
     p.nodeId,
-    p.live,
     p.attention,
     p.attentionHidden,
     p.delivery,
@@ -193,8 +196,22 @@ export function buildChatSignature(parts){
     p.echoHash || "",
     p.histKey || "",
     p.turnsHash || "",
-    p.peekHash || "",
     p.expanded ? "1" : "0",
+  ].join("|");
+}
+
+/* Everything peekBlockHTML renders. Its own signature so the pane can move on
+   its own — a spinner changes the capture on every poll, and that must cost a
+   pane-sized repaint, not a transcript-sized one. */
+export function buildPeekSignature(parts){
+  const p = parts || {};
+  return [
+    p.showPeek ? "1" : "0",
+    p.peekHash || "",
+    p.forcePeek ? "1" : "0",
+    p.label || "",
+    p.termFull ? "1" : "0",
+    p.unconfirmed ? "1" : "0",
   ].join("|");
 }
 
@@ -507,6 +524,13 @@ export function createChatFeature(deps){
 
   /* feature-owned state */
   let chatSig = "";
+  /* The pane's own render region: a host element inside #msgs that the
+     transcript rebuild recreates, plus the signature of what is painted into
+     it. Held as a reference rather than looked up, because the host is created
+     by the rebuild and #msgs' markup is written wholesale. */
+  let peekHost = null;
+  let peekSig = "";
+  const peekCleanups = [];
   let termOpen = false;
   let termFull = false;
   let sentEcho = null;
@@ -593,6 +617,48 @@ export function createChatFeature(deps){
     while (renderedCleanups.length){
       try { renderedCleanups.pop()(); } catch { /* ignore */ }
     }
+    clearPeekListeners();
+  }
+
+  /* The pane's #termfull / #decresolve live and die with each pane repaint, so
+     they get their own list — otherwise every poll would push another closure
+     onto renderedCleanups, which is only drained on a transcript rebuild. */
+  function clearPeekListeners(){
+    while (peekCleanups.length){
+      try { peekCleanups.pop()(); } catch { /* ignore */ }
+    }
+  }
+
+  /* Repaint the terminal pane in place. Called on every refresh — including
+     the transcript's skip path, which is the point. */
+  function renderPeekHost(n, { showPeek, peekText, forcePeek, label, termFull: full, unconfirmed }){
+    if (!peekHost) return;
+    const sig = buildPeekSignature({
+      showPeek, peekHash: hash(peekText || ""), forcePeek, label,
+      termFull: full, unconfirmed,
+    });
+    if (sig === peekSig) return;
+    peekSig = sig;
+    clearPeekListeners();
+    peekHost.innerHTML = showPeek && peekText
+      ? peekBlockHTML({ forcePeek, label, termFull: full, peekText, unconfirmed, escape })
+      : "";
+    const pk = q(peekHost, ".peek");
+    if (pk) pk.scrollTop = pk.scrollHeight;
+    const onPeek = (node, event, handler) => {
+      if (!node || typeof node.addEventListener !== "function") return;
+      node.addEventListener(event, handler);
+      peekCleanups.push(() => node.removeEventListener(event, handler));
+    };
+    const tf = q(peekHost, "#termfull") || (doc && doc.querySelector ? doc.querySelector("#termfull") : null);
+    onPeek(tf, "click", () => { termFull = !termFull; peekSig = ""; refreshChat(); });
+    const dr = q(peekHost, "#decresolve") || (doc && doc.querySelector ? doc.querySelector("#decresolve") : null);
+    onPeek(dr, "click", async () => {
+      try { await api(`/api/nodes/${encodeURIComponent(n.id)}/send/resolve`, { method: "POST" }); }
+      catch { /* ignore */ }
+      chatSig = "";
+      if (typeof d.tick === "function") d.tick();
+    });
   }
 
   function beginChatLoad(id, gen, cold){
@@ -989,7 +1055,6 @@ export function createChatFeature(deps){
     const expanded = permExpanded.node === n.id && permExpanded.open;
     const sig = buildChatSignature({
       nodeId: n.id,
-      live: data.live,
       attention: n.attention,
       attentionHidden,
       delivery: data.delivery,
@@ -1002,10 +1067,15 @@ export function createChatFeature(deps){
       echoHash: echo ? hash(echo.text) : "",
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hash(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
-      peekHash: hash(peekText),
       expanded,
     });
+    const label = unconfirmed
+      ? "Send unconfirmed \u2014 check the terminal"
+      : (DEC_LABELS[data.reason] || "Needs your attention");
+    const paneState = { showPeek, peekText, forcePeek, label, termFull, unconfirmed };
     if (chatRenderDecision(sig, chatSig) === "skip"){
+      /* The transcript stands; only the pane may have moved. */
+      renderPeekHost(n, paneState);
       if (chatScrollBottom){ pinChatBottom(msgs); chatScrollBottom = false; }
       endChatLoad();
       return;
@@ -1017,9 +1087,6 @@ export function createChatFeature(deps){
     const el = msgs;
     if (!el){ endChatLoad(); return; }
     const atBottom = nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
-    const label = unconfirmed
-      ? "Send unconfirmed \u2014 check the terminal"
-      : (DEC_LABELS[data.reason] || "Needs your attention");
 
     clearRenderedListeners();
     el.innerHTML =
@@ -1050,10 +1117,20 @@ export function createChatFeature(deps){
         <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markdown(a.clean)}${a.html}</div>
       </div>`;
       }).join("") +
-      (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
-      (showPeek && peekText
-        ? peekBlockHTML({ forcePeek, label, termFull, peekText, unconfirmed, escape })
-        : "");
+      (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "");
+
+    /* The pane's own region. Created rather than written into the markup so the
+       feature can hold a live reference: #msgs is rewritten wholesale, and a
+       string-built host would have to be re-found after every rebuild. */
+    peekHost = doc && doc.createElement ? doc.createElement("div") : null;
+    if (peekHost){
+      peekHost.id = "peekhost";
+      el.appendChild(peekHost);
+    }
+    /* The fresh host is empty and its listeners died with the old one, so the
+       pane must be repainted unconditionally after a rebuild. */
+    peekSig = "";
+    renderPeekHost(n, paneState);
 
     renderBubbleActions();
 
@@ -1082,24 +1159,11 @@ export function createChatFeature(deps){
     }
     if (!histScrolled && !consumePendingJump(el, turns, data.prior_turns || 0) && (atBottom || forcePeek))
       pinChatBottom(el);
-    const pk = q(el, ".peek");
-    if (pk) pk.scrollTop = pk.scrollHeight;
-
     const onRendered = (node, event, handler) => {
       if (!node || typeof node.addEventListener !== "function") return;
       node.addEventListener(event, handler);
       renderedCleanups.push(() => node.removeEventListener(event, handler));
     };
-    const tf = q(el, "#termfull") || (doc && doc.querySelector ? doc.querySelector("#termfull") : null);
-    onRendered(tf, "click", () => { termFull = !termFull; chatSig = ""; refreshChat(); });
-    const dr = q(el, "#decresolve") || (doc && doc.querySelector ? doc.querySelector("#decresolve") : null);
-    onRendered(dr, "click", async () => {
-      try { await api(`/api/nodes/${encodeURIComponent(n.id)}/send/resolve`, { method: "POST" }); }
-      catch { /* ignore */ }
-      chatSig = "";
-      if (typeof d.tick === "function") d.tick();
-    });
-
     if (keyrow){
       /* Preserve .permask scrollTop across poll rebuilds (expanded path only).
          Same spirit as withCardEditsPreserved: snapshot before innerHTML write,
