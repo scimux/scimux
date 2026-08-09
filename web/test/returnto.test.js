@@ -165,3 +165,32 @@ test("selecting a chat any other way drops the context — the trajectory deviat
 test("returnAfterSelection on an already-empty context stays empty", () => {
   assert.equal(returnAfterSelection(null, "jump"), null);
 });
+
+/* ---------- P5a: a dock open is not a jump ---------- */
+
+/* The wall map's "Open chat" used to always remember RETURN_MAP, so #chatback
+   re-appeared as "‹ Return to Map" (#chatback.hasreturn beats .backbtn's
+   desktop display:none). Under the dock the map never left the screen, so that
+   control is a no-op that points at what you are already looking at. The
+   context is documented as surviving "a jump and nothing else" — opening into
+   the dock is not a jump. */
+import * as returnto from "../js/returnto.js";
+
+test("P5a: a wall jump remembers the map only when the map actually left", () => {
+  assert.equal(returnto.mapJumpReturnKind({ how: "jump", docked: false }), RETURN_MAP);
+  assert.equal(returnto.mapJumpReturnKind({ how: "jump", docked: true }), null,
+    "docked: the map is still on screen, so there is nothing to return to");
+});
+
+test("P5a: only a jump is remembered — other selections never are", () => {
+  for (const how of ["card", "flag", "new", "", undefined]){
+    assert.equal(returnto.mapJumpReturnKind({ how, docked: false }), null,
+      `how=${String(how)} is not a jump`);
+    assert.equal(returnto.mapJumpReturnKind({ how, docked: true }), null,
+      `how=${String(how)} is not a jump (docked)`);
+  }
+});
+
+test("P5a: mapJumpReturnKind tolerates a missing argument", () => {
+  assert.equal(returnto.mapJumpReturnKind(), null);
+});

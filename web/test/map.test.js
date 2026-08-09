@@ -3485,3 +3485,41 @@ test("P5: #maprail is outside #mapwrap; successive renders rewrite one rail (no 
     "re-render must not re-bind click (no orphaned listeners)");
   feature.destroy();
 });
+
+/* ---------- P5a: chrome that assumed map and chat are never both visible ---------- */
+
+test("P5a: the bookmarks chevron is hidden in full screen (no dead control)", () => {
+  /* #bookmarksbtn toggles body.bookmarks-open. Under body.map-full the wall
+     earns the whole width, so the pane it opens is hidden — leaving a control
+     that appears to do nothing. Hide the control instead. */
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "900px media block present");
+  const rule = mediaBody.match(/body\.map-full\s+#bookmarksbtn\s*\{([^}]+)\}/);
+  assert.ok(rule, "body.map-full #bookmarksbtn rule inside desktop media");
+  assert.match(rule[1], /display:\s*none/, "chevron hidden in full screen");
+});
+
+test("P5a: bookmarks-open cannot reveal the pane over the wall map", () => {
+  /* body.bookmarks-open #bookmarkspane { display: flex } (notes.css) and
+     body.map-full #bookmarkspane { display: none } have equal specificity, so
+     source order decided it and the pane won — sliding in over the full-screen
+     wall. Pin an explicit higher-specificity rule so order can never decide. */
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "900px media block present");
+  assert.match(mediaBody, /body\.map-full\s+#bookmarkspane[^{]*\{[^}]*display:\s*none/,
+    "full screen hides the bookmarks pane");
+  const both = mediaBody.match(/body\.map-full\.bookmarks-open\s+#bookmarkspane\s*\{([^}]+)\}/);
+  assert.ok(both, "explicit body.map-full.bookmarks-open #bookmarkspane rule");
+  assert.match(both[1], /display:\s*none/,
+    "an open bookmarks state must not reveal the pane in full screen");
+});
+
+test("P5a: #maprail is an announced landmark, not a bare labelled div", () => {
+  /* aria-label on a <div> with no role is dropped by most screen readers, so
+     the rail had no announced identity (its ticks were labelled fine). */
+  const html = readFileSync(join(__dirname, "../index.html"), "utf8");
+  const tag = html.match(/<div id="maprail"[^>]*>/);
+  assert.ok(tag, "#maprail present in index.html");
+  assert.match(tag[0], /role="navigation"/, "rail is a navigation landmark");
+  assert.match(tag[0], /aria-label="[^"]+"/, "landmark is named");
+});
