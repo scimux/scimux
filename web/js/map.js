@@ -5,6 +5,7 @@
  * Owned roots / controls:
  *   - #maptabs, #lanechips, #mapwrap, #mapscroll (scroll for toolbar)
  *   - #maptoolbar (floating wall-map selection bar)
+ *   - #maprail (attention-locator gutter; full-screen wall only)
  *   - #mapfullbtn, #farebtn (map chrome toggles)
  *   - #mapdivider (dock map|chat separator; desktop-only under map-full.map-dock)
  *   - map group sheet controls #tab_head/#tab_name/#tab_lanes/#tab_save/#tab_del
@@ -17,7 +18,7 @@
  *   - storage (localStorage), document/window, CSS.escape
  *
  * Outputs:
- *   - HTML into maptabs / lanechips / mapwrap / maptoolbar
+ *   - HTML into maptabs / lanechips / mapwrap / maptoolbar / maprail
  *   - body.map-full / body.map-dock / body.dock-peek classes; mapfullbtn
  *     ARIA/glyph; farebtn.on + aria-pressed + on/off layer-group SVG (fare
  *     layer; revealed only under body.map-full)
@@ -35,6 +36,7 @@
  *   - #mapwrap click (fold / station / golane / goorigin / legacy wall btns)
  *   - #mapwrap longpress station → editor (+ wall selection when full)
  *   - #maptoolbar click (open chat / edit / bookmark / fork / exit)
+ *   - #maprail click (select asking station + scrollIntoView)
  *   - #mapscroll scroll + window resize → positionMapToolbar
  *   - #mapfullbtn / #farebtn click
  *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split / peek)
@@ -113,6 +115,31 @@ export function anchoredScrollTop({ prevTop, prevIndex, nextIndex, rowHeight } =
   if (prevIndex == null || nextIndex == null) return prevTop;
   const next = Number(prevTop) + (Number(nextIndex) - Number(prevIndex)) * Number(rowHeight);
   return next < 0 ? 0 : next;
+}
+
+/* Attention rail ticks: one locator per asking station at its fraction of wall
+   content height. Attention is a node property, but wall rows are stops — only
+   the HEAD stop of an asking node gets a tick (matches attentionStationSVG's
+   `if (!s.head) return` guard). Pure, DOM-free; ordered as the rows are. */
+export function railTicks({ rows, rowHeight, offset } = {}){
+  const list = rows || [];
+  const n = list.length;
+  if (!n) return [];
+  const RH = Number(rowHeight);
+  const OFF = Number(offset);
+  const contentH = OFF + n * RH;
+  if (!(contentH > 0)) return [];
+  const out = [];
+  for (let i = 0; i < n; i++){
+    const s = list[i];
+    if (!s || !s.head || !s.n || !s.n.attention) continue;
+    out.push({
+      nodeId: s.n.id,
+      stopKey: stopKey(s),
+      frac: (OFF + i * RH + RH / 2) / contentH,
+    });
+  }
+  return out;
 }
 
 export const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
@@ -832,6 +859,7 @@ export function createMapFeature(deps){
   const mapwrap = roots.mapwrap;
   const mapscroll = roots.mapscroll;
   const maptoolbar = roots.maptoolbar;
+  const maprail = roots.maprail;
   const mapfullbtn = roots.mapfullbtn;
   const farebtn = roots.farebtn;
   const fareticket = roots.fareticket;
@@ -1229,6 +1257,27 @@ export function createMapFeature(deps){
     positionMapToolbar();
   }
 
+  /* Attention rail: rewrite after every wall paint. .on only when there is at
+     least one tick so an empty gutter cannot swallow clicks. Cleared on the
+     empty-rows early return and whenever the stack map renders instead. */
+  function clearMapRail(){
+    if (!maprail) return;
+    maprail.classList.toggle("on", false);
+    maprail.innerHTML = "";
+  }
+
+  function renderMapRail(rows){
+    if (!maprail) return;
+    const ticks = railTicks({ rows, rowHeight: WALL_ROW_H, offset: 16 });
+    maprail.classList.toggle("on", ticks.length > 0);
+    if (!ticks.length){ maprail.innerHTML = ""; return; }
+    maprail.innerHTML = ticks.map(t => {
+      const n = nodeById(t.nodeId);
+      const title = (n && (n.title || n.id)) || t.nodeId;
+      return `<button type="button" data-nid="${escape(t.nodeId)}" data-skey="${escape(t.stopKey)}" style="top:${t.frac * 100}%" aria-label="Jump to ${escape(title)}"></button>`;
+    }).join("");
+  }
+
   function renderWallMap(model, grp, inGroup, served, stations, focusLane){
     const colLanes = model.lanes.filter(l => inGroup(l.id));
     const cols = laneColumnOrder(colLanes, stations, model.byId);
@@ -1252,6 +1301,11 @@ export function createMapFeature(deps){
 
     if (!nRows){
       if (mapwrap) mapwrap.innerHTML = `<div class="empty">No journeys${grp ? " on this map" : ""} yet.</div>`;
+      /* Empty wall: drop anchor state so a later refill with the same stop
+         selected does not apply a stale row-index delta (P4 edge). */
+      lastSelKey = "";
+      lastSelRow = null;
+      clearMapRail();
       renderLaneChips(model, inGroup, focusLane);
       return;
     }
@@ -1422,6 +1476,10 @@ export function createMapFeature(deps){
     lastSelRow = nextIndex;
     renderLaneChips(model, inGroup, focusLane);
     renderMapToolbar();
+    /* Rail follows the wall paint: signature already includes n.attention, so
+       a node starting/stopping asking re-renders and the rail updates; a skip
+       correctly leaves it alone. */
+    renderMapRail(rows);
   }
 
   function renderMap(){
@@ -1446,6 +1504,8 @@ export function createMapFeature(deps){
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
+    /* Stack map has no rail — clear so a prior wall session cannot leave ticks. */
+    clearMapRail();
 
     const RH = 76, LX = 22, LW = 56;
     const y = i => i * RH + RH / 2;
@@ -1705,6 +1765,24 @@ export function createMapFeature(deps){
     }
   }
 
+  function onMapRailClick(e){
+    /* Tick tap: same selection path as a wall row tap (setMapSel), then bring
+       the row into view. scrollIntoView is correct here — P4's no-animation
+       fence was about poll ticks, not a human tapping a control. */
+    const t = e.target.closest("[data-nid]");
+    if (!t) return;
+    const nid = t.dataset.nid;
+    const skey = t.dataset.skey || "";
+    if (mapFull) setMapSel(nid, skey, "");
+    const row = mapwrap && mapwrap.querySelector(
+      skey
+        ? `.strow[data-skey="${CSSRef.escape(skey)}"]`
+        : `.strow[data-nid="${CSSRef.escape(nid)}"]`,
+    );
+    if (row && typeof row.scrollIntoView === "function")
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
   function onToolbarClick(e){
     const j = e.target.closest("[data-jump]");
     if (j){
@@ -1813,6 +1891,7 @@ export function createMapFeature(deps){
     on(lanechips, "click", onLaneChipsClick);
     on(mapwrap, "click", onMapWrapClick);
     on(maptoolbar, "click", onToolbarClick);
+    on(maprail, "click", onMapRailClick);
     on(mapscroll, "scroll", positionMapToolbar, { passive: true });
     if (win && typeof win.addEventListener === "function"){
       win.addEventListener("resize", positionMapToolbar);
