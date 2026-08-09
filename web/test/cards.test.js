@@ -576,3 +576,93 @@ test("ordering remains map-model responsibility (pins → attention → fresh)",
   assert.equal(ids[0], "attn");
   assert.equal(hardAttention({ attention: "approval" }), true);
 });
+
+/* ---------- the 304 path has to actually be cheap ----------
+ * updateCardAges runs on both poll branches, including the ETag 304
+ * short-circuit whose whole purpose is to make an unchanged fleet nearly
+ * free. It looped every node in the fleet — CSS.escape, a regex, and two
+ * getElementById each — to reach the handful of cards actually rendered,
+ * and rewrote every card's title attribute unconditionally. */
+
+function agedNode(id, over){
+  return { id, title: id, live: "quiet", last_interaction: 1000, last_activity: 1000, ...over };
+}
+
+function renderedCard(id){
+  const time = {
+    textContent: "", _title: "", titleWrites: 0,
+    get title(){ return this._title; },
+    set title(v){ this.titleWrites++; this._title = v; },
+    classList: { remove(){}, add(){} },
+    offsetWidth: 0,
+  };
+  return { id: "card-" + id, _time: time, querySelector: s => (s === ".time" ? time : null) };
+}
+
+test("updateAges is proportional to the rendered cards, not to the fleet", () => {
+  const cards = [renderedCard("n7"), renderedCard("n42")];
+  let byIdCalls = 0;
+  const list = {
+    innerHTML: "", addEventListener(){}, removeEventListener(){},
+    querySelectorAll(sel){ return sel === ".card" ? cards : []; },
+  };
+  const nodes = Array.from({ length: 120 }, (_, i) => agedNode("n" + i));
+  const feature = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll: () => [], addEventListener(){}, removeEventListener(){} }, list },
+    document: { title: "", getElementById(){ byIdCalls++; return null; }, querySelector: () => null },
+    nodes: () => nodes,
+    unadopted: () => [], sel: () => "", cardTab: () => "all", setCardTab(){},
+    laneFilter: () => "", attnFoldOpen: () => false, setAttnFoldOpen(){},
+    expanded: () => new Set(), actionCard: () => "", setActionCard(){},
+    editingDesc: () => "", setEditingDesc(){}, editingTitle: () => "",
+    editingTitleScope: () => "", cardsSig: () => "", setCardsSig(){},
+    pinned: () => [], archived: () => [], lanes: () => [], bookmarks: () => [],
+    agentLogo: () => "", laneSelectHTML: () => "", laneColor: () => "#000", laneName: () => "",
+    icons: {}, ageText: ms => "T" + ms,
+  });
+
+  feature.updateAges();
+  assert.equal(byIdCalls, 0,
+    "the DOM already knows which cards exist — walking the fleet to find them is the bug");
+  assert.equal(cards[0]._time.textContent, "you T1000");
+  assert.equal(cards[1]._time.textContent, "you T1000");
+  assert.equal(cards[0]._time.title, "Last interaction T1000 · last seen T1000");
+
+  const writes = cards[0]._time.titleWrites;
+  assert.ok(writes > 0, "the first pass must set the title");
+  feature.updateAges();
+  feature.updateAges();
+  assert.equal(cards[0]._time.titleWrites, writes,
+    "an unchanged title must not be rewritten on every poll");
+  assert.equal(byIdCalls, 0);
+});
+
+test("updateAges still updates a card whose age text moved on", () => {
+  const cards = [renderedCard("a")];
+  let clock = 1000;
+  const list = {
+    innerHTML: "", addEventListener(){}, removeEventListener(){},
+    querySelectorAll(sel){ return sel === ".card" ? cards : []; },
+  };
+  const node = agedNode("a");
+  const feature = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll: () => [], addEventListener(){}, removeEventListener(){} }, list },
+    document: { title: "", getElementById: () => null, querySelector: () => null },
+    nodes: () => [node],
+    unadopted: () => [], sel: () => "", cardTab: () => "all", setCardTab(){},
+    laneFilter: () => "", attnFoldOpen: () => false, setAttnFoldOpen(){},
+    expanded: () => new Set(), actionCard: () => "", setActionCard(){},
+    editingDesc: () => "", setEditingDesc(){}, editingTitle: () => "",
+    editingTitleScope: () => "", cardsSig: () => "", setCardsSig(){},
+    pinned: () => [], archived: () => [], lanes: () => [], bookmarks: () => [],
+    agentLogo: () => "", laneSelectHTML: () => "", laneColor: () => "#000", laneName: () => "",
+    icons: {}, ageText: () => "T" + clock,
+  });
+  feature.updateAges();
+  assert.equal(cards[0]._time.textContent, "you T1000");
+  const titleWrites = cards[0]._time.titleWrites;
+  clock = 2000;
+  feature.updateAges();
+  assert.equal(cards[0]._time.textContent, "you T2000", "a moved age must still land");
+  assert.ok(cards[0]._time.titleWrites > titleWrites, "and so must a moved title");
+});
