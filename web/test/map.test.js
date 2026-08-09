@@ -3415,3 +3415,146 @@ test("peek is gone: no third dock state in the exports, the CSS, or the ladder",
   assert.equal(mapExports.escapeDockStep({ mapFull: false, mapDock: false }), "none");
   assert.equal(mapExports.escapeDockStep(), "none", "tolerates a missing argument");
 });
+
+/* ---------- wall repaint budget: shape rebuilds, state patches ----------
+ * The wall was re-innerHTML'd on nearly every 2s poll because its signature
+ * folded in two fields that move on the poll cadence: mechanical live
+ * (active<->quiet flips whenever a pane stops animating) and ctx_pct (an
+ * integer gauge that creeps). With ~170 stations the odds that *some* node
+ * moved are ~1 per tick, so one agent's 1px dot rebuilt the whole wall and
+ * discarded every painted layer — the "grey areas while scrolling".
+ * The rule these tests pin: rebuild when the wall's *shape* changes; repaint
+ * a station's *state* in place. */
+
+function volNode(over){
+  return {
+    id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+    created_at: "2026-01-01T00:00:00Z", ctx_pct: 10, stops: [], ...over,
+  };
+}
+const volSigOpts = { focusLane: null, mapTab: "all", mapSel: "", mapSelKey: "", fareOn: false };
+const volSig = n => wallMapSignature(stopsOf(n).sort(newestFirst), ["L"], volSigOpts);
+
+test("liveShape keeps exited/unavailable but collapses the active<->quiet flicker", () => {
+  // exited and unavailable swap a filled dot for a hollow one and put .dead on
+  // the row — a shape change, worth a rebuild. active vs quiet is one circle
+  // radius and one caption word, so both collapse to the same bucket.
+  assert.equal(mapExports.liveShape("exited"), "exited");
+  assert.equal(mapExports.liveShape("unavailable"), "unavailable");
+  assert.equal(mapExports.liveShape("active"), mapExports.liveShape("quiet"));
+  assert.notEqual(mapExports.liveShape("active"), "exited");
+  assert.equal(mapExports.liveShape(""), mapExports.liveShape("quiet"),
+    "an absent liveness is not its own shape");
+});
+
+test("wall signature ignores the active<->quiet flip", () => {
+  assert.equal(volSig(volNode({ live: "active" })), volSig(volNode({ live: "quiet" })),
+    "a turn starting or ending must not rebuild the wall");
+  assert.equal(mapRenderDecision(volSig(volNode({ live: "active" })),
+                                 volSig(volNode({ live: "quiet" }))), "skip");
+});
+
+test("wall signature ignores ctx_pct drift but not its first appearance", () => {
+  assert.equal(volSig(volNode({ ctx_pct: 10 })), volSig(volNode({ ctx_pct: 74 })),
+    "the gauge creeping must not rebuild the wall");
+  assert.equal(volSig(volNode({ ctx_pct: 79 })), volSig(volNode({ ctx_pct: 81 })),
+    "even the 80% colour flip is an attribute write, not a rebuild");
+  // null -> number has to create SVG elements, so it is a shape change.
+  assert.notEqual(volSig(volNode({ ctx_pct: null })), volSig(volNode({ ctx_pct: 0 })),
+    "a ring appearing from nothing cannot be patched into existence");
+});
+
+test("wall signature still rebuilds for the liveness changes that change shape", () => {
+  const running = volSig(volNode({ live: "active" }));
+  assert.notEqual(running, volSig(volNode({ live: "exited" })), "hollow dot + .dead row");
+  assert.notEqual(running, volSig(volNode({ live: "unavailable" })), "hollow dot");
+  assert.notEqual(running, volSig(volNode({ attention: "approval" })),
+    "attention adds the glow and a rail tick");
+});
+
+test("wallVolatile keys head stops only, and volatileDiff returns just the movers", () => {
+  const a = volNode({ id: "a", live: "quiet", ctx_pct: 10 });
+  const b = volNode({ id: "b", live: "quiet", ctx_pct: 20 });
+  const rows = [...stopsOf(a), ...stopsOf(b)];
+  const prev = mapExports.wallVolatile(rows);
+  assert.deepEqual(Object.keys(prev).sort(), [stopKey(stopsOf(a)[0]), stopKey(stopsOf(b)[0])].sort());
+  // Earlier stops render "· earlier stop" — no status word, no live dot.
+  const withStops = volNode({ id: "c", stops: [{ time: "2026-01-02T00:00:00Z" }] });
+  const stopRows = stopsOf(withStops);
+  assert.ok(stopRows.length > 1, "fixture must produce a non-head stop");
+  assert.equal(Object.keys(mapExports.wallVolatile(stopRows)).length, 1,
+    "only head stops carry volatile state");
+
+  const moved = [...stopsOf(volNode({ id: "a", live: "active", ctx_pct: 10 })), ...stopsOf(b)];
+  const next = mapExports.wallVolatile(moved);
+  assert.deepEqual(mapExports.volatileDiff(prev, next), [stopKey(stopsOf(a)[0])],
+    "one node moving must not repaint its 169 neighbours");
+  assert.deepEqual(mapExports.volatileDiff(next, next), [], "a still fleet patches nothing");
+  assert.deepEqual(mapExports.volatileDiff(null, next).sort(), Object.keys(next).sort(),
+    "no previous frame means paint everything");
+});
+
+test("patchStationVolatile writes attributes and text, never innerHTML", () => {
+  const writes = [];
+  const el = (tag, attrs = {}) => ({
+    tag, attrs, _text: "",
+    get textContent(){ return this._text; },
+    set textContent(v){ this._text = v; writes.push([tag, "text", v]); },
+    set innerHTML(v){ throw new Error("patch must not re-parse markup"); },
+    getAttribute(k){ return this.attrs[k]; },
+    setAttribute(k, v){ this.attrs[k] = String(v); writes.push([tag, k, String(v)]); },
+  });
+  const cap = el("st");
+  const row = el("row"); row.querySelector = s => (s === ".cap .st" ? cap : null);
+  const dot = el("dot", { r: "5.5" });
+  const arc = el("arc", { "stroke-dasharray": "0 1", stroke: "C(L)", "data-col": "C(L)" });
+  const root = { querySelector(s){
+    if (s.includes(".strow")) return row;
+    if (s.includes("data-dot")) return dot;
+    if (s.includes("data-ctx")) return arc;
+    return null;
+  } };
+
+  mapExports.patchStationVolatile(root, "k", volNode({ live: "active", ctx_pct: 90 }));
+  assert.equal(cap.textContent, "Running", "the caption word is the live signal on the wall");
+  assert.equal(dot.attrs.r, "6.5", "active dot is the fatter one");
+  assert.equal(arc.attrs.stroke, "var(--attn)", "the gauge turns amber past 80%");
+  assert.notEqual(arc.attrs["stroke-dasharray"], "0 1", "the arc must actually move");
+
+  mapExports.patchStationVolatile(root, "k", volNode({ live: "quiet", ctx_pct: 30 }));
+  assert.equal(cap.textContent, "Quiet");
+  assert.equal(dot.attrs.r, "5.5");
+  assert.equal(arc.attrs.stroke, "C(L)", "below 80% it goes back to the lane colour it was drawn in");
+
+  // A station whose hooks are absent (an exited node has no patchable dot)
+  // must be a silent no-op, not a throw that kills the whole poll tick.
+  assert.doesNotThrow(() => mapExports.patchStationVolatile({ querySelector: () => null }, "k", volNode({})));
+  assert.doesNotThrow(() => mapExports.patchStationVolatile(null, "k", volNode({})));
+});
+
+test("the wall markup carries the hooks the patch needs", () => {
+  const n = volNode({});
+  const html = stationRowHTML(n, { color: () => "C", name: () => "N" },
+    { stop: stopsOf(n)[0] });
+  assert.match(html, /<span class="st">Quiet<\/span>/,
+    "the status word needs its own element or the patch has to rewrite the caption");
+  // The live dot and the gauge arc need addressable hooks in the SVG, and the
+  // arc must be emitted even at 0% so the patch never has to create a node.
+  assert.match(mapSrc, /data-dot="/);
+  assert.match(mapSrc, /data-ctx="/);
+  assert.match(mapSrc, /data-col="/);
+  assert.doesNotMatch(mapSrc, /if \(frac > 0\)/,
+    "an arc that only exists above 0% cannot be patched from 0% upwards");
+});
+
+test("the wall's skip path patches volatile state instead of returning blind", () => {
+  // Dropping live/ctx_pct from the signature without a repaint would leave the
+  // wall lying about which agents are running.
+  const skip = mapSrc.slice(mapSrc.indexOf("const sig = wallMapSignature("));
+  const decision = skip.slice(0, skip.indexOf("\n", skip.indexOf('=== "skip"')) + 200);
+  assert.match(decision, /=== "skip"\)\s*return patchWallVolatile\(/,
+    "the skip branch must repaint the movers before it returns");
+  assert.match(skip, /wallVol(atile)? *= *wallVolatile\(/,
+    "a rebuild must record the frame the next patch diffs against");
+});
