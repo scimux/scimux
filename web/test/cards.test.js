@@ -1004,3 +1004,124 @@ test("a shape change still rebuilds, and a settled fleet still only ages", () =>
   feature.render();
   assert.equal(writes, 1, "a retitle is shape, so the list is rebuilt");
 });
+
+/* ---------- P3: caret at the end, never select-all (card description) ---------- */
+
+test("P3 8: card description long-press focuses caret at end, never select-all", () => {
+  let cardsSig = "";
+  let editingDesc = "";
+  let expanded = new Set();
+  let actionCard = "";
+  const nodes = [{
+    id: "n1", title: "Alpha", description: "card desc body",
+    lane_id: "", live: "quiet", model: "m", last_interaction: 1,
+  }];
+  const summaryFns = [];
+  const timers = [];
+  const descInput = {
+    tagName: "TEXTAREA",
+    value: "card desc body",
+    dataset: { descInput: "n1" },
+    _focused: false,
+    _selected: false,
+    _range: null,
+    focus(){ this._focused = true; },
+    select(){ this._selected = true; },
+    setSelectionRange(a, b){
+      this.selectionStart = a; this.selectionEnd = b; this._range = [a, b];
+    },
+  };
+  const list = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+    addEventListener(){},
+    removeEventListener(){},
+  };
+  const tabs = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+    addEventListener(){},
+    removeEventListener(){},
+  };
+  const doc = {
+    title: "",
+    getElementById: () => null,
+    querySelector(sel){
+      if (typeof sel === "string" && sel.includes("data-desc-input")) return descInput;
+      return null;
+    },
+  };
+  assert.match(cardsSrc, /from "\.\/caret\.js"/, "cards imports caret.js");
+  assert.match(cardsSrc, /focusAtEnd\s*\(/, "card description entry uses focusAtEnd");
+
+  const feature = createCardsFeature({
+    roots: { tabs, list },
+    document: doc,
+    nodes: () => nodes,
+    unadopted: () => [],
+    sel: () => "",
+    cardTab: () => "current",
+    setCardTab(){},
+    laneFilter: () => "",
+    attnFoldOpen: () => false,
+    setAttnFoldOpen(){},
+    expanded: () => expanded,
+    actionCard: () => actionCard,
+    setActionCard: v => { actionCard = v; },
+    editingDesc: () => editingDesc,
+    setEditingDesc: v => { editingDesc = v; },
+    editingTitle: () => "",
+    editingTitleScope: () => "",
+    cardsSig: () => cardsSig,
+    setCardsSig: v => { cardsSig = v; },
+    pinned: () => [],
+    archived: () => [],
+    lanes: () => [],
+    bookmarks: () => [],
+    agentLogo: () => "",
+    laneSelectHTML: () => "",
+    laneColor: () => "#000",
+    laneName: () => "",
+    icons: {},
+    CSS: { escape: s => s },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    longpress(_root, selector, fn){
+      if (selector === ".summary") summaryFns.push(fn);
+      return () => {};
+    },
+  });
+  feature.bind();
+  assert.equal(summaryFns.length, 1, "summary longpress bound");
+  const summaryEl = { dataset: { desc: "n1" } };
+  summaryFns[0](summaryEl);
+  assert.equal(editingDesc, "n1");
+  for (const fn of timers) fn();
+
+  assert.equal(descInput._focused, true, "description textarea focused");
+  assert.equal(descInput._selected, false, "select() must not run");
+  assert.deepEqual(descInput._range, [descInput.value.length, descInput.value.length],
+    "caret at end of existing description");
+  feature.destroy();
+});
+
+test("P3 12: withCardEditsPreserved still restores the original selection range", () => {
+  /* Regression lock — not an entry point. Must pass at red and green. */
+  const title = fakeField({ key: "title:n1", value: "Draft", active: true });
+  title.selectionStart = 3;
+  title.selectionEnd = 5;
+  let fields = [title];
+  const root = { querySelectorAll(){ return fields; } };
+  const doc = { activeElement: title };
+  withCardEditsPreserved(root, "", () => {
+    title.value = "Server";
+    title.selectionStart = 0;
+    title.selectionEnd = 0;
+    fields = [title];
+  }, { document: doc });
+  assert.equal(title.value, "Draft");
+  assert.equal(title.focused, true);
+  assert.deepEqual(title.ranged, [3, 5],
+    "poll rebuild restores the original range unchanged — never forces end or select-all");
+});

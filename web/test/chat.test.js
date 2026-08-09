@@ -2547,3 +2547,109 @@ test("P1 DOM 14: skip-path peek growth does not yank a reader who scrolled up", 
     "a reader who scrolled up is never pulled back down by peek re-pin");
   ctx.feature.destroy();
 });
+
+/* ---------- P3: caret at the end, never select-all (chat call sites) ---------- */
+
+test("P3 6: description long-press places caret at end; never select-all", () => {
+  let descPress = null;
+  const timers = [];
+  const ctx = makeFeature({
+    deps: {
+      setTimeout: (fn) => { timers.push(fn); return timers.length; },
+      longpress: (_root, selector, fn) => {
+        if (selector === "#chatdesc") descPress = fn;
+        return () => {};
+      },
+    },
+  });
+  const input = ctx.roots.chatdescinput;
+  input.value = "existing description text";
+  input._focused = false;
+  input._selected = false;
+  input._range = null;
+  input.focus = function(){ this._focused = true; };
+  input.select = function(){ this._selected = true; };
+  input.setSelectionRange = function(a, b){
+    this.selectionStart = a; this.selectionEnd = b; this._range = [a, b];
+  };
+
+  ctx.feature.bind();
+  ctx.feature.renderHead();
+  assert.equal(typeof descPress, "function", "longpress on #chatdesc is bound");
+  descPress();
+  assert.equal(ctx.feature.isEditingDesc(), true);
+  /* focus is deferred via setTimeout(0) */
+  for (const fn of timers) fn();
+
+  assert.equal(input._focused, true, "description input is focused");
+  assert.equal(input._selected, false, "select() must not run — no select-all");
+  assert.deepEqual(input._range, [input.value.length, input.value.length],
+    "caret at end of existing content");
+  assert.match(chatSrc, /from "\.\/caret\.js"/, "chat routes focus through caret.js");
+  assert.match(chatSrc, /focusAtEnd\s*\(/, "onDescLongpress uses focusAtEnd");
+  ctx.feature.destroy();
+});
+
+test("P3 7: use-as-description places caret at end via focusAtEnd", async () => {
+  assert.match(chatSrc, /from "\.\/caret\.js"/);
+  assert.doesNotMatch(chatSrc, /chatdescinput\.setSelectionRange\s*\(/);
+
+  const timers = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "promote this turn", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: {
+      setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    },
+  });
+  const input = ctx.roots.chatdescinput;
+  input._focused = false;
+  input._selected = false;
+  input._range = null;
+  input.focus = function(){ this._focused = true; };
+  input.select = function(){ this._selected = true; };
+  input.setSelectionRange = function(a, b){
+    this.selectionStart = a; this.selectionEnd = b; this._range = [a, b];
+  };
+
+  ctx.feature.bind();
+  await ctx.feature.render();
+
+  /* Open bubble actions by tapping the turn, then hit "use as description". */
+  const turnEl = el("div", { className: "turn", dataset: { bk: "i:0" } });
+  turnEl.dataset.bk = "i:0";
+  turnEl.closest = sel => {
+    if (sel.includes(".turn")) return turnEl;
+    if (sel.includes("[data-bact]")) return null;
+    return null;
+  };
+  firstListener(ctx.roots.msgs, "click")({
+    target: turnEl,
+    preventDefault(){}, stopPropagation(){},
+  });
+
+  const descBtn = el("button", { dataset: { bact: "desc" } });
+  descBtn.dataset.bact = "desc";
+  descBtn.closest = sel => {
+    if (sel.includes("[data-bact]")) return descBtn;
+    if (sel.includes(".turn")) return turnEl;
+    return null;
+  };
+  firstListener(ctx.roots.msgs, "click")({
+    target: descBtn,
+    preventDefault(){}, stopPropagation(){},
+  });
+
+  assert.equal(ctx.feature.isEditingDesc(), true);
+  for (const fn of timers) fn();
+
+  assert.equal(input.value, "promote this turn");
+  assert.equal(input._focused, true);
+  assert.equal(input._selected, false, "select() must not run");
+  assert.deepEqual(input._range, [input.value.length, input.value.length],
+    "caret at end of the promoted text");
+  ctx.feature.destroy();
+});

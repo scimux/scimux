@@ -1397,3 +1397,126 @@ test("bookmarkListHTML emits the shared action bar for the open bookmark", () =>
   assert.match(html, /class="actionbar tear"/);
   assert.match(html, /data-bmact="jump"/);
 });
+
+/* ---------- P3: caret at the end after openSendTo merges into the composer ---------- */
+
+test("P3 13: openSendTo places the caret after the merged draft in #prompt", () => {
+  assert.match(bookmarksSrc, /from "\.\/caret\.js"/, "bookmarks imports caret.js");
+  assert.match(bookmarksSrc, /focusAtEnd\s*\(/, "openSendTo uses focusAtEnd on #prompt");
+
+  /* Production order (verified at 9c74086):
+       1. storage.setItem(draft)            — bookmarks.js ~713
+       2. d.select(tgt)                     — app.js select → composer.onSelect
+          → setPromptText(storage draft)    — composer.js:357 paints #prompt
+       3. prompt.focus()                    — bare today; must become focusAtEnd
+     By focus time the text is already in the DOM. The unit harness mocks
+     select, so the stub paints the draft onto #prompt the same way
+     composer.onSelect would. */
+
+  const ranges = [];
+  const selection = {
+    ranges,
+    removeAllRanges(){ ranges.length = 0; },
+    addRange(r){ ranges.push(r); },
+  };
+  const ownerDocument = {
+    createRange(){
+      return {
+        startContainer: null, startOffset: 0,
+        endContainer: null, endOffset: 0,
+        collapsed: false,
+        setStart(n, o){ this.startContainer = n; this.startOffset = o; },
+        setEnd(n, o){
+          this.endContainer = n; this.endOffset = o;
+          this.collapsed = this.startContainer === n && this.startOffset === o;
+        },
+        selectNodeContents(n){
+          this.startContainer = n; this.startOffset = 0;
+          this.endContainer = n;
+          this.endOffset = (n.textContent || "").length;
+        },
+        collapse(toStart){
+          if (toStart){
+            this.endContainer = this.startContainer;
+            this.endOffset = this.startOffset;
+          } else {
+            this.startContainer = this.endContainer;
+            this.startOffset = this.endOffset;
+          }
+          this.collapsed = true;
+        },
+      };
+    },
+    getSelection(){ return selection; },
+  };
+
+  let storageRef = null;
+  let promptRef = null;
+  const effects = { select: [], openSheet: [], closeSheets: [], setLevel: [] };
+
+  const ctx = createFeature({
+    nodes: sendtoNodes,
+    pinned: [],
+    isDesktop: false,
+    deps: {
+      select: id => {
+        effects.select.push(id);
+        /* Mirror composer.onSelect → setPromptText(draft from storage). */
+        const draft = (storageRef && storageRef.getItem(DRAFT_KEY_PREFIX + id)) || "";
+        if (promptRef) promptRef.textContent = draft;
+      },
+      closeSheets: () => { effects.closeSheets.push(1); },
+      setLevel: n => { effects.setLevel.push(n); },
+    },
+  });
+  const { feature, roots, storage } = ctx;
+  storageRef = storage;
+  storage.setItem(DRAFT_KEY_PREFIX + "ok", "existing");
+
+  const prompt = roots.chatPrompt;
+  promptRef = prompt;
+  const textNode = { nodeType: 3, textContent: "", lastChild: null, parentNode: prompt };
+  prompt.isContentEditable = true;
+  prompt.contentEditable = "true";
+  prompt.ownerDocument = ownerDocument;
+  prompt.childNodes = [];
+  prompt.lastChild = null;
+  let _text = "";
+  Object.defineProperty(prompt, "textContent", {
+    configurable: true,
+    get(){ return _text; },
+    set(v){
+      _text = String(v || "");
+      textNode.textContent = _text;
+      if (_text){
+        prompt.childNodes = [textNode];
+        prompt.lastChild = textNode;
+      } else {
+        prompt.childNodes = [];
+        prompt.lastChild = null;
+      }
+    },
+  });
+  prompt._focused = false;
+  prompt.focus = function(){ this._focused = true; };
+
+  feature.bind();
+  feature.openSendTo({ text: "carried over", exceptId: "self", title: "Send to chat…" });
+
+  const fwd = el("button", { dataset: { fwd: "ok" } });
+  fwd.dataset.fwd = "ok";
+  fwd.closest = sel => sel === "[data-fwd]" ? fwd : null;
+  roots.sendtoList.onclick({ target: fwd });
+
+  const merged = "existing\n\ncarried over";
+  assert.equal(storage.getItem(DRAFT_KEY_PREFIX + "ok"), merged);
+  assert.deepEqual(effects.select, ["ok"]);
+  assert.equal(prompt.textContent, merged,
+    "composer has the merged draft before caret placement");
+  assert.equal(prompt._focused, true, "#prompt focused after send-to");
+  assert.equal(selection.ranges.length, 1, "contenteditable selection set");
+  const r = selection.ranges[0];
+  assert.equal(r.collapsed, true, "nothing pre-selected");
+  assert.equal(r.startContainer, textNode, "caret on the draft text node");
+  assert.equal(r.startOffset, merged.length, "caret AFTER the text you just sent");
+});

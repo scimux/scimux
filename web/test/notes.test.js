@@ -798,6 +798,9 @@ function el(tag, props = {}){
     focus(){ node._focused = true; documentRef.activeElement = node; },
     blur(){ node._focused = false; },
     select(){ node._selected = true; },
+    setSelectionRange(a, b){
+      node.selectionStart = a; node.selectionEnd = b; node._range = [a, b];
+    },
     click(){ node.dispatch("click"); },
     remove(){
       if (node.parentNode && node.parentNode.children){
@@ -2502,4 +2505,88 @@ test("--pane is one token for every side column, and half of it insets the docke
   assert.ok(inset, "docked content-column inset rule present inside the 900px block");
   assert.match(inset[1], /padding-inline:\s*calc\(var\(--pane\)\s*\/\s*2\)/,
     "inset is half a pane per side, derived not literal");
+});
+
+/* ---------- P3: caret at the end, never select-all (notes call sites) ---------- */
+
+test("P3 9: note card rename places caret at end; never select-all", async () => {
+  assert.match(notesSrc, /from "\.\/caret\.js"/, "notes imports caret.js");
+  assert.match(notesSrc, /focusAtEnd\s*\(/, "rename uses focusAtEnd");
+
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Original Title", order: 0 }],
+    docs: { n1: { id: "n1", title: "Original Title", sections: [] } },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const card = el("div", { className: "wscard", dataset: { note: "n1" }, draggable: true });
+  card.dataset.note = "n1";
+  card.draggable = true;
+  const title = el("div", { className: "wctitle", textContent: "Original Title" });
+  card.appendChild(title);
+  const renameBtn = el("button", { dataset: { wcact: "rename" } });
+  renameBtn.dataset.wcact = "rename";
+  renameBtn.closest = sel => {
+    if (sel === "[data-wcact]" || sel === "[data-wcact=\"rename\"]") return renameBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+
+  roots.wscards.dispatch("click", {
+    target: renameBtn,
+    stopPropagation(){},
+    preventDefault(){},
+  });
+
+  const input = card.querySelector("input") || card.querySelector(".wctitleedit");
+  assert.ok(input, "rename swaps title for an input");
+  assert.equal(input.value, "Original Title");
+  assert.equal(input._focused, true, "rename input focused");
+  assert.equal(input._selected, false, "select() must not run — no select-all");
+  assert.deepEqual(input._range, [input.value.length, input.value.length],
+    "caret at end of existing title");
+});
+
+test("P3 10: note section body edit places caret at end", async () => {
+  assert.match(notesSrc, /from "\.\/caret\.js"/);
+  assert.match(notesSrc, /focusAtEnd\s*\(/);
+
+  const bodyText = "existing section body text";
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{ id: "s1", title: "S", body: bodyText, order: 0, references: [] }],
+      },
+    },
+  });
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const body = el("div", { className: "wssecbody" });
+  const render = el("div", { dataset: { secrender: "" } });
+  render.dataset.secrender = "";
+  sec.appendChild(body);
+  body.appendChild(render);
+  ctx.roots.wssections.appendChild(sec);
+  ctx.roots.wssections.dispatch("click", { target: render });
+
+  const textarea = body.querySelector("textarea");
+  assert.ok(textarea, "body click enters edit mode");
+  assert.equal(textarea.value, bodyText);
+  assert.equal(textarea._focused, true, "body textarea focused");
+  assert.equal(textarea._selected, false, "select() must not run");
+  assert.deepEqual(textarea._range, [bodyText.length, bodyText.length],
+    "caret at end of existing body — bare focus() lands at 0 in WebKit");
 });

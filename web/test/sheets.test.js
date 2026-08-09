@@ -378,6 +378,9 @@ function el(tag, props = {}){
   };
   node.focus = () => { node._focused = true; };
   node.select = () => { node._selected = true; };
+  node.setSelectionRange = (a, b) => {
+    node.selectionStart = a; node.selectionEnd = b; node._range = [a, b];
+  };
   node.scrollIntoView = () => { node._scrolled = true; };
   node.insertAdjacentHTML = (pos, html) => {
     if (pos === "beforeend" && tag === "select"){
@@ -1179,4 +1182,44 @@ test("public factory API has no mutable test accessors", () => {
     "openAdopt",
     "openSheet",
   ].sort());
+});
+
+/* ---------- P3: caret at the end, never select-all (sheets call sites) ---------- */
+
+test("P3 11: seedForkTitle still selects all — the sanctioned exception", () => {
+  /* Regression lock — must pass at red and green. HIG reserves select-all for
+     a machine-generated guess the user is expected to replace wholesale. */
+  assert.match(sheetsSrc, /scheduleTitleFocus\s*\(\s*true\s*\)/,
+    "seedForkTitle still requests select-all");
+  const ctx = createFeature();
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("Evidence line\nmore", "p1");
+  ctx.flush(0);
+  assert.equal(ctx.byId.nc_title._focused, true);
+  assert.equal(ctx.byId.nc_title._selected, true,
+    "fork-seeded New Activity title keeps select-all");
+  /* The selectAll parameter must survive — cleaning it up fails the phase. */
+  assert.match(sheetsSrc, /function scheduleTitleFocus\s*\(\s*selectAll\s*\)/);
+});
+
+test("P3 activity/station editor title places caret at end (scheduleTitleFocus false)", () => {
+  assert.match(sheetsSrc, /from "\.\/caret\.js"/, "sheets imports caret.js");
+  assert.match(sheetsSrc, /focusAtEnd\s*\(/, "false branch uses focusAtEnd");
+
+  const ctx = createFeature();
+  ctx.feature.bind();
+  const title = ctx.byId.nc_title;
+  title._focused = false;
+  title._selected = false;
+  title._range = null;
+  title.setSelectionRange = function(a, b){
+    this.selectionStart = a; this.selectionEnd = b; this._range = [a, b];
+  };
+  ctx.feature.openActivityEditor("p1");
+  assert.equal(title.value, "Parent");
+  ctx.flush(0);
+  assert.equal(title._focused, true, "title focused on editor open");
+  assert.equal(title._selected, false, "select-all only for seedForkTitle");
+  assert.deepEqual(title._range, [title.value.length, title.value.length],
+    "caret at end of existing activity title");
 });
