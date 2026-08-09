@@ -1863,3 +1863,425 @@ test("the chat signature hashes the turns without materialising them", () => {
   assert.match(chatSrc, /hashTurns[^;]*from "\.\/lanes\.js"|import \{[^}]*hashTurns[^}]*\} from "\.\/lanes\.js"/,
     "reuse the primitive, do not reimplement djb2 here");
 });
+
+/* ---------- P1: the chat that opens blank — scroller compositing + bottom pin ----------
+ * Two independent faults on a node switch: (a) a filter/opacity transition on
+ * #msgs leaves a stale WebKit layer after innerHTML mid-transition; (b) the
+ * bottom pin is a one-shot assignment that is discarded when the box has no
+ * layout, and nothing re-asserts when content settles or the peek host grows.
+ * Pure pinDecision + CSS declaration tests + DOM refreshChat cases. */
+
+/* Anchor the base #msgs rule (not body.cards-open, not .loading, not reduced-motion).
+   It is the rule that immediately follows #msgwrap and carries overflow-y: auto. */
+function baseMsgsRuleBody(css){
+  const m = css.match(/#msgwrap\s*\{[^}]*\}\s*#msgs\s*\{([^}]+)\}/);
+  assert.ok(m, "base #msgs rule must follow #msgwrap");
+  assert.match(m[1], /overflow-y\s*:\s*auto/, "base #msgs is the overflow scroller");
+  return m[1];
+}
+
+function loadingMsgsRuleBody(css){
+  const m = css.match(/#msgwrap\.loading\s+#msgs\s*\{([^}]+)\}/);
+  assert.ok(m, "#msgwrap.loading #msgs rule present");
+  return m[1];
+}
+
+function atBottom(el){
+  return nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight, SCROLL_NEAR_BOTTOM_PX);
+}
+
+test("P1 A1: base #msgs has no -webkit-overflow-scrolling", () => {
+  const body = baseMsgsRuleBody(chatCssSrc);
+  assert.doesNotMatch(body, /-webkit-overflow-scrolling/,
+    "momentum scrolling is the default since iOS 13; the prefix forces a layer");
+  // siblings stay put
+  assert.match(chatCssSrc, /body\.cards-open\s+#msgs\s*\{[^}]*overflow:\s*hidden/,
+    "body.cards-open #msgs is untouched");
+  assert.match(chatCssSrc, /#peekhost:empty\s*\{[^}]*display:\s*none/,
+    "#peekhost:empty is untouched");
+});
+
+test("P1 A2: base #msgs transition does not name filter or opacity", () => {
+  const body = baseMsgsRuleBody(chatCssSrc);
+  const tr = body.match(/transition\s*:\s*([^;]+)/);
+  if (tr){
+    assert.doesNotMatch(tr[1], /\bfilter\b/, "filter must not transition on the scroller");
+    assert.doesNotMatch(tr[1], /\bopacity\b/, "opacity must not transition on the scroller");
+  }
+  // a bare "filter" somewhere else in the file is not a free pass — the base body is the hazard
+  assert.doesNotMatch(body, /transition\s*:[^;]*\bfilter\b/);
+  assert.doesNotMatch(body, /transition\s*:[^;]*\bopacity\b/);
+});
+
+test("P1 A3: #msgwrap.loading #msgs keeps pointer-events:none, drops filter/opacity", () => {
+  const body = loadingMsgsRuleBody(chatCssSrc);
+  assert.match(body, /pointer-events\s*:\s*none/,
+    "pointer-events: none is load-bearing and stays");
+  assert.doesNotMatch(body, /\bfilter\s*:/,
+    "cold-load dimming must not put a filter on the scroller");
+  assert.doesNotMatch(body, /\bopacity\s*:/,
+    "cold-load dimming must not put opacity on the scroller");
+});
+
+test("P1 A4: #chatloading overlay still present and [hidden] by default", () => {
+  assert.match(chatCssSrc, /#chatloading\s*\{/,
+    "the load affordance lives on #chatloading, not on the scroller");
+  const hidden = chatCssSrc.match(/#chatloading\[hidden\]\s*\{([^}]+)\}/);
+  assert.ok(hidden, "#chatloading[hidden] rule present");
+  assert.match(hidden[1], /display\s*:\s*none/);
+  // backdrop tint/blur still lives on the overlay
+  const overlay = chatCssSrc.match(/#chatloading\s*\{([^}]+)\}/);
+  assert.ok(overlay);
+  assert.match(overlay[1], /backdrop-filter|background/,
+    "overlay still tints/blurs the backdrop on its own");
+});
+
+test("P1 pure 1: no layout box keeps intent pending", () => {
+  assert.equal(typeof chatExports.pinDecision, "function", "pinDecision must be exported");
+  const r = chatExports.pinDecision({
+    scrollTop: 400, scrollHeight: 3000, clientHeight: 0, want: true,
+  });
+  assert.equal(r.action, "none");
+  assert.equal(r.pending, true);
+});
+
+test("P1 pure 2: want pin with a real box lands at max scrollTop", () => {
+  const r = chatExports.pinDecision({
+    scrollTop: 0, scrollHeight: 3000, clientHeight: 600, want: true,
+  });
+  assert.equal(r.action, "pin");
+  assert.equal(r.scrollTop, 2400);
+  assert.equal(r.pending, false);
+});
+
+test("P1 pure 3: over-scrolled clamps back to max", () => {
+  const r = chatExports.pinDecision({
+    scrollTop: 9000, scrollHeight: 3000, clientHeight: 600, want: false,
+  });
+  assert.equal(r.action, "clamp");
+  assert.equal(r.scrollTop, 2400);
+});
+
+test("P1 pure 4: already at bottom, no want → none", () => {
+  const r = chatExports.pinDecision({
+    scrollTop: 2400, scrollHeight: 3000, clientHeight: 600, want: false,
+  });
+  assert.equal(r.action, "none");
+  assert.equal(r.pending, false);
+});
+
+test("P1 pure 5: deliberate scroll-up is never yanked down", () => {
+  const r = chatExports.pinDecision({
+    scrollTop: 200, scrollHeight: 3000, clientHeight: 600, want: false,
+  });
+  assert.equal(r.action, "none");
+  assert.equal(r.scrollTop, 200);
+});
+
+test("P1 pure 6: content shorter than the box never goes negative", () => {
+  const pin = chatExports.pinDecision({
+    scrollTop: 50, scrollHeight: 200, clientHeight: 600, want: true,
+  });
+  assert.equal(pin.scrollTop, 0);
+  assert.ok(pin.scrollTop >= 0);
+  const clamp = chatExports.pinDecision({
+    scrollTop: 50, scrollHeight: 200, clientHeight: 600, want: false,
+  });
+  assert.equal(clamp.action, "clamp");
+  assert.equal(clamp.scrollTop, 0);
+});
+
+test("P1 DOM 7: node switch with a stale large scrollTop ends near the bottom", async () => {
+  const { feature, roots } = makeFeature();
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 600;
+  roots.msgs.scrollTop = 9000; // inherited from a taller previous chat
+  feature.onSelectChange();
+  await feature.render();
+  assert.ok(atBottom(roots.msgs),
+    `expected near bottom, got scrollTop=${roots.msgs.scrollTop} of max=${roots.msgs.scrollHeight - roots.msgs.clientHeight}`);
+  feature.destroy();
+});
+
+test("P1 DOM 8: pin while clientHeight is 0 re-asserts once the box gains height", async () => {
+  const rafs = [];
+  let roCb = null;
+  const { feature, roots } = makeFeature({
+    deps: {
+      requestAnimationFrame: (fn) => { rafs.push(fn); return rafs.length; },
+      ResizeObserver: class {
+        constructor(cb){ roCb = cb; }
+        observe(){}
+        disconnect(){}
+        unobserve(){}
+      },
+    },
+  });
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 0; // display:none / map-full — no layout box
+  roots.msgs.scrollTop = 0;
+  feature.onSelectChange();
+  await feature.render();
+  // intent must survive: the pin assignment with no box is a no-op
+  assert.equal(roots.msgs.clientHeight, 0);
+  // box appears (user left the wall map / chat became visible)
+  roots.msgs.clientHeight = 600;
+  // re-assert via rAF and/or ResizeObserver — both are injected through deps
+  assert.ok(rafs.length > 0 || typeof roCb === "function",
+    "pending pin must schedule rAF and/or attach a ResizeObserver via deps");
+  for (const fn of rafs.splice(0)) fn();
+  if (typeof roCb === "function") roCb([]);
+  assert.ok(atBottom(roots.msgs),
+    `after layout, expected near bottom, got scrollTop=${roots.msgs.scrollTop}`);
+  feature.destroy();
+});
+
+test("P1 DOM 9: ResizeObserver re-clamps when content shrinks after a pin", async () => {
+  let roCb = null;
+  const { feature, roots } = makeFeature({
+    deps: {
+      requestAnimationFrame: () => 0,
+      ResizeObserver: class {
+        constructor(cb){ roCb = cb; }
+        observe(){}
+        disconnect(){}
+        unobserve(){}
+      },
+    },
+  });
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 600;
+  roots.msgs.scrollTop = 0;
+  feature.onSelectChange();
+  await feature.render();
+  assert.ok(atBottom(roots.msgs), "initial pin lands at bottom");
+  // content shrinks (history collapsed, tiles reflowed) leaving scrollTop past max
+  roots.msgs.scrollHeight = 1000;
+  roots.msgs.scrollTop = 2400; // was max of the old height
+  assert.ok(typeof roCb === "function", "ResizeObserver must be installed via deps");
+  roCb([]);
+  assert.ok(roots.msgs.scrollTop <= Math.max(0, roots.msgs.scrollHeight - roots.msgs.clientHeight),
+    "shrink must re-clamp; blank viewport is the bug");
+  assert.equal(roots.msgs.scrollTop, 400);
+  feature.destroy();
+});
+
+test("P1 DOM 10: verified pin clears intent exactly once; later ticks do not re-pin a reader who scrolled up", async () => {
+  const { feature, roots } = makeFeature();
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 600;
+  roots.msgs.scrollTop = 0;
+  feature.onSelectChange();
+  await feature.render();
+  assert.ok(atBottom(roots.msgs), "first pin");
+  // reader scrolls up deliberately after the pin cleared
+  roots.msgs.scrollTop = 200;
+  feature.invalidate();
+  await feature.render();
+  assert.equal(roots.msgs.scrollTop, 200,
+    "intent was cleared on the verified pin; a later rebuild must not yank them down");
+  feature.destroy();
+});
+
+test("P1 DOM 11: reported repro — A→B→A with stale scrollTop and changing clientHeight", async () => {
+  const nodes = [
+    { id: "A", title: "Operator A", agent: "claude", model: "s", live: "quiet", attention: "", lane_id: "", description: "" },
+    { id: "B", title: "Operator B", agent: "claude", model: "s", live: "quiet", attention: "", lane_id: "", description: "" },
+  ];
+  let sel = "A";
+  const payload = (id) => ({
+    turns: [
+      { role: "user", text: `hello ${id}`, time: "2026-01-01T00:00:00Z" },
+      { role: "assistant", text: `hi ${id}`, time: "2026-01-01T00:01:00Z" },
+    ],
+    live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+  });
+  const { feature, roots, setSel } = makeFeature({
+    nodes,
+    sel: "A",
+    api: async (path) => {
+      if (path.includes("/peek")) return "";
+      if (path.includes("/chat")) return payload(sel);
+      return {};
+    },
+  });
+  // sit in A at the bottom
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 600;
+  roots.msgs.scrollTop = 2400;
+  await feature.render();
+  assert.ok(atBottom(roots.msgs), "A starts at bottom");
+
+  // send to… B: draft written, select(B), render B
+  feature.onSelectChange();
+  setSel("B");
+  sel = "B";
+  roots.msgs.scrollHeight = 1800;
+  roots.msgs.clientHeight = 500;
+  await feature.render();
+  assert.ok(atBottom(roots.msgs), "B opens at its newest bubble");
+
+  // switch back to A — #msgs still carries B's offset / a large stale scrollTop,
+  // and the clientHeight changes between the two renders (orientation / chrome)
+  feature.onSelectChange();
+  setSel("A");
+  sel = "A";
+  roots.msgs.scrollTop = 9000;
+  roots.msgs.scrollHeight = 4000;
+  roots.msgs.clientHeight = 700;
+  await feature.render();
+  assert.ok(atBottom(roots.msgs),
+    `A must end near its own bottom after A→B→A; scrollTop=${roots.msgs.scrollTop} max=${4000 - 700}`);
+  feature.destroy();
+});
+
+test("P1 DOM 12: cold-load class toggle still honours chatScrollBottom", async () => {
+  const timers = [];
+  const { feature, roots } = makeFeature({
+    deps: {
+      setTimeout: (fn) => { timers.push(fn); return timers.length; },
+      clearTimeout: () => {},
+      requestAnimationFrame: () => 0,
+      ResizeObserver: class { constructor(){} observe(){} disconnect(){} },
+    },
+  });
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 600;
+  roots.msgs.scrollTop = 100;
+  // cold path: onSelectChange clears chatSig so beginChatLoad schedules .loading
+  feature.onSelectChange();
+  const renderP = feature.render();
+  // fire the delayed load affordance while the fetch is in flight
+  for (const fn of timers.splice(0)) fn();
+  assert.equal(roots.msgwrap.classList.contains("loading"), true,
+    "cold load adds .loading after CHAT_LOAD_DELAY_MS");
+  assert.equal(roots.chatloading.hidden, false);
+  await renderP;
+  // endChatLoad clears .loading regardless of class-toggle ordering vs pin
+  assert.equal(roots.msgwrap.classList.contains("loading"), false);
+  assert.equal(roots.chatloading.hidden, true);
+  assert.ok(atBottom(roots.msgs),
+    "final scroll position is the bottom regardless of the class-toggle ordering");
+  feature.destroy();
+});
+
+/* Peek growth on the skip path: each distinct capture lengthens #msgs by a
+   fixed step large enough that an unre-pinned reader falls outside the
+   SCROLL_NEAR_BOTTOM_PX slack (cause b4). Length-proportional growth is too
+   small — the old pin assigned scrollTop=scrollHeight (overscrolled), so a
+   few dozen extra pixels still looked "near bottom". */
+function peekGrowingDocument(msgs, step = 800){
+  let frames = 0;
+  return {
+    createElement(tag){
+      const node = el(tag);
+      let html = "";
+      Object.defineProperty(node, "innerHTML", {
+        configurable: true,
+        get(){ return html; },
+        set(v){
+          html = String(v);
+          node.children.length = 0;
+          if (node.id === "peekhost" && html){
+            frames += 1;
+            msgs.scrollHeight = 3000 + frames * step;
+          }
+        },
+      });
+      return node;
+    },
+    querySelector: () => null,
+  };
+}
+
+function makePeekSkipFeature(){
+  let paneText = "frame-one";
+  const roots = makeRoots();
+  roots.msgs.scrollHeight = 3000;
+  roots.msgs.clientHeight = 600;
+  roots.msgs.scrollTop = 2400;
+  const nodes = [{
+    id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+    live: "quiet", attention: "approval", lane_id: "L1", description: "d",
+  }];
+  const feature = createChatFeature({
+    roots,
+    document: peekGrowingDocument(roots.msgs),
+    window: {},
+    CSS: { escape: s => String(s) },
+    api: async (path) => {
+      if (path.includes("/peek")) return paneText;
+      if (path.includes("/chat")) return {
+        turns: [
+          { role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
+          { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" },
+        ],
+        live: "quiet", delivery: "ok", source: "tmux", attention: "approval",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      };
+      return {};
+    },
+    nodes: () => nodes,
+    sel: () => "n1",
+    selGen: () => 1,
+    nodeById: id => nodes.find(n => n.id === id),
+    icons: {
+      ICON_TERM: "T", ICON_CHECK: "✓", ICON_CHEV_UP: "↑", ICON_CHEV_DOWN: "↓",
+      ICON_BRANCH: "B", ICON_INTO: "I", ICON_COPY: "C", ICON_DOWNALL: "↓↓", ICON_FILE: "F",
+    },
+    setComposerBusy: () => {},
+    setComposerClosed: () => {},
+    setAttachAvail: () => {},
+    setBookmarksBackLabel: () => {},
+    getPendingJump: () => null,
+    setPendingJump: () => {},
+    invalidateCardsSig: () => {},
+    invalidateMapSig: () => {},
+    renderCards: () => {},
+    renderMap: () => {},
+    isDesktop: () => false,
+    now: () => 1_000_000,
+    longpress: () => () => {},
+    requestAnimationFrame: () => 0,
+    ResizeObserver: class { constructor(){} observe(){} disconnect(){} },
+  });
+  return {
+    feature, roots,
+    setPane: (v) => { paneText = v; },
+  };
+}
+
+test("P1 DOM 13: skip-path peek growth re-pins a reader who was at the bottom", async () => {
+  const ctx = makePeekSkipFeature();
+  await ctx.feature.render();
+  // land exactly at the real max (not overscrolled) so a large growth pushes us off
+  ctx.roots.msgs.scrollTop = ctx.roots.msgs.scrollHeight - ctx.roots.msgs.clientHeight;
+  assert.ok(atBottom(ctx.roots.msgs), "reader is at the bottom before the skip tick");
+  const htmlBefore = ctx.roots.msgs.innerHTML;
+  const stBefore = ctx.roots.msgs.scrollTop;
+  const shBefore = ctx.roots.msgs.scrollHeight;
+  // only the peek capture moves — transcript signature is unchanged → skip path
+  ctx.setPane("frame-two-much-longer-capture-while-agent-works");
+  await ctx.feature.render();
+  assert.equal(ctx.roots.msgs.innerHTML, htmlBefore,
+    "skip path stays a skip: no transcript rebuild");
+  assert.ok(ctx.roots.msgs.scrollHeight > shBefore + SCROLL_NEAR_BOTTOM_PX,
+    "fixture must grow past the near-bottom slack");
+  assert.ok(atBottom(ctx.roots.msgs),
+    `peek growth must not push a bottom-reader off; was st=${stBefore} sh=${shBefore}, now st=${ctx.roots.msgs.scrollTop} sh=${ctx.roots.msgs.scrollHeight}`);
+  ctx.feature.destroy();
+});
+
+test("P1 DOM 14: skip-path peek growth does not yank a reader who scrolled up", async () => {
+  const ctx = makePeekSkipFeature();
+  await ctx.feature.render();
+  // deliberate scroll-up before the pane moves
+  ctx.roots.msgs.scrollTop = 200;
+  const held = ctx.roots.msgs.scrollTop;
+  ctx.setPane("frame-two-much-longer-capture-while-agent-works");
+  await ctx.feature.render();
+  assert.equal(ctx.roots.msgs.scrollTop, held,
+    "a reader who scrolled up is never pulled back down by peek re-pin");
+  ctx.feature.destroy();
+});
