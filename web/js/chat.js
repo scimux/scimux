@@ -76,7 +76,7 @@
  */
 
 import { esc, md, fmtWhen, fmtBubbleTime, bubbleTitle } from "./format.js";
-import { hashStr } from "./lanes.js";
+import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod } from "./map-model.js";
 
 /* ---------- public constants ---------- */
@@ -1066,7 +1066,7 @@ export function createChatFeature(deps){
       chatStarted: data.chat_started || "",
       echoHash: echo ? hash(echo.text) : "",
       histKey: hist ? "h" + priorSegs.length : "",
-      turnsHash: hash(turns.map(t => t.role + "\u0000" + t.text).join("\u0001")),
+      turnsHash: hashTurns(turns),
       expanded,
     });
     const label = unconfirmed

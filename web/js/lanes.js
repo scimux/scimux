@@ -29,6 +29,24 @@ export function hashStr(s){
   return h;
 }
 
+/* The same hash over role-NUL-text records joined by U+0001, fed to the
+   accumulator instead of concatenated first. The chat signature runs this on
+   every poll — before it knows whether it will rebuild — so the join it
+   replaces allocated the whole transcript as a fresh string every two seconds.
+   Value-identical to the join it replaces; see lanes.test.js. */
+export function hashTurns(turns){
+  let h = 5381;
+  const feed = t => { for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; };
+  const list = turns || [];
+  for (let i = 0; i < list.length; i++){
+    if (i) feed("\u0001");
+    feed(String(list[i].role));
+    feed("\u0000");
+    feed(String(list[i].text));
+  }
+  return h;
+}
+
 /* ---------- lane list / ordering / lookup ---------- */
 
 export function laneList(lanes){

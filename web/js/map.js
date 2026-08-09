@@ -899,7 +899,7 @@ export function stationRowHTML(n, lm, opts = {}){
   if (stop && !stop.head)
     return `
         <div class="strow stoprow ${alt ? "alt " : ""}${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${escape(n.id)}" data-skey="${escape(stopKey(stop))}" data-stop="${escape(stop.time)}">
-          <div class="lbl"><span class="t">${escape(label.title)}</span></div>
+          <div class="lbl${label.desc ? " hasdesc" : ""}"><span class="t">${escape(label.title)}</span></div>
           <div class="cap">${escape(stamp(stop.time))} &middot; earlier stop</div>
           ${label.desc ? `<div class="desc">${escape(label.desc)}</div>` : ""}
         </div>`;
@@ -909,7 +909,7 @@ export function stationRowHTML(n, lm, opts = {}){
   return `
         <div class="strow ${alt ? "alt " : ""}${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${escape(n.id)}"${stop ? ` data-skey="${escape(stopKey(stop))}"` : ""}>
-          <div class="lbl"><span class="agent-logo" title="${escape(n.agent || "agent")}">${opts.agentLogo || ""}</span><span class="t">${escape(label.title)}</span>${fork ? forkCue : ""}</div>
+          <div class="lbl${desc ? " hasdesc" : ""}"><span class="agent-logo" title="${escape(n.agent || "agent")}">${opts.agentLogo || ""}</span><span class="t">${escape(label.title)}</span>${fork ? forkCue : ""}</div>
           <div class="cap">${escape(when)} · ${escape(configText(n))} · <span class="st">${escape(status(n))}</span>${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${escape(l)}"` : ""} style="color:${escape(lm.color(l))}">&#8644; ${escape(lm.name(l))}</span>`).join("")}</div>
           ${desc ? `<div class="desc">${escape(desc)}</div>` : ""}

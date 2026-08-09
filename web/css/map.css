@@ -57,7 +57,12 @@
   padding-top: 3px; border-top: 1px solid var(--hairline);
   line-height: 1.25; overflow: hidden; display: -webkit-box;
   -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.strow .lbl:has(+ .cap + .desc) .t { -webkit-line-clamp: 1; }
+/* The builder knows whether a description exists, so it says so with a class.
+   The relational sibling selector this replaces was re-evaluated for every
+   station row on every map rebuild — and the map rebuilds on every fleet poll.
+   (Keep the literal selector syntax out of this comment: the guard test scans
+   the raw stylesheet source, comments included.) */
+.strow .lbl.hasdesc .t { -webkit-line-clamp: 1; }
 .strow .cap { font-size: 11px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strow .forkcue { font-size: 12px; font-weight: 600; margin-left: 14px; cursor: pointer;
