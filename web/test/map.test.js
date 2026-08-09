@@ -3629,3 +3629,17 @@ test("saveMapFold reuses the caller's lane model on the render path", () => {
   assert.doesNotMatch(render.slice(0, render.indexOf("const sig = stackMapSignature")), /saveMapFold\(\)/,
     "the per-tick calls must pass the model they already have");
 });
+
+test("the lane attention dot pulses without repainting its halo", () => {
+  /* .lattn is its own element, so its opacity/transform animation already
+     scales whatever shadow it carries — the halo can be static. */
+  const dot = mapCssSrc.match(/\.lhead\s+\.lattn\s*\{([^}]+)\}/);
+  assert.ok(dot, ".lhead .lattn must still carry the pulse");
+  assert.match(dot[1], /box-shadow:/, "the halo lives on the element");
+  assert.doesNotMatch(dot[1], /will-change:[^;]*box-shadow/,
+    "will-change cannot composite a box-shadow — the hint only costs memory");
+  const kf = mapCssSrc.match(/@keyframes\s+mapAttentionDot\s*\{([\s\S]*?)\n\}/);
+  assert.ok(kf, "@keyframes mapAttentionDot must still exist");
+  assert.doesNotMatch(kf[1], /box-shadow/, "the pulse must be opacity/transform only");
+  assert.match(kf[1], /opacity/, "and it must still pulse");
+});

@@ -33,6 +33,7 @@ import { orderedNodes, hardAttention, visibleCardLists } from "../js/map-model.j
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cardsSrc = readFileSync(join(__dirname, "../js/cards.js"), "utf8");
+const cardsCssSrc = readFileSync(join(__dirname, "../css/cards.css"), "utf8");
 
 /* ---------- purity of pure helpers (no browser side effects in pure path) ---------- */
 test("cards.js pure helpers do not reference app globals for decisions", () => {
@@ -665,4 +666,20 @@ test("updateAges still updates a card whose age text moved on", () => {
   feature.updateAges();
   assert.equal(cards[0]._time.textContent, "you T2000", "a moved age must still land");
   assert.ok(cards[0]._time.titleWrites > titleWrites, "and so must a moved title");
+});
+
+test("the attention card pulses a static shadow's opacity, not the shadow", () => {
+  /* .card.attention::after is already a dedicated overlay layer, so the glow
+     can sit still and the layer can fade. Animating the box-shadow itself
+     repaints a blurred ring every frame for as long as the node asks. */
+  const layer = cardsCssSrc.match(/\.card\.attention::after\s*\{([^}]+)\}/);
+  assert.ok(layer, ".card.attention::after must still be the overlay");
+  assert.match(layer[1], /box-shadow:/, "the glow lives on the overlay");
+  assert.match(layer[1], /animation:\s*attentionPulse/);
+  assert.doesNotMatch(layer[1], /will-change:[^;]*box-shadow/,
+    "will-change cannot composite a box-shadow — the hint only costs memory");
+  const kf = cardsCssSrc.match(/@keyframes\s+attentionPulse\s*\{([\s\S]*?)\n\}/);
+  assert.ok(kf, "@keyframes attentionPulse must still exist");
+  assert.doesNotMatch(kf[1], /box-shadow/, "the pulse must be opacity-only");
+  assert.match(kf[1], /opacity/, "and it must still pulse");
 });
