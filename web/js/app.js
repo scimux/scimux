@@ -692,10 +692,12 @@ const mapFeature = createMapFeature({
   selectNode: (id, how) => {
     /* a wall-map "Open chat" is a jump: remember the map so #chatback leads
        back into it (UI review item 18) — but only when the map actually left.
-       Under the dock it keeps the top half, so a "Return to Map" control would
-       point at what the user is already looking at (P5a). */
-    const docked = isDesktop() && mapFeature.isFull() && mapFeature.isDock();
-    const kind = mapJumpReturnKind({ how, docked });
+       Asked of isFull(), not isDock(): map.js calls selectNode *before*
+       setMapDock(true), so isDock() is still false here on the first open and
+       the pill appeared every time. On the desktop wall a jump always keeps
+       the map (full → dock), so isFull() is the honest predicate. */
+    const mapStays = isDesktop() && mapFeature.isFull();
+    const kind = mapJumpReturnKind({ how, mapStays });
     if (kind) setReturnContext(kind, { node: id });
     select(id, how);
   },
@@ -1276,10 +1278,8 @@ document.addEventListener("keydown", e => {
     const step = escapeDockStep({
       mapFull: mapFeature.isFull(),
       mapDock: mapFeature.isDock(),
-      dockPeek: mapFeature.isPeek(),
     });
-    if (step === "peek") mapFeature.setPeek(true);
-    else if (step === "undock") mapFeature.setDock(false);
+    if (step === "undock") mapFeature.setDock(false);
     else if (step === "exit-full") setMapFull(false);
   }
 });
@@ -1457,6 +1457,9 @@ function applyNavAction(action){
   }
 }
 $("#chatback").addEventListener("click", returnFromChat);
+/* The dock's × — visible only under body.map-full.map-dock. Bound here rather
+   than in chatFeature because the state it changes belongs to the map. */
+$("#dockclose").addEventListener("click", () => mapFeature.setDock(false));
 /* the scrim is the left panes' peek made tappable: a tap steps ONE pane back
    (level 3→2, 2→1), mirroring the swipe — never a jump straight to chat. */
 $("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));

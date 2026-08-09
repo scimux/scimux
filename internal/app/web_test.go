@@ -796,18 +796,23 @@ func TestWorkspaceMatchesWallMap(t *testing.T) {
 }
 
 // Item 3 (2026-07-30 iPad review): on desktop/landscape the two left zones
-// (Bookmarks inbox + Notes list) default to the app pane width (340px, same as
-// #cards / #bookmarkspane) so the columns share one rhythm. Phase 2: widths are
-// CSS custom props with a 340px fallback when the user has not resized.
+// (Bookmarks inbox + Notes list) default to the app pane width (same as #cards
+// / #bookmarkspane) so the columns share one rhythm. Phase 2: widths are CSS
+// custom props falling back to that width when the user has not resized. The
+// shared width is the --pane token, so "one rhythm" is now enforced by the
+// cascade rather than by four literals agreeing with each other.
 func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
 	css := mustProductionCSSCascade(t)
-	inbox := cssBlock(t, css, "#wsinbox { width: var(--wsinbox-w, 340px);")
-	if !strings.Contains(inbox, "340px") {
-		t.Errorf("#wsinbox default width must fall back to 340px (>=900px); got %q", inbox)
+	if !strings.Contains(css, "--pane:") {
+		t.Error("cascade must define the --pane side-column token")
 	}
-	nav := cssBlock(t, css, "#wsnav { width: var(--wsnav-w, 340px);")
-	if !strings.Contains(nav, "340px") {
-		t.Errorf("#wsnav default width must fall back to 340px (>=900px); got %q", nav)
+	inbox := cssBlock(t, css, "#wsinbox { width: var(--wsinbox-w, var(--pane));")
+	if !strings.Contains(inbox, "var(--pane)") {
+		t.Errorf("#wsinbox default width must fall back to var(--pane) (>=900px); got %q", inbox)
+	}
+	nav := cssBlock(t, css, "#wsnav { width: var(--wsnav-w, var(--pane));")
+	if !strings.Contains(nav, "var(--pane)") {
+		t.Errorf("#wsnav default width must fall back to var(--pane) (>=900px); got %q", nav)
 	}
 	// Resizable dividers are part of the same three-zone desktop contract.
 	if !strings.Contains(css, ".wsdivider") {

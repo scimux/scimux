@@ -53,6 +53,13 @@
      stay in step. Each rule cancels all but 2px of it with a derived negative
      margin, so growing this number costs no layout. */
   --grab:      20px;
+  /* pane: the width of a side column — #cards, #map's resting width, the
+     bookmarks pane, the two workspace zones. They were four separate 340px
+     literals with a comment insisting they share one rhythm. Also the measure
+     of the chat's familiar reading width: beside a pane the chat is
+     100% - pane, so a full-width chat gets the same column back by insetting
+     half a pane per side. */
+  --pane:      340px;
 }
 @media (prefers-color-scheme: dark) {
   :root {

@@ -19,7 +19,7 @@
  *
  * Outputs:
  *   - HTML into maptabs / lanechips / mapwrap / maptoolbar / maprail
- *   - body.map-full / body.map-dock / body.dock-peek classes; mapfullbtn
+ *   - body.map-full / body.map-dock classes; mapfullbtn
  *     ARIA/glyph; farebtn.on + aria-pressed + on/off layer-group SVG (fare
  *     layer; revealed only under body.map-full)
  *   - body style --dockmap (dock split; CSS variable write, never a re-render)
@@ -39,8 +39,7 @@
  *   - #maprail click (select asking station + scrollIntoView)
  *   - #mapscroll scroll + window resize → positionMapToolbar
  *   - #mapfullbtn / #farebtn click
- *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split / peek)
- *   - #chat click when dock-peek (strip restore — gated on body class state)
+ *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split)
  *   - #tab_save / #tab_del click (map group sheet)
  *
  * Not owned (stay shell / other features):
@@ -93,15 +92,11 @@ export const MAP_DOCK_KEY = "scimux-mapdock";
 export const MAP_DOCK_H_KEY = "scimux-mapdockh";
 /* Dock peek (chat collapsed to a title strip). Distinct from MAP_DOCK_KEY /
    MAP_DOCK_H_KEY — peek is a state, not a fraction value. */
-export const MAP_DOCK_PEEK_KEY = "scimux-mapdockpeek";
 
 export const DOCK_FRAC_DEFAULT = 0.55;
 export const DOCK_FRAC_MIN = 0.30;
 export const DOCK_FRAC_MAX = 0.75;
 export const DOCK_FRAC_NUDGE = 0.05;
-/* Extra drag past DOCK_FRAC_MAX (map share grows as the divider moves down)
-   that snaps into dock-peek. Symmetric leave threshold is DOCK_FRAC_MAX. */
-export const DOCK_PEEK_SNAP = 0.06;
 
 /* Uniform wall-row height — shared by SVG geometry (rowY / svgH) and scroll
    anchoring across poll rebuilds. Must match .strow height in map.css. */
@@ -178,21 +173,26 @@ export function dockFracFromDrag({ clientY, appTop, appHeight } = {}){
   return clampDockFrac((Number(clientY) - Number(appTop || 0)) / appHeight);
 }
 
-/* Unclamped map-height fraction for peek hysteresis (enter ≥ MAX+SNAP,
-   leave ≤ MAX). Same geometry as dockFracFromDrag; no clamp. */
-export function rawDockFracFromDrag({ clientY, appTop, appHeight } = {}){
-  if (!(appHeight > 0)) return DOCK_FRAC_DEFAULT;
-  return (Number(clientY) - Number(appTop || 0)) / appHeight;
+/* What a tap on a wall row should do. The action bar is a selection-scoped
+   command surface, and HIG dismisses that family (edit menu, contextual menu,
+   popover) when a command is chosen — so a command closes the bar while the
+   selection survives, being the row highlight, the scroll anchor, and what the
+   docked chat is pointed at. That leaves one gap: with the bar closed and the
+   row still selected, an ordinary toggle would read the second tap as
+   "deselect" and the user would have to tap twice to get the menu back. */
+export function stationTapAction({ id, key, barOpen, mapSel, mapSelKey } = {}){
+  if (!barOpen && id === mapSel && key === mapSelKey) return "reopen";
+  return "toggle";
 }
 
 /* Escape ladder under the wall map. Pure — app.js dispatches the result.
-   dock open → peek → out of the dock → out of full screen.
+   dock open → out of the dock → out of full screen. The middle "peek" rung
+   was removed after acceptance: a pop-out folded to its title strip is
+   neither reading the chat nor reading the map, so Escape closes it outright.
    mapFull:false → "none" at every input (phone / not full). */
-export function escapeDockStep({ mapFull, mapDock, dockPeek } = {}){
+export function escapeDockStep({ mapFull, mapDock } = {}){
   if (!mapFull) return "none";
-  if (mapDock && !dockPeek) return "peek";
-  if (mapDock && dockPeek) return "undock";
-  return "exit-full";
+  return mapDock ? "undock" : "exit-full";
 }
 
 /* validate the saved group only against loaded state — before loadUI
@@ -865,7 +865,6 @@ export function createMapFeature(deps){
   const fareticket = roots.fareticket;
   const mapEl = roots.map;
   const mapdivider = roots.mapdivider;
-  const chatRoot = roots.chat; /* static #chat; peek strip tap target */
   const tabHead = roots.tabHead;
   const tabName = roots.tabName;
   const tabLanes = roots.tabLanes;
@@ -900,11 +899,13 @@ export function createMapFeature(deps){
   /* Peek: chat collapsed to a title strip. Distinct from the fraction — leaving
      peek restores dockFrac / scimux-mapdockh, never a synthetic 0.95. Only
      meaningful under map-full.map-dock; cleared when either flag drops. */
-  let dockPeek = !!(mapDock && storage && storage.getItem(MAP_DOCK_PEEK_KEY) === "1");
   let dockDrag = null;
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
+  /* Whether the station action bar is showing. Deliberately separate from the
+     selection: a command dismisses the bar, the selection stays. */
+  let mapBarOpen = false;
   /* Last wall selection key/row after a rebuild — used to anchor #mapscroll
      when a poll shifts the same selection's row index. Guard: only apply when
      mapSelKey === lastSelKey (a new selection's index delta is meaningless). */
@@ -955,12 +956,25 @@ export function createMapFeature(deps){
   }
 
   function setMapSel(id, key, stopTime){
+    if (stationTapAction({ id, key, barOpen: mapBarOpen, mapSel, mapSelKey }) === "reopen"){
+      mapBarOpen = true;
+      renderMapToolbar();
+      return;
+    }
     const next = toggleMapSelection({ id, key, stopTime, mapSelKey, nodes: g("nodes", []) });
     mapSel = next.mapSel;
     mapSelKey = next.mapSelKey;
     mapSelStop = next.mapSelStop;
+    mapBarOpen = !!next.mapSel;
     mapSig = "";
     renderMap();
+  }
+
+  /* Dismiss the bar without touching the selection (see stationTapAction). */
+  function closeMapBar(){
+    if (!mapBarOpen) return;
+    mapBarOpen = false;
+    renderMapToolbar();
   }
 
   function syncMapFullBtn(){
@@ -982,20 +996,15 @@ export function createMapFeature(deps){
     if (mapFull) storeSet(MAP_FULL_KEY, "1");
     else storeRemove(MAP_FULL_KEY);
     /* Leaving full screen also leaves the dock — the dock is only meaningful
-       under body.map-full, and the CSS selector is the conjunction. Peek dies
-       with both flags so no stale dock-peek class survives into stack layout. */
+       under body.map-full, and the CSS selector is the conjunction. */
     if (!mapFull){
       mapDock = false;
       storeRemove(MAP_DOCK_KEY);
-      dockPeek = false;
-      storeRemove(MAP_DOCK_PEEK_KEY);
-      if (doc && doc.body){
-        doc.body.classList.toggle("map-dock", false);
-        doc.body.classList.toggle("dock-peek", false);
-      }
+      if (doc && doc.body) doc.body.classList.toggle("map-dock", false);
     }
     const cleared = clearMapSelection();
     mapSel = cleared.mapSel; mapSelKey = cleared.mapSelKey; mapSelStop = cleared.mapSelStop;
+    mapBarOpen = false;
     if (doc && doc.body) doc.body.classList.toggle("map-full", mapFull);
     syncMapFullBtn();
     mapSig = "";
@@ -1008,27 +1017,9 @@ export function createMapFeature(deps){
   function setMapDock(on){
     mapDock = !!on;
     if (mapDock) storeSet(MAP_DOCK_KEY, "1");
-    else {
-      storeRemove(MAP_DOCK_KEY);
-      /* Leaving the dock also leaves peek — peek is only meaningful under
-         body.map-full.map-dock. */
-      setDockPeek(false);
-    }
+    else storeRemove(MAP_DOCK_KEY);
     if (doc && doc.body) doc.body.classList.toggle("map-dock", mapDock);
     renderMapToolbar();
-  }
-
-  /* Peek is a distinct state from the fraction. Entering it must not overwrite
-     scimux-mapdockh; restoring re-applies the last committed dockFrac. */
-  function setDockPeek(on){
-    const next = !!on;
-    const was = dockPeek;
-    dockPeek = next;
-    if (dockPeek) storeSet(MAP_DOCK_PEEK_KEY, "1");
-    else storeRemove(MAP_DOCK_PEEK_KEY);
-    if (doc && doc.body) doc.body.classList.toggle("dock-peek", dockPeek);
-    /* Leaving peek restores the last committed split (CSS var only). */
-    if (was && !dockPeek) applyDockFrac(dockFrac, { persist: false });
   }
 
   function dividerEl(){
@@ -1036,9 +1027,6 @@ export function createMapFeature(deps){
   }
   function appEl(){
     return roots.app || (doc && doc.querySelector && doc.querySelector("#app"));
-  }
-  function chatEl(){
-    return chatRoot || (doc && doc.querySelector && doc.querySelector("#chat"));
   }
 
   /* Write --dockmap on body. CSS variable only — never renderMap, never mapSig.
@@ -1056,24 +1044,10 @@ export function createMapFeature(deps){
     if (persist) storeSet(MAP_DOCK_H_KEY, String(dockFrac));
   }
 
-  /* Re-apply the last *persisted* fraction (or current dockFrac) without
-     writing storage — used when entering peek mid-drag so --dockmap is not
-     left pinned at the 75% clamp ceiling. */
-  function reapplyCommittedDockFrac(){
-    const raw = storage && storage.getItem(MAP_DOCK_H_KEY);
-    if (raw == null || raw === ""){
-      applyDockFrac(dockFrac, { persist: false });
-      return;
-    }
-    applyDockFrac(Number(raw), { persist: false });
-  }
-
-  /* ---- P2/P3: dock divider — same handler shape as notes.js onDivider* ----
+  /* ---- P2: dock divider — same handler shape as notes.js onDivider* ----
      P2a: no-op when !isDesktop (notes.js uses isNarrow the same way). CSS
      already hides the control on phone; the guard stops --dockmap writes if
-     focus somehow reaches the element.
-     P3: raw fraction past MAX+SNAP enters peek (divider dragged DOWN — map
-     share grows). Leave when raw ≤ MAX. Reversible inside one gesture. */
+     focus somehow reaches the element. */
   function onDockDividerPointerDown(e){
     if (!isDesktop()) return;
     const handle = dividerEl();
@@ -1105,38 +1079,19 @@ export function createMapFeature(deps){
       return;
     const y = e.clientY || 0;
     if (Math.abs(y - dockDrag.startY) > 2) dockDrag.moved = true;
-    const raw = rawDockFracFromDrag({
+    const raw = dockFracFromDrag({
       clientY: y,
       appTop: dockDrag.appTop,
       appHeight: dockDrag.appHeight,
     });
-    /* Enter peek past MAX + SNAP (divider down). Do not overwrite the
-       committed fraction — re-apply it so --dockmap is not left at 75%. */
-    if (raw >= DOCK_FRAC_MAX + DOCK_PEEK_SNAP){
-      if (!dockPeek){
-        setDockPeek(true);
-        reapplyCommittedDockFrac();
-      }
-      return;
-    }
-    /* Leave peek when raw is back at or below MAX (hysteresis band in between). */
-    if (dockPeek){
-      if (raw <= DOCK_FRAC_MAX){
-        setDockPeek(false);
-        applyDockFrac(clampDockFrac(raw), { persist: false });
-      }
-      return;
-    }
-    applyDockFrac(clampDockFrac(raw), { persist: false });
+    applyDockFrac(raw, { persist: false });
   }
   function onDockDividerPointerUp(e){
     if (!dockDrag) return;
     if (dockDrag.pointerId != null && e.pointerId != null && e.pointerId !== dockDrag.pointerId)
       return;
-    /* Persist on pointerup only — not per move (same as notes wsdivider).
-       Peek is not a fraction: never write scimux-mapdockh while peeked. */
-    if (dockDrag.moved && !dockPeek) applyDockFrac(dockFrac, { persist: true });
-    if (dockPeek) reapplyCommittedDockFrac();
+    /* Persist on pointerup only — not per move (same as notes wsdivider). */
+    if (dockDrag.moved) applyDockFrac(dockFrac, { persist: true });
     const handle = dockDrag.handle;
     if (handle && handle.classList) handle.classList.remove("dragging");
     if (handle && typeof handle.releasePointerCapture === "function" && dockDrag.pointerId != null){
@@ -1152,29 +1107,10 @@ export function createMapFeature(deps){
     if (t && t !== handle && !(t.closest && t.closest("#mapdivider"))) return;
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     if (typeof e.preventDefault === "function") e.preventDefault();
-    /* Keyboard parity with drag: ArrowDown at MAX enters peek; ArrowUp from
-       peek restores the split. ArrowUp moves the separator up → smaller map;
-       ArrowDown → larger map. */
-    if (e.key === "ArrowUp" && dockPeek){
-      setDockPeek(false);
-      return;
-    }
-    if (e.key === "ArrowDown" && !dockPeek && dockFrac >= DOCK_FRAC_MAX){
-      setDockPeek(true);
-      return;
-    }
-    if (dockPeek) return; /* ArrowDown while peeked is a no-op */
+    /* ArrowUp moves the separator up → smaller map; ArrowDown → larger map,
+       each clamped by applyDockFrac. */
     const delta = e.key === "ArrowUp" ? -DOCK_FRAC_NUDGE : DOCK_FRAC_NUDGE;
     applyDockFrac(dockFrac + delta, { persist: true });
-  }
-
-  /* Peek strip tap: restore the persisted fraction (not DOCK_FRAC_DEFAULT).
-     Listener on the static #chat, gated on dockPeek — never inside a polled
-     render region. */
-  function onChatPeekClick(){
-    if (!dockPeek) return;
-    setDockPeek(false);
-    reapplyCommittedDockFrac();
   }
 
   function selectedStop(){
@@ -1235,7 +1171,7 @@ export function createMapFeature(deps){
   function renderMapToolbar(){
     const bar = maptoolbar;
     if (!bar) return;
-    const n = (mapFull && mapSel) ? nodeById(mapSel) : null;
+    const n = (mapFull && mapSel && mapBarOpen) ? nodeById(mapSel) : null;
     bar.classList.toggle("on", !!n);
     if (!n){ bar.innerHTML = ""; bar.style.display = ""; return; }
     const ss = selectedStop();
@@ -1794,27 +1730,32 @@ export function createMapFeature(deps){
       /* Full wall → dock and stay; stack/column map → leave full as today. */
       if (mapFull) setMapDock(true);
       else setMapFull(false);
+      closeMapBar();
       return;
     }
     const pe = e.target.closest("[data-medit]");
     if (pe){
       if (typeof d.openActivityEditor === "function") d.openActivityEditor(pe.dataset.medit, mapSelStop || "");
+      closeMapBar();
       return;
     }
     const nt = e.target.closest("[data-forkbookmark]");
     if (nt){
       if (typeof d.addStationBookmark === "function")
         d.addStationBookmark(nt.dataset.forkbookmark, mapSelStop);
+      closeMapBar();
       return;
     }
     const fk = e.target.closest("[data-forkfrom]");
     if (fk){
       if (typeof d.forkFromStation === "function") d.forkFromStation(fk.dataset.forkfrom);
+      closeMapBar();
       return;
     }
     const ex = e.target.closest("[data-mapexit]");
     if (ex){
       if (typeof d.exitThread === "function") d.exitThread(ex.dataset.mapexit);
+      closeMapBar();
       return;
     }
   }
@@ -1909,14 +1850,10 @@ export function createMapFeature(deps){
     on(div, "pointerup", onDockDividerPointerUp);
     on(div, "pointercancel", onDockDividerPointerUp);
     on(div, "keydown", onDockDividerKeydown);
-    /* Peek strip: click on static #chat restores the last committed fraction.
-       Gated inside the handler on dockPeek; not attached in a polled region. */
-    on(chatEl(), "click", onChatPeekClick);
     /* Restore the split on bind (clamped). No render — CSS var only. */
     applyDockFrac(dockFrac, { persist: false });
     if (doc && doc.body){
       if (mapDock) doc.body.classList.toggle("map-dock", true);
-      doc.body.classList.toggle("dock-peek", !!(mapDock && dockPeek));
     }
     if (typeof d.longpress === "function"){
       if (lanechips){
@@ -1945,8 +1882,6 @@ export function createMapFeature(deps){
     if (mapFull && isDesktop() && doc && doc.body){
       doc.body.classList.add("map-full");
       if (mapDock) doc.body.classList.add("map-dock");
-      /* toggle(name, force) — fakes in tests only implement toggle/add/contains. */
-      doc.body.classList.toggle("dock-peek", !!(mapDock && dockPeek));
     }
     applyDockFrac(dockFrac, { persist: false });
     syncFareBtn();
@@ -1967,8 +1902,6 @@ export function createMapFeature(deps){
     isFull: () => mapFull,
     setDock: setMapDock,
     isDock: () => mapDock,
-    setPeek: setDockPeek,
-    isPeek: () => dockPeek,
     restoreChrome,
     scrollMapToTop,
   };

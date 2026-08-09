@@ -148,6 +148,10 @@ body.bookmarks-open #bookmarkpeek { display: block; }
    the full-screen dock body class reveals it. Hide-global / reveal-scoped —
    same pattern as .wsdivider and #maptoolbar. */
 #mapdivider { display: none; }
+/* The dock's close control: hide-global / reveal-scoped, same as #mapdivider
+   and #maptoolbar — outside the dock there is no pop-out to close, and
+   display:none is what keeps it out of the tab order. */
+#dockclose { display: none; }
 
 /* ---------- desktop / iPad: columns ---------- */
 @media (min-width: 900px) {
@@ -155,7 +159,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   #cards, #map {
     position: static; transform: none; box-shadow: none; transition: none;
     border-right: 1px solid var(--hairline); height: auto;
-    width: 340px; flex: none;
+    width: var(--pane); flex: none;
   }
   /* position:relative anchors the floating toolbar; top:auto cancels the base
      (phone) rule's top offset, which relative — unlike static — would honor */
@@ -196,33 +200,18 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     border-right: none; border-bottom: 1px solid var(--hairline);
   }
   body.map-full.map-dock #chat { display: flex; flex: 1 1 auto; min-height: 0; }
-  /* P3 dock-peek: #chat bottoms out at a titled strip (var(--peek)) instead of
-     vanishing. #map takes the remainder — it must not stay pinned to --dockmap.
-     Visible chrome is #chathead .toprow (#chatdot + #chattitle); everything
-     below is display:none (composer stays in the DOM as the singleton). Head
-     controls go inert so the whole strip is one tap target (notes collapsed
-     tap-catcher idiom). */
-  body.map-full.map-dock.dock-peek #chat {
-    flex: 0 0 var(--peek); height: var(--peek); min-height: var(--peek);
-    max-height: var(--peek); overflow: hidden; cursor: pointer;
-  }
-  body.map-full.map-dock.dock-peek #map {
-    flex: 1 1 auto; height: auto; min-height: 0;
-  }
-  body.map-full.map-dock.dock-peek #chatmission,
-  body.map-full.map-dock.dock-peek #chatdetails,
-  body.map-full.map-dock.dock-peek #gauge,
-  body.map-full.map-dock.dock-peek #msgwrap,
-  body.map-full.map-dock.dock-peek #keyrow,
-  body.map-full.map-dock.dock-peek #convtools,
-  body.map-full.map-dock.dock-peek #workpulse,
-  body.map-full.map-dock.dock-peek #promptbar {
-    display: none;
-  }
-  body.map-full.map-dock.dock-peek #infobtn,
-  body.map-full.map-dock.dock-peek #bookmarksbtn {
-    pointer-events: none;
-  }
+  /* Acceptance retired the fold-to-title-strip state: it is neither reading
+     the chat nor reading the map. The × in the chat head closes the pop-out
+     outright; the divider still tunes the split between the two. */
+  body.map-full.map-dock #dockclose { display: flex; }
+  /* The dock hides #cards, so the chat runs edge to edge and drops (+) and
+     send into the two bottom corners — exactly where iPadOS parks its
+     input-source pill with a hardware keyboard attached, covering one or the
+     other. Give the content column back the width it has beside the
+     Activities pane (half a pane per side, centred). Chrome — the head's
+     hairline, the composer's top border — still spans, as it does elsewhere. */
+  body.map-full.map-dock #msgs,
+  body.map-full.map-dock #promptbar { padding-inline: calc(var(--pane) / 2); }
   /* P2 dock divider — same control as .wsdivider, rotated 90°:
      vertical drag (clientY), row-resize, horizontal pill, one boundary.
      grab strip from --grab, with all but 2px of it cancelled by the derived
@@ -258,7 +247,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     #mapdivider::before { transition: none; }
   }
   #bookmarkspane { position: static; transform: none; transition: none;
-    box-shadow: none; display: none; width: 340px; flex: none;
+    box-shadow: none; display: none; width: var(--pane); flex: none;
     height: auto; border-left: 1px solid var(--hairline); }
   body.bookmarks-open #bookmarkspane { display: flex; }
   body:not(.bookmarks-open) #bookmarkflags { display: flex; }
@@ -629,10 +618,10 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   #notesworkspace #wsback { display: none; }
 }
 @media (min-width: 900px) {
-  /* item 3: at the desktop/landscape breakpoint the app shows 340px side panes
+  /* item 3: at the desktop/landscape breakpoint the app shows --pane-wide side
      (#cards, #bookmarkspane); the two left workspace zones match that width so
      the columns share one rhythm when unset. User resize still wins via custom
      props. The active note keeps the remaining weight. */
-  #wsinbox { width: var(--wsinbox-w, 340px); }
-  #wsnav { width: var(--wsnav-w, 340px); }
+  #wsinbox { width: var(--wsinbox-w, var(--pane)); }
+  #wsnav { width: var(--wsnav-w, var(--pane)); }
 }

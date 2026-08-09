@@ -2822,24 +2822,21 @@ function appEscapeDockDispatch(feature){
   return step;
 }
 
-test("P3: escapeDockStep full truth table", () => {
+test("escapeDockStep full truth table", () => {
   const step = mapExports.escapeDockStep;
   assert.equal(typeof step, "function", "escapeDockStep is exported");
 
-  // mapFull:false → "none" at every (mapDock, dockPeek) input (phone / not full).
+  // mapFull:false → "none" at either mapDock (phone / not full).
   for (const mapDock of [false, true]){
-    for (const dockPeek of [false, true]){
-      assert.equal(step({ mapFull: false, mapDock, dockPeek }), "none",
-        `mapFull:false → none (mapDock=${mapDock}, dockPeek=${dockPeek})`);
-    }
+    assert.equal(step({ mapFull: false, mapDock }), "none", `mapFull:false → none (mapDock=${mapDock})`);
   }
 
-  // Ladder under full screen: dock open → peek → undock → exit-full.
-  assert.equal(step({ mapFull: true, mapDock: true, dockPeek: false }), "peek");
+  // Ladder under full screen: close the pop-out, then leave full screen.
+  assert.equal(step({ mapFull: true, mapDock: true }), "undock");
+  assert.equal(step({ mapFull: true, mapDock: false }), "exit-full");
+
+  // A stale peek flag from an older build must not resurrect a third rung.
   assert.equal(step({ mapFull: true, mapDock: true, dockPeek: true }), "undock");
-  assert.equal(step({ mapFull: true, mapDock: false, dockPeek: false }), "exit-full");
-  // Defensive: peek flag without dock is not a real state → exit full screen.
-  assert.equal(step({ mapFull: true, mapDock: false, dockPeek: true }), "exit-full");
 });
 
 /* ---------- P4: scroll anchoring across poll rebuilds ---------- */
