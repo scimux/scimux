@@ -3394,15 +3394,79 @@ test("dock close: an × in the chat head, no fold-to-title-strip state", () => {
   assert.equal(ids[ids.length - 1], "dockclose", "and is last, i.e. trailing/top-right");
   assert.match(indexHtmlSrc, /id="dockclose"[^>]*aria-label="[^"]+"/, "#dockclose is named");
 
-  assert.match(notesCssSrc, /(?:^|\n)#dockclose\s*\{[^}]*display:\s*none/,
+  assert.match(notesCssSrc, /(?:^|\n)[^{}\n]*#dockclose\s*\{[^}]*display:\s*none/,
     "hidden globally — it only means anything under the dock");
   const mediaBody = notesDesktopMediaBody(notesCssSrc);
-  assert.match(mediaBody, /body\.map-full\.map-dock\s+#dockclose\s*\{[^}]*display:\s*flex/,
+  assert.match(mediaBody, /body\.map-full\.map-dock\s+[^{}\n]*#dockclose\s*\{[^}]*display:\s*flex/,
     "revealed only under body.map-full.map-dock");
 
   const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
   assert.match(appSrc, /dockclose[\s\S]{0,200}setDock\(false\)/,
     "app.js wires #dockclose to leave the dock");
+});
+
+/* ---------- cascade: hide-global rules must actually win ---------- */
+
+/* The link order in index.html — the tiebreaker when specificity ties. */
+const CSS_LINK_ORDER = ["tokens", "base", "layout", "cards", "map", "chat",
+  "sheets", "notes", "accessibility"];
+
+/** [ids, classes+attrs+pseudo-classes, elements] for the selectors we compare. */
+function cssSpecificity(sel){
+  const s = String(sel).trim();
+  const ids = (s.match(/#[\w-]+/g) || []).length;
+  const cls = (s.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+/g) || []).length;
+  const els = (s.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) || []).length;
+  return [ids, cls, els];
+}
+
+/** Does rule a beat rule b? Specificity first, then stylesheet order. */
+function cascadeWins(a, b){
+  const sa = cssSpecificity(a.sel), sb = cssSpecificity(b.sel);
+  for (let i = 0; i < 3; i++) if (sa[i] !== sb[i]) return sa[i] > sb[i];
+  return CSS_LINK_ORDER.indexOf(a.file) >= CSS_LINK_ORDER.indexOf(b.file);
+}
+
+/** The selector of the first rule in src that gives #id the given display. */
+function displayRuleFor(src, id, value){
+  const re = new RegExp(`(?:^|\\n|\\{)\\s*([^{}\\n]*#${id}(?:[^{}\\n]*)?)\\{[^}]*display:\\s*${value}`);
+  const m = src.match(re);
+  return m ? m[1].trim() : null;
+}
+
+test("cssSpecificity counts ids, classes and elements", () => {
+  assert.deepEqual(cssSpecificity("#dockclose"), [1, 0, 0]);
+  assert.deepEqual(cssSpecificity("#chathead .headtoggle"), [1, 1, 0]);
+  assert.deepEqual(cssSpecificity("#chathead #dockclose"), [2, 0, 0]);
+  assert.deepEqual(cssSpecificity("body.map-full.map-dock #dockclose"), [1, 2, 1]);
+});
+
+test("the chat-head toggles that must hide actually outrank #chathead .headtoggle", () => {
+  /* #chathead .headtoggle sets display:flex and carries an id *and* a class.
+     A bare #dockclose { display: none } loses that fight, so the wall map's
+     close × sat in the ordinary chat head next to the bookmarks chevron —
+     a control for a pop-out that is not on screen. Matching the rule's text
+     (as the test above does) cannot see this; only the cascade can. */
+  const chatCss = readFileSync(join(__dirname, "../css/chat.css"), "utf8");
+  const shown = { sel: (chatCss.match(/(?:^|\n)([^{}\n]*\.headtoggle)\s*\{[^}]*display:\s*flex/) || [])[1], file: "chat" };
+  assert.ok(shown.sel, "the .headtoggle display:flex rule must still exist");
+
+  const hide = { sel: displayRuleFor(notesCssSrc, "dockclose", "none"), file: "notes" };
+  assert.ok(hide.sel, "#dockclose must still be hidden globally");
+  assert.ok(cascadeWins(hide, shown),
+    `"${hide.sel}" must beat "${shown.sel}" or the × is always visible`);
+
+  const media = notesDesktopMediaBody(notesCssSrc);
+  const reveal = { sel: displayRuleFor(media, "dockclose", "flex"), file: "notes" };
+  assert.ok(reveal.sel, "the dock must still reveal it");
+  assert.ok(cascadeWins(reveal, hide),
+    `"${reveal.sel}" must beat its own hide "${hide.sel}"`);
+
+  /* Same fight, same head: the bookmarks chevron under the full-screen map. */
+  const bmHide = { sel: displayRuleFor(media, "bookmarksbtn", "none"), file: "notes" };
+  assert.ok(bmHide.sel, "the full-screen map must still hide the bookmarks chevron");
+  assert.ok(cascadeWins(bmHide, shown),
+    `"${bmHide.sel}" must beat "${shown.sel}"`);
 });
 
 test("peek is gone: no third dock state in the exports, the CSS, or the ladder", () => {
