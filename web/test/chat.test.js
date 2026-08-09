@@ -1707,3 +1707,132 @@ test("expanded rebuild restores non-zero .permask scrollTop", async () => {
   assert.equal(after.scrollTop, 240, "scrollTop survives keyrow.innerHTML reassignment");
   ctx.feature.destroy();
 });
+
+/* ---------- the terminal peek is not part of the transcript ----------
+ * peekText is a live tmux capture: while an agent animates a spinner it
+ * changes on every poll, deterministically. It shared a render region with
+ * every chat bubble, so a moving pane re-innerHTML'd the whole transcript
+ * twice a second — re-running the markdown parser and building a fresh Intl
+ * formatter per turn, for the live segment and every loaded history segment.
+ * On a phone that is the poll loop's largest recurring cost.
+ * The pane gets its own host: a moving pane repaints only the pane. */
+
+import * as chatExports from "../js/chat.js";
+
+function peekingFeature(peek){
+  let peekText = peek;
+  const made = makeFeature({
+    nodes: [{
+      id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+      live: "quiet", attention: "approval", lane_id: "L1", description: "d",
+    }],
+    api: async (path) => {
+      if (path.includes("/peek")) return peekText();
+      if (path.includes("/chat")) return {
+        turns: [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
+                { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }],
+        live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      };
+      return {};
+    },
+  });
+  let writes = 0, html = "";
+  Object.defineProperty(made.roots.msgs, "innerHTML", {
+    configurable: true,
+    get(){ return html; },
+    set(v){ writes++; html = v; },
+  });
+  return {
+    ...made,
+    msgsWrites: () => writes,
+    msgsHTML: () => html,
+    peekHost: () => (made.roots.msgs.children || []).find(c => c.id === "peekhost") || null,
+  };
+}
+
+test("buildChatSignature does not carry the terminal pane", () => {
+  const base = {
+    nodeId: "n1", attention: "", delivery: "ok", showPeek: true,
+    termOpen: false, termFull: false, source: "tmux", priorTurns: 0,
+    turnsHash: 7,
+  };
+  assert.equal(
+    buildChatSignature({ ...base, peekHash: 1 }),
+    buildChatSignature({ ...base, peekHash: 2 }),
+    "a moving pane must not invalidate the transcript");
+  // live never appears in the #msgs markup — it drives applyChatActivityChrome,
+  // which is outside the render region.
+  assert.equal(
+    buildChatSignature({ ...base, live: "active" }),
+    buildChatSignature({ ...base, live: "quiet" }),
+    "a turn starting or ending must not rebuild every bubble");
+  assert.notEqual(buildChatSignature({ ...base, turnsHash: 8 }), buildChatSignature(base),
+    "a real transcript change still rebuilds");
+});
+
+test("buildPeekSignature tracks everything the pane block renders", () => {
+  const base = { showPeek: true, peekHash: 1, forcePeek: true, label: "L", termFull: false, unconfirmed: false };
+  const sig = o => chatExports.buildPeekSignature({ ...base, ...o });
+  assert.equal(sig({}), sig({}), "stable input, stable signature");
+  assert.notEqual(sig({ peekHash: 2 }), sig({}), "new pane text");
+  assert.notEqual(sig({ showPeek: false }), sig({}), "pane hidden");
+  assert.notEqual(sig({ forcePeek: false }), sig({}), "heading switches to Terminal");
+  assert.notEqual(sig({ label: "M" }), sig({}), "attention label");
+  assert.notEqual(sig({ termFull: true }), sig({}), "expanded pane");
+  assert.notEqual(sig({ unconfirmed: true }), sig({}), "the delivery notice and its button");
+});
+
+test("a moving pane repaints the pane, not the transcript", async () => {
+  let pane = "frame one";
+  const f = peekingFeature(() => pane);
+  await f.feature.render();
+  const afterFirst = f.msgsWrites();
+  assert.ok(afterFirst > 0, "the first render must build the transcript");
+  const host = f.peekHost();
+  assert.ok(host, "the pane needs its own host inside #msgs");
+  assert.match(host.innerHTML, /frame one/);
+  assert.doesNotMatch(f.msgsHTML(), /frame one/,
+    "the pane text must not be baked into the transcript markup");
+
+  pane = "frame two";
+  await f.feature.render();
+  assert.equal(f.msgsWrites(), afterFirst,
+    "a new pane frame must not rebuild a single bubble");
+  assert.match(f.peekHost().innerHTML, /frame two/, "but the pane itself must move");
+});
+
+test("a real transcript change still rebuilds, and re-hosts the pane", async () => {
+  let pane = "pane";
+  let turns = [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" }];
+  const made = makeFeature({
+    nodes: [{
+      id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+      live: "quiet", attention: "approval", lane_id: "L1", description: "d",
+    }],
+    api: async (path) => {
+      if (path.includes("/peek")) return pane;
+      if (path.includes("/chat")) return {
+        turns, live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      };
+      return {};
+    },
+  });
+  await made.feature.render();
+  const host1 = (made.roots.msgs.children || []).find(c => c.id === "peekhost");
+  assert.ok(host1);
+  turns = [...turns, { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }];
+  await made.feature.render();
+  const hosts = (made.roots.msgs.children || []).filter(c => c.id === "peekhost");
+  assert.equal(hosts.length, 1, "a rebuild must not leave a second pane host behind");
+  assert.match(hosts[0].innerHTML, /pane/,
+    "the pane has to be repainted into the fresh host, or it vanishes on rebuild");
+});
+
+test("an empty pane host takes no room in the message column", () => {
+  // #msgs is a flex column with a 12px gap, so an empty host would push a
+  // phantom gap under the last bubble on every chat without a pane.
+  assert.match(chatCssSrc, /#peekhost:empty\s*\{[^}]*display:\s*none/,
+    "chat.css must collapse the empty host");
+});
