@@ -1852,3 +1852,14 @@ test("an empty pane host takes no room in the message column", () => {
   assert.match(chatCssSrc, /#peekhost:empty\s*\{[^}]*display:\s*none/,
     "chat.css must collapse the empty host");
 });
+
+test("the chat signature hashes the turns without materialising them", () => {
+  /* This runs before the skip check, so it is paid on every poll on both
+     branches — the string it used to build was the entire conversation. */
+  assert.match(chatSrc, /turnsHash:\s*hashTurns\(turns\)/,
+    "the signature must use the streaming hash");
+  assert.doesNotMatch(chatSrc, /turns\.map\([^)]*\)\.join\(/,
+    "no full-transcript string may be built per tick");
+  assert.match(chatSrc, /hashTurns[^;]*from "\.\/lanes\.js"|import \{[^}]*hashTurns[^}]*\} from "\.\/lanes\.js"/,
+    "reuse the primitive, do not reimplement djb2 here");
+});

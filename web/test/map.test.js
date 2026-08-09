@@ -3735,3 +3735,29 @@ test("reduced motion loses the halo with the pulse", () => {
   assert.ok(stops.some(b => /box-shadow:\s*none/.test(b)),
     "stopping the pulse must drop the static halo too");
 });
+
+test("the wall's title clamp is a class the builder sets, not a :has() scan", () => {
+  /* :has() is matched per .strow, and the wall is ~170 of them; WebKit's
+     invalidation for it is coarse, so the per-tick caption patch inside a row
+     can drag the whole selector back through style recalc. The builder already
+     knows whether the row has a description. */
+  assert.doesNotMatch(mapCssSrc, /:has\(/,
+    "map.css must not need a :has() scan on the wall's hottest selector");
+  assert.match(mapCssSrc, /\.strow\s+\.lbl\.hasdesc\s+\.t\s*\{[^}]*-webkit-line-clamp:\s*1/,
+    "the one-line clamp is keyed off the class instead");
+
+  const n = { id: "n1", title: "Alpha", agent: "claude", created_at: "2026-01-01T00:00:00Z", live: "quiet" };
+  const lm = { color: () => "#000", name: () => "L" };
+  const withDesc = mapExports.stationRowHTML({ ...n, description: "why" }, lm);
+  const without = mapExports.stationRowHTML(n, lm);
+  assert.match(withDesc, /class="lbl hasdesc"/, "a described head row is marked");
+  assert.match(withDesc, /<div class="desc">/, "and still renders the description");
+  assert.doesNotMatch(without, /hasdesc/, "an undescribed row is not");
+
+  /* Earlier stops share the row structure, so they need the same mark. */
+  const stopNode = { ...n, description: "why", stops: [] };
+  const stop = { time: "2026-01-01T00:00:00Z", head: false, i: 0, n: stopNode };
+  const stopRow = mapExports.stationRowHTML(stopNode, lm, { stop });
+  assert.match(stopRow, /stoprow/, "the earlier-stop branch was exercised");
+  assert.match(stopRow, /class="lbl hasdesc"/, "an earlier stop with a description is marked too");
+});

@@ -82,7 +82,7 @@ test("lanes.js exports named pure helpers", async () => {
     "laneById", "laneName", "laneColor", "uniqueLaneID", "nextLaneColor",
     "makeLane", "servedLanes", "laneModel", "groupLanes", "laneInGroup",
     "stationsInGroup", "forkKind", "stopTimes", "stopsOf", "stopKey",
-    "stopLabel", "newestFirst", "parentStopIndex", "laneColumnOrder",
+    "stopLabel", "newestFirst", "parentStopIndex", "laneColumnOrder", "hashTurns",
   ]) {
     assert.ok(name in mod, name);
   }
@@ -180,6 +180,31 @@ test("hashStr: deterministic signed 32-bit djb2", () => {
   const s = "test";
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   assert.equal(hashStr("test"), h);
+});
+
+test("hashTurns equals joining the turns and hashing that, without building the string", async () => {
+  /* The chat signature hashed every turn of the transcript on every poll —
+     including the 304 path and including the branch that then skips the
+     rebuild. The join allocated the whole conversation as one fresh string
+     every 2s. hashTurns must be a drop-in: same value, no allocation. */
+  const { hashTurns } = await import("../js/lanes.js");
+  const joined = turns => hashStr(turns.map(t => t.role + "\u0000" + t.text).join("\u0001"));
+  const cases = [
+    [],
+    [{ role: "user", text: "hello" }],
+    [{ role: "user", text: "hello" }, { role: "assistant", text: "hi there" }],
+    [{ role: "user", text: "" }, { role: "user", text: "" }],
+    [{ role: "user", text: "a\u0001b" }, { role: "user", text: "c" }],
+    [{ role: undefined, text: undefined }],
+    [{ role: "user", text: "\u{1F600} unicode" }],
+  ];
+  for (const c of cases)
+    assert.equal(hashTurns(c), joined(c), JSON.stringify(c));
+  assert.equal(hashTurns(null), hashStr(""), "no turns hashes like no text");
+  /* Separators matter: moving a boundary must move the hash. */
+  assert.notEqual(
+    hashTurns([{ role: "user", text: "ab" }]),
+    hashTurns([{ role: "user", text: "a" }, { role: "b", text: "" }]));
 });
 
 /* ---------- uniqueLaneID / makeLane ---------- */
