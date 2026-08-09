@@ -189,6 +189,33 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     border-right: none; border-bottom: 1px solid var(--hairline);
   }
   body.map-full.map-dock #chat { display: flex; flex: 1 1 auto; min-height: 0; }
+  /* P3 dock-peek: #chat bottoms out at a titled strip (var(--peek)) instead of
+     vanishing. #map takes the remainder — it must not stay pinned to --dockmap.
+     Visible chrome is #chathead .toprow (#chatdot + #chattitle); everything
+     below is display:none (composer stays in the DOM as the singleton). Head
+     controls go inert so the whole strip is one tap target (notes collapsed
+     tap-catcher idiom). */
+  body.map-full.map-dock.dock-peek #chat {
+    flex: 0 0 var(--peek); height: var(--peek); min-height: var(--peek);
+    max-height: var(--peek); overflow: hidden; cursor: pointer;
+  }
+  body.map-full.map-dock.dock-peek #map {
+    flex: 1 1 auto; height: auto; min-height: 0;
+  }
+  body.map-full.map-dock.dock-peek #chatmission,
+  body.map-full.map-dock.dock-peek #chatdetails,
+  body.map-full.map-dock.dock-peek #gauge,
+  body.map-full.map-dock.dock-peek #msgwrap,
+  body.map-full.map-dock.dock-peek #keyrow,
+  body.map-full.map-dock.dock-peek #convtools,
+  body.map-full.map-dock.dock-peek #workpulse,
+  body.map-full.map-dock.dock-peek #promptbar {
+    display: none;
+  }
+  body.map-full.map-dock.dock-peek #infobtn,
+  body.map-full.map-dock.dock-peek #bookmarksbtn {
+    pointer-events: none;
+  }
   /* P2 dock divider — same control as .wsdivider, rotated 90°:
      vertical drag (clientY), row-resize, horizontal pill, one boundary.
      12px grab + margin:-5px 0 (not 44px — dock is desktop/iPad-only and the
@@ -218,8 +245,8 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   #mapdivider:focus-visible {
     outline: 2px solid var(--work); outline-offset: -2px;
   }
-  /* Nested so #mapdivider never appears outside the 900px block (phone has no
-     dock). Same reduced-motion opt-out as .wsdivider::before. */
+  /* Nested so the reduced-motion opt-out lives with the sizing rules it
+     modifies (same pattern as .wsdivider::before). Base hide is global. */
   @media (prefers-reduced-motion: reduce) {
     #mapdivider::before { transition: none; }
   }

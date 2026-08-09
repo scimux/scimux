@@ -44,7 +44,7 @@ import {
   withCsrf as withCsrfMod, api as apiMod,
 } from "./api.js";
 import { createCardsFeature } from "./cards.js";
-import { createMapFeature } from "./map.js";
+import { createMapFeature, escapeDockStep } from "./map.js";
 import { createChatFeature, splitAssetRefs } from "./chat.js";
 import { createComposerFeature } from "./composer.js";
 import {
@@ -1259,15 +1259,22 @@ document.addEventListener("keydown", e => {
     chatFeature.cancelDescEdit();
     return;
   }
-  /* Escape exits full-screen (keyboard parity — .backbtn is hidden ≥900px).
-     Ignored while a text field is focused so it can't hijack a field's own
-     Escape; the earlier edit-field branches already returned. In later phases
-     a mode-within-mode field commits/reverts first, then a second Escape
-     reaches here. */
+  /* Escape walks the dock ladder (keyboard parity — .backbtn is hidden ≥900px):
+     dock open → peek → undock → exit full screen. Ignored while a text field
+     is focused so it can't hijack a field's own Escape; the earlier edit-field
+     branches already returned. Search/notes/bookmarks/composer own Escape in
+     their scopes and stopPropagation — do not reorder or replace this site. */
   if (e.key === "Escape" && mapFeature.isFull() &&
       !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable){
     e.preventDefault();
-    setMapFull(false);
+    const step = escapeDockStep({
+      mapFull: mapFeature.isFull(),
+      mapDock: mapFeature.isDock(),
+      dockPeek: mapFeature.isPeek(),
+    });
+    if (step === "peek") mapFeature.setPeek(true);
+    else if (step === "undock") mapFeature.setDock(false);
+    else if (step === "exit-full") setMapFull(false);
   }
 });
 document.addEventListener("focusout", e => {
