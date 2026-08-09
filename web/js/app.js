@@ -653,6 +653,7 @@ const mapFeature = createMapFeature({
     farebtn: $("#farebtn"),
     fareticket: $("#fare_ticket"),
     map: $("#map"),
+    mapdivider: $("#mapdivider"),
     tabHead: $("#tab_head"),
     tabName: $("#tab_name"),
     tabLanes: $("#tab_lanes"),

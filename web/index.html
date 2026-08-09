@@ -52,6 +52,12 @@
     <div id="maptoolbar"></div>
   </section>
 
+  <!-- dock divider (desktop/iPad only under body.map-full.map-dock): map | chat.
+       Same separator idiom as .wsdivider, rotated — sibling of #map/#chat, not
+       a child of either, so the composer stays a singleton outside #mapwrap. -->
+  <div id="mapdivider" role="separator" aria-orientation="horizontal"
+    tabindex="0" aria-label="Resize map and chat"></div>
+
   <!-- level 2: activity cards -->
   <section id="cards" class="panel">
     <div class="phead">

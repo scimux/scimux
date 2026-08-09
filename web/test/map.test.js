@@ -2457,9 +2457,11 @@ function createDockDividerFeature(opts = {}){
     groups: () => [],
     laneFilter: () => "",
     uiLoaded: () => true,
-    laneModel: () => opts.laneModel || ({
-      lanes: [], color: () => "#00f", name: id => id, byId: {},
-    }),
+    laneModel: typeof opts.laneModel === "function"
+      ? opts.laneModel
+      : () => opts.laneModel || ({
+          lanes: [], color: () => "#00f", name: id => id, byId: {},
+        }),
     agentLogo: () => "",
     ...opts.deps,
   });

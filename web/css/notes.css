@@ -172,7 +172,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   body.map-full #bookmarkspane, body.map-full #bookmarkflags { display: none; }
   /* P1 dock shell: wall map on top + existing #chat below. No DOM reparent —
      #map and #chat are already siblings in #app; this is a flex-direction
-     change and an un-hide. Fixed 55/45 until P2's divider.
+     change and an un-hide. --dockmap defaults to 55%; P2's divider writes it.
      Load-bearing: height:auto on #map overrides .panel's height:100%;
      min-height:0 on #chat lets the flex item shrink so #promptbar stays in
      view (children are flex:none — same failure class as approval P7). */
@@ -182,6 +182,40 @@ body.bookmarks-open #bookmarkpeek { display: block; }
     border-right: none; border-bottom: 1px solid var(--hairline);
   }
   body.map-full.map-dock #chat { display: flex; flex: 1 1 auto; min-height: 0; }
+  /* P2 dock divider — same control as .wsdivider, rotated 90°:
+     vertical drag (clientY), row-resize, horizontal pill, one boundary.
+     12px grab + margin:-5px 0 (not 44px — dock is desktop/iPad-only and the
+     repo already settled this at 12px for the same class of control).
+     display:none until body.map-full.map-dock; phone never sees a dock. */
+  #mapdivider {
+    display: none; flex: none; height: 12px; margin: -5px 0; padding: 0;
+    cursor: row-resize; touch-action: none; position: relative; z-index: 2;
+    width: auto; align-self: stretch; background: transparent; flex-shrink: 0;
+  }
+  body.map-full.map-dock #mapdivider { display: block; }
+  #mapdivider::after {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    height: 1px; transform: translateY(-50%); background: var(--hairline);
+  }
+  /* Horizontal grab pill (wsdivider's vertical 4×28 rotated). pointer-events:none
+     so the whole 12px strip stays the hit target. */
+  #mapdivider::before {
+    content: ""; position: absolute; top: 50%; left: 50%;
+    width: 28px; height: 4px; border-radius: 2px;
+    transform: translate(-50%, -50%); background: var(--dim);
+    opacity: .45; pointer-events: none;
+    transition: opacity .12s ease, background-color .12s ease;
+  }
+  #mapdivider:hover::before, #mapdivider:focus-visible::before,
+  #mapdivider.dragging::before { opacity: 1; background: var(--work); }
+  #mapdivider:focus-visible {
+    outline: 2px solid var(--work); outline-offset: -2px;
+  }
+  /* Nested so #mapdivider never appears outside the 900px block (phone has no
+     dock). Same reduced-motion opt-out as .wsdivider::before. */
+  @media (prefers-reduced-motion: reduce) {
+    #mapdivider::before { transition: none; }
+  }
   #bookmarkspane { position: static; transform: none; transition: none;
     box-shadow: none; display: none; width: 340px; flex: none;
     height: auto; border-left: 1px solid var(--hairline); }

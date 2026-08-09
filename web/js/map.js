@@ -6,6 +6,7 @@
  *   - #maptabs, #lanechips, #mapwrap, #mapscroll (scroll for toolbar)
  *   - #maptoolbar (floating wall-map selection bar)
  *   - #mapfullbtn, #farebtn (map chrome toggles)
+ *   - #mapdivider (dock map|chat separator; desktop-only under map-full.map-dock)
  *   - map group sheet controls #tab_head/#tab_name/#tab_lanes/#tab_save/#tab_del
  *     (map-specific sheet body; generic sheet open/close stays injected)
  *
@@ -20,8 +21,9 @@
  *   - body.map-full / body.map-dock classes; mapfullbtn ARIA/glyph; farebtn.on
  *     + aria-pressed + on/off layer-group SVG (fare layer; revealed only under
  *     body.map-full)
+ *   - body style --dockmap (dock split; CSS variable write, never a re-render)
  *   - localStorage: scimux-maptab, scimux-mapfold, scimux-mapfold-known,
- *     scimux-mapfull, scimux-fare, scimux-mapdock
+ *     scimux-mapfull, scimux-fare, scimux-mapdock, scimux-mapdockh
  *   - uiMutate groups/lanes; callbacks: select, setLevel, setLaneFilter,
  *     loadChatHistory, jumpChatToNow, openActivityEditor, forkFromStation,
  *     addStationBookmark, exitThread, openSheet/closeSheets, renderCards
@@ -34,6 +36,7 @@
  *   - #maptoolbar click (open chat / edit / bookmark / fork / exit)
  *   - #mapscroll scroll + window resize → positionMapToolbar
  *   - #mapfullbtn / #farebtn click
+ *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split)
  *   - #tab_save / #tab_del click (map group sheet)
  *
  * Not owned (stay shell / other features):
@@ -82,6 +85,13 @@ export const MAP_FARE_KEY = "scimux-fare";
 /* Dock (wall map on top + real chat below) is a separate flag from full-screen
    wall mode. Do not reuse MAP_FULL_KEY / MAP_FOLD_KEY / MAP_FARE_KEY. */
 export const MAP_DOCK_KEY = "scimux-mapdock";
+/* Map height FRACTION under the dock (not px). Distinct from MAP_DOCK_KEY. */
+export const MAP_DOCK_H_KEY = "scimux-mapdockh";
+
+export const DOCK_FRAC_DEFAULT = 0.55;
+export const DOCK_FRAC_MIN = 0.30;
+export const DOCK_FRAC_MAX = 0.75;
+export const DOCK_FRAC_NUDGE = 0.05;
 
 export const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
@@ -100,6 +110,23 @@ export function dockArrangement({ mapFull, mapDock, isDesktop } = {}){
   if (mapFull && mapDock) return "dock";
   if (mapFull) return "wall";
   return "stack";
+}
+
+/* Clamp the dock map-height fraction. Non-finite (NaN/undefined/…) → default
+   0.55 so a hand-edited localStorage value can never produce an unusable split. */
+export function clampDockFrac(frac){
+  const n = Number(frac);
+  if (!Number.isFinite(n)) return DOCK_FRAC_DEFAULT;
+  if (n < DOCK_FRAC_MIN) return DOCK_FRAC_MIN;
+  if (n > DOCK_FRAC_MAX) return DOCK_FRAC_MAX;
+  return n;
+}
+
+/* Raw map-height fraction from a vertical drag over #app, then clamped.
+   appHeight <= 0 (hidden / zero rect) → default rather than NaN/Infinity. */
+export function dockFracFromDrag({ clientY, appTop, appHeight } = {}){
+  if (!(appHeight > 0)) return DOCK_FRAC_DEFAULT;
+  return clampDockFrac((Number(clientY) - Number(appTop || 0)) / appHeight);
 }
 
 /* validate the saved group only against loaded state — before loadUI
@@ -770,6 +797,7 @@ export function createMapFeature(deps){
   const farebtn = roots.farebtn;
   const fareticket = roots.fareticket;
   const mapEl = roots.map;
+  const mapdivider = roots.mapdivider;
   const tabHead = roots.tabHead;
   const tabName = roots.tabName;
   const tabLanes = roots.tabLanes;
@@ -794,6 +822,14 @@ export function createMapFeature(deps){
   /* Dock: wall map on top + existing #chat below. Independent of map selection
      (the selection is what the dock points at). Cleared when leaving full. */
   let mapDock = !!(storage && storage.getItem(MAP_DOCK_KEY) === "1");
+  /* Dock map-height fraction (0.30–0.75). Restored through clampDockFrac so a
+     hand-edited "3" can never become a 300% map. Applied as --dockmap on body. */
+  let dockFrac = (() => {
+    const raw = storage && storage.getItem(MAP_DOCK_H_KEY);
+    if (raw == null || raw === "") return DOCK_FRAC_DEFAULT;
+    return clampDockFrac(Number(raw));
+  })();
+  let dockDrag = null;
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
@@ -892,6 +928,91 @@ export function createMapFeature(deps){
     else storeRemove(MAP_DOCK_KEY);
     if (doc && doc.body) doc.body.classList.toggle("map-dock", mapDock);
     renderMapToolbar();
+  }
+
+  function dividerEl(){
+    return mapdivider || (doc && doc.querySelector && doc.querySelector("#mapdivider"));
+  }
+  function appEl(){
+    return roots.app || (doc && doc.querySelector && doc.querySelector("#app"));
+  }
+
+  /* Write --dockmap on body. CSS variable only — never renderMap, never mapSig.
+     That is the poll-safety guarantee: resizing must not rebuild #mapwrap or
+     disturb the composer. Differ from notes dividers only in axis (clientY /
+     row-resize / horizontal pill) and in writing one fraction rather than two
+     column widths. */
+  function applyDockFrac(frac, { persist = false } = {}){
+    dockFrac = clampDockFrac(frac);
+    const body = doc && doc.body;
+    if (body && body.style && typeof body.style.setProperty === "function"){
+      /* Whole percents: nudge is 5% and the CSS var is a flex-basis percentage. */
+      body.style.setProperty("--dockmap", Math.round(dockFrac * 100) + "%");
+    }
+    if (persist) storeSet(MAP_DOCK_H_KEY, String(dockFrac));
+  }
+
+  /* ---- P2: dock divider — same handler shape as notes.js onDivider* ---- */
+  function onDockDividerPointerDown(e){
+    const handle = dividerEl();
+    if (!handle) return;
+    const t = e.target;
+    if (t && t !== handle && !(t.closest && t.closest("#mapdivider"))) return;
+    if (e.button != null && e.button !== 0) return;
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    const app = appEl();
+    const rect = app && typeof app.getBoundingClientRect === "function"
+      ? app.getBoundingClientRect()
+      : { top: 0, height: 0 };
+    dockDrag = {
+      pointerId: e.pointerId,
+      startY: e.clientY || 0,
+      appTop: rect.top || 0,
+      appHeight: rect.height || 0,
+      moved: false,
+      handle,
+    };
+    if (handle.classList) handle.classList.add("dragging");
+    if (typeof handle.setPointerCapture === "function" && e.pointerId != null){
+      try { handle.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+  }
+  function onDockDividerPointerMove(e){
+    if (!dockDrag) return;
+    if (dockDrag.pointerId != null && e.pointerId != null && e.pointerId !== dockDrag.pointerId)
+      return;
+    const y = e.clientY || 0;
+    if (Math.abs(y - dockDrag.startY) > 2) dockDrag.moved = true;
+    applyDockFrac(dockFracFromDrag({
+      clientY: y,
+      appTop: dockDrag.appTop,
+      appHeight: dockDrag.appHeight,
+    }), { persist: false });
+  }
+  function onDockDividerPointerUp(e){
+    if (!dockDrag) return;
+    if (dockDrag.pointerId != null && e.pointerId != null && e.pointerId !== dockDrag.pointerId)
+      return;
+    /* Persist on pointerup only — not per move (same as notes wsdivider). */
+    if (dockDrag.moved) applyDockFrac(dockFrac, { persist: true });
+    const handle = dockDrag.handle;
+    if (handle && handle.classList) handle.classList.remove("dragging");
+    if (handle && typeof handle.releasePointerCapture === "function" && dockDrag.pointerId != null){
+      try { handle.releasePointerCapture(dockDrag.pointerId); } catch { /* ignore */ }
+    }
+    dockDrag = null;
+  }
+  function onDockDividerKeydown(e){
+    const handle = dividerEl();
+    if (!handle) return;
+    const t = e.target;
+    if (t && t !== handle && !(t.closest && t.closest("#mapdivider"))) return;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    /* ArrowUp moves the separator up → smaller map; ArrowDown → larger map.
+       Notes uses ArrowLeft/Right for the vertical column dividers. */
+    const delta = e.key === "ArrowUp" ? -DOCK_FRAC_NUDGE : DOCK_FRAC_NUDGE;
+    applyDockFrac(dockFrac + delta, { persist: true });
   }
 
   function selectedStop(){
@@ -1549,6 +1670,16 @@ export function createMapFeature(deps){
     on(farebtn, "click", onFareClick);
     on(tabSave, "click", onTabSave);
     on(tabDel, "click", onTabDel);
+    /* Dock divider: pointer drag + keyboard nudge. Listeners go through
+       cleanups so destroy() drops them (same pattern as every other map root). */
+    const div = dividerEl();
+    on(div, "pointerdown", onDockDividerPointerDown);
+    on(div, "pointermove", onDockDividerPointerMove);
+    on(div, "pointerup", onDockDividerPointerUp);
+    on(div, "pointercancel", onDockDividerPointerUp);
+    on(div, "keydown", onDockDividerKeydown);
+    /* Restore the split on bind (clamped). No render — CSS var only. */
+    applyDockFrac(dockFrac, { persist: false });
     if (typeof d.longpress === "function"){
       if (lanechips){
         const c = d.longpress(lanechips, ".lanechip", onLaneChipLongpress);
@@ -1577,6 +1708,7 @@ export function createMapFeature(deps){
       doc.body.classList.add("map-full");
       if (mapDock) doc.body.classList.add("map-dock");
     }
+    applyDockFrac(dockFrac, { persist: false });
     syncFareBtn();
     syncMapFullBtn();
   }
