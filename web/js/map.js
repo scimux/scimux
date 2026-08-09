@@ -309,14 +309,81 @@ function fareFingerprint(n){
   ].join(",");
 }
 
+/* ---------- repaint budget: shape rebuilds, state patches ----------
+   The wall is one innerHTML write over ~170 rows and a 12,784px SVG, so it
+   may only be rebuilt when its *shape* changes. Mechanical liveness and the
+   context gauge move on the poll cadence — across a fleet that means every
+   tick — so they are deliberately kept out of the signature and painted onto
+   the existing nodes instead (patchStationVolatile). */
+
+/* Only the liveness transitions that change what is drawn: exited and
+   unavailable swap the filled dot for a hollow one and put .dead on the row.
+   active vs quiet is one circle radius and one caption word — patchable. */
+export function liveShape(live){
+  return live === "exited" || live === "unavailable" ? live : "run";
+}
+
 export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn } = {}){
   return "wall|" + (cols || []).join(",") + "|" + focusLane + "|" + mapTab + "|" +
     mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify((rows || []).map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, s.n.created_at,
       l.title, l.desc, s.n.agent,
-      s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "", s.n.live,
-      s.n.attention, s.n.ctx_pct == null ? -1 : s.n.ctx_pct,
+      s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
+      liveShape(s.n.live),
+      // Presence, not value: a gauge appearing from null has to create SVG
+      // elements, which no attribute write can do. Its drift is patched.
+      s.n.attention, s.n.ctx_pct == null ? 0 : 1,
       fareOn ? fareFingerprint(s.n) : 0]; }));
+}
+
+/* The per-station state the signature deliberately ignores. Earlier stops
+   render "· earlier stop" — no status word, no live dot — so they have none. */
+export function stationVolatile(n){
+  if (!n) return "";
+  return (n.live || "") + "|" + (n.ctx_pct == null ? "" : n.ctx_pct);
+}
+
+export function wallVolatile(rows){
+  const out = {};
+  (rows || []).forEach(s => { if (s && s.head && s.n) out[stopKey(s)] = stationVolatile(s.n); });
+  return out;
+}
+
+/** Keys whose volatile state moved since the last frame. No previous frame
+    means paint everything (the wall was just rebuilt from scratch). */
+export function volatileDiff(prev, next){
+  const out = [];
+  Object.keys(next || {}).forEach(k => { if (!prev || prev[k] !== next[k]) out.push(k); });
+  return out;
+}
+
+/** Radius of the context gauge ring. Shared by the renderer and the patch so
+    the arc's circumference cannot drift between them. */
+export const CTX_RING_R = 9;
+
+/** Repaint one station's liveness and gauge on the nodes already in the DOM.
+    Attribute and text writes only — an innerHTML write here would give back
+    everything the skip bought. A station whose hooks are absent (an exited
+    node has no patchable dot) is a silent no-op: this runs inside the poll
+    tick and must never throw. */
+export function patchStationVolatile(root, key, n, opts = {}){
+  if (!root || typeof root.querySelector !== "function" || !n) return false;
+  const cssEsc = opts.cssEscape || (s => String(s));
+  const st = opts.status || statusText;
+  const k = cssEsc(key);
+  const row = root.querySelector(`.strow[data-skey="${k}"]`);
+  const cap = row && typeof row.querySelector === "function" ? row.querySelector(".cap .st") : null;
+  if (cap) cap.textContent = st(n);
+  const dot = root.querySelector(`circle[data-dot="${k}"]`);
+  if (dot) dot.setAttribute("r", n.live === "active" ? 6.5 : 5.5);
+  const arc = root.querySelector(`circle[data-ctx="${k}"]`);
+  if (arc){
+    const C = 2 * Math.PI * CTX_RING_R;
+    const frac = Math.max(0, Math.min(1, (n.ctx_pct || 0) / 100));
+    arc.setAttribute("stroke-dasharray", `${frac * C} ${C}`);
+    arc.setAttribute("stroke", n.ctx_pct >= 80 ? "var(--attn)" : (arc.getAttribute("data-col") || ""));
+  }
+  return true;
 }
 
 /* ---------- V2-P3 lane heat (fare-design.md v2.3 / V2-P3) ----------
@@ -843,7 +910,7 @@ export function stationRowHTML(n, lm, opts = {}){
         <div class="strow ${alt ? "alt " : ""}${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${escape(n.id)}"${stop ? ` data-skey="${escape(stopKey(stop))}"` : ""}>
           <div class="lbl"><span class="agent-logo" title="${escape(n.agent || "agent")}">${opts.agentLogo || ""}</span><span class="t">${escape(label.title)}</span>${fork ? forkCue : ""}</div>
-          <div class="cap">${escape(when)} · ${escape(configText(n))} · ${escape(status(n))}${
+          <div class="cap">${escape(when)} · ${escape(configText(n))} · <span class="st">${escape(status(n))}</span>${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${escape(l)}"` : ""} style="color:${escape(lm.color(l))}">&#8644; ${escape(lm.name(l))}</span>`).join("")}</div>
           ${desc ? `<div class="desc">${escape(desc)}</div>` : ""}
         </div>`;
@@ -912,6 +979,9 @@ export function createMapFeature(deps){
   let lastSelKey = "";
   let lastSelRow = null;
   let mapSig = "";
+  /* Last painted volatile frame, keyed by stop. Diffed on every skipped poll
+     so liveness and the context gauge still move without a rebuild. */
+  let wallVol = {};
   let editTab = null;
   let bound = false;
   const cleanups = [];
@@ -1214,6 +1284,25 @@ export function createMapFeature(deps){
     }).join("");
   }
 
+  /* The skipped-poll path. Nothing about the wall's shape changed, so only the
+     stations whose liveness or gauge moved get touched — attribute and text
+     writes on nodes that are already painted, no markup re-parsed. */
+  function patchWallVolatile(rows){
+    const next = wallVolatile(rows);
+    const moved = volatileDiff(wallVol, next);
+    if (!moved.length) return;
+    if (mapwrap)
+      moved.forEach(k => patchStationVolatile(mapwrap, k, headNodeAt(rows, k), {
+        cssEscape: s => CSSRef.escape(s),
+      }));
+    wallVol = next;
+  }
+
+  const headNodeAt = (rows, key) => {
+    const s = (rows || []).find(r => r && r.head && stopKey(r) === key);
+    return s ? s.n : null;
+  };
+
   function renderWallMap(model, grp, inGroup, served, stations, focusLane){
     const colLanes = model.lanes.filter(l => inGroup(l.id));
     const cols = laneColumnOrder(colLanes, stations, model.byId);
@@ -1223,8 +1312,11 @@ export function createMapFeature(deps){
     const sig = wallMapSignature(rows, cols, {
       focusLane, mapTab, mapSel, mapSelKey, fareOn,
     });
-    if (mapRenderDecision(sig, mapSig) === "skip") return;
+    if (mapRenderDecision(sig, mapSig) === "skip") return patchWallVolatile(rows);
     mapSig = sig;
+    /* The frame the next patch diffs against. Recorded before the rebuild,
+       because the markup below is drawn from exactly this state. */
+    wallVol = wallVolatile(rows);
 
     const RH = WALL_ROW_H, CW = 46, MX = 24, OFF = 16, GAP = 16;
     const nCols = cols.length, nRows = rows.length;
@@ -1348,15 +1440,21 @@ export function createMapFeature(deps){
         svg += i === lineTop[dotX] ? terminalCapSVG(dotX, yy, op, col)
                                    : terminalStationSVG(dotX, yy, op, col);
       if (n.attention) svg += attentionStationSVG(dotX, yy, op);
+      /* data-dot / data-ctx are the repaint hooks. Only the live branch
+         carries one: exited and unavailable are in the signature, so reaching
+         them rebuilds rather than patches. */
+      const skey = escape(stopKey(s));
       if (n.live === "exited" || n.live === "unavailable")
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
       else
-        svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
+        svg += `<circle data-dot="${skey}" cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
       if (n.ctx_pct != null && !n.attention){
-        const R = 9, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
+        const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none" stroke="${col}" stroke-width="2" opacity="${op * .2}"/>`;
-        if (frac > 0)
-          svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none"
+        /* Emitted even at 0% — an invisible arc the patch can grow, since no
+           attribute write can create a node that was never drawn. data-col
+           remembers the lane colour the patch falls back to below 80%. */
+        svg += `<circle data-ctx="${skey}" data-col="${col}" cx="${dotX}" cy="${yy}" r="${R}" fill="none"
                 stroke="${n.ctx_pct >= 80 ? "var(--attn)" : col}" stroke-width="2"
                 stroke-dasharray="${frac * C} ${C}" stroke-linecap="round"
                 transform="rotate(-90 ${dotX} ${yy})" opacity="${op}"/>`;

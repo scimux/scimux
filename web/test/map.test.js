@@ -217,16 +217,20 @@ test("mapTabsHTML All / groups / add button order and ARIA", () => {
 test("ctx_pct still rendered as tank, unchanged (D1)", () => {
   // Tank is the wall-map occupancy ring (D1) — distinct from the fare capsule.
   // Pin the SVG occupancy path byte-for-byte so a merge into the fare overlay is caught.
+  // Re-pinned when the arc gained its repaint hooks and lost the frac > 0
+  // guard (an arc that only exists above 0% cannot be patched upwards). The
+  // geometry — R, the two concentric circles, the 80% amber flip, the -90
+  // rotation — is unchanged and is what this pin is here to protect.
   const tankSnippet = `if (n.ctx_pct != null && !n.attention){
-        const R = 9, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
-        svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;
-        if (frac > 0)
-          svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none"
+        const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
+        svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;`;
+  assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
+  const arcSnippet = `svg += \`<circle data-ctx="\${skey}" data-col="\${col}" cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none"
                 stroke="\${n.ctx_pct >= 80 ? "var(--attn)" : col}" stroke-width="2"
                 stroke-dasharray="\${frac * C} \${C}" stroke-linecap="round"
-                transform="rotate(-90 \${dotX} \${yy})" opacity="\${op}"/>\`;
-      }`;
-  assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
+                transform="rotate(-90 \${dotX} \${yy})" opacity="\${op}"/>\`;`;
+  assert.ok(mapSrc.includes(arcSnippet), "wall tank occupancy arc must be unchanged (D1)");
+  assert.equal(mapExports.CTX_RING_R, 9, "the tank's radius is the pinned geometry");
   // Capsule/callout must not re-absorb occupancy as "% ctx"
   assert.doesNotMatch(mapSrc, /% ctx/);
 });
@@ -328,7 +332,9 @@ test("stationRowHTML earlier stop vs head markup contracts", () => {
   assert.match(head, /agent-logo/);
   assert.match(head, /forkcue/);
   assert.match(head, /data-golane="L2"/);
-  assert.match(head, /m\/high · Quiet/);
+  // The status word sits in its own element so a poll can repaint it without
+  // rewriting the caption; the caption's order is otherwise unchanged.
+  assert.match(head, /m\/high · <span class="st">Quiet<\/span>/);
   // V2-P4: no always-on fare text row on station cards
   assert.doesNotMatch(head, /class="fare"/);
 });
