@@ -213,8 +213,13 @@ body.bookmarks-open #bookmarkpeek { display: block; }
      input-source pill with a hardware keyboard attached, covering one or the
      other. Give the content column back the width it has beside the
      Activities pane (half a pane per side, centred). Chrome — the head's
-     hairline, the composer's top border — still spans, as it does elsewhere. */
+     hairline, the composer's top border — still spans, as it does elsewhere.
+     The whole column, not just the transcript: the approval row and the
+     conversation tools sit between the two and read as loose otherwise. Only
+     the inline padding moves, so #keyrow's own top hairline still spans. */
   body.map-full.map-dock #msgs,
+  body.map-full.map-dock #keyrow,
+  body.map-full.map-dock #convtools,
   body.map-full.map-dock #promptbar { padding-inline: calc(var(--pane) / 2); }
   /* P2 dock divider — same control as .wsdivider, rotated 90°:
      vertical drag (clientY), row-resize, horizontal pill, one boundary.

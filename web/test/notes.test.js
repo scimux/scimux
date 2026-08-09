@@ -2495,9 +2495,11 @@ test("--pane is one token for every side column, and half of it insets the docke
      (+) and send in the two bottom corners where iPadOS parks its
      input-source pill. Give the content column back the width it has beside
      the Activities pane — half that pane per side. */
+  /* Which elements share the column is map.test.js's question; this one only
+     asks that the inset stays derived from the same token. */
   const inset = mediaBody.match(
-    /body\.map-full\.map-dock\s+#msgs,\s*\n?\s*body\.map-full\.map-dock\s+#promptbar\s*\{([^}]+)\}/);
-  assert.ok(inset, "docked #msgs + #promptbar inset rule present inside the 900px block");
+    /body\.map-full\.map-dock\s+#msgs,[^{}]*\{([^}]+)\}/);
+  assert.ok(inset, "docked content-column inset rule present inside the 900px block");
   assert.match(inset[1], /padding-inline:\s*calc\(var\(--pane\)\s*\/\s*2\)/,
     "inset is half a pane per side, derived not literal");
 });
