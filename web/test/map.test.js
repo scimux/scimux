@@ -2419,6 +2419,23 @@ function fakeDockBody(seedClasses = ["map-full", "map-dock"]){
   };
 }
 
+/** Brace-matched outside of notes.css @media (min-width: 900px). */
+function notesDesktopMediaOutside(css){
+  const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(css);
+  if (!m) return null;
+  const open = m.index + m[0].length - 1;
+  let depth = 0, end = -1;
+  for (let i = open; i < css.length; i++){
+    if (css[i] === "{") depth++;
+    else if (css[i] === "}"){
+      depth--;
+      if (depth === 0){ end = i; break; }
+    }
+  }
+  if (end < 0) return null;
+  return css.slice(0, m.index) + css.slice(end + 1);
+}
+
 /** Minimal dock-divider harness: full+dock, #mapdivider, #app geometry, storage. */
 function createDockDividerFeature(opts = {}){
   const body = opts.body || fakeDockBody();
@@ -2450,7 +2467,8 @@ function createDockDividerFeature(opts = {}){
       },
     },
     storage,
-    isDesktop: () => true,
+    /* opts.isDesktop overrides the desktop default (P2a phone-guard tests). */
+    isDesktop: typeof opts.isDesktop === "function" ? opts.isDesktop : () => true,
     mapOpen: () => true,
     level: () => 1,
     nodes: () => opts.nodes || [],
@@ -2642,8 +2660,12 @@ test("P2: ArrowUp/ArrowDown nudge the split by 5% and clamp at both ends", () =>
 });
 
 test("P2: CSS #mapdivider mirrors .wsdivider (row-resize, pill, hairline, focus)", () => {
-  const rule = notesCssSrc.match(/#mapdivider\s*\{([^}]+)\}/);
-  assert.ok(rule, "#mapdivider rule present");
+  /* Sizing/appearance live inside the 900px block (global rule is display:none
+     only — assert the desktop rule body, not the first #mapdivider match). */
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "900px media block present");
+  const rule = mediaBody.match(/(?:^|\n)\s*#mapdivider\s*\{([^}]+)\}/);
+  assert.ok(rule, "#mapdivider sizing rule inside desktop media");
   assert.match(rule[1], /cursor:\s*row-resize/, "vertical drag cursor");
   assert.match(rule[1], /touch-action:\s*none/, "prevent scroll-while-drag");
 
@@ -2660,28 +2682,42 @@ test("P2: CSS #mapdivider mirrors .wsdivider (row-resize, pill, hairline, focus)
     ":focus-visible state for keyboard focus");
 });
 
-test("P2: CSS #mapdivider rules live only inside @media (min-width: 900px)", () => {
+test("P2: CSS #mapdivider size/appearance inside 900px; outside only base hide", () => {
+  /* P2a rewrite: the old assertion "no #mapdivider string outside the media
+     block" was too strong. The correct contract is hide-global / size-scoped
+     (same as .wsdivider and #maptoolbar): a global display:none is required so
+     the index.html singleton leaves the phone tab order; sizing stays inside
+     the brace-matched 900px block. Brace extraction, not text-order slicing. */
   const mediaBody = notesDesktopMediaBody(notesCssSrc);
   assert.ok(mediaBody, "900px media block present");
-  assert.match(mediaBody, /#mapdivider\s*\{/, "#mapdivider base rule inside desktop media");
-  assert.match(mediaBody, /body\.map-full\.map-dock\s+#mapdivider\s*\{/,
-    "divider only appears under the dock");
-  assert.match(mediaBody, /#mapdivider::before\s*\{/, "pill rule inside desktop media");
-  assert.match(mediaBody, /#mapdivider::after\s*\{/, "hairline rule inside desktop media");
 
-  const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(notesCssSrc);
-  const open = m.index + m[0].length - 1;
-  let depth = 0, end = -1;
-  for (let i = open; i < notesCssSrc.length; i++){
-    if (notesCssSrc[i] === "{") depth++;
-    else if (notesCssSrc[i] === "}"){
-      depth--;
-      if (depth === 0){ end = i; break; }
+  const desk = mediaBody.match(/(?:^|\n)\s*#mapdivider\s*\{([^}]+)\}/);
+  assert.ok(desk, "#mapdivider sizing rule inside desktop media");
+  assert.match(desk[1], /height:\s*12px/, "12px grab inside 900px");
+  assert.match(desk[1], /margin:\s*-5px\s+0/, "negative margin grab expand inside 900px");
+  assert.match(desk[1], /cursor:\s*row-resize/, "row-resize inside 900px");
+  assert.match(desk[1], /touch-action:\s*none/, "touch-action inside 900px");
+  assert.match(mediaBody, /body\.map-full\.map-dock\s+#mapdivider\s*\{[^}]*display:\s*block/,
+    "reveal only under the dock, inside 900px");
+  assert.match(mediaBody, /#mapdivider::before\s*\{/, "pill inside 900px");
+  assert.match(mediaBody, /#mapdivider::after\s*\{/, "hairline inside 900px");
+  assert.match(mediaBody, /#mapdivider:focus-visible\s*\{/, "focus-visible inside 900px");
+
+  const outside = notesDesktopMediaOutside(notesCssSrc);
+  assert.ok(outside != null, "outside slice via brace-matched media close");
+  // Every outside #mapdivider rule may only hide — never size or show.
+  const outsideRules = [...outside.matchAll(/#mapdivider(?![.\w-])[^{]*\{([^}]*)\}/g)];
+  for (const m of outsideRules){
+    const body = m[1];
+    assert.doesNotMatch(body, /height\s*:/, "outside must not size height");
+    assert.doesNotMatch(body, /margin\s*:/, "outside must not set margin");
+    assert.doesNotMatch(body, /cursor\s*:/, "outside must not set cursor");
+    if (/display\s*:/.test(body)){
+      assert.match(body, /display:\s*none/, "outside display must be none only");
+      assert.doesNotMatch(body, /display:\s*(?!none\b)[\w-]+/,
+        "outside must not reveal the divider");
     }
   }
-  const outside = notesCssSrc.slice(0, m.index) + notesCssSrc.slice(end + 1);
-  assert.doesNotMatch(outside, /#mapdivider/,
-    "dock divider must not exist outside the desktop media query (phone has no dock)");
 });
 
 test("P2: destroy() removes the divider's listeners", () => {
@@ -2699,5 +2735,62 @@ test("P2: destroy() removes the divider's listeners", () => {
   // re-bind after destroy works
   feature.bind();
   assert.equal(mapdivider._listenerCount("pointerdown"), 1);
+  feature.destroy();
+});
+
+/* ---------- P2a: phone hide + viewport-guarded handlers ---------- */
+
+test("P2a: global #mapdivider { display: none } exists outside @media 900px", () => {
+  /* Mechanism for "not in the phone tab order": display:none is global, like
+     #maptoolbar. Asserted via CSS source — no focus model in the suite (§0). */
+  const outside = notesDesktopMediaOutside(notesCssSrc);
+  assert.ok(outside != null, "brace-matched outside of 900px media");
+  const base = outside.match(/(?:^|\n)\s*#mapdivider\s*\{([^}]+)\}/);
+  assert.ok(base, "global #mapdivider rule outside the 900px media block");
+  assert.match(base[1], /display:\s*none/, "global rule hides the divider");
+  assert.doesNotMatch(base[1], /height\s*:/, "global rule is hide-only, not sized");
+  assert.doesNotMatch(base[1], /cursor\s*:/, "global rule is hide-only, not interactive chrome");
+});
+
+test("P2a: divider handlers no-op when isDesktop is false", () => {
+  /* Belt and braces with the global display:none — notes.js guards isNarrow()
+     the same way. Phone must not write --dockmap or persist scimux-mapdockh. */
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+  });
+  const { feature, body, mapdivider } = createDockDividerFeature({
+    storage,
+    isDesktop: () => false,
+  });
+  feature.bind();
+  // Clear bind-time restore so a handler write is unambiguous.
+  if (body.style.removeProperty) body.style.removeProperty("--dockmap");
+  else body.style._props && delete body.style._props["--dockmap"];
+  storage.removeItem(hKey());
+
+  firstListener(mapdivider, "keydown")({
+    target: mapdivider, key: "ArrowDown", preventDefault(){},
+  });
+  assert.equal(body.style.getPropertyValue("--dockmap"), "",
+    "phone keydown must not write --dockmap");
+  assert.equal(storage.getItem(hKey()), null,
+    "phone keydown must not persist scimux-mapdockh");
+
+  firstListener(mapdivider, "pointerdown")({
+    target: mapdivider, pointerId: 1, clientY: 100, button: 0,
+    preventDefault(){},
+  });
+  firstListener(mapdivider, "pointermove")({
+    target: mapdivider, pointerId: 1, clientY: 700,
+  });
+  firstListener(mapdivider, "pointerup")({
+    target: mapdivider, pointerId: 1, clientY: 700,
+  });
+  assert.equal(body.style.getPropertyValue("--dockmap"), "",
+    "phone pointer drag must not write --dockmap");
+  assert.equal(storage.getItem(hKey()), null,
+    "phone pointer drag must not persist scimux-mapdockh");
   feature.destroy();
 });
