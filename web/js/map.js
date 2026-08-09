@@ -101,6 +101,20 @@ export const DOCK_FRAC_NUDGE = 0.05;
    that snaps into dock-peek. Symmetric leave threshold is DOCK_FRAC_MAX. */
 export const DOCK_PEEK_SNAP = 0.06;
 
+/* Uniform wall-row height — shared by SVG geometry (rowY / svgH) and scroll
+   anchoring across poll rebuilds. Must match .strow height in map.css. */
+export const WALL_ROW_H = 76;
+
+/* Keep the selected station fixed on screen when a poll inserts/removes rows
+   above it. Pure arithmetic on row indices — no layout measurement.
+   Returns prevTop unchanged when either index is missing (no selection, or
+   the selected stop vanished). Never goes below 0. */
+export function anchoredScrollTop({ prevTop, prevIndex, nextIndex, rowHeight } = {}){
+  if (prevIndex == null || nextIndex == null) return prevTop;
+  const next = Number(prevTop) + (Number(nextIndex) - Number(prevIndex)) * Number(rowHeight);
+  return next < 0 ? 0 : next;
+}
+
 export const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="3.2"/></filter></defs>`;
 
@@ -863,6 +877,11 @@ export function createMapFeature(deps){
   let mapSel = "";
   let mapSelKey = "";
   let mapSelStop = "";
+  /* Last wall selection key/row after a rebuild — used to anchor #mapscroll
+     when a poll shifts the same selection's row index. Guard: only apply when
+     mapSelKey === lastSelKey (a new selection's index delta is meaningless). */
+  let lastSelKey = "";
+  let lastSelRow = null;
   let mapSig = "";
   let editTab = null;
   let bound = false;
@@ -1222,7 +1241,7 @@ export function createMapFeature(deps){
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
 
-    const RH = 76, CW = 46, MX = 24, OFF = 16, GAP = 16;
+    const RH = WALL_ROW_H, CW = 46, MX = 24, OFF = 16, GAP = 16;
     const nCols = cols.length, nRows = rows.length;
     const colX = c => MX + c * CW;
     const rowY = i => OFF + i * RH + RH / 2;
@@ -1238,6 +1257,11 @@ export function createMapFeature(deps){
     }
 
     const rowIdx = {}; rows.forEach((s, i) => rowIdx[stopKey(s)] = i);
+    /* Capture scroll + prior row before the DOM write (innerHTML can reset
+       scrollTop). Applied only when the selection key is unchanged. */
+    const prevTop = mapscroll ? mapscroll.scrollTop : 0;
+    const prevKey = lastSelKey;
+    const prevIndex = lastSelRow;
     const BR = 13;
     const xOff = {};
     {
@@ -1383,6 +1407,19 @@ export function createMapFeature(deps){
       alt: i % 2 === 1,
     })).join("")}
   </div>`;
+    /* Anchor only when the same stop stayed selected. A new mapSelKey's
+       prev/next indices describe different stops — applying the delta yanks
+       the viewport on every tap. Missing mapscroll is a no-op (no throw). */
+    const nextIndex = mapSelKey && Object.prototype.hasOwnProperty.call(rowIdx, mapSelKey)
+      ? rowIdx[mapSelKey]
+      : null;
+    if (mapscroll && mapSelKey === prevKey){
+      mapscroll.scrollTop = anchoredScrollTop({
+        prevTop, prevIndex, nextIndex, rowHeight: WALL_ROW_H,
+      });
+    }
+    lastSelKey = mapSelKey;
+    lastSelRow = nextIndex;
     renderLaneChips(model, inGroup, focusLane);
     renderMapToolbar();
   }
