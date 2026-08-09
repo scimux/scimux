@@ -2393,3 +2393,309 @@ test("P1: setMapDock(true) does not clear mapSel / mapSelKey / mapSelStop", () =
   assert.equal(maptoolbar.innerHTML, "", "setFull clears selection; setDock must not");
   feature.destroy();
 });
+
+/* ---------- P2: dock divider (drag, clamp, persist, keyboard) ---------- */
+
+function fakeBodyStyle(){
+  const props = {};
+  return {
+    setProperty(k, v){ props[k] = String(v); },
+    getPropertyValue(k){ return Object.prototype.hasOwnProperty.call(props, k) ? props[k] : ""; },
+    removeProperty(k){ delete props[k]; },
+    _props: props,
+  };
+}
+
+function fakeDockBody(seedClasses = ["map-full", "map-dock"]){
+  return {
+    classList: {
+      _set: new Set(seedClasses),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+      remove(name){ this._set.delete(name); },
+    },
+    style: fakeBodyStyle(),
+  };
+}
+
+/** Minimal dock-divider harness: full+dock, #mapdivider, #app geometry, storage. */
+function createDockDividerFeature(opts = {}){
+  const body = opts.body || fakeDockBody();
+  const storage = opts.storage || memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+  });
+  const mapdivider = opts.mapdivider || fakeEl("mapdivider");
+  mapdivider.setPointerCapture = () => {};
+  mapdivider.releasePointerCapture = () => {};
+  const app = opts.app || fakeEl("app");
+  app.getBoundingClientRect = opts.appRect || (() => ({
+    top: 100, height: 1000, bottom: 1100, left: 0, right: 800, width: 800,
+  }));
+  const mapwrap = opts.mapwrap || fakeEl("mapwrap");
+  const maptoolbar = opts.maptoolbar || fakeEl("maptoolbar");
+  const feature = createMapFeature({
+    roots: {
+      mapdivider, mapwrap, maptoolbar,
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
+      mapfullbtn: fakeEl("mapfullbtn"),
+    },
+    document: {
+      body,
+      querySelector(sel){
+        if (sel === "#app") return app;
+        if (sel === "#mapdivider") return mapdivider;
+        return null;
+      },
+    },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => opts.nodes || [],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => opts.laneModel || ({
+      lanes: [], color: () => "#00f", name: id => id, byId: {},
+    }),
+    agentLogo: () => "",
+    ...opts.deps,
+  });
+  return { feature, body, storage, mapdivider, app, mapwrap, maptoolbar };
+}
+
+test("P2: clampDockFrac clamps to 0.30–0.75; non-finite → 0.55", () => {
+  const clamp = mapExports.clampDockFrac;
+  assert.equal(typeof clamp, "function", "clampDockFrac is exported");
+  assert.equal(clamp(0.1), 0.30);
+  assert.equal(clamp(0.9), 0.75);
+  assert.equal(clamp(0.5), 0.5);
+  assert.equal(clamp(NaN), 0.55);
+  assert.equal(clamp(undefined), 0.55);
+});
+
+test("P2: dockFracFromDrag arithmetic; appHeight 0 → default", () => {
+  const fromDrag = mapExports.dockFracFromDrag;
+  assert.equal(typeof fromDrag, "function", "dockFracFromDrag is exported");
+  // clientY 100px into a 1000px app starting at top 0 → 0.10 → clamp 0.30
+  assert.equal(fromDrag({ clientY: 100, appTop: 0, appHeight: 1000 }), 0.30);
+  // midpoint
+  assert.equal(fromDrag({ clientY: 600, appTop: 100, appHeight: 1000 }), 0.50);
+  // near bottom → clamp 0.75
+  assert.equal(fromDrag({ clientY: 1000, appTop: 0, appHeight: 1000 }), 0.75);
+  // no measurable app → default, not NaN/Infinity
+  assert.equal(fromDrag({ clientY: 500, appTop: 0, appHeight: 0 }), 0.55);
+  assert.equal(fromDrag({ clientY: 500, appTop: 0, appHeight: -10 }), 0.55);
+});
+
+test("P2: MAP_DOCK_H_KEY is scimux-mapdockh and distinct from every map key", () => {
+  assert.equal(mapExports.MAP_DOCK_H_KEY, "scimux-mapdockh");
+  const existing = [
+    MAP_TAB_KEY, MAP_FOLD_KEY, MAP_FOLD_KNOWN_KEY, MAP_FULL_KEY, MAP_FARE_KEY,
+    mapExports.MAP_DOCK_KEY,
+  ];
+  for (const k of existing){
+    assert.notEqual(mapExports.MAP_DOCK_H_KEY, k, `MAP_DOCK_H_KEY must not reuse ${k}`);
+  }
+});
+
+test("P2: drag writes --dockmap and does not call renderMap / touch mapSig", () => {
+  /* Poll-safety guarantee: resize is a CSS variable write only. Rebuilding
+     #mapwrap on drag would thrash the wall and can disturb the composer. */
+  const node = {
+    id: "a", title: "Alpha", description: "", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-02T00:00:00Z", stops: [],
+  };
+  const { feature, body, mapdivider, mapwrap, storage } = createDockDividerFeature({
+    storage: memoryStorage({
+      [MAP_FULL_KEY]: "1",
+      [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+    }),
+    nodes: [node],
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f", name: () => "Lane", byId: { a: node },
+    }),
+  });
+  feature.bind();
+  feature.render();
+  assert.ok(mapwrap.innerHTML.length > 0, "wall rendered once");
+  mapwrap.innerHTML = "STALE";
+
+  firstListener(mapdivider, "pointerdown")({
+    target: mapdivider, pointerId: 1, clientY: 600, button: 0,
+    preventDefault(){},
+  });
+  firstListener(mapdivider, "pointermove")({
+    target: mapdivider, pointerId: 1, clientY: 600,
+  });
+  // appTop=100, appHeight=1000, clientY=600 → (600-100)/1000 = 0.50 → 50%
+  assert.equal(body.style.getPropertyValue("--dockmap"), "50%");
+  // mapSig untouched: a subsequent render with unchanged nodes must skip
+  feature.render();
+  assert.equal(mapwrap.innerHTML, "STALE",
+    "drag must not clear mapSig (render skip still holds)");
+  // and must not have rebuilt mid-drag either
+  assert.equal(mapwrap.innerHTML, "STALE", "drag must not call renderMap");
+  // move-only: nothing persisted yet
+  assert.equal(storage.getItem(mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh"), null);
+  feature.destroy();
+});
+
+test("P2: dock height persists on pointerup only; restore clamps hand-edited storage", () => {
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+  });
+  const { feature, body, mapdivider } = createDockDividerFeature({ storage });
+  feature.bind();
+
+  firstListener(mapdivider, "pointerdown")({
+    target: mapdivider, pointerId: 1, clientY: 100, button: 0,
+    preventDefault(){},
+  });
+  firstListener(mapdivider, "pointermove")({
+    target: mapdivider, pointerId: 1, clientY: 700, // moved past threshold
+  });
+  assert.equal(storage.getItem(hKey()), null, "pointermove does not persist");
+  firstListener(mapdivider, "pointerup")({
+    target: mapdivider, pointerId: 1, clientY: 700,
+  });
+  // clientY 700, appTop 100, height 1000 → 0.60
+  assert.equal(storage.getItem(hKey()), "0.6");
+  assert.equal(body.style.getPropertyValue("--dockmap"), "60%");
+  feature.destroy();
+
+  // Hand-edited localStorage "3" must not produce a 300% map.
+  const storage2 = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [hKey()]: "3",
+  });
+  const again = createDockDividerFeature({ storage: storage2 });
+  again.feature.bind();
+  assert.equal(again.body.style.getPropertyValue("--dockmap"), "75%",
+    "stored '3' clamps to max 0.75 → 75%, never 300%");
+  again.feature.destroy();
+});
+
+test("P2: ArrowUp/ArrowDown nudge the split by 5% and clamp at both ends", () => {
+  const hKey = () => mapExports.MAP_DOCK_H_KEY || "scimux-mapdockh";
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+    [hKey()]: "0.5",
+  });
+  const { feature, body, mapdivider, storage: st } = createDockDividerFeature({ storage });
+  feature.bind();
+  assert.equal(body.style.getPropertyValue("--dockmap"), "50%");
+
+  const key = firstListener(mapdivider, "keydown");
+  assert.ok(key, "keydown listener on #mapdivider");
+
+  key({ target: mapdivider, key: "ArrowDown", preventDefault(){} });
+  assert.equal(body.style.getPropertyValue("--dockmap"), "55%");
+  assert.equal(st.getItem(hKey()), "0.55");
+
+  key({ target: mapdivider, key: "ArrowUp", preventDefault(){} });
+  assert.equal(body.style.getPropertyValue("--dockmap"), "50%");
+
+  // Clamp at top (min map share 30%)
+  st.setItem(hKey(), "0.30");
+  feature.destroy();
+  const lo = createDockDividerFeature({
+    storage: memoryStorage({
+      [MAP_FULL_KEY]: "1",
+      [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+      [hKey()]: "0.30",
+    }),
+  });
+  lo.feature.bind();
+  firstListener(lo.mapdivider, "keydown")({
+    target: lo.mapdivider, key: "ArrowUp", preventDefault(){},
+  });
+  assert.equal(lo.body.style.getPropertyValue("--dockmap"), "30%");
+  lo.feature.destroy();
+
+  // Clamp at bottom (max map share 75%)
+  const hi = createDockDividerFeature({
+    storage: memoryStorage({
+      [MAP_FULL_KEY]: "1",
+      [mapExports.MAP_DOCK_KEY || "scimux-mapdock"]: "1",
+      [hKey()]: "0.75",
+    }),
+  });
+  hi.feature.bind();
+  firstListener(hi.mapdivider, "keydown")({
+    target: hi.mapdivider, key: "ArrowDown", preventDefault(){},
+  });
+  assert.equal(hi.body.style.getPropertyValue("--dockmap"), "75%");
+  hi.feature.destroy();
+});
+
+test("P2: CSS #mapdivider mirrors .wsdivider (row-resize, pill, hairline, focus)", () => {
+  const rule = notesCssSrc.match(/#mapdivider\s*\{([^}]+)\}/);
+  assert.ok(rule, "#mapdivider rule present");
+  assert.match(rule[1], /cursor:\s*row-resize/, "vertical drag cursor");
+  assert.match(rule[1], /touch-action:\s*none/, "prevent scroll-while-drag");
+
+  const pill = notesCssSrc.match(/#mapdivider::before\s*\{([^}]+)\}/);
+  assert.ok(pill, "#mapdivider::before grab pill present");
+  assert.match(pill[1], /pointer-events:\s*none/,
+    "pill is decoration; whole 12px strip stays the hit target");
+
+  const hair = notesCssSrc.match(/#mapdivider::after\s*\{([^}]+)\}/);
+  assert.ok(hair, "#mapdivider::after hairline present");
+  assert.match(hair[1], /background:\s*var\(--hairline\)/, "1px hairline via ::after");
+
+  assert.match(notesCssSrc, /#mapdivider:focus-visible\s*\{/,
+    ":focus-visible state for keyboard focus");
+});
+
+test("P2: CSS #mapdivider rules live only inside @media (min-width: 900px)", () => {
+  const mediaBody = notesDesktopMediaBody(notesCssSrc);
+  assert.ok(mediaBody, "900px media block present");
+  assert.match(mediaBody, /#mapdivider\s*\{/, "#mapdivider base rule inside desktop media");
+  assert.match(mediaBody, /body\.map-full\.map-dock\s+#mapdivider\s*\{/,
+    "divider only appears under the dock");
+  assert.match(mediaBody, /#mapdivider::before\s*\{/, "pill rule inside desktop media");
+  assert.match(mediaBody, /#mapdivider::after\s*\{/, "hairline rule inside desktop media");
+
+  const m = /@media\s*\(\s*min-width:\s*900px\s*\)\s*\{/.exec(notesCssSrc);
+  const open = m.index + m[0].length - 1;
+  let depth = 0, end = -1;
+  for (let i = open; i < notesCssSrc.length; i++){
+    if (notesCssSrc[i] === "{") depth++;
+    else if (notesCssSrc[i] === "}"){
+      depth--;
+      if (depth === 0){ end = i; break; }
+    }
+  }
+  const outside = notesCssSrc.slice(0, m.index) + notesCssSrc.slice(end + 1);
+  assert.doesNotMatch(outside, /#mapdivider/,
+    "dock divider must not exist outside the desktop media query (phone has no dock)");
+});
+
+test("P2: destroy() removes the divider's listeners", () => {
+  const { feature, mapdivider } = createDockDividerFeature();
+  feature.bind();
+  feature.bind(); // idempotent
+  assert.equal(mapdivider._listenerCount("pointerdown"), 1);
+  assert.equal(mapdivider._listenerCount("pointermove"), 1);
+  assert.equal(mapdivider._listenerCount("pointerup"), 1);
+  assert.equal(mapdivider._listenerCount("keydown"), 1);
+  const n = mapdivider._totalListeners();
+  assert.ok(n >= 4, "divider owns pointer + key listeners");
+  feature.destroy();
+  assert.equal(mapdivider._totalListeners(), 0, "destroy removes every divider listener");
+  // re-bind after destroy works
+  feature.bind();
+  assert.equal(mapdivider._listenerCount("pointerdown"), 1);
+  feature.destroy();
+});
