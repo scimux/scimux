@@ -700,13 +700,29 @@ export function createBookmarksFeature(deps){
     const section = (label, list) =>
       (list.length && labelled ? `<div class="sendto-group">${label}</div>` : "") +
       list.map(item).join("");
-    listEl.innerHTML =
-      (section("Pinned", groups.pinned) + section("Recent", groups.recent)) ||
-      `<div style="color:var(--dim);font-size:14px">no live chat can receive this</div>`;
+    const targets = section("Pinned", groups.pinned) + section("Recent", groups.recent);
+    /* Always offer "Start new chat…" — including when nothing live can receive.
+       Distinct data-newchat (never data-fwd) so the handler cannot treat it as
+       a node id. No parent/lineage: openNewActivity clears ncParent. */
+    const newChat =
+      `<div class="sendto-new" role="separator"></div>` +
+      `<button type="button" class="pos-item" data-newchat style="width:100%;text-align:left">` +
+      `Start new chat\u2026</button>`;
+    listEl.innerHTML = targets + newChat;
     if (sendtoListWithHandler && sendtoListWithHandler !== listEl &&
         sendtoListWithHandler.onclick === sendtoClickHandler)
       sendtoListWithHandler.onclick = null;
     sendtoClickHandler = ev => {
+      /* data-newchat before data-fwd — a shared attribute would open a phantom chat. */
+      const startNew = ev.target.closest && ev.target.closest("[data-newchat]");
+      if (startNew){
+        if (typeof d.closeSheets === "function") d.closeSheets();
+        if (typeof d.openNewActivity === "function")
+          d.openNewActivity({ prompt: text || "", focusTitle: true });
+        if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
+          d.setLevel(1);
+        return;
+      }
       const b = ev.target.closest && ev.target.closest("[data-fwd]");
       if (!b) return;
       const tgt = b.dataset.fwd;

@@ -899,6 +899,7 @@ bookmarksFeature = createBookmarksFeature({
   setLevel: n => setLevel(n),
   openSheet: id => sheetsFeature.openSheet(id),
   closeSheets: () => sheetsFeature.closeSheets(),
+  openNewActivity: opts => sheetsFeature.openNewActivity(opts),
   setPendingJump: v => { pendingJump = v; },
   openPreview: (uid, seg, rec, at) => openPreview(uid, seg, rec, at),
   invalidateChat: () => chatFeature.invalidate(),

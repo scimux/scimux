@@ -1180,6 +1180,7 @@ test("public factory API has no mutable test accessors", () => {
     "forkFromTurn",
     "openActivityEditor",
     "openAdopt",
+    "openNewActivity",
     "openSheet",
   ].sort());
 });

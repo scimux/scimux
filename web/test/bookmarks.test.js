@@ -1142,12 +1142,15 @@ test("openSendTo sets the sheet title per caller and merges into the target draf
   assert.equal(roots.chatPrompt._focused, true);
 });
 
-test("openSendTo shows an explicit empty state when nothing can receive", () => {
+test("openSendTo with no live targets still offers Start new chat… (P4)", () => {
+  /* Replaces the pre-P4 dead-end message; case 2 is the full pin. */
   const ctx = createFeature({ nodes: { dead: sendtoNodes.dead }, pinned: [] });
   ctx.feature.bind();
   ctx.feature.openSendTo({ text: "x", exceptId: "" });
   assert.doesNotMatch(ctx.roots.sendtoList.innerHTML, /data-fwd=/);
-  assert.match(ctx.roots.sendtoList.innerHTML, /no (running|live|open) chat/i);
+  assert.doesNotMatch(ctx.roots.sendtoList.innerHTML, /no (running|live|open) chat/i);
+  assert.match(ctx.roots.sendtoList.innerHTML, /data-newchat/);
+  assert.match(ctx.roots.sendtoList.innerHTML, /Start new chat…|Start new chat\u2026/);
 });
 
 test("bookmark longpress reuses openSendTo — the crowded picker is filtered too", () => {

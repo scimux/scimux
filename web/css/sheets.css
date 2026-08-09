@@ -53,6 +53,10 @@
   letter-spacing: .04em; margin: 12px 0 4px;
 }
 .sheet .sendto-group:first-child { margin-top: 0; }
+/* Trailing "Start new chat…" in #sendto — always last, visually separated. */
+.sheet .sendto-new {
+  border-top: 1px solid var(--hairline); margin: 12px 0 4px;
+}
 #backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,.25);
   opacity: 0; pointer-events: none; transition: opacity .3s; }
 #backdrop.on { opacity: 1; pointer-events: auto; }

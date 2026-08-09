@@ -641,20 +641,24 @@ export function createSheetsFeature(deps = {}){
     scheduleTitleFocus(false);
   }
 
-  function openNewActivity(){
+  /* prompt/focusTitle serve Send-to "Start new chat…" (bookmarks openNewActivity
+     dep). Defaults keep plain "+" identical. Never bind this bare as a click
+     listener — the Event would be destructured as options; use () => openNewActivity(). */
+  function openNewActivity({ prompt = "", focusTitle = false } = {}){
     ncParent = ""; ncRationale = ""; ncEdit = ""; ncEditStop = "";
     resetCreateChrome();
     setNewActivitySubmitting(false);
     const title = root("nc_title");
     if (title) title.value = "";
-    const prompt = root("nc_prompt");
-    if (prompt) prompt.value = "";
+    const promptEl = root("nc_prompt");
+    if (promptEl) promptEl.value = prompt || "";
     prepareLaunchConfig();
     prepareNewActivityLane();
     const lastDir = getLastDir(storage);
     const dir = root("nc_dir");
     if (lastDir && dir && !dir.value) dir.value = lastDir;
     openSheet("#newchat");
+    if (focusTitle) scheduleTitleFocus(false);
   }
 
   function openAdopt(session){
@@ -869,7 +873,7 @@ export function createSheetsFeature(deps = {}){
     closeSheets();
     on(root("backdrop"), "click", closeSheets);
     on(root("burger"), "click", () => openSheet("#menu"));
-    on(root("plusbtn"), "click", openNewActivity);
+    on(root("plusbtn"), "click", () => openNewActivity());
     on(root("nc_agent"), "change", onAgentChange);
     on(root("nc_model"), "change", onModelChange);
     on(root("nc_start"), "click", () => { onStartClick(); });
@@ -897,6 +901,7 @@ export function createSheetsFeature(deps = {}){
     closeSheets,
     openAdopt,
     openActivityEditor,
+    openNewActivity,
     forkFromTurn,
     forkFromStation,
     fieldError,
