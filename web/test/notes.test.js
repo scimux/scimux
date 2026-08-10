@@ -2657,3 +2657,79 @@ test("P3 10: note section body edit places caret at end", async () => {
   assert.deepEqual(textarea._range, [bodyText.length, bodyText.length],
     "caret at end of existing body — bare focus() lands at 0 in WebKit");
 });
+
+
+/* ---------- P6 review: notes send-to routes ---------- */
+
+test("P6 review: inbox send-to strips asset markers and excepts the source chat", () => {
+  const calls = [];
+  const ctx = createFeature({
+    bookmarks: [{ t: "1", node: "nX", text: "see ![shot](scimux-asset:a_1) here" }],
+    deps: { openSendTo: opts => calls.push(opts) },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+
+  const row = el("div", { className: "wsibookmark", dataset: { t: "1" } });
+  row.dataset.t = "1";
+  const btn = el("button", { dataset: { bmact: "sendto" } });
+  btn.dataset.bmact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-bmact]") return btn;
+    if (sel === ".wsibookmark") return row;
+    return null;
+  };
+  roots.wsinboxlist.dispatch("click", { target: btn });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].text, "see shot here", "asset markers stripped");
+  assert.equal(calls[0].exceptId, "nX", "the bookmark's own chat is withheld");
+});
+
+test("P6 review: reference send-to strips asset markers and excepts the source chat", async () => {
+  const calls = [];
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{
+          id: "s1", title: "", body: "x", order: 0,
+          references: [{
+            id: "r1",
+            source: { node: "nX", uid: "u", segment: 0, record: 0 },
+            snapshot: { text: "see ![shot](scimux-asset:a_1) here", lane: "#f00" },
+          }],
+        }],
+      },
+    },
+    deps: { openSendTo: opts => calls.push(opts) },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  const card = el("button", { className: "wscard", dataset: { note: "n1" } });
+  card.dataset.note = "n1";
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.dispatch("click", { target: card });
+  await settle();
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const ref = el("div", { className: "wsref", dataset: { ref: "r1" } });
+  ref.dataset.ref = "r1";
+  const btn = el("button", { dataset: { refact: "sendto" } });
+  btn.dataset.refact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-refact]") return btn;
+    if (sel === ".wsref") return ref;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  roots.wssections.dispatch("click", { target: btn });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].text, "see shot here", "asset markers stripped");
+  assert.equal(calls[0].exceptId, "nX", "the reference's source chat is withheld");
+});

@@ -686,3 +686,25 @@ test("P6 fence: bubbleActionsHTML is not restructured", () => {
   assert.match(chatSrc, /data-bact="bookmark"/);
   assert.match(chatSrc, /data-bact="copy"/);
 });
+
+
+/* ================================================================
+ * P6 review — danger is exclusive, not merely present
+ * ================================================================ */
+
+test("P6 review: only the destructive item carries .danger in either menu", () => {
+  /* Case 9a/9b bind danger TO the destructive item, which stays true if a
+     second item is also painted red — and --danger is reserved for
+     delete/archive (P2). Pin exclusivity, not just the coupling. */
+  const cases = [
+    ["bmact", "del", bookmarksMod.bookmarkMenuHTML(
+      { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane" })],
+    ["refact", "trash", notesMod.referenceMenuHTML({ icons: ICONS })],
+  ];
+  for (const [attr, expected, html] of cases){
+    const red = [...html.matchAll(/<button([^>]*)class="danger"/g)]
+      .map(m => (m[1].match(new RegExp('data-' + attr + '="([^"]+)"')) || [])[1]);
+    assert.deepEqual(red, [expected],
+      `exactly one .danger item in the ${attr} menu, and it is ${expected}`);
+  }
+});

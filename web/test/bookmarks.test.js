@@ -423,6 +423,15 @@ function el(tag, attrs = {}){
     },
     focus(){ this._focused = true; },
     blur(){ this._focused = false; },
+    remove(){
+      this._removed = true;
+      const sibs = this.parentNode && this.parentNode.children;
+      if (sibs){
+        const i = sibs.indexOf(this);
+        if (i >= 0) sibs.splice(i, 1);
+      }
+      this.parentNode = null;
+    },
     setAttribute(k, v){ this[k === "aria-label" ? "ariaLabel" : k] = v; if (k === "aria-label") this._ariaLabel = v; },
     getAttribute(k){ return k === "aria-label" ? this._ariaLabel : this[k]; },
     scrollIntoView(){ this._scrolled = true; },
@@ -1747,4 +1756,91 @@ test("P4 data-newchat branch runs before data-fwd (no phantom chat id)", () => {
   ctx.roots.sendtoList.onclick({ target: newChatClickTarget() });
   assert.equal(ctx.effects.select.length, 0);
   assert.equal(ctx.openNewActivityCalls.length, 1);
+});
+
+
+/* ---------- P6 review: the send-to route, and one click per tap ---------- */
+
+/* P6's headline guarantee — every send-to route strips scimux-asset: markers —
+   is pinned in actionbar.test.js only by the identifier appearing somewhere in
+   bookmarks.js/notes.js, which the import statement satisfies on its own.
+   Deleting the call survives the whole suite. These drive the real path. */
+test("P6 review: pane send-to strips asset markers and excepts the source chat", () => {
+  const ctx = createFeature({
+    bookmarks: [{ t: "t1", node: "n1", text: "see ![shot](scimux-asset:a_1) here" }],
+    isDesktop: true,
+  });
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.setOpen(true);
+
+  const wrap = el("div", { className: "bookmark", dataset: { t: "t1" } });
+  wrap.dataset.t = "t1";
+  const btn = el("button", { dataset: { bmact: "sendto" } });
+  btn.dataset.bmact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-bmact]") return btn;
+    if (sel === ".bookmark") return wrap;
+    return null;
+  };
+  roots.bookmarkspane.dispatch("click", { target: btn });
+
+  /* the bookmark's own chat cannot be a target for its own text */
+  assert.doesNotMatch(roots.sendtoList.innerHTML, /data-fwd="n1"/,
+    "exceptId must withhold the source chat");
+  assert.match(roots.sendtoList.innerHTML, /data-fwd="n2"/);
+
+  const fwd = el("button", { dataset: { fwd: "n2" } });
+  fwd.dataset.fwd = "n2";
+  fwd.closest = sel => (sel === "[data-fwd]" ? fwd : null);
+  roots.sendtoList.onclick({ target: fwd });
+
+  assert.equal(storage.getItem(DRAFT_KEY_PREFIX + "n2"), "see shot here",
+    "asset markers are stripped before the text reaches the target draft");
+});
+
+test("P6 review: an overflow-menu click runs its action once, not twice", () => {
+  /* The popover is appended to #bookmarkspane — the very element that carries
+     the delegated [data-bmact] handler — and the menu's own listener neither
+     stops propagation nor clears the stored target. A real browser therefore
+     delivers the click twice: once to the menu listener, once by bubbling to
+     the pane. Headless fakes do not bubble, so the second delivery is
+     simulated here exactly as the DOM would (skipped once propagation stops). */
+  const created = [];
+  const ctx = createFeature({
+    bookmarks: [{ t: "t1", node: "n1", text: "copy me" }],
+    isDesktop: true,
+  });
+  ctx.document.createElement = tag => {
+    const n = el(tag);
+    created.push(n);
+    return n;
+  };
+  const { feature, roots, effects } = ctx;
+  feature.bind();
+  feature.setOpen(true);
+
+  const wrap = el("div", { className: "bookmark", dataset: { t: "t1" } });
+  wrap.dataset.t = "t1";
+  const more = el("button", { dataset: { bmact: "more" } });
+  more.dataset.bmact = "more";
+  more.closest = sel => {
+    if (sel === "[data-bmact]") return more;
+    if (sel === ".bookmark") return wrap;
+    return null;
+  };
+  roots.bookmarkspane.dispatch("click", { target: more });
+  const menu = created[created.length - 1];
+  assert.ok(menu, "overflow menu element created");
+
+  const item = el("button", { dataset: { bmact: "copy" } });
+  item.dataset.bmact = "copy";
+  item.closest = sel => (sel === "[data-bmact]" ? item : null);
+
+  let stopped = false;
+  menu.dispatch("click", { target: item, stopPropagation(){ stopped = true; } });
+  if (!stopped) roots.bookmarkspane.dispatch("click", { target: item });
+
+  assert.deepEqual(effects.copy, ["copy me"],
+    "the menu item's action must not also fire on the delegated pane handler");
 });
