@@ -741,7 +741,10 @@ var projectDirEsc = regexp.MustCompile(`[^a-zA-Z0-9-]`)
 // logs whose newest *content* turn is after since — used to re-run discovery
 // when a pane finished a whole working phase that the linked transcript never
 // carried (a /clear or relaunch inside the pane started a new session file).
-// Only a file the phase actually wrote can be the pane's current session.
+// Only a file the phase actually wrote can be the pane's current session:
+// mtime after since is the necessary condition (append-only logs, so mtime
+// bounds the newest record, and files the phase never touched are skipped
+// unread), a newer content turn the sufficient one.
 // When since is zero (adoption), fall back to mtime so an empty just-created
 // session file can still be claimed before its first turn lands.
 func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessionID string, ok bool) {
@@ -760,6 +763,17 @@ func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessio
 			}
 			t = st.ModTime()
 		} else {
+			// mtime first, and not merely as an optimization: these logs are
+			// append-only, so mtime is an upper bound on the newest record —
+			// a file untouched since the phase start cannot have carried it.
+			// Reading every log in the directory instead costs seconds on a
+			// long-lived project dir, inside the poll loop.
+			st, err := os.Stat(m)
+			if err != nil || !st.ModTime().After(since) {
+				continue
+			}
+			// Touched is not written-to: confirm with content time so a
+			// trailing metadata record cannot claim the phase (P2b).
 			ct, ok := NewestContentTime(m)
 			if !ok || !ct.After(since) {
 				continue
