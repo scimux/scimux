@@ -272,9 +272,12 @@ func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error {
 // chat silently freezes on the last linked conversation, and — because the
 // store is replayed at startup — restarting scimux does not recover. The
 // judgment is mechanical (pane went active→quiet while the linked file's
-// mtime stayed before the phase start); a wrong or missing guess leaves peek
-// and send working exactly as at adoption. Also links a node that never got
-// a transcript (adoption guess failed) once its pane completes a phase.
+// newest *content* turn stayed before the phase start — mtime is not evidence
+// of content; a trailing bridge-session record must not claim the phase);
+// a wrong or missing guess leaves peek and send working exactly as at
+// adoption. Also links a node that never got a transcript (adoption guess
+// failed) once its pane completes a phase. Retired paths/session ids
+// (deadTranscripts) are refused so a /clear cannot come back from the dead.
 func (a *app) maybeRelinkTranscript(n *Node) {
 	a.mu.Lock()
 	cur := n.Transcript
@@ -287,25 +290,28 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	// poll tick; pad the phase-start watermark.
 	since = since.Add(-10 * time.Second)
 	if cur != "" {
-		if st, err := os.Stat(cur); err == nil && st.ModTime().After(since) {
+		// Content time, not mtime: a metadata-only touch on the linked file
+		// (Claude Code's trailing bridge-session) must not claim the phase.
+		if ct, ok := transcript.NewestContentTime(cur); ok && ct.After(since) {
 			return // the linked file carried this phase; the link is healthy
 		}
 	}
 	// Prefer the pane process's own session id (deterministic even with many
 	// sessions in one directory) — but only when the file it names carried
-	// the phase that just ended. The cmdline holds the id claude was
-	// *launched* with; after an in-pane /clear the process keeps that argv
-	// while writing a brand-new session file, so a stale cmdline id must fall
-	// through to the newest-file heuristic instead of relinking the dead
-	// pre-/clear transcript (which would blind needs-input for good: the
-	// dead file never grows, so no pending call and no staleness signal ever
-	// appear). The fallback is ambiguous only when two panes in the same
-	// directory finish concurrently, and path exclusivity bounds that damage.
+	// the phase that just ended *and* is not a retired pre-/clear transcript.
+	// The cmdline holds the id claude was *launched* with; after an in-pane
+	// /clear the process keeps that argv while writing a brand-new session
+	// file, so a stale cmdline id must fall through to the newest-file
+	// heuristic instead of relinking the dead pre-/clear transcript (which
+	// would blind needs-input for good: the dead file never grows, so no
+	// pending call and no staleness signal ever appear). The fallback is
+	// ambiguous only when two panes in the same directory finish
+	// concurrently, and path exclusivity bounds that damage.
 	var path, sid string
 	if pid, err := a.server.Session(n.ID).PanePID(); err == nil {
-		if got := a.paneSessionID(pid); got != "" {
-			if p, ok := transcript.FindClaudeTranscript(a.home, got); ok {
-				if st, err := os.Stat(p); err == nil && st.ModTime().After(since) {
+		if got := a.paneSessionID(pid); got != "" && !a.isDeadTranscript(n.ID, "", got) {
+			if p, ok := transcript.FindClaudeTranscript(a.home, got); ok && !a.isDeadTranscript(n.ID, p, got) {
+				if ct, ok := transcript.NewestContentTime(p); ok && ct.After(since) {
 					path, sid = p, got
 				}
 			}
@@ -313,10 +319,15 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	}
 	if path == "" {
 		if p, s, ok := transcript.FindClaudeNewestInDirSince(a.home, n.Dir, since); ok {
-			path, sid = p, s
+			if !a.isDeadTranscript(n.ID, p, s) {
+				path, sid = p, s
+			}
 		}
 	}
 	if path == "" || path == cur {
+		return
+	}
+	if a.isDeadTranscript(n.ID, path, sid) {
 		return
 	}
 	a.mu.Lock()
@@ -544,7 +555,7 @@ func (a *app) discoverTranscript(n *Node) {
 	}
 	a.mu.Unlock()
 	path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID)
-	if !ok || excluded[path] {
+	if !ok || excluded[path] || a.isDeadTranscript(n.ID, path, n.SessionID) {
 		return
 	}
 	// Reserve the path under the lock before the store write, re-checking

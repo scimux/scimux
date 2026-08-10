@@ -74,6 +74,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		sendState:       map[string]string{},
 		reserved:        map[string]bool{},
 		anim:            map[string]*animState{},
+		deadTranscripts: map[string]map[string]bool{},
 		server:          server,
 		launchGrace:     launchGrace,
 		launchPoll:      launchPoll,
@@ -195,6 +196,13 @@ type app struct {
 	// pathClaims: transcript paths reserved by an in-flight discovery store
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool
+	// deadTranscripts: per-node set of retired transcript paths and session
+	// ids (P2a). A /clear tombstones the old link so maybeRelinkTranscript /
+	// discoverTranscript cannot rebind the pre-clear file from a pane cmdline
+	// or a late mtime touch. Per-node, never global — another node may own
+	// the same path. Replay of "transcript-retired" records rebuilds this;
+	// a delete drops the node's set with the node.
+	deadTranscripts map[string]map[string]bool
 	// chatMark/staleChat: per-node transcript progress at the last
 	// active→quiet pane transition, and whether the file has been growing
 	// without recognizable agent-side records since (degrade the UI to peek).

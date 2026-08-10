@@ -15,10 +15,14 @@ import (
 // storeRecord is one line of the append-only store file. Node metadata is
 // tiny; chat content lives in the agents' own transcript files.
 type storeRecord struct {
-	Type string `json:"type"` // "node" | "transcript" | "key" | "delete"
+	Type string `json:"type"` // "node" | "transcript" | "key" | "delete" | "transcript-retired"
 	Node *Node  `json:"node,omitempty"`
 	ID   string `json:"id,omitempty"`
 	Path string `json:"path,omitempty"`
+	// SessionID is set on "transcript-retired" tombstones so a pane cmdline
+	// that still names the launch session cannot rebind the dead file after
+	// a /clear (P2a). Omitempty keeps older record types unchanged.
+	SessionID string `json:"session_id,omitempty"`
 	// "key" records are the answered-dialog evidence trail: which key was
 	// pressed for a node while what dialog (pane excerpt) was on screen.
 	// Replay ignores them — they carry no node state.
@@ -80,6 +84,12 @@ func (a *app) loadStore() error {
 	// transcript record wins regardless of where it appears relative to its
 	// node record. A delete record removes the node from the visible registry;
 	// a later node record with the same ID would reintroduce it.
+	// "transcript-retired" tombstones accumulate per-node into
+	// deadTranscripts (path and session id); a delete drops the node's set.
+	// Unknown types are silently ignored — never errors.
+	if a.deadTranscripts == nil {
+		a.deadTranscripts = map[string]map[string]bool{}
+	}
 	transcripts := map[string]string{}
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -102,6 +112,8 @@ func (a *app) loadStore() error {
 			}
 		case rec.Type == "transcript":
 			transcripts[rec.ID] = rec.Path
+		case rec.Type == "transcript-retired":
+			a.markDeadTranscriptLocked(rec.ID, rec.Path, rec.SessionID)
 		case rec.Type == "delete":
 			a.removeNodeLocked(rec.ID)
 			delete(transcripts, rec.ID)
@@ -113,6 +125,42 @@ func (a *app) loadStore() error {
 		}
 	}
 	return nil
+}
+
+// markDeadTranscriptLocked records a retired path and/or session id for a
+// node. Callers that already hold a.mu (or run single-threaded at startup)
+// use this; per-node, never global — another node may own the same path.
+func (a *app) markDeadTranscriptLocked(nodeID, path, sessionID string) {
+	if nodeID == "" {
+		return
+	}
+	if a.deadTranscripts == nil {
+		a.deadTranscripts = map[string]map[string]bool{}
+	}
+	set := a.deadTranscripts[nodeID]
+	if set == nil {
+		set = map[string]bool{}
+		a.deadTranscripts[nodeID] = set
+	}
+	if path != "" {
+		set[path] = true
+	}
+	if sessionID != "" {
+		set[sessionID] = true
+	}
+}
+
+// isDeadTranscript reports whether path or sessionID was retired for this
+// node. Safe without a.mu for a snapshot read of the map reference; callers
+// that mutate hold a.mu around mark/delete.
+func (a *app) isDeadTranscript(nodeID, path, sessionID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	set := a.deadTranscripts[nodeID]
+	if set == nil {
+		return false
+	}
+	return (path != "" && set[path]) || (sessionID != "" && set[sessionID])
 }
 
 // removeNodeLocked drops a node and every per-node poll field. Runtime callers
@@ -143,6 +191,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.segCache, id)
 	delete(a.fareCache, id)
 	delete(a.anim, id)
+	delete(a.deadTranscripts, id)
 }
 
 // sessionLogPath is the single spelling of a node's session-log location; the

@@ -279,6 +279,7 @@ func (a *app) retireTranscript(n *Node) {
 		a.mu.Unlock()
 		return
 	}
+	oldPath, oldSID := n.Transcript, n.SessionID
 	cp := *n
 	cp.Transcript, cp.SessionID = "", ""
 	a.mu.Unlock()
@@ -289,10 +290,20 @@ func (a *app) retireTranscript(n *Node) {
 	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: ""}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: retire transcript for %s: %v\n", n.ID, err)
 	}
+	// Tombstone the retired path/session so maybeRelinkTranscript and
+	// discoverTranscript refuse them even when the pane cmdline still names
+	// the launch session or a late metadata touch bumps the dead file's mtime.
+	// Append-only: a new record, never an edit of the node/transcript lines.
+	if err := a.appendRecord(storeRecord{
+		Type: "transcript-retired", ID: n.ID, Path: oldPath, SessionID: oldSID,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: tombstone transcript for %s: %v\n", n.ID, err)
+	}
 	// Deliberate non-poller reset after durable retirement only: poller-owned
 	// maps must drop the old file's tailer/progress/mirror so the next segment
 	// cannot inherit them. Persist failure returns above without touching these.
 	a.mu.Lock()
+	a.markDeadTranscriptLocked(n.ID, oldPath, oldSID)
 	n.Transcript, n.SessionID = "", ""
 	delete(a.tailers, n.ID)
 	delete(a.chatMark, n.ID)
@@ -450,6 +461,14 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"turns": turns, "last_change": lastMS,
 		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
+	}
+	// fresh: zero-turn current segment with prior history behind a source
+	// seam — a /clear'ed chat. The client trusts this over fallback so a
+	// cleared Claude node says "fresh chat — send a prompt" instead of
+	// dropping to a terminal peek (P2c). A never-started node has no prior
+	// turns and must not claim fresh.
+	if len(seg.Turns) == 0 && seg.PriorTurns > 0 {
+		resp["fresh"] = true
 	}
 	if assets != nil {
 		resp["assets"] = assets

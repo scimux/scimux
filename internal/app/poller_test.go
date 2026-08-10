@@ -585,11 +585,12 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	}
 	oldPath := filepath.Join(proj, "old-session.jsonl")
 	newPath := filepath.Join(proj, "new-session.jsonl")
-	for _, p := range []string{oldPath, newPath} {
-		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Content time, not mtime: the new session must carry a turn after the
+	// phase watermark; the old one's content predates it.
+	oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	newTS := time.Now().UTC().Format(time.RFC3339Nano)
+	appendLines(t, oldPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"old"}}`, oldTS))
+	appendLines(t, newPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"new"}}`, newTS))
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldPath, past, past); err != nil {
 		t.Fatal(err)
@@ -629,11 +630,10 @@ func TestMaybeRelinkTranscriptIgnoresStaleCmdlineSession(t *testing.T) {
 	}
 	oldPath := filepath.Join(proj, "old-session.jsonl")
 	newPath := filepath.Join(proj, "new-session.jsonl")
-	for _, p := range []string{oldPath, newPath} {
-		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	newTS := time.Now().UTC().Format(time.RFC3339Nano)
+	appendLines(t, oldPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"old"}}`, oldTS))
+	appendLines(t, newPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"new"}}`, newTS))
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldPath, past, past); err != nil {
 		t.Fatal(err)
@@ -658,8 +658,8 @@ func TestMaybeRelinkTranscriptIgnoresStaleCmdlineSession(t *testing.T) {
 	}
 }
 
-// A linked transcript that carried the phase (mtime after phase start) is
-// healthy — a newer sibling session file must not steal the link.
+// A linked transcript that carried the phase (content time after phase start)
+// is healthy — a newer sibling session file must not steal the link.
 func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"c1": true}}
 	a := newTestApp(t, f)
@@ -669,11 +669,10 @@ func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {
 	}
 	linked := filepath.Join(proj, "linked.jsonl")
 	other := filepath.Join(proj, "other.jsonl")
-	for _, p := range []string{linked, other} {
-		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Linked file's content is after the phase start — it carried the work.
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	appendLines(t, linked, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"linked"}}`, ts))
+	appendLines(t, other, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"other"}}`, ts))
 
 	n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj", Transcript: linked}
 	a.nodes = append(a.nodes, n)

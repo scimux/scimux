@@ -161,11 +161,18 @@ export function chatActivityPolicy({
   source = "",
   priorTurns = 0,
   termOpen = false,
+  fresh = false,
 } = {}){
   const unconfirmed = delivery === "unconfirmed";
-  const mustShowPane = !attentionHidden && (!!fallback || !!attention || unconfirmed);
+  // Server-reported fresh (zero-turn post-seam segment) means a deliberate
+  // /clear: show "fresh chat — send a prompt" instead of treating empty+
+  // fallback as a broken transcript that forces a terminal peek (P2c).
+  // Attention and unconfirmed delivery still force the pane.
+  const mustShowPane = !attentionHidden && (
+    !!attention || unconfirmed || (!!fallback && !fresh)
+  );
   const freshSurface = !turnsLength && !mustShowPane &&
-                       source === "acp" && (priorTurns || 0) > 0;
+                       (fresh || (source === "acp" && (priorTurns || 0) > 0));
   const forcePeek = mustShowPane || (!turnsLength && !freshSurface);
   const showPeek = forcePeek || !!termOpen;
   return { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek };
@@ -1112,6 +1119,7 @@ export function createChatFeature(deps){
       source: data.source,
       priorTurns: data.prior_turns || 0,
       termOpen,
+      fresh: !!data.fresh,
     });
     const { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek } = policy;
 

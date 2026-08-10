@@ -11,6 +11,7 @@
 package transcript
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -112,6 +113,47 @@ func makeTurn(role, text, ts string) (Turn, bool) {
 		return Turn{}, false
 	}
 	return Turn{Role: role, Text: text, Time: ts}, true
+}
+
+// NewestContentTime returns the newest timestamp among records the existing
+// parser turns into a visible turn (ParseLine/makeTurn). Metadata and unknown
+// shapes — including Claude Code's trailing bridge-session records — are
+// silently ignored. ok is false when the file is unreadable or has no turns.
+// Callers use this instead of mtime when judging whether a transcript carried
+// a working phase: mtime is not evidence of content.
+func NewestContentTime(path string) (time.Time, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+	var newest time.Time
+	found := false
+	sc := bufio.NewScanner(f)
+	// Claude/Codex lines can be large (tool results); raise the token limit
+	// so a long line is still considered rather than aborting the scan.
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		turn, ok := ParseLine(line)
+		if !ok || turn.Time == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, turn.Time)
+		if err != nil {
+			t, err = time.Parse(time.RFC3339, turn.Time)
+		}
+		if err != nil {
+			continue
+		}
+		if !found || t.After(newest) {
+			newest, found = t, true
+		}
+	}
+	return newest, found
 }
 
 // contentText accepts both a plain string and a list of content blocks,
@@ -696,10 +738,12 @@ func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
 var projectDirEsc = regexp.MustCompile(`[^a-zA-Z0-9-]`)
 
 // FindClaudeNewestInDirSince is FindClaudeNewestInDir restricted to session
-// logs modified after since — used to re-run discovery when a pane finished a
-// whole working phase that the linked transcript never carried (a /clear or
-// relaunch inside the pane started a new session file). Only a file the
-// phase actually wrote can be the pane's current session.
+// logs whose newest *content* turn is after since — used to re-run discovery
+// when a pane finished a whole working phase that the linked transcript never
+// carried (a /clear or relaunch inside the pane started a new session file).
+// Only a file the phase actually wrote can be the pane's current session.
+// When since is zero (adoption), fall back to mtime so an empty just-created
+// session file can still be claimed before its first turn lands.
 func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessionID string, ok bool) {
 	esc := projectDirEsc.ReplaceAllString(dir, "-")
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", esc, "*.jsonl"))
@@ -708,12 +752,22 @@ func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessio
 	}
 	var bestTime time.Time
 	for _, m := range matches {
-		st, err := os.Stat(m)
-		if err != nil || !st.ModTime().After(since) {
-			continue
+		var t time.Time
+		if since.IsZero() {
+			st, err := os.Stat(m)
+			if err != nil {
+				continue
+			}
+			t = st.ModTime()
+		} else {
+			ct, ok := NewestContentTime(m)
+			if !ok || !ct.After(since) {
+				continue
+			}
+			t = ct
 		}
-		if path == "" || st.ModTime().After(bestTime) {
-			path, bestTime = m, st.ModTime()
+		if path == "" || t.After(bestTime) {
+			path, bestTime = m, t
 		}
 	}
 	if path == "" {

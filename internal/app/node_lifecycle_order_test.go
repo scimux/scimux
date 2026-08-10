@@ -21,6 +21,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -280,11 +281,11 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	}
 	oldPath := filepath.Join(proj, "old-session.jsonl")
 	newPath := filepath.Join(proj, "new-session.jsonl")
-	for _, p := range []string{oldPath, newPath} {
-		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Content time gates require a real turn after the phase watermark.
+	oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	newTS := time.Now().UTC().Format(time.RFC3339Nano)
+	appendLines(t, oldPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"old"}}`, oldTS))
+	appendLines(t, newPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"new"}}`, newTS))
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldPath, past, past); err != nil {
 		t.Fatal(err)
