@@ -111,8 +111,10 @@ test(".popmenu button.danger uses --danger, not --attn (covers Delete section)",
   /* Section menu data-mi=del uses class="danger"; note delete is on the card.
      P5: generic .popmenu rules live in menu.css; del is built via menuButtonHTML
      (attrs + danger: true) rather than an inline class="danger" string. */
-  assert.match(notesSrc, /data-mi="del"/);
-  assert.match(notesSrc, /danger:\s*true/);
+  /* P5 review: keep del and danger COUPLED. Asserting the two strings exist
+     independently let `danger: true` move onto "Move up" with the suite green —
+     and this test's own name claims to cover Delete section. */
+  assert.match(notesSrc, /data-mi="del"[^)]*danger:\s*true/);
   assert.match(menuCssSrc, /\.popmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
   assert.doesNotMatch(menuCssSrc, /\.popmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
 });
@@ -1964,6 +1966,61 @@ test("card delete confirm issues DELETE for that note id", async () => {
   const del = apiLog.find(x => x.method === "DELETE" && x.url.includes("/api/notes/n2"));
   assert.ok(del, "confirm issues DELETE for the card's note");
   assert.equal(roots.wstitle.textContent, "Keep");
+});
+
+/* P5 review: the two call-site offsets were unpinned after the lift. The pure
+   menuPlacement is covered at both offsets, but nothing bound notes.js to the
+   RIGHT one — swapping 150 and 40 left the whole suite green while the confirm
+   popover moved 110px. The existing confirm fixtures cannot see it: with an
+   anchor at left 10 both offsets clamp to the same 8px floor. Anchor far enough
+   right that the clamp does not bite and the offsets separate:
+     offset 40  -> max(8, min(300 - 40, 400 - 190)) = 210
+     offset 150 -> max(8, min(300 - 150, 400 - 190)) = 150 */
+test("P5 review: openDeleteConfirm positions with offset 40, not the section menu's 150", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Keep", order: 0 }, { id: "n2", title: "Gone", order: 1 }],
+    docs: {
+      n1: { id: "n1", title: "Keep", sections: [] },
+      n2: { id: "n2", title: "Gone", sections: [] },
+    },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const card = el("div", { className: "wscard", dataset: { note: "n2" } });
+  card.dataset.note = "n2";
+  const delBtn = el("button", { className: "danger", dataset: { wcact: "delete" } });
+  delBtn.dataset.wcact = "delete";
+  delBtn.closest = sel => {
+    if (sel === "[data-wcact]" || sel.includes("data-wcact")) return delBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  delBtn.getBoundingClientRect = () => ({ top: 260, left: 300, bottom: 300, height: 40, width: 44 });
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+  roots.wspanel.getBoundingClientRect = () => ({ top: 0, left: 0, width: 400, height: 600 });
+
+  roots.wscards.dispatch("click", { target: delBtn, stopPropagation(){}, preventDefault(){} });
+  await settle();
+
+  const menu = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(menu, "confirm popover opens");
+  assert.equal(menu.style.left, "210px", "offset 40 — 150 would put it at 150px");
+  assert.equal(menu.style.top, "304px");
+});
+
+/* Source-level companion: there is no harness that opens the section menu, so
+   the 150 side of the swap is pinned where it is written. Binds the construct
+   to its offset rather than asserting the two numbers exist somewhere. */
+test("P5 review: each popover call site keeps its own offset (150 section, 40 confirm)", () => {
+  const section = notesSrc.slice(notesSrc.indexOf("function openSectionMenu"));
+  assert.match(section.slice(0, 900), /offset:\s*150/);
+  const confirm = notesSrc.slice(notesSrc.indexOf("function openDeleteConfirm"));
+  assert.match(confirm.slice(0, 900), /offset:\s*40/);
 });
 
 /* ---------- section title Enter/Escape contract in source ---------- */
