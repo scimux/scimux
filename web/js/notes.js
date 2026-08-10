@@ -1852,7 +1852,7 @@ export function createNotesFeature(deps){
   function onDocClick(e){
     /* exclude every overflow trigger so the open-tap does not instantly dismiss */
     if (popMenu.shouldCloseForClick(e.target, {
-      exclude: '[data-secmenu], [data-bmact="more"]',
+      exclude: '[data-secmenu], [data-bmact="more"], [data-refact="trash"]',
     }))
       closeWsMenu();
   }
