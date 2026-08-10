@@ -985,6 +985,52 @@ test("success cleanup revokes previews; unconfirmed is success", async () => {
   ctx.feature.destroy();
 });
 
+// P1d — an unacknowledged send must not look delivered; 409 must show the
+// server's message instead of being swallowed.
+test("P1d: 200 status unconfirmed is not-delivered and keeps draft", async () => {
+  const ctx = makeFeature({
+    sendHandler: async () => ({ status: "unconfirmed", text: "please approve" }),
+  });
+  ctx.feature.bind();
+  ctx.roots.prompt.textContent = "please approve";
+  await ctx.feature.sendPrompt();
+  assert.ok(ctx.alerts.length >= 1, "must alert that send was not confirmed");
+  assert.match(String(ctx.alerts[0]), /not delivered|unconfirmed|check the terminal/i);
+  assert.equal(ctx.storage.getItem("scimux-draft:n1"), "please approve");
+  assert.equal(ctx.feature.promptText(), "please approve");
+  assert.ok(ctx.clears.includes("n1"), "echo must retract on unconfirmed");
+  ctx.feature.destroy();
+});
+
+test("P1d: 409 surfaces server message on send", async () => {
+  const ctx = makeFeature({
+    sendHandler: async () => {
+      const err = new Error("previous send unconfirmed — check the terminal");
+      err.status = 409;
+      throw err;
+    },
+  });
+  ctx.feature.bind();
+  ctx.roots.prompt.textContent = "next";
+  await ctx.feature.sendPrompt();
+  assert.deepEqual(ctx.alerts, ["previous send unconfirmed — check the terminal"]);
+  assert.equal(ctx.storage.getItem("scimux-draft:n1"), "next");
+  ctx.feature.destroy();
+});
+
+test("P1d: ordinary 200 acknowledged is unchanged success", async () => {
+  const ctx = makeFeature({
+    sendHandler: async () => ({ status: "acknowledged" }),
+  });
+  ctx.feature.bind();
+  ctx.roots.prompt.textContent = "ok prompt";
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.alerts.length, 0);
+  assert.equal(ctx.storage.getItem("scimux-draft:n1"), null);
+  assert.equal(ctx.clears.length, 0);
+  ctx.feature.destroy();
+});
+
 test("409 restores quietly; non-409 alerts; draft merge and stage restore", async () => {
   // 409
   const ctx = makeFeature({

@@ -686,3 +686,193 @@ func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {
 		t.Fatalf("healthy link was stolen: %q", n.Transcript)
 	}
 }
+
+// P1b/P1c — quiet-pane owing stall and structural dialog matcher. The exact
+// reported case: Write/Edit approval on screen, no unresolved tool_use in the
+// transcript (Claude Code flushes late), healthy transcript, quiet pane.
+func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
+	// Non-matching pane text so only the mechanical backstop can fire.
+	plainPane := "working…\n$"
+	// Current Write/Edit dialog wording — no "proceed"/"allow" verbs.
+	editDialog := ` Do you want to make this edit to hello.txt?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend`
+	// Active pane: content differs from prevCap each observation.
+	activePrev := "tick-a\nline2\nline3\nline4\nline5\nline6\nline7"
+	activeCur := "tick-b\nline2\nline3\nline4\nline5\nline6\nline7"
+
+	quietRunner := func(pane string) tmuxsession.Runner {
+		return func(ctx context.Context, stdin string, args ...string) (string, error) {
+			for _, arg := range args {
+				if arg == "has-session" {
+					return "", nil
+				}
+				if arg == "capture-pane" {
+					return pane, nil
+				}
+			}
+			return "", nil
+		}
+	}
+
+	// (a) quiet + owing + past the stall ⇒ inspect, no unresolved call.
+	t.Run("owing_past_stall_inspect", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-2 * owedStallAfter)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
+		if got := a.attn["cl1"]; got != "inspect" {
+			t.Errorf("attention = %q, want inspect", got)
+		}
+	})
+
+	// (b) quiet + owing + inside the stall ⇒ none.
+	t.Run("owing_inside_stall_none", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none inside stall", got)
+		}
+	})
+
+	// (c) quiet with newest turn an assistant turn ⇒ none, however long.
+	t.Run("finished_turn_never_inspect", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-2 * owedStallAfter)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none on finished turn", got)
+		}
+	})
+
+	// (d) matcher hit classifies as dialog immediately, before the stall elapses.
+	t.Run("structural_matcher_dialog_immediate", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": editDialog},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-5 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(editDialog)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "dialog" {
+			t.Errorf("attention = %q, want dialog from structural matcher", got)
+		}
+	})
+
+	// (e) an active pane takes no new path (owing backstop is quiet-only).
+	t.Run("active_pane_no_owing_path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": activePrev},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-2 * owedStallAfter)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			anim:      map[string]*animState{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(activeCur)),
+		}
+		a.poll()
+		if got := a.live["cl1"]; got != "active" {
+			t.Fatalf("live = %q, want active", got)
+		}
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none on active pane", got)
+		}
+	})
+
+	// (f) attention clears once the transcript grows (assistant turn lands).
+	t.Run("clears_when_transcript_grows", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-2 * owedStallAfter)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "inspect" {
+			t.Fatalf("setup: attention = %q, want inspect", got)
+		}
+		appendLines(t, path,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"edited"}]}}`)
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention after growth = %q, want cleared", got)
+		}
+	})
+}

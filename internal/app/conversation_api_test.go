@@ -986,6 +986,38 @@ func TestHandlePeekSpotsDialog(t *testing.T) {
 	}
 }
 
+// TestHandlePeekStructuralDialogNoWaitingOn: P1c — peek raises attention for
+// the current Write/Edit dialog wording even with no unresolved tool call in
+// the transcript (Claude Code's late tool_use flush). Shares the quiet-branch
+// predicate with the poller.
+func TestHandlePeekStructuralDialogNoWaitingOn(t *testing.T) {
+	editDialog := ` Do you want to make this edit to hello.txt?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend`
+	f := &fakeTmux{alive: map[string]bool{"p1": true}, capture: editDialog}
+	a := newTestApp(t, f)
+	path := filepath.Join(t.TempDir(), "tx.jsonl")
+	// User prompt only — no tool_use record (the late-flush case).
+	appendLines(t, path,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+	n := &Node{ID: "p1", Title: "p1", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+	a.nodes, a.byID["p1"] = []*Node{n}, n
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/p1/peek", nil)
+	r.SetPathValue("id", "p1")
+	a.handlePeek(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("peek = %d", rec.Code)
+	}
+	if got := a.attn["p1"]; got != "dialog" {
+		t.Errorf("attention after peek = %q, want dialog (no WaitingOn required)", got)
+	}
+}
+
 // --- /api/nodes/{id}/chat (tmux fallback) ---
 
 func TestHandleChatTmuxFallbackNoTranscript(t *testing.T) {

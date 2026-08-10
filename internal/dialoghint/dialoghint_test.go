@@ -91,6 +91,53 @@ Do you want to proceed? Esc to cancel
 Agent working...`,
 			match: true, // This is intentional - we match if dialog text exists
 		},
+		// P1a — structural numbered-options shape (Write / Edit / AskUserQuestion).
+		// Keys on 1. then 2. plus "esc to cancel", not on "proceed"/"allow" verbs.
+		{
+			name: "edit approval (numbered options shape)",
+			pane: ` Do you want to make this edit to hello.txt?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend`,
+			match: true,
+		},
+		{
+			name: "create approval (numbered options shape)",
+			pane: ` Do you want to create hello.txt?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend`,
+			match: true,
+		},
+		{
+			name: "AskUserQuestion numbered options shape",
+			pane: ` Which approach should we take?
+ ❯ 1. Keep the poller mechanical
+   2. Parse the TUI
+   3. Something else
+
+ Esc to cancel`,
+			match: true,
+		},
+		{
+			name:  "numbered list in agent output is not a dialog",
+			pane:  "Here is the plan:\n1. First step\n2. Second step\n3. Third step\nDone.",
+			match: false,
+		},
+		{
+			name:  "numbered options without esc to cancel anchor",
+			pane:  "Pick one:\n  1. Yes\n  2. No\n  3. Maybe",
+			match: false,
+		},
+		{
+			name:  "esc to cancel with no numbered options",
+			pane:  "Press Esc to cancel when ready\nWaiting…",
+			match: false,
+		},
 	}
 
 	for _, tt := range tests {

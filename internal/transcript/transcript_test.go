@@ -408,6 +408,65 @@ func TestWaitingOnCodex(t *testing.T) {
 	}
 }
 
+// Owing is the transcript half of the quiet-pane stall backstop (P1b): the
+// agent owes the next output when the newest recognized record is a human
+// prompt or a tool result. Unknown record types leave it unchanged.
+func TestOwing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "owe.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tl := &Tailer{Path: path}
+
+	if tl.Owing() {
+		t.Fatal("empty file: Owing = true, want false")
+	}
+
+	// Human prompt: agent owes a response.
+	f.WriteString(`{"type":"user","timestamp":"t1","message":{"role":"user","content":"please edit hello.txt"}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() {
+		t.Fatal("after user prompt: Owing = false, want true")
+	}
+
+	// Assistant turn: agent has produced output; debt cleared.
+	f.WriteString(`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"I will edit it"}]}}` + "\n")
+	tl.Poll()
+	if tl.Owing() {
+		t.Fatal("after assistant turn: Owing = true, want false")
+	}
+
+	// Tool result (type:user with tool_result blocks): agent continues; owes again.
+	f.WriteString(`{"type":"assistant","timestamp":"t3","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}` + "\n")
+	f.WriteString(`{"type":"user","timestamp":"t4","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() {
+		t.Fatal("after tool result: Owing = false, want true")
+	}
+
+	// Unknown typed record: leave owing unchanged (still true).
+	f.WriteString(`{"type":"bridge-session","timestamp":"t5","payload":{}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() {
+		t.Fatal("unknown record type must leave Owing unchanged (true)")
+	}
+
+	// After an assistant record, owing is false; unknown still leaves it false.
+	f.WriteString(`{"type":"assistant","timestamp":"t6","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n")
+	tl.Poll()
+	if tl.Owing() {
+		t.Fatal("after second assistant: Owing = true, want false")
+	}
+	f.WriteString(`{"type":"file-history-delta","timestamp":"t7"}` + "\n")
+	tl.Poll()
+	if tl.Owing() {
+		t.Fatal("unknown record type must leave Owing unchanged (false)")
+	}
+}
+
 func TestTailerUsageClaude(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	f, _ := os.Create(p)
