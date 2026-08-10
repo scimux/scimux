@@ -2652,3 +2652,44 @@ test("chatActivityPolicy: server fresh trusts over source===acp and fallback", (
   assert.equal(attn.mustShowPane, true);
   assert.equal(attn.freshSurface, false);
 });
+
+/* ---------- P7: Markdown in the unfolded description ---------- */
+
+test("P7: description read state is md() HTML; editor keeps raw; markup escaped", async () => {
+  /* Same content must not be rich in one pane and flat in another. Notes
+     already uses rendered-read / plain-edit; the chat description follows.
+     md() is escape-first — no new sanitiser. */
+  const { md } = await import("../js/format.js");
+  const raw = "**hello** and <script>alert(1)</script>\n\nsecond paragraph";
+  const ctx = makeFeature({
+    nodes: [{
+      id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+      live: "quiet", attention: "", lane_id: "L1", description: raw,
+    }],
+  });
+  ctx.feature.bind();
+  ctx.feature.renderHead();
+
+  const read = ctx.roots.chatdesc;
+  assert.equal(read.innerHTML, md(raw),
+    "read state is exactly md(description) into innerHTML");
+  assert.match(read.innerHTML, /<strong>hello<\/strong>/, "markdown bold renders");
+  assert.match(read.innerHTML, /&lt;script&gt;/, "raw markup is escaped by md()");
+  assert.doesNotMatch(read.innerHTML, /<script>/i, "no injected script tags");
+  assert.match(read.innerHTML, /<p>/, "multi-paragraph description is structured");
+
+  // Editor path stays raw plain text (value), never the rendered HTML.
+  assert.equal(ctx.roots.chatdescinput.value, raw,
+    "editor receives the raw description text");
+  assert.doesNotMatch(ctx.roots.chatdescinput.value, /<strong>/,
+    "editor is not pre-filled with rendered HTML");
+
+  // Empty description: still a readable placeholder (not md of empty → "").
+  ctx.nodes[0].description = "";
+  ctx.nodes[0].prompt = "";
+  ctx.feature.renderHead();
+  assert.match(ctx.roots.chatdesc.innerHTML || ctx.roots.chatdesc.textContent || "",
+    /No description yet/, "empty description shows the placeholder");
+
+  ctx.feature.destroy();
+});

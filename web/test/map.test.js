@@ -4467,3 +4467,178 @@ test("P6: standing guard — no maprail survives in production web sources", () 
     }
   }
 });
+
+/* ---------- P7: thicker selection frame; tab attention counts ---------- */
+
+test("P7: .strow.current selection frame is 2px at ~55% (rule body)", () => {
+  /* Assert on the extracted rule body — width and mix percentage — not on a
+     class name in an HTML string. Inset shadow: no layout shift. */
+  const rule = mapCssSrc.match(/\.strow\.current\s*\{([^}]+)\}/);
+  assert.ok(rule, ".strow.current rule must exist in map.css");
+  const body = rule[1];
+  assert.match(body, /box-shadow\s*:\s*inset\s+0\s+0\s+0\s+2px/,
+    "selection frame is 2px inset (was 1px)");
+  assert.match(body, /color-mix\(\s*in\s+srgb\s*,\s*var\(--work\)\s+55%\s*,\s*transparent\s*\)/,
+    "selection frame is ~55% work mix (was 35%)");
+  assert.doesNotMatch(body, /inset\s+0\s+0\s+0\s+1px/,
+    "1px frame is retired");
+});
+
+test("P7: mapTabAttentionCounts — waiting only; All; multi-lane; empty tab", () => {
+  /* Reuses P6's kind split: any attention (including inspect) is waiting;
+     turn_done alone is ready and is NOT counted. The badge names where the
+     user's attention is needed to let the agent proceed. Membership mirrors
+     renderMap: lane_id && served(n).some(inGroup). */
+  const fn = mapExports.mapTabAttentionCounts;
+  assert.equal(typeof fn, "function", "mapTabAttentionCounts is exported");
+
+  const nodes = [
+    { id: "w", lane_id: "L1", attention: "approval", turn_done: false },
+    { id: "insp", lane_id: "L1", attention: "inspect", turn_done: false },
+    { id: "ready", lane_id: "L1", attention: "", turn_done: true },
+    { id: "quiet", lane_id: "L1", attention: "", turn_done: false },
+    { id: "b", lane_id: "L2", attention: "question", turn_done: false },
+    /* multi: primary lane L3, also served on L1 via injected served() */
+    { id: "multi", lane_id: "L3", attention: "approval", turn_done: false },
+    { id: "nolane", lane_id: "", attention: "approval", turn_done: false },
+  ];
+  const groups = [
+    { id: "g1", name: "One", lanes: ["L1"] },
+    { id: "g2", name: "Two", lanes: ["L2"] },
+    { id: "g3", name: "Empty", lanes: ["L99"] },
+    { id: "g13", name: "One+Three", lanes: ["L1", "L3"] },
+  ];
+  const served = n => {
+    if (n.id === "multi") return ["L3", "L1"];
+    return n.lane_id ? [n.lane_id] : [];
+  };
+  const c = fn(nodes, groups, { served });
+
+  // All: waiting stations with a lane — w, insp, b, multi (not ready/quiet/nolane)
+  assert.equal(c.all, 4, "All counts every waiting station (not ready, not quiet)");
+  // g1 / L1: w, insp, and multi (served on L1)
+  assert.equal(c.g1, 3, "tab counts stations whose served lanes intersect the group");
+  assert.equal(c.g2, 1, "L2 waiting station only");
+  assert.equal(c.g3, 0, "tab whose lanes hold nothing is zero");
+  assert.equal(c.g13, 3, "union tab: w + insp + multi (not double-counted per node)");
+
+  // Empty inputs
+  assert.deepEqual(fn([], [], {}), { all: 0 });
+  assert.deepEqual(fn(null, null), { all: 0 });
+});
+
+test("P7: mapTabsHTML carries the count badge and no animation class", () => {
+  const counts = { all: 2, g1: 1, g2: 0 };
+  const html = mapTabsHTML("g1", [
+    { id: "g1", name: "Alpha" },
+    { id: "g2", name: "Beta" },
+  ], { escape: s => s, counts });
+
+  // All tab badge
+  assert.match(html, /data-mt="all"[^>]*>All<span class="tabcount">2<\/span>/,
+    "All tab shows its waiting count");
+  // Selected group with count
+  assert.match(html, /data-mt="g1"[^>]*>[\s\S]*?Alpha<span class="tabcount">1<\/span>/,
+    "group tab shows its waiting count");
+  // Zero count: no badge (not a "0" pill)
+  const beta = html.match(/data-mt="g2"[^>]*>([\s\S]*?)<\/button>/);
+  assert.ok(beta, "Beta tab present");
+  assert.doesNotMatch(beta[1], /tabcount/, "zero-count tab has no badge");
+
+  // HIG: badge on the tab, pulse on the station — no motion on the tab itself.
+  assert.doesNotMatch(html, /class="[^"]*(?:pulse|animat|glow|attn-ring)/i,
+    "tab HTML carries no animation / pulse / glow class");
+  assert.doesNotMatch(html, /tabcount[^"]*(?:pulse|anim)/i);
+
+  // Without counts, still pure (existing order/ARIA contract intact).
+  const bare = mapTabsHTML("all", [{ id: "g1", name: "Alpha" }], { escape: s => s });
+  assert.doesNotMatch(bare, /tabcount/, "omitted counts → no badges");
+  assert.match(bare, /data-mt="\+" class="add"/);
+});
+
+test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
+  /* renderMapTabs is on the poll path via renderMap so live counts stay
+     current — but the region must not rebuild every tick. Gate on a counts
+     signature. Rename editor stays outside #maptabs (#tab_name in the sheet). */
+  const maptabs = fakeEl("maptabs");
+  const mapwrap = fakeEl("mapwrap");
+  const nodes = [
+    {
+      id: "a", title: "Ask", description: "", agent: "x", model: "m", effort: "",
+      lane_id: "L1", parent: "", ended_at: "", live: "quiet", attention: "approval",
+      created_at: "2026-01-01T00:00:00Z", stops: [],
+    },
+    {
+      id: "q", title: "Quiet", description: "", agent: "x", model: "m", effort: "",
+      lane_id: "L1", parent: "", ended_at: "", live: "quiet", attention: "",
+      created_at: "2026-01-02T00:00:00Z", stops: [],
+    },
+  ];
+  let groups = [{ id: "g1", name: "Roadmap", lanes: ["L1"] }];
+  const storage = memoryStorage({
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L1"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const feature = createMapFeature({
+    roots: {
+      maptabs, mapwrap, lanechips: fakeEl("chips"),
+      mapscroll: fakeEl("scroll"),
+    },
+    document: {
+      body: { classList: { contains: () => true, toggle(){}, add(){} } },
+      querySelector: () => null,
+    },
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => groups,
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L1", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: Object.fromEntries(nodes.map(n => [n.id, n])),
+    }),
+    agentLogo: () => "",
+  });
+
+  feature.renderTabs();
+  assert.match(maptabs.innerHTML, /tabcount">1</, "initial paint shows All/group count");
+  const first = maptabs.innerHTML;
+
+  // Same counts: no rebuild (poll-safety).
+  maptabs.innerHTML = "STALE";
+  feature.renderTabs();
+  assert.equal(maptabs.innerHTML, "STALE",
+    "renderTabs must not rewrite when counts and tab set are unchanged");
+
+  // Poll path: renderMap also refreshes tabs, still gated.
+  feature.render();
+  assert.equal(maptabs.innerHTML, "STALE",
+    "renderMap must not force a tab rewrite when counts are unchanged");
+
+  // Count changes: rebuild.
+  nodes[1].attention = "inspect";
+  feature.render();
+  assert.notEqual(maptabs.innerHTML, "STALE", "count change rebuilds via render path");
+  assert.match(maptabs.innerHTML, /tabcount">2</, "All count rose to 2");
+
+  // Tab set change (rename) rebuilds even if counts are the same.
+  maptabs.innerHTML = "STALE2";
+  // Force a same-count recompute first so the sig is current, then rename.
+  feature.renderTabs(); // may no-op if STALE2 left sig stale — call after real paint
+  // Restore from last good counts: re-render once from real state.
+  nodes[1].attention = "inspect";
+  feature.invalidate?.();
+  // Clear the tabs sig by changing groups.
+  groups = [{ id: "g1", name: "Renamed", lanes: ["L1"] }];
+  feature.renderTabs();
+  assert.match(maptabs.innerHTML, /Renamed/, "group rename rebuilds the tab bar");
+  assert.doesNotMatch(maptabs.innerHTML, /STALE/, "rename is not signature-skipped");
+
+  feature.destroy();
+  void first;
+});
