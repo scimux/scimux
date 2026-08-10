@@ -378,6 +378,12 @@ const paneQuietAfter = 8 * time.Second
 const animStallAfter = 90 * time.Second
 const owedStallAfter = 45 * time.Second
 
+// owedStallCorroborated: the owing stall when the pane also shows the dialog
+// chrome anchor. The anchor cannot classify (it appears in agent prose too),
+// but on a pane that is already quiet with the agent owing output it is strong
+// enough to reach the same neutral verdict sooner.
+const owedStallCorroborated = 10 * time.Second
+
 // quietAttentionFallback is the quiet-branch attention sources that do not
 // need WaitingOn: the dialoghint matcher (P1a, including the structural
 // numbered-options shape) and the owing-stall mechanical backstop (P1b).
@@ -397,8 +403,14 @@ func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince ti
 	if visible != "" && dialoghint.ClassifyVisible(visible) {
 		return "dialog"
 	}
-	if tl != nil && tl.Owing() && time.Since(quietSince) >= owedStallAfter {
-		return "inspect"
+	if tl != nil && tl.Owing() {
+		stall := owedStallAfter
+		if visible != "" && dialoghint.HasCancelAnchor(visible) {
+			stall = owedStallCorroborated
+		}
+		if time.Since(quietSince) >= stall {
+			return "inspect"
+		}
 	}
 	return ""
 }

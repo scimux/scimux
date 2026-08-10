@@ -120,7 +120,13 @@ test commands are `bash --norc` or `cat`.
   a human prompt or a tool result, i.e. the agent owes the next output —
   and the pane has been static past `owedStallAfter`, raise neutral
   `inspect`. That signal is turn role plus pane quietness only — no pane
-  text — and never feeds liveness. `handlePeek` runs the same quiet-branch
+  text — and never feeds liveness. One narrow use of pane text rides on top
+  of it: `dialoghint.HasCancelAnchor` (the bare "esc to cancel" chrome
+  phrase) shortens that wait to `owedStallCorroborated`. It only ever
+  *sharpens the timing of a verdict the mechanical evidence already
+  reached* — it cannot raise attention alone and cannot change the kind,
+  because the phrase also occurs in ordinary agent prose (any session
+  discussing dialoghint prints it). `handlePeek` runs the same quiet-branch
   predicate (matcher + owing stall) one-shot when a human opens the terminal
   view, so a late-flush dialog is visible without needing an unresolved call
   in the transcript. `handlePeek` itself is *not* quiet-gated (that is the

@@ -55,6 +55,19 @@ func ClassifyVisible(pane string) bool {
 	return false
 }
 
+// HasCancelAnchor reports whether the pane shows the modal-chrome phrase every
+// Claude Code dialog carries. It is **corroboration only** and must never raise
+// attention by itself: unlike the matchers above it has no structure to bound
+// it, and the phrase occurs in ordinary agent prose — any session discussing
+// dialoghint prints it (measured live). Its one sanctioned use is shortening a
+// stall that already rests on mechanical evidence: quiet pane + the agent owing
+// output. In 1190 captured frames the phrase and a real dialog coincided 519
+// times with no chrome counterexample, which is why it sharpens the timing; the
+// prose case is why it may not decide the outcome.
+func HasCancelAnchor(pane string) bool {
+	return escToCancel.MatchString(stripANSI(pane))
+}
+
 // numberedOptionsDialog is the structural fallback for Claude Code approval
 // menus whose verbs change (Write/Edit no longer say "proceed"/"allow"): a
 // run of consecutively numbered options (1. then 2., …) with "esc to cancel"
