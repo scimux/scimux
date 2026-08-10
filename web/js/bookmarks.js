@@ -823,6 +823,13 @@ export function createBookmarksFeature(deps){
       onClick: (ev) => {
         const btn = ev.target.closest && ev.target.closest("[data-bmact]");
         if (!btn) return;
+        /* The popover lives inside #bookmarkspane, which carries the delegated
+           [data-bmact] handler, so this click would reach onPaneClick a second
+           time by bubbling — and menuBookmarkT still resolves the same
+           bookmark, so the action would run twice. Stop here and dispatch
+           once, deliberately. (Notes' popover goes to #wspanel, which is not
+           an ancestor of its list handlers, so it has no such seam.) */
+        if (typeof ev.stopPropagation === "function") ev.stopPropagation();
         /* Re-dispatch through the pane handler with the stored target so
            menu items reuse data-bmact dispatch without living inside .bookmark. */
         onPaneClick({ target: btn, preventDefault(){}, stopPropagation(){} });
