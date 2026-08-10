@@ -37,7 +37,8 @@
  *   - #mapwrap longpress station → editor (+ wall selection when full)
  *   - #maptoolbar click (open chat / edit / bookmark / fork / exit)
  *   - #mappill click (select off-screen station + scrollIntoView)
- *   - #mapscroll scroll + window resize → positionMapToolbar / positionMapPill
+ *   - #mapscroll scroll + window resize + dock split → positionMapToolbar /
+ *     positionMapPill (rAF-throttled; never a re-render)
  *   - #mapfullbtn / #farebtn click
  *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split)
  *   - #tab_save / #tab_del click (map group sheet)
@@ -76,7 +77,7 @@ import {
   laneColumnOrder,
 } from "./lanes.js";
 import {
-  statusText, statusKind, hardAttention, turnFinished, headStopKey, toggleMapSelection,
+  statusText, statusKind, turnFinished, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
 
@@ -114,10 +115,14 @@ export function anchoredScrollTop({ prevTop, prevIndex, nextIndex, rowHeight } =
   return next < 0 ? 0 : next;
 }
 
-/* Attention pill geometry source: one tick per hard-attention or finished HEAD
-   at its fraction of wall content height (matches attentionStationSVG's head-
-   only paint). Pure, DOM-free; ordered as the rows are. kind is "waiting"
-   (hardAttention) or "ready" (turn_done only) so the pill can label itself. */
+/* Attention pill geometry source: one tick per ringed HEAD at its fraction of
+   wall content height (matches attentionStationSVG's head-only paint). The tick
+   set is deliberately the *ring* set — any attention, plus a finished turn —
+   because the pill exists to locate off-screen rings; a ringed station with no
+   tick is one the locator refuses to take you to. That includes the neutral
+   "inspect", the state P1 raises when an approval dialog cannot be proven from
+   the transcript. Pure, DOM-free; ordered as the rows are. kind is "waiting"
+   (any attention) or "ready" (turn_done only) so the pill can label itself. */
 export function railTicks({ rows, rowHeight, offset } = {}){
   const list = rows || [];
   const n = list.length;
@@ -131,7 +136,7 @@ export function railTicks({ rows, rowHeight, offset } = {}){
     const s = list[i];
     if (!s || !s.head || !s.n) continue;
     let kind = null;
-    if (hardAttention(s.n)) kind = "waiting";
+    if (s.n.attention) kind = "waiting";
     else if (turnFinished(s.n)) kind = "ready";
     if (!kind) continue;
     out.push({
@@ -148,7 +153,15 @@ export function railTicks({ rows, rowHeight, offset } = {}){
    scroll viewport, decide whether to show, how many, which way, and the label.
    A tick is off-screen when frac*contentH falls outside
    [scrollTop, scrollTop + viewportH]. Prefer the nearest below when both
-   directions have off-screen ticks. */
+   directions have off-screen ticks.
+
+   The pill counts where the user's attention is needed to let the agent
+   proceed: if any waiting station is off-screen the pill is about *those*, and
+   the finished ones are not counted, not named and not targeted — they get the
+   pill to themselves once the waiting ones are on-screen or answered. Counting
+   the total while naming one kind would say "4 waiting" for one blocked agent,
+   which is the meaning P5 reserved for --attn, and could scroll you to a
+   station the label never mentioned. */
 export function attentionPill({ ticks, scrollTop, viewportH, contentH } = {}){
   const list = ticks || [];
   const top = Number(scrollTop) || 0;
@@ -162,11 +175,19 @@ export function attentionPill({ ticks, scrollTop, viewportH, contentH } = {}){
     if (!(y >= top && y <= bottom)) off.push(t);
   }
   if (!off.length){
-    return { show: false, count: 0, dir: "down", nodeId: "", stopKey: "", label: "" };
+    return {
+      show: false, count: 0, dir: "down", kind: "waiting",
+      nodeId: "", stopKey: "", label: "",
+    };
   }
+  /* One kind owns the pill: waiting if any is off-screen, else ready. Count,
+     arrow and target all come from that set — never from the other. */
+  const waiting = off.filter(t => t.kind === "waiting");
+  const kind = waiting.length ? "waiting" : "ready";
+  const named = waiting.length ? waiting : off;
   const below = [];
   const above = [];
-  for (const t of off){
+  for (const t of named){
     const y = Number(t.frac) * ch;
     if (y > bottom) below.push(t);
     else above.push(t);
@@ -179,15 +200,14 @@ export function attentionPill({ ticks, scrollTop, viewportH, contentH } = {}){
     dir = "up";
     target = above.reduce((a, b) => (Number(a.frac) >= Number(b.frac) ? a : b));
   }
-  const anyWaiting = off.some(t => t.kind === "waiting");
-  const word = anyWaiting ? "waiting" : "ready";
   return {
     show: true,
-    count: off.length,
+    count: named.length,
     dir,
+    kind,
     nodeId: target.nodeId || "",
     stopKey: target.stopKey || "",
-    label: `${off.length} ${word}`,
+    label: `${named.length} ${kind}`,
   };
 }
 
@@ -1177,6 +1197,13 @@ export function createMapFeature(deps){
     else storeRemove(MAP_DOCK_KEY);
     if (doc && doc.body) doc.body.classList.toggle("map-dock", mapDock);
     renderMapToolbar();
+    /* The dock hands half the map's height to the chat, and that height is the
+       pill's only input — so the verdict painted before the dock is stale the
+       moment it opens. Cheap: pure geometry plus a few writes to the #mappill
+       singleton, never a #mapwrap rebuild, so poll safety is untouched.
+       Reading clientHeight here flushes layout, so the post-dock height is the
+       one measured. */
+    positionMapPill();
   }
 
   function dividerEl(){
@@ -1199,6 +1226,9 @@ export function createMapFeature(deps){
       body.style.setProperty("--dockmap", Math.round(dockFrac * 100) + "%");
     }
     if (persist) storeSet(MAP_DOCK_H_KEY, String(dockFrac));
+    /* Still no re-render — the split only moves the pill's viewport, which is
+       chrome. rAF-throttled, so a drag costs one reposition per frame. */
+    scheduleMapChrome();
   }
 
   /* ---- P2: dock divider — same handler shape as notes.js onDivider* ----
@@ -1325,9 +1355,12 @@ export function createMapFeature(deps){
     bar.style.left = Math.max(8, rr.left - mr.left + padLeft) + "px";
   }
 
-  /* rAF-throttled scroll: toolbar + pill only (no server call). */
+  /* rAF-throttled chrome reposition: toolbar + pill only (no server call).
+     Driven by scroll, by window resize, and by the dock divider — the drag
+     rewrites the map's height on every pointermove, and the pill reads that
+     height. */
   let scrollRaf = 0;
-  function onMapScroll(){
+  function scheduleMapChrome(){
     if (scrollRaf) return;
     const raf = (win && win.requestAnimationFrame)
       || (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : null);
@@ -1418,6 +1451,9 @@ export function createMapFeature(deps){
       contentH: pillContentH,
     });
     mappill.classList.toggle("on", !!decision.show);
+    /* Hue follows the word: --attn only when the pill is about stations that
+       are blocked on you (P5 reserves yellow for exactly that). */
+    mappill.classList.toggle("ready", !!decision.show && decision.kind === "ready");
     if (!decision.show){
       mappill.textContent = "";
       mappill.dataset.nid = "";
@@ -2086,7 +2122,7 @@ export function createMapFeature(deps){
     on(mapwrap, "click", onMapWrapClick);
     on(maptoolbar, "click", onToolbarClick);
     on(mappill, "click", onMapPillClick);
-    on(mapscroll, "scroll", onMapScroll, { passive: true });
+    on(mapscroll, "scroll", scheduleMapChrome, { passive: true });
     if (win && typeof win.addEventListener === "function"){
       win.addEventListener("resize", onMapResize);
       cleanups.push(() => win.removeEventListener("resize", onMapResize));

@@ -138,6 +138,9 @@ body.map-full #maptoolbar.on { display: flex; }
   box-shadow: 0 6px 20px rgba(0,0,0,.28); cursor: pointer;
   white-space: nowrap; }
 body.map-full #mappill.on { display: flex; align-items: center; justify-content: center; }
+/* A pill about finished turns wears the finished hue: --attn stays reserved
+   for "blocked on you", the one meaning P5 gave it. */
+#mappill.ready { background: color-mix(in srgb, var(--work) 92%, var(--fg)); }
 /* Ring hit target: re-enable pointer events on the transparent control circle
    while the rest of the station SVG stays pointer-events:none. */
 .lbody > svg .attnstation-hit { pointer-events: all; cursor: pointer; }
