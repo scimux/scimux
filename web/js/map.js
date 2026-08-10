@@ -5,7 +5,7 @@
  * Owned roots / controls:
  *   - #maptabs, #lanechips, #mapwrap, #mapscroll (scroll for toolbar)
  *   - #maptoolbar (floating wall-map selection bar)
- *   - #maprail (attention-locator gutter; full-screen wall only)
+ *   - #mappill (off-screen attention pill; full-screen wall only)
  *   - #mapfullbtn, #farebtn (map chrome toggles)
  *   - #mapdivider (dock map|chat separator; desktop-only under map-full.map-dock)
  *   - map group sheet controls #tab_head/#tab_name/#tab_lanes/#tab_save/#tab_del
@@ -18,7 +18,7 @@
  *   - storage (localStorage), document/window, CSS.escape
  *
  * Outputs:
- *   - HTML into maptabs / lanechips / mapwrap / maptoolbar / maprail
+ *   - HTML into maptabs / lanechips / mapwrap / maptoolbar / mappill
  *   - body.map-full / body.map-dock classes; mapfullbtn
  *     ARIA/glyph; farebtn.on + aria-pressed + on/off layer-group SVG (fare
  *     layer; revealed only under body.map-full)
@@ -33,11 +33,11 @@
  * Events owned after one idempotent bind():
  *   - #maptabs click (select / second-tap edit / ✕ remove / + create)
  *   - #lanechips click + longpress rename
- *   - #mapwrap click (fold / station / golane / goorigin / legacy wall btns)
+ *   - #mapwrap click (fold / station / golane / goorigin / ring open / legacy wall btns)
  *   - #mapwrap longpress station → editor (+ wall selection when full)
  *   - #maptoolbar click (open chat / edit / bookmark / fork / exit)
- *   - #maprail click (select asking station + scrollIntoView)
- *   - #mapscroll scroll + window resize → positionMapToolbar
+ *   - #mappill click (select off-screen station + scrollIntoView)
+ *   - #mapscroll scroll + window resize → positionMapToolbar / positionMapPill
  *   - #mapfullbtn / #farebtn click
  *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split)
  *   - #tab_save / #tab_del click (map group sheet)
@@ -75,7 +75,9 @@ import {
   parentStopIndex,
   laneColumnOrder,
 } from "./lanes.js";
-import { statusText, statusKind, turnFinished, headStopKey, toggleMapSelection } from "./map-model.js";
+import {
+  statusText, statusKind, hardAttention, turnFinished, headStopKey, toggleMapSelection,
+} from "./map-model.js";
 import { cardConfigText } from "./cards.js";
 
 /* ---------- storage keys (public contract) ---------- */
@@ -112,10 +114,10 @@ export function anchoredScrollTop({ prevTop, prevIndex, nextIndex, rowHeight } =
   return next < 0 ? 0 : next;
 }
 
-/* Attention rail ticks: one locator per asking station at its fraction of wall
-   content height. Attention is a node property, but wall rows are stops — only
-   the HEAD stop of an asking node gets a tick (matches attentionStationSVG's
-   `if (!s.head) return` guard). Pure, DOM-free; ordered as the rows are. */
+/* Attention pill geometry source: one tick per hard-attention or finished HEAD
+   at its fraction of wall content height (matches attentionStationSVG's head-
+   only paint). Pure, DOM-free; ordered as the rows are. kind is "waiting"
+   (hardAttention) or "ready" (turn_done only) so the pill can label itself. */
 export function railTicks({ rows, rowHeight, offset } = {}){
   const list = rows || [];
   const n = list.length;
@@ -127,14 +129,66 @@ export function railTicks({ rows, rowHeight, offset } = {}){
   const out = [];
   for (let i = 0; i < n; i++){
     const s = list[i];
-    if (!s || !s.head || !s.n || !s.n.attention) continue;
+    if (!s || !s.head || !s.n) continue;
+    let kind = null;
+    if (hardAttention(s.n)) kind = "waiting";
+    else if (turnFinished(s.n)) kind = "ready";
+    if (!kind) continue;
     out.push({
       nodeId: s.n.id,
       stopKey: stopKey(s),
       frac: (OFF + i * RH + RH / 2) / contentH,
+      kind,
     });
   }
   return out;
+}
+
+/* Off-screen attention pill decision core. Pure: given tick fracs and the
+   scroll viewport, decide whether to show, how many, which way, and the label.
+   A tick is off-screen when frac*contentH falls outside
+   [scrollTop, scrollTop + viewportH]. Prefer the nearest below when both
+   directions have off-screen ticks. */
+export function attentionPill({ ticks, scrollTop, viewportH, contentH } = {}){
+  const list = ticks || [];
+  const top = Number(scrollTop) || 0;
+  const vh = Number(viewportH) || 0;
+  const ch = Number(contentH) || 0;
+  const bottom = top + vh;
+  const off = [];
+  for (const t of list){
+    if (!t) continue;
+    const y = Number(t.frac) * ch;
+    if (!(y >= top && y <= bottom)) off.push(t);
+  }
+  if (!off.length){
+    return { show: false, count: 0, dir: "down", nodeId: "", stopKey: "", label: "" };
+  }
+  const below = [];
+  const above = [];
+  for (const t of off){
+    const y = Number(t.frac) * ch;
+    if (y > bottom) below.push(t);
+    else above.push(t);
+  }
+  let dir, target;
+  if (below.length){
+    dir = "down";
+    target = below.reduce((a, b) => (Number(a.frac) <= Number(b.frac) ? a : b));
+  } else {
+    dir = "up";
+    target = above.reduce((a, b) => (Number(a.frac) >= Number(b.frac) ? a : b));
+  }
+  const anyWaiting = off.some(t => t.kind === "waiting");
+  const word = anyWaiting ? "waiting" : "ready";
+  return {
+    show: true,
+    count: off.length,
+    dir,
+    nodeId: target.nodeId || "",
+    stopKey: target.stopKey || "",
+    label: `${off.length} ${word}`,
+  };
 }
 
 export const ATTN_GLOW_DEF = `<defs><filter id="attnglow" x="-80%" y="-80%" width="260%" height="260%">
@@ -512,11 +566,16 @@ export function wallLaneTrackSVG(stops, { x, color, opacity = 1, heatOn = false 
 
 /* Station ring/pulse for hard attention (default --attn yellow) and for a
    finished turn (caller passes var(--work)). Same paint path, distinct hue
-   so yellow keeps exactly one meaning: blocked on you (P5). */
-export function attentionStationSVG(x, y, op, hue){
+   so yellow keeps exactly one meaning: blocked on you (P5).
+   When nodeId is given, a transparent r=22 hit circle is painted after the
+   ring (44px target, HIG) carrying data-jump so the ring opens chat. */
+export function attentionStationSVG(x, y, op, hue, nodeId){
   const c = hue || "var(--attn)";
+  const hit = (nodeId != null && nodeId !== "")
+    ? `\n          <circle class="attnstation-hit" cx="${x}" cy="${y}" r="22" fill="transparent" pointer-events="all" data-jump="${esc(String(nodeId))}"/>`
+    : "";
   return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="${c}" filter="url(#attnglow)"/>
-          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>`;
+          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>${hit}`;
 }
 
 // terminalStationSVG marks an ended thread that sits *mid-lane* — the mainline
@@ -943,7 +1002,7 @@ export function createMapFeature(deps){
   const mapwrap = roots.mapwrap;
   const mapscroll = roots.mapscroll;
   const maptoolbar = roots.maptoolbar;
-  const maprail = roots.maprail;
+  const mappill = roots.mappill;
   const mapfullbtn = roots.mapfullbtn;
   const farebtn = roots.farebtn;
   const fareticket = roots.fareticket;
@@ -1266,6 +1325,29 @@ export function createMapFeature(deps){
     bar.style.left = Math.max(8, rr.left - mr.left + padLeft) + "px";
   }
 
+  /* rAF-throttled scroll: toolbar + pill only (no server call). */
+  let scrollRaf = 0;
+  function onMapScroll(){
+    if (scrollRaf) return;
+    const raf = (win && win.requestAnimationFrame)
+      || (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : null);
+    if (!raf){
+      positionMapToolbar();
+      positionMapPill();
+      return;
+    }
+    scrollRaf = raf(() => {
+      scrollRaf = 0;
+      positionMapToolbar();
+      positionMapPill();
+    });
+  }
+
+  function onMapResize(){
+    positionMapToolbar();
+    positionMapPill();
+  }
+
   function renderMapToolbar(){
     const bar = maptoolbar;
     if (!bar) return;
@@ -1291,25 +1373,71 @@ export function createMapFeature(deps){
     positionMapToolbar();
   }
 
-  /* Attention rail: rewrite after every wall paint. .on only when there is at
-     least one tick so an empty gutter cannot swallow clicks. Cleared on the
-     empty-rows early return and whenever the stack map renders instead. */
-  function clearMapRail(){
-    if (!maprail) return;
-    maprail.classList.toggle("on", false);
-    maprail.innerHTML = "";
+  /* Last wall-tick geometry for the off-screen attention pill. Recomputed on
+     each wall paint; positionMapPill re-reads scroll/viewport only. */
+  let pillTicks = [];
+  let pillContentH = 0;
+  const WALL_OFF = 16;
+
+  function clearMapPill(){
+    pillTicks = [];
+    pillContentH = 0;
+    if (!mappill) return;
+    mappill.classList.toggle("on", false);
+    mappill.textContent = "";
+    mappill.dataset.nid = "";
+    mappill.dataset.skey = "";
+    if (typeof mappill.removeAttribute === "function"){
+      mappill.removeAttribute("aria-label");
+    }
   }
 
-  function renderMapRail(rows){
-    if (!maprail) return;
-    const ticks = railTicks({ rows, rowHeight: WALL_ROW_H, offset: 16 });
-    maprail.classList.toggle("on", ticks.length > 0);
-    if (!ticks.length){ maprail.innerHTML = ""; return; }
-    maprail.innerHTML = ticks.map(t => {
-      const n = nodeById(t.nodeId);
-      const title = (n && (n.title || n.id)) || t.nodeId;
-      return `<button type="button" data-nid="${escape(t.nodeId)}" data-skey="${escape(t.stopKey)}" style="top:${t.frac * 100}%" aria-label="Jump to ${escape(title)}"></button>`;
-    }).join("");
+  /* Open chat at a station — shared by the toolbar "Open chat" button and the
+     attention-ring hit circle. stop empty → head (jumpChatToNow). */
+  function openStationChat(id, stop){
+    if (!id) return;
+    if (typeof d.selectNode === "function") d.selectNode(id, "jump");
+    if (stop){
+      if (typeof d.loadChatHistory === "function") d.loadChatHistory(id, stop);
+    } else if (typeof d.jumpChatToNow === "function") d.jumpChatToNow();
+    if (mapFull) setMapDock(true);
+    else setMapFull(false);
+  }
+
+  function positionMapPill(){
+    if (!mappill) return;
+    if (!mapFull || !mapscroll){
+      mappill.classList.toggle("on", false);
+      mappill.textContent = "";
+      return;
+    }
+    const decision = attentionPill({
+      ticks: pillTicks,
+      scrollTop: mapscroll.scrollTop || 0,
+      viewportH: mapscroll.clientHeight || 0,
+      contentH: pillContentH,
+    });
+    mappill.classList.toggle("on", !!decision.show);
+    if (!decision.show){
+      mappill.textContent = "";
+      mappill.dataset.nid = "";
+      mappill.dataset.skey = "";
+      return;
+    }
+    const arrow = decision.dir === "up" ? "↑" : "↓";
+    mappill.textContent = `${decision.label} ${arrow}`;
+    mappill.dataset.nid = decision.nodeId || "";
+    mappill.dataset.skey = decision.stopKey || "";
+    if (typeof mappill.setAttribute === "function"){
+      mappill.setAttribute("aria-label", `Jump to ${decision.label} ${arrow}`);
+    }
+  }
+
+  function updateMapPill(rows){
+    const list = rows || [];
+    pillTicks = railTicks({ rows: list, rowHeight: WALL_ROW_H, offset: WALL_OFF });
+    pillContentH = WALL_OFF + list.length * WALL_ROW_H;
+    positionMapPill();
   }
 
   /* The skipped-poll path. Nothing about the wall's shape changed, so only the
@@ -1361,7 +1489,7 @@ export function createMapFeature(deps){
          selected does not apply a stale row-index delta (P4 edge). */
       lastSelKey = "";
       lastSelRow = null;
-      clearMapRail();
+      clearMapPill();
       renderLaneChips(model, inGroup, focusLane);
       return;
     }
@@ -1469,8 +1597,9 @@ export function createMapFeature(deps){
                                    : terminalStationSVG(dotX, yy, op, col);
       // Widen the existing ring path: hard attention keeps --attn; a finished
       // turn reuses the same SVG with --work. No parallel paint path (P5).
-      if (n.attention) svg += attentionStationSVG(dotX, yy, op);
-      else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
+      // Hit circle carries data-jump so the ring is the open-chat control (P6).
+      if (n.attention) svg += attentionStationSVG(dotX, yy, op, null, n.id);
+      else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)", n.id);
       /* data-dot / data-ctx are the repaint hooks. Only the live branch
          carries one: exited and unavailable are in the signature, so reaching
          them rebuilds rather than patches. */
@@ -1541,10 +1670,10 @@ export function createMapFeature(deps){
     lastSelRow = nextIndex;
     renderLaneChips(model, inGroup, focusLane);
     renderMapToolbar();
-    /* Rail follows the wall paint: signature already includes n.attention, so
-       a node starting/stopping asking re-renders and the rail updates; a skip
-       correctly leaves it alone. */
-    renderMapRail(rows);
+    /* Pill follows the wall paint: signature already includes n.attention and
+       turn_done, so a ring appearing/disappearing rebuilds (not a volatile
+       patch) and the hit circle + pill ticks stay in lockstep. */
+    updateMapPill(rows);
   }
 
   function renderMap(){
@@ -1569,8 +1698,9 @@ export function createMapFeature(deps){
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
-    /* Stack map has no rail — clear so a prior wall session cannot leave ticks. */
-    clearMapRail();
+    /* Stack map has no attention pill — clear so a prior wall session cannot
+       leave a floating "N waiting" over the column map. */
+    clearMapPill();
 
     const RH = 76, LX = 22, LW = 56;
     const y = i => i * RH + RH / 2;
@@ -1612,8 +1742,8 @@ export function createMapFeature(deps){
         if (n.ended_at)
           svg += i === 0 ? terminalCapSVG(dotX, yy, op, col)
                          : terminalStationSVG(dotX, yy, op, col);
-        if (n.attention) svg += attentionStationSVG(dotX, yy, op);
-        else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
+        if (n.attention) svg += attentionStationSVG(dotX, yy, op, null, n.id);
+        else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)", n.id);
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
         else
@@ -1795,12 +1925,13 @@ export function createMapFeature(deps){
     }
     const f = e.target.closest("[data-fold]");
     if (f){ toggleMapFold(f.dataset.fold); return; }
-    const j = e.target.closest("[data-jump]");
+    /* P6: ring hit circle (and any other data-jump in the wrap) opens chat —
+       before the generic [data-nid] row branch so the ring wins over the row.
+       Two closest() calls (not a comma selector) so fakes and older engines
+       that only match a single simple selector still route correctly. */
+    const j = e.target.closest(".attnstation-hit") || e.target.closest("[data-jump]");
     if (j){
-      if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump, "jump");
-      /* Full wall → dock and stay; stack/column map → leave full as today. */
-      if (mapFull) setMapDock(true);
-      else setMapFull(false);
+      openStationChat(j.dataset.jump, j.dataset.stop || "");
       return;
     }
     const pe = e.target.closest("[data-medit]");
@@ -1831,14 +1962,13 @@ export function createMapFeature(deps){
     }
   }
 
-  function onMapRailClick(e){
-    /* Tick tap: same selection path as a wall row tap (setMapSel), then bring
-       the row into view. scrollIntoView is correct here — P4's no-animation
-       fence was about poll ticks, not a human tapping a control. */
-    const t = e.target.closest("[data-nid]");
-    if (!t) return;
-    const nid = t.dataset.nid;
-    const skey = t.dataset.skey || "";
+  function onMapPillClick(e){
+    /* Pill locates (select + scrollIntoView); the ring opens. Human tap, so
+       smooth scroll is fine — P4's no-animation fence is about poll ticks. */
+    const t = e.currentTarget || e.target;
+    const nid = (t && t.dataset && t.dataset.nid) || "";
+    const skey = (t && t.dataset && t.dataset.skey) || "";
+    if (!nid) return;
     if (mapFull) setMapSel(nid, skey, "");
     const row = mapwrap && mapwrap.querySelector(
       skey
@@ -1852,14 +1982,7 @@ export function createMapFeature(deps){
   function onToolbarClick(e){
     const j = e.target.closest("[data-jump]");
     if (j){
-      const st = mapSelStop;
-      if (typeof d.selectNode === "function") d.selectNode(j.dataset.jump, "jump");
-      if (st){
-        if (typeof d.loadChatHistory === "function") d.loadChatHistory(j.dataset.jump, st);
-      } else if (typeof d.jumpChatToNow === "function") d.jumpChatToNow();
-      /* Full wall → dock and stay; stack/column map → leave full as today. */
-      if (mapFull) setMapDock(true);
-      else setMapFull(false);
+      openStationChat(j.dataset.jump, mapSelStop);
       closeMapBar();
       return;
     }
@@ -1962,11 +2085,11 @@ export function createMapFeature(deps){
     on(lanechips, "click", onLaneChipsClick);
     on(mapwrap, "click", onMapWrapClick);
     on(maptoolbar, "click", onToolbarClick);
-    on(maprail, "click", onMapRailClick);
-    on(mapscroll, "scroll", positionMapToolbar, { passive: true });
+    on(mappill, "click", onMapPillClick);
+    on(mapscroll, "scroll", onMapScroll, { passive: true });
     if (win && typeof win.addEventListener === "function"){
-      win.addEventListener("resize", positionMapToolbar);
-      cleanups.push(() => win.removeEventListener("resize", positionMapToolbar));
+      win.addEventListener("resize", onMapResize);
+      cleanups.push(() => win.removeEventListener("resize", onMapResize));
     }
     on(mapfullbtn, "click", onMapFullClick);
     on(farebtn, "click", onFareClick);

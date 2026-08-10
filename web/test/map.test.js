@@ -2967,13 +2967,11 @@ function p4Node(id, createdAt, title){
 }
 
 /** Wall-map harness with #mapscroll for P4 scrollTop assertions.
- *  P5 injects #maprail; P6 replaces it with #mappill (sibling of #maptoolbar,
- *  never inside #mapwrap). Both roots accepted during the red→green window. */
+ *  P6 injects #mappill (sibling of #maptoolbar, never inside #mapwrap). */
 function createWallScrollFeature(nodes, opts = {}){
   const mapwrap = fakeEl("mapwrap");
   const mapscroll = fakeEl("mapscroll");
   const maptoolbar = fakeEl("maptoolbar");
-  const maprail = opts.maprail || fakeEl("maprail");
   const mappill = opts.mappill || fakeEl("mappill");
   /* Viewport geometry for attentionPill / positionMapPill — not real layout. */
   if (opts.clientHeight != null) mapscroll.clientHeight = opts.clientHeight;
@@ -2997,7 +2995,7 @@ function createWallScrollFeature(nodes, opts = {}){
   for (const n of nodes) byId[n.id] = n;
   const feature = createMapFeature({
     roots: {
-      mapwrap, mapscroll, maptoolbar, maprail, mappill,
+      mapwrap, mapscroll, maptoolbar, mappill,
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
       mapfullbtn: fakeEl("mapfullbtn"),
     },
@@ -3021,12 +3019,10 @@ function createWallScrollFeature(nodes, opts = {}){
     selectNode: opts.selectNode,
     loadChatHistory: opts.loadChatHistory,
     jumpChatToNow: opts.jumpChatToNow,
-    setMapDock: opts.setMapDock,
-    setMapFull: opts.setMapFull,
   });
   feature.bind();
   feature.restoreChrome();
-  return { feature, mapwrap, mapscroll, maptoolbar, maprail, mappill, body, storage, nodes, byId };
+  return { feature, mapwrap, mapscroll, maptoolbar, mappill, body, storage, nodes, byId };
 }
 
 function selectWallStop(mapwrap, { nid, skey, stop }){
@@ -3147,13 +3143,13 @@ function p5Frac(i, nRows, rowHeight = 76, offset = 16){
   return (offset + i * rowHeight + rowHeight / 2) / (offset + nRows * rowHeight);
 }
 
-test("P5: railTicks — asking heads only, frac arithmetic, empty cases", () => {
+test("P5/P6: railTicks — hard-attention heads, frac arithmetic, empty cases", () => {
   const fn = mapExports.railTicks;
   assert.equal(typeof fn, "function", "railTicks is exported");
 
-  // Five rows; asking heads at indices 1 and 3. Non-head of an asking node
-  // at index 0 must contribute nothing (attention is a node property; the wall
-  // only marks the head stop — the rail must match).
+  // Five rows; hard-attention heads at indices 1 and 3. Non-head of an asking
+  // node at index 0 must contribute nothing (attention is a node property; the
+  // wall only marks the head stop — the pill geometry must match).
   const askA = {
     id: "a", title: "Alpha", attention: "approval",
     created_at: "t0", stops: [], live: "quiet", lane_id: "L",
@@ -3186,17 +3182,20 @@ test("P5: railTicks — asking heads only, frac arithmetic, empty cases", () => 
   ];
   const RH = 76, OFF = 16;
   const ticks = fn({ rows, rowHeight: RH, offset: OFF });
-  assert.equal(ticks.length, 3, "one tick per asking HEAD only (not per stop)");
+  assert.equal(ticks.length, 3, "one tick per hard-attention HEAD only (not per stop)");
   assert.deepEqual(ticks.map(t => t.nodeId), ["a", "b", "m"]);
   assert.deepEqual(ticks.map(t => t.stopKey), ["a#0", "b#0", "m#1"]);
+  assert.deepEqual(ticks.map(t => t.kind), ["waiting", "waiting", "waiting"]);
   assert.equal(ticks[0].frac, p5Frac(1, 5, RH, OFF));
   assert.equal(ticks[1].frac, p5Frac(3, 5, RH, OFF));
   assert.equal(ticks[2].frac, p5Frac(4, 5, RH, OFF));
   // Ordering matches row order (top-down), not sorted by node id.
   assert.ok(ticks[0].frac < ticks[1].frac && ticks[1].frac < ticks[2].frac);
 
-  // No attention anywhere → [].
-  const quietRows = rows.map(s => ({ ...s, n: { ...s.n, attention: "" } }));
+  // No attention / finished anywhere → [].
+  const quietRows = rows.map(s => ({
+    ...s, n: { ...s.n, attention: "", turn_done: false },
+  }));
   assert.deepEqual(fn({ rows: quietRows, rowHeight: RH, offset: OFF }), []);
 
   // Empty rows → [].
@@ -3204,116 +3203,98 @@ test("P5: railTicks — asking heads only, frac arithmetic, empty cases", () => 
   assert.deepEqual(fn({ rows: null, rowHeight: RH, offset: OFF }), []);
 });
 
-test("P5: CSS #maprail hide-global / reveal-scoped; dashed gutter", () => {
-  /* §0: assert on extracted declarations — no layout engine in the suite.
-     Pattern matches #maptoolbar: base display:none, body.map-full #maprail.on
-     reveals it. Brace smoke (smoke.test.js) stays green with any CSS edit. */
-  const base = mapCssSrc.match(/(?:^|\n)\s*#maprail\s*\{([^}]+)\}/);
-  assert.ok(base, "#maprail base rule exists in map.css");
-  assert.match(base[1], /display:\s*none/,
-    "base #maprail is display:none (not focusable off-screen)");
-  // Base rule itself must not be the reveal — no body.map-full in the selector
-  // of this first match; the reveal is a separate rule.
-  assert.match(mapCssSrc, /body\.map-full\s+#maprail\.on\s*\{([^}]+)\}/,
-    "body.map-full #maprail.on reveal rule present");
-  const reveal = mapCssSrc.match(/body\.map-full\s+#maprail\.on\s*\{([^}]+)\}/);
-  assert.ok(reveal);
-  assert.match(reveal[1], /display:\s*(block|flex)/,
-    "reveal shows the rail under map-full + .on");
-  // Dashed gutter (border or background on the rail itself).
-  assert.match(mapCssSrc, /#maprail[^{]*\{[^}]*dashed/,
-    "gutter is dashed (declaration on #maprail)");
-});
-
-test("P5: wall render with two asking heads yields two tick buttons with frac tops", () => {
-  // Five single-stop nodes, newest-first. Asking at indices 1 and 3
-  // (created_at order → sort newest first).
+test("P6: wall pill shows only when an asking/finished station is off-screen", () => {
+  /* Replaces the P5 rail-tick button assertions: the pill is a single control
+     whose show/label come from attentionPill, not one button per tick. */
   const nodes = [
-    p4Node("n0", "2026-01-01T00:00:00Z", "N0"), // oldest → bottom
+    p4Node("n0", "2026-01-01T00:00:00Z", "N0"),
     p4Node("n1", "2026-01-02T00:00:00Z", "N1"),
     p4Node("n2", "2026-01-03T00:00:00Z", "N2"),
     p4Node("n3", "2026-01-04T00:00:00Z", "N3"),
-    p4Node("n4", "2026-01-05T00:00:00Z", "N4"), // newest → top
+    p4Node("n4", "2026-01-05T00:00:00Z", "N4"),
   ];
-  nodes[1].attention = "approval"; // n1 → row index 3 (newest-first)
+  nodes[1].attention = "approval"; // n1 → row index 3
   nodes[3].attention = "question"; // n3 → row index 1
-  const { feature, maprail } = createWallScrollFeature(nodes);
+  // Viewport shorter than content so both ticks are off-screen.
+  // contentH = 16 + 5*76 = 396. Viewport height 80 → only the top of the list.
+  const { feature, mappill, mapscroll } = createWallScrollFeature(nodes, {
+    clientHeight: 80, scrollTop: 0,
+  });
   feature.render();
+  assert.ok(mappill.classList.contains("on"), "pill .on when ticks are off-screen");
+  assert.match(mappill.textContent, /2 waiting/);
+  assert.match(mappill.textContent, /↓|↑/);
+  assert.equal(mappill.dataset.nid, "n3", "targets the nearest off-screen (top-side first below)");
+  assert.equal(mappill.dataset.skey, "n3#0");
+  assert.equal(mappill._listenerCount("click"), 1,
+    "exactly one click listener on the singleton pill");
 
-  assert.ok(maprail.classList.contains("on"), "rail .on when there is at least one tick");
-  const btns = maprail.innerHTML.match(/<button\b/g) || [];
-  assert.equal(btns.length, 2, "exactly two tick buttons");
-  // data-nid / data-skey (same convention as .strow) and top: <frac>%.
-  assert.match(maprail.innerHTML, /data-nid="n3"/);
-  assert.match(maprail.innerHTML, /data-skey="n3#0"/);
-  assert.match(maprail.innerHTML, /data-nid="n1"/);
-  assert.match(maprail.innerHTML, /data-skey="n1#0"/);
-  const fN3 = p5Frac(1, 5); // n3 is second from top
-  const fN1 = p5Frac(3, 5); // n1 is fourth from top
-  assert.match(maprail.innerHTML, new RegExp(`data-nid="n3"[^>]*top:\\s*${fN3 * 100}%|top:\\s*${fN3 * 100}%[^>]*data-nid="n3"`));
-  assert.match(maprail.innerHTML, new RegExp(`data-nid="n1"[^>]*top:\\s*${fN1 * 100}%|top:\\s*${fN1 * 100}%[^>]*data-nid="n1"`));
-  assert.match(maprail.innerHTML, /aria-label=/);
+  // Scroll so both asking heads fall inside a tall viewport → hide.
+  mapscroll.clientHeight = 500;
+  mapscroll.scrollTop = 0;
+  // Re-trigger geometry via the scroll handler (rAF-throttled; tests have no
+  // rAF → falls through to the direct path).
+  firstListener(mapscroll, "scroll")({});
+  assert.equal(mappill.classList.contains("on"), false,
+    "pill hides when every asking station is on-screen");
   feature.destroy();
 });
 
-test("P5: zero asking stations leaves rail without .on and with no buttons", () => {
-  /* GREEN AT RED: fixture starts empty and nothing sets .on. Only bites if
-     green wrongly forces .on (or leaves buttons) when nothing is asking —
-     same framing as P4's "selection/no-selection leave scrollTop alone". */
+test("P6: zero asking stations leaves pill without .on", () => {
   const quiet = [
     p4Node("a", "2026-01-01T00:00:00Z", "A"),
     p4Node("b", "2026-01-02T00:00:00Z", "B"),
   ];
-  const { feature, maprail } = createWallScrollFeature(quiet);
+  const { feature, mappill } = createWallScrollFeature(quiet, { clientHeight: 40 });
   feature.render();
-  assert.equal(maprail.classList.contains("on"), false,
-    "empty rail is not .on (must not swallow clicks)");
-  assert.equal(maprail.innerHTML, "", "empty rail has no tick buttons");
+  assert.equal(mappill.classList.contains("on"), false,
+    "empty pill is not .on (must not swallow clicks)");
+  assert.equal(mappill.textContent, "", "empty pill has no label");
   feature.destroy();
 });
 
-test("P5: tapping a tick selects that node+stop via the same path as a row tap", () => {
+test("P6: tapping the pill selects the target and does not open chat", () => {
+  /* The pill locates; the ring opens. Two gestures, two outcomes. */
   const a = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
   const b = p4Node("b", "2026-01-02T00:00:00Z", "Beta");
   a.attention = "approval";
   b.attention = "question";
-  const { feature, mapwrap, maptoolbar, maprail } = createWallScrollFeature([a, b]);
+  const calls = [];
+  const { feature, mapwrap, maptoolbar, mappill } = createWallScrollFeature([a, b], {
+    clientHeight: 40, scrollTop: 0,
+    selectNode: (id, why) => calls.push(["select", id, why]),
+    jumpChatToNow: () => calls.push(["now"]),
+  });
+  // Make row queryable for setMapSel's .current paint.
+  mapwrap.querySelector = (sel) => {
+    if (String(sel).includes("a#0") || String(sel).includes('nid="a"')
+      || String(sel).includes("a")) {
+      return {
+        dataset: { nid: "a", skey: "a#0", stop: "" },
+        classList: { toggle(){}, contains(){ return false; } },
+        scrollIntoView(){ calls.push(["scroll"]); },
+      };
+    }
+    return null;
+  };
   feature.render();
-  assert.match(maprail.innerHTML, /data-nid="a"/);
+  assert.ok(mappill.classList.contains("on"), "pill visible for off-screen asking");
   assert.equal(maptoolbar.innerHTML, "", "no selection yet");
 
-  // Tick tap — same data-nid / data-skey convention as .strow.
-  firstListener(maprail, "click")({
-    target: {
-      dataset: { nid: "a", skey: "a#0" },
-      closest(selector){
-        if (selector === "[data-nid]" || selector === "button") return this;
-        return null;
-      },
-    },
+  firstListener(mappill, "click")({
+    currentTarget: mappill,
+    target: mappill,
   });
-  assert.match(maptoolbar.innerHTML, /data-jump="a"/,
-    "tick tap selects the station (toolbar paints for mapSel)");
-  assert.match(mapwrap.innerHTML, /data-nid="a"[^>]*class="[^"]*current|class="[^"]*current[^"]*"[^>]*data-nid="a"|strow[^"]*current[^"]*"[^>]*data-nid="a"/,
-    "selected row carries .current after tick selection");
+  assert.match(maptoolbar.innerHTML, /data-jump="a"|data-jump="b"/,
+    "pill tap selects a station (toolbar paints for mapSel)");
+  assert.ok(!calls.some(c => c[0] === "now"),
+    "pill must not open chat (that is the ring's job)");
+  assert.ok(!calls.some(c => c[0] === "select" && c[2] === "jump"),
+    "pill must not call selectNode(..., 'jump')");
   feature.destroy();
 });
 
-test("P5: #maprail is outside #mapwrap; successive renders rewrite one rail (no tick accumulation)", () => {
-  // Poll-safety structure: singleton sibling of #mapscroll / #maptoolbar inside
-  // #map — never a descendant of the polled #mapwrap (same contract as toolbar).
-  assert.match(indexHtmlSrc, /id="maprail"/, "#maprail present in index.html");
-  assert.match(indexHtmlSrc, /id="mapscroll"/);
-  assert.match(indexHtmlSrc, /id="mapwrap"/);
-  // mapwrap is a self-closing inner empty div; maprail must not nest inside it.
-  assert.doesNotMatch(indexHtmlSrc,
-    /id="mapwrap"[^>]*>[^<]*<[^>]*id="maprail"/,
-    "#maprail must not be a child of #mapwrap");
-  // Sibling of mapscroll (both under #map): maprail appears after mapscroll closes.
-  assert.match(indexHtmlSrc,
-    /id="mapscroll"><div id="mapwrap"><\/div><\/div>[\s\S]*id="maprail"/,
-    "#maprail is a sibling after #mapscroll, not inside it");
-
+test("P6: successive wall renders keep one pill listener (no re-bind)", () => {
   const nodes = [
     p4Node("a", "2026-01-01T00:00:00Z", "A"),
     p4Node("b", "2026-01-02T00:00:00Z", "B"),
@@ -3321,20 +3302,17 @@ test("P5: #maprail is outside #mapwrap; successive renders rewrite one rail (no 
   ];
   nodes[0].attention = "approval";
   nodes[2].attention = "question";
-  const { feature, maprail, byId } = createWallScrollFeature(nodes);
+  const { feature, mappill, byId } = createWallScrollFeature(nodes, {
+    clientHeight: 40,
+  });
   feature.render();
-  const countButtons = () => (maprail.innerHTML.match(/<button\b/g) || []).length;
-  assert.equal(countButtons(), 2, "first render: two ticks");
-  assert.equal(maprail._listenerCount("click"), 1,
-    "exactly one click listener on the singleton rail");
+  assert.equal(mappill._listenerCount("click"), 1,
+    "exactly one click listener on the singleton pill");
 
-  // Signature change (title) forces a second wall rebuild; tick count must not
-  // accumulate (innerHTML rewrite, not append). Listener count stays 1.
   byId.a.title = "A-renamed";
   nodes[0].title = "A-renamed";
   feature.render();
-  assert.equal(countButtons(), 2, "second render: still two ticks, not four");
-  assert.equal(maprail._listenerCount("click"), 1,
+  assert.equal(mappill._listenerCount("click"), 1,
     "re-render must not re-bind click (no orphaned listeners)");
   feature.destroy();
 });
@@ -3367,14 +3345,14 @@ test("P5a: bookmarks-open cannot reveal the pane over the wall map", () => {
     "an open bookmarks state must not reveal the pane in full screen");
 });
 
-test("P5a: #maprail is an announced landmark, not a bare labelled div", () => {
-  /* aria-label on a <div> with no role is dropped by most screen readers, so
-     the rail had no announced identity (its ticks were labelled fine). */
+test("P6: #mappill is a named button control (not a bare div)", () => {
+  /* Replaces the P5a maprail landmark pin: the pill is a real <button> so it
+     is announced without a role=navigation wrapper. */
   const html = readFileSync(join(__dirname, "../index.html"), "utf8");
-  const tag = html.match(/<div id="maprail"[^>]*>/);
-  assert.ok(tag, "#maprail present in index.html");
-  assert.match(tag[0], /role="navigation"/, "rail is a navigation landmark");
-  assert.match(tag[0], /aria-label="[^"]+"/, "landmark is named");
+  const tag = html.match(/<button[^>]*id="mappill"[^>]*>/);
+  assert.ok(tag, "#mappill present as a button in index.html");
+  assert.match(tag[0], /aria-label="[^"]+"/, "control is named");
+  assert.match(tag[0], /type="button"/, "type=button so it never submits");
 });
 
 test("P5b: --grab is one token for all three dividers, comfortably mouse-sized", () => {

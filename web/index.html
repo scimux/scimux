@@ -51,10 +51,10 @@
     <!-- floating selection toolbar (full screen only): named selected station
          + its actions, so the row never has controls layered over it -->
     <div id="maptoolbar"></div>
-    <!-- attention rail (full screen only): dashed gutter + one tick per asking
-         station. Singleton sibling of #mapscroll/#maptoolbar — never inside
-         #mapwrap (poll-safe). Hidden when nothing is asking. -->
-    <div id="maprail" role="navigation" aria-label="stations asking"></div>
+    <!-- off-screen attention pill (full screen only): "N waiting ↓" / "N ready ↑".
+         Singleton sibling of #mapscroll/#maptoolbar — never inside #mapwrap
+         (poll-safe). Hidden when every asking/finished station is on-screen. -->
+    <button type="button" id="mappill" aria-label="jump to off-screen station"></button>
   </section>
 
   <!-- dock divider (desktop/iPad only under body.map-full.map-dock): map | chat.

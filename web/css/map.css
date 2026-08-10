@@ -125,22 +125,22 @@
   background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: blur(10px);
   box-shadow: 0 6px 20px rgba(0,0,0,.22); }
 body.map-full #maptoolbar.on { display: flex; }
-/* Attention rail: dashed gutter down the wall's right edge, one tick per
-   asking station at its content-height fraction. Singleton outside #mapwrap
-   (poll-safe); hide-global / reveal-scoped like #maptoolbar so it is not
-   focusable off-screen. .on only when there is at least one tick. */
-#maprail { display: none; position: absolute; z-index: 15;
-  top: 0; right: 0; bottom: 0; width: 18px;
-  border-left: 1.5px dashed color-mix(in srgb, var(--attn) 55%, var(--hairline));
-  pointer-events: none; }
-body.map-full #maprail.on { display: block; }
-/* Tick: ≥44px hit target (visually a short dash), top set as frac% of content. */
-#maprail button { position: absolute; left: 0; right: 0; height: 44px;
-  margin: 0; padding: 0; border: 0; background: transparent;
-  transform: translateY(-50%); cursor: pointer; pointer-events: auto; }
-#maprail button::before { content: ""; display: block; width: 10px; height: 3px;
-  margin: 0 auto; border-radius: 1px; background: var(--attn);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--attn) 45%, transparent); }
+/* Off-screen attention pill: platform jump-to-unread idiom. Singleton outside
+   #mapwrap (poll-safe); hide-global / reveal-scoped like #maptoolbar so it is
+   not focusable off-screen. .on only when at least one hard-attention or
+   finished station is outside the viewport. min-height 44px (HIG). */
+#mappill { display: none; position: absolute; z-index: 16;
+  left: 50%; transform: translateX(-50%);
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  min-height: 44px; padding: 10px 16px; border: 0; border-radius: 22px;
+  font: inherit; font-size: 14px; font-weight: 700; color: var(--bg);
+  background: color-mix(in srgb, var(--attn) 92%, var(--fg));
+  box-shadow: 0 6px 20px rgba(0,0,0,.28); cursor: pointer;
+  white-space: nowrap; }
+body.map-full #mappill.on { display: flex; align-items: center; justify-content: center; }
+/* Ring hit target: re-enable pointer events on the transparent control circle
+   while the rest of the station SVG stays pointer-events:none. */
+.lbody > svg .attnstation-hit { pointer-events: all; cursor: pointer; }
 #maptoolbar .mtb-node { display: flex; align-items: center; gap: 8px; min-width: 0; }
 #maptoolbar .mtb-swatch { width: 10px; height: 10px; border-radius: 5px; flex: none; }
 #maptoolbar .mtb-title { font-weight: 700; font-size: 14px; max-width: 30vw;

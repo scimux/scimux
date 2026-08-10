@@ -349,13 +349,20 @@ func TestOpenChatControlIsConsistent(t *testing.T) {
 	if strings.Contains(mapSrc, "&#8249; Open chat") {
 		t.Error("the wall-map toolbar must not use a bare chevron for Open chat — it must use ICON_JUMP like every other surface")
 	}
-	jumpIdx := strings.Index(mapSrc, "data-jump=")
-	if jumpIdx < 0 {
-		t.Fatal("wall-map toolbar lost its data-jump control")
+	// The attention-ring hit circle also carries data-jump (P6); the Open chat
+	// label lives only on the toolbar button. Anchor on that label, then walk
+	// back to the opening tag so a ring hit further up the file cannot win.
+	labelIdx := strings.Index(mapSrc, "Open chat</button>")
+	if labelIdx < 0 {
+		t.Fatal("wall-map toolbar lost its Open chat button")
 	}
-	btn := mapSrc[jumpIdx:]
-	if end := strings.Index(btn, "</button>"); end >= 0 {
-		btn = btn[:end]
+	btnStart := strings.LastIndex(mapSrc[:labelIdx], "<button")
+	if btnStart < 0 {
+		t.Fatal("Open chat label has no opening <button")
+	}
+	btn := mapSrc[btnStart : labelIdx+len("Open chat</button>")]
+	if !strings.Contains(btn, "data-jump=") {
+		t.Errorf("the wall-map Open chat button must carry data-jump; got %q", btn)
 	}
 	if !strings.Contains(btn, "ICON_JUMP") {
 		t.Errorf("the wall-map Open chat button must render ICON_JUMP; got %q", btn)
