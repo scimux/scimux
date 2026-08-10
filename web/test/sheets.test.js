@@ -1286,3 +1286,54 @@ test("P4 plusbtn click leaves nc_prompt empty (openNewActivity ignores the Event
   assert.equal(ctx.byId.nc_title.value, "");
   assert.equal(ctx.byId.newchat.classList.contains("open"), true);
 });
+
+/* ---------- P7: .sheet .pos-item is a 44px touch target ----------
+ * Rule-body regexes only — never a file-wide min-height grep (that would
+ * pass if the declaration landed on .sheet .pos-item .d or sendto-group).
+ * Mutation check: move min-height into the neighbour rule and confirm red. */
+
+const sheetsCssSrc = readFileSync(join(__dirname, "../css/sheets.css"), "utf8");
+
+function posItemRuleBody(){
+  const m = sheetsCssSrc.match(/\.sheet\s+\.pos-item\s*\{([^}]+)\}/);
+  assert.ok(m, ".sheet .pos-item rule present");
+  return m[1];
+}
+
+test("P7: .sheet .pos-item body has min-height: 44px", () => {
+  const body = posItemRuleBody();
+  assert.match(body, /min-height:\s*44px/,
+    ".sheet .pos-item must declare min-height: 44px (hit-testable floor)");
+});
+
+test("P7: .sheet .pos-item body centres its items (not baseline)", () => {
+  /* align-items: baseline in a 44px flex row pins the label to the top of
+     the box. The lane dot already has inline align-self: center, so the
+     hazard is the title, not the dot. */
+  const body = posItemRuleBody();
+  assert.match(body, /align-items:\s*center/,
+    ".sheet .pos-item centres the label in the 44px row");
+  assert.doesNotMatch(body, /align-items:\s*baseline/,
+    "baseline would top-align the label once the row is 44px tall");
+});
+
+test("P7: neither 44px target fakes height with margin", () => {
+  /* Margin is not hit-testable — the original .pos-item trap. Spacing
+     margins (e.g. margin: 6px 0) may stay; a vertical margin that alone
+     invents a ≥44px block must not stand in for min-height. */
+  const posBody = posItemRuleBody();
+  const menuCss = readFileSync(join(__dirname, "../css/menu.css"), "utf8");
+  const pop = menuCss.match(/\.popmenu\s+button\s*\{([^}]+)\}/);
+  assert.ok(pop, ".popmenu button rule present");
+  const popBody = pop[1];
+  for (const [name, body] of [[".sheet .pos-item", posBody], [".popmenu button", popBody]]) {
+    assert.match(body, /min-height:\s*44px/,
+      `${name}: height floor comes from min-height, not margin`);
+    assert.doesNotMatch(body,
+      /margin(?:-(?:top|bottom))?:\s*(?:4[4-9]|[5-9]\d|\d{3,})px/,
+      `${name}: vertical margin must not invent the 44px target`);
+    assert.doesNotMatch(body,
+      /margin:\s*(?:4[4-9]|[5-9]\d|\d{3,})px\s+0\b/,
+      `${name}: margin: Npx 0 with N≥44 would fake the target`);
+  }
+});

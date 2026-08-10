@@ -402,3 +402,22 @@ test("P5: menu.js takes no implicit document global at module scope", async () =
   assert.equal(typeof menu.menuButtonHTML, "function");
   assert.equal(typeof menu.menuSepHTML, "function");
 });
+
+/* ---------- P7: .popmenu button is a 44px touch target ----------
+ * Match the rule BODY. A file-wide /min-height:\s*44px/ would pass if the
+ * declaration landed on .popmenu .sep (a 44px-tall hairline). Mutation
+ * check: put min-height on .sep and confirm this fails. */
+
+const menuCssSrc = readFileSync(join(cssDir, "menu.css"), "utf8");
+
+function popmenuButtonRuleBody(){
+  const m = menuCssSrc.match(/\.popmenu\s+button\s*\{([^}]+)\}/);
+  assert.ok(m, ".popmenu button rule present");
+  return m[1];
+}
+
+test("P7: .popmenu button body has min-height: 44px", () => {
+  const body = popmenuButtonRuleBody();
+  assert.match(body, /min-height:\s*44px/,
+    ".popmenu button must declare min-height: 44px");
+});
