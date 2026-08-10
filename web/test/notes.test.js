@@ -584,13 +584,13 @@ test("referenceHTML and sectionBodyInner preserve references", () => {
     icons: { ICON_JUMP: "J", ICON_COPY: "C", ICON_TRASH: "T" },
   });
   assert.match(html, /data-ref="r1"/);
-  /* P6: visible bar is jump · sendto · more; copy/trash move to the overflow menu */
+  /* P3: visible bar is jump · copy · sendto · trash; no overflow menu */
   assert.match(html, /data-refact="jump"/);
+  assert.match(html, /data-refact="copy"/);
   assert.match(html, /data-refact="sendto"/);
-  assert.match(html, /data-refact="more"/);
-  assert.doesNotMatch(html, /data-refact="copy"/);
-  assert.doesNotMatch(html, /data-refact="trash"/);
-  assert.match(html, /data-refmore/); /* clamp trigger — distinct from overflow */
+  assert.match(html, /data-refact="trash"/);
+  assert.doesNotMatch(html, /data-refact="more"/);
+  assert.match(html, /data-refmore/); /* clamp trigger — distinct from any overflow */
   assert.match(html, /S · you · W\(T1\)/);
   assert.match(html, /\[md:\*\*hi\*\*\]/);
 
@@ -713,14 +713,13 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
 
   const item = inboxItemHTML({ t: "1", text: "hi", node: "n1" }, "var(--unlane)",
     { ...deps, open: true });
-  /* item 5 + P6: inbox card carries the shared primary bar (jump · sendto ·
-     note · more); copy/del live in the overflow menu, comment stays pane-only */
+  /* P3: inbox bar is jump · copy · note · more; sendto/del live in the menu */
   assert.match(item, /class="actionbar tear"/);
-  for (const act of ["jump", "sendto", "note", "more"]) {
+  for (const act of ["jump", "copy", "note", "more"]) {
     assert.match(item, new RegExp(`data-bmact="${act}"`), act);
   }
   assert.doesNotMatch(item, /data-bmact="comment"/);
-  assert.doesNotMatch(item, /data-bmact="copy"/);
+  assert.doesNotMatch(item, /data-bmact="sendto"/);
   assert.doesNotMatch(item, /data-bmact="del"/);
 });
 
@@ -1517,7 +1516,7 @@ test("placement payload uses bookmarkSource + snapshot; targeted path available"
   assert.equal(roots.notesworkspace.classList.contains("placing"), false);
 });
 
-/* ---------- reference copy / jump / trash ---------- */
+/* ---------- reference copy / jump / trash (P3: trash confirms first) ---------- */
 test("reference copy, jump, and in-place trash", async () => {
   const ctx = createFeature({
     notes: [{ id: "n1", title: "N", order: 0 }],
@@ -1579,6 +1578,7 @@ test("reference copy, jump, and in-place trash", async () => {
   assert.equal(effects.jump.length, 1);
   assert.equal(effects.jump[0].uid, "u");
 
+  /* P3: trash is inline + .danger and requires confirm (no window.confirm) */
   const trashBtn = el("button", { dataset: { refact: "trash" } });
   trashBtn.dataset.refact = "trash";
   trashBtn.closest = sel => {
@@ -1587,9 +1587,23 @@ test("reference copy, jump, and in-place trash", async () => {
     if (sel === ".wssec") return sec;
     return null;
   };
+  trashBtn.getBoundingClientRect = () =>
+    ({ top: 100, left: 100, bottom: 144, right: 144, width: 44, height: 44 });
+  roots.wspanel.getBoundingClientRect = () =>
+    ({ top: 0, left: 0, width: 400, height: 600 });
   let removed = false;
   ref.remove = () => { removed = true; wrap.children = []; };
   roots.wssections.dispatch("click", { target: trashBtn });
+  await Promise.resolve();
+  assert.ok(!apiLog.some(x => x.method === "DELETE"),
+    "trash must not DELETE before confirm");
+  const confirm = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(confirm, "confirm popover opens");
+  assert.match(confirm.className, /wsconfirm/);
+  const ok = el("button", { dataset: { wconfirm: "ok" } });
+  ok.dataset.wconfirm = "ok";
+  ok.closest = sel => (sel === "[data-wconfirm]" ? ok : null);
+  confirm.dispatch("click", { target: ok });
   await Promise.resolve();
   await Promise.resolve();
   assert.ok(apiLog.some(x => x.method === "DELETE" && x.url.includes("/references/r1")));

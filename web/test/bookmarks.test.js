@@ -190,19 +190,19 @@ test("bookmarkListHTML: empty, jump gate, comment class, action order", () => {
   });
   assert.match(open, /class="bookmark "/);
   assert.match(open, /Chat A/);
-  /* P6: visible bar is jump · sendto · note · more; del/copy/comment move to menu */
+  /* P3: pane bar is jump · comment · note · more; copy/sendto/del live in the menu */
   assert.match(open, /data-bmact="jump"/);
-  assert.match(open, /data-bmact="sendto"/);
+  assert.match(open, /data-bmact="comment"/);
   assert.match(open, /data-bmact="note"/);
   assert.match(open, /data-bmact="more"/);
   assert.doesNotMatch(open, /data-bmact="del"/);
   assert.doesNotMatch(open, /data-bmact="copy"/);
-  assert.doesNotMatch(open, /data-bmact="comment"/);
+  assert.doesNotMatch(open, /data-bmact="sendto"/);
   const jumpIdx = open.indexOf('data-bmact="jump"');
-  const sendIdx = open.indexOf('data-bmact="sendto"');
+  const commentIdx = open.indexOf('data-bmact="comment"');
   const noteIdx = open.indexOf('data-bmact="note"');
   const moreIdx = open.indexOf('data-bmact="more"');
-  assert.ok(jumpIdx >= 0 && sendIdx > jumpIdx && noteIdx > sendIdx && moreIdx > noteIdx);
+  assert.ok(jumpIdx >= 0 && commentIdx > jumpIdx && noteIdx > commentIdx && moreIdx > noteIdx);
 
   const uidOpen = bookmarkListHTML({
     list: [list[1]],
@@ -1296,22 +1296,22 @@ const ICONS = {
   ICON_INTO: "<svg id=i/>", ICON_MENU_DOTS: "<svg id=m/>",
 };
 
-test("bookmarkActionsHTML renders the pane's primary set in order (P6)", () => {
+test("bookmarkActionsHTML renders the pane's primary set in order (P3)", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" },
     /* the pane's FULL set is what it shows with the Notes workspace open;
        "use in note" is withheld while that workspace is closed (item 4) */
     { icons: ICONS, context: "pane", workspaceOpen: true });
   const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
-  /* P6: comment/copy/del move into the overflow menu */
-  assert.deepEqual(order, ["jump", "sendto", "note", "more"]);
+  /* P3: comment on the bar; copy/sendto/del in the overflow menu */
+  assert.deepEqual(order, ["jump", "comment", "note", "more"]);
 });
 
-test("bookmarkActionsHTML omits comment from the inbox bar — reply composer is pane-only (P6)", () => {
+test("bookmarkActionsHTML omits comment from the inbox bar — reply composer is pane-only (P3)", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
   const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
-  assert.deepEqual(order, ["jump", "sendto", "note", "more"]);
+  assert.deepEqual(order, ["jump", "copy", "note", "more"]);
   assert.ok(!order.includes("comment"));
 });
 
@@ -1330,11 +1330,13 @@ test("bookmarkActionsHTML drops jump only when the bookmark has no address at al
 });
 
 test("bookmarkActionsHTML withholds comment from a comment (no nesting)", () => {
-  /* P6: comment is never on the visible bar; the no-nesting rule lives in the menu */
+  /* P3: comment is on the pane bar when available; no nesting promotes copy */
   const html = bookmarkActionsHTML(
-    { t: "2", text: "x", node: "n1", anchor: "1" }, { icons: ICONS, context: "pane" });
+    { t: "2", text: "x", node: "n1", anchor: "1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true });
   assert.ok(!html.includes(`data-bmact="comment"`));
-  assert.ok(!html.includes(`data-bmact="more"`) || true); /* more still present */
+  assert.match(html, /data-bmact="copy"/, "copy promoted when comment withheld");
+  assert.match(html, /data-bmact="more"/);
 });
 
 test("bookmarkActionsHTML uses the shared .actionbar/.btn-plain classes, not per-surface geometry", () => {
