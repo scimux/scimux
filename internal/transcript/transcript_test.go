@@ -485,17 +485,30 @@ func TestLastRoleAndDelivered(t *testing.T) {
 		t.Fatalf("after codex assistant message: Owing=%v Delivered=%v, want false/true", tl.Owing(), tl.Delivered())
 	}
 
-	// Site: rotation (shrunken file) resets lastRole so Delivered is false again.
+	// Site: rotation (shrunken file) resets lastRole. This one must start from
+	// *delivered* and rotate to empty: only then does the reset decide the
+	// answer. Rotating into a file whose content sets a role would pass with
+	// no reset at all, because replaying that content overwrites lastRole —
+	// which is why the two rotation checks below cannot cover this site.
+	// Concretely: without the reset, a /clear-rotated log keeps claiming the
+	// pre-clear assistant turn, and the map calls the fresh chat "Ready".
+	if !tl.Delivered() {
+		t.Fatal("precondition: rotation check must start from a delivered tailer")
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl.Poll()
+	if tl.Owing() || tl.Delivered() {
+		t.Fatalf("after rotation from delivered to empty: Owing=%v Delivered=%v, want false/false",
+			tl.Owing(), tl.Delivered())
+	}
+
+	// Rotation into fresh content: the replayed record decides the role.
 	if err := os.WriteFile(path, []byte(`{"type":"user","timestamp":"r1","message":{"role":"user","content":"fresh after rotate"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Shrink offset past new size first so Poll sees rotation.
-	// Write a shorter file: empty then one line is smaller than the previous large log
-	// only if we truncate. WriteFile already truncates.
 	tl.Poll()
-	// After rotation the new content is a user turn → owing, not delivered.
-	// The reset itself must have cleared lastRole before replaying; end state
-	// after the user line is the real check that the path ran.
 	if !tl.Owing() || tl.Delivered() {
 		t.Fatalf("after rotation+user: Owing=%v Delivered=%v, want true/false", tl.Owing(), tl.Delivered())
 	}

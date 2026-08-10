@@ -785,6 +785,32 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 		}
 	})
 
+	t.Run("not_finished_when_dialog_without_pending", func(t *testing.T) {
+		// Isolates the attn == "" clause. The two subtests above cannot: both
+		// of their fixtures also carry an unresolved tool call, so dropping
+		// attn == "" leaves PendingCount() covering them (and vice versa).
+		// This is P1's exact case — Claude Code flushes the tool_use record
+		// late, so the newest record is the assistant's text with nothing
+		// pending while an approval dialog sits on the pane. Without the
+		// clause the map would call that blocked chat "Ready".
+		dialogPane := "Do you want to proceed?\n  1. Yes\n  2. No\n  Esc to cancel"
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run sweep"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"about to run it"}]}}`)
+		a := mk(t, path, func(a *app, n *Node) {
+			a.prevCap["cl1"] = dialogPane // unchanged capture = quiet pane
+			a.server = tmuxsession.NewServerWithRunner("testsock", quietRunner(dialogPane))
+		})
+		a.poll()
+		if got := a.attn["cl1"]; got != "dialog" {
+			t.Fatalf("attention = %q, want dialog from the matcher", got)
+		}
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone must not fire while any attention is classified")
+		}
+	})
+
 	t.Run("not_finished_when_ended", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
