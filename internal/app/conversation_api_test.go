@@ -1379,18 +1379,18 @@ func TestHandleChatCodexPendingKinds(t *testing.T) {
 	if body.PermToolKind != "execute" {
 		t.Errorf("perm_tool_kind = %q, want execute (command approval)", body.PermToolKind)
 	}
-	if len(body.Perms) < 2 {
-		t.Fatalf("perm_options = %d, want at least accept+cancel", len(body.Perms))
+	if len(body.Perms) != 2 {
+		t.Fatalf("perm_options = %d, want accept+cancel", len(body.Perms))
 	}
-	byName := map[string]string{}
+	byKey := map[string]PermOption{}
 	for _, o := range body.Perms {
-		byName[o.Name] = o.Kind
+		byKey[o.Key] = o
 	}
-	if byName["accept"] != "allow" {
-		t.Errorf("accept kind = %q, want allow", byName["accept"])
+	if got := byKey["1"]; got.Name != "Approve once" || got.Kind != "allow" {
+		t.Errorf("accept option = %+v, want Approve once/allow", got)
 	}
-	if byName["cancel"] != "reject" {
-		t.Errorf("cancel kind = %q, want reject", byName["cancel"])
+	if got := byKey["2"]; got.Name != "Reject and stop" || got.Kind != "reject" {
+		t.Errorf("cancel option = %+v, want Reject and stop/reject", got)
 	}
 }
 

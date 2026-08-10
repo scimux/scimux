@@ -262,7 +262,7 @@ func TestManagerFileChangeApprovalResolve(t *testing.T) {
 	if !ok || pending.Title != "item/fileChange/requestApproval" {
 		t.Fatalf("pending = %+v %v", pending, ok)
 	}
-	if got := optionNames(pending.Options); strings.Join(got, ",") != "accept,acceptForSession,decline,cancel" {
+	if got := optionNames(pending.Options); strings.Join(got, ",") != "Approve once,Approve for session,Reject and continue,Reject and stop" {
 		t.Fatalf("file-change options = %v", got)
 	}
 
@@ -334,9 +334,8 @@ func TestManagerNoPendingResolve(t *testing.T) {
 	}
 }
 
-// Pending must tag rejections as "reject" and everything else as "allow", and
-// set tool kind to "execute" only when the approval carries a command. Always/
-// session variants are intentionally not distinguished.
+// Pending must expose distinct human labels and role kinds while retaining the
+// numbered decision tokens used to answer the original codex request.
 func TestPendingMapsDecisionAndToolKind(t *testing.T) {
 	s := &Session{nodeID: "n1", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
 
@@ -349,11 +348,9 @@ func TestPendingMapsDecisionAndToolKind(t *testing.T) {
 			AvailableDecisions: []Decision{
 				{Key: "accept"},
 				{Key: "acceptForSession"},
+				{Key: "acceptWithExecpolicyAmendment"},
 				{Key: "cancel"},
 				{Key: "decline"},
-				{Key: "denied"},
-				{Key: "abort"},
-				{Key: "declinePermissions"},
 			},
 		},
 		ch: make(chan chosen, 1),
@@ -365,23 +362,19 @@ func TestPendingMapsDecisionAndToolKind(t *testing.T) {
 	if p.ToolKind != "execute" {
 		t.Errorf("ToolKind = %q, want execute when Command is set", p.ToolKind)
 	}
-	want := map[string]string{
-		"accept":             "allow",
-		"acceptForSession":   "allow",
-		"cancel":             "reject",
-		"decline":            "reject",
-		"denied":             "reject",
-		"abort":              "reject",
-		"declinePermissions": "reject",
+	want := []PermOption{
+		{Key: "1", Name: "Approve once", Kind: "allow"},
+		{Key: "2", Name: "Approve for session", Kind: "allow_always"},
+		{Key: "3", Name: "Approve and allow matching commands", Kind: "allow_always"},
+		{Key: "4", Name: "Reject and stop", Kind: "reject"},
+		{Key: "5", Name: "Reject and continue", Kind: "reject"},
 	}
 	if len(p.Options) != len(want) {
 		t.Fatalf("options = %d, want %d", len(p.Options), len(want))
 	}
-	for _, o := range p.Options {
-		if got, ok := want[o.Name]; !ok {
-			t.Errorf("unexpected option %q", o.Name)
-		} else if o.Kind != got {
-			t.Errorf("option %q Kind = %q, want %q", o.Name, o.Kind, got)
+	for i := range want {
+		if p.Options[i] != want[i] {
+			t.Errorf("option[%d] = %+v, want %+v", i, p.Options[i], want[i])
 		}
 	}
 
@@ -406,15 +399,25 @@ func TestPendingMapsDecisionAndToolKind(t *testing.T) {
 	}
 }
 
-func TestMapDecisionKindAndToolKind(t *testing.T) {
-	for _, k := range []string{"cancel", "decline", "denied", "abort", "declinePermissions"} {
-		if got := mapDecisionKind(Decision{Key: k}); got != "reject" {
-			t.Errorf("mapDecisionKind(%q) = %q, want reject", k, got)
-		}
+func TestDecisionPresentationAndToolKind(t *testing.T) {
+	tests := []struct {
+		decision Decision
+		name     string
+		kind     string
+	}{
+		{Decision{Key: "approved_for_session"}, "Approve for session", "allow_always"},
+		{Decision{Key: "allowForTurn"}, "Allow for turn", "allow"},
+		{Decision{Key: "allowForSession"}, "Allow for session", "allow_always"},
+		{Decision{Key: "declinePermissions"}, "Reject", "reject"},
+		{Decision{Key: "applyNetworkPolicyAmendment", Payload: json.RawMessage(`{"network_policy_amendment":{"action":"allow","host":"example.com"}}`)}, "Always allow network access to example.com", "allow_always"},
+		{Decision{Key: "applyNetworkPolicyAmendment", Payload: json.RawMessage(`{"network_policy_amendment":{"action":"deny","host":"example.com"}}`)}, "Always deny network access to example.com", "reject_always"},
+		{Decision{Key: "applyNetworkPolicyAmendment", Payload: json.RawMessage(`{"network_policy_amendment":{"action":"allow"}}`)}, "Apply network policy rule", ""},
+		{Decision{Key: "futureDecision"}, "futureDecision", "allow"},
 	}
-	for _, k := range []string{"accept", "acceptForSession", "approved", "approved_for_session", "allowForTurn", "allowForSession"} {
-		if got := mapDecisionKind(Decision{Key: k}); got != "allow" {
-			t.Errorf("mapDecisionKind(%q) = %q, want allow", k, got)
+	for _, tt := range tests {
+		name, kind := decisionPresentation(tt.decision)
+		if name != tt.name || kind != tt.kind {
+			t.Errorf("decisionPresentation(%q) = %q/%q, want %q/%q", tt.decision.Key, name, kind, tt.name, tt.kind)
 		}
 	}
 	if got := mapApprovalToolKind(Approval{Command: "ls"}); got != "execute" {

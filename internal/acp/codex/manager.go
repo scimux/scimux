@@ -298,10 +298,9 @@ type PendingPermission struct {
 	Options  []PermOption
 }
 
-// PermOption is one answerable decision: the key a supervisor presses, the
-// decision's name (the codex decision enum, e.g. "accept"), and the option's
-// role kind when known ("allow" | "reject" | ""). Shape matches acp.PermOption
-// so the HTTP/UI layer treats both transports identically.
+// PermOption is one answerable decision: the key a supervisor presses, a
+// human-readable decision name, and the option's role kind when known. Shape
+// matches acp.PermOption so the HTTP/UI layer treats both transports identically.
 type PermOption struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
@@ -590,10 +589,11 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 	ds := a.AvailableDecisions
 	opts := make([]PermOption, 0, len(ds))
 	for i, d := range ds {
+		name, kind := decisionPresentation(d)
 		opts = append(opts, PermOption{
 			Key:  strconv.Itoa(i + 1),
-			Name: d.Key,
-			Kind: mapDecisionKind(d),
+			Name: name,
+			Kind: kind,
 		})
 	}
 	return PendingPermission{
@@ -603,15 +603,48 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 	}, true
 }
 
-// mapDecisionKind projects a codex decision into scimux option vocabulary.
-// Rejections become "reject"; everything else is "allow". Always/session
-// variants are intentionally not distinguished — no grounded evidence for that
-// enum yet, and a wrong guess would mislabel a persistent grant as a one-shot.
-func mapDecisionKind(d Decision) string {
-	if d.IsRejection() {
-		return "reject"
+// decisionPresentation translates codex protocol enums into labels and role
+// kinds. The choice token and payload remain untouched in pendingPermission,
+// so presentation cannot change the decision sent back to codex.
+func decisionPresentation(d Decision) (string, string) {
+	switch d.Key {
+	case "accept", "approved":
+		return "Approve once", "allow"
+	case "acceptForSession", "approved_for_session":
+		return "Approve for session", "allow_always"
+	case "acceptWithExecpolicyAmendment":
+		return "Approve and allow matching commands", "allow_always"
+	case "applyNetworkPolicyAmendment":
+		var p struct {
+			Rule struct {
+				Action string `json:"action"`
+				Host   string `json:"host"`
+			} `json:"network_policy_amendment"`
+		}
+		_ = json.Unmarshal(d.Payload, &p)
+		if p.Rule.Action == "allow" && p.Rule.Host != "" {
+			return "Always allow network access to " + p.Rule.Host, "allow_always"
+		}
+		if p.Rule.Action == "deny" && p.Rule.Host != "" {
+			return "Always deny network access to " + p.Rule.Host, "reject_always"
+		}
+		return "Apply network policy rule", ""
+	case "allowForTurn":
+		return "Allow for turn", "allow"
+	case "allowForSession":
+		return "Allow for session", "allow_always"
+	case "decline", "denied":
+		return "Reject and continue", "reject"
+	case "cancel", "abort":
+		return "Reject and stop", "reject"
+	case "declinePermissions":
+		return "Reject", "reject"
+	default:
+		if d.IsRejection() {
+			return d.Key, "reject"
+		}
+		return d.Key, "allow"
 	}
-	return "allow"
 }
 
 // mapApprovalToolKind is "execute" when the approval carries a command, else "".
