@@ -316,12 +316,16 @@ test("P5 6: web/css/menu.css is enumerated and brace depth returns to 0", () => 
 
 test("P5: menu.js takes no implicit document global at module scope", async () => {
   /* enrolment puts menu.js under offline-import-smoke; it must not touch
-     document/window at load time. */
+     document/window at load time. Strip comments before scanning. */
   assert.ok(existsSync(menuJsPath), "web/js/menu.js must exist");
   const src = readFileSync(menuJsPath, "utf8");
-  assert.doesNotMatch(src, /^(?!.*(?:function|=>)).*\bdocument\b/m);
-  /* crude: no top-level bare document. access — allow the parameter name */
-  assert.doesNotMatch(src, /^[^/\n]*\bdocument\.(createElement|body|getElementById)/m);
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(code, /\bdocument\.(createElement|body|getElementById|querySelector)\b/);
+  assert.doesNotMatch(code, /\bwindow\./);
+  /* bare global `document` as an expression — allow the createPopoverMenu(doc) param */
+  assert.doesNotMatch(code, /[^\w.]document[^\w]/);
   const menu = await loadMenu();
   assert.equal(typeof menu.createPopoverMenu, "function");
   assert.equal(typeof menu.menuPlacement, "function");

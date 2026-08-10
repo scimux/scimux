@@ -22,6 +22,7 @@ var productionCSSFinalOrder = []string{
 	"/css/map.css",
 	"/css/chat.css",
 	"/css/sheets.css",
+	"/css/menu.css",
 	"/css/notes.css",
 	"/css/accessibility.css",
 }
@@ -1330,9 +1331,11 @@ func TestProductionChatSheetsCSSServing(t *testing.T) {
 
 // --- Packet 5E: notes + accessibility extraction -----------------------------
 
-// nineLinkCSSOrder is the permanent complete Phase 5 stylesheet list established
-// by Packet 5E. Ownership tests require this exact order (not merely a prefix).
-var nineLinkCSSOrder = []string{
+// productionLinkCSSOrder is the permanent complete stylesheet list (Packet 5E
+// nine-link order, extended by P5 with menu.css immediately before notes.css so
+// note-specific rules can still override the shared popover). Ownership tests
+// require this exact order (not merely a prefix).
+var productionLinkCSSOrder = []string{
 	"/css/tokens.css",
 	"/css/base.css",
 	"/css/layout.css",
@@ -1340,28 +1343,30 @@ var nineLinkCSSOrder = []string{
 	"/css/map.css",
 	"/css/chat.css",
 	"/css/sheets.css",
+	"/css/menu.css",
 	"/css/notes.css",
 	"/css/accessibility.css",
 }
 
 // TestProductionNotesAccessibilityCSSOwnership locks the permanent notes and
-// accessibility ownership established in Packet 5E and completed in 5F: the
-// complete nine-link order with notes eighth and accessibility last; notes.css
-// owns Bookmarks/Notes/desktop/peek rules; layout no longer owns #bookmarkpeek;
-// accessibility.css owns only the cross-component pane reduced-motion override;
-// cascade order holds; and the final state has no inline <style> source.
+// accessibility ownership established in Packet 5E and completed in 5F (and
+// extended by P5's shared menu.css): the complete linked order with menu before
+// notes and accessibility last; notes.css owns Bookmarks/Notes/desktop/peek
+// rules; layout no longer owns #bookmarkpeek; accessibility.css owns only the
+// cross-component pane reduced-motion override; cascade order holds; and the
+// final state has no inline <style> source.
 func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 	html := mustReadIndex(t)
 	hrefs, err := linkedStylesheetHrefs(html)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hrefs) != len(nineLinkCSSOrder) {
-		t.Fatalf("linked stylesheets = %v, want exact nine-link order %v", hrefs, nineLinkCSSOrder)
+	if len(hrefs) != len(productionLinkCSSOrder) {
+		t.Fatalf("linked stylesheets = %v, want exact link order %v", hrefs, productionLinkCSSOrder)
 	}
-	for i, want := range nineLinkCSSOrder {
+	for i, want := range productionLinkCSSOrder {
 		if hrefs[i] != want {
-			t.Fatalf("linked[%d]=%q, want %q (exact nine-link order %v)", i, hrefs[i], want, nineLinkCSSOrder)
+			t.Fatalf("linked[%d]=%q, want %q (exact link order %v)", i, hrefs[i], want, productionLinkCSSOrder)
 		}
 	}
 	if hrefs[len(hrefs)-1] != "/css/accessibility.css" {
@@ -1420,7 +1425,7 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 		"#wsplacepill {",
 		".wsibubble.clamped {",
 		".wsrefbody.clamped {",
-		".wsmenu {",
+		".popmenu .wsconfirmmsg {",
 		"#wscards .empty {",
 		"#wsnoteempty {",
 		"@media (max-width: 767px) {",
@@ -1577,7 +1582,7 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 	if !strings.Contains(string(tokensCSS), "--peek:") {
 		t.Fatal("tokens.css must own --peek")
 	}
-	for _, name := range []string{"base.css", "layout.css", "cards.css", "map.css", "chat.css", "sheets.css", "notes.css", "accessibility.css"} {
+	for _, name := range []string{"base.css", "layout.css", "cards.css", "map.css", "chat.css", "sheets.css", "menu.css", "notes.css", "accessibility.css"} {
 		b, err := fs.ReadFile(webFS, "web/css/"+name)
 		if err != nil {
 			t.Fatalf("%s missing: %v", name, err)

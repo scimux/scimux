@@ -470,16 +470,8 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   line-height: 1.55; color: var(--ink); background: var(--code-bg); border: 1px solid var(--hairline);
   border-radius: 10px; padding: 10px 12px; outline: none; resize: none; }
 .wssecedit:focus { border-color: var(--work); }
-/* section overflow menu (add-below / edit / move / delete) */
-.wsmenu { position: absolute; z-index: 3; min-width: 176px; background: var(--surface);
-  border: 1px solid var(--hairline); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.28);
-  padding: 6px; }
-.wsmenu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-  padding: 9px 12px; border-radius: 8px; color: var(--ink); font-size: 14px; }
-.wsmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-.wsmenu button.danger { color: var(--danger); }
-.wsmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
-.wsmenu .wsconfirmmsg { padding: 8px 12px 10px; font-size: 13px; line-height: 1.4;
+/* note-specific confirm message inside the shared .popmenu (menu.css). */
+.popmenu .wsconfirmmsg { padding: 8px 12px 10px; font-size: 13px; line-height: 1.4;
   color: var(--ink); max-width: 220px; }
 #notesworkspace .backbtn { display: flex; }
 /* --- inbox zone (left): the reused capture layer --- */

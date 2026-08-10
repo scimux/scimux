@@ -32,7 +32,7 @@
  *   - wsSaveTimers / wsPending / wsSaveChains (per-field serialization)
  *   - wsInboxSig / wsInboxTab / expandedWsInbox / expandedRefs
  *   - wsCardDragging / wsCardDragEl / wsTouch / wsPlacing
- *   - wsSecTitleOrig / wsMenuEl
+ *   - wsSecTitleOrig / popMenu (shared popover slot)
  *
  * Server calls (via injected api):
  *   - GET    /api/notes
@@ -112,6 +112,11 @@ import {
   notesSwipeBackDecision as notesSwipeBackDecisionDefault,
 } from "./navigation.js";
 import { focusAtEnd } from "./caret.js";
+import {
+  createPopoverMenu,
+  menuButtonHTML,
+  menuSepHTML,
+} from "./menu.js";
 
 /* ---------- public constants ---------- */
 
@@ -728,7 +733,7 @@ export function createNotesFeature(deps){
   let wsTouch = null;
   let wsPlacing = null;
   const wsSecTitleOrig = {};
-  let wsMenuEl = null;
+  const popMenu = createPopoverMenu(doc);
   let bound = false;
   const cleanups = [];
   let copyTimer = null;
@@ -1196,28 +1201,23 @@ export function createNotesFeature(deps){
   /** In-workspace confirm before archive-delete (no window.confirm — blocked in iOS PWA). */
   function openDeleteConfirm(anchor, noteId){
     if (!doc || !noteId) return;
-    closeWsMenu();
-    const m = doc.createElement("div");
-    m.className = "wsmenu wsconfirm";
-    m.innerHTML =
-      `<div class="wsconfirmmsg">Delete note? It moves to the archive.</div>` +
-      `<button type="button" data-wconfirm="cancel">Cancel</button>` +
-      `<button type="button" data-wconfirm="ok" class="danger">Delete</button>`;
     const panel = root("wspanel");
-    if (panel) panel.appendChild(m);
     const tgt = anchor || null;
-    const r = tgt && tgt.getBoundingClientRect
-      ? tgt.getBoundingClientRect() : { bottom: 0, left: 0 };
-    const pr = panel && panel.getBoundingClientRect
-      ? panel.getBoundingClientRect() : { top: 0, left: 0, width: 400 };
-    m.style.top = (r.bottom - pr.top + 4) + "px";
-    m.style.left = Math.max(8, Math.min(r.left - pr.left - 40, pr.width - 190)) + "px";
-    wsMenuEl = m;
-    m.addEventListener("click", async ev => {
-      const btn = ev.target.closest && ev.target.closest("[data-wconfirm]");
-      if (!btn) return;
-      closeWsMenu();
-      if (btn.dataset.wconfirm === "ok") await wsDeleteNote(noteId);
+    popMenu.open({
+      panel,
+      anchor: tgt,
+      offset: 40,
+      className: "popmenu wsconfirm",
+      html:
+        `<div class="wsconfirmmsg">Delete note? It moves to the archive.</div>` +
+        `<button type="button" data-wconfirm="cancel">Cancel</button>` +
+        `<button type="button" data-wconfirm="ok" class="danger">Delete</button>`,
+      onClick: async ev => {
+        const btn = ev.target.closest && ev.target.closest("[data-wconfirm]");
+        if (!btn) return;
+        closeWsMenu();
+        if (btn.dataset.wconfirm === "ok") await wsDeleteNote(noteId);
+      },
     });
   }
 
@@ -1280,31 +1280,29 @@ export function createNotesFeature(deps){
   }
 
   function closeWsMenu(){
-    if (wsMenuEl){ wsMenuEl.remove(); wsMenuEl = null; }
+    popMenu.close();
   }
 
   function openSectionMenu(btn){
-    closeWsMenu();
     const secId = btn.closest(".wssec").dataset.sec;
-    const m = doc.createElement("div");
-    m.className = "wsmenu";
-    m.innerHTML =
-      `<button data-mi="add">${icons.ICON_PLUS || ""}<span>Add section below</span></button>` +
-      `<button data-mi="edit">${icons.ICON_PENCIL || ""}<span>Edit</span></button>` +
-      `<button data-mi="up">${icons.ICON_MOVE_UP || ""}<span>Move up</span></button>` +
-      `<button data-mi="down">${icons.ICON_MOVE_DOWN || ""}<span>Move down</span></button>` +
-      `<div class="sep"></div>` +
-      `<button data-mi="del" class="danger">${icons.ICON_TRASH || ""}<span>Delete section</span></button>`;
     const panel = root("wspanel");
-    if (panel) panel.appendChild(m);
-    const r = btn.getBoundingClientRect(), pr = panel ? panel.getBoundingClientRect() : { top: 0, left: 0, width: 400 };
-    m.style.top = (r.bottom - pr.top + 4) + "px";
-    m.style.left = Math.max(8, Math.min(r.left - pr.left - 150, pr.width - 190)) + "px";
-    wsMenuEl = m;
-    m.addEventListener("click", async ev => {
-      const mi = ev.target.closest("[data-mi]"); if (!mi) return;
-      closeWsMenu();
-      await sectionMenuAction(mi.dataset.mi, secId);
+    popMenu.open({
+      panel,
+      anchor: btn,
+      offset: 150,
+      className: "popmenu",
+      html:
+        menuButtonHTML({ attrs: 'data-mi="add"', label: "Add section below", icon: icons.ICON_PLUS || "" }) +
+        menuButtonHTML({ attrs: 'data-mi="edit"', label: "Edit", icon: icons.ICON_PENCIL || "" }) +
+        menuButtonHTML({ attrs: 'data-mi="up"', label: "Move up", icon: icons.ICON_MOVE_UP || "" }) +
+        menuButtonHTML({ attrs: 'data-mi="down"', label: "Move down", icon: icons.ICON_MOVE_DOWN || "" }) +
+        menuSepHTML() +
+        menuButtonHTML({ attrs: 'data-mi="del"', label: "Delete section", icon: icons.ICON_TRASH || "", danger: true }),
+      onClick: async ev => {
+        const mi = ev.target.closest("[data-mi]"); if (!mi) return;
+        closeWsMenu();
+        await sectionMenuAction(mi.dataset.mi, secId);
+      },
     });
   }
 
@@ -1753,7 +1751,7 @@ export function createNotesFeature(deps){
   }
 
   function onDocClick(e){
-    if (wsMenuEl && e.target && !e.target.closest(".wsmenu") && !e.target.closest("[data-secmenu]"))
+    if (popMenu.shouldCloseForClick(e.target, { exclude: "[data-secmenu]" }))
       closeWsMenu();
   }
 

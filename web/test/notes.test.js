@@ -50,6 +50,7 @@ const notesSrc = readFileSync(join(__dirname, "../js/notes.js"), "utf8");
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
 const tokensSrc = readFileSync(join(__dirname, "../css/tokens.css"), "utf8");
 const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
+const menuCssSrc = readFileSync(join(__dirname, "../css/menu.css"), "utf8");
 const baseCssSrc = readFileSync(join(__dirname, "../css/base.css"), "utf8");
 const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
 
@@ -106,11 +107,14 @@ test("--danger token is defined in light and dark; distinct from --attn", () => 
   assert.notEqual(lightAttn[1].trim(), lightDanger[1].trim());
 });
 
-test(".wsmenu button.danger uses --danger, not --attn (covers Delete section)", () => {
-  /* Section menu data-mi=del uses class="danger"; note delete is on the card. */
-  assert.match(notesSrc, /data-mi="del"[^>]*class="danger"|class="danger"[^>]*data-mi="del"/);
-  assert.match(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
-  assert.doesNotMatch(notesCssSrc, /\.wsmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
+test(".popmenu button.danger uses --danger, not --attn (covers Delete section)", () => {
+  /* Section menu data-mi=del uses class="danger"; note delete is on the card.
+     P5: generic .popmenu rules live in menu.css; del is built via menuButtonHTML
+     (attrs + danger: true) rather than an inline class="danger" string. */
+  assert.match(notesSrc, /data-mi="del"/);
+  assert.match(notesSrc, /danger:\s*true/);
+  assert.match(menuCssSrc, /\.popmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--danger\)/);
+  assert.doesNotMatch(menuCssSrc, /\.popmenu\s+button\.danger\s*\{[^}]*color:\s*var\(--attn\)/);
 });
 
 test("card delete action uses --danger (not --attn)", () => {
@@ -1374,7 +1378,7 @@ test("delete note success clears editor", async () => {
   });
   await settle();
   assert.equal(apiLog.some(x => x.method === "DELETE"), false, "await confirm");
-  const confirm = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
+  const confirm = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
   assert.ok(confirm);
   const ok = el("button", { dataset: { wconfirm: "ok" } });
   ok.dataset.wconfirm = "ok";
@@ -1897,7 +1901,7 @@ test("card delete opens archive-aware confirm; cancel skips DELETE", async () =>
     false,
     "delete must not fire before confirm",
   );
-  const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
+  const menu = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
   assert.ok(menu, "confirm popover opens");
   assert.match(menu.innerHTML, /archive/i);
   assert.match(menu.innerHTML, /data-wconfirm="cancel"/);
@@ -1949,7 +1953,7 @@ test("card delete confirm issues DELETE for that note id", async () => {
   });
   await settle();
 
-  const menu = roots.wspanel.children.find(c => (c.className || "").includes("wsmenu"));
+  const menu = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
   assert.ok(menu);
   const ok = el("button", { dataset: { wconfirm: "ok" } });
   ok.dataset.wconfirm = "ok";
