@@ -523,6 +523,51 @@ func TestLastRoleAndDelivered(t *testing.T) {
 	}
 }
 
+// NewestTurnTime dates the newest parsed turn from the CLI's own stamp, in
+// memory, with no extra file read — the poller's freshness gate for the map's
+// "Ready" prominence (P5 review). Zero means "cannot be dated", never "old".
+func TestNewestTurnTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "when.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tl := &Tailer{Path: path}
+	if ts, ok := tl.NewestTurnTime(); ok || !ts.IsZero() {
+		t.Fatalf("empty tailer: got %v/%v, want zero/false", ts, ok)
+	}
+
+	want, err := time.Parse(time.RFC3339Nano, "2026-08-10T09:15:00.500Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"type":"assistant","timestamp":"2026-08-10T09:15:00.500Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n")
+	tl.Poll()
+	ts, ok := tl.NewestTurnTime()
+	if !ok || !ts.Equal(want) {
+		t.Fatalf("after assistant turn: got %v/%v, want %v/true", ts, ok, want)
+	}
+
+	// An undated turn must not pretend to be "now" and must not erase the
+	// last real stamp: the freshness gate reads absence as unknown.
+	f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"no stamp"}]}}` + "\n")
+	tl.Poll()
+	if ts, ok := tl.NewestTurnTime(); !ok || !ts.Equal(want) {
+		t.Fatalf("after undated turn: got %v/%v, want the previous stamp", ts, ok)
+	}
+
+	// Rotation resets it with the rest of the tailer state, so a /clear-ed log
+	// cannot date a fresh chat by its pre-clear turn.
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl.Poll()
+	if ts, ok := tl.NewestTurnTime(); ok || !ts.IsZero() {
+		t.Fatalf("after rotation: got %v/%v, want zero/false", ts, ok)
+	}
+}
+
 // Owing is the transcript half of the quiet-pane stall backstop (P1b): the
 // agent owes the next output when the newest recognized record is a human
 // prompt or a tool result. Unknown record types leave it unchanged.

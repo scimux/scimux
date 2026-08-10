@@ -704,6 +704,12 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 			return "", nil
 		}
 	}
+	// Delivery age decides prominence (P5 review): fixtures stamp their turns
+	// with real RFC3339 times so each subtest fails for its own reason and not
+	// because an unparseable "t1" left the delivery undated.
+	stampAgo := func(d time.Duration) string {
+		return time.Now().Add(-d).UTC().Format(time.RFC3339Nano)
+	}
 	mk := func(t *testing.T, path string, extra func(*app, *Node)) *app {
 		t.Helper()
 		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
@@ -729,8 +735,8 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 	t.Run("finished_when_quiet_delivered_no_pending", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
-			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(30*time.Second)+`","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
 		a := mk(t, path, nil)
 		a.poll()
 		if got := a.live["cl1"]; got != "quiet" {
@@ -744,10 +750,42 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 		}
 	})
 
+	t.Run("not_finished_when_delivery_is_old", func(t *testing.T) {
+		// Prominence is for a turn you might have just missed. An idle live
+		// session that answered hours ago is still honestly idle, but it must
+		// not hold a top-tier slot and a pulsing ring forever (P5 review).
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"`+stampAgo(3*time.Hour)+`","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(2*time.Hour)+`","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		a := mk(t, path, nil)
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Fatalf("attention = %q, want none", got)
+		}
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone = true, want false once the delivery is older than turnDoneWindow")
+		}
+	})
+
+	t.Run("not_finished_when_delivery_is_undated", func(t *testing.T) {
+		// No parseable timestamp = no provable freshness. Claim nothing rather
+		// than claim "just finished" (same rule as the ACP seam).
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		a := mk(t, path, nil)
+		a.poll()
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone = true, want false when the delivery cannot be dated")
+		}
+	})
+
 	t.Run("not_finished_while_owing", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"hi"}}`)
 		a := mk(t, path, nil)
 		// Keep lastChg recent enough that the owing stall has not fired inspect.
 		a.lastChg["cl1"] = time.Now().Add(-10 * time.Second)
@@ -760,8 +798,8 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 	t.Run("not_finished_with_pending_tool_call", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run it"}}`,
-			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"run it"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(30*time.Second)+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`)
 		a := mk(t, path, nil)
 		a.poll()
 		// Pending Bash may classify as attention via WaitingOn; either way not finished.
@@ -773,8 +811,8 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 	t.Run("not_finished_when_attention_classified", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
-			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"},{"type":"tool_use","id":"tu1","name":"AskUserQuestion","input":{}}]}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(30*time.Second)+`","message":{"role":"assistant","content":[{"type":"text","text":"done"},{"type":"tool_use","id":"tu1","name":"AskUserQuestion","input":{}}]}}`)
 		a := mk(t, path, nil)
 		a.poll()
 		if a.attn["cl1"] == "" {
@@ -796,8 +834,8 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 		dialogPane := "Do you want to proceed?\n  1. Yes\n  2. No\n  Esc to cancel"
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run sweep"}}`,
-			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"about to run it"}]}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"run sweep"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(30*time.Second)+`","message":{"role":"assistant","content":[{"type":"text","text":"about to run it"}]}}`)
 		a := mk(t, path, func(a *app, n *Node) {
 			a.prevCap["cl1"] = dialogPane // unchanged capture = quiet pane
 			a.server = tmuxsession.NewServerWithRunner("testsock", quietRunner(dialogPane))
@@ -814,8 +852,8 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 	t.Run("not_finished_when_ended", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
-			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(30*time.Second)+`","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
 		a := mk(t, path, func(a *app, n *Node) {
 			n.EndedAt = "2026-01-01T00:00:00Z"
 		})
@@ -828,8 +866,8 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 	t.Run("cleared_when_active", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
-			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
-			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+			`{"type":"user","timestamp":"`+stampAgo(90*time.Second)+`","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"`+stampAgo(30*time.Second)+`","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
 		a := mk(t, path, nil)
 		a.turnDone["cl1"] = true      // stale flag from a previous quiet tick
 		a.lastChg["cl1"] = time.Now() // pane just changed → active
