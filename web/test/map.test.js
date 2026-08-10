@@ -3,7 +3,7 @@
  * forkKind, laneColumnOrder, toggleMapSelection, or stop-chain algorithms. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
@@ -2967,12 +2967,17 @@ function p4Node(id, createdAt, title){
 }
 
 /** Wall-map harness with #mapscroll for P4 scrollTop assertions.
- *  P5 also injects #maprail (sibling of #maptoolbar, never inside #mapwrap). */
+ *  P5 injects #maprail; P6 replaces it with #mappill (sibling of #maptoolbar,
+ *  never inside #mapwrap). Both roots accepted during the red→green window. */
 function createWallScrollFeature(nodes, opts = {}){
   const mapwrap = fakeEl("mapwrap");
   const mapscroll = fakeEl("mapscroll");
   const maptoolbar = fakeEl("maptoolbar");
   const maprail = opts.maprail || fakeEl("maprail");
+  const mappill = opts.mappill || fakeEl("mappill");
+  /* Viewport geometry for attentionPill / positionMapPill — not real layout. */
+  if (opts.clientHeight != null) mapscroll.clientHeight = opts.clientHeight;
+  if (opts.scrollTop != null) mapscroll.scrollTop = opts.scrollTop;
   const body = {
     classList: {
       _set: new Set(["map-full"]),
@@ -2992,7 +2997,7 @@ function createWallScrollFeature(nodes, opts = {}){
   for (const n of nodes) byId[n.id] = n;
   const feature = createMapFeature({
     roots: {
-      mapwrap, mapscroll, maptoolbar, maprail,
+      mapwrap, mapscroll, maptoolbar, maprail, mappill,
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
       mapfullbtn: fakeEl("mapfullbtn"),
     },
@@ -3013,10 +3018,15 @@ function createWallScrollFeature(nodes, opts = {}){
     }),
     laneColor: () => "#00f",
     agentLogo: () => "",
+    selectNode: opts.selectNode,
+    loadChatHistory: opts.loadChatHistory,
+    jumpChatToNow: opts.jumpChatToNow,
+    setMapDock: opts.setMapDock,
+    setMapFull: opts.setMapFull,
   });
   feature.bind();
   feature.restoreChrome();
-  return { feature, mapwrap, mapscroll, maptoolbar, maprail, body, storage, nodes, byId };
+  return { feature, mapwrap, mapscroll, maptoolbar, maprail, mappill, body, storage, nodes, byId };
 }
 
 function selectWallStop(mapwrap, { nid, skey, stop }){
@@ -3898,5 +3908,378 @@ test("the dock's content column is one column — the approval row included", ()
   }
   for (const id of ["#gauge", "#chathead"]){
     assert.ok(!ids.includes(id), `${id} is chrome and must still span`);
+  }
+});
+
+/* ---------- P6: ring is the control; pill replaces the rail ---------- */
+
+/** Pull the hit-circle tag out of attentionStationSVG (or wall/stack markup). */
+function attnHitCircle(svg){
+  const m = String(svg || "").match(/<circle\b[^>]*class="[^"]*attnstation-hit[^"]*"[^>]*\/?>|<circle\b[^>]*class='[^']*attnstation-hit[^']*'[^>]*\/?>/);
+  if (m) return m[0];
+  // Attribute order may put class after other attrs.
+  const all = [...String(svg || "").matchAll(/<circle\b[^>]*>/g)].map(x => x[0]);
+  return all.find(t => /attnstation-hit/.test(t)) || "";
+}
+
+function circleAttr(tag, name){
+  const m = tag.match(new RegExp(`\\b${name}="([^"]*)"`));
+  return m ? m[1] : null;
+}
+
+test("P6: attentionPill pure — nothing asking / all on-screen → show false", () => {
+  const fn = mapExports.attentionPill;
+  assert.equal(typeof fn, "function", "attentionPill is exported");
+
+  const empty = fn({ ticks: [], scrollTop: 0, viewportH: 200, contentH: 800 });
+  assert.equal(empty.show, false);
+  assert.equal(empty.count, 0);
+
+  const none = fn({ ticks: null, scrollTop: 0, viewportH: 200, contentH: 800 });
+  assert.equal(none.show, false);
+  assert.equal(none.count, 0);
+
+  // One tick at the vertical centre of the viewport — on-screen.
+  // y = frac * contentH = 0.25 * 800 = 200; viewport [0, 400] contains 200.
+  const onScreen = fn({
+    ticks: [{ nodeId: "a", stopKey: "a#0", frac: 0.25, kind: "waiting" }],
+    scrollTop: 0, viewportH: 400, contentH: 800,
+  });
+  assert.equal(onScreen.show, false, "on-screen tick does not raise the pill");
+  assert.equal(onScreen.count, 0);
+});
+
+test("P6: attentionPill pure — one below, one above, both (nearest below wins)", () => {
+  const fn = mapExports.attentionPill;
+  // contentH=1000, viewport [200, 500] (scrollTop=200, vh=300).
+  // below: frac 0.8 → y=800 (>500); above: frac 0.05 → y=50 (<200).
+  const below = fn({
+    ticks: [{ nodeId: "b", stopKey: "b#0", frac: 0.8, kind: "waiting" }],
+    scrollTop: 200, viewportH: 300, contentH: 1000,
+  });
+  assert.equal(below.show, true);
+  assert.equal(below.count, 1);
+  assert.equal(below.dir, "down");
+  assert.equal(below.nodeId, "b");
+  assert.equal(below.stopKey, "b#0");
+  assert.match(below.label, /1 waiting/);
+
+  const above = fn({
+    ticks: [{ nodeId: "a", stopKey: "a#0", frac: 0.05, kind: "waiting" }],
+    scrollTop: 200, viewportH: 300, contentH: 1000,
+  });
+  assert.equal(above.show, true);
+  assert.equal(above.count, 1);
+  assert.equal(above.dir, "up");
+  assert.equal(above.nodeId, "a");
+  assert.match(above.label, /1 waiting/);
+
+  // Both directions: prefer nearest below even if an above tick is closer.
+  // above at y=180 (20px above top), below at y=700 (200px below bottom).
+  const both = fn({
+    ticks: [
+      { nodeId: "up", stopKey: "up#0", frac: 0.18, kind: "waiting" },
+      { nodeId: "dn", stopKey: "dn#0", frac: 0.70, kind: "waiting" },
+    ],
+    scrollTop: 200, viewportH: 300, contentH: 1000,
+  });
+  assert.equal(both.show, true);
+  assert.equal(both.count, 2);
+  assert.equal(both.dir, "down", "prefer below when both directions have off-screen ticks");
+  assert.equal(both.nodeId, "dn");
+  assert.match(both.label, /2 waiting/);
+});
+
+test("P6: attentionPill pure — finished-only → ready; mixed → waiting; arrows", () => {
+  const fn = mapExports.attentionPill;
+  // Two finished ticks below the fold.
+  const ready = fn({
+    ticks: [
+      { nodeId: "r1", stopKey: "r1#0", frac: 0.7, kind: "ready" },
+      { nodeId: "r2", stopKey: "r2#0", frac: 0.9, kind: "ready" },
+    ],
+    scrollTop: 0, viewportH: 200, contentH: 1000,
+  });
+  assert.equal(ready.show, true);
+  assert.equal(ready.count, 2);
+  assert.equal(ready.dir, "down");
+  assert.match(ready.label, /2 ready/);
+  assert.doesNotMatch(ready.label, /waiting/);
+
+  // Mixed hard + finished off-screen → "waiting" wins the word.
+  const mixed = fn({
+    ticks: [
+      { nodeId: "w", stopKey: "w#0", frac: 0.8, kind: "waiting" },
+      { nodeId: "r", stopKey: "r#0", frac: 0.9, kind: "ready" },
+    ],
+    scrollTop: 0, viewportH: 200, contentH: 1000,
+  });
+  assert.equal(mixed.count, 2);
+  assert.match(mixed.label, /2 waiting/);
+  assert.doesNotMatch(mixed.label, /ready/);
+
+  // Nearest of two below is the smaller frac (closer to the viewport bottom).
+  const nearer = fn({
+    ticks: [
+      { nodeId: "far", stopKey: "far#0", frac: 0.95, kind: "waiting" },
+      { nodeId: "near", stopKey: "near#0", frac: 0.6, kind: "ready" },
+    ],
+    scrollTop: 0, viewportH: 200, contentH: 1000,
+  });
+  assert.equal(nearer.nodeId, "near");
+  assert.equal(nearer.dir, "down");
+
+  // Nearest of two above is the larger frac (closer to the viewport top).
+  const nearerUp = fn({
+    ticks: [
+      { nodeId: "farUp", stopKey: "farUp#0", frac: 0.02, kind: "waiting" },
+      { nodeId: "nearUp", stopKey: "nearUp#0", frac: 0.15, kind: "waiting" },
+    ],
+    scrollTop: 300, viewportH: 200, contentH: 1000,
+  });
+  assert.equal(nearerUp.dir, "up");
+  assert.equal(nearerUp.nodeId, "nearUp");
+});
+
+test("P6: railTicks folds finished heads and reports kind", () => {
+  /* P5's rail only ticked attention heads. P6's pill counts hard attention
+     AND turn_done, so railTicks must emit both with a kind field. */
+  const fn = mapExports.railTicks;
+  assert.equal(typeof fn, "function");
+  const hard = {
+    id: "h", title: "Hard", attention: "approval", turn_done: false,
+    created_at: "t0", stops: [], live: "quiet", lane_id: "L",
+  };
+  const finished = {
+    id: "f", title: "Fin", attention: "", turn_done: true,
+    created_at: "t1", stops: [], live: "quiet", lane_id: "L",
+  };
+  const quiet = {
+    id: "q", title: "Quiet", attention: "", turn_done: false,
+    created_at: "t2", stops: [], live: "quiet", lane_id: "L",
+  };
+  const rows = [
+    { n: hard, i: 0, time: "t0", head: true },
+    { n: finished, i: 0, time: "t1", head: true },
+    { n: quiet, i: 0, time: "t2", head: true },
+  ];
+  const ticks = fn({ rows, rowHeight: 76, offset: 16 });
+  assert.equal(ticks.length, 2, "hard + finished heads only");
+  assert.deepEqual(ticks.map(t => t.nodeId), ["h", "f"]);
+  assert.equal(ticks[0].kind, "waiting");
+  assert.equal(ticks[1].kind, "ready");
+  assert.ok(typeof ticks[0].frac === "number");
+  assert.ok(typeof ticks[0].stopKey === "string");
+});
+
+test("P6: attentionStationSVG hit circle r≥22, transparent, hit-testable, after ring", () => {
+  /* Decorative ring is r=9.5 (~19px). HIG wants ≥44pt; r=22 → 44px diameter.
+     fill="none" is not hit-testable — must be transparent (or pointer-events=all). */
+  const svg = attentionStationSVG(10, 20, 0.5, undefined, "node-a");
+  const hit = attnHitCircle(svg);
+  assert.ok(hit, "hit circle with class attnstation-hit is present when nodeId is given");
+  const r = Number(circleAttr(hit, "r"));
+  assert.ok(r >= 22, `hit radius ${r} must be ≥ 22 (44px target)`);
+  const fill = circleAttr(hit, "fill");
+  assert.ok(fill === "transparent" || /pointer-events\s*=\s*["']?(all|auto)/.test(hit),
+    "hit-testable: fill=transparent or pointer-events all/auto");
+  assert.notEqual(fill, "none", "fill=none is not hit-testable");
+  assert.match(hit, /data-jump="node-a"/, "hit carries routing data-jump");
+
+  // Painted after the ring so it sits on top in SVG paint order.
+  const ringAt = svg.indexOf("attnstation-ring");
+  const hitAt = svg.indexOf("attnstation-hit");
+  assert.ok(ringAt >= 0 && hitAt > ringAt, "hit circle is painted after the ring");
+
+  // No nodeId → no hit target (pure geometry callers stay decoration-only).
+  const bare = attentionStationSVG(1, 2, 1);
+  assert.equal(attnHitCircle(bare), "", "no hit without a node id");
+});
+
+test("P6: wall and stack SVG both carry the hit circle on asking/finished stations", () => {
+  const ask = p4Node("ask", "2026-01-02T00:00:00Z", "Ask");
+  ask.attention = "approval";
+  const fin = p4Node("fin", "2026-01-01T00:00:00Z", "Fin");
+  fin.turn_done = true;
+  const quiet = p4Node("q", "2026-01-03T00:00:00Z", "Quiet");
+
+  // Wall (map-full desktop).
+  const wall = createWallScrollFeature([ask, fin, quiet]);
+  wall.feature.render();
+  const wallHits = [...wall.mapwrap.innerHTML.matchAll(/attnstation-hit/g)];
+  assert.equal(wallHits.length, 2, "wall: hit on asking + finished only");
+  assert.match(wall.mapwrap.innerHTML, /attnstation-hit[^>]*r="22"|r="22"[^>]*attnstation-hit/);
+  assert.match(wall.mapwrap.innerHTML, /data-jump="ask"/);
+  assert.match(wall.mapwrap.innerHTML, /data-jump="fin"/);
+  assert.doesNotMatch(wall.mapwrap.innerHTML, /data-jump="q"/);
+  wall.feature.destroy();
+
+  // Stack (desktop column map — not full).
+  const mapwrap = fakeEl("mapwrap");
+  const body = {
+    classList: {
+      _set: new Set(),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+      remove(name){ this._set.delete(name); },
+    },
+  };
+  const byId = { ask, fin, q: quiet };
+  const stack = createMapFeature({
+    roots: {
+      mapwrap, mapscroll: fakeEl("mapscroll"), maptoolbar: fakeEl("tb"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
+    },
+    document: { body, querySelector: () => null },
+    storage: memoryStorage({
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+    }),
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [ask, fin, quiet],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f", name: () => "Lane", byId,
+    }),
+    laneColor: () => "#00f",
+    agentLogo: () => "",
+  });
+  stack.bind();
+  stack.restoreChrome();
+  stack.render();
+  assert.match(mapwrap.innerHTML, /attnstation-hit/, "stack map also draws the hit circle");
+  assert.match(mapwrap.innerHTML, /data-jump="ask"/);
+  stack.destroy();
+});
+
+test("P6: tapping the ring reaches the same open path as toolbar [data-jump]", () => {
+  /* Destination: selectNode(id,"jump") + jumpChatToNow (head) / loadChatHistory
+     (earlier) + setMapDock(true) in full wall. Assert on injected calls, not
+     "a function was called". */
+  const head = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  head.attention = "approval";
+  const calls = [];
+  const { feature, mapwrap, body, storage } = createWallScrollFeature([head], {
+    selectNode: (id, why) => calls.push(["select", id, why]),
+    loadChatHistory: (id, at) => calls.push(["history", id, at]),
+    jumpChatToNow: () => calls.push(["now"]),
+  });
+  feature.render();
+  assert.match(mapwrap.innerHTML, /attnstation-hit/, "ring hit is in the wall SVG");
+
+  firstListener(mapwrap, "click")({
+    target: {
+      dataset: { jump: "a" },
+      classList: { contains: n => n === "attnstation-hit" },
+      closest(selector){
+        if (selector === ".attnstation-hit" || selector === "[data-jump]"
+          || selector === "circle.attnstation-hit"
+          || selector === ".attnstation-hit[data-jump]") return this;
+        return null;
+      },
+    },
+  });
+  assert.deepEqual(calls, [
+    ["select", "a", "jump"],
+    ["now"],
+  ], "head ring: selectNode(id, jump) then jumpChatToNow");
+  assert.equal(body.classList.contains("map-dock"), true,
+    "full wall ring opens docked chat (setMapDock)");
+  assert.equal(storage.getItem(mapExports.MAP_DOCK_KEY || "scimux-mapdock"), "1");
+  assert.equal(feature.isFull(), true, "mapFull stays true when docking from the ring");
+  feature.destroy();
+});
+
+test("P6: ring tap wins over the generic [data-nid] row branch", () => {
+  /* onMapWrapClick must handle the hit circle before [data-nid], so a tap on
+     the ring opens chat rather than only selecting the row. */
+  const head = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  head.attention = "question";
+  const calls = [];
+  const { feature, mapwrap, maptoolbar } = createWallScrollFeature([head], {
+    selectNode: (id, why) => calls.push(["select", id, why]),
+    jumpChatToNow: () => calls.push(["now"]),
+  });
+  feature.render();
+
+  // Target that would match BOTH .attnstation-hit and (if ordered wrong) a
+  // parent [data-nid] — the hit branch must fire the open path.
+  firstListener(mapwrap, "click")({
+    target: {
+      dataset: { jump: "a", nid: "a", skey: "a#0", stop: "" },
+      closest(selector){
+        if (selector === ".attnstation-hit" || selector === "[data-jump]") return this;
+        if (selector === "[data-nid]") return this;
+        return null;
+      },
+    },
+  });
+  assert.ok(calls.some(c => c[0] === "select" && c[2] === "jump"),
+    "ring path uses selectNode(..., 'jump'), not a bare row select");
+  assert.ok(calls.some(c => c[0] === "now"), "and jumps chat to now");
+  // Toolbar "Open chat" would also dock; ring must not stop at mere selection.
+  void maptoolbar;
+  feature.destroy();
+});
+
+test("P6: CSS #mappill hide-global / reveal-scoped; min-height ≥44; safe-area", () => {
+  /* §0: assert on extracted declarations — not class names in an HTML string. */
+  const base = mapCssSrc.match(/(?:^|\n)\s*#mappill\s*\{([^}]+)\}/);
+  assert.ok(base, "#mappill base rule exists in map.css");
+  assert.match(base[1], /display:\s*none/,
+    "base #mappill is display:none (not focusable off-screen)");
+  const mh = base[1].match(/min-height:\s*([0-9.]+)px/);
+  assert.ok(mh, "min-height declared in px");
+  assert.ok(Number(mh[1]) >= 44, `min-height ${mh[1]}px must be ≥ 44 (HIG)`);
+  assert.match(base[1], /safe-area-inset-bottom/,
+    "bottom offset uses env(safe-area-inset-bottom)");
+
+  assert.match(mapCssSrc, /body\.map-full\s+#mappill\.on\s*\{([^}]+)\}/,
+    "body.map-full #mappill.on reveal rule present");
+  const reveal = mapCssSrc.match(/body\.map-full\s+#mappill\.on\s*\{([^}]+)\}/);
+  assert.ok(reveal);
+  assert.match(reveal[1], /display:\s*(block|flex)/,
+    "reveal shows the pill under map-full + .on");
+});
+
+test("P6: #mappill is outside #mapwrap; sibling of #maptoolbar", () => {
+  const html = readFileSync(join(__dirname, "../index.html"), "utf8");
+  assert.match(html, /id="mappill"/, "#mappill present in index.html");
+  assert.match(html, /id="maptoolbar"/);
+  assert.match(html, /id="mapwrap"/);
+  assert.doesNotMatch(html,
+    /id="mapwrap"[^>]*>[^<]*<[^>]*id="mappill"/,
+    "#mappill must not be a child of #mapwrap (poll-safe singleton)");
+  // Sibling after mapscroll, near the toolbar — never nested in the polled region.
+  assert.match(html,
+    /id="mapscroll"><div id="mapwrap"><\/div><\/div>[\s\S]*id="mappill"/,
+    "#mappill is a sibling after #mapscroll, not inside it");
+  // Prefer a real button so it is a control, not a bare labelled div.
+  assert.match(html, /<button[^>]*id="mappill"/, "#mappill is a <button>");
+});
+
+test("P6: standing guard — no maprail survives in production web sources", () => {
+  /* Like arc 1's .dock-peek test: the rail is gone, not renamed in place. */
+  const html = readFileSync(join(__dirname, "../index.html"), "utf8");
+  const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+  assert.doesNotMatch(html, /maprail/, "no maprail in index.html");
+  assert.doesNotMatch(mapCssSrc, /maprail/, "no maprail in map.css");
+  assert.doesNotMatch(mapSrc, /maprail/, "no maprail in map.js");
+  assert.doesNotMatch(appSrc, /maprail/, "no maprail in app.js");
+
+  // Broader: every production web file under web/js and web/css.
+  for (const dir of ["js", "css"]) {
+    const root = join(__dirname, "..", dir);
+    for (const name of readdirSync(root)) {
+      if (!/\.(js|css)$/.test(name)) continue;
+      const src = readFileSync(join(root, name), "utf8");
+      assert.doesNotMatch(src, /maprail/, `no maprail in web/${dir}/${name}`);
+    }
   }
 });
