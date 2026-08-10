@@ -134,6 +134,13 @@ type Node struct {
 	SessionID  string `json:"session_id,omitempty"` // claude: session uuid (minted by us); codex: thread id from thread/start; ACP: session id
 	Transcript string `json:"transcript,omitempty"`
 	Adopted    bool   `json:"adopted,omitempty"` // adopted tmux sessions are never killed by scimux
+	// AXScreenReader is true when scimux launched this Claude process with
+	// --ax-screen-reader. It is server-owned launch metadata: clients must not
+	// set it, adoption always leaves it false, and older store records that
+	// lack the field replay as false. It controls tmux menu-key translation
+	// only (choice+Enter for numbered/y/n dialogs); it must not affect
+	// liveness or transcript parsing.
+	AXScreenReader bool `json:"ax_screen_reader,omitempty"`
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
 	// transcript files, the original path — claude), "acp" (an Agent Client
 	// Protocol subprocess, pi/opencode/grok) or "codex" (codex's app-server protocol

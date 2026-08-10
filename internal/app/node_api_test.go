@@ -101,6 +101,9 @@ func TestPublicRouteCreateSuccessAndFork(t *testing.T) {
 	if created.ID == "" || created.LaneID != "lane-a" || created.Title != "Root" {
 		t.Fatalf("created node = %+v", created)
 	}
+	if !created.AXScreenReader {
+		t.Error("public create of owned Claude must return ax_screen_reader:true")
+	}
 	if len(a.nodes) != 1 || a.byID[created.ID] == nil {
 		t.Fatal("create did not publish the node in memory")
 	}
@@ -117,6 +120,9 @@ func TestPublicRouteCreateSuccessAndFork(t *testing.T) {
 	}
 	if child.Parent != created.ID || child.LaneID != "lane-a" {
 		t.Fatalf("fork parent/lane = %q/%q, want %q/lane-a", child.Parent, child.LaneID, created.ID)
+	}
+	if !child.AXScreenReader {
+		t.Error("public fork of owned Claude must return ax_screen_reader:true")
 	}
 }
 
@@ -180,6 +186,9 @@ func TestPublicRouteAdoptSessionTransportAndTranscript(t *testing.T) {
 	}
 	if n.ID != "live1" || !n.Adopted {
 		t.Fatalf("adopted node = %+v", n)
+	}
+	if n.AXScreenReader {
+		t.Error("adopted Claude must remain ax_screen_reader:false")
 	}
 	if a.byID["live1"] == nil {
 		t.Fatal("adopt did not register the node")
@@ -671,6 +680,12 @@ func TestHandleNewNodeResolvesClaudeModelID(t *testing.T) {
 	if !strings.Contains(launch, "--effort 'medium'") {
 		t.Errorf("launch did not pass effort: %q", launch)
 	}
+	if c := strings.Count(launch, "--ax-screen-reader"); c != 1 {
+		t.Errorf("resolved-model launch must contain exactly one --ax-screen-reader (got %d): %q", c, launch)
+	}
+	if !a.nodes[0].AXScreenReader {
+		t.Error("resolved-model Claude create must set AXScreenReader=true")
+	}
 }
 
 // A launch that dies before its interface is ready (the real-world case: a
@@ -714,28 +729,175 @@ func TestHandleNewNodeWrapsLaunchCommand(t *testing.T) {
 		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
 	}
 	wrapped := false
+	var launch string
 	f.mu.Lock()
 	for _, c := range f.calls {
-		if len(c) >= 3 && c[2] == "new-session" && strings.Contains(strings.Join(c, " "), launchFailSentinel) {
-			wrapped = true
+		if len(c) >= 3 && c[2] == "new-session" {
+			joined := strings.Join(c, " ")
+			launch = joined
+			if strings.Contains(joined, launchFailSentinel) {
+				wrapped = true
+			}
 		}
 	}
 	f.mu.Unlock()
 	if !wrapped {
 		t.Error("new-session command was not wrapped with launch diagnostics")
 	}
+	if c := strings.Count(launch, "--ax-screen-reader"); c != 1 {
+		t.Errorf("create launch must contain exactly one --ax-screen-reader (got %d): %q", c, launch)
+	}
+}
+
+// AXScreenReader ownership: owned Claude create/fork are true; adoption and
+// non-Claude creation stay false; client-forged values cannot invent AX
+// semantics; launch failure leaves nothing published or persisted.
+func TestAXScreenReaderOwnershipCreateForkAdopt(t *testing.T) {
+	// Successful create: returned and published node is AX-marked.
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	rec := newNode(a, `{"title":"Root","agent":"claude","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var created Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if !created.AXScreenReader {
+		t.Error("create response: want AXScreenReader=true for owned Claude")
+	}
+	if n := a.byID[created.ID]; n == nil || !n.AXScreenReader {
+		t.Error("published node: want AXScreenReader=true")
+	}
+	persisted := false
+	for _, r := range keyRecords(t, a.storePath) {
+		if r.Type == "node" && r.Node != nil && r.Node.ID == created.ID {
+			persisted = true
+			if !r.Node.AXScreenReader {
+				t.Error("store node record must have ax_screen_reader:true")
+			}
+		}
+	}
+	if !persisted {
+		t.Fatal("create did not persist a node record")
+	}
+
+	// Fork of a legacy parent (AX false) still launches with AX true.
+	fFork := &fakeTmux{}
+	aFork := newTestApp(t, fFork)
+	parent := &Node{
+		ID: "legacy-parent", Title: "Legacy", Prompt: "p", Agent: "claude",
+		Dir: aFork.home, SessionID: "legacy-sid", CreatedAt: "2026-01-01T00:00:00Z",
+		AXScreenReader: false,
+	}
+	aFork.nodes = []*Node{parent}
+	aFork.byID = map[string]*Node{parent.ID: parent}
+	rec = newNode(aFork, `{"title":"Child","agent":"claude","dir":"`+aFork.home+`","parent":"legacy-parent"}`)
+	if rec.Code != 200 {
+		t.Fatalf("fork: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var child Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &child); err != nil {
+		t.Fatal(err)
+	}
+	if !child.AXScreenReader {
+		t.Error("Claude fork of legacy parent must have AXScreenReader=true")
+	}
+	if parent.AXScreenReader {
+		t.Error("fork must not mutate the legacy parent's AXScreenReader")
+	}
+	var forkLaunch string
+	fFork.mu.Lock()
+	for _, c := range fFork.calls {
+		if len(c) >= 3 && c[2] == "new-session" {
+			forkLaunch = strings.Join(c, " ")
+		}
+	}
+	fFork.mu.Unlock()
+	if c := strings.Count(forkLaunch, "--ax-screen-reader"); c != 1 {
+		t.Errorf("fork launch must contain exactly one --ax-screen-reader (got %d): %q", c, forkLaunch)
+	}
+
+	// Adopted Claude remains false.
+	fAdopt := &fakeTmux{alive: map[string]bool{"adopt-me": true}}
+	aAdopt := newTestApp(t, fAdopt)
+	rec = adopt(aAdopt, `{"session":"adopt-me","agent":"claude","dir":`+strconv.Quote(aAdopt.home)+`}`)
+	if rec.Code != 200 {
+		t.Fatalf("adopt: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var adopted Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &adopted); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.AXScreenReader {
+		t.Error("adopted Claude must remain AXScreenReader=false")
+	}
+	if aAdopt.byID["adopt-me"].AXScreenReader {
+		t.Error("published adopted node must remain AXScreenReader=false")
+	}
+
+	// Adopted non-Claude tmux sessions remain false too; an unknown request
+	// field cannot opt a legacy pi pane into Claude AX key semantics.
+	fAdoptPi := &fakeTmux{alive: map[string]bool{"adopt-pi": true}}
+	aAdoptPi := newTestApp(t, fAdoptPi)
+	rec = adopt(aAdoptPi, `{"session":"adopt-pi","agent":"pi","dir":`+strconv.Quote(aAdoptPi.home)+`,"ax_screen_reader":true}`)
+	if rec.Code != 200 {
+		t.Fatalf("adopt pi: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var adoptedPi Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &adoptedPi); err != nil {
+		t.Fatal(err)
+	}
+	if adoptedPi.AXScreenReader {
+		t.Error("adopted non-Claude node must remain AXScreenReader=false")
+	}
+
+	// Non-Claude create (codex) stays false even if the client supplies true.
+	aCodex, _ := newCodexTestApp(t, "THREAD-AX", filepath.Join(t.TempDir(), "rollout.jsonl"))
+	rec = newNode(aCodex, `{"title":"C","prompt":"hi","agent":"codex","dir":`+strconv.Quote(aCodex.home)+`,"ax_screen_reader":true}`)
+	if rec.Code != 200 {
+		t.Fatalf("codex create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var codexNode Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &codexNode); err != nil {
+		t.Fatal(err)
+	}
+	if codexNode.AXScreenReader {
+		t.Error("codex create must not set AXScreenReader")
+	}
+
+	// Launch failure: no published node, no store record.
+	fFail := &fakeTmux{capture: "API Error: model gone\n" + launchFailSentinel + " (status 1)\n"}
+	aFail := newTestApp(t, fFail)
+	rec = newNode(aFail, `{"title":"Boom","agent":"claude","dir":`+strconv.Quote(aFail.home)+`,"ax_screen_reader":true}`)
+	if rec.Code == 200 {
+		t.Fatal("failed launch must not succeed")
+	}
+	if len(aFail.nodes) != 0 {
+		t.Fatalf("failed launch published %d nodes", len(aFail.nodes))
+	}
+	for _, r := range keyRecords(t, aFail.storePath) {
+		if r.Type == "node" {
+			t.Fatalf("failed launch must not persist a node, got AX=%v id=%q", r.Node.AXScreenReader, r.Node.ID)
+		}
+	}
 }
 
 // A create request supplies launch config only; identity, adoption, the ended
-// cap, and the linked transcript are server-owned and must never be trusted
-// from the body (adopted → an owned session is never killed; ended_at → a node
-// born closed; transcript → an arbitrary mirror bind with no pathClaimed check).
+// cap, the linked transcript, and AX launch mode are server-owned and must
+// never be trusted from the body (adopted → an owned session is never killed;
+// ended_at → a node born closed; transcript → an arbitrary mirror bind with no
+// pathClaimed check; ax_screen_reader → claim AX key semantics for an ordinary
+// pane). For a successful owned Claude launch the marker is still true — set
+// by launchNode, not by the scrubbed client claim.
 func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	body := `{"title":"Sneaky","agent":"claude","dir":"` + a.home + `",` +
 		`"id":"pwned","adopted":true,"ended_at":"2020-01-01T00:00:00Z",` +
-		`"transcript":"/etc/shadow","session_id":"forged","fork_kind":"s"}`
+		`"transcript":"/etc/shadow","session_id":"forged","fork_kind":"s",` +
+		`"ax_screen_reader":true}`
 	rec := newNode(a, body)
 	if rec.Code != 200 {
 		t.Fatalf("create: code = %d body %q", rec.Code, rec.Body.String())
@@ -762,6 +924,19 @@ func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
 	// A claude node's session id is minted server-side, never the forged value.
 	if n.SessionID == "forged" {
 		t.Error("session_id trusted from body")
+	}
+	// Client-supplied ax_screen_reader cannot manufacture AX semantics on its
+	// own; the authoritative launch still marks owned Claude true.
+	if !n.AXScreenReader {
+		t.Error("owned Claude launch must set AXScreenReader=true after scrubbing the client claim")
+	}
+	// Response body also reports the server-owned value.
+	var resp Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.AXScreenReader {
+		t.Error("create response must report ax_screen_reader:true for owned Claude")
 	}
 }
 

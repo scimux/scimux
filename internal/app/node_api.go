@@ -184,14 +184,16 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// Scrub every server-owned field before validation: a create request only
 	// supplies launch config (title/description/prompt/agent/model/effort/dir/
-	// parent/lane_id/rationale). Identity, adoption, liveness, and the linked
-	// transcript are all minted or managed by the server, and trusting them from
-	// the body would let a client be born "Closed" (ended_at), keep an owned
-	// tmux session alive forever (adopted → closeOwned never kills it), or bind
-	// the mirror to an arbitrary transcript path (no pathClaimed check on
-	// create, unlike handleAdopt). The UI never sends these; this closes the
-	// gap for any other client. ForkKind is recomputed in resolveNode.
-	n.ID, n.SessionID, n.Transcript, n.CreatedAt, n.EndedAt, n.ForkKind, n.Adopted = "", "", "", "", "", "", false
+	// parent/lane_id/rationale). Identity, adoption, liveness, the linked
+	// transcript, and AX launch mode are all minted or managed by the server,
+	// and trusting them from the body would let a client be born "Closed"
+	// (ended_at), keep an owned tmux session alive forever (adopted → closeOwned
+	// never kills it), bind the mirror to an arbitrary transcript path (no
+	// pathClaimed check on create, unlike handleAdopt), or claim AX key
+	// semantics for an ordinary external pane. The UI never sends these; this
+	// closes the gap for any other client. ForkKind is recomputed in
+	// resolveNode; AXScreenReader is set only at the owned-Claude launch seam.
+	n.ID, n.SessionID, n.Transcript, n.CreatedAt, n.EndedAt, n.ForkKind, n.Adopted, n.AXScreenReader = "", "", "", "", "", "", false, false
 	// Resolve and validate the launch configuration first: no request that
 	// fails validation (empty prompt, unknown parent, bad agent or dir) ever
 	// reaches createNode, and the transport decision reads the *resolved* agent

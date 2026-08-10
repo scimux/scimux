@@ -72,7 +72,12 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 func agentCommand(n *Node) (string, error) {
 	switch n.Agent {
 	case "claude":
-		parts := []string{"claude", "--session-id", n.SessionID, "--remote-control"}
+		// --ax-screen-reader is a hard default for every scimux-owned Claude
+		// launch: stable flat-text menus for supervision. Exactly one flag;
+		// placed before --remote-control so an empty title cannot treat the
+		// flag as that option's value. Pair with n.AXScreenReader=true at the
+		// launchNode seam so the stored marker matches the launched argv.
+		parts := []string{"claude", "--session-id", n.SessionID, "--ax-screen-reader", "--remote-control"}
 		if n.Title != "" {
 			parts = append(parts, shellQuote(n.Title))
 		}
@@ -494,12 +499,19 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 	// a bad flag): surface the agent's own error to the caller rather than
 	// persisting a node whose session has already vanished. Nothing is stored
 	// yet, so failing here leaves no phantom node — only the held-open session to
-	// reap.
+	// reap. AXScreenReader is set only after this gate so a failed launch never
+	// publishes or persists a misleading AX-marked node.
 	if reason, bad := a.awaitLaunch(n.ID); bad {
 		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
 			fmt.Fprintf(os.Stderr, "scimux: reaping failed launch %s: %v\n", n.ID, kerr)
 		}
 		return 502, fmt.Errorf("agent exited on launch: %s", reason)
+	}
+	// Owned Claude was launched with --ax-screen-reader (agentCommand). Record
+	// that fact on the same Node that is about to be persisted and published.
+	// Never set for adoption, structured transports, or non-Claude tmux.
+	if n.Agent == "claude" {
+		n.AXScreenReader = true
 	}
 	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
 		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {

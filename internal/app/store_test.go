@@ -693,6 +693,46 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// ax_screen_reader:true round-trips through the append-only store; a legacy
+// record that omits the field replays as false without migration or error.
+func TestLoadStoreAXScreenReaderRoundTripAndLegacy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	w := &app{byID: map[string]*Node{}, storePath: path}
+	ax := &Node{
+		ID: "ax-claude", Title: "AX", Prompt: "hi", Agent: "claude", Dir: "/tmp",
+		SessionID: "sid", CreatedAt: "2026-08-10T00:00:00Z", AXScreenReader: true,
+	}
+	if err := w.appendRecord(storeRecord{Type: "node", Node: ax}); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy pre-upgrade Claude record: no ax_screen_reader field at all.
+	legacyLine := `{"type":"node","node":{"id":"legacy","title":"Old","prompt":"p","agent":"claude","dir":"/tmp","created_at":"2026-01-01T00:00:00Z"}}` + "\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(legacyLine); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	r := &app{byID: map[string]*Node{}, storePath: path}
+	if err := r.loadStore(); err != nil {
+		t.Fatalf("loadStore: %v", err)
+	}
+	got := r.byID["ax-claude"]
+	if got == nil || !got.AXScreenReader {
+		t.Fatalf("ax node not round-tripped: %#v", got)
+	}
+	legacy := r.byID["legacy"]
+	if legacy == nil {
+		t.Fatal("legacy node missing after replay")
+	}
+	if legacy.AXScreenReader {
+		t.Error("legacy record without ax_screen_reader must replay false")
+	}
+}
+
 // The store holds prompts, working dirs, and pane-excerpt evidence; it must be
 // created owner-only rather than relying on the parent directory's mode
 // (finding 63).

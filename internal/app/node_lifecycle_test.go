@@ -521,7 +521,8 @@ func TestShellQuoteMatrix(t *testing.T) {
 }
 
 func TestAgentCommandClaudeMatrix(t *testing.T) {
-	// Exact Claude command with and without title/model/effort.
+	// Exact Claude command with and without title/model/effort. Every owned
+	// Claude launch carries exactly one --ax-screen-reader (screen-reader default).
 	full := &Node{
 		Agent: "claude", SessionID: "uuid-1", Title: "My Session",
 		Model: "opus", Effort: "high", Prompt: "hello world",
@@ -530,14 +531,17 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `claude --session-id uuid-1 --remote-control 'My Session' --model 'opus' --effort 'high' 'hello world'`
+	want := `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' --effort 'high' 'hello world'`
 	if got != want {
 		t.Errorf("full claude =\n  %s\nwant\n  %s", got, want)
+	}
+	if strings.Count(got, "--ax-screen-reader") != 1 {
+		t.Errorf("full claude must contain exactly one --ax-screen-reader, got %s", got)
 	}
 
 	// Title only (no model, no effort).
 	titleOnly := &Node{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"}
-	if got, _ := agentCommand(titleOnly); got != `claude --session-id u --remote-control 'T' 'p'` {
+	if got, _ := agentCommand(titleOnly); got != `claude --session-id u --ax-screen-reader --remote-control 'T' 'p'` {
 		t.Errorf("title-only claude = %s", got)
 	}
 
@@ -546,15 +550,15 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	// appears but with no following quoted title; characterize current argv).
 	modelOnly := &Node{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "p"}
 	got, _ = agentCommand(modelOnly)
-	// Current: parts = claude --session-id u --remote-control --model 'sonnet' 'p'
+	// Current: parts = claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' 'p'
 	// because empty Title skips the shellQuote(title) append only.
-	wantModel := `claude --session-id u --remote-control --model 'sonnet' 'p'`
+	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' 'p'`
 	if got != wantModel {
 		t.Errorf("model-only claude =\n  %s\nwant\n  %s", got, wantModel)
 	}
 
 	bare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(bare); got != `claude --session-id uuid-2 --remote-control 'p'` {
+	if got, _ := agentCommand(bare); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
 		t.Errorf("bare claude = %s", got)
 	}
 }
@@ -562,6 +566,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 	// Exact pi / opencode fallback commands; effort is not a supported flag on
 	// either harness via agentCommand (characterize: Effort is ignored).
+	// --ax-screen-reader is Claude-only and must never appear here.
 	piFull := &Node{Agent: "pi", Model: "mistral/devstral-latest", Effort: "high", Prompt: "hello"}
 	if got, err := agentCommand(piFull); err != nil {
 		t.Fatal(err)
@@ -570,6 +575,9 @@ func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 	}
 	if got, _ := agentCommand(piFull); strings.Contains(got, "--effort") {
 		t.Errorf("pi command must not pass --effort, got %s", got)
+	}
+	if got, _ := agentCommand(piFull); strings.Contains(got, "--ax-screen-reader") {
+		t.Errorf("pi command must not pass --ax-screen-reader, got %s", got)
 	}
 
 	piBare := &Node{Agent: "pi", Effort: "xhigh", Prompt: "p"}
@@ -584,6 +592,9 @@ func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 	if got, _ := agentCommand(ocFull); strings.Contains(got, "--effort") {
 		t.Errorf("opencode command must not pass --effort, got %s", got)
 	}
+	if got, _ := agentCommand(ocFull); strings.Contains(got, "--ax-screen-reader") {
+		t.Errorf("opencode command must not pass --ax-screen-reader, got %s", got)
+	}
 
 	ocBare := &Node{Agent: "opencode", Prompt: "p"}
 	if got, _ := agentCommand(ocBare); got != `opencode --prompt 'p'` {
@@ -594,6 +605,9 @@ func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 	gFull := &Node{Agent: "grok", Model: "grok-4.5", Effort: "low", Prompt: "hello"}
 	if got, _ := agentCommand(gFull); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
 		t.Errorf("grok+model+effort = %s", got)
+	}
+	if got, _ := agentCommand(gFull); strings.Contains(got, "--ax-screen-reader") {
+		t.Errorf("grok command must not pass --ax-screen-reader, got %s", got)
 	}
 	gBare := &Node{Agent: "grok", Prompt: "p"}
 	if got, _ := agentCommand(gBare); got != `grok 'p'` {
@@ -703,12 +717,15 @@ func TestAgentCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != `claude --session-id uuid-1 --remote-control 'My Session' --model 'opus' 'hello world'` {
+	if got != `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' 'hello world'` {
 		t.Errorf("claude cmd = %s", got)
+	}
+	if strings.Count(got, "--ax-screen-reader") != 1 {
+		t.Errorf("claude cmd must contain exactly one --ax-screen-reader, got %s", got)
 	}
 
 	claudeBare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(claudeBare); got != `claude --session-id uuid-2 --remote-control 'p'` {
+	if got, _ := agentCommand(claudeBare); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
 		t.Errorf("bare claude cmd = %s", got)
 	}
 
@@ -725,6 +742,9 @@ func TestAgentCommand(t *testing.T) {
 	if !strings.Contains(got, `'don'\''t run $(rm -rf /); echo "done"'`) {
 		t.Errorf("tricky prompt not quoted inertly: %s", got)
 	}
+	if strings.Count(got, "--ax-screen-reader") != 1 {
+		t.Errorf("tricky claude must still carry exactly one --ax-screen-reader, got %s", got)
+	}
 
 	if _, err := agentCommand(&Node{Agent: "gemini", Prompt: "p"}); err == nil {
 		t.Error("unknown agent must error")
@@ -737,13 +757,16 @@ func TestAgentCommand(t *testing.T) {
 func TestAgentCommandClaudeEffort(t *testing.T) {
 	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"}
 	got, _ := agentCommand(n)
-	if got != `claude --session-id u --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium' 'hi'` {
+	if got != `claude --session-id u --ax-screen-reader --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium' 'hi'` {
 		t.Errorf("claude+effort cmd = %s", got)
 	}
 	// No effort -> no --effort flag.
 	n2 := &Node{Agent: "claude", SessionID: "u", Prompt: "hi"}
 	if got, _ := agentCommand(n2); strings.Contains(got, "--effort") {
 		t.Errorf("effort-less claude cmd must omit --effort, got %s", got)
+	}
+	if got, _ := agentCommand(n2); got != `claude --session-id u --ax-screen-reader --remote-control 'hi'` {
+		t.Errorf("effort-less claude cmd = %s", got)
 	}
 }
 
@@ -991,5 +1014,110 @@ func TestResolveNodeTransport(t *testing.T) {
 	// Migration: a stored record with no Transport field is treated as tmux.
 	if got := (&Node{Agent: "pi"}).transport(); got != "tmux" {
 		t.Errorf("absent transport = %q, want tmux (back-compat migration)", got)
+	}
+}
+
+// Owned Claude launches always carry exactly one --ax-screen-reader, and the
+// durable node marker is set only after a successful launch (before persist).
+// Non-Claude agentCommand paths never receive the flag.
+func TestAgentCommandClaudeAXScreenReaderOnce(t *testing.T) {
+	variants := []*Node{
+		{Agent: "claude", SessionID: "uuid-1", Title: "My Session", Model: "opus", Effort: "high", Prompt: "hello world"},
+		{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"},
+		{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "p"},
+		{Agent: "claude", SessionID: "uuid-2", Prompt: "p"},
+		{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"},
+		{Agent: "claude", SessionID: "u", Prompt: `don't run $(rm -rf /); echo "done"`},
+	}
+	for _, n := range variants {
+		got, err := agentCommand(n)
+		if err != nil {
+			t.Fatalf("agentCommand(%+v): %v", n, err)
+		}
+		if c := strings.Count(got, "--ax-screen-reader"); c != 1 {
+			t.Errorf("claude cmd must contain exactly one --ax-screen-reader (got %d): %s", c, got)
+		}
+		// Flag is a fixed option, not a remote-control value: it always sits
+		// between --session-id and --remote-control.
+		if !strings.Contains(got, "--session-id "+n.SessionID+" --ax-screen-reader --remote-control") {
+			t.Errorf("flag placement wrong: %s", got)
+		}
+	}
+	for _, n := range []*Node{
+		{Agent: "pi", Prompt: "p"},
+		{Agent: "opencode", Prompt: "p"},
+		{Agent: "grok", Prompt: "p"},
+	} {
+		got, err := agentCommand(n)
+		if err != nil {
+			t.Fatalf("agentCommand(%s): %v", n.Agent, err)
+		}
+		if strings.Contains(got, "--ax-screen-reader") {
+			t.Errorf("%s command must not carry --ax-screen-reader: %s", n.Agent, got)
+		}
+	}
+}
+
+// launchNode is the authoritative seam: a successful owned Claude launch sets
+// AXScreenReader before persist, and the spawned command carries the flag.
+func TestLaunchNodeSetsAXScreenReaderForClaude(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	n := &Node{
+		ID: "ax-claude", Title: "AX", Prompt: "hi", Agent: "claude",
+		Dir: a.home, SessionID: "sess-ax", CreatedAt: "2026-08-10T00:00:00Z",
+	}
+	if status, err := a.launchNode(n, nil); err != nil || status != 0 {
+		t.Fatalf("launchNode: status=%d err=%v", status, err)
+	}
+	if !n.AXScreenReader {
+		t.Fatal("successful Claude launch must set AXScreenReader=true before return")
+	}
+	// Persist recorded the marker (authoritative owned-Claude <=> ax true).
+	var saw bool
+	for _, r := range keyRecords(t, a.storePath) {
+		if r.Type == "node" && r.Node != nil && r.Node.ID == "ax-claude" {
+			saw = true
+			if !r.Node.AXScreenReader {
+				t.Fatal("persisted Claude node must have ax_screen_reader:true")
+			}
+		}
+	}
+	if !saw {
+		t.Fatal("launchNode did not persist the node record")
+	}
+	// The tmux new-session command includes exactly one --ax-screen-reader.
+	var launch string
+	f.mu.Lock()
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "new-session" {
+			launch = strings.Join(c, " ")
+		}
+	}
+	f.mu.Unlock()
+	if c := strings.Count(launch, "--ax-screen-reader"); c != 1 {
+		t.Errorf("new-session argv must contain exactly one --ax-screen-reader (got %d): %q", c, launch)
+	}
+}
+
+// A launch that dies during awaitLaunch must not leave a published or persisted
+// AX-marked node (marker is set only after the await gate).
+func TestLaunchNodeFailureDoesNotMarkAX(t *testing.T) {
+	f := &fakeTmux{capture: "API Error: bad flag\n" + launchFailSentinel + " (status 1)\n"}
+	a := newTestApp(t, f)
+	n := &Node{
+		ID: "ax-fail", Title: "Fail", Prompt: "hi", Agent: "claude",
+		Dir: a.home, SessionID: "sess-fail", CreatedAt: "2026-08-10T00:00:00Z",
+	}
+	if _, err := a.launchNode(n, nil); err == nil {
+		t.Fatal("expected launch failure")
+	}
+	if n.AXScreenReader {
+		t.Error("failed launch must not set AXScreenReader on the in-memory node")
+	}
+	for _, r := range keyRecords(t, a.storePath) {
+		if r.Type == "node" {
+			t.Fatalf("failed launch must not persist a node record, got %+v", r.Node)
+		}
 	}
 }
