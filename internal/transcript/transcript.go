@@ -232,6 +232,12 @@ type Tailer struct {
 	// an assistant record (visible text or tool_use). Unknown record types leave
 	// it unchanged. Quiet-pane stall backstop input only (P1b) — never liveness.
 	owing bool
+	// lastRole is "" | "user" | "assistant": the role of the newest recognized
+	// agent-facing record. Empty before anything is recognized — that is the
+	// case Owing cannot distinguish (Owing is also false then). Assigned at
+	// every site that assigns owing. Map "turn finished" input only (P5) —
+	// never liveness.
+	lastRole string
 }
 
 // UsageBreakdown is the latest per-turn token split retained from a Claude
@@ -536,6 +542,16 @@ func (t *Tailer) Owing() bool {
 	return t.owing
 }
 
+// Delivered reports whether the newest recognized agent-facing record is an
+// assistant turn (text or tool_use / function_call). False before anything is
+// recognized and after a user/tool_result record. Sibling of Owing — not its
+// inverse: both are false on an empty tailer. Map turn-finished input only.
+func (t *Tailer) Delivered() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastRole == "assistant"
+}
+
 // notePending updates the pending-call set from one JSONL line and appends
 // ToolStamp entries for the mirror (V2-P2). Pending tracking and tool
 // stamping share one parse so join keys stay identical.
@@ -558,6 +574,9 @@ func (t *Tailer) notePending(line []byte) {
 		// Agent-facing record: user (prompt or tool_result) leaves the agent
 		// owing; assistant (text or tool_use) clears the debt. Set before the
 		// content parse so tool_result-only user records still mark owing.
+		// lastRole tracks the same record so Delivered can distinguish
+		// "assistant just spoke" from "nothing recognized yet".
+		t.lastRole = generic.Type
 		t.owing = generic.Type == "user"
 		var msg struct {
 			Content json.RawMessage `json:"content"`
@@ -614,6 +633,7 @@ func (t *Tailer) notePending(line []byte) {
 		case "function_call", "custom_tool_call":
 			t.pending = append(t.pending, pendingCall{p.CallID, p.Name})
 			t.owing = false
+			t.lastRole = "assistant"
 			if p.CallID != "" {
 				t.Tools = append(t.Tools, ToolStamp{
 					ID: p.CallID, Title: p.Name, Status: "pending", Time: generic.Timestamp,
@@ -622,6 +642,7 @@ func (t *Tailer) notePending(line []byte) {
 		case "function_call_output", "custom_tool_call_output":
 			t.resolve(p.CallID)
 			t.owing = true
+			t.lastRole = "user"
 			if p.CallID != "" {
 				t.Tools = append(t.Tools, ToolStamp{
 					ID: p.CallID, Status: "completed", Time: generic.Timestamp,
@@ -672,6 +693,7 @@ func (t *Tailer) Poll() []Turn {
 		t.lastIn, t.lastOut, t.lastCacheRead, t.lastCacheCreate = 0, 0, 0, 0
 		t.lastTurnID = ""
 		t.owing = false
+		t.lastRole = ""
 	}
 	if st.Size() == t.offset {
 		return t.Turns
@@ -708,6 +730,9 @@ func (t *Tailer) Poll() []Turn {
 			t.Turns = append(t.Turns, turn)
 			// Visible turns also set owing (Codex message items reach here
 			// without going through the function_call branches above).
+			if turn.Role == "user" || turn.Role == "assistant" {
+				t.lastRole = turn.Role
+			}
 			t.owing = turn.Role == "user"
 		}
 	}

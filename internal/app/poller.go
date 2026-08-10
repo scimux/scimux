@@ -18,9 +18,9 @@ import (
 // Lock ownership for the poll path (existing behavior; do not change locking
 // merely to match this comment):
 //
-//   - a.mu protects node fields and poll-state maps (live, attn, attnAt,
-//     prevCap, lastChg, activeSince, anim, chatMark, staleChat, tailers,
-//     pathClaims, mirrors).
+//   - a.mu protects node fields and poll-state maps (live, attn, turnDone,
+//     attnAt, prevCap, lastChg, activeSince, anim, chatMark, staleChat,
+//     tailers, pathClaims, mirrors).
 //   - tmux capture, transcript/filesystem work, appendRecord/store work, and
 //     session-log/mirror work run without a.mu held.
 //   - Durable transcript/store work completes before a.mu is reacquired to
@@ -104,11 +104,14 @@ func (a *app) poll() {
 		// from attention merely preserved across an indeterminate tick: only the
 		// former (re)stamps attnAt, so the preserve window ages out (R21.2).
 		freshAttn := false
+		// quietTl is the Tailer polled on this quiet tick (nil otherwise). The
+		// turn_done predicate reuses it — no second tailerFor / file read.
+		var quietTl *transcript.Tailer
 		if state == "quiet" {
-			tl := a.tailerFor(n)
-			if tl != nil {
-				tl.Poll()
-				if name, ok := tl.WaitingOn(); ok {
+			quietTl = a.tailerFor(n)
+			if quietTl != nil {
+				quietTl.Poll()
+				if name, ok := quietTl.WaitingOn(); ok {
 					attn = attentionKind(name)
 				}
 				// Judge the transcript only across a whole working phase (the
@@ -117,7 +120,7 @@ func (a *app) poll() {
 				// the next phase — and newly recognized chat progress clears a
 				// stale flag immediately, without waiting for another activity
 				// cycle (finding 24).
-				off, prog := tl.Progress()
+				off, prog := quietTl.Progress()
 				a.noteChatProgress(n.ID, off, prog, prev == "active")
 			}
 			// Dialoghint matcher + owing-stall backstop (P1a/P1b). Shared with
@@ -127,7 +130,7 @@ func (a *app) poll() {
 				quietSince := a.lastChg[n.ID]
 				a.mu.Unlock()
 				visible, _ := s.CaptureVisible()
-				attn = quietAttentionFallback(tl, visible, quietSince)
+				attn = quietAttentionFallback(quietTl, visible, quietSince)
 			}
 			// Neutral needs-a-look state: the pane is quiet but there is no
 			// trustworthy structured transcript to say whether the agent
@@ -140,7 +143,7 @@ func (a *app) poll() {
 				a.mu.Lock()
 				noEvidence := n.Transcript == "" || a.staleChat[n.ID]
 				a.mu.Unlock()
-				if noEvidence || (tl != nil && tl.Unparseable()) {
+				if noEvidence || (quietTl != nil && quietTl.Unparseable()) {
 					attn = "inspect"
 				}
 			}
@@ -202,6 +205,16 @@ func (a *app) poll() {
 				}
 			}
 		}
+		// P5 item 10 — turn finished: quiet pane, newest recognized record is
+		// assistant (Delivered), no unresolved tool call, no attention, not
+		// ended. Uses quietTl already polled this tick — zero extra I/O.
+		// ACP nodes never reach this with a Tailer (tailerFor returns nil when
+		// Transcript == ""); absent turn_done means UNKNOWN, not "not finished".
+		turnDone := false
+		if state == "quiet" && attn == "" && n.EndedAt == "" &&
+			quietTl != nil && quietTl.Delivered() && quietTl.PendingCount() == 0 {
+			turnDone = true
+		}
 		a.mu.Lock()
 		prevAttn := a.attn[n.ID]
 		a.live[n.ID] = state
@@ -212,6 +225,10 @@ func (a *app) poll() {
 			a.attnAt[n.ID] = time.Now()
 		}
 		a.attn[n.ID] = attn
+		if a.turnDone == nil { // tests build app literals without the map
+			a.turnDone = map[string]bool{}
+		}
+		a.turnDone[n.ID] = turnDone
 		a.mu.Unlock()
 		// V2-P2: durable wait edges from the existing mechanical needs-input
 		// signal (WaitingOn + quiet/confined-anim; no new regex).

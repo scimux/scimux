@@ -222,7 +222,9 @@ test("ctx_pct still rendered as tank, unchanged (D1)", () => {
   // guard (an arc that only exists above 0% cannot be patched upwards). The
   // geometry — R, the two concentric circles, the 80% amber flip, the -90
   // rotation — is unchanged and is what this pin is here to protect.
-  const tankSnippet = `if (n.ctx_pct != null && !n.attention){
+  // P5: also suppress the tank under a finished-turn ring (same reason as
+  // attention — two concentric rings would fight). Geometry otherwise pinned.
+  const tankSnippet = `if (n.ctx_pct != null && !n.attention && !turnFinished(n)){
         const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;`;
   assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
@@ -3729,7 +3731,7 @@ test("the wall markup carries the hooks the patch needs", () => {
   const n = volNode({});
   const html = stationRowHTML(n, { color: () => "C", name: () => "N" },
     { stop: stopsOf(n)[0] });
-  assert.match(html, /<span class="st">Quiet<\/span>/,
+  assert.match(html, /<span class="st st-quiet">Quiet<\/span>/,
     "the status word needs its own element or the patch has to rewrite the caption");
   // The live dot and the gauge arc need addressable hooks in the SVG, and the
   // arc must be emitted even at 0% so the patch never has to create a node.

@@ -286,6 +286,7 @@ func TestRemoveNodeLocked(t *testing.T) {
 		byID:        map[string]*Node{"a": na, "b": nb},
 		live:        map[string]string{"a": "quiet", "b": "active"},
 		attn:        map[string]string{"a": "approval"},
+		turnDone:    map[string]bool{"a": true},
 		attnAt:      map[string]time.Time{"a": now},
 		prevCap:     map[string]string{"a": "cap"},
 		lastChg:     map[string]time.Time{"a": now},
@@ -306,7 +307,7 @@ func TestRemoveNodeLocked(t *testing.T) {
 	if got := nodeIDs(a); strings.Join(got, ",") != "b" {
 		t.Fatalf("nodes = %v, want [b]", got)
 	}
-	for _, name := range []string{"live", "attn", "attnAt", "prevCap", "lastChg", "activeSince",
+	for _, name := range []string{"live", "attn", "turnDone", "attnAt", "prevCap", "lastChg", "activeSince",
 		"tailers", "mirrors", "chatMark", "staleChat", "sendState", "segCache", "fareCache", "anim"} {
 		var ok bool
 		switch name {
@@ -314,6 +315,8 @@ func TestRemoveNodeLocked(t *testing.T) {
 			_, ok = a.live["a"]
 		case "attn":
 			_, ok = a.attn["a"]
+		case "turnDone":
+			_, ok = a.turnDone["a"]
 		case "attnAt":
 			_, ok = a.attnAt["a"]
 		case "prevCap":

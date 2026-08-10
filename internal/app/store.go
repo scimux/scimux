@@ -178,6 +178,7 @@ func (a *app) removeNodeLocked(id string) {
 	}
 	delete(a.live, id)
 	delete(a.attn, id)
+	delete(a.turnDone, id)
 	delete(a.attnAt, id)
 	delete(a.prevCap, id)
 	delete(a.lastChg, id)

@@ -46,6 +46,7 @@ func TestNewAppInitializesMutableMaps(t *testing.T) {
 		"byID":        a.byID != nil,
 		"live":        a.live != nil,
 		"attn":        a.attn != nil,
+		"turnDone":    a.turnDone != nil,
 		"attnAt":      a.attnAt != nil,
 		"prevCap":     a.prevCap != nil,
 		"lastChg":     a.lastChg != nil,

@@ -26,6 +26,11 @@ import { stopTimes, servedLanes } from "./lanes.js";
    evidence — worth a look, but never the yellow "needs your decision" alarm */
 export const hardAttention = n => n.attention && n.attention !== "inspect";
 
+/* turn_done is a server-projected flag (quiet + assistant delivered + no
+   pending tool call). Absent means UNKNOWN — ACP nodes never set it and must
+   render as plain Quiet, not as a failed finished claim. */
+export const turnFinished = n => !!(n && n.turn_done);
+
 export function cardState(n){
   // A deliberately closed thread (/exit) is an immutable dead-end: it takes
   // precedence over mechanical liveness so a closed-but-adopted or
@@ -38,16 +43,29 @@ export function cardState(n){
   return "idle";
 }
 
+/* One precedence expression for the map status word and its class, so the
+   word and st-${kind} can never disagree. Keys:
+   closed | attention | inspect | running | finished | exited | unavailable | quiet.
+   "Ready" is honest only when turn_done is provable (item 10); plain Quiet
+   stays Quiet — it covers a finished-unknown, a crash, and a silent wait. */
+function statusInfo(n){
+  const node = n || {};
+  if (node.ended_at) return { kind: "closed", text: "Closed" };
+  if (node.attention === "inspect") return { kind: "inspect", text: "Quiet · check the terminal" };
+  if (node.attention) return { kind: "attention", text: `Waiting · needs your ${node.attention}` };
+  if (node.live === "active") return { kind: "running", text: "Running" };
+  if (node.live === "exited") return { kind: "exited", text: "Exited" };
+  if (node.live === "unavailable") return { kind: "unavailable", text: "Unavailable" };
+  if (turnFinished(node)) return { kind: "finished", text: "Ready" };
+  return { kind: "quiet", text: "Quiet" };
+}
+
+export function statusKind(n){
+  return statusInfo(n).kind;
+}
+
 export function statusText(n){
-  // Closed is a deliberate, durable cap — it wins over mechanical liveness and
-  // any lingering attention flag.
-  if (n.ended_at) return "Closed";
-  if (n.attention === "inspect") return "Quiet · check the terminal";
-  if (n.attention) return `Waiting · needs your ${n.attention}`;
-  if (n.live === "active") return "Running";
-  if (n.live === "exited") return "Exited";
-  if (n.live === "unavailable") return "Unavailable";
-  return "Quiet";
+  return statusInfo(n).text;
 }
 
 /* ---------- recency helpers used by ordering ---------- */
@@ -65,12 +83,12 @@ export function cardInteractionMS(n){
    Liveness — not last_interaction — must decide the tier: last_interaction is
    the last *human* turn, so a chat where the agent has churned for minutes
    since you last typed would otherwise sink below an idle chat you touched more
-   recently (the "active chats in the middle" bug). Tiers mirror cardState's
-   precedence exactly (closed > attention > active > dead > idle) so a card's
-   position and its rendered state never disagree. */
+   recently (the "active chats in the middle" bug). Tiers: closed sinks; hard
+   attention and a finished turn share the top; then active, dead, idle.
+   Finished is not a new attention value — hardAttention is unchanged. */
 export function livenessTier(n){
   if (n.ended_at) return 4;                                       // closed — immutable dead-end, sinks
-  if (hardAttention(n)) return 0;                                 // needs your decision — top
+  if (hardAttention(n) || turnFinished(n)) return 0;              // needs you / ready for you — top
   if (n.live === "active") return 1;                              // working now
   if (n.live === "exited" || n.live === "unavailable") return 3;  // dead — sinks with closed
   return 2;                                                       // idle / quiet / fresh

@@ -61,6 +61,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		byID:            map[string]*Node{},
 		live:            map[string]string{},
 		attn:            map[string]string{},
+		turnDone:        map[string]bool{},
 		attnAt:          map[string]time.Time{},
 		prevCap:         map[string]string{},
 		lastChg:         map[string]time.Time{},
@@ -159,6 +160,11 @@ type app struct {
 	byID  map[string]*Node
 	live  map[string]string // node id -> "active"|"quiet"|"exited"
 	attn  map[string]string // node id -> ""|"approval"|"question"|"inspect"
+	// turnDone: quiet + newest transcript record is assistant + no pending
+	// tool call + no attention classified (P5 item 10). Projected as
+	// turn_done on nodeView. Never set for ACP nodes (no Tailer) — absent
+	// means UNKNOWN, not "not finished". Never feeds liveness.
+	turnDone map[string]bool
 	// attnAt: when a.attn[id] was last set by *fresh* evidence (a classification
 	// this tick, or the one-shot peek path) rather than carried over. The
 	// active-branch preserve path (R20.5) keeps attention while the corroborated

@@ -805,7 +805,7 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
 		a := mk(t, path, nil)
-		a.turnDone["cl1"] = true // stale flag from a previous quiet tick
+		a.turnDone["cl1"] = true      // stale flag from a previous quiet tick
 		a.lastChg["cl1"] = time.Now() // pane just changed → active
 		a.prevCap["cl1"] = "different\npane"
 		a.server = tmuxsession.NewServerWithRunner("testsock", quietRunner("fresh\npane"))

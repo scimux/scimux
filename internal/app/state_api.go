@@ -82,11 +82,17 @@ func sysload() sysInfo {
 
 type nodeView struct {
 	*Node
-	Live            string `json:"live"`
-	Attention       string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
-	HasTranscript   bool   `json:"has_transcript"`
-	LastActivity    int64  `json:"last_activity,omitempty"`    // unix ms of last pane/log movement
-	LastInteraction int64  `json:"last_interaction,omitempty"` // unix ms of last user turn or page-turn
+	Live      string `json:"live"`
+	Attention string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
+	// TurnDone: the agent has finished its turn and is waiting for the human
+	// (quiet pane, newest transcript record is assistant, no pending tool
+	// call, no attention). omitempty so absent means UNKNOWN — ACP nodes
+	// (pi/opencode/grok) have no Tailer and never set this field; they must
+	// render exactly as they do without it (P5 accepted seam).
+	TurnDone        bool  `json:"turn_done,omitempty"`
+	HasTranscript   bool  `json:"has_transcript"`
+	LastActivity    int64 `json:"last_activity,omitempty"`    // unix ms of last pane/log movement
+	LastInteraction int64 `json:"last_interaction,omitempty"` // unix ms of last user turn or page-turn
 	// CtxPct is the live context occupancy (segment-scoped, 0-100), projected
 	// onto the list only for live nodes (active/quiet) — the map's at-a-glance
 	// congestion gauge. A pointer so absent (dead node / no usage yet) is
@@ -179,7 +185,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// always have chat to show.
 		hasTranscript := n.Transcript != "" || a.proc(n) != nil
 		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID],
-			HasTranscript: hasTranscript, LastActivity: lastMS})
+			TurnDone: a.turnDone[n.ID], HasTranscript: hasTranscript, LastActivity: lastMS})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server). A

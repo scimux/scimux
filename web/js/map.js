@@ -75,7 +75,7 @@ import {
   parentStopIndex,
   laneColumnOrder,
 } from "./lanes.js";
-import { statusText, headStopKey, toggleMapSelection } from "./map-model.js";
+import { statusText, statusKind, turnFinished, headStopKey, toggleMapSelection } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
 
 /* ---------- storage keys (public contract) ---------- */
@@ -291,7 +291,7 @@ export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull,
       fold.has(b.lane.id), hasAttn(b),
       b.rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, l.title, l.desc,
         s.n.agent, s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
-        s.n.live, s.n.attention]; })]))
+        s.n.live, s.n.attention, s.n.turn_done ? 1 : 0]; })]))
     + "|" + focusLane + "|" + mapTab + "|" + mapFull;
 }
 
@@ -332,7 +332,9 @@ export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSel
       liveShape(s.n.live),
       // Presence, not value: a gauge appearing from null has to create SVG
       // elements, which no attribute write can do. Its drift is patched.
-      s.n.attention, s.n.ctx_pct == null ? 0 : 1,
+      // turn_done is in the signature so the finished ring rebuilds (SVG),
+      // not just the status word (patchable).
+      s.n.attention, s.n.turn_done ? 1 : 0, s.n.ctx_pct == null ? 0 : 1,
       fareOn ? fareFingerprint(s.n) : 0]; }));
 }
 
@@ -340,7 +342,8 @@ export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSel
    render "· earlier stop" — no status word, no live dot — so they have none. */
 export function stationVolatile(n){
   if (!n) return "";
-  return (n.live || "") + "|" + (n.ctx_pct == null ? "" : n.ctx_pct);
+  return (n.live || "") + "|" + (n.ctx_pct == null ? "" : n.ctx_pct)
+    + "|" + (n.turn_done ? 1 : 0) + "|" + (n.attention || "");
 }
 
 export function wallVolatile(rows){
@@ -370,10 +373,17 @@ export function patchStationVolatile(root, key, n, opts = {}){
   if (!root || typeof root.querySelector !== "function" || !n) return false;
   const cssEsc = opts.cssEscape || (s => String(s));
   const st = opts.status || statusText;
+  const kindFn = opts.statusKind || statusKind;
   const k = cssEsc(key);
   const row = root.querySelector(`.strow[data-skey="${k}"]`);
   const cap = row && typeof row.querySelector === "function" ? row.querySelector(".cap .st") : null;
-  if (cap) cap.textContent = st(n);
+  if (cap){
+    // Class carries colour + the running ::after pulse; text is the word.
+    // Attribute/text writes only — never innerHTML (skip-path contract).
+    const kind = kindFn(n);
+    if ("className" in cap) cap.className = "st st-" + kind;
+    cap.textContent = st(n);
+  }
   const dot = root.querySelector(`circle[data-dot="${k}"]`);
   if (dot) dot.setAttribute("r", n.live === "active" ? 6.5 : 5.5);
   const arc = root.querySelector(`circle[data-ctx="${k}"]`);
@@ -500,9 +510,13 @@ export function wallLaneTrackSVG(stops, { x, color, opacity = 1, heatOn = false 
   return out;
 }
 
-export function attentionStationSVG(x, y, op){
-  return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="var(--attn)" filter="url(#attnglow)"/>
-          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="var(--attn)" stroke-width="2.5"/>`;
+/* Station ring/pulse for hard attention (default --attn yellow) and for a
+   finished turn (caller passes var(--work)). Same paint path, distinct hue
+   so yellow keeps exactly one meaning: blocked on you (P5). */
+export function attentionStationSVG(x, y, op, hue){
+  const c = hue || "var(--attn)";
+  return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="${c}" filter="url(#attnglow)"/>
+          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>`;
 }
 
 // terminalStationSVG marks an ended thread that sits *mid-lane* — the mainline
@@ -906,11 +920,14 @@ export function stationRowHTML(n, lm, opts = {}){
   const when = stop && stop.i > 0
     ? `${stamp(stop.time)} · stop ${stop.i + 1}` : stamp(n.created_at);
   const desc = label.desc;
+  // kind from the same precedence as the word (statusKind), even when a test
+  // injects a custom status() string — class and default word stay aligned.
+  const kind = (opts.statusKind || statusKind)(n);
   return `
         <div class="strow ${alt ? "alt " : ""}${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${escape(n.id)}"${stop ? ` data-skey="${escape(stopKey(stop))}"` : ""}>
           <div class="lbl${desc ? " hasdesc" : ""}"><span class="agent-logo" title="${escape(n.agent || "agent")}">${opts.agentLogo || ""}</span><span class="t">${escape(label.title)}</span>${fork ? forkCue : ""}</div>
-          <div class="cap">${escape(when)} · ${escape(configText(n))} · <span class="st">${escape(status(n))}</span>${
+          <div class="cap">${escape(when)} · ${escape(configText(n))} · <span class="st st-${kind}">${escape(status(n))}</span>${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${escape(l)}"` : ""} style="color:${escape(lm.color(l))}">&#8644; ${escape(lm.name(l))}</span>`).join("")}</div>
           ${desc ? `<div class="desc">${escape(desc)}</div>` : ""}
         </div>`;
@@ -1450,7 +1467,10 @@ export function createMapFeature(deps){
       if (n.ended_at)
         svg += i === lineTop[dotX] ? terminalCapSVG(dotX, yy, op, col)
                                    : terminalStationSVG(dotX, yy, op, col);
+      // Widen the existing ring path: hard attention keeps --attn; a finished
+      // turn reuses the same SVG with --work. No parallel paint path (P5).
       if (n.attention) svg += attentionStationSVG(dotX, yy, op);
+      else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
       /* data-dot / data-ctx are the repaint hooks. Only the live branch
          carries one: exited and unavailable are in the signature, so reaching
          them rebuilds rather than patches. */
@@ -1459,7 +1479,7 @@ export function createMapFeature(deps){
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
       else
         svg += `<circle data-dot="${skey}" cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
-      if (n.ctx_pct != null && !n.attention){
+      if (n.ctx_pct != null && !n.attention && !turnFinished(n)){
         const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none" stroke="${col}" stroke-width="2" opacity="${op * .2}"/>`;
         /* Emitted even at 0% — an invisible arc the patch can grow, since no
@@ -1593,6 +1613,7 @@ export function createMapFeature(deps){
           svg += i === 0 ? terminalCapSVG(dotX, yy, op, col)
                          : terminalStationSVG(dotX, yy, op, col);
         if (n.attention) svg += attentionStationSVG(dotX, yy, op);
+        else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
         else

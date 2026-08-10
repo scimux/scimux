@@ -65,6 +65,36 @@
 .strow .lbl.hasdesc .t { -webkit-line-clamp: 1; }
 .strow .cap { font-size: 11px; color: var(--dim); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Status word carries its state (P5 item 3): colour + the word already there.
+   Never colour alone (HIG). Quiet stays Quiet — "Ready" only when turn_done
+   is provable (item 10 / .st-finished). */
+.strow .cap .st.st-running { color: var(--work); font-weight: 600; }
+.strow .cap .st.st-attention { color: var(--attn); font-weight: 600; }
+.strow .cap .st.st-finished { color: var(--work); font-weight: 600; }
+.strow .cap .st.st-inspect { color: var(--dim); }
+.strow .cap .st.st-quiet,
+.strow .cap .st.st-closed,
+.strow .cap .st.st-exited,
+.strow .cap .st.st-unavailable { color: var(--dim); }
+/* Running pulse: same compositor pattern as .lattn (static box-shadow, animated
+   transform+opacity). ::after so the skip-path patch only rewrites class+text. */
+.st.st-running::after {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 5px;
+  border-radius: 50%; background: var(--work); vertical-align: 0;
+  transform: translateZ(0) scale(.85); transform-origin: center;
+  box-shadow: 0 0 10px 2px rgba(var(--work-rgb), .38);
+  will-change: transform, opacity; animation: mapRunDot 1.65s ease-in-out infinite;
+}
+@keyframes mapRunDot {
+  0%, 100% { opacity: .45; transform: translateZ(0) scale(.76); }
+  50%      { opacity: 1; transform: translateZ(0) scale(1.28); }
+}
+/* Reduced motion next to the rules it disables (chat.css/notes.css practice;
+   accessibility.css is only for the pane slides). */
+@media (prefers-reduced-motion: reduce) {
+  .st.st-running::after { animation: none; box-shadow: none; }
+  .attnstation-glow, .attnstation-ring { animation: none; }
+}
 .strow .forkcue { font-size: 12px; font-weight: 600; margin-left: 14px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9;
   flex: 1 1 30%; min-width: 44px; max-width: 45%; }
