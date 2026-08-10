@@ -22,6 +22,10 @@ import {
   toggleMapSelection,
   stationLatestTurn,
 } from "../js/map-model.js";
+/* Namespace import so P5 red tests can assert on statusKind / turnFinished
+   before those names exist as named exports (a missing named import would
+   abort the whole file at load time). */
+import * as mapModel from "../js/map-model.js";
 import { stopTimes, servedLanes, stopKey } from "../js/lanes.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -29,6 +33,8 @@ import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const mapSrc = readFileSync(join(__dirname, "../js/map-model.js"), "utf8");
+const statusKind = (...a) => mapModel.statusKind(...a);
+const turnFinished = (...a) => mapModel.turnFinished(...a);
 
 /* ---------- purity / no browser globals ---------- */
 test("map-model.js has no browser globals or implicit app state", () => {
@@ -70,7 +76,7 @@ test("map-model.js has no browser globals or implicit app state", () => {
 test("map-model.js exports named pure helpers", async () => {
   const mod = await import("../js/map-model.js");
   for (const name of [
-    "hardAttention", "cardState", "statusText",
+    "hardAttention", "cardState", "statusText", "statusKind", "turnFinished",
     "cardCreatedMS", "cardInteractionMS", "livenessTier",
     "orderedNodes", "pinnedOrder", "canReceiveSend", "sendableNodes",
     "isArchived", "isPinned", "tabListForCards", "inLaneScope", "visibleCardLists",
@@ -122,6 +128,82 @@ test("statusText precedence: Closed > inspect > hard attention > live tiers > Qu
   assert.equal(statusText({ live: "unavailable" }), "Unavailable");
   assert.equal(statusText({ live: "quiet" }), "Quiet");
   assert.equal(statusText({}), "Quiet");
+});
+
+/* ---------- P5: statusKind / turnFinished / finished tier ---------- */
+
+/* statusKind and statusText share one precedence so the word and the class
+   can never disagree. kind → expected text for every fixture below. */
+const STATUS_KIND_TEXT = {
+  closed: "Closed",
+  inspect: "Quiet · check the terminal",
+  attention: null, // depends on attention value
+  running: "Running",
+  finished: "Ready",
+  exited: "Exited",
+  unavailable: "Unavailable",
+  quiet: "Quiet",
+};
+
+const STATUS_FIXTURES = [
+  { name: "closed beats everything", n: { ended_at: "t", attention: "approval", live: "active", turn_done: true }, kind: "closed" },
+  { name: "hard attention waiting", n: { attention: "approval", live: "quiet" }, kind: "attention", text: "Waiting · needs your approval" },
+  { name: "question attention", n: { attention: "question", live: "quiet" }, kind: "attention", text: "Waiting · needs your question" },
+  { name: "inspect attention", n: { attention: "inspect", live: "quiet" }, kind: "inspect" },
+  { name: "running agent", n: { live: "active" }, kind: "running" },
+  { name: "finished turn (item 10)", n: { live: "quiet", turn_done: true }, kind: "finished" },
+  { name: "quiet but not delivered", n: { live: "quiet" }, kind: "quiet" },
+  { name: "quiet-but-stale (no turn_done)", n: { live: "quiet", turn_done: false }, kind: "quiet" },
+  { name: "crashed / exited", n: { live: "exited" }, kind: "exited" },
+  { name: "unavailable", n: { live: "unavailable" }, kind: "unavailable" },
+  { name: "ACP node: turn_done absent = unknown, not finished", n: { live: "quiet", agent: "pi" }, kind: "quiet" },
+  { name: "ACP with no field stays quiet even if live quiet", n: { live: "quiet", agent: "grok" }, kind: "quiet" },
+  { name: "finished suppressed while running", n: { live: "active", turn_done: true }, kind: "running" },
+  { name: "finished suppressed by hard attention", n: { attention: "approval", live: "quiet", turn_done: true }, kind: "attention", text: "Waiting · needs your approval" },
+  { name: "finished suppressed by closed", n: { ended_at: "t", turn_done: true, live: "quiet" }, kind: "closed" },
+];
+
+test("turnFinished is true only when turn_done is set", () => {
+  assert.equal(turnFinished({ turn_done: true }), true);
+  assert.equal(turnFinished({ turn_done: false }), false);
+  assert.equal(turnFinished({}), false);
+  assert.equal(turnFinished({ turn_done: 1 }), true);
+  // ACP / unknown: field absent must mean UNKNOWN, never "not finished" as a
+  // positive claim — but the predicate itself is false so status stays Quiet.
+  assert.equal(turnFinished({ live: "quiet", agent: "pi" }), false);
+});
+
+test("statusKind and statusText agree across the fixture matrix", () => {
+  for (const fx of STATUS_FIXTURES) {
+    const kind = statusKind(fx.n);
+    const text = statusText(fx.n);
+    assert.equal(kind, fx.kind, `${fx.name}: kind`);
+    const wantText = fx.text ?? STATUS_KIND_TEXT[fx.kind];
+    assert.equal(text, wantText, `${fx.name}: text for kind ${kind}`);
+    // kind is a stable key from the allowed set
+    assert.ok(kind in STATUS_KIND_TEXT, `${fx.name}: unexpected kind ${kind}`);
+  }
+});
+
+test("livenessTier puts finished in the top tier alongside hardAttention", () => {
+  assert.equal(livenessTier({ attention: "approval" }), 0);
+  assert.equal(livenessTier({ live: "quiet", turn_done: true }), 0,
+    "finished turn is top tier — same prominence as hard attention");
+  // finished does not outrank closed
+  assert.equal(livenessTier({ ended_at: "t", turn_done: true }), 4);
+  // finished does not beat hard attention (both tier 0; ordering is stable)
+  assert.equal(livenessTier({ attention: "approval", turn_done: true }), 0);
+});
+
+test("hardAttention is unchanged by turn_done (regression lock)", () => {
+  // hardAttention is attention && attention !== "inspect" — turn_done must
+  // never become a new attention value or change this predicate.
+  assert.equal(!!hardAttention({}), false);
+  assert.equal(!!hardAttention({ turn_done: true }), false);
+  assert.equal(hardAttention({ attention: "inspect", turn_done: true }), false);
+  assert.equal(hardAttention({ attention: "approval", turn_done: true }), true);
+  assert.equal(hardAttention({ attention: "question" }), true);
+  assert.equal(hardAttention({ attention: "approval" }), true);
 });
 
 /* ---------- liveness tiers ---------- */

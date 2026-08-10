@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,6 +382,52 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 	// No session log → last_interaction falls to created_at.
 	if int64(got["last_interaction"].(float64)) != unixMSStamp(n.CreatedAt) {
 		t.Errorf("last_interaction = %v, want created_at ms", got["last_interaction"])
+	}
+}
+
+// P5 item 10: turn_done serializes when true and is omitted when unknown
+// (false / absent) so ACP nodes and unfinished quiet nodes look identical
+// on the wire — absent means UNKNOWN, never a positive "not finished".
+func TestHandleStateTurnDoneField(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	done := &Node{ID: "done", Title: "D", Agent: "claude", Transcript: "/t.jsonl", CreatedAt: "2026-07-14T00:00:00Z"}
+	quiet := &Node{ID: "quiet", Title: "Q", Agent: "claude", Transcript: "/t2.jsonl", CreatedAt: "2026-07-14T00:00:00Z"}
+	acp := &Node{ID: "acp1", Title: "A", Agent: "pi", Transport: "acp", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes = []*Node{done, quiet, acp}
+	for _, n := range a.nodes {
+		a.byID[n.ID] = n
+		a.live[n.ID] = "quiet"
+	}
+	if a.turnDone == nil {
+		a.turnDone = map[string]bool{}
+	}
+	a.turnDone[done.ID] = true
+	// quiet and acp intentionally leave turnDone unset / false
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Raw JSON: omitempty must drop the key when false.
+	raw := rec.Body.String()
+	if !strings.Contains(raw, `"turn_done":true`) {
+		t.Errorf("finished node must serialize turn_done:true; body=%s", raw)
+	}
+	nodes := decodeStateNodes(t, rec.Body.Bytes())
+	byID := map[string]map[string]any{}
+	for _, n := range nodes {
+		byID[n["id"].(string)] = n
+	}
+	if v, ok := byID["done"]["turn_done"]; !ok || v != true {
+		t.Errorf("done.turn_done = %v,%v, want true", v, ok)
+	}
+	if _, ok := byID["quiet"]["turn_done"]; ok {
+		t.Errorf("quiet.turn_done present = %v, want omitted", byID["quiet"]["turn_done"])
+	}
+	if _, ok := byID["acp1"]["turn_done"]; ok {
+		t.Errorf("acp.turn_done present = %v, want omitted (UNKNOWN)", byID["acp1"]["turn_done"])
 	}
 }
 

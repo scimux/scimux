@@ -686,6 +686,170 @@ func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {
 	}
 }
 
+// P5 item 10 — turn_done is derived in the quiet branch with zero extra I/O:
+// quiet + Delivered + no pending call + no attention + not ended. ACP nodes
+// (no Tailer) never raise it — absent means UNKNOWN, not "not finished".
+func TestTurnDoneQuietDelivered(t *testing.T) {
+	plainPane := "working…\n$"
+	quietRunner := func(pane string) tmuxsession.Runner {
+		return func(ctx context.Context, stdin string, args ...string) (string, error) {
+			for _, arg := range args {
+				if arg == "has-session" {
+					return "", nil
+				}
+				if arg == "capture-pane" {
+					return pane, nil
+				}
+			}
+			return "", nil
+		}
+	}
+	mk := func(t *testing.T, path string, extra func(*app, *Node)) *app {
+		t.Helper()
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			turnDone:  map[string]bool{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		if extra != nil {
+			extra(a, n)
+		}
+		return a
+	}
+
+	t.Run("finished_when_quiet_delivered_no_pending", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		a := mk(t, path, nil)
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
+		if got := a.attn["cl1"]; got != "" {
+			t.Fatalf("attention = %q, want none", got)
+		}
+		if !a.turnDone["cl1"] {
+			t.Fatal("turnDone = false, want true for quiet+delivered+no pending")
+		}
+	})
+
+	t.Run("not_finished_while_owing", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`)
+		a := mk(t, path, nil)
+		// Keep lastChg recent enough that the owing stall has not fired inspect.
+		a.lastChg["cl1"] = time.Now().Add(-10 * time.Second)
+		a.poll()
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone = true, want false while agent still owes output")
+		}
+	})
+
+	t.Run("not_finished_with_pending_tool_call", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run it"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`)
+		a := mk(t, path, nil)
+		a.poll()
+		// Pending Bash may classify as attention via WaitingOn; either way not finished.
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone = true, want false with unresolved tool call")
+		}
+	})
+
+	t.Run("not_finished_when_attention_classified", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"},{"type":"tool_use","id":"tu1","name":"AskUserQuestion","input":{}}]}}`)
+		a := mk(t, path, nil)
+		a.poll()
+		if a.attn["cl1"] == "" {
+			t.Fatal("expected attention from AskUserQuestion, got none")
+		}
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone must not fire when attention is classified")
+		}
+	})
+
+	t.Run("not_finished_when_ended", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		a := mk(t, path, func(a *app, n *Node) {
+			n.EndedAt = "2026-01-01T00:00:00Z"
+		})
+		a.poll()
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone = true, want false on ended node")
+		}
+	})
+
+	t.Run("cleared_when_active", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		a := mk(t, path, nil)
+		a.turnDone["cl1"] = true // stale flag from a previous quiet tick
+		a.lastChg["cl1"] = time.Now() // pane just changed → active
+		a.prevCap["cl1"] = "different\npane"
+		a.server = tmuxsession.NewServerWithRunner("testsock", quietRunner("fresh\npane"))
+		a.poll()
+		if got := a.live["cl1"]; got != "active" {
+			t.Fatalf("live = %q, want active", got)
+		}
+		if a.turnDone["cl1"] {
+			t.Fatal("turnDone must clear when the pane is active")
+		}
+	})
+
+	t.Run("acp_no_tailer_stays_unknown", func(t *testing.T) {
+		// tailerFor returns nil when Transcript == ""; ACP nodes never reach
+		// turn_done in this phase. Absent must mean UNKNOWN.
+		n := &Node{ID: "pi1", Agent: "pi", Transcript: ""}
+		a := &app{
+			byID:      map[string]*Node{"pi1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			turnDone:  map[string]bool{},
+			prevCap:   map[string]string{},
+			lastChg:   map[string]time.Time{},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			// No proc manager → falls through to tmux path; no session → exited.
+			server: tmuxsession.NewServerWithRunner("testsock", func(ctx context.Context, stdin string, args ...string) (string, error) {
+				for _, arg := range args {
+					if arg == "has-session" {
+						return "", fmt.Errorf("no session")
+					}
+				}
+				return "", nil
+			}),
+		}
+		a.poll()
+		if a.turnDone["pi1"] {
+			t.Fatal("ACP/no-transcript node must not set turnDone")
+		}
+	})
+}
+
 // P1b/P1c — quiet-pane owing stall and structural dialog matcher. The exact
 // reported case: Write/Edit approval on screen, no unresolved tool_use in the
 // transcript (Claude Code flushes late), healthy transcript, quiet pane.

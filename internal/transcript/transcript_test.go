@@ -408,6 +408,108 @@ func TestWaitingOnCodex(t *testing.T) {
 	}
 }
 
+// Delivered / lastRole is the sibling of Owing used for the map's "turn
+// finished" state (P5 item 10). Every site that assigns t.owing must also
+// assign lastRole so Delivered() is true only after a recognized assistant
+// record — never before anything is recognized (Owing is also false then).
+func TestLastRoleAndDelivered(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "role.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tl := &Tailer{Path: path}
+
+	// Empty: not owing, not delivered — lastRole is the discriminator.
+	if tl.Owing() || tl.Delivered() {
+		t.Fatal("empty file: Owing/Delivered must both be false")
+	}
+
+	// Site: Claude user/assistant branch in notePending (and ParseLine).
+	f.WriteString(`{"type":"user","timestamp":"t1","message":{"role":"user","content":"please edit hello.txt"}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() || tl.Delivered() {
+		t.Fatalf("after user: Owing=%v Delivered=%v, want true/false", tl.Owing(), tl.Delivered())
+	}
+
+	f.WriteString(`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n")
+	tl.Poll()
+	if tl.Owing() || !tl.Delivered() {
+		t.Fatalf("after assistant text: Owing=%v Delivered=%v, want false/true", tl.Owing(), tl.Delivered())
+	}
+
+	// Site: Claude assistant tool_use (owing cleared in notePending; no ParseLine turn).
+	f.WriteString(`{"type":"assistant","timestamp":"t3","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}` + "\n")
+	tl.Poll()
+	if tl.Owing() || !tl.Delivered() {
+		t.Fatalf("after tool_use: Owing=%v Delivered=%v, want false/true", tl.Owing(), tl.Delivered())
+	}
+	if tl.PendingCount() == 0 {
+		t.Fatal("tool_use should leave a pending call")
+	}
+
+	// Site: Claude user tool_result (owing true).
+	f.WriteString(`{"type":"user","timestamp":"t4","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() || tl.Delivered() {
+		t.Fatalf("after tool_result: Owing=%v Delivered=%v, want true/false", tl.Owing(), tl.Delivered())
+	}
+
+	// Unknown typed record: leave lastRole/owing unchanged.
+	f.WriteString(`{"type":"bridge-session","timestamp":"t5","payload":{}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() || tl.Delivered() {
+		t.Fatal("unknown record must leave lastRole/owing unchanged (still user/owing)")
+	}
+
+	// Site: Codex function_call → assistant (not owing, delivered).
+	f.WriteString(`{"timestamp":"t6","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{}"}}` + "\n")
+	tl.Poll()
+	if tl.Owing() || !tl.Delivered() {
+		t.Fatalf("after codex function_call: Owing=%v Delivered=%v, want false/true", tl.Owing(), tl.Delivered())
+	}
+
+	// Site: Codex function_call_output → user (owing, not delivered).
+	f.WriteString(`{"timestamp":"t7","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}` + "\n")
+	tl.Poll()
+	if !tl.Owing() || tl.Delivered() {
+		t.Fatalf("after codex function_call_output: Owing=%v Delivered=%v, want true/false", tl.Owing(), tl.Delivered())
+	}
+
+	// Site: ParseLine visible Codex message (assistant).
+	f.WriteString(`{"timestamp":"t8","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"all done"}]}}` + "\n")
+	tl.Poll()
+	if tl.Owing() || !tl.Delivered() {
+		t.Fatalf("after codex assistant message: Owing=%v Delivered=%v, want false/true", tl.Owing(), tl.Delivered())
+	}
+
+	// Site: rotation (shrunken file) resets lastRole so Delivered is false again.
+	if err := os.WriteFile(path, []byte(`{"type":"user","timestamp":"r1","message":{"role":"user","content":"fresh after rotate"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Shrink offset past new size first so Poll sees rotation.
+	// Write a shorter file: empty then one line is smaller than the previous large log
+	// only if we truncate. WriteFile already truncates.
+	tl.Poll()
+	// After rotation the new content is a user turn → owing, not delivered.
+	// The reset itself must have cleared lastRole before replaying; end state
+	// after the user line is the real check that the path ran.
+	if !tl.Owing() || tl.Delivered() {
+		t.Fatalf("after rotation+user: Owing=%v Delivered=%v, want true/false", tl.Owing(), tl.Delivered())
+	}
+
+	// Explicit empty-after-reset: truncate to empty.
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl.Poll()
+	if tl.Owing() || tl.Delivered() {
+		t.Fatalf("after rotation to empty: Owing=%v Delivered=%v, want false/false", tl.Owing(), tl.Delivered())
+	}
+}
+
 // Owing is the transcript half of the quiet-pane stall backstop (P1b): the
 // agent owes the next output when the newest recognized record is a human
 // prompt or a tool result. Unknown record types leave it unchanged.

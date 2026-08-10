@@ -69,6 +69,7 @@ import { forkKind, stopsOf, stopKey, newestFirst } from "../js/lanes.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const mapSrc = readFileSync(join(__dirname, "../js/map.js"), "utf8");
+const mapCssSrc = readFileSync(join(__dirname, "../css/map.css"), "utf8");
 const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
 
 /* ---------- module shape / no later features ---------- */
@@ -334,7 +335,8 @@ test("stationRowHTML earlier stop vs head markup contracts", () => {
   assert.match(head, /data-golane="L2"/);
   // The status word sits in its own element so a poll can repaint it without
   // rewriting the caption; the caption's order is otherwise unchanged.
-  assert.match(head, /m\/high · <span class="st">Quiet<\/span>/);
+  // P5: state class st-<kind> rides next to .st so colour tracks the word.
+  assert.match(head, /m\/high · <span class="st st-quiet">Quiet<\/span>/);
   // V2-P4: no always-on fare text row on station cards
   assert.doesNotMatch(head, /class="fare"/);
 });
@@ -347,6 +349,112 @@ test("attentionStationSVG and ATTN_GLOW_DEF geometry classes", () => {
   assert.match(svg, /cx="10"/);
   assert.match(svg, /cy="20"/);
   assert.match(svg, /--attn-op:0\.5/);
+});
+
+/* ---------- P5 (arc2): status colour, running pulse, finished ring ---------- */
+
+test("P5: station status span carries st-<kind> for every live state", () => {
+  const lm = { color: () => "#f", name: () => "L" };
+  const base = { id: "n", title: "T", agent: "claude", created_at: "2026-01-01T00:00:00Z" };
+  const cases = [
+    { n: { ...base, live: "quiet" }, kind: "quiet", word: "Quiet" },
+    { n: { ...base, live: "active" }, kind: "running", word: "Running" },
+    { n: { ...base, live: "quiet", turn_done: true }, kind: "finished", word: "Ready" },
+    { n: { ...base, live: "quiet", attention: "approval" }, kind: "attention", word: "Waiting" },
+    { n: { ...base, live: "quiet", attention: "inspect" }, kind: "inspect", word: "Quiet" },
+    { n: { ...base, live: "exited" }, kind: "exited", word: "Exited" },
+    { n: { ...base, live: "unavailable" }, kind: "unavailable", word: "Unavailable" },
+    { n: { ...base, ended_at: "t", live: "quiet" }, kind: "closed", word: "Closed" },
+  ];
+  for (const c of cases) {
+    const html = stationRowHTML(c.n, lm, { escape: s => s });
+    assert.match(html, new RegExp(`<span class="st st-${c.kind}">[^<]*${c.word}`),
+      `${c.kind}: class + word`);
+  }
+});
+
+test("P5: running pulse is a compositor-animated ::after on .st-running only", () => {
+  const lm = { color: () => "#f", name: () => "L" };
+  const run = stationRowHTML(
+    { id: "r", title: "R", agent: "claude", live: "active", created_at: "2026-01-01T00:00:00Z" },
+    lm, { escape: s => s });
+  const quiet = stationRowHTML(
+    { id: "q", title: "Q", agent: "claude", live: "quiet", created_at: "2026-01-01T00:00:00Z" },
+    lm, { escape: s => s });
+  assert.match(run, /class="st st-running"/, "running carries st-running");
+  assert.doesNotMatch(quiet, /st-running/, "quiet does not");
+
+  // Pulse is CSS, not an extra HTML element — assert on the rule body.
+  const rule = mapCssSrc.match(/\.st(?:\.st-running|\.st-running::after| st-running)[^{]*\{([^}]+)\}/);
+  // Prefer the ::after rule that carries the pulse itself.
+  const after = mapCssSrc.match(/\.st\.st-running::after\s*\{([^}]+)\}/);
+  assert.ok(after, ".st.st-running::after pulse rule must exist");
+  assert.match(after[1], /animation\s*:/, "pulse is animated");
+  assert.match(after[1], /box-shadow\s*:/, "static halo like .lattn (not keyframed)");
+  assert.doesNotMatch(after[1], /will-change:[^;]*box-shadow/,
+    "will-change cannot composite a box-shadow");
+  // Keyframes used by the pulse must not animate box-shadow.
+  const animName = (after[1].match(/animation\s*:\s*([A-Za-z0-9_-]+)/) || [])[1];
+  assert.ok(animName, "animation names a keyframe");
+  const kf = mapCssSrc.match(new RegExp(`@keyframes\\s+${animName}\\s*\\{([\\s\\S]*?)\\n\\}`));
+  assert.ok(kf, `@keyframes ${animName} must exist in map.css`);
+  assert.doesNotMatch(kf[1], /box-shadow/, "pulse is opacity/transform only");
+  assert.match(kf[1], /opacity/, "and it must still pulse");
+  void rule;
+});
+
+test("P5: reduced-motion disables the running pulse (rule body in map.css)", () => {
+  // Practice: reduced-motion lives next to the rules it disables (map.css),
+  // not in accessibility.css (pane slides only).
+  const blocks = mapCssSrc.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\n\}/g) || [];
+  assert.ok(blocks.length, "map.css must have a prefers-reduced-motion block");
+  const hit = blocks.find(b => /\.st\.st-running::after|\.st-running/.test(b));
+  assert.ok(hit, "reduced-motion must mention the running pulse");
+  // Assert on the rule BODY, not class names alone.
+  const body = hit.replace(/^@media[^{]+\{/, "").replace(/\}\s*$/, "");
+  assert.match(body, /animation\s*:\s*none/, "stops the pulse");
+  assert.match(body, /box-shadow\s*:\s*none/, "drops the static halo with the pulse");
+});
+
+test("P5: finished station ring uses --work, not --attn", () => {
+  // attentionStationSVG is widened: default stays --attn; finished passes --work.
+  const attn = attentionStationSVG(1, 2, 1);
+  assert.match(attn, /var\(--attn\)/, "hard attention keeps yellow");
+  assert.doesNotMatch(attn, /var\(--work\)/, "default path is not finished hue");
+
+  const fin = attentionStationSVG(1, 2, 1, "var(--work)");
+  assert.match(fin, /var\(--work\)/, "finished ring is success/--work");
+  assert.doesNotMatch(fin, /var\(--attn\)/, "finished ring must not use --attn yellow");
+  assert.match(fin, /class="attnstation-glow"/, "same paint path, not a fork");
+  assert.match(fin, /class="attnstation-ring"/);
+
+  // Call sites gate on attention OR turn_done (widened, not a parallel path).
+  const gates = [...mapSrc.matchAll(/if\s*\(\s*n\.attention[^)]*\)\s*svg\s*\+=\s*attentionStationSVG/g)];
+  // After the fix the condition includes turnFinished / turn_done.
+  const paintCalls = [...mapSrc.matchAll(/attentionStationSVG\s*\(/g)];
+  assert.ok(paintCalls.length >= 3, "definition + two map paint sites");
+  // Source must pass --work for the finished case somewhere near the calls.
+  assert.match(mapSrc, /attentionStationSVG\([^)]*var\(--work\)|turnFinished|turn_done/,
+    "paint path must know about finished / --work");
+  void gates;
+});
+
+test("P5: .st colour tokens per state in map.css", () => {
+  // Colour is one channel next to the word — never the only one (HIG).
+  const running = mapCssSrc.match(/\.st\.st-running\s*\{([^}]+)\}/);
+  const attention = mapCssSrc.match(/\.st\.st-attention\s*\{([^}]+)\}/);
+  const finished = mapCssSrc.match(/\.st\.st-finished\s*\{([^}]+)\}/);
+  assert.ok(running, ".st.st-running colour rule");
+  assert.ok(attention, ".st.st-attention colour rule");
+  assert.ok(finished, ".st.st-finished colour rule");
+  assert.match(running[1], /var\(--work\)/, "running uses --work");
+  assert.match(attention[1], /var\(--attn\)/, "waiting uses --attn");
+  assert.match(finished[1], /var\(--work\)/, "finished uses success/--work (not --attn)");
+  // Quiet / closed / exited / unavailable stay --dim (or inherit the caption dim).
+  for (const k of ["quiet", "closed", "exited", "unavailable"]) {
+    const r = mapCssSrc.match(new RegExp(`\\.st\\.st-${k}\\s*\\{([^}]+)\\}`));
+    if (r) assert.match(r[1], /var\(--dim\)/, `${k} uses --dim`);
+  }
 });
 
 test("terminalStationSVG: spur rises then curves LEFT to a vertical buffer bar", () => {
@@ -3018,9 +3126,8 @@ test("P4: no selection leaves scrollTop untouched on rebuild", () => {
   feature.destroy();
 });
 
-/* ---------- P5: attention rail (locator gutter on the wall map) ---------- */
+/* ---------- P5 (arc1): attention rail (locator gutter on the wall map) ---------- */
 
-const mapCssSrc = readFileSync(join(__dirname, "../css/map.css"), "utf8");
 const indexHtmlSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
 
 /** Wall-row fraction of content height — same formula as railTicks / renderWallMap. */
