@@ -446,9 +446,12 @@ test("P3 9: inline Remove opens confirm; only ok fires the delete", async () => 
   const trashBtn = el("button", { dataset: { refact: "trash" } });
   trashBtn.dataset.refact = "trash";
   trashBtn.closest = sel => {
-    if (sel === "[data-refact]") return trashBtn;
-    if (sel === ".wsref") return ref;
-    if (sel === ".wssec") return sec;
+    /* comma lists resolve like the DOM: any one part matching is a hit */
+    for (const part of String(sel).split(",").map(s => s.trim())){
+      if (part === "[data-refact]" || part === '[data-refact="trash"]') return trashBtn;
+      if (part === ".wsref") return ref;
+      if (part === ".wssec") return sec;
+    }
     return null;
   };
   trashBtn.getBoundingClientRect = () =>
@@ -463,6 +466,18 @@ test("P3 9: inline Remove opens confirm; only ok fires the delete", async () => 
   assert.ok(menu, "confirm popover must open on trash");
   assert.match(menu.className, /wsconfirm/, "reuse the openDeleteConfirm shell");
   assert.equal(deletesBefore(), 0, "DELETE must not fire before ok");
+
+  /* The same tap reaches the document handler too: a real click bubbles
+     #wssections → document. Headless fakes do not bubble, so deliver the
+     second leg exactly as the DOM would (the simulation bookmarks.test.js
+     uses for the one-click overflow guard). The tap that opens the confirm
+     must not dismiss it — the trash trigger belongs in onDocClick's
+     exclude list, like every other popover trigger. */
+  (docListeners.click || []).forEach(fn => fn({ target: trashBtn }));
+  assert.ok(
+    wspanel.children.some(c => (c.className || "").includes("popmenu")),
+    "the opening tap must not dismiss the confirm it just opened",
+  );
 
   /* cancel — still no delete */
   const cancel = el("button", { dataset: { wconfirm: "cancel" } });
