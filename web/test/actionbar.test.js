@@ -70,6 +70,30 @@ function el(tag = "div", props = {}){
     dataset: Object.assign({}, props.dataset || {}),
     _listeners: listeners,
     _ariaLabel: "",
+    get classList(){
+      const self = node;
+      return {
+        contains(c){
+          return (self.className || "").split(/\s+/).filter(Boolean).includes(c);
+        },
+        add(c){
+          const set = new Set((self.className || "").split(/\s+/).filter(Boolean));
+          set.add(c);
+          self.className = [...set].join(" ");
+        },
+        remove(c){
+          const set = new Set((self.className || "").split(/\s+/).filter(Boolean));
+          set.delete(c);
+          self.className = [...set].join(" ");
+        },
+        toggle(c, force){
+          const has = this.contains(c);
+          if (force === true || (!has && force !== false)){ this.add(c); return true; }
+          this.remove(c);
+          return false;
+        },
+      };
+    },
     addEventListener(type, fn){
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(fn);
@@ -464,8 +488,8 @@ test("P3 9: inline Remove opens confirm; only ok fires the delete", async () => 
     "ok must DELETE the reference",
   );
 
-  /* never window.confirm — blocked in the iOS PWA */
-  assert.doesNotMatch(notesSrc, /window\.confirm/);
+  /* never call window.confirm — blocked in the iOS PWA (comment may mention it) */
+  assert.doesNotMatch(notesSrc, /window\.confirm\s*\(/);
 });
 
 /* ================================================================

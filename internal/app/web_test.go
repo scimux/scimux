@@ -1126,9 +1126,8 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 			t.Error("#notesbtn must not carry .backbtn")
 		}
 	}
-	// P6: visible bar is jump · sendto · note · more; delete moved into the
-	// overflow menu (bookmarkMenuHTML). Paperclip still sits before the menu
-	// trigger on the bar.
+	// P3: paperclip (use-in-note) still sits before the overflow trigger on the
+	// bar; delete lives in bookmarkMenuHTML.
 	clip := strings.Index(src, `b("note",`)
 	more := strings.Index(src, `b("more",`)
 	if clip < 0 || more < 0 {

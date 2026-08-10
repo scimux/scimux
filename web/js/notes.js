@@ -575,35 +575,20 @@ export function referenceHTML(r, deps = {}){
   const into = icons.ICON_INTO
     ? `<span class="rot180">${icons.ICON_INTO}</span>`
     : "";
-  /* P6: jump · sendto · more. data-refmore is the text-clamp trigger and must
-     stay a distinct attribute from the overflow menu (data-refact="more"). */
+  /* P3: jump · copy · sendto · trash (no overflow). data-refmore is the
+     text-clamp trigger and must stay a distinct attribute. Remove is inline
+     .danger and confirms before deleting (see referenceAction). */
   return `<div class="wsref" data-ref="${esc(r.id)}" style="border-left-color:${esc(color)}">
     <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
     <div class="wsrefbody">${mdFn(snap.text || "")}</div>
     <button class="wsrefmore" data-refmore hidden></button>
     <div class="actionbar tear">
       <button class="btn-plain" data-refact="jump" aria-label="jump to chat">${icons.ICON_JUMP || ""}</button>
+      <button class="btn-plain" data-refact="copy" aria-label="copy">${icons.ICON_COPY || ""}</button>
       <button class="btn-plain" data-refact="sendto" aria-label="send to\u2026">${into}</button>
-      <button class="btn-plain" data-refact="more" aria-label="more actions">${icons.ICON_MENU_DOTS || ""}</button>
+      <button class="btn-plain danger" data-refact="trash" aria-label="remove">${icons.ICON_TRASH || ""}</button>
     </div>
   </div>`;
-}
-
-/** Overflow menu for a section reference. Items reuse data-refact so the
-    existing referenceAction dispatch keeps working. Destructive Remove is
-    last, .danger, after a separator. */
-export function referenceMenuHTML(deps = {}){
-  const icons = deps.icons || {};
-  return menuButtonHTML({
-    attrs: 'data-refact="copy"',
-    label: "Copy",
-    icon: icons.ICON_COPY || "",
-  }) + menuSepHTML() + menuButtonHTML({
-    attrs: 'data-refact="trash"',
-    label: "Remove",
-    icon: icons.ICON_TRASH || "",
-    danger: true,
-  });
 }
 
 /** Card stays grab-draggable only when not mid-rename (drag would steal the gesture). */
@@ -1424,17 +1409,13 @@ export function createNotesFeature(deps){
   async function referenceAction(btn){
     const refEl = btn.closest(".wsref");
     const secEl = btn.closest(".wssec");
-    /* Menu items live outside the card; fall back to the open-menu target. */
+    /* Confirm / prior menu path: fall back to the open-menu target. */
     const secId = (secEl && secEl.dataset && secEl.dataset.sec)
       || (menuRef && menuRef.secId) || "";
     const refId = (refEl && refEl.dataset && refEl.dataset.ref)
       || (menuRef && menuRef.refId) || "";
     const ref = findRef(secId, refId);
     if (!ref) return;
-    if (btn.dataset.refact === "more"){
-      openReferenceOverflow(btn, secId, refId);
-      return;
-    }
     if (btn.dataset.refact === "sendto"){
       const src = ref.source || {};
       openSendTo({
@@ -1462,40 +1443,48 @@ export function createNotesFeature(deps){
       return;
     }
     if (btn.dataset.refact === "trash"){
-      closeWsMenu();
-      try {
-        const docu = await api("/api/notes/" + encodeURIComponent(wsActiveId) +
-          "/sections/" + encodeURIComponent(secId) + "/references/" + encodeURIComponent(refId),
-          { method: "DELETE" });
-        if (docu && docu.id === wsActiveId){ wsActive = docu; syncCardMeta(docu); }
-      } catch { toast("Couldn't remove reference"); return; }
-      if (refEl){
-        const wrap = refEl.parentElement;
-        refEl.remove();
-        if (wrap && wrap.classList && wrap.classList.contains("wsrefs") && !wrap.children.length)
-          wrap.remove();
-      } else {
-        /* menu path: rebuild the note so the removed ref leaves the DOM */
-        renderNote();
-      }
+      /* Inline Remove confirms first (HIG; no window.confirm — blocked in iOS PWA). */
+      openRemoveRefConfirm(btn, secId, refId, refEl);
+      return;
     }
   }
 
-  function openReferenceOverflow(trigger, secId, refId){
+  /** Confirm before removing an embedded reference. Reuses the openDeleteConfirm
+      shell (popMenu, className "popmenu wsconfirm", offset 40, data-wconfirm). */
+  function openRemoveRefConfirm(anchor, secId, refId, refEl){
+    if (!doc || !secId || !refId) return;
     menuRef = { secId, refId };
     menuInboxT = "";
     const panel = root("wspanel");
     popMenu.open({
       panel,
-      anchor: trigger,
-      trigger,
+      anchor: anchor || null,
+      trigger: anchor || null,
       offset: 40,
-      className: "popmenu",
-      html: referenceMenuHTML({ icons }),
-      onClick: (ev) => {
-        const btn = ev.target.closest && ev.target.closest("[data-refact]");
+      className: "popmenu wsconfirm",
+      html:
+        `<div class="wsconfirmmsg">Remove this reference?</div>` +
+        `<button type="button" data-wconfirm="cancel">Cancel</button>` +
+        `<button type="button" data-wconfirm="ok" class="danger">Remove</button>`,
+      onClick: async ev => {
+        const btn = ev.target.closest && ev.target.closest("[data-wconfirm]");
         if (!btn) return;
-        referenceAction(btn);
+        closeWsMenu();
+        if (btn.dataset.wconfirm !== "ok") return;
+        try {
+          const docu = await api("/api/notes/" + encodeURIComponent(wsActiveId) +
+            "/sections/" + encodeURIComponent(secId) + "/references/" + encodeURIComponent(refId),
+            { method: "DELETE" });
+          if (docu && docu.id === wsActiveId){ wsActive = docu; syncCardMeta(docu); }
+        } catch { toast("Couldn't remove reference"); return; }
+        if (refEl){
+          const wrap = refEl.parentElement;
+          refEl.remove();
+          if (wrap && wrap.classList && wrap.classList.contains("wsrefs") && !wrap.children.length)
+            wrap.remove();
+        } else {
+          renderNote();
+        }
       },
     });
   }
@@ -1863,7 +1852,7 @@ export function createNotesFeature(deps){
   function onDocClick(e){
     /* exclude every overflow trigger so the open-tap does not instantly dismiss */
     if (popMenu.shouldCloseForClick(e.target, {
-      exclude: '[data-secmenu], [data-bmact="more"], [data-refact="more"]',
+      exclude: '[data-secmenu], [data-bmact="more"]',
     }))
       closeWsMenu();
   }

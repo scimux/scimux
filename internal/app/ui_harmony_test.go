@@ -202,11 +202,12 @@ func TestBookmarkIsACardWithInsideActions(t *testing.T) {
 
 // In zone 1 of the Notes workspace a bookmark only offered "Use in note", so
 // reaching its chat meant first placing it into a section — an extra step with
-// no purpose. The inbox must render the same action set as the compact pane,
-// minus comment (whose composer lives only in the pane).
+// no purpose. The inbox must render the shared action builder as the compact
+// pane, minus comment (whose composer lives only in the pane).
 //
-// P6: the visible bar is jump · sendto · note · more; copy/del (and pane-only
-// comment) live in bookmarkMenuHTML. Comment stays gated to the pane menu.
+// P3: inbox bar is jump · copy · note · more; sendto/del live in
+// bookmarkMenuHTML. Pane bar is jump · comment · (note) · more with copy
+// promoted into the bar when comment is withheld. Comment stays pane-only.
 func TestWorkspaceInboxBookmarkHasFullActions(t *testing.T) {
 	notes := mustReadWeb(t, "web/js/notes.js")
 	bm := mustReadWeb(t, "web/js/bookmarks.js")
@@ -220,23 +221,25 @@ func TestWorkspaceInboxBookmarkHasFullActions(t *testing.T) {
 	if !strings.Contains(bm, `b("jump"`) {
 		t.Error("the shared action row must offer a jump-to-chat action (item 5)")
 	}
-	for _, act := range []string{"sendto", "note", "more"} {
+	// P3 bar primaries (jump already checked). sendto moved to the overflow menu.
+	for _, act := range []string{"copy", "note", "more"} {
 		if !strings.Contains(bm, `b("`+act+`"`) {
 			t.Errorf("the shared action row must offer the %q action", act)
 		}
 	}
-	// Secondary actions live in the overflow menu (P6), not the visible bar.
+	// Secondary / overflow actions.
 	if !strings.Contains(bm, "bookmarkMenuHTML") {
 		t.Error("overflow secondary actions must live in bookmarkMenuHTML")
 	}
-	if !strings.Contains(bm, `data-bmact="copy"`) {
-		t.Error("copy must remain available via the overflow menu")
+	if !strings.Contains(bm, `data-bmact="sendto"`) {
+		t.Error("sendto must remain available via the overflow menu (P3)")
 	}
 	if !strings.Contains(bm, `data-bmact="del"`) {
 		t.Error("delete must remain available via the overflow menu")
 	}
 	// comment is pane-only: its composer (#bookmarkprompt) is not in the workspace.
-	if !strings.Contains(bm, `context === "pane" && nt && nt.node && !nt.anchor`) &&
+	if !strings.Contains(bm, `context === "pane" && !!(nt && nt.node && !nt.anchor)`) &&
+		!strings.Contains(bm, `context === "pane" && nt && nt.node && !nt.anchor`) &&
 		!strings.Contains(bm, `context === "pane" && nt.node && !nt.anchor`) {
 		t.Error(`"comment" must be gated to the pane: the reply composer lives only in the Bookmarks pane`)
 	}

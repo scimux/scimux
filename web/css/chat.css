@@ -180,9 +180,10 @@ body.cards-open #msgs { overflow: hidden; }
   padding: 0 13px; border-radius: 22px; font-size: 13px;
   color: var(--dim); background: var(--surface); }
 .bubactions button:active { color: var(--work); }
-.bubactions .rot180 { display: inline-flex; transform: rotate(180deg); }
-.bubactions .rot90l { display: inline-flex; transform: rotate(-90deg); }
-.bubactions .rot180 { display: inline-flex; transform: rotate(180deg); }
+/* Element-level: bookmark pane / inbox / reference bars emit .rot180 outside
+   .bubactions, and the send-to glyph must rotate on every surface. */
+.rot180 { display: inline-flex; transform: rotate(180deg); }
+.rot90l { display: inline-flex; transform: rotate(-90deg); }
 
 .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin: 0; }
 .bubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; background: var(--code-bg);

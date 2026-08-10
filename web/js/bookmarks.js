@@ -263,14 +263,15 @@ export function bookmarkActionsHTML(nt, opts){
     icons = {}, context = "pane", workspaceOpen = false, singleZone = false,
   } = opts || {};
   const canPlace = context === "inbox" || workspaceOpen || singleZone;
+  /* Comment is pane-only and withheld on comment rows (no nesting) and when
+     the bookmark has no node. When withheld, promote Copy into the bar so it
+     never has a hole and no action appears twice. */
+  const canComment = context === "pane" && !!(nt && nt.node && !nt.anchor);
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
-  const into = icons.ICON_INTO
-    ? `<span class="rot180">${icons.ICON_INTO}</span>`
-    : "";
   return `<div class="actionbar tear">
         ${nt.node || nt.uid ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
-        ${b("sendto", "send to\u2026", into)}
+        ${canComment ? b("comment", "comment", icons.ICON_COMMENT) : b("copy", "copy", icons.ICON_COPY)}
         ${canPlace ? b("note", "use in note", icons.ICON_CLIP) : ""}
         ${b("more", "more actions", icons.ICON_MENU_DOTS)}
       </div>`;
@@ -278,21 +279,28 @@ export function bookmarkActionsHTML(nt, opts){
 
 /** Overflow menu for a bookmark row. Menu items reuse data-bmact so the same
     dispatch handles bar and menu. Destructive Delete is last, .danger, after
-    a separator (HIG). Comment is pane-only and withheld from comments. */
+    a separator (HIG). Copy is omitted when already on the bar (Comment
+    withheld). Send to lives here for pane and inbox. */
 export function bookmarkMenuHTML(nt, opts){
   const { icons = {}, context = "pane" } = opts || {};
+  const canComment = context === "pane" && !!(nt && nt.node && !nt.anchor);
+  /* Copy is on the bar whenever Comment is not — never both, never neither. */
+  const copyOnBar = !canComment;
+  const into = icons.ICON_INTO
+    ? `<span class="rot180">${icons.ICON_INTO}</span>`
+    : "";
   let html = "";
-  if (context === "pane" && nt && nt.node && !nt.anchor){
+  if (!copyOnBar){
     html += menuButtonHTML({
-      attrs: 'data-bmact="comment"',
-      label: "Comment",
-      icon: icons.ICON_COMMENT || "",
+      attrs: 'data-bmact="copy"',
+      label: "Copy",
+      icon: icons.ICON_COPY || "",
     });
   }
   html += menuButtonHTML({
-    attrs: 'data-bmact="copy"',
-    label: "Copy",
-    icon: icons.ICON_COPY || "",
+    attrs: 'data-bmact="sendto"',
+    label: "Send to\u2026",
+    icon: into,
   });
   html += menuSepHTML();
   html += menuButtonHTML({
