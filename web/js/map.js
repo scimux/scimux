@@ -338,34 +338,42 @@ export function laneChipStyle(color, selected, { escape = esc, contrastText = co
   return `border-color:${c};background:${c};color:${escape(contrastText(color))}`;
 }
 
-/* Per-tab counts of stations that need the user to let the agent proceed.
-   Reuses P6's kind split (railTicks / attentionPill): any attention —
-   including the neutral "inspect" — is waiting; turn_done alone is ready and
-   is NOT counted. Membership mirrors renderMap:
-   lane_id && served(n).some(laneID => !grp || grp.includes(laneID)).
-   A station served by several lanes counts once for All and once per group
-   that intersects its served set (never double-counted inside one tab).
-   Pure; returns { all, [groupId]: n }. */
+/* Per-tab badge: one number, and the kind the hue will name. Reuses P6's
+   pill rule verbatim (railTicks / attentionPill): any attention — including
+   the neutral "inspect" — is waiting, turn_done without attention is ready,
+   and a tab holding both badges the waiting count only. Never the sum: the
+   number and the hue must always say the same thing.
+   Membership mirrors renderMap: lane_id && served(n).some(inGroup), with the
+   group's lanes read through groupLanes so a record with no lanes key means
+   "no filter" in both places. A station served by several lanes counts once
+   for All and once per intersecting group, never twice inside one tab.
+   Pure; returns { all: {n, kind}, [groupId]: {n, kind} }. */
 export function mapTabAttentionCounts(nodes, groups, { served = servedLanes } = {}){
   const list = Array.isArray(nodes) ? nodes : [];
   const gs = Array.isArray(groups) ? groups : [];
-  const out = { all: 0 };
-  for (const g of gs) out[g.id] = 0;
+  const tabs = [["all", groupLanes("all", gs)], ...gs.map(g => [g.id, groupLanes(g.id, gs)])];
+  const tally = {};
+  for (const [id] of tabs) tally[id] = { waiting: 0, ready: 0 };
   for (const n of list){
-    if (!n || !n.lane_id || !n.attention) continue;
+    if (!n || !n.lane_id) continue;
+    const kind = n.attention ? "waiting" : (turnFinished(n) ? "ready" : "");
+    if (!kind) continue;
     const lanes = served(n) || [];
-    if (!lanes.length) continue;
-    out.all++;
-    for (const g of gs){
-      const grp = g.lanes || [];
-      if (lanes.some(id => grp.includes(id))) out[g.id]++;
+    for (const [id, grp] of tabs){
+      if (lanes.some(laneID => !grp || grp.includes(laneID))) tally[id][kind]++;
     }
+  }
+  const out = {};
+  for (const [id] of tabs){
+    const t = tally[id];
+    out[id] = t.waiting ? { n: t.waiting, kind: "waiting" } : { n: t.ready, kind: "ready" };
   }
   return out;
 }
 
 /* Signature for the map-tabs region: rebuild only when selection, group set
-   (id+name), or waiting counts change. Counts alone turn a formerly static
+   (id+name), or badge counts change — kind included, so 1 waiting → 1 ready
+   repaints instead of keeping the wrong hue. Counts alone turn a formerly static
    bar into a polled one; without this gate every tick would rewrite #maptabs. */
 export function mapTabsSignature(mapTab, groups, counts){
   return JSON.stringify({
@@ -377,9 +385,12 @@ export function mapTabsSignature(mapTab, groups, counts){
 
 export function mapTabsHTML(mapTab, groups, { escape = esc, counts = null } = {}){
   const c = counts || {};
-  const badge = n => {
-    const k = Number(n) || 0;
-    return k > 0 ? `<span class="tabcount">${k}</span>` : "";
+  const badge = c => {
+    const k = Number(c && c.n) || 0;
+    if (k <= 0) return "";
+    /* Marker only — the hue lives in CSS, same split as #mappill.ready. */
+    const ready = c.kind === "ready" ? " ready" : "";
+    return `<span class="tabcount${ready}">${k}</span>`;
   };
   const sorted = [...(groups || [])].sort(byNameID);
   return (
