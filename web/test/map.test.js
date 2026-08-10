@@ -2985,6 +2985,23 @@ function createWallScrollFeature(nodes, opts = {}){
       remove(name){ this._set.delete(name); },
     },
   };
+  /* The wall's viewport height is not constant: docking hands half of it to the
+     chat and a divider drag rewrites it continuously. There is no layout engine
+     here, so the harness stands in for one —
+       dockedClientHeight → the height returned while body carries .map-dock
+       clientHeightRef    → a mutable { v } a test can rewrite mid-drag
+     Both feed the same clientHeight the feature reads. */
+  if (opts.dockedClientHeight != null || opts.clientHeightRef){
+    Object.defineProperty(mapscroll, "clientHeight", {
+      configurable: true,
+      get(){
+        if (opts.clientHeightRef) return opts.clientHeightRef.v;
+        return body.classList.contains("map-dock")
+          ? opts.dockedClientHeight
+          : opts.clientHeight;
+      },
+    });
+  }
   const storage = memoryStorage({
     [MAP_FULL_KEY]: "1",
     [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
@@ -2998,6 +3015,9 @@ function createWallScrollFeature(nodes, opts = {}){
       mapwrap, mapscroll, maptoolbar, mappill,
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
       mapfullbtn: fakeEl("mapfullbtn"),
+      /* Optional: the dock divider drags the wall's own viewport height. */
+      mapdivider: opts.mapdivider,
+      app: opts.app,
     },
     document: { body, querySelector: () => null },
     storage,
@@ -3022,7 +3042,10 @@ function createWallScrollFeature(nodes, opts = {}){
   });
   feature.bind();
   feature.restoreChrome();
-  return { feature, mapwrap, mapscroll, maptoolbar, mappill, body, storage, nodes, byId };
+  return {
+    feature, mapwrap, mapscroll, maptoolbar, mappill, body, storage, nodes, byId,
+    mapdivider: opts.mapdivider,
+  };
 }
 
 function selectWallStop(mapwrap, { nid, skey, stop }){
@@ -3314,6 +3337,124 @@ test("P6: successive wall renders keep one pill listener (no re-bind)", () => {
   feature.render();
   assert.equal(mappill._listenerCount("click"), 1,
     "re-render must not re-bind click (no orphaned listeners)");
+  feature.destroy();
+});
+
+/** A tap on the attention ring's transparent hit circle. */
+function ringTapEvent(id){
+  return {
+    target: {
+      dataset: { jump: id },
+      classList: { contains: n => n === "attnstation-hit" },
+      closest(selector){
+        if (selector === ".attnstation-hit" || selector === "[data-jump]") return this;
+        return null;
+      },
+    },
+  };
+}
+
+test("P6: a ready-only pill wears --work, never the blocked-on-you yellow", () => {
+  /* P5 settled that --attn means exactly one thing: blocked on you. A pill that
+     says "2 ready" while painted yellow re-merges the two meanings the phase
+     just separated — and points at stations painted --work. */
+  const base = mapCssSrc.match(/(?:^|\n)\s*#mappill\s*\{([^}]+)\}/);
+  assert.ok(base, "#mappill base rule exists in map.css");
+  assert.match(base[1], /var\(--attn\)/, "the default pill is the attention hue");
+  const ready = mapCssSrc.match(/#mappill\.ready\s*\{([^}]+)\}/);
+  assert.ok(ready, "#mappill.ready rule exists");
+  assert.match(ready[1], /var\(--work\)/, "a ready pill uses the finished hue");
+  assert.doesNotMatch(ready[1], /var\(--attn\)/, "and drops --attn entirely");
+
+  // And the class is applied only when the label actually says "ready".
+  const nodes = [
+    p4Node("a", "2026-01-01T00:00:00Z", "A"),
+    p4Node("b", "2026-01-02T00:00:00Z", "B"),
+    p4Node("c", "2026-01-03T00:00:00Z", "C"),
+  ];
+  nodes[0].turn_done = true; // oldest → bottom row, off-screen
+  const { feature, mappill } = createWallScrollFeature(nodes, { clientHeight: 40 });
+  feature.render();
+  assert.ok(mappill.classList.contains("on"));
+  assert.match(mappill.textContent, /1 ready/);
+  assert.ok(mappill.classList.contains("ready"), "ready-only pill carries .ready");
+
+  // One waiting station joins it: the pill goes back to waiting, and yellow.
+  nodes[2].attention = "approval";
+  feature.render();
+  assert.match(mappill.textContent, /1 waiting/);
+  assert.equal(mappill.classList.contains("ready"), false,
+    "a waiting pill must not keep the ready hue");
+  feature.destroy();
+});
+
+test("P6: entering the dock recomputes the pill — the ring's own gesture shrinks the map", () => {
+  /* The ring tap docks the chat, which hands half the map's height to it. The
+     pill's whole input is that height, so the gesture P6 introduced invalidates
+     the verdict P6 painted. Nothing else recomputes it: an idle wall skips
+     renderMap on every poll, so a stale pill stays stale indefinitely. */
+  const nodes = [
+    p4Node("n0", "2026-01-01T00:00:00Z", "N0"),
+    p4Node("n1", "2026-01-02T00:00:00Z", "N1"),
+    p4Node("n2", "2026-01-03T00:00:00Z", "N2"),
+    p4Node("n3", "2026-01-04T00:00:00Z", "N3"),
+    p4Node("n4", "2026-01-05T00:00:00Z", "N4"),
+  ];
+  nodes[1].attention = "approval"; // row index 3 → y = 16 + 3*76 + 38 = 282
+  const { feature, mapwrap, mappill, body } = createWallScrollFeature(nodes, {
+    clientHeight: 500,       // undocked: content is 396 tall, everything fits
+    dockedClientHeight: 80,  // docked: the wall keeps a sliver
+    scrollTop: 0,
+    selectNode: () => {},
+    jumpChatToNow: () => {},
+  });
+  feature.render();
+  assert.equal(mappill.classList.contains("on"), false,
+    "undocked: the whole wall fits, so no pill");
+
+  firstListener(mapwrap, "click")(ringTapEvent("n1"));
+  assert.equal(body.classList.contains("map-dock"), true, "the ring docked the chat");
+  assert.ok(mappill.classList.contains("on"),
+    "docking pushed the asking station off-screen — the pill must say so");
+  assert.match(mappill.textContent, /1 waiting/);
+  feature.destroy();
+});
+
+test("P6: a divider drag recomputes the pill", () => {
+  /* Same failure by the other route: applyDockFrac writes --dockmap and is
+     documented as never re-rendering the map — correct, and the reason the pill
+     has to be repositioned explicitly. */
+  const nodes = [
+    p4Node("a", "2026-01-01T00:00:00Z", "A"),
+    p4Node("b", "2026-01-02T00:00:00Z", "B"),
+    p4Node("c", "2026-01-03T00:00:00Z", "C"),
+  ];
+  nodes[0].attention = "approval"; // oldest → bottom row
+  const viewport = { v: 500 };     // content is 16 + 3*76 = 244 tall
+  const mapdivider = fakeEl("mapdivider");
+  mapdivider.setPointerCapture = () => {};
+  mapdivider.releasePointerCapture = () => {};
+  const app = fakeEl("app");
+  app.getBoundingClientRect = () => ({
+    top: 0, height: 1000, bottom: 1000, left: 0, right: 800, width: 800,
+  });
+  const { feature, mappill } = createWallScrollFeature(nodes, {
+    clientHeightRef: viewport, scrollTop: 0, mapdivider, app,
+  });
+  feature.render();
+  assert.equal(mappill.classList.contains("on"), false, "tall map: nothing off-screen");
+
+  firstListener(mapdivider, "pointerdown")({
+    target: mapdivider, pointerId: 1, clientY: 600, button: 0,
+    preventDefault(){},
+  });
+  viewport.v = 60; // the drag handed the height to the chat
+  firstListener(mapdivider, "pointermove")({
+    target: mapdivider, pointerId: 1, clientY: 300,
+  });
+  assert.ok(mappill.classList.contains("on"),
+    "the drag changed the viewport — the pill must recompute");
+  assert.match(mappill.textContent, /1 waiting/);
   feature.destroy();
 });
 
@@ -3981,10 +4122,17 @@ test("P6: attentionPill pure — finished-only → ready; mixed → waiting; arr
   assert.equal(ready.show, true);
   assert.equal(ready.count, 2);
   assert.equal(ready.dir, "down");
+  assert.equal(ready.kind, "ready");
   assert.match(ready.label, /2 ready/);
   assert.doesNotMatch(ready.label, /waiting/);
 
-  // Mixed hard + finished off-screen → "waiting" wins the word.
+  /* Mixed hard + finished off-screen. Maintainer decision 2026-08-10: the pill
+     counts where the user's attention is needed to let the agent proceed — so
+     the count is the *waiting* ticks alone, never the total. "2 waiting" with
+     one waiting station would claim two agents are blocked on you, which is
+     exactly the meaning P5 reserved for --attn. The finished station is not
+     announced while a waiting one is off-screen; it gets the pill to itself
+     once the waiting ones are on-screen or answered. */
   const mixed = fn({
     ticks: [
       { nodeId: "w", stopKey: "w#0", frac: 0.8, kind: "waiting" },
@@ -3992,11 +4140,15 @@ test("P6: attentionPill pure — finished-only → ready; mixed → waiting; arr
     ],
     scrollTop: 0, viewportH: 200, contentH: 1000,
   });
-  assert.equal(mixed.count, 2);
-  assert.match(mixed.label, /2 waiting/);
+  assert.equal(mixed.count, 1, "counts the waiting stations, not every off-screen tick");
+  assert.equal(mixed.kind, "waiting");
+  assert.match(mixed.label, /1 waiting/);
   assert.doesNotMatch(mixed.label, /ready/);
 
-  // Nearest of two below is the smaller frac (closer to the viewport bottom).
+  /* The label names waiting, so the target must BE a waiting station: a pill
+     that says "1 waiting ↓" and scrolls to a finished one is a lie about the
+     destination. Nearest *among the named kind* — here the far waiting tick
+     wins over the nearer ready one. */
   const nearer = fn({
     ticks: [
       { nodeId: "far", stopKey: "far#0", frac: 0.95, kind: "waiting" },
@@ -4004,8 +4156,20 @@ test("P6: attentionPill pure — finished-only → ready; mixed → waiting; arr
     ],
     scrollTop: 0, viewportH: 200, contentH: 1000,
   });
-  assert.equal(nearer.nodeId, "near");
+  assert.equal(nearer.nodeId, "far", "the named kind picks the target");
+  assert.equal(nearer.stopKey, "far#0");
   assert.equal(nearer.dir, "down");
+
+  // Nearest of two below, both waiting: the smaller frac (closer to the fold).
+  const twoBelow = fn({
+    ticks: [
+      { nodeId: "far", stopKey: "far#0", frac: 0.95, kind: "waiting" },
+      { nodeId: "near", stopKey: "near#0", frac: 0.6, kind: "waiting" },
+    ],
+    scrollTop: 0, viewportH: 200, contentH: 1000,
+  });
+  assert.equal(twoBelow.nodeId, "near");
+  assert.equal(twoBelow.count, 2);
 
   // Nearest of two above is the larger frac (closer to the viewport top).
   const nearerUp = fn({
@@ -4017,6 +4181,48 @@ test("P6: attentionPill pure — finished-only → ready; mixed → waiting; arr
   });
   assert.equal(nearerUp.dir, "up");
   assert.equal(nearerUp.nodeId, "nearUp");
+
+  /* Direction follows the named kind too: a waiting station above and a
+     finished one below must send the arrow up, to the one that needs you. */
+  const waitingAbove = fn({
+    ticks: [
+      { nodeId: "w", stopKey: "w#0", frac: 0.1, kind: "waiting" },
+      { nodeId: "r", stopKey: "r#0", frac: 0.9, kind: "ready" },
+    ],
+    scrollTop: 300, viewportH: 200, contentH: 1000,
+  });
+  assert.equal(waitingAbove.dir, "up");
+  assert.equal(waitingAbove.nodeId, "w");
+  assert.equal(waitingAbove.count, 1);
+});
+
+test("P6: railTicks folds inspect into waiting — the tick set is the ring set", () => {
+  /* The wall paints a ring for ANY attention (`if (n.attention)`), including
+     the neutral "inspect" P1 raises when Claude's approval dialog cannot be
+     proven from the transcript. The pill exists to locate off-screen rings, so
+     its tick set must be that same set: a station that is ringed but uncounted
+     is one the locator refuses to take you to — and inspect is precisely the
+     state P1 added for the waits that were being missed. Maintainer decision
+     2026-08-10: inspect counts as waiting. */
+  const fn = mapExports.railTicks;
+  const mk = (id, attention, done) => ({
+    n: {
+      id, title: id, attention, turn_done: !!done,
+      created_at: "t", stops: [], live: "quiet", lane_id: "L",
+    },
+    i: 0, time: "t", head: true,
+  });
+  const rows = [
+    mk("insp", "inspect"),
+    mk("ask", "approval"),
+    mk("done", "", true),
+    mk("quiet", ""),
+  ];
+  const ticks = fn({ rows, rowHeight: 76, offset: 16 });
+  assert.deepEqual(ticks.map(t => t.nodeId), ["insp", "ask", "done"],
+    "a ringed inspect station gets a tick");
+  assert.deepEqual(ticks.map(t => t.kind), ["waiting", "waiting", "ready"],
+    "inspect is a waiting kind — it needs you before the agent proceeds");
 });
 
 test("P6: railTicks folds finished heads and reports kind", () => {
