@@ -557,6 +557,15 @@ func TestNewestTurnTime(t *testing.T) {
 		t.Fatalf("after undated turn: got %v/%v, want the previous stamp", ts, ok)
 	}
 
+	// Claude Code flushes some records late, so a trailing turn can carry an
+	// *older* stamp than one already parsed (the P1 root cause). Newest wins:
+	// a late flush must not age a fresh delivery out of the freshness window.
+	f.WriteString(`{"type":"user","timestamp":"2026-08-10T09:14:00Z","message":{"role":"user","content":"flushed late"}}` + "\n")
+	tl.Poll()
+	if ts, ok := tl.NewestTurnTime(); !ok || !ts.Equal(want) {
+		t.Fatalf("after late-flushed older turn: got %v/%v, want the newer stamp %v", ts, ok, want)
+	}
+
 	// Rotation resets it with the rest of the tailer state, so a /clear-ed log
 	// cannot date a fresh chat by its pre-clear turn.
 	if err := os.WriteFile(path, nil, 0o644); err != nil {

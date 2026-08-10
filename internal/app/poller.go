@@ -211,7 +211,9 @@ func (a *app) poll() {
 		// ACP nodes never reach this with a Tailer (tailerFor returns nil when
 		// Transcript == ""); absent turn_done means UNKNOWN, not "not finished".
 		// The claim expires: an idle session must not stay "finished" forever.
-		// Undated turns read as unknown and decline rather than guess.
+		// Undated turns read as unknown and decline rather than guess (the
+		// dated check is deliberately redundant with the window — a zero time
+		// is always outside it — and states the intent at the seam).
 		turnDone := false
 		if state == "quiet" && attn == "" && n.EndedAt == "" &&
 			quietTl != nil && quietTl.Delivered() && quietTl.PendingCount() == 0 {
