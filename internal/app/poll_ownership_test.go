@@ -263,9 +263,10 @@ func TestHandleKeyPreservesAttentionBeforeDelivery(t *testing.T) {
 // ---------- notePeekDialog: raise-only, fresh stamp, evidence required ----------
 
 // TestNotePeekDialogOwnership covers the deliberate non-poller attention raise:
-// only corroborated structured evidence raises attention; fresh attention stamps
-// attnAt; existing attention is not overwritten or restamped; matcher failure
-// or missing structured evidence leaves attention unchanged.
+// WaitingOn+matcher raises approval/question; quietAttentionFallback raises
+// dialog/inspect without WaitingOn (P1c); fresh attention stamps attnAt;
+// existing attention is not overwritten or restamped; matcher failure with an
+// unresolved call and no owing stall leaves attention unchanged.
 func TestNotePeekDialogOwnership(t *testing.T) {
 	dialogPane := "Do you want to proceed?\n  1. Yes\n  2. No\n  Esc to cancel"
 	normalPane := "Agent working on files…"
@@ -330,10 +331,12 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		}
 	})
 
-	t.Run("no_structured_evidence_leaves_unchanged", func(t *testing.T) {
+	t.Run("dialog_matcher_without_waiting_on_raises_dialog", func(t *testing.T) {
+		// P1c: peek shares the quiet-branch predicate — structural/legacy
+		// dialoghint alone raises "dialog" even with no unresolved tool call
+		// (Claude late tool_use flush). Was "leaves_unchanged" pre-P1.
 		f := &fakeTmux{alive: map[string]bool{"p3": true}, capture: dialogPane}
 		a := newTestApp(t, f)
-		// Transcript with no unresolved tool call — pane dialog alone is not enough.
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`)
@@ -346,11 +349,8 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		a.handlePeek(rec, r)
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if got := a.attn["p3"]; got != "" {
-			t.Errorf("attention raised without structured evidence: %q", got)
-		}
-		if _, ok := a.attnAt["p3"]; ok {
-			t.Error("attnAt set without structured evidence")
+		if got := a.attn["p3"]; got != "dialog" {
+			t.Errorf("attention = %q, want dialog from matcher without WaitingOn", got)
 		}
 	})
 
@@ -377,7 +377,9 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		}
 	})
 
-	t.Run("missing_transcript_leaves_unchanged", func(t *testing.T) {
+	t.Run("missing_transcript_matcher_still_raises_dialog", func(t *testing.T) {
+		// Same quiet-branch path as poller's terminal-only harness: matcher
+		// alone classifies "dialog" with no transcript (P1c parity).
 		f := &fakeTmux{alive: map[string]bool{"p5": true}, capture: dialogPane}
 		a := newTestApp(t, f)
 		n := &Node{ID: "p5", Title: "p5", Agent: "claude", CreatedAt: "2026-07-18T00:00:00Z"}
@@ -389,8 +391,8 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		a.handlePeek(rec, r)
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if got := a.attn["p5"]; got != "" {
-			t.Errorf("attention without transcript: %q", got)
+		if got := a.attn["p5"]; got != "dialog" {
+			t.Errorf("attention without transcript = %q, want dialog", got)
 		}
 	})
 }

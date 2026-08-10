@@ -113,9 +113,18 @@ test commands are `bash --norc` or `cat`.
   never arrives (observed live: a 6m42s approval wait, unnoticed). If the
   matcher goes dark (TUI rewording), the same confined-animation state with
   a stalled transcript degrades to the neutral `inspect` after
-  `animStallAfter`, never a classified dialog. `handlePeek` runs the same
-  corroborated check one-shot when a human opens the terminal view. Liveness
-  itself stays regex-free — the matchers must never feed active/quiet.
+  `animStallAfter`, never a classified dialog. A further mechanical quiet-
+  branch backstop covers Claude Code's late tool_use flush (the call record
+  is not on disk until approval, so `WaitingOn` stays false for the whole
+  wait): when the newest recognized transcript record is a **user** turn —
+  a human prompt or a tool result, i.e. the agent owes the next output —
+  and the pane has been static past `owedStallAfter`, raise neutral
+  `inspect`. That signal is turn role plus pane quietness only — no pane
+  text — and never feeds liveness. `handlePeek` runs the same quiet-branch
+  predicate (matcher + owing stall) one-shot when a human opens the terminal
+  view, so a late-flush dialog is visible without needing an unresolved call
+  in the transcript. Liveness itself stays regex-free — the matchers and the
+  owing backstop must never feed active/quiet.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

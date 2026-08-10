@@ -1031,8 +1031,8 @@ test("P1d: ordinary 200 acknowledged is unchanged success", async () => {
   ctx.feature.destroy();
 });
 
-test("409 restores quietly; non-409 alerts; draft merge and stage restore", async () => {
-  // 409
+test("409 alerts with server message; draft merge and stage restore", async () => {
+  // P1d: 409 must surface the server's message (was swallowed pre-P1).
   const ctx = makeFeature({
     sendHandler: async () => {
       const err = new Error("conflict");
@@ -1046,9 +1046,11 @@ test("409 restores quietly; non-409 alerts; draft merge and stage restore", asyn
   await Promise.resolve();
   await Promise.resolve();
   ctx.roots.prompt.textContent = "original";
+  await ctx.feature.sendPrompt();
+  assert.deepEqual(ctx.alerts, ["conflict"]);
+
   // while "in flight", type newer draft after optimistic clear happens inside send —
   // inject by setting storage after clear via intercepting: use a custom send that sets newer mid-call
-  let phase = 0;
   const ctx2 = makeFeature({
     sendHandler: async () => {
       // after optimistic clear, operator typed more
@@ -1066,7 +1068,7 @@ test("409 restores quietly; non-409 alerts; draft merge and stage restore", asyn
   const p2 = "blob:a.png";
   ctx2.roots.prompt.textContent = "original";
   await ctx2.feature.sendPrompt();
-  assert.equal(ctx2.alerts.length, 0);
+  assert.deepEqual(ctx2.alerts, ["conflict"]);
   assert.equal(ctx2.clears[0], "n1");
   assert.equal(ctx2.storage.getItem("scimux-draft:n1"), "original\n\nnewer typing");
   assert.equal(ctx2.feature.promptText(), "original\n\nnewer typing");
@@ -1099,8 +1101,8 @@ test("409 restores quietly; non-409 alerts; draft merge and stage restore", asyn
   ctx4.roots.prompt.textContent = "a";
   await ctx4.feature.sendPrompt();
   assert.deepEqual(ctx4.clears, ["n1"]);
+  assert.deepEqual(ctx4.alerts, ["c"]);
 
-  void ctx; void phase;
   ctx.feature.destroy();
   ctx2.feature.destroy();
   ctx3.feature.destroy();
@@ -1178,7 +1180,8 @@ test("send button routes to interrupt when busy", async () => {
   ctx.feature.destroy();
 });
 
-test("interrupt 409 is quiet; other errors alert", async () => {
+test("interrupt 409 surfaces server message; other errors alert", async () => {
+  // P1d: 409 must show the server's message (was swallowed pre-P1).
   const ctx = makeFeature({
     interruptHandler: async () => {
       const err = new Error("no turn");
@@ -1188,7 +1191,7 @@ test("interrupt 409 is quiet; other errors alert", async () => {
   });
   ctx.feature.bind();
   await ctx.feature.interruptPrompt();
-  assert.equal(ctx.alerts.length, 0);
+  assert.deepEqual(ctx.alerts, ["no turn"]);
 
   const ctx2 = makeFeature({
     interruptHandler: async () => {

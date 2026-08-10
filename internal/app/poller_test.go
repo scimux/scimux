@@ -795,6 +795,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 	})
 
 	// (d) matcher hit classifies as dialog immediately, before the stall elapses.
+	// Quiet needs lastChg ≥ 8s; owedStallAfter is 45s — use 10s to sit between.
 	t.Run("structural_matcher_dialog_immediate", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
@@ -806,13 +807,16 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			live:      map[string]string{},
 			attn:      map[string]string{},
 			prevCap:   map[string]string{"cl1": editDialog},
-			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-5 * time.Second)},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
 			tailers:   map[string]*transcript.Tailer{},
 			chatMark:  map[string]chatMark{},
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(editDialog)),
 		}
 		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
 		if got := a.attn["cl1"]; got != "dialog" {
 			t.Errorf("attention = %q, want dialog from structural matcher", got)
 		}

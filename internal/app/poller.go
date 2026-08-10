@@ -120,16 +120,14 @@ func (a *app) poll() {
 				off, prog := tl.Progress()
 				a.noteChatProgress(n.ID, off, prog, prev == "active")
 			}
-			// Parallel regex-based dialog detection. Independent of structured
-			// transcript parsing; fires on terminal-only harnesses, format
-			// changes, or discovery failures. Only runs on quiet panes, only
-			// examines visible screen (no scrollback mixed in).
+			// Dialoghint matcher + owing-stall backstop (P1a/P1b). Shared with
+			// notePeekDialog via quietAttentionFallback — never feeds liveness.
 			if attn == "" {
-				if visible, err := s.CaptureVisible(); err == nil {
-					if dialoghint.ClassifyVisible(visible) {
-						attn = "dialog"
-					}
-				}
+				a.mu.Lock()
+				quietSince := a.lastChg[n.ID]
+				a.mu.Unlock()
+				visible, _ := s.CaptureVisible()
+				attn = quietAttentionFallback(tl, visible, quietSince)
 			}
 			// Neutral needs-a-look state: the pane is quiet but there is no
 			// trustworthy structured transcript to say whether the agent
@@ -368,8 +366,28 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 // unresolved tool call and a stalled transcript waits before the neutral
 // "inspect" backstop fires — the safety net for dialogs the matcher no
 // longer recognizes after a TUI rewording.
+// owedStallAfter: quiet-pane backstop when the newest transcript turn is a
+// user turn (agent owes output) and the pane has been static this long with
+// no unresolved call and no matcher hit — Claude Code's late tool_use flush
+// leaves WaitingOn blind for the whole approval wait (P1b).
 const animMaxLines = 3
 const animStallAfter = 90 * time.Second
+const owedStallAfter = 45 * time.Second
+
+// quietAttentionFallback is the quiet-branch attention sources that do not
+// need WaitingOn: the dialoghint matcher (P1a, including the structural
+// numbered-options shape) and the owing-stall mechanical backstop (P1b).
+// Called from the poller's quiet branch and from notePeekDialog (P1c).
+// Feeds attention only — never liveness. The backstop reads no pane text.
+func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince time.Time) string {
+	if visible != "" && dialoghint.ClassifyVisible(visible) {
+		return "dialog"
+	}
+	if tl != nil && tl.Owing() && !quietSince.IsZero() && time.Since(quietSince) >= owedStallAfter {
+		return "inspect"
+	}
+	return ""
+}
 
 type animState struct {
 	lines []int     // union of line indices seen changing, sorted

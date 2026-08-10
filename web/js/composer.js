@@ -536,8 +536,8 @@ export function createComposerFeature(deps){
       if (typeof d.scheduleTick === "function") d.scheduleTick(250);
       else if (typeof d.tick === "function") setTimeoutFn(d.tick, 250);
     } catch (err) {
-      /* a stop tap racing the turn's natural end 409s — not an error */
-      if (err && err.status !== 409) alertFn(err.message);
+      /* surface every failure, including 409 (in flight / closed / unconfirmed) */
+      if (err) alertFn(err.message);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       if (typeof d.refreshChat === "function") d.refreshChat();
     }
@@ -587,21 +587,40 @@ export function createComposerFeature(deps){
     if (typeof d.setSentEcho === "function") d.setSentEcho(echo);
     if (typeof d.paintEcho === "function") d.paintEcho(dest);
     try {
+      let res = null;
       if (typeof d.api === "function"){
-        await d.api(`/api/nodes/${encodeURIComponent(dest)}/send`, {
+        res = await d.api(`/api/nodes/${encodeURIComponent(dest)}/send`, {
           method: "POST",
           body: JSON.stringify({ text, attachments: refs }),
         });
+      }
+      /* 200 with status:"unconfirmed" is not-delivered — keep the draft */
+      if (res && res.status === "unconfirmed") {
+        alertFn("not delivered — check the terminal");
+        if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
+        const newer = storage.getItem(draftStorageKey(dest)) || "";
+        const merged = mergeFailedDraft(text, newer);
+        if (merged) storage.setItem(draftStorageKey(dest), merged);
+        if (items.length)
+          stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
+        if (selId() === dest){
+          setPromptText(merged);
+          renderStage();
+        }
+        if (typeof d.invalidateChat === "function") d.invalidateChat();
+        if (typeof d.scheduleTick === "function") d.scheduleTick(400);
+        else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
+        return;
       }
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       items.forEach(x => {
         if (x.preview) URLImpl.revokeObjectURL(x.preview);
       });
-      /* unconfirmed is still success — draft stays cleared */
       if (typeof d.scheduleTick === "function") d.scheduleTick(400);
       else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
     } catch (err) {
-      if (!err || err.status !== 409) alertFn(err && err.message);
+      /* surface every failure, including 409 (unconfirmed / in flight / closed) */
+      if (err) alertFn(err && err.message);
       /* retract only this destination's echo */
       if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
       const newer = storage.getItem(draftStorageKey(dest)) || "";

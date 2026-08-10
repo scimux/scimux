@@ -185,6 +185,11 @@ type Tailer struct {
 	lastCacheRead   int64
 	lastCacheCreate int64
 	lastTurnID      string
+	// owing is true when the newest recognized agent-facing record leaves the
+	// agent owing the next output: a human prompt or a tool result. False after
+	// an assistant record (visible text or tool_use). Unknown record types leave
+	// it unchanged. Quiet-pane stall backstop input only (P1b) — never liveness.
+	owing bool
 }
 
 // UsageBreakdown is the latest per-turn token split retained from a Claude
@@ -480,6 +485,15 @@ func (t *Tailer) WaitingOn() (name string, ok bool) {
 	return t.pending[len(t.pending)-1].name, true
 }
 
+// Owing reports whether the newest recognized transcript record leaves the
+// agent owing the next output (human prompt or tool result). The quiet-pane
+// stall backstop combines this with pane quietness only — no pane text.
+func (t *Tailer) Owing() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.owing
+}
+
 // notePending updates the pending-call set from one JSONL line and appends
 // ToolStamp entries for the mirror (V2-P2). Pending tracking and tool
 // stamping share one parse so join keys stay identical.
@@ -499,6 +513,10 @@ func (t *Tailer) notePending(line []byte) {
 		if generic.IsMeta {
 			return
 		}
+		// Agent-facing record: user (prompt or tool_result) leaves the agent
+		// owing; assistant (text or tool_use) clears the debt. Set before the
+		// content parse so tool_result-only user records still mark owing.
+		t.owing = generic.Type == "user"
 		var msg struct {
 			Content json.RawMessage `json:"content"`
 		}
@@ -553,6 +571,7 @@ func (t *Tailer) notePending(line []byte) {
 		switch p.Type {
 		case "function_call", "custom_tool_call":
 			t.pending = append(t.pending, pendingCall{p.CallID, p.Name})
+			t.owing = false
 			if p.CallID != "" {
 				t.Tools = append(t.Tools, ToolStamp{
 					ID: p.CallID, Title: p.Name, Status: "pending", Time: generic.Timestamp,
@@ -560,6 +579,7 @@ func (t *Tailer) notePending(line []byte) {
 			}
 		case "function_call_output", "custom_tool_call_output":
 			t.resolve(p.CallID)
+			t.owing = true
 			if p.CallID != "" {
 				t.Tools = append(t.Tools, ToolStamp{
 					ID: p.CallID, Status: "completed", Time: generic.Timestamp,
@@ -609,6 +629,7 @@ func (t *Tailer) Poll() []Turn {
 		t.ctxUsed, t.ctxWindow = 0, 0
 		t.lastIn, t.lastOut, t.lastCacheRead, t.lastCacheCreate = 0, 0, 0, 0
 		t.lastTurnID = ""
+		t.owing = false
 	}
 	if st.Size() == t.offset {
 		return t.Turns
@@ -643,6 +664,9 @@ func (t *Tailer) Poll() []Turn {
 		t.noteUsage(line)
 		if turn, ok := ParseLine(line); ok {
 			t.Turns = append(t.Turns, turn)
+			// Visible turns also set owing (Codex message items reach here
+			// without going through the function_call branches above).
+			t.owing = turn.Role == "user"
 		}
 	}
 	return t.Turns

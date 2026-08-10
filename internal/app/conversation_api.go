@@ -799,42 +799,51 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, cap)
 }
 
-// notePeekDialog runs the corroborated dialog check when a human opens the
-// terminal view. Peeking is exactly the manual gesture that catches a dialog
-// the quiet gate cannot see (parallel calls queued behind it keep the pane
-// animating), so automate it at the same moment: one visible capture,
-// transcript corroboration required, attention only ever added — the poller
-// keeps owning clearing. Deliberate non-poller raise: only unresolved
-// structured evidence plus a visible dialog matcher may set attn/attnAt, and
-// existing attention is never overwritten or restamped. Unlike the poller's
-// tick path this is one-shot and human-triggered, so it skips the
-// confined-animation gate.
+// notePeekDialog runs the dialog check when a human opens the terminal view.
+// Peeking is exactly the manual gesture that catches a dialog the quiet gate
+// cannot see (parallel calls queued behind it keep the pane animating), so
+// automate it at the same moment: one visible capture, attention only ever
+// added — the poller keeps owning clearing. Existing attention is never
+// overwritten or restamped. Unlike the poller's tick path this is one-shot
+// and human-triggered, so it skips the confined-animation gate.
+//
+// Two raise paths share the quiet-branch predicate (P1c):
+//  1. unresolved tool call + dialoghint matcher → attentionKind (approval/question);
+//  2. quietAttentionFallback — structural matcher (dialog) or owing stall
+//     (inspect) — for the Claude late-flush case where WaitingOn is false.
 func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
-	tl := a.tailerFor(n)
-	if tl == nil {
-		return
-	}
-	tl.Poll()
-	name, ok := tl.WaitingOn()
-	if !ok {
-		return
-	}
-	// Skip the visible-pane capture entirely when attention is already set — the
-	// poller has classified this node and notePeekDialog only ever raises fresh
+	// Skip work when attention is already set — only ever raises fresh
 	// attention, never overwrites (efficiency, 2026-07-20 batch).
 	a.mu.Lock()
 	already := a.attn[n.ID] != ""
+	quietSince := a.lastChg[n.ID]
 	a.mu.Unlock()
 	if already {
 		return
 	}
+	tl := a.tailerFor(n)
+	if tl != nil {
+		tl.Poll()
+	}
 	visible, err := s.CaptureVisible()
-	if err != nil || !dialoghint.ClassifyVisible(visible) {
+	if err != nil {
+		visible = ""
+	}
+	kind := ""
+	if tl != nil {
+		if name, ok := tl.WaitingOn(); ok && visible != "" && dialoghint.ClassifyVisible(visible) {
+			kind = attentionKind(name)
+		}
+	}
+	if kind == "" {
+		kind = quietAttentionFallback(tl, visible, quietSince)
+	}
+	if kind == "" {
 		return
 	}
 	a.mu.Lock()
 	if a.attn[n.ID] == "" {
-		a.attn[n.ID] = attentionKind(name)
+		a.attn[n.ID] = kind
 		if a.attnAt == nil { // tests build app literals without the map
 			a.attnAt = map[string]time.Time{}
 		}
