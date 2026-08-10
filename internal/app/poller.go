@@ -83,7 +83,7 @@ func (a *app) poll() {
 					a.prevCap[n.ID] = cap
 					a.lastChg[n.ID] = time.Now()
 				}
-				if time.Since(a.lastChg[n.ID]) < 8*time.Second {
+				if time.Since(a.lastChg[n.ID]) < paneQuietAfter {
 					state = "active"
 				} else {
 					state = "quiet"
@@ -370,7 +370,11 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 // user turn (agent owes output) and the pane has been static this long with
 // no unresolved call and no matcher hit — Claude Code's late tool_use flush
 // leaves WaitingOn blind for the whole approval wait (P1b).
+// paneQuietAfter: a pane unchanged for this long is mechanically quiet. It is
+// the liveness threshold, and also the precondition every quiet-branch
+// attention source shares.
 const animMaxLines = 3
+const paneQuietAfter = 8 * time.Second
 const animStallAfter = 90 * time.Second
 const owedStallAfter = 45 * time.Second
 
@@ -379,11 +383,21 @@ const owedStallAfter = 45 * time.Second
 // numbered-options shape) and the owing-stall mechanical backstop (P1b).
 // Called from the poller's quiet branch and from notePeekDialog (P1c).
 // Feeds attention only — never liveness. The backstop reads no pane text.
+//
+// Both sources require a mechanically static pane, checked here rather than
+// left to the caller: the poller's quiet branch satisfies it by construction,
+// but notePeekDialog runs on a human peek with no liveness gate at all, and
+// pane text must never create attention on an active pane — that case is
+// fenced to unresolved call + confined animation, which notePeekDialog's
+// corroborated path handles before reaching this one.
 func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince time.Time) string {
+	if quietSince.IsZero() || time.Since(quietSince) < paneQuietAfter {
+		return ""
+	}
 	if visible != "" && dialoghint.ClassifyVisible(visible) {
 		return "dialog"
 	}
-	if tl != nil && tl.Owing() && !quietSince.IsZero() && time.Since(quietSince) >= owedStallAfter {
+	if tl != nil && tl.Owing() && time.Since(quietSince) >= owedStallAfter {
 		return "inspect"
 	}
 	return ""

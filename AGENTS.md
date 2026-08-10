@@ -123,8 +123,12 @@ test commands are `bash --norc` or `cat`.
   text — and never feeds liveness. `handlePeek` runs the same quiet-branch
   predicate (matcher + owing stall) one-shot when a human opens the terminal
   view, so a late-flush dialog is visible without needing an unresolved call
-  in the transcript. Liveness itself stays regex-free — the matchers and the
-  owing backstop must never feed active/quiet.
+  in the transcript. `handlePeek` itself is *not* quiet-gated (that is the
+  point — it catches the dialog whose queued calls keep the pane animating),
+  so the shared predicate enforces the static-pane precondition itself
+  (`paneQuietAfter`): on an active pane only the corroborated path may raise.
+  Liveness itself stays regex-free — the matchers and the owing backstop must
+  never feed active/quiet.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the
