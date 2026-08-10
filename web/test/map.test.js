@@ -4484,11 +4484,13 @@ test("P7: .strow.current selection frame is 2px at ~55% (rule body)", () => {
     "1px frame is retired");
 });
 
-test("P7: mapTabAttentionCounts — waiting only; All; multi-lane; empty tab", () => {
-  /* Reuses P6's kind split: any attention (including inspect) is waiting;
-     turn_done alone is ready and is NOT counted. The badge names where the
-     user's attention is needed to let the agent proceed. Membership mirrors
-     renderMap: lane_id && served(n).some(inGroup). */
+test("P7: mapTabAttentionCounts mirrors the pill — one number, kind names it", () => {
+  /* Reuses P6's kind split verbatim (railTicks / attentionPill): any attention
+     — including the neutral "inspect" — is waiting; turn_done without
+     attention is ready. One badge per tab: if anything is waiting the badge
+     counts waiting and wears that kind; otherwise it counts ready. Never the
+     sum, so the number always matches the word the hue says.
+     Membership mirrors renderMap: lane_id && served(n).some(inGroup). */
   const fn = mapExports.mapTabAttentionCounts;
   assert.equal(typeof fn, "function", "mapTabAttentionCounts is exported");
 
@@ -4501,12 +4503,18 @@ test("P7: mapTabAttentionCounts — waiting only; All; multi-lane; empty tab", (
     /* multi: primary lane L3, also served on L1 via injected served() */
     { id: "multi", lane_id: "L3", attention: "approval", turn_done: false },
     { id: "nolane", lane_id: "", attention: "approval", turn_done: false },
+    /* both flags set: waiting wins, exactly as railTicks resolves it */
+    { id: "both", lane_id: "L4", attention: "approval", turn_done: true },
+    { id: "done", lane_id: "L5", attention: "", turn_done: true },
+    { id: "done2", lane_id: "L5", attention: "", turn_done: true },
   ];
   const groups = [
     { id: "g1", name: "One", lanes: ["L1"] },
     { id: "g2", name: "Two", lanes: ["L2"] },
     { id: "g3", name: "Empty", lanes: ["L99"] },
     { id: "g13", name: "One+Three", lanes: ["L1", "L3"] },
+    { id: "g4", name: "Both", lanes: ["L4"] },
+    { id: "g5", name: "Done", lanes: ["L5"] },
   ];
   const served = n => {
     if (n.id === "multi") return ["L3", "L1"];
@@ -4514,24 +4522,63 @@ test("P7: mapTabAttentionCounts — waiting only; All; multi-lane; empty tab", (
   };
   const c = fn(nodes, groups, { served });
 
-  // All: waiting stations with a lane — w, insp, b, multi (not ready/quiet/nolane)
-  assert.equal(c.all, 4, "All counts every waiting station (not ready, not quiet)");
-  // g1 / L1: w, insp, and multi (served on L1)
-  assert.equal(c.g1, 3, "tab counts stations whose served lanes intersect the group");
-  assert.equal(c.g2, 1, "L2 waiting station only");
-  assert.equal(c.g3, 0, "tab whose lanes hold nothing is zero");
-  assert.equal(c.g13, 3, "union tab: w + insp + multi (not double-counted per node)");
+  // All: waiting stations with a lane — w, insp, b, multi, both (ready ignored
+  // while anything waits; quiet and lane-less never count).
+  assert.deepEqual(c.all, { n: 5, kind: "waiting" },
+    "All counts waiting only while anything is waiting");
+  // g1 / L1: w, insp, multi are waiting; the ready node on L1 is not added.
+  assert.deepEqual(c.g1, { n: 3, kind: "waiting" },
+    "a mixed tab counts waiting, never the sum");
+  assert.deepEqual(c.g2, { n: 1, kind: "waiting" });
+  assert.deepEqual(c.g13, { n: 3, kind: "waiting" },
+    "union tab: w + insp + multi (never double-counted inside one tab)");
+  assert.deepEqual(c.g4, { n: 1, kind: "waiting" },
+    "attention + turn_done on one node resolves to waiting");
+  // Ready-only tab: the finished state gets the same badge, a different kind.
+  assert.deepEqual(c.g5, { n: 2, kind: "ready" },
+    "a tab holding only finished turns badges ready");
+  // Nothing at all: zero, and the kind is the quiet one.
+  assert.deepEqual(c.g3, { n: 0, kind: "ready" },
+    "tab whose lanes hold nothing is zero");
 
   // Empty inputs
-  assert.deepEqual(fn([], [], {}), { all: 0 });
-  assert.deepEqual(fn(null, null), { all: 0 });
+  assert.deepEqual(fn([], [], {}), { all: { n: 0, kind: "ready" } });
+  assert.deepEqual(fn(null, null), { all: { n: 0, kind: "ready" } });
+});
+
+test("P7: tab membership goes through groupLanes, not a private re-read", () => {
+  /* renderMap filters with groupLanes(...) — `lanes ?? null`, where null means
+     "no filter, show everything". A counter that reads g.lanes || [] instead
+     would badge 0 on a group record with no lanes key while the map body shows
+     every station under it. Same helper, same answer. */
+  const fn = mapExports.mapTabAttentionCounts;
+  const nodes = [
+    { id: "w", lane_id: "L1", attention: "approval" },
+    { id: "b", lane_id: "L2", attention: "question" },
+  ];
+  const served = n => (n.lane_id ? [n.lane_id] : []);
+
+  const loose = fn(nodes, [{ id: "gx", name: "No lanes key" }], { served });
+  assert.deepEqual(loose.gx, loose.all,
+    "a group without a lanes key filters nothing — same count as All");
+
+  // An explicitly empty list still means "matches nothing" in both places.
+  const empty = fn(nodes, [{ id: "ge", name: "Empty", lanes: [] }], { served });
+  assert.deepEqual(empty.ge, { n: 0, kind: "ready" },
+    "lanes: [] matches nothing (unchanged)");
 });
 
 test("P7: mapTabsHTML carries the count badge and no animation class", () => {
-  const counts = { all: 2, g1: 1, g2: 0 };
+  const counts = {
+    all: { n: 2, kind: "waiting" },
+    g1: { n: 1, kind: "waiting" },
+    g2: { n: 0, kind: "waiting" },
+    g3: { n: 4, kind: "ready" },
+  };
   const html = mapTabsHTML("g1", [
     { id: "g1", name: "Alpha" },
     { id: "g2", name: "Beta" },
+    { id: "g3", name: "Gamma" },
   ], { escape: s => s, counts });
 
   // All tab badge
@@ -4540,6 +4587,9 @@ test("P7: mapTabsHTML carries the count badge and no animation class", () => {
   // Selected group with count
   assert.match(html, /data-mt="g1"[^>]*>[\s\S]*?Alpha<span class="tabcount">1<\/span>/,
     "group tab shows its waiting count");
+  // Ready kind carries the hue marker, mirroring #mappill.ready.
+  assert.match(html, /data-mt="g3"[^>]*>[\s\S]*?Gamma<span class="tabcount ready">4<\/span>/,
+    "a ready-kind badge is marked so the hue can name it");
   // Zero count: no badge (not a "0" pill)
   const beta = html.match(/data-mt="g2"[^>]*>([\s\S]*?)<\/button>/);
   assert.ok(beta, "Beta tab present");
@@ -4554,6 +4604,34 @@ test("P7: mapTabsHTML carries the count badge and no animation class", () => {
   const bare = mapTabsHTML("all", [{ id: "g1", name: "Alpha" }], { escape: s => s });
   assert.doesNotMatch(bare, /tabcount/, "omitted counts → no badges");
   assert.match(bare, /data-mt="\+" class="add"/);
+});
+
+test("P7: a ready-kind tab badge wears --work, waiting keeps --attn", () => {
+  /* Same two-hue contract as the ring and the pill: yellow means exactly one
+     thing ("blocked on you"), finished turns get the success hue. */
+  const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
+  const base = layoutCss.match(/\.tabs\s+\.tabcount\s*\{([^}]+)\}/);
+  assert.ok(base, ".tabs .tabcount rule must exist");
+  assert.match(base[1], /color\s*:\s*var\(--attn\)/, "waiting badge is --attn");
+
+  const ready = layoutCss.match(/\.tabs\s+\.tabcount\.ready\s*\{([^}]+)\}/);
+  assert.ok(ready, ".tabs .tabcount.ready rule must exist");
+  assert.match(ready[1], /color\s*:\s*var\(--work\)/, "ready badge is --work");
+  assert.match(ready[1], /background\s*:[^;]*var\(--work\)/,
+    "ready badge background is mixed from --work, not --attn");
+  assert.doesNotMatch(ready[1], /var\(--attn\)/,
+    "the ready badge must not fall back to the waiting hue");
+});
+
+test("P7: the tabs signature separates a kind flip from a count change", () => {
+  /* A tab that goes from 1 waiting to 1 ready keeps the same number and must
+     still repaint — otherwise the badge keeps the wrong hue. */
+  const groups = [{ id: "g1", name: "Alpha" }];
+  const waiting = mapExports.mapTabsSignature("all", groups,
+    { all: { n: 1, kind: "waiting" }, g1: { n: 1, kind: "waiting" } });
+  const ready = mapExports.mapTabsSignature("all", groups,
+    { all: { n: 1, kind: "ready" }, g1: { n: 1, kind: "ready" } });
+  assert.notEqual(waiting, ready, "kind is part of the region signature");
 });
 
 test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
