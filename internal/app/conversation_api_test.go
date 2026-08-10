@@ -986,18 +986,20 @@ func TestHandlePeekSpotsDialog(t *testing.T) {
 	}
 }
 
-// TestHandlePeekStructuralDialogNoWaitingOn: P1c — peek raises attention for
-// the current Write/Edit dialog wording even with no unresolved tool call in
-// the transcript (Claude Code's late tool_use flush). Shares the quiet-branch
-// predicate with the poller.
-func TestHandlePeekStructuralDialogNoWaitingOn(t *testing.T) {
-	editDialog := ` Do you want to make this edit to hello.txt?
+const peekEditDialog = ` Do you want to make this edit to hello.txt?
  ❯ 1. Yes
    2. Yes, allow all edits during this session (shift+tab)
    3. No
 
  Esc to cancel · Tab to amend`
-	f := &fakeTmux{alive: map[string]bool{"p1": true}, capture: editDialog}
+
+// TestHandlePeekStructuralDialogNoWaitingOn: P1c — peek raises attention for
+// the current Write/Edit dialog wording even with no unresolved tool call in
+// the transcript (Claude Code's late tool_use flush). Shares the quiet-branch
+// predicate with the poller, including its static-pane precondition: the
+// matcher may classify a quiet pane, never an active one (AGENTS.md).
+func TestHandlePeekStructuralDialogNoWaitingOn(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"p1": true}, capture: peekEditDialog}
 	a := newTestApp(t, f)
 	path := filepath.Join(t.TempDir(), "tx.jsonl")
 	// User prompt only — no tool_use record (the late-flush case).
@@ -1005,6 +1007,7 @@ func TestHandlePeekStructuralDialogNoWaitingOn(t *testing.T) {
 		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
 	n := &Node{ID: "p1", Title: "p1", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 	a.nodes, a.byID["p1"] = []*Node{n}, n
+	a.lastChg["p1"] = time.Now().Add(-time.Minute) // pane mechanically static
 
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/nodes/p1/peek", nil)
@@ -1016,6 +1019,53 @@ func TestHandlePeekStructuralDialogNoWaitingOn(t *testing.T) {
 	if got := a.attn["p1"]; got != "dialog" {
 		t.Errorf("attention after peek = %q, want dialog (no WaitingOn required)", got)
 	}
+}
+
+// TestNotePeekDialogActivePaneNeedsStructuredEvidence pins the fence that P1c
+// must not widen: handlePeek is not quiet-gated (it deliberately runs while the
+// pane animates, to catch a dialog with parallel calls queued behind it), so on
+// an *active* pane only the corroborated path may raise — an unresolved tool
+// call plus the matcher. Pane text alone must never create attention there.
+func TestNotePeekDialogActivePaneNeedsStructuredEvidence(t *testing.T) {
+	peek := func(t *testing.T, id string, lines ...string) *app {
+		t.Helper()
+		f := &fakeTmux{alive: map[string]bool{id: true}, capture: peekEditDialog}
+		a := newTestApp(t, f)
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path, lines...)
+		n := &Node{ID: id, Title: id, Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+		a.nodes, a.byID[id] = []*Node{n}, n
+		a.lastChg[id] = time.Now() // pane changed just now: active, not quiet
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/nodes/"+id+"/peek", nil)
+		r.SetPathValue("id", id)
+		a.handlePeek(rec, r)
+		return a
+	}
+
+	t.Run("matcher_alone_on_active_pane_stays_silent", func(t *testing.T) {
+		a := peek(t, "a1",
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if got := a.attn["a1"]; got != "" {
+			t.Errorf("attention = %q, want none: pane text alone on an active pane", got)
+		}
+		if _, ok := a.attnAt["a1"]; ok {
+			t.Error("attnAt stamped from pane text on an active pane")
+		}
+	})
+
+	t.Run("unresolved_call_plus_matcher_still_raises", func(t *testing.T) {
+		a := peek(t, "a2",
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Edit"}]}}`)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if got := a.attn["a2"]; got != "approval" {
+			t.Errorf("attention = %q, want approval: the corroborated path is unchanged", got)
+		}
+	})
 }
 
 // --- /api/nodes/{id}/chat (tmux fallback) ---

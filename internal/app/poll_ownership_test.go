@@ -334,7 +334,9 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 	t.Run("dialog_matcher_without_waiting_on_raises_dialog", func(t *testing.T) {
 		// P1c: peek shares the quiet-branch predicate — structural/legacy
 		// dialoghint alone raises "dialog" even with no unresolved tool call
-		// (Claude late tool_use flush). Was "leaves_unchanged" pre-P1.
+		// (Claude late tool_use flush). Was "leaves_unchanged" pre-P1. The
+		// predicate still requires a static pane; see
+		// TestNotePeekDialogActivePaneNeedsStructuredEvidence.
 		f := &fakeTmux{alive: map[string]bool{"p3": true}, capture: dialogPane}
 		a := newTestApp(t, f)
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
@@ -342,6 +344,7 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`)
 		n := &Node{ID: "p3", Title: "p3", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p3"] = []*Node{n}, n
+		a.lastChg["p3"] = time.Now().Add(-time.Minute)
 
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/api/nodes/p3/peek", nil)
@@ -379,11 +382,13 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 
 	t.Run("missing_transcript_matcher_still_raises_dialog", func(t *testing.T) {
 		// Same quiet-branch path as poller's terminal-only harness: matcher
-		// alone classifies "dialog" with no transcript (P1c parity).
+		// alone classifies "dialog" with no transcript (P1c parity), on a
+		// static pane.
 		f := &fakeTmux{alive: map[string]bool{"p5": true}, capture: dialogPane}
 		a := newTestApp(t, f)
 		n := &Node{ID: "p5", Title: "p5", Agent: "claude", CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p5"] = []*Node{n}, n
+		a.lastChg["p5"] = time.Now().Add(-time.Minute)
 
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/api/nodes/p5/peek", nil)
