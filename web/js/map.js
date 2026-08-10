@@ -338,12 +338,54 @@ export function laneChipStyle(color, selected, { escape = esc, contrastText = co
   return `border-color:${c};background:${c};color:${escape(contrastText(color))}`;
 }
 
-export function mapTabsHTML(mapTab, groups, { escape = esc } = {}){
+/* Per-tab counts of stations that need the user to let the agent proceed.
+   Reuses P6's kind split (railTicks / attentionPill): any attention —
+   including the neutral "inspect" — is waiting; turn_done alone is ready and
+   is NOT counted. Membership mirrors renderMap:
+   lane_id && served(n).some(laneID => !grp || grp.includes(laneID)).
+   A station served by several lanes counts once for All and once per group
+   that intersects its served set (never double-counted inside one tab).
+   Pure; returns { all, [groupId]: n }. */
+export function mapTabAttentionCounts(nodes, groups, { served = servedLanes } = {}){
+  const list = Array.isArray(nodes) ? nodes : [];
+  const gs = Array.isArray(groups) ? groups : [];
+  const out = { all: 0 };
+  for (const g of gs) out[g.id] = 0;
+  for (const n of list){
+    if (!n || !n.lane_id || !n.attention) continue;
+    const lanes = served(n) || [];
+    if (!lanes.length) continue;
+    out.all++;
+    for (const g of gs){
+      const grp = g.lanes || [];
+      if (lanes.some(id => grp.includes(id))) out[g.id]++;
+    }
+  }
+  return out;
+}
+
+/* Signature for the map-tabs region: rebuild only when selection, group set
+   (id+name), or waiting counts change. Counts alone turn a formerly static
+   bar into a polled one; without this gate every tick would rewrite #maptabs. */
+export function mapTabsSignature(mapTab, groups, counts){
+  return JSON.stringify({
+    mapTab: mapTab || "all",
+    groups: (groups || []).map(g => [g.id, g.name]),
+    counts: counts || {},
+  });
+}
+
+export function mapTabsHTML(mapTab, groups, { escape = esc, counts = null } = {}){
+  const c = counts || {};
+  const badge = n => {
+    const k = Number(n) || 0;
+    return k > 0 ? `<span class="tabcount">${k}</span>` : "";
+  };
   const sorted = [...(groups || [])].sort(byNameID);
   return (
-    `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All</button>` +
+    `<button data-mt="all" class="${mapTab === "all" ? "on" : ""}">All${badge(c.all)}</button>` +
     sorted.map(t => `<button data-mt="${escape(t.id)}" class="${mapTab === t.id ? "on" : ""}">
-       ${escape(t.name)}<span class="x" data-rm="${escape(t.id)}">&#10005;</span></button>`).join("") +
+       ${escape(t.name)}${badge(c[t.id])}<span class="x" data-rm="${escape(t.id)}">&#10005;</span></button>`).join("") +
     `<button data-mt="+" class="add" aria-label="add map">+</button>`
   );
 }
@@ -1075,6 +1117,10 @@ export function createMapFeature(deps){
   let lastSelKey = "";
   let lastSelRow = null;
   let mapSig = "";
+  /* Last painted map-tabs signature (selected tab + group set + waiting
+     counts). Live counts put #maptabs on the poll path; the gate keeps a
+     steady bar from rewriting every tick. */
+  let mapTabsSig = "";
   /* Last painted volatile frame, keyed by stop. Diffed on every skipped poll
      so liveness and the context gauge still move without a rebuild. */
   let wallVol = {};
@@ -1311,7 +1357,12 @@ export function createMapFeature(deps){
   function renderMapTabs(){
     mapTab = resolveMapTab(mapTab, groups(), uiLoaded());
     if (!maptabs) return;
-    maptabs.innerHTML = mapTabsHTML(mapTab, groups(), { escape });
+    const gs = groups();
+    const counts = mapTabAttentionCounts(g("nodes", []), gs);
+    const sig = mapTabsSignature(mapTab, gs, counts);
+    if (mapRenderDecision(sig, mapTabsSig) === "skip") return;
+    mapTabsSig = sig;
+    maptabs.innerHTML = mapTabsHTML(mapTab, gs, { escape, counts });
   }
 
   function renderLaneChips(model, inGroup, focusLane){
@@ -1714,6 +1765,10 @@ export function createMapFeature(deps){
 
   function renderMap(){
     if (!mapVisible()) return;
+    /* Live tab badges: refresh before the wall/stack signature gate so a poll
+       that only changes attention still updates counts even when the map body
+       itself skips. Internally gated on mapTabsSig. */
+    renderMapTabs();
     const model = lm();
     const grp = groupLanes(mapTab, groups());
     const inGroup = laneID => !grp || grp.includes(laneID);

@@ -231,6 +231,26 @@ body.cards-open #msgs { overflow: hidden; }
   border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
 .wssecrender th, .wsrefbody th, .wsibubble th { background: var(--th-bg); font-weight: 600; }
 .wssecrender strong, .wsrefbody strong, .wsibubble strong { font-weight: 650; }
+/* P7: unfolded chat description uses the same md() — mirror the prose
+   styling so multi-paragraph prompts are legible (ownership pin above stays). */
+.chatdesc p { margin: 0 0 8px; }
+.chatdesc p:last-child { margin: 0; }
+.chatdesc code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace;
+  background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.chatdesc pre { margin: 8px 0; padding: 10px 12px;
+  border-radius: 8px; background: var(--code-bg); overflow-x: auto; }
+.chatdesc pre code { background: none; padding: 0; border-radius: 0; }
+.chatdesc h1, .chatdesc h2, .chatdesc h3 { margin: 10px 0 6px; line-height: 1.22; }
+.chatdesc h1 { font-size: 1.22em; }
+.chatdesc h2 { font-size: 1.14em; }
+.chatdesc h3 { font-size: 1.06em; }
+.chatdesc blockquote { margin: 6px 0;
+  padding-left: 10px; border-left: 3px solid var(--hairline); color: var(--dim); }
+.chatdesc ul, .chatdesc ol { margin: 4px 0 8px; padding-left: 20px; }
+.chatdesc table { border-collapse: collapse; margin: 6px 0; font-size: 13px; width: 100%; }
+.chatdesc th, .chatdesc td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
+.chatdesc th { background: var(--th-bg); font-weight: 600; }
+.chatdesc strong { font-weight: 650; }
 
 /* multimodal attachments (P3): thumbnails / file chips inside a bubble. */
 .attrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }

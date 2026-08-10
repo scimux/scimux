@@ -916,7 +916,11 @@ export function createChatFeature(deps){
     if (chatmeta)
       chatmeta.textContent = [n.agent || "agent", n.model || "default", n.effort || "", ctx].filter(Boolean).join(" · ");
     const desc = n.description || n.prompt || "";
-    if (chatdesc) chatdesc.textContent = desc || "No description yet.";
+    /* Read state: same md() the bubbles and note references use — a description
+       that is usually a multi-paragraph initial prompt must not render flat here
+       and rich elsewhere. Editor stays raw (value), the standard rendered-read /
+       plain-edit split. md() is escape-first; no extra sanitiser. */
+    if (chatdesc) chatdesc.innerHTML = desc ? md(desc) : "No description yet.";
     const input = chatdescinput;
     if (input && (!editingChatDesc || input.dataset.node !== n.id)){
       input.value = desc;
