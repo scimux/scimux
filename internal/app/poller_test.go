@@ -964,3 +964,142 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		}
 	})
 }
+
+// P2 — /clear must not rebind a retired Claude transcript (ux-fixes-2.md).
+// (a) tombstone, (b) content-time not mtime, (c) genuine new session, (d) cur
+// health ignores metadata-only touches.
+func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
+	claudeUser := func(text, ts string) string {
+		return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":%q}}`, ts, text)
+	}
+	// (a) a tombstoned path is never re-bound even when its mtime and its
+	// newest content record are both newer than the phase start.
+	t.Run("tombstoned_path_never_rebound", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"c1": true}}
+		a := newTestApp(t, f)
+		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+		if err := os.MkdirAll(proj, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		oldPath := filepath.Join(proj, "old-session.jsonl")
+		// Content newer than the phase start — without a tombstone this would
+		// look like a live session that carried the phase.
+		now := time.Now().UTC()
+		appendLines(t, oldPath, claudeUser("pre-clear turn", now.Format(time.RFC3339Nano)))
+		// Phase started 30s ago; content is "now".
+		n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj", Transcript: oldPath, SessionID: "old-session"}
+		a.nodes = append(a.nodes, n)
+		a.byID["c1"] = n
+		a.retireTranscript(n)
+		if n.Transcript != "" || n.SessionID != "" {
+			t.Fatalf("retire left link: transcript=%q session=%q", n.Transcript, n.SessionID)
+		}
+		// Pane cmdline still advertises the launch (dead) session; content and
+		// mtime are both after the phase watermark.
+		a.paneSession = func(pid string) string { return "old-session" }
+		a.activeSince["c1"] = now.Add(-30 * time.Second)
+		a.maybeRelinkTranscript(n)
+		if n.Transcript == oldPath || n.SessionID == "old-session" {
+			t.Fatalf("tombstoned transcript re-bound: transcript=%q session=%q", n.Transcript, n.SessionID)
+		}
+	})
+
+	// (b) newest content predates the phase start, mtime is newer — the
+	// exact bridge-session shape from the report. Refuse.
+	t.Run("content_time_not_mtime_refuses_bridge_session", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"c1": true}}
+		a := newTestApp(t, f)
+		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+		if err := os.MkdirAll(proj, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		deadPath := filepath.Join(proj, "dead-session.jsonl")
+		// Content from an hour ago; a trailing metadata record bumps mtime.
+		oldTS := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339Nano)
+		appendLines(t, deadPath,
+			claudeUser("old turn", oldTS),
+			`{"type":"bridge-session","timestamp":"2026-08-10T08:04:55.000Z"}`)
+		// Touch mtime to "now" so a pure-mtime gate would accept it.
+		now := time.Now()
+		if err := os.Chtimes(deadPath, now, now); err != nil {
+			t.Fatal(err)
+		}
+		n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj"}
+		a.nodes = append(a.nodes, n)
+		a.byID["c1"] = n
+		a.paneSession = func(pid string) string { return "dead-session" }
+		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+		a.maybeRelinkTranscript(n)
+		if n.Transcript == deadPath || n.SessionID == "dead-session" {
+			t.Fatalf("bridge-session mtime bump re-bound dead file: transcript=%q session=%q",
+				n.Transcript, n.SessionID)
+		}
+	})
+
+	// (c) a genuine new session file still binds.
+	t.Run("genuine_new_session_still_binds", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"c1": true}}
+		a := newTestApp(t, f)
+		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+		if err := os.MkdirAll(proj, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		oldPath := filepath.Join(proj, "old-session.jsonl")
+		newPath := filepath.Join(proj, "new-session.jsonl")
+		oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+		newTS := time.Now().UTC().Format(time.RFC3339Nano)
+		appendLines(t, oldPath, claudeUser("pre-clear", oldTS))
+		appendLines(t, newPath, claudeUser("post-clear prompt", newTS))
+		past := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(oldPath, past, past); err != nil {
+			t.Fatal(err)
+		}
+		n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj", Transcript: oldPath, SessionID: "old-session"}
+		a.nodes = append(a.nodes, n)
+		a.byID["c1"] = n
+		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+		a.maybeRelinkTranscript(n)
+		if n.Transcript != newPath {
+			t.Fatalf("transcript = %q, want new session %q", n.Transcript, newPath)
+		}
+		if n.SessionID != "new-session" {
+			t.Fatalf("session id = %q, want new-session", n.SessionID)
+		}
+	})
+
+	// (d) the cur health check no longer treats a metadata-only touch as
+	// "carried the phase" — so a linked dead file with only a late mtime bump
+	// is not considered healthy and relink can proceed to a real new file.
+	t.Run("cur_health_ignores_metadata_only_touch", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"c1": true}}
+		a := newTestApp(t, f)
+		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+		if err := os.MkdirAll(proj, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		linked := filepath.Join(proj, "linked.jsonl")
+		newer := filepath.Join(proj, "fresh-session.jsonl")
+		oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+		newTS := time.Now().UTC().Format(time.RFC3339Nano)
+		appendLines(t, linked,
+			claudeUser("old content", oldTS),
+			`{"type":"bridge-session","timestamp":"2026-08-10T08:04:55.000Z"}`)
+		appendLines(t, newer, claudeUser("real new turn", newTS))
+		// Bump linked mtime so the old mtime-based health check would keep it.
+		now := time.Now()
+		if err := os.Chtimes(linked, now, now); err != nil {
+			t.Fatal(err)
+		}
+		n := &Node{ID: "c1", Agent: "claude", Dir: "/w/proj", Transcript: linked, SessionID: "linked"}
+		a.nodes = append(a.nodes, n)
+		a.byID["c1"] = n
+		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+		a.maybeRelinkTranscript(n)
+		if n.Transcript == linked {
+			t.Fatalf("metadata-only mtime touch kept dead link healthy; transcript still %q", linked)
+		}
+		if n.Transcript != newer {
+			t.Fatalf("transcript = %q, want relink to %q", n.Transcript, newer)
+		}
+	})
+}

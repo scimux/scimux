@@ -1833,3 +1833,72 @@ func TestRetireTranscriptSnapshotsClosingStation(t *testing.T) {
 		t.Fatalf("node label mutated by /clear: %q/%q", n.Title, n.Description)
 	}
 }
+
+// P2c — handleChat reports fresh:true for a zero-turn post-seam segment
+// (cleared Claude chat) and not for a never-started node.
+func TestHandleChatFreshAfterClearSeam(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true, "c2": true}}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cleared node: prior turns behind a source seam, empty current segment.
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes = append(a.nodes, n)
+	a.byID["c1"] = n
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("c1", "claude", "", "", a.home),
+		sessionlog.NewSource("/tmp/old.jsonl", "old-sid"),
+		{T: "user", Text: "old question", Time: "2026-07-14T01:00:00Z"},
+		{T: "assistant", Text: "old answer", Time: "2026-07-14T01:01:00Z"},
+		sessionlog.NewClearSource(""),
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/c1/chat", nil)
+	r.SetPathValue("id", "c1")
+	a.handleChat(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("chat code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Turns      []any `json:"turns"`
+		PriorTurns int   `json:"prior_turns"`
+		Fresh      bool  `json:"fresh"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Turns) != 0 || body.PriorTurns == 0 {
+		t.Fatalf("post-clear segment: turns=%d prior=%d", len(body.Turns), body.PriorTurns)
+	}
+	if !body.Fresh {
+		t.Fatalf("fresh = false, want true for zero-turn post-seam segment; body=%s", rec.Body.String())
+	}
+
+	// Never-started node: no session log → not fresh.
+	n2 := &Node{ID: "c2", Title: "c2", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes = append(a.nodes, n2)
+	a.byID["c2"] = n2
+	rec2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/nodes/c2/chat", nil)
+	r2.SetPathValue("id", "c2")
+	a.handleChat(rec2, r2)
+	if rec2.Code != 200 {
+		t.Fatalf("never-started chat code = %d", rec2.Code)
+	}
+	var body2 struct {
+		Fresh bool `json:"fresh"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &body2); err != nil {
+		t.Fatal(err)
+	}
+	if body2.Fresh {
+		t.Fatal("never-started node must not report fresh:true")
+	}
+}

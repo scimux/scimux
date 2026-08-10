@@ -741,3 +741,114 @@ func TestArchiveSessionLog(t *testing.T) {
 		t.Fatalf("archived content = %q", b)
 	}
 }
+
+// P2a — transcript-retired tombstones: survive restart, drop on delete, and
+// unknown record types still replay without error.
+func TestTranscriptRetiredTombstones(t *testing.T) {
+	claudeUser := func(text, ts string) string {
+		return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":%q}}`, ts, text)
+	}
+
+	// Tombstone in the store must still block rebind after a full loadStore
+	// (simulates scimux restart). Asserts via maybeRelink behaviour so the
+	// red commit does not depend on a private field that is not yet present.
+	t.Run("tombstones_survive_restart", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"c1": true}}
+		a := newTestApp(t, f)
+		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
+		if err := os.MkdirAll(proj, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		deadPath := filepath.Join(proj, "dead-sid.jsonl")
+		now := time.Now().UTC()
+		appendLines(t, deadPath, claudeUser("late content", now.Format(time.RFC3339Nano)))
+		// Persist a node + an explicit tombstone, then reload as on startup.
+		writeStoreLines(t, a.storePath, true,
+			fmt.Sprintf(`{"type":"node","node":{"id":"c1","title":"C","prompt":"p","agent":"claude","dir":"/w/proj","created_at":"2026-07-01T08:00:00Z"}}`),
+			fmt.Sprintf(`{"type":"transcript-retired","id":"c1","path":%q,"session_id":"dead-sid"}`, deadPath),
+		)
+		a.nodes, a.byID = nil, map[string]*Node{}
+		a.deadTranscripts = map[string]map[string]bool{}
+		if err := a.loadStore(); err != nil {
+			t.Fatalf("loadStore: %v", err)
+		}
+		n := a.byID["c1"]
+		if n == nil {
+			t.Fatal("node missing after reload")
+		}
+		// Map must carry the tombstone across restart.
+		if a.deadTranscripts["c1"] == nil || !a.deadTranscripts["c1"][deadPath] || !a.deadTranscripts["c1"]["dead-sid"] {
+			t.Fatalf("dead set after restart = %v, want path+session", a.deadTranscripts["c1"])
+		}
+		a.paneSession = func(pid string) string { return "dead-sid" }
+		a.activeSince = map[string]time.Time{"c1": now.Add(-30 * time.Second)}
+		a.maybeRelinkTranscript(n)
+		if n.Transcript == deadPath || n.SessionID == "dead-sid" {
+			t.Fatalf("restart+tombstone still re-bound dead file: transcript=%q session=%q",
+				n.Transcript, n.SessionID)
+		}
+	})
+
+	t.Run("delete_drops_tombstones", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nodes.jsonl")
+		writeStoreLines(t, path, true,
+			storeNodeLine(t, "n1", "N1", "p", "d"),
+			`{"type":"transcript-retired","id":"n1","path":"/dead/old.jsonl","session_id":"dead-sid"}`,
+			storeDelLine("n1"),
+		)
+		a := &app{byID: map[string]*Node{}, storePath: path, deadTranscripts: map[string]map[string]bool{}}
+		if err := a.loadStore(); err != nil {
+			t.Fatalf("loadStore: %v", err)
+		}
+		if a.deadTranscripts["n1"] != nil {
+			t.Fatalf("delete must drop the node's dead set, got %v", a.deadTranscripts["n1"])
+		}
+		if a.byID["n1"] != nil {
+			t.Fatal("deleted node still present")
+		}
+	})
+
+	t.Run("unknown_record_type_still_replays", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nodes.jsonl")
+		writeStoreLines(t, path, true,
+			storeNodeLine(t, "n1", "N1", "p", "d"),
+			`{"type":"future-unknown-record","id":"n1","payload":{"x":1}}`,
+			storeTxLine("n1", "/t/ok.jsonl"),
+		)
+		a := &app{byID: map[string]*Node{}, storePath: path}
+		if err := a.loadStore(); err != nil {
+			t.Fatalf("loadStore must ignore unknown types: %v", err)
+		}
+		if a.byID["n1"] == nil || a.byID["n1"].Transcript != "/t/ok.jsonl" {
+			t.Fatalf("replay after unknown type broken: node=%v", a.byID["n1"])
+		}
+	})
+
+	t.Run("retire_appends_tombstone_record", func(t *testing.T) {
+		f := &fakeTmux{}
+		a := newTestApp(t, f)
+		tx := filepath.Join(t.TempDir(), "sess.jsonl")
+		if err := os.WriteFile(tx, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		n := &Node{ID: "c1", Agent: "claude", Transcript: tx, SessionID: "sess-abc"}
+		a.nodes = append(a.nodes, n)
+		a.byID[n.ID] = n
+		a.retireTranscript(n)
+		b, err := os.ReadFile(a.storePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(b)
+		if !strings.Contains(body, `"type":"transcript-retired"`) {
+			t.Fatalf("store missing transcript-retired record:\n%s", body)
+		}
+		if !strings.Contains(body, tx) || !strings.Contains(body, "sess-abc") {
+			t.Fatalf("tombstone must carry path and session_id:\n%s", body)
+		}
+		// Live map must also refuse immediately (not only after restart).
+		if a.deadTranscripts["c1"] == nil || !a.deadTranscripts["c1"][tx] || !a.deadTranscripts["c1"]["sess-abc"] {
+			t.Fatalf("in-memory dead set after retire = %v", a.deadTranscripts["c1"])
+		}
+	})
+}

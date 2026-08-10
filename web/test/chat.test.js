@@ -2613,3 +2613,42 @@ test("P3 7: use-as-description places caret at end via focusAtEnd", () => {
   assert.match(useFn[0], /setTimeoutFn\s*\(/,
     "focus stays deferred so the editor is in the document first");
 });
+
+/* P2c — cleared Claude chat: server fresh:true yields freshSurface even when
+   source is not "acp" and fallback would otherwise force a peek. */
+test("chatActivityPolicy: server fresh trusts over source===acp and fallback", () => {
+  // Cleared tmux/Claude node: empty turns, fallback/source=none, prior history,
+  // server says fresh.
+  const cleared = chatActivityPolicy({
+    turnsLength: 0,
+    source: "none",
+    fallback: true,
+    priorTurns: 5,
+    fresh: true,
+  });
+  assert.equal(cleared.freshSurface, true, "server fresh must yield freshSurface for non-ACP");
+  assert.equal(cleared.forcePeek, false, "fresh surface must not force peek");
+  assert.equal(cleared.mustShowPane, false, "fallback alone must not force pane when fresh");
+
+  // Same shape without server fresh: still peeks (cleared Claude today).
+  const noFresh = chatActivityPolicy({
+    turnsLength: 0,
+    source: "none",
+    fallback: true,
+    priorTurns: 5,
+    fresh: false,
+  });
+  assert.equal(noFresh.freshSurface, false);
+  assert.equal(noFresh.forcePeek, true);
+
+  // Attention still forces the pane even when fresh.
+  const attn = chatActivityPolicy({
+    turnsLength: 0,
+    fresh: true,
+    fallback: true,
+    priorTurns: 3,
+    attention: "approval",
+  });
+  assert.equal(attn.mustShowPane, true);
+  assert.equal(attn.freshSurface, false);
+});

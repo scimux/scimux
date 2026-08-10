@@ -656,3 +656,50 @@ func TestTailer_ToolStampsCodex(t *testing.T) {
 		t.Errorf("result = %+v", stamps[1])
 	}
 }
+
+// P2b — NewestContentTime ignores metadata-only records and returns false
+// when the file has no turns the parser would surface.
+func TestNewestContentTime(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("ignores_metadata_only_and_unknown", func(t *testing.T) {
+		path := filepath.Join(dir, "with-bridge.jsonl")
+		// Content at 07:28; trailing bridge-session at 08:04 must not count.
+		body := `{"type":"user","timestamp":"2026-08-10T07:28:38.000Z","message":{"role":"user","content":"last real turn"}}` + "\n" +
+			`{"type":"bridge-session","timestamp":"2026-08-10T08:04:55.000Z"}` + "\n" +
+			`{"type":"summary","summary":"meta","leafUuid":"x"}` + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := NewestContentTime(path)
+		if !ok {
+			t.Fatal("NewestContentTime returned false, want the user turn's time")
+		}
+		want, err := time.Parse(time.RFC3339Nano, "2026-08-10T07:28:38.000Z")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Equal(want) {
+			t.Fatalf("NewestContentTime = %v, want %v (bridge-session must not count)", got, want)
+		}
+	})
+
+	t.Run("false_when_no_turns", func(t *testing.T) {
+		path := filepath.Join(dir, "empty-meta.jsonl")
+		body := `{"type":"bridge-session","timestamp":"2026-08-10T08:04:55.000Z"}` + "\n" +
+			`{"type":"summary","summary":"only meta"}` + "\n" +
+			`{}` + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := NewestContentTime(path); ok {
+			t.Fatal("metadata-only file must return ok=false")
+		}
+	})
+
+	t.Run("missing_file", func(t *testing.T) {
+		if _, ok := NewestContentTime(filepath.Join(dir, "nope.jsonl")); ok {
+			t.Fatal("missing file must return ok=false")
+		}
+	})
+}
