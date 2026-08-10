@@ -879,4 +879,88 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			t.Errorf("attention after growth = %q, want cleared", got)
 		}
 	})
+
+	// (g) the "esc to cancel" anchor corroborates an owing stall: same neutral
+	// inspect, reached at owedStallCorroborated instead of owedStallAfter. The
+	// pane carries the anchor but no numbered options, so the matcher does not
+	// classify it — this is the shortening path, not the dialog path.
+	anchorPane := "Waiting for your answer\n\n Esc to cancel · Tab to amend"
+	t.Run("anchor_shortens_owing_stall", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": anchorPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-15 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(anchorPane)),
+		}
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
+		if got := a.attn["cl1"]; got != "inspect" {
+			t.Errorf("attention = %q, want inspect at the corroborated stall", got)
+		}
+	})
+
+	// (h) the anchor never creates attention on its own: a finished turn owes
+	// nothing, so no stall runs however long the pane sits with the phrase on
+	// screen (a scimux session discussing dialoghint is exactly this pane).
+	t.Run("anchor_without_owing_never_raises", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"the matcher wants esc to cancel"}]}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": anchorPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-4 * owedStallAfter)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(anchorPane)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: the anchor corroborates, it never raises", got)
+		}
+	})
+
+	// (i) without the anchor the full stall still applies — (b) pins the same
+	// window from the other side, this one pins that the shortening is what
+	// makes the difference at 15s.
+	t.Run("no_anchor_keeps_full_stall", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-15 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none without the anchor at 15s", got)
+		}
+	})
 }

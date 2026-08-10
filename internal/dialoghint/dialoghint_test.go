@@ -150,6 +150,33 @@ Agent working...`,
 	}
 }
 
+// TestHasCancelAnchor pins the corroboration-only signal. It is deliberately
+// loose — the phrase occurs in ordinary agent prose (a scimux session
+// discussing dialoghint prints it), which is exactly why it may only shorten a
+// stall that already has mechanical evidence behind it, never raise attention
+// on its own.
+func TestHasCancelAnchor(t *testing.T) {
+	tests := []struct {
+		name string
+		pane string
+		want bool
+	}{
+		{"approval dialog footer", " 3. No\n\n Esc to cancel · Tab to amend", true},
+		{"lowercase mid-line", "press esc to cancel the operation", true},
+		{"ansi coloured footer", "\x1b[2m Esc to cancel\x1b[0m", true},
+		{"agent prose quoting the anchor", "the matcher requires esc to cancel below the options", true},
+		{"absent", "Working…\n esc to interrupt", false},
+		{"empty pane", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasCancelAnchor(tt.pane); got != tt.want {
+				t.Errorf("HasCancelAnchor() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStripANSI(t *testing.T) {
 	tests := []struct {
 		input string
