@@ -210,10 +210,14 @@ func (a *app) poll() {
 		// ended. Uses quietTl already polled this tick — zero extra I/O.
 		// ACP nodes never reach this with a Tailer (tailerFor returns nil when
 		// Transcript == ""); absent turn_done means UNKNOWN, not "not finished".
+		// The claim expires: an idle session must not stay "finished" forever.
+		// Undated turns read as unknown and decline rather than guess.
 		turnDone := false
 		if state == "quiet" && attn == "" && n.EndedAt == "" &&
 			quietTl != nil && quietTl.Delivered() && quietTl.PendingCount() == 0 {
-			turnDone = true
+			if at, dated := quietTl.NewestTurnTime(); dated && time.Since(at) < turnDoneWindow {
+				turnDone = true
+			}
 		}
 		a.mu.Lock()
 		prevAttn := a.attn[n.ID]
@@ -411,6 +415,13 @@ const owedStallAfter = 45 * time.Second
 // but on a pane that is already quiet with the agent owing output it is strong
 // enough to reach the same neutral verdict sooner.
 const owedStallCorroborated = 10 * time.Second
+
+// turnDoneWindow bounds how long a delivered turn keeps claiming "finished".
+// The claim is dated by the CLI's own stamp on the newest parsed turn, not by
+// scimux clocks, so it survives a restart and cannot relight every idle
+// station. Past the window a node is simply quiet again: the reply is still
+// there to read, but it is no longer news.
+const turnDoneWindow = 30 * time.Minute
 
 // quietAttentionFallback is the quiet-branch attention sources that do not
 // need WaitingOn: the dialoghint matcher (P1a, including the structural

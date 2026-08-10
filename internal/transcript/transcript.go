@@ -142,11 +142,8 @@ func NewestContentTime(path string) (time.Time, bool) {
 		if !ok || turn.Time == "" {
 			continue
 		}
-		t, err := time.Parse(time.RFC3339Nano, turn.Time)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339, turn.Time)
-		}
-		if err != nil {
+		t, ok := parseStamp(turn.Time)
+		if !ok {
 			continue
 		}
 		if !found || t.After(newest) {
@@ -154,6 +151,21 @@ func NewestContentTime(path string) (time.Time, bool) {
 		}
 	}
 	return newest, found
+}
+
+// parseStamp reads a CLI line timestamp, tolerating both RFC3339 forms the
+// agents emit. Absent or unparseable reads as unknown, never as zero time.
+func parseStamp(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return ts, true
+	}
+	if ts, err := time.Parse(time.RFC3339, s); err == nil {
+		return ts, true
+	}
+	return time.Time{}, false
 }
 
 // contentText accepts both a plain string and a list of content blocks,
@@ -238,6 +250,11 @@ type Tailer struct {
 	// every site that assigns owing. Map "turn finished" input only (P5) —
 	// never liveness.
 	lastRole string
+	// lastTurnAt is the CLI's own stamp on the newest parsed turn, kept in
+	// memory so the poller can date a delivery without re-reading the file.
+	// Zero means "cannot be dated" (nothing parsed yet, undated records, or a
+	// rotation reset) — never "old". Map freshness input only, never liveness.
+	lastTurnAt time.Time
 }
 
 // UsageBreakdown is the latest per-turn token split retained from a Claude
@@ -552,6 +569,15 @@ func (t *Tailer) Delivered() bool {
 	return t.lastRole == "assistant"
 }
 
+// NewestTurnTime reports the CLI's stamp on the newest parsed turn. ok is
+// false when no turn has been dated — undated records must read as unknown,
+// so a caller gating on freshness declines rather than guesses.
+func (t *Tailer) NewestTurnTime() (time.Time, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastTurnAt, !t.lastTurnAt.IsZero()
+}
+
 // notePending updates the pending-call set from one JSONL line and appends
 // ToolStamp entries for the mirror (V2-P2). Pending tracking and tool
 // stamping share one parse so join keys stay identical.
@@ -694,6 +720,7 @@ func (t *Tailer) Poll() []Turn {
 		t.lastTurnID = ""
 		t.owing = false
 		t.lastRole = ""
+		t.lastTurnAt = time.Time{}
 	}
 	if st.Size() == t.offset {
 		return t.Turns
@@ -728,6 +755,11 @@ func (t *Tailer) Poll() []Turn {
 		t.noteUsage(line)
 		if turn, ok := ParseLine(line); ok {
 			t.Turns = append(t.Turns, turn)
+			// Newest, not last-parsed: Claude flushes some records late, so a
+			// trailing older stamp must not age a fresh delivery.
+			if ts, ok := parseStamp(turn.Time); ok && ts.After(t.lastTurnAt) {
+				t.lastTurnAt = ts
+			}
 			// Visible turns also set owing (Codex message items reach here
 			// without going through the function_call branches above).
 			if turn.Role == "user" || turn.Role == "assistant" {
