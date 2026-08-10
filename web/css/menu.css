@@ -3,7 +3,7 @@
   border: 1px solid var(--hairline); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.28);
   padding: 6px; }
 .popmenu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-  padding: 9px 12px; border-radius: 8px; color: var(--ink); font-size: 14px; }
+  padding: 9px 12px; min-height: 44px; border-radius: 8px; color: var(--ink); font-size: 14px; }
 .popmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .popmenu button.danger { color: var(--danger); }
 .popmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
