@@ -75,7 +75,10 @@
  * Chat surface (head + turns + history + terminal + echo + scroll + keys).
  */
 
-import { esc, md, fmtWhen, fmtBubbleTime, bubbleTitle } from "./format.js";
+import {
+  esc, md, fmtWhen, fmtBubbleTime, bubbleTitle,
+  ASSET_REF_RE, stripAssetRefs,
+} from "./format.js";
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
@@ -90,7 +93,6 @@ export const CHAT_DETAIL_SAVED_MS = 2000;
 export const PENDING_JUMP_TTL_MS = 15000;
 
 export const RASTER_RE = /\.(png|jpe?g|gif|webp)$/i;
-export const ASSET_REF_RE = /(!?)\[([^\]]*)\]\(scimux-asset:([\w-]+)\)/g;
 
 export const DEC_LABELS = {
   no_transcript: "No transcript yet \u2014 showing the terminal",
@@ -363,19 +365,6 @@ export function splitAssetRefs(text, nodeId, assets, deps = {}){
     return "";
   }).replace(/\n{3,}/g, "\n\n").trim();
   return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
-}
-
-/* stripAssetRefs: pure. Replace ![alt](scimux-asset:id) / [alt](scimux-asset:id)
-   markers with their alt text (drop when alt is empty) so a forked prompt
-   never ships dead asset markdown the new node cannot resolve. Reuses
-   ASSET_REF_RE (reset lastIndex — it is a /g regex). Sheets stays free of
-   asset knowledge; the chat caller owns the strip. */
-export function stripAssetRefs(text){
-  const re = ASSET_REF_RE;
-  re.lastIndex = 0;
-  return (text || "")
-    .replace(re, (_m, _bang, alt) => alt || "")
-    .replace(/\n{3,}/g, "\n\n");
 }
 
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything

@@ -98,6 +98,7 @@ import {
   md as mdDefault,
   fmtWhen as fmtWhenDefault,
   fmtNoteMeta as fmtNoteMetaDefault,
+  stripAssetRefs,
 } from "./format.js";
 import { hashStr as hashStrDefault } from "./lanes.js";
 import {
@@ -106,6 +107,7 @@ import {
   bookmarkSortKey as bookmarkSortKeyDefault,
   bookmarkClampState as bookmarkClampStateDefault,
   bookmarkActionsHTML as bookmarkActionsHTMLDefault,
+  bookmarkMenuHTML as bookmarkMenuHTMLDefault,
 } from "./bookmarks.js";
 import {
   captureNotesTouchStart as captureNotesTouchStartDefault,
@@ -570,16 +572,38 @@ export function referenceHTML(r, deps = {}){
   const color = snap.lane || "var(--unlane)";
   const label = provLabel(esc(snap.station || ""), esc(snap.speaker || ""),
     snap.time ? esc(whenFn(snap.time)) : "");
+  const into = icons.ICON_INTO
+    ? `<span class="rot180">${icons.ICON_INTO}</span>`
+    : "";
+  /* P6: jump · sendto · more. data-refmore is the text-clamp trigger and must
+     stay a distinct attribute from the overflow menu (data-refact="more"). */
   return `<div class="wsref" data-ref="${esc(r.id)}" style="border-left-color:${esc(color)}">
     <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
     <div class="wsrefbody">${mdFn(snap.text || "")}</div>
     <button class="wsrefmore" data-refmore hidden></button>
     <div class="actionbar tear">
       <button class="btn-plain" data-refact="jump" aria-label="jump to chat">${icons.ICON_JUMP || ""}</button>
-      <button class="btn-plain" data-refact="copy" aria-label="copy reference text">${icons.ICON_COPY || ""}</button>
-      <button class="btn-plain danger" data-refact="trash" aria-label="remove reference">${icons.ICON_TRASH || ""}</button>
+      <button class="btn-plain" data-refact="sendto" aria-label="send to\u2026">${into}</button>
+      <button class="btn-plain" data-refact="more" aria-label="more actions">${icons.ICON_MENU_DOTS || ""}</button>
     </div>
   </div>`;
+}
+
+/** Overflow menu for a section reference. Items reuse data-refact so the
+    existing referenceAction dispatch keeps working. Destructive Remove is
+    last, .danger, after a separator. */
+export function referenceMenuHTML(deps = {}){
+  const icons = deps.icons || {};
+  return menuButtonHTML({
+    attrs: 'data-refact="copy"',
+    label: "Copy",
+    icon: icons.ICON_COPY || "",
+  }) + menuSepHTML() + menuButtonHTML({
+    attrs: 'data-refact="trash"',
+    label: "Remove",
+    icon: icons.ICON_TRASH || "",
+    danger: true,
+  });
 }
 
 /** Card stays grab-draggable only when not mid-rename (drag would steal the gesture). */
@@ -702,6 +726,7 @@ export function createNotesFeature(deps){
   const bookmarkLaneId = d.bookmarkLaneId || bookmarkLaneIdDefault;
   const bookmarkSortKey = d.bookmarkSortKey || bookmarkSortKeyDefault;
   const bookmarkClampState = d.bookmarkClampState || bookmarkClampStateDefault;
+  const bookmarkMenuHTML = d.bookmarkMenuHTML || bookmarkMenuHTMLDefault;
   const captureNotesTouchStart = d.captureNotesTouchStart || captureNotesTouchStartDefault;
   const notesSwipeBackDecision = d.notesSwipeBackDecision || notesSwipeBackDecisionDefault;
   const icons = d.icons || {};
@@ -734,6 +759,9 @@ export function createNotesFeature(deps){
   let wsPlacing = null;
   const wsSecTitleOrig = {};
   const popMenu = createPopoverMenu(doc);
+  /* overflow-menu target identity when the menu lives outside the card */
+  let menuInboxT = "";
+  let menuRef = null; /* { secId, refId } */
   let bound = false;
   const cleanups = [];
   let copyTimer = null;
@@ -904,6 +932,9 @@ export function createNotesFeature(deps){
   }
   function jumpToChatAddress(a){
     return typeof d.jumpToChatAddress === "function" ? d.jumpToChatAddress(a) : false;
+  }
+  function openSendTo(opts){
+    if (typeof d.openSendTo === "function") d.openSendTo(opts);
   }
   function uiMutate(op){
     if (typeof d.uiMutate === "function") d.uiMutate(op);
@@ -1391,37 +1422,82 @@ export function createNotesFeature(deps){
   }
 
   async function referenceAction(btn){
-    const refEl = btn.closest(".wsref"), secEl = btn.closest(".wssec");
-    const secId = secEl.dataset.sec, refId = refEl.dataset.ref;
+    const refEl = btn.closest(".wsref");
+    const secEl = btn.closest(".wssec");
+    /* Menu items live outside the card; fall back to the open-menu target. */
+    const secId = (secEl && secEl.dataset && secEl.dataset.sec)
+      || (menuRef && menuRef.secId) || "";
+    const refId = (refEl && refEl.dataset && refEl.dataset.ref)
+      || (menuRef && menuRef.refId) || "";
     const ref = findRef(secId, refId);
     if (!ref) return;
-    const act = btn.dataset.refact;
-    if (act === "copy"){
-      copyText((ref.snapshot && ref.snapshot.text) || "");
-      btn.innerHTML = "&#10003;";
-      if (copyTimer) clearTimeoutFn(copyTimer);
-      copyTimer = setTimeoutFn(() => { btn.innerHTML = icons.ICON_COPY || ""; }, COPY_ACK_MS);
+    if (btn.dataset.refact === "more"){
+      openReferenceOverflow(btn, secId, refId);
       return;
     }
-    if (act === "jump"){
+    if (btn.dataset.refact === "sendto"){
+      const src = ref.source || {};
+      openSendTo({
+        text: stripAssetRefs((ref.snapshot && ref.snapshot.text) || ""),
+        exceptId: src.node || "",
+        title: "Send to chat\u2026",
+      });
+      return;
+    }
+    if (btn.dataset.refact === "copy"){
+      closeWsMenu();
+      copyText((ref.snapshot && ref.snapshot.text) || "");
+      if (refEl){
+        btn.innerHTML = "&#10003;";
+        if (copyTimer) clearTimeoutFn(copyTimer);
+        copyTimer = setTimeoutFn(() => { btn.innerHTML = icons.ICON_COPY || ""; }, COPY_ACK_MS);
+      }
+      return;
+    }
+    if (btn.dataset.refact === "jump"){
       const src = ref.source || {};
       if (!jumpToChatAddress({ node: src.node, uid: src.uid, segment: src.segment,
           record: src.record, turnTime: src.turnTime, text: (ref.snapshot || {}).text }))
         toast("Source unavailable — the captured snapshot is still shown here.");
       return;
     }
-    if (act === "trash"){
+    if (btn.dataset.refact === "trash"){
+      closeWsMenu();
       try {
         const docu = await api("/api/notes/" + encodeURIComponent(wsActiveId) +
           "/sections/" + encodeURIComponent(secId) + "/references/" + encodeURIComponent(refId),
           { method: "DELETE" });
         if (docu && docu.id === wsActiveId){ wsActive = docu; syncCardMeta(docu); }
       } catch { toast("Couldn't remove reference"); return; }
-      const wrap = refEl.parentElement;
-      refEl.remove();
-      if (wrap && wrap.classList && wrap.classList.contains("wsrefs") && !wrap.children.length)
-        wrap.remove();
+      if (refEl){
+        const wrap = refEl.parentElement;
+        refEl.remove();
+        if (wrap && wrap.classList && wrap.classList.contains("wsrefs") && !wrap.children.length)
+          wrap.remove();
+      } else {
+        /* menu path: rebuild the note so the removed ref leaves the DOM */
+        renderNote();
+      }
     }
+  }
+
+  function openReferenceOverflow(trigger, secId, refId){
+    menuRef = { secId, refId };
+    menuInboxT = "";
+    const panel = root("wspanel");
+    popMenu.open({
+      panel,
+      anchor: trigger,
+      trigger,
+      offset: 40,
+      className: "popmenu",
+      html: referenceMenuHTML({ icons }),
+      onClick: (ev) => {
+        const btn = ev.target.closest && ev.target.closest("[data-refact]");
+        if (!btn) return;
+        referenceAction(btn);
+      },
+    });
   }
 
   async function placeHeldBookmark(secId){
@@ -1556,10 +1632,20 @@ export function createNotesFeature(deps){
       return;
     }
     const card = act.closest(".wsibookmark");
-    if (!card) return;
-    const nt = bookmarks().find(x => x.t === card.dataset.t);
+    const t = (card && card.dataset && card.dataset.t) || menuInboxT;
+    const nt = bookmarks().find(x => x.t === t);
     if (!nt) return;
     switch (act.dataset.bmact){
+      case "more":
+        openInboxOverflow(act, nt);
+        return;
+      case "sendto":
+        openSendTo({
+          text: stripAssetRefs(nt.text || ""),
+          exceptId: nt.node || "",
+          title: "Send bookmark to\u2026",
+        });
+        return;
       case "jump":
         /* jumpToChatAddress closes this workspace itself when it resolves */
         if (!(nt.node || nt.uid)) return;
@@ -1569,19 +1655,43 @@ export function createNotesFeature(deps){
         })) toast("That chat is no longer available.");
         return;
       case "copy":
+        closeWsMenu();
         copyText(nt.text || "");
-        act.innerHTML = "&#10003;";
-        if (wsInboxCopyTimer) clearTimeoutFn(wsInboxCopyTimer);
-        wsInboxCopyTimer = setTimeoutFn(() => { wsInboxSig = ""; renderInbox(); }, COPY_ACK_MS);
+        if (card){
+          act.innerHTML = "&#10003;";
+          if (wsInboxCopyTimer) clearTimeoutFn(wsInboxCopyTimer);
+          wsInboxCopyTimer = setTimeoutFn(() => { wsInboxSig = ""; renderInbox(); }, COPY_ACK_MS);
+        }
         return;
       case "note":
         startPlacement(nt);
         return;
       case "del":
+        closeWsMenu();
         wsInboxOpenT = "";
         uiMutate({ k: "bookmark-del", t: nt.t });
         return;
     }
+  }
+
+  function openInboxOverflow(trigger, nt){
+    if (!nt) return;
+    menuInboxT = nt.t;
+    menuRef = null;
+    const panel = root("wspanel");
+    popMenu.open({
+      panel,
+      anchor: trigger,
+      trigger,
+      offset: 40,
+      className: "popmenu",
+      html: bookmarkMenuHTML(nt, { icons, context: "inbox" }),
+      onClick: (ev) => {
+        const btn = ev.target.closest && ev.target.closest("[data-bmact]");
+        if (!btn) return;
+        onInboxListClick({ target: btn, preventDefault(){}, stopPropagation(){} });
+      },
+    });
   }
 
   /* the unfolded row must be on screen after the tap that unfolded it — the
@@ -1751,7 +1861,10 @@ export function createNotesFeature(deps){
   }
 
   function onDocClick(e){
-    if (popMenu.shouldCloseForClick(e.target, { exclude: "[data-secmenu]" }))
+    /* exclude every overflow trigger so the open-tap does not instantly dismiss */
+    if (popMenu.shouldCloseForClick(e.target, {
+      exclude: '[data-secmenu], [data-bmact="more"], [data-refact="more"]',
+    }))
       closeWsMenu();
   }
 

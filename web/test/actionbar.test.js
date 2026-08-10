@@ -64,6 +64,7 @@ function el(tag = "div", props = {}){
     parentNode: null,
     dataset: Object.assign({}, props.dataset || {}),
     _listeners: listeners,
+    _ariaLabel: "",
     addEventListener(type, fn){
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(fn);
@@ -79,6 +80,10 @@ function el(tag = "div", props = {}){
       }, ev);
       if (!e.target) e.target = node;
       for (const fn of listeners.get(type) || []) fn(e);
+    },
+    setAttribute(k, v){
+      if (k === "aria-label") node._ariaLabel = String(v);
+      else node[k] = v;
     },
     focus(){ node._focused = true; },
     blur(){ node._focused = false; },
@@ -295,10 +300,12 @@ test("P6 5b: sendto is present on inbox HTML and notes wires openSendTo", () => 
       nodeById: () => ({ title: "A" }) },
   );
   assert.match(item, /data-bmact="sendto"/);
-  /* notes must receive openSendTo via deps (never import bookmarks) */
+  /* notes must receive openSendTo via deps (never import the picker from chat) */
   assert.match(appSrc, /openSendTo/);
   assert.match(notesSrc, /openSendTo/);
-  assert.doesNotMatch(notesSrc, /from ["']\.\/bookmarks\.js["'][\s\S]*openSendTo|from ["']\.\/chat\.js["']/);
+  assert.doesNotMatch(notesSrc, /from ["']\.\/chat\.js["']/);
+  /* openSendTo is a dep, not a named import from bookmarks */
+  assert.doesNotMatch(notesSrc, /import\s*\{[^}]*openSendTo[^}]*\}\s*from\s*["']\.\/bookmarks\.js["']/);
 });
 
 test("P6 5c: reference sendto is present and notes dispatches it", () => {
@@ -540,17 +547,14 @@ test("P6 12b: comment stays pane-only and is withheld from comments (menu)", () 
 
 test("P6 13: inbox and reference send-to carry text and exclude the source chat", () => {
   /* Source pins: both paths call openSendTo with text + exceptId from the
-     bookmark/reference source node. */
-  assert.match(notesSrc, /openSendTo\s*\(/);
-  /* inbox sendto must pass the bookmark text and except the source node */
-  const inboxBlock = notesSrc.includes("bmact") && notesSrc.includes("sendto");
-  assert.ok(inboxBlock, "notes handles inbox sendto");
-  /* rough but stable: exceptId appears near an openSendTo call in notes */
-  const idx = notesSrc.indexOf("openSendTo");
-  assert.ok(idx >= 0, "notes.js must call openSendTo");
-  const window = notesSrc.slice(Math.max(0, idx - 50), idx + 800);
-  assert.match(window, /exceptId/, "send-to from notes must exclude the source chat");
-  assert.match(window, /text\s*:/, "send-to from notes must carry text");
+     bookmark/reference source node. The local wrapper is `function openSendTo`;
+     the call sites pass the options object. */
+  assert.match(notesSrc, /openSendTo\s*\(\s*\{/);
+  assert.match(notesSrc, /exceptId\s*:/, "send-to from notes must exclude the source chat");
+  assert.match(notesSrc, /stripAssetRefs\s*\(/, "send-to from notes strips asset markers");
+  /* at least two call sites (inbox + reference) */
+  const calls = notesSrc.match(/openSendTo\s*\(\s*\{/g) || [];
+  assert.ok(calls.length >= 2, `expected ≥2 openSendTo call sites, got ${calls.length}`);
   /* app injects openSendTo into notes feature */
   assert.match(appSrc, /createNotesFeature\s*\(\s*\{[\s\S]*openSendTo/);
 });

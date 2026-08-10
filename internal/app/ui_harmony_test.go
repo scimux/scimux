@@ -204,6 +204,9 @@ func TestBookmarkIsACardWithInsideActions(t *testing.T) {
 // reaching its chat meant first placing it into a section — an extra step with
 // no purpose. The inbox must render the same action set as the compact pane,
 // minus comment (whose composer lives only in the pane).
+//
+// P6: the visible bar is jump · sendto · note · more; copy/del (and pane-only
+// comment) live in bookmarkMenuHTML. Comment stays gated to the pane menu.
 func TestWorkspaceInboxBookmarkHasFullActions(t *testing.T) {
 	notes := mustReadWeb(t, "web/js/notes.js")
 	bm := mustReadWeb(t, "web/js/bookmarks.js")
@@ -217,13 +220,24 @@ func TestWorkspaceInboxBookmarkHasFullActions(t *testing.T) {
 	if !strings.Contains(bm, `b("jump"`) {
 		t.Error("the shared action row must offer a jump-to-chat action (item 5)")
 	}
-	for _, act := range []string{"copy", "note", "del"} {
+	for _, act := range []string{"sendto", "note", "more"} {
 		if !strings.Contains(bm, `b("`+act+`"`) {
 			t.Errorf("the shared action row must offer the %q action", act)
 		}
 	}
+	// Secondary actions live in the overflow menu (P6), not the visible bar.
+	if !strings.Contains(bm, "bookmarkMenuHTML") {
+		t.Error("overflow secondary actions must live in bookmarkMenuHTML")
+	}
+	if !strings.Contains(bm, `data-bmact="copy"`) {
+		t.Error("copy must remain available via the overflow menu")
+	}
+	if !strings.Contains(bm, `data-bmact="del"`) {
+		t.Error("delete must remain available via the overflow menu")
+	}
 	// comment is pane-only: its composer (#bookmarkprompt) is not in the workspace.
-	if !strings.Contains(bm, `context === "pane" && nt.node && !nt.anchor`) {
+	if !strings.Contains(bm, `context === "pane" && nt && nt.node && !nt.anchor`) &&
+		!strings.Contains(bm, `context === "pane" && nt.node && !nt.anchor`) {
 		t.Error(`"comment" must be gated to the pane: the reply composer lives only in the Bookmarks pane`)
 	}
 	// One builder, not a second copy of the action row markup.

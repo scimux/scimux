@@ -29,6 +29,22 @@ export function esc(s) {
     .replaceAll('"', "&quot;");
 }
 
+/* scimux-asset: markers are node-scoped. Strip them before carrying text into
+   another chat (send-to / fork) so the target never receives dead markdown it
+   cannot resolve. One home for every surface (bubble, pane bookmark, inbox
+   bookmark, section reference) — see P6 of ux-fixes.md. */
+export const ASSET_REF_RE = /(!?)\[([^\]]*)\]\(scimux-asset:([\w-]+)\)/g;
+
+/* Replace ![alt](scimux-asset:id) / [alt](scimux-asset:id) with their alt text
+   (drop when alt is empty). Reset lastIndex — ASSET_REF_RE is a /g regex. */
+export function stripAssetRefs(text){
+  const re = ASSET_REF_RE;
+  re.lastIndex = 0;
+  return (text || "")
+    .replace(re, (_m, _bang, alt) => alt || "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
 /* ---------- minimal markdown (escape-first; fenced code, tables, lists) ---------- */
 export function mdInline(s) {
   return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>")

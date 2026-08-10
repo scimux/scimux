@@ -1058,7 +1058,7 @@ test("sendto action opens picker, merges draft, navigates", () => {
   feature.setOpen(true);
 
   /* longpress must not be bound after P6 */
-  assert.equal(roots.bookmarklist._lp, null, "longpress binding removed");
+  assert.ok(!roots.bookmarklist._lp, "longpress binding removed");
 
   const wrap = el("div", { className: "bookmark", dataset: { t: "t1" } });
   wrap.dataset.t = "t1";
@@ -1212,7 +1212,7 @@ test("bind is idempotent; destroy removes listeners and send-to owner (no longpr
   const n1 = roots.bookmarksbtn._listeners.get("click").length;
   assert.equal(n1, 1);
   /* P6: longpress is no longer bound */
-  assert.equal(roots.bookmarklist._lp, null);
+  assert.ok(!roots.bookmarklist._lp);
 
   /* open send-to via the feature API so destroy can clear the owner */
   feature.openSendTo({ text: "x", title: "t" });
@@ -1220,7 +1220,7 @@ test("bind is idempotent; destroy removes listeners and send-to owner (no longpr
 
   feature.destroy();
   assert.equal(roots.bookmarksbtn._listeners.get("click").length, 0);
-  assert.equal(roots.bookmarklist._lp, null);
+  assert.ok(!roots.bookmarklist._lp);
   assert.equal(roots.sendtoList.onclick, null);
 
   /* re-bind works */

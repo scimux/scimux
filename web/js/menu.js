@@ -53,17 +53,29 @@ export function menuButtonHTML({ attrs = "", label = "", danger = false, icon = 
  * One live popover slot. open() closes any prior menu first (exactly one in
  * the document). close() removes it. shouldCloseForClick mirrors the notes
  * onDocClick predicate: dismiss on outside click, not on the menu itself or
- * an exclude selector (notes passes "[data-secmenu]"). No Escape handling,
- * no focus management — those are out of scope for this pure refactor.
+ * an exclude selector (notes passes "[data-secmenu]"). Escape closes and
+ * returns focus to the trigger element passed via open() options (P6) —
+ * never document.activeElement at module scope.
  */
 export function createPopoverMenu(doc){
   let menuEl = null;
+  let triggerEl = null;
+  let keyHandler = null;
+
+  function unbindKey(){
+    if (keyHandler && doc && typeof doc.removeEventListener === "function"){
+      try { doc.removeEventListener("keydown", keyHandler); } catch { /* ignore */ }
+    }
+    keyHandler = null;
+  }
 
   function close(){
+    unbindKey();
     if (menuEl){
       menuEl.remove();
       menuEl = null;
     }
+    triggerEl = null;
   }
 
   function element(){
@@ -78,6 +90,8 @@ export function createPopoverMenu(doc){
    * @param {string}  [opts.className] defaults to "popmenu"
    * @param {string}  [opts.html] innerHTML
    * @param {function} [opts.onClick] click listener on the menu root
+   * @param {Element} [opts.trigger] focus-return target on Escape; defaults
+   *   to anchor when omitted
    */
   function open({
     panel,
@@ -86,6 +100,7 @@ export function createPopoverMenu(doc){
     className = "popmenu",
     html = "",
     onClick,
+    trigger,
   } = {}){
     close();
     if (!doc || typeof doc.createElement !== "function") return null;
@@ -103,7 +118,21 @@ export function createPopoverMenu(doc){
     m.style.top = pos.top + "px";
     m.style.left = pos.left + "px";
     menuEl = m;
+    triggerEl = trigger || anchor || null;
     if (typeof onClick === "function") m.addEventListener("click", onClick);
+    /* Escape closes and restores focus to the open()-provided trigger. */
+    if (typeof doc.addEventListener === "function"){
+      keyHandler = (ev) => {
+        if (!menuEl) return;
+        if (ev.key !== "Escape" && ev.key !== "Esc") return;
+        if (typeof ev.preventDefault === "function") ev.preventDefault();
+        if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+        const returnTo = triggerEl;
+        close();
+        if (returnTo && typeof returnTo.focus === "function") returnTo.focus();
+      };
+      doc.addEventListener("keydown", keyHandler);
+    }
     return m;
   }
 

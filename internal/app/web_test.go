@@ -1126,14 +1126,22 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 			t.Error("#notesbtn must not carry .backbtn")
 		}
 	}
-	// in the note action row, the paperclip (use-in-note) sits just before delete
+	// P6: visible bar is jump · sendto · note · more; delete moved into the
+	// overflow menu (bookmarkMenuHTML). Paperclip still sits before the menu
+	// trigger on the bar.
 	clip := strings.Index(src, `b("note",`)
-	del := strings.Index(src, `b("del",`)
-	if clip < 0 || del < 0 {
-		t.Fatal("note action row must contain both the use-in-note and delete actions")
+	more := strings.Index(src, `b("more",`)
+	if clip < 0 || more < 0 {
+		t.Fatal("note action row must contain both the use-in-note and more (overflow) actions")
 	}
-	if !(clip < del) {
-		t.Error("the use-in-note (paperclip) action must sit before delete (second-to-last)")
+	if !(clip < more) {
+		t.Error("the use-in-note (paperclip) action must sit before the overflow trigger")
+	}
+	if !strings.Contains(src, "bookmarkMenuHTML") {
+		t.Error("delete lives in bookmarkMenuHTML after P6, not on the visible bar")
+	}
+	if !strings.Contains(src, `data-bmact="del"`) {
+		t.Error("delete must still be offered via the overflow menu")
 	}
 	act := src[clip:]
 	if end := strings.Index(act, ")"); end > 0 {

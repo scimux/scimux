@@ -852,7 +852,7 @@ composerFeature = createComposerFeature({
   alert: msg => alert(msg),
 });
 
-/* Bookmarks feature — pane, flags, clamp, reply composer, jump, longpress.
+/* Bookmarks feature — pane, flags, clamp, reply composer, jump, send-to.
    openNotes is lazy so Notes workspace (Packet 7F) is never imported here. */
 bookmarksFeature = createBookmarksFeature({
   roots: {
@@ -882,6 +882,7 @@ bookmarksFeature = createBookmarksFeature({
   hashStr,
   icons: {
     ICON_JUMP, ICON_COMMENT, ICON_COPY, ICON_CLIP, ICON_TRASH, ICON_SEND,
+    ICON_INTO, ICON_MENU_DOTS,
   },
   bookmarks: () => getUI().bookmarks,
   uiMutate,
@@ -908,7 +909,7 @@ bookmarksFeature = createBookmarksFeature({
   isDesktop,
   singleZone,
   restartWorkPulse: () => restartWorkPulse(),
-  longpress: (container, selector, fn) => longpress(container, selector, fn),
+  /* P6: longpress send-to removed; send-to is an explicit bar button. */
 });
 function renderBookmarksPane(){ bookmarksFeature.render(); }
 function setBookmarksOpen(open){ bookmarksFeature.setOpen(open); }
@@ -957,6 +958,7 @@ notesFeature = createNotesFeature({
   icons: {
     ICON_PLUS, ICON_MENU_DOTS, ICON_CLIP, ICON_JUMP, ICON_COPY, ICON_TRASH,
     ICON_CHEV_RIGHT, ICON_CHEV_DOWN, ICON_PENCIL, ICON_MOVE_UP, ICON_MOVE_DOWN,
+    ICON_INTO,
   },
   api,
   bookmarks: () => getUI().bookmarks,
@@ -965,6 +967,8 @@ notesFeature = createNotesFeature({
   laneColor: id => laneColor(id),
   toast: msg => toast(msg),
   copyText: s => copyText(s),
+  /* bookmarks owns #sendto; inbox + reference bars reuse the one dialogue */
+  openSendTo: opts => bookmarksFeature.openSendTo(opts),
   onVisibilityChange: () => { bookmarksFeature.invalidate(); renderBookmarksPane(); },
   jumpToChatAddress: a => {
     setReturnContext(RETURN_NOTE, { title: notesFeature.activeTitle() });

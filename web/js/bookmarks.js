@@ -1,4 +1,4 @@
-/* Bookmarks feature: pane, flags, clamp, composer, jump, longpress send-to.
+/* Bookmarks feature: pane, flags, clamp, composer, jump, send-to (explicit bar).
  *
  * Packet 7E ownership inventory
  * -----------------------------
@@ -44,9 +44,10 @@
  *   - Jump / copy / delete / comment / use-in-note action dispatch
  *   - Manual bookmark creation (general / lane / comment-anchor)
  *   - Reply chip, blur empty-cancel, Escape, chip dismiss
- *   - Longpress send-to draft merge + sheet/navigation
- *   - openSendTo: shared picker for bookmark longpress AND chat bubbles —
- *     live/open targets only, pinned block (manual order) then recency
+ *   - Send-to draft merge + sheet/navigation (explicit bar button; P6 removed
+ *     the longpress-only route)
+ *   - openSendTo: shared picker for bookmark bar, inbox, reference, and chat
+ *     bubbles — live/open targets only, pinned block then recency
  *
  * Timers / clipboard / scrolling / layout seams:
  *   - copy acknowledgement 900ms timer (restores ICON_COPY; clears sig)
@@ -63,15 +64,16 @@
  *   - startPlacement (Notes use-in-note — Notes owns workspace; 7F)
  *   - openNotes lazy (Notes › / workspace)
  *   - openSheet / closeSheets, setLevel, restartWorkPulse
- *   - toast, copyText, longpress helper, prompt focus targets
+ *   - toast, copyText, prompt focus targets
  *   - storage (localStorage), document, setTimeout/clearTimeout, CSS.escape
- *   - esc, md, fmtWhen, hashStr, icons
+ *   - esc, md, fmtWhen, hashStr, icons, stripAssetRefs (format.js)
+ *   - menu.js createPopoverMenu for the overflow (comment/copy/Delete)
  *
  * bind / destroy lifecycle:
  *   - createBookmarksFeature(deps) → { bind, destroy, render, setOpen,
  *     isOpen, invalidate, pinBottom, setBackLabel, jumpToChatAddress }
  *   - bind() is idempotent; destroy() removes every owned listener and
- *     longpress disposer exactly once; shell DOM roots stay in place
+ *     closes the overflow menu; shell DOM roots stay in place
  *
  * Explicit non-ownership:
  *   - Notes workspace / inbox / reference projection / bookmarkSnapshot /
@@ -81,17 +83,13 @@
  *   - Search, the openPreview implementation, map station capture
  *     (addStationBookmark shell), chat bubble capture (chat.js)
  *   - Composer #promptbar (composer.js), generic sheets, polling tick body
- *   - Shared longpress helper implementation (shell injects)
  *   - state.js applyOp bookmark-add/del (reducer stays shared)
  *
  * Reuses (no algorithm duplication):
- *   format.js: esc, md, fmtWhen
+ *   format.js: esc, md, fmtWhen, stripAssetRefs
  *   lanes.js: hashStr
  *   map-model.js: sendableNodes (send-to eligibility + ranking)
- *
- * Pre-existing bug fixed in 7E (reported separately):
- *   Longpress resolved `bookmark` but checked/used undeclared `note`.
- *   Intended contract: use `bookmark` for the guard and draft text.
+ *   menu.js: createPopoverMenu, menuButtonHTML, menuSepHTML
  *
  * Contracts preserved:
  *   - Oldest-first list; comments immediately after anchors
@@ -105,10 +103,20 @@
  *   - Existing IDs, classes, ARIA, data attributes, labels, source order
  */
 
-import { esc as escDefault, md as mdDefault, fmtWhen as fmtWhenDefault } from "./format.js";
+import {
+  esc as escDefault,
+  md as mdDefault,
+  fmtWhen as fmtWhenDefault,
+  stripAssetRefs,
+} from "./format.js";
 import { hashStr as hashStrDefault } from "./lanes.js";
 import { sendableNodes } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import {
+  createPopoverMenu,
+  menuButtonHTML,
+  menuSepHTML,
+} from "./menu.js";
 
 /* ---------- public constants ---------- */
 
@@ -232,12 +240,15 @@ export function bookmarkListHTML(opts){
 }
 
 /* The one action row a bookmark gets, wherever it is shown (UI review items
-   5, 6, 8, 9). Both the compact Bookmarks pane and the Notes workspace inbox
-   render this, so the two can no longer drift apart in geometry, order, or
-   which actions exist at all — the inbox used to offer only "Use in note",
-   which meant reaching the chat required first placing the bookmark into a
-   section. `context` withholds exactly one action: comment is pane-only,
-   because its reply composer (#bookmarkprompt) lives only there.
+   5, 6, 8, 9 + P6). Both the compact Bookmarks pane and the Notes workspace
+   inbox render this, so the two can no longer drift apart in geometry, order,
+   or which actions exist at all.
+
+   P6 grammar (icon-only): three primaries + overflow menu trigger
+     [open in chat] [send to…] [use in note] [⋯ …]
+   Secondary items (comment, copy, Delete) live in bookmarkMenuHTML. Comment
+   is still pane-only (its reply composer lives only there) and still withheld
+   from comments (no nesting) — those gates move into the menu builder.
 
    "use in note" is withheld from the pane while the Notes workspace is closed
    (review 2, item 4): it arms placement mode, whose only targets are the
@@ -254,14 +265,43 @@ export function bookmarkActionsHTML(nt, opts){
   const canPlace = context === "inbox" || workspaceOpen || singleZone;
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
+  const into = icons.ICON_INTO
+    ? `<span class="rot180">${icons.ICON_INTO}</span>`
+    : "";
   return `<div class="actionbar tear">
         ${nt.node || nt.uid ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
-        ${context === "pane" && nt.node && !nt.anchor
-          ? b("comment", "comment on this bookmark", icons.ICON_COMMENT) : ""}
-        ${b("copy", "copy bookmark", icons.ICON_COPY)}
+        ${b("sendto", "send to\u2026", into)}
         ${canPlace ? b("note", "use in note", icons.ICON_CLIP) : ""}
-        ${b("del", "delete bookmark", icons.ICON_TRASH, " danger")}
+        ${b("more", "more actions", icons.ICON_MENU_DOTS)}
       </div>`;
+}
+
+/** Overflow menu for a bookmark row. Menu items reuse data-bmact so the same
+    dispatch handles bar and menu. Destructive Delete is last, .danger, after
+    a separator (HIG). Comment is pane-only and withheld from comments. */
+export function bookmarkMenuHTML(nt, opts){
+  const { icons = {}, context = "pane" } = opts || {};
+  let html = "";
+  if (context === "pane" && nt && nt.node && !nt.anchor){
+    html += menuButtonHTML({
+      attrs: 'data-bmact="comment"',
+      label: "Comment",
+      icon: icons.ICON_COMMENT || "",
+    });
+  }
+  html += menuButtonHTML({
+    attrs: 'data-bmact="copy"',
+    label: "Copy",
+    icon: icons.ICON_COPY || "",
+  });
+  html += menuSepHTML();
+  html += menuButtonHTML({
+    attrs: 'data-bmact="del"',
+    label: "Delete",
+    icon: icons.ICON_TRASH || "",
+    danger: true,
+  });
+  return html;
 }
 
 export function bookmarkFlagsHTML(flags, hasGeneral, esc){
@@ -358,10 +398,12 @@ export function createBookmarksFeature(deps){
   let bookmarkAnchor = "";
   let bound = false;
   const cleanups = [];
-  let longpressDispose = null;
   let copyTimer = null;
   let sendtoListWithHandler = null;
   let sendtoClickHandler = null;
+  const popMenu = createPopoverMenu(doc);
+  let menuBookmarkT = "";
+  let menuContext = "pane";
 
   function bookmarks(){
     return g("bookmarks", []) || [];
@@ -599,8 +641,23 @@ export function createBookmarksFeature(deps){
     }
     const act = e.target.closest && e.target.closest("[data-bmact]");
     if (act){
-      const nt = bookmarks().find(x => x.t === act.closest(".bookmark")?.dataset.t);
+      /* Menu items live outside the card; fall back to the open-menu target. */
+      const card = act.closest(".bookmark");
+      const t = (card && card.dataset && card.dataset.t) || menuBookmarkT;
+      const nt = bookmarks().find(x => x.t === t);
       if (!nt) return;
+      if (act.dataset.bmact === "more"){
+        openBookmarkOverflow(act, nt, "pane");
+        return;
+      }
+      if (act.dataset.bmact === "sendto"){
+        openSendTo({
+          text: stripAssetRefs(nt.text || ""),
+          exceptId: nt.node || "",
+          title: "Send bookmark to\u2026",
+        });
+        return;
+      }
       if (act.dataset.bmact === "jump" && (nt.node || nt.uid)){
         if (!jumpToChatAddress({
           node: nt.node, uid: nt.uid, segment: nt.segment,
@@ -612,21 +669,27 @@ export function createBookmarksFeature(deps){
       } else if (act.dataset.bmact === "note"){
         if (typeof d.startPlacement === "function") d.startPlacement(nt);
       } else if (act.dataset.bmact === "comment"){
+        popMenu.close();
         setBookmarkAnchor(nt.t);
         openBookmarkT = "";
         render();
         if (roots.bookmarkprompt && typeof roots.bookmarkprompt.focus === "function")
           roots.bookmarkprompt.focus();
       } else if (act.dataset.bmact === "copy"){
+        popMenu.close();
         if (typeof d.copyText === "function") d.copyText(nt.text || "");
-        act.innerHTML = "&#10003;";
-        if (copyTimer) clearTimeoutFn(copyTimer);
-        copyTimer = setTimeoutFn(() => {
-          act.innerHTML = icons.ICON_COPY || "";
-          bookmarksSig = "";
-          copyTimer = null;
-        }, COPY_ACK_MS);
+        /* bar button gets the checkmark ack; menu items just close */
+        if (card){
+          act.innerHTML = "&#10003;";
+          if (copyTimer) clearTimeoutFn(copyTimer);
+          copyTimer = setTimeoutFn(() => {
+            act.innerHTML = icons.ICON_COPY || "";
+            bookmarksSig = "";
+            copyTimer = null;
+          }, COPY_ACK_MS);
+        }
       } else if (act.dataset.bmact === "del"){
+        popMenu.close();
         openBookmarkT = "";
         if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-del", t: nt.t });
       }
@@ -745,12 +808,31 @@ export function createBookmarksFeature(deps){
     if (typeof d.openSheet === "function") d.openSheet("#sendto");
   }
 
-  function onLongpress(el){
-    const bookmark = bookmarks().find(x => x.t === el.dataset.t);
-    /* Pre-existing defect fixed in 7E: production resolved `bookmark` but
-       checked/used undeclared `note`. Intended contract uses `bookmark`. */
-    if (!bookmark) return;
-    openSendTo({ text: bookmark.text || "", title: "Send bookmark to…" });
+  function openBookmarkOverflow(trigger, nt, context){
+    if (!nt) return;
+    menuBookmarkT = nt.t;
+    menuContext = context || "pane";
+    const panel = roots.bookmarkspane || (doc && doc.body);
+    popMenu.open({
+      panel,
+      anchor: trigger,
+      trigger,
+      offset: 40,
+      className: "popmenu",
+      html: bookmarkMenuHTML(nt, { icons, context: menuContext }),
+      onClick: (ev) => {
+        const btn = ev.target.closest && ev.target.closest("[data-bmact]");
+        if (!btn) return;
+        /* Re-dispatch through the pane handler with the stored target so
+           menu items reuse data-bmact dispatch without living inside .bookmark. */
+        onPaneClick({ target: btn, preventDefault(){}, stopPropagation(){} });
+      },
+    });
+  }
+
+  function onDocClick(e){
+    if (popMenu.shouldCloseForClick(e.target, { exclude: '[data-bmact="more"]' }))
+      popMenu.close();
   }
 
   function listen(target, type, fn, opts){
@@ -786,20 +868,15 @@ export function createBookmarksFeature(deps){
     listen(roots.bookmarkprompt, "keydown", onPromptKeydown);
     listen(roots.bookmarkprompt, "blur", onPromptBlur);
     listen(roots.bookmarkchipx, "click", onChipXClick);
-
-    if (typeof d.longpress === "function" && roots.bookmarklist){
-      longpressDispose = d.longpress(roots.bookmarklist, ".bookmark", onLongpress);
-    }
+    if (doc) listen(doc, "click", onDocClick);
   }
 
   function destroy(){
     while (cleanups.length){
       try { cleanups.pop()(); } catch { /* ignore */ }
     }
-    if (typeof longpressDispose === "function"){
-      try { longpressDispose(); } catch { /* ignore */ }
-      longpressDispose = null;
-    }
+    try { popMenu.close(); } catch { /* ignore */ }
+    menuBookmarkT = "";
     if (copyTimer){
       clearTimeoutFn(copyTimer);
       copyTimer = null;
