@@ -312,6 +312,76 @@ test("P5 6: web/css/menu.css is enumerated and brace depth returns to 0", () => 
   assert.doesNotMatch(raw, /wsconfirmmsg/);
 });
 
+/* ---------- P6: Escape closes the open popover; focus returns to trigger ---------- */
+
+test("P6 Escape: Escape closes the open popover", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  /* doc must accept keydown listeners for Escape */
+  const keyListeners = [];
+  doc.addEventListener = (type, fn) => {
+    if (type === "keydown") keyListeners.push(fn);
+  };
+  doc.removeEventListener = (type, fn) => {
+    if (type === "keydown"){
+      const i = keyListeners.indexOf(fn);
+      if (i >= 0) keyListeners.splice(i, 1);
+    }
+  };
+  const ctl = menu.createPopoverMenu(doc);
+  const trigger = makeEl("button");
+  trigger.focus = () => { trigger._focused = true; };
+  const el = ctl.open({
+    panel, anchor, offset: 150,
+    className: "popmenu",
+    html: `<button data-mi="x">X</button>`,
+    trigger,
+  });
+  assert.ok(el);
+  assert.equal(ctl.element(), el);
+  assert.ok(keyListeners.length >= 1, "Escape keydown listener must be registered on open");
+
+  for (const fn of keyListeners.slice()){
+    fn({ key: "Escape", preventDefault(){}, stopPropagation(){} });
+  }
+  assert.equal(ctl.element(), null, "Escape must close the menu");
+  assert.equal(panel.children.length, 0);
+});
+
+test("P6 Escape: focus returns to the trigger element", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  const keyListeners = [];
+  doc.addEventListener = (type, fn) => {
+    if (type === "keydown") keyListeners.push(fn);
+  };
+  doc.removeEventListener = (type, fn) => {
+    if (type === "keydown"){
+      const i = keyListeners.indexOf(fn);
+      if (i >= 0) keyListeners.splice(i, 1);
+    }
+  };
+  const ctl = menu.createPopoverMenu(doc);
+  const trigger = makeEl("button");
+  let focused = false;
+  trigger.focus = () => { focused = true; trigger._focused = true; };
+  ctl.open({
+    panel, anchor, offset: 150,
+    className: "popmenu",
+    html: `<button data-mi="x">X</button>`,
+    trigger,
+  });
+  for (const fn of keyListeners.slice()){
+    fn({ key: "Escape", preventDefault(){}, stopPropagation(){} });
+  }
+  assert.equal(focused, true, "focus must return to the trigger passed via open() options");
+  /* trigger arrives through open() options — not document.activeElement at module scope */
+  assert.doesNotMatch(
+    readFileSync(menuJsPath, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, ""),
+    /document\.activeElement/,
+  );
+});
+
 /* ---------- structural pin: menu.js is importable under bare Node ---------- */
 
 test("P5: menu.js takes no implicit document global at module scope", async () => {

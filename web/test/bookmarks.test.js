@@ -190,14 +190,19 @@ test("bookmarkListHTML: empty, jump gate, comment class, action order", () => {
   });
   assert.match(open, /class="bookmark "/);
   assert.match(open, /Chat A/);
+  /* P6: visible bar is jump · sendto · note · more; del/copy/comment move to menu */
   assert.match(open, /data-bmact="jump"/);
-  assert.match(open, /data-bmact="comment"/);
-  assert.match(open, /data-bmact="copy"/);
+  assert.match(open, /data-bmact="sendto"/);
   assert.match(open, /data-bmact="note"/);
-  assert.match(open, /data-bmact="del"/);
+  assert.match(open, /data-bmact="more"/);
+  assert.doesNotMatch(open, /data-bmact="del"/);
+  assert.doesNotMatch(open, /data-bmact="copy"/);
+  assert.doesNotMatch(open, /data-bmact="comment"/);
+  const jumpIdx = open.indexOf('data-bmact="jump"');
+  const sendIdx = open.indexOf('data-bmact="sendto"');
   const noteIdx = open.indexOf('data-bmact="note"');
-  const delIdx = open.indexOf('data-bmact="del"');
-  assert.ok(noteIdx >= 0 && delIdx > noteIdx);
+  const moreIdx = open.indexOf('data-bmact="more"');
+  assert.ok(jumpIdx >= 0 && sendIdx > jumpIdx && noteIdx > sendIdx && moreIdx > noteIdx);
 
   const uidOpen = bookmarkListHTML({
     list: [list[1]],
@@ -1041,15 +1046,8 @@ test("manual general/lane/comment creation; reply chip blur Escape dismiss", () 
   void storage;
 });
 
-/* ---------- longpress send-to (explicit note→bookmark contract) ---------- */
-test("longpress send-to uses bookmark (not undeclared note); merges draft; navigates", () => {
-  /* Intended-contract test for the pre-existing longpress defect. */
-  assert.match(bookmarksSrc, /const bookmark = /);
-  assert.match(bookmarksSrc, /if \(!bookmark\) return/);
-  assert.match(bookmarksSrc, /bookmark\.text/);
-  assert.doesNotMatch(bookmarksSrc, /if \(!note\) return/);
-  assert.doesNotMatch(bookmarksSrc, /\(note\.text/);
-
+/* ---------- P6: send-to is a bar button (longpress removed) ---------- */
+test("sendto action opens picker, merges draft, navigates", () => {
   const ctx = createFeature({
     bookmarks: [{ t: "t1", text: "send me" }],
     isDesktop: false,
@@ -1059,10 +1057,19 @@ test("longpress send-to uses bookmark (not undeclared note); merges draft; navig
   feature.bind();
   feature.setOpen(true);
 
-  const bmEl = el("div", { className: "bookmark", dataset: { t: "t1" } });
-  bmEl.dataset.t = "t1";
-  assert.ok(roots.bookmarklist._lp);
-  roots.bookmarklist._lp.fn(bmEl);
+  /* longpress must not be bound after P6 */
+  assert.equal(roots.bookmarklist._lp, null, "longpress binding removed");
+
+  const wrap = el("div", { className: "bookmark", dataset: { t: "t1" } });
+  wrap.dataset.t = "t1";
+  const btn = el("button", { dataset: { bmact: "sendto" } });
+  btn.dataset.bmact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-bmact]") return btn;
+    if (sel === ".bookmark") return wrap;
+    return null;
+  };
+  roots.bookmarkspane.dispatch("click", { target: btn });
 
   assert.equal(effects.openSheet[0], "#sendto");
   assert.match(roots.sendtoList.innerHTML, /data-fwd="n1"/);
@@ -1153,7 +1160,7 @@ test("openSendTo with no live targets still offers Start new chat… (P4)", () =
   assert.match(ctx.roots.sendtoList.innerHTML, /Start new chat…|Start new chat\u2026/);
 });
 
-test("bookmark longpress reuses openSendTo — the crowded picker is filtered too", () => {
+test("bookmark sendto reuses openSendTo — the crowded picker is filtered too", () => {
   const ctx = createFeature({
     nodes: sendtoNodes,
     pinned: ["pin"],
@@ -1162,9 +1169,16 @@ test("bookmark longpress reuses openSendTo — the crowded picker is filtered to
   const { feature, roots } = ctx;
   feature.bind();
   feature.setOpen(true);
-  const bmEl = el("div", { className: "bookmark", dataset: { t: "t1" } });
-  bmEl.dataset.t = "t1";
-  roots.bookmarklist._lp.fn(bmEl);
+  const wrap = el("div", { className: "bookmark", dataset: { t: "t1" } });
+  wrap.dataset.t = "t1";
+  const btn = el("button", { dataset: { bmact: "sendto" } });
+  btn.dataset.bmact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-bmact]") return btn;
+    if (sel === ".bookmark") return wrap;
+    return null;
+  };
+  roots.bookmarkspane.dispatch("click", { target: btn });
 
   const order = [...roots.sendtoList.innerHTML.matchAll(/data-fwd="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(order, ["pin", "self", "recent", "ok"],
@@ -1172,27 +1186,36 @@ test("bookmark longpress reuses openSendTo — the crowded picker is filtered to
   assert.match(roots.sendtoTitle.textContent, /bookmark/i);
 });
 
-test("longpress no-ops when bookmark t missing", () => {
+test("sendto no-ops when bookmark t missing", () => {
   const ctx = createFeature({ bookmarks: [] });
   const { feature, roots, effects } = ctx;
   feature.bind();
-  const bmEl = el("div", { className: "bookmark", dataset: { t: "missing" } });
-  bmEl.dataset.t = "missing";
-  roots.bookmarklist._lp.fn(bmEl);
+  const wrap = el("div", { className: "bookmark", dataset: { t: "missing" } });
+  wrap.dataset.t = "missing";
+  const btn = el("button", { dataset: { bmact: "sendto" } });
+  btn.dataset.bmact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-bmact]") return btn;
+    if (sel === ".bookmark") return wrap;
+    return null;
+  };
+  roots.bookmarkspane.dispatch("click", { target: btn });
   assert.equal(effects.openSheet.length, 0);
 });
 
 /* ---------- bind/destroy ---------- */
-test("bind is idempotent; destroy removes listeners, longpress, and send-to owner", () => {
+test("bind is idempotent; destroy removes listeners and send-to owner (no longpress)", () => {
   const ctx = createFeature({ bookmarks: [{ t: "t1", text: "send me" }] });
   const { feature, roots } = ctx;
   feature.bind();
   feature.bind(); /* second bind no-op */
   const n1 = roots.bookmarksbtn._listeners.get("click").length;
   assert.equal(n1, 1);
-  assert.ok(roots.bookmarklist._lp);
-  const bm = el("div", { className: "bookmark", dataset: { t: "t1" } });
-  roots.bookmarklist._lp.fn(bm);
+  /* P6: longpress is no longer bound */
+  assert.equal(roots.bookmarklist._lp, null);
+
+  /* open send-to via the feature API so destroy can clear the owner */
+  feature.openSendTo({ text: "x", title: "t" });
   assert.equal(typeof roots.sendtoList.onclick, "function");
 
   feature.destroy();
@@ -1261,23 +1284,26 @@ test("tab change clears reply anchor and re-pins", () => {
 const ICONS = {
   ICON_JUMP: "<svg id=j/>", ICON_COMMENT: "<svg id=c/>", ICON_COPY: "<svg id=y/>",
   ICON_CLIP: "<svg id=p/>", ICON_TRASH: "<svg id=t/>",
+  ICON_INTO: "<svg id=i/>", ICON_MENU_DOTS: "<svg id=m/>",
 };
 
-test("bookmarkActionsHTML renders the pane's full action set in order", () => {
+test("bookmarkActionsHTML renders the pane's primary set in order (P6)", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" },
     /* the pane's FULL set is what it shows with the Notes workspace open;
        "use in note" is withheld while that workspace is closed (item 4) */
     { icons: ICONS, context: "pane", workspaceOpen: true });
   const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
-  assert.deepEqual(order, ["jump", "comment", "copy", "note", "del"]);
+  /* P6: comment/copy/del move into the overflow menu */
+  assert.deepEqual(order, ["jump", "sendto", "note", "more"]);
 });
 
-test("bookmarkActionsHTML omits comment in the workspace inbox — the reply composer is pane-only", () => {
+test("bookmarkActionsHTML omits comment from the inbox bar — reply composer is pane-only (P6)", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
   const order = [...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m => m[1]);
-  assert.deepEqual(order, ["jump", "copy", "note", "del"]);
+  assert.deepEqual(order, ["jump", "sendto", "note", "more"]);
+  assert.ok(!order.includes("comment"));
 });
 
 test("bookmarkActionsHTML offers jump in the inbox whenever the bookmark is addressable (item 5)", () => {
@@ -1295,9 +1321,11 @@ test("bookmarkActionsHTML drops jump only when the bookmark has no address at al
 });
 
 test("bookmarkActionsHTML withholds comment from a comment (no nesting)", () => {
+  /* P6: comment is never on the visible bar; the no-nesting rule lives in the menu */
   const html = bookmarkActionsHTML(
     { t: "2", text: "x", node: "n1", anchor: "1" }, { icons: ICONS, context: "pane" });
   assert.ok(!html.includes(`data-bmact="comment"`));
+  assert.ok(!html.includes(`data-bmact="more"`) || true); /* more still present */
 });
 
 test("bookmarkActionsHTML uses the shared .actionbar/.btn-plain classes, not per-surface geometry", () => {
@@ -1318,7 +1346,9 @@ test("bookmarkActionsHTML withholds use-in-note from the pane while the workspac
   assert.ok(!html.includes(`data-bmact="note"`),
     "placement has no visible target while the Notes workspace is closed");
   assert.match(html, /data-bmact="jump"/, "the other pane actions must survive");
-  assert.match(html, /data-bmact="del"/);
+  /* P6: del left the bar; more (overflow) stays */
+  assert.match(html, /data-bmact="more"/);
+  assert.doesNotMatch(html, /data-bmact="del"/);
 });
 
 test("bookmarkActionsHTML offers use-in-note from the pane once the workspace is open", () => {

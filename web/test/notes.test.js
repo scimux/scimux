@@ -584,9 +584,13 @@ test("referenceHTML and sectionBodyInner preserve references", () => {
     icons: { ICON_JUMP: "J", ICON_COPY: "C", ICON_TRASH: "T" },
   });
   assert.match(html, /data-ref="r1"/);
+  /* P6: visible bar is jump · sendto · more; copy/trash move to the overflow menu */
   assert.match(html, /data-refact="jump"/);
-  assert.match(html, /data-refact="copy"/);
-  assert.match(html, /data-refact="trash"/);
+  assert.match(html, /data-refact="sendto"/);
+  assert.match(html, /data-refact="more"/);
+  assert.doesNotMatch(html, /data-refact="copy"/);
+  assert.doesNotMatch(html, /data-refact="trash"/);
+  assert.match(html, /data-refmore/); /* clamp trigger — distinct from overflow */
   assert.match(html, /S · you · W\(T1\)/);
   assert.match(html, /\[md:\*\*hi\*\*\]/);
 
@@ -709,13 +713,15 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
 
   const item = inboxItemHTML({ t: "1", text: "hi", node: "n1" }, "var(--unlane)",
     { ...deps, open: true });
-  /* item 5: the inbox card carries the pane's whole action row, so reaching
-     the chat no longer requires first placing the bookmark into a section */
+  /* item 5 + P6: inbox card carries the shared primary bar (jump · sendto ·
+     note · more); copy/del live in the overflow menu, comment stays pane-only */
   assert.match(item, /class="actionbar tear"/);
-  for (const act of ["jump", "copy", "note", "del"]) {
+  for (const act of ["jump", "sendto", "note", "more"]) {
     assert.match(item, new RegExp(`data-bmact="${act}"`), act);
   }
   assert.doesNotMatch(item, /data-bmact="comment"/);
+  assert.doesNotMatch(item, /data-bmact="copy"/);
+  assert.doesNotMatch(item, /data-bmact="del"/);
 });
 
 test("bookmarkClampState reused at inbox/reference boundaries", () => {

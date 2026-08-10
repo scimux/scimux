@@ -13,7 +13,6 @@ import {
   CHAT_LOAD_DELAY_MS,
   DEC_LABELS,
   RASTER_RE,
-  ASSET_REF_RE,
   chatRenderDecision,
   attentionIsSuppressed,
   suppressAttentionUntilTime,
@@ -37,7 +36,6 @@ import {
   refTilesHTML,
   assetTileHTML,
   splitAssetRefs,
-  stripAssetRefs,
   splitPermTitle,
   bubbleActionsHTML,
   keyRowHTML,
@@ -45,6 +43,12 @@ import {
   echoBubbleHTML,
   createChatFeature,
 } from "../js/chat.js";
+/* P6: ASSET_REF_RE + stripAssetRefs live in format.js (one home for every
+   send-to strip). Mechanical import-path move from chat.js. */
+import {
+  ASSET_REF_RE,
+  stripAssetRefs,
+} from "../js/format.js";
 /* Namespace import for symbols a red commit adds: a missing *named* import is a
    module-resolution error that takes the whole file down with it, which hides
    the ~100 tests that were meant to stay green. Through the namespace the same
