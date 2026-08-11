@@ -3388,6 +3388,47 @@ test("P6: a ready-only pill wears --work, never the blocked-on-you yellow", () =
   feature.destroy();
 });
 
+test("P8: the pill's label is legible on both of its fills, in both themes", () => {
+  /* Observed live on the wall map: the pill rendered as a bare drop shadow with
+     an invisible label. Two causes, both in these two rules.
+     (1) The fill was color-mix(... var(--fg)) and --fg does not exist in this
+         palette, so the whole background-color was invalid → transparent. The
+         repo-wide guard in smoke.test.js now catches that class; this case pins
+         the fix in place.
+     (2) The label was color: var(--bg) — warm paper — which is invisible on a
+         transparent fill and wrong on yellow anyway. --ink is no good either:
+         it flips with the theme, and --attn stays bright yellow in dark mode,
+         so a theme-following label goes near-white on yellow. Yellow needs a
+         fixed dark label; the petrol .ready fill needs a light one (the house
+         pattern for filled --work, cf. base.css .btn-primary). */
+  const base = mapCssSrc.match(/(?:^|\n)\s*#mappill\s*\{([^}]+)\}/);
+  assert.ok(base, "#mappill base rule exists in map.css");
+  const ready = mapCssSrc.match(/#mappill\.ready\s*\{([^}]+)\}/);
+  assert.ok(ready, "#mappill.ready rule exists");
+
+  for (const [name, body] of [["#mappill", base[1]], ["#mappill.ready", ready[1]]]){
+    assert.doesNotMatch(body, /var\(--fg\)/, `${name} must not use the non-existent --fg`);
+    const bg = body.match(/background\s*:\s*([^;]+)/);
+    assert.ok(bg, `${name} sets a background`);
+    assert.doesNotMatch(bg[1], /var\(--(?!attn\b|work\b)[\w-]+\)/,
+      `${name}'s fill may only reference the state hues, no other token`);
+  }
+
+  // Yellow fill → fixed dark label, not a theme-following one.
+  const baseColor = base[1].match(/(?:^|;|\s)color\s*:\s*([^;]+)/);
+  assert.ok(baseColor, "#mappill sets a label colour");
+  assert.doesNotMatch(baseColor[1], /var\(--bg\)|var\(--ink\)|var\(--surface\)/,
+    "a theme-following label is near-white on yellow in dark mode");
+  assert.match(baseColor[1], /#[0-9a-fA-F]{3,6}|\brgb/,
+    "the label on yellow is a fixed dark colour");
+
+  // Petrol fill → light label, the same choice filled --work already makes.
+  const readyColor = ready[1].match(/(?:^|;|\s)color\s*:\s*([^;]+)/);
+  assert.ok(readyColor, "#mappill.ready sets its own label colour");
+  assert.match(readyColor[1], /#fff\b|#ffffff\b|\bwhite\b/i,
+    "a filled --work surface carries white text (base.css .btn-primary)");
+});
+
 test("P6: entering the dock recomputes the pill — the ring's own gesture shrinks the map", () => {
   /* The ring tap docks the chat, which hands half the map's height to it. The
      pill's whole input is that height, so the gesture P6 introduced invalidates

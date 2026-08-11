@@ -113,4 +113,62 @@ test("keyframeBlocks brace-matches nested stop blocks", () => {
   assert.doesNotMatch(blocks[0].body, /\.x/, "the block must end at its own closing brace");
 });
 
+/* Custom properties set at runtime rather than declared in a stylesheet.
+   Everything else must be declared in web/css, or the var() is invalid at
+   computed-value time and the whole declaration silently disappears. */
+const RUNTIME_VARS = new Set([
+  "--logo",     // app.js: agent mask logo url, inline style
+  "--vvtop",    // app.js: visual-viewport offset
+  "--attn-op",  // map.js: attention ring opacity, inline style
+  "--dockmap",  // map.js: dock split percentage on <body>
+]);
+
+export function cssVarUses(src){
+  const out = new Set();
+  /* var(--name) with no comma fallback. A fallback makes an undefined name
+     harmless, so those are deliberately not collected. */
+  for (const m of stripCssComments(src).matchAll(/var\(\s*(--[\w-]+)\s*\)/g)) out.add(m[1]);
+  return out;
+}
+
+export function cssVarDefs(src){
+  const out = new Set();
+  for (const m of stripCssComments(src).matchAll(/(--[\w-]+)\s*:/g)) out.add(m[1]);
+  return out;
+}
+
+test("every var(--x) in web/css resolves to a declared custom property", () => {
+  /* The failure this catches, observed live: #mappill was written
+     `background: color-mix(in srgb, var(--attn) 92%, var(--fg))`, but --fg has
+     never existed in this palette (the foreground token is --ink). One
+     undefined name makes the whole value invalid at computed-value time, so
+     background-color fell back to transparent — the pill rendered as its own
+     drop shadow with an invisible label. Every rule-body regex in the suite
+     passed, because the string it asserts on was there.
+     Grep-level guard, no browser needed: collect declarations across all of
+     web/css, then every fallback-less var() use must be among them. */
+  const files = readdirSync(cssDir).filter(f => f.endsWith(".css"));
+  const defined = new Set(RUNTIME_VARS);
+  for (const f of files) for (const d of cssVarDefs(readFileSync(join(cssDir, f), "utf8"))) defined.add(d);
+
+  const missing = [];
+  for (const f of files){
+    for (const use of cssVarUses(readFileSync(join(cssDir, f), "utf8"))){
+      if (!defined.has(use)) missing.push(`${f}: var(${use})`);
+    }
+  }
+  assert.deepEqual(missing, [],
+    "undefined custom properties silently void their whole declaration");
+});
+
+test("cssVarUses ignores fallback forms and cssVarDefs finds declarations", () => {
+  const uses = cssVarUses("a{color:var(--x);background:var(--y, red);border:var( --z )}");
+  assert.deepEqual([...uses].sort(), ["--x", "--z"],
+    "a var() with a fallback cannot void its declaration, so it is not required");
+  const defs = cssVarDefs(":root{--a:1px;\n  --b-c : red}");
+  assert.deepEqual([...defs].sort(), ["--a", "--b-c"]);
+  assert.equal(cssVarUses("/* var(--commented) */ a{color:red}").size, 0,
+    "commented-out uses are not uses");
+});
+
 test("test runner is active", () => assert.equal(1 + 1, 2));
