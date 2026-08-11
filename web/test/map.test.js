@@ -28,6 +28,7 @@ import {
   stackMapSignature,
   wallMapSignature,
   attentionStationSVG,
+  attentionHitSVG,
   terminalStationSVG,
   terminalCapSVG,
   forkCueHTML,
@@ -565,6 +566,111 @@ test("stack and wall signatures change on fare/fold/selection fields", () => {
 
 /* ---------- fake-DOM factory lifecycle ---------- */
 
+/* B7/#11: stubs must not silently return null for selectors they do not
+   implement — that green-washes production paths that query something the
+   harness never modelled. Known forms below may return null/[] ("not found");
+   anything else throws. Scope: this file only. */
+function unsupportedSelector(method, selector){
+  throw new Error(
+    `map.test.js DOM stub ${method}(${JSON.stringify(String(selector))}): ` +
+    `selector form not implemented. Implement the case, or fix production code ` +
+    `that was only green because the stub returned null.`,
+  );
+}
+
+/** closest() forms map.js is known to try (click routing + a few chrome paths). */
+const KNOWN_CLOSEST = new Set([
+  "[data-fare-capsule]",
+  "[data-fold]",
+  ".attnstation-hit",
+  "[data-jump]",
+  "[data-medit]",
+  "[data-forkfrom]",
+  "[data-golane]",
+  "[data-goorigin]",
+  "[data-nid]",
+  "[data-rm]",
+  "[data-mt]",
+  "[data-chip]",
+  "[data-forkbookmark]",
+  "[data-mapexit]",
+  "button, a, input",
+  "#mapdivider",
+  // compound forms some tests assert production may use
+  "circle.attnstation-hit",
+  ".attnstation-hit[data-jump]",
+]);
+
+function isKnownQuerySelector(sel){
+  const s = String(sel);
+  return (
+    s === "#mapfullbtn" || s === "#mapdivider" || s === "#app" || s === "#map" || s === "#chat" ||
+    s === ".cap .st" || s === "input:checked" ||
+    s.startsWith(".strow[data-skey=") ||
+    s.startsWith(".strow[data-nid=") ||
+    s.startsWith("circle[data-dot=") ||
+    s.startsWith("circle[data-ctx=") ||
+    s.startsWith(".lblock[data-lane=")
+  );
+}
+
+function isKnownQuerySelectorAll(sel){
+  return String(sel) === "input:checked" || isKnownQuerySelector(sel);
+}
+
+/** closest that returns matches[sel] when listed, null for other known forms,
+    throws on unknown forms. matches values may be elements or null. */
+function stubClosest(matches = {}){
+  return function closest(sel){
+    if (Object.prototype.hasOwnProperty.call(matches, sel)) return matches[sel];
+    if (KNOWN_CLOSEST.has(sel)) return null;
+    unsupportedSelector("closest", sel);
+  };
+}
+
+/** Event target with dataset; each matchSelectors entry maps closest → this target. */
+function fakeTarget(dataset, matchSelectors){
+  const t = { dataset: dataset || {} };
+  const sels = Array.isArray(matchSelectors) ? matchSelectors : [matchSelectors];
+  const matches = {};
+  for (const sel of sels) matches[sel] = t;
+  t.closest = stubClosest(matches);
+  return t;
+}
+
+function stubQuerySelector(impl){
+  return function querySelector(sel){
+    if (typeof impl === "function"){
+      const r = impl(sel);
+      // impl may return undefined to mean "I don't handle this form"
+      if (r !== undefined) return r;
+    }
+    if (isKnownQuerySelector(sel)) return null;
+    unsupportedSelector("querySelector", sel);
+  };
+}
+
+function stubQuerySelectorAll(impl){
+  return function querySelectorAll(sel){
+    if (typeof impl === "function"){
+      const r = impl(sel);
+      if (r !== undefined) return r;
+    }
+    if (isKnownQuerySelectorAll(sel)) return [];
+    unsupportedSelector("querySelectorAll", sel);
+  };
+}
+
+function stubDocument(body, extra = {}){
+  const { querySelector: qsImpl, querySelectorAll: qsaImpl, ...rest } = extra;
+  return {
+    body,
+    ...rest,
+    querySelector: stubQuerySelector(qsImpl),
+    querySelectorAll: stubQuerySelectorAll(qsaImpl),
+  };
+}
+
 function fakeEl(id){
   const listeners = new Map(); // event -> Set of handlers
   const attrs = {};
@@ -594,9 +700,9 @@ function fakeEl(id){
     removeEventListener(ev, fn){
       listeners.get(ev)?.delete(fn);
     },
-    querySelector(){ return null; },
-    querySelectorAll(){ return []; },
-    closest(){ return null; },
+    querySelector: stubQuerySelector(),
+    querySelectorAll: stubQuerySelectorAll(),
+    closest: stubClosest(),
     getBoundingClientRect(){ return { top: 0, bottom: 100, left: 0, right: 100 }; },
     _listeners: listeners,
     _listenerCount(ev){ return listeners.get(ev)?.size || 0; },
@@ -647,7 +753,7 @@ test("createMapFeature bind is idempotent; destroy removes all map-owned listene
       mapfullbtn, farebtn, tabSave, tabDel,
     },
     window: win,
-    document: { body: { classList: { contains: () => false, toggle(){}, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { contains: () => false, toggle(){}, add(){} } }),
     storage: memoryStorage(),
     isDesktop: () => true,
     level: () => 1,
@@ -721,7 +827,7 @@ test("setFull clears selection, persists key, toggles body class", () => {
   const mapfullbtn = fakeEl("mapfullbtn");
   const feature = createMapFeature({
     roots: { mapfullbtn, maptoolbar: fakeEl("tb"), mapwrap: fakeEl("w") },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -781,7 +887,7 @@ test("earlier-stop toolbar opens history and docks without leaving full-screen",
   const calls = [];
   const feature = createMapFeature({
     roots: { mapwrap, maptoolbar, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -804,19 +910,15 @@ test("earlier-stop toolbar opens history and docks without leaving full-screen",
   });
   feature.bind();
 
-  const row = {
-    dataset: { nid: "a", skey: "a#0", stop },
-    closest(selector){ return selector === "[data-nid]" ? this : null; },
-  };
-  firstListener(mapwrap, "click")({ target: row });
+  firstListener(mapwrap, "click")({
+    target: fakeTarget({ nid: "a", skey: "a#0", stop }, "[data-nid]"),
+  });
   assert.match(maptoolbar.innerHTML, /data-jump="a"/);
   assert.match(maptoolbar.innerHTML, /earlier stop/);
 
-  const jump = {
-    dataset: { jump: "a" },
-    closest(selector){ return selector === "[data-jump]" ? this : null; },
-  };
-  firstListener(maptoolbar, "click")({ target: jump });
+  firstListener(maptoolbar, "click")({
+    target: fakeTarget({ jump: "a" }, "[data-jump]"),
+  });
   assert.deepEqual(calls, [["select", "a"], ["history", "a", stop]]);
   assert.equal(feature.isFull(), true, "Open chat from the wall stays in full screen");
   assert.equal(storage.getItem(MAP_FULL_KEY), "1");
@@ -836,18 +938,15 @@ test("new map sheet persists its checked lanes before selecting the group", () =
   const storage = memoryStorage();
   let groups = [];
   const calls = [];
-  tabLanes.querySelectorAll = selector => selector === "input:checked"
-    ? [{ value: "L1" }, { value: "L2" }]
-    : [];
+  tabLanes.querySelectorAll = stubQuerySelectorAll(selector =>
+    selector === "input:checked" ? [{ value: "L1" }, { value: "L2" }] : undefined
+  );
   const feature = createMapFeature({
     roots: {
       maptabs, tabHead, tabName, tabLanes, tabSave, tabDel,
       mapwrap: fakeEl("mapwrap"), lanechips: fakeEl("lanechips"),
     },
-    document: {
-      body: { classList: { contains: () => false, toggle(){}, add(){} } },
-      querySelector: () => null,
-    },
+    document: stubDocument({ classList: { contains: () => false, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => false,
     mapOpen: () => false,
@@ -871,13 +970,8 @@ test("new map sheet persists its checked lanes before selecting the group", () =
   });
   feature.bind();
 
-  const add = {
-    dataset: { mt: "+" },
-    closest(selector){
-      if (selector === "[data-rm]") return null;
-      return selector === "[data-mt]" ? this : null;
-    },
-  };
+  const add = { dataset: { mt: "+" } };
+  add.closest = stubClosest({ "[data-rm]": null, "[data-mt]": add });
   firstListener(maptabs, "click")({ target: add });
   assert.deepEqual(calls, [["open", "#tabsheet"]]);
   assert.equal(tabHead.textContent, "New map");
@@ -911,7 +1005,7 @@ test("syncMapFullBtn sets aria-label and out/in glyphs for enter and exit", () =
   const contractIcon = "CONTRACT_GLYPH";
   const feature = createMapFeature({
     roots: { mapfullbtn, maptoolbar: fakeEl("tb"), mapwrap: fakeEl("w") },
-    document: { body: { classList: { toggle(){}, contains: () => false, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { toggle(){}, contains: () => false, add(){} } }),
     storage,
     isDesktop: () => false,
     mapOpen: () => false,
@@ -945,7 +1039,7 @@ test("invalidate forces next render; signature skip prevents rebuild", () => {
   });
   const feature = createMapFeature({
     roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { contains: () => true, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -987,7 +1081,7 @@ test("stack renderer caps a top-terminus ended node with the straight buffer (T)
   });
   const feature = createMapFeature({
     roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { contains: () => true, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1045,7 +1139,7 @@ test("stack renderer draws the sideways spur for a mid-lane ended node", () => {
   });
   const feature = createMapFeature({
     roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { contains: () => true, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1103,7 +1197,7 @@ test("wall map caps a y-stay branch terminus with the straight buffer (T)", () =
   const storage = memoryStorage({ [MAP_FULL_KEY]: "1" });
   const feature = createMapFeature({
     roots: { mapwrap, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body: { classList: { contains: () => true, toggle(){}, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { contains: () => true, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1156,7 +1250,7 @@ test("farebtn is icon toggle with aria-pressed and on/off glyph state", () => {
       farebtn, mapfullbtn: fakeEl("mapfullbtn"),
       maptoolbar: fakeEl("tb"), mapwrap: fakeEl("w"),
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1248,7 +1342,7 @@ test("wall re-render on fare change preserves external composer draft (polling i
       mapwrap, farebtn, mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1553,7 +1647,7 @@ test("V2-P3 wall heat re-render preserves composer (polling invariant)", () => {
       mapwrap, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1775,7 +1869,7 @@ test("V2-P5 wall: a capsule on every segment; tap opens the ticket sheet", () =>
       mapwrap, fareticket, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1819,10 +1913,10 @@ test("V2-P5 wall: a capsule on every segment; tap opens the ticket sheet", () =>
   // Tap a capsule → ticket rendered into the sheet body, sheet opened
   const capsuleEl = {
     dataset: { fareCapsule: "1", fareNode: "a", fareSeg: "0" },
-    closest(sel){ return sel === "[data-fare-capsule]" ? this : null; },
   };
+  capsuleEl.closest = stubClosest({ "[data-fare-capsule]": capsuleEl });
   firstListener(mapwrap, "click")({
-    target: { closest(sel){ return capsuleEl.closest(sel); } },
+    target: { closest: stubClosest({ "[data-fare-capsule]": capsuleEl }) },
     stopPropagation(){},
     preventDefault(){},
   });
@@ -1892,7 +1986,7 @@ test("V2-P5 capsules gated off when !fareOn; heat call sites stay parked", () =>
       mapfullbtn: fakeEl("mapfullbtn"), lanechips: fakeEl("chips"),
       maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -2374,7 +2468,7 @@ test("P1: [data-jump] docks when full, setMapFull(false) when not", () => {
   const maptoolbar = fakeEl("maptoolbar");
   const feature = createMapFeature({
     roots: { mapwrap, maptoolbar, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -2399,19 +2493,13 @@ test("P1: [data-jump] docks when full, setMapFull(false) when not", () => {
 
   // Select a station so the toolbar has [data-jump].
   firstListener(mapwrap, "click")({
-    target: {
-      dataset: { nid: "a", skey: "a#0", stop },
-      closest(selector){ return selector === "[data-nid]" ? this : null; },
-    },
+    target: fakeTarget({ nid: "a", skey: "a#0", stop }, "[data-nid]"),
   });
   assert.match(maptoolbar.innerHTML, /data-jump="a"/);
 
   // Full → Open chat docks and stays full.
   firstListener(maptoolbar, "click")({
-    target: {
-      dataset: { jump: "a" },
-      closest(selector){ return selector === "[data-jump]" ? this : null; },
-    },
+    target: fakeTarget({ jump: "a" }, "[data-jump]"),
   });
   assert.ok(calls.some(c => c[0] === "select" && c[1] === "a"), "selectNode called");
   assert.equal(feature.isFull(), true, "mapFull stays true when docking");
@@ -2427,10 +2515,7 @@ test("P1: [data-jump] docks when full, setMapFull(false) when not", () => {
   assert.equal(body.classList.contains("map-dock"), false);
   calls.length = 0;
   firstListener(mapwrap, "click")({
-    target: {
-      dataset: { jump: "a" },
-      closest(selector){ return selector === "[data-jump]" ? this : null; },
-    },
+    target: fakeTarget({ jump: "a" }, "[data-jump]"),
   });
   assert.ok(calls.some(c => c[0] === "select" && c[1] === "a"), "selectNode still called when not full");
   assert.equal(feature.isFull(), false, "setMapFull(false) path leaves mapFull false");
@@ -2464,7 +2549,7 @@ test("P1: setMapDock(true) does not clear mapSel / mapSelKey / mapSelStop", () =
   const maptoolbar = fakeEl("maptoolbar");
   const feature = createMapFeature({
     roots: { mapwrap, maptoolbar, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -2486,10 +2571,7 @@ test("P1: setMapDock(true) does not clear mapSel / mapSelKey / mapSelStop", () =
 
   // Establish selection (mapSel=a, mapSelKey=a#0, mapSelStop=stop) via wall tap.
   firstListener(mapwrap, "click")({
-    target: {
-      dataset: { nid: "a", skey: "a#0", stop },
-      closest(selector){ return selector === "[data-nid]" ? this : null; },
-    },
+    target: fakeTarget({ nid: "a", skey: "a#0", stop }, "[data-nid]"),
   });
   assert.match(maptoolbar.innerHTML, /data-jump="a"/, "selection paints the toolbar");
   assert.match(maptoolbar.innerHTML, /earlier stop/, "mapSelStop is live in the toolbar");
@@ -2577,15 +2659,14 @@ function createDockDividerFeature(opts = {}){
       mapfullbtn: fakeEl("mapfullbtn"),
       chat,
     },
-    document: {
-      body,
+    document: stubDocument(body, {
       querySelector(sel){
         if (sel === "#app") return app;
         if (sel === "#mapdivider") return mapdivider;
         if (sel === "#chat") return chat;
-        return null;
+        return undefined; // fall through to known-null / throw
       },
-    },
+    }),
     storage,
     /* opts.isDesktop overrides the desktop default (P2a phone-guard tests). */
     isDesktop: typeof opts.isDesktop === "function" ? opts.isDesktop : () => true,
@@ -3019,7 +3100,7 @@ function createWallScrollFeature(nodes, opts = {}){
       mapdivider: opts.mapdivider,
       app: opts.app,
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -3050,10 +3131,7 @@ function createWallScrollFeature(nodes, opts = {}){
 
 function selectWallStop(mapwrap, { nid, skey, stop }){
   firstListener(mapwrap, "click")({
-    target: {
-      dataset: { nid, skey, stop: stop || "" },
-      closest(selector){ return selector === "[data-nid]" ? this : null; },
-    },
+    target: fakeTarget({ nid, skey, stop: stop || "" }, "[data-nid]"),
   });
 }
 
@@ -3289,7 +3367,7 @@ test("P6: tapping the pill selects the target and does not open chat", () => {
     jumpChatToNow: () => calls.push(["now"]),
   });
   // Make row queryable for setMapSel's .current paint.
-  mapwrap.querySelector = (sel) => {
+  mapwrap.querySelector = stubQuerySelector(sel => {
     if (String(sel).includes("a#0") || String(sel).includes('nid="a"')
       || String(sel).includes("a")) {
       return {
@@ -3298,8 +3376,8 @@ test("P6: tapping the pill selects the target and does not open chat", () => {
         scrollIntoView(){ calls.push(["scroll"]); },
       };
     }
-    return null;
-  };
+    return null; // known strow form, not found / not matching
+  });
   feature.render();
   assert.ok(mappill.classList.contains("on"), "pill visible for off-screen asking");
   assert.equal(maptoolbar.innerHTML, "", "no selection yet");
@@ -3342,16 +3420,15 @@ test("P6: successive wall renders keep one pill listener (no re-bind)", () => {
 
 /** A tap on the attention ring's transparent hit circle. */
 function ringTapEvent(id){
-  return {
-    target: {
-      dataset: { jump: id },
-      classList: { contains: n => n === "attnstation-hit" },
-      closest(selector){
-        if (selector === ".attnstation-hit" || selector === "[data-jump]") return this;
-        return null;
-      },
-    },
+  const target = {
+    dataset: { jump: id },
+    classList: { contains: n => n === "attnstation-hit" },
   };
+  target.closest = stubClosest({
+    ".attnstation-hit": target,
+    "[data-jump]": target,
+  });
+  return { target };
 }
 
 test("P6: a ready-only pill wears --work, never the blocked-on-you yellow", () => {
@@ -3601,7 +3678,7 @@ test("action bar: a command dismisses the bar, a tap on the still-selected row r
   const maptoolbar = fakeEl("maptoolbar");
   const feature = createMapFeature({
     roots: { mapwrap, maptoolbar, lanechips: fakeEl("chips"), maptabs: fakeEl("tabs") },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage: memoryStorage({
       [MAP_FULL_KEY]: "1",
       [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
@@ -3627,10 +3704,7 @@ test("action bar: a command dismisses the bar, a tap on the still-selected row r
   feature.bind();
 
   const rowTap = () => firstListener(mapwrap, "click")({
-    target: {
-      dataset: { nid: "a", skey: "a#0", stop },
-      closest(selector){ return selector === "[data-nid]" ? this : null; },
-    },
+    target: fakeTarget({ nid: "a", skey: "a#0", stop }, "[data-nid]"),
   });
 
   rowTap();
@@ -3638,10 +3712,7 @@ test("action bar: a command dismisses the bar, a tap on the still-selected row r
   assert.match(mapwrap.innerHTML, /current/, "row tap marks the row current");
 
   firstListener(maptoolbar, "click")({
-    target: {
-      dataset: { jump: "a" },
-      closest(selector){ return selector === "[data-jump]" ? this : null; },
-    },
+    target: fakeTarget({ jump: "a" }, "[data-jump]"),
   });
   assert.equal(maptoolbar.innerHTML, "", "the command dismisses the bar");
   assert.equal(maptoolbar.classList.contains("on"), false, "and drops .on so it cannot catch a scroll");
@@ -3878,15 +3949,18 @@ test("patchStationVolatile writes attributes and text, never innerHTML", () => {
     setAttribute(k, v){ this.attrs[k] = String(v); writes.push([tag, k, String(v)]); },
   });
   const cap = el("st");
-  const row = el("row"); row.querySelector = s => (s === ".cap .st" ? cap : null);
+  const row = el("row");
+  row.querySelector = stubQuerySelector(s => (s === ".cap .st" ? cap : undefined));
   const dot = el("dot", { r: "5.5" });
   const arc = el("arc", { "stroke-dasharray": "0 1", stroke: "C(L)", "data-col": "C(L)" });
-  const root = { querySelector(s){
-    if (s.includes(".strow")) return row;
-    if (s.includes("data-dot")) return dot;
-    if (s.includes("data-ctx")) return arc;
-    return null;
-  } };
+  const root = {
+    querySelector: stubQuerySelector(s => {
+      if (s.includes(".strow")) return row;
+      if (s.includes("data-dot")) return dot;
+      if (s.includes("data-ctx")) return arc;
+      return undefined;
+    }),
+  };
 
   mapExports.patchStationVolatile(root, "k", volNode({ live: "active", ctx_pct: 90 }));
   assert.equal(cap.textContent, "Running", "the caption word is the live signal on the wall");
@@ -3901,7 +3975,7 @@ test("patchStationVolatile writes attributes and text, never innerHTML", () => {
 
   // A station whose hooks are absent (an exited node has no patchable dot)
   // must be a silent no-op, not a throw that kills the whole poll tick.
-  assert.doesNotThrow(() => mapExports.patchStationVolatile({ querySelector: () => null }, "k", volNode({})));
+  assert.doesNotThrow(() => mapExports.patchStationVolatile({ querySelector: stubQuerySelector() }, "k", volNode({})));
   assert.doesNotThrow(() => mapExports.patchStationVolatile(null, "k", volNode({})));
 });
 
@@ -3951,7 +4025,7 @@ test("an unchanged fold set costs no storage write and no second lane model", ()
   let models = 0;
   const feature = createMapFeature({
     roots: { mapwrap: fakeEl("mapwrap"), maptoolbar: fakeEl("tb"), lanechips: fakeEl("chips") },
-    document: { body: { classList: { contains: () => false, toggle(){}, add(){} } }, querySelector: () => null },
+    document: stubDocument({ classList: { contains: () => false, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => false,
     mapOpen: () => true,
@@ -4305,11 +4379,12 @@ test("P6: railTicks folds finished heads and reports kind", () => {
   assert.ok(typeof ticks[0].stopKey === "string");
 });
 
-test("P6: attentionStationSVG hit circle r≥22, transparent, hit-testable, after ring", () => {
+test("P6: attentionHitSVG r≥22, transparent, hit-testable; glow/ring stay decoration-only", () => {
   /* Decorative ring is r=9.5 (~19px). HIG wants ≥44pt; r=22 → 44px diameter.
-     fill="none" is not hit-testable — must be transparent (or pointer-events=all). */
-  const svg = attentionStationSVG(10, 20, 0.5, undefined, "node-a");
-  const hit = attnHitCircle(svg);
+     fill="none" is not hit-testable — must be transparent (or pointer-events=all).
+     Hit is a separate emit (attentionHitSVG) so wall/stack can paint it AFTER
+     the solid station dot — see P4 order tests. */
+  const hit = attnHitCircle(attentionHitSVG(10, 20, "node-a"));
   assert.ok(hit, "hit circle with class attnstation-hit is present when nodeId is given");
   const r = Number(circleAttr(hit, "r"));
   assert.ok(r >= 22, `hit radius ${r} must be ≥ 22 (44px target)`);
@@ -4318,15 +4393,13 @@ test("P6: attentionStationSVG hit circle r≥22, transparent, hit-testable, afte
     "hit-testable: fill=transparent or pointer-events all/auto");
   assert.notEqual(fill, "none", "fill=none is not hit-testable");
   assert.match(hit, /data-jump="node-a"/, "hit carries routing data-jump");
+  assert.match(hit, /pointer-events="all"/, "transparent fill needs pointer-events=all");
 
-  // Painted after the ring so it sits on top in SVG paint order.
-  const ringAt = svg.indexOf("attnstation-ring");
-  const hitAt = svg.indexOf("attnstation-hit");
-  assert.ok(ringAt >= 0 && hitAt > ringAt, "hit circle is painted after the ring");
-
-  // No nodeId → no hit target (pure geometry callers stay decoration-only).
-  const bare = attentionStationSVG(1, 2, 1);
-  assert.equal(attnHitCircle(bare), "", "no hit without a node id");
+  // Glow/ring helper must not smuggle a hit circle (order is the caller's job).
+  const deco = attentionStationSVG(10, 20, 0.5);
+  assert.equal(attnHitCircle(deco), "", "attentionStationSVG is decoration-only");
+  assert.equal(attentionHitSVG(1, 2, ""), "", "no hit without a node id");
+  assert.equal(attentionHitSVG(1, 2, null), "", "null node id → empty");
 });
 
 test("P6: wall and stack SVG both carry the hit circle on asking/finished stations", () => {
@@ -4364,7 +4437,7 @@ test("P6: wall and stack SVG both carry the hit circle on asking/finished statio
       mapwrap, mapscroll: fakeEl("mapscroll"), maptoolbar: fakeEl("tb"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
     },
-    document: { body, querySelector: () => null },
+    document: stubDocument(body),
     storage: memoryStorage({
       [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
       [MAP_FOLD_KEY]: JSON.stringify([]),
@@ -4391,6 +4464,132 @@ test("P6: wall and stack SVG both carry the hit circle on asking/finished statio
   stack.destroy();
 });
 
+/* P4: hit circle must be LAST among co-located station paint (glow, ring, solid
+   dot, ctx arc). SVG hit-tests later siblings first — a hit painted under the
+   solid r=5.5/6.5 dot leaves the station centre dead. Assert on emitted markup
+   order, never on a fake that declares its own class. */
+function svgCircles(html){
+  return [...String(html || "").matchAll(/<circle\b[^>]*\/?>/g)].map(m => m[0]);
+}
+
+/** Circles sharing the hit target's cx/cy, in document order. */
+function coLocatedStationPaint(html, nodeId){
+  const circles = svgCircles(html);
+  const hit = circles.find(c =>
+    /attnstation-hit/.test(c) && c.includes(`data-jump="${nodeId}"`));
+  if (!hit) return { hit: null, peers: [], hitIndex: -1 };
+  const cx = circleAttr(hit, "cx");
+  const cy = circleAttr(hit, "cy");
+  const peers = circles.filter(c =>
+    circleAttr(c, "cx") === cx && circleAttr(c, "cy") === cy);
+  return { hit, peers, hitIndex: peers.indexOf(hit) };
+}
+
+function assertHitIsTopmost(html, nodeId, label){
+  const { hit, peers, hitIndex } = coLocatedStationPaint(html, nodeId);
+  assert.ok(hit, `${label}: hit circle for ${nodeId} must be in the markup`);
+  assert.equal(hitIndex, peers.length - 1,
+    `${label}: hit for ${nodeId} must be the last co-located circle ` +
+    `(paint order; centre tap hits later siblings first). peers=${peers.map(c =>
+      (c.match(/class="([^"]*)"/) || c.match(/data-dot="([^"]*)"/) || ["", "?"])[1]
+      || (c.includes("data-dot") ? "dot" : c.includes("data-ctx") ? "ctx" : "solid")
+    ).join(",")}`);
+  // Wall hooks: when present, hit must follow data-dot and data-ctx by string index.
+  const skey = `${nodeId}#0`;
+  const hitAt = html.indexOf(hit);
+  const dotAt = html.search(new RegExp(`data-dot="${skey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
+  if (dotAt >= 0) assert.ok(dotAt < hitAt, `${label}: data-dot before hit for ${nodeId}`);
+  const ctxAt = html.search(new RegExp(`data-ctx="${skey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
+  if (ctxAt >= 0) assert.ok(ctxAt < hitAt, `${label}: data-ctx before hit for ${nodeId}`);
+}
+
+function createStackMapFeature(nodes){
+  const mapwrap = fakeEl("mapwrap");
+  const body = {
+    classList: {
+      _set: new Set(),
+      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+      contains(name){ return this._set.has(name); },
+      add(name){ this._set.add(name); },
+      remove(name){ this._set.delete(name); },
+    },
+  };
+  const byId = {};
+  for (const n of nodes) byId[n.id] = n;
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, mapscroll: fakeEl("mapscroll"), maptoolbar: fakeEl("tb"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
+    },
+    document: stubDocument(body),
+    storage: memoryStorage({
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+    }),
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => nodes,
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f", name: () => "Lane", byId,
+    }),
+    laneColor: () => "#00f",
+    agentLogo: () => "",
+  });
+  feature.bind();
+  feature.restoreChrome();
+  return { feature, mapwrap };
+}
+
+test("P4: wall hit circle is after station dot (attention and finished)", () => {
+  const ask = p4Node("ask", "2026-01-02T00:00:00Z", "Ask");
+  ask.attention = "approval";
+  const fin = p4Node("fin", "2026-01-01T00:00:00Z", "Fin");
+  fin.turn_done = true;
+  const quiet = p4Node("q", "2026-01-03T00:00:00Z", "Quiet");
+  quiet.ctx_pct = 40; // would draw a ctx ring; must not get a hit circle
+
+  const { feature, mapwrap } = createWallScrollFeature([ask, fin, quiet]);
+  feature.render();
+  const html = mapwrap.innerHTML;
+
+  assertHitIsTopmost(html, "ask", "wall attention");
+  assertHitIsTopmost(html, "fin", "wall finished (turn_done / --work)");
+
+  // Negative: quiet station emits no hit (attentionStationSVG never called).
+  assert.equal(coLocatedStationPaint(html, "q").hit, null,
+    "quiet station must not emit .attnstation-hit");
+  assert.doesNotMatch(html, /data-jump="q"/);
+  // Quiet does get a ctx ring — prove the hooks path still runs without a hit.
+  assert.match(html, /data-ctx="q#0"/, "quiet still draws the ctx gauge");
+
+  feature.destroy();
+});
+
+test("P4: stack hit circle is after station dot (attention and finished)", () => {
+  const ask = p4Node("ask", "2026-01-02T00:00:00Z", "Ask");
+  ask.attention = "approval";
+  const fin = p4Node("fin", "2026-01-01T00:00:00Z", "Fin");
+  fin.turn_done = true;
+  const quiet = p4Node("q", "2026-01-03T00:00:00Z", "Quiet");
+
+  const { feature, mapwrap } = createStackMapFeature([ask, fin, quiet]);
+  feature.render();
+  const html = mapwrap.innerHTML;
+
+  assertHitIsTopmost(html, "ask", "stack attention");
+  assertHitIsTopmost(html, "fin", "stack finished (turn_done / --work)");
+  assert.equal(coLocatedStationPaint(html, "q").hit, null,
+    "stack quiet station must not emit .attnstation-hit");
+  assert.doesNotMatch(html, /data-jump="q"/);
+
+  feature.destroy();
+});
+
 test("P6: tapping the ring reaches the same open path as toolbar [data-jump]", () => {
   /* Destination: selectNode(id,"jump") + jumpChatToNow (head) / loadChatHistory
      (earlier) + setMapDock(true) in full wall. Assert on injected calls, not
@@ -4406,18 +4605,17 @@ test("P6: tapping the ring reaches the same open path as toolbar [data-jump]", (
   feature.render();
   assert.match(mapwrap.innerHTML, /attnstation-hit/, "ring hit is in the wall SVG");
 
-  firstListener(mapwrap, "click")({
-    target: {
-      dataset: { jump: "a" },
-      classList: { contains: n => n === "attnstation-hit" },
-      closest(selector){
-        if (selector === ".attnstation-hit" || selector === "[data-jump]"
-          || selector === "circle.attnstation-hit"
-          || selector === ".attnstation-hit[data-jump]") return this;
-        return null;
-      },
-    },
+  const ringTarget = {
+    dataset: { jump: "a" },
+    classList: { contains: n => n === "attnstation-hit" },
+  };
+  ringTarget.closest = stubClosest({
+    ".attnstation-hit": ringTarget,
+    "[data-jump]": ringTarget,
+    "circle.attnstation-hit": ringTarget,
+    ".attnstation-hit[data-jump]": ringTarget,
   });
+  firstListener(mapwrap, "click")({ target: ringTarget });
   assert.deepEqual(calls, [
     ["select", "a", "jump"],
     ["now"],
@@ -4443,16 +4641,15 @@ test("P6: ring tap wins over the generic [data-nid] row branch", () => {
 
   // Target that would match BOTH .attnstation-hit and (if ordered wrong) a
   // parent [data-nid] — the hit branch must fire the open path.
-  firstListener(mapwrap, "click")({
-    target: {
-      dataset: { jump: "a", nid: "a", skey: "a#0", stop: "" },
-      closest(selector){
-        if (selector === ".attnstation-hit" || selector === "[data-jump]") return this;
-        if (selector === "[data-nid]") return this;
-        return null;
-      },
-    },
+  const bothTarget = {
+    dataset: { jump: "a", nid: "a", skey: "a#0", stop: "" },
+  };
+  bothTarget.closest = stubClosest({
+    ".attnstation-hit": bothTarget,
+    "[data-jump]": bothTarget,
+    "[data-nid]": bothTarget,
   });
+  firstListener(mapwrap, "click")({ target: bothTarget });
   assert.ok(calls.some(c => c[0] === "select" && c[2] === "jump"),
     "ring path uses selectNode(..., 'jump'), not a bare row select");
   assert.ok(calls.some(c => c[0] === "now"), "and jumps chat to now");
@@ -4711,10 +4908,7 @@ test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
       maptabs, mapwrap, lanechips: fakeEl("chips"),
       mapscroll: fakeEl("scroll"),
     },
-    document: {
-      body: { classList: { contains: () => true, toggle(){}, add(){} } },
-      querySelector: () => null,
-    },
+    document: stubDocument({ classList: { contains: () => true, toggle(){}, add(){} } }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,

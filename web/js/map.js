@@ -640,15 +640,20 @@ export function wallLaneTrackSVG(stops, { x, color, opacity = 1, heatOn = false 
 /* Station ring/pulse for hard attention (default --attn yellow) and for a
    finished turn (caller passes var(--work)). Same paint path, distinct hue
    so yellow keeps exactly one meaning: blocked on you (P5).
-   When nodeId is given, a transparent r=22 hit circle is painted after the
-   ring (44px target, HIG) carrying data-jump so the ring opens chat. */
-export function attentionStationSVG(x, y, op, hue, nodeId){
+   Glow+ring only — the transparent hit target is attentionHitSVG, emitted
+   AFTER the solid station dot (and ctx ring) so SVG hit-testing reaches the
+   centre of the station (paint order: later siblings win). */
+export function attentionStationSVG(x, y, op, hue){
   const c = hue || "var(--attn)";
-  const hit = (nodeId != null && nodeId !== "")
-    ? `\n          <circle class="attnstation-hit" cx="${x}" cy="${y}" r="22" fill="transparent" pointer-events="all" data-jump="${esc(String(nodeId))}"/>`
-    : "";
   return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="${c}" filter="url(#attnglow)"/>
-          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>${hit}`;
+          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>`;
+}
+
+/* Transparent r=22 hit circle (44px HIG target) carrying data-jump so a tap
+   on the ring/centre opens chat. Must be the last paint for that station. */
+export function attentionHitSVG(x, y, nodeId){
+  if (nodeId == null || nodeId === "") return "";
+  return `<circle class="attnstation-hit" cx="${x}" cy="${y}" r="22" fill="transparent" pointer-events="all" data-jump="${esc(String(nodeId))}"/>`;
 }
 
 // terminalStationSVG marks an ended thread that sits *mid-lane* — the mainline
@@ -1695,9 +1700,11 @@ export function createMapFeature(deps){
                                    : terminalStationSVG(dotX, yy, op, col);
       // Widen the existing ring path: hard attention keeps --attn; a finished
       // turn reuses the same SVG with --work. No parallel paint path (P5).
-      // Hit circle carries data-jump so the ring is the open-chat control (P6).
-      if (n.attention) svg += attentionStationSVG(dotX, yy, op, null, n.id);
-      else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)", n.id);
+      // Hit target is emitted AFTER the solid dot (and ctx) so the centre is
+      // tappable — SVG paints later siblings on top (P4).
+      const ringed = !!(n.attention || turnFinished(n));
+      if (n.attention) svg += attentionStationSVG(dotX, yy, op, null);
+      else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
       /* data-dot / data-ctx are the repaint hooks. Only the live branch
          carries one: exited and unavailable are in the signature, so reaching
          them rebuilds rather than patches. */
@@ -1717,6 +1724,7 @@ export function createMapFeature(deps){
                 stroke-dasharray="${frac * C} ${C}" stroke-linecap="round"
                 transform="rotate(-90 ${dotX} ${yy})" opacity="${op}"/>`;
       }
+      if (ringed) svg += attentionHitSVG(dotX, yy, n.id);
     });
 
     /* V2-P5: a capsule on the midpoint of every priced gap — the fare layer
@@ -1844,12 +1852,15 @@ export function createMapFeature(deps){
         if (n.ended_at)
           svg += i === 0 ? terminalCapSVG(dotX, yy, op, col)
                          : terminalStationSVG(dotX, yy, op, col);
-        if (n.attention) svg += attentionStationSVG(dotX, yy, op, null, n.id);
-        else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)", n.id);
+        // Hit after the solid dot (P4) — same paint-order rule as the wall.
+        const ringed = !!(n.attention || turnFinished(n));
+        if (n.attention) svg += attentionStationSVG(dotX, yy, op, null);
+        else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
         else
           svg += `<circle cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
+        if (ringed) svg += attentionHitSVG(dotX, yy, n.id);
       });
 
       return `<div class="lblock" data-lane="${escape(b.lane.id)}">${head}<div class="lbody">
