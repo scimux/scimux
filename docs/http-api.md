@@ -17,6 +17,13 @@ are still guarded against CSRF: non-`GET`/`HEAD`/`OPTIONS` requests must be
 same-origin, must carry the `X-Scimux-CSRF` token embedded in the served page,
 and must use an accepted content type (`application/json` or multipart uploads).
 
+**Compression:** when the client sends `Accept-Encoding: gzip`, eligible
+responses are gzip-compressed (`Content-Encoding: gzip`, `Vary:
+Accept-Encoding`). Compression applies across `/api/*` and the static tree for
+compressible content types (JSON, text, JavaScript, SVG, …). Already-compressed
+payloads (images, PDF, zip, …) and empty short-circuit responses (`304`,
+`204`) are left alone so poll validators stay intact.
+
 ## Reading state
 
 ### `GET /api/state`
@@ -124,7 +131,14 @@ snapshot. For structured nodes (`codex`, ACP `pi`/`opencode`/`grok`), `source` i
 `GET /api/nodes/{id}/chat?history=1` returns the whole log as ordered read-only
 surfaces: `{"segments":[{"start","seam","reason","turns"}, …]}`. This is the
 on-demand path behind "show earlier history" and earlier metro stops; normal
-polling stays current-segment only.
+polling stays current-segment only. The history branch does not participate in
+ETag short-circuiting.
+
+On the polled (non-history) path, responses carry an `ETag`; polling clients
+may send `If-None-Match` and receive `304 Not Modified` when the snapshot is
+unchanged. The tag hashes the fully marshalled body (turns *and* mechanics such
+as attention, `last_change`, and delivery), so a needs-input flip without a log
+write still invalidates the cache.
 
 ### `GET /api/nodes/{id}/peek[?mode=visible]`
 
@@ -159,10 +173,10 @@ nodes, deleted (archived) logs, and bookmarks — grouped by chat. Returns:
 `kind` is `live | archived | bookmarks`. A `live` group carries the node `id`
 (open the normal chat, or fork it); an `archived` group carries only `uid` —
 the deleted log's on-disk identity (a meta UID, or `legacy:<path>` for a
-header-less log) — read via `GET /api/archived`. `forkable` reports whether the
+header-less log) — read via `GET /api/preview`. `forkable` reports whether the
 chat can seed a fork (a live node, or an archived one whose recorded dir still
 exists). Each hit's `role` is `user | assistant | asset | bookmark`; log hits
-carry the stable `(segment, record)` ordinal pair that anchors an archived read,
+carry the stable `(segment, record)` ordinal pair that anchors a preview read,
 bookmark hits carry `bookmark_id` and the referenced `turn_time`;
 `before`/`match`/`after` are the excerpt around the match.
 
@@ -171,32 +185,34 @@ as it is typed); longer queries are clamped to 128 runes. The scan is bounded
 (per-file, per-group, total-hit, and group-count caps); tripping any cap sets
 `partial: true`. There is no cache and no `ETag` — each call rescans.
 
-### `GET /api/archived?uid=<uid>&seg=<n>&rec=<n>&at=<time>`
+### `GET /api/preview?uid=<uid>&seg=<n>&rec=<n>&at=<time>`
 
-The read-only surface for a **deleted** chat (a live search hit opens the normal
-chat instead). `uid` is required — the archived log's identity from a search
-group. The hit is anchored by its `(seg, rec)` ordinal (with `at`, a turn
-timestamp, as a defensive fallback). Returns a bounded window of turns around
-the anchor:
+The read-only turn window a search hit (or bookmark) opens onto its surrounding
+conversation — for **every** hit, live or deleted. It is deliberately not
+`GET /api/nodes/{id}/chat`: no composer, no polling, no history, no mechanics —
+just a photo of the turns around the hit. `uid` is required (the log's on-disk
+identity from a search group or bookmark address). The hit is anchored by its
+`(seg, rec)` ordinal (with `at`, a turn timestamp, as a defensive fallback).
+Returns a bounded window of turns around the anchor:
 
 ```json
 {
-  "uid": "a1b2c3", "title": "Fix the poller",
-  "agent": "claude", "model": "…", "effort": "…", "dir": "/path",
-  "forkable": true,
+  "uid": "a1b2c3", "node": "my-node", "title": "Fix the poller",
+  "agent": "claude", "model": "…",
   "turns": [ { …transcript turn… } ],
+  "assets": { "a_1": { … } },
   "anchor": 8, "before_truncated": true, "after_truncated": false
 }
 ```
 
-`anchor` is the index into `turns` of the hit turn; `before_truncated` /
-`after_truncated` say whether turns were dropped on either side. `forkable` is
-true when the recorded agent and dir survive. There is no node, process,
-composer, or polling here — just a photo of the turns so the supervisor can read
-what was said and, if the dir survives, fork from it. Asset markers render as
-inert "unavailable" chips (a deleted node's blobs are archived away). Missing
-`uid` is `400`; every other failure (unknown uid, unreadable log, traversal
-attempt) degrades to `404`.
+`node` is present only when the chat still lives (the UI can offer "Open chat");
+it is omitted for deleted logs. `anchor` is the index into `turns` of the hit
+turn; `before_truncated` / `after_truncated` say whether turns were dropped on
+either side. Live nodes project assets the same way chat does; a deleted node's
+blobs were archived away, so asset markers render as inert "unavailable" chips.
+This surface does not describe forkability (`forkable`, `dir`, and `effort` are
+not returned). Missing `uid` is `400`; every other failure (unknown uid,
+unreadable log, traversal attempt) degrades to `404`.
 
 ### `GET /api/agents`
 
@@ -358,6 +374,103 @@ lanes). GET sets an `ETag` and honors `If-None-Match`. PUT requires
 `If-Match` (the last ETag, or `*` to bootstrap) — `428` without it, `409` on
 mismatch — and replaces the document atomically. Bodies over the size limit
 are `413`.
+
+## Notes
+
+Synthesis documents (not bookmarks — those live in `ui.json`). Each note is a
+folder at `~/.scimux/notes/<id>/note.json`: the JSON file is always the source
+of truth. Optional per-note git versioning shells out to the `git` binary into
+`notes/<id>/.git` and degrades silently when git is absent or fails — a failed
+commit never fails the HTTP write. Mutating methods below are subject to the
+CSRF rules in the Security preamble.
+
+### `GET /api/notes`
+
+Sparse list of notes — enough to render cards, never section bodies:
+
+```json
+{
+  "notes": [
+    {
+      "id": "…", "title": "Install Guide",
+      "created_at": "…", "edited_at": "…", "order": 0,
+      "section_count": 2, "lanes": ["#c0392b"]
+    }
+  ]
+}
+```
+
+`lanes` is the deduped set of embedded-reference lane colors across sections
+(first-seen order). Listing errors are `500`.
+
+### `POST /api/notes`
+
+Create a note: server-minted id, auto title (`YYYY-MM-DD HH:MM`), a single
+starter section titled `"Section 1"`, and an `order` that appends it after
+existing notes. Returns the full document. Create failures are `500`.
+
+### `GET /api/notes/{id}`
+
+The full note document (`id`, `title`, `created_at`, `edited_at`, `order`,
+`sections[]` with each section's `id`/`title`/`body`/`order`/`references`).
+Unknown id is `404`.
+
+### `PATCH /api/notes/{id}`
+
+Partial update: only the fields present in the body are applied. Body fields
+(all optional):
+
+- `title` — rename the note
+- `order` — reposition among notes
+- `add_section` — append a section with this title (`""` becomes `"Section N"`)
+- `section` — edit one existing section by `id`:
+  - `title` / `body` / `order` — field updates
+  - `delete: true` — remove the section
+  - `commit: true` — client signal that a non-structural body edit has
+    finished (mid-edit debounced autosaves omit it so optional git does not
+    snapshot every keystroke). Structural changes (title/order/add/delete)
+    commit immediately without it. `commit` is a PATCH field, not a route.
+
+Returns the full document with an advanced `edited_at`. Unknown note is
+`404`; unknown section id is `400`; save failures are `500`. Bad JSON is
+`400`.
+
+### `DELETE /api/notes/{id}`
+
+Archives the whole note folder to `notes/archive/<id>.<stamp>/` rather than
+destroying it (a reissued id can never collide with live data). Returns
+`{"ok":"deleted"}`. Unknown id is `404`.
+
+### `POST /api/notes/{id}/sections/{sectionID}/references`
+
+Append an embedded chat reference to a section. Body carries the durable
+source address and a display snapshot; the server mints the reference `id`
+(any client-supplied id is ignored). Default placement is the bottom of the
+section. Returns the full note. Unknown note or section is `404`; bad JSON is
+`400`.
+
+```json
+{
+  "source": {
+    "uid": "a1b2c3", "segment": 2, "record": 7,
+    "node": "my-node", "turnTime": "2026-07-28T10:00:00Z"
+  },
+  "snapshot": {
+    "lane": "#c0392b", "station": "my-node",
+    "speaker": "assistant", "time": "2026-07-28T10:00:00Z",
+    "text": "the cited turn"
+  }
+}
+```
+
+The reference is self-contained: it still renders after the source node is
+deleted.
+
+### `DELETE /api/notes/{id}/sections/{sectionID}/references/{refID}`
+
+Remove one embedded reference from a section. Does not touch the source chat
+bubble or any capture-layer bookmark. Returns the full note. Unknown note is
+`404`; unknown section or reference id is `404`.
 
 ## Maintenance
 

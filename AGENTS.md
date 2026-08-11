@@ -10,6 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
+node --test web/test/*.test.js  # browser unit suite (948 tests; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -32,6 +33,10 @@ test commands are `bash --norc` or `cat`.
   by `internal/app`, never the reverse.
 - Keep the repository root for module metadata, documentation, licenses, and
   top-level directories. Do not add application Go files or tests there.
+
+Comments that say `Packet <N>` are design-doc phase references used
+consistently across the codebase; they are kept deliberately so a change stays
+traceable to the phase that introduced it. Do not mass-rename them as jargon.
 
 ## Invariants (deliberate design decisions — do not "improve" them away)
 
