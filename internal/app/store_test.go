@@ -693,6 +693,105 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// Key audits record the semantic choice (Key) and, for tmux actions, the
+// physical sequence (Keys). Structured audits omit Keys. Old key records
+// without Keys still load without error; replay ignores key records entirely.
+func TestStoreKeyAuditKeysField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	a := &app{byID: map[string]*Node{}, storePath: path}
+
+	// AX compound: semantic Key + physical Keys.
+	ax := storeRecord{
+		Type: "key", ID: "n1", Key: "1", Keys: []string{"1", "Enter"},
+		Excerpt: "menu", Time: "2026-08-10T00:00:00Z",
+	}
+	if err := a.appendRecord(ax); err != nil {
+		t.Fatal(err)
+	}
+	// Ordinary single-key tmux convention: one-element Keys.
+	single := storeRecord{
+		Type: "key", ID: "n1", Key: "Escape", Keys: []string{"Escape"},
+		Excerpt: "esc", Time: "2026-08-10T00:00:01Z",
+	}
+	if err := a.appendRecord(single); err != nil {
+		t.Fatal(err)
+	}
+	// Structured-style: Key only, Keys nil → omitempty drops the field.
+	structured := storeRecord{
+		Type: "key", ID: "c1", Key: "y", Excerpt: "tool", Time: "2026-08-10T00:00:02Z",
+	}
+	if err := a.appendRecord(structured); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy key line without keys field.
+	legacy := `{"type":"key","id":"old","key":"n","excerpt":"y/n","time":"2026-01-01T00:00:00Z"}` + "\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(legacy); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want 4 store lines, got %d: %s", len(lines), raw)
+	}
+	// Marshaled AX record has both key and keys.
+	if !strings.Contains(lines[0], `"key":"1"`) || !strings.Contains(lines[0], `"keys":["1","Enter"]`) {
+		t.Errorf("AX key record JSON = %s", lines[0])
+	}
+	if !strings.Contains(lines[1], `"keys":["Escape"]`) {
+		t.Errorf("single-key record JSON = %s", lines[1])
+	}
+	// Structured omitempty: no "keys" field when empty/nil.
+	if strings.Contains(lines[2], `"keys"`) {
+		t.Errorf("structured key record must omit keys, got %s", lines[2])
+	}
+
+	// loadStore succeeds and ignores key records (no node state).
+	r := &app{byID: map[string]*Node{}, storePath: path}
+	if err := r.loadStore(); err != nil {
+		t.Fatalf("loadStore with key records: %v", err)
+	}
+	if len(r.nodes) != 0 {
+		t.Fatalf("key records must not create nodes, got %d", len(r.nodes))
+	}
+
+	// Round-trip parse of each line into storeRecord.
+	for i, line := range lines {
+		var rec storeRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if rec.Type != "key" {
+			t.Fatalf("line %d type = %q", i, rec.Type)
+		}
+	}
+	var axRec, singleRec, structRec, legacyRec storeRecord
+	_ = json.Unmarshal([]byte(lines[0]), &axRec)
+	_ = json.Unmarshal([]byte(lines[1]), &singleRec)
+	_ = json.Unmarshal([]byte(lines[2]), &structRec)
+	_ = json.Unmarshal([]byte(lines[3]), &legacyRec)
+	if axRec.Key != "1" || len(axRec.Keys) != 2 || axRec.Keys[0] != "1" || axRec.Keys[1] != "Enter" {
+		t.Errorf("AX parse = %+v", axRec)
+	}
+	if singleRec.Key != "Escape" || len(singleRec.Keys) != 1 || singleRec.Keys[0] != "Escape" {
+		t.Errorf("single parse = %+v", singleRec)
+	}
+	if structRec.Key != "y" || structRec.Keys != nil {
+		t.Errorf("structured parse = %+v", structRec)
+	}
+	if legacyRec.Key != "n" || legacyRec.Keys != nil {
+		t.Errorf("legacy parse = %+v", legacyRec)
+	}
+}
+
 // ax_screen_reader:true round-trips through the append-only store; a legacy
 // record that omits the field replays as false without migration or error.
 func TestLoadStoreAXScreenReaderRoundTripAndLegacy(t *testing.T) {

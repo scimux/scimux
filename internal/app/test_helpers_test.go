@@ -63,6 +63,9 @@ type fakeTmux struct {
 	capture    string          // capture-pane output
 	captureErr bool
 	killErr    bool // kill-session returns an error (delete-durability tests)
+	// sendKeysErr makes send-keys fail after the call is recorded, so tests
+	// can assert pre-delivery failure paths without a real tmux server.
+	sendKeysErr bool
 	// captureAfterEnter, when set, is returned by capture-pane once an Enter
 	// keypress was sent — it lets SendAck observe a pane "reaction".
 	captureAfterEnter string
@@ -100,6 +103,10 @@ func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (strin
 		}
 		return "", nil
 	case "send-keys":
+		if f.sendKeysErr {
+			return "", errors.New("send-keys failed")
+		}
+		// Compound AX sequences end with Enter; single Escape/Tab/etc. do not.
 		if lastArg(args) == "Enter" {
 			f.enterSent = true
 		}

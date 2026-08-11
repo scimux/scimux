@@ -1368,6 +1368,66 @@ test("attention suppression collapses keyrow and hides attention chrome", async 
   feature.destroy();
 });
 
+/* Screen-reader AX: the browser stays semantic and single-shot. Server-side
+ * translation may expand "1" into physical ["1","Enter"]; JS must not POST
+ * Enter, wait, or inspect ax_screen_reader. */
+test("tmux numbered key click is one semantic POST without delayed Enter", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "claude", model: "s", live: "quiet",
+    attention: "question", lane_id: "", description: "",
+  }];
+  const scheduled = [];
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "question",
+    },
+    deps: {
+      // Capture delayed tick scheduling; must not schedule a second /key.
+      scheduleTick: (ms) => { scheduled.push({ kind: "scheduleTick", ms }); },
+      tick: () => { scheduled.push({ kind: "tick" }); },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key="1"/);
+
+  const before = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  const btn = el("button", { dataset: { key: "1" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: btn });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const keyCalls = ctx.apiCalls.filter(c => c.path.includes("/key"));
+  assert.equal(keyCalls.length, before + 1, "exactly one /key request");
+  const call = keyCalls[keyCalls.length - 1];
+  assert.match(call.path, /\/api\/nodes\/n1\/key$/);
+  assert.equal(call.opts?.method, "POST");
+  assert.equal(call.opts?.body, JSON.stringify({ key: "1" }),
+    "body is the semantic choice only");
+  // No second request for Enter, and no body that embeds Enter.
+  assert.equal(
+    keyCalls.filter(c => {
+      try {
+        const b = JSON.parse(c.opts?.body || "{}");
+        return b.key === "Enter";
+      } catch { return false; }
+    }).length,
+    0,
+    "must not POST Enter as a separate confirmation",
+  );
+  // scheduleTick(400) for chat refresh is fine; it must not POST /key again.
+  assert.ok(
+    scheduled.every(s => s.kind !== "key"),
+    "no delayed key confirmation scheduled",
+  );
+  const afterFlush = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  assert.equal(afterFlush, before + 1, "still exactly one /key after async settle");
+  ctx.feature.destroy();
+});
+
 test("work-pulse start/stop via activity chrome", async () => {
   const { feature, roots } = makeFeature({
     chatPayload: {

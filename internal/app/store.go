@@ -23,12 +23,19 @@ type storeRecord struct {
 	// that still names the launch session cannot rebind the dead file after
 	// a /clear (P2a). Omitempty keeps older record types unchanged.
 	SessionID string `json:"session_id,omitempty"`
-	// "key" records are the answered-dialog evidence trail: which key was
-	// pressed for a node while what dialog (pane excerpt) was on screen.
-	// Replay ignores them — they carry no node state.
-	Key     string `json:"key,omitempty"`
-	Excerpt string `json:"excerpt,omitempty"`
-	Time    string `json:"time,omitempty"`
+	// "key" records are the answered-dialog evidence trail. Replay ignores
+	// them — they carry no node state.
+	//
+	// Key is the semantic web choice the supervisor selected (e.g. "1", "y",
+	// "Escape"). Keys, when present, is the physical tmux key sequence that
+	// was actually delivered for that one web action (e.g. ["1","Enter"] for
+	// an AX Claude numbered choice, or ["Escape"] for a single navigation
+	// key). Structured Codex/ACP decisions leave Keys absent: no terminal
+	// keys were pressed.
+	Key     string   `json:"key,omitempty"`
+	Keys    []string `json:"keys,omitempty"`
+	Excerpt string   `json:"excerpt,omitempty"`
+	Time    string   `json:"time,omitempty"`
 }
 
 func (a *app) appendRecord(rec storeRecord) error {

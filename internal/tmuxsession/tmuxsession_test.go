@@ -234,6 +234,106 @@ func TestSendKey(t *testing.T) {
 	}
 }
 
+func TestSendKeys(t *testing.T) {
+	f := &fakeRunner{}
+	sv := newTestServer(f)
+	s := sv.Session("node1")
+
+	// Compound choice + Enter: one runner call, exact order, pane target =name:.
+	if err := s.SendKeys("1", "Enter"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-L", "testsock", "send-keys", "-t", "=node1:", "1", "Enter"}
+	if len(f.calls) != 1 {
+		t.Fatalf("SendKeys(1, Enter) made %d runner calls, want 1: %v", len(f.calls), f.calls)
+	}
+	if !reflect.DeepEqual(f.calls[0].args, want) {
+		t.Fatalf("args = %v, want %v", f.calls[0].args, want)
+	}
+
+	// y + Enter preserves order in one call.
+	f.calls = nil
+	if err := s.SendKeys("y", "Enter"); err != nil {
+		t.Fatal(err)
+	}
+	wantY := []string{"-L", "testsock", "send-keys", "-t", "=node1:", "y", "Enter"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, wantY) {
+		t.Fatalf("SendKeys(y, Enter) = %v, want one call %v", f.calls, wantY)
+	}
+
+	// SendKey remains a one-key wrapper.
+	f.calls = nil
+	if err := s.SendKey("1"); err != nil {
+		t.Fatal(err)
+	}
+	wantOne := []string{"-L", "testsock", "send-keys", "-t", "=node1:", "1"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, wantOne) {
+		t.Fatalf("SendKey(1) = %v, want %v", f.calls, wantOne)
+	}
+
+	// Empty sequence: error, no runner call.
+	f.calls = nil
+	if err := s.SendKeys(); err == nil {
+		t.Fatal("empty SendKeys must error")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("empty sequence contacted tmux: %v", f.calls)
+	}
+
+	// Any invalid member rejects the entire sequence before tmux contact.
+	// Cover invalid before, between, and after valid keys.
+	before := len(f.calls)
+	for _, seq := range [][]string{
+		{"q", "Enter"},        // invalid first
+		{"1", "q", "Enter"},   // invalid between
+		{"1", "Enter", "C-c"}, // invalid after
+		{"0"},                 // invalid alone
+		{"rm -rf /"},          // not a whitelist member
+		{"Enter Enter"},       // not a single allowed key token
+	} {
+		f.calls = f.calls[:before]
+		if err := s.SendKeys(seq...); err == nil {
+			t.Errorf("SendKeys(%v) accepted invalid sequence", seq)
+		}
+		if len(f.calls) != before {
+			t.Errorf("invalid sequence %v contacted tmux: %v", seq, f.calls[before:])
+		}
+	}
+
+	// Representative allowed special/navigation keys still work as a sequence.
+	f.calls = nil
+	if err := s.SendKeys("Escape"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendKeys("Tab"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendKeys("Up"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendKeys("Down"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 4 {
+		t.Fatalf("special keys: %d calls, want 4", len(f.calls))
+	}
+	for i, key := range []string{"Escape", "Tab", "Up", "Down"} {
+		want := []string{"-L", "testsock", "send-keys", "-t", "=node1:", key}
+		if !reflect.DeepEqual(f.calls[i].args, want) {
+			t.Errorf("%s args = %v, want %v", key, f.calls[i].args, want)
+		}
+	}
+
+	// Pane target remains exactly =name: (trailing colon required for pane cmds).
+	f.calls = nil
+	if err := sv.Session("my-node").SendKeys("n", "Enter"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.calls[0].args; !reflect.DeepEqual(got, []string{"-L", "testsock", "send-keys", "-t", "=my-node:", "n", "Enter"}) {
+		t.Errorf("pane target regression: %v", got)
+	}
+}
+
 // scriptedRunner answers capture-pane calls from a queue (last entry repeats)
 // while recording every invocation — enough to simulate a TUI that does or
 // does not react to Enter.

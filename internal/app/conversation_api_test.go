@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -425,6 +426,10 @@ func TestPublicRouteKeyWhitelistAndAuditOrder(t *testing.T) {
 		if got == nil || got.Key != "y" || !strings.Contains(got.Excerpt, "Approve?") {
 			t.Fatalf("audit record = %+v", got)
 		}
+		// Default seed is non-AX Claude: physical Keys is the one-element sequence.
+		if !reflect.DeepEqual(got.Keys, []string{"y"}) {
+			t.Errorf("legacy Keys = %v, want [y]", got.Keys)
+		}
 		a.mu.Lock()
 		if a.attn["k1"] != "" {
 			t.Errorf("attn after success = %q, want cleared", a.attn["k1"])
@@ -498,6 +503,9 @@ func TestPublicRouteKeyWhitelistAndAuditOrder(t *testing.T) {
 		}
 		if found == nil || found.Key != "y" || found.Excerpt == "" {
 			t.Fatalf("audit record = %+v", found)
+		}
+		if found.Keys != nil {
+			t.Errorf("structured audit must omit Keys, got %v", found.Keys)
 		}
 		select {
 		case <-decisionDelivered:
@@ -916,6 +924,10 @@ func TestHandleKeyTmuxEvidenceBeforeAction(t *testing.T) {
 	if got == nil || got.Key != "y" || !strings.Contains(got.Excerpt, "Approve?") {
 		t.Fatalf("audit record = %+v, want key y with pane excerpt", got)
 	}
+	// Legacy/adopted Claude (AXScreenReader false): one-element physical Keys.
+	if !reflect.DeepEqual(got.Keys, []string{"y"}) {
+		t.Errorf("legacy single-key Keys = %v, want [y]", got.Keys)
+	}
 }
 
 func TestHandleKeyRefusesWithoutEvidence(t *testing.T) {
@@ -932,6 +944,374 @@ func TestHandleKeyRefusesWithoutEvidence(t *testing.T) {
 		if s == "send-keys" {
 			t.Fatal("send-keys must not run when evidence capture failed")
 		}
+	}
+}
+
+// tmuxKeySequence is the pure AX policy: Claude+tmux+AX digit/y/n → choice+Enter;
+// everything else (including nil node) stays a single physical key.
+func TestTmuxKeySequence(t *testing.T) {
+	axClaude := &Node{Agent: "claude", Transport: "tmux", AXScreenReader: true}
+	legacyClaude := &Node{Agent: "claude", Transport: "tmux", AXScreenReader: false}
+	adoptedClaude := &Node{Agent: "claude", Transport: "tmux", Adopted: true, AXScreenReader: false}
+	piTmux := &Node{Agent: "pi", Transport: "tmux"}
+	ocTmux := &Node{Agent: "opencode", Transport: "tmux"}
+	codex := &Node{Agent: "codex", Transport: "codex"}
+
+	cases := []struct {
+		name string
+		n    *Node
+		key  string
+		want []string
+	}{
+		{"ax-1", axClaude, "1", []string{"1", "Enter"}},
+		{"ax-9", axClaude, "9", []string{"9", "Enter"}},
+		{"ax-y", axClaude, "y", []string{"y", "Enter"}},
+		{"ax-n", axClaude, "n", []string{"n", "Enter"}},
+		{"ax-Enter", axClaude, "Enter", []string{"Enter"}},
+		{"ax-Escape", axClaude, "Escape", []string{"Escape"}},
+		{"ax-Tab", axClaude, "Tab", []string{"Tab"}},
+		{"ax-Up", axClaude, "Up", []string{"Up"}},
+		{"ax-Down", axClaude, "Down", []string{"Down"}},
+		{"legacy-1", legacyClaude, "1", []string{"1"}},
+		{"adopted-1", adoptedClaude, "1", []string{"1"}},
+		{"pi-1", piTmux, "1", []string{"1"}},
+		{"opencode-1", ocTmux, "1", []string{"1"}},
+		// Pure helper returns the key even for structured agents; public
+		// routing never delivers that sequence through tmux.
+		{"codex-1", codex, "1", []string{"1"}},
+		{"nil-1", nil, "1", []string{"1"}},
+	}
+	for _, c := range cases {
+		got := tmuxKeySequence(c.n, c.key)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: tmuxKeySequence = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// sendKeysCalls returns every send-keys argv recorded by the fake runner.
+func sendKeysCalls(f *fakeTmux) [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out [][]string
+	for _, c := range f.calls {
+		if len(c) >= 3 && c[2] == "send-keys" {
+			out = append(out, append([]string(nil), c...))
+		}
+	}
+	return out
+}
+
+// AX Claude compound delivery: one capture, one send-keys with choice+Enter,
+// semantic Key + physical Keys audit, single attention clear and end edge.
+func TestHandleKeyAXClaudeCompoundDelivery(t *testing.T) {
+	pane := "Permission Required\n  1. Yes\n  2. No\nEnter selection [1-2], or Escape to cancel:"
+	f := &fakeTmux{alive: map[string]bool{"ax1": true}, capture: pane}
+	a := newTestApp(t, f)
+	n := &Node{
+		ID: "ax1", Title: "ax1", Agent: "claude", Transport: "tmux",
+		AXScreenReader: true, CreatedAt: "2026-08-10T00:00:00Z",
+	}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.attn[n.ID] = "approval"
+	a.attnAt[n.ID] = time.Now().Add(-30 * time.Second)
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, "claude", "c", "", a.home),
+		{T: "attention", Time: "2026-08-10T10:00:00Z", Attention: &sessionlog.AttentionEvent{Kind: "approval", Status: "start"}},
+	})
+
+	// AX + "1" → capture then one send-keys `1 Enter`.
+	rec := keyReq(a, "ax1", `{"key":"1"}`)
+	if rec.Code != 200 {
+		t.Fatalf("AX key 1: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	subs := f.subcommands()
+	capIdx, keyIdx := -1, -1
+	for i, s := range subs {
+		if s == "capture-pane" && capIdx == -1 {
+			capIdx = i
+		}
+		if s == "send-keys" && keyIdx == -1 {
+			keyIdx = i
+		}
+	}
+	if capIdx == -1 || keyIdx == -1 || capIdx > keyIdx {
+		t.Fatalf("capture must precede send-keys, got %v", subs)
+	}
+	sk := sendKeysCalls(f)
+	if len(sk) != 1 {
+		t.Fatalf("want exactly one send-keys call, got %d: %v", len(sk), sk)
+	}
+	// Args: -L sock send-keys -t =ax1: 1 Enter
+	if !reflect.DeepEqual(sk[0][2:], []string{"send-keys", "-t", "=ax1:", "1", "Enter"}) {
+		t.Errorf("send-keys argv = %v, want send-keys -t =ax1: 1 Enter", sk[0])
+	}
+	// Not two runner calls for the compound sequence.
+	sendCount := 0
+	for _, s := range subs {
+		if s == "send-keys" {
+			sendCount++
+		}
+	}
+	if sendCount != 1 {
+		t.Errorf("send-keys subcommand count = %d, want 1", sendCount)
+	}
+
+	recs := keyRecords(t, a.storePath)
+	var got *storeRecord
+	for i := range recs {
+		if recs[i].Type == "key" {
+			got = &recs[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("missing key audit")
+	}
+	if got.Key != "1" {
+		t.Errorf("semantic Key = %q, want 1", got.Key)
+	}
+	if !reflect.DeepEqual(got.Keys, []string{"1", "Enter"}) {
+		t.Errorf("physical Keys = %v, want [1 Enter]", got.Keys)
+	}
+	if !strings.Contains(got.Excerpt, "Permission Required") {
+		t.Errorf("excerpt missing pre-delivery pane evidence: %q", got.Excerpt)
+	}
+	if a.attn[n.ID] != "" {
+		t.Errorf("attn after compound delivery = %q, want cleared once", a.attn[n.ID])
+	}
+	var ends int
+	for _, ev := range sessionlog.ReadEvents(a.sessionLogPath(n.ID)) {
+		if ev.T == "attention" && ev.Attention != nil && ev.Attention.Status == "end" {
+			ends++
+		}
+	}
+	if ends != 1 {
+		t.Errorf("attention end edges = %d, want 1", ends)
+	}
+
+	// AX + y → y Enter in one call.
+	f.calls = nil
+	a.attn[n.ID] = "question"
+	rec = keyReq(a, "ax1", `{"key":"y"}`)
+	if rec.Code != 200 {
+		t.Fatalf("AX key y: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	sk = sendKeysCalls(f)
+	if len(sk) != 1 || !reflect.DeepEqual(sk[0][2:], []string{"send-keys", "-t", "=ax1:", "y", "Enter"}) {
+		t.Errorf("y Enter delivery = %v", sk)
+	}
+
+	// AX + Escape remains a single physical key.
+	f.calls = nil
+	rec = keyReq(a, "ax1", `{"key":"Escape"}`)
+	if rec.Code != 200 {
+		t.Fatalf("AX Escape: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	sk = sendKeysCalls(f)
+	if len(sk) != 1 || !reflect.DeepEqual(sk[0][2:], []string{"send-keys", "-t", "=ax1:", "Escape"}) {
+		t.Errorf("Escape delivery = %v", sk)
+	}
+	recs = keyRecords(t, a.storePath)
+	var esc *storeRecord
+	for i := range recs {
+		if recs[i].Type == "key" && recs[i].Key == "Escape" {
+			esc = &recs[i]
+		}
+	}
+	if esc == nil || !reflect.DeepEqual(esc.Keys, []string{"Escape"}) {
+		t.Errorf("Escape audit Keys = %+v", esc)
+	}
+}
+
+// Legacy Claude, adopted Claude, and non-Claude tmux stay single-key.
+func TestHandleKeyLegacyAdoptedNonClaudeSingleKey(t *testing.T) {
+	cases := []struct {
+		name string
+		n    *Node
+	}{
+		{"legacy", &Node{ID: "leg", Title: "leg", Agent: "claude", Transport: "tmux",
+			AXScreenReader: false, CreatedAt: "2026-01-01T00:00:00Z"}},
+		{"adopted", &Node{ID: "adp", Title: "adp", Agent: "claude", Transport: "tmux",
+			Adopted: true, AXScreenReader: false, CreatedAt: "2026-01-01T00:00:00Z"}},
+		{"pi", &Node{ID: "pi1", Title: "pi1", Agent: "pi", Transport: "tmux",
+			CreatedAt: "2026-01-01T00:00:00Z"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeTmux{alive: map[string]bool{c.n.ID: true}, capture: "Approve? 1/2\n"}
+			a := newTestApp(t, f)
+			a.nodes = []*Node{c.n}
+			a.byID[c.n.ID] = c.n
+			rec := keyReq(a, c.n.ID, `{"key":"1"}`)
+			if rec.Code != 200 {
+				t.Fatalf("code = %d body %q", rec.Code, rec.Body.String())
+			}
+			sk := sendKeysCalls(f)
+			if len(sk) != 1 {
+				t.Fatalf("send-keys calls = %d, want 1", len(sk))
+			}
+			want := []string{"send-keys", "-t", "=" + c.n.ID + ":", "1"}
+			if !reflect.DeepEqual(sk[0][2:], want) {
+				t.Errorf("argv = %v, want %v (no Enter)", sk[0][2:], want)
+			}
+			recs := keyRecords(t, a.storePath)
+			var got *storeRecord
+			for i := range recs {
+				if recs[i].Type == "key" {
+					got = &recs[i]
+				}
+			}
+			if got == nil || got.Key != "1" || !reflect.DeepEqual(got.Keys, []string{"1"}) {
+				t.Errorf("audit = %+v, want Key=1 Keys=[1]", got)
+			}
+		})
+	}
+}
+
+// Capture / SendKeys failure preserves attention and writes no success audit.
+func TestHandleKeyFailurePreservesAttention(t *testing.T) {
+	t.Run("capture_failure", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"axf": true}, captureErr: true}
+		a := newTestApp(t, f)
+		n := &Node{ID: "axf", Title: "axf", Agent: "claude", Transport: "tmux",
+			AXScreenReader: true, CreatedAt: "2026-08-10T00:00:00Z"}
+		a.nodes = []*Node{n}
+		a.byID[n.ID] = n
+		a.attn[n.ID] = "approval"
+		if rec := keyReq(a, "axf", `{"key":"1"}`); rec.Code != 500 {
+			t.Fatalf("code = %d, want 500", rec.Code)
+		}
+		if len(sendKeysCalls(f)) != 0 {
+			t.Fatal("send-keys must not run when capture failed")
+		}
+		if a.attn[n.ID] != "approval" {
+			t.Errorf("attn cleared on capture failure")
+		}
+		for _, r := range keyRecords(t, a.storePath) {
+			if r.Type == "key" {
+				t.Fatalf("unexpected key audit on capture failure: %+v", r)
+			}
+		}
+	})
+
+	t.Run("sendkeys_failure", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"axs": true}, capture: "menu", sendKeysErr: true}
+		a := newTestApp(t, f)
+		n := &Node{ID: "axs", Title: "axs", Agent: "claude", Transport: "tmux",
+			AXScreenReader: true, CreatedAt: "2026-08-10T00:00:00Z"}
+		a.nodes = []*Node{n}
+		a.byID[n.ID] = n
+		a.attn[n.ID] = "approval"
+		if rec := keyReq(a, "axs", `{"key":"1"}`); rec.Code != 500 {
+			t.Fatalf("code = %d, want 500", rec.Code)
+		}
+		// Call was attempted (validation passed) but failed.
+		if len(sendKeysCalls(f)) != 1 {
+			t.Fatalf("expected one failed send-keys attempt, got %v", sendKeysCalls(f))
+		}
+		if a.attn[n.ID] != "approval" {
+			t.Errorf("attn cleared on SendKeys failure")
+		}
+		for _, r := range keyRecords(t, a.storePath) {
+			if r.Type == "key" {
+				t.Fatalf("success audit written after SendKeys failure: %+v", r)
+			}
+		}
+	})
+}
+
+// Audit failure after physical delivery reports the existing partial-failure
+// contract: keys cannot be unsent, so response is not plain success.
+func TestHandleKeyAuditFailureAfterDelivery(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"axa": true}, capture: "Approve?\n"}
+	a := newTestApp(t, f)
+	n := &Node{ID: "axa", Title: "axa", Agent: "claude", Transport: "tmux",
+		AXScreenReader: true, CreatedAt: "2026-08-10T00:00:00Z"}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	// Make appendRecord fail: storePath is a directory.
+	bad := filepath.Join(t.TempDir(), "nodes.jsonl")
+	if err := os.Mkdir(bad, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.storePath = bad
+
+	rec := keyReq(a, "axa", `{"key":"1"}`)
+	if rec.Code != 500 {
+		t.Fatalf("code = %d, want 500; body %q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "key was sent") {
+		t.Errorf("partial-failure body must report delivery-then-audit failure, got %q", rec.Body.String())
+	}
+	// Physical keys already delivered.
+	sk := sendKeysCalls(f)
+	if len(sk) != 1 || !reflect.DeepEqual(sk[0][2:], []string{"send-keys", "-t", "=axa:", "1", "Enter"}) {
+		t.Errorf("physical delivery = %v", sk)
+	}
+	// Attention still cleared after successful delivery (before audit).
+	if a.attn[n.ID] != "" {
+		t.Errorf("attn = %q after delivery; clear happens before audit", a.attn[n.ID])
+	}
+}
+
+// Structured Codex decisions keep semantic Key only — no physical Keys/Enter.
+func TestHandleKeyStructuredOmitsPhysicalKeys(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	spawn, approvalDispatched, decisionDelivered := newApprovalFakeCodexSpawn(t, "THREAD-KEY-AX", rollout)
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
+	a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
+	t.Cleanup(a.codex.Shutdown)
+
+	rec := newNode(a, `{"prompt":"do it","title":"T","agent":"codex","dir":"`+a.home+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("create: %d", rec.Code)
+	}
+	n := a.nodes[0]
+	select {
+	case <-approvalDispatched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approval")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := a.codex.Pending(n.ID); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := a.codex.Pending(n.ID); !ok {
+		t.Fatal("pending approval never appeared")
+	}
+
+	keyRec := keyReq(a, n.ID, `{"key":"y"}`)
+	if keyRec.Code != 200 {
+		t.Fatalf("handleKey: code = %d body %q", keyRec.Code, keyRec.Body)
+	}
+	// No tmux send-keys for structured decisions.
+	if len(sendKeysCalls(f)) != 0 {
+		t.Fatalf("structured key must not contact tmux: %v", sendKeysCalls(f))
+	}
+	recs := keyRecords(t, a.storePath)
+	var found *storeRecord
+	for i := range recs {
+		if recs[i].Type == "key" {
+			found = &recs[i]
+			break
+		}
+	}
+	if found == nil || found.Key != "y" {
+		t.Fatalf("audit = %+v", found)
+	}
+	if found.Keys != nil {
+		t.Errorf("structured audit must omit Keys, got %v", found.Keys)
+	}
+	select {
+	case <-decisionDelivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("decision never reached fake server")
 	}
 }
 
@@ -1546,6 +1926,9 @@ func TestHandleKeyCodexAuditPositive(t *testing.T) {
 	if found.ID != n.ID {
 		t.Errorf("audit node id = %q, want %q", found.ID, n.ID)
 	}
+	if found.Keys != nil {
+		t.Errorf("structured audit must omit physical Keys, got %v", found.Keys)
+	}
 
 	// The fake server must receive the decision. Since store append happens before
 	// Deliver, which happens before approve() returns, which happens before the
@@ -1593,7 +1976,8 @@ func TestHandleSendInterruptTmux(t *testing.T) {
 		t.Fatalf("interrupt key = %q, want Escape", sentKey)
 	}
 	b, err := os.ReadFile(a.storePath)
-	if err != nil || !strings.Contains(string(b), `"key":"Escape"`) || !strings.Contains(string(b), "interrupt: ") {
+	if err != nil || !strings.Contains(string(b), `"key":"Escape"`) ||
+		!strings.Contains(string(b), `"keys":["Escape"]`) || !strings.Contains(string(b), "interrupt: ") {
 		t.Fatalf("interrupt not audited: %v\n%s", err, b)
 	}
 	if _, ok := a.sendState[id]; ok {

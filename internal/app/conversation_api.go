@@ -377,7 +377,7 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"ok": "interrupted"})
 		return
 	}
-	// tmux path: the interrupt is a remote keypress and follows the SendKey
+	// tmux path: the interrupt is a remote keypress and follows the SendKeys
 	// contract — whitelisted key only (Escape is Claude Code's documented
 	// turn interrupt; C-c on an idle pane clears input and a double press
 	// exits the CLI), recorded in the store with pane evidence. Evidence
@@ -394,7 +394,8 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: "Escape",
-		Excerpt: "interrupt: " + excerpt, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		Keys: []string{"Escape"}, Excerpt: "interrupt: " + excerpt,
+		Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: interrupt sent to %s but audit record failed: %v\n", n.ID, err)
 		http.Error(w, "the interrupt was sent, but the audit record failed: "+err.Error(), 500)
 		return
@@ -684,9 +685,27 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	resp["perm_tool_kind"] = pending.ToolKind
 }
 
-// handleKey presses one whitelisted key in the node's pane — answering an
-// approval prompt or question menu remotely — and appends the pane's bottom
-// lines plus the key to the store as decision evidence.
+// tmuxKeySequence maps a semantic web choice to the physical tmux key
+// sequence for one /key action. Claude nodes launched in screen-reader mode
+// (AXScreenReader) need a digit or y/n followed immediately by Enter; every
+// other allowed key, and every non-AX / non-Claude / non-tmux node, stays a
+// single physical key. The renderer is taken from durable launch metadata —
+// never from pane contents, process args, or transcript text. Nil n is
+// treated as non-AX (single key).
+func tmuxKeySequence(n *Node, key string) []string {
+	if n != nil && n.Agent == "claude" && n.transport() == "tmux" && n.AXScreenReader {
+		switch key {
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "y", "n":
+			return []string{key, "Enter"}
+		}
+	}
+	return []string{key}
+}
+
+// handleKey accepts one whitelisted semantic choice for an approval prompt or
+// question menu. Structured transports resolve it through their protocol;
+// tmux captures pane evidence, delivers the renderer-specific physical key
+// sequence, and audits both the semantic choice and physical keys.
 func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
@@ -712,7 +731,8 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	// post-send best-effort write. Persist the decision first, then deliver, so
 	// a store failure can never leave an unaudited permission answer already
 	// acted on (finding 53). The tool title stands in for the pane excerpt as
-	// decision evidence.
+	// decision evidence. Keys stays absent: no terminal keys were pressed, and
+	// this branch must never receive a synthetic Enter.
 	if pm := a.proc(n); pm != nil {
 		optID, evidence, err := pm.PrepareResolve(n.ID, body.Key)
 		if err != nil {
@@ -747,14 +767,17 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	excerpt := lastLines(cap, 12)
-	if err := s.SendKey(body.Key); err != nil {
+	// Semantic web choice → physical sequence (AX Claude: choice + Enter).
+	// One browser action becomes one validated SendKeys delivery.
+	seq := tmuxKeySequence(n, body.Key)
+	if err := s.SendKeys(seq...); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	// Deliberate non-poller write: successful key delivery clears attn/attnAt
 	// now rather than waiting for the tool-call record to resolve (it only lands
 	// when the approved tool completes, which for a long tool is minutes away —
-	// R21.2). Failures before SendKey must not reach here. The mechanical
+	// R21.2). Failures before SendKeys must not reach here. The mechanical
 	// pipeline re-raises on the next tick if the dialog is still up, mirroring
 	// what the structured path gets for free from pm.Attention.
 	a.mu.Lock()
@@ -765,10 +788,11 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	// V2-P2: closing the wait edge on web-key answer (same mechanical signal).
 	a.persistAttentionTransition(n, prevAttn, "")
 	// The audit record is part of the operation's success contract: a keypress
-	// whose evidence cannot be persisted must not report plain success. The key
-	// is already delivered (cannot be unsent), so say exactly that.
+	// whose evidence cannot be persisted must not report plain success. The
+	// physical sequence is already delivered (cannot be unsent), so say exactly
+	// that. Key = semantic choice; Keys = physical tmux sequence.
 	if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
-		Excerpt: excerpt, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		Keys: seq, Excerpt: excerpt, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: key %q sent to %s but audit record failed: %v\n", body.Key, n.ID, err)
 		http.Error(w, "key was sent, but persisting the audit record failed: "+err.Error(), 500)
 		return

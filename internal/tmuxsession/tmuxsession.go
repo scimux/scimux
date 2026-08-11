@@ -196,16 +196,35 @@ var allowedKeys = map[string]bool{
 
 func AllowedKey(key string) bool { return allowedKeys[key] }
 
-// SendKey presses one whitelisted key in the pane — how a supervisor answers
-// an agent's approval prompt or question menu without attaching.
-func (s *Session) SendKey(key string) error {
-	if !allowedKeys[key] {
-		return fmt.Errorf("key %q not allowed", key)
+// SendKeys presses one or more whitelisted keys in the pane, in order, through
+// a single tmux send-keys invocation. Every member is validated against the
+// closed allowedKeys whitelist before tmux is contacted; if any member is
+// invalid, nothing is sent. An empty sequence is rejected. This is how a
+// supervisor answers an agent's approval prompt or question menu without
+// attaching — including Claude screen-reader menus that need a choice plus
+// Enter as one physical delivery.
+func (s *Session) SendKeys(keys ...string) error {
+	if len(keys) == 0 {
+		return fmt.Errorf("key sequence is empty")
 	}
-	if out, err := s.sv.tmux("", "send-keys", "-t", s.paneTarget(), key); err != nil {
+	for _, key := range keys {
+		if !allowedKeys[key] {
+			return fmt.Errorf("key %q not allowed", key)
+		}
+	}
+	args := make([]string, 0, 3+len(keys))
+	args = append(args, "send-keys", "-t", s.paneTarget())
+	args = append(args, keys...)
+	if out, err := s.sv.tmux("", args...); err != nil {
 		return fmt.Errorf("tmux send-keys: %v: %s", err, out)
 	}
 	return nil
+}
+
+// SendKey presses one whitelisted key in the pane. It is a compatibility
+// wrapper around SendKeys for single-key callers.
+func (s *Session) SendKey(key string) error {
+	return s.SendKeys(key)
 }
 
 // Capture returns the pane's rendered plain text (last 200 scrollback lines).
