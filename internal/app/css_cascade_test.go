@@ -1321,8 +1321,8 @@ var productionLinkCSSOrder = []string{
 // extended by P5's shared menu.css): the complete linked order with menu before
 // notes and accessibility last; notes.css owns Bookmarks/Notes/desktop/peek
 // rules; layout no longer owns #bookmarkpeek; accessibility.css owns only the
-// cross-component pane reduced-motion override; cascade order holds; and the
-// final state has no inline <style> source.
+// cross-component pane reduced-motion override and the global :focus-visible
+// outline; cascade order holds; and the final state has no inline <style> source.
 func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 	html := mustReadIndex(t)
 	hrefs, err := linkedStylesheetHrefs(html)
@@ -1418,17 +1418,28 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 		}
 	}
 
-	// accessibility.css owns the complete cross-component pane rule and,
-	// apart from its explanatory comment and whitespace, nothing else.
+	// accessibility.css owns the complete cross-component pane rule, the
+	// global keyboard focus ring, and — apart from their explanatory comments
+	// and whitespace — nothing else. The residual strip below keeps the file
+	// from becoming a junk drawer: every new permitted block must be named
+	// here and stripped, or the residual check fails.
 	a11yComment := "/* the spatial-line slides are motion; honour Reduce Motion (pane-gap-design.md"
 	a11yMedia := "@media (prefers-reduced-motion: reduce) {\n  #cards, #map, #bookmarkspane { transition: none; }\n}"
+	// Global :focus-visible outline (P7). Bare :focus-visible is (0,1,0); the
+	// existing divider rules (.wsdivider:focus-visible (0,2,0) and
+	// #mapdivider:focus-visible (1,1,0)) still win, so no double ring.
+	a11yFocusRule := ":focus-visible {\n  outline: 2px solid var(--work);\n  outline-offset: 2px;\n}"
 	if !strings.Contains(a11y, a11yComment) {
 		t.Fatalf("accessibility.css missing explanatory reduced-motion comment")
 	}
 	if !strings.Contains(a11y, a11yMedia) {
 		t.Fatalf("accessibility.css missing cross-component pane reduced-motion override")
 	}
-	// Strip the required comment/media and remaining whitespace; nothing may remain.
+	if !strings.Contains(a11y, a11yFocusRule) {
+		t.Fatalf("accessibility.css missing global :focus-visible outline rule")
+	}
+	// Strip the required comment/media/focus blocks and remaining whitespace;
+	// nothing may remain.
 	rest := a11y
 	// Drop the multi-line comment that ends before the media query.
 	if i := strings.Index(rest, "/* the spatial-line slides are motion;"); i >= 0 {
@@ -1437,8 +1448,15 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 		}
 	}
 	rest = strings.Replace(rest, a11yMedia, "", 1)
+	// Drop the multi-line comment that precedes the :focus-visible rule.
+	if i := strings.Index(rest, "/* Keyboard focus"); i >= 0 {
+		if j := strings.Index(rest[i:], "*/"); j >= 0 {
+			rest = rest[:i] + rest[i+j+2:]
+		}
+	}
+	rest = strings.Replace(rest, a11yFocusRule, "", 1)
 	if strings.TrimSpace(rest) != "" {
-		t.Fatalf("accessibility.css must contain only the pane reduced-motion comment/block; residual %q", rest)
+		t.Fatalf("accessibility.css must contain only the pane reduced-motion and global :focus-visible comment/blocks; residual %q", rest)
 	}
 	// notes.css must not still hold the cross-component override.
 	if strings.Contains(notes, "#cards, #map, #bookmarkspane { transition: none; }") {
@@ -1670,5 +1688,27 @@ func TestProductionCSSFinalStateLinkedOnly(t *testing.T) {
 	wantCascade := strings.Join(parts, cssCascadeSeparator)
 	if cascade != wantCascade {
 		t.Fatalf("assembled cascade differs from linked-only concatenation (%d vs %d bytes)", len(cascade), len(wantCascade))
+	}
+}
+
+// TestProductionIndexHasNoInlineStyleAttributes closes the other half of the
+// linked-only contract. hasInlineStyle finds a <style> ELEMENT; it is blind to
+// a style="…" ATTRIBUTE, and six of those survived in index.html until P7 moved
+// them into the stylesheets that own their components. A style attribute beats
+// every linked rule short of !important, so it is invisible to the ownership
+// tests above and un-overridable by the cascade they check.
+//
+// Runtime inline styles set from JS (element.style.display, the pane widths)
+// are a different thing and stay allowed — they carry computed values that
+// cannot live in a stylesheet. This guards the static document only.
+func TestProductionIndexHasNoInlineStyleAttributes(t *testing.T) {
+	html := mustReadIndex(t)
+	for _, form := range []string{`style="`, "style='"} {
+		if i := strings.Index(html, form); i >= 0 {
+			line := 1 + strings.Count(html[:i], "\n")
+			end := i + strings.IndexAny(html[i:], ">\n")
+			t.Errorf("web/index.html:%d carries an inline style attribute — move it to the stylesheet that owns the component: %q",
+				line, html[i:end])
+		}
 	}
 }

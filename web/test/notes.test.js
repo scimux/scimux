@@ -750,6 +750,49 @@ test("noteCardHTML carries Rename + Delete card actions; delete is danger", () =
   assert.doesNotMatch(html, /<button class="wscard/);
 });
 
+/* P7: missing deps.esc / deps.md must fall back to the real escaper, never
+   identity. A caller that forgets deps used to get raw <script> into
+   innerHTML. Assert the escaped form is present so a merely-empty result
+   cannot pass. */
+test("HTML builders escape untrusted fields when deps are omitted", () => {
+  const x = "<script>alert(1)</script>";
+  const escaped = "&lt;script&gt;alert(1)&lt;/script&gt;";
+  const hasLiteralScript = html => html.includes("<script>");
+  const hasEscaped = html => html.includes(escaped);
+
+  const body = sectionBodyInner({ body: x, references: [] });
+  assert.equal(hasLiteralScript(body), false, "sectionBodyInner body");
+  assert.equal(hasEscaped(body), true, "sectionBodyInner body escaped");
+
+  const sec = sectionHTML({ id: x, title: x, body: x, references: [] }, false);
+  assert.equal(hasLiteralScript(sec), false, "sectionHTML");
+  assert.equal(hasEscaped(sec), true, "sectionHTML escaped");
+
+  const ref = referenceHTML({
+    id: x,
+    snapshot: { lane: x, station: x, speaker: x, time: "T", text: x },
+  });
+  assert.equal(hasLiteralScript(ref), false, "referenceHTML");
+  assert.equal(hasEscaped(ref), true, "referenceHTML escaped");
+
+  const card = noteCardHTML({ id: x, title: x, lanes: [x] }, null);
+  assert.equal(hasLiteralScript(card), false, "noteCardHTML");
+  assert.equal(hasEscaped(card), true, "noteCardHTML escaped");
+
+  const inbox = inboxItemHTML({ t: x, text: x, node: "n1" }, "var(--unlane)", {});
+  assert.equal(hasLiteralScript(inbox), false, "inboxItemHTML");
+  assert.equal(hasEscaped(inbox), true, "inboxItemHTML escaped");
+
+  /* md fallbacks: missing md must render as escaped plain text, not raw HTML. */
+  const bodyMd = sectionBodyInner({ body: x, references: [] }, {});
+  assert.equal(hasLiteralScript(bodyMd), false, "sectionBodyInner md fallback");
+  assert.equal(hasEscaped(bodyMd), true, "sectionBodyInner md escaped");
+
+  const refMd = referenceHTML({ id: "r", snapshot: { text: x } }, {});
+  assert.equal(hasLiteralScript(refMd), false, "referenceHTML md fallback");
+  assert.equal(hasEscaped(refMd), true, "referenceHTML md escaped");
+});
+
 test("noteCardDragEnabled is false while renaming", () => {
   assert.equal(noteCardDragEnabled(false), true);
   assert.equal(noteCardDragEnabled(true), false);

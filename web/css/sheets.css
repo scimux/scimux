@@ -13,7 +13,18 @@
 .sheet .grab { width: 36px; height: 5px; border-radius: 3px; background: var(--hairline);
   margin: 4px auto 14px; }
 .sheet h3 { margin: 0 0 2px; font-size: 20px; }
+/* send-to and card-actions titles are a step quieter than the default sheet h3 */
+#sendto_title, #ca_title { font-size: 17px; }
 .sheet .sect { margin-top: 16px; }
+/* secondary explainer copy inside a sheet (e.g. map-group filter note) */
+.sheet .sect.hint { color: var(--dim); font-size: 13px; }
+/* full-width left-aligned action row (card archive toggle) */
+#ca_arch { width: 100%; text-align: left; }
+/* map-group delete: hidden until openTabSheet sets display when editing */
+#tab_del {
+  display: none; width: 100%; margin-top: 10px; padding: 12px;
+  color: var(--bad); font-weight: 600;
+}
 /* the new-activity sheet doubles as the edit sheet (map pencil / long-press):
    in edit mode the immutable launch config + set-once lane are hidden */
 #newchat.editing .nc-create-only { display: none; }

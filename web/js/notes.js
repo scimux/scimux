@@ -584,8 +584,10 @@ export function createSaveEnqueue(){
 /* ---------- pure: HTML builders ---------- */
 
 export function sectionBodyInner(s, { md, esc, fmtWhen, icons } = {}){
-  const mdFn = md || (t => String(t ?? ""));
-  const escFn = esc || (t => String(t ?? ""));
+  /* Missing md/esc falls back to escDefault (escaped plain text), never
+     identity — raw interpolation into innerHTML is a latent XSS path. */
+  const mdFn = md || escDefault;
+  const escFn = esc || escDefault;
   const whenFn = fmtWhen || (t => String(t ?? ""));
   const ic = icons || {};
   const refs = (s.references || []).map(r => referenceHTML(r, { md: mdFn, esc: escFn, fmtWhen: whenFn, icons: ic })).join("");
@@ -594,7 +596,7 @@ export function sectionBodyInner(s, { md, esc, fmtWhen, icons } = {}){
 }
 
 export function sectionHTML(s, folded, deps = {}){
-  const esc = deps.esc || (t => String(t ?? ""));
+  const esc = deps.esc || escDefault;
   const icons = deps.icons || {};
   return `<div class="wssec ${folded ? "folded" : ""}" data-sec="${esc(s.id)}">
     <div class="wssechead">
@@ -608,8 +610,8 @@ export function sectionHTML(s, folded, deps = {}){
 }
 
 export function referenceHTML(r, deps = {}){
-  const esc = deps.esc || (t => String(t ?? ""));
-  const mdFn = deps.md || (t => String(t ?? ""));
+  const esc = deps.esc || escDefault;
+  const mdFn = deps.md || escDefault;
   const whenFn = deps.fmtWhen || (t => String(t ?? ""));
   const icons = deps.icons || {};
   const snap = r.snapshot || {};
@@ -663,7 +665,7 @@ export function noteCardKeySelects({ key, inTitleEdit, onAction, renaming } = {}
 }
 
 export function noteCardHTML(c, activeId, deps = {}){
-  const esc = deps.esc || (t => String(t ?? ""));
+  const esc = deps.esc || escDefault;
   const meta = deps.fmtNoteMeta || (() => "");
   const icons = deps.icons || {};
   const lanes = (c.lanes || []).map(col => `<i style="background:${esc(col)}"></i>`).join("");
@@ -715,8 +717,8 @@ export function inboxTabsHTML(tab, tabs, esc, laneColor){
    removed was a mode change (place into a section, then chase the chat); one
    tap that unfolds in place is not that. */
 export function inboxItemHTML(nt, color, deps = {}){
-  const esc = deps.esc || (t => String(t ?? ""));
-  const mdFn = deps.md || (t => String(t ?? ""));
+  const esc = deps.esc || escDefault;
+  const mdFn = deps.md || escDefault;
   const whenFn = deps.fmtWhen || (t => String(t ?? ""));
   const icons = deps.icons || {};
   const actions = deps.bookmarkActionsHTML || bookmarkActionsHTMLDefault;

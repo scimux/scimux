@@ -367,6 +367,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   border-right: 1px solid var(--hairline); }
 #wsnavhead { display: flex; align-items: center; justify-content: space-between;
   flex: none; padding: 12px 16px 8px; }
+#wsnavhead .spacer { flex: 1; }
 #wsnewnote { width: 30px; height: 30px; border-radius: 8px; color: var(--work);
   display: inline-flex; align-items: center; justify-content: center; }
 #wsnewnote:active { background: var(--code-bg); }

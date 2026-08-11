@@ -4,3 +4,13 @@
 @media (prefers-reduced-motion: reduce) {
   #cards, #map, #bookmarkspane { transition: none; }
 }
+
+/* Keyboard focus ring (P7 / WCAG 2.4.7). Last in the cascade so it beats the
+   outline:none declarations on custom-styled controls. :focus-visible only —
+   mouse clicks stay outline-free. Bare :focus-visible is (0,1,0); the divider
+   rules (.wsdivider:focus-visible (0,2,0), #mapdivider:focus-visible (1,1,0))
+   still win and keep their own ring without doubling. */
+:focus-visible {
+  outline: 2px solid var(--work);
+  outline-offset: 2px;
+}

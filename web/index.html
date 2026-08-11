@@ -259,7 +259,7 @@
       <div id="wsnav" role="region" aria-label="Notes">
         <div id="wsnavhead" class="columnhead">
           <span>Notes</span>
-          <span class="spacer" style="flex:1"></span>
+          <span class="spacer"></span>
           <button id="wsnewnote" aria-label="new note" title="New note"></button>
         </div>
         <div id="wscards"><div class="empty">loading…</div></div>
@@ -344,7 +344,7 @@
      both fill it; only the title differs. Targets are live, open chats only. -->
 <div class="sheet" id="sendto">
   <div class="grab"></div>
-  <h3 style="font-size:17px" id="sendto_title">Send to&#8230;</h3>
+  <h3 id="sendto_title">Send to&#8230;</h3>
   <div class="sect" id="sendto_list"></div>
 </div>
 
@@ -359,9 +359,9 @@
 <!-- card actions (long-press a card): archive in/out of the current stack -->
 <div class="sheet" id="cardact">
   <div class="grab"></div>
-  <h3 style="font-size:17px" id="ca_title"></h3>
+  <h3 id="ca_title"></h3>
   <div class="sect">
-    <button class="pos-item" id="ca_arch" style="width:100%;text-align:left"><span></span></button>
+    <button class="pos-item" id="ca_arch"><span></span></button>
   </div>
 </div>
 
@@ -371,13 +371,12 @@
   <h3 id="tab_head">New map</h3>
   <div class="sect"><div class="k">Name</div><input id="tab_name" placeholder="e.g. automotive"></div>
   <div class="sect"><div class="k">Journeys on this map</div><div id="tab_lanes"></div></div>
-  <div class="sect" style="color:var(--dim);font-size:13px">
+  <div class="sect hint">
     Maps are a viewing filter &#8212; an empty map is fine, and removing a map
     never touches the journeys.
   </div>
   <button class="cta" id="tab_save">Add map</button>
-  <button id="tab_del" style="display:none;width:100%;margin-top:10px;padding:12px;
-    color:var(--bad);font-weight:600">Delete map (journeys stay)</button>
+  <button id="tab_del">Delete map (journeys stay)</button>
 </div>
 
 <!-- burger menu -->
