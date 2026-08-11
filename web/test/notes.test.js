@@ -713,14 +713,13 @@ test("inbox lane tabs, resolve, list order, HTML", () => {
 
   const item = inboxItemHTML({ t: "1", text: "hi", node: "n1" }, "var(--unlane)",
     { ...deps, open: true });
-  /* P3: inbox bar is jump · copy · note · more; sendto/del live in the menu */
+  /* P5: inbox flat bar is jump · copy · note · sendto · del */
   assert.match(item, /class="actionbar tear"/);
-  for (const act of ["jump", "copy", "note", "more"]) {
+  for (const act of ["jump", "copy", "note", "sendto", "del"]) {
     assert.match(item, new RegExp(`data-bmact="${act}"`), act);
   }
   assert.doesNotMatch(item, /data-bmact="comment"/);
-  assert.doesNotMatch(item, /data-bmact="sendto"/);
-  assert.doesNotMatch(item, /data-bmact="del"/);
+  assert.doesNotMatch(item, /data-bmact="more"/);
 });
 
 test("bookmarkClampState reused at inbox/reference boundaries", () => {

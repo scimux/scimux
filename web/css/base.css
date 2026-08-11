@@ -46,12 +46,24 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 /* ---------- action bar: one geometry for every per-item action row ----------
    The Bookmarks pane used 44x40, the in-section reference card 30x28 — two
    sizes for the same five verbs, and both under the 44pt minimum touch target
-   (UI review items 8 + 9). One class now, and the buttons are *distributed*
-   rather than clumped left or centred: that is the HIG toolbar idiom, and it
-   keeps each target's slack area away from its neighbour's. */
+   (UI review items 8 + 9). One class now.
+
+   Phone (default): buttons are *distributed* rather than clumped left or
+   centred — the HIG toolbar idiom on a full-width card, and it keeps each
+   target's slack area away from its neighbour's.
+
+   Desktop (≥900px = isDesktop()): the Bookmarks pane, notes zone-1, and
+   section cards are far wider than N×44px, so space-between marooned icons
+   across a gap. Override to a leading-edge cluster; leave the base rule
+   alone so the phone contract stays true (P5). flex-start (not start): the
+   codebase already uses the flex-prefixed alignment keywords, and flex-start
+   is unambiguous on the main axis without depending on writing-mode. */
 .actionbar { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
 .actionbar button { width: 44px; height: 44px; padding: 0; flex: none; }
 .actionbar button svg { width: 15px; height: 15px; }
+@media (min-width: 900px) {
+  .actionbar { justify-content: flex-start; }
+}
 
 /* ---------- round overlay actions: one shape for a list row's verbs ----------
    A list row's actions float over its trailing edge as a cluster of circular

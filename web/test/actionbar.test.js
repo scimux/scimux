@@ -175,30 +175,193 @@ function ruleBody(css, selectorRe){
 }
 
 /* ================================================================
- * P3 compositions — each surface's exact bar and menu, in order
+ * P5 — flat bar (no more), delete confirms; phone keeps overflow
  * ================================================================ */
 
-test("P3 1: pane bookmark bar is jump · comment · note · more (default, comment available)", () => {
+test("P5 flat: bookmarkActionsHTML emits every action inline, no more button", () => {
+  const pane = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true },
+  );
+  assert.deepEqual(visibleBmActs(pane),
+    ["jump", "comment", "note", "copy", "sendto", "del"]);
+  assert.doesNotMatch(pane, /data-bmact="more"/);
+
+  const inbox = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "inbox" },
+  );
+  assert.deepEqual(visibleBmActs(inbox),
+    ["jump", "copy", "note", "sendto", "del"]);
+  assert.doesNotMatch(inbox, /data-bmact="more"/);
+});
+
+test("P5 flat: Delete is last, .danger, and data-bmact=del is unchanged for dispatch", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" },
     { icons: ICONS, context: "pane", workspaceOpen: true },
   );
   const acts = visibleBmActs(html);
-  assert.deepEqual(acts, ["jump", "comment", "note", "more"]);
-  for (const gone of ["copy", "sendto", "del"])
-    assert.ok(!acts.includes(gone), `${gone} belongs in the overflow menu, not the pane bar`);
+  assert.equal(acts[acts.length - 1], "del");
+  assert.match(
+    html,
+    /data-bmact="del"[^>]*class="[^"]*danger|class="[^"]*danger[^"]*"[^>]*data-bmact="del"/,
+  );
+  /* same action string the existing click handler already keys on */
+  assert.match(bookmarksSrc, /bmact === "del"|dataset\.bmact === "del"/);
+});
+
+test("P5 width: phone overflow mode keeps today's more menu (6×44 would not fit)", () => {
+  /* Max flat row: 6×44 + 5×4 gap = 284px. Phone Bookmarks pane content on a
+     320px SE is ~232px — overflow. overflow:true keeps the pre-P5 bar. */
+  const pane = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true, overflow: true },
+  );
+  assert.deepEqual(visibleBmActs(pane), ["jump", "comment", "note", "more"]);
+  const inbox = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "inbox", overflow: true },
+  );
+  assert.deepEqual(visibleBmActs(inbox), ["jump", "copy", "note", "more"]);
+});
+
+test("P5 flat: inline Delete opens confirm; only ok fires bookmark-del", async () => {
+  const roots = {
+    bookmarkspane: el("section", { id: "bookmarkspane" }),
+    bookmarktabs: el("div"),
+    bookmarklist: el("div", { id: "bookmarklist" }),
+    bookmarkflags: el("div"),
+    bookmarksbtn: el("button"),
+    bookmarksback: el("button"),
+    notesbtn: el("button"),
+    bookmarkpeek: el("div"),
+    bookmarkbar: el("div"),
+    bookmarkchip: el("div", { hidden: true }),
+    bookmarkchiptext: el("span"),
+    bookmarkchipx: el("button"),
+    bookmarkprompt: el("div"),
+    bookmarksend: el("button"),
+  };
+  roots.bookmarkprompt.dataset = {};
+  roots.bookmarkspane.getBoundingClientRect = () =>
+    ({ top: 0, left: 0, width: 400, height: 600, right: 400, bottom: 600 });
+
+  const docListeners = {};
+  const document = {
+    body: el("body"),
+    activeElement: null,
+    contains: () => true,
+    createElement: tag => el(tag),
+    querySelector: () => null,
+    addEventListener(type, fn){
+      (docListeners[type] || (docListeners[type] = [])).push(fn);
+    },
+    removeEventListener(type, fn){
+      if (!docListeners[type]) return;
+      docListeners[type] = docListeners[type].filter(f => f !== fn);
+    },
+  };
+
+  const ops = [];
+  const bms = [{ t: "1", text: "hello", node: "n1" }];
+  const feature = createBookmarksFeature({
+    roots,
+    document,
+    storage: makeStorage(),
+    setTimeout: () => 0, clearTimeout: () => {},
+    esc: s => s, md: s => s, fmtWhen: s => s, hashStr: s => s,
+    icons: ICONS,
+    bookmarks: () => bms,
+    uiMutate: op => ops.push(op),
+    nodeById: () => ({ id: "n1", title: "A" }),
+    laneList: () => [], laneColor: () => "",
+    laneModel: () => ({ color: () => "" }),
+    orderedNodes: () => [], pinned: () => [],
+    isDesktop: () => true,
+    CSS: { escape: s => s },
+  });
+  feature.bind();
+
+  const card = el("div", { className: "bookmark", dataset: { t: "1" } });
+  card.dataset.t = "1";
+  const delBtn = el("button", { className: "btn-plain danger", dataset: { bmact: "del" } });
+  delBtn.dataset.bmact = "del";
+  delBtn.closest = sel => {
+    for (const part of String(sel).split(",").map(s => s.trim())){
+      if (part === "[data-bmact]" || part === '[data-bmact="del"]') return delBtn;
+      if (part === ".bookmark") return card;
+      if (part === ".actionbar") return el("div", { className: "actionbar" });
+    }
+    return null;
+  };
+  delBtn.getBoundingClientRect = () =>
+    ({ top: 100, left: 100, bottom: 144, right: 144, width: 44, height: 44 });
+
+  roots.bookmarkspane.dispatch("click", { target: delBtn });
+  await Promise.resolve();
+
+  const menu = roots.bookmarkspane.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(menu, "confirm popover must open on bar delete");
+  assert.match(menu.className, /wsconfirm/, "reuse the openDeleteConfirm shell");
+  assert.equal(ops.length, 0, "bookmark-del must not fire before ok");
+
+  /* opening tap must not dismiss (same seam as reference trash) */
+  (docListeners.click || []).forEach(fn => fn({ target: delBtn }));
+  assert.ok(
+    roots.bookmarkspane.children.some(c => (c.className || "").includes("popmenu")),
+    "the opening tap must not dismiss the confirm it just opened",
+  );
+
+  const cancel = el("button", { dataset: { wconfirm: "cancel" } });
+  cancel.dataset.wconfirm = "cancel";
+  cancel.closest = sel => (sel === "[data-wconfirm]" ? cancel : null);
+  menu.dispatch("click", { target: cancel });
+  await Promise.resolve();
+  assert.equal(ops.length, 0, "cancel must not delete");
+
+  roots.bookmarkspane.dispatch("click", { target: delBtn });
+  await Promise.resolve();
+  const menu2 = roots.bookmarkspane.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(menu2, "confirm re-opens");
+  const ok = el("button", { dataset: { wconfirm: "ok" } });
+  ok.dataset.wconfirm = "ok";
+  ok.closest = sel => (sel === "[data-wconfirm]" ? ok : null);
+  menu2.dispatch("click", { target: ok });
+  await Promise.resolve();
+  assert.ok(
+    ops.some(o => o.k === "bookmark-del" && o.t === "1"),
+    "ok must fire bookmark-del",
+  );
+  assert.doesNotMatch(bookmarksSrc, /window\.confirm\s*\(/);
+});
+
+/* ================================================================
+ * P3 compositions — each surface's exact bar and menu, in order
+ * ================================================================ */
+
+/* P5: overflow menu flattened onto the bar (desktop default). Former menu
+   entries append rightward in menu order; Delete is last and .danger. */
+test("P3 1: pane bookmark bar is jump · comment · note · copy · sendto · del (default, comment available)", () => {
+  const html = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true },
+  );
+  const acts = visibleBmActs(html);
+  assert.deepEqual(acts, ["jump", "comment", "note", "copy", "sendto", "del"]);
+  assert.ok(!acts.includes("more"), "P5: more overflow is gone from the flat bar");
   assert.match(html, /class="actionbar tear"/);
 });
 
-test("P3 2: inbox bookmark bar is jump · copy · note · more", () => {
+test("P3 2: inbox bookmark bar is jump · copy · note · sendto · del", () => {
   const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" },
     { icons: ICONS, context: "inbox" },
   );
   const acts = visibleBmActs(html);
-  assert.deepEqual(acts, ["jump", "copy", "note", "more"]);
-  for (const gone of ["comment", "sendto", "del"])
-    assert.ok(!acts.includes(gone), `${gone} must not be visible on the inbox bar`);
+  assert.deepEqual(acts, ["jump", "copy", "note", "sendto", "del"]);
+  assert.ok(!acts.includes("comment"), "comment composer is pane-only");
+  assert.ok(!acts.includes("more"), "P5: more overflow is gone from the flat bar");
 });
 
 test("P3 3: section reference bar is jump · copy · sendto · trash (no more)", () => {
@@ -218,48 +381,52 @@ test("P3 3: section reference bar is jump · copy · sendto · trash (no more)",
   assert.doesNotMatch(html, /data-refact="more"[^>]*data-refmore|data-refmore[^>]*data-refact="more"/);
 });
 
-test("P3 4: pane menu is copy · sendto · del when comment is on the bar", () => {
-  assert.equal(typeof bookmarksMod.bookmarkMenuHTML, "function",
-    "bookmarkMenuHTML must be exported from bookmarks.js");
-  const html = bookmarksMod.bookmarkMenuHTML(
+test("P3 4: pane flat bar includes former menu items copy · sendto · del after the primaries", () => {
+  /* Was: pane menu is copy · sendto · del when comment is on the bar.
+     P5: those menu entries are now on the bar itself, in the same order. */
+  const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" },
-    { icons: ICONS, context: "pane" },
+    { icons: ICONS, context: "pane", workspaceOpen: true },
   );
   const acts = visibleBmActs(html);
-  assert.deepEqual(acts, ["copy", "sendto", "del"]);
-  assert.ok(!acts.includes("comment"), "comment is on the bar, not the menu");
+  const copyIdx = acts.indexOf("copy");
+  const sendIdx = acts.indexOf("sendto");
+  const delIdx = acts.indexOf("del");
+  assert.ok(copyIdx >= 0 && sendIdx === copyIdx + 1 && delIdx === sendIdx + 1,
+    "former menu order preserved as a trailing block on the bar");
+  assert.ok(!acts.includes("more"));
+  assert.ok(!acts.includes("comment") || acts.indexOf("comment") < copyIdx,
+    "comment stays among the primaries, before the former menu block");
 });
 
-test("P3 5: inbox menu is sendto · del (no copy — copy is on the bar)", () => {
-  assert.equal(typeof bookmarksMod.bookmarkMenuHTML, "function");
-  const html = bookmarksMod.bookmarkMenuHTML(
+test("P3 5: inbox flat bar appends sendto · del (copy stays primary, not duplicated)", () => {
+  /* Was: inbox menu is sendto · del (copy already on the bar).
+     P5: sendto · del join the bar; copy appears exactly once. */
+  const html = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" },
     { icons: ICONS, context: "inbox" },
   );
   const acts = visibleBmActs(html);
-  assert.deepEqual(acts, ["sendto", "del"]);
+  assert.deepEqual(acts, ["jump", "copy", "note", "sendto", "del"]);
+  assert.equal(acts.filter(a => a === "copy").length, 1, "no-duplicate copy");
   assert.ok(!acts.includes("comment"), "comment composer is pane-only");
-  assert.ok(!acts.includes("copy"), "copy is already on the inbox bar");
 });
 
-test("P3 6: when Comment is withheld, pane bar promotes Copy and drops it from the menu", () => {
-  /* comment withheld: comment rows (nt.anchor) and bookmarks with no node */
+test("P3 6: when Comment is withheld, pane bar promotes Copy once and still has no hole", () => {
+  /* comment withheld: comment rows (nt.anchor) and bookmarks with no node.
+     Was: bar jump·copy·note·more and menu sendto·del.
+     P5: bar jump·copy·note·sendto·del — copy exactly once, no more. */
   for (const nt of [
     { t: "2", text: "x", node: "n1", anchor: "1" },
     { t: "3", text: "orphan", uid: "u1" },
   ]){
     const bar = visibleBmActs(bookmarkActionsHTML(
       nt, { icons: ICONS, context: "pane", workspaceOpen: true }));
-    assert.deepEqual(bar, ["jump", "copy", "note", "more"],
+    assert.deepEqual(bar, ["jump", "copy", "note", "sendto", "del"],
       `bar promotes copy when comment withheld (${nt.t})`);
     assert.ok(!bar.includes("comment"));
-
-    const menu = visibleBmActs(bookmarksMod.bookmarkMenuHTML(
-      nt, { icons: ICONS, context: "pane" }));
-    assert.deepEqual(menu, ["sendto", "del"],
-      `menu drops copy when it is on the bar (${nt.t})`);
-    assert.ok(!menu.includes("copy"));
-    assert.ok(!menu.includes("comment"));
+    assert.ok(!bar.includes("more"));
+    assert.equal(bar.filter(a => a === "copy").length, 1, "no-duplicate copy");
   }
 });
 
@@ -537,13 +704,15 @@ test("P3 10: .rot180 and .rot90l apply outside .bubactions; duplicate is gone", 
  * Send-to still dispatches (composition moved it; behaviour unchanged)
  * ================================================================ */
 
-test("P3 sendto: pane/inbox menus and reference bar still carry sendto dispatch", () => {
-  const paneMenu = bookmarksMod.bookmarkMenuHTML(
-    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane" });
-  assert.match(paneMenu, /data-bmact="sendto"/);
-  const inboxMenu = bookmarksMod.bookmarkMenuHTML(
+test("P3 sendto: pane/inbox bars and reference bar still carry sendto dispatch", () => {
+  /* Was: pane/inbox menus carry sendto. P5: sendto lives on the flat bars. */
+  const paneBar = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true });
+  assert.match(paneBar, /data-bmact="sendto"/);
+  const inboxBar = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
-  assert.match(inboxMenu, /data-bmact="sendto"/);
+  assert.match(inboxBar, /data-bmact="sendto"/);
   const ref = referenceHTML(
     { id: "r1", snapshot: { text: "ref body", lane: "#0", station: "", speaker: "", time: "" } },
     { esc: s => s, md: s => s, fmtWhen: s => s, icons: ICONS },
@@ -569,26 +738,29 @@ test("P3 sendto: notes wires openSendTo via deps (never imports the picker)", ()
  * Destructive is .danger, last, after .sep — bookmark menus
  * ================================================================ */
 
-test("P3: pane/inbox Delete is .danger, last, after .sep (coupled to data-bmact=del)", () => {
-  assert.equal(typeof bookmarksMod.bookmarkMenuHTML, "function");
+test("P3: pane/inbox Delete is .danger, last on the flat bar (coupled to data-bmact=del)", () => {
+  /* Was: del is .danger, last, after .sep in the overflow menu.
+     P5: del is on the bar, still .danger and still last (no .sep on a toolbar). */
   for (const context of ["pane", "inbox"]){
-    const html = bookmarksMod.bookmarkMenuHTML(
+    const html = bookmarkActionsHTML(
       { t: "1", text: "x", node: "n1" },
-      { icons: ICONS, context },
+      { icons: ICONS, context, workspaceOpen: true },
     );
     assert.match(
       html,
       /data-bmact="del"[^>]*class="[^"]*danger|class="[^"]*danger[^"]*"[^>]*data-bmact="del"/,
       `${context}: danger must ride on the del button, not a sibling`,
     );
-    const sepIdx = html.indexOf('class="sep"');
-    assert.ok(sepIdx >= 0, `${context}: separator present`);
-    const delIdx = html.indexOf('data-bmact="del"');
-    assert.ok(delIdx > sepIdx, `${context}: del follows the separator`);
+    const acts = visibleBmActs(html);
+    assert.equal(acts[acts.length - 1], "del", `${context}: del is last`);
     const lastBtn = html.lastIndexOf("<button");
-    assert.ok(lastBtn > sepIdx);
     assert.match(html.slice(lastBtn), /data-bmact="del"/);
     assert.match(html.slice(lastBtn), /danger/);
+    /* only del is red on the bar */
+    const red = [...html.matchAll(/<button([^>]*)>/g)]
+      .filter(m => /class="[^"]*danger/.test(m[1]))
+      .map(m => (m[1].match(/data-bmact="([^"]+)"/) || [])[1]);
+    assert.deepEqual(red, ["del"], `${context}: only del carries .danger`);
   }
 });
 
@@ -715,7 +887,7 @@ test("P6 12: canPlace / context semantics unchanged (regression lock)", () => {
   assert.ok(!multi.includes('data-bmact="note"'));
 });
 
-test("P3: comment stays pane-only and is withheld from comments (bar + menu)", () => {
+test("P3: comment stays pane-only and is withheld from comments (flat bar)", () => {
   /* With comment on the bar, the no-nesting rule lives in the bar builder too. */
   const paneBar = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane", workspaceOpen: true });
@@ -727,9 +899,6 @@ test("P3: comment stays pane-only and is withheld from comments (bar + menu)", (
   const inboxBar = bookmarkActionsHTML(
     { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
   assert.doesNotMatch(inboxBar, /data-bmact="comment"/);
-  const inboxMenu = bookmarksMod.bookmarkMenuHTML(
-    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "inbox" });
-  assert.doesNotMatch(inboxMenu, /data-bmact="comment"/);
 });
 
 /* ================================================================
@@ -795,10 +964,11 @@ test("P6 collision 1: data-refmore remains the clamp; no data-refact=more collis
  * Name collision 2 — menu items reuse data-bmact (bookmark menus)
  * ================================================================ */
 
-test("P6 collision 2: overflow menu items reuse data-bmact for dispatch", () => {
-  assert.equal(typeof bookmarksMod.bookmarkMenuHTML, "function");
-  const bm = bookmarksMod.bookmarkMenuHTML(
-    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane" });
+test("P6 collision 2: flat bar items reuse data-bmact for dispatch", () => {
+  /* Was: overflow menu items reuse data-bmact. P5: same actions on the bar. */
+  const bm = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true });
   assert.match(bm, /data-bmact="copy"/);
   assert.match(bm, /data-bmact="sendto"/);
   assert.match(bm, /data-bmact="del"/);
@@ -848,12 +1018,15 @@ test("P6: bars stay tap-to-reveal (closed row has no actionbar)", () => {
  * Menu items built via menuButtonHTML / menuSepHTML
  * ================================================================ */
 
-test("P6: overflow menus are built with menuButtonHTML + menuSepHTML", () => {
-  assert.match(bookmarksSrc, /menuButtonHTML/);
-  assert.match(bookmarksSrc, /menuSepHTML/);
-  /* reference overflow is gone; bookmark menus (pane + inbox) still use the helpers */
+test("P6: menu helpers stay available (confirm / other popovers); flat bar needs no overflow menu", () => {
+  /* P5: bookmark overflow menu is gone from the flat bar; menuButtonHTML /
+     menuSepHTML remain for other popovers (confirm shells, section menus). */
   assert.equal(typeof menuMod.menuButtonHTML, "function");
   assert.equal(typeof menuMod.menuSepHTML, "function");
+  assert.ok(!visibleBmActs(bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true },
+  )).includes("more"));
 });
 
 /* bubbleActionsHTML is NOT restructured (fence) */
@@ -871,12 +1044,14 @@ test("P6 fence: bubbleActionsHTML is not restructured", () => {
  * ================================================================ */
 
 test("P6 review: only the destructive item carries .danger", () => {
-  const bm = bookmarksMod.bookmarkMenuHTML(
-    { t: "1", text: "x", node: "n1" }, { icons: ICONS, context: "pane" });
-  const redBm = [...bm.matchAll(/<button([^>]*)class="danger"/g)]
+  const bm = bookmarkActionsHTML(
+    { t: "1", text: "x", node: "n1" },
+    { icons: ICONS, context: "pane", workspaceOpen: true });
+  const redBm = [...bm.matchAll(/<button([^>]*)>/g)]
+    .filter(m => /class="[^"]*danger/.test(m[1]))
     .map(m => (m[1].match(/data-bmact="([^"]+)"/) || [])[1]);
   assert.deepEqual(redBm, ["del"],
-    "exactly one .danger item in the bookmark menu, and it is del");
+    "exactly one .danger item on the bookmark bar, and it is del");
 
   const ref = referenceHTML(
     { id: "r1", snapshot: { text: "x", lane: "#0", station: "", speaker: "", time: "" } },

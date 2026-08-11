@@ -127,6 +127,13 @@ func TestControlLadderIsNamedAndApplied(t *testing.T) {
 // One action-bar geometry, used by every per-item action row. Before this round
 // the Bookmarks pane used 44x40 and the in-section reference card used 30x28 —
 // visibly different, and both under the 44pt HIG minimum touch target.
+//
+// Phone (default): space-between distributes a short row of 44px targets across
+// a full-width card — the HIG toolbar idiom that keeps each target's slack away
+// from its neighbour. Desktop (≥900px, matching isDesktop()): the Bookmarks
+// pane and notes zone-1 are far wider than N×44px, so the same rule marooned
+// icons at both edges. Override to a leading-edge cluster there; do not drop
+// space-between from the base rule (P5).
 func TestActionBarGeometryIsSharedAndMeetsTouchMinimum(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 
@@ -134,10 +141,53 @@ func TestActionBarGeometryIsSharedAndMeetsTouchMinimum(t *testing.T) {
 	if !strings.Contains(bar, "display: flex") {
 		t.Errorf(".actionbar must be a flex row; got %q", bar)
 	}
-	// HIG toolbars distribute their items across the container rather than
-	// clumping them left (the old behaviour) or centred (item 8's first guess).
+	// Phone contract: HIG toolbars distribute items across the full-width card.
 	if !strings.Contains(bar, "justify-content: space-between") {
-		t.Errorf(".actionbar must distribute its buttons across the card, the HIG toolbar idiom; got %q", bar)
+		t.Errorf(".actionbar base rule must keep space-between (phone toolbar); got %q", bar)
+	}
+
+	// Desktop override: cluster at the leading edge so wide columns do not
+	// stretch three or four icons across a gap. Scoped to the same 900px
+	// breakpoint as isDesktop() — do not invent a new one.
+	desktopMedia := "@media (min-width: 900px)"
+	di := strings.Index(css, desktopMedia)
+	if di < 0 {
+		t.Fatal("desktop actionbar override needs @media (min-width: 900px) (matches isDesktop)")
+	}
+	// Prefer a block that actually re-declares .actionbar; fall back to any
+	// 900px media if several exist (layout/notes also use the breakpoint).
+	rest := css[di:]
+	// Walk every min-width:900px media and accept if any clusters .actionbar.
+	foundCluster := false
+	for {
+		mi := strings.Index(rest, desktopMedia)
+		if mi < 0 {
+			break
+		}
+		chunk := rest[mi:]
+		// Limit to this media query's opening brace region roughly: find the
+		// first .actionbar rule after the media marker and check its body.
+		ai := strings.Index(chunk, ".actionbar {")
+		if ai >= 0 {
+			// Ensure the .actionbar we found is still inside this @media: no
+			// closing of the media before it at depth 0 is hard; instead require
+			// the justify-content override appears near .actionbar within the
+			// same short window (the override is a one-line rule).
+			window := chunk[ai:]
+			if len(window) > 200 {
+				window = window[:200]
+			}
+			if strings.Contains(window, "justify-content: flex-start") ||
+				strings.Contains(window, "justify-content: start") {
+				foundCluster = true
+				break
+			}
+		}
+		rest = rest[mi+len(desktopMedia):]
+	}
+	if !foundCluster {
+		t.Error("desktop @media (min-width: 900px) must override .actionbar to " +
+			"justify-content: flex-start (or start) so icons cluster at the leading edge")
 	}
 
 	btn := cssBlock(t, css, ".actionbar button")

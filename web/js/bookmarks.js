@@ -215,7 +215,7 @@ export function bookmarkListHTML(opts){
   const {
     list, bookmarkTab, openBookmarkT,
     nodeById, esc, md, fmtWhen, laneColor, icons = {},
-    workspaceOpen = false, singleZone = false,
+    workspaceOpen = false, singleZone = false, overflow = false,
   } = opts || {};
   const e = esc || (s => String(s ?? ""));
   const renderMd = md || (s => String(s ?? ""));
@@ -234,21 +234,29 @@ export function bookmarkListHTML(opts){
       <div class="nbubble" style="border-left-color:${color}">${renderMd(nt.text || "")}</div>
       <button class="nmore" data-nmore hidden></button>
       ${openBookmarkT === nt.t
-        ? bookmarkActionsHTML(nt, { icons, context: "pane", workspaceOpen, singleZone }) : ""}
+        ? bookmarkActionsHTML(nt, { icons, context: "pane", workspaceOpen, singleZone, overflow }) : ""}
     </div>`;
   }).join("");
 }
 
 /* The one action row a bookmark gets, wherever it is shown (UI review items
-   5, 6, 8, 9 + P6). Both the compact Bookmarks pane and the Notes workspace
-   inbox render this, so the two can no longer drift apart in geometry, order,
-   or which actions exist at all.
+   5, 6, 8, 9 + P6 + P5). Both the compact Bookmarks pane and the Notes
+   workspace inbox render this, so the two can no longer drift apart in
+   geometry, order, or which actions exist at all.
 
-   P6 grammar (icon-only): three primaries + overflow menu trigger
-     [open in chat] [send to…] [use in note] [⋯ …]
-   Secondary items (comment, copy, Delete) live in bookmarkMenuHTML. Comment
-   is still pane-only (its reply composer lives only there) and still withheld
-   from comments (no nesting) — those gates move into the menu builder.
+   P5 grammar (icon-only, flat by default):
+     pane:  [jump] [comment|copy] [note?] [copy?] [sendto] [del.danger]
+     inbox: [jump] [copy] [note] [sendto] [del.danger]
+   Former overflow-menu entries append rightward in menu order. Delete is
+   last and .danger; the click handler confirms before firing (like .wsref
+   trash). Comment is still pane-only and withheld from comments (no nesting);
+   when withheld, Copy takes its primary slot and is not duplicated later.
+
+   Width guard (`overflow: true`): max flat row is 6×44 + 5×4 gap = 284px.
+   Phone Bookmarks pane content on a 320px SE is ~232px, so a 6-button row
+   would clip inside overflow:hidden cards. Call sites pass overflow when
+   !isDesktop() to keep today's more-menu bar on narrow widths. Desktop
+   (`var(--pane)` 340px content ~296px) fits the flat row with flex-start.
 
    "use in note" is withheld from the pane while the Notes workspace is closed
    (review 2, item 4): it arms placement mode, whose only targets are the
@@ -261,26 +269,47 @@ export function bookmarkListHTML(opts){
 export function bookmarkActionsHTML(nt, opts){
   const {
     icons = {}, context = "pane", workspaceOpen = false, singleZone = false,
+    overflow = false,
   } = opts || {};
   const canPlace = context === "inbox" || workspaceOpen || singleZone;
   /* Comment is pane-only and withheld on comment rows (no nesting) and when
-     the bookmark has no node. When withheld, promote Copy into the bar so it
-     never has a hole and no action appears twice. */
+     the bookmark has no node. When withheld, promote Copy into the primary
+     slot so it never has a hole and no action appears twice. */
   const canComment = context === "pane" && !!(nt && nt.node && !nt.anchor);
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
-  return `<div class="actionbar tear">
+  const into = icons.ICON_INTO
+    ? `<span class="rot180">${icons.ICON_INTO}</span>`
+    : "";
+
+  /* Phone / narrow: keep the pre-P5 bar so 6×44 never clips the card. */
+  if (overflow){
+    return `<div class="actionbar tear">
         ${nt.node || nt.uid ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
         ${canComment ? b("comment", "comment", icons.ICON_COMMENT) : b("copy", "copy", icons.ICON_COPY)}
         ${canPlace ? b("note", "use in note", icons.ICON_CLIP) : ""}
         ${b("more", "more actions", icons.ICON_MENU_DOTS)}
       </div>`;
+  }
+
+  /* Flat (default / desktop): primaries, then former menu entries in order. */
+  let html = `<div class="actionbar tear">`;
+  if (nt && (nt.node || nt.uid)) html += b("jump", "open in activity", icons.ICON_JUMP);
+  if (canComment) html += b("comment", "comment", icons.ICON_COMMENT);
+  else html += b("copy", "copy", icons.ICON_COPY);
+  if (canPlace) html += b("note", "use in note", icons.ICON_CLIP);
+  /* Topmost menu entry → next right: copy only when it was not the primary. */
+  if (canComment) html += b("copy", "copy", icons.ICON_COPY);
+  html += b("sendto", "send to\u2026", into);
+  html += b("del", "delete", icons.ICON_TRASH, " danger");
+  html += `</div>`;
+  return html;
 }
 
-/** Overflow menu for a bookmark row. Menu items reuse data-bmact so the same
-    dispatch handles bar and menu. Destructive Delete is last, .danger, after
-    a separator (HIG). Copy is omitted when already on the bar (Comment
-    withheld). Send to lives here for pane and inbox. */
+/** Overflow menu for a bookmark row when the bar uses overflow:true (phone).
+    Menu items reuse data-bmact so the same dispatch handles bar and menu.
+    Destructive Delete is last, .danger, after a separator (HIG). Copy is
+    omitted when already on the bar (Comment withheld). */
 export function bookmarkMenuHTML(nt, opts){
   const { icons = {}, context = "pane" } = opts || {};
   const canComment = context === "pane" && !!(nt && nt.node && !nt.anchor);
@@ -513,6 +542,9 @@ export function createBookmarksFeature(deps){
          except on the single-zone phone layout where it is the way in */
       workspaceOpen: typeof d.wsOpen === "function" && d.wsOpen(),
       singleZone: typeof d.singleZone === "function" && d.singleZone(),
+      /* P5 width guard: flat 6×44 row does not fit phone pane content;
+         keep the more-menu bar below the isDesktop() breakpoint. */
+      overflow: typeof d.isDesktop === "function" ? !d.isDesktop() : false,
     });
     const sig = hashStr(tabsHtml + "|" + listHtml);
     if (sig === bookmarksSig) return;
@@ -698,6 +730,13 @@ export function createBookmarksFeature(deps){
         }
       } else if (act.dataset.bmact === "del"){
         popMenu.close();
+        /* Flat bar (toolbar): confirm first, like .wsref trash. Overflow menu
+           already put Delete behind "more", so that path stays one-tap. */
+        const onBar = !!(act.closest && act.closest(".actionbar"));
+        if (onBar){
+          openDeleteBookmarkConfirm(act, nt);
+          return;
+        }
         openBookmarkT = "";
         if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-del", t: nt.t });
       }
@@ -845,8 +884,38 @@ export function createBookmarksFeature(deps){
     });
   }
 
+  /** Confirm before deleting from the flat toolbar (HIG; no window.confirm —
+      blocked in iOS PWA). Reuses the openDeleteConfirm shell (popMenu,
+      className "popmenu wsconfirm", offset 40, data-wconfirm). */
+  function openDeleteBookmarkConfirm(anchor, nt){
+    if (!nt) return;
+    menuBookmarkT = nt.t;
+    const panel = roots.bookmarkspane || (doc && doc.body);
+    popMenu.open({
+      panel,
+      anchor: anchor || null,
+      trigger: anchor || null,
+      offset: 40,
+      className: "popmenu wsconfirm",
+      html:
+        `<div class="wsconfirmmsg">Delete bookmark?</div>` +
+        `<button type="button" data-wconfirm="cancel">Cancel</button>` +
+        `<button type="button" data-wconfirm="ok" class="danger">Delete</button>`,
+      onClick: ev => {
+        const btn = ev.target.closest && ev.target.closest("[data-wconfirm]");
+        if (!btn) return;
+        popMenu.close();
+        if (btn.dataset.wconfirm !== "ok") return;
+        openBookmarkT = "";
+        if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-del", t: nt.t });
+      },
+    });
+  }
+
   function onDocClick(e){
-    if (popMenu.shouldCloseForClick(e.target, { exclude: '[data-bmact="more"]' }))
+    if (popMenu.shouldCloseForClick(e.target, {
+      exclude: '[data-bmact="more"], [data-bmact="del"]',
+    }))
       popMenu.close();
   }
 

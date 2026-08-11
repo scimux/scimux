@@ -683,7 +683,11 @@ export function inboxItemHTML(nt, color, deps = {}){
       <div class="wsiwhen">${esc(whenFn(nt.t))}${src}</div>
       <div class="wsibubble" style="border-left-color:${color}">${mdFn(nt.text || "")}</div>
       <button class="wsimore" data-wsimore hidden></button>
-      ${deps.open ? actions(nt, { icons, context: "inbox" }) : ""}
+      ${deps.open ? actions(nt, {
+        icons, context: "inbox",
+        /* P5 width guard: phone keeps the more-menu bar (see bookmarkActionsHTML). */
+        overflow: !!deps.overflow,
+      }) : ""}
     </div>`;
 }
 
@@ -1039,6 +1043,8 @@ export function createNotesFeature(deps){
     const listHtml = list.length
       ? list.map(nt => inboxItemHTML(nt, color, {
         esc, md, fmtWhen, icons, nodeById, open: nt.t === wsInboxOpenT,
+        /* P5 width guard: flat row below isDesktop() keeps the more menu. */
+        overflow: typeof d.isDesktop === "function" ? !d.isDesktop() : false,
       })).join("")
       : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
     const sig = hashStr(tabsHtml + "|" + listHtml);
@@ -1655,12 +1661,48 @@ export function createNotesFeature(deps){
       case "note":
         startPlacement(nt);
         return;
-      case "del":
+      case "del": {
         closeWsMenu();
+        /* Flat bar (toolbar): confirm first, like .wsref trash. Overflow menu
+           already put Delete behind "more", so that path stays one-tap. */
+        const onBar = !!(act.closest && act.closest(".actionbar"));
+        if (onBar){
+          openDeleteBookmarkConfirm(act, nt);
+          return;
+        }
         wsInboxOpenT = "";
         uiMutate({ k: "bookmark-del", t: nt.t });
         return;
+      }
     }
+  }
+
+  /** Confirm before deleting a bookmark from the flat inbox toolbar (HIG;
+      no window.confirm). Same shell as openRemoveRefConfirm / openDeleteConfirm. */
+  function openDeleteBookmarkConfirm(anchor, nt){
+    if (!nt) return;
+    menuInboxT = nt.t;
+    menuRef = null;
+    const panel = root("wspanel");
+    popMenu.open({
+      panel,
+      anchor: anchor || null,
+      trigger: anchor || null,
+      offset: 40,
+      className: "popmenu wsconfirm",
+      html:
+        `<div class="wsconfirmmsg">Delete bookmark?</div>` +
+        `<button type="button" data-wconfirm="cancel">Cancel</button>` +
+        `<button type="button" data-wconfirm="ok" class="danger">Delete</button>`,
+      onClick: ev => {
+        const btn = ev.target.closest && ev.target.closest("[data-wconfirm]");
+        if (!btn) return;
+        closeWsMenu();
+        if (btn.dataset.wconfirm !== "ok") return;
+        wsInboxOpenT = "";
+        uiMutate({ k: "bookmark-del", t: nt.t });
+      },
+    });
   }
 
   function openInboxOverflow(trigger, nt){
@@ -1852,7 +1894,7 @@ export function createNotesFeature(deps){
   function onDocClick(e){
     /* exclude every overflow trigger so the open-tap does not instantly dismiss */
     if (popMenu.shouldCloseForClick(e.target, {
-      exclude: '[data-secmenu], [data-bmact="more"], [data-refact="trash"]',
+      exclude: '[data-secmenu], [data-bmact="more"], [data-bmact="del"], [data-refact="trash"]',
     }))
       closeWsMenu();
   }

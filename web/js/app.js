@@ -977,6 +977,9 @@ notesFeature = createNotesFeature({
     return ok;
   },
   isNarrow: () => window.matchMedia("(max-width: 767px)").matches,
+  /* P5: inbox flat-vs-overflow bar follows the same desktop breakpoint. */
+  isDesktop,
+  uiMutate,
   notesbtn: () => $("#notesbtn"),
   captureNotesTouchStart,
   notesSwipeBackDecision,
@@ -1777,6 +1780,13 @@ window.addEventListener("resize", renderJourneyToggle);
 matchMedia(SINGLE_ZONE_QUERY).addEventListener("change", () => {
   bookmarksFeature.invalidate();
   renderBookmarksPane();
+});
+/* P5: crossing isDesktop() flips flat bar ↔ overflow more-menu; re-render. */
+matchMedia("(min-width: 900px)").addEventListener("change", () => {
+  bookmarksFeature.invalidate();
+  renderBookmarksPane();
+  if (typeof notesFeature.invalidateInbox === "function") notesFeature.invalidateInbox();
+  if (typeof notesFeature.renderInbox === "function") notesFeature.renderInbox();
 });
 /* restore persisted full-screen / fare chrome (map feature owns keys + ARIA) */
 mapFeature.restoreChrome();
