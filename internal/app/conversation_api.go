@@ -17,8 +17,10 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/url"
 	"os"
@@ -483,7 +485,25 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	} else {
 		a.tmuxChatInto(resp, n, seg)
 	}
-	writeJSON(w, resp)
+	// Polled path only: ETag short-circuit hashes the fully marshalled body
+	// (same as /api/state). Hashing log identity alone would miss needs-input,
+	// attention, last_change, and other mechanics that change without a log
+	// write — the trap that hides an unanswered approval dialog.
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	h := fnv.New64a()
+	h.Write(body)
+	etag := fmt.Sprintf(`"%x"`, h.Sum64())
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 // projectTurns rewrites each turn's attachment markers (internal/asset.Project)

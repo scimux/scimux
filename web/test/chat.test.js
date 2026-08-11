@@ -1284,6 +1284,19 @@ function firstListener(node, type){
   return (node._listeners.get(type) || [])[0]?.fn;
 }
 
+function defaultChatPayload(overrides = {}){
+  return overrides.chatPayload || {
+    turns: [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
+            { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }],
+    live: "quiet",
+    delivery: "ok",
+    source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z",
+    prior_turns: 0,
+    assets: {},
+  };
+}
+
 function makeFeature(overrides = {}){
   const roots = makeRoots();
   const nodes = overrides.nodes || [{
@@ -1294,8 +1307,7 @@ function makeFeature(overrides = {}){
   let selGen = overrides.selGen ?? 1;
   let pendingJump = null;
   const apiCalls = [];
-  const api = async (path, opts) => {
-    apiCalls.push({ path, opts });
+  const resolveApi = async (path, opts) => {
     if (typeof overrides.api === "function") return overrides.api(path, opts, apiCalls);
     if (path.includes("/chat?history=1")) {
       return {
@@ -1304,20 +1316,26 @@ function makeFeature(overrides = {}){
       };
     }
     if (path.includes("/peek")) return overrides.peekText || "pane text";
-    if (path.includes("/chat")) {
-      return overrides.chatPayload || {
-        turns: [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
-                { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }],
-        live: "quiet",
-        delivery: "ok",
-        source: "tmux",
-        chat_started: "2026-01-01T00:00:00Z",
-        prior_turns: 0,
-        assets: {},
-      };
-    }
+    if (path.includes("/chat")) return defaultChatPayload(overrides);
     return {};
   };
+  const api = async (path, opts) => {
+    apiCalls.push({ path, opts, kind: "api" });
+    return resolveApi(path, opts);
+  };
+  /* Conditional chat poll: exposes status + ETag like production apiConditionalGet. */
+  const apiConditionalGet = overrides.apiConditionalGet || (async (path, etag) => {
+    const opts = { headers: etag ? { "If-None-Match": etag } : {} };
+    apiCalls.push({ path, opts, etag: etag || "", kind: "conditional" });
+    if (typeof overrides.chatConditional === "function")
+      return overrides.chatConditional(path, etag, apiCalls);
+    if (path.includes("/chat") && !path.includes("history")) {
+      const data = await resolveApi(path, opts);
+      return { status: 200, etag: overrides.stableChatETag || '"etag1"', data };
+    }
+    const data = await resolveApi(path, opts);
+    return { status: 200, etag: "", data };
+  });
   const effects = {
     setComposerBusy: [],
     setComposerClosed: [],
@@ -1333,6 +1351,7 @@ function makeFeature(overrides = {}){
     window: {},
     CSS: { escape: s => String(s).replace(/"/g, '\\"') },
     api,
+    apiConditionalGet,
     nodes: () => nodes,
     sel: () => sel,
     selGen: () => selGen,
@@ -1431,6 +1450,142 @@ test("refreshChat builds bubbles, signature-skips rebuild, preserves empty/loadi
   const host = roots.msgs.children.find(c => c.id === "peekhost");
   assert.ok(host, "the pane host must exist after a rebuild");
   assert.match(host.innerHTML, /peekblock|Terminal/);
+  feature.destroy();
+});
+
+/* ---------- P2: conditional chat poll (If-None-Match / 304) ---------- */
+
+test("P2 refreshChat omits If-None-Match on first poll, then sends validator", async () => {
+  const { feature, apiCalls } = makeFeature({ stableChatETag: '"v1"' });
+  feature.bind();
+  await feature.render();
+  await feature.render();
+  const polls = apiCalls.filter(c =>
+    c.path.includes("/chat") && !c.path.includes("history") && c.kind === "conditional");
+  assert.ok(polls.length >= 2, `want ≥2 conditional chat polls, got ${polls.length}`);
+  const h0 = polls[0].opts?.headers || {};
+  const h1 = polls[1].opts?.headers || {};
+  assert.equal(h0["If-None-Match"] || "", "",
+    "first request for a node must not send If-None-Match");
+  assert.equal(h1["If-None-Match"], '"v1"',
+    "second request must send the stored ETag");
+  feature.destroy();
+});
+
+test("P2 refreshChat 304 performs no re-render", async () => {
+  let n = 0;
+  const payload = defaultChatPayload();
+  const { feature, roots, apiCalls } = makeFeature({
+    chatConditional: () => {
+      n += 1;
+      if (n === 1) return { status: 200, etag: '"e1"', data: payload };
+      return { status: 304, etag: '"e1"', data: null };
+    },
+  });
+  feature.bind();
+  await feature.render();
+  assert.match(roots.msgs.innerHTML, /hello/);
+  // Marker proves the 304 path did not rebuild #msgs (signature skip alone
+  // would still run after a 200 decode; 304 must not touch the render seam).
+  roots.msgs.innerHTML = roots.msgs.innerHTML + "<!--no-rerender-->";
+  const htmlMarked = roots.msgs.innerHTML;
+  await feature.render();
+  assert.equal(roots.msgs.innerHTML, htmlMarked,
+    "304 must not re-render turns or rewrite #msgs");
+  const polls = apiCalls.filter(c => c.kind === "conditional");
+  assert.ok(polls.length >= 2);
+  assert.equal(polls[1].opts?.headers?.["If-None-Match"], '"e1"');
+  feature.destroy();
+});
+
+test("P2 refreshChat 304 leaves no stuck load or busy state", async () => {
+  let n = 0;
+  const timers = [];
+  const payload = defaultChatPayload({
+    chatPayload: {
+      ...defaultChatPayload(),
+      live: "quiet",
+    },
+  });
+  const { feature, roots, effects } = makeFeature({
+    chatConditional: () => {
+      n += 1;
+      if (n === 1) return { status: 200, etag: '"e1"', data: payload };
+      return { status: 304, etag: '"e1"', data: null };
+    },
+    deps: {
+      setTimeout: (fn) => { timers.push(fn); return timers.length; },
+      clearTimeout: () => {},
+    },
+  });
+  feature.bind();
+  // Cold first load exercises beginChatLoad; endChatLoad must clear it.
+  feature.onSelectChange();
+  const p1 = feature.render();
+  for (const fn of timers.splice(0)) fn();
+  assert.equal(roots.msgwrap.classList.contains("loading"), true);
+  await p1;
+  assert.equal(roots.msgwrap.classList.contains("loading"), false);
+  assert.equal(roots.chatloading.hidden, true);
+
+  // Second poll is 304 — cold-load via invalidate (keeps per-node ETag).
+  // beginChatLoad must still be balanced by endChatLoad on the 304 exit.
+  feature.invalidate();
+  const p2 = feature.render();
+  for (const fn of timers.splice(0)) fn();
+  assert.equal(roots.msgwrap.classList.contains("loading"), true,
+    "cold 304 path still shows loading while request is in flight");
+  await p2;
+  assert.equal(roots.msgwrap.classList.contains("loading"), false,
+    "304 must call endChatLoad so .loading does not stick");
+  assert.equal(roots.chatloading.hidden, true);
+  // Busy is not forced true on quiet payload; ensure last state is not stuck true.
+  assert.notEqual(effects.setComposerBusy.at(-1), true,
+    "304 must not leave composer stuck busy");
+  // Prove the second request was actually a 304, not a silent 200 rebuild.
+  assert.equal(n, 2, "chatConditional must have returned 304 on the second poll");
+  feature.destroy();
+});
+
+test("P2 refreshChat drops previous node's validator on switch", async () => {
+  const nodes = [
+    { id: "A", title: "Alpha", agent: "claude", model: "sonnet",
+      live: "quiet", attention: "", lane_id: "L1", description: "d" },
+    { id: "B", title: "Beta", agent: "claude", model: "sonnet",
+      live: "quiet", attention: "", lane_id: "L1", description: "d" },
+  ];
+  const tags = { A: '"etag-A"', B: '"etag-B"' };
+  const { feature, apiCalls, setSel, setSelGen } = makeFeature({
+    nodes,
+    sel: "A",
+    chatConditional: (path, etag) => {
+      const id = path.includes("/A/") || path.endsWith("/A/chat") || path.includes("nodes/A/")
+        ? "A"
+        : path.includes("nodes/B/") ? "B" : (path.match(/nodes\/([^/]+)\/chat/) || [])[1];
+      const nodeId = id || "A";
+      return {
+        status: 200,
+        etag: tags[nodeId] || '"x"',
+        data: {
+          ...defaultChatPayload(),
+          turns: [{ role: "user", text: "from-" + nodeId, time: "2026-01-01T00:00:00Z" }],
+        },
+      };
+    },
+  });
+  feature.bind();
+  await feature.render(); // A, store etag-A
+  feature.onSelectChange();
+  setSel("B");
+  setSelGen(2);
+  await feature.render(); // B must not send etag-A
+  const polls = apiCalls.filter(c =>
+    c.kind === "conditional" && c.path.includes("/chat") && !c.path.includes("history"));
+  assert.ok(polls.length >= 2);
+  const bPoll = polls.find(c => c.path.includes("nodes/B/"));
+  assert.ok(bPoll, "expected a poll for node B");
+  assert.equal(bPoll.opts?.headers?.["If-None-Match"] || "", "",
+    "node switch must not send the previous node's validator");
   feature.destroy();
 });
 

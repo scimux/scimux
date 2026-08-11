@@ -11,6 +11,8 @@ import {
   withCsrf,
   decodeResponse,
   api,
+  conditionalGetRequest,
+  apiConditionalGet,
   uiInitialGetRequest,
   uiPollGetRequest,
   uiPutRequest,
@@ -75,6 +77,8 @@ test("api.js exports named helpers and reuses state.js", async () => {
     "withCsrf",
     "decodeResponse",
     "api",
+    "conditionalGetRequest",
+    "apiConditionalGet",
     "uiInitialGetRequest",
     "uiPollGetRequest",
     "uiPutRequest",
@@ -286,6 +290,39 @@ test("conditional poll GET includes If-None-Match only when a revision exists", 
   assert.deepEqual(noRev.opts.headers, {});
   const missing = uiPollGetRequest(undefined);
   assert.deepEqual(missing.opts.headers, {});
+});
+
+test("conditionalGetRequest mirrors uiPoll shape for arbitrary paths", () => {
+  const withTag = conditionalGetRequest("/api/nodes/n1/chat", '"c1"');
+  assert.equal(withTag.path, "/api/nodes/n1/chat");
+  assert.deepEqual(withTag.opts.headers, { "If-None-Match": '"c1"' });
+  const bare = conditionalGetRequest("/api/nodes/n1/chat", "");
+  assert.deepEqual(bare.opts.headers, {});
+});
+
+test("apiConditionalGet returns 304 without throwing; 200 carries body+ETag", async () => {
+  const calls = [];
+  const fetchImpl = async (path, opts) => {
+    calls.push({ path, opts });
+    const inm = opts?.headers?.get?.("If-None-Match") ||
+      (opts?.headers && opts.headers["If-None-Match"]) || "";
+    if (inm === '"same"') {
+      return fakeResponse({ ok: false, status: 304, body: "", contentType: "", headers: { ETag: '"same"' } });
+    }
+    return fakeResponse({
+      ok: true, status: 200, body: JSON.stringify({ turns: [] }),
+      contentType: "application/json", headers: { ETag: '"same"' },
+    });
+  };
+  const first = await apiConditionalGet("/api/nodes/n1/chat", "", { fetchImpl, HeadersImpl: H });
+  assert.equal(first.status, 200);
+  assert.equal(first.etag, '"same"');
+  assert.deepEqual(first.data, { turns: [] });
+  const second = await apiConditionalGet("/api/nodes/n1/chat", '"same"', { fetchImpl, HeadersImpl: H });
+  assert.equal(second.status, 304);
+  assert.equal(second.etag, '"same"');
+  assert.equal(second.data, null);
+  assert.equal(calls.length, 2);
 });
 
 test("conditional PUT has exact If-Match, JSON body, CSRF, and never If-Match: *", () => {

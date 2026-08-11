@@ -42,6 +42,7 @@ import {
 } from "./navigation.js";
 import {
   withCsrf as withCsrfMod, api as apiMod,
+  apiConditionalGet as apiConditionalGetMod,
 } from "./api.js";
 import { createCardsFeature } from "./cards.js";
 import { createMapFeature, escapeDockStep } from "./map.js";
@@ -117,6 +118,8 @@ const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointe
 const CSRF = document.querySelector('meta[name="scimux-csrf"]')?.content || "";
 const withCsrf = (opts = {}) => withCsrfMod(opts, CSRF);
 const api = (path, opts) => apiMod(path, opts, { fetchImpl: fetch, csrf: CSRF });
+const apiConditionalGet = (path, etag) =>
+  apiConditionalGetMod(path, etag, { fetchImpl: fetch, csrf: CSRF });
 
 /* UI document + state tick live in createPollingFeature (Packet 7I).
    Shell reaches the shared document via getUI() / uiMutate / isUILoaded. */
@@ -767,6 +770,7 @@ const chatFeature = createChatFeature({
   bubbleTitle,
   hashStr,
   api,
+  apiConditionalGet,
   nodes: () => nodes,
   sel: () => sel,
   selGen: () => selGen,

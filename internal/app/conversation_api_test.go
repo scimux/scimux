@@ -2331,3 +2331,217 @@ func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
 		t.Fatal("new user turn must withdraw reply_ready")
 	}
 }
+
+// ---------- P2: chat poll ETag / 304 ----------
+// Hash the fully marshalled response body (same shape as /api/state). A
+// validator keyed only on the session log would miss needs-input / attention /
+// last_change changes that leave size+mtime alone.
+
+func chatGET(t *testing.T, a *app, id, ifNoneMatch string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/"+id+"/chat", nil)
+	r.SetPathValue("id", id)
+	if ifNoneMatch != "" {
+		r.Header.Set("If-None-Match", ifNoneMatch)
+	}
+	a.handleChat(rec, r)
+	return rec
+}
+
+func seedChatNodeWithLog(t *testing.T, a *app, id string, events ...sessionlog.Event) *Node {
+	t.Helper()
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: id, Title: id, Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes = append(a.nodes, n)
+	a.byID[id] = n
+	a.live[id] = "quiet"
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, id+".jsonl")}
+	base := []sessionlog.Event{
+		sessionlog.NewMeta(id, "claude", "", "", a.home),
+		{T: "user", Text: "hello", Time: "2026-07-14T01:00:00Z"},
+		{T: "assistant", Text: "hi there", Time: "2026-07-14T01:01:00Z"},
+	}
+	if len(events) > 0 {
+		base = append([]sessionlog.Event{sessionlog.NewMeta(id, "claude", "", "", a.home)}, events...)
+	}
+	for _, ev := range base {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return n
+}
+
+// TestHandleChatETagChangesWhenMechanicsChange is the trap-avoidance test:
+// the session log is untouched, but a needs-input/attention (or last_change)
+// field flips — the ETag must change and a conditional GET must return 200,
+// not a stale 304 that would hide an approval dialog.
+func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"m1": true}}
+	a := newTestApp(t, f)
+	seedChatNodeWithLog(t, a, "m1")
+
+	rec1 := chatGET(t, a, "m1", "")
+	if rec1.Code != 200 {
+		t.Fatalf("baseline code = %d body %q", rec1.Code, rec1.Body.String())
+	}
+	etag1 := rec1.Header().Get("ETag")
+	if etag1 == "" {
+		t.Fatal("baseline missing ETag")
+	}
+	if rec1.Body.Len() == 0 {
+		t.Fatal("baseline body empty")
+	}
+
+	// Log unchanged; attention raised (needs-input machinery).
+	a.mu.Lock()
+	a.attn["m1"] = "approval"
+	a.mu.Unlock()
+
+	rec2 := chatGET(t, a, "m1", etag1)
+	if rec2.Code != 200 {
+		t.Fatalf("after attention: code = %d, want 200 (not a stale 304)", rec2.Code)
+	}
+	etag2 := rec2.Header().Get("ETag")
+	if etag2 == "" || etag2 == etag1 {
+		t.Fatalf("after attention: ETag = %q, want different non-empty (was %q)", etag2, etag1)
+	}
+	var body struct {
+		Attention string `json:"attention"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Attention != "approval" {
+		t.Fatalf("attention = %q, want approval", body.Attention)
+	}
+
+	// Same trap for last_change (pane activity while the log is idle).
+	a.mu.Lock()
+	a.lastChg["m1"] = time.UnixMilli(1_700_000_000_123)
+	a.mu.Unlock()
+	rec3 := chatGET(t, a, "m1", etag2)
+	if rec3.Code != 200 {
+		t.Fatalf("after last_change: code = %d, want 200", rec3.Code)
+	}
+	etag3 := rec3.Header().Get("ETag")
+	if etag3 == "" || etag3 == etag2 {
+		t.Fatalf("after last_change: ETag = %q, want different from %q", etag3, etag2)
+	}
+}
+
+func TestHandleChatETagStableAnd304WhenUnchanged(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	seedChatNodeWithLog(t, a, "c1")
+	// Pin last_change so two successive builds are byte-identical.
+	a.mu.Lock()
+	a.lastChg["c1"] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+
+	rec1 := chatGET(t, a, "c1", "")
+	if rec1.Code != 200 {
+		t.Fatalf("first code = %d", rec1.Code)
+	}
+	etag1 := rec1.Header().Get("ETag")
+	if etag1 == "" {
+		t.Fatal("missing ETag")
+	}
+	if rec1.Body.Len() == 0 {
+		t.Fatal("first body empty")
+	}
+	if ct := rec1.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	rec2 := chatGET(t, a, "c1", "")
+	if rec2.Header().Get("ETag") != etag1 {
+		t.Errorf("ETag drifted without change: %q → %q", etag1, rec2.Header().Get("ETag"))
+	}
+
+	rec3 := chatGET(t, a, "c1", etag1)
+	if rec3.Code != http.StatusNotModified {
+		t.Fatalf("If-None-Match code = %d, want 304", rec3.Code)
+	}
+	if rec3.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", rec3.Body.String())
+	}
+}
+
+func TestHandleChatETagChangesWhenLogGainsTurn(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	seedChatNodeWithLog(t, a, "c1")
+	a.mu.Lock()
+	a.lastChg["c1"] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+
+	rec1 := chatGET(t, a, "c1", "")
+	etag1 := rec1.Header().Get("ETag")
+	if etag1 == "" {
+		t.Fatal("missing ETag")
+	}
+
+	w := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "c1.jsonl")}
+	if err := w.Append(sessionlog.Event{T: "user", Text: "another turn", Time: "2026-07-14T01:02:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	// Invalidate segment cache so the new turn is visible.
+	a.mu.Lock()
+	delete(a.segCache, "c1")
+	a.mu.Unlock()
+
+	rec2 := chatGET(t, a, "c1", etag1)
+	if rec2.Code != 200 {
+		t.Fatalf("after turn: code = %d, want 200", rec2.Code)
+	}
+	etag2 := rec2.Header().Get("ETag")
+	if etag2 == "" || etag2 == etag1 {
+		t.Fatalf("after turn: ETag = %q, want different from %q", etag2, etag1)
+	}
+	var body struct {
+		Turns []transcript.Turn `json:"turns"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Turns) < 3 {
+		t.Fatalf("turns = %d, want >= 3 after append", len(body.Turns))
+	}
+}
+
+func TestHandleChatHistoryUnaffectedByETag(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	seedChatNodeWithLog(t, a, "c1")
+
+	// ?history=1 is an on-demand read: always 200 with a body, no ETag
+	// short-circuit, even when If-None-Match is sent.
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/c1/chat?history=1", nil)
+	r.SetPathValue("id", "c1")
+	r.Header.Set("If-None-Match", `"deadbeef"`)
+	a.handleChat(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("history code = %d, want 200", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("history body empty")
+	}
+	// No requirement to set ETag on history; if present it must not 304.
+	if rec.Code == http.StatusNotModified {
+		t.Fatal("history must not return 304")
+	}
+	var body struct {
+		Segments []sessionlog.HistorySegment `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Segments) == 0 {
+		t.Fatal("history segments empty")
+	}
+}

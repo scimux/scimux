@@ -572,6 +572,9 @@ export function createChatFeature(deps){
 
   /* feature-owned state */
   let chatSig = "";
+  /* Per-node chat poll validator (ETag). Keyed by node id so a tag from A is
+     never sent for B; cleared on node switch (onSelectChange). */
+  let chatETag = { node: "", etag: "" };
   /* The pane's own render region: a host element inside #msgs that the
      transcript rebuild recreates, plus the signature of what is painted into
      it. Held as a reference rather than looked up, because the host is created
@@ -823,6 +826,8 @@ export function createChatFeature(deps){
 
   function onSelectChange(){
     chatSig = "";
+    /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
+    chatETag = { node: "", etag: "" };
     /* A new chat always opens at its newest bubble. #msgs is a singleton
        reused across nodes, so without this the rebuild inherits the scroll
        offset of the chat we just left: `atBottom` was measured on the old
@@ -1093,9 +1098,31 @@ export function createChatFeature(deps){
     renderChatHead();
     const gen = g("selGen", 0);
     const endChatLoad = beginChatLoad(n.id, gen, !chatSig);
+    const chatPath = `/api/nodes/${encodeURIComponent(n.id)}/chat`;
+    /* Only the tag for this node — never a sibling's. */
+    const held = chatETag.node === n.id ? chatETag.etag : "";
     let data;
-    try { data = await api(`/api/nodes/${encodeURIComponent(n.id)}/chat`); }
-    catch { endChatLoad(); return; }
+    try {
+      if (typeof d.apiConditionalGet === "function") {
+        const result = await d.apiConditionalGet(chatPath, held);
+        if (gen !== g("selGen", 0) || g("sel", "") !== n.id) return;
+        /* 304: body unchanged — balance the load token and skip every render
+           seam (turns, signature, chrome). Composer busy stays as last 200 set
+           it; the payload that drove it has not changed. */
+        if (result.status === 304) {
+          endChatLoad();
+          return;
+        }
+        if (!result.data) {
+          endChatLoad();
+          return;
+        }
+        chatETag = { node: n.id, etag: result.etag || "" };
+        data = result.data;
+      } else {
+        data = await api(chatPath);
+      }
+    } catch { endChatLoad(); return; }
     if (gen !== g("selGen", 0) || g("sel", "") !== n.id) return;
 
     let chromeChanged = false;

@@ -78,6 +78,37 @@ export async function api(path, opts, deps = {}) {
   return decodeResponse(r);
 }
 
+/* Conditional GET request contract — same shape as uiPollGetRequest.
+   If-None-Match is present only when etag is non-empty. */
+export function conditionalGetRequest(path, etag) {
+  return {
+    path,
+    opts: { headers: etag ? { "If-None-Match": etag } : {} },
+  };
+}
+
+/* Conditional GET that exposes status and ETag. Unlike api(), a 304 is not
+   an error: returns { status: 304, etag, data: null } with an empty body.
+   Non-OK statuses other than 304 still throw (same Error shape as decodeResponse).
+   On 200, data is the decoded JSON/text body. */
+export async function apiConditionalGet(path, etag, deps = {}) {
+  const { fetchImpl, csrf = "", HeadersImpl = Headers } = deps;
+  const req = conditionalGetRequest(path, etag);
+  const r = await fetchImpl(req.path, withCsrf(req.opts, csrf, HeadersImpl));
+  if (r.status === 304) {
+    return { status: 304, etag: readETag(r) || etag || "", data: null };
+  }
+  if (!r.ok) {
+    const err = new Error(await r.text());
+    err.status = r.status;
+    throw err;
+  }
+  const data = r.headers.get("content-type")?.includes("json")
+    ? await r.json()
+    : await r.text();
+  return { status: r.status, etag: readETag(r), data };
+}
+
 /* ---------- /api/ui request contracts ---------- */
 
 /* Unconditional initial GET — no conditional headers. */
