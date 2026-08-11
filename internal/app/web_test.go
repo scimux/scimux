@@ -386,13 +386,12 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 			t.Errorf("activity card interaction/connectivity wiring missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`#statusbar .host::before`,
-		`#statusbar .host.online::before { background: #34C759; }`,
-	} {
-		if !strings.Contains(css, want) {
-			t.Errorf("activity card connectivity CSS missing %q", want)
-		}
+	// Online/offline host chrome must exist; concrete status colours are design.
+	if !strings.Contains(css, `#statusbar .host::before`) {
+		t.Error("activity card connectivity CSS missing #statusbar .host::before")
+	}
+	if !strings.Contains(css, `#statusbar .host.online::before`) {
+		t.Error("activity card connectivity CSS missing #statusbar .host.online::before")
 	}
 }
 
@@ -430,14 +429,13 @@ func TestJourneyLaneFoldAndChipWiring(t *testing.T) {
 			t.Errorf("shell/composition map fold/chip code still present: %q", dead)
 		}
 	}
-	for _, want := range []string{
-		`animation: mapAttentionDot 1.65s ease-in-out infinite;`,
-		`.lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }`,
-		`.lhead .chev { color: var(--dim); font-size: 15px; width: 16px;`,
-	} {
-		if !strings.Contains(css, want) {
-			t.Errorf("journey lane fold/chip CSS missing %q", want)
-		}
+	// Reduced-motion must cancel attention animations; concrete durations,
+	// easing curves, and chevron type sizes are design choices (P6).
+	if !strings.Contains(css, `.lhead .lattn, .attnstation-glow, .attnstation-ring { animation: none; }`) {
+		t.Error("journey lane fold/chip CSS missing reduced-motion animation:none for attention marks")
+	}
+	if !strings.Contains(css, `.lhead .chev`) {
+		t.Error("journey lane fold/chip CSS missing .lhead .chev")
 	}
 	chipCSSStart := strings.Index(css, ".lanechip {")
 	chipCSSEnd := strings.Index(css[chipCSSStart:], ".lanechip.selected")
@@ -884,13 +882,25 @@ func TestWorkspaceHasSwipeBack(t *testing.T) {
 
 // Follow-up (2026-07-30 iPad review): the workspace title ("Notes") must render
 // at the same size/weight as the app pane headings ("Activities", "Bookmarks").
+// P6: the contract is that the two agree, not what they agree on — asserted
+// relationally so the type scale can be retuned in one edit, but not drift
+// apart in two. Plus the zeroed UA heading margin, which is structural.
 func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 	pane := cssBlock(t, css, ".phead h2 {")
 	ws := cssBlock(t, css, "#wstopbar h2 {")
+	for _, prop := range []string{"font-size", "font-weight"} {
+		p, w := cssDecl(pane, prop), cssDecl(ws, prop)
+		if p == "" {
+			t.Fatalf(".phead h2 must declare %s; got %q", prop, pane)
+		}
+		if p != w {
+			t.Errorf("#wstopbar h2 %s = %q, must match .phead h2 %q — the workspace title reads as a pane heading", prop, w, p)
+		}
+	}
 	// margin:0 is essential — without it the UA heading margin inflates the bar's
 	// height (flex items don't collapse margins), so the header renders taller.
-	for _, want := range []string{"font-size: 22px", "font-weight: 700", "margin: 0"} {
+	for _, want := range []string{"margin: 0"} {
 		if !strings.Contains(pane, want) {
 			t.Fatalf(".phead h2 baseline changed, expected %q; got %q", want, pane)
 		}
@@ -902,17 +912,40 @@ func TestWorkspaceTitleMatchesPaneHeadings(t *testing.T) {
 
 // Follow-up (2026-07-30 iPad review): the workspace header bar must be the same
 // vertical height as the chat area header. Both rows are driven by 34px controls,
-// so matching the top/bottom padding (10px, from #chathead) makes them identical.
+// so matching top/bottom padding makes them identical.
+//
+// P6 restored this after it was briefly deleted as a "literal padding" test. The
+// literals were incidental; the contract — two bars, one height — was found in a
+// device review and is checked nowhere else. Asserted relationally: the padding
+// may be retuned, as long as both bars are retuned together.
 func TestWorkspaceHeaderHeightMatchesChatHead(t *testing.T) {
 	css := mustProductionCSSCascade(t)
-	chat := cssBlock(t, css, "#chathead {")
-	if !strings.Contains(chat, "padding: 10px 16px 10px") {
-		t.Fatalf("#chathead vertical padding baseline changed; got %q", chat)
+	chatTop, chatBot := cssPadVertical(t, cssBlock(t, css, "#chathead {"))
+	wsTop, wsBot := cssPadVertical(t, cssBlock(t, css, "#wstopbar {"))
+	if chatTop != wsTop || chatBot != wsBot {
+		t.Errorf("#wstopbar vertical padding = %s/%s, must match #chathead %s/%s so both header bars are the same height",
+			wsTop, wsBot, chatTop, chatBot)
 	}
-	ws := cssBlock(t, css, "#wstopbar {")
-	if !strings.Contains(ws, "padding: 10px ") {
-		t.Errorf("#wstopbar must use 10px top/bottom padding to match #chathead; got %q", ws)
+}
+
+// cssPadVertical returns the top and bottom components of a `padding` shorthand.
+func cssPadVertical(t *testing.T, block string) (string, string) {
+	t.Helper()
+	v := cssDecl(block, "padding")
+	if v == "" {
+		t.Fatalf("no padding shorthand in %q", block)
 	}
+	f := strings.Fields(v)
+	switch len(f) {
+	case 1:
+		return f[0], f[0]
+	case 2:
+		return f[0], f[0]
+	case 3, 4:
+		return f[0], f[2]
+	}
+	t.Fatalf("unparsable padding shorthand %q", v)
+	return "", ""
 }
 
 // Follow-up (2026-07-30): the section body editor auto-grows to fit its content
@@ -1376,6 +1409,30 @@ func cssBlock(t *testing.T, cascade, marker string) string {
 		t.Fatalf("unterminated CSS rule %q", marker)
 	}
 	return cascade[i : i+end]
+}
+
+// cssDecl returns the value of prop inside a rule body returned by cssBlock,
+// trimmed and without its semicolon; "" when the property is not declared.
+//
+// P6 uses it for *relational* assertions: two surfaces that must agree, or two
+// roles that must differ, can be pinned to each other without freezing the
+// designer's chosen value. A test that only checks "the property exists" is
+// worse than no test — it reads as coverage while passing on any value.
+func cssDecl(block, prop string) string {
+	// cssBlock hands back the selector line too; declarations start after "{".
+	if i := strings.Index(block, "{"); i >= 0 {
+		block = block[i+1:]
+	}
+	for _, part := range strings.Split(block, ";") {
+		k, v, ok := strings.Cut(part, ":")
+		if !ok {
+			continue
+		}
+		if fields := strings.Fields(k); len(fields) == 1 && fields[0] == prop {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // --- Pane gaps (pane-gap-design.md) ------------------------------------------

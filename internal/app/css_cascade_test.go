@@ -415,27 +415,16 @@ func TestProductionCSSTransitionContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inline := hasInlineStyle(html)
 
-	// Transition rule: linked list is a prefix of the final order while inline
-	// CSS remains; once inline is gone it must equal the complete final list.
-	if inline {
-		if len(hrefs) > len(productionCSSFinalOrder) {
-			t.Fatalf("linked stylesheets (%d) exceed final order (%d)", len(hrefs), len(productionCSSFinalOrder))
-		}
-		for i, href := range hrefs {
-			if href != productionCSSFinalOrder[i] {
-				t.Fatalf("linked[%d]=%q, want prefix of final order %q", i, href, productionCSSFinalOrder[i])
-			}
-		}
-	} else {
-		if len(hrefs) != len(productionCSSFinalOrder) {
-			t.Fatalf("no inline style remains: linked count=%d, want full final order %d", len(hrefs), len(productionCSSFinalOrder))
-		}
-		for i, href := range hrefs {
-			if href != productionCSSFinalOrder[i] {
-				t.Fatalf("linked[%d]=%q, want %q", i, href, productionCSSFinalOrder[i])
-			}
+	// Linked-only production: the linked list must equal the complete final order.
+	// (The former "inline still present → prefix" branch is unreachable now that
+	// TestProductionCSSFinalStateLinkedOnly pins hasInlineStyle false.)
+	if len(hrefs) != len(productionCSSFinalOrder) {
+		t.Fatalf("linked count=%d, want full final order %d", len(hrefs), len(productionCSSFinalOrder))
+	}
+	for i, href := range hrefs {
+		if href != productionCSSFinalOrder[i] {
+			t.Fatalf("linked[%d]=%q, want %q", i, href, productionCSSFinalOrder[i])
 		}
 	}
 
@@ -452,8 +441,10 @@ func TestProductionCSSTransitionContract(t *testing.T) {
 
 	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
 
-	// Currently linked sheets (none in 5A): each must serve exact embedded
-	// bytes with CSS content type, no-store, and nosniff.
+	// Per-href serving for every linked sheet. The dedicated *CSSServing tests
+	// cover tokens/base/layout/cards/map/chat/sheets/notes/accessibility; this
+	// loop is the only place that serves /css/menu.css with the same four
+	// header + exact-byte assertions, so it stays.
 	for _, href := range hrefs {
 		t.Run("serve"+href, func(t *testing.T) {
 			embedPath, err := stylesheetEmbedPath(href)
@@ -482,32 +473,9 @@ func TestProductionCSSTransitionContract(t *testing.T) {
 			}
 		})
 	}
-
-	// Target files not yet linked/embedded remain unavailable. /css/ itself
-	// must not expose a directory listing.
-	for _, path := range append([]string{"/css/"}, productionCSSFinalOrder...) {
-		// Skip any that are currently linked and therefore must 200 above.
-		linked := false
-		for _, href := range hrefs {
-			if href == path {
-				linked = true
-				break
-			}
-		}
-		if linked {
-			continue
-		}
-		t.Run("unavailable"+path, func(t *testing.T) {
-			rec := getCharacterization(t, h, path)
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("GET %s status=%d, want 404 while unlinked", path, rec.Code)
-			}
-			if bodyLooksLikeDirectoryListing(rec.Body.String()) {
-				t.Fatalf("GET %s exposed a directory listing", path)
-			}
-			assertNotIndexOrSVG(t, path, rec.Body.Bytes())
-		})
-	}
+	// The old unlinked-path loop over append([]string{"/css/"}, finalOrder...)
+	// degenerated to a single residual "/css/" case once every final-order href
+	// is linked; that 404 is already covered by TestProductionNotesAccessibilityCSSServing.
 }
 
 // TestProductionCSSNegativeRootsPreserved keeps the existing static negative

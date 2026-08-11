@@ -11,13 +11,10 @@ import (
 	"codeberg.org/chrberger/scimux/internal/notestore"
 )
 
-// gitNoteTests shells out to git (like tmux integration tests). Skipped under
-// -short and when git is not on PATH.
+// requireGit skips when git is not on PATH. Git is present in the CI image
+// (apk add git); these tests run under -short so CI exercises notestore/git.go.
 func requireGit(t *testing.T) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("git note versioning test skipped with -short")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not in PATH")
 	}
@@ -214,10 +211,9 @@ func TestNoteGitSectionTitleCommitBoundary(t *testing.T) {
 }
 
 // Without git on PATH, note mutations still succeed and leave no repo.
+// Isolates findGit via SetFindGitForTest + unconditional defer restore; no
+// test in package app calls t.Parallel(), so the process-global override is safe.
 func TestNoteGitAbsentDegrades(t *testing.T) {
-	if testing.Short() {
-		t.Skip("mutates findGit; skipped with -short")
-	}
 	// Force "git not found" regardless of the host PATH.
 	restore := notestore.SetFindGitForTest(func() (string, error) {
 		return "", exec.ErrNotFound

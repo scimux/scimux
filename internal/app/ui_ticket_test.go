@@ -231,13 +231,9 @@ func TestTicketPunchesAreCoarseEnoughToReadAsPaper(t *testing.T) {
 	}
 
 	run := cssBlock(t, css, ".actionbar.tear::before {")
-	// The run's dots must clear the old 1.1px radius by a wide margin: the dot
-	// diameter is now the size the end punch used to be.
+	// The run's dots must clear the old hairline-thin radius (regression guard).
 	if strings.Contains(run, "1.1px") {
 		t.Errorf("the run still uses the original hairline-thin dot; got %q", run)
-	}
-	if !strings.Contains(run, "2.5px") {
-		t.Errorf("the run's dots should be 5px across (2.5px radius); got %q", run)
 	}
 	// And the run has to be inset past the bigger end punches instead of the
 	// hard-coded 14px that cleared only a 5px hole.

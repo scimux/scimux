@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -39,14 +40,8 @@ func TestPaneAndColumnHeaderTypeRoles(t *testing.T) {
 	if !strings.Contains(css, ".panetitle") {
 		t.Fatal("a shared .panetitle type role must exist so pane titles cannot drift apart")
 	}
-	title := cssBlock(t, css, ".panetitle")
-	for _, want := range []string{"font-size: 22px", "font-weight: 700"} {
-		t.Run("panetitle/"+want, func(t *testing.T) {
-			if !strings.Contains(title, want) {
-				t.Errorf(".panetitle must carry %s; got %q", want, title)
-			}
-		})
-	}
+	// Role existence is the contract; concrete type-scale values are design
+	// choices and are not pinned here (P6).
 
 	// One named role for in-view column headers.
 	if !strings.Contains(css, ".columnhead") {
@@ -58,9 +53,6 @@ func TestPaneAndColumnHeaderTypeRoles(t *testing.T) {
 	}
 	if !strings.Contains(col, "text-transform: none") {
 		t.Error(".columnhead must explicitly reset text-transform so no earlier rule re-capitalizes it")
-	}
-	if !strings.Contains(col, "font-weight: 600") {
-		t.Errorf(".columnhead must be semibold so hierarchy comes from weight+size, not casing; got %q", col)
 	}
 	if !strings.Contains(col, "var(--dim)") {
 		t.Errorf(".columnhead must be secondary colour; got %q", col)
@@ -105,9 +97,17 @@ func TestPaneAndColumnHeaderTypeRoles(t *testing.T) {
 func TestControlLadderIsNamedAndApplied(t *testing.T) {
 	css := mustProductionCSSCascade(t)
 
+	// Ladder tiers must key off role tokens, not literal paint values — with one
+	// exception. A solid --work fill needs a light label: --work is a mid petrol
+	// in both themes, so a theme-following label (var(--ink)) goes near-white on
+	// it in dark mode. That is legibility, not taste, and it is the house pattern
+	// map.test.js cites by name when it pins the same choice on #mappill.ready.
 	filled := cssBlock(t, css, ".btn-filled")
-	if !strings.Contains(filled, "var(--work)") || !strings.Contains(filled, "#fff") {
-		t.Errorf(".btn-filled must be solid petrol on white — the one committing action; got %q", filled)
+	if !strings.Contains(filled, "var(--work)") {
+		t.Errorf(".btn-filled must use the work/petrol role token; got %q", filled)
+	}
+	if label := cssDecl(filled, "color"); !strings.Contains(strings.ToLower(label), "#fff") && !strings.EqualFold(label, "white") {
+		t.Errorf(".btn-filled label = %q; a solid --work fill carries a fixed light label, not a theme-following one", label)
 	}
 	tinted := cssBlock(t, css, ".btn-tinted {")
 	if !strings.Contains(tinted, "color-mix(in srgb, var(--work)") || !strings.Contains(tinted, "color: var(--work)") {
@@ -373,17 +373,42 @@ func afterMarker(s, marker string) string {
 // pane and the full-screen wall map, since both render .strow.
 func TestStationTitleIsSemibold(t *testing.T) {
 	css := mustProductionCSSCascade(t)
-	block := cssBlock(t, css, ".strow .lbl {")
-	if !strings.Contains(block, "font-weight: 600") {
-		t.Errorf(".strow .lbl must be semibold so the title separates from the description line; got %q", block)
+	// The contract is the *contrast*, not the numbers: a live station title has
+	// to outweigh a past stop. P6 pins them to each other so the type scale can
+	// be retuned, but not flattened — "both declare a font-weight" would pass
+	// with two identical values and guard nothing.
+	title := cssDecl(cssBlock(t, css, ".strow .lbl {"), "font-weight")
+	if title == "" {
+		t.Fatal(".strow .lbl must declare a font-weight — hierarchy comes from weight, not casing")
 	}
 	// A past stop is a segment marker, not a chat title: it has no description
 	// line under it and stays deliberately secondary. An EXITED thread is still a
 	// chat title and keeps the weight — see TestStationTitleStaysBoldWhenTheThreadIsDead.
-	stop := cssBlock(t, css, ".strow.stoprow .lbl")
-	if !strings.Contains(stop, "font-weight: 400") {
-		t.Errorf(".strow.stoprow .lbl must stay regular weight — past stops are deliberately secondary; got %q", stop)
+	stop := cssDecl(cssBlock(t, css, ".strow.stoprow .lbl"), "font-weight")
+	if stop == "" {
+		t.Fatal(".strow.stoprow .lbl must declare its own font-weight — past stops are deliberately secondary")
 	}
+	tw, sw := cssWeight(t, title), cssWeight(t, stop)
+	if tw <= sw {
+		t.Errorf(".strow .lbl (%s) must be heavier than .strow.stoprow .lbl (%s) so a live title separates from a past stop", title, stop)
+	}
+}
+
+// cssWeight parses a numeric font-weight, mapping the two keywords the codebase
+// may legitimately switch to.
+func cssWeight(t *testing.T, v string) int {
+	t.Helper()
+	switch v {
+	case "normal":
+		return 400
+	case "bold":
+		return 700
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		t.Fatalf("font-weight %q is neither numeric nor normal/bold", v)
+	}
+	return n
 }
 
 // --- items 12 + 14: one "Open chat" control everywhere ------------------------

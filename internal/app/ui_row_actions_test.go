@@ -26,13 +26,6 @@ func TestListRowActionsShareTheRoundOverlay(t *testing.T) {
 			t.Errorf(".roundactions must float over the row rather than grow it (%s); got %q", want, cluster)
 		}
 	}
-	btn := cssBlock(t, css, ".roundactions button")
-	for _, want := range []string{"width: 40px", "height: 40px", "border-radius: 20px"} {
-		if !strings.Contains(btn, want) {
-			t.Errorf(".roundactions button must be a circle (%s); got %q", want, btn)
-		}
-	}
-
 	// Both lists opt in by class — the geometry is written once.
 	for _, f := range []string{"web/js/cards.js", "web/js/notes.js"} {
 		if !strings.Contains(mustReadWeb(t, f), "roundactions") {

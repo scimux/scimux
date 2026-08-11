@@ -235,3 +235,29 @@ func TestFareTypes_LiveInFarePackage(t *testing.T) {
 	_ = f.Total()
 	var _ fare.Occupancy
 }
+
+// Fare and Rides are thin wrappers over FareAndRides; exercise the actual
+// returned computation (not just "does not panic").
+func TestFareCache_FareAndRidesWrappers(t *testing.T) {
+	path := fareFixture(t, "claude-sum.jsonl")
+	var c FareCache
+	wantF, wantR := c.FareAndRides(path)
+	gotF := c.Fare(path)
+	if gotF.FreshIn != wantF.FreshIn || gotF.Out != wantF.Out || gotF.Turns != wantF.Turns {
+		t.Errorf("Fare FreshIn/Out/Turns = %d/%d/%d, want %d/%d/%d",
+			gotF.FreshIn, gotF.Out, gotF.Turns, wantF.FreshIn, wantF.Out, wantF.Turns)
+	}
+	if gotF.FreshIn != 102 || gotF.Out != 460 || gotF.Turns != 2 {
+		t.Errorf("Fare FreshIn/Out/Turns = %d/%d/%d, want 102/460/2", gotF.FreshIn, gotF.Out, gotF.Turns)
+	}
+	gotR := c.Rides(path)
+	if len(gotR) != len(wantR) {
+		t.Fatalf("Rides len = %d, want %d", len(gotR), len(wantR))
+	}
+	for i := range wantR {
+		if gotR[i].Totals.Turns != wantR[i].Totals.Turns || gotR[i].Real != wantR[i].Real {
+			t.Errorf("Rides[%d] Turns/Real = %d/%v, want %d/%v",
+				i, gotR[i].Totals.Turns, gotR[i].Real, wantR[i].Totals.Turns, wantR[i].Real)
+		}
+	}
+}
