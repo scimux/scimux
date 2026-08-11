@@ -46,10 +46,7 @@ func gunzipBody(t *testing.T, b []byte) []byte {
 // for every response emits a ~20-byte header/footer and sets Content-Encoding
 // on the empty 304, breaking every idle poll.
 func TestGzip304StateNoContentEncoding(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	base := gzipGET(t, h, "/api/state", nil)
 	if base.Code != http.StatusOK {
 		t.Fatalf("baseline status = %d, want 200; body=%q", base.Code, base.Body.String())
@@ -96,10 +93,7 @@ func TestGzip304ChatNoContentEncoding(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, a)
 
 	base := gzipGET(t, h, "/api/nodes/"+id+"/chat", nil)
 	if base.Code != http.StatusOK {
@@ -126,10 +120,7 @@ func TestGzip304ChatNoContentEncoding(t *testing.T) {
 }
 
 func TestGzipStateRoundTrip(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	plain := gzipGET(t, h, "/api/state", nil)
 	if plain.Code != http.StatusOK {
 		t.Fatalf("plain status = %d", plain.Code)
@@ -148,10 +139,7 @@ func TestGzipStateRoundTrip(t *testing.T) {
 }
 
 func TestGzipStaticJSRoundTrip(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	const path = "/js/app.js"
 	plain := gzipGET(t, h, path, nil)
 	if plain.Code != http.StatusOK {
@@ -171,10 +159,7 @@ func TestGzipStaticJSRoundTrip(t *testing.T) {
 }
 
 func TestGzipNoAcceptEncodingUnchanged(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	// Two plain GETs must be byte-identical and free of Content-Encoding.
 	a := gzipGET(t, h, "/api/state", nil)
 	b := gzipGET(t, h, "/api/state", nil)

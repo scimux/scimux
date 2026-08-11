@@ -22,21 +22,6 @@ type FareCache struct {
 	folds int // times the fold ran (test spy for fold-on-growth)
 }
 
-// Fare returns the cached whole-journey totals, re-folding only when path,
-// size, or mtime advances. A missing/unreadable file yields zero totals
-// (Turns==0 → fare unavailable at the projector) and does not error.
-func (c *FareCache) Fare(path string) fare.FareTotals {
-	f, _ := c.FareAndRides(path)
-	return f
-}
-
-// Rides returns the cached per-segment rides (tokens + time model), re-folding
-// only when path/size/mtime advances (V2-P2).
-func (c *FareCache) Rides(path string) []fare.Ride {
-	_, rides := c.FareAndRides(path)
-	return rides
-}
-
 // FareAndRides returns whole-journey totals and per-segment rides from one
 // fold, sharing the size/mtime cache key.
 func (c *FareCache) FareAndRides(path string) (fare.FareTotals, []fare.Ride) {
@@ -76,6 +61,8 @@ func ReadFare(path string) fare.FareTotals {
 // ReadFareBySegment returns per-segment fare totals split on source seams
 // (same delimiters as segment.go / ReadHistory). Dedup is consistent with
 // ReadFare: the sum of segment Total()s equals ReadFare().Total().
+// Kept (not production-called) so TestReadFareBySegment_SplitsOnSourceSeams
+// can assert the whole-vs-segments reconciliation invariant no other test states.
 func ReadFareBySegment(path string) []fare.FareTotals {
 	_, segs := foldFareFromEvents(ReadEvents(path))
 	return segs

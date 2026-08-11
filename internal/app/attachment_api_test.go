@@ -27,16 +27,6 @@ import (
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
-// attachmentAPIHandler builds the production router for public-route assertions.
-func attachmentAPIHandler(t *testing.T, a *app) http.Handler {
-	t.Helper()
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 // seedAttachNode registers a live-looking tmux node without going through create.
 func seedAttachNode(a *app, id string) *Node {
 	n := &Node{ID: id, Title: id, Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
@@ -94,7 +84,7 @@ func TestPublicRouteUploadMultipartGuardAndSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedAttachNode(a, "n1")
-	h := attachmentAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Missing CSRF → 403 before the handler runs.
 	if rec := multipartOne(t, h, "/api/nodes/n1/attachments", "a.txt", []byte("x"), false); rec.Code != http.StatusForbidden {
@@ -211,7 +201,7 @@ func TestPublicRouteUploadSizeCapAndIngestRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedAttachNode(a, "n1")
-	h := attachmentAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Body larger than the cap (file payload alone exceeds attachUploadMax).
 	big := make([]byte, attachUploadMax+1)
@@ -284,7 +274,7 @@ func TestPublicRouteSendAttachmentResolveAndExpand(t *testing.T) {
 	}
 	seedAttachNode(a, "n1")
 	seedAttachNode(a, "n2")
-	h := attachmentAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Stage a real upload for n1 and a sibling for n2.
 	rec := multipartOne(t, h, "/api/nodes/n1/attachments", "ok.png", []byte("PNG"), true)
@@ -362,7 +352,7 @@ func TestPublicRouteAttachmentAndAssetGET(t *testing.T) {
 	}
 	seedAttachNode(a, "n1")
 	seedAttachNode(a, "n2")
-	h := attachmentAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Raster attachment: nosniff + pinned image type, inline (no disposition).
 	rec := multipartOne(t, h, "/api/nodes/n1/attachments", "pic.png", []byte("PNGDATA"), true)
@@ -542,7 +532,7 @@ func TestPublicRouteChatProjectsUploadAsset(t *testing.T) {
 		T: "user", Time: "2026-07-14T01:00:00Z",
 		Text: "check this out\n\n[attached image: /tmp/n1/photo.png]",
 	}))
-	h := attachmentAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	rec := routeRequest(h, http.MethodGet, "/api/nodes/c1/chat", "", false)
 	if rec.Code != http.StatusOK {
@@ -582,7 +572,7 @@ func TestPublicRouteDeleteArchivesAttachmentsAndAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedAttachNode(a, "n1")
-	h := attachmentAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Upload a small (inline) and force a blob-sized asset so both archive
 	// helpers have live material under attachments/ and assets/.

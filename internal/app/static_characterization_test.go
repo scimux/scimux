@@ -9,7 +9,7 @@ import (
 )
 
 func TestCharacterizationIndexRoute(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	rec := getCharacterization(t, h, "/")
 	if rec.Code != http.StatusOK {
@@ -45,7 +45,7 @@ func TestCharacterizationIndexRoute(t *testing.T) {
 }
 
 func TestCharacterizationAgentAssets(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	tests := []struct {
 		path      string
@@ -85,7 +85,7 @@ func TestCharacterizationAgentAssets(t *testing.T) {
 }
 
 func TestCharacterizationAssetDirectoryBehavior(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	noSlash := getCharacterization(t, h, "/assets")
 	if noSlash.Code != http.StatusMovedPermanently {
@@ -118,7 +118,7 @@ func TestCharacterizationAssetDirectoryBehavior(t *testing.T) {
 }
 
 func TestCharacterizationStaticNotFoundAndAllowlist(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, path := range []string{
 		"/favicon.ico",
@@ -146,7 +146,7 @@ func TestCharacterizationStaticNotFoundAndAllowlist(t *testing.T) {
 }
 
 func TestCharacterizationStaticDoesNotShadowAPI(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	licenses := getCharacterization(t, h, "/api/licenses")
 	if licenses.Code != http.StatusOK {

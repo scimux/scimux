@@ -19,16 +19,6 @@ import (
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
 
-// nodeAPIHandler builds the production router for public-route assertions.
-func nodeAPIHandler(t *testing.T, a *app) http.Handler {
-	t.Helper()
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 // ---------- create / fork ----------
 
 func TestPublicRouteCreateValidationAndLaunchFailure(t *testing.T) {
@@ -37,7 +27,7 @@ func TestPublicRouteCreateValidationAndLaunchFailure(t *testing.T) {
 	// binding (CSRF + Content-Type included).
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
-	h := nodeAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Empty body / missing required fields → 400, no new-session.
 	rec := routeRequest(h, http.MethodPost, "/api/nodes", `{}`, true)
@@ -66,7 +56,7 @@ func TestPublicRouteCreateValidationAndLaunchFailure(t *testing.T) {
 	// CLI message and rolls the session back.
 	f2 := &fakeTmux{capture: "API Error: model gone\n" + launchFailSentinel + " (status 1)\n"}
 	a2 := newTestApp(t, f2)
-	h2 := nodeAPIHandler(t, a2)
+	h2 := newTestHandler(t, a2)
 	rec = routeRequest(h2, http.MethodPost, "/api/nodes",
 		`{"title":"Fork","agent":"claude","dir":`+strconv.Quote(a2.home)+`}`, true)
 	if rec.Code == http.StatusOK {
@@ -83,7 +73,7 @@ func TestPublicRouteCreateValidationAndLaunchFailure(t *testing.T) {
 func TestPublicRouteCreateSuccessAndFork(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
-	h := nodeAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Root create succeeds through the public binding.
 	rec := routeRequest(h, http.MethodPost, "/api/nodes",
@@ -138,7 +128,7 @@ func TestPublicRouteAdoptSessionTransportAndTranscript(t *testing.T) {
 	}
 	a.byID["owner"] = a.nodes[0]
 	a.reserved = map[string]bool{"pending": true}
-	h := nodeAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Missing session → 400.
 	if rec := routeRequest(h, http.MethodPost, "/api/adopt", `{}`, true); rec.Code != http.StatusBadRequest {
@@ -200,7 +190,7 @@ func TestPublicRouteAdoptSessionTransportAndTranscript(t *testing.T) {
 func TestPublicRouteUpdateMetadataAndImmutableLane(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
-	h := nodeAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Seed via public create so the id is real.
 	rec := routeRequest(h, http.MethodPost, "/api/nodes",
@@ -257,7 +247,7 @@ func TestPublicRouteExitOwnedAdoptedAndStructured(t *testing.T) {
 	t.Run("owned", func(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{}}
 		a := newTestApp(t, f)
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		rec := routeRequest(h, http.MethodPost, "/api/nodes",
 			`{"title":"T","agent":"claude","dir":`+strconv.Quote(a.home)+`}`, true)
 		if rec.Code != http.StatusOK {
@@ -297,7 +287,7 @@ func TestPublicRouteExitOwnedAdoptedAndStructured(t *testing.T) {
 	t.Run("adopted", func(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{"live1": true}}
 		a := newTestApp(t, f)
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		rec := routeRequest(h, http.MethodPost, "/api/adopt",
 			`{"session":"live1","agent":"claude","dir":`+strconv.Quote(a.home)+`}`, true)
 		if rec.Code != http.StatusOK {
@@ -332,7 +322,7 @@ func TestPublicRouteExitOwnedAdoptedAndStructured(t *testing.T) {
 	t.Run("structured", func(t *testing.T) {
 		rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 		a, _ := newCodexTestApp(t, "THREAD-EXIT", rollout)
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		rec := routeRequest(h, http.MethodPost, "/api/nodes",
 			`{"title":"C","prompt":"hi","agent":"codex","dir":`+strconv.Quote(a.home)+`}`, true)
 		if rec.Code != http.StatusOK {
@@ -374,7 +364,7 @@ func TestPublicRouteExitOwnedAdoptedAndStructured(t *testing.T) {
 	// Missing node → 404.
 	t.Run("missing", func(t *testing.T) {
 		a := newTestApp(t, &fakeTmux{})
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		if rec := routeRequest(h, http.MethodPost, "/api/nodes/nope/exit", "", true); rec.Code != http.StatusNotFound {
 			t.Fatalf("missing exit: status = %d, want 404", rec.Code)
 		}
@@ -406,7 +396,7 @@ func TestPublicRouteDeletePersistCloseArchive(t *testing.T) {
 		if _, err := a.ingestAttachmentAsset("n1", "big.bin", "application/octet-stream", "/tmp/u", make([]byte, assetInlineCap+1)); err != nil {
 			t.Fatal(err)
 		}
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodDelete, "/api/nodes/n1", "", true)
 		if rec.Code != http.StatusOK {
@@ -458,7 +448,7 @@ func TestPublicRouteDeletePersistCloseArchive(t *testing.T) {
 		if err := os.Mkdir(a.storePath, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		rec := routeRequest(h, http.MethodDelete, "/api/nodes/n1", "", true)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("delete with broken store: status = %d, want 500", rec.Code)
@@ -477,7 +467,7 @@ func TestPublicRouteDeletePersistCloseArchive(t *testing.T) {
 		a := newTestApp(t, f)
 		a.nodes = []*Node{{ID: "n1", Title: "n1", Agent: "claude"}}
 		a.byID["n1"] = a.nodes[0]
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		rec := routeRequest(h, http.MethodDelete, "/api/nodes/n1", "", true)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("delete with kill failure: status = %d, want 500", rec.Code)
@@ -497,7 +487,7 @@ func TestPublicRouteDeletePersistCloseArchive(t *testing.T) {
 	// Missing node → 404.
 	t.Run("missing", func(t *testing.T) {
 		a := newTestApp(t, &fakeTmux{})
-		h := nodeAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		if rec := routeRequest(h, http.MethodDelete, "/api/nodes/nope", "", true); rec.Code != http.StatusNotFound {
 			t.Fatalf("missing delete: status = %d, want 404", rec.Code)
 		}
@@ -512,7 +502,7 @@ func TestPublicRouteAgents(t *testing.T) {
 	// detailed discovery behavior is covered separately with explicit fakes.
 	t.Setenv("PATH", t.TempDir())
 	a := newTestApp(t, &fakeTmux{})
-	h := nodeAPIHandler(t, a)
+	h := newTestHandler(t, a)
 	rec := routeRequest(h, http.MethodGet, "/api/agents", "", false)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/agents: status = %d body %q", rec.Code, rec.Body.String())

@@ -127,15 +127,6 @@ func TestCSRFIndexEmbedsToken(t *testing.T) {
 // multipart public routes, and TestHandleSendOversizedPrompt413. Does not
 // re-walk every unsafe API path.
 
-func securityHandler(t *testing.T) http.Handler {
-	t.Helper()
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 // securityCall exercises the production wrapper. body "" leaves Content-Type
 // unset unless setCT is non-empty.
 func securityCall(t *testing.T, h http.Handler, method, path, body, setCT string, headers map[string]string) *httptest.ResponseRecorder {
@@ -163,7 +154,7 @@ func securityCall(t *testing.T, h http.Handler, method, path, body, setCT string
 }
 
 func TestPublicSecuritySafeMethodsBypass(t *testing.T) {
-	h := securityHandler(t)
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	// GET is already covered by TestGuardMutations; characterize HEAD/OPTIONS
 	// through the production wrapper (index / known API).
 	for _, method := range []string{http.MethodHead, http.MethodOptions} {
@@ -186,7 +177,7 @@ func TestPublicSecuritySafeMethodsBypass(t *testing.T) {
 // Probe by combining failing earlier checks with later ones and asserting the
 // earlier error text wins.
 func TestPublicSecurityUnsafeRejectionOrder(t *testing.T) {
-	h := securityHandler(t)
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	path := "/api/nodes" // registered POST; also try unknown later
 
 	// 1) Cross-origin wins over missing/wrong CSRF and bad content type.
@@ -233,7 +224,7 @@ func TestPublicSecurityUnsafeRejectionOrder(t *testing.T) {
 }
 
 func TestPublicSecurityOriginAndReferer(t *testing.T) {
-	h := securityHandler(t)
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	// Use a bodyless registered unsafe route so content-type is not in play.
 	path := "/api/nodes/ghost/exit"
 
@@ -308,7 +299,7 @@ func TestPublicSecurityOriginAndReferer(t *testing.T) {
 }
 
 func TestPublicSecurityCSRFTokenCases(t *testing.T) {
-	h := securityHandler(t)
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	path := "/api/ui"
 	body := `{}`
 
@@ -348,7 +339,7 @@ func TestCSRFTokenShape(t *testing.T) {
 }
 
 func TestPublicSecurityBodylessAndContentTypes(t *testing.T) {
-	h := securityHandler(t)
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	// Bodyless unsafe request (no Content-Type) with valid token passes the
 	// guard; registered exit on unknown node → 404 from the handler.
@@ -408,7 +399,7 @@ func TestPublicSecurityBodylessAndContentTypes(t *testing.T) {
 
 func TestPublicSecurityUnknownUnsafeRouteOutermost(t *testing.T) {
 	// Complements TestNewHandlerMutationGuardIsOutermost with explicit error text.
-	h := securityHandler(t)
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	rec := securityCall(t, h, http.MethodPost, "/api/totally-unknown", `{}`, "application/json", nil)
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "missing or invalid CSRF token") {
 		t.Fatalf("unknown unsafe without CSRF: status=%d body=%q", rec.Code, rec.Body.String())

@@ -17,16 +17,6 @@ import (
 	"testing"
 )
 
-// uiStateAPIHandler builds the production router for public-route assertions.
-func uiStateAPIHandler(t *testing.T, a *app) http.Handler {
-	t.Helper()
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 // uiRoute issues a request through the production handler with optional CSRF
 // and revision headers. Empty body leaves Content-Type unset (GET/HEAD).
 func uiRoute(t *testing.T, h http.Handler, method, path, body string, csrf bool, headers map[string]string) *httptest.ResponseRecorder {
@@ -76,7 +66,7 @@ func TestPublicRouteUIBootstrapAndETag(t *testing.T) {
 	if _, err := os.Stat(a.uiPath); !os.IsNotExist(err) {
 		t.Fatalf("precondition: uiPath should be missing, stat err=%v", err)
 	}
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	rec := uiGet(t, h, "")
 	if rec.Code != http.StatusOK {
@@ -115,7 +105,7 @@ func TestPublicRouteUIExactBytesAndStableETag(t *testing.T) {
 	if err := os.WriteFile(a.uiPath, stored, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	rec := uiGet(t, h, "")
 	if rec.Code != http.StatusOK {
@@ -147,7 +137,7 @@ func TestPublicRouteUIMalformedStoredJSON(t *testing.T) {
 	if err := os.WriteFile(a.uiPath, malformed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	rec := uiGet(t, h, "")
 	if rec.Code != http.StatusInternalServerError {
@@ -184,7 +174,7 @@ func TestPublicRouteUIUnreadablePathShape(t *testing.T) {
 	if err := os.Mkdir(a.uiPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	rec := uiGet(t, h, "")
 	if rec.Code != http.StatusInternalServerError {
@@ -212,7 +202,7 @@ func TestPublicRouteUIPutValidationBeforeTouch(t *testing.T) {
 	if err := os.WriteFile(a.uiPath, prior, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// No If-Match → 428, stored state untouched.
 	rec := uiPut(t, h, `{"notes":[]}`, "")
@@ -253,7 +243,7 @@ func TestPublicRouteUIWildcardBootstrapAndMode(t *testing.T) {
 	if _, err := os.Stat(a.uiPath); !os.IsNotExist(err) {
 		t.Fatalf("precondition: uiPath should be missing")
 	}
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	body := `{"groups":[{"id":"g1"}],"notes":[]}`
 	rec := uiPut(t, h, body, "*")
@@ -300,7 +290,7 @@ func TestPublicRouteUIWildcardBootstrapAndMode(t *testing.T) {
 
 func TestPublicRouteUIMatchingUpdateAndStaleConflict(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Bootstrap.
 	if rec := uiPut(t, h, `{"v":1}`, "*"); rec.Code != http.StatusOK {
@@ -352,7 +342,7 @@ func TestPublicRouteUIMatchingUpdateAndStaleConflict(t *testing.T) {
 
 func TestPublicRouteUIConcurrentSameRevision(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 	if rec := uiPut(t, h, `{"base":true}`, "*"); rec.Code != http.StatusOK {
 		t.Fatalf("bootstrap: %d", rec.Code)
 	}
@@ -425,7 +415,7 @@ func TestPublicRouteUITempWriteFailureLeavesPrior(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(tmp) })
-	h := uiStateAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// GET still serves the prior document.
 	g := uiGet(t, h, "")

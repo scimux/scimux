@@ -11,90 +11,15 @@ import (
 )
 
 func TestNewHandlerEmbeddedWebFSConstructs(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	rec := routeRequest(h, http.MethodGet, "/", "", false)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", rec.Code)
 	}
 }
 
-func TestNewHandlerAPIRouteInventory(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, route := range characterizationAPIRoutes() {
-		t.Run(route.method+" "+route.pattern, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodOptions, "http://127.0.0.1:8787"+route.path, nil)
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-			if rec.Code != http.StatusMethodNotAllowed {
-				t.Fatalf("OPTIONS %s status = %d, want 405", route.path, rec.Code)
-			}
-			if !allowContains(rec.Header().Get("Allow"), route.method) {
-				t.Fatalf("OPTIONS %s Allow = %q, want %q", route.path, rec.Header().Get("Allow"), route.method)
-			}
-		})
-	}
-}
-
-func TestNewHandlerRepresentativeBindings(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name   string
-		method string
-		path   string
-		body   string
-		csrf   bool
-		want   int
-	}{
-		{"state", http.MethodGet, "/api/state", "", false, http.StatusOK},
-		{"licenses", http.MethodGet, "/api/licenses", "", false, http.StatusOK},
-		{"new node invalid", http.MethodPost, "/api/nodes", `{}`, true, http.StatusBadRequest},
-		{"ui put missing if-match", http.MethodPut, "/api/ui", `{}`, true, http.StatusPreconditionRequired},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := routeRequest(h, tt.method, tt.path, tt.body, tt.csrf)
-			if rec.Code != tt.want {
-				t.Fatalf("%s %s status = %d, want %d; body=%q", tt.method, tt.path, rec.Code, tt.want, rec.Body.String())
-			}
-			if rec.Code == http.StatusNotFound {
-				t.Fatalf("%s %s reached generic 404", tt.method, tt.path)
-			}
-		})
-	}
-}
-
-func TestNewHandlerMutationGuard(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, route := range characterizationAPIRoutes() {
-		if route.method == http.MethodGet {
-			continue
-		}
-		t.Run(route.method+" "+route.pattern+" without csrf", func(t *testing.T) {
-			rec := routeRequest(h, route.method, route.path, `{}`, false)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("%s %s without CSRF status = %d, want 403; body=%q", route.method, route.path, rec.Code, rec.Body.String())
-			}
-		})
-	}
-}
-
 func TestNewHandlerMutationGuardIsOutermost(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	withoutCSRF := routeRequest(h, http.MethodPost, "/api/not-a-route", `{}`, false)
 	if withoutCSRF.Code != http.StatusForbidden {
 		t.Fatalf("unknown unsafe route without CSRF status = %d, want 403", withoutCSRF.Code)
@@ -106,10 +31,7 @@ func TestNewHandlerMutationGuardIsOutermost(t *testing.T) {
 }
 
 func TestNewHandlerStaticDoesNotShadowAPI(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	rec := routeRequest(h, http.MethodGet, "/api/licenses", "", false)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/licenses status = %d, want 200; body=%q", rec.Code, rec.Body.String())
@@ -123,10 +45,7 @@ func TestNewHandlerStaticDoesNotShadowAPI(t *testing.T) {
 }
 
 func TestNewHandlerConstructsCurrentStaticBehavior(t *testing.T) {
-	h, err := NewHandler(newTestApp(t, &fakeTmux{}), webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	index := routeRequest(h, http.MethodGet, "/", "", false)
 	if got := index.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
 		t.Fatalf("GET / Content-Type = %q, want text/html; charset=utf-8", got)
@@ -251,6 +170,17 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newTestHandler builds the production router for tests. Shared across package
+// app tests; fatals on construction error (call NewHandler raw when asserting failure).
+func newTestHandler(t *testing.T, a *app) http.Handler {
+	t.Helper()
+	h, err := NewHandler(a, webFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
 }
 
 func routeRequest(h http.Handler, method, path, body string, csrf bool) *httptest.ResponseRecorder {

@@ -12,14 +12,6 @@ import (
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
 
-// fare returns the node's whole-journey FareTotals, cache-backed so an idle
-// poll is a stat rather than a full-log fold. Defensive: bare test apps and
-// missing logs yield Turns==0 (projector omits fare fields — absent ≠ zero).
-func (a *app) fare(n *Node) fare.FareTotals {
-	f, _ := a.fareAndRides(n)
-	return f
-}
-
 // fareAndRides returns whole-journey totals and per-segment rides (V2-P2).
 func (a *app) fareAndRides(n *Node) (fare.FareTotals, []fare.Ride) {
 	if a.sessionsDir == "" {

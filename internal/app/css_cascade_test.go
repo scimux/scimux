@@ -439,7 +439,7 @@ func TestProductionCSSTransitionContract(t *testing.T) {
 		t.Fatal("assembled production CSS must not contain @import")
 	}
 
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	// Per-href serving for every linked sheet. The dedicated *CSSServing tests
 	// cover tokens/base/layout/cards/map/chat/sheets/notes/accessibility; this
@@ -481,7 +481,7 @@ func TestProductionCSSTransitionContract(t *testing.T) {
 // TestProductionCSSNegativeRootsPreserved keeps the existing static negative
 // surface green alongside the transition contract without weakening it.
 func TestProductionCSSNegativeRootsPreserved(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	for _, path := range []string{
 		"/css/",
 		"/css/app.css",
@@ -644,7 +644,7 @@ func TestProductionTokensAndBaseCSSOwnership(t *testing.T) {
 // TestProductionTokensAndBaseCSSServing activates the 5A exact-byte, content-
 // type, cache, nosniff, and negative-path contracts for the two linked files.
 func TestProductionTokensAndBaseCSSServing(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, href := range []string{"/css/tokens.css", "/css/base.css"} {
 		t.Run("ok"+href, func(t *testing.T) {
@@ -968,7 +968,7 @@ func TestProductionLayoutCardsMapCSSOwnership(t *testing.T) {
 // TestProductionLayoutCardsMapCSSServing activates the 5A exact-byte, content-
 // type, cache, nosniff, and negative-path contracts for the three new linked files.
 func TestProductionLayoutCardsMapCSSServing(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, href := range []string{"/css/layout.css", "/css/cards.css", "/css/map.css"} {
 		t.Run("ok"+href, func(t *testing.T) {
@@ -1242,7 +1242,7 @@ func TestProductionChatSheetsCSSOwnership(t *testing.T) {
 // TestProductionChatSheetsCSSServing activates the 5A exact-byte, content-
 // type, cache, nosniff, and negative-path contracts for the two new linked files.
 func TestProductionChatSheetsCSSServing(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, href := range []string{"/css/chat.css", "/css/sheets.css"} {
 		t.Run("ok"+href, func(t *testing.T) {
@@ -1583,7 +1583,7 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 // content-type, cache, nosniff, and negative-path contracts for the two new
 // linked files.
 func TestProductionNotesAccessibilityCSSServing(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, href := range []string{"/css/notes.css", "/css/accessibility.css"} {
 		t.Run("ok"+href, func(t *testing.T) {

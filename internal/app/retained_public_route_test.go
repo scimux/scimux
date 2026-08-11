@@ -29,21 +29,12 @@ import (
 	"codeberg.org/chrberger/scimux/internal/notestore"
 )
 
-func retainedPublicHandler(t *testing.T, a *app) http.Handler {
-	t.Helper()
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 // TestPublicRouteNotesLifecycle exercises the complete notes route family
 // through NewHandler as one private-store lifecycle. Complements — does not
 // replace — the detailed direct notestore/HTTP tests in notes_http_test.go.
 func TestPublicRouteNotesLifecycle(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	h := retainedPublicHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// GET list — empty sparse list.
 	rec := routeRequest(h, http.MethodGet, "/api/notes", "", false)
@@ -181,7 +172,7 @@ func TestPublicRouteUpdateCheckAndApplyValidation(t *testing.T) {
 	withUpdateSeams(t, srv.URL, "v1.0.0")
 
 	a := newTestApp(t, &fakeTmux{})
-	h := retainedPublicHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// GET check via public wrapper → available update for older current version.
 	rec := routeRequest(h, http.MethodGet, "/api/update/check", "", false)
@@ -227,7 +218,7 @@ func TestPublicRouteUpdateCheckAndApplyValidation(t *testing.T) {
 // have public coverage elsewhere — a single smoke map, not a behavioral matrix.
 func TestPublicRouteRetainedRepresentatives(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	h := retainedPublicHandler(t, a)
+	h := newTestHandler(t, a)
 
 	tests := []struct {
 		name   string

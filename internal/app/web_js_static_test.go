@@ -33,7 +33,7 @@ var productionJSURLs = []string{
 // TestProductionJSServeHeadersAndBytes locks exact embedded JS bytes plus
 // JavaScript content type, no-store, and nosniff for every production module.
 func TestProductionJSServeHeadersAndBytes(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	for _, href := range productionJSURLs {
 		t.Run("ok"+href, func(t *testing.T) {
 			embedPath := "web" + href // /js/foo.js -> web/js/foo.js
@@ -64,7 +64,7 @@ func TestProductionJSServeHeadersAndBytes(t *testing.T) {
 // TestProductionJSNegativeRoots rejects directory listing, missing, nested,
 // traversal/encoded traversal, non-JS, raw-source, test, and package paths.
 func TestProductionJSNegativeRoots(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	for _, pathURL := range []string{
 		"/js/",
 		"/js/missing.js",

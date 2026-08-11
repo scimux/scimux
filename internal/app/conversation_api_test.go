@@ -25,16 +25,6 @@ import (
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
-// conversationAPIHandler builds the production router for public-route assertions.
-func conversationAPIHandler(t *testing.T, a *app) http.Handler {
-	t.Helper()
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 // seedTmuxNode registers a live-looking tmux node without going through create.
 func seedTmuxNode(a *app, id string) *Node {
 	n := &Node{ID: id, Title: id, Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"}
@@ -50,7 +40,7 @@ func TestPublicRouteUnknownAndEndedConversation(t *testing.T) {
 	a := newTestApp(t, f)
 	n := seedTmuxNode(a, "live")
 	n.EndedAt = "2026-07-23T00:00:00Z"
-	h := conversationAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Unknown node → 404 on every conversation route.
 	unknown := []struct {
@@ -107,7 +97,7 @@ func TestPublicRouteSendValidationAndDelivery(t *testing.T) {
 	a := newTestApp(t, f)
 	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
 	seedTmuxNode(a, "n1")
-	h := conversationAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Empty text with no attachments → 400.
 	if rec := routeRequest(h, http.MethodPost, "/api/nodes/n1/send", `{"text":"  "}`, true); rec.Code != http.StatusBadRequest {
@@ -152,7 +142,7 @@ func TestPublicRouteSendValidationAndDelivery(t *testing.T) {
 	a2 := newTestApp(t, f2)
 	a2.server.PasteDelay, a2.server.AckPoll = time.Millisecond, time.Millisecond
 	seedTmuxNode(a2, "n2")
-	h2 := conversationAPIHandler(t, a2)
+	h2 := newTestHandler(t, a2)
 	rec = routeRequest(h2, http.MethodPost, "/api/nodes/n2/send", `{"text":"go"}`, true)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"acknowledged"`) {
 		t.Fatalf("acknowledged send: status = %d body %q", rec.Code, rec.Body.String())
@@ -185,7 +175,7 @@ func TestPublicRouteSendClearRetiresTranscript(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := conversationAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	rec := routeRequest(h, http.MethodPost, "/api/nodes/c1/send", `{"text":"  /clear  "}`, true)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "acknowledged") {
@@ -230,7 +220,7 @@ func TestPublicRouteStructuredSendClearAndConflict(t *testing.T) {
 		spawn, requests := newFakeCodexSpawn(t, "THREAD-CLR-R", rollout)
 		a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
 		t.Cleanup(a.codex.Shutdown)
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodPost, "/api/nodes",
 			`{"title":"C","prompt":"ping","agent":"codex","dir":`+strconv.Quote(a.home)+`}`, true)
@@ -277,7 +267,7 @@ func TestPublicRouteStructuredSendClearAndConflict(t *testing.T) {
 		logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
 		a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
 		t.Cleanup(a.codex.Shutdown)
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodPost, "/api/nodes",
 			`{"title":"X","prompt":"do x","agent":"codex","dir":`+strconv.Quote(a.home)+`}`, true)
@@ -309,7 +299,7 @@ func TestPublicRouteInterruptTmuxAndStructured(t *testing.T) {
 		a := newTestApp(t, f)
 		seedTmuxNode(a, "t1")
 		a.sendState["t1"] = "unconfirmed"
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodPost, "/api/nodes/t1/send/interrupt", "", true)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "interrupted") {
@@ -363,7 +353,7 @@ func TestPublicRouteInterruptTmuxAndStructured(t *testing.T) {
 			Dir: a.home, CreatedAt: "2026-07-14T00:00:00Z"}
 		a.nodes = append(a.nodes, n)
 		a.byID[n.ID] = n
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodPost, "/api/nodes/phantom/send/interrupt", "", true)
 		if rec.Code == http.StatusOK {
@@ -388,7 +378,7 @@ func TestPublicRouteKeyWhitelistAndAuditOrder(t *testing.T) {
 		seedTmuxNode(a, "k1")
 		a.attn["k1"] = "approval"
 		a.attnAt["k1"] = time.Now().Add(-30 * time.Second)
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		// Disallowed key rejected before any tmux contact.
 		if rec := routeRequest(h, http.MethodPost, "/api/nodes/k1/key", `{"key":"q"}`, true); rec.Code != http.StatusBadRequest {
@@ -461,7 +451,7 @@ func TestPublicRouteKeyWhitelistAndAuditOrder(t *testing.T) {
 		logDir := filepath.Join(filepath.Dir(a.storePath), "codex")
 		a.codex = codexManager{codex.NewManagerWithSpawn(logDir, spawn)}
 		t.Cleanup(a.codex.Shutdown)
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodPost, "/api/nodes",
 			`{"prompt":"do it","title":"T","agent":"codex","dir":`+strconv.Quote(a.home)+`}`, true)
@@ -522,7 +512,7 @@ func TestPublicRoutePeekTmuxAndStructured(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{"p1": true}, capture: "PANE CONTENT"}
 		a := newTestApp(t, f)
 		seedTmuxNode(a, "p1")
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodGet, "/api/nodes/p1/peek", "", false)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "PANE CONTENT") {
@@ -548,7 +538,7 @@ func TestPublicRoutePeekTmuxAndStructured(t *testing.T) {
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
 		n := seedTmuxNode(a, "p2")
 		n.Transcript = path
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 
 		rec := routeRequest(h, http.MethodGet, "/api/nodes/p2/peek", "", false)
 		if rec.Code != http.StatusOK {
@@ -562,7 +552,7 @@ func TestPublicRoutePeekTmuxAndStructured(t *testing.T) {
 	t.Run("structured_session_log_peek", func(t *testing.T) {
 		rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 		a, _ := newCodexTestApp(t, "THREAD-PEEK", rollout)
-		h := conversationAPIHandler(t, a)
+		h := newTestHandler(t, a)
 		rec := routeRequest(h, http.MethodPost, "/api/nodes",
 			`{"title":"P","prompt":"hi","agent":"codex","dir":`+strconv.Quote(a.home)+`}`, true)
 		if rec.Code != http.StatusOK {
@@ -618,7 +608,7 @@ func TestPublicRouteChatSegmentHistoryAndAssets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := conversationAPIHandler(t, a)
+	h := newTestHandler(t, a)
 
 	// Polled chat: segment-scoped, prior_turns, asset projection, transport overlay.
 	rec := routeRequest(h, http.MethodGet, "/api/nodes/c1/chat", "", false)
@@ -689,7 +679,7 @@ func TestPublicRouteChatSegmentHistoryAndAssets(t *testing.T) {
 	// Structured chat overlay: source "acp".
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	a2, _ := newCodexTestApp(t, "THREAD-CHAT-R", rollout)
-	h2 := conversationAPIHandler(t, a2)
+	h2 := newTestHandler(t, a2)
 	rec = routeRequest(h2, http.MethodPost, "/api/nodes",
 		`{"title":"Q","prompt":"q","agent":"codex","dir":`+strconv.Quote(a2.home)+`}`, true)
 	if rec.Code != http.StatusOK {

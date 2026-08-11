@@ -57,17 +57,8 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 	}
 }
 
-func newCharacterizationHandler(t *testing.T, a *app) http.Handler {
-	t.Helper()
-	h, err := NewHandler(a, webFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 func TestCharacterizationAPIRouteInventory(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, route := range characterizationAPIRoutes() {
 		t.Run(route.method+" "+route.pattern, func(t *testing.T) {
@@ -87,7 +78,7 @@ func TestCharacterizationAPIRouteInventory(t *testing.T) {
 }
 
 func TestCharacterizationRepresentativeBindings(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	tests := []struct {
 		name        string
@@ -133,7 +124,7 @@ func TestCharacterizationRepresentativeBindings(t *testing.T) {
 }
 
 func TestCharacterizationMutationGuard(t *testing.T) {
-	h := newCharacterizationHandler(t, newTestApp(t, &fakeTmux{}))
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 
 	for _, route := range characterizationAPIRoutes() {
 		if route.method == http.MethodGet {
