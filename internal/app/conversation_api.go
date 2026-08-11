@@ -696,6 +696,7 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	resp["perm_title"] = pending.Title
 	resp["perm_options"] = pending.Options
 	resp["perm_tool_kind"] = pending.ToolKind
+	resp["perm_reason"] = pending.Reason
 }
 
 // tmuxKeySequence maps a semantic web choice to the physical tmux key

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -290,11 +291,14 @@ func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 }
 
 // PendingPermission is the UI-facing view of one outstanding approval: a title,
-// the tool's kind when known, and the answerable options. Empty ToolKind or
-// option Kind means "unknown" — never an error, never a guess.
+// the tool's kind when known, an optional reason, and the answerable options.
+// Empty ToolKind, option Kind, or Reason means "unknown" — never an error,
+// never a guess. Shape matches acp.PendingPermission so the HTTP/UI layer
+// treats both transports identically.
 type PendingPermission struct {
 	Title    string
 	ToolKind string
+	Reason   string // why the agent is asking; empty when unknown
 	Options  []PermOption
 }
 
@@ -599,6 +603,7 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 	return PendingPermission{
 		Title:    approvalTitle(a),
 		ToolKind: mapApprovalToolKind(a),
+		Reason:   a.Reason,
 		Options:  opts,
 	}, true
 }
@@ -647,8 +652,19 @@ func decisionPresentation(d Decision) (string, string) {
 	}
 }
 
-// mapApprovalToolKind is "execute" when the approval carries a command, else "".
+// mapApprovalToolKind classifies the ask for the UI body element (PERM_CODE_KINDS).
+// Kind comes from what the approval is — method first, then Command as a
+// legacy fallback — never from whether a title string happens to look like code.
 func mapApprovalToolKind(a Approval) string {
+	switch a.Method {
+	case "item/commandExecution/requestApproval", "execCommandApproval":
+		return "execute"
+	case "item/fileChange/requestApproval", "applyPatchApproval":
+		return "edit"
+	case "item/permissions/requestApproval":
+		// Prose scope description → .permtext, not <pre>.
+		return ""
+	}
 	if a.Command != "" {
 		return "execute"
 	}
@@ -698,13 +714,100 @@ func mapKeyToDecision(key string, ds []Decision) (int, bool) {
 	return 0, false
 }
 
-// approvalTitle is the one-line label of an approval: the proposed command when
-// there is one, otherwise the request method.
+// approvalTitle is the supervisor-facing ask body. Prefer payload fields the
+// codex app-server documents over the JSON-RPC method name:
+//
+//   - commandExecution: the command string (unchanged)
+//   - fileChange: grantRoot when present ("File changes under …"); method fallback
+//   - permissions: a short scope summary from permissions.fileSystem / network
+//
+// Field names are taken from the official codex app-server README and the
+// synthetic fixtures in this package — never invented. Missing keys fall
+// through; empty/malformed params degrade to the method name (or "approval").
 func approvalTitle(a Approval) string {
 	if a.Command != "" {
 		return a.Command
 	}
-	return a.Method
+	switch a.Method {
+	case "item/fileChange/requestApproval", "applyPatchApproval":
+		if t := fileChangeTitle(a); t != "" {
+			return t
+		}
+	case "item/permissions/requestApproval":
+		if t := permissionsTitle(a); t != "" {
+			return t
+		}
+	}
+	if a.Method != "" {
+		return a.Method
+	}
+	return "approval"
+}
+
+// fileChangeTitle reads optional grantRoot from Raw. The app-server docs say
+// the approval carries itemId/threadId/turnId, optional reason, and may include
+// unstable grantRoot; the actual per-file diffs live on item/started, not here.
+// We never invent a path — absent grantRoot yields "".
+func fileChangeTitle(a Approval) string {
+	var p struct {
+		GrantRoot string `json:"grantRoot"`
+	}
+	if len(a.Raw) == 0 || json.Unmarshal(a.Raw, &p) != nil {
+		return ""
+	}
+	if p.GrantRoot == "" {
+		return ""
+	}
+	return "File changes under " + p.GrantRoot
+}
+
+// permissionsTitle summarises the requested scope from the documented v2 shape:
+// permissions.fileSystem.write|read path arrays and permissions.network.enabled.
+// Unknown or empty objects yield "" so the caller can fall back to the method.
+func permissionsTitle(a Approval) string {
+	var p struct {
+		Permissions struct {
+			Network    json.RawMessage `json:"network"`
+			FileSystem json.RawMessage `json:"fileSystem"`
+		} `json:"permissions"`
+	}
+	if len(a.Raw) == 0 || json.Unmarshal(a.Raw, &p) != nil {
+		return ""
+	}
+	var parts []string
+	if len(p.Permissions.FileSystem) > 0 && string(p.Permissions.FileSystem) != "null" {
+		var fs struct {
+			Write []string `json:"write"`
+			Read  []string `json:"read"`
+		}
+		if json.Unmarshal(p.Permissions.FileSystem, &fs) == nil {
+			if len(fs.Write) > 0 {
+				parts = append(parts, "filesystem write: "+strings.Join(fs.Write, ", "))
+			}
+			if len(fs.Read) > 0 {
+				parts = append(parts, "filesystem read: "+strings.Join(fs.Read, ", "))
+			}
+		}
+	}
+	if len(p.Permissions.Network) > 0 && string(p.Permissions.Network) != "null" {
+		var net struct {
+			Enabled *bool `json:"enabled"`
+		}
+		// Documented form: network.enabled. A non-null network object without
+		// a parseable enabled flag still means a network ask.
+		if json.Unmarshal(p.Permissions.Network, &net) == nil {
+			if net.Enabled != nil && *net.Enabled {
+				parts = append(parts, "network access")
+			} else if net.Enabled == nil {
+				// Object present but no enabled key — mention network generically.
+				parts = append(parts, "network access")
+			}
+			// enabled:false is a deny request shape we do not invent labels for.
+		} else {
+			parts = append(parts, "network access")
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // --- turn lifecycle ---

@@ -340,10 +340,11 @@ type PermOption struct {
 }
 
 // PendingPermission is the UI-facing view of one outstanding approval on a
-// structured-transport node. Empty ToolKind means "unknown".
+// structured-transport node. Empty ToolKind or Reason means "unknown".
 type PendingPermission struct {
 	Title    string
 	ToolKind string
+	Reason   string // why the agent is asking; empty when unknown
 	Options  []PermOption
 }
 
@@ -394,7 +395,7 @@ func (m acpManager) Pending(id string) (PendingPermission, bool) {
 	for i, o := range p.Options {
 		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
 	}
-	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Options: out}, true
+	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
 }
 
 func (m acpManager) Conflict(err error) bool {
@@ -413,7 +414,7 @@ func (m codexManager) Pending(id string) (PendingPermission, bool) {
 	for i, o := range p.Options {
 		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
 	}
-	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Options: out}, true
+	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
 }
 
 func (m codexManager) Conflict(err error) bool {

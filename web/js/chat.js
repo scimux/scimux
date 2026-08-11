@@ -200,6 +200,7 @@ export function buildChatSignature(parts){
     p.termFull,
     p.source,
     p.permTitle,
+    p.permReason || "",
     p.permOptionsKey,
     p.priorTurns || 0,
     p.chatStarted || "",
@@ -433,9 +434,11 @@ function permOptionClass(kind){
   return PERM_KIND_CLASS[kind] || "unknown";
 }
 
-/* Pure core for the approval "show all" measure pass. Vertical overflow only:
-   .permcode is white-space:pre; overflow-x:auto, so a long single-line command
-   can be wide without needing expand (expand only lifts the vertical clamp).
+/* Pure core for the approval "show all" measure pass. Vertical overflow only
+   (scrollHeight vs clientHeight). .permcode uses white-space:pre-wrap and
+   overflow-wrap:anywhere so a long single-line command wraps into line boxes
+   under the 3-line clamp; that vertical growth is what unhides "show all"
+   (G1a). Horizontal scroll is not the read path.
 
    Three states, not two. With no layout box — body.map-full hides #chat while
    polling keeps rendering it — the element measures 0x0, and reading that as
@@ -454,7 +457,7 @@ export function permMoreDecision(scrollHeight, clientHeight){
 
 export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
-  permToolKind = "", expanded = false,
+  permToolKind = "", permReason = "", expanded = false,
   escape = esc,
 } = {}){
   if (!attention || attentionHidden) return "";
@@ -472,10 +475,15 @@ export function keyRowHTML({
     /* Start hidden; revealPermMoreIfNeeded unhides only when .permask overflows
        vertically. Single-line asks must not get a dead control. */
     const more = expanded ? "" : `<button class="permmore" hidden>show all</button>`;
+    /* Reason is a distinct line above verb+body (G1b). Same dimmed chrome as
+       .permverb so they cannot collapse into one visual line. Empty = omit. */
+    const reason = (permReason && String(permReason)) || "";
+    const reasonEl = reason
+      ? `<div class="permreason">${escape(reason)}</div>` : "";
     const verbEl = verb ? `<div class="permverb">${escape(verb)}</div>` : "";
     /* .permmore is a sibling of .permask — inside the clamp it is clipped
        whenever the ask exceeds three lines (the exact moment it is needed). */
-    const mask = `<div class="permask${clamp}">${verbEl}${body}</div>`;
+    const mask = `<div class="permask${clamp}">${reasonEl}${verbEl}${body}</div>`;
     const btns = `<div class="permbtns">${opts.map(o => {
       const { label, title } = permOptionLabel(o);
       const cls = permOptionClass(o.kind);
@@ -1177,6 +1185,7 @@ export function createChatFeature(deps){
       showPeek, termOpen, termFull,
       source: data.source,
       permTitle: data.perm_title,
+      permReason: data.perm_reason || "",
       permOptionsKey: permOptionsKey(data.perm_options),
       priorTurns: data.prior_turns || 0,
       chatStarted: data.chat_started || "",
@@ -1331,6 +1340,7 @@ export function createChatFeature(deps){
         permTitle: data.perm_title,
         permOptions: data.perm_options,
         permToolKind: data.perm_tool_kind || "",
+        permReason: data.perm_reason || "",
         expanded,
         escape,
       });

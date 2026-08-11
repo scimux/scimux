@@ -428,6 +428,124 @@ test("keyRowHTML: never md() on perm_title; payload escapes; structure and kinds
   assert.doesNotMatch(open, /permmore/);
 });
 
+/* G1b: reason is a distinct dimmed line above the ask body (.permreason),
+ * not mixed into .permverb or the code/prose body. Escaped, optional. */
+test("G1b: keyRowHTML renders permReason above the body, escaped and distinct", () => {
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `curl example.com`",
+    permToolKind: "execute",
+    permReason: "DNS failed. Allow <network>?",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: true,
+  });
+  assert.match(html, /class="permreason"/, "reason has its own class");
+  assert.match(html, /DNS failed\. Allow &lt;network&gt;\?/,
+    "reason must be HTML-escaped");
+  assert.doesNotMatch(html, /Allow <network>/, "raw angle brackets must not land");
+  // Order: reason, then verb, then body — not the same visual line.
+  const reasonIdx = html.indexOf("permreason");
+  const verbIdx = html.indexOf("permverb");
+  const codeIdx = html.indexOf("permcode");
+  assert.ok(reasonIdx >= 0 && verbIdx > reasonIdx && codeIdx > verbIdx,
+    "order is reason → verb → body");
+  // Verb and reason are separate elements.
+  assert.match(html, /class="permreason"[^>]*>DNS failed/);
+  assert.match(html, /class="permverb"[^>]*>Execute</);
+
+  // Absent reason: no .permreason element.
+  const noReason = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `ls`",
+    permToolKind: "execute",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: true,
+  });
+  assert.doesNotMatch(noReason, /permreason/,
+    "empty/absent reason must not emit a dead line");
+});
+
+/* Cross-agent matrix (P1 deliverable): codex / grok / pi / opencode share one
+ * keyRowHTML path. Pins body element choice, reachability, buttons, escaping
+ * across tool kinds × title shapes × reason presence. */
+test("P1 matrix: body element, reachability, buttons, escape across agents", () => {
+  const CODE_KINDS = new Set(["execute", "edit", "read", "search"]);
+  const kinds = ["execute", "edit", "read", "search", "think", "fetch", "other", ""];
+  const titles = {
+    short: "ls -la",
+    long: "x".repeat(400),
+    multi: "cat <<EOF\n  indented line\nEOF",
+  };
+  const reasons = {
+    present: "DNS failed — allow <net>?",
+    absent: "",
+  };
+  const opts = [
+    { key: "1", name: "Allow once", kind: "allow" },
+    { key: "2", name: "Reject once", kind: "reject" },
+  ];
+  let rows = 0;
+  for (const kind of kinds){
+    for (const [titleKey, title] of Object.entries(titles)){
+      for (const [reasonKey, reason] of Object.entries(reasons)){
+        rows++;
+        const label = `kind=${kind||"(empty)"} title=${titleKey} reason=${reasonKey}`;
+        const poisonTitle = title + "<script>x</script>";
+        const html = keyRowHTML({
+          attention: "approval", source: "acp",
+          permTitle: poisonTitle,
+          permToolKind: kind,
+          permReason: reason,
+          permOptions: opts,
+          expanded: false,
+        });
+        const wantCode = CODE_KINDS.has(kind);
+        if (wantCode){
+          assert.match(html, /<pre class="permcode">/, `${label}: code body`);
+          assert.doesNotMatch(html, /class="permtext"/, `${label}: not prose`);
+        } else {
+          assert.match(html, /class="permtext"/, `${label}: prose body`);
+          assert.doesNotMatch(html, /<pre class="permcode">/, `${label}: not code`);
+        }
+        /* Full ask is in the DOM (clamp is CSS-only). Poison is escaped. */
+        assert.match(html, /&lt;script&gt;/, `${label}: title escaped`);
+        assert.doesNotMatch(html, /<script>/, `${label}: no raw script`);
+        if (titleKey === "long"){
+          assert.match(html, /x{400}/, `${label}: full long command present`);
+        }
+        if (titleKey === "multi"){
+          assert.match(html, /indented line/, `${label}: multi-line body kept`);
+          assert.match(html, /  indented/, `${label}: leading indent survives in HTML`);
+        }
+        if (reasonKey === "present"){
+          assert.match(html, /class="permreason"/, `${label}: reason line`);
+          assert.match(html, /allow &lt;net&gt;\?/, `${label}: reason escaped`);
+        } else {
+          assert.doesNotMatch(html, /permreason/, `${label}: no reason line`);
+        }
+        /* Collapsed always emits show-all control (measure pass may unhide). */
+        assert.match(html, /class="permmore"/, `${label}: show all available`);
+        assert.match(html, /class="permask clamped"/, `${label}: clamped mask`);
+        /* Answer buttons with 44px targets still emitted. */
+        assert.match(html, /class="permbtns"/, `${label}: buttons row`);
+        assert.match(html, /data-key="1"/, `${label}: allow button`);
+        assert.match(html, /data-key="2"/, `${label}: reject button`);
+        assert.match(html, /class="permbtn allow"/, `${label}: allow class`);
+        assert.match(html, /class="permbtn reject"/, `${label}: reject class`);
+      }
+    }
+  }
+  assert.equal(rows, kinds.length * Object.keys(titles).length * Object.keys(reasons).length,
+    "matrix row count");
+  /* Structural pin: .permcode wraps so long single-line can grow vertically. */
+  const codeBody = permcodeRuleBody(chatCssSrc);
+  assert.match(codeBody, /white-space\s*:\s*pre-wrap/);
+  /* Short-viewport pin: .permbtns stays flex: 0 0 auto so 44px targets survive. */
+  const btns = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
+  assert.ok(btns, ".permbtns rule");
+  assert.match(btns[1], /flex\s*:\s*0\s+0\s+auto/);
+});
+
 test("keyRowHTML: code vs prose and codex label fallback", () => {
   // codex bare command + permToolKind execute → <pre class="permcode">
   const codex = keyRowHTML({
@@ -1832,9 +1950,67 @@ test("expanded rebuild restores non-zero .permask scrollTop", async () => {
 /* ---------- P2: the approval row — reject colour + conditional "show all" ----------
  * (a) .permbtn.reject must not shout --danger: declining is the safe branch;
  *     --attn is the attention surface; --danger stays for delete/archive.
- * (b) .permmore starts hidden and is revealed only when .permask overflows
- *     vertically (horizontal overflow of a long single-line .permcode must not
- *     unhide it). Case 8 is the existing expanded:true test above — stays green. */
+ * (b) .permmore starts hidden and is revealed when .permask overflows
+ *     vertically. A long single-line .permcode wraps (pre-wrap + word-break),
+ *     so it grows line boxes and CAN unhide "show all" — G1a. Case 8 is the
+ *     existing expanded:true test above — stays green. */
+
+function permcodeRuleBody(css){
+  const m = css.match(/\.permcode\s*\{([^}]+)\}/);
+  assert.ok(m, ".permcode rule present");
+  return m[1];
+}
+
+/* G1a: structural — a 400-char single-line command must produce multiple line
+ * boxes, not one wide pre row. pre-wrap keeps leading whitespace (heredocs);
+ * word-break / overflow-wrap lets unbroken tokens wrap inside the clamp. */
+test("G1a: .permcode wraps long single-line commands (pre-wrap + break)", () => {
+  const body = permcodeRuleBody(chatCssSrc);
+  assert.match(body, /white-space\s*:\s*pre-wrap/,
+    "pre-wrap: keep indentation, allow soft wraps at line ends");
+  assert.ok(
+    /overflow-wrap\s*:\s*(anywhere|break-word)/.test(body) ||
+      /word-break\s*:\s*break-all/.test(body) ||
+      /word-break\s*:\s*break-word/.test(body),
+    "word-break or overflow-wrap so a 400-char token wraps into line boxes");
+  assert.doesNotMatch(body, /white-space\s*:\s*pre\s*;/,
+    "plain pre (no wrap) is the G1a bug — long commands stay one line box");
+  assert.doesNotMatch(body, /overflow-x\s*:\s*auto/,
+    "horizontal scroll is no longer the only way to read a long command");
+  /* Keep the monospace shell-code chrome. */
+  assert.match(body, /ui-monospace|monospace/);
+  assert.match(body, /border-radius/);
+  assert.match(body, /padding/);
+  assert.match(body, /background/);
+});
+
+/* G1a: invert the stale "horizontal overflow must not unhide" contract.
+ * A long single-line .permcode ask, once wrapped, overflows the 3-line clamp
+ * vertically and the measure pass must be able to unhide "show all".
+ * (makeKeyrow only stubs .permask/.permmore — body class is checked on HTML.) */
+test("G1a: long single-line .permcode ask can unhide show all", async () => {
+  const longCmd = "x".repeat(400);
+  const ctx = makeFeature({
+    nodes: acpApprovalNodes(),
+    chatPayload: acpApprovalPayload({
+      perm_title: longCmd,
+      perm_tool_kind: "execute",
+    }),
+  });
+  /* After wrapping, a 400-char command is many line boxes → vertical overflow. */
+  ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 400, clientHeight: 72 };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /class="permcode"/,
+    "execute kind uses .permcode body for a bare long command");
+  assert.match(ctx.roots.keyrow.innerHTML, new RegExp("x{400}"),
+    "the full command is in the ask body");
+  const more = ctx.roots.keyrow.querySelector(".permmore");
+  assert.ok(more, ".permmore present for clamped long ask");
+  assert.equal(more.hidden, false,
+    "wrapped long single-line command must unhide show all (was G1a bug)");
+  ctx.feature.destroy();
+});
 
 const baseCssSrc = readFileSync(join(__dirname, "../css/base.css"), "utf8");
 
@@ -1911,8 +2087,8 @@ test("P2 6: measure pass keeps .permmore hidden when .permask does not overflow"
       perm_title: "Execute `echo hi`",
     }),
   });
-  /* No vertical overflow: scrollHeight == clientHeight. A long *wide* line
-     would still look like this on the vertical axis (the whole point of the fix). */
+  /* No vertical overflow: scrollHeight == clientHeight. Short asks stay
+     without a dead "show all" control; long wrapped ones use G1a metrics. */
   ctx.roots.keyrow._permMaskMetrics = { scrollHeight: 48, clientHeight: 48 };
   ctx.feature.bind();
   await ctx.feature.render();

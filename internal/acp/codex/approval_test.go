@@ -114,3 +114,146 @@ func decisionKeys(ds []Decision) []string {
 	}
 	return out
 }
+
+// G1c: build the ask body from payload fields the codex app-server documents
+// (grantRoot, permissions.fileSystem/network), never the JSON-RPC method name
+// when a safer label exists. Method name remains the last-resort fallback.
+func TestApprovalTitleFileChangeNamesWhatChanges(t *testing.T) {
+	a := decodeApproval("item/fileChange/requestApproval", []byte(`{
+		"threadId":"t","turnId":"u","itemId":"i","startedAtMs":1,
+		"reason":"write file","grantRoot":"/w"
+	}`))
+	got := approvalTitle(a)
+	if got == "" {
+		t.Fatal("title must be non-empty")
+	}
+	if got == "item/fileChange/requestApproval" {
+		t.Fatalf("title is the method name %q — must name what is changing", got)
+	}
+	if !strings.Contains(got, "/w") {
+		t.Fatalf("title %q must name the grant root /w", got)
+	}
+}
+
+func TestApprovalTitlePermissionsStatesScope(t *testing.T) {
+	a := decodeApproval("item/permissions/requestApproval", []byte(`{
+		"threadId":"t","turnId":"u","itemId":"i","environmentId":"local",
+		"startedAtMs":1,"cwd":"/w","reason":"need write",
+		"permissions":{"network":null,"fileSystem":{"write":["/w"]}}
+	}`))
+	got := approvalTitle(a)
+	if got == "" {
+		t.Fatal("title must be non-empty")
+	}
+	if got == "item/permissions/requestApproval" {
+		t.Fatalf("title is the method name %q — must state the permission scope", got)
+	}
+	// Documented shape: permissions.fileSystem.write is an array of paths.
+	if !strings.Contains(got, "/w") {
+		t.Fatalf("title %q must mention the write path /w", got)
+	}
+	// Network-only request (official README: network.enabled).
+	netOnly := decodeApproval("item/permissions/requestApproval", []byte(`{
+		"threadId":"t","turnId":"u","itemId":"i",
+		"permissions":{"network":{"enabled":true}}
+	}`))
+	netTitle := approvalTitle(netOnly)
+	if netTitle == "" || netTitle == "item/permissions/requestApproval" {
+		t.Fatalf("network-only title = %q, want a scope description", netTitle)
+	}
+	if !strings.Contains(strings.ToLower(netTitle), "network") {
+		t.Fatalf("network-only title %q must mention network", netTitle)
+	}
+}
+
+func TestApprovalTitleCommandUnchanged(t *testing.T) {
+	a := decodeApproval("item/commandExecution/requestApproval", []byte(syntheticApproval))
+	got := approvalTitle(a)
+	if !strings.Contains(got, "printf") {
+		t.Fatalf("command approval title = %q, want the command", got)
+	}
+	if got != a.Command {
+		t.Fatalf("command approval title = %q, want exact Command %q", got, a.Command)
+	}
+}
+
+// G1b: the synthetic exec approval fixture carries a reason; Pending must
+// expose it so the chat key row can render the explanation above the command.
+func TestPendingExposesReasonFromSyntheticFixture(t *testing.T) {
+	a := decodeApproval("item/commandExecution/requestApproval", []byte(syntheticApproval))
+	if !strings.HasPrefix(a.Reason, "Run the fixture command.") {
+		t.Fatalf("fixture reason not decoded: %q", a.Reason)
+	}
+	s := &Session{
+		nodeID: "n1",
+		pending: []*pendingPermission{{
+			seq:      1,
+			approval: a,
+			ch:       make(chan chosen, 1),
+		}},
+	}
+	p, ok := s.pendingInfo()
+	if !ok {
+		t.Fatal("expected pending")
+	}
+	if p.Reason == "" {
+		t.Fatal("PendingPermission.Reason is empty — reason was decoded then dropped")
+	}
+	if p.Reason != a.Reason {
+		t.Fatalf("Reason = %q, want %q", p.Reason, a.Reason)
+	}
+	// Title remains the command; reason is a separate field, not mixed into Title.
+	if p.Title != a.Command {
+		t.Fatalf("Title = %q, want Command (reason stays separate)", p.Title)
+	}
+}
+
+func TestApprovalTitleDegradesSafely(t *testing.T) {
+	// Empty params → method name (last resort), never panic, never empty when method known.
+	empty := decodeApproval("item/fileChange/requestApproval", []byte(`{}`))
+	if got := approvalTitle(empty); got != "item/fileChange/requestApproval" {
+		t.Fatalf("empty fileChange title = %q, want method fallback", got)
+	}
+	malformed := decodeApproval("item/permissions/requestApproval", []byte(`not-json`))
+	if got := approvalTitle(malformed); got != "item/permissions/requestApproval" {
+		t.Fatalf("malformed permissions title = %q, want method fallback", got)
+	}
+	unknown := decodeApproval("item/futureThing/requestApproval", []byte(`{"foo":1}`))
+	if got := approvalTitle(unknown); got != "item/futureThing/requestApproval" {
+		t.Fatalf("unknown method title = %q, want method fallback", got)
+	}
+	// Completely empty Approval still yields something non-empty.
+	if got := approvalTitle(Approval{}); got == "" {
+		t.Fatal("zero Approval title must not be empty")
+	}
+}
+
+func TestMapApprovalToolKindByMethod(t *testing.T) {
+	// Kind comes from what the approval is, not merely whether Command is set.
+	if got := mapApprovalToolKind(Approval{
+		Method:  "item/commandExecution/requestApproval",
+		Command: "ls",
+	}); got != "execute" {
+		t.Errorf("commandExecution = %q, want execute", got)
+	}
+	if got := mapApprovalToolKind(Approval{
+		Method: "item/fileChange/requestApproval",
+		Raw:    json.RawMessage(`{"grantRoot":"/w"}`),
+	}); got != "edit" {
+		t.Errorf("fileChange = %q, want edit", got)
+	}
+	// Permissions are prose scope descriptions → no code kind.
+	if got := mapApprovalToolKind(Approval{
+		Method: "item/permissions/requestApproval",
+	}); got != "" {
+		t.Errorf("permissions = %q, want \"\"", got)
+	}
+	// Unknown / empty still safe.
+	if got := mapApprovalToolKind(Approval{}); got != "" {
+		t.Errorf("empty = %q, want \"\"", got)
+	}
+	// Legacy: Command alone still maps to execute (recorded shape).
+	if got := mapApprovalToolKind(Approval{Command: "ls"}); got != "execute" {
+		t.Errorf("Command-only = %q, want execute", got)
+	}
+}

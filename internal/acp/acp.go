@@ -409,11 +409,15 @@ func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 }
 
 // PendingPermission is the UI-facing view of one outstanding approval: a title,
-// the tool's kind when known, and the answerable options. Empty ToolKind or
-// option Kind means "unknown" — never an error, never a guess.
+// the tool's kind when known, an optional reason, and the answerable options.
+// Empty ToolKind, option Kind, or Reason means "unknown" — never an error,
+// never a guess. Shape matches codex.PendingPermission so the HTTP/UI layer
+// treats both transports identically. ACP RequestPermission has no reason
+// field; Reason stays empty there.
 type PendingPermission struct {
 	Title    string
 	ToolKind string
+	Reason   string // why the agent is asking; empty when unknown (ACP always empty)
 	Options  []PermOption
 }
 

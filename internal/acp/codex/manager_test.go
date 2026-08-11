@@ -259,8 +259,15 @@ func TestManagerFileChangeApprovalResolve(t *testing.T) {
 
 	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
 	pending, ok := m.Pending("n1")
-	if !ok || pending.Title != "item/fileChange/requestApproval" {
+	// G1c: title names the grant root, not the JSON-RPC method.
+	if !ok || pending.Title == "" || pending.Title == "item/fileChange/requestApproval" {
 		t.Fatalf("pending = %+v %v", pending, ok)
+	}
+	if !strings.Contains(pending.Title, "/w") {
+		t.Fatalf("pending title %q must name grantRoot /w", pending.Title)
+	}
+	if pending.ToolKind != "edit" {
+		t.Fatalf("file-change ToolKind = %q, want edit", pending.ToolKind)
 	}
 	if got := optionNames(pending.Options); strings.Join(got, ",") != "Approve once,Approve for session,Reject and continue,Reject and stop" {
 		t.Fatalf("file-change options = %v", got)
@@ -378,7 +385,7 @@ func TestPendingMapsDecisionAndToolKind(t *testing.T) {
 		}
 	}
 
-	// No command (file-change / permissions): tool kind stays "".
+	// File-change: tool kind is "edit" from the method, not from Command.
 	s.pending = []*pendingPermission{{
 		seq: 2,
 		approval: Approval{
@@ -391,8 +398,8 @@ func TestPendingMapsDecisionAndToolKind(t *testing.T) {
 	if !ok {
 		t.Fatal("expected pending without command")
 	}
-	if p.ToolKind != "" {
-		t.Errorf("ToolKind = %q, want \"\" when Command is empty", p.ToolKind)
+	if p.ToolKind != "edit" {
+		t.Errorf("ToolKind = %q, want edit for fileChange", p.ToolKind)
 	}
 	if p.Options[0].Kind != "allow" || p.Options[1].Kind != "reject" {
 		t.Errorf("file-change kinds = %q/%q, want allow/reject", p.Options[0].Kind, p.Options[1].Kind)
