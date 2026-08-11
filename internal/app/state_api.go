@@ -204,9 +204,9 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	// node whose log is unchanged re-parses nothing.
 	//
 	// Fare (journey meter) is projected for every node, also cache-backed
-	// (shared LogCache: invalidate-on-growth). It is whole-journey ReadFare —
-	// never segment history and never merged into ctx_pct (D1). Missing/empty
-	// fare → fields omitted.
+	// (shared LogCache: tail parse on growth, hit-list re-fold for fare). It
+	// is whole-journey ReadFare — never segment history and never merged into
+	// ctx_pct (D1). Missing/empty fare → fields omitted.
 	for i := range views {
 		v := &views[i]
 		// Every node reports its stop chain (the map draws stations for dead

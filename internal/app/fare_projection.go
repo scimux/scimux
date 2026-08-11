@@ -2,11 +2,12 @@ package app
 
 // fare_projection.go — whole-journey fare + per-segment rides onto the
 // /api/state poll payload (fare-design.md Phase 7 + V2-P2, D1, D8). Cached
-// under the shared LogCache: fare/rides re-derive only when the session log's
-// size or mtime advances (invalidate-on-growth, one walk shared with segment
-// and assets). Occupancy (ctx_pct) stays on the segment path and is never
-// merged with fare. UI: wall heat (V2-P3) + selected-segment capsule/callout
-// (V2-P4); v1 fareLineHTML is retired.
+// under the shared LogCache: on log growth the tail is parsed once and fare
+// is re-folded from the retained usage-hit list (markCounted is re-run so a
+// mechanical source seam can retroactively un-count no-TurnID hits). Segment
+// and assets share that same walk. Occupancy (ctx_pct) stays on the segment
+// path and is never merged with fare. UI: wall heat (V2-P3) + selected-segment
+// capsule/callout (V2-P4); v1 fareLineHTML is retired.
 
 import (
 	"codeberg.org/chrberger/scimux/internal/fare"
@@ -21,7 +22,7 @@ func (a *app) fareAndRides(n *Node) (fare.FareTotals, []fare.Ride) {
 }
 
 // logCacheWalks is the test spy for how many times the node's session log was
-// actually parsed through LogCache (Phase 7 / P9 Stage A).
+// actually parsed through LogCache (Phase 7 / P9).
 func logCacheWalks(a *app, id string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()

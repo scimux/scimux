@@ -300,8 +300,8 @@ type app struct {
 	assetHook asset.IngestFunc
 	// logCache memoizes each node's poll-path session-log products (segment,
 	// fare+rides, anchored assets, asset index) under one (path, size, mtime)
-	// key. An unchanged log costs a stat per access; a change re-walks the
-	// file once and derives all four products. Never holds history segments.
+	// key. An unchanged log costs a stat; growth resumes from the last
+	// newline watermark and parses only the tail. Never holds history segments.
 	logCache map[string]*sessionlog.LogCache
 	// notes is the synthesis-document store (~/.scimux/notes/, one mutable
 	// JSON file per note — internal/notestore). Deliberately separate from the

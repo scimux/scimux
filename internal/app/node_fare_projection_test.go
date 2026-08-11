@@ -2,8 +2,8 @@ package app
 
 // Phase 7 — node fare projection onto the /api/state poll payload
 // (fare-design.md Phase 7, D1, D8). Fare is whole-journey ReadFare, cached
-// under LogCache (invalidate-on-growth); ctx_pct occupancy stays
-// segment-scoped and untouched.
+// under LogCache (tail parse on growth; hit-list re-fold); ctx_pct occupancy
+// stays segment-scoped and untouched.
 
 import (
 	"net/http/httptest"
