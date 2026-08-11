@@ -2,8 +2,9 @@
 // checks, shared JSON body bound, and JSON response encoding.
 //
 // Ownership (existing behavior; this file does not change it):
-//   - NewHandler returns guardMutations(mux), so the middleware stays outermost
-//     around the complete router (registration remains in router.go).
+//   - NewHandler returns withGzip(guardMutations(mux)): the mutation guard
+//     wraps the complete mux, and gzip is outermost on the response path
+//     (registration remains in router.go).
 //   - Safe methods (GET/HEAD/OPTIONS) bypass the mutation checks.
 //   - Unsafe ordering remains same-origin → constant-time CSRF token comparison
 //     → content type → routed handler.

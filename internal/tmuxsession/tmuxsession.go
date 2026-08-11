@@ -86,13 +86,36 @@ func (sv *Server) NewSession(name, dir, command string) (*Session, error) {
 func (sv *Server) Session(name string) *Session { return &Session{sv: sv, Name: name} }
 
 // Sessions lists the names of all sessions on this private server. A server
-// that is not running is not an error — it simply has no sessions.
+// that is not running is not an error — it simply has no sessions. A command
+// failure is also collapsed to nil (callers that must not treat a probe
+// failure as "every session is gone" should use ListSessions instead).
 func (sv *Server) Sessions() []string {
-	out, err := sv.tmux("", "list-sessions", "-F", "#{session_name}")
-	if err != nil || strings.TrimSpace(out) == "" {
+	names, err := sv.ListSessions()
+	if err != nil {
 		return nil
 	}
-	return strings.Split(out, "\n")
+	return names
+}
+
+// ListSessions returns every session name on this private server.
+//
+// Unlike Sessions, a failed list-sessions invocation is returned as an error
+// so a caller can leave derived state unchanged for the tick rather than
+// treating every session as gone. A server that is not running is not an
+// error — it simply has no sessions (nil, nil).
+func (sv *Server) ListSessions() ([]string, error) {
+	out, err := sv.tmux("", "list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		// No private server yet is a real empty set, not a transient failure.
+		if strings.Contains(out, "no server") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("tmux list-sessions: %v: %s", err, out)
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
 }
 
 // KillServer stops the private tmux server and with it every scimux session.

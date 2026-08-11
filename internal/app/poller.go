@@ -44,6 +44,13 @@ func (a *app) poll() {
 	copy(nodes, a.nodes)
 	a.mu.Unlock()
 
+	// One list-sessions for the whole tick answers liveness for every tmux
+	// node (set lookup), replacing N has-session forks. A failed snapshot
+	// must not mass-flip every node to exited: leave their live[] alone for
+	// this tick (branch a). Capture still runs only for names present in
+	// the set; its own error still distinguishes unavailable from exited.
+	sessionSet, sessionsOK := a.sessionSnapshot()
+
 	for _, n := range nodes {
 		// Structured-protocol nodes (ACP, codex app-server) carry no tmux pane:
 		// liveness and needs-input come from the manager's structured state
@@ -69,12 +76,17 @@ func (a *app) poll() {
 			}
 			continue
 		}
+		if !sessionsOK {
+			// Transient list-sessions failure: do not rewrite live/attn for
+			// tmux nodes this tick. discoverTranscript/syncMirror can wait.
+			continue
+		}
 		s := a.server.Session(n.ID)
 		a.mu.Lock()
 		prev := a.live[n.ID] // not yet overwritten this tick
 		a.mu.Unlock()
 		state := "exited"
-		if s.Alive() {
+		if sessionSet[n.ID] {
 			cap, err := s.Capture()
 			if err == nil {
 				a.mu.Lock()
@@ -256,6 +268,26 @@ func (a *app) poll() {
 		a.discoverTranscript(n)
 		a.syncMirror(n)
 	}
+}
+
+// sessionSnapshot runs one list-sessions and returns the name set. ok is
+// false when the listing failed (as opposed to succeeding with zero
+// sessions); callers must leave liveness unchanged on !ok.
+func (a *app) sessionSnapshot() (map[string]bool, bool) {
+	if a.server == nil {
+		return nil, true // bare tests without a server: empty set, not a failure
+	}
+	names, err := a.server.ListSessions()
+	if err != nil {
+		return nil, false
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name != "" {
+			set[name] = true
+		}
+	}
+	return set, true
 }
 
 // persistAttentionTransition appends a session-log attention start/end edge

@@ -189,6 +189,39 @@ func TestSessionsEmptyWhenServerDown(t *testing.T) {
 	}
 }
 
+func TestListSessionsDistinguishesErrorFromEmpty(t *testing.T) {
+	// Empty success: server up, zero sessions.
+	f := &fakeRunner{out: ""}
+	names, err := newTestServer(f).ListSessions()
+	if err != nil || names != nil {
+		t.Fatalf("empty success: names=%v err=%v, want nil,nil", names, err)
+	}
+	// No private server: empty success, not an error.
+	f = &fakeRunner{out: "no server running on /tmp/x", err: errors.New("exit status 1")}
+	names, err = newTestServer(f).ListSessions()
+	if err != nil || names != nil {
+		t.Fatalf("no server: names=%v err=%v, want nil,nil", names, err)
+	}
+	// Transient failure: error returned so callers can leave state alone.
+	f = &fakeRunner{out: "error connecting to /tmp/tmux", err: errors.New("exit status 1")}
+	names, err = newTestServer(f).ListSessions()
+	if err == nil {
+		t.Fatalf("probe failure must return error, got names=%v", names)
+	}
+	if names != nil {
+		t.Fatalf("probe failure names = %v, want nil", names)
+	}
+	// Happy path.
+	f = &fakeRunner{out: "a\nb"}
+	names, err = newTestServer(f).ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"a", "b"}) {
+		t.Fatalf("ListSessions = %v, want [a b]", names)
+	}
+}
+
 func TestCwdUsesPaneTarget(t *testing.T) {
 	f := &fakeRunner{out: "/data/exp1"}
 	sv := newTestServer(f)

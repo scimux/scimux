@@ -59,6 +59,7 @@ type fakeTmux struct {
 	mu         sync.Mutex
 	calls      [][]string
 	list       []string        // list-sessions output (session names)
+	listErr    bool            // list-sessions returns an error (poll snapshot-failure tests)
 	alive      map[string]bool // has-session result per exact name
 	capture    string          // capture-pane output
 	captureErr bool
@@ -82,6 +83,13 @@ func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (strin
 	}
 	switch sub {
 	case "list-sessions":
+		if f.listErr {
+			return "error connecting to /tmp/tmux-0/default", errors.New("exit status 1")
+		}
+		// Explicit list only (including empty). Do not derive from alive:
+		// handleNewNode consults list-sessions to pick a free title slug, and
+		// many tests pre-seed alive with the intended id before create — that
+		// must not make the name look taken.
 		return strings.Join(f.list, "\n"), nil
 	case "has-session":
 		name := strings.TrimSuffix(strings.TrimPrefix(lastArg(args), "="), ":")

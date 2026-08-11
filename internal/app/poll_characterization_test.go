@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,27 +22,41 @@ import (
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
-// pollRunner builds a fake-tmux Runner that reports session liveness and pane
-// capture without talking to a real tmux server. capture-pane invocations are
-// counted so structured-transport tests can prove the tmux path is skipped.
-func pollRunner(alive bool, pane string, captureErr bool, captureCalls *int) tmuxsession.Runner {
+// pollRunner builds a fake-tmux Runner that reports session liveness via
+// list-sessions (the poller's one-fork snapshot) and pane capture without
+// talking to a real tmux server. capture-pane invocations are counted so
+// structured-transport tests can prove the tmux path is skipped.
+//
+// sessions is the list-sessions name set: non-empty means those nodes are
+// alive; nil/empty means every node is exited. has-session is still answered
+// for code paths outside poll() that call Alive() directly.
+func pollRunner(sessions []string, pane string, captureErr bool, captureCalls *int) tmuxsession.Runner {
+	aliveSet := map[string]bool{}
+	for _, s := range sessions {
+		aliveSet[s] = true
+	}
 	return func(ctx context.Context, stdin string, args ...string) (string, error) {
-		for _, arg := range args {
-			switch arg {
-			case "has-session":
-				if alive {
-					return "", nil
-				}
-				return "", fmt.Errorf("can't find session")
-			case "capture-pane":
-				if captureCalls != nil {
-					*captureCalls++
-				}
-				if captureErr {
-					return "", fmt.Errorf("capture failed")
-				}
-				return pane, nil
+		sub := ""
+		if len(args) >= 3 {
+			sub = args[2]
+		}
+		switch sub {
+		case "list-sessions":
+			return strings.Join(sessions, "\n"), nil
+		case "has-session":
+			name := strings.TrimSuffix(strings.TrimPrefix(lastArg(args), "="), ":")
+			if aliveSet[name] {
+				return "", nil
 			}
+			return "", fmt.Errorf("can't find session")
+		case "capture-pane":
+			if captureCalls != nil {
+				*captureCalls++
+			}
+			if captureErr {
+				return "", fmt.Errorf("capture failed")
+			}
+			return pane, nil
 		}
 		return "", nil
 	}
@@ -84,7 +99,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 
 	t.Run("changed capture is active and stamps activeSince", func(t *testing.T) {
 		n := &Node{ID: id, Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(true, paneB, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, paneB, false, nil))
 		a.prevCap[id] = paneA
 		a.live[id] = "quiet"
 		before := time.Now()
@@ -103,7 +118,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 
 	t.Run("unchanged but recent lastChg stays active without restamping activeSince", func(t *testing.T) {
 		n := &Node{ID: id, Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(true, paneA, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, paneA, false, nil))
 		a.prevCap[id] = paneA
 		a.lastChg[id] = time.Now().Add(-2 * time.Second) // within 8s quiet gate
 		a.live[id] = "active"
@@ -121,7 +136,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 	t.Run("unchanged beyond quiet threshold is quiet", func(t *testing.T) {
 		n := &Node{ID: id, Agent: "claude", Transcript: filepath.Join(t.TempDir(), "missing.jsonl")}
 		// Healthy empty path absent → inspect; we only assert liveness here.
-		a := newPollApp(t, n, pollRunner(true, paneA, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, paneA, false, nil))
 		a.prevCap[id] = paneA
 		a.lastChg[id] = time.Now().Add(-10 * time.Second)
 		a.live[id] = "active"
@@ -139,7 +154,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 
 	t.Run("missing session is exited", func(t *testing.T) {
 		n := &Node{ID: id, Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(false, paneA, false, nil))
+		a := newPollApp(t, n, pollRunner(nil, paneA, false, nil))
 		a.live[id] = "active"
 		a.poll()
 		if got := a.live[id]; got != "exited" {
@@ -152,7 +167,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 
 	t.Run("capture failure is unavailable", func(t *testing.T) {
 		n := &Node{ID: id, Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(true, dialogPane, true, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, dialogPane, true, nil))
 		a.poll()
 		if got := a.live[id]; got != "unavailable" {
 			t.Fatalf("live = %q, want unavailable", got)
@@ -167,7 +182,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 		// with dialog-shaped vs ordinary text must both be quiet.
 		for _, pane := range []string{paneA, dialogPane} {
 			n := &Node{ID: id, Agent: "claude"}
-			a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+			a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 			a.prevCap[id] = pane
 			a.lastChg[id] = time.Now().Add(-10 * time.Second)
 			a.poll()
@@ -178,7 +193,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 		// And the same with a recent lastChg must both be active.
 		for _, pane := range []string{paneA, dialogPane} {
 			n := &Node{ID: id, Agent: "claude"}
-			a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+			a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 			a.prevCap[id] = pane
 			a.lastChg[id] = time.Now().Add(-time.Second)
 			a.poll()
@@ -190,7 +205,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 
 	t.Run("activeSince set only when entering active from non-active", func(t *testing.T) {
 		n := &Node{ID: id, Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(true, paneB, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, paneB, false, nil))
 		a.prevCap[id] = paneA
 		// prev live unset → entering active
 		a.poll()
@@ -202,7 +217,7 @@ func TestPollMechanicalLiveness(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 		a.prevCap[id] = paneB
 		// Swap pane so capture differs again.
-		a.server = tmuxsession.NewServerWithRunner("testsock", pollRunner(true, paneA, false, nil))
+		a.server = tmuxsession.NewServerWithRunner("testsock", pollRunner([]string{n.ID}, paneA, false, nil))
 		a.poll()
 		if got := a.live[id]; got != "active" {
 			t.Fatalf("live = %q after second change, want active", got)
@@ -222,7 +237,7 @@ func TestPollStructuredTransportBypassesTmux(t *testing.T) {
 		// Runner would report a live dialog pane if consulted — structured path
 		// must ignore it.
 		n := &Node{ID: "cx1", Agent: "codex", Transport: "codex", Transcript: "/nope.jsonl"}
-		a := newPollApp(t, n, pollRunner(true, "Do you want to proceed?\n  1. Yes", false, &captures))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, "Do you want to proceed?\n  1. Yes", false, &captures))
 		a.codex = codexManager{codex.NewManager(t.TempDir())}
 		t.Cleanup(a.codex.Shutdown)
 		a.prevCap[n.ID] = "prior" // would affect tmux quiet/active if read
@@ -246,7 +261,7 @@ func TestPollStructuredTransportBypassesTmux(t *testing.T) {
 		var captures int
 		rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 		n := &Node{ID: "cx2", Agent: "codex", Transport: "codex", Dir: t.TempDir()}
-		a := newPollApp(t, n, pollRunner(true, "pane that would be quiet or dialog", false, &captures))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, "pane that would be quiet or dialog", false, &captures))
 		spawn, _ := newFakeCodexSpawn(t, "THREAD-POLL", rollout)
 		a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
 		t.Cleanup(a.codex.Shutdown)
@@ -270,7 +285,7 @@ func TestPollStructuredTransportBypassesTmux(t *testing.T) {
 		var captures int
 		rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 		n := &Node{ID: "cx3", Agent: "codex", Transport: "codex", Dir: t.TempDir()}
-		a := newPollApp(t, n, pollRunner(true, "ignored pane", false, &captures))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, "ignored pane", false, &captures))
 		spawn, _, turnStarted, unblock := newBlockingFakeCodexSpawn(t, "THREAD-ACT", rollout)
 		a.codex = codexManager{codex.NewManagerWithSpawn(a.sessionsDir, spawn)}
 		t.Cleanup(func() {
@@ -316,7 +331,7 @@ func TestPollActiveToQuietTranscriptJudgment(t *testing.T) {
 
 	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
 	pane := "static quiet pane"
-	a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+	a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 	a.prevCap[n.ID] = pane
 	a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 	// Establish the pre-phase baseline on a quiet tick (judge=false).
@@ -365,7 +380,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 
 	t.Run("missing transcript is inspect", func(t *testing.T) {
 		n := &Node{ID: "n", Agent: "claude"} // no Transcript
-		a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		a.poll()
@@ -382,7 +397,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":"ok"}}`)
 		n := &Node{ID: "n", Agent: "claude", Transcript: path}
-		a := newPollApp(t, n, pollRunner(true, dialogish, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, dialogish, false, nil))
 		a.prevCap[n.ID] = dialogish
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		// Install the tailer first: a fresh tailerFor clears staleChat (relink
@@ -408,7 +423,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"hello"}}`)
 		n := &Node{ID: "n", Agent: "claude", Transcript: path}
-		a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		_ = a.tailerFor(n)
@@ -436,7 +451,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
 	t.Run("ordinary text without transcript is inspect not approval", func(t *testing.T) {
 		pane := "Bash completed successfully\npermission granted earlier\n$"
 		n := &Node{ID: "n", Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		a.poll()
@@ -455,7 +470,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"all done"}}`)
 		pane := "all done\n$"
 		n := &Node{ID: "n", Agent: "claude", Transcript: path}
-		a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		a.poll()
@@ -476,7 +491,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
   3. Deny
   Esc to cancel`
 		n := &Node{ID: "n", Agent: "claude"}
-		a := newPollApp(t, n, pollRunner(true, dialogPane, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, dialogPane, false, nil))
 		a.prevCap[n.ID] = dialogPane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		a.poll()
@@ -493,7 +508,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}`)
 		pane := "waiting on a form...\n$"
 		n := &Node{ID: "n", Agent: "claude", Transcript: path}
-		a := newPollApp(t, n, pollRunner(true, pane, false, nil))
+		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
 		a.poll()
@@ -517,13 +532,17 @@ func TestPollActiveTranscriptProgressRestartsStallWindow(t *testing.T) {
 	// Runner returns a slight confined change each tick after the baseline.
 	tick := 12
 	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
-		for _, arg := range args {
-			if arg == "has-session" {
-				return "", nil
-			}
-			if arg == "capture-pane" {
-				return fmt.Sprintf("running tools\n  · Bash (%ds)\nidle", tick), nil
-			}
+		sub := ""
+		if len(args) >= 3 {
+			sub = args[2]
+		}
+		switch sub {
+		case "list-sessions":
+			return "cl1", nil
+		case "has-session":
+			return "", nil
+		case "capture-pane":
+			return fmt.Sprintf("running tools\n  · Bash (%ds)\nidle", tick), nil
 		}
 		return "", nil
 	}
@@ -575,7 +594,11 @@ func TestPollActiveTranscriptProgressRestartsStallWindow(t *testing.T) {
 // re-runs discovery when a claude pane finishes a phase the linked transcript
 // did not carry. Persistence/ordering stay covered by MaybeRelink* and Packet 2E.
 func TestPollActiveToQuietTriggersRelink(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"c1": true}, capture: "static quiet pane"}
+	f := &fakeTmux{
+		list:    []string{"c1"},
+		alive:   map[string]bool{"c1": true},
+		capture: "static quiet pane",
+	}
 	a := newTestApp(t, f)
 	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
 	if err := os.MkdirAll(proj, 0o755); err != nil {
@@ -625,7 +648,7 @@ func TestPollActiveUnconfinedDialogTextStaysUnflagged(t *testing.T) {
 	appendLines(t, path,
 		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
 	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
-	a := newPollApp(t, n, pollRunner(true, dialog, false, nil))
+	a := newPollApp(t, n, pollRunner([]string{n.ID}, dialog, false, nil))
 	a.prevCap[n.ID] = streamingPrev
 	a.poll()
 	if got := a.live[n.ID]; got != "active" {

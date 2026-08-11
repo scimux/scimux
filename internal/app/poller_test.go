@@ -201,16 +201,20 @@ func TestPollerDialogDetection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			captureErr := !tc.hasCapt
 			runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
-				for _, arg := range args {
-					if arg == "has-session" {
-						return "", nil // session alive
+				sub := ""
+				if len(args) >= 3 {
+					sub = args[2]
+				}
+				switch sub {
+				case "list-sessions":
+					return "pi1", nil
+				case "has-session":
+					return "", nil // session alive
+				case "capture-pane":
+					if captureErr {
+						return "", fmt.Errorf("capture failed")
 					}
-					if arg == "capture-pane" {
-						if captureErr {
-							return "", fmt.Errorf("capture failed")
-						}
-						return tc.pane, nil
-					}
+					return tc.pane, nil
 				}
 				return "", nil
 			}
@@ -256,6 +260,9 @@ func TestDialogDetectionOrWithStructured(t *testing.T) {
 		for _, arg := range args {
 			if arg == "capture-pane" {
 				return dialogPane, nil
+			}
+			if arg == "list-sessions" {
+				return "cl1\npi1", nil
 			}
 			if arg == "has-session" {
 				return "", nil
@@ -322,13 +329,17 @@ func TestActivePaneDialogCorroboration(t *testing.T) {
 				`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`,
 				`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c2","name":"Bash","input":{}}]}}`)
 			runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
-				for _, arg := range args {
-					if arg == "capture-pane" {
-						return dialog, nil
-					}
-					if arg == "has-session" {
-						return "", nil
-					}
+				sub := ""
+				if len(args) >= 3 {
+					sub = args[2]
+				}
+				switch sub {
+				case "list-sessions":
+					return "cl1", nil
+				case "has-session":
+					return "", nil
+				case "capture-pane":
+					return dialog, nil
 				}
 				return "", nil
 			}
@@ -370,6 +381,9 @@ func TestActiveConfinedStallBackstop(t *testing.T) {
 		for _, arg := range args {
 			if arg == "capture-pane" {
 				return pane, nil
+			}
+			if arg == "list-sessions" {
+				return "cl1\npi1", nil
 			}
 			if arg == "has-session" {
 				return "", nil
@@ -425,6 +439,9 @@ func TestActivePaneKeepsPeekSetAttention(t *testing.T) {
 			if arg == "capture-pane" {
 				return pane, nil
 			}
+			if arg == "list-sessions" {
+				return "cl1\npi1", nil
+			}
 			if arg == "has-session" {
 				return "", nil
 			}
@@ -477,6 +494,9 @@ func TestPeekSetAttentionExpiresAfterStall(t *testing.T) {
 		for _, arg := range args {
 			if arg == "capture-pane" {
 				return pane, nil
+			}
+			if arg == "list-sessions" {
+				return "cl1\npi1", nil
 			}
 			if arg == "has-session" {
 				return "", nil
@@ -693,15 +713,23 @@ func TestMaybeRelinkTranscriptKeepsHealthyLink(t *testing.T) {
 // (no Tailer) never raise it — absent means UNKNOWN, not "not finished".
 func TestTurnDoneQuietDelivered(t *testing.T) {
 	plainPane := "working…\n$"
-	quietRunner := func(pane string) tmuxsession.Runner {
+	quietRunner := func(pane string, sessions ...string) tmuxsession.Runner {
+		if len(sessions) == 0 {
+			sessions = []string{"cl1"}
+		}
+		listOut := strings.Join(sessions, "\n")
 		return func(ctx context.Context, stdin string, args ...string) (string, error) {
-			for _, arg := range args {
-				if arg == "has-session" {
-					return "", nil
-				}
-				if arg == "capture-pane" {
-					return pane, nil
-				}
+			sub := ""
+			if len(args) >= 3 {
+				sub = args[2]
+			}
+			switch sub {
+			case "list-sessions":
+				return listOut, nil
+			case "has-session":
+				return "", nil
+			case "capture-pane":
+				return pane, nil
 			}
 			return "", nil
 		}
@@ -933,15 +961,23 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 	activePrev := "tick-a\nline2\nline3\nline4\nline5\nline6\nline7"
 	activeCur := "tick-b\nline2\nline3\nline4\nline5\nline6\nline7"
 
-	quietRunner := func(pane string) tmuxsession.Runner {
+	quietRunner := func(pane string, sessions ...string) tmuxsession.Runner {
+		if len(sessions) == 0 {
+			sessions = []string{"cl1"}
+		}
+		listOut := strings.Join(sessions, "\n")
 		return func(ctx context.Context, stdin string, args ...string) (string, error) {
-			for _, arg := range args {
-				if arg == "has-session" {
-					return "", nil
-				}
-				if arg == "capture-pane" {
-					return pane, nil
-				}
+			sub := ""
+			if len(args) >= 3 {
+				sub = args[2]
+			}
+			switch sub {
+			case "list-sessions":
+				return listOut, nil
+			case "has-session":
+				return "", nil
+			case "capture-pane":
+				return pane, nil
 			}
 			return "", nil
 		}
@@ -1244,15 +1280,23 @@ Enter selection [1-3], or Esc to cancel:`
 	prosePane := "Screen-reader menus end with Escape to cancel after Enter selection.\n" +
 		"dialoghint must not treat this sentence as a live dialog.\n$"
 
-	quietRunner := func(pane string) tmuxsession.Runner {
+	quietRunner := func(pane string, sessions ...string) tmuxsession.Runner {
+		if len(sessions) == 0 {
+			sessions = []string{"cl1"}
+		}
+		listOut := strings.Join(sessions, "\n")
 		return func(ctx context.Context, stdin string, args ...string) (string, error) {
-			for _, arg := range args {
-				if arg == "has-session" {
-					return "", nil
-				}
-				if arg == "capture-pane" {
-					return pane, nil
-				}
+			sub := ""
+			if len(args) >= 3 {
+				sub = args[2]
+			}
+			switch sub {
+			case "list-sessions":
+				return listOut, nil
+			case "has-session":
+				return "", nil
+			case "capture-pane":
+				return pane, nil
 			}
 			return "", nil
 		}
@@ -1430,7 +1474,11 @@ Enter selection [1-3], or Esc to cancel:`
 // (a) tombstone, (b) content-time not mtime, (c) genuine new session, (d) cur
 // health ignores metadata-only touches.
 func TestPollFreshClearDoesNotRaiseInspect(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"c1": true}, capture: "fresh prompt"}
+	f := &fakeTmux{
+		list:    []string{"c1"},
+		alive:   map[string]bool{"c1": true},
+		capture: "fresh prompt",
+	}
 	a := newTestApp(t, f)
 	n := &Node{ID: "c1", Agent: "claude", CreatedAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)}
 	a.nodes = []*Node{n}

@@ -17,8 +17,8 @@ import (
 
 // TestRouterAPIRouteOwnership locks the Phase 4 boundary: every registered API
 // route has exactly one production handler definition in its expected feature
-// file, router.go stays registration-only, and NewHandler still returns the
-// complete mux wrapped once by guardMutations.
+// file, router.go stays registration-only, and NewHandler still returns
+// withGzip(guardMutations(mux)).
 func TestRouterAPIRouteOwnership(t *testing.T) {
 	table := characterizationAPIRoutes()
 	if len(table) != 31 {
@@ -109,7 +109,7 @@ func TestRouterAPIRouteOwnership(t *testing.T) {
 	}
 
 	assertRouterRegistrationOnly(t)
-	assertNewHandlerReturnsGuardMutationsOnce(t)
+	assertNewHandlerReturnsWithGzipOnce(t)
 	assertMainGoCompositionOnly(t)
 	assertNoStalePhase4Comments(t)
 }
@@ -299,7 +299,10 @@ func callExprName(fun ast.Expr) string {
 	}
 }
 
-func assertNewHandlerReturnsGuardMutationsOnce(t *testing.T) {
+// assertNewHandlerReturnsWithGzipOnce locks the middleware order:
+// withGzip(guardMutations(mux)). Compression is outermost; the mutation
+// guard still wraps the complete mux exactly once.
+func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 	t.Helper()
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "router.go", nil, 0)
@@ -311,23 +314,28 @@ func assertNewHandlerReturnsGuardMutationsOnce(t *testing.T) {
 		t.Fatal("NewHandler missing")
 	}
 
-	// Count guardMutations(...) calls in the function body.
-	guardCalls := 0
+	// Count each middleware call in the function body.
+	counts := map[string]int{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "guardMutations" {
-			guardCalls++
+		if id, ok := call.Fun.(*ast.Ident); ok {
+			if id.Name == "guardMutations" || id.Name == "withGzip" {
+				counts[id.Name]++
+			}
 		}
 		return true
 	})
-	if guardCalls != 1 {
-		t.Fatalf("NewHandler contains %d guardMutations calls, want exactly 1", guardCalls)
+	if counts["guardMutations"] != 1 {
+		t.Fatalf("NewHandler contains %d guardMutations calls, want exactly 1", counts["guardMutations"])
+	}
+	if counts["withGzip"] != 1 {
+		t.Fatalf("NewHandler contains %d withGzip calls, want exactly 1", counts["withGzip"])
 	}
 
-	// The final return must be guardMutations(mux), nil (or equivalent idents).
+	// Final return must be withGzip(guardMutations(mux)), nil.
 	stmts := fn.Body.List
 	if len(stmts) == 0 {
 		t.Fatal("NewHandler body empty")
@@ -336,22 +344,32 @@ func assertNewHandlerReturnsGuardMutationsOnce(t *testing.T) {
 	if !ok || len(ret.Results) != 2 {
 		t.Fatalf("NewHandler final statement is not a two-value return: %T", stmts[len(stmts)-1])
 	}
-	call, ok := ret.Results[0].(*ast.CallExpr)
+	outer, ok := ret.Results[0].(*ast.CallExpr)
 	if !ok {
-		t.Fatalf("NewHandler returns %T, want guardMutations(...)", ret.Results[0])
+		t.Fatalf("NewHandler returns %T, want withGzip(...)", ret.Results[0])
 	}
-	id, ok := call.Fun.(*ast.Ident)
-	if !ok || id.Name != "guardMutations" {
-		t.Fatalf("NewHandler return wrapper = %s, want guardMutations", callExprName(call.Fun))
+	outerID, ok := outer.Fun.(*ast.Ident)
+	if !ok || outerID.Name != "withGzip" {
+		t.Fatalf("NewHandler return wrapper = %s, want withGzip", callExprName(outer.Fun))
 	}
-	if len(call.Args) != 1 {
-		t.Fatalf("guardMutations args = %d, want 1 (the mux)", len(call.Args))
+	if len(outer.Args) != 1 {
+		t.Fatalf("withGzip args = %d, want 1", len(outer.Args))
 	}
-	muxID, ok := call.Args[0].(*ast.Ident)
+	inner, ok := outer.Args[0].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("withGzip argument = %T, want guardMutations(...)", outer.Args[0])
+	}
+	innerID, ok := inner.Fun.(*ast.Ident)
+	if !ok || innerID.Name != "guardMutations" {
+		t.Fatalf("inner wrapper = %s, want guardMutations", callExprName(inner.Fun))
+	}
+	if len(inner.Args) != 1 {
+		t.Fatalf("guardMutations args = %d, want 1 (the mux)", len(inner.Args))
+	}
+	muxID, ok := inner.Args[0].(*ast.Ident)
 	if !ok || muxID.Name != "mux" {
-		t.Fatalf("guardMutations argument = %T, want mux", call.Args[0])
+		t.Fatalf("guardMutations argument = %T, want mux", inner.Args[0])
 	}
-	// Second result should be nil.
 	if nilID, ok := ret.Results[1].(*ast.Ident); !ok || nilID.Name != "nil" {
 		t.Fatalf("NewHandler second return = %T, want nil", ret.Results[1])
 	}
