@@ -2286,3 +2286,48 @@ func TestHandleChatFreshAfterClearSeam(t *testing.T) {
 		t.Fatal("never-started node must not report fresh:true")
 	}
 }
+
+func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}}
+	a := newTestApp(t, f)
+	tx := filepath.Join(t.TempDir(), "claude.jsonl")
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	appendLines(t, tx,
+		`{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","timestamp":"`+stamp+`","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}`)
+	n := &Node{ID: "c1", Title: "c1", Agent: "claude", Transcript: tx}
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+	a.live[n.ID] = "active" // pane quiet debounce has not elapsed yet
+
+	request := func() struct {
+		Live       string `json:"live"`
+		ReplyReady bool   `json:"reply_ready"`
+	} {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/nodes/c1/chat", nil)
+		r.SetPathValue("id", n.ID)
+		a.handleChat(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("chat code = %d body %q", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Live       string `json:"live"`
+			ReplyReady bool   `json:"reply_ready"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	body := request()
+	if body.Live != "active" || !body.ReplyReady {
+		t.Fatalf("active completed reply = live %q ready %v, want active/true", body.Live, body.ReplyReady)
+	}
+	appendLines(t, tx, `{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":"next"}}`)
+	body = request()
+	if body.ReplyReady {
+		t.Fatal("new user turn must withdraw reply_ready")
+	}
+}

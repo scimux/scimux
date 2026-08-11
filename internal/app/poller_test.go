@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -1428,6 +1429,49 @@ Enter selection [1-3], or Esc to cancel:`
 // P2 — /clear must not rebind a retired Claude transcript (ux-fixes-2.md).
 // (a) tombstone, (b) content-time not mtime, (c) genuine new session, (d) cur
 // health ignores metadata-only touches.
+func TestPollFreshClearDoesNotRaiseInspect(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"c1": true}, capture: "fresh prompt"}
+	a := newTestApp(t, f)
+	n := &Node{ID: "c1", Agent: "claude", CreatedAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)}
+	a.nodes = []*Node{n}
+	a.byID = map[string]*Node{n.ID: n}
+	a.prevCap[n.ID] = f.capture
+	a.lastChg[n.ID] = time.Now().Add(-time.Minute)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+		{T: "user", Text: "before clear"},
+		{T: "assistant", Text: "old answer"},
+		sessionlog.NewClearSource(""),
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a.poll()
+	if got := a.live[n.ID]; got != "quiet" {
+		t.Fatalf("live = %q, want quiet", got)
+	}
+	if got := a.attn[n.ID]; got != "" {
+		t.Fatalf("post-clear attention = %q, want none", got)
+	}
+
+	// Once the fresh segment contains a turn, an actually missing transcript
+	// regains the ordinary neutral inspect fallback.
+	if err := w.Append(sessionlog.Event{T: "user", Text: "after clear"}); err != nil {
+		t.Fatal(err)
+	}
+	a.poll()
+	if got := a.attn[n.ID]; got != "inspect" {
+		t.Fatalf("post-prompt attention = %q, want inspect for missing transcript", got)
+	}
+}
+
 func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 	claudeUser := func(text, ts string) string {
 		return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":%q}}`, ts, text)

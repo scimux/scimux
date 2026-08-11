@@ -255,6 +255,12 @@ type Tailer struct {
 	// Zero means "cannot be dated" (nothing parsed yet, undated records, or a
 	// rotation reset) — never "old". Map freshness input only, never liveness.
 	lastTurnAt time.Time
+	// endTurn is Claude's explicit stop_reason:"end_turn" boundary. Unlike
+	// Delivered, it is false for an assistant tool_use or a partial assistant
+	// record. The chat composer uses it to become ready as soon as Claude has
+	// committed the completed reply, without waiting for the pane quiet timer.
+	// Structured transcript data only; never feeds mechanical liveness.
+	endTurn bool
 }
 
 // UsageBreakdown is the latest per-turn token split retained from a Claude
@@ -569,6 +575,15 @@ func (t *Tailer) Delivered() bool {
 	return t.lastRole == "assistant"
 }
 
+// EndTurn reports Claude's explicit completed-turn boundary. It is kept
+// separate from Delivered because an assistant record can instead be a tool
+// request that leaves the agent blocked on permission or still working.
+func (t *Tailer) EndTurn() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.endTurn
+}
+
 // NewestTurnTime reports the CLI's stamp on the newest parsed turn. ok is
 // false when no turn has been dated — undated records must read as unknown,
 // so a caller gating on freshness declines rather than guesses.
@@ -604,12 +619,18 @@ func (t *Tailer) notePending(line []byte) {
 		// "assistant just spoke" from "nothing recognized yet".
 		t.lastRole = generic.Type
 		t.owing = generic.Type == "user"
+		t.endTurn = false
 		var msg struct {
-			Content json.RawMessage `json:"content"`
+			Content    json.RawMessage `json:"content"`
+			StopReason string          `json:"stop_reason"`
 		}
 		if json.Unmarshal(generic.Message, &msg) != nil {
 			return
 		}
+		// Every recognized Claude-facing record replaces the boundary state:
+		// a new user turn or tool-use/partial assistant record withdraws the
+		// prior completion; only the explicit final boundary raises it.
+		t.endTurn = generic.Type == "assistant" && msg.StopReason == "end_turn"
 		var blocks []struct {
 			Type      string `json:"type"`
 			ID        string `json:"id"`
@@ -721,6 +742,7 @@ func (t *Tailer) Poll() []Turn {
 		t.owing = false
 		t.lastRole = ""
 		t.lastTurnAt = time.Time{}
+		t.endTurn = false
 	}
 	if st.Size() == t.offset {
 		return t.Turns

@@ -277,8 +277,8 @@ export function pendingEmptyHTML({ freshSurface, pending }){
     : "no readable transcript \u2014 showing the raw terminal below"}</div>`;
 }
 
-export function workPulseShouldRun(live, mustShowPane){
-  return live === "active" && !mustShowPane;
+export function workPulseShouldRun(live, mustShowPane, replyReady = false){
+  return live === "active" && !mustShowPane && !replyReady;
 }
 
 /* Pure scroll-target decision for history ride-back.
@@ -717,9 +717,10 @@ export function createChatFeature(deps){
     };
   }
 
-  function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek){
-    setWorkPulse(workPulseShouldRun(live, mustShowPane));
-    if (typeof d.setComposerBusy === "function") d.setComposerBusy(live === "active");
+  function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek, replyReady){
+    setWorkPulse(workPulseShouldRun(live, mustShowPane, replyReady));
+    if (typeof d.setComposerBusy === "function")
+      d.setComposerBusy(live === "active" && !replyReady);
     if (convtools) convtools.hidden = false;
     if (termtoggle){
       termtoggle.innerHTML = icons.ICON_TERM || "";
@@ -1151,7 +1152,12 @@ export function createChatFeature(deps){
       chatCtxPct = { node: n.id, pct };
       renderChatHead();
     }
-    applyChatActivityChrome(data.live, mustShowPane, forcePeek, showPeek);
+    // A successful /clear is ready for input immediately even if a tmux pane
+    // redraw keeps mechanical liveness active for its debounce window.
+    applyChatActivityChrome(
+      data.live, mustShowPane, forcePeek, showPeek,
+      !!data.reply_ready || freshSurface,
+    );
 
     const hist = chatHist.node === n.id && chatHist.segs ? chatHist.segs : null;
     const priorSegs = priorSegsFromHistory(hist, data.chat_started);

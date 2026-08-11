@@ -523,6 +523,43 @@ func TestLastRoleAndDelivered(t *testing.T) {
 	}
 }
 
+func TestClaudeEndTurnBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "end-turn.jsonl")
+	tl := &Tailer{Path: path}
+	appendLine := func(line string) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		tl.Poll()
+	}
+
+	appendLine(`{"type":"user","message":{"role":"user","content":"hi"}}`)
+	if tl.EndTurn() {
+		t.Fatal("user turn must not be an end-turn boundary")
+	}
+	appendLine(`{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash"}]}}`)
+	if tl.EndTurn() {
+		t.Fatal("tool_use stop must not release the composer")
+	}
+	appendLine(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}`)
+	appendLine(`{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}`)
+	if !tl.EndTurn() {
+		t.Fatal("end_turn boundary was not retained")
+	}
+	appendLine(`{"type":"user","message":{"role":"user","content":"next"}}`)
+	if tl.EndTurn() {
+		t.Fatal("a new user turn must withdraw the prior end-turn boundary")
+	}
+}
+
 // NewestTurnTime dates the newest parsed turn from the CLI's own stamp, in
 // memory, with no extra file read — the poller's freshness gate for the map's
 // "Ready" prominence (P5 review). Zero means "cannot be dated", never "old".

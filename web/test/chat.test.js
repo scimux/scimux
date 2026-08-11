@@ -860,6 +860,7 @@ test("attentionIsSuppressed and suppress window", () => {
 test("workPulseShouldRun only when active and pane not forced", () => {
   assert.equal(workPulseShouldRun("active", false), true);
   assert.equal(workPulseShouldRun("active", true), false);
+  assert.equal(workPulseShouldRun("active", false, true), false);
   assert.equal(workPulseShouldRun("quiet", false), false);
 });
 
@@ -1454,6 +1455,30 @@ test("work-pulse start/stop via activity chrome", async () => {
   });
   await n2.feature.render();
   assert.equal(n2.roots.workpulse.classList.contains("on"), false);
+
+  // Claude's explicit end_turn releases the main-chat scanner and composer
+  // even while the mechanically debounced pane still reports active.
+  const ready = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: "done" }],
+      live: "active", reply_ready: true, delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+  });
+  await ready.feature.render();
+  assert.equal(ready.roots.workpulse.classList.contains("on"), false);
+  assert.equal(ready.effects.setComposerBusy.at(-1), false);
+
+  const cleared = makeFeature({
+    chatPayload: {
+      turns: [], live: "active", fresh: true, fallback: true,
+      delivery: "ok", source: "none", chat_started: "2026-01-02T00:00:00Z",
+      prior_turns: 2, assets: {},
+    },
+  });
+  await cleared.feature.render();
+  assert.equal(cleared.roots.workpulse.classList.contains("on"), false);
+  assert.equal(cleared.effects.setComposerBusy.at(-1), false);
 });
 
 test("history expansion renders prior segs with data-bk hist keys", async () => {

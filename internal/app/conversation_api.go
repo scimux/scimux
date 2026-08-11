@@ -52,6 +52,10 @@ func (a *app) segment(n *Node) sessionlog.Segment {
 	return c.Segment(a.sessionLogPath(n.ID))
 }
 
+func isFreshSurface(seg sessionlog.Segment) bool {
+	return len(seg.Turns) == 0 && seg.PriorTurns > 0
+}
+
 func (a *app) node(r *http.Request) (*Node, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -468,7 +472,7 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	// cleared Claude node says "fresh chat — send a prompt" instead of
 	// dropping to a terminal peek (P2c). A never-started node has no prior
 	// turns and must not claim fresh.
-	if len(seg.Turns) == 0 && seg.PriorTurns > 0 {
+	if isFreshSurface(seg) {
 		resp["fresh"] = true
 	}
 	if assets != nil {
@@ -565,13 +569,19 @@ func (a *app) assetSummary(nodeID string, rec sessionlog.AssetEvent) map[string]
 // at most one poll tick behind the transcript).
 func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment) {
 	tl := a.tailerFor(n) // may reset staleness on a relink; read flags after
+	if tl != nil {
+		// The chat poll may race ahead of the supervisor tick. Refresh the
+		// lightweight tailer here so reply_ready is withdrawn immediately by a
+		// new user/tool record and does not leave a stale send button enabled.
+		tl.Poll()
+	}
 	a.mu.Lock()
 	pending := n.Transcript == ""
 	live := a.live[n.ID]
 	stale := a.staleChat[n.ID]
 	attn := a.attn[n.ID]
 	delivery := a.sendState[n.ID]
-	agent, model := n.Agent, n.Model
+	agent, model, ended := n.Agent, n.Model, n.EndedAt != ""
 	a.mu.Unlock()
 	turns := seg.Turns
 	// fallback signals "the transcript is not (or no longer) making sense" —
@@ -618,6 +628,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 		pendCalls = tl.PendingCount()
 		waiting, _ = tl.WaitingOn()
 	}
+	replyReady := tl != nil && tl.EndTurn() && pendCalls == 0 && attn == "" && !ended
 	// Usage is segment-scoped: a /clear seam resets the gauge together with
 	// the context it measures.
 	ctxUsed := seg.Used
@@ -634,6 +645,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	resp["progress"] = prog
 	resp["pending_calls"] = pendCalls
 	resp["waiting_on"] = waiting
+	resp["reply_ready"] = replyReady
 	resp["ctx_used"] = ctxUsed
 	resp["ctx_window"] = ctxWindow
 	resp["ctx_pct"] = ctxPct
@@ -676,6 +688,7 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	resp["progress"] = len(seg.Turns)
 	resp["pending_calls"] = 0
 	resp["waiting_on"] = pending.Title
+	resp["reply_ready"] = false
 	resp["ctx_used"] = seg.Used
 	resp["ctx_window"] = seg.Size
 	resp["ctx_pct"] = ctxPct

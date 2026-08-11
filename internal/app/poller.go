@@ -108,10 +108,18 @@ func (a *app) poll() {
 		// turn_done predicate reuses it — no second tailerFor / file read.
 		var quietTl *transcript.Tailer
 		if state == "quiet" {
+			// A zero-turn segment immediately after /clear is deliberately idle:
+			// the detached Claude transcript is expected, not missing evidence.
+			// Suppress every attention fallback until the first post-clear turn
+			// lands. Structured transports already have no pending request after
+			// their successful Clear, so this gives every transport the same
+			// fresh-page contract without weakening ordinary missing-transcript
+			// diagnostics.
+			freshSurface := isFreshSurface(a.segment(n))
 			quietTl = a.tailerFor(n)
 			if quietTl != nil {
 				quietTl.Poll()
-				if name, ok := quietTl.WaitingOn(); ok {
+				if name, ok := quietTl.WaitingOn(); ok && !freshSurface {
 					attn = attentionKind(name)
 				}
 				// Judge the transcript only across a whole working phase (the
@@ -125,7 +133,7 @@ func (a *app) poll() {
 			}
 			// Dialoghint matcher + owing-stall backstop (P1a/P1b). Shared with
 			// notePeekDialog via quietAttentionFallback — never feeds liveness.
-			if attn == "" {
+			if attn == "" && !freshSurface {
 				a.mu.Lock()
 				quietSince := a.lastChg[n.ID]
 				a.mu.Unlock()
@@ -139,7 +147,7 @@ func (a *app) poll() {
 			// a stale one, or one whose recent data stopped parsing. Never
 			// labeled question/approval (no structured evidence, and pane
 			// regexes stay forbidden); the UI shows the terminal instead.
-			if attn == "" {
+			if attn == "" && !freshSurface {
 				a.mu.Lock()
 				noEvidence := n.Transcript == "" || a.staleChat[n.ID]
 				a.mu.Unlock()
