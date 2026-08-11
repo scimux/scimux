@@ -101,9 +101,6 @@ func (a *app) poll() {
 					state = "quiet"
 				}
 				if state == "active" && prev != "active" {
-					if a.activeSince == nil {
-						a.activeSince = map[string]time.Time{}
-					}
 					a.activeSince[n.ID] = time.Now()
 				}
 				a.mu.Unlock()

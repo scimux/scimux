@@ -48,9 +48,6 @@ func (a *app) segment(n *Node) sessionlog.Segment {
 // a.mu is held only for the map lookup/create — never across file I/O.
 func (a *app) sessionLogCache(id string) *sessionlog.LogCache {
 	a.mu.Lock()
-	if a.logCache == nil {
-		a.logCache = map[string]*sessionlog.LogCache{}
-	}
 	c := a.logCache[id]
 	if c == nil {
 		c = &sessionlog.LogCache{}
@@ -930,9 +927,6 @@ func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
 	a.mu.Lock()
 	if a.attn[n.ID] == "" {
 		a.attn[n.ID] = kind
-		if a.attnAt == nil { // tests build app literals without the map
-			a.attnAt = map[string]time.Time{}
-		}
 		a.attnAt[n.ID] = time.Now() // fresh evidence: start the preserve window (R21.2)
 	}
 	a.mu.Unlock()

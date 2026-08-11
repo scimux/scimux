@@ -1,45 +1,117 @@
 package app
 
-// Packet 10 Stage B: production poller.go must not carry nil-map guards whose
-// comments blame tests. Maps are initialized in newApp via initMaps; tests that
-// reach poll() call initMaps on their fixtures instead of shipping guards.
+// Packet 10 Stage B: the poll path must not carry lazy nil-map guards. Every
+// map field is initialized in newApp via initMaps; tests that reach poll()
+// call the same helper on their fixtures instead of making production ship a
+// branch that can only fire in a test.
+//
+// The check is AST-shaped, not comment-shaped, so rewording the comment does
+// not smuggle the pattern back in. It matches the exact leak: an `if a.X ==
+// nil` whose body does nothing but assign an empty map to that same field.
+// Behavioral short-circuits that return a value (sessionSnapshot's bare-server
+// path) allocate nothing and are not this pattern.
 
 import (
-	"os"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-func TestPollerHasNoTestBlamedNilMapGuards(t *testing.T) {
+// nilMapGuardFiles are the production files on the poll path. Scoped
+// deliberately: lazy initialization is legitimate elsewhere (the usage cache,
+// the claude-model probe), and this test speaks only for poll-path state that
+// newApp already builds.
+var nilMapGuardFiles = []string{"poller.go", "conversation_api.go"}
+
+func TestPollPathHasNoLazyNilMapGuards(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	path := filepath.Join(filepath.Dir(thisFile), "poller.go")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read poller.go: %v", err)
-	}
-	// Match the deleted production shape exactly: a same-line
-	// `== nil { // …test…` guard. Behavioral short-circuits with a next-line
-	// comment (e.g. sessionSnapshot's bare-server path) are out of scope.
+	dir := filepath.Dir(thisFile)
+	fset := token.NewFileSet()
 	var hits []string
-	for _, line := range strings.Split(string(b), "\n") {
-		if !strings.Contains(line, "== nil {") {
-			continue
+	for _, name := range nilMapGuardFiles {
+		path := filepath.Join(dir, name)
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
 		}
-		commentIdx := strings.Index(line, "//")
-		if commentIdx < 0 {
-			continue
-		}
-		if strings.Contains(strings.ToLower(line[commentIdx:]), "test") {
-			hits = append(hits, strings.TrimSpace(line))
-		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			stmt, isIf := n.(*ast.IfStmt)
+			if !isIf {
+				return true
+			}
+			field, isNilCheck := nilCheckedSelector(stmt.Cond)
+			if !isNilCheck {
+				return true
+			}
+			if !bodyOnlyAssignsEmptyMap(stmt.Body, field) {
+				return true
+			}
+			hits = append(hits, name+":"+
+				strconv.Itoa(fset.Position(stmt.Pos()).Line)+" if "+field+" == nil { "+field+" = map[…]…{} }")
+			return true
+		})
 	}
 	if len(hits) > 0 {
-		t.Fatalf("poller.go reintroduced nil-map guard(s) blaming tests:\n  %s\n"+
-			"use app.initMaps() in fixtures instead", strings.Join(hits, "\n  "))
+		t.Fatalf("poll-path files reintroduced lazy nil-map guard(s):\n  %s\n"+
+			"initialize the field in initMaps and call a.initMaps() in the fixture instead",
+			strings.Join(hits, "\n  "))
 	}
+}
+
+// nilCheckedSelector reports the rendered `x.Field` of an `x.Field == nil`
+// condition.
+func nilCheckedSelector(cond ast.Expr) (string, bool) {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.EQL {
+		return "", false
+	}
+	ident, ok := bin.Y.(*ast.Ident)
+	if !ok || ident.Name != "nil" {
+		return "", false
+	}
+	return renderSelector(bin.X)
+}
+
+// bodyOnlyAssignsEmptyMap reports whether the block is exactly one assignment
+// of an empty map composite literal to field.
+func bodyOnlyAssignsEmptyMap(body *ast.BlockStmt, field string) bool {
+	if body == nil || len(body.List) != 1 {
+		return false
+	}
+	assign, ok := body.List[0].(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return false
+	}
+	lhs, ok := renderSelector(assign.Lhs[0])
+	if !ok || lhs != field {
+		return false
+	}
+	lit, ok := assign.Rhs[0].(*ast.CompositeLit)
+	if !ok || len(lit.Elts) != 0 {
+		return false
+	}
+	_, isMap := lit.Type.(*ast.MapType)
+	return isMap
+}
+
+// renderSelector renders `x.Field` selector expressions over a plain
+// identifier; anything more complex is not the shape this test polices.
+func renderSelector(e ast.Expr) (string, bool) {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	base, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	return base.Name + "." + sel.Sel.Name, true
 }
