@@ -482,8 +482,11 @@ export function keyRowHTML({
       ? `<div class="permreason">${escape(reason)}</div>` : "";
     const verbEl = verb ? `<div class="permverb">${escape(verb)}</div>` : "";
     /* .permmore is a sibling of .permask — inside the clamp it is clipped
-       whenever the ask exceeds three lines (the exact moment it is needed). */
-    const mask = `<div class="permask${clamp}">${reasonEl}${verbEl}${body}</div>`;
+       whenever the ask exceeds three lines (the exact moment it is needed).
+       P5b: .permreason is a sibling too (like .hint). Inside the clamp it
+       stole lines from the ask body; outside, the reason is always visible
+       and revealPermMoreIfNeeded measures body overflow only. */
+    const mask = `<div class="permask${clamp}">${verbEl}${body}</div>`;
     const btns = `<div class="permbtns">${opts.map(o => {
       const { label, title } = permOptionLabel(o);
       const cls = permOptionClass(o.kind);
@@ -491,9 +494,10 @@ export function keyRowHTML({
       return `<button data-key="${escape(o.key)}" class="permbtn ${cls}"${titleAttr}>${escape(o.key)}. ${escape(label)}</button>`;
     }).join("")}</div>`;
     /* Hint outside the clamp; wording must not repeat the tool title — that
-       is the ask body, rendered immediately below. */
+       is the ask body, rendered immediately below. Order:
+       hint → permreason → permask(verb+body) → permmore → permbtns */
     const hint = `<span class="hint">The agent needs your approval \u2014 choose one:</span>`;
-    return hint + mask + more + btns;
+    return hint + reasonEl + mask + more + btns;
   }
   return `<span class="hint">${escape(HINTS[attention] || `The agent waits for your ${attention} \u2014 keys go straight to its terminal:`)}</span>` +
     `<div class="permbtns keys">` +

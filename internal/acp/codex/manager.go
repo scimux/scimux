@@ -715,15 +715,18 @@ func mapKeyToDecision(key string, ds []Decision) (int, bool) {
 }
 
 // approvalTitle is the supervisor-facing ask body. Prefer payload fields the
-// codex app-server documents over the JSON-RPC method name:
+// codex app-server documents; never show a raw JSON-RPC method name:
 //
 //   - commandExecution: the command string (unchanged)
-//   - fileChange: grantRoot when present ("File changes under …"); method fallback
-//   - permissions: a short scope summary from permissions.fileSystem / network
+//   - fileChange: grantRoot when present ("File changes under …"); else "File changes"
+//   - permissions: a short scope summary from permissions.fileSystem / network;
+//     else "Permission change"
+//   - known methods without usable fields: short human phrase (P5b)
+//   - unknown / empty method: "approval"
 //
 // Field names are taken from the official codex app-server README and the
 // synthetic fixtures in this package — never invented. Missing keys fall
-// through; empty/malformed params degrade to the method name (or "approval").
+// through to a truthful generic label, not the wire method path.
 func approvalTitle(a Approval) string {
 	if a.Command != "" {
 		return a.Command
@@ -733,21 +736,25 @@ func approvalTitle(a Approval) string {
 		if t := fileChangeTitle(a); t != "" {
 			return t
 		}
+		return "File changes"
 	case "item/permissions/requestApproval":
 		if t := permissionsTitle(a); t != "" {
 			return t
 		}
+		return "Permission change"
+	case "item/commandExecution/requestApproval", "execCommandApproval":
+		// Command is preferred above; empty command still needs a label.
+		return "Command execution"
 	}
-	if a.Method != "" {
-		return a.Method
-	}
+	// Unknown method — do not surface the JSON-RPC path as the ask.
 	return "approval"
 }
 
 // fileChangeTitle reads optional grantRoot from Raw. The app-server docs say
 // the approval carries itemId/threadId/turnId, optional reason, and may include
 // unstable grantRoot; the actual per-file diffs live on item/started, not here.
-// We never invent a path — absent grantRoot yields "".
+// We never invent a path — absent grantRoot yields "" so approvalTitle can
+// use the generic "File changes" label (P5b).
 func fileChangeTitle(a Approval) string {
 	var p struct {
 		GrantRoot string `json:"grantRoot"`
@@ -763,7 +770,8 @@ func fileChangeTitle(a Approval) string {
 
 // permissionsTitle summarises the requested scope from the documented v2 shape:
 // permissions.fileSystem.write|read path arrays and permissions.network.enabled.
-// Unknown or empty objects yield "" so the caller can fall back to the method.
+// Unknown or empty objects yield "" so the caller can fall back to
+// "Permission change" (P5b) — never the wire method name.
 func permissionsTitle(a Approval) string {
 	var p struct {
 		Permissions struct {

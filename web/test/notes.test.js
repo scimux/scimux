@@ -21,6 +21,9 @@ import {
   parseWorkspaceLayout,
   layoutAfterPlan,
   dividerResizePlan,
+  wsLayoutMins,
+  clampWorkspaceLayout,
+  WS_INBOX_FLAT_ZONE_MIN,
   provLabel,
   sectionSwapPlan,
   noteCardReorderPlan,
@@ -171,6 +174,103 @@ function assertTotal(plan, total = WS_TOTAL){
   const w = plan.widths;
   assert.equal(w.inbox + w.nav + w.note, total);
 }
+
+/* P5b item 1: desktop inbox floor fits the flat action bar.
+ *
+ * Arithmetic (must match the product constants / comments):
+ *   flat inbox bar = 5×44 + 4×4 gap = 236px content
+ *   chrome = list pad 10+10 + border 1+1 + bar pad 6+6 = 34px
+ *   zone min = 236 + 34 = 270px
+ * Phone keeps 210 (overflow more-menu bar fits; notes.css clamp lower bound). */
+test("P5b: wsLayoutMins raises inbox floor on desktop only (flat-row arithmetic)", () => {
+  assert.equal(typeof wsLayoutMins, "function", "wsLayoutMins must be exported");
+  assert.equal(typeof clampWorkspaceLayout, "function");
+  assert.ok(Number.isFinite(WS_INBOX_FLAT_ZONE_MIN) && WS_INBOX_FLAT_ZONE_MIN > 210,
+    "flat zone min must exceed the phone floor");
+  /* derive: 5 buttons, 4 gaps, chrome from real CSS (notes.css list/bar/border) */
+  const flatRow = 5 * 44 + 4 * 4;
+  const chrome = 10 + 10 + 1 + 1 + 6 + 6;
+  assert.equal(WS_INBOX_FLAT_ZONE_MIN, flatRow + chrome,
+    "WS_INBOX_FLAT_ZONE_MIN must be row + chrome, not a bare magic 270");
+
+  const desk = wsLayoutMins({ isDesktop: true });
+  assert.equal(desk.inbox, WS_INBOX_FLAT_ZONE_MIN);
+  assert.equal(desk.nav, WS_LAYOUT_MINS.nav);
+  assert.equal(desk.note, WS_LAYOUT_MINS.note);
+
+  const phone = wsLayoutMins({ isDesktop: false });
+  assert.equal(phone.inbox, 210, "below 900px keep the phone/overflow floor");
+  assert.equal(phone.nav, 190);
+  assert.equal(phone.note, 280);
+});
+
+test("P5b: dividerResizePlan at desktop mins never yields a flat-row-clipping inbox", () => {
+  const mins = wsLayoutMins({ isDesktop: true });
+  /* Drag into the old 210–269 clip band: either collapse to peek, or expand
+     at ≥ flat min — never land expanded in the band where Delete is clipped. */
+  for (const pointerX of [100, 210, 230, 250, 269, 270, 300]){
+    const plan = dividerResizePlan(resizeArgs({
+      mins,
+      boundary: "inbox",
+      pointerX,
+      zones: { inbox: 300, nav: 220, note: 380 },
+      last: { inbox: 300, nav: 220 },
+      total: 900,
+    }));
+    if (plan.collapsed.inbox){
+      assert.equal(plan.widths.inbox, WS_PEEK,
+        `collapsed inbox at pointerX=${pointerX} must be peek`);
+    } else {
+      assert.ok(plan.widths.inbox >= mins.inbox,
+        `expanded inbox ${plan.widths.inbox} at pointerX=${pointerX} must be ≥ ${mins.inbox}`);
+    }
+  }
+});
+
+test("P5b: clampWorkspaceLayout restores a too-narrow persisted inbox on desktop", () => {
+  /* iPad dragged to 210 + overflow bar, then desktop reloads the stored width */
+  const mins = wsLayoutMins({ isDesktop: true });
+  const clamped = clampWorkspaceLayout(
+    { inboxW: 210, navW: 200, inboxCollapsed: false, navCollapsed: false },
+    mins,
+  );
+  assert.equal(clamped.inboxW, mins.inbox,
+    "restore must raise 210 → flat-row min so Delete is reachable");
+  assert.equal(clamped.navW, 200);
+  /* collapsed keeps stored last width (peek is applied separately) */
+  const col = clampWorkspaceLayout(
+    { inboxW: 210, navW: 200, inboxCollapsed: true, navCollapsed: false },
+    mins,
+  );
+  assert.equal(col.inboxW, 210, "collapsed: do not rewrite last width via the flat floor");
+  /* phone mins leave 210 alone */
+  const phone = clampWorkspaceLayout(
+    { inboxW: 210, navW: 200, inboxCollapsed: false, navCollapsed: false },
+    wsLayoutMins({ isDesktop: false }),
+  );
+  assert.equal(phone.inboxW, 210);
+});
+
+test("P5b: open/apply clamps persisted too-narrow inbox on desktop (iPad→desktop)", async () => {
+  const mins = wsLayoutMins({ isDesktop: true });
+  const stored = {
+    inboxW: 210, navW: 200, inboxCollapsed: false, navCollapsed: false,
+  };
+  const ctx = createFeature({
+    storageInit: { [STORAGE_KEY_WS_LAYOUT]: JSON.stringify(stored) },
+    isDesktop: true,
+  });
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  const applied = parseFloat(roots.wszones.style.getPropertyValue("--wsinbox-w"));
+  assert.ok(applied >= mins.inbox,
+    `applied --wsinbox-w ${applied} must be ≥ ${mins.inbox} on desktop restore`);
+  /* storage should reflect the clamp so the next open does not re-clip */
+  const L = JSON.parse(storage.getItem(STORAGE_KEY_WS_LAYOUT));
+  assert.ok(L.inboxW >= mins.inbox, `persisted inboxW ${L.inboxW} after restore clamp`);
+});
 
 test("parseWorkspaceLayout: empty, valid, corrupt → defaults", () => {
   const def = { inboxW: null, navW: null, inboxCollapsed: false, navCollapsed: false };
@@ -1135,6 +1235,7 @@ function createFeature(overrides = {}){
       return overrides.jumpOk !== false;
     },
     isNarrow: () => !!overrides.isNarrow,
+    isDesktop: () => !!overrides.isDesktop,
     notesbtn: () => notesbtn,
     activeElement: () => document.activeElement,
     ...overrides.deps,

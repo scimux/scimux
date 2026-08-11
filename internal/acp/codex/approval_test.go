@@ -209,22 +209,52 @@ func TestPendingExposesReasonFromSyntheticFixture(t *testing.T) {
 }
 
 func TestApprovalTitleDegradesSafely(t *testing.T) {
-	// Empty params → method name (last resort), never panic, never empty when method known.
+	// P5b: known methods without usable params get a short human phrase —
+	// never a JSON-RPC method name (those are not an ask the human can read).
+	// Unknown / empty still degrade, never panic, never empty.
 	empty := decodeApproval("item/fileChange/requestApproval", []byte(`{}`))
-	if got := approvalTitle(empty); got != "item/fileChange/requestApproval" {
-		t.Fatalf("empty fileChange title = %q, want method fallback", got)
+	if got := approvalTitle(empty); got == "" || strings.Contains(got, "/requestApproval") {
+		t.Fatalf("empty fileChange title = %q, want human phrase without method path", got)
 	}
 	malformed := decodeApproval("item/permissions/requestApproval", []byte(`not-json`))
-	if got := approvalTitle(malformed); got != "item/permissions/requestApproval" {
-		t.Fatalf("malformed permissions title = %q, want method fallback", got)
+	if got := approvalTitle(malformed); got == "" || strings.Contains(got, "/requestApproval") {
+		t.Fatalf("malformed permissions title = %q, want human phrase without method path", got)
 	}
 	unknown := decodeApproval("item/futureThing/requestApproval", []byte(`{"foo":1}`))
-	if got := approvalTitle(unknown); got != "item/futureThing/requestApproval" {
-		t.Fatalf("unknown method title = %q, want method fallback", got)
+	if got := approvalTitle(unknown); got == "" || strings.Contains(got, "/requestApproval") {
+		t.Fatalf("unknown method title = %q, want human fallback without method path", got)
 	}
 	// Completely empty Approval still yields something non-empty.
 	if got := approvalTitle(Approval{}); got == "" {
 		t.Fatal("zero Approval title must not be empty")
+	}
+}
+
+// P5b: each known method family has a truthful generic label when payload
+// fields are absent — not the wire method name.
+func TestApprovalTitleHumanFallbacksNeverExposeMethodPath(t *testing.T) {
+	cases := []struct {
+		method string
+		raw    string
+		want   string
+	}{
+		{"item/fileChange/requestApproval", `{}`, "File changes"},
+		{"applyPatchApproval", `{}`, "File changes"},
+		{"item/permissions/requestApproval", `{"permissions":{}}`, "Permission change"},
+		{"item/commandExecution/requestApproval", `{}`, "Command execution"},
+		{"execCommandApproval", `{}`, "Command execution"},
+		{"item/futureThing/requestApproval", `{}`, "approval"},
+		{"", `{}`, "approval"},
+	}
+	for _, tc := range cases {
+		a := decodeApproval(tc.method, []byte(tc.raw))
+		got := approvalTitle(a)
+		if got != tc.want {
+			t.Errorf("method %q title = %q, want %q", tc.method, got, tc.want)
+		}
+		if strings.Contains(got, "/requestApproval") {
+			t.Errorf("method %q title %q must not contain /requestApproval", tc.method, got)
+		}
 	}
 }
 

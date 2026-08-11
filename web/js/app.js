@@ -1781,10 +1781,12 @@ matchMedia(SINGLE_ZONE_QUERY).addEventListener("change", () => {
   bookmarksFeature.invalidate();
   renderBookmarksPane();
 });
-/* P5: crossing isDesktop() flips flat bar ↔ overflow more-menu; re-render. */
+/* P5/P5b: crossing isDesktop() flips flat bar ↔ overflow more-menu and
+   re-clamps a persisted too-narrow inboxW to the flat-row floor. */
 matchMedia("(min-width: 900px)").addEventListener("change", () => {
   bookmarksFeature.invalidate();
   renderBookmarksPane();
+  if (typeof notesFeature.applyLayout === "function") notesFeature.applyLayout();
   if (typeof notesFeature.invalidateInbox === "function") notesFeature.invalidateInbox();
   if (typeof notesFeature.renderInbox === "function") notesFeature.renderInbox();
 });

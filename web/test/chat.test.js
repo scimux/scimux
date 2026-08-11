@@ -428,6 +428,35 @@ test("keyRowHTML: never md() on perm_title; payload escapes; structure and kinds
   assert.doesNotMatch(open, /permmore/);
 });
 
+/* P5b item 2: .permreason must sit outside .permask so a multi-line reason
+ * does not consume the three-line clamp that belongs to the ask body. */
+test("P5b: .permreason is not a descendant of .permask (clamp is body-only)", () => {
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Execute `curl example.com`",
+    permToolKind: "execute",
+    permReason: "Line one of the reason.\nLine two of the reason.\nLine three would steal the body.",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: false,
+  });
+  assert.match(html, /class="permreason"/, "reason is present");
+  assert.match(html, /class="permask clamped"/, "mask is clamped when not expanded");
+  const parts = permaskInnerAndRest(html);
+  assert.ok(parts, "emits a .permask element");
+  assert.doesNotMatch(parts.inner, /permreason/,
+    ".permreason must not live inside .permask (would eat the 3-line clamp)");
+  assert.match(parts.before, /class="permreason"/,
+    ".permreason sits before .permask (with the hint)");
+  assert.match(parts.inner, /permverb|permcode|permtext/,
+    "verb/body stay inside the mask");
+  /* document order: hint → reason → mask */
+  const hintAt = html.search(/class="hint"/);
+  const reasonAt = html.search(/class="permreason"/);
+  const maskAt = html.search(/class="permask/);
+  assert.ok(hintAt >= 0 && reasonAt > hintAt && maskAt > reasonAt,
+    "order is hint → permreason → permask");
+});
+
 /* G1b: reason is a distinct dimmed line above the ask body (.permreason),
  * not mixed into .permverb or the code/prose body. Escaped, optional. */
 test("G1b: keyRowHTML renders permReason above the body, escaped and distinct", () => {

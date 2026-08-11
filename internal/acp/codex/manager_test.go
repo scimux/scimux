@@ -315,7 +315,8 @@ func TestManagerQueuesConcurrentApprovals(t *testing.T) {
 
 	waitFor(t, func() bool {
 		p, ok := m.Pending("n1")
-		return ok && p.Title == "item/fileChange/requestApproval" && len(p.Options) == 4
+		// P5b: no grantRoot → human "File changes", never the method path.
+		return ok && p.Title == "File changes" && len(p.Options) == 4
 	})
 	optID, _, err = m.PrepareResolve("n1", "4")
 	if err != nil {

@@ -311,9 +311,10 @@ body.cards-open #msgs { overflow: hidden; }
 .permask.clamped { display: -webkit-box; -webkit-line-clamp: 3;
   -webkit-box-orient: vertical; overflow: hidden; }
 .permverb { font-size: 12px; color: var(--dim); }
-/* G1b: agent-supplied reason, distinct from .permverb (tool verb) above the
-   ask body. Same dim chrome; separate element so both can show at once. */
-.permreason { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+/* G1b / P5b: agent-supplied reason, distinct from .permverb (tool verb).
+   Sibling of .permask under #keyrow (gap: 8px) — not inside the 3-line clamp.
+   No margin-bottom: the keyrow gap owns sibling spacing. */
+.permreason { font-size: 12px; color: var(--dim); }
 /* pre-wrap: keep heredoc/indent whitespace; soft-wrap long lines so a
    single-line shell command grows line boxes under .permask.clamped and
    "show all" can unhide (G1a). overflow-wrap:anywhere breaks unbroken tokens. */

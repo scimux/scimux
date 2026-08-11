@@ -132,10 +132,54 @@ export const STORAGE_KEY_INBOX_TAB = STORAGE_KEY_TAB;
 export const STORAGE_KEY_WS_LAYOUT = "scimux-wslayout";
 export const COPY_ACK_MS = 900;
 /* Default mins match the clamp() lower ends in notes.css @media 768px;
- * peek matches the practical midpoint of --peek (clamp(44px, 12%, 60px)). */
+ * peek matches the practical midpoint of --peek (clamp(44px, 12%, 60px)).
+ *
+ * Phone/tablet (<900px) keep inbox: 210 — that is the CSS clamp lower bound
+ * and the overflow more-menu bar fits there.
+ *
+ * Desktop (≥900px) raises the inbox floor so the flat P5 action bar is never
+ * clipped by #wsinboxlist { overflow-x: hidden }. Arithmetic from real CSS:
+ *   flat row  = 5 × 44px buttons + 4 × 4px gap          = 236px
+ *   chrome    = list pad 10+10 + border 1+1 + bar pad 6+6 =  34px
+ *               (#wsinboxlist padding, .wsibookmark border, .wsibookmark .actionbar)
+ *   zone min  = 236 + 34                                  = 270px
+ * Persisted widths from an iPad drag at 210 must be raised on restore too —
+ * a drag-only clamp misses that path (P5b). */
 export const WS_LAYOUT_MINS = { inbox: 210, nav: 190, note: 280 };
+export const WS_INBOX_FLAT_ROW_PX = 5 * 44 + 4 * 4;
+export const WS_INBOX_FLAT_CHROME_PX = 10 + 10 + 1 + 1 + 6 + 6;
+export const WS_INBOX_FLAT_ZONE_MIN = WS_INBOX_FLAT_ROW_PX + WS_INBOX_FLAT_CHROME_PX;
 export const WS_LAYOUT_PEEK = 48;
 export const WS_DIVIDER_NUDGE = 20;
+
+/** Mins for dividerResizePlan / restore. Desktop raises inbox to the flat-row
+ *  zone floor; phone keeps the CSS 210 clamp lower bound. */
+export function wsLayoutMins({ isDesktop = false } = {}){
+  return {
+    inbox: isDesktop
+      ? Math.max(WS_LAYOUT_MINS.inbox, WS_INBOX_FLAT_ZONE_MIN)
+      : WS_LAYOUT_MINS.inbox,
+    nav: WS_LAYOUT_MINS.nav,
+    note: WS_LAYOUT_MINS.note,
+  };
+}
+
+/** Raise a persisted expanded inboxW that would clip the flat bar. Collapsed
+ *  rows keep their last width (peek is applied separately). Does not touch nav. */
+export function clampWorkspaceLayout(layout, mins){
+  const L = layout && typeof layout === "object"
+    ? {
+      inboxW: layout.inboxW == null ? null : layout.inboxW,
+      navW: layout.navW == null ? null : layout.navW,
+      inboxCollapsed: !!layout.inboxCollapsed,
+      navCollapsed: !!layout.navCollapsed,
+    }
+    : { inboxW: null, navW: null, inboxCollapsed: false, navCollapsed: false };
+  const floor = mins && Number.isFinite(Number(mins.inbox)) ? Number(mins.inbox) : 0;
+  if (!L.inboxCollapsed && L.inboxW != null && floor > 0 && L.inboxW < floor)
+    L.inboxW = floor;
+  return L;
+}
 
 /* ---------- pure: folds ---------- */
 
@@ -794,10 +838,26 @@ export function createNotesFeature(deps){
       zonesEl.style.setProperty(prop, v);
     else zonesEl.style[prop] = v;
   }
-  /* Apply persisted layout → custom props + .collapsed on zone rails. */
+  function layoutIsDesktop(){
+    return typeof d.isDesktop === "function" ? !!d.isDesktop() : false;
+  }
+  function currentLayoutMins(){
+    return wsLayoutMins({ isDesktop: layoutIsDesktop() });
+  }
+  /* Apply persisted layout → custom props + .collapsed on zone rails.
+     P5b: clamp a too-narrow stored inboxW on desktop so the flat bar fits
+     (iPad-at-210 → desktop restore). Write the raised value back so the next
+     open does not re-clip. */
   function applyWsLayout(layout){
-    const L = layout || wsLayout || parseWorkspaceLayout(null);
+    const raw = layout || wsLayout || parseWorkspaceLayout(null);
+    const mins = currentLayoutMins();
+    const L = clampWorkspaceLayout(raw, mins);
+    const raised = !L.inboxCollapsed
+      && raw && raw.inboxW != null
+      && L.inboxW != null
+      && L.inboxW !== raw.inboxW;
     wsLayout = L;
+    if (raised) persistWsLayout(L);
     const zonesEl = root("wszones");
     const inbox = root("wsinbox");
     const nav = root("wsnav");
@@ -839,10 +899,11 @@ export function createNotesFeature(deps){
     const nw = (nav.getBoundingClientRect && nav.getBoundingClientRect().width) || 0;
     const noteW = (note.getBoundingClientRect && note.getBoundingClientRect().width) || 0;
     /* fall back to last known / defaults when rects are zero (hidden / test) */
+    const mins = currentLayoutMins();
     const widths = {
-      inbox: iw > 0 ? iw : (wsLayout.inboxCollapsed ? WS_LAYOUT_PEEK : (wsLayout.inboxW || WS_LAYOUT_MINS.inbox)),
-      nav: nw > 0 ? nw : (wsLayout.navCollapsed ? WS_LAYOUT_PEEK : (wsLayout.navW || WS_LAYOUT_MINS.nav)),
-      note: noteW > 0 ? noteW : WS_LAYOUT_MINS.note,
+      inbox: iw > 0 ? iw : (wsLayout.inboxCollapsed ? WS_LAYOUT_PEEK : (wsLayout.inboxW || mins.inbox)),
+      nav: nw > 0 ? nw : (wsLayout.navCollapsed ? WS_LAYOUT_PEEK : (wsLayout.navW || mins.nav)),
+      note: noteW > 0 ? noteW : mins.note,
     };
     return { widths, total: widths.inbox + widths.nav + widths.note };
   }
@@ -851,7 +912,7 @@ export function createNotesFeature(deps){
       boundary,
       pointerX,
       zones: base.zones,
-      mins: WS_LAYOUT_MINS,
+      mins: currentLayoutMins(),
       peek: WS_LAYOUT_PEEK,
       total: base.total,
       collapsed: base.collapsed,
@@ -860,6 +921,7 @@ export function createNotesFeature(deps){
   }
   function layoutBaseFromCurrent(){
     const m = measureZones();
+    const mins = currentLayoutMins();
     return {
       zones: m.widths,
       total: m.total,
@@ -868,8 +930,8 @@ export function createNotesFeature(deps){
         nav: !!(wsLayout && wsLayout.navCollapsed),
       },
       last: {
-        inbox: (wsLayout && wsLayout.inboxW) || m.widths.inbox,
-        nav: (wsLayout && wsLayout.navW) || m.widths.nav,
+        inbox: (wsLayout && wsLayout.inboxW) || m.widths.inbox || mins.inbox,
+        nav: (wsLayout && wsLayout.navW) || m.widths.nav || mins.nav,
       },
     };
   }
@@ -2065,6 +2127,13 @@ export function createNotesFeature(deps){
 
   function invalidateInbox(){ wsInboxSig = ""; }
 
+  /* P5b: re-apply persisted layout under the current isDesktop mins (breakpoint
+     cross). No-op when the workspace is closed. */
+  function applyLayout(){
+    if (!isOpen()) return;
+    applyWsLayout(wsLayout || readWsLayout());
+  }
+
   return {
     bind,
     destroy,
@@ -2076,5 +2145,6 @@ export function createNotesFeature(deps){
     endPlacement,
     renderInbox,
     invalidateInbox,
+    applyLayout,
   };
 }
