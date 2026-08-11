@@ -185,8 +185,17 @@ func TestTicketPerforationHasItsOwnContrastToken(t *testing.T) {
 	if !strings.Contains(root, "--perf:") {
 		t.Errorf("the perforation needs a token of its own, not --hairline; got %q", root)
 	}
-	dark := afterMarker(css, "@media (prefers-color-scheme: dark)")
-	if !strings.Contains(dark, "--perf:") {
+	// Scan every dark block, not just the text after the last one: afterMarker
+	// is LastIndex-based, so any stylesheet that adds its own dark override
+	// after tokens.css in the cascade would fail this for no reason.
+	darkRestated := false
+	for _, part := range strings.Split(css, "@media (prefers-color-scheme: dark)")[1:] {
+		if strings.Contains(part, "--perf:") {
+			darkRestated = true
+			break
+		}
+	}
+	if !darkRestated {
 		t.Error("the perforation token must be restated for the dark theme — one value cannot serve both")
 	}
 

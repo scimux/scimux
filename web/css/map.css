@@ -133,14 +133,27 @@ body.map-full #maptoolbar.on { display: flex; }
   left: 50%; transform: translateX(-50%);
   bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   min-height: 44px; padding: 10px 16px; border: 0; border-radius: 22px;
-  font: inherit; font-size: 14px; font-weight: 700; color: var(--bg);
-  background: color-mix(in srgb, var(--attn) 92%, var(--fg));
+  font: inherit; font-size: 14px; font-weight: 700;
+  /* Same hue as the ring it points at, no mix: the pill and the station must
+     read as one signal. The label is a fixed near-black because --attn stays
+     bright yellow in dark mode too — a theme-following --ink label would go
+     near-white on it. */
+  color: #1C1C1E; background: var(--attn);
   box-shadow: 0 6px 20px rgba(0,0,0,.28); cursor: pointer;
   white-space: nowrap; }
 body.map-full #mappill.on { display: flex; align-items: center; justify-content: center; }
 /* A pill about finished turns wears the finished hue: --attn stays reserved
-   for "blocked on you", the one meaning P5 gave it. */
-#mappill.ready { background: color-mix(in srgb, var(--work) 92%, var(--fg)); }
+   for "blocked on you", the one meaning P5 gave it. Petrol is dark in both
+   themes, so this one takes white — the house pattern for a filled --work
+   surface (base.css .btn-primary, the send button, user bubbles). */
+#mappill.ready { color: #fff; background: var(--work); }
+@media (prefers-color-scheme: dark) {
+  /* dark --work is a lighter petrol (#2FA7B4): white on it is 2.9:1, under AA
+     for a 14px bold label, while near-black is 6.0:1. The pill is the one
+     filled --work surface that has to be read at a glance from across the
+     wall, so it takes the readable label rather than the house white. */
+  #mappill.ready { color: #1C1C1E; }
+}
 /* Ring hit target: re-enable pointer events on the transparent control circle
    while the rest of the station SVG stays pointer-events:none. */
 .lbody > svg .attnstation-hit { pointer-events: all; cursor: pointer; }

@@ -3427,6 +3427,14 @@ test("P8: the pill's label is legible on both of its fills, in both themes", () 
   assert.ok(readyColor, "#mappill.ready sets its own label colour");
   assert.match(readyColor[1], /#fff\b|#ffffff\b|\bwhite\b/i,
     "a filled --work surface carries white text (base.css .btn-primary)");
+
+  /* Added after the red commit, on measurement rather than on taste: dark-mode
+     --work is #2FA7B4, where white lands at 2.9:1 — under AA for a 14px bold
+     label — while near-black is 6.0:1. The pill has to be read at a glance
+     from across the wall, so it overrides the house white in dark mode. */
+  const dark = mapCssSrc.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{[\s\S]*?#mappill\.ready\s*\{([^}]+)\}/);
+  assert.ok(dark, "#mappill.ready has a dark-scheme label override");
+  assert.match(dark[1], /color\s*:\s*#1C1C1E/i, "dark-mode ready label is near-black");
 });
 
 test("P6: entering the dock recomputes the pill — the ring's own gesture shrinks the map", () => {
