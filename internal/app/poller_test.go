@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -1188,6 +1189,238 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		a.poll()
 		if got := a.attn["cl1"]; got != "" {
 			t.Errorf("attention = %q, want none without the anchor at 15s", got)
+		}
+	})
+}
+
+// TestAXScreenReaderPollerPins locks screen-reader (AX) pane shapes into the
+// existing poller paths: structural quiet-branch dialog fallback, mechanical
+// elapsed-time activity, cancel-anchor vs interrupt, completed tools, and
+// prose safety. Production poller logic is unchanged — only the cancel-anchor
+// spelling compatibility in dialoghint is new. Synthetic panes only.
+func TestAXScreenReaderPollerPins(t *testing.T) {
+	// Flat AX permission menu: full-word Escape, no abbreviated Esc line.
+	axPermission := `Permission Required: Create file
+hello.txt
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Escape to cancel:`
+
+	// Flat AX question menu (AskUserQuestion-shaped).
+	axQuestion := `Which approach should we take?
+
+  1. Keep the poller mechanical
+  2. Parse the TUI
+  3. Other
+  4. Chat about this
+
+Enter selection [1-4], or Escape to cancel:`
+
+	// Abbreviated variant — ordinary TUI spelling still classifies.
+	axPermissionEsc := `Permission Required: Create file
+hello.txt
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Esc to cancel:`
+
+	// Running silent tool: only the elapsed timer changes between captures.
+	running12 := "Running… (12s)\n$"
+	running13 := "Running… (13s)\n$"
+
+	// Interrupt chrome is not the dialog cancel anchor.
+	interruptPane := "Running tool…\n esc to interrupt\n$"
+
+	// Completed tool output: no live menu.
+	completedPane := "Wrote hello.txt (42 bytes)\n\n✓ Done\n$"
+
+	// Agent prose discussing the screen-reader prompt — no structural menu.
+	prosePane := "Screen-reader menus end with Escape to cancel after Enter selection.\n" +
+		"dialoghint must not treat this sentence as a live dialog.\n$"
+
+	quietRunner := func(pane string) tmuxsession.Runner {
+		return func(ctx context.Context, stdin string, args ...string) (string, error) {
+			for _, arg := range args {
+				if arg == "has-session" {
+					return "", nil
+				}
+				if arg == "capture-pane" {
+					return pane, nil
+				}
+			}
+			return "", nil
+		}
+	}
+	// quietApp builds a Claude node with a static pane older than paneQuietAfter.
+	// lastChg is 10s ago: past quiet (8s) but inside owedStallAfter (45s), so only
+	// the structural matcher can raise attention — not the mechanical owing stall.
+	quietApp := func(t *testing.T, pane string, transcriptLines ...string) *app {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		if len(transcriptLines) > 0 {
+			appendLines(t, path, transcriptLines...)
+		} else {
+			// Empty file so the tailer exists but reports nothing pending/owing.
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		return &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			turnDone:  map[string]bool{},
+			prevCap:   map[string]string{"cl1": pane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(pane)),
+		}
+	}
+
+	// (A) Static AX permission pane older than paneQuietAfter raises dialog
+	// even when Claude has not flushed the tool_use record (late flush).
+	t.Run("static_ax_permission_dialog_without_tool_use", func(t *testing.T) {
+		a := quietApp(t, axPermission,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"create hello.txt"}}`)
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
+		if got := a.attn["cl1"]; got != "dialog" {
+			t.Errorf("attention = %q, want dialog from AX permission menu", got)
+		}
+	})
+
+	// Abbreviated footer still classifies on the same path.
+	t.Run("static_ax_permission_abbreviated_esc", func(t *testing.T) {
+		a := quietApp(t, axPermissionEsc,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"create hello.txt"}}`)
+		a.poll()
+		if got := a.attn["cl1"]; got != "dialog" {
+			t.Errorf("attention = %q, want dialog from abbreviated Esc menu", got)
+		}
+	})
+
+	// (B) Static AX question pane with only the human turn raises hard attention
+	// through the structural fallback (no unresolved AskUserQuestion yet).
+	t.Run("static_ax_question_dialog_human_turn_only", func(t *testing.T) {
+		a := quietApp(t, axQuestion,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"which approach?"}}`)
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
+		if got := a.attn["cl1"]; got != "dialog" {
+			t.Errorf("attention = %q, want dialog from AX question menu", got)
+		}
+	})
+
+	// (C) Silent tool whose pane only ticks Running… (12s) → (13s) stays active
+	// with no attention. Mechanical pane-change only — no text special-casing.
+	t.Run("running_elapsed_time_stays_active_no_attention", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"write it"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Write","input":{}}]}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": running12},
+			lastChg:   map[string]time.Time{},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			anim:      map[string]*animState{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(running13)),
+		}
+		a.poll()
+		if got := a.live["cl1"]; got != "active" {
+			t.Fatalf("live = %q, want active (elapsed timer is pane change)", got)
+		}
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none while tool runs with no dialog", got)
+		}
+	})
+
+	// (D) "esc to interrupt" is not the dialog cancel anchor and must not
+	// raise dialog attention on a quiet running pane without menu structure.
+	t.Run("esc_to_interrupt_not_dialog", func(t *testing.T) {
+		a := quietApp(t, interruptPane,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`)
+		a.poll()
+		// Unresolved Bash → structured approval, not dialog-from-interrupt text.
+		if got := a.attn["cl1"]; got != "approval" {
+			t.Errorf("attention = %q, want approval from unresolved tool (not interrupt text)", got)
+		}
+		// Explicit: interrupt chrome alone does not classify as dialog.
+		if dialoghint.ClassifyVisible(interruptPane) {
+			t.Error("esc to interrupt pane must not ClassifyVisible as dialog")
+		}
+		if dialoghint.HasCancelAnchor(interruptPane) {
+			t.Error("esc to interrupt must not satisfy HasCancelAnchor")
+		}
+	})
+
+	// (E) Completed tool with resolved transcript and stable pane → quiet,
+	// finished, no dialog attention.
+	t.Run("completed_tool_quiet_no_dialog", func(t *testing.T) {
+		stamp := time.Now().Add(-30 * time.Second).UTC().Format(time.RFC3339Nano)
+		userStamp := time.Now().Add(-90 * time.Second).UTC().Format(time.RFC3339Nano)
+		a := quietApp(t, completedPane,
+			`{"type":"user","timestamp":"`+userStamp+`","message":{"role":"user","content":"write hello"}}`,
+			`{"type":"assistant","timestamp":"`+stamp+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Write","input":{}}]}}`,
+			`{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}`,
+			`{"type":"assistant","timestamp":"`+stamp+`","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Fatalf("live = %q, want quiet", got)
+		}
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none after completed tool", got)
+		}
+		if !a.turnDone["cl1"] {
+			t.Error("turnDone = false, want true for quiet delivered completed tool")
+		}
+	})
+
+	// (F) Prose discussing Escape to cancel / screen-reader menus must not
+	// raise attention without mechanical+structural preconditions.
+	t.Run("prose_escape_to_cancel_no_attention", func(t *testing.T) {
+		// Finished assistant turn: agent does not owe output; prose alone is
+		// insufficient even past the longest stall.
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"Escape to cancel is the AX footer; dialoghint is corroboration only"}]}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": prosePane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-4 * owedStallAfter)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(prosePane)),
+		}
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: prose is not a dialog", got)
 		}
 	})
 }

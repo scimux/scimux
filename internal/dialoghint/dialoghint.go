@@ -6,17 +6,26 @@ import (
 	"strings"
 )
 
+// cancelAnchorRE is the shared Claude dialog-footer fragment. It accepts both
+// documented renderer spellings — ordinary TUI "Esc to cancel" and screen-
+// reader "Escape to cancel" — and nothing broader (bare Escape, bare cancel,
+// "esc to interrupt", "Escape to cancellation", …). Every matcher that
+// anchors on this chrome must compose this fragment so both spellings stay
+// in lockstep. HasCancelAnchor uses the same expression and remains
+// corroboration-only: it never raises attention by itself.
+const cancelAnchorRE = `\besc(?:ape)? to cancel\b`
+
 var (
 	// Claude Code approval dialogs
-	commandSubstitution = regexp.MustCompile(`(?is)\bcommand contains\b.*\bcommand substitution\b.*\besc to cancel\b`)
-	proceedDialog       = regexp.MustCompile(`(?is)\bdo you want to proceed\b.*\besc to cancel\b`)
-	dontAskAgain        = regexp.MustCompile(`(?is)\byes\b.*and don.?t ask again\b.*\besc to cancel\b`)
-	allowDialog         = regexp.MustCompile(`(?is)\ballow\s+\S+\s+to\s+\w+.*\b\d\.\s*allow\b.*\besc to cancel\b`)
+	commandSubstitution = regexp.MustCompile(`(?is)\bcommand contains\b.*\bcommand substitution\b.*` + cancelAnchorRE)
+	proceedDialog       = regexp.MustCompile(`(?is)\bdo you want to proceed\b.*` + cancelAnchorRE)
+	dontAskAgain        = regexp.MustCompile(`(?is)\byes\b.*and don.?t ask again\b.*` + cancelAnchorRE)
+	allowDialog         = regexp.MustCompile(`(?is)\ballow\s+\S+\s+to\s+\w+.*\b\d\.\s*allow\b.*` + cancelAnchorRE)
 
 	// numberedOptionLine matches a dialog menu option: optional pointer glyph,
 	// then "N." with N a positive integer. Shape-based (P1a) — not verb-based.
 	numberedOptionLine = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*(\d+)\.\s+\S`)
-	escToCancel        = regexp.MustCompile(`(?i)\besc to cancel\b`)
+	escToCancel        = regexp.MustCompile(`(?i)` + cancelAnchorRE)
 
 	// Rate limit menus
 	rateLimitMenu = regexp.MustCompile(`(?im)^\s*[❯›>]?\s*1\.\s*stop and wait for limit to reset\b`)
@@ -25,7 +34,7 @@ var (
 )
 
 // optionGapLines: consecutive options may sit this many non-option lines apart
-// (blank lines, chrome). escAnchorLines: "esc to cancel" may trail the last
+// (blank lines, chrome). escAnchorLines: the cancel anchor may trail the last
 // option by this many lines (footer chrome).
 const (
 	optionGapLines = 3
@@ -70,9 +79,10 @@ func HasCancelAnchor(pane string) bool {
 
 // numberedOptionsDialog is the structural fallback for Claude Code approval
 // menus whose verbs change (Write/Edit no longer say "proceed"/"allow"): a
-// run of consecutively numbered options (1. then 2., …) with "esc to cancel"
+// run of consecutively numbered options (1. then 2., …) with a cancel anchor
 // a few lines below the last option. Enumeration of verbs demonstrably
-// breaks; shape does not.
+// breaks; shape does not. The anchor accepts both "Esc to cancel" and the
+// screen-reader spelling "Escape to cancel".
 func numberedOptionsDialog(s string) bool {
 	lines := strings.Split(s, "\n")
 	// Scan for a run starting at 1., collecting consecutive N, N+1, …
@@ -100,7 +110,7 @@ func numberedOptionsDialog(s string) bool {
 			// Need at least 1. and 2.
 			continue
 		}
-		// Anchor: "esc to cancel" within escAnchorLines of the last option.
+		// Anchor: cancel chrome within escAnchorLines of the last option.
 		for k := lastOpt + 1; k < len(lines) && k-lastOpt <= escAnchorLines; k++ {
 			if escToCancel.MatchString(lines[k]) {
 				return true

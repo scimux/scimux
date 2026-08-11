@@ -138,6 +138,151 @@ Agent working...`,
 			pane:  "Press Esc to cancel when ready\nWaiting…",
 			match: false,
 		},
+		// Screen-reader (AX) flat menus: documented "Escape to cancel" footer
+		// with no separate abbreviated "Esc to cancel" line. Synthetic only.
+		{
+			name: "AX create file permission",
+			pane: `Permission Required: Create file
+hello.txt
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Escape to cancel:`,
+			match: true,
+		},
+		{
+			name: "AX bash permission",
+			pane: `Permission Required: Bash command
+go test ./...
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Escape to cancel:`,
+			match: true,
+		},
+		{
+			// Full-word path only: no abbreviated "Esc to cancel" anywhere.
+			name: "AX AskUserQuestion Escape only",
+			pane: `Which approach should we take?
+
+  1. Keep the poller mechanical
+  2. Parse the TUI
+  3. Other
+  4. Chat about this
+
+Enter selection [1-4], or Escape to cancel:`,
+			match: true,
+		},
+		{
+			// Invalid-number retry re-prompts the range; still an active menu.
+			name: "AX invalid number retry still dialog",
+			pane: `Permission Required: Create file
+notes.md
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Invalid selection. Enter a number from 1 to 3, or Escape to cancel:`,
+			match: true,
+		},
+		{
+			// Abbreviated footer still classifies (ordinary TUI compatibility).
+			name: "AX-shaped menu with abbreviated Esc",
+			pane: `Permission Required: Create file
+hello.txt
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Esc to cancel:`,
+			match: true,
+		},
+		{
+			name:  "prose Enter selection without options or cancel",
+			pane:  "The form says Enter selection when ready, but this is just agent prose.",
+			match: false,
+		},
+		{
+			name: "completed flat tool output not a dialog",
+			pane: `Wrote hello.txt (42 bytes)
+
+✓ Done
+$`,
+			match: false,
+		},
+		{
+			name: "Escape to cancellation near miss",
+			pane: `Pick one:
+  1. Yes
+  2. No
+
+Enter selection [1-2], or Escape to cancellation:`,
+			match: false,
+		},
+		{
+			name: "Escapement to cancel near miss",
+			pane: `Pick one:
+  1. Yes
+  2. No
+
+Escapement to cancel:`,
+			match: false,
+		},
+		{
+			name: "bare Escape with numbered options",
+			pane: `Pick one:
+  1. Yes
+  2. No
+
+Press Escape`,
+			match: false,
+		},
+		{
+			name: "bare cancel with numbered options",
+			pane: `Pick one:
+  1. Yes
+  2. No
+
+Type cancel to abort`,
+			match: false,
+		},
+		{
+			name: "nonconsecutive option numbers",
+			pane: `Pick one:
+  1. Yes
+  3. No
+
+Enter selection [1-3], or Escape to cancel:`,
+			match: false,
+		},
+		{
+			name: "malformed option without space after number",
+			pane: `Pick one:
+  1.Yes
+  2.No
+
+Enter selection [1-2], or Escape to cancel:`,
+			match: false,
+		},
+		{
+			// Ordinary prose discussing the screen-reader prompt must not
+			// classify without consecutive options + cancel anchor structure.
+			name: "prose discussing Escape to cancel",
+			pane: "Screen-reader menus end with Escape to cancel after Enter selection. " +
+				"dialoghint must not treat this sentence as a live dialog.",
+			match: false,
+		},
+		{
+			name:  "Permission Required alone is not a dialog",
+			pane:  "Permission Required: Create file\nWaiting for input…",
+			match: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -154,18 +299,29 @@ Agent working...`,
 // loose — the phrase occurs in ordinary agent prose (a scimux session
 // discussing dialoghint prints it), which is exactly why it may only shorten a
 // stall that already has mechanical evidence behind it, never raise attention
-// on its own.
+// on its own. Both documented Claude spellings are accepted; near-misses are
+// not.
 func TestHasCancelAnchor(t *testing.T) {
 	tests := []struct {
 		name string
 		pane string
 		want bool
 	}{
-		{"approval dialog footer", " 3. No\n\n Esc to cancel · Tab to amend", true},
-		{"lowercase mid-line", "press esc to cancel the operation", true},
-		{"ansi coloured footer", "\x1b[2m Esc to cancel\x1b[0m", true},
-		{"agent prose quoting the anchor", "the matcher requires esc to cancel below the options", true},
-		{"absent", "Working…\n esc to interrupt", false},
+		{"approval dialog footer Esc", " 3. No\n\n Esc to cancel · Tab to amend", true},
+		{"screen-reader footer Escape", "Enter selection [1-3], or Escape to cancel:", true},
+		{"lowercase esc mid-line", "press esc to cancel the operation", true},
+		{"lowercase escape mid-line", "press escape to cancel the operation", true},
+		{"mixed case ESCAPE", "OR ESCAPE TO CANCEL:", true},
+		{"mixed case ESC", "OR ESC TO CANCEL:", true},
+		{"ansi coloured Esc footer", "\x1b[2m Esc to cancel\x1b[0m", true},
+		{"ansi coloured Escape footer", "\x1b[2m Escape to cancel\x1b[0m", true},
+		{"agent prose quoting esc", "the matcher requires esc to cancel below the options", true},
+		{"agent prose quoting Escape", "Anthropic documents Escape to cancel on AX menus", true},
+		{"esc to interrupt not cancel", "Working…\n esc to interrupt", false},
+		{"Escape to cancellation", "Escape to cancellation of the request", false},
+		{"Escapement to cancel", "Escapement to cancel is not chrome", false},
+		{"bare Escape", "Press Escape when ready", false},
+		{"bare cancel", "Type cancel to abort", false},
 		{"empty pane", "", false},
 	}
 	for _, tt := range tests {
