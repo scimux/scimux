@@ -846,18 +846,15 @@ export function createNotesFeature(deps){
   }
   /* Apply persisted layout → custom props + .collapsed on zone rails.
      P5b: clamp a too-narrow stored inboxW on desktop so the flat bar fits
-     (iPad-at-210 → desktop restore). Write the raised value back so the next
-     open does not re-clip. */
+     (narrow-layout drag at 210 → desktop restore). The clamp is not persisted:
+     it is idempotent, so every apply re-raises it anyway, and writing it back
+     would destroy a width the user deliberately chose under the narrow layout
+     (where 210 is legal) the first time they widen the window. */
   function applyWsLayout(layout){
     const raw = layout || wsLayout || parseWorkspaceLayout(null);
     const mins = currentLayoutMins();
     const L = clampWorkspaceLayout(raw, mins);
-    const raised = !L.inboxCollapsed
-      && raw && raw.inboxW != null
-      && L.inboxW != null
-      && L.inboxW !== raw.inboxW;
     wsLayout = L;
-    if (raised) persistWsLayout(L);
     const zonesEl = root("wszones");
     const inbox = root("wsinbox");
     const nav = root("wsnav");

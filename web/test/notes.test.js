@@ -267,9 +267,12 @@ test("P5b: open/apply clamps persisted too-narrow inbox on desktop (iPad→deskt
   const applied = parseFloat(roots.wszones.style.getPropertyValue("--wsinbox-w"));
   assert.ok(applied >= mins.inbox,
     `applied --wsinbox-w ${applied} must be ≥ ${mins.inbox} on desktop restore`);
-  /* storage should reflect the clamp so the next open does not re-clip */
+  /* The clamp is applied, not persisted. It is idempotent, so every apply
+     re-raises it; writing it back would destroy a width the user deliberately
+     chose under the narrow layout, where 210 is legal. */
   const L = JSON.parse(storage.getItem(STORAGE_KEY_WS_LAYOUT));
-  assert.ok(L.inboxW >= mins.inbox, `persisted inboxW ${L.inboxW} after restore clamp`);
+  assert.equal(L.inboxW, 210,
+    "the stored narrow-layout width must survive a desktop restore clamp");
 });
 
 test("parseWorkspaceLayout: empty, valid, corrupt → defaults", () => {
