@@ -22,6 +22,7 @@ import (
 // ticks otherwise only advance the baseline (findings 21, 24).
 func TestNoteChatProgress(t *testing.T) {
 	a := &app{chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}
+	a.initMaps()
 	a.noteChatProgress("n", 100, 2, false) // quiet tick: baseline
 	if a.staleChat["n"] {
 		t.Fatal("baseline observation must not mark stale")
@@ -49,8 +50,10 @@ func TestNoteChatProgress(t *testing.T) {
 }
 
 func newTailerTestApp() *app {
-	return &app{tailers: map[string]*transcript.Tailer{},
+	a := &app{tailers: map[string]*transcript.Tailer{},
 		chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}
+	a.initMaps()
+	return a
 }
 
 // A (re)built tailer takes its baseline from the file's existing history —
@@ -232,6 +235,7 @@ func TestPollerDialogDetection(t *testing.T) {
 				staleChat: map[string]bool{},
 				server:    tmuxsession.NewServerWithRunner("testsock", runner),
 			}
+			a.initMaps()
 
 			a.poll()
 
@@ -284,6 +288,7 @@ func TestDialogDetectionOrWithStructured(t *testing.T) {
 		staleChat: map[string]bool{},
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
+	a.initMaps()
 
 	a.poll()
 
@@ -356,6 +361,7 @@ func TestActivePaneDialogCorroboration(t *testing.T) {
 				staleChat: map[string]bool{},
 				server:    tmuxsession.NewServerWithRunner("testsock", runner),
 			}
+			a.initMaps()
 			a.poll()
 			if got := a.live["cl1"]; got != "active" {
 				t.Fatalf("live = %q, want active", got)
@@ -404,6 +410,7 @@ func TestActiveConfinedStallBackstop(t *testing.T) {
 		staleChat: map[string]bool{},
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
+	a.initMaps()
 	a.poll() // establishes the confined-animation state and its offset
 	if got := a.attn["cl1"]; got != "" {
 		t.Fatalf("fresh stall window: attention = %q, want none", got)
@@ -462,6 +469,7 @@ func TestActivePaneKeepsPeekSetAttention(t *testing.T) {
 		staleChat: map[string]bool{},
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
+	a.initMaps()
 	a.poll()
 	if got := a.live["cl1"]; got != "active" {
 		t.Fatalf("live = %q, want active", got)
@@ -520,6 +528,7 @@ func TestPeekSetAttentionExpiresAfterStall(t *testing.T) {
 		staleChat: map[string]bool{},
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
+	a.initMaps()
 	a.poll()
 	if got := a.attn["cl1"]; got != "" {
 		t.Errorf("stale peek-set attention not aged out: %q, want empty", got)
@@ -533,6 +542,7 @@ func TestPeekSetAttentionExpiresAfterStall(t *testing.T) {
 // forever (R20.6).
 func TestNoteAnimSpillKeepsStallWindow(t *testing.T) {
 	a := &app{anim: map[string]*animState{}}
+	a.initMaps()
 	base := "l0\nl1\nl2\nl3\nl4\nl5"
 	step1 := "l0\nx1\nx2\nx3\nl4\nl5" // lines 1,2,3 change: confined
 	a.noteAnim("n", base, step1)
@@ -756,6 +766,7 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
 		}
+		a.initMaps()
 		if extra != nil {
 			extra(a, n)
 		}
@@ -937,6 +948,7 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 				return "", nil
 			}),
 		}
+		a.initMaps()
 		a.poll()
 		if a.turnDone["pi1"] {
 			t.Fatal("ACP/no-transcript node must not set turnDone")
@@ -1001,6 +1013,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.live["cl1"]; got != "quiet" {
 			t.Fatalf("live = %q, want quiet", got)
@@ -1028,6 +1041,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.attn["cl1"]; got != "" {
 			t.Errorf("attention = %q, want none inside stall", got)
@@ -1053,6 +1067,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.attn["cl1"]; got != "" {
 			t.Errorf("attention = %q, want none on finished turn", got)
@@ -1078,6 +1093,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(editDialog)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.live["cl1"]; got != "quiet" {
 			t.Fatalf("live = %q, want quiet", got)
@@ -1106,6 +1122,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			anim:      map[string]*animState{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(activeCur)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.live["cl1"]; got != "active" {
 			t.Fatalf("live = %q, want active", got)
@@ -1133,6 +1150,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.attn["cl1"]; got != "inspect" {
 			t.Fatalf("setup: attention = %q, want inspect", got)
@@ -1167,6 +1185,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(anchorPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.live["cl1"]; got != "quiet" {
 			t.Fatalf("live = %q, want quiet", got)
@@ -1197,6 +1216,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(anchorPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.attn["cl1"]; got != "" {
 			t.Errorf("attention = %q, want none: the anchor corroborates, it never raises", got)
@@ -1223,6 +1243,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.attn["cl1"]; got != "" {
 			t.Errorf("attention = %q, want none without the anchor at 15s", got)
@@ -1316,7 +1337,7 @@ Enter selection [1-3], or Esc to cancel:`
 			}
 		}
 		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
-		return &app{
+		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
 			live:      map[string]string{},
@@ -1329,6 +1350,8 @@ Enter selection [1-3], or Esc to cancel:`
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(pane)),
 		}
+		a.initMaps()
+		return a
 	}
 
 	// (A) Static AX permission pane older than paneQuietAfter raises dialog
@@ -1390,6 +1413,7 @@ Enter selection [1-3], or Esc to cancel:`
 			anim:      map[string]*animState{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(running13)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.live["cl1"]; got != "active" {
 			t.Fatalf("live = %q, want active (elapsed timer is pane change)", got)
@@ -1463,6 +1487,7 @@ Enter selection [1-3], or Esc to cancel:`
 			staleChat: map[string]bool{},
 			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(prosePane)),
 		}
+		a.initMaps()
 		a.poll()
 		if got := a.attn["cl1"]; got != "" {
 			t.Errorf("attention = %q, want none: prose is not a dialog", got)

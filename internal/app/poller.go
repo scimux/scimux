@@ -245,15 +245,9 @@ func (a *app) poll() {
 		prevAttn := a.attn[n.ID]
 		a.live[n.ID] = state
 		if freshAttn && attn != "" {
-			if a.attnAt == nil { // tests build app literals without the map
-				a.attnAt = map[string]time.Time{}
-			}
 			a.attnAt[n.ID] = time.Now()
 		}
 		a.attn[n.ID] = attn
-		if a.turnDone == nil { // tests build app literals without the map
-			a.turnDone = map[string]bool{}
-		}
 		a.turnDone[n.ID] = turnDone
 		a.mu.Unlock()
 		// V2-P2: durable wait edges from the existing mechanical needs-input
@@ -527,9 +521,6 @@ func (a *app) noteAnim(id, prev, cur string) {
 			// backstop forever (R20.6).
 			st.lines = idx
 			return
-		}
-		if a.anim == nil { // tests build app literals without the map
-			a.anim = map[string]*animState{}
 		}
 		a.anim[id] = &animState{lines: idx, since: time.Now(), off: -1}
 	} else {

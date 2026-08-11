@@ -58,28 +58,9 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 	sessionsDir := filepath.Join(cfg.DataDir, "sessions")
 	notesDir := filepath.Join(cfg.DataDir, "notes")
 	a := &app{
-		byID:            map[string]*Node{},
-		live:            map[string]string{},
-		attn:            map[string]string{},
-		turnDone:        map[string]bool{},
-		attnAt:          map[string]time.Time{},
-		prevCap:         map[string]string{},
-		lastChg:         map[string]time.Time{},
-		activeSince:     map[string]time.Time{},
-		tailers:         map[string]*transcript.Tailer{},
-		mirrors:         map[string]*mirror{},
-		piMirrors:       map[string]*piFareMirror{},
-		pathClaims:      map[string]bool{},
-		chatMark:        map[string]chatMark{},
-		staleChat:       map[string]bool{},
-		sendState:       map[string]string{},
-		reserved:        map[string]bool{},
-		anim:            map[string]*animState{},
-		deadTranscripts: map[string]map[string]bool{},
 		server:          server,
 		launchGrace:     launchGrace,
 		launchPoll:      launchPoll,
-		claudeIDs:       map[string]string{},
 		claudeCachePath: filepath.Join(cfg.DataDir, "claude-models.json"),
 		acp:             acpManager{acp.NewManager(sessionsDir)},
 		codex:           codexManager{codex.NewManager(sessionsDir)},
@@ -89,10 +70,12 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		attachmentsDir:  filepath.Join(cfg.DataDir, "attachments"),
 		assetsDir:       filepath.Join(cfg.DataDir, "assets"),
 		assetHook:       nil,
-		logCache:        map[string]*sessionlog.LogCache{},
 		notes:           notestore.New(notesDir),
 		home:            cfg.Home,
 	}
+	// Map fields live here so production and poll-reaching test fixtures share
+	// one initializer; initMaps never overwrites a map the caller already set.
+	a.initMaps()
 	a.assetHook = a.ingestAssetHook
 	a.acp.SetAssetHook(a.assetHook)
 	a.codex.SetAssetHook(a.assetHook)
@@ -101,6 +84,74 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		return nil, fmt.Errorf("load store: %w", err)
 	}
 	return a, nil
+}
+
+// initMaps fills any nil map fields with empty maps. Production newApp calls
+// it once; tests that build *app literals and reach poll() call it after
+// setting explicit fixture values so those values are kept and only the maps
+// the test did not care about are filled. Do not reintroduce nil-map guards
+// in poller.go for test convenience.
+func (a *app) initMaps() {
+	if a.byID == nil {
+		a.byID = map[string]*Node{}
+	}
+	if a.live == nil {
+		a.live = map[string]string{}
+	}
+	if a.attn == nil {
+		a.attn = map[string]string{}
+	}
+	if a.turnDone == nil {
+		a.turnDone = map[string]bool{}
+	}
+	if a.attnAt == nil {
+		a.attnAt = map[string]time.Time{}
+	}
+	if a.prevCap == nil {
+		a.prevCap = map[string]string{}
+	}
+	if a.lastChg == nil {
+		a.lastChg = map[string]time.Time{}
+	}
+	if a.activeSince == nil {
+		a.activeSince = map[string]time.Time{}
+	}
+	if a.tailers == nil {
+		a.tailers = map[string]*transcript.Tailer{}
+	}
+	if a.mirrors == nil {
+		a.mirrors = map[string]*mirror{}
+	}
+	if a.piMirrors == nil {
+		a.piMirrors = map[string]*piFareMirror{}
+	}
+	if a.pathClaims == nil {
+		a.pathClaims = map[string]bool{}
+	}
+	if a.chatMark == nil {
+		a.chatMark = map[string]chatMark{}
+	}
+	if a.staleChat == nil {
+		a.staleChat = map[string]bool{}
+	}
+	if a.sendState == nil {
+		a.sendState = map[string]string{}
+	}
+	if a.reserved == nil {
+		a.reserved = map[string]bool{}
+	}
+	if a.anim == nil {
+		a.anim = map[string]*animState{}
+	}
+	if a.deadTranscripts == nil {
+		a.deadTranscripts = map[string]map[string]bool{}
+	}
+	if a.claudeIDs == nil {
+		a.claudeIDs = map[string]string{}
+	}
+	if a.logCache == nil {
+		a.logCache = map[string]*sessionlog.LogCache{}
+	}
 }
 
 // ---------- model ----------

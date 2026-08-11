@@ -19,7 +19,6 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // pollRunner builds a fake-tmux Runner that reports session liveness via
@@ -65,26 +64,18 @@ func pollRunner(sessions []string, pane string, captureErr bool, captureCalls *i
 func newPollApp(t *testing.T, n *Node, runner tmuxsession.Runner) *app {
 	t.Helper()
 	data := t.TempDir()
-	return &app{
+	a := &app{
 		byID:        map[string]*Node{n.ID: n},
 		nodes:       []*Node{n},
-		live:        map[string]string{},
-		attn:        map[string]string{},
-		attnAt:      map[string]time.Time{},
-		prevCap:     map[string]string{},
-		lastChg:     map[string]time.Time{},
-		activeSince: map[string]time.Time{},
-		tailers:     map[string]*transcript.Tailer{},
-		mirrors:     map[string]*mirror{},
-		pathClaims:  map[string]bool{},
-		chatMark:    map[string]chatMark{},
-		staleChat:   map[string]bool{},
-		anim:        map[string]*animState{},
 		server:      tmuxsession.NewServerWithRunner("testsock", runner),
 		home:        t.TempDir(),
 		storePath:   filepath.Join(data, "nodes.jsonl"),
 		sessionsDir: filepath.Join(data, "sessions"),
 	}
+	// Fill the maps poll() writes (turnDone, attnAt, anim, …) without routing
+	// pure poll fixtures through newTestApp.
+	a.initMaps()
+	return a
 }
 
 // TestPollMechanicalLiveness locks the pane-change liveness matrix and the
