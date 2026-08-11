@@ -204,8 +204,9 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	// node whose log is unchanged re-parses nothing.
 	//
 	// Fare (journey meter) is projected for every node, also cache-backed
-	// (fold-on-growth). It is whole-journey ReadFare — never segment history
-	// and never merged into ctx_pct (D1). Missing/empty fare → fields omitted.
+	// (shared LogCache: invalidate-on-growth). It is whole-journey ReadFare —
+	// never segment history and never merged into ctx_pct (D1). Missing/empty
+	// fare → fields omitted.
 	for i := range views {
 		v := &views[i]
 		// Every node reports its stop chain (the map draws stations for dead
@@ -219,7 +220,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		v.LastInteraction = lastInteractionMS(v.Node, seg)
 		// Fare meter: independent of live state (journey total still meaningful
 		// on exited threads). applyFare no-ops when Turns==0. Per-segment rides
-		// (V2-P2) share the same fold-on-growth cache.
+		// (V2-P2) share the same LogCache walk as segment/assets.
 		f, rides := a.fareAndRides(v.Node)
 		applyFare(v, f)
 		applyFareRides(v, rides)

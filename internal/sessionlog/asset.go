@@ -109,8 +109,14 @@ func SHA256Hex(data []byte) string {
 // is the durable one (Deduplication policy in upload-design.md) — a later
 // record reusing the same ID is ignored rather than overwriting it.
 func ReadAssets(path string) map[string]AssetEvent {
+	return assetsFromEvents(ReadEvents(path))
+}
+
+// assetsFromEvents is the pure core of ReadAssets; LogCache calls it on the
+// single in-memory event slice shared with the other poll products.
+func assetsFromEvents(evs []Event) map[string]AssetEvent {
 	idx := make(map[string]AssetEvent)
-	for _, ev := range ReadEvents(path) {
+	for _, ev := range evs {
 		if ev.T != "asset" || ev.Asset == nil || ev.Asset.ID == "" {
 			continue
 		}
@@ -141,9 +147,15 @@ type AnchoredAsset struct {
 // SourcePath are omitted — only path markers are projected. Defensive like the
 // other readers: unreadable files and malformed lines yield nothing.
 func ReadAnchoredAssets(path string) []AnchoredAsset {
+	return anchoredAssetsFromEvents(ReadEvents(path))
+}
+
+// anchoredAssetsFromEvents is the pure core of ReadAnchoredAssets; LogCache
+// calls it on the single in-memory event slice shared with the other products.
+func anchoredAssetsFromEvents(evs []Event) []AnchoredAsset {
 	var out []AnchoredAsset
 	lastTurn := -1
-	for i, ev := range ReadEvents(path) {
+	for i, ev := range evs {
 		switch ev.T {
 		case "user", "assistant":
 			// Match segmentOf's turn filter: whitespace-only records are not

@@ -1,53 +1,8 @@
 package sessionlog
 
 import (
-	"os"
-	"sync"
-	"time"
-
 	"codeberg.org/chrberger/scimux/internal/fare"
 )
-
-// FareCache memoizes one node's ReadFare / ReadRidesBySegment fold keyed by
-// the file's (size, mtime). Same invalidation contract as Cache (segment.go):
-// the 1s poll path costs a stat on an unchanged log, not a full-journey
-// re-walk (Phase 7 fold-on-growth; V2-P2 extends to per-segment rides).
-type FareCache struct {
-	mu    sync.Mutex
-	path  string
-	size  int64
-	mtime time.Time
-	fare  fare.FareTotals
-	rides []fare.Ride
-	folds int // times the fold ran (test spy for fold-on-growth)
-}
-
-// FareAndRides returns whole-journey totals and per-segment rides from one
-// fold, sharing the size/mtime cache key.
-func (c *FareCache) FareAndRides(path string) (fare.FareTotals, []fare.Ride) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return fare.FareTotals{ReportedCostComplete: true}, nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.path == path && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
-		return c.fare, c.rides
-	}
-	// One event walk for tokens + time model (foldRides calls foldFareFromEvents).
-	f, rides := foldRides(path)
-	c.path, c.size, c.mtime, c.fare, c.rides = path, st.Size(), st.ModTime(), f.Totals, rides
-	c.folds++
-	return c.fare, c.rides
-}
-
-// Folds is the number of times the fare/ride fold was invoked through this
-// cache. Used by Phase 7 / V2-P2 tests to prove fold-on-growth.
-func (c *FareCache) Folds() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.folds
-}
 
 // ReadFare folds the whole session-log journey into canonical fare totals:
 // §2.3 normalization via meta.agent, TurnID dedup (D3) with source-seam

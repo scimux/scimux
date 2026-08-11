@@ -582,10 +582,10 @@ func TestWarmStartupMirrorsAndCachesSegments(t *testing.T) {
 		t.Fatalf("warm startup log events = %v, want %v", got, want)
 	}
 	a.mu.Lock()
-	c := a.segCache["c1"]
+	c := a.logCache["c1"]
 	a.mu.Unlock()
 	if c == nil {
-		t.Fatal("warm startup did not populate the segment cache")
+		t.Fatal("warm startup did not populate the log cache")
 	}
 	seg := a.segment(n)
 	if len(seg.Turns) != 2 || seg.Turns[0].Text != "question" || seg.Turns[1].Text != "answer" {

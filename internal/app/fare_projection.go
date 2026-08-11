@@ -2,14 +2,14 @@ package app
 
 // fare_projection.go — whole-journey fare + per-segment rides onto the
 // /api/state poll payload (fare-design.md Phase 7 + V2-P2, D1, D8). Cached
-// fold-on-growth mirrors segCache: ReadFare/ReadRidesBySegment only re-run
-// when the session log's size or mtime advances. Occupancy (ctx_pct) stays
-// on the segment path and is never merged with fare. UI: wall heat (V2-P3)
-// + selected-segment capsule/callout (V2-P4); v1 fareLineHTML is retired.
+// under the shared LogCache: fare/rides re-derive only when the session log's
+// size or mtime advances (invalidate-on-growth, one walk shared with segment
+// and assets). Occupancy (ctx_pct) stays on the segment path and is never
+// merged with fare. UI: wall heat (V2-P3) + selected-segment capsule/callout
+// (V2-P4); v1 fareLineHTML is retired.
 
 import (
 	"codeberg.org/chrberger/scimux/internal/fare"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
 
 // fareAndRides returns whole-journey totals and per-segment rides (V2-P2).
@@ -17,31 +17,22 @@ func (a *app) fareAndRides(n *Node) (fare.FareTotals, []fare.Ride) {
 	if a.sessionsDir == "" {
 		return fare.FareTotals{ReportedCostComplete: true}, nil
 	}
-	a.mu.Lock()
-	if a.fareCache == nil {
-		a.fareCache = map[string]*sessionlog.FareCache{}
-	}
-	c := a.fareCache[n.ID]
-	if c == nil {
-		c = &sessionlog.FareCache{}
-		a.fareCache[n.ID] = c
-	}
-	a.mu.Unlock()
-	return c.FareAndRides(a.sessionLogPath(n.ID))
+	return a.sessionLogCache(n.ID).FareAndRides(a.sessionLogPath(n.ID))
 }
 
-// fareCacheFolds is the test spy seam for fold-on-growth (Phase 7).
-func fareCacheFolds(a *app, id string) int {
+// logCacheWalks is the test spy for how many times the node's session log was
+// actually parsed through LogCache (Phase 7 / P9 Stage A).
+func logCacheWalks(a *app, id string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.fareCache == nil {
+	if a.logCache == nil {
 		return 0
 	}
-	c := a.fareCache[id]
+	c := a.logCache[id]
 	if c == nil {
 		return 0
 	}
-	return c.Folds()
+	return c.Walks()
 }
 
 // applyFare projects whole-journey fare onto the state node view.

@@ -89,8 +89,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		attachmentsDir:  filepath.Join(cfg.DataDir, "attachments"),
 		assetsDir:       filepath.Join(cfg.DataDir, "assets"),
 		assetHook:       nil,
-		segCache:        map[string]*sessionlog.Cache{},
-		fareCache:       map[string]*sessionlog.FareCache{},
+		logCache:        map[string]*sessionlog.LogCache{},
 		notes:           notestore.New(notesDir),
 		home:            cfg.Home,
 	}
@@ -299,13 +298,11 @@ type app struct {
 	// SetAssetHook at startup) with each turn's scanned local-path candidates.
 	// See asset.IngestFunc and ingestAssetHook (agent_asset.go).
 	assetHook asset.IngestFunc
-	// segCache memoizes each node's parsed current segment so the 1s chat
-	// poll costs a stat, not a reparse, while the log is unchanged.
-	segCache map[string]*sessionlog.Cache
-	// fareCache memoizes each node's whole-journey FareTotals (ReadFare) so
-	// the 1s state poll folds only when the session log grows (Phase 7).
-	// Same size/mtime key as segCache; never holds history segments.
-	fareCache map[string]*sessionlog.FareCache
+	// logCache memoizes each node's poll-path session-log products (segment,
+	// fare+rides, anchored assets, asset index) under one (path, size, mtime)
+	// key. An unchanged log costs a stat per access; a change re-walks the
+	// file once and derives all four products. Never holds history segments.
+	logCache map[string]*sessionlog.LogCache
 	// notes is the synthesis-document store (~/.scimux/notes/, one mutable
 	// JSON file per note — internal/notestore). Deliberately separate from the
 	// append-only session log: notes are documents, not an event stream (see

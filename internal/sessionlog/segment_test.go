@@ -298,13 +298,16 @@ func TestSegmentCache(t *testing.T) {
 		NewMeta("n1", "codex", "", "", "/tmp"),
 		{T: "user", Text: "one"},
 	})
-	var c Cache
+	var c LogCache
 	if got := c.Segment(path); len(got.Turns) != 1 {
 		t.Fatalf("first read: %+v", got.Turns)
 	}
 	// Unchanged file: served from cache (observable only as equality here).
 	if got := c.Segment(path); len(got.Turns) != 1 {
 		t.Fatalf("cached read: %+v", got.Turns)
+	}
+	if c.Walks() != 1 {
+		t.Fatalf("unchanged re-read Walks() = %d, want 1", c.Walks())
 	}
 	// Append → cache must notice.
 	w := &Writer{Path: path}

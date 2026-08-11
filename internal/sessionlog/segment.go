@@ -1,9 +1,7 @@
 package sessionlog
 
 import (
-	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -205,33 +203,4 @@ func ReadHistory(path string) []HistorySegment {
 	}
 	flush()
 	return segs
-}
-
-// Cache memoizes one node's parsed segment keyed by the file's (size, mtime).
-// The chat endpoint polls every second while logs change only at turn/tool
-// granularity, so the common case is a stat plus a cache hit; a change
-// re-parses the whole file. (Records are appended, never rewritten, so size
-// alone almost suffices — mtime guards the delete-and-reissue case where a
-// fresh log happens to match the old length.)
-type Cache struct {
-	mu    sync.Mutex
-	path  string
-	size  int64
-	mtime time.Time
-	seg   Segment
-}
-
-func (c *Cache) Segment(path string) Segment {
-	st, err := os.Stat(path)
-	if err != nil {
-		return Segment{Turns: []transcript.Turn{}}
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.path == path && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
-		return c.seg
-	}
-	seg := ReadSegment(path)
-	c.path, c.size, c.mtime, c.seg = path, st.Size(), st.ModTime(), seg
-	return seg
 }

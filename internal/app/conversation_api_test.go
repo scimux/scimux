@@ -2479,9 +2479,9 @@ func TestHandleChatETagChangesWhenLogGainsTurn(t *testing.T) {
 	if err := w.Append(sessionlog.Event{T: "user", Text: "another turn", Time: "2026-07-14T01:02:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	// Invalidate segment cache so the new turn is visible.
+	// Invalidate log cache so the new turn is visible.
 	a.mu.Lock()
-	delete(a.segCache, "c1")
+	delete(a.logCache, "c1")
 	a.mu.Unlock()
 
 	rec2 := chatGET(t, a, "c1", etag1)

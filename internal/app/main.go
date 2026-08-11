@@ -35,8 +35,8 @@ var hostname = "scimux"
 
 // warmStartup pays the cold replay cost before the browser can ask for it:
 // one poll discovers/catches up tmux transcript mirrors, then the per-node
-// segment cache is populated so the first /api/state or chat poll reads
-// settled logs from memory instead of parsing every chat on demand.
+// LogCache is populated (segment, fare, assets) so the first /api/state or
+// chat poll reads settled logs from memory instead of parsing on demand.
 func (a *app) warmStartup() {
 	a.poll()
 
@@ -45,7 +45,7 @@ func (a *app) warmStartup() {
 	copy(nodes, a.nodes)
 	a.mu.Unlock()
 	for _, n := range nodes {
-		a.segment(n)
+		a.segment(n) // warms all four LogCache products in one walk
 	}
 }
 

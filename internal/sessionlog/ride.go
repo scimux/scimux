@@ -33,7 +33,12 @@ func ReadRide(path string) fare.Ride {
 }
 
 func foldRides(path string) (fare.Ride, []fare.Ride) {
-	evs := ReadEvents(path)
+	return foldRidesFromEvents(ReadEvents(path))
+}
+
+// foldRidesFromEvents is the pure core of foldRides; LogCache calls it on the
+// single in-memory event slice shared with the other poll products.
+func foldRidesFromEvents(evs []Event) (fare.Ride, []fare.Ride) {
 	totals, segs := foldFareFromEvents(evs)
 	nSeg := len(segs)
 	if nSeg == 0 {

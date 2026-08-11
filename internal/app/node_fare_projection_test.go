@@ -2,7 +2,8 @@ package app
 
 // Phase 7 — node fare projection onto the /api/state poll payload
 // (fare-design.md Phase 7, D1, D8). Fare is whole-journey ReadFare, cached
-// fold-on-growth; ctx_pct occupancy stays segment-scoped and untouched.
+// under LogCache (invalidate-on-growth); ctx_pct occupancy stays
+// segment-scoped and untouched.
 
 import (
 	"net/http/httptest"
@@ -86,7 +87,7 @@ func TestNodeProjection_FareFieldsPopulated(t *testing.T) {
 // TestNodeProjection_FareCachedUntilLogGrows: fold runs on first projection
 // and after size/mtime advance, but not when the log is unchanged. Proven by
 // mutating the file behind the cache (same size+mtime → stale value) then
-// growing it (recompute). A fold-count spy on FareCache double-checks.
+// growing it (recompute). A Walks() spy on LogCache double-checks.
 func TestNodeProjection_FareCachedUntilLogGrows(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := &Node{
@@ -303,10 +304,10 @@ func assertJSONInt(t *testing.T, m map[string]any, key string, want int) {
 	}
 }
 
-// fareFolds returns how many times the node's FareCache has re-folded.
+// fareFolds returns how many times the node's LogCache has re-parsed the log.
 func fareFolds(t *testing.T, a *app, id string) int {
 	t.Helper()
-	return fareCacheFolds(a, id)
+	return logCacheWalks(a, id)
 }
 
 // buildPaddedFareLog builds a session log with known fare totals, padded with

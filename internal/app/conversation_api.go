@@ -41,17 +41,23 @@ func (a *app) segment(n *Node) sessionlog.Segment {
 	if a.sessionsDir == "" {
 		return sessionlog.Segment{Turns: []transcript.Turn{}} // bare test apps
 	}
+	return a.sessionLogCache(n.ID).Segment(a.sessionLogPath(n.ID))
+}
+
+// sessionLogCache returns the per-node LogCache, installing one if needed.
+// a.mu is held only for the map lookup/create — never across file I/O.
+func (a *app) sessionLogCache(id string) *sessionlog.LogCache {
 	a.mu.Lock()
-	if a.segCache == nil {
-		a.segCache = map[string]*sessionlog.Cache{}
+	if a.logCache == nil {
+		a.logCache = map[string]*sessionlog.LogCache{}
 	}
-	c := a.segCache[n.ID]
+	c := a.logCache[id]
 	if c == nil {
-		c = &sessionlog.Cache{}
-		a.segCache[n.ID] = c
+		c = &sessionlog.LogCache{}
+		a.logCache[id] = c
 	}
 	a.mu.Unlock()
-	return c.Segment(a.sessionLogPath(n.ID))
+	return c
 }
 
 func isFreshSurface(seg sessionlog.Segment) bool {
@@ -523,7 +529,10 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 		return turns, nil
 	}
 	logPath := a.sessionLogPath(nodeID)
-	anchored := sessionlog.ReadAnchoredAssets(logPath)
+	// Anchored assets and the ID index share the node's LogCache with
+	// segment/fare — an idle chat poll no longer re-walks the log every tick.
+	c := a.sessionLogCache(nodeID)
+	anchored := c.AnchoredAssets(logPath)
 	out := make([]transcript.Turn, len(turns))
 	referenced := map[string]bool{}
 	for i, t := range turns {
@@ -538,7 +547,7 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 	if len(referenced) == 0 {
 		return out, nil
 	}
-	idx := sessionlog.ReadAssets(logPath)
+	idx := c.Assets(logPath)
 	assets := map[string]any{}
 	for id := range referenced {
 		if rec, ok := idx[id]; ok {
