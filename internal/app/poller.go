@@ -150,11 +150,25 @@ func (a *app) poll() {
 					// so an unresolved tool call alone is weak evidence of a
 					// permission wait (long-running tools can also sit static).
 					// Require the same ClassifyVisible fence the active branch
-					// already uses. Non-AX/adopted Claude keep the legacy
-					// unresolved-call + quiet-pane hard attention (fixes-2 P1).
+					// already uses before claiming approval/question. Non-AX/
+					// adopted Claude keep the legacy unresolved-call +
+					// quiet-pane hard attention (fixes-2 P1).
 					if n.AXScreenReader {
-						if visible, err := s.CaptureVisible(); err == nil && dialoghint.ClassifyVisible(visible) {
+						a.mu.Lock()
+						quietSince := a.lastChg[n.ID]
+						a.mu.Unlock()
+						visible, err := s.CaptureVisible()
+						switch {
+						case err == nil && dialoghint.ClassifyVisible(visible):
 							attn = attentionKind(name)
+						case !quietSince.IsZero() && time.Since(quietSince) >= owedStallAX:
+							// Matcher dark on a flat AX pane while the
+							// transcript holds an unresolved call: degrade to
+							// the neutral, keyless inspect — never to a
+							// classified dialog this has no evidence for, and
+							// never to silence, which is how a real approval
+							// went unnoticed indefinitely.
+							attn = "inspect"
 						}
 					} else {
 						attn = attentionKind(name)
@@ -479,6 +493,19 @@ const owedStallAfter = 45 * time.Second
 // enough to reach the same neutral verdict sooner.
 const owedStallCorroborated = 10 * time.Second
 
+// owedStallAX: the same stall on an --ax-screen-reader node, which renders a
+// flatter and quieter pane, so staticness is weaker evidence of a wait. AX sits
+// exactly one rung slower than the legacy renderer at every step —
+// corroborated < owed < AX — and the cancel anchor sharpens AX by one rung, to
+// the non-AX owed timing, never all the way to owedStallCorroborated.
+//
+// This is the *floor*, not a classifier: past it an AX node the matcher cannot
+// read says the neutral, keyless "no visible progress", never approval or
+// question. The floor exists because attention for AX otherwise rests entirely
+// on one regex family — see ax_inspect_floor_test.go for the six AX pane shapes
+// that family does not match.
+const owedStallAX = 4 * time.Minute
+
 // turnDoneWindow bounds how long a delivered turn keeps claiming "finished".
 // The claim is dated by the CLI's own stamp on the newest parsed turn, not by
 // scimux clocks, so it survives a restart and cannot relight every idle
@@ -499,11 +526,21 @@ const turnDoneWindow = 30 * time.Minute
 // fenced to unresolved call + confined animation, which notePeekDialog's
 // corroborated path handles before reaching this one.
 //
-// axScreenReader disables the uncorroborated Owing() inspect path: under
-// --ax-screen-reader the pane is deliberately flatter, so quietness past a
-// fixed timeout is not a safe claim that the agent is waiting. AX may still
-// raise "dialog" via ClassifyVisible, and missing/stale/unparseable transcript
-// inspect still lives in the caller's separate noEvidence branch (fixes-2 P1).
+// axScreenReader *delays* the uncorroborated Owing() inspect path rather than
+// disabling it: under --ax-screen-reader the pane is deliberately flatter, so
+// quietness past the legacy timeout is not yet a safe claim that the agent is
+// waiting — but past owedStallAX it is, and the alternative is silence.
+//
+// fixes-2 P1 disabled this path for AX outright. That was one fix too many:
+// the observed harm (a spurious inspect inviting a stray "1") was already
+// removed by making inspect keyless in the UI, while disabling the backstop
+// left AX with a single regex family as its only route to any attention. When
+// that family goes dark on a TUI rewording, an AX node on a real approval
+// raised nothing at all, indefinitely — where AGENTS.md's rule for a dark
+// matcher is degradation to the neutral inspect, never to a classified dialog
+// and never to silence. AX may still raise "dialog" via ClassifyVisible, and
+// missing/stale/unparseable transcript inspect still lives in the caller's
+// separate noEvidence branch.
 func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince time.Time, axScreenReader bool) string {
 	if quietSince.IsZero() || time.Since(quietSince) < paneQuietAfter {
 		return ""
@@ -511,13 +548,23 @@ func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince ti
 	if visible != "" && dialoghint.ClassifyVisible(visible) {
 		return "dialog"
 	}
-	if axScreenReader {
-		return ""
-	}
 	if tl != nil && tl.Owing() {
+		// Ladder: corroborated < owed < AX. The base rung is the renderer's —
+		// AX is slower because its flat pane makes staticness weaker evidence.
+		// The cancel anchor sharpens by exactly one rung, so AX with an anchor
+		// lands on the non-AX base timing and never on owedStallCorroborated:
+		// the phrase occurs in ordinary agent prose, and AX must stay strictly
+		// more conservative than the legacy renderer at every step.
 		stall := owedStallAfter
+		if axScreenReader {
+			stall = owedStallAX
+		}
 		if visible != "" && dialoghint.HasCancelAnchor(visible) {
-			stall = owedStallCorroborated
+			if axScreenReader {
+				stall = owedStallAfter
+			} else {
+				stall = owedStallCorroborated
+			}
 		}
 		if time.Since(quietSince) >= stall {
 			return "inspect"

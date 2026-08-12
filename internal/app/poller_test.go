@@ -1594,14 +1594,21 @@ Enter selection [1-3], or Escape to cancel:`
 		}
 	})
 
-	// 3. AX + quiet + Owing past owedStallAfter + no matcher → no inspect via Owing.
-	t.Run("ax_owing_past_stall_no_inspect", func(t *testing.T) {
+	// 3. AX + quiet + Owing past owedStallAfter but short of owedStallAX + no
+	//    matcher → still no inspect. AX sits one rung slower than the legacy
+	//    renderer; it does raise the neutral inspect eventually, which
+	//    TestQuietAttentionFallbackAXOwingFloor pins from the other side.
+	t.Run("ax_owing_past_legacy_stall_not_yet_inspect", func(t *testing.T) {
 		a, _ := quietNode(t, plainPane, true, owingUser...)
 		// Stretch quietSince past owedStallAfter (quietNode defaults to 10s).
-		a.lastChg["cl1"] = time.Now().Add(-2 * owedStallAfter)
+		quiet := 2 * owedStallAfter
+		if quiet >= owedStallAX {
+			t.Fatalf("test is vacuous: %v is already past owedStallAX (%v)", quiet, owedStallAX)
+		}
+		a.lastChg["cl1"] = time.Now().Add(-quiet)
 		a.poll()
 		if got := a.attn["cl1"]; got == "inspect" {
-			t.Errorf("attention = %q, AX must not raise inspect via uncorroborated Owing()", got)
+			t.Errorf("attention = %q, AX must not reach inspect on the legacy 45s rung", got)
 		}
 		if got := a.live["cl1"]; got != "quiet" {
 			t.Errorf("live = %q, want quiet", got)
