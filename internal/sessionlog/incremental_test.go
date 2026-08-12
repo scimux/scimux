@@ -409,8 +409,12 @@ func propertyAlphabet() []Event {
 // later append must still equal a cold read of the rewritten body + append
 // (prefix signature forces cold when the watermarked prefix changed).
 func TestLogCache_SameSizeRewriteThenGrow(t *testing.T) {
+	// One meta for both logs: NewMeta's RFC3339Nano stamp is not zero-padded,
+	// so two independent headers can differ in length and flip which file is
+	// longer. Shared header + shorter usage digits keeps alt pad-able.
+	meta := NewMeta("n1", "codex", "gpt", "", "/tmp")
 	path := writeLog(t, []Event{
-		NewMeta("n1", "codex", "gpt", "", "/tmp"),
+		meta,
 		{T: "usage", Time: "2026-07-15T09:00:00Z", Usage: &UsageEvent{
 			InputTokens: 50, OutputTokens: 10, TurnID: "c1",
 		}},
@@ -428,9 +432,9 @@ func TestLogCache_SameSizeRewriteThenGrow(t *testing.T) {
 
 	// Rewrite with different totals, pad to same byte length, restore mtime.
 	alt := writeLog(t, []Event{
-		NewMeta("n1", "codex", "gpt", "", "/tmp"),
+		meta,
 		{T: "usage", Time: "2026-07-15T09:00:00Z", Usage: &UsageEvent{
-			InputTokens: 9, OutputTokens: 8, TurnID: "alt",
+			InputTokens: 9, OutputTokens: 8, TurnID: "x",
 		}},
 	})
 	altBytes, err := os.ReadFile(alt)
