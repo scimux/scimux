@@ -55,7 +55,7 @@
  * Reuses (no algorithm duplication):
  *   lanes.js: groupLanes, servedLanes, forkKind, stopsOf, stopKey, stopLabel,
  *     newestFirst, parentStopIndex, laneColumnOrder, byNameID, stampMS
- *   map-model.js: statusText, headStopKey, toggleMapSelection
+ *   map-model.js: statusText, hardAttention, headStopKey, toggleMapSelection
  *   format.js: esc, fmtStamp, stampMS, contrastText
  *   cards.js: cardConfigText (station caption only)
  *
@@ -77,7 +77,7 @@ import {
   laneColumnOrder,
 } from "./lanes.js";
 import {
-  statusText, statusKind, turnFinished, headStopKey, toggleMapSelection,
+  statusText, statusKind, turnFinished, hardAttention, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
 
@@ -117,12 +117,11 @@ export function anchoredScrollTop({ prevTop, prevIndex, nextIndex, rowHeight } =
 
 /* Attention pill geometry source: one tick per ringed HEAD at its fraction of
    wall content height (matches attentionStationSVG's head-only paint). The tick
-   set is deliberately the *ring* set — any attention, plus a finished turn —
-   because the pill exists to locate off-screen rings; a ringed station with no
-   tick is one the locator refuses to take you to. That includes the neutral
-   "inspect", the state P1 raises when an approval dialog cannot be proven from
-   the transcript. Pure, DOM-free; ordered as the rows are. kind is "waiting"
-   (any attention) or "ready" (turn_done only) so the pill can label itself. */
+   set is the *ring* set — hardAttention (approval/question/dialog), plus a
+   finished turn — so the pill locates stations that need a decision or show
+   ready news. Neutral inspect is diagnostic only and does not ring, tick, or
+   count as waiting (fixes-2 P1). Pure, DOM-free; ordered as the rows are.
+   kind is "waiting" (hard attention) or "ready" (turn_done only). */
 export function railTicks({ rows, rowHeight, offset } = {}){
   const list = rows || [];
   const n = list.length;
@@ -136,7 +135,7 @@ export function railTicks({ rows, rowHeight, offset } = {}){
     const s = list[i];
     if (!s || !s.head || !s.n) continue;
     let kind = null;
-    if (s.n.attention) kind = "waiting";
+    if (hardAttention(s.n)) kind = "waiting";
     else if (turnFinished(s.n)) kind = "ready";
     if (!kind) continue;
     out.push({
@@ -339,9 +338,9 @@ export function laneChipStyle(color, selected, { escape = esc, contrastText = co
 }
 
 /* Per-tab badge: one number, and the kind the hue will name. Reuses P6's
-   pill rule verbatim (railTicks / attentionPill): any attention — including
-   the neutral "inspect" — is waiting, turn_done without attention is ready,
-   and a tab holding both badges the waiting count only. Never the sum: the
+   pill rule (railTicks / attentionPill): hardAttention is waiting, turn_done
+   without hard attention is ready, and a tab holding both badges the waiting
+   count only. Neutral inspect never counts (fixes-2 P1). Never the sum: the
    number and the hue must always say the same thing.
    Membership mirrors renderMap: lane_id && served(n).some(inGroup), with the
    group's lanes read through groupLanes so a record with no lanes key means
@@ -356,7 +355,7 @@ export function mapTabAttentionCounts(nodes, groups, { served = servedLanes } = 
   for (const [id] of tabs) tally[id] = { waiting: 0, ready: 0 };
   for (const n of list){
     if (!n || !n.lane_id) continue;
-    const kind = n.attention ? "waiting" : (turnFinished(n) ? "ready" : "");
+    const kind = hardAttention(n) ? "waiting" : (turnFinished(n) ? "ready" : "");
     if (!kind) continue;
     const lanes = served(n) || [];
     for (const [id, grp] of tabs){
@@ -412,7 +411,7 @@ export function buildStackBlocks(lanes, stations, { served = servedLanes, inGrou
 }
 
 export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm } = {}){
-  const hasAttn = b => b.rows.some(s => s.n.attention) ? 1 : 0;
+  const hasAttn = b => b.rows.some(s => hardAttention(s.n)) ? 1 : 0;
   const fold = mapFold || new Set();
   return JSON.stringify((blocks || []).map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
       fold.has(b.lane.id), hasAttn(b),
@@ -1700,10 +1699,11 @@ export function createMapFeature(deps){
                                    : terminalStationSVG(dotX, yy, op, col);
       // Widen the existing ring path: hard attention keeps --attn; a finished
       // turn reuses the same SVG with --work. No parallel paint path (P5).
-      // Hit target is emitted AFTER the solid dot (and ctx) so the centre is
-      // tappable — SVG paints later siblings on top (P4).
-      const ringed = !!(n.attention || turnFinished(n));
-      if (n.attention) svg += attentionStationSVG(dotX, yy, op, null);
+      // Neutral inspect does not ring (fixes-2 P1). Hit target is emitted AFTER
+      // the solid dot (and ctx) so the centre is tappable — SVG paints later
+      // siblings on top (P4).
+      const ringed = !!(hardAttention(n) || turnFinished(n));
+      if (hardAttention(n)) svg += attentionStationSVG(dotX, yy, op, null);
       else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
       /* data-dot / data-ctx are the repaint hooks. Only the live branch
          carries one: exited and unavailable are in the signature, so reaching
@@ -1713,7 +1713,7 @@ export function createMapFeature(deps){
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
       else
         svg += `<circle data-dot="${skey}" cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
-      if (n.ctx_pct != null && !n.attention && !turnFinished(n)){
+      if (n.ctx_pct != null && !hardAttention(n) && !turnFinished(n)){
         const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none" stroke="${col}" stroke-width="2" opacity="${op * .2}"/>`;
         /* Emitted even at 0% — an invisible arc the patch can grow, since no
@@ -1776,7 +1776,7 @@ export function createMapFeature(deps){
     lastSelRow = nextIndex;
     renderLaneChips(model, inGroup, focusLane);
     renderMapToolbar();
-    /* Pill follows the wall paint: signature already includes n.attention and
+    /* Pill follows the wall paint: signature already includes attention and
        turn_done, so a ring appearing/disappearing rebuilds (not a volatile
        patch) and the hit circle + pill ticks stay in lockstep. */
     updateMapPill(rows);
@@ -1815,7 +1815,7 @@ export function createMapFeature(deps){
     const RH = 76, LX = 22, LW = 56;
     const y = i => i * RH + RH / 2;
     const dimRow = n => focusLane && !served(n).includes(focusLane);
-    const hasAttn = b => b.rows.some(s => s.n.attention) ? 1 : 0;
+    const hasAttn = b => b.rows.some(s => hardAttention(s.n)) ? 1 : 0;
 
     if (mapwrap) mapwrap.innerHTML = blocks.map(b => {
       const col = escape(model.color(b.lane.id));
@@ -1853,8 +1853,9 @@ export function createMapFeature(deps){
           svg += i === 0 ? terminalCapSVG(dotX, yy, op, col)
                          : terminalStationSVG(dotX, yy, op, col);
         // Hit after the solid dot (P4) — same paint-order rule as the wall.
-        const ringed = !!(n.attention || turnFinished(n));
-        if (n.attention) svg += attentionStationSVG(dotX, yy, op, null);
+        // Neutral inspect does not ring (fixes-2 P1).
+        const ringed = !!(hardAttention(n) || turnFinished(n));
+        if (hardAttention(n)) svg += attentionStationSVG(dotX, yy, op, null);
         else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;

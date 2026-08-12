@@ -129,7 +129,19 @@ func (a *app) poll() {
 			if quietTl != nil {
 				quietTl.Poll()
 				if name, ok := quietTl.WaitingOn(); ok && !freshSurface {
-					attn = attentionKind(name)
+					// Under --ax-screen-reader the pane is flatter and quieter,
+					// so an unresolved tool call alone is weak evidence of a
+					// permission wait (long-running tools can also sit static).
+					// Require the same ClassifyVisible fence the active branch
+					// already uses. Non-AX/adopted Claude keep the legacy
+					// unresolved-call + quiet-pane hard attention (fixes-2 P1).
+					if n.AXScreenReader {
+						if visible, err := s.CaptureVisible(); err == nil && dialoghint.ClassifyVisible(visible) {
+							attn = attentionKind(name)
+						}
+					} else {
+						attn = attentionKind(name)
+					}
 				}
 				// Judge the transcript only across a whole working phase (the
 				// active→quiet transition, finding 21); on ordinary quiet ticks
@@ -142,12 +154,13 @@ func (a *app) poll() {
 			}
 			// Dialoghint matcher + owing-stall backstop (P1a/P1b). Shared with
 			// notePeekDialog via quietAttentionFallback — never feeds liveness.
+			// AX nodes skip the uncorroborated Owing() inspect path (flat pane).
 			if attn == "" && !freshSurface {
 				a.mu.Lock()
 				quietSince := a.lastChg[n.ID]
 				a.mu.Unlock()
 				visible, _ := s.CaptureVisible()
-				attn = quietAttentionFallback(quietTl, visible, quietSince)
+				attn = quietAttentionFallback(quietTl, visible, quietSince, n.AXScreenReader)
 			}
 			// Neutral needs-a-look state: the pane is quiet but there is no
 			// trustworthy structured transcript to say whether the agent
@@ -468,12 +481,21 @@ const turnDoneWindow = 30 * time.Minute
 // pane text must never create attention on an active pane — that case is
 // fenced to unresolved call + confined animation, which notePeekDialog's
 // corroborated path handles before reaching this one.
-func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince time.Time) string {
+//
+// axScreenReader disables the uncorroborated Owing() inspect path: under
+// --ax-screen-reader the pane is deliberately flatter, so quietness past a
+// fixed timeout is not a safe claim that the agent is waiting. AX may still
+// raise "dialog" via ClassifyVisible, and missing/stale/unparseable transcript
+// inspect still lives in the caller's separate noEvidence branch (fixes-2 P1).
+func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince time.Time, axScreenReader bool) string {
 	if quietSince.IsZero() || time.Since(quietSince) < paneQuietAfter {
 		return ""
 	}
 	if visible != "" && dialoghint.ClassifyVisible(visible) {
 		return "dialog"
+	}
+	if axScreenReader {
+		return ""
 	}
 	if tl != nil && tl.Owing() {
 		stall := owedStallAfter

@@ -919,7 +919,7 @@ func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
 		}
 	}
 	if kind == "" {
-		kind = quietAttentionFallback(tl, visible, quietSince)
+		kind = quietAttentionFallback(tl, visible, quietSince, n.AXScreenReader)
 	}
 	if kind == "" {
 		return

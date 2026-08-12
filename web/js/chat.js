@@ -108,7 +108,8 @@ export const DEC_LABELS = {
 
 const KEYS = { Up: "\u2191", Down: "\u2193", Enter: "\u23ce", Escape: "Esc" };
 const HINTS = {
-  inspect: "The agent has gone quiet \u2014 check the terminal below; keys go straight to it:",
+  /* Neutral diagnostic only — no remote keys (fixes-2 P1). */
+  inspect: "No visible progress \u2014 inspect if needed.",
 };
 
 /* ---------- pure decisions ---------- */
@@ -461,6 +462,11 @@ export function keyRowHTML({
   escape = esc,
 } = {}){
   if (!attention || attentionHidden) return "";
+  /* inspect is a neutral diagnostic: offer no remote keypad. Terminal/log
+     inspection stays on the existing peek affordance (fixes-2 P1). */
+  if (attention === "inspect"){
+    return `<span class="hint">${escape(HINTS.inspect)}</span>`;
+  }
   if (source === "acp"){
     const opts = permOptions || [];
     if (!opts.length){

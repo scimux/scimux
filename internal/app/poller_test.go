@@ -1495,6 +1495,212 @@ Enter selection [1-3], or Esc to cancel:`
 	})
 }
 
+// TestAXQuietAttentionSafety pins P1 (fixes-2.md): under --ax-screen-reader,
+// quiet unresolved tools and Owing() stalls are not hard/neutral attention
+// without visible-dialog corroboration. Non-AX and missing-transcript paths
+// stay as before. Liveness remains mechanical.
+func TestAXQuietAttentionSafety(t *testing.T) {
+	plainPane := "I have the evidence I need. Writing the updated review.\n$"
+	// Recognized permission menu (same structural shape as dialoghint fixtures).
+	permDialog := `Permission Required: Create file
+hello.txt
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Escape to cancel:`
+
+	quietRunner := func(pane string) tmuxsession.Runner {
+		return func(ctx context.Context, stdin string, args ...string) (string, error) {
+			sub := ""
+			if len(args) >= 3 {
+				sub = args[2]
+			}
+			switch sub {
+			case "list-sessions":
+				return "cl1", nil
+			case "has-session":
+				return "", nil
+			case "capture-pane":
+				return pane, nil
+			}
+			return "", nil
+		}
+	}
+	// quietNode is past paneQuietAfter with a static capture. ax selects the
+	// owned Claude renderer metadata that production launch sets.
+	quietNode := func(t *testing.T, pane string, ax bool, transcriptLines ...string) (*app, time.Time) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		if len(transcriptLines) > 0 {
+			appendLines(t, path, transcriptLines...)
+		} else {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path, AXScreenReader: ax}
+		quietSince := time.Now().Add(-10 * time.Second)
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			turnDone:  map[string]bool{},
+			prevCap:   map[string]string{"cl1": pane},
+			lastChg:   map[string]time.Time{"cl1": quietSince},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(pane)),
+		}
+		a.initMaps()
+		return a, quietSince
+	}
+	unresolvedBash := []string{
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run tests"}}`,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`,
+	}
+	// Human turn only — agent owes the next output (Owing), no tool_use yet.
+	owingUser := []string{
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"write the review"}}`,
+	}
+
+	// 1. AX + quiet + unresolved Bash + no recognized dialog → no approval.
+	t.Run("ax_unresolved_bash_no_dialog_no_approval", func(t *testing.T) {
+		a, quietSince := quietNode(t, plainPane, true, unresolvedBash...)
+		a.poll()
+		if got := a.attn["cl1"]; got == "approval" || got == "question" {
+			t.Errorf("attention = %q, want no hard attention without visible dialog under AX", got)
+		}
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Errorf("live = %q, want quiet (attention must not feed liveness)", got)
+		}
+		if !a.lastChg["cl1"].Equal(quietSince) {
+			t.Errorf("lastChg moved by attention path: got %v want %v", a.lastChg["cl1"], quietSince)
+		}
+	})
+
+	// 2. AX + quiet + unresolved Bash + recognized permission dialog → approval.
+	t.Run("ax_unresolved_bash_with_dialog_approval", func(t *testing.T) {
+		a, _ := quietNode(t, permDialog, true, unresolvedBash...)
+		a.poll()
+		if got := a.attn["cl1"]; got != "approval" {
+			t.Errorf("attention = %q, want approval when AX + unresolved + ClassifyVisible", got)
+		}
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Errorf("live = %q, want quiet", got)
+		}
+	})
+
+	// 3. AX + quiet + Owing past owedStallAfter + no matcher → no inspect via Owing.
+	t.Run("ax_owing_past_stall_no_inspect", func(t *testing.T) {
+		a, _ := quietNode(t, plainPane, true, owingUser...)
+		// Stretch quietSince past owedStallAfter (quietNode defaults to 10s).
+		a.lastChg["cl1"] = time.Now().Add(-2 * owedStallAfter)
+		a.poll()
+		if got := a.attn["cl1"]; got == "inspect" {
+			t.Errorf("attention = %q, AX must not raise inspect via uncorroborated Owing()", got)
+		}
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Errorf("live = %q, want quiet", got)
+		}
+	})
+
+	// 4. Non-AX + quiet + unresolved call keeps hard attention (legacy semantics).
+	t.Run("non_ax_unresolved_bash_approval", func(t *testing.T) {
+		a, _ := quietNode(t, plainPane, false, unresolvedBash...)
+		a.poll()
+		if got := a.attn["cl1"]; got != "approval" {
+			t.Errorf("attention = %q, want approval for non-AX quiet unresolved Bash", got)
+		}
+	})
+
+	// 5. Missing/stale/unparseable transcript still yields neutral inspect on AX.
+	//    (Feature narrowed, not deleted — same seams as TestPollInspectFallbacks.)
+	t.Run("ax_missing_transcript_still_inspect", func(t *testing.T) {
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: "", AXScreenReader: true}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.initMaps()
+		a.poll()
+		if got := a.attn["cl1"]; got != "inspect" {
+			t.Errorf("attention = %q, want inspect for missing transcript on AX", got)
+		}
+	})
+	t.Run("ax_stale_transcript_still_inspect", func(t *testing.T) {
+		a, _ := quietNode(t, plainPane, true,
+			`{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":"ok"}}`)
+		// Install the tailer first: a fresh tailerFor clears staleChat (relink
+		// contract). Then re-flag stale so the quiet inspect path sees it.
+		_ = a.tailerFor(a.byID["cl1"])
+		a.staleChat["cl1"] = true
+		a.live["cl1"] = "quiet"
+		a.poll()
+		if got := a.attn["cl1"]; got != "inspect" {
+			t.Errorf("attention = %q, want inspect for stale transcript on AX", got)
+		}
+	})
+	t.Run("ax_unparseable_transcript_still_inspect", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tx.jsonl")
+		appendLines(t, path,
+			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
+			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"hello"}}`)
+		n := &Node{ID: "cl1", Agent: "claude", Transcript: path, AXScreenReader: true}
+		a := &app{
+			byID:      map[string]*Node{"cl1": n},
+			nodes:     []*Node{n},
+			live:      map[string]string{},
+			attn:      map[string]string{},
+			prevCap:   map[string]string{"cl1": plainPane},
+			lastChg:   map[string]time.Time{"cl1": time.Now().Add(-10 * time.Second)},
+			tailers:   map[string]*transcript.Tailer{},
+			chatMark:  map[string]chatMark{},
+			staleChat: map[string]bool{},
+			server:    tmuxsession.NewServerWithRunner("testsock", quietRunner(plainPane)),
+		}
+		a.initMaps()
+		_ = a.tailerFor(n)
+		junk := make([]string, 10)
+		for i := range junk {
+			junk[i] = "not-json-line"
+		}
+		appendLines(t, path, junk...)
+		a.live["cl1"] = "quiet"
+		a.poll()
+		tl := a.tailers["cl1"]
+		if tl == nil || !tl.Unparseable() {
+			t.Fatalf("setup: tailer unparseable = %v", tl != nil && tl.Unparseable())
+		}
+		if got := a.attn["cl1"]; got != "inspect" {
+			t.Errorf("attention = %q, want inspect when Unparseable on AX", got)
+		}
+	})
+
+	// 6. New attention branches do not rewrite live timestamps (lastChg).
+	t.Run("ax_attention_paths_leave_lastchg", func(t *testing.T) {
+		a, quietSince := quietNode(t, plainPane, true, unresolvedBash...)
+		a.poll()
+		if !a.lastChg["cl1"].Equal(quietSince) {
+			t.Errorf("lastChg rewritten: got %v want %v", a.lastChg["cl1"], quietSince)
+		}
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Errorf("live = %q, want quiet", got)
+		}
+	})
+}
+
 // P2 — /clear must not rebind a retired Claude transcript (ux-fixes-2.md).
 // (a) tombstone, (b) content-time not mtime, (c) genuine new session, (d) cur
 // health ignores metadata-only touches.

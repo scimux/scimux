@@ -225,7 +225,9 @@ test("ctx_pct still rendered as tank, unchanged (D1)", () => {
   // rotation — is unchanged and is what this pin is here to protect.
   // P5: also suppress the tank under a finished-turn ring (same reason as
   // attention — two concentric rings would fight). Geometry otherwise pinned.
-  const tankSnippet = `if (n.ctx_pct != null && !n.attention && !turnFinished(n)){
+  // hardAttention (not raw n.attention) so neutral inspect does not suppress the
+  // tank the way a yellow ring would — inspect is not ringed (fixes-2 P1).
+  const tankSnippet = `if (n.ctx_pct != null && !hardAttention(n) && !turnFinished(n)){
         const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;`;
   assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
@@ -4319,14 +4321,10 @@ test("P6: attentionPill pure — finished-only → ready; mixed → waiting; arr
   assert.equal(waitingAbove.count, 1);
 });
 
-test("P6: railTicks folds inspect into waiting — the tick set is the ring set", () => {
-  /* The wall paints a ring for ANY attention (`if (n.attention)`), including
-     the neutral "inspect" P1 raises when Claude's approval dialog cannot be
-     proven from the transcript. The pill exists to locate off-screen rings, so
-     its tick set must be that same set: a station that is ringed but uncounted
-     is one the locator refuses to take you to — and inspect is precisely the
-     state P1 added for the waits that were being missed. Maintainer decision
-     2026-08-10: inspect counts as waiting. */
+test("P6: railTicks excludes inspect from waiting — hardAttention only", () => {
+  /* fixes-2 P1 inverted the 2026-08-10 contract: neutral inspect is diagnostic,
+     not a verified wait. Rings, ticks, pills, and tab badges use hardAttention
+     (approval/question/dialog), never truthy n.attention. turn_done stays ready. */
   const fn = mapExports.railTicks;
   const mk = (id, attention, done) => ({
     n: {
@@ -4342,10 +4340,12 @@ test("P6: railTicks folds inspect into waiting — the tick set is the ring set"
     mk("quiet", ""),
   ];
   const ticks = fn({ rows, rowHeight: 76, offset: 16 });
-  assert.deepEqual(ticks.map(t => t.nodeId), ["insp", "ask", "done"],
-    "a ringed inspect station gets a tick");
-  assert.deepEqual(ticks.map(t => t.kind), ["waiting", "waiting", "ready"],
-    "inspect is a waiting kind — it needs you before the agent proceeds");
+  assert.deepEqual(ticks.map(t => t.nodeId), ["ask", "done"],
+    "inspect contributes zero waiting ticks; hard attention + ready remain");
+  assert.deepEqual(ticks.map(t => t.kind), ["waiting", "ready"],
+    "inspect is not a waiting kind");
+  assert.ok(!ticks.some(t => t.nodeId === "insp"),
+    "inspect station has no attention ring tick");
 });
 
 test("P6: railTicks folds finished heads and reports kind", () => {
@@ -4731,11 +4731,10 @@ test("P7: .strow.current selection frame is 2px at ~55% (rule body)", () => {
 });
 
 test("P7: mapTabAttentionCounts mirrors the pill — one number, kind names it", () => {
-  /* Reuses P6's kind split verbatim (railTicks / attentionPill): any attention
-     — including the neutral "inspect" — is waiting; turn_done without
-     attention is ready. One badge per tab: if anything is waiting the badge
-     counts waiting and wears that kind; otherwise it counts ready. Never the
-     sum, so the number always matches the word the hue says.
+  /* Reuses P6's kind split (railTicks / attentionPill): hardAttention is
+     waiting; inspect contributes zero; turn_done without hard attention is
+     ready. One badge per tab: if anything is waiting the badge counts waiting
+     and wears that kind; otherwise it counts ready. Never the sum.
      Membership mirrors renderMap: lane_id && served(n).some(inGroup). */
   const fn = mapExports.mapTabAttentionCounts;
   assert.equal(typeof fn, "function", "mapTabAttentionCounts is exported");
@@ -4768,18 +4767,18 @@ test("P7: mapTabAttentionCounts mirrors the pill — one number, kind names it",
   };
   const c = fn(nodes, groups, { served });
 
-  // All: waiting stations with a lane — w, insp, b, multi, both (ready ignored
-  // while anything waits; quiet and lane-less never count).
-  assert.deepEqual(c.all, { n: 5, kind: "waiting" },
-    "All counts waiting only while anything is waiting");
-  // g1 / L1: w, insp, multi are waiting; the ready node on L1 is not added.
-  assert.deepEqual(c.g1, { n: 3, kind: "waiting" },
-    "a mixed tab counts waiting, never the sum");
+  // All: hard-attention stations with a lane — w, b, multi, both (inspect is
+  // not waiting; ready ignored while anything waits; quiet/lane-less never).
+  assert.deepEqual(c.all, { n: 4, kind: "waiting" },
+    "All counts hard waiting only; inspect contributes zero");
+  // g1 / L1: w + multi waiting; inspect does not count; ready not added.
+  assert.deepEqual(c.g1, { n: 2, kind: "waiting" },
+    "a mixed tab counts hard waiting, never inspect or the sum");
   assert.deepEqual(c.g2, { n: 1, kind: "waiting" });
-  assert.deepEqual(c.g13, { n: 3, kind: "waiting" },
-    "union tab: w + insp + multi (never double-counted inside one tab)");
+  assert.deepEqual(c.g13, { n: 2, kind: "waiting" },
+    "union tab: w + multi (inspect excluded; never double-counted)");
   assert.deepEqual(c.g4, { n: 1, kind: "waiting" },
-    "attention + turn_done on one node resolves to waiting");
+    "hard attention + turn_done on one node resolves to waiting");
   // Ready-only tab: the finished state gets the same badge, a different kind.
   assert.deepEqual(c.g5, { n: 2, kind: "ready" },
     "a tab holding only finished turns badges ready");
@@ -4941,10 +4940,15 @@ test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
   assert.equal(maptabs.innerHTML, "STALE",
     "renderMap must not force a tab rewrite when counts are unchanged");
 
-  // Count changes: rebuild.
+  // Count changes: rebuild. hardAttention (question) raises the waiting badge;
+  // inspect must not (fixes-2 P1).
   nodes[1].attention = "inspect";
   feature.render();
-  assert.notEqual(maptabs.innerHTML, "STALE", "count change rebuilds via render path");
+  assert.equal(maptabs.innerHTML, "STALE",
+    "inspect does not change waiting tab counts — no rebuild");
+  nodes[1].attention = "question";
+  feature.render();
+  assert.notEqual(maptabs.innerHTML, "STALE", "hard-attention count change rebuilds");
   assert.match(maptabs.innerHTML, /tabcount">2</, "All count rose to 2");
 
   // Tab set change (rename) rebuilds even if counts are the same.
@@ -4952,7 +4956,7 @@ test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
   // Force a same-count recompute first so the sig is current, then rename.
   feature.renderTabs(); // may no-op if STALE2 left sig stale — call after real paint
   // Restore from last good counts: re-render once from real state.
-  nodes[1].attention = "inspect";
+  nodes[1].attention = "question";
   feature.invalidate?.();
   // Clear the tabs sig by changing groups.
   groups = [{ id: "g1", name: "Renamed", lanes: ["L1"] }];

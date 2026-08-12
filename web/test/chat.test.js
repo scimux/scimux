@@ -738,6 +738,29 @@ test("keyRowHTML: tmux .permbtns has keys; ACP .permbtns does not", () => {
   assert.doesNotMatch(acpBtns[1], /\bkeys\b/, "ACP .permbtns must not carry keys");
 });
 
+/* fixes-2 P1: neutral inspect is diagnostic only — no remote keypad. */
+test("keyRowHTML: inspect has no remote keys or permbtns", () => {
+  const html = keyRowHTML({ attention: "inspect" });
+  assert.ok(html, "inspect still renders a chat row");
+  assert.match(html, /inspect if needed|No visible progress/i,
+    "neutral diagnostic copy points at terminal inspection");
+  assert.doesNotMatch(html, /data-key/, "inspect must not emit data-key buttons");
+  assert.doesNotMatch(html, /permbtns/, "inspect must not emit .permbtns");
+  assert.doesNotMatch(html, /data-key="[1-4yn]"|data-key="Enter"|data-key="Escape"|data-key="Up"|data-key="Down"/);
+  // Digits / y/n / Enter / Escape as button labels would also invite a decision.
+  assert.doesNotMatch(html, /<button[^>]*>\s*[1-4yn]\s*<\/button>/i);
+  assert.doesNotMatch(html, /<button[^>]*>\s*(Enter|Esc|Escape|↑|↓|⏎)\s*<\/button>/i);
+
+  // Verified terminal decision rows keep their controls.
+  const approval = keyRowHTML({ attention: "approval" });
+  assert.match(approval, /data-key="1"/, "approval retains digit keys");
+  assert.match(approval, /permbtns/, "approval retains .permbtns");
+  const question = keyRowHTML({ attention: "question" });
+  assert.match(question, /data-key="y"/, "question retains y/n keys");
+  assert.match(question, /data-key="Enter"/, "question retains Enter");
+  assert.match(question, /data-key="Escape"/, "question retains Escape");
+});
+
 test("CSS: .permbtns.keys wraps in a row; base .permbtns stays column pin", () => {
   // Base pin (column + non-shrink) — already asserted above; re-pin direction here.
   const base = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);
