@@ -18,21 +18,21 @@ import (
 
 func TestAgentCommandPiOpencode(t *testing.T) {
 	pi := &Node{Agent: "pi", Model: "mistral/devstral-latest", Prompt: "hello"}
-	if got, _ := agentCommand(pi); got != `pi --model 'mistral/devstral-latest' 'hello'` {
+	if got, _ := agentCommand(pi, nil); got != `pi --model 'mistral/devstral-latest' 'hello'` {
 		t.Errorf("pi cmd = %s", got)
 	}
 	// opencode takes the first prompt as a flag, not a positional argument.
 	oc := &Node{Agent: "opencode", Model: "openai/gpt-5.5", Prompt: "hello"}
-	if got, _ := agentCommand(oc); got != `opencode --model 'openai/gpt-5.5' --prompt 'hello'` {
+	if got, _ := agentCommand(oc, nil); got != `opencode --model 'openai/gpt-5.5' --prompt 'hello'` {
 		t.Errorf("opencode cmd = %s", got)
 	}
 	bare := &Node{Agent: "pi", Prompt: "p"}
-	if got, _ := agentCommand(bare); got != `pi 'p'` {
+	if got, _ := agentCommand(bare, nil); got != `pi 'p'` {
 		t.Errorf("bare pi cmd = %s", got)
 	}
 	// grok is ACP in production; agentCommand is only a legacy tmux fallback.
 	g := &Node{Agent: "grok", Model: "grok-4.5", Effort: "low", Prompt: "hello"}
-	if got, _ := agentCommand(g); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
+	if got, _ := agentCommand(g, nil); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
 		t.Errorf("grok cmd = %s", got)
 	}
 }

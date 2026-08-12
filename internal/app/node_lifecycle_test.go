@@ -527,7 +527,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 		Agent: "claude", SessionID: "uuid-1", Title: "My Session",
 		Model: "opus", Effort: "high", Prompt: "hello world",
 	}
-	got, err := agentCommand(full)
+	got, err := agentCommand(full, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 
 	// Title only (no model, no effort).
 	titleOnly := &Node{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"}
-	if got, _ := agentCommand(titleOnly); got != `claude --session-id u --ax-screen-reader --remote-control 'T' 'p'` {
+	if got, _ := agentCommand(titleOnly, nil); got != `claude --session-id u --ax-screen-reader --remote-control 'T' 'p'` {
 		t.Errorf("title-only claude = %s", got)
 	}
 
@@ -549,7 +549,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	// extra quoting path — title empty means the --remote-control flag still
 	// appears but with no following quoted title; characterize current argv).
 	modelOnly := &Node{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "p"}
-	got, _ = agentCommand(modelOnly)
+	got, _ = agentCommand(modelOnly, nil)
 	// Current: parts = claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' 'p'
 	// because empty Title skips the shellQuote(title) append only.
 	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' 'p'`
@@ -558,7 +558,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	}
 
 	bare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(bare); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
+	if got, _ := agentCommand(bare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
 		t.Errorf("bare claude = %s", got)
 	}
 }
@@ -568,66 +568,66 @@ func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 	// either harness via agentCommand (characterize: Effort is ignored).
 	// --ax-screen-reader is Claude-only and must never appear here.
 	piFull := &Node{Agent: "pi", Model: "mistral/devstral-latest", Effort: "high", Prompt: "hello"}
-	if got, err := agentCommand(piFull); err != nil {
+	if got, err := agentCommand(piFull, nil); err != nil {
 		t.Fatal(err)
 	} else if got != `pi --model 'mistral/devstral-latest' 'hello'` {
 		t.Errorf("pi+model+effort = %s (effort must not add a flag)", got)
 	}
-	if got, _ := agentCommand(piFull); strings.Contains(got, "--effort") {
+	if got, _ := agentCommand(piFull, nil); strings.Contains(got, "--effort") {
 		t.Errorf("pi command must not pass --effort, got %s", got)
 	}
-	if got, _ := agentCommand(piFull); strings.Contains(got, "--ax-screen-reader") {
+	if got, _ := agentCommand(piFull, nil); strings.Contains(got, "--ax-screen-reader") {
 		t.Errorf("pi command must not pass --ax-screen-reader, got %s", got)
 	}
 
 	piBare := &Node{Agent: "pi", Effort: "xhigh", Prompt: "p"}
-	if got, _ := agentCommand(piBare); got != `pi 'p'` {
+	if got, _ := agentCommand(piBare, nil); got != `pi 'p'` {
 		t.Errorf("bare pi = %s", got)
 	}
 
 	ocFull := &Node{Agent: "opencode", Model: "openai/gpt-5.5", Effort: "medium", Prompt: "hello"}
-	if got, _ := agentCommand(ocFull); got != `opencode --model 'openai/gpt-5.5' --prompt 'hello'` {
+	if got, _ := agentCommand(ocFull, nil); got != `opencode --model 'openai/gpt-5.5' --prompt 'hello'` {
 		t.Errorf("opencode+model = %s", got)
 	}
-	if got, _ := agentCommand(ocFull); strings.Contains(got, "--effort") {
+	if got, _ := agentCommand(ocFull, nil); strings.Contains(got, "--effort") {
 		t.Errorf("opencode command must not pass --effort, got %s", got)
 	}
-	if got, _ := agentCommand(ocFull); strings.Contains(got, "--ax-screen-reader") {
+	if got, _ := agentCommand(ocFull, nil); strings.Contains(got, "--ax-screen-reader") {
 		t.Errorf("opencode command must not pass --ax-screen-reader, got %s", got)
 	}
 
 	ocBare := &Node{Agent: "opencode", Prompt: "p"}
-	if got, _ := agentCommand(ocBare); got != `opencode --prompt 'p'` {
+	if got, _ := agentCommand(ocBare, nil); got != `opencode --prompt 'p'` {
 		t.Errorf("bare opencode = %s", got)
 	}
 
 	// grok legacy/forced-tmux fallback: -m and --reasoning-effort like ACP argv.
 	gFull := &Node{Agent: "grok", Model: "grok-4.5", Effort: "low", Prompt: "hello"}
-	if got, _ := agentCommand(gFull); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
+	if got, _ := agentCommand(gFull, nil); got != `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'` {
 		t.Errorf("grok+model+effort = %s", got)
 	}
-	if got, _ := agentCommand(gFull); strings.Contains(got, "--ax-screen-reader") {
+	if got, _ := agentCommand(gFull, nil); strings.Contains(got, "--ax-screen-reader") {
 		t.Errorf("grok command must not pass --ax-screen-reader, got %s", got)
 	}
 	gBare := &Node{Agent: "grok", Prompt: "p"}
-	if got, _ := agentCommand(gBare); got != `grok 'p'` {
+	if got, _ := agentCommand(gBare, nil); got != `grok 'p'` {
 		t.Errorf("bare grok = %s", got)
 	}
 
 	// Prompt quoting for the fallback path.
 	tricky := &Node{Agent: "pi", Prompt: `don't run $(rm -rf /)`}
-	if got, _ := agentCommand(tricky); !strings.Contains(got, `'don'\''t run $(rm -rf /)'`) {
+	if got, _ := agentCommand(tricky, nil); !strings.Contains(got, `'don'\''t run $(rm -rf /)'`) {
 		t.Errorf("pi tricky prompt not inert: %s", got)
 	}
 }
 
 func TestAgentCommandRejectsCodexAndUnknown(t *testing.T) {
 	// codex uses app-server, not tmux agentCommand.
-	if _, err := agentCommand(&Node{Agent: "codex", Prompt: "p"}); err == nil {
+	if _, err := agentCommand(&Node{Agent: "codex", Prompt: "p"}, nil); err == nil {
 		t.Error("agentCommand must reject codex")
 	}
 	for _, agent := range []string{"gemini", "", "Claude"} {
-		if _, err := agentCommand(&Node{Agent: agent, Prompt: "p"}); err == nil {
+		if _, err := agentCommand(&Node{Agent: agent, Prompt: "p"}, nil); err == nil {
 			t.Errorf("agentCommand must reject unknown agent %q", agent)
 		}
 	}
@@ -713,7 +713,7 @@ func TestShellQuote(t *testing.T) {
 
 func TestAgentCommand(t *testing.T) {
 	claude := &Node{Agent: "claude", SessionID: "uuid-1", Title: "My Session", Model: "opus", Prompt: "hello world"}
-	got, err := agentCommand(claude)
+	got, err := agentCommand(claude, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,20 +725,20 @@ func TestAgentCommand(t *testing.T) {
 	}
 
 	claudeBare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(claudeBare); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
+	if got, _ := agentCommand(claudeBare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
 		t.Errorf("bare claude cmd = %s", got)
 	}
 
 	// codex no longer launches over tmux — it is supervised through the codex
 	// app-server bridge — so it has no tmux launch command line.
 	codex := &Node{Agent: "codex", Model: "gpt-5.5", Effort: "high", Prompt: "sweep thresholds"}
-	if _, err := agentCommand(codex); err == nil {
+	if _, err := agentCommand(codex, nil); err == nil {
 		t.Error("agentCommand should reject codex (no tmux launch path)")
 	}
 
 	// A prompt containing quotes and shell metacharacters must stay inert.
 	tricky := &Node{Agent: "claude", SessionID: "u", Prompt: `don't run $(rm -rf /); echo "done"`}
-	got, _ = agentCommand(tricky)
+	got, _ = agentCommand(tricky, nil)
 	if !strings.Contains(got, `'don'\''t run $(rm -rf /); echo "done"'`) {
 		t.Errorf("tricky prompt not quoted inertly: %s", got)
 	}
@@ -746,7 +746,7 @@ func TestAgentCommand(t *testing.T) {
 		t.Errorf("tricky claude must still carry exactly one --ax-screen-reader, got %s", got)
 	}
 
-	if _, err := agentCommand(&Node{Agent: "gemini", Prompt: "p"}); err == nil {
+	if _, err := agentCommand(&Node{Agent: "gemini", Prompt: "p"}, nil); err == nil {
 		t.Error("unknown agent must error")
 	}
 }
@@ -756,16 +756,16 @@ func TestAgentCommand(t *testing.T) {
 // launches exactly as before).
 func TestAgentCommandClaudeEffort(t *testing.T) {
 	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"}
-	got, _ := agentCommand(n)
+	got, _ := agentCommand(n, nil)
 	if got != `claude --session-id u --ax-screen-reader --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium' 'hi'` {
 		t.Errorf("claude+effort cmd = %s", got)
 	}
 	// No effort -> no --effort flag.
 	n2 := &Node{Agent: "claude", SessionID: "u", Prompt: "hi"}
-	if got, _ := agentCommand(n2); strings.Contains(got, "--effort") {
+	if got, _ := agentCommand(n2, nil); strings.Contains(got, "--effort") {
 		t.Errorf("effort-less claude cmd must omit --effort, got %s", got)
 	}
-	if got, _ := agentCommand(n2); got != `claude --session-id u --ax-screen-reader --remote-control 'hi'` {
+	if got, _ := agentCommand(n2, nil); got != `claude --session-id u --ax-screen-reader --remote-control 'hi'` {
 		t.Errorf("effort-less claude cmd = %s", got)
 	}
 }
@@ -1030,7 +1030,7 @@ func TestAgentCommandClaudeAXScreenReaderOnce(t *testing.T) {
 		{Agent: "claude", SessionID: "u", Prompt: `don't run $(rm -rf /); echo "done"`},
 	}
 	for _, n := range variants {
-		got, err := agentCommand(n)
+		got, err := agentCommand(n, nil)
 		if err != nil {
 			t.Fatalf("agentCommand(%+v): %v", n, err)
 		}
@@ -1048,7 +1048,7 @@ func TestAgentCommandClaudeAXScreenReaderOnce(t *testing.T) {
 		{Agent: "opencode", Prompt: "p"},
 		{Agent: "grok", Prompt: "p"},
 	} {
-		got, err := agentCommand(n)
+		got, err := agentCommand(n, nil)
 		if err != nil {
 			t.Fatalf("agentCommand(%s): %v", n.Agent, err)
 		}
@@ -1119,5 +1119,244 @@ func TestLaunchNodeFailureDoesNotMarkAX(t *testing.T) {
 		if r.Type == "node" {
 			t.Fatalf("failed launch must not persist a node record, got %+v", r.Node)
 		}
+	}
+}
+
+// ---------- 6. Claude --add-dir for the node's attachment staging dir ----------
+//
+// Uploads stage at ~/.scimux/attachments/<node-id>/, which sits outside the
+// workspace cwd. --add-dir grants the CLI tool access there so every attached
+// file does not prompt for out-of-workspace permission. n.Dir is already the
+// process cwd and must not be passed to this flag.
+
+func fakeNewSessionArgv(f *fakeTmux) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		c := f.calls[i]
+		if len(c) >= 3 && c[2] == "new-session" {
+			return strings.Join(c, " ")
+		}
+	}
+	return ""
+}
+
+func TestClaudeLaunchAddsTheNodesAttachmentDir(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	n := &Node{
+		ID: "att-claude", Title: "Att", Prompt: "hi", Agent: "claude",
+		Dir: a.home, SessionID: "sess-att", CreatedAt: "2026-08-10T00:00:00Z",
+	}
+	if status, err := a.launchNode(n, nil); err != nil || status != 0 {
+		t.Fatalf("launchNode: status=%d err=%v", status, err)
+	}
+	wantDir := a.attachmentDir(n.ID)
+	if wantDir != filepath.Join(a.attachmentsDir, n.ID) {
+		t.Fatalf("attachmentDir(%q) = %q, want <attachmentsDir>/<id>", n.ID, wantDir)
+	}
+	launch := fakeNewSessionArgv(f)
+	if c := strings.Count(launch, "--add-dir"); c != 1 {
+		t.Errorf("new-session argv must contain exactly one --add-dir (got %d): %q", c, launch)
+	}
+	wantFlag := "--add-dir " + shellQuote(wantDir)
+	if !strings.Contains(launch, wantFlag) {
+		t.Errorf("new-session argv missing %q: %q", wantFlag, launch)
+	}
+}
+
+func TestAddDirIsEmittedExactlyOnce(t *testing.T) {
+	dir := "/tmp/scimux-attachments/chat"
+	variants := []*Node{
+		{Agent: "claude", SessionID: "uuid-1", Title: "My Session", Model: "opus", Effort: "high", Prompt: "hello world"},
+		{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"},
+		{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "p"},
+		{Agent: "claude", SessionID: "uuid-2", Prompt: "p"},
+		{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"},
+		{Agent: "claude", SessionID: "u", Prompt: `don't run $(rm -rf /); echo "done"`},
+	}
+	for _, n := range variants {
+		got, err := agentCommand(n, []string{dir})
+		if err != nil {
+			t.Fatalf("agentCommand(%+v): %v", n, err)
+		}
+		if c := strings.Count(got, "--add-dir"); c != 1 {
+			t.Errorf("claude cmd must contain exactly one --add-dir (got %d): %s", c, got)
+		}
+		if !strings.Contains(got, "--add-dir "+shellQuote(dir)) {
+			t.Errorf("claude cmd missing quoted --add-dir value: %s", got)
+		}
+	}
+}
+
+func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
+	dir := "/tmp/scimux-attachments/chat"
+	quotedDir := shellQuote(dir)
+
+	titled := &Node{Agent: "claude", SessionID: "u", Title: "My Title", Prompt: "the prompt"}
+	got, err := agentCommand(titled, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTitled := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --add-dir ` + quotedDir + ` 'the prompt'`
+	if got != wantTitled {
+		t.Errorf("titled =\n  %s\nwant\n  %s", got, wantTitled)
+	}
+
+	// Empty title: --remote-control still appears with no value. --add-dir and
+	// its path sit after that flag (not before it, and not as its value) and
+	// before the prompt.
+	bare := &Node{Agent: "claude", SessionID: "u", Prompt: "the prompt"}
+	got, err = agentCommand(bare, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBare := `claude --session-id u --ax-screen-reader --remote-control --add-dir ` + quotedDir + ` 'the prompt'`
+	if got != wantBare {
+		t.Errorf("empty title =\n  %s\nwant\n  %s", got, wantBare)
+	}
+
+	full := &Node{Agent: "claude", SessionID: "u", Title: "My Title", Model: "opus", Effort: "high", Prompt: "the prompt"}
+	got, err = agentCommand(full, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFull := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --model 'opus' --effort 'high' --add-dir ` + quotedDir + ` 'the prompt'`
+	if got != wantFull {
+		t.Errorf("title+model+effort =\n  %s\nwant\n  %s", got, wantFull)
+	}
+
+	// Empty title + model: --add-dir still follows the remote-control pair
+	// (here separated by --model) and precedes the prompt.
+	modelOnly := &Node{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "the prompt"}
+	got, err = agentCommand(modelOnly, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' --add-dir ` + quotedDir + ` 'the prompt'`
+	if got != wantModel {
+		t.Errorf("empty title+model =\n  %s\nwant\n  %s", got, wantModel)
+	}
+
+	for name, cmd := range map[string]string{"titled": wantTitled, "empty title": wantBare, "full": wantFull, "empty+model": wantModel} {
+		iRC := strings.Index(cmd, "--remote-control")
+		iAdd := strings.Index(cmd, "--add-dir ")
+		iPrompt := strings.LastIndex(cmd, "'the prompt'")
+		if iRC < 0 || iAdd < 0 || iPrompt < 0 || !(iRC < iAdd && iAdd < iPrompt) {
+			t.Errorf("%s: want --remote-control then --add-dir then prompt, got %s", name, cmd)
+		}
+	}
+}
+
+func TestThePromptStaysTheLastArgument(t *testing.T) {
+	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "opus", Prompt: "hello world"}
+	quoted := shellQuote(n.Prompt)
+
+	got, err := agentCommand(n, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, " "+quoted) {
+		t.Errorf("without --add-dir, prompt is not last: %s", got)
+	}
+	if strings.Contains(got, "--add-dir") {
+		t.Errorf("nil addDirs must omit --add-dir: %s", got)
+	}
+
+	dir := "/tmp/scimux-attachments/n"
+	got, err = agentCommand(n, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "--add-dir "+shellQuote(dir)) {
+		t.Errorf("with addDirs, missing --add-dir: %s", got)
+	}
+	if !strings.HasSuffix(got, " "+quoted) {
+		t.Errorf("with --add-dir, prompt is not last: %s", got)
+	}
+}
+
+func TestNonClaudeAgentsAreUnchanged(t *testing.T) {
+	cases := []struct {
+		n    *Node
+		want string
+	}{
+		{&Node{Agent: "pi", Model: "mistral/devstral-latest", Prompt: "hello"}, `pi --model 'mistral/devstral-latest' 'hello'`},
+		{&Node{Agent: "opencode", Model: "openai/gpt-5.5", Prompt: "hello"}, `opencode --model 'openai/gpt-5.5' --prompt 'hello'`},
+		{&Node{Agent: "grok", Model: "grok-4.5", Effort: "low", Prompt: "hello"}, `grok -m 'grok-4.5' --reasoning-effort 'low' 'hello'`},
+	}
+	extra := []string{"/should/not/appear"}
+	for _, c := range cases {
+		gotNil, err := agentCommand(c.n, nil)
+		if err != nil {
+			t.Fatalf("%s nil: %v", c.n.Agent, err)
+		}
+		if gotNil != c.want {
+			t.Errorf("%s with nil =\n  %s\nwant\n  %s", c.n.Agent, gotNil, c.want)
+		}
+		gotExtra, err := agentCommand(c.n, extra)
+		if err != nil {
+			t.Fatalf("%s extra: %v", c.n.Agent, err)
+		}
+		if gotExtra != c.want {
+			t.Errorf("%s with addDirs must be byte-identical, got %s", c.n.Agent, gotExtra)
+		}
+		if strings.Contains(gotExtra, "--add-dir") {
+			t.Errorf("%s must not emit --add-dir, got %s", c.n.Agent, gotExtra)
+		}
+	}
+	if _, err := agentCommand(&Node{Agent: "codex", Prompt: "p"}, nil); err == nil {
+		t.Error("codex must still be rejected")
+	}
+	if _, err := agentCommand(&Node{Agent: "codex", Prompt: "p"}, extra); err == nil {
+		t.Error("codex must still be rejected with addDirs")
+	}
+}
+
+func TestANodeWithNoAttachmentsDirConfiguredOmitsTheFlag(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	a.attachmentsDir = ""
+	n := &Node{
+		ID: "no-att", Title: "T", Prompt: "hi", Agent: "claude",
+		Dir: a.home, SessionID: "sess-no", CreatedAt: "2026-08-10T00:00:00Z",
+	}
+	if status, err := a.launchNode(n, nil); err != nil || status != 0 {
+		t.Fatalf("launchNode: status=%d err=%v", status, err)
+	}
+	launch := fakeNewSessionArgv(f)
+	if strings.Contains(launch, "--add-dir") {
+		t.Errorf("empty attachmentsDir must omit --add-dir, got %q", launch)
+	}
+
+	// Empty or blank paths must never reach the CLI, even if a caller passes them.
+	n2 := &Node{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"}
+	for _, dirs := range [][]string{nil, {}, {""}, {"", ""}, {"  "}} {
+		got, err := agentCommand(n2, dirs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(got, "--add-dir") {
+			t.Errorf("addDirs=%#v must omit --add-dir, got %s", dirs, got)
+		}
+	}
+}
+
+func TestTheDirectoryExistsBeforeLaunch(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	n := &Node{
+		ID: "mkdir-claude", Title: "T", Prompt: "hi", Agent: "claude",
+		Dir: a.home, SessionID: "sess-mkdir", CreatedAt: "2026-08-10T00:00:00Z",
+	}
+	dir := a.attachmentDir(n.ID)
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("attachment dir should not exist before launch: %v", err)
+	}
+	if status, err := a.launchNode(n, nil); err != nil || status != 0 {
+		t.Fatalf("launchNode: status=%d err=%v", status, err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("attachment dir must exist after launch: %v", err)
 	}
 }

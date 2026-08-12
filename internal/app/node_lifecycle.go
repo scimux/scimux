@@ -69,7 +69,7 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 // agentCommand builds the launch command. The first prompt rides on the
 // command line so prompt delivery and session start are atomic — no
 // "is the TUI drawn yet" race, which only later turns (via paste) tolerate.
-func agentCommand(n *Node) (string, error) {
+func agentCommand(n *Node, addDirs []string) (string, error) {
 	switch n.Agent {
 	case "claude":
 		// --ax-screen-reader is a hard default for every scimux-owned Claude
@@ -88,6 +88,17 @@ func agentCommand(n *Node) (string, error) {
 		// it only when set so an effort-less node launches exactly as before.
 		if n.Effort != "" {
 			parts = append(parts, "--effort", shellQuote(n.Effort))
+		}
+		// --add-dir grants tool access to extra directories (the node's upload
+		// staging path). It sits after the optional --remote-control <title>
+		// pair — and after --model/--effort — so an empty title cannot eat the
+		// path as its value, and the prompt stays the last argument. Empty or
+		// blank paths are skipped so they never reach the CLI.
+		for _, dir := range addDirs {
+			if strings.TrimSpace(dir) == "" {
+				continue
+			}
+			parts = append(parts, "--add-dir", shellQuote(dir))
 		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
 	// pi, opencode, and grok reach agentCommand only as a legacy/forced tmux
@@ -488,7 +499,21 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 			launch = &cp
 		}
 	}
-	cmd, err := agentCommand(launch)
+	// Extra directories for Claude --add-dir. Only the node's attachment
+	// staging dir: n.Dir is already the process cwd (passing it is a no-op
+	// for the trust dialog and is not this flag's job). Skip when
+	// attachmentsDir is unset so an empty or relative path never reaches
+	// the CLI. MkdirAll here because the CLI rejects a non-existent path
+	// and storeAttachment otherwise creates the dir lazily on first upload.
+	var addDirs []string
+	if n.Agent == "claude" && a.attachmentsDir != "" {
+		dir := a.attachmentDir(n.ID)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return 500, fmt.Errorf("create attachment dir: %w", err)
+		}
+		addDirs = []string{dir}
+	}
+	cmd, err := agentCommand(launch, addDirs)
 	if err != nil {
 		return 400, err
 	}
