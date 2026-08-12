@@ -18,7 +18,7 @@ import (
 // TestRouterAPIRouteOwnership locks the Phase 4 boundary: every registered API
 // route has exactly one production handler definition in its expected feature
 // file, router.go stays registration-only, and NewHandler still returns
-// withGzip(guardMutations(mux)).
+// withGzip(withRequestBoundary(policy, guardMutations(mux))).
 func TestRouterAPIRouteOwnership(t *testing.T) {
 	table := characterizationAPIRoutes()
 	if len(table) != 32 {
@@ -300,8 +300,10 @@ func callExprName(fun ast.Expr) string {
 }
 
 // assertNewHandlerReturnsWithGzipOnce locks the middleware order:
-// withGzip(guardMutations(mux)). Compression is outermost; the mutation
-// guard still wraps the complete mux exactly once.
+// withGzip(withRequestBoundary(policy, guardMutations(mux))). Compression is
+// outermost; the request boundary wraps the mutation guard so Host validation
+// covers the entire public handler; the mutation guard still wraps the mux
+// exactly once.
 func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -322,7 +324,8 @@ func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 			return true
 		}
 		if id, ok := call.Fun.(*ast.Ident); ok {
-			if id.Name == "guardMutations" || id.Name == "withGzip" {
+			switch id.Name {
+			case "guardMutations", "withGzip", "withRequestBoundary":
 				counts[id.Name]++
 			}
 		}
@@ -334,8 +337,11 @@ func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 	if counts["withGzip"] != 1 {
 		t.Fatalf("NewHandler contains %d withGzip calls, want exactly 1", counts["withGzip"])
 	}
+	if counts["withRequestBoundary"] != 1 {
+		t.Fatalf("NewHandler contains %d withRequestBoundary calls, want exactly 1", counts["withRequestBoundary"])
+	}
 
-	// Final return must be withGzip(guardMutations(mux)), nil.
+	// Final return must be withGzip(withRequestBoundary(..., guardMutations(mux))), nil.
 	stmts := fn.Body.List
 	if len(stmts) == 0 {
 		t.Fatal("NewHandler body empty")
@@ -355,13 +361,24 @@ func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 	if len(outer.Args) != 1 {
 		t.Fatalf("withGzip args = %d, want 1", len(outer.Args))
 	}
-	inner, ok := outer.Args[0].(*ast.CallExpr)
+	mid, ok := outer.Args[0].(*ast.CallExpr)
 	if !ok {
-		t.Fatalf("withGzip argument = %T, want guardMutations(...)", outer.Args[0])
+		t.Fatalf("withGzip argument = %T, want withRequestBoundary(...)", outer.Args[0])
+	}
+	midID, ok := mid.Fun.(*ast.Ident)
+	if !ok || midID.Name != "withRequestBoundary" {
+		t.Fatalf("inner wrapper = %s, want withRequestBoundary", callExprName(mid.Fun))
+	}
+	if len(mid.Args) != 2 {
+		t.Fatalf("withRequestBoundary args = %d, want 2 (policy, guardMutations(mux))", len(mid.Args))
+	}
+	inner, ok := mid.Args[1].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("withRequestBoundary second arg = %T, want guardMutations(...)", mid.Args[1])
 	}
 	innerID, ok := inner.Fun.(*ast.Ident)
 	if !ok || innerID.Name != "guardMutations" {
-		t.Fatalf("inner wrapper = %s, want guardMutations", callExprName(inner.Fun))
+		t.Fatalf("guard wrapper = %s, want guardMutations", callExprName(inner.Fun))
 	}
 	if len(inner.Args) != 1 {
 		t.Fatalf("guardMutations args = %d, want 1 (the mux)", len(inner.Args))

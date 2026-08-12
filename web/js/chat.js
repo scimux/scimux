@@ -45,6 +45,7 @@
  *   - #chathead click (header-row details toggle)
  *   - #msgs scroll (compact header)
  *   - #msgs load capture (thumbnail box + re-pin near bottom)
+ *   - #msgs error capture (broken-thumbnail cleanup; no inline onerror)
  *   - #msgs click (histload, bubble tap, bubble actions)
  *   - #msgs touchend (double-tap zoom reset on empty background)
  *   - #keyrow click (dialog keys + attention collapse)
@@ -93,6 +94,8 @@ export const CHAT_LOAD_DELAY_MS = 300;
 export const CHAT_DETAIL_SAVED_MS = 2000;
 export const PENDING_JUMP_TTL_MS = 15000;
 
+/* Exact client twin of the server's inlineImageTypes allowlist: only these
+   raster extensions preview as <img>. Recorded MIME is never consulted. */
 export const RASTER_RE = /\.(png|jpe?g|gif|webp)$/i;
 
 export const DEC_LABELS = {
@@ -339,20 +342,23 @@ export function attTileHTML(nodeId, leaf, isImage, {
   isImage = isImage && rasterRe.test(name);
   return isImage
     ? `<a class="attthumb" data-tkey="${escape(leaf)}"${tileStyle(tileBox, leaf)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
-      `<img src="${url}" alt="${escape(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
+      `<img src="${url}" alt="${escape(name)}" loading="lazy"></a>`
     : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${escape(name)}">` +
       `${iconFile}<span>${escape(name)}</span></a>`;
 }
 
 export function refTilesHTML(refs, nodeId, deps = {}){
   if (!refs || !refs.length) return "";
-  const tiles = refs.map(r =>
-    attTileHTML(nodeId, (r.path || "").split("/").pop(), /^image\//.test(r.mime || ""), deps)).join("");
+  const rasterRe = deps.rasterRe || RASTER_RE;
+  const tiles = refs.map(r => {
+    const leaf = (r.path || "").split("/").pop();
+    return attTileHTML(nodeId, leaf, rasterRe.test(leaf), deps);
+  }).join("");
   return `<div class="attrow">${tiles}</div>`;
 }
 
 export function assetTileHTML(nodeId, id, alt, rec, {
-  escape = esc, iconFile = "", tileBox = {},
+  escape = esc, iconFile = "", tileBox = {}, rasterRe = RASTER_RE,
 } = {}){
   if (!rec){
     return `<span class="attfile missing" title="${escape(alt || id)} — unavailable">` +
@@ -360,11 +366,10 @@ export function assetTileHTML(nodeId, id, alt, rec, {
   }
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/assets/${encodeURIComponent(id)}`;
   const name = rec.name || alt || "file";
-  const isImage = /^image\//.test(rec.mime || "");
-  const src = rec.inline && rec.data ? rec.data : url;
+  const isImage = rasterRe.test(name);
   return isImage
     ? `<a class="attthumb" data-tkey="${escape(id)}"${tileStyle(tileBox, id)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
-      `<img src="${src}" alt="${escape(name)}" loading="lazy" onerror="this.closest('.attthumb').remove()"></a>`
+      `<img src="${url}" alt="${escape(name)}" loading="lazy"></a>`
     : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${escape(name)}">` +
       `${iconFile}<span>${escape(name)}</span></a>`;
 }
@@ -1759,6 +1764,13 @@ export function createChatFeature(deps){
       msgs.scrollTop = msgs.scrollHeight;
   }
 
+  function onMsgsError(e){
+    const img = e.target;
+    if (!img || img.tagName !== "IMG") return;
+    const a = img.closest && img.closest(".attthumb");
+    if (a) a.remove();
+  }
+
   function onKeyrowClick(e){
     const sel = g("sel", "");
     /* "show all" expands the ask in place — no key send, no attention collapse. */
@@ -1970,6 +1982,7 @@ export function createChatFeature(deps){
     on(chathead, "click", onHeadClick);
     on(msgs, "scroll", onMsgsScroll);
     on(msgs, "load", onMsgsLoad, true);
+    on(msgs, "error", onMsgsError, true);
     on(msgs, "click", onMsgsClick);
     on(msgs, "touchend", onMsgsTouchEnd, { passive: true });
     on(keyrow, "click", onKeyrowClick);

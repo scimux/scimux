@@ -142,6 +142,10 @@ func securityCall(t *testing.T, h http.Handler, method, path, body, setCT string
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range headers {
+		if k == "Host" {
+			req.Host = v
+			continue
+		}
 		if v == "" {
 			req.Header.Del(k)
 			continue
@@ -481,4 +485,270 @@ func TestWriteJSONContentTypeAndNewline(t *testing.T) {
 	if got["ok"] != "saved" {
 		t.Fatalf("payload = %#v", got)
 	}
+}
+
+// ---------- Phase P2: request-boundary Host, Fetch Metadata, framing ----------
+
+func TestRequestBoundaryDNSRebindingRejected(t *testing.T) {
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
+	// Matching hostile Host + Origin plus a valid CSRF token is the
+	// DNS-rebinding case: Origin.Host == r.Host would pass the old check.
+	rec := securityCall(t, h, http.MethodPost, "/api/nodes/ghost/exit", `{}`, "application/json", map[string]string{
+		"Host":          "evil.example:8787",
+		"Origin":        "http://evil.example:8787",
+		"X-Scimux-CSRF": csrfToken,
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("DNS-rebind POST: status=%d, want 403; body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Code == http.StatusNotFound {
+		t.Fatal("hostile Host reached the routed handler")
+	}
+	if !strings.Contains(rec.Body.String(), "untrusted host") {
+		t.Fatalf("DNS-rebind body = %q, want untrusted host", rec.Body.String())
+	}
+}
+
+func TestRequestBoundaryHostileHostCoversPublicHandler(t *testing.T) {
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
+	headers := map[string]string{"Host": "evil.example:8787"}
+	for _, path := range []string{"/", "/api/state", "/no-such-route"} {
+		rec := securityCall(t, h, http.MethodGet, path, "", "", headers)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("GET %s hostile Host: status=%d, want 403; body=%q", path, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), csrfToken) {
+			t.Fatalf("GET %s leaked the CSRF token under a hostile Host", path)
+		}
+		if bodyLooksLikeIndex(rec.Body.String()) {
+			t.Fatalf("GET %s served the token-bearing index under a hostile Host", path)
+		}
+	}
+}
+
+func TestRequestBoundaryLoopbackHostsAccepted(t *testing.T) {
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
+	// Ports are not host identity: an SSH-forwarded client port must work.
+	for _, host := range []string{
+		"127.0.0.1:8787",
+		"127.0.0.1:9999",
+		"127.0.0.2",
+		"[::1]:8787",
+		"[::1]:443",
+		"localhost",
+		"localhost:1234",
+		"LOCALHOST.",
+		"127.0.0.1",
+	} {
+		rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": host})
+		if rec.Code == http.StatusForbidden && strings.Contains(rec.Body.String(), "untrusted host") {
+			t.Fatalf("loopback Host %q rejected: status=%d body=%q", host, rec.Code, rec.Body.String())
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("loopback Host %q: status=%d, want 200; body=%q", host, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestRequestBoundaryMalformedHostsRejected(t *testing.T) {
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
+	for _, host := range []string{
+		"",
+		"127.0.0.1:",
+		"127.0.0.1:abc",
+		"user@127.0.0.1:8787",
+		"user:pass@localhost",
+		"127.0.0.1,evil.example",
+		"evil.example,127.0.0.1:8787",
+		"[:::1]",
+		"[::1",
+		"::1]:8787",
+		"[gggg::1]:8787",
+		"host:1:2",
+	} {
+		rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": host})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("malformed Host %q: status=%d, want 403; body=%q", host, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestRequestBoundaryFetchMetadataAPI(t *testing.T) {
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
+	// Empty search is a cheap documented 200 — no corpus scan.
+	for _, path := range []string{"/api/search", "/api/update/check"} {
+		for _, site := range []string{"cross-site", "same-site"} {
+			rec := securityCall(t, h, http.MethodGet, path, "", "", map[string]string{
+				"Sec-Fetch-Site": site,
+			})
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s Sec-Fetch-Site=%s: status=%d, want 403; body=%q", path, site, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "cross-site request rejected") {
+				t.Fatalf("%s Sec-Fetch-Site=%s body = %q", path, site, rec.Body.String())
+			}
+		}
+		for _, site := range []string{"same-origin", "none", ""} {
+			headers := map[string]string{}
+			if site != "" {
+				headers["Sec-Fetch-Site"] = site
+			}
+			rec := securityCall(t, h, http.MethodGet, "/api/search", "", "", headers)
+			if rec.Code == http.StatusForbidden && strings.Contains(rec.Body.String(), "cross-site request rejected") {
+				t.Fatalf("/api/search Sec-Fetch-Site=%q rejected by fetch metadata: body=%q", site, rec.Body.String())
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("/api/search Sec-Fetch-Site=%q: status=%d, want normal 200; body=%q", site, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	// Static/index is not an API path: a cross-site GET of / must not be
+	// fetch-metadata-rejected (Host remains the primary boundary).
+	rec := securityCall(t, h, http.MethodGet, "/", "", "", map[string]string{
+		"Sec-Fetch-Site": "cross-site",
+	})
+	if rec.Code == http.StatusForbidden && strings.Contains(rec.Body.String(), "cross-site request rejected") {
+		t.Fatalf("GET / rejected by fetch metadata; Host is the boundary for non-API")
+	}
+}
+
+func TestRequestBoundaryAntiFramingHeaders(t *testing.T) {
+	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
+	wantCSP := "frame-ancestors 'none'"
+	check := func(name string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
+			t.Fatalf("%s CSP = %q, want %q", name, got, wantCSP)
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("%s X-Frame-Options = %q, want DENY", name, got)
+		}
+	}
+
+	check("GET /", securityCall(t, h, http.MethodGet, "/", "", "", nil))
+	check("GET /api/state", securityCall(t, h, http.MethodGet, "/api/state", "", "", nil))
+	check("GET unknown", securityCall(t, h, http.MethodGet, "/no-such-route", "", "", nil))
+	check("OPTIONS /api/state", securityCall(t, h, http.MethodOptions, "/api/state", "", "", nil))
+	check("CSRF 403", securityCall(t, h, http.MethodPost, "/api/nodes", `{}`, "application/json", nil))
+	check("hostile Host", securityCall(t, h, http.MethodGet, "/", "", "", map[string]string{
+		"Host": "evil.example:8787",
+	}))
+	check("fetch metadata 403", securityCall(t, h, http.MethodGet, "/api/search", "", "", map[string]string{
+		"Sec-Fetch-Site": "cross-site",
+	}))
+}
+
+func handlerWithPolicy(t *testing.T, listenAddr string, extra []string) http.Handler {
+	t.Helper()
+	p, err := newRequestPolicy(listenAddr, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, &fakeTmux{})
+	a.requestPolicy = p
+	return newTestHandler(t, a)
+}
+
+func TestRequestBoundaryLocaldomainNotImplicitlyTrusted(t *testing.T) {
+	// localhost.localdomain is a real DNS name, not the documented localhost
+	// identity. Loopback and wildcard listeners must reject it unless the
+	// operator opted in with -trusted-host.
+	for _, listen := range []string{"127.0.0.1:8787", "0.0.0.0:8787"} {
+		h := handlerWithPolicy(t, listen, nil)
+		for _, host := range []string{"localhost.localdomain", "localhost.localdomain:8787", "LOCALHOST.LOCALDOMAIN."} {
+			rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": host})
+			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "untrusted host") {
+				t.Fatalf("%s listener Host %q: status=%d body=%q, want 403 untrusted host", listen, host, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	optIn := handlerWithPolicy(t, "127.0.0.1:8787", []string{"localhost.localdomain"})
+	rec := securityCall(t, optIn, http.MethodGet, "/api/state", "", "", map[string]string{
+		"Host": "localhost.localdomain:9999",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("-trusted-host localhost.localdomain: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequestBoundaryWildcardDoesNotTrustDNS(t *testing.T) {
+	h := handlerWithPolicy(t, "0.0.0.0:8787", nil)
+	// IP-literal access is the documented wildcard policy; DNS names are not.
+	for _, host := range []string{"192.168.1.5:8787", "10.0.0.9", "[::1]:80", "127.0.0.1:9", "localhost"} {
+		rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": host})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("wildcard IP/localhost %q: status=%d body=%q", host, rec.Code, rec.Body.String())
+		}
+	}
+	rec := securityCall(t, h, http.MethodGet, "/", "", "", map[string]string{"Host": "evil.example:8787"})
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "untrusted host") {
+		t.Fatalf("wildcard DNS Host: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequestBoundaryConcreteHostPolicy(t *testing.T) {
+	h := handlerWithPolicy(t, "192.168.1.5:8787", []string{"box.lan"})
+	// Configured identity and explicit extra.
+	for _, host := range []string{"192.168.1.5:8787", "192.168.1.5:9999", "box.lan", "BOX.LAN."} {
+		rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": host})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("concrete allowed %q: status=%d body=%q", host, rec.Code, rec.Body.String())
+		}
+	}
+	// Other IPs and unrelated DNS names are rejected — including loopback,
+	// which is not the configured identity.
+	for _, host := range []string{"10.0.0.9:8787", "127.0.0.1:8787", "evil.example", "other.lan"} {
+		rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": host})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("concrete rejected %q: status=%d body=%q", host, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestRequestBoundaryConcreteNameDoesNotTrustArbitraryIP(t *testing.T) {
+	h := handlerWithPolicy(t, "box.lan:8787", nil)
+	rec := securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": "box.lan:80"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("configured name: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	rec = securityCall(t, h, http.MethodGet, "/api/state", "", "", map[string]string{"Host": "192.168.1.5"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unnamed IP on named listener: status=%d, want 403; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCanonicalizeHost(t *testing.T) {
+	ok := func(in, want string) {
+		t.Helper()
+		got, err := canonicalizeHost(in)
+		if err != nil {
+			t.Fatalf("canonicalizeHost(%q) = %v, want %q", in, err, want)
+		}
+		if got != want {
+			t.Fatalf("canonicalizeHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+	bad := func(in string) {
+		t.Helper()
+		if _, err := canonicalizeHost(in); err == nil {
+			t.Fatalf("canonicalizeHost(%q) succeeded, want error", in)
+		}
+	}
+	ok("127.0.0.1:8787", "127.0.0.1")
+	ok("127.0.0.1", "127.0.0.1")
+	ok("[::1]:8787", "::1")
+	ok("[::1]", "::1")
+	ok("[0:0:0:0:0:0:0:1]", "::1")
+	ok("[::ffff:127.0.0.1]:80", "127.0.0.1")
+	ok("LOCALHOST.", "localhost")
+	ok("Box.LAN:9", "box.lan")
+	bad("")
+	bad("user@host")
+	bad("a,b")
+	bad("127.0.0.1:")
+	bad("127.0.0.1:abc")
+	bad("[:::1]")
+	bad("[::1")
+	bad("::1")
+	bad("host:1:2")
 }

@@ -70,8 +70,11 @@ func TestHandleChatProjectsUploadedAttachmentAsset(t *testing.T) {
 	if as["name"] != "photo.png" || as["mime"] != "image/png" || as["inline"] != true {
 		t.Errorf("asset summary = %+v", as)
 	}
-	if data, _ := as["data"].(string); !strings.HasPrefix(data, "data:image/png;base64,") {
-		t.Errorf("asset data uri = %q", data)
+	if _, ok := as["data"]; ok {
+		t.Errorf("asset summary still carries inline data: %+v", as)
+	}
+	if url, _ := as["url"].(string); url != "/api/nodes/c1/assets/a_1" {
+		t.Errorf("asset url = %q, want canonical endpoint", url)
 	}
 
 	// The stored log line is never rewritten: replaying it raw still shows
@@ -131,5 +134,45 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAssetSummaryNeverInterpolatesMIMEIntoURL(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	sum := a.assetSummary("n1", sessionlog.AssetEvent{
+		ID: "a_1", Name: "x.png", Mime: `image/png" onerror="alert(1)`,
+		Size: 3, Storage: "inline", Bytes: "aGk=",
+	})
+	if _, ok := sum["data"]; ok {
+		t.Fatalf("inline asset still carries a data field: %+v", sum)
+	}
+	url, _ := sum["url"].(string)
+	if url == "" {
+		t.Fatalf("asset summary missing canonical url: %+v", sum)
+	}
+	if strings.Contains(url, "onerror") || strings.Contains(url, `"`) || strings.Contains(url, "image/png") {
+		t.Fatalf("url interpolates recorded MIME: %q", url)
+	}
+	if url != "/api/nodes/n1/assets/a_1" {
+		t.Fatalf("url = %q, want /api/nodes/n1/assets/a_1", url)
+	}
+}
+
+func TestAssetSummaryAlwaysUsesCanonicalURL(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	inline := a.assetSummary("node/id", sessionlog.AssetEvent{
+		ID: "a/1", Name: "x.png", Mime: "image/png", Storage: "inline", Bytes: "aGk=",
+	})
+	blob := a.assetSummary("node/id", sessionlog.AssetEvent{
+		ID: "a/1", Name: "x.bin", Mime: "application/octet-stream", Storage: "blob",
+	})
+	want := "/api/nodes/node%2Fid/assets/a%2F1"
+	for _, sum := range []map[string]any{inline, blob} {
+		if _, ok := sum["data"]; ok {
+			t.Fatalf("summary still carries data: %+v", sum)
+		}
+		if got, _ := sum["url"].(string); got != want {
+			t.Fatalf("url = %q, want %q (summary=%+v)", got, want, sum)
+		}
 	}
 }

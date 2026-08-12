@@ -49,9 +49,11 @@ func NewHandler(a *app, web fs.FS) (http.Handler, error) {
 	mux.HandleFunc("POST /api/update", a.handleUpdateApply)
 	mux.HandleFunc("GET /api/licenses", handleLicenses)
 
-	// withGzip is outermost so every completed response can opt in; the
-	// mutation guard still sees the raw request first (withGzip only wraps
-	// the ResponseWriter). 304/204 and already-compressed types are skipped
-	// inside the wrapper — see gzip.go.
-	return withGzip(guardMutations(mux)), nil
+	// withGzip is outermost so every completed response can opt in (it only
+	// wraps the ResponseWriter). withRequestBoundary then sees every request
+	// — Host, Fetch Metadata, anti-framing — before the mutation guard and
+	// the mux, so a hostile Host cannot read the token-bearing index or
+	// reach a 404/405. 304/204 and already-compressed types are skipped
+	// inside the gzip wrapper — see gzip.go.
+	return withGzip(withRequestBoundary(a.requestPolicy, guardMutations(mux))), nil
 }

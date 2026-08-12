@@ -11,11 +11,32 @@ them. Script against it read-mostly, and prefer `GET /api/state` and the
 per-node reads over anything that mutates.
 
 **Security:** there is no authentication (see "Remote access and security"
-in the README). Anything that can reach the port can do everything listed
-here, including answering approval prompts. Browser-originated unsafe methods
-are still guarded against CSRF: non-`GET`/`HEAD`/`OPTIONS` requests must be
-same-origin, must carry the `X-Scimux-CSRF` token embedded in the served page,
-and must use an accepted content type (`application/json` or multipart uploads).
+in the README). Anything that can reach the port on an allowed Host can do
+everything listed here, including answering approval prompts. These
+controls protect the loopback/browser boundary; they are not a login.
+
+- **Trusted Host.** Every request — the token-bearing index, static files,
+  APIs, and 404/405 — is checked against a Host policy derived from `-addr`
+  plus optional `-trusted-host` values. Ports are not host identity, so an
+  SSH-forwarded client port still works. A loopback listener trusts
+  loopback IP literals and `localhost`; a concrete bind trusts that
+  identity (and explicit extras); a wildcard bind may be reached by
+  IP literal but does not silently trust arbitrary DNS names. A matching
+  hostile `Host`/`Origin` (DNS rebinding) is rejected before any handler.
+- **CSRF.** Browser-originated unsafe methods remain same-origin, must
+  carry the `X-Scimux-CSRF` token embedded in the served page, and must use
+  an accepted content type (`application/json` or multipart uploads).
+  CORS is not enabled.
+- **Fetch Metadata.** Browser requests to any `/api/*` path that arrive
+  with `Sec-Fetch-Site: cross-site` or `same-site` are rejected, including
+  safe GETs such as search and update-check. `same-origin`, `none`, and
+  clients that omit the header follow the documented route behavior.
+- **Anti-framing.** Successful and error responses carry
+  `Content-Security-Policy: frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`.
+
+Binding `-addr` wider than loopback still exposes full controller access
+to every client that can reach an allowed Host.
 
 **Compression:** when the client sends `Accept-Encoding: gzip`, eligible
 responses are gzip-compressed (`Content-Encoding: gzip`, `Vary:
@@ -187,6 +208,9 @@ as it is typed); longer queries are clamped to 128 runes. The scan is bounded
 (per-file, per-group, total-hit, and group-count caps); tripping any cap sets
 `partial: true`. There is no cache and no `ETag` — each call rescans.
 
+Cross-site and same-site browser GETs are rejected at the common request
+boundary (`Sec-Fetch-Site`); this endpoint is otherwise unchanged.
+
 ### `GET /api/preview?uid=<uid>&seg=<n>&rec=<n>&at=<time>`
 
 The read-only turn window a search hit (or bookmark) opens onto its surrounding
@@ -344,9 +368,16 @@ by `assetID`. Bytes come from the log's inline base64 record or from blob
 storage under `~/.scimux/assets/{id}/`. As with attachments, safe raster images
 (`png`, `jpg`, `jpeg`, `gif`, `webp`) are served inline with `nosniff`; every
 other type downloads as `application/octet-stream` so agent-generated active
-content (`.html`, `.svg`, …) can never run same-origin. An unknown node or asset
-id, or a blob path that resolves outside the node's own asset directory, is
-`404`.
+content (`.html`, `.svg`, …) can never run same-origin. Recorded MIME never
+decides inline-vs-download — only the filename extension does. An unknown node
+or asset id, or a blob path that resolves outside the node's own asset
+directory, is `404`.
+
+This URL is the sole rendering address for both inline and blob storage.
+Chat and preview responses list each referenced asset with the canonical
+path `/api/nodes/{id}/assets/{assetID}` and never embed inline `data:`
+URI content. The browser builds `href`/`src` from encoded node and asset
+ids only; recorded MIME is not interpolated into HTML.
 
 ### `POST /api/nodes/{id}/send/resolve`
 
@@ -514,7 +545,8 @@ bubble or any capture-layer bookmark. Returns the full note. Unknown note is
 
 Queries the release feed. Returns `{current, latest, url, notes, available}`;
 `available` is never true for `dev` builds. `502` if the feed is
-unreachable.
+unreachable. Cross-site and same-site browser GETs are rejected at the
+common request boundary (`Sec-Fetch-Site`).
 
 ### `POST /api/update`
 

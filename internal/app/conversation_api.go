@@ -586,22 +586,20 @@ func assetsAsOf(anchored []sessionlog.AnchoredAsset, record int) map[string]sess
 	return byPath
 }
 
-// assetSummary builds one entry of the chat response's "assets" map (see
-// upload-design.md "Rendering API"): inline assets carry their bytes as a
-// data: URI so the client never round-trips to the download endpoint just
-// to paint a thumbnail; blob assets carry the download URL instead.
+// assetSummary builds one entry of the chat response's "assets" map.
+// Every asset — inline or blob — exposes the same canonical same-origin URL.
+// Recorded MIME and inline bytes are never interpolated into a data: URI:
+// the asset endpoint is the sole byte-serving and rendering URL, and it
+// decides inline-vs-download from the file extension, not from rec.Mime.
 func (a *app) assetSummary(nodeID string, rec sessionlog.AssetEvent) map[string]any {
-	m := map[string]any{
-		"name": rec.Name, "mime": rec.Mime, "size": rec.Size, "sha256": rec.SHA256,
+	return map[string]any{
+		"name":   rec.Name,
+		"mime":   rec.Mime,
+		"size":   rec.Size,
+		"sha256": rec.SHA256,
+		"inline": rec.Storage == "inline",
+		"url":    "/api/nodes/" + url.PathEscape(nodeID) + "/assets/" + url.PathEscape(rec.ID),
 	}
-	if rec.Storage == "inline" {
-		m["inline"] = true
-		m["data"] = "data:" + rec.Mime + ";base64," + rec.Bytes
-	} else {
-		m["inline"] = false
-		m["url"] = "/api/nodes/" + url.PathEscape(nodeID) + "/assets/" + url.PathEscape(rec.ID)
-	}
-	return m
 }
 
 // tmuxChatInto overlays the tmux-transport state onto the shared chat

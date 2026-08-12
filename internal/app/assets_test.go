@@ -161,6 +161,28 @@ func TestServeAssetTraversalBlobPathRejected(t *testing.T) {
 	}
 }
 
+func TestServeAssetRecordedMIMEDoesNotAuthorizeInline(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.byID["n1"] = &Node{ID: "n1"}
+	appendAsset(t, a, "n1", sessionlog.AssetEvent{
+		ID: "a_html", Name: "evil.html", Mime: "image/png",
+		Storage: "inline", Bytes: base64.StdEncoding.EncodeToString([]byte("<html>")),
+	})
+	rec := serveAsset(a, "n1", "a_html")
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Error("missing nosniff")
+	}
+	if !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
+		t.Errorf("HTML named asset served inline despite image/png MIME: %q", rec.Header().Get("Content-Disposition"))
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("content-type = %q, want application/octet-stream (extension wins, not MIME)", ct)
+	}
+}
+
 func TestServeAssetCorruptInlineBytesRejected(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	a.byID["n1"] = &Node{ID: "n1"}

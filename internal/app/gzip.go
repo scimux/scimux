@@ -1,9 +1,10 @@
 // gzip.go — response compression middleware for the HTTP stack.
 //
 // Ownership:
-//   - NewHandler wraps the mux as withGzip(guardMutations(mux)). Compression
-//     is outermost so every completed response can opt in; mutation guards still
-//     run first on the request path.
+//   - NewHandler wraps the mux as
+//     withGzip(withRequestBoundary(policy, guardMutations(mux))). Compression
+//     is outermost so every completed response can opt in; the request
+//     boundary and mutation guard still run first on the request path.
 //   - Only responses whose Content-Type is known-compressible are gzipped.
 //     Already-compressed binary types (PNG/JPEG/PDF/zip/…) and anything that
 //     already carries Content-Encoding are left alone — handleAsset and

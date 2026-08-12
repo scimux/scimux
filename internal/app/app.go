@@ -402,6 +402,10 @@ type app struct {
 	claudeCredsPath  string
 	claudeUsageURL   string
 	grokUsageOpts    acp.GrokBillingOptions
+	// requestPolicy is the Host / Fetch Metadata / anti-framing boundary
+	// configured from -addr and -trusted-host. Nil means the default
+	// loopback policy (127.0.0.1), matching the shipped -addr default.
+	requestPolicy *requestPolicy
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:

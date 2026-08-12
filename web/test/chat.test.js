@@ -238,9 +238,56 @@ test("refTilesHTML and attTileHTML for echo path", () => {
 test("assetTileHTML image vs file and inline data", () => {
   const img = assetTileHTML("n1", "id1", "alt", { name: "a.png", mime: "image/png", inline: true, data: "data:image/png;base64,xx" }, { iconFile: "F" });
   assert.match(img, /attthumb/);
-  assert.match(img, /data:image\/png/);
+  assert.match(img, /\/api\/nodes\/n1\/assets\/id1/);
+  assert.doesNotMatch(img, /data:image\/png/);
   const file = assetTileHTML("n1", "id2", "doc", { name: "a.pdf", mime: "application/pdf" }, { iconFile: "F" });
   assert.match(file, /attfile/);
+});
+
+test("assetTileHTML ignores record data and derives URLs from encoded ids", () => {
+  const html = assetTileHTML(
+    "node/id",
+    "a/1",
+    "alt",
+    { name: "shot.png", mime: "image/png", inline: true, data: "data:image/png;base64,EVIL" },
+    { iconFile: "F" },
+  );
+  assert.match(html, /\/api\/nodes\/node%2Fid\/assets\/a%2F1/);
+  assert.doesNotMatch(html, /data:image/);
+  assert.doesNotMatch(html, /EVIL/);
+  assert.match(html, /href="\/api\/nodes\/node%2Fid\/assets\/a%2F1"/);
+  assert.match(html, /src="\/api\/nodes\/node%2Fid\/assets\/a%2F1"/);
+});
+
+test("assetTileHTML malicious MIME cannot add an attribute or handler", () => {
+  const html = assetTileHTML("n1", "id1", "alt", {
+    name: "a.png",
+    mime: `image/png" onerror="alert(1)`,
+    data: `data:image/png" onerror="alert(1)`,
+  }, { iconFile: "F" });
+  assert.doesNotMatch(html, /onerror=/);
+  assert.doesNotMatch(html, /alert\(1\)/);
+  assert.match(html, /\/api\/nodes\/n1\/assets\/id1/);
+});
+
+test("preview eligibility is the exact safe-raster allowlist, not /^image\\//", () => {
+  const svg = assetTileHTML("n1", "s1", "pic", { name: "x.svg", mime: "image/svg+xml" }, { iconFile: "F" });
+  assert.match(svg, /attfile/);
+  assert.doesNotMatch(svg, /attthumb/);
+  const htmlNamed = assetTileHTML("n1", "h1", "page", { name: "x.html", mime: "image/png" }, { iconFile: "F" });
+  assert.match(htmlNamed, /attfile/);
+  assert.doesNotMatch(htmlNamed, /attthumb/);
+  const png = assetTileHTML("n1", "p1", "pic", { name: "x.PNG", mime: "application/octet-stream" }, { iconFile: "F" });
+  assert.match(png, /attthumb/);
+});
+
+test("generated attachment and asset HTML has no inline onerror", () => {
+  const asset = assetTileHTML("n1", "id1", "alt", { name: "a.png", mime: "image/png" }, { iconFile: "F" });
+  const att = attTileHTML("n1", "deadbeef-shot.png", true, { iconFile: "F" });
+  const refs = refTilesHTML([{ path: "deadbeef-shot.png", mime: "image/png" }], "n1", { iconFile: "F" });
+  for (const html of [asset, att, refs]) {
+    assert.doesNotMatch(html, /onerror=/);
+  }
 });
 
 /* ---------- history surfaces ---------- */
@@ -1435,6 +1482,7 @@ test("factory bind is idempotent; destroy removes listeners", () => {
   assert.equal(roots.msgs.listenerCount("click"), 1);
   assert.equal(roots.msgs.listenerCount("scroll"), 1);
   assert.equal(roots.msgs.listenerCount("load"), 1);
+  assert.equal(roots.msgs.listenerCount("error"), 1);
   assert.equal(roots.msgs.listenerCount("touchend"), 1);
   assert.equal(roots.termtoggle.listenerCount("click"), 1);
   assert.equal(roots.keyrow.listenerCount("click"), 1);
@@ -1445,6 +1493,7 @@ test("factory bind is idempotent; destroy removes listeners", () => {
   assert.equal(roots.msgs.listenerCount("click"), 0);
   assert.equal(roots.msgs.listenerCount("scroll"), 0);
   assert.equal(roots.msgs.listenerCount("load"), 0);
+  assert.equal(roots.msgs.listenerCount("error"), 0);
   assert.equal(roots.msgs.listenerCount("touchend"), 0);
   assert.equal(roots.keyrow.listenerCount("click"), 0);
   assert.equal(roots.termtoggle.listenerCount("click"), 0);
@@ -1454,6 +1503,37 @@ test("factory bind is idempotent; destroy removes listeners", () => {
   feature.bind();
   assert.equal(roots.infobtn.listenerCount("click"), 1);
   feature.destroy();
+});
+
+test("broken-thumbnail cleanup is one delegated error listener; rebuilds do not accumulate", async () => {
+  const { feature, roots } = makeFeature({
+    chatPayload: {
+      turns: [{
+        role: "user",
+        text: "see ![pic](scimux-asset:a1)",
+        time: "2026-01-01T00:00:00Z",
+      }],
+      live: "quiet",
+      delivery: "ok",
+      source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z",
+      prior_turns: 0,
+      assets: { a1: { name: "a.png", mime: "image/png" } },
+    },
+  });
+  feature.bind();
+  assert.equal(roots.msgs.listenerCount("error"), 1, "one delegated error listener");
+  await feature.render();
+  assert.match(roots.msgs.innerHTML, /attthumb/);
+  assert.doesNotMatch(roots.msgs.innerHTML, /onerror=/);
+  await feature.render(); // same sig skip
+  feature.invalidate();
+  await feature.render(); // rebuild
+  assert.equal(roots.msgs.listenerCount("error"), 1, "rebuild must not add another error listener");
+  feature.bind();
+  assert.equal(roots.msgs.listenerCount("error"), 1);
+  feature.destroy();
+  assert.equal(roots.msgs.listenerCount("error"), 0);
 });
 
 test("refreshChat builds bubbles, signature-skips rebuild, preserves empty/loading", async () => {

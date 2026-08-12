@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,6 +28,16 @@ func SetVersion(v string) {
 }
 
 const appSummary = "scimux supervises agent chats from a local web page."
+
+// stringList is a repeatable flag value (used by -trusted-host).
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 // hostname is resolved once at startup; shown in the UI statusbar.
 var hostname = "scimux"
@@ -129,6 +140,8 @@ func Run() {
 	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
+	var trustedHosts stringList
+	flag.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	flag.Parse()
 
 	if err := prepareDataDir(*data); err != nil {
@@ -144,6 +157,12 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	policy, err := newRequestPolicy(*addr, trustedHosts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: host policy:", err)
+		os.Exit(1)
+	}
+	a.requestPolicy = policy
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
 	a.warmStartup()
 	status.Done()
