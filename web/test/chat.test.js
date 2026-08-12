@@ -3161,3 +3161,156 @@ test("P7: description read state is md() HTML; editor keeps raw; markup escaped"
 
   ctx.feature.destroy();
 });
+
+/* ---------- P1 security: structured permission request identity ---------- */
+
+test("keyRowHTML: structured buttons carry data-request-id from permRequestId", () => {
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "Edit",
+    permOptions: [
+      { key: "1", name: "Allow once", kind: "allow" },
+      { key: "2", name: "Reject", kind: "reject" },
+    ],
+    permRequestId: "req-opaque-42",
+  });
+  assert.match(html, /data-request-id="req-opaque-42"/);
+  assert.match(html, /data-key="1"/);
+  assert.match(html, /data-key="2"/);
+  // Every option button on the row carries the same request id.
+  const ids = [...html.matchAll(/data-request-id="([^"]+)"/g)].map(m => m[1]);
+  assert.equal(ids.length, 2);
+  assert.ok(ids.every(id => id === "req-opaque-42"));
+});
+
+test("keyRowHTML: tmux keys do not invent data-request-id", () => {
+  const html = keyRowHTML({ attention: "question" });
+  assert.doesNotMatch(html, /data-request-id/);
+  assert.match(html, /data-key="y"/);
+});
+
+test("structured permission click posts captured request_id with key", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "grok", model: "g", live: "quiet",
+    attention: "approval", lane_id: "", description: "",
+  }];
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "ok", source: "acp",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "approval",
+      perm_title: "go test",
+      perm_options: [
+        { key: "1", name: "Allow once", kind: "allow" },
+        { key: "2", name: "Reject", kind: "reject" },
+      ],
+      perm_request_id: "req-click-7",
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  // Rendered HTML includes the request id on each option button.
+  assert.match(ctx.roots.keyrow.innerHTML, /data-request-id="req-click-7"/);
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key="1"/);
+
+  const before = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  // Harness does not materialize buttons from HTML; click a synthetic button
+  // that mirrors the rendered data-key + data-request-id attributes.
+  const btn = el("button", { dataset: { key: "1", requestId: "req-click-7" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: btn });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const keyCalls = ctx.apiCalls.filter(c => c.path.includes("/key"));
+  assert.equal(keyCalls.length, before + 1, "exactly one /key request");
+  const call = keyCalls[keyCalls.length - 1];
+  assert.match(call.path, /\/api\/nodes\/n1\/key$/);
+  const body = JSON.parse(call.opts?.body || "{}");
+  assert.equal(body.key, "1");
+  assert.equal(body.request_id, "req-click-7",
+    "must post the request id rendered with the permission row");
+  ctx.feature.destroy();
+});
+
+test("permission click captures node and request_id before async refresh", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "pi", model: "p", live: "quiet",
+    attention: "approval", lane_id: "", description: "",
+  }];
+  let releaseKey;
+  const keyGate = new Promise(r => { releaseKey = r; });
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "ok", source: "acp",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "approval",
+      perm_title: "rm -rf",
+      perm_options: [{ key: "1", name: "Allow once", kind: "allow" }],
+      perm_request_id: "req-A",
+    },
+    api: async (path, opts) => {
+      if (path.includes("/key")) {
+        await keyGate;
+        return { ok: "sent" };
+      }
+      if (path.includes("/chat")) {
+        return {
+          turns: [{ role: "user", text: "q" }],
+          live: "quiet", delivery: "ok", source: "acp",
+          chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+          attention: "approval",
+          perm_title: "rm -rf",
+          perm_options: [{ key: "1", name: "Allow once", kind: "allow" }],
+          perm_request_id: "req-A",
+        };
+      }
+      return {};
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+
+  const btn = el("button", { dataset: { key: "1", requestId: "req-A" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: btn });
+  // While the POST is held, change selection and invent a newer request id.
+  ctx.setSel("n2");
+  // Release the held /key — body must still target the click-time capture.
+  releaseKey();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  const keyCalls = ctx.apiCalls.filter(c => c.path.includes("/key"));
+  assert.ok(keyCalls.length >= 1, "expected a /key call");
+  const body = JSON.parse(keyCalls[keyCalls.length - 1].opts?.body || "{}");
+  assert.equal(body.request_id, "req-A",
+    "must not retarget to a newer request id that appeared after click");
+  assert.equal(body.key, "1");
+  assert.match(keyCalls[keyCalls.length - 1].path, /\/api\/nodes\/n1\/key$/,
+    "must target the node captured at click, not a later selection");
+  ctx.feature.destroy();
+});
+
+test("buildChatSignature includes permRequestId so A→B rebuilds the row", () => {
+  const base = {
+    nodeId: "n1", attention: "approval", attentionHidden: false,
+    delivery: "ok", showPeek: false, termOpen: false, termFull: false,
+    source: "acp", permTitle: "go test",
+    permOptionsKey: "1Allow onceallow,2Rejectreject",
+    permRequestId: "inc:1",
+    priorTurns: 0, chatStarted: "t", echoHash: "", histKey: "",
+    turnsHash: "1", decisionsHash: "", expanded: false,
+  };
+  const a = buildChatSignature(base);
+  const b = buildChatSignature({ ...base, permRequestId: "inc:2" });
+  assert.notEqual(a, b,
+    "identical title/options with different request ids must change the signature");
+  assert.equal(buildChatSignature(base), a, "stable for same request id");
+  assert.equal(
+    buildChatSignature({ ...base, permRequestId: "" }),
+    buildChatSignature({ ...base, permRequestId: undefined }),
+    "missing and empty request id are equivalent",
+  );
+});

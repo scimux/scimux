@@ -21,6 +21,8 @@ package acp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,11 +42,15 @@ import (
 
 // Errors returned to the HTTP layer so it can pick a status code.
 var (
-	ErrNoSession  = errors.New("no live ACP session for node")
-	ErrNotAlive   = errors.New("ACP subprocess has exited")
-	ErrNoPending  = errors.New("no permission request is pending")
-	ErrTurnActive = errors.New("a turn is already in flight")
-	ErrNoTurn     = errors.New("no turn is in flight")
+	ErrNoSession = errors.New("no live ACP session for node")
+	ErrNotAlive  = errors.New("ACP subprocess has exited")
+	ErrNoPending = errors.New("no permission request is pending")
+	// ErrStalePermission means PrepareResolve was called with an expected
+	// request ID that is not the current pending request (replaced, cleared,
+	// or never matched). HTTP maps it to 409; the replacement stays pending.
+	ErrStalePermission = errors.New("pending permission request has changed")
+	ErrTurnActive      = errors.New("a turn is already in flight")
+	ErrNoTurn          = errors.New("no turn is in flight")
 )
 
 // launchTimeout bounds initialize + new-session so a hung agent (e.g. one
@@ -132,6 +138,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		model:     model,
 		effort:    effort,
 		assetHook: m.assetHook,
+		incarn:    newSessionIncarn(),
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -270,6 +277,7 @@ func (m *Manager) Clear(nodeID string) error {
 		effort:    old.effort,
 		ctxSize:   old.ctxSize, // fall back to prior window until initialize re-probes
 		assetHook: old.assetHook,
+		incarn:    newSessionIncarn(), // fresh identity: request IDs must not collide with pre-clear
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -338,7 +346,11 @@ func (m *Manager) Resolve(nodeID, key string) (string, error) {
 	if s == nil {
 		return "", ErrNoSession
 	}
-	id, evidence, err := s.prepareResolve(key)
+	p, ok := s.pendingInfo()
+	if !ok {
+		return "", ErrNoPending
+	}
+	id, evidence, err := s.prepareResolve(p.RequestID, key)
 	if err != nil {
 		return "", err
 	}
@@ -351,13 +363,16 @@ func (m *Manager) Resolve(nodeID, key string) (string, error) {
 // PrepareResolve maps the pending key to a permission option and returns the
 // option id plus audit evidence WITHOUT delivering it, so the HTTP layer can
 // persist the decision before the agent ever receives the answer (finding 53:
-// no unaudited permission decision). Deliver completes the answer.
-func (m *Manager) PrepareResolve(nodeID, key string) (optID, evidence string, err error) {
+// no unaudited permission decision). expectedRequestID must name the request
+// the caller evaluated; a mismatch returns ErrStalePermission while the
+// current pending request remains actionable. Deliver completes the answer
+// and re-checks the prepared token against the live request.
+func (m *Manager) PrepareResolve(nodeID, expectedRequestID, key string) (optID, evidence string, err error) {
 	s := m.session(nodeID)
 	if s == nil {
 		return "", "", ErrNoSession
 	}
-	id, ev, err := s.prepareResolve(key)
+	id, ev, err := s.prepareResolve(expectedRequestID, key)
 	return string(id), ev, err
 }
 
@@ -549,10 +564,15 @@ type Session struct {
 	curMsgID      string
 	assistant     strings.Builder
 	pending       *pendingPermission
-	pendingSeq    uint64 // monotonic per-session; projects as PendingPermission.RequestID
-	lastError     string
-	banner        string
-	bannerDone    bool
+	pendingSeq    uint64 // monotonic per-session; pairs with incarn in RequestID
+	// incarn is a collision-resistant identity for this Session value. Request
+	// IDs and prepared tokens include it so a post-/clear (or kill/relaunch)
+	// session cannot accept a stale decision from a prior incarnation that
+	// reused sequence numbers.
+	incarn     string
+	lastError  string
+	banner     string
+	bannerDone bool
 	// shellUsed/shellSize remember the latest usage_update occupancy for the
 	// in-flight turn so endTurn can pair it with PromptResponse.usage
 	// (opencode two-shape; fare-design §2.1 / D5). Cleared at turn end.
@@ -561,6 +581,50 @@ type Session struct {
 
 	done     chan struct{} // closed on exit/stop; unblocks a pending permission
 	doneOnce sync.Once
+}
+
+// newSessionIncarn mints an opaque per-Session identity for request/token binding.
+func newSessionIncarn() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+// formatRequestID builds the opaque pending-request identity: incarn:seq.
+func formatRequestID(incarn string, seq uint64) string {
+	return incarn + ":" + strconv.FormatUint(seq, 10)
+}
+
+// ParseRequestID splits an opaque request id into incarnation and sequence.
+// Exported so the app layer can apply auto-approve enable cutoffs.
+func ParseRequestID(id string) (incarn string, seq uint64, ok bool) {
+	i := strings.IndexByte(id, ':')
+	if i <= 0 || i == len(id)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseUint(id[i+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return id[:i], n, true
+}
+
+// PermissionBoundary returns the session incarnation and the highest request
+// sequence issued so far. Auto-approve treats requests with the same
+// incarnation and seq <= maxSeq as pre-enable (including any still queued).
+func (m *Manager) PermissionBoundary(nodeID string) (incarn string, maxSeq uint64, ok bool) {
+	s := m.session(nodeID)
+	if s == nil {
+		return "", 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.incarn == "" {
+		return "", 0, false
+	}
+	return s.incarn, s.pendingSeq, true
 }
 
 // pendingPermission is the one outstanding permission request (ACP is one turn
@@ -929,22 +993,31 @@ func (s *Session) scanAssetsLocked(ev Event) {
 // --- permission answering ---
 
 // prepareResolve maps a whitelisted key to the pending option and returns an
-// opaque token naming both the request sequence and the option id, plus audit
-// evidence, without delivering. The token pins deliver to this exact request.
-// Holds s.mu for the whole mapping so it reads a consistent pending snapshot.
-func (s *Session) prepareResolve(key string) (sdk.PermissionOptionId, string, error) {
+// opaque token naming incarnation, request sequence, and option id, plus audit
+// evidence, without delivering. expectedRequestID is compared to the current
+// pending request under the same lock that selects the option, so a key
+// evaluated against request A cannot map against a replacement B. The token
+// still pins deliver to this exact request and session incarnation.
+func (s *Session) prepareResolve(expectedRequestID, key string) (sdk.PermissionOptionId, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pending == nil {
 		return "", "", ErrNoPending
 	}
+	if s.incarn == "" {
+		s.incarn = newSessionIncarn()
+	}
+	curID := formatRequestID(s.incarn, s.pending.seq)
+	if expectedRequestID == "" || expectedRequestID != curID {
+		return "", "", ErrStalePermission
+	}
 	id, ok := mapKeyToOption(key, s.pending.options)
 	if !ok {
 		return "", "", fmt.Errorf("key %q maps to no permission option", key)
 	}
-	// Token format: "<seq>:<optionId>" — seq fences replacement requests that
-	// reuse the same option ids (common for allow/reject).
-	tok := sdk.PermissionOptionId(fmt.Sprintf("%d:%s", s.pending.seq, id))
+	// Token format: "<incarn>:<seq>:<optionId>" — incarnation fences /clear
+	// and kill/relaunch; seq fences in-session replacements that reuse option ids.
+	tok := sdk.PermissionOptionId(fmt.Sprintf("%s:%d:%s", s.incarn, s.pending.seq, id))
 	return tok, "permission: " + s.pending.toolTitle, nil
 }
 
@@ -952,8 +1025,7 @@ func (s *Session) prepareResolve(key string) (sdk.PermissionOptionId, string, er
 // It holds s.mu across the check-and-send and consumes the pending request
 // (pending = nil) atomically, closing the finding-53 race where a copy of
 // pending could be sent into a stale channel after clearPending had run. The
-// token's sequence must still name the current pending request, so an answer
-// mapped against a since-replaced request is refused rather than misdelivered.
+// token's incarnation and sequence must still name the current pending request.
 func (s *Session) deliver(tok sdk.PermissionOptionId) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -961,8 +1033,8 @@ func (s *Session) deliver(tok sdk.PermissionOptionId) error {
 	if p == nil {
 		return ErrNoPending
 	}
-	seq, optID, ok := parseDeliverToken(string(tok))
-	if !ok || seq != p.seq {
+	incarn, seq, optID, ok := parseDeliverToken(string(tok))
+	if !ok || incarn != s.incarn || seq != p.seq {
 		return errors.New("pending permission changed before the answer was delivered")
 	}
 	valid := false
@@ -984,19 +1056,23 @@ func (s *Session) deliver(tok sdk.PermissionOptionId) error {
 	}
 }
 
-// parseDeliverToken splits a prepareResolve token into (seq, optionId).
-// Accepts only the "<seq>:<optionId>" form produced by prepareResolve.
-func parseDeliverToken(tok string) (seq uint64, optID sdk.PermissionOptionId, ok bool) {
-	// Split on the first ':' so option ids may themselves contain colons.
+// parseDeliverToken splits a prepareResolve token into (incarn, seq, optionId).
+// Accepts only the "<incarn>:<seq>:<optionId>" form; option ids may contain colons.
+func parseDeliverToken(tok string) (incarn string, seq uint64, optID sdk.PermissionOptionId, ok bool) {
 	i := strings.IndexByte(tok, ':')
-	if i <= 0 || i == len(tok)-1 {
-		return 0, "", false
+	if i <= 0 {
+		return "", 0, "", false
 	}
-	n, err := strconv.ParseUint(tok[:i], 10, 64)
+	rest := tok[i+1:]
+	j := strings.IndexByte(rest, ':')
+	if j <= 0 || j == len(rest)-1 {
+		return "", 0, "", false
+	}
+	n, err := strconv.ParseUint(rest[:j], 10, 64)
 	if err != nil {
-		return 0, "", false
+		return "", 0, "", false
 	}
-	return n, sdk.PermissionOptionId(tok[i+1:]), true
+	return tok[:i], n, sdk.PermissionOptionId(rest[j+1:]), true
 }
 
 func (s *Session) pendingInfo() (PendingPermission, bool) {
@@ -1004,6 +1080,9 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 	defer s.mu.Unlock()
 	if s.pending == nil {
 		return PendingPermission{}, false
+	}
+	if s.incarn == "" {
+		s.incarn = newSessionIncarn()
 	}
 	opts := make([]PermOption, 0, len(s.pending.options))
 	for i, o := range s.pending.options {
@@ -1014,7 +1093,7 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 		})
 	}
 	return PendingPermission{
-		RequestID: strconv.FormatUint(s.pending.seq, 10),
+		RequestID: formatRequestID(s.incarn, s.pending.seq),
 		Title:     s.pending.toolTitle,
 		ToolKind:  s.pending.toolKind,
 		Options:   opts,

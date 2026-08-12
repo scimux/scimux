@@ -364,6 +364,23 @@ type app struct {
 	// start off because no entry exists. Protected by a.mu; never hold a.mu
 	// across manager calls or session-log I/O.
 	autoApprove map[string]*autoApproveState
+	// autoGate serializes automatic decision commitment against enable,
+	// disable, and re-arm per node. Once disable/re-arm returns, no decision
+	// belonging to the prior lease may subsequently deliver. Held across
+	// prepare/audit/deliver on the decision path (narrow per-node lock —
+	// never a.mu across those ops). autoGateMu protects the map only.
+	autoGateMu sync.Mutex
+	autoGate   map[string]*sync.Mutex
+	// testProc, when non-nil, is returned by proc() instead of the real ACP
+	// or Codex manager. Tests only — never set in production.
+	testProc procManager
+	// deleteGateHook, when non-nil, runs inside finalizeDeleteWithAutoBarrier
+	// after the auto-gate is held and the lease is cleared, before manager
+	// teardown. Tests only — used to race enable/decision against deletion.
+	deleteGateHook func(id string)
+	// acceptArmHook, when non-nil, runs inside acceptStructuredPrompt after
+	// primed→armed while the auto-gate is still held. Tests only.
+	acceptArmHook func(id string)
 	// notes is the synthesis-document store (~/.scimux/notes/, one mutable
 	// JSON file per note — internal/notestore). Deliberately separate from the
 	// append-only session log: notes are documents, not an event stream (see
@@ -422,9 +439,17 @@ type procManager interface {
 	// chat surface turns the page, the node and its log file stay.
 	Clear(nodeID string) error
 	Interrupt(nodeID string) error
-	PrepareResolve(nodeID, key string) (optID, evidence string, err error)
+	// PrepareResolve maps key against the pending request named by
+	// expectedRequestID. A mismatch is a conflict (HTTP 409); the current
+	// pending request is left untouched. Delivery still re-checks the
+	// prepared token.
+	PrepareResolve(nodeID, expectedRequestID, key string) (optID, evidence string, err error)
 	Deliver(nodeID, optID string) error
 	Pending(nodeID string) (PendingPermission, bool)
+	// PermissionBoundary returns the session incarnation and highest issued
+	// request sequence for auto-approve enable cutoffs. ok is false when
+	// there is no live session.
+	PermissionBoundary(nodeID string) (incarn string, maxSeq uint64, ok bool)
 	Turns(nodeID string) []transcript.Turn
 	Peek(nodeID string) string
 	Usage(nodeID string) (used, window int64)
@@ -460,7 +485,8 @@ func (m acpManager) Pending(id string) (PendingPermission, bool) {
 
 func (m acpManager) Conflict(err error) bool {
 	return err == acp.ErrNoSession || err == acp.ErrNotAlive ||
-		err == acp.ErrTurnActive || err == acp.ErrNoPending || err == acp.ErrNoTurn
+		err == acp.ErrTurnActive || err == acp.ErrNoPending || err == acp.ErrNoTurn ||
+		err == acp.ErrStalePermission
 }
 
 type codexManager struct{ *codex.Manager }
@@ -479,13 +505,20 @@ func (m codexManager) Pending(id string) (PendingPermission, bool) {
 
 func (m codexManager) Conflict(err error) bool {
 	return err == codex.ErrNoSession || err == codex.ErrNotAlive ||
-		err == codex.ErrTurnActive || err == codex.ErrNoPending || err == codex.ErrNoTurn
+		err == codex.ErrTurnActive || err == codex.ErrNoPending || err == codex.ErrNoTurn ||
+		err == codex.ErrStalePermission
 }
 
 // proc returns the structured-protocol manager for a node, or nil for a tmux
 // (claude) node. It is the single dispatch point that lets the HTTP/poll paths
 // treat ACP and codex-app-server nodes identically.
+//
+// When testProc is non-nil (tests only), it replaces the real manager so HTTP
+// handlers can be exercised against a stub without a live agent subprocess.
 func (a *app) proc(n *Node) procManager {
+	if a.testProc != nil {
+		return a.testProc
+	}
 	switch n.transport() {
 	case "acp":
 		return a.acp

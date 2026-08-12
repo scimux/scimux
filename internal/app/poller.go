@@ -76,13 +76,26 @@ func (a *app) poll() {
 			}
 			// Lease cannot cross a turn or a dead process. Do not clear a
 			// primed lease merely because the process is not yet up (enable
-			// while idle is valid before the first prompt lands).
+			// while idle is valid before the first prompt lands). Capture the
+			// current LeaseID at decision time; under the gate, clear only if
+			// that same lease is still current so a completed re-arm is not
+			// erased by a stale poller disarm.
+			needDisarm := false
+			disarmLeaseID := ""
 			if prevLive == "active" && live != "active" {
-				delete(a.autoApprove, n.ID) // turn completed or exited mid-turn
+				needDisarm = true // turn completed or exited mid-turn
 			} else if live == "exited" && (prevLive == "active" || prevLive == "quiet") {
-				delete(a.autoApprove, n.ID) // process/session loss after known liveness
+				needDisarm = true // process/session loss after known liveness
+			}
+			if needDisarm {
+				if st := a.autoApprove[n.ID]; st != nil {
+					disarmLeaseID = st.LeaseID
+				}
 			}
 			a.mu.Unlock()
+			if needDisarm {
+				a.disarmAutoApproveIfLease(n.ID, disarmLeaseID)
+			}
 			// V2-P2: persist needs-input start→end edges from the existing
 			// mechanical Attention() signal only — no new regex / source.
 			a.persistAttentionTransition(n, prevAttn, attn)

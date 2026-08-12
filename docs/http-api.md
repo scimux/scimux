@@ -125,8 +125,10 @@ For tmux/Claude nodes, `source` is `transcript`, `peek`, `none`, or
 `terminal_only`; `fallback:true` means the UI should degrade to the pane
 snapshot. For structured nodes (`codex`, ACP `pi`/`opencode`/`grok`), `source` is
 `acp`; there is no pane fallback, and pending approval details are returned as
-`perm_title` and `perm_options`. Structured-node turn failures may also set
-`error`.
+`perm_title`, `perm_options`, and — only while a permission is pending — an
+opaque `perm_request_id` that `POST …/key` must echo back. Idle structured
+chats and tmux nodes do not invent a request id. Structured-node turn failures
+may also set `error`.
 
 `GET /api/nodes/{id}/chat?history=1` returns the whole log as ordered read-only
 surfaces: `{"segments":[{"start","seam","reason","turns"}, …]}`. This is the
@@ -358,12 +360,22 @@ Interrupt the node's in-flight turn.
 
 ### `POST /api/nodes/{id}/key`
 
-Body: `{"key": "1"}`. Answers a dialog. Keys are a whitelist (digits, `y`/`n`,
-arrows, Tab, Enter, Escape) — this endpoint answers prompts, it is not a
-keystroke injector; anything else is `400`. Every accepted key is recorded
-in the store together with decision evidence (the pane's bottom lines, or
-the tool title on structured transports); on structured transports the
-decision is persisted *before* the agent learns the answer.
+Body: `{"key": "1"}` for tmux/Claude, or
+`{"key": "1", "request_id": "<opaque>"}` for structured transports (Codex,
+ACP). Answers a dialog. Keys are a whitelist (digits, `y`/`n`, arrows, Tab,
+Enter, Escape) — this endpoint answers prompts, it is not a keystroke
+injector; anything else is `400`.
+
+On structured nodes `request_id` is **required** and must match the
+`perm_request_id` from the pending permission on `GET …/chat`. Missing
+`request_id` is `400`; a stale id (the pending request was replaced) is
+`409`. Neither case writes a key audit record or delivers a decision.
+tmux/Claude keeps the `{key}`-only body and is unchanged.
+
+Every accepted key is recorded in the store together with decision evidence
+(the pane's bottom lines, or the tool title on structured transports); on
+structured transports the decision is persisted *before* the agent learns
+the answer.
 
 ### `POST /api/nodes/{id}/auto-approve`
 

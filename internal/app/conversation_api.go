@@ -174,10 +174,10 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]string{"status": "acknowledged"})
 			return
 		}
-		// Before accepting a new idle prompt, drop any stale armed lease from
-		// the previous turn so it can never leak forward (P3).
-		a.clearStaleArmedBeforePrompt(n.ID, live)
-		if err := pm.Send(n.ID, delivered); err != nil {
+		// Boundary sample → Send → primed arm under the auto-gate so the
+		// first permission of this turn cannot race into the cutoff, and a
+		// concurrent enable cannot install between Send and arm.
+		if err := a.acceptStructuredPrompt(n, pm, delivered); err != nil {
 			code := 500
 			if pm.Conflict(err) {
 				code = 409
@@ -185,8 +185,6 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), code)
 			return
 		}
-		// Primed → armed once the next prompt is successfully accepted.
-		a.armAutoApproveOnPrompt(n.ID)
 		a.noteUsagePrompt(n.Agent)
 		writeJSON(w, map[string]string{"status": "acknowledged"})
 		return
@@ -741,6 +739,11 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	resp["perm_options"] = pending.Options
 	resp["perm_tool_kind"] = pending.ToolKind
 	resp["perm_reason"] = pending.Reason
+	// Opaque request identity only while a permission is actually pending.
+	// Idle structured chats and tmux nodes must not invent a request id.
+	if hasPerm && pending.RequestID != "" {
+		resp["perm_request_id"] = pending.RequestID
+	}
 }
 
 // tmuxKeySequence maps a semantic web choice to the physical tmux key
@@ -773,7 +776,10 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	if a.refuseEnded(w, n) {
 		return
 	}
-	var body struct{ Key string }
+	var body struct {
+		Key       string `json:"key"`
+		RequestID string `json:"request_id"`
+	}
 	if err := decodeJSON(w, r, &body); err != nil || body.Key == "" {
 		http.Error(w, "bad request", 400)
 		return
@@ -791,8 +797,16 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	// acted on (finding 53). The tool title stands in for the pane excerpt as
 	// decision evidence. Keys stays absent: no terminal keys were pressed, and
 	// this branch must never receive a synthetic Enter.
+	//
+	// request_id binds the decision to the exact pending request the UI (or
+	// auto-approver) evaluated. Missing → 400; stale → 409. Neither writes an
+	// audit record nor delivers. tmux/Claude keeps the {key}-only body.
 	if pm := a.proc(n); pm != nil {
-		optID, evidence, err := pm.PrepareResolve(n.ID, body.Key)
+		if body.RequestID == "" {
+			http.Error(w, "request_id is required for structured permission decisions", 400)
+			return
+		}
+		optID, evidence, err := pm.PrepareResolve(n.ID, body.RequestID, body.Key)
 		if err != nil {
 			code := 400
 			if pm.Conflict(err) {

@@ -230,7 +230,7 @@ func TestManagerApprovalResolve(t *testing.T) {
 	}
 
 	// Answer "1" → the first decision ("accept"): map, then deliver.
-	optID, evidence, err := m.PrepareResolve("n1", "1")
+	optID, evidence, err := m.PrepareResolve("n1", pending.RequestID, "1")
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestManagerFileChangeApprovalResolve(t *testing.T) {
 		t.Fatalf("file-change options = %v", got)
 	}
 
-	optID, _, err := m.PrepareResolve("n1", "2")
+	optID, _, err := m.PrepareResolve("n1", pending.RequestID, "2")
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -301,7 +301,8 @@ func TestManagerQueuesConcurrentApprovals(t *testing.T) {
 	})
 	ms.serverRequest(t, 2, "item/fileChange/requestApproval", `{"threadId":"THREAD-1","turnId":"turn-1","itemId":"patch-1","startedAtMs":1}`)
 
-	optID, _, err := m.PrepareResolve("n1", "1")
+	p1, _ := m.Pending("n1")
+	optID, _, err := m.PrepareResolve("n1", p1.RequestID, "1")
 	if err != nil {
 		t.Fatalf("prepare first: %v", err)
 	}
@@ -318,7 +319,8 @@ func TestManagerQueuesConcurrentApprovals(t *testing.T) {
 		// P5b: no grantRoot → human "File changes", never the method path.
 		return ok && p.Title == "File changes" && len(p.Options) == 4
 	})
-	optID, _, err = m.PrepareResolve("n1", "4")
+	p2, _ := m.Pending("n1")
+	optID, _, err = m.PrepareResolve("n1", p2.RequestID, "4")
 	if err != nil {
 		t.Fatalf("prepare second: %v", err)
 	}
@@ -334,10 +336,10 @@ func TestManagerQueuesConcurrentApprovals(t *testing.T) {
 func TestManagerNoPendingResolve(t *testing.T) {
 	m, _, ms := newManagerWithMock(t)
 	launch(t, m, ms, "n1", "", "")
-	if _, _, err := m.PrepareResolve("n1", "1"); err != ErrNoPending {
+	if _, _, err := m.PrepareResolve("n1", "1", "1"); err != ErrNoPending {
 		t.Fatalf("want ErrNoPending, got %v", err)
 	}
-	if _, _, err := m.PrepareResolve("missing", "1"); err != ErrNoSession {
+	if _, _, err := m.PrepareResolve("missing", "1", "1"); err != ErrNoSession {
 		t.Fatalf("want ErrNoSession, got %v", err)
 	}
 }

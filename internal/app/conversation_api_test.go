@@ -474,11 +474,13 @@ func TestPublicRouteKeyWhitelistAndAuditOrder(t *testing.T) {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		if _, ok := a.codex.Pending(n.ID); !ok {
+		p, ok := a.codex.Pending(n.ID)
+		if !ok {
 			t.Fatal("pending approval never appeared")
 		}
 
-		rec = routeRequest(h, http.MethodPost, "/api/nodes/"+n.ID+"/key", `{"key":"y"}`, true)
+		rec = routeRequest(h, http.MethodPost, "/api/nodes/"+n.ID+"/key",
+			`{"key":"y","request_id":`+strconv.Quote(p.RequestID)+`}`, true)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("key: status = %d body %q", rec.Code, rec.Body.String())
 		}
@@ -1272,11 +1274,12 @@ func TestHandleKeyStructuredOmitsPhysicalKeys(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, ok := a.codex.Pending(n.ID); !ok {
+	p, ok := a.codex.Pending(n.ID)
+	if !ok {
 		t.Fatal("pending approval never appeared")
 	}
 
-	keyRec := keyReq(a, n.ID, `{"key":"y"}`)
+	keyRec := keyReq(a, n.ID, `{"key":"y","request_id":`+strconv.Quote(p.RequestID)+`}`)
 	if keyRec.Code != 200 {
 		t.Fatalf("handleKey: code = %d body %q", keyRec.Code, keyRec.Body)
 	}
@@ -1718,13 +1721,14 @@ func TestHandleChatCodexPendingKinds(t *testing.T) {
 		t.Fatalf("chat: code = %d %s", rec2.Code, rec2.Body)
 	}
 	var body struct {
-		Source       string       `json:"source"`
-		Pending      bool         `json:"pending"`
-		Perms        []PermOption `json:"perm_options"`
-		PermTitle    string       `json:"perm_title"`
-		PermToolKind string       `json:"perm_tool_kind"`
-		Attention    string       `json:"attention"`
-		WaitingOn    string       `json:"waiting_on"`
+		Source        string       `json:"source"`
+		Pending       bool         `json:"pending"`
+		Perms         []PermOption `json:"perm_options"`
+		PermTitle     string       `json:"perm_title"`
+		PermToolKind  string       `json:"perm_tool_kind"`
+		PermRequestID string       `json:"perm_request_id"`
+		Attention     string       `json:"attention"`
+		WaitingOn     string       `json:"waiting_on"`
 	}
 	if err := json.Unmarshal(rec2.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -1738,6 +1742,12 @@ func TestHandleChatCodexPendingKinds(t *testing.T) {
 	// Existing fields: title, attention, waiting_on describe the live approval.
 	if body.Attention != "approval" {
 		t.Errorf("attention = %q, want approval", body.Attention)
+	}
+	if body.PermRequestID == "" {
+		t.Error("perm_request_id must be non-empty while a structured permission is pending")
+	}
+	if p, ok := a.codex.Pending(n.ID); ok && p.RequestID != body.PermRequestID {
+		t.Errorf("perm_request_id = %q, want manager pending %q", body.PermRequestID, p.RequestID)
 	}
 	if body.PermTitle == "" || body.WaitingOn == "" {
 		t.Errorf("perm_title=%q waiting_on=%q, want non-empty", body.PermTitle, body.WaitingOn)
@@ -1820,7 +1830,8 @@ func TestHandleKeyCodexAuditBeforeDeliver(t *testing.T) {
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
 
-	req := httptest.NewRequest("POST", "/api/nodes/phantom/key", strings.NewReader(`{"key":"y"}`))
+	req := httptest.NewRequest("POST", "/api/nodes/phantom/key",
+		strings.NewReader(`{"key":"y","request_id":"1"}`))
 	req.SetPathValue("id", "phantom")
 	rec := httptest.NewRecorder()
 	a.handleKey(rec, req)
@@ -1884,9 +1895,14 @@ func TestHandleKeyCodexAuditPositive(t *testing.T) {
 	}
 
 	// POST /key y: maps to the first non-rejecting decision ("accept"), writes
-	// the audit record, then delivers the decision.
+	// the audit record, then delivers the decision. request_id binds the
+	// decision to the exact pending request (P1 security).
+	p, ok := a.codex.Pending(n.ID)
+	if !ok || p.RequestID == "" {
+		t.Fatal("pending approval disappeared before /key")
+	}
 	keyReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/key",
-		strings.NewReader(`{"key":"y"}`))
+		strings.NewReader(`{"key":"y","request_id":`+strconv.Quote(p.RequestID)+`}`))
 	keyReq.SetPathValue("id", n.ID)
 	keyRec := httptest.NewRecorder()
 	a.handleKey(keyRec, keyReq)
@@ -2533,5 +2549,140 @@ func TestHandleChatHistoryUnaffectedByETag(t *testing.T) {
 	}
 	if len(body.Segments) == 0 {
 		t.Fatal("history segments empty")
+	}
+}
+
+// ---------- P1 security: structured request identity on /chat and /key ----------
+
+// Structured chat with a pending permission exposes a stable non-empty
+// perm_request_id. Idle structured chat and tmux chat must not invent one.
+func TestPermRequestIDChatExposure(t *testing.T) {
+	// Idle structured (no pending): no perm_request_id.
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "idle-acp", "grok", "acp")
+	// Inject a live manager with no pending via empty acp manager — chat still
+	// routes through procChatInto when a.proc returns non-nil. Use a stub via
+	// temporarily replacing is hard; drive procChatInto directly.
+	stub := &stubProc{live: "quiet", hasSession: true, hasPending: false}
+	seg := sessionlog.Segment{}
+	resp := map[string]any{}
+	a.procChatInto(resp, n, stub, seg)
+	if _, ok := resp["perm_request_id"]; ok {
+		t.Fatalf("idle structured chat invented perm_request_id: %v", resp["perm_request_id"])
+	}
+
+	// Pending structured: non-empty stable id.
+	stub.hasPending = true
+	stub.pending = allowPending("opaque-req-7")
+	resp = map[string]any{}
+	a.procChatInto(resp, n, stub, seg)
+	id, _ := resp["perm_request_id"].(string)
+	if id != "opaque-req-7" {
+		t.Fatalf("perm_request_id = %v, want opaque-req-7", resp["perm_request_id"])
+	}
+	// Stable across two projections.
+	resp2 := map[string]any{}
+	a.procChatInto(resp2, n, stub, seg)
+	if resp2["perm_request_id"] != id {
+		t.Fatalf("perm_request_id unstable: %v → %v", id, resp2["perm_request_id"])
+	}
+
+	// tmux chat must not invent a structured request id.
+	tmux := seedTmuxNode(a, "tmux-1")
+	a.live[tmux.ID] = "quiet"
+	req := httptest.NewRequest("GET", "/api/nodes/tmux-1/chat", nil)
+	req.SetPathValue("id", "tmux-1")
+	rec := httptest.NewRecorder()
+	a.handleChat(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("tmux chat: %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := body["perm_request_id"]; ok && v != nil && v != "" {
+		t.Fatalf("tmux chat invented perm_request_id: %v", v)
+	}
+}
+
+// Missing request_id on structured /key → 400; stale → 409; neither audits or delivers.
+// Current {request_id,key} preserves audit-before-delivery. tmux /key stays {key}-only.
+// Exercises the real handleKey handler via app.testProc.
+func TestHandleKeyStructuredRequestID(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "key-id", "pi", "acp")
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending:        allowPending("inc:1"),
+		clearOnDeliver: true,
+		conflictErrors: []error{errStubStale},
+	}
+	a.testProc = stub
+
+	postKey := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/key", strings.NewReader(body))
+		req.SetPathValue("id", n.ID)
+		rec := httptest.NewRecorder()
+		a.handleKey(rec, req)
+		return rec
+	}
+
+	before := len(keyRecords(t, a.storePath))
+	// Missing request_id → 400, no audit, no deliver.
+	if rec := postKey(`{"key":"1"}`); rec.Code != 400 {
+		t.Fatalf("missing request_id: code=%d body %q, want 400", rec.Code, rec.Body)
+	}
+	if stub.deliverCalls != 0 || len(keyRecords(t, a.storePath)) != before {
+		t.Fatalf("missing request_id must not audit or deliver; del=%d keys=%d",
+			stub.deliverCalls, len(keyRecords(t, a.storePath))-before)
+	}
+	// Stale request_id → 409, no audit, no deliver; pending remains.
+	if rec := postKey(`{"key":"1","request_id":"inc:99"}`); rec.Code != 409 {
+		t.Fatalf("stale request_id: code=%d body %q, want 409", rec.Code, rec.Body)
+	}
+	if stub.deliverCalls != 0 || len(keyRecords(t, a.storePath)) != before {
+		t.Fatalf("stale request_id must not audit or deliver; del=%d keys=%d",
+			stub.deliverCalls, len(keyRecords(t, a.storePath))-before)
+	}
+	if !stub.hasPending || stub.pending.RequestID != "inc:1" {
+		t.Fatalf("replacement/current pending must remain; got %+v", stub.pending)
+	}
+	// Current request_id + key → 200, audit then deliver.
+	if rec := postKey(`{"key":"1","request_id":"inc:1"}`); rec.Code != 200 {
+		t.Fatalf("current: code=%d body %q, want 200", rec.Code, rec.Body)
+	}
+	if stub.deliverCalls != 1 {
+		t.Fatalf("deliverCalls = %d, want 1", stub.deliverCalls)
+	}
+	if len(keyRecords(t, a.storePath)) != before+1 {
+		t.Fatalf("want one new key audit after successful resolve")
+	}
+	// Audit key matches the semantic choice.
+	recs := keyRecords(t, a.storePath)
+	var found *storeRecord
+	for i := range recs {
+		if recs[i].Type == "key" && recs[i].ID == n.ID {
+			found = &recs[i]
+		}
+	}
+	if found == nil || found.Key != "1" || found.Excerpt == "" {
+		t.Fatalf("audit = %+v", found)
+	}
+
+	// tmux /key retains {key}-only shape and succeeds without request_id.
+	f := &fakeTmux{alive: map[string]bool{"tmux-key": true}, capture: "Approve? (y/n)\n"}
+	a2 := newTestApp(t, f)
+	a2.nodes = []*Node{{ID: "tmux-key", Title: "t", Agent: "claude", CreatedAt: "2026-08-11T00:00:00Z"}}
+	a2.byID["tmux-key"] = a2.nodes[0]
+	req := httptest.NewRequest("POST", "/api/nodes/tmux-key/key", strings.NewReader(`{"key":"y"}`))
+	req.SetPathValue("id", "tmux-key")
+	rec := httptest.NewRecorder()
+	a2.handleKey(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("tmux /key without request_id: code = %d body %q", rec.Code, rec.Body)
+	}
+	if len(sendKeysCalls(f)) == 0 {
+		t.Fatal("tmux /key must deliver a key")
 	}
 }

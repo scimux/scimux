@@ -204,6 +204,9 @@ export function buildChatSignature(parts){
     p.permTitle,
     p.permReason || "",
     p.permOptionsKey,
+    /* Request identity must participate: A→B with identical title/options
+       still rebuilds the row so buttons carry B's data-request-id (P1 review). */
+    p.permRequestId || "",
     p.priorTurns || 0,
     p.chatStarted || "",
     p.echoHash || "",
@@ -478,8 +481,8 @@ export function permMoreDecision(scrollHeight, clientHeight){
 
 export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
-  permToolKind = "", permReason = "", expanded = false,
-  escape = esc,
+  permToolKind = "", permReason = "", permRequestId = "",
+  expanded = false, escape = esc,
 } = {}){
   if (!attention || attentionHidden) return "";
   /* inspect is a neutral diagnostic: offer no remote keypad. Terminal/log
@@ -510,11 +513,15 @@ export function keyRowHTML({
        stole lines from the ask body; outside, the reason is always visible
        and revealPermMoreIfNeeded measures body overflow only. */
     const mask = `<div class="permask${clamp}">${verbHTML}${bodyHTML}</div>`;
+    /* data-request-id is the opaque perm_request_id for this row — captured
+       at click so a later poll cannot retarget the decision. */
+    const reqAttr = permRequestId
+      ? ` data-request-id="${escape(String(permRequestId))}"` : "";
     const btns = `<div class="permbtns">${opts.map(o => {
       const { label, title } = permOptionLabel(o);
       const cls = permOptionClass(o.kind);
       const titleAttr = title ? ` title="${escape(title)}"` : "";
-      return `<button data-key="${escape(o.key)}" class="permbtn ${cls}"${titleAttr}>${escape(o.key)}. ${escape(label)}</button>`;
+      return `<button data-key="${escape(o.key)}"${reqAttr} class="permbtn ${cls}"${titleAttr}>${escape(o.key)}. ${escape(label)}</button>`;
     }).join("")}</div>`;
     /* Hint outside the clamp; wording must not repeat the tool title — that
        is the ask body, rendered immediately below. Order:
@@ -1510,6 +1517,7 @@ export function createChatFeature(deps){
       permTitle: data.perm_title,
       permReason: data.perm_reason || "",
       permOptionsKey: permOptionsKey(data.perm_options),
+      permRequestId: data.perm_request_id || "",
       priorTurns: data.prior_turns || 0,
       chatStarted: data.chat_started || "",
       echoHash: echo ? hash(echo.text) : "",
@@ -1654,6 +1662,7 @@ export function createChatFeature(deps){
         permOptions: data.perm_options,
         permToolKind: data.perm_tool_kind || "",
         permReason: data.perm_reason || "",
+        permRequestId: data.perm_request_id || "",
         expanded,
         escape,
       });
@@ -1763,12 +1772,20 @@ export function createChatFeature(deps){
     }
     const b = e.target.closest && e.target.closest("[data-key]");
     if (!b || !sel) return;
+    /* Capture node, request id, and key from the rendered row BEFORE collapsing
+       or refreshing the UI. Never re-read a newer global request id after the
+       async action begins (P1: bind decision to the exact pending request). */
     const dest = sel;
+    const key = b.dataset.key;
+    const requestId = b.dataset.requestId || "";
     collapseAttentionUI(dest);
     (async () => {
       try {
+        const body = requestId
+          ? { key, request_id: requestId }
+          : { key };
         await api(`/api/nodes/${encodeURIComponent(dest)}/key`,
-          { method: "POST", body: JSON.stringify({ key: b.dataset.key }) });
+          { method: "POST", body: JSON.stringify(body) });
         chatSig = "";
         if (typeof d.scheduleTick === "function") d.scheduleTick(400);
         else if (typeof d.tick === "function") setTimeoutFn(() => d.tick(), 400);

@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,7 +51,11 @@ var (
 	ErrNoSession = errors.New("no live codex session for node")
 	ErrNotAlive  = errors.New("codex subprocess has exited")
 	ErrNoPending = errors.New("no permission request is pending")
-	ErrNoTurn    = errors.New("no turn is in flight")
+	// ErrStalePermission means PrepareResolve was called with an expected
+	// request ID that is not the current head pending request. HTTP maps it
+	// to 409; the replacement stays pending and actionable.
+	ErrStalePermission = errors.New("pending permission request has changed")
+	ErrNoTurn          = errors.New("no turn is in flight")
 )
 
 // launchTimeout bounds initialize + thread/start so a hung app-server (e.g. one
@@ -119,6 +125,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		model:     model,
 		effort:    effort,
 		assetHook: m.assetHook,
+		incarn:    newSessionIncarn(),
 		procAlive: true,
 		done:      make(chan struct{}),
 	}
@@ -260,13 +267,16 @@ func (m *Manager) Clear(nodeID string) error {
 // PrepareResolve maps a whitelisted key to a pending decision and returns an
 // opaque option id (the decision's index) plus audit evidence WITHOUT
 // delivering it, so the HTTP layer can persist the decision before the agent is
-// answered (finding 53). Deliver completes the answer.
-func (m *Manager) PrepareResolve(nodeID, key string) (optID, evidence string, err error) {
+// answered (finding 53). expectedRequestID must name the request the caller
+// evaluated; a mismatch returns ErrStalePermission while the current head
+// remains pending. Deliver completes the answer and re-checks the prepared
+// token against the live request.
+func (m *Manager) PrepareResolve(nodeID, expectedRequestID, key string) (optID, evidence string, err error) {
 	s := m.session(nodeID)
 	if s == nil {
 		return "", "", ErrNoSession
 	}
-	return s.prepareResolve(key)
+	return s.prepareResolve(expectedRequestID, key)
 }
 
 // Deliver hands a previously mapped decision to the pending approval. It fails
@@ -450,9 +460,56 @@ type Session struct {
 	lastError     string
 	pending       []*pendingPermission
 	pendingSeq    uint64
+	// incarn is a collision-resistant identity for this Session value. Request
+	// IDs and prepared tokens include it so a kill/relaunch under the same
+	// node id cannot accept a stale decision that reused sequence numbers.
+	incarn string
 
 	done     chan struct{} // closed on exit/stop; unblocks a pending approval
 	doneOnce sync.Once
+}
+
+// newSessionIncarn mints an opaque per-Session identity for request/token binding.
+func newSessionIncarn() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+// formatRequestID builds the opaque pending-request identity: incarn:seq.
+func formatRequestID(incarn string, seq uint64) string {
+	return incarn + ":" + strconv.FormatUint(seq, 10)
+}
+
+// ParseRequestID splits an opaque request id into incarnation and sequence.
+func ParseRequestID(id string) (incarn string, seq uint64, ok bool) {
+	i := strings.IndexByte(id, ':')
+	if i <= 0 || i == len(id)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseUint(id[i+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return id[:i], n, true
+}
+
+// PermissionBoundary returns the session incarnation and the highest request
+// sequence issued so far (covers the entire approval queue). Auto-approve
+// treats same-incarnation seq <= maxSeq as pre-enable.
+func (m *Manager) PermissionBoundary(nodeID string) (incarn string, maxSeq uint64, ok bool) {
+	s := m.session(nodeID)
+	if s == nil {
+		return "", 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.incarn == "" {
+		return "", 0, false
+	}
+	return s.incarn, s.pendingSeq, true
 }
 
 // pendingPermission is one outstanding approval. Codex can issue more than one
@@ -540,30 +597,34 @@ func (s *Session) approve(a Approval) (string, json.RawMessage, bool) {
 }
 
 // prepareResolve maps a whitelisted key to a pending decision and returns an
-// opaque token naming both the approval (by identity) and the chosen decision
-// index, plus audit evidence, without delivering. The token pins deliver to
-// this exact approval: with a queue, the head can change between the audit
-// write and the delivery (turn end, cancellation), and a bare index would
-// silently answer a different request than the one recorded as evidence.
-func (s *Session) prepareResolve(key string) (optID, evidence string, err error) {
+// opaque token naming incarnation, approval sequence, and decision index, plus
+// audit evidence, without delivering. expectedRequestID is compared to the
+// current head under the same lock that selects the decision. The token still
+// pins deliver to this exact approval and session incarnation.
+func (s *Session) prepareResolve(expectedRequestID, key string) (optID, evidence string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.pending) == 0 {
 		return "", "", ErrNoPending
 	}
+	if s.incarn == "" {
+		s.incarn = newSessionIncarn()
+	}
 	p := s.pending[0]
+	curID := formatRequestID(s.incarn, p.seq)
+	if expectedRequestID == "" || expectedRequestID != curID {
+		return "", "", ErrStalePermission
+	}
 	idx, ok := mapKeyToDecision(key, p.approval.AvailableDecisions)
 	if !ok {
 		return "", "", fmt.Errorf("key %q maps to no decision", key)
 	}
-	return fmt.Sprintf("%d:%d", p.seq, idx), "permission: " + approvalTitle(p.approval), nil
+	return fmt.Sprintf("%s:%d:%d", s.incarn, p.seq, idx), "permission: " + approvalTitle(p.approval), nil
 }
 
 // deliver hands the mapped decision to the blocked approve goroutine. It holds
-// s.mu across the check-and-send and consumes the pending request atomically,
-// so a decision mapped against a since-replaced request is refused rather than
-// misdelivered (the finding-53 race, mirrored from acp.deliver). The token's
-// sequence number must still name the queue head.
+// s.mu across the check-and-send and consumes the pending request atomically.
+// The token's incarnation and sequence must still name the queue head.
 func (s *Session) deliver(optID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -571,12 +632,8 @@ func (s *Session) deliver(optID string) error {
 		return ErrNoPending
 	}
 	p := s.pending[0]
-	var seq uint64
-	var idx int
-	if n, err := fmt.Sscanf(optID, "%d:%d", &seq, &idx); n != 2 || err != nil {
-		return errors.New("malformed decision token")
-	}
-	if seq != p.seq || idx < 0 || idx >= len(p.approval.AvailableDecisions) {
+	incarn, seq, idx, ok := parseDeliverToken(optID)
+	if !ok || incarn != s.incarn || seq != p.seq || idx < 0 || idx >= len(p.approval.AvailableDecisions) {
 		return errors.New("pending permission changed before the answer was delivered")
 	}
 	d := p.approval.AvailableDecisions[idx]
@@ -589,11 +646,36 @@ func (s *Session) deliver(optID string) error {
 	}
 }
 
+// parseDeliverToken splits "<incarn>:<seq>:<idx>".
+func parseDeliverToken(tok string) (incarn string, seq uint64, idx int, ok bool) {
+	i := strings.IndexByte(tok, ':')
+	if i <= 0 {
+		return "", 0, 0, false
+	}
+	rest := tok[i+1:]
+	j := strings.IndexByte(rest, ':')
+	if j <= 0 || j == len(rest)-1 {
+		return "", 0, 0, false
+	}
+	n, err := strconv.ParseUint(rest[:j], 10, 64)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	k, err := strconv.Atoi(rest[j+1:])
+	if err != nil {
+		return "", 0, 0, false
+	}
+	return tok[:i], n, k, true
+}
+
 func (s *Session) pendingInfo() (PendingPermission, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.pending) == 0 {
 		return PendingPermission{}, false
+	}
+	if s.incarn == "" {
+		s.incarn = newSessionIncarn()
 	}
 	a := s.pending[0].approval
 	ds := a.AvailableDecisions
@@ -607,7 +689,7 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 		})
 	}
 	return PendingPermission{
-		RequestID: strconv.FormatUint(s.pending[0].seq, 10),
+		RequestID: formatRequestID(s.incarn, s.pending[0].seq),
 		Title:     approvalTitle(a),
 		ToolKind:  mapApprovalToolKind(a),
 		Reason:    a.Reason,

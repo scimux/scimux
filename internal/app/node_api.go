@@ -410,7 +410,10 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Unlock()
 
-	if err := a.closeOwned(n); err != nil {
+	// Hold the auto-approve gate through lease clear, manager teardown, node
+	// removal, and archival so a concurrent enable cannot install a new lease
+	// (and a decision cannot deliver) during the delete window.
+	if err := a.finalizeDeleteWithAutoBarrier(n); err != nil {
 		// The agent outlived the delete record. Re-assert the node so replay
 		// (and this process) keep showing it live: a later node record wins
 		// over the delete, exactly as the concurrent-launch path relies on.
@@ -424,12 +427,34 @@ func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "close session: "+err.Error(), 500)
 		return
 	}
+	writeJSON(w, map[string]string{"ok": "deleted"})
+}
 
+// finalizeDeleteWithAutoBarrier holds the per-node auto-approve gate from
+// lease removal through manager kill, in-memory node drop, and session-log
+// archival. Concurrent enable/decision paths wait on the same gate and cannot
+// survive past a completed delete.
+func (a *app) finalizeDeleteWithAutoBarrier(n *Node) error {
+	g := a.autoGateFor(n.ID)
+	g.Lock()
+	defer g.Unlock()
+
+	a.mu.Lock()
+	delete(a.autoApprove, n.ID)
+	a.mu.Unlock()
+
+	if a.deleteGateHook != nil {
+		a.deleteGateHook(n.ID)
+	}
+
+	if err := a.closeOwned(n); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	a.removeNodeLocked(n.ID)
 	a.mu.Unlock()
 	a.archiveSessionLog(n.ID)
 	a.archiveAttachments(n.ID)
 	a.archiveAssets(n.ID)
-	writeJSON(w, map[string]string{"ok": "deleted"})
+	return nil
 }

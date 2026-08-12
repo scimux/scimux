@@ -273,7 +273,8 @@ func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
 	// Step 1: map the key to an option and capture evidence, without delivering —
 	// the agent stays blocked and the request stays pending (PrepareResolve is
 	// read-only). Digit "1" selects the first option.
-	optID, evidence, err := m.PrepareResolve("n1", "1")
+	pending, _ := m.Pending("n1")
+	optID, evidence, err := m.PrepareResolve("n1", pending.RequestID, "1")
 	if err != nil {
 		t.Fatalf("PrepareResolve: %v", err)
 	}
@@ -312,7 +313,7 @@ func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
 	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" && m.Attention("n1") == "" })
 
 	// The request is consumed and a second answer has nothing to answer.
-	if _, _, err := m.PrepareResolve("n1", "1"); err != ErrNoPending {
+	if _, _, err := m.PrepareResolve("n1", "1", "1"); err != ErrNoPending {
 		t.Errorf("PrepareResolve after deliver = %v, want ErrNoPending", err)
 	}
 	turns := m.Turns("n1")
@@ -330,7 +331,7 @@ func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
 // rather than panicking — the after-restart / never-launched case.
 func TestPrepareResolveNoSession(t *testing.T) {
 	m := newManager(t, &fakeAgent{})
-	if _, _, err := m.PrepareResolve("ghost", "1"); err != ErrNoSession {
+	if _, _, err := m.PrepareResolve("ghost", "1", "1"); err != ErrNoSession {
 		t.Errorf("PrepareResolve(no session) = %v, want ErrNoSession", err)
 	}
 	if err := m.Deliver("ghost", "opt_allow"); err != ErrNoSession {
@@ -1084,7 +1085,7 @@ func TestRequestPermissionStoresToolKind(t *testing.T) {
 // Delivering an option that no longer matches the current pending request is
 // refused rather than answering a since-replaced prompt (finding 53).
 func TestDeliverRejectsStaleOption(t *testing.T) {
-	s := &Session{nodeID: "n1", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
+	s := &Session{nodeID: "n1", incarn: "incA", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
 	s.pendingSeq = 1
 	s.pending = &pendingPermission{
 		seq:       1,
@@ -1092,21 +1093,25 @@ func TestDeliverRejectsStaleOption(t *testing.T) {
 		options:   []sdk.PermissionOption{{OptionId: "opt_allow", Name: "Allow"}},
 		ch:        make(chan sdk.PermissionOptionId, 1),
 	}
-	if err := s.deliver(sdk.PermissionOptionId("1:opt_gone")); err == nil {
+	if err := s.deliver(sdk.PermissionOptionId("incA:1:opt_gone")); err == nil {
 		t.Error("expected delivery of an unknown option to be refused")
 	}
 	// Wrong sequence (stale prepare against a prior request) is refused.
-	if err := s.deliver(sdk.PermissionOptionId("99:opt_allow")); err == nil {
+	if err := s.deliver(sdk.PermissionOptionId("incA:99:opt_allow")); err == nil {
 		t.Error("expected delivery of a stale-seq token to be refused")
 	}
+	// Wrong incarnation (post-clear session reuse of seq) is refused.
+	if err := s.deliver(sdk.PermissionOptionId("incB:1:opt_allow")); err == nil {
+		t.Error("expected delivery of a foreign-incarnation token to be refused")
+	}
 	// A valid token is consumed and clears the pending request.
-	if err := s.deliver(sdk.PermissionOptionId("1:opt_allow")); err != nil {
+	if err := s.deliver(sdk.PermissionOptionId("incA:1:opt_allow")); err != nil {
 		t.Fatalf("valid deliver failed: %v", err)
 	}
 	if _, ok := s.pendingInfo(); ok {
 		t.Error("pending should be cleared after a successful deliver")
 	}
-	if err := s.deliver(sdk.PermissionOptionId("1:opt_allow")); err != ErrNoPending {
+	if err := s.deliver(sdk.PermissionOptionId("incA:1:opt_allow")); err != ErrNoPending {
 		t.Errorf("second deliver err = %v, want ErrNoPending", err)
 	}
 }

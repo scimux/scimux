@@ -34,12 +34,36 @@ type stubProc struct {
 	clearOnDeliver bool
 	// record last deliver token
 	lastDeliver string
+	// lastPrepareReqID is the expectedRequestID last passed to PrepareResolve
+	lastPrepareReqID string
+	// prepareHook runs under the stub lock just before the prepare result
+	// (tests use it to swap pending between snapshot and prepare)
+	prepareHook func(*stubProc)
+	// conflictErrors are classified as Conflict (HTTP 409)
+	conflictErrors []error
+	// boundary* override PermissionBoundary when boundarySet is true
+	boundarySet    bool
+	boundaryIncarn string
+	boundaryMaxSeq uint64
+	// sendHook runs under the stub lock during Send (simulates turn starting
+	// and issuing a permission before Send returns).
+	sendCalls int
+	sendErr   error
+	sendHook  func(*stubProc)
 }
 
 func (s *stubProc) Launch(string, string, string, string, string) (string, error) {
 	return "", nil
 }
-func (s *stubProc) Send(string, string) error      { return nil }
+func (s *stubProc) Send(nodeID, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sendCalls++
+	if s.sendHook != nil {
+		s.sendHook(s)
+	}
+	return s.sendErr
+}
 func (s *stubProc) Clear(string) error             { return nil }
 func (s *stubProc) Interrupt(string) error         { return nil }
 func (s *stubProc) Turns(string) []transcript.Turn { return nil }
@@ -58,8 +82,15 @@ func (s *stubProc) Kill(string) error       { return nil }
 func (s *stubProc) RecordStartFailure(string, error) error {
 	return nil
 }
-func (s *stubProc) Shutdown()               {}
-func (s *stubProc) Conflict(err error) bool { return false }
+func (s *stubProc) Shutdown() {}
+func (s *stubProc) Conflict(err error) bool {
+	for _, e := range s.conflictErrors {
+		if err == e {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *stubProc) Pending(string) (PendingPermission, bool) {
 	s.mu.Lock()
@@ -70,12 +101,44 @@ func (s *stubProc) Pending(string) (PendingPermission, bool) {
 	return s.pending, true
 }
 
-func (s *stubProc) PrepareResolve(nodeID, key string) (string, string, error) {
+func (s *stubProc) PermissionBoundary(string) (string, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasSession && s.boundaryIncarn == "" && s.boundaryMaxSeq == 0 {
+		return "", 0, false
+	}
+	if s.boundarySet {
+		return s.boundaryIncarn, s.boundaryMaxSeq, true
+	}
+	// Derive from pending RequestID when it uses incarn:seq form.
+	if s.hasPending {
+		if inc, seq, ok := parsePermissionRequestID(s.pending.RequestID); ok {
+			return inc, seq, true
+		}
+	}
+	if s.hasSession {
+		return s.boundaryIncarn, s.boundaryMaxSeq, true
+	}
+	return "", 0, false
+}
+
+func (s *stubProc) PrepareResolve(nodeID, expectedRequestID, key string) (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prepareCalls++
+	s.lastPrepareReqID = expectedRequestID
+	if s.prepareHook != nil {
+		s.prepareHook(s)
+	}
+	// Bind expected request ID to the current pending (mirrors real managers).
+	if s.hasPending && expectedRequestID != "" && expectedRequestID != s.pending.RequestID {
+		return "", "", errStubStale
+	}
 	if s.prepareErr != nil {
 		return "", "", s.prepareErr
+	}
+	if !s.hasPending {
+		return "", "", errStubNoPending
 	}
 	tok := s.prepareTok
 	if tok == "" {
@@ -83,6 +146,11 @@ func (s *stubProc) PrepareResolve(nodeID, key string) (string, string, error) {
 	}
 	return tok, "permission: " + s.pending.Title, nil
 }
+
+var (
+	errStubStale     = errors.New("stub: pending permission request has changed")
+	errStubNoPending = errors.New("stub: no permission request is pending")
+)
 
 func (s *stubProc) Deliver(nodeID, optID string) error {
 	s.mu.Lock()
@@ -163,7 +231,7 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 	}
 
 	// Enable while idle → primed.
-	v = a.setAutoApproveEnabled(n.ID, true, "quiet", "")
+	v = a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
 	if !v.Enabled || v.Phase != "primed" || v.Count != 0 {
 		t.Fatalf("enable idle = %+v, want primed count 0", v)
 	}
@@ -174,8 +242,8 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 		t.Fatal("lease id empty")
 	}
 
-	// Next prompt accepted → armed.
-	a.armAutoApproveOnPrompt(n.ID)
+	// Next prompt accepted → armed (pre-send boundary empty / fail-closed until bound).
+	a.armAutoApproveOnPrompt(n.ID, "", 0, false)
 	a.mu.Lock()
 	v = a.autoApproveViewOf(n)
 	a.mu.Unlock()
@@ -185,24 +253,24 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 
 	// Enable during active turn → armed immediately; pending at enable recorded.
 	a.disarmAutoApprove(n.ID)
-	v = a.setAutoApproveEnabled(n.ID, true, "active", "req-old")
+	v = a.setAutoApproveEnabled(n.ID, true, "active", "inc", 1)
 	if v.Phase != "armed" {
 		t.Fatalf("enable active = %+v, want armed", v)
 	}
 	a.mu.Lock()
-	if !a.autoApprove[n.ID].PendingAtEnable["req-old"] {
-		t.Fatal("pending-at-enable not recorded")
+	if a.autoApprove[n.ID].EnableIncarn != "inc" || a.autoApprove[n.ID].EnableMaxSeq != 1 {
+		t.Fatalf("enable cutoff = %q/%d, want inc/1", a.autoApprove[n.ID].EnableIncarn, a.autoApprove[n.ID].EnableMaxSeq)
 	}
 	a.mu.Unlock()
 
 	// Manual disable → off.
-	v = a.setAutoApproveEnabled(n.ID, false, "active", "")
+	v = a.setAutoApproveEnabled(n.ID, false, "active", "", 0)
 	if v.Enabled || v.Phase != "off" {
 		t.Fatalf("disable = %+v, want off", v)
 	}
 
 	// Restart semantics: no state after delete of map entry (process restart).
-	a.setAutoApproveEnabled(n.ID, true, "quiet", "")
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
 	a2 := newTestApp(t, &fakeTmux{})
 	// New app has empty autoApprove → off.
 	n2 := seedStructuredNode(t, a2, "g1", "grok", "acp")
@@ -223,7 +291,7 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 	}
 
 	// Completion / interrupt / clear / exit / delete transitions.
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.disarmAutoApprove(n.ID) // interrupt/clear/exit/delete path
 	a.mu.Lock()
 	if a.autoApprove[n.ID] != nil {
@@ -232,7 +300,7 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 	a.mu.Unlock()
 
 	// clearStaleArmedBeforePrompt drops armed when idle.
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.clearStaleArmedBeforePrompt(n.ID, "quiet")
 	a.mu.Lock()
 	if a.autoApprove[n.ID] != nil {
@@ -241,7 +309,7 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 	a.mu.Unlock()
 
 	// Browser navigation has no server effect — no code path; state survives.
-	a.setAutoApproveEnabled(n.ID, true, "quiet", "")
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
 	a.mu.Lock()
 	if a.autoApprove[n.ID] == nil || a.autoApprove[n.ID].Phase != autoPhasePrimed {
 		t.Fatal("lease must remain without browser involvement")
@@ -319,7 +387,7 @@ func TestAutoApproveHTTPAndETag(t *testing.T) {
 	}
 
 	// Arm via prompt transition → ETag changes
-	a.armAutoApproveOnPrompt(n.ID)
+	a.armAutoApproveOnPrompt(n.ID, "inc", 0, true)
 	rec2 := chatGET(t, a, "cx1", etag1)
 	if rec2.Code != 200 {
 		t.Fatalf("after arm code=%d", rec2.Code)
@@ -403,10 +471,10 @@ func TestMaybeAutoApproveAuditBeforeDeliver(t *testing.T) {
 	n := seedStructuredNode(t, a, "s1", "opencode", "acp")
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("req-1"), clearOnDeliver: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
 	}
 	// Arm lease (active enable).
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 
 	a.maybeAutoApprove(n, stub)
 	if stub.prepareCalls != 1 || stub.deliverCalls != 1 {
@@ -423,7 +491,7 @@ func TestMaybeAutoApproveAuditBeforeDeliver(t *testing.T) {
 			dec = evs[i].Decision
 		}
 	}
-	if dec == nil || dec.Source != "auto" || dec.RequestID != "req-1" || dec.Selected.Kind != "allow" {
+	if dec == nil || dec.Source != "auto" || dec.RequestID != "inc:1" || dec.Selected.Kind != "allow" {
 		t.Fatalf("decision = %+v", dec)
 	}
 	if dec.Selected.Key != "1" || dec.Selected.Name != "Allow once" {
@@ -451,9 +519,9 @@ func TestMaybeAutoApproveGrokStyleSelectsKey2(t *testing.T) {
 	n := seedStructuredNode(t, a, "g-key2", "grok", "acp")
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: grokStylePending("req-g2"), clearOnDeliver: true,
+		pending: grokStylePending("inc:1"), clearOnDeliver: true,
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	if stub.prepareCalls != 1 || stub.deliverCalls != 1 {
 		t.Fatalf("prepare/deliver = %d/%d, want 1/1", stub.prepareCalls, stub.deliverCalls)
@@ -505,7 +573,7 @@ func TestMaybeAutoApproveMultipleAllowsStayManual(t *testing.T) {
 			},
 		},
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	if stub.prepareCalls != 0 || stub.deliverCalls != 0 {
 		t.Fatalf("ambiguous allows must stay manual; prep/del=%d/%d",
@@ -524,9 +592,9 @@ func TestMaybeAutoApproveAuditFailureFailClosed(t *testing.T) {
 	}
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("req-fail"),
+		pending: allowPending("inc:1"),
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	if stub.deliverCalls != 0 {
 		t.Fatalf("deliver called %d times after audit failure", stub.deliverCalls)
@@ -539,7 +607,7 @@ func TestMaybeAutoApproveAuditFailureFailClosed(t *testing.T) {
 	if st == nil || st.Count != 0 || st.Error == "" {
 		t.Fatalf("state after audit fail = %+v", st)
 	}
-	if !st.Attempted["req-fail"] {
+	if !st.Attempted["inc:1"] {
 		t.Fatal("must mark attempted so poller does not retry every tick")
 	}
 	a.mu.Unlock()
@@ -559,9 +627,9 @@ func TestMaybeAutoApproveDeliveryFailureKeepsAudit(t *testing.T) {
 	n := seedStructuredNode(t, a, "s3", "grok", "acp")
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("req-d"), deliverErr: errors.New("agent gone"),
+		pending: allowPending("inc:1"), deliverErr: errors.New("agent gone"),
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	if stub.deliverCalls != 1 {
 		t.Fatal("deliver must be attempted")
@@ -595,43 +663,57 @@ func TestMaybeAutoApproveSkipsPendingAtEnable(t *testing.T) {
 	n := seedStructuredNode(t, a, "s4", "codex", "codex")
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("already-showing"),
+		// Same incarnation, seq at the enable watermark.
+		pending: allowPending("inc:5"),
 	}
-	// Enable while this request is already pending.
-	a.setAutoApproveEnabled(n.ID, true, "active", "already-showing")
+	// Enable cutoff: incarn=inc, maxSeq=5 → this request is pre-enable.
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 5)
 	a.maybeAutoApprove(n, stub)
 	if stub.prepareCalls != 0 || stub.deliverCalls != 0 {
 		t.Fatalf("must not auto-resolve pre-enable request; prep/del=%d/%d",
 			stub.prepareCalls, stub.deliverCalls)
 	}
+	// A later request (seq 6) on the same incarnation is eligible.
+	stub.pending = allowPending("inc:6")
+	stub.hasPending = true
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 1 {
+		t.Fatalf("post-enable request should deliver; del=%d", stub.deliverCalls)
+	}
 }
 
 // A primed lease — enabled while the node was idle — must not approve anything
-// until a prompt arms it. This is the load-bearing half of "one turn": the
-// lease is scoped to the turn the human starts *after* enabling, so a request
-// arriving while merely primed (a turn scimux thinks ended, a prompt sent from
-// elsewhere) belongs to no leased turn and stays manual.
+// until a prompt arms it. Arming with the pre-send boundary makes the same
+// request eligible (one-turn contract / C3).
 func TestMaybeAutoApprovePrimedLeaseNeverApproves(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "s6", "grok", "acp")
 	stub := &stubProc{
 		live: "quiet", hasSession: true, hasPending: true,
-		pending: grokStylePending("req-primed"), clearOnDeliver: true,
+		pending:        grokStylePending("inc:1"),
+		clearOnDeliver: true,
+		boundarySet:    true, boundaryIncarn: "inc", boundaryMaxSeq: 0,
 	}
-	if v := a.setAutoApproveEnabled(n.ID, true, "quiet", ""); v.Phase != "primed" {
+	if v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0); v.Phase != "primed" {
 		t.Fatalf("setup: phase = %q, want primed (enabled while idle)", v.Phase)
 	}
+	// Primed must never approve, even if the request is otherwise eligible.
 	a.maybeAutoApprove(n, stub)
 	if stub.prepareCalls != 0 || stub.deliverCalls != 0 {
 		t.Fatalf("primed lease auto-approved; prep/del=%d/%d, want 0/0",
 			stub.prepareCalls, stub.deliverCalls)
 	}
-	// Arming it is what unlocks the same request — otherwise this test would
-	// still pass if the request were ineligible for some unrelated reason.
-	a.armAutoApproveOnPrompt(n.ID)
+	// Pre-send boundary maxSeq=0: the turn's first permission (inc:1) is eligible after arm.
+	a.armAutoApproveOnPrompt(n.ID, "inc", 0, true)
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	if st == nil || st.Phase != autoPhaseArmed || st.EnableIncarn != "inc" || st.EnableMaxSeq != 0 {
+		t.Fatalf("after arm state = %+v, want armed inc/0", st)
+	}
+	a.mu.Unlock()
 	a.maybeAutoApprove(n, stub)
 	if stub.deliverCalls != 1 {
-		t.Fatalf("armed lease delivered %d, want 1 — the request itself is eligible",
+		t.Fatalf("armed lease delivered %d, want 1 — same request becomes eligible",
 			stub.deliverCalls)
 	}
 }
@@ -646,7 +728,7 @@ func TestMaybeAutoApproveIneligibleStaysManual(t *testing.T) {
 			Options: []PermOption{{Key: "1", Name: "Always", Kind: "allow_always"}},
 		},
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	if stub.prepareCalls != 0 {
 		t.Fatal("ineligible must not prepare")
@@ -663,11 +745,11 @@ func TestPollAutoApproveBeforeAttention(t *testing.T) {
 	n := seedStructuredNode(t, a, "p1", "grok", "acp")
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("req-poll"), clearOnDeliver: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
 	}
 	// Inject stub via replacing acp manager adapter is hard; call maybeAutoApprove
 	// then simulate poll attention publish order.
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	attn := stub.Attention(n.ID)
 	a.mu.Lock()
@@ -683,9 +765,9 @@ func TestPollNoDoubleDeliver(t *testing.T) {
 	n := seedStructuredNode(t, a, "p2", "pi", "acp")
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("req-once"), clearOnDeliver: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	// Concurrent polls.
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -709,44 +791,56 @@ func TestPollNoDoubleDeliver(t *testing.T) {
 func TestDisarmDuringAutoApproveCannotLeak(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "p3", "codex", "codex")
-	// Slow deliver: hold until we disarm mid-flight.
+	// Slow deliver: hold until the test releases it. Disable waits on the
+	// per-node auto-gate, so it must be started concurrently (not before
+	// release) — once disable returns, the prior lease is gone.
 	gate := make(chan struct{})
-	var deliverStarted atomic.Int32
+	inDeliver := make(chan struct{})
 	stub := &stubProc{
 		live: "active", hasSession: true, hasPending: true,
-		pending: allowPending("req-race"),
+		pending: allowPending("inc:1"),
 	}
-	// Wrap deliver with gate via deliverErr path: custom type
-	slow := &slowDeliverProc{stubProc: stub, gate: gate, started: &deliverStarted}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	slow := &channelDeliverProc{
+		stubProc: stub,
+		onEnter:  func() { close(inDeliver); <-gate },
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 
 	done := make(chan struct{})
 	go func() {
 		a.maybeAutoApprove(n, slow)
 		close(done)
 	}()
-	// Wait until deliver is about to run (after audit).
-	deadline := time.Now().Add(2 * time.Second)
-	for deliverStarted.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if deliverStarted.Load() == 0 {
+	select {
+	case <-inDeliver:
+	case <-time.After(3 * time.Second):
 		close(gate)
 		<-done
 		t.Fatal("deliver never started")
 	}
-	// Concurrent disable.
-	a.disarmAutoApprove(n.ID)
+	// Concurrent disable waits behind the in-flight decision.
+	disarmDone := make(chan struct{})
+	go func() {
+		a.disarmAutoApprove(n.ID)
+		close(disarmDone)
+	}()
 	close(gate)
-	<-done
-	// Count must not increment on a disarmed lease after delivery... actually
-	// delivery may still succeed to the agent, but count check requires lease match.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("maybeAutoApprove did not finish")
+	}
+	select {
+	case <-disarmDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("disarm did not finish")
+	}
+	// After disable returns the lease is gone; no armed state may remain.
 	a.mu.Lock()
 	st := a.autoApprove[n.ID]
 	a.mu.Unlock()
-	if st != nil && st.Count > 0 {
-		// If disarm deleted state, st is nil — good. If somehow still present with count, fail.
-		t.Fatalf("leaked armed state with count: %+v", st)
+	if st != nil {
+		t.Fatalf("leaked armed state after disable: %+v", st)
 	}
 }
 
@@ -819,7 +913,7 @@ func TestAutoApproveCallOrder(t *testing.T) {
 	stub := &orderSpyProc{
 		stubProc: &stubProc{
 			live: "active", hasSession: true, hasPending: true,
-			pending: allowPending("req-ord"), clearOnDeliver: true,
+			pending: allowPending("inc:1"), clearOnDeliver: true,
 		},
 		onPrepare: func() {
 			mu.Lock()
@@ -841,7 +935,7 @@ func TestAutoApproveCallOrder(t *testing.T) {
 			mu.Unlock()
 		},
 	}
-	a.setAutoApproveEnabled(n.ID, true, "active", "")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.maybeAutoApprove(n, stub)
 	mu.Lock()
 	got := strings.Join(order, ",")
@@ -857,11 +951,11 @@ type orderSpyProc struct {
 	onDeliver func()
 }
 
-func (o *orderSpyProc) PrepareResolve(id, key string) (string, string, error) {
+func (o *orderSpyProc) PrepareResolve(id, expectedRequestID, key string) (string, string, error) {
 	if o.onPrepare != nil {
 		o.onPrepare()
 	}
-	return o.stubProc.PrepareResolve(id, key)
+	return o.stubProc.PrepareResolve(id, expectedRequestID, key)
 }
 func (o *orderSpyProc) Deliver(id, tok string) error {
 	if o.onDeliver != nil {
@@ -873,11 +967,1078 @@ func (o *orderSpyProc) Deliver(id, tok string) error {
 func TestDeleteClearsAutoApprove(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "del1", "pi", "acp")
-	a.setAutoApproveEnabled(n.ID, true, "quiet", "")
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
 	a.mu.Lock()
 	a.removeNodeLocked(n.ID)
 	if a.autoApprove[n.ID] != nil {
 		t.Fatal("delete must clear auto-approve state")
 	}
 	a.mu.Unlock()
+}
+
+// ---------- P1 security: request-ID bind + lease linearization ----------
+
+// Snapshot A, replace with B (same key layout) before prepare. B must not be
+// delivered and no decision event may be written.
+func TestMaybeAutoApproveStaleRequestNotDelivered(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "race-a", "grok", "acp")
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending:        allowPending("inc:1"),
+		conflictErrors: []error{errStubStale},
+	}
+	// When prepare runs with A's id, pending is already B (identical keys).
+	stub.prepareHook = func(s *stubProc) {
+		s.pending = allowPending("inc:2")
+		s.hasPending = true
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 0 {
+		t.Fatalf("deliverCalls = %d, want 0 (B must not be answered for A's evaluation)", stub.deliverCalls)
+	}
+	if stub.lastPrepareReqID != "inc:1" {
+		t.Fatalf("prepare expected id = %q, want inc:1", stub.lastPrepareReqID)
+	}
+	for _, ev := range sessionlog.ReadEvents(a.sessionLogPath(n.ID)) {
+		if ev.T == "decision" {
+			t.Fatalf("decision audit written for stale prepare: %+v", ev.Decision)
+		}
+	}
+	// B remains pending for manual resolution.
+	if !stub.hasPending || stub.pending.RequestID != "inc:2" {
+		t.Fatalf("B must remain pending; got has=%v pending=%+v", stub.hasPending, stub.pending)
+	}
+}
+
+// Replacement B has allow_always at the key that was A's one-time allow.
+// Option position is never authorization — B must not be delivered.
+func TestMaybeAutoApproveReplacementAllowAlwaysNotDelivered(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "race-aa", "opencode", "acp")
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending:        allowPending("inc:1"), // key "1" is allow
+		conflictErrors: []error{errStubStale},
+	}
+	stub.prepareHook = func(s *stubProc) {
+		// B: key "1" is now allow_always (A's former key position).
+		s.pending = PendingPermission{
+			RequestID: "inc:2", Title: "go test ./...", ToolKind: "execute",
+			Options: []PermOption{
+				{Key: "1", Name: "Always allow", Kind: "allow_always"},
+				{Key: "2", Name: "Reject", Kind: "reject"},
+			},
+		}
+		s.hasPending = true
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 0 {
+		t.Fatalf("deliverCalls = %d, want 0", stub.deliverCalls)
+	}
+	for _, ev := range sessionlog.ReadEvents(a.sessionLogPath(n.ID)) {
+		if ev.T == "decision" {
+			t.Fatalf("must not audit a decision for a replaced request: %+v", ev.Decision)
+		}
+	}
+}
+
+// Disable wins the per-node decision ordering: disable returns and the old
+// lease never calls Deliver.
+func TestAutoApproveDisableWinsPreventsDelivery(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "dis-first", "pi", "acp")
+	inPending := make(chan struct{})
+	releasePending := make(chan struct{})
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
+	}
+	// Block the decision path in Pending so disable can take the auto-gate first.
+	blocking := &pendingBlockProc{
+		stubProc: stub,
+		onPending: func() {
+			select {
+			case <-inPending:
+			default:
+				close(inPending)
+			}
+			<-releasePending
+		},
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+
+	done := make(chan struct{})
+	go func() {
+		a.maybeAutoApprove(n, blocking)
+		close(done)
+	}()
+	select {
+	case <-inPending:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision never entered Pending")
+	}
+	// Disable while decision is still before the auto-gate.
+	a.disarmAutoApprove(n.ID)
+	close(releasePending)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("maybeAutoApprove did not return after disable")
+	}
+	if stub.deliverCalls != 0 || stub.prepareCalls != 0 {
+		t.Fatalf("old lease must not prepare/deliver after disable; prep/del=%d/%d",
+			stub.prepareCalls, stub.deliverCalls)
+	}
+	a.mu.Lock()
+	if a.autoApprove[n.ID] != nil {
+		t.Fatalf("lease must be off after disable: %+v", a.autoApprove[n.ID])
+	}
+	a.mu.Unlock()
+}
+
+// Automatic decision wins ordering: audit+delivery finish before disable
+// returns; no old-lease delivery afterward.
+func TestAutoApproveDecisionWinsBeforeDisable(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "dec-first", "codex", "codex")
+	inDeliver := make(chan struct{})
+	releaseDeliver := make(chan struct{})
+	order := make(chan string, 4)
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
+	}
+	slow := &channelDeliverProc{
+		stubProc: stub,
+		onEnter: func() {
+			close(inDeliver)
+			<-releaseDeliver
+			order <- "deliver-done"
+		},
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+
+	decDone := make(chan struct{})
+	go func() {
+		a.maybeAutoApprove(n, slow)
+		close(decDone)
+	}()
+	select {
+	case <-inDeliver:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision never reached Deliver")
+	}
+	// Disable must wait behind the in-flight decision (holds auto-gate).
+	disarmDone := make(chan struct{})
+	go func() {
+		a.disarmAutoApprove(n.ID)
+		order <- "disable-done"
+		close(disarmDone)
+	}()
+	// Finish delivery; then disable may return. Order is recorded on channels.
+	close(releaseDeliver)
+	select {
+	case <-decDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision did not finish")
+	}
+	select {
+	case <-disarmDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("disable did not return after decision released the gate")
+	}
+	var seq []string
+	for len(seq) < 2 {
+		select {
+		case s := <-order:
+			seq = append(seq, s)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("order incomplete: %v", seq)
+		}
+	}
+	if seq[0] != "deliver-done" || seq[1] != "disable-done" {
+		t.Fatalf("order = %v, want deliver-done then disable-done", seq)
+	}
+	if stub.deliverCalls != 1 {
+		t.Fatalf("deliverCalls = %d, want 1", stub.deliverCalls)
+	}
+	// No second delivery after disable.
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 1 {
+		t.Fatalf("post-disable deliverCalls = %d, want still 1", stub.deliverCalls)
+	}
+	// Decision audit exists (committed before disable returned).
+	var saw bool
+	for _, ev := range sessionlog.ReadEvents(a.sessionLogPath(n.ID)) {
+		if ev.T == "decision" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("decision audit missing after decision-first ordering")
+	}
+}
+
+// Re-arm has the same barrier as disable and creates a distinct lease ID.
+func TestAutoApproveRearmBarrierAndNewLease(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "rearm", "grok", "acp")
+	inDeliver := make(chan struct{})
+	releaseDeliver := make(chan struct{})
+	order := make(chan string, 4)
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
+	}
+	slow := &channelDeliverProc{
+		stubProc: stub,
+		onEnter: func() {
+			close(inDeliver)
+			<-releaseDeliver
+			order <- "deliver-done"
+		},
+	}
+	v1 := a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	if v1.Phase != "armed" || v1.Enabled != true {
+		t.Fatalf("first enable = %+v", v1)
+	}
+	a.mu.Lock()
+	lease1 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+	if lease1 == "" {
+		t.Fatal("empty lease id")
+	}
+
+	decDone := make(chan struct{})
+	go func() {
+		a.maybeAutoApprove(n, slow)
+		close(decDone)
+	}()
+	select {
+	case <-inDeliver:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision never reached Deliver")
+	}
+
+	// Re-arm (enable again) must wait behind the in-flight decision.
+	var v2 autoApproveView
+	rearmDone := make(chan struct{})
+	go func() {
+		v2 = a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+		order <- "rearm-done"
+		close(rearmDone)
+	}()
+	close(releaseDeliver)
+	select {
+	case <-decDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision did not finish")
+	}
+	select {
+	case <-rearmDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("re-arm did not return")
+	}
+	var seq []string
+	for len(seq) < 2 {
+		select {
+		case s := <-order:
+			seq = append(seq, s)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("order incomplete: %v", seq)
+		}
+	}
+	if seq[0] != "deliver-done" || seq[1] != "rearm-done" {
+		t.Fatalf("order = %v, want deliver-done then rearm-done", seq)
+	}
+	if !v2.Enabled || v2.Phase != "armed" {
+		t.Fatalf("re-arm view = %+v", v2)
+	}
+	a.mu.Lock()
+	lease2 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+	if lease2 == "" || lease2 == lease1 {
+		t.Fatalf("re-arm lease = %q, want distinct from %q", lease2, lease1)
+	}
+	// Old lease must not deliver again under the new lease without a new request.
+	// The old request was already delivered; pending cleared.
+	if stub.deliverCalls != 1 {
+		t.Fatalf("deliverCalls = %d, want 1", stub.deliverCalls)
+	}
+}
+
+// pendingBlockProc runs onPending before returning Pending (race coordination).
+type pendingBlockProc struct {
+	*stubProc
+	onPending func()
+}
+
+func (p *pendingBlockProc) Pending(id string) (PendingPermission, bool) {
+	if p.onPending != nil {
+		p.onPending()
+	}
+	return p.stubProc.Pending(id)
+}
+
+// channelDeliverProc runs onEnter inside Deliver before delegating.
+type channelDeliverProc struct {
+	*stubProc
+	onEnter func()
+}
+
+func (c *channelDeliverProc) Deliver(nodeID, optID string) error {
+	if c.onEnter != nil {
+		c.onEnter()
+	}
+	return c.stubProc.Deliver(nodeID, optID)
+}
+
+// ---------- P1 review: re-arm cutoff + lifecycle barriers ----------
+
+// HTTP re-arm while A is delivering: snapshot is taken after the gate, so B
+// (which became current while re-arm waited) stays manual.
+func TestHTTPRearmCutoffExcludesRequestThatArrivedDuringWait(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "rearm-http", "grok", "acp")
+	inDeliver := make(chan struct{})
+	releaseDeliver := make(chan struct{})
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		// First lease: A (seq 1) is post-enable (cutoff maxSeq 0).
+		pending: allowPending("inc:1"), clearOnDeliver: true,
+		boundarySet: true, boundaryIncarn: "inc", boundaryMaxSeq: 0,
+	}
+	v1 := a.enableAutoApprove(n.ID, stub)
+	if v1.Phase != "armed" {
+		t.Fatalf("first enable = %+v", v1)
+	}
+	// After enable, advance boundary so a concurrent re-arm can observe B.
+	stub.mu.Lock()
+	stub.boundaryMaxSeq = 1
+	stub.mu.Unlock()
+	// Old lease starts delivering A.
+	slow := &channelDeliverProc{
+		stubProc: stub,
+		onEnter: func() {
+			close(inDeliver)
+			<-releaseDeliver
+		},
+	}
+	decDone := make(chan struct{})
+	go func() {
+		a.maybeAutoApprove(n, slow)
+		close(decDone)
+	}()
+	select {
+	case <-inDeliver:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision never reached Deliver")
+	}
+	// While A is in deliver, B becomes the next pending and boundary advances.
+	// Re-arm waits on the gate; when it wins, PermissionBoundary must see B.
+	stub.mu.Lock()
+	stub.pending = allowPending("inc:2")
+	stub.hasPending = true
+	stub.boundaryMaxSeq = 2
+	stub.mu.Unlock()
+
+	var v2 autoApproveView
+	rearmDone := make(chan struct{})
+	go func() {
+		// Real HTTP handler path would call enableAutoApprove with a.proc;
+		// exercise that function with the stub so the snapshot is gate-ordered.
+		v2 = a.enableAutoApprove(n.ID, stub)
+		close(rearmDone)
+	}()
+	close(releaseDeliver)
+	select {
+	case <-decDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision did not finish")
+	}
+	select {
+	case <-rearmDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("re-arm did not finish")
+	}
+	if !v2.Enabled || v2.Phase != "armed" {
+		t.Fatalf("re-arm view = %+v", v2)
+	}
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	if st == nil || st.EnableIncarn != "inc" || st.EnableMaxSeq != 2 {
+		t.Fatalf("re-arm cutoff = %+v, want inc/2 (includes B)", st)
+	}
+	a.mu.Unlock()
+	// B must stay manual under the new lease.
+	stub.deliverCalls = 0
+	stub.prepareCalls = 0
+	stub.clearOnDeliver = false
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 0 {
+		t.Fatalf("B (seq 2 at re-arm cutoff) must stay manual; del=%d", stub.deliverCalls)
+	}
+	// C created after re-arm is eligible.
+	stub.pending = allowPending("inc:3")
+	stub.hasPending = true
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 1 {
+		t.Fatalf("post-rearm request should deliver; del=%d", stub.deliverCalls)
+	}
+}
+
+// Codex queue: B queued behind A before re-arm; after A finishes and re-arm
+// returns, B stays manual (boundary maxSeq covers the whole queue).
+func TestRearmExcludesQueuedBehindHead(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "queue-b", "codex", "codex")
+	// At enable, pendingSeq is already 2 (A head + B queued).
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending:     allowPending("inc:1"), // head is A
+		boundarySet: true, boundaryIncarn: "inc", boundaryMaxSeq: 2,
+	}
+	v := a.enableAutoApprove(n.ID, stub)
+	if v.Phase != "armed" {
+		t.Fatalf("enable = %+v", v)
+	}
+	a.mu.Lock()
+	if a.autoApprove[n.ID].EnableMaxSeq != 2 {
+		t.Fatalf("cutoff maxSeq = %d, want 2", a.autoApprove[n.ID].EnableMaxSeq)
+	}
+	a.mu.Unlock()
+	// A is pre-enable.
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 0 {
+		t.Fatal("A must stay manual")
+	}
+	// After A is answered externally, B becomes head with seq 2 — still pre-enable.
+	stub.pending = allowPending("inc:2")
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 0 {
+		t.Fatal("queued-at-enable B must stay manual after becoming head")
+	}
+}
+
+// Delete during in-flight deliver: delete waits for the barrier, then no
+// further decision appends land on an archived log.
+func TestDeleteWaitsForAutoApproveBarrier(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "del-race", "pi", "acp")
+	inDeliver := make(chan struct{})
+	releaseDeliver := make(chan struct{})
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	slow := &channelDeliverProc{
+		stubProc: stub,
+		onEnter:  func() { close(inDeliver); <-releaseDeliver },
+	}
+	decDone := make(chan struct{})
+	go func() {
+		a.maybeAutoApprove(n, slow)
+		close(decDone)
+	}()
+	select {
+	case <-inDeliver:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision never reached Deliver")
+	}
+	// Delete path: disarm first (what handleDeleteNode does before close/archive).
+	disarmDone := make(chan struct{})
+	go func() {
+		a.disarmAutoApprove(n.ID)
+		close(disarmDone)
+	}()
+	close(releaseDeliver)
+	select {
+	case <-decDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("decision did not finish")
+	}
+	select {
+	case <-disarmDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("disarm did not finish after decision")
+	}
+	a.mu.Lock()
+	if a.autoApprove[n.ID] != nil {
+		t.Fatal("lease must be gone after delete barrier")
+	}
+	a.mu.Unlock()
+	// No further auto delivery after barrier.
+	stub.hasPending = true
+	stub.pending = allowPending("inc:2")
+	a.maybeAutoApprove(n, stub)
+	// deliverCalls may be 1 from the first decision; must not grow.
+	if stub.deliverCalls != 1 {
+		t.Fatalf("post-delete deliverCalls = %d, want 1", stub.deliverCalls)
+	}
+}
+
+// HTTP disable does not call Live/Pending (fast path).
+func TestHTTPDisableSkipsManagerSnapshot(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "dis-fast", "grok", "acp")
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	// No manager installed; disable must still succeed without panicking.
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/auto-approve", strings.NewReader(`{"enabled":false}`))
+	r.SetPathValue("id", n.ID)
+	a.handleAutoApprove(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("disable code = %d body %q", rec.Code, rec.Body)
+	}
+	a.mu.Lock()
+	if a.autoApprove[n.ID] != nil {
+		t.Fatal("lease must be off")
+	}
+	a.mu.Unlock()
+}
+
+// ---------- P1 re-review: delete barrier, empty boundary, poller lease-id ----------
+
+// Malformed request IDs are always ineligible, even with an empty enable boundary.
+func TestRequestCreatedAfterEnableFailClosed(t *testing.T) {
+	// Empty boundary → never eligible.
+	if requestCreatedAfterEnable("", 0, "inc:1") {
+		t.Fatal("empty enable boundary must not treat any request as post-enable")
+	}
+	if requestCreatedAfterEnable("", 0, "malformed") {
+		t.Fatal("malformed ID with empty boundary must be ineligible")
+	}
+	// Bound boundary → malformed still ineligible.
+	if requestCreatedAfterEnable("inc", 0, "malformed") {
+		t.Fatal("malformed ID must always be ineligible")
+	}
+	if requestCreatedAfterEnable("inc", 0, "") {
+		t.Fatal("empty request ID must be ineligible")
+	}
+	if requestCreatedAfterEnable("inc", 0, "other:1") {
+		t.Fatal("foreign incarnation must be ineligible")
+	}
+	if requestCreatedAfterEnable("inc", 5, "inc:5") {
+		t.Fatal("seq at watermark must be pre-enable")
+	}
+	if !requestCreatedAfterEnable("inc", 5, "inc:6") {
+		t.Fatal("seq after watermark must be post-enable")
+	}
+}
+
+// Enable without a session (empty boundary), arm with pre-send incarnation A
+// (maxSeq 0); A:1 is eligible, foreign incarnation B is not.
+func TestPrimedArmBindsPresendBoundaryAndFencesIncarnation(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "bound-a", "grok", "acp")
+	// Enable while idle with no manager boundary.
+	if v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0); v.Phase != "primed" {
+		t.Fatalf("enable = %+v", v)
+	}
+	// Pre-send bound to A/0; first permission A:1 is post-cutoff.
+	a.armAutoApproveOnPrompt(n.ID, "A", 0, true)
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	if st == nil || st.EnableIncarn != "A" || st.EnableMaxSeq != 0 || st.Phase != autoPhaseArmed {
+		t.Fatalf("arm bind = %+v, want armed A/0", st)
+	}
+	a.mu.Unlock()
+	stubA := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("A:1"), clearOnDeliver: true,
+	}
+	a.maybeAutoApprove(n, stubA)
+	if stubA.deliverCalls != 1 {
+		t.Fatalf("A:1 after pre-send cutoff 0 must deliver; del=%d", stubA.deliverCalls)
+	}
+	// Session replaced by B (foreign incarnation) — must not auto-approve.
+	stubB := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("B:1"),
+	}
+	a.maybeAutoApprove(n, stubB)
+	if stubB.deliverCalls != 0 {
+		t.Fatal("incarnation B must not qualify under lease bound to A")
+	}
+}
+
+// Real handleDeleteNode holds the auto-gate through teardown: concurrent enable
+// and poll-driven auto-approve cannot install a lease or deliver a decision
+// that survives deletion, and the session log is not recreated after archival.
+func TestHandleDeleteBlocksEnableAndDecision(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "del-live", "pi", "acp")
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("inc:1"), clearOnDeliver: true,
+	}
+	a.testProc = stub
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+
+	inGate := make(chan struct{})
+	releaseGate := make(chan struct{})
+	a.deleteGateHook = func(id string) {
+		if id != n.ID {
+			t.Errorf("hook id = %q", id)
+		}
+		close(inGate)
+		<-releaseGate
+	}
+
+	delDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("DELETE", "/api/nodes/"+n.ID, nil)
+		r.SetPathValue("id", n.ID)
+		a.handleDeleteNode(rec, r)
+		delDone <- rec.Code
+	}()
+
+	select {
+	case <-inGate:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delete never acquired the auto-gate")
+	}
+
+	// Race enable (must wait on the gate) and maybeAutoApprove (pre-check
+	// sees lease already cleared under the held gate → returns without deliver).
+	enableDone := make(chan autoApproveView, 1)
+	go func() {
+		enableDone <- a.enableAutoApprove(n.ID, stub)
+	}()
+	// Spin maybeAutoApprove repeatedly while delete holds the gate.
+	var pollDelivers atomic.Int32
+	stopPoll := make(chan struct{})
+	var pollWG sync.WaitGroup
+	pollWG.Add(1)
+	go func() {
+		defer pollWG.Done()
+		for {
+			select {
+			case <-stopPoll:
+				return
+			default:
+				before := stub.deliverCalls
+				a.maybeAutoApprove(n, stub)
+				if stub.deliverCalls > before {
+					pollDelivers.Add(1)
+				}
+			}
+		}
+	}()
+
+	// Enable must not complete while the gate is held.
+	select {
+	case <-enableDone:
+		t.Fatal("enable completed while delete still held the gate")
+	case <-time.After(50 * time.Millisecond):
+		// expected: blocked on gate
+	}
+
+	// Let delete finish teardown + archival.
+	close(releaseGate)
+	var code int
+	select {
+	case code = <-delDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delete did not finish")
+	}
+	if code != 200 {
+		t.Fatalf("delete code = %d, want 200", code)
+	}
+	close(stopPoll)
+	pollWG.Wait()
+	select {
+	case v := <-enableDone:
+		// After delete, node is gone → unsupported/off.
+		if v.Enabled || v.Phase != "off" {
+			t.Fatalf("post-delete enable = %+v, want off", v)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("enable did not unblock after delete")
+	}
+	if pollDelivers.Load() != 0 {
+		t.Fatalf("poll auto-approve delivered during delete window: %d", pollDelivers.Load())
+	}
+
+	a.mu.Lock()
+	if a.autoApprove[n.ID] != nil {
+		t.Fatalf("lease survived delete: %+v", a.autoApprove[n.ID])
+	}
+	if a.byID[n.ID] != nil {
+		t.Fatal("node still in byID after delete")
+	}
+	a.mu.Unlock()
+	if stub.deliverCalls != 0 {
+		t.Fatalf("no decision may deliver across delete; del=%d", stub.deliverCalls)
+	}
+	// Log archived: live path gone.
+	if _, err := os.Stat(a.sessionLogPath(n.ID)); !os.IsNotExist(err) {
+		t.Fatalf("live session log still present after delete: %v", err)
+	}
+	// No recreation of the live log after archival.
+	// (maybeAutoApprove must not have appended post-archive.)
+	if a.sessionLogExists(n.ID) {
+		t.Fatal("session log recreated after archival")
+	}
+}
+
+// Poller disarm-first then re-arm: the observed lease is cleared; re-arm installs a new one.
+func TestPollerDisarmThenRearm(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "poll-1", "grok", "acp")
+	v := a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	if !v.Enabled {
+		t.Fatal("setup")
+	}
+	a.mu.Lock()
+	lease1 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+
+	// Disarm the observed lease (poller path).
+	a.disarmAutoApproveIfLease(n.ID, lease1)
+	a.mu.Lock()
+	if a.autoApprove[n.ID] != nil {
+		t.Fatal("lease should be cleared by matching disarm")
+	}
+	a.mu.Unlock()
+
+	// Re-arm installs a distinct lease.
+	v2 := a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	if !v2.Enabled {
+		t.Fatal("re-arm failed")
+	}
+	a.mu.Lock()
+	lease2 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+	if lease2 == "" || lease2 == lease1 {
+		t.Fatalf("re-arm lease = %q, want new (not %q)", lease2, lease1)
+	}
+}
+
+// Re-arm first, then a stale poller disarm for the old lease ID must not erase the new lease.
+func TestStalePollerDisarmDoesNotEraseRearm(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "poll-2", "codex", "codex")
+	v1 := a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	a.mu.Lock()
+	lease1 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+	if lease1 == "" || !v1.Enabled {
+		t.Fatal("setup")
+	}
+
+	// Re-arm (new lease) before the stale disarm runs.
+	v2 := a.setAutoApproveEnabled(n.ID, true, "active", "inc", 1)
+	a.mu.Lock()
+	lease2 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+	if !v2.Enabled || lease2 == "" || lease2 == lease1 {
+		t.Fatalf("re-arm lease = %q (old %q)", lease2, lease1)
+	}
+
+	// Stale poller disarm observed lease1 — must leave lease2 intact.
+	a.disarmAutoApproveIfLease(n.ID, lease1)
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	a.mu.Unlock()
+	if st == nil || st.LeaseID != lease2 {
+		t.Fatalf("stale disarm wiped re-arm: %+v, want lease %q", st, lease2)
+	}
+
+	// Empty observation must not wipe either.
+	a.disarmAutoApproveIfLease(n.ID, "")
+	a.mu.Lock()
+	st = a.autoApprove[n.ID]
+	a.mu.Unlock()
+	if st == nil || st.LeaseID != lease2 {
+		t.Fatalf("empty-lease disarm wiped state: %+v", st)
+	}
+}
+
+// Pre-send boundary is sampled before Send. If Send publishes inc:1 before
+// returning, arm still uses the pre-send maxSeq (0) so inc:1 remains eligible.
+func TestAcceptStructuredPromptPresendCutoffKeepsFirstPermissionEligible(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "send-race", "grok", "acp")
+	stub := &stubProc{
+		live: "quiet", hasSession: true,
+		boundarySet: true, boundaryIncarn: "inc", boundaryMaxSeq: 0,
+	}
+	// During Send, the turn issues permission inc:1 and advances the boundary.
+	stub.sendHook = func(s *stubProc) {
+		s.pending = allowPending("inc:1")
+		s.hasPending = true
+		s.boundaryMaxSeq = 1
+		s.live = "active"
+	}
+	if v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0); v.Phase != "primed" {
+		t.Fatalf("enable = %+v", v)
+	}
+	if err := a.acceptStructuredPrompt(n, stub, "do it"); err != nil {
+		t.Fatal(err)
+	}
+	if stub.sendCalls != 1 {
+		t.Fatalf("sendCalls = %d", stub.sendCalls)
+	}
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	if st == nil || st.Phase != autoPhaseArmed || st.EnableIncarn != "inc" || st.EnableMaxSeq != 0 {
+		t.Fatalf("after accept state = %+v, want armed inc/0 (pre-send)", st)
+	}
+	a.mu.Unlock()
+	// First permission of the turn is eligible under pre-send cutoff 0.
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 1 {
+		t.Fatalf("inc:1 must deliver after pre-send arm; del=%d", stub.deliverCalls)
+	}
+}
+
+// Real handleSend path: same pre-send cutoff guarantee via HTTP.
+func TestHandleSendArmsWithPresendCutoff(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "http-send", "pi", "acp")
+	stub := &stubProc{
+		live: "quiet", hasSession: true,
+		boundarySet: true, boundaryIncarn: "inc", boundaryMaxSeq: 0,
+	}
+	stub.sendHook = func(s *stubProc) {
+		s.pending = allowPending("inc:1")
+		s.hasPending = true
+		s.boundaryMaxSeq = 1
+		s.live = "active"
+	}
+	a.testProc = stub
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/send",
+		strings.NewReader(`{"text":"run tests"}`))
+	r.SetPathValue("id", n.ID)
+	a.handleSend(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("handleSend code = %d body %q", rec.Code, rec.Body)
+	}
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	if st == nil || st.Phase != autoPhaseArmed || st.EnableMaxSeq != 0 {
+		t.Fatalf("after send state = %+v, want armed maxSeq 0", st)
+	}
+	lease := st.LeaseID
+	a.mu.Unlock()
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 1 {
+		t.Fatalf("first permission must deliver; del=%d", stub.deliverCalls)
+	}
+	// Lease identity preserved through arm.
+	a.mu.Lock()
+	if a.autoApprove[n.ID] == nil || a.autoApprove[n.ID].LeaseID != lease {
+		t.Fatalf("lease rotated unexpectedly: %+v", a.autoApprove[n.ID])
+	}
+	a.mu.Unlock()
+}
+
+// Arm must not reset a different primed lease (lease-ID mismatch guard).
+// L2 stays primed under the gate while we invoke the locked helper with L1.
+func TestArmDoesNotResetForeignLease(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "foreign-lease", "codex", "codex")
+	// Primed lease L1.
+	v1 := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+	a.mu.Lock()
+	l1 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+	if !v1.Enabled || l1 == "" {
+		t.Fatal("setup primed")
+	}
+	// Concurrent enable installs a different primed lease L2 (still idle).
+	v2 := a.setAutoApproveEnabled(n.ID, true, "quiet", "old", 3)
+	a.mu.Lock()
+	l2 := a.autoApprove[n.ID].LeaseID
+	inc2 := a.autoApprove[n.ID].EnableIncarn
+	max2 := a.autoApprove[n.ID].EnableMaxSeq
+	phase := a.autoApprove[n.ID].Phase
+	a.mu.Unlock()
+	if !v2.Enabled || l2 == l1 || phase != autoPhasePrimed {
+		t.Fatalf("setup L2 = %q phase %s (L1 %q)", l2, phase, l1)
+	}
+	// Hold the gate and arm as if finishing the old prompt with L1's id.
+	g := a.autoGateFor(n.ID)
+	g.Lock()
+	a.armAutoApproveOnPromptLocked(n.ID, l1, "inc", 0, true)
+	g.Unlock()
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	gotID, gotPhase, gotInc, gotMax := "", autoPhaseOff, "", uint64(0)
+	if st != nil {
+		gotID, gotPhase, gotInc, gotMax = st.LeaseID, st.Phase, st.EnableIncarn, st.EnableMaxSeq
+	}
+	a.mu.Unlock()
+	if gotID != l2 || gotPhase != autoPhasePrimed || gotInc != inc2 || gotMax != max2 {
+		t.Fatalf("arm reset foreign primed lease: id=%q phase=%s bound=%s/%d, want L2 %q primed %s/%d",
+			gotID, gotPhase, gotInc, gotMax, l2, inc2, max2)
+	}
+}
+
+// Concurrent enable waits behind acceptStructuredPrompt's gate. After both
+// complete, enable's new lease is current (L2). Pre-send arming of L1 is
+// covered by TestAcceptStructuredPromptPresendCutoff / TestHandleSendArms.
+func TestEnableWaitsBehindAcceptStructuredPrompt(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "enable-wait", "grok", "acp")
+	inSend := make(chan struct{})
+	releaseSend := make(chan struct{})
+	// Capture L1 after arm while accept still holds the gate (before unlock).
+	armedL1 := make(chan struct {
+		lease string
+		phase autoApprovePhase
+		max   uint64
+	}, 1)
+	stub := &stubProc{
+		live: "quiet", hasSession: true,
+		boundarySet: true, boundaryIncarn: "inc", boundaryMaxSeq: 0,
+	}
+	stub.sendHook = func(s *stubProc) {
+		close(inSend)
+		<-releaseSend
+		s.pending = allowPending("inc:1")
+		s.hasPending = true
+		s.boundaryMaxSeq = 1
+	}
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+	a.mu.Lock()
+	l1 := a.autoApprove[n.ID].LeaseID
+	a.mu.Unlock()
+
+	a.acceptArmHook = func(id string) {
+		if id != n.ID {
+			return
+		}
+		// Still holding the auto-gate here (called from acceptStructuredPrompt).
+		a.mu.Lock()
+		st := a.autoApprove[id]
+		var snap struct {
+			lease string
+			phase autoApprovePhase
+			max   uint64
+		}
+		if st != nil {
+			snap.lease, snap.phase, snap.max = st.LeaseID, st.Phase, st.EnableMaxSeq
+		}
+		a.mu.Unlock()
+		select {
+		case armedL1 <- snap:
+		default:
+		}
+	}
+
+	acceptDone := make(chan error, 1)
+	go func() {
+		acceptDone <- a.acceptStructuredPrompt(n, stub, "go")
+	}()
+	select {
+	case <-inSend:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send never entered")
+	}
+
+	// Enable must wait on the auto-gate held across Send.
+	enableDone := make(chan autoApproveView, 1)
+	go func() {
+		enableDone <- a.enableAutoApprove(n.ID, stub)
+	}()
+	select {
+	case <-enableDone:
+		t.Fatal("enable completed while accept still held the gate")
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	close(releaseSend)
+
+	// Observe L1 while accept still holds the gate (hook fires before unlock).
+	var mid struct {
+		lease string
+		phase autoApprovePhase
+		max   uint64
+	}
+	select {
+	case mid = <-armedL1:
+	case <-time.After(3 * time.Second):
+		t.Fatal("acceptArmHook never fired")
+	}
+	if mid.lease != l1 || mid.phase != autoPhaseArmed || mid.max != 0 {
+		t.Fatalf("mid-accept under gate = %+v, want L1 %q armed maxSeq 0", mid, l1)
+	}
+
+	// Wait for both operations; order between acceptDone and enableDone is free
+	// after the gate is released.
+	var acceptErr error
+	var v2 autoApproveView
+	for acceptDone != nil || enableDone != nil {
+		select {
+		case err := <-acceptDone:
+			acceptErr = err
+			acceptDone = nil
+		case v := <-enableDone:
+			v2 = v
+			enableDone = nil
+		case <-time.After(3 * time.Second):
+			t.Fatal("accept or enable did not finish")
+		}
+	}
+	if acceptErr != nil {
+		t.Fatal(acceptErr)
+	}
+	if !v2.Enabled {
+		t.Fatalf("enable after accept = %+v", v2)
+	}
+	// Final state: enable's new lease (L2), not L1.
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	finalID := ""
+	if st != nil {
+		finalID = st.LeaseID
+	}
+	a.mu.Unlock()
+	if finalID == "" || finalID == l1 {
+		t.Fatalf("final lease = %q, want new L2 (not L1 %q)", finalID, l1)
+	}
+}
+
+// Unavailable pre-send boundary clears any older cutoff so eligibility fails closed.
+func TestArmWithoutBoundClearsPriorCutoff(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "clear-bound", "pi", "acp")
+	// Prime with an older non-empty boundary (as if enable saw session A).
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "A", 7)
+	a.mu.Lock()
+	if a.autoApprove[n.ID].EnableIncarn != "A" || a.autoApprove[n.ID].EnableMaxSeq != 7 {
+		t.Fatalf("setup bound = %+v", a.autoApprove[n.ID])
+	}
+	a.mu.Unlock()
+	// Arm without a trustworthy pre-send boundary.
+	a.armAutoApproveOnPrompt(n.ID, "", 0, false)
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	phase, inc, max := autoPhaseOff, "", uint64(0)
+	if st != nil {
+		phase, inc, max = st.Phase, st.EnableIncarn, st.EnableMaxSeq
+	}
+	a.mu.Unlock()
+	if phase != autoPhaseArmed || inc != "" || max != 0 {
+		t.Fatalf("after unbound arm = phase %s bound %q/%d, want armed empty", phase, inc, max)
+	}
+	// A:8 must stay manual under empty cutoff.
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending("A:8"), clearOnDeliver: true,
+	}
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 0 {
+		t.Fatalf("A:8 must remain manual with empty cutoff; del=%d", stub.deliverCalls)
+	}
 }

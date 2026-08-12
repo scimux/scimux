@@ -43,116 +43,116 @@ func TestEligibleAutoAllowMatrix(t *testing.T) {
 	cases := []struct {
 		name            string
 		armed           bool
-		requestAtEnable bool // request was already pending when lease armed
+		afterEnable     bool // request was created after the enable cutoff
 		opts            []PermOption
 		wantOK          bool
 		wantSelectedKey string
 	}{
 		{
 			name:  "sole allow at key 1 is eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{allow1, reject2},
 			wantOK: true, wantSelectedKey: "1",
 		},
 		{
 			name:  "grok style allow_always then allow selects key 2",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   grokStyle,
 			wantOK: true, wantSelectedKey: "2",
 		},
 		{
 			name:  "sole allow at later key 2 is eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   allowOnly2,
 			wantOK: true, wantSelectedKey: "2",
 		},
 		{
 			name:  "sole allow at later key 3 is eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   allowOnly3,
 			wantOK: true, wantSelectedKey: "3",
 		},
 		{
 			name:  "allow_always alone is ineligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{allowAlways1},
 			wantOK: false,
 		},
 		{
 			name:  "allow_always first with only reject is ineligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{allowAlways1, reject2},
 			wantOK: false,
 		},
 		{
 			name:  "multiple one-time allow options are ambiguous",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   twoAllows,
 			wantOK: false,
 		},
 		{
 			name:  "reject first is not eligible when no allow",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{reject1},
 			wantOK: false,
 		},
 		{
 			name:  "reject_always alone is not eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{rejectAlways1},
 			wantOK: false,
 		},
 		{
 			name:  "missing kind is not eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{unknown1},
 			wantOK: false,
 		},
 		{
 			name:  "missing options is not eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   nil,
 			wantOK: false,
 		},
 		{
 			name:  "empty options is not eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{},
 			wantOK: false,
 		},
 		{
 			name:  "request already pending at enable is not eligible",
-			armed: true, requestAtEnable: true,
+			armed: true, afterEnable: false,
 			opts:   []PermOption{allow1, reject2},
 			wantOK: false,
 		},
 		{
 			name:  "request at enable even with sole allow at key 2 is not eligible",
-			armed: true, requestAtEnable: true,
+			armed: true, afterEnable: false,
 			opts:   grokStyle,
 			wantOK: false,
 		},
 		{
 			name:  "not armed is not eligible",
-			armed: false, requestAtEnable: false,
+			armed: false, afterEnable: true,
 			opts:   []PermOption{allow1},
 			wantOK: false,
 		},
 		{
 			name:  "sole allow with non-digit key is eligible by kind",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{{Key: "y", Name: "Allow", Kind: "allow"}},
 			wantOK: true, wantSelectedKey: "y",
 		},
 		{
 			name:  "unknown kind string is not eligible",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts:   []PermOption{{Key: "1", Name: "Future", Kind: "maybe"}},
 			wantOK: false,
 		},
 		{
 			name:  "allow_always is never selected even when sole non-reject",
-			armed: true, requestAtEnable: false,
+			armed: true, afterEnable: true,
 			opts: []PermOption{
 				{Key: "1", Name: "Always", Kind: "allow_always"},
 				{Key: "2", Name: "Reject", Kind: "reject"},
@@ -162,7 +162,7 @@ func TestEligibleAutoAllowMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sel, ok := eligibleAutoAllow(tc.armed, tc.requestAtEnable, tc.opts)
+			sel, ok := eligibleAutoAllow(tc.armed, tc.afterEnable, tc.opts)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (selected=%+v)", ok, tc.wantOK, sel)
 			}
