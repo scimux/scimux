@@ -451,6 +451,26 @@ of truth. Optional per-note git versioning shells out to the `git` binary into
 commit never fails the HTTP write. Mutating methods below are subject to the
 CSRF rules in the Security preamble.
 
+**Note, section, and reference ids are opaque server-minted identities** (a
+single filename-safe path component). Clients must treat them as opaque strings
+and must not construct or encode path segments into them. The store enforces
+the mint grammar on every entry point; HTTP handlers validate route ids before
+mutation or git work.
+
+**Status contract for route identities**
+
+| Condition | Status |
+|---|---|
+| Malformed / non-minted note, section, or reference id that reaches a handler (including URL-decoded traversal such as `..%2F…`) | `400` |
+| Well-formed id that is unknown or archived | `404` |
+| Path pattern not owned by ServeMux (e.g. extra `/` segments the route does not bind) | `404` |
+| Literal path cleaning by the Go ServeMux (e.g. bare `..` segments) | may `301` before the handler |
+
+Double-encoded input is decoded only once by the router; application code does
+not recursively decode path values. A single decode that still yields a
+non-minted id is `400`. Traversal requests are never redirected into a valid
+mutation route.
+
 ### `GET /api/notes`
 
 Sparse list of notes — enough to render cards, never section bodies:
@@ -468,7 +488,9 @@ Sparse list of notes — enough to render cards, never section bodies:
 ```
 
 `lanes` is the deduped set of embedded-reference lane colors across sections
-(first-seen order). Listing errors are `500`.
+(first-seen order). Listing errors are `500`. Invalid directory names and
+documents whose embedded `id` differs from the folder name are skipped
+defensively (they do not fail the whole list).
 
 ### `POST /api/notes`
 
@@ -480,7 +502,10 @@ existing notes. Returns the full document. Create failures are `500`.
 
 The full note document (`id`, `title`, `created_at`, `edited_at`, `order`,
 `sections[]` with each section's `id`/`title`/`body`/`order`/`references`).
-Unknown id is `404`.
+Malformed id is `400`; unknown well-formed id is `404`. A on-disk document
+whose embedded `id` does not match the requested folder id is rejected as
+invalid (`400`) — identity cannot redirect a subsequent save into another
+directory.
 
 ### `PATCH /api/notes/{id}`
 
@@ -498,23 +523,23 @@ Partial update: only the fields present in the body are applied. Body fields
     snapshot every keystroke). Structural changes (title/order/add/delete)
     commit immediately without it. `commit` is a PATCH field, not a route.
 
-Returns the full document with an advanced `edited_at`. Unknown note is
-`404`; unknown section id is `400`; save failures are `500`. Bad JSON is
-`400`.
+Returns the full document with an advanced `edited_at`. Malformed note or
+section id is `400`; unknown note is `404`; unknown section id is `400`; save
+failures are `500`. Bad JSON is `400`.
 
 ### `DELETE /api/notes/{id}`
 
 Archives the whole note folder to `notes/archive/<id>.<stamp>/` rather than
 destroying it (a reissued id can never collide with live data). Returns
-`{"ok":"deleted"}`. Unknown id is `404`.
+`{"ok":"deleted"}`. Malformed id is `400`; unknown id is `404`.
 
 ### `POST /api/notes/{id}/sections/{sectionID}/references`
 
 Append an embedded chat reference to a section. Body carries the durable
 source address and a display snapshot; the server mints the reference `id`
 (any client-supplied id is ignored). Default placement is the bottom of the
-section. Returns the full note. Unknown note or section is `404`; bad JSON is
-`400`.
+section. Returns the full note. Malformed note or section id is `400`;
+unknown well-formed note or section is `404`; bad JSON is `400`.
 
 ```json
 {
@@ -536,8 +561,9 @@ deleted.
 ### `DELETE /api/notes/{id}/sections/{sectionID}/references/{refID}`
 
 Remove one embedded reference from a section. Does not touch the source chat
-bubble or any capture-layer bookmark. Returns the full note. Unknown note is
-`404`; unknown section or reference id is `404`.
+bubble or any capture-layer bookmark. Returns the full note. Malformed note,
+section, or reference id is `400`; unknown well-formed note is `404`; unknown
+section or reference id is `404`.
 
 ## Maintenance
 
@@ -550,10 +576,17 @@ common request boundary (`Sec-Fetch-Site`).
 
 ### `POST /api/update`
 
-Self-update: downloads the release binary for this OS/arch, verifies it
-against the release's `SHA256SUMS`, and atomically replaces the running
-executable (restart is manual). `409` if already up to date, a `dev` build,
-or an update is already in progress.
+Self-update: downloads the release binary for this OS/arch from the trusted
+HTTPS release origin (`codeberg.org` only — exact host, no userinfo, port
+empty or 443), verifies it against the release's `SHA256SUMS` (same origin
+policy on the initial URL and every redirect), and atomically replaces the
+running executable only after size, close, and checksum checks succeed.
+Binary downloads are capped at 256 MiB; a response that exceeds the cap is
+rejected without accepting a truncated payload. Failed verification or
+download leaves the installed executable byte-for-byte unchanged, does not
+restart the process, and removes any `.scimux-update-*` temp file. `409` if
+already up to date, a `dev` build, or an update is already in progress.
+`502` on download/verify failure; `500` on install (chmod/rename) failure.
 
 ### `GET /api/licenses`
 

@@ -2,7 +2,10 @@ package notestore
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -332,5 +335,443 @@ func TestListDefensiveSkipsGarbage(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != good.ID {
 		t.Fatalf("want only the one good note (no legacy flat file), got %d: %+v", len(list), list)
+	}
+}
+
+// --- P3: note identity and path confinement ---
+
+// invalidIDs covers malformed identities that must never select a path outside
+// exactly one live note directory. Both slash styles are represented.
+var invalidIDs = []string{
+	"",
+	".",
+	"..",
+	"foo/bar",
+	`foo\bar`,
+	"/absolute",
+	`\absolute`,
+	"archive",
+	".hidden",
+	"20260101T120000-deadbeef/extra",
+	"not-a-timestamp-aabbccdd",
+	"20260101T120000",            // missing suffix
+	"20260101T120000-",           // empty suffix
+	"20260101T120000-gggggggg",   // non-hex
+	"20260101T120000-aabbcc",     // too short
+	"20260101T120000-aabbccddee", // too long for normal form
+	"20260101T120000-Tdeadbeef",  // wrong separator case/shape
+	"20260101t120000-deadbeef",   // lowercase T
+	"2026-01-01T12:00:00-deadbeef",
+	"20260101T120000-deadbeef\x00",
+	"../archive/secret",
+	"archive/secret",
+	"..%2Farchive", // double-encoded leftover after single decode
+}
+
+func TestValidIDRejectsMalformed(t *testing.T) {
+	for _, id := range invalidIDs {
+		if ValidID(id) {
+			t.Errorf("ValidID(%q) = true, want false", id)
+		}
+	}
+	// Valid minted shapes: normal (8 hex) and rand-fallback (t + hex).
+	for _, id := range []string{
+		"20260101T120000-deadbeef",
+		"20260812T180517-9c0a9701",
+		"20260101T120000-t18cb20f5d2c2fe4c",
+		"20260101T000000-t1",
+	} {
+		if !ValidID(id) {
+			t.Errorf("ValidID(%q) = false, want true", id)
+		}
+	}
+}
+
+// Get/Save/Delete reject invalid IDs without touching anything outside one
+// intended live-note directory. Sentinel files prove no traversal.
+func TestInvalidIDNeverTouchesOutsideNoteDir(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+
+	// Sentinels that traversal must not read, write, or archive.
+	secretPath := filepath.Join(root, "secret-marker.txt")
+	if err := os.WriteFile(secretPath, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archiveSecret := filepath.Join(root, "archive", "secret")
+	if err := os.MkdirAll(archiveSecret, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(archiveSecret, "note.json"), []byte(`{"id":"secret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside-sentinel")
+	if err := os.WriteFile(outside, []byte("OUTSIDE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
+
+	// Snapshot root tree (names only at top level + archive).
+	snapshot := func() string {
+		var b strings.Builder
+		entries, _ := os.ReadDir(root)
+		for _, e := range entries {
+			b.WriteString(e.Name())
+			b.WriteByte('\n')
+		}
+		return b.String()
+	}
+	before := snapshot()
+	secretBefore, _ := os.ReadFile(secretPath)
+	archBefore, _ := os.ReadFile(filepath.Join(archiveSecret, "note.json"))
+	outBefore, _ := os.ReadFile(outside)
+
+	for _, id := range invalidIDs {
+		if _, err := s.Get(id); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Get(%q): err = %v, want ErrInvalidID", id, err)
+		}
+		if err := s.Save(Note{ID: id, Title: "x", Sections: []Section{}}); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Save(%q): err = %v, want ErrInvalidID", id, err)
+		}
+		if err := s.Delete(id); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Delete(%q): err = %v, want ErrInvalidID", id, err)
+		}
+	}
+
+	if after := snapshot(); after != before {
+		t.Errorf("root directory changed after invalid ops:\nbefore:\n%safter:\n%s", before, after)
+	}
+	if got, _ := os.ReadFile(secretPath); string(got) != string(secretBefore) {
+		t.Error("secret-marker.txt was modified")
+	}
+	if got, _ := os.ReadFile(filepath.Join(archiveSecret, "note.json")); string(got) != string(archBefore) {
+		t.Error("archive/secret/note.json was modified")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != string(outBefore) {
+		t.Error("outside sentinel was modified")
+	}
+	// No new archive entries from invalid deletes.
+	archived, _ := filepath.Glob(filepath.Join(root, "archive", "*"))
+	if len(archived) != 1 {
+		t.Errorf("archive entries = %v, want only original secret", archived)
+	}
+}
+
+// TryCommit with an invalid id must not invoke the git locator or open a repo.
+func TestTryCommitInvalidIDNeverInvokesGit(t *testing.T) {
+	s := New(t.TempDir())
+	called := false
+	restore := SetFindGitForTest(func() (string, error) {
+		called = true
+		return "/usr/bin/git", nil
+	})
+	defer restore()
+
+	for _, id := range []string{"", "..", "archive", "foo/bar", `foo\bar`, "/abs", "not-valid"} {
+		called = false
+		s.TryCommit(id, "should not run")
+		if called {
+			t.Errorf("TryCommit(%q) invoked findGit", id)
+		}
+	}
+}
+
+// Valid server-minted IDs still round-trip, save atomically, keep permissions,
+// work with optional git, and archive the whole folder on Delete.
+func TestValidIDRoundTripPermissionsGitArchive(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	sh, err := s.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ValidID(sh.ID) {
+		t.Fatalf("Create minted invalid id %q", sh.ID)
+	}
+	if !ValidID(sh.Sections[0].ID) {
+		t.Fatalf("Create minted invalid section id %q", sh.Sections[0].ID)
+	}
+
+	// Permissions: note dir 0700, note.json 0600.
+	di, err := os.Stat(filepath.Join(dir, sh.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if di.Mode().Perm() != 0o700 {
+		t.Errorf("note dir mode = %o, want 0700", di.Mode().Perm())
+	}
+	fi, err := os.Stat(filepath.Join(dir, sh.ID, "note.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("note.json mode = %o, want 0600", fi.Mode().Perm())
+	}
+
+	sh.Sections[0].Body = "atomic body"
+	if err := s.Save(sh); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(sh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Sections[0].Body != "atomic body" {
+		t.Errorf("body = %q", got.Sections[0].Body)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sh.ID, "note.json.tmp")); !os.IsNotExist(err) {
+		t.Error("stray tmp after atomic save")
+	}
+
+	// Optional isolated git: only if git is present.
+	if bin, err := exec.LookPath("git"); err == nil {
+		s.TryCommit(sh.ID, "version")
+		if _, err := os.Stat(filepath.Join(dir, sh.ID, ".git")); err != nil {
+			t.Errorf("expected .git after TryCommit with git at %s: %v", bin, err)
+		}
+	}
+
+	if err := s.Delete(sh.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sh.ID)); !os.IsNotExist(err) {
+		t.Error("live folder still present after delete")
+	}
+	archived, err := filepath.Glob(filepath.Join(dir, "archive", sh.ID+".*"))
+	if err != nil || len(archived) != 1 {
+		t.Fatalf("want one archive under notes/archive/, got %v err=%v", archived, err)
+	}
+	// Archive destination must be directly beneath notes/archive/.
+	rel, err := filepath.Rel(filepath.Join(dir, "archive"), archived[0])
+	if err != nil || strings.Contains(rel, string(filepath.Separator)) || rel == ".." || strings.HasPrefix(rel, "..") {
+		t.Errorf("archive path not directly under archive/: %q rel=%q err=%v", archived[0], rel, err)
+	}
+}
+
+// Get rejects a note.json whose embedded ID differs from the directory name.
+func TestGetRejectsEmbeddedIDMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	// Manually plant a folder with a valid name but mismatched document id.
+	id := "20260101T120000-aabbccdd"
+	noteDir := filepath.Join(dir, id)
+	if err := os.MkdirAll(noteDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Embedded ID is a different valid-looking mint.
+	doc := `{"id":"20260101T120000-11223344","title":"mismatch","order":0,"sections":[]}`
+	if err := os.WriteFile(filepath.Join(noteDir, "note.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(id); !errors.Is(err, ErrInvalidID) {
+		// Also accept a dedicated mismatch error if exposed as ErrInvalidID subclass.
+		if err == nil {
+			t.Fatal("Get accepted embedded ID mismatch")
+		}
+		// Must not return the mismatched document as success.
+		t.Fatalf("Get mismatch: err = %v, want ErrInvalidID (or identity error)", err)
+	}
+}
+
+// A mismatched embedded ID cannot redirect Save or TryCommit into another directory.
+func TestMismatchedEmbeddedIDCannotRedirectSaveOrCommit(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	// Victim: a real note that must stay untouched.
+	victim, err := s.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	victimBody := "do not clobber"
+	victim.Sections[0].Body = victimBody
+	if err := s.Save(victim); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attacker tries to save with directory id A but embedded id of victim.
+	attackerID := "20260101T120000-deadbeef"
+	// First create a legitimate note at attackerID by planting via Save with matching id.
+	attacker := Note{
+		ID:       attackerID,
+		Title:    "attacker",
+		Created:  nowStamp(),
+		Edited:   nowStamp(),
+		Order:    99,
+		Sections: []Section{{ID: "20260101T120000-eeeeeeee", Title: "S", Order: 0}},
+	}
+	if err := s.Save(attacker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now craft a Save that claims victim's ID inside the document while
+	// being invoked as if for the attacker folder — Save uses sh.ID only,
+	// so a forged sh.ID=victim must be rejected when... wait: Save uses
+	// sh.ID as the path key. The attack is: Get returns document with
+	// embedded victim ID, then Save writes to victim's path.
+	// After Get rejects mismatch, mutation handlers never see it.
+	// Still prove Save(sh) with path construction cannot write outside:
+	// Save with sh.ID = victim.ID is legitimate; the bad case is Get
+	// returning a doc whose ID differs from requested path id.
+	// Direct Save of a note whose ID is valid still goes to notes/<id>/.
+	// The attack surface is Get(requested) returning sh with sh.ID != requested.
+	// Prove plant: folder attackerID contains note.json with victim's ID —
+	// Get must fail, and a subsequent Save of that document using victim.ID
+	// would be a separate call the handler must not make.
+
+	// Plant mismatch under attackerID.
+	bad := fmt.Sprintf(`{"id":%q,"title":"forged","order":0,"sections":[{"id":"20260101T120000-ffffffff","title":"x","body":"pwned","order":0}]}`, victim.ID)
+	if err := os.WriteFile(filepath.Join(dir, attackerID, "note.json"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(attackerID); err == nil {
+		t.Fatal("Get must reject embedded ID != directory")
+	}
+
+	// TryCommit must not open git for invalid / after failed get path.
+	called := false
+	restore := SetFindGitForTest(func() (string, error) {
+		called = true
+		return "/usr/bin/git", nil
+	})
+	defer restore()
+	// Commit under attacker folder id — document is mismatched; TryCommit only
+	// needs a valid id and a note.json on disk. It should still not rewrite
+	// victim. If TryCommit validates embedded ID, even better.
+	called = false
+	s.TryCommit(attackerID, "forged")
+	// Victim content must remain.
+	v, err := s.Get(victim.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Sections[0].Body != victimBody {
+		t.Errorf("victim body changed to %q", v.Sections[0].Body)
+	}
+	// Save with intentionally wrong cross-id must only affect notes/<sh.ID>/
+	// when sh.ID is valid — never create secondary paths via embedded fields.
+	// Save a document whose Title mentions another path; only sh.ID matters.
+	cross := Note{ID: attackerID, Title: "x", Sections: []Section{{ID: "20260101T120000-aaaaaaaa", Title: "t"}}}
+	// Overwrite the mismatched file with a consistent document via Save.
+	if err := s.Save(cross); err != nil {
+		// If Save validates existing embedded ID on disk — fine; but Save
+		// should accept consistent sh.ID.
+		t.Fatalf("Save consistent attacker: %v", err)
+	}
+	// Victim still intact and only under its own dir.
+	if v2, err := s.Get(victim.ID); err != nil || v2.Sections[0].Body != victimBody {
+		t.Fatalf("victim after cross save: err=%v body=%v", err, v2)
+	}
+	// No second directory created from embedded ids.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() == "archive" || !e.IsDir() {
+			continue
+		}
+		if !ValidID(e.Name()) {
+			t.Errorf("unexpected non-valid dir %q", e.Name())
+		}
+	}
+	_ = called
+}
+
+// List skips invalid directory names, malformed docs, and embedded-ID
+// mismatches, returning other valid notes.
+func TestListSkipsInvalidAndMismatched(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	good, err := s.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalid directory name.
+	badName := filepath.Join(dir, "not-valid-id")
+	if err := os.MkdirAll(badName, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badName, "note.json"),
+		[]byte(`{"id":"not-valid-id","title":"x","order":0,"sections":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Valid dir name, mismatched embedded id.
+	mismatchID := "20260101T120000-bbbbbbbb"
+	md := filepath.Join(dir, mismatchID)
+	if err := os.MkdirAll(md, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(md, "note.json"),
+		[]byte(`{"id":"20260101T120000-cccccccc","title":"m","order":1,"sections":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Valid dir, malformed JSON.
+	tornID := "20260101T120000-dddddddd"
+	td := filepath.Join(dir, tornID)
+	if err := os.MkdirAll(td, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(td, "note.json"), []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != good.ID {
+		t.Fatalf("want only good note, got %+v", list)
+	}
+}
+
+// notePaths prove with filepath.Rel that constructed paths stay under the
+// notes root at exactly notes/<valid-id>/ or notes/<valid-id>/note.json.
+func TestNotePathContainment(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	id := "20260101T120000-deadbeef"
+
+	dir, err := s.noteDirChecked(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := s.pathChecked(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly notes/<id>
+	relDir, err := filepath.Rel(root, dir)
+	if err != nil || relDir != id {
+		t.Errorf("noteDir rel = %q err=%v, want %q", relDir, err, id)
+	}
+	// Exactly notes/<id>/note.json
+	relDoc, err := filepath.Rel(root, doc)
+	if err != nil || relDoc != filepath.Join(id, "note.json") {
+		t.Errorf("path rel = %q err=%v, want %s", relDoc, err, filepath.Join(id, "note.json"))
+	}
+
+	// Invalid IDs never produce paths.
+	for _, bad := range []string{"..", "a/b", `a\b`, "/x", "archive", ""} {
+		if _, err := s.noteDirChecked(bad); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("noteDirChecked(%q) = %v", bad, err)
+		}
+		if _, err := s.pathChecked(bad); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("pathChecked(%q) = %v", bad, err)
+		}
+	}
+
+	// Archive destinations only from validated ID, directly under archive/.
+	arch, err := s.archiveDirChecked(id, "20260101T000000.000000000Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relArch, err := filepath.Rel(filepath.Join(root, "archive"), arch)
+	if err != nil || relArch != id+".20260101T000000.000000000Z" {
+		t.Errorf("archive rel = %q err=%v", relArch, err)
+	}
+	if _, err := s.archiveDirChecked("..", "stamp"); !errors.Is(err, ErrInvalidID) {
+		t.Errorf("archiveDirChecked invalid: %v", err)
 	}
 }

@@ -74,7 +74,12 @@ func summarize(sh notestore.Note) noteSummary {
 }
 
 func (a *app) handleNoteGet(w http.ResponseWriter, r *http.Request) {
-	sh, err := a.notes.Get(r.PathValue("id"))
+	id := r.PathValue("id")
+	if !notestore.ValidID(id) {
+		http.Error(w, "invalid note id", 400)
+		return
+	}
+	sh, err := a.notes.Get(id)
 	if err != nil {
 		a.noteError(w, err)
 		return
@@ -121,9 +126,18 @@ type sectionEdit struct {
 
 func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !notestore.ValidID(id) {
+		http.Error(w, "invalid note id", 400)
+		return
+	}
 	var body notePatch
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
+		return
+	}
+	// Section id is a route/body identity: reject malformed before mutation or git.
+	if body.Section != nil && body.Section.ID != "" && !notestore.ValidID(body.Section.ID) {
+		http.Error(w, "invalid section id", 400)
 		return
 	}
 	a.noteMu.Lock()
@@ -155,7 +169,7 @@ func (a *app) handleNotePatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := a.notes.Save(sh); err != nil {
-		http.Error(w, "save note: "+err.Error(), 500)
+		a.noteError(w, err)
 		return
 	}
 	// Optional per-note git: best-effort after a successful Save. Never fails
@@ -240,6 +254,16 @@ func applySectionEdit(sh *notestore.Note, sec *sectionEdit) error {
 // cannot forge or collide reference identities that Find usages (phase 2) will
 // key on. Default placement is the bottom of the section.
 func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sectionID := r.PathValue("sectionID")
+	if !notestore.ValidID(id) {
+		http.Error(w, "invalid note id", 400)
+		return
+	}
+	if !notestore.ValidID(sectionID) {
+		http.Error(w, "invalid section id", 400)
+		return
+	}
 	var ref notestore.Reference
 	if err := decodeJSON(w, r, &ref); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
@@ -248,21 +272,21 @@ func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
 	ref.ID = "" // force a server-minted id; ignore anything the client sent
 	a.noteMu.Lock()
 	defer a.noteMu.Unlock()
-	sh, err := a.notes.Get(r.PathValue("id"))
+	sh, err := a.notes.Get(id)
 	if err != nil {
 		a.noteError(w, err)
 		return
 	}
-	if _, err := sh.AddReference(r.PathValue("sectionID"), ref); err != nil {
+	if _, err := sh.AddReference(sectionID, ref); err != nil {
 		a.noteError(w, err)
 		return
 	}
 	if err := a.notes.Save(sh); err != nil {
-		http.Error(w, "save note: "+err.Error(), 500)
+		a.noteError(w, err)
 		return
 	}
 	// Reference add is structural: one commit per successful save.
-	a.notes.TryCommit(r.PathValue("id"), "add reference")
+	a.notes.TryCommit(id, "add reference")
 	writeJSON(w, sh)
 }
 
@@ -270,29 +294,54 @@ func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
 // removes only that reference — never the source chat bubble and never the
 // capture-layer sticky note (removal from capture stays explicit).
 func (a *app) handleNoteTrashReference(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sectionID := r.PathValue("sectionID")
+	refID := r.PathValue("refID")
+	if !notestore.ValidID(id) {
+		http.Error(w, "invalid note id", 400)
+		return
+	}
+	if !notestore.ValidID(sectionID) {
+		http.Error(w, "invalid section id", 400)
+		return
+	}
+	if !notestore.ValidID(refID) {
+		http.Error(w, "invalid reference id", 400)
+		return
+	}
 	a.noteMu.Lock()
 	defer a.noteMu.Unlock()
-	sh, err := a.notes.Get(r.PathValue("id"))
+	sh, err := a.notes.Get(id)
 	if err != nil {
 		a.noteError(w, err)
 		return
 	}
-	if !sh.RemoveReference(r.PathValue("sectionID"), r.PathValue("refID")) {
+	if !sh.RemoveReference(sectionID, refID) {
 		http.Error(w, "not found", 404)
 		return
 	}
 	if err := a.notes.Save(sh); err != nil {
-		http.Error(w, "save note: "+err.Error(), 500)
+		a.noteError(w, err)
 		return
 	}
 	// Reference remove is structural: one commit per successful save.
-	a.notes.TryCommit(r.PathValue("id"), "remove reference")
+	a.notes.TryCommit(id, "remove reference")
 	writeJSON(w, sh)
 }
 
-// noteError maps a store read error to the right HTTP status: a missing note
-// or section is a 404, anything else a 500.
+// noteError maps a store error to the right HTTP status:
+//   - ErrInvalidID → 400 (malformed note/section/reference identity)
+//   - ErrNotFound  → 404 (well-formed but unknown)
+//   - anything else → 500
+//
+// Path values that never reach a handler (ServeMux non-match) are 404 at the
+// router; cleaned literal ".." segments may 301 before the handler. Documented
+// in docs/http-api.md.
 func (a *app) noteError(w http.ResponseWriter, err error) {
+	if errors.Is(err, notestore.ErrInvalidID) {
+		http.Error(w, "invalid id", 400)
+		return
+	}
 	if errors.Is(err, notestore.ErrNotFound) {
 		http.Error(w, "not found", 404)
 		return
@@ -301,9 +350,14 @@ func (a *app) noteError(w http.ResponseWriter, err error) {
 }
 
 func (a *app) handleNoteDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !notestore.ValidID(id) {
+		http.Error(w, "invalid note id", 400)
+		return
+	}
 	a.noteMu.Lock()
 	defer a.noteMu.Unlock()
-	if err := a.notes.Delete(r.PathValue("id")); err != nil {
+	if err := a.notes.Delete(id); err != nil {
 		a.noteError(w, err)
 		return
 	}

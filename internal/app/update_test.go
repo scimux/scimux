@@ -1,17 +1,21 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,11 +55,48 @@ func fakeForgejo(t *testing.T, tag string, assets map[string][]byte) *httptest.S
 	return srv
 }
 
+// allowTestServerPolicy trusts only the given httptest server's host (HTTP or
+// TLS). Production Codeberg policy is never weakened globally.
+func allowTestServerPolicy(t *testing.T, srv *httptest.Server) releaseDownloadPolicy {
+	t.Helper()
+	base, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return releaseDownloadPolicy{
+		AllowURL: func(u *url.URL) error {
+			if u == nil {
+				return fmt.Errorf("nil URL")
+			}
+			if u.Scheme != base.Scheme {
+				return fmt.Errorf("scheme %q", u.Scheme)
+			}
+			if u.User != nil {
+				return fmt.Errorf("userinfo")
+			}
+			if u.Host != base.Host {
+				return fmt.Errorf("host %q", u.Host)
+			}
+			return nil
+		},
+		MaxBytes: maxUpdateBinaryBytes,
+		Client:   srv.Client(),
+	}
+}
+
 func withUpdateSeams(t *testing.T, apiBase, ver string) {
 	t.Helper()
 	oldBase, oldVer := releaseAPIBase, version
 	releaseAPIBase, version = apiBase, ver
 	t.Cleanup(func() { releaseAPIBase, version = oldBase, oldVer })
+}
+
+// withTestAssetPolicy installs a narrow policy for the fake asset server and
+// restores production policy via t.Cleanup.
+func withTestAssetPolicy(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	restore := setReleasePolicyForTest(allowTestServerPolicy(t, srv))
+	t.Cleanup(restore)
 }
 
 func TestUpdateCheck(t *testing.T) {
@@ -122,6 +163,7 @@ func TestUpdateApplyInstallsVerifiedBinary(t *testing.T) {
 		name: newBin, "SHA256SUMS": []byte(sums),
 	})
 	withUpdateSeams(t, srv.URL, "v1.0.0")
+	withTestAssetPolicy(t, srv)
 
 	exe := filepath.Join(t.TempDir(), "scimux")
 	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
@@ -166,6 +208,7 @@ func TestUpdateApplyChecksumMismatchLeavesBinary(t *testing.T) {
 		"SHA256SUMS": []byte(strings.Repeat("0", 64) + "  " + name + "\n"),
 	})
 	withUpdateSeams(t, srv.URL, "v1.0.0")
+	withTestAssetPolicy(t, srv)
 
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "scimux")
@@ -250,4 +293,764 @@ func TestLicensesEmbedded(t *testing.T) {
 			t.Errorf("license %q does not contain %q", key, marker)
 		}
 	}
+}
+
+// --- P3: bounded download, URL policy, failure cleanup ---
+
+func shaSums(name string, payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), name)
+}
+
+func assertNoUpdateTemps(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".scimux-update-") {
+			t.Errorf("leftover temp file %s", e.Name())
+		}
+	}
+}
+
+func assertBinaryUnchanged(t *testing.T, exe, want string) {
+	t.Helper()
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("installed binary changed: got %q want %q", got, want)
+	}
+}
+
+// Positive Content-Length greater than the cap is rejected before temp-file
+// creation or executable mutation.
+func TestDownloadRejectsOversizedContentLength(t *testing.T) {
+	const capBytes int64 = 64
+	var temps int32
+	oldCreate := updateCreateTemp
+	updateCreateTemp = func(dir, pattern string) (*os.File, error) {
+		atomic.AddInt32(&temps, 1)
+		return oldCreate(dir, pattern)
+	}
+	t.Cleanup(func() { updateCreateTemp = oldCreate })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		// Body should not matter; rejection is before read/temp.
+		w.Write(bytesN(1000, 'x'))
+	}))
+	t.Cleanup(srv.Close)
+
+	policy := allowTestServerPolicy(t, srv)
+	policy.MaxBytes = capBytes
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "scimux-bin"
+	_, err := downloadVerifiedWith(context.Background(), policy, srv.URL, shaSums(name, bytesN(10, 'a')), name, exe)
+	if err == nil || !strings.Contains(err.Error(), "Content-Length") {
+		t.Fatalf("err = %v, want Content-Length rejection", err)
+	}
+	if atomic.LoadInt32(&temps) != 0 {
+		t.Errorf("CreateTemp called %d times; want 0 before oversize CL reject", temps)
+	}
+	assertBinaryUnchanged(t, exe, "old")
+	assertNoUpdateTemps(t, dir)
+}
+
+// Chunked/unknown-length body exceeding the cap is detected by the first extra
+// byte and rejected — not accepted merely because the copy truncated at cap.
+func TestDownloadRejectsOversizedChunkedBody(t *testing.T) {
+	const capBytes int64 = 32
+	payload := bytesN(int(capBytes)+8, 'z')
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No Content-Length → chunked/unknown.
+		w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	policy := allowTestServerPolicy(t, srv)
+	policy.MaxBytes = capBytes
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Matching checksum of a truncated-at-cap slice must still not succeed.
+	truncated := payload[:capBytes]
+	name := "scimux-bin"
+	_, err := downloadVerifiedWith(context.Background(), policy, srv.URL, shaSums(name, truncated), name, exe)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want body exceeds limit", err)
+	}
+	assertBinaryUnchanged(t, exe, "old")
+	assertNoUpdateTemps(t, dir)
+}
+
+// No more than the configured cap reaches the temp writer (lightweight small
+// cap). Observes the transient write count through updateTempWriter — cleanup
+// alone is not enough coverage (removing LimitReader could still leave no temp).
+func TestDownloadWritesAtMostCapBytes(t *testing.T) {
+	const capBytes int64 = 40
+	var maxWritten int64
+	oldWriter := updateTempWriter
+	updateTempWriter = func(f *os.File) io.Writer {
+		return &countingTempWriter{w: f, n: &maxWritten}
+	}
+	t.Cleanup(func() { updateTempWriter = oldWriter })
+
+	// Chunked/unknown length so we exercise the write path (a large
+	// Content-Length is rejected before CreateTemp and would not write).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Transfer-Encoding", "chunked")
+		// Force chunked by flushing progressive writes without CL.
+		flusher, _ := w.(http.Flusher)
+		chunk := bytesN(int(capBytes)+20, 'q')
+		for i := 0; i < len(chunk); i += 8 {
+			end := i + 8
+			if end > len(chunk) {
+				end = len(chunk)
+			}
+			w.Write(chunk[i:end])
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	policy := allowTestServerPolicy(t, srv)
+	policy.MaxBytes = capBytes
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	name := "bin"
+	// Use a checksum that would match if truncation were accepted.
+	_, err := downloadVerifiedWith(context.Background(), policy, srv.URL,
+		shaSums(name, bytesN(int(capBytes), 'q')), name, exe)
+	if err == nil {
+		t.Fatal("expected oversize rejection")
+	}
+	if maxWritten > capBytes {
+		t.Errorf("wrote %d bytes to temp, cap is %d", maxWritten, capBytes)
+	}
+	if maxWritten != capBytes {
+		t.Errorf("wrote %d bytes, want exactly cap %d before overflow probe", maxWritten, capBytes)
+	}
+	assertNoUpdateTemps(t, dir)
+	assertBinaryUnchanged(t, exe, "old")
+}
+
+// countingTempWriter records cumulative bytes written through the temp-writer seam.
+type countingTempWriter struct {
+	w io.Writer
+	n *int64
+}
+
+func (c *countingTempWriter) Write(p []byte) (int, error) {
+	nw, err := c.w.Write(p)
+	*c.n += int64(nw)
+	return nw, err
+}
+
+// failAfterTempWriter writes up to after bytes successfully, then fails.
+type failAfterTempWriter struct {
+	w     io.Writer
+	after int
+	wrote int
+}
+
+func (f *failAfterTempWriter) Write(p []byte) (int, error) {
+	if f.wrote >= f.after {
+		return 0, fmt.Errorf("simulated write failure")
+	}
+	remain := f.after - f.wrote
+	if len(p) > remain {
+		p = p[:remain]
+	}
+	nw, err := f.w.Write(p)
+	f.wrote += nw
+	if err != nil {
+		return nw, err
+	}
+	if f.wrote >= f.after {
+		return nw, fmt.Errorf("simulated write failure after %d bytes", f.wrote)
+	}
+	return nw, nil
+}
+
+// zeroThenExtraReader returns the capped payload, then a (0,nil) short-read,
+// then one extra byte — legal io.Reader behavior that a single Read treating
+// (0,nil) as EOF would miss.
+type zeroThenExtraReader struct {
+	payload []byte
+	phase   int // 0=payload, 1=(0,nil), 2=extra, 3=EOF
+}
+
+func (r *zeroThenExtraReader) Read(p []byte) (int, error) {
+	switch r.phase {
+	case 0:
+		if len(r.payload) == 0 {
+			r.phase = 1
+			return 0, nil
+		}
+		n := copy(p, r.payload)
+		r.payload = r.payload[n:]
+		if len(r.payload) == 0 {
+			r.phase = 1
+		}
+		return n, nil
+	case 1:
+		r.phase = 2
+		return 0, nil
+	case 2:
+		r.phase = 3
+		if len(p) == 0 {
+			return 0, nil
+		}
+		p[0] = 'X'
+		return 1, nil
+	default:
+		return 0, io.EOF
+	}
+}
+
+// Exact-cap payload with matching checksum succeeds.
+func TestDownloadExactCapSucceeds(t *testing.T) {
+	const capBytes int64 = 48
+	payload := bytesN(int(capBytes), 'e')
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+	policy := allowTestServerPolicy(t, srv)
+	policy.MaxBytes = capBytes
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	name := "bin"
+	tmp, err := downloadVerifiedWith(context.Background(), policy, srv.URL, shaSums(name, payload), name, exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(tmp) })
+	got, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != int(capBytes) || string(got) != string(payload) {
+		t.Errorf("tmp len=%d content mismatch", len(got))
+	}
+	assertBinaryUnchanged(t, exe, "old") // downloadVerified does not install
+}
+
+// A body that returns exactly cap bytes, then (0,nil), then one extra byte
+// must be rejected — (0,nil) is not EOF.
+func TestDownloadRejectsZeroNilThenExtraByte(t *testing.T) {
+	const capBytes int64 = 16
+	payload := bytesN(int(capBytes), 'z')
+	// Serve through a custom RoundTrip is heavy; instead exercise the overflow
+	// probe via an httptest body is hard to inject (0,nil). Use a local helper
+	// path: wrap download by installing a transport... Simpler: call the
+	// probe contract through downloadVerifiedWith against a server that uses
+	// chunked writes with Flush. Go's HTTP server may coalesce, so use an
+	// io.Pipe body via httptest and a custom handler that hijacks...
+	// Narrow approach: unit-test the reader against downloadVerifiedWith by
+	// swapping http via a policy Client with a custom Transport.
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(&zeroThenExtraReader{payload: append([]byte(nil), payload...)}),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	policy := releaseDownloadPolicy{
+		AllowURL: func(u *url.URL) error { return nil },
+		MaxBytes: capBytes,
+		Client:   &http.Client{Transport: rt},
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	name := "bin"
+	// Checksum of the capped prefix alone must not make this succeed.
+	_, err := downloadVerifiedWith(context.Background(), policy, "https://example.test/bin",
+		shaSums(name, payload), name, exe)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want body exceeds limit", err)
+	}
+	assertBinaryUnchanged(t, exe, "old")
+	assertNoUpdateTemps(t, dir)
+}
+
+// Injected client with a permissive CheckRedirect must still reject a
+// disallowed redirect target; the sink must never be hit.
+func TestDownloadInjectedClientCannotBypassRedirectPolicy(t *testing.T) {
+	var sinkHits int32
+	httpSink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&sinkHits, 1)
+		w.Write([]byte("should-not-download"))
+	}))
+	t.Cleanup(httpSink.Close)
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, httpSink.URL+"/bin", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+	originURL, _ := url.Parse(origin.URL)
+
+	// Client whose callback would allow any redirect (returns nil always).
+	permissive := origin.Client()
+	permissive.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return nil // would follow HTTP sink without security wrap
+	}
+
+	policy := releaseDownloadPolicy{
+		AllowURL: func(u *url.URL) error {
+			if u.Scheme != "https" {
+				return fmt.Errorf("not https")
+			}
+			if u.Host != originURL.Host {
+				return fmt.Errorf("untrusted host %q", u.Host)
+			}
+			return nil
+		},
+		MaxBytes: 64,
+		Client:   permissive,
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	_, err := downloadVerifiedWith(context.Background(), policy, origin.URL+"/start",
+		shaSums("bin", []byte("x")), "bin", exe)
+	if err == nil {
+		t.Fatal("want redirect rejection despite permissive client CheckRedirect")
+	}
+	if atomic.LoadInt32(&sinkHits) != 0 {
+		t.Errorf("sink hits = %d, want 0", sinkHits)
+	}
+	assertBinaryUnchanged(t, exe, "old")
+	assertNoUpdateTemps(t, dir)
+}
+
+// Smaller verified payload still installs via the apply handler.
+func TestUpdateApplySmallVerifiedPayload(t *testing.T) {
+	newBin := []byte("tiny-ok")
+	name := "scimux-" + goosArch()
+	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+		name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
+	})
+	withUpdateSeams(t, srv.URL, "v1.0.0")
+	withTestAssetPolicy(t, srv)
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old binary"), 0o755)
+	execed := make(chan string, 1)
+	oldExe, oldExec := executablePath, execSelf
+	executablePath = func() (string, error) { return exe, nil }
+	execSelf = func(path string) error { execed <- path; return nil }
+	t.Cleanup(func() { executablePath, execSelf = oldExe, oldExec })
+
+	rec := httptest.NewRecorder()
+	newUpdateTestApp(t).handleUpdateApply(rec, updateReq("v9.9.9"))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	select {
+	case <-execed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("execSelf not called")
+	}
+	got, _ := os.ReadFile(exe)
+	if string(got) != string(newBin) {
+		t.Errorf("got %q", got)
+	}
+	if fi, _ := os.Stat(exe); fi.Mode().Perm()&0o111 == 0 {
+		t.Error("not executable")
+	}
+	assertNoUpdateTemps(t, dir)
+}
+
+// Failure matrix: preserve installed binary, no execSelf, no leftover temps.
+func TestUpdateFailureCleanupMatrix(t *testing.T) {
+	// Shared: old binary must remain "old binary".
+	type caseFn struct {
+		name string
+		run  func(t *testing.T, dir, exe string)
+	}
+	cases := []caseFn{
+		{
+			name: "oversized Content-Length",
+			run: func(t *testing.T, dir, exe string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Length", "999")
+					w.Write(bytesN(999, 'x'))
+				}))
+				t.Cleanup(srv.Close)
+				p := allowTestServerPolicy(t, srv)
+				p.MaxBytes = 16
+				name := "bin"
+				_, err := downloadVerifiedWith(context.Background(), p, srv.URL, shaSums(name, []byte("x")), name, exe)
+				if err == nil {
+					t.Fatal("want error")
+				}
+			},
+		},
+		{
+			name: "oversized chunked",
+			run: func(t *testing.T, dir, exe string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write(bytesN(100, 'y'))
+				}))
+				t.Cleanup(srv.Close)
+				p := allowTestServerPolicy(t, srv)
+				p.MaxBytes = 16
+				name := "bin"
+				_, err := downloadVerifiedWith(context.Background(), p, srv.URL, shaSums(name, bytesN(16, 'y')), name, exe)
+				if err == nil {
+					t.Fatal("want error")
+				}
+			},
+		},
+		{
+			name: "checksum mismatch",
+			run: func(t *testing.T, dir, exe string) {
+				body := []byte("payload")
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write(body)
+				}))
+				t.Cleanup(srv.Close)
+				p := allowTestServerPolicy(t, srv)
+				name := "bin"
+				_, err := downloadVerifiedWith(context.Background(), p, srv.URL,
+					strings.Repeat("0", 64)+"  "+name+"\n", name, exe)
+				if err == nil || !strings.Contains(err.Error(), "checksum") {
+					t.Fatalf("err=%v", err)
+				}
+			},
+		},
+		{
+			name: "invalid initial URL",
+			run: func(t *testing.T, dir, exe string) {
+				p := productionReleasePolicy()
+				p.MaxBytes = 64
+				_, err := downloadVerifiedWith(context.Background(), p,
+					"http://codeberg.org/assets/bin", shaSums("bin", []byte("x")), "bin", exe)
+				if err == nil {
+					t.Fatal("want URL rejection")
+				}
+			},
+		},
+		{
+			name: "redirect to HTTP",
+			run: func(t *testing.T, dir, exe string) {
+				// TLS origin redirects to plain HTTP — production policy rejects.
+				httpSink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte("should-not-download"))
+				}))
+				t.Cleanup(httpSink.Close)
+				tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, httpSink.URL+"/bin", http.StatusFound)
+				}))
+				t.Cleanup(tlsSrv.Close)
+				p := releaseDownloadPolicy{
+					AllowURL: func(u *url.URL) error {
+						// Mimic production: HTTPS only.
+						if u.Scheme != "https" {
+							return fmt.Errorf("not https")
+						}
+						return nil
+					},
+					MaxBytes: 64,
+					Client:   tlsSrv.Client(),
+				}
+				_, err := downloadVerifiedWith(context.Background(), p, tlsSrv.URL+"/bin",
+					shaSums("bin", []byte("x")), "bin", exe)
+				if err == nil {
+					t.Fatal("want redirect rejection")
+				}
+			},
+		},
+		{
+			name: "redirect untrusted host",
+			run: func(t *testing.T, dir, exe string) {
+				evil := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte("evil"))
+				}))
+				t.Cleanup(evil.Close)
+				good := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, evil.URL+"/bin", http.StatusFound)
+				}))
+				t.Cleanup(good.Close)
+				goodURL, _ := url.Parse(good.URL)
+				p := releaseDownloadPolicy{
+					AllowURL: func(u *url.URL) error {
+						if u.Scheme != "https" || u.Host != goodURL.Host {
+							return fmt.Errorf("untrusted %s", u.Host)
+						}
+						return nil
+					},
+					MaxBytes: 64,
+					Client:   good.Client(),
+				}
+				_, err := downloadVerifiedWith(context.Background(), p, good.URL+"/bin",
+					shaSums("bin", []byte("x")), "bin", exe)
+				if err == nil {
+					t.Fatal("want untrusted redirect rejection")
+				}
+			},
+		},
+		{
+			name: "redirect hostname-suffix trick",
+			run: func(t *testing.T, dir, exe string) {
+				p := productionReleasePolicy()
+				// Direct validation of the hostile URL (suffix host).
+				err := p.validateURL("https://codeberg.org.evil.example/assets/bin")
+				if err == nil {
+					t.Fatal("suffix host must be rejected")
+				}
+			},
+		},
+		{
+			name: "temp create failure",
+			run: func(t *testing.T, dir, exe string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte("data-for-create-fail"))
+				}))
+				t.Cleanup(srv.Close)
+				p := allowTestServerPolicy(t, srv)
+				oldCreate := updateCreateTemp
+				updateCreateTemp = func(d, pattern string) (*os.File, error) {
+					return nil, fmt.Errorf("simulated create failure")
+				}
+				t.Cleanup(func() { updateCreateTemp = oldCreate })
+				_, err := downloadVerifiedWith(context.Background(), p, srv.URL,
+					shaSums("bin", []byte("data-for-create-fail")), "bin", exe)
+				if err == nil || !strings.Contains(err.Error(), "create") {
+					t.Fatalf("err=%v, want create failure", err)
+				}
+			},
+		},
+		{
+			name: "temp write failure",
+			run: func(t *testing.T, dir, exe string) {
+				body := []byte("partial-write-then-fail-body-long-enough")
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write(body)
+				}))
+				t.Cleanup(srv.Close)
+				p := allowTestServerPolicy(t, srv)
+				oldWriter := updateTempWriter
+				updateTempWriter = func(f *os.File) io.Writer {
+					return &failAfterTempWriter{w: f, after: 8}
+				}
+				t.Cleanup(func() { updateTempWriter = oldWriter })
+				_, err := downloadVerifiedWith(context.Background(), p, srv.URL, shaSums("bin", body), "bin", exe)
+				if err == nil || !strings.Contains(err.Error(), "write failure") {
+					t.Fatalf("err=%v, want write failure after partial write", err)
+				}
+			},
+		},
+		{
+			name: "temp close failure",
+			run: func(t *testing.T, dir, exe string) {
+				body := []byte("close-fail-body")
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write(body)
+				}))
+				t.Cleanup(srv.Close)
+				p := allowTestServerPolicy(t, srv)
+				oldClose := updateCloseTemp
+				updateCloseTemp = func(f *os.File) error {
+					f.Close() // real close so remove works
+					return fmt.Errorf("simulated close failure")
+				}
+				t.Cleanup(func() { updateCloseTemp = oldClose })
+				_, err := downloadVerifiedWith(context.Background(), p, srv.URL, shaSums("bin", body), "bin", exe)
+				if err == nil || !strings.Contains(err.Error(), "close") {
+					t.Fatalf("err=%v, want close failure", err)
+				}
+			},
+		},
+		{
+			name: "chmod failure",
+			run: func(t *testing.T, dir, exe string) {
+				newBin := []byte("chmod-fail-bin")
+				name := "scimux-" + goosArch()
+				srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+					name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
+				})
+				withUpdateSeams(t, srv.URL, "v1.0.0")
+				withTestAssetPolicy(t, srv)
+				oldExe, oldExec := executablePath, execSelf
+				executablePath = func() (string, error) { return exe, nil }
+				execSelf = func(path string) error { t.Error("execSelf on chmod fail"); return nil }
+				t.Cleanup(func() { executablePath, execSelf = oldExe, oldExec })
+				oldChmod := updateChmod
+				chmodCalls := 0
+				updateChmod = func(string, os.FileMode) error {
+					chmodCalls++
+					return fmt.Errorf("simulated chmod failure")
+				}
+				t.Cleanup(func() { updateChmod = oldChmod })
+				rec := httptest.NewRecorder()
+				newUpdateTestApp(t).handleUpdateApply(rec, updateReq("v9.9.9"))
+				if chmodCalls == 0 {
+					t.Fatalf("updateChmod never called; status %d body %s", rec.Code, rec.Body)
+				}
+				if rec.Code != 500 {
+					t.Fatalf("status %d: %s", rec.Code, rec.Body)
+				}
+			},
+		},
+		{
+			name: "rename failure",
+			run: func(t *testing.T, dir, exe string) {
+				newBin := []byte("rename-fail-bin")
+				name := "scimux-" + goosArch()
+				srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+					name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
+				})
+				withUpdateSeams(t, srv.URL, "v1.0.0")
+				withTestAssetPolicy(t, srv)
+				oldExe, oldExec := executablePath, execSelf
+				executablePath = func() (string, error) { return exe, nil }
+				execSelf = func(path string) error { t.Error("execSelf on rename fail"); return nil }
+				t.Cleanup(func() { executablePath, execSelf = oldExe, oldExec })
+				oldRename := updateRename
+				updateRename = func(string, string) error { return fmt.Errorf("simulated rename failure") }
+				t.Cleanup(func() { updateRename = oldRename })
+				rec := httptest.NewRecorder()
+				newUpdateTestApp(t).handleUpdateApply(rec, updateReq("v9.9.9"))
+				if rec.Code != 500 {
+					t.Fatalf("status %d: %s", rec.Code, rec.Body)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			exe := filepath.Join(dir, "scimux")
+			const old = "old binary"
+			if err := os.WriteFile(exe, []byte(old), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			execCalled := false
+			oldExec := execSelf
+			execSelf = func(string) error { execCalled = true; return nil }
+			t.Cleanup(func() { execSelf = oldExec })
+
+			tc.run(t, dir, exe)
+
+			assertBinaryUnchanged(t, exe, old)
+			if execCalled {
+				t.Error("execSelf must not run on failure")
+			}
+			assertNoUpdateTemps(t, dir)
+		})
+	}
+}
+
+func TestProductionAssetURLPolicy(t *testing.T) {
+	p := productionReleasePolicy()
+	// Accepts canonical Codeberg HTTPS asset URL (no port / :443).
+	for _, ok := range []string{
+		"https://codeberg.org/chrberger/scimux/releases/download/v1.0.0/scimux-linux-amd64",
+		"https://codeberg.org:443/chrberger/scimux/releases/download/v1.0.0/SHA256SUMS",
+	} {
+		if err := p.validateURL(ok); err != nil {
+			t.Errorf("accept %s: %v", ok, err)
+		}
+	}
+	// Rejects.
+	for _, bad := range []string{
+		"http://codeberg.org/x",
+		"https://evil.example/x",
+		"https://codeberg.org.evil.example/x",
+		"https://user@codeberg.org/x",
+		"https://codeberg.org:8443/x",
+		"https://user:pass@codeberg.org/x",
+	} {
+		if err := p.validateURL(bad); err == nil {
+			t.Errorf("reject %s: got nil", bad)
+		}
+	}
+}
+
+// Allowed same-policy redirect remains bounded and checksum-verified.
+func TestDownloadAllowedRedirectBoundedAndVerified(t *testing.T) {
+	const capBytes int64 = 64
+	payload := []byte("redirected-ok-payload")
+	var finalHits int32
+	mux := http.NewServeMux()
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, srv.URL+"/final", http.StatusFound)
+	})
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&finalHits, 1)
+		w.Write(payload)
+	})
+	p := allowTestServerPolicy(t, srv)
+	p.MaxBytes = capBytes
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	name := "bin"
+	tmp, err := downloadVerifiedWith(context.Background(), p, srv.URL+"/start", shaSums(name, payload), name, exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(tmp) })
+	got, _ := os.ReadFile(tmp)
+	if string(got) != string(payload) {
+		t.Errorf("got %q", got)
+	}
+	if atomic.LoadInt32(&finalHits) != 1 {
+		t.Errorf("final hits %d", finalHits)
+	}
+	assertBinaryUnchanged(t, exe, "old")
+}
+
+// Private TLS server with injected client — does not mutate DefaultClient.
+func TestDownloadUsesInjectedTLSClient(t *testing.T) {
+	payload := []byte("tls-payload")
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+	// Without injected client, DefaultClient would fail TLS verify.
+	p := allowTestServerPolicy(t, srv)
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scimux")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	name := "bin"
+	tmp, err := downloadVerifiedWith(context.Background(), p, srv.URL, shaSums(name, payload), name, exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(tmp)
+}
+
+func bytesN(n int, b byte) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }

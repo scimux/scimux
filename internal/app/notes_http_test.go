@@ -3,6 +3,8 @@ package app
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -61,9 +63,12 @@ func TestNoteCreateAndGet(t *testing.T) {
 		t.Errorf("get mismatch: %+v", got)
 	}
 
-	// Unknown id is a 404, never a 500.
-	if r := getNote(a, "nope"); r.Code != 404 {
+	// Well-formed but unknown id is a 404; malformed is 400 (see confinement tests).
+	if r := getNote(a, "20260101T120000-00000000"); r.Code != 404 {
 		t.Errorf("unknown id: code = %d, want 404", r.Code)
+	}
+	if r := getNote(a, "nope"); r.Code != 400 {
+		t.Errorf("malformed id: code = %d, want 400", r.Code)
 	}
 }
 
@@ -283,12 +288,15 @@ func TestNoteAddReference(t *testing.T) {
 		t.Errorf("snapshot did not persist: %+v", r.Snapshot)
 	}
 
-	// Unknown section 404, unknown note 404.
-	if rec := addReference(a, sh.ID, "nope", `{}`); rec.Code != 404 {
+	// Well-formed unknown section/note are 404; malformed ids are 400.
+	if rec := addReference(a, sh.ID, "20260101T120000-00000000", `{}`); rec.Code != 404 {
 		t.Errorf("unknown section: code = %d, want 404", rec.Code)
 	}
-	if rec := addReference(a, "nope", sid, `{}`); rec.Code != 404 {
+	if rec := addReference(a, "20260101T120000-00000000", sid, `{}`); rec.Code != 404 {
 		t.Errorf("unknown note: code = %d, want 404", rec.Code)
+	}
+	if rec := addReference(a, sh.ID, "nope", `{}`); rec.Code != 400 {
+		t.Errorf("malformed section id: code = %d, want 400", rec.Code)
 	}
 }
 
@@ -337,9 +345,12 @@ func TestNoteTrashReference(t *testing.T) {
 	if len(got.Sections[0].References) != 1 || got.Sections[0].References[0].Source.UID != "keep" {
 		t.Errorf("wrong reference trashed: %+v", got.Sections[0].References)
 	}
-	// Trashing an absent reference is a 404.
-	if rec := trashReference(a, sh.ID, sid, "gone"); rec.Code != 404 {
+	// Trashing a well-formed absent reference is a 404; malformed is 400.
+	if rec := trashReference(a, sh.ID, sid, "20260101T120000-00000000"); rec.Code != 404 {
 		t.Errorf("trash absent: code = %d, want 404", rec.Code)
+	}
+	if rec := trashReference(a, sh.ID, sid, "gone"); rec.Code != 400 {
+		t.Errorf("trash malformed ref id: code = %d, want 400", rec.Code)
 	}
 }
 
@@ -392,12 +403,254 @@ func TestNoteDeleteArchives(t *testing.T) {
 	if len(list) != 0 {
 		t.Errorf("deleted note still listed: %d", len(list))
 	}
-	// Deleting an unknown id is a 404, not a 500.
+	// Deleting a well-formed unknown id is a 404; malformed is 400.
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("DELETE", "/api/notes/nope", nil)
-	req2.SetPathValue("id", "nope")
+	req2 := httptest.NewRequest("DELETE", "/api/notes/20260101T120000-00000000", nil)
+	req2.SetPathValue("id", "20260101T120000-00000000")
 	a.handleNoteDelete(rec2, req2)
 	if rec2.Code != 404 {
 		t.Errorf("delete unknown: code = %d, want 404", rec2.Code)
+	}
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest("DELETE", "/api/notes/nope", nil)
+	req3.SetPathValue("id", "nope")
+	a.handleNoteDelete(rec3, req3)
+	if rec3.Code != 400 {
+		t.Errorf("delete malformed: code = %d, want 400", rec3.Code)
+	}
+}
+
+// --- P3: public-handler note path confinement ---
+
+// noteSentinelTree plants markers that traversal must never read, write,
+// archive, or git-init. Returns paths for later assertions.
+func noteSentinelTree(t *testing.T, a *app) (secretFile, archiveNote, outsideFile string) {
+	t.Helper()
+	root := a.notes.Dir
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secretFile = filepath.Join(root, "secret-marker.txt")
+	if err := os.WriteFile(secretFile, []byte("SECRET-LIVE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archDir := filepath.Join(root, "archive", "secret-target")
+	if err := os.MkdirAll(archDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archiveNote = filepath.Join(archDir, "note.json")
+	if err := os.WriteFile(archiveNote, []byte(`{"id":"secret-target"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile = filepath.Join(filepath.Dir(root), "outside-sentinel.txt")
+	if err := os.WriteFile(outsideFile, []byte("OUTSIDE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(outsideFile) })
+	return secretFile, archiveNote, outsideFile
+}
+
+func assertSentinelsIntact(t *testing.T, secretFile, archiveNote, outsideFile string) {
+	t.Helper()
+	if b, _ := os.ReadFile(secretFile); string(b) != "SECRET-LIVE" {
+		t.Errorf("secret marker changed: %q", b)
+	}
+	if b, _ := os.ReadFile(archiveNote); string(b) != `{"id":"secret-target"}` {
+		t.Errorf("archive sentinel changed: %q", b)
+	}
+	if b, _ := os.ReadFile(outsideFile); string(b) != "OUTSIDE" {
+		t.Errorf("outside sentinel changed: %q", b)
+	}
+	// No git repo next to sentinels.
+	for _, p := range []string{
+		filepath.Join(filepath.Dir(secretFile), "archive", "secret-target", ".git"),
+		filepath.Join(filepath.Dir(outsideFile), ".git"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("unexpected git at %s", p)
+		}
+	}
+}
+
+// Status contract (documented in docs/http-api.md):
+//   - Invalid decoded route ids that reach a handler → 400
+//   - Paths not owned by ServeMux → 404
+//   - No traversal request is redirected into a valid mutation route
+//   - Double-encoded input is decoded only once (cannot become traversal)
+func TestNoteHTTPPathConfinement(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	h := newTestHandler(t, a)
+	secretFile, archiveNote, outsideFile := noteSentinelTree(t, a)
+
+	// Create a real note so valid paths still work through the public router.
+	sh := createNote(t, a)
+	sid := sh.Sections[0].ID
+
+	// Encoded slash and dot-segment note IDs for each applicable route.
+	// ServeMux decodes once; PathValue yields "../archive/secret" etc.
+	traversalNoteIDs := []string{
+		"..%2Farchive%2Fsecret-target",
+		"archive%2Fsecret-target",
+		"%2e%2e",
+		"%2e%2e%2farchive%2Fsecret-target",
+		"..%5Csecret-target",
+		"%2Fetc%2Fpasswd",
+	}
+
+	type route struct {
+		method string
+		path   func(noteID string) string
+		body   string
+		csrf   bool
+	}
+	routes := []route{
+		{"GET", func(id string) string { return "/api/notes/" + id }, "", false},
+		{"PATCH", func(id string) string { return "/api/notes/" + id }, `{"title":"pwn"}`, true},
+		{"DELETE", func(id string) string { return "/api/notes/" + id }, "", true},
+		{"POST", func(id string) string {
+			return "/api/notes/" + id + "/sections/" + sid + "/references"
+		}, `{"source":{"uid":"x"},"snapshot":{"text":"y"}}`, true},
+		{"DELETE", func(id string) string {
+			return "/api/notes/" + id + "/sections/" + sid + "/references/20260101T120000-ffffffff"
+		}, "", true},
+	}
+
+	// Documented status matrix: 400 (invalid id reached handler), 404 (unowned
+	// pattern), 301 (ServeMux path clean). Never 200, never 5xx.
+	assertTraversalStatus := func(t *testing.T, method, path string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		switch rec.Code {
+		case 400, 404, 301:
+			// ok
+		default:
+			t.Errorf("%s %s: status %d body %q, want 400/404/301 (never 200 or 5xx)",
+				method, path, rec.Code, rec.Body)
+		}
+	}
+
+	for _, id := range traversalNoteIDs {
+		for _, rt := range routes {
+			path := rt.path(id)
+			rec := routeRequest(h, rt.method, path, rt.body, rt.csrf)
+			assertTraversalStatus(t, rt.method, path, rec)
+		}
+	}
+
+	// Section/reference identity confinement with a valid note id → 400
+	// (handler reached with malformed section/ref PathValue).
+	sectionTraversal := []string{
+		"..%2Fbad",
+		"bad%2Fid",
+		"%2e%2e",
+	}
+	for _, sec := range sectionTraversal {
+		path := "/api/notes/" + sh.ID + "/sections/" + sec + "/references"
+		rec := routeRequest(h, "POST", path, `{"source":{"uid":"x"},"snapshot":{"text":"y"}}`, true)
+		assertTraversalStatus(t, "POST", path, rec)
+		path = "/api/notes/" + sh.ID + "/sections/" + sec + "/references/20260101T120000-aaaaaaaa"
+		rec = routeRequest(h, "DELETE", path, "", true)
+		assertTraversalStatus(t, "DELETE", path, rec)
+	}
+	refTraversal := []string{"..%2Fbad", "bad%2Fid", "%2e%2e"}
+	for _, ref := range refTraversal {
+		path := "/api/notes/" + sh.ID + "/sections/" + sid + "/references/" + ref
+		rec := routeRequest(h, "DELETE", path, "", true)
+		assertTraversalStatus(t, "DELETE", path, rec)
+	}
+
+	// Double-encoded: single decode yields literal "%2F", not a slash → 400.
+	doubleEnc := "/api/notes/..%252Farchive%252Fsecret-target"
+	for _, method := range []string{"GET", "DELETE"} {
+		rec := routeRequest(h, method, doubleEnc, "", method != "GET")
+		if rec.Code != 400 {
+			t.Errorf("%s double-encoded: status %d, want 400 (body %q)", method, rec.Code, rec.Body)
+		}
+	}
+
+	// Multi-segment path not owned by ServeMux → 404 (not rewritten to mutation).
+	rec := routeRequest(h, "GET", "/api/notes/foo/bar", "", false)
+	if rec.Code != 404 {
+		t.Errorf("unowned path: status %d, want 404", rec.Code)
+	}
+	rec = routeRequest(h, "PATCH", "/api/notes/foo/bar", `{"title":"x"}`, true)
+	if rec.Code != 404 {
+		t.Errorf("unowned PATCH: status %d, want 404", rec.Code)
+	}
+
+	// Valid generated note/section/reference ids retain existing behavior.
+	rec = routeRequest(h, "GET", "/api/notes/"+sh.ID, "", false)
+	if rec.Code != 200 {
+		t.Fatalf("valid GET: %d %s", rec.Code, rec.Body)
+	}
+	rec = routeRequest(h, "PATCH", "/api/notes/"+sh.ID, `{"title":"Kept Safe"}`, true)
+	if rec.Code != 200 {
+		t.Fatalf("valid PATCH: %d %s", rec.Code, rec.Body)
+	}
+	refBody := `{"source":{"uid":"u1","segment":0,"record":1},"snapshot":{"text":"ok","lane":"#c0392b"}}`
+	rec = routeRequest(h, "POST",
+		"/api/notes/"+sh.ID+"/sections/"+sid+"/references", refBody, true)
+	if rec.Code != 200 {
+		t.Fatalf("valid add ref: %d %s", rec.Code, rec.Body)
+	}
+	var withRef notestore.Note
+	if err := json.Unmarshal(rec.Body.Bytes(), &withRef); err != nil {
+		t.Fatal(err)
+	}
+	if len(withRef.Sections[0].References) != 1 {
+		t.Fatalf("want 1 ref, got %d", len(withRef.Sections[0].References))
+	}
+	refID := withRef.Sections[0].References[0].ID
+	if !notestore.ValidID(refID) {
+		t.Fatalf("minted ref id invalid: %q", refID)
+	}
+	rec = routeRequest(h, "DELETE",
+		"/api/notes/"+sh.ID+"/sections/"+sid+"/references/"+refID, "", true)
+	if rec.Code != 200 {
+		t.Fatalf("valid trash ref: %d %s", rec.Code, rec.Body)
+	}
+
+	assertSentinelsIntact(t, secretFile, archiveNote, outsideFile)
+
+	// Archive dir still has only the original secret-target (no traversal archive).
+	entries, err := os.ReadDir(filepath.Join(a.notes.Dir, "archive"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "secret-target" {
+		t.Errorf("archive entries = %v, want only secret-target", entries)
+	}
+
+	// Live note still present and titled.
+	got := createGet(t, a, sh.ID)
+	if got.Title != "Kept Safe" {
+		t.Errorf("title = %q", got.Title)
+	}
+}
+
+// Documented status matrix for malformed vs unknown note identities.
+func TestNoteIDStatusContract(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	h := newTestHandler(t, a)
+
+	// Malformed decoded ids → 400 when the handler is reached.
+	for _, id := range []string{"..", "archive", "foo/bar", ".hidden", "not-minted"} {
+		// Use SetPathValue path via direct helper for exact decoded values,
+		// and also the public router where encoding applies.
+		if rec := getNote(a, id); rec.Code != 400 {
+			t.Errorf("getNote(%q): %d, want 400", id, rec.Code)
+		}
+		if rec := patchNote(a, id, `{"title":"x"}`); rec.Code != 400 {
+			t.Errorf("patchNote(%q): %d, want 400", id, rec.Code)
+		}
+	}
+	// Well-formed missing → 404.
+	missing := "20260101T120000-00000000"
+	if rec := getNote(a, missing); rec.Code != 404 {
+		t.Errorf("missing get: %d", rec.Code)
+	}
+	// Public router: encoded traversal that reaches the handler → 400.
+	rec := routeRequest(h, "GET", "/api/notes/..%2Farchive%2Fsecret", "", false)
+	if rec.Code != 400 {
+		t.Errorf("encoded traversal GET: %d, want 400", rec.Code)
 	}
 }

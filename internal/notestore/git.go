@@ -27,16 +27,23 @@ func SetFindGitForTest(fn func() (string, error)) (restore func()) {
 // never notes/ as a whole. Identity is forced via -c, and global/system
 // gitconfig are redirected to os.DevNull, so the user's commit.gpgsign,
 // hooksPath, includeIf, etc. never apply.
+//
+// Invalid ids return immediately without invoking the git locator — the store
+// remains the final path boundary even if a caller skips HTTP validation.
 func (s *Store) TryCommit(id, message string) {
-	if id == "" {
+	dir, err := s.noteDirChecked(id)
+	if err != nil {
+		return
+	}
+	doc, err := s.pathChecked(id)
+	if err != nil {
 		return
 	}
 	bin, err := findGit()
 	if err != nil || bin == "" {
 		return
 	}
-	dir := s.noteDir(id)
-	if _, err := os.Stat(s.path(id)); err != nil {
+	if _, err := os.Stat(doc); err != nil {
 		return // no document to version
 	}
 	if message == "" {

@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -110,7 +111,52 @@ func New(dir string) *Store { return &Store{Dir: dir} }
 // ErrNotFound is returned by Get/Delete for an unknown or archived note id.
 var ErrNotFound = errors.New("notestore: note not found")
 
+// ErrInvalidID is returned when a note/section/reference id is not a
+// server-minted filename-safe component. HTTP handlers map it to 400.
+var ErrInvalidID = errors.New("notestore: invalid id")
+
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// idRe matches the complete newID grammar:
+//   - normal:   YYYYMMDDTHHMMSS- + 8 lowercase hex (4 random bytes)
+//   - fallback: YYYYMMDDTHHMMSS-t + 1..16 lowercase hex (UnixNano)
+//
+// Both forms are a single path component: no dots, slashes, or separators.
+var idRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}-([0-9a-f]{8}|t[0-9a-f]{1,16})$`)
+
+// ValidID reports whether id is exactly one server-minted filename-safe
+// component. The store is the final filesystem boundary: every entry point
+// that consumes an id calls this before any path join. Rejects empty, ".",
+// "..", absolute paths, both slash styles, reserved names, leading dots, and
+// anything that is not the complete newID grammar (not merely "../" stripping).
+func ValidID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	// Reject any path separator (slash or backslash) regardless of host OS,
+	// and reject absolute / volume-shaped inputs before regex matching.
+	if strings.ContainsAny(id, `/\`) {
+		return false
+	}
+	if filepath.IsAbs(id) {
+		return false
+	}
+	// filepath.IsAbs misses bare Windows volume forms and leading separators
+	// on Unix when mixed; also reject NUL and other control bytes.
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x20 || id[i] == 0x7f {
+			return false
+		}
+	}
+	if strings.HasPrefix(id, ".") {
+		return false
+	}
+	// Reserved live-tree name used by Delete's archive destination.
+	if id == "archive" {
+		return false
+	}
+	return idRe.MatchString(id)
+}
 
 // newID mints an opaque, stable, filename-safe id. A sortable time prefix aids
 // human debugging of the directory; the random suffix makes two notes created
@@ -126,11 +172,67 @@ func newID() string {
 	return fmt.Sprintf("%s-%x", time.Now().UTC().Format("20060102T150405"), b)
 }
 
-// noteDir is the per-note folder notes/<id>/.
-func (s *Store) noteDir(id string) string { return filepath.Join(s.Dir, id) }
+// noteDirChecked returns the absolute-cleaned path of notes/<id>/ after
+// proving id is valid and the joined path is exactly one component under the
+// store root (filepath.Rel depth check).
+func (s *Store) noteDirChecked(id string) (string, error) {
+	if !ValidID(id) {
+		return "", ErrInvalidID
+	}
+	root := filepath.Clean(s.Dir)
+	dir := filepath.Join(root, id)
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel != id {
+		return "", ErrInvalidID
+	}
+	// Defense in depth: rel must be a single component (no separators, no ..).
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		strings.ContainsRune(rel, filepath.Separator) {
+		return "", ErrInvalidID
+	}
+	return dir, nil
+}
 
-// path is the note document notes/<id>/note.json.
-func (s *Store) path(id string) string { return filepath.Join(s.noteDir(id), "note.json") }
+// pathChecked returns notes/<id>/note.json after the same containment proof.
+func (s *Store) pathChecked(id string) (string, error) {
+	dir, err := s.noteDirChecked(id)
+	if err != nil {
+		return "", err
+	}
+	doc := filepath.Join(dir, "note.json")
+	root := filepath.Clean(s.Dir)
+	rel, err := filepath.Rel(root, doc)
+	if err != nil || rel != filepath.Join(id, "note.json") {
+		return "", ErrInvalidID
+	}
+	return doc, nil
+}
+
+// archiveDirChecked returns notes/archive/<id>.<stamp> for a validated id.
+// The destination is exactly one entry directly beneath notes/archive/.
+func (s *Store) archiveDirChecked(id, stamp string) (string, error) {
+	if !ValidID(id) {
+		return "", ErrInvalidID
+	}
+	// Stamp is server-minted (time format); reject separators so archive
+	// cannot escape notes/archive/.
+	if stamp == "" || strings.ContainsAny(stamp, `/\`) || strings.Contains(stamp, "..") {
+		return "", ErrInvalidID
+	}
+	root := filepath.Clean(s.Dir)
+	archRoot := filepath.Join(root, "archive")
+	name := id + "." + stamp
+	dest := filepath.Join(archRoot, name)
+	rel, err := filepath.Rel(archRoot, dest)
+	if err != nil || rel != name {
+		return "", ErrInvalidID
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		strings.ContainsRune(rel, filepath.Separator) {
+		return "", ErrInvalidID
+	}
+	return dest, nil
+}
 
 // Create writes a fresh note: auto title YYYY-MM-DD HH:MM, a single starter
 // section titled "Section 1", and an order that appends it after existing
@@ -233,8 +335,15 @@ func (sh *Note) RemoveReference(sectionID, refID string) bool {
 // Get reads and parses one note. A missing file is ErrNotFound; a malformed
 // file is a hard error here (unlike List, a caller asking for a specific id
 // wants to know the file is corrupt rather than silently get an empty note).
+// Invalid ids are ErrInvalidID before any filesystem access. An embedded
+// document id that differs from the requested/directory id is also
+// ErrInvalidID — identity cannot redirect a subsequent Save into another dir.
 func (s *Store) Get(id string) (Note, error) {
-	b, err := os.ReadFile(s.path(id))
+	doc, err := s.pathChecked(id)
+	if err != nil {
+		return Note{}, err
+	}
+	b, err := os.ReadFile(doc)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Note{}, ErrNotFound
@@ -245,19 +354,27 @@ func (s *Store) Get(id string) (Note, error) {
 	if err := json.Unmarshal(b, &sh); err != nil {
 		return Note{}, err
 	}
+	if sh.ID != id {
+		return Note{}, ErrInvalidID
+	}
 	return sh, nil
 }
 
 // Save rewrites the note's file atomically (tmp-write + rename inside the note
 // folder), overwriting rather than appending, and stamps edited_at. Write cost
 // is bounded by this one note's size, so autosave frequency never grows the
-// store.
+// store. Rejects an invalid embedded id before creating directories or temps.
 func (s *Store) Save(sh Note) error {
-	if sh.ID == "" {
-		return errors.New("notestore: cannot save a note with an empty id")
+	dir, err := s.noteDirChecked(sh.ID)
+	if err != nil {
+		return err
+	}
+	doc, err := s.pathChecked(sh.ID)
+	if err != nil {
+		return err
 	}
 	// Ensure the per-note folder exists; the data dir itself is created with it.
-	if err := os.MkdirAll(s.noteDir(sh.ID), 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	sh.Edited = nowStamp()
@@ -269,13 +386,13 @@ func (s *Store) Save(sh Note) error {
 	}
 	b = append(b, '\n')
 	// Tmp lives inside the note folder so rename stays same-directory atomic.
-	tmp := s.path(sh.ID) + ".tmp"
+	tmp := doc + ".tmp"
 	// 0600: section bodies and captured pane snapshots are as sensitive as the
 	// session log's prompt text.
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.path(sh.ID)); err != nil {
+	if err := os.Rename(tmp, doc); err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -284,31 +401,43 @@ func (s *Store) Save(sh Note) error {
 
 // Delete moves the whole note folder into notes/archive/<id>.<stamp>/.
 // Nothing is erased; a reissued id can never append onto dead content because
-// the live folder is gone. Missing note is ErrNotFound.
+// the live folder is gone. Missing note is ErrNotFound. Invalid ids are
+// ErrInvalidID and never touch the archive tree.
 func (s *Store) Delete(id string) error {
-	src := s.noteDir(id)
+	src, err := s.noteDirChecked(id)
+	if err != nil {
+		return err
+	}
+	doc, err := s.pathChecked(id)
+	if err != nil {
+		return err
+	}
 	// Require the note document (not just an empty dir) so a stray folder is
 	// not treated as a live note.
-	if _, err := os.Stat(s.path(id)); err != nil {
+	if _, err := os.Stat(doc); err != nil {
 		if os.IsNotExist(err) {
 			return ErrNotFound
 		}
 		return err
 	}
-	dir := filepath.Join(s.Dir, "archive")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	archRoot := filepath.Join(filepath.Clean(s.Dir), "archive")
+	if err := os.MkdirAll(archRoot, 0o700); err != nil {
 		return err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	return os.Rename(src, filepath.Join(dir, id+"."+stamp))
+	dest, err := s.archiveDirChecked(id, stamp)
+	if err != nil {
+		return err
+	}
+	return os.Rename(src, dest)
 }
 
 // List returns every parseable note under notes/<id>/note.json, sorted by the
 // stored Order field (ties broken by id for a stable order). Defensive like
 // the rest of the corpus readers: non-directories (including stray top-level
-// *.json — no legacy flat-file read), the archive subdir, missing/malformed
-// note.json, and tmp files are skipped, never a hard error — a corrupt file
-// must not 500 the whole list.
+// *.json — no legacy flat-file read), the archive subdir, invalid directory
+// names, missing/malformed note.json, embedded-id mismatches, and tmp files
+// are skipped, never a hard error — a corrupt file must not 500 the whole list.
 func (s *Store) List() ([]Note, error) {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
@@ -326,13 +455,23 @@ func (s *Store) List() ([]Note, error) {
 		if name == "archive" || strings.HasPrefix(name, ".") {
 			continue
 		}
-		b, err := os.ReadFile(s.path(name))
+		if !ValidID(name) {
+			continue // invalid directory name: never join into a path read
+		}
+		doc, err := s.pathChecked(name)
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile(doc)
 		if err != nil {
 			continue // missing note.json, permission, etc.
 		}
 		var sh Note
 		if json.Unmarshal(b, &sh) != nil || sh.ID == "" {
 			continue // malformed or headerless: skip, don't fail the list
+		}
+		if sh.ID != name {
+			continue // embedded identity mismatch: skip, never rename silently
 		}
 		out = append(out, sh)
 	}
