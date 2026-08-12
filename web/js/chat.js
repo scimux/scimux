@@ -9,7 +9,7 @@
  *   - #msgwrap / #msgs / #chatloading
  *   - #gauge / #gaugefill (context gauge)
  *   - #keyrow (dialog answer buttons — presentation + key send)
- *   - #convtools / #termtoggle / #scrollend
+ *   - #convtools / #termtoggle / #autoapprove / #scrollend
  *   - #workpulse
  *
  * Inputs (getters / injected deps — never implicit app globals):
@@ -37,6 +37,7 @@
  *   - GET  /api/nodes/:id/peek[?mode=visible]
  *   - POST /api/nodes/:id/key
  *   - POST /api/nodes/:id/send/resolve
+ *   - POST /api/nodes/:id/auto-approve
  *   - PATCH /api/nodes/:id  (description only, from details editor)
  *
  * Events owned after one idempotent bind():
@@ -47,7 +48,7 @@
  *   - #msgs click (histload, bubble tap, bubble actions)
  *   - #msgs touchend (double-tap zoom reset on empty background)
  *   - #keyrow click (dialog keys + attention collapse)
- *   - #termtoggle / #scrollend click
+ *   - #termtoggle / #autoapprove / #scrollend click
  *   - longpress #chattitle / #chatdesc (title edit / desc edit)
  *   - dynamic #termfull / #decresolve (rebound each rebuild and explicitly
  *     detached before replacement or destroy)
@@ -208,6 +209,7 @@ export function buildChatSignature(parts){
     p.echoHash || "",
     p.histKey || "",
     p.turnsHash || "",
+    p.decisionsHash || "",
     p.expanded ? "1" : "0",
   ].join("|");
 }
@@ -537,6 +539,185 @@ export function echoBubbleHTML(text, tilesHTML = "", { markdown = md } = {}){
       </div>`;
 }
 
+/* ---------- auto-approve chrome + decision audit (fixes-2 P4) ---------- */
+
+export const AUTO_APPROVE_HELP =
+  "Automatically selects the sole one-time approval option. Resets when the turn finishes or is interrupted.";
+export const AUTO_APPROVE_CLAUDE_HELP =
+  "Auto-approval isn't available for Claude yet.";
+export const AUTO_APPROVE_LABEL_FULL = "Auto-approve this turn";
+export const AUTO_APPROVE_LABEL_NARROW = "Auto-approve";
+
+export function autoApproveViewNorm(view){
+  const v = view || {};
+  return {
+    supported: !!v.supported,
+    enabled: !!v.enabled,
+    phase: v.phase || "off",
+    count: Number(v.count) || 0,
+    error: v.error ? String(v.error) : "",
+  };
+}
+
+/* Accessible name for the toggle. Count is spoken only when enabled and > 0. */
+export function autoApproveAriaName({ enabled = false, count = 0, supported = true } = {}){
+  if (!supported) return AUTO_APPROVE_CLAUDE_HELP;
+  const base = "Auto-approve eligible tool requests for this turn";
+  if (enabled && (Number(count) || 0) > 0){
+    return `${base}; ${Number(count)} approved.`;
+  }
+  return base;
+}
+
+/* Pure presentation model for the #autoapprove toggle. */
+export function autoApproveChromeModel(view, { agent = "" } = {}){
+  const v = autoApproveViewNorm(view);
+  const agentL = String(agent || "").toLowerCase();
+  // Unsupported transport (Claude/tmux) or explicit Claude agent: disabled control.
+  if (!v.supported || agentL === "claude"){
+    return {
+      supported: false,
+      enabled: false,
+      phase: "off",
+      count: 0,
+      error: "",
+      pressed: false,
+      disabled: true,
+      showWarning: false,
+      showBadge: false,
+      badgeText: "",
+      labelFull: AUTO_APPROVE_LABEL_FULL,
+      labelNarrow: AUTO_APPROVE_LABEL_NARROW,
+      title: AUTO_APPROVE_CLAUDE_HELP,
+      ariaLabel: AUTO_APPROVE_CLAUDE_HELP,
+      toggleIcon: "off",
+      classNames: ["autoapprove", "unsupported"],
+    };
+  }
+  const enabled = !!v.enabled && (v.phase === "primed" || v.phase === "armed");
+  const count = enabled ? (Number(v.count) || 0) : 0;
+  const classes = ["autoapprove", enabled ? "on" : "off"];
+  if (v.error) classes.push("has-error");
+  return {
+    supported: true,
+    enabled,
+    phase: v.phase,
+    count,
+    error: v.error || "",
+    pressed: enabled,
+    disabled: false,
+    showWarning: enabled,
+    showBadge: enabled && count > 0,
+    badgeText: enabled && count > 0 ? String(count) : "",
+    labelFull: AUTO_APPROVE_LABEL_FULL,
+    labelNarrow: AUTO_APPROVE_LABEL_NARROW,
+    title: AUTO_APPROVE_HELP,
+    ariaLabel: autoApproveAriaName({ enabled, count, supported: true }),
+    toggleIcon: enabled ? "on" : "off",
+    classNames: classes,
+  };
+}
+
+/* Inner HTML for the toggle. All dynamic text is escaped. */
+export function autoApproveButtonInnerHTML(model, icons = {}, { escape = esc } = {}){
+  const m = model || {};
+  const icon = m.toggleIcon === "on"
+    ? (icons.ICON_TOGGLE_ON || "")
+    : (icons.ICON_TOGGLE_OFF || "");
+  const warn = m.showWarning ? (icons.ICON_WARN || "") : "";
+  const badge = m.showBadge
+    ? `<span class="aa-badge" aria-hidden="true">${escape(m.badgeText)}</span>`
+    : "";
+  const err = m.error
+    ? `<span class="aa-error" role="status">${escape(m.error)}</span>`
+    : "";
+  return `<span class="aa-icon" aria-hidden="true">${icon}</span>` +
+    (warn ? `<span class="aa-warn" aria-hidden="true">${warn}</span>` : "") +
+    `<span class="aa-label">` +
+      `<span class="aa-label-full">${escape(m.labelFull || AUTO_APPROVE_LABEL_FULL)}</span>` +
+      `<span class="aa-label-narrow">${escape(m.labelNarrow || AUTO_APPROVE_LABEL_NARROW)}</span>` +
+    `</span>` +
+    badge + err;
+}
+
+/* Stable hash of decision surfaces for the chat rebuild signature. */
+export function decisionsHash(decisions){
+  return (decisions || []).map(d => {
+    const dec = (d && d.decision) || d || {};
+    const sel = dec.selected || {};
+    return [
+      d && d.record != null ? d.record : "",
+      dec.request_id || "",
+      sel.key || "",
+      dec.lease_id || "",
+    ].join(":");
+  }).join("|");
+}
+
+/* Merge turns and decision surfaces by durable record index. */
+export function mergeTimelineItems(turns, decisions){
+  const items = [];
+  (turns || []).forEach((t, i) => {
+    const rec = t && t.record != null ? Number(t.record) : i;
+    items.push({ kind: "turn", record: rec, index: i, turn: t, ord: items.length });
+  });
+  (decisions || []).forEach(d => {
+    const rec = d && d.record != null ? Number(d.record) : 0;
+    items.push({ kind: "decision", record: rec, decision: d, ord: items.length });
+  });
+  items.sort((a, b) => {
+    if (a.record !== b.record) return a.record - b.record;
+    if (a.kind !== b.kind) return a.kind === "turn" ? -1 : 1;
+    return a.ord - b.ord;
+  });
+  return items;
+}
+
+/* Compact expandable audit row for one decision surface. Plain text only —
+   never md()/innerHTML of unescaped agent content. No bubble actions. */
+export function decisionRowHTML(surface, { escape = esc, fmtTime = fmtWhen } = {}){
+  const s = surface || {};
+  const d = s.decision || {};
+  const sel = d.selected || {};
+  const title = d.title != null ? String(d.title) : "";
+  const selName = sel.name != null ? String(sel.name) : (sel.key != null ? String(sel.key) : "");
+  const summary = "Auto-approved: " + title + (selName ? " \u2014 " + selName : "");
+  const opts = Array.isArray(d.options) ? d.options : [];
+  const optsHTML = opts.map(o => {
+    const key = o && o.key != null ? String(o.key) : "";
+    const name = o && o.name != null ? String(o.name) : "";
+    const kind = o && o.kind != null ? String(o.kind) : "unknown";
+    return `<li><code>${escape(key)}</code> ${escape(name)}` +
+      ` <span class="aa-kind">(${escape(kind)})</span></li>`;
+  }).join("");
+  const when = s.time ? escape(fmtTime(s.time)) : "";
+  const agent = d.agent != null ? String(d.agent) : "";
+  const toolKind = d.tool_kind != null ? String(d.tool_kind) : "";
+  const reason = d.reason != null ? String(d.reason) : "";
+  const req = d.request_id != null ? String(d.request_id) : "";
+  const lease = d.lease_id != null ? String(d.lease_id) : "";
+  const selKey = sel.key != null ? String(sel.key) : "";
+  const selKind = sel.kind != null ? String(sel.kind) : "";
+  return `<details class="decision" data-record="${escape(String(s.record ?? ""))}"` +
+    ` data-request="${escape(req)}">` +
+    `<summary class="decision-sum">${escape(summary)}</summary>` +
+    `<div class="decision-body">` +
+    (when ? `<div class="decision-row"><span class="k">Time</span> ${when}</div>` : "") +
+    (agent ? `<div class="decision-row"><span class="k">Agent</span> ${escape(agent)}</div>` : "") +
+    (toolKind ? `<div class="decision-row"><span class="k">Tool</span> ${escape(toolKind)}</div>` : "") +
+    `<div class="decision-row"><span class="k">Command</span>` +
+      ` <pre class="decision-cmd">${escape(title)}</pre></div>` +
+    (reason ? `<div class="decision-row"><span class="k">Reason</span> ${escape(reason)}</div>` : "") +
+    `<div class="decision-row"><span class="k">Options</span>` +
+      `<ul class="decision-opts">${optsHTML}</ul></div>` +
+    `<div class="decision-row"><span class="k">Selected</span>` +
+      ` <code>${escape(selKey)}</code> ${escape(selName)}` +
+      ` <span class="aa-kind">(${escape(selKind)})</span></div>` +
+    `<div class="decision-row"><span class="k">Request</span> <code>${escape(req)}</code></div>` +
+    `<div class="decision-row"><span class="k">Lease</span> <code>${escape(lease)}</code></div>` +
+    `</div></details>`;
+}
+
 /* ---------- feature factory ---------- */
 
 export function createChatFeature(deps){
@@ -573,6 +754,7 @@ export function createChatFeature(deps){
   const keyrow = roots.keyrow;
   const convtools = roots.convtools;
   const termtoggle = roots.termtoggle;
+  const autoapprove = roots.autoapprove;
   const scrollend = roots.scrollend;
   const workpulse = roots.workpulse;
 
@@ -581,6 +763,10 @@ export function createChatFeature(deps){
   /* Per-node chat poll validator (ETag). Keyed by node id so a tag from A is
      never sent for B; cleared on node switch (onSelectChange). */
   let chatETag = { node: "", etag: "" };
+  /* Last authoritative auto-approve view for the selected node (server-owned). */
+  let lastAutoView = null;
+  /* In-flight POST node id — never repaint another node with a stale response. */
+  let autoApproveInFlight = "";
   /* The pane's own render region: a host element inside #msgs that the
      transcript rebuild recreates, plus the signature of what is painted into
      it. Held as a reference rather than looked up, because the host is created
@@ -752,6 +938,62 @@ export function createChatFeature(deps){
     }
   }
 
+  /* Paint the server-authoritative auto-approve toggle. Never optimistically
+     claims enabled — only apply a view the server returned. */
+  function paintAutoApprove(view, n){
+    if (!autoapprove) return;
+    const agent = (n && n.agent) || "";
+    let v = view;
+    if (v == null){
+      v = String(agent).toLowerCase() === "claude"
+        ? { supported: false, enabled: false, phase: "off", count: 0 }
+        : { supported: true, enabled: false, phase: "off", count: 0 };
+    }
+    lastAutoView = v;
+    const model = autoApproveChromeModel(v, { agent });
+    autoapprove.disabled = !!model.disabled;
+    if (typeof autoapprove.setAttribute === "function"){
+      autoapprove.setAttribute("aria-pressed", model.pressed ? "true" : "false");
+      autoapprove.setAttribute("aria-label", model.ariaLabel);
+    }
+    autoapprove.title = model.title;
+    autoapprove.className = model.classNames.join(" ");
+    if (autoapprove.classList && autoapprove.classList._s){
+      autoapprove.classList._s = new Set(model.classNames);
+    } else if (autoapprove.classList){
+      ["on", "off", "unsupported", "has-error"].forEach(c => {
+        if (typeof autoapprove.classList.toggle === "function")
+          autoapprove.classList.toggle(c, model.classNames.includes(c));
+      });
+      if (typeof autoapprove.classList.add === "function")
+        autoapprove.classList.add("autoapprove");
+    }
+    autoapprove.innerHTML = autoApproveButtonInnerHTML(model, icons, { escape });
+  }
+
+  function renderTurnHTML(t, { bk, hist = false, nodeId, assets } = {}){
+    const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
+    bubbleTurns[bk] = t;
+    const cls = turnRoleClass(t.role, { hist, media: !!(a.html && !a.clean) });
+    const dataAttrs = hist
+      ? `data-bk="${bk}" data-time="${escape(t.time || "")}" data-uid="${escape(t.uid || "")}" data-segment="${t.segment || 0}" data-record="${t.record || 0}"`
+      : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
+    return `
+      <div class="${cls}" ${dataAttrs}>
+        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markdown(a.clean)}${a.html}</div>
+      </div>`;
+  }
+
+  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets } = {}){
+    return mergeTimelineItems(turns, decisions).map(item => {
+      if (item.kind === "decision"){
+        return decisionRowHTML(item.decision, { escape, fmtTime: whenFn });
+      }
+      const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
+      return renderTurnHTML(item.turn, { bk, hist, nodeId, assets });
+    }).join("");
+  }
+
   function attentionSuppressed(id){
     if (!id) return false;
     if (attentionIsSuppressed(id, suppressAttentionUntil)) return true;
@@ -834,6 +1076,8 @@ export function createChatFeature(deps){
     chatSig = "";
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
     chatETag = { node: "", etag: "" };
+    lastAutoView = null;
+    autoApproveInFlight = "";
     /* A new chat always opens at its newest bubble. #msgs is a singleton
        reused across nodes, so without this the rebuild inherits the scroll
        offset of the chat we just left: `atBottom` was measured on the old
@@ -1203,9 +1447,13 @@ export function createChatFeature(deps){
       data.live, mustShowPane, forcePeek, showPeek,
       !!data.reply_ready || freshSurface,
     );
+    /* Auto-approve chrome is outside the transcript signature so count/phase
+       can repaint without clobbering the composer or rebuilding bubbles. */
+    paintAutoApprove(data.auto_approve, n);
 
     const hist = chatHist.node === n.id && chatHist.segs ? chatHist.segs : null;
     const priorSegs = priorSegsFromHistory(hist, data.chat_started);
+    const liveDecisions = data.decisions || [];
     /* Leave expand when this node no longer has a live acp approval row. */
     const acpOpts = (data.source === "acp" && (data.perm_options || []).length)
       ? data.perm_options : null;
@@ -1229,6 +1477,8 @@ export function createChatFeature(deps){
       echoHash: echo ? hash(echo.text) : "",
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hashTurns(turns),
+      decisionsHash: decisionsHash(liveDecisions) +
+        (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
     });
     const label = unconfirmed
@@ -1278,30 +1528,18 @@ export function createChatFeature(deps){
       (data.prior_turns > 0 && !hist ? histLoadHTML(data.prior_turns) : "") +
       priorSegs.map((s, si) =>
         `<div class="chatseam histseam" data-seam="${escape(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${escape(whenFn(s.start))}</span></div>` +
-        (s.turns || []).map((t, ti) => {
-          const h = splitAssetRefs(t.text, n.id, assets, tileDeps());
-          const bk = histBk(si, ti);
-          bubbleTurns[bk] = t;
-          return `
-      <div class="${turnRoleClass(t.role, { hist: true, media: !!(h.html && !h.clean) })}" data-bk="${bk}" data-time="${escape(t.time || "")}" data-uid="${escape(t.uid || "")}" data-segment="${t.segment || 0}" data-record="${t.record || 0}">
-        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markdown(h.clean)}${h.html}</div>
-      </div>`;
-        }).join("")
+        renderTimelineHTML(s.turns || [], s.decisions || [], {
+          hist: true, segIndex: si, nodeId: n.id, assets,
+        })
       ).join("") +
       (data.chat_started
         ? `<div class="chatseam curseam"><span>chat started ${escape(whenFn(data.chat_started))}</span></div>` : "") +
-      (!turns.length
+      (!turns.length && !liveDecisions.length
         ? pendingEmptyHTML({ freshSurface, pending: data.pending })
         : "") +
-      turns.map((t, i) => {
-        const a = splitAssetRefs(t.text, n.id, assets, tileDeps());
-        const bk = liveBk(i);
-        bubbleTurns[bk] = t;
-        return `
-      <div class="${turnRoleClass(t.role, { media: !!(a.html && !a.clean) })}" data-i="${i}" data-bk="${bk}">
-        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markdown(a.clean)}${a.html}</div>
-      </div>`;
-      }).join("") +
+      renderTimelineHTML(turns, liveDecisions, {
+        hist: false, nodeId: n.id, assets,
+      }) +
       (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "");
 
     /* The pane's own region. Created rather than written into the markup so the
@@ -1596,6 +1834,40 @@ export function createChatFeature(deps){
     if (termOpen && msgs) msgs.scrollTop = 1e6;
   }
 
+  /* Toggle auto-approve via POST. Capture node id before the request so a
+     response for A never repaints B. No optimistic enable. */
+  async function onAutoApproveClick(){
+    if (!autoapprove || autoapprove.disabled) return;
+    const id = g("sel", "");
+    const n = nodeById(id);
+    if (!id || !n) return;
+    const pressed = typeof autoapprove.getAttribute === "function"
+      ? autoapprove.getAttribute("aria-pressed") === "true"
+      : false;
+    const enable = !pressed;
+    autoApproveInFlight = id;
+    try {
+      const view = await api(`/api/nodes/${encodeURIComponent(id)}/auto-approve`, {
+        method: "POST",
+        body: JSON.stringify({ enabled: enable }),
+      });
+      if (autoApproveInFlight !== id || g("sel", "") !== id) return;
+      // Invalidate only this node's chat validator; never borrow another's ETag.
+      if (chatETag.node === id) chatETag = { node: "", etag: "" };
+      paintAutoApprove(view, n);
+      chatSig = "";
+      await refreshChat();
+    } catch (err){
+      if (autoApproveInFlight !== id || g("sel", "") !== id) return;
+      // Retain last authoritative server state; surface a concise error.
+      const msg = (err && err.message) ? String(err.message) : "auto-approve failed";
+      const base = lastAutoView || { supported: true, enabled: false, phase: "off", count: 0 };
+      paintAutoApprove({ ...base, error: msg.replace(/\s+/g, " ").trim().slice(0, 160) }, n);
+    } finally {
+      if (autoApproveInFlight === id) autoApproveInFlight = "";
+    }
+  }
+
   function onScrollEnd(){
     if (!msgs) return;
     if (typeof msgs.scrollTo === "function")
@@ -1647,6 +1919,7 @@ export function createChatFeature(deps){
     on(msgs, "touchend", onMsgsTouchEnd, { passive: true });
     on(keyrow, "click", onKeyrowClick);
     on(termtoggle, "click", onTermToggle);
+    on(autoapprove, "click", onAutoApproveClick);
     if (scrollend){
       scrollend.innerHTML = icons.ICON_DOWNALL || "";
       on(scrollend, "click", onScrollEnd);

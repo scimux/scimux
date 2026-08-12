@@ -108,7 +108,12 @@
     </div>
     <div id="keyrow"></div>
     <div id="convtools" hidden>
-      <button id="termtoggle" aria-label="show terminal" title="show/hide terminal"></button>
+      <div class="convtools-start">
+        <button id="termtoggle" aria-label="show terminal" title="show/hide terminal"></button>
+        <button type="button" id="autoapprove" class="autoapprove off" aria-pressed="false"
+          title="Automatically selects the sole one-time approval option. Resets when the turn finishes or is interrupted."
+          aria-label="Auto-approve eligible tool requests for this turn"></button>
+      </div>
       <button id="scrollend" aria-label="scroll to latest message" title="scroll to latest"></button>
     </div>
     <div id="workpulse" aria-hidden="true"></div>

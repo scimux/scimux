@@ -132,17 +132,99 @@ body.cards-open #msgs { overflow: hidden; }
   to   { transform: translate3d(194%,0,0); }
 }
 
-/* composer tools: a small icon row sitting above the prompt — jump to the
-   chat's end on the left, toggle the terminal open below the last bubble
-   on the right */
-#convtools { display: flex; align-items: center; gap: 16px; justify-content: space-between;
+/* composer tools: terminal + auto-approve on the left, scroll-to-latest on
+   the right (fixes-2 P4). The composer (#promptbar) stays outside this row. */
+#convtools { display: flex; align-items: center; gap: 12px; justify-content: space-between;
   padding: 4px 16px 0; }
 #convtools[hidden] { display: none; }
+.convtools-start { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+#convtools > #scrollend { flex: 0 0 auto; margin-left: auto; }
 #convtools button { width: 34px; height: 34px; border-radius: 9px; color: var(--dim);
   display: flex; align-items: center; justify-content: center; }
 #convtools button:active { color: var(--work); }
 #convtools button.on { color: var(--work); background: var(--th-bg); }
 #convtools button:disabled { opacity: .4; }
+/* Auto-approve: one toggle target (icon + label + optional badge). Min 44×44
+   hit region; state is icon geometry + warning + pressed, not color alone. */
+#convtools button.autoapprove {
+  width: auto; min-width: 44px; min-height: 44px; height: auto;
+  padding: 6px 10px; gap: 6px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: flex-start;
+  color: var(--dim); background: transparent; border: 1px solid transparent;
+  font-size: 13px; line-height: 1.2; max-width: 100%;
+}
+#convtools button.autoapprove .aa-icon,
+#convtools button.autoapprove .aa-warn { display: inline-flex; flex: 0 0 auto; }
+#convtools button.autoapprove .aa-warn { color: #C98900; }
+#convtools button.autoapprove.on {
+  color: var(--ink);
+  background: color-mix(in srgb, #FFB020 14%, transparent);
+  border-color: color-mix(in srgb, #C98900 45%, transparent);
+}
+#convtools button.autoapprove.on .aa-icon { color: #C98900; }
+#convtools button.autoapprove.unsupported { opacity: .45; }
+#convtools button.autoapprove:disabled { opacity: .45; cursor: not-allowed; }
+#convtools button.autoapprove:active:not(:disabled) { color: var(--work); }
+#convtools button.autoapprove .aa-label {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+#convtools button.autoapprove .aa-label-narrow { display: none; }
+#convtools button.autoapprove .aa-badge {
+  flex: 0 0 auto; min-width: 1.4em; padding: 1px 6px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, #C98900 22%, transparent);
+  color: var(--ink); border: 1px solid color-mix(in srgb, #C98900 50%, transparent);
+}
+#convtools button.autoapprove .aa-error {
+  flex: 1 1 auto; font-size: 11px; color: var(--bad); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 12em;
+}
+@media (max-width: 520px) {
+  #convtools button.autoapprove .aa-label-full { display: none; }
+  #convtools button.autoapprove .aa-label-narrow { display: inline; }
+}
+@media (prefers-color-scheme: dark) {
+  #convtools button.autoapprove.on {
+    background: color-mix(in srgb, #FFB020 18%, transparent);
+    border-color: color-mix(in srgb, #FFB020 40%, transparent);
+  }
+  #convtools button.autoapprove.on .aa-icon,
+  #convtools button.autoapprove .aa-warn { color: #FFB020; }
+}
+@media (prefers-contrast: more) {
+  #convtools button.autoapprove.on {
+    border-width: 2px; border-color: #C98900;
+  }
+  #convtools button.autoapprove .aa-badge { border-width: 2px; }
+  #convtools button.autoapprove.off {
+    border-color: var(--hairline);
+  }
+}
+/* Decision audit surfaces (session-log t:"decision") — read-only, not turns. */
+.decision {
+  margin: 8px 0; padding: 0; border-radius: 10px; max-width: 92%;
+  background: var(--surface); border: 1px solid var(--hairline);
+  color: var(--dim); font-size: 13px;
+}
+.decision-sum {
+  cursor: pointer; list-style: none; padding: 8px 12px;
+  color: var(--ink); font-size: 13px;
+}
+.decision-sum::-webkit-details-marker { display: none; }
+.decision[open] > .decision-sum { border-bottom: 1px solid var(--hairline); }
+.decision-body { padding: 8px 12px 10px; display: grid; gap: 6px; }
+.decision-row { line-height: 1.35; }
+.decision-row .k {
+  color: var(--dim); font-size: 11px; text-transform: uppercase;
+  letter-spacing: .03em; display: block; margin-bottom: 2px;
+}
+.decision-cmd {
+  margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--code-bg);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; color: var(--ink);
+}
+.decision-opts { margin: 0; padding-left: 18px; }
+.decision .aa-kind { color: var(--dim); font-size: 12px; }
 .copied { color: var(--work) !important; }
 
 /* inline field validation: message + icon next to the field (color is never
