@@ -3121,6 +3121,69 @@ test("chatActivityPolicy: server fresh trusts over source===acp and fallback", (
   assert.equal(attn.freshSurface, false);
 });
 
+/* ---------- P4: description read pane is height-bounded (scroll, not grow) ----------
+ * #chathead is flex:none in the panel column. An unbounded .chatdesc pushes the
+ * transcript off-screen. Reading flows one axis (same house rule as #msgs):
+ * the container clips x; code blocks scroll internally. */
+
+/** Extract a CSS rule body by bare-class selector (not descendants). */
+function chatdescRuleBody(css){
+  const m = css.match(/\.chatdesc\s*\{([^}]+)\}/);
+  assert.ok(m, ".chatdesc bare rule present");
+  return m[1];
+}
+function chatdescPreRuleBody(css){
+  const m = css.match(/\.chatdesc\s+pre\s*\{([^}]+)\}/);
+  assert.ok(m, ".chatdesc pre rule present");
+  return m[1];
+}
+function chatdescboxRuleBody(css){
+  const m = css.match(/\.chatdescbox\s*\{([^}]+)\}/);
+  assert.ok(m, ".chatdescbox bare rule present");
+  return m[1];
+}
+
+test("P4: .chatdesc is height-bounded and scrolls vertically", () => {
+  /* Bare class only — .chatdesc p / .chatdesc pre must not satisfy this. */
+  const body = chatdescRuleBody(chatCssSrc);
+  assert.match(body, /max-height\s*:\s*[\d.]+dvh/,
+    ".chatdesc must cap height in dvh so #chathead (flex:none) cannot grow unbound");
+  assert.match(body, /overflow-y\s*:\s*auto/,
+    "long descriptions scroll inside the cap, not by expanding the head");
+  assert.match(body, /overscroll-behavior\s*:\s*contain/,
+    "a flick inside the description must not chain-scroll the transcript underneath");
+});
+
+test("P4: long unbreakable content wraps instead of widening the head", () => {
+  const body = chatdescRuleBody(chatCssSrc);
+  assert.match(body, /overflow-wrap\s*:\s*(break-word|anywhere)/,
+    "unbreakable tokens wrap; the head must not become a sideways scroller");
+});
+
+test("P4: code inside the description scrolls on its own axis", () => {
+  const preBody = chatdescPreRuleBody(chatCssSrc);
+  assert.match(preBody, /overflow-x\s*:\s*auto/,
+    ".chatdesc pre scrolls long code lines internally");
+  /* House rule from #msgs (chat.css): reading flows one axis; the container
+     clips x and code blocks scroll internally. Absence of overflow-x:auto is
+     not enough to state that: overflow-y:auto silently computes overflow-x to
+     auto, so the clip must be declared or the cap re-creates the sideways
+     scroller it was added to prevent. */
+  const descBody = chatdescRuleBody(chatCssSrc);
+  assert.doesNotMatch(descBody, /overflow-x\s*:\s*auto/,
+    ".chatdesc itself must not be a horizontal scroller (same rule as #msgs)");
+  assert.match(descBody, /overflow-x\s*:\s*clip/,
+    "overflow-y:auto computes overflow-x to auto unless x is explicitly clipped");
+});
+
+test("P4: the editor textarea is unaffected", () => {
+  const body = chatdescboxRuleBody(chatCssSrc);
+  assert.match(body, /resize\s*:\s*vertical/,
+    "editor keeps resize:vertical for free-form composition");
+  assert.doesNotMatch(body, /max-height\s*:/,
+    "editor must not inherit the reading cap — editing is free height");
+});
+
 /* ---------- P7: Markdown in the unfolded description ---------- */
 
 test("P7: description read state is md() HTML; editor keeps raw; markup escaped", async () => {

@@ -30,7 +30,14 @@
 #chathead.details-open .mission { display: none; }
 .detailmeta { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .detailmeta .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chatdesc { color: var(--ink); line-height: 1.4; overflow-wrap: break-word; }
+/* A description is read here, not composed here: bound it and let it scroll
+   rather than letting #chathead (flex:none) push the transcript off-screen.
+   x stays clipped — code blocks scroll on their own axis, same rule as #msgs.
+   overflow-x: clip is load-bearing, not decoration: overflow-y:auto alone
+   computes overflow-x to auto (see #msgs below), which would make the very
+   sideways scroller this rule exists to prevent. */
+.chatdesc { color: var(--ink); line-height: 1.4; overflow-wrap: break-word;
+  max-height: 28dvh; overflow-y: auto; overflow-x: clip; overscroll-behavior: contain; }
 .chatdescbox {
   display: none; width: 100%; min-height: 76px; resize: vertical;
   margin: 0; padding: 9px 10px;
