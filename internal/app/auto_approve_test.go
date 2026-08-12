@@ -606,6 +606,36 @@ func TestMaybeAutoApproveSkipsPendingAtEnable(t *testing.T) {
 	}
 }
 
+// A primed lease — enabled while the node was idle — must not approve anything
+// until a prompt arms it. This is the load-bearing half of "one turn": the
+// lease is scoped to the turn the human starts *after* enabling, so a request
+// arriving while merely primed (a turn scimux thinks ended, a prompt sent from
+// elsewhere) belongs to no leased turn and stays manual.
+func TestMaybeAutoApprovePrimedLeaseNeverApproves(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "s6", "grok", "acp")
+	stub := &stubProc{
+		live: "quiet", hasSession: true, hasPending: true,
+		pending: grokStylePending("req-primed"), clearOnDeliver: true,
+	}
+	if v := a.setAutoApproveEnabled(n.ID, true, "quiet", ""); v.Phase != "primed" {
+		t.Fatalf("setup: phase = %q, want primed (enabled while idle)", v.Phase)
+	}
+	a.maybeAutoApprove(n, stub)
+	if stub.prepareCalls != 0 || stub.deliverCalls != 0 {
+		t.Fatalf("primed lease auto-approved; prep/del=%d/%d, want 0/0",
+			stub.prepareCalls, stub.deliverCalls)
+	}
+	// Arming it is what unlocks the same request — otherwise this test would
+	// still pass if the request were ineligible for some unrelated reason.
+	a.armAutoApproveOnPrompt(n.ID)
+	a.maybeAutoApprove(n, stub)
+	if stub.deliverCalls != 1 {
+		t.Fatalf("armed lease delivered %d, want 1 — the request itself is eligible",
+			stub.deliverCalls)
+	}
+}
+
 func TestMaybeAutoApproveIneligibleStaysManual(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "s5", "opencode", "acp")
