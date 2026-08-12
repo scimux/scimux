@@ -423,6 +423,24 @@ const PERM_KIND_LABEL = {
 
 const PERM_CODE_KINDS = new Set(["execute", "edit", "read", "search"]);
 
+/* One rendering decision for an agent permission ask, shared by the live
+   approval row and the decision audit so the audit can never read worse
+   than the thing it audits. md() is escape-first (format.js), so this is
+   still "never innerHTML of unescaped agent content". */
+export function permBodyHTML(title, toolKind, {
+  escape = esc, markdown = md, codeClass = "permcode", textClass = "permtext",
+  verbClass = "permverb",
+} = {}){
+  const { verb, code } = splitPermTitle(title);
+  const asCode = !!verb || PERM_CODE_KINDS.has(toolKind || "");
+  const verbHTML = verb
+    ? `<div class="${verbClass}">${escape(verb)}</div>` : "";
+  const bodyHTML = asCode
+    ? `<pre class="${codeClass}">${escape(code)}</pre>`
+    : `<div class="${textClass}">${markdown(code)}</div>`;
+  return { verbHTML, bodyHTML };
+}
+
 function permOptionLabel(o){
   const name = o && o.name != null ? String(o.name) : "";
   const kind = (o && o.kind) || "";
@@ -474,11 +492,9 @@ export function keyRowHTML({
     if (!opts.length){
       return `<span class="hint">Waiting for approval options from the agent...</span>`;
     }
-    const { verb, code } = splitPermTitle(permTitle);
-    const asCode = !!verb || PERM_CODE_KINDS.has(permToolKind || "");
-    const body = asCode
-      ? `<pre class="permcode">${escape(code)}</pre>`
-      : `<div class="permtext">${escape(code)}</div>`;
+    const { verbHTML, bodyHTML } = permBodyHTML(permTitle, permToolKind, {
+      escape, codeClass: "permcode", textClass: "permtext", verbClass: "permverb",
+    });
     const clamp = expanded ? "" : " clamped";
     /* Start hidden; revealPermMoreIfNeeded unhides only when .permask overflows
        vertically. Single-line asks must not get a dead control. */
@@ -488,13 +504,12 @@ export function keyRowHTML({
     const reason = (permReason && String(permReason)) || "";
     const reasonEl = reason
       ? `<div class="permreason">${escape(reason)}</div>` : "";
-    const verbEl = verb ? `<div class="permverb">${escape(verb)}</div>` : "";
     /* .permmore is a sibling of .permask — inside the clamp it is clipped
        whenever the ask exceeds three lines (the exact moment it is needed).
        P5b: .permreason is a sibling too (like .hint). Inside the clamp it
        stole lines from the ask body; outside, the reason is always visible
        and revealPermMoreIfNeeded measures body overflow only. */
-    const mask = `<div class="permask${clamp}">${verbEl}${body}</div>`;
+    const mask = `<div class="permask${clamp}">${verbHTML}${bodyHTML}</div>`;
     const btns = `<div class="permbtns">${opts.map(o => {
       const { label, title } = permOptionLabel(o);
       const cls = permOptionClass(o.kind);
@@ -683,9 +698,13 @@ export function mergeTimelineItems(turns, decisions){
   return items;
 }
 
-/* Compact expandable audit row for one decision surface. Plain text only —
-   never md()/innerHTML of unescaped agent content. No bubble actions. */
-export function decisionRowHTML(surface, { escape = esc, fmtTime = fmtWhen } = {}){
+/* Compact expandable audit row for one decision surface. Agent title/reason
+   go through permBodyHTML / md() — both are escape-first, so this is still
+   never innerHTML of unescaped agent content. Summary stays plain escaped
+   text (one-line audit row). No bubble actions. */
+export function decisionRowHTML(surface, {
+  escape = esc, markdown = md, fmtTime = fmtWhen,
+} = {}){
   const s = surface || {};
   const d = s.decision || {};
   const sel = d.selected || {};
@@ -708,6 +727,14 @@ export function decisionRowHTML(surface, { escape = esc, fmtTime = fmtWhen } = {
   const lease = d.lease_id != null ? String(d.lease_id) : "";
   const selKey = sel.key != null ? String(sel.key) : "";
   const selKind = sel.kind != null ? String(sel.kind) : "";
+  const { verbHTML, bodyHTML } = permBodyHTML(title, toolKind, {
+    escape, markdown,
+    codeClass: "decision-cmd", textClass: "decision-text", verbClass: "decision-verb",
+  });
+  const reasonHTML = reason
+    ? `<div class="decision-row"><span class="k">Reason</span>` +
+      ` <div class="decision-reason">${markdown(reason)}</div></div>`
+    : "";
   return `<details class="decision" data-record="${escape(String(s.record ?? ""))}"` +
     ` data-request="${escape(req)}">` +
     `<summary class="decision-sum">${escape(summary)}</summary>` +
@@ -716,8 +743,8 @@ export function decisionRowHTML(surface, { escape = esc, fmtTime = fmtWhen } = {
     (agent ? `<div class="decision-row"><span class="k">Agent</span> ${escape(agent)}</div>` : "") +
     (toolKind ? `<div class="decision-row"><span class="k">Tool</span> ${escape(toolKind)}</div>` : "") +
     `<div class="decision-row"><span class="k">Command</span>` +
-      ` <pre class="decision-cmd">${escape(title)}</pre></div>` +
-    (reason ? `<div class="decision-row"><span class="k">Reason</span> ${escape(reason)}</div>` : "") +
+      `${verbHTML ? " " + verbHTML : ""} ${bodyHTML}</div>` +
+    reasonHTML +
     `<div class="decision-row"><span class="k">Options</span>` +
       `<ul class="decision-opts">${optsHTML}</ul></div>` +
     `<div class="decision-row"><span class="k">Selected</span>` +

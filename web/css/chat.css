@@ -226,6 +226,47 @@ body.cards-open #msgs { overflow: hidden; }
   white-space: pre-wrap; overflow-wrap: anywhere;
   font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; color: var(--ink);
 }
+/* Verb line for the splitPermTitle shape (mirrors .permverb on the live row). */
+.decision-verb { font-size: 12px; color: var(--dim); }
+/* Markdown descendants for prose title / reason (shared md() — escape-first).
+   Mirror .card .summary; keep the audit's --dim colour and 13px type scale. */
+.decision-text, .decision-reason {
+  color: var(--dim); font-size: 13px; line-height: 1.35; overflow-wrap: break-word;
+}
+.decision-text p { margin: 0 0 .55em; }
+.decision-text p:last-child { margin-bottom: 0; }
+.decision-text ul, .decision-text ol { margin: .35em 0 .55em; padding-left: 1.35em; }
+.decision-text li { margin: .15em 0; }
+.decision-text table { border-collapse: collapse; margin: .45em 0; width: 100%; font-size: 13px; }
+.decision-text th, .decision-text td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
+.decision-text blockquote {
+  margin: .45em 0; padding: .25em 0 .25em 10px;
+  border-left: 3px solid var(--hairline); color: var(--dim);
+}
+.decision-text pre {
+  margin: .45em 0; padding: 8px 10px; overflow-x: auto;
+  background: var(--bg); border-radius: 8px; font-size: 12.5px; line-height: 1.4;
+}
+.decision-text code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.decision-text pre code { font-size: inherit; }
+.decision-text a { color: var(--work); }
+.decision-reason p { margin: 0 0 .55em; }
+.decision-reason p:last-child { margin-bottom: 0; }
+.decision-reason ul, .decision-reason ol { margin: .35em 0 .55em; padding-left: 1.35em; }
+.decision-reason li { margin: .15em 0; }
+.decision-reason table { border-collapse: collapse; margin: .45em 0; width: 100%; font-size: 13px; }
+.decision-reason th, .decision-reason td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
+.decision-reason blockquote {
+  margin: .45em 0; padding: .25em 0 .25em 10px;
+  border-left: 3px solid var(--hairline); color: var(--dim);
+}
+.decision-reason pre {
+  margin: .45em 0; padding: 8px 10px; overflow-x: auto;
+  background: var(--bg); border-radius: 8px; font-size: 12.5px; line-height: 1.4;
+}
+.decision-reason code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.decision-reason pre code { font-size: inherit; }
+.decision-reason a { color: var(--work); }
 .decision-opts { margin: 0; padding-left: 18px; }
 .decision .aa-kind { color: var(--dim); font-size: 12px; }
 .copied { color: var(--work) !important; }

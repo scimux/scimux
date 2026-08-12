@@ -16,11 +16,12 @@ import {
   decisionsHash,
   mergeTimelineItems,
   decisionRowHTML,
+  permBodyHTML,
   buildChatSignature,
   keyRowHTML,
   createChatFeature,
 } from "../js/chat.js";
-import { esc } from "../js/format.js";
+import { esc, md } from "../js/format.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(join(__dirname, "../index.html"), "utf8");
@@ -248,6 +249,188 @@ test("P4 decisionsHash changes rebuild signature; count alone is outside turns h
   assert.match(chatJs, /decisionsHash/);
   // Auto chrome is painted outside the signature skip path.
   assert.match(chatJs, /paintAutoApprove\(data\.auto_approve/);
+});
+
+/* ---------- P3: decision audit body matches live ask rendering ---------- */
+
+/** Extract a CSS rule body by selector. Asserts the selector is present. */
+function ruleBody(css, selectorRe){
+  const m = css.match(selectorRe);
+  assert.ok(m, `rule matching ${selectorRe} present`);
+  return m[1];
+}
+
+function decisionSurface(overrides = {}){
+  const d = { ...sampleDecision.decision, ...(overrides.decision || {}) };
+  return {
+    record: overrides.record ?? sampleDecision.record,
+    time: overrides.time ?? sampleDecision.time,
+    decision: d,
+  };
+}
+
+test("P3: a prose ask renders Markdown, a command ask stays a code block", () => {
+  // A: execute kind → code block, no prose paragraph wrapper on the command.
+  const a = decisionRowHTML(decisionSurface({
+    decision: { tool_kind: "execute", title: "go test ./...", reason: "" },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  assert.match(a, /<pre class="decision-cmd">/);
+  assert.match(a, /go test \.\/\.\.\./);
+  // Command body is a <pre>, not a Markdown <p> (the reason row may be absent).
+  const cmdA = a.match(/class="decision-cmd"[^>]*>([\s\S]*?)<\/pre>/);
+  assert.ok(cmdA, "decision-cmd pre present");
+  assert.doesNotMatch(cmdA[0], /<p>/, "code branch: no <p> inside the command pre");
+  assert.doesNotMatch(a, /class="decision-text"/, "execute kind is not prose");
+
+  // B: empty tool_kind + Markdown title → prose container with strong/code.
+  // Summary keeps the raw one-line title (escaped); only the body is Markdown.
+  const b = decisionRowHTML(decisionSurface({
+    decision: {
+      tool_kind: "",
+      title: "Update **serqco** and see `notes.md`",
+      reason: "",
+    },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  assert.match(b, /class="decision-text"/);
+  const textB = b.match(/class="decision-text"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(textB, ".decision-text container");
+  assert.match(textB[1], /<strong>serqco<\/strong>/);
+  assert.match(textB[1], /<code>notes\.md<\/code>/);
+  assert.doesNotMatch(textB[1], /\*\*serqco\*\*/);
+  assert.doesNotMatch(textB[1], /`notes\.md`/);
+  assert.doesNotMatch(b, /<pre class="decision-cmd">/, "prose branch is not a code pre");
+
+  // C: splitPermTitle verb+code shape → .decision-verb + code inside <pre>.
+  const c = decisionRowHTML(decisionSurface({
+    decision: { tool_kind: "read", title: "Read `/etc/hosts`", reason: "" },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  assert.match(c, /class="decision-verb"[^>]*>Read</);
+  assert.match(c, /<pre class="decision-cmd">/);
+  const cmdC = c.match(/class="decision-cmd"[^>]*>([\s\S]*?)<\/pre>/);
+  assert.ok(cmdC);
+  assert.match(cmdC[1], /\/etc\/hosts/);
+  assert.doesNotMatch(cmdC[1], /Read/, "verb lives outside the pre, like the live row");
+});
+
+test("P3: reason renders Markdown", () => {
+  const html = decisionRowHTML(decisionSurface({
+    decision: {
+      tool_kind: "execute",
+      title: "go test ./...",
+      reason: "Run the suite with **flags**",
+    },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  assert.match(html, /class="decision-reason"/);
+  const reason = html.match(/class="decision-reason"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(reason, ".decision-reason container present");
+  assert.match(reason[1], /<strong>flags<\/strong>/);
+  assert.doesNotMatch(reason[1], /\*\*flags\*\*/);
+});
+
+test("P3: Markdown rendering does not open an injection hole", () => {
+  // Code branch (sampleDecision: execute + script payload in title).
+  const codeHTML = decisionRowHTML(sampleDecision, {
+    escape: esc, markdown: md, fmtTime: t => t,
+  });
+  assert.match(codeHTML, /&lt;script&gt;/);
+  assert.match(codeHTML, /&lt;b&gt;flags&lt;\/b&gt;/);
+  assert.doesNotMatch(codeHTML, /<script[\s>]/i);
+  assert.doesNotMatch(codeHTML, /<b>flags<\/b>/i);
+  // Prose branch with the same poison payloads.
+  const proseHTML = decisionRowHTML(decisionSurface({
+    decision: {
+      tool_kind: "",
+      title: "Please run <script>alert(1)</script> now",
+      reason: "Use <b>flags</b> carefully",
+    },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  assert.match(proseHTML, /class="decision-text"/);
+  assert.match(proseHTML, /&lt;script&gt;/);
+  assert.match(proseHTML, /&lt;b&gt;flags&lt;\/b&gt;/);
+  assert.doesNotMatch(proseHTML, /<script[\s>]/i);
+  assert.doesNotMatch(proseHTML, /<b>flags<\/b>/i);
+});
+
+test("P3: the summary line stays single-line plain text", () => {
+  const html = decisionRowHTML(decisionSurface({
+    decision: {
+      tool_kind: "",
+      title: "# heading\n\n* bullet\n\n```\ncode\n```\n\n**bold**",
+      reason: "unused",
+      selected: { key: "2", name: "Allow once", kind: "allow" },
+    },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  const sum = html.match(/class="decision-sum"[^>]*>([\s\S]*?)<\/summary>/);
+  assert.ok(sum, ".decision-sum present");
+  const content = sum[1];
+  assert.doesNotMatch(content, /<p[\s>]/i);
+  assert.doesNotMatch(content, /<pre[\s>]/i);
+  assert.doesNotMatch(content, /<ul[\s>]/i);
+  assert.doesNotMatch(content, /<h[1-3][\s>]/i);
+  // Still plain-escaped text for the human one-liner.
+  assert.match(content, /Auto-approved:/);
+  assert.match(content, /Allow once/);
+});
+
+test("P3: the shared body helper serves both the live ask and the audit", () => {
+  assert.match(chatJs, /export function permBodyHTML\s*\(/,
+    "permBodyHTML must be a named export");
+  // Both call sites invoke the helper (not a duplicated inline decision).
+  const keyStart = chatJs.indexOf("export function keyRowHTML");
+  const decStart = chatJs.indexOf("export function decisionRowHTML");
+  const peekStart = chatJs.indexOf("export function peekBlockHTML");
+  assert.ok(keyStart >= 0 && decStart >= 0 && peekStart >= 0);
+  const keyBody = chatJs.slice(keyStart, peekStart);
+  const decBody = chatJs.slice(decStart, chatJs.indexOf("export function createChatFeature"));
+  assert.match(keyBody, /permBodyHTML\s*\(/,
+    "keyRowHTML (live ask) must call permBodyHTML");
+  assert.match(decBody, /permBodyHTML\s*\(/,
+    "decisionRowHTML (audit) must call permBodyHTML");
+  // Sanity: the pure helper is importable and returns the expected shape.
+  const { verbHTML, bodyHTML } = permBodyHTML("Read `/etc/hosts`", "read", {
+    escape: esc, markdown: md, codeClass: "decision-cmd", textClass: "decision-text",
+  });
+  assert.match(verbHTML, /decision-verb|Read/);
+  assert.match(bodyHTML, /decision-cmd|\/etc\/hosts/);
+});
+
+test("P3: .decision-text / .decision-reason Markdown descendants mirror .card .summary", () => {
+  // Rule-body style — never a file-wide grep. Assert p margins, ul/ol padding,
+  // pre overflow-x:auto, table border-collapse — same set as cards.css summary.
+  for (const base of [".decision-text", ".decision-reason"]) {
+    const escSel = base.replace(".", "\\.");
+    const pBody = ruleBody(chatCss, new RegExp(escSel + "\\s+p\\s*\\{([^}]+)\\}"));
+    assert.match(pBody, /margin/, `${base} p has margin`);
+
+    const ulBody = ruleBody(chatCss, new RegExp(escSel + "\\s+ul\\s*,\\s*" + escSel + "\\s+ol\\s*\\{([^}]+)\\}"));
+    assert.match(ulBody, /padding-left|padding:/, `${base} ul/ol has padding`);
+
+    const preBody = ruleBody(chatCss, new RegExp(escSel + "\\s+pre\\s*\\{([^}]+)\\}"));
+    assert.match(preBody, /overflow-x\s*:\s*auto/, `${base} pre scrolls horizontally`);
+
+    const tableBody = ruleBody(chatCss, new RegExp(escSel + "\\s+table\\s*\\{([^}]+)\\}"));
+    assert.match(tableBody, /border-collapse/, `${base} table collapses borders`);
+  }
+});
+
+test("P3: the live prose ask escapes payloads even though it now renders Markdown", () => {
+  /* Sharing permBodyHTML means the live .permtext branch goes through md() too
+     (the code branch stays plain-escaped, pinned by chat.test.js "never md() on
+     perm_title"). md() is escape-first, so agent prose can style itself but can
+     never inject markup — the whole reason the shared helper is allowed. */
+  const html = keyRowHTML({
+    attention: "approval", source: "acp",
+    permTitle: "run <script>alert(1)</script> with **flags** and <b>bold</b>",
+    permToolKind: "think",
+    permOptions: [{ key: "1", name: "Allow once", kind: "allow" }],
+    expanded: true,
+  });
+  assert.match(html, /class="permtext"/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;b&gt;bold&lt;\/b&gt;/);
+  assert.doesNotMatch(html, /<script[\s>]/i);
+  assert.doesNotMatch(html, /<b>bold<\/b>/i);
+  assert.match(html, /<strong>flags<\/strong>/, "prose Markdown does render");
 });
 
 /* ---------- fake DOM + factory ---------- */
