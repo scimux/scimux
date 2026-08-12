@@ -45,7 +45,8 @@
  *   - map, chat, composer, bookmarks, notes, search, sheets, polling
  *
  * Reuses (no algorithm duplication):
- *   format.js: esc, ageText
+ *   format.js: esc, ageText, md (expanded card description — same renderer as
+ *     chat details; never applied to the raw textarea editor)
  *   map-model.js: hardAttention, cardState, statusText, orderedNodes,
  *     pinnedOrder, isArchived, isPinned, inLaneScope, visibleCardLists
  *   lanes.js pure functions only via injected laneColor/laneName/laneList
@@ -55,7 +56,7 @@
  * the complete Activities card surface (render + edit preservation + events).
  */
 
-import { esc, ageText } from "./format.js";
+import { esc, ageText, md } from "./format.js";
 import {
   hardAttention,
   cardState,
@@ -174,12 +175,13 @@ export function computeCardsSignature(args){
   ])) + cardsSignatureTail({ ...args, foldLen: fold.length });
 }
 
-/* The same signature with the two volatile things removed: each card's
-   mechanical liveness, and the order livenessTier derives from it. What is
-   left is what the card's HTML actually is — so when only this is unchanged,
-   the DOM already holds every card and the render can patch instead of
-   rebuild. Attention stays in: it moves a card between the list and the
-   attention fold, which is structure, and it is a human-paced event anyway. */
+/* The same signature with mechanical liveness removed. live flips every poll
+   for a working agent and only changes the status line / state class — not
+   card order (order is hard attention + last_interaction). What is left is
+   what the card's HTML actually is — so when only this is unchanged, the DOM
+   already holds every card and the render can patch instead of rebuild.
+   Attention stays in: it moves a card between the list and the attention
+   fold, which is structure, and it is a human-paced event anyway. */
 export function cardShapeSignature(args){
   const main = args.list || [];
   const fold = args.foldList || [];
@@ -400,6 +402,8 @@ export function createCardsFeature(deps){
   const icons = d.icons || {};
   const escape = d.esc || esc;
   const ageFn = d.ageText || ageText;
+  /* Same escape-first md() as chat details — prefer import; allow inject for tests. */
+  const markdown = d.md || md;
 
   function g(name, fallback){
     const v = d[name];
@@ -464,7 +468,7 @@ export function createCardsFeature(deps){
         </div>
         <input data-lane-new="${escape(n.id)}" hidden placeholder="New lane name">
       </div>` : railboxHTML(n)}
-      <div class="summary" data-desc="${escape(n.id)}">${escape(desc || "No description yet.")}</div>
+      <div class="summary" data-desc="${escape(n.id)}">${desc ? markdown(desc) : "No description yet."}</div>
       <textarea class="descbox" data-desc-input="${escape(n.id)}">${escape(desc)}</textarea>
       <div class="actions roundactions">
         <button class="pin" data-pin-action="${escape(n.id)}" aria-label="${pinned ? "unpin" : "pin"}">${pinned ? (icons.ICON_UNPIN || "") : (icons.ICON_PIN || "")}</button>

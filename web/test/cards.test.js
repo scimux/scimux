@@ -38,6 +38,7 @@ import {
   createCardsFeature,
 } from "../js/cards.js";
 import { orderedNodes, hardAttention, visibleCardLists } from "../js/map-model.js";
+import { md as sharedMd, esc as sharedEsc } from "../js/format.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cardsSrc = readFileSync(join(__dirname, "../js/cards.js"), "utf8");
@@ -575,12 +576,12 @@ test("archived hard-attention still surfaces via map-model visibleCardLists (not
   assert.deepEqual(list.map(n => n.id).sort(), ["arch-attn", "live"]);
 });
 
-test("ordering remains map-model responsibility (pins → attention → fresh)", () => {
+test("ordering remains map-model responsibility (hard attention → interaction)", () => {
   // Do not re-test full matrix; one smoke that cards imports orderedNodes for counts only
   assert.match(cardsSrc, /orderedNodes/);
   const ids = orderedNodes([
-    { id: "idle", last_activity: 1 },
-    { id: "attn", attention: "approval" },
+    { id: "idle", last_interaction: 900 },
+    { id: "attn", attention: "approval", last_interaction: 1 },
   ]).map(n => n.id);
   assert.equal(ids[0], "attn");
   assert.equal(hardAttention({ attention: "approval" }), true);
@@ -695,9 +696,10 @@ test("the attention card pulses a static shadow's opacity, not the shadow", () =
 /* ---------- A: a liveness flip patches the list, it does not rebuild it ---------- */
 
 test("cardShapeSignature ignores liveness and card order", () => {
-  /* live flips on the 2s poll for every working agent, and livenessTier turns
-     that flip into a reorder — so folding either into the shape signature
-     means the list is rebuilt from scratch for as long as anything is running. */
+  /* live flips on the 2s poll for every working agent. It updates the status
+     line in place but no longer reorders the list (order is hard attention +
+     last_interaction). Folding live into the shape signature would still
+     rebuild the list from scratch for as long as anything is running. */
   const base = { unadopted: [], sel: "a", expanded: new Set(), cardTab: "current",
     laneFilter: "", attnFoldOpen: false, bookmarksLen: 0, lanes: [], pinned: [],
     actionCard: "", editingDesc: "", editingTitle: "" };
@@ -751,7 +753,7 @@ test("reorderPlan emits no move when the order already holds", () => {
 });
 
 test("reorderPlan lifts one card to the front with a single insertBefore", () => {
-  /* The common case: an agent starts a turn, livenessTier promotes it. */
+  /* The common case: hard attention or a newer interaction promotes a card. */
   const plan = reorderPlan(["a", "b", "c", "d"], ["c", "a", "b", "d"]);
   assert.deepEqual(plan, [{ key: "c", before: "a" }]);
 });
@@ -940,9 +942,11 @@ test("a liveness flip patches the cards in place instead of rebuilding them", ()
   assert.ok(byId["card-a"]._classes.has("idle"), "the quiet card keeps its own");
   assert.match(byId["card-b"]._status.innerHTML, /workdot/, "and its status line is repainted");
   assert.match(byId["card-b"]._status.innerHTML, /running/);
-  assert.deepEqual(dom.children.map(c => c.id), ["attnfold", "card-b", "card-a"],
-    "livenessTier promotes it, so the patch must move it — around the fold button, not over it");
-  assert.deepEqual(dom.moves, [["card-b", "card-a"]], "with one insertBefore, not a re-append of each");
+  /* live is not an ordering field — interaction recency still ranks a above b.
+     Status updates in place; the list order is unchanged. */
+  assert.deepEqual(dom.children.map(c => c.id), ["attnfold", "card-a", "card-b"],
+    "a mechanical liveness change must not reorder cards");
+  assert.deepEqual(dom.moves, [], "no insertBefore when order is unchanged");
   assert.equal(byId["card-b"]._time.textContent, "you A2",
     "the patch still owes the list its age refresh");
 });
@@ -1124,4 +1128,255 @@ test("P3 12: withCardEditsPreserved still restores the original selection range"
   assert.equal(title.focused, true);
   assert.deepEqual(title.ranged, [3, 5],
     "poll rebuild restores the original range unchanged — never forces end or select-all");
+});
+
+/* ---------- P2 Part B: expanded card descriptions use shared md() ---------- */
+
+function descFeature(nodes, { expandedIds = [], editingDesc = "", cardsSig = "" } = {}){
+  let sig = cardsSig;
+  let edit = editingDesc;
+  const expanded = new Set(expandedIds);
+  const list = {
+    innerHTML: "",
+    querySelectorAll(){ return []; },
+    addEventListener(){},
+    removeEventListener(){},
+  };
+  const tabs = {
+    innerHTML: "",
+    querySelectorAll(){ return []; },
+    addEventListener(){},
+    removeEventListener(){},
+  };
+  const feature = createCardsFeature({
+    roots: { tabs, list },
+    document: { title: "", getElementById: () => null, querySelector: () => null },
+    nodes: () => nodes,
+    unadopted: () => [],
+    sel: () => "",
+    cardTab: () => "current",
+    setCardTab(){},
+    laneFilter: () => "",
+    attnFoldOpen: () => false,
+    setAttnFoldOpen(){},
+    expanded: () => expanded,
+    actionCard: () => "",
+    setActionCard(){},
+    editingDesc: () => edit,
+    setEditingDesc: v => { edit = v; },
+    editingTitle: () => "",
+    editingTitleScope: () => "",
+    cardsSig: () => sig,
+    setCardsSig: v => { sig = v; },
+    pinned: () => [],
+    archived: () => [],
+    lanes: () => [],
+    bookmarks: () => [],
+    agentLogo: () => "",
+    laneSelectHTML: () => "",
+    laneColor: () => "#000",
+    laneName: () => "",
+    icons: {},
+    CSS: { escape: s => s },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  });
+  return { feature, list, getEditingDesc: () => edit, setEditingDesc: v => { edit = v; },
+    getSig: () => sig, setSig: v => { sig = v; }, expanded };
+}
+
+function summaryHTML(listHTML){
+  const m = listHTML.match(/<div class="summary"[^>]*>([\s\S]*?)<\/div>\s*<textarea/);
+  return m ? m[1] : "";
+}
+
+function descboxHTML(listHTML){
+  const m = listHTML.match(/<textarea class="descbox"[^>]*>([\s\S]*?)<\/textarea>/);
+  return m ? m[1] : null;
+}
+
+test("P2 md: cards.js imports shared md beside esc/ageText", () => {
+  assert.match(cardsSrc, /import\s*\{[^}]*\bmd\b[^}]*\}\s*from\s*["']\.\/format\.js["']/,
+    "cards must import md from format.js — no second Markdown dialect");
+  assert.match(cardsSrc, /import\s*\{[^}]*\besc\b[^}]*\bageText\b[^}]*\}\s*from\s*["']\.\/format\.js["']/);
+});
+
+test("P2 md: expanded summary renders bold, italic, code, list, and link", () => {
+  const desc = "Hello **bold** and *italic* with `code`\n\n- item one\n- item two\n\n[docs](https://example.com/x)";
+  const { feature, list } = descFeature([{
+    id: "n1", title: "T", description: desc, lane_id: "l", live: "quiet", model: "m",
+    last_interaction: 1,
+  }], { expandedIds: ["n1"] });
+  feature.render();
+  const sum = summaryHTML(list.innerHTML);
+  assert.match(sum, /<strong>bold<\/strong>/);
+  assert.match(sum, /<em>italic<\/em>/);
+  assert.match(sum, /<code>code<\/code>/);
+  assert.match(sum, /<ul><li>item one<\/li><li>item two<\/li><\/ul>/);
+  assert.match(sum, /<a href="https:\/\/example\.com\/x" target="_blank" rel="noopener">docs<\/a>/);
+  assert.equal(sum, sharedMd(desc), "card summary must equal shared md() for the same source");
+});
+
+test("P2 md: expanded summary renders fenced code and tables", () => {
+  const desc = "```\nconst x = 1 < 2\n```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |";
+  const { feature, list } = descFeature([{
+    id: "n1", title: "T", description: desc, lane_id: "l", live: "quiet", model: "m",
+    last_interaction: 1,
+  }], { expandedIds: ["n1"] });
+  feature.render();
+  const sum = summaryHTML(list.innerHTML);
+  assert.match(sum, /<pre><code>const x = 1 &lt; 2<\/code><\/pre>/);
+  assert.match(sum, /<table><tr><th>A<\/th><th>B<\/th><\/tr><tr><td>1<\/td><td>2<\/td><\/tr><\/table>/);
+  assert.equal(sum, sharedMd(desc));
+});
+
+test("P2 md: script-like and attribute-shaped input stays escaped", () => {
+  const desc = 'Click <script>alert(1)</script> and <img src=x onerror="alert(1)">';
+  const { feature, list } = descFeature([{
+    id: "n1", title: "T", description: desc, lane_id: "l", live: "quiet", model: "m",
+    last_interaction: 1,
+  }], { expandedIds: ["n1"] });
+  feature.render();
+  const sum = summaryHTML(list.innerHTML);
+  // Escape-first: angle brackets become entities so no live tag/attribute runs.
+  // The literal text "onerror=" may still appear inside escaped content.
+  assert.doesNotMatch(sum, /<script[\s>]/i);
+  assert.doesNotMatch(sum, /<img[\s>]/i);
+  assert.match(sum, /&lt;script&gt;/);
+  assert.match(sum, /&lt;img/);
+  assert.match(sum, /onerror=&quot;alert\(1\)&quot;/);
+  assert.equal(sum, sharedMd(desc));
+});
+
+test("P2 md: .summary is rendered HTML while .descbox holds raw Markdown", () => {
+  const desc = "**keep raw** and a [link](https://example.com)";
+  const { feature, list } = descFeature([{
+    id: "n1", title: "T", description: desc, lane_id: "l", live: "quiet", model: "m",
+    last_interaction: 1,
+  }], { expandedIds: ["n1"] });
+  feature.render();
+  const sum = summaryHTML(list.innerHTML);
+  const box = descboxHTML(list.innerHTML);
+  assert.match(sum, /<strong>keep raw<\/strong>/);
+  assert.match(sum, /<a href="https:\/\/example\.com"/);
+  // textarea content is entity-escaped for safe HTML embedding of raw source
+  assert.equal(box, sharedEsc(desc));
+  assert.match(box, /\*\*keep raw\*\*/);
+  assert.doesNotMatch(box, /<strong>/);
+});
+
+test("P2 md: empty description falls back to No description yet", () => {
+  const { feature, list } = descFeature([{
+    id: "n1", title: "T", description: "", prompt: "", lane_id: "l", live: "quiet", model: "m",
+    last_interaction: 1,
+  }], { expandedIds: ["n1"] });
+  feature.render();
+  assert.equal(summaryHTML(list.innerHTML), "No description yet.");
+  assert.equal(descboxHTML(list.innerHTML), "");
+});
+
+test("P2 md: prompt is used when description is empty", () => {
+  const { feature, list } = descFeature([{
+    id: "n1", title: "T", description: "", prompt: "use **prompt**", lane_id: "l",
+    live: "quiet", model: "m", last_interaction: 1,
+  }], { expandedIds: ["n1"] });
+  feature.render();
+  assert.equal(summaryHTML(list.innerHTML), sharedMd("use **prompt**"));
+});
+
+test("P2 md: active description edit survives a poll rebuild after Markdown rendering", () => {
+  const nodes = [{
+    id: "n1", title: "T", description: "server **desc**", lane_id: "l",
+    live: "quiet", model: "m", last_interaction: 1,
+  }];
+  let editingDesc = "n1";
+  let cardsSig = "";
+  const descInput = {
+    value: "draft *markdown* still typing",
+    dataset: { descInput: "n1" },
+    type: "textarea",
+    selectionStart: 6,
+    selectionEnd: 15,
+    focused: false,
+    setSelectionRange(a, b){ this.selectionStart = a; this.selectionEnd = b; this.ranged = [a, b]; },
+    focus(){ this.focused = true; },
+  };
+  let fields = [descInput];
+  const list = {
+    innerHTML: "",
+    querySelectorAll(sel){
+      if (sel === "input, textarea, select") return fields;
+      return [];
+    },
+    addEventListener(){},
+    removeEventListener(){},
+  };
+  const tabs = { innerHTML: "", querySelectorAll: () => [], addEventListener(){}, removeEventListener(){} };
+  const doc = { title: "", activeElement: descInput, getElementById: () => null, querySelector: () => null };
+  const feature = createCardsFeature({
+    roots: { tabs, list },
+    document: doc,
+    nodes: () => nodes,
+    unadopted: () => [],
+    sel: () => "",
+    cardTab: () => "current",
+    setCardTab(){},
+    laneFilter: () => "",
+    attnFoldOpen: () => false,
+    setAttnFoldOpen(){},
+    expanded: () => new Set(["n1"]),
+    actionCard: () => "",
+    setActionCard(){},
+    editingDesc: () => editingDesc,
+    setEditingDesc: v => { editingDesc = v; },
+    editingTitle: () => "",
+    editingTitleScope: () => "",
+    cardsSig: () => cardsSig,
+    setCardsSig: v => { cardsSig = v; },
+    pinned: () => [],
+    archived: () => [],
+    lanes: () => [],
+    bookmarks: () => [],
+    agentLogo: () => "",
+    laneSelectHTML: () => "",
+    laneColor: () => "#000",
+    laneName: () => "",
+    icons: {},
+    CSS: { escape: s => s },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  });
+  feature.render();
+  // Simulate poll: server description changed, force rebuild while editor is open
+  nodes[0].description = "server **changed**";
+  cardsSig = ""; // invalidate like a structural poll
+  // After rebuild, withCardEditsPreserved re-queries fields; keep the same fake
+  // element so restored value/focus land where the test can observe them.
+  feature.render();
+  assert.equal(descInput.value, "draft *markdown* still typing",
+    "active desc editor must keep the raw draft, never the rendered Markdown");
+  assert.equal(descInput.focused, true);
+  assert.deepEqual(descInput.ranged, [6, 15]);
+  // Summary (read surface) still renders via md when not in the editing overlay —
+  // but while .editing is set the CSS hides .summary; the HTML may still contain
+  // the server's rendered description for the next read mode.
+  assert.match(list.innerHTML, /class="card[^"]*editing/);
+  assert.match(list.innerHTML, /data-desc-input="n1"/);
+});
+
+test("P2 md: .summary CSS covers paragraphs, lists, tables, blockquotes, code", () => {
+  /* Minimal fit-inside-card rules only — no card geometry redesign. */
+  for (const sel of [
+    ".card .summary p",
+    ".card .summary ul",
+    ".card .summary ol",
+    ".card .summary li",
+    ".card .summary table",
+    ".card .summary blockquote",
+    ".card .summary pre",
+    ".card .summary code",
+  ]) {
+    assert.ok(cardsCssSrc.includes(sel) || cardsCssSrc.includes(sel.replace(".card ", "")),
+      `cards.css must style ${sel} for Markdown descendants`);
+  }
 });

@@ -52,6 +52,25 @@
   overflow-wrap: break-word;
 }
 .card.expanded .summary { display: block; }
+/* Markdown descendants (shared md() — same as chat details). Fit inside the
+   card; do not redesign card geometry. */
+.card .summary p { margin: 0 0 .55em; }
+.card .summary p:last-child { margin-bottom: 0; }
+.card .summary ul, .card .summary ol { margin: .35em 0 .55em; padding-left: 1.35em; }
+.card .summary li { margin: .15em 0; }
+.card .summary table { border-collapse: collapse; margin: .45em 0; width: 100%; font-size: 13px; }
+.card .summary th, .card .summary td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
+.card .summary blockquote {
+  margin: .45em 0; padding: .25em 0 .25em 10px;
+  border-left: 3px solid var(--hairline); color: var(--dim);
+}
+.card .summary pre {
+  margin: .45em 0; padding: 8px 10px; overflow-x: auto;
+  background: var(--bg); border-radius: 8px; font-size: 12.5px; line-height: 1.4;
+}
+.card .summary code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.card .summary pre code { font-size: inherit; }
+.card .summary a { color: var(--work); }
 .card .descbox {
   display: none; width: 100%; min-height: 92px; resize: vertical;
   margin-top: 10px; padding: 10px 12px;

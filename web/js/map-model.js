@@ -75,34 +75,26 @@ export function cardCreatedMS(n){
   return isNaN(v) ? 0 : v;
 }
 
+/* Last human interaction, falling back to created_at for synthetic/malformed
+   nodes that lack last_interaction. The state API already projects a creation
+   or page-turn fallback for real nodes. */
 export function cardInteractionMS(n){
-  return n.last_interaction || 0;
-}
-
-/* The Activities list is tiered by liveness, then by recency within a tier.
-   Liveness — not last_interaction — must decide the tier: last_interaction is
-   the last *human* turn, so a chat where the agent has churned for minutes
-   since you last typed would otherwise sink below an idle chat you touched more
-   recently (the "active chats in the middle" bug). Tiers: closed sinks; hard
-   attention and a finished turn share the top; then active, dead, idle.
-   Finished is not a new attention value — hardAttention is unchanged. */
-export function livenessTier(n){
-  if (n.ended_at) return 4;                                       // closed — immutable dead-end, sinks
-  if (hardAttention(n) || turnFinished(n)) return 0;              // needs you / ready for you — top
-  if (n.live === "active") return 1;                              // working now
-  if (n.live === "exited" || n.live === "unavailable") return 3;  // dead — sinks with closed
-  return 2;                                                       // idle / quiet / fresh
+  return (n && n.last_interaction) || cardCreatedMS(n) || 0;
 }
 
 /* ---------- ordering ---------- */
 
+/* Current/All Activities order (fixes-2 P2):
+   1. hard attention first (hardAttention — never inspect)
+   2. newest last_interaction
+   3. newest last_activity as a deterministic tie-breaker
+   4. newest created_at as the final tie-breaker
+   turn_done / active / quiet / exited / closed are visible on cards but are
+   not separate sort tiers — they must not outrank the user's latest touch. */
 export function orderedNodes(nodes){
   return [...(nodes || [])].sort((a, b) => {
-    const ta = livenessTier(a), tb = livenessTier(b);
-    if (ta !== tb) return ta - tb;
-    const freshA = !(a.last_activity || 0), freshB = !(b.last_activity || 0);
-    if (freshA !== freshB) return freshA ? -1 : 1;
-    if (freshA && freshB) return cardCreatedMS(b) - cardCreatedMS(a);
+    const aa = hardAttention(a) ? 1 : 0, ba = hardAttention(b) ? 1 : 0;
+    if (aa !== ba) return ba - aa;
     return cardInteractionMS(b) - cardInteractionMS(a) ||
       (b.last_activity || 0) - (a.last_activity || 0) ||
       cardCreatedMS(b) - cardCreatedMS(a);

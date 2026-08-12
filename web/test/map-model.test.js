@@ -8,7 +8,6 @@ import {
   statusText,
   cardCreatedMS,
   cardInteractionMS,
-  livenessTier,
   orderedNodes,
   pinnedOrder,
   canReceiveSend,
@@ -77,13 +76,15 @@ test("map-model.js exports named pure helpers", async () => {
   const mod = await import("../js/map-model.js");
   for (const name of [
     "hardAttention", "cardState", "statusText", "statusKind", "turnFinished",
-    "cardCreatedMS", "cardInteractionMS", "livenessTier",
+    "cardCreatedMS", "cardInteractionMS",
     "orderedNodes", "pinnedOrder", "canReceiveSend", "sendableNodes",
     "isArchived", "isPinned", "tabListForCards", "inLaneScope", "visibleCardLists",
     "headStopKey", "toggleMapSelection",
   ]) {
     assert.ok(name in mod, name);
   }
+  assert.equal("livenessTier" in mod, false,
+    "livenessTier is removed — ordering is hard attention then interaction recency");
 });
 
 test("map-model.js reuses lanes.js stopTimes (no local copy)", () => {
@@ -185,16 +186,6 @@ test("statusKind and statusText agree across the fixture matrix", () => {
   }
 });
 
-test("livenessTier puts finished in the top tier alongside hardAttention", () => {
-  assert.equal(livenessTier({ attention: "approval" }), 0);
-  assert.equal(livenessTier({ live: "quiet", turn_done: true }), 0,
-    "finished turn is top tier — same prominence as hard attention");
-  // finished does not outrank closed
-  assert.equal(livenessTier({ ended_at: "t", turn_done: true }), 4);
-  // finished does not beat hard attention (both tier 0; ordering is stable)
-  assert.equal(livenessTier({ attention: "approval", turn_done: true }), 0);
-});
-
 test("hardAttention is unchanged by turn_done (regression lock)", () => {
   // hardAttention is attention && attention !== "inspect" — turn_done must
   // never become a new attention value or change this predicate.
@@ -206,36 +197,15 @@ test("hardAttention is unchanged by turn_done (regression lock)", () => {
   assert.equal(hardAttention({ attention: "approval" }), true);
 });
 
-/* ---------- liveness tiers ---------- */
-test("livenessTier mirrors cardState precedence numbers", () => {
-  assert.equal(livenessTier({ ended_at: "t" }), 4);
-  assert.equal(livenessTier({ attention: "approval" }), 0);
-  assert.equal(livenessTier({ attention: "inspect", live: "active" }), 1); // inspect not hard
-  assert.equal(livenessTier({ live: "active" }), 1);
-  assert.equal(livenessTier({ live: "exited" }), 3);
-  assert.equal(livenessTier({ live: "unavailable" }), 3);
-  assert.equal(livenessTier({ live: "quiet" }), 2);
-  assert.equal(livenessTier({}), 2);
-});
+/* ---------- orderedNodes: hard attention, then human recency (P2) ----------
+   Precedence is exactly:
+     1. hardAttention (never inspect)
+     2. newest last_interaction
+     3. newest last_activity
+     4. newest created_at
+   turn_done / active / quiet / exited / closed are NOT separate sort tiers. */
 
-/* ---------- orderedNodes: Go fixture + ties + fresh ---------- */
-test("orderedNodes: attention then fresh then interaction recency (Go fixture)", () => {
-  // Mirrors TestActivityCardOrderPinsAttentionThenFreshCards
-  const nodes = [
-    { id: "active-older", last_activity: 900, last_interaction: 200, created_at: "2026-01-04T00:00:00Z" },
-    { id: "newer-fresh", created_at: "2026-01-06T00:00:00Z" },
-    { id: "active-newer", last_activity: 300, last_interaction: 800, created_at: "2026-01-01T00:00:00Z" },
-    { id: "never-touched", last_activity: 700, created_at: "2026-01-03T00:00:00Z" },
-    { id: "older-fresh", created_at: "2026-01-05T00:00:00Z" },
-    { id: "attn", attention: "approval", last_activity: 100, last_interaction: 100, created_at: "2026-01-02T00:00:00Z" },
-  ];
-  assert.deepEqual(
-    orderedNodes(nodes).map(n => n.id),
-    ["attn", "newer-fresh", "older-fresh", "active-newer", "active-older", "never-touched"],
-  );
-});
-
-test("orderedNodes: hard attention outranks live active regardless of interaction age", () => {
+test("orderedNodes: hard attention beats a newer ordinary card", () => {
   const nodes = [
     { id: "working", live: "active", last_activity: 999, last_interaction: 999 },
     { id: "needs", attention: "approval", last_activity: 1, last_interaction: 1 },
@@ -243,37 +213,50 @@ test("orderedNodes: hard attention outranks live active regardless of interactio
   assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["needs", "working"]);
 });
 
-test("orderedNodes: closed sinks below dead and idle", () => {
+test("orderedNodes: inspect does not get hard-attention promotion", () => {
   const nodes = [
-    { id: "closed", ended_at: "t", last_interaction: 999 },
-    { id: "dead", live: "exited", last_interaction: 1 },
-    { id: "idle", live: "quiet", last_interaction: 2 },
+    { id: "quiet-new", live: "quiet", last_interaction: 500 },
+    { id: "inspect-old", attention: "inspect", live: "quiet", last_interaction: 100 },
   ];
-  assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["idle", "dead", "closed"]);
+  assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["quiet-new", "inspect-old"],
+    "inspect sorts by interaction recency, never the hard-attention bucket");
 });
 
-test("orderedNodes: fresh nodes (no last_activity) float above interacted same-tier", () => {
+test("orderedNodes: newer active interaction beats older turn_done card", () => {
+  /* The reported bug: a finished "Full Code Review" sat above an actively
+     used implementer card because turn_done shared the top liveness tier. */
   const nodes = [
-    { id: "touched", last_activity: 50, last_interaction: 50, created_at: "2026-01-01T00:00:00Z" },
-    { id: "fresh", created_at: "2026-01-02T00:00:00Z" },
+    { id: "full-review", live: "quiet", turn_done: true, last_interaction: 100, last_activity: 200 },
+    { id: "implementer", live: "active", last_interaction: 500, last_activity: 510 },
   ];
-  assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["fresh", "touched"]);
+  assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["implementer", "full-review"]);
 });
 
-test("orderedNodes: among fresh nodes, newer created_at first", () => {
+test("orderedNodes: newer quiet interaction beats older active card", () => {
   const nodes = [
-    { id: "old", created_at: "2026-01-01T00:00:00Z" },
-    { id: "new", created_at: "2026-01-03T00:00:00Z" },
+    { id: "active-old", live: "active", last_interaction: 100, last_activity: 900 },
+    { id: "quiet-new", live: "quiet", last_interaction: 500, last_activity: 500 },
   ];
-  assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["new", "old"]);
+  assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["quiet-new", "active-old"]);
 });
 
-test("orderedNodes: interaction ties fall through to last_activity then created_at", () => {
+test("orderedNodes: dead and closed participate by interaction recency", () => {
+  const nodes = [
+    { id: "closed-new", ended_at: "t", last_interaction: 900 },
+    { id: "dead-mid", live: "exited", last_interaction: 500 },
+    { id: "idle-old", live: "quiet", last_interaction: 100 },
+    { id: "unavail-new", live: "unavailable", last_interaction: 700 },
+  ];
+  assert.deepEqual(orderedNodes(nodes).map(n => n.id),
+    ["closed-new", "unavail-new", "dead-mid", "idle-old"],
+    "closed/dead are not sunk below idle by a liveness tier");
+});
+
+test("orderedNodes: interaction ties fall through to activity then created_at", () => {
   const nodes = [
     { id: "a", last_activity: 10, last_interaction: 100, created_at: "2026-01-01T00:00:00Z" },
     { id: "b", last_activity: 20, last_interaction: 100, created_at: "2026-01-02T00:00:00Z" },
   ];
-  // same interaction → higher last_activity wins
   assert.deepEqual(orderedNodes(nodes).map(n => n.id), ["b", "a"]);
 
   const tied = [
@@ -283,10 +266,21 @@ test("orderedNodes: interaction ties fall through to last_activity then created_
   assert.deepEqual(orderedNodes(tied).map(n => n.id), ["y", "x"]);
 });
 
+test("orderedNodes: missing interaction falls back to created_at", () => {
+  const nodes = [
+    { id: "older-created", created_at: "2026-01-01T00:00:00Z" },
+    { id: "newer-created", created_at: "2026-01-03T00:00:00Z" },
+    { id: "has-interaction", last_interaction: Date.parse("2026-01-02T00:00:00Z"),
+      created_at: "2026-01-01T00:00:00Z" },
+  ];
+  assert.deepEqual(orderedNodes(nodes).map(n => n.id),
+    ["newer-created", "has-interaction", "older-created"]);
+});
+
 test("orderedNodes: does not mutate input array", () => {
   const nodes = [
-    { id: "b", last_activity: 1 },
-    { id: "a", last_activity: 2 },
+    { id: "b", last_interaction: 1 },
+    { id: "a", last_interaction: 2 },
   ];
   const copy = nodes.slice();
   orderedNodes(nodes);
@@ -299,6 +293,11 @@ test("cardCreatedMS / cardInteractionMS boundaries", () => {
   assert.equal(cardCreatedMS({ created_at: "2026-01-01T00:00:00.000Z" }), Date.parse("2026-01-01T00:00:00.000Z"));
   assert.equal(cardInteractionMS({}), 0);
   assert.equal(cardInteractionMS({ last_interaction: 42 }), 42);
+  // Missing last_interaction falls back to parsed created_at (state API does
+  // this for real nodes; synthetic fixtures need the same key).
+  assert.equal(cardInteractionMS({ created_at: "2026-01-01T00:00:00.000Z" }),
+    Date.parse("2026-01-01T00:00:00.000Z"));
+  assert.equal(cardInteractionMS({ last_interaction: 42, created_at: "2026-01-01T00:00:00.000Z" }), 42);
 });
 
 /* ---------- pinnedOrder: attention-first then pin index ---------- */
