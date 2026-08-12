@@ -420,7 +420,9 @@ func TestDecisionPresentationAndToolKind(t *testing.T) {
 		{Decision{Key: "applyNetworkPolicyAmendment", Payload: json.RawMessage(`{"network_policy_amendment":{"action":"allow","host":"example.com"}}`)}, "Always allow network access to example.com", "allow_always"},
 		{Decision{Key: "applyNetworkPolicyAmendment", Payload: json.RawMessage(`{"network_policy_amendment":{"action":"deny","host":"example.com"}}`)}, "Always deny network access to example.com", "reject_always"},
 		{Decision{Key: "applyNetworkPolicyAmendment", Payload: json.RawMessage(`{"network_policy_amendment":{"action":"allow"}}`)}, "Apply network policy rule", ""},
-		{Decision{Key: "futureDecision"}, "futureDecision", "allow"},
+		// Unknown keys present under their raw token with no semantic kind —
+		// see TestUnknownDecisionKeyIsNotAllow for why "" and not "allow".
+		{Decision{Key: "futureDecision"}, "futureDecision", ""},
 	}
 	for _, tt := range tests {
 		name, kind := decisionPresentation(tt.decision)

@@ -655,7 +655,16 @@ func decisionPresentation(d Decision) (string, string) {
 		if d.IsRejection() {
 			return d.Key, "reject"
 		}
-		return d.Key, "allow"
+		// Unknown is unknown, never "allow". Kind is no longer only a button
+		// colour: the auto-approver treats a sole kind=="allow" option as its
+		// authorization to answer for the human, so guessing here would hand
+		// that authority to whatever token upstream invents next. A renamed
+		// once-allow key, or a menu whose only non-reject option is an
+		// unrecognized (possibly persistent) grant, must stay manual. The
+		// human still sees and can choose the option — it is presented under
+		// its raw key with the neutral "unknown" role, exactly as the ACP side
+		// (mapOptionKind) and the unreadable network-policy rule above do.
+		return d.Key, ""
 	}
 }
 
