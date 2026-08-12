@@ -27,6 +27,17 @@ var (
 	numberedOptionLine = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*(\d+)\.\s+\S`)
 	escToCancel        = regexp.MustCompile(`(?i)` + cancelAnchorRE)
 
+	// letteredOptionLine: "y. Yes, I trust this folder" — a single-letter menu
+	// key, the shape Claude Code uses for confirm/deny dialogs that predate the
+	// session (workspace trust) and therefore have no transcript behind them.
+	letteredOptionLine = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*([a-z])\.\s+\S`)
+
+	// enterPromptLine: the terminal input prompt that closes such a dialog,
+	// e.g. "Enter y/n:". Anchoring here rather than on the cancel-chrome phrase
+	// is deliberate: a lettered run is a much weaker shape than a numbered one,
+	// and the cancel phrase appears in ordinary agent prose.
+	enterPromptLine = regexp.MustCompile(`(?i)^\s*enter\s+([a-z](?:\s*/\s*[a-z])+)\s*:\s*$`)
+
 	// Rate limit menus
 	rateLimitMenu = regexp.MustCompile(`(?im)^\s*[❯›>]?\s*1\.\s*stop and wait for limit to reset\b`)
 	rateLimitHit  = regexp.MustCompile(`(?i)\b(?:hit|reached)\s+your\s+(?:weekly|usage|session)\s+limit\b`)
@@ -52,7 +63,7 @@ func ClassifyVisible(pane string) bool {
 		return true
 	}
 
-	if numberedOptionsDialog(stripped) {
+	if numberedOptionsDialog(stripped) || letteredOptionsDialog(stripped) {
 		return true
 	}
 
@@ -118,6 +129,88 @@ func numberedOptionsDialog(s string) bool {
 		}
 	}
 	return false
+}
+
+// letteredOptionsDialog is the structural fallback for Claude Code confirm/
+// deny menus whose options are lettered (y. / n.) rather than numbered —
+// notably the workspace-trust dialog that appears before any transcript
+// exists. A run of ≥2 consecutive lettered option lines with distinct
+// letters (same optionGapLines tolerance as the numbered scanner) plus an
+// enterPromptLine within escAnchorLines of the last option whose letter set
+// equals the options' letter set. The Enter prompt, not "esc to cancel", is
+// the anchor: a lettered run is a weaker shape than a numbered one, and the
+// cancel phrase occurs in ordinary agent prose.
+func letteredOptionsDialog(s string) bool {
+	lines := strings.Split(s, "\n")
+	for i := 0; i < len(lines); i++ {
+		letter, ok := optionLetter(lines[i])
+		if !ok {
+			continue
+		}
+		seen := map[string]bool{letter: true}
+		lastOpt := i
+		j := i + 1
+		for j < len(lines) && j-lastOpt <= optionGapLines {
+			if m, ok := optionLetter(lines[j]); ok {
+				if seen[m] {
+					break
+				}
+				seen[m] = true
+				lastOpt = j
+				j++
+				continue
+			}
+			j++
+		}
+		if len(seen) < 2 {
+			continue
+		}
+		for k := lastOpt + 1; k < len(lines) && k-lastOpt <= escAnchorLines; k++ {
+			if prompt, ok := enterPromptLetters(lines[k]); ok && sameLetterSet(seen, prompt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func optionLetter(line string) (string, bool) {
+	m := letteredOptionLine.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	return strings.ToLower(m[1]), true
+}
+
+func enterPromptLetters(line string) (map[string]bool, bool) {
+	m := enterPromptLine.FindStringSubmatch(line)
+	if m == nil {
+		return nil, false
+	}
+	set := make(map[string]bool)
+	for _, p := range strings.Split(m[1], "/") {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		set[p] = true
+	}
+	if len(set) < 2 {
+		return nil, false
+	}
+	return set, true
+}
+
+func sameLetterSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 func optionNumber(line string) (int, bool) {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1706,6 +1707,116 @@ Enter selection [1-3], or Escape to cancel:`
 			t.Errorf("live = %q, want quiet", got)
 		}
 	})
+}
+
+// workspaceTrustPane is independently authored to exercise the lettered
+// y/n grammar before a transcript exists. No live CLI output is included.
+const workspaceTrustPane = `Synthetic workspace menu
+Permission Required: Accessing workspace:
+/fixture/workspace
+Fixture workspace access request.
+Fixture details deliberately span another line.
+Fixture help
+y. Yes, I trust this folder
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel`
+
+// launchedTrustNode is a just-launched Claude node sitting on the workspace-
+// trust dialog: no transcript yet (discovery pending), pane static past
+// paneQuietAfter. Shape follows axNodeWithTranscript.
+func launchedTrustNode(t *testing.T, pane string, quiet time.Duration) *app {
+	t.Helper()
+	n := &Node{ID: "cl1", Agent: "claude", Transcript: "", AXScreenReader: true}
+	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
+		sub := ""
+		if len(args) >= 3 {
+			sub = args[2]
+		}
+		switch sub {
+		case "list-sessions":
+			return "cl1", nil
+		case "has-session":
+			return "", nil
+		case "capture-pane":
+			return pane, nil
+		}
+		return "", nil
+	}
+	a := &app{
+		byID:      map[string]*Node{"cl1": n},
+		nodes:     []*Node{n},
+		live:      map[string]string{},
+		attn:      map[string]string{},
+		prevCap:   map[string]string{"cl1": pane},
+		lastChg:   map[string]time.Time{"cl1": time.Now().Add(-quiet)},
+		tailers:   map[string]*transcript.Tailer{},
+		chatMark:  map[string]chatMark{},
+		staleChat: map[string]bool{},
+		server:    tmuxsession.NewServerWithRunner("testsock", runner),
+	}
+	a.initMaps()
+	return a
+}
+
+// A launched Claude node with no transcript on a lettered workspace-trust
+// dialog must classify as dialog (keypad), not the keyless inspect that the
+// noEvidence branch would otherwise raise. No poller change: ClassifyVisible
+// is already consulted first.
+func TestLaunchedClaudeTrustDialogNoTranscript(t *testing.T) {
+	a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
+	a.poll()
+	if got := a.attn["cl1"]; got != "dialog" {
+		t.Errorf("attention = %q, want dialog (not inspect) on a lettered trust dialog with no transcript", got)
+	}
+	if got := a.live["cl1"]; got != "quiet" {
+		t.Errorf("live = %q, want quiet", got)
+	}
+}
+
+// Liveness stays mechanical: the lettered matcher never turns a static pane
+// active, and a changing pane stays active with no attention raised.
+func TestLetteredTrustDialogDoesNotFeedLiveness(t *testing.T) {
+	t.Run("static pane stays quiet", func(t *testing.T) {
+		a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
+		a.poll()
+		if got := a.live["cl1"]; got != "quiet" {
+			t.Errorf("live = %q, want quiet — matcher must not feed liveness", got)
+		}
+		if got := a.attn["cl1"]; got == "dialog" && a.live["cl1"] == "active" {
+			t.Error("matcher turned the pane active")
+		}
+	})
+	t.Run("changing pane stays active with no attention", func(t *testing.T) {
+		a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
+		a.prevCap["cl1"] = "Synthetic workspace menu\nstarting…\n"
+		a.poll()
+		if got := a.live["cl1"]; got != "active" {
+			t.Errorf("live = %q, want active on a changing pane", got)
+		}
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none while the pane is still changing", got)
+		}
+	})
+}
+
+// handlePeek / notePeekDialog share quietAttentionFallback, so a one-shot
+// peek on the same no-transcript trust dialog must classify identically.
+func TestHandlePeekLetteredTrustDialog(t *testing.T) {
+	a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/nodes/cl1/peek", nil)
+	r.SetPathValue("id", "cl1")
+	a.handlePeek(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("peek = %d", rec.Code)
+	}
+	if got := a.attn["cl1"]; got != "dialog" {
+		t.Errorf("peek attention = %q, want dialog", got)
+	}
+	if got := a.live["cl1"]; got != "" {
+		t.Errorf("peek must not write liveness: live = %q", got)
+	}
 }
 
 // P2 — /clear must not rebind a retired Claude transcript (ux-fixes-2.md).

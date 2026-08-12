@@ -761,6 +761,15 @@ test("keyRowHTML: inspect has no remote keys or permbtns", () => {
   assert.match(question, /data-key="Escape"/, "question retains Escape");
 });
 
+/* P5: classified dialog (lettered workspace-trust, no transcript) is the
+   whole point of promoting inspect → dialog — the y/n/Enter keypad. */
+test("dialog attention offers y/n/Enter", () => {
+  const html = keyRowHTML({ attention: "dialog", source: "" });
+  assert.match(html, /data-key="y"/);
+  assert.match(html, /data-key="n"/);
+  assert.match(html, /data-key="Enter"/);
+});
+
 test("CSS: .permbtns.keys wraps in a row; base .permbtns stays column pin", () => {
   // Base pin (column + non-shrink) — already asserted above; re-pin direction here.
   const base = chatCssSrc.match(/\.permbtns\s*\{([^}]+)\}/);

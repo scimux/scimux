@@ -283,6 +283,73 @@ Enter selection [1-2], or Escape to cancel:`,
 			pane:  "Permission Required: Create file\nWaiting for input…",
 			match: false,
 		},
+		// Lettered y/n workspace-trust dialog (pre-transcript, AX). Options
+		// are "y." / "n." rather than "1." / "2."; the decided anchor is the
+		// terminal input prompt "Enter y/n:", not "esc to cancel".
+		{
+			name: "lettered y/n workspace-trust dialog",
+			pane: `Synthetic workspace menu
+Permission Required: Accessing workspace:
+/fixture/workspace
+Fixture workspace access request.
+Fixture details deliberately span another line.
+Fixture help
+y. Yes, I trust this folder
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel`,
+			match: true,
+		},
+		{
+			name: "lettered y/n workspace-trust dialog ANSI",
+			pane: "Synthetic workspace menu\n" +
+				"\x1b[1mPermission Required: Accessing workspace:\x1b[0m\n" +
+				"/fixture/workspace\n" +
+				"Fixture workspace access request.\n" +
+				"Fixture details deliberately span another line.\n" +
+				"Fixture help\n" +
+				"\x1b[32my. Yes, I trust this folder\x1b[0m\n" +
+				"\x1b[31mn. No, exit\x1b[0m\n" +
+				"\x1b[1mEnter y/n:\x1b[0m\n" +
+				"Enter to confirm · Esc to cancel",
+			match: true,
+		},
+		{
+			// Prose-false-positive guard: a lettered run plus the cancel
+			// chrome is not enough. Without the Enter prompt this stays dark.
+			name: "lettered options without the Enter prompt stay dark",
+			pane: `Synthetic workspace menu
+Permission Required: Accessing workspace:
+/fixture/workspace
+Fixture workspace access request.
+Fixture details deliberately span another line.
+Fixture help
+y. Yes, I trust this folder
+n. No, exit
+Enter to confirm · Esc to cancel`,
+			match: false,
+		},
+		{
+			name: "prose that merely mentions the prompt stays dark",
+			pane: "The workspace-trust dialog prints Enter y/n: on its own line, " +
+				"but this paragraph is just agent prose discussing dialoghint.",
+			match: false,
+		},
+		{
+			name: "single lettered option is not a dialog",
+			pane: `y. Yes, I trust this folder
+Enter y/n:
+Enter to confirm · Esc to cancel`,
+			match: false,
+		},
+		{
+			name: "prompt letters must match the offered options",
+			pane: `y. Yes, I trust this folder
+n. No, exit
+Enter a/b:
+Enter to confirm · Esc to cancel`,
+			match: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -317,6 +384,17 @@ func TestHasCancelAnchor(t *testing.T) {
 		{"ansi coloured Escape footer", "\x1b[2m Escape to cancel\x1b[0m", true},
 		{"agent prose quoting esc", "the matcher requires esc to cancel below the options", true},
 		{"agent prose quoting Escape", "Anthropic documents Escape to cancel on AX menus", true},
+		// HasCancelAnchor gains nothing from the lettered-options matcher:
+		// the trust dialog is true only because of the Esc footer, and a
+		// lettered run + Enter prompt without that chrome stays false.
+		{"lettered trust dialog Esc footer", `Synthetic workspace menu
+Permission Required: Accessing workspace:
+/fixture/workspace
+y. Yes, I trust this folder
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel`, true},
+		{"lettered options and Enter prompt without cancel chrome", "y. Yes, I trust this folder\nn. No, exit\nEnter y/n:\n", false},
 		{"esc to interrupt not cancel", "Working…\n esc to interrupt", false},
 		{"Escape to cancellation", "Escape to cancellation of the request", false},
 		{"Escapement to cancel", "Escapement to cancel is not chrome", false},
