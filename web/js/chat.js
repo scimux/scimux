@@ -81,7 +81,7 @@ import {
   ASSET_REF_RE, stripAssetRefs,
 } from "./format.js";
 import { hashStr, hashTurns } from "./lanes.js";
-import { hardAttention as hardAttentionMod } from "./map-model.js";
+import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
 
 /* ---------- public constants ---------- */
@@ -569,13 +569,22 @@ export function autoApproveAriaName({ enabled = false, count = 0, supported = tr
   return base;
 }
 
-/* Pure presentation model for the #autoapprove toggle. */
-export function autoApproveChromeModel(view, { agent = "" } = {}){
+/* Pure presentation model for the #autoapprove toggle.
+   `node` is optional: with one, the control disappears for a chat that can
+   never arm the lease. "Auto-approve this turn" presupposes a turn, and a
+   closed thread or dead liveness has none left — canReceiveSend is exactly
+   that predicate ("a chat with a process left to type into"), so the two
+   cannot drift apart. Hidden rather than disabled: a disabled control still
+   claims the capability belongs here. A node we have not polled yet is not
+   provably dead and stays visible. */
+export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
   const v = autoApproveViewNorm(view);
   const agentL = String(agent || "").toLowerCase();
+  const hidden = node ? !canReceiveSend(node) : false;
   // Unsupported transport (Claude/tmux) or explicit Claude agent: disabled control.
   if (!v.supported || agentL === "claude"){
     return {
+      hidden,
       supported: false,
       enabled: false,
       phase: "off",
@@ -599,13 +608,14 @@ export function autoApproveChromeModel(view, { agent = "" } = {}){
   const classes = ["autoapprove", enabled ? "on" : "off"];
   if (v.error) classes.push("has-error");
   return {
+    hidden,
     supported: true,
     enabled,
     phase: v.phase,
     count,
     error: v.error || "",
     pressed: enabled,
-    disabled: false,
+    disabled: hidden,
     showWarning: enabled,
     showBadge: enabled && count > 0,
     badgeText: enabled && count > 0 ? String(count) : "",
@@ -950,7 +960,8 @@ export function createChatFeature(deps){
         : { supported: true, enabled: false, phase: "off", count: 0 };
     }
     lastAutoView = v;
-    const model = autoApproveChromeModel(v, { agent });
+    const model = autoApproveChromeModel(v, { agent, node: n });
+    autoapprove.hidden = !!model.hidden;
     autoapprove.disabled = !!model.disabled;
     if (typeof autoapprove.setAttribute === "function"){
       autoapprove.setAttribute("aria-pressed", model.pressed ? "true" : "false");

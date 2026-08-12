@@ -153,6 +153,9 @@ body.cards-open #msgs { overflow: hidden; }
   color: var(--dim); background: transparent; border: 1px solid transparent;
   font-size: 13px; line-height: 1.2; max-width: 100%;
 }
+/* display:inline-flex above beats the UA [hidden] rule — same trap as
+   #chathead .headtoggle. Without this the JS hide is a no-op in a browser. */
+#convtools button.autoapprove[hidden] { display: none; }
 #convtools button.autoapprove .aa-icon,
 #convtools button.autoapprove .aa-warn { display: inline-flex; flex: 0 0 auto; }
 #convtools button.autoapprove .aa-warn { color: #C98900; }

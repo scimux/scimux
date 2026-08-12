@@ -879,3 +879,123 @@ test("P4 label constants and narrow visual contraction", () => {
   assert.match(html, /aa-label-full[^>]*>Auto-approve this turn</);
   assert.match(html, /aa-label-narrow[^>]*>Auto-approve</);
 });
+
+/* ---------- Slice 6: the control is absent when no turn can happen ---------- */
+
+/* "Auto-approve this turn" presupposes a turn. A closed thread (/exit) is an
+   immutable dead end and dead liveness means there is no process left to prompt,
+   so the lease can never be armed there — the button was still painted, offering
+   a toggle whose only possible outcome is a refusal. Hidden, not disabled: a
+   disabled control still says "this is a thing you could have here". */
+test("P4.1 chrome model hides the toggle for closed and dead chats", () => {
+  const off = { supported: true, enabled: false, phase: "off", count: 0 };
+
+  // The button is display:inline-flex, which beats the UA [hidden] rule, so the
+  // JS flag alone would hide nothing in a browser.
+  assert.match(chatCss, /button\.autoapprove\[hidden\]\s*\{[^}]*display:\s*none/);
+
+  const alive = autoApproveChromeModel(off, { agent: "grok", node: { id: "g1", live: "quiet" } });
+  assert.equal(alive.hidden, false);
+  assert.equal(alive.disabled, false);
+
+  // No node yet (freshly created, never polled) is not provably dead — same
+  // rule as canReceiveSend, and the pre-existing two-argument callers keep
+  // their behavior.
+  assert.equal(autoApproveChromeModel(off, { agent: "grok" }).hidden, false);
+  assert.equal(autoApproveChromeModel(off).hidden, false);
+  assert.equal(autoApproveChromeModel(off, { agent: "grok", node: { id: "g1" } }).hidden, false);
+
+  for (const node of [
+    { id: "g1", live: "quiet", ended_at: 1_000 },
+    { id: "g1", live: "exited" },
+    { id: "g1", live: "unavailable" },
+    { id: "g1", live: "exited", ended_at: 1_000 },
+  ]) {
+    const m = autoApproveChromeModel(off, { agent: "grok", node });
+    assert.equal(m.hidden, true, `hidden for ${JSON.stringify(node)}`);
+    // A hidden control must not stay activatable by keyboard or script.
+    assert.equal(m.disabled, true, `disabled for ${JSON.stringify(node)}`);
+  }
+
+  // A lease that was still enabled when the process died hides too — the
+  // server's turn-scoped lease is over regardless of the last painted view.
+  const stale = autoApproveChromeModel(
+    { supported: true, enabled: true, phase: "armed", count: 3 },
+    { agent: "grok", node: { id: "g1", live: "exited" } },
+  );
+  assert.equal(stale.hidden, true);
+
+  // The unsupported (Claude/tmux) branch carries the same flag.
+  const claudeClosed = autoApproveChromeModel(
+    { supported: false, enabled: false, phase: "off", count: 0 },
+    { agent: "claude", node: { id: "c1", live: "quiet", ended_at: 1_000 } },
+  );
+  assert.equal(claudeClosed.hidden, true);
+  assert.equal(
+    autoApproveChromeModel(
+      { supported: false, enabled: false, phase: "off", count: 0 },
+      { agent: "claude", node: { id: "c1", live: "quiet" } },
+    ).hidden,
+    false,
+    "a live Claude chat still shows the disabled explainer",
+  );
+});
+
+test("P4.1 factory hides the toggle on closed/exited nodes and restores it on switch", async () => {
+  const payload = live => ({
+    turns: [{ role: "user", text: "hi", record: 1 }],
+    live, delivery: "ok", source: "acp",
+    chat_started: "t", prior_turns: 0, assets: {},
+    auto_approve: { supported: true, enabled: false, phase: "off", count: 0 },
+  });
+
+  {
+    const { feature, roots } = makeFeature({ chatPayload: payload("quiet") });
+    feature.bind();
+    await feature.render();
+    assert.equal(!!roots.autoapprove.hidden, false);
+    feature.destroy();
+  }
+  {
+    const { feature, roots } = makeFeature({
+      nodes: [{ id: "g1", title: "Grok", agent: "grok", live: "quiet", attention: "", ended_at: 1_000 }],
+      chatPayload: payload("quiet"),
+    });
+    feature.bind();
+    await feature.render();
+    assert.equal(roots.autoapprove.hidden, true, "closed thread");
+    assert.equal(roots.autoapprove.disabled, true);
+    feature.destroy();
+  }
+  {
+    const { feature, roots } = makeFeature({
+      nodes: [{ id: "g1", title: "Grok", agent: "grok", live: "exited", attention: "" }],
+      chatPayload: payload("exited"),
+    });
+    feature.bind();
+    await feature.render();
+    assert.equal(roots.autoapprove.hidden, true, "exited process");
+    feature.destroy();
+  }
+  {
+    // #convtools is a singleton: selecting a live chat after a dead one must
+    // bring the control back, or the hide would be sticky for the session.
+    const { feature, roots, setSel, setSelGen } = makeFeature({
+      nodes: [
+        // Closed, not exited: the chat payload's `live` is authoritative and
+        // overwrites n.live on every render, so a per-node liveness fixture
+        // would not survive the switch. ended_at is the node's own.
+        { id: "g1", title: "Grok", agent: "grok", live: "quiet", attention: "", ended_at: 1_000 },
+        { id: "g2", title: "Grok 2", agent: "grok", live: "quiet", attention: "" },
+      ],
+      chatPayload: payload("quiet"),
+    });
+    feature.bind();
+    await feature.render();
+    assert.equal(roots.autoapprove.hidden, true);
+    setSel("g2"); setSelGen(2);
+    await feature.render();
+    assert.equal(roots.autoapprove.hidden, false, "live chat restores the control");
+    feature.destroy();
+  }
+});
