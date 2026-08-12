@@ -37,6 +37,7 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodPost, "/api/nodes/{id}/send/resolve", "/api/nodes/node-1/send/resolve", "handleSendResolve", "conversation_api.go"},                                                 // extracted
 		{http.MethodPost, "/api/nodes/{id}/send/interrupt", "/api/nodes/node-1/send/interrupt", "handleSendInterrupt", "conversation_api.go"},                                           // extracted
 		{http.MethodPost, "/api/nodes/{id}/key", "/api/nodes/node-1/key", "handleKey", "conversation_api.go"},                                                                           // extracted
+		{http.MethodPost, "/api/nodes/{id}/auto-approve", "/api/nodes/node-1/auto-approve", "handleAutoApprove", "auto_approve.go"},                                                     // P3
 		{http.MethodGet, "/api/nodes/{id}/chat", "/api/nodes/node-1/chat", "handleChat", "conversation_api.go"},                                                                         // extracted
 		{http.MethodGet, "/api/nodes/{id}/peek", "/api/nodes/node-1/peek", "handlePeek", "conversation_api.go"},                                                                         // extracted
 		{http.MethodGet, "/api/notes", "/api/notes", "handleNoteList", "notes.go"},                                                                                                      // retained

@@ -152,6 +152,9 @@ func (a *app) initMaps() {
 	if a.logCache == nil {
 		a.logCache = map[string]*sessionlog.LogCache{}
 	}
+	if a.autoApprove == nil {
+		a.autoApprove = map[string]*autoApproveState{}
+	}
 }
 
 // ---------- model ----------
@@ -356,6 +359,11 @@ type app struct {
 	// key. An unchanged log costs a stat; growth resumes from the last
 	// newline watermark and parses only the tail. Never holds history segments.
 	logCache map[string]*sessionlog.LogCache
+	// autoApprove is the in-memory per-node one-turn auto-approval lease
+	// (P3). Never persisted — restart is always off. New/forked node IDs
+	// start off because no entry exists. Protected by a.mu; never hold a.mu
+	// across manager calls or session-log I/O.
+	autoApprove map[string]*autoApproveState
 	// notes is the synthesis-document store (~/.scimux/notes/, one mutable
 	// JSON file per note — internal/notestore). Deliberately separate from the
 	// append-only session log: notes are documents, not an event stream (see
@@ -391,11 +399,13 @@ type PermOption struct {
 
 // PendingPermission is the UI-facing view of one outstanding approval on a
 // structured-transport node. Empty ToolKind or Reason means "unknown".
+// RequestID is an opaque stable identity for the current pending request.
 type PendingPermission struct {
-	Title    string
-	ToolKind string
-	Reason   string // why the agent is asking; empty when unknown
-	Options  []PermOption
+	RequestID string // opaque; stable while this request is pending
+	Title     string
+	ToolKind  string
+	Reason    string // why the agent is asking; empty when unknown
+	Options   []PermOption
 }
 
 // procManager is the shared surface of scimux's two structured-protocol
@@ -445,7 +455,7 @@ func (m acpManager) Pending(id string) (PendingPermission, bool) {
 	for i, o := range p.Options {
 		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
 	}
-	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
+	return PendingPermission{RequestID: p.RequestID, Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
 }
 
 func (m acpManager) Conflict(err error) bool {
@@ -464,7 +474,7 @@ func (m codexManager) Pending(id string) (PendingPermission, bool) {
 	for i, o := range p.Options {
 		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
 	}
-	return PendingPermission{Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
+	return PendingPermission{RequestID: p.RequestID, Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
 }
 
 func (m codexManager) Conflict(err error) bool {

@@ -139,7 +139,8 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	// gone. The manager records the user turn before prompting (a log-append
 	// failure refuses the send) — see the Send contract on each manager.
 	if pm := a.proc(n); pm != nil {
-		if pm.Live(n.ID) == "active" {
+		live := pm.Live(n.ID)
+		if live == "active" {
 			http.Error(w, "a turn to this node is still in flight", 409)
 			return
 		}
@@ -161,6 +162,8 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), code)
 				return
 			}
+			// /clear ends the turn lease (page turn is a hard reset).
+			a.disarmAutoApprove(n.ID)
 			// Keep node.session_id on the post-clear ACP/thread id so the pi
 			// native fare join (session-map.json) stays one hop (Phase 4).
 			if sid := a.liveSessionID(n); sid != "" && sid != n.SessionID {
@@ -171,6 +174,9 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]string{"status": "acknowledged"})
 			return
 		}
+		// Before accepting a new idle prompt, drop any stale armed lease from
+		// the previous turn so it can never leak forward (P3).
+		a.clearStaleArmedBeforePrompt(n.ID, live)
 		if err := pm.Send(n.ID, delivered); err != nil {
 			code := 500
 			if pm.Conflict(err) {
@@ -179,6 +185,8 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), code)
 			return
 		}
+		// Primed → armed once the next prompt is successfully accepted.
+		a.armAutoApproveOnPrompt(n.ID)
 		a.noteUsagePrompt(n.Agent)
 		writeJSON(w, map[string]string{"status": "acknowledged"})
 		return
@@ -383,6 +391,7 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), code)
 			return
 		}
+		a.disarmAutoApprove(n.ID)
 		writeJSON(w, map[string]string{"ok": "interrupted"})
 		return
 	}
@@ -483,6 +492,15 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	if assets != nil {
 		resp["assets"] = assets
 	}
+	// Current-segment decision audit surfaces (P3); separate from turns.
+	if len(seg.Decisions) > 0 {
+		resp["decisions"] = seg.Decisions
+	}
+	// Authoritative auto-approval state participates in the full-body ETag.
+	a.mu.Lock()
+	aaView := a.autoApproveViewOf(n)
+	a.mu.Unlock()
+	resp["auto_approve"] = aaView
 	if pm := a.proc(n); pm != nil {
 		a.procChatInto(resp, n, pm, seg)
 	} else {

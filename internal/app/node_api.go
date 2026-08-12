@@ -366,6 +366,8 @@ func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
 		} else if a.proc(n) == nil && n.Adopted {
 			stopped, reason = false, "adopted"
 		}
+		// /exit ends the auto-approval lease (process/session loss).
+		a.disarmAutoApprove(n.ID)
 	} else {
 		// Idempotent re-exit (only reachable by a direct API call — the UI hides
 		// the control once ended): do not tear the process down a second time.

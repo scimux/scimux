@@ -277,8 +277,9 @@ func TestPermissionPrepareResolveAndDeliver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareResolve: %v", err)
 	}
-	if optID != "opt_allow" {
-		t.Errorf("key %q mapped to %q, want opt_allow (first option)", "1", optID)
+	// Token is "<seq>:<optionId>" so delivery is fenced to this exact request.
+	if !strings.HasSuffix(optID, ":opt_allow") {
+		t.Errorf("key %q mapped to %q, want token ending in :opt_allow (first option)", "1", optID)
 	}
 	if !strings.Contains(evidence, "run bash") {
 		t.Errorf("evidence = %q, want it to carry the tool title as decision context", evidence)
@@ -1084,22 +1085,28 @@ func TestRequestPermissionStoresToolKind(t *testing.T) {
 // refused rather than answering a since-replaced prompt (finding 53).
 func TestDeliverRejectsStaleOption(t *testing.T) {
 	s := &Session{nodeID: "n1", logw: &logWriter{Path: filepath.Join(t.TempDir(), "n1.jsonl")}}
+	s.pendingSeq = 1
 	s.pending = &pendingPermission{
+		seq:       1,
 		toolTitle: "run bash",
 		options:   []sdk.PermissionOption{{OptionId: "opt_allow", Name: "Allow"}},
 		ch:        make(chan sdk.PermissionOptionId, 1),
 	}
-	if err := s.deliver(sdk.PermissionOptionId("opt_gone")); err == nil {
+	if err := s.deliver(sdk.PermissionOptionId("1:opt_gone")); err == nil {
 		t.Error("expected delivery of an unknown option to be refused")
 	}
-	// A valid option is consumed and clears the pending request.
-	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != nil {
+	// Wrong sequence (stale prepare against a prior request) is refused.
+	if err := s.deliver(sdk.PermissionOptionId("99:opt_allow")); err == nil {
+		t.Error("expected delivery of a stale-seq token to be refused")
+	}
+	// A valid token is consumed and clears the pending request.
+	if err := s.deliver(sdk.PermissionOptionId("1:opt_allow")); err != nil {
 		t.Fatalf("valid deliver failed: %v", err)
 	}
 	if _, ok := s.pendingInfo(); ok {
 		t.Error("pending should be cleared after a successful deliver")
 	}
-	if err := s.deliver(sdk.PermissionOptionId("opt_allow")); err != ErrNoPending {
+	if err := s.deliver(sdk.PermissionOptionId("1:opt_allow")); err != ErrNoPending {
 		t.Errorf("second deliver err = %v, want ErrNoPending", err)
 	}
 }

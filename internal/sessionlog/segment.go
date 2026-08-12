@@ -36,6 +36,10 @@ type Segment struct {
 	// the per-node cache. Always non-nil so the projection never nil-checks; a
 	// stop with no entry falls back to the node's live Title/Description.
 	Stations map[string]StationLabel
+	// Decisions are auto-approval audit surfaces in the current segment only
+	// (after the last source seam), in durable record order. Not turns — P4
+	// merges them into chat as read-only audit rows by Record index.
+	Decisions []DecisionSurface
 }
 
 // StationLabel is one stop's frozen name and description.
@@ -48,6 +52,7 @@ func segmentOf(evs []Event) Segment {
 	var seg Segment
 	seg.Turns = []transcript.Turn{}
 	seg.Stations = map[string]StationLabel{}
+	seg.Decisions = []DecisionSurface{}
 	// Durable address bookkeeping, kept numerically identical to ScanLog: uid is
 	// the meta header's, record is the event's index in evs (ReadEvents skips the
 	// same blank/torn lines ScanLog skips, so evs[i] is parsed record i), and
@@ -66,6 +71,7 @@ func segmentOf(evs []Event) Segment {
 		case "source":
 			seg.PriorTurns += len(seg.Turns)
 			seg.Turns = seg.Turns[:0]
+			seg.Decisions = seg.Decisions[:0]
 			seg.StartTime = ev.Time
 			seg.Used, seg.Size = 0, 0
 			if ev.Source != nil && ev.Source.Reason == "clear" {
@@ -94,6 +100,12 @@ func segmentOf(evs []Event) Segment {
 			// Whole-log, not segment-scoped: closed stations live before seams.
 			if ev.Station != nil && ev.Station.Seam != "" {
 				seg.Stations[ev.Station.Seam] = StationLabel{Title: ev.Station.Title, Desc: ev.Station.Desc}
+			}
+		case "decision":
+			if ev.Decision != nil {
+				seg.Decisions = append(seg.Decisions, DecisionSurface{
+					Record: i, Time: ev.Time, Decision: *ev.Decision,
+				})
 			}
 		}
 	}
@@ -145,10 +157,11 @@ func ReadSegment(path string) Segment {
 // R20.9 rule as Segment.StartTime — adopted/imported turns can be far older
 // than their bind seam).
 type HistorySegment struct {
-	Start  string            `json:"start"`
-	Seam   string            `json:"seam"`
-	Reason string            `json:"reason,omitempty"` // opening seam's reason; "" for the log's first surface
-	Turns  []transcript.Turn `json:"turns"`
+	Start     string            `json:"start"`
+	Seam      string            `json:"seam"`
+	Reason    string            `json:"reason,omitempty"` // opening seam's reason; "" for the log's first surface
+	Turns     []transcript.Turn `json:"turns"`
+	Decisions []DecisionSurface `json:"decisions,omitempty"` // audit surfaces in this surface, record order
 }
 
 // ReadHistory parses the log into all its surfaces, oldest first. Surfaces
@@ -160,13 +173,17 @@ type HistorySegment struct {
 // a poll path.
 func ReadHistory(path string) []HistorySegment {
 	segs := []HistorySegment{}
-	cur := HistorySegment{Turns: []transcript.Turn{}}
+	cur := HistorySegment{Turns: []transcript.Turn{}, Decisions: []DecisionSurface{}}
 	flush := func() {
-		if len(cur.Turns) == 0 {
+		// Drop surfaces with neither readable turns nor decisions (back-to-back
+		// mechanical seams). A decision-only surface is still history P4 needs.
+		if len(cur.Turns) == 0 && len(cur.Decisions) == 0 {
 			return
 		}
-		if t0 := cur.Turns[0].Time; t0 != "" && earlier(t0, cur.Start) {
-			cur.Start = t0
+		if len(cur.Turns) > 0 {
+			if t0 := cur.Turns[0].Time; t0 != "" && earlier(t0, cur.Start) {
+				cur.Start = t0
+			}
 		}
 		segs = append(segs, cur)
 	}
@@ -186,7 +203,7 @@ func ReadHistory(path string) []HistorySegment {
 		switch ev.T {
 		case "source":
 			flush()
-			cur = HistorySegment{Start: ev.Time, Seam: ev.Time, Turns: []transcript.Turn{}}
+			cur = HistorySegment{Start: ev.Time, Seam: ev.Time, Turns: []transcript.Turn{}, Decisions: []DecisionSurface{}}
 			if ev.Source != nil {
 				cur.Reason = ev.Source.Reason
 			}
@@ -197,6 +214,12 @@ func ReadHistory(path string) []HistorySegment {
 				cur.Turns = append(cur.Turns, transcript.Turn{
 					Role: ev.T, Text: ev.Text, Time: ev.Time,
 					UID: uid, Segment: recSeg, Record: i,
+				})
+			}
+		case "decision":
+			if ev.Decision != nil {
+				cur.Decisions = append(cur.Decisions, DecisionSurface{
+					Record: i, Time: ev.Time, Decision: *ev.Decision,
 				})
 			}
 		}

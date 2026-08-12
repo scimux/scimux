@@ -295,11 +295,17 @@ func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 // Empty ToolKind, option Kind, or Reason means "unknown" — never an error,
 // never a guess. Shape matches acp.PendingPermission so the HTTP/UI layer
 // treats both transports identically.
+//
+// RequestID is an opaque stable identity for the current pending request
+// (derived from the manager's pending sequence). It stays fixed while the same
+// request is pending and advances for the next request even when title/options
+// match.
 type PendingPermission struct {
-	Title    string
-	ToolKind string
-	Reason   string // why the agent is asking; empty when unknown
-	Options  []PermOption
+	RequestID string // opaque; stable while this request is pending
+	Title     string
+	ToolKind  string
+	Reason    string // why the agent is asking; empty when unknown
+	Options   []PermOption
 }
 
 // PermOption is one answerable decision: the key a supervisor presses, a
@@ -601,10 +607,11 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 		})
 	}
 	return PendingPermission{
-		Title:    approvalTitle(a),
-		ToolKind: mapApprovalToolKind(a),
-		Reason:   a.Reason,
-		Options:  opts,
+		RequestID: strconv.FormatUint(s.pending[0].seq, 10),
+		Title:     approvalTitle(a),
+		ToolKind:  mapApprovalToolKind(a),
+		Reason:    a.Reason,
+		Options:   opts,
 	}, true
 }
 

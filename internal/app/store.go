@@ -199,6 +199,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.logCache, id)
 	delete(a.anim, id)
 	delete(a.deadTranscripts, id)
+	delete(a.autoApprove, id)
 }
 
 // sessionLogPath is the single spelling of a node's session-log location; the

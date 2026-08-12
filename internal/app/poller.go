@@ -57,13 +57,30 @@ func (a *app) poll() {
 		// (process alive, turn in flight, pending permission), not pane-change
 		// detection. No capture, no transcript discovery.
 		if pm := a.proc(n); pm != nil {
+			// P3: auto-resolve eligible structured approvals before publishing
+			// manual attention. Manager + session-log I/O stay outside a.mu.
+			a.maybeAutoApprove(n, pm)
+
+			// Snapshot manager state outside a.mu (HasSession/Live/Attention
+			// are in-memory lookups, but keep the "no a.mu across manager
+			// calls" discipline for consistency with Send/log paths).
+			live := pm.Live(n.ID)
 			attn := pm.Attention(n.ID)
 			a.mu.Lock()
 			prevAttn := a.attn[n.ID]
-			a.live[n.ID] = pm.Live(n.ID)
+			prevLive := a.live[n.ID]
+			a.live[n.ID] = live
 			a.attn[n.ID] = attn
-			if a.live[n.ID] == "active" {
+			if live == "active" {
 				a.lastChg[n.ID] = time.Now()
+			}
+			// Lease cannot cross a turn or a dead process. Do not clear a
+			// primed lease merely because the process is not yet up (enable
+			// while idle is valid before the first prompt lands).
+			if prevLive == "active" && live != "active" {
+				delete(a.autoApprove, n.ID) // turn completed or exited mid-turn
+			} else if live == "exited" && (prevLive == "active" || prevLive == "quiet") {
+				delete(a.autoApprove, n.ID) // process/session loss after known liveness
 			}
 			a.mu.Unlock()
 			// V2-P2: persist needs-input start→end edges from the existing

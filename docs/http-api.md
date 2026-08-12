@@ -365,6 +365,30 @@ in the store together with decision evidence (the pane's bottom lines, or
 the tool title on structured transports); on structured transports the
 decision is persisted *before* the agent learns the answer.
 
+### `POST /api/nodes/{id}/auto-approve`
+
+Body: `{"enabled": true}`. Arms or disarms the server-owned, one-turn
+auto-approval lease for structured transports only (Codex app-server; Grok,
+OpenCode, and Pi through ACP). Claude/tmux returns `400` and creates no
+state. State is never persisted across process restart.
+
+Response (authoritative):
+
+```json
+{"supported": true, "enabled": true, "phase": "primed", "count": 0}
+```
+
+`phase` is `off`, `primed` (enabled while idle), or `armed` (active for the
+current turn). `count` advances only after an eligible decision is audited
+into the session log and then successfully delivered. Eligibility selects
+the sole offered option with semantic kind `allow` (one-time / request-
+scoped), regardless of display key or position — never `allow_always`,
+`reject`, or an ambiguous multi-allow menu. Requests already pending when
+the lease was enabled are never auto-resolved. The same object is included
+on `GET /api/nodes/{id}/chat` as `auto_approve` and participates in that
+response's full-body ETag. Current-segment decision audit surfaces appear
+as `decisions` on the same response (and in `?history=1` segments).
+
 ## UI state
 
 ### `GET /api/ui` / `PUT /api/ui`

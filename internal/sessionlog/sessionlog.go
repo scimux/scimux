@@ -31,7 +31,7 @@ import (
 // record types they don't know, so the schema can grow without breaking
 // old binaries or old files.
 type Event struct {
-	T          string          `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset" | "attention"
+	T          string          `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset" | "attention" | "decision"
 	Time       string          `json:"time"`
 	Text       string          `json:"text,omitempty"`       // user / assistant
 	Tool       *ToolEvent      `json:"tool,omitempty"`       // tool
@@ -42,8 +42,47 @@ type Event struct {
 	Asset      *AssetEvent     `json:"asset,omitempty"`      // asset
 	Station    *StationEvent   `json:"station,omitempty"`    // station
 	Attention  *AttentionEvent `json:"attention,omitempty"`  // attention (needs-input edge)
+	Decision   *DecisionEvent  `json:"decision,omitempty"`   // decision (auto-approval audit; P3)
 	StopReason string          `json:"stopReason,omitempty"` // stop
 	Error      string          `json:"error,omitempty"`      // error
+}
+
+// DecisionEvent is an audited automatic (or future manual) permission choice.
+// Appended and fsynced before the structured transport delivers the selected
+// option. Additive schema: old readers ignore t:"decision"; it is never a
+// turn, seam, fare hit, tool interval, attention edge, or asset anchor.
+type DecisionEvent struct {
+	Source    string      `json:"source"`              // "auto"
+	LeaseID   string      `json:"lease_id"`            // opaque lease that authorized this decision
+	RequestID string      `json:"request_id"`          // stable pending-request identity
+	Agent     string      `json:"agent,omitempty"`     // node agent at decision time
+	ToolKind  string      `json:"tool_kind,omitempty"` // structured tool kind when known
+	Title     string      `json:"title,omitempty"`     // full pending title/command
+	Reason    string      `json:"reason,omitempty"`    // full reason when known
+	Options   []DecOption `json:"options,omitempty"`   // every offered option
+	Selected  DecOption   `json:"selected"`            // the option scimux authorized
+}
+
+// DecOption is one permission choice in a DecisionEvent: key, display name,
+// and semantic kind ("allow" | "allow_always" | "reject" | "reject_always" | "").
+type DecOption struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
+}
+
+// NewDecision builds a t:"decision" audit record. Time is stamped on Append.
+func NewDecision(d DecisionEvent) Event {
+	return Event{T: "decision", Decision: &d}
+}
+
+// DecisionSurface is one decision projected for chat audit rendering, keyed by
+// durable ReadEvents record index so P4 can merge it into timeline order without
+// turning it into a fake assistant turn.
+type DecisionSurface struct {
+	Record   int           `json:"record"`
+	Time     string        `json:"time"`
+	Decision DecisionEvent `json:"decision"`
 }
 
 // AttentionEvent brackets a needs-input interval (approval / question /
@@ -411,6 +450,11 @@ func formatEvent(ev Event) string {
 		return "— stop (" + ev.StopReason + ")"
 	case "error":
 		return "! error: " + oneLine(ev.Error)
+	case "decision":
+		if ev.Decision != nil {
+			return "· auto " + oneLine(ev.Decision.Title) + " → " + oneLine(ev.Decision.Selected.Name)
+		}
+		return "· decision"
 	}
 	return "· " + ev.T
 }

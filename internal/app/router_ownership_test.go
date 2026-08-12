@@ -1,6 +1,6 @@
 package app
 
-// Packet 4F: source/AST-backed ownership audit for the 31 /api/... routes.
+// Packet 4F: source/AST-backed ownership audit for the 32 /api/... routes.
 // Extends characterizationAPIRoutes() rather than inventing a second inventory.
 // Scans only production Go sources in the application package (never examples/).
 
@@ -21,8 +21,8 @@ import (
 // withGzip(guardMutations(mux)).
 func TestRouterAPIRouteOwnership(t *testing.T) {
 	table := characterizationAPIRoutes()
-	if len(table) != 31 {
-		t.Fatalf("characterization table has %d routes, want 31", len(table))
+	if len(table) != 32 {
+		t.Fatalf("characterization table has %d routes, want 32", len(table))
 	}
 
 	// Table-internal uniqueness: each method+pattern pair appears once.

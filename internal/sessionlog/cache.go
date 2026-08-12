@@ -61,6 +61,7 @@ type LogCache struct {
 	recSeg        int
 	priorTurns    int
 	turns         []transcript.Turn
+	decisions     []DecisionSurface
 	rawStartTime  string
 	used, sizeOcc int64
 	clearTimes    []string
@@ -289,6 +290,7 @@ func (c *LogCache) resetAccum() {
 	c.recSeg = 0
 	c.priorTurns = 0
 	c.turns = c.turns[:0]
+	c.decisions = c.decisions[:0]
 	c.rawStartTime = ""
 	c.used, c.sizeOcc = 0, 0
 	c.clearTimes = c.clearTimes[:0]
@@ -354,6 +356,7 @@ func (c *LogCache) ingest(ev Event, i int) {
 	case "source":
 		c.priorTurns += len(c.turns)
 		c.turns = c.turns[:0]
+		c.decisions = c.decisions[:0]
 		c.rawStartTime = ev.Time
 		c.used, c.sizeOcc = 0, 0
 		if ev.Source != nil && ev.Source.Reason == "clear" {
@@ -382,6 +385,12 @@ func (c *LogCache) ingest(ev Event, i int) {
 				c.stations = map[string]StationLabel{}
 			}
 			c.stations[ev.Station.Seam] = StationLabel{Title: ev.Station.Title, Desc: ev.Station.Desc}
+		}
+	case "decision":
+		if ev.Decision != nil {
+			c.decisions = append(c.decisions, DecisionSurface{
+				Record: i, Time: ev.Time, Decision: *ev.Decision,
+			})
 		}
 	}
 
@@ -502,11 +511,15 @@ func (c *LogCache) snapshotProducts() {
 		Used:       c.used,
 		Size:       c.sizeOcc,
 		Turns:      append([]transcript.Turn(nil), c.turns...),
+		Decisions:  append([]DecisionSurface(nil), c.decisions...),
 		ClearTimes: append([]string(nil), c.clearTimes...),
 		Stations:   make(map[string]StationLabel, len(c.stations)),
 	}
 	if seg.Turns == nil {
 		seg.Turns = []transcript.Turn{}
+	}
+	if seg.Decisions == nil {
+		seg.Decisions = []DecisionSurface{}
 	}
 	for k, v := range c.stations {
 		seg.Stations[k] = v

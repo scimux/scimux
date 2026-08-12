@@ -414,11 +414,16 @@ func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 // never a guess. Shape matches codex.PendingPermission so the HTTP/UI layer
 // treats both transports identically. ACP RequestPermission has no reason
 // field; Reason stays empty there.
+//
+// RequestID is an opaque stable identity for the current pending request
+// (monotonic per-session sequence). It stays fixed while the same request is
+// pending and advances for the next request even when title/options match.
 type PendingPermission struct {
-	Title    string
-	ToolKind string
-	Reason   string // why the agent is asking; empty when unknown (ACP always empty)
-	Options  []PermOption
+	RequestID string // opaque; stable while this request is pending
+	Title     string
+	ToolKind  string
+	Reason    string // why the agent is asking; empty when unknown (ACP always empty)
+	Options   []PermOption
 }
 
 // PermOption is one answerable permission choice: the key a supervisor presses,
@@ -544,6 +549,7 @@ type Session struct {
 	curMsgID      string
 	assistant     strings.Builder
 	pending       *pendingPermission
+	pendingSeq    uint64 // monotonic per-session; projects as PendingPermission.RequestID
 	lastError     string
 	banner        string
 	bannerDone    bool
@@ -559,8 +565,11 @@ type Session struct {
 
 // pendingPermission is the one outstanding permission request (ACP is one turn
 // at a time, so at most one). RequestPermission blocks on ch until a key
-// resolves it, or done closes (cancel/shutdown → cancelled outcome).
+// resolves it, or done closes (cancel/shutdown → cancelled outcome). seq
+// identifies the request across the prepare→deliver gap so a stale answer
+// cannot be delivered to a replacement request with the same option ids.
 type pendingPermission struct {
+	seq       uint64
 	toolTitle string
 	toolKind  string // ACP ToolKind string, or "" when unknown
 	options   []sdk.PermissionOption
@@ -660,7 +669,10 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 		s.mu.Unlock()
 		return cancelledPermission(), nil
 	}
-	s.pending = &pendingPermission{toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch}
+	s.pendingSeq++
+	s.pending = &pendingPermission{
+		seq: s.pendingSeq, toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch,
+	}
 	s.mu.Unlock()
 
 	defer s.clearPending()
@@ -916,9 +928,10 @@ func (s *Session) scanAssetsLocked(ev Event) {
 
 // --- permission answering ---
 
-// prepareResolve maps a whitelisted key to the pending option and returns the
-// option id plus audit evidence, without delivering. Holds s.mu for the whole
-// mapping so it reads a consistent pending snapshot.
+// prepareResolve maps a whitelisted key to the pending option and returns an
+// opaque token naming both the request sequence and the option id, plus audit
+// evidence, without delivering. The token pins deliver to this exact request.
+// Holds s.mu for the whole mapping so it reads a consistent pending snapshot.
 func (s *Session) prepareResolve(key string) (sdk.PermissionOptionId, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -929,25 +942,32 @@ func (s *Session) prepareResolve(key string) (sdk.PermissionOptionId, string, er
 	if !ok {
 		return "", "", fmt.Errorf("key %q maps to no permission option", key)
 	}
-	return id, "permission: " + s.pending.toolTitle, nil
+	// Token format: "<seq>:<optionId>" — seq fences replacement requests that
+	// reuse the same option ids (common for allow/reject).
+	tok := sdk.PermissionOptionId(fmt.Sprintf("%d:%s", s.pending.seq, id))
+	return tok, "permission: " + s.pending.toolTitle, nil
 }
 
 // deliver hands the mapped option to the blocked RequestPermission goroutine.
 // It holds s.mu across the check-and-send and consumes the pending request
 // (pending = nil) atomically, closing the finding-53 race where a copy of
 // pending could be sent into a stale channel after clearPending had run. The
-// option must still belong to the current pending request, so an answer mapped
-// against a since-replaced request is refused rather than misdelivered.
-func (s *Session) deliver(id sdk.PermissionOptionId) error {
+// token's sequence must still name the current pending request, so an answer
+// mapped against a since-replaced request is refused rather than misdelivered.
+func (s *Session) deliver(tok sdk.PermissionOptionId) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.pending
 	if p == nil {
 		return ErrNoPending
 	}
+	seq, optID, ok := parseDeliverToken(string(tok))
+	if !ok || seq != p.seq {
+		return errors.New("pending permission changed before the answer was delivered")
+	}
 	valid := false
 	for _, o := range p.options {
-		if o.OptionId == id {
+		if o.OptionId == optID {
 			valid = true
 			break
 		}
@@ -957,11 +977,26 @@ func (s *Session) deliver(id sdk.PermissionOptionId) error {
 	}
 	s.pending = nil // consume; RequestPermission's deferred clearPending is now a no-op
 	select {
-	case p.ch <- id: // buffered (cap 1) and empty: completes without blocking
+	case p.ch <- optID: // buffered (cap 1) and empty: completes without blocking
 		return nil
 	default:
 		return errors.New("permission request was already answered")
 	}
+}
+
+// parseDeliverToken splits a prepareResolve token into (seq, optionId).
+// Accepts only the "<seq>:<optionId>" form produced by prepareResolve.
+func parseDeliverToken(tok string) (seq uint64, optID sdk.PermissionOptionId, ok bool) {
+	// Split on the first ':' so option ids may themselves contain colons.
+	i := strings.IndexByte(tok, ':')
+	if i <= 0 || i == len(tok)-1 {
+		return 0, "", false
+	}
+	n, err := strconv.ParseUint(tok[:i], 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return n, sdk.PermissionOptionId(tok[i+1:]), true
 }
 
 func (s *Session) pendingInfo() (PendingPermission, bool) {
@@ -979,9 +1014,10 @@ func (s *Session) pendingInfo() (PendingPermission, bool) {
 		})
 	}
 	return PendingPermission{
-		Title:    s.pending.toolTitle,
-		ToolKind: s.pending.toolKind,
-		Options:  opts,
+		RequestID: strconv.FormatUint(s.pending.seq, 10),
+		Title:     s.pending.toolTitle,
+		ToolKind:  s.pending.toolKind,
+		Options:   opts,
 	}, true
 }
 
