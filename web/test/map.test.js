@@ -462,6 +462,50 @@ test("P5: .st colour tokens per state in map.css", () => {
   }
 });
 
+/* P1 — wall-map attention ring was unclickable: .lbody > svg and .strow both
+   had z-index:auto, rows paint after the SVG, and padding-left inset means each
+   .strow box still spans x=0 and covers the ring hit circle. Rule-body regexes
+   only (never file-wide grep). */
+test("P1: .lbody > svg is stacked above the station rows", () => {
+  const svg = mapCssSrc.match(/\.lbody\s*>\s*svg\s*\{([^}]+)\}/);
+  assert.ok(svg, ".lbody > svg rule must exist");
+  const zi = svg[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(zi, ".lbody > svg must declare z-index (rows cover auto-stacked SVG)");
+  assert.ok(Number(zi[1]) >= 1, `z-index ${zi[1]} must be >= 1`);
+  // A z-index on .strow would re-cover the SVG in tree order (rows after SVG).
+  const strow = mapCssSrc.match(/\.strow\s*\{([^}]+)\}/);
+  assert.ok(strow, ".strow rule must exist");
+  assert.doesNotMatch(strow[1], /z-index\s*:/,
+    ".strow must not declare z-index (would silently re-break ring hit)");
+});
+
+test("P1: the ring hit target keeps its pointer-events opt-in", () => {
+  // Raising the SVG must not turn the overlay into a click shield over rows.
+  const svg = mapCssSrc.match(/\.lbody\s*>\s*svg\s*\{([^}]+)\}/);
+  assert.ok(svg, ".lbody > svg rule");
+  assert.match(svg[1], /pointer-events\s*:\s*none/,
+    ".lbody > svg stays pointer-events:none");
+  const hit = mapCssSrc.match(/\.lbody\s*>\s*svg\s+\.attnstation-hit\s*\{([^}]+)\}/);
+  assert.ok(hit, ".lbody > svg .attnstation-hit rule");
+  assert.match(hit[1], /pointer-events\s*:\s*all/,
+    "hit circle re-enables pointer-events:all");
+});
+
+test("P1: the fare capsule still wins over the ring", () => {
+  // Capsules sit at gap midpoints and can fall inside a ring's 22px radius.
+  const svg = mapCssSrc.match(/\.lbody\s*>\s*svg\s*\{([^}]+)\}/);
+  assert.ok(svg, ".lbody > svg rule");
+  const svgZ = svg[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(svgZ, ".lbody > svg must declare z-index");
+  const fare = mapCssSrc.match(/\.fare-capsule\s*\{([^}]+)\}/);
+  assert.ok(fare, ".fare-capsule rule");
+  const fareZ = fare[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(fareZ, ".fare-capsule must declare z-index");
+  assert.ok(Number(fareZ[1]) > Number(svgZ[1]),
+    `.fare-capsule z-index ${fareZ[1]} must be strictly greater than ` +
+    `.lbody > svg z-index ${svgZ[1]}`);
+});
+
 test("terminalStationSVG: spur rises then curves LEFT to a vertical buffer bar", () => {
   const svg = terminalStationSVG(100, 200, 0.5, "#abc");
   // an arc (the spur) plus a straight buffer bar
