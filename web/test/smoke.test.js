@@ -171,4 +171,33 @@ test("cssVarUses ignores fallback forms and cssVarDefs finds declarations", () =
     "commented-out uses are not uses");
 });
 
+test("no CSS rule outranks #toast", () => {
+  /* #toast is topmost by definition — it confirms actions taken from inside
+     any full-screen overlay. A later layering fix that raises a surface past
+     200 would bury the toast; this walks every web/css file (comments
+     stripped, same as the brace/var guards) and asserts the maximum z-index
+     belongs to #toast. */
+  const files = readdirSync(cssDir).filter(f => f.endsWith(".css")).sort();
+  assert.ok(files.length > 0, "web/css has .css files");
+  let maxZ = -Infinity;
+  let toastZ = null;
+  for (const name of files){
+    const src = stripCssComments(readFileSync(join(cssDir, name), "utf8"));
+    for (const m of src.matchAll(/z-index\s*:\s*(-?\d+)/g)){
+      const n = Number(m[1]);
+      if (n > maxZ) maxZ = n;
+    }
+    if (name === "notes.css"){
+      const toastRule = src.match(/#toast\s*\{([^}]+)\}/);
+      assert.ok(toastRule, "#toast rule present in notes.css");
+      const zi = toastRule[1].match(/z-index\s*:\s*(-?\d+)/);
+      assert.ok(zi, "#toast declares z-index");
+      toastZ = Number(zi[1]);
+    }
+  }
+  assert.ok(toastZ != null, "#toast z-index must be found");
+  assert.equal(toastZ, maxZ,
+    `#toast z-index ${toastZ} must be the global maximum (saw ${maxZ})`);
+});
+
 test("test runner is active", () => assert.equal(1 + 1, 2));

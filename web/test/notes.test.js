@@ -2819,6 +2819,61 @@ test("P3 10: note section body edit places caret at end", async () => {
 });
 
 
+/* ---------- P2: workspace send-to reuses the one #sendto dialogue ----------
+ * CSS lifts .sheet above #notesworkspace; this locks the JS contract the
+ * fix makes visible — note-section bubbles call the shared openSendTo with
+ * the bubble text and source node id (bookmarks owns #sendto). */
+
+test("P2: the workspace send-to path opens the one shared #sendto sheet", async () => {
+  const calls = [];
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{
+          id: "s1", title: "", body: "x", order: 0,
+          references: [{
+            id: "r1",
+            source: { node: "src-node", uid: "u", segment: 0, record: 0 },
+            snapshot: { text: "bubble text from the note", lane: "#0a0" },
+          }],
+        }],
+      },
+    },
+    deps: { openSendTo: opts => calls.push(opts) },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  const card = el("button", { className: "wscard", dataset: { note: "n1" } });
+  card.dataset.note = "n1";
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.dispatch("click", { target: card });
+  await settle();
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const ref = el("div", { className: "wsref", dataset: { ref: "r1" } });
+  ref.dataset.ref = "r1";
+  const btn = el("button", { dataset: { refact: "sendto" } });
+  btn.dataset.refact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-refact]") return btn;
+    if (sel === ".wsref") return ref;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  roots.wssections.dispatch("click", { target: btn });
+
+  assert.equal(calls.length, 1, "openSendTo called once for data-refact=sendto");
+  assert.equal(calls[0].text, "bubble text from the note",
+    "bubble snapshot text is the send-to payload");
+  assert.equal(calls[0].exceptId, "src-node",
+    "source node id is withheld from the target list");
+});
+
 /* ---------- P6 review: notes send-to routes ---------- */
 
 test("P6 review: inbox send-to strips asset markers and excepts the source chat", () => {

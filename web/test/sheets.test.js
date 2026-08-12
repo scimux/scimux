@@ -1337,3 +1337,65 @@ test("P7: neither 44px target fakes height with margin", () => {
       `${name}: margin: Npx 0 with N≥44 would fake the target`);
   }
 });
+
+/* ---------- P2: modal sheet layer above every full-screen overlay ----------
+ * Sheets and #backdrop lived at 60/55 while #notesworkspace and #previewview
+ * sit at 110 and #searchoverlay at 120 — so any sheet opened from the
+ * workspace or search painted behind them. Rule-body regexes only (never a
+ * file-wide z-index grep). Mutation check: set .sheet back to 60 → red. */
+
+const notesCssForSheetZ = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
+const layoutCssForSheetZ = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
+
+test("P2: the modal sheet layer sits above every full-screen overlay", () => {
+  /* Bare `.sheet {` only — never `.sheet.open` / `.sheet .pos-item`. */
+  const sheetRule = sheetsCssSrc.match(/(?:^|\n)\.sheet\s*\{([^}]+)\}/);
+  assert.ok(sheetRule, ".sheet rule present");
+  const sheetZi = sheetRule[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(sheetZi, ".sheet declares z-index");
+  const sheetZ = Number(sheetZi[1]);
+
+  const backdropRule = sheetsCssSrc.match(/#backdrop\s*\{([^}]+)\}/);
+  assert.ok(backdropRule, "#backdrop rule present");
+  const backdropZi = backdropRule[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(backdropZi, "#backdrop declares z-index");
+  const backdropZ = Number(backdropZi[1]);
+
+  const wsRule = notesCssForSheetZ.match(/#notesworkspace\s*\{([^}]+)\}/);
+  assert.ok(wsRule, "#notesworkspace rule present");
+  const wsZi = wsRule[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(wsZi, "#notesworkspace declares z-index");
+  const wsZ = Number(wsZi[1]);
+
+  const toastRule = notesCssForSheetZ.match(/#toast\s*\{([^}]+)\}/);
+  assert.ok(toastRule, "#toast rule present");
+  const toastZi = toastRule[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(toastZi, "#toast declares z-index");
+  const toastZ = Number(toastZi[1]);
+
+  const searchRule = layoutCssForSheetZ.match(/#searchoverlay\s*\{([^}]+)\}/);
+  assert.ok(searchRule, "#searchoverlay rule present");
+  const searchZi = searchRule[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(searchZi, "#searchoverlay declares z-index");
+  const searchZ = Number(searchZi[1]);
+
+  const previewRule = layoutCssForSheetZ.match(/#previewview\s*\{([^}]+)\}/);
+  assert.ok(previewRule, "#previewview rule present");
+  const previewZi = previewRule[1].match(/z-index\s*:\s*(-?\d+)/);
+  assert.ok(previewZi, "#previewview declares z-index");
+  const previewZ = Number(previewZi[1]);
+
+  /* Ladder: sheet > backdrop > searchoverlay > notesworkspace == previewview,
+     and toast > sheet. Target: backdrop 125, sheet 130, search 120, ws/preview
+     110, toast 200. */
+  assert.ok(sheetZ > backdropZ,
+    `.sheet (${sheetZ}) must sit above #backdrop (${backdropZ})`);
+  assert.ok(backdropZ > searchZ,
+    `#backdrop (${backdropZ}) must sit above #searchoverlay (${searchZ})`);
+  assert.ok(searchZ > wsZ,
+    `#searchoverlay (${searchZ}) must sit above #notesworkspace (${wsZ})`);
+  assert.equal(wsZ, previewZ,
+    `#notesworkspace (${wsZ}) and #previewview (${previewZ}) share a tier`);
+  assert.ok(toastZ > sheetZ,
+    `#toast (${toastZ}) must outrank .sheet (${sheetZ})`);
+});

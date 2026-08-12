@@ -1394,12 +1394,23 @@ func mustReadApp(t *testing.T) string {
 	return string(b)
 }
 
+// cssComment matches a CSS block comment, non-greedily.
+var cssComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+
 // cssBlock returns the text of the first CSS rule whose selector line contains
 // marker, from that line to the closing brace. cascade must be the assembled
 // document CSS (inline <style> plus linked stylesheets in document order), not
 // raw index HTML.
+//
+// Comments are stripped first: this locator is a plain substring search, and
+// this codebase documents its layering decisions in prose above the rules that
+// implement them. A comment naming "#toast" or "#notesworkspace" in a
+// stylesheet that comes earlier in the cascade than the real rule would bind
+// the wrong block and fail a relational assertion for a reason no reader could
+// guess (fixes-3 P2 hit exactly that). Prose must stay free to name selectors.
 func cssBlock(t *testing.T, cascade, marker string) string {
 	t.Helper()
+	cascade = cssComment.ReplaceAllString(cascade, "")
 	i := strings.Index(cascade, marker)
 	if i < 0 {
 		t.Fatalf("could not locate CSS rule %q", marker)
