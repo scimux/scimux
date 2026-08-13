@@ -866,6 +866,34 @@ test("create success: payload, last dir, tick, select, phone level", async () =>
   assert.equal(ctx.byId.newchat.classList.contains("open"), false);
 });
 
+test("Claude create with unconfirmed initial delivery preserves a recoverable composer draft", async () => {
+  const ctx = createFeature({ isDesktop: false });
+  ctx.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return {};
+    if (path === "/api/nodes" && opts.method === "POST")
+      return { id: "claude-pending", initial_delivery: "unconfirmed" };
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_title.value = "Remote Claude";
+  ctx.byId.nc_prompt.value = "irreplaceable long prompt";
+  ctx.byId.nc_agent.value = "claude";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    ctx.storage.getItem("scimux-draft:claude-pending"),
+    "irreplaceable long prompt",
+  );
+  assert.deepEqual(ctx.effects.select, ["claude-pending"]);
+  assert.equal(ctx.byId.newchat.classList.contains("open"), false,
+    "created node is selected instead of inviting a duplicate create");
+  assert.match(ctx.effects.alert.join(" "), /not confirmed|not delivered/i);
+});
+
 test("create validation: missing title, fork lane required, new-lane error", async () => {
   const ctx = createFeature();
   ctx.feature.bind();

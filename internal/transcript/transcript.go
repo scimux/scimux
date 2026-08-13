@@ -805,6 +805,33 @@ func FindClaudeTranscript(home, sessionID string) (string, bool) {
 	return matches[0], true
 }
 
+// ClaudeBridgeReady reports whether Claude has recorded that Remote Control is
+// active for sessionID. The prose in content is deliberately ignored: it is UI
+// copy (and may be localized or reworded), while type/subtype/sessionId are the
+// narrow structural signal observed in Claude's JSONL. As with every transcript
+// helper, unknown shapes and read errors degrade to false rather than errors.
+func ClaudeBridgeReady(path, sessionID string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var r struct {
+			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Type == "system" &&
+			r.Subtype == "bridge_status" && r.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 // FindClaudeNewestInDir locates the most recently modified Claude session
 // log for a given working directory — used when adopting a session whose
 // id we don't know (e.g. migrated via --resume). Returns path and the

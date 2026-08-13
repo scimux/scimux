@@ -178,8 +178,12 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
 - Prompts are delivered as a single paste (`load-buffer`/`paste-buffer`),
   then a separate Enter. `send-keys` with raw text would re-interpret
   newlines as submissions.
-- The first prompt of a chat rides on the agent's launch command line
-  (atomic, avoids TUI-readiness races); only follow-up turns use paste.
+- Structured transports keep their protocol-owned first-turn delivery. Owned
+  Claude launches with `--remote-control` but without a positional prompt;
+  scimux waits for that session's structured `bridge_status`, pastes the first
+  prompt, and accepts only the matching transcript user turn as confirmation.
+  A timeout preserves the prompt for recovery and never retries automatically.
+  Later tmux prompts use the same single-paste-then-Enter mechanics.
 
 ## Fixtures and privacy
 

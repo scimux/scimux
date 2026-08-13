@@ -142,6 +142,37 @@ func TestFindClaudeTranscript(t *testing.T) {
 	}
 }
 
+func TestClaudeBridgeReady(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	id := "11111111-2222-3333-4444-555555555555"
+	lines := []byte(
+		`{"type":"system","subtype":"bridge_status","sessionId":"other","content":"active"}` + "\n" +
+			`{"type":"system","subtype":"different","sessionId":"` + id + `"}` + "\n" +
+			`not json` + "\n")
+	if err := os.WriteFile(path, lines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ClaudeBridgeReady(path, id) {
+		t.Fatal("wrong-session and unknown records must not report readiness")
+	}
+	appendLines := `{"type":"system","subtype":"bridge_status","sessionId":"` + id + `","content":"localized text may change"}` + "\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(appendLines); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if !ClaudeBridgeReady(path, id) {
+		t.Fatal("matching bridge_status must report readiness without matching prose")
+	}
+	if ClaudeBridgeReady(filepath.Join(dir, "missing.jsonl"), id) {
+		t.Fatal("missing transcript must degrade to not ready")
+	}
+}
+
 func TestFindClaudeNewestInDir(t *testing.T) {
 	home := t.TempDir()
 	proj := filepath.Join(home, ".claude", "projects", "-data-my-exp-1")

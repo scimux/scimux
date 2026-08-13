@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
@@ -531,7 +532,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' --effort 'high' 'hello world'`
+	want := `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' --effort 'high'`
 	if got != want {
 		t.Errorf("full claude =\n  %s\nwant\n  %s", got, want)
 	}
@@ -541,7 +542,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 
 	// Title only (no model, no effort).
 	titleOnly := &Node{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"}
-	if got, _ := agentCommand(titleOnly, nil); got != `claude --session-id u --ax-screen-reader --remote-control 'T' 'p'` {
+	if got, _ := agentCommand(titleOnly, nil); got != `claude --session-id u --ax-screen-reader --remote-control 'T'` {
 		t.Errorf("title-only claude = %s", got)
 	}
 
@@ -550,17 +551,86 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	// appears but with no following quoted title; characterize current argv).
 	modelOnly := &Node{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "p"}
 	got, _ = agentCommand(modelOnly, nil)
-	// Current: parts = claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' 'p'
+	// The first prompt is deliberately absent: owned Claude waits for its
+	// bridge_status record and receives it through tmux after startup.
 	// because empty Title skips the shellQuote(title) append only.
-	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' 'p'`
+	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet'`
 	if got != wantModel {
 		t.Errorf("model-only claude =\n  %s\nwant\n  %s", got, wantModel)
 	}
 
 	bare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(bare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
+	if got, _ := agentCommand(bare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control` {
 		t.Errorf("bare claude = %s", got)
 	}
+	for _, cmd := range []string{got, want, wantModel} {
+		if strings.Contains(cmd, "hello world") || strings.HasSuffix(cmd, " 'p'") {
+			t.Errorf("Claude launch leaked the deferred prompt into argv: %s", cmd)
+		}
+	}
+}
+
+func TestDeliverClaudeInitialPromptWaitsForBridgeAndTranscript(t *testing.T) {
+	f := &fakeTmux{captureAfterEnter: "pane moved but that is not delivery proof"}
+	a := newTestApp(t, f)
+	a.claudeReadyTimeout = 300 * time.Millisecond
+	a.claudeDeliveryTimeout = 300 * time.Millisecond
+	a.claudeInitialPoll = 5 * time.Millisecond
+	n := &Node{ID: "claude-ready", Agent: "claude", SessionID: "sid-ready", Prompt: "long\ninitial prompt"}
+	path := writeClaudeTranscript(t, a.home, n.SessionID)
+	appendLines(t, path,
+		`{"type":"system","subtype":"bridge_status","sessionId":"sid-ready","content":"ready"}`)
+	go func() {
+		deadline := time.Now().Add(250 * time.Millisecond)
+		for !f.didSendEnter() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = file.WriteString(`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":"long\ninitial prompt"}}` + "\n")
+			_ = file.Close()
+		}
+	}()
+	if got := a.deliverClaudeInitialPrompt(n); got != initialAcknowledged {
+		t.Fatalf("delivery = %q, want acknowledged", got)
+	}
+	if !f.didSendEnter() {
+		t.Fatal("ready Claude never received the deferred prompt")
+	}
+}
+
+func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
+	t.Run("not ready sends nothing", func(t *testing.T) {
+		f := &fakeTmux{}
+		a := newTestApp(t, f)
+		a.claudeReadyTimeout = 25 * time.Millisecond
+		a.claudeInitialPoll = 5 * time.Millisecond
+		n := &Node{ID: "not-ready", Agent: "claude", SessionID: "sid", Prompt: "keep me"}
+		writeClaudeTranscript(t, a.home, n.SessionID)
+		if got := a.deliverClaudeInitialPrompt(n); got != initialNotSent {
+			t.Fatalf("delivery = %q, want not_sent", got)
+		}
+		if f.didSendEnter() || containsSub(f.subcommands(), "load-buffer") {
+			t.Fatal("prompt was sent before bridge readiness")
+		}
+	})
+	t.Run("pane movement is not confirmation", func(t *testing.T) {
+		f := &fakeTmux{captureAfterEnter: "moving pane"}
+		a := newTestApp(t, f)
+		a.claudeReadyTimeout = 50 * time.Millisecond
+		a.claudeDeliveryTimeout = 25 * time.Millisecond
+		a.claudeInitialPoll = 5 * time.Millisecond
+		n := &Node{ID: "unconfirmed", Agent: "claude", SessionID: "sid", Prompt: "keep me"}
+		path := writeClaudeTranscript(t, a.home, n.SessionID)
+		appendLines(t, path,
+			`{"type":"system","subtype":"bridge_status","sessionId":"sid","content":"ready"}`)
+		if got := a.deliverClaudeInitialPrompt(n); got != initialUnconfirmed {
+			t.Fatalf("delivery = %q, want unconfirmed", got)
+		}
+		if !f.didSendEnter() {
+			t.Fatal("test did not exercise submission")
+		}
+	})
 }
 
 func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
@@ -717,7 +787,7 @@ func TestAgentCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' 'hello world'` {
+	if got != `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus'` {
 		t.Errorf("claude cmd = %s", got)
 	}
 	if strings.Count(got, "--ax-screen-reader") != 1 {
@@ -725,7 +795,7 @@ func TestAgentCommand(t *testing.T) {
 	}
 
 	claudeBare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(claudeBare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control 'p'` {
+	if got, _ := agentCommand(claudeBare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control` {
 		t.Errorf("bare claude cmd = %s", got)
 	}
 
@@ -736,11 +806,12 @@ func TestAgentCommand(t *testing.T) {
 		t.Error("agentCommand should reject codex (no tmux launch path)")
 	}
 
-	// A prompt containing quotes and shell metacharacters must stay inert.
+	// A prompt containing shell metacharacters is absent from Claude's launch
+	// argv entirely; it will later travel through tmux's literal paste buffer.
 	tricky := &Node{Agent: "claude", SessionID: "u", Prompt: `don't run $(rm -rf /); echo "done"`}
 	got, _ = agentCommand(tricky, nil)
-	if !strings.Contains(got, `'don'\''t run $(rm -rf /); echo "done"'`) {
-		t.Errorf("tricky prompt not quoted inertly: %s", got)
+	if strings.Contains(got, "rm -rf") || strings.Contains(got, "echo") {
+		t.Errorf("deferred prompt leaked into Claude argv: %s", got)
 	}
 	if strings.Count(got, "--ax-screen-reader") != 1 {
 		t.Errorf("tricky claude must still carry exactly one --ax-screen-reader, got %s", got)
@@ -757,7 +828,7 @@ func TestAgentCommand(t *testing.T) {
 func TestAgentCommandClaudeEffort(t *testing.T) {
 	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"}
 	got, _ := agentCommand(n, nil)
-	if got != `claude --session-id u --ax-screen-reader --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium' 'hi'` {
+	if got != `claude --session-id u --ax-screen-reader --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium'` {
 		t.Errorf("claude+effort cmd = %s", got)
 	}
 	// No effort -> no --effort flag.
@@ -765,7 +836,7 @@ func TestAgentCommandClaudeEffort(t *testing.T) {
 	if got, _ := agentCommand(n2, nil); strings.Contains(got, "--effort") {
 		t.Errorf("effort-less claude cmd must omit --effort, got %s", got)
 	}
-	if got, _ := agentCommand(n2, nil); got != `claude --session-id u --ax-screen-reader --remote-control 'hi'` {
+	if got, _ := agentCommand(n2, nil); got != `claude --session-id u --ax-screen-reader --remote-control` {
 		t.Errorf("effort-less claude cmd = %s", got)
 	}
 }
@@ -774,10 +845,10 @@ func TestAgentCommandClaudeEffort(t *testing.T) {
 // is ready (a rejected --model, a bad flag) leaves its error on the pane long
 // enough for awaitLaunch to read it, instead of the session vanishing into an
 // unexplained dead node. The wrapper must run the original command verbatim
-// first (so the first prompt still rides the command line) and must not touch
-// the clean-exit path.
+// first and must not touch the clean-exit path. First-prompt delivery is a
+// later tmux paste and is intentionally outside this wrapper.
 func TestWrapLaunchDiagnostics(t *testing.T) {
-	cmd := `claude --session-id u --remote-control 'T' --model 'opus' 'hi'`
+	cmd := `claude --session-id u --remote-control 'T' --model 'opus'`
 	w := wrapLaunch(cmd)
 	if !strings.HasPrefix(w, cmd+";") {
 		t.Errorf("wrapper must run the original command first, got %q", w)
@@ -1198,20 +1269,19 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantTitled := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --add-dir ` + quotedDir + ` 'the prompt'`
+	wantTitled := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --add-dir ` + quotedDir
 	if got != wantTitled {
 		t.Errorf("titled =\n  %s\nwant\n  %s", got, wantTitled)
 	}
 
 	// Empty title: --remote-control still appears with no value. --add-dir and
-	// its path sit after that flag (not before it, and not as its value) and
-	// before the prompt.
+	// its path sit after that flag (not before it, and not as its value).
 	bare := &Node{Agent: "claude", SessionID: "u", Prompt: "the prompt"}
 	got, err = agentCommand(bare, []string{dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBare := `claude --session-id u --ax-screen-reader --remote-control --add-dir ` + quotedDir + ` 'the prompt'`
+	wantBare := `claude --session-id u --ax-screen-reader --remote-control --add-dir ` + quotedDir
 	if got != wantBare {
 		t.Errorf("empty title =\n  %s\nwant\n  %s", got, wantBare)
 	}
@@ -1221,19 +1291,19 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantFull := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --model 'opus' --effort 'high' --add-dir ` + quotedDir + ` 'the prompt'`
+	wantFull := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --model 'opus' --effort 'high' --add-dir ` + quotedDir
 	if got != wantFull {
 		t.Errorf("title+model+effort =\n  %s\nwant\n  %s", got, wantFull)
 	}
 
 	// Empty title + model: --add-dir still follows the remote-control pair
-	// (here separated by --model) and precedes the prompt.
+	// (here separated by --model).
 	modelOnly := &Node{Agent: "claude", SessionID: "u", Model: "sonnet", Prompt: "the prompt"}
 	got, err = agentCommand(modelOnly, []string{dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' --add-dir ` + quotedDir + ` 'the prompt'`
+	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' --add-dir ` + quotedDir
 	if got != wantModel {
 		t.Errorf("empty title+model =\n  %s\nwant\n  %s", got, wantModel)
 	}
@@ -1241,23 +1311,20 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	for name, cmd := range map[string]string{"titled": wantTitled, "empty title": wantBare, "full": wantFull, "empty+model": wantModel} {
 		iRC := strings.Index(cmd, "--remote-control")
 		iAdd := strings.Index(cmd, "--add-dir ")
-		iPrompt := strings.LastIndex(cmd, "'the prompt'")
-		if iRC < 0 || iAdd < 0 || iPrompt < 0 || !(iRC < iAdd && iAdd < iPrompt) {
-			t.Errorf("%s: want --remote-control then --add-dir then prompt, got %s", name, cmd)
+		if iRC < 0 || iAdd < 0 || iRC >= iAdd || strings.Contains(cmd, "the prompt") {
+			t.Errorf("%s: want --remote-control then --add-dir and no prompt, got %s", name, cmd)
 		}
 	}
 }
 
-func TestThePromptStaysTheLastArgument(t *testing.T) {
+func TestClaudePromptIsDeferredOutsideLaunchArguments(t *testing.T) {
 	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "opus", Prompt: "hello world"}
-	quoted := shellQuote(n.Prompt)
-
 	got, err := agentCommand(n, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(got, " "+quoted) {
-		t.Errorf("without --add-dir, prompt is not last: %s", got)
+	if strings.Contains(got, n.Prompt) {
+		t.Errorf("without --add-dir, prompt leaked into argv: %s", got)
 	}
 	if strings.Contains(got, "--add-dir") {
 		t.Errorf("nil addDirs must omit --add-dir: %s", got)
@@ -1271,8 +1338,8 @@ func TestThePromptStaysTheLastArgument(t *testing.T) {
 	if !strings.Contains(got, "--add-dir "+shellQuote(dir)) {
 		t.Errorf("with addDirs, missing --add-dir: %s", got)
 	}
-	if !strings.HasSuffix(got, " "+quoted) {
-		t.Errorf("with --add-dir, prompt is not last: %s", got)
+	if strings.Contains(got, n.Prompt) {
+		t.Errorf("with --add-dir, prompt leaked into argv: %s", got)
 	}
 }
 

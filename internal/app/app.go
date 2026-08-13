@@ -25,7 +25,8 @@ type Config struct {
 }
 
 type appDeps struct {
-	Server *tmuxsession.Server
+	Server               *tmuxsession.Server
+	DeliverClaudeInitial func(*Node) initialDelivery
 }
 
 func NewApp(cfg Config) (*app, error) {
@@ -72,6 +73,18 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		assetHook:       nil,
 		notes:           notestore.New(notesDir),
 		home:            cfg.Home,
+	}
+	// Owned Claude is the sole tmux transport whose first prompt is deferred:
+	// Remote Control must finish bootstrapping before its editor is safe. Tests
+	// inject an acknowledged result so unrelated lifecycle coverage need not
+	// manufacture Claude's private transcript records.
+	a.claudeReadyTimeout = 15 * time.Second
+	a.claudeDeliveryTimeout = 15 * time.Second
+	a.claudeInitialPoll = 100 * time.Millisecond
+	if deps.DeliverClaudeInitial != nil {
+		a.deliverClaudeInitial = deps.DeliverClaudeInitial
+	} else {
+		a.deliverClaudeInitial = a.deliverClaudeInitialPrompt
 	}
 	// Map fields live here so production and poll-reaching test fixtures share
 	// one initializer; initMaps never overwrites a map the caller already set.
@@ -319,8 +332,12 @@ type app struct {
 	// this window awaitLaunch reads it and reports it to the create caller instead
 	// of persisting an unexplained dead node. Zero disables the check. launchPoll
 	// is the capture interval inside that window.
-	launchGrace time.Duration
-	launchPoll  time.Duration
+	launchGrace           time.Duration
+	launchPoll            time.Duration
+	claudeReadyTimeout    time.Duration
+	claudeDeliveryTimeout time.Duration
+	claudeInitialPoll     time.Duration
+	deliverClaudeInitial  func(*Node) initialDelivery
 	// claudeIDs maps the family alias the UI offers (opus/sonnet/haiku/fable) to
 	// the concrete model id the installed claude CLI actually accepts, probed once
 	// at startup (probeClaudeModels) because the CLI mis-resolves its own aliases.

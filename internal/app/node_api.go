@@ -213,18 +213,24 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// createNode manages a.mu itself: the id reservation happens under the
 	// lock, the external launch outside it.
-	status, err = a.createNode(&n, taken)
+	status, initial, err := a.createNode(&n, taken)
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	// The launch carried the node's first prompt (it rides the agent's command
-	// line), so a successful create is a budget-consuming turn for
-	// Claude/Codex/Grok.
-	if strings.TrimSpace(n.Prompt) != "" {
+	// Structured transports accepted their first turn inside createNode. Claude
+	// consumed budget when its deferred paste was acknowledged or remained
+	// ambiguous; readiness timeout means nothing was sent and consumes none.
+	if strings.TrimSpace(n.Prompt) != "" &&
+		(n.Agent != "claude" || initial != initialNotSent) {
 		a.noteUsagePrompt(n.Agent)
 	}
-	writeJSON(w, n)
+	// Embed Node so existing clients keep the flat response shape. The extra
+	// field exists only on create; it is delivery evidence, not node config.
+	writeJSON(w, struct {
+		*Node
+		InitialDelivery initialDelivery `json:"initial_delivery,omitempty"`
+	}{Node: &n, InitialDelivery: initial})
 }
 
 func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {

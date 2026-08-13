@@ -450,7 +450,10 @@ func TestExitPersistBeforeCloseAndIdempotence(t *testing.T) {
 		a, err = newApp(Config{
 			Home: home, DataDir: data,
 			LaunchGrace: 40 * time.Millisecond, LaunchPoll: 5 * time.Millisecond,
-		}, appDeps{Server: tmuxsession.NewServerWithRunner("testsock", run)})
+		}, appDeps{
+			Server:               tmuxsession.NewServerWithRunner("testsock", run),
+			DeliverClaudeInitial: func(*Node) initialDelivery { return initialAcknowledged },
+		})
 		if err != nil {
 			t.Fatal(err)
 		}

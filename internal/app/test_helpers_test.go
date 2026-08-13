@@ -139,6 +139,12 @@ func (f *fakeTmux) subcommands() []string {
 	return subs
 }
 
+func (f *fakeTmux) didSendEnter() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.enterSent
+}
+
 func lastArg(args []string) string {
 	if len(args) == 0 {
 		return ""
@@ -164,7 +170,10 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 		// in the fake pane is seen on the first poll, success falls through at once.
 		LaunchGrace: 40 * time.Millisecond,
 		LaunchPoll:  5 * time.Millisecond,
-	}, appDeps{Server: tmuxsession.NewServerWithRunner("testsock", f.run)})
+	}, appDeps{
+		Server:               tmuxsession.NewServerWithRunner("testsock", f.run),
+		DeliverClaudeInitial: func(*Node) initialDelivery { return initialAcknowledged },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

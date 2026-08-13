@@ -793,6 +793,18 @@ export function createSheetsFeature(deps = {}){
       const n = api
         ? await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) })
         : { id: "new" };
+      if (n && n.id && n.initial_delivery && n.initial_delivery !== "acknowledged"){
+        /* Cross-feature storage contract with composer.js, kept as a literal
+           here so sheets does not import a later feature module. The server
+           already created this exact node; select it and preserve recovery
+           rather than leaving Start able to create a duplicate node. */
+        if (storage) storage.setItem("scimux-draft:" + n.id, payload.prompt);
+        if (typeof d.alert === "function") d.alert(
+          n.initial_delivery === "not_sent"
+            ? "Claude did not become ready; the initial prompt was not delivered and has been restored."
+            : "Claude initial prompt delivery was not confirmed; the prompt has been restored. Check the terminal before retrying."
+        );
+      }
       if (laneChoice.lane && typeof d.uiMutate === "function"){
         const list = typeof d.laneList === "function" ? d.laneList() : [];
         d.uiMutate({ k: "lanes", lanes: [...list, laneChoice.lane] });

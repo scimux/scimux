@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // ---------- node lifecycle ----------
@@ -66,9 +67,10 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 	}
 }
 
-// agentCommand builds the launch command. The first prompt rides on the
-// command line so prompt delivery and session start are atomic — no
-// "is the TUI drawn yet" race, which only later turns (via paste) tolerate.
+// agentCommand builds the launch command. Structured transports keep their
+// established first-prompt paths. Owned Claude is the exception: Remote
+// Control must finish bootstrapping before its editor is safe, so its prompt is
+// omitted here and delivered by deliverClaudeInitialPrompt after bridge_status.
 func agentCommand(n *Node, addDirs []string) (string, error) {
 	switch n.Agent {
 	case "claude":
@@ -92,15 +94,15 @@ func agentCommand(n *Node, addDirs []string) (string, error) {
 		// --add-dir grants tool access to extra directories (the node's upload
 		// staging path). It sits after the optional --remote-control <title>
 		// pair — and after --model/--effort — so an empty title cannot eat the
-		// path as its value, and the prompt stays the last argument. Empty or
-		// blank paths are skipped so they never reach the CLI.
+		// path as its value. Empty or blank paths are skipped so they never reach
+		// the CLI; the deferred prompt is not part of this argv.
 		for _, dir := range addDirs {
 			if strings.TrimSpace(dir) == "" {
 				continue
 			}
 			parts = append(parts, "--add-dir", shellQuote(dir))
 		}
-		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
+		return strings.Join(parts, " "), nil
 	// pi, opencode, and grok reach agentCommand only as a legacy/forced tmux
 	// fallback (new nodes resolve to the ACP transport). pi/opencode take the
 	// "provider/model" form their list commands emit; grok takes -m and
@@ -144,10 +146,10 @@ const launchHoldSeconds = 30
 // wrapLaunch wraps a tmux launch command so that a process which exits before
 // its interface is ready leaves its error on the pane instead of the session
 // vanishing into an unexplained dead node (the "unknown error state, could not
-// be adopted" failure). The original command runs verbatim first — so the first
-// prompt still rides the command line — and the sentinel is emitted only on a
-// non-zero exit, so a clean quit falls through untouched (pane closes, session
-// dies, exactly as before). tmux runs this whole string via `sh -c`.
+// be adopted" failure). The original command runs verbatim first, and the
+// sentinel is emitted only on a non-zero exit, so a clean quit falls through
+// untouched (pane closes, session dies, exactly as before). tmux runs this
+// whole string via `sh -c`.
 func wrapLaunch(cmd string) string {
 	return fmt.Sprintf(`%s; __ec=$?; if [ "$__ec" != 0 ]; then printf '\n%s (status %%d)\n' "$__ec"; sleep %d; fi`,
 		cmd, launchFailSentinel, launchHoldSeconds)
@@ -365,11 +367,19 @@ func (a *app) resolveNode(n *Node) (int, error) {
 // the node is published or the attempt failed. Returns the HTTP status to use
 // on error: client mistakes are 400, server-side failures (tmux, store) are
 // 500. taken carries tmux session names that must not be reused as node IDs.
-func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
+type initialDelivery string
+
+const (
+	initialAcknowledged initialDelivery = "acknowledged"
+	initialNotSent      initialDelivery = "not_sent"
+	initialUnconfirmed  initialDelivery = "unconfirmed"
+)
+
+func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, error) {
 	a.mu.Lock()
 	if status, err := a.resolveNode(n); err != nil {
 		a.mu.Unlock()
-		return status, err
+		return status, "", err
 	}
 	n.ID = a.uniqueID(n.Title, taken)
 	if a.reserved == nil { // tests build app literals without the map
@@ -381,7 +391,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 		if err != nil {
 			delete(a.reserved, n.ID)
 			a.mu.Unlock()
-			return 500, fmt.Errorf("allocate session id: %w", err)
+			return 500, "", fmt.Errorf("allocate session id: %w", err)
 		}
 		n.SessionID = sid
 	}
@@ -413,7 +423,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 	}
 	a.mu.Unlock()
 	if err != nil {
-		return status, err
+		return status, "", err
 	}
 	if collided {
 		fmt.Fprintf(os.Stderr, "scimux: node id %s was claimed concurrently during launch; abandoning the new launch\n", n.ID)
@@ -434,16 +444,14 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 		if winner != nil {
 			_ = a.appendRecord(storeRecord{Type: "node", Node: winner})
 		}
-		return 409, fmt.Errorf("node id %q was claimed concurrently; launch abandoned", n.ID)
+		return 409, "", fmt.Errorf("node id %q was claimed concurrently; launch abandoned", n.ID)
 	}
 
-	// Deliver the research question as the first turn of a structured node.
-	// Unlike the tmux path (where the first prompt rides the launch command
-	// line and thus always reaches the agent), a structured Send can fail
-	// before anything is recorded — e.g. the subprocess died during launch, or
-	// the user-turn append failed. Persist that failure to the node's own
-	// history so the chat view shows it instead of a silent, empty successful
-	// node (finding 52). The node still exists and the prompt can be retried.
+	// Deliver the research question as the first turn of a structured node. A
+	// structured Send can fail before anything is recorded — e.g. the subprocess
+	// died during launch, or the user-turn append failed. Persist that failure to
+	// the node's own history so the chat view shows it instead of a silent, empty
+	// successful node (finding 52). Owned Claude is handled separately below.
 	if pm != nil {
 		if err := pm.Send(n.ID, n.Prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "scimux: first prompt to %s node %s failed: %v\n", n.transport(), n.ID, err)
@@ -454,11 +462,73 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, error) {
 			// clean success: report it so the operator retries the prompt
 			// (finding 59).
 			if rerr := pm.RecordStartFailure(n.ID, err); rerr != nil {
-				return 500, fmt.Errorf("node created but first prompt %q and its failure record were not durable (retry the prompt): %v", err, rerr)
+				return 500, "", fmt.Errorf("node created but first prompt %q and its failure record were not durable (retry the prompt): %v", err, rerr)
 			}
 		}
 	}
-	return 0, nil
+	var delivery initialDelivery
+	if n.Agent == "claude" && a.deliverClaudeInitial != nil {
+		// The node is already published so state polling can discover it while
+		// Remote Control boots. Hold the ordinary send gate across that window:
+		// another browser must not paste a follow-up ahead of the first turn.
+		a.mu.Lock()
+		a.sendState[n.ID] = "submitting"
+		a.mu.Unlock()
+		delivery = a.deliverClaudeInitial(n)
+		a.mu.Lock()
+		if delivery == initialUnconfirmed {
+			a.sendState[n.ID] = "unconfirmed"
+		} else {
+			delete(a.sendState, n.ID)
+		}
+		a.mu.Unlock()
+	}
+	return 0, delivery, nil
+}
+
+// deliverClaudeInitialPrompt waits for Claude's structured Remote Control
+// readiness record, then submits the already-durable Node.Prompt through tmux.
+// Pane changes are intentionally ignored: only a matching new transcript user
+// turn proves acceptance. Ambiguity is surfaced and never auto-retried.
+func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
+	poll := a.claudeInitialPoll
+	if poll <= 0 {
+		poll = 100 * time.Millisecond
+	}
+	readyDeadline := time.Now().Add(a.claudeReadyTimeout)
+	var path string
+	for {
+		if p, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok &&
+			transcript.ClaudeBridgeReady(p, n.SessionID) {
+			path = p
+			break
+		}
+		if a.claudeReadyTimeout <= 0 || time.Now().After(readyDeadline) {
+			return initialNotSent
+		}
+		time.Sleep(poll)
+	}
+
+	tl := &transcript.Tailer{Path: path}
+	before := len(tl.Poll())
+	if err := a.server.Session(n.ID).Send(n.Prompt); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: deferred first prompt to Claude node %s failed: %v\n", n.ID, err)
+		return initialNotSent
+	}
+	want := strings.TrimSpace(n.Prompt)
+	deliveryDeadline := time.Now().Add(a.claudeDeliveryTimeout)
+	for {
+		turns := tl.Poll()
+		for _, turn := range turns[before:] {
+			if turn.Role == "user" && strings.TrimSpace(turn.Text) == want {
+				return initialAcknowledged
+			}
+		}
+		if a.claudeDeliveryTimeout <= 0 || time.Now().After(deliveryDeadline) {
+			return initialUnconfirmed
+		}
+		time.Sleep(poll)
+	}
 }
 
 // launchNode starts the tmux session or structured-protocol subprocess (ACP
