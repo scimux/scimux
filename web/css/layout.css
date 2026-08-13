@@ -211,13 +211,10 @@
    Glyphs are state-swapped SVGs (expand out / contract in), not a rotate. */
 #mapfullbtn { display: none; color: var(--work); font-size: 20px; line-height: 1;
   width: 34px; height: 34px; border-radius: 9px; align-items: center; justify-content: center; }
-/* Layers menu: full-screen map only (body.map-full). Matches #mapfullbtn
-   size/shape; stable layers glyph (Fare state lives in the menu). A control
-   never appears where its overlay can't render. */
-#layersbtn { display: none; color: var(--dim); font-size: 16px; line-height: 1;
-  width: 34px; height: 34px; border-radius: 9px; align-items: center; justify-content: center;
-  border: none; background: none; padding: 0; }
-#layersbtn svg { width: 16px; height: 16px; display: block; }
+/* Layers menu: full-screen map only (body.map-full). Size, hit target, and
+   lane-row placement live in map.css. A control never appears where its
+   overlay can't render. */
+#layersbtn { display: none; }
 body.map-full #layersbtn { display: inline-flex; }
 /* v1 .fare text meter retired in V2-P4 — capsule/callout live in map.css */
 #scrim {

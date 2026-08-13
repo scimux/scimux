@@ -67,6 +67,7 @@ import {
 import * as mapExports from "../js/map.js";
 import { toggleMapSelection, headStopKey } from "../js/map-model.js";
 import { forkKind, stopsOf, stopKey, newestFirst } from "../js/lanes.js";
+import { menuPlacement } from "../js/menu.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const mapSrc = readFileSync(join(__dirname, "../js/map.js"), "utf8");
@@ -75,6 +76,7 @@ const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
 const indexHtml = readFileSync(join(__dirname, "../index.html"), "utf8");
 const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
+const accessCss = readFileSync(join(__dirname, "../css/accessibility.css"), "utf8");
 
 /* ---------- module shape / no later features ---------- */
 test("map.js exports factory and pure helpers; reuses lanes/map-model", () => {
@@ -1692,13 +1694,11 @@ test("setFull(false) dismisses an open Layers menu and resets aria-expanded", ()
 });
 
 test("layersbtn chrome CSS: full-screen-only reveal; reject old farebtn contract", () => {
-  assert.match(layoutCss, /#layersbtn\s*\{[^}]*display:\s*none/s);
-  assert.match(layoutCss, /body\.map-full\s+#layersbtn\s*\{[^}]*display:\s*inline-flex/s);
-  assert.match(layoutCss, /#layersbtn\s*\{[^}]*width:\s*34px/s);
-  assert.match(layoutCss, /#layersbtn\s*\{[^}]*height:\s*34px/s);
-  assert.match(layoutCss, /#layersbtn\s*\{[^}]*border-radius:\s*9px/s);
+  const chromeCss = layoutCss + "\n" + mapCssSrc;
+  assert.match(chromeCss, /#layersbtn\s*\{[^}]*display:\s*none/s);
+  assert.match(chromeCss, /body\.map-full\s+#layersbtn\s*\{[^}]*display:\s*inline-flex/s);
   assert.doesNotMatch(layoutCss, /#farebtn\b/);
-  assert.match(indexHtml, /id="layersbtn"[^>]*>[\s\S]*?id="mapfullbtn"/);
+  assert.doesNotMatch(mapCssSrc, /#farebtn\b/);
   assert.match(indexHtml, /id="layersbtn"[^>]*aria-label="Layers"/);
   assert.match(indexHtml, /id="layersbtn"[^>]*title="Layers"/);
   assert.match(indexHtml, /id="layersbtn"[^>]*aria-haspopup="menu"/);
@@ -1711,6 +1711,310 @@ test("layersbtn chrome CSS: full-screen-only reveal; reject old farebtn contract
   assert.match(appSrc, /ICON_LAYERS/);
   assert.match(appSrc, /layersbtn:\s*\$\("#layersbtn"\)/);
   assert.doesNotMatch(appSrc, /ICON_FARE_ON|ICON_FARE_OFF|#farebtn|farebtn:/);
+});
+
+/* ---------- P2: leading lane-row placement and responsive polish ---------- */
+
+function stripCssComments(src){
+  return String(src || "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+function cssRuleBodies(src, selectorRe){
+  const text = stripCssComments(src);
+  const bodies = [];
+  const re = new RegExp("(?:" + String(selectorRe.source) + ")\\s*\\{([^}]+)\\}", "g");
+  let m;
+  while ((m = re.exec(text))) bodies.push(m[1]);
+  return bodies;
+}
+
+function cssDecls(src, selectorRe){
+  return cssRuleBodies(src, selectorRe).join("\n");
+}
+
+function declaredPx(decls, prop){
+  const min = decls.match(new RegExp(`min-${prop}:\\s*([0-9.]+)px`));
+  const abs = decls.match(new RegExp(`(?:^|[;{\\s])${prop}:\\s*([0-9.]+)px`));
+  return Math.max(min ? Number(min[1]) : 0, abs ? Number(abs[1]) : 0);
+}
+
+function mapPanelHtml(){
+  const m = indexHtml.match(/<section id="map"[^>]*>[\s\S]*?<\/section>/);
+  assert.ok(m, "#map section must exist");
+  return m[0];
+}
+
+function mapHeadHtml(section){
+  const m = section.match(/<div class="phead">[\s\S]*?<\/div>/);
+  assert.ok(m, "Journeys header (.phead) must exist");
+  return m[0];
+}
+
+test("P2: Journeys regions are header, tabs, #mapcontrols, scroll; Layers leads chips", () => {
+  const section = mapPanelHtml();
+  const headAt = section.search(/<div class="phead">/);
+  const tabsAt = section.search(/id="maptabs"/);
+  const controlsAt = section.search(/id="mapcontrols"/);
+  const scrollAt = section.search(/id="mapscroll"/);
+  assert.ok(headAt >= 0, "header present");
+  assert.ok(tabsAt > headAt, "#maptabs follows the header");
+  assert.ok(controlsAt > tabsAt, "#mapcontrols follows #maptabs");
+  assert.ok(scrollAt > controlsAt, "#mapscroll follows #mapcontrols");
+
+  const controls = section.match(/id="mapcontrols"[^>]*>([\s\S]*?)id="mapscroll"/);
+  assert.ok(controls, "#mapcontrols must sit immediately before #mapscroll");
+  const inner = controls[1];
+  assert.match(inner, /id="layersbtn"/, "#mapcontrols contains #layersbtn");
+  assert.match(inner, /id="lanechips"/, "#mapcontrols contains #lanechips");
+  assert.ok(inner.indexOf('id="layersbtn"') < inner.indexOf('id="lanechips"'),
+    "#layersbtn is immediately before sibling #lanechips");
+  assert.match(
+    section,
+    /id="mapcontrols"[^>]*>\s*<button[^>]*id="layersbtn"[\s\S]*?<\/button>\s*<div[^>]*id="lanechips"/,
+    "#layersbtn and #lanechips are siblings; Layers is not a child of #lanechips",
+  );
+  assert.doesNotMatch(inner, /id="lanechips"[^>]*>[\s\S]*id="layersbtn"/,
+    "renderLaneChips must not be able to erase Layers by nesting it in #lanechips");
+
+  const head = mapHeadHtml(section);
+  assert.match(head, /id="mapfullbtn"/, "header keeps #mapfullbtn");
+  assert.match(head, /id="mapclose"/, "header keeps #mapclose");
+  assert.doesNotMatch(head, /id="layersbtn"/, "Layers is not in the Journeys header");
+});
+
+test("P2: Layers hide is full-screen-only and leaves no leading gap or separator", () => {
+  const css = layoutCss + "\n" + mapCssSrc;
+  const hideTarget = cssDecls(css, /#layersbtn|#maplayers|#mapcontrols\s+\.maplayers/);
+  assert.match(hideTarget, /display:\s*none/,
+    "#layersbtn or its fixed wrapper is hidden by default");
+  assert.match(css, /body\.map-full\s+(?:#layersbtn|#maplayers|#mapcontrols\s+\.maplayers)\s*\{[^}]*display:\s*inline-flex/s,
+    "body.map-full reveals Layers");
+
+  const controls = cssDecls(mapCssSrc, /#mapcontrols/);
+  assert.ok(declaredPx(controls, "padding-left") < 44,
+    "#mapcontrols must not reserve a Layers-sized leading hole when the button is hidden");
+  assert.ok(declaredPx(controls, "min-width") < 44,
+    "#mapcontrols min-width must not keep a Layers-sized gap when hidden");
+
+  assert.doesNotMatch(indexHtml,
+    /id="layersbtn"[\s\S]{0,240}class="(?:sep|mapsep|divider)"/,
+    "no standalone separator element that would remain after Layers is hidden");
+  const layersVisual = cssDecls(css, /#layersbtn(?::after)?|#maplayers(?::after)?/);
+  const hasOwnedDivider = /border-right:|::after/.test(css) &&
+    (/border-right:/.test(layersVisual) || /#layersbtn::after|#maplayers::after/.test(stripCssComments(css)));
+  if (hasOwnedDivider){
+    assert.match(hideTarget, /display:\s*none/,
+      "separator is owned by the hidden Layers unit so it disappears atomically");
+  }
+});
+
+test("P2: Layers has a 44×44 hit region, 16×16 glyph, focus, and press feedback", () => {
+  const css = layoutCss + "\n" + mapCssSrc;
+  const btn = cssDecls(css, /#layersbtn/);
+  assert.ok(btn, "#layersbtn rule exists");
+  assert.ok(declaredPx(btn, "width") >= 44 || declaredPx(btn, "min-width") >= 44,
+    "Layers hit region is at least 44px wide");
+  assert.ok(declaredPx(btn, "height") >= 44 || declaredPx(btn, "min-height") >= 44,
+    "Layers hit region is at least 44px tall");
+  assert.match(btn, /flex:\s*none/, "Layers group does not shrink");
+
+  const glyph = cssDecls(css, /#layersbtn\s+svg/);
+  assert.match(glyph, /width:\s*16px/, "glyph stays 16×16");
+  assert.match(glyph, /height:\s*16px/, "glyph stays 16×16");
+
+  assert.doesNotMatch(btn, /outline:\s*none/,
+    "Layers must not suppress the shared :focus-visible ring");
+  assert.match(accessCss, /:focus-visible\s*\{[^}]*outline:\s*2px\s+solid\s+var\(--work\)/s,
+    "visible keyboard focus uses the shared focus token");
+
+  const hover = cssDecls(css, /#layersbtn:hover/);
+  const active = cssDecls(css, /#layersbtn:active/);
+  assert.match(hover, /background:/, "hover feedback is present");
+  assert.match(active, /background:/, "active/press feedback is present");
+  assert.doesNotMatch(hover, /#[0-9a-fA-F]{3,8}/, "hover uses design tokens, not hex");
+  assert.doesNotMatch(active, /#[0-9a-fA-F]{3,8}/, "active uses design tokens, not hex");
+});
+
+test("P2: #mapcontrols is a flex row; chips grow/wrap; Layers stays leading", () => {
+  const controls = cssDecls(mapCssSrc, /#mapcontrols/);
+  assert.match(controls, /display:\s*flex/, "#mapcontrols is a flex row");
+  const dir = controls.match(/flex-direction:\s*(\w+)/);
+  if (dir) assert.equal(dir[1], "row", "control row stays horizontal");
+  assert.doesNotMatch(controls, /flex-wrap:\s*wrap/,
+    "the row itself does not wrap; chips wrap on their side");
+
+  const btn = cssDecls(layoutCss + "\n" + mapCssSrc, /#layersbtn/);
+  assert.match(btn, /flex:\s*none/, "Layers group does not shrink");
+
+  const chipsScoped = cssDecls(mapCssSrc, /#mapcontrols\s+(?:#lanechips|\.lanechips)/);
+  assert.match(chipsScoped, /flex:\s*1|flex-grow:\s*[1-9]/,
+    "#lanechips consumes remaining width");
+  const chips = chipsScoped + "\n" + cssDecls(mapCssSrc, /\.lanechips/);
+  assert.match(chips, /flex-wrap:\s*wrap/, "lane chips wrap safely");
+
+  const layersVisual = cssDecls(layoutCss + "\n" + mapCssSrc, /#layersbtn(?::after)?|#maplayers(?::after)?/);
+  const gap = controls.match(/gap:\s*([0-9.]+)px/);
+  const hasGap = !!(gap && Number(gap[1]) > 0);
+  const hasDivider = /border-right:/.test(layersVisual) ||
+    /#layersbtn::after|#maplayers::after/.test(stripCssComments(layoutCss + "\n" + mapCssSrc));
+  assert.ok(hasGap || hasDivider,
+    "a divider or gap distinguishes Layers from the lane-filter chips");
+
+  const lanechips = fakeEl("lanechips");
+  const feature = createMapFeature({
+    roots: {
+      lanechips,
+      mapwrap: fakeEl("mapwrap"),
+      maptabs: fakeEl("tabs"),
+      maptoolbar: fakeEl("tb"),
+      mapfullbtn: fakeEl("mapfullbtn"),
+    },
+    document: layersDoc({ classList: mapClassList(["map-full"]) }),
+    storage: memoryStorage({
+      [MAP_FULL_KEY]: "1",
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["A", "B"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+    }),
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [],
+    groups: () => [],
+    laneFilter: () => "B",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "A", name: "Alpha" }, { id: "B", name: "Beta" }],
+      color: () => "#00f",
+      name: id => id,
+      byId: {},
+    }),
+  });
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+  const html = lanechips.innerHTML;
+  const aAt = html.indexOf('data-chip="A"');
+  const bAt = html.indexOf('data-chip="B"');
+  assert.ok(aAt >= 0 && bAt > aAt, "chip order follows the lane model");
+  assert.match(html, /data-chip="B"[^>]*class="lanechip selected"|class="lanechip selected"[^>]*data-chip="B"/);
+  assert.doesNotMatch(html, /data-chip="A"[^>]*selected|selected[^>]*data-chip="A"/);
+  feature.destroy();
+});
+
+test("P2: Layers popover still anchors below the button and clamps in the map panel", () => {
+  const wideAnchor = { top: 80, left: 16, bottom: 124, right: 60, width: 44, height: 44 };
+  const widePanel = { top: 0, left: 0, width: 900, height: 600 };
+  const wide = menuPlacement(wideAnchor, widePanel, { offset: 0 });
+  assert.deepEqual(wide, { top: 128, left: 16 });
+  assert.ok(wide.top > wideAnchor.bottom, "opens below the Layers button");
+  assert.ok(wide.left >= 8 && wide.left <= widePanel.width - 190, "clamped inside a wide map");
+
+  const narrowAnchor = { top: 80, left: 8, bottom: 124, right: 52, width: 44, height: 44 };
+  const narrowPanel = { top: 0, left: 0, width: 280, height: 500 };
+  const narrow = menuPlacement(narrowAnchor, narrowPanel, { offset: 0 });
+  assert.equal(narrow.top, 128, "still unfolds below the button on a narrow map");
+  assert.ok(narrow.left >= 8, "left edge clamps inside the panel");
+  assert.ok(narrow.left <= narrowPanel.width - 190, "right edge clamps inside the panel");
+
+  const layersbtn = layersButton();
+  layersbtn.getBoundingClientRect = () => ({ ...wideAnchor });
+  const map = mapPanel();
+  map.getBoundingClientRect = () => ({
+    ...widePanel, bottom: 600, right: 900,
+  });
+  const feature = createMapFeature({
+    roots: {
+      layersbtn, map,
+      mapwrap: fakeEl("mapwrap"),
+      mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"),
+      maptabs: fakeEl("tabs"),
+      maptoolbar: fakeEl("tb"),
+    },
+    document: layersDoc({ classList: mapClassList(["map-full"]) }),
+    storage: memoryStorage({ [MAP_FULL_KEY]: "1" }),
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({ lanes: [], color: () => "", name: id => id, byId: {} }),
+    icons: { ICON_LAYERS: ICON_LAYERS_TEST },
+  });
+  feature.bind();
+  firstListener(layersbtn, "click")();
+  const opened = popMenus(map)[0];
+  assert.ok(opened, "map consumer still opens one popover on the map panel");
+  assert.equal(opened.style.top, "128px", "map consumer uses menuPlacement below Layers");
+  assert.equal(opened.style.left, "16px", "leading-edge Layers opens toward the map interior");
+  feature.destroy();
+
+  const openCall = mapSrc.match(/layersMenu\.open\(\{[\s\S]*?\}\)/);
+  assert.ok(openCall, "Layers still opens through the shared popover controller");
+  assert.doesNotMatch(openCall[0], /offset:\s*(40|150)/,
+    "Layers must not inherit notes-menu offsets that would pull it off the leading edge");
+});
+
+test("P2: map rerenders rewrite only #lanechips and #mapwrap; Layers and menu survive", () => {
+  const layersbtn = layersButton();
+  const lanechips = fakeEl("lanechips");
+  const mapwrap = fakeEl("mapwrap");
+  const map = mapPanel();
+  const feature = createMapFeature({
+    roots: {
+      layersbtn, lanechips, mapwrap, map,
+      mapfullbtn: fakeEl("mapfullbtn"),
+      maptabs: fakeEl("tabs"),
+      maptoolbar: fakeEl("tb"),
+    },
+    document: layersDoc({ classList: mapClassList(["map-full"]) }),
+    storage: memoryStorage({
+      [MAP_FULL_KEY]: "1",
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["A", "B"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+    }),
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "A", name: "Alpha" }, { id: "B", name: "Beta" }],
+      color: () => "#00f",
+      name: id => id,
+      byId: {},
+    }),
+    icons: { ICON_LAYERS: ICON_LAYERS_TEST },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  const glyph = layersbtn.innerHTML;
+  assert.match(glyph, /data-icon="layers"/);
+
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1);
+  const menu = popMenus(map)[0];
+
+  feature.render();
+  assert.equal(layersbtn.innerHTML, glyph, "renderLaneChips must not rewrite the sibling Layers button");
+  assert.equal(popMenus(map).length, 1, "an open Layers menu survives a poll/render");
+  assert.equal(popMenus(map)[0], menu);
+  assert.match(lanechips.innerHTML, /data-chip="A"/);
+  assert.match(lanechips.innerHTML, /data-chip="B"/);
+  assert.ok(lanechips.innerHTML.indexOf('data-chip="A"') < lanechips.innerHTML.indexOf('data-chip="B"'));
+  assert.match(mapwrap.innerHTML, /empty|lblock|strow/);
+
+  const chipFn = mapSrc.match(/function renderLaneChips\([\s\S]*?\n  \}/);
+  assert.ok(chipFn, "renderLaneChips remains the chips-only rewrite");
+  assert.match(chipFn[0], /lanechips\.innerHTML/);
+  assert.doesNotMatch(chipFn[0], /layersbtn|mapcontrols|popmenu/,
+    "renderLaneChips must not touch Layers or the open menu");
+  assert.doesNotMatch(indexHtml, /id="lanechips"[^>]*>[\s\S]*id="layersbtn"/);
+  feature.destroy();
 });
 
 test("wall re-render on fare change preserves external composer draft (polling invariant)", () => {

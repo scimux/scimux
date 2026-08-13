@@ -39,14 +39,16 @@
     <div class="phead">
       <h2 class="panetitle">Journeys</h2>
       <span class="spacer"></span>
-      <button id="layersbtn" aria-label="Layers" title="Layers" aria-haspopup="menu" aria-expanded="false"></button>
       <button id="mapfullbtn" aria-label="full-screen map"></button>
       <!-- back points RIGHT at its parent Activities (R→L returns there); the
            mirror of #chatback's "‹ Activities", which really is to the left -->
       <button class="backbtn" id="mapclose">Activities &#8250;</button>
     </div>
     <div class="tabs" id="maptabs"></div>
-    <div class="lanechips" id="lanechips"></div>
+    <div id="mapcontrols">
+      <button id="layersbtn" aria-label="Layers" title="Layers" aria-haspopup="menu" aria-expanded="false"></button>
+      <div class="lanechips" id="lanechips"></div>
+    </div>
     <div id="mapscroll"><div id="mapwrap"></div></div>
     <!-- floating selection toolbar (full screen only): named selected station
          + its actions, so the row never has controls layered over it -->
