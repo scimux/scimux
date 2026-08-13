@@ -55,27 +55,33 @@ export function menuButtonHTML({ attrs = "", label = "", danger = false, icon = 
  * onDocClick predicate: dismiss on outside click, not on the menu itself or
  * an exclude selector (notes passes "[data-secmenu]"). Escape closes and
  * returns focus to the trigger element passed via open() options (P6) —
- * never document.activeElement at module scope.
+ * never document.activeElement at module scope. Escape is capture-phase so
+ * an open menu outranks earlier bubble listeners (app.js full-screen ladder).
  */
 export function createPopoverMenu(doc){
   let menuEl = null;
   let triggerEl = null;
   let keyHandler = null;
+  let onCloseCb = null;
 
   function unbindKey(){
     if (keyHandler && doc && typeof doc.removeEventListener === "function"){
-      try { doc.removeEventListener("keydown", keyHandler); } catch { /* ignore */ }
+      try { doc.removeEventListener("keydown", keyHandler, true); } catch { /* ignore */ }
     }
     keyHandler = null;
   }
 
   function close(){
     unbindKey();
+    const cb = onCloseCb;
+    onCloseCb = null;
+    const wasOpen = !!menuEl;
     if (menuEl){
       menuEl.remove();
       menuEl = null;
     }
     triggerEl = null;
+    if (wasOpen && typeof cb === "function") cb();
   }
 
   function element(){
@@ -92,6 +98,10 @@ export function createPopoverMenu(doc){
    * @param {function} [opts.onClick] click listener on the menu root
    * @param {Element} [opts.trigger] focus-return target on Escape; defaults
    *   to anchor when omitted
+   * @param {function} [opts.onClose] called once when an open menu is
+   *   dismissed (public close, Escape, replacement open, teardown). Cleared
+   *   before the call so reentrant/repeated close cannot double-notify.
+   *   Omitted on existing consumers — behaviour unchanged.
    */
   function open({
     panel,
@@ -101,6 +111,7 @@ export function createPopoverMenu(doc){
     html = "",
     onClick,
     trigger,
+    onClose,
   } = {}){
     close();
     if (!doc || typeof doc.createElement !== "function") return null;
@@ -119,8 +130,11 @@ export function createPopoverMenu(doc){
     m.style.left = pos.left + "px";
     menuEl = m;
     triggerEl = trigger || anchor || null;
+    onCloseCb = typeof onClose === "function" ? onClose : null;
     if (typeof onClick === "function") m.addEventListener("click", onClick);
-    /* Escape closes and restores focus to the open()-provided trigger. */
+    /* Escape closes and restores focus to the open()-provided trigger.
+       Capture phase so an open popover refuses the key before later bubble
+       listeners (app.js full-screen ladder is registered first, on bubble). */
     if (typeof doc.addEventListener === "function"){
       keyHandler = (ev) => {
         if (!menuEl) return;
@@ -131,7 +145,7 @@ export function createPopoverMenu(doc){
         close();
         if (returnTo && typeof returnTo.focus === "function") returnTo.focus();
       };
-      doc.addEventListener("keydown", keyHandler);
+      doc.addEventListener("keydown", keyHandler, true);
     }
     return m;
   }

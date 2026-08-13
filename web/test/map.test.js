@@ -72,6 +72,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const mapSrc = readFileSync(join(__dirname, "../js/map.js"), "utf8");
 const mapCssSrc = readFileSync(join(__dirname, "../css/map.css"), "utf8");
 const notesCssSrc = readFileSync(join(__dirname, "../css/notes.css"), "utf8");
+const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+const indexHtml = readFileSync(join(__dirname, "../index.html"), "utf8");
+const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
 
 /* ---------- module shape / no later features ---------- */
 test("map.js exports factory and pure helpers; reuses lanes/map-model", () => {
@@ -80,6 +83,7 @@ test("map.js exports factory and pure helpers; reuses lanes/map-model", () => {
   assert.match(mapSrc, /from "\.\/map-model\.js"/);
   assert.match(mapSrc, /from "\.\/format\.js"/);
   assert.match(mapSrc, /from "\.\/cards\.js"/); // cardConfigText only
+  assert.match(mapSrc, /from "\.\/menu\.js"/);
   assert.doesNotMatch(mapSrc, /from "\.\/chat\.js"/);
   assert.doesNotMatch(mapSrc, /from "\.\/composer\.js"/);
   assert.doesNotMatch(mapSrc, /from "\.\/polling\.js"/);
@@ -642,6 +646,8 @@ const KNOWN_CLOSEST = new Set([
   "[data-mapexit]",
   "button, a, input",
   "#mapdivider",
+  "[data-layer=\"fare\"]",
+  "#layersbtn",
   // compound forms some tests assert production may use
   "circle.attnstation-hit",
   ".attnstation-hit[data-jump]",
@@ -774,6 +780,220 @@ function firstListener(el, event){
   return [...(el._listeners.get(event) || [])][0];
 }
 
+function makeMenuNode(tag = "div"){
+  const listeners = {};
+  const attrs = {};
+  const node = {
+    tagName: String(tag).toUpperCase(),
+    className: "",
+    innerHTML: "",
+    style: {},
+    children: [],
+    parentNode: null,
+    dataset: {},
+    getBoundingClientRect(){
+      return { top: 0, left: 0, bottom: 0, right: 0, width: 0, height: 0 };
+    },
+    setAttribute(k, v){ attrs[k] = String(v); },
+    getAttribute(k){ return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+    addEventListener(type, fn){
+      (listeners[type] || (listeners[type] = [])).push(fn);
+    },
+    removeEventListener(type, fn){
+      if (!listeners[type]) return;
+      listeners[type] = listeners[type].filter(f => f !== fn);
+    },
+    dispatch(type, ev = {}){
+      const e = Object.assign({
+        type, target: node, currentTarget: node,
+        preventDefault(){}, stopPropagation(){},
+      }, ev);
+      for (const fn of listeners[type] || []) fn(e);
+    },
+    appendChild(child){
+      child.parentNode = node;
+      node.children.push(child);
+      return child;
+    },
+    remove(){
+      if (!node.parentNode) return;
+      const kids = node.parentNode.children;
+      const i = kids.indexOf(node);
+      if (i >= 0) kids.splice(i, 1);
+      node.parentNode = null;
+    },
+    closest(sel){
+      if (sel === ".popmenu" && String(node.className || "").includes("popmenu")) return node;
+      return null;
+    },
+  };
+  return node;
+}
+
+function popMenus(panel){
+  return (panel.children || []).filter(c => String(c.className || "").includes("popmenu"));
+}
+
+function fareMenuTarget(menu){
+  return {
+    closest(sel){
+      const s = String(sel);
+      if (s.includes("data-layer") && s.includes("fare")) return this;
+      if (s === ".popmenu") return menu;
+      return null;
+    },
+  };
+}
+
+function chooseFareItem(panel){
+  const menus = popMenus(panel);
+  assert.equal(menus.length, 1, "exactly one .popmenu must be open");
+  menus[0].dispatch("click", { target: fareMenuTarget(menus[0]) });
+  return menus[0];
+}
+
+function isCaptureOpt(opts){
+  return opts === true || !!(opts && opts.capture);
+}
+
+function layersDoc(body, extra = {}){
+  const listeners = new Map();
+  const entries = new Map();
+  return stubDocument(body, {
+    addEventListener(ev, fn, opts){
+      if (!listeners.has(ev)) listeners.set(ev, new Set());
+      listeners.get(ev).add(fn);
+      if (!entries.has(ev)) entries.set(ev, []);
+      entries.get(ev).push({ fn, capture: isCaptureOpt(opts) });
+    },
+    removeEventListener(ev, fn, opts){
+      listeners.get(ev)?.delete(fn);
+      const list = entries.get(ev);
+      if (!list) return;
+      const capture = isCaptureOpt(opts);
+      const i = list.findIndex(l => l.fn === fn && l.capture === capture);
+      if (i >= 0) list.splice(i, 1);
+    },
+    createElement(tag){ return makeMenuNode(tag); },
+    _listeners: listeners,
+    _listenerEntries: entries,
+    _listenerCount(ev){ return listeners.get(ev)?.size || 0; },
+    _totalListeners(){
+      let n = 0;
+      for (const set of listeners.values()) n += set.size;
+      return n;
+    },
+    ...extra,
+  });
+}
+
+function dispatchDocKey(doc, ev = {}){
+  const list = [...(doc._listenerEntries.get("keydown") || [])];
+  const e = Object.assign({
+    key: "Escape",
+    target: { tagName: "BODY", isContentEditable: false },
+    preventDefault(){},
+    stopPropagation(){ e._stopped = true; },
+  }, ev);
+  for (const l of list.filter(x => x.capture)){
+    l.fn(e);
+    if (e._stopped) return e;
+  }
+  for (const l of list.filter(x => !x.capture)){
+    l.fn(e);
+    if (e._stopped) return e;
+  }
+  return e;
+}
+
+function appStyleEscape(feature, e){
+  /* Mirror of app.js document keydown Escape ladder (bubble phase). */
+  if (e.key !== "Escape" || !feature.isFull()) return;
+  const t = e.target || {};
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable) return;
+  if (typeof e.preventDefault === "function") e.preventDefault();
+  const step = mapExports.escapeDockStep({
+    mapFull: feature.isFull(),
+    mapDock: feature.isDock(),
+  });
+  if (step === "undock") feature.setDock(false);
+  else if (step === "exit-full") feature.setFull(false);
+}
+
+function fullLayersHost(store = {}){
+  const layersbtn = layersButton();
+  const map = mapPanel();
+  const mapwrap = fakeEl("mapwrap");
+  const body = { classList: mapClassList(["map-full"]) };
+  const doc = layersDoc(body);
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+    ...store,
+  });
+  const feature = createMapFeature({
+    roots: {
+      layersbtn, map, mapwrap, mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+    },
+    document: doc,
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({ lanes: [], color: () => "", name: id => id, byId: {} }),
+    icons: { ICON_LAYERS: ICON_LAYERS_TEST },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  return { feature, layersbtn, map, doc, storage };
+}
+
+function layersButton(){
+  const btn = fakeEl("layersbtn");
+  btn.focus = () => { btn._focused = true; };
+  btn.closest = function closest(sel){
+    if (sel === "#layersbtn") return btn;
+    if (sel === ".popmenu") return null;
+    if (KNOWN_CLOSEST.has(sel)) return null;
+    unsupportedSelector("closest", sel);
+  };
+  btn.getBoundingClientRect = () => ({
+    top: 10, left: 200, bottom: 44, right: 234, width: 34, height: 34,
+  });
+  return btn;
+}
+
+function mapPanel(){
+  const map = fakeEl("map");
+  map.children = [];
+  map.appendChild = function appendChild(child){
+    child.parentNode = map;
+    map.children.push(child);
+    return child;
+  };
+  map.getBoundingClientRect = () => ({
+    top: 0, left: 0, width: 400, height: 600, bottom: 600, right: 400,
+  });
+  return map;
+}
+
+const ICON_LAYERS_TEST = `<svg data-icon="layers" aria-hidden="true"></svg>`;
+
+function mapClassList(seed = []){
+  return {
+    _set: new Set(seed),
+    toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
+    contains(name){ return this._set.has(name); },
+    add(name){ this._set.add(name); },
+  };
+}
+
 test("createMapFeature bind is idempotent; destroy removes all map-owned listeners", () => {
   const maptabs = fakeEl("maptabs");
   const lanechips = fakeEl("lanechips");
@@ -781,7 +1001,7 @@ test("createMapFeature bind is idempotent; destroy removes all map-owned listene
   const mapscroll = fakeEl("mapscroll");
   const maptoolbar = fakeEl("maptoolbar");
   const mapfullbtn = fakeEl("mapfullbtn");
-  const farebtn = fakeEl("farebtn");
+  const layersbtn = layersButton();
   const tabSave = fakeEl("tab_save");
   const tabDel = fakeEl("tab_del");
   const winListeners = new Map();
@@ -793,13 +1013,14 @@ test("createMapFeature bind is idempotent; destroy removes all map-owned listene
     removeEventListener(ev, fn){ winListeners.get(ev)?.delete(fn); },
   };
   const longpressCleanups = [];
+  const doc = layersDoc({ classList: { contains: () => false, toggle(){}, add(){} } });
   const feature = createMapFeature({
     roots: {
       maptabs, lanechips, mapwrap, mapscroll, maptoolbar,
-      mapfullbtn, farebtn, tabSave, tabDel,
+      mapfullbtn, layersbtn, tabSave, tabDel,
     },
     window: win,
-    document: stubDocument({ classList: { contains: () => false, toggle(){}, add(){} } }),
+    document: doc,
     storage: memoryStorage(),
     isDesktop: () => true,
     level: () => 1,
@@ -827,7 +1048,8 @@ test("createMapFeature bind is idempotent; destroy removes all map-owned listene
   assert.equal(maptoolbar._listenerCount("click"), 1);
   assert.equal(mapscroll._listenerCount("scroll"), 1);
   assert.equal(mapfullbtn._listenerCount("click"), 1);
-  assert.equal(farebtn._listenerCount("click"), 1);
+  assert.equal(layersbtn._listenerCount("click"), 1);
+  assert.equal(doc._listenerCount("click"), 1, "document outside-click listener registered once");
   assert.equal(tabSave._listenerCount("click"), 1);
   assert.equal(tabDel._listenerCount("click"), 1);
   assert.equal(winListeners.get("resize")?.size || 0, 1);
@@ -848,7 +1070,8 @@ test("createMapFeature bind is idempotent; destroy removes all map-owned listene
   assert.equal(mapscroll._totalListeners(), 0);
   assert.equal(maptoolbar._totalListeners(), 0);
   assert.equal(mapfullbtn._totalListeners(), 0);
-  assert.equal(farebtn._totalListeners(), 0);
+  assert.equal(layersbtn._totalListeners(), 0);
+  assert.equal(doc._totalListeners(), 0, "document listeners removed on destroy");
   assert.equal(tabSave._totalListeners(), 0);
   assert.equal(tabDel._totalListeners(), 0);
   assert.equal(winListeners.get("resize")?.size || 0, 0);
@@ -857,6 +1080,8 @@ test("createMapFeature bind is idempotent; destroy removes all map-owned listene
   // re-bind after destroy works
   feature.bind();
   assert.equal(maptabs._listenerCount("click"), 1);
+  assert.equal(layersbtn._listenerCount("click"), 1);
+  assert.equal(doc._listenerCount("click"), 1);
   feature.destroy();
 });
 
@@ -1276,27 +1501,36 @@ test("wall map caps a y-stay branch terminus with the straight buffer (T)", () =
     "interior main-column ended node did not render the spur");
 });
 
-/* ---------- Phase 8: farebtn icon + wall re-render polling invariant ---------- */
+/* ---------- Phase 8: Layers menu + wall re-render polling invariant ---------- */
 
-test("farebtn is icon toggle with aria-pressed and on/off glyph state", () => {
-  // Production uses inlined SVG (no FA webfont classes — TestPinnedIcons).
-  // On/off = .on + aria-pressed + distinct glyph (data-fare marker).
-  const farebtn = fakeEl("farebtn");
+test("layersMenuHTML: Fare is a menuitemcheckbox with a check only when enabled", () => {
+  assert.equal(typeof mapExports.layersMenuHTML, "function", "layersMenuHTML must be exported");
+  const off = mapExports.layersMenuHTML({ fareOn: false });
+  assert.match(off, /role="menuitemcheckbox"/);
+  assert.match(off, /aria-checked="false"/);
+  assert.match(off, />Fare</);
+  assert.doesNotMatch(off, /[✓✔]/);
+  const on = mapExports.layersMenuHTML({ fareOn: true });
+  assert.match(on, /role="menuitemcheckbox"/);
+  assert.match(on, /aria-checked="true"/);
+  assert.match(on, /aria-hidden="true"/);
+  assert.match(on, /[✓✔]/);
+  assert.match(on, />Fare</);
+  const injected = mapExports.layersMenuHTML({ fareOn: false, label: `<img src=x>` });
+  assert.doesNotMatch(injected, /<img/);
+  assert.match(injected, /&lt;img/);
+});
+
+test("layersbtn is a stable Layers control, not an aria-pressed fare toggle", () => {
+  const layersbtn = layersButton();
+  const map = mapPanel();
   const storage = memoryStorage();
-  const body = {
-    classList: {
-      _set: new Set(),
-      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
-      contains(name){ return this._set.has(name); },
-      add(name){ this._set.add(name); },
-    },
-  };
   const feature = createMapFeature({
     roots: {
-      farebtn, mapfullbtn: fakeEl("mapfullbtn"),
+      layersbtn, map, mapfullbtn: fakeEl("mapfullbtn"),
       maptoolbar: fakeEl("tb"), mapwrap: fakeEl("w"),
     },
-    document: stubDocument(body),
+    document: layersDoc({ classList: mapClassList() }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1306,45 +1540,177 @@ test("farebtn is icon toggle with aria-pressed and on/off glyph state", () => {
     laneFilter: () => "",
     uiLoaded: () => true,
     laneModel: () => ({ lanes: [], color: () => "", name: id => id, byId: {} }),
-    icons: {
-      ICON_FARE_ON: `<svg data-fare="on" aria-hidden="true">ON</svg>`,
-      ICON_FARE_OFF: `<svg data-fare="off" aria-hidden="true">OFF</svg>`,
-    },
+    icons: { ICON_LAYERS: ICON_LAYERS_TEST },
   });
   feature.bind();
   feature.restoreChrome();
-  assert.equal(farebtn.getAttribute("aria-label"), "toggle fare overlay");
-  assert.equal(farebtn.getAttribute("aria-pressed"), "false");
-  assert.equal(farebtn.classList.contains("on"), false);
-  assert.match(farebtn.innerHTML, /data-fare="off"/);
-  assert.doesNotMatch(farebtn.innerHTML, /data-fare="on"/);
-
-  firstListener(farebtn, "click")();
-  assert.equal(farebtn.getAttribute("aria-pressed"), "true");
-  assert.equal(farebtn.classList.contains("on"), true);
-  assert.equal(storage.getItem(MAP_FARE_KEY), "1");
-  assert.match(farebtn.innerHTML, /data-fare="on"/);
-
-  firstListener(farebtn, "click")();
-  assert.equal(farebtn.getAttribute("aria-pressed"), "false");
-  assert.equal(farebtn.classList.contains("on"), false);
-  assert.equal(storage.getItem(MAP_FARE_KEY), null);
-  assert.match(farebtn.innerHTML, /data-fare="off"/);
+  assert.equal(layersbtn.getAttribute("aria-label"), "Layers");
+  assert.equal(layersbtn.getAttribute("title"), "Layers");
+  assert.equal(layersbtn.getAttribute("aria-haspopup"), "menu");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "false");
+  assert.equal(layersbtn.getAttribute("aria-pressed"), null);
+  assert.match(layersbtn.innerHTML, /data-icon="layers"/);
+  assert.doesNotMatch(layersbtn.innerHTML, /data-fare=/);
+  firstListener(layersbtn, "click")();
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "true");
+  assert.equal(layersbtn.getAttribute("aria-pressed"), null);
+  assert.match(layersbtn.innerHTML, /data-icon="layers"/);
+  assert.doesNotMatch(layersbtn.innerHTML, /data-fare=/);
   feature.destroy();
 });
 
-test("farebtn chrome CSS: full-screen-only reveal, mapfullbtn sizing", () => {
-  const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
-  assert.match(layoutCss, /#farebtn\s*\{[^}]*display:\s*none/s);
-  assert.match(layoutCss, /body\.map-full\s+#farebtn\s*\{[^}]*display:\s*inline-flex/s);
-  // sized like #mapfullbtn
-  assert.match(layoutCss, /#farebtn\s*\{[^}]*width:\s*34px/s);
-  assert.match(layoutCss, /#farebtn\s*\{[^}]*height:\s*34px/s);
-  assert.match(layoutCss, /#farebtn\s*\{[^}]*border-radius:\s*9px/s);
-  const indexHtml = readFileSync(join(__dirname, "../index.html"), "utf8");
-  // farebtn immediately left of mapfullbtn
-  assert.match(indexHtml, /id="farebtn"[^>]*>[\s\S]*?id="mapfullbtn"/);
-  assert.match(indexHtml, /aria-label="toggle fare overlay"/);
+test("layers menu: open, Fare checkbox, toggle, reopen, dismiss, destroy", () => {
+  const layersbtn = layersButton();
+  const map = mapPanel();
+  const mapwrap = fakeEl("mapwrap");
+  const node = {
+    id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
+    effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
+    attention: "", created_at: "2026-01-01T00:00:00Z", last_activity: 100,
+    ctx_pct: 30, stops: ["2026-01-02T00:00:00Z"],
+    fare_total: 170, fare_turns: 2, fare_cost_complete: false,
+    fare_segments: [{ total: 100, fresh_in: 80, out: 20, real_ms: 5000 }],
+  };
+  const storage = memoryStorage({
+    [MAP_FULL_KEY]: "1",
+    [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+    [MAP_FOLD_KEY]: JSON.stringify([]),
+  });
+  const doc = layersDoc({ classList: mapClassList(["map-full"]) });
+  const feature = createMapFeature({
+    roots: {
+      layersbtn, map, mapwrap, mapfullbtn: fakeEl("mapfullbtn"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
+    },
+    document: doc,
+    storage,
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [node],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f",
+      name: () => "Lane",
+      byId: { a: node },
+    }),
+    agentLogo: () => "",
+    icons: { ICON_LAYERS: ICON_LAYERS_TEST },
+  });
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+  assert.doesNotMatch(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/);
+
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1, "opening creates exactly one .popmenu");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "true");
+  const opened = popMenus(map)[0];
+  assert.equal(opened.getAttribute("role"), "menu");
+  assert.match(opened.innerHTML, /role="menuitemcheckbox"/);
+  assert.match(opened.innerHTML, /aria-checked="false"/);
+  assert.match(opened.innerHTML, />Fare</);
+  assert.doesNotMatch(opened.innerHTML, /[✓✔]/);
+  assert.match(opened.style.top || "", /^\d+(\.\d+)?px$/);
+  assert.match(opened.style.left || "", /^\d+(\.\d+)?px$/);
+
+  chooseFareItem(map);
+  assert.equal(popMenus(map).length, 0, "choosing Fare dismisses the menu");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "false");
+  assert.equal(storage.getItem(MAP_FARE_KEY), "1");
+  assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
+    "Fare toggle must invalidate the map signature and redraw the overlay");
+
+  firstListener(layersbtn, "click")();
+  const reopened = popMenus(map)[0];
+  assert.ok(reopened, "reopening after toggle");
+  assert.match(reopened.innerHTML, /aria-checked="true"/);
+  assert.match(reopened.innerHTML, /[✓✔]/);
+
+  const inside = { closest: sel => (sel === ".popmenu" ? reopened : null) };
+  firstListener(doc, "click")({ target: inside });
+  assert.equal(popMenus(map).length, 1, "click inside the menu must not close it");
+  firstListener(doc, "click")({ target: layersbtn });
+  assert.equal(popMenus(map).length, 1, "click on the Layers trigger must not prematurely close");
+  const outside = { closest(){ return null; } };
+  firstListener(doc, "click")({ target: outside });
+  assert.equal(popMenus(map).length, 0, "outside click closes the menu");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "false");
+
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1);
+  for (const fn of [...(doc._listeners.get("keydown") || [])]){
+    fn({ key: "Escape", preventDefault(){}, stopPropagation(){} });
+  }
+  assert.equal(popMenus(map).length, 0, "Escape closes through the shared controller");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "false");
+  assert.equal(layersbtn._focused, true, "Escape restores trigger focus");
+
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1);
+  feature.destroy();
+  assert.equal(popMenus(map).length, 0, "destroy removes any open popover");
+  assert.equal(layersbtn._totalListeners(), 0);
+  assert.equal(doc._totalListeners(), 0);
+});
+
+test("Escape with Layers open closes only the menu; map stays full-screen", () => {
+  /* Reproduce app.js listener order: the dock-ladder handler is registered on
+     document at load (bubble). The popover registers later, on open. A real
+     keydown must let an open Layers menu refuse Escape before the ladder. */
+  const { feature, layersbtn, map, doc } = fullLayersHost();
+  assert.equal(feature.isFull(), true);
+  doc.addEventListener("keydown", e => appStyleEscape(feature, e));
+
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1);
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "true");
+
+  dispatchDocKey(doc, { key: "Escape" });
+  assert.equal(popMenus(map).length, 0, "first Escape dismisses Layers");
+  assert.equal(feature.isFull(), true, "map must remain full-screen");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "false");
+  assert.equal(layersbtn._focused, true, "focus returns to Layers");
+
+  dispatchDocKey(doc, { key: "Escape" });
+  assert.equal(feature.isFull(), false, "second Escape may then exit full-screen");
+  feature.destroy();
+});
+
+test("setFull(false) dismisses an open Layers menu and resets aria-expanded", () => {
+  const { feature, layersbtn, map } = fullLayersHost();
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1);
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "true");
+  feature.setFull(false);
+  assert.equal(popMenus(map).length, 0, "leaving full-screen must not orphan the popover");
+  assert.equal(layersbtn.getAttribute("aria-expanded"), "false");
+  feature.destroy();
+});
+
+test("layersbtn chrome CSS: full-screen-only reveal; reject old farebtn contract", () => {
+  assert.match(layoutCss, /#layersbtn\s*\{[^}]*display:\s*none/s);
+  assert.match(layoutCss, /body\.map-full\s+#layersbtn\s*\{[^}]*display:\s*inline-flex/s);
+  assert.match(layoutCss, /#layersbtn\s*\{[^}]*width:\s*34px/s);
+  assert.match(layoutCss, /#layersbtn\s*\{[^}]*height:\s*34px/s);
+  assert.match(layoutCss, /#layersbtn\s*\{[^}]*border-radius:\s*9px/s);
+  assert.doesNotMatch(layoutCss, /#farebtn\b/);
+  assert.match(indexHtml, /id="layersbtn"[^>]*>[\s\S]*?id="mapfullbtn"/);
+  assert.match(indexHtml, /id="layersbtn"[^>]*aria-label="Layers"/);
+  assert.match(indexHtml, /id="layersbtn"[^>]*title="Layers"/);
+  assert.match(indexHtml, /id="layersbtn"[^>]*aria-haspopup="menu"/);
+  assert.match(indexHtml, /id="layersbtn"[^>]*aria-expanded="false"/);
+  assert.doesNotMatch(indexHtml, /id="farebtn"/);
+  assert.doesNotMatch(indexHtml, /id="layersbtn"[^>]*aria-pressed/);
+  assert.doesNotMatch(indexHtml, /aria-label="toggle fare overlay"/);
+  assert.doesNotMatch(mapSrc, /#farebtn\b|roots\.farebtn|ICON_FARE_ON|ICON_FARE_OFF|aria-pressed/);
+  assert.match(mapSrc, /createPopoverMenu/);
+  assert.match(appSrc, /ICON_LAYERS/);
+  assert.match(appSrc, /layersbtn:\s*\$\("#layersbtn"\)/);
+  assert.doesNotMatch(appSrc, /ICON_FARE_ON|ICON_FARE_OFF|#farebtn|farebtn:/);
 });
 
 test("wall re-render on fare change preserves external composer draft (polling invariant)", () => {
@@ -1355,14 +1721,6 @@ test("wall re-render on fare change preserves external composer draft (polling i
   const composer = fakeEl("prompt");
   composer.value = "my draft stays";
   composer._focused = true;
-  const body = {
-    classList: {
-      _set: new Set(["map-full"]),
-      toggle(name, on){ if (on) this._set.add(name); else this._set.delete(name); },
-      contains(name){ return this._set.has(name); },
-      add(name){ this._set.add(name); },
-    },
-  };
   const node = {
     id: "a", title: "Alpha", description: "d", agent: "claude", model: "m",
     effort: "", lane_id: "L", parent: "", ended_at: "", live: "quiet",
@@ -1382,13 +1740,14 @@ test("wall re-render on fare change preserves external composer draft (polling i
     [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
     [MAP_FOLD_KEY]: JSON.stringify([]),
   });
-  const farebtn = fakeEl("farebtn");
+  const layersbtn = layersButton();
+  const map = mapPanel();
   const feature = createMapFeature({
     roots: {
-      mapwrap, farebtn, mapfullbtn: fakeEl("mapfullbtn"),
+      mapwrap, layersbtn, map, mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
-    document: stubDocument(body),
+    document: layersDoc({ classList: mapClassList(["map-full"]) }),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -1404,10 +1763,7 @@ test("wall re-render on fare change preserves external composer draft (polling i
       byId: { a: node },
     }),
     agentLogo: () => "",
-    icons: {
-      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
-      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
-    },
+    icons: { ICON_LAYERS: ICON_LAYERS_TEST },
   });
   // fareOn must be restored from storage (no longer dormant)
   feature.bind();
@@ -1432,6 +1788,15 @@ test("wall re-render on fare change preserves external composer draft (polling i
   // composer singleton untouched
   assert.equal(composer.value, "my draft stays");
   assert.equal(composer._focused, true);
+
+  // Toggle Fare through the Layers menu: still only #mapwrap, never the composer.
+  firstListener(layersbtn, "click")();
+  assert.equal(popMenus(map).length, 1);
+  chooseFareItem(map);
+  assert.equal(storage.getItem(MAP_FARE_KEY), null);
+  assert.equal(composer.value, "my draft stays");
+  assert.equal(composer._focused, true);
+
   // map never owns the composer
   assert.doesNotMatch(mapSrc, /from "\.\/composer\.js"/);
   assert.doesNotMatch(mapSrc, /#prompt\b|getElementById\(["']prompt/);
@@ -1690,7 +2055,7 @@ test("V2-P3 wall heat re-render preserves composer (polling invariant)", () => {
   });
   const feature = createMapFeature({
     roots: {
-      mapwrap, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
+      mapwrap, layersbtn: fakeEl("layersbtn"), mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
     document: stubDocument(body),
@@ -1710,8 +2075,7 @@ test("V2-P3 wall heat re-render preserves composer (polling invariant)", () => {
     }),
     agentLogo: () => "",
     icons: {
-      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
-      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+      ICON_LAYERS: ICON_LAYERS_TEST,
     },
   });
   feature.bind();
@@ -1912,7 +2276,7 @@ test("V2-P5 wall: a capsule on every segment; tap opens the ticket sheet", () =>
   });
   const feature = createMapFeature({
     roots: {
-      mapwrap, fareticket, farebtn: fakeEl("farebtn"), mapfullbtn: fakeEl("mapfullbtn"),
+      mapwrap, fareticket, layersbtn: fakeEl("layersbtn"), mapfullbtn: fakeEl("mapfullbtn"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
     document: stubDocument(body),
@@ -1933,8 +2297,7 @@ test("V2-P5 wall: a capsule on every segment; tap opens the ticket sheet", () =>
     agentLogo: () => "",
     openSheet: id => opened.push(id),
     icons: {
-      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
-      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+      ICON_LAYERS: ICON_LAYERS_TEST,
     },
   });
   feature.bind();
@@ -2025,14 +2388,15 @@ test("V2-P5 capsules gated off when !fareOn; heat call sites stay parked", () =>
     [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
     [MAP_FOLD_KEY]: JSON.stringify([]),
   });
-  const farebtn = fakeEl("farebtn");
+  const layersbtn = layersButton();
+  const map = mapPanel();
   const feature = createMapFeature({
     roots: {
-      mapwrap, fareticket: fakeEl("fare_ticket"), farebtn,
+      mapwrap, fareticket: fakeEl("fare_ticket"), layersbtn, map,
       mapfullbtn: fakeEl("mapfullbtn"), lanechips: fakeEl("chips"),
       maptabs: fakeEl("tabs"), maptoolbar: fakeEl("tb"),
     },
-    document: stubDocument(body),
+    document: layersDoc(body),
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
@@ -2050,8 +2414,7 @@ test("V2-P5 capsules gated off when !fareOn; heat call sites stay parked", () =>
     agentLogo: () => "",
     openSheet: () => {},
     icons: {
-      ICON_FARE_ON: `<svg data-fare="on"></svg>`,
-      ICON_FARE_OFF: `<svg data-fare="off"></svg>`,
+      ICON_LAYERS: ICON_LAYERS_TEST,
     },
   });
   feature.bind();
@@ -2061,9 +2424,9 @@ test("V2-P5 capsules gated off when !fareOn; heat call sites stay parked", () =>
     "no capsule when fareOff");
   assert.doesNotMatch(mapwrap.innerHTML, /class="fare"/);
 
-  // turn fare on → capsule appears without any selection
-  firstListener(farebtn, "click")();
-  feature.render();
+  // turn fare on via the Layers menu → capsule appears without any selection
+  firstListener(layersbtn, "click")();
+  chooseFareItem(map);
   assert.match(mapwrap.innerHTML, /fare-capsule|data-fare-capsule/,
     "capsule when fareOn, no selection needed");
   assert.doesNotMatch(mapwrap.innerHTML, /data-heat=/, "heat stays parked");

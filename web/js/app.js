@@ -283,12 +283,10 @@ const ICON_MAP_EXPAND = `<svg width="16" height="16" viewBox="0 0 512 512" fill=
 const ICON_MAP_CONTRACT = `<svg width="16" height="16" viewBox="0 0 512 512" fill="currentColor" aria-hidden="true">
   <path d="M439.5 7c9.4-9.4 24.6-9.4 33.9 0l32 32c9.4 9.4 9.4 24.6 0 33.9l-87 87 39 39c6.9 6.9 8.9 17.2 5.2 26.2S450.2 240 440.5 240l-144 0c-13.3 0-24-10.7-24-24l0-144c0-9.7 5.8-18.5 14.8-22.2s19.3-1.7 26.2 5.2l39 39 87-87zM72.5 272l144 0c13.3 0 24 10.7 24 24l0 144c0 9.7-5.8 18.5-14.8 22.2s-19.3 1.7-26.2-5.2l-39-39-87 87c-9.4 9.4-24.6 9.4-33.9 0l-32-32c-9.4-9.4-9.4-24.6 0-33.9l87-87-39-39c-6.9-6.9-8.9-17.2-5.2-26.2S62.8 272 72.5 272z"/>
 </svg>`;
-/* Fare layer toggle — Font Awesome Free 6.7.2 classic solid layer-group path
+/* Layers control — Font Awesome Free 6.7.2 classic solid layer-group path
    (CC BY 4.0), inlined like every other glyph (no webfont classes;
-   see TestPinnedIcons). On = full fill; off = outline stroke (regular free
-   has no layer-group; the dim button color is the off cue). */
-const ICON_FARE_ON = `<svg width="16" height="16" viewBox="0 0 576 512" fill="currentColor" data-fare="on" aria-hidden="true"><path d="M264.5 5.2c14.9-6.9 32.1-6.9 47 0l218.6 101c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 149.8C37.4 145.8 32 137.3 32 128s5.4-17.9 13.9-21.8L264.5 5.2zM476.9 209.6l53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 277.8C37.4 273.8 32 265.3 32 256s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0l152-70.2zm-152 198.2l152-70.2 53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 405.8C37.4 401.8 32 393.3 32 384s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0z"/></svg>`;
-const ICON_FARE_OFF = `<svg width="16" height="16" viewBox="0 0 576 512" fill="none" stroke="currentColor" stroke-width="28" data-fare="off" aria-hidden="true"><path d="M264.5 5.2c14.9-6.9 32.1-6.9 47 0l218.6 101c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 149.8C37.4 145.8 32 137.3 32 128s5.4-17.9 13.9-21.8L264.5 5.2zM476.9 209.6l53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 277.8C37.4 273.8 32 265.3 32 256s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0l152-70.2zm-152 198.2l152-70.2 53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 405.8C37.4 401.8 32 393.3 32 384s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0z"/></svg>`;
+   see TestPinnedIcons). One stable glyph; Fare on/off lives in the menu. */
+const ICON_LAYERS = `<svg width="16" height="16" viewBox="0 0 576 512" fill="currentColor" data-icon="layers" aria-hidden="true"><path d="M264.5 5.2c14.9-6.9 32.1-6.9 47 0l218.6 101c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 149.8C37.4 145.8 32 137.3 32 128s5.4-17.9 13.9-21.8L264.5 5.2zM476.9 209.6l53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 277.8C37.4 273.8 32 265.3 32 256s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0l152-70.2zm-152 198.2l152-70.2 53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 405.8C37.4 401.8 32 393.3 32 384s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0z"/></svg>`;
 function agentLogo(agent){
   switch ((agent || "").toLowerCase()){
   case "claude":
@@ -668,7 +666,7 @@ const mapFeature = createMapFeature({
     maptoolbar: $("#maptoolbar"),
     mappill: $("#mappill"),
     mapfullbtn: $("#mapfullbtn"),
-    farebtn: $("#farebtn"),
+    layersbtn: $("#layersbtn"),
     fareticket: $("#fare_ticket"),
     map: $("#map"),
     mapdivider: $("#mapdivider"),
@@ -703,7 +701,7 @@ const mapFeature = createMapFeature({
   laneById,
   nodeById: id => nodeById(id),
   agentLogo,
-  icons: { ICON_PENCIL, ICON_END, ICON_MAP_EXPAND, ICON_MAP_CONTRACT, ICON_FARE_ON, ICON_FARE_OFF },
+  icons: { ICON_PENCIL, ICON_END, ICON_MAP_EXPAND, ICON_MAP_CONTRACT, ICON_LAYERS },
   uiMutate,
   selectNode: (id, how) => {
     /* a wall-map "Open chat" is a jump: remember the map so #chatback leads
@@ -1436,7 +1434,7 @@ function longpress(container, selector, fn){
 
 /* Card-local listeners (tabs/list/swipe/drag/longpress/age flip). */
 cardsFeature.bind();
-/* Map-local listeners (tabs/chips/wrap/toolbar/full/fare/scroll/resize). */
+/* Map-local listeners (tabs/chips/wrap/toolbar/full/layers/scroll/resize). */
 mapFeature.bind();
 /* Chat-local listeners (head/details, msgs, keys, terminal, scroll, longpress). */
 chatFeature.bind();

@@ -6,7 +6,7 @@
  *   - #maptabs, #lanechips, #mapwrap, #mapscroll (scroll for toolbar)
  *   - #maptoolbar (floating wall-map selection bar)
  *   - #mappill (off-screen attention pill; full-screen wall only)
- *   - #mapfullbtn, #farebtn (map chrome toggles)
+ *   - #mapfullbtn, #layersbtn (map chrome; Layers opens the Fare menu)
  *   - #mapdivider (dock map|chat separator; desktop-only under map-full.map-dock)
  *   - map group sheet controls #tab_head/#tab_name/#tab_lanes/#tab_save/#tab_del
  *     (map-specific sheet body; generic sheet open/close stays injected)
@@ -19,9 +19,9 @@
  *
  * Outputs:
  *   - HTML into maptabs / lanechips / mapwrap / maptoolbar / mappill
- *   - body.map-full / body.map-dock classes; mapfullbtn
- *     ARIA/glyph; farebtn.on + aria-pressed + on/off layer-group SVG (fare
- *     layer; revealed only under body.map-full)
+ *   - body.map-full / body.map-dock classes; mapfullbtn ARIA/glyph;
+ *     layersbtn (stable layers glyph + Layers menu; Fare state lives in the
+ *     menu; revealed only under body.map-full)
  *   - body style --dockmap (dock split; CSS variable write, never a re-render)
  *   - localStorage: scimux-maptab, scimux-mapfold, scimux-mapfold-known,
  *     scimux-mapfull, scimux-fare, scimux-mapdock, scimux-mapdockh,
@@ -39,7 +39,7 @@
  *   - #mappill click (select off-screen station + scrollIntoView)
  *   - #mapscroll scroll + window resize + dock split → positionMapToolbar /
  *     positionMapPill (rAF-throttled; never a re-render)
- *   - #mapfullbtn / #farebtn click
+ *   - #mapfullbtn / #layersbtn click (Layers menu + Fare item)
  *   - #mapdivider pointerdown/move/up/cancel + keydown (dock split)
  *   - #tab_save / #tab_del click (map group sheet)
  *
@@ -80,6 +80,7 @@ import {
   statusText, statusKind, turnFinished, hardAttention, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
+import { createPopoverMenu } from "./menu.js";
 
 /* ---------- storage keys (public contract) ---------- */
 
@@ -830,6 +831,15 @@ export function fareCapsuleHTML(seg, opts = {}){
   </button>`;
 }
 
+/* Layers popover body. Fare is a menuitemcheckbox; the decorative checkmark
+   is hidden from assistive technology. Visible labels are escaped. */
+export function layersMenuHTML({ fareOn = false, label = "Fare", escape = esc } = {}){
+  const checked = !!fareOn;
+  const text = escape(label);
+  const mark = checked ? `<span class="check" aria-hidden="true">✓</span>` : "";
+  return `<button type="button" role="menuitemcheckbox" aria-checked="${checked ? "true" : "false"}" data-layer="fare">${mark}<span>${text}</span></button>`;
+}
+
 /* ---------- V2-P5 fare ticket (the capsule's bottom sheet) ----------
    A vintage paper fare ticket: the tokens spent are the ticket's price, so
    they get the ticket's biggest type. Every block is data-conditional —
@@ -1081,7 +1091,7 @@ export function createMapFeature(deps){
   const maptoolbar = roots.maptoolbar;
   const mappill = roots.mappill;
   const mapfullbtn = roots.mapfullbtn;
-  const farebtn = roots.farebtn;
+  const layersbtn = roots.layersbtn;
   const fareticket = roots.fareticket;
   const mapEl = roots.map;
   const mapdivider = roots.mapdivider;
@@ -1142,6 +1152,7 @@ export function createMapFeature(deps){
   let editTab = null;
   let bound = false;
   const cleanups = [];
+  const layersMenu = createPopoverMenu(doc);
 
   function g(name, fallback){
     const v = d[name];
@@ -1236,6 +1247,7 @@ export function createMapFeature(deps){
     /* Leaving full screen also leaves the dock — the dock is only meaningful
        under body.map-full, and the CSS selector is the conjunction. */
     if (!mapFull){
+      try { layersMenu.close(); } catch { /* ignore */ }
       mapDock = false;
       storeRemove(MAP_DOCK_KEY);
       if (doc && doc.body) doc.body.classList.toggle("map-dock", false);
@@ -2129,28 +2141,72 @@ export function createMapFeature(deps){
 
   function onMapFullClick(){ setMapFull(!mapFull); }
 
-  function syncFareBtn(){
-    if (!farebtn) return;
-    const icons = d.icons || {};
-    // Inlined SVG glyphs (no FA webfont classes — TestPinnedIcons). On/off
-    // state is .on + aria-pressed + data-fare marker on the glyph.
-    farebtn.innerHTML = fareOn
-      ? (icons.ICON_FARE_ON || "")
-      : (icons.ICON_FARE_OFF || "");
-    farebtn.classList.toggle("on", fareOn);
-    if (typeof farebtn.setAttribute === "function"){
-      farebtn.setAttribute("aria-pressed", fareOn ? "true" : "false");
-      farebtn.setAttribute("aria-label", "toggle fare overlay");
-    }
+  function syncLayersExpanded(){
+    if (!layersbtn || typeof layersbtn.setAttribute !== "function") return;
+    layersbtn.setAttribute("aria-expanded", layersMenu.element() ? "true" : "false");
   }
 
-  function onFareClick(){
+  function syncLayersBtn(){
+    if (!layersbtn) return;
+    const icons = d.icons || {};
+    // One stable layers glyph (no FA webfont — TestPinnedIcons). Fare state
+    // lives on the menu item, not on this button.
+    layersbtn.innerHTML = icons.ICON_LAYERS || "";
+    if (typeof layersbtn.setAttribute === "function"){
+      layersbtn.setAttribute("aria-label", "Layers");
+      layersbtn.setAttribute("title", "Layers");
+      layersbtn.setAttribute("aria-haspopup", "menu");
+    }
+    syncLayersExpanded();
+  }
+
+  function onLayersClose(){
+    syncLayersExpanded();
+  }
+
+  function layersPanel(){
+    if (mapEl) return mapEl;
+    if (doc && typeof doc.querySelector === "function") return doc.querySelector("#map");
+    return null;
+  }
+
+  function openLayersMenu(){
+    if (!layersbtn) return;
+    const m = layersMenu.open({
+      panel: layersPanel(),
+      anchor: layersbtn,
+      trigger: layersbtn,
+      html: layersMenuHTML({ fareOn, escape }),
+      onClick: onLayersMenuClick,
+      onClose: onLayersClose,
+    });
+    if (m && typeof m.setAttribute === "function") m.setAttribute("role", "menu");
+    syncLayersExpanded();
+  }
+
+  function onLayersClick(){
+    if (layersMenu.element()){
+      layersMenu.close();
+      return;
+    }
+    openLayersMenu();
+  }
+
+  function onLayersMenuClick(e){
+    const t = e && e.target;
+    const item = t && typeof t.closest === "function" ? t.closest("[data-layer=\"fare\"]") : null;
+    if (!item) return;
     fareOn = !fareOn;
     if (fareOn) storeSet(MAP_FARE_KEY, "1");
     else storeRemove(MAP_FARE_KEY);
-    syncFareBtn();
+    layersMenu.close();
     mapSig = "";
     renderMap();
+  }
+
+  function onLayersDocClick(e){
+    if (layersMenu.shouldCloseForClick(e && e.target, { exclude: "#layersbtn" }))
+      layersMenu.close();
   }
 
   function onLaneChipLongpress(el){
@@ -2206,7 +2262,8 @@ export function createMapFeature(deps){
       cleanups.push(() => win.removeEventListener("resize", onMapResize));
     }
     on(mapfullbtn, "click", onMapFullClick);
-    on(farebtn, "click", onFareClick);
+    on(layersbtn, "click", onLayersClick);
+    on(doc, "click", onLayersDocClick);
     on(tabSave, "click", onTabSave);
     on(tabDel, "click", onTabDel);
     /* Dock divider: pointer drag + keyboard nudge. Listeners go through
@@ -2232,7 +2289,7 @@ export function createMapFeature(deps){
         if (typeof c === "function") cleanups.push(c);
       }
     }
-    syncFareBtn();
+    syncLayersBtn();
     syncMapFullBtn();
   }
 
@@ -2240,6 +2297,7 @@ export function createMapFeature(deps){
     while (cleanups.length){
       try { cleanups.pop()(); } catch { /* ignore */ }
     }
+    try { layersMenu.close(); } catch { /* ignore */ }
     bound = false;
   }
 
@@ -2251,7 +2309,7 @@ export function createMapFeature(deps){
       if (mapDock) doc.body.classList.add("map-dock");
     }
     applyDockFrac(dockFrac, { persist: false });
-    syncFareBtn();
+    syncLayersBtn();
     syncMapFullBtn();
   }
 

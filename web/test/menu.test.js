@@ -382,6 +382,217 @@ test("P6 Escape: focus returns to the trigger element", async () => {
   );
 });
 
+/* ---------- P1: optional onClose fires once per open menu ---------- */
+
+function withKeyDoc(host){
+  const keyListeners = [];
+  host.doc.addEventListener = (type, fn) => {
+    if (type === "keydown") keyListeners.push(fn);
+  };
+  host.doc.removeEventListener = (type, fn) => {
+    if (type === "keydown"){
+      const i = keyListeners.indexOf(fn);
+      if (i >= 0) keyListeners.splice(i, 1);
+    }
+  };
+  host.keyListeners = keyListeners;
+  return host;
+}
+
+test("P1 onClose: fires once on public close(); omitted callback is unchanged", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  const ctl = menu.createPopoverMenu(doc);
+  const el = ctl.open({
+    panel, anchor, offset: 150,
+    className: "popmenu",
+    html: `<button data-mi="x">X</button>`,
+  });
+  assert.ok(el);
+  ctl.close();
+  assert.equal(ctl.element(), null, "close without onClose still removes the menu");
+  assert.equal(panel.children.length, 0);
+  ctl.close();
+
+  const calls = [];
+  ctl.open({
+    panel, anchor, offset: 150,
+    html: `<button data-mi="y">Y</button>`,
+    onClose: () => calls.push("close"),
+  });
+  assert.equal(calls.length, 0, "onClose must not fire on open");
+  ctl.close();
+  assert.equal(calls.length, 1, "onClose fires once on public close()");
+  ctl.close();
+  assert.equal(calls.length, 1, "repeated close() must not double-notify");
+});
+
+test("P1 onClose: does not fire when nothing is open", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  const ctl = menu.createPopoverMenu(doc);
+  const calls = [];
+  ctl.close();
+  ctl.open({
+    panel, anchor,
+    html: `<button data-mi="x">X</button>`,
+    onClose: () => calls.push("close"),
+  });
+  ctl.close();
+  assert.equal(calls.length, 1);
+  ctl.close();
+  ctl.close();
+  assert.equal(calls.length, 1, "onClose must not fire when nothing is open");
+});
+
+test("P1 onClose: fires once on Escape", async () => {
+  const menu = await loadMenu();
+  const host = withKeyDoc(makeHost());
+  const ctl = menu.createPopoverMenu(host.doc);
+  const calls = [];
+  ctl.open({
+    panel: host.panel, anchor: host.anchor,
+    html: `<button data-mi="x">X</button>`,
+    onClose: () => calls.push("esc"),
+  });
+  assert.ok(host.keyListeners.length >= 1);
+  for (const fn of host.keyListeners.slice()){
+    fn({ key: "Escape", preventDefault(){}, stopPropagation(){} });
+  }
+  assert.equal(ctl.element(), null);
+  assert.equal(calls.length, 1, "Escape close must notify onClose once");
+  for (const fn of host.keyListeners.slice()){
+    fn({ key: "Escape", preventDefault(){}, stopPropagation(){} });
+  }
+  assert.equal(calls.length, 1);
+});
+
+test("P1 onClose: fires once when replaced by another open()", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  const ctl = menu.createPopoverMenu(doc);
+  const calls = [];
+  ctl.open({
+    panel, anchor,
+    html: `<button data-mi="a">A</button>`,
+    onClose: () => calls.push("first"),
+  });
+  const second = ctl.open({
+    panel, anchor,
+    html: `<button data-mi="b">B</button>`,
+    onClose: () => calls.push("second"),
+  });
+  assert.equal(calls.length, 1, "replacing open() closes the first menu once");
+  assert.equal(calls[0], "first");
+  assert.equal(ctl.element(), second);
+  ctl.close();
+  assert.deepEqual(calls, ["first", "second"]);
+});
+
+test("P1 onClose: fires once on consumer teardown close()", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  const ctl = menu.createPopoverMenu(doc);
+  const calls = [];
+  ctl.open({
+    panel, anchor,
+    html: `<button data-mi="x">X</button>`,
+    onClose: () => calls.push("teardown"),
+  });
+  /* destroy() path: consumer removes the open popover via public close(). */
+  ctl.close();
+  assert.equal(calls.length, 1);
+  assert.equal(ctl.element(), null);
+  assert.equal(panel.children.length, 0);
+});
+
+function isCaptureOpt(opts){
+  return opts === true || !!(opts && opts.capture);
+}
+
+function dispatchKeyOrdered(listeners, ev){
+  const e = Object.assign({
+    key: "Escape",
+    preventDefault(){},
+    stopPropagation(){ e._stopped = true; },
+  }, ev);
+  for (const l of listeners.filter(x => x.capture)){
+    l.fn(e);
+    if (e._stopped) return e;
+  }
+  for (const l of listeners.filter(x => !x.capture)){
+    l.fn(e);
+    if (e._stopped) return e;
+  }
+  return e;
+}
+
+test("P1 Escape: keydown is registered in the capture phase", async () => {
+  const menu = await loadMenu();
+  const { doc, panel, anchor } = makeHost();
+  const added = [];
+  doc.addEventListener = (type, fn, opts) => {
+    if (type === "keydown") added.push({ fn, capture: isCaptureOpt(opts) });
+  };
+  doc.removeEventListener = (type, fn, opts) => {
+    if (type !== "keydown") return;
+    const capture = isCaptureOpt(opts);
+    const i = added.findIndex(l => l.fn === fn && l.capture === capture);
+    if (i >= 0) added.splice(i, 1);
+  };
+  const ctl = menu.createPopoverMenu(doc);
+  ctl.open({
+    panel, anchor,
+    html: `<button data-mi="x">X</button>`,
+  });
+  assert.ok(added.some(l => l.capture),
+    "Escape must be registered on document in the capture phase so it outranks app.js");
+  const src = readFileSync(menuJsPath, "utf8");
+  assert.match(
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, ""),
+    /addEventListener\(\s*["']keydown["']\s*,\s*keyHandler\s*,\s*(true|\{\s*capture:\s*true\s*\})\s*\)/,
+  );
+  assert.match(
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, ""),
+    /removeEventListener\(\s*["']keydown["']\s*,\s*keyHandler\s*,\s*(true|\{\s*capture:\s*true\s*\})\s*\)/,
+  );
+  ctl.close();
+});
+
+test("P1 Escape: open popover gets first refusal over a pre-registered bubble listener", async () => {
+  const menu = await loadMenu();
+  const { panel, anchor } = makeHost();
+  const listeners = [];
+  const doc = {
+    createElement(tag){ return makeEl(tag); },
+    addEventListener(type, fn, opts){
+      if (type !== "keydown") return;
+      listeners.push({ fn, capture: isCaptureOpt(opts) });
+    },
+    removeEventListener(type, fn, opts){
+      if (type !== "keydown") return;
+      const capture = isCaptureOpt(opts);
+      const i = listeners.findIndex(l => l.fn === fn && l.capture === capture);
+      if (i >= 0) listeners.splice(i, 1);
+    },
+  };
+  const bubble = [];
+  /* app.js registers its Escape ladder on document at load, bubble phase. */
+  doc.addEventListener("keydown", () => { bubble.push("app"); });
+  const ctl = menu.createPopoverMenu(doc);
+  ctl.open({
+    panel, anchor,
+    html: `<button data-mi="x">X</button>`,
+  });
+  dispatchKeyOrdered(listeners, { key: "Escape" });
+  assert.equal(ctl.element(), null, "Escape still closes the open menu");
+  assert.deepEqual(bubble, [],
+    "a pre-registered bubble Escape handler must not run while the menu is open");
+  dispatchKeyOrdered(listeners, { key: "Escape" });
+  assert.deepEqual(bubble, ["app"],
+    "with no open menu, the earlier bubble handler may run");
+});
+
 /* ---------- structural pin: menu.js is importable under bare Node ---------- */
 
 test("P5: menu.js takes no implicit document global at module scope", async () => {
