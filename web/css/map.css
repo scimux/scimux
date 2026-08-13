@@ -180,7 +180,7 @@ body.map-full #mappill.on { display: flex; align-items: center; justify-content:
    trailing hairline lives on #layersbtn so display:none removes the
    separator atomically (no empty gap on the compact map). */
 #mapcontrols { display: flex; flex-direction: row; flex-wrap: nowrap;
-  align-items: flex-start; }
+  align-items: center; }
 #layersbtn { flex: none; width: 44px; height: 44px; min-width: 44px; min-height: 44px;
   margin: 4px 12px 6px 12px; padding: 0; position: relative;
   color: var(--dim); font-size: 16px; line-height: 1; border: none; background: none;
@@ -191,7 +191,7 @@ body.map-full #mappill.on { display: flex; align-items: center; justify-content:
 #layersbtn:hover { background: var(--code-bg); }
 #layersbtn:active { background: var(--th-bg); }
 #mapcontrols .lanechips { flex: 1 1 auto; min-width: 0; }
-.lanechips { display: flex; gap: 8px; padding: 4px 16px 10px; flex-wrap: wrap; }
+.lanechips { display: flex; gap: 8px; padding: 7px 16px; flex-wrap: wrap; }
 .lanechip { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 12px;
   border: 1.5px solid transparent; max-width: 160px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

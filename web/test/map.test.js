@@ -1842,6 +1842,8 @@ test("P2: #mapcontrols is a flex row; chips grow/wrap; Layers stays leading", ()
   if (dir) assert.equal(dir[1], "row", "control row stays horizontal");
   assert.doesNotMatch(controls, /flex-wrap:\s*wrap/,
     "the row itself does not wrap; chips wrap on their side");
+  assert.match(controls, /align-items:\s*center/,
+    "lane chips align vertically with the Layers glyph");
 
   const btn = cssDecls(layoutCss + "\n" + mapCssSrc, /#layersbtn/);
   assert.match(btn, /flex:\s*none/, "Layers group does not shrink");
@@ -1851,6 +1853,8 @@ test("P2: #mapcontrols is a flex row; chips grow/wrap; Layers stays leading", ()
     "#lanechips consumes remaining width");
   const chips = chipsScoped + "\n" + cssDecls(mapCssSrc, /\.lanechips/);
   assert.match(chips, /flex-wrap:\s*wrap/, "lane chips wrap safely");
+  assert.match(chips, /padding:\s*7px\s+16px/,
+    "symmetric vertical padding keeps chip centers aligned while wrapping");
 
   const layersVisual = cssDecls(layoutCss + "\n" + mapCssSrc, /#layersbtn(?::after)?|#maplayers(?::after)?/);
   const gap = controls.match(/gap:\s*([0-9.]+)px/);
