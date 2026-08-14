@@ -4814,6 +4814,25 @@ test("reduced motion loses the halo with the pulse", () => {
     "stopping the pulse must drop the static halo too");
 });
 
+test("the iPad wall map uses a static non-filtered station halo", () => {
+  /* WebKit can raster the wall's full-height SVG for a filtered, animated
+     child.  The iPad layout is the desktop wall at >=900px, but its primary
+     input remains coarse/no-hover: keep the richer effect on real desktops
+     and make that one paint path deliberately boring. */
+  const marker = "iPad wall-map paint budget";
+  const start = notesCssSrc.indexOf(marker);
+  assert.notEqual(start, -1, "the iPad-specific wall paint fence must be documented");
+  const fence = notesCssSrc.slice(start, start + 1400);
+  assert.match(fence, /@media\s*\(hover:\s*none\)\s*and\s*\(pointer:\s*coarse\)/,
+    "the workaround must not remove the richer desktop effect");
+  assert.match(fence, /\.attnstation-glow\s*\{[^}]*animation:\s*none[^}]*filter:\s*none[^}]*will-change:\s*auto/s,
+    "the iPad glow must neither animate nor invoke the SVG blur compositor");
+  assert.match(fence, /\.attnstation-ring\s*\{[^}]*animation:\s*none[^}]*will-change:\s*auto/s,
+    "the visible ring must be static on iPad");
+  assert.match(fence, /body\.map-full\s+#map\s*\{[^}]*animation:\s*none/s,
+    "the full-height filtered surface must not be parent-faded on entry");
+});
+
 test("the wall's title clamp is a class the builder sets, not a :has() scan", () => {
   /* :has() is matched per .strow, and the wall is ~170 of them; WebKit's
      invalidation for it is coarse, so the per-tick caption patch inside a row

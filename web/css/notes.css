@@ -183,6 +183,23 @@ body.bookmarks-open #bookmarkpeek { display: block; }
      right edge (the shrink button) permanently off-screen */
   body.map-full #map { display: flex; width: auto; flex: 1; min-width: 0;
     border-right: none; animation: mapfade .26s ease; }
+  /* iPad wall-map paint budget: the wall is one full-height SVG (roughly 12k
+     CSS px with a large fleet). WebKit can allocate/raster that whole surface
+     when a filtered child animates or its parent fades. Keep the richer blur
+     pulse on mouse/trackpad desktops; on the coarse, no-hover iPad path the
+     glow is a cheap translucent circle behind a static sharp ring. `filter`
+     here overrides the SVG presentation attribute filter="url(#attnglow)". */
+  @media (hover: none) and (pointer: coarse) {
+    .attnstation-glow {
+      animation: none; filter: none; will-change: auto;
+      opacity: calc(var(--attn-op) * .20);
+    }
+    .attnstation-ring {
+      animation: none; will-change: auto;
+      opacity: var(--attn-op);
+    }
+    body.map-full #map { animation: none; }
+  }
   body.map-full #cards, body.map-full #chat,
   body.map-full #bookmarkspane, body.map-full #bookmarkflags { display: none; }
   /* P5a: `body.bookmarks-open #bookmarkspane { display: flex }` below has the
