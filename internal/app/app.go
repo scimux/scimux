@@ -289,11 +289,12 @@ type app struct {
 	// without recognizable agent-side records since (degrade the UI to peek).
 	chatMark  map[string]chatMark
 	staleChat map[string]bool
-	// sendState: per-node web prompt delivery state, "submitting" while a
-	// send is in flight, "unconfirmed" when neither the pane nor the
-	// transcript acknowledged the submission. New sends are held (409) until
-	// the state clears, so a delayed Enter can never stack a second prompt
-	// onto an unsubmitted first one.
+	// sendState: per-node web prompt delivery state, "submitting" while a send
+	// is in flight, "unconfirmed" for an ambiguous ordinary send, and
+	// "initial_unconfirmed" for the deferred Claude first prompt. Only that
+	// initial state self-heals when its matching mirrored user turn arrives;
+	// ordinary ambiguity stays manual. New sends are held (409) until the state
+	// clears, so a delayed Enter can never stack a second prompt onto the first.
 	sendState map[string]string
 	// reserved: node ids claimed by an in-flight create whose external launch
 	// runs outside a.mu; uniqueID must not reissue them, like pathClaims for

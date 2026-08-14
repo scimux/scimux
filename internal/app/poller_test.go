@@ -50,6 +50,50 @@ func TestNoteChatProgress(t *testing.T) {
 	}
 }
 
+// A deferred Claude prompt can land in the transcript after the synchronous
+// create deadline. That is late evidence, not permanent ambiguity: the poller
+// must release the initial-only send gate as soon as the mirrored user turn
+// matches the durable Node.Prompt. Ordinary unconfirmed follow-up sends remain
+// manual, and a different user turn proves nothing about the initial prompt.
+func TestPollReconcilesLateClaudeInitialDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		state      string
+		turn       string
+		wantLocked bool
+	}{
+		{"matching initial turn self-heals", "initial_unconfirmed", "irreplaceable prompt", false},
+		{"different turn stays uncertain", "initial_unconfirmed", "different prompt", true},
+		{"ordinary unconfirmed send stays manual", "unconfirmed", "irreplaceable prompt", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeTmux{list: []string{"cl1"}, capture: "working"}
+			a := newTestApp(t, f)
+			if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "claude.jsonl")
+			appendFile(t, path, claudeTurn("user", tc.turn, "2026-08-14T12:00:00Z"))
+			n := &Node{
+				ID: "cl1", Title: "Claude", Agent: "claude", Dir: a.home,
+				Prompt: "irreplaceable prompt", Transcript: path,
+			}
+			a.nodes = []*Node{n}
+			a.byID[n.ID] = n
+			a.sendState[n.ID] = tc.state
+
+			a.poll()
+
+			a.mu.Lock()
+			_, locked := a.sendState[n.ID]
+			a.mu.Unlock()
+			if locked != tc.wantLocked {
+				t.Fatalf("send gate locked = %v, want %v", locked, tc.wantLocked)
+			}
+		})
+	}
+}
+
 func newTailerTestApp() *app {
 	a := &app{tailers: map[string]*transcript.Tailer{},
 		chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}

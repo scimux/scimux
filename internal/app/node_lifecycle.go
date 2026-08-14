@@ -373,6 +373,10 @@ const (
 	initialAcknowledged initialDelivery = "acknowledged"
 	initialNotSent      initialDelivery = "not_sent"
 	initialUnconfirmed  initialDelivery = "unconfirmed"
+
+	sendSubmitting         = "submitting"
+	sendUnconfirmed        = "unconfirmed"
+	sendInitialUnconfirmed = "initial_unconfirmed"
 )
 
 func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, error) {
@@ -472,12 +476,12 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 		// Remote Control boots. Hold the ordinary send gate across that window:
 		// another browser must not paste a follow-up ahead of the first turn.
 		a.mu.Lock()
-		a.sendState[n.ID] = "submitting"
+		a.sendState[n.ID] = sendSubmitting
 		a.mu.Unlock()
 		delivery = a.deliverClaudeInitial(n)
 		a.mu.Lock()
 		if delivery == initialUnconfirmed {
-			a.sendState[n.ID] = "unconfirmed"
+			a.sendState[n.ID] = sendInitialUnconfirmed
 		} else {
 			delete(a.sendState, n.ID)
 		}

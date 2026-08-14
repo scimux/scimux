@@ -315,6 +315,40 @@ func (a *app) poll() {
 		}
 		a.discoverTranscript(n)
 		a.syncMirror(n)
+		a.reconcileClaudeInitialDelivery(n)
+	}
+}
+
+// reconcileClaudeInitialDelivery releases only the initial-prompt uncertainty
+// when Claude's transcript mirror catches up after the synchronous create
+// deadline. It never retries the prompt and never clears an ordinary
+// unconfirmed follow-up send: those still require the supervisor's explicit
+// terminal check.
+func (a *app) reconcileClaudeInitialDelivery(n *Node) {
+	if n == nil || n.Agent != "claude" {
+		return
+	}
+	a.mu.Lock()
+	pending := a.sendState[n.ID] == sendInitialUnconfirmed
+	a.mu.Unlock()
+	if !pending {
+		return
+	}
+
+	want := strings.TrimSpace(n.Prompt)
+	if want == "" {
+		return
+	}
+	for _, turn := range a.segment(n).Turns {
+		if turn.Role != "user" || strings.TrimSpace(turn.Text) != want {
+			continue
+		}
+		a.mu.Lock()
+		if a.sendState[n.ID] == sendInitialUnconfirmed {
+			delete(a.sendState, n.ID)
+		}
+		a.mu.Unlock()
+		return
 	}
 }
 

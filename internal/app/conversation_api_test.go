@@ -771,6 +771,30 @@ func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 	}
 }
 
+// The initial-only internal state still presents the existing delivery
+// warning until late transcript evidence reconciles it. Otherwise the browser
+// would stop forcing the terminal precisely while the delivery is uncertain.
+func TestHandleChatPresentsInitialUnconfirmedAsUnconfirmed(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	seedChatNodeWithLog(t, a, "n1")
+	a.sendState["n1"] = "initial_unconfirmed"
+
+	rec := chatGET(t, a, "n1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat = %d %q", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Delivery string `json:"delivery"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Delivery != "unconfirmed" {
+		t.Fatalf("delivery = %q, want public unconfirmed", body.Delivery)
+	}
+}
+
 // A prompt past the 1 MiB body cap must fail with a specific 413 naming the
 // limit, not a bare "bad request" that gives the user no size hint and
 // invites retries that can never succeed.

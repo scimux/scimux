@@ -191,16 +191,16 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	switch a.sendState[n.ID] {
-	case "submitting":
+	case sendSubmitting:
 		a.mu.Unlock()
 		http.Error(w, "a send to this node is still in flight", 409)
 		return
-	case "unconfirmed":
+	case sendUnconfirmed, sendInitialUnconfirmed:
 		a.mu.Unlock()
 		http.Error(w, "the previous send is unconfirmed — check the terminal, then recheck", 409)
 		return
 	}
-	a.sendState[n.ID] = "submitting"
+	a.sendState[n.ID] = sendSubmitting
 	a.mu.Unlock()
 
 	// Transcript watermark before the send: a new user turn appearing is the
@@ -226,7 +226,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	if acked {
 		delete(a.sendState, n.ID)
 	} else {
-		a.sendState[n.ID] = "unconfirmed"
+		a.sendState[n.ID] = sendUnconfirmed
 	}
 	a.mu.Unlock()
 	// SendAck succeeded, so the prompt was delivered to the pane (acked or
@@ -361,7 +361,7 @@ func (a *app) handleSendResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	if a.sendState[n.ID] == "submitting" {
+	if a.sendState[n.ID] == sendSubmitting {
 		a.mu.Unlock()
 		http.Error(w, "a send is still in flight", 409)
 		return
@@ -420,7 +420,7 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 	// has taken over. A send still in flight ("submitting") keeps its state:
 	// clearing it here would let a second send race the in-flight paste.
 	a.mu.Lock()
-	if a.sendState[n.ID] != "submitting" {
+	if a.sendState[n.ID] != sendSubmitting {
 		delete(a.sendState, n.ID)
 	}
 	a.mu.Unlock()
@@ -621,6 +621,12 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	stale := a.staleChat[n.ID]
 	attn := a.attn[n.ID]
 	delivery := a.sendState[n.ID]
+	if delivery == sendInitialUnconfirmed {
+		// Initial delivery has a distinct internal state so the poller can
+		// reconcile late transcript evidence without weakening the manual gate
+		// for ordinary sends. The browser keeps one uncertainty presentation.
+		delivery = sendUnconfirmed
+	}
 	agent, model, ended := n.Agent, n.Model, n.EndedAt != ""
 	a.mu.Unlock()
 	turns := seg.Turns

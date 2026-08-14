@@ -147,7 +147,7 @@ func TestPublicRouteClaudeInitialDeliveryEvidence(t *testing.T) {
 				t.Fatalf("response = %+v", body)
 			}
 			a.mu.Lock()
-			locked := a.sendState[body.ID] == "unconfirmed"
+			locked := a.sendState[body.ID] == "initial_unconfirmed"
 			a.mu.Unlock()
 			if locked != tc.wantLocked {
 				t.Fatalf("send lock = %v, want %v", locked, tc.wantLocked)
