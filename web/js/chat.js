@@ -710,10 +710,11 @@ export function mergeTimelineItems(turns, decisions){
   return items;
 }
 
-/* Compact expandable audit row for one decision surface. Agent title/reason
-   go through permBodyHTML / md() — both are escape-first, so this is still
-   never innerHTML of unescaped agent content. Summary stays plain escaped
-   text (one-line audit row). No bubble actions. */
+/* Audit surface for one automatic decision. The approved request is always
+   visible and uses the exact same prose-vs-command renderer as the live ask;
+   only mechanical audit metadata is collapsed. permBodyHTML / md() are
+   escape-first, so this is still never innerHTML of unescaped agent content.
+   No bubble actions. */
 export function decisionRowHTML(surface, {
   escape = esc, markdown = md, fmtTime = fmtWhen,
 } = {}){
@@ -722,7 +723,6 @@ export function decisionRowHTML(surface, {
   const sel = d.selected || {};
   const title = d.title != null ? String(d.title) : "";
   const selName = sel.name != null ? String(sel.name) : (sel.key != null ? String(sel.key) : "");
-  const summary = "Auto-approved: " + title + (selName ? " \u2014 " + selName : "");
   const opts = Array.isArray(d.options) ? d.options : [];
   const optsHTML = opts.map(o => {
     const key = o && o.key != null ? String(o.key) : "";
@@ -747,15 +747,18 @@ export function decisionRowHTML(surface, {
     ? `<div class="decision-row"><span class="k">Reason</span>` +
       ` <div class="decision-reason">${markdown(reason)}</div></div>`
     : "";
-  return `<details class="decision" data-record="${escape(String(s.record ?? ""))}"` +
+  return `<div class="decision" data-record="${escape(String(s.record ?? ""))}"` +
     ` data-request="${escape(req)}">` +
-    `<summary class="decision-sum">${escape(summary)}</summary>` +
+    `<div class="decision-head"><span class="decision-state">Auto-approved</span>` +
+      (selName ? `<span class="decision-selected">\u2014 ${escape(selName)}</span>` : "") +
+    `</div>` +
+    `<div class="decision-approved">${verbHTML ? verbHTML : ""}${bodyHTML}</div>` +
+    `<details class="decision-meta">` +
+    `<summary class="decision-sum">Audit details</summary>` +
     `<div class="decision-body">` +
     (when ? `<div class="decision-row"><span class="k">Time</span> ${when}</div>` : "") +
     (agent ? `<div class="decision-row"><span class="k">Agent</span> ${escape(agent)}</div>` : "") +
     (toolKind ? `<div class="decision-row"><span class="k">Tool</span> ${escape(toolKind)}</div>` : "") +
-    `<div class="decision-row"><span class="k">Command</span>` +
-      `${verbHTML ? " " + verbHTML : ""} ${bodyHTML}</div>` +
     reasonHTML +
     `<div class="decision-row"><span class="k">Options</span>` +
       `<ul class="decision-opts">${optsHTML}</ul></div>` +
@@ -764,7 +767,7 @@ export function decisionRowHTML(surface, {
       ` <span class="aa-kind">(${escape(selKind)})</span></div>` +
     `<div class="decision-row"><span class="k">Request</span> <code>${escape(req)}</code></div>` +
     `<div class="decision-row"><span class="k">Lease</span> <code>${escape(lease)}</code></div>` +
-    `</div></details>`;
+    `</div></details></div>`;
 }
 
 /* ---------- feature factory ---------- */

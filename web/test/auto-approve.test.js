@@ -189,12 +189,15 @@ const sampleDecision = {
   },
 };
 
-test("P4 decisionRowHTML: compact summary, expandable details, full escape, no bubble actions", () => {
+test("P4 decisionRowHTML: visible approved request, expandable audit, full escape, no bubble actions", () => {
   const html = decisionRowHTML(sampleDecision, { escape: esc, fmtTime: t => t });
   assert.match(html, /class="decision"/);
-  assert.match(html, /Auto-approved:.*go test/);
+  assert.match(html, /class="decision-head"[^>]*>[\s\S]*Auto-approved/);
   assert.match(html, /Allow once/);
-  assert.match(html, /<details/);
+  assert.match(html, /class="decision-approved"/);
+  assert.match(html, /<details class="decision-meta"/);
+  assert.ok(html.indexOf('class="decision-approved"') < html.indexOf('class="decision-meta"'),
+    "the formatted request is visible before the collapsed audit metadata");
   assert.match(html, /lease-abc/);
   assert.match(html, /req-9/);
   assert.match(html, /tool_kind|Tool/);
@@ -208,7 +211,7 @@ test("P4 decisionRowHTML: compact summary, expandable details, full escape, no b
   assert.doesNotMatch(html, /data-bact=/);
   assert.doesNotMatch(html, /fork from here|bookmark|send to/);
   assert.doesNotMatch(html, /data-key=/);
-  // Long command retained in details
+  // The approved command is the visible body, not bare text in the disclosure.
   assert.match(html, /class="decision-cmd"/);
 });
 
@@ -282,8 +285,7 @@ test("P3: a prose ask renders Markdown, a command ask stays a code block", () =>
   assert.doesNotMatch(cmdA[0], /<p>/, "code branch: no <p> inside the command pre");
   assert.doesNotMatch(a, /class="decision-text"/, "execute kind is not prose");
 
-  // B: empty tool_kind + Markdown title → prose container with strong/code.
-  // Summary keeps the raw one-line title (escaped); only the body is Markdown.
+  // B: empty tool_kind + Markdown title → visible prose with strong/code.
   const b = decisionRowHTML(decisionSurface({
     decision: {
       tool_kind: "",
@@ -351,7 +353,7 @@ test("P3: Markdown rendering does not open an injection hole", () => {
   assert.doesNotMatch(proseHTML, /<b>flags<\/b>/i);
 });
 
-test("P3: the summary line stays single-line plain text", () => {
+test("P3: the approved request renders block Markdown before collapsed audit metadata", () => {
   const html = decisionRowHTML(decisionSurface({
     decision: {
       tool_kind: "",
@@ -360,16 +362,38 @@ test("P3: the summary line stays single-line plain text", () => {
       selected: { key: "2", name: "Allow once", kind: "allow" },
     },
   }), { escape: esc, markdown: md, fmtTime: t => t });
+  const approvedAt = html.indexOf('class="decision-approved"');
+  const metaAt = html.indexOf('class="decision-meta"');
+  assert.ok(approvedAt >= 0 && metaAt > approvedAt,
+    "the rich approved request must be outside and before the audit disclosure");
+  const approved = html.slice(approvedAt, metaAt);
+  assert.match(approved, /<h1>heading<\/h1>/);
+  assert.match(approved, /<ul>[\s\S]*<li>bullet<\/li>[\s\S]*<\/ul>/);
+  assert.match(approved, /<pre><code>code<\/code><\/pre>/);
+  assert.match(approved, /<strong>bold<\/strong>/);
+
   const sum = html.match(/class="decision-sum"[^>]*>([\s\S]*?)<\/summary>/);
   assert.ok(sum, ".decision-sum present");
-  const content = sum[1];
-  assert.doesNotMatch(content, /<p[\s>]/i);
-  assert.doesNotMatch(content, /<pre[\s>]/i);
-  assert.doesNotMatch(content, /<ul[\s>]/i);
-  assert.doesNotMatch(content, /<h[1-3][\s>]/i);
-  // Still plain-escaped text for the human one-liner.
-  assert.match(content, /Auto-approved:/);
-  assert.match(content, /Allow once/);
+  assert.match(sum[1], /Audit details/);
+  assert.doesNotMatch(sum[1], /heading|bullet|code|bold/,
+    "the disclosure label must not duplicate or flatten the request");
+});
+
+test("P3: multiline tool commands are visibly pre-wrapped in monospace", () => {
+  const html = decisionRowHTML(decisionSurface({
+    decision: {
+      tool_kind: "execute",
+      title: "git status --short\ngo test ./...",
+      reason: "",
+    },
+  }), { escape: esc, markdown: md, fmtTime: t => t });
+  const approvedAt = html.indexOf('class="decision-approved"');
+  const metaAt = html.indexOf('class="decision-meta"');
+  const approved = html.slice(approvedAt, metaAt);
+  assert.match(approved, /<pre class="decision-cmd">git status --short\ngo test \.\/\.\.\.<\/pre>/);
+  const cmdCSS = ruleBody(chatCss, /\.decision-cmd\s*\{([^}]+)\}/);
+  assert.match(cmdCSS, /ui-monospace/);
+  assert.match(cmdCSS, /white-space:\s*pre-wrap/);
 });
 
 test("P3: the shared body helper serves both the live ask and the audit", () => {
@@ -946,7 +970,8 @@ test("P4 decisions render in live segment order; history uses same path; no bubb
   feature.bind();
   await feature.render();
   assert.match(roots.msgs.innerHTML, /class="decision"/);
-  assert.match(roots.msgs.innerHTML, /Auto-approved:/);
+  assert.match(roots.msgs.innerHTML, /class="decision-state"[^>]*>Auto-approved</);
+  assert.match(roots.msgs.innerHTML, /class="decision-approved"/);
   assert.match(roots.msgs.innerHTML, /&lt;script&gt;/);
   assert.doesNotMatch(roots.msgs.innerHTML, /data-bact=/);
   // Decision sits among turns by record order (record 5 after turn record 4).
@@ -1004,7 +1029,8 @@ test("P4 history segments render decisions; toggle off does not remove durable r
   assert.match(roots.msgs.innerHTML, /class="decision"/);
   // Count badge off does not remove decisions
   assert.equal(roots.autoapprove.getAttribute("aria-pressed"), "false");
-  assert.match(roots.msgs.innerHTML, /Auto-approved:/);
+  assert.match(roots.msgs.innerHTML, /class="decision-state"[^>]*>Auto-approved</);
+  assert.match(roots.msgs.innerHTML, /class="decision-approved"/);
   feature.destroy();
 });
 
