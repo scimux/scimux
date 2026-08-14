@@ -4,11 +4,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { usageAgentDisplayName, usageBadgeLayout } from "../js/usage.js";
+import {
+  usageAgentDisplayName, usageBadgeLayout, resetRemainingPercent, usageResetBars,
+} from "../js/usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
 const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
+const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
 
 test("usage.js is pure; app imports it; index has #sysgrok", () => {
   assert.match(appSrc, /from "\.\/usage\.js"/);
@@ -74,4 +77,57 @@ test("unavailable and empty windows", () => {
   assert.equal(empty.has5h, false);
   assert.equal(empty.hasW, false);
   assert.match(empty.tip, /usage unavailable/);
+});
+
+test("resetRemainingPercent is an accurate clamped determinate gauge", () => {
+  const now = Date.parse("2026-08-14T12:00:00Z");
+  assert.equal(resetRemainingPercent("2026-08-14T14:30:00Z", 300, now), 50);
+  assert.equal(resetRemainingPercent("2026-08-19T00:00:00Z", 10080, now), 64.28571428571429);
+  assert.equal(resetRemainingPercent("2026-08-14T11:00:00Z", 300, now), 0,
+    "a stale reset drains to zero");
+  assert.equal(resetRemainingPercent("2026-08-15T12:00:00Z", 300, now), 100,
+    "an out-of-range future reset clamps to full");
+  assert.equal(resetRemainingPercent("", 300, now), null);
+  assert.equal(resetRemainingPercent("not-a-date", 300, now), null);
+  assert.equal(resetRemainingPercent("2026-08-14T14:30:00Z", 0, now), null);
+});
+
+test("usageResetBars returns two labeled rails, but Grok only its weekly rail", () => {
+  const now = Date.parse("2026-08-14T12:00:00Z");
+  const two = usageResetBars({
+    five_hour_remaining: 40,
+    five_hour_reset: "2026-08-14T14:30:00Z",
+    weekly_remaining: 70,
+    weekly_reset: "2026-08-18T00:00:00Z",
+  }, now);
+  assert.deepEqual(two.map(x => x.key), ["5h", "W"]);
+  assert.equal(two[0].remainingPercent, 50);
+
+  const grok = usageResetBars({
+    weekly_remaining: 86,
+    weekly_reset: "2026-08-18T00:00:00Z",
+  }, now);
+  assert.deepEqual(grok.map(x => x.key), ["W"]);
+
+  const unknown = usageResetBars({
+    five_hour_remaining: 40,
+    weekly_remaining: 70,
+  }, now);
+  assert.deepEqual(unknown, [], "unknown reset times emit no misleading empty rail");
+});
+
+test("phone badge owns minimal noninteractive reset rails and one VoiceOver summary", () => {
+  const badge = appSrc.slice(appSrc.indexOf("function usageBadge("), appSrc.indexOf("function renderUsage("));
+  assert.match(badge, /usageResetBars\(/);
+  assert.match(badge, /<span class="resetrail"[^>]*aria-hidden="true"/,
+    "the visual rails are inert descendants, not controls");
+  assert.doesNotMatch(badge, /<button[^>]*resetrail|resetrail[^`]*<button/);
+  assert.match(badge, /class="ubadge"[^>]*role="img"[^>]*aria-label=/,
+    "VoiceOver reads one concise badge summary, not separate micro-elements");
+  assert.match(badge, /class="Labbr"[^>]*>[\s\S]*resetrail/,
+    "rails live in the compact phone presentation");
+
+  assert.match(layoutCss, /@media\s*\(max-width:\s*520px\)[\s\S]*\.Labbr\s*\{[^}]*display:\s*inline-flex/);
+  assert.match(layoutCss, /\.resetrail\s*\{[^}]*height:\s*2px[^}]*background:/s);
+  assert.match(layoutCss, /\.resetrail\s+i\s*\{[^}]*height:\s*100%[^}]*background:/s);
 });

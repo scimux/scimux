@@ -172,11 +172,21 @@
 @keyframes rolldn { from { transform: translateY(-9px); opacity: 0; } }
 @keyframes rollup { from { transform: translateY(9px);  opacity: 0; } }
 .Labbr { display: none; }
+.uwindow { display: inline-flex; flex-direction: column; min-width: 0; }
+.uwindow-label { display: inline-flex; align-items: center; white-space: nowrap; }
+/* Phone-only time-to-reset gauge: markup lives in the hidden compact branch,
+   so desktop/iPad keep their exact reset labels. Neutral ink distinguishes
+   reset runway from the green/orange/red quota-fuel meaning. */
+.resetrail {
+  display: block; width: 100%; height: 2px; margin-top: 2px; overflow: hidden;
+  border-radius: 1px; background: color-mix(in srgb, var(--dim) 20%, transparent);
+}
+.resetrail i { display: block; height: 100%; background: var(--dim); }
 @media (max-width: 520px) {
   #statusbar { gap: 10px; padding-left: 12px; padding-right: 12px; }
   #statusbar .sysphase { gap: 8px; }
   .Lfull { display: none; }
-  .Labbr { display: inline; }
+  .Labbr { display: inline-flex; align-items: flex-start; gap: 8px; }
 }
 
 /* ---------- app shell: chat is the base layer, cards slide over (phone) ---------- */

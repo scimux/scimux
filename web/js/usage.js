@@ -30,3 +30,32 @@ export function usageBadgeLayout(agent, v){
   if (v.plan) tip += ` (${v.plan})`;
   return { name, available: true, has5h, hasW, tip };
 }
+
+/* Determinate time-to-reset gauge. The value is remaining runway (full just
+   after a reset, empty at the next reset), matching the subscription fuel
+   rings' high-is-good direction. Unknown/bad resets stay absent; callers must
+   not turn missing provider data into a misleading empty rail. */
+export function resetRemainingPercent(reset, windowMinutes, nowMs = Date.now()){
+  const resetMs = reset instanceof Date ? reset.getTime() : Date.parse(reset || "");
+  const durationMs = Number(windowMinutes) * 60_000;
+  const now = Number(nowMs);
+  if (!Number.isFinite(resetMs) || !(durationMs > 0) || !Number.isFinite(now)) return null;
+  return Math.max(0, Math.min(100, 100 * (resetMs - now) / durationMs));
+}
+
+/* Phone reset rails in reading order. Window presence follows the quota
+   surface: Grok has only W; Claude/Codex normally have 5h then W. A provider
+   can report quota without a reset time, in which case that rail is omitted. */
+export function usageResetBars(v, nowMs = Date.now()){
+  const u = v || {};
+  const out = [];
+  if (u.five_hour_remaining != null){
+    const remainingPercent = resetRemainingPercent(u.five_hour_reset, 300, nowMs);
+    if (remainingPercent != null) out.push({ key: "5h", remainingPercent });
+  }
+  if (u.weekly_remaining != null){
+    const remainingPercent = resetRemainingPercent(u.weekly_reset, 10_080, nowMs);
+    if (remainingPercent != null) out.push({ key: "W", remainingPercent });
+  }
+  return out;
+}

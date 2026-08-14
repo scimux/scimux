@@ -25,7 +25,7 @@ import {
   fmtNoteMeta, bubbleTitle, cssRGB as cssRGBMod,
   contrastText as contrastTextMod,
 } from "./format.js";
-import { usageBadgeLayout } from "./usage.js";
+import { usageBadgeLayout, usageResetBars } from "./usage.js";
 import {
   hashStr, laneList as laneListMod, sortedLaneList as sortedLaneListMod,
   laneById as laneByIdMod, laneName as laneNameMod, laneColor as laneColorMod,
@@ -406,7 +406,7 @@ function usageBadge(agent, v){
   const logo = `<span class="agent-logo" aria-hidden="true">${agentLogo(agent)}</span>`;
   const layout = usageBadgeLayout(agent, v);
   if (!layout.available){
-    return `<span class="ubadge u-off" title="${layout.tip}">${logo}` +
+    return `<span class="ubadge u-off" role="img" title="${esc(layout.tip)}" aria-label="${esc(layout.tip)}">${logo}` +
            `<span class="Lfull">--</span><span class="Labbr">--</span></span>`;
   }
   const fh = v.five_hour_remaining, wk = v.weekly_remaining;
@@ -414,18 +414,28 @@ function usageBadge(agent, v){
   const num = (x) => x == null ? "--" : Math.round(x);
   const fhc = usageRemClass(fh), wkc = usageRemClass(wk);
   const fg = fuelGauge(fh), wg = fuelGauge(wk);
-  let fullInner = "", abbrInner = "", tip = layout.name + ":";
+  const resetBars = new Map(usageResetBars(v).map(x => [x.key, x]));
+  const resetRail = key => {
+    const bar = resetBars.get(key);
+    if (!bar) return "";
+    return `<span class="resetrail" aria-hidden="true"><i style="width:${bar.remainingPercent}%"></i></span>`;
+  };
+  let fullInner = "", tip = layout.name + ":";
+  const abbrCells = [];
   if (layout.has5h) {
     fullInner += `${fg}5h <b class="${fhc}">${num(fh)}%</b>${fhr ? " " + esc(fhr) : ""}`;
-    abbrInner += `${fg}5h <b class="${fhc}">${num(fh)}%</b>`;
+    abbrCells.push(`<span class="uwindow"><span class="uwindow-label">` +
+      `${fg}5h <b class="${fhc}">${num(fh)}%</b></span>${resetRail("5h")}</span>`);
     tip += ` 5h ${num(fh)}% left${fhr ? ", resets " + fhr : ""}`;
   }
-  if (layout.has5h && layout.hasW) { fullInner += " · "; abbrInner += " · "; tip += " ·"; }
+  if (layout.has5h && layout.hasW) { fullInner += " · "; tip += " ·"; }
   if (layout.hasW) {
     fullInner += `${wg}W <b class="${wkc}">${num(wk)}%</b>${wkr ? " " + esc(wkr) : ""}`;
-    abbrInner += `${wg}W <b class="${wkc}">${num(wk)}%</b>`;
+    abbrCells.push(`<span class="uwindow"><span class="uwindow-label">` +
+      `${wg}W <b class="${wkc}">${num(wk)}%</b></span>${resetRail("W")}</span>`);
     tip += ` weekly ${num(wk)}% left${wkr ? ", resets " + wkr : ""}`;
   }
+  let abbrInner = abbrCells.join("");
   if (!layout.has5h && !layout.hasW) {
     fullInner = abbrInner = "--";
     tip += " usage unavailable";
@@ -433,7 +443,7 @@ function usageBadge(agent, v){
   if (v.plan) tip += ` (${v.plan})`;
   const full = `<span class="Lfull">${fullInner}</span>`;
   const abbr = `<span class="Labbr">${abbrInner}</span>`;
-  return `<span class="ubadge" title="${esc(tip)}">${logo}${full}${abbr}</span>`;
+  return `<span class="ubadge" role="img" title="${esc(tip)}" aria-label="${esc(tip)}">${logo}${full}${abbr}</span>`;
 }
 function renderUsage(snap){
   const a = (snap && snap.agents) || {};
