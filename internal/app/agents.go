@@ -377,8 +377,8 @@ func grokDefaultEfforts() modelEffort {
 
 // parseGrokModels extracts the default model id and the available-model list
 // from `grok models` human text. Defensive: login banners and blank lines are
-// ignored; bullet lines `* <id>` (optional "(default)") contribute ids; the
-// "Default model:" line supplies the float-to-front default.
+// ignored; bullet lines `* <id>` or `- <id>` (optional "(default)") contribute
+// ids; the "Default model:" line supplies the float-to-front default.
 func parseGrokModels(out string) (defaultModel string, models []string) {
 	seen := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
@@ -390,11 +390,15 @@ func parseGrokModels(out string) (defaultModel string, models []string) {
 			defaultModel = strings.TrimSpace(rest)
 			continue
 		}
-		// "* grok-4.5" or "* grok-4.5 (default)"
-		if !strings.HasPrefix(line, "*") {
+		// "* grok-4.6 (default)" or "- grok-4.5"
+		if strings.HasPrefix(line, "*") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		} else if strings.HasPrefix(line, "-") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		} else {
 			continue
 		}
-		id := strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		id := line
 		if i := strings.IndexByte(id, ' '); i >= 0 {
 			id = id[:i]
 		}

@@ -38,18 +38,64 @@ func TestAgentCommandPiOpencode(t *testing.T) {
 }
 
 func TestParseGrokModels(t *testing.T) {
-	out := "You are logged in with grok.com.\n\nDefault model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n  * grok-code-fast-1\n"
-	def, models := parseGrokModels(out)
-	if def != "grok-4.5" {
-		t.Errorf("default = %q, want grok-4.5", def)
+	// `grok models` marks the default with * and every other id with -;
+	// older CLIs used * for the whole list. Both markers are catalog lines.
+	cases := []struct {
+		name    string
+		out     string
+		wantDef string
+		want    []string
+	}{
+		{
+			name:    "current mixed bullets",
+			out:     "You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n",
+			wantDef: "grok-4.6",
+			want:    []string{"grok-4.6", "grok-4.5"},
+		},
+		{
+			name:    "legacy all asterisks",
+			out:     "You are logged in with grok.com.\n\nDefault model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n  * grok-code-fast-1\n",
+			wantDef: "grok-4.5",
+			want:    []string{"grok-4.5", "grok-code-fast-1"},
+		},
+		{
+			name:    "dash only",
+			out:     "Default model: grok-4.5\n- grok-4.5\n- grok-code-fast-1\n",
+			wantDef: "grok-4.5",
+			want:    []string{"grok-4.5", "grok-code-fast-1"},
+		},
+		{
+			name: "duplicate star and dash",
+			out:  "* grok-4.6 (default)\n- grok-4.6\n- grok-4.5\n",
+			want: []string{"grok-4.6", "grok-4.5"},
+		},
+		{
+			name:    "banner and headings are not models",
+			out:     "You are logged in with grok.com.\nAvailable models:\nDefault model: grok-4.6\n",
+			wantDef: "grok-4.6",
+		},
+		{
+			name: "empty bullet skipped",
+			out:  "*   \n- \n* grok-4.6\n",
+			want: []string{"grok-4.6"},
+		},
 	}
-	want := []string{"grok-4.5", "grok-code-fast-1"}
-	if !reflect.DeepEqual(models, want) {
-		t.Errorf("models = %v, want %v", models, want)
-	}
-	// Banner-only / empty → no models so detectAgents falls back.
-	if _, m := parseGrokModels("You are logged in with grok.com.\n"); len(m) != 0 {
-		t.Errorf("empty catalog = %v, want nil/empty", m)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def, models := parseGrokModels(tc.out)
+			if def != tc.wantDef {
+				t.Errorf("default = %q, want %q", def, tc.wantDef)
+			}
+			if len(tc.want) == 0 {
+				if len(models) != 0 {
+					t.Errorf("models = %v, want nil/empty", models)
+				}
+				return
+			}
+			if !reflect.DeepEqual(models, tc.want) {
+				t.Errorf("models = %v, want %v", models, tc.want)
+			}
+		})
 	}
 }
 
@@ -415,7 +461,7 @@ printf '%s\n' 'openai/gpt-5.5' 'anthropic/claude-sonnet-4-5'
 `)
 	writeScript(t, binDir, "grok", `
 if [ "$1" != "models" ]; then exit 2; fi
-printf '%s\n' 'Default model: grok-4.5' '* grok-code-fast-1' '* grok-4.5 (default)'
+printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (default)'
 `)
 	t.Setenv("PATH", binDir)
 
