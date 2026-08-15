@@ -94,6 +94,47 @@ func TestPollReconcilesLateClaudeInitialDelivery(t *testing.T) {
 	}
 }
 
+func TestReconcileClaudeInitialDeliveryCanonicalNewlines(t *testing.T) {
+	// AT-CR-03/04: late reconciliation uses the same canonical compare as the
+	// synchronous create path. A CR-only mismatch must self-heal; different
+	// text must not.
+	cases := []struct {
+		at, name, prompt, turn string
+		wantLocked             bool
+	}{
+		{"AT-CR-03", "cr turn heals lf prompt", "irreplaceable\nprompt", "irreplaceable\rprompt", false},
+		{"AT-CR-03", "crlf turn heals lf prompt", "irreplaceable\nprompt", "irreplaceable\r\nprompt", false},
+		{"AT-CR-04", "different late turn stays uncertain", "irreplaceable\nprompt", "different prompt", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.at+"/"+tc.name, func(t *testing.T) {
+			f := &fakeTmux{list: []string{"cl1"}, capture: "working"}
+			a := newTestApp(t, f)
+			if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "claude.jsonl")
+			appendFile(t, path, claudeTurn("user", tc.turn, "2026-08-14T12:00:00Z"))
+			n := &Node{
+				ID: "cl1", Title: "Claude", Agent: "claude", Dir: a.home,
+				Prompt: tc.prompt, Transcript: path,
+			}
+			a.nodes = []*Node{n}
+			a.byID[n.ID] = n
+			a.sendState[n.ID] = sendInitialUnconfirmed
+
+			a.poll()
+
+			a.mu.Lock()
+			_, locked := a.sendState[n.ID]
+			a.mu.Unlock()
+			if locked != tc.wantLocked {
+				t.Fatalf("send gate locked = %v, want %v", locked, tc.wantLocked)
+			}
+		})
+	}
+}
+
 func newTailerTestApp() *app {
 	a := &app{tailers: map[string]*transcript.Tailer{},
 		chatMark: map[string]chatMark{}, staleChat: map[string]bool{}}

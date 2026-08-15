@@ -23,6 +23,11 @@ type storeRecord struct {
 	// that still names the launch session cannot rebind the dead file after
 	// a /clear (P2a). Omitempty keeps older record types unchanged.
 	SessionID string `json:"session_id,omitempty"`
+	// HookID, Generation, and Cause belong to claude-hook / claude-binding
+	// records. Replay ignores those types until Phase 2 wires them.
+	HookID     string `json:"hook_id,omitempty"`
+	Generation int    `json:"generation,omitempty"`
+	Cause      string `json:"cause,omitempty"`
 	// "key" records are the answered-dialog evidence trail. Replay ignores
 	// them — they carry no node state.
 	//

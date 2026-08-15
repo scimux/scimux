@@ -142,6 +142,35 @@ func TestFindClaudeTranscript(t *testing.T) {
 	}
 }
 
+func TestFindClaudeTranscriptRequiresUniqueMatch(t *testing.T) {
+	// AT-BIND-13: a known UUID with exactly one path still binds; two files
+	// with the same UUID basename bind nothing.
+	home := t.TempDir()
+	id := "11111111-2222-3333-4444-555555555556"
+	p1 := filepath.Join(home, ".claude", "projects", "-w-one")
+	p2 := filepath.Join(home, ".claude", "projects", "-w-two")
+	if err := os.MkdirAll(p1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(p2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	one := filepath.Join(p1, id+".jsonl")
+	if err := os.WriteFile(one, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := FindClaudeTranscript(home, id)
+	if !ok || got != one {
+		t.Fatalf("unique match = %q ok=%v, want %q", got, ok, one)
+	}
+	if err := os.WriteFile(filepath.Join(p2, id+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if path, ok := FindClaudeTranscript(home, id); ok {
+		t.Fatalf("duplicate UUID matches must bind nothing, got %q", path)
+	}
+}
+
 func TestClaudeBridgeReady(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")

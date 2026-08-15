@@ -168,6 +168,12 @@ func (a *app) initMaps() {
 	if a.autoApprove == nil {
 		a.autoApprove = map[string]*autoApproveState{}
 	}
+	if a.claudeHooks == nil {
+		a.claudeHooks = map[string]string{}
+	}
+	if a.claudeGens == nil {
+		a.claudeGens = map[string]int{}
+	}
 }
 
 // ---------- model ----------
@@ -311,6 +317,11 @@ type app struct {
 	// for a pane pid (sessionFromPane). Tests set it: the process tree behind
 	// a fake tmux pane is not reachable through the Runner seam.
 	paneSession func(pid string) string
+	// claudeHooks maps a node id to its private hook capability id. It is not
+	// a Node JSON field and must never appear on /api/state.
+	claudeHooks map[string]string
+	// claudeGens is the per-node Claude binding generation (claude-fixes.md D7).
+	claudeGens map[string]int
 
 	// storeMu serializes every append to nodes.jsonl, independent of a.mu (some
 	// callers hold a.mu, some do not). It gives the append-only store one

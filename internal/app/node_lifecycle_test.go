@@ -633,6 +633,49 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 	})
 }
 
+func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
+	// AT-CR-01/02/04/05: only CR/LF/CRLF are canonicalized. The helper is
+	// not wired yet, so matching text that differs only by line endings stays
+	// unconfirmed, and genuine mismatches plus internal whitespace stay as today.
+	userTurn := func(text string) string {
+		return fmt.Sprintf(`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":%q}}`, text)
+	}
+	cases := []struct {
+		at, name, prompt, turn string
+		want                   initialDelivery
+	}{
+		{"AT-CR-01", "lf prompt vs cr turn", "long\ninitial prompt", "long\rinitial prompt", initialAcknowledged},
+		{"AT-CR-02", "lf prompt vs crlf turn", "long\ninitial prompt", "long\r\ninitial prompt", initialAcknowledged},
+		{"AT-CR-04", "different text stays unconfirmed", "keep me", "keep me!", initialUnconfirmed},
+		{"AT-CR-05", "repeated spaces are not collapsed", "a  b\n\nc", "a b\n\nc", initialUnconfirmed},
+		{"AT-CR-05", "tabs are not collapsed", "a\t\tb", "a\tb", initialUnconfirmed},
+		{"AT-CR-05", "single-line exact match", "hello", "hello", initialAcknowledged},
+	}
+	for _, tc := range cases {
+		t.Run(tc.at+"/"+tc.name, func(t *testing.T) {
+			f := &fakeTmux{captureAfterEnter: "pane moved but that is not delivery proof"}
+			a := newTestApp(t, f)
+			a.claudeReadyTimeout = 200 * time.Millisecond
+			a.claudeDeliveryTimeout = 200 * time.Millisecond
+			a.claudeInitialPoll = 5 * time.Millisecond
+			n := &Node{ID: "claude-nl", Agent: "claude", SessionID: "sid-nl", Prompt: tc.prompt}
+			path := writeClaudeTranscript(t, a.home, n.SessionID)
+			appendLines(t, path,
+				`{"type":"system","subtype":"bridge_status","sessionId":"sid-nl","content":"ready"}`)
+			go func() {
+				deadline := time.Now().Add(150 * time.Millisecond)
+				for !f.didSendEnter() && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				appendLines(t, path, userTurn(tc.turn))
+			}()
+			if got := a.deliverClaudeInitialPrompt(n); got != tc.want {
+				t.Fatalf("delivery = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAgentCommandPiOpencodeMatrix(t *testing.T) {
 	// Exact pi / opencode fallback commands; effort is not a supported flag on
 	// either harness via agentCommand (characterize: Effort is ignored).
