@@ -1238,3 +1238,104 @@ func TestHandleNewNodeDoesNotExposeHookCapability(t *testing.T) {
 		t.Fatalf("create leaked hook capability: %s", rec.Body.String())
 	}
 }
+
+// claudeFreshClearLines reproduces the preamble Claude Code writes into a
+// /clear successor's transcript before the next human turn: a mode record, the
+// remote-control bridge record, a file-history snapshot, and the isMeta
+// local-command caveat. ParseLine recognizes none of them, so the file has no
+// content time at all for as long as the human stays away.
+func claudeFreshClearLines(sid string) []string {
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	return []string{
+		`{"type":"mode","mode":"normal","sessionId":"` + sid + `"}`,
+		`{"type":"bridge-session","sessionId":"` + sid + `","bridgeSessionId":"cse_test","lastSequenceNum":0}`,
+		`{"type":"file-history-snapshot","messageId":"m1","snapshot":{"messageId":"m1","trackedFileBackups":{},"timestamp":"` + stamp + `"},"isSnapshotUpdate":false}`,
+		`{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"<local-command-caveat>caveat</local-command-caveat>"},"isMeta":true,"uuid":"u1","timestamp":"` + stamp + `"}`,
+	}
+}
+
+// A transcript with no recognized turns yet is absence of evidence, not proof
+// of staleness. Observed live against claude 2.1.224: the first active→quiet
+// transition after a /clear retired and tombstoned the freshly bound successor,
+// leaving the node permanently in peek.
+func TestContentlessTranscriptIsNotRetiredAsStale(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cur := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeFreshClearLines(hookSIDOwn)...)
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, cur)
+	writeSeedLog(t, a, n.ID, "before")
+	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
+
+	a.maybeRelinkTranscript(n)
+
+	if n.Transcript != cur || n.SessionID != hookSIDOwn {
+		t.Fatalf("contentless transcript was retired: %q / %q", n.Transcript, n.SessionID)
+	}
+	if a.deadTranscripts[n.ID][cur] {
+		t.Fatal("contentless transcript was tombstoned; a later bind can never recover it")
+	}
+	for _, rec := range keyRecords(t, a.storePath) {
+		if rec.Type == "transcript-retired" && rec.ID == n.ID {
+			t.Fatal("contentless transcript wrote a transcript-retired record")
+		}
+	}
+}
+
+// A link established after the phase began cannot be stale for that phase, even
+// if the file's newest content predates it.
+func TestRecentlyBoundTranscriptIsNotRetiredAsStale(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cur := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -2*time.Hour))
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, cur)
+	writeSeedLog(t, a, n.ID, "before")
+	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
+	a.claudeBoundAt[n.ID] = time.Now()
+
+	a.maybeRelinkTranscript(n)
+
+	if n.Transcript != cur || n.SessionID != hookSIDOwn {
+		t.Fatalf("link bound inside this phase was retired: %q / %q", n.Transcript, n.SessionID)
+	}
+}
+
+// The whole /clear rollover, in the order the poller runs it: the successor is
+// bound by the hook, then the next active→quiet transition must leave it alone.
+func TestClearHookSuccessorSurvivesNextPollTransition(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("before clear", -time.Minute))
+	succ := writeClaudeProject(t, a.home, "-w-proj", hookSIDSuccessor, claudeFreshClearLines(hookSIDSuccessor)...)
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
+	writeSeedLog(t, a, n.ID, "before")
+
+	a.retireTranscript(n) // what the web /clear and the pane-typed /clear both reach
+	if err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
+		HookEventName: "SessionStart", Source: "clear",
+		SessionID: hookSIDSuccessor, TranscriptPath: succ, Cwd: "/w/proj",
+	}); err != nil {
+		t.Fatalf("clear hook: %v", err)
+	}
+	if n.Transcript != succ {
+		t.Fatalf("clear hook did not bind successor: %q", n.Transcript)
+	}
+
+	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
+	a.maybeRelinkTranscript(n)
+
+	if n.Transcript != succ || n.SessionID != hookSIDSuccessor {
+		t.Fatalf("poll transition after /clear dropped the successor: %q / %q", n.Transcript, n.SessionID)
+	}
+	if a.deadTranscripts[n.ID][succ] {
+		t.Fatal("successor tombstoned; the node can never rebind it")
+	}
+}

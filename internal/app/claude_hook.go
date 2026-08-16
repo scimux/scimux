@@ -528,6 +528,7 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 	}
 	n.Transcript = ev.TranscriptPath
 	n.SessionID = ev.SessionID
+	a.claudeBoundAt[nodeID] = time.Now()
 	delete(a.pathClaims, ev.TranscriptPath)
 	return nil
 }

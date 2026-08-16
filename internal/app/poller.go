@@ -424,17 +424,27 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	a.mu.Lock()
 	cur := n.Transcript
 	since, ok := a.activeSince[n.ID]
+	bound := a.claudeBoundAt[n.ID]
 	a.mu.Unlock()
-	if !ok {
+	if !ok || cur == "" {
 		return
 	}
 	since = since.Add(-10 * time.Second)
-	if cur != "" {
-		if ct, ok := transcript.NewestContentTime(cur); ok && ct.After(since) {
-			return
-		}
-		a.retireTranscript(n)
+	// A link established inside the phase being judged cannot have missed it.
+	if bound.After(since) {
+		return
 	}
+	// No recognized turn yet is absence of evidence, not proof of staleness.
+	// Claude Code fills a fresh /clear successor with mode, bridge-session,
+	// file-history-snapshot and an isMeta caveat record — ParseLine recognizes
+	// none of them — so the file carries no content time until the next human
+	// turn. Retiring on that tombstones the successor and strands the node in
+	// peek for good (observed against claude 2.1.224).
+	ct, ok := transcript.NewestContentTime(cur)
+	if !ok || ct.After(since) {
+		return
+	}
+	a.retireTranscript(n)
 }
 
 // The quiet gate is structurally blind to one case: an approval dialog with
@@ -701,6 +711,7 @@ func (a *app) discoverTranscript(n *Node) {
 	}
 	a.mu.Lock()
 	n.Transcript = path
+	a.claudeBoundAt[n.ID] = time.Now()
 	delete(a.pathClaims, path)
 	a.mu.Unlock()
 }

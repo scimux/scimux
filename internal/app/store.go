@@ -251,6 +251,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.claudeHooks, id)
 	delete(a.claudeGens, id)
 	delete(a.pendingClaudeHooks, id)
+	delete(a.claudeBoundAt, id)
 }
 
 // sessionLogPath is the single spelling of a node's session-log location; the

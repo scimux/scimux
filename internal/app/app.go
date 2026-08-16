@@ -177,6 +177,9 @@ func (a *app) initMaps() {
 	if a.pendingClaudeHooks == nil {
 		a.pendingClaudeHooks = map[string]string{}
 	}
+	if a.claudeBoundAt == nil {
+		a.claudeBoundAt = map[string]time.Time{}
+	}
 }
 
 // ---------- model ----------
@@ -328,6 +331,11 @@ type app struct {
 	// pendingClaudeHooks holds a prepared hook id after launch and before the
 	// hook record is persisted at publish time.
 	pendingClaudeHooks map[string]string
+	// claudeBoundAt is when each node's current transcript link was
+	// established. A link younger than the phase being judged cannot be stale
+	// for that phase (maybeRelinkTranscript). In memory only: after a restart
+	// there is no phase to judge either, and the file has content by then.
+	claudeBoundAt map[string]time.Time
 
 	// storeMu serializes every append to nodes.jsonl, independent of a.mu (some
 	// callers hold a.mu, some do not). It gives the append-only store one
