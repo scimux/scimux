@@ -98,9 +98,34 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   the same PID (multi-thread per app-server process is first-class there).
   In both, the seam is appended only after the protocol call succeeded;
   Claude gets a path-less "detached" seam at retire time and the successor
-  bind only from that node's validated SessionStart hook. Fork stays the only path that can
-  change launch config: a forked node inherits agent/model/effort/dir but
-  never conversation history.
+  bind only from that node's validated SessionStart hook. Fork stays the only
+  path that can change launch config: a forked node inherits
+  agent/model/effort/dir but never conversation history.
+- **A Claude transcript is bound only by that node's own SessionStart hook.**
+  Every Claude launch mints a fresh hook bundle under
+  `~/.scimux/claude-hooks/<hex-id>/` (`settings.json` 0600, `inbox/` and
+  `processed/` 0700) and passes it as `--settings`; the file registers scimux
+  itself as the `SessionStart` command, so the hook firing *is* the
+  process→transcript ownership proof. `--session-id` seeds the first
+  transcript, `--continue` is forbidden, and `--settings` must precede
+  `--remote-control` (an optional-value flag that would otherwise swallow it).
+  Bindings are per-node and generation-numbered (`claude-binding` records,
+  replayed *after* ordinary node records so a later title edit cannot wipe
+  one); retired paths and session ids become `deadTranscripts` tombstones that
+  can never be rebound for that node. This is deliberately **fail-closed**: no
+  hook means no chat, and the node degrades to peek rather than guessing an
+  owner from the pane cmdline. Consequences worth knowing before "fixing" a
+  bug report: spurious pane noise that trips the staleness backstop drops a
+  node to peek until the next `/clear` or relaunch hook; and because
+  `settings.json` bakes `os.Executable()` at launch, a pane that outlives a
+  *move* of the scimux binary keeps a settings file pointing nowhere, so its
+  next `/clear` silently fails to bind. Rebuilding in place is harmless (Go
+  captures the path at process start — no `(deleted)` suffix — and the path
+  resolves to the new binary), and every fresh launch bakes the current path,
+  so this needs a moved-or-deleted binary *plus* a surviving pane *plus* a
+  `/clear`. Never retire a transcript on absent evidence: a just-created
+  successor holds only meta records, so "no recognized content yet" is not
+  staleness (see `maybeRelinkTranscript`).
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from
   pane-change detection). Do not add regexes matching agent TUI strings.
   Needs-input detection follows the same rule: it combines an unresolved
@@ -178,6 +203,21 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
 - Prompts are delivered as a single paste (`load-buffer`/`paste-buffer`),
   then a separate Enter. `send-keys` with raw text would re-interpret
   newlines as submissions.
+- That paste is bracketed (`paste-buffer -d -p`). tmux translates a buffer's
+  newlines to carriage returns, which are indistinguishable from Enter, so
+  without the markers a receiving TUI can only guess from arrival speed
+  whether a block was pasted or typed — under load that guess fails and one
+  prompt lands as several submitted messages (observed against claude
+  2.1.224). tmux emits the markers only when the application has requested
+  bracketed-paste mode, so `-p` is inert for a wrapped `cat` or `bash`
+  (pinned by `TestBracketedPasteIsInertWithoutRequest`).
+- Line endings are normalized to LF before `load-buffer`
+  (`normalizeNewlines`). Because tmux rewrites LF to CR on paste, a CRLF pair
+  would survive as CR CR — two line breaks where the author wrote one, which
+  both corrupts the prompt and breaks first-turn delivery confirmation
+  (the pasted text stops matching `canonicalPrompt`). Only line endings are
+  touched: leading/trailing whitespace, deliberate blank lines, and interior
+  spacing are the user's text.
 - Structured transports keep their protocol-owned first-turn delivery. Owned
   Claude launches with `--remote-control` but without a positional prompt;
   scimux waits for that session's structured `bridge_status`, pastes the first
