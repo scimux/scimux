@@ -17,7 +17,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -799,7 +798,7 @@ func (t *Tailer) Poll() []Turn {
 // we minted ourselves, so a filename match is unambiguous.
 func FindClaudeTranscript(home, sessionID string) (string, bool) {
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", sessionID+".jsonl"))
-	if err != nil || len(matches) == 0 {
+	if err != nil || len(matches) != 1 {
 		return "", false
 	}
 	return matches[0], true
@@ -830,68 +829,4 @@ func ClaudeBridgeReady(path, sessionID string) bool {
 		}
 	}
 	return false
-}
-
-// FindClaudeNewestInDir locates the most recently modified Claude session
-// log for a given working directory — used when adopting a session whose
-// id we don't know (e.g. migrated via --resume). Returns path and the
-// session id (the filename). Claude escapes the cwd into a project dir
-// name by replacing path separators and other specials with '-'.
-func FindClaudeNewestInDir(home, dir string) (path, sessionID string, ok bool) {
-	return FindClaudeNewestInDirSince(home, dir, time.Time{})
-}
-
-var projectDirEsc = regexp.MustCompile(`[^a-zA-Z0-9-]`)
-
-// FindClaudeNewestInDirSince is FindClaudeNewestInDir restricted to session
-// logs whose newest *content* turn is after since — used to re-run discovery
-// when a pane finished a whole working phase that the linked transcript never
-// carried (a /clear or relaunch inside the pane started a new session file).
-// Only a file the phase actually wrote can be the pane's current session:
-// mtime after since is the necessary condition (append-only logs, so mtime
-// bounds the newest record, and files the phase never touched are skipped
-// unread), a newer content turn the sufficient one.
-// When since is zero (adoption), fall back to mtime so an empty just-created
-// session file can still be claimed before its first turn lands.
-func FindClaudeNewestInDirSince(home, dir string, since time.Time) (path, sessionID string, ok bool) {
-	esc := projectDirEsc.ReplaceAllString(dir, "-")
-	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", esc, "*.jsonl"))
-	if err != nil || len(matches) == 0 {
-		return "", "", false
-	}
-	var bestTime time.Time
-	for _, m := range matches {
-		var t time.Time
-		if since.IsZero() {
-			st, err := os.Stat(m)
-			if err != nil {
-				continue
-			}
-			t = st.ModTime()
-		} else {
-			// mtime first, and not merely as an optimization: these logs are
-			// append-only, so mtime is an upper bound on the newest record —
-			// a file untouched since the phase start cannot have carried it.
-			// Reading every log in the directory instead costs seconds on a
-			// long-lived project dir, inside the poll loop.
-			st, err := os.Stat(m)
-			if err != nil || !st.ModTime().After(since) {
-				continue
-			}
-			// Touched is not written-to: confirm with content time so a
-			// trailing metadata record cannot claim the phase (P2b).
-			ct, ok := NewestContentTime(m)
-			if !ok || !ct.After(since) {
-				continue
-			}
-			t = ct
-		}
-		if path == "" || t.After(bestTime) {
-			path, bestTime = m, t
-		}
-	}
-	if path == "" {
-		return "", "", false
-	}
-	return path, strings.TrimSuffix(filepath.Base(path), ".jsonl"), true
 }

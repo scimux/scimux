@@ -75,7 +75,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   append onto dead history. tmux nodes reach the store through the transcript
   mirror (`mirror.go`): the poller projects tailer output into the same
   records, with `source` seam records marking every transcript (re)bind
-  (/clear rollover, relink, rotation) as the dedupe watermark. New transports
+  (/clear rollover, hook bind, rotation) as the dedupe watermark. New transports
   write the same records to the same directory — do not introduce
   per-transport log formats or directories. The store is also the **chat
   read path for every transport** (phase 3): handleChat renders the log's
@@ -97,8 +97,8 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   fresh PID self-evidently carries no context); codex opens a new thread on
   the same PID (multi-thread per app-server process is first-class there).
   In both, the seam is appended only after the protocol call succeeded;
-  Claude gets a path-less "detached" seam at retire time and the real seam
-  at relink. Fork stays the only path that can
+  Claude gets a path-less "detached" seam at retire time and the successor
+  bind only from that node's validated SessionStart hook. Fork stays the only path that can
   change launch config: a forked node inherits agent/model/effort/dir but
   never conversation history.
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from

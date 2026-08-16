@@ -174,6 +174,9 @@ func (a *app) initMaps() {
 	if a.claudeGens == nil {
 		a.claudeGens = map[string]int{}
 	}
+	if a.pendingClaudeHooks == nil {
+		a.pendingClaudeHooks = map[string]string{}
+	}
 }
 
 // ---------- model ----------
@@ -284,11 +287,11 @@ type app struct {
 	// write, so a concurrent adoption cannot publish the same path.
 	pathClaims map[string]bool
 	// deadTranscripts: per-node set of retired transcript paths and session
-	// ids (P2a). A /clear tombstones the old link so maybeRelinkTranscript /
-	// discoverTranscript cannot rebind the pre-clear file from a pane cmdline
-	// or a late mtime touch. Per-node, never global — another node may own
-	// the same path. Replay of "transcript-retired" records rebuilds this;
-	// a delete drops the node's set with the node.
+	// ids (P2a). A /clear tombstones the old link so discoverTranscript and
+	// a late hook event cannot rebind the pre-clear file. Per-node, never
+	// global — another node may own the same path. Replay of
+	// "transcript-retired" records rebuilds this; a delete drops the node's
+	// set with the node.
 	deadTranscripts map[string]map[string]bool
 	// chatMark/staleChat: per-node transcript progress at the last
 	// active→quiet pane transition, and whether the file has been growing
@@ -322,6 +325,9 @@ type app struct {
 	claudeHooks map[string]string
 	// claudeGens is the per-node Claude binding generation (claude-fixes.md D7).
 	claudeGens map[string]int
+	// pendingClaudeHooks holds a prepared hook id after launch and before the
+	// hook record is persisted at publish time.
+	pendingClaudeHooks map[string]string
 
 	// storeMu serializes every append to nodes.jsonl, independent of a.mu (some
 	// callers hold a.mu, some do not). It gives the append-only store one

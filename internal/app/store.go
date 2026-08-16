@@ -99,10 +99,20 @@ func (a *app) loadStore() error {
 	// "transcript-retired" tombstones accumulate per-node into
 	// deadTranscripts (path and session id); a delete drops the node's set.
 	// Unknown types are silently ignored — never errors.
+	// claude-hook / claude-binding are applied after ordinary node and
+	// transcript records so a later title Node cannot wipe a hook binding.
 	if a.deadTranscripts == nil {
 		a.deadTranscripts = map[string]map[string]bool{}
 	}
+	if a.claudeHooks == nil {
+		a.claudeHooks = map[string]string{}
+	}
+	if a.claudeGens == nil {
+		a.claudeGens = map[string]int{}
+	}
 	transcripts := map[string]string{}
+	hooks := map[string]storeRecord{}
+	bindings := map[string]storeRecord{}
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -126,9 +136,15 @@ func (a *app) loadStore() error {
 			transcripts[rec.ID] = rec.Path
 		case rec.Type == "transcript-retired":
 			a.markDeadTranscriptLocked(rec.ID, rec.Path, rec.SessionID)
+		case rec.Type == "claude-hook":
+			hooks[rec.ID] = rec
+		case rec.Type == "claude-binding":
+			bindings[rec.ID] = rec
 		case rec.Type == "delete":
 			a.removeNodeLocked(rec.ID)
 			delete(transcripts, rec.ID)
+			delete(hooks, rec.ID)
+			delete(bindings, rec.ID)
 		}
 	}
 	for id, path := range transcripts {
@@ -136,6 +152,33 @@ func (a *app) loadStore() error {
 			n.Transcript = path
 		}
 	}
+	for id, rec := range hooks {
+		if _, ok := a.byID[id]; !ok {
+			continue
+		}
+		if !safePathComponent(rec.HookID) {
+			continue
+		}
+		a.claudeHooks[id] = rec.HookID
+		if rec.Generation > 0 {
+			a.claudeGens[id] = rec.Generation
+		}
+	}
+	for id, rec := range bindings {
+		n, ok := a.byID[id]
+		if !ok {
+			continue
+		}
+		if rec.HookID != "" && safePathComponent(rec.HookID) {
+			a.claudeHooks[id] = rec.HookID
+		}
+		if rec.Generation > 0 {
+			a.claudeGens[id] = rec.Generation
+		}
+		n.Transcript = rec.Path
+		n.SessionID = rec.SessionID
+	}
+	a.cleanupOrphanClaudeHooks()
 	return nil
 }
 
@@ -205,6 +248,9 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.anim, id)
 	delete(a.deadTranscripts, id)
 	delete(a.autoApprove, id)
+	delete(a.claudeHooks, id)
+	delete(a.claudeGens, id)
+	delete(a.pendingClaudeHooks, id)
 }
 
 // sessionLogPath is the single spelling of a node's session-log location; the

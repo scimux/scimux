@@ -202,26 +202,6 @@ func TestClaudeBridgeReady(t *testing.T) {
 	}
 }
 
-func TestFindClaudeNewestInDir(t *testing.T) {
-	home := t.TempDir()
-	proj := filepath.Join(home, ".claude", "projects", "-data-my-exp-1")
-	os.MkdirAll(proj, 0o755)
-	older := filepath.Join(proj, "aaaaaaaa-0000-0000-0000-000000000001.jsonl")
-	newer := filepath.Join(proj, "bbbbbbbb-0000-0000-0000-000000000002.jsonl")
-	os.WriteFile(older, []byte("{}\n"), 0o644)
-	os.WriteFile(newer, []byte("{}\n"), 0o644)
-	past := time.Now().Add(-2 * time.Hour)
-	os.Chtimes(older, past, past)
-
-	path, sid, ok := FindClaudeNewestInDir(home, "/data/my/exp_1")
-	if !ok || path != newer || sid != "bbbbbbbb-0000-0000-0000-000000000002" {
-		t.Fatalf("got %q sid=%q ok=%v", path, sid, ok)
-	}
-	if _, _, ok := FindClaudeNewestInDir(home, "/data/unknown"); ok {
-		t.Fatal("unknown dir must not match")
-	}
-}
-
 // A transcript that produced valid turns and then stops making sense must
 // flag Unparseable so the UI can degrade to the pane snapshot — while
 // benign unknown *typed* records never trip the signal (finding 15).
@@ -968,62 +948,4 @@ func TestNewestContentTime(t *testing.T) {
 			t.Fatal("missing file must return ok=false")
 		}
 	})
-}
-
-// Relink cost bound: the content-time scan must open only files the phase
-// could plausibly have written. The session logs are append-only, so a file's
-// mtime is an upper bound on its newest record — a file untouched since the
-// phase started cannot have carried it, and must be skipped without being
-// read. Without this the scan parses every session log in the project
-// directory on every relink attempt (measured: 10.7s / 135 files on a real
-// dir, inside the 2s poll loop).
-func TestFindClaudeNewestInDirSinceSkipsUntouchedFiles(t *testing.T) {
-	home := t.TempDir()
-	proj := filepath.Join(home, ".claude", "projects", "-w-proj")
-	if err := os.MkdirAll(proj, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	turn := func(ts time.Time) []byte {
-		return []byte(`{"type":"user","timestamp":"` + ts.UTC().Format(time.RFC3339Nano) +
-			`","message":{"role":"user","content":"hello"}}` + "\n")
-	}
-	now := time.Now()
-	since := now.Add(-30 * time.Second)
-
-	// Untouched file: its content claims to be newer than the live one, so a
-	// content-only scan would prefer it — but its mtime predates the phase,
-	// which is impossible for a file the phase wrote.
-	stale := filepath.Join(proj, "stale-session.jsonl")
-	if err := os.WriteFile(stale, turn(now), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	past := now.Add(-2 * time.Hour)
-	if err := os.Chtimes(stale, past, past); err != nil {
-		t.Fatal(err)
-	}
-	// Live file: written during the phase, slightly older content.
-	live := filepath.Join(proj, "live-session.jsonl")
-	if err := os.WriteFile(live, turn(now.Add(-10*time.Second)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	path, sid, ok := FindClaudeNewestInDirSince(home, "/w/proj", since)
-	if !ok || path != live {
-		t.Fatalf("path = %q ok=%v, want the file touched during the phase %q", path, ok, live)
-	}
-	if sid != "live-session" {
-		t.Fatalf("sid = %q, want live-session", sid)
-	}
-
-	// A file touched during the phase whose newest *content* still predates it
-	// stays excluded — the bridge-session case P2b fixed.
-	touchedNoContent := filepath.Join(proj, "bridge-session-only.jsonl")
-	body := append(turn(now.Add(-2*time.Hour)),
-		[]byte(`{"type":"bridge-session","timestamp":"`+now.UTC().Format(time.RFC3339Nano)+`"}`+"\n")...)
-	if err := os.WriteFile(touchedNoContent, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if path, _, _ := FindClaudeNewestInDirSince(home, "/w/proj", since); path != live {
-		t.Fatalf("path = %q, want %q (metadata touch must not win)", path, live)
-	}
 }

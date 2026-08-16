@@ -582,8 +582,8 @@ func TestPollActiveTranscriptProgressRestartsStallWindow(t *testing.T) {
 }
 
 // TestPollActiveToQuietTriggersRelink: poll itself (not a direct unit call)
-// re-runs discovery when a claude pane finishes a phase the linked transcript
-// did not carry. Persistence/ordering stay covered by MaybeRelink* and Packet 2E.
+// drains hook events on active→quiet. It must not choose a newest-file
+// transcript; a legacy stale link detaches.
 func TestPollActiveToQuietTriggersRelink(t *testing.T) {
 	f := &fakeTmux{
 		list:    []string{"c1"},
@@ -620,11 +620,11 @@ func TestPollActiveToQuietTriggersRelink(t *testing.T) {
 	if got := a.live["c1"]; got != "quiet" {
 		t.Fatalf("live = %q, want quiet (active→quiet transition)", got)
 	}
-	if n.Transcript != newPath {
-		t.Fatalf("transcript = %q, want poll-driven relink to %q", n.Transcript, newPath)
+	if n.Transcript == newPath || n.SessionID == "new-session" {
+		t.Fatalf("poll guessed newest file: %q / %q", n.Transcript, n.SessionID)
 	}
-	if n.SessionID != "new-session" {
-		t.Fatalf("session id = %q, want new-session", n.SessionID)
+	if n.Transcript != "" {
+		t.Fatalf("legacy stale link must detach on active→quiet, got %q", n.Transcript)
 	}
 }
 

@@ -37,6 +37,14 @@ func newUUID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
+// canonicalPrompt is the single equality helper for sent-prompt versus
+// transcript-turn confirmation. Only line endings are normalized.
+func canonicalPrompt(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.TrimSpace(s)
+}
+
 // slugStrip collapses any run of characters not allowed in a tmux session name
 // into a single '-'. '.' is excluded from the allow-set on purpose: it is tmux's
 // window.pane target separator, so a slug containing it yields an unaddressable
@@ -67,42 +75,50 @@ func (a *app) uniqueID(title string, taken map[string]bool) string {
 	}
 }
 
+// agentCommandClaude builds the owned-Claude argv. --settings sits before
+// --remote-control so an empty title cannot swallow the path. Tests that do
+// not pass a settings file keep the historical flag order.
+func agentCommandClaude(n *Node, addDirs []string, settingsPath string) string {
+	// --ax-screen-reader is a hard default for every scimux-owned Claude
+	// launch: stable flat-text menus for supervision. Exactly one flag;
+	// placed before --remote-control so an empty title cannot treat the
+	// flag as that option's value. Pair with n.AXScreenReader=true at the
+	// launchNode seam so the stored marker matches the launched argv.
+	parts := []string{"claude", "--session-id", n.SessionID, "--ax-screen-reader"}
+	if settingsPath != "" {
+		parts = append(parts, "--settings", shellQuote(settingsPath))
+	}
+	parts = append(parts, "--remote-control")
+	if n.Title != "" {
+		parts = append(parts, shellQuote(n.Title))
+	}
+	if n.Model != "" {
+		parts = append(parts, "--model", shellQuote(n.Model))
+	}
+	if n.Effort != "" {
+		parts = append(parts, "--effort", shellQuote(n.Effort))
+	}
+	for _, dir := range addDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		parts = append(parts, "--add-dir", shellQuote(dir))
+	}
+	return strings.Join(parts, " ")
+}
+
 // agentCommand builds the launch command. Structured transports keep their
 // established first-prompt paths. Owned Claude is the exception: Remote
 // Control must finish bootstrapping before its editor is safe, so its prompt is
 // omitted here and delivered by deliverClaudeInitialPrompt after bridge_status.
 func agentCommand(n *Node, addDirs []string) (string, error) {
+	return agentCommandSettings(n, addDirs, "")
+}
+
+func agentCommandSettings(n *Node, addDirs []string, settingsPath string) (string, error) {
 	switch n.Agent {
 	case "claude":
-		// --ax-screen-reader is a hard default for every scimux-owned Claude
-		// launch: stable flat-text menus for supervision. Exactly one flag;
-		// placed before --remote-control so an empty title cannot treat the
-		// flag as that option's value. Pair with n.AXScreenReader=true at the
-		// launchNode seam so the stored marker matches the launched argv.
-		parts := []string{"claude", "--session-id", n.SessionID, "--ax-screen-reader", "--remote-control"}
-		if n.Title != "" {
-			parts = append(parts, shellQuote(n.Title))
-		}
-		if n.Model != "" {
-			parts = append(parts, "--model", shellQuote(n.Model))
-		}
-		// The claude CLI takes --effort <level> (low/medium/high/xhigh/max); pass
-		// it only when set so an effort-less node launches exactly as before.
-		if n.Effort != "" {
-			parts = append(parts, "--effort", shellQuote(n.Effort))
-		}
-		// --add-dir grants tool access to extra directories (the node's upload
-		// staging path). It sits after the optional --remote-control <title>
-		// pair — and after --model/--effort — so an empty title cannot eat the
-		// path as its value. Empty or blank paths are skipped so they never reach
-		// the CLI; the deferred prompt is not part of this argv.
-		for _, dir := range addDirs {
-			if strings.TrimSpace(dir) == "" {
-				continue
-			}
-			parts = append(parts, "--add-dir", shellQuote(dir))
-		}
-		return strings.Join(parts, " "), nil
+		return agentCommandClaude(n, addDirs, settingsPath), nil
 	// pi, opencode, and grok reach agentCommand only as a legacy/forced tmux
 	// fallback (new nodes resolve to the ACP transport). pi/opencode take the
 	// "provider/model" form their list commands emit; grok takes -m and
@@ -427,9 +443,15 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 	}
 	a.mu.Unlock()
 	if err != nil {
+		if hookID := a.takePendingClaudeHook(n.ID); hookID != "" {
+			a.archiveHookBundle(hookID)
+		}
 		return status, "", err
 	}
 	if collided {
+		if hookID := a.takePendingClaudeHook(n.ID); hookID != "" {
+			a.archiveHookBundle(hookID)
+		}
 		fmt.Fprintf(os.Stderr, "scimux: node id %s was claimed concurrently during launch; abandoning the new launch\n", n.ID)
 		if pm != nil {
 			_ = pm.Kill(n.ID)
@@ -449,6 +471,26 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 			_ = a.appendRecord(storeRecord{Type: "node", Node: winner})
 		}
 		return 409, "", fmt.Errorf("node id %q was claimed concurrently; launch abandoned", n.ID)
+	}
+
+	if hookID := a.takePendingClaudeHook(n.ID); hookID != "" {
+		if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: n.ID, HookID: hookID, Generation: 1}); err != nil {
+			if pm != nil {
+				_ = pm.Kill(n.ID)
+			} else if s := a.server.Session(n.ID); s.Alive() {
+				_ = s.Kill()
+			}
+			a.mu.Lock()
+			a.removeNodeLocked(n.ID)
+			a.mu.Unlock()
+			_ = a.appendRecord(storeRecord{Type: "delete", ID: n.ID, Time: time.Now().UTC().Format(time.RFC3339)})
+			a.archiveHookBundle(hookID)
+			return 500, "", fmt.Errorf("persist claude hook (session rolled back): %v", err)
+		}
+		a.mu.Lock()
+		a.claudeHooks[n.ID] = hookID
+		a.claudeGens[n.ID] = 1
+		a.mu.Unlock()
 	}
 
 	// Deliver the research question as the first turn of a structured node. A
@@ -502,7 +544,8 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 	readyDeadline := time.Now().Add(a.claudeReadyTimeout)
 	var path string
 	for {
-		if p, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok &&
+		a.drainClaudeHooks()
+		if p, ok := a.claudeReadyPath(n); ok &&
 			transcript.ClaudeBridgeReady(p, n.SessionID) {
 			path = p
 			break
@@ -519,12 +562,12 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 		fmt.Fprintf(os.Stderr, "scimux: deferred first prompt to Claude node %s failed: %v\n", n.ID, err)
 		return initialNotSent
 	}
-	want := strings.TrimSpace(n.Prompt)
+	want := canonicalPrompt(n.Prompt)
 	deliveryDeadline := time.Now().Add(a.claudeDeliveryTimeout)
 	for {
 		turns := tl.Poll()
 		for _, turn := range turns[before:] {
-			if turn.Role == "user" && strings.TrimSpace(turn.Text) == want {
+			if turn.Role == "user" && canonicalPrompt(turn.Text) == want {
 				return initialAcknowledged
 			}
 		}
@@ -587,11 +630,21 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		}
 		addDirs = []string{dir}
 	}
-	cmd, err := agentCommand(launch, addDirs)
+	var hookID, settingsPath string
+	if n.Agent == "claude" {
+		var herr error
+		hookID, settingsPath, herr = a.prepareClaudeHookBundle(n.ID)
+		if herr != nil {
+			return 500, fmt.Errorf("prepare claude hook: %w", herr)
+		}
+	}
+	cmd, err := agentCommandSettings(launch, addDirs, settingsPath)
 	if err != nil {
+		a.archiveHookBundle(hookID)
 		return 400, err
 	}
 	if _, err := a.server.NewSession(n.ID, n.Dir, wrapLaunch(cmd)); err != nil {
+		a.archiveHookBundle(hookID)
 		return 500, err
 	}
 	// Catch a launch that dies before its interface is ready (a rejected --model,
@@ -604,6 +657,7 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
 			fmt.Fprintf(os.Stderr, "scimux: reaping failed launch %s: %v\n", n.ID, kerr)
 		}
+		a.archiveHookBundle(hookID)
 		return 502, fmt.Errorf("agent exited on launch: %s", reason)
 	}
 	// Owned Claude was launched with --ax-screen-reader (agentCommand). Record
@@ -616,7 +670,11 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		if kerr := a.server.Session(n.ID).Kill(); kerr != nil {
 			fmt.Fprintf(os.Stderr, "scimux: rollback of session %s failed: %v\n", n.ID, kerr)
 		}
+		a.archiveHookBundle(hookID)
 		return 500, fmt.Errorf("persist node (session rolled back): %v", err)
+	}
+	if hookID != "" {
+		a.setPendingClaudeHook(n.ID, hookID)
 	}
 	return 0, nil
 }

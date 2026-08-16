@@ -128,6 +128,9 @@ func isTerminal(f *os.File) bool {
 
 // Run starts the local scimux server and blocks until it exits.
 func Run() {
+	if len(os.Args) > 1 && os.Args[1] == claudeSessionHookCmd {
+		os.Exit(runClaudeSessionHookMain(os.Args[2:]))
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)

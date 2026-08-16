@@ -132,22 +132,12 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	if n.Description == "" {
 		n.Description = n.Prompt
 	}
-	// Adopted claude session without a known id: first try the pane's own
-	// process arguments (claude --resume <id> / --session-id <id>), which is
-	// deterministic even with several sessions in one directory. Fall back
-	// to the newest session log in the working directory. A wrong or missing
-	// guess still leaves peek + send working.
+	// Adopted claude session without a known id: try the pane's own process
+	// arguments (claude --resume <id> / --session-id <id>). No newest-file
+	// fallback — without a UUID the node stays transcriptless and peeks.
 	if n.Agent == "claude" && n.SessionID == "" && n.Transcript == "" {
 		if pid, err := s.PanePID(); err == nil {
 			n.SessionID = sessionFromPane(pid, sessionArgFromCmdline)
-		}
-		// A process-derived id remains authoritative even if Claude has not
-		// created (or we cannot yet see) its transcript. discoverTranscript
-		// will retry it; do not replace it with the nondeterministic mtime guess.
-		if n.SessionID == "" {
-			if path, sid, ok := transcript.FindClaudeNewestInDir(a.home, n.Dir); ok {
-				n.Transcript, n.SessionID = path, sid
-			}
 		}
 	}
 	// Any known claude session id — supplied explicitly (the migration script
@@ -456,9 +446,11 @@ func (a *app) finalizeDeleteWithAutoBarrier(n *Node) error {
 	if err := a.closeOwned(n); err != nil {
 		return err
 	}
+	hookID := a.claudeHookID(n.ID)
 	a.mu.Lock()
 	a.removeNodeLocked(n.ID)
 	a.mu.Unlock()
+	a.archiveHookBundle(hookID)
 	a.archiveSessionLog(n.ID)
 	a.archiveAttachments(n.ID)
 	a.archiveAssets(n.ID)

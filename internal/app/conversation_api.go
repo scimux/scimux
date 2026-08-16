@@ -235,13 +235,12 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		a.noteUsagePrompt(n.Agent)
 	}
 	// /clear delivered through scimux is a *known* session rollover: Claude
-	// Code starts a fresh session file and the linked transcript goes dead.
-	// Retire the link right away — the UI degrades honestly to peek (the old
-	// conversation is gone from the pane too), and the phase-end relink picks
-	// up the new session file after the next turn. A /clear typed directly
-	// into an attached pane still relies on the mtime heuristic.
+	// Code starts a fresh session file. Retire the link right away (path-less
+	// detached seam, peek while waiting). Only that node's SessionStart
+	// source:"clear" hook event may bind the successor. Never retry /clear.
 	if acked && n.Agent == "claude" && strings.TrimSpace(body.Text) == "/clear" {
 		a.retireTranscript(n)
+		a.advanceClaudeClearAfterWeb(n)
 	}
 	if !acked {
 		writeJSON(w, map[string]string{"status": "unconfirmed", "text": body.Text})
@@ -305,9 +304,9 @@ func (a *app) retireTranscript(n *Node) {
 	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: ""}); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: retire transcript for %s: %v\n", n.ID, err)
 	}
-	// Tombstone the retired path/session so maybeRelinkTranscript and
-	// discoverTranscript refuse them even when the pane cmdline still names
-	// the launch session or a late metadata touch bumps the dead file's mtime.
+	// Tombstone the retired path/session so discoverTranscript and a late
+	// hook event refuse them even when the pane cmdline still names the
+	// launch session or a late metadata touch bumps the dead file's mtime.
 	// Append-only: a new record, never an edit of the node/transcript lines.
 	if err := a.appendRecord(storeRecord{
 		Type: "transcript-retired", ID: n.ID, Path: oldPath, SessionID: oldSID,

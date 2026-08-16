@@ -299,7 +299,7 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	a.maybeRelinkTranscript(n)
 
 	if n.Transcript != oldPath {
-		t.Fatalf("relink mutated memory on persist failure: %q", n.Transcript)
+		t.Fatalf("stale detach mutated memory on persist failure: %q", n.Transcript)
 	}
 	if n.SessionID != "old-session" {
 		t.Fatalf("session id mutated on persist failure: %q", n.SessionID)
@@ -308,19 +308,16 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	claimed := a.pathClaims[newPath]
 	a.mu.Unlock()
 	if claimed {
-		t.Error("path claim still held after relink persist failure")
+		t.Error("path claim still held after persist failure")
 	}
 
 	fixStore(t, a)
 	a.maybeRelinkTranscript(n)
-	if n.Transcript != newPath {
-		t.Fatalf("retry after fix: transcript = %q, want %q", n.Transcript, newPath)
+	if n.Transcript == newPath {
+		t.Fatalf("retry guessed newest file %q", n.Transcript)
 	}
-	a.mu.Lock()
-	claimed = a.pathClaims[newPath]
-	a.mu.Unlock()
-	if claimed {
-		t.Error("path claim still held after successful relink")
+	if n.Transcript != "" {
+		t.Fatalf("legacy stale link must detach after store fix, got %q", n.Transcript)
 	}
 }
 

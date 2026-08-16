@@ -29,6 +29,9 @@ const (
 	hookSIDOther     = "dddddddd-dddd-4ddd-8ddd-ddddddddddd4"
 	hookSIDMismatch  = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee5"
 	hookSIDUnsafe    = "ffffffff-ffff-4fff-8fff-fffffffffff6"
+	hookSIDSymlink   = "12121212-1212-4121-8121-121212121212"
+	hookSIDDir       = "34343434-3434-4343-8343-343434343434"
+	hookSIDParent    = "56565656-5656-4565-8565-565656565656"
 )
 
 func hookSessionJSON(source, sid, path string) []byte {
@@ -177,6 +180,62 @@ func launchArgvHasSettings(cmd string) bool {
 	iSet := strings.Index(cmd, "--settings")
 	iRC := strings.Index(cmd, "--remote-control")
 	return iSet >= 0 && iRC >= 0 && iSet < iRC && strings.Count(cmd, "--settings") == 1
+}
+
+func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
+	// Phase 2 gate: a synthetic multiline create is acknowledged when the
+	// transcript user turn uses CR line endings.
+	f := &fakeTmux{captureAfterEnter: "pane moved but that is not delivery proof"}
+	a := newTestApp(t, f)
+	a.deliverClaudeInitial = a.deliverClaudeInitialPrompt
+	a.claudeReadyTimeout = 400 * time.Millisecond
+	a.claudeDeliveryTimeout = 400 * time.Millisecond
+	a.claudeInitialPoll = 5 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(350 * time.Millisecond)
+		var n *Node
+		for time.Now().Before(deadline) {
+			a.mu.Lock()
+			if len(a.nodes) > 0 {
+				n = a.nodes[0]
+			}
+			a.mu.Unlock()
+			if n != nil && n.SessionID != "" {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if n == nil || n.SessionID == "" {
+			return
+		}
+		path := writeClaudeTranscript(t, a.home, n.SessionID)
+		appendLines(t, path,
+			`{"type":"system","subtype":"bridge_status","sessionId":"`+n.SessionID+`","content":"ready"}`)
+		wait := time.Now().Add(200 * time.Millisecond)
+		for !f.didSendEnter() && time.Now().Before(wait) {
+			time.Sleep(time.Millisecond)
+		}
+		appendLines(t, path, fmt.Sprintf(
+			`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":%q}}`,
+			"line1\rline2"))
+	}()
+	rec := newNode(a, `{"title":"CRCreate","prompt":"line1\nline2","agent":"claude","dir":`+strconv.Quote(a.home)+`}`)
+	<-done
+	if rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		InitialDelivery initialDelivery `json:"initial_delivery"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.InitialDelivery != initialAcknowledged {
+		t.Fatalf("initial_delivery = %q, want acknowledged", body.InitialDelivery)
+	}
 }
 
 func TestOwnedClaudeLaunchInstallsPrivateSettings(t *testing.T) {
@@ -550,37 +609,52 @@ func TestClaudeStartupHookRejectsInvalidEvents(t *testing.T) {
 	if err := os.MkdirAll(linkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(linkDir, hookSIDOwn+".jsonl")
-	if err := os.Symlink(outside, link); err != nil {
+	outsideSym := filepath.Join(t.TempDir(), hookSIDSymlink+".jsonl")
+	if err := os.WriteFile(outsideSym, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(linkDir, hookSIDSymlink+".jsonl")
+	if err := os.Symlink(outsideSym, link); err != nil {
 		t.Fatal(err)
 	}
 	nonRegDir := filepath.Join(a.home, ".claude", "projects", "-w-dir")
 	if err := os.MkdirAll(nonRegDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	nonRegular := filepath.Join(nonRegDir, hookSIDOwn+".jsonl")
+	nonRegular := filepath.Join(nonRegDir, hookSIDDir+".jsonl")
 	if err := os.Mkdir(nonRegular, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	outsideProj := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideProj, hookSIDParent+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkProj := filepath.Join(a.home, ".claude", "projects", "-w-parentlink")
+	if err := os.Symlink(outsideProj, linkProj); err != nil {
+		t.Fatal(err)
+	}
+	parentLinked := filepath.Join(linkProj, hookSIDParent+".jsonl")
 
 	cases := []struct {
-		name string
-		ev   claudeSessionStartEvent
+		name   string
+		minted string
+		ev     claudeSessionStartEvent
 	}{
-		{"uuid mismatch", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDMismatch, TranscriptPath: mismatch, Cwd: "/w/proj"}},
-		{"basename mismatch", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: claimed, Cwd: "/w/proj"}},
-		{"outside root", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: outside, Cwd: "/w/proj"}},
-		{"relative path", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: filepath.Join(".claude", "projects", "-w-proj", hookSIDOwn+".jsonl"), Cwd: "/w/proj"}},
-		{"dotdot escape", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: traversal, Cwd: "/w/proj"}},
-		{"symlink escape", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: link, Cwd: "/w/proj"}},
-		{"non-regular file", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: nonRegular, Cwd: "/w/proj"}},
-		{"duplicate uuid files", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: own, Cwd: "/w/proj"}},
-		{"retired path", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDSuccessor, TranscriptPath: retired, Cwd: "/w/proj"}},
-		{"claimed path", claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDForeign, TranscriptPath: claimed, Cwd: "/w/proj"}},
+		{"uuid mismatch", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDMismatch, TranscriptPath: mismatch, Cwd: "/w/proj"}},
+		{"basename mismatch", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: claimed, Cwd: "/w/proj"}},
+		{"outside root", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: outside, Cwd: "/w/proj"}},
+		{"relative path", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: filepath.Join(".claude", "projects", "-w-proj", hookSIDOwn+".jsonl"), Cwd: "/w/proj"}},
+		{"dotdot escape", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: traversal, Cwd: "/w/proj"}},
+		{"symlink escape", hookSIDSymlink, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDSymlink, TranscriptPath: link, Cwd: "/w/proj"}},
+		{"parent dir symlink escape", hookSIDParent, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDParent, TranscriptPath: parentLinked, Cwd: "/w/proj"}},
+		{"non-regular file", hookSIDDir, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDDir, TranscriptPath: nonRegular, Cwd: "/w/proj"}},
+		{"duplicate uuid files", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDOwn, TranscriptPath: own, Cwd: "/w/proj"}},
+		{"retired path", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDSuccessor, TranscriptPath: retired, Cwd: "/w/proj"}},
+		{"claimed path", hookSIDOwn, claudeSessionStartEvent{HookEventName: "SessionStart", Source: "startup", SessionID: hookSIDForeign, TranscriptPath: claimed, Cwd: "/w/proj"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			n.Transcript, n.SessionID = "", hookSIDOwn
+			n.Transcript, n.SessionID = "", tc.minted
 			err := a.processClaudeHookEvent(n.ID, tc.ev)
 			if errors.Is(err, errClaudeHookNotImplemented) {
 				t.Fatal("invalid event must be classified, not left unimplemented")
@@ -686,6 +760,40 @@ func TestClaudeClearWithoutHookStaysDetached(t *testing.T) {
 	}
 }
 
+func TestHookOwnedStalePhaseDetaches(t *testing.T) {
+	// A hook-owned node whose linked file did not carry the phase must detach
+	// and show the pane. A later valid clear hook still binds the successor.
+	f := &fakeTmux{alive: map[string]bool{"n1": true}}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -2*time.Hour))
+	newest := writeClaudeProject(t, a.home, "-w-proj", hookSIDForeign, claudeUserLine("newest", 0))
+	succ := writeClaudeProject(t, a.home, "-w-proj", hookSIDSuccessor, claudeUserLine("after", 0))
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
+	writeSeedLog(t, a, n.ID, "before")
+	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
+
+	a.maybeRelinkTranscript(n)
+	if n.Transcript == newest || n.SessionID == hookSIDForeign {
+		t.Fatalf("hook-owned stale phase guessed newest file: %q / %q", n.Transcript, n.SessionID)
+	}
+	if n.Transcript != "" || n.SessionID != "" {
+		t.Fatalf("hook-owned stale phase must detach, got %q / %q", n.Transcript, n.SessionID)
+	}
+
+	if err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
+		HookEventName: "SessionStart", Source: "clear",
+		SessionID: hookSIDSuccessor, TranscriptPath: succ, Cwd: "/w/proj",
+	}); err != nil {
+		t.Fatalf("successor after detach: %v", err)
+	}
+	if n.Transcript != succ || n.SessionID != hookSIDSuccessor {
+		t.Fatalf("hook after detach bound %q / %q, want successor", n.Transcript, n.SessionID)
+	}
+}
+
 func TestClaudePaneTypedClearMatchesWebClear(t *testing.T) {
 	// AT-BIND-06
 	setup := func(t *testing.T) (*app, *Node, string) {
@@ -782,7 +890,7 @@ func TestClaudeStaleGenerationEventIsRejected(t *testing.T) {
 		HookEventName: "SessionStart", Source: "clear",
 		SessionID: hookSIDSuccessor, TranscriptPath: first, Cwd: "/w/proj",
 	}
-	if err := a.processClaudeHookEvent(n.ID, late); err == nil || errors.Is(err, errClaudeHookNotImplemented) {
+	if err := a.processClaudeHookEventAt(n.ID, late, captured); err == nil || errors.Is(err, errClaudeHookNotImplemented) {
 		t.Fatalf("stale generation must be a classified reject, err=%v", err)
 	}
 	if n.Transcript != old || len(bindingRecs(t, a, n.ID)) != 0 {
@@ -902,6 +1010,37 @@ func TestClaudeCompactAndResumeSources(t *testing.T) {
 	})
 }
 
+func TestResumeEventIsParkedNotReplayed(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	cur := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("keep", 0))
+	other := writeClaudeProject(t, a.home, "-w-proj", hookSIDSuccessor)
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, cur)
+	hookID := a.claudeHookID(n.ID)
+	inbox := hookInboxReady(t, a, hookID, "resume", hookSessionJSON("resume", hookSIDSuccessor, other))
+
+	a.drainClaudeHooks()
+	if n.Transcript != cur || n.SessionID != hookSIDOwn {
+		t.Fatalf("resume drain auto-bound %q / %q", n.Transcript, n.SessionID)
+	}
+	if a.attn[n.ID] != "inspect" {
+		t.Fatalf("resume attention = %q, want inspect", a.attn[n.ID])
+	}
+	if _, err := os.Stat(inbox); !os.IsNotExist(err) {
+		t.Fatal("resume event must leave the inbox after one apply")
+	}
+	held, err := filepath.Glob(filepath.Join(a.claudeHooksDir(), hookID, "processed", "held", "*.json"))
+	if err != nil || len(held) != 1 {
+		t.Fatalf("parked resume events = %v, want 1 in processed/held/", held)
+	}
+
+	a.attn[n.ID] = ""
+	a.drainClaudeHooks()
+	if a.attn[n.ID] != "" {
+		t.Fatal("parked resume must not re-stamp inspect on later ticks")
+	}
+}
+
 func TestAdoptedClaudeWithoutUUIDStaysTranscriptless(t *testing.T) {
 	// AT-BIND-12
 	f := &fakeTmux{alive: map[string]bool{"orphan": true}}
@@ -948,8 +1087,11 @@ func TestLegacyStoreReplayAndNoNewestFileRelink(t *testing.T) {
 	newest := writeClaudeProject(t, a.home, "-w-proj", hookSIDForeign, claudeUserLine("newest", 0))
 	a2.activeSince["legacy"] = time.Now().Add(-30 * time.Second)
 	a2.maybeRelinkTranscript(got)
-	if got.Transcript != old || got.SessionID != hookSIDOwn {
-		t.Fatalf("legacy node entered newest-file relink: %q / %q (newest %q)", got.Transcript, got.SessionID, newest)
+	if got.Transcript == newest || got.SessionID == hookSIDForeign {
+		t.Fatalf("legacy node entered newest-file relink: %q / %q", got.Transcript, got.SessionID)
+	}
+	if got.Transcript != "" {
+		t.Fatalf("legacy stale transcript must detach, got %q", got.Transcript)
 	}
 }
 

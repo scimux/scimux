@@ -24,7 +24,7 @@ import (
 //   - tmux capture, transcript/filesystem work, appendRecord/store work, and
 //     session-log/mirror work run without a.mu held.
 //   - Durable transcript/store work completes before a.mu is reacquired to
-//     publish in-memory links (discoverTranscript, maybeRelinkTranscript).
+//     publish in-memory links (discoverTranscript, hook-driven binding).
 //   - tailerFor performs catch-up transcript I/O without a.mu, then atomically
 //     installs the tailer and progress baseline under a.mu.
 //   - noteAnim and pathClaimedLocked require the caller to hold a.mu.
@@ -50,6 +50,7 @@ func (a *app) poll() {
 	// this tick (branch a). Capture still runs only for names present in
 	// the set; its own error still distinguishes unavailable from exited.
 	sessionSet, sessionsOK := a.sessionSnapshot()
+	a.drainClaudeHooks()
 
 	for _, n := range nodes {
 		// Structured-protocol nodes (ACP, codex app-server) carry no tmux pane:
@@ -335,12 +336,12 @@ func (a *app) reconcileClaudeInitialDelivery(n *Node) {
 		return
 	}
 
-	want := strings.TrimSpace(n.Prompt)
+	want := canonicalPrompt(n.Prompt)
 	if want == "" {
 		return
 	}
 	for _, turn := range a.segment(n).Turns {
-		if turn.Role != "user" || strings.TrimSpace(turn.Text) != want {
+		if turn.Role != "user" || canonicalPrompt(turn.Text) != want {
 			continue
 		}
 		a.mu.Lock()
@@ -410,20 +411,16 @@ func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error {
 	return w.Append(ev)
 }
 
-// maybeRelinkTranscript re-runs transcript discovery for a tmux claude node
-// whose pane just finished a working phase the linked transcript did not
-// carry. Claude Code starts a new session file on /clear or a relaunch inside
-// the same pane; the old link then points at a file that stops growing, the
-// chat silently freezes on the last linked conversation, and — because the
-// store is replayed at startup — restarting scimux does not recover. The
-// judgment is mechanical (pane went active→quiet while the linked file's
-// newest *content* turn stayed before the phase start — mtime is not evidence
-// of content; a trailing bridge-session record must not claim the phase);
-// a wrong or missing guess leaves peek and send working exactly as at
-// adoption. Also links a node that never got a transcript (adoption guess
-// failed) once its pane completes a phase. Retired paths/session ids
-// (deadTranscripts) are refused so a /clear cannot come back from the dead.
+// maybeRelinkTranscript is the active→quiet hook drain and stale-link
+// backstop. It must not choose a transcript from cwd, mtime, pane cmdline,
+// or newest-file. After a phase the linked file did not carry, every Claude
+// node detaches and shows the pane. A later validated hook event still binds
+// the successor.
 func (a *app) maybeRelinkTranscript(n *Node) {
+	if n == nil || n.Agent != "claude" {
+		return
+	}
+	a.drainClaudeHooks()
 	a.mu.Lock()
 	cur := n.Transcript
 	since, ok := a.activeSince[n.ID]
@@ -431,79 +428,12 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	if !ok {
 		return
 	}
-	// Transcript writes can precede the first observed pane change by up to a
-	// poll tick; pad the phase-start watermark.
 	since = since.Add(-10 * time.Second)
 	if cur != "" {
-		// Content time, not mtime: a metadata-only touch on the linked file
-		// (Claude Code's trailing bridge-session) must not claim the phase.
 		if ct, ok := transcript.NewestContentTime(cur); ok && ct.After(since) {
-			return // the linked file carried this phase; the link is healthy
+			return
 		}
-	}
-	// Prefer the pane process's own session id (deterministic even with many
-	// sessions in one directory) — but only when the file it names carried
-	// the phase that just ended *and* is not a retired pre-/clear transcript.
-	// The cmdline holds the id claude was *launched* with; after an in-pane
-	// /clear the process keeps that argv while writing a brand-new session
-	// file, so a stale cmdline id must fall through to the newest-file
-	// heuristic instead of relinking the dead pre-/clear transcript (which
-	// would blind needs-input for good: the dead file never grows, so no
-	// pending call and no staleness signal ever appear). The fallback is
-	// ambiguous only when two panes in the same directory finish
-	// concurrently, and path exclusivity bounds that damage.
-	var path, sid string
-	if pid, err := a.server.Session(n.ID).PanePID(); err == nil {
-		if got := a.paneSessionID(pid); got != "" && !a.isDeadTranscript(n.ID, "", got) {
-			if p, ok := transcript.FindClaudeTranscript(a.home, got); ok && !a.isDeadTranscript(n.ID, p, got) {
-				if ct, ok := transcript.NewestContentTime(p); ok && ct.After(since) {
-					path, sid = p, got
-				}
-			}
-		}
-	}
-	if path == "" {
-		if p, s, ok := transcript.FindClaudeNewestInDirSince(a.home, n.Dir, since); ok {
-			if !a.isDeadTranscript(n.ID, p, s) {
-				path, sid = p, s
-			}
-		}
-	}
-	if path == "" || path == cur {
-		return
-	}
-	if a.isDeadTranscript(n.ID, path, sid) {
-		return
-	}
-	a.mu.Lock()
-	if a.pathClaimedLocked(path, n.ID) {
-		a.mu.Unlock()
-		return
-	}
-	a.pathClaims[path] = true
-	a.mu.Unlock()
-	// Record first, publish second — same contract as discoverTranscript.
-	if err := a.appendRecord(storeRecord{Type: "transcript", ID: n.ID, Path: path}); err != nil {
-		fmt.Fprintf(os.Stderr, "scimux: relink transcript for %s: %v (will retry)\n", n.ID, err)
-		a.mu.Lock()
-		delete(a.pathClaims, path)
-		a.mu.Unlock()
-		return
-	}
-	a.mu.Lock()
-	n.Transcript = path
-	var cp Node
-	if sid != "" && sid != n.SessionID {
-		n.SessionID = sid
-		cp = *n
-	}
-	delete(a.pathClaims, path)
-	a.mu.Unlock()
-	// Persist the corrected session id as a fresh node record (append-only:
-	// corrections are new records). Best-effort — the transcript record above
-	// already carries the link across restarts.
-	if cp.ID != "" {
-		_ = a.appendRecord(storeRecord{Type: "node", Node: &cp})
+		a.retireTranscript(n)
 	}
 }
 
@@ -724,8 +654,8 @@ func (a *app) discoverTranscript(n *Node) {
 	}
 	// Only claude (tmux) nodes discover a transcript file. The structured
 	// transports keep their history in the manager's session log and never
-	// reach here (the poller continues past them before discovery). An adopted
-	// claude node without a known id already made its one guess at adoption.
+	// reach here (the poller continues past them before discovery). Adoption
+	// without an explicit or process-derived UUID stays transcriptless.
 	if n.Agent != "claude" || n.SessionID == "" {
 		return
 	}

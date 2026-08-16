@@ -689,11 +689,9 @@ func TestWarmStartupMirrorsAndCachesSegments(t *testing.T) {
 	}
 }
 
-// TestMaybeRelinkTranscriptAfterSessionRollover: a /clear or relaunch inside
-// the pane starts a new session file; once the pane finishes a working phase
-// the stale link never carried, discovery must re-run and relink — otherwise
-// the chat freezes on the old conversation forever (restarts replay the store
-// and change nothing).
+// TestMaybeRelinkTranscriptAfterSessionRollover: a stale linked transcript
+// after /clear must not be replaced by the newest file in the directory.
+// Legacy (no hook) nodes detach; hook-owned nodes wait for SessionStart.
 func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"c1": true}}
 	a := newTestApp(t, f)
@@ -703,8 +701,6 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	}
 	oldPath := filepath.Join(proj, "old-session.jsonl")
 	newPath := filepath.Join(proj, "new-session.jsonl")
-	// Content time, not mtime: the new session must carry a turn after the
-	// phase watermark; the old one's content predates it.
 	oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	newTS := time.Now().UTC().Format(time.RFC3339Nano)
 	appendLines(t, oldPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"old"}}`, oldTS))
@@ -721,15 +717,11 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 
 	a.maybeRelinkTranscript(n)
 
-	if n.Transcript != newPath {
-		t.Fatalf("transcript = %q, want relink to %q", n.Transcript, newPath)
+	if n.Transcript == newPath || n.SessionID == "new-session" {
+		t.Fatalf("newest-file guess rebound %q / %q", n.Transcript, n.SessionID)
 	}
-	if n.SessionID != "new-session" {
-		t.Fatalf("session id = %q, want new-session", n.SessionID)
-	}
-	b, err := os.ReadFile(a.storePath)
-	if err != nil || !strings.Contains(string(b), newPath) {
-		t.Fatalf("relink not persisted to store: %v\n%s", err, b)
+	if n.Transcript != "" || n.SessionID != "" {
+		t.Fatalf("legacy stale link must detach, got %q / %q", n.Transcript, n.SessionID)
 	}
 }
 
@@ -768,11 +760,8 @@ func TestMaybeRelinkTranscriptIgnoresStaleCmdlineSession(t *testing.T) {
 
 	a.maybeRelinkTranscript(n)
 
-	if n.Transcript != newPath {
-		t.Fatalf("transcript = %q, want %q (stale cmdline session id must not win)", n.Transcript, newPath)
-	}
-	if n.SessionID != "new-session" {
-		t.Fatalf("session id = %q, want new-session", n.SessionID)
+	if n.Transcript != "" || n.SessionID != "" {
+		t.Fatalf("detached node must stay detached without a hook, got %q / %q", n.Transcript, n.SessionID)
 	}
 }
 
@@ -2022,8 +2011,8 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		}
 	})
 
-	// (c) a genuine new session file still binds.
-	t.Run("genuine_new_session_still_binds", func(t *testing.T) {
+	// (c) a genuine new session file is not guessed from the directory.
+	t.Run("genuine_new_session_not_guessed", func(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{"c1": true}}
 		a := newTestApp(t, f)
 		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
@@ -2045,11 +2034,8 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		a.byID["c1"] = n
 		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
 		a.maybeRelinkTranscript(n)
-		if n.Transcript != newPath {
-			t.Fatalf("transcript = %q, want new session %q", n.Transcript, newPath)
-		}
-		if n.SessionID != "new-session" {
-			t.Fatalf("session id = %q, want new-session", n.SessionID)
+		if n.Transcript == newPath || n.SessionID == "new-session" {
+			t.Fatalf("newest-file guess rebound %q / %q", n.Transcript, n.SessionID)
 		}
 	})
 
@@ -2084,8 +2070,8 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		if n.Transcript == linked {
 			t.Fatalf("metadata-only mtime touch kept dead link healthy; transcript still %q", linked)
 		}
-		if n.Transcript != newer {
-			t.Fatalf("transcript = %q, want relink to %q", n.Transcript, newer)
+		if n.Transcript == newer {
+			t.Fatalf("newest-file guess rebound %q", n.Transcript)
 		}
 	})
 }
