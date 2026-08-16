@@ -152,14 +152,24 @@ func (s *Session) Alive() bool {
 // removes the interleaving entirely without serializing sends.
 var sendSeq atomic.Uint64
 
-// Send delivers text as a single paste (safe for long, multi-line prompts —
-// send-keys would re-interpret newlines as submissions) and then submits it.
+// Send delivers text as a single bracketed paste (safe for long, multi-line
+// prompts — send-keys would re-interpret newlines as submissions) and then
+// submits it.
+//
+// -p is what makes the multi-line case reliable. tmux translates the buffer's
+// newlines to carriage returns, which are indistinguishable from Enter, so
+// without the bracketed-paste markers a receiving TUI can only guess from
+// arrival speed whether the block was pasted or typed. Under load that guess
+// fails and one prompt arrives as several submitted messages (observed live
+// against claude 2.1.224). tmux inserts the markers only when the application
+// has requested bracketed paste mode, so the flag is inert for a wrapped
+// command that does not support it.
 func (s *Session) Send(text string) error {
 	buf := fmt.Sprintf("scimux-send-%d", sendSeq.Add(1))
 	if out, err := s.sv.tmux(text, "load-buffer", "-b", buf, "-"); err != nil {
 		return fmt.Errorf("tmux load-buffer: %v: %s", err, out)
 	}
-	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-b", buf, "-t", s.paneTarget()); err != nil {
+	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-p", "-b", buf, "-t", s.paneTarget()); err != nil {
 		return fmt.Errorf("tmux paste-buffer: %v: %s", err, out)
 	}
 	time.Sleep(s.sv.PasteDelay)
@@ -183,7 +193,7 @@ func (s *Session) SendAck(text string) (acked bool, err error) {
 	if out, err := s.sv.tmux(text, "load-buffer", "-b", buf, "-"); err != nil {
 		return false, fmt.Errorf("tmux load-buffer: %v: %s", err, out)
 	}
-	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-b", buf, "-t", s.paneTarget()); err != nil {
+	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-p", "-b", buf, "-t", s.paneTarget()); err != nil {
 		return false, fmt.Errorf("tmux paste-buffer: %v: %s", err, out)
 	}
 	time.Sleep(s.sv.PasteDelay)

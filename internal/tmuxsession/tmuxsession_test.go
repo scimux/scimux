@@ -101,7 +101,7 @@ func TestSendOrderingAndPayload(t *testing.T) {
 		t.Errorf("prompt not passed byte-identically via stdin")
 	}
 	buf := load.args[4] // the per-send buffer name
-	if got := paste.args[2:]; !reflect.DeepEqual(got, []string{"paste-buffer", "-d", "-b", buf, "-t", "=node1:"}) {
+	if got := paste.args[2:]; !reflect.DeepEqual(got, []string{"paste-buffer", "-d", "-p", "-b", buf, "-t", "=node1:"}) {
 		t.Errorf("paste-buffer args = %v (want same buffer %q as load)", got, buf)
 	}
 	if got := enter.args[2:]; !reflect.DeepEqual(got, []string{"send-keys", "-t", "=node1:", "Enter"}) {
@@ -471,5 +471,49 @@ func TestTmuxTimeout(t *testing.T) {
 	}
 	if len(b.calls) != 1 {
 		t.Fatalf("want exactly 1 tmux call attempted, got %d", len(b.calls))
+	}
+}
+
+// Bracketed paste is what tells the receiving TUI "this block is pasted, not
+// typed". Without it tmux delivers the buffer as bare keystrokes and the line
+// breaks it translates to carriage returns are indistinguishable from Enter,
+// so a multi-line prompt can arrive as several submitted messages (observed
+// live against claude 2.1.224: one three-line prompt answered as three turns).
+// The -p flag is conditional inside tmux — it inserts the markers only if the
+// application requested bracketed paste mode — so it cannot corrupt input for
+// a wrapped command that does not support it.
+func TestPasteIsBracketed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		send func(*Session) error
+	}{
+		{"Send", func(s *Session) error { return s.Send("one\ntwo\nthree") }},
+		{"SendAck", func(s *Session) error { _, err := s.SendAck("one\ntwo\nthree"); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			sv := newTestServer(f)
+			if err := tc.send(sv.Session("node1")); err != nil {
+				t.Fatal(err)
+			}
+			var paste []string
+			for _, c := range f.calls {
+				if len(c.args) > 2 && c.args[2] == "paste-buffer" {
+					paste = c.args[2:]
+				}
+			}
+			if paste == nil {
+				t.Fatalf("no paste-buffer call in %v", f.calls)
+			}
+			found := false
+			for _, a := range paste {
+				if a == "-p" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("paste-buffer args = %v, want -p (bracketed paste)", paste)
+			}
+		})
 	}
 }

@@ -140,3 +140,34 @@ func TestKillDeadSessionErrorsCleanly(t *testing.T) {
 		t.Fatal("second Kill must return an error")
 	}
 }
+
+// -p must be inert for a wrapped command that never requests bracketed paste
+// mode: tmux inserts the markers only on request, so a plain reader like cat
+// must see the text unchanged and never the literal escape sequences.
+func TestBracketedPasteIsInertWithoutRequest(t *testing.T) {
+	sv := integrationServer(t)
+	dir, _ := os.Getwd()
+	s, err := sv.NewSession("brackets", dir, "cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// cat prints nothing until it is fed, so readiness is the live pane itself.
+	waitFor(t, 5*time.Second, "pane to start", func() bool { return s.Alive() })
+	marker := fmt.Sprintf("ALPHA-%d", rand.Int63())
+	if err := s.Send(marker + "\nBETA-" + marker); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "both pasted lines", func() bool {
+		out, _ := s.Capture()
+		return strings.Contains(out, marker) && strings.Contains(out, "BETA-"+marker)
+	})
+	out, err := s.Capture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, junk := range []string{"200~", "201~"} {
+		if strings.Contains(out, junk) {
+			t.Errorf("bracketed-paste marker %q leaked into a pane that never requested it:\n%s", junk, out)
+		}
+	}
+}
