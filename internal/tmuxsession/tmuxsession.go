@@ -152,6 +152,19 @@ func (s *Session) Alive() bool {
 // removes the interleaving entirely without serializing sends.
 var sendSeq atomic.Uint64
 
+// normalizeNewlines rewrites CRLF and lone CR to LF before the text reaches a
+// tmux buffer. tmux translates a buffer's line feeds to carriage returns on
+// paste, so CRLF would survive that rewrite as CR CR — two line breaks where
+// the author wrote one, changing the prompt the agent receives and records.
+// Only line endings are touched: leading and trailing whitespace, deliberate
+// blank lines, and interior spacing are the user's text and are passed through.
+func normalizeNewlines(s string) string {
+	if !strings.ContainsRune(s, '\r') {
+		return s
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
+}
+
 // Send delivers text as a single bracketed paste (safe for long, multi-line
 // prompts — send-keys would re-interpret newlines as submissions) and then
 // submits it.
@@ -166,7 +179,7 @@ var sendSeq atomic.Uint64
 // command that does not support it.
 func (s *Session) Send(text string) error {
 	buf := fmt.Sprintf("scimux-send-%d", sendSeq.Add(1))
-	if out, err := s.sv.tmux(text, "load-buffer", "-b", buf, "-"); err != nil {
+	if out, err := s.sv.tmux(normalizeNewlines(text), "load-buffer", "-b", buf, "-"); err != nil {
 		return fmt.Errorf("tmux load-buffer: %v: %s", err, out)
 	}
 	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-p", "-b", buf, "-t", s.paneTarget()); err != nil {
@@ -190,7 +203,7 @@ const sendAckPolls = 8
 // caller must treat as an unconfirmed delivery, not as a licence to retry.
 func (s *Session) SendAck(text string) (acked bool, err error) {
 	buf := fmt.Sprintf("scimux-send-%d", sendSeq.Add(1))
-	if out, err := s.sv.tmux(text, "load-buffer", "-b", buf, "-"); err != nil {
+	if out, err := s.sv.tmux(normalizeNewlines(text), "load-buffer", "-b", buf, "-"); err != nil {
 		return false, fmt.Errorf("tmux load-buffer: %v: %s", err, out)
 	}
 	if out, err := s.sv.tmux("", "paste-buffer", "-d", "-p", "-b", buf, "-t", s.paneTarget()); err != nil {

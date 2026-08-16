@@ -517,3 +517,68 @@ func TestPasteIsBracketed(t *testing.T) {
 		})
 	}
 }
+
+// tmux rewrites a buffer's line feeds to carriage returns on paste. Text that
+// already ends its lines with CRLF therefore arrives as CR CR — two line breaks
+// where the author wrote one — so the prompt Claude records is not the prompt
+// the user typed, and the delivery check correctly reports it unconfirmed
+// (observed live: a CRLF initial prompt answered fine but warned "check
+// terminal"). Normalizing to LF before the buffer is loaded makes tmux's rewrite
+// happen exactly once per line break. The fix belongs here, not in the
+// comparison: collapsing blank lines there would also hide real corruption.
+func TestPasteNormalizesLineEndings(t *testing.T) {
+	const want = "line one\nline two\nline three"
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"LF", "line one\nline two\nline three"},
+		{"CRLF", "line one\r\nline two\r\nline three"},
+		{"CR", "line one\rline two\rline three"},
+		{"mixed", "line one\r\nline two\rline three"},
+	} {
+		for _, send := range []struct {
+			name string
+			call func(*Session, string) error
+		}{
+			{"Send", func(s *Session, txt string) error { return s.Send(txt) }},
+			{"SendAck", func(s *Session, txt string) error { _, err := s.SendAck(txt); return err }},
+		} {
+			t.Run(tc.name+"/"+send.name, func(t *testing.T) {
+				f := &fakeRunner{}
+				sv := newTestServer(f)
+				if err := send.call(sv.Session("node1"), tc.text); err != nil {
+					t.Fatal(err)
+				}
+				var load *call
+				for i := range f.calls {
+					if len(f.calls[i].args) > 2 && f.calls[i].args[2] == "load-buffer" {
+						load = &f.calls[i]
+						break
+					}
+				}
+				if load == nil {
+					t.Fatalf("no load-buffer call in %v", f.calls)
+				}
+				if load.stdin != want {
+					t.Errorf("load-buffer stdin = %q, want %q", load.stdin, want)
+				}
+			})
+		}
+	}
+}
+
+// Normalizing line endings must not touch anything else: no trimming, no
+// collapsing of the blank lines an author wrote deliberately, no change to
+// interior spacing.
+func TestPasteNormalizationPreservesEverythingElse(t *testing.T) {
+	text := "  leading spaces\n\n\ndeliberate blank lines\ttab\n  trailing \n"
+	f := &fakeRunner{}
+	sv := newTestServer(f)
+	if err := sv.Session("node1").Send(text); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls[0].stdin != text {
+		t.Errorf("LF-only text was altered:\n got %q\nwant %q", f.calls[0].stdin, text)
+	}
+}
