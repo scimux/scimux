@@ -63,6 +63,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		launchGrace:     launchGrace,
 		launchPoll:      launchPoll,
 		claudeCachePath: filepath.Join(cfg.DataDir, "claude-models.json"),
+		claudeProbeDir:  filepath.Join(cfg.DataDir, "probe"),
 		acp:             acpManager{acp.NewManager(sessionsDir)},
 		codex:           codexManager{codex.NewManager(sessionsDir)},
 		storePath:       filepath.Join(cfg.DataDir, "nodes.jsonl"),
@@ -179,6 +180,9 @@ func (a *app) initMaps() {
 	}
 	if a.claudeBoundAt == nil {
 		a.claudeBoundAt = map[string]time.Time{}
+	}
+	if a.lastDeliver == nil {
+		a.lastDeliver = map[string]time.Time{}
 	}
 }
 
@@ -332,10 +336,18 @@ type app struct {
 	// hook record is persisted at publish time.
 	pendingClaudeHooks map[string]string
 	// claudeBoundAt is when each node's current transcript link was
-	// established. A link younger than the phase being judged cannot be stale
-	// for that phase (maybeRelinkTranscript). In memory only: after a restart
-	// there is no phase to judge either, and the file has content by then.
+	// established. A link established after the delivery being judged cannot
+	// have missed it (maybeRelinkTranscript).
 	claudeBoundAt map[string]time.Time
+	// lastDeliver is when scimux last pasted a prompt into each node's pane.
+	// It is the only thing that makes a stale link provable: the agent owes
+	// output for that prompt, so a transcript with no content since then is
+	// not the file the pane is writing to. Pane phases cannot stand in for it
+	// — the poller's first capture after a restart manufactures one (prevCap
+	// starts empty), and so does TUI chrome redrawing after a finished turn.
+	// In memory only, and deliberately so: a fresh process has delivered
+	// nothing, so it has nothing to judge and leaves every link alone.
+	lastDeliver map[string]time.Time
 
 	// storeMu serializes every append to nodes.jsonl, independent of a.mu (some
 	// callers hold a.mu, some do not). It gives the append-only store one
@@ -373,8 +385,12 @@ type app struct {
 	claudeIDs       map[string]string
 	claudeMu        sync.Mutex
 	claudeCachePath string // ~/.scimux/claude-models.json; empty disables caching
-	storePath       string
-	uiPath          string
+	// claudeProbeDir is the neutral cwd the model probe runs in, so its
+	// throwaway `claude -p` transcript can never land in a node's
+	// ~/.claude/projects folder (claudeProbeWorkdir).
+	claudeProbeDir string
+	storePath      string
+	uiPath         string
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also

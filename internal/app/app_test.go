@@ -98,6 +98,7 @@ func TestNewAppDerivesDataPaths(t *testing.T) {
 	}
 	want := map[string]string{
 		"claudeCachePath": filepath.Join(data, "claude-models.json"),
+		"claudeProbeDir":  filepath.Join(data, "probe"),
 		"storePath":       filepath.Join(data, "nodes.jsonl"),
 		"uiPath":          filepath.Join(data, "ui.json"),
 		"sessionsDir":     filepath.Join(data, "sessions"),
@@ -107,6 +108,7 @@ func TestNewAppDerivesDataPaths(t *testing.T) {
 	}
 	got := map[string]string{
 		"claudeCachePath": a.claudeCachePath,
+		"claudeProbeDir":  a.claudeProbeDir,
 		"storePath":       a.storePath,
 		"uiPath":          a.uiPath,
 		"sessionsDir":     a.sessionsDir,

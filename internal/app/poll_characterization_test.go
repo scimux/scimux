@@ -614,6 +614,10 @@ func TestPollActiveToQuietTriggersRelink(t *testing.T) {
 	a.prevCap["c1"] = "static quiet pane"
 	a.lastChg["c1"] = time.Now().Add(-10 * time.Second)
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+	// An unanswered pasted prompt is what makes the link provably stale; a
+	// bare pane phase proves nothing (the poller's first capture after a
+	// restart manufactures one).
+	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 
 	a.poll()
 

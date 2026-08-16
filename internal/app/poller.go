@@ -411,9 +411,23 @@ func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error {
 	return w.Append(ev)
 }
 
+// noteDelivery records that scimux pasted a prompt into a node's pane. It is
+// the watermark the stale-link backstop judges against: after this instant the
+// agent owes output, so a transcript that records nothing is not the file the
+// pane is writing to. Callers pass the paste time rather than "now" so a slow
+// confirmation wait cannot move the watermark forward past the answer.
+func (a *app) noteDelivery(id string, at time.Time) {
+	if id == "" {
+		return
+	}
+	a.mu.Lock()
+	a.lastDeliver[id] = at
+	a.mu.Unlock()
+}
+
 // maybeRelinkTranscript is the active→quiet hook drain and stale-link
 // backstop. It must not choose a transcript from cwd, mtime, pane cmdline,
-// or newest-file. After a phase the linked file did not carry, every Claude
+// or newest-file. After a delivery the linked file did not carry, every Claude
 // node detaches and shows the pane. A later validated hook event still binds
 // the successor.
 func (a *app) maybeRelinkTranscript(n *Node) {
@@ -423,15 +437,29 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	a.drainClaudeHooks()
 	a.mu.Lock()
 	cur := n.Transcript
-	since, ok := a.activeSince[n.ID]
+	deliv, delivered := a.lastDeliver[n.ID]
 	bound := a.claudeBoundAt[n.ID]
 	a.mu.Unlock()
-	if !ok || cur == "" {
+	if cur == "" {
 		return
 	}
-	since = since.Add(-10 * time.Second)
-	// A link established inside the phase being judged cannot have missed it.
-	if bound.After(since) {
+	// Staleness is judged against a delivery, never against a pane phase. A
+	// phase proves only that the terminal repainted: the poller's very first
+	// capture after a restart opens one (prevCap starts empty, so any live
+	// pane reads as changed), and so does remote-control chrome redrawing
+	// after a turn is already finished. Both were observed retiring healthy
+	// transcripts — the restart case retired every idle Claude node at once.
+	// A delivered prompt is different: the agent owes output for it.
+	if !delivered {
+		return
+	}
+	// The transcript write lags the paste; judging inside that window would
+	// retire a link that is about to be answered.
+	if time.Since(deliv) < deliveryGrace {
+		return
+	}
+	// A link established after the prompt was pasted cannot have missed it.
+	if bound.After(deliv) {
 		return
 	}
 	// No recognized turn yet is absence of evidence, not proof of staleness.
@@ -441,7 +469,7 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 	// turn. Retiring on that tombstones the successor and strands the node in
 	// peek for good (observed against claude 2.1.224).
 	ct, ok := transcript.NewestContentTime(cur)
-	if !ok || ct.After(since) {
+	if !ok || !ct.Before(deliv) {
 		return
 	}
 	a.retireTranscript(n)
@@ -471,6 +499,12 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 // attention source shares.
 const animMaxLines = 3
 const paneQuietAfter = 8 * time.Second
+
+// deliveryGrace is how long after a paste the stale-link backstop waits before
+// a transcript with no new content counts as proof the link is dead. It covers
+// the lag between the paste and the agent writing its user record; the pane
+// can complete a whole active→quiet cycle on the paste echo alone inside it.
+const deliveryGrace = 30 * time.Second
 const animStallAfter = 90 * time.Second
 const owedStallAfter = 45 * time.Second
 

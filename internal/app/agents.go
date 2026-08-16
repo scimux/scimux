@@ -174,16 +174,33 @@ func parseClaudeModels(out string) map[string]string {
 // answer returns nil, and scimux falls back to passing the bare family alias
 // (the pre-existing behavior). This shells out to a real agent CLI, so it runs
 // only at startup, never in tests.
-func probeClaudeModels(ctx context.Context) map[string]string {
+func probeClaudeModels(ctx context.Context, probeDir string) map[string]string {
 	bin, err := exec.LookPath("claude")
 	if err != nil {
 		return nil
 	}
-	out, err := exec.CommandContext(ctx, bin, "-p", claudeModelPrompt).Output()
+	cmd := exec.CommandContext(ctx, bin, "-p", claudeModelPrompt)
+	cmd.Dir = claudeProbeWorkdir(probeDir)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
 	return parseClaudeModels(string(out))
+}
+
+// claudeProbeWorkdir is the directory the probe runs in, created on demand.
+// It must never be the cwd scimux inherited: claude writes a transcript into
+// ~/.claude/projects/<slug of its cwd>/, so a probe launched from a supervised
+// node's directory drops a throwaway session into that node's project folder,
+// where the relink machinery can adopt it and the enumeration prompt shows up
+// in a live chat. A dedicated dir under ~/.scimux keeps it somewhere no node
+// can own; if that cannot be created the OS temp dir stands in — anything but
+// the inherited cwd.
+func claudeProbeWorkdir(dir string) string {
+	if dir != "" && os.MkdirAll(dir, 0o700) == nil {
+		return dir
+	}
+	return os.TempDir()
 }
 
 // claudeCacheTTL bounds how long a successful model probe is trusted before

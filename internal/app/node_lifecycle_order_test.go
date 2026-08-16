@@ -294,6 +294,9 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	a.nodes = append(a.nodes, n)
 	a.byID["c1"] = n
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+	// A pasted prompt this file never recorded is what makes the link
+	// provably stale; a bare pane phase proves nothing (D1/D2).
+	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 	breakStore(t, a)
 
 	a.maybeRelinkTranscript(n)

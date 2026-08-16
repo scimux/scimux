@@ -651,6 +651,101 @@ func TestLoadStoreReplayCorrections(t *testing.T) {
 	}
 }
 
+// Replay must not resurrect a link the store already retired. Bindings and
+// legacy transcript records are applied after the stream is read (so a later
+// title-only node record cannot wipe them), which means their ordering against
+// a transcript-retired record is lost by the time they land. Without a
+// tombstone check the node comes back from a restart pointing at a file
+// scimux itself declared dead — observed stranding a /cleared node on its
+// pre-clear transcript.
+func TestLoadStoreDoesNotRebindRetiredTranscripts(t *testing.T) {
+	node := `{"type":"node","node":{"id":"a","title":"n","prompt":"p","agent":"claude","dir":"/tmp","created_at":"2026-07-01T08:00:00Z"}}`
+
+	t.Run("retired binding path stays detached", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "nodes.jsonl")
+		lines := []string{
+			node,
+			`{"type":"claude-binding","id":"a","path":"/t/dead.jsonl","session_id":"dead","hook_id":"abcd","generation":1}`,
+			`{"type":"transcript-retired","id":"a","path":"/t/dead.jsonl","session_id":"dead"}`,
+		}
+		if err := os.WriteFile(store, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		a := &app{byID: map[string]*Node{}, storePath: store}
+		if err := a.loadStore(); err != nil {
+			t.Fatal(err)
+		}
+		n := a.byID["a"]
+		if n.Transcript != "" || n.SessionID != "" {
+			t.Fatalf("retired binding re-applied on replay: transcript=%q session=%q", n.Transcript, n.SessionID)
+		}
+		// The hook identity is not the link; it must survive so the next
+		// SessionStart can bind a successor.
+		if a.claudeHooks["a"] != "abcd" || a.claudeGens["a"] != 1 {
+			t.Fatalf("hook identity lost: hook=%q gen=%d", a.claudeHooks["a"], a.claudeGens["a"])
+		}
+	})
+
+	t.Run("retired session id alone stays detached", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "nodes.jsonl")
+		lines := []string{
+			node,
+			`{"type":"claude-binding","id":"a","path":"/t/dead.jsonl","session_id":"dead"}`,
+			`{"type":"transcript-retired","id":"a","session_id":"dead"}`,
+		}
+		if err := os.WriteFile(store, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		a := &app{byID: map[string]*Node{}, storePath: store}
+		if err := a.loadStore(); err != nil {
+			t.Fatal(err)
+		}
+		if n := a.byID["a"]; n.Transcript != "" || n.SessionID != "" {
+			t.Fatalf("binding with retired session re-applied: transcript=%q session=%q", n.Transcript, n.SessionID)
+		}
+	})
+
+	t.Run("successor binding after a retire survives", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "nodes.jsonl")
+		lines := []string{
+			node,
+			`{"type":"claude-binding","id":"a","path":"/t/dead.jsonl","session_id":"dead"}`,
+			`{"type":"transcript-retired","id":"a","path":"/t/dead.jsonl","session_id":"dead"}`,
+			`{"type":"claude-binding","id":"a","path":"/t/live.jsonl","session_id":"live","generation":2}`,
+		}
+		if err := os.WriteFile(store, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		a := &app{byID: map[string]*Node{}, storePath: store}
+		if err := a.loadStore(); err != nil {
+			t.Fatal(err)
+		}
+		n := a.byID["a"]
+		if n.Transcript != "/t/live.jsonl" || n.SessionID != "live" {
+			t.Fatalf("post-retire successor bind lost: transcript=%q session=%q", n.Transcript, n.SessionID)
+		}
+	})
+
+	t.Run("retired legacy transcript record stays detached", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "nodes.jsonl")
+		lines := []string{
+			node,
+			`{"type":"transcript","id":"a","path":"/t/dead.jsonl"}`,
+			`{"type":"transcript-retired","id":"a","path":"/t/dead.jsonl"}`,
+		}
+		if err := os.WriteFile(store, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		a := &app{byID: map[string]*Node{}, storePath: store}
+		if err := a.loadStore(); err != nil {
+			t.Fatal(err)
+		}
+		if n := a.byID["a"]; n.Transcript != "" {
+			t.Fatalf("retired legacy transcript re-applied: %q", n.Transcript)
+		}
+	})
+}
+
 func TestStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nodes.jsonl")
 	w := &app{byID: map[string]*Node{}, storePath: path}

@@ -147,8 +147,12 @@ func (a *app) loadStore() error {
 			delete(bindings, rec.ID)
 		}
 	}
+	// Applying links last costs their ordering against the tombstones, so the
+	// tombstones decide: a path or session this node retired is never re-bound
+	// by replay. Without this a restart resurrects the link scimux itself
+	// declared dead (a /cleared node came back on its pre-clear transcript).
 	for id, path := range transcripts {
-		if n, ok := a.byID[id]; ok {
+		if n, ok := a.byID[id]; ok && !a.isDeadTranscript(id, path, "") {
 			n.Transcript = path
 		}
 	}
@@ -174,6 +178,13 @@ func (a *app) loadStore() error {
 		}
 		if rec.Generation > 0 {
 			a.claudeGens[id] = rec.Generation
+		}
+		// The hook identity above is not the link and survives a retire — the
+		// next SessionStart binds a successor through it. The link itself does
+		// not: a retired path or session stays detached, and the node degrades
+		// to peek until that successor arrives.
+		if a.isDeadTranscript(id, rec.Path, rec.SessionID) {
+			continue
 		}
 		n.Transcript = rec.Path
 		n.SessionID = rec.SessionID
@@ -252,6 +263,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.claudeGens, id)
 	delete(a.pendingClaudeHooks, id)
 	delete(a.claudeBoundAt, id)
+	delete(a.lastDeliver, id)
 }
 
 // sessionLogPath is the single spelling of a node's session-log location; the

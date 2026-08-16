@@ -244,7 +244,7 @@ func (a *app) refreshClaudeModels(ctx context.Context) {
 		a.setClaudeIDs(cache.IDs)
 		return
 	}
-	if ids := probeClaudeModels(ctx); len(ids) > 0 {
+	if ids := probeClaudeModels(ctx, a.claudeProbeDir); len(ids) > 0 {
 		a.setClaudeIDs(ids)
 		if err := writeClaudeCache(a.claudeCachePath, ids); err != nil {
 			fmt.Fprintf(os.Stderr, "scimux: cache claude models: %v\n", err)
@@ -558,10 +558,14 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 
 	tl := &transcript.Tailer{Path: path}
 	before := len(tl.Poll())
+	pasted := time.Now()
 	if err := a.server.Session(n.ID).Send(n.Prompt); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: deferred first prompt to Claude node %s failed: %v\n", n.ID, err)
 		return initialNotSent
 	}
+	// The first prompt reached the pane: from here the agent owes output, so
+	// this is the watermark the stale-link backstop judges against.
+	a.noteDelivery(n.ID, pasted)
 	want := canonicalPrompt(n.Prompt)
 	deliveryDeadline := time.Now().Add(a.claudeDeliveryTimeout)
 	for {

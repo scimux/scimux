@@ -211,6 +211,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	if tl != nil {
 		turnsBefore = len(tl.Poll())
 	}
+	pasted := time.Now()
 	acked, err := a.server.Session(n.ID).SendAck(delivered)
 	if err != nil {
 		a.mu.Lock()
@@ -222,6 +223,9 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !acked && tl != nil && len(tl.Poll()) > turnsBefore {
 		acked = true
 	}
+	// The prompt reached the pane, so the agent owes output from here on: this
+	// is the watermark the stale-link backstop judges the transcript against.
+	a.noteDelivery(n.ID, pasted)
 	a.mu.Lock()
 	if acked {
 		delete(a.sendState, n.ID)

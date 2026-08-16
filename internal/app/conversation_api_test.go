@@ -740,6 +740,7 @@ func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 		staleChat: map[string]bool{},
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
+	a.initMaps() // keeps the fixture maps above, fills the rest handleSend writes
 	send := func(text string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/api/nodes/n1/send", strings.NewReader(`{"text":"`+text+`"}`))
@@ -846,6 +847,7 @@ func TestHandleSendAcknowledgedByPane(t *testing.T) {
 		staleChat: map[string]bool{},
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
+	a.initMaps() // keeps the fixture maps above, fills the rest handleSend writes
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/api/nodes/n1/send", strings.NewReader(`{"text":"go"}`))

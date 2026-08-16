@@ -774,6 +774,9 @@ func TestHookOwnedStalePhaseDetaches(t *testing.T) {
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
 	writeSeedLog(t, a, n.ID, "before")
 	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
+	// The phase is only judgeable because a prompt was pasted and this file
+	// never recorded it; a bare pane phase proves nothing (D1/D2).
+	a.noteDelivery(n.ID, time.Now().Add(-time.Minute))
 
 	a.maybeRelinkTranscript(n)
 	if n.Transcript == newest || n.SessionID == hookSIDForeign {
@@ -1090,6 +1093,20 @@ func TestLegacyStoreReplayAndNoNewestFileRelink(t *testing.T) {
 	if got.Transcript == newest || got.SessionID == hookSIDForeign {
 		t.Fatalf("legacy node entered newest-file relink: %q / %q", got.Transcript, got.SessionID)
 	}
+	// The reloaded process has delivered nothing, so it has no evidence the
+	// link is stale and must leave it alone (D1: this is what retired every
+	// idle Claude node on every restart).
+	if got.Transcript != old {
+		t.Fatalf("reload retired a legacy link it never delivered to: %q", got.Transcript)
+	}
+
+	// Once a prompt is pasted and this file does not record it, it detaches —
+	// still without guessing the newest file.
+	a2.noteDelivery("legacy", time.Now().Add(-time.Minute))
+	a2.maybeRelinkTranscript(got)
+	if got.Transcript == newest || got.SessionID == hookSIDForeign {
+		t.Fatalf("detach guessed newest file: %q / %q", got.Transcript, got.SessionID)
+	}
 	if got.Transcript != "" {
 		t.Fatalf("legacy stale transcript must detach, got %q", got.Transcript)
 	}
@@ -1337,5 +1354,120 @@ func TestClearHookSuccessorSurvivesNextPollTransition(t *testing.T) {
 	}
 	if a.deadTranscripts[n.ID][succ] {
 		t.Fatal("successor tombstoned; the node can never rebind it")
+	}
+}
+
+// D1/D2. A pane phase is not evidence that the agent worked: the poller's
+// first capture after a restart manufactures one (prevCap is empty, so any
+// pane looks changed), and so does late TUI chrome redrawing seconds after a
+// turn finished. Both were observed retiring healthy transcripts live. The
+// only mechanical proof a link is stale is an *unanswered delivery* — scimux
+// pasted a prompt and the transcript never recorded anything since.
+func TestRelinkRequiresAnUnansweredDelivery(t *testing.T) {
+	// setup returns an app with a hook-owned node whose transcript's newest
+	// content is contentAge old, and a completed active→quiet phase.
+	setup := func(t *testing.T, contentAge time.Duration) (*app, *Node, string) {
+		t.Helper()
+		f := &fakeTmux{alive: map[string]bool{"n1": true}}
+		a := newTestApp(t, f)
+		if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cur := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn,
+			claudeUserLine("turn", -contentAge))
+		n := seedOwnedClaude(t, a, "n1", hookSIDOwn, cur)
+		writeSeedLog(t, a, n.ID, "before")
+		a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
+		return a, n, cur
+	}
+
+	// D1: nothing was ever delivered through scimux — the phase is the
+	// poller's own first-capture artifact after a restart. Every idle Claude
+	// node was retired and tombstoned this way on every restart.
+	t.Run("no delivery recorded survives", func(t *testing.T) {
+		a, n, cur := setup(t, 2*time.Hour)
+		a.maybeRelinkTranscript(n)
+		if n.Transcript != cur {
+			t.Fatalf("restart phase retired an idle node: %q", n.Transcript)
+		}
+		if a.deadTranscripts[n.ID][cur] {
+			t.Fatal("idle node's transcript tombstoned; it can never rebind")
+		}
+	})
+
+	// D2: the delivery was answered — content exists after it — and only then
+	// did the pane redraw (remote-control chrome, spinner teardown).
+	t.Run("delivery answered survives a later redraw", func(t *testing.T) {
+		a, n, cur := setup(t, 30*time.Second)
+		a.noteDelivery(n.ID, time.Now().Add(-60*time.Second))
+		a.maybeRelinkTranscript(n)
+		if n.Transcript != cur {
+			t.Fatalf("late redraw retired an answered transcript: %q", n.Transcript)
+		}
+	})
+
+	// The real stale case: a prompt was pasted and this file never carried it.
+	t.Run("unanswered delivery retires", func(t *testing.T) {
+		a, n, cur := setup(t, 2*time.Hour)
+		a.noteDelivery(n.ID, time.Now().Add(-60*time.Second))
+		a.maybeRelinkTranscript(n)
+		if n.Transcript != "" || n.SessionID != "" {
+			t.Fatalf("unanswered delivery must detach, got %q / %q", n.Transcript, n.SessionID)
+		}
+		if !a.deadTranscripts[n.ID][cur] {
+			t.Fatal("retired path not tombstoned")
+		}
+	})
+
+	// A transcript write lags the paste; judging inside that window would
+	// retire a link that is about to be answered.
+	t.Run("delivery inside the grace window survives", func(t *testing.T) {
+		a, n, cur := setup(t, 2*time.Hour)
+		a.noteDelivery(n.ID, time.Now())
+		a.maybeRelinkTranscript(n)
+		if n.Transcript != cur {
+			t.Fatalf("retired inside the delivery grace window: %q", n.Transcript)
+		}
+	})
+
+	// A link established after the prompt was pasted cannot have missed it.
+	t.Run("link bound after the delivery survives", func(t *testing.T) {
+		a, n, cur := setup(t, 2*time.Hour)
+		a.noteDelivery(n.ID, time.Now().Add(-60*time.Second))
+		a.claudeBoundAt[n.ID] = time.Now()
+		a.maybeRelinkTranscript(n)
+		if n.Transcript != cur {
+			t.Fatalf("link bound after the delivery was retired: %q", n.Transcript)
+		}
+	})
+}
+
+// D1 end to end through the poller: a fresh process adopting a live pane must
+// survive its own first capture. prevCap is empty at startup, so tick one sees
+// a "change" and opens an active phase that no existing transcript can have
+// carried; tick two closes it as quiet and runs the backstop.
+func TestFirstPollAfterRestartKeepsIdleTranscripts(t *testing.T) {
+	proj := t.TempDir()
+	n := &Node{ID: "n1", Agent: "claude", Dir: "/w/proj", SessionID: "old-session"}
+	a := newPollApp(t, n, pollRunner([]string{n.ID}, "a live pane", false, nil))
+	cur := filepath.Join(proj, "old-session.jsonl")
+	appendLines(t, cur, claudeUserLine("hours ago", -2*time.Hour))
+	n.Transcript = cur
+
+	a.poll() // first capture: prevCap empty, so the pane looks changed
+	if a.live[n.ID] != "active" {
+		t.Fatalf("first tick live = %q, want active (precondition)", a.live[n.ID])
+	}
+	a.lastChg[n.ID] = time.Now().Add(-2 * paneQuietAfter) // let the phase end
+	a.poll()
+	if a.live[n.ID] != "quiet" {
+		t.Fatalf("second tick live = %q, want quiet (precondition)", a.live[n.ID])
+	}
+
+	if n.Transcript != cur {
+		t.Fatalf("restart retired an idle node's transcript: %q", n.Transcript)
+	}
+	if a.deadTranscripts[n.ID][cur] {
+		t.Fatal("restart tombstoned the transcript; the node is stranded in peek")
 	}
 }

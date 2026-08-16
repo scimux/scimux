@@ -528,3 +528,52 @@ func TestCodexManagerConflictAndPending(t *testing.T) {
 		t.Errorf("Pending(ghost) = (%+v, true), want ok=false", p)
 	}
 }
+
+// The model probe shells out to `claude -p`, and claude writes a transcript
+// into ~/.claude/projects/<slug of its cwd>/. Inheriting scimux's own cwd
+// therefore drops a throwaway probe session into whatever project scimux was
+// started from; when that is a supervised node's directory the relink
+// machinery can adopt the probe file and the enumeration prompt surfaces in a
+// live chat (observed during E2E testing). The probe must always run somewhere
+// no node can own.
+func TestClaudeProbeWorkdirIsNeverTheInheritedCwd(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("creates and returns the dedicated dir", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "probe")
+		got := claudeProbeWorkdir(dir)
+		if got != dir {
+			t.Fatalf("workdir = %q, want %q", got, dir)
+		}
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("probe dir not created: %v", err)
+		}
+		if !fi.IsDir() {
+			t.Fatal("probe path is not a directory")
+		}
+		if perm := fi.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("probe dir perm = %o, want 700", perm)
+		}
+	})
+
+	t.Run("falls back to a temp dir, never the cwd", func(t *testing.T) {
+		// An unusable path: a regular file stands where the dir should go.
+		blocked := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, dir := range []string{"", filepath.Join(blocked, "probe")} {
+			got := claudeProbeWorkdir(dir)
+			if got == "" || got == cwd {
+				t.Fatalf("workdir(%q) = %q, must not be empty or the inherited cwd", dir, got)
+			}
+			if fi, err := os.Stat(got); err != nil || !fi.IsDir() {
+				t.Fatalf("workdir(%q) = %q is not a usable directory (%v)", dir, got, err)
+			}
+		}
+	})
+}

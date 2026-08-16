@@ -714,6 +714,9 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	a.nodes = append(a.nodes, n)
 	a.byID["c1"] = n
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+	// The prompt this file never recorded is the staleness evidence; a bare
+	// pane phase proves nothing (D1/D2).
+	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 
 	a.maybeRelinkTranscript(n)
 
@@ -2066,6 +2069,8 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		a.nodes = append(a.nodes, n)
 		a.byID["c1"] = n
 		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
+		// The unanswered prompt is the staleness evidence (D1/D2).
+		a.noteDelivery("c1", time.Now().Add(-time.Minute))
 		a.maybeRelinkTranscript(n)
 		if n.Transcript == linked {
 			t.Fatalf("metadata-only mtime touch kept dead link healthy; transcript still %q", linked)
