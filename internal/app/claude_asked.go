@@ -37,8 +37,8 @@ import (
 
 // claudeAskedTTL bounds how long a notice may stand. It is a leak backstop,
 // not the retirement policy: a notice is normally retired the moment the
-// helper auto-approves its call, or when the pane resumes streaming (the
-// mechanical diff-geometry signal that the dialog is gone). A dialog may
+// helper auto-approves its call, or when the transcript records the work that
+// only an answered dialog can produce. A dialog may
 // legitimately wait hours for a human, so this is generous on purpose — the
 // failure this whole design exists to prevent is a wait going unnoticed, and a
 // notice that outstays its dialog costs only a look at the terminal.
@@ -102,16 +102,24 @@ func removeClaudeAskedNotice(perm, id string) {
 	_ = os.Remove(claudeAskedPath(perm, id))
 }
 
-// readClaudeAskedNotices returns the standing notices, newest first, dropping
+// askedFile pairs a standing notice with the file that holds it, so a caller
+// can retire one specific ask.
+type askedFile struct {
+	path string
+	note claudeAskedNotice
+	at   time.Time
+}
+
+// readClaudeAskedFiles returns the standing notices, newest first, dropping
 // (and deleting) anything past the TTL. Defensive like every other transcript
 // reader: an unreadable or unparseable file is ignored, never an error.
-func readClaudeAskedNotices(perm string, now time.Time) []claudeAskedNotice {
+func readClaudeAskedFiles(perm string, now time.Time) []askedFile {
 	dir := filepath.Join(perm, claudeAskedDirName)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
-	var out []claudeAskedNotice
+	var out []askedFile
 	for _, e := range ents {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -130,27 +138,43 @@ func readClaudeAskedNotices(perm string, now time.Time) []claudeAskedNotice {
 			_ = os.Remove(p)
 			continue
 		}
-		out = append(out, note)
+		out = append(out, askedFile{path: p, note: note, at: at})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].At > out[j].At })
+	sort.Slice(out, func(i, j int) bool { return out[i].note.At > out[j].note.At })
 	return out
 }
 
-// sweepClaudeAskedNotices retires every standing notice for a bundle. The
-// caller must have mechanical evidence that no dialog is on screen — today
-// that is the pane resuming unconfined output, which is the same diff geometry
-// noteAnim already uses to decide an animation strip has ended.
-func sweepClaudeAskedNotices(perm string) {
-	dir := filepath.Join(perm, claudeAskedDirName)
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return
+func readClaudeAskedNotices(perm string, now time.Time) []claudeAskedNotice {
+	files := readClaudeAskedFiles(perm, now)
+	out := make([]claudeAskedNotice, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.note)
 	}
-	for _, e := range ents {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
+	return out
+}
+
+// retireOldestAskedNotice retires exactly one ask — the oldest one written
+// before `before`, which the caller sets to the time of the transcript record
+// that proves an ask was resolved.
+//
+// Two properties this deliberately has, both learned the hard way:
+//
+// One per call. Claude draws queued dialogs in order, and one resolution
+// answers one ask, so retiring the whole directory on a single signal would
+// discard a second dialog's announcement while it was still on screen.
+//
+// Older than the evidence. A notice written *after* the newest transcript
+// record cannot have been resolved by it: an agent that printed text and then
+// asked for permission produces exactly that ordering, and retiring on it
+// would erase the ask one tick after it arrived.
+func retireOldestAskedNotice(perm string, before, now time.Time) bool {
+	files := readClaudeAskedFiles(perm, now)
+	for i := len(files) - 1; i >= 0; i-- { // oldest first
+		if files[i].at.Before(before) {
+			return os.Remove(files[i].path) == nil
 		}
 	}
+	return false
 }
 
 // bundleSupportsAsked reports whether a bundle proves the notice layout, from
@@ -158,33 +182,38 @@ func sweepClaudeAskedNotices(perm string) {
 // feature says no and keeps the pane-geometry backstop: the gate degrades to
 // "no gate", never to "no attention".
 func bundleSupportsAsked(bundle string) bool {
-	if bundle == "" {
+	caps, ok := readClaudeHookCapabilities(bundle)
+	if !ok || caps.Asked < 1 {
 		return false
 	}
-	b, err := os.ReadFile(filepath.Join(bundle, "capabilities.json"))
-	if err != nil {
-		return false
-	}
-	var caps struct {
-		Asked int `json:"asked"`
-	}
-	if json.Unmarshal(b, &caps) != nil || caps.Asked < 1 {
+	// The gate suppresses attention, so it needs the stronger proof: a bundle
+	// whose baked binary is gone can never write a notice, and its silence must
+	// not read as "Claude asked nothing" (claudeBundleExecUsable).
+	if !claudeBundleExecUsable(caps) {
 		return false
 	}
 	st, err := os.Stat(filepath.Join(bundle, "perm", claudeAskedDirName))
 	return err == nil && st.IsDir()
 }
 
-// noteClaudeAskedCapability records a fresh bundle's notice support.
+// noteClaudeAskedCapability records what a fresh bundle proves about notice
+// support — from disk, the same proof the restart refresh reads, and recorded
+// either way so an unusable bundle cannot keep a stale yes (see
+// noteClaudePermCapability).
 func (a *app) noteClaudeAskedCapability(hookID string) {
 	if hookID == "" {
 		return
 	}
+	ok := bundleSupportsAsked(a.claudeHookBundlePath(hookID))
 	a.mu.Lock()
 	if a.claudeAskedCap == nil {
 		a.claudeAskedCap = map[string]bool{}
 	}
-	a.claudeAskedCap[hookID] = true
+	if ok {
+		a.claudeAskedCap[hookID] = true
+	} else {
+		delete(a.claudeAskedCap, hookID)
+	}
 	a.mu.Unlock()
 }
 
@@ -232,9 +261,27 @@ func (a *app) claudeAskState(n *Node) (attn string, capable bool) {
 	return "", true
 }
 
-// sweepClaudeAsked retires a node's notices when the pane proves no dialog is
-// up. Never called with pane *text* as the evidence.
-func (a *app) sweepClaudeAsked(n *Node) {
+// noteClaudeAskedProgress records the transcript watermark and reports whether
+// it grew since the last observation. Growth is the mechanical signal that the
+// agent reached its own control flow again — which, for a call that was waiting
+// on a human, cannot happen before the human answered. A first observation
+// never counts as growth, and a rotation (a smaller offset) counts as none.
+func (a *app) noteClaudeAskedProgress(id string, off int64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prev, seen := a.claudeAskedOff[id]
+	a.claudeAskedOff[id] = off
+	return seen && off > prev
+}
+
+// retireClaudeAskedOnProgress retires one ask after the transcript proved one
+// was resolved. `before` is the newest dated transcript record; an undated
+// transcript retires nothing, the same way every other freshness gate declines
+// rather than guesses.
+func (a *app) retireClaudeAskedOnProgress(n *Node, before time.Time, dated bool) bool {
+	if !dated {
+		return false
+	}
 	a.mu.Lock()
 	capable := a.claudeAskedSupportedLocked(n)
 	bundle := ""
@@ -243,7 +290,7 @@ func (a *app) sweepClaudeAsked(n *Node) {
 	}
 	a.mu.Unlock()
 	if bundle == "" {
-		return
+		return false
 	}
-	sweepClaudeAskedNotices(filepath.Join(bundle, "perm"))
+	return retireOldestAskedNotice(filepath.Join(bundle, "perm"), before, time.Now())
 }

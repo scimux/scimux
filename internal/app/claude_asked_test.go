@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -244,9 +245,15 @@ func newAskedHarness(t *testing.T, capable bool) *askedHarness {
 			t.Fatal(err)
 		}
 	}
-	caps := `{"permission":1}`
+	// The exec path is part of the proof (AT-CD-16): the test binary is a real
+	// executable, so a capable fixture records one.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := `{"permission":1,"exec":` + strconv.Quote(self) + `}`
 	if capable {
-		caps = `{"permission":1,"asked":1}`
+		caps = `{"permission":1,"asked":1,"exec":` + strconv.Quote(self) + `}`
 	}
 	if err := os.WriteFile(filepath.Join(bundle, "capabilities.json"), []byte(caps), 0o600); err != nil {
 		t.Fatal(err)
@@ -275,15 +282,27 @@ func (h *askedHarness) stall(t *testing.T) {
 // drop writes an escalation notice exactly as the blocked helper would.
 func (h *askedHarness) drop(t *testing.T, tool string) {
 	t.Helper()
+	h.dropAt(t, tool, "n1.json", time.Now())
+}
+
+func (h *askedHarness) dropAt(t *testing.T, tool, name string, at time.Time) {
+	t.Helper()
 	note := claudeAskedNotice{
-		At:      time.Now().UTC().Format(time.RFC3339Nano),
+		At:      at.UTC().Format(time.RFC3339Nano),
 		Session: hookSIDOwn,
 		Tool:    tool,
 		Digest:  "d1",
 	}
-	if err := writeClaudePermFile(filepath.Join(askedDir(h.bundle), "n1.json"), note); err != nil {
+	if err := writeClaudePermFile(filepath.Join(askedDir(h.bundle), name), note); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// grow appends a recognized transcript record — what reaching the agent's own
+// control flow looks like on disk when a tool finally runs.
+func (h *askedHarness) grow(t *testing.T, line string) {
+	t.Helper()
+	appendLines(t, h.n.Transcript, line)
 }
 
 func TestActiveStallSuppressedWithoutEscalationNotice(t *testing.T) {
@@ -359,24 +378,189 @@ func TestQuietFallbackSurvivesMissingNotice(t *testing.T) {
 	}
 }
 
-func TestStreamingPaneSweepsStandingNotices(t *testing.T) {
-	// AT-CD-12: retirement. The human answers the dialog in the pane, the
-	// agent resumes producing output, and the diff stops being confined —
-	// the same mechanical geometry noteAnim already uses. That is what
-	// retires the notice; nothing reads pane text to decide it.
+func TestDialogDrawMustNotRetireItsOwnNotice(t *testing.T) {
+	// AT-CD-12: observed live in P1 (case B). Drawing the dialog *is* an
+	// unconfined pane diff — a permission box replaces most of the screen — so
+	// retiring notices on pane geometry destroyed the notice one tick after it
+	// arrived, and the dialog sat there raising nothing at all. Pane geometry
+	// cannot tell "a dialog appeared" from "output resumed": that is the same
+	// ambiguity the notice exists to settle, so it must not be the retirement
+	// signal.
 	h := newAskedHarness(t, true)
 	h.a.poll()
 	h.drop(t, "Bash")
+	*h.pane = "Permission Required: Bash command\ndate > stamp2.txt\nDo you want to proceed?\n1. Yes\n2. Yes, and always allow\n3. No\nEnter selection [1-3]"
+	h.a.poll()
+	if got := standingNotices(t, h.bundle); len(got) != 1 {
+		t.Fatalf("standing notices after the dialog was drawn = %v, want the one that announced it", got)
+	}
+	if got := h.a.attn[h.n.ID]; got != "approval" {
+		t.Fatalf("attention = %q, want approval — the dialog is on screen", got)
+	}
+}
+
+func TestNoticeNewerThanItsEvidenceSurvives(t *testing.T) {
+	// AT-CD-14: the ordering clause. An agent that narrates and *then* asks for
+	// permission produces transcript growth whose newest record predates the
+	// ask, so growth alone must not retire it — retiring on "something moved"
+	// would erase the announcement of a dialog that is about to be drawn.
+	h := newAskedHarness(t, true)
+	h.a.poll()
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	// The harness's own pending call is resolved here so the *ordering* clause is
+	// the only thing keeping this notice alive (AT-CD-15 covers the pending one).
+	h.grow(t, `{"type":"user","timestamp":"`+past+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}}`)
+	h.grow(t, `{"type":"assistant","timestamp":"`+past+`","message":{"role":"assistant","content":[{"type":"text","text":"about to run it"}]}}`)
+	h.drop(t, "Bash")
+	*h.pane = strings.Replace(*h.pane, "1m 29s", "1m 30s", 1)
+	h.a.poll()
+	if got := standingNotices(t, h.bundle); len(got) != 1 {
+		t.Fatalf("standing notices = %v, want the ask that came after the newest record", got)
+	}
+	if got := h.a.attn[h.n.ID]; got != "approval" {
+		t.Fatalf("attention = %q, want approval", got)
+	}
+}
+
+func TestAnnouncingTheBlockedCallMustNotRetireItsNotice(t *testing.T) {
+	// AT-CD-15: growth is not resolution while a call is still unresolved. The
+	// parallel-call case makes this concrete and it is the one the whole
+	// discriminator exists for: Claude asks for A and B in one turn, the human
+	// answers A in the pane, and A's records — a tool_result and the agent
+	// talking again — carry stamps *newer* than B's notice. Both clauses of the
+	// retirement rule (growth, notice older than the evidence) are then satisfied
+	// for B, whose dialog is on screen right now. So the gate is the transcript's
+	// own pending set: while any call is unresolved, a resolution cannot be
+	// claimed, no matter how much newer the newest record is.
+	h := newAskedHarness(t, true)
+	h.a.poll()
+	h.dropAt(t, "Bash", "n1.json", time.Now().Add(-time.Second))
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	h.grow(t, `{"type":"assistant","timestamp":"`+stamp+`","message":{"role":"assistant","content":[{"type":"text","text":"the first one is done"}]}}`)
+	*h.pane = strings.Replace(*h.pane, "1m 29s", "1m 30s", 1)
+	h.a.poll()
+	if got := standingNotices(t, h.bundle); len(got) != 1 {
+		t.Fatalf("standing notices = %v, want the ask that is still waiting", got)
+	}
+	if got := h.a.attn[h.n.ID]; got != "approval" {
+		t.Fatalf("attention = %q, want approval — that dialog is on screen", got)
+	}
+}
+
+func TestTranscriptResolutionRetiresOneNoticeOldestFirst(t *testing.T) {
+	// AT-CD-13: retirement, corrected. The human answers in the pane, Claude
+	// runs the tool and only then writes its records — so recognized transcript
+	// growth on a producing pane is the mechanical proof that an ask was
+	// resolved. Exactly one ask is retired per resolution, oldest first: Claude
+	// draws queued dialogs in order, and a second standing ask must survive its
+	// predecessor's answer or the wait it announces goes unnoticed.
+	h := newAskedHarness(t, true)
+	h.a.poll()
+	h.dropAt(t, "Bash", "old.json", time.Now().Add(-time.Minute))
+	h.dropAt(t, "Bash", "new.json", time.Now())
 	h.a.poll()
 	if got := h.a.attn[h.n.ID]; got != "approval" {
 		t.Fatalf("precondition: attention = %q, want approval", got)
 	}
-	*h.pane = "totally\ndifferent\noutput\nstreaming\nnow\nline5\nline6"
+	// Real stamps: retirement compares the notice against the CLI's own record
+	// time, and an undated transcript must retire nothing. The record that
+	// proves an answer is the agent talking again after the tool ran.
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	h.grow(t, `{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}}`)
+	h.grow(t, `{"type":"assistant","timestamp":"`+stamp+`","message":{"role":"assistant","content":[{"type":"text","text":"ran it"}]}}`)
+	*h.pane = strings.Replace(*h.pane, "1m 29s", "1m 31s", 1)
+	h.a.poll()
+	got := standingNotices(t, h.bundle)
+	if len(got) != 1 || got[0] != "new.json" {
+		t.Fatalf("standing notices = %v, want only new.json (one resolution retires one ask, oldest first)", got)
+	}
+	if got := h.a.attn[h.n.ID]; got != "approval" {
+		t.Fatalf("attention = %q, want approval — the second ask is still waiting", got)
+	}
+	stamp2 := time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+	h.grow(t, `{"type":"assistant","timestamp":"`+stamp2+`","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+	*h.pane = strings.Replace(*h.pane, "1m 31s", "1m 33s", 1)
 	h.a.poll()
 	if got := standingNotices(t, h.bundle); len(got) != 0 {
-		t.Fatalf("standing notices after the pane resumed streaming = %v, want none", got)
+		t.Fatalf("standing notices = %v, want none once both asks resolved", got)
 	}
 	if got := h.a.attn[h.n.ID]; got != "" {
-		t.Fatalf("attention = %q, want none once the dialog is gone", got)
+		t.Fatalf("attention = %q, want none once no ask is standing", got)
+	}
+}
+
+func TestCapabilityRequiresTheBakedExecPath(t *testing.T) {
+	// AT-CD-16 (gap 5): settings.json bakes os.Executable() at launch, so a pane
+	// that outlives a *move* of the scimux binary keeps a settings file pointing
+	// nowhere. Its hooks can no longer run — and for the notice gate that failure
+	// is silent in the dangerous direction: no hook means no notices, and no
+	// notices reads as "Claude asked nothing", which suppresses the very
+	// attention the pane needs. So both capabilities must be provable against
+	// the baked path, not just against the bundle's layout: a bundle whose
+	// binary is gone reports no capability, which restores the pane-geometry
+	// backstop and shows the auto-approve toggle as unsupported.
+	a := newTestApp(t, &fakeTmux{})
+	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	_ = n
+	if !bundleSupportsAsked(bundle) || !bundleSupportsPermission(bundle) {
+		t.Fatal("a freshly prepared bundle must prove both capabilities")
+	}
+
+	capPath := filepath.Join(bundle, "capabilities.json")
+	rewrite := func(t *testing.T, caps string) {
+		t.Helper()
+		if err := os.WriteFile(capPath, []byte(caps), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gone := filepath.Join(t.TempDir(), "moved-away", "scimux")
+	rewrite(t, `{"permission":1,"asked":1,"exec":`+strconv.Quote(gone)+`}`)
+	if bundleSupportsAsked(bundle) {
+		t.Fatal("a bundle whose binary moved must not gate attention")
+	}
+	if bundleSupportsPermission(bundle) {
+		t.Fatal("a bundle whose binary moved must not advertise auto-approval")
+	}
+
+	// Present but not executable is the same failure with a different cause.
+	dud := filepath.Join(t.TempDir(), "scimux")
+	if err := os.WriteFile(dud, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewrite(t, `{"permission":1,"asked":1,"exec":`+strconv.Quote(dud)+`}`)
+	if bundleSupportsAsked(bundle) || bundleSupportsPermission(bundle) {
+		t.Fatal("a non-executable baked path proves nothing")
+	}
+
+	// A bundle written before the path was recorded cannot prove it either. The
+	// unprovable case degrades exactly like the broken one — that is what keeps
+	// the backstop instead of losing attention silently.
+	rewrite(t, `{"permission":1,"asked":1}`)
+	if bundleSupportsAsked(bundle) || bundleSupportsPermission(bundle) {
+		t.Fatal("an unrecorded exec path must not count as proof")
+	}
+}
+
+func TestLaunchCapabilityIsRecordedFromDiskNotAssumed(t *testing.T) {
+	// AT-CD-17 (gap 5): the launch-time note must read the same proof the
+	// restart path reads. Otherwise a running scimux would hold "capable" for a
+	// bundle whose hooks cannot execute until someone restarts it.
+	a := newTestApp(t, &fakeTmux{})
+	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	a.mu.Lock()
+	hookID := a.claudeHooks[n.ID]
+	a.mu.Unlock()
+
+	if err := os.WriteFile(filepath.Join(bundle, "capabilities.json"),
+		[]byte(`{"permission":1,"asked":1,"exec":"/nonexistent/scimux"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.noteClaudeAskedCapability(hookID)
+	a.noteClaudePermCapability(hookID)
+	a.mu.Lock()
+	asked, perm := a.claudeAskedCap[hookID], a.claudePermCap[hookID]
+	a.mu.Unlock()
+	if asked || perm {
+		t.Fatalf("capabilities recorded from an unusable bundle: asked=%v permission=%v", asked, perm)
 	}
 }

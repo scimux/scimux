@@ -167,8 +167,15 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	// before a feature lacks its member and stays unsupported for it.
 	// "permission" gates answering, "asked" gates the escalation-notice
 	// discriminator; a bundle with only the former keeps the pane-geometry
-	// attention backstop.
-	if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), []byte(`{"permission":1,"asked":1}`), 0o600); err != nil {
+	// attention backstop. "exec" records the binary settings.json just baked in,
+	// as JSON rather than a shell string to re-parse, so both gates can check
+	// that the hooks can still run at all (claudeBundleExecUsable).
+	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Exec: execPath})
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), caps, 0o600); err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
 	}

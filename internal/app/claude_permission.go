@@ -33,10 +33,20 @@ const claudePermissionHookCmd = "__claude-permission-hook"
 const (
 	// permHookDeadline bounds how long a tool call may wait on scimux before
 	// escalating to the dialog. Claude's own hook timeout is far longer; this
-	// is scimux's promise, not Claude's.
-	permHookDeadline = 2 * time.Second
+	// is scimux's promise, not Claude's. Kept generous on purpose: the cost of
+	// waiting is a second of latency on a call the human already authorized,
+	// while the cost of stopping too early is the very unnoticed dialog this
+	// feature exists to prevent. A loaded host runs the lane late.
+	permHookDeadline = 5 * time.Second
 	// permHookPollEvery is the rendezvous poll interval inside the helper.
 	permHookPollEvery = 25 * time.Millisecond
+	// permAnswerWindow is how old a request may be before the *app* stops
+	// answering it — deliberately shorter than the helper's own stop, because
+	// the two clocks belong to different processes and an answer written at the
+	// helper's last instant would be audited as an approval nobody read. The
+	// slack covers one full lane pass plus one helper poll, the longest an
+	// answer can take to be noticed. Pinned by AT-CP-22.
+	permAnswerWindow = permHookDeadline - 1*time.Second
 )
 
 // claudePermAllowJSON is the only thing this helper ever prints. Pinned
@@ -178,7 +188,31 @@ func claudePermRequestPending(req claudePermRequest, now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	return now.Sub(at) < permHookDeadline
+	return now.Sub(at) < permAnswerWindow
+}
+
+// claudePermMissedDeadline reports the one decline that is a *fault* rather
+// than the fence working: everything passed but the clock. It exists so the
+// degradation can be reported instead of looking like an ordinary policy
+// decline — a human who armed the lease is about to meet a dialog anyway, and
+// the only honest thing is to say why. An unparseable stamp is a parse failure,
+// not a slow host, so it is not counted here.
+func claudePermMissedDeadline(ctx claudePermContext, req claudePermRequest) bool {
+	if _, err := time.Parse(time.RFC3339Nano, req.At); err != nil {
+		return false
+	}
+	if claudePermRequestPending(req, ctx.Now) {
+		return false
+	}
+	now := ctx.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	// Re-run the whole policy with the clock clause satisfied. If it passes
+	// then, the clock was the only clause that failed.
+	fresh := req
+	fresh.At = now.UTC().Format(time.RFC3339Nano)
+	return eligibleClaudePermission(ctx, fresh)
 }
 
 // RunClaudePermissionHook is the hidden helper body.
@@ -365,24 +399,59 @@ func writeClaudePermFile(path string, v any) error {
 // a pane launched before this feature shipped stays unsupported until it is
 // relaunched, and says so rather than silently never arming.
 func bundleSupportsPermission(bundle string) bool {
-	if bundle == "" {
+	caps, ok := readClaudeHookCapabilities(bundle)
+	if !ok || caps.Permission < 1 {
 		return false
+	}
+	if !claudeBundleExecUsable(caps) {
+		return false
+	}
+	_, err := claudePermDir(bundle)
+	return err == nil
+}
+
+// claudeHookCapabilities is capabilities.json: what a bundle on disk proves
+// about itself, written once at prepare time and never rewritten.
+type claudeHookCapabilities struct {
+	Permission int    `json:"permission"`
+	Asked      int    `json:"asked"`
+	Exec       string `json:"exec,omitempty"`
+}
+
+func readClaudeHookCapabilities(bundle string) (claudeHookCapabilities, bool) {
+	if bundle == "" {
+		return claudeHookCapabilities{}, false
 	}
 	b, err := os.ReadFile(filepath.Join(bundle, "capabilities.json"))
-	if err != nil {
-		return false
+	if err != nil || len(b) > claudeHookStdinLimit {
+		return claudeHookCapabilities{}, false
 	}
-	var caps struct {
-		Permission int `json:"permission"`
-	}
+	var caps claudeHookCapabilities
 	if json.Unmarshal(b, &caps) != nil {
+		return claudeHookCapabilities{}, false
+	}
+	return caps, true
+}
+
+// claudeBundleExecUsable reports whether the binary settings.json points at can
+// still be run. settings.json bakes os.Executable() at launch, so a pane that
+// outlives a *move* of the scimux binary keeps a settings file pointing
+// nowhere: its SessionStart hook cannot bind a transcript, its
+// PermissionRequest hook cannot answer, and — the silent one — it can no longer
+// write escalation notices, which reads as "Claude asked nothing" and suppresses
+// exactly the attention that pane needs. An unrecorded path is unprovable and
+// counts as unusable for the same reason: both gates must fail towards keeping
+// the backstop, never towards trusting a hook that cannot run. Rebuilding in
+// place stays fine — the path resolves to the new binary.
+func claudeBundleExecUsable(caps claudeHookCapabilities) bool {
+	if caps.Exec == "" {
 		return false
 	}
-	if caps.Permission < 1 {
+	st, err := os.Stat(caps.Exec)
+	if err != nil || st.IsDir() {
 		return false
 	}
-	_, err = claudePermDir(bundle)
-	return err == nil
+	return st.Mode().Perm()&0o111 != 0
 }
 
 // runClaudePermissionHookMain always exits 0. A non-zero exit from a
@@ -421,24 +490,45 @@ func (a *app) claudePermBundleLocked(nodeID string) string {
 	return filepath.Join(root, hookID)
 }
 
+// claudeHookBundlePath maps a hook id to its bundle directory, for the paths
+// that hold an id rather than a node (capability recording, restart refresh).
+func (a *app) claudeHookBundlePath(hookID string) string {
+	if !safePathComponent(hookID) {
+		return ""
+	}
+	root := a.claudeHooksDir()
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, hookID)
+}
+
 func (a *app) claudePermBundle(nodeID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.claudePermBundleLocked(nodeID)
 }
 
-// noteClaudePermCapability records that a bundle carries the permission
-// rendezvous, so the supported predicate stays a map lookup under a.mu
-// instead of filesystem I/O on every poll projection.
+// noteClaudePermCapability records what a bundle proves about the permission
+// rendezvous, so the supported predicate stays a map lookup under a.mu instead
+// of filesystem I/O on every poll projection. It reads the same proof the
+// restart refresh reads — including the baked exec path — and records the
+// answer either way, so a bundle that has stopped being usable loses the
+// capability instead of keeping a stale yes until someone restarts scimux.
 func (a *app) noteClaudePermCapability(hookID string) {
 	if hookID == "" {
 		return
 	}
+	ok := bundleSupportsPermission(a.claudeHookBundlePath(hookID))
 	a.mu.Lock()
 	if a.claudePermCap == nil {
 		a.claudePermCap = map[string]bool{}
 	}
-	a.claudePermCap[hookID] = true
+	if ok {
+		a.claudePermCap[hookID] = true
+	} else {
+		delete(a.claudePermCap, hookID)
+	}
 	a.mu.Unlock()
 }
 
@@ -644,13 +734,13 @@ func (a *app) resolveOneClaudePermission(n *Node, bundle, path, name string, req
 	a.mu.Lock()
 	st := a.autoApprove[n.ID]
 	ctx := claudePermContext{
-		SessionID:    n.SessionID,
-		TurnPromptID: a.claudeTurnPrompt[n.ID],
-		Now:          time.Now(),
+		SessionID: n.SessionID,
+		Now:       time.Now(),
 	}
 	if st != nil {
 		ctx.Armed = st.Phase == autoPhaseArmed
 		ctx.LeaseID = st.LeaseID
+		ctx.TurnPromptID = st.TurnPromptID
 	}
 	leaseID := ctx.LeaseID
 	agent := n.Agent
@@ -659,8 +749,30 @@ func (a *app) resolveOneClaudePermission(n *Node, bundle, path, name string, req
 	if !eligibleClaudePermission(ctx, req) {
 		// Declined: the helper escalates on its own deadline and the human
 		// sees the dialog Claude was about to draw anyway.
+		if claudePermMissedDeadline(ctx, req) {
+			msg := fmt.Sprintf("auto-approve missed the hook deadline (request=%s tool=%s): the call escalated to the dialog",
+				req.ID, req.Event.ToolName)
+			_ = a.appendSessionEvent(n.ID, sessionlog.Event{T: "error", Error: msg})
+			a.mu.Lock()
+			if cur := a.autoApprove[n.ID]; cur != nil && cur.LeaseID == leaseID {
+				cur.Error = "auto-approve missed the hook deadline; the call escalated to the dialog"
+			}
+			a.mu.Unlock()
+		}
 		a.finishClaudePermRequest(bundle, path, name, "manual")
 		return false
+	}
+
+	// Latch the turn. The first eligible request binds the fence for the rest
+	// of the lease; the write is idempotent for every later request of the same
+	// turn. Done under the gate the enable/disable path also takes, so it can
+	// only ever attach to the lease that just passed the policy.
+	if req.Event.PromptID != "" {
+		a.mu.Lock()
+		if cur := a.autoApprove[n.ID]; cur != nil && cur.LeaseID == leaseID && cur.TurnPromptID == "" {
+			cur.TurnPromptID = req.Event.PromptID
+		}
+		a.mu.Unlock()
 	}
 
 	// Claim the request by moving it out of req/ before any audit. The rename

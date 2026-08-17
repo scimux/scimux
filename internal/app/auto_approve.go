@@ -65,6 +65,16 @@ type autoApproveState struct {
 	EnableMaxSeq uint64
 	Attempted    map[string]bool // RequestIDs already tried (fail-closed no-retry)
 	Error        string          // concise auto-approval error for chat
+	// TurnPromptID is the protocol turn this lease has committed to, latched
+	// from the first request it answers and never reassigned. Claude's lease
+	// must not outlive its turn, but the pane-liveness disarm is a heuristic
+	// edge; prompt_id is the CLI's own turn identity (proven in P0 to be shared
+	// by a parent and its subagent inside one turn, and to differ between
+	// turns), so a request from any other turn is declined and meets the human
+	// at the dialog. Empty means the lease has not answered anything yet.
+	// It lives here, not in a per-node map, so a fresh lease is a fresh fence
+	// with no clearing step for a future path to forget.
+	TurnPromptID string
 }
 
 // autoApproveView is the authoritative JSON shape for the mutation endpoint

@@ -187,8 +187,8 @@ func (a *app) initMaps() {
 	if a.claudeAskedCap == nil {
 		a.claudeAskedCap = map[string]bool{}
 	}
-	if a.claudeTurnPrompt == nil {
-		a.claudeTurnPrompt = map[string]string{}
+	if a.claudeAskedOff == nil {
+		a.claudeAskedOff = map[string]int64{}
 	}
 	if a.lastDeliver == nil {
 		a.lastDeliver = map[string]time.Time{}
@@ -354,10 +354,10 @@ type app struct {
 	// different versions, and a bundle that proves only the former must keep
 	// today's attention backstop rather than lose attention silently.
 	claudeAskedCap map[string]bool
-	// claudeTurnPrompt is the current turn's prompt_id per node, learned from
-	// the transcript. Empty means the protocol turn fence is unbound and the
-	// lease alone bounds the turn.
-	claudeTurnPrompt map[string]string
+	// claudeAskedOff is the transcript watermark the notice retirement compares
+	// against, per node: growth means the agent reached its own control flow
+	// again, which for a waiting call cannot happen before a human answered.
+	claudeAskedOff map[string]int64
 	// claudeBoundAt is when each node's current transcript link was
 	// established. A link established after the delivery being judged cannot
 	// have missed it (maybeRelinkTranscript).

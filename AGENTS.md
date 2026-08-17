@@ -189,9 +189,22 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   audited, audited before it is answered. The marker is published only in the
   `armed` phase — that is Claude's substitute for the structured transports'
   enable cutoff, because a call that asked before the marker existed left no
-  request to answer. Support is proven from disk (`capabilities.json`), so an
-  adopted pane degrades to a disabled toggle rather than a lease that can never
-  arm.
+  request to answer. A lease also **latches the first `prompt_id` it answers**
+  (`autoApproveState.TurnPromptID`) and declines any request from another turn:
+  prompt_id is the CLI's own turn identity — shared by a parent and its
+  subagent within a turn — so the fence holds even when the pane-liveness
+  disarm misses the turn edge. It lives on the lease, not on the node, so a
+  fresh lease is a fresh fence with no clearing step to forget. The two
+  deadlines are deliberately different numbers: the helper waits
+  `permHookDeadline` (5s, generous — a loaded host runs the lane late), the app
+  stops answering at the strictly shorter `permAnswerWindow`, because an answer
+  written at the helper's last instant would be audited as an approval nobody
+  read. A decline that failed *only* on that clock is reported (session-log
+  error plus the chat header's concise error); a policy decline stays silent, or
+  every plan-mode call would cry wolf. Support is proven from disk
+  (`capabilities.json`, which also records the `exec` path settings.json baked),
+  so an adopted pane — or one whose scimux binary has been *moved* — degrades to
+  a disabled toggle rather than a lease that can never arm.
 - **An escalation notice is evidence, never an answer.** The same hook writes
   `perm/asked/<nonce>.json` for *every* decision it escalates, armed or not
   (`internal/app/claude_asked.go`), because the hook knows the one thing no
@@ -202,7 +215,10 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   backstop occasionally fired hard attention at a busy agent. So for a Claude
   node whose bundle proves the layout (`capabilities.json` gains `"asked"`, a
   gate independent of `"permission"` so older bundles degrade to *no gate*,
-  never to *no attention*), the notice becomes the sole authority on the
+  never to *no attention* — and both gates additionally require the bundle's
+  baked `exec` path to still be a runnable file, because a bundle whose binary
+  moved writes no notices and its silence must never read as "Claude asked
+  nothing"), the notice becomes the sole authority on the
   active-pane paths: a notice raises immediately, classified by its tool name;
   no notice suppresses both the `animStallAfter` degradation and the
   attention-preservation window. It also raises where nothing else can — Claude
@@ -211,11 +227,19 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   fallback is deliberately **not** gated (rate-limit menus, trust-folder and
   login prompts fire no hook and reach a quiet pane). Notices are retired by
   the helper when it auto-approves (an approved call never reaches a dialog),
-  by an unconfined pane diff (`noteAnim` reporting the pane resumed streaming —
-  still diff geometry, never text), and by a generous TTL as a leak backstop.
-  The notice carries a digest of `tool_input`, never the input itself: a
-  disarmed session writes one per decision without the human having consented
-  to any audit.
+  by recognized transcript **growth** on a producing pane, and by a generous
+  TTL as a leak backstop. Pane geometry is deliberately *not* a retirement
+  signal. Growth retires exactly one notice, oldest first, and only under two
+  further clauses, both learned from a live probe: the notice must be **older**
+  than the newest dated turn (an agent that printed text and *then* asked
+  produces the reverse ordering), and the transcript must hold **no unresolved
+  call at all** (`PendingCount() == 0`) — with two calls queued behind one
+  dialog, answering the first writes records newer than the second ask's notice
+  while that second dialog is still on screen. The watermark still advances on
+  every tick, including the ticks the pending set blocks: a frozen mark could
+  not report the growth the *next* resolution writes. The notice carries a
+  digest of `tool_input`, never the input itself: a disarmed session writes one
+  per decision without the human having consented to any audit.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

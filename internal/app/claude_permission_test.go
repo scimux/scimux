@@ -888,3 +888,193 @@ func permBundleWithAsked(t *testing.T) string {
 	}
 	return root
 }
+
+func TestLeaseLatchesFirstPromptIDAndRefusesAnother(t *testing.T) {
+	// AT-CP-20 (gap 2): the lease must not outlive its turn even when the
+	// pane-liveness disarm misses the edge. prompt_id is the protocol's own turn
+	// identity — proven in P0 to be shared by a parent and its subagent within a
+	// turn and to change between turns — so the first request a lease answers
+	// latches it, and a request from any other turn is declined. Without the
+	// latch, TurnPromptID stays empty forever and the fence never binds: exactly
+	// the deviation §4's status block called out.
+	a := newTestApp(t, &fakeTmux{})
+	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+
+	first := armedRequest(a, n, "nonce-1")
+	dropRequest(t, bundle, first)
+	if got := a.resolveClaudePermissionsFor(n); got != 1 {
+		t.Fatalf("first request answers = %d, want 1", got)
+	}
+	a.mu.Lock()
+	latched := ""
+	if st := a.autoApprove[n.ID]; st != nil {
+		latched = st.TurnPromptID
+	}
+	a.mu.Unlock()
+	if latched != first.Event.PromptID {
+		t.Fatalf("latched turn prompt = %q, want %q", latched, first.Event.PromptID)
+	}
+
+	// Same turn (a parallel call, or a subagent under the same prompt_id).
+	same := armedRequest(a, n, "nonce-2")
+	dropRequest(t, bundle, same)
+	if got := a.resolveClaudePermissionsFor(n); got != 1 {
+		t.Fatalf("same-turn request answers = %d, want 1", got)
+	}
+
+	// A different turn under the same armed lease: declined, and left for the
+	// human exactly as any other policy decline.
+	other := armedRequest(a, n, "nonce-3")
+	other.Event.PromptID = "prompt-2"
+	dropRequest(t, bundle, other)
+	if got := a.resolveClaudePermissionsFor(n); got != 0 {
+		t.Fatalf("next-turn request answers = %d, want 0", got)
+	}
+	if _, ok := answerFileFor(bundle, other.ID); ok {
+		t.Fatal("a request from another turn must never be answered")
+	}
+	if _, err := os.Stat(filepath.Join(bundle, "perm", "processed", "manual", other.ID+".json")); err != nil {
+		t.Fatalf("declined request not recorded as manual: %v", err)
+	}
+}
+
+func TestReArmingClearsTheLatchedTurn(t *testing.T) {
+	// AT-CP-21 (gap 2): the latch lives on the lease, not the node, so its
+	// lifetime needs no cleanup code that a future path could forget. A human
+	// who toggles auto-approve on again is arming for the turn in front of them,
+	// so a fence latched by the previous lease must not make the new one inert.
+	a := newTestApp(t, &fakeTmux{})
+	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+	first := armedRequest(a, n, "nonce-1")
+	dropRequest(t, bundle, first)
+	if got := a.resolveClaudePermissionsFor(n); got != 1 {
+		t.Fatalf("first request answers = %d, want 1", got)
+	}
+
+	a.setAutoApproveEnabled(n.ID, false, "active", "", 0)
+	a.mu.Lock()
+	stillLeased := a.autoApprove[n.ID] != nil
+	a.mu.Unlock()
+	if stillLeased {
+		t.Fatal("disarm must drop the lease state, and the latch with it")
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+	next := armedRequest(a, n, "nonce-9")
+	next.Event.PromptID = "prompt-2"
+	dropRequest(t, bundle, next)
+	if got := a.resolveClaudePermissionsFor(n); got != 1 {
+		t.Fatalf("new lease answers = %d, want 1 — a fresh lease latches the new turn", got)
+	}
+}
+
+func TestAnswerWindowIsStrictlyShorterThanTheHookDeadline(t *testing.T) {
+	// AT-CP-22 (gap 3): the two windows must not be the same number. The helper
+	// stops waiting at permHookDeadline; if the app were still willing to answer
+	// at that same age, a request answered at the last moment would be audited
+	// as an approval the blocked process never read — the call escalates to the
+	// dialog anyway and the decision row lies about reality. So the app's window
+	// closes first, by more than one full lane pass plus one helper poll, which
+	// is the longest an answer can take to be noticed.
+	if permAnswerWindow >= permHookDeadline {
+		t.Fatalf("answer window %v must be strictly shorter than the hook deadline %v",
+			permAnswerWindow, permHookDeadline)
+	}
+	if slack := permHookDeadline - permAnswerWindow; slack < claudePermLaneEvery+permHookPollEvery {
+		t.Fatalf("slack %v is too small for one lane pass (%v) plus one helper poll (%v)",
+			slack, claudePermLaneEvery, permHookPollEvery)
+	}
+	// A human waiting on a dialog is the failure this feature exists to avoid,
+	// so the deadline is not allowed to shrink back to a value where a busy
+	// host loses approvals to a race it cannot see.
+	if permHookDeadline < 5*time.Second {
+		t.Fatalf("hook deadline %v is too tight for a loaded host", permHookDeadline)
+	}
+
+	// And the window is what the policy actually uses.
+	now := time.Now()
+	late := basePermReq(now)
+	late.At = now.Add(-permAnswerWindow - time.Millisecond).UTC().Format(time.RFC3339Nano)
+	if eligibleClaudePermission(basePermCtx(now), late) {
+		t.Fatal("a request older than the answer window must not be answered")
+	}
+	fresh := basePermReq(now)
+	fresh.At = now.Add(-permAnswerWindow + 50*time.Millisecond).UTC().Format(time.RFC3339Nano)
+	if !eligibleClaudePermission(basePermCtx(now), fresh) {
+		t.Fatal("a request inside the answer window must stay eligible")
+	}
+}
+
+func TestMissedDeadlineIsVisibleAndPolicyDeclinesAreSilent(t *testing.T) {
+	// AT-CP-23 (gap 3): a degradation must not be silent. When the lease was
+	// armed and the request was eligible on every clause *except* the clock, the
+	// human is about to see a dialog they told scimux to answer, and the only
+	// honest report is to say so — an error event in the log and the concise
+	// error the chat header already renders. A policy decline is different: the
+	// fence working as designed is not a fault and must stay quiet, or every
+	// plan-mode call would cry wolf.
+	expired := func(r *claudePermRequest) {
+		r.At = time.Now().Add(-10 * permHookDeadline).UTC().Format(time.RFC3339Nano)
+	}
+	policy := func(r *claudePermRequest) { r.Event.PermissionMode = "plan" }
+
+	for _, tc := range []struct {
+		name     string
+		mut      func(r *claudePermRequest)
+		wantLoud bool
+	}{
+		{"missed deadline", expired, true},
+		{"policy decline", policy, false},
+		// A stale clock cannot be told apart from a policy decline, and an
+		// unreadable stamp is a parse failure, not a slow host.
+		{"unparseable stamp", func(r *claudePermRequest) { r.At = "yesterday" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t, &fakeTmux{})
+			n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+			a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+			req := armedRequest(a, n, "nonce-1")
+			tc.mut(&req)
+			dropRequest(t, bundle, req)
+
+			if got := a.resolveClaudePermissionsFor(n); got != 0 {
+				t.Fatalf("answers written = %d, want 0", got)
+			}
+			if _, ok := answerFileFor(bundle, req.ID); ok {
+				t.Fatal("a declined request must never be answered")
+			}
+			loud := false
+			for _, ev := range logEvents(t, a, n.ID) {
+				if ev.T == "decision" {
+					t.Fatal("a declined request must not be audited as a decision")
+				}
+				if ev.T == "error" && strings.Contains(ev.Error, req.ID) {
+					loud = true
+				}
+			}
+			a.mu.Lock()
+			st := a.autoApprove[n.ID]
+			errText := ""
+			if st != nil {
+				errText = st.Error
+			}
+			a.mu.Unlock()
+			if tc.wantLoud {
+				if !loud {
+					t.Fatal("a missed hook deadline must be reported in the session log")
+				}
+				if errText == "" {
+					t.Fatal("a missed hook deadline must surface in the chat header error")
+				}
+			} else {
+				if loud {
+					t.Fatal("a policy decline must not log an error")
+				}
+				if errText != "" {
+					t.Fatalf("a policy decline must leave no error, got %q", errText)
+				}
+			}
+		})
+	}
+}

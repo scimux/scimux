@@ -117,13 +117,12 @@ func (a *app) poll() {
 		prev := a.live[n.ID] // not yet overwritten this tick
 		a.mu.Unlock()
 		state := "exited"
-		paneStreamed := false
 		if sessionSet[n.ID] {
 			cap, err := s.Capture()
 			if err == nil {
 				a.mu.Lock()
 				if pc := a.prevCap[n.ID]; cap != pc {
-					paneStreamed = a.noteAnim(n.ID, pc, cap)
+					a.noteAnim(n.ID, pc, cap)
 					a.prevCap[n.ID] = cap
 					a.lastChg[n.ID] = time.Now()
 				}
@@ -139,14 +138,6 @@ func (a *app) poll() {
 			} else {
 				state = "unavailable"
 			}
-		}
-		// The pane resumed unconfined output: mechanically no static dialog is on
-		// screen, so a Claude escalation notice that outlived its dialog (the
-		// human answered in the terminal, so the helper never returned an allow)
-		// is retired here. Diff geometry only — the same signal noteAnim already
-		// derives, never pane text.
-		if paneStreamed {
-			a.sweepClaudeAsked(n)
 		}
 		// One read per tick of what Claude has actually escalated
 		// (claude_asked.go). askCapable means the PermissionRequest hook is
@@ -212,6 +203,12 @@ func (a *app) poll() {
 				// cycle (finding 24).
 				off, prog := quietTl.Progress()
 				a.noteChatProgress(n.ID, off, prog, prev == "active")
+				// Keep the notice watermark current without retiring anything: a
+				// static pane is exactly what a waiting dialog looks like, so a
+				// quiet tick is never evidence that an ask was answered.
+				if askCapable {
+					a.noteClaudeAskedProgress(n.ID, off)
+				}
 			}
 			// Dialoghint matcher + owing-stall backstop (P1a/P1b). Shared with
 			// notePeekDialog via quietAttentionFallback — never feeds liveness.
@@ -250,6 +247,29 @@ func (a *app) poll() {
 			// degrades to the neutral "inspect", never a classified dialog.
 			if tl := a.tailerFor(n); tl != nil {
 				tl.Poll()
+				// Retirement (claude_asked.go): recognized transcript growth on a
+				// producing pane is the mechanical proof that an ask was resolved
+				// — Claude runs the tool and writes its records only *after* the
+				// human answers. One resolution retires one ask, oldest first,
+				// and only an ask older than the record that proves it.
+				//
+				// The pending set gates the retirement — never the watermark. With
+				// two calls queued behind one dialog, answering the first produces
+				// records newer than the second ask's notice while that second
+				// dialog is on screen, so growth plus the ordering clause is not
+				// enough: an unresolved call anywhere in the transcript means no
+				// resolution can be claimed this tick. The watermark still advances
+				// on those ticks, exactly as on quiet ones — a frozen mark cannot
+				// report the growth the *next* resolution writes.
+				if askCapable {
+					off, _ := tl.Progress()
+					if a.noteClaudeAskedProgress(n.ID, off) && tl.PendingCount() == 0 {
+						at, dated := tl.NewestTurnTime()
+						if a.retireClaudeAskedOnProgress(n, at, dated) {
+							askAttn, _ = a.claudeAskState(n)
+						}
+					}
+				}
 				if name, ok := tl.WaitingOn(); ok {
 					off, _ := tl.Progress()
 					a.mu.Lock()
@@ -660,19 +680,20 @@ type animState struct {
 // many lines and clears the state; an animation strip touches the same few
 // lines tick after tick. Mechanical only — diff geometry, never text.
 // Callers hold a.mu.
-// It reports whether this change was unconfined — the pane resumed streaming
-// output, which is mechanical evidence that no static dialog is on screen. The
-// caller uses that to retire Claude escalation notices (claude_asked.go); it is
-// diff geometry, never text, so it stays inside the liveness invariant.
-func (a *app) noteAnim(id, prev, cur string) (streaming bool) {
+//
+// Deliberately *not* used to decide that a dialog is gone: drawing a
+// permission box is itself an unconfined diff, so geometry cannot separate
+// "a dialog appeared" from "output resumed" — the very ambiguity the
+// escalation notices exist to settle (claude_asked.go).
+func (a *app) noteAnim(id, prev, cur string) {
 	if prev == "" {
-		return false // first observation: no baseline to diff against
+		return // first observation: no baseline to diff against
 	}
 	idx := changedLines(prev, cur, animMaxLines+1)
 	if st := a.anim[id]; st != nil {
 		if merged := unionInts(st.lines, idx); len(merged) <= animMaxLines {
 			st.lines = merged
-			return false
+			return
 		}
 	}
 	if len(idx) <= animMaxLines {
@@ -684,13 +705,12 @@ func (a *app) noteAnim(id, prev, cur string) (streaming bool) {
 			// drifts more often than animStallAfter postpone the inspect
 			// backstop forever (R20.6).
 			st.lines = idx
-			return false
+			return
 		}
 		a.anim[id] = &animState{lines: idx, since: time.Now(), off: -1}
-		return false
+		return
 	}
 	delete(a.anim, id)
-	return true
 }
 
 // changedLines reports the indices of lines that differ between two
