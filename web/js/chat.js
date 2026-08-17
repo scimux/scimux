@@ -569,7 +569,7 @@ export function echoBubbleHTML(text, tilesHTML = "", { markdown = md } = {}){
 /* ---------- auto-approve chrome + decision audit (fixes-2 P4) ---------- */
 
 export const AUTO_APPROVE_HELP =
-  "Automatically selects the sole one-time approval option. Resets when the turn finishes or is interrupted.";
+  "Automatically selects the sole one-time approval option. Stays on until you stop the turn, switch it off, or /clear or /exit the chat.";
 export const AUTO_APPROVE_UNSUPPORTED_HELP =
   "Auto-approval isn't available for this chat.";
 /* Claude reaches auto-approve through a PermissionRequest hook that only a
@@ -577,7 +577,7 @@ export const AUTO_APPROVE_UNSUPPORTED_HELP =
    feature) can never arm. Say what would change that rather than refusing. */
 export const AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP =
   "Auto-approval needs a Claude chat scimux launched itself \u2014 relaunch or fork this chat to use it.";
-export const AUTO_APPROVE_LABEL_FULL = "Auto-approve this turn";
+export const AUTO_APPROVE_LABEL_FULL = "Auto-approve tool calls";
 export const AUTO_APPROVE_LABEL_NARROW = "Auto-approve";
 
 /* Which refusal to show. Only Claude has an actionable one. */
@@ -601,7 +601,7 @@ export function autoApproveViewNorm(view){
 /* Accessible name for the toggle. Count is spoken only when enabled and > 0. */
 export function autoApproveAriaName({ enabled = false, count = 0, supported = true, agent = "" } = {}){
   if (!supported) return unsupportedHelp(agent);
-  const base = "Auto-approve eligible tool requests for this turn";
+  const base = "Auto-approve eligible tool requests";
   if (enabled && (Number(count) || 0) > 0){
     return `${base}; ${Number(count)} approved.`;
   }
@@ -610,7 +610,7 @@ export function autoApproveAriaName({ enabled = false, count = 0, supported = tr
 
 /* Pure presentation model for the #autoapprove toggle.
    `node` is optional: with one, the control disappears for a chat that can
-   never arm the lease. "Auto-approve this turn" presupposes a turn, and a
+   never arm the lease. Auto-approve presupposes a turn to come, and a
    closed thread or dead liveness has none left — canReceiveSend is exactly
    that predicate ("a chat with a process left to type into"), so the two
    cannot drift apart. Hidden rather than disabled: a disabled control still

@@ -75,27 +75,31 @@ func (a *app) poll() {
 			if live == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
-			// Lease cannot cross a turn or a dead process. Do not clear a
-			// primed lease merely because the process is not yet up (enable
-			// while idle is valid before the first prompt lands). Capture the
-			// current LeaseID at decision time; under the gate, clear only if
-			// that same lease is still current so a completed re-arm is not
-			// erased by a stale poller disarm.
-			needDisarm := false
-			disarmLeaseID := ""
-			if prevLive == "active" && live != "active" {
-				needDisarm = true // turn completed or exited mid-turn
-			} else if live == "exited" && (prevLive == "active" || prevLive == "quiet") {
-				needDisarm = true // process/session loss after known liveness
-			}
-			if needDisarm {
+			// An armed lease cannot cross a turn or a dead process, but the
+			// *enable* is sticky: a completed turn parks the lease (armed →
+			// primed, marker retracted) and the next prompt re-arms it, while
+			// only process loss turns the toggle off. Do not touch a primed
+			// lease merely because the process is not yet up (enable while idle
+			// is valid before the first prompt lands). Capture the current
+			// LeaseID at decision time; under the gate, act only if that same
+			// lease is still current so a completed re-arm is not erased by a
+			// stale poller transition.
+			disarmLeaseID, settleLeaseID := "", ""
+			if live == "exited" && prevLive != "exited" {
 				if st := a.autoApprove[n.ID]; st != nil {
-					disarmLeaseID = st.LeaseID
+					disarmLeaseID = st.LeaseID // process/session loss
+				}
+			} else if prevLive == "active" && live != "active" {
+				if st := a.autoApprove[n.ID]; st != nil {
+					settleLeaseID = st.LeaseID // turn completed
 				}
 			}
 			a.mu.Unlock()
-			if needDisarm {
+			if disarmLeaseID != "" {
 				a.disarmAutoApproveIfLease(n.ID, disarmLeaseID)
+			}
+			if settleLeaseID != "" {
+				a.settleAutoApproveAfterTurn(n.ID, settleLeaseID)
 			}
 			// V2-P2: persist needs-input start→end edges from the existing
 			// mechanical Attention() signal only — no new regex / source.
@@ -366,20 +370,28 @@ func (a *app) poll() {
 		}
 		a.attn[n.ID] = attn
 		a.turnDone[n.ID] = turnDone
-		// A lease cannot cross a turn or survive a dead pane — the same rule
-		// the structured branch applies above, read from the same mechanical
-		// pane liveness. Capture the lease id here so a re-arm that completed
-		// after this tick's observation is not erased by a stale disarm.
-		disarmLeaseID := ""
-		if (prev == "active" && state != "active") ||
-			(state == "exited" && (prev == "active" || prev == "quiet")) {
+		// An armed lease cannot cross a turn, and no lease survives a dead pane
+		// — the same rule the structured branch applies above, read from the
+		// same mechanical pane liveness. A turn boundary parks the lease
+		// (armed → primed) rather than revoking the human's standing enable.
+		// Capture the lease id here so a re-arm that completed after this
+		// tick's observation is not erased by a stale transition.
+		disarmLeaseID, settleLeaseID := "", ""
+		if state == "exited" && prev != "exited" {
 			if st := a.autoApprove[n.ID]; st != nil {
 				disarmLeaseID = st.LeaseID
+			}
+		} else if prev == "active" && state != "active" {
+			if st := a.autoApprove[n.ID]; st != nil {
+				settleLeaseID = st.LeaseID
 			}
 		}
 		a.mu.Unlock()
 		if disarmLeaseID != "" {
 			a.disarmAutoApproveIfLease(n.ID, disarmLeaseID)
+		}
+		if settleLeaseID != "" {
+			a.settleAutoApproveAfterTurn(n.ID, settleLeaseID)
 		}
 		// V2-P2: durable wait edges from the existing mechanical needs-input
 		// signal (WaitingOn + quiet/confined-anim; no new regex).

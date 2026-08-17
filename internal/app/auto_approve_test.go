@@ -299,14 +299,20 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 	}
 	a.mu.Unlock()
 
-	// clearStaleArmedBeforePrompt drops armed when idle.
+	// settleArmedBeforePrompt parks an armed lease that outlived its turn: the
+	// armed phase must not cross the boundary, but the human's enable does.
 	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
-	a.clearStaleArmedBeforePrompt(n.ID, "quiet")
+	a.settleArmedBeforePrompt(n.ID, "quiet")
 	a.mu.Lock()
-	if a.autoApprove[n.ID] != nil {
-		t.Fatal("stale armed must clear before idle prompt")
+	st := a.autoApprove[n.ID]
+	if st == nil || st.Phase != autoPhasePrimed {
+		t.Fatalf("stale armed lease = %+v, want a primed lease before the idle prompt", st)
+	}
+	if st.EnableIncarn != "" {
+		t.Fatalf("parked lease kept the old cutoff %q; the next arm must rebind one", st.EnableIncarn)
 	}
 	a.mu.Unlock()
+	a.disarmAutoApprove(n.ID)
 
 	// Browser navigation has no server effect — no code path; state survives.
 	a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)

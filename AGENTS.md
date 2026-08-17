@@ -192,8 +192,8 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   request to answer. A lease also **latches the first `prompt_id` it answers**
   (`autoApproveState.TurnPromptID`) and declines any request from another turn:
   prompt_id is the CLI's own turn identity — shared by a parent and its
-  subagent within a turn — so the fence holds even when the pane-liveness
-  disarm misses the turn edge. It lives on the lease, not on the node, so a
+  subagent within a turn — so the fence holds even when the mechanical turn
+  edge is missed. It lives on the lease, not on the node, so a
   fresh lease is a fresh fence with no clearing step to forget. The two
   deadlines are deliberately different numbers: the helper waits
   `permHookDeadline` (5s, generous — a loaded host runs the lane late), the app
@@ -205,6 +205,29 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   (`capabilities.json`, which also records the `exec` path settings.json baked),
   so an adopted pane — or one whose scimux binary has been *moved* — degrades to
   a disabled toggle rather than a lease that can never arm.
+- **The auto-approve toggle is a switch, so it holds its state.** Enabling it
+  expresses a *standing* intent that survives turn after turn; only the human's
+  own acts end it — **stop/interrupt, un-toggling, `/clear`, `/exit`** — plus
+  the hard resets nobody chooses (process/session loss, node delete, and a
+  process restart, since the lease is never persisted). The **armed phase**
+  still cannot cross a turn: at the mechanical turn boundary the poller *parks*
+  the lease (`settleAutoApproveAfterTurn`) — retracts Claude's marker, rotates
+  the `LeaseID`, releases the `TurnPromptID` fence, zeroes count and cutoff —
+  and the next prompt re-arms it from the same enable. This replaces an earlier
+  rule where the boundary disarmed outright; do not restore it. Two reasons, one
+  practical and one from the HIG: mechanically, "turn over" is read from pane
+  liveness, so *any* static stretch past `paneQuietAfter` (8s) ended the lease —
+  and a static pane is exactly what a waiting approval dialog looks like, so the
+  lease died at the moment it was needed, which is also why the same sessions
+  filled with `inspect` attention; and as interface, a switch expresses
+  persistent state and must change only when a person changes it, so a control
+  that flips itself off reads as a defect. The scope belongs in the help text
+  (`AUTO_APPROVE_HELP` names every way it ends), never in a self-reverting
+  control — and the label is therefore "Auto-approve tool calls", not "…this
+  turn". Stickiness widens authority to the *next* prompt by design, so every
+  per-request guard stays: sole one-time option, never `allow_always`, the
+  enable cutoff, and no automatic retry of a request already attempted
+  (`Attempted` is deliberately carried across the boundary).
 - **An escalation notice is evidence, never an answer.** The same hook writes
   `perm/asked/<nonce>.json` for *every* decision it escalates, armed or not
   (`internal/app/claude_asked.go`), because the hook knows the one thing no
