@@ -877,3 +877,14 @@ func TestResolveClaudePermissionAuditsRenderableToolKind(t *testing.T) {
 		t.Fatalf("title = %q, want it to name both the tool and its subject", dec.Title)
 	}
 }
+
+// permBundleWithAsked is permBundle plus the escalation-notice directory: the
+// layout every bundle prepared from this version on carries.
+func permBundleWithAsked(t *testing.T) string {
+	t.Helper()
+	root := permBundle(t)
+	if err := os.MkdirAll(filepath.Join(root, "perm", "asked"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}

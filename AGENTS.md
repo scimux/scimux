@@ -143,7 +143,10 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   never arrives (observed live: a 6m42s approval wait, unnoticed). If the
   matcher goes dark (TUI rewording), the same confined-animation state with
   a stalled transcript degrades to the neutral `inspect` after
-  `animStallAfter`, never a classified dialog. A further mechanical quiet-
+  `animStallAfter`, never a classified dialog. (For an owned Claude launch this
+  whole active-pane chain is superseded by the escalation notice — see the
+  "evidence, never an answer" invariant below — because the notice settles the
+  ambiguity these heuristics can only guess at.) A further mechanical quiet-
   branch backstop covers Claude Code's late tool_use flush (the call record
   is not on disk until approval, so `WaitingOn` stays false for the whole
   wait): when the newest recognized transcript record is a **user** turn —
@@ -169,10 +172,12 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   The same per-node bundle that binds the transcript also registers a
   `PermissionRequest` hook (`__claude-permission-hook --dir <bundle>`), so
   auto-approval has a structured channel instead of a simulated keystroke.
-  The hook is registered on **every** owned launch and is inert until a lease
-  is armed: with no `perm/lease` marker it reads one file, prints nothing, and
-  exits 0 — indistinguishable from having no hook. `PreToolUse` is deliberately
-  never registered (it fires for every tool call, decision needed or not).
+  The hook is registered on **every** owned launch and never *authorizes*
+  anything until a lease is armed: with no `perm/lease` marker it prints
+  nothing and exits 0, so Claude falls through to its own dialog exactly as if
+  no hook existed. It is not silent, though — see the escalation-notice
+  invariant below. `PreToolUse` is deliberately never registered (it fires for
+  every tool call, decision needed or not).
   Claude offers the hook **no menu and no `tool_use_id`**, so the rendezvous is
   keyed by a hook-minted nonce (one blocked helper process = one request = one
   answer), and "allow once" is an *omission*: scimux emits
@@ -187,6 +192,30 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   request to answer. Support is proven from disk (`capabilities.json`), so an
   adopted pane degrades to a disabled toggle rather than a lease that can never
   arm.
+- **An escalation notice is evidence, never an answer.** The same hook writes
+  `perm/asked/<nonce>.json` for *every* decision it escalates, armed or not
+  (`internal/app/claude_asked.go`), because the hook knows the one thing no
+  amount of transcript or pane reasoning can recover: whether a dialog is about
+  to be drawn. An unresolved `tool_use` over a confined animation is
+  byte-identical between "a long tool is running" and "a dialog is up with
+  parallel calls animating behind it" — which is why the animation-stall
+  backstop occasionally fired hard attention at a busy agent. So for a Claude
+  node whose bundle proves the layout (`capabilities.json` gains `"asked"`, a
+  gate independent of `"permission"` so older bundles degrade to *no gate*,
+  never to *no attention*), the notice becomes the sole authority on the
+  active-pane paths: a notice raises immediately, classified by its tool name;
+  no notice suppresses both the `animStallAfter` degradation and the
+  attention-preservation window. It also raises where nothing else can — Claude
+  flushes the `tool_use` record only *after* approval, so for a first blocked
+  call the waiting helper is the only proof the dialog exists. The quiet-pane
+  fallback is deliberately **not** gated (rate-limit menus, trust-folder and
+  login prompts fire no hook and reach a quiet pane). Notices are retired by
+  the helper when it auto-approves (an approved call never reaches a dialog),
+  by an unconfined pane diff (`noteAnim` reporting the pane resumed streaming —
+  still diff geometry, never text), and by a generous TTL as a leak backstop.
+  The notice carries a digest of `tool_input`, never the input itself: a
+  disarmed session writes one per decision without the human having consented
+  to any audit.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

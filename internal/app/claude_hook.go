@@ -142,7 +142,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		os.RemoveAll(dir)
 		return "", "", err
 	}
-	for _, sub := range []string{"inbox", "processed", "perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"), filepath.Join("perm", "processed")} {
+	for _, sub := range []string{"inbox", "processed", "perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"), filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName)} {
 		p := filepath.Join(dir, sub)
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			os.RemoveAll(dir)
@@ -163,9 +163,12 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		os.RemoveAll(dir)
 		return "", "", err
 	}
-	// capabilities.json makes permission support provable from disk: a bundle
-	// prepared before this feature has none and stays unsupported.
-	if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), []byte(`{"permission":1}`), 0o600); err != nil {
+	// capabilities.json makes support provable from disk: a bundle prepared
+	// before a feature lacks its member and stays unsupported for it.
+	// "permission" gates answering, "asked" gates the escalation-notice
+	// discriminator; a bundle with only the former keeps the pane-geometry
+	// attention backstop.
+	if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), []byte(`{"permission":1,"asked":1}`), 0o600); err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
 	}

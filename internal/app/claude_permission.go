@@ -202,16 +202,21 @@ func runClaudePermissionHook(dir string, r io.Reader, stdout, stderr io.Writer, 
 		return err
 	}
 
-	// Fast path: no armed lease is the state every session is in unless a
-	// human has just toggled auto-approve on. One open, one read, no wait,
-	// and behaviour indistinguishable from having no hook at all.
-	lease, ok := readClaudePermLease(perm, time.Now())
-	if !ok {
-		return nil
-	}
-
 	id, err := newPermRequestID()
 	if err != nil {
+		return nil
+	}
+	// The escalation notice comes first and is written unconditionally: it
+	// records that Claude *asked*, which is not an authorization and cannot
+	// become one. Writing it before the lease check is what lets scimux tell
+	// "no dialog is on screen" from "the hook is inert" — see claude_asked.go.
+	writeClaudeAskedNotice(perm, id, ev, time.Now())
+
+	// Fast path: no armed lease is the state every session is in unless a
+	// human has just toggled auto-approve on. One read, no wait, and no
+	// answer — the notice stands, because the dialog is about to be drawn.
+	lease, ok := readClaudePermLease(perm, time.Now())
+	if !ok {
 		return nil
 	}
 	req := claudePermRequest{
@@ -233,6 +238,12 @@ func runClaudePermissionHook(dir string, r io.Reader, stdout, stderr io.Writer, 
 		if ans, ok := readClaudePermAnswer(ansPath); ok {
 			if ans.allows(req) {
 				_, _ = io.WriteString(stdout, claudePermAllowJSON)
+				// Retired only after the allow is on stdout: this call never
+				// reaches a dialog, so its notice must not raise attention.
+				// Ordered this way round because a notice that outlives its
+				// answer costs a look at the terminal, while one retired
+				// before the answer landed could hide a real dialog.
+				removeClaudeAskedNotice(perm, id)
 			}
 			return nil
 		}
@@ -445,16 +456,22 @@ func (a *app) refreshClaudePermCaps() {
 	}
 	a.mu.Unlock()
 	caps := map[string]bool{}
+	asked := map[string]bool{}
 	for _, hookID := range ids {
 		if !safePathComponent(hookID) {
 			continue
 		}
-		if bundleSupportsPermission(filepath.Join(root, hookID)) {
+		bundle := filepath.Join(root, hookID)
+		if bundleSupportsPermission(bundle) {
 			caps[hookID] = true
+		}
+		if bundleSupportsAsked(bundle) {
+			asked[hookID] = true
 		}
 	}
 	a.mu.Lock()
 	a.claudePermCap = caps
+	a.claudeAskedCap = asked
 	a.mu.Unlock()
 }
 

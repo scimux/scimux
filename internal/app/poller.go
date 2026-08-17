@@ -117,12 +117,13 @@ func (a *app) poll() {
 		prev := a.live[n.ID] // not yet overwritten this tick
 		a.mu.Unlock()
 		state := "exited"
+		paneStreamed := false
 		if sessionSet[n.ID] {
 			cap, err := s.Capture()
 			if err == nil {
 				a.mu.Lock()
 				if pc := a.prevCap[n.ID]; cap != pc {
-					a.noteAnim(n.ID, pc, cap)
+					paneStreamed = a.noteAnim(n.ID, pc, cap)
 					a.prevCap[n.ID] = cap
 					a.lastChg[n.ID] = time.Now()
 				}
@@ -139,6 +140,21 @@ func (a *app) poll() {
 				state = "unavailable"
 			}
 		}
+		// The pane resumed unconfined output: mechanically no static dialog is on
+		// screen, so a Claude escalation notice that outlived its dialog (the
+		// human answered in the terminal, so the helper never returned an allow)
+		// is retired here. Diff geometry only — the same signal noteAnim already
+		// derives, never pane text.
+		if paneStreamed {
+			a.sweepClaudeAsked(n)
+		}
+		// One read per tick of what Claude has actually escalated
+		// (claude_asked.go). askCapable means the PermissionRequest hook is
+		// authoritative for this node: it fires for every decision Claude needs a
+		// human for, so "no standing notice" is positive evidence that no dialog
+		// is up — which the pane-geometry backstops cannot know and must not
+		// contradict.
+		askAttn, askCapable := a.claudeAskState(n)
 		attn := ""
 		// freshAttn distinguishes attention classified from evidence this tick
 		// from attention merely preserved across an indeterminate tick: only the
@@ -248,7 +264,18 @@ func (a *app) poll() {
 						stalledSince = st.since
 					}
 					a.mu.Unlock()
-					if st != nil {
+					switch {
+					case askCapable:
+						// The hook is the sole authority here. An unresolved call
+						// on disk plus a confined animation is byte-identical
+						// between "a long tool is running" and "a dialog is up
+						// with parallel calls animating behind it", so neither the
+						// matchers nor the stall backstop can discriminate — but
+						// the hook already told us. A notice means a dialog (kind
+						// from its tool name); no notice means the call is simply
+						// still executing, and nothing is raised.
+						attn = askAttn
+					case st != nil:
 						if visible, err := s.CaptureVisible(); err == nil && dialoghint.ClassifyVisible(visible) {
 							attn = attentionKind(name)
 						} else if time.Since(stalledSince) >= animStallAfter {
@@ -270,7 +297,12 @@ func (a *app) poll() {
 					// "approval" for all 3 minutes (R21.2). Only preserve while
 					// the last fresh classification is younger than animStallAfter;
 					// a web-key answer clears it outright in handleKey.
-					if attn == "" {
+					// A capable node needs no preservation window: the notice
+					// itself persists across indeterminate ticks (it is a file,
+					// not a per-tick classification) and its absence is evidence,
+					// so preserving here would re-raise exactly the attention the
+					// discriminator just retired.
+					if attn == "" && !askCapable {
 						a.mu.Lock()
 						if prevAttn := a.attn[n.ID]; prevAttn != "" && time.Since(a.attnAt[n.ID]) < animStallAfter {
 							attn = prevAttn
@@ -279,6 +311,16 @@ func (a *app) poll() {
 					}
 				}
 			}
+		}
+		// A standing notice raises on its own, whichever branch ran and whether or
+		// not the transcript holds an unresolved call. That last part is the
+		// point: Claude flushes the tool_use record only *after* approval, so for
+		// a first blocked call the helper is the only evidence the dialog exists
+		// — the same late-flush case the owing-stall backstop covers in tens of
+		// seconds, answered here in one tick. askAttn is non-empty only for a
+		// capable node.
+		if attn == "" && askAttn != "" {
+			attn, freshAttn = askAttn, true
 		}
 		// P5 item 10 — turn finished: quiet pane, newest recognized record is
 		// assistant (Delivered), no unresolved tool call, no attention, not
@@ -618,15 +660,19 @@ type animState struct {
 // many lines and clears the state; an animation strip touches the same few
 // lines tick after tick. Mechanical only — diff geometry, never text.
 // Callers hold a.mu.
-func (a *app) noteAnim(id, prev, cur string) {
+// It reports whether this change was unconfined — the pane resumed streaming
+// output, which is mechanical evidence that no static dialog is on screen. The
+// caller uses that to retire Claude escalation notices (claude_asked.go); it is
+// diff geometry, never text, so it stays inside the liveness invariant.
+func (a *app) noteAnim(id, prev, cur string) (streaming bool) {
 	if prev == "" {
-		return // first observation: no baseline to diff against
+		return false // first observation: no baseline to diff against
 	}
 	idx := changedLines(prev, cur, animMaxLines+1)
 	if st := a.anim[id]; st != nil {
 		if merged := unionInts(st.lines, idx); len(merged) <= animMaxLines {
 			st.lines = merged
-			return
+			return false
 		}
 	}
 	if len(idx) <= animMaxLines {
@@ -638,12 +684,13 @@ func (a *app) noteAnim(id, prev, cur string) {
 			// drifts more often than animStallAfter postpone the inspect
 			// backstop forever (R20.6).
 			st.lines = idx
-			return
+			return false
 		}
 		a.anim[id] = &animState{lines: idx, since: time.Now(), off: -1}
-	} else {
-		delete(a.anim, id)
+		return false
 	}
+	delete(a.anim, id)
+	return true
 }
 
 // changedLines reports the indices of lines that differ between two

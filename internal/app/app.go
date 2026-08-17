@@ -184,6 +184,9 @@ func (a *app) initMaps() {
 	if a.claudePermCap == nil {
 		a.claudePermCap = map[string]bool{}
 	}
+	if a.claudeAskedCap == nil {
+		a.claudeAskedCap = map[string]bool{}
+	}
 	if a.claudeTurnPrompt == nil {
 		a.claudeTurnPrompt = map[string]string{}
 	}
@@ -345,6 +348,12 @@ type app struct {
 	// PermissionRequest rendezvous. Rebuilt from disk at startup so support
 	// survives a restart as a property of the pane's bundle, not of memory.
 	claudePermCap map[string]bool
+	// claudeAskedCap maps a Claude hook bundle id to whether it carries the
+	// escalation-notice layout (claude_asked.go). Separate from
+	// claudePermCap on purpose: answering and discriminating shipped in
+	// different versions, and a bundle that proves only the former must keep
+	// today's attention backstop rather than lose attention silently.
+	claudeAskedCap map[string]bool
 	// claudeTurnPrompt is the current turn's prompt_id per node, learned from
 	// the transcript. Empty means the protocol turn fence is unbound and the
 	// lease alone bounds the turn.
