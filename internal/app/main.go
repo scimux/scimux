@@ -49,6 +49,10 @@ var hostname = "scimux"
 // LogCache is populated (segment, fare, assets) so the first /api/state or
 // chat poll reads settled logs from memory instead of parsing on demand.
 func (a *app) warmStartup() {
+	// Panes that outlived scimux keep whatever their hook bundle proves, so
+	// the permission capability is re-derived from disk before anything can
+	// consult it.
+	a.refreshClaudePermCaps()
 	a.poll()
 
 	a.mu.Lock()
@@ -131,6 +135,9 @@ func Run() {
 	if len(os.Args) > 1 && os.Args[1] == claudeSessionHookCmd {
 		os.Exit(runClaudeSessionHookMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == claudePermissionHookCmd {
+		os.Exit(runClaudePermissionHookMain(os.Args[2:]))
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
@@ -193,6 +200,9 @@ func Run() {
 			time.Sleep(2 * time.Second)
 		}
 	}()
+	// The permission fast lane answers armed Claude tool calls between polls.
+	// A tick with no armed lease costs one map walk and no filesystem work.
+	go a.claudePermissionLane()
 	// Warm the harness/model probe (it shells out to the agent CLIs) so the
 	// first new-activity dialog doesn't wait on subprocesses.
 	go detectAgents()

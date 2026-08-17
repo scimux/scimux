@@ -181,6 +181,12 @@ func (a *app) initMaps() {
 	if a.claudeBoundAt == nil {
 		a.claudeBoundAt = map[string]time.Time{}
 	}
+	if a.claudePermCap == nil {
+		a.claudePermCap = map[string]bool{}
+	}
+	if a.claudeTurnPrompt == nil {
+		a.claudeTurnPrompt = map[string]string{}
+	}
 	if a.lastDeliver == nil {
 		a.lastDeliver = map[string]time.Time{}
 	}
@@ -335,6 +341,14 @@ type app struct {
 	// pendingClaudeHooks holds a prepared hook id after launch and before the
 	// hook record is persisted at publish time.
 	pendingClaudeHooks map[string]string
+	// claudePermCap maps a Claude hook bundle id to whether it carries the
+	// PermissionRequest rendezvous. Rebuilt from disk at startup so support
+	// survives a restart as a property of the pane's bundle, not of memory.
+	claudePermCap map[string]bool
+	// claudeTurnPrompt is the current turn's prompt_id per node, learned from
+	// the transcript. Empty means the protocol turn fence is unbound and the
+	// lease alone bounds the turn.
+	claudeTurnPrompt map[string]string
 	// claudeBoundAt is when each node's current transcript link was
 	// established. A link established after the delivery being judged cannot
 	// have missed it (maybeRelinkTranscript).

@@ -411,9 +411,14 @@ the answer.
 ### `POST /api/nodes/{id}/auto-approve`
 
 Body: `{"enabled": true}`. Arms or disarms the server-owned, one-turn
-auto-approval lease for structured transports only (Codex app-server; Grok,
-OpenCode, and Pi through ACP). Claude/tmux returns `400` and creates no
-state. State is never persisted across process restart.
+auto-approval lease. Supported on the structured transports (Codex
+app-server; Grok, OpenCode, and Pi through ACP) and on Claude/tmux chats
+that scimux launched itself — those carry a hook bundle registering a
+`PermissionRequest` hook, which is how a Claude tool call can be answered at
+all. Two cases still return `400` and create no state: a Claude pane scimux
+did not launch (adopted, or launched before the feature existed, so its
+bundle has no permission rendezvous), and any other unsupported transport.
+State is never persisted across process restart.
 
 Response (authoritative):
 
@@ -423,11 +428,27 @@ Response (authoritative):
 
 `phase` is `off`, `primed` (enabled while idle), or `armed` (active for the
 current turn). `count` advances only after an eligible decision is audited
-into the session log and then successfully delivered. Eligibility selects
-the sole offered option with semantic kind `allow` (one-time / request-
-scoped), regardless of display key or position — never `allow_always`,
-`reject`, or an ambiguous multi-allow menu. Requests already pending when
-the lease was enabled are never auto-resolved. The same object is included
+into the session log and then successfully delivered.
+
+On the structured transports, eligibility selects the sole offered option
+with semantic kind `allow` (one-time / request-scoped), regardless of
+display key or position — never `allow_always`, `reject`, or an ambiguous
+multi-allow menu. Requests already pending when the lease was enabled are
+never auto-resolved.
+
+Claude offers scimux no menu: its `PermissionRequest` hook describes the
+tool call, and "allow once" versus "allow always" lives on the answer, where
+scimux emits `{"behavior":"allow"}` and never the `updatedPermissions`
+member that would persist a rule. Eligibility is therefore rebuilt from what
+the hook proves: an armed lease the request echoes, the node's own bound
+session id, an ordinary permission mode (`default` or `acceptEdits`), and a
+tool that is not itself a question (`ExitPlanMode`, `AskUserQuestion`).
+Anything else — and any request whose hook has already escalated — stays
+manual and meets the human at the dialog. Because the hook writes a request
+only while the arm marker exists, a call that asked before the lease was
+armed is structurally out of reach; that is Claude's equivalent of the
+structured transports' enable cutoff. Audited Claude decisions carry an
+empty `options` list for the same reason. The same object is included
 on `GET /api/nodes/{id}/chat` as `auto_approve` and participates in that
 response's full-body ETag. Current-segment decision audit surfaces appear
 as `decisions` on the same response (and in `?history=1` segments).

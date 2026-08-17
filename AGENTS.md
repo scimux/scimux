@@ -10,7 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
-node --test web/test/*.test.js  # browser unit suite (948 tests; no browser needed)
+node --test web/test/*.test.js  # browser unit suite (1030 tests; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -165,6 +165,28 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   (`paneQuietAfter`): on an active pane only the corroborated path may raise.
   Liveness itself stays regex-free — the matchers and the owing backstop must
   never feed active/quiet.
+- **A Claude approval is answered through the hook, never through the pane.**
+  The same per-node bundle that binds the transcript also registers a
+  `PermissionRequest` hook (`__claude-permission-hook --dir <bundle>`), so
+  auto-approval has a structured channel instead of a simulated keystroke.
+  The hook is registered on **every** owned launch and is inert until a lease
+  is armed: with no `perm/lease` marker it reads one file, prints nothing, and
+  exits 0 — indistinguishable from having no hook. `PreToolUse` is deliberately
+  never registered (it fires for every tool call, decision needed or not).
+  Claude offers the hook **no menu and no `tool_use_id`**, so the rendezvous is
+  keyed by a hook-minted nonce (one blocked helper process = one request = one
+  answer), and "allow once" is an *omission*: scimux emits
+  `{"behavior":"allow"}` and never `updatedPermissions`, the only member that
+  would persist a rule. Ordering rules that must not be inverted: arm flips
+  in-memory state *then* writes the marker, disarm removes the marker *then*
+  clears state (a stale marker can only cost a tool call the helper's deadline,
+  never authorize one); and a request is claimed by rename before it is
+  audited, audited before it is answered. The marker is published only in the
+  `armed` phase — that is Claude's substitute for the structured transports'
+  enable cutoff, because a call that asked before the marker existed left no
+  request to answer. Support is proven from disk (`capabilities.json`), so an
+  adopted pane degrades to a disabled toggle rather than a lease that can never
+  arm.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

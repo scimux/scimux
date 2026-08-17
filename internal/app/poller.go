@@ -304,7 +304,21 @@ func (a *app) poll() {
 		}
 		a.attn[n.ID] = attn
 		a.turnDone[n.ID] = turnDone
+		// A lease cannot cross a turn or survive a dead pane — the same rule
+		// the structured branch applies above, read from the same mechanical
+		// pane liveness. Capture the lease id here so a re-arm that completed
+		// after this tick's observation is not erased by a stale disarm.
+		disarmLeaseID := ""
+		if (prev == "active" && state != "active") ||
+			(state == "exited" && (prev == "active" || prev == "quiet")) {
+			if st := a.autoApprove[n.ID]; st != nil {
+				disarmLeaseID = st.LeaseID
+			}
+		}
 		a.mu.Unlock()
+		if disarmLeaseID != "" {
+			a.disarmAutoApproveIfLease(n.ID, disarmLeaseID)
+		}
 		// V2-P2: durable wait edges from the existing mechanical needs-input
 		// signal (WaitingOn + quiet/confined-anim; no new regex).
 		a.persistAttentionTransition(n, prevAttn, attn)

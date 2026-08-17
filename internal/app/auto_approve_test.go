@@ -858,31 +858,50 @@ func (s *slowDeliverProc) Deliver(nodeID, optID string) error {
 }
 
 func TestClaudeAutoApproveNeverTouchesTmux(t *testing.T) {
+	// The invariant guard: a Claude approval is answered through the hook
+	// rendezvous or not at all. If anyone ever routes one through SendKeys —
+	// which would make scimux press keys in a human's pane — this goes red.
 	f := &fakeTmux{alive: map[string]bool{"c-claude": true}}
 	a := newTestApp(t, f)
 	n := &Node{ID: "c-claude", Title: "c", Agent: "claude", CreatedAt: "t"}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
-	// Baseline call count.
+	// An unsupported Claude pane (no permission-capable bundle) is refused,
+	// and the refusal costs no tmux call.
 	before := len(f.subcommands())
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/nodes/c-claude/auto-approve", strings.NewReader(`{"enabled":true}`))
 	r.SetPathValue("id", "c-claude")
 	a.handleAutoApprove(rec, r)
 	if rec.Code == 200 {
-		t.Fatal("claude must not succeed")
+		t.Fatal("a claude pane without the permission hook must not succeed")
 	}
 	after := len(f.subcommands())
 	if after != before {
 		t.Fatalf("claude auto-approve contacted tmux: calls before=%d after=%d subs=%v",
 			before, after, f.subcommands())
 	}
+
+	// A supported pane, armed and actually answering a request, is the case
+	// that matters: still zero tmux traffic.
+	armed, bundle := seedPermClaude(t, a, "c-armed", hookSIDOwn)
+	a.setAutoApproveEnabled(armed.ID, true, "active", "", 0)
+	dropRequest(t, bundle, armedRequest(a, armed, "nonce-1"))
+	before = len(f.subcommands())
+	if got := a.resolveClaudePermissions(); got != 1 {
+		t.Fatalf("armed lane delivered %d approvals, want 1", got)
+	}
+	if got := len(f.subcommands()); got != before {
+		t.Fatalf("answering a claude approval contacted tmux: before=%d after=%d subs=%v",
+			before, got, f.subcommands())
+	}
 }
 
 func TestAutoApproveAgentsShareEligibility(t *testing.T) {
 	// Prove codex/grok/opencode/pi all use the same pure function (table already
-	// covers options). Here we only assert each transport is supported and
-	// Claude is not.
+	// covers options). Here we only assert which transports the *structured*
+	// predicate covers: Claude is not one of them — it reaches auto-approval
+	// through its own hook, checked separately below.
 	agents := []struct {
 		agent, transport string
 		supported        bool
@@ -898,6 +917,22 @@ func TestAutoApproveAgentsShareEligibility(t *testing.T) {
 		n := &Node{Agent: ag.agent, Transport: ag.transport}
 		if got := autoApproveSupported(n); got != ag.supported {
 			t.Errorf("%s/%s supported=%v, want %v", ag.agent, ag.transport, got, ag.supported)
+		}
+	}
+
+	// The endpoint's predicate is the union: structured transports plus a
+	// Claude pane whose own bundle carries the permission rendezvous.
+	a := newTestApp(t, &fakeTmux{})
+	capable, _ := seedPermClaude(t, a, "hooked", hookSIDOwn)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.autoApproveSupportedFor(capable) {
+		t.Error("a hook-capable claude pane must be supported by the endpoint predicate")
+	}
+	for _, ag := range agents {
+		n := &Node{ID: "x-" + ag.agent + ag.transport, Agent: ag.agent, Transport: ag.transport}
+		if got := a.autoApproveSupportedFor(n); got != ag.supported {
+			t.Errorf("endpoint predicate %s/%s = %v, want %v", ag.agent, ag.transport, got, ag.supported)
 		}
 	}
 }

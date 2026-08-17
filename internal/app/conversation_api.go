@@ -212,7 +212,12 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		turnsBefore = len(tl.Poll())
 	}
 	pasted := time.Now()
-	acked, err := a.server.Session(n.ID).SendAck(delivered)
+	isClear := strings.TrimSpace(body.Text) == "/clear"
+	// Paste and lease arm are linearized under the per-node auto-gate so a
+	// concurrent enable cannot install a lease between the two.
+	acked, err := a.acceptTmuxPrompt(n, isClear, func() (bool, error) {
+		return a.server.Session(n.ID).SendAck(delivered)
+	})
 	if err != nil {
 		a.mu.Lock()
 		delete(a.sendState, n.ID)
@@ -235,14 +240,14 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	// SendAck succeeded, so the prompt was delivered to the pane (acked or
 	// unconfirmed — both consume budget). /clear is a page turn, not a turn.
-	if strings.TrimSpace(body.Text) != "/clear" {
+	if !isClear {
 		a.noteUsagePrompt(n.Agent)
 	}
 	// /clear delivered through scimux is a *known* session rollover: Claude
 	// Code starts a fresh session file. Retire the link right away (path-less
 	// detached seam, peek while waiting). Only that node's SessionStart
 	// source:"clear" hook event may bind the successor. Never retry /clear.
-	if acked && n.Agent == "claude" && strings.TrimSpace(body.Text) == "/clear" {
+	if acked && n.Agent == "claude" && isClear {
 		a.retireTranscript(n)
 		a.advanceClaudeClearAfterWeb(n)
 	}

@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   AUTO_APPROVE_HELP,
-  AUTO_APPROVE_CLAUDE_HELP,
+  AUTO_APPROVE_UNSUPPORTED_HELP,
+  AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP,
   AUTO_APPROVE_LABEL_FULL,
   AUTO_APPROVE_LABEL_NARROW,
   autoApproveAriaName,
@@ -100,17 +101,19 @@ test("P4 chrome model: off, primed, armed-zero, armed-count, Claude, error", () 
   assert.equal(claude.disabled, true);
   assert.equal(claude.showWarning, false);
   assert.equal(claude.showBadge, false);
-  assert.equal(claude.title, AUTO_APPROVE_CLAUDE_HELP);
-  assert.equal(claude.ariaLabel, AUTO_APPROVE_CLAUDE_HELP);
+  assert.equal(claude.title, AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP);
+  assert.equal(claude.ariaLabel, AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP);
   assert.ok(claude.classNames.includes("unsupported"));
 
-  // Claude agent even if a buggy payload claims supported.
-  const claudeHard = autoApproveChromeModel(
+  // Support is the server's verdict, not the agent name: a Claude chat whose
+  // pane carries the permission hook gets the ordinary chrome.
+  const claudeArmed = autoApproveChromeModel(
     { supported: true, enabled: true, phase: "armed", count: 3 },
     { agent: "claude" },
   );
-  assert.equal(claudeHard.disabled, true);
-  assert.equal(claudeHard.showBadge, false);
+  assert.equal(claudeArmed.disabled, false);
+  assert.equal(claudeArmed.showBadge, true);
+  assert.equal(claudeArmed.badgeText, "3");
 
   const err = autoApproveChromeModel({
     supported: true, enabled: true, phase: "armed", count: 1,
@@ -153,7 +156,7 @@ test("P4 accessibility pure contracts: aria name, 44px CSS target, non-color sta
     "Auto-approve eligible tool requests for this turn");
   assert.equal(autoApproveAriaName({ enabled: true, count: 15, supported: true }),
     "Auto-approve eligible tool requests for this turn; 15 approved.");
-  assert.equal(autoApproveAriaName({ supported: false }), AUTO_APPROVE_CLAUDE_HELP);
+  assert.equal(autoApproveAriaName({ supported: false }), AUTO_APPROVE_UNSUPPORTED_HELP);
 
   assert.match(chatCss, /button\.autoapprove[\s\S]*min-width:\s*44px/);
   assert.match(chatCss, /button\.autoapprove[\s\S]*min-height:\s*44px/);

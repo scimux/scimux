@@ -142,7 +142,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		os.RemoveAll(dir)
 		return "", "", err
 	}
-	for _, sub := range []string{"inbox", "processed"} {
+	for _, sub := range []string{"inbox", "processed", "perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"), filepath.Join("perm", "processed")} {
 		p := filepath.Join(dir, sub)
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			os.RemoveAll(dir)
@@ -160,6 +160,12 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	}
 	raw, err := claudeHookSettingsJSON(execPath, dir)
 	if err != nil {
+		os.RemoveAll(dir)
+		return "", "", err
+	}
+	// capabilities.json makes permission support provable from disk: a bundle
+	// prepared before this feature has none and stays unsupported.
+	if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), []byte(`{"permission":1}`), 0o600); err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
 	}
@@ -188,15 +194,27 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 		return nil, fmt.Errorf("claude hook settings: %w", errClaudeHookRejected)
 	}
 	cmd := shellQuote(execPath) + " " + claudeSessionHookCmd + " --dir " + shellQuote(hookDir)
-	doc := map[string]any{
-		"hooks": map[string]any{
-			"SessionStart": []any{
-				map[string]any{
-					"hooks": []any{
-						map[string]any{"type": "command", "command": cmd},
-					},
+	// PermissionRequest is registered on every owned launch and is inert
+	// while no lease marker exists, so a session can be armed at any later
+	// point in its life without a relaunch. PreToolUse is deliberately never
+	// registered: it fires for every tool call, decision needed or not.
+	permCmd, err := claudePermissionHookCommand(execPath, hookDir)
+	if err != nil {
+		return nil, err
+	}
+	entry := func(command string) []any {
+		return []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{"type": "command", "command": command},
 				},
 			},
+		}
+	}
+	doc := map[string]any{
+		"hooks": map[string]any{
+			"SessionStart":      entry(cmd),
+			"PermissionRequest": entry(permCmd),
 		},
 	}
 	return json.Marshal(doc)

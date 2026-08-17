@@ -570,10 +570,22 @@ export function echoBubbleHTML(text, tilesHTML = "", { markdown = md } = {}){
 
 export const AUTO_APPROVE_HELP =
   "Automatically selects the sole one-time approval option. Resets when the turn finishes or is interrupted.";
-export const AUTO_APPROVE_CLAUDE_HELP =
-  "Auto-approval isn't available for Claude yet.";
+export const AUTO_APPROVE_UNSUPPORTED_HELP =
+  "Auto-approval isn't available for this chat.";
+/* Claude reaches auto-approve through a PermissionRequest hook that only a
+   scimux-owned launch installs, so an adopted pane (or one launched before the
+   feature) can never arm. Say what would change that rather than refusing. */
+export const AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP =
+  "Auto-approval needs a Claude chat scimux launched itself \u2014 relaunch or fork this chat to use it.";
 export const AUTO_APPROVE_LABEL_FULL = "Auto-approve this turn";
 export const AUTO_APPROVE_LABEL_NARROW = "Auto-approve";
+
+/* Which refusal to show. Only Claude has an actionable one. */
+export function unsupportedHelp(agent){
+  return String(agent || "").toLowerCase() === "claude"
+    ? AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP
+    : AUTO_APPROVE_UNSUPPORTED_HELP;
+}
 
 export function autoApproveViewNorm(view){
   const v = view || {};
@@ -587,8 +599,8 @@ export function autoApproveViewNorm(view){
 }
 
 /* Accessible name for the toggle. Count is spoken only when enabled and > 0. */
-export function autoApproveAriaName({ enabled = false, count = 0, supported = true } = {}){
-  if (!supported) return AUTO_APPROVE_CLAUDE_HELP;
+export function autoApproveAriaName({ enabled = false, count = 0, supported = true, agent = "" } = {}){
+  if (!supported) return unsupportedHelp(agent);
   const base = "Auto-approve eligible tool requests for this turn";
   if (enabled && (Number(count) || 0) > 0){
     return `${base}; ${Number(count)} approved.`;
@@ -608,8 +620,9 @@ export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
   const v = autoApproveViewNorm(view);
   const agentL = String(agent || "").toLowerCase();
   const hidden = node ? !canReceiveSend(node) : false;
-  // Unsupported transport (Claude/tmux) or explicit Claude agent: disabled control.
-  if (!v.supported || agentL === "claude"){
+  // Support is the server's verdict alone (agent, transport, and — for Claude —
+  // a permission-capable hook bundle). The UI never second-guesses it by name.
+  if (!v.supported){
     return {
       hidden,
       supported: false,
@@ -624,8 +637,8 @@ export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
       badgeText: "",
       labelFull: AUTO_APPROVE_LABEL_FULL,
       labelNarrow: AUTO_APPROVE_LABEL_NARROW,
-      title: AUTO_APPROVE_CLAUDE_HELP,
-      ariaLabel: AUTO_APPROVE_CLAUDE_HELP,
+      title: unsupportedHelp(agentL),
+      ariaLabel: unsupportedHelp(agentL),
       toggleIcon: "off",
       classNames: ["autoapprove", "unsupported"],
     };
@@ -649,7 +662,7 @@ export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
     labelFull: AUTO_APPROVE_LABEL_FULL,
     labelNarrow: AUTO_APPROVE_LABEL_NARROW,
     title: AUTO_APPROVE_HELP,
-    ariaLabel: autoApproveAriaName({ enabled, count, supported: true }),
+    ariaLabel: autoApproveAriaName({ enabled, count, supported: true, agent: agentL }),
     toggleIcon: enabled ? "on" : "off",
     classNames: classes,
   };
@@ -761,9 +774,13 @@ export function decisionRowHTML(surface, {
     (toolKind ? `<div class="decision-row"><span class="k">Tool</span> ${escape(toolKind)}</div>` : "") +
     reasonHTML +
     `<div class="decision-row"><span class="k">Options</span>` +
-      `<ul class="decision-opts">${optsHTML}</ul></div>` +
+      (opts.length
+        ? `<ul class="decision-opts">${optsHTML}</ul>`
+        : `<span class="decision-none">no menu offered \u2014 hook decision</span>`) +
+      `</div>` +
     `<div class="decision-row"><span class="k">Selected</span>` +
-      ` <code>${escape(selKey)}</code> ${escape(selName)}` +
+      (selKey ? ` <code>${escape(selKey)}</code>` : "") +
+      ` ${escape(selName)}` +
       ` <span class="aa-kind">(${escape(selKind)})</span></div>` +
     `<div class="decision-row"><span class="k">Request</span> <code>${escape(req)}</code></div>` +
     `<div class="decision-row"><span class="k">Lease</span> <code>${escape(lease)}</code></div>` +

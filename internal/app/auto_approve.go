@@ -134,6 +134,14 @@ func parsePermissionRequestID(id string) (incarn string, seq uint64, ok bool) {
 	return id[:i], n, true
 }
 
+// autoApproveSupportedFor reports whether a node can auto-approve at all:
+// either a structured transport that proves permission options, or a Claude
+// pane whose own hook bundle carries the permission rendezvous. Caller may
+// hold a.mu (the Claude side is a map lookup, never filesystem I/O).
+func (a *app) autoApproveSupportedFor(n *Node) bool {
+	return autoApproveSupported(n) || a.claudePermSupportedLocked(n)
+}
+
 // autoApproveSupported reports whether the node uses a structured transport
 // that can prove permission options (codex app-server, ACP for grok/opencode/pi).
 func autoApproveSupported(n *Node) bool {
@@ -157,7 +165,7 @@ func newLeaseID() string {
 
 // autoApproveViewOf projects in-memory state for one node. Caller may hold a.mu.
 func (a *app) autoApproveViewOf(n *Node) autoApproveView {
-	if !autoApproveSupported(n) {
+	if !a.autoApproveSupportedFor(n) {
 		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
 	}
 	st := a.autoApprove[n.ID]
@@ -180,11 +188,15 @@ func (a *app) disableAutoApprove(id string) autoApproveView {
 	g := a.autoGateFor(id)
 	g.Lock()
 	defer g.Unlock()
+	// Retract the Claude arm marker before clearing state. The reverse order
+	// would leave a window in which the marker outlives the lease; this order
+	// can at worst cost a tool call the helper's deadline.
+	a.retractClaudeLease(a.claudePermBundle(id))
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.autoApprove, id)
 	n := a.byID[id]
-	if n == nil || !autoApproveSupported(n) {
+	if n == nil || !a.autoApproveSupportedFor(n) {
 		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
 	}
 	return autoApproveView{Supported: true, Enabled: false, Phase: string(autoPhaseOff)}
@@ -208,31 +220,17 @@ func (a *app) enableAutoApprove(id string, pm procManager) autoApproveView {
 		if incarn, maxSeq, ok := pm.PermissionBoundary(id); ok {
 			enableIncarn, enableMaxSeq = incarn, maxSeq
 		}
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := a.byID[id]
-	if n == nil || !autoApproveSupported(n) {
-		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
-	}
-	st := &autoApproveState{
-		LeaseID:      newLeaseID(),
-		Count:        0,
-		EnableIncarn: enableIncarn,
-		EnableMaxSeq: enableMaxSeq,
-		Attempted:    map[string]bool{},
-	}
-	if live == "active" {
-		st.Phase = autoPhaseArmed
 	} else {
-		st.Phase = autoPhasePrimed
+		// tmux node: liveness is the poller's mechanical pane signal. Claude
+		// has no permission sequence to fence an enable against, but it needs
+		// none — the arm marker is the cutoff. A call that asked before the
+		// marker existed left no request behind, so arming mid-turn cannot
+		// answer it; it still meets the human at the dialog.
+		a.mu.Lock()
+		live = a.live[id]
+		a.mu.Unlock()
 	}
-	if a.autoApprove == nil {
-		a.autoApprove = map[string]*autoApproveState{}
-	}
-	a.autoApprove[id] = st
-	return a.autoApproveViewOf(n)
+	return a.installAutoApproveLease(id, live, enableIncarn, enableMaxSeq)
 }
 
 // setAutoApproveEnabled is the test-friendly mutation that applies a pre-known
@@ -245,10 +243,18 @@ func (a *app) setAutoApproveEnabled(id string, enabled bool, live, enableIncarn 
 	g := a.autoGateFor(id)
 	g.Lock()
 	defer g.Unlock()
+	return a.installAutoApproveLease(id, live, enableIncarn, enableMaxSeq)
+}
+
+// installAutoApproveLease commits a fresh lease. Callers hold the per-node
+// auto-gate. Claude's arm marker is published only after the in-memory state
+// is committed, and only for an armed phase: a primed lease must not let the
+// hook answer a tool call belonging to a turn that is already running.
+func (a *app) installAutoApproveLease(id, live, enableIncarn string, enableMaxSeq uint64) autoApproveView {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	n := a.byID[id]
-	if n == nil || !autoApproveSupported(n) {
+	if n == nil || !a.autoApproveSupportedFor(n) {
+		a.mu.Unlock()
 		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
 	}
 	st := &autoApproveState{
@@ -267,7 +273,37 @@ func (a *app) setAutoApproveEnabled(id string, enabled bool, live, enableIncarn 
 		a.autoApprove = map[string]*autoApproveState{}
 	}
 	a.autoApprove[id] = st
-	return a.autoApproveViewOf(n)
+	view := a.autoApproveViewOf(n)
+	bundle, leaseID := a.claudeLeaseTargetLocked(n, st)
+	a.mu.Unlock()
+	a.applyClaudeLeaseMarker(bundle, leaseID)
+	return view
+}
+
+// claudeLeaseTargetLocked reports the bundle whose marker tracks this node's
+// lease and the lease id to publish ("" retracts). Caller holds a.mu.
+func (a *app) claudeLeaseTargetLocked(n *Node, st *autoApproveState) (bundle, leaseID string) {
+	if !a.claudePermSupportedLocked(n) {
+		return "", ""
+	}
+	bundle = a.claudePermBundleLocked(n.ID)
+	if st != nil && st.Phase == autoPhaseArmed {
+		leaseID = st.LeaseID
+	}
+	return bundle, leaseID
+}
+
+// applyClaudeLeaseMarker publishes or retracts the marker. Callers hold the
+// per-node auto-gate but not a.mu (this touches the filesystem).
+func (a *app) applyClaudeLeaseMarker(bundle, leaseID string) {
+	if bundle == "" {
+		return
+	}
+	if leaseID == "" {
+		a.retractClaudeLease(bundle)
+		return
+	}
+	a.publishClaudeLease(bundle, leaseID)
 }
 
 // disarmAutoApprove resets the lease to off (completion, interrupt, clear,
@@ -278,6 +314,7 @@ func (a *app) disarmAutoApprove(id string) {
 	g := a.autoGateFor(id)
 	g.Lock()
 	defer g.Unlock()
+	a.retractClaudeLease(a.claudePermBundle(id))
 	a.mu.Lock()
 	delete(a.autoApprove, id)
 	a.mu.Unlock()
@@ -297,10 +334,20 @@ func (a *app) disarmAutoApproveIfLease(id, leaseID string) {
 	defer g.Unlock()
 	a.mu.Lock()
 	st := a.autoApprove[id]
-	if st != nil && st.LeaseID == leaseID {
-		delete(a.autoApprove, id)
+	match := st != nil && st.LeaseID == leaseID
+	bundle := ""
+	if match {
+		bundle = a.claudePermBundleLocked(id)
 	}
 	a.mu.Unlock()
+	if match {
+		a.retractClaudeLease(bundle)
+		a.mu.Lock()
+		if cur := a.autoApprove[id]; cur != nil && cur.LeaseID == leaseID {
+			delete(a.autoApprove, id)
+		}
+		a.mu.Unlock()
+	}
 }
 
 // armAutoApproveOnPrompt transitions primed → armed after a prompt is accepted.
@@ -368,10 +415,20 @@ func (a *app) clearStaleArmedBeforePrompt(id string, live string) {
 func (a *app) clearStaleArmedBeforePromptLocked(id string) {
 	a.mu.Lock()
 	st := a.autoApprove[id]
-	if st != nil && st.Phase == autoPhaseArmed {
-		delete(a.autoApprove, id)
+	stale := st != nil && st.Phase == autoPhaseArmed
+	bundle := ""
+	if stale {
+		bundle = a.claudePermBundleLocked(id)
 	}
 	a.mu.Unlock()
+	if stale {
+		a.retractClaudeLease(bundle)
+		a.mu.Lock()
+		if cur := a.autoApprove[id]; cur != nil && cur.Phase == autoPhaseArmed {
+			delete(a.autoApprove, id)
+		}
+		a.mu.Unlock()
+	}
 }
 
 // acceptStructuredPrompt linearizes pre-send boundary sample → Send → primed
@@ -414,6 +471,51 @@ func (a *app) acceptStructuredPrompt(n *Node, pm procManager, text string) error
 		a.acceptArmHook(n.ID)
 	}
 	return nil
+}
+
+// acceptTmuxPrompt linearizes stale-lease cleanup → paste → arm under the
+// per-node auto-gate: the tmux analogue of acceptStructuredPrompt, for the
+// one transport whose prompt goes through a pane instead of a manager.
+//
+// There is no PermissionBoundary here and none is needed: the arm marker is
+// itself the cutoff, since the hook writes a request only while a marker is
+// published. hasBound is therefore false — any cutoff from a previous enable
+// is cleared rather than carried across the turn.
+//
+// isClear marks a page turn. /clear ends the lease outright: the fresh
+// surface must be armed deliberately, exactly as on the structured branch.
+func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error)) (bool, error) {
+	g := a.autoGateFor(n.ID)
+	g.Lock()
+	defer g.Unlock()
+
+	a.mu.Lock()
+	live := a.live[n.ID]
+	primedLeaseID := ""
+	if st := a.autoApprove[n.ID]; st != nil && st.Phase == autoPhasePrimed {
+		primedLeaseID = st.LeaseID
+	}
+	a.mu.Unlock()
+	if live != "active" {
+		a.clearStaleArmedBeforePromptLocked(n.ID)
+	}
+
+	acked, err := send()
+	if err != nil {
+		return acked, err
+	}
+	if isClear {
+		a.retractClaudeLease(a.claudePermBundle(n.ID))
+		a.mu.Lock()
+		delete(a.autoApprove, n.ID)
+		a.mu.Unlock()
+		return acked, nil
+	}
+	if primedLeaseID != "" {
+		a.armAutoApproveOnPromptLocked(n.ID, primedLeaseID, "", 0, false)
+		a.syncClaudeLeaseMarker(n)
+	}
+	return acked, nil
 }
 
 // maybeAutoApprove resolves an eligible structured pending request in the
@@ -570,8 +672,14 @@ func (a *app) handleAutoApprove(w http.ResponseWriter, r *http.Request) {
 	if a.refuseEnded(w, n) {
 		return
 	}
-	if !autoApproveSupported(n) {
-		http.Error(w, "auto-approval is not available for this transport", http.StatusBadRequest)
+	// The Claude half of the predicate reads a.claudeHooks and the capability
+	// map, both written by the hook drain under a.mu — take the lock for the
+	// read even though the structured half needs none.
+	a.mu.Lock()
+	supported := a.autoApproveSupportedFor(n)
+	a.mu.Unlock()
+	if !supported {
+		http.Error(w, "auto-approval is not available for this chat", http.StatusBadRequest)
 		return
 	}
 	var body struct {

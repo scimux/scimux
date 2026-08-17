@@ -292,9 +292,11 @@ func TestClaudeHookSettingsJSONIsPrivateSessionStartOnly(t *testing.T) {
 		t.Fatalf("settings must contain only hooks, got %s", raw)
 	}
 	starts, _ := hooks["SessionStart"].([]any)
-	if len(starts) != 1 || len(hooks) != 1 {
+	if len(starts) != 1 {
 		t.Fatalf("want exactly one SessionStart hook, got %s", raw)
 	}
+	// Which other events may appear is pinned by
+	// TestClaudeHookSettingsRegistersPermissionRequestOnly.
 	if !strings.Contains(string(raw), claudeSessionHookCmd) {
 		t.Fatalf("hook command missing %s: %s", claudeSessionHookCmd, raw)
 	}
