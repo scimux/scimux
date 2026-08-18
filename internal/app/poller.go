@@ -212,6 +212,14 @@ func (a *app) poll() {
 				// quiet tick is never evidence that an ask was answered.
 				if askCapable {
 					a.noteClaudeAskedProgress(n.ID, off)
+					// Per-call retirement is safe here where growth is not:
+					// it matches a notice to the one call it announced, so a
+					// static pane proves nothing either way and is not asked
+					// to. A dialog answered just before the pane settled
+					// leaves its record behind, and this drains it.
+					if a.retireClaudeAskedByCalls(n, quietTl.ToolStamps()) > 0 {
+						askAttn, _ = a.claudeAskState(n)
+					}
 				}
 			}
 			// Dialoghint matcher + owing-stall backstop (P1a/P1b). Shared with
@@ -251,27 +259,35 @@ func (a *app) poll() {
 			// degrades to the neutral "inspect", never a classified dialog.
 			if tl := a.tailerFor(n); tl != nil {
 				tl.Poll()
-				// Retirement (claude_asked.go): recognized transcript growth on a
-				// producing pane is the mechanical proof that an ask was resolved
-				// — Claude runs the tool and writes its records only *after* the
-				// human answers. One resolution retires one ask, oldest first,
-				// and only an ask older than the record that proves it.
+				// Retirement (claude_asked.go), two rules, exact first.
 				//
-				// The pending set gates the retirement — never the watermark. With
-				// two calls queued behind one dialog, answering the first produces
-				// records newer than the second ask's notice while that second
-				// dialog is on screen, so growth plus the ordering clause is not
-				// enough: an unresolved call anywhere in the transcript means no
-				// resolution can be claimed this tick. The watermark still advances
-				// on those ticks, exactly as on quiet ones — a frozen mark cannot
-				// report the growth the *next* resolution writes.
+				// Per-call: a notice carries the digest of the tool_input it
+				// escalated, and Claude writes the matching tool_use record only
+				// *after* the human answers — so that record retires that notice,
+				// whatever else is in flight. This is the primary rule.
+				//
+				// Growth stays as the fallback for what the digest cannot join:
+				// a dialog that is dismissed, or one raised for something that
+				// never becomes a tool_use record (a plan choice, a question).
+				// It keeps its old guard — an unresolved call anywhere means no
+				// resolution can be claimed — because it is statistical, not a
+				// join. That guard is precisely why it could not carry the load
+				// alone: a working agent nearly always has a call pending, so
+				// notices stood until their TTL and held hard attention over an
+				// agent that was merely busy (16 of them across one 23-minute
+				// turn, observed 2026-08-18). The watermark still advances on
+				// every tick — a frozen mark cannot report the growth the *next*
+				// resolution writes.
 				if askCapable {
 					off, _ := tl.Progress()
-					if a.noteClaudeAskedProgress(n.ID, off) && tl.PendingCount() == 0 {
+					grew := a.noteClaudeAskedProgress(n.ID, off)
+					retired := a.retireClaudeAskedByCalls(n, tl.ToolStamps()) > 0
+					if grew && !retired && tl.PendingCount() == 0 {
 						at, dated := tl.NewestTurnTime()
-						if a.retireClaudeAskedOnProgress(n, at, dated) {
-							askAttn, _ = a.claudeAskState(n)
-						}
+						retired = a.retireClaudeAskedOnProgress(n, at, dated)
+					}
+					if retired {
+						askAttn, _ = a.claudeAskState(n)
 					}
 				}
 				if name, ok := tl.WaitingOn(); ok {

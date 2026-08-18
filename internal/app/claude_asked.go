@@ -33,6 +33,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // claudeAskedTTL bounds how long a notice may stand. It is a leak backstop,
@@ -293,4 +295,107 @@ func (a *app) retireClaudeAskedOnProgress(n *Node, before time.Time, dated bool)
 		return false
 	}
 	return retireOldestAskedNotice(filepath.Join(bundle, "perm"), before, time.Now())
+}
+
+// toolEvidence is one transcript tool-call record, reduced to what can retire a
+// notice: the call's identity, its tool name, the digest of its input, and when
+// it was written.
+type toolEvidence struct {
+	ID     string
+	Tool   string
+	Digest string
+	At     time.Time
+}
+
+// retireAskedByToolEvidence retires the notices whose calls have appeared in
+// the transcript, and returns how many went.
+//
+// This is the exact join that growth-based retirement could only approximate.
+// Claude writes a tool_use record *after* the human answers the dialog, so a
+// record carrying the same tool name and input digest as a standing notice is
+// proof that that specific ask was resolved — no counting, no oldest-first
+// guess, and no dependence on how many other calls are in flight. That last
+// property is the point: retireOldestAskedNotice is gated on an empty pending
+// set, and a working agent almost never has one, so notices accumulated until
+// their 4h TTL and held hard attention over an agent that was merely busy
+// (observed 2026-08-18: 16 standing notices across 23 minutes of one turn).
+//
+// Three clauses are kept from the growth rule because they guard real states,
+// not hypotheticals:
+//
+//	one per record — the same command may be asked twice; the second dialog can
+//	still be on screen while the first one's record lands.
+//	older than the evidence — a record written before the ask cannot have
+//	resolved it (run a tool, then ask for the same command again).
+//	dated only — an undated record reads as unknown and retires nothing, the
+//	same way every other freshness gate declines rather than guesses.
+func retireAskedByToolEvidence(perm string, seen []toolEvidence, now time.Time) int {
+	if perm == "" || len(seen) == 0 {
+		return 0
+	}
+	files := readClaudeAskedFiles(perm, now)
+	if len(files) == 0 {
+		return 0
+	}
+	// Oldest first, so identical asks retire in the order they were made.
+	used := make(map[int]bool, len(files))
+	retired := 0
+	for _, ev := range seen {
+		if ev.Digest == "" || ev.Tool == "" || ev.At.IsZero() {
+			continue
+		}
+		for i := len(files) - 1; i >= 0; i-- {
+			f := files[i]
+			if used[i] || f.note.Digest != ev.Digest || f.note.Tool != ev.Tool {
+				continue
+			}
+			if !f.at.Before(ev.At) {
+				continue // the ask is newer than its supposed proof
+			}
+			if os.Remove(f.path) == nil {
+				used[i] = true
+				retired++
+			}
+			break
+		}
+	}
+	return retired
+}
+
+// retireClaudeAskedByCalls credits the transcript tool calls this node has not
+// been credited for yet against its standing notices, and returns how many were
+// retired. The stamps accumulate for the life of the tailer, so a watermark
+// keeps one record worth exactly one retirement.
+//
+// Unlike the growth path this is indifferent to pane state and to the pending
+// set: it matches a specific call to the specific notice that announced it, so
+// there is nothing for a static dialog or a queued call to confuse.
+func (a *app) retireClaudeAskedByCalls(n *Node, stamps []transcript.ToolStamp) int {
+	a.mu.Lock()
+	seenN := a.claudeAskedTools[n.ID]
+	if len(stamps) < seenN {
+		seenN = 0 // rotation: the tailer rewound, same signal the mirror uses
+	}
+	a.claudeAskedTools[n.ID] = len(stamps)
+	capable := a.claudeAskedSupportedLocked(n)
+	bundle := ""
+	if capable {
+		bundle = a.claudePermBundleLocked(n.ID)
+	}
+	a.mu.Unlock()
+	if bundle == "" || seenN >= len(stamps) {
+		return 0
+	}
+	var ev []toolEvidence
+	for _, s := range stamps[seenN:] {
+		if s.Digest == "" {
+			continue // result side, or a call whose input did not parse
+		}
+		at, err := time.Parse(time.RFC3339, s.Time)
+		if err != nil {
+			continue // undated reads as unknown, and retires nothing
+		}
+		ev = append(ev, toolEvidence{ID: s.ID, Tool: s.Title, Digest: s.Digest, At: at})
+	}
+	return retireAskedByToolEvidence(filepath.Join(bundle, "perm"), ev, time.Now())
 }

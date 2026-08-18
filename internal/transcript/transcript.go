@@ -13,6 +13,8 @@ package transcript
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -50,6 +52,24 @@ type ToolStamp struct {
 	Title  string // tool name when known (call side)
 	Status string // "pending" | "completed"
 	Time   string // raw transcript timestamp
+	// Digest is the first 16 hex of sha256 over the call's raw input bytes,
+	// set on the call side only. It joins a record to the Claude escalation
+	// notice that announced the same call (internal/app/claude_asked.go):
+	// Claude writes the record only after a human answers, so a match is proof
+	// that one specific dialog closed. Verified against real data 2026-08-18 —
+	// the hook's tool_input and the transcript's input hash identically, so no
+	// canonicalization is involved on either side.
+	Digest string
+}
+
+// inputDigest is the shared spelling of that hash. Empty input yields "", so a
+// record with nothing to hash never collides with a notice.
+func inputDigest(input []byte) string {
+	if len(input) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(input)
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // ParseLine extracts a turn from one JSONL line of either format.
@@ -631,10 +651,11 @@ func (t *Tailer) notePending(line []byte) {
 		// prior completion; only the explicit final boundary raises it.
 		t.endTurn = generic.Type == "assistant" && msg.StopReason == "end_turn"
 		var blocks []struct {
-			Type      string `json:"type"`
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			ToolUseID string `json:"tool_use_id"`
+			Type      string          `json:"type"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			ToolUseID string          `json:"tool_use_id"`
+			Input     json.RawMessage `json:"input"`
 		}
 		if json.Unmarshal(msg.Content, &blocks) != nil {
 			// Plain-string content: a human prompt (or interrupt notice)
@@ -650,7 +671,8 @@ func (t *Tailer) notePending(line []byte) {
 				t.pending = append(t.pending, pendingCall{b.ID, b.Name})
 				if b.ID != "" {
 					t.Tools = append(t.Tools, ToolStamp{
-						ID: b.ID, Title: b.Name, Status: "pending", Time: generic.Timestamp,
+						ID: b.ID, Title: b.Name, Status: "pending",
+						Time: generic.Timestamp, Digest: inputDigest(b.Input),
 					})
 				}
 			case "tool_result":
