@@ -1,6 +1,9 @@
 builds/
-scimux-*
-scimux
+# anchored to the repo root: these name the built binary, not any path
+# component. Unanchored they also match the directory cmd/scimux/, which
+# silently kept the build entrypoint out of git.
+/scimux-*
+/scimux
 
 # locally captured transcript/protocol fixtures (regenerate with
 # scripts/capture-fixtures.sh; they contain personal environment snapshots
