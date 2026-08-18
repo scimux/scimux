@@ -299,17 +299,14 @@ func TestAutoApproveLeaseLifecycle(t *testing.T) {
 	}
 	a.mu.Unlock()
 
-	// settleArmedBeforePrompt parks an armed lease that outlived its turn: the
-	// armed phase must not cross the boundary, but the human's enable does.
+	// settleArmedBeforePrompt closes an armed structured-agent lease that
+	// outlived its turn. Only Claude carries the enable across a turn.
 	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
 	a.settleArmedBeforePrompt(n.ID, "quiet")
 	a.mu.Lock()
 	st := a.autoApprove[n.ID]
-	if st == nil || st.Phase != autoPhasePrimed {
-		t.Fatalf("stale armed lease = %+v, want a primed lease before the idle prompt", st)
-	}
-	if st.EnableIncarn != "" {
-		t.Fatalf("parked lease kept the old cutoff %q; the next arm must rebind one", st.EnableIncarn)
+	if st != nil {
+		t.Fatalf("stale structured-agent lease = %+v, want off before the idle prompt", st)
 	}
 	a.mu.Unlock()
 	a.disarmAutoApprove(n.ID)

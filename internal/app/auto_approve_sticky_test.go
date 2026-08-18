@@ -7,20 +7,19 @@ import (
 	"time"
 )
 
-// The sticky-lease rules (2026-08-17). Enabling auto-approve expresses a
-// standing intent, not a one-turn action: the toggle stays on until the human
-// takes it back. Only three human acts and the hard resets end it.
+// Claude's sticky-lease rules (2026-08-17). Enabling auto-approve on Claude
+// expresses a standing intent. Structured agents retain one-turn leases.
 //
 //	a) interrupt ("stop")
 //	b) manual un-toggle
 //	c) /clear and /exit
 //	+  process/session loss and node delete (non-negotiable, not human acts)
 //
-// A turn ending is *not* one of them. The lease degrades armed → primed at the
-// turn boundary — marker retracted, fence cleared, Enabled still true — and the
-// next prompt re-arms it. The pane-liveness disarm this replaces fired on any
-// 8s static stretch (paneQuietAfter), which is exactly what an approval dialog
-// looks like, so the lease died at the moment it was needed.
+// A Claude turn ending is *not* one of them. Its lease degrades armed → primed
+// at the boundary — marker retracted, fence cleared, Enabled still true — and
+// the next prompt re-arms it. The pane-liveness disarm this replaces fired on
+// any 8s static stretch (paneQuietAfter), which is exactly what an approval
+// dialog looks like, so the lease died at the moment it was needed.
 
 // leaseIDOf reads the current lease id ("" when off).
 func leaseIDOf(a *app, id string) string {
@@ -184,9 +183,9 @@ func TestPaneExitDisarmsLeaseOutright(t *testing.T) {
 	}
 }
 
-func TestStructuredTurnEndKeepsLeasePrimed(t *testing.T) {
-	// Same rule on the structured branch of the poller, for every ACP/codex
-	// agent — the lease is transport-independent policy.
+func TestStructuredTurnEndDisarmsLease(t *testing.T) {
+	// Codex and every ACP agent are deliberately one-turn controls. Their
+	// protocol turn boundary is exact, so completion turns the toggle off.
 	for _, tc := range []struct{ agent, transport string }{
 		{"grok", "acp"}, {"opencode", "acp"}, {"pi", "acp"}, {"codex", "codex"},
 	} {
@@ -208,14 +207,14 @@ func TestStructuredTurnEndKeepsLeasePrimed(t *testing.T) {
 			stub.mu.Unlock()
 			a.poll()
 
-			if got := phaseOf(a, n.ID); got != autoPhasePrimed {
-				t.Fatalf("phase after turn end = %q, want primed", got)
+			if got := phaseOf(a, n.ID); got != autoPhaseOff {
+				t.Fatalf("phase after turn end = %q, want off", got)
 			}
 			a.mu.Lock()
 			enabled := a.autoApproveViewOf(n).Enabled
 			a.mu.Unlock()
-			if !enabled {
-				t.Fatal("turn end must leave the toggle on")
+			if enabled {
+				t.Fatal("turn end must switch the structured-agent toggle off")
 			}
 		})
 	}
@@ -300,6 +299,31 @@ func TestInterruptDisarmsLease(t *testing.T) {
 	}
 	if got := phaseOf(a, n.ID); got != autoPhaseOff {
 		t.Fatalf("phase after interrupt = %q, want off", got)
+	}
+}
+
+func TestClaudeInterruptDisarmsStickyLease(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"ci1": true}, capture: "esc to interrupt"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaude(t, a, "ci1", hookSIDOwn)
+	a.mu.Lock()
+	a.live[n.ID] = "active"
+	a.mu.Unlock()
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("precondition: Claude lease marker was not armed")
+	}
+
+	h := newTestHandler(t, a)
+	rec := routeRequest(h, http.MethodPost, "/api/nodes/ci1/send/interrupt", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("interrupt: status = %d body %q", rec.Code, rec.Body.String())
+	}
+	if got := phaseOf(a, n.ID); got != autoPhaseOff {
+		t.Fatalf("Claude phase after interrupt = %q, want off", got)
+	}
+	if lease, ok := markerLease(t, bundle); ok {
+		t.Fatalf("Claude interrupt left marker %q armed", lease)
 	}
 }
 
@@ -389,7 +413,7 @@ func TestResolvedToolCallStillParksTmuxLease(t *testing.T) {
 		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run it"}}`,
 		runningToolCall,
 		`{"type":"user","timestamp":"t3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"done"}]}}`,
-		`{"type":"assistant","timestamp":"t4","message":{"role":"assistant","content":[{"type":"text","text":"it is done"}]}}`)
+		`{"type":"assistant","timestamp":"t4","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"it is done"}]}}`)
 
 	a.mu.Lock()
 	a.live[n.ID] = "active"
@@ -403,5 +427,57 @@ func TestResolvedToolCallStillParksTmuxLease(t *testing.T) {
 	}
 	if lease, ok := markerLease(t, bundle); ok {
 		t.Fatalf("completed turn left the arm marker behind (%q)", lease)
+	}
+}
+
+func TestClaudeQuietMidTurnDoesNotParkStickyLease(t *testing.T) {
+	// Reproduces the regression: a permission/question wait can make the pane
+	// quiet before Claude flushes a call. User-role transcript state without an
+	// explicit end_turn must keep the marker armed for later calls in this turn.
+	f := &fakeTmux{alive: map[string]bool{"tq": true}, list: []string{"tq"}, capture: "waiting quietly"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "tq", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"do the work"}}`)
+	a.mu.Lock()
+	a.live[n.ID] = "active"
+	a.mu.Unlock()
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+	armedLease := leaseIDOf(a, n.ID)
+
+	endTmuxTurn(t, a, n.ID)
+
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase on a quiet mid-turn = %q, want armed", got)
+	}
+	if lease, ok := markerLease(t, bundle); !ok || lease != armedLease {
+		t.Fatalf("quiet mid-turn marker = %q,%v, want unchanged %q", lease, ok, armedLease)
+	}
+}
+
+func TestClaudeNextPromptSettlesAndRearmsSurvivingLease(t *testing.T) {
+	// Belt path: if the poller missed end_turn, accepting the next idle prompt is
+	// itself the definitive boundary. Rotate before send, then re-arm afterward.
+	f := &fakeTmux{alive: map[string]bool{"tb": true}, list: []string{"tb"}, capture: "idle", captureAfterEnter: "working"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaude(t, a, "tb", hookSIDOwn)
+	a.mu.Lock()
+	a.live[n.ID] = "quiet"
+	a.mu.Unlock()
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+	oldLease := leaseIDOf(a, n.ID)
+
+	acked, err := a.acceptTmuxPrompt(n, false, func() (bool, error) { return true, nil })
+	if err != nil || !acked {
+		t.Fatalf("accept prompt = %v,%v", acked, err)
+	}
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase after next prompt = %q, want armed", got)
+	}
+	newLease := leaseIDOf(a, n.ID)
+	if newLease == "" || newLease == oldLease {
+		t.Fatalf("lease after next prompt = %q, want fresh from %q", newLease, oldLease)
+	}
+	if marker, ok := markerLease(t, bundle); !ok || marker != newLease {
+		t.Fatalf("marker after next prompt = %q,%v, want %q", marker, ok, newLease)
 	}
 }

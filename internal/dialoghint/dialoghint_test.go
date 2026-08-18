@@ -411,6 +411,26 @@ Enter to confirm · Esc to cancel`, true},
 	}
 }
 
+func TestHasInterruptAnchor(t *testing.T) {
+	tests := []struct {
+		name string
+		pane string
+		want bool
+	}{
+		{"ordinary working footer", "Running tool…\n esc to interrupt", true},
+		{"screen reader spelling", "Working\n Escape to interrupt", true},
+		{"dialog cancel is not working", "1. Allow\n2. Deny\nEscape to cancel", false},
+		{"bare interrupt is too broad", "request interrupted", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasInterruptAnchor(tt.pane); got != tt.want {
+				t.Fatalf("HasInterruptAnchor() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStripANSI(t *testing.T) {
 	tests := []struct {
 		input string

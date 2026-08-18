@@ -8,7 +8,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
-  AUTO_APPROVE_HELP,
+  AUTO_APPROVE_CLAUDE_HELP,
+  AUTO_APPROVE_CLAUDE_LABEL_FULL,
   AUTO_APPROVE_UNSUPPORTED_HELP,
   AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP,
   autoApproveChromeModel,
@@ -28,7 +29,8 @@ test("Claude chrome follows the server's supported verdict, not the agent name",
   assert.equal(armed.disabled, false);
   assert.equal(armed.pressed, true);
   assert.equal(armed.showWarning, true);
-  assert.equal(armed.title, AUTO_APPROVE_HELP);
+  assert.equal(armed.title, AUTO_APPROVE_CLAUDE_HELP);
+  assert.equal(armed.labelFull, AUTO_APPROVE_CLAUDE_LABEL_FULL);
   assert.ok(!armed.classNames.includes("unsupported"));
 
   const primed = autoApproveChromeModel(

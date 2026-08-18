@@ -91,6 +91,19 @@ test("timing constants match live contracts", () => {
   assert.ok(ASSET_REF_RE.test("![x](scimux-asset:abc)"));
 });
 
+test("attention evidence key changes only with kind or fresh evidence epoch", () => {
+  assert.equal(chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123 }), "inspect:123");
+  assert.equal(chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123, live: "active" }), "inspect:123");
+  assert.notEqual(
+    chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123 }),
+    chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 124 }),
+  );
+  assert.notEqual(
+    chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123 }),
+    chatmod.attentionEvidenceKey({ attention: "approval", attention_at: 123 }),
+  );
+});
+
 /* ---------- signature skip vs rebuild ---------- */
 test("chatRenderDecision skip versus rebuild", () => {
   assert.equal(chatRenderDecision("a|b", "a|b"), "skip");
@@ -338,6 +351,15 @@ test("chatActivityPolicy: forcePeek, showPeek, freshSurface, unconfirmed", () =>
   assert.equal(attn.mustShowPane, true);
   assert.equal(attn.forcePeek, true);
   assert.equal(attn.showPeek, true);
+  const inspect = chatActivityPolicy({ attention: "inspect", turnsLength: 2 });
+  assert.equal(inspect.mustShowPane, true, "a fresh inspect opens the terminal once");
+  assert.equal(inspect.forcePeek, true);
+  assert.equal(inspect.showPeek, true);
+  const inspectDismissed = chatActivityPolicy({
+    attention: "inspect", attentionHidden: true, turnsLength: 2,
+  });
+  assert.equal(inspectDismissed.mustShowPane, false);
+  assert.equal(inspectDismissed.showPeek, false);
 
   const hidden = chatActivityPolicy({
     attention: "approval", attentionHidden: true, turnsLength: 2,
@@ -785,18 +807,21 @@ test("keyRowHTML: tmux .permbtns has keys; ACP .permbtns does not", () => {
   assert.doesNotMatch(acpBtns[1], /\bkeys\b/, "ACP .permbtns must not carry keys");
 });
 
-/* fixes-2 P1: neutral inspect is diagnostic only — no remote keypad. */
-test("keyRowHTML: inspect has no remote keys or permbtns", () => {
+/* Neutral inspect gets one local acknowledgement, never a remote keypad. */
+test("keyRowHTML: inspect has a local Esc acknowledgement but no remote keys", () => {
   const html = keyRowHTML({ attention: "inspect" });
   assert.ok(html, "inspect still renders a chat row");
   assert.match(html, /inspect if needed|No visible progress/i,
     "neutral diagnostic copy points at terminal inspection");
   assert.doesNotMatch(html, /data-key/, "inspect must not emit data-key buttons");
-  assert.doesNotMatch(html, /permbtns/, "inspect must not emit .permbtns");
+  assert.match(html, /data-dismiss-attention="inspect"/,
+    "inspect Esc is a local acknowledgement rather than a terminal key");
+  assert.match(html, /class="permbtns keys"/, "acknowledgement uses the yellow action bar");
+  assert.match(html, /Esc \u00b7 all good/);
   assert.doesNotMatch(html, /data-key="[1-4yn]"|data-key="Enter"|data-key="Escape"|data-key="Up"|data-key="Down"/);
-  // Digits / y/n / Enter / Escape as button labels would also invite a decision.
+  // Digits / y/n / Enter as button labels would invite a terminal decision.
   assert.doesNotMatch(html, /<button[^>]*>\s*[1-4yn]\s*<\/button>/i);
-  assert.doesNotMatch(html, /<button[^>]*>\s*(Enter|Esc|Escape|↑|↓|⏎)\s*<\/button>/i);
+  assert.doesNotMatch(html, /<button[^>]*>\s*(Enter|Escape|↑|↓|⏎)\s*<\/button>/i);
 
   // Verified terminal decision rows keep their controls.
   const approval = keyRowHTML({ attention: "approval" });
@@ -1219,6 +1244,7 @@ function el(tag, attrs = {}){
       if (sel.includes(".permmore") && this.classList.contains("permmore")) return this;
       if (sel.includes(".permask") && this.classList.contains("permask")) return this;
       if (sel.includes("[data-bact]") && this.dataset?.bact) return this;
+      if (sel.includes("[data-dismiss-attention]") && this.dataset?.dismissAttention) return this;
       if (sel.includes("[data-key]") && this.dataset?.key) return this;
       if (sel.includes(".turn") && this.classList.contains("turn")) return this;
       if (sel.includes(".attthumb") && this.classList.contains("attthumb")) return this;
@@ -1781,6 +1807,53 @@ test("attention suppression collapses keyrow and hides attention chrome", async 
   // suppressed → keyrow empty and pane not forced solely by attention
   assert.equal(roots.keyrow.innerHTML, "");
   feature.destroy();
+});
+
+test("inspect Esc is local and stays dismissed until fresh attention evidence", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "claude", model: "s", live: "quiet",
+    attention: "inspect", attention_at: 100, lane_id: "", description: "",
+  }];
+  const payload = {
+    turns: [{ role: "user", text: "q" }],
+    live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    attention: "inspect",
+  };
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: payload,
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /data-dismiss-attention="inspect"/);
+
+  const beforeKeys = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  const dismiss = el("button", { dataset: { dismissAttention: "inspect" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: dismiss });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ctx.apiCalls.filter(c => c.path.includes("/key")).length, beforeKeys,
+    "the acknowledgement must never send Escape to Claude");
+  assert.equal(ctx.roots.keyrow.innerHTML, "");
+
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.equal(ctx.roots.keyrow.innerHTML, "",
+    "the same evidence remains dismissed without a short timer");
+
+  nodes[0].attention_at = 101;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /data-dismiss-attention="inspect"/,
+    "fresh evidence makes inspection visible again");
+
+  nodes[0].attention = "approval";
+  payload.attention = "approval";
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key="Escape"/,
+    "hard attention is never hidden by the neutral acknowledgement");
+  ctx.feature.destroy();
 });
 
 /* Screen-reader AX: the browser stays semantic and single-shot. Server-side

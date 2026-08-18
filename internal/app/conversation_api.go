@@ -433,6 +433,9 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 		delete(a.sendState, n.ID)
 	}
 	a.mu.Unlock()
+	// Stop is the human taking control back. Claude's enable is sticky across
+	// ordinary completed turns, but never across an explicit interrupt.
+	a.disarmAutoApprove(n.ID)
 	writeJSON(w, map[string]string{"ok": "interrupted"})
 }
 

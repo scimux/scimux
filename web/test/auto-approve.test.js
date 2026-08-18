@@ -7,9 +7,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   AUTO_APPROVE_HELP,
+  AUTO_APPROVE_CLAUDE_HELP,
   AUTO_APPROVE_UNSUPPORTED_HELP,
   AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP,
   AUTO_APPROVE_LABEL_FULL,
+  AUTO_APPROVE_CLAUDE_LABEL_FULL,
   AUTO_APPROVE_LABEL_NARROW,
   autoApproveAriaName,
   autoApproveChromeModel,
@@ -90,7 +92,7 @@ test("P4 chrome model: off, primed, armed-zero, armed-count, Claude, error", () 
   const armed15 = autoApproveChromeModel({ supported: true, enabled: true, phase: "armed", count: 15 });
   assert.equal(armed15.showBadge, true);
   assert.equal(armed15.badgeText, "15");
-  assert.equal(armed15.ariaLabel, "Auto-approve eligible tool requests; 15 approved.");
+  assert.equal(armed15.ariaLabel, "Auto-approve eligible tool requests this turn; 15 approved.");
   assert.doesNotMatch(armed15.labelFull, /\(15\)/);
   assert.doesNotMatch(armed15.labelNarrow, /15/);
 
@@ -114,6 +116,8 @@ test("P4 chrome model: off, primed, armed-zero, armed-count, Claude, error", () 
   assert.equal(claudeArmed.disabled, false);
   assert.equal(claudeArmed.showBadge, true);
   assert.equal(claudeArmed.badgeText, "3");
+  assert.equal(claudeArmed.labelFull, AUTO_APPROVE_CLAUDE_LABEL_FULL);
+  assert.equal(claudeArmed.title, AUTO_APPROVE_CLAUDE_HELP);
 
   const err = autoApproveChromeModel({
     supported: true, enabled: true, phase: "armed", count: 1,
@@ -133,7 +137,7 @@ test("P4 chrome HTML: warning only when on; badge only when count > 0; no parent
   assert.match(offHTML, /OFF/);
   assert.doesNotMatch(offHTML, /WARN/);
   assert.doesNotMatch(offHTML, /aa-badge/);
-  assert.match(offHTML, /Auto-approve tool calls/);
+  assert.match(offHTML, /Auto-approve this turn/);
   assert.match(offHTML, /aa-label-narrow[^>]*>Auto-approve</);
 
   const onHTML = autoApproveButtonInnerHTML(
@@ -144,27 +148,23 @@ test("P4 chrome HTML: warning only when on; badge only when count > 0; no parent
   assert.match(onHTML, /WARN/);
   assert.match(onHTML, /class="aa-badge"[^>]*>15</);
   assert.doesNotMatch(onHTML, /\(15\)/);
-  assert.match(onHTML, /Auto-approve tool calls/);
+  assert.match(onHTML, /Auto-approve this turn/);
 
   const help = AUTO_APPROVE_HELP;
   assert.match(help, /sole one-time approval/);
-  assert.match(help, /Stays on until/);
+  assert.match(help, /Resets when the turn finishes/);
 });
 
-/* Sticky-lease rules (2026-08-17). The toggle is a switch, so it must express a
-   persistent state and change only when a person changes it — a switch that
-   flips itself off at every turn boundary reads as a bug, and the old
-   "this turn" label made the self-revert the control's advertised behaviour.
-   The scope now lives in the help text, which is where a limited setting
-   explains itself. */
-test("sticky lease: the toggle is not scoped to one turn", () => {
-  assert.doesNotMatch(AUTO_APPROVE_LABEL_FULL, /this turn/i);
-  assert.doesNotMatch(autoApproveAriaName({ enabled: true, count: 1, supported: true }), /this turn/i);
-  // The help names each way it ends, so nothing about the switch is a surprise.
+test("auto-approve scope is one turn except for Claude", () => {
+  assert.match(AUTO_APPROVE_LABEL_FULL, /this turn/i);
+  assert.match(autoApproveAriaName({ enabled: true, count: 1, supported: true }), /this turn/i);
+  assert.doesNotMatch(AUTO_APPROVE_CLAUDE_LABEL_FULL, /this turn/i);
+  assert.doesNotMatch(autoApproveAriaName({ enabled: true, count: 1, supported: true, agent: "claude" }), /this turn/i);
   assert.match(AUTO_APPROVE_HELP, /stop/i);
   assert.match(AUTO_APPROVE_HELP, /\/clear/);
   assert.match(AUTO_APPROVE_HELP, /\/exit/);
-  assert.doesNotMatch(AUTO_APPROVE_HELP, /Resets when the turn finishes/);
+  assert.match(AUTO_APPROVE_HELP, /Resets when the turn finishes/);
+  assert.match(AUTO_APPROVE_CLAUDE_HELP, /stays on across turns/i);
   // index.html's static copy of both strings must not drift from the module's.
   assert.ok(indexHtml.includes(AUTO_APPROVE_HELP), "index.html title drifted from AUTO_APPROVE_HELP");
   assert.ok(
@@ -185,8 +185,10 @@ test("sticky lease: a primed lease paints as enabled", () => {
 
 test("P4 accessibility pure contracts: aria name, 44px CSS target, non-color state", () => {
   assert.equal(autoApproveAriaName({ enabled: false, count: 0, supported: true }),
-    "Auto-approve eligible tool requests");
+    "Auto-approve eligible tool requests this turn");
   assert.equal(autoApproveAriaName({ enabled: true, count: 15, supported: true }),
+    "Auto-approve eligible tool requests this turn; 15 approved.");
+  assert.equal(autoApproveAriaName({ enabled: true, count: 15, supported: true, agent: "claude" }),
     "Auto-approve eligible tool requests; 15 approved.");
   assert.equal(autoApproveAriaName({ supported: false }), AUTO_APPROVE_UNSUPPORTED_HELP);
 
@@ -737,7 +739,7 @@ test("P4 factory paints off/primed/armed/count and Claude disabled", async () =>
     assert.match(btn.innerHTML, /OFF/);
     assert.doesNotMatch(btn.innerHTML, /WARN/);
     assert.doesNotMatch(btn.innerHTML, /aa-badge/);
-    assert.match(btn.innerHTML, /Auto-approve tool calls/);
+    assert.match(btn.innerHTML, /Auto-approve this turn/);
     feature.destroy();
   }
   {
@@ -1114,13 +1116,14 @@ test("P4 help title uses semantic sole-allow wording", () => {
 });
 
 test("P4 label constants and narrow visual contraction", () => {
-  assert.equal(AUTO_APPROVE_LABEL_FULL, "Auto-approve tool calls");
+  assert.equal(AUTO_APPROVE_LABEL_FULL, "Auto-approve this turn");
+  assert.equal(AUTO_APPROVE_CLAUDE_LABEL_FULL, "Auto-approve tool calls");
   assert.equal(AUTO_APPROVE_LABEL_NARROW, "Auto-approve");
   const html = autoApproveButtonInnerHTML(
     autoApproveChromeModel({ supported: true, enabled: true, phase: "armed", count: 0 }),
     { ICON_TOGGLE_ON: "ON", ICON_WARN: "W" },
   );
-  assert.match(html, /aa-label-full[^>]*>Auto-approve tool calls</);
+  assert.match(html, /aa-label-full[^>]*>Auto-approve this turn</);
   assert.match(html, /aa-label-narrow[^>]*>Auto-approve</);
 });
 

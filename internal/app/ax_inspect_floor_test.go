@@ -53,6 +53,7 @@ func TestQuietAttentionFallbackAXOwingFloor(t *testing.T) {
 	// Anchor present, dialog unrecognized — the probe's "AX free-text prompt".
 	anchorPane := "The agent asks: which branch should I target?\n\nType a reply, or Escape to cancel:"
 	plainPane := "I have the evidence I need. Writing the updated review.\n$"
+	workingPane := "Running tool…\n esc to interrupt\n$"
 
 	tl := owingTailer(t)
 
@@ -70,6 +71,8 @@ func TestQuietAttentionFallbackAXOwingFloor(t *testing.T) {
 			"AX is one rung slower — 45s is not yet enough"},
 		{"AX past AX stall", plainPane, owedStallAX + time.Second, true, "inspect",
 			"the floor: AX eventually says no visible progress"},
+		{"AX working footer suppresses floor", workingPane, owedStallAX + time.Second, true, "",
+			"the ordinary working footer is a suppression hint, never a dialog"},
 		{"AX with anchor past owed stall", anchorPane, owedStallAfter + time.Second, true, "inspect",
 			"anchor sharpens AX by one rung, to the non-AX timing"},
 		{"AX with anchor before owed stall", anchorPane, owedStallCorroborated + time.Second, true, "",
@@ -108,6 +111,7 @@ func TestAXUnrecognizedDialogDegradesToInspect(t *testing.T) {
 		{"recognized dialog still classifies past the AX stall", permDialog, owedStallAX + time.Second, "approval"},
 		{"unrecognized dialog is not yet inspect", rewordedDialog, 10 * time.Second, ""},
 		{"unrecognized dialog degrades to inspect at the AX stall", rewordedDialog, owedStallAX + time.Second, "inspect"},
+		{"working footer suppresses inspect past the AX stall", "Running tool…\n esc to interrupt", owedStallAX + time.Second, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.what, func(t *testing.T) {
