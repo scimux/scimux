@@ -641,12 +641,9 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		if herr != nil {
 			return 500, fmt.Errorf("prepare claude hook: %w", herr)
 		}
-		// The bundle we just wrote provably carries both hook capabilities, so
-		// record them now instead of waiting for the next startup scan
-		// (refreshClaudePermCaps): the auto-approve toggle and the escalation-
-		// notice discriminator must both work for a node launched this session.
-		a.noteClaudePermCapability(hookID)
-		a.noteClaudeAskedCapability(hookID)
+		// Writing the bundle proves its layout, not that Claude loaded or ran it.
+		// Capability becomes authoritative only after this live process delivers a
+		// valid SessionStart event (processClaudeHookEventAt).
 	}
 	cmd, err := agentCommandSettings(launch, addDirs, settingsPath)
 	if err != nil {

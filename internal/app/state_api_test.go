@@ -340,6 +340,8 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 	a.byID[n.ID] = n
 	a.live[n.ID] = "active"
 	a.attn[n.ID] = "approval"
+	attn := time.Date(2026, 7, 15, 9, 59, 0, 0, time.UTC)
+	a.attnAt[n.ID] = attn
 	chg := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	a.lastChg[n.ID] = chg
 
@@ -378,6 +380,9 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 	}
 	if int64(got["last_activity"].(float64)) != chg.UnixMilli() {
 		t.Errorf("last_activity = %v, want %d", got["last_activity"], chg.UnixMilli())
+	}
+	if int64(got["attention_at"].(float64)) != attn.UnixMilli() {
+		t.Errorf("attention_at = %v, want %d", got["attention_at"], attn.UnixMilli())
 	}
 	// No session log → last_interaction falls to created_at.
 	if int64(got["last_interaction"].(float64)) != unixMSStamp(n.CreatedAt) {

@@ -75,10 +75,9 @@ func (a *app) poll() {
 			if live == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
-			// An armed lease cannot cross a turn or a dead process, but the
-			// *enable* is sticky: a completed turn parks the lease (armed →
-			// primed, marker retracted) and the next prompt re-arms it, while
-			// only process loss turns the toggle off. Do not touch a primed
+			// An armed lease cannot cross a turn or a dead process. Claude parks
+			// its sticky enable; structured agents turn it off at completion.
+			// Do not touch a primed
 			// lease merely because the process is not yet up (enable while idle
 			// is valid before the first prompt lands). Capture the current
 			// LeaseID at decision time; under the gate, act only if that same
@@ -186,6 +185,10 @@ func (a *app) poll() {
 						switch {
 						case err == nil && dialoghint.ClassifyVisible(visible):
 							attn = attentionKind(name)
+						case err == nil && dialoghint.HasInterruptAnchor(visible):
+							// Claude is displaying its ordinary working footer. This
+							// suppresses only the neutral AX inspect floor; it is not
+							// liveness and cannot override the classified-dialog case.
 						case !quietSince.IsZero() && time.Since(quietSince) >= owedStallAX:
 							// Matcher dark on a flat AX pane while the
 							// transcript holds an unresolved call: degrade to
@@ -386,10 +389,9 @@ func (a *app) poll() {
 		}
 		a.attn[n.ID] = attn
 		a.turnDone[n.ID] = turnDone
-		// An armed lease cannot cross a turn, and no lease survives a dead pane
-		// — the same rule the structured branch applies above, read from the
-		// same mechanical pane liveness. A turn boundary parks the lease
-		// (armed → primed) rather than revoking the human's standing enable.
+		// An armed lease cannot cross a turn, and no lease survives a dead pane.
+		// Unlike the structured branch above, Claude's sticky tmux branch waits
+		// for an explicit transcript boundary before parking (armed → primed).
 		// Capture the lease id here so a re-arm that completed after this
 		// tick's observation is not erased by a stale transition.
 		disarmLeaseID, settleLeaseID := "", ""
@@ -398,27 +400,14 @@ func (a *app) poll() {
 				disarmLeaseID = st.LeaseID
 			}
 		} else if prev == "active" && state != "active" {
-			// A quiet pane is not a finished turn while a call is unresolved.
-			// The case this guards is an approval dialog with a second call
-			// queued behind it: the dialog is static, so the pane crosses
-			// paneQuietAfter, and parking there retracts the very marker the
-			// queued call needs — the lease dies at the moment it is wanted,
-			// which is the annoyance the sticky rules exist to end. A long
-			// foreground tool is *not* the motivating case: Claude draws a
-			// ticking elapsed timer, so liveness stays "active" and this
-			// branch never runs (pinned by
-			// running_elapsed_time_stays_active_no_attention).
-			//
-			// Reasoned, not observed: no live probe has reached the queued-call
-			// state (case D tried and instead measured a backgrounded job —
-			// see the sticky test file). Treat it as a guard, not a fix.
-			//
-			// The transcript settles what the pane cannot, reusing the same
-			// unresolved-call count turn_done reads, already polled this tick.
-			// With no readable transcript the plain rule stands: fail closed to
-			// the pane dialog rather than hold a lease on no evidence.
-			toolRunning := quietTl != nil && quietTl.PendingCount() > 0
-			if st := a.autoApprove[n.ID]; st != nil && !toolRunning {
+			// Claude's explicit end_turn settles what pane quietness cannot. A
+			// permission/question dialog is also quiet and may not have flushed a
+			// tool_use record yet, so "no pending call" is not a turn boundary.
+			// With no readable transcript the legacy mechanical rule stands;
+			// otherwise require the structured completion record. The explicit
+			// interrupt record is projected as EndTurn by the tailer too.
+			turnClosed := quietTl == nil || (quietTl.EndTurn() && quietTl.PendingCount() == 0)
+			if st := a.autoApprove[n.ID]; st != nil && turnClosed {
 				settleLeaseID = st.LeaseID
 			}
 		}
@@ -692,6 +681,9 @@ func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince ti
 	}
 	if visible != "" && dialoghint.ClassifyVisible(visible) {
 		return "dialog"
+	}
+	if visible != "" && dialoghint.HasInterruptAnchor(visible) {
+		return ""
 	}
 	if tl != nil && tl.Owing() {
 		// Ladder: corroborated < owed < AX. The base rung is the renderer's —

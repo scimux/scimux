@@ -109,6 +109,10 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   process→transcript ownership proof. `--session-id` seeds the first
   transcript, `--continue` is forbidden, and `--settings` must precede
   `--remote-control` (an optional-value flag that would otherwise swallow it).
+  scimux deliberately supports Claude's default `~/.claude` state root only;
+  it does **not** evaluate or support `CLAUDE_CONFIG_DIR`. Keep transcript-path
+  validation anchored under `~/.claude/projects` unless that scope decision is
+  explicitly revisited.
   Bindings are per-node and generation-numbered (`claude-binding` records,
   replayed *after* ordinary node records so a later title edit cannot wipe
   one); retired paths and session ids become `deadTranscripts` tombstones that
@@ -159,7 +163,13 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   *sharpens the timing of a verdict the mechanical evidence already
   reached* — it cannot raise attention alone and cannot change the kind,
   because the phrase also occurs in ordinary agent prose (any session
-  discussing dialoghint prints it). `handlePeek` runs the same quiet-branch
+  discussing dialoghint prints it). The ordinary `esc to interrupt` working
+  footer is the inverse, suppression-only hint: it may suppress neutral
+  `inspect`, but it never feeds liveness, creates attention, retires a hook
+  notice, or overrides a classified dialog. Claude's explicit interrupted-
+  message record is a completed turn boundary even though Claude writes it
+  with role `user`; it clears Owing/pending and releases the next-prompt gate.
+  `handlePeek` runs the same quiet-branch
   predicate (matcher + owing stall) one-shot when a human opens the terminal
   view, so a late-flush dialog is visible without needing an unresolved call
   in the transcript. `handlePeek` itself is *not* quiet-gated (that is the
@@ -201,20 +211,25 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   written at the helper's last instant would be audited as an approval nobody
   read. A decline that failed *only* on that clock is reported (session-log
   error plus the chat header's concise error); a policy decline stays silent, or
-  every plan-mode call would cry wolf. Support is proven from disk
+  every plan-mode call would cry wolf. Bundle layout is proven from disk
   (`capabilities.json`, which also records the `exec` path settings.json baked),
-  so an adopted pane — or one whose scimux binary has been *moved* — degrades to
-  a disabled toggle rather than a lease that can never arm.
-- **The auto-approve toggle is a switch, so it holds its state.** Enabling it
-  expresses a *standing* intent that survives turn after turn; only the human's
-  own acts end it — **stop/interrupt, un-toggling, `/clear`, `/exit`** — plus
-  the hard resets nobody chooses (process/session loss, node delete, and a
-  process restart, since the lease is never persisted). The **armed phase**
-  still cannot cross a turn: at the mechanical turn boundary the poller *parks*
+  but a fresh launch becomes capable only after that Claude process successfully
+  delivers its SessionStart hook. An adopted pane — or one whose scimux binary
+  has been *moved* — degrades to a disabled toggle rather than a lease that can
+  never arm.
+- **Auto-approve scope is agent-specific.** Claude's toggle is a standing switch
+  that survives turn after turn; only the human's own acts end it —
+  **stop/interrupt, un-toggling, `/clear`, `/exit`** — plus the hard resets
+  nobody chooses (process/session loss, node delete, and process restart, since
+  the lease is never persisted). Codex, grok, opencode, and pi keep the original
+  **current-turn** behavior: their explicit turn-completion edge disarms the
+  toggle, as do stop/interrupt and `/clear`. For Claude, the **armed phase**
+  still cannot cross a turn: at Claude's explicit transcript boundary the poller *parks*
   the lease (`settleAutoApproveAfterTurn`) — retracts Claude's marker, rotates
   the `LeaseID`, releases the `TurnPromptID` fence, zeroes count and cutoff —
   and the next prompt re-arms it from the same enable. This replaces an earlier
-  rule where the boundary disarmed outright; do not restore it. Two reasons, one
+  rule where Claude's boundary disarmed outright; do not restore it for Claude
+  or extend Claude's sticky exception to structured agents. Two reasons, one
   practical and one from the HIG: mechanically, "turn over" is read from pane
   liveness, so *any* static stretch past `paneQuietAfter` (8s) ended the lease —
   and a static pane is exactly what a waiting approval dialog looks like, so the
@@ -222,21 +237,24 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   filled with `inspect` attention; and as interface, a switch expresses
   persistent state and must change only when a person changes it, so a control
   that flips itself off reads as a defect. The scope belongs in the help text
-  (`AUTO_APPROVE_HELP` names every way it ends), never in a self-reverting
-  control — and the label is therefore "Auto-approve tool calls", not "…this
-  turn". Stickiness widens authority to the *next* prompt by design, so every
-  per-request guard stays: sole one-time option, never `allow_always`, the
+  (`AUTO_APPROVE_CLAUDE_HELP` names every way it ends); Claude's label is
+  "Auto-approve tool calls", while structured agents say "Auto-approve this
+  turn". Claude stickiness widens authority to the *next* prompt by design, so
+  every per-request guard stays: sole one-time option, never `allow_always`, the
   enable cutoff, and no automatic retry of a request already attempted
-  (`Attempted` is deliberately carried across the boundary). **The boundary
-  itself is pane quietness *plus* an empty unresolved-call set** — a quiet pane
-  is not a finished turn while a call is unresolved. The case this guards is an
+  (`Attempted` is deliberately carried across the boundary). **Claude's
+  boundary is its explicit transcript `end_turn` (or explicit interrupt
+  record), not pane quietness.** A quiet pane is not a finished turn even when
+  the unresolved-call set is empty: Claude may not flush the call until after a
+  permission/question is answered. The case this guards is an
   approval dialog with a second call queued behind it: the dialog is static, so
   the pane crosses `paneQuietAfter`, and parking there retracts the very marker
   the queued call needs. The transcript settles what the pane cannot, reusing
-  the same count `turn_done` reads and already polled that tick; with no
-  readable transcript the plain rule stands (fail closed to the pane dialog
-  rather than hold a lease on no evidence). Scope it honestly before extending
-  it: a long *foreground* tool is **not** the motivating case, because Claude's
+  the same explicit boundary `reply_ready` reads; with no readable transcript
+  the plain mechanical rule stands. The next accepted prompt is also a final
+  boundary belt: it rotates and re-arms a surviving sticky lease. Scope it
+  honestly before extending it: a long *foreground* tool is **not** the
+  motivating case, because Claude's
   ticking elapsed timer keeps liveness `active` so the branch never runs
   (`running_elapsed_time_stays_active_no_attention`), and **no live probe has
   reached the queued-call state** — case D tried and measured a backgrounded job
@@ -286,6 +304,15 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   and `esc to interrupt`. The watermark still advances on every tick, including
   the ticks the pending set blocks: a frozen mark could not report the growth
   the *next* resolution writes.
+- **Neutral inspect is acknowledgeable, not actionable.** A fresh `inspect`
+  may unfold the terminal once, but its yellow Esc choice is a local “all good”
+  acknowledgement: it must never send Escape to the agent (that would interrupt
+  an ordinary working footer). The acknowledgement hides the terminal and
+  action row for that exact evidence epoch. It remains dismissed across polls
+  and animation frames, and becomes visible again only when fresh evidence
+  changes `attention_at`, the attention kind changes, or attention clears and
+  is later raised again. Ordinary approval/question/dialog buttons still send
+  their whitelisted remote keys and keep only the short stale-poll suppression.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

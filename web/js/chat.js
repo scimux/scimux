@@ -131,6 +131,12 @@ export function suppressAttentionUntilTime(now = Date.now(), ms = ATTENTION_SUPP
   return now + ms;
 }
 
+/* Stable identity of one attention claim. attention_at changes only when the
+   server sees fresh evidence, not on each poll or spinner frame. */
+export function attentionEvidenceKey(node = {}){
+  return `${node.attention || ""}:${Number(node.attention_at) || 0}`;
+}
+
 export function normalizeEchoText(s){
   return (s || "").replace(/\s+/g, " ").trim();
 }
@@ -172,7 +178,8 @@ export function chatActivityPolicy({
   // Server-reported fresh (zero-turn post-seam segment) means a deliberate
   // /clear: show "fresh chat — send a prompt" instead of treating empty+
   // fallback as a broken transcript that forces a terminal peek (P2c).
-  // Attention and unconfirmed delivery still force the pane.
+  // Attention and unconfirmed delivery force the pane until the user locally
+  // acknowledges this exact evidence epoch.
   const mustShowPane = !attentionHidden && (
     !!attention || unconfirmed || (!!fallback && !fresh)
   );
@@ -490,10 +497,12 @@ export function keyRowHTML({
   expanded = false, escape = esc,
 } = {}){
   if (!attention || attentionHidden) return "";
-  /* inspect is a neutral diagnostic: offer no remote keypad. Terminal/log
-     inspection stays on the existing peek affordance (fixes-2 P1). */
+  /* Inspect is a neutral diagnostic. Esc is a local acknowledgement, never a
+     remote terminal key: sending Escape to an ordinary working footer would
+     interrupt the agent we just inspected. */
   if (attention === "inspect"){
-    return `<span class="hint">${escape(HINTS.inspect)}</span>`;
+    return `<span class="hint">${escape(HINTS.inspect)}</span>` +
+      `<div class="permbtns keys"><button data-dismiss-attention="inspect" class="permbtn">Esc · all good</button></div>`;
   }
   if (source === "acp"){
     const opts = permOptions || [];
@@ -569,7 +578,9 @@ export function echoBubbleHTML(text, tilesHTML = "", { markdown = md } = {}){
 /* ---------- auto-approve chrome + decision audit (fixes-2 P4) ---------- */
 
 export const AUTO_APPROVE_HELP =
-  "Automatically selects the sole one-time approval option. Stays on until you stop the turn, switch it off, or /clear or /exit the chat.";
+  "Automatically selects the sole one-time approval option for the current turn. Resets when the turn finishes, when you stop it, or on /clear or /exit.";
+export const AUTO_APPROVE_CLAUDE_HELP =
+  "Automatically selects the sole one-time approval option. For Claude, this stays on across turns until you stop a turn, switch it off, or /clear or /exit the chat.";
 export const AUTO_APPROVE_UNSUPPORTED_HELP =
   "Auto-approval isn't available for this chat.";
 /* Claude reaches auto-approve through a PermissionRequest hook that only a
@@ -577,8 +588,20 @@ export const AUTO_APPROVE_UNSUPPORTED_HELP =
    feature) can never arm. Say what would change that rather than refusing. */
 export const AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP =
   "Auto-approval needs a Claude chat scimux launched itself \u2014 relaunch or fork this chat to use it.";
-export const AUTO_APPROVE_LABEL_FULL = "Auto-approve tool calls";
+export const AUTO_APPROVE_LABEL_FULL = "Auto-approve this turn";
+export const AUTO_APPROVE_CLAUDE_LABEL_FULL = "Auto-approve tool calls";
 export const AUTO_APPROVE_LABEL_NARROW = "Auto-approve";
+
+export function autoApproveCopy(agent){
+  const claude = String(agent || "").toLowerCase() === "claude";
+  return {
+    labelFull: claude ? AUTO_APPROVE_CLAUDE_LABEL_FULL : AUTO_APPROVE_LABEL_FULL,
+    help: claude ? AUTO_APPROVE_CLAUDE_HELP : AUTO_APPROVE_HELP,
+    ariaBase: claude
+      ? "Auto-approve eligible tool requests"
+      : "Auto-approve eligible tool requests this turn",
+  };
+}
 
 /* Which refusal to show. Only Claude has an actionable one. */
 export function unsupportedHelp(agent){
@@ -601,7 +624,7 @@ export function autoApproveViewNorm(view){
 /* Accessible name for the toggle. Count is spoken only when enabled and > 0. */
 export function autoApproveAriaName({ enabled = false, count = 0, supported = true, agent = "" } = {}){
   if (!supported) return unsupportedHelp(agent);
-  const base = "Auto-approve eligible tool requests";
+  const base = autoApproveCopy(agent).ariaBase;
   if (enabled && (Number(count) || 0) > 0){
     return `${base}; ${Number(count)} approved.`;
   }
@@ -619,6 +642,7 @@ export function autoApproveAriaName({ enabled = false, count = 0, supported = tr
 export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
   const v = autoApproveViewNorm(view);
   const agentL = String(agent || "").toLowerCase();
+  const copy = autoApproveCopy(agentL);
   const hidden = node ? !canReceiveSend(node) : false;
   // Support is the server's verdict alone (agent, transport, and — for Claude —
   // a permission-capable hook bundle). The UI never second-guesses it by name.
@@ -635,7 +659,7 @@ export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
       showWarning: false,
       showBadge: false,
       badgeText: "",
-      labelFull: AUTO_APPROVE_LABEL_FULL,
+      labelFull: copy.labelFull,
       labelNarrow: AUTO_APPROVE_LABEL_NARROW,
       title: unsupportedHelp(agentL),
       ariaLabel: unsupportedHelp(agentL),
@@ -659,9 +683,9 @@ export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
     showWarning: enabled,
     showBadge: enabled && count > 0,
     badgeText: enabled && count > 0 ? String(count) : "",
-    labelFull: AUTO_APPROVE_LABEL_FULL,
+    labelFull: copy.labelFull,
     labelNarrow: AUTO_APPROVE_LABEL_NARROW,
-    title: AUTO_APPROVE_HELP,
+    title: copy.help,
     ariaLabel: autoApproveAriaName({ enabled, count, supported: true, agent: agentL }),
     toggleIcon: enabled ? "on" : "off",
     classNames: classes,
@@ -847,6 +871,7 @@ export function createChatFeature(deps){
   let termFull = false;
   let sentEcho = null;
   let suppressAttentionUntil = {};
+  let dismissedAttention = {};
   let chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
   let chatScrollBottom = false;
   let lastTurns = [];
@@ -1064,10 +1089,13 @@ export function createChatFeature(deps){
     }).join("");
   }
 
-  function attentionSuppressed(id){
+  function attentionSuppressed(id, node){
     if (!id) return false;
     if (attentionIsSuppressed(id, suppressAttentionUntil)) return true;
     delete suppressAttentionUntil[id];
+    if (node && node.attention === "inspect" &&
+        dismissedAttention[id] === attentionEvidenceKey(node)) return true;
+    delete dismissedAttention[id];
     return false;
   }
 
@@ -1472,8 +1500,11 @@ export function createChatFeature(deps){
     }
     const echo = sentEcho && sentEcho.node === n.id ? sentEcho : null;
     const assets = Object.assign({}, chatHist.assets || {}, data.assets || {});
-    if (!n.attention) delete suppressAttentionUntil[n.id];
-    const attentionHidden = !!n.attention && attentionSuppressed(n.id);
+    if (!n.attention){
+      delete suppressAttentionUntil[n.id];
+      delete dismissedAttention[n.id];
+    }
+    const attentionHidden = !!n.attention && attentionSuppressed(n.id, n);
     const policy = chatActivityPolicy({
       attention: n.attention,
       attentionHidden,
@@ -1799,6 +1830,19 @@ export function createChatFeature(deps){
       if (!sel) return;
       permExpanded = { node: sel, open: true };
       chatSig = "";
+      refreshChat();
+      return;
+    }
+    const dismiss = e.target.closest && e.target.closest("[data-dismiss-attention]");
+    if (dismiss){
+      const n = nodeById(sel);
+      if (!sel || !n || n.attention !== "inspect") return;
+      dismissedAttention[sel] = attentionEvidenceKey(n);
+      termOpen = false;
+      chatSig = "";
+      peekSig = "";
+      if (keyrow) keyrow.innerHTML = "";
+      if (peekHost) peekHost.innerHTML = "";
       refreshChat();
       return;
     }

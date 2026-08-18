@@ -1519,6 +1519,9 @@ Enter selection [1-3], or Esc to cancel:`
 		if dialoghint.HasCancelAnchor(interruptPane) {
 			t.Error("esc to interrupt must not satisfy HasCancelAnchor")
 		}
+		if !dialoghint.HasInterruptAnchor(interruptPane) {
+			t.Error("esc to interrupt must satisfy the suppression-only working anchor")
+		}
 	})
 
 	// (E) Completed tool with resolved transcript and stable pane → quiet,

@@ -560,6 +560,16 @@ func TestClaudeStartupHookBindsReportedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")
+	hookID, _, err := a.prepareClaudeHookBundle(n.ID)
+	if err != nil {
+		t.Fatalf("prepare bundle: %v", err)
+	}
+	a.mu.Lock()
+	a.claudeHooks[n.ID] = hookID
+	if a.claudePermCap[hookID] || a.claudeAskedCap[hookID] {
+		t.Fatal("writing a hook bundle must not claim that Claude loaded it")
+	}
+	a.mu.Unlock()
 	ev := claudeSessionStartEvent{
 		HookEventName: "SessionStart", Source: "startup",
 		SessionID: hookSIDOwn, TranscriptPath: own, Cwd: "/w/proj",
@@ -569,6 +579,12 @@ func TestClaudeStartupHookBindsReportedPath(t *testing.T) {
 	}
 	if n.Transcript != own || n.SessionID != hookSIDOwn {
 		t.Fatalf("bound %q / %q, want %q / %q", n.Transcript, n.SessionID, own, hookSIDOwn)
+	}
+	a.mu.Lock()
+	permCap, askedCap := a.claudePermCap[hookID], a.claudeAskedCap[hookID]
+	a.mu.Unlock()
+	if !permCap || !askedCap {
+		t.Fatalf("valid live SessionStart did not activate hook capabilities: permission=%v asked=%v", permCap, askedCap)
 	}
 	if n.Transcript == foreign {
 		t.Fatal("newest foreign JSONL must not win")

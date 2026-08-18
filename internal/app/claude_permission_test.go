@@ -370,9 +370,9 @@ func TestClaudeHookSettingsRegistersPermissionRequestOnly(t *testing.T) {
 }
 
 func TestClaudeHookBundleCarriesPermissionCapability(t *testing.T) {
-	// AT-CP-09: support is proven by the bundle on disk, not by process
-	// memory — a pane launched before this feature stays unsupported after a
-	// scimux restart until it is relaunched.
+	// AT-CP-09: the bundle advertises its layout on disk. A fresh app does not
+	// activate that capability until SessionStart proves Claude loaded it (pinned
+	// at the binding seam); restart replay may then recover the proven layout.
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")

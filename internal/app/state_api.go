@@ -82,8 +82,9 @@ func sysload() sysInfo {
 
 type nodeView struct {
 	*Node
-	Live      string `json:"live"`
-	Attention string `json:"attention,omitempty"` // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
+	Live        string `json:"live"`
+	Attention   string `json:"attention,omitempty"`    // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
+	AttentionAt int64  `json:"attention_at,omitempty"` // unix ms of the fresh evidence that raised the current attention
 	// TurnDone: the agent has finished its turn and is waiting for the human
 	// (quiet pane, newest transcript record is assistant, no pending tool
 	// call, no attention). omitempty so absent means UNKNOWN — ACP nodes
@@ -177,6 +178,10 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		if t, ok := a.lastChg[n.ID]; ok {
 			lastMS = t.UnixMilli()
 		}
+		var attentionMS int64
+		if t, ok := a.attnAt[n.ID]; ok {
+			attentionMS = t.UnixMilli()
+		}
 		// Copy the node while holding the lock: marshaling a live *Node after
 		// unlock races the poller's Transcript writes (a Go data race).
 		nc := *n
@@ -184,7 +189,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// manager's session log rather than a linked transcript file, so they
 		// always have chat to show.
 		hasTranscript := n.Transcript != "" || a.proc(n) != nil
-		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID],
+		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID], AttentionAt: attentionMS,
 			TurnDone: a.turnDone[n.ID], HasTranscript: hasTranscript, LastActivity: lastMS})
 	}
 	// Sessions on our socket that no node accounts for: candidates for

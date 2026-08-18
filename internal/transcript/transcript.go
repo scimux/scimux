@@ -274,10 +274,11 @@ type Tailer struct {
 	// Zero means "cannot be dated" (nothing parsed yet, undated records, or a
 	// rotation reset) — never "old". Map freshness input only, never liveness.
 	lastTurnAt time.Time
-	// endTurn is Claude's explicit stop_reason:"end_turn" boundary. Unlike
-	// Delivered, it is false for an assistant tool_use or a partial assistant
-	// record. The chat composer uses it to become ready as soon as Claude has
-	// committed the completed reply, without waiting for the pane quiet timer.
+	// endTurn is Claude's explicit stop_reason:"end_turn" boundary, or its
+	// explicit interrupted-message record. Unlike Delivered, it is false for an
+	// assistant tool_use or a partial assistant record. The chat composer uses it
+	// to become ready as soon as Claude has committed the completed/aborted turn,
+	// without waiting for the pane quiet timer.
 	// Structured transcript data only; never feeds mechanical liveness.
 	endTurn bool
 }
@@ -617,11 +618,12 @@ func (t *Tailer) NewestTurnTime() (time.Time, bool) {
 // stamping share one parse so join keys stay identical.
 func (t *Tailer) notePending(line []byte) {
 	var generic struct {
-		Type      string          `json:"type"`
-		Timestamp string          `json:"timestamp"`
-		Message   json.RawMessage `json:"message"`
-		Payload   json.RawMessage `json:"payload"`
-		IsMeta    bool            `json:"isMeta"`
+		Type                 string          `json:"type"`
+		Timestamp            string          `json:"timestamp"`
+		Message              json.RawMessage `json:"message"`
+		Payload              json.RawMessage `json:"payload"`
+		IsMeta               bool            `json:"isMeta"`
+		InterruptedMessageID string          `json:"interruptedMessageId"`
 	}
 	if json.Unmarshal(line, &generic) != nil {
 		return
@@ -644,6 +646,18 @@ func (t *Tailer) notePending(line []byte) {
 			StopReason string          `json:"stop_reason"`
 		}
 		if json.Unmarshal(generic.Message, &msg) != nil {
+			return
+		}
+		// Claude records an interrupted turn as a user-role message even though
+		// it is a terminal boundary: the agent does not owe another response and
+		// the next prompt is valid immediately. Treating it like an ordinary user
+		// prompt leaves Owing true forever, eventually raises the AX inspect floor,
+		// and withdraws reply_ready. The structural interruptedMessageId is the
+		// primary signal; the exact bracketed text keeps older captures working.
+		if generic.Type == "user" && claudeInterruptedTurn(generic.InterruptedMessageID, msg.Content) {
+			t.pending = nil
+			t.owing = false
+			t.endTurn = true
 			return
 		}
 		// Every recognized Claude-facing record replaces the boundary state:
@@ -730,6 +744,34 @@ func (t *Tailer) notePending(line []byte) {
 	}
 }
 
+func claudeInterruptedTurn(interruptedMessageID string, content json.RawMessage) bool {
+	if interruptedMessageID != "" {
+		return true
+	}
+	isInterruptText := func(s string) bool {
+		s = strings.TrimSpace(s)
+		return s == "[Request interrupted by user]" ||
+			s == "[Request interrupted by user for tool use]"
+	}
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		return isInterruptText(text)
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "text" && isInterruptText(b.Text) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Tailer) resolve(id string) {
 	for i, c := range t.pending {
 		if c.id == id {
@@ -804,11 +846,16 @@ func (t *Tailer) Poll() []Turn {
 				t.lastTurnAt = ts
 			}
 			// Visible turns also set owing (Codex message items reach here
-			// without going through the function_call branches above).
-			if turn.Role == "user" || turn.Role == "assistant" {
-				t.lastRole = turn.Role
+			// without going through the function_call branches above). An explicit
+			// Claude completion/interrupt boundary was already interpreted by
+			// notePending and must not be overwritten merely because the visible
+			// interrupt notice itself carries role=user.
+			if !t.endTurn {
+				if turn.Role == "user" || turn.Role == "assistant" {
+					t.lastRole = turn.Role
+				}
+				t.owing = turn.Role == "user"
 			}
-			t.owing = turn.Role == "user"
 		}
 	}
 	return t.Turns

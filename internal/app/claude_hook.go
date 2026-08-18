@@ -401,18 +401,37 @@ func (a *app) processClaudeHookEventAt(nodeID string, ev claudeSessionStartEvent
 	if ev.HookEventName != "SessionStart" || !allowedClaudeHookSource(ev.Source) {
 		return errClaudeHookRejected
 	}
+	var err error
 	switch ev.Source {
 	case "startup":
-		return a.bindClaudeStartup(nodeID, ev, capturedGen)
+		err = a.bindClaudeStartup(nodeID, ev, capturedGen)
 	case "clear":
-		return a.bindClaudeClear(nodeID, ev, capturedGen)
+		err = a.bindClaudeClear(nodeID, ev, capturedGen)
 	case "compact":
-		return a.applyClaudeCompact(nodeID, ev)
+		err = a.applyClaudeCompact(nodeID, ev)
 	case "resume":
-		return a.applyClaudeResume(nodeID)
+		err = a.applyClaudeResume(nodeID)
 	default:
 		return fmt.Errorf("claude hook source %s: %w", ev.Source, errClaudeHookRejected)
 	}
+	if err == nil {
+		a.noteClaudeHookCapabilitiesForNode(nodeID)
+	}
+	return err
+}
+
+// noteClaudeHookCapabilitiesForNode is the live acknowledgement seam. The
+// bundle's disk layout is consulted only after Claude proved that this exact
+// launch loaded it by running SessionStart successfully.
+func (a *app) noteClaudeHookCapabilitiesForNode(nodeID string) {
+	a.mu.Lock()
+	hookID := a.claudeHookIDLocked(nodeID)
+	a.mu.Unlock()
+	if hookID == "" {
+		return
+	}
+	a.noteClaudePermCapability(hookID)
+	a.noteClaudeAskedCapability(hookID)
 }
 
 func (a *app) bindClaudeStartup(nodeID string, ev claudeSessionStartEvent, capturedGen int) error {

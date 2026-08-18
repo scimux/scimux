@@ -5,6 +5,7 @@ package transcript
 // whenever a CLI update changes its format.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -597,6 +598,58 @@ func TestClaudeEndTurnBoundary(t *testing.T) {
 	appendLine(`{"type":"user","message":{"role":"user","content":"next"}}`)
 	if tl.EndTurn() {
 		t.Fatal("a new user turn must withdraw the prior end-turn boundary")
+	}
+}
+
+func TestClaudeInterruptIsCompletedBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "interrupt.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tl := &Tailer{Path: path}
+
+	lines := []string{
+		`{"type":"user","timestamp":"2026-08-18T14:05:01Z","message":{"role":"user","content":"do it"}}`,
+		`{"type":"assistant","timestamp":"2026-08-18T14:05:02Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`,
+		`{"type":"user","timestamp":"2026-08-18T14:28:30Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"interruptedMessageId":"msg_1"}`,
+	}
+	for _, line := range lines {
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	tl.Poll()
+	if tl.Owing() {
+		t.Fatal("an explicit Claude interrupt must not leave the agent owing output")
+	}
+	if tl.PendingCount() != 0 {
+		t.Fatalf("pending calls after interrupt = %d, want 0", tl.PendingCount())
+	}
+	if !tl.EndTurn() {
+		t.Fatal("an explicit Claude interrupt must release the next-prompt gate")
+	}
+}
+
+func TestClaudeInterruptTextFallbackIsExact(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "legacy", content: `"[Request interrupted by user]"`, want: true},
+		{name: "tool use block", content: `[{"type":"text","text":"[Request interrupted by user for tool use]"}]`, want: true},
+		{name: "ordinary prompt mentioning marker", content: `"[Request interrupted by user] is what Claude printed"`, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudeInterruptedTurn("", json.RawMessage(tc.content)); got != tc.want {
+				t.Fatalf("claudeInterruptedTurn(%s) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
 	}
 }
 

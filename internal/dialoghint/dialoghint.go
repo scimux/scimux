@@ -26,6 +26,7 @@ var (
 	// then "N." with N a positive integer. Shape-based (P1a) — not verb-based.
 	numberedOptionLine = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*(\d+)\.\s+\S`)
 	escToCancel        = regexp.MustCompile(`(?i)` + cancelAnchorRE)
+	escToInterrupt     = regexp.MustCompile(`(?i)\besc(?:ape)? to interrupt\b`)
 
 	// letteredOptionLine: "y. Yes, I trust this folder" — a single-letter menu
 	// key, the shape Claude Code uses for confirm/deny dialogs that predate the
@@ -86,6 +87,15 @@ func ClassifyVisible(pane string) bool {
 // prose case is why it may not decide the outcome.
 func HasCancelAnchor(pane string) bool {
 	return escToCancel.MatchString(stripANSI(pane))
+}
+
+// HasInterruptAnchor reports Claude's ordinary working-state footer. It is a
+// suppression hint only: it may prevent the neutral quiet/owing "inspect"
+// fallback, but it must never feed liveness, retire a permission notice, or
+// override a positively classified dialog. Agent prose can contain the phrase;
+// a false match therefore costs only an unnecessary warning, never an answer.
+func HasInterruptAnchor(pane string) bool {
+	return escToInterrupt.MatchString(stripANSI(pane))
 }
 
 // numberedOptionsDialog is the structural fallback for Claude Code approval
