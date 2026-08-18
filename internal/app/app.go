@@ -190,6 +190,9 @@ func (a *app) initMaps() {
 	if a.claudeAskedOff == nil {
 		a.claudeAskedOff = map[string]int64{}
 	}
+	if a.claudeAskedTools == nil {
+		a.claudeAskedTools = map[string]int{}
+	}
 	if a.lastDeliver == nil {
 		a.lastDeliver = map[string]time.Time{}
 	}
@@ -358,6 +361,11 @@ type app struct {
 	// against, per node: growth means the agent reached its own control flow
 	// again, which for a waiting call cannot happen before a human answered.
 	claudeAskedOff map[string]int64
+	// claudeAskedTools is the per-node count of tool stamps already credited
+	// against notices. The tailer accumulates stamps for the life of a
+	// transcript, so without a watermark one approved call would go on
+	// retiring a notice every tick.
+	claudeAskedTools map[string]int
 	// claudeBoundAt is when each node's current transcript link was
 	// established. A link established after the delivery being judged cannot
 	// have missed it (maybeRelinkTranscript).

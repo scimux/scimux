@@ -262,20 +262,30 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   call the waiting helper is the only proof the dialog exists. The quiet-pane
   fallback is deliberately **not** gated (rate-limit menus, trust-folder and
   login prompts fire no hook and reach a quiet pane). Notices are retired by
-  the helper when it auto-approves (an approved call never reaches a dialog),
-  by recognized transcript **growth** on a producing pane, and by a generous
-  TTL as a leak backstop. Pane geometry is deliberately *not* a retirement
-  signal. Growth retires exactly one notice, oldest first, and only under two
-  further clauses, both learned from a live probe: the notice must be **older**
-  than the newest dated turn (an agent that printed text and *then* asked
-  produces the reverse ordering), and the transcript must hold **no unresolved
-  call at all** (`PendingCount() == 0`) — with two calls queued behind one
-  dialog, answering the first writes records newer than the second ask's notice
-  while that second dialog is still on screen. The watermark still advances on
-  every tick, including the ticks the pending set blocks: a frozen mark could
-  not report the growth the *next* resolution writes. The notice carries a
-  digest of `tool_input`, never the input itself: a disarmed session writes one
-  per decision without the human having consented to any audit.
+  the helper when it auto-approves (an approved call never reaches a dialog), by
+  the **specific tool call** each one announced, by recognized transcript
+  **growth** as a fallback, and by a generous TTL as a leak backstop. Pane
+  geometry is deliberately *not* a retirement signal.
+  The per-call rule is the primary one and it is an exact join, not a heuristic:
+  the notice stores a digest of the `tool_input` it escalated (never the input
+  itself — a disarmed session writes one per decision without the human having
+  consented to any audit), Claude writes the matching `tool_use` record only
+  *after* the human answers, so that record proves that dialog closed. It
+  therefore retires **regardless of what else is in flight**, and each record is
+  credited once (a per-node stamp watermark) so one approved call cannot drain
+  notices for dialogs still on screen. Growth remains for what no digest can
+  join — a dismissed dialog, or an ask that never becomes a `tool_use` record
+  (plan choice, question) — and keeps its old guards: exactly one notice, oldest
+  first, only a notice **older** than the newest dated turn (an agent that
+  printed text and *then* asked produces the reverse ordering), and only with
+  **no unresolved call at all** (`PendingCount() == 0`). That last guard is why
+  growth cannot carry the load alone: a working agent nearly always has a call
+  pending, so notices stood until their 4h TTL and held hard attention over an
+  agent that was merely busy — 16 standing notices across a single 23-minute
+  turn, observed 2026-08-18, each unfolding a peek that showed only a spinner
+  and `esc to interrupt`. The watermark still advances on every tick, including
+  the ticks the pending set blocks: a frozen mark could not report the growth
+  the *next* resolution writes.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the
