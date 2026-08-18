@@ -158,7 +158,11 @@ func TestUndatedEvidenceRetiresNothing(t *testing.T) {
 const approvedCallInput = `{"command":"rm -rf build"}`
 
 func approvedCallLine(id, tool string) string {
-	return `{"type":"assistant","timestamp":"2026-08-18T12:00:05Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"` +
+	// Dated just after the notices these tests plant, and well inside the
+	// 4h asked TTL. A calendar-day fixture (2026-08-18T12:00Z) expires
+	// later the same day and the join then refuses a "newer" notice.
+	ts := time.Now().Add(-30 * time.Second).UTC().Format(time.RFC3339Nano)
+	return `{"type":"assistant","timestamp":"` + ts + `","message":{"role":"assistant","content":[{"type":"tool_use","id":"` +
 		id + `","name":"` + tool + `","input":` + approvedCallInput + `}]}}`
 }
 
@@ -176,7 +180,7 @@ func TestPollerRetiresNoticeFromTranscriptCall(t *testing.T) {
 	mkPermDirs(t, bundle)
 	a.refreshClaudePermCaps()
 	askedNoticeAt(t, bundle, "n1", "Bash", digestOf(approvedCallInput),
-		time.Date(2026, 8, 18, 12, 0, 1, 0, time.UTC))
+		time.Now().Add(-time.Minute))
 
 	if attn, _ := a.claudeAskState(n); attn == "" {
 		t.Fatal("setup: the notice should be raising attention before retirement")
@@ -205,7 +209,7 @@ func TestTranscriptCallCreditedOnlyOnce(t *testing.T) {
 		approvedCallLine("tu1", "Bash"))
 	mkPermDirs(t, bundle)
 	a.refreshClaudePermCaps()
-	at := time.Date(2026, 8, 18, 12, 0, 1, 0, time.UTC)
+	at := time.Now().Add(-2 * time.Minute)
 	askedNoticeAt(t, bundle, "n1", "Bash", digestOf(approvedCallInput), at)
 	askedNoticeAt(t, bundle, "n2", "Bash", digestOf(approvedCallInput), at.Add(time.Second))
 
