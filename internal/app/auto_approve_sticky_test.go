@@ -333,18 +333,26 @@ func seedPermClaudeWithTranscript(t *testing.T, a *app, id, sid string, lines ..
 const runningToolCall = `{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`
 
 func TestLongRunningToolCallDoesNotParkTmuxLease(t *testing.T) {
-	// Live probe case D, 2026-08-18. A pane that has gone quiet is not a
-	// finished turn while a tool is still running: `sleep 150` draws nothing,
-	// so the pane crossed paneQuietAfter (8s) at t=25s, the boundary parked the
-	// lease, and when the tool finished 130s later the *next* call in the same
-	// turn found no marker and escalated to a dialog. One audited approval
-	// instead of three, and a human waiting on a turn they had already
-	// authorized. Any tool call quiet for more than 8s did this — a build, a
-	// test run, a fetch — so it was most real work, not an edge case.
+	// A quiet pane is not a finished turn while a call is unresolved. The case
+	// this guards is an approval dialog with a second call queued behind it:
+	// the dialog is static, the pane crosses paneQuietAfter (8s), and parking
+	// there retracts the marker the queued call needs — the lease dies at the
+	// moment it is wanted, which is the annoyance the sticky rules exist to
+	// end. Pane quietness alone cannot tell "turn over" from "call pending";
+	// the transcript can, and already does for turn_done.
 	//
-	// Pane quietness alone cannot tell "turn over" from "tool running"; the
-	// transcript can, and already does for turn_done. An unresolved call means
-	// the turn is still going, so the lease must stay armed.
+	// Scope honestly: a long *foreground* tool is not the motivating case.
+	// Claude draws a ticking elapsed timer, so liveness stays "active" and this
+	// branch never runs — see running_elapsed_time_stays_active_no_attention in
+	// poller_test.go. This guard is reasoning, not a reproduced failure.
+	//
+	// Live probe case D (2026-08-18) was written to observe it and did not:
+	// the probe host blocks foreground `sleep`, so its Claude backgrounded the
+	// long command, the turn genuinely ended, and the pane went quiet with
+	// nothing pending — parking was correct there. The probe's own error
+	// (asserting a state it never reached) is recorded so the next attempt does
+	// not repeat it. Until a probe reaches a queued call behind a dialog, this
+	// test pins the intended rule, not a confirmed cure.
 	f := &fakeTmux{alive: map[string]bool{"t1": true}, list: []string{"t1"}, capture: "idle pane"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaudeWithTranscript(t, a, "t1", hookSIDOwn,

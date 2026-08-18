@@ -382,17 +382,25 @@ func (a *app) poll() {
 				disarmLeaseID = st.LeaseID
 			}
 		} else if prev == "active" && state != "active" {
-			// A quiet pane is not a finished turn while a tool is still
-			// running. A silent command draws nothing, so the pane crosses
-			// paneQuietAfter (8s) mid-turn; parking there retracts the marker,
-			// and the turn's *next* call escalates to a dialog the human had
-			// already authorized. Observed live (probe case D): `sleep 150`
-			// went quiet at 25s, and the following call in the same turn hit a
-			// dialog 130s later. The transcript settles what the pane cannot —
-			// the same unresolved-call count turn_done reads, already polled
-			// this tick. With no readable transcript the plain rule stands:
-			// fail closed to the pane dialog rather than hold a lease on no
-			// evidence.
+			// A quiet pane is not a finished turn while a call is unresolved.
+			// The case this guards is an approval dialog with a second call
+			// queued behind it: the dialog is static, so the pane crosses
+			// paneQuietAfter, and parking there retracts the very marker the
+			// queued call needs — the lease dies at the moment it is wanted,
+			// which is the annoyance the sticky rules exist to end. A long
+			// foreground tool is *not* the motivating case: Claude draws a
+			// ticking elapsed timer, so liveness stays "active" and this
+			// branch never runs (pinned by
+			// running_elapsed_time_stays_active_no_attention).
+			//
+			// Reasoned, not observed: no live probe has reached the queued-call
+			// state (case D tried and instead measured a backgrounded job —
+			// see the sticky test file). Treat it as a guard, not a fix.
+			//
+			// The transcript settles what the pane cannot, reusing the same
+			// unresolved-call count turn_done reads, already polled this tick.
+			// With no readable transcript the plain rule stands: fail closed to
+			// the pane dialog rather than hold a lease on no evidence.
 			toolRunning := quietTl != nil && quietTl.PendingCount() > 0
 			if st := a.autoApprove[n.ID]; st != nil && !toolRunning {
 				settleLeaseID = st.LeaseID

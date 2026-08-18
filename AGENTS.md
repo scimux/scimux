@@ -229,15 +229,18 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   enable cutoff, and no automatic retry of a request already attempted
   (`Attempted` is deliberately carried across the boundary). **The boundary
   itself is pane quietness *plus* an empty unresolved-call set** — a quiet pane
-  is not a finished turn while a tool is still running. A silent command draws
-  nothing, so the pane crosses `paneQuietAfter` mid-turn; parking there retracts
-  the marker and the turn's *next* call escalates to a dialog the human had
-  already authorized (live probe case D: `sleep 150` went quiet at 25s and the
-  following call hit a dialog 130s later — one audited approval instead of
-  three). The transcript settles what the pane cannot, reusing the same count
-  `turn_done` reads and already polled that tick. With no readable transcript
-  the plain rule stands: fail closed to the pane dialog rather than hold a lease
-  on no evidence.
+  is not a finished turn while a call is unresolved. The case this guards is an
+  approval dialog with a second call queued behind it: the dialog is static, so
+  the pane crosses `paneQuietAfter`, and parking there retracts the very marker
+  the queued call needs. The transcript settles what the pane cannot, reusing
+  the same count `turn_done` reads and already polled that tick; with no
+  readable transcript the plain rule stands (fail closed to the pane dialog
+  rather than hold a lease on no evidence). Scope it honestly before extending
+  it: a long *foreground* tool is **not** the motivating case, because Claude's
+  ticking elapsed timer keeps liveness `active` so the branch never runs
+  (`running_elapsed_time_stays_active_no_attention`), and **no live probe has
+  reached the queued-call state** — case D tried and measured a backgrounded job
+  instead. This is a reasoned guard, not a reproduced fix.
 - **An escalation notice is evidence, never an answer.** The same hook writes
   `perm/asked/<nonce>.json` for *every* decision it escalates, armed or not
   (`internal/app/claude_asked.go`), because the hook knows the one thing no
