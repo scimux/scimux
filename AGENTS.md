@@ -181,7 +181,9 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
 - **A Claude approval is answered through the hook, never through the pane.**
   The same per-node bundle that binds the transcript also registers a
   `PermissionRequest` hook (`__claude-permission-hook --dir <bundle>`), so
-  auto-approval has a structured channel instead of a simulated keystroke.
+  auto-approval has a structured channel instead of a simulated keystroke,
+  and a `Stop` / `StopFailure` hook (`__claude-stop-hook --dir <bundle>`)
+  so the current-turn lease ends when Claude finishes responding.
   The hook is registered on **every** owned launch and never *authorizes*
   anything until a lease is armed: with no `perm/lease` marker it prints
   nothing and exits 0, so Claude falls through to its own dialog exactly as if
@@ -217,48 +219,50 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   delivers its SessionStart hook. An adopted pane — or one whose scimux binary
   has been *moved* — degrades to a disabled toggle rather than a lease that can
   never arm.
-- **Auto-approve scope is agent-specific.** Claude's toggle is a standing switch
-  that survives turn after turn; only the human's own acts end it —
-  **stop/interrupt, un-toggling, `/clear`, `/exit`** — plus the hard resets
-  nobody chooses (process/session loss, node delete, and process restart, since
-  the lease is never persisted). Codex, grok, opencode, and pi keep the original
-  **current-turn** behavior: their explicit turn-completion edge disarms the
-  toggle, as do stop/interrupt and `/clear`. For Claude, the **armed phase**
-  still cannot cross a turn: at Claude's explicit transcript boundary the poller *parks*
-  the lease (`settleAutoApproveAfterTurn`) — retracts Claude's marker, rotates
-  the `LeaseID`, releases the `TurnPromptID` fence, zeroes count and cutoff —
-  and the next prompt re-arms it from the same enable. This replaces an earlier
-  rule where Claude's boundary disarmed outright; do not restore it for Claude
-  or extend Claude's sticky exception to structured agents. Two reasons, one
-  practical and one from the HIG: mechanically, "turn over" is read from pane
-  liveness, so *any* static stretch past `paneQuietAfter` (8s) ended the lease —
-  and a static pane is exactly what a waiting approval dialog looks like, so the
-  lease died at the moment it was needed, which is also why the same sessions
-  filled with `inspect` attention; and as interface, a switch expresses
-  persistent state and must change only when a person changes it, so a control
-  that flips itself off reads as a defect. The scope belongs in the help text
-  (`AUTO_APPROVE_CLAUDE_HELP` names every way it ends); Claude's label is
-  "Auto-approve tool calls", while structured agents say "Auto-approve this
-  turn". Claude stickiness widens authority to the *next* prompt by design, so
-  every per-request guard stays: sole one-time option, never `allow_always`, the
-  enable cutoff, and no automatic retry of a request already attempted
-  (`Attempted` is deliberately carried across the boundary). **Claude's
-  boundary is its explicit transcript `end_turn` (or explicit interrupt
-  record), not pane quietness.** A quiet pane is not a finished turn even when
-  the unresolved-call set is empty: Claude may not flush the call until after a
-  permission/question is answered. The case this guards is an
-  approval dialog with a second call queued behind it: the dialog is static, so
-  the pane crosses `paneQuietAfter`, and parking there retracts the very marker
-  the queued call needs. The transcript settles what the pane cannot, reusing
-  the same explicit boundary `reply_ready` reads; with no readable transcript
-  the plain mechanical rule stands. The next accepted prompt is also a final
-  boundary belt: it rotates and re-arms a surviving sticky lease. Scope it
-  honestly before extending it: a long *foreground* tool is **not** the
-  motivating case, because Claude's
+- **Auto-approve scope is one turn for every agent.** The toggle is
+  **current-turn** on Claude, Codex, grok, opencode, and pi: it disarms at
+  turn completion, stop/interrupt, un-toggling, `/clear`, `/exit`, and the
+  hard resets nobody chooses (process/session loss, node delete, and process
+  restart — the lease is never persisted). Every agent shares the same help
+  and label ("Auto-approve this turn"). Enabling during a Claude approval
+  dialog still arms the *current* turn: those dialogs are mechanically
+  quiet, so `live=="active"` is the wrong predicate — owing, an unresolved
+  call, or a standing escalation notice means the turn is still open.
+  Claude's **turn-completion edge** is its official `Stop` hook
+  (`__claude-stop-hook --dir <bundle>`), registered on every owned launch
+  beside SessionStart and PermissionRequest; `StopFailure` uses the same
+  helper. `capabilities.json` carries `"stop"` so a pre-Stop launch is
+  visible on disk (it still auto-approves via the transcript fallback).
+  The helper reads the current arm marker and writes a lease-tagged notice
+  (`processed/stop/`); drain *settles* (`settleAutoApproveAfterTurn`) only
+  if that `LeaseID` is still armed, the notice is inside a 30-minute TTL,
+  and `session_id` matches. A late Stop from turn N cannot revoke turn N+1.
+  Quarantine on session mismatch or TTL leaves the lease **armed** — failure
+  keeps authority; the transcript fallback and next-prompt belt bound that.
+  The poller republishes the arm marker only when remaining life is below
+  half of `claudeLeaseTTL` (30 min), so Stop still sees it on a long turn
+  without an fsync every poll tick. `stop_hook_active` writes nothing —
+  that turn is still running. `SubagentStop` is never registered.
+  An unread auto-approve Error on the lease is dropped at the boundary
+  (same as every other agent); the session-log audit still has the failure.
+  The poller keeps the transcript `end_turn` / explicit interrupt record as
+  a fallback (`settleAutoApproveAfterTurn`) and the next accepted prompt as
+  a final belt; both turn the lease **off**, not primed. **Claude's boundary is still not pane quietness.** A
+  quiet pane is not a finished turn even when the unresolved-call set is
+  empty: Claude may not flush the call until after a permission/question is
+  answered. The case this guards is an approval dialog with a second call
+  queued behind it: the dialog is static, so the pane crosses
+  `paneQuietAfter`, and settling there would retract the very marker the
+  queued call needs. The Stop hook and the transcript settle what the pane
+  cannot, reusing the same explicit boundary `reply_ready` reads; with no
+  readable transcript the plain mechanical rule stands. Scope it honestly:
+  a long *foreground* tool is **not** the motivating case, because Claude's
   ticking elapsed timer keeps liveness `active` so the branch never runs
   (`running_elapsed_time_stays_active_no_attention`), and **no live probe has
   reached the queued-call state** — case D tried and measured a backgrounded job
-  instead. This is a reasoned guard, not a reproduced fix.
+  instead. This is a reasoned guard, not a reproduced fix. Every per-request
+  guard stays: sole one-time option, never `allow_always`, the enable cutoff,
+  and no automatic retry of a request already attempted.
 - **An escalation notice is evidence, never an answer.** The same hook writes
   `perm/asked/<nonce>.json` for *every* decision it escalates, armed or not
   (`internal/app/claude_asked.go`), because the hook knows the one thing no
@@ -305,14 +309,19 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   the ticks the pending set blocks: a frozen mark could not report the growth
   the *next* resolution writes.
 - **Neutral inspect is acknowledgeable, not actionable.** A fresh `inspect`
-  may unfold the terminal once, but its yellow Esc choice is a local “all good”
-  acknowledgement: it must never send Escape to the agent (that would interrupt
-  an ordinary working footer). The acknowledgement hides the terminal and
-  action row for that exact evidence epoch. It remains dismissed across polls
-  and animation frames, and becomes visible again only when fresh evidence
-  changes `attention_at`, the attention kind changes, or attention clears and
-  is later raised again. Ordinary approval/question/dialog buttons still send
-  their whitelisted remote keys and keep only the short stale-poll suppression.
+  may unfold the terminal once. Non-AX inspect shows the default terminal
+  action bar (digits, y/n, arrows, Enter, Escape) plus a distinct **Dismiss**
+  that never sends a key. Escape stays a remote key so a misclassified dialog
+  can still be backed out of; Dismiss is the local “I looked — all good”
+  acknowledgement (title/aria say it does not send Escape). **AX inspect is
+  Dismiss-only:** `tmuxKeySequence` expands `"1"` to `["1","Enter"]`, so a
+  keypad on a spurious inspect would submit a prompt. The acknowledgement
+  hides the terminal and action row for that exact evidence epoch. It remains
+  dismissed across polls and animation frames, and becomes visible again only
+  when fresh evidence changes `attention_at`, the attention kind changes, or
+  attention clears and is later raised again. Ordinary approval/question/dialog
+  buttons still send their whitelisted remote keys and keep only the short
+  stale-poll suppression.
 - **Remote keys are a whitelist.** `SendKey` accepts only the dialog keys
   (digits, y/n, arrows, Tab, Enter, Escape) — it answers prompts, it is not
   a keystroke injector. Every key pressed via the API is recorded in the

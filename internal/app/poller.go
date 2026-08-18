@@ -75,9 +75,8 @@ func (a *app) poll() {
 			if live == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
-			// An armed lease cannot cross a turn or a dead process. Claude parks
-			// its sticky enable; structured agents turn it off at completion.
-			// Do not touch a primed
+			// An armed lease cannot cross a turn or a dead process. Every
+			// agent turns it off at completion. Do not touch a primed
 			// lease merely because the process is not yet up (enable while idle
 			// is valid before the first prompt lands). Capture the current
 			// LeaseID at decision time; under the gate, act only if that same
@@ -192,9 +191,11 @@ func (a *app) poll() {
 						case !quietSince.IsZero() && time.Since(quietSince) >= owedStallAX:
 							// Matcher dark on a flat AX pane while the
 							// transcript holds an unresolved call: degrade to
-							// the neutral, keyless inspect — never to a
-							// classified dialog this has no evidence for, and
-							// never to silence, which is how a real approval
+							// the neutral inspect. AX inspect has no remote
+							// keypad (a stray "1" would become 1+Enter and
+							// submit), so this cannot invite a prompt. Never
+							// a classified dialog this has no evidence for,
+							// and never silence, which is how a real approval
 							// went unnoticed indefinitely.
 							attn = "inspect"
 						}
@@ -390,10 +391,11 @@ func (a *app) poll() {
 		a.attn[n.ID] = attn
 		a.turnDone[n.ID] = turnDone
 		// An armed lease cannot cross a turn, and no lease survives a dead pane.
-		// Unlike the structured branch above, Claude's sticky tmux branch waits
-		// for an explicit transcript boundary before parking (armed → primed).
-		// Capture the lease id here so a re-arm that completed after this
-		// tick's observation is not erased by a stale transition.
+		// Unlike the structured branch above, Claude waits for an explicit
+		// transcript boundary before disarming (Stop hook is the primary
+		// signal; end_turn is the fallback). Capture the lease id here so a
+		// re-arm that completed after this tick's observation is not erased
+		// by a stale transition.
 		disarmLeaseID, settleLeaseID := "", ""
 		if state == "exited" && prev != "exited" {
 			if st := a.autoApprove[n.ID]; st != nil {
@@ -418,6 +420,10 @@ func (a *app) poll() {
 		if settleLeaseID != "" {
 			a.settleAutoApproveAfterTurn(n.ID, settleLeaseID)
 		}
+		// An armed Claude marker expires after claudeLeaseTTL and is never
+		// rewritten on its own; republish so Stop can still read it on a
+		// long turn.
+		a.refreshClaudeLeaseExpiry(n)
 		// V2-P2: durable wait edges from the existing mechanical needs-input
 		// signal (WaitingOn + quiet/confined-anim; no new regex).
 		a.persistAttentionTransition(n, prevAttn, attn)
@@ -634,10 +640,11 @@ const owedStallCorroborated = 10 * time.Second
 // the non-AX owed timing, never all the way to owedStallCorroborated.
 //
 // This is the *floor*, not a classifier: past it an AX node the matcher cannot
-// read says the neutral, keyless "no visible progress", never approval or
-// question. The floor exists because attention for AX otherwise rests entirely
-// on one regex family — see ax_inspect_floor_test.go for the six AX pane shapes
-// that family does not match.
+// read says the neutral "no visible progress", never approval or question.
+// AX inspect is Dismiss-only in the UI (no digit/y-n keypad), so the floor
+// cannot invite a stray "1"+"Enter" prompt. The floor exists because
+// attention for AX otherwise rests entirely on one regex family — see
+// ax_inspect_floor_test.go for the six AX pane shapes that family does not match.
 const owedStallAX = 4 * time.Minute
 
 // turnDoneWindow bounds how long a delivered turn keeps claiming "finished".
@@ -666,13 +673,14 @@ const turnDoneWindow = 30 * time.Minute
 // waiting — but past owedStallAX it is, and the alternative is silence.
 //
 // fixes-2 P1 disabled this path for AX outright. That was one fix too many:
-// the observed harm (a spurious inspect inviting a stray "1") was already
-// removed by making inspect keyless in the UI, while disabling the backstop
-// left AX with a single regex family as its only route to any attention. When
-// that family goes dark on a TUI rewording, an AX node on a real approval
-// raised nothing at all, indefinitely — where AGENTS.md's rule for a dark
-// matcher is degradation to the neutral inspect, never to a classified dialog
-// and never to silence. AX may still raise "dialog" via ClassifyVisible, and
+// the observed harm (a spurious inspect inviting a stray "1") is removed by
+// keeping AX inspect keyless in the UI (Dismiss only; non-AX inspect keeps
+// the full keypad plus Dismiss), while disabling the backstop left AX with
+// a single regex family as its only route to any attention. When that family
+// goes dark on a TUI rewording, an AX node on a real approval raised nothing
+// at all, indefinitely — where AGENTS.md's rule for a dark matcher is
+// degradation to the neutral inspect, never to a classified dialog and never
+// to silence. AX may still raise "dialog" via ClassifyVisible, and
 // missing/stale/unparseable transcript inspect still lives in the caller's
 // separate noEvidence branch.
 func quietAttentionFallback(tl *transcript.Tailer, visible string, quietSince time.Time, axScreenReader bool) string {

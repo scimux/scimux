@@ -494,15 +494,20 @@ export function permMoreDecision(scrollHeight, clientHeight){
 export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
   permToolKind = "", permReason = "", permRequestId = "",
-  expanded = false, escape = esc,
+  expanded = false, axScreenReader = false, escape = esc,
 } = {}){
   if (!attention || attentionHidden) return "";
-  /* Inspect is a neutral diagnostic. Esc is a local acknowledgement, never a
-     remote terminal key: sending Escape to an ordinary working footer would
-     interrupt the agent we just inspected. */
+  /* Inspect is a neutral diagnostic. Non-AX gets the default terminal
+     keypad so a misclassified dialog can be answered, plus a distinct
+     Dismiss that never sends a key. AX inspect is Dismiss-only: a stray
+     "1" would expand to 1+Enter and submit a prompt. */
   if (attention === "inspect"){
-    return `<span class="hint">${escape(HINTS.inspect)}</span>` +
-      `<div class="permbtns keys"><button data-dismiss-attention="inspect" class="permbtn">Esc · all good</button></div>`;
+    const hint = `<span class="hint">${escape(HINTS.inspect)}</span>`;
+    const dismiss = inspectDismissButton();
+    if (axScreenReader){
+      return hint + `<div class="permbtns keys">${dismiss}</div>`;
+    }
+    return hint + `<div class="permbtns keys">${tmuxKeyButtons()}${dismiss}</div>`;
   }
   if (source === "acp"){
     const opts = permOptions || [];
@@ -544,10 +549,18 @@ export function keyRowHTML({
     return hint + reasonEl + mask + more + btns;
   }
   return `<span class="hint">${escape(HINTS[attention] || `The agent waits for your ${attention} \u2014 keys go straight to its terminal:`)}</span>` +
-    `<div class="permbtns keys">` +
-    ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
-      `<button data-key="${k}" class="permbtn">${KEYS[k] || k}</button>`).join("") +
-    `</div>`;
+    `<div class="permbtns keys">${tmuxKeyButtons()}</div>`;
+}
+
+function tmuxKeyButtons(){
+  return ["1","2","3","4","y","n","Up","Down","Enter","Escape"].map(k =>
+    `<button data-key="${k}" class="permbtn">${KEYS[k] || k}</button>`).join("");
+}
+
+function inspectDismissButton(){
+  const title = "Dismiss \u2014 I looked; do not send Escape to the agent";
+  const aria = "Dismiss inspect; does not send Escape to the agent";
+  return `<button type="button" data-dismiss-attention="inspect" class="permbtn" title="${title}" aria-label="${aria}">Dismiss</button>`;
 }
 
 export function peekBlockHTML({
@@ -579,8 +592,7 @@ export function echoBubbleHTML(text, tilesHTML = "", { markdown = md } = {}){
 
 export const AUTO_APPROVE_HELP =
   "Automatically selects the sole one-time approval option for the current turn. Resets when the turn finishes, when you stop it, or on /clear or /exit.";
-export const AUTO_APPROVE_CLAUDE_HELP =
-  "Automatically selects the sole one-time approval option. For Claude, this stays on across turns until you stop a turn, switch it off, or /clear or /exit the chat.";
+export const AUTO_APPROVE_CLAUDE_HELP = AUTO_APPROVE_HELP;
 export const AUTO_APPROVE_UNSUPPORTED_HELP =
   "Auto-approval isn't available for this chat.";
 /* Claude reaches auto-approve through a PermissionRequest hook that only a
@@ -589,17 +601,14 @@ export const AUTO_APPROVE_UNSUPPORTED_HELP =
 export const AUTO_APPROVE_CLAUDE_UNSUPPORTED_HELP =
   "Auto-approval needs a Claude chat scimux launched itself \u2014 relaunch or fork this chat to use it.";
 export const AUTO_APPROVE_LABEL_FULL = "Auto-approve this turn";
-export const AUTO_APPROVE_CLAUDE_LABEL_FULL = "Auto-approve tool calls";
+export const AUTO_APPROVE_CLAUDE_LABEL_FULL = AUTO_APPROVE_LABEL_FULL;
 export const AUTO_APPROVE_LABEL_NARROW = "Auto-approve";
 
-export function autoApproveCopy(agent){
-  const claude = String(agent || "").toLowerCase() === "claude";
+export function autoApproveCopy(){
   return {
-    labelFull: claude ? AUTO_APPROVE_CLAUDE_LABEL_FULL : AUTO_APPROVE_LABEL_FULL,
-    help: claude ? AUTO_APPROVE_CLAUDE_HELP : AUTO_APPROVE_HELP,
-    ariaBase: claude
-      ? "Auto-approve eligible tool requests"
-      : "Auto-approve eligible tool requests this turn",
+    labelFull: AUTO_APPROVE_LABEL_FULL,
+    help: AUTO_APPROVE_HELP,
+    ariaBase: "Auto-approve eligible tool requests this turn",
   };
 }
 
@@ -624,7 +633,7 @@ export function autoApproveViewNorm(view){
 /* Accessible name for the toggle. Count is spoken only when enabled and > 0. */
 export function autoApproveAriaName({ enabled = false, count = 0, supported = true, agent = "" } = {}){
   if (!supported) return unsupportedHelp(agent);
-  const base = autoApproveCopy(agent).ariaBase;
+  const base = autoApproveCopy().ariaBase;
   if (enabled && (Number(count) || 0) > 0){
     return `${base}; ${Number(count)} approved.`;
   }
@@ -642,7 +651,7 @@ export function autoApproveAriaName({ enabled = false, count = 0, supported = tr
 export function autoApproveChromeModel(view, { agent = "", node = null } = {}){
   const v = autoApproveViewNorm(view);
   const agentL = String(agent || "").toLowerCase();
-  const copy = autoApproveCopy(agentL);
+  const copy = autoApproveCopy();
   const hidden = node ? !canReceiveSend(node) : false;
   // Support is the server's verdict alone (agent, transport, and — for Claude —
   // a permission-capable hook bundle). The UI never second-guesses it by name.
@@ -1720,6 +1729,7 @@ export function createChatFeature(deps){
         permReason: data.perm_reason || "",
         permRequestId: data.perm_request_id || "",
         expanded,
+        axScreenReader: !!n.ax_screen_reader,
         escape,
       });
       if (permScroll && permScroll.nodeId === n.id && expanded){

@@ -4,15 +4,18 @@ package app
 //
 // fixes-2 P1 stopped a spurious 45-second `inspect` from inviting a stray `1`
 // on an --ax-screen-reader node. It did that twice over: the UI stopped giving
-// `inspect` a remote keypad (keyRowHTML), and the poller stopped raising it for
-// AX at all. Only the first was needed — a keyless `inspect` cannot send
-// anything. The second removed AX's floor: with the quiet WaitingOn branch
-// fenced behind ClassifyVisible *and* the Owing backstop disabled, one regex
-// family became the sole route to any AX attention. Six of seven plausible AX
-// pane shapes (reworded footer, footer-less menu, y/n confirm, free-text
-// prompt, single-option menu) do not match it, and in that state an AX node
-// sitting on a real approval raised nothing, indefinitely — while a non-AX node
-// in the identical state still degrades to `inspect` at 45s.
+// AX `inspect` a remote keypad (keyRowHTML: Dismiss only; a stray "1" would
+// become 1+Enter), and the poller stopped raising it for AX at all. Only the
+// first was needed — an AX-keyless `inspect` cannot submit a prompt. The
+// second removed AX's floor: with the quiet WaitingOn branch fenced behind
+// ClassifyVisible *and* the Owing backstop disabled, one regex family became
+// the sole route to any AX attention. Six of seven plausible AX pane shapes
+// (reworded footer, footer-less menu, y/n confirm, free-text prompt,
+// single-option menu) do not match it, and in that state an AX node sitting
+// on a real approval raised nothing, indefinitely — while a non-AX node in
+// the identical state still degrades to `inspect` at 45s. Non-AX inspect
+// keeps the full keypad plus Dismiss so a misclassified dialog can be
+// answered; that keypad must not appear on AX.
 //
 // These tests pin the floor: AX stays strictly more conservative than non-AX at
 // every rung, but it does eventually say "no visible progress".

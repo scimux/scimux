@@ -1840,7 +1840,7 @@ func launchedTrustNode(t *testing.T, pane string, quiet time.Duration) *app {
 }
 
 // A launched Claude node with no transcript on a lettered workspace-trust
-// dialog must classify as dialog (keypad), not the keyless inspect that the
+// dialog must classify as dialog (keypad), not the inspect that the
 // noEvidence branch would otherwise raise. No poller change: ClassifyVisible
 // is already consulted first.
 func TestLaunchedClaudeTrustDialogNoTranscript(t *testing.T) {

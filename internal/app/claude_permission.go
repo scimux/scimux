@@ -344,6 +344,22 @@ func readClaudePermLease(perm string, now time.Time) (string, bool) {
 	return l.Lease, true
 }
 
+func claudePermLeaseRemaining(perm string, now time.Time) (lease string, remaining time.Duration, ok bool) {
+	b, err := os.ReadFile(filepath.Join(perm, "lease"))
+	if err != nil || len(b) > claudeHookStdinLimit {
+		return "", 0, false
+	}
+	var l claudePermLease
+	if json.Unmarshal(b, &l) != nil || l.Lease == "" {
+		return "", 0, false
+	}
+	exp, err := time.Parse(time.RFC3339Nano, l.Expires)
+	if err != nil || !now.Before(exp) {
+		return "", 0, false
+	}
+	return l.Lease, exp.Sub(now), true
+}
+
 func readClaudePermAnswer(path string) (claudePermAnswer, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 || len(b) > claudeHookStdinLimit {
@@ -415,6 +431,7 @@ func bundleSupportsPermission(bundle string) bool {
 type claudeHookCapabilities struct {
 	Permission int    `json:"permission"`
 	Asked      int    `json:"asked"`
+	Stop       int    `json:"stop"`
 	Exec       string `json:"exec,omitempty"`
 }
 
@@ -600,6 +617,34 @@ func (a *app) retractClaudeLease(bundle string) {
 	if err := os.Remove(path); err == nil {
 		_ = sessionlog.SyncParentDir(path)
 	}
+}
+
+// refreshClaudeLeaseExpiry republishes an armed marker when less than half
+// of claudeLeaseTTL remains. Stop reads that marker; rewriting every poll
+// tick would fsync thousands of times an hour for a 30-minute TTL. No-op
+// when the lease is not armed or still has plenty of life.
+func (a *app) refreshClaudeLeaseExpiry(n *Node) {
+	if n == nil {
+		return
+	}
+	a.mu.Lock()
+	st := a.autoApprove[n.ID]
+	if st == nil || st.Phase != autoPhaseArmed {
+		a.mu.Unlock()
+		return
+	}
+	supported := a.claudePermSupportedLocked(n)
+	bundle := a.claudePermBundleLocked(n.ID)
+	leaseID := st.LeaseID
+	a.mu.Unlock()
+	if !supported || bundle == "" || leaseID == "" {
+		return
+	}
+	now := time.Now()
+	if cur, remaining, ok := claudePermLeaseRemaining(filepath.Join(bundle, "perm"), now); ok && cur == leaseID && remaining >= claudeLeaseTTL/2 {
+		return
+	}
+	a.publishClaudeLease(bundle, leaseID)
 }
 
 // syncClaudeLeaseMarker brings the on-disk marker in line with the node's

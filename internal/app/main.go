@@ -138,6 +138,9 @@ func Run() {
 	if len(os.Args) > 1 && os.Args[1] == claudePermissionHookCmd {
 		os.Exit(runClaudePermissionHookMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == claudeStopHookCmd {
+		os.Exit(runClaudeStopHookMain(os.Args[2:]))
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
