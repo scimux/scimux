@@ -7,19 +7,18 @@ import (
 	"time"
 )
 
-// Claude's sticky-lease rules (2026-08-17). Enabling auto-approve on Claude
-// expresses a standing intent. Structured agents retain one-turn leases.
+// One-turn auto-approve for every agent, including Claude. Enabling expresses
+// intent for the current turn only. The lease ends on:
 //
 //	a) interrupt ("stop")
 //	b) manual un-toggle
 //	c) /clear and /exit
+//	d) turn completion (Claude Stop hook or transcript end_turn; ACP/Codex
+//	   protocol edges)
 //	+  process/session loss and node delete (non-negotiable, not human acts)
 //
-// A Claude turn ending is *not* one of them. Its lease degrades armed → primed
-// at the boundary — marker retracted, fence cleared, Enabled still true — and
-// the next prompt re-arms it. The pane-liveness disarm this replaces fired on
-// any 8s static stretch (paneQuietAfter), which is exactly what an approval
-// dialog looks like, so the lease died at the moment it was needed.
+// Claude's turn boundary is not pane quietness. A permission wait is also
+// quiet, so mid-turn silence must leave the lease armed until Stop / end_turn.
 
 // leaseIDOf reads the current lease id ("" when off).
 func leaseIDOf(a *app, id string) string {
@@ -51,11 +50,9 @@ func endTmuxTurn(t *testing.T, a *app, id string) {
 	}
 }
 
-func TestTurnEndKeepsTmuxLeaseEnabledAsPrimed(t *testing.T) {
-	// The lease survives the turn as a *primed* lease: still enabled to the
-	// human, but inert to the hook until the next prompt arms it. Retracting
-	// the marker at the boundary keeps the "marker only in the armed phase"
-	// invariant exactly as the old disarm did.
+func TestTurnEndDisarmsTmuxLease(t *testing.T) {
+	// Claude matches every other agent: a completed turn turns the toggle off.
+	// Retracting the marker at the boundary keeps the hook inert.
 	f := &fakeTmux{alive: map[string]bool{"t1": true}, list: []string{"t1"}, capture: "idle pane"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "t1", hookSIDOwn)
@@ -64,32 +61,29 @@ func TestTurnEndKeepsTmuxLeaseEnabledAsPrimed(t *testing.T) {
 	a.live[n.ID] = "active"
 	a.mu.Unlock()
 	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
-	armedLease := leaseIDOf(a, n.ID)
 	if _, ok := markerLease(t, bundle); !ok {
 		t.Fatal("precondition: armed lease must publish a marker")
 	}
 
 	endTmuxTurn(t, a, n.ID)
 
-	if got := phaseOf(a, n.ID); got != autoPhasePrimed {
-		t.Fatalf("phase after the turn ended = %q, want primed (the toggle stays on)", got)
+	if got := phaseOf(a, n.ID); got != autoPhaseOff {
+		t.Fatalf("phase after the turn ended = %q, want off", got)
 	}
 	a.mu.Lock()
 	view := a.autoApproveViewOf(n)
 	a.mu.Unlock()
-	if !view.Enabled {
-		t.Fatal("turn end must not switch the toggle off; that is the annoyance this replaces")
+	if view.Enabled {
+		t.Fatal("turn end must switch the Claude toggle off, like every other agent")
 	}
 	if lease, ok := markerLease(t, bundle); ok {
-		t.Fatalf("primed lease left the arm marker behind (%q); the hook must go inert", lease)
-	}
-	if got := leaseIDOf(a, n.ID); got == armedLease {
-		t.Fatal("turn end must rotate the lease id: one lease is still one turn, so the next turn needs a fresh fence")
+		t.Fatalf("turn end left the arm marker behind (%q); the hook must go inert", lease)
 	}
 }
 
-func TestStickyTmuxLeaseRearmsOnNextPromptWithoutRetoggle(t *testing.T) {
-	// The whole point: prompt → turn → prompt → turn, one toggle.
+func TestTmuxTurnEndRequiresRetoggleForNextTurn(t *testing.T) {
+	// prompt → turn end → next prompt does not re-arm. The human must enable
+	// again, exactly as on grok/opencode/pi/codex.
 	f := &fakeTmux{alive: map[string]bool{"t2": true}, list: []string{"t2"}, capture: "idle pane", captureAfterEnter: "working"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "t2", hookSIDOwn)
@@ -98,34 +92,36 @@ func TestStickyTmuxLeaseRearmsOnNextPromptWithoutRetoggle(t *testing.T) {
 	if v := a.enableAutoApprove(n.ID, nil); !v.Enabled {
 		t.Fatalf("enable: %+v", v)
 	}
-	// Two turns is the whole claim: the second one arms from the same enable.
-	for turn := 1; turn <= 2; turn++ {
-		rec := routeRequest(h, http.MethodPost, "/api/nodes/t2/send", `{"text":"go"}`, true)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("turn %d send: status = %d body %q", turn, rec.Code, rec.Body.String())
-		}
-		if got := phaseOf(a, n.ID); got != autoPhaseArmed {
-			t.Fatalf("turn %d: phase after prompt = %q, want armed", turn, got)
-		}
-		lease, ok := markerLease(t, bundle)
-		if !ok {
-			t.Fatalf("turn %d: armed lease published no marker; the hook can never answer", turn)
-		}
-		if want := leaseIDOf(a, n.ID); lease != want {
-			t.Fatalf("turn %d: marker lease = %q, want %q", turn, lease, want)
-		}
-		endTmuxTurn(t, a, n.ID)
-		if got := phaseOf(a, n.ID); got != autoPhasePrimed {
-			t.Fatalf("turn %d: phase after turn end = %q, want primed", turn, got)
-		}
+	rec := routeRequest(h, http.MethodPost, "/api/nodes/t2/send", `{"text":"go"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first send: status = %d body %q", rec.Code, rec.Body.String())
+	}
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase after first prompt = %q, want armed", got)
+	}
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("armed lease published no marker")
+	}
+	endTmuxTurn(t, a, n.ID)
+	if got := phaseOf(a, n.ID); got != autoPhaseOff {
+		t.Fatalf("phase after turn end = %q, want off", got)
+	}
+
+	rec = routeRequest(h, http.MethodPost, "/api/nodes/t2/send", `{"text":"again"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second send: status = %d body %q", rec.Code, rec.Body.String())
+	}
+	if got := phaseOf(a, n.ID); got != autoPhaseOff {
+		t.Fatalf("phase after next prompt without retoggle = %q, want off", got)
+	}
+	if lease, ok := markerLease(t, bundle); ok {
+		t.Fatalf("next prompt re-armed the marker (%q) without a new enable", lease)
 	}
 }
 
 func TestTurnEndClearsThePromptIDFence(t *testing.T) {
-	// TurnPromptID latches the turn a lease has committed to and declines every
-	// other turn's request. Under a sticky lease that latch must be released at
-	// the turn boundary, or the second turn would be silently unapprovable —
-	// stickiness in the UI and nothing behind it.
+	// TurnPromptID latches the turn a lease has committed to. Turn end deletes
+	// the lease, so the next enable starts with a fresh fence.
 	f := &fakeTmux{alive: map[string]bool{"t3": true}, list: []string{"t3"}, capture: "idle pane"}
 	a := newTestApp(t, f)
 	n, _ := seedPermClaude(t, a, "t3", hookSIDOwn)
@@ -144,14 +140,8 @@ func TestTurnEndClearsThePromptIDFence(t *testing.T) {
 	a.mu.Lock()
 	st := a.autoApprove[n.ID]
 	a.mu.Unlock()
-	if st == nil {
-		t.Fatal("turn end must keep the lease")
-	}
-	if st.TurnPromptID != "" {
-		t.Fatalf("TurnPromptID = %q after the turn ended, want cleared", st.TurnPromptID)
-	}
-	if st.Count != 0 {
-		t.Fatalf("Count = %d after the turn ended, want 0 (the badge counts this turn)", st.Count)
+	if st != nil {
+		t.Fatalf("turn end must delete the lease, still have %+v", st)
 	}
 }
 
@@ -361,8 +351,8 @@ func TestLongRunningToolCallDoesNotParkTmuxLease(t *testing.T) {
 	// this guards is an approval dialog with a second call queued behind it:
 	// the dialog is static, the pane crosses paneQuietAfter (8s), and parking
 	// there retracts the marker the queued call needs — the lease dies at the
-	// moment it is wanted, which is the annoyance the sticky rules exist to
-	// end. Pane quietness alone cannot tell "turn over" from "call pending";
+	// moment it is wanted. Pane quietness alone cannot tell "turn over" from
+	// "call pending"; the Stop hook and the transcript can.
 	// the transcript can, and already does for turn_done.
 	//
 	// Scope honestly: a long *foreground* tool is not the motivating case.
@@ -403,10 +393,10 @@ func TestLongRunningToolCallDoesNotParkTmuxLease(t *testing.T) {
 	}
 }
 
-func TestResolvedToolCallStillParksTmuxLease(t *testing.T) {
+func TestResolvedToolCallDisarmsTmuxLease(t *testing.T) {
 	// The other side of the same predicate: once the result is in, a quiet pane
-	// is a finished turn and the boundary parks the lease as before. Without
-	// this the fix above would simply never park.
+	// with end_turn is a finished turn and the lease turns off. Without this
+	// the mid-turn guard would simply never disarm.
 	f := &fakeTmux{alive: map[string]bool{"t2": true}, list: []string{"t2"}, capture: "idle pane"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaudeWithTranscript(t, a, "t2", hookSIDOwn,
@@ -422,8 +412,8 @@ func TestResolvedToolCallStillParksTmuxLease(t *testing.T) {
 
 	endTmuxTurn(t, a, n.ID)
 
-	if got := phaseOf(a, n.ID); got != autoPhasePrimed {
-		t.Fatalf("phase after a completed turn = %q, want primed", got)
+	if got := phaseOf(a, n.ID); got != autoPhaseOff {
+		t.Fatalf("phase after a completed turn = %q, want off", got)
 	}
 	if lease, ok := markerLease(t, bundle); ok {
 		t.Fatalf("completed turn left the arm marker behind (%q)", lease)
@@ -454,9 +444,94 @@ func TestClaudeQuietMidTurnDoesNotParkStickyLease(t *testing.T) {
 	}
 }
 
-func TestClaudeNextPromptSettlesAndRearmsSurvivingLease(t *testing.T) {
-	// Belt path: if the poller missed end_turn, accepting the next idle prompt is
-	// itself the definitive boundary. Rotate before send, then re-arm afterward.
+func TestClaudeEnableDuringQuietOwingTurnArms(t *testing.T) {
+	// "Auto-approve this turn" must apply to a turn whose approval dialog is
+	// already up. The pane is quiet by design; owing (or a standing ask) is
+	// the current-turn signal.
+	f := &fakeTmux{alive: map[string]bool{"q1": true}, list: []string{"q1"}, capture: "waiting"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "q1", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"do the work"}}`)
+	a.mu.Lock()
+	a.live[n.ID] = "quiet"
+	a.mu.Unlock()
+
+	v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+	if v.Phase != string(autoPhaseArmed) {
+		t.Fatalf("phase during a quiet owing turn = %q, want armed", v.Phase)
+	}
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("quiet owing enable published no marker; the dialog cannot be answered")
+	}
+}
+
+func TestClaudeEnableAfterEndTurnStaysPrimed(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"q2": true}, list: []string{"q2"}, capture: "idle"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "q2", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"go"}}`,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}`)
+	a.mu.Lock()
+	a.live[n.ID] = "quiet"
+	a.mu.Unlock()
+
+	v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+	if v.Phase != string(autoPhasePrimed) {
+		t.Fatalf("phase after a finished turn = %q, want primed", v.Phase)
+	}
+	if _, ok := markerLease(t, bundle); ok {
+		t.Fatal("enable after end_turn must not publish an arm marker")
+	}
+}
+
+func TestClaudeEnableDuringStandingAskArms(t *testing.T) {
+	// The notice exists because Claude prints text and then asks before
+	// flushing tool_use: newest record is assistant, Owing is false, and
+	// PendingCount is 0. A tailer that returns there never sees the ask.
+	f := &fakeTmux{alive: map[string]bool{"q3": true}, list: []string{"q3"}, capture: "dialog"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "q3", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"do the work"}}`,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"I'll edit that"}]}}`)
+	a.noteClaudeAskedCapability(a.claudeHookID(n.ID))
+	askedNoticeAt(t, bundle, "ask1", "Bash", "deadbeefdeadbeef", time.Now().Add(-time.Minute))
+	a.mu.Lock()
+	a.live[n.ID] = "quiet"
+	a.mu.Unlock()
+
+	v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+	if v.Phase != string(autoPhaseArmed) {
+		t.Fatalf("phase with a standing ask = %q, want armed", v.Phase)
+	}
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("standing ask must publish the marker so the hook can answer")
+	}
+}
+
+func TestClaudeEnableDuringAssistantTextWithoutAskStaysPrimed(t *testing.T) {
+	// The same transcript without a notice is not a current-turn wait.
+	f := &fakeTmux{alive: map[string]bool{"q4": true}, list: []string{"q4"}, capture: "idle"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "q4", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"do the work"}}`,
+		`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"I'll edit that"}]}}`)
+	a.mu.Lock()
+	a.live[n.ID] = "quiet"
+	a.mu.Unlock()
+
+	v := a.setAutoApproveEnabled(n.ID, true, "quiet", "", 0)
+	if v.Phase != string(autoPhasePrimed) {
+		t.Fatalf("phase with assistant text and no ask = %q, want primed", v.Phase)
+	}
+	if _, ok := markerLease(t, bundle); ok {
+		t.Fatal("assistant text alone must not publish an arm marker")
+	}
+}
+
+func TestClaudeNextPromptDisarmsSurvivingArmedLease(t *testing.T) {
+	// Belt path: if the poller missed end_turn, accepting the next idle prompt
+	// is itself the definitive boundary. With one-turn leases that means off,
+	// not a silent re-arm.
 	f := &fakeTmux{alive: map[string]bool{"tb": true}, list: []string{"tb"}, capture: "idle", captureAfterEnter: "working"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "tb", hookSIDOwn)
@@ -464,20 +539,15 @@ func TestClaudeNextPromptSettlesAndRearmsSurvivingLease(t *testing.T) {
 	a.live[n.ID] = "quiet"
 	a.mu.Unlock()
 	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
-	oldLease := leaseIDOf(a, n.ID)
 
 	acked, err := a.acceptTmuxPrompt(n, false, func() (bool, error) { return true, nil })
 	if err != nil || !acked {
 		t.Fatalf("accept prompt = %v,%v", acked, err)
 	}
-	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
-		t.Fatalf("phase after next prompt = %q, want armed", got)
+	if got := phaseOf(a, n.ID); got != autoPhaseOff {
+		t.Fatalf("phase after next prompt = %q, want off", got)
 	}
-	newLease := leaseIDOf(a, n.ID)
-	if newLease == "" || newLease == oldLease {
-		t.Fatalf("lease after next prompt = %q, want fresh from %q", newLease, oldLease)
-	}
-	if marker, ok := markerLease(t, bundle); !ok || marker != newLease {
-		t.Fatalf("marker after next prompt = %q,%v, want %q", marker, ok, newLease)
+	if marker, ok := markerLease(t, bundle); ok {
+		t.Fatalf("next prompt left marker %q armed", marker)
 	}
 }

@@ -32,14 +32,13 @@ func (a *app) autoGateFor(id string) *sync.Mutex {
 }
 
 // autoApprovePhase is the server-owned lease phase. Every lease is armed for
-// one turn at a time. Claude alone keeps the enable behind it sticky across
-// turns; structured agents return to off when their current turn completes.
+// one turn at a time. Every agent, including Claude, returns to off when its
+// current turn completes.
 //
 //	off  → primed                 enabled while idle
 //	off  → armed(lease,count=0)   enabled during an active turn
 //	armed → armed(count+1)        eligible decision audited then delivered
-//	armed → primed(fresh lease)   Claude turn completed — parked, still enabled
-//	armed → off                   non-Claude turn completed
+//	armed → off                   turn completed (Stop / end_turn / protocol)
 //	armed → off                   manual disable, interrupt, /clear, /exit,
 //	                              delete, or process/session loss
 //	primed → armed                next prompt accepted successfully
@@ -271,6 +270,20 @@ func (a *app) installAutoApproveLease(id, live, enableIncarn string, enableMaxSe
 		a.mu.Unlock()
 		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
 	}
+	a.mu.Unlock()
+
+	// Claude approval dialogs are mechanically quiet, so live=="active" is
+	// the wrong arm predicate there. A still-open turn (owing / pending /
+	// standing ask) is the current turn the toggle names. Tailer and notice
+	// I/O stay outside a.mu.
+	arm := live == "active" || a.claudeTurnStillOpen(n)
+
+	a.mu.Lock()
+	n = a.byID[id]
+	if n == nil || !a.autoApproveSupportedFor(n) {
+		a.mu.Unlock()
+		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
+	}
 	st := &autoApproveState{
 		LeaseID:      newLeaseID(),
 		Count:        0,
@@ -278,7 +291,7 @@ func (a *app) installAutoApproveLease(id, live, enableIncarn string, enableMaxSe
 		EnableMaxSeq: enableMaxSeq,
 		Attempted:    map[string]bool{},
 	}
-	if live == "active" {
+	if arm {
 		st.Phase = autoPhaseArmed
 	} else {
 		st.Phase = autoPhasePrimed
@@ -292,6 +305,35 @@ func (a *app) installAutoApproveLease(id, live, enableIncarn string, enableMaxSe
 	a.mu.Unlock()
 	a.applyClaudeLeaseMarker(bundle, leaseID)
 	return view
+}
+
+// claudeTurnStillOpen reports whether a Claude node is still inside a turn
+// even though the pane is quiet — the approval-dialog case. An empty or
+// finished transcript is not a turn; owing, unresolved calls, or a standing
+// escalation notice are. Caller must not hold a.mu (tailer poll and notice
+// reads take it).
+func (a *app) claudeTurnStillOpen(n *Node) bool {
+	if n == nil || !strings.EqualFold(n.Agent, "claude") {
+		return false
+	}
+	if tl := a.tailerFor(n); tl != nil {
+		tl.Poll()
+		if tl.EndTurn() && tl.PendingCount() == 0 {
+			return false
+		}
+		if tl.Owing() || tl.PendingCount() > 0 {
+			return true
+		}
+		// Fall through: Claude may have printed text and then asked before
+		// flushing tool_use, so Owing is false and nothing is pending.
+	}
+	if ask, capable := a.claudeAskState(n); capable && ask != "" {
+		return true
+	}
+	a.mu.Lock()
+	attn := a.attn[n.ID]
+	a.mu.Unlock()
+	return attn == "approval" || attn == "question" || attn == "dialog"
 }
 
 // claudeLeaseTargetLocked reports the bundle whose marker tracks this node's
@@ -416,8 +458,8 @@ func (a *app) armAutoApproveOnPromptLocked(id, primedLeaseID, boundaryIncarn str
 
 // settleArmedBeforePrompt closes an armed lease that survived past turn
 // completion before accepting a new idle prompt (spec: a lease cannot cross a
-// turn). Claude parks it; a structured agent turns it off. The poller normally
-// settles at the boundary itself; this is the belt for a boundary it missed.
+// turn). Every agent turns it off. The poller normally settles at the
+// boundary itself; this is the belt for a boundary it missed.
 func (a *app) settleArmedBeforePrompt(id string, live string) {
 	if live == "active" {
 		return // still in a turn; leave armed lease alone
@@ -428,28 +470,17 @@ func (a *app) settleArmedBeforePrompt(id string, live string) {
 	a.settleAutoApproveAfterTurnLocked(id, "")
 }
 
-// settleAutoApproveAfterTurn closes an armed turn lease. Claude degrades to a
-// fresh primed lease so its toggle expresses standing intent across turns;
-// every structured agent (codex, grok, opencode, pi) returns to off. Claude's
-// exception exists because pane quietness once revoked its lease in the middle
-// of an approval sequence; the structured transports have explicit turn edges
-// and retain the safer, requested one-turn control.
-//
-// Everything a Claude lease may not carry across a turn is reset, so the primed
-// lease the next prompt arms is fresh in every sense the armed phase depends
-// on: a new LeaseID (the Claude marker's identity), a released TurnPromptID
-// fence, a zeroed count and cutoff. Attempted is deliberately carried: a
-// request scimux already tried and failed on must never get a second automatic
-// attempt, and
-// both cutoffs (the structured incarn/seq watermark, Claude's marker) make a
-// previous turn's request ineligible regardless. Error is carried too — a
-// decline the human has not read yet must survive the boundary that produced
-// it; arming on the next prompt clears it.
+// settleAutoApproveAfterTurn closes an armed turn lease. Every agent
+// (Claude included) returns to off. Claude's official Stop hook is the
+// primary boundary; this path is the transcript / protocol fallback and
+// the next-prompt belt. Pane quietness alone is not enough for Claude —
+// a permission wait is also quiet.
 //
 // The marker is retracted before the phase changes, the same order disarm
 // uses: a marker outliving the armed phase could authorize a call belonging to
 // a turn nobody armed for, while the reverse can only cost a call the helper's
-// deadline.
+// deadline. An unread auto-approve Error on the lease is dropped with it —
+// the same as every other agent. The session-log audit still has the failure.
 //
 // leaseID, when non-empty, must still match — a re-arm that completed after
 // the caller's observation is left intact (stale-settle linearization).
@@ -472,13 +503,9 @@ func (a *app) settleAutoApproveAfterTurnLocked(id, leaseID string) {
 	}
 	a.mu.Lock()
 	stale := matches(a.autoApprove[id])
-	sticky := false
 	bundle := ""
 	if stale {
-		if n := a.byID[id]; n != nil && strings.EqualFold(n.Agent, "claude") {
-			sticky = true
-			bundle = a.claudePermBundleLocked(id)
-		}
+		bundle = a.claudePermBundleLocked(id)
 	}
 	a.mu.Unlock()
 	if !stale {
@@ -487,15 +514,7 @@ func (a *app) settleAutoApproveAfterTurnLocked(id, leaseID string) {
 	a.retractClaudeLease(bundle)
 	a.mu.Lock()
 	if cur := a.autoApprove[id]; matches(cur) {
-		if !sticky {
-			delete(a.autoApprove, id)
-		} else {
-			cur.Phase = autoPhasePrimed
-			cur.LeaseID = newLeaseID()
-			cur.TurnPromptID = ""
-			cur.Count = 0
-			cur.EnableIncarn, cur.EnableMaxSeq = "", 0
-		}
+		delete(a.autoApprove, id)
 	}
 	a.mu.Unlock()
 }

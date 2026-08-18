@@ -329,9 +329,9 @@ func TestClaudePermissionHookMainAlwaysExitsZero(t *testing.T) {
 }
 
 func TestClaudeHookSettingsRegistersPermissionRequestOnly(t *testing.T) {
-	// AT-CP-08: PermissionRequest rides the same private settings file, and
-	// PreToolUse (which fires for every call, decision needed or not) is
-	// never registered.
+	// AT-CP-08: PermissionRequest and the turn-end Stop family ride the same
+	// private settings file. PreToolUse (every call) and SubagentStop (not
+	// the main turn) are never registered.
 	raw, err := claudeHookSettingsJSON("/tmp/scimux dir/scimux", "/tmp/scimux hooks/hook-id")
 	if err != nil {
 		t.Fatalf("settings JSON: %v", err)
@@ -347,13 +347,16 @@ func TestClaudeHookSettingsRegistersPermissionRequestOnly(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("settings JSON: %v\n%s", err, raw)
 	}
-	allowed := map[string]bool{"SessionStart": true, "PermissionRequest": true}
+	allowed := map[string]bool{
+		"SessionStart": true, "PermissionRequest": true,
+		"Stop": true, "StopFailure": true,
+	}
 	for name := range doc.Hooks {
 		if !allowed[name] {
 			t.Fatalf("unexpected hook event %q registered: %s", name, raw)
 		}
 	}
-	for _, name := range []string{"SessionStart", "PermissionRequest"} {
+	for _, name := range []string{"SessionStart", "PermissionRequest", "Stop", "StopFailure"} {
 		if len(doc.Hooks[name]) != 1 || len(doc.Hooks[name][0].Hooks) != 1 {
 			t.Fatalf("want exactly one %s hook: %s", name, raw)
 		}
@@ -364,8 +367,17 @@ func TestClaudeHookSettingsRegistersPermissionRequestOnly(t *testing.T) {
 	if cmd := doc.Hooks["SessionStart"][0].Hooks[0].Command; !strings.Contains(cmd, claudeSessionHookCmd) {
 		t.Fatalf("SessionStart command = %q, want the session helper", cmd)
 	}
+	if cmd := doc.Hooks["Stop"][0].Hooks[0].Command; !strings.Contains(cmd, claudeStopHookCmd) {
+		t.Fatalf("Stop command = %q, want the stop helper", cmd)
+	}
+	if cmd := doc.Hooks["StopFailure"][0].Hooks[0].Command; cmd != doc.Hooks["Stop"][0].Hooks[0].Command {
+		t.Fatalf("StopFailure command = %q, want the same helper as Stop", cmd)
+	}
 	if strings.Contains(string(raw), "PreToolUse") {
 		t.Fatalf("PreToolUse must never be registered: %s", raw)
+	}
+	if strings.Contains(string(raw), "SubagentStop") {
+		t.Fatalf("SubagentStop must never be registered: %s", raw)
 	}
 }
 

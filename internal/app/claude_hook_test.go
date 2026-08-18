@@ -349,7 +349,7 @@ func TestClaudeHookBundleLeavesUserSettingsUntouched(t *testing.T) {
 	if st.Mode().Perm() != 0o600 {
 		t.Fatalf("settings.json mode = %o, want 0600", st.Mode().Perm())
 	}
-	for _, dir := range []string{"inbox", "processed"} {
+	for _, dir := range []string{"inbox", "processed", "stop"} {
 		p := filepath.Join(a.claudeHooksDir(), hookID, dir)
 		st, err := os.Stat(p)
 		if err != nil {

@@ -142,7 +142,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		os.RemoveAll(dir)
 		return "", "", err
 	}
-	for _, sub := range []string{"inbox", "processed", "perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"), filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName)} {
+	for _, sub := range []string{"inbox", "processed", "stop", "perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"), filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName)} {
 		p := filepath.Join(dir, sub)
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			os.RemoveAll(dir)
@@ -170,7 +170,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	// attention backstop. "exec" records the binary settings.json just baked in,
 	// as JSON rather than a shell string to re-parse, so both gates can check
 	// that the hooks can still run at all (claudeBundleExecUsable).
-	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Exec: execPath})
+	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Exec: execPath})
 	if err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
@@ -208,7 +208,13 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 	// while no lease marker exists, so a session can be armed at any later
 	// point in its life without a relaunch. PreToolUse is deliberately never
 	// registered: it fires for every tool call, decision needed or not.
+	// Stop / StopFailure are the official current-turn boundary (after the
+	// tool loop; not on user interrupt). SubagentStop is not the main turn.
 	permCmd, err := claudePermissionHookCommand(execPath, hookDir)
+	if err != nil {
+		return nil, err
+	}
+	stopCmd, err := claudeStopHookCommand(execPath, hookDir)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +231,8 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 		"hooks": map[string]any{
 			"SessionStart":      entry(cmd),
 			"PermissionRequest": entry(permCmd),
+			"Stop":              entry(stopCmd),
+			"StopFailure":       entry(stopCmd),
 		},
 	}
 	return json.Marshal(doc)
@@ -323,6 +331,7 @@ func (a *app) drainClaudeHooks() {
 	a.mu.Unlock()
 	for _, p := range pairs {
 		a.drainClaudeHookInbox(p[0], p[1])
+		a.drainClaudeStopInbox(p[0], p[1])
 	}
 }
 

@@ -91,10 +91,9 @@ func TestTmuxClearDisarmsClaudeLease(t *testing.T) {
 	}
 }
 
-// AT-CP-21 (the *armed phase* cannot cross a turn; the human's enable does)
-// now lives in auto_approve_sticky_test.go as
-// TestTurnEndKeepsTmuxLeaseEnabledAsPrimed: active → quiet still retracts the
-// marker at the boundary, but parks the lease as primed instead of clearing it.
+// AT-CP-21 (the *armed phase* cannot cross a turn) now lives in
+// auto_approve_sticky_test.go as TestTurnEndDisarmsTmuxLease: active → quiet
+// with an explicit turn boundary retracts the marker and turns the lease off.
 
 func TestEnableDuringActiveTmuxTurnArmsImmediately(t *testing.T) {
 	// AT-CP-22: a human toggles auto-approve *because* a turn is running. For

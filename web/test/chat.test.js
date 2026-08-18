@@ -807,30 +807,41 @@ test("keyRowHTML: tmux .permbtns has keys; ACP .permbtns does not", () => {
   assert.doesNotMatch(acpBtns[1], /\bkeys\b/, "ACP .permbtns must not carry keys");
 });
 
-/* Neutral inspect gets one local acknowledgement, never a remote keypad. */
-test("keyRowHTML: inspect has a local Esc acknowledgement but no remote keys", () => {
+/* Neutral inspect uses the default terminal keypad plus a distinct Dismiss.
+   Dismiss is local acknowledgement; Escape stays a remote key so a
+   misclassified dialog can still be backed out of. */
+test("keyRowHTML: inspect has the default action bar plus Dismiss", () => {
   const html = keyRowHTML({ attention: "inspect" });
   assert.ok(html, "inspect still renders a chat row");
   assert.match(html, /inspect if needed|No visible progress/i,
     "neutral diagnostic copy points at terminal inspection");
-  assert.doesNotMatch(html, /data-key/, "inspect must not emit data-key buttons");
+  assert.match(html, /class="permbtns keys"/, "inspect uses the yellow action bar");
+  for (const k of ["1", "2", "3", "4", "y", "n", "Up", "Down", "Enter", "Escape"]){
+    assert.match(html, new RegExp(`data-key="${k}"`), `inspect keeps remote key ${k}`);
+  }
   assert.match(html, /data-dismiss-attention="inspect"/,
-    "inspect Esc is a local acknowledgement rather than a terminal key");
-  assert.match(html, /class="permbtns keys"/, "acknowledgement uses the yellow action bar");
-  assert.match(html, /Esc \u00b7 all good/);
-  assert.doesNotMatch(html, /data-key="[1-4yn]"|data-key="Enter"|data-key="Escape"|data-key="Up"|data-key="Down"/);
-  // Digits / y/n / Enter as button labels would invite a terminal decision.
-  assert.doesNotMatch(html, /<button[^>]*>\s*[1-4yn]\s*<\/button>/i);
-  assert.doesNotMatch(html, /<button[^>]*>\s*(Enter|Escape|↑|↓|⏎)\s*<\/button>/i);
+    "Dismiss is a local acknowledgement rather than a terminal key");
+  assert.match(html, />Dismiss</, "the extra button is labelled Dismiss");
+  assert.match(html, /aria-label="[^"]*does not send Escape/i,
+    "Dismiss must say it does not send Escape");
+  assert.match(html, /title="[^"]*do not send Escape/i,
+    "Dismiss title must distinguish it from remote Escape");
 
-  // Verified terminal decision rows keep their controls.
+  const ax = keyRowHTML({ attention: "inspect", axScreenReader: true });
+  assert.match(ax, /data-dismiss-attention="inspect"/, "AX inspect still has Dismiss");
+  assert.doesNotMatch(ax, /data-key=/,
+    "AX inspect must not offer a remote keypad: 1 becomes 1+Enter and submits");
+
+  // Verified terminal decision rows keep their remote Escape and no Dismiss.
   const approval = keyRowHTML({ attention: "approval" });
   assert.match(approval, /data-key="1"/, "approval retains digit keys");
   assert.match(approval, /permbtns/, "approval retains .permbtns");
+  assert.doesNotMatch(approval, /data-dismiss-attention/,
+    "classified attention is not locally dismissable");
   const question = keyRowHTML({ attention: "question" });
   assert.match(question, /data-key="y"/, "question retains y/n keys");
   assert.match(question, /data-key="Enter"/, "question retains Enter");
-  assert.match(question, /data-key="Escape"/, "question retains Escape");
+  assert.match(question, /data-key="Escape"/, "question retains remote Escape");
 });
 
 /* P5: classified dialog (lettered workspace-trust, no transcript) is the
@@ -1809,6 +1820,29 @@ test("attention suppression collapses keyrow and hides attention chrome", async 
   feature.destroy();
 });
 
+test("AX inspect renders Dismiss only so a stray 1 cannot submit", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "claude", model: "s", live: "quiet",
+    attention: "inspect", attention_at: 100, lane_id: "", description: "",
+    ax_screen_reader: true,
+  }];
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "inspect",
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, />Dismiss</);
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /data-key=/,
+    "AX inspect must not emit the keypad that tmuxKeySequence would confirm with Enter");
+  ctx.feature.destroy();
+});
+
 test("inspect Esc is local and stays dismissed until fresh attention evidence", async () => {
   const nodes = [{
     id: "n1", title: "A", agent: "claude", model: "s", live: "quiet",
@@ -1827,6 +1861,11 @@ test("inspect Esc is local and stays dismissed until fresh attention evidence", 
   ctx.feature.bind();
   await ctx.feature.render();
   assert.match(ctx.roots.keyrow.innerHTML, /data-dismiss-attention="inspect"/);
+  assert.match(ctx.roots.keyrow.innerHTML, />Dismiss</);
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key="Enter"/,
+    "inspect still offers the rest of the terminal action bar");
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key="Escape"/,
+    "inspect Escape remains a remote key; Dismiss is the local ack");
 
   const beforeKeys = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
   const dismiss = el("button", { dataset: { dismissAttention: "inspect" } });
@@ -1853,6 +1892,52 @@ test("inspect Esc is local and stays dismissed until fresh attention evidence", 
   await ctx.feature.render();
   assert.match(ctx.roots.keyrow.innerHTML, /data-key="Escape"/,
     "hard attention is never hidden by the neutral acknowledgement");
+  ctx.feature.destroy();
+});
+
+test("inspect remote keys still send /key; Dismiss does not", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "claude", model: "s", live: "quiet",
+    attention: "inspect", attention_at: 100, lane_id: "", description: "",
+  }];
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "inspect",
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+
+  const before = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  const enter = el("button", { dataset: { key: "Enter" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: enter });
+  await new Promise(resolve => setImmediate(resolve));
+  const keyCalls = ctx.apiCalls.filter(c => c.path.includes("/key"));
+  assert.equal(keyCalls.length, before + 1, "inspect Enter is a remote terminal key");
+  assert.equal(JSON.parse(keyCalls[keyCalls.length - 1].opts?.body || "{}").key, "Enter");
+
+  const ctx2 = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "inspect",
+    },
+  });
+  ctx2.feature.bind();
+  await ctx2.feature.render();
+  const beforeEsc = ctx2.apiCalls.filter(c => c.path.includes("/key")).length;
+  const esc = el("button", { dataset: { key: "Escape" } });
+  firstListener(ctx2.roots.keyrow, "click")({ target: esc });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ctx2.apiCalls.filter(c => c.path.includes("/key")).length, beforeEsc + 1,
+    "inspect Escape is a remote terminal key so a dialog can still be backed out of");
+  ctx2.feature.destroy();
   ctx.feature.destroy();
 });
 
