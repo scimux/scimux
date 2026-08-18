@@ -1489,11 +1489,31 @@ func TestProductionNotesAccessibilityCSSOwnership(t *testing.T) {
 	for _, sig := range []string{
 		"#attadd { transition: none; }",
 		"#attmenu { animation: none; }",
-		".stagechip .spin i { animation: none; }",
 	} {
 		if !strings.Contains(chat, sig) {
 			t.Fatalf("chat.css must retain local reduced-motion signature %q", sig)
 		}
+	}
+	// The inverse rule, and deliberately not an omission: indeterminate
+	// progress indicators keep animating under Reduce Motion. That setting
+	// targets large-scale parallax and slide/zoom transitions; Apple's own
+	// activity indicators keep turning under it, and an indicator that stops
+	// moving reads as stalled — which is what an iPhone reported against the
+	// chat overlay. Pinned here as well as in the browser suite because the
+	// embedded stylesheet is what actually ships.
+	for _, frozen := range []string{
+		"#chatloading .spin { animation: none; }",
+		".stagechip .spin i { animation: none; }",
+	} {
+		if strings.Contains(chat, frozen) {
+			t.Fatalf("chat.css must not freeze an indeterminate indicator: %q", frozen)
+		}
+	}
+	// The overlay's blur belongs to its own scrim layer: on WebKit a
+	// backdrop-filter box rasterizes as a unit and an animating descendant can
+	// stop repainting inside it.
+	if !strings.Contains(chat, "#chatloading .scrim {") {
+		t.Fatal("chat.css must keep the dim/blur on #chatloading .scrim, not on the overlay shell")
 	}
 
 	// Cascade order: pane transitions before accessibility override; notes

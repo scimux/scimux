@@ -31,13 +31,16 @@ func (a *app) autoGateFor(id string) *sync.Mutex {
 	return g
 }
 
-// autoApprovePhase is the server-owned one-turn lease phase.
+// autoApprovePhase is the server-owned lease phase. The lease is armed for one
+// turn at a time, but the *enable* behind it is sticky: only the human's own
+// acts and the hard resets reach "off" (see settleAutoApproveAfterTurn).
 //
 //	off  → primed                 enabled while idle
 //	off  → armed(lease,count=0)   enabled during an active turn
 //	armed → armed(count+1)        eligible decision audited then delivered
-//	armed → off                   manual disable, completion, interrupt,
-//	                              /clear, /exit, delete, or process/session loss
+//	armed → primed(fresh lease)   turn completed — parked, still enabled
+//	armed → off                   manual disable, interrupt, /clear, /exit,
+//	                              delete, or process/session loss
 //	primed → armed                next prompt accepted successfully
 //	primed → off                  manual disable / exit / delete / manager loss
 type autoApprovePhase string
@@ -368,7 +371,7 @@ func (a *app) disarmAutoApproveIfLease(id, leaseID string) {
 // If hasBound is false, any prior cutoff is cleared so eligibility fails closed.
 // Already-armed leases are left untouched (a concurrent enable must not be
 // mistaken for stale state and rotated). Cross-turn armed cleanup is
-// clearStaleArmedBeforePrompt / the poller, not this path.
+// settleArmedBeforePrompt / the poller, not this path.
 //
 // Caller may already hold the auto-gate (acceptStructuredPrompt); if not,
 // this takes it.
@@ -410,35 +413,83 @@ func (a *app) armAutoApproveOnPromptLocked(id, primedLeaseID, boundaryIncarn str
 	}
 }
 
-// clearStaleArmedBeforePrompt removes an armed lease that survived past turn
-// completion before accepting a new idle prompt (spec: lease cannot cross a turn).
-func (a *app) clearStaleArmedBeforePrompt(id string, live string) {
+// settleArmedBeforePrompt parks an armed lease that survived past turn
+// completion before accepting a new idle prompt (spec: a lease cannot cross a
+// turn). The poller normally settles it at the boundary itself; this is the
+// belt for a boundary the poller never observed.
+func (a *app) settleArmedBeforePrompt(id string, live string) {
 	if live == "active" {
 		return // still in a turn; leave armed lease alone
 	}
 	g := a.autoGateFor(id)
 	g.Lock()
 	defer g.Unlock()
-	a.clearStaleArmedBeforePromptLocked(id)
+	a.settleAutoApproveAfterTurnLocked(id, "")
 }
 
-func (a *app) clearStaleArmedBeforePromptLocked(id string) {
+// settleAutoApproveAfterTurn degrades an armed lease to primed at the turn
+// boundary. The toggle expresses a *standing* intent (sticky-lease rules,
+// 2026-08-17), so a finished turn parks the lease rather than revoking it;
+// only the human's own acts — interrupt, un-toggle, /clear, /exit — and the
+// hard resets (process/session loss, delete) reach disarmAutoApprove. The
+// pane-liveness disarm this replaces fired on any static stretch past
+// paneQuietAfter, which is precisely what a waiting approval dialog looks
+// like, so the lease died at the moment it was needed.
+//
+// Everything a lease may not carry across a turn is reset, so the primed lease
+// the next prompt arms is fresh in every sense the armed phase depends on: a
+// new LeaseID (the Claude marker's identity), a released TurnPromptID fence, a
+// zeroed count and cutoff. Attempted is deliberately carried: a request scimux
+// already tried and failed on must never get a second automatic attempt, and
+// both cutoffs (the structured incarn/seq watermark, Claude's marker) make a
+// previous turn's request ineligible regardless. Error is carried too — a
+// decline the human has not read yet must survive the boundary that produced
+// it; arming on the next prompt clears it.
+//
+// The marker is retracted before the phase changes, the same order disarm
+// uses: a marker outliving the armed phase could authorize a call belonging to
+// a turn nobody armed for, while the reverse can only cost a call the helper's
+// deadline.
+//
+// leaseID, when non-empty, must still match — a re-arm that completed after
+// the caller's observation is left intact (stale-settle linearization).
+func (a *app) settleAutoApproveAfterTurn(id, leaseID string) {
+	if leaseID == "" {
+		return
+	}
+	g := a.autoGateFor(id)
+	g.Lock()
+	defer g.Unlock()
+	a.settleAutoApproveAfterTurnLocked(id, leaseID)
+}
+
+// settleAutoApproveAfterTurnLocked is the gate-held core. An empty leaseID
+// matches whatever armed lease is present.
+func (a *app) settleAutoApproveAfterTurnLocked(id, leaseID string) {
+	matches := func(st *autoApproveState) bool {
+		return st != nil && st.Phase == autoPhaseArmed &&
+			(leaseID == "" || st.LeaseID == leaseID)
+	}
 	a.mu.Lock()
-	st := a.autoApprove[id]
-	stale := st != nil && st.Phase == autoPhaseArmed
+	stale := matches(a.autoApprove[id])
 	bundle := ""
 	if stale {
 		bundle = a.claudePermBundleLocked(id)
 	}
 	a.mu.Unlock()
-	if stale {
-		a.retractClaudeLease(bundle)
-		a.mu.Lock()
-		if cur := a.autoApprove[id]; cur != nil && cur.Phase == autoPhaseArmed {
-			delete(a.autoApprove, id)
-		}
-		a.mu.Unlock()
+	if !stale {
+		return
 	}
+	a.retractClaudeLease(bundle)
+	a.mu.Lock()
+	if cur := a.autoApprove[id]; matches(cur) {
+		cur.Phase = autoPhasePrimed
+		cur.LeaseID = newLeaseID()
+		cur.TurnPromptID = ""
+		cur.Count = 0
+		cur.EnableIncarn, cur.EnableMaxSeq = "", 0
+	}
+	a.mu.Unlock()
 }
 
 // acceptStructuredPrompt linearizes pre-send boundary sample → Send → primed
@@ -453,7 +504,7 @@ func (a *app) acceptStructuredPrompt(n *Node, pm procManager, text string) error
 
 	live := pm.Live(n.ID)
 	if live != "active" {
-		a.clearStaleArmedBeforePromptLocked(n.ID)
+		a.settleAutoApproveAfterTurnLocked(n.ID, "")
 	}
 
 	// Pre-send boundary: permissions with seq > maxSeq (same incarn) are
@@ -507,7 +558,7 @@ func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error))
 	}
 	a.mu.Unlock()
 	if live != "active" {
-		a.clearStaleArmedBeforePromptLocked(n.ID)
+		a.settleAutoApproveAfterTurnLocked(n.ID, "")
 	}
 
 	acked, err := send()

@@ -259,9 +259,22 @@ export function createErrorField(msg){
   return "prompt";
 }
 
+/* The CTA's *accessible* name. It carries the busy state because the visible
+   title deliberately does not: a control's title is not a progress readout,
+   and swapping "Start"→"Starting..." resizes the control mid-press. VoiceOver
+   still hears the state; sighted users get the .ctadots indicator instead. */
 export function submitButtonLabel({ editing, submitting }){
   if (editing) return submitting ? "Saving..." : "Save";
   return submitting ? "Starting..." : "Start";
+}
+
+/* The CTA's visible contents: a stable label plus, while submitting, three
+   travelling dots. Indeterminate by construction — creating an activity has no
+   knowable percentage, and a fake progress bar would be a lie. */
+export function submitButtonHTML({ editing, submitting }){
+  const label = `<span class="ctalabel">${editing ? "Save" : "Start"}</span>`;
+  if (!submitting) return label;
+  return label + `<span class="ctadots" aria-hidden="true"><i></i><i></i><i></i></span>`;
 }
 
 export function sheetHeadLabels({ editing, editStop }){
@@ -310,6 +323,7 @@ export function createSheetsFeature(deps = {}){
     : (typeof setTimeout !== "undefined" ? setTimeout : (() => 0));
   const clearTimeoutFn = typeof d.clearTimeout === "function" ? d.clearTimeout
     : (typeof clearTimeout !== "undefined" ? clearTimeout : (() => {}));
+  const nowFn = typeof d.now === "function" ? d.now : (() => Date.now());
   const stopsOf = typeof d.stopsOf === "function" ? d.stopsOf : stopsOfDefault;
   const stopLabel = typeof d.stopLabel === "function" ? d.stopLabel : stopLabelDefault;
 
@@ -545,12 +559,24 @@ export function createSheetsFeature(deps = {}){
     if (typeof d.syncLanePicker === "function") d.syncLanePicker(root("nc_lane"));
   }
 
+  /* Single writer for the CTA's contents. Every caller goes through here so
+     nothing writes bare textContent over the label/dots structure. */
+  function renderStartButton({ editing, submitting }){
+    const btn = root("nc_start");
+    if (!btn) return;
+    btn.innerHTML = submitButtonHTML({ editing, submitting });
+    if (typeof btn.setAttribute === "function"){
+      btn.setAttribute("aria-busy", submitting ? "true" : "false");
+      btn.setAttribute("aria-label", submitButtonLabel({ editing, submitting }));
+    }
+  }
+
   function setNewActivitySubmitting(active){
     newActivitySubmitting = !!active;
     const btn = root("nc_start");
     if (!btn) return;
     btn.disabled = newActivitySubmitting;
-    btn.textContent = submitButtonLabel({ editing: !!ncEdit, submitting: newActivitySubmitting });
+    renderStartButton({ editing: !!ncEdit, submitting: newActivitySubmitting });
   }
 
   function scheduleTitleFocus(selectAll){
@@ -582,8 +608,7 @@ export function createSheetsFeature(deps = {}){
     if (sheet && sheet.classList) sheet.classList.remove("editing");
     const head = root("nc_head");
     if (head) head.textContent = labels.head;
-    const start = root("nc_start");
-    if (start) start.textContent = labels.start;
+    renderStartButton({ editing: false, submitting: false });
   }
 
   function forkFromTurn(text, parent){
@@ -629,8 +654,7 @@ export function createSheetsFeature(deps = {}){
     const labels = sheetHeadLabels({ editing: true, editStop: ncEditStop });
     const head = root("nc_head");
     if (head) head.textContent = labels.head;
-    const start = root("nc_start");
-    if (start) start.textContent = labels.start;
+    renderStartButton({ editing: true, submitting: false });
     clearFieldError(root("nc_title"));
     clearFieldError(root("nc_prompt"));
     const title = root("nc_title");
@@ -793,7 +817,9 @@ export function createSheetsFeature(deps = {}){
       const n = api
         ? await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) })
         : { id: "new" };
-      if (n && n.id && n.initial_delivery && n.initial_delivery !== "acknowledged"){
+      const echoLaunchPrompt =
+        !(n && n.initial_delivery && n.initial_delivery !== "acknowledged");
+      if (n && n.id && !echoLaunchPrompt){
         /* Cross-feature storage contract with composer.js, kept as a literal
            here so sheets does not import a later feature module. The server
            already created this exact node; select it and preserve recovery
@@ -815,6 +841,29 @@ export function createSheetsFeature(deps = {}){
       closeSheets();
       if (typeof d.invalidateStateEtag === "function") d.invalidateStateEtag();
       if (typeof d.tick === "function") await d.tick();
+      /* Optimistic echo for the launch prompt. composer.js owns this for every
+         later turn, but the first prompt travels with the launch config and so
+         had no echo at all: the chat stayed empty until the transport wrote the
+         user turn — minutes on a cold local model (pi/ACP, reported 2026-08-18)
+         — and the human's own words were not even on screen. Set *before*
+         select(), because select() runs refreshChat and the first paint should
+         already carry the bubble. Not painted directly: #msgs still holds the
+         previous node until that refresh lands.
+
+         Skipped when the server reported the prompt undelivered — it has been
+         restored to the recovery draft above, and an echo titled "delivering"
+         would claim something that did not happen.
+
+         The record is a literal, not composer.buildSentEcho: sheets does not
+         import a later feature module (same contract as the draft key above).
+         seen:null is the no-prior-surface case — a brand-new node has no turns,
+         so retireSentEcho's user-turn count settles it. */
+      if (echoLaunchPrompt && payload.prompt && n && n.id &&
+          typeof d.setSentEcho === "function"){
+        d.setSentEcho({
+          node: n.id, text: payload.prompt, atts: [], at: nowFn(), seen: null,
+        });
+      }
       if (typeof d.select === "function") d.select(n.id);
       const desktop = typeof d.isDesktop === "function" ? d.isDesktop() : false;
       if (!desktop && typeof d.setLevel === "function") d.setLevel(1);

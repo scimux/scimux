@@ -106,15 +106,16 @@
     <div id="gauge" hidden><i id="gaugefill"></i></div>
     <div id="msgwrap">
       <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
-      <div id="chatloading" hidden aria-live="polite" aria-label="loading chat"><div class="spin"></div></div>
+      <!-- the scrim is a sibling, never the spinner's parent: see chat.css -->
+      <div id="chatloading" hidden role="status" aria-live="polite" aria-label="loading chat"><div class="scrim"></div><div class="spin"></div></div>
     </div>
     <div id="keyrow"></div>
     <div id="convtools" hidden>
       <div class="convtools-start">
         <button id="termtoggle" aria-label="show terminal" title="show/hide terminal"></button>
         <button type="button" id="autoapprove" class="autoapprove off" aria-pressed="false"
-          title="Automatically selects the sole one-time approval option. Resets when the turn finishes or is interrupted."
-          aria-label="Auto-approve eligible tool requests for this turn"></button>
+          title="Automatically selects the sole one-time approval option. Stays on until you stop the turn, switch it off, or /clear or /exit the chat."
+          aria-label="Auto-approve eligible tool requests"></button>
       </div>
       <button id="scrollend" aria-label="scroll to latest message" title="scroll to latest"></button>
     </div>
@@ -318,7 +319,9 @@
       <b>new lane</b> branches a new topic, another <b>existing lane</b> crosses
       over onto it. To just continue this thread, close and use <b>/clear</b> instead.</div>
   </div>
-  <button class="cta" id="nc_start">Start</button>
+  <!-- structure mirrors sheets.js submitButtonHTML; the busy state adds
+       .ctadots and flips aria-busy, the visible title never changes -->
+  <button class="cta" id="nc_start" aria-busy="false" aria-label="Start"><span class="ctalabel">Start</span></button>
 </div>
 
 <!-- adopt sheet -->

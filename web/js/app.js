@@ -1102,6 +1102,9 @@ sheetsFeature = createSheetsFeature({
   uiMutate: op => uiMutate(op),
   updateLocalNode: n => updateLocalNode(n),
   select: id => select(id),
+  /* the launch prompt's optimistic echo — the composer owns every later turn */
+  setSentEcho: e => chatFeature.setSentEcho(e),
+  now: () => Date.now(),
   setLevel,
   isDesktop,
   tick: () => pollingFeature.tick(),

@@ -91,39 +91,10 @@ func TestTmuxClearDisarmsClaudeLease(t *testing.T) {
 	}
 }
 
-func TestPollDisarmsClaudeLeaseWhenTurnEnds(t *testing.T) {
-	// AT-CP-21: the lease cannot cross a turn. For tmux the turn boundary is
-	// the same mechanical pane signal liveness already uses — active → quiet
-	// retracts the marker before the phase is cleared.
-	f := &fakeTmux{alive: map[string]bool{"t1": true}, list: []string{"t1"}, capture: "idle pane"}
-	a := newTestApp(t, f)
-	n, bundle := seedPermClaude(t, a, "t1", hookSIDOwn)
-
-	a.mu.Lock()
-	a.live[n.ID] = "active"
-	a.prevCap[n.ID] = "idle pane"
-	a.lastChg[n.ID] = time.Now().Add(-2 * paneQuietAfter)
-	a.mu.Unlock()
-	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
-	if _, ok := markerLease(t, bundle); !ok {
-		t.Fatal("precondition: armed lease must publish a marker")
-	}
-
-	a.poll()
-
-	a.mu.Lock()
-	live := a.live[n.ID]
-	a.mu.Unlock()
-	if live != "quiet" {
-		t.Fatalf("live = %q, want quiet (test setup)", live)
-	}
-	if got := phaseOf(a, n.ID); got != autoPhaseOff {
-		t.Fatalf("phase after the turn ended = %q, want off", got)
-	}
-	if lease, ok := markerLease(t, bundle); ok {
-		t.Fatalf("turn end left the arm marker behind (%q)", lease)
-	}
-}
+// AT-CP-21 (the *armed phase* cannot cross a turn; the human's enable does)
+// now lives in auto_approve_sticky_test.go as
+// TestTurnEndKeepsTmuxLeaseEnabledAsPrimed: active → quiet still retracts the
+// marker at the boundary, but parks the lease as primed instead of clearing it.
 
 func TestEnableDuringActiveTmuxTurnArmsImmediately(t *testing.T) {
 	// AT-CP-22: a human toggles auto-approve *because* a turn is running. For
