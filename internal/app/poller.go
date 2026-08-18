@@ -382,7 +382,19 @@ func (a *app) poll() {
 				disarmLeaseID = st.LeaseID
 			}
 		} else if prev == "active" && state != "active" {
-			if st := a.autoApprove[n.ID]; st != nil {
+			// A quiet pane is not a finished turn while a tool is still
+			// running. A silent command draws nothing, so the pane crosses
+			// paneQuietAfter (8s) mid-turn; parking there retracts the marker,
+			// and the turn's *next* call escalates to a dialog the human had
+			// already authorized. Observed live (probe case D): `sleep 150`
+			// went quiet at 25s, and the following call in the same turn hit a
+			// dialog 130s later. The transcript settles what the pane cannot —
+			// the same unresolved-call count turn_done reads, already polled
+			// this tick. With no readable transcript the plain rule stands:
+			// fail closed to the pane dialog rather than hold a lease on no
+			// evidence.
+			toolRunning := quietTl != nil && quietTl.PendingCount() > 0
+			if st := a.autoApprove[n.ID]; st != nil && !toolRunning {
 				settleLeaseID = st.LeaseID
 			}
 		}

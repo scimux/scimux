@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -312,5 +313,87 @@ func TestManualDisableStillTurnsLeaseOff(t *testing.T) {
 	v := a.setAutoApproveEnabled(n.ID, false, "active", "", 0)
 	if v.Enabled || v.Phase != string(autoPhaseOff) {
 		t.Fatalf("manual disable = %+v, want off", v)
+	}
+}
+
+// seedPermClaudeWithTranscript is seedPermClaude plus a bound transcript whose
+// lines the caller supplies, so a test can put the node in a state the tailer
+// can read (an unresolved tool call, say).
+func seedPermClaudeWithTranscript(t *testing.T, a *app, id, sid string, lines ...string) (*Node, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), id+".jsonl")
+	appendLines(t, path, lines...)
+	n, bundle := seedPermClaude(t, a, id, sid)
+	n.Transcript = path
+	return n, bundle
+}
+
+// A tool call the agent has started and no result has come back for: the
+// transcript state of `sleep 150 && date > d1.txt` while it runs.
+const runningToolCall = `{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`
+
+func TestLongRunningToolCallDoesNotParkTmuxLease(t *testing.T) {
+	// Live probe case D, 2026-08-18. A pane that has gone quiet is not a
+	// finished turn while a tool is still running: `sleep 150` draws nothing,
+	// so the pane crossed paneQuietAfter (8s) at t=25s, the boundary parked the
+	// lease, and when the tool finished 130s later the *next* call in the same
+	// turn found no marker and escalated to a dialog. One audited approval
+	// instead of three, and a human waiting on a turn they had already
+	// authorized. Any tool call quiet for more than 8s did this — a build, a
+	// test run, a fetch — so it was most real work, not an edge case.
+	//
+	// Pane quietness alone cannot tell "turn over" from "tool running"; the
+	// transcript can, and already does for turn_done. An unresolved call means
+	// the turn is still going, so the lease must stay armed.
+	f := &fakeTmux{alive: map[string]bool{"t1": true}, list: []string{"t1"}, capture: "idle pane"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "t1", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run it"}}`,
+		runningToolCall)
+
+	a.mu.Lock()
+	a.live[n.ID] = "active"
+	a.mu.Unlock()
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+	armedLease := leaseIDOf(a, n.ID)
+
+	endTmuxTurn(t, a, n.ID)
+
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase while a tool call is still unresolved = %q, want armed", got)
+	}
+	lease, ok := markerLease(t, bundle)
+	if !ok {
+		t.Fatal("the marker was retracted mid-turn; the turn's next call escalates to a dialog the human already authorized")
+	}
+	if lease != armedLease {
+		t.Fatalf("marker lease = %q, want the unchanged armed lease %q", lease, armedLease)
+	}
+}
+
+func TestResolvedToolCallStillParksTmuxLease(t *testing.T) {
+	// The other side of the same predicate: once the result is in, a quiet pane
+	// is a finished turn and the boundary parks the lease as before. Without
+	// this the fix above would simply never park.
+	f := &fakeTmux{alive: map[string]bool{"t2": true}, list: []string{"t2"}, capture: "idle pane"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "t2", hookSIDOwn,
+		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"run it"}}`,
+		runningToolCall,
+		`{"type":"user","timestamp":"t3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"done"}]}}`,
+		`{"type":"assistant","timestamp":"t4","message":{"role":"assistant","content":[{"type":"text","text":"it is done"}]}}`)
+
+	a.mu.Lock()
+	a.live[n.ID] = "active"
+	a.mu.Unlock()
+	a.setAutoApproveEnabled(n.ID, true, "active", "", 0)
+
+	endTmuxTurn(t, a, n.ID)
+
+	if got := phaseOf(a, n.ID); got != autoPhasePrimed {
+		t.Fatalf("phase after a completed turn = %q, want primed", got)
+	}
+	if lease, ok := markerLease(t, bundle); ok {
+		t.Fatalf("completed turn left the arm marker behind (%q)", lease)
 	}
 }
