@@ -2752,11 +2752,15 @@ test("P1 A4: #chatloading overlay still present and [hidden] by default", () => 
   const hidden = chatCssSrc.match(/#chatloading\[hidden\]\s*\{([^}]+)\}/);
   assert.ok(hidden, "#chatloading[hidden] rule present");
   assert.match(hidden[1], /display\s*:\s*none/);
-  // backdrop tint/blur still lives on the overlay
-  const overlay = chatCssSrc.match(/#chatloading\s*\{([^}]+)\}/);
-  assert.ok(overlay);
-  assert.match(overlay[1], /backdrop-filter|background/,
-    "overlay still tints/blurs the backdrop on its own");
+  // Backdrop tint/blur still belongs to the overlay and never to the scroller.
+  // It sits on the overlay's own .scrim layer rather than the shell — see
+  // LI-A3 for why the indicator must not be inside a filtered box.
+  const scrim = chatCssSrc.match(/#chatloading\s+\.scrim\s*\{([^}]+)\}/);
+  assert.ok(scrim, "#chatloading .scrim rule present");
+  assert.match(scrim[1], /backdrop-filter|background/,
+    "the overlay still tints/blurs the backdrop on its own");
+  assert.doesNotMatch(baseMsgsRuleBody(chatCssSrc), /backdrop-filter|filter\s*:/,
+    "and the dimming never migrates onto the scroller");
 });
 
 test("P1 pure 1: no layout box keeps intent pending", () => {
@@ -3465,4 +3469,106 @@ test("buildChatSignature includes permRequestId so A→B rebuilds the row", () =
     buildChatSignature({ ...base, permRequestId: undefined }),
     "missing and empty request id are equivalent",
   );
+});
+
+/* ---------- Loading indicators P1: the chat overlay spinner ----------
+ * Reported from an iPhone: on a slow connection the chat dims and a spinner
+ * appears, but it does not turn. Two independent causes, both fixed here:
+ *   (a) Reduce Motion switched the animation off. Apple's own
+ *       UIActivityIndicatorView / ProgressView keep spinning under Reduce
+ *       Motion — that setting targets large-scale parallax and slide/zoom
+ *       transitions, not a small in-place indeterminate indicator. HIG is
+ *       explicit that a progress indicator which stops moving reads as
+ *       stalled, which is the opposite of the message.
+ *   (b) The spinner lived *inside* an element carrying backdrop-filter. On
+ *       WebKit that box rasterizes as a unit and an animating descendant can
+ *       stop repainting — the same layer-staleness family already documented
+ *       for #msgs. The dim/blur is now its own sibling layer behind the
+ *       indicator, so the indicator is never in a filtered subtree.
+ */
+const indexHtmlChat = readFileSync(join(__dirname, "../index.html"), "utf8");
+
+function chatLoadingMarkup(html){
+  const m = html.match(/<div id="chatloading"[^>]*>[\s\S]*?<\/div>\s*<\/div>/);
+  assert.ok(m, "#chatloading element present in index.html");
+  return m[0];
+}
+
+/* Brace-matched extraction: a naive non-greedy regex stops at the first inner
+   "}" and would silently exclude the very declarations under test. */
+function reducedMotionBlocks(css){
+  const out = [];
+  const re = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{/g;
+  let m;
+  while ((m = re.exec(css))){
+    let depth = 1, i = re.lastIndex;
+    while (i < css.length && depth > 0){
+      if (css[i] === "{") depth++;
+      else if (css[i] === "}") depth--;
+      i++;
+    }
+    assert.equal(depth, 0, "unbalanced prefers-reduced-motion block");
+    out.push(css.slice(m.index, i));
+  }
+  assert.ok(out.length, "the stylesheet must still have reduced-motion blocks");
+  return out;
+}
+
+test("LI-A1: the chat spinner keeps animating under Reduce Motion", () => {
+  const rule = chatCssSrc.match(/#chatloading\s+\.spin\s*\{([^}]+)\}/);
+  assert.ok(rule, "#chatloading .spin rule present");
+  assert.match(rule[1], /animation\s*:\s*spin\s/,
+    "the indicator is driven by the shared spin keyframes");
+  for (const block of reducedMotionBlocks(chatCssSrc)){
+    assert.doesNotMatch(block, /#chatloading\s+\.spin/,
+      "Reduce Motion must not stop the chat spinner: a frozen indicator reads " +
+      "as stalled, and a small in-place indicator is not the motion class the " +
+      "setting exists to suppress");
+  }
+});
+
+test("LI-A2: no indeterminate progress indicator is frozen by Reduce Motion", () => {
+  /* The same rule as A1, applied to every spinner idiom in the sheet: the
+     upload chip's ring and the sheet CTA's dots. */
+  for (const block of reducedMotionBlocks(chatCssSrc)){
+    assert.doesNotMatch(block, /\.stagechip\s+\.spin/,
+      "the upload chip's ring is an indeterminate indicator too");
+  }
+});
+
+test("LI-A3: the blur/dim is a sibling scrim, never the spinner's ancestor", () => {
+  const shell = chatCssSrc.match(/#chatloading\s*\{([^}]+)\}/);
+  assert.ok(shell, "#chatloading rule present");
+  assert.doesNotMatch(shell[1], /backdrop-filter/,
+    "a backdrop-filter box rasterizes as a unit on WebKit; an animating " +
+    "descendant can stop repainting inside it");
+  assert.doesNotMatch(shell[1], /(^|[^-])filter\s*:/,
+    "no filter on the ancestor of the indicator either");
+  const scrim = chatCssSrc.match(/#chatloading\s+\.scrim\s*\{([^}]+)\}/);
+  assert.ok(scrim, "#chatloading .scrim carries the dim + blur");
+  assert.match(scrim[1], /-webkit-backdrop-filter\s*:\s*blur/, "keep the WebKit prefix");
+  assert.match(scrim[1], /(^|[^-])backdrop-filter\s*:\s*blur/, "and the unprefixed property");
+  assert.match(scrim[1], /position\s*:\s*absolute/, "the scrim covers the region on its own layer");
+
+  const markup = chatLoadingMarkup(indexHtmlChat);
+  const scrimAt = markup.indexOf('class="scrim"');
+  const spinAt = markup.indexOf('class="spin"');
+  assert.ok(scrimAt >= 0, "scrim element present");
+  assert.ok(spinAt >= 0, "spin element present");
+  assert.ok(scrimAt < spinAt, "scrim paints first, the indicator sits above it");
+  assert.doesNotMatch(markup, /class="scrim"[^>]*>\s*<div class="spin"/,
+    "the spinner must be the scrim's sibling, not its child");
+});
+
+test("LI-A4: the overlay announces itself as a live status region", () => {
+  const markup = chatLoadingMarkup(indexHtmlChat);
+  assert.match(markup, /role="status"/, "VoiceOver needs the status role");
+  assert.match(markup, /aria-live="polite"/, "polite: it must not interrupt");
+  assert.match(markup, /aria-label="loading chat"/);
+});
+
+test("LI-A5: the indicator's arc carries the contrast, not the track", () => {
+  const rule = chatCssSrc.match(/#chatloading\s+\.spin\s*\{([^}]+)\}/);
+  assert.match(rule[1], /border-top-color\s*:\s*var\(--work\)/,
+    "the moving arc is a non-text UI component and takes the full accent");
 });

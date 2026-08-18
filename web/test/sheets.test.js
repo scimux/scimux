@@ -32,6 +32,7 @@ import {
   buildAdoptPayload,
   createErrorField,
   submitButtonLabel,
+  submitButtonHTML,
   sheetHeadLabels,
   getLastDir,
   setLastDir,
@@ -994,7 +995,10 @@ test("single-flight submission ignores re-entry", async () => {
   ctx.byId.nc_start.dispatch("click");
   await Promise.resolve();
   assert.equal(ctx.byId.nc_start.disabled, true);
-  assert.equal(ctx.byId.nc_start.textContent, "Starting...");
+  /* the busy state moved off the visible title and onto the accessible name +
+     the .ctadots indicator (LI-B1..B3) */
+  assert.equal(ctx.byId.nc_start.getAttribute("aria-label"), "Starting...");
+  assert.match(ctx.byId.nc_start.innerHTML, /class="ctadots"/);
   ctx.byId.nc_start.dispatch("click");
   await Promise.resolve();
   assert.equal(posts, 1);
@@ -1426,4 +1430,178 @@ test("P2: the modal sheet layer sits above every full-screen overlay", () => {
     `#notesworkspace (${wsZ}) and #previewview (${previewZ}) share a tier`);
   assert.ok(toastZ > sheetZ,
     `#toast (${toastZ}) must outrank .sheet (${sheetZ})`);
+});
+
+/* ---------- Loading indicators P2/P3: the Start button and the launch echo ----------
+ * Two gaps reported from an iPhone against one moment — pressing Start:
+ *   P2  the button goes disabled and its label swaps to "Starting..." with no
+ *       motion at all, so a slow backend is indistinguishable from a dead one.
+ *   P3  the first prompt travels *with the launch config*, not through the
+ *       composer, so nothing ever called setSentEcho for it. On a cold ACP
+ *       model load the chat then sat empty for minutes — not even the human's
+ *       own prompt was on screen.
+ * HIG shape for P2: the visible label stays put (a control's title is not a
+ * progress readout, and a changing title resizes the control); the motion is a
+ * separate indeterminate indicator; the *accessible* name still carries the
+ * state, so submitButtonLabel keeps its wording and becomes the aria-label.
+ */
+
+test("LI-B1: the visible CTA label is stable; the dots are a separate indicator", () => {
+  assert.equal(submitButtonHTML({ editing: false, submitting: false }),
+    `<span class="ctalabel">Start</span>`);
+  assert.equal(submitButtonHTML({ editing: true, submitting: false }),
+    `<span class="ctalabel">Save</span>`);
+  const busy = submitButtonHTML({ editing: false, submitting: true });
+  assert.match(busy, /<span class="ctalabel">Start<\/span>/,
+    "the word does not change under the user — only an indicator is added");
+  assert.match(busy, /class="ctadots"/);
+  assert.match(submitButtonHTML({ editing: true, submitting: true }),
+    /<span class="ctalabel">Save<\/span>[\s\S]*class="ctadots"/);
+});
+
+test("LI-B2: three dots, decorative to VoiceOver", () => {
+  const busy = submitButtonHTML({ editing: false, submitting: true });
+  assert.equal((busy.match(/<i><\/i>/g) || []).length, 3, "three dots");
+  assert.match(busy, /class="ctadots" aria-hidden="true"/,
+    "the accessible name carries the state; the dots must not be read out");
+});
+
+test("LI-B3: pressing Start paints dots, aria-busy and the busy accessible name", async () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const ctx = createFeature();
+  ctx.setApi(async (path, opts) => {
+    if (path === "/api/agents") return {};
+    if (path === "/api/nodes" && opts.method === "POST"){ await gate; return { id: "n1" }; }
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  assert.match(ctx.byId.nc_start.innerHTML, /<span class="ctalabel">Start<\/span>/);
+  assert.equal(ctx.byId.nc_start.getAttribute("aria-busy"), "false");
+
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  assert.equal(ctx.byId.nc_start.disabled, true);
+  assert.match(ctx.byId.nc_start.innerHTML, /class="ctadots"/, "the wait is animated");
+  assert.match(ctx.byId.nc_start.innerHTML, /<span class="ctalabel">Start<\/span>/,
+    "the label does not resize the button mid-press");
+  assert.equal(ctx.byId.nc_start.getAttribute("aria-busy"), "true");
+  assert.equal(ctx.byId.nc_start.getAttribute("aria-label"), "Starting...",
+    "the state lives in the accessible name, not the visible title");
+  release();
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+});
+
+test("LI-B4: the editor's Save button uses the same busy chrome", () => {
+  const ctx = createFeature();
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("p1");
+  assert.match(ctx.byId.nc_start.innerHTML, /<span class="ctalabel">Save<\/span>/,
+    "resetCreateChrome/openActivityEditor must not write bare text over the structure");
+});
+
+test("LI-B5: dots animate, survive Reduce Motion, and busy is not disabled-dim", () => {
+  assert.match(sheetsCssSrc, /@keyframes\s+ctadot\b/, "the dots have their own keyframes");
+  const dots = sheetsCssSrc.match(/\.ctadots\s+i\s*\{([^}]+)\}/);
+  assert.ok(dots, ".ctadots i rule present");
+  assert.match(dots[1], /animation\s*:\s*ctadot\s/);
+  assert.match(sheetsCssSrc, /\.ctadots\s+i:nth-child\(2\)\s*\{[^}]*animation-delay/,
+    "staggered delays are what make it read as travelling dots");
+  assert.match(sheetsCssSrc, /\.ctadots\s+i:nth-child\(3\)\s*\{[^}]*animation-delay/);
+  const rm = sheetsCssSrc.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\n\}/g) || [];
+  for (const b of rm)
+    assert.doesNotMatch(b, /\.ctadots/,
+      "an indeterminate indicator that stops moving reads as stalled");
+  assert.match(sheetsCssSrc, /\.cta\[aria-busy="true"\]/,
+    "busy must not look the same as unavailable: lift the :disabled dimming");
+});
+
+test("LI-C1: a started activity echoes its launch prompt before the chat opens", async () => {
+  const echoes = [];
+  const ctx = createFeature({
+    deps: { setSentEcho: e => echoes.push(e), now: () => 1234 },
+  });
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_title.value = "Cold model";
+  ctx.byId.nc_prompt.value = "explain the fare layer";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+
+  assert.equal(echoes.length, 1, "exactly one optimistic echo for the launch prompt");
+  assert.deepEqual(echoes[0], {
+    node: "created-1", text: "explain the fare layer", atts: [], at: 1234, seen: null,
+  }, "same record shape composer.buildSentEcho makes; seen:null — there is no prior surface");
+  assert.deepEqual(ctx.effects.select, ["created-1"]);
+});
+
+test("LI-C2: the echo is set before the selection, so the first render already has it", async () => {
+  const order = [];
+  const ctx = createFeature({
+    deps: {
+      setSentEcho: () => order.push("echo"),
+      select: id => order.push("select:" + id),
+    },
+  });
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_prompt.value = "p";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.deepEqual(order, ["echo", "select:created-1"],
+    "select() runs refreshChat; the echo must already be set or the first " +
+    "paint is empty and the bubble pops in a poll later");
+});
+
+test("LI-C3: an undelivered launch prompt is never echoed as delivered", async () => {
+  for (const delivery of ["not_sent", "unconfirmed"]){
+    const echoes = [];
+    const ctx = createFeature({ deps: { setSentEcho: e => echoes.push(e) } });
+    ctx.setApi(async (path, opts) => {
+      if (path === "/api/agents") return {};
+      if (path === "/api/nodes" && opts.method === "POST")
+        return { id: "n1", initial_delivery: delivery };
+      return {};
+    });
+    ctx.feature.bind();
+    ctx.byId.plusbtn.dispatch("click");
+    ctx.byId.nc_title.value = "T";
+    ctx.byId.nc_prompt.value = "p";
+    ctx.byId.nc_lane.value = "lane-a";
+    ctx.byId.nc_start.dispatch("click");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.equal(echoes.length, 0,
+      `${delivery}: the prompt was restored to the draft — an echo would claim ` +
+      "a delivery that did not happen");
+    assert.equal(ctx.storage.getItem("scimux-draft:n1"), "p", "recovery draft still kept");
+  }
+});
+
+test("LI-C4: an edit or a rejected start never mints an echo", async () => {
+  const echoes = [];
+  const ctx = createFeature({ deps: { setSentEcho: e => echoes.push(e) } });
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("p1");
+  ctx.byId.nc_title.value = "Renamed";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(echoes.length, 0, "editing a node is not a prompt");
+
+  ctx.feature.openNewActivity();
+  ctx.byId.nc_title.value = "";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(echoes.length, 0, "a rejected form never launched anything");
+});
+
+test("LI-C5: sheets still imports no later feature module for the echo", () => {
+  assert.doesNotMatch(sheetsSrc, /from "\.\/composer\.js"/,
+    "the echo record is built as a literal here, like the draft-key contract");
+  assert.match(sheetsSrc, /setSentEcho/);
 });

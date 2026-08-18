@@ -72,23 +72,35 @@ body.cards-open #msgs { overflow: hidden; }
 #peekhost:empty { display: none; }
 /* pointer-events only — never filter/opacity on the scroller (see #msgs). */
 #msgwrap.loading #msgs { pointer-events: none; }
+/* The overlay is a bare positioning shell — deliberately no filter and no
+   background of its own. The dim + blur lives on the .scrim child so the
+   indicator is never a descendant of a backdrop-filtered box: WebKit
+   rasterizes such a box as one unit and an animating descendant inside it can
+   stop repainting, which is the "spinner that does not spin" reported from an
+   iPhone. Same layer-staleness family as the #msgs note above. */
 #chatloading {
   position: absolute; inset: 0; z-index: 2;
   display: flex; align-items: center; justify-content: center;
+}
+#chatloading[hidden] { display: none; }
+#chatloading .scrim {
+  position: absolute; inset: 0;
   background: color-mix(in srgb, var(--bg) 42%, transparent);
   -webkit-backdrop-filter: blur(1px); backdrop-filter: blur(1px);
 }
-#chatloading[hidden] { display: none; }
 #chatloading .spin {
+  position: relative;   /* above the scrim without joining its layer */
   width: 34px; height: 34px; border-radius: 50%;
-  border: 3px solid rgba(var(--work-rgb), .22);
+  border: 3px solid rgba(var(--work-rgb), .28);
   border-top-color: var(--work);
   animation: spin .85s linear infinite;
 }
-@media (prefers-reduced-motion: reduce) {
-  /* vestigial #msgs { transition: none } removed with the scroller transition */
-  #chatloading .spin { animation: none; }
-}
+/* No prefers-reduced-motion rule here, and none for any other indeterminate
+   progress indicator (.stagechip .spin i, .ctadots). That setting exists for
+   large-scale parallax and slide/zoom transitions that provoke vestibular
+   discomfort; Apple's own UIActivityIndicatorView and ProgressView keep
+   turning under it. A progress indicator that stops moving reads as stalled —
+   exactly the message a slow connection must not send. */
 /* no "you/agent" labels — side + color already carry the role */
 .turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
 .turn .bubble {
@@ -596,4 +608,4 @@ body.cards-open #msgs { overflow: hidden; }
   justify-content: center; }
 .stagechip .spin i { width: 16px; height: 16px; border-radius: 50%;
   border: 2px solid var(--hairline); border-top-color: var(--work); animation: spin .7s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .stagechip .spin i { animation: none; } }
+/* keeps turning under Reduce Motion — see the #chatloading note */

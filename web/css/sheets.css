@@ -50,10 +50,30 @@
   background: var(--bg); border: 1px solid var(--hairline); border-radius: 10px;
   padding: 10px 12px; outline: none; margin-top: 4px;
 }
-.sheet .cta { display: block; width: 100%; margin-top: 20px; padding: 13px;
+.sheet .cta { display: flex; align-items: center; justify-content: center; gap: 2px;
+  width: 100%; margin-top: 20px; padding: 13px;
   background: var(--work); color: #fff; font-weight: 600; font-size: 16px;
   border-radius: var(--radius); text-align: center; }
 .sheet .cta:disabled { opacity: .55; }
+/* Busy is not unavailable. The button is disabled while the request is in
+   flight (single-flight), but the disabled dimming would say "you cannot do
+   this" when the truth is "this is happening" — so busy keeps near-full
+   contrast and lets the dots carry the message. */
+.sheet .cta[aria-busy="true"]:disabled { opacity: .82; }
+
+/* Indeterminate wait indicator for a committed action: three dots travelling
+   in a shallow wave. Deliberately not another ring — the chat overlay already
+   owns the spinner idiom, and two different waits should not look alike.
+   No prefers-reduced-motion rule: see the note in chat.css (#chatloading). */
+.ctadots { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.ctadots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor;
+  animation: ctadot 1.05s ease-in-out infinite; }
+.ctadots i:nth-child(2) { animation-delay: .14s; }
+.ctadots i:nth-child(3) { animation-delay: .28s; }
+@keyframes ctadot {
+  0%, 70%, 100% { transform: translateY(0);    opacity: .5; }
+  35%           { transform: translateY(-3px); opacity: 1; }
+}
 .sheet .item { display: flex; gap: 10px; align-items: baseline; margin: 8px 0; font-size: 14px; }
 .sheet .item .tag { color: var(--dim); font-size: 12px; margin-left: auto; }
 /* burger menu: update row + about ([hidden] must beat the display rules above) */
