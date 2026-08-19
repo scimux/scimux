@@ -666,6 +666,19 @@ func TestSendToPicker(t *testing.T) {
 	if !strings.Contains(string(bookmarks), "sendableNodes") {
 		t.Error("bookmarks must rank send-to targets via map-model's sendableNodes")
 	}
+	if !strings.Contains(string(bookmarks), "sendToItemHTML") {
+		t.Error("send-to rows must be built by sendToItemHTML (lane swatch + agent logo + title)")
+	}
+	if !strings.Contains(app, "agentLogo,\n  laneModel: () => laneModel()") {
+		t.Error("bookmarks feature must receive agentLogo so send-to rows can show the agent mark")
+	}
+	sheetsCSS, err := os.ReadFile(webSourcePath("web/css/sheets.css"))
+	if err != nil {
+		t.Fatalf("read sheets.css: %v", err)
+	}
+	if !strings.Contains(string(sheetsCSS), "#sendto .agent-logo") {
+		t.Error("send-to picker needs a #sendto .agent-logo size rule")
+	}
 	css, err := os.ReadFile(webSourcePath("web/css/chat.css"))
 	if err != nil {
 		t.Fatalf("read chat.css: %v", err)

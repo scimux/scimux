@@ -47,7 +47,8 @@
  *   - Send-to draft merge + sheet/navigation (explicit bar button; P6 removed
  *     the longpress-only route)
  *   - openSendTo: shared picker for bookmark bar, inbox, reference, and chat
- *     bubbles — live/open targets only, pinned block then recency
+ *     bubbles — live/open targets only, pinned block then recency; each
+ *     row is lane swatch, then agent logo, then title (sendToItemHTML)
  *
  * Timers / clipboard / scrolling / layout seams:
  *   - copy acknowledgement 900ms timer (restores ICON_COPY; clears sig)
@@ -57,7 +58,7 @@
  *   - body.bookmarks-open class toggle
  *
  * Injected node / lane / chat / Notes / sheet / navigation effects:
- *   - nodeById, orderedNodes, pinned, laneList, laneColor, laneModel
+ *   - nodeById, orderedNodes, pinned, laneList, laneColor, laneModel, agentLogo
  *   - uiMutate, bookmarks getter (UI.bookmarks)
  *   - jump deps: setPendingJump, invalidateChat, select, openPreview,
  *     wsOpen, closeWorkspace, isDesktop, singleZone
@@ -360,6 +361,28 @@ export function bookmarksToggleState(open){
 /** Longpress send-to: merge bookmark text into an existing per-node draft. */
 export function mergeBookmarkIntoDraft(prev, text){
   return (prev ? prev + "\n\n" : "") + (text || "");
+}
+
+/** One send-to destination row: lane swatch, agent logo, title.
+    The logo is visual identity (HIG leading image). It is aria-hidden; the
+    button's aria-label carries "title, agent" so VoiceOver can tell two
+    like-named chats apart. Logo HTML is trusted (agentLogo returns SVG/mask
+    markup) and is not re-escaped. */
+export function sendToItemHTML(n, opts){
+  if (!n || !n.id) return "";
+  const d = opts || {};
+  const e = d.esc || escDefault;
+  const color = typeof d.laneColor === "function" ? d.laneColor(n.lane_id) : "";
+  const logoFn = typeof d.agentLogo === "function" ? d.agentLogo : () => "";
+  const title = n.title || "";
+  const agent = n.agent || "agent";
+  const logo = logoFn(n.agent);
+  const aria = title ? `${title}, ${agent}` : agent;
+  return `<button type="button" class="pos-item" data-fwd="${e(n.id)}" aria-label="${e(aria)}" style="width:100%;text-align:left">
+      <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${e(color)}"></span>
+      <span class="agent-logo" title="${e(agent)}" aria-hidden="true">${logo}</span>
+      <span>${e(title)}</span>
+    </button>`;
 }
 
 /** Manual create payload shape (caller supplies ISO t). */
@@ -799,11 +822,11 @@ export function createBookmarksFeature(deps){
       (doc && doc.querySelector && doc.querySelector("#sendto_title"));
     if (titleEl && title) titleEl.textContent = title;
     const groups = sendableNodes(nodes, { exceptId, pinned: pins });
-    const item = n => `
-    <button class="pos-item" data-fwd="${esc(n.id)}" style="width:100%;text-align:left">
-      <span style="width:12px;height:12px;border-radius:6px;flex:none;align-self:center;background:${esc(lm.color(n.lane_id))}"></span>
-      <span>${esc(n.title)}</span>
-    </button>`;
+    const item = n => sendToItemHTML(n, {
+      esc,
+      laneColor: id => lm.color(id),
+      agentLogo: d.agentLogo,
+    });
     /* Label the blocks only when both exist: with one block the order needs no
        explanation, with two an unlabelled split looks arbitrary. */
     const labelled = groups.pinned.length > 0 && groups.recent.length > 0;

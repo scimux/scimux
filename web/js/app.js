@@ -929,6 +929,7 @@ bookmarksFeature = createBookmarksFeature({
   nodeById: id => nodeById(id),
   laneList: () => laneList(),
   laneColor: id => laneColor(id),
+  agentLogo,
   laneModel: () => laneModel(),
   orderedNodes: () => orderedNodes(),
   pinned: () => getUI().pinned,

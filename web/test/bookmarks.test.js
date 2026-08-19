@@ -24,6 +24,7 @@ import {
   bookmarkFlagsHTML,
   bookmarksToggleState,
   mergeBookmarkIntoDraft,
+  sendToItemHTML,
   manualBookmarkPayload,
   jumpAddressDecision,
   createBookmarksFeature,
@@ -1096,6 +1097,108 @@ test("sendto action opens picker, merges draft, navigates", () => {
   assert.equal(roots.chatPrompt._focused, true);
 });
 
+/* ---------- send-to row markup: lane swatch, then agent logo, then title ---------- */
+
+const sendToEsc = s => String(s ?? "").replace(/[<>&"]/g, c => ({
+  "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;",
+}[c]));
+
+function sendToFwdRow(html, id){
+  const m = html.match(new RegExp(`<button\\b[^>]*data-fwd="${id}"[^>]*>[\\s\\S]*?</button>`));
+  assert.ok(m, `data-fwd=${id} row present`);
+  return m[0];
+}
+
+test("sendToItemHTML: swatch, then agent-logo, then title; VoiceOver name is title, agent", () => {
+  const html = sendToItemHTML(
+    { id: "n1", title: "Alpha", agent: "claude", lane_id: "lane-a" },
+    { esc: sendToEsc, laneColor: () => "#f00", agentLogo: a => `LOGO(${a})` },
+  );
+  const iDot = html.search(/width:\s*12px/);
+  const iLogo = html.search(/class="agent-logo"/);
+  const iTitle = html.search(/<span>Alpha<\/span>/);
+  assert.ok(iDot >= 0, "lane swatch present");
+  assert.ok(iLogo > iDot, "agent logo sits after the lane swatch");
+  assert.ok(iTitle > iLogo, "title sits after the agent logo");
+  assert.match(html, /data-fwd="n1"/);
+  assert.match(html, /aria-label="Alpha, claude"/);
+  assert.match(html, /class="agent-logo"[^>]*title="claude"/);
+  assert.match(html, /class="agent-logo"[^>]*aria-hidden="true"/);
+  assert.match(html, /LOGO\(claude\)/);
+  assert.match(html, /background:#f00/);
+  assert.match(html, /class="pos-item"/);
+});
+
+test("sendToItemHTML: missing agent falls back to 'agent'; logo helper still receives the raw value", () => {
+  const seen = [];
+  const html = sendToItemHTML(
+    { id: "n1", title: "Alpha", lane_id: "lane-a" },
+    { esc: sendToEsc, laneColor: () => "#0f0", agentLogo: a => { seen.push(a); return "X"; } },
+  );
+  assert.match(html, /aria-label="Alpha, agent"/);
+  assert.match(html, /title="agent"/);
+  assert.deepEqual(seen, [undefined]);
+});
+
+test("sendToItemHTML: missing title uses the agent as the accessible name", () => {
+  const html = sendToItemHTML(
+    { id: "n1", agent: "pi" },
+    { esc: sendToEsc, agentLogo: () => "" },
+  );
+  assert.match(html, /aria-label="pi"/);
+  assert.doesNotMatch(html, /aria-label=", /);
+  assert.match(html, /<span><\/span>\s*<\/button>/);
+});
+
+test("sendToItemHTML: escapes id, title, agent, and lane color; logo HTML is trusted", () => {
+  const html = sendToItemHTML(
+    { id: `a"b`, title: `Hi <x>`, agent: `cl"aude`, lane_id: "l" },
+    {
+      esc: sendToEsc,
+      laneColor: () => `red"`,
+      agentLogo: () => `<svg></svg>`,
+    },
+  );
+  assert.match(html, /data-fwd="a&quot;b"/);
+  assert.match(html, /aria-label="Hi &lt;x&gt;, cl&quot;aude"/);
+  assert.match(html, /title="cl&quot;aude"/);
+  assert.match(html, /background:red&quot;/);
+  assert.match(html, /<span>Hi &lt;x&gt;<\/span>/);
+  assert.match(html, /<svg><\/svg>/, "agentLogo returns HTML; do not re-escape it");
+  assert.doesNotMatch(html, /Hi <x>/);
+});
+
+test("sendToItemHTML: missing node or id yields an empty string", () => {
+  assert.equal(sendToItemHTML(null), "");
+  assert.equal(sendToItemHTML(undefined), "");
+  assert.equal(sendToItemHTML({}), "");
+  assert.equal(sendToItemHTML({ title: "x", agent: "claude" }), "");
+});
+
+test("sendToItemHTML: missing deps still emit the three-part row", () => {
+  const html = sendToItemHTML({ id: "a", title: "T", agent: "claude" });
+  assert.match(html, /data-fwd="a"/);
+  assert.match(html, /class="agent-logo"/);
+  assert.match(html, /<span>T<\/span>/);
+  assert.match(html, /aria-label="T, claude"/);
+});
+
+test("sendToItemHTML: default esc (format.js) runs when no esc is passed", () => {
+  const html = sendToItemHTML({ id: "a", title: "A<B", agent: `c"d` }, { agentLogo: () => "" });
+  assert.match(html, /A&lt;B/);
+  assert.match(html, /title="c&quot;d"/);
+  assert.match(html, /aria-label="A&lt;B, c&quot;d"/);
+});
+
+test("sendToItemHTML: non-function laneColor/agentLogo degrade to empty marks, not throw", () => {
+  const html = sendToItemHTML(
+    { id: "a", title: "T", agent: "grok", lane_id: "l" },
+    { esc: sendToEsc, laneColor: "#f00", agentLogo: "not-a-fn" },
+  );
+  assert.match(html, /class="agent-logo"[^>]*><\/span>/);
+  assert.match(html, /background:"/, "no color when laneColor is not a function");
+});
+
 /* ---------- send-to picker: one dialogue, shared by bubbles and bookmarks ---------- */
 
 const sendtoNodes = {
@@ -1167,6 +1270,68 @@ test("openSendTo with no live targets still offers Start new chat… (P4)", () =
   assert.doesNotMatch(ctx.roots.sendtoList.innerHTML, /no (running|live|open) chat/i);
   assert.match(ctx.roots.sendtoList.innerHTML, /data-newchat/);
   assert.match(ctx.roots.sendtoList.innerHTML, /Start new chat…|Start new chat\u2026/);
+});
+
+test("openSendTo rows lead with lane swatch, then agent logo, then title", () => {
+  const seen = [];
+  const ctx = createFeature({
+    nodes: {
+      a: { id: "a", title: "Alpha", lane_id: "lane-a", live: "quiet",
+        agent: "claude", last_interaction: 10 },
+      b: { id: "b", title: "Beta", lane_id: "lane-b", live: "quiet",
+        agent: "grok", last_interaction: 5 },
+    },
+    pinned: [],
+    deps: { agentLogo: ag => { seen.push(ag); return `LOGO(${ag})`; } },
+  });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x" });
+  const html = ctx.roots.sendtoList.innerHTML;
+
+  const a = sendToFwdRow(html, "a");
+  const iDot = a.search(/width:\s*12px/);
+  const iLogo = a.search(/class="agent-logo"/);
+  const iTitle = a.search(/<span>Alpha<\/span>/);
+  assert.ok(iDot >= 0, "lane swatch present");
+  assert.ok(iLogo > iDot, "agent logo after the lane swatch");
+  assert.ok(iTitle > iLogo, "title after the agent logo");
+  assert.match(a, /aria-label="Alpha, claude"/);
+  assert.match(a, /class="agent-logo"[^>]*aria-hidden="true"/);
+  assert.match(a, /title="claude"/);
+  assert.match(a, /LOGO\(claude\)/);
+  assert.match(a, /background:#f00/, "lane-a color from the test factory");
+
+  const b = sendToFwdRow(html, "b");
+  assert.match(b, /aria-label="Beta, grok"/);
+  assert.match(b, /LOGO\(grok\)/);
+  assert.deepEqual([...seen].sort(), ["claude", "grok"]);
+
+  const start = html.match(/<button\b[^>]*data-newchat[\s\S]*?<\/button>/);
+  assert.ok(start, "Start new chat row");
+  assert.doesNotMatch(start[0], /agent-logo/, "Start new chat is not a chat");
+  assert.doesNotMatch(start[0], /width:\s*12px/, "Start new chat has no lane swatch");
+});
+
+test("openSendTo still renders the logo slot when agentLogo is omitted", () => {
+  const ctx = createFeature({
+    nodes: {
+      a: { id: "a", title: "Alpha", lane_id: "lane-a", live: "quiet", last_interaction: 1 },
+    },
+    pinned: [],
+    deps: { agentLogo: null },
+  });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x" });
+  const a = sendToFwdRow(ctx.roots.sendtoList.innerHTML, "a");
+  assert.match(a, /class="agent-logo"/);
+  assert.match(a, /aria-label="Alpha, agent"/);
+});
+
+test("openSendTo empty-target list has no agent-logo (Start new chat only)", () => {
+  const ctx = createFeature({ nodes: { dead: sendtoNodes.dead }, pinned: [] });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "x", exceptId: "" });
+  assert.doesNotMatch(ctx.roots.sendtoList.innerHTML, /agent-logo/);
 });
 
 test("bookmark sendto reuses openSendTo — the crowded picker is filtered too", () => {

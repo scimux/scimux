@@ -1338,6 +1338,26 @@ test("P7: .sheet .pos-item body has min-height: 44px", () => {
     ".sheet .pos-item must declare min-height: 44px (hit-testable floor)");
 });
 
+test("send-to agent logo is 16px in the picker (not the 20px card size)", () => {
+  /* Bare `#sendto .agent-logo {` — never the img/svg/mask descendant rule. */
+  const m = sheetsCssSrc.match(/#sendto\s+\.agent-logo\s*\{([^}]+)\}/);
+  assert.ok(m, "#sendto .agent-logo rule present");
+  assert.match(m[1], /width:\s*16px/);
+  assert.match(m[1], /height:\s*16px/);
+  assert.match(m[1], /flex:\s*none/);
+  assert.doesNotMatch(m[1], /width:\s*20px/);
+  assert.doesNotMatch(m[1], /height:\s*20px/);
+});
+
+test("send-to agent logo inner marks inherit the 16px size", () => {
+  const m = sheetsCssSrc.match(/#sendto\s+\.agent-logo\s+img[\s\S]*?\{([^}]+)\}/);
+  assert.ok(m, "#sendto .agent-logo img/svg/mask-logo override present");
+  assert.match(m[1], /width:\s*16px/);
+  assert.match(m[1], /height:\s*16px/);
+  assert.match(sheetsCssSrc, /#sendto\s+\.agent-logo\s+svg/);
+  assert.match(sheetsCssSrc, /#sendto\s+\.agent-logo\s+\.mask-logo/);
+});
+
 test("P7: .sheet .pos-item body centres its items (not baseline)", () => {
   /* align-items: baseline in a 44px flex row pins the label to the top of
      the box. The lane dot already has inline align-self: center, so the
