@@ -28,6 +28,11 @@ type storeRecord struct {
 	HookID     string `json:"hook_id,omitempty"`
 	Generation int    `json:"generation,omitempty"`
 	Cause      string `json:"cause,omitempty"`
+	// RetirePath / RetireSession travel on a committed claude-binding so
+	// the new transcript and the old tombstone land in one append. Replay
+	// applies both or neither. A claude-binding-candidate is never applied.
+	RetirePath    string `json:"retire_path,omitempty"`
+	RetireSession string `json:"retire_session,omitempty"`
 	// "key" records are the answered-dialog evidence trail. Replay ignores
 	// them — they carry no node state.
 	//
@@ -110,6 +115,9 @@ func (a *app) loadStore() error {
 	if a.claudeGens == nil {
 		a.claudeGens = map[string]int{}
 	}
+	if a.claudeAck == nil {
+		a.claudeAck = map[string]bool{}
+	}
 	transcripts := map[string]string{}
 	hooks := map[string]storeRecord{}
 	bindings := map[string]storeRecord{}
@@ -140,6 +148,8 @@ func (a *app) loadStore() error {
 			hooks[rec.ID] = rec
 		case rec.Type == "claude-binding":
 			bindings[rec.ID] = rec
+		case rec.Type == "claude-binding-candidate":
+			// Uncommitted: replay must keep the previous binding.
 		case rec.Type == "delete":
 			a.removeNodeLocked(rec.ID)
 			delete(transcripts, rec.ID)
@@ -173,11 +183,19 @@ func (a *app) loadStore() error {
 		if !ok {
 			continue
 		}
+		// A later claude-hook generation is a durable detached /clear fence.
+		// Never let an older binding record overwrite or reattach across it.
+		if cur := a.claudeGens[id]; cur > 0 && rec.Generation > 0 && rec.Generation < cur {
+			continue
+		}
 		if rec.HookID != "" && safePathComponent(rec.HookID) {
 			a.claudeHooks[id] = rec.HookID
 		}
 		if rec.Generation > 0 {
 			a.claudeGens[id] = rec.Generation
+		}
+		if rec.RetirePath != "" || rec.RetireSession != "" {
+			a.markDeadTranscriptLocked(id, rec.RetirePath, rec.RetireSession)
 		}
 		// The hook identity above is not the link and survives a retire — the
 		// next SessionStart binds a successor through it. The link itself does
@@ -188,6 +206,16 @@ func (a *app) loadStore() error {
 		}
 		n.Transcript = rec.Path
 		n.SessionID = rec.SessionID
+		// A binding record is the durable proof that SessionStart ran.
+		a.claudeAck[id] = true
+	}
+	seen := map[string]bool{}
+	for _, hookID := range a.claudeHooks {
+		if hookID == "" || seen[hookID] {
+			continue
+		}
+		seen[hookID] = true
+		a.noteClaudeStrictCapability(hookID)
 	}
 	a.cleanupOrphanClaudeHooks()
 	return nil
@@ -263,6 +291,11 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.claudeGens, id)
 	delete(a.pendingClaudeHooks, id)
 	delete(a.claudeBoundAt, id)
+	delete(a.claudeAck, id)
+	delete(a.claudeLaunchErr, id)
+	delete(a.claudeTurns, id)
+	delete(a.claudeClosing, id)
+	delete(a.claudeDialogNote, id)
 	delete(a.lastDeliver, id)
 }
 

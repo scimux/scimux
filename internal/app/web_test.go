@@ -480,7 +480,7 @@ func TestStructuredApprovalDoesNotInventYN(t *testing.T) {
 		t.Fatalf("read chat.js: %v", err)
 	}
 	src := string(b)
-	i := strings.Index(src, `if (source === "acp")`)
+	i := strings.Index(src, `if (source === "acp"`)
 	if i < 0 {
 		t.Fatal("structured approval branch not found")
 	}

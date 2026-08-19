@@ -68,7 +68,13 @@ Each entry is the stored node (id, title, prompt, description, rationale,
 lane_id, fork_kind, agent, model, effort, dir, transport, created_at,
 `ended_at`, …) plus the mechanical view: `live` is
 `active | quiet | exited | unavailable`,
-`attention` (when set) is `approval | question | inspect`, and
+`attention` (when set) is `approval | question | inspect` (Claude never
+uses `inspect` for automatic terminal fallback, and never publishes
+attention while auto-approve is armed), `supervision` is the
+Claude-only contract (`claude_starting` for a current bundle awaiting
+SessionStart, `claude_strict` after acknowledgement, `claude_unsupported`
+for adopted/legacy/moved-binary bundles, `claude_failed` for startup or
+delivery errors), and
 `last_activity` is the last pane change in Unix milliseconds. `ctx_pct`, when
 present, is the live segment's context occupancy percentage. `stops` are the
 node's `/clear` page-turn timestamps; the map prepends `created_at` to draw the
@@ -143,13 +149,21 @@ fields (`ctx_used`, `ctx_window`, `ctx_pct`), `live`, `attention`, `source`,
 `progress`, and `delivery` (state of the last tmux send).
 
 For tmux/Claude nodes, `source` is `transcript`, `peek`, `none`, or
-`terminal_only`; `fallback:true` means the UI should degrade to the pane
-snapshot. For structured nodes (`codex`, ACP `pi`/`opencode`/`grok`), `source` is
+`terminal_only`; Claude never uses `fallback` to force the terminal. While
+the first Claude prompt is awaiting SessionStart or transcript confirmation,
+`pending_prompt` carries that text (pale bubble) and `delivery` is
+`submitting` or `unconfirmed`. A startup or delivery failure sets `error` and
+`restore_draft` with the original prompt; it does not open the terminal.
+
+For structured nodes (`codex`, ACP `pi`/`opencode`/`grok`), `source` is
 `acp`; there is no pane fallback, and pending approval details are returned as
 `perm_title`, `perm_options`, and — only while a permission is pending — an
 opaque `perm_request_id` that `POST …/key` must echo back. Idle structured
-chats and tmux nodes do not invent a request id. Structured-node turn failures
-may also set `error`.
+chats and tmux nodes do not invent a request id. For a strict Claude
+permission dialog the echo token is `perm_dialog_id`, a **server-minted
+visible-dialog epoch**. Claude's `Notification(permission_prompt)` payload
+has no PermissionRequest id; scimux does not claim exact request correlation.
+Structured-node turn failures may also set `error`.
 
 `GET /api/nodes/{id}/chat?history=1` returns the whole log as ordered read-only
 surfaces: `{"segments":[{"start","seam","reason","turns"}, …]}`. This is the
@@ -279,6 +293,10 @@ for a fork. A plain new activity needs a non-empty `prompt`; a fork inherits
 its parent's agent/model/effort/dir when those fields are omitted and must land
 on a lane. Returns the created node. Validation failures (empty prompt where
 required, unknown parent, bad agent or dir, bad fork lane) are 4xx.
+A Claude create returns immediately with `initial_delivery: "pending"`; the
+first prompt is pasted after SessionStart on a background path. Failures after
+that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
+this response.
 
 Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
 `transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
@@ -333,6 +351,11 @@ turn is still in flight, while a tmux send is unconfirmed, or after `/exit`
 (`thread is closed; fork to continue`). On structured transports `"/clear"` is
 implemented by scimux itself: a fresh protocol session on the same node,
 recorded as a source seam — same page-turn semantics as Claude's `/clear`.
+A Claude send whose leading slash command is `/fork` or `/fork …` is `400`
+(Claude's native fork is not supported; use `POST /api/nodes` with `parent`
+to create a fresh node). Ordinary prose that merely contains the text
+`/fork` is accepted. Claude SessionStart sources accepted by the hook are
+`startup`, `clear`, `compact`, and `resume` only.
 
 `attachments` is optional; each element is a reference returned by
 `POST …/attachments` (below). Every ref must point inside this node's own
@@ -391,17 +414,26 @@ Interrupt the node's in-flight turn.
 
 ### `POST /api/nodes/{id}/key`
 
-Body: `{"key": "1"}` for tmux/Claude, or
-`{"key": "1", "request_id": "<opaque>"}` for structured transports (Codex,
-ACP). Answers a dialog. Keys are a whitelist (digits, `y`/`n`, arrows, Tab,
-Enter, Escape) — this endpoint answers prompts, it is not a keystroke
-injector; anything else is `400`.
+Body: `{"key": "1"}` for ordinary tmux keys, `{"key": "1", "request_id":
+"<opaque>"}` for structured transports (Codex, ACP), or `{"key": "1",
+"dialog_id": "<epoch>"}` for a strict Claude permission dialog. Answers a
+dialog. Keys are a whitelist (digits, `y`/`n`, arrows, Tab, Enter, Escape)
+— this endpoint answers prompts, it is not a keystroke injector; anything
+else is `400`.
 
 On structured nodes `request_id` is **required** and must match the
 `perm_request_id` from the pending permission on `GET …/chat`. Missing
 `request_id` is `400`; a stale id (the pending request was replaced) is
 `409`. Neither case writes a key audit record or delivers a decision.
-tmux/Claude keeps the `{key}`-only body and is unchanged.
+On a strict Claude node with a visible permission dialog, `dialog_id` (or
+`request_id` carrying the same epoch) is required and must match the
+current `perm_dialog_id`. That token is a server-minted visible-dialog
+epoch, not Claude's PermissionRequest identity. Any `dialog_id` that is
+missing from the live epoch, already retired, or mismatched is `409` and
+sends no keys. A successful key retires that epoch only; standing asks
+are not deleted as a guessed identity. Ordinary tmux keys (user-opened
+terminal, no visible dialog, no `dialog_id`) still use the `{key}`-only
+body.
 
 Every accepted key is recorded in the store together with decision evidence
 (the pane's bottom lines, or the tool title on structured transports); on

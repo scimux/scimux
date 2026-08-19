@@ -578,8 +578,10 @@ func TestDeliverClaudeInitialPromptWaitsForBridgeAndTranscript(t *testing.T) {
 	a.claudeInitialPoll = 5 * time.Millisecond
 	n := &Node{ID: "claude-ready", Agent: "claude", SessionID: "sid-ready", Prompt: "long\ninitial prompt"}
 	path := writeClaudeTranscript(t, a.home, n.SessionID)
-	appendLines(t, path,
-		`{"type":"system","subtype":"bridge_status","sessionId":"sid-ready","content":"ready"}`)
+	n.Transcript = path
+	a.byID[n.ID] = n
+	a.nodes = append(a.nodes, n)
+	installPreparedClaudeHook(t, a, n)
 	go func() {
 		deadline := time.Now().Add(250 * time.Millisecond)
 		for !f.didSendEnter() && time.Now().Before(deadline) {
@@ -611,7 +613,7 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 			t.Fatalf("delivery = %q, want not_sent", got)
 		}
 		if f.didSendEnter() || containsSub(f.subcommands(), "load-buffer") {
-			t.Fatal("prompt was sent before bridge readiness")
+			t.Fatal("prompt was sent before SessionStart")
 		}
 	})
 	t.Run("pane movement is not confirmation", func(t *testing.T) {
@@ -622,10 +624,15 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 		a.claudeInitialPoll = 5 * time.Millisecond
 		n := &Node{ID: "unconfirmed", Agent: "claude", SessionID: "sid", Prompt: "keep me"}
 		path := writeClaudeTranscript(t, a.home, n.SessionID)
-		appendLines(t, path,
-			`{"type":"system","subtype":"bridge_status","sessionId":"sid","content":"ready"}`)
-		if got := a.deliverClaudeInitialPrompt(n); got != initialUnconfirmed {
-			t.Fatalf("delivery = %q, want unconfirmed", got)
+		n.Transcript = path
+		a.byID[n.ID] = n
+		a.nodes = append(a.nodes, n)
+		installPreparedClaudeHook(t, a, n)
+		if got := a.deliverClaudeInitialPrompt(n); got != initialNotSent {
+			t.Fatalf("delivery = %q, want not_sent after confirmation timeout", got)
+		}
+		if a.claudeLaunchError(n.ID) == "" {
+			t.Fatal("confirmation timeout must record an inline delivery error")
 		}
 		if !f.didSendEnter() {
 			t.Fatal("test did not exercise submission")
@@ -646,9 +653,9 @@ func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
 	}{
 		{"AT-CR-01", "lf prompt vs cr turn", "long\ninitial prompt", "long\rinitial prompt", initialAcknowledged},
 		{"AT-CR-02", "lf prompt vs crlf turn", "long\ninitial prompt", "long\r\ninitial prompt", initialAcknowledged},
-		{"AT-CR-04", "different text stays unconfirmed", "keep me", "keep me!", initialUnconfirmed},
-		{"AT-CR-05", "repeated spaces are not collapsed", "a  b\n\nc", "a b\n\nc", initialUnconfirmed},
-		{"AT-CR-05", "tabs are not collapsed", "a\t\tb", "a\tb", initialUnconfirmed},
+		{"AT-CR-04", "different text is a delivery failure", "keep me", "keep me!", initialNotSent},
+		{"AT-CR-05", "repeated spaces are not collapsed", "a  b\n\nc", "a b\n\nc", initialNotSent},
+		{"AT-CR-05", "tabs are not collapsed", "a\t\tb", "a\tb", initialNotSent},
 		{"AT-CR-05", "single-line exact match", "hello", "hello", initialAcknowledged},
 	}
 	for _, tc := range cases {
@@ -660,8 +667,10 @@ func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
 			a.claudeInitialPoll = 5 * time.Millisecond
 			n := &Node{ID: "claude-nl", Agent: "claude", SessionID: "sid-nl", Prompt: tc.prompt}
 			path := writeClaudeTranscript(t, a.home, n.SessionID)
-			appendLines(t, path,
-				`{"type":"system","subtype":"bridge_status","sessionId":"sid-nl","content":"ready"}`)
+			n.Transcript = path
+			a.byID[n.ID] = n
+			a.nodes = append(a.nodes, n)
+			installPreparedClaudeHook(t, a, n)
 			go func() {
 				deadline := time.Now().Add(150 * time.Millisecond)
 				for !f.didSendEnter() && time.Now().Before(deadline) {

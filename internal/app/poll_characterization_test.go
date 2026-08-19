@@ -320,7 +320,7 @@ func TestPollActiveToQuietTranscriptJudgment(t *testing.T) {
 	path := filepath.Join(dir, "tx.jsonl")
 	appendLines(t, path) // empty link
 
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	pane := "static quiet pane"
 	a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 	a.prevCap[n.ID] = pane
@@ -370,7 +370,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 	dialogish := "something about approval permissions" // not a dialoghint match
 
 	t.Run("missing transcript is inspect", func(t *testing.T) {
-		n := &Node{ID: "n", Agent: "claude"} // no Transcript
+		n := tmuxFallbackNode("n", "")
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -387,7 +387,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":"ok"}}`)
-		n := &Node{ID: "n", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("n", path)
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, dialogish, false, nil))
 		a.prevCap[n.ID] = dialogish
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -413,7 +413,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"hello"}}`)
-		n := &Node{ID: "n", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("n", path)
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -441,7 +441,7 @@ func TestPollInspectFallbacks(t *testing.T) {
 func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
 	t.Run("ordinary text without transcript is inspect not approval", func(t *testing.T) {
 		pane := "Bash completed successfully\npermission granted earlier\n$"
-		n := &Node{ID: "n", Agent: "claude"}
+		n := tmuxFallbackNode("n", "")
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -460,7 +460,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"done?"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":"all done"}}`)
 		pane := "all done\n$"
-		n := &Node{ID: "n", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("n", path)
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -481,7 +481,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
   2. Allow for this session
   3. Deny
   Esc to cancel`
-		n := &Node{ID: "n", Agent: "claude"}
+		n := tmuxFallbackNode("n", "")
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, dialogPane, false, nil))
 		a.prevCap[n.ID] = dialogPane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -498,7 +498,7 @@ func TestPollQuietOrdinaryPaneNoClassifiedAttention(t *testing.T) {
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}`)
 		pane := "waiting on a form...\n$"
-		n := &Node{ID: "n", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("n", path)
 		a := newPollApp(t, n, pollRunner([]string{n.ID}, pane, false, nil))
 		a.prevCap[n.ID] = pane
 		a.lastChg[n.ID] = time.Now().Add(-10 * time.Second)
@@ -537,7 +537,7 @@ func TestPollActiveTranscriptProgressRestartsStallWindow(t *testing.T) {
 		}
 		return "", nil
 	}
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	a := newPollApp(t, n, runner)
 	a.prevCap[n.ID] = "running tools\n  · Bash (11s)\nidle"
 	a.poll() // establish confined anim + stamp stall offset
@@ -642,7 +642,7 @@ func TestPollActiveUnconfinedDialogTextStaysUnflagged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tx.jsonl")
 	appendLines(t, path,
 		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	a := newPollApp(t, n, pollRunner([]string{n.ID}, dialog, false, nil))
 	a.prevCap[n.ID] = streamingPrev
 	a.poll()

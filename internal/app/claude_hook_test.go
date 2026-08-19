@@ -212,8 +212,12 @@ func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
 			return
 		}
 		path := writeClaudeTranscript(t, a.home, n.SessionID)
-		appendLines(t, path,
-			`{"type":"system","subtype":"bridge_status","sessionId":"`+n.SessionID+`","content":"ready"}`)
+		if err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
+			HookEventName: "SessionStart", Source: "startup",
+			SessionID: n.SessionID, TranscriptPath: path, Cwd: a.home,
+		}); err != nil {
+			return
+		}
 		wait := time.Now().Add(200 * time.Millisecond)
 		for !f.didSendEnter() && time.Now().Before(wait) {
 			time.Sleep(time.Millisecond)
@@ -233,9 +237,20 @@ func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.InitialDelivery != initialAcknowledged {
-		t.Fatalf("initial_delivery = %q, want acknowledged", body.InitialDelivery)
+	if body.InitialDelivery != initialPending {
+		t.Fatalf("initial_delivery = %q, want pending (create is asynchronous)", body.InitialDelivery)
 	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		st := a.sendState[a.nodes[0].ID]
+		a.mu.Unlock()
+		if st == "" {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("background delivery never confirmed the CR transcript")
 }
 
 func TestOwnedClaudeLaunchInstallsPrivateSettings(t *testing.T) {
@@ -753,6 +768,13 @@ func writeSeedLog(t *testing.T, a *app, id, text string) {
 
 func sendClear(t *testing.T, a *app, id string) {
 	t.Helper()
+	a.mu.Lock()
+	n := a.byID[id]
+	strict := a.claudeSupervisionOf(n) == claudeSupStrict
+	a.mu.Unlock()
+	if !strict {
+		installPreparedClaudeHook(t, a, n)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/nodes/"+id+"/send", strings.NewReader(`{"text":"/clear"}`))
 	req.SetPathValue("id", id)
@@ -1011,22 +1033,46 @@ func TestClaudeCompactAndResumeSources(t *testing.T) {
 			t.Fatalf("changed compact rebound %q / %q", n.Transcript, n.SessionID)
 		}
 	})
-	t.Run("AT-BIND-11 resume", func(t *testing.T) {
+	t.Run("AT-BIND-11 resume same identity", func(t *testing.T) {
+		err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
+			HookEventName: "SessionStart", Source: "resume",
+			SessionID: hookSIDOwn, TranscriptPath: cur, Cwd: "/w/proj",
+		})
+		if err != nil {
+			t.Fatalf("resume same identity: %v", err)
+		}
+		if n.Transcript != cur || n.SessionID != hookSIDOwn {
+			t.Fatalf("resume mutated %q / %q", n.Transcript, n.SessionID)
+		}
+		if a.attn[n.ID] == "inspect" {
+			t.Fatal("resume must not raise inspect")
+		}
+		if userTurnCount(t, a, n.ID) == 0 {
+			t.Fatal("resume must keep prior history")
+		}
+	})
+	t.Run("AT-BIND-11 resume changed identity rebinds", func(t *testing.T) {
 		err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
 			HookEventName: "SessionStart", Source: "resume",
 			SessionID: hookSIDSuccessor, TranscriptPath: other, Cwd: "/w/proj",
 		})
-		if errors.Is(err, errClaudeHookNotImplemented) {
-			t.Fatal("resume must be handled without auto-bind")
+		if err != nil {
+			t.Fatalf("changed resume must rebind, err=%v", err)
 		}
-		if n.Transcript != cur || n.SessionID != hookSIDOwn {
-			t.Fatalf("resume auto-bound %q / %q", n.Transcript, n.SessionID)
+		if n.Transcript != other || n.SessionID != hookSIDSuccessor {
+			t.Fatalf("resume did not rebind: %q / %q", n.Transcript, n.SessionID)
 		}
-		if a.attn[n.ID] != "inspect" {
-			t.Fatalf("resume attention = %q, want inspect", a.attn[n.ID])
+		if a.attn[n.ID] == "inspect" {
+			t.Fatal("resume must not raise inspect")
 		}
-		if userTurnCount(t, a, n.ID) == 0 {
-			t.Fatal("resume must keep prior history")
+		if a.claudeLaunchError(n.ID) != "" {
+			t.Fatalf("successful rebind recorded launch error %q", a.claudeLaunchError(n.ID))
+		}
+		if a.claudeGeneration(n.ID) != gen {
+			t.Fatalf("resume must keep generation %d, got %d", gen, a.claudeGeneration(n.ID))
+		}
+		if a.isDeadTranscript(n.ID, cur, hookSIDOwn) != true {
+			t.Fatal("resume must tombstone the previous transcript")
 		}
 	})
 }
@@ -1041,24 +1087,14 @@ func TestResumeEventIsParkedNotReplayed(t *testing.T) {
 	inbox := hookInboxReady(t, a, hookID, "resume", hookSessionJSON("resume", hookSIDSuccessor, other))
 
 	a.drainClaudeHooks()
-	if n.Transcript != cur || n.SessionID != hookSIDOwn {
-		t.Fatalf("resume drain auto-bound %q / %q", n.Transcript, n.SessionID)
+	if n.Transcript != other || n.SessionID != hookSIDSuccessor {
+		t.Fatalf("changed resume drain did not rebind: %q / %q", n.Transcript, n.SessionID)
 	}
-	if a.attn[n.ID] != "inspect" {
-		t.Fatalf("resume attention = %q, want inspect", a.attn[n.ID])
+	if a.attn[n.ID] == "inspect" {
+		t.Fatal("resume must not raise inspect")
 	}
 	if _, err := os.Stat(inbox); !os.IsNotExist(err) {
 		t.Fatal("resume event must leave the inbox after one apply")
-	}
-	held, err := filepath.Glob(filepath.Join(a.claudeHooksDir(), hookID, "processed", "held", "*.json"))
-	if err != nil || len(held) != 1 {
-		t.Fatalf("parked resume events = %v, want 1 in processed/held/", held)
-	}
-
-	a.attn[n.ID] = ""
-	a.drainClaudeHooks()
-	if a.attn[n.ID] != "" {
-		t.Fatal("parked resume must not re-stamp inspect on later ticks")
 	}
 }
 

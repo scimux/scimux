@@ -272,7 +272,7 @@ func TestPublicRouteSendAttachmentResolveAndExpand(t *testing.T) {
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	seedAttachNode(a, "n1")
+	seedPermClaude(t, a, "n1", hookSIDOwn)
 	seedAttachNode(a, "n2")
 	h := newTestHandler(t, a)
 

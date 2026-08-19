@@ -471,6 +471,9 @@ func TestHandleSendTmuxNotesUsagePrompt(t *testing.T) {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
 	id := a.nodes[0].ID
+	waitClaudeInitialGate(t, a, id)
+	a.markClaudeHookAck(id)
+	a.noteClaudeHookCapabilitiesForNode(id)
 	// createNode carried the first prompt -> already noted.
 	if promptNoted(a) {
 		// good: reset so we isolate the send below
@@ -491,6 +494,9 @@ func TestHandleSendClearDoesNotNoteUsage(t *testing.T) {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
 	id := a.nodes[0].ID
+	waitClaudeInitialGate(t, a, id)
+	a.markClaudeHookAck(id)
+	a.noteClaudeHookCapabilitiesForNode(id)
 	resetPromptNote(a)
 
 	send(t, a, id, `{"text":"/clear"}`, 200)

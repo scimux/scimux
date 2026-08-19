@@ -187,8 +187,8 @@ func TestPollConcurrentWithHandleState(t *testing.T) {
 			t.Fatal("poll never wrote lastChg")
 		}
 	}
-	if a.byID["n-discover"].Transcript == "" {
-		t.Fatal("discovery never linked transcript for n-discover")
+	if a.byID["n-discover"].Transcript != "" {
+		t.Fatal("Claude UUID discovery must not link a transcript")
 	}
 	if a.mirrors["n-mirror"] == nil && a.tailers["n-mirror"] == nil {
 		// Mirror map entry is created on first syncMirror; tailer also installs.
@@ -277,7 +277,7 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
-		n := &Node{ID: "p1", Title: "p1", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+		n := &Node{ID: "p1", Title: "p1", Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p1"] = []*Node{n}, n
 
 		before := time.Now()
@@ -308,7 +308,7 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"AskUserQuestion","input":{}}]}}`)
-		n := &Node{ID: "p2", Title: "p2", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+		n := &Node{ID: "p2", Title: "p2", Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p2"] = []*Node{n}, n
 		prior := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 		a.attn["p2"] = "inspect" // existing classification must stand
@@ -342,7 +342,7 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`)
-		n := &Node{ID: "p3", Title: "p3", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+		n := &Node{ID: "p3", Title: "p3", Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p3"] = []*Node{n}, n
 		a.lastChg["p3"] = time.Now().Add(-time.Minute)
 
@@ -363,7 +363,7 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
-		n := &Node{ID: "p4", Title: "p4", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+		n := &Node{ID: "p4", Title: "p4", Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p4"] = []*Node{n}, n
 
 		rec := httptest.NewRecorder()
@@ -386,7 +386,7 @@ func TestNotePeekDialogOwnership(t *testing.T) {
 		// static pane.
 		f := &fakeTmux{alive: map[string]bool{"p5": true}, capture: dialogPane}
 		a := newTestApp(t, f)
-		n := &Node{ID: "p5", Title: "p5", Agent: "claude", CreatedAt: "2026-07-18T00:00:00Z"}
+		n := &Node{ID: "p5", Title: "p5", Agent: "pi", Transport: "tmux", CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID["p5"] = []*Node{n}, n
 		a.lastChg["p5"] = time.Now().Add(-time.Minute)
 

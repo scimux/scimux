@@ -236,9 +236,12 @@ func newAskedHarness(t *testing.T, capable bool) *askedHarness {
 
 	hookID := "00000000-0000-4000-8000-0000000000a1"
 	bundle := filepath.Join(a.claudeHooksDir(), hookID)
-	subs := []string{"perm", "perm/req", "perm/ans", "perm/processed"}
+	subs := []string{
+		"inbox", "processed", "stop", "notify",
+		"perm", "perm/req", "perm/ans", "perm/processed",
+	}
 	if capable {
-		subs = append(subs, "perm/asked")
+		subs = append(subs, "perm/asked", "perm/shown")
 	}
 	for _, sub := range subs {
 		if err := os.MkdirAll(filepath.Join(bundle, sub), 0o700); err != nil {
@@ -253,15 +256,18 @@ func newAskedHarness(t *testing.T, capable bool) *askedHarness {
 	}
 	caps := `{"permission":1,"exec":` + strconv.Quote(self) + `}`
 	if capable {
-		caps = `{"permission":1,"asked":1,"exec":` + strconv.Quote(self) + `}`
+		caps = `{"permission":1,"asked":1,"stop":1,"notify":1,"exec":` + strconv.Quote(self) + `}`
 	}
 	if err := os.WriteFile(filepath.Join(bundle, "capabilities.json"), []byte(caps), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	a.mu.Lock()
 	a.claudeHooks[n.ID] = hookID
-	a.claudePermCap[hookID] = true
+	a.claudePermCap[hookID] = capable
 	a.claudeAskedCap[hookID] = capable
+	a.claudeStrictCap[hookID] = capable
+	a.claudeAck[n.ID] = capable
+	n.SessionID = hookSIDOwn
 	a.mu.Unlock()
 	return &askedHarness{a: a, n: n, bundle: bundle, pane: paneRef}
 }
@@ -296,6 +302,9 @@ func (h *askedHarness) dropAt(t *testing.T, tool, name string, at time.Time) {
 	if err := writeClaudePermFile(filepath.Join(askedDir(h.bundle), name), note); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := mintClaudeVisibleEpoch(filepath.Join(h.bundle, "perm"), hookSIDOwn); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // grow appends a recognized transcript record — what reaching the agent's own
@@ -328,8 +337,8 @@ func TestActiveStallUnchangedWithoutAskedCapability(t *testing.T) {
 	h.a.poll()
 	h.stall(t)
 	h.a.poll()
-	if got := h.a.attn[h.n.ID]; got != "inspect" {
-		t.Fatalf("attention = %q, want inspect — an unproven bundle must keep today's backstop", got)
+	if got := h.a.attn[h.n.ID]; got != "" {
+		t.Fatalf("attention = %q, want none — an incomplete Claude bundle is unsupported, not inspect", got)
 	}
 }
 
@@ -355,7 +364,7 @@ func TestStandingNoticeClassifiesQuestionTools(t *testing.T) {
 	h.drop(t, "AskUserQuestion")
 	h.a.poll()
 	if got := h.a.attn[h.n.ID]; got != "question" {
-		t.Fatalf("attention = %q, want question", got)
+		t.Fatalf("attention = %q, want question so the epoch-bound surface can open", got)
 	}
 }
 
@@ -373,8 +382,8 @@ func TestQuietFallbackSurvivesMissingNotice(t *testing.T) {
 	if got := h.a.live[h.n.ID]; got != "quiet" {
 		t.Fatalf("live = %q, want quiet (test setup)", got)
 	}
-	if got := h.a.attn[h.n.ID]; got == "" {
-		t.Fatal("a quiet pane with an unresolved call must still raise; the notice gate is active-pane only")
+	if got := h.a.attn[h.n.ID]; got != "" {
+		t.Fatalf("attention = %q, want none: Claude quiet fallback must not raise without a visible permission dialog", got)
 	}
 }
 

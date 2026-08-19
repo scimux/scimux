@@ -98,13 +98,20 @@ func TestClaudeStopHookWritesLeaseTaggedNotice(t *testing.T) {
 	}
 }
 
-func TestClaudeStopHookWritesNothingWithoutMarker(t *testing.T) {
+func TestClaudeStopHookWritesSessionNoticeWithoutMarker(t *testing.T) {
 	root := stopHookBundle(t)
 	if err := RunClaudeStopHook(root, bytes.NewReader(stopEventJSON("Stop", false)), io.Discard, io.Discard); err != nil {
 		t.Fatalf("helper: %v", err)
 	}
-	if got := readyStopNotices(t, root); len(got) != 0 {
-		t.Fatalf("unarmed Stop wrote %+v", got)
+	got := readyStopNotices(t, root)
+	if len(got) != 1 {
+		t.Fatalf("unarmed Stop notices = %d, want 1 so drain can clear epochs", len(got))
+	}
+	if got[0].Lease != "" {
+		t.Fatalf("unarmed notice lease = %q, want empty", got[0].Lease)
+	}
+	if got[0].SessionID != hookSIDOwn || got[0].HookEventName != "Stop" {
+		t.Fatalf("unarmed notice = %+v", got[0])
 	}
 }
 

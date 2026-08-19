@@ -85,6 +85,10 @@ type nodeView struct {
 	Live        string `json:"live"`
 	Attention   string `json:"attention,omitempty"`    // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
 	AttentionAt int64  `json:"attention_at,omitempty"` // unix ms of the fresh evidence that raised the current attention
+	// Supervision is Claude-only: starting | strict | unsupported | failed.
+	// Other agents omit it. The UI uses it to refuse inspect/fallback peeks.
+	Supervision string `json:"supervision,omitempty"`
+	LaunchError string `json:"launch_error,omitempty"`
 	// TurnDone: the agent has finished its turn and is waiting for the human
 	// (quiet pane, newest transcript record is assistant, no pending tool
 	// call, no attention). omitempty so absent means UNKNOWN — ACP nodes
@@ -189,8 +193,17 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// manager's session log rather than a linked transcript file, so they
 		// always have chat to show.
 		hasTranscript := n.Transcript != "" || a.proc(n) != nil
-		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: a.attn[n.ID], AttentionAt: attentionMS,
-			TurnDone: a.turnDone[n.ID], HasTranscript: hasTranscript, LastActivity: lastMS})
+		sup := a.claudeSupervisionOf(n)
+		attn := a.attn[n.ID]
+		if n.Agent == "claude" && attn == "inspect" {
+			attn = ""
+		}
+		if n.Agent == "claude" && sup != claudeSupStrict && attn != "" {
+			attn = ""
+		}
+		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: attn, AttentionAt: attentionMS,
+			TurnDone: a.turnDone[n.ID], HasTranscript: hasTranscript, LastActivity: lastMS,
+			Supervision: string(sup), LaunchError: a.claudeLaunchErr[n.ID]})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server). A

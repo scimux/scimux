@@ -51,7 +51,13 @@ export function cardState(n){
 function statusInfo(n){
   const node = n || {};
   if (node.ended_at) return { kind: "closed", text: "Closed" };
-  if (node.attention === "inspect") return { kind: "inspect", text: "Quiet · check the terminal" };
+  if (node.attention === "inspect" &&
+      node.supervision !== "claude_strict" &&
+      node.supervision !== "claude_unsupported" &&
+      node.supervision !== "claude_starting" &&
+      node.supervision !== "claude_failed"){
+    return { kind: "inspect", text: "Quiet · check the terminal" };
+  }
   if (node.attention) return { kind: "attention", text: `Waiting · needs your ${node.attention}` };
   if (node.live === "active") return { kind: "running", text: "Running" };
   if (node.live === "exited") return { kind: "exited", text: "Exited" };

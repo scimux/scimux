@@ -208,19 +208,26 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	// Structured transports accepted their first turn inside createNode. Claude
-	// consumed budget when its deferred paste was acknowledged or remained
-	// ambiguous; readiness timeout means nothing was sent and consumes none.
-	if strings.TrimSpace(n.Prompt) != "" &&
-		(n.Agent != "claude" || initial != initialNotSent) {
+	// Structured transports accepted their first turn inside createNode.
+	// Claude pastes after SessionStart on a background goroutine and notes
+	// usage there only if the paste happened.
+	if n.Agent != "claude" && strings.TrimSpace(n.Prompt) != "" {
 		a.noteUsagePrompt(n.Agent)
 	}
-	// Embed Node so existing clients keep the flat response shape. The extra
-	// field exists only on create; it is delivery evidence, not node config.
+	// Snapshot under the lock so SessionStart cannot mutate SessionID /
+	// Transcript / delivery fields while this response is marshaled.
+	a.mu.Lock()
+	snap := n
+	launchErr := a.claudeLaunchErr[n.ID]
+	a.mu.Unlock()
 	writeJSON(w, struct {
 		*Node
 		InitialDelivery initialDelivery `json:"initial_delivery,omitempty"`
-	}{Node: &n, InitialDelivery: initial})
+		InitialError    string          `json:"initial_error,omitempty"`
+	}{Node: &snap, InitialDelivery: initial, InitialError: launchErr})
+	if snap.Agent == "claude" {
+		a.startClaudeInitialDelivery(snap.ID)
+	}
 }
 
 func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
@@ -363,7 +370,11 @@ func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
 			stopped, reason = false, "adopted"
 		}
 		// /exit ends the auto-approval lease (process/session loss).
-		a.disarmAutoApprove(n.ID)
+		if n.Agent == "claude" {
+			a.endClaudePermissionTurn(n)
+		} else {
+			a.disarmAutoApprove(n.ID)
+		}
 	} else {
 		// Idempotent re-exit (only reachable by a direct API call — the UI hides
 		// the control once ended): do not tear the process down a second time.
@@ -435,9 +446,15 @@ func (a *app) finalizeDeleteWithAutoBarrier(n *Node) error {
 	g.Lock()
 	defer g.Unlock()
 
+	if n.Agent == "claude" {
+		a.retractClaudeLease(a.claudePermBundle(n.ID))
+	}
 	a.mu.Lock()
 	delete(a.autoApprove, n.ID)
 	a.mu.Unlock()
+	if n.Agent == "claude" {
+		a.resetClaudePermissionTurnLocked(n)
+	}
 
 	if a.deleteGateHook != nil {
 		a.deleteGateHook(n.ID)

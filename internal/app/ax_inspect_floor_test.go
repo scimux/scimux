@@ -110,11 +110,11 @@ func TestAXUnrecognizedDialogDegradesToInspect(t *testing.T) {
 		quiet time.Duration
 		want  string
 	}{
-		{"recognized dialog classifies immediately", permDialog, 10 * time.Second, "approval"},
-		{"recognized dialog still classifies past the AX stall", permDialog, owedStallAX + time.Second, "approval"},
-		{"unrecognized dialog is not yet inspect", rewordedDialog, 10 * time.Second, ""},
-		{"unrecognized dialog degrades to inspect at the AX stall", rewordedDialog, owedStallAX + time.Second, "inspect"},
-		{"working footer suppresses inspect past the AX stall", "Running tool…\n esc to interrupt", owedStallAX + time.Second, ""},
+		{"recognized dialog does not auto-open Claude", permDialog, 10 * time.Second, ""},
+		{"recognized dialog still does not inspect past the AX stall", permDialog, owedStallAX + time.Second, ""},
+		{"unrecognized dialog is not inspect", rewordedDialog, 10 * time.Second, ""},
+		{"unrecognized dialog does not degrade to inspect on Claude", rewordedDialog, owedStallAX + time.Second, ""},
+		{"working footer stays silent", "Running tool…\n esc to interrupt", owedStallAX + time.Second, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.what, func(t *testing.T) {

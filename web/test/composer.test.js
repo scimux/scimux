@@ -29,6 +29,7 @@ import {
   stageChipHTML,
   stageRowHTML,
   createComposerFeature,
+  isClaudeNativeForkCommand,
 } from "../js/composer.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -801,6 +802,46 @@ test("composer drag/drop stages files", async () => {
   await Promise.resolve();
   assert.match(ctx.roots.attstage.innerHTML, /drop\.png/);
   ctx.feature.destroy();
+});
+
+test("isClaudeNativeForkCommand is leading-command only", () => {
+  assert.equal(isClaudeNativeForkCommand("/fork"), true);
+  assert.equal(isClaudeNativeForkCommand("  /fork  "), true);
+  assert.equal(isClaudeNativeForkCommand("/fork extra"), true);
+  assert.equal(isClaudeNativeForkCommand("please use /fork"), false);
+  assert.equal(isClaudeNativeForkCommand("/forked"), false);
+  assert.equal(isClaudeNativeForkCommand("I ran /fork yesterday"), false);
+});
+
+test("composer refuses Claude /fork and keeps the draft", async () => {
+  const ctx = makeFeature({
+    nodes: [{ id: "n1", title: "A", agent: "claude", ended_at: "" }],
+  });
+  ctx.feature.bind();
+  ctx.roots.prompt.textContent = "/fork";
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.apiCalls.length, 0);
+  assert.match(ctx.alerts.join(" "), /Fork action/);
+  assert.equal(ctx.feature.promptText(), "/fork");
+  ctx.feature.destroy();
+
+  const prose = makeFeature({
+    nodes: [{ id: "n1", title: "A", agent: "claude", ended_at: "" }],
+  });
+  prose.feature.bind();
+  prose.roots.prompt.textContent = "please use /fork later";
+  await prose.feature.sendPrompt();
+  assert.equal(prose.apiCalls.length, 1);
+  prose.feature.destroy();
+
+  const other = makeFeature({
+    nodes: [{ id: "n1", title: "A", agent: "pi", ended_at: "" }],
+  });
+  other.feature.bind();
+  other.roots.prompt.textContent = "/fork";
+  await other.feature.sendPrompt();
+  assert.equal(other.apiCalls.length, 1, "non-Claude /fork is not blocked in the GUI");
+  other.feature.destroy();
 });
 
 /* ---------- send / interrupt ---------- */

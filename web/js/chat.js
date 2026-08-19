@@ -108,6 +108,10 @@ export const DEC_LABELS = {
   /* ACP transport (pi/opencode/grok): no pane, so "terminal" reads as the event log */
   turn_active: "Agent is working",
   turn_error: "The agent finished without output \u2014 check the log",
+  claude_starting: "Starting Claude \u2014 waiting for SessionStart",
+  claude_unsupported: "This Claude session cannot be supervised with the current hook bundle",
+  claude_launch_error: "Claude did not start",
+  claude_transcript_fault: "The transcript is not readable \u2014 send another prompt or fork",
 };
 
 const KEYS = { Up: "\u2191", Down: "\u2193", Enter: "\u23ce", Escape: "Esc" };
@@ -173,8 +177,28 @@ export function chatActivityPolicy({
   priorTurns = 0,
   termOpen = false,
   fresh = false,
+  supervision = "",
+  autoApproveArmed = false,
 } = {}){
   const unconfirmed = delivery === "unconfirmed";
+  const claudeGated = supervision === "claude_strict" ||
+    supervision === "claude_unsupported" ||
+    supervision === "claude_starting" ||
+    supervision === "claude_failed";
+  if (claudeGated){
+    // Hooked/starting/unsupported Claude: never auto-open from inspect,
+    // fallback, unconfirmed delivery, empty turns, or owing. The pane is
+    // visible only when the user opened it or a proven permission dialog
+    // is waiting and auto-approve is not armed.
+    const permDialog = supervision === "claude_strict" && !autoApproveArmed &&
+      !attentionHidden && (attention === "approval" || attention === "dialog" || attention === "question");
+    const mustShowPane = permDialog;
+    const freshSurface = !turnsLength && !mustShowPane &&
+                         (fresh || (source === "acp" && (priorTurns || 0) > 0));
+    const forcePeek = mustShowPane;
+    const showPeek = forcePeek || !!termOpen;
+    return { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek };
+  }
   // Server-reported fresh (zero-turn post-seam segment) means a deliberate
   // /clear: show "fresh chat — send a prompt" instead of treating empty+
   // fallback as a broken transcript that forces a terminal peek (P2c).
@@ -217,6 +241,8 @@ export function buildChatSignature(parts){
     /* Request identity must participate: A→B with identical title/options
        still rebuilds the row so buttons carry B's data-request-id (P1 review). */
     p.permRequestId || "",
+    p.permDialogId || "",
+    p.permManual ? "1" : "0",
     p.priorTurns || 0,
     p.chatStarted || "",
     p.echoHash || "",
@@ -287,8 +313,19 @@ export function histLoadHTML(priorTurns){
   return `<div class="chatseam"><button class="histload">show earlier history &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
 }
 
-export function pendingEmptyHTML({ freshSurface, pending }){
+export function pendingEmptyHTML({ freshSurface, pending, supervision = "" } = {}){
   if (freshSurface) return `<div class="pending">fresh chat \u2014 send a prompt</div>`;
+  if (supervision === "claude_starting"){
+    return `<div class="pending">starting Claude \u2014 waiting for SessionStart</div>`;
+  }
+  if (supervision === "claude_strict" || supervision === "claude_failed"){
+    return `<div class="pending">${pending
+      ? "waiting for the first confirmed turn"
+      : "no confirmed turns yet"}</div>`;
+  }
+  if (supervision === "claude_unsupported"){
+    return `<div class="pending">this Claude session cannot be supervised \u2014 fork or relaunch it</div>`;
+  }
   return `<div class="pending">${pending
     ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
     : "no readable transcript \u2014 showing the raw terminal below"}</div>`;
@@ -491,17 +528,46 @@ export function permMoreDecision(scrollHeight, clientHeight){
   return (scrollHeight || 0) > ch ? PERM_MORE_SHOW : PERM_MORE_HIDE;
 }
 
+export function restoreDraftDecision({ original = "", current = "" } = {}){
+  const orig = String(original || "");
+  const cur = String(current || "");
+  if (cur === "" || cur === orig){
+    return { action: "restore", text: orig };
+  }
+  return { action: "keep", text: cur };
+}
+
 export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
   permToolKind = "", permReason = "", permRequestId = "",
+  permDialogId = "", permManual = false,
   expanded = false, axScreenReader = false, escape = esc,
 } = {}){
-  if (!attention || attentionHidden) return "";
+  const opts = permOptions || [];
+  const epochBound = !!(permDialogId && opts.length);
+  const epochManual = !!(permManual && (permDialogId || permReason));
+  /* A live Claude dialog always uses the epoch-bound surface — never the
+     generic unbound keypad — even when map attention is suppressed (armed
+     auto-approve) or locally hidden. */
+  if (epochBound || epochManual){
+    attentionHidden = false;
+  } else if (!attention || attentionHidden){
+    return "";
+  }
+  if (epochManual && !epochBound){
+    const reason = (permReason && String(permReason)) ||
+      "A dialog is visible but its options could not be read safely. Open Terminal to respond.";
+    const title = permTitle
+      ? `<div class="permtext">${escape(permTitle)}</div>` : "";
+    const open = `<button type="button" data-open-terminal="1" class="permbtn">Open Terminal</button>`;
+    return `<span class="hint">${escape(reason)}</span>` + title +
+      `<div class="permbtns">${open}</div>`;
+  }
   /* Inspect is a neutral diagnostic. Non-AX gets the default terminal
      keypad so a misclassified dialog can be answered, plus a distinct
      Dismiss that never sends a key. AX inspect is Dismiss-only: a stray
      "1" would expand to 1+Enter and submit a prompt. */
-  if (attention === "inspect"){
+  if (attention === "inspect" && !epochBound){
     const hint = `<span class="hint">${escape(HINTS.inspect)}</span>`;
     const dismiss = inspectDismissButton();
     if (axScreenReader){
@@ -509,8 +575,7 @@ export function keyRowHTML({
     }
     return hint + `<div class="permbtns keys">${tmuxKeyButtons()}${dismiss}</div>`;
   }
-  if (source === "acp"){
-    const opts = permOptions || [];
+  if (source === "acp" || ((permRequestId || permDialogId) && opts.length)){
     if (!opts.length){
       return `<span class="hint">Waiting for approval options from the agent...</span>`;
     }
@@ -532,15 +597,20 @@ export function keyRowHTML({
        stole lines from the ask body; outside, the reason is always visible
        and revealPermMoreIfNeeded measures body overflow only. */
     const mask = `<div class="permask${clamp}">${verbHTML}${bodyHTML}</div>`;
-    /* data-request-id is the opaque perm_request_id for this row — captured
-       at click so a later poll cannot retarget the decision. */
+    /* data-request-id is the opaque perm_request_id for structured (ACP/
+       Codex) rows. data-dialog-id is a server-minted visible-dialog epoch
+       for Claude: Notification has no PermissionRequest id, so this is not
+       Claude's request identity. Captured at click so a later poll cannot
+       retarget the decision. */
     const reqAttr = permRequestId
       ? ` data-request-id="${escape(String(permRequestId))}"` : "";
+    const dialogAttr = permDialogId
+      ? ` data-dialog-id="${escape(String(permDialogId))}"` : "";
     const btns = `<div class="permbtns">${opts.map(o => {
       const { label, title } = permOptionLabel(o);
       const cls = permOptionClass(o.kind);
       const titleAttr = title ? ` title="${escape(title)}"` : "";
-      return `<button data-key="${escape(o.key)}"${reqAttr} class="permbtn ${cls}"${titleAttr}>${escape(o.key)}. ${escape(label)}</button>`;
+      return `<button data-key="${escape(o.key)}"${reqAttr}${dialogAttr} class="permbtn ${cls}"${titleAttr}>${escape(o.key)}. ${escape(label)}</button>`;
     }).join("")}</div>`;
     /* Hint outside the clamp; wording must not repeat the tool title — that
        is the ask body, rendered immediately below. Order:
@@ -867,6 +937,8 @@ export function createChatFeature(deps){
   let chatETag = { node: "", etag: "" };
   /* Last authoritative auto-approve view for the selected node (server-owned). */
   let lastAutoView = null;
+  /* Per-node: restore_draft applied once so a later poll cannot clobber typing. */
+  const restoredDraft = {};
   /* In-flight POST node id — never repaint another node with a stale response. */
   let autoApproveInFlight = "";
   /* The pane's own render region: a host element inside #msgs that the
@@ -1502,6 +1574,24 @@ export function createChatFeature(deps){
     const turns = data.turns || [];
     if (typeof d.setAttachAvail === "function") d.setAttachAvail(turns.length > 0);
 
+    if (data.restore_draft && n.id && !restoredDraft[n.id]){
+      restoredDraft[n.id] = true;
+      if (sentEcho && sentEcho.node === n.id) sentEcho = null;
+      const stored = (d.storage && typeof d.storage.getItem === "function")
+        ? (d.storage.getItem("scimux-draft:" + n.id) || "") : "";
+      const live = (typeof d.composerText === "function" && g("sel", "") === n.id)
+        ? (d.composerText() || stored) : stored;
+      const decision = restoreDraftDecision({ original: data.restore_draft, current: live });
+      if (decision.action === "restore"){
+        if (typeof d.restoreDraft === "function") d.restoreDraft(n.id, decision.text);
+        else if (d.storage && typeof d.storage.setItem === "function"){
+          d.storage.setItem("scimux-draft:" + n.id, decision.text);
+        }
+      }
+    }
+    if (!sentEcho && data.pending_prompt && n.id && !data.restore_draft){
+      sentEcho = { node: n.id, text: data.pending_prompt, atts: [], at: Date.now(), seen: null };
+    }
     if (sentEcho && sentEcho.node === n.id){
       const now = typeof d.now === "function" ? d.now() : Date.now();
       const r = retireSentEcho(sentEcho, turns, now);
@@ -1524,6 +1614,8 @@ export function createChatFeature(deps){
       priorTurns: data.prior_turns || 0,
       termOpen,
       fresh: !!data.fresh,
+      supervision: data.supervision || n.supervision || "",
+      autoApproveArmed: !!(data.auto_approve && data.auto_approve.phase === "armed"),
     });
     const { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek } = policy;
 
@@ -1583,6 +1675,8 @@ export function createChatFeature(deps){
       permReason: data.perm_reason || "",
       permOptionsKey: permOptionsKey(data.perm_options),
       permRequestId: data.perm_request_id || "",
+      permDialogId: data.perm_dialog_id || "",
+      permManual: !!data.perm_manual,
       priorTurns: data.prior_turns || 0,
       chatStarted: data.chat_started || "",
       echoHash: echo ? hash(echo.text) : "",
@@ -1645,8 +1739,14 @@ export function createChatFeature(deps){
       ).join("") +
       (data.chat_started
         ? `<div class="chatseam curseam"><span>chat started ${escape(whenFn(data.chat_started))}</span></div>` : "") +
+      (data.error
+        ? `<div class="pending chaterr" role="status">${escape(data.error)}</div>`
+        : "") +
       (!turns.length && !liveDecisions.length
-        ? pendingEmptyHTML({ freshSurface, pending: data.pending })
+        ? pendingEmptyHTML({
+            freshSurface, pending: data.pending,
+            supervision: data.supervision || n.supervision || "",
+          })
         : "") +
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, nodeId: n.id, assets,
@@ -1728,6 +1828,8 @@ export function createChatFeature(deps){
         permToolKind: data.perm_tool_kind || "",
         permReason: data.perm_reason || "",
         permRequestId: data.perm_request_id || "",
+        permDialogId: data.perm_dialog_id || "",
+        permManual: !!data.perm_manual,
         expanded,
         axScreenReader: !!n.ax_screen_reader,
         escape,
@@ -1843,6 +1945,11 @@ export function createChatFeature(deps){
       refreshChat();
       return;
     }
+    const openTerm = e.target.closest && e.target.closest("[data-open-terminal]");
+    if (openTerm){
+      if (!termOpen) onTermToggle();
+      return;
+    }
     const dismiss = e.target.closest && e.target.closest("[data-dismiss-attention]");
     if (dismiss){
       const n = nodeById(sel);
@@ -1864,12 +1971,13 @@ export function createChatFeature(deps){
     const dest = sel;
     const key = b.dataset.key;
     const requestId = b.dataset.requestId || "";
+    const dialogId = b.dataset.dialogId || "";
     collapseAttentionUI(dest);
     (async () => {
       try {
-        const body = requestId
-          ? { key, request_id: requestId }
-          : { key };
+        const body = { key };
+        if (requestId) body.request_id = requestId;
+        if (dialogId) body.dialog_id = dialogId;
         await api(`/api/nodes/${encodeURIComponent(dest)}/key`,
           { method: "POST", body: JSON.stringify(body) });
         chatSig = "";

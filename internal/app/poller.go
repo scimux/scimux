@@ -148,6 +148,12 @@ func (a *app) poll() {
 		// is up — which the pane-geometry backstops cannot know and must not
 		// contradict.
 		askAttn, askCapable := a.claudeAskState(n)
+		claudeDlg := a.claudeVisibleDialog(n)
+		a.mu.Lock()
+		claudeSup := a.claudeSupervisionOf(n)
+		claudeArmed := a.claudeAutoApproveArmedLocked(n)
+		a.mu.Unlock()
+		claudeGated := n.Agent == "claude"
 		attn := ""
 		// freshAttn distinguishes attention classified from evidence this tick
 		// from attention merely preserved across an indeterminate tick: only the
@@ -156,7 +162,52 @@ func (a *app) poll() {
 		// quietTl is the Tailer polled on this quiet tick (nil otherwise). The
 		// turn_done predicate reuses it — no second tailerFor / file read.
 		var quietTl *transcript.Tailer
-		if state == "quiet" {
+		if claudeGated {
+			// Strict hooked Claude: the terminal is never opened from quietness,
+			// AX staticness, unresolved calls, missing/stale/unparseable
+			// transcripts, fallback chat, or owing timeouts. Unsupported and
+			// starting Claude nodes are equally forbidden from inspect.
+			// Attention is only a proven visible permission dialog, and never
+			// while auto-approve remains armed (that case is an inline error).
+			if claudeSup == claudeSupStrict && claudeDlg.Attn != "" && !claudeArmed {
+				attn, freshAttn = claudeDlg.Attn, true
+			}
+			refreshClaudeDlg := func(tl *transcript.Tailer) {
+				if claudeSup != claudeSupStrict || tl == nil {
+					return
+				}
+				off, _ := tl.Progress()
+				grew := a.noteClaudeAskedProgress(n.ID, off)
+				retired := a.retireClaudeAskedByCalls(n, tl.ToolStamps()) > 0
+				if grew && !retired && tl.PendingCount() == 0 {
+					at, dated := tl.NewestTurnTime()
+					retired = a.retireClaudeAskedOnProgress(n, at, dated)
+				}
+				if retired {
+					claudeDlg = a.claudeVisibleDialog(n)
+				}
+				if claudeDlg.Attn != "" && !claudeDlg.Armed {
+					attn, freshAttn = claudeDlg.Attn, true
+				} else {
+					attn, freshAttn = "", retired
+				}
+			}
+			if state == "quiet" {
+				quietTl = a.tailerFor(n)
+				if quietTl != nil {
+					quietTl.Poll()
+					off, prog := quietTl.Progress()
+					a.noteChatProgress(n.ID, off, prog, prev == "active")
+					refreshClaudeDlg(quietTl)
+				}
+			} else if state == "active" {
+				if tl := a.tailerFor(n); tl != nil {
+					tl.Poll()
+					refreshClaudeDlg(tl)
+				}
+			}
+			askAttn, askCapable = "", false
+		} else if state == "quiet" {
 			// A zero-turn segment immediately after /clear is deliberately idle:
 			// the detached Claude transcript is expected, not missing evidence.
 			// Suppress every attention fallback until the first post-clear turn
@@ -397,20 +448,20 @@ func (a *app) poll() {
 		// re-arm that completed after this tick's observation is not erased
 		// by a stale transition.
 		disarmLeaseID, settleLeaseID := "", ""
+		claudeLost := n.Agent == "claude" && state == "exited" && prev != "exited"
 		if state == "exited" && prev != "exited" {
 			if st := a.autoApprove[n.ID]; st != nil {
 				disarmLeaseID = st.LeaseID
 			}
 		} else if prev == "active" && state != "active" {
-			// Claude's explicit end_turn settles what pane quietness cannot. A
-			// permission/question dialog is also quiet and may not have flushed a
-			// tool_use record yet, so "no pending call" is not a turn boundary.
-			// With no readable transcript the legacy mechanical rule stands;
-			// otherwise require the structured completion record. The explicit
-			// interrupt record is projected as EndTurn by the tailer too.
-			turnClosed := quietTl == nil || (quietTl.EndTurn() && quietTl.PendingCount() == 0)
-			if st := a.autoApprove[n.ID]; st != nil && turnClosed {
-				settleLeaseID = st.LeaseID
+			// Hooked Claude stays armed until Stop / interrupt / disable /
+			// /clear / /exit / process loss. Pane quietness is not a turn
+			// boundary. Other agents keep the existing mechanical settle.
+			if n.Agent != "claude" {
+				turnClosed := quietTl == nil || (quietTl.EndTurn() && quietTl.PendingCount() == 0)
+				if st := a.autoApprove[n.ID]; st != nil && turnClosed {
+					settleLeaseID = st.LeaseID
+				}
 			}
 		}
 		a.mu.Unlock()
@@ -419,6 +470,9 @@ func (a *app) poll() {
 		}
 		if settleLeaseID != "" {
 			a.settleAutoApproveAfterTurn(n.ID, settleLeaseID)
+		}
+		if claudeLost {
+			a.resetClaudePermissionTurn(n)
 		}
 		// An armed Claude marker expires after claudeLeaseTTL and is never
 		// rewritten on its own; republish so Stop can still read it on a
@@ -468,6 +522,7 @@ func (a *app) reconcileClaudeInitialDelivery(n *Node) {
 			delete(a.sendState, n.ID)
 		}
 		a.mu.Unlock()
+		a.clearClaudeLaunchError(n.ID)
 		return
 	}
 }
@@ -819,17 +874,19 @@ func attentionKind(tool string) string {
 }
 
 func (a *app) discoverTranscript(n *Node) {
+	// Claude transcripts are bound only by SessionStart. UUID directory
+	// discovery is not ownership evidence. Other transports do not discover
+	// files here.
+	if n == nil || n.Agent == "claude" {
+		return
+	}
 	a.mu.Lock()
 	done := n.Transcript != ""
 	a.mu.Unlock()
 	if done {
 		return
 	}
-	// Only claude (tmux) nodes discover a transcript file. The structured
-	// transports keep their history in the manager's session log and never
-	// reach here (the poller continues past them before discovery). Adoption
-	// without an explicit or process-derived UUID stays transcriptless.
-	if n.Agent != "claude" || n.SessionID == "" {
+	if n.SessionID == "" {
 		return
 	}
 	created, err := time.Parse(time.RFC3339, n.CreatedAt)

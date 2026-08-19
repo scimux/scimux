@@ -29,6 +29,8 @@ type claudeStopEvent struct {
 // revoke turn N+1.
 type claudeStopNotice struct {
 	Lease         string `json:"lease"`
+	Turn          string `json:"turn,omitempty"`
+	TurnGen       int    `json:"turn_gen,omitempty"`
 	HookEventName string `json:"hook_event_name"`
 	SessionID     string `json:"session_id"`
 	At            string `json:"at,omitempty"`
@@ -84,16 +86,19 @@ func RunClaudeStopHook(dir string, r io.Reader, stdout, stderr io.Writer) error 
 	if ev.HookEventName == "Stop" && ev.StopHookActive {
 		return nil
 	}
-	perm, err := claudePermDir(dir)
-	if err != nil {
-		return nil
+	lease := ""
+	var turn claudeAcceptedTurn
+	if perm, err := claudePermDir(dir); err == nil {
+		lease, _ = readClaudePermLease(perm, time.Now())
+		turn, _ = readClaudeAcceptedTurn(perm)
 	}
-	lease, ok := readClaudePermLease(perm, time.Now())
-	if !ok {
-		return nil
-	}
+	// Always emit a session-scoped Stop notice, armed or not, so drain can
+	// clear epochs/asks/attention even when no lease exists. A late Stop
+	// from another session or another accepted turn is quarantined on drain.
 	raw, err := json.Marshal(claudeStopNotice{
 		Lease:         lease,
+		Turn:          turn.Turn,
+		TurnGen:       turn.Gen,
 		HookEventName: ev.HookEventName,
 		SessionID:     ev.SessionID,
 		At:            time.Now().UTC().Format(time.RFC3339Nano),
@@ -150,7 +155,7 @@ func (a *app) drainClaudeStopInbox(nodeID, hookID string) {
 			continue
 		}
 		var n claudeStopNotice
-		if json.Unmarshal(b, &n) != nil || n.Lease == "" ||
+		if json.Unmarshal(b, &n) != nil ||
 			(n.HookEventName != "Stop" && n.HookEventName != "StopFailure") {
 			a.quarantineClaudeHookEvent(hookID, path, name)
 			continue
@@ -166,10 +171,29 @@ func (a *app) drainClaudeStopInbox(nodeID, hookID string) {
 			a.quarantineClaudeHookEvent(hookID, path, name)
 			continue
 		}
-		// Same gate as the poller / next-prompt belt: only an armed lease
-		// settles. A primed or off lease with this id is left alone.
-		a.settleAutoApproveAfterTurn(nodeID, n.Lease)
+		g := a.autoGateFor(nodeID)
+		g.Lock()
+		current := a.claudeAcceptedTurnOf(nodeID)
+		closing := a.claudeClosingTurnOf(nodeID)
+		if !claudeStopMatchesTurn(n, current, closing) {
+			// Late Stop from turn N after N+1 began: consume it, mutate nothing.
+			a.finishClaudeHookEvent(hookID, path, name, "stop")
+			g.Unlock()
+			continue
+		}
+		// Lease settle is an additional fence. Permission cleanup is
+		// unconditional for the matching turn, even when no lease was armed.
+		if n.Lease != "" {
+			a.settleAutoApproveAfterTurnLocked(nodeID, n.Lease)
+		}
+		a.mu.Lock()
+		node := a.byID[nodeID]
+		a.mu.Unlock()
+		if node != nil {
+			a.resetClaudePermissionTurnLocked(node)
+		}
 		a.finishClaudeHookEvent(hookID, path, name, "stop")
+		g.Unlock()
 	}
 }
 

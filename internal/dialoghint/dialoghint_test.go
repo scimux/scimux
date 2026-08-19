@@ -1,6 +1,9 @@
 package dialoghint
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClassifyVisible(t *testing.T) {
 	tests := []struct {
@@ -368,6 +371,46 @@ Enter to confirm · Esc to cancel`,
 // stall that already has mechanical evidence behind it, never raise attention
 // on its own. Both documented Claude spellings are accepted; near-misses are
 // not.
+const axAskUserQuestionPane = `Which approach should we take?
+
+  1. Keep the poller mechanical
+  2. Parse the TUI
+  3. Other
+  4. Chat about this
+
+Enter selection [1-4], or Escape to cancel:`
+
+func TestNumberedOptionsAXAskUserQuestion(t *testing.T) {
+	opts, ok := NumberedOptions(axAskUserQuestionPane)
+	if !ok {
+		t.Fatal("AX AskUserQuestion fixture must extract a numbered menu")
+	}
+	if len(opts) != 4 {
+		t.Fatalf("options = %d, want 4 (option 4 must be available)", len(opts))
+	}
+	want := []string{
+		"Keep the poller mechanical",
+		"Parse the TUI",
+		"Other",
+		"Chat about this",
+	}
+	for i, label := range want {
+		if opts[i].N != i+1 || opts[i].Label != label {
+			t.Errorf("option %d = {%d, %q}, want {%d, %q}", i+1, opts[i].N, opts[i].Label, i+1, label)
+		}
+	}
+	for _, o := range opts {
+		if strings.Contains(strings.ToLower(o.Label), "don't ask") ||
+			strings.Contains(strings.ToLower(o.Label), "allow always") ||
+			strings.EqualFold(o.Label, "Yes") {
+			t.Fatalf("invented permission label %q on a question menu", o.Label)
+		}
+	}
+	if _, ok := NumberedOptions("Here is the plan:\n1. First step\n2. Second step\n3. Third step\nDone."); ok {
+		t.Fatal("prose numbered list must not extract as a dialog menu")
+	}
+}
+
 func TestHasCancelAnchor(t *testing.T) {
 	tests := []struct {
 		name string
@@ -459,5 +502,26 @@ func TestStripANSI(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestLooksLikeWorkspaceTrustRequiresTrustEvidence(t *testing.T) {
+	trust := `Synthetic workspace menu
+Permission Required: Accessing workspace:
+/tmp/proj
+Fixture workspace access request.
+y. Yes, I trust this folder
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel`
+	generic := "Choose an option:\ny. Yes\nn. No\nEnter y/n:\n"
+	if !LooksLikeWorkspaceTrust(trust) {
+		t.Fatal("trust pane must match")
+	}
+	if LooksLikeWorkspaceTrust(generic) {
+		t.Fatal("generic lettered y/n must not be classified as workspace trust")
+	}
+	if !letteredOptionsDialog(stripANSI(generic)) {
+		t.Fatal("generic pane is still a lettered-options dialog")
 	}
 }

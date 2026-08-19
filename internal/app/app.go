@@ -193,6 +193,24 @@ func (a *app) initMaps() {
 	if a.claudeAskedTools == nil {
 		a.claudeAskedTools = map[string]int{}
 	}
+	if a.claudeAck == nil {
+		a.claudeAck = map[string]bool{}
+	}
+	if a.claudeStrictCap == nil {
+		a.claudeStrictCap = map[string]bool{}
+	}
+	if a.claudeLaunchErr == nil {
+		a.claudeLaunchErr = map[string]string{}
+	}
+	if a.claudeTurns == nil {
+		a.claudeTurns = map[string]claudeAcceptedTurn{}
+	}
+	if a.claudeClosing == nil {
+		a.claudeClosing = map[string]claudeAcceptedTurn{}
+	}
+	if a.claudeDialogNote == nil {
+		a.claudeDialogNote = map[string]string{}
+	}
 	if a.lastDeliver == nil {
 		a.lastDeliver = map[string]time.Time{}
 	}
@@ -370,6 +388,34 @@ type app struct {
 	// established. A link established after the delivery being judged cannot
 	// have missed it (maybeRelinkTranscript).
 	claudeBoundAt map[string]time.Time
+	// claudeAck is set only after a valid SessionStart for that node has
+	// been processed. A newly launched node is not hook-capable until then.
+	claudeAck map[string]bool
+	// claudeStrictCap maps a hook bundle id to whether it is the complete
+	// current contract (SessionStart, PermissionRequest, Notification, Stop,
+	// StopFailure, asked layout, runnable exec).
+	claudeStrictCap map[string]bool
+	// claudeLaunchErr is a durable-for-the-process inline launch/delivery
+	// error for a Claude node. It is never a reason to open the terminal.
+	claudeLaunchErr map[string]string
+	// claudeTurns is the live accepted-turn nonce per Claude node. Stop and
+	// Notification helpers capture it; drain matches it exactly.
+	claudeTurns map[string]claudeAcceptedTurn
+	// claudeClosing is the last closed accepted turn, kept so a second Stop
+	// for that turn is idempotent and cannot match the next begin.
+	claudeClosing map[string]claudeAcceptedTurn
+	// claudeDialogNote is an inline manual diagnostic when a notification
+	// cannot be ordered against the current turn. It never carries buttons.
+	claudeDialogNote map[string]string
+	// claudeBindMu / claudeBindLocks serialize per-node Claude binding
+	// mutations (startup, clear, resume) so a failed commit cannot race a
+	// generation change onto an uncommitted store record.
+	claudeBindMu    sync.Mutex
+	claudeBindLocks map[string]*sync.Mutex
+	// claudeAfterCandidate, when non-nil, runs after an uncommitted
+	// claude-binding-candidate is appended and before the committed record
+	// is validated. Tests only.
+	claudeAfterCandidate func(nodeID string)
 	// lastDeliver is when scimux last pasted a prompt into each node's pane.
 	// It is the only thing that makes a stale link provable: the agent owes
 	// output for that prompt, so a transcript with no content since then is

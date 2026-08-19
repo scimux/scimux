@@ -115,6 +115,16 @@ export function normalizePromptText(raw){
   return String(raw || "").replace(/\u00a0/g, " ");
 }
 
+/** Claude's native /fork command. Leading command only — prose that
+ *  mentions "/fork" is not rejected. HTTP remains authoritative. */
+export function isClaudeNativeForkCommand(text){
+  const s = String(text || "").trim();
+  if (s === "/fork") return true;
+  if (!s.startsWith("/fork")) return false;
+  const next = s.charAt(5);
+  return next === " " || next === "\t" || next === "\n" || next === "\r";
+}
+
 /** Per-node localStorage key for drafts. */
 export function draftStorageKey(nodeId){
   return DRAFT_KEY_PREFIX + (nodeId || "");
@@ -569,6 +579,12 @@ export function createComposerFeature(deps){
     if (anyUploading(items)) await waitForUploads(items);
     const refs = completedRefs(items);
     if (!hasSendPayload(text, refs)) return;
+    const destNode = nodeById(dest);
+    if (destNode && String(destNode.agent || "").toLowerCase() === "claude" &&
+        isClaudeNativeForkCommand(text)){
+      alertFn("Claude /fork is not supported. Use scimux's Fork action to start a fresh chat that inherits launch configuration but not conversation history.");
+      return;
+    }
     clearPrompt();
     storage.removeItem(draftStorageKey(dest));
     stage[dest] = []; /* clear optimistically; restore on failure */

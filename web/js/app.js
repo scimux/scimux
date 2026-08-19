@@ -816,6 +816,15 @@ const chatFeature = createChatFeature({
   setComposerBusy: v => composerFeature.setComposerBusy(v),
   setComposerClosed: v => composerFeature.setComposerClosed(v),
   setAttachAvail: v => composerFeature.setAttachAvail(v),
+  storage: localStorage,
+  composerText: () => (composerFeature && typeof composerFeature.promptText === "function")
+    ? (composerFeature.promptText() || "") : "",
+  restoreDraft: (id, text) => {
+    try { localStorage.setItem("scimux-draft:" + id, text); } catch { /* ignore */ }
+    if (sel === id && composerFeature && typeof composerFeature.setPromptText === "function"){
+      composerFeature.setPromptText(text);
+    }
+  },
   setBookmarksBackLabel: t => bookmarksFeature.setBackLabel(t),
   updateLocalNode: n => updateLocalNode(n),
   invalidateCardsSig: () => { cardsSig = ""; },

@@ -197,6 +197,38 @@ func claudePermRequestPending(req claudePermRequest, now time.Time) bool {
 // decline — a human who armed the lease is about to meet a dialog anyway, and
 // the only honest thing is to say why. An unparseable stamp is a parse failure,
 // not a slow host, so it is not counted here.
+// claudePermDeclineReason names the policy/fence reason an armed request
+// cannot be auto-approved. Empty means the request was simply ineligible in
+// a way that is not a failure (no lease, empty id).
+func claudePermDeclineReason(ctx claudePermContext, req claudePermRequest) string {
+	if !ctx.Armed || ctx.LeaseID == "" || req.Lease == "" || req.Lease != ctx.LeaseID || req.ID == "" {
+		return ""
+	}
+	ev := req.Event
+	if ev.HookEventName != "PermissionRequest" {
+		return "auto-approve refused an unexpected hook event"
+	}
+	if ctx.SessionID == "" || ev.SessionID == "" || ev.SessionID != ctx.SessionID {
+		return "auto-approve refused a request from another Claude session"
+	}
+	if ev.ToolName == "" {
+		return "auto-approve refused a request with no tool name"
+	}
+	if claudeQuestionTools[ev.ToolName] {
+		return "auto-approve does not answer questions or plan choices"
+	}
+	if ev.PermissionMode == "plan" {
+		return "auto-approve does not answer plan-mode choices"
+	}
+	if !claudeAutoModes[ev.PermissionMode] {
+		return "auto-approve refused an unknown or automated permission mode"
+	}
+	if ctx.TurnPromptID != "" && ev.PromptID != ctx.TurnPromptID {
+		return "auto-approve refused a request from another turn"
+	}
+	return ""
+}
+
 func claudePermMissedDeadline(ctx claudePermContext, req claudePermRequest) bool {
 	if _, err := time.Parse(time.RFC3339Nano, req.At); err != nil {
 		return false
@@ -432,6 +464,7 @@ type claudeHookCapabilities struct {
 	Permission int    `json:"permission"`
 	Asked      int    `json:"asked"`
 	Stop       int    `json:"stop"`
+	Notify     int    `json:"notify"`
 	Exec       string `json:"exec,omitempty"`
 }
 
@@ -564,8 +597,21 @@ func (a *app) refreshClaudePermCaps() {
 	a.mu.Unlock()
 	caps := map[string]bool{}
 	asked := map[string]bool{}
+	strict := map[string]bool{}
+	acked := map[string]bool{}
+	a.mu.Lock()
+	for nodeID, hookID := range a.claudeHooks {
+		if a.claudeAck[nodeID] {
+			acked[hookID] = true
+		}
+	}
+	a.mu.Unlock()
 	for _, hookID := range ids {
 		if !safePathComponent(hookID) {
+			continue
+		}
+		if !acked[hookID] {
+			// A freshly launched node is not hook-capable until SessionStart.
 			continue
 		}
 		bundle := filepath.Join(root, hookID)
@@ -575,10 +621,14 @@ func (a *app) refreshClaudePermCaps() {
 		if bundleSupportsAsked(bundle) {
 			asked[hookID] = true
 		}
+		if bundleCompleteCurrent(bundle) {
+			strict[hookID] = true
+		}
 	}
 	a.mu.Lock()
 	a.claudePermCap = caps
 	a.claudeAskedCap = asked
+	a.claudeStrictCap = strict
 	a.mu.Unlock()
 }
 
@@ -589,10 +639,10 @@ func (a *app) claudePermSupportedLocked(n *Node) bool {
 		return false
 	}
 	hookID := a.claudeHookIDLocked(n.ID)
-	if hookID == "" {
+	if hookID == "" || !a.claudeHookAckedLocked(n.ID) {
 		return false
 	}
-	return a.claudePermCap[hookID]
+	return a.claudePermCap[hookID] && a.claudeSupervisionOf(n) == claudeSupStrict
 }
 
 // publishClaudeLease writes the arm marker the hook reads. Ordering rule:
@@ -793,7 +843,9 @@ func (a *app) resolveOneClaudePermission(n *Node, bundle, path, name string, req
 
 	if !eligibleClaudePermission(ctx, req) {
 		// Declined: the helper escalates on its own deadline and the human
-		// sees the dialog Claude was about to draw anyway.
+		// sees the dialog Claude was about to draw anyway. Deadline, policy,
+		// prompt-fence, and session mismatches are inline failures — never
+		// inspect attention.
 		if claudePermMissedDeadline(ctx, req) {
 			msg := fmt.Sprintf("auto-approve missed the hook deadline (request=%s tool=%s): the call escalated to the dialog",
 				req.ID, req.Event.ToolName)
@@ -801,6 +853,14 @@ func (a *app) resolveOneClaudePermission(n *Node, bundle, path, name string, req
 			a.mu.Lock()
 			if cur := a.autoApprove[n.ID]; cur != nil && cur.LeaseID == leaseID {
 				cur.Error = "auto-approve missed the hook deadline; the call escalated to the dialog"
+			}
+			a.mu.Unlock()
+		} else if reason := claudePermDeclineReason(ctx, req); reason != "" {
+			msg := reason + " (request=" + req.ID + ")"
+			_ = a.appendSessionEvent(n.ID, sessionlog.Event{T: "error", Error: msg})
+			a.mu.Lock()
+			if cur := a.autoApprove[n.ID]; cur != nil && cur.LeaseID == leaseID {
+				cur.Error = reason
 			}
 			a.mu.Unlock()
 		}

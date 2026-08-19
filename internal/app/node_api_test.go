@@ -143,11 +143,12 @@ func TestPublicRouteClaudeInitialDeliveryEvidence(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}
-			if body.ID == "" || body.Prompt != "irreplaceable" || body.InitialDelivery != tc.delivery {
-				t.Fatalf("response = %+v", body)
+			if body.ID == "" || body.Prompt != "irreplaceable" || body.InitialDelivery != initialPending {
+				t.Fatalf("create must return pending immediately, got %+v", body)
 			}
+			waitClaudeInitialGate(t, a, body.ID)
 			a.mu.Lock()
-			locked := a.sendState[body.ID] == "initial_unconfirmed"
+			locked := a.sendState[body.ID] == sendInitialUnconfirmed
 			a.mu.Unlock()
 			if locked != tc.wantLocked {
 				t.Fatalf("send lock = %v, want %v", locked, tc.wantLocked)
@@ -167,23 +168,31 @@ func TestClaudeCreateHoldsSendGateDuringDeferredInitialDelivery(t *testing.T) {
 		return initialAcknowledged
 	}
 	h := newTestHandler(t, a)
-	created := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		created <- routeRequest(h, http.MethodPost, "/api/nodes",
-			`{"title":"Gate","prompt":"first","agent":"claude","dir":`+strconv.Quote(a.home)+`}`, true)
-	}()
+	rec := routeRequest(h, http.MethodPost, "/api/nodes",
+		`{"title":"Gate","prompt":"first","agent":"claude","dir":`+strconv.Quote(a.home)+`}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create: %d %q", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ID              string          `json:"id"`
+		InitialDelivery initialDelivery `json:"initial_delivery"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.InitialDelivery != initialPending {
+		t.Fatalf("initial_delivery = %q, want pending", body.InitialDelivery)
+	}
 	<-started
 
-	send := routeRequest(h, http.MethodPost, "/api/nodes/Gate/send", `{"text":"second"}`, true)
+	send := routeRequest(h, http.MethodPost, "/api/nodes/"+body.ID+"/send", `{"text":"second"}`, true)
 	if send.Code != http.StatusConflict || !strings.Contains(send.Body.String(), "still in flight") {
 		t.Fatalf("concurrent send = %d %q, want in-flight 409", send.Code, send.Body.String())
 	}
 	close(release)
-	if rec := <-created; rec.Code != http.StatusOK {
-		t.Fatalf("create: %d %q", rec.Code, rec.Body.String())
-	}
+	waitClaudeInitialGate(t, a, body.ID)
 	a.mu.Lock()
-	_, held := a.sendState["Gate"]
+	_, held := a.sendState[body.ID]
 	a.mu.Unlock()
 	if held {
 		t.Fatal("acknowledged initial delivery left the send gate held")
