@@ -35,6 +35,7 @@ import {
 import {
   hardAttention, orderedNodes as orderedNodesMod,
   isArchived as isArchivedMod, stationLatestTurn,
+  ackReadySeen, pruneReadySeen, loadReadySeen, saveReadySeen,
 } from "./map-model.js";
 import {
   clampLevel, scrimStep, captureTouchStart, documentSwipeDecision,
@@ -82,6 +83,7 @@ const $ = s => document.querySelector(s);
 let nodes = [];              // last /api/state nodes
 let unadopted = [];
 let sel = localStorage.getItem("scimux-sel") || "";
+let readySeen = loadReadySeen(localStorage);
 let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
 /* termOpen lives inside createChatFeature (Packet 7C). */
 let cardTab = "current";
@@ -576,6 +578,7 @@ const cardsFeature = createCardsFeature({
   editingTitleScope: () => editingTitleScope,
   cardsSig: () => cardsSig,
   setCardsSig: v => { cardsSig = v; },
+  readySeen: () => readySeen,
   pinned: () => getUI().pinned,
   archived: () => getUI().archived,
   lanes: () => getUI().lanes,
@@ -698,6 +701,8 @@ const mapFeature = createMapFeature({
   fmtDur,
   contrastText,
   nodes: () => nodes,
+  sel: () => sel,
+  readySeen: () => readySeen,
   groups: () => getUI().groups,
   laneFilter: () => laneFilter,
   uiLoaded: () => uiLoaded(),
@@ -1290,6 +1295,11 @@ function select(id, how){
     const visibleHere = isArchived(seln.id) === (cardTab === "archived") ||
       (cardTab === "current" && hardAttention(seln));
     if (!visibleHere) cardTab = isArchived(seln.id) ? "archived" : "current";
+    const nextSeen = ackReadySeen(readySeen, seln);
+    if (nextSeen !== readySeen){
+      readySeen = nextSeen;
+      saveReadySeen(localStorage, readySeen);
+    }
   }
   cardsSig = "";
   renderCards();
@@ -1772,6 +1782,13 @@ pollingFeature = createPollingFeature({
   publishState: st => {
     nodes = st.nodes || [];
     unadopted = st.unadopted || [];
+    let nextSeen = pruneReadySeen(readySeen, nodes);
+    const open = nodeById(sel);
+    if (open && open.turn_done) nextSeen = ackReadySeen(nextSeen, open);
+    if (nextSeen !== readySeen){
+      readySeen = nextSeen;
+      saveReadySeen(localStorage, readySeen);
+    }
   },
   renderSys,
   ensureSelection: () => {

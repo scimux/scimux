@@ -47,8 +47,8 @@
  * Reuses (no algorithm duplication):
  *   format.js: esc, ageText, md (expanded card description — same renderer as
  *     chat details; never applied to the raw textarea editor)
- *   map-model.js: hardAttention, cardState, statusText, orderedNodes,
- *     pinnedOrder, isArchived, isPinned, inLaneScope, visibleCardLists
+ *   map-model.js: hardAttention, cardState, statusText, statusKind, displayReady,
+ *     orderedNodes, pinnedOrder, isArchived, isPinned, inLaneScope, visibleCardLists
  *   lanes.js pure functions only via injected laneColor/laneName/laneList
  *   state.js only via injected uiMutate
  *
@@ -61,6 +61,8 @@ import {
   hardAttention,
   cardState,
   statusText,
+  statusKind,
+  displayReady,
   orderedNodes,
   isArchived as isArchivedMod,
   isPinned as isPinnedMod,
@@ -115,12 +117,17 @@ export function cardTimeHTML(n, flip = 0, { escape = esc, ageFn = ageText } = {}
    setting the current one, so the list must stay complete. */
 export const CARD_STATES = ["closed", "attention", "working", "dead", "idle"];
 
-/* The one volatile line of a card: the work dot and the status text, both
-   derived from mechanical liveness. cardHTML emits it at build time and the
-   patch writes it back on a liveness flip — same function, so the two can
-   never disagree about what the card should say. */
+/* The one volatile line of a card: the work/ready disc and the status text.
+   cardHTML emits it at build time and the patch writes it back on a liveness
+   flip — same function, so the two can never disagree about what the card
+   should say. Ready reuses the workdot slot; Quiet has no disc. */
 export function cardStatusHTML(n, flip = 0, deps = {}){
-  const dot = cardState(n) === "working" ? '<span class="workdot"></span>' : "";
+  const readyFn = deps.displayReady || displayReady;
+  const ready = readyFn(n, { selectedId: deps.selectedId, seenAt: deps.seenAt });
+  const working = cardState(n) === "working";
+  const dot = working
+    ? '<span class="workdot"></span>'
+    : (ready ? '<span class="readydot" title="Ready to continue" aria-hidden="true"></span>' : "");
   return `${dot}<span class="st">${cardMetaHTML(n, flip, deps)}</span>`;
 }
 
@@ -128,8 +135,13 @@ export function cardMetaHTML(n, flip = 0, deps = {}){
   const escape = deps.escape || esc;
   const ageFn = deps.ageFn || ageText;
   const status = deps.statusText || statusText;
-  const state = status(n).toLowerCase();
-  return `${escape(cardConfigText(n))} · ${escape(state)} · ${cardTimeHTML(n, flip, { escape, ageFn })}`;
+  const kindFn = deps.statusKind || statusKind;
+  const readyFn = deps.displayReady || displayReady;
+  const ready = readyFn(n, { selectedId: deps.selectedId, seenAt: deps.seenAt });
+  const word = ready
+    ? `<span class="st-finished">${escape("Ready")}</span>`
+    : escape(kindFn(n) === "finished" ? "quiet" : status(n).toLowerCase());
+  return `${escape(cardConfigText(n))} · ${word} · ${cardTimeHTML(n, flip, { escape, ageFn })}`;
 }
 
 /* ---------- pure signature / tab / count / empty / fold decisions ---------- */
@@ -171,7 +183,7 @@ export function computeCardsSignature(args){
   const fold = args.foldList || [];
   return JSON.stringify(main.concat(fold).map(n => [
     n.id, n.title, n.description, n.lane_id, n.ended_at || "", n.live, n.attention,
-    n.model, n.effort, !!n.last_interaction,
+    n.model, n.effort, !!n.last_interaction, n.turn_done ? 1 : 0,
   ])) + cardsSignatureTail({ ...args, foldLen: fold.length });
 }
 
@@ -460,7 +472,7 @@ export function createCardsFeature(deps){
         ${pinned ? `<span class="pinflag" title="pinned" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}
         <button class="chev" data-x="${escape(n.id)}" aria-label="summary">&#8250;</button>
       </div>
-      <div class="status">${cardStatusHTML(n, flip, { escape, ageFn, statusText })}</div>
+      <div class="status">${cardStatusHTML(n, flip, { escape, ageFn, statusText, selectedId: sel, seenAt: g("readySeen", {}) })}</div>
       ${!n.lane_id ? `<div class="lanebox" data-card-lane="${escape(n.id)}">
         <div class="lanepick">
           <span class="laneswatch"></span>
@@ -553,7 +565,9 @@ export function createCardsFeature(deps){
       el.classList?.add?.(state);
       const status = el.querySelector?.(".status");
       if (!status) continue;
-      const next = cardStatusHTML(n, cardTimeFlip, { escape, ageFn, statusText });
+      const next = cardStatusHTML(n, cardTimeFlip, {
+        escape, ageFn, statusText, selectedId: g("sel", ""), seenAt: g("readySeen", {}),
+      });
       if (status.innerHTML !== next) status.innerHTML = next;
     }
     /* Every child, not just the cards: the fold button and the empty state

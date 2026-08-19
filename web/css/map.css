@@ -28,6 +28,8 @@
   will-change: transform, opacity; }
 .attnstation-glow { animation: mapAttentionGlow 1.65s ease-in-out infinite; }
 .attnstation-ring { animation: mapAttentionRing 1.65s ease-in-out infinite; }
+/* Ready is news, not an alarm: same ring path, no pulse. Waiting keeps motion. */
+.attnstation-glow.ready, .attnstation-ring.ready { animation: none; }
 @keyframes mapAttentionDot {
   0%, 100% { opacity: .45; transform: translateZ(0) scale(.76); }
   50%      { opacity: 1; transform: translateZ(0) scale(1.28); }

@@ -176,6 +176,11 @@
   background: var(--work); margin-right: 5px; vertical-align: 1px;
   transform: translateZ(0) scale(.85); transform-origin: center;
   will-change: transform, opacity; animation: breathe 1.25s ease-in-out infinite; }
+/* Same slot as .workdot: inline, 7px, petrol. Static — motion stays on
+   running and waiting. */
+.readydot { display: inline-block; width: 7px; height: 7px; border-radius: 4px;
+  background: var(--work); margin-right: 5px; vertical-align: 1px; }
+.card .status .st-finished { color: var(--work); font-weight: 600; }
 #chathead .dot.active {
   transform: translateZ(0) scale(.85); transform-origin: center;
   will-change: transform, opacity; animation: breathe 1.25s ease-in-out infinite;

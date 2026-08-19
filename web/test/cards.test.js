@@ -113,6 +113,98 @@ test("cardMetaHTML projects config · status · time", () => {
   assert.equal(html, `m/e · running · <span class="time" title=""></span>`);
 });
 
+test("computeCardsSignature changes when turn_done flips; shape does not", () => {
+  const base = {
+    list: [{ id: "a", title: "T", description: "d", lane_id: "", ended_at: "", live: "quiet", attention: "", model: "m", effort: "", last_interaction: 1, turn_done: false }],
+    foldList: [],
+    unadopted: [],
+    sel: "a",
+    expanded: new Set(),
+    cardTab: "current",
+    laneFilter: "",
+    attnFoldOpen: false,
+    bookmarksLen: 0,
+    lanes: [],
+    pinned: [],
+    actionCard: "",
+    editingDesc: "",
+    editingTitle: "",
+  };
+  const quiet = computeCardsSignature(base);
+  const readyList = [{ ...base.list[0], turn_done: true }];
+  const ready = computeCardsSignature({ ...base, list: readyList });
+  assert.notEqual(quiet, ready, "full sig must include turn_done so Ready patches");
+  assert.equal(
+    cardShapeSignature(base),
+    cardShapeSignature({ ...base, list: readyList }),
+    "shape omits turn_done so the card is patched, not rebuilt",
+  );
+  assert.equal(cardsRenderPlan({
+    sig: ready,
+    cardsSig: quiet,
+    shapeSig: cardShapeSignature({ ...base, list: readyList }),
+    cardsShapeSig: cardShapeSignature(base),
+    pinDragging: false,
+  }), "patch");
+});
+
+test("cardStatusHTML paints a static readydot only when displayReady", () => {
+  const n = { id: "n", model: "opus", live: "quiet", turn_done: true, last_activity: 10 };
+  const html = cardStatusHTML(n, 0, { escape: s => s, ageFn: () => "2m" });
+  assert.match(html, /class="readydot"/);
+  assert.match(html, /title="Ready to continue"/);
+  assert.match(html, /aria-hidden="true"/);
+  assert.doesNotMatch(html, /class="workdot"/);
+  assert.match(html, /class="st-finished">Ready</);
+  assert.doesNotMatch(html, / · ready · /);
+
+  const selected = cardStatusHTML(n, 0, {
+    escape: s => s, ageFn: () => "2m", selectedId: "n",
+  });
+  assert.doesNotMatch(selected, /class="readydot"/);
+  assert.match(selected, / · quiet · /);
+
+  const seen = cardStatusHTML(n, 0, {
+    escape: s => s, ageFn: () => "2m", seenAt: { n: 10 },
+  });
+  assert.doesNotMatch(seen, /class="readydot"/);
+  assert.match(seen, / · quiet · /);
+
+  const working = cardStatusHTML(
+    { id: "n", model: "opus", live: "active", turn_done: true },
+    0, { escape: s => s, ageFn: () => "2m" },
+  );
+  assert.match(working, /class="workdot"/);
+  assert.doesNotMatch(working, /class="readydot"/);
+
+  const quiet = cardStatusHTML(
+    { id: "n", model: "opus", live: "quiet" },
+    0, { escape: s => s, ageFn: () => "2m" },
+  );
+  assert.doesNotMatch(quiet, /class="readydot"/);
+  assert.doesNotMatch(quiet, /class="workdot"/);
+  assert.match(quiet, / · quiet · /);
+});
+
+test("CARD_STATES stays the five mechanical tokens (no finished glow class)", () => {
+  assert.deepEqual(CARD_STATES, ["closed", "attention", "working", "dead", "idle"]);
+});
+
+test("cards.css: .readydot is a static petrol disc; no finished card glow", () => {
+  const dot = cardsCssSrc.match(/\.readydot\s*\{([^}]+)\}/);
+  assert.ok(dot, ".readydot rule must exist");
+  assert.match(dot[1], /var\(--work\)/, "disc uses petrol");
+  assert.match(dot[1], /border-radius/, "it is a disc");
+  assert.doesNotMatch(dot[1], /animation\s*:/, "Ready disc must not pulse");
+  const word = cardsCssSrc.match(/\.card\s+\.status\s+\.st-finished\s*\{([^}]+)\}/)
+    || cardsCssSrc.match(/\.st-finished\s*\{([^}]+)\}/);
+  assert.ok(word, ".st-finished colour rule on the card status line");
+  assert.match(word[1], /var\(--work\)/, "Ready word uses petrol");
+  assert.doesNotMatch(cardsCssSrc, /\.card\.finished/, "no finished card glow class");
+  const attn = cardsCssSrc.match(/\.card\.attention::after\s*\{/);
+  assert.ok(attn, "attention glow stays the only card halo");
+});
+
 /* ---------- signature / render decision ---------- */
 test("computeCardsSignature equality for age-only; change forces rebuild", () => {
   const base = {

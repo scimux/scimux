@@ -233,7 +233,7 @@ test("ctx_pct still rendered as tank, unchanged (D1)", () => {
   // attention — two concentric rings would fight). Geometry otherwise pinned.
   // hardAttention (not raw n.attention) so neutral inspect does not suppress the
   // tank the way a yellow ring would — inspect is not ringed (fixes-2 P1).
-  const tankSnippet = `if (n.ctx_pct != null && !hardAttention(n) && !turnFinished(n)){
+  const tankSnippet = `if (n.ctx_pct != null && !hardAttention(n) && !displayReady(n, readyCtx())){
         const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += \`<circle cx="\${dotX}" cy="\${yy}" r="\${R}" fill="none" stroke="\${col}" stroke-width="2" opacity="\${op * .2}"/>\`;`;
   assert.ok(mapSrc.includes(tankSnippet), "wall tank SVG occupancy ring must be unchanged (D1)");
@@ -436,18 +436,81 @@ test("P5: finished station ring uses --work, not --attn", () => {
   const fin = attentionStationSVG(1, 2, 1, "var(--work)");
   assert.match(fin, /var\(--work\)/, "finished ring is success/--work");
   assert.doesNotMatch(fin, /var\(--attn\)/, "finished ring must not use --attn yellow");
-  assert.match(fin, /class="attnstation-glow"/, "same paint path, not a fork");
-  assert.match(fin, /class="attnstation-ring"/);
+  assert.match(fin, /class="attnstation-glow(?: ready)?"/, "same paint path, not a fork");
+  assert.match(fin, /class="attnstation-ring(?: ready)?"/);
 
   // Call sites gate on attention OR turn_done (widened, not a parallel path).
   const gates = [...mapSrc.matchAll(/if\s*\(\s*n\.attention[^)]*\)\s*svg\s*\+=\s*attentionStationSVG/g)];
-  // After the fix the condition includes turnFinished / turn_done.
+  // After the fix the condition includes turnFinished / turn_done / displayReady.
   const paintCalls = [...mapSrc.matchAll(/attentionStationSVG\s*\(/g)];
   assert.ok(paintCalls.length >= 3, "definition + two map paint sites");
   // Source must pass --work for the finished case somewhere near the calls.
-  assert.match(mapSrc, /attentionStationSVG\([^)]*var\(--work\)|turnFinished|turn_done/,
+  assert.match(mapSrc, /attentionStationSVG\([^)]*var\(--work\)|turnFinished|turn_done|displayReady/,
     "paint path must know about finished / --work");
   void gates;
+});
+
+test("P1: finished ring SVG carries ready class; waiting does not", () => {
+  const attn = attentionStationSVG(1, 2, 1);
+  assert.match(attn, /class="attnstation-glow"/);
+  assert.match(attn, /class="attnstation-ring"/);
+  assert.doesNotMatch(attn, /attnstation-glow ready|attnstation-ring ready/);
+
+  const fin = attentionStationSVG(1, 2, 1, "var(--work)");
+  assert.match(fin, /class="attnstation-glow ready"/);
+  assert.match(fin, /class="attnstation-ring ready"/);
+});
+
+test("P1: map.css ready rings are static; waiting rings still pulse", () => {
+  const readyRing = mapCssSrc.match(/\.attnstation-ring\.ready\s*,\s*\.attnstation-glow\.ready|\.attnstation-glow\.ready\s*,\s*\.attnstation-ring\.ready|\.attnstation-ring\.ready\s*\{([^}]+)\}/);
+  assert.ok(readyRing, "ready ring rule exists");
+  const block = mapCssSrc.match(/\.attnstation-(?:ring|glow)\.ready[\s\S]*?\{([^}]+)\}/);
+  assert.ok(block, "ready class has a CSS body");
+  assert.match(mapCssSrc, /\.attnstation-ring\.ready[\s\S]{0,180}animation\s*:\s*none/,
+    "ready ring animation is none");
+  assert.match(mapCssSrc, /\.attnstation-ring\s*\{[^}]*animation\s*:\s*mapAttentionRing/,
+    "waiting ring still pulses");
+});
+
+test("P1: railTicks omits Ready when selected or already seen", () => {
+  const fn = mapExports.railTicks;
+  const row = {
+    n: { id: "f", title: "Fin", attention: "", turn_done: true,
+      created_at: "t1", stops: [], live: "quiet", lane_id: "L", last_activity: 50 },
+    i: 0, time: "t1", head: true,
+  };
+  const base = { rows: [row], rowHeight: 76, offset: 16 };
+  assert.equal(fn(base).map(t => t.nodeId).join(), "f");
+  assert.equal(fn({ ...base, selectedId: "f" }).length, 0, "open chat is not a ready tick");
+  assert.equal(fn({ ...base, seenAt: { f: 50 } }).length, 0, "acked turn is not a ready tick");
+  assert.equal(fn({ ...base, selectedId: "other" }).length, 1);
+});
+
+test("P1: mapTabAttentionCounts Ready uses displayReady", () => {
+  const nodes = [
+    { id: "ready", lane_id: "L1", attention: "", turn_done: true, last_activity: 1 },
+    { id: "open", lane_id: "L1", attention: "", turn_done: true, last_activity: 1 },
+  ];
+  const groups = [];
+  const fn = mapExports.mapTabAttentionCounts;
+  const all = fn(nodes, groups);
+  assert.equal(all.all.kind, "ready");
+  assert.equal(all.all.n, 2);
+  const afterOpen = fn(nodes, groups, { selectedId: "open" });
+  assert.equal(afterOpen.all.n, 1, "selected Ready node drops out of the count");
+  const afterSeen = fn(nodes, groups, { seenAt: { ready: 1, open: 1 } });
+  assert.equal(afterSeen.all.n, 0);
+});
+
+test("P1: stationRowHTML Ready word hides when ready ctx says not displayReady", () => {
+  const lm = { color: () => "#f", name: () => "L" };
+  const n = { id: "n", title: "T", agent: "claude", live: "quiet", turn_done: true,
+    created_at: "2026-01-01T00:00:00Z", last_activity: 8 };
+  const shown = stationRowHTML(n, lm, { escape: s => s });
+  assert.match(shown, /st-finished">Ready/);
+  const hidden = stationRowHTML(n, lm, { escape: s => s, ready: { selectedId: "n" } });
+  assert.match(hidden, /st-quiet">Quiet/);
+  assert.doesNotMatch(hidden, /st-finished/);
 });
 
 test("P5: .st colour tokens per state in map.css", () => {

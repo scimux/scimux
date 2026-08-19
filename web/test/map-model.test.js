@@ -76,6 +76,8 @@ test("map-model.js exports named pure helpers", async () => {
   const mod = await import("../js/map-model.js");
   for (const name of [
     "hardAttention", "cardState", "statusText", "statusKind", "turnFinished",
+    "displayReady", "ackReadySeen", "pruneReadySeen",
+    "loadReadySeen", "saveReadySeen", "READY_SEEN_KEY",
     "cardCreatedMS", "cardInteractionMS",
     "orderedNodes", "pinnedOrder", "canReceiveSend", "sendableNodes",
     "isArchived", "isPinned", "tabListForCards", "inLaneScope", "visibleCardLists",
@@ -174,6 +176,113 @@ test("turnFinished is true only when turn_done is set", () => {
   // ACP / unknown: field absent must mean UNKNOWN, never "not finished" as a
   // positive claim — but the predicate itself is false so status stays Quiet.
   assert.equal(turnFinished({ live: "quiet", agent: "pi" }), false);
+});
+
+/* P1 Ready marker: displayReady is the paint predicate. turnFinished stays
+   the raw server flag — selected/seen must not leak into it. */
+const displayReady = (...a) => mapModel.displayReady(...a);
+const ackReadySeen = (...a) => mapModel.ackReadySeen(...a);
+const pruneReadySeen = (...a) => mapModel.pruneReadySeen(...a);
+const loadReadySeen = (...a) => mapModel.loadReadySeen(...a);
+const saveReadySeen = (...a) => mapModel.saveReadySeen(...a);
+
+test("map-model.js exports Ready paint helpers", async () => {
+  const mod = await import("../js/map-model.js");
+  for (const name of [
+    "displayReady", "ackReadySeen", "pruneReadySeen",
+    "loadReadySeen", "saveReadySeen", "READY_SEEN_KEY",
+  ]) {
+    assert.ok(name in mod, name);
+  }
+});
+
+test("displayReady is false when turn_done is absent, false, or ACP-quiet", () => {
+  assert.equal(displayReady({}), false);
+  assert.equal(displayReady({ turn_done: false, live: "quiet" }), false);
+  assert.equal(displayReady({ live: "quiet", agent: "pi" }), false);
+  assert.equal(displayReady({ live: "quiet", agent: "grok" }), false);
+  assert.equal(displayReady({ live: "quiet", agent: "opencode" }), false);
+  assert.equal(displayReady({ live: "quiet", agent: "codex" }), false);
+});
+
+test("displayReady is true for an unselected unseen finished turn", () => {
+  assert.equal(displayReady({ id: "n", live: "quiet", turn_done: true }), true);
+  assert.equal(displayReady(
+    { id: "n", live: "quiet", turn_done: true, last_activity: 50 },
+    { selectedId: "other", seenAt: {} },
+  ), true);
+});
+
+test("displayReady is false when the node is the selected chat", () => {
+  const n = { id: "n", live: "quiet", turn_done: true, last_activity: 10 };
+  assert.equal(displayReady(n, { selectedId: "n" }), false);
+  assert.equal(displayReady(n, { selectedId: "other" }), true);
+});
+
+test("displayReady is false when seen stamp covers last_activity", () => {
+  const n = { id: "n", live: "quiet", turn_done: true, last_activity: 100 };
+  assert.equal(displayReady(n, { seenAt: { n: 100 } }), false);
+  assert.equal(displayReady(n, { seenAt: { n: 200 } }), false);
+  assert.equal(displayReady(n, { seenAt: { n: 50 } }), true);
+  assert.equal(displayReady(n, { seenAt: {} }), true);
+});
+
+test("displayReady relights when last_activity advances past seen", () => {
+  const prev = { id: "n", live: "quiet", turn_done: true, last_activity: 100 };
+  assert.equal(displayReady(prev, { seenAt: { n: 100 } }), false);
+  const next = { id: "n", live: "quiet", turn_done: true, last_activity: 250 };
+  assert.equal(displayReady(next, { seenAt: { n: 100 } }), true);
+});
+
+test("displayReady stays false under attention, running, or closed", () => {
+  assert.equal(displayReady({ id: "n", live: "quiet", turn_done: true, attention: "approval" }), false);
+  assert.equal(displayReady({ id: "n", live: "active", turn_done: true }), false);
+  assert.equal(displayReady({ id: "n", live: "quiet", turn_done: true, ended_at: "t" }), false);
+});
+
+test("turnFinished ignores selected/seen (no coupling into the server flag)", () => {
+  const n = { id: "n", live: "quiet", turn_done: true, last_activity: 10 };
+  assert.equal(turnFinished(n), true);
+  assert.equal(displayReady(n, { selectedId: "n", seenAt: { n: 10 } }), false);
+  assert.equal(turnFinished(n), true);
+});
+
+test("ackReadySeen writes last_activity and is idempotent", () => {
+  const n = { id: "n", last_activity: 42 };
+  const once = ackReadySeen({}, n);
+  assert.deepEqual(once, { n: 42 });
+  const twice = ackReadySeen(once, n);
+  assert.equal(twice, once, "unchanged ack returns the same object");
+  const missing = ackReadySeen({}, { id: "m" });
+  assert.deepEqual(missing, { m: 0 });
+  assert.deepEqual(ackReadySeen(null, n), { n: 42 });
+  assert.deepEqual(ackReadySeen({}, null), {});
+});
+
+test("pruneReadySeen drops ids whose node is not turn_done", () => {
+  const seen = { keep: 1, gone: 2, quiet: 3 };
+  const nodes = [
+    { id: "keep", turn_done: true },
+    { id: "quiet", turn_done: false },
+  ];
+  const next = pruneReadySeen(seen, nodes);
+  assert.deepEqual(next, { keep: 1 });
+  assert.deepEqual(pruneReadySeen({ keep: 1 }, [{ id: "keep", turn_done: true }]), { keep: 1 });
+});
+
+test("loadReadySeen / saveReadySeen round-trip through injected storage", () => {
+  assert.equal(mapModel.READY_SEEN_KEY, "scimux-ready-seen");
+  const store = {
+    data: {},
+    getItem(k){ return this.data[k] ?? null; },
+    setItem(k, v){ this.data[k] = String(v); },
+  };
+  assert.deepEqual(loadReadySeen(store), {});
+  saveReadySeen(store, { a: 9, b: 3 });
+  assert.deepEqual(loadReadySeen(store), { a: 9, b: 3 });
+  store.data[mapModel.READY_SEEN_KEY] = "not-json";
+  assert.deepEqual(loadReadySeen(store), {});
+  assert.deepEqual(loadReadySeen(null), {});
 });
 
 test("statusKind and statusText agree across the fixture matrix", () => {

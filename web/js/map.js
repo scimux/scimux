@@ -77,7 +77,8 @@ import {
   laneColumnOrder,
 } from "./lanes.js";
 import {
-  statusText, statusKind, turnFinished, hardAttention, headStopKey, toggleMapSelection,
+  displayReady, displayStatusInfo,
+  hardAttention, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
 import { createPopoverMenu } from "./menu.js";
@@ -123,7 +124,7 @@ export function anchoredScrollTop({ prevTop, prevIndex, nextIndex, rowHeight } =
    ready news. Neutral inspect is diagnostic only and does not ring, tick, or
    count as waiting (fixes-2 P1). Pure, DOM-free; ordered as the rows are.
    kind is "waiting" (hard attention) or "ready" (turn_done only). */
-export function railTicks({ rows, rowHeight, offset } = {}){
+export function railTicks({ rows, rowHeight, offset, selectedId, seenAt } = {}){
   const list = rows || [];
   const n = list.length;
   if (!n) return [];
@@ -137,7 +138,7 @@ export function railTicks({ rows, rowHeight, offset } = {}){
     if (!s || !s.head || !s.n) continue;
     let kind = null;
     if (hardAttention(s.n)) kind = "waiting";
-    else if (turnFinished(s.n)) kind = "ready";
+    else if (displayReady(s.n, { selectedId, seenAt })) kind = "ready";
     if (!kind) continue;
     out.push({
       nodeId: s.n.id,
@@ -348,7 +349,7 @@ export function laneChipStyle(color, selected, { escape = esc, contrastText = co
    "no filter" in both places. A station served by several lanes counts once
    for All and once per intersecting group, never twice inside one tab.
    Pure; returns { all: {n, kind}, [groupId]: {n, kind} }. */
-export function mapTabAttentionCounts(nodes, groups, { served = servedLanes } = {}){
+export function mapTabAttentionCounts(nodes, groups, { served = servedLanes, selectedId, seenAt } = {}){
   const list = Array.isArray(nodes) ? nodes : [];
   const gs = Array.isArray(groups) ? groups : [];
   const tabs = [["all", groupLanes("all", gs)], ...gs.map(g => [g.id, groupLanes(g.id, gs)])];
@@ -356,7 +357,7 @@ export function mapTabAttentionCounts(nodes, groups, { served = servedLanes } = 
   for (const [id] of tabs) tally[id] = { waiting: 0, ready: 0 };
   for (const n of list){
     if (!n || !n.lane_id) continue;
-    const kind = hardAttention(n) ? "waiting" : (turnFinished(n) ? "ready" : "");
+    const kind = hardAttention(n) ? "waiting" : (displayReady(n, { selectedId, seenAt }) ? "ready" : "");
     if (!kind) continue;
     const lanes = served(n) || [];
     for (const [id, grp] of tabs){
@@ -411,14 +412,14 @@ export function buildStackBlocks(lanes, stations, { served = servedLanes, inGrou
     .sort((a, b) => byNameID(a.lane, b.lane));
 }
 
-export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm } = {}){
+export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm, selectedId, seenAt } = {}){
   const hasAttn = b => b.rows.some(s => hardAttention(s.n)) ? 1 : 0;
   const fold = mapFold || new Set();
   return JSON.stringify((blocks || []).map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
       fold.has(b.lane.id), hasAttn(b),
       b.rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, l.title, l.desc,
         s.n.agent, s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
-        s.n.live, s.n.attention, s.n.turn_done ? 1 : 0]; })]))
+        s.n.live, s.n.attention, displayReady(s.n, { selectedId, seenAt }) ? 1 : 0]; })]))
     + "|" + focusLane + "|" + mapTab + "|" + mapFull;
 }
 
@@ -450,7 +451,7 @@ export function liveShape(live){
   return live === "exited" || live === "unavailable" ? live : "run";
 }
 
-export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn } = {}){
+export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSelKey, fareOn, selectedId, seenAt } = {}){
   return "wall|" + (cols || []).join(",") + "|" + focusLane + "|" + mapTab + "|" +
     mapSel + "|" + mapSelKey + "|" + (fareOn ? "F" : "") + "|" +
     JSON.stringify((rows || []).map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, s.n.created_at,
@@ -461,7 +462,7 @@ export function wallMapSignature(rows, cols, { focusLane, mapTab, mapSel, mapSel
       // elements, which no attribute write can do. Its drift is patched.
       // turn_done is in the signature so the finished ring rebuilds (SVG),
       // not just the status word (patchable).
-      s.n.attention, s.n.turn_done ? 1 : 0, s.n.ctx_pct == null ? 0 : 1,
+      s.n.attention, displayReady(s.n, { selectedId, seenAt }) ? 1 : 0, s.n.ctx_pct == null ? 0 : 1,
       fareOn ? fareFingerprint(s.n) : 0]; }));
 }
 
@@ -499,8 +500,9 @@ export const CTX_RING_R = 9;
 export function patchStationVolatile(root, key, n, opts = {}){
   if (!root || typeof root.querySelector !== "function" || !n) return false;
   const cssEsc = opts.cssEscape || (s => String(s));
-  const st = opts.status || statusText;
-  const kindFn = opts.statusKind || statusKind;
+  const ready = opts.ready || {};
+  const st = opts.status || (x => displayStatusInfo(x, ready).text);
+  const kindFn = opts.statusKind || (x => displayStatusInfo(x, ready).kind);
   const k = cssEsc(key);
   const row = root.querySelector(`.strow[data-skey="${k}"]`);
   const cap = row && typeof row.querySelector === "function" ? row.querySelector(".cap .st") : null;
@@ -645,8 +647,9 @@ export function wallLaneTrackSVG(stops, { x, color, opacity = 1, heatOn = false 
    centre of the station (paint order: later siblings win). */
 export function attentionStationSVG(x, y, op, hue){
   const c = hue || "var(--attn)";
-  return `<circle class="attnstation-glow" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="${c}" filter="url(#attnglow)"/>
-          <circle class="attnstation-ring" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>`;
+  const ready = hue === "var(--work)" ? " ready" : "";
+  return `<circle class="attnstation-glow${ready}" style="--attn-op:${op}" cx="${x}" cy="${y}" r="10.5" fill="${c}" filter="url(#attnglow)"/>
+          <circle class="attnstation-ring${ready}" style="--attn-op:${op}" cx="${x}" cy="${y}" r="9.5" fill="none" stroke="${c}" stroke-width="2.5"/>`;
 }
 
 /* Transparent r=22 hit circle (44px HIG target) carrying data-jump so a tap
@@ -1052,7 +1055,7 @@ export function stationRowHTML(n, lm, opts = {}){
   const {
     padLeft = 0, others = [], dim = false, golane = false, current = false,
     fork = false, stop = null, alt = false,
-    escape = esc, stamp = fmtStamp, status = statusText, configText = cardConfigText,
+    escape = esc, stamp = fmtStamp, status, configText = cardConfigText,
     forkCue = "",
   } = opts;
   const label = stop ? stopLabel(stop) : { title: n.title || "", desc: n.description || n.prompt || "" };
@@ -1066,14 +1069,16 @@ export function stationRowHTML(n, lm, opts = {}){
   const when = stop && stop.i > 0
     ? `${stamp(stop.time)} · stop ${stop.i + 1}` : stamp(n.created_at);
   const desc = label.desc;
-  // kind from the same precedence as the word (statusKind), even when a test
-  // injects a custom status() string — class and default word stay aligned.
-  const kind = (opts.statusKind || statusKind)(n);
+  // Default word/kind follow displayStatusInfo so an opened/acked turn is
+  // Quiet. An injected status/statusKind still wins (class + word stay aligned).
+  const shown = displayStatusInfo(n, opts.ready);
+  const kind = opts.statusKind ? opts.statusKind(n) : shown.kind;
+  const word = status ? status(n) : shown.text;
   return `
         <div class="strow ${alt ? "alt " : ""}${dim ? "dimmed" : ""} ${n.live === "exited" ? "dead" : ""}${current ? " current" : ""}"
              style="padding-left:${padLeft}px" data-nid="${escape(n.id)}"${stop ? ` data-skey="${escape(stopKey(stop))}"` : ""}>
           <div class="lbl${desc ? " hasdesc" : ""}"><span class="agent-logo" title="${escape(n.agent || "agent")}">${opts.agentLogo || ""}</span><span class="t">${escape(label.title)}</span>${fork ? forkCue : ""}</div>
-          <div class="cap">${escape(when)} · ${escape(configText(n))} · <span class="st st-${kind}">${escape(status(n))}</span>${
+          <div class="cap">${escape(when)} · ${escape(configText(n))} · <span class="st st-${kind}">${escape(word)}</span>${
             others.map(l => ` · <span class="xchip"${golane ? ` data-golane="${escape(l)}"` : ""} style="color:${escape(lm.color(l))}">&#8644; ${escape(lm.name(l))}</span>`).join("")}</div>
           ${desc ? `<div class="desc">${escape(desc)}</div>` : ""}
         </div>`;
@@ -1157,6 +1162,9 @@ export function createMapFeature(deps){
   function g(name, fallback){
     const v = d[name];
     return typeof v === "function" ? v() : (v !== undefined ? v : fallback);
+  }
+  function readyCtx(){
+    return { selectedId: g("sel", ""), seenAt: g("readySeen", {}) };
   }
   function nodeById(id){
     if (typeof d.nodeById === "function") return d.nodeById(id);
@@ -1385,7 +1393,7 @@ export function createMapFeature(deps){
     mapTab = resolveMapTab(mapTab, groups(), uiLoaded());
     if (!maptabs) return;
     const gs = groups();
-    const counts = mapTabAttentionCounts(g("nodes", []), gs);
+    const counts = mapTabAttentionCounts(g("nodes", []), gs, readyCtx());
     const sig = mapTabsSignature(mapTab, gs, counts);
     if (mapRenderDecision(sig, mapTabsSig) === "skip") return;
     mapTabsSig = sig;
@@ -1407,7 +1415,8 @@ export function createMapFeature(deps){
     const agentLogo = typeof d.agentLogo === "function" ? d.agentLogo(n.agent) : "";
     return stationRowHTML(n, model, {
       ...opts,
-      escape, stamp: stampFn, status: statusText, configText: cardConfigText,
+      escape, stamp: stampFn, configText: cardConfigText,
+      ready: readyCtx(),
       forkCue, agentLogo,
     });
   }
@@ -1549,7 +1558,7 @@ export function createMapFeature(deps){
 
   function updateMapPill(rows){
     const list = rows || [];
-    pillTicks = railTicks({ rows: list, rowHeight: WALL_ROW_H, offset: WALL_OFF });
+    pillTicks = railTicks({ rows: list, rowHeight: WALL_ROW_H, offset: WALL_OFF, ...readyCtx() });
     pillContentH = WALL_OFF + list.length * WALL_ROW_H;
     positionMapPill();
   }
@@ -1564,6 +1573,7 @@ export function createMapFeature(deps){
     if (mapwrap)
       moved.forEach(k => patchStationVolatile(mapwrap, k, headNodeAt(rows, k), {
         cssEscape: s => CSSRef.escape(s),
+        ready: readyCtx(),
       }));
     wallVol = next;
   }
@@ -1580,7 +1590,7 @@ export function createMapFeature(deps){
     const rows = stations.flatMap(stopsOf).sort(newestFirst);
 
     const sig = wallMapSignature(rows, cols, {
-      focusLane, mapTab, mapSel, mapSelKey, fareOn,
+      focusLane, mapTab, mapSel, mapSelKey, fareOn, ...readyCtx(),
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return patchWallVolatile(rows);
     mapSig = sig;
@@ -1714,9 +1724,9 @@ export function createMapFeature(deps){
       // Neutral inspect does not ring (fixes-2 P1). Hit target is emitted AFTER
       // the solid dot (and ctx) so the centre is tappable — SVG paints later
       // siblings on top (P4).
-      const ringed = !!(hardAttention(n) || turnFinished(n));
+      const ringed = !!(hardAttention(n) || displayReady(n, readyCtx()));
       if (hardAttention(n)) svg += attentionStationSVG(dotX, yy, op, null);
-      else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
+      else if (displayReady(n, readyCtx())) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
       /* data-dot / data-ctx are the repaint hooks. Only the live branch
          carries one: exited and unavailable are in the signature, so reaching
          them rebuilds rather than patches. */
@@ -1725,7 +1735,7 @@ export function createMapFeature(deps){
         svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
       else
         svg += `<circle data-dot="${skey}" cx="${dotX}" cy="${yy}" r="${n.live === "active" ? 6.5 : 5.5}" fill="${col}" opacity="${op}"/>`;
-      if (n.ctx_pct != null && !hardAttention(n) && !turnFinished(n)){
+      if (n.ctx_pct != null && !hardAttention(n) && !displayReady(n, readyCtx())){
         const R = CTX_RING_R, C = 2 * Math.PI * R, frac = Math.max(0, Math.min(1, n.ctx_pct / 100));
         svg += `<circle cx="${dotX}" cy="${yy}" r="${R}" fill="none" stroke="${col}" stroke-width="2" opacity="${op * .2}"/>`;
         /* Emitted even at 0% — an invisible arc the patch can grow, since no
@@ -1816,7 +1826,7 @@ export function createMapFeature(deps){
     }
 
     const sig = stackMapSignature(blocks, {
-      mapFold, focusLane, mapTab, mapFull, lm: model,
+      mapFold, focusLane, mapTab, mapFull, lm: model, ...readyCtx(),
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
@@ -1866,9 +1876,9 @@ export function createMapFeature(deps){
                          : terminalStationSVG(dotX, yy, op, col);
         // Hit after the solid dot (P4) — same paint-order rule as the wall.
         // Neutral inspect does not ring (fixes-2 P1).
-        const ringed = !!(hardAttention(n) || turnFinished(n));
+        const ringed = !!(hardAttention(n) || displayReady(n, readyCtx()));
         if (hardAttention(n)) svg += attentionStationSVG(dotX, yy, op, null);
-        else if (turnFinished(n)) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
+        else if (displayReady(n, readyCtx())) svg += attentionStationSVG(dotX, yy, op, "var(--work)");
         if (n.live === "exited" || n.live === "unavailable")
           svg += `<circle cx="${dotX}" cy="${yy}" r="5.5" fill="var(--bg)" stroke="${col}" stroke-width="2.5" opacity="${op * .55}"/>`;
         else

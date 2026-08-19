@@ -31,6 +31,69 @@ export const hardAttention = n => n.attention && n.attention !== "inspect";
    render as plain Quiet, not as a failed finished claim. */
 export const turnFinished = n => !!(n && n.turn_done);
 
+/* Per-device ack of a finished turn the user has opened. The key is a
+   string; values are last_activity at ack time. Storage is injected — this
+   module never names the browser store. */
+export const READY_SEEN_KEY = "scimux-ready-seen";
+
+/* Paint predicate for the Ready marker. turnFinished stays the raw server
+   flag; selected chat and a seen stamp that covers last_activity hide it. */
+export function displayReady(n, { selectedId, seenAt } = {}){
+  if (!turnFinished(n)) return false;
+  if (n.ended_at) return false;
+  if (hardAttention(n)) return false;
+  if (n.live === "active") return false;
+  if (selectedId && n.id === selectedId) return false;
+  const seen = seenAt && n.id != null ? seenAt[n.id] : undefined;
+  const at = Number(n.last_activity) || 0;
+  if (seen != null && Number(seen) >= at) return false;
+  return true;
+}
+
+export function ackReadySeen(seenAt, n){
+  if (!n || !n.id) return seenAt || {};
+  const at = Number(n.last_activity) || 0;
+  const cur = seenAt || {};
+  if (cur[n.id] === at) return cur;
+  return Object.assign({}, cur, { [n.id]: at });
+}
+
+export function pruneReadySeen(seenAt, nodes){
+  const cur = seenAt || {};
+  const live = new Set((nodes || []).filter(n => n && n.turn_done).map(n => n.id));
+  const next = {};
+  let changed = false;
+  for (const id of Object.keys(cur)){
+    if (live.has(id)) next[id] = cur[id];
+    else changed = true;
+  }
+  if (!changed && Object.keys(next).length === Object.keys(cur).length) return cur;
+  return next;
+}
+
+export function loadReadySeen(storage){
+  if (!storage || typeof storage.getItem !== "function") return {};
+  try {
+    const raw = JSON.parse(storage.getItem(READY_SEEN_KEY) || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(raw)){
+      const num = Number(v);
+      if (k && Number.isFinite(num)) out[k] = num;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function saveReadySeen(storage, seenAt){
+  if (!storage || typeof storage.setItem !== "function") return;
+  try {
+    storage.setItem(READY_SEEN_KEY, JSON.stringify(seenAt || {}));
+  } catch { /* quota / private mode */ }
+}
+
 export function cardState(n){
   // A deliberately closed thread (/exit) is an immutable dead-end: it takes
   // precedence over mechanical liveness so a closed-but-adopted or
@@ -72,6 +135,15 @@ export function statusKind(n){
 
 export function statusText(n){
   return statusInfo(n).text;
+}
+
+/* UI status after Ready dismiss: an acked or selected finished turn reads
+   as Quiet. Paint sites use this; statusKind/statusText stay the server view. */
+export function displayStatusInfo(n, ctx){
+  if (displayReady(n, ctx)) return { kind: "finished", text: "Ready" };
+  const info = statusInfo(n);
+  if (info.kind === "finished") return { kind: "quiet", text: "Quiet" };
+  return info;
 }
 
 /* ---------- recency helpers used by ordering ---------- */
