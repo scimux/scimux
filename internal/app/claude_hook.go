@@ -1,6 +1,7 @@
 // claude_hook.go — private SessionStart hook transport and generation-checked
 // Claude transcript binding. Startup, clear, compact, and resume are hook-only;
-// directory recency never selects a transcript.
+// directory recency never selects a transcript. Claude's native fork
+// (source:"fork" and the /fork command) is not accepted.
 package app
 
 import (
@@ -142,7 +143,12 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		os.RemoveAll(dir)
 		return "", "", err
 	}
-	for _, sub := range []string{"inbox", "processed", "stop", "perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"), filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName)} {
+	for _, sub := range []string{
+		"inbox", "processed", "stop", "notify",
+		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
+		filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
+		filepath.Join("perm", claudeShownDirName),
+	} {
 		p := filepath.Join(dir, sub)
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			os.RemoveAll(dir)
@@ -170,7 +176,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	// attention backstop. "exec" records the binary settings.json just baked in,
 	// as JSON rather than a shell string to re-parse, so both gates can check
 	// that the hooks can still run at all (claudeBundleExecUsable).
-	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Exec: execPath})
+	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Exec: execPath})
 	if err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
@@ -196,6 +202,10 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		os.RemoveAll(dir)
 		return "", "", werr
 	}
+	// Disk completeness is knowable at prepare time. Permission/auto-approve
+	// capability still waits for SessionStart; this only lets supervision
+	// report claude_starting instead of claude_unsupported.
+	a.noteClaudeStrictCapability(hookID)
 	return hookID, settingsPath, nil
 }
 
@@ -218,6 +228,10 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	notifyCmd, err := claudeNotifyHookCommand(execPath, hookDir)
+	if err != nil {
+		return nil, err
+	}
 	entry := func(command string) []any {
 		return []any{
 			map[string]any{
@@ -227,10 +241,19 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 			},
 		}
 	}
+	notifyEntry := []any{
+		map[string]any{
+			"matcher": "permission_prompt",
+			"hooks": []any{
+				map[string]any{"type": "command", "command": notifyCmd},
+			},
+		},
+	}
 	doc := map[string]any{
 		"hooks": map[string]any{
 			"SessionStart":      entry(cmd),
 			"PermissionRequest": entry(permCmd),
+			"Notification":      notifyEntry,
 			"Stop":              entry(stopCmd),
 			"StopFailure":       entry(stopCmd),
 		},
@@ -332,6 +355,7 @@ func (a *app) drainClaudeHooks() {
 	for _, p := range pairs {
 		a.drainClaudeHookInbox(p[0], p[1])
 		a.drainClaudeStopInbox(p[0], p[1])
+		a.drainClaudeNotifyInbox(p[0], p[1])
 	}
 }
 
@@ -410,6 +434,9 @@ func (a *app) processClaudeHookEventAt(nodeID string, ev claudeSessionStartEvent
 	if ev.HookEventName != "SessionStart" || !allowedClaudeHookSource(ev.Source) {
 		return errClaudeHookRejected
 	}
+	lock := a.claudeBindLock(nodeID)
+	lock.Lock()
+	defer lock.Unlock()
 	var err error
 	switch ev.Source {
 	case "startup":
@@ -419,11 +446,12 @@ func (a *app) processClaudeHookEventAt(nodeID string, ev claudeSessionStartEvent
 	case "compact":
 		err = a.applyClaudeCompact(nodeID, ev)
 	case "resume":
-		err = a.applyClaudeResume(nodeID)
+		err = a.applyClaudeResume(nodeID, ev, capturedGen)
 	default:
 		return fmt.Errorf("claude hook source %s: %w", ev.Source, errClaudeHookRejected)
 	}
 	if err == nil {
+		a.markClaudeHookAck(nodeID)
 		a.noteClaudeHookCapabilitiesForNode(nodeID)
 	}
 	return err
@@ -441,6 +469,7 @@ func (a *app) noteClaudeHookCapabilitiesForNode(nodeID string) {
 	}
 	a.noteClaudePermCapability(hookID)
 	a.noteClaudeAskedCapability(hookID)
+	a.noteClaudeStrictCapability(hookID)
 }
 
 func (a *app) bindClaudeStartup(nodeID string, ev claudeSessionStartEvent, capturedGen int) error {
@@ -470,7 +499,7 @@ func (a *app) bindClaudeStartup(nodeID string, ev claudeSessionStartEvent, captu
 	a.pathClaims[ev.TranscriptPath] = true
 	a.mu.Unlock()
 
-	if err := a.commitClaudeBinding(nodeID, hookID, gen, ev, "startup"); err != nil {
+	if err := a.commitClaudeBinding(nodeID, hookID, gen, ev, "startup", "", ""); err != nil {
 		a.mu.Lock()
 		delete(a.pathClaims, ev.TranscriptPath)
 		a.mu.Unlock()
@@ -501,54 +530,87 @@ func (a *app) bindClaudeClear(nodeID string, ev claudeSessionStartEvent, capture
 	}
 	if a.pathClaimedLocked(ev.TranscriptPath, nodeID) {
 		a.mu.Unlock()
+		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
 		return errClaudeHookRejected
 	}
 	a.pathClaims[ev.TranscriptPath] = true
-	needPage := n.Transcript != "" || n.SessionID != ""
+	oldPath, oldSID := n.Transcript, n.SessionID
+	needPage := oldPath != "" || oldSID != ""
 	a.mu.Unlock()
 
 	if needPage {
-		a.retireTranscript(n)
 		if err := a.persistClaudeClearGeneration(n.ID, hookID, capturedGen); err != nil {
 			a.mu.Lock()
 			delete(a.pathClaims, ev.TranscriptPath)
 			a.mu.Unlock()
+			a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
 			return err
 		}
 		capturedGen++
 	}
 
-	if err := a.commitClaudeBinding(nodeID, hookID, capturedGen, ev, "clear"); err != nil {
+	retirePath, retireSID := "", ""
+	if needPage {
+		retirePath, retireSID = oldPath, oldSID
+	}
+	if err := a.commitClaudeBinding(nodeID, hookID, capturedGen, ev, "clear", retirePath, retireSID); err != nil {
 		a.mu.Lock()
 		delete(a.pathClaims, ev.TranscriptPath)
 		a.mu.Unlock()
+		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
 		return err
+	}
+	if needPage {
+		a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, true)
 	}
 	return nil
 }
 
-func (a *app) advanceClaudeClearAfterWeb(n *Node) {
+func (a *app) advanceClaudeClearAfterWeb(n *Node) error {
 	if n == nil {
-		return
+		return errClaudeHookRejected
+	}
+	lock := a.claudeBindLock(n.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	return a.advanceClaudeClearAfterWebLocked(n)
+}
+
+// advanceClaudeClearAfterWebLocked advances the detached generation while
+// the caller holds claudeBindLock. The HTTP /clear path holds that lock from
+// before Enter through transcript retirement and this append.
+func (a *app) advanceClaudeClearAfterWebLocked(n *Node) error {
+	if n == nil {
+		return errClaudeHookRejected
 	}
 	a.mu.Lock()
 	hookID := a.claudeHookIDLocked(n.ID)
 	captured := a.claudeGenerationLocked(n.ID)
 	a.mu.Unlock()
 	if hookID == "" {
-		return
+		return errClaudeHookRejected
 	}
-	_ = a.persistClaudeClearGeneration(n.ID, hookID, captured)
+	return a.persistClaudeClearGeneration(n.ID, hookID, captured)
 }
 
+// persistClaudeClearGeneration is called only while claudeBindLock(nodeID) is
+// held. Validate before append; after a successful append no competing bind or
+// web clear can move the generation before memory is updated.
 func (a *app) persistClaudeClearGeneration(nodeID, hookID string, captured int) error {
 	next := captured + 1
+	a.mu.Lock()
+	valid := a.byID[nodeID] != nil && a.claudeHookIDLocked(nodeID) == hookID &&
+		a.claudeGenerationLocked(nodeID) == captured
+	a.mu.Unlock()
+	if !valid {
+		return errClaudeHookRejected
+	}
 	if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: nodeID, HookID: hookID, Generation: next}); err != nil {
 		return err
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.claudeHookIDLocked(nodeID) != hookID || a.claudeGenerationLocked(nodeID) != captured {
+	if a.byID[nodeID] == nil || a.claudeHookIDLocked(nodeID) != hookID || a.claudeGenerationLocked(nodeID) != captured {
 		return errClaudeHookRejected
 	}
 	if a.claudeGens == nil {
@@ -558,9 +620,12 @@ func (a *app) persistClaudeClearGeneration(nodeID, hookID string, captured int) 
 	return nil
 }
 
-func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessionStartEvent, cause string) error {
-	rec := storeRecord{
-		Type:       "claude-binding",
+func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessionStartEvent, cause, retirePath, retireSID string) error {
+	// Candidate first: replay ignores it. The committed claude-binding is
+	// written only after generation/node validation still holds, and it
+	// carries the old path/session tombstone so both land or neither does.
+	candidate := storeRecord{
+		Type:       "claude-binding-candidate",
 		ID:         nodeID,
 		HookID:     hookID,
 		Generation: gen,
@@ -568,15 +633,42 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 		Path:       ev.TranscriptPath,
 		Cause:      cause,
 	}
-	if err := a.appendRecord(rec); err != nil {
+	if err := a.appendRecord(candidate); err != nil {
 		return err
 	}
+	if a.claudeAfterCandidate != nil {
+		a.claudeAfterCandidate(nodeID)
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.claudeHookIDLocked(nodeID) != hookID || a.claudeGenerationLocked(nodeID) != gen {
+	if a.claudeHookIDLocked(nodeID) != hookID || a.claudeGenerationLocked(nodeID) != gen || a.byID[nodeID] == nil {
 		delete(a.pathClaims, ev.TranscriptPath)
+		a.mu.Unlock()
 		return errClaudeHookRejected
 	}
+	a.mu.Unlock()
+
+	rec := storeRecord{
+		Type:          "claude-binding",
+		ID:            nodeID,
+		HookID:        hookID,
+		Generation:    gen,
+		SessionID:     ev.SessionID,
+		Path:          ev.TranscriptPath,
+		Cause:         cause,
+		RetirePath:    retirePath,
+		RetireSession: retireSID,
+	}
+	if err := a.appendRecord(rec); err != nil {
+		a.mu.Lock()
+		delete(a.pathClaims, ev.TranscriptPath)
+		a.mu.Unlock()
+		return err
+	}
+	// The committed record is durable. All generation mutations use the same
+	// per-node bind lock, so the validated generation cannot move between the
+	// append and this in-memory application.
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	n := a.byID[nodeID]
 	if n == nil {
 		delete(a.pathClaims, ev.TranscriptPath)
@@ -584,7 +676,13 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 	}
 	n.Transcript = ev.TranscriptPath
 	n.SessionID = ev.SessionID
+	if a.claudeBoundAt == nil {
+		a.claudeBoundAt = map[string]time.Time{}
+	}
 	a.claudeBoundAt[nodeID] = time.Now()
+	if retirePath != "" || retireSID != "" {
+		a.markDeadTranscriptLocked(nodeID, retirePath, retireSID)
+	}
 	delete(a.pathClaims, ev.TranscriptPath)
 	return nil
 }
@@ -605,17 +703,93 @@ func (a *app) applyClaudeCompact(nodeID string, ev claudeSessionStartEvent) erro
 	return nil
 }
 
-func (a *app) applyClaudeResume(nodeID string) error {
+func (a *app) applyClaudeResume(nodeID string, ev claudeSessionStartEvent, capturedGen int) error {
+	// Resume is accepted and never becomes inspect. Same identity is a
+	// no-op. A valid changed session/path is rebound with the current
+	// generation, path-claim, tombstone, persistence, and source-seam
+	// rules. The new binding is committed before the old transcript is
+	// retired. Failure is an inline error, not inspect, and keeps the
+	// previous valid binding.
+	if err := a.validateClaudeHookEvent(nodeID, ev, false); err != nil {
+		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+		return err
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.byID[nodeID] == nil {
+	n := a.byID[nodeID]
+	if n == nil {
+		a.mu.Unlock()
 		return errClaudeHookRejected
 	}
-	if a.attn == nil {
-		a.attn = map[string]string{}
+	if n.SessionID == ev.SessionID && n.Transcript == ev.TranscriptPath {
+		a.mu.Unlock()
+		return nil
 	}
-	a.attn[nodeID] = "inspect"
-	return errClaudeHookHeld
+	hookID := a.claudeHookIDLocked(nodeID)
+	gen := a.claudeGenerationLocked(nodeID)
+	if hookID == "" || gen != capturedGen {
+		a.mu.Unlock()
+		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+		return errClaudeHookRejected
+	}
+	if a.pathClaimedLocked(ev.TranscriptPath, nodeID) {
+		a.mu.Unlock()
+		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+		return errClaudeHookRejected
+	}
+	a.pathClaims[ev.TranscriptPath] = true
+	oldPath, oldSID := n.Transcript, n.SessionID
+	a.mu.Unlock()
+
+	if err := a.commitClaudeBinding(nodeID, hookID, gen, ev, "resume", oldPath, oldSID); err != nil {
+		a.mu.Lock()
+		delete(a.pathClaims, ev.TranscriptPath)
+		a.mu.Unlock()
+		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+		return err
+	}
+	a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, false)
+	a.clearClaudeLaunchError(nodeID)
+	return nil
+}
+
+// applyRetiredClaudeTranscript drops poller state for a path that the
+// committed binding already tombstoned. It does not append store records:
+// a failed extra append must not be the only tombstone, and a successful
+// commit already persisted retire_path / retire_session.
+func (a *app) applyRetiredClaudeTranscript(nodeID, oldPath, oldSID string, pageTurn bool) {
+	if oldPath == "" && oldSID == "" {
+		return
+	}
+	a.mu.Lock()
+	n := a.byID[nodeID]
+	if n != nil && n.Transcript != oldPath {
+		delete(a.tailers, nodeID)
+		delete(a.chatMark, nodeID)
+		delete(a.staleChat, nodeID)
+		delete(a.mirrors, nodeID)
+		delete(a.piMirrors, nodeID)
+		if n.Transcript != "" {
+			if a.claudeBoundAt == nil {
+				a.claudeBoundAt = map[string]time.Time{}
+			}
+			a.claudeBoundAt[nodeID] = time.Now()
+		} else {
+			delete(a.claudeBoundAt, nodeID)
+		}
+	}
+	a.mu.Unlock()
+	if !pageTurn || a.sessionsDir == "" || n == nil {
+		return
+	}
+	logPath := a.sessionLogPath(nodeID)
+	if _, err := os.Stat(logPath); err != nil {
+		return
+	}
+	a.snapshotClosingStation(n)
+	w := &sessionlog.Writer{Path: logPath}
+	if err := w.Append(sessionlog.NewClearSource("")); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: clear seam for %s: %v\n", nodeID, err)
+	}
 }
 
 func (a *app) validateClaudeHookEvent(nodeID string, ev claudeSessionStartEvent, startup bool) error {
@@ -710,6 +884,11 @@ func (a *app) archiveClaudeHook(nodeID string) {
 	delete(a.claudeHooks, nodeID)
 	delete(a.claudeGens, nodeID)
 	delete(a.pendingClaudeHooks, nodeID)
+	delete(a.claudeAck, nodeID)
+	delete(a.claudeLaunchErr, nodeID)
+	delete(a.claudeTurns, nodeID)
+	delete(a.claudeClosing, nodeID)
+	delete(a.claudeDialogNote, nodeID)
 	a.mu.Unlock()
 	a.archiveHookBundle(hookID)
 }

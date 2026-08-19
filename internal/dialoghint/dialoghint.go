@@ -25,8 +25,11 @@ var (
 	// numberedOptionLine matches a dialog menu option: optional pointer glyph,
 	// then "N." with N a positive integer. Shape-based (P1a) — not verb-based.
 	numberedOptionLine = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*(\d+)\.\s+\S`)
-	escToCancel        = regexp.MustCompile(`(?i)` + cancelAnchorRE)
-	escToInterrupt     = regexp.MustCompile(`(?i)\besc(?:ape)? to interrupt\b`)
+	// numberedOptionCapture is the same shape plus the remainder of the line
+	// (the label). Used only after NumberedOptions has validated the menu.
+	numberedOptionCapture = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*(\d+)\.\s+(\S.*)$`)
+	escToCancel           = regexp.MustCompile(`(?i)` + cancelAnchorRE)
+	escToInterrupt        = regexp.MustCompile(`(?i)\besc(?:ape)? to interrupt\b`)
 
 	// letteredOptionLine: "y. Yes, I trust this folder" — a single-letter menu
 	// key, the shape Claude Code uses for confirm/deny dialogs that predate the
@@ -98,6 +101,21 @@ func HasInterruptAnchor(pane string) bool {
 	return escToInterrupt.MatchString(stripANSI(pane))
 }
 
+// NumberedOption is one item from a structurally validated numbered menu.
+// N is the key Claude's AX prompt accepts; Label is the pane text after "N.".
+type NumberedOption struct {
+	N     int
+	Label string
+}
+
+// NumberedOptions extracts a consecutively numbered menu (starting at 1)
+// that is anchored by cancel chrome. It is description-only: callers must
+// already know a dialog is visible (Notification or an equivalent proof).
+// The pane text here never creates attention on its own.
+func NumberedOptions(pane string) ([]NumberedOption, bool) {
+	return extractNumberedOptions(stripANSI(pane))
+}
+
 // numberedOptionsDialog is the structural fallback for Claude Code approval
 // menus whose verbs change (Write/Edit no longer say "proceed"/"allow"): a
 // run of consecutively numbered options (1. then 2., …) with a cancel anchor
@@ -105,21 +123,28 @@ func HasInterruptAnchor(pane string) bool {
 // breaks; shape does not. The anchor accepts both "Esc to cancel" and the
 // screen-reader spelling "Escape to cancel".
 func numberedOptionsDialog(s string) bool {
+	_, ok := extractNumberedOptions(s)
+	return ok
+}
+
+func extractNumberedOptions(s string) ([]NumberedOption, bool) {
 	lines := strings.Split(s, "\n")
 	// Scan for a run starting at 1., collecting consecutive N, N+1, …
 	for i := 0; i < len(lines); i++ {
-		n, ok := optionNumber(lines[i])
+		n, label, ok := optionNumberAndLabel(lines[i])
 		if !ok || n != 1 {
 			continue
 		}
+		opts := []NumberedOption{{N: n, Label: label}}
 		lastOpt := i
 		expect := 2
 		j := i + 1
 		for j < len(lines) && j-lastOpt <= optionGapLines {
-			if m, ok := optionNumber(lines[j]); ok {
+			if m, lab, ok := optionNumberAndLabel(lines[j]); ok {
 				if m != expect {
 					break
 				}
+				opts = append(opts, NumberedOption{N: m, Label: lab})
 				lastOpt = j
 				expect++
 				j++
@@ -134,11 +159,11 @@ func numberedOptionsDialog(s string) bool {
 		// Anchor: cancel chrome within escAnchorLines of the last option.
 		for k := lastOpt + 1; k < len(lines) && k-lastOpt <= escAnchorLines; k++ {
 			if escToCancel.MatchString(lines[k]) {
-				return true
+				return opts, true
 			}
 		}
 	}
-	return false
+	return nil, false
 }
 
 // letteredOptionsDialog is the structural fallback for Claude Code confirm/
@@ -211,6 +236,24 @@ func enterPromptLetters(line string) (map[string]bool, bool) {
 	return set, true
 }
 
+// LooksLikeWorkspaceTrust reports Claude Code's pre-session workspace-trust
+// dialog. A generic lettered y/n menu is not enough: the pane must also
+// carry trust-specific wording (the folder-trust option and/or the
+// "Accessing workspace" permission title). This is a one-shot launch
+// diagnosis, never an attention source and never a liveness input.
+func LooksLikeWorkspaceTrust(pane string) bool {
+	s := stripANSI(pane)
+	if !letteredOptionsDialog(s) {
+		return false
+	}
+	lower := strings.ToLower(s)
+	hasTrustFolder := strings.Contains(lower, "trust this folder")
+	hasAccessing := strings.Contains(lower, "accessing workspace")
+	hasTrustCheck := strings.Contains(lower, "one you trust") ||
+		strings.Contains(lower, "project you created")
+	return hasTrustFolder && (hasAccessing || hasTrustCheck)
+}
+
 func sameLetterSet(a, b map[string]bool) bool {
 	if len(a) != len(b) {
 		return false
@@ -224,15 +267,20 @@ func sameLetterSet(a, b map[string]bool) bool {
 }
 
 func optionNumber(line string) (int, bool) {
-	m := numberedOptionLine.FindStringSubmatch(line)
+	n, _, ok := optionNumberAndLabel(line)
+	return n, ok
+}
+
+func optionNumberAndLabel(line string) (int, string, bool) {
+	m := numberedOptionCapture.FindStringSubmatch(line)
 	if m == nil {
-		return 0, false
+		return 0, "", false
 	}
 	n, err := strconv.Atoi(m[1])
 	if err != nil || n < 1 {
-		return 0, false
+		return 0, "", false
 	}
-	return n, true
+	return n, strings.TrimSpace(m[2]), true
 }
 
 var ansi = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)

@@ -96,7 +96,7 @@ func TestPublicRouteSendValidationAndDelivery(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"n1": true}, capture: "static pane"}
 	a := newTestApp(t, f)
 	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
-	seedTmuxNode(a, "n1")
+	seedPermClaude(t, a, "n1", hookSIDOwn)
 	h := newTestHandler(t, a)
 
 	// Empty text with no attachments → 400.
@@ -141,7 +141,7 @@ func TestPublicRouteSendValidationAndDelivery(t *testing.T) {
 	f2 := &fakeTmux{alive: map[string]bool{"n2": true}, capture: "before", captureAfterEnter: "after"}
 	a2 := newTestApp(t, f2)
 	a2.server.PasteDelay, a2.server.AckPoll = time.Millisecond, time.Millisecond
-	seedTmuxNode(a2, "n2")
+	seedPermClaude(t, a2, "n2", hookSIDOwn)
 	h2 := newTestHandler(t, a2)
 	rec = routeRequest(h2, http.MethodPost, "/api/nodes/n2/send", `{"text":"go"}`, true)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"acknowledged"`) {
@@ -159,6 +159,7 @@ func TestPublicRouteSendClearRetiresTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := seedTmuxNode(a, "c1")
+	installPreparedClaudeHook(t, a, n)
 	tx := filepath.Join(t.TempDir(), "sess.jsonl")
 	if err := os.WriteFile(tx, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -539,6 +540,8 @@ func TestPublicRoutePeekTmuxAndStructured(t *testing.T) {
 		appendLines(t, path,
 			`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
 		n := seedTmuxNode(a, "p2")
+		n.Agent = "pi"
+		n.Transport = "tmux"
 		n.Transcript = path
 		h := newTestHandler(t, a)
 
@@ -730,7 +733,7 @@ func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 	runner := func(ctx context.Context, stdin string, args ...string) (string, error) {
 		return "static pane", nil
 	}
-	n := &Node{ID: "n1", Agent: "claude"}
+	n := &Node{ID: "n1", Agent: "pi"}
 	a := &app{
 		byID:      map[string]*Node{"n1": n},
 		nodes:     []*Node{n},
@@ -800,7 +803,7 @@ func TestHandleChatPresentsInitialUnconfirmedAsUnconfirmed(t *testing.T) {
 // limit, not a bare "bad request" that gives the user no size hint and
 // invites retries that can never succeed.
 func TestHandleSendOversizedPrompt413(t *testing.T) {
-	n := &Node{ID: "n1", Agent: "claude"}
+	n := &Node{ID: "n1", Agent: "pi"}
 	a := &app{
 		byID:      map[string]*Node{"n1": n},
 		nodes:     []*Node{n},
@@ -837,7 +840,7 @@ func TestHandleSendAcknowledgedByPane(t *testing.T) {
 		}
 		return "", nil
 	}
-	n := &Node{ID: "n1", Agent: "claude"}
+	n := &Node{ID: "n1", Agent: "pi"}
 	a := &app{
 		byID:      map[string]*Node{"n1": n},
 		nodes:     []*Node{n},
@@ -1370,7 +1373,7 @@ func TestHandlePeekSpotsDialog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tx.jsonl")
 	appendLines(t, path,
 		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}`)
-	n := &Node{ID: "p1", Title: "p1", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+	n := &Node{ID: "p1", Title: "p1", Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 	a.nodes, a.byID["p1"] = []*Node{n}, n
 
 	rec := httptest.NewRecorder()
@@ -1404,7 +1407,7 @@ func TestHandlePeekStructuralDialogNoWaitingOn(t *testing.T) {
 	// User prompt only — no tool_use record (the late-flush case).
 	appendLines(t, path,
 		`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-	n := &Node{ID: "p1", Title: "p1", Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+	n := &Node{ID: "p1", Title: "p1", Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 	a.nodes, a.byID["p1"] = []*Node{n}, n
 	a.lastChg["p1"] = time.Now().Add(-time.Minute) // pane mechanically static
 
@@ -1432,7 +1435,7 @@ func TestNotePeekDialogActivePaneNeedsStructuredEvidence(t *testing.T) {
 		a := newTestApp(t, f)
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path, lines...)
-		n := &Node{ID: id, Title: id, Agent: "claude", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
+		n := &Node{ID: id, Title: id, Agent: "pi", Transport: "tmux", Transcript: path, CreatedAt: "2026-07-18T00:00:00Z"}
 		a.nodes, a.byID[id] = []*Node{n}, n
 		a.lastChg[id] = time.Now() // pane changed just now: active, not quiet
 		rec := httptest.NewRecorder()
@@ -1490,8 +1493,8 @@ func TestHandleChatTmuxFallbackNoTranscript(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.Pending || !body.Fallback || body.Source != "none" {
-		t.Errorf("no-transcript chat = %+v, want pending+fallback, source none", body)
+	if !body.Pending || body.Fallback || body.Source != "none" {
+		t.Errorf("no-transcript Claude chat = %+v, want pending, no fallback (no forced terminal)", body)
 	}
 }
 
@@ -2038,6 +2041,8 @@ func TestHandleSendClearRetiresTranscript(t *testing.T) {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
 	n := a.nodes[0]
+	a.markClaudeHookAck(n.ID)
+	a.noteClaudeHookCapabilitiesForNode(n.ID)
 	tx := filepath.Join(t.TempDir(), "sess.jsonl")
 	if err := os.WriteFile(tx, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)

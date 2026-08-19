@@ -867,12 +867,12 @@ test("create success: payload, last dir, tick, select, phone level", async () =>
   assert.equal(ctx.byId.newchat.classList.contains("open"), false);
 });
 
-test("Claude create with unconfirmed initial delivery preserves a recoverable composer draft", async () => {
+test("Claude create with not_sent initial delivery preserves a recoverable composer draft", async () => {
   const ctx = createFeature({ isDesktop: false });
   ctx.setApi(async (path, opts = {}) => {
     if (path === "/api/agents") return {};
     if (path === "/api/nodes" && opts.method === "POST")
-      return { id: "claude-pending", initial_delivery: "unconfirmed" };
+      return { id: "claude-pending", initial_delivery: "not_sent", initial_error: "Claude did not start." };
     return {};
   });
   ctx.feature.bind();
@@ -892,7 +892,7 @@ test("Claude create with unconfirmed initial delivery preserves a recoverable co
   assert.deepEqual(ctx.effects.select, ["claude-pending"]);
   assert.equal(ctx.byId.newchat.classList.contains("open"), false,
     "created node is selected instead of inviting a duplicate create");
-  assert.match(ctx.effects.alert.join(" "), /not confirmed|not delivered/i);
+  assert.match(ctx.effects.alert.join(" "), /did not start|not delivered/i);
 });
 
 test("create validation: missing title, fork lane required, new-lane error", async () => {
@@ -1560,7 +1560,7 @@ test("LI-C2: the echo is set before the selection, so the first render already h
 });
 
 test("LI-C3: an undelivered launch prompt is never echoed as delivered", async () => {
-  for (const delivery of ["not_sent", "unconfirmed"]){
+  for (const delivery of ["not_sent"]){
     const echoes = [];
     const ctx = createFeature({ deps: { setSentEcho: e => echoes.push(e) } });
     ctx.setApi(async (path, opts) => {

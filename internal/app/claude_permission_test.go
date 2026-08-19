@@ -349,14 +349,14 @@ func TestClaudeHookSettingsRegistersPermissionRequestOnly(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		"SessionStart": true, "PermissionRequest": true,
-		"Stop": true, "StopFailure": true,
+		"Notification": true, "Stop": true, "StopFailure": true,
 	}
 	for name := range doc.Hooks {
 		if !allowed[name] {
 			t.Fatalf("unexpected hook event %q registered: %s", name, raw)
 		}
 	}
-	for _, name := range []string{"SessionStart", "PermissionRequest", "Stop", "StopFailure"} {
+	for _, name := range []string{"SessionStart", "PermissionRequest", "Notification", "Stop", "StopFailure"} {
 		if len(doc.Hooks[name]) != 1 || len(doc.Hooks[name][0].Hooks) != 1 {
 			t.Fatalf("want exactly one %s hook: %s", name, raw)
 		}
@@ -540,7 +540,8 @@ func seedPermClaude(t *testing.T, a *app, id, sid string) (*Node, string) {
 	a.mu.Lock()
 	a.claudeHooks[n.ID] = hookID
 	a.mu.Unlock()
-	a.noteClaudePermCapability(hookID)
+	a.markClaudeHookAck(n.ID)
+	a.noteClaudeHookCapabilitiesForNode(n.ID)
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1037,7 +1038,7 @@ func TestMissedDeadlineIsVisibleAndPolicyDeclinesAreSilent(t *testing.T) {
 		wantLoud bool
 	}{
 		{"missed deadline", expired, true},
-		{"policy decline", policy, false},
+		{"policy decline", policy, true},
 		// A stale clock cannot be told apart from a policy decline, and an
 		// unreadable stamp is a parse failure, not a slow host.
 		{"unparseable stamp", func(r *claudePermRequest) { r.At = "yesterday" }, false},

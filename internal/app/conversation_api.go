@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/asset"
@@ -124,6 +125,13 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
+	// Claude's native /fork is not a scimux SessionStart source. Forking is
+	// scimux's own create-with-parent action. HTTP is authoritative: the GUI
+	// also blocks this, but a raw POST must still 400.
+	if n.Agent == "claude" && claudeNativeForkCommand(body.Text) {
+		http.Error(w, "Claude /fork is not supported; use scimux's Fork action to create a fresh node that inherits launch configuration but not conversation history", http.StatusBadRequest)
+		return
+	}
 	atts, err := a.resolveAttachments(n.ID, body.Attachments)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -200,6 +208,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the previous send is unconfirmed — check the terminal, then recheck", 409)
 		return
 	}
+	if n.Agent == "claude" {
+		sup := a.claudeSupervisionOf(n)
+		launchErr := a.claudeLaunchErr[n.ID]
+		if sup != claudeSupStrict {
+			a.mu.Unlock()
+			http.Error(w, claudeSupervisionExplain(sup, launchErr), http.StatusConflict)
+			return
+		}
+	}
 	a.sendState[n.ID] = sendSubmitting
 	a.mu.Unlock()
 
@@ -213,6 +230,16 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	pasted := time.Now()
 	isClear := strings.TrimSpace(body.Text) == "/clear"
+	// A Claude /clear can fire SessionStart before SendAck returns. Hold the
+	// same binding lock used by SessionStart until the old link is retired and
+	// its successor generation is durable, so the hook can only observe the
+	// completed page-turn state.
+	var clearBind *sync.Mutex
+	if n.Agent == "claude" && isClear {
+		clearBind = a.claudeBindLock(n.ID)
+		clearBind.Lock()
+		defer clearBind.Unlock()
+	}
 	// Paste and lease arm are linearized under the per-node auto-gate so a
 	// concurrent enable cannot install a lease between the two.
 	acked, err := a.acceptTmuxPrompt(n, isClear, func() (bool, error) {
@@ -222,7 +249,11 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		delete(a.sendState, n.ID)
 		a.mu.Unlock()
-		http.Error(w, err.Error(), 500)
+		code := http.StatusInternalServerError
+		if errors.Is(err, errClaudeTurnInFlight) {
+			code = http.StatusConflict
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	if !acked && tl != nil && len(tl.Poll()) > turnsBefore {
@@ -247,15 +278,42 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Code starts a fresh session file. Retire the link right away (path-less
 	// detached seam, peek while waiting). Only that node's SessionStart
 	// source:"clear" hook event may bind the successor. Never retry /clear.
-	if acked && n.Agent == "claude" && isClear {
+	// SendAck can return acked=false after paste+Enter succeeded — end the
+	// old permission turn on any send that did not error.
+	if n.Agent == "claude" && isClear {
 		a.retireTranscript(n)
-		a.advanceClaudeClearAfterWeb(n)
+		if err := a.advanceClaudeClearAfterWebLocked(n); err != nil {
+			a.recordClaudeLaunchError(n.ID, claudeResumeExplain)
+		}
 	}
 	if !acked {
 		writeJSON(w, map[string]string{"status": "unconfirmed", "text": body.Text})
 		return
 	}
 	writeJSON(w, map[string]string{"status": "acknowledged"})
+}
+
+// claudeNativeForkCommand reports whether text is Claude's native /fork
+// invocation: the trimmed prompt is exactly "/fork" or begins with "/fork"
+// followed by whitespace. Ordinary prose that merely contains the token
+// "/fork" is not a command.
+func claudeNativeForkCommand(text string) bool {
+	s := strings.TrimSpace(text)
+	if s == "/fork" {
+		return true
+	}
+	if !strings.HasPrefix(s, "/fork") {
+		return false
+	}
+	rest := s[len("/fork"):]
+	if rest == "" {
+		return true
+	}
+	switch rest[0] {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	return false
 }
 
 // snapshotClosingStation freezes the label of the station a /clear is about to
@@ -398,7 +456,11 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), code)
 			return
 		}
-		a.disarmAutoApprove(n.ID)
+		if n.Agent == "claude" {
+			a.endClaudePermissionTurn(n)
+		} else {
+			a.disarmAutoApprove(n.ID)
+		}
 		writeJSON(w, map[string]string{"ok": "interrupted"})
 		return
 	}
@@ -435,7 +497,11 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	// Interrupt is the human taking control back. It ends the lease on every
 	// agent; Claude's official Stop hook does not fire on user interrupt.
-	a.disarmAutoApprove(n.ID)
+	if n.Agent == "claude" {
+		a.endClaudePermissionTurn(n)
+	} else {
+		a.disarmAutoApprove(n.ID)
+	}
 	writeJSON(w, map[string]string{"ok": "interrupted"})
 }
 
@@ -642,6 +708,13 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	agent, model, ended := n.Agent, n.Model, n.EndedAt != ""
 	a.mu.Unlock()
 	turns := seg.Turns
+	a.mu.Lock()
+	sup := a.claudeSupervisionOf(n)
+	launchErr := a.claudeLaunchErr[n.ID]
+	armed := a.claudeAutoApproveArmedLocked(n)
+	a.mu.Unlock()
+	dlg := a.claudeVisibleDialog(n)
+
 	// fallback signals "the transcript is not (or no longer) making sense" —
 	// missing, not yet populated (or not yet mirrored), unreadable,
 	// format-incompatible from the start, structurally broken after valid
@@ -649,7 +722,15 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	// cycles without one recognizable chat record (staleChat: a typed future
 	// format). A path string existing does not mean the transcript is usable;
 	// the client must degrade to the pane snapshot in every one of these cases.
+	// Claude (strict, starting, unsupported, or failed) never uses that
+	// degradation to force the terminal.
 	fallback := len(turns) == 0 || (tl != nil && tl.Unparseable()) || stale
+	if agent == "claude" {
+		fallback = false
+		if attn == "inspect" {
+			attn = ""
+		}
+	}
 
 	// Diagnostics: where the chat content comes from and why attention (or
 	// its absence) looks the way it does — so a missed question is
@@ -658,6 +739,8 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	switch {
 	case agent == "pi" || agent == "opencode":
 		source = "terminal_only" // supported via pane peek + send only
+	case agent == "claude" && (sup == claudeSupStarting || pending):
+		source = "none"
 	case pending:
 		source = "none"
 	case fallback:
@@ -665,6 +748,14 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	}
 	reason := ""
 	switch {
+	case agent == "claude" && sup == claudeSupUnsupported:
+		reason = "claude_unsupported"
+	case agent == "claude" && sup == claudeSupFailed:
+		reason = "claude_launch_error"
+	case agent == "claude" && sup == claudeSupStarting:
+		reason = "claude_starting"
+	case agent == "claude" && (tl != nil && tl.Unparseable() || stale):
+		reason = "claude_transcript_fault"
 	case live == "active":
 		reason = "pane_active"
 	case attn == "question":
@@ -707,6 +798,58 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	resp["ctx_used"] = ctxUsed
 	resp["ctx_window"] = ctxWindow
 	resp["ctx_pct"] = ctxPct
+	if agent == "claude" {
+		resp["supervision"] = string(sup)
+		if explain := claudeSupervisionExplain(sup, launchErr); explain != "" {
+			resp["error"] = explain
+		}
+		if delivery == sendSubmitting || delivery == sendUnconfirmed || delivery == sendInitialUnconfirmed {
+			resp["pending_prompt"] = n.Prompt
+		}
+		if launchErr != "" && delivery != sendSubmitting && delivery != sendUnconfirmed && delivery != sendInitialUnconfirmed {
+			resp["restore_draft"] = n.Prompt
+		}
+		if note := a.claudeDialogNoteOf(n.ID); note != "" && dlg.DialogID == "" {
+			resp["perm_manual"] = true
+			resp["perm_reason"] = note
+		}
+		if sup == claudeSupStrict && dlg.DialogID != "" {
+			// perm_dialog_id is a server-minted visible-dialog epoch, not a
+			// PermissionRequest id. Action keys come only from a validated
+			// current AX menu. Missing options → manual response + Open
+			// Terminal, never an invented Yes/No/allow-always row.
+			resp["perm_dialog_id"] = dlg.DialogID
+			resp["perm_title"] = dlg.Title
+			resp["perm_tool_kind"] = claudePermToolKind(dlg.Tool)
+			opts := a.claudeDialogOptions(n, dlg)
+			if len(opts) > 0 {
+				resp["perm_options"] = opts
+			} else {
+				resp["perm_manual"] = true
+			}
+			if dlg.Question {
+				resp["perm_reason"] = "This is a question or plan choice — auto-approve will not answer it."
+			}
+			if armed {
+				resp["perm_manual"] = true
+				if dlg.Question {
+					if len(opts) > 0 {
+						resp["perm_reason"] = "Auto-approve is armed and will not answer this. Choose below, or open Terminal."
+					} else {
+						resp["perm_reason"] = "Auto-approve is armed and will not answer this. Open Terminal to respond."
+					}
+				} else if resp["perm_reason"] == nil {
+					if len(opts) > 0 {
+						resp["perm_reason"] = "Auto-approve could not answer this permission request. Choose below, or open Terminal."
+					} else {
+						resp["perm_reason"] = "Auto-approve could not answer this permission request. Open Terminal to respond."
+					}
+				}
+			} else if len(opts) == 0 && resp["perm_reason"] == nil {
+				resp["perm_reason"] = "A dialog is visible but its options could not be read safely. Open Terminal to respond."
+			}
+		}
+	}
 }
 
 // procChatInto overlays the structured-transport (ACP or codex app-server)
@@ -795,6 +938,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Key       string `json:"key"`
 		RequestID string `json:"request_id"`
+		DialogID  string `json:"dialog_id"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil || body.Key == "" {
 		http.Error(w, "bad request", 400)
@@ -858,6 +1002,45 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	// Semantic web choice → physical sequence (AX Claude: choice + Enter).
 	// One browser action becomes one validated SendKeys delivery.
 	seq := tmuxKeySequence(n, body.Key)
+	claudeEpoch := ""
+	if n.Agent == "claude" {
+		dlg := a.claudeVisibleDialog(n)
+		// A dialog_id in the body is fail-closed: send nothing unless it is
+		// exactly the live epoch. A missing, retired, or mismatched epoch
+		// must never type a digit/Enter into Claude's prompt.
+		if body.DialogID != "" {
+			if dlg.DialogID == "" || body.DialogID != dlg.DialogID {
+				http.Error(w, "stale permission dialog", http.StatusConflict)
+				return
+			}
+			claudeEpoch = dlg.DialogID
+		} else if a.claudeStrictSupervised(n) && dlg.DialogID != "" {
+			if body.RequestID != "" && body.RequestID == dlg.DialogID {
+				claudeEpoch = dlg.DialogID
+			} else {
+				http.Error(w, "dialog_id is required for Claude permission decisions", 400)
+				return
+			}
+		}
+		if claudeEpoch != "" {
+			opts := a.claudeDialogOptions(n, dlg)
+			if len(opts) == 0 {
+				http.Error(w, "dialog options are not available; open the terminal", http.StatusConflict)
+				return
+			}
+			allowed := false
+			for _, o := range opts {
+				if o.Key == body.Key {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				http.Error(w, "key is not an option on this dialog", 400)
+				return
+			}
+		}
+	}
 	if err := s.SendKeys(seq...); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -868,6 +1051,13 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	// R21.2). Failures before SendKeys must not reach here. The mechanical
 	// pipeline re-raises on the next tick if the dialog is still up, mirroring
 	// what the structured path gets for free from pm.Attention.
+	//
+	// For a strict hooked Claude node, retire only the visible-dialog epoch.
+	// Standing asks are not a guessed Notification identity and stay until
+	// transcript/tool evidence or a turn boundary retires them.
+	if n.Agent == "claude" && claudeEpoch != "" {
+		a.retireClaudeVisibleDialog(n, claudeEpoch)
+	}
 	a.mu.Lock()
 	prevAttn := a.attn[n.ID]
 	a.attn[n.ID] = ""
@@ -943,6 +1133,12 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 //  2. quietAttentionFallback — structural matcher (dialog) or owing stall
 //     (inspect) — for the Claude late-flush case where WaitingOn is false.
 func (a *app) notePeekDialog(n *Node, s *tmuxsession.Session) {
+	// Claude never gains inspect/owing attention from a peek. Strict nodes
+	// only raise from a proven permission dialog; unsupported nodes do not
+	// enter fallback supervision.
+	if n != nil && n.Agent == "claude" {
+		return
+	}
 	// Skip work when attention is already set — only ever raises fresh
 	// attention, never overwrites (efficiency, 2026-07-20 batch).
 	a.mu.Lock()

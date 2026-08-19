@@ -41,6 +41,7 @@ import {
   keyRowHTML,
   peekBlockHTML,
   echoBubbleHTML,
+  restoreDraftDecision,
   createChatFeature,
 } from "../js/chat.js";
 /* P6: ASSET_REF_RE + stripAssetRefs live in format.js (one home for every
@@ -378,6 +379,260 @@ test("chatActivityPolicy: forcePeek, showPeek, freshSurface, unconfirmed", () =>
   const unconf = chatActivityPolicy({ delivery: "unconfirmed", turnsLength: 1 });
   assert.equal(unconf.unconfirmed, true);
   assert.equal(unconf.forcePeek, true);
+});
+
+test("chatActivityPolicy: Claude strict never auto-opens except a proven permission dialog", () => {
+  const starting = chatActivityPolicy({
+    supervision: "claude_starting", turnsLength: 0, fallback: true, delivery: "unconfirmed",
+  });
+  assert.equal(starting.forcePeek, false);
+  assert.equal(starting.mustShowPane, false);
+  assert.equal(starting.showPeek, false);
+
+  const inspect = chatActivityPolicy({
+    supervision: "claude_strict", attention: "inspect", turnsLength: 0,
+  });
+  assert.equal(inspect.mustShowPane, false);
+  assert.equal(inspect.forcePeek, false);
+
+  const missing = chatActivityPolicy({
+    supervision: "claude_strict", fallback: true, turnsLength: 0,
+  });
+  assert.equal(missing.forcePeek, false);
+
+  const perm = chatActivityPolicy({
+    supervision: "claude_strict", attention: "approval", turnsLength: 2,
+  });
+  assert.equal(perm.mustShowPane, true);
+  assert.equal(perm.forcePeek, true);
+
+  const armed = chatActivityPolicy({
+    supervision: "claude_strict", attention: "approval", autoApproveArmed: true, turnsLength: 2,
+  });
+  assert.equal(armed.mustShowPane, false);
+
+  const unsupported = chatActivityPolicy({
+    supervision: "claude_unsupported", attention: "inspect", fallback: true, turnsLength: 0,
+  });
+  assert.equal(unsupported.mustShowPane, false);
+  assert.equal(unsupported.forcePeek, false);
+
+  const manual = chatActivityPolicy({
+    supervision: "claude_strict", termOpen: true, turnsLength: 2,
+  });
+  assert.equal(manual.showPeek, true);
+  assert.equal(manual.forcePeek, false);
+});
+
+test("keyRowHTML: Claude permission bar binds the visible-dialog epoch, not a request id", () => {
+  const html = keyRowHTML({
+    attention: "approval",
+    source: "transcript",
+    permTitle: "Bash",
+    permOptions: [{ key: "1", name: "Yes", kind: "allow" }, { key: "3", name: "No", kind: "reject" }],
+    permDialogId: "epoch-9",
+  });
+  assert.match(html, /data-dialog-id="epoch-9"/);
+  assert.doesNotMatch(html, /data-request-id/);
+  assert.match(html, /data-key="1"/);
+  assert.doesNotMatch(html, /Quiet/);
+});
+
+test("Claude permission click posts dialog_id without claiming request identity", async () => {
+  const nodes = [{
+    id: "n1", title: "A", agent: "claude", model: "sonnet", live: "quiet",
+    attention: "approval", lane_id: "", description: "",
+  }];
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: {
+      turns: [{ role: "user", text: "q" }],
+      live: "quiet", delivery: "", source: "transcript",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      attention: "approval",
+      supervision: "claude_strict",
+      perm_title: "Bash",
+      perm_options: [
+        { key: "1", name: "Yes", kind: "allow" },
+        { key: "3", name: "No", kind: "reject" },
+      ],
+      perm_dialog_id: "epoch-click-7",
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /data-dialog-id="epoch-click-7"/);
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /data-request-id/);
+  const btn = el("button", { dataset: { key: "1", dialogId: "epoch-click-7" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: btn });
+  await new Promise(resolve => setImmediate(resolve));
+  const keyCalls = ctx.apiCalls.filter(c => c.path.includes("/key"));
+  assert.equal(keyCalls.length, 1);
+  const body = JSON.parse(keyCalls[0].opts?.body || "{}");
+  assert.equal(body.key, "1");
+  assert.equal(body.dialog_id, "epoch-click-7");
+  assert.equal(body.request_id, undefined);
+  ctx.feature.destroy();
+});
+
+test("pending_prompt seeds a pale echo; restore_draft clears it", async () => {
+  const restored = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [],
+      live: "quiet",
+      delivery: "unconfirmed",
+      pending_prompt: "hello pale",
+      supervision: "claude_starting",
+      pending: true,
+      chat_started: "2026-01-01T00:00:00Z",
+      prior_turns: 0,
+      assets: {},
+    },
+    restoreDraft: (id, text) => restored.push({ id, text }),
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /hello pale/);
+  assert.match(ctx.roots.msgs.innerHTML, /echo/);
+  ctx.feature.destroy();
+
+  const ctx2 = makeFeature({
+    chatPayload: {
+      turns: [],
+      live: "quiet",
+      delivery: "",
+      restore_draft: "hello pale",
+      error: "Claude did not start.",
+      supervision: "claude_failed",
+      pending: true,
+      chat_started: "2026-01-01T00:00:00Z",
+      prior_turns: 0,
+      assets: {},
+    },
+    restoreDraft: (id, text) => restored.push({ id, text }),
+  });
+  ctx2.feature.setSentEcho({ node: "n1", text: "hello pale", atts: [], at: Date.now(), seen: null });
+  ctx2.feature.bind();
+  await ctx2.feature.render();
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].text, "hello pale");
+  assert.doesNotMatch(ctx2.roots.msgs.innerHTML, /echo/);
+  ctx2.feature.destroy();
+});
+
+test("restoreDraftDecision keeps newer composer input", () => {
+  assert.equal(restoreDraftDecision({ original: "first prompt", current: "" }).action, "restore");
+  assert.equal(restoreDraftDecision({ original: "first prompt", current: "first prompt" }).action, "restore");
+  const typed = restoreDraftDecision({ original: "first prompt", current: "newer follow-up" });
+  assert.equal(typed.action, "keep");
+  assert.equal(typed.text, "newer follow-up");
+});
+
+test("restoreDraftDecision uses exact text equality", () => {
+  const orig = "first prompt";
+  const wsOnly = restoreDraftDecision({ original: orig, current: "   " });
+  assert.equal(wsOnly.action, "keep");
+  assert.equal(wsOnly.text, "   ");
+  const lead = restoreDraftDecision({ original: orig, current: " first prompt" });
+  assert.equal(lead.action, "keep");
+  assert.equal(lead.text, " first prompt");
+  const trail = restoreDraftDecision({ original: orig, current: "first prompt " });
+  assert.equal(trail.action, "keep");
+  assert.equal(trail.text, "first prompt ");
+  const multi = restoreDraftDecision({ original: "line\n\n", current: "line\n \n" });
+  assert.equal(multi.action, "keep");
+  assert.equal(multi.text, "line\n \n");
+  const newer = restoreDraftDecision({ original: orig, current: "rewritten" });
+  assert.equal(newer.action, "keep");
+  assert.equal(newer.text, "rewritten");
+  const empty = restoreDraftDecision({ original: orig, current: "" });
+  assert.equal(empty.action, "restore");
+  assert.equal(empty.text, orig);
+  const same = restoreDraftDecision({ original: orig, current: orig });
+  assert.equal(same.action, "restore");
+  assert.equal(same.text, orig);
+});
+
+test("restore_draft does not overwrite a draft typed during pending startup", async () => {
+  const restored = [];
+  const storage = {
+    data: { "scimux-draft:n1": "typed while starting" },
+    getItem(k){ return this.data[k] || null; },
+    setItem(k, v){ this.data[k] = v; },
+  };
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [],
+      live: "quiet",
+      delivery: "",
+      restore_draft: "hello pale",
+      error: "Claude did not start.",
+      supervision: "claude_failed",
+      pending: true,
+      chat_started: "2026-01-01T00:00:00Z",
+      prior_turns: 0,
+      assets: {},
+    },
+    storage,
+    composerText: () => "typed while starting",
+    restoreDraft: (id, text) => restored.push({ id, text }),
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.equal(restored.length, 0, "must not call restoreDraft over newer input");
+  assert.equal(storage.getItem("scimux-draft:n1"), "typed while starting");
+  ctx.feature.destroy();
+});
+
+test("keyRowHTML: Claude question without proven options is manual + Open Terminal", () => {
+  const html = keyRowHTML({
+    attention: "question",
+    source: "transcript",
+    permTitle: "AskUserQuestion",
+    permOptions: [],
+    permDialogId: "epoch-q",
+    permManual: true,
+    permReason: "A dialog is visible but its options could not be read safely. Open Terminal to respond.",
+  });
+  assert.match(html, /Open Terminal/);
+  assert.match(html, /data-open-terminal/);
+  assert.doesNotMatch(html, /Yes, and don.?t ask again/);
+  assert.doesNotMatch(html, /data-key="1"/);
+  assert.doesNotMatch(html, /allow always/i);
+});
+
+test("keyRowHTML: epoch-bound Claude surface renders without map attention", () => {
+  const html = keyRowHTML({
+    attention: "",
+    source: "transcript",
+    permTitle: "AskUserQuestion",
+    permOptions: [{ key: "1", name: "Yes", kind: "allow" }],
+    permDialogId: "epoch-q",
+    permReason: "Auto-approve is armed and will not answer this. Choose below, or open Terminal.",
+  });
+  assert.match(html, /data-dialog-id="epoch-q"/);
+  assert.doesNotMatch(html, /data-key="y"/);
+  assert.match(html, /Choose below/);
+});
+
+test("chatActivityPolicy: Claude question auto-opens only when auto-approve is off", () => {
+  const off = chatActivityPolicy({
+    supervision: "claude_strict", attention: "question", turnsLength: 2,
+  });
+  assert.equal(off.mustShowPane, true);
+  const armed = chatActivityPolicy({
+    supervision: "claude_strict", attention: "question", autoApproveArmed: true, turnsLength: 2,
+  });
+  assert.equal(armed.mustShowPane, false);
+});
+
+test("pendingEmptyHTML: Claude startup does not mention the raw terminal", () => {
+  const html = pendingEmptyHTML({ pending: true, supervision: "claude_starting" });
+  assert.match(html, /SessionStart/);
+  assert.doesNotMatch(html, /raw terminal/i);
+  const other = pendingEmptyHTML({ pending: true });
+  assert.match(other, /raw terminal/i);
 });
 
 test("peekBlockHTML and keyRowHTML presentation contracts", () => {
@@ -1493,6 +1748,9 @@ function makeFeature(overrides = {}){
     updateLocalNode: () => {},
     copyText: () => {},
     uiMutate: () => {},
+    storage: overrides.storage,
+    composerText: overrides.composerText,
+    restoreDraft: overrides.restoreDraft,
     stampAddress: () => {},
     forkFromTurn: () => {},
     alert: () => {},

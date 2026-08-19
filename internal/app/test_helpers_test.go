@@ -19,6 +19,32 @@ import (
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
+// AX pane fixtures used by Claude dialog-control tests. Labels must match
+// the live menu; they are not the invented Yes / don't-ask / No row.
+const axPermissionPane = `Permission Required: Create file
+hello.txt
+
+  1. Yes
+  2. Yes, and don't ask again for this session
+  3. No
+
+Enter selection [1-3], or Escape to cancel:`
+
+const axAskUserQuestionPane = `Which approach should we take?
+
+  1. Keep the poller mechanical
+  2. Parse the TUI
+  3. Other
+  4. Chat about this
+
+Enter selection [1-4], or Escape to cancel:`
+
+// tmuxFallbackNode is a non-Claude tmux subject. Inspect, owing, and
+// quiet-fallback supervision stay on this path; Claude is gated off it.
+func tmuxFallbackNode(id, path string) *Node {
+	return &Node{ID: id, Agent: "pi", Transport: "tmux", Transcript: path}
+}
+
 func writeClaudeTranscript(t *testing.T, home, sessionID string) string {
 	t.Helper()
 	proj := filepath.Join(home, ".claude", "projects", "-w-proj")
@@ -215,7 +241,55 @@ func adopt(a *app, bodyJSON string) *httptest.ResponseRecorder {
 func newNode(a *app, bodyJSON string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	a.handleNewNode(rec, httptest.NewRequest("POST", "/api/nodes", strings.NewReader(bodyJSON)))
+	// Claude create returns before the background delivery goroutine finishes.
+	// Tests that send immediately after newNode need the instant-ack stub to
+	// have released the send gate; yield briefly. Tests that keep delivery
+	// outstanding (SessionStart wait) still see submitting after this cap.
+	if rec.Code == 200 && a != nil {
+		var n Node
+		if json.Unmarshal(rec.Body.Bytes(), &n) == nil && n.Agent == "claude" && n.ID != "" {
+			waitClaudeInitialGateFor(a, n.ID, 80*time.Millisecond)
+		}
+	}
 	return rec
+}
+
+func waitClaudeInitialGate(t *testing.T, a *app, id string) {
+	t.Helper()
+	waitClaudeInitialGateFor(a, id, 2*time.Second)
+	a.mu.Lock()
+	st := a.sendState[id]
+	a.mu.Unlock()
+	if st == sendSubmitting {
+		t.Fatal("initial delivery still submitting")
+	}
+}
+
+func waitClaudeInitialGateFor(a *app, id string, d time.Duration) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		st := a.sendState[id]
+		a.mu.Unlock()
+		if st != sendSubmitting {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func installPreparedClaudeHook(t *testing.T, a *app, n *Node) string {
+	t.Helper()
+	hookID, _, err := a.prepareClaudeHookBundle(n.ID)
+	if err != nil {
+		t.Fatalf("prepare Claude hook bundle: %v", err)
+	}
+	a.mu.Lock()
+	a.claudeHooks[n.ID] = hookID
+	a.mu.Unlock()
+	a.markClaudeHookAck(n.ID)
+	a.noteClaudeHookCapabilitiesForNode(n.ID)
+	return filepath.Join(a.claudeHooksDir(), hookID)
 }
 
 func containsSub(subs []string, want string) bool {

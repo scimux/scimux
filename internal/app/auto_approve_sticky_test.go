@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -51,8 +53,8 @@ func endTmuxTurn(t *testing.T, a *app, id string) {
 }
 
 func TestTurnEndDisarmsTmuxLease(t *testing.T) {
-	// Claude matches every other agent: a completed turn turns the toggle off.
-	// Retracting the marker at the boundary keeps the hook inert.
+	// Pane quietness is not a Claude turn boundary. The lease stays armed
+	// until Stop / interrupt / disable / /clear / /exit / process loss.
 	f := &fakeTmux{alive: map[string]bool{"t1": true}, list: []string{"t1"}, capture: "idle pane"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "t1", hookSIDOwn)
@@ -67,17 +69,11 @@ func TestTurnEndDisarmsTmuxLease(t *testing.T) {
 
 	endTmuxTurn(t, a, n.ID)
 
-	if got := phaseOf(a, n.ID); got != autoPhaseOff {
-		t.Fatalf("phase after the turn ended = %q, want off", got)
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase after pane quiet = %q, want armed", got)
 	}
-	a.mu.Lock()
-	view := a.autoApproveViewOf(n)
-	a.mu.Unlock()
-	if view.Enabled {
-		t.Fatal("turn end must switch the Claude toggle off, like every other agent")
-	}
-	if lease, ok := markerLease(t, bundle); ok {
-		t.Fatalf("turn end left the arm marker behind (%q); the hook must go inert", lease)
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("pane quiet must leave the Claude arm marker in place")
 	}
 }
 
@@ -103,8 +99,15 @@ func TestTmuxTurnEndRequiresRetoggleForNextTurn(t *testing.T) {
 		t.Fatal("armed lease published no marker")
 	}
 	endTmuxTurn(t, a, n.ID)
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase after pane quiet = %q, want armed", got)
+	}
+	if err := RunClaudeStopHook(bundle, bytes.NewReader(stopEventJSON("Stop", false)), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	a.drainClaudeStopInbox(n.ID, filepath.Base(bundle))
 	if got := phaseOf(a, n.ID); got != autoPhaseOff {
-		t.Fatalf("phase after turn end = %q, want off", got)
+		t.Fatalf("phase after Stop = %q, want off", got)
 	}
 
 	rec = routeRequest(h, http.MethodPost, "/api/nodes/t2/send", `{"text":"again"}`, true)
@@ -112,10 +115,10 @@ func TestTmuxTurnEndRequiresRetoggleForNextTurn(t *testing.T) {
 		t.Fatalf("second send: status = %d body %q", rec.Code, rec.Body.String())
 	}
 	if got := phaseOf(a, n.ID); got != autoPhaseOff {
-		t.Fatalf("phase after next prompt without retoggle = %q, want off", got)
+		t.Fatalf("phase after next prompt = %q, want off until re-toggled", got)
 	}
-	if lease, ok := markerLease(t, bundle); ok {
-		t.Fatalf("next prompt re-armed the marker (%q) without a new enable", lease)
+	if _, ok := markerLease(t, bundle); ok {
+		t.Fatal("a new Claude turn must not silently re-arm the stopped lease")
 	}
 }
 
@@ -140,8 +143,8 @@ func TestTurnEndClearsThePromptIDFence(t *testing.T) {
 	a.mu.Lock()
 	st := a.autoApprove[n.ID]
 	a.mu.Unlock()
-	if st != nil {
-		t.Fatalf("turn end must delete the lease, still have %+v", st)
+	if st == nil || st.TurnPromptID != "prompt-1" {
+		t.Fatalf("pane quiet must keep the lease and its prompt fence, got %+v", st)
 	}
 }
 
@@ -412,11 +415,11 @@ func TestResolvedToolCallDisarmsTmuxLease(t *testing.T) {
 
 	endTmuxTurn(t, a, n.ID)
 
-	if got := phaseOf(a, n.ID); got != autoPhaseOff {
-		t.Fatalf("phase after a completed turn = %q, want off", got)
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase after pane quiet with end_turn = %q, want armed until Stop", got)
 	}
-	if lease, ok := markerLease(t, bundle); ok {
-		t.Fatalf("completed turn left the arm marker behind (%q)", lease)
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("completed-looking quiet must not retract the Claude marker")
 	}
 }
 
@@ -528,10 +531,10 @@ func TestClaudeEnableDuringAssistantTextWithoutAskStaysPrimed(t *testing.T) {
 	}
 }
 
-func TestClaudeNextPromptDisarmsSurvivingArmedLease(t *testing.T) {
-	// Belt path: if the poller missed end_turn, accepting the next idle prompt
-	// is itself the definitive boundary. With one-turn leases that means off,
-	// not a silent re-arm.
+func TestClaudePrimedLeaseArmsOnAcceptedPrompt(t *testing.T) {
+	// A primed idle lease arms on the prompt it was waiting for and remains
+	// armed until that turn's Stop. This is the first turn under the lease, not
+	// a replacement for a still-open accepted turn.
 	f := &fakeTmux{alive: map[string]bool{"tb": true}, list: []string{"tb"}, capture: "idle", captureAfterEnter: "working"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "tb", hookSIDOwn)
@@ -544,10 +547,10 @@ func TestClaudeNextPromptDisarmsSurvivingArmedLease(t *testing.T) {
 	if err != nil || !acked {
 		t.Fatalf("accept prompt = %v,%v", acked, err)
 	}
-	if got := phaseOf(a, n.ID); got != autoPhaseOff {
-		t.Fatalf("phase after next prompt = %q, want off", got)
+	if got := phaseOf(a, n.ID); got != autoPhaseArmed {
+		t.Fatalf("phase after accepted prompt = %q, want armed until Stop", got)
 	}
-	if marker, ok := markerLease(t, bundle); ok {
-		t.Fatalf("next prompt left marker %q armed", marker)
+	if _, ok := markerLease(t, bundle); !ok {
+		t.Fatal("accepted prompt must publish the Claude marker")
 	}
 }

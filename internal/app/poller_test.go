@@ -361,7 +361,7 @@ func TestDialogDetectionOrWithStructured(t *testing.T) {
 		return "", nil
 	}
 
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	a := &app{
 		byID:      map[string]*Node{"cl1": n},
 		nodes:     []*Node{n},
@@ -434,7 +434,7 @@ func TestActivePaneDialogCorroboration(t *testing.T) {
 				}
 				return "", nil
 			}
-			n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+			n := tmuxFallbackNode("cl1", path)
 			a := &app{
 				byID:      map[string]*Node{"cl1": n},
 				nodes:     []*Node{n},
@@ -483,7 +483,7 @@ func TestActiveConfinedStallBackstop(t *testing.T) {
 		}
 		return "", nil
 	}
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	a := &app{
 		byID:      map[string]*Node{"cl1": n},
 		nodes:     []*Node{n},
@@ -541,7 +541,7 @@ func TestActivePaneKeepsPeekSetAttention(t *testing.T) {
 		}
 		return "", nil
 	}
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	a := &app{
 		byID:      map[string]*Node{"cl1": n},
 		nodes:     []*Node{n},
@@ -598,7 +598,7 @@ func TestPeekSetAttentionExpiresAfterStall(t *testing.T) {
 		}
 		return "", nil
 	}
-	n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+	n := tmuxFallbackNode("cl1", path)
 	a := &app{
 		byID:  map[string]*Node{"cl1": n},
 		nodes: []*Node{n},
@@ -830,7 +830,7 @@ func TestTurnDoneQuietDelivered(t *testing.T) {
 	}
 	mk := func(t *testing.T, path string, extra func(*app, *Node)) *app {
 		t.Helper()
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1078,7 +1078,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1106,7 +1106,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1132,7 +1132,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1158,7 +1158,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1186,7 +1186,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1215,7 +1215,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1250,7 +1250,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1281,7 +1281,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"the matcher wants esc to cancel"}]}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1308,7 +1308,7 @@ func TestQuietOwingStallAndStructuralDialog(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "tx.jsonl")
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"edit hello.txt"}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1414,7 +1414,7 @@ Enter selection [1-3], or Esc to cancel:`
 				t.Fatal(err)
 			}
 		}
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1477,7 +1477,7 @@ Enter selection [1-3], or Esc to cancel:`
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"write it"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Write","input":{}}]}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1555,7 +1555,7 @@ Enter selection [1-3], or Esc to cancel:`
 		appendLines(t, path,
 			`{"type":"user","timestamp":"t1","message":{"role":"user","content":"hi"}}`,
 			`{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"Escape to cancel is the AX footer; dialoghint is corroboration only"}]}}`)
-		n := &Node{ID: "cl1", Agent: "claude", Transcript: path}
+		n := tmuxFallbackNode("cl1", path)
 		a := &app{
 			byID:      map[string]*Node{"cl1": n},
 			nodes:     []*Node{n},
@@ -1667,8 +1667,8 @@ Enter selection [1-3], or Escape to cancel:`
 	t.Run("ax_unresolved_bash_with_dialog_approval", func(t *testing.T) {
 		a, _ := quietNode(t, permDialog, true, unresolvedBash...)
 		a.poll()
-		if got := a.attn["cl1"]; got != "approval" {
-			t.Errorf("attention = %q, want approval when AX + unresolved + ClassifyVisible", got)
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: Claude never raises from pane/transcript fallback", got)
 		}
 		if got := a.live["cl1"]; got != "quiet" {
 			t.Errorf("live = %q, want quiet", got)
@@ -1700,8 +1700,8 @@ Enter selection [1-3], or Escape to cancel:`
 	t.Run("non_ax_unresolved_bash_approval", func(t *testing.T) {
 		a, _ := quietNode(t, plainPane, false, unresolvedBash...)
 		a.poll()
-		if got := a.attn["cl1"]; got != "approval" {
-			t.Errorf("attention = %q, want approval for non-AX quiet unresolved Bash", got)
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: Claude never raises from unresolved-call + quiet", got)
 		}
 	})
 
@@ -1723,8 +1723,8 @@ Enter selection [1-3], or Escape to cancel:`
 		}
 		a.initMaps()
 		a.poll()
-		if got := a.attn["cl1"]; got != "inspect" {
-			t.Errorf("attention = %q, want inspect for missing transcript on AX", got)
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: Claude never inspects from a missing transcript", got)
 		}
 	})
 	t.Run("ax_stale_transcript_still_inspect", func(t *testing.T) {
@@ -1736,8 +1736,8 @@ Enter selection [1-3], or Escape to cancel:`
 		a.staleChat["cl1"] = true
 		a.live["cl1"] = "quiet"
 		a.poll()
-		if got := a.attn["cl1"]; got != "inspect" {
-			t.Errorf("attention = %q, want inspect for stale transcript on AX", got)
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: Claude never inspects from a stale transcript", got)
 		}
 	})
 	t.Run("ax_unparseable_transcript_still_inspect", func(t *testing.T) {
@@ -1771,8 +1771,8 @@ Enter selection [1-3], or Escape to cancel:`
 		if tl == nil || !tl.Unparseable() {
 			t.Fatalf("setup: tailer unparseable = %v", tl != nil && tl.Unparseable())
 		}
-		if got := a.attn["cl1"]; got != "inspect" {
-			t.Errorf("attention = %q, want inspect when Unparseable on AX", got)
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("attention = %q, want none: Claude never inspects from an unparseable transcript", got)
 		}
 	})
 
@@ -1846,8 +1846,8 @@ func launchedTrustNode(t *testing.T, pane string, quiet time.Duration) *app {
 func TestLaunchedClaudeTrustDialogNoTranscript(t *testing.T) {
 	a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
 	a.poll()
-	if got := a.attn["cl1"]; got != "dialog" {
-		t.Errorf("attention = %q, want dialog (not inspect) on a lettered trust dialog with no transcript", got)
+	if got := a.attn["cl1"]; got != "" {
+		t.Errorf("attention = %q, want none: a Claude trust dialog is a launch error, not poll inspect", got)
 	}
 	if got := a.live["cl1"]; got != "quiet" {
 		t.Errorf("live = %q, want quiet", got)
@@ -1891,8 +1891,8 @@ func TestHandlePeekLetteredTrustDialog(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("peek = %d", rec.Code)
 	}
-	if got := a.attn["cl1"]; got != "dialog" {
-		t.Errorf("peek attention = %q, want dialog", got)
+	if got := a.attn["cl1"]; got != "" {
+		t.Errorf("peek attention = %q, want none: Claude peek does not raise fallback attention", got)
 	}
 	if got := a.live["cl1"]; got != "" {
 		t.Errorf("peek must not write liveness: live = %q", got)
@@ -1944,8 +1944,8 @@ func TestPollFreshClearDoesNotRaiseInspect(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.poll()
-	if got := a.attn[n.ID]; got != "inspect" {
-		t.Fatalf("post-prompt attention = %q, want inspect for missing transcript", got)
+	if got := a.attn[n.ID]; got != "" {
+		t.Fatalf("post-prompt attention = %q, want none: Claude never inspects from a missing transcript", got)
 	}
 }
 

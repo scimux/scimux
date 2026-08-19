@@ -326,14 +326,14 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 		LaneID:      "lane-1",
 		ForkKind:    "y-new",
 		EndedAt:     "2026-07-20T12:00:00Z",
-		Agent:       "claude",
+		Agent:       "pi",
+		Transport:   "tmux",
 		Model:       "claude-sonnet",
 		Effort:      "high",
 		Dir:         "/work",
 		SessionID:   "sess-1",
 		Transcript:  "/tmp/t.jsonl",
 		Adopted:     true,
-		Transport:   "", // tmux default
 		CreatedAt:   "2026-07-14T00:00:00Z",
 	}
 	a.nodes = []*Node{n}
@@ -361,7 +361,7 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 		"id": "full", "parent": "root", "title": "Title", "prompt": "the prompt",
 		"description": "desc", "rationale": "why", "lane_id": "lane-1",
 		"fork_kind": "y-new", "ended_at": "2026-07-20T12:00:00Z",
-		"agent": "claude", "model": "claude-sonnet", "effort": "high",
+		"agent": "pi", "model": "claude-sonnet", "effort": "high",
 		"dir": "/work", "session_id": "sess-1", "transcript": "/tmp/t.jsonl",
 		"created_at": "2026-07-14T00:00:00Z",
 		"live":       "active", "attention": "approval",

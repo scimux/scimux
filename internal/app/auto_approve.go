@@ -206,10 +206,16 @@ func (a *app) disableAutoApprove(id string) autoApproveView {
 	// can at worst cost a tool call the helper's deadline.
 	a.retractClaudeLease(a.claudePermBundle(id))
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	delete(a.autoApprove, id)
 	n := a.byID[id]
-	if n == nil || !a.autoApproveSupportedFor(n) {
+	supported := n != nil && a.autoApproveSupportedFor(n)
+	a.mu.Unlock()
+	if n != nil && n.Agent == "claude" {
+		// The lease no longer suppresses attention. Reevaluate any still-
+		// current visible-dialog epoch so the map/card and terminal can open.
+		a.publishClaudeVisibleAttention(n)
+	}
+	if !supported {
 		return autoApproveView{Supported: false, Enabled: false, Phase: string(autoPhaseOff)}
 	}
 	return autoApproveView{Supported: true, Enabled: false, Phase: string(autoPhaseOff)}
@@ -315,6 +321,9 @@ func (a *app) installAutoApproveLease(id, live, enableIncarn string, enableMaxSe
 func (a *app) claudeTurnStillOpen(n *Node) bool {
 	if n == nil || !strings.EqualFold(n.Agent, "claude") {
 		return false
+	}
+	if a.claudeAcceptedTurnOf(n.ID).Turn != "" {
+		return true
 	}
 	if tl := a.tailerFor(n); tl != nil {
 		tl.Poll()
@@ -470,11 +479,10 @@ func (a *app) settleArmedBeforePrompt(id string, live string) {
 	a.settleAutoApproveAfterTurnLocked(id, "")
 }
 
-// settleAutoApproveAfterTurn closes an armed turn lease. Every agent
-// (Claude included) returns to off. Claude's official Stop hook is the
-// primary boundary; this path is the transcript / protocol fallback and
-// the next-prompt belt. Pane quietness alone is not enough for Claude —
-// a permission wait is also quiet.
+// settleAutoApproveAfterTurn closes an armed turn lease. Every agent returns
+// to off. Strict Claude reaches this through its matching Stop/StopFailure
+// notice; structured transports use their protocol completion edge. Pane
+// quietness alone is not a Claude boundary — a permission wait is also quiet.
 //
 // The marker is retracted before the phase changes, the same order disarm
 // uses: a marker outliving the armed phase could authorize a call belonging to
@@ -587,7 +595,7 @@ func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error))
 			turnClosed = tl.EndTurn() && tl.PendingCount() == 0
 		}
 	}
-	if turnClosed {
+	if turnClosed && n.Agent != "claude" {
 		a.settleAutoApproveAfterTurnLocked(n.ID, "")
 	}
 	a.mu.Lock()
@@ -597,8 +605,19 @@ func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error))
 	}
 	a.mu.Unlock()
 
+	var claudeTurn claudeAcceptedTurn
+	var err error
+	if n.Agent == "claude" && !isClear {
+		claudeTurn, err = a.beginClaudeAcceptedTurn(n)
+		if err != nil {
+			return false, err
+		}
+	}
 	acked, err := send()
 	if err != nil {
+		if claudeTurn.Turn != "" {
+			a.abortClaudeAcceptedTurn(n.ID, claudeTurn.Turn)
+		}
 		return acked, err
 	}
 	if isClear {
@@ -606,6 +625,9 @@ func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error))
 		a.mu.Lock()
 		delete(a.autoApprove, n.ID)
 		a.mu.Unlock()
+		if n.Agent == "claude" {
+			a.resetClaudePermissionTurnLocked(n)
+		}
 		return acked, nil
 	}
 	if primedLeaseID != "" {

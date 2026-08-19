@@ -210,23 +210,15 @@ func TestDiscoverTranscriptPersistsBeforePublishAndReleasesClaim(t *testing.T) {
 
 	a.discoverTranscript(n)
 
-	if n.Transcript != path {
-		t.Fatalf("transcript = %q, want %q", n.Transcript, path)
+	if n.Transcript != "" {
+		t.Fatalf("Claude discoverTranscript bound %q; SessionStart is the only bind", n.Transcript)
 	}
+	_ = path
 	a.mu.Lock()
 	claimed := a.pathClaims[path]
 	a.mu.Unlock()
 	if claimed {
-		t.Error("path claim still held after successful discovery")
-	}
-	var saw bool
-	for _, r := range storeRecs(t, a.storePath) {
-		if r.Type == "transcript" && r.ID == n.ID && r.Path == path {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Error("durable transcript record missing after discovery")
+		t.Error("path claim still held after a no-op Claude discovery")
 	}
 }
 
@@ -248,7 +240,7 @@ func TestDiscoverTranscriptPersistFailureRetryableAndReleasesClaim(t *testing.T)
 	a.discoverTranscript(n)
 
 	if n.Transcript != "" {
-		t.Fatalf("in-memory transcript set despite persist failure: %q", n.Transcript)
+		t.Fatalf("Claude discoverTranscript bound %q; SessionStart is the only bind", n.Transcript)
 	}
 	a.mu.Lock()
 	claimed := a.pathClaims[path]
@@ -257,18 +249,10 @@ func TestDiscoverTranscriptPersistFailureRetryableAndReleasesClaim(t *testing.T)
 		t.Error("path claim still held after discovery persist failure")
 	}
 
-	// Fix the store and retry: the empty in-memory state is what makes discovery
-	// re-enter; the released claim lets the path be reserved again.
 	fixStore(t, a)
 	a.discoverTranscript(n)
-	if n.Transcript != path {
-		t.Fatalf("retry after fix: transcript = %q, want %q", n.Transcript, path)
-	}
-	a.mu.Lock()
-	claimed = a.pathClaims[path]
-	a.mu.Unlock()
-	if claimed {
-		t.Error("path claim still held after successful retry")
+	if n.Transcript != "" {
+		t.Fatalf("retry still must not UUID-discover a Claude transcript: %q", n.Transcript)
 	}
 }
 

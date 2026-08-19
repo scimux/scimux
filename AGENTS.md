@@ -10,7 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
-node --test web/test/*.test.js  # browser unit suite (1030 tests; no browser needed)
+node --test web/test/*.test.js  # browser unit suite (1064 tests; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -100,25 +100,60 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   Claude gets a path-less "detached" seam at retire time and the successor
   bind only from that node's validated SessionStart hook. Fork stays the only
   path that can change launch config: a forked node inherits
-  agent/model/effort/dir but never conversation history.
+  agent/model/effort/dir but never conversation history. Claude's native
+  `/fork` command and `SessionStart source:"fork"` are not supported —
+  forking is scimux's existing Fork action only (a fresh node/process,
+  ordinary `SessionStart source:"startup"`). Never send `/fork` to the
+  Claude CLI.
 - **A Claude transcript is bound only by that node's own SessionStart hook.**
   Every Claude launch mints a fresh hook bundle under
   `~/.scimux/claude-hooks/<hex-id>/` (`settings.json` 0600, `inbox/` and
   `processed/` 0700) and passes it as `--settings`; the file registers scimux
   itself as the `SessionStart` command, so the hook firing *is* the
-  process→transcript ownership proof. `--session-id` seeds the first
-  transcript, `--continue` is forbidden, and `--settings` must precede
+  process→transcript ownership proof **and** the startup/hook-health
+  acknowledgement. The undocumented transcript `bridge_status` record is not
+  a readiness condition. `--session-id` seeds the first transcript,
+  `--continue` is forbidden, and `--settings` must precede
   `--remote-control` (an optional-value flag that would otherwise swallow it).
-  scimux deliberately supports Claude's default `~/.claude` state root only;
-  it does **not** evaluate or support `CLAUDE_CONFIG_DIR`. Keep transcript-path
-  validation anchored under `~/.claude/projects` unless that scope decision is
-  explicitly revisited.
+  Every owned launch also passes `--ax-screen-reader` and `--add-dir` for
+  every genuinely additional directory outside the working directory
+  (including the attachment staging directory). `--add-dir` does **not**
+  bypass Claude workspace trust; scimux never edits undocumented trust-state
+  files. Create returns the new node immediately so the browser can select it
+  and show the first prompt as a pale pending bubble while SessionStart and
+  delivery confirmation are outstanding. The prompt is pasted exactly once,
+  only after a valid SessionStart acknowledgement; the bubble becomes solid
+  only when the matching transcript user turn confirms delivery. The send
+  gate stays held across that window so no later prompt can overtake the
+  first. SessionStart timeout, a diagnosed workspace-trust dialog, paste
+  failure, or final delivery-confirmation failure is an inline error: the
+  prompt is restored as the node's draft, never retried automatically, and
+  the terminal is not opened. A generic lettered startup dialog is **not**
+  diagnosed as workspace trust — the inline error tells the user to inspect
+  Claude outside scimux. scimux deliberately supports Claude's default `~/.claude` state root
+  only; it does **not** evaluate or support `CLAUDE_CONFIG_DIR`. Keep
+  transcript-path validation anchored under `~/.claude/projects` unless that
+  scope decision is explicitly revisited.
   Bindings are per-node and generation-numbered (`claude-binding` records,
   replayed *after* ordinary node records so a later title edit cannot wipe
   one); retired paths and session ids become `deadTranscripts` tombstones that
-  can never be rebound for that node. This is deliberately **fail-closed**: no
-  hook means no chat, and the node degrades to peek rather than guessing an
-  owner from the pane cmdline. Consequences worth knowing before "fixing" a
+  can never be rebound for that node. SessionStart sources `startup`,
+  `clear`, `compact`, and `resume` are accepted and never become
+  inspect attention. `source:"fork"` is rejected. Same-identity `resume` is a
+  no-op; a valid changed session/path is rebound with the current generation,
+  path-claim, tombstone, persistence, and source-seam rules — never left
+  silently on the old transcript. The commit is transactional: an uncommitted
+  candidate cannot be replayed, and tombstone persistence failure fails the
+  rebind. If that rebind cannot complete, the node surfaces an inline
+  error rather than inspect. Both live memory and store replay keep the
+  previous binding. A newly prepared current hook bundle reports
+  `claude_starting` while SessionStart is outstanding; permission and
+  auto-approve capability become authoritative only after the valid
+  SessionStart acknowledgement. Adopted, incomplete, legacy, or
+  moved-binary bundles are `claude_unsupported`. This is deliberately
+  **fail-closed**: no complete current hook bundle means the Claude node is
+  unsupported (inline explanation), never inspect/fallback supervision, and
+  never a guessed owner from the pane cmdline. Consequences worth knowing before "fixing" a
   bug report: spurious pane noise that trips the staleness backstop drops a
   node to peek until the next `/clear` or relaunch hook; and because
   `settings.json` bakes `os.Executable()` at launch, a pane that outlives a
@@ -132,7 +167,10 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   staleness (see `maybeRelinkTranscript`).
 - **Liveness is mechanical only** (active/quiet/exited/unavailable, from
   pane-change detection). Do not add regexes matching agent TUI strings.
-  Needs-input detection follows the same rule: it combines an unresolved
+  The inspect/owing/quiet-fallback attention path below is for non-Claude
+  agents. A scimux-owned Claude node never raises inspect from quietness,
+  AX, owing, or transcript faults (see the Claude-only strict terminal
+  policy). Needs-input detection follows the same rule: it combines an unresolved
   tool call in the transcript (structured data — both CLIs log the call
   record when the agent asks and the result record only after the human
   answers) with a mechanically quiet pane (running tools animate a timer;
@@ -233,36 +271,86 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   beside SessionStart and PermissionRequest; `StopFailure` uses the same
   helper. `capabilities.json` carries `"stop"` so a pre-Stop launch is
   visible on disk (it still auto-approves via the transcript fallback).
-  The helper reads the current arm marker and writes a lease-tagged notice
-  (`processed/stop/`); drain *settles* (`settleAutoApproveAfterTurn`) only
-  if that `LeaseID` is still armed, the notice is inside a 30-minute TTL,
-  and `session_id` matches. A late Stop from turn N cannot revoke turn N+1.
+  The helper reads the current arm marker and the app-owned accepted-turn
+  nonce and writes a lease-and-turn-tagged notice (`processed/stop/`); drain
+  *settles* (`settleAutoApproveAfterTurn`) only if that `LeaseID` is still
+  armed, the notice is inside a 30-minute TTL, and `session_id` matches.
+  Drain also requires the notice's turn nonce to match the current or
+  closing accepted turn. A late Stop from turn N cannot revoke, clear,
+  tombstone, or otherwise mutate turn N+1. Cleanup for a matching turn is
+  unconditional even when no lease was armed. The lease-ID fence remains
+  an additional guard.
   Quarantine on session mismatch or TTL leaves the lease **armed** — failure
-  keeps authority; the transcript fallback and next-prompt belt bound that.
+  keeps authority. The app-owned turn nonce is published durably before
+  Enter; marker publication failure refuses the send. A second Claude turn
+  is refused until the prior matching Stop has been drained, so a delayed
+  helper can never relabel turn N as N+1 by reading a replaced marker.
   The poller republishes the arm marker only when remaining life is below
   half of `claudeLeaseTTL` (30 min), so Stop still sees it on a long turn
   without an fsync every poll tick. `stop_hook_active` writes nothing —
   that turn is still running. `SubagentStop` is never registered.
   An unread auto-approve Error on the lease is dropped at the boundary
   (same as every other agent); the session-log audit still has the failure.
-  The poller keeps the transcript `end_turn` / explicit interrupt record as
-  a fallback (`settleAutoApproveAfterTurn`) and the next accepted prompt as
-  a final belt; both turn the lease **off**, not primed. **Claude's boundary is still not pane quietness.** A
-  quiet pane is not a finished turn even when the unresolved-call set is
-  empty: Claude may not flush the call until after a permission/question is
-  answered. The case this guards is an approval dialog with a second call
-  queued behind it: the dialog is static, so the pane crosses
-  `paneQuietAfter`, and settling there would retract the very marker the
-  queued call needs. The Stop hook and the transcript settle what the pane
-  cannot, reusing the same explicit boundary `reply_ready` reads; with no
-  readable transcript the plain mechanical rule stands. Scope it honestly:
-  a long *foreground* tool is **not** the motivating case, because Claude's
-  ticking elapsed timer keeps liveness `active` so the branch never runs
-  (`running_elapsed_time_stays_active_no_attention`), and **no live probe has
-  reached the queued-call state** — case D tried and measured a backgrounded job
-  instead. This is a reasoned guard, not a reproduced fix. Every per-request
-  guard stays: sole one-time option, never `allow_always`, the enable cutoff,
-  and no automatic retry of a request already attempted.
+  **For a SessionStart-acknowledged Claude node the lease stays armed until
+  Stop / StopFailure, interrupt, disable, `/clear`, `/exit`, or process
+  loss.** Pane quietness and the next accepted prompt are not Claude turn
+  boundaries. Codex/ACP keep the existing protocol settle. A deadline,
+  policy, competing-hook, or upstream ask/deny failure is an inline
+  auto-approve error only: while the lease remains armed, scimux does not
+  publish map/card attention and does not open the terminal. Disabling
+  auto-approve reevaluates any still-current visible-dialog epoch and then
+  publishes attention if that dialog is still waiting. Stop, StopFailure,
+  interrupt, `/clear`, `/exit`, process loss, and node deletion disarm the
+  matching lease, clear Claude attention, and tombstone unresolved
+  asked/shown/epoch records for the ending session so a later turn cannot
+  pair with them. AskUserQuestion,
+  ExitPlanMode, plan choices, deny rules, and unknown modes are never
+  auto-answered. Every per-request guard stays: sole one-time
+  `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
+  (never `updatedPermissions`), lease IDs, prompt_id fencing, audit-before-
+  delivery, and no automatic retry of a request already attempted.
+- **Claude-only strict terminal policy** (maintainer-approved, 2026-08-18).
+  For a newly scimux-owned, SessionStart-acknowledged Claude node with the
+  complete current hook bundle (SessionStart, PermissionRequest,
+  Notification(`permission_prompt`), Stop, StopFailure), the tmux terminal
+  may be visible only when the user opened it with the terminal button, or
+  when auto-approve is not armed and a current permission dialog is
+  structurally proven. Notification(`permission_prompt`) proves only that
+  *a* permission dialog is visible — Claude's payload has no PermissionRequest
+  id and no tool_use id, so scimux does **not** claim exact request
+  correlation. The UI action is bound to a server-minted visible-dialog
+  epoch (`perm_dialog_id`). Action keys and labels come only from a
+  structurally validated current AX menu (or another exact source) after
+  that Notification; invented Yes / "don't ask again" / No rows are never
+  shown for questions or plan choices. A standing ask's tool hint classifies
+  `AskUserQuestion` and `ExitPlanMode` — a generic Notification title does
+  not override that. If exact options cannot be extracted, the chat shows
+  an inline manual-response state and Open Terminal, with no guessed
+  buttons. Notifications are fenced by the accepted-turn nonce; a notice
+  belonging to a closed turn must not mint an epoch for the next turn.
+  A successful pane key retires that epoch only.
+  Standing asked notices are not a guessed Notification identity and retire
+  only through matching transcript/tool evidence or an explicit turn
+  boundary. A `/key` body that includes `dialog_id` is fail-closed: a
+  missing, retired, or mismatched epoch returns 409 and never types into
+  Claude's prompt. Questions, plan choices, deny rules, and unknown modes
+  are never auto-answered; they stay answerable through the same
+  epoch-bound surface. While auto-approve is armed the map does not go
+  yellow and the terminal does not auto-open, but the chat still shows
+  epoch-bound controls (not generic unbound keys). Out-of-order or
+  concurrent asks cannot present an older request as the current dialog
+  identity, because no such identity is claimed. Pane text is never parsed
+  to invent one. Pane quietness,
+  AX static rendering, unresolved transcript calls, missing/stale/
+  unparseable transcripts, fallback chat, and owing timeouts must never
+  automatically open the terminal and must never emit "quiet · inspect
+  terminal". Transcript and startup faults become inline status or error
+  states. Adopted panes and incomplete/old hook bundles are
+  **unsupported**: they get an inline explanation and never enter this
+  hooked path or the inspect/fallback supervision used by other agents.
+  A moved or missing scimux executable invalidates hook capability. Stop
+  clears obsolete Claude attention and terminal-forcing state. Codex, ACP,
+  pi, opencode, and grok keep their existing inspect/fallback behavior.
 - **An escalation notice is evidence, never an answer.** The same hook writes
   `perm/asked/<nonce>.json` for *every* decision it escalates, armed or not
   (`internal/app/claude_asked.go`), because the hook knows the one thing no
@@ -377,9 +465,11 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   spacing are the user's text.
 - Structured transports keep their protocol-owned first-turn delivery. Owned
   Claude launches with `--remote-control` but without a positional prompt;
-  scimux waits for that session's structured `bridge_status`, pastes the first
-  prompt, and accepts only the matching transcript user turn as confirmation.
-  A timeout preserves the prompt for recovery and never retries automatically.
+  scimux waits for a valid SessionStart from that exact launched process,
+  pastes the first prompt once, and accepts only the matching transcript user
+  turn as confirmation. The pale launch bubble stays pending until that
+  confirmation. A SessionStart, trust, or delivery failure is an inline error
+  that preserves the prompt as a draft and never opens the terminal or retries.
   Later tmux prompts use the same single-paste-then-Enter mechanics.
 
 ## Fixtures and privacy

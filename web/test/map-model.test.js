@@ -122,6 +122,8 @@ test("cardState precedence: closed > attention > working > dead > idle", () => {
 test("statusText precedence: Closed > inspect > hard attention > live tiers > Quiet", () => {
   assert.equal(statusText({ ended_at: "t", attention: "approval", live: "active" }), "Closed");
   assert.equal(statusText({ attention: "inspect" }), "Quiet · check the terminal");
+  assert.notEqual(statusText({ attention: "inspect", supervision: "claude_strict" }), "Quiet · check the terminal");
+  assert.notEqual(statusText({ attention: "inspect", supervision: "claude_unsupported" }), "Quiet · check the terminal");
   assert.equal(statusText({ attention: "approval" }), "Waiting · needs your approval");
   assert.equal(statusText({ attention: "question" }), "Waiting · needs your question");
   assert.equal(statusText({ live: "active" }), "Running");

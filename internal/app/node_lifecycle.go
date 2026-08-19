@@ -108,9 +108,10 @@ func agentCommandClaude(n *Node, addDirs []string, settingsPath string) string {
 }
 
 // agentCommand builds the launch command. Structured transports keep their
-// established first-prompt paths. Owned Claude is the exception: Remote
-// Control must finish bootstrapping before its editor is safe, so its prompt is
-// omitted here and delivered by deliverClaudeInitialPrompt after bridge_status.
+// established first-prompt paths. Owned Claude is the exception: SessionStart
+// from this launch is the readiness acknowledgement, so its prompt is omitted
+// here and delivered by deliverClaudeInitialPrompt after that hook event binds
+// the transcript.
 func agentCommand(n *Node, addDirs []string) (string, error) {
 	return agentCommandSettings(n, addDirs, "")
 }
@@ -389,6 +390,7 @@ const (
 	initialAcknowledged initialDelivery = "acknowledged"
 	initialNotSent      initialDelivery = "not_sent"
 	initialUnconfirmed  initialDelivery = "unconfirmed"
+	initialPending      initialDelivery = "pending"
 
 	sendSubmitting         = "submitting"
 	sendUnconfirmed        = "unconfirmed"
@@ -512,59 +514,127 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 			}
 		}
 	}
-	var delivery initialDelivery
 	if n.Agent == "claude" && a.deliverClaudeInitial != nil {
-		// The node is already published so state polling can discover it while
-		// Remote Control boots. Hold the ordinary send gate across that window:
-		// another browser must not paste a follow-up ahead of the first turn.
+		// Return the node immediately so the browser can select it and paint
+		// the pale launch bubble. SessionStart, the single paste, and
+		// transcript confirmation run after the HTTP snapshot is marshaled.
+		// The send gate stays held so no later prompt can overtake the first.
 		a.mu.Lock()
 		a.sendState[n.ID] = sendSubmitting
 		a.mu.Unlock()
-		delivery = a.deliverClaudeInitial(n)
-		a.mu.Lock()
-		if delivery == initialUnconfirmed {
-			a.sendState[n.ID] = sendInitialUnconfirmed
-		} else {
-			delete(a.sendState, n.ID)
-		}
-		a.mu.Unlock()
+		return 0, initialPending, nil
 	}
-	return 0, delivery, nil
+	return 0, "", nil
 }
 
-// deliverClaudeInitialPrompt waits for Claude's structured Remote Control
-// readiness record, then submits the already-durable Node.Prompt through tmux.
-// Pane changes are intentionally ignored: only a matching new transcript user
-// turn proves acceptance. Ambiguity is surfaced and never auto-retried.
+func (a *app) startClaudeInitialDelivery(id string) {
+	if a.deliverClaudeInitial == nil || id == "" {
+		return
+	}
+	a.mu.Lock()
+	n := a.byID[id]
+	pending := n != nil && n.Agent == "claude" && a.sendState[id] == sendSubmitting
+	a.mu.Unlock()
+	if pending {
+		go a.runClaudeInitialDelivery(n)
+	}
+}
+
+// runClaudeInitialDelivery waits for SessionStart, pastes once, and confirms
+// against the transcript. Failures are inline (draft restore, no retry, no
+// terminal). The HTTP create path has already returned.
+func (a *app) runClaudeInitialDelivery(n *Node) {
+	if n == nil || a.deliverClaudeInitial == nil {
+		return
+	}
+	delivery := a.deliverClaudeInitial(n)
+	a.mu.Lock()
+	if a.byID[n.ID] == nil {
+		delete(a.sendState, n.ID)
+		a.mu.Unlock()
+		return
+	}
+	switch delivery {
+	case initialUnconfirmed, initialPending:
+		a.sendState[n.ID] = sendInitialUnconfirmed
+	default:
+		delete(a.sendState, n.ID)
+	}
+	prompt, agent := n.Prompt, n.Agent
+	a.mu.Unlock()
+	if delivery != initialNotSent && strings.TrimSpace(prompt) != "" {
+		a.noteUsagePrompt(agent)
+	}
+}
+
+// deliverClaudeInitialPrompt waits for a valid SessionStart from this exact
+// launched process, then submits the already-durable Node.Prompt through tmux.
+// SessionStart is the readiness and hook-health acknowledgement; the
+// undocumented transcript bridge_status record is not consulted. Pane changes
+// are intentionally ignored: only a matching new transcript user turn proves
+// acceptance. Failure is an inline launch/delivery error — the terminal is
+// never opened and the prompt is never retried.
 func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 	poll := a.claudeInitialPoll
 	if poll <= 0 {
 		poll = 100 * time.Millisecond
 	}
 	readyDeadline := time.Now().Add(a.claudeReadyTimeout)
-	var path string
 	for {
 		a.drainClaudeHooks()
-		if p, ok := a.claudeReadyPath(n); ok &&
-			transcript.ClaudeBridgeReady(p, n.SessionID) {
-			path = p
+		if a.claudeSessionStartReady(n) {
 			break
 		}
 		if a.claudeReadyTimeout <= 0 || time.Now().After(readyDeadline) {
+			a.recordClaudeLaunchError(n.ID, a.diagnoseClaudeStartFailure(n))
 			return initialNotSent
 		}
 		time.Sleep(poll)
 	}
 
+	a.mu.Lock()
+	path := n.Transcript
+	a.mu.Unlock()
+	if path == "" {
+		a.recordClaudeLaunchError(n.ID, claudeStartTimeoutExplain)
+		return initialNotSent
+	}
+
 	tl := &transcript.Tailer{Path: path}
 	before := len(tl.Poll())
 	pasted := time.Now()
-	if err := a.server.Session(n.ID).Send(n.Prompt); err != nil {
-		fmt.Fprintf(os.Stderr, "scimux: deferred first prompt to Claude node %s failed: %v\n", n.ID, err)
+	g := a.autoGateFor(n.ID)
+	g.Lock()
+	turn, err := a.beginClaudeAcceptedTurn(n)
+	if err != nil {
+		g.Unlock()
+		a.recordClaudeLaunchError(n.ID, claudeTurnFenceExplain)
 		return initialNotSent
 	}
+	if err := a.server.Session(n.ID).Send(n.Prompt); err != nil {
+		a.abortClaudeAcceptedTurn(n.ID, turn.Turn)
+		g.Unlock()
+		fmt.Fprintf(os.Stderr, "scimux: deferred first prompt to Claude node %s failed: %v\n", n.ID, err)
+		a.recordClaudeLaunchError(n.ID, claudePasteExplain)
+		return initialNotSent
+	}
+	// A toggle enabled while startup was pending is primed. The accepted first
+	// turn arms it only after Enter succeeded, under the same gate as the turn
+	// marker publication.
+	a.mu.Lock()
+	primedLeaseID := ""
+	if st := a.autoApprove[n.ID]; st != nil && st.Phase == autoPhasePrimed {
+		primedLeaseID = st.LeaseID
+	}
+	a.mu.Unlock()
+	if primedLeaseID != "" {
+		a.armAutoApproveOnPromptLocked(n.ID, primedLeaseID, "", 0, false)
+		a.syncClaudeLeaseMarker(n)
+	}
+	g.Unlock()
 	// The first prompt reached the pane: from here the agent owes output, so
-	// this is the watermark the stale-link backstop judges against.
+	// this is the watermark the stale-link backstop judges against. Paste
+	// happens exactly once; confirmation failure never retries it.
 	a.noteDelivery(n.ID, pasted)
 	want := canonicalPrompt(n.Prompt)
 	deliveryDeadline := time.Now().Add(a.claudeDeliveryTimeout)
@@ -572,11 +642,13 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 		turns := tl.Poll()
 		for _, turn := range turns[before:] {
 			if turn.Role == "user" && canonicalPrompt(turn.Text) == want {
+				a.clearClaudeLaunchError(n.ID)
 				return initialAcknowledged
 			}
 		}
 		if a.claudeDeliveryTimeout <= 0 || time.Now().After(deliveryDeadline) {
-			return initialUnconfirmed
+			a.recordClaudeLaunchError(n.ID, claudeDeliveryExplain)
+			return initialNotSent
 		}
 		time.Sleep(poll)
 	}
@@ -620,12 +692,14 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 			launch = &cp
 		}
 	}
-	// Extra directories for Claude --add-dir. Only the node's attachment
-	// staging dir: n.Dir is already the process cwd (passing it is a no-op
-	// for the trust dialog and is not this flag's job). Skip when
-	// attachmentsDir is unset so an empty or relative path never reaches
-	// the CLI. MkdirAll here because the CLI rejects a non-existent path
-	// and storeAttachment otherwise creates the dir lazily on first upload.
+	// Extra directories for Claude --add-dir. Only genuinely additional
+	// directories outside the working directory — today the node's attachment
+	// staging dir. n.Dir is already the process cwd (passing it is a no-op
+	// and does not bypass workspace trust). Skip when attachmentsDir is unset
+	// so an empty or relative path never reaches the CLI. MkdirAll here
+	// because the CLI rejects a non-existent path and storeAttachment
+	// otherwise creates the dir lazily on first upload. A persistent
+	// permissions.additionalDirectories setting is not required.
 	var addDirs []string
 	if n.Agent == "claude" && a.attachmentsDir != "" {
 		dir := a.attachmentDir(n.ID)
