@@ -24,7 +24,6 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
-	"time"
 
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
@@ -573,26 +572,19 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 func TestDeliverClaudeInitialPromptWaitsForBridgeAndTranscript(t *testing.T) {
 	f := &fakeTmux{captureAfterEnter: "pane moved but that is not delivery proof"}
 	a := newTestApp(t, f)
-	a.claudeReadyTimeout = 300 * time.Millisecond
-	a.claudeDeliveryTimeout = 300 * time.Millisecond
-	a.claudeInitialPoll = 5 * time.Millisecond
+	a.claudeReadyTimeout = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
 	n := &Node{ID: "claude-ready", Agent: "claude", SessionID: "sid-ready", Prompt: "long\ninitial prompt"}
 	path := writeClaudeTranscript(t, a.home, n.SessionID)
 	n.Transcript = path
 	a.byID[n.ID] = n
 	a.nodes = append(a.nodes, n)
 	installPreparedClaudeHook(t, a, n)
-	go func() {
-		deadline := time.Now().Add(250 * time.Millisecond)
-		for !f.didSendEnter() && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err == nil {
-			_, _ = file.WriteString(`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":"long\ninitial prompt"}}` + "\n")
-			_ = file.Close()
-		}
-	}()
+	// The confirming turn must land after the paste, never before: the delivery
+	// scan only counts turns appearing past its pre-paste watermark.
+	f.appendOnEnter(t, path,
+		`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":"long\ninitial prompt"}}`)
 	if got := a.deliverClaudeInitialPrompt(n); got != initialAcknowledged {
 		t.Fatalf("delivery = %q, want acknowledged", got)
 	}
@@ -605,8 +597,9 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 	t.Run("not ready sends nothing", func(t *testing.T) {
 		f := &fakeTmux{}
 		a := newTestApp(t, f)
-		a.claudeReadyTimeout = 25 * time.Millisecond
-		a.claudeInitialPoll = 5 * time.Millisecond
+		// The ready timeout IS the assertion here, so it stays short.
+		a.claudeReadyTimeout = testTimeoutBudget
+		a.claudeInitialPoll = testInitialPoll
 		n := &Node{ID: "not-ready", Agent: "claude", SessionID: "sid", Prompt: "keep me"}
 		writeClaudeTranscript(t, a.home, n.SessionID)
 		if got := a.deliverClaudeInitialPrompt(n); got != initialNotSent {
@@ -619,9 +612,11 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 	t.Run("pane movement is not confirmation", func(t *testing.T) {
 		f := &fakeTmux{captureAfterEnter: "moving pane"}
 		a := newTestApp(t, f)
-		a.claudeReadyTimeout = 50 * time.Millisecond
-		a.claudeDeliveryTimeout = 25 * time.Millisecond
-		a.claudeInitialPoll = 5 * time.Millisecond
+		// SessionStart must succeed (generous), then the confirmation timeout is
+		// the assertion (short) — nothing ever appends a matching turn.
+		a.claudeReadyTimeout = testReadyBudget
+		a.claudeDeliveryTimeout = testTimeoutBudget
+		a.claudeInitialPoll = testInitialPoll
 		n := &Node{ID: "unconfirmed", Agent: "claude", SessionID: "sid", Prompt: "keep me"}
 		path := writeClaudeTranscript(t, a.home, n.SessionID)
 		n.Transcript = path
@@ -662,22 +657,26 @@ func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
 		t.Run(tc.at+"/"+tc.name, func(t *testing.T) {
 			f := &fakeTmux{captureAfterEnter: "pane moved but that is not delivery proof"}
 			a := newTestApp(t, f)
-			a.claudeReadyTimeout = 200 * time.Millisecond
-			a.claudeDeliveryTimeout = 200 * time.Millisecond
-			a.claudeInitialPoll = 5 * time.Millisecond
+			a.claudeReadyTimeout = testReadyBudget
+			// The budget's meaning differs per case, and conflating the two is
+			// what made this test flake: on an acknowledged case it is only a
+			// race window (generous), on a not-sent case it is the assertion
+			// and the runtime (short). Either way the turn is already on disk
+			// before the first confirmation poll, so the verdict is decided by
+			// the text, not by the clock.
+			if tc.want == initialAcknowledged {
+				a.claudeDeliveryTimeout = testDeliverBudget
+			} else {
+				a.claudeDeliveryTimeout = testTimeoutBudget
+			}
+			a.claudeInitialPoll = testInitialPoll
 			n := &Node{ID: "claude-nl", Agent: "claude", SessionID: "sid-nl", Prompt: tc.prompt}
 			path := writeClaudeTranscript(t, a.home, n.SessionID)
 			n.Transcript = path
 			a.byID[n.ID] = n
 			a.nodes = append(a.nodes, n)
 			installPreparedClaudeHook(t, a, n)
-			go func() {
-				deadline := time.Now().Add(150 * time.Millisecond)
-				for !f.didSendEnter() && time.Now().Before(deadline) {
-					time.Sleep(time.Millisecond)
-				}
-				appendLines(t, path, userTurn(tc.turn))
-			}()
+			f.appendOnEnter(t, path, userTurn(tc.turn))
 			if got := a.deliverClaudeInitialPrompt(n); got != tc.want {
 				t.Fatalf("delivery = %q, want %q", got, tc.want)
 			}

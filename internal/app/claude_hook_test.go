@@ -188,14 +188,19 @@ func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
 	f := &fakeTmux{captureAfterEnter: "pane moved but that is not delivery proof"}
 	a := newTestApp(t, f)
 	a.deliverClaudeInitial = a.deliverClaudeInitialPrompt
-	a.claudeReadyTimeout = 400 * time.Millisecond
-	a.claudeDeliveryTimeout = 400 * time.Millisecond
-	a.claudeInitialPoll = 5 * time.Millisecond
+	a.claudeReadyTimeout = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
 
 	done := make(chan struct{})
+	// appendErr is written by the goroutine and read only after <-done, so the
+	// join is the synchronisation. It carries the failure back to the test
+	// goroutine instead of returning silently and leaving the real cause to
+	// surface as an unexplained delivery mismatch.
+	var appendErr error
 	go func() {
 		defer close(done)
-		deadline := time.Now().Add(350 * time.Millisecond)
+		deadline := time.Now().Add(testEnterWait)
 		var n *Node
 		for time.Now().Before(deadline) {
 			a.mu.Lock()
@@ -209,6 +214,7 @@ func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 		if n == nil || n.SessionID == "" {
+			appendErr = errors.New("create never published a Claude node with a session id")
 			return
 		}
 		path := writeClaudeTranscript(t, a.home, n.SessionID)
@@ -216,18 +222,27 @@ func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
 			HookEventName: "SessionStart", Source: "startup",
 			SessionID: n.SessionID, TranscriptPath: path, Cwd: a.home,
 		}); err != nil {
+			appendErr = fmt.Errorf("SessionStart: %w", err)
 			return
 		}
-		wait := time.Now().Add(200 * time.Millisecond)
-		for !f.didSendEnter() && time.Now().Before(wait) {
-			time.Sleep(time.Millisecond)
+		// Wait for the paste as an event, not for a duration: the confirming
+		// turn must be appended after it, and racing two wall-clock budgets is
+		// what used to make this test fail on a loaded machine.
+		select {
+		case <-f.enterSignal():
+		case <-time.After(testEnterWait):
+			appendErr = errors.New("tmux Enter was never sent")
+			return
 		}
-		appendLines(t, path, fmt.Sprintf(
+		appendErr = appendLinesErr(path, fmt.Sprintf(
 			`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":%q}}`,
 			"line1\rline2"))
 	}()
 	rec := newNode(a, `{"title":"CRCreate","prompt":"line1\nline2","agent":"claude","dir":`+strconv.Quote(a.home)+`}`)
 	<-done
+	if appendErr != nil {
+		t.Fatal(appendErr)
+	}
 	if rec.Code != 200 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}

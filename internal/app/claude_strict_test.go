@@ -16,9 +16,10 @@ import (
 func TestClaudeLaunchDoesNotUseBridgeStatus(t *testing.T) {
 	f := &fakeTmux{captureAfterEnter: "pane"}
 	a := newTestApp(t, f)
-	a.claudeReadyTimeout = 40 * time.Millisecond
-	a.claudeDeliveryTimeout = 40 * time.Millisecond
-	a.claudeInitialPoll = 5 * time.Millisecond
+	// The ready timeout IS the assertion: no SessionStart ever arrives.
+	a.claudeReadyTimeout = testTimeoutBudget
+	a.claudeDeliveryTimeout = testTimeoutBudget
+	a.claudeInitialPoll = testInitialPoll
 	n := &Node{ID: "n1", Agent: "claude", SessionID: hookSIDOwn, Prompt: "hello"}
 	path := writeClaudeTranscript(t, a.home, n.SessionID)
 	appendLines(t, path,
@@ -37,23 +38,17 @@ func TestClaudeLaunchDoesNotUseBridgeStatus(t *testing.T) {
 func TestClaudeLaunchWaitsForSessionStartThenConfirms(t *testing.T) {
 	f := &fakeTmux{captureAfterEnter: "pane"}
 	a := newTestApp(t, f)
-	a.claudeReadyTimeout = 200 * time.Millisecond
-	a.claudeDeliveryTimeout = 200 * time.Millisecond
-	a.claudeInitialPoll = 5 * time.Millisecond
+	a.claudeReadyTimeout = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
 	n := &Node{ID: "n1", Agent: "claude", SessionID: hookSIDOwn, Prompt: "hello"}
 	path := writeClaudeTranscript(t, a.home, n.SessionID)
 	n.Transcript = path
 	a.byID[n.ID] = n
 	a.nodes = append(a.nodes, n)
 	installPreparedClaudeHook(t, a, n)
-	go func() {
-		deadline := time.Now().Add(150 * time.Millisecond)
-		for !f.didSendEnter() && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
-		appendLines(t, path,
-			`{"type":"user","timestamp":"2026-08-18T00:00:00Z","message":{"role":"user","content":"hello"}}`)
-	}()
+	f.appendOnEnter(t, path,
+		`{"type":"user","timestamp":"2026-08-18T00:00:00Z","message":{"role":"user","content":"hello"}}`)
 	if got := a.deliverClaudeInitialPrompt(n); got != initialAcknowledged {
 		t.Fatalf("delivery = %q, want acknowledged after SessionStart", got)
 	}
@@ -295,13 +290,17 @@ func TestClaudeCreateReturnsPendingBeforeSessionStart(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	a.deliverClaudeInitial = a.deliverClaudeInitialPrompt
-	a.claudeReadyTimeout = 2 * time.Second
-	a.claudeDeliveryTimeout = 2 * time.Second
-	a.claudeInitialPoll = 5 * time.Millisecond
+	// Generous: no SessionStart ever arrives, and the point is that delivery is
+	// still pending while the assertions below run.
+	a.claudeReadyTimeout = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
 	start := time.Now()
 	rec := newNode(a, `{"title":"Pale","prompt":"hello pale","agent":"claude","dir":`+strconv.Quote(a.home)+`}`)
-	if time.Since(start) > 500*time.Millisecond {
-		t.Fatalf("create blocked for %s; must return before SessionStart", time.Since(start))
+	// A create that waited for SessionStart would take the whole ready budget;
+	// the margin is a fraction of it so a loaded machine cannot fake the verdict.
+	if blocked := time.Since(start); blocked > testReadyBudget/2 {
+		t.Fatalf("create blocked for %s; must return before SessionStart", blocked)
 	}
 	if rec.Code != 200 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
@@ -339,9 +338,9 @@ func TestClaudePalePromptSolidAfterTranscriptConfirm(t *testing.T) {
 	f := &fakeTmux{captureAfterEnter: "pane"}
 	a := newTestApp(t, f)
 	a.deliverClaudeInitial = a.deliverClaudeInitialPrompt
-	a.claudeReadyTimeout = 800 * time.Millisecond
-	a.claudeDeliveryTimeout = 800 * time.Millisecond
-	a.claudeInitialPoll = 5 * time.Millisecond
+	a.claudeReadyTimeout = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
 	rec := newNode(a, `{"title":"Solid","prompt":"hello pale","agent":"claude","dir":`+strconv.Quote(a.home)+`}`)
 	if rec.Code != 200 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
@@ -360,13 +359,10 @@ func TestClaudePalePromptSolidAfterTranscriptConfirm(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("startup: %v", err)
 	}
-	deadline := time.Now().Add(400 * time.Millisecond)
-	for !f.didSendEnter() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !f.didSendEnter() {
-		t.Fatal("prompt was not pasted after SessionStart")
-	}
+	// The paste is an event; wait for it rather than for a duration. This test
+	// deliberately inspects the pale bubble in the window between the paste and
+	// the confirming turn, so it cannot use appendOnEnter.
+	f.awaitEnter(t)
 	before := chatBody(t, a, n.ID)
 	if before["pending_prompt"] != "hello pale" {
 		t.Fatalf("bubble must stay pale after paste, pending_prompt=%v", before["pending_prompt"])
@@ -388,9 +384,11 @@ func TestClaudeStartupFailureRestoresDraftWithoutTerminal(t *testing.T) {
 	f := &fakeTmux{capture: "y. Continue\nn. Cancel\nEnter y/n:\n"}
 	a := newTestApp(t, f)
 	a.deliverClaudeInitial = a.deliverClaudeInitialPrompt
-	a.claudeReadyTimeout = 40 * time.Millisecond
-	a.claudeDeliveryTimeout = 40 * time.Millisecond
-	a.claudeInitialPoll = 5 * time.Millisecond
+	// The ready timeout IS the assertion: the trust dialog means SessionStart
+	// never arrives, and waitClaudeInitialGate below requires it to give up.
+	a.claudeReadyTimeout = testTimeoutBudget
+	a.claudeDeliveryTimeout = testTimeoutBudget
+	a.claudeInitialPoll = testInitialPoll
 	rec := newNode(a, `{"title":"FailStart","prompt":"keep me","agent":"claude","dir":`+strconv.Quote(a.home)+`}`)
 	if rec.Code != 200 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())

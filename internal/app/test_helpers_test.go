@@ -19,6 +19,36 @@ import (
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
+// Timeout budgets for the Claude first-turn delivery tests.
+//
+// These serve two different purposes and must not be conflated — doing so is
+// what made TestDeliverClaudeInitialPromptCanonicalNewlines flake:
+//
+//   - On a path that expects delivery to SUCCEED, the budget is only a race
+//     window. It is never reached in a passing run, so it must be generous
+//     enough to survive a loaded machine, a `-race` build, or a `-count=N`
+//     stress run. Use testDeliverBudget / testReadyBudget.
+//   - On a path that expects delivery to TIME OUT, the budget *is* the test's
+//     runtime and the assertion itself. It must stay short. Use
+//     testTimeoutBudget.
+//
+// The ordering constraint ("the confirming transcript turn is appended only
+// after the paste") is expressed as an event via fakeTmux.onEnter, never as a
+// second wall-clock deadline racing the first.
+const (
+	// testReadyBudget / testDeliverBudget bound the SessionStart wait and the
+	// delivery-confirmation wait on success paths.
+	testReadyBudget   = 10 * time.Second
+	testDeliverBudget = 10 * time.Second
+	// testTimeoutBudget is used where the timeout is the expected outcome.
+	testTimeoutBudget = 25 * time.Millisecond
+	// testInitialPoll is the poll interval; small so success paths are fast.
+	testInitialPoll = 2 * time.Millisecond
+	// testEnterWait bounds awaitEnter. Like the success budgets it is a race
+	// window, not an expected duration.
+	testEnterWait = 10 * time.Second
+)
+
 // AX pane fixtures used by Claude dialog-control tests. Labels must match
 // the live menu; they are not the invented Yes / don't-ask / No row.
 const axPermissionPane = `Permission Required: Create file
@@ -60,16 +90,25 @@ func writeClaudeTranscript(t *testing.T, home, sessionID string) string {
 
 func appendLines(t *testing.T, path string, lines ...string) {
 	t.Helper()
+	if err := appendLinesErr(path, lines...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// appendLinesErr is the *testing.T-free core of appendLines, for the callers
+// that run off the test goroutine (where t.Fatal is not allowed).
+func appendLinesErr(path string, lines ...string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	defer f.Close()
 	for _, l := range lines {
 		if _, err := f.WriteString(l + "\n"); err != nil {
-			t.Fatal(err)
+			return err
 		}
 	}
+	return nil
 }
 
 // webSourcePath resolves a repository-root browser file from this package's
@@ -97,6 +136,15 @@ type fakeTmux struct {
 	// keypress was sent — it lets SendAck observe a pane "reaction".
 	captureAfterEnter string
 	enterSent         bool
+	// enterCh is closed when Enter is first sent, so a test can wait for the
+	// paste as an *event* rather than guessing how long it takes (awaitEnter).
+	// Created lazily because every fakeTmux is built as a struct literal.
+	enterCh chan struct{}
+	// enterAppend* let a test hand the fake the transcript lines to append at
+	// the moment of the paste; see appendOnEnter.
+	enterAppendPath  string
+	enterAppendLines []string
+	enterAppendErr   error
 }
 
 func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (string, error) {
@@ -141,8 +189,12 @@ func (f *fakeTmux) run(ctx context.Context, stdin string, args ...string) (strin
 			return "", errors.New("send-keys failed")
 		}
 		// Compound AX sequences end with Enter; single Escape/Tab/etc. do not.
-		if lastArg(args) == "Enter" {
+		if lastArg(args) == "Enter" && !f.enterSent {
 			f.enterSent = true
+			if f.enterAppendPath != "" {
+				f.enterAppendErr = appendLinesErr(f.enterAppendPath, f.enterAppendLines...)
+			}
+			close(f.enterSignalLocked())
 		}
 		return "", nil
 	case "display-message":
@@ -169,6 +221,67 @@ func (f *fakeTmux) didSendEnter() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.enterSent
+}
+
+// enterSignalLocked returns the channel closed on the first Enter, creating it
+// on demand. The caller must hold f.mu.
+func (f *fakeTmux) enterSignalLocked() chan struct{} {
+	if f.enterCh == nil {
+		f.enterCh = make(chan struct{})
+	}
+	return f.enterCh
+}
+
+// enterSignal returns a channel that is closed once Enter has been sent (and is
+// already closed if it was sent before the call).
+func (f *fakeTmux) enterSignal() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.enterSignalLocked()
+}
+
+// awaitEnter blocks until the paste's Enter has been sent, and fails the test if
+// it never is. Use it from the test goroutine in place of a polling loop: the
+// delivery of Enter is an event, and waiting for the event rather than for a
+// wall-clock budget is what keeps these tests from racing a loaded machine.
+func (f *fakeTmux) awaitEnter(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.enterSignal():
+	case <-time.After(testEnterWait):
+		t.Fatal("tmux Enter was never sent")
+	}
+}
+
+// appendOnEnter makes the fake append lines to the transcript at the instant
+// the paste's Enter is sent — synchronously, inside the tmux call, before Send
+// returns.
+//
+// This is what makes the Claude first-turn delivery tests deterministic. The
+// production code takes its `before` watermark and pastes, then scans for a new
+// user turn until claudeDeliveryTimeout. Appending from a background goroutine
+// that had been polling for the paste made the turn's arrival a second race
+// against that same budget: when the machine was loaded the turn landed after
+// the deadline and a test expecting confirmation saw "not_sent". Appending on
+// the Enter itself puts the evidence on disk before the confirmation loop runs
+// its first poll, so a matching turn always confirms and a mismatching one
+// always fails to — neither outcome depends on the clock.
+//
+// The append happens with f.mu held; nothing here may call back into fakeTmux.
+func (f *fakeTmux) appendOnEnter(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	f.mu.Lock()
+	f.enterAppendPath = path
+	f.enterAppendLines = lines
+	f.mu.Unlock()
+	t.Cleanup(func() {
+		f.mu.Lock()
+		err := f.enterAppendErr
+		f.mu.Unlock()
+		if err != nil {
+			t.Errorf("appending the transcript turn on Enter failed: %v", err)
+		}
+	})
 }
 
 func lastArg(args []string) string {
@@ -256,7 +369,9 @@ func newNode(a *app, bodyJSON string) *httptest.ResponseRecorder {
 
 func waitClaudeInitialGate(t *testing.T, a *app, id string) {
 	t.Helper()
-	waitClaudeInitialGateFor(a, id, 2*time.Second)
+	// Generous: every caller expects the gate to be released, so this bound is
+	// a race window and is never reached in a passing run.
+	waitClaudeInitialGateFor(a, id, testDeliverBudget)
 	a.mu.Lock()
 	st := a.sendState[id]
 	a.mu.Unlock()
