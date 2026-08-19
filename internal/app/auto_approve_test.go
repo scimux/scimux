@@ -50,6 +50,9 @@ type stubProc struct {
 	sendCalls int
 	sendErr   error
 	sendHook  func(*stubProc)
+	// lastError is the structured LastError() projection (empty after a
+	// successful turn; set for interrupt/empty/failed).
+	lastError string
 }
 
 func (s *stubProc) Launch(string, string, string, string, string) (string, error) {
@@ -76,7 +79,7 @@ func (s *stubProc) Attention(string) string {
 	}
 	return ""
 }
-func (s *stubProc) LastError(string) string { return "" }
+func (s *stubProc) LastError(string) string { return s.lastError }
 func (s *stubProc) HasSession(string) bool  { return s.hasSession }
 func (s *stubProc) Kill(string) error       { return nil }
 func (s *stubProc) RecordStartFailure(string, error) error {

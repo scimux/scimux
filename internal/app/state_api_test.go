@@ -390,9 +390,9 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 	}
 }
 
-// P5 item 10: turn_done serializes when true and is omitted when unknown
-// (false / absent) so ACP nodes and unfinished quiet nodes look identical
-// on the wire — absent means UNKNOWN, never a positive "not finished".
+// P5 item 10 / P2: turn_done serializes when true and is omitted when
+// unknown (false / absent). A structured node that has latched Ready
+// serializes the same as Claude; a never-ran quiet node still omits.
 func TestHandleStateTurnDoneField(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
@@ -408,7 +408,8 @@ func TestHandleStateTurnDoneField(t *testing.T) {
 		a.turnDone = map[string]bool{}
 	}
 	a.turnDone[done.ID] = true
-	// quiet and acp intentionally leave turnDone unset / false
+	a.turnDone[acp.ID] = true
+	// quiet intentionally leaves turnDone unset / false (UNKNOWN)
 
 	rec := httptest.NewRecorder()
 	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
@@ -431,8 +432,8 @@ func TestHandleStateTurnDoneField(t *testing.T) {
 	if _, ok := byID["quiet"]["turn_done"]; ok {
 		t.Errorf("quiet.turn_done present = %v, want omitted", byID["quiet"]["turn_done"])
 	}
-	if _, ok := byID["acp1"]["turn_done"]; ok {
-		t.Errorf("acp.turn_done present = %v, want omitted (UNKNOWN)", byID["acp1"]["turn_done"])
+	if v, ok := byID["acp1"]["turn_done"]; !ok || v != true {
+		t.Errorf("acp.turn_done = %v,%v, want true when the structured latch is set", v, ok)
 	}
 }
 

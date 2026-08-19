@@ -282,9 +282,10 @@ type app struct {
 	live  map[string]string // node id -> "active"|"quiet"|"exited"
 	attn  map[string]string // node id -> ""|"approval"|"question"|"inspect"
 	// turnDone: quiet + newest transcript record is assistant + no pending
-	// tool call + no attention classified (P5 item 10). Projected as
-	// turn_done on nodeView. Never set for ACP nodes (no Tailer) — absent
-	// means UNKNOWN, not "not finished". Never feeds liveness.
+	// tool call + no attention classified (P5 item 10). Structured agents
+	// latch the same flag from the active→quiet edge (P2). Projected as
+	// turn_done on nodeView. Absent means UNKNOWN, not "not finished".
+	// Never feeds liveness.
 	turnDone map[string]bool
 	// attnAt: when a.attn[id] was last set by *fresh* evidence (a classification
 	// this tick, or the one-shot peek path) rather than carried over. The

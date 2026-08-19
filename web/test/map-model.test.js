@@ -76,7 +76,7 @@ test("map-model.js exports named pure helpers", async () => {
   const mod = await import("../js/map-model.js");
   for (const name of [
     "hardAttention", "cardState", "statusText", "statusKind", "turnFinished",
-    "displayReady", "ackReadySeen", "pruneReadySeen",
+    "displayReady", "displayStatusInfo", "ackReadySeen", "pruneReadySeen",
     "loadReadySeen", "saveReadySeen", "READY_SEEN_KEY",
     "cardCreatedMS", "cardInteractionMS",
     "orderedNodes", "pinnedOrder", "canReceiveSend", "sendableNodes",
@@ -189,7 +189,7 @@ const saveReadySeen = (...a) => mapModel.saveReadySeen(...a);
 test("map-model.js exports Ready paint helpers", async () => {
   const mod = await import("../js/map-model.js");
   for (const name of [
-    "displayReady", "ackReadySeen", "pruneReadySeen",
+    "displayReady", "displayStatusInfo", "ackReadySeen", "pruneReadySeen",
     "loadReadySeen", "saveReadySeen", "READY_SEEN_KEY",
   ]) {
     assert.ok(name in mod, name);
@@ -236,8 +236,18 @@ test("displayReady relights when last_activity advances past seen", () => {
 
 test("displayReady stays false under attention, running, or closed", () => {
   assert.equal(displayReady({ id: "n", live: "quiet", turn_done: true, attention: "approval" }), false);
+  assert.equal(displayReady({ id: "n", live: "quiet", turn_done: true, attention: "inspect" }), false);
   assert.equal(displayReady({ id: "n", live: "active", turn_done: true }), false);
   assert.equal(displayReady({ id: "n", live: "quiet", turn_done: true, ended_at: "t" }), false);
+});
+
+test("displayStatusInfo hides Ready after open or ack; keeps other kinds", () => {
+  const n = { id: "n", live: "quiet", turn_done: true, last_activity: 5 };
+  assert.deepEqual(mapModel.displayStatusInfo(n, {}), { kind: "finished", text: "Ready" });
+  assert.deepEqual(mapModel.displayStatusInfo(n, { selectedId: "n" }), { kind: "quiet", text: "Quiet" });
+  assert.deepEqual(mapModel.displayStatusInfo(n, { seenAt: { n: 5 } }), { kind: "quiet", text: "Quiet" });
+  assert.equal(mapModel.displayStatusInfo({ live: "active" }, {}).kind, "running");
+  assert.equal(mapModel.displayStatusInfo({ attention: "approval" }, {}).kind, "attention");
 });
 
 test("turnFinished ignores selected/seen (no coupling into the server flag)", () => {
@@ -267,7 +277,10 @@ test("pruneReadySeen drops ids whose node is not turn_done", () => {
   ];
   const next = pruneReadySeen(seen, nodes);
   assert.deepEqual(next, { keep: 1 });
-  assert.deepEqual(pruneReadySeen({ keep: 1 }, [{ id: "keep", turn_done: true }]), { keep: 1 });
+  const same = { keep: 1 };
+  assert.equal(pruneReadySeen(same, [{ id: "keep", turn_done: true }]), same);
+  assert.deepEqual(pruneReadySeen({}, []), {});
+  assert.deepEqual(pruneReadySeen(null, null), {});
 });
 
 test("loadReadySeen / saveReadySeen round-trip through injected storage", () => {
@@ -282,7 +295,16 @@ test("loadReadySeen / saveReadySeen round-trip through injected storage", () => 
   assert.deepEqual(loadReadySeen(store), { a: 9, b: 3 });
   store.data[mapModel.READY_SEEN_KEY] = "not-json";
   assert.deepEqual(loadReadySeen(store), {});
+  store.data[mapModel.READY_SEEN_KEY] = "[1]";
+  assert.deepEqual(loadReadySeen(store), {});
+  store.data[mapModel.READY_SEEN_KEY] = JSON.stringify({ "": 1, bad: "x", ok: 4 });
+  assert.deepEqual(loadReadySeen(store), { ok: 4 });
   assert.deepEqual(loadReadySeen(null), {});
+  assert.deepEqual(loadReadySeen({}), {});
+  saveReadySeen(null, { a: 1 });
+  saveReadySeen({ getItem(){ return null; } }, { a: 1 });
+  const boom = { setItem(){ throw new Error("quota"); } };
+  saveReadySeen(boom, { a: 1 });
 });
 
 test("statusKind and statusText agree across the fixture matrix", () => {

@@ -27,8 +27,8 @@ import { stopTimes, servedLanes } from "./lanes.js";
 export const hardAttention = n => n.attention && n.attention !== "inspect";
 
 /* turn_done is a server-projected flag (quiet + assistant delivered + no
-   pending tool call). Absent means UNKNOWN — ACP nodes never set it and must
-   render as plain Quiet, not as a failed finished claim. */
+   pending tool call on tmux; successful active→quiet on structured). Absent
+   means UNKNOWN — a never-ran node must render as Quiet, not finished. */
 export const turnFinished = n => !!(n && n.turn_done);
 
 /* Per-device ack of a finished turn the user has opened. The key is a
@@ -41,7 +41,7 @@ export const READY_SEEN_KEY = "scimux-ready-seen";
 export function displayReady(n, { selectedId, seenAt } = {}){
   if (!turnFinished(n)) return false;
   if (n.ended_at) return false;
-  if (hardAttention(n)) return false;
+  if (n.attention) return false;
   if (n.live === "active") return false;
   if (selectedId && n.id === selectedId) return false;
   const seen = seenAt && n.id != null ? seenAt[n.id] : undefined;

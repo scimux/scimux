@@ -312,6 +312,117 @@ func TestPollStructuredTransportBypassesTmux(t *testing.T) {
 	})
 }
 
+// TestStructuredTurnDone is the P2 predicate: ACP/codex Ready is the
+// active→quiet edge with no LastError, held across quiet ticks for the
+// same window Claude uses, never claimed for idle-never-ran.
+func TestStructuredTurnDone(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-time.Second)
+	stale := now.Add(-turnDoneWindow - time.Second)
+	cases := []struct {
+		name     string
+		live     string
+		attn     string
+		prevLive string
+		lastErr  string
+		endedAt  string
+		prevDone bool
+		lastChg  time.Time
+		want     bool
+	}{
+		{name: "never_ran", live: "quiet", want: false},
+		{name: "just_finished", live: "quiet", prevLive: "active", lastChg: fresh, want: true},
+		{name: "hold_quiet", live: "quiet", prevDone: true, lastChg: fresh, want: true},
+		{name: "expired", live: "quiet", prevDone: true, lastChg: stale, want: false},
+		{name: "zero_latch_clock", live: "quiet", prevDone: true, want: false},
+		{name: "still_running", live: "active", prevLive: "active", want: false},
+		{name: "attention", live: "quiet", attn: "approval", prevLive: "active", lastChg: fresh, want: false},
+		{name: "ended", live: "quiet", endedAt: "t", prevLive: "active", lastChg: fresh, want: false},
+		{name: "empty_or_failed_turn", live: "quiet", prevLive: "active", lastErr: "agent produced no output this turn", lastChg: fresh, want: false},
+		{name: "interrupted", live: "quiet", prevLive: "active", lastErr: "turn interrupted by supervisor", lastChg: fresh, want: false},
+		{name: "exited", live: "exited", prevLive: "active", lastChg: fresh, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := structuredTurnDone(tc.live, tc.attn, tc.prevLive, tc.lastErr, tc.endedAt, tc.prevDone, tc.lastChg, now)
+			if got != tc.want {
+				t.Fatalf("structuredTurnDone = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPollStructuredTurnDone(t *testing.T) {
+	n := &Node{ID: "pi1", Agent: "pi", Transport: "acp"}
+	a := newPollApp(t, n, pollRunner(nil, "unused", false, nil))
+	stub := &stubProc{live: "quiet", hasSession: true}
+	a.testProc = stub
+
+	a.poll()
+	if a.turnDone[n.ID] {
+		t.Fatal("idle-never-ran structured node must not claim turn_done")
+	}
+
+	stub.live = "active"
+	a.poll()
+	if a.turnDone[n.ID] {
+		t.Fatal("active structured turn must not claim turn_done")
+	}
+
+	stub.live = "quiet"
+	a.poll()
+	if !a.turnDone[n.ID] {
+		t.Fatal("active→quiet with empty LastError must set turn_done")
+	}
+
+	a.poll()
+	if !a.turnDone[n.ID] {
+		t.Fatal("turn_done must hold across subsequent quiet ticks")
+	}
+
+	stub.lastError = "agent produced no output this turn"
+	a.poll()
+	if a.turnDone[n.ID] {
+		t.Fatal("LastError must suppress turn_done")
+	}
+
+	stub.lastError = ""
+	stub.live = "active"
+	a.poll()
+	stub.live = "quiet"
+	stub.hasPending = true
+	a.poll()
+	if a.turnDone[n.ID] {
+		t.Fatal("attention must suppress turn_done")
+	}
+
+	stub.hasPending = false
+	n.EndedAt = "2026-08-19T00:00:00Z"
+	stub.live = "active"
+	a.poll()
+	stub.live = "quiet"
+	a.poll()
+	if a.turnDone[n.ID] {
+		t.Fatal("ended node must not claim turn_done")
+	}
+
+	n.EndedAt = ""
+	n.Agent, n.Transport = "codex", "codex"
+	stub.live = "active"
+	a.poll()
+	stub.live = "quiet"
+	a.poll()
+	if !a.turnDone[n.ID] {
+		t.Fatal("codex active→quiet must set turn_done")
+	}
+
+	a.lastChg[n.ID] = time.Now().Add(-turnDoneWindow - time.Second)
+	a.poll()
+	if a.turnDone[n.ID] {
+		t.Fatal("turn_done must expire after turnDoneWindow")
+	}
+}
+
 // TestPollActiveToQuietTranscriptJudgment: the whole-phase (prev active → quiet)
 // path marks stale when the linked file grew without recognized agent progress,
 // and quiet ticks clear stale when progress finally arrives.

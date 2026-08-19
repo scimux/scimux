@@ -90,10 +90,9 @@ type nodeView struct {
 	Supervision string `json:"supervision,omitempty"`
 	LaunchError string `json:"launch_error,omitempty"`
 	// TurnDone: the agent has finished its turn and is waiting for the human
-	// (quiet pane, newest transcript record is assistant, no pending tool
-	// call, no attention). omitempty so absent means UNKNOWN — ACP nodes
-	// (pi/opencode/grok) have no Tailer and never set this field; they must
-	// render exactly as they do without it (P5 accepted seam).
+	// (quiet + delivered + no pending tool + no attention on tmux; quiet +
+	// successful active→quiet on structured). omitempty so absent means
+	// UNKNOWN — never-ran structured nodes still omit it.
 	TurnDone        bool  `json:"turn_done,omitempty"`
 	HasTranscript   bool  `json:"has_transcript"`
 	LastActivity    int64 `json:"last_activity,omitempty"`    // unix ms of last pane/log movement

@@ -67,14 +67,17 @@ func (a *app) poll() {
 			// calls" discipline for consistency with Send/log paths).
 			live := pm.Live(n.ID)
 			attn := pm.Attention(n.ID)
+			lastErr := pm.LastError(n.ID)
 			a.mu.Lock()
 			prevAttn := a.attn[n.ID]
 			prevLive := a.live[n.ID]
+			prevDone := a.turnDone[n.ID]
 			a.live[n.ID] = live
 			a.attn[n.ID] = attn
 			if live == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
+			a.turnDone[n.ID] = structuredTurnDone(live, attn, prevLive, lastErr, n.EndedAt, prevDone, a.lastChg[n.ID], time.Now())
 			// An armed lease cannot cross a turn or a dead process. Every
 			// agent turns it off at completion. Do not touch a primed
 			// lease merely because the process is not yet up (enable while idle
@@ -708,6 +711,25 @@ const owedStallAX = 4 * time.Minute
 // station. Past the window a node is simply quiet again: the reply is still
 // there to read, but it is no longer news.
 const turnDoneWindow = 30 * time.Minute
+
+// structuredTurnDone is the P2 Ready latch for ACP/codex. Proof is the
+// mechanical active→quiet edge with an empty LastError (endTurn writes
+// LastError for interrupt/empty/failed; a successful end_turn /
+// turn/completed leaves it empty). Idle-never-ran stays false. The latch
+// holds across quiet ticks until attention, process death, a new turn, or
+// turnDoneWindow — same bound as the Claude transcript claim.
+func structuredTurnDone(live, attn, prevLive, lastErr, endedAt string, prevDone bool, lastChg, now time.Time) bool {
+	if endedAt != "" || live != "quiet" || attn != "" || lastErr != "" {
+		return false
+	}
+	if prevLive == "active" {
+		return true
+	}
+	if !prevDone || lastChg.IsZero() {
+		return false
+	}
+	return now.Sub(lastChg) < turnDoneWindow
+}
 
 // quietAttentionFallback is the quiet-branch attention sources that do not
 // need WaitingOn: the dialoghint matcher (P1a, including the structural
