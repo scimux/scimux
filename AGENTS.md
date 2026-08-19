@@ -10,7 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
-node --test web/test/*.test.js  # browser unit suite (1064 tests; no browser needed)
+node --test web/test/*.test.js  # browser unit suite (1069 tests, including web/test/audit.test.js; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -50,6 +50,15 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
     typed unions was evaluated and rejected as ~600 lines of ongoing schema
     churn. The tmux/transcript core stays stdlib-only; do not let the SDK (or
     any other module) leak beyond `internal/acp/`.
+  - **Pending exception #2 (not yet taken):** `github.com/pion/...` for the
+    WebRTC transport is scoped to `internal/remote/` only. No pion module is
+    in `go.mod` today. Adding one is a maintainer decision belonging to
+    phase S6; this note is not permission to take it. The scope is
+    mechanically enforced: `internal/app/remote_boundary_guard_test.go`
+    asserts over the module import graph that no package outside
+    `internal/remote/` imports `github.com/pion/...`. That guard was written
+    while it is vacuously true, precisely so it can never be "added along
+    with the dependency".
 - **Snapshot over stream.** Output is read via `tmux capture-pane -p`
   snapshots and via the transcript JSONL files the agent CLIs write
   themselves. Never parse the terminal byte stream, never use tmux control
@@ -437,6 +446,19 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   notes only; do not remove it as an accidental invariant violation, and do
   not expand it into a history UI without an explicit phase. There is no
   legacy flat-file migration path.
+- **Frozen characterization suites.** These four are frozen at commit
+  `4e35aad`: `internal/app/router_characterization_test.go`,
+  `internal/app/static_characterization_test.go`,
+  `internal/app/web_js_static_test.go`, and
+  `internal/app/css_cascade_test.go`. Adding assertions is fine. Needing
+  to CHANGE or DELETE one is a review stop, not an edit — it means the
+  refactor has altered behaviour the suites exist to pin. The freeze names
+  a commit rather than "as written" because commit `0848836` deleted a
+  `css_cascade_test.go` assertion (`.stagechip .spin i { animation: none; }`)
+  and replaced it with its opposite, deliberately: indeterminate progress
+  must keep animating under Reduce Motion. That reversal is pre-freeze and
+  arrived via merge from `2026-08-11_scimux-testing`, so it is not a
+  protocol violation, but it is why the freeze needs a commit to point at.
 - The README's **Non-goals** section is a hard scope fence; features listed
   there need explicit maintainer approval, not code.
 
