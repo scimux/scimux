@@ -115,3 +115,14 @@ func validateRequest(req *Request) (http.Header, error) {
 func validateResponseHeaders(h http.Header) (http.Header, error) {
 	return filterHeaders(h, allowedResponseHeaders)
 }
+
+func knownRejectClass(c Class) bool {
+	switch c {
+	case ClassAbsoluteURI, ClassAuthority, ClassHopByHop, ClassUpgrade,
+		ClassTrailer, ClassLengthConflict, ClassCRLF, ClassMethod,
+		ClassBodyTooLarge, ClassMalformed, ClassTruncated:
+		return true
+	default:
+		return false
+	}
+}

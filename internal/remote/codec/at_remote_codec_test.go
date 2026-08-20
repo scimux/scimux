@@ -523,6 +523,48 @@ func TestATRemoteCodecD_PerRouteBodyCap(t *testing.T) {
 		})
 		wantReject(t, err, ClassBodyTooLarge)
 	})
+
+	t.Run("state-over-json-cap-succeeds", func(t *testing.T) {
+		const n = JSONBodyMax + 1
+		client := startPair(t, HandlerFunc(func(ctx context.Context, req *Request) (*Response, error) {
+			return &Response{
+				ID:     req.ID,
+				Status: http.StatusOK,
+				Headers: http.Header{
+					"Content-Type": {"application/json"},
+				},
+				Body: limitBody(n, 's'),
+			}, nil
+		}))
+		resp := mustRoundTrip(t, client, validGET("req-state-over-json", "/api/state"))
+		got, err := countBytes(resp.Body)
+		if err != nil {
+			t.Fatalf("read /api/state over jsonBodyMax: %v", err)
+		}
+		if got != n {
+			t.Fatalf("client consumed %d bytes, want %d", got, n)
+		}
+	})
+
+	t.Run("state-over-asset-cap-rejected", func(t *testing.T) {
+		client := startPair(t, HandlerFunc(func(ctx context.Context, req *Request) (*Response, error) {
+			return &Response{
+				ID:     req.ID,
+				Status: http.StatusOK,
+				Headers: http.Header{
+					"Content-Type": {"application/json"},
+				},
+				Body: limitBody(AgentAssetMax+1, 'S'),
+			}, nil
+		}))
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		resp, err := client.RoundTrip(ctx, validGET("req-state-over-asset", "/api/state"))
+		if err == nil && resp != nil && resp.Body != nil {
+			_, err = io.Copy(io.Discard, resp.Body)
+		}
+		wantReject(t, err, ClassBodyTooLarge)
+	})
 }
 
 var echoOK = HandlerFunc(func(ctx context.Context, req *Request) (*Response, error) {

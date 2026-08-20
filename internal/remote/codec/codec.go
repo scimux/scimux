@@ -133,6 +133,7 @@ type call struct {
 	bodyW   *io.PipeWriter
 	respCap int64
 	n       int64
+	settled bool
 }
 
 type respOrErr struct {

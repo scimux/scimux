@@ -194,7 +194,9 @@ func decodeHeaders(p []byte) (http.Header, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	h := make(http.Header, int(n))
+	// Do not size the map or value slices from a claimed count — a hostile
+	// peer can claim 65535 headers and send two bytes.
+	h := make(http.Header)
 	for i := 0; i < int(n); i++ {
 		name, r, err := takeString(rest)
 		if err != nil {
@@ -204,7 +206,7 @@ func decodeHeaders(p []byte) (http.Header, []byte, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		vals := make([]string, 0, int(nv))
+		vals := make([]string, 0)
 		for j := 0; j < int(nv); j++ {
 			v, rr, err := takeString(r)
 			if err != nil {
@@ -269,7 +271,7 @@ func encodeResponsePayload(id string, status int, h http.Header) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	if status < 0 || status > 65535 {
+	if !validHTTPStatus(status) {
 		return nil, reject(ClassMalformed, "")
 	}
 	b = putU16(b, status)
@@ -286,8 +288,16 @@ func decodeResponsePayload(p []byte) (id string, status int, h http.Header, err 
 		return
 	}
 	status = int(st)
+	if !validHTTPStatus(status) {
+		err = reject(ClassMalformed, "")
+		return
+	}
 	h, _, err = decodeHeaders(p)
 	return
+}
+
+func validHTTPStatus(s int) bool {
+	return s >= 100 && s <= 599
 }
 
 func encodeID(id string) ([]byte, error) {

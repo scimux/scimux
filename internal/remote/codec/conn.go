@@ -156,12 +156,21 @@ func (c *Conn) Serve(ctx context.Context, h Handler) error {
 	return err
 }
 
-// Close releases session resources.
+// Close marks the session closed and unblocks pending calls. If r or w
+// implements io.Closer it is closed so the client read loop is not stuck
+// in decodeFrame. If r is not a Closer, the transport owner must close
+// the reader to release that loop.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
 		close(c.closeCh)
 		c.failAll(io.ErrClosedPipe)
+		if rc, ok := c.r.(io.Closer); ok {
+			_ = rc.Close()
+		}
+		if wc, ok := c.w.(io.Closer); ok {
+			_ = wc.Close()
+		}
 	})
 	return nil
 }
@@ -176,6 +185,7 @@ func (c *Conn) failAll(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for id, cl := range c.pending {
+		cl.settled = true
 		select {
 		case cl.respCh <- respOrErr{err: err}:
 		default:
@@ -373,10 +383,15 @@ func (c *Conn) acceptResponse(payload []byte) {
 		c.failCall(id, err)
 		return
 	}
+	hdrs, err = validateResponseHeaders(hdrs)
+	if err != nil {
+		c.failCall(id, err)
+		return
+	}
 	pr, pw := io.Pipe()
 	c.mu.Lock()
 	cl := c.pending[id]
-	if cl == nil {
+	if cl == nil || cl.settled {
 		c.mu.Unlock()
 		_ = pw.Close()
 		return
@@ -402,16 +417,24 @@ func (c *Conn) acceptClientBody(payload []byte) {
 	}
 	c.mu.Lock()
 	cl := c.pending[id]
-	c.mu.Unlock()
-	if cl == nil || cl.bodyW == nil {
+	if cl == nil {
+		c.mu.Unlock()
+		return
+	}
+	bodyW := cl.bodyW
+	if bodyW == nil {
+		c.mu.Unlock()
 		return
 	}
 	if cl.respCap-cl.n < int64(len(data)) {
-		_ = cl.bodyW.CloseWithError(reject(ClassBodyTooLarge, ""))
+		cl.settled = true
+		c.mu.Unlock()
+		_ = bodyW.CloseWithError(reject(ClassBodyTooLarge, ""))
 		return
 	}
 	cl.n += int64(len(data))
-	_, _ = cl.bodyW.Write(data)
+	c.mu.Unlock()
+	_, _ = bodyW.Write(data)
 }
 
 func (c *Conn) acceptClientBodyEnd(payload []byte) {
@@ -421,12 +444,14 @@ func (c *Conn) acceptClientBodyEnd(payload []byte) {
 	}
 	c.mu.Lock()
 	cl := c.pending[id]
+	var bodyW *io.PipeWriter
 	if cl != nil {
+		bodyW = cl.bodyW
 		delete(c.pending, id)
 	}
 	c.mu.Unlock()
-	if cl != nil && cl.bodyW != nil {
-		_ = cl.bodyW.Close()
+	if bodyW != nil {
+		_ = bodyW.Close()
 	}
 }
 
@@ -435,32 +460,25 @@ func (c *Conn) acceptReject(payload []byte) {
 	if err != nil {
 		return
 	}
-	rej := reject(class, field)
-	c.mu.Lock()
-	cl := c.pending[id]
-	c.mu.Unlock()
-	if cl == nil {
-		return
+	if !knownRejectClass(class) {
+		class = ClassMalformed
+		field = ""
 	}
-	if cl.bodyW != nil {
-		_ = cl.bodyW.CloseWithError(rej)
-		return
-	}
-	select {
-	case cl.respCh <- respOrErr{err: rej}:
-	default:
-	}
+	c.failCall(id, reject(class, field))
 }
 
 func (c *Conn) failCall(id string, err error) {
 	c.mu.Lock()
 	cl := c.pending[id]
-	c.mu.Unlock()
-	if cl == nil {
+	if cl == nil || cl.settled {
+		c.mu.Unlock()
 		return
 	}
-	if cl.bodyW != nil {
-		_ = cl.bodyW.CloseWithError(err)
+	cl.settled = true
+	bodyW := cl.bodyW
+	c.mu.Unlock()
+	if bodyW != nil {
+		_ = bodyW.CloseWithError(err)
 		return
 	}
 	select {

@@ -19,3 +19,20 @@ func FuzzDecodeFrame(f *testing.F) {
 		_, _ = decodeFrame(bytes.NewReader(data))
 	})
 }
+
+// FuzzDecodePayloads feeds the payload parsers that decodeFrame leaves
+// opaque. Claimed lengths that exceed the remaining slice must not allocate.
+func FuzzDecodePayloads(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x00, 0x00})
+	f.Add([]byte{0xff, 0xff})
+	f.Add([]byte{0x00, 0x01, 'a'})
+	f.Add([]byte{0xff, 0xff, 'x'})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _, _, _, _, _ = decodeRequestPayload(data)
+		_, _, _, _ = decodeResponsePayload(data)
+		_, _, _ = decodeHeaders(data)
+		_, _, _, _ = decodeRejectPayload(data)
+		_, _, _ = decodeIDPayload(data)
+	})
+}
