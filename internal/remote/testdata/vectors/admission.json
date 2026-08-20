@@ -1,0 +1,182 @@
+[
+  {
+    "id": "enroll-request-ok",
+    "message": "enroll-request",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/enroll",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"0410-6105-0R3G-G28A-1C60-T3GF\",\"pubkey\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "{\"handle\":\"ih_041061050R3GG28A\",\"v\":1}\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "rand_hex": "0102030405060708090a"
+    }
+  },
+  {
+    "id": "enroll-response-ok",
+    "message": "enroll-response",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/enroll",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"0410-6105-0R3G-G28A-1C60-T3GF\",\"pubkey\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "{\"handle\":\"ih_041061050R3GG28A\",\"v\":1}\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "rand_hex": "0102030405060708090a"
+    }
+  },
+  {
+    "id": "challenge-request-ok",
+    "message": "challenge-request",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/challenge",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "{\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"v\":1}\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  {
+    "id": "challenge-response-ok",
+    "message": "challenge-response",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/challenge",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "{\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"v\":1}\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  {
+    "id": "verify-request-ok",
+    "message": "verify-request",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/verify",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+    },
+    "response": {
+      "status": 204
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ]
+    }
+  },
+  {
+    "id": "verify-response-ok",
+    "message": "verify-response",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/verify",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+    },
+    "response": {
+      "status": 204
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ]
+    }
+  }
+]

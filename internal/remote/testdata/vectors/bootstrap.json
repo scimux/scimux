@@ -1,0 +1,85 @@
+[
+  {
+    "id": "p-page",
+    "message": "p-page",
+    "comment": "Declarative until P5 registers GET /p. Body is §13.1.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "text/html; charset=utf-8",
+        "Digest": "sha-256=:2tC4m+G4mByGgghU5zDJKhmXxnMu8gJZJ9W44YQ9Bis=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "<!doctype html>\n<meta charset=utf-8>\n<meta name=viewport content=\"width=device-width,initial-scale=1\">\n<title>pair</title>\n<link rel=stylesheet href=\"/p/boot.css\">\n<form id=pair>\n<label>pairing code <input name=code autocomplete=one-time-code></label>\n<button type=submit>continue</button>\n</form>\n<script src=\"/p/boot.js\"></script>\n"
+    }
+  },
+  {
+    "id": "p-boot-js",
+    "message": "p-boot-js",
+    "comment": "Declarative until P5 registers GET /p/boot.js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/boot.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:Nfs9UF2WBas13kcbL7bNUg1lLIa8w+BiH06L8a4qGD0=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "document.documentElement.dataset.boot=\"1\";\n"
+    }
+  },
+  {
+    "id": "p-boot-css",
+    "message": "p-boot-css",
+    "comment": "Declarative until P5 registers GET /p/boot.css.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/boot.css"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "text/css; charset=utf-8",
+        "Digest": "sha-256=:+tpv2NzjwUphpvD/qz6NPHcWFeZwW0/aGPIzmqfSPBE=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": ":root{font:18px/1.4 system-ui,sans-serif}\nbody{margin:2rem auto;max-width:28rem}\n"
+    }
+  },
+  {
+    "id": "p-rejection",
+    "message": "p-rejection",
+    "kind": "rejection",
+    "request": {
+      "method": "GET",
+      "path": "/p/not-in-inventory"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    }
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "health-response",
+    "message": "health-response",
+    "comment": "Declarative zero-state allowlist. GET /health is not on the public mux, so this is never replayed through newAdmissionHandler.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/health"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "{\"ready\":true,\"version\":\"test\",\"waits\":0,\"waits_max\":0,\"pairing_waits\":0,\"pairing_waits_max\":0,\"accepted\":0,\"rejected\":0,\"rate_limited\":0,\"envelope_bytes\":0,\"replay_generation\":1}\n"
+    }
+  }
+]

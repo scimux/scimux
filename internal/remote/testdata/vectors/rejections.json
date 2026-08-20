@@ -1,0 +1,297 @@
+[
+  {
+    "id": "constant-rejection-get-enroll",
+    "message": "constant-rejection",
+    "kind": "rejection",
+    "request": {
+      "method": "GET",
+      "path": "/v1/enroll"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    }
+  },
+  {
+    "id": "rejection-unknown-code",
+    "message": "rejection-unknown",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/enroll",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"0000-0000-0000-0000-0000-0000\",\"pubkey\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\"}"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    }
+  },
+  {
+    "id": "rejection-malformed-json",
+    "message": "rejection-malformed",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/enroll",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    }
+  },
+  {
+    "id": "rejection-unauthorised-badsig",
+    "message": "rejection-unauthorised",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/verify",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444\"}"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  {
+    "id": "rejection-replay-verify",
+    "message": "rejection-replay",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/verify",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/verify",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+        }
+      ]
+    }
+  },
+  {
+    "id": "rejection-stale-challenge",
+    "message": "rejection-stale",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/verify",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "advance": "31s"
+    }
+  },
+  {
+    "id": "rejection-revoked-handle",
+    "message": "rejection-revoked",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/challenge",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "revoke": true
+    }
+  },
+  {
+    "id": "rejection-method-get-enroll",
+    "message": "rejection-method",
+    "kind": "rejection",
+    "request": {
+      "method": "GET",
+      "path": "/v1/enroll"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    }
+  },
+  {
+    "id": "rejection-content-length-chunked",
+    "message": "rejection-content-length",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/enroll",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"0410-6105-0R3G-G28A-1C60-T3GF\",\"pubkey\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\"}",
+      "content_length": -1
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f"
+    }
+  },
+  {
+    "id": "rejection-version-zero",
+    "message": "rejection-version",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/enroll",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":0,\"code\":\"0410-6105-0R3G-G28A-1C60-T3GF\",\"pubkey\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\"}"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f"
+    }
+  },
+  {
+    "id": "rejection-unclean-path-dotdot",
+    "message": "rejection-unclean-path",
+    "kind": "rejection",
+    "request": {
+      "method": "POST",
+      "path": "/v1/envelope/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/../cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "headers": {
+        "Content-Type": "application/octet-stream"
+      },
+      "body_utf8": "sealed"
+    },
+    "response": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "not found\n"
+    }
+  }
+]
