@@ -56,6 +56,9 @@ var argvSubcommands = []string{
 var argvFlags = []string{
 	"addr",
 	"data",
+	"invite-file",
+	"invite-stdin",
+	"remote",
 	"socket",
 	"trusted-host",
 }

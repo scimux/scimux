@@ -542,6 +542,9 @@ type app struct {
 	// configured from -addr and -trusted-host. Nil means the default
 	// loopback policy (127.0.0.1), matching the shipped -addr default.
 	requestPolicy *requestPolicy
+	// hostedRemote, when set, is the laptop remote-access client whose
+	// status is projected on GET /api/state. Nil without --remote.
+	hostedRemote interface{ HostedStatus() string }
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:

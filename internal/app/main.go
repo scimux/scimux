@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/remote"
 )
 
 // version is set by the command package, whose symbol is stamped at build time
@@ -156,29 +158,38 @@ func Run() {
 	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
+	doRemote := flag.Bool("remote", false, "enable remote access")
+	inviteFile := flag.String("invite-file", "", "read invite from a 0600 owner-only file")
+	inviteStdin := flag.Bool("invite-stdin", false, "read invite from stdin")
 	var trustedHosts stringList
 	flag.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	flag.Parse()
 
-	if err := prepareDataDir(*data); err != nil {
+	cmd := &Command{
+		Args:   os.Args,
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+		Home:   home,
+		Config: remote.Config{
+			DataDir:     *data,
+			Remote:      *doRemote,
+			InviteFile:  *inviteFile,
+			InviteStdin: *inviteStdin,
+			Stdin:       os.Stdin,
+			Stdout:      os.Stdout,
+			Stderr:      os.Stderr,
+		},
+	}
+	if err := cmd.Run(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
-	a, err := NewApp(Config{
-		Home:    home,
-		DataDir: *data,
-		Socket:  *socket,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
+	a := cmd.application
+	if a == nil {
+		fmt.Fprintln(os.Stderr, "scimux: startup produced no application")
 		os.Exit(1)
 	}
-	policy, err := newRequestPolicy(*addr, trustedHosts)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "scimux: host policy:", err)
-		os.Exit(1)
-	}
-	a.requestPolicy = policy
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
 	a.warmStartup()
 	status.Done()
@@ -221,10 +232,14 @@ func Run() {
 		a.refreshClaudeModels(ctx)
 	}()
 
-	handler, err := NewHandler(a, webFS)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
+	handler := cmd.Handler()
+	if handler == nil {
+		h, err := NewHandler(a, webFS)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scimux:", err)
+			os.Exit(1)
+		}
+		handler = h
 	}
 
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
