@@ -686,9 +686,10 @@ func (c *Client) RegisterDevice(ctx context.Context, rec DeviceRecord) (DeviceRe
 			return err
 		}
 		out = DeviceRecord{
-			ID:     rec.ID,
-			RID:    rid,
-			PubKey: append([]byte(nil), rec.PubKey...),
+			ID:      rec.ID,
+			RID:     rid,
+			PubKey:  append([]byte(nil), rec.PubKey...),
+			ECDHPub: append([]byte(nil), rec.ECDHPub...),
 		}
 		c.devices = append(c.devices, out)
 		if err := c.persist(c.snapshotState()); err != nil {
@@ -1287,6 +1288,10 @@ func (c *Client) liveRIDs() map[string]bool {
 }
 
 func (c *Client) waitLoopRID(ctx context.Context, rid string) {
+	// reply is the sealed answer owed to this device, carried out on the next
+	// wait. It survives a failed post so a transport blip does not strand a
+	// device that is holding its envelope POST open.
+	var reply []byte
 	for {
 		if ctx.Err() != nil {
 			return
@@ -1294,9 +1299,24 @@ func (c *Client) waitLoopRID(ctx context.Context, rid string) {
 		if !c.liveRIDs()[rid] {
 			return
 		}
-		err := c.postWaitRID(ctx, rid)
+		env, err := c.postWaitRID(ctx, rid, reply)
 		if ctx.Err() != nil {
 			return
+		}
+		if err == nil {
+			// Delivered. A failed post may not have reached the rendezvous, so
+			// the reply is held for the next attempt rather than dropped.
+			reply = nil
+		}
+		if len(env) > 0 {
+			// A device is calling. Answering is best-effort by design: an
+			// envelope that does not open, or a device with no pairing key on
+			// record, must leave the loop polling and send nothing back.
+			if out, aerr := c.answerSessionEnvelope(ctx, rid, env); aerr == nil {
+				reply = out
+			} else {
+				c.noteWaitResult(aerr)
+			}
 		}
 		if classOfErr(err) == ClassRevoked {
 			c.applyRevoked()
@@ -1362,11 +1382,18 @@ func (c *Client) applyRevoked() {
 	c.kickWaiters()
 }
 
-func (c *Client) postWaitRID(ctx context.Context, rid string) error {
+// postWaitRID performs one /v1/wait for rid, optionally carrying a sealed
+// reply for the device, and returns the sealed envelope the rendezvous served
+// (nil on a 204).
+//
+// The envelope used to be read and discarded here. It is returned now because
+// it is the only thing the wait exists to fetch: dropping it made the whole
+// loop a no-op with correct challenge rotation.
+func (c *Client) postWaitRID(ctx context.Context, rid string, reply []byte) ([]byte, error) {
 	c.mu.Lock()
 	if c.st.Handle == "" || len(c.priv) != ed25519.PrivateKeySize || !validRID(rid) {
 		c.mu.Unlock()
-		return errNoDeviceWait
+		return nil, errNoDeviceWait
 	}
 	handle := c.st.Handle
 	priv := append(ed25519.PrivateKey(nil), c.priv...)
@@ -1378,57 +1405,65 @@ func (c *Client) postWaitRID(ctx context.Context, rid string) error {
 		got, err := c.postChallenge(ctx)
 		if err != nil {
 			c.clearWaitChalRID(rid)
-			return err
+			return nil, err
 		}
 		chal = got
 	}
 	msg := buildAuthMessage(origin, ProtocolVersion, "/v1/wait", handle, chal)
 	sig := ed25519.Sign(priv, msg)
-	body, _ := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"v":         c.requestV(),
 		"handle":    handle,
 		"challenge": hex.EncodeToString(chal),
 		"sig":       hex.EncodeToString(sig),
 		"id":        rid,
 		"max_ms":    WaitDefaultMaxMS,
-	})
+	}
+	// A sealed answer rides out on an ordinary wait. The signature above is
+	// unchanged by its presence — the rendezvous vectors carry a
+	// byte-identical sig for wait-response-envelope and envelope-reply-on-wait
+	// — so reply is outside the signed message, exactly like max_ms.
+	if len(reply) > 0 {
+		fields["reply"] = hex.EncodeToString(reply)
+	}
+	body, _ := json.Marshal(fields)
 	resp, err := c.postWaitJSON(ctx, body)
 	if err != nil {
 		c.clearWaitChalRID(rid)
-		return err
+		return nil, err
 	}
 	raw, boundErr := readBounded(resp.Body, waitBodyMax)
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		c.clearWaitChalRID(rid)
-		return classError(ClassUnavailable, "wait", "rendezvous rejected the wait; retrying with a fresh challenge")
+		return nil, classError(ClassUnavailable, "wait", "rendezvous rejected the wait; retrying with a fresh challenge")
 	}
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		c.clearWaitChalRID(rid)
-		return fmt.Errorf("wait status %d", resp.StatusCode)
+		return nil, fmt.Errorf("wait status %d", resp.StatusCode)
 	}
 	if boundErr != nil {
 		c.clearWaitChalRID(rid)
-		return boundErr
+		return nil, boundErr
 	}
 	if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
 		c.clearWaitChalRID(rid)
-		return fmt.Errorf("wait missing nosniff")
+		return nil, fmt.Errorf("wait missing nosniff")
 	}
 	next, err := hex.DecodeString(resp.Header.Get("X-Rv-Challenge"))
 	if err != nil || len(next) != 32 {
 		c.clearWaitChalRID(rid)
-		return fmt.Errorf("wait missing next challenge")
+		return nil, fmt.Errorf("wait missing next challenge")
 	}
 	if resp.StatusCode == http.StatusNoContent && len(raw) != 0 {
 		c.clearWaitChalRID(rid)
-		return fmt.Errorf("wait nonempty 204")
+		return nil, fmt.Errorf("wait nonempty 204")
 	}
 	if resp.StatusCode == http.StatusOK {
 		ct := resp.Header.Get("Content-Type")
 		if !acceptMediaType(ct, "application/octet-stream") {
 			c.clearWaitChalRID(rid)
-			return fmt.Errorf("wait unexpected content type")
+			return nil, fmt.Errorf("wait unexpected content type")
 		}
 	}
 	c.mu.Lock()
@@ -1437,7 +1472,7 @@ func (c *Client) postWaitRID(ctx context.Context, rid string) error {
 	}
 	c.waitChals[rid] = next
 	c.mu.Unlock()
-	return nil
+	return raw, nil
 }
 
 func (c *Client) postWaitJSON(ctx context.Context, body []byte) (*http.Response, error) {
