@@ -50,6 +50,13 @@ type Client struct {
 	lockMu       sync.Mutex
 	lockRefs     int
 	devWake      chan struct{}
+
+	// pairing is this client's FR-11/FR-12 pairing state (pairing.go). It
+	// hangs off the client rather than a package-level registry so it dies
+	// with the client it belongs to; pairingOnce covers a zero-value Client
+	// that did not come from NewClient.
+	pairingOnce sync.Once
+	pairing     *pairingRuntime
 }
 
 var errNoDeviceWait = fmt.Errorf("remote: no registered device to wait")
@@ -66,6 +73,7 @@ func NewClient(cfg Config) *Client {
 		waitChals: map[string][]byte{},
 		devWake:   make(chan struct{}, 1),
 		inviteFD:  -1,
+		pairing:   newPairingRuntime(),
 	}
 }
 

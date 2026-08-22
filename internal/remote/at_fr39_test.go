@@ -1,0 +1,185 @@
+package remote
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"sync"
+	"testing"
+)
+
+// AT-FR-39-b: Simultaneous attacker and legitimate offers resolve to the
+// legitimate one or to failure — never to the attacker — and
+// role/reflection attacks are rejected.
+func TestAT_FR_39_b_AttackerNeverWinsRoleAndReflectionRejected(t *testing.T) {
+	const at = "AT-FR-39-b"
+	c, _, ctx, cancel := s7Enrolled(t)
+	defer cancel()
+
+	code, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatalf("%s: MintPairingCode: %v", at, err)
+	}
+
+	_, legitPub := s7MustP256(t)
+	_, atkPub := s7MustP256(t)
+	if bytes.Equal(legitPub, atkPub) {
+		t.Fatalf("%s: fixture key material collided", at)
+	}
+	legitNonce := bytes.Repeat([]byte{0x11}, 32)
+	atkNonce := bytes.Repeat([]byte{0x22}, 32)
+	legitEnv, err := json.Marshal(map[string]any{
+		"v": 1, "type": "pair-offer", "device_pub": hex.EncodeToString(legitPub),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	atkEnv, err := json.Marshal(map[string]any{
+		"v": 1, "type": "pair-offer", "device_pub": hex.EncodeToString(atkPub),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same code, same device id and label; the offers differ only in key material.
+	legit := PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", DevicePub: legitPub, OfferNonce: legitNonce, Envelope: legitEnv}
+	attacker := PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", DevicePub: atkPub, OfferNonce: atkNonce, Envelope: atkEnv}
+
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = c.AcceptPairingOffer(ctx, legit)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = c.AcceptPairingOffer(ctx, attacker)
+	}()
+	wg.Wait()
+	for i, e := range errs {
+		if errors.Is(e, ErrUnimplemented) {
+			t.Fatalf("%s: AcceptPairingOffer[%d]: %v", at, i, e)
+		}
+	}
+
+	dev, err := c.CompletePairing(ctx, code.Code, true, true)
+	if err != nil {
+		if errors.Is(err, ErrUnimplemented) {
+			t.Fatalf("%s: CompletePairing: %v", at, err)
+		}
+		// Failure is allowed. Completing as the attacker is not.
+	} else if bytes.Equal(dev.PubKey, atkPub) {
+		t.Fatalf("%s: attacker key material won", at)
+	} else if !bytes.Equal(dev.PubKey, legitPub) {
+		t.Fatalf("%s: winner pub is not the legitimate key material", at)
+	}
+
+	x, err := c.PairingECDHPublic()
+	if err != nil {
+		t.Fatalf("%s: PairingECDHPublic: %v", at, err)
+	}
+	if len(x) == 0 {
+		t.Fatalf("%s: laptop pairing public key is empty", at)
+	}
+	roleEnv, err := json.Marshal(map[string]any{
+		"v": 1, "type": "pair-reply", "install_pub": hex.EncodeToString(x),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roleCode, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatalf("%s: mint role-swap code: %v", at, err)
+	}
+	_, rolePub := s7MustP256(t)
+	role := PairingOffer{Code: roleCode.Code, DeviceID: "phone", Label: "Phone", DevicePub: rolePub, OfferNonce: bytes.Repeat([]byte{0x31}, 32), Envelope: roleEnv}
+	requireClass(t, c.AcceptPairingOffer(ctx, role), ClassPairRole)
+
+	reflCode, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatalf("%s: mint reflection code: %v", at, err)
+	}
+	refl := PairingOffer{Code: reflCode.Code, DeviceID: "phone", Label: "Phone", DevicePub: append([]byte(nil), x...), OfferNonce: bytes.Repeat([]byte{0x33}, 32), Envelope: []byte(`{"v":1,"type":"pair-offer"}`)}
+	requireClass(t, c.AcceptPairingOffer(ctx, refl), ClassPairReflection)
+}
+
+// AT-FR-39-c: The single-use moment is exact: a code is consumed at the
+// specified transition (laptop reply / both-sided confirmation, or TTL)
+// and not before — not at offer, not at cancel — proven by driving a
+// failure just either side of it.
+func TestAT_FR_39_c_SingleUseMomentExact(t *testing.T) {
+	const at = "AT-FR-39-c"
+	c, clk, ctx, cancel := s7Enrolled(t)
+	defer cancel()
+
+	code, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatalf("%s: MintPairingCode: %v", at, err)
+	}
+
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone"}); err != nil {
+		t.Fatalf("%s: offer must not consume: %v", at, err)
+	}
+	consumed, err := c.PairingConsumed(code.Code)
+	if err != nil {
+		t.Fatalf("%s: PairingConsumed after offer: %v", at, err)
+	}
+	if consumed {
+		t.Fatalf("%s: code consumed at offer; the transition is reply or TTL", at)
+	}
+
+	if err := c.CancelPairing(ctx, code.Code); err != nil {
+		t.Fatalf("%s: cancel: %v", at, err)
+	}
+	consumed, err = c.PairingConsumed(code.Code)
+	if err != nil {
+		t.Fatalf("%s: PairingConsumed after cancel: %v", at, err)
+	}
+	if consumed {
+		t.Fatalf("%s: code consumed at cancel", at)
+	}
+
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone"}); err != nil {
+		t.Fatalf("%s: reusable after cancel: %v", at, err)
+	}
+
+	// Just before confirmation: still unconsumed.
+	consumed, err = c.PairingConsumed(code.Code)
+	if err != nil {
+		t.Fatalf("%s: PairingConsumed before confirm: %v", at, err)
+	}
+	if consumed {
+		t.Fatalf("%s: consumed before the reply/confirm transition", at)
+	}
+
+	_, err = c.CompletePairing(ctx, code.Code, true, true)
+	if err != nil {
+		t.Fatalf("%s: confirm: %v", at, err)
+	}
+	consumed, err = c.PairingConsumed(code.Code)
+	if err != nil {
+		t.Fatalf("%s: PairingConsumed after confirm: %v", at, err)
+	}
+	if !consumed {
+		t.Fatalf("%s: code not consumed at the reply/confirm transition", at)
+	}
+	_, err = c.CompletePairing(ctx, code.Code, true, true)
+	requireClass(t, err, ClassPairConsumed)
+
+	// TTL path: a fresh code, advance the clock, consumed-by-expiry.
+	code2, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatalf("%s: mint 2: %v", at, err)
+	}
+	clk.Advance(PairingTTL)
+	consumed, err = c.PairingConsumed(code2.Code)
+	if err != nil {
+		t.Fatalf("%s: PairingConsumed after TTL: %v", at, err)
+	}
+	if !consumed {
+		t.Fatalf("%s: TTL did not consume the code", at)
+	}
+	err = c.AcceptPairingOffer(ctx, PairingOffer{Code: code2.Code, DeviceID: "late"})
+	requireClass(t, err, ClassPairExpired)
+}
