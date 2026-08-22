@@ -50,15 +50,40 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
     typed unions was evaluated and rejected as ~600 lines of ongoing schema
     churn. The tmux/transcript core stays stdlib-only; do not let the SDK (or
     any other module) leak beyond `internal/acp/`.
-  - **Pending exception #2 (not yet taken):** `github.com/pion/...` for the
-    WebRTC transport is scoped to `internal/remote/` only. No pion module is
-    in `go.mod` today. Adding one is a maintainer decision belonging to
-    phase S6; this note is not permission to take it. The scope is
+  - **Approved exception #2 (taken 2026-08-22):** `github.com/pion/...` for
+    the WebRTC transport is a deliberate, maintainer-approved dependency
+    **scoped to `internal/remote/` only**. The decision is made and is not to
+    be relitigated: a browser will only speak WebRTC for a peer-to-peer data
+    channel, so the laptop end must speak the same ICE/DTLS/SCTP stack, and
+    hand-rolling that in stdlib was rejected as neither realistic nor safe to
+    maintain. The module **landed in S6** (2026-08-22) as a single direct
+    require, `github.com/pion/webrtc/v4`; its twenty-odd siblings are
+    `// indirect` and are transitive closure, not further decisions. The one
+    direct path is listed in `allowedModuleRequires`
+    (`internal/app/remote_boundary_guard_test.go`), which is the mechanical
+    half of the approval — adding another line there is a new exception, not
+    an upgrade.
+    Nothing outside `internal/remote/` may import it, ever. The scope is
     mechanically enforced: `internal/app/remote_boundary_guard_test.go`
     asserts over the module import graph that no package outside
     `internal/remote/` imports `github.com/pion/...`. That guard was written
     while it is vacuously true, precisely so it can never be "added along
     with the dependency".
+  - **Packaging, decided 2026-08-22 — one binary, unconditionally.** pion
+    ships in the single default binary. There is **no build tag, no
+    `remote`/`noremote` variant, and no second artifact**; a two-binary split
+    was considered specifically to keep a pion-free default and was
+    **rejected** — one static binary for everything is the product.
+    Consequences to accept rather than relitigate: pion is compiled into every
+    build, including for users who never pair a device; because remote is a
+    *runtime* switch and not a build-time one, the linker cannot dead-strip
+    it; and the module count rises from 2 to the whole pion family. What does
+    not change: pion is pure Go, so `CGO_ENABLED=0` and the FreeBSD static
+    build keep working, and `go build -o scimux ./cmd/scimux` stays the only
+    build command. Do not reintroduce build tags to "offer a slim build" —
+    that is the rejected option, not an optimisation. The import guard above
+    stays in force regardless: approving the dependency widened *what* may be
+    imported, never *where it may be imported from*.
 - **Snapshot over stream.** Output is read via `tmux capture-pane -p`
   snapshots and via the transcript JSONL files the agent CLIs write
   themselves. Never parse the terminal byte stream, never use tmux control

@@ -30,10 +30,20 @@ import (
 
 // The binary carries its own legal notices (MPL-2.0 §3.2 asks executable
 // distributions to say where source and license live; the About sheet does).
+//
+// The set below is every module linked into the binary, not every module in
+// go.mod: pion is one direct require that pulls a family of transitive ones,
+// and a notice that named only the require would under-report what ships.
+// Regenerate from `go list -deps ./cmd/scimux` if the transport's dependency
+// set changes.
 var (
-	ownLicense = mustEmbeddedLicense("scimux.LICENSE")
-	acpLicense = mustEmbeddedLicense("acp-go-sdk.LICENSE")
-	goLicense  = mustEmbeddedLicense("go.LICENSE")
+	ownLicense     = mustEmbeddedLicense("scimux.LICENSE")
+	acpLicense     = mustEmbeddedLicense("acp-go-sdk.LICENSE")
+	goLicense      = mustEmbeddedLicense("go.LICENSE")
+	pionLicense    = mustEmbeddedLicense("pion.LICENSE")
+	golangXLicense = mustEmbeddedLicense("golang-x.LICENSE")
+	uuidLicense    = mustEmbeddedLicense("uuid.LICENSE")
+	anetLicense    = mustEmbeddedLicense("anet.LICENSE")
 )
 
 func mustEmbeddedLicense(name string) string {
@@ -46,9 +56,13 @@ func mustEmbeddedLicense(name string) string {
 
 func handleLicenses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{
-		"scimux": ownLicense,
-		"acp":    acpLicense,
-		"go":     goLicense,
+		"scimux":  ownLicense,
+		"acp":     acpLicense,
+		"go":      goLicense,
+		"pion":    pionLicense,
+		"golangx": golangXLicense,
+		"uuid":    uuidLicense,
+		"anet":    anetLicense,
 	})
 }
 

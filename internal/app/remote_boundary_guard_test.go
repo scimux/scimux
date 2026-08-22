@@ -32,7 +32,7 @@ const remoteBoundaryPrefix = "internal/remote"
 
 // confinedModules are third-party module paths that may appear in the tree
 // only under a named directory. Both scimux dependency exceptions live here:
-// acp-go-sdk (approved, in use) and pion (approved, not yet taken).
+// acp-go-sdk (approved, in use) and pion (approved 2026-08-22, lands in S6).
 //
 // AGENTS.md is the prose statement of these; this is the mechanical one.
 var confinedModules = map[string]string{
@@ -40,12 +40,18 @@ var confinedModules = map[string]string{
 	"github.com/pion/":            remoteBoundaryPrefix,
 }
 
-// allowedModuleRequires is every module path go.mod may require. pion is
-// deliberately absent: it becomes legal when S6 lands the maintainer decision
-// and the AGENTS.md amendment, and adding it here is that decision's mechanical
-// half. Standard-library-only is the invariant; this list is the exception set.
+// allowedModuleRequires is every module path go.mod may require directly.
+// Standard-library-only is the invariant; this list is the exception set.
+//
+// pion joined it in S6, which is the mechanical half of the maintainer
+// decision of 2026-08-22. Only the one module scimux imports is here:
+// github.com/pion/webrtc/v4 pulls in twenty-odd siblings, but those are
+// `// indirect` — transitive closure, not decisions — and the loop below
+// skips them. The confinement rule above is unaffected: approving pion
+// widened what may be imported, never from where.
 var allowedModuleRequires = []string{
 	"github.com/coder/acp-go-sdk",
+	"github.com/pion/webrtc/v4",
 }
 
 func repoRootFromTest(t *testing.T) string {
@@ -176,6 +182,14 @@ func TestGoModRequiresOnlyApprovedModules(t *testing.T) {
 	inBlock := false
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
+		// Indirect requirements are transitive closure, not a decision; the
+		// invariant is about direct dependencies. Detect the marker on the raw
+		// line: stripping comments first would delete the very text the
+		// indirect check below looks for, so every transitive module would be
+		// reported as a deliberate one. That bug shipped unnoticed at S0
+		// because go.mod had no indirect block at all until pion arrived — the
+		// hazard this file's own header warns about, in a second form.
+		indirect := strings.Contains(line, "// indirect")
 		if i := strings.Index(line, "//"); i >= 0 {
 			line = strings.TrimSpace(line[:i])
 		}
@@ -198,9 +212,7 @@ func TestGoModRequiresOnlyApprovedModules(t *testing.T) {
 		if len(fields) < 2 {
 			continue
 		}
-		// Indirect requirements are transitive closure, not a decision; the
-		// invariant is about direct dependencies.
-		if strings.Contains(line, "// indirect") {
+		if indirect {
 			continue
 		}
 		got = append(got, fields[0])
@@ -212,8 +224,8 @@ func TestGoModRequiresOnlyApprovedModules(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("go.mod requires %v, approved set is %v.\n"+
 			"scimux is standard-library-only with named exceptions (AGENTS.md). "+
-			"Adding a module is a maintainer decision: pion is approved in principle "+
-			"for S6 but not yet taken, and anything else needs a new exception.",
+			"Adding a module is a maintainer decision: pion is approved (2026-08-22) "+
+			"and lands in S6, and anything else needs a new exception.",
 			got, want)
 	}
 }
