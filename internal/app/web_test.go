@@ -693,7 +693,7 @@ func TestPreviewView(t *testing.T) {
 		"function openPreview(",
 		"function closePreview(",
 		"function renderPreview(",
-		`fetch("/api/preview?uid="`,
+		`api("/api/preview?uid="`,
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("preview implementation missing %q", want)
@@ -708,8 +708,8 @@ func TestPreviewView(t *testing.T) {
 	}
 	// A live chat's assets resolve here exactly as in the chat — same node, same
 	// asset map — or the same turn would read "unavailable" one tap apart.
-	if !strings.Contains(app, `splitAssetRefs(t.text || "", previewNode, d.assets || {}, { iconFile: ICON_FILE })`) {
-		t.Error("preview asset projection must pass the node, its assets, and ICON_FILE")
+	if !strings.Contains(app, `splitAssetRefs(t.text || "", previewNode, d.assets || {}, { iconFile: ICON_FILE, assetURL })`) {
+		t.Error("preview asset projection must pass the node, its assets, ICON_FILE, and assetURL")
 	}
 }
 

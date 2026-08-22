@@ -109,11 +109,14 @@ export function stateGetRequest(stateEtag) {
  * All DOM, network, timer, and feature effects are injected.
  */
 export function createPollingFeature(deps = {}) {
+  if (typeof deps.fetchImpl !== "function") {
+    throw new Error("createPollingFeature: fetchImpl is required");
+  }
   const {
     document: doc = globalThis.document,
     window: win = globalThis.window,
     storage,
-    fetchImpl = globalThis.fetch?.bind(globalThis),
+    fetchImpl,
     csrf = "",
     setTimeout: setTimeoutImpl = globalThis.setTimeout?.bind(globalThis),
     clearTimeout: clearTimeoutImpl = globalThis.clearTimeout?.bind(globalThis),
@@ -282,7 +285,8 @@ export function createPollingFeature(deps = {}) {
       let r;
       try {
         const req = stateGetRequest(stateEtag);
-        r = await fetchImpl(req.path, req.opts);
+        /* A 2s ETag poll must not be served from the HTTP cache. */
+        r = await fetchImpl(req.path, { ...req.opts, cache: "no-store" });
       } catch {
         if (destroyed) return;
         setHostOnline(false);

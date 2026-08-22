@@ -1723,6 +1723,7 @@ function makeFeature(overrides = {}){
     CSS: { escape: s => String(s).replace(/"/g, '\\"') },
     api,
     apiConditionalGet,
+    assetURL: path => path,
     nodes: () => nodes,
     sel: () => sel,
     selGen: () => selGen,
@@ -3453,6 +3454,7 @@ function makePeekSkipFeature(){
     document: peekGrowingDocument(roots.msgs),
     window: {},
     CSS: { escape: s => String(s) },
+    assetURL: path => path,
     api: async (path) => {
       if (path.includes("/peek")) return paneText;
       if (path.includes("/chat")) return {
