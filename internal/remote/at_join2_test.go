@@ -280,7 +280,7 @@ func TestLiveSessionRefusalIsNotATimeout(t *testing.T) {
 	bad := dev.offer
 	bad.Fingerprint = tamperedFingerprint
 
-	s, _, err := acceptSessionOffer(ctx, bad, tunnelEcho(nil))
+	s, _, err := acceptSessionOffer(ctx, bad, tunnelEcho(nil), nil)
 	if s != nil {
 		_ = s.Close()
 		t.Fatal("a substituted fingerprint produced a retained session")

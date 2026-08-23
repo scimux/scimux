@@ -103,7 +103,7 @@ func (c *Client) answerSessionEnvelope(ctx context.Context, rid string, sealed [
 	// Join 2: the answer keeps its peer. acceptSessionOffer applies the FR-16
 	// fingerprint binding first, so a rendezvous that rewrote the SDP copy is
 	// refused here rather than dialled.
-	session, answer, err := acceptSessionOffer(ctx, offer, handler)
+	session, answer, err := acceptSessionOffer(ctx, offer, handler, iceServersFromOrigin(origin))
 	if err != nil {
 		return nil, err
 	}

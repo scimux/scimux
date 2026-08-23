@@ -26,7 +26,9 @@ package remote
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -40,12 +42,44 @@ import (
 // It is generous because it covers ICE on a bad network, not a protocol step.
 const sessionArrivalDeadline = 60 * time.Second
 
+// stunServicePort is the UDP port the rendezvous Binding responder listens
+// on (rendezvous-v1 §17). The HTTP origin's port is discarded; this is the
+// only port the answering path ever gathers against.
+const stunServicePort = "3478"
+
+// iceServersFromOrigin derives the STUN server the answering path gathers
+// against from the rendezvous origin the client is already configured to
+// talk to. There is no ICE-server discovery endpoint: take the host, drop
+// any HTTP port, and use UDP 3478. An origin that will not parse, or has
+// no host, yields no servers rather than an error — a session that might
+// still work over host candidates is better than one refused outright.
+func iceServersFromOrigin(origin string) []webrtc.ICEServer {
+	if origin == "" {
+		origin = DefaultOrigin
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil
+	}
+	return []webrtc.ICEServer{{
+		URLs: []string{"stun:" + net.JoinHostPort(host, stunServicePort)},
+	}}
+}
+
 // acceptSessionOffer answers a device's §12.1 offer and retains the peer.
+//
+// iceServers is the STUN configuration derived from the rendezvous origin;
+// this is the only production peer connection that gathers against one,
+// because it is the path that has to reach a device on another network.
 //
 // The returned Session is the laptop half only: the far end is the device, so
 // there is no client-side peer and no RoundTrip. The returned inner is the
 // answer to seal back through the rendezvous.
-func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Handler) (*Session, SessionInner, error) {
+func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Handler, iceServers []webrtc.ICEServer) (*Session, SessionInner, error) {
 	if handler == nil {
 		return nil, SessionInner{}, classError(ClassUnavailable, "accept",
 			"this installation serves no tunnel, so a session offer cannot be answered")
@@ -58,7 +92,7 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 		return nil, SessionInner{}, err
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return nil, SessionInner{}, classErrorf(ClassHandshake, "accept", "could not create a peer connection", err)
 	}
