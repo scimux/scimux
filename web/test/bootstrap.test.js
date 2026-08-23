@@ -429,3 +429,145 @@ test("AT-FR-40-d: the suite runs against the repository files and the manifest c
     }
   }
 });
+
+/* AT-FR-15a-b — the bootstrap half of "no service worker on any origin, in
+ * any mode".
+ *
+ * AT-FR-15a-a (web/test/at-fr15.test.js) already proves this for the page:
+ * it scans every served module statically and drives app.js under a
+ * register trap on both a localhost and a channel transport. What it cannot
+ * reach is the S8 entry path, which did not exist when it was written. On a
+ * remote origin the bootstrap is the FIRST code that runs, before app.js is
+ * so much as minted, so a registration there would happen entirely outside
+ * that test's dynamic half.
+ *
+ * Two assertions, deliberately of different kinds:
+ *
+ *   1. The bootstrap never reads `navigator` at all. Trapping only
+ *      `serviceWorker.register` would pass a bootstrap that stashed
+ *      `navigator.serviceWorker` for later, or reached CacheStorage instead;
+ *      asserting the whole object is untouched says the injected seams are
+ *      the only platform this function has. It is also why the trap records
+ *      reads rather than throwing on them — a throw proves nothing about a
+ *      property nobody asked for.
+ *
+ *   2. Every module the bootstrap actually mints a blob for is free of
+ *      service-worker and cache-storage references. This is keyed on the
+ *      manifest graph, not on a directory listing: the manifest is FR-40's
+ *      authority on what gets executed, so a module entering the graph from
+ *      anywhere else is still scanned here.
+ *
+ * The origin is varied across a localhost and a remote https host to make the
+ * "any origin" half literal, even though the bootstrap should be — and is —
+ * indifferent to it. If it ever stops being indifferent, that is the finding.
+ */
+
+const SERVICE_WORKER_RE = /\bserviceWorker\b|\bServiceWorkerRegistration\b|\bcaches\s*\.\s*(?:open|match|keys|has|delete)\b/;
+
+function installNavigatorTrap() {
+  const reads = [];
+  const swCalls = [];
+  const serviceWorker = new Proxy({
+    register(scriptURL, options) {
+      swCalls.push({ scriptURL, options });
+      return Promise.resolve({});
+    },
+  }, {
+    get(target, prop) {
+      reads.push("navigator.serviceWorker." + String(prop));
+      return Reflect.get(target, prop);
+    },
+  });
+
+  const navigator = new Proxy({ serviceWorker, userAgent: "at-fr-15a-b" }, {
+    get(target, prop) {
+      reads.push("navigator." + String(prop));
+      return Reflect.get(target, prop);
+    },
+  });
+
+  return { reads, swCalls, navigator };
+}
+
+/* Async by necessity, not by style. A synchronous version restores the real
+ * globals in `finally` as soon as fn() hands back its promise — that is,
+ * before the bootstrap's first await has even resumed — so the trap would be
+ * uninstalled for the entire run and the assertions on it would be vacuous.
+ * This suite caught exactly that: an obfuscated `navigator["service"+"Worker"]`
+ * read passed. Await the work inside the swap. */
+async function withGlobals(values, fn) {
+  const saved = new Map();
+  for (const [name, value] of Object.entries(values)) {
+    saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [name, desc] of saved) {
+      if (desc) Object.defineProperty(globalThis, name, desc);
+      else delete globalThis[name];
+    }
+  }
+}
+
+test("AT-FR-15a-b: the FR-40 bootstrap registers no service worker, on any origin, in any mode", async () => {
+  const at = "AT-FR-15a-b";
+  const inventory = servedFromDisk();
+  const manifest = await laptopManifest(inventory);
+
+  for (const origin of ["http://127.0.0.1:8787", "https://device.example"]) {
+    const trap = installNavigatorTrap();
+    const channel = diskChannel(inventory);
+    const s = seams();
+
+    const result = await withGlobals({
+      navigator: trap.navigator,
+      location: { href: origin + "/", origin },
+    }, () => bootstrap({
+      channel,
+      manifest,
+      createObjectURL: s.createObjectURL,
+      installImportMap: s.installImportMap,
+      importModule: s.importModule,
+    }));
+
+    // Anti-vacuity: a bootstrap that aborted early would touch nothing and
+    // pass every assertion below without having proved anything.
+    if (s.imported.length !== 1) {
+      fail(at, `boot on ${origin} imported ${s.imported.length} entries, want 1 — the run below proves nothing`);
+    }
+    if (!result || !result.entry) {
+      fail(at, `boot on ${origin} returned no entry blob`);
+    }
+
+    if (trap.swCalls.length) {
+      fail(at, `serviceWorker.register was called on ${origin}: ${JSON.stringify(trap.swCalls)}`);
+    }
+    if (trap.reads.length) {
+      fail(at, `boot on ${origin} read the platform navigator (${trap.reads.join(", ")}); ` +
+        "the injected channel/blob/import-map seams are the only platform the bootstrap may use");
+    }
+  }
+
+  // The graph the bootstrap actually executes, keyed on the manifest.
+  const byUrl = new Map(inventory.map(i => [i.url, i]));
+  let scanned = 0;
+  for (const entry of manifest.entries) {
+    if (entry.kind !== "js" && entry.kind !== "index") continue;
+    const item = byUrl.get(entry.url);
+    if (!item) fail(at, `manifest names ${entry.url}, which is not on disk`);
+    const src = readFileSync(item.file, "utf8");
+    scanned += 1;
+    if (SERVICE_WORKER_RE.test(src)) {
+      fail(at, `${entry.url} is in the boot graph and references a service worker or cache storage`);
+    }
+  }
+  if (scanned < 2) {
+    fail(at, `scanned ${scanned} executable graph members; the manifest scan is vacuous`);
+  }
+});
