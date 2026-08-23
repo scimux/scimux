@@ -150,16 +150,15 @@ var reachOpenFindings = map[string]string{
 // them unset is the intended configuration, so no product assignment is
 // expected. Each was checked against its defaulting site.
 var reachConfigDefaults = map[string]bool{
-	"Clock":         true, // client.go:1175 via NewBackoff
-	"RNG":           true, // client.go:1175 via NewBackoff
-	"Rand":          true, // client.go:101
-	"Sys":           true, // invite_file.go:14
-	"Hooks":         true, // client.go:97
-	"Scheduler":     true, // client.go:1172
-	"HTTPClient":    true, // client.go:108
-	"RendezvousURL": true, // persist.go:261
-	"Version":       true, // client.go:121
-	"MinVersion":    true, // client.go:128
+	"Clock":      true, // client.go:1175 via NewBackoff
+	"RNG":        true, // client.go:1175 via NewBackoff
+	"Rand":       true, // client.go:101
+	"Sys":        true, // invite_file.go:14
+	"Hooks":      true, // client.go:97
+	"Scheduler":  true, // client.go:1172
+	"HTTPClient": true, // client.go:108
+	"Version":    true, // client.go:121
+	"MinVersion": true, // client.go:128
 }
 
 // reachConfigSeams are remote.Config fields that exist for tests: fault
@@ -178,7 +177,29 @@ var reachConfigSeams = map[string]bool{
 	"LockHeldFile":            true,
 	"LockReleaseFile":         true,
 	"InviteString":            true, // remote.go:307 says so in as many words
+
+	// RendezvousURL was filed as a default until 2026-08-23, on the strength of
+	// persist.go's rvBase() fallback. That reading hid a real finding: no
+	// product code set it *or* Origin, so every build could only ever reach
+	// remote.DefaultOrigin while the acceptance files talked to httptest
+	// servers and looked healthy. The operator path is --rendezvous-url, and it
+	// sets Origin, because origin is bound into the pairing transcript
+	// (rendezvous-v1 §11) and rvBase() falls back to it — one flag, so the
+	// address and the transcript identity cannot drift apart. What is left here
+	// is the genuine seam: a test pointing HTTP at an httptest base while
+	// keeping the real origin the transcript vectors were computed against.
+	"RendezvousURL": true,
 }
+
+// A name-resolution caveat worth stating where the next reader will look. The
+// reachability guard resolves symbols by *name*, not by type, so a field is
+// counted as set by product code if any same-named field is assigned anywhere
+// in it. Config.Origin passed clean for the whole of S5-S7 on the strength of
+// PersistedState.Origin being assigned at client.go:405 — a different field of
+// a different struct. The guard under-reports rather than crying wolf, which
+// is the documented trade, but it means a Config field sharing a name with a
+// PersistedState field gets no coverage from this file. Config.Origin is now
+// covered directly instead, by TestRendezvousURLFlagReachesRemoteConfig.
 
 // reachConfigOpenFindings is the Config half of reachOpenFindings: a field the
 // struct documents as an operator action, that no operator can reach.

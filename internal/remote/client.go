@@ -362,7 +362,24 @@ func (c *Client) loadState() error {
 	if err := c.applyState(st); err != nil {
 		return err
 	}
-	return nil
+	return c.checkOrigin(st)
+}
+
+// checkOrigin refuses an identity bound to a different rendezvous. Only states
+// that carry an origin are checked; validatePersistedSemantics already requires
+// one for exactly those, and an unenrolled installation is still free to choose.
+func (c *Client) checkOrigin(st PersistedState) error {
+	switch st.Status {
+	case StateEnrolled, StateDisabled, StateRevoked:
+	default:
+		return nil
+	}
+	if st.Origin == "" || st.Origin == c.origin() {
+		return nil
+	}
+	return classError(ClassOriginMismatch, "start",
+		"this installation is enrolled at "+st.Origin+" but --rendezvous-url names "+
+			c.origin()+"; point it back, or enroll again with a fresh data directory")
 }
 
 func (c *Client) recoverEnrolledTemp() (PersistedState, bool) {

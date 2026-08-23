@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/remote"
@@ -92,11 +94,18 @@ func (c *Command) Run(ctx context.Context) error {
 	doRemote := fs.Bool("remote", c.Config.Remote, "enable remote access")
 	inviteFile := fs.String("invite-file", c.Config.InviteFile, "read invite from a 0600 owner-only file")
 	inviteStdin := fs.Bool("invite-stdin", c.Config.InviteStdin, "read invite from stdin")
+	rvURL := fs.String("rendezvous-url", c.Config.Origin, "rendezvous base URL (default "+remote.DefaultOrigin+"); also the origin bound into pairing transcripts")
 	var trustedHosts stringList
 	fs.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
+
+	origin, err := normalizeRendezvousURL(*rvURL)
+	if err != nil {
+		return err
+	}
+	c.Config.Origin = origin
 
 	c.listenAddr = *addr
 	c.socket = *socket
@@ -248,4 +257,23 @@ func (c *Command) Client() *remote.Client {
 		return nil
 	}
 	return c.client
+}
+
+// normalizeRendezvousURL trims the trailing slash a browser paste carries and
+// insists on an absolute http(s) URL. rvBase() concatenates "/v1/..." onto
+// this, and the origin it also becomes is compared byte for byte against the
+// device's copy inside the pairing transcript — so a value that merely "works"
+// as an address is not enough.
+func normalizeRendezvousURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("-rendezvous-url %q is not a URL: %w", raw, err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return "", fmt.Errorf("-rendezvous-url %q must be an absolute https:// URL", raw)
+	}
+	return strings.TrimRight(raw, "/"), nil
 }

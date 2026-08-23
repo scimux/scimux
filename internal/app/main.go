@@ -161,6 +161,10 @@ func Run() {
 	doRemote := flag.Bool("remote", false, "enable remote access")
 	inviteFile := flag.String("invite-file", "", "read invite from a 0600 owner-only file")
 	inviteStdin := flag.Bool("invite-stdin", false, "read invite from stdin")
+	// Registered here as well as in Command.Run because this parse runs first
+	// and would reject the flag as unknown. Command.Run owns the normalisation
+	// and the http(s) check; this one only has to accept and forward it.
+	rvURL := flag.String("rendezvous-url", "", "rendezvous base URL (default "+remote.DefaultOrigin+"); also the origin bound into pairing transcripts")
 	var trustedHosts stringList
 	flag.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	flag.Parse()
@@ -176,6 +180,7 @@ func Run() {
 			Remote:      *doRemote,
 			InviteFile:  *inviteFile,
 			InviteStdin: *inviteStdin,
+			Origin:      *rvURL,
 			Stdin:       os.Stdin,
 			Stdout:      os.Stdout,
 			Stderr:      os.Stderr,

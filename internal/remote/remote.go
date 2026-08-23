@@ -66,6 +66,11 @@ const (
 	ClassNotFound            Class = "not-found"
 	ClassUnauthorized        Class = "unauthorized"
 	ClassUnavailable         Class = "unavailable"
+	// ClassOriginMismatch is an enrolled identity being presented to a
+	// rendezvous other than the one that issued it. The server cannot report
+	// this — an unknown handle gets the same opaque rejection as a revoked one
+	// — so the client refuses before the request.
+	ClassOriginMismatch Class = "origin-mismatch"
 )
 
 // Error is a classified remote failure. Guidance is operator-facing and

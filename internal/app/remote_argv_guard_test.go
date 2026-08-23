@@ -59,6 +59,11 @@ var argvFlags = []string{
 	"invite-file",
 	"invite-stdin",
 	"remote",
+	// rendezvous-url names an address, never a credential: the invite is still
+	// hidden TTY, --invite-file or --invite-stdin. It is the operator path to
+	// remote.Config.Origin, without which every build talks only to
+	// remote.DefaultOrigin.
+	"rendezvous-url",
 	"socket",
 	"trusted-host",
 }
