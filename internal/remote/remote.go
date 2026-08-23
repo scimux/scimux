@@ -138,9 +138,10 @@ type PersistedState struct {
 
 // PersistedDevice is one paired device record (no WebRTC).
 type PersistedDevice struct {
-	ID     string `json:"id"`
-	RID    string `json:"rid"`
-	PubKey string `json:"public_key,omitempty"`
+	ID      string `json:"id"`
+	RID     string `json:"rid"`
+	PubKey  string `json:"public_key,omitempty"`
+	ECDHPub string `json:"ecdh_public_key,omitempty"`
 }
 
 // PendingEnrollment is partial-enrollment evidence (AT-FR-02-e). It must

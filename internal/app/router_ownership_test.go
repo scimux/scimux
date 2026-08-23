@@ -30,8 +30,8 @@ import (
 // matched structurally down to the mux identifier.
 func TestRouterAPIRouteOwnership(t *testing.T) {
 	table := characterizationAPIRoutes()
-	if len(table) != 32 {
-		t.Fatalf("characterization table has %d routes, want 32", len(table))
+	if len(table) != 38 {
+		t.Fatalf("characterization table has %d routes, want 38", len(table))
 	}
 
 	// Table-internal uniqueness: each method+pattern pair appears once.
@@ -111,6 +111,7 @@ func TestRouterAPIRouteOwnership(t *testing.T) {
 		"state_api.go", "node_api.go", "conversation_api.go",
 		"attachment_api.go", "ui_state_api.go", "security.go",
 		"usage.go", "notes.go", "search.go", "preview.go", "agents.go", "update.go",
+		"remote_pairing.go",
 	} {
 		if _, err := os.Stat(home); err != nil {
 			t.Errorf("expected home %s: %v", home, err)

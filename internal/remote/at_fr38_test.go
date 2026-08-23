@@ -55,7 +55,7 @@ func TestAT_FR_38_DeviceListStableLabelsDuplicatesPairedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: mint 1: %v", at, err)
 	}
-	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code1.Code, DeviceID: "phone", Label: "Phone"}); err != nil {
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code1.Code, DeviceID: "phone", Label: "Phone", SignPub: s7MustSignPub(t), DevicePub: s7MustP256Pub(t)}); err != nil {
 		t.Fatalf("%s: offer 1: %v", at, err)
 	}
 	d1, err := c.CompletePairing(ctx, code1.Code, true, true)
@@ -75,7 +75,7 @@ func TestAT_FR_38_DeviceListStableLabelsDuplicatesPairedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: mint 2: %v", at, err)
 	}
-	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code2.Code, DeviceID: "tablet", Label: "Phone"}); err != nil {
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code2.Code, DeviceID: "tablet", Label: "Phone", SignPub: s7MustSignPub(t), DevicePub: s7MustP256Pub(t)}); err != nil {
 		t.Fatalf("%s: offer 2: %v", at, err)
 	}
 	d2, err := c.CompletePairing(ctx, code2.Code, true, true)

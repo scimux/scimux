@@ -545,6 +545,9 @@ type app struct {
 	// hostedRemote, when set, is the laptop remote-access client whose
 	// status is projected on GET /api/state. Nil without --remote.
 	hostedRemote interface{ HostedStatus() string }
+	// hostedPairing is the pairing API the local HTTP routes call.
+	// It is a sibling of hostedRemote, not a widening of it.
+	hostedPairing hostedPairingClient
 }
 
 // PermOption is one answerable permission/decision choice surfaced to the UI:

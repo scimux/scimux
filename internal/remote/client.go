@@ -359,7 +359,9 @@ func (c *Client) loadState() error {
 		c.st = PersistedState{Status: StateCorrupt}
 		return classError(ClassCorruptIdentity, "start", "the identity file is semantically invalid")
 	}
-	c.applyState(st)
+	if err := c.applyState(st); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -734,7 +736,7 @@ func (c *Client) Devices() ([]DeviceRecord, error) {
 	}
 	out := make([]DeviceRecord, len(c.devices))
 	for i, d := range c.devices {
-		out[i] = DeviceRecord{ID: d.ID, RID: d.RID, PubKey: append([]byte(nil), d.PubKey...)}
+		out[i] = DeviceRecord{ID: d.ID, RID: d.RID, PubKey: append([]byte(nil), d.PubKey...), ECDHPub: append([]byte(nil), d.ECDHPub...)}
 	}
 	return out, nil
 }

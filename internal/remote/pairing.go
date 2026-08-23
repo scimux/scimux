@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
@@ -66,6 +67,9 @@ type PairingOffer struct {
 	DevicePub  []byte
 	OfferNonce []byte
 	Envelope   []byte
+	// SignPub is the device's ed25519 identity. DevicePub is the P-256 Y
+	// used for SAS and envelope seal; the two cannot share a field.
+	SignPub []byte
 }
 
 // PairedDevice is a completed pairing record: stable label and paired-at.
@@ -86,14 +90,30 @@ type pairingRuntime struct {
 }
 
 type pairSession struct {
-	code      string
-	rid       string
-	expiresAt time.Time
-	consumed  bool
-	contested bool
-	waiterOn  bool
-	offer     *PairingOffer
-	state     PairingUIState
+	code       string
+	rid        string
+	expiresAt  time.Time
+	consumed   bool
+	contested  bool
+	waiterOn   bool
+	offer      *PairingOffer
+	state      PairingUIState
+	sas        string
+	sasErr     error
+	replyNonce []byte
+	transcript []byte
+}
+
+// PairingStatus is the laptop view of one pairing code: FR-38 state plus
+// the SAS derived from this session's own keys and transcript (protocol §11).
+type PairingStatus struct {
+	State      PairingUIState
+	Code       string
+	RID        string
+	SAS        string
+	ExpiresAt  time.Time
+	LaptopPub  []byte
+	ReplyNonce []byte
 }
 
 // pairingOf returns the client's own pairing runtime. State belongs to the
@@ -171,6 +191,7 @@ func copyOffer(o PairingOffer) *PairingOffer {
 	cp.DevicePub = append([]byte(nil), o.DevicePub...)
 	cp.OfferNonce = append([]byte(nil), o.OfferNonce...)
 	cp.Envelope = append([]byte(nil), o.Envelope...)
+	cp.SignPub = append([]byte(nil), o.SignPub...)
 	return &cp
 }
 
@@ -206,8 +227,8 @@ func (c *Client) MintPairingCode(ctx context.Context) (PairingCode, error) {
 	now := c.pairingNow()
 	r := pairingOf(c)
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if _, err := r.ensureX(); err != nil {
+		r.mu.Unlock()
 		return PairingCode{}, err
 	}
 	exp := now.Add(PairingTTL)
@@ -218,6 +239,8 @@ func (c *Client) MintPairingCode(ctx context.Context) (PairingCode, error) {
 		waiterOn:  true,
 		state:     PairStatePending,
 	}
+	r.mu.Unlock()
+	c.persistPairingX()
 	return PairingCode{Code: code, RID: rid, ExpiresAt: exp}, nil
 }
 
@@ -256,6 +279,7 @@ func (c *Client) AcceptPairingOffer(ctx context.Context, offer PairingOffer) err
 	if s.offer != nil && pubsEqual(s.offer.DevicePub, offer.DevicePub) {
 		s.waiterOn = true
 		s.state = PairStatePending
+		s.sasErr = c.derivePairingSASLocked(r, s)
 		return nil
 	}
 	if s.offer != nil && (len(s.offer.DevicePub) > 0 || len(offer.DevicePub) > 0) && !bytes.Equal(s.offer.DevicePub, offer.DevicePub) {
@@ -266,6 +290,44 @@ func (c *Client) AcceptPairingOffer(ctx context.Context, offer PairingOffer) err
 	s.offer = copyOffer(offer)
 	s.waiterOn = true
 	s.state = PairStatePending
+	s.sasErr = c.derivePairingSASLocked(r, s)
+	return nil
+}
+
+// derivePairingSASLocked is protocol §11 on the live session: ECDH(X, Y)
+// with this installation's X and the offer's Y, HKDF over this session's
+// transcript. Caller holds r.mu. Failures are returned rather than
+// leaving s.sas empty as something to confirm.
+func (c *Client) derivePairingSASLocked(r *pairingRuntime, s *pairSession) error {
+	if r == nil || s == nil || s.offer == nil {
+		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived")
+	}
+	if len(r.xPriv) == 0 {
+		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived: laptop pairing key is missing")
+	}
+	if len(s.offer.DevicePub) == 0 {
+		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived: device pairing public key is missing")
+	}
+	if len(s.replyNonce) == 0 {
+		s.replyNonce = make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, s.replyNonce); err != nil {
+			return classErrorf(ClassUnauthorized, "sas", "pairing SAS was not derived", err)
+		}
+	}
+	var install []byte
+	if len(c.pub) > 0 {
+		install = append([]byte(nil), c.pub...)
+	}
+	tr, err := BuildPairingTranscript(c.origin(), s.code, s.rid, r.xPub, s.offer.DevicePub, install, s.offer.OfferNonce, s.replyNonce)
+	if err != nil {
+		return classErrorf(ClassUnauthorized, "sas", "pairing SAS was not derived", err)
+	}
+	sas, err := DerivePairingSAS(r.xPriv, s.offer.DevicePub, tr)
+	if err != nil {
+		return classErrorf(ClassUnauthorized, "sas", "pairing SAS was not derived", err)
+	}
+	s.sas = sas
+	s.transcript = tr
 	return nil
 }
 
@@ -304,9 +366,20 @@ func offerAttackClass(offer PairingOffer, x []byte) Class {
 // Withholding either confirmation fails closed with ClassPairUnconfirmed
 // and does not persist a device.
 func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, error) {
+	out, live, err := c.completePairingSession(ctx, code, laptopConfirm, deviceConfirm)
+	if err != nil {
+		return PairedDevice{}, err
+	}
+	if err := c.adoptPairedDevice(live); err != nil {
+		return PairedDevice{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) completePairingSession(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, DeviceRecord, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return PairedDevice{}, err
+			return PairedDevice{}, DeviceRecord{}, err
 		}
 	}
 	r := pairingOf(c)
@@ -315,30 +388,34 @@ func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm
 	now := c.pairingNow()
 	s, _, err := lookupSession(r, code, now)
 	if err != nil {
-		return PairedDevice{}, err
+		return PairedDevice{}, DeviceRecord{}, err
 	}
 	if s == nil || s.expired(now) {
-		return PairedDevice{}, classError(ClassPairExpired, "complete", "pairing code has expired")
+		return PairedDevice{}, DeviceRecord{}, classError(ClassPairExpired, "complete", "pairing code has expired")
 	}
 	if s.consumed {
-		return PairedDevice{}, classError(ClassPairConsumed, "complete", "pairing code has already been used")
+		return PairedDevice{}, DeviceRecord{}, classError(ClassPairConsumed, "complete", "pairing code has already been used")
 	}
 	if !laptopConfirm || !deviceConfirm {
-		return PairedDevice{}, classError(ClassPairUnconfirmed, "complete", "both sides must confirm; SAS is never a password")
+		return PairedDevice{}, DeviceRecord{}, classError(ClassPairUnconfirmed, "complete", "both sides must confirm; SAS is never a password")
 	}
 	if s.contested || s.offer == nil {
 		s.state = PairStateFailed
-		return PairedDevice{}, fmt.Errorf("remote: pairing did not resolve to a single offer")
+		return PairedDevice{}, DeviceRecord{}, fmt.Errorf("remote: pairing did not resolve to a single offer")
+	}
+	if s.sas == "" {
+		s.state = PairStateFailed
+		if s.sasErr != nil {
+			return PairedDevice{}, DeviceRecord{}, s.sasErr
+		}
+		return PairedDevice{}, DeviceRecord{}, classError(ClassUnauthorized, "complete", "pairing SAS was not derived")
+	}
+	if len(s.offer.SignPub) != ed25519.PublicKeySize {
+		return PairedDevice{}, DeviceRecord{}, classError(ClassUnauthorized, "complete", "device identity public key is missing")
 	}
 	id := s.offer.DeviceID
 	if id == "" {
 		id = s.rid
-	}
-	for _, d := range r.devices {
-		if d.ID == id {
-			id = s.rid
-			break
-		}
 	}
 	dev := PairedDevice{
 		ID:       id,
@@ -347,11 +424,96 @@ func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm
 		PairedAt: now,
 		PubKey:   append([]byte(nil), s.offer.DevicePub...),
 	}
+	live := DeviceRecord{
+		ID:      id,
+		RID:     s.rid,
+		PubKey:  append([]byte(nil), s.offer.SignPub...),
+		ECDHPub: append([]byte(nil), s.offer.DevicePub...),
+	}
 	s.consumed = true
 	s.waiterOn = false
 	s.state = PairStateSucceeded
-	r.devices = append(r.devices, copyDevice(dev))
-	return copyDevice(dev), nil
+	replaced := false
+	for i, d := range r.devices {
+		if d.ID == id {
+			r.devices[i] = copyDevice(dev)
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		r.devices = append(r.devices, copyDevice(dev))
+	}
+	return copyDevice(dev), live, nil
+}
+
+// adoptPairedDevice publishes a completed pairing onto the client's device
+// registry so the wait loop will poll that RID. pairingRuntime.devices is
+// the FR-38 list; c.devices is what session signalling consults.
+func (c *Client) adoptPairedDevice(rec DeviceRecord) error {
+	err := c.withStateLock("pair", func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.loaded {
+			if err := c.loadState(); err != nil {
+				return err
+			}
+		}
+		newRec := DeviceRecord{
+			ID:      rec.ID,
+			RID:     rec.RID,
+			PubKey:  append([]byte(nil), rec.PubKey...),
+			ECDHPub: append([]byte(nil), rec.ECDHPub...),
+		}
+		prevIdx := -1
+		var previous DeviceRecord
+		for i, d := range c.devices {
+			if d.ID == rec.ID {
+				previous = d
+				prevIdx = i
+				break
+			}
+		}
+		if prevIdx >= 0 {
+			if ch := c.channels[rec.ID]; ch != nil {
+				_ = ch.Close()
+				delete(c.channels, rec.ID)
+			}
+			if _, ok := c.pending[rec.ID]; ok {
+				delete(c.pending, rec.ID)
+				if c.hook().OnPendingErase != nil {
+					c.hook().OnPendingErase(rec.ID)
+				}
+			}
+			if previous.RID != "" {
+				c.revoked[previous.RID] = struct{}{}
+			}
+			c.devEpoch[rec.ID]++
+			c.devices[prevIdx] = newRec
+		} else {
+			c.devices = append(c.devices, newRec)
+		}
+		if c.st.Status == "" {
+			return nil
+		}
+		if err := c.persist(c.snapshotState()); err != nil {
+			if prevIdx >= 0 {
+				if previous.RID != "" {
+					delete(c.revoked, previous.RID)
+				}
+				c.devices[prevIdx] = previous
+			} else {
+				c.devices = c.devices[:len(c.devices)-1]
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	c.kickWaiters()
+	return nil
 }
 
 // CancelPairing tears down the temporary waiter without consuming the
@@ -379,6 +541,8 @@ func (c *Client) CancelPairing(ctx context.Context, code string) error {
 	s.waiterOn = false
 	s.offer = nil
 	s.contested = false
+	s.sas = ""
+	s.sasErr = nil
 	if !s.consumed {
 		s.state = PairStateCancelled
 	}
@@ -417,6 +581,66 @@ func (c *Client) PairingWaiterRegistered(rid string) (bool, error) {
 	return false, nil
 }
 
+// PairingSession is the current FR-38 state plus SAS material for a code.
+func (c *Client) PairingSession(code string) (PairingStatus, error) {
+	r := pairingOf(c)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, _, err := lookupSession(r, code, c.pairingNow())
+	if err != nil {
+		return PairingStatus{}, err
+	}
+	if s == nil {
+		return PairingStatus{}, classError(ClassNotFound, "pair", "unknown pairing code")
+	}
+	return PairingStatus{
+		State:      s.state,
+		Code:       s.code,
+		RID:        s.rid,
+		SAS:        s.sas,
+		ExpiresAt:  s.expiresAt,
+		LaptopPub:  append([]byte(nil), r.xPub...),
+		ReplyNonce: append([]byte(nil), s.replyNonce...),
+	}, nil
+}
+
+// RevokePairedDevice removes a completed pairing from the device list.
+func (c *Client) RevokePairedDevice(ctx context.Context, id string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	r := pairingOf(c)
+	r.mu.Lock()
+	prev := make([]PairedDevice, len(r.devices))
+	for i, d := range r.devices {
+		prev[i] = copyDevice(d)
+	}
+	kept := r.devices[:0]
+	found := false
+	for _, d := range r.devices {
+		if d.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, copyDevice(d))
+	}
+	if !found {
+		r.mu.Unlock()
+		return classError(ClassNotFound, "revoke", "paired device not found")
+	}
+	r.devices = kept
+	r.mu.Unlock()
+	if err := c.RevokeDevice(ctx, id); err != nil {
+		r.mu.Lock()
+		r.devices = prev
+		r.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
 // PairingState is the current FR-38 UI state for a code.
 func (c *Client) PairingState(code string) (PairingUIState, error) {
 	r := pairingOf(c)
@@ -449,8 +673,16 @@ func (c *Client) PairedDevices() ([]PairedDevice, error) {
 func (c *Client) PairingECDHPublic() ([]byte, error) {
 	r := pairingOf(c)
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.ensureX()
+	created := len(r.xPub) == 0
+	pub, err := r.ensureX()
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		c.persistPairingX()
+	}
+	return pub, nil
 }
 
 // BuildPairingTranscript is protocol §11.

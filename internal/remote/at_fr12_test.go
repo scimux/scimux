@@ -95,7 +95,7 @@ func TestAT_FR_12_c_WithheldConfirmationDoesNotComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: MintPairingCode: %v", at, err)
 	}
-	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone"}); err != nil {
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", SignPub: s7MustSignPub(t), DevicePub: s7MustP256Pub(t)}); err != nil {
 		t.Fatalf("%s: offer: %v", at, err)
 	}
 

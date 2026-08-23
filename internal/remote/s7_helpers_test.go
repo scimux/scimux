@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -71,4 +72,19 @@ func s7MustP256(t *testing.T) (priv, pub []byte) {
 		t.Fatal(err)
 	}
 	return k.Bytes(), k.PublicKey().Bytes()
+}
+
+func s7MustP256Pub(t *testing.T) []byte {
+	t.Helper()
+	_, pub := s7MustP256(t)
+	return pub
+}
+
+func s7MustSignPub(t *testing.T) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
 }

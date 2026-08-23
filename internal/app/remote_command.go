@@ -163,6 +163,9 @@ func (c *Command) Run(ctx context.Context) error {
 	err = cli.Start(ctx)
 	if c.application != nil {
 		c.application.setHostedRemote(cli)
+		c.application.mu.Lock()
+		c.application.hostedPairing = cli
+		c.application.mu.Unlock()
 	}
 	if err != nil {
 		switch remoteClass(err) {

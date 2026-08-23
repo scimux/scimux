@@ -55,6 +55,12 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodGet, "/api/update/check", "/api/update/check", "handleUpdateCheck", "update.go"},                                                                                    // retained
 		{http.MethodPost, "/api/update", "/api/update", "handleUpdateApply", "update.go"},                                                                                               // retained
 		{http.MethodGet, "/api/licenses", "/api/licenses", "handleLicenses", "update.go"},                                                                                               // retained
+		{http.MethodPost, "/api/remote/pairing", "/api/remote/pairing", "handleRemotePairingMint", "remote_pairing.go"},                                                                 // S7b
+		{http.MethodGet, "/api/remote/pairing/{code}", "/api/remote/pairing/04106105", "handleRemotePairingState", "remote_pairing.go"},                                                 // S7b
+		{http.MethodPost, "/api/remote/pairing/{code}/confirm", "/api/remote/pairing/04106105/confirm", "handleRemotePairingConfirm", "remote_pairing.go"},                              // S7b
+		{http.MethodPost, "/api/remote/pairing/{code}/cancel", "/api/remote/pairing/04106105/cancel", "handleRemotePairingCancel", "remote_pairing.go"},                                 // S7b
+		{http.MethodGet, "/api/remote/devices", "/api/remote/devices", "handleRemoteDeviceList", "remote_pairing.go"},                                                                   // S7b
+		{http.MethodDelete, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRevoke", "remote_pairing.go"},                                                   // S7b
 	}
 }
 

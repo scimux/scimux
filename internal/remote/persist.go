@@ -1,6 +1,8 @@
 package remote
 
 import (
+	"bytes"
+	"crypto/ecdh"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -54,7 +56,7 @@ func (c *Client) persist(st PersistedState) error {
 		f.Close()
 		return injected(WriteData)
 	}
-	raw, err := json.Marshal(st)
+	raw, err := json.Marshal(c.persistEnvelope(st))
 	if err != nil {
 		f.Close()
 		return err
@@ -115,15 +117,16 @@ func (c *Client) snapshotState() PersistedState {
 	st.Devices = make([]PersistedDevice, len(c.devices))
 	for i, d := range c.devices {
 		st.Devices[i] = PersistedDevice{
-			ID:     d.ID,
-			RID:    d.RID,
-			PubKey: hex.EncodeToString(d.PubKey),
+			ID:      d.ID,
+			RID:     d.RID,
+			PubKey:  hex.EncodeToString(d.PubKey),
+			ECDHPub: hex.EncodeToString(d.ECDHPub),
 		}
 	}
 	return st
 }
 
-func (c *Client) applyState(st PersistedState) {
+func (c *Client) applyState(st PersistedState) error {
 	c.st = st
 	c.loaded = true
 	c.devices = c.devices[:0]
@@ -132,6 +135,11 @@ func (c *Client) applyState(st PersistedState) {
 		if d.PubKey != "" {
 			if raw, err := hex.DecodeString(d.PubKey); err == nil {
 				rec.PubKey = raw
+			}
+		}
+		if d.ECDHPub != "" {
+			if raw, err := hex.DecodeString(d.ECDHPub); err == nil {
+				rec.ECDHPub = raw
 			}
 		}
 		c.devices = append(c.devices, rec)
@@ -146,6 +154,98 @@ func (c *Client) applyState(st PersistedState) {
 			c.priv = raw
 		}
 	}
+	return c.applyPairingXFromDisk()
+}
+
+// persistedEnvelope is the identity file plus the pairing ECDH key X.
+// Extra fields are ignored by PersistedState unmarshal; applyState re-reads
+// them so a restart keeps the same SAS identity.
+type persistedEnvelope struct {
+	PersistedState
+	PairingXPriv string `json:"pairing_x_priv,omitempty"`
+	PairingXPub  string `json:"pairing_x_pub,omitempty"`
+}
+
+func (c *Client) persistEnvelope(st PersistedState) persistedEnvelope {
+	env := persistedEnvelope{PersistedState: st}
+	priv, pub := c.copyPairingX()
+	if len(priv) > 0 && len(pub) > 0 {
+		env.PairingXPriv = hex.EncodeToString(priv)
+		env.PairingXPub = hex.EncodeToString(pub)
+	}
+	return env
+}
+
+func (c *Client) copyPairingX() (priv, pub []byte) {
+	if c == nil || c.pairing == nil {
+		return nil, nil
+	}
+	r := c.pairing
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]byte(nil), r.xPriv...), append([]byte(nil), r.xPub...)
+}
+
+func (c *Client) persistPairingX() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.st.Status == "" {
+		return
+	}
+	_ = c.persist(c.snapshotState())
+}
+
+func (c *Client) applyPairingXFromDisk() error {
+	raw, err := os.ReadFile(c.StatePath())
+	if err != nil {
+		return nil
+	}
+	var extra persistedEnvelope
+	if json.Unmarshal(raw, &extra) != nil {
+		return nil
+	}
+	if extra.PairingXPriv == "" && extra.PairingXPub == "" {
+		return nil
+	}
+	if extra.PairingXPriv == "" || extra.PairingXPub == "" {
+		return classError(ClassCorruptIdentity, "start", "pairing_x_priv and pairing_x_pub must both be present")
+	}
+	priv, err := hex.DecodeString(extra.PairingXPriv)
+	if err != nil || len(priv) == 0 {
+		return classError(ClassCorruptIdentity, "start", "pairing_x_priv is not valid hex")
+	}
+	pub, err := hex.DecodeString(extra.PairingXPub)
+	if err != nil || len(pub) == 0 {
+		return classError(ClassCorruptIdentity, "start", "pairing_x_pub is not valid hex")
+	}
+	if err := pairingXCorresponds(priv, pub); err != nil {
+		return err
+	}
+	r := pairingOf(c)
+	r.mu.Lock()
+	r.xPriv = priv
+	r.xPub = pub
+	r.mu.Unlock()
+	return nil
+}
+
+func pairingXCorresponds(priv, pub []byte) error {
+	curve := ecdh.P256()
+	k, err := curve.NewPrivateKey(priv)
+	if err != nil {
+		return classError(ClassCorruptIdentity, "start", "pairing_x_priv is not a valid P-256 private key")
+	}
+	peer, err := curve.NewPublicKey(pub)
+	if err != nil {
+		return classError(ClassCorruptIdentity, "start", "pairing_x_pub is not a valid P-256 public key")
+	}
+	if !bytes.Equal(k.PublicKey().Bytes(), peer.Bytes()) {
+		return classError(ClassCorruptIdentity, "start", "pairing_x_priv and pairing_x_pub are not a corresponding valid P-256 pair")
+	}
+	return nil
 }
 
 func (c *Client) origin() string {

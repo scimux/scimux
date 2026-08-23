@@ -644,3 +644,37 @@ already up to date, a `dev` build, or an update is already in progress.
 ### `GET /api/licenses`
 
 License texts bundled into the binary (shown in the About sheet).
+
+## Remote pairing
+
+Loopback pairing for `--remote`. Confirm is a separate explicit call;
+mint never completes a pairing. The curl recipe and FR-38 state table
+live in `docs/remote-pairing-curl.md`. CSRF is required on unsafe methods;
+GET needs no header. `sameOrigin` is true when both Origin and Referer
+are absent.
+
+### `POST /api/remote/pairing`
+
+Mint an 8-character pairing code with a 60-second TTL. Confirm flags in
+the body are ignored.
+
+### `GET /api/remote/pairing/{code}`
+
+FR-38 state for a code, plus SAS once a device offer has arrived.
+
+### `POST /api/remote/pairing/{code}/confirm`
+
+Complete pairing only when both `laptop_confirm` and `device_confirm`
+are present and `true`. Omitted flags do not default to true.
+
+### `POST /api/remote/pairing/{code}/cancel`
+
+Tear down the waiter without consuming the code.
+
+### `GET /api/remote/devices`
+
+Paired devices with stable labels and paired-at times.
+
+### `DELETE /api/remote/devices/{id}`
+
+Revoke one paired device.

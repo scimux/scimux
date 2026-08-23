@@ -42,8 +42,8 @@ func TestAT_FR_39_b_AttackerNeverWinsRoleAndReflectionRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Same code, same device id and label; the offers differ only in key material.
-	legit := PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", DevicePub: legitPub, OfferNonce: legitNonce, Envelope: legitEnv}
-	attacker := PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", DevicePub: atkPub, OfferNonce: atkNonce, Envelope: atkEnv}
+	legit := PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", DevicePub: legitPub, SignPub: s7MustSignPub(t), OfferNonce: legitNonce, Envelope: legitEnv}
+	attacker := PairingOffer{Code: code.Code, DeviceID: "phone", Label: "Phone", DevicePub: atkPub, SignPub: s7MustSignPub(t), OfferNonce: atkNonce, Envelope: atkEnv}
 
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
@@ -140,7 +140,7 @@ func TestAT_FR_39_c_SingleUseMomentExact(t *testing.T) {
 		t.Fatalf("%s: code consumed at cancel", at)
 	}
 
-	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone"}); err != nil {
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone", SignPub: s7MustSignPub(t), DevicePub: s7MustP256Pub(t)}); err != nil {
 		t.Fatalf("%s: reusable after cancel: %v", at, err)
 	}
 

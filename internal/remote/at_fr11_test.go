@@ -66,7 +66,7 @@ func TestAT_FR_11_b_PairingCodeSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: MintPairingCode: %v", at, err)
 	}
-	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone"}); err != nil {
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{Code: code.Code, DeviceID: "phone", SignPub: s7MustSignPub(t), DevicePub: s7MustP256Pub(t)}); err != nil {
 		t.Fatalf("%s: AcceptPairingOffer: %v", at, err)
 	}
 	_, err = c.CompletePairing(ctx, code.Code, true, true)
