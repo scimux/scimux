@@ -281,6 +281,14 @@ func envelopeKey(shared, ephemeralPub, recipientStatic []byte) (cipher.AEAD, err
 // crypto/rand on every call: the vector's fixed ephemeral is a fixture, not
 // a minting rule, and reusing either would leak the plaintext.
 func SealEnvelope(inner SessionInner, recipientPub []byte, origin, rid string) ([]byte, error) {
+	plain, err := canonicalInner(inner)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "could not encode the session inner", err)
+	}
+	return sealEnvelopeBytes(plain, recipientPub, origin, rid)
+}
+
+func sealEnvelopeBytes(plain, recipientPub []byte, origin, rid string) ([]byte, error) {
 	if origin == "" || rid == "" {
 		return nil, classError(ClassHandshake, "seal", "an envelope needs both an origin and a rendezvous id")
 	}
@@ -302,10 +310,6 @@ func SealEnvelope(inner SessionInner, recipientPub []byte, origin, rid string) (
 	if err != nil {
 		return nil, classErrorf(ClassHandshake, "seal", "could not derive the envelope key", err)
 	}
-	plain, err := canonicalInner(inner)
-	if err != nil {
-		return nil, classErrorf(ClassHandshake, "seal", "could not encode the session inner", err)
-	}
 	nonce := make([]byte, gcmNonceLen)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, classErrorf(ClassHandshake, "seal", "could not draw a nonce", err)
@@ -320,31 +324,9 @@ func SealEnvelope(inner SessionInner, recipientPub []byte, origin, rid string) (
 // authenticate under this origin and rid is refused; there is no lenient
 // path that returns a partially trusted inner.
 func OpenEnvelope(sealed, recipientPriv []byte, origin, rid string) (SessionInner, error) {
-	if len(sealed) < p256UncompressedLen+gcmNonceLen+gcmTagLen {
-		return SessionInner{}, classError(ClassHandshake, "open", "the sealed envelope is too short to be one")
-	}
-	curve := ecdh.P256()
-	priv, err := curve.NewPrivateKey(recipientPriv)
+	plain, err := openEnvelopeBytes(sealed, recipientPriv, origin, rid)
 	if err != nil {
-		return SessionInner{}, classErrorf(ClassHandshake, "open", "the recipient key is not a P-256 scalar", err)
-	}
-	ephPub := sealed[:p256UncompressedLen]
-	eph, err := curve.NewPublicKey(ephPub)
-	if err != nil {
-		return SessionInner{}, classErrorf(ClassHandshake, "open", "the envelope prefix is not an ephemeral P-256 point", err)
-	}
-	shared, err := priv.ECDH(eph)
-	if err != nil {
-		return SessionInner{}, classErrorf(ClassHandshake, "open", "the key agreement failed", err)
-	}
-	gcm, err := envelopeKey(shared, ephPub, priv.PublicKey().Bytes())
-	if err != nil {
-		return SessionInner{}, classErrorf(ClassHandshake, "open", "could not derive the envelope key", err)
-	}
-	nonce := sealed[p256UncompressedLen : p256UncompressedLen+gcmNonceLen]
-	plain, err := gcm.Open(nil, nonce, sealed[p256UncompressedLen+gcmNonceLen:], envelopeAD(origin, rid))
-	if err != nil {
-		return SessionInner{}, classError(ClassHandshake, "open", "the sealed envelope did not authenticate for this origin and rendezvous id")
+		return SessionInner{}, err
 	}
 	var inner SessionInner
 	if err := json.Unmarshal(plain, &inner); err != nil {
@@ -354,6 +336,36 @@ func OpenEnvelope(sealed, recipientPriv []byte, origin, rid string) (SessionInne
 		return SessionInner{}, classError(ClassHandshake, "open", "the envelope is not a session offer or answer")
 	}
 	return inner, nil
+}
+
+func openEnvelopeBytes(sealed, recipientPriv []byte, origin, rid string) ([]byte, error) {
+	if len(sealed) < p256UncompressedLen+gcmNonceLen+gcmTagLen {
+		return nil, classError(ClassHandshake, "open", "the sealed envelope is too short to be one")
+	}
+	curve := ecdh.P256()
+	priv, err := curve.NewPrivateKey(recipientPriv)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "open", "the recipient key is not a P-256 scalar", err)
+	}
+	ephPub := sealed[:p256UncompressedLen]
+	eph, err := curve.NewPublicKey(ephPub)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "open", "the envelope prefix is not an ephemeral P-256 point", err)
+	}
+	shared, err := priv.ECDH(eph)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "open", "the key agreement failed", err)
+	}
+	gcm, err := envelopeKey(shared, ephPub, priv.PublicKey().Bytes())
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "open", "could not derive the envelope key", err)
+	}
+	nonce := sealed[p256UncompressedLen : p256UncompressedLen+gcmNonceLen]
+	plain, err := gcm.Open(nil, nonce, sealed[p256UncompressedLen+gcmNonceLen:], envelopeAD(origin, rid))
+	if err != nil {
+		return nil, classError(ClassHandshake, "open", "the sealed envelope did not authenticate for this origin and rendezvous id")
+	}
+	return plain, nil
 }
 
 // HandshakeSession admits a relayed session description for use with local.

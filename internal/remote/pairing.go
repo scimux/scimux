@@ -82,9 +82,22 @@ type PairedDevice struct {
 }
 
 type pairingRuntime struct {
+	// completeMu serializes whole CompletePairing calls. The single-use
+	// check reads s.consumed in prepare and sets it in commit, with an
+	// adopt in between that must not hold mu (it persists), so without
+	// this two callers both pass the check before either sets the flag.
+	//
+	// It is a lock, not a lifecycle flag: S7f removed pairSession.reserved
+	// precisely because a caller that died between set and clear left the
+	// session unusable forever. A mutex released by defer cannot do that.
+	// Lock order is completeMu -> mu -> state lock, never the reverse;
+	// nothing else acquires completeMu.
+	completeMu sync.Mutex
+
 	mu       sync.Mutex
 	xPriv    []byte
 	xPub     []byte
+	xOnDisk  bool // xPriv/xPub have been written to the identity file
 	sessions map[string]*pairSession
 	devices  []PairedDevice
 }
@@ -225,13 +238,12 @@ func (c *Client) MintPairingCode(ctx context.Context) (PairingCode, error) {
 		return PairingCode{}, err
 	}
 	now := c.pairingNow()
-	r := pairingOf(c)
-	r.mu.Lock()
-	if _, err := r.ensureX(); err != nil {
-		r.mu.Unlock()
+	if err := c.ensureDurableX(); err != nil {
 		return PairingCode{}, err
 	}
 	exp := now.Add(PairingTTL)
+	r := pairingOf(c)
+	r.mu.Lock()
 	r.sessions[code] = &pairSession{
 		code:      code,
 		rid:       rid,
@@ -240,7 +252,7 @@ func (c *Client) MintPairingCode(ctx context.Context) (PairingCode, error) {
 		state:     PairStatePending,
 	}
 	r.mu.Unlock()
-	c.persistPairingX()
+	c.kickWaiters()
 	return PairingCode{Code: code, RID: rid, ExpiresAt: exp}, nil
 }
 
@@ -366,17 +378,29 @@ func offerAttackClass(offer PairingOffer, x []byte) Class {
 // Withholding either confirmation fails closed with ClassPairUnconfirmed
 // and does not persist a device.
 func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, error) {
-	out, live, err := c.completePairingSession(ctx, code, laptopConfirm, deviceConfirm)
+	// Prepare checks single-use and commit records it; hold the pairing
+	// runtime's completion lock across both so the two cannot interleave
+	// (AT-FR-39-c under concurrency).
+	r := pairingOf(c)
+	r.completeMu.Lock()
+	defer r.completeMu.Unlock()
+
+	out, live, err := c.preparePairingComplete(ctx, code, laptopConfirm, deviceConfirm)
 	if err != nil {
 		return PairedDevice{}, err
 	}
 	if err := c.adoptPairedDevice(live); err != nil {
 		return PairedDevice{}, err
 	}
+	if err := c.commitPairingComplete(code, out); err != nil {
+		_ = c.unadoptPairedDevice(live)
+		return PairedDevice{}, err
+	}
+	c.kickWaiters()
 	return out, nil
 }
 
-func (c *Client) completePairingSession(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, DeviceRecord, error) {
+func (c *Client) preparePairingComplete(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, DeviceRecord, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return PairedDevice{}, DeviceRecord{}, err
@@ -430,12 +454,32 @@ func (c *Client) completePairingSession(ctx context.Context, code string, laptop
 		PubKey:  append([]byte(nil), s.offer.SignPub...),
 		ECDHPub: append([]byte(nil), s.offer.DevicePub...),
 	}
-	s.consumed = true
-	s.waiterOn = false
-	s.state = PairStateSucceeded
+	return copyDevice(dev), live, nil
+}
+
+// commitPairingComplete is the pairing-session half of CompletePairing, run
+// only after the live device record has been persisted. Validation belongs
+// in prepare; commit is pure mutation and does not re-check expiry or
+// consumption. That is what holds the persist-race line: an expiry that
+// lands during adopt cannot fail this half, because commit does not look
+// at the clock. A persist failure of adopt leaves the code unconsumed so
+// the operator can retry.
+func (c *Client) commitPairingComplete(code string, dev PairedDevice) error {
+	r := pairingOf(c)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	norm, err := normalizePairingCode(code)
+	if err != nil {
+		norm = code
+	}
+	if s := r.sessions[norm]; s != nil {
+		s.consumed = true
+		s.waiterOn = false
+		s.state = PairStateSucceeded
+	}
 	replaced := false
 	for i, d := range r.devices {
-		if d.ID == id {
+		if d.ID == dev.ID {
 			r.devices[i] = copyDevice(dev)
 			replaced = true
 			break
@@ -444,7 +488,7 @@ func (c *Client) completePairingSession(ctx context.Context, code string, laptop
 	if !replaced {
 		r.devices = append(r.devices, copyDevice(dev))
 	}
-	return copyDevice(dev), live, nil
+	return nil
 }
 
 // adoptPairedDevice publishes a completed pairing onto the client's device
@@ -516,6 +560,38 @@ func (c *Client) adoptPairedDevice(rec DeviceRecord) error {
 	return nil
 }
 
+// unadoptPairedDevice drops a just-adopted live record so a failed commit
+// cannot leave a device the FR-38 list never recorded.
+//
+// Deliberate undo path: commitPairingComplete currently always returns
+// nil, so CompletePairing cannot reach this. It is kept for a commit that
+// may later be able to fail.
+func (c *Client) unadoptPairedDevice(rec DeviceRecord) error {
+	err := c.withStateLock("pair", func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		kept := c.devices[:0]
+		for _, d := range c.devices {
+			if d.ID == rec.ID && d.RID == rec.RID {
+				if rec.RID != "" {
+					delete(c.revoked, rec.RID)
+				}
+				continue
+			}
+			kept = append(kept, d)
+		}
+		c.devices = kept
+		if c.st.Status == "" {
+			return nil
+		}
+		return c.persist(c.snapshotState())
+	})
+	if err == nil {
+		c.kickWaiters()
+	}
+	return err
+}
+
 // CancelPairing tears down the temporary waiter without consuming the
 // code (FR-38, protocol §10.4).
 func (c *Client) CancelPairing(ctx context.Context, code string) error {
@@ -524,6 +600,7 @@ func (c *Client) CancelPairing(ctx context.Context, code string) error {
 			return err
 		}
 	}
+	defer c.kickWaiters()
 	r := pairingOf(c)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -671,18 +748,138 @@ func (c *Client) PairedDevices() ([]PairedDevice, error) {
 // PairingECDHPublic is the laptop static P-256 public key X used in
 // the pairing transcript (protocol §11).
 func (c *Client) PairingECDHPublic() ([]byte, error) {
+	if err := c.ensureDurableX(); err != nil {
+		return nil, err
+	}
 	r := pairingOf(c)
 	r.mu.Lock()
-	created := len(r.xPub) == 0
-	pub, err := r.ensureX()
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	return append([]byte(nil), r.xPub...), nil
+}
+
+const (
+	pairOfferType = "pair-offer"
+	pairReplyType = "pair-reply"
+)
+
+type pairingInner struct {
+	V          int    `json:"v"`
+	Type       string `json:"type"`
+	DevicePub  string `json:"device_pub,omitempty"`
+	SignPub    string `json:"device_sign_pub,omitempty"`
+	OfferNonce string `json:"offer_nonce,omitempty"`
+	ReplyNonce string `json:"reply_nonce,omitempty"`
+	InstallPub string `json:"install_pub,omitempty"`
+	DeviceID   string `json:"device_id,omitempty"`
+	Label      string `json:"label,omitempty"`
+}
+
+func (c *Client) pairingWaiter(rid string) (string, bool) {
+	r := pairingOf(c)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := c.pairingNow()
+	for _, s := range r.sessions {
+		s.applyExpiry(now)
+		if s.rid == rid && s.waiterOn && !s.expired(now) {
+			return s.code, true
+		}
+	}
+	return "", false
+}
+
+func (c *Client) pairingLiveRIDs() map[string]bool {
+	r := pairingOf(c)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := c.pairingNow()
+	out := map[string]bool{}
+	for _, s := range r.sessions {
+		s.applyExpiry(now)
+		if s.waiterOn && !s.expired(now) && validRID(s.rid) {
+			out[s.rid] = true
+		}
+	}
+	return out
+}
+
+// answerPairingEnvelope opens a sealed pair/offer, feeds AcceptPairingOffer,
+// and seals a pair-reply to the device's Y. An unopenable or rejected offer
+// returns an error and no blob so the wait loop sends nothing and does not
+// consume the code (§10.6).
+func (c *Client) answerPairingEnvelope(ctx context.Context, rid string, sealed []byte) ([]byte, error) {
+	priv, err := c.sessionKeyPriv()
 	if err != nil {
 		return nil, err
 	}
-	if created {
-		c.persistPairingX()
+	origin := c.origin()
+	plain, err := openEnvelopeBytes(sealed, priv, origin, rid)
+	if err != nil {
+		return nil, err
 	}
-	return pub, nil
+	var inner pairingInner
+	if err := json.Unmarshal(plain, &inner); err != nil {
+		return nil, classErrorf(ClassHandshake, "pair", "pairing offer is not JSON", err)
+	}
+	if inner.Type != pairOfferType {
+		return nil, classError(ClassHandshake, "pair", "envelope is not a pair-offer")
+	}
+	code, ok := c.pairingWaiter(rid)
+	if !ok {
+		return nil, classError(ClassPairExpired, "pair", "pairing waiter is not registered")
+	}
+	y, err := hex.DecodeString(inner.DevicePub)
+	if err != nil || len(y) == 0 {
+		return nil, classError(ClassHandshake, "pair", "pair-offer device_pub is missing")
+	}
+	var sign []byte
+	if inner.SignPub != "" {
+		sign, err = hex.DecodeString(inner.SignPub)
+		if err != nil {
+			return nil, classError(ClassHandshake, "pair", "pair-offer device_sign_pub is not hex")
+		}
+	}
+	var offerN []byte
+	if inner.OfferNonce != "" {
+		offerN, err = hex.DecodeString(inner.OfferNonce)
+		if err != nil {
+			return nil, classError(ClassHandshake, "pair", "pair-offer offer_nonce is not hex")
+		}
+	}
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{
+		Code:       code,
+		DeviceID:   inner.DeviceID,
+		Label:      inner.Label,
+		DevicePub:  y,
+		SignPub:    sign,
+		OfferNonce: offerN,
+		Envelope:   append([]byte(nil), plain...),
+	}); err != nil {
+		return nil, err
+	}
+	st, err := c.PairingSession(code)
+	if err != nil {
+		return nil, err
+	}
+	if st.SAS == "" {
+		return nil, classError(ClassUnauthorized, "pair", "pairing SAS was not derived")
+	}
+	var install string
+	c.mu.Lock()
+	if len(c.pub) > 0 {
+		install = hex.EncodeToString(c.pub)
+	}
+	c.mu.Unlock()
+	reply, err := json.Marshal(pairingInner{
+		V:          ProtocolVersion,
+		Type:       pairReplyType,
+		InstallPub: install,
+		ReplyNonce: hex.EncodeToString(st.ReplyNonce),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sealEnvelopeBytes(reply, y, origin, rid)
 }
 
 // BuildPairingTranscript is protocol §11.

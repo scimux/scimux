@@ -29,14 +29,15 @@ import (
 // it: it is the same key the pairing transcript binds. This reads it rather
 // than keeping a second copy, so there is exactly one X per installation and
 // no way for the pairing SAS and the session envelope to disagree about which
-// key the laptop is.
+// key the laptop is. Opening an envelope uses X, so the key is durable
+// before this returns.
 func (c *Client) sessionKeyPriv() ([]byte, error) {
+	if err := c.ensureDurableX(); err != nil {
+		return nil, err
+	}
 	r := pairingOf(c)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, err := r.ensureX(); err != nil {
-		return nil, err
-	}
 	if len(r.xPriv) == 0 {
 		return nil, classError(ClassHandshake, "session", "the laptop has no static key to open the envelope with")
 	}

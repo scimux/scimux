@@ -1274,9 +1274,9 @@ func (c *Client) loopStopped() bool {
 
 func (c *Client) liveRIDs() map[string]bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	out := map[string]bool{}
 	if c.st.Status == StateRevoked || c.st.Status == StateDisabled || c.rvStopped {
+		c.mu.Unlock()
 		return out
 	}
 	for _, d := range c.devices {
@@ -1285,6 +1285,10 @@ func (c *Client) liveRIDs() map[string]bool {
 				out[d.RID] = true
 			}
 		}
+	}
+	c.mu.Unlock()
+	for rid := range c.pairingLiveRIDs() {
+		out[rid] = true
 	}
 	return out
 }
@@ -1299,9 +1303,16 @@ func (c *Client) waitLoopRID(ctx context.Context, rid string) {
 			return
 		}
 		if !c.liveRIDs()[rid] {
+			c.kickWaiters()
 			return
 		}
-		env, err := c.postWaitRID(ctx, rid, reply)
+		var env []byte
+		var err error
+		if pairCode, ok := c.pairingWaiter(rid); ok {
+			env, err = c.postPairWaitRID(ctx, pairCode, rid, reply)
+		} else {
+			env, err = c.postWaitRID(ctx, rid, reply)
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -1314,7 +1325,14 @@ func (c *Client) waitLoopRID(ctx context.Context, rid string) {
 			// A device is calling. Answering is best-effort by design: an
 			// envelope that does not open, or a device with no pairing key on
 			// record, must leave the loop polling and send nothing back.
-			if out, aerr := c.answerSessionEnvelope(ctx, rid, env); aerr == nil {
+			var out []byte
+			var aerr error
+			if _, ok := c.pairingWaiter(rid); ok {
+				out, aerr = c.answerPairingEnvelope(ctx, rid, env)
+			} else {
+				out, aerr = c.answerSessionEnvelope(ctx, rid, env)
+			}
+			if aerr == nil {
 				reply = out
 			} else {
 				c.noteWaitResult(aerr)
@@ -1392,6 +1410,14 @@ func (c *Client) applyRevoked() {
 // it is the only thing the wait exists to fetch: dropping it made the whole
 // loop a no-op with correct challenge rotation.
 func (c *Client) postWaitRID(ctx context.Context, rid string, reply []byte) ([]byte, error) {
+	return c.postSignedWait(ctx, "/v1/wait", rid, "", reply)
+}
+
+func (c *Client) postPairWaitRID(ctx context.Context, code, rid string, reply []byte) ([]byte, error) {
+	return c.postSignedWait(ctx, "/v1/pair/wait", rid, code, reply)
+}
+
+func (c *Client) postSignedWait(ctx context.Context, route, rid, code string, reply []byte) ([]byte, error) {
 	c.mu.Lock()
 	if c.st.Handle == "" || len(c.priv) != ed25519.PrivateKeySize || !validRID(rid) {
 		c.mu.Unlock()
@@ -1411,7 +1437,7 @@ func (c *Client) postWaitRID(ctx context.Context, rid string, reply []byte) ([]b
 		}
 		chal = got
 	}
-	msg := buildAuthMessage(origin, ProtocolVersion, "/v1/wait", handle, chal)
+	msg := buildAuthMessage(origin, ProtocolVersion, route, handle, chal)
 	sig := ed25519.Sign(priv, msg)
 	fields := map[string]any{
 		"v":         c.requestV(),
@@ -1421,6 +1447,9 @@ func (c *Client) postWaitRID(ctx context.Context, rid string, reply []byte) ([]b
 		"id":        rid,
 		"max_ms":    WaitDefaultMaxMS,
 	}
+	if code != "" {
+		fields["code"] = code
+	}
 	// A sealed answer rides out on an ordinary wait. The signature above is
 	// unchanged by its presence — the rendezvous vectors carry a
 	// byte-identical sig for wait-response-envelope and envelope-reply-on-wait
@@ -1429,7 +1458,7 @@ func (c *Client) postWaitRID(ctx context.Context, rid string, reply []byte) ([]b
 		fields["reply"] = hex.EncodeToString(reply)
 	}
 	body, _ := json.Marshal(fields)
-	resp, err := c.postWaitJSON(ctx, body)
+	resp, err := c.postWaitJSONAt(ctx, route, body)
 	if err != nil {
 		c.clearWaitChalRID(rid)
 		return nil, err
@@ -1478,7 +1507,11 @@ func (c *Client) postWaitRID(ctx context.Context, rid string, reply []byte) ([]b
 }
 
 func (c *Client) postWaitJSON(ctx context.Context, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.rvBase(), "/")+"/v1/wait", bytes.NewReader(body))
+	return c.postWaitJSONAt(ctx, "/v1/wait", body)
+}
+
+func (c *Client) postWaitJSONAt(ctx context.Context, route string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.rvBase(), "/")+route, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

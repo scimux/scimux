@@ -32,24 +32,29 @@ type sessionRV struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu        sync.Mutex
-	queued    map[string][]byte // rid -> sealed offer not yet delivered
-	delivered map[string]int    // rid -> how many times an envelope was served
-	replies   [][]byte          // every decoded `reply` seen, in order
-	waits     int
+	mu          sync.Mutex
+	queued      map[string][]byte // rid -> sealed offer not yet delivered
+	delivered   map[string]int    // rid -> how many times an envelope was served
+	replies     [][]byte          // every decoded `reply` seen, in order
+	waits       int
+	waitRID     map[string]int // rid -> /v1/wait count
+	pairWaitRID map[string]int // rid -> /v1/pair/wait count
 }
 
 func newSessionRV(t *testing.T) *sessionRV {
 	t.Helper()
 	f := &sessionRV{
-		t:         t,
-		queued:    map[string][]byte{},
-		delivered: map[string]int{},
+		t:           t,
+		queued:      map[string][]byte{},
+		delivered:   map[string]int{},
+		waitRID:     map[string]int{},
+		pairWaitRID: map[string]int{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/challenge", f.handleChallenge)
 	mux.HandleFunc("/v1/verify", f.handleVerify)
 	mux.HandleFunc("/v1/wait", f.handleWait)
+	mux.HandleFunc("/v1/pair/wait", f.handleWait)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -81,6 +86,18 @@ func (f *sessionRV) WaitCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.waits
+}
+
+func (f *sessionRV) SessionWaitCount(rid string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.waitRID[rid]
+}
+
+func (f *sessionRV) PairWaitCount(rid string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pairWaitRID[rid]
 }
 
 // DeliveredCount is how many times an envelope was served for rid.
@@ -118,6 +135,11 @@ func (f *sessionRV) handleWait(w http.ResponseWriter, r *http.Request) {
 
 	f.mu.Lock()
 	f.waits++
+	if r.URL.Path == "/v1/pair/wait" {
+		f.pairWaitRID[req.ID]++
+	} else {
+		f.waitRID[req.ID]++
+	}
 	// A reply rides in on an ordinary wait; the vectors show the signature is
 	// byte-identical with and without it, so it is not signature-covered.
 	if req.Reply != "" {

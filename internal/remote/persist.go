@@ -186,16 +186,53 @@ func (c *Client) copyPairingX() (priv, pub []byte) {
 	return append([]byte(nil), r.xPriv...), append([]byte(nil), r.xPub...)
 }
 
-func (c *Client) persistPairingX() {
+func (c *Client) persistPairingX() error {
 	if c == nil {
-		return
+		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.st.Status == "" {
-		return
-	}
-	_ = c.persist(c.snapshotState())
+	return c.withStateLock("pair-x", func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.st.Status == "" {
+			return nil
+		}
+		return c.persist(c.snapshotState())
+	})
+}
+
+// ensureDurableX is the pairing-runtime half of the S7f invariant: any X
+// that leaves the runtime must already be on the identity file. A persist
+// failure leaves no X in memory, so the next call mints rather than
+// handing back a stranded key. Durability is "is it on disk?", not "did
+// this call mint it?".
+func (c *Client) ensureDurableX() error {
+	return c.withStateLock("pair-x", func() error {
+		r := pairingOf(c)
+		r.mu.Lock()
+		if len(r.xPub) > 0 && r.xOnDisk {
+			r.mu.Unlock()
+			return nil
+		}
+		if _, err := r.ensureX(); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		r.mu.Unlock()
+
+		if err := c.persistPairingX(); err != nil {
+			r.mu.Lock()
+			if !r.xOnDisk {
+				r.xPriv = nil
+				r.xPub = nil
+			}
+			r.mu.Unlock()
+			return err
+		}
+		r.mu.Lock()
+		r.xOnDisk = true
+		r.mu.Unlock()
+		return nil
+	})
 }
 
 func (c *Client) applyPairingXFromDisk() error {
@@ -228,6 +265,7 @@ func (c *Client) applyPairingXFromDisk() error {
 	r.mu.Lock()
 	r.xPriv = priv
 	r.xPub = pub
+	r.xOnDisk = true
 	r.mu.Unlock()
 	return nil
 }

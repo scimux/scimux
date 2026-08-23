@@ -183,3 +183,95 @@ func TestAT_FR_39_c_SingleUseMomentExact(t *testing.T) {
 	err = c.AcceptPairingOffer(ctx, PairingOffer{Code: code2.Code, DeviceID: "late"})
 	requireClass(t, err, ClassPairExpired)
 }
+
+// AT-FR-39-c (concurrency): single-use is a property of the code, not of the
+// calling pattern. TestAT_FR_39_c_SingleUseMomentExact proves a *sequential*
+// second CompletePairing is refused with ClassPairConsumed. That refusal is
+// checked in prepare and the flag is set in commit, so two callers that both
+// prepare before either commits used to both succeed — the code was single-use
+// per call sequence rather than single-use.
+//
+// Nothing hostile gets in that way: the session binds one offer, so both
+// callers publish the same device and the registries converge. But a caller
+// that is told "consumed" in one interleaving and "here is your device" in
+// another cannot be reasoned about, and the next reader of PairingConsumed
+// would assume the stronger guarantee the sequential row appears to give.
+func TestAT_FR_39_c_SingleUseIsExactUnderConcurrency(t *testing.T) {
+	const at = "AT-FR-39-c-concurrent"
+	c, _, ctx, cancel := s7Enrolled(t)
+	defer cancel()
+
+	code, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatalf("%s: MintPairingCode: %v", at, err)
+	}
+	if err := c.AcceptPairingOffer(ctx, PairingOffer{
+		Code:       code.Code,
+		DeviceID:   "phone",
+		Label:      "Phone",
+		DevicePub:  s7MustP256Pub(t),
+		SignPub:    s7MustSignPub(t),
+		OfferNonce: bytes.Repeat([]byte{0x41}, 32),
+	}); err != nil {
+		t.Fatalf("%s: offer: %v", at, err)
+	}
+
+	const callers = 2
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = c.CompletePairing(ctx, code.Code, true, true)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	ok, consumedRefusals := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case classOfErr(err) == ClassPairConsumed:
+			consumedRefusals++
+		default:
+			t.Fatalf("%s: unexpected error from a concurrent complete: %v", at, err)
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("%s: %d of %d concurrent completes succeeded, want exactly 1 (errs=%v); the code is not single-use under concurrency",
+			at, ok, callers, errs)
+	}
+	if consumedRefusals != callers-1 {
+		t.Fatalf("%s: %d concurrent completes refused as pair-consumed, want %d (errs=%v)",
+			at, consumedRefusals, callers-1, errs)
+	}
+
+	consumed, err := c.PairingConsumed(code.Code)
+	if err != nil {
+		t.Fatalf("%s: PairingConsumed: %v", at, err)
+	}
+	if !consumed {
+		t.Fatalf("%s: code not consumed after a successful concurrent complete", at)
+	}
+
+	// The winning complete must still be whole: both registries, one device.
+	paired, err := c.PairedDevices()
+	if err != nil {
+		t.Fatalf("%s: PairedDevices: %v", at, err)
+	}
+	live, err := c.Devices()
+	if err != nil {
+		t.Fatalf("%s: Devices: %v", at, err)
+	}
+	if len(paired) != 1 || len(live) != 1 {
+		t.Fatalf("%s: registries after concurrent complete: paired=%+v live=%+v, want one device in each", at, paired, live)
+	}
+	if paired[0].RID != code.RID || live[0].RID != code.RID {
+		t.Fatalf("%s: registries disagree on RID: paired=%s live=%s want %s", at, paired[0].RID, live[0].RID, code.RID)
+	}
+}
