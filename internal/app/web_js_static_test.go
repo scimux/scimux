@@ -13,6 +13,7 @@ import (
 var productionJSURLs = []string{
 	"/js/api.js",
 	"/js/app.js",
+	"/js/bootstrap.js",
 	"/js/bookmarks.js",
 	"/js/cards.js",
 	"/js/caret.js",
