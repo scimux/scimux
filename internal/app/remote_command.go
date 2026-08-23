@@ -30,6 +30,12 @@ type Command struct {
 	client      *remote.Client
 	listenAddr  string
 	socket      string
+
+	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
+	// remote client, or nil for a purely local run. It is kept so the join is
+	// observable from the product entry point rather than only from the
+	// constructor.
+	tunnelHandlerFor func(remote.TunnelPeer) http.Handler
 }
 
 // Run starts the process according to Args.
@@ -129,19 +135,32 @@ func (c *Command) Run(ctx context.Context) error {
 	}
 	a.requestPolicy = policy
 
+	// One owned mux, two boundaries (S3). The local chain is byte-for-byte
+	// what NewHandler has always returned (FR-15); the factory binds the same
+	// mux to whichever device the wait loop later proves.
+	local, tunnelFor, err := newBoundaryFactory(a, webFS)
+	if err != nil {
+		return err
+	}
 	if c.handler == nil {
-		h, err := NewHandler(a, webFS)
-		if err != nil {
-			return err
-		}
-		c.handler = h
+		c.handler = local
 	}
 
 	if !c.Config.Remote {
 		return nil
 	}
 
+	// Join 3: without this the whole tunnel half is unreachable — a device
+	// could pair, negotiate a session and frame a request, and the laptop
+	// would answer ClassUnavailable because it serves no handler. The peer is
+	// translated rather than shared: internal/remote cannot import this
+	// package, and this package must not grow a pion-adjacent type.
+	c.tunnelHandlerFor = func(p remote.TunnelPeer) http.Handler {
+		return tunnelFor(tunnelPeer{DeviceID: p.DeviceID, RID: p.RID})
+	}
+
 	rc := c.Config
+	rc.TunnelHandlerFor = c.tunnelHandlerFor
 	if rc.DataDir == "" {
 		rc.DataDir = *data
 	}

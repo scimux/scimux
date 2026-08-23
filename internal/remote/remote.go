@@ -335,7 +335,17 @@ type Config struct {
 	// receives a device's session offer: by then there is no caller left to
 	// hand one in. Nil means the installation cannot serve a tunnel, and an
 	// arriving offer is refused rather than answered into nothing.
+	//
+	// Deprecated in favour of TunnelHandlerFor, which is consulted first. A
+	// bare handler cannot know which device it is answering, so the S3
+	// boundary's peer argument would be dead in production; the answering path
+	// already holds the device id and RID it proved.
 	TunnelHandler http.Handler
+
+	// TunnelHandlerFor builds the S3 tunnel boundary for one proven peer.
+	// Returning nil for a peer refuses that session without disabling the
+	// installation.
+	TunnelHandlerFor func(TunnelPeer) http.Handler
 
 	HTTPClient    *http.Client
 	RendezvousURL string

@@ -93,7 +93,7 @@ func (c *Client) answerSessionEnvelope(ctx context.Context, rid string, sealed [
 	if err != nil {
 		return nil, err
 	}
-	handler := c.tunnelHandler()
+	handler := c.tunnelHandler(TunnelPeer{DeviceID: deviceID, RID: rid})
 	if handler == nil {
 		return nil, classError(ClassUnavailable, "session",
 			"this installation serves no tunnel, so a session offer cannot be answered")
@@ -123,11 +123,24 @@ func (c *Client) answerSessionEnvelope(ctx context.Context, rid string, sealed [
 	return blob, nil
 }
 
+// TunnelPeer names the device a tunnel boundary is being built for. Both
+// fields are already proven by the time it is constructed: the RID carried the
+// sealed offer, and the device is the one that RID resolves to.
+type TunnelPeer struct {
+	DeviceID string
+	RID      string
+}
+
 // tunnelHandler is the S3 boundary a live session serves, or nil.
-func (c *Client) tunnelHandler() http.Handler {
+func (c *Client) tunnelHandler(peer TunnelPeer) http.Handler {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.cfg.TunnelHandler
+	factory := c.cfg.TunnelHandlerFor
+	fallback := c.cfg.TunnelHandler
+	c.mu.Unlock()
+	if factory != nil {
+		return factory(peer)
+	}
+	return fallback
 }
 
 // attachSession registers s as the device's live channel, replacing and

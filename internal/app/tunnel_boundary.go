@@ -86,11 +86,28 @@ func tunnelResponseHeaders() map[string]string {
 // AT-FR-17-e asserts behaviour at. The route table is registered exactly
 // once, by newMux (router.go); neither boundary owns an inventory of its own.
 func newBoundaries(a *app, web fs.FS, peer tunnelPeer) (local http.Handler, tunnel http.Handler, err error) {
+	local, tunnelFor, err := newBoundaryFactory(a, web)
+	if err != nil {
+		return nil, nil, err
+	}
+	return local, tunnelFor(peer), nil
+}
+
+// newBoundaryFactory is newBoundaries for a run that does not yet know its
+// peers, which is every real one: a device is proven in the rendezvous wait
+// loop, long after startup. The owned mux is still built exactly once — so a
+// route-table error is a startup error and never a mid-session refusal the
+// device would see as "unavailable" — and each proven peer gets its own
+// tunnel boundary over that one mux. local is byte-for-byte NewHandler's
+// chain (FR-15).
+func newBoundaryFactory(a *app, web fs.FS) (local http.Handler, tunnel func(tunnelPeer) http.Handler, err error) {
 	mux, err := newMux(a, web)
 	if err != nil {
 		return nil, nil, err
 	}
-	return withLocalBoundary(a, mux), withTunnelBoundary(peer, mux), nil
+	return withLocalBoundary(a, mux), func(peer tunnelPeer) http.Handler {
+		return withTunnelBoundary(peer, mux)
+	}, nil
 }
 
 // withTunnelBoundary wraps the owned mux for a proven peer. It stamps the
