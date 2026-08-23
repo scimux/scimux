@@ -329,6 +329,13 @@ type Config struct {
 	// implementation so backoff retries do not sleep on the wall clock.
 	Scheduler Scheduler
 
+	// TunnelHandler is the S3 tunnel boundary a live session serves. It is
+	// configuration rather than a call argument because the wait loop is what
+	// receives a device's session offer: by then there is no caller left to
+	// hand one in. Nil means the installation cannot serve a tunnel, and an
+	// arriving offer is refused rather than answered into nothing.
+	TunnelHandler http.Handler
+
 	HTTPClient    *http.Client
 	RendezvousURL string
 	FailWrite     *WriteFault

@@ -9,16 +9,18 @@ package remote
 // answer, and seal the answer back to the device so the rendezvous can hand
 // it to the still-open POST /v1/envelope/<rid>.
 //
-// Scope note, deliberately narrow: this closes the *signalling* path. The
-// peer connection CreateSessionAnswer builds is not retained here, so the
-// answer is genuine but nothing yet holds the session it describes. Keeping
-// the connection alive, applying the FR-16 binding on the live path, and
-// serving requests over the data channel is join 2. Splitting it this way
-// keeps each half separately testable at the protocol boundary; it is not an
-// oversight.
+// Join 2 completed that: the answer now comes from acceptSessionOffer, which
+// applies the FR-16 fingerprint binding, keeps its peer connection, and serves
+// the tunnel boundary over the data channel the device opens. The session is
+// registered as the device's Channel before the answer is sent, so revocation
+// severs live traffic instead of only editing a record.
+//
+// Still outside this file: what the tunnel boundary actually is. handler comes
+// from Config, and the S3 boundary is wired into it by internal/app — join 3.
 
 import (
 	"context"
+	"net/http"
 )
 
 // sessionKeyPriv is the laptop's static P-256 private key X (§11).
@@ -41,21 +43,29 @@ func (c *Client) sessionKeyPriv() ([]byte, error) {
 	return append([]byte(nil), r.xPriv...), nil
 }
 
-// deviceECDHPub is the static P-256 public key Y of the device behind rid.
-func (c *Client) deviceECDHPub(rid string) ([]byte, error) {
+// deviceForRID resolves a rendezvous id to the device's own id and its static
+// P-256 public key Y.
+//
+// Authorisation is checked here rather than after the handshake: a revoked or
+// disabled device must not cost a peer connection, and must certainly not
+// receive an answer it could dial.
+func (c *Client) deviceForRID(rid string) (string, []byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, d := range c.devices {
 		if d.RID != rid {
 			continue
 		}
+		if err := c.authDevice(d.ID); err != nil {
+			return "", nil, err
+		}
 		if len(d.ECDHPub) == 0 {
-			return nil, classError(ClassHandshake, "session",
+			return "", nil, classError(ClassHandshake, "session",
 				"this device has no pairing key on record, so an answer cannot be sealed to it")
 		}
-		return append([]byte(nil), d.ECDHPub...), nil
+		return d.ID, append([]byte(nil), d.ECDHPub...), nil
 	}
-	return nil, classError(ClassNotFound, "session", "no device is registered for this rendezvous id")
+	return "", nil, classError(ClassNotFound, "session", "no device is registered for this rendezvous id")
 }
 
 // answerSessionEnvelope opens a device's sealed session offer and returns the
@@ -79,13 +89,61 @@ func (c *Client) answerSessionEnvelope(ctx context.Context, rid string, sealed [
 	}
 	// Resolve the recipient before spending a peer connection on an answer we
 	// would have nowhere to send.
-	peer, err := c.deviceECDHPub(rid)
+	deviceID, peer, err := c.deviceForRID(rid)
 	if err != nil {
 		return nil, err
 	}
-	answer, err := CreateSessionAnswer(ctx, offer)
+	handler := c.tunnelHandler()
+	if handler == nil {
+		return nil, classError(ClassUnavailable, "session",
+			"this installation serves no tunnel, so a session offer cannot be answered")
+	}
+
+	// Join 2: the answer keeps its peer. acceptSessionOffer applies the FR-16
+	// fingerprint binding first, so a rendezvous that rewrote the SDP copy is
+	// refused here rather than dialled.
+	session, answer, err := acceptSessionOffer(ctx, offer, handler)
 	if err != nil {
 		return nil, err
 	}
-	return SealEnvelope(answer, peer, origin, rid)
+	blob, err := SealEnvelope(answer, peer, origin, rid)
+	if err != nil {
+		_ = session.Close()
+		return nil, err
+	}
+
+	// Register before the answer goes out. AttachChannel re-checks
+	// authorisation, so a device revoked during the handshake is refused here;
+	// and once registered, RevokeDevice closes this session rather than only
+	// editing a record.
+	if err := c.attachSession(deviceID, session); err != nil {
+		_ = session.Close()
+		return nil, err
+	}
+	return blob, nil
+}
+
+// tunnelHandler is the S3 boundary a live session serves, or nil.
+func (c *Client) tunnelHandler() http.Handler {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg.TunnelHandler
+}
+
+// attachSession registers s as the device's live channel, replacing and
+// closing whatever was there.
+//
+// A device that reconnects — new network, reloaded page — sends a fresh offer
+// while the old session may still look alive to us. Leaving the previous one
+// registered would mean the next revoke closes the stale session and leaves
+// the live one running, which is precisely the FR-29 failure this is meant to
+// prevent.
+func (c *Client) attachSession(deviceID string, s *Session) error {
+	c.mu.Lock()
+	prev := c.channels[deviceID]
+	c.mu.Unlock()
+	if prev != nil && prev != Channel(s) {
+		_ = prev.Close()
+	}
+	return c.AttachChannel(deviceID, s)
 }

@@ -24,7 +24,7 @@ package remote
 import (
 	"crypto/ecdh"
 	"crypto/rand"
-	"encoding/hex"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -42,42 +42,17 @@ func deviceKeypair(t *testing.T) (*ecdh.PrivateKey, []byte) {
 
 // enrolledClientWithDevice starts a client against rv with one registered
 // device, and returns the client and the device's rendezvous id.
+//
+// The tunnel handler matters even though nothing in this file sends a request
+// over the channel: since join 2 a client with no handler refuses a session
+// offer outright rather than answering into nothing, so without one the
+// negative rows below would assert "no reply" for the wrong reason and the
+// positive row could not pass at all.
 func enrolledClientWithDevice(t *testing.T, rv *sessionRV, devECDHPub []byte) (*Client, string) {
 	t.Helper()
-	cfg := r3ClientCfg(t, rv.URL(), rv.HTTPClient())
-	cfg.Backoff = BackoffConfig{
-		Initial:    20 * time.Millisecond,
-		Max:        200 * time.Millisecond,
-		Factor:     2,
-		SuccessFor: 5 * time.Second,
-	}
-	pub, priv := newEd25519(t)
-	writeState(t, NewClient(cfg), PersistedState{
-		V:          1,
-		Status:     StateEnrolled,
-		Handle:     "ih_041061050R3GG28A",
-		PublicKey:  hex.EncodeToString(pub),
-		PrivateKey: hex.EncodeToString(priv),
-		Origin:     DefaultOrigin,
-	})
-
-	ctx, cancel := ctxTO(t)
-	t.Cleanup(cancel)
-	c := NewClient(cfg)
-	if err := c.Start(ctx); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
-
-	dev, err := c.RegisterDevice(ctx, DeviceRecord{
-		ID:      "phone",
-		PubKey:  append([]byte(nil), testPhonePubKey...),
-		ECDHPub: append([]byte(nil), devECDHPub...),
-	})
-	if err != nil {
-		t.Fatalf("register device: %v", err)
-	}
-	return c, dev.RID
+	return liveSessionClient(t, rv, devECDHPub, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 }
 
 // awaitReply polls rv for the laptop's first reply blob.

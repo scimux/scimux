@@ -52,6 +52,14 @@ type Session struct {
 	deviceID string
 	offers   int
 
+	// laptopOnly marks a session whose far end is a real device rather than an
+	// in-process client peer (acceptSessionOffer). Such a session has no
+	// client half at all, so the questions "is the channel live" and "can this
+	// round-trip" have different answers here than for InProcessTunnel — and
+	// the flag says which shape is meant rather than inferring it from a nil,
+	// which a half-built in-process session would also satisfy.
+	laptopOnly bool
+
 	cause TransportCause
 }
 
@@ -151,8 +159,14 @@ func (s *Session) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, classError(ClassHandshake, "round-trip", "no request")
 	}
 	s.mu.Lock()
-	conn, closed := s.conn, s.closed
+	conn, closed, one := s.conn, s.closed, s.laptopOnly
 	s.mu.Unlock()
+	if one {
+		// This session serves; it does not dial. The requesting end is the
+		// device, and there is no client-side codec conn to drive.
+		return nil, classError(ClassUnavailable, "round-trip",
+			"this session serves a remote device and has no outbound request path")
+	}
 	if closed || conn == nil {
 		return nil, classError(ClassPeerAbsent, "round-trip", "the tunnel is closed")
 	}
@@ -240,14 +254,21 @@ func (s *Session) Send([]byte) error {
 // ChannelLive reports whether the data channel is open.
 func (s *Session) ChannelLive() bool {
 	s.mu.Lock()
-	closed := s.closed
+	closed, one := s.closed, s.laptopOnly
 	clientDC, laptopDC := s.clientDC, s.laptopDC
 	s.mu.Unlock()
-	if closed || clientDC == nil || laptopDC == nil {
+	if closed || laptopDC == nil {
 		return false
 	}
-	return clientDC.ReadyState() == webrtc.DataChannelStateOpen &&
-		laptopDC.ReadyState() == webrtc.DataChannelStateOpen
+	if laptopDC.ReadyState() != webrtc.DataChannelStateOpen {
+		return false
+	}
+	if one {
+		// The client end is the device, out of this process. The laptop's own
+		// channel being open is the whole of what can be observed here.
+		return true
+	}
+	return clientDC != nil && clientDC.ReadyState() == webrtc.DataChannelStateOpen
 }
 
 // RestartRendezvous restarts the signalling hub without touching the
