@@ -7,15 +7,18 @@
  * takes the peer and channel as injected dependencies and owns what happens
  * to them: the request registry, the FR-24 state, and teardown.
  *
- * The codec is injected for the same reason it is a separate concern — the
- * wire format is internal/remote/codec's binary framing, and its browser half
- * has a mechanical oracle (the Go implementation and the shared vectors).
- * Nothing here should encode a byte itself.
+ * The codec is injected because the wire format is a separate concern with
+ * its own mechanical oracle (internal/remote/codec and its shared vectors).
+ * The seam below mirrors codec.Request / codec.Response exactly — string
+ * IDs, method/path/query/headers apart, and a *streamed* body — because a
+ * seam invented from a simpler stand-in is a seam the real codec cannot
+ * satisfy.
  *
  *   AT-FR-41-a  a dropped channel produces a named FR-24 state and an
  *               explicit reconnect, never a request that never settles
  *   AT-FR-41-b  every in-flight request at the moment of loss is rejected
- *               with a distinguishable error
+ *               with a distinguishable error — including one whose head has
+ *               arrived and whose body is still streaming
  *   AT-FR-41-c  nothing schedules work in, or depends on, a context that
  *               outlives the page
  */
@@ -86,12 +89,17 @@ function fakePeer() {
   };
 }
 
-/* A JSON stand-in for internal/remote/codec's binary framing. The transport
- * must not care which one it has. */
+/* A JSON stand-in for internal/remote/codec's binary framing, implementing
+ * the same seam: encodeRequest yields the chunks to write, receive() is fed
+ * whatever arrives and yields zero or more decoded events. The transport
+ * must not care which implementation it has. */
 function jsonCodec() {
   return {
-    encode: req => JSON.stringify(req),
-    decode: data => JSON.parse(String(data)),
+    encodeRequest: req => [JSON.stringify(req)],
+    receive: data => {
+      const msg = JSON.parse(String(data));
+      return Array.isArray(msg) ? msg : [msg];
+    },
   };
 }
 
@@ -125,12 +133,27 @@ function within(p, what, ms = 1000) {
   ]);
 }
 
-/* Answer the request the transport most recently sent. */
-function answerLast(channel, { status = 200, body = "ok" } = {}) {
-  const req = JSON.parse(channel.sent[channel.sent.length - 1]);
-  channel.fire("message", {
-    data: JSON.stringify({ id: req.id, status, headers: {}, body }),
-  });
+const lastRequest = channel => JSON.parse(channel.sent[channel.sent.length - 1]);
+
+function deliver(channel, events) {
+  channel.fire("message", { data: JSON.stringify(events) });
+}
+
+/* Answer the most recent request in full: head, one body chunk, end. */
+function answerLast(channel, { status = 200, headers = {}, body = "ok" } = {}) {
+  const req = lastRequest(channel);
+  deliver(channel, [
+    { type: "response", id: req.id, status, headers },
+    { type: "body", id: req.id, chunk: body },
+    { type: "end", id: req.id },
+  ]);
+  return req;
+}
+
+/* Send only the head, leaving the body streaming. */
+function headOnly(channel, { status = 200, headers = {} } = {}) {
+  const req = lastRequest(channel);
+  deliver(channel, [{ type: "response", id: req.id, status, headers }]);
   return req;
 }
 
@@ -139,28 +162,75 @@ test("AT-FR-41-pre: a request over a live channel resolves (anti-vacuity)", asyn
   const p = transport.fetchImpl("/api/state", {});
   assert.equal(channel.sent.length, 1, "the request was not sent over the channel");
   answerLast(channel, { status: 200, body: "hello" });
-  const res = await p;
+  const res = await within(p, "a request over a live channel");
   assert.equal(res.ok, true);
   assert.equal(res.status, 200);
   assert.equal(await res.text(), "hello");
-  // api.js reads r.headers.get("content-type") on every call; a response
-  // without it breaks every consumer of the FR-42 seam.
-  assert.equal(typeof res.headers.get, "function", "the response carries no headers.get");
+});
+
+test("AT-FR-41-pre: the encoded request matches codec.Request's shape", async () => {
+  // codec.Request keeps ID, Method, Path, Query and Headers apart. A
+  // transport that collapses them cannot be fed to the real codec.
+  const { channel, transport } = harness();
+  transport.fetchImpl("/api/nodes/n1/chat?history=1", {
+    method: "POST",
+    headers: { "X-Scimux-Csrf": "tok" },
+    body: "hi",
+  });
+  const req = lastRequest(channel);
+
+  assert.equal(typeof req.id, "string", "codec.Request.ID is a string, not a number");
+  assert.notEqual(req.id, "", "the request carries no id");
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/nodes/n1/chat", "query must not be left on the path");
+  assert.equal(req.query, "history=1");
+  assert.equal(req.headers["X-Scimux-Csrf"], "tok");
+  assert.equal(req.body, "hi");
+});
+
+test("AT-FR-41-pre: method defaults to GET and an absent query is empty", async () => {
+  const { channel, transport } = harness();
+  transport.fetchImpl("/api/state", {});
+  const req = lastRequest(channel);
+  assert.equal(req.method, "GET");
+  assert.equal(req.query, "");
+  assert.equal(req.path, "/api/state");
+});
+
+test("AT-FR-41-pre: request ids are distinct", async () => {
+  const { channel, transport } = harness();
+  transport.fetchImpl("/api/state", {});
+  transport.fetchImpl("/api/usage", {});
+  const [a, b] = channel.sent.map(s => JSON.parse(s).id);
+  assert.notEqual(a, b, "two concurrent requests share an id; answers cannot be routed");
+});
+
+test("AT-FR-41-pre: a streamed body is reassembled in order", async () => {
+  const { channel, transport } = harness();
+  const p = transport.fetchImpl("/api/state", {});
+  const req = headOnly(channel, { headers: { "content-type": "application/json" } });
+
+  const res = await within(p, "the response head");
+  // The head resolves before the body completes — the same contract fetch
+  // has, and the reason a body arriving in 0x02 frames is expressible here.
+  deliver(channel, [{ type: "body", id: req.id, chunk: '{"a":' }]);
+  deliver(channel, [{ type: "body", id: req.id, chunk: "1}" }]);
+  deliver(channel, [{ type: "end", id: req.id }]);
+
+  assert.deepEqual(await within(res.json(), "the streamed body"), { a: 1 });
 });
 
 test("AT-FR-41-pre: the response satisfies the shape api.js consumes", async () => {
   const { channel, transport } = harness();
   const p = transport.fetchImpl("/api/state", {});
-  const req = JSON.parse(channel.sent[0]);
-  channel.fire("message", {
-    data: JSON.stringify({
-      id: req.id,
-      status: 200,
-      headers: { "content-type": "application/json" },
-      body: '{"n":1}',
-    }),
+  answerLast(channel, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+    body: '{"n":1}',
   });
-  const res = await p;
+  const res = await within(p, "a JSON response");
+  // api.js reads r.headers.get("content-type") on every call, and HTTP
+  // header names are case-insensitive.
   assert.equal(res.headers.get("content-type"), "application/json");
   assert.equal(res.headers.get("Content-Type"), "application/json", "header lookup must be case-insensitive");
   assert.deepEqual(await res.json(), { n: 1 });
@@ -172,7 +242,7 @@ test("AT-FR-41-pre: a non-2xx answer resolves as a response, it is not an error"
   const { channel, transport } = harness();
   const p = transport.fetchImpl("/api/ui", {});
   answerLast(channel, { status: 409, body: "conflict" });
-  const res = await p;
+  const res = await within(p, "a 409 response");
   assert.equal(res.ok, false);
   assert.equal(res.status, 409);
 });
@@ -276,10 +346,70 @@ test("AT-FR-41-b: every in-flight request is rejected distinguishably at the mom
   assert.equal(transport.pendingCount(), 0, "the registry still holds requests after loss");
 });
 
+test("AT-FR-41-b: a body still streaming at the moment of loss rejects too", async () => {
+  // The head resolved, so the caller already holds a response object. Its
+  // body can never complete. Without this the request "succeeded" and the
+  // hang simply moved from fetchImpl() to res.text() — which is worse,
+  // because the FR-24 state says lost while a read sits there forever.
+  const { channel, transport } = harness();
+  const p = transport.fetchImpl("/api/state", {});
+  const req = headOnly(channel);
+  const res = await within(p, "the response head");
+
+  deliver(channel, [{ type: "body", id: req.id, chunk: "partial" }]);
+  const body = res.text().then(() => "resolved", e => e);
+
+  channel.readyState = "closed";
+  channel.fire("close", {});
+
+  const r = await within(body, "a body still streaming at the moment of loss");
+  assert.notEqual(r, "resolved", "a truncated body was returned as if complete");
+  assert.equal(r.name, "remote-connection-lost");
+  assert.equal(r.cause, CAUSE_CONNECTED_THEN_LOST);
+});
+
+test("AT-FR-41-b: an end with no head fails the request, it is not an empty success", async () => {
+  // Found by mutation: resolving a bare "end" as a 200 with an empty body
+  // turns a malformed answer into a plausible one, and api.js would parse it
+  // as real data. There is one error vocabulary here — the caller only needs
+  // to know no answer is coming.
+  const { channel, transport } = harness();
+  const p = transport.fetchImpl("/api/state", {});
+  const req = lastRequest(channel);
+  deliver(channel, [{ type: "end", id: req.id }]);
+
+  await assert.rejects(
+    () => within(p, "a request ended without a head"),
+    err => err.name === "remote-connection-lost",
+  );
+  assert.equal(transport.pendingCount(), 0, "the request was left in the registry");
+});
+
+test("AT-FR-41-b: a reject frame settles the request distinguishably from loss", async () => {
+  // codec.RejectError is the peer refusing this request — the connection is
+  // fine. Reporting it as connection loss would send the UI to an FR-24
+  // state over one bad request.
+  const { channel, transport } = harness();
+  const p = transport.fetchImpl("/api/state", {});
+  const req = lastRequest(channel);
+  deliver(channel, [{ type: "reject", id: req.id, class: "method", message: "method not allowed" }]);
+
+  const err = await within(p.then(() => null, e => e), "a rejected request");
+  assert.ok(err, "the request resolved despite being rejected");
+  assert.notEqual(err.name, "remote-connection-lost", "a reject is not transport loss");
+  assert.equal(err.class, "method");
+  assert.equal(
+    transport.state().connected,
+    true,
+    "a rejected request must not take the transport out of the connected state",
+  );
+  assert.equal(transport.pendingCount(), 0);
+});
+
 test("AT-FR-41-b: a late answer for a rejected request is ignored, not re-settled", async () => {
   const { channel, transport } = harness();
   const p = transport.fetchImpl("/api/state", {});
-  const req = JSON.parse(channel.sent[0]);
+  const req = lastRequest(channel);
   const settled = p.then(() => "resolved", e => e.name);
 
   channel.readyState = "closed";
@@ -288,9 +418,10 @@ test("AT-FR-41-b: a late answer for a rejected request is ignored, not re-settle
 
   // The peer's answer arrives after we gave up. It must not throw and must
   // not resurrect anything.
-  channel.fire("message", {
-    data: JSON.stringify({ id: req.id, status: 200, headers: {}, body: "late" }),
-  });
+  deliver(channel, [
+    { type: "response", id: req.id, status: 200, headers: {} },
+    { type: "end", id: req.id },
+  ]);
   assert.equal(transport.pendingCount(), 0);
 });
 
@@ -364,5 +495,21 @@ test("AT-FR-41-c: close() rejects in-flight requests too", async () => {
   const p = transport.fetchImpl("/api/state", {});
   const settled = p.then(() => "resolved", e => e.name);
   transport.close();
-  assert.equal(await within(settled, "the request outstanding at close()"), "remote-connection-lost");
+  assert.equal(
+    await within(settled, "the request outstanding at close()"),
+    "remote-connection-lost",
+  );
+});
+
+test("AT-FR-41-c: close() rejects a body still streaming", async () => {
+  const { channel, transport } = harness();
+  const p = transport.fetchImpl("/api/state", {});
+  headOnly(channel);
+  const res = await within(p, "the response head");
+  const body = res.text().then(() => "resolved", e => e.name);
+  transport.close();
+  assert.equal(
+    await within(body, "a body streaming at close()"),
+    "remote-connection-lost",
+  );
 });
