@@ -167,11 +167,19 @@ func (a *app) syncPiFare(n *Node) {
 		}
 	}
 
-	// Source seam when the bound native file or session id changes (first
-	// bind, or /clear → new sessionId → new file per O1).
+	// Source seam when the bound native file or session id changes — but
+	// never on a first bind. With no prior bind state (path and sid both
+	// empty, fresh or recovered by replay) there is nothing to dedupe
+	// against, so the watermark seam buys nothing and would only page the
+	// first prompt out of the live segment. A /clear is unaffected: the ACP
+	// clear path's NewClearSource seam makes replay recover a non-empty sid,
+	// so the native-path seam is appended as before. The bind itself is
+	// recorded either way.
 	if native != m.path || sid != m.sid {
-		if err := m.logw.Append(sessionlog.NewSource(native, sid)); err != nil {
-			return
+		if m.path != "" || m.sid != "" {
+			if err := m.logw.Append(sessionlog.NewSource(native, sid)); err != nil {
+				return
+			}
 		}
 		m.path, m.sid = native, sid
 		m.tailer = &transcript.PiTailer{Path: native}

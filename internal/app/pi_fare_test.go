@@ -109,7 +109,14 @@ func TestPiNative_ClearStartsNewSession(t *testing.T) {
 	n := &Node{ID: "pi1", Agent: "pi", Model: "m", SessionID: "sid-old"}
 	a.syncPiFare(n)
 
-	// Switch to the new session (simulates ACP Clear + new sessionId).
+	// Simulate ACP Clear faithfully: the clear path appends its own path-less
+	// clear seam before the node moves to the new sessionId. (The mirror no
+	// longer writes a seam on its *first* bind, so this seam — not the old
+	// bind — is the first of the two.)
+	cw := &sessionlog.Writer{Path: filepath.Join(a.sessionsDir, "pi1.jsonl")}
+	if err := cw.Append(sessionlog.NewClearSource("sid-new")); err != nil {
+		t.Fatal(err)
+	}
 	n.SessionID = "sid-new"
 	a.syncPiFare(n)
 
@@ -121,7 +128,7 @@ func TestPiNative_ClearStartsNewSession(t *testing.T) {
 		}
 	}
 	if len(sources) < 2 {
-		t.Fatalf("sources = %d, want ≥2 (old bind + new session after clear); events=%+v", len(sources), evs)
+		t.Fatalf("sources = %d, want ≥2 (clear seam + native rebind after clear); events=%+v", len(sources), evs)
 	}
 	// Last source must bind the new session id (and its native path).
 	last := sources[len(sources)-1]
@@ -421,5 +428,204 @@ func TestPiFare_ReadFareUnaffectedByOccupancy(t *testing.T) {
 	wantCost := 0.01 + 0.02
 	if f.ReportedCostUSD < wantCost-1e-9 || f.ReportedCostUSD > wantCost+1e-9 {
 		t.Errorf("ReportedCostUSD = %v, want %v (D8: reported-only, not from models.json rates)", f.ReportedCostUSD, wantCost)
+	}
+}
+
+// --- Defect 2: the fare mirror's first bind must not write a source seam ---
+
+// plantFreshPiLog pre-creates the node's session log the way a real first
+// prompt does: the launch meta header followed by the user turn (written by
+// the ACP layer before the first prompt). Returns the log path.
+func plantFreshPiLog(t *testing.T, a *app, nodeID, prompt string) string {
+	t.Helper()
+	logPath := filepath.Join(a.sessionsDir, nodeID+".jsonl")
+	w := &sessionlog.Writer{Path: logPath}
+	if err := w.Append(sessionlog.NewMeta(nodeID, "pi", "m", "", "/tmp/fixture")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.Event{T: "user", Text: prompt}); err != nil {
+		t.Fatal(err)
+	}
+	return logPath
+}
+
+func countPiFareSources(t *testing.T, logPath string) []sessionlog.SourceEvent {
+	t.Helper()
+	var sources []sessionlog.SourceEvent
+	for _, ev := range sessionlog.ReadEvents(logPath) {
+		if ev.T == "source" && ev.Source != nil {
+			sources = append(sources, *ev.Source)
+		}
+	}
+	return sources
+}
+
+// TestPiFare_FirstBindWritesNoSeam: on a fresh node both the mirror's path
+// and sid are empty, so the first successful bind has nothing to dedupe
+// against — it records the bind but appends no source seam, while still
+// projecting usage.
+func TestPiFare_FirstBindWritesNoSeam(t *testing.T) {
+	a := piFareTestApp(t)
+	body := `{"type":"message","id":"t1","message":{"role":"assistant","model":"m","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":1,"reasoning":0,"totalTokens":12,"cost":{"total":0.01}}}}` + "\n"
+	plantPiNative(t, a.home, "sid-1", body)
+	logPath := plantFreshPiLog(t, a, "pi-fb", "first prompt")
+	n := &Node{ID: "pi-fb", Agent: "pi", Model: "m", SessionID: "sid-1"}
+	a.syncPiFare(n)
+
+	if srcs := countPiFareSources(t, logPath); len(srcs) != 0 {
+		t.Fatalf("first bind wrote %d source seam(s), want none: %+v", len(srcs), srcs)
+	}
+	// The usage record was still projected.
+	var usages int
+	for _, ev := range sessionlog.ReadEvents(logPath) {
+		if ev.T == "usage" && ev.Usage != nil {
+			usages++
+		}
+	}
+	if usages != 1 {
+		t.Fatalf("usage records = %d, want 1 (bind must still project usage)", usages)
+	}
+}
+
+// TestPiFare_FirstBindKeepsFirstTurnInLiveSegment: with no spurious seam the
+// segment reader keeps the first prompt in the live chat surface — nothing is
+// evicted behind "show earlier history" and the chat-started header is not
+// re-dated at the (nonexistent) seam.
+func TestPiFare_FirstBindKeepsFirstTurnInLiveSegment(t *testing.T) {
+	a := piFareTestApp(t)
+	body := `{"type":"message","id":"t1","message":{"role":"assistant","model":"m","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":1,"reasoning":0,"totalTokens":12,"cost":{"total":0.01}}}}` + "\n"
+	plantPiNative(t, a.home, "sid-1", body)
+	logPath := plantFreshPiLog(t, a, "pi-seg", "first prompt")
+	n := &Node{ID: "pi-seg", Agent: "pi", Model: "m", SessionID: "sid-1"}
+	a.syncPiFare(n)
+
+	var metaTime string
+	for _, ev := range sessionlog.ReadEvents(logPath) {
+		if ev.T == "meta" {
+			metaTime = ev.Time
+		}
+	}
+	if metaTime == "" {
+		t.Fatal("no meta header in log")
+	}
+	seg := sessionlog.ReadSegment(logPath)
+	if seg.PriorTurns != 0 {
+		t.Errorf("PriorTurns = %d, want 0 (no seam may page out the first turn)", seg.PriorTurns)
+	}
+	if len(seg.Turns) != 1 || seg.Turns[0].Role != "user" || seg.Turns[0].Text != "first prompt" {
+		t.Fatalf("live segment turns = %+v, want the first user turn live", seg.Turns)
+	}
+	if seg.StartTime != metaTime {
+		t.Errorf("StartTime = %q, want the meta/turn time %q (no seam re-dating)", seg.StartTime, metaTime)
+	}
+}
+
+// TestPiFare_FirstBindStaysSeamlessAfterRestart: after a suppressed first
+// bind the log holds no source, so replay recovers path=="" && sid=="" and the
+// next bind is suppressed again — never a late seam mid-log.
+func TestPiFare_FirstBindStaysSeamlessAfterRestart(t *testing.T) {
+	a := piFareTestApp(t)
+	body := `{"type":"message","id":"t1","message":{"role":"assistant","model":"m","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":1,"reasoning":0,"totalTokens":12,"cost":{"total":0.01}}}}` + "\n"
+	plantPiNative(t, a.home, "sid-1", body)
+	logPath := plantFreshPiLog(t, a, "pi-rs", "first prompt")
+	n := &Node{ID: "pi-rs", Agent: "pi", Model: "m", SessionID: "sid-1"}
+	a.syncPiFare(n)
+
+	// Simulate a scimux restart: the in-memory mirror is gone; durable state
+	// comes back from the log only.
+	a.piMirrors = nil
+	a.syncPiFare(n)
+
+	if srcs := countPiFareSources(t, logPath); len(srcs) != 0 {
+		t.Fatalf("post-restart bind wrote %d source seam(s), want none: %+v", len(srcs), srcs)
+	}
+	var usages int
+	for _, ev := range sessionlog.ReadEvents(logPath) {
+		if ev.T == "usage" && ev.Usage != nil {
+			usages++
+		}
+	}
+	if usages != 1 {
+		t.Fatalf("usage records = %d, want 1 (no duplicated usage after restart)", usages)
+	}
+}
+
+// TestPiFare_RebindAfterFirstBindWritesSeam: once the mirror has prior bind
+// state, a different native file/session id is a genuine rebind — the seam is
+// appended.
+func TestPiFare_RebindAfterFirstBindWritesSeam(t *testing.T) {
+	a := piFareTestApp(t)
+	body1 := `{"type":"message","id":"t1","message":{"role":"assistant","model":"m","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":1,"reasoning":0,"totalTokens":12,"cost":{"total":0.01}}}}` + "\n"
+	body2 := `{"type":"message","id":"t2","message":{"role":"assistant","model":"m","usage":{"input":20,"output":3,"cacheRead":0,"cacheWrite":2,"reasoning":0,"totalTokens":23,"cost":{"total":0.02}}}}` + "\n"
+	plantPiNative(t, a.home, "sid-1", body1)
+	logPath := plantFreshPiLog(t, a, "pi-rb", "first prompt")
+	n := &Node{ID: "pi-rb", Agent: "pi", Model: "m", SessionID: "sid-1"}
+	a.syncPiFare(n)
+	if srcs := countPiFareSources(t, logPath); len(srcs) != 0 {
+		t.Fatalf("first bind wrote %d source seam(s), want none: %+v", len(srcs), srcs)
+	}
+
+	// Second session: a different native file (simulates /clear → new sid).
+	p2 := filepath.Join(a.home, ".pi", "agent", "sessions", "--tmp-fixture--", "2026-08-04T13-00-00-000Z_sid-2.jsonl")
+	if err := os.WriteFile(p2, []byte(body2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mapPath := filepath.Join(a.home, ".pi", "pi-acp", "session-map.json")
+	raw, err := os.ReadFile(mapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["sessions"].(map[string]any)["sid-2"] = map[string]string{
+		"sessionId":   "sid-2",
+		"cwd":         "/tmp/fixture",
+		"sessionFile": p2,
+		"updatedAt":   "2026-08-04T13:00:00.000Z",
+	}
+	b, _ := json.Marshal(m)
+	if err := os.WriteFile(mapPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	n.SessionID = "sid-2"
+	a.syncPiFare(n)
+
+	srcs := countPiFareSources(t, logPath)
+	if len(srcs) != 1 {
+		t.Fatalf("rebind wrote %d source seams, want 1: %+v", len(srcs), srcs)
+	}
+	if srcs[0].SessionID != "sid-2" || srcs[0].Path != p2 {
+		t.Errorf("rebind seam = %+v, want sid-2 / %q", srcs[0], p2)
+	}
+}
+
+// TestPiFare_SeamStillWrittenAfterClearSeam: a /clear leaves the ACP
+// NewClearSource seam in the log, so replay recovers a non-empty sid — the
+// mirror's native-path bind then appends its seam exactly as before.
+func TestPiFare_SeamStillWrittenAfterClearSeam(t *testing.T) {
+	a := piFareTestApp(t)
+	body := `{"type":"message","id":"t1","message":{"role":"assistant","model":"m","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":1,"reasoning":0,"totalTokens":12,"cost":{"total":0.01}}}}` + "\n"
+	plantPiNative(t, a.home, "sid-1", body)
+	logPath := plantFreshPiLog(t, a, "pi-cs", "first prompt")
+	// The ACP clear path has already turned the page.
+	w := &sessionlog.Writer{Path: logPath}
+	if err := w.Append(sessionlog.NewClearSource("sid-1")); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "pi-cs", Agent: "pi", Model: "m", SessionID: "sid-1"}
+	a.syncPiFare(n)
+
+	srcs := countPiFareSources(t, logPath)
+	if len(srcs) != 2 {
+		t.Fatalf("seams = %d, want 2 (clear seam + native bind seam): %+v", len(srcs), srcs)
+	}
+	if srcs[0].Reason != "clear" {
+		t.Errorf("first seam = %+v, want the clear seam", srcs[0])
+	}
+	if srcs[1].Path == "" || srcs[1].SessionID != "sid-1" {
+		t.Errorf("second seam = %+v, want the native bind seam (path + sid-1)", srcs[1])
 	}
 }
