@@ -685,11 +685,23 @@ Revoke one paired device.
 
 ### `GET /api/remote/status`
 
-The installation's hosted enrollment as `{"hosted":"<status>"}`, where
-status is `enrolled`, `disabled`, `revoked`, or `unavailable`. `404`
-when remote pairing is not enabled. GET needs no CSRF header. The body
-is that one field — it never mints a code and never returns a rid, SAS,
-or public key.
+The installation's hosted enrollment as `hosted` (`enrolled`,
+`disabled`, `revoked`, or `unavailable`) plus a `devices` array. Each
+device is `{"id":"...","connected":true}` when its tunnel is live.
+When it is not, `connected` is false; `cause` is one of the six FR-24
+states (`rendezvous-unavailable`, `laptop-offline`,
+`signalling-rejected`, `ice-failed`, `auth-failed`,
+`connected-then-lost`) only when the transport has produced one. A
+paired device that has never attached a channel omits `cause`
+entirely — never connected is not a cause. `guidance` is present only
+for `ice-failed`, and is the only state that names
+SSH/WireGuard/Tailscale. `hosted` is independent of `cause`: a
+revoked installation is still `hosted:"revoked"` and is not an
+FR-24 cause.
+
+`404` when remote pairing is not enabled. GET needs no CSRF header.
+The body never mints a code and never returns a rid, SAS, or public
+key.
 
 `POST /api/remote/pairing` returns `409` with `hosted` and a readable
 `error` when status is `revoked` or `disabled` — durable facts about

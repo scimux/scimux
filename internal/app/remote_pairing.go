@@ -21,7 +21,10 @@ type hostedPairingClient interface {
 	PairedDevices() ([]remote.PairedDevice, error)
 	RevokePairedDevice(context.Context, string) error
 	HostedStatus() string
+	TransportCause(string) (remote.TransportCause, error)
 }
+
+var _ hostedPairingClient = (*remote.Client)(nil)
 
 func (a *app) pairingClient() hostedPairingClient {
 	if a == nil {
@@ -151,7 +154,40 @@ func (a *app) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"hosted": p.HostedStatus()})
+	list, err := p.PairedDevices()
+	if err != nil {
+		writeRemotePairingError(w, err)
+		return
+	}
+	devices := make([]map[string]any, 0, len(list))
+	for _, d := range list {
+		devices = append(devices, projectRemoteDeviceCause(p, d.ID))
+	}
+	writeJSON(w, map[string]any{
+		"hosted":  p.HostedStatus(),
+		"devices": devices,
+	})
+}
+
+// projectRemoteDeviceCause is the FR-24 HTTP view of one paired device.
+// connected:true with no cause is a live tunnel. connected:false with the
+// cause key absent is D2: no attached Session, or a ClassPeerAbsent error,
+// is not a cause. guidance is AT-FR-24-c: only ice-failed names a fallback.
+func projectRemoteDeviceCause(p hostedPairingClient, id string) map[string]any {
+	out := map[string]any{"id": id, "connected": false}
+	cause, err := p.TransportCause(id)
+	if err != nil {
+		return out
+	}
+	if cause == "" {
+		out["connected"] = true
+		return out
+	}
+	out["cause"] = string(cause)
+	if g := cause.Guidance(); g != "" {
+		out["guidance"] = g
+	}
+	return out
 }
 
 func pairingStatusJSON(st remote.PairingStatus) map[string]any {
