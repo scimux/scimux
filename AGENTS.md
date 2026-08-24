@@ -10,7 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
-node --test web/test/*.test.js  # browser unit suite (1106 tests; no browser needed)
+node --test web/test/*.test.js  # browser unit suite (1115 tests; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -108,7 +108,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
 - **A Claude transcript is bound only by that node's own SessionStart hook.**
   Every Claude launch mints a fresh hook bundle under
   `~/.scimux/claude-hooks/<hex-id>/` (`settings.json` 0600, `inbox/`,
-  `processed/`, `stop/`, `notify/`, `compact/`, and `perm/` 0700) and passes
+  `processed/`, `stop/`, `notify/`, `compact/`, `elicitation/`, and `perm/` 0700) and passes
   it as `--settings`; the file registers scimux itself as the `SessionStart`
   command, so the hook firing *is* the process→transcript ownership proof
   **and** the startup/hook-health acknowledgement. The undocumented transcript `bridge_status` record is not
@@ -313,10 +313,11 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   For a newly scimux-owned, SessionStart-acknowledged Claude node with the
   complete current hook bundle (SessionStart, PermissionRequest,
   Notification(`permission_prompt`), Stop, StopFailure, PreCompact,
-  PostCompact), the tmux terminal
+  PostCompact, Elicitation, ElicitationResult), the tmux terminal
   may be visible only when the user opened it with the terminal button, or
   when auto-approve is not armed and a current permission dialog is
-  structurally proven. Notification(`permission_prompt`) proves only that
+  structurally proven. MCP elicitation raises structured `question`
+  attention and never auto-opens the terminal. Notification(`permission_prompt`) proves only that
   *a* permission dialog is visible — Claude's payload has no PermissionRequest
   id and no tool_use id, so scimux does **not** claim exact request
   correlation. The UI action is bound to a server-minted visible-dialog
@@ -342,7 +343,10 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   concurrent asks cannot present an older request as the current dialog
   identity, because no such identity is claimed. Pane text is never parsed
   to invent one. Compaction is not a permission dialog and never opens the
-  terminal. Pane quietness,
+  terminal. MCP elicitation is structured question evidence, never
+  auto-answered, and never auto-opens the terminal; a coexisting proven
+  permission dialog may still force it. Schema and result content are not
+  retained. Pane quietness,
   AX static rendering, unresolved transcript calls, missing/stale/
   unparseable transcripts, fallback chat, and owing timeouts must never
   automatically open the terminal and must never emit "quiet · inspect
@@ -412,6 +416,25 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   does not change `SessionStart source:"compact"` transcript binding. The
   complete current bundle requires the compact capability and `compact/`
   directory; older bundles are `claude_unsupported` until relaunch.
+- **Claude MCP elicitation is passive chat UX.** Elicitation and
+  ElicitationResult ride the same private hook bundle as SessionStart. The
+  helper writes one `elicitation/active/<nonce>.json` per current request
+  (session, optional elicitation-id digest, accepted-turn fence, bounded MCP
+  server name plus correlation digest, message, mode, URL-mode-only validated
+  http(s) URL, timestamp) and
+  never retains `requested_schema` or result `content`. It never prints to
+  stdout/stderr and always exits 0, so scimux
+  cannot deny or rewrite the MCP exchange. A current request raises yellow
+  `question` attention even while auto-approve is armed, is never
+  auto-answered, and is shown only on `GET /api/nodes/{id}/chat` as
+  `elicitation_waiting` plus bounded metadata (not `/api/state`). The selected
+  chat explains the request and offers Open Terminal; it does not invent
+  Yes/No or keypad controls. ElicitationResult removes the matching record.
+  Same-identity SessionStart `compact`/`resume` leave it standing. `/clear`,
+  Stop, StopFailure, interrupt, `/exit`, changed-session rebind, process loss,
+  and node deletion clear it. The complete current bundle requires the
+  elicitation capability and `elicitation/` directories; older bundles are
+  `claude_unsupported` until relaunch.
 - **Neutral inspect is acknowledgeable, not actionable.** A fresh `inspect`
   may unfold the terminal once. Non-AX inspect shows the default terminal
   action bar (digits, y/n, arrows, Enter, Escape) plus a distinct **Dismiss**

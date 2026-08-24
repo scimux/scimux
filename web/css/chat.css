@@ -117,6 +117,12 @@ body.cards-open #msgs { overflow: hidden; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
 .pending.compacting { color: var(--work); }
+.pending.elicitation { color: var(--work); font-style: normal; }
+.pending.elicitation .elicitation-item { margin-top: 8px; }
+.pending.elicitation .elicitation-server { font-weight: 600; color: var(--ink); }
+.pending.elicitation .elicitation-message { color: var(--ink); font-style: italic; }
+.pending.elicitation .elicitation-mode { color: var(--dim); font-size: 12px; }
+.pending.elicitation .elicitation-url a { color: var(--work); }
 /* /clear page-turn: prior history stays in the log behind a seam; the chat
    surface starts fresh under a rule + when it started. The same component
    will separate segments if full-history rendering arrives later. */

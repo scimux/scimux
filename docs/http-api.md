@@ -174,7 +174,8 @@ ETag short-circuiting.
 On the polled (non-history) path, responses carry an `ETag`; polling clients
 may send `If-None-Match` and receive `304 Not Modified` when the snapshot is
 unchanged. The tag hashes the fully marshalled body (turns *and* mechanics such
-as attention, `last_change`, delivery, and Claude `compacting`), so a
+as attention, `last_change`, delivery, and Claude `compacting` /
+`elicitation_waiting`), so a
 needs-input or compaction flip without a log write still invalidates the cache.
 
 For a strict scimux-owned Claude node, `compacting: true` (and optional
@@ -182,6 +183,14 @@ For a strict scimux-owned Claude node, `compacting: true` (and optional
 `compact/active.json` marker is valid. The field is omitted when idle. It
 does not appear on `/api/state`. Compaction forces `reply_ready` false and
 does not change `live`, `attention`, `fallback`, or `supervision`.
+
+While an MCP elicitation is outstanding, the same chat payload sets
+`elicitation_waiting: true`, `elicitation_count`, and a bounded
+`elicitations` array of `{server, message, mode, url}` metadata for the
+current session. Those fields are omitted when idle and never appear on
+`/api/state`. Elicitation forces `reply_ready` false, raises `question`
+attention, and does not reuse `perm_*` identity fields. Schema and result
+content are never included.
 
 ### `GET /api/nodes/{id}/peek[?mode=visible]`
 

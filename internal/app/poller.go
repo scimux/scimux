@@ -170,8 +170,10 @@ func (a *app) poll() {
 			// AX staticness, unresolved calls, missing/stale/unparseable
 			// transcripts, fallback chat, or owing timeouts. Unsupported and
 			// starting Claude nodes are equally forbidden from inspect.
-			// Attention is only a proven visible permission dialog, and never
-			// while auto-approve remains armed (that case is an inline error).
+			// Attention is a proven visible permission dialog (never while
+			// auto-approve remains armed — that case is an inline error) or
+			// a current MCP elicitation, which stays visible even when the
+			// lease is armed because elicitation is never auto-answered.
 			if claudeSup == claudeSupStrict && claudeDlg.Attn != "" && !claudeArmed {
 				attn, freshAttn = claudeDlg.Attn, true
 			}
@@ -210,6 +212,9 @@ func (a *app) poll() {
 				}
 			}
 			askAttn, askCapable = "", false
+			if claudeSup == claudeSupStrict && a.claudeElicitationWaiting(n) && attn == "" {
+				attn, freshAttn = "question", true
+			}
 		} else if state == "quiet" {
 			// A zero-turn segment immediately after /clear is deliberately idle:
 			// the detached Claude transcript is expected, not missing evidence.

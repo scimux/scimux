@@ -43,6 +43,10 @@ import {
   echoBubbleHTML,
   restoreDraftDecision,
   createChatFeature,
+  elicitationStatusHTML,
+  elicitationKey,
+  isSafeElicitationURL,
+  ELICITATION_OPEN_LABEL,
 } from "../js/chat.js";
 /* P6: ASSET_REF_RE + stripAssetRefs live in format.js (one home for every
    send-to strip). Mechanical import-path move from chat.js. */
@@ -402,12 +406,20 @@ test("chatActivityPolicy: Claude strict never auto-opens except a proven permiss
 
   const perm = chatActivityPolicy({
     supervision: "claude_strict", attention: "approval", turnsLength: 2,
+    permDialogId: "epoch-1",
   });
   assert.equal(perm.mustShowPane, true);
   assert.equal(perm.forcePeek, true);
 
+  const approvalOnly = chatActivityPolicy({
+    supervision: "claude_strict", attention: "approval", turnsLength: 2,
+  });
+  assert.equal(approvalOnly.mustShowPane, false,
+    "attention alone is not a proven permission dialog");
+
   const armed = chatActivityPolicy({
     supervision: "claude_strict", attention: "approval", autoApproveArmed: true, turnsLength: 2,
+    permDialogId: "epoch-1",
   });
   assert.equal(armed.mustShowPane, false);
 
@@ -616,15 +628,28 @@ test("keyRowHTML: epoch-bound Claude surface renders without map attention", () 
   assert.match(html, /Choose below/);
 });
 
-test("chatActivityPolicy: Claude question auto-opens only when auto-approve is off", () => {
+test("chatActivityPolicy: Claude question auto-opens only with a proven permission epoch", () => {
   const off = chatActivityPolicy({
     supervision: "claude_strict", attention: "question", turnsLength: 2,
+    permDialogId: "epoch-q",
   });
   assert.equal(off.mustShowPane, true);
+  const elicitationOnly = chatActivityPolicy({
+    supervision: "claude_strict", attention: "question", turnsLength: 2,
+  });
+  assert.equal(elicitationOnly.mustShowPane, false,
+    "elicitation-only question attention must not auto-open the terminal");
   const armed = chatActivityPolicy({
     supervision: "claude_strict", attention: "question", autoApproveArmed: true, turnsLength: 2,
+    permDialogId: "epoch-q",
   });
   assert.equal(armed.mustShowPane, false);
+  const both = chatActivityPolicy({
+    supervision: "claude_strict", attention: "question", turnsLength: 2,
+    permDialogId: "epoch-q",
+  });
+  assert.equal(both.mustShowPane, true,
+    "a coexisting proven permission dialog may still force the terminal");
 });
 
 test("pendingEmptyHTML: Claude startup does not mention the raw terminal", () => {
@@ -1511,6 +1536,7 @@ function el(tag, attrs = {}){
       if (sel.includes(".permask") && this.classList.contains("permask")) return this;
       if (sel.includes("[data-bact]") && this.dataset?.bact) return this;
       if (sel.includes("[data-dismiss-attention]") && this.dataset?.dismissAttention) return this;
+      if (sel.includes("[data-open-terminal]") && this.dataset?.openTerminal) return this;
       if (sel.includes("[data-key]") && this.dataset?.key) return this;
       if (sel.includes(".turn") && this.classList.contains("turn")) return this;
       if (sel.includes(".attthumb") && this.classList.contains("attthumb")) return this;
@@ -4100,4 +4126,205 @@ test("compacting status does not yank a scrolled-up reader, and pins a bottom re
     "a reader already at the bottom stays pinned when the status disappears");
   ctx.feature.destroy();
   bottom.feature.destroy();
+});
+
+function elicitationPayload(extra = {}){
+  return {
+    turns: [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
+            { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }],
+    live: "quiet",
+    delivery: "ok",
+    source: "tmux",
+    supervision: "claude_strict",
+    attention: "question",
+    elicitation_waiting: true,
+    elicitation_count: 1,
+    elicitations: [{
+      server: "docs-server",
+      message: "Please provide your credentials",
+      mode: "form",
+    }],
+    chat_started: "2026-01-01T00:00:00Z",
+    prior_turns: 0,
+    assets: {},
+    reply_ready: false,
+    auto_approve: { phase: "off" },
+    ...extra,
+  };
+}
+
+test("isSafeElicitationURL accepts only absolute http(s)", () => {
+  assert.equal(isSafeElicitationURL("https://auth.example.com/login"), true);
+  assert.equal(isSafeElicitationURL("http://localhost:8080/x"), true);
+  assert.equal(isSafeElicitationURL("javascript:alert(1)"), false);
+  assert.equal(isSafeElicitationURL("data:text/html,<script>"), false);
+  assert.equal(isSafeElicitationURL("/relative"), false);
+  assert.equal(isSafeElicitationURL("//evil.example"), false);
+  assert.equal(isSafeElicitationURL("https://user:pass@evil.example"), false);
+});
+
+test("elicitationStatusHTML escapes text and never uses Markdown", () => {
+  const html = elicitationStatusHTML({
+    elicitation_waiting: true,
+    elicitation_count: 1,
+    elicitations: [{
+      server: "<script>alert(1)</script>",
+      message: "**bold** <img src=x>",
+      mode: "form",
+    }],
+  });
+  assert.match(html, /class="pending elicitation"/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /\*\*bold\*\*/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<img /);
+  assert.doesNotMatch(html, /<strong>/);
+  assert.match(html, new RegExp(ELICITATION_OPEN_LABEL));
+  assert.match(html, /data-open-terminal="1"/);
+  assert.doesNotMatch(html, /data-key=/);
+});
+
+test("elicitationStatusHTML URL mode renders only a validated http(s) link", () => {
+  const ok = elicitationStatusHTML({
+    elicitation_waiting: true,
+    elicitation_count: 1,
+    elicitations: [{
+      server: "auth",
+      message: "Please authenticate",
+      mode: "url",
+      url: "https://auth.example.com/login",
+    }],
+  });
+  assert.match(ok, /href="https:\/\/auth\.example\.com\/login"/);
+  assert.match(ok, /target="_blank"/);
+  assert.match(ok, /rel="noopener noreferrer"/);
+
+  const bad = elicitationStatusHTML({
+    elicitation_waiting: true,
+    elicitation_count: 1,
+    elicitations: [{
+      server: "auth",
+      message: "Please authenticate",
+      mode: "url",
+      url: "javascript:alert(1)",
+    }],
+  });
+  assert.doesNotMatch(bad, /href=/);
+  assert.doesNotMatch(bad, /javascript:/);
+});
+
+test("keyRowHTML: elicitation-only question never shows a guessed keypad", () => {
+  const html = keyRowHTML({
+    attention: "question",
+    elicitationWaiting: true,
+    source: "tmux",
+  });
+  assert.equal(html, "");
+  assert.doesNotMatch(html, /data-key=/);
+});
+
+test("buildChatSignature changes when elicitation flips", () => {
+  const base = {
+    nodeId: "n1", attention: "", attentionHidden: false,
+    delivery: "ok", showPeek: false, termOpen: false, termFull: false,
+    source: "tmux", permTitle: "", permOptionsKey: "", priorTurns: 0,
+    chatStarted: "2026-01-01T00:00:00Z", echoHash: "", histKey: "",
+    turnsHash: "t",
+  };
+  const off = buildChatSignature(base);
+  const on = buildChatSignature({
+    ...base,
+    attention: "question",
+    elicitationKey: elicitationKey(elicitationPayload()),
+  });
+  assert.notEqual(off, on, "elicitation must participate in the chat signature");
+  assert.equal(chatRenderDecision(on, off), "rebuild");
+});
+
+test("elicitation status is dedicated, not permManual, and survives auto-approve", async () => {
+  const payload = elicitationPayload({
+    auto_approve: { phase: "armed", supported: true },
+  });
+  const nodes = [{
+    id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+    live: "quiet", attention: "question", lane_id: "L1", description: "d",
+  }];
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: payload,
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const html = ctx.roots.msgs.innerHTML;
+  assert.match(html, /docs-server/);
+  assert.match(html, /Please provide your credentials/);
+  assert.match(html, /form/);
+  assert.match(html, /data-open-terminal="1"/);
+  assert.doesNotMatch(html, /data-key=/);
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /data-key=/);
+  assert.doesNotMatch(ctx.roots.keyrow.innerHTML, /Yes/);
+  assert.equal(ctx.roots.termtoggle.classList.contains("on"), false,
+    "elicitation must not auto-open the terminal");
+  ctx.feature.destroy();
+});
+
+test("multiple elicitations show a bounded list", () => {
+  const html = elicitationStatusHTML({
+    elicitation_waiting: true,
+    elicitation_count: 3,
+    elicitations: [
+      { server: "a", message: "one", mode: "form" },
+      { server: "b", message: "two", mode: "url", url: "https://example.com" },
+    ],
+  });
+  assert.match(html, /3 MCP input requests/);
+  assert.match(html, />a</);
+  assert.match(html, />b</);
+});
+
+test("elicitation Open Terminal sends no remote key", async () => {
+  const payload = elicitationPayload();
+  const nodes = [{
+    id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+    live: "quiet", attention: "question", lane_id: "L1", description: "d",
+  }];
+  const ctx = makeFeature({ nodes, chatPayload: payload });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /data-open-terminal="1"/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /data-key=/);
+  assert.match(chatSrc, /function onMsgsClick[\s\S]*data-open-terminal/);
+  assert.match(chatSrc, /if \(openTerm\)\{\s*if \(!termOpen\) onTermToggle\(\);\s*return;/);
+  ctx.feature.destroy();
+});
+
+test("elicitation rebuild preserves a scrolled-up reader and pins a bottom reader", async () => {
+  let waiting = false;
+  const ctx = makeFeature({
+    nodes: [{
+      id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+      live: "quiet", attention: waiting ? "question" : "", lane_id: "L1", description: "d",
+    }],
+    chatConditional: () => ({
+      status: 200,
+      etag: waiting ? '"e1"' : '"e0"',
+      data: waiting ? elicitationPayload() : {
+        ...elicitationPayload(),
+        elicitation_waiting: false,
+        elicitation_count: 0,
+        elicitations: [],
+        attention: "",
+      },
+    }),
+  });
+  ctx.roots.msgs.scrollHeight = 3000;
+  ctx.roots.msgs.clientHeight = 600;
+  ctx.roots.msgs.scrollTop = 200;
+  await ctx.feature.render();
+  waiting = true;
+  ctx.nodes[0].attention = "question";
+  await ctx.feature.render();
+  assert.equal(ctx.roots.msgs.scrollTop, 200,
+    "a reader scrolled upward is not pulled to the bottom");
+  ctx.feature.destroy();
 });

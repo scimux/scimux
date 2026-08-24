@@ -145,6 +145,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	}
 	for _, sub := range []string{
 		"inbox", "processed", "stop", "notify", "compact",
+		"elicitation", filepath.Join("elicitation", "active"),
 		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
 		filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
 		filepath.Join("perm", claudeShownDirName),
@@ -176,7 +177,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	// attention backstop. "exec" records the binary settings.json just baked in,
 	// as JSON rather than a shell string to re-parse, so both gates can check
 	// that the hooks can still run at all (claudeBundleExecUsable).
-	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Exec: execPath})
+	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Exec: execPath})
 	if err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
@@ -221,6 +222,8 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 	// Stop / StopFailure are the official current-turn boundary (after the
 	// tool loop; not on user interrupt). SubagentStop is not the main turn.
 	// PreCompact / PostCompact are passive UX evidence for context compaction.
+	// Elicitation / ElicitationResult are passive UX evidence for MCP input
+	// requests. The matcher is omitted so every MCP server is covered.
 	permCmd, err := claudePermissionHookCommand(execPath, hookDir)
 	if err != nil {
 		return nil, err
@@ -234,6 +237,10 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 		return nil, err
 	}
 	compactCmd, err := claudeCompactHookCommand(execPath, hookDir)
+	if err != nil {
+		return nil, err
+	}
+	elicitationCmd, err := claudeElicitationHookCommand(execPath, hookDir)
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +278,8 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 			"StopFailure":       entry(stopCmd),
 			"PreCompact":        compactEntry,
 			"PostCompact":       compactEntry,
+			"Elicitation":       entry(elicitationCmd),
+			"ElicitationResult": entry(elicitationCmd),
 		},
 	}
 	return json.Marshal(doc)
@@ -577,6 +586,7 @@ func (a *app) bindClaudeClear(nodeID string, ev claudeSessionStartEvent, capture
 	}
 	if needPage {
 		a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, true)
+		clearClaudeElicitationsForSession(a.claudeHookBundlePath(hookID), oldSID)
 	}
 	return nil
 }
@@ -764,6 +774,7 @@ func (a *app) applyClaudeResume(nodeID string, ev claudeSessionStartEvent, captu
 	}
 	a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, false)
 	a.clearClaudeLaunchError(nodeID)
+	clearClaudeElicitationsForSession(a.claudeHookBundlePath(hookID), oldSID)
 	return nil
 }
 

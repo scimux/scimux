@@ -179,6 +179,7 @@ export function chatActivityPolicy({
   fresh = false,
   supervision = "",
   autoApproveArmed = false,
+  permDialogId = "",
 } = {}){
   const unconfirmed = delivery === "unconfirmed";
   const claudeGated = supervision === "claude_strict" ||
@@ -187,11 +188,11 @@ export function chatActivityPolicy({
     supervision === "claude_failed";
   if (claudeGated){
     // Hooked/starting/unsupported Claude: never auto-open from inspect,
-    // fallback, unconfirmed delivery, empty turns, or owing. The pane is
-    // visible only when the user opened it or a proven permission dialog
-    // is waiting and auto-approve is not armed.
+    // fallback, unconfirmed delivery, empty turns, owing, or elicitation.
+    // The pane is visible only when the user opened it or a proven
+    // permission-dialog epoch is waiting and auto-approve is not armed.
     const permDialog = supervision === "claude_strict" && !autoApproveArmed &&
-      !attentionHidden && (attention === "approval" || attention === "dialog" || attention === "question");
+      !attentionHidden && !!permDialogId;
     const mustShowPane = permDialog;
     const freshSurface = !turnsLength && !mustShowPane &&
                          (fresh || (source === "acp" && (priorTurns || 0) > 0));
@@ -251,7 +252,54 @@ export function buildChatSignature(parts){
     p.decisionsHash || "",
     p.expanded ? "1" : "0",
     p.compacting ? "1" : "0",
+    p.elicitationKey || "",
   ].join("|");
+}
+
+export function elicitationKey(data){
+  if (!data || !data.elicitation_waiting) return "";
+  const items = Array.isArray(data.elicitations) ? data.elicitations : [];
+  return String(data.elicitation_count || items.length) + ":" +
+    items.map(it => [it.server || "", it.message || "", it.mode || "", it.url || ""].join("\0")).join("\n");
+}
+
+export function isSafeElicitationURL(raw){
+  if (!raw || typeof raw !== "string") return false;
+  const trimmed = raw.trim();
+  const lower = trimmed.toLowerCase();
+  if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false;
+  try {
+    const u = new URL(trimmed);
+    return (u.protocol === "http:" || u.protocol === "https:") && !!u.host && !u.username;
+  } catch {
+    return false;
+  }
+}
+
+export const ELICITATION_OPEN_LABEL = "Open Terminal to respond";
+
+export function elicitationStatusHTML(data, { escape = esc } = {}){
+  if (!data || !data.elicitation_waiting) return "";
+  const items = Array.isArray(data.elicitations) ? data.elicitations : [];
+  const count = Number(data.elicitation_count) || items.length;
+  const heading = count > 1
+    ? `${count} MCP input requests are waiting in Claude's dialog.`
+    : "An MCP server needs input in Claude's dialog.";
+  const rows = items.map(it => {
+    const server = escape(String(it.server || "MCP"));
+    const message = escape(String(it.message || ""));
+    const mode = it.mode ? escape(String(it.mode)) : "";
+    const modeLine = mode ? `<div class="elicitation-mode">${mode}</div>` : "";
+    let urlLine = "";
+    if (it.mode === "url" && isSafeElicitationURL(it.url)){
+      const href = escape(String(it.url));
+      urlLine = `<div class="elicitation-url"><a href="${href}" target="_blank" rel="noopener noreferrer">${href}</a></div>`;
+    }
+    return `<div class="elicitation-item"><div class="elicitation-server">${server}</div>` +
+      `<div class="elicitation-message">${message}</div>${modeLine}${urlLine}</div>`;
+  }).join("");
+  const open = `<div class="permbtns"><button type="button" data-open-terminal="1" class="permbtn">${ELICITATION_OPEN_LABEL}</button></div>`;
+  return `<div class="pending elicitation" role="status">${escape(heading)}${rows}${open}</div>`;
 }
 
 export const COMPACTING_STATUS =
@@ -549,6 +597,7 @@ export function keyRowHTML({
   attention, attentionHidden, source, permTitle, permOptions,
   permToolKind = "", permReason = "", permRequestId = "",
   permDialogId = "", permManual = false,
+  elicitationWaiting = false,
   expanded = false, axScreenReader = false, escape = esc,
 } = {}){
   const opts = permOptions || [];
@@ -559,6 +608,10 @@ export function keyRowHTML({
      auto-approve) or locally hidden. */
   if (epochBound || epochManual){
     attentionHidden = false;
+  } else if (elicitationWaiting){
+    /* Elicitation is a dedicated renderer in the transcript. Never fall
+       through to guessed Yes/No, digits, or the generic tmux keypad. */
+    return "";
   } else if (!attention || attentionHidden){
     return "";
   }
@@ -1624,6 +1677,7 @@ export function createChatFeature(deps){
       fresh: !!data.fresh,
       supervision: data.supervision || n.supervision || "",
       autoApproveArmed: !!(data.auto_approve && data.auto_approve.phase === "armed"),
+      permDialogId: data.perm_dialog_id || "",
     });
     const { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek } = policy;
 
@@ -1695,6 +1749,7 @@ export function createChatFeature(deps){
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
       compacting: !!data.compacting,
+      elicitationKey: elicitationKey(data),
     });
     const label = unconfirmed
       ? "Send unconfirmed \u2014 check the terminal"
@@ -1762,7 +1817,8 @@ export function createChatFeature(deps){
         hist: false, nodeId: n.id, assets,
       }) +
       (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
-      (data.compacting ? compactingStatusHTML() : "");
+      (data.compacting ? compactingStatusHTML() : "") +
+      elicitationStatusHTML(data, { escape });
 
     /* The pane's own region. Created rather than written into the markup so the
        feature can hold a live reference: #msgs is rewritten wholesale, and a
@@ -1841,6 +1897,7 @@ export function createChatFeature(deps){
         permRequestId: data.perm_request_id || "",
         permDialogId: data.perm_dialog_id || "",
         permManual: !!data.perm_manual,
+        elicitationWaiting: !!data.elicitation_waiting,
         expanded,
         axScreenReader: !!n.ax_screen_reader,
         escape,
@@ -2004,6 +2061,11 @@ export function createChatFeature(deps){
   }
 
   function onMsgsClick(e){
+    const openTerm = e.target.closest && e.target.closest("[data-open-terminal]");
+    if (openTerm){
+      if (!termOpen) onTermToggle();
+      return;
+    }
     const hl = e.target.closest && e.target.closest(".histload");
     if (hl){
       const sel = g("sel", "");

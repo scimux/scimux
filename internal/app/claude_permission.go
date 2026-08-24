@@ -461,12 +461,13 @@ func bundleSupportsPermission(bundle string) bool {
 // claudeHookCapabilities is capabilities.json: what a bundle on disk proves
 // about itself, written once at prepare time and never rewritten.
 type claudeHookCapabilities struct {
-	Permission int    `json:"permission"`
-	Asked      int    `json:"asked"`
-	Stop       int    `json:"stop"`
-	Notify     int    `json:"notify"`
-	Compact    int    `json:"compact"`
-	Exec       string `json:"exec,omitempty"`
+	Permission  int    `json:"permission"`
+	Asked       int    `json:"asked"`
+	Stop        int    `json:"stop"`
+	Notify      int    `json:"notify"`
+	Compact     int    `json:"compact"`
+	Elicitation int    `json:"elicitation"`
+	Exec        string `json:"exec,omitempty"`
 }
 
 func readClaudeHookCapabilities(bundle string) (claudeHookCapabilities, bool) {

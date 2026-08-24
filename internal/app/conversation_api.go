@@ -782,6 +782,10 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	if compacting {
 		replyReady = false
 	}
+	elicitationWaiting, elicitationCount, elicitations := a.claudeElicitationChatState(n)
+	if elicitationWaiting {
+		replyReady = false
+	}
 	// Usage is segment-scoped: a /clear seam resets the gauge together with
 	// the context it measures.
 	ctxUsed := seg.Used
@@ -818,6 +822,11 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 			if compactTrigger != "" {
 				resp["compact_trigger"] = compactTrigger
 			}
+		}
+		if elicitationWaiting {
+			resp["elicitation_waiting"] = true
+			resp["elicitation_count"] = elicitationCount
+			resp["elicitations"] = elicitations
 		}
 		if note := a.claudeDialogNoteOf(n.ID); note != "" && dlg.DialogID == "" {
 			resp["perm_manual"] = true
