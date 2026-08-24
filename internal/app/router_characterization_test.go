@@ -61,6 +61,7 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodPost, "/api/remote/pairing/{code}/cancel", "/api/remote/pairing/04106105/cancel", "handleRemotePairingCancel", "remote_pairing.go"},                                 // S7b
 		{http.MethodGet, "/api/remote/devices", "/api/remote/devices", "handleRemoteDeviceList", "remote_pairing.go"},                                                                   // S7b
 		{http.MethodDelete, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRevoke", "remote_pairing.go"},                                                   // S7b
+		{http.MethodGet, "/api/remote/status", "/api/remote/status", "handleRemoteStatus", "remote_pairing.go"},                                                                         // S8
 	}
 }
 

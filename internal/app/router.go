@@ -81,6 +81,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("POST /api/remote/pairing/{code}/cancel", a.handleRemotePairingCancel)
 	mux.HandleFunc("GET /api/remote/devices", a.handleRemoteDeviceList)
 	mux.HandleFunc("DELETE /api/remote/devices/{id}", a.handleRemoteDeviceRevoke)
+	mux.HandleFunc("GET /api/remote/status", a.handleRemoteStatus)
 
 	return mux, nil
 }

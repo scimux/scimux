@@ -678,3 +678,20 @@ Paired devices with stable labels and paired-at times.
 ### `DELETE /api/remote/devices/{id}`
 
 Revoke one paired device.
+
+### `GET /api/remote/status`
+
+The installation's hosted enrollment as `{"hosted":"<status>"}`, where
+status is `enrolled`, `disabled`, `revoked`, or `unavailable`. `404`
+when remote pairing is not enabled. GET needs no CSRF header. The body
+is that one field — it never mints a code and never returns a rid, SAS,
+or public key.
+
+`POST /api/remote/pairing` returns `409` with `hosted` and a readable
+`error` when status is `revoked` or `disabled` — durable facts about
+authorization. `unavailable` is a transient rendezvous condition and
+still mints, because the mint is what starts the pairing wait loop that
+clears it; a code minted then is genuinely pairable once the outage
+lifts. For the same reason `GET /api/remote/pairing/{code}` reports
+FR-38 `failed` (plus `reason`) only under `revoked` or `disabled`, and
+leaves a live session `pending` through a transient outage.
