@@ -238,8 +238,14 @@ func pairedDeviceJSON(d remote.PairedDevice) map[string]any {
 	if !d.PairedAt.IsZero() {
 		out["paired_at"] = d.PairedAt.UTC().Format(time.RFC3339Nano)
 	}
+	// PairedDevice.PubKey is the device's static P-256 ECDH key (the offer's
+	// DevicePub), not its ed25519 signing identity — pairing.go puts SignPub
+	// on DeviceRecord.PubKey instead, and says the two cannot share a field.
+	// `public_key` means ed25519 everywhere else here, including the on-disk
+	// PersistedDevice, so this material ships under the name that record
+	// already gives it.
 	if len(d.PubKey) > 0 {
-		out["public_key"] = hex.EncodeToString(d.PubKey)
+		out["ecdh_public_key"] = hex.EncodeToString(d.PubKey)
 	}
 	return out
 }

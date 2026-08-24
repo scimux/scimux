@@ -673,7 +673,11 @@ Tear down the waiter without consuming the code.
 
 ### `GET /api/remote/devices`
 
-Paired devices with stable labels and paired-at times.
+Paired devices with stable labels and paired-at times. A device's key is
+`ecdh_public_key`: the static P-256 key a reply envelope is sealed to,
+matching the name the on-disk record uses for the same material. It is
+not the device's ed25519 signing identity, which this API does not
+expose — `public_key` means ed25519 elsewhere, so it is not reused here.
 
 ### `DELETE /api/remote/devices/{id}`
 

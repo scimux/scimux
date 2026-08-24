@@ -281,7 +281,7 @@ func TestRemoteStatusRoute(t *testing.T) {
 			if got, ok := body["hosted"].(string); !ok || got != status {
 				t.Fatalf("hosted = %v, want %q", body["hosted"], status)
 			}
-			for _, key := range []string{"code", "rid", "sas", "public_key", "laptop_pub", "reply_nonce"} {
+			for _, key := range []string{"code", "rid", "sas", "public_key", "ecdh_public_key", "laptop_pub", "reply_nonce"} {
 				if _, ok := body[key]; ok {
 					t.Fatalf("status body leaked pairing field %q: %s", key, rec.Body.String())
 				}
@@ -313,5 +313,55 @@ func TestRemoteStatusWithoutPairingClientIs404(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "remote pairing is not enabled") {
 		t.Fatalf("404 body = %q, want sibling remote-route message", rec.Body.String())
+	}
+}
+
+// TestPairedDeviceJSONNamesTheECDHKeyHonestly pins a name, which is the whole
+// point of it.
+//
+// PairedDevice.PubKey is the device's static P-256 ECDH key — the offer's
+// DevicePub (internal/remote/pairing.go:449), the key a §12.2 reply envelope
+// is sealed *to*. It is NOT the device's signing identity: the same commit
+// puts the ed25519 SignPub on DeviceRecord.PubKey two lines later, and
+// DeviceRecord's own comment says the two "cannot be the same field".
+//
+// Everywhere else in this codebase `public_key` means the ed25519 identity —
+// PersistedDevice.PubKey, the installation's own PublicKey, the enrollment
+// record. Emitting the P-256 Y under that name gives the HTTP API a field
+// that collides with the on-disk record: same name, different algorithm,
+// different key. Anyone comparing the API against ~/.scimux state, or
+// verifying a signature with what the API called a public key, is then
+// simply wrong. PersistedDevice already ships the correct name for this
+// material — `ecdh_public_key` — so the API uses it too, and the two agree
+// per key rather than per position.
+//
+// Nothing consumed the old name when it was changed; the pairing UI does not
+// exist yet. That is why this is a rename and not a compatibility problem.
+func TestPairedDeviceJSONNamesTheECDHKeyHonestly(t *testing.T) {
+	out := pairedDeviceJSON(remote.PairedDevice{
+		ID:     "phone",
+		RID:    "rid-1",
+		Label:  "Phone",
+		PubKey: []byte{0xde, 0xad, 0xbe, 0xef},
+	})
+
+	if _, ok := out["public_key"]; ok {
+		t.Errorf("pairedDeviceJSON emits %q, which means the ed25519 identity "+
+			"everywhere else in this repo; this value is the P-256 ECDH Y", "public_key")
+	}
+	got, ok := out["ecdh_public_key"].(string)
+	if !ok {
+		t.Fatalf("ecdh_public_key missing or not a string: %#v", out)
+	}
+	if got != "deadbeef" {
+		t.Fatalf("ecdh_public_key = %q, want the hex of the ECDH key", got)
+	}
+
+	// An absent key emits no field at all, matching PersistedDevice's omitempty.
+	bare := pairedDeviceJSON(remote.PairedDevice{ID: "phone", RID: "rid-1"})
+	for _, k := range []string{"public_key", "ecdh_public_key"} {
+		if _, ok := bare[k]; ok {
+			t.Errorf("device with no key still emitted %q", k)
+		}
 	}
 }
