@@ -9,18 +9,22 @@ import (
 // Wire format (one frame):
 //
 //	type   uint8     // 0x00 request, 0x01 response, 0x02 body, 0x03 body-end,
-//	                 // 0x04 cancel, 0x05 reject. Anything else is malformed.
+//	                 // 0x04 cancel, 0x05 reject. Anything else is a frame
+//	                 // this build predates: read whole, then dropped by the
+//	                 // dispatch (tunnel-v1 §2.1, see isKnownType).
 //	length uint24 BE // payload bytes that follow
 //	payload [length]byte
 //
 // A body stream is zero or more typeBody frames followed by typeBodyEnd
 // (the end marker is a distinct type, not a zero-length chunk).
 //
-// The 4-byte header is what AT-remote-codec-c pins:
+// The 4-byte header is what AT-remote-codec-c pins. Since the type byte
+// stopped being a verdict, garbage is judged by the length prefix, so it
+// reads as truncated rather than malformed:
 //
 //	empty / 1 byte → truncated (header incomplete)
-//	0xff 0xff 0xff → malformed (invalid type, decided from the first byte)
-//	raw HTTP       → malformed (type is 'G' / 'H')
+//	0xff 0xff 0xff → truncated (type 0xff, then 2 of 3 length bytes)
+//	raw HTTP       → truncated (type 'G', length "ET " is over the cap)
 //	00 00 10 00 01 → truncated (type 0x00, length 0x001000, 1 payload byte)
 const (
 	typeRequest  uint8 = 0x00
