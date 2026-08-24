@@ -699,3 +699,13 @@ clears it; a code minted then is genuinely pairable once the outage
 lifts. For the same reason `GET /api/remote/pairing/{code}` reports
 FR-38 `failed` (plus `reason`) only under `revoked` or `disabled`, and
 leaves a live session `pending` through a transient outage.
+
+### `GET /api/remote/bootstrap`
+
+Laptop-supplied FR-40 bootstrap manifest. JSON with `source` (`laptop`),
+`entry` (`/js/app.js`), and `entries` naming every served asset with
+`url`, `kind`, `size`, and `integrity` (`sha256-` + standard-base64
+SHA-256 of the bytes that GET on that URL returns). Derived from the
+embedded filesystem the handlers serve, computed once per process. GET
+needs no CSRF header. Always reachable — this is application content,
+not pairing state.

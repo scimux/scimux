@@ -82,6 +82,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("GET /api/remote/devices", a.handleRemoteDeviceList)
 	mux.HandleFunc("DELETE /api/remote/devices/{id}", a.handleRemoteDeviceRevoke)
 	mux.HandleFunc("GET /api/remote/status", a.handleRemoteStatus)
+	mux.HandleFunc("GET /api/remote/bootstrap", a.handleRemoteBootstrapManifest)
 
 	return mux, nil
 }

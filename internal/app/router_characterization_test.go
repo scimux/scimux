@@ -62,6 +62,7 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodGet, "/api/remote/devices", "/api/remote/devices", "handleRemoteDeviceList", "remote_pairing.go"},                                                                   // S7b
 		{http.MethodDelete, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRevoke", "remote_pairing.go"},                                                   // S7b
 		{http.MethodGet, "/api/remote/status", "/api/remote/status", "handleRemoteStatus", "remote_pairing.go"},                                                                         // S8
+		{http.MethodGet, "/api/remote/bootstrap", "/api/remote/bootstrap", "handleRemoteBootstrapManifest", "remote_manifest.go"},                                                       // S8
 	}
 }
 
