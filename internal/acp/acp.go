@@ -1213,10 +1213,20 @@ func (s *Session) stop() error {
 // --- adapters ---
 
 // captureBanner records pi's startup banner (advertised in the new-session
-// _meta) so appendAssistantLocked can strip it. Best-effort and pi-specific.
+// _meta) so appendAssistantLocked can strip it. pi-acp namespaces the field
+// under "piAcp" (_meta.piAcp.startupInfo); the top-level startupInfo lookup
+// stays as a defensive fallback. Best-effort and pi-specific: junk shapes
+// (wrong types, missing keys, empty string) never panic, never error, and
+// leave the banner unset.
 func (s *Session) captureBanner(resp sdk.NewSessionResponse) {
 	if s.agent != "pi" || resp.Meta == nil {
 		return
+	}
+	if m, ok := resp.Meta["piAcp"].(map[string]any); ok {
+		if str, ok := m["startupInfo"].(string); ok {
+			s.banner = str
+			return
+		}
 	}
 	if si, ok := resp.Meta["startupInfo"]; ok {
 		if str, ok := si.(string); ok {
