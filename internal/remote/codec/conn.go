@@ -229,6 +229,13 @@ func (c *Conn) readLoop(ctx context.Context, server bool) error {
 			}
 			return err
 		}
+		if !isKnownType(fr.typ) {
+			// tunnel-v1 §2.1. The frame was read whole, so the
+			// stream stays aligned; dropping it is what makes a
+			// MINOR addition invisible to an older laptop rather
+			// than a torn-down session.
+			continue
+		}
 		if server {
 			c.handleServerFrame(ctx, fr)
 		} else {
@@ -461,7 +468,21 @@ func (c *Conn) acceptReject(payload []byte) {
 		return
 	}
 	if !knownRejectClass(class) {
-		class = ClassMalformed
+		// tunnel-v1 §2.1 and §5: an unknown class is not an error. It
+		// is an opaque refusal reason a later MINOR may have added,
+		// and relabelling it "malformed" told the operator the frame
+		// was corrupt when the peer had simply refused for a reason
+		// this build predates — which would force every new class to
+		// be a MAJOR bump.
+		//
+		// It is still peer-supplied text on its way into an error
+		// message, so it is surfaced only in the shape a class may
+		// take. Anything else is genuinely unparseable.
+		if !plausibleRejectClass(class) {
+			class = ClassMalformed
+		}
+		// The field's meaning is class-specific, so it means nothing
+		// alongside a class this build does not know.
 		field = ""
 	}
 	c.failCall(id, reject(class, field))

@@ -321,8 +321,14 @@ func TestATRemoteCodecC_TruncatedAndMalformedRejected(t *testing.T) {
 	}{
 		{name: "empty", data: nil, class: ClassTruncated},
 		{name: "one-byte", data: []byte{0x00}, class: ClassTruncated},
-		{name: "three-ff", data: []byte{0xff, 0xff, 0xff}, class: ClassMalformed},
-		{name: "raw-http", data: []byte("GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), class: ClassMalformed},
+		// Garbage no longer fails on the type byte. tunnel-v1 §2.1
+		// makes an unrecognised type skippable rather than fatal, so
+		// the verdict is deferred to the length prefix — which for
+		// arbitrary bytes means the payload never arrives. Still
+		// rejected without panic, which is what this AC asserts; the
+		// class is truncated rather than malformed.
+		{name: "three-ff", data: []byte{0xff, 0xff, 0xff}, class: ClassTruncated},
+		{name: "raw-http", data: []byte("GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), class: ClassTruncated},
 		{name: "claimed-length-eof", data: []byte{0x00, 0x00, 0x10, 0x00, 0x01}, class: ClassTruncated},
 	}
 	for _, tc := range cases {
@@ -364,7 +370,8 @@ func TestATRemoteCodecC_TruncatedAndMalformedRejected(t *testing.T) {
 			return &Response{Status: 200, Body: bodyOf("")}, nil
 		}))
 		_ = sw.Close()
-		wantReject(t, err, ClassMalformed)
+		// Truncated for the same reason as the decode cases above.
+		wantReject(t, err, ClassTruncated)
 	})
 }
 

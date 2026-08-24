@@ -116,6 +116,35 @@ func validateResponseHeaders(h http.Header) (http.Header, error) {
 	return filterHeaders(h, allowedResponseHeaders)
 }
 
+// maxRejectClassLen bounds a class this build has never heard of. Every
+// class in tunnel-v1 §5 is well under it; the bound exists because the
+// string is a peer's, not because a longer name is meaningful.
+const maxRejectClassLen = 40
+
+// plausibleRejectClass reports whether an unrecognised class string is
+// shaped like one a future minor version could legitimately define:
+// a short lowercase hyphenated token. It is a grammar check on untrusted
+// text, not a guess at meaning — see acceptReject.
+func plausibleRejectClass(c Class) bool {
+	if len(c) == 0 || len(c) > maxRejectClassLen {
+		return false
+	}
+	if c[0] == '-' || c[len(c)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(c); i++ {
+		ch := c[i]
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= '0' && ch <= '9':
+		case ch == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func knownRejectClass(c Class) bool {
 	switch c {
 	case ClassAbsoluteURI, ClassAuthority, ClassHopByHop, ClassUpgrade,

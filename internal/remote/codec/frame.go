@@ -43,7 +43,13 @@ type frame struct {
 	payload []byte
 }
 
-func validType(t uint8) bool {
+// isKnownType reports whether the type byte is one this version has an
+// opinion about. Deliberately not a validity test: tunnel-v1 §2.1 lets a
+// MINOR bump add frame types, and this binary is the half that goes stale
+// (rv is deployed once and reaches every browser; scimux sits on many
+// laptops at many versions). The dispatch switches in conn.go ignore what
+// they do not recognise, which is what makes an addition additive.
+func isKnownType(t uint8) bool {
 	return t <= typeReject
 }
 
@@ -60,9 +66,12 @@ func decodeFrame(r io.Reader) (*frame, error) {
 		return nil, err
 	}
 	typ := hdr[0]
-	if !validType(typ) {
-		return nil, reject(ClassMalformed, "")
-	}
+	// No rejection on the type byte. Rejecting here tore down the
+	// connection *and* desynced the stream, because the length prefix
+	// below had not been read yet: one frame type added in a MINOR bump
+	// would have broken every laptop older than it. Every frame is
+	// length-prefixed, so an unknown one is skipped whole instead —
+	// decodeFrame reads it, the dispatch drops it.
 	if _, err := io.ReadFull(r, hdr[1:]); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return nil, reject(ClassTruncated, "")

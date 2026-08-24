@@ -1,9 +1,13 @@
 package codec
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,7 +113,11 @@ func TestReceiveRejectsCRLFResponseHeader(t *testing.T) {
 	wantReject(t, err, ClassCRLF)
 }
 
-func TestReceiveUnknownRejectClassIsMalformed(t *testing.T) {
+// tunnel-v1 §2.1 and §5. This test used to assert the opposite — that an
+// unknown class became ClassMalformed. That reading made every new
+// rejection class a MAJOR bump, and told the operator the frame was
+// corrupt when the peer had merely refused for a newer reason.
+func TestReceiveUnknownRejectClassIsSurfacedVerbatim(t *testing.T) {
 	client := hostilePair(t, func(sw *io.PipeWriter, id string) {
 		payload, err := encodeRejectPayload(id, Class("not-a-real-class"), "x")
 		if err != nil {
@@ -120,7 +128,105 @@ func TestReceiveUnknownRejectClassIsMalformed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	_, err := client.RoundTrip(ctx, validGET("req-hostile", "/api/state"))
-	wantReject(t, err, ClassMalformed)
+	wantReject(t, err, Class("not-a-real-class"))
+	// The request still fails. Tolerating the class is not sanitising
+	// the refusal into acceptance.
+	if err == nil {
+		t.Fatal("an unknown rejection class must still fail the request")
+	}
+}
+
+// The class is peer-supplied text on its way into an error string, so
+// tolerance stops at the token grammar.
+func TestReceiveMisshapenRejectClassIsMalformed(t *testing.T) {
+	for _, bad := range []string{
+		"",
+		"Not-Lowercase",
+		"has space",
+		"crlf\r\ninjected",
+		"-leading",
+		"trailing-",
+		"under_score",
+		strings.Repeat("a", maxRejectClassLen+1),
+	} {
+		t.Run(strconv.Quote(bad), func(t *testing.T) {
+			client := hostilePair(t, func(sw *io.PipeWriter, id string) {
+				payload, err := encodeRejectPayload(id, Class(bad), "x")
+				if err != nil {
+					// The encoder refuses some of these outright,
+					// which is a stricter answer to the same question.
+					return
+				}
+				_ = writeRawFrame(sw, typeReject, payload)
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err := client.RoundTrip(ctx, validGET("req-hostile", "/api/state"))
+			if err == nil {
+				t.Fatal("a misshapen rejection class must not resolve the request")
+			}
+			var rej *RejectError
+			if errors.As(err, &rej) && rej.Class != ClassMalformed {
+				t.Fatalf("class %q surfaced as %q, want %q", bad, rej.Class, ClassMalformed)
+			}
+		})
+	}
+}
+
+// tunnel-v1 §2.1: a frame type this build predates must be skipped
+// whole, not rejected. Rejecting on the type byte also desynced the
+// stream, because the length prefix had not been read yet — so the
+// frames after it decoded from the wrong offset.
+func TestReceiveUnknownFrameTypeIsSkippedWhole(t *testing.T) {
+	client := hostilePair(t, func(sw *io.PipeWriter, id string) {
+		// A type no version defines, carrying a payload that would
+		// itself decode as plausible frames if the stream desynced.
+		_ = writeRawFrame(sw, 0x42, bytes.Repeat([]byte{typeBodyEnd, 0, 0, 0}, 8))
+		payload, err := encodeResponsePayload(id, http.StatusOK, http.Header{
+			"Content-Type": {"application/json"},
+		})
+		if err != nil {
+			return
+		}
+		_ = writeRawFrame(sw, typeResponse, payload)
+		_ = writeRawFrame(sw, typeBodyEnd, mustID(id))
+	})
+	resp := mustRoundTrip(t, client, validGET("req-hostile", "/api/state"))
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if got := resp.Headers.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q; the stream desynced past the unknown frame", got)
+	}
+}
+
+// The same, with the unknown frame arriving between the head and the
+// body end: skipping must not disturb an in-flight response either.
+func TestReceiveUnknownFrameTypeMidResponse(t *testing.T) {
+	client := hostilePair(t, func(sw *io.PipeWriter, id string) {
+		payload, err := encodeResponsePayload(id, http.StatusOK, http.Header{
+			"Content-Type": {"text/plain"},
+		})
+		if err != nil {
+			return
+		}
+		_ = writeRawFrame(sw, typeResponse, payload)
+		body, err := putString(nil, id)
+		if err != nil {
+			return
+		}
+		_ = writeRawFrame(sw, typeBody, append(body, []byte("hello")...))
+		_ = writeRawFrame(sw, 0x7f, []byte("a frame from a newer peer"))
+		_ = writeRawFrame(sw, typeBodyEnd, mustID(id))
+	})
+	resp := mustRoundTrip(t, client, validGET("req-hostile", "/api/state"))
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("body = %q, want %q", got, "hello")
+	}
 }
 
 func TestReceiveRejectsOutOfRangeStatus(t *testing.T) {

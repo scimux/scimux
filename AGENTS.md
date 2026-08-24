@@ -84,6 +84,46 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
     that is the rejected option, not an optimisation. The import guard above
     stays in force regardless: approving the dependency widened *what* may be
     imported, never *where it may be imported from*.
+- **The tunnel protocol is owned by scimux-rv, not by this repository.**
+  Decided 2026-08-24. The browser↔laptop data-channel wire format is
+  specified in scimux-rv's `docs/protocol/tunnel-v1.md`, and its **browser**
+  implementation lives there too (`web/js/codec.js`, `web/js/connection.js`
+  in that repo, served from the closed `/p` inventory). The reason is
+  deployment asymmetry: rv is deployed once and reaches every browser on the
+  next page load, while scimux binaries sit on many laptops at many
+  user-chosen versions. The side that must tolerate the spread is rv's, so rv
+  holds it. Do not reintroduce a browser codec or channel transport here —
+  it would arrive over the very channel it exists to create.
+  What stays here is the **laptop half**: `internal/remote/codec` (Go), and
+  `web/js/bootstrap.js`, which is the *loader*, not the transport. The loader
+  runs after the channel works, knows scimux's entry module and specifier
+  rules, and therefore ships with the scimux binary — that is what lets this
+  repository add modules, rename files, or restructure its graph with no rv
+  deployment. Vendoring the loader into rv was considered and rejected: rv
+  would go stale on the next module added, and would end up supplying the
+  code that checks this laptop's own integrity values, inverting FR-40.
+  The seam between the two is three fixed constants (§7 of `tunnel-v1.md`):
+  `GET /api/remote/bootstrap`, `GET /js/bootstrap.js`, and the
+  `bootstrap({channel, manifest, createObjectURL, installImportMap,
+  importModule})` signature. Those three are **protocol**. Renaming the route,
+  moving the loader, or changing that signature is a MAJOR version bump that
+  breaks every deployed rv, not a local refactor.
+  Tunnel versioning is semantic and both halves bind: MAJOR breaks old
+  binaries by design and must surface as a named FR-24 state saying which
+  side is behind; MINOR is additive and must never escalate to the user.
+  What keeps MINOR safe is that unknown frame types, unknown rejection
+  classes, and trailing payload bytes are ignored rather than treated as
+  malformed.
+- **`internal/remote/codec/testdata/vectors.json` is a published contract,
+  not a local fixture.** `vectors_test.go` regenerates it by calling the
+  production encoders and fails on drift; scimux-rv byte-copies it and
+  decodes every vector with its browser codec. It is the only oracle either
+  side has, so it must stay generated — never hand-edited, never
+  pretty-printed, never authored by reading the spec. Changing it changes
+  scimux-rv, and the vendoring lane is recorded in that repository's
+  `docs/tunnel-protocol-sync.md` (the mirror of our
+  `docs/rendezvous-protocol-sync.md`, which carries rv's vectors the other
+  way).
 - **Snapshot over stream.** Output is read via `tmux capture-pane -p`
   snapshots and via the transcript JSONL files the agent CLIs write
   themselves. Never parse the terminal byte stream, never use tmux control
