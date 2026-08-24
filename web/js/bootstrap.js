@@ -154,7 +154,12 @@ export async function bootstrap({
   if (!entryBlob) {
     throw named("bootstrap-missing", "manifest entry " + entryUrl + " was not in the graph");
   }
-  await importModule(entryBlob);
+  // Hand the namespace back rather than discarding it. app.js self-boots only
+  // from an http(s) URL, which the entry blob never is, so the caller has to
+  // call createApp itself — with the channel transport as fetchImpl and blob
+  // URLs for assetURL. Without this the boot verifies every module and then
+  // renders nothing.
+  const module = await importModule(entryBlob);
 
-  return { index, imports, stylesheets, assets, entry: entryBlob };
+  return { index, imports, stylesheets, assets, entry: entryBlob, module };
 }

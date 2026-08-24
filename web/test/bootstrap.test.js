@@ -571,3 +571,49 @@ test("AT-FR-15a-b: the FR-40 bootstrap registers no service worker, on any origi
     fail(at, `scanned ${scanned} executable graph members; the manifest scan is vacuous`);
   }
 });
+
+/* FR-41 — the boot has to be able to start the app.
+ *
+ * app.js self-boots only when its own URL is http(s) (web/js/app.js:1878),
+ * which is right for the localhost page and impossible remotely: the entry
+ * runs from a blob: URL, so the guard never matches. Nothing else calls
+ * createApp. So a remote boot that verified and blobbed all 24 modules
+ * perfectly still ends at a blank page.
+ *
+ * bootstrap() imports the entry and throws the module namespace away, which
+ * leaves its caller nothing to start. Returning the namespace is the whole
+ * fix, and it is deliberately all of it: whether the composition root lives
+ * in /p or here is an open cross-repo question, and returning the namespace
+ * is correct under either answer.
+ */
+test("AT-FR-41-d: the boot hands back the entry module so the app can be started", async () => {
+  const at = "AT-FR-41-d";
+  const inventory = servedFromDisk();
+  const manifest = await laptopManifest(inventory);
+  const channel = diskChannel(inventory);
+  const s = seams();
+
+  const marker = { createApp: () => "started" };
+  const result = await bootstrap({
+    channel,
+    manifest,
+    createObjectURL: s.createObjectURL,
+    installImportMap: s.installImportMap,
+    /* Stand in for a real dynamic import of the entry blob. */
+    importModule: async url => (url === undefined ? undefined : marker),
+  });
+
+  if (!result.module) {
+    fail(at, "bootstrap returned no entry module; nothing can call createApp, so a remote boot renders nothing");
+  }
+  if (result.module !== marker) {
+    fail(at, "bootstrap returned something other than the imported entry namespace");
+  }
+  if (typeof result.module.createApp !== "function") {
+    fail(at, "the returned namespace is not the entry module");
+  }
+  /* Anti-vacuity: the existing return contract is unchanged. */
+  for (const key of ["index", "stylesheets", "assets", "entry"]) {
+    if (!(key in result)) fail(at, `bootstrap stopped returning ${key}`);
+  }
+});
