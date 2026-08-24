@@ -116,6 +116,7 @@ body.cards-open #msgs { overflow: hidden; }
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
+.pending.compacting { color: var(--work); }
 /* /clear page-turn: prior history stays in the log behind a seam; the chat
    surface starts fresh under a rule + when it started. The same component
    will separate segments if full-history rendering arrives later. */

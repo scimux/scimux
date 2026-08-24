@@ -2,7 +2,8 @@
 //
 // A newly launched Claude node enters the strict hooked path only after a
 // valid SessionStart from that exact process has been processed against a
-// complete current hook bundle. Until then it is "starting". Adopted panes,
+// complete current hook bundle (including PreCompact/PostCompact). Until then
+// it is "starting". Adopted panes,
 // pre-feature bundles, a moved/missing scimux executable, and any other
 // incomplete contract are "unsupported": they never receive inspect/fallback
 // terminal supervision and never enter the hooked permission path.
@@ -101,17 +102,18 @@ func (a *app) clearClaudeLaunchError(nodeID string) {
 
 // bundleCompleteCurrent reports whether a hook bundle on disk is the complete
 // current contract: SessionStart, PermissionRequest, Notification, Stop,
-// StopFailure, notice layout, and a still-runnable baked executable.
+// StopFailure, PreCompact, PostCompact, notice layout, and a still-runnable
+// baked executable.
 func bundleCompleteCurrent(bundle string) bool {
 	caps, ok := readClaudeHookCapabilities(bundle)
-	if !ok || caps.Permission < 1 || caps.Asked < 1 || caps.Stop < 1 || caps.Notify < 1 {
+	if !ok || caps.Permission < 1 || caps.Asked < 1 || caps.Stop < 1 || caps.Notify < 1 || caps.Compact < 1 {
 		return false
 	}
 	if !claudeBundleExecUsable(caps) {
 		return false
 	}
 	for _, sub := range []string{
-		"inbox", "processed", "stop", "notify",
+		"inbox", "processed", "stop", "notify", "compact",
 		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
 		filepath.Join("perm", claudeAskedDirName), filepath.Join("perm", claudeShownDirName),
 	} {

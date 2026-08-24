@@ -174,8 +174,14 @@ ETag short-circuiting.
 On the polled (non-history) path, responses carry an `ETag`; polling clients
 may send `If-None-Match` and receive `304 Not Modified` when the snapshot is
 unchanged. The tag hashes the fully marshalled body (turns *and* mechanics such
-as attention, `last_change`, and delivery), so a needs-input flip without a log
-write still invalidates the cache.
+as attention, `last_change`, delivery, and Claude `compacting`), so a
+needs-input or compaction flip without a log write still invalidates the cache.
+
+For a strict scimux-owned Claude node, `compacting: true` (and optional
+`compact_trigger` of `manual` or `auto`) is set while a current
+`compact/active.json` marker is valid. The field is omitted when idle. It
+does not appear on `/api/state`. Compaction forces `reply_ready` false and
+does not change `live`, `attention`, `fallback`, or `supervision`.
 
 ### `GET /api/nodes/{id}/peek[?mode=visible]`
 

@@ -144,7 +144,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		return "", "", err
 	}
 	for _, sub := range []string{
-		"inbox", "processed", "stop", "notify",
+		"inbox", "processed", "stop", "notify", "compact",
 		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
 		filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
 		filepath.Join("perm", claudeShownDirName),
@@ -176,7 +176,7 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	// attention backstop. "exec" records the binary settings.json just baked in,
 	// as JSON rather than a shell string to re-parse, so both gates can check
 	// that the hooks can still run at all (claudeBundleExecUsable).
-	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Exec: execPath})
+	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Exec: execPath})
 	if err != nil {
 		os.RemoveAll(dir)
 		return "", "", err
@@ -220,6 +220,7 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 	// registered: it fires for every tool call, decision needed or not.
 	// Stop / StopFailure are the official current-turn boundary (after the
 	// tool loop; not on user interrupt). SubagentStop is not the main turn.
+	// PreCompact / PostCompact are passive UX evidence for context compaction.
 	permCmd, err := claudePermissionHookCommand(execPath, hookDir)
 	if err != nil {
 		return nil, err
@@ -229,6 +230,10 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 		return nil, err
 	}
 	notifyCmd, err := claudeNotifyHookCommand(execPath, hookDir)
+	if err != nil {
+		return nil, err
+	}
+	compactCmd, err := claudeCompactHookCommand(execPath, hookDir)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +254,14 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 			},
 		},
 	}
+	compactEntry := []any{
+		map[string]any{
+			"matcher": "manual|auto",
+			"hooks": []any{
+				map[string]any{"type": "command", "command": compactCmd},
+			},
+		},
+	}
 	doc := map[string]any{
 		"hooks": map[string]any{
 			"SessionStart":      entry(cmd),
@@ -256,6 +269,8 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 			"Notification":      notifyEntry,
 			"Stop":              entry(stopCmd),
 			"StopFailure":       entry(stopCmd),
+			"PreCompact":        compactEntry,
+			"PostCompact":       compactEntry,
 		},
 	}
 	return json.Marshal(doc)

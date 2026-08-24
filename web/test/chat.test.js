@@ -3988,3 +3988,116 @@ test("LI-A5: the indicator's arc carries the contrast, not the track", () => {
   assert.match(rule[1], /border-top-color\s*:\s*var\(--work\)/,
     "the moving arc is a non-text UI component and takes the full accent");
 });
+
+const COMPACTING_STATUS =
+  "Claude is compacting the conversation context. Responses will resume when it finishes.";
+
+test("buildChatSignature changes when compacting flips", () => {
+  const base = {
+    nodeId: "n1", attention: "", attentionHidden: false,
+    delivery: "ok", showPeek: false, termOpen: false, termFull: false,
+    source: "tmux", permTitle: "", permOptionsKey: "", priorTurns: 0,
+    chatStarted: "2026-01-01T00:00:00Z", echoHash: "", histKey: "",
+    turnsHash: "t",
+  };
+  const off = buildChatSignature(base);
+  const on = buildChatSignature({ ...base, compacting: true });
+  assert.notEqual(off, on, "compacting must participate in the chat signature");
+  assert.equal(buildChatSignature({ ...base, compacting: false }), off);
+  assert.equal(chatRenderDecision(on, off), "rebuild");
+});
+
+function compactingPayload(compacting, extra = {}){
+  return {
+    turns: [{ role: "user", text: "hello", time: "2026-01-01T00:00:00Z" },
+            { role: "assistant", text: "hi", time: "2026-01-01T00:01:00Z" }],
+    live: "quiet",
+    delivery: "ok",
+    source: "tmux",
+    supervision: "claude_strict",
+    compacting,
+    compact_trigger: compacting ? "auto" : undefined,
+    compact_summary: "SECRET SUMMARY",
+    custom_instructions: "SECRET INSTRUCTIONS",
+    chat_started: "2026-01-01T00:00:00Z",
+    prior_turns: 0,
+    assets: {},
+    reply_ready: false,
+    ...extra,
+  };
+}
+
+test("compacting status is one inline status, busy chrome, no terminal or attention", async () => {
+  let compacting = true;
+  const ctx = makeFeature({
+    chatConditional: () => ({
+      status: 200,
+      etag: compacting ? '"c1"' : '"c0"',
+      data: compactingPayload(compacting),
+    }),
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const html = ctx.roots.msgs.innerHTML;
+  assert.equal([...html.matchAll(/role="status"/g)].length, 1,
+    "exactly one inline status in the live chat");
+  assert.match(html, new RegExp(COMPACTING_STATUS.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.ok(html.indexOf("hi") < html.indexOf(COMPACTING_STATUS),
+    "status renders after the live timeline");
+  assert.doesNotMatch(html, /SECRET SUMMARY|SECRET INSTRUCTIONS|compact_summary|custom_instructions/);
+  assert.equal(ctx.roots.workpulse.classList.contains("on"), true,
+    "working pulse stays on while compacting even if live is quiet");
+  assert.equal(ctx.effects.setComposerBusy.at(-1), true);
+  assert.equal(ctx.roots.termtoggle.classList.contains("on"), false,
+    "compaction must not force the terminal");
+  assert.equal(ctx.roots.keyrow.innerHTML, "",
+    "compaction must not create a dialog/action row");
+
+  compacting = false;
+  await ctx.feature.render();
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Claude is compacting/,
+    "status disappears after PostCompact without a transcript change");
+  ctx.feature.destroy();
+});
+
+test("compacting status does not yank a scrolled-up reader, and pins a bottom reader", async () => {
+  let compacting = false;
+  const ctx = makeFeature({
+    chatConditional: () => ({
+      status: 200,
+      etag: compacting ? '"c1"' : '"c0"',
+      data: compactingPayload(compacting),
+    }),
+  });
+  ctx.roots.msgs.scrollHeight = 3000;
+  ctx.roots.msgs.clientHeight = 600;
+  ctx.roots.msgs.scrollTop = 200;
+  await ctx.feature.render();
+  compacting = true;
+  await ctx.feature.render();
+  assert.equal(ctx.roots.msgs.scrollTop, 200,
+    "a reader scrolled upward is not pulled to the bottom");
+
+  const bottom = makeFeature({
+    chatConditional: () => ({
+      status: 200,
+      etag: compactingBottom ? '"b1"' : '"b0"',
+      data: compactingPayload(compactingBottom),
+    }),
+  });
+  let compactingBottom = false;
+  bottom.roots.msgs.scrollHeight = 3000;
+  bottom.roots.msgs.clientHeight = 600;
+  bottom.roots.msgs.scrollTop = 2400;
+  await bottom.feature.render();
+  compactingBottom = true;
+  await bottom.feature.render();
+  assert.ok(atBottom(bottom.roots.msgs),
+    "a reader already at the bottom stays pinned when the status appears");
+  compactingBottom = false;
+  await bottom.feature.render();
+  assert.ok(atBottom(bottom.roots.msgs),
+    "a reader already at the bottom stays pinned when the status disappears");
+  ctx.feature.destroy();
+  bottom.feature.destroy();
+});

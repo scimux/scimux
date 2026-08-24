@@ -465,6 +465,7 @@ type claudeHookCapabilities struct {
 	Asked      int    `json:"asked"`
 	Stop       int    `json:"stop"`
 	Notify     int    `json:"notify"`
+	Compact    int    `json:"compact"`
 	Exec       string `json:"exec,omitempty"`
 }
 

@@ -10,7 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; this is what CI runs
-node --test web/test/*.test.js  # browser unit suite (1064 tests; no browser needed)
+node --test web/test/*.test.js  # browser unit suite (1106 tests; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -107,11 +107,11 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   Claude CLI.
 - **A Claude transcript is bound only by that node's own SessionStart hook.**
   Every Claude launch mints a fresh hook bundle under
-  `~/.scimux/claude-hooks/<hex-id>/` (`settings.json` 0600, `inbox/` and
-  `processed/` 0700) and passes it as `--settings`; the file registers scimux
-  itself as the `SessionStart` command, so the hook firing *is* the
-  process→transcript ownership proof **and** the startup/hook-health
-  acknowledgement. The undocumented transcript `bridge_status` record is not
+  `~/.scimux/claude-hooks/<hex-id>/` (`settings.json` 0600, `inbox/`,
+  `processed/`, `stop/`, `notify/`, `compact/`, and `perm/` 0700) and passes
+  it as `--settings`; the file registers scimux itself as the `SessionStart`
+  command, so the hook firing *is* the process→transcript ownership proof
+  **and** the startup/hook-health acknowledgement. The undocumented transcript `bridge_status` record is not
   a readiness condition. `--session-id` seeds the first transcript,
   `--continue` is forbidden, and `--settings` must precede
   `--remote-control` (an optional-value flag that would otherwise swallow it).
@@ -312,7 +312,8 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
 - **Claude-only strict terminal policy** (maintainer-approved, 2026-08-18).
   For a newly scimux-owned, SessionStart-acknowledged Claude node with the
   complete current hook bundle (SessionStart, PermissionRequest,
-  Notification(`permission_prompt`), Stop, StopFailure), the tmux terminal
+  Notification(`permission_prompt`), Stop, StopFailure, PreCompact,
+  PostCompact), the tmux terminal
   may be visible only when the user opened it with the terminal button, or
   when auto-approve is not armed and a current permission dialog is
   structurally proven. Notification(`permission_prompt`) proves only that
@@ -340,7 +341,8 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   epoch-bound controls (not generic unbound keys). Out-of-order or
   concurrent asks cannot present an older request as the current dialog
   identity, because no such identity is claimed. Pane text is never parsed
-  to invent one. Pane quietness,
+  to invent one. Compaction is not a permission dialog and never opens the
+  terminal. Pane quietness,
   AX static rendering, unresolved transcript calls, missing/stale/
   unparseable transcripts, fallback chat, and owing timeouts must never
   automatically open the terminal and must never emit "quiet · inspect
@@ -396,6 +398,20 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   and `esc to interrupt`. The watermark still advances on every tick, including
   the ticks the pending set blocks: a frozen mark could not report the growth
   the *next* resolution writes.
+- **Claude compaction is passive chat UX.** PreCompact and PostCompact ride
+  the same private hook bundle as SessionStart. The helper writes
+  `compact/active.json` (`session_id`, `trigger` `manual`|`auto`, timestamp
+  only) on PreCompact and removes a same-session marker on PostCompact. It
+  never retains `custom_instructions` or `compact_summary`, never prints to
+  stdout/stderr, and always exits 0 so scimux cannot block compaction. A
+  current marker is `compacting: true` on `GET /api/nodes/{id}/chat` only
+  (not `/api/state`): the selected chat shows a transient status, the
+  working pulse stays on, the composer stays busy, and `reply_ready` is
+  false. Compaction never feeds attention, mechanical liveness, map/card
+  yellow, terminal forcing, a session-log event, or a source seam, and it
+  does not change `SessionStart source:"compact"` transcript binding. The
+  complete current bundle requires the compact capability and `compact/`
+  directory; older bundles are `claude_unsupported` until relaunch.
 - **Neutral inspect is acknowledgeable, not actionable.** A fresh `inspect`
   may unfold the terminal once. Non-AX inspect shows the default terminal
   action bar (digits, y/n, arrows, Enter, Escape) plus a distinct **Dismiss**

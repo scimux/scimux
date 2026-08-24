@@ -350,6 +350,7 @@ func TestClaudeHookSettingsRegistersPermissionRequestOnly(t *testing.T) {
 	allowed := map[string]bool{
 		"SessionStart": true, "PermissionRequest": true,
 		"Notification": true, "Stop": true, "StopFailure": true,
+		"PreCompact": true, "PostCompact": true,
 	}
 	for name := range doc.Hooks {
 		if !allowed[name] {

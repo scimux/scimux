@@ -250,7 +250,15 @@ export function buildChatSignature(parts){
     p.turnsHash || "",
     p.decisionsHash || "",
     p.expanded ? "1" : "0",
+    p.compacting ? "1" : "0",
   ].join("|");
+}
+
+export const COMPACTING_STATUS =
+  "Claude is compacting the conversation context. Responses will resume when it finishes.";
+
+export function compactingStatusHTML(){
+  return `<div class="pending compacting" role="status">${COMPACTING_STATUS}</div>`;
 }
 
 /* Everything peekBlockHTML renders. Its own signature so the pane can move on
@@ -1099,10 +1107,10 @@ export function createChatFeature(deps){
     };
   }
 
-  function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek, replyReady){
-    setWorkPulse(workPulseShouldRun(live, mustShowPane, replyReady));
+  function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek, replyReady, compacting){
+    setWorkPulse(workPulseShouldRun(live, mustShowPane, replyReady) || !!compacting);
     if (typeof d.setComposerBusy === "function")
-      d.setComposerBusy(live === "active" && !replyReady);
+      d.setComposerBusy((live === "active" && !replyReady) || !!compacting);
     if (convtools) convtools.hidden = false;
     if (termtoggle){
       termtoggle.innerHTML = icons.ICON_TERM || "";
@@ -1648,6 +1656,7 @@ export function createChatFeature(deps){
     applyChatActivityChrome(
       data.live, mustShowPane, forcePeek, showPeek,
       !!data.reply_ready || freshSurface,
+      !!data.compacting,
     );
     /* Auto-approve chrome is outside the transcript signature so count/phase
        can repaint without clobbering the composer or rebuilding bubbles. */
@@ -1685,6 +1694,7 @@ export function createChatFeature(deps){
       decisionsHash: decisionsHash(liveDecisions) +
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
+      compacting: !!data.compacting,
     });
     const label = unconfirmed
       ? "Send unconfirmed \u2014 check the terminal"
@@ -1751,7 +1761,8 @@ export function createChatFeature(deps){
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, nodeId: n.id, assets,
       }) +
-      (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "");
+      (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
+      (data.compacting ? compactingStatusHTML() : "");
 
     /* The pane's own region. Created rather than written into the markup so the
        feature can hold a live reference: #msgs is rewritten wholesale, and a
