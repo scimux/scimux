@@ -17,6 +17,9 @@ func s8Causes() []TransportCause {
 		CauseICEFailed,
 		CauseAuthFailed,
 		CauseConnectedThenLost,
+		// The seventh, added with tunnel 2.0.0: a MAJOR mismatch has to be
+		// a named state, because major 2 breaks every major-1 peer by design.
+		CauseTunnelVersionMismatch,
 	}
 }
 
@@ -39,8 +42,8 @@ func TestAT_S8_Cause_EachCauseRoundTrips(t *testing.T) {
 		}
 		seen[got] = true
 	}
-	if len(seen) != 6 {
-		t.Fatalf("%s: saw %d distinct causes, want 6: %v", at, len(seen), seen)
+	if len(seen) != len(s8Causes()) {
+		t.Fatalf("%s: saw %d distinct causes, want %d: %v", at, len(seen), len(s8Causes()), seen)
 	}
 }
 

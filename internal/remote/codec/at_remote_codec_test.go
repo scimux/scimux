@@ -3,6 +3,7 @@ package codec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -320,8 +321,8 @@ func TestATRemoteCodecC_TruncatedAndMalformedRejected(t *testing.T) {
 		class Class
 	}{
 		{name: "empty", data: nil, class: ClassTruncated},
-		{name: "one-byte", data: []byte{0x00}, class: ClassTruncated},
-		// Garbage no longer fails on the type byte. tunnel-v1 §2.1
+		{name: "one-byte", data: []byte{typeRequest}, class: ClassTruncated},
+		// Garbage no longer fails on the type byte. tunnel-v2 §2.1
 		// makes an unrecognised type skippable rather than fatal, so
 		// the verdict is deferred to the length prefix — which for
 		// arbitrary bytes means the payload never arrives. Still
@@ -329,7 +330,13 @@ func TestATRemoteCodecC_TruncatedAndMalformedRejected(t *testing.T) {
 		// class is truncated rather than malformed.
 		{name: "three-ff", data: []byte{0xff, 0xff, 0xff}, class: ClassTruncated},
 		{name: "raw-http", data: []byte("GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), class: ClassTruncated},
-		{name: "claimed-length-eof", data: []byte{0x00, 0x00, 0x10, 0x00, 0x01}, class: ClassTruncated},
+		{name: "claimed-length-eof", data: []byte{typeRequest, 0x00, 0x10, 0x00, 0x01}, class: ClassTruncated},
+		// §3.1's one exception. Type 0x00 is permanently reserved, so
+		// refusing it forecloses nothing; without the refusal a
+		// zero-filled buffer would decode as an endless run of valid
+		// empty frames.
+		{name: "reserved-type", data: []byte{0x00, 0x00, 0x00, 0x00}, class: ClassMalformed},
+		{name: "reserved-type-alone", data: []byte{0x00}, class: ClassMalformed},
 	}
 	for _, tc := range cases {
 		t.Run("decode/"+tc.name, func(t *testing.T) {
@@ -351,7 +358,7 @@ func TestATRemoteCodecC_TruncatedAndMalformedRejected(t *testing.T) {
 		}()
 		sr, cw := io.Pipe()
 		cr, sw := io.Pipe()
-		server := NewConn(sr, sw)
+		server := NewConn(sr, sw, RoleResponder)
 		drained := make(chan struct{})
 		go func() {
 			defer close(drained)
@@ -370,8 +377,19 @@ func TestATRemoteCodecC_TruncatedAndMalformedRejected(t *testing.T) {
 			return &Response{Status: 200, Body: bodyOf("")}, nil
 		}))
 		_ = sw.Close()
-		// Truncated for the same reason as the decode cases above.
-		wantReject(t, err, ClassTruncated)
+		// The verdict moved earlier, and got more specific. Garbage now
+		// arrives where the preamble was due (tunnel-v2 §2.2.1), so the
+		// stream is refused as "not a tunnel peer" before a single frame
+		// is parsed — which is what FR-24 has to be able to say. Still
+		// rejected without panic and the handler still never runs, which
+		// is what this AC asserts.
+		var ve *VersionError
+		if !errors.As(err, &ve) || ve.Reason != VersionNoPreamble {
+			t.Fatalf("err = %v (%T), want *VersionError %s", err, err, VersionNoPreamble)
+		}
+		if ve.HavePeer {
+			t.Error("HavePeer is true for a peer whose preamble never parsed")
+		}
 	})
 }
 

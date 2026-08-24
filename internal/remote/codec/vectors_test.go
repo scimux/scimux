@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -43,15 +44,40 @@ func TestCodecVectors(t *testing.T) {
 }
 
 type vectorFile struct {
-	MaxFramePayload int      `json:"max_frame_payload"`
-	BodyChunkSize   int      `json:"body_chunk_size"`
-	FrameHeaderSize int      `json:"frame_header_size"`
-	Counts          counts   `json:"counts"`
-	Vectors         []vector `json:"vectors"`
+	MaxFramePayload  int             `json:"max_frame_payload"`
+	BodyChunkSize    int             `json:"body_chunk_size"`
+	FrameHeaderSize  int             `json:"frame_header_size"`
+	RecordHeaderSize int             `json:"record_header_size"`
+	PreambleSize     int             `json:"preamble_size"`
+	Handshake        vectorHandshake `json:"handshake"`
+	Counts           counts          `json:"counts"`
+	Vectors          []vector        `json:"vectors"`
+}
+
+// vectorHandshake is tunnel-v2 §2.2 as bytes. It is kept out of the
+// per-vector `bytes` deliberately: every vector below is frame-only, so
+// rv's structural frame walk never has to special-case eight leading
+// bytes that are not a frame.
+type vectorHandshake struct {
+	Preamble       string           `json:"preamble"`
+	HelloInitiator string           `json:"hello_initiator"`
+	HelloResponder string           `json:"hello_responder"`
+	Mismatches     []vectorMismatch `json:"mismatches"`
+}
+
+// vectorMismatch is a preamble that must be refused, and by which name.
+// The cause is produced by calling decodePreamble, not by transcribing
+// §2.5 — a vector authored from the prose would only prove two readers
+// read it the same way.
+type vectorMismatch struct {
+	Name  string `json:"name"`
+	Bytes string `json:"bytes"`
+	Cause string `json:"cause"`
 }
 
 type counts struct {
 	Vectors  int `json:"vectors"`
+	Hello    int `json:"hello"`
 	Request  int `json:"request"`
 	Response int `json:"response"`
 	Body     int `json:"body"`
@@ -162,19 +188,87 @@ func buildVectorFile(t *testing.T) vectorFile {
 			nReq, ct.Response, ct.Body, ct.End, ct.Reject)
 	}
 	ct.Request = nReq
+	hs := buildHandshake(t)
+	ct.Hello = 2
 	return vectorFile{
-		MaxFramePayload: maxFramePayload,
-		BodyChunkSize:   bodyChunkSize,
-		FrameHeaderSize: frameHeaderSize,
-		Counts:          ct,
-		Vectors:         vectors,
+		MaxFramePayload:  maxFramePayload,
+		BodyChunkSize:    bodyChunkSize,
+		FrameHeaderSize:  frameHeaderSize,
+		RecordHeaderSize: recordHeaderSize,
+		PreambleSize:     preambleSize,
+		Handshake:        hs,
+		Counts:           ct,
+		Vectors:          vectors,
+	}
+}
+
+func buildHandshake(t *testing.T) vectorHandshake {
+	t.Helper()
+	hello := func(role uint8) string {
+		payload, err := encodeHelloPayload(Hello{
+			Role:         role,
+			MaxRecvFrame: maxFramePayload,
+			Impl:         "scimux",
+		})
+		if err != nil {
+			t.Fatalf("encodeHelloPayload: %v", err)
+		}
+		var buf bytes.Buffer
+		c := NewConn(nil, &buf, role)
+		if err := c.writeFrame(typeHello, payload); err != nil {
+			t.Fatalf("writeFrame hello: %v", err)
+		}
+		return base64.StdEncoding.EncodeToString(buf.Bytes())
+	}
+
+	raw := func(magic string, major, minor uint16) []byte {
+		b := []byte(magic)
+		return append(b, byte(major>>8), byte(major), byte(minor>>8), byte(minor))
+	}
+	bad := []struct {
+		name string
+		in   []byte
+	}{
+		{"wrong-magic", raw("XMCS", ProtocolMajor, ProtocolMinor)},
+		{"raw-http", []byte("GET /api")},
+		{"all-zeroes", make([]byte, preambleSize)},
+		{"truncated", encodePreamble()[:preambleSize-1]},
+		{"major-1", raw("SCMX", 1, 0)},
+		{"major-ahead", raw("SCMX", ProtocolMajor+1, 0)},
+		{"major-byte-swapped", []byte{'S', 'C', 'M', 'X', 0x02, 0x00, 0x00, 0x00}},
+	}
+	out := make([]vectorMismatch, 0, len(bad))
+	for _, tc := range bad {
+		_, _, err := decodePreamble(bytes.NewReader(tc.in))
+		var ve *VersionError
+		if !errors.As(err, &ve) {
+			t.Fatalf("%s: err = %v, want *VersionError", tc.name, err)
+		}
+		out = append(out, vectorMismatch{
+			Name:  tc.name,
+			Bytes: base64.StdEncoding.EncodeToString(tc.in),
+			Cause: ve.Reason,
+		})
+	}
+
+	// A differing minor is never a mismatch (§2.3). Assert it here so the
+	// generator cannot quietly start producing one as a mismatch row.
+	if _, _, err := decodePreamble(bytes.NewReader(raw("SCMX", ProtocolMajor, 0xffff))); err != nil {
+		t.Fatalf("a higher minor was refused: %v", err)
+	}
+
+	return vectorHandshake{
+		Preamble:       base64.StdEncoding.EncodeToString(encodePreamble()),
+		HelloInitiator: hello(RoleInitiator),
+		HelloResponder: hello(RoleResponder),
+		Mismatches:     out,
 	}
 }
 
 func requestVector(t *testing.T, name string, req vectorRequest, body []byte) vector {
 	t.Helper()
 	var buf bytes.Buffer
-	c := NewConn(nil, &buf)
+	c := NewConn(nil, &buf, RoleResponder)
 	hdrs := http.Header{}
 	for k, v := range req.Headers {
 		hdrs[k] = []string{v}
@@ -205,7 +299,7 @@ func requestVector(t *testing.T, name string, req vectorRequest, body []byte) ve
 func framedVector(t *testing.T, name string, write func(*Conn)) vector {
 	t.Helper()
 	var buf bytes.Buffer
-	c := NewConn(nil, &buf)
+	c := NewConn(nil, &buf, RoleResponder)
 	write(c)
 	raw := buf.Bytes()
 	if len(raw) == 0 {
@@ -249,11 +343,10 @@ func writeRejectFrame(t *testing.T, c *Conn, id string, class Class, field strin
 
 func writeBodyFrame(t *testing.T, c *Conn, id string, data []byte) {
 	t.Helper()
-	chunk, err := encodeID(id)
+	chunk, err := encodeBodyPayload(id, data)
 	if err != nil {
-		t.Fatalf("encodeID: %v", err)
+		t.Fatalf("encodeBodyPayload: %v", err)
 	}
-	chunk = append(chunk, data...)
 	if err := c.writeFrame(typeBody, chunk); err != nil {
 		t.Fatalf("writeFrame body: %v", err)
 	}

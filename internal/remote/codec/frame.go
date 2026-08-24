@@ -1,45 +1,51 @@
 package codec
 
 import (
-	"encoding/binary"
 	"io"
 	"net/http"
 )
 
-// Wire format (one frame):
+// Wire format (one frame), tunnel-v2 §3:
 //
-//	type   uint8     // 0x00 request, 0x01 response, 0x02 body, 0x03 body-end,
-//	                 // 0x04 cancel, 0x05 reject. Anything else is a frame
-//	                 // this build predates: read whole, then dropped by the
-//	                 // dispatch (tunnel-v1 §2.1, see isKnownType).
+//	type   uint8     // see the constants below
 //	length uint24 BE // payload bytes that follow
 //	payload [length]byte
+//
+// The payload is a sequence of records (§4, tlv.go), which share this
+// header's four-byte shape. Frame types above the highest assigned one
+// are frames this build predates: read whole, then dropped by the
+// dispatch, which is what makes a MINOR addition additive.
+//
+// Type 0x00 is the one exception to skip-the-unknown. It is permanently
+// reserved, so no future MINOR can assign it and rejecting it costs no
+// extensibility; and without the rule a zero-filled or padded buffer
+// decodes as "type 0x00, length 0" — a valid empty frame, consumed
+// silently, forever.
 //
 // A body stream is zero or more typeBody frames followed by typeBodyEnd
 // (the end marker is a distinct type, not a zero-length chunk).
 //
-// The 4-byte header is what AT-remote-codec-c pins. Since the type byte
-// stopped being a verdict, garbage is judged by the length prefix, so it
-// reads as truncated rather than malformed:
+// The 4-byte header is what AT-remote-codec-c pins. Garbage is judged by
+// the length prefix, so it reads as truncated rather than malformed:
 //
 //	empty / 1 byte → truncated (header incomplete)
 //	0xff 0xff 0xff → truncated (type 0xff, then 2 of 3 length bytes)
 //	raw HTTP       → truncated (type 'G', length "ET " is over the cap)
-//	00 00 10 00 01 → truncated (type 0x00, length 0x001000, 1 payload byte)
 const (
-	typeRequest  uint8 = 0x00
-	typeResponse uint8 = 0x01
-	typeBody     uint8 = 0x02
-	typeBodyEnd  uint8 = 0x03
-	typeCancel   uint8 = 0x04
-	typeReject   uint8 = 0x05
+	typeReserved uint8 = 0x00
+	typeHello    uint8 = 0x01
+	typeRequest  uint8 = 0x02
+	typeResponse uint8 = 0x03
+	typeBody     uint8 = 0x04
+	typeBodyEnd  uint8 = 0x05
+	typeCancel   uint8 = 0x06
+	typeReject   uint8 = 0x07
 )
 
 const (
 	frameHeaderSize = 4
 	maxFramePayload = (64 << 10) + 1024
 	bodyChunkSize   = 32 << 10
-	maxString       = 1 << 16
 )
 
 type frame struct {
@@ -48,13 +54,16 @@ type frame struct {
 }
 
 // isKnownType reports whether the type byte is one this version has an
-// opinion about. Deliberately not a validity test: tunnel-v1 §2.1 lets a
+// opinion about. Deliberately not a validity test: tunnel-v2 §2.1 lets a
 // MINOR bump add frame types, and this binary is the half that goes stale
 // (rv is deployed once and reaches every browser; scimux sits on many
 // laptops at many versions). The dispatch switches in conn.go ignore what
 // they do not recognise, which is what makes an addition additive.
+//
+// typeReserved is excluded: it never becomes known, because decodeFrame
+// refuses it outright.
 func isKnownType(t uint8) bool {
-	return t <= typeReject
+	return t != typeReserved && t <= typeReject
 }
 
 func decodeFrame(r io.Reader) (*frame, error) {
@@ -70,7 +79,15 @@ func decodeFrame(r io.Reader) (*frame, error) {
 		return nil, err
 	}
 	typ := hdr[0]
-	// No rejection on the type byte. Rejecting here tore down the
+	if typ == typeReserved {
+		// §3.1's single exception to skip-the-unknown. 0x00 is permanently
+		// reserved, so refusing it forecloses nothing a future MINOR could
+		// have used; and without the refusal a zero-filled or padded
+		// buffer decodes as "type 0x00, length 0" — a valid empty frame,
+		// consumed silently, forever.
+		return nil, reject(ClassMalformed, "")
+	}
+	// No rejection on any other type byte. Rejecting there tore down the
 	// connection *and* desynced the stream, because the length prefix
 	// below had not been read yet: one frame type added in a MINOR bump
 	// would have broken every laptop older than it. Every frame is
@@ -106,6 +123,18 @@ func decodeFrame(r io.Reader) (*frame, error) {
 	return &frame{typ: typ, payload: payload}, nil
 }
 
+// writeRaw writes bytes that are not a frame. The preamble is the only
+// such thing in this protocol, and it exists precisely to precede framing.
+func (c *Conn) writeRaw(b []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.closed.Load() {
+		return io.ErrClosedPipe
+	}
+	_, err := c.w.Write(b)
+	return err
+}
+
 func (c *Conn) writeFrame(typ uint8, payload []byte) error {
 	if len(payload) > 0xffffff {
 		return reject(ClassMalformed, "")
@@ -132,180 +161,139 @@ func (c *Conn) writeFrame(typ uint8, payload []byte) error {
 	return nil
 }
 
-func putU16(b []byte, v int) []byte {
-	var tmp [2]byte
-	binary.BigEndian.PutUint16(tmp[:], uint16(v))
-	return append(b, tmp[:]...)
-}
-
-func putBytes(b []byte, s []byte) ([]byte, error) {
-	if len(s) >= maxString {
-		return nil, reject(ClassMalformed, "")
-	}
-	b = putU16(b, len(s))
-	return append(b, s...), nil
-}
-
-func putString(b []byte, s string) ([]byte, error) {
-	return putBytes(b, []byte(s))
-}
-
-func takeU16(p []byte) (uint16, []byte, error) {
-	if len(p) < 2 {
-		return 0, nil, reject(ClassMalformed, "")
-	}
-	return binary.BigEndian.Uint16(p[:2]), p[2:], nil
-}
-
-func takeBytes(p []byte) ([]byte, []byte, error) {
-	n, rest, err := takeU16(p)
-	if err != nil {
-		return nil, nil, err
-	}
-	if int(n) > len(rest) {
-		return nil, nil, reject(ClassMalformed, "")
-	}
-	return rest[:n], rest[n:], nil
-}
-
-func takeString(p []byte) (string, []byte, error) {
-	b, rest, err := takeBytes(p)
-	if err != nil {
-		return "", nil, err
-	}
-	return string(b), rest, nil
-}
-
+// encodeHeaders writes one nested header record per name (§5.8): a
+// name record and one value record per value. No count anywhere — the
+// enclosing record's length ends the list.
 func encodeHeaders(b []byte, h http.Header) ([]byte, error) {
-	if h == nil {
-		return putU16(b, 0), nil
-	}
-	n := 0
-	for range h {
-		n++
-	}
-	b = putU16(b, n)
 	for name, vals := range h {
-		var err error
-		b, err = putString(b, name)
+		inner, err := putRecordString(nil, tagHeaderName, name)
 		if err != nil {
 			return nil, err
 		}
-		b = putU16(b, len(vals))
 		for _, v := range vals {
-			b, err = putString(b, v)
+			inner, err = putRecordString(inner, tagHeaderValue, v)
 			if err != nil {
 				return nil, err
 			}
+		}
+		b, err = putRecord(b, tagHeader, inner)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return b, nil
 }
 
-func decodeHeaders(p []byte) (http.Header, []byte, error) {
-	n, rest, err := takeU16(p)
+// decodeHeader reads one nested header record into h. A repeated name
+// record is last-wins (§4, scalars); repeated value records are the
+// multi-valued case.
+func decodeHeader(h http.Header, val []byte) error {
+	name := ""
+	// Do not preallocate from anything the peer said: there is no count to
+	// preallocate from, which is the point.
+	vals := make([]string, 0)
+	err := eachRecord(val, func(tag uint8, v []byte) error {
+		switch tag {
+		case tagHeaderName:
+			name = string(v)
+		case tagHeaderValue:
+			vals = append(vals, string(v))
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	// Do not size the map or value slices from a claimed count — a hostile
-	// peer can claim 65535 headers and send two bytes.
-	h := make(http.Header)
-	for i := 0; i < int(n); i++ {
-		name, r, err := takeString(rest)
-		if err != nil {
-			return nil, nil, err
-		}
-		nv, r, err := takeU16(r)
-		if err != nil {
-			return nil, nil, err
-		}
-		vals := make([]string, 0)
-		for j := 0; j < int(nv); j++ {
-			v, rr, err := takeString(r)
-			if err != nil {
-				return nil, nil, err
-			}
-			vals = append(vals, v)
-			r = rr
-		}
-		h[name] = vals
-		rest = r
+	if name == "" {
+		// A header record with no name is not a header. It is not
+		// tolerated as an unknown field either: the record's tag is one
+		// this build knows, so its contents are this build's business.
+		return reject(ClassMalformed, "")
 	}
-	return h, rest, nil
+	h[name] = vals
+	return nil
 }
 
 func encodeRequestPayload(id, method, path, query string, h http.Header) ([]byte, error) {
 	b := make([]byte, 0, 64)
 	var err error
-	b, err = putString(b, id)
-	if err != nil {
+	if b, err = putRecordString(b, tagID, id); err != nil {
 		return nil, err
 	}
-	b, err = putString(b, method)
-	if err != nil {
+	if b, err = putRecordString(b, tagMethod, method); err != nil {
 		return nil, err
 	}
-	b, err = putString(b, path)
-	if err != nil {
+	if b, err = putRecordString(b, tagPath, path); err != nil {
 		return nil, err
 	}
-	b, err = putString(b, query)
-	if err != nil {
+	if b, err = putRecordString(b, tagQuery, query); err != nil {
 		return nil, err
 	}
 	return encodeHeaders(b, h)
 }
 
 func decodeRequestPayload(p []byte) (id, method, path, query string, h http.Header, err error) {
-	id, p, err = takeString(p)
-	if err != nil {
-		return
-	}
-	method, p, err = takeString(p)
-	if err != nil {
-		return
-	}
-	path, p, err = takeString(p)
-	if err != nil {
-		return
-	}
-	query, p, err = takeString(p)
-	if err != nil {
-		return
-	}
-	h, p, err = decodeHeaders(p)
+	h = make(http.Header)
+	err = eachRecord(p, func(tag uint8, val []byte) error {
+		switch tag {
+		case tagID:
+			id = string(val)
+		case tagMethod:
+			method = string(val)
+		case tagPath:
+			path = string(val)
+		case tagQuery:
+			query = string(val)
+		case tagHeader:
+			return decodeHeader(h, val)
+		}
+		// Every other tag is a field a later MINOR added. Skipping it is
+		// what makes that addition additive rather than a MAJOR break.
+		return nil
+	})
 	return
 }
 
 func encodeResponsePayload(id string, status int, h http.Header) ([]byte, error) {
-	b := make([]byte, 0, 64)
-	var err error
-	b, err = putString(b, id)
-	if err != nil {
-		return nil, err
-	}
 	if !validHTTPStatus(status) {
 		return nil, reject(ClassMalformed, "")
 	}
-	b = putU16(b, status)
+	b := make([]byte, 0, 64)
+	var err error
+	if b, err = putRecordString(b, tagID, id); err != nil {
+		return nil, err
+	}
+	if b, err = putRecordU16(b, tagStatus, uint16(status)); err != nil {
+		return nil, err
+	}
 	return encodeHeaders(b, h)
 }
 
 func decodeResponsePayload(p []byte) (id string, status int, h http.Header, err error) {
-	id, p, err = takeString(p)
+	h = make(http.Header)
+	seenStatus := false
+	err = eachRecord(p, func(tag uint8, val []byte) error {
+		switch tag {
+		case tagID:
+			id = string(val)
+		case tagStatus:
+			st, sErr := recordU16(val)
+			if sErr != nil {
+				return sErr
+			}
+			status = int(st)
+			seenStatus = true
+		case tagHeader:
+			return decodeHeader(h, val)
+		}
+		return nil
+	})
 	if err != nil {
 		return
 	}
-	st, p, err := takeU16(p)
-	if err != nil {
-		return
-	}
-	status = int(st)
-	if !validHTTPStatus(status) {
+	if !seenStatus || !validHTTPStatus(status) {
 		err = reject(ClassMalformed, "")
-		return
 	}
-	h, _, err = decodeHeaders(p)
 	return
 }
 
@@ -314,36 +302,58 @@ func validHTTPStatus(s int) bool {
 }
 
 func encodeID(id string) ([]byte, error) {
-	return putString(nil, id)
+	return putRecordString(nil, tagID, id)
 }
 
-func decodeIDPayload(p []byte) (string, []byte, error) {
-	return takeString(p)
+// encodeBodyPayload is a body chunk: the stream's id and its data (§5.4).
+func encodeBodyPayload(id string, data []byte) ([]byte, error) {
+	b, err := putRecordString(nil, tagID, id)
+	if err != nil {
+		return nil, err
+	}
+	return putRecord(b, tagData, data)
+}
+
+// decodeIDPayload returns the id and, for a body frame, its data. Body-end
+// and cancel carry no data record, so data is empty for them.
+func decodeIDPayload(p []byte) (id string, data []byte, err error) {
+	err = eachRecord(p, func(tag uint8, val []byte) error {
+		switch tag {
+		case tagID:
+			id = string(val)
+		case tagData:
+			data = val
+		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return id, data, nil
 }
 
 func encodeRejectPayload(id string, class Class, field string) ([]byte, error) {
-	b, err := putString(nil, id)
+	b, err := putRecordString(nil, tagID, id)
 	if err != nil {
 		return nil, err
 	}
-	b, err = putString(b, string(class))
-	if err != nil {
+	if b, err = putRecordString(b, tagClass, string(class)); err != nil {
 		return nil, err
 	}
-	return putString(b, field)
+	return putRecordString(b, tagField, field)
 }
 
 func decodeRejectPayload(p []byte) (id string, class Class, field string, err error) {
-	id, p, err = takeString(p)
-	if err != nil {
-		return
-	}
-	var cs string
-	cs, p, err = takeString(p)
-	if err != nil {
-		return
-	}
-	field, _, err = takeString(p)
-	class = Class(cs)
+	err = eachRecord(p, func(tag uint8, val []byte) error {
+		switch tag {
+		case tagID:
+			id = string(val)
+		case tagClass:
+			class = Class(val)
+		case tagField:
+			field = string(val)
+		}
+		return nil
+	})
 	return
 }

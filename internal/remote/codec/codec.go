@@ -7,6 +7,7 @@
 package codec
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -106,6 +107,23 @@ type Conn struct {
 	r io.Reader
 	w io.Writer
 
+	// role is this side's tunnel-v2 §5.1 role, sent in our hello.
+	role uint8
+	// Impl is free diagnostic text sent in our hello. The peer must never
+	// parse it for behaviour (§5.1).
+	Impl string
+
+	// br is owned from construction, not created inside the read loop, so
+	// the handshake and the loop read from the same buffer. Two readers
+	// over one stream would lose whatever the first one buffered past its
+	// own last byte.
+	br *bufio.Reader
+
+	handshakeOnce sync.Once
+	handshakeErr  error
+	peerHello     Hello
+	havePeerHello atomic.Bool
+
 	writeMu sync.Mutex
 
 	closeOnce sync.Once
@@ -143,10 +161,16 @@ type respOrErr struct {
 
 // NewConn binds one side of a pair. r and w are typically the two halves
 // of a crossed io.Pipe pair; the codec does not open a network.
-func NewConn(r io.Reader, w io.Writer) *Conn {
+//
+// role is RoleInitiator or RoleResponder (tunnel-v2 §5.1). It is fixed at
+// construction because it is a property of which end of the tunnel this
+// is, not of any one request, and the peer is told it in the hello.
+func NewConn(r io.Reader, w io.Writer, role uint8) *Conn {
 	return &Conn{
 		r:       r,
 		w:       w,
+		role:    role,
+		br:      bufio.NewReaderSize(r, chunkBufSize),
 		closeCh: make(chan struct{}),
 		pending: make(map[string]*call),
 		inBody:  make(map[string]*incoming),

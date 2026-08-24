@@ -86,7 +86,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
     imported, never *where it may be imported from*.
 - **The tunnel protocol is owned by scimux-rv, not by this repository.**
   Decided 2026-08-24. The browser↔laptop data-channel wire format is
-  specified in scimux-rv's `docs/protocol/tunnel-v1.md`, and its **browser**
+  specified in scimux-rv's `docs/protocol/tunnel-v2.md`, and its **browser**
   implementation lives there too (`web/js/codec.js`, `web/js/connection.js`
   in that repo, served from the closed `/p` inventory). The reason is
   deployment asymmetry: rv is deployed once and reaches every browser on the
@@ -102,7 +102,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   deployment. Vendoring the loader into rv was considered and rejected: rv
   would go stale on the next module added, and would end up supplying the
   code that checks this laptop's own integrity values, inverting FR-40.
-  The seam between the two is three fixed constants (§7 of `tunnel-v1.md`):
+  The seam between the two is three fixed constants (§8 of `tunnel-v2.md`):
   `GET /api/remote/bootstrap`, `GET /js/bootstrap.js`, and the
   `bootstrap({channel, manifest, createObjectURL, installImportMap,
   importModule})` signature. Those three are **protocol**. Renaming the route,
@@ -110,10 +110,21 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   breaks every deployed rv, not a local refactor.
   Tunnel versioning is semantic and both halves bind: MAJOR breaks old
   binaries by design and must surface as a named FR-24 state saying which
-  side is behind; MINOR is additive and must never escalate to the user.
-  What keeps MINOR safe is that unknown frame types, unknown rejection
-  classes, and trailing payload bytes are ignored rather than treated as
-  malformed.
+  side is behind (the `tunnel-version-mismatch` cause); MINOR is additive
+  and must never escalate to the user. What keeps MINOR safe is that
+  unknown frame types, unknown record tags, unknown rejection classes, and
+  trailing bytes are ignored rather than treated as malformed. The one
+  exception is frame type `0x00` and record tag `0x00`, reserved
+  permanently and always malformed — rejectable precisely because no
+  future minor can assign them.
+  Every channel opens with an 8-byte frozen preamble (`SCMX` + major
+  uint16 + minor uint16) from each side, then exactly one hello frame per
+  side, before any request. The preamble never gains a field; capabilities
+  grow in the hello. Payload fields are **tagged records** (`tag uint8` +
+  `length uint24 BE`, the same 4-byte shape as a frame header), not
+  positional, and a tag number is permanent: never reused, never
+  repurposed, never retyped. Do not add a count prefix anywhere — records
+  are read to exhaustion so a claimed count cannot be lied about.
 - **`internal/remote/codec/testdata/vectors.json` is a published contract,
   not a local fixture.** `vectors_test.go` regenerates it by calling the
   production encoders and fails on drift; scimux-rv byte-copies it and

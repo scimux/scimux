@@ -66,8 +66,8 @@ func startPair(t *testing.T, h Handler) *Conn {
 	ctx, cancel := context.WithCancel(t.Context())
 	cr, sw := io.Pipe()
 	sr, cw := io.Pipe()
-	client := NewConn(cr, cw)
-	server := NewConn(sr, sw)
+	client := NewConn(cr, cw, RoleInitiator)
+	server := NewConn(sr, sw, RoleResponder)
 	errc := make(chan error, 1)
 	go func() {
 		errc <- server.Serve(ctx, h)

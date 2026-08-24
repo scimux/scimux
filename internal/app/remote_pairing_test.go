@@ -415,6 +415,8 @@ func s8StatusCauses() []remote.TransportCause {
 		remote.CauseICEFailed,
 		remote.CauseAuthFailed,
 		remote.CauseConnectedThenLost,
+		// The seventh, added with tunnel 2.0.0.
+		remote.CauseTunnelVersionMismatch,
 	}
 }
 
@@ -425,7 +427,7 @@ func entryHasFallback(entry string) bool {
 		strings.Contains(l, "tailscale")
 }
 
-func TestRemoteStatusSixCausesRoundTrip(t *testing.T) {
+func TestRemoteStatusEveryCauseRoundTrips(t *testing.T) {
 	causes := s8StatusCauses()
 	devices := make([]remote.PairedDevice, len(causes))
 	causeByID := make(map[string]remote.TransportCause, len(causes))
@@ -490,8 +492,8 @@ func TestRemoteStatusSixCausesRoundTrip(t *testing.T) {
 			seen[got] = true
 		}
 	}
-	if len(seen) != 6 {
-		t.Fatalf("saw %d distinct cause strings, want 6: %v", len(seen), seen)
+	if len(seen) != len(causes) {
+		t.Fatalf("saw %d distinct cause strings, want %d: %v", len(seen), len(causes), seen)
 	}
 }
 

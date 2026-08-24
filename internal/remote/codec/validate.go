@@ -117,7 +117,7 @@ func validateResponseHeaders(h http.Header) (http.Header, error) {
 }
 
 // maxRejectClassLen bounds a class this build has never heard of. Every
-// class in tunnel-v1 §5 is well under it; the bound exists because the
+// class in tunnel-v2 §5 is well under it; the bound exists because the
 // string is a peer's, not because a longer name is meaningful.
 const maxRejectClassLen = 40
 

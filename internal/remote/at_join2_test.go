@@ -92,7 +92,8 @@ func (d *devicePeer) applyAnswer(ctx context.Context, answer SessionInner) error
 
 // roundTrip issues one FR-27 request over the open channel.
 func (d *devicePeer) roundTrip(ctx context.Context, path string) (*codec.Response, error) {
-	conn := codec.NewConn(d.stream, d.stream)
+	// The device end dials, so it is the initiator (tunnel-v2 §5.1).
+	conn := codec.NewConn(d.stream, d.stream, codec.RoleInitiator)
 	return conn.RoundTrip(ctx, &codec.Request{
 		ID:      "join2-0001",
 		Method:  http.MethodGet,

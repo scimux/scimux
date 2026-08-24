@@ -520,6 +520,8 @@ func causeOfClass(c Class) TransportCause {
 		return CauseAuthFailed
 	case ClassHandshake, ClassFingerprint:
 		return CauseSignallingRejected
+	case ClassTunnelVersion:
+		return CauseTunnelVersionMismatch
 	default:
 		return ""
 	}

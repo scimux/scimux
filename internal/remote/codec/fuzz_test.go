@@ -21,18 +21,23 @@ func FuzzDecodeFrame(f *testing.F) {
 }
 
 // FuzzDecodePayloads feeds the payload parsers that decodeFrame leaves
-// opaque. Claimed lengths that exceed the remaining slice must not allocate.
+// opaque. Every one of them is now a record walk (tunnel-v2 §4), so a
+// claimed record length that exceeds the remaining slice must be
+// malformed rather than an allocation or a panic.
 func FuzzDecodePayloads(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0x00, 0x00})
 	f.Add([]byte{0xff, 0xff})
-	f.Add([]byte{0x00, 0x01, 'a'})
-	f.Add([]byte{0xff, 0xff, 'x'})
+	f.Add([]byte{0x01, 0x00, 0x00, 0x01, 'a'})
+	f.Add([]byte{0x01, 0xff, 0xff, 0xff, 'x'})
+	f.Add([]byte{0x00, 0x00, 0x00, 0x00})
+	f.Add([]byte{0x05, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x04, 'H', 'o', 's', 't'})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _, _, _, _, _ = decodeRequestPayload(data)
 		_, _, _, _ = decodeResponsePayload(data)
-		_, _, _ = decodeHeaders(data)
 		_, _, _, _ = decodeRejectPayload(data)
 		_, _, _ = decodeIDPayload(data)
+		_, _ = decodeHelloPayload(data)
+		_ = eachRecord(data, func(uint8, []byte) error { return nil })
 	})
 }

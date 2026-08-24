@@ -1,7 +1,6 @@
 package codec
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -17,6 +16,13 @@ func (c *Conn) RoundTrip(ctx context.Context, req *Request) (*Response, error) {
 	}
 	hdrs, err := validateRequest(req)
 	if err != nil {
+		return nil, err
+	}
+	// §7 step 0. Nothing goes on the wire before negotiation succeeds:
+	// a request sent to a peer at another major is a request that peer
+	// will misread, and the FR-24 state has to be the version, not
+	// whatever the misreading produced.
+	if err := c.Handshake(ctx); err != nil {
 		return nil, err
 	}
 	id := req.ID
@@ -94,7 +100,9 @@ func (c *Conn) writeOutgoingBody(ctx context.Context, id string, body io.Reader,
 			_ = rc.Close()
 		}
 	}()
-	buf := make([]byte, chunkBufSize)
+	// The peer's advertised max_recv_frame constrains our encoder, so the
+	// read buffer is sized from it rather than from bodyChunkSize alone.
+	buf := make([]byte, c.maxSendChunk(id))
 	var n int64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -105,11 +113,10 @@ func (c *Conn) writeOutgoingBody(ctx context.Context, id string, body io.Reader,
 			if capN-n < int64(nr) {
 				return reject(ClassBodyTooLarge, "")
 			}
-			chunk, encErr := encodeID(id)
+			chunk, encErr := encodeBodyPayload(id, buf[:nr])
 			if encErr != nil {
 				return encErr
 			}
-			chunk = append(chunk, buf[:nr]...)
 			if werr := c.writeFrame(typeBody, chunk); werr != nil {
 				return werr
 			}
@@ -139,6 +146,9 @@ func (c *Conn) Serve(ctx context.Context, h Handler) error {
 	}
 	if h == nil {
 		return reject(ClassMalformed, "")
+	}
+	if err := c.Handshake(ctx); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -208,7 +218,7 @@ func (c *Conn) ensureClientLoop() {
 }
 
 func (c *Conn) readLoop(ctx context.Context, server bool) error {
-	br := bufio.NewReaderSize(c.r, chunkBufSize)
+	br := c.br
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -229,8 +239,19 @@ func (c *Conn) readLoop(ctx context.Context, server bool) error {
 			}
 			return err
 		}
+		if fr.typ == typeHello {
+			// §2.2.2: exactly one hello per side per channel, and the
+			// handshake already consumed it. A second one would be a way
+			// to renegotiate mid-stream, which §2.2 does not have — a new
+			// version needs a new channel.
+			err := reject(ClassMalformed, "")
+			if !server {
+				c.failAll(err)
+			}
+			return err
+		}
 		if !isKnownType(fr.typ) {
-			// tunnel-v1 §2.1. The frame was read whole, so the
+			// tunnel-v2 §2.1. The frame was read whole, so the
 			// stream stays aligned; dropping it is what makes a
 			// MINOR addition invisible to an older laptop rather
 			// than a torn-down session.
@@ -468,7 +489,7 @@ func (c *Conn) acceptReject(payload []byte) {
 		return
 	}
 	if !knownRejectClass(class) {
-		// tunnel-v1 §2.1 and §5: an unknown class is not an error. It
+		// tunnel-v2 §2.1 and §5: an unknown class is not an error. It
 		// is an opaque refusal reason a later MINOR may have added,
 		// and relabelling it "malformed" told the operator the frame
 		// was corrupt when the peer had simply refused for a reason
@@ -548,7 +569,7 @@ func (c *Conn) writeOutgoingResponse(ctx context.Context, id, method, path strin
 		return
 	}
 	defer body.Close()
-	buf := make([]byte, chunkBufSize)
+	buf := make([]byte, c.maxSendChunk(id))
 	var n int64
 	for {
 		if ctx.Err() != nil {
@@ -560,11 +581,10 @@ func (c *Conn) writeOutgoingResponse(ctx context.Context, id, method, path strin
 				_ = c.writeReject(id, reject(ClassBodyTooLarge, ""))
 				return
 			}
-			chunk, encErr := encodeID(id)
+			chunk, encErr := encodeBodyPayload(id, buf[:nr])
 			if encErr != nil {
 				return
 			}
-			chunk = append(chunk, buf[:nr]...)
 			if werr := c.writeFrame(typeBody, chunk); werr != nil {
 				return
 			}

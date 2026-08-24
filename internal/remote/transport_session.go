@@ -107,8 +107,8 @@ func inProcessTunnelVia(ctx context.Context, hub *signallingHub, handler http.Ha
 	// a session must outlive the call that set it up.
 	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.serveCancel = cancel
-	s.srv = codec.NewConn(pair.laptopStream, pair.laptopStream)
-	s.conn = codec.NewConn(pair.clientStream, pair.clientStream)
+	s.srv = codec.NewConn(pair.laptopStream, pair.laptopStream, codec.RoleResponder)
+	s.conn = codec.NewConn(pair.clientStream, pair.clientStream, codec.RoleInitiator)
 	go func() {
 		defer close(s.serveDone)
 		_ = s.srv.Serve(serveCtx, &httpTunnelHandler{h: handler})
@@ -181,7 +181,10 @@ func (s *Session) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	resp, err := conn.RoundTrip(ctx, creq)
 	if err != nil {
-		return nil, err
+		// §7 step 0 runs inside RoundTrip, so a MAJOR mismatch arrives here
+		// before any request byte was written. It has to become the named
+		// FR-24 state rather than reaching the UI as a frame error.
+		return nil, s.noteTunnelError("round-trip", err)
 	}
 	return httpResponse(req, resp), nil
 }

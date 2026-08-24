@@ -199,7 +199,8 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.
 		return
 	}
 
-	srv := codec.NewConn(stream, stream)
+	// The laptop is always the responder: it serves, the browser dials.
+	srv := codec.NewConn(stream, stream, codec.RoleResponder)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -210,5 +211,9 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.
 	s.cause = ""
 	s.mu.Unlock()
 
-	_ = srv.Serve(ctx, &httpTunnelHandler{h: handler})
+	// The laptop is the side that outlives deployments, so it is the side
+	// most likely to meet a peer of another major. Serve negotiates before
+	// it dispatches anything, and a version verdict is recorded as this
+	// session's FR-24 cause rather than dropped as a serve error.
+	_ = s.noteTunnelError("serve", srv.Serve(ctx, &httpTunnelHandler{h: handler}))
 }

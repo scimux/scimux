@@ -30,6 +30,34 @@ func writeRawFrame(w io.Writer, typ uint8, payload []byte) error {
 	return nil
 }
 
+// peerHandshake plays the other end of tunnel-v2 §2.2: read the Conn's
+// preamble and hello, then send our own. Every raw-frame peer in this
+// file has to do it, because a Conn sends nothing at all until it has.
+func peerHandshake(r io.Reader, w io.Writer, role uint8) error {
+	if _, _, err := decodePreamble(r); err != nil {
+		return err
+	}
+	fr, err := decodeFrame(r)
+	if err != nil {
+		return err
+	}
+	if fr.typ != typeHello {
+		return io.ErrUnexpectedEOF
+	}
+	payload, err := encodeHelloPayload(Hello{
+		Role:         role,
+		MaxRecvFrame: maxFramePayload,
+		Impl:         "hostile-peer",
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(encodePreamble()); err != nil {
+		return err
+	}
+	return writeRawFrame(w, typeHello, payload)
+}
+
 func consumeClientRequest(r io.Reader) error {
 	sawReq := false
 	for {
@@ -55,7 +83,7 @@ func hostilePair(t *testing.T, respond func(sw *io.PipeWriter, id string)) *Conn
 	t.Helper()
 	cr, sw := io.Pipe()
 	sr, cw := io.Pipe()
-	client := NewConn(cr, cw)
+	client := NewConn(cr, cw, RoleInitiator)
 	t.Cleanup(func() {
 		_ = client.Close()
 		_ = cr.Close()
@@ -64,6 +92,9 @@ func hostilePair(t *testing.T, respond func(sw *io.PipeWriter, id string)) *Conn
 		_ = sw.Close()
 	})
 	go func() {
+		if err := peerHandshake(sr, sw, RoleResponder); err != nil {
+			return
+		}
 		if err := consumeClientRequest(sr); err != nil {
 			return
 		}
@@ -113,7 +144,7 @@ func TestReceiveRejectsCRLFResponseHeader(t *testing.T) {
 	wantReject(t, err, ClassCRLF)
 }
 
-// tunnel-v1 §2.1 and §5. This test used to assert the opposite — that an
+// tunnel-v2 §2.1 and §5. This test used to assert the opposite — that an
 // unknown class became ClassMalformed. That reading made every new
 // rejection class a MAJOR bump, and told the operator the frame was
 // corrupt when the peer had merely refused for a newer reason.
@@ -173,7 +204,7 @@ func TestReceiveMisshapenRejectClassIsMalformed(t *testing.T) {
 	}
 }
 
-// tunnel-v1 §2.1: a frame type this build predates must be skipped
+// tunnel-v2 §2.1: a frame type this build predates must be skipped
 // whole, not rejected. Rejecting on the type byte also desynced the
 // stream, because the length prefix had not been read yet — so the
 // frames after it decoded from the wrong offset.
@@ -211,11 +242,11 @@ func TestReceiveUnknownFrameTypeMidResponse(t *testing.T) {
 			return
 		}
 		_ = writeRawFrame(sw, typeResponse, payload)
-		body, err := putString(nil, id)
+		body, err := encodeBodyPayload(id, []byte("hello"))
 		if err != nil {
 			return
 		}
-		_ = writeRawFrame(sw, typeBody, append(body, []byte("hello")...))
+		_ = writeRawFrame(sw, typeBody, body)
 		_ = writeRawFrame(sw, 0x7f, []byte("a frame from a newer peer"))
 		_ = writeRawFrame(sw, typeBodyEnd, mustID(id))
 	})
@@ -231,12 +262,14 @@ func TestReceiveUnknownFrameTypeMidResponse(t *testing.T) {
 
 func TestReceiveRejectsOutOfRangeStatus(t *testing.T) {
 	client := hostilePair(t, func(sw *io.PipeWriter, id string) {
-		b, err := putString(nil, id)
+		b, err := putRecordString(nil, tagID, id)
 		if err != nil {
 			return
 		}
-		b = putU16(b, 700)
-		b = putU16(b, 0)
+		b, err = putRecordU16(b, tagStatus, 700)
+		if err != nil {
+			return
+		}
 		_ = writeRawFrame(sw, typeResponse, b)
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
