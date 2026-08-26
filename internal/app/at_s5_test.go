@@ -84,6 +84,7 @@ func TestAT_FR_01_b_RemoteWithoutInviteFailsLocally(t *testing.T) {
 				DataDir:       data,
 				RendezvousURL: "http://127.0.0.1:1",
 				HTTPClient:    unreachableHTTP(),
+				NewTerminal:   noTestTerminal,
 				Hooks: remote.Hooks{
 					OnEnrollAttempt: func() { enrolls++ },
 				},
@@ -133,6 +134,7 @@ func TestAT_FR_01_b_RemoteWithoutInviteFailsLocally(t *testing.T) {
 				DataDir:       data,
 				RendezvousURL: "http://127.0.0.1:1",
 				HTTPClient:    unreachableHTTP(),
+				NewTerminal:   noTestTerminal,
 			},
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -278,7 +280,7 @@ func TestAT_FR_32_a_DisableAllLeavesLocalhost(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: new(bytes.Buffer),
 		Home:   t.TempDir(),
-		Config: remote.Config{DataDir: data, Remote: true},
+		Config: remote.Config{DataDir: data, Remote: true, NewTerminal: noTestTerminal},
 	}
 	cmd.handler = h
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

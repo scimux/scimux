@@ -34,6 +34,7 @@ func TestS5R5_F2_HostedStatusWaitChallengeTransitions(t *testing.T) {
 			DataDir:       data,
 			RendezvousURL: srv.URL,
 			HTTPClient:    srv.Client,
+			NewTerminal:   noTestTerminal,
 			Backoff: remote.BackoffConfig{
 				Initial:    20 * time.Millisecond,
 				Max:        200 * time.Millisecond,

@@ -34,6 +34,7 @@ func TestS5R6_F1_HostedWait404ThenFreshChallengeStaysEnrolled(t *testing.T) {
 			DataDir:       data,
 			RendezvousURL: srv.URL,
 			HTTPClient:    srv.Client,
+			NewTerminal:   noTestTerminal,
 			Backoff: remote.BackoffConfig{
 				Initial:    20 * time.Millisecond,
 				Max:        200 * time.Millisecond,
@@ -84,6 +85,7 @@ func TestS5R6_F1_HostedWait404ThenChallengeRevokeStopsEveryRID(t *testing.T) {
 			DataDir:       data,
 			RendezvousURL: srv.URL,
 			HTTPClient:    srv.Client,
+			NewTerminal:   noTestTerminal,
 			Backoff: remote.BackoffConfig{
 				Initial:    20 * time.Millisecond,
 				Max:        200 * time.Millisecond,

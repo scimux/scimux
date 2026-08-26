@@ -185,6 +185,7 @@ func remoteCmd(t *testing.T, data, url string, hc *http.Client) *Command {
 			DataDir:       data,
 			RendezvousURL: url,
 			HTTPClient:    hc,
+			NewTerminal:   noTestTerminal,
 		},
 	}
 }

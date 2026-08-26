@@ -115,6 +115,7 @@ func TestS5R3_F8_RevokedRemoteLeavesLocalhost(t *testing.T) {
 			DataDir:       data,
 			RendezvousURL: "http://127.0.0.1:1",
 			HTTPClient:    constantStatusHTTP(http.StatusNotFound),
+			NewTerminal:   noTestTerminal,
 		},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -158,7 +159,7 @@ func TestS5R3_F8_DisabledRemoteLeavesLocalhost(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: new(bytes.Buffer),
 		Home:   t.TempDir(),
-		Config: remote.Config{DataDir: data, Remote: true, RendezvousURL: "http://127.0.0.1:1", HTTPClient: unreachableHTTP()},
+		Config: remote.Config{DataDir: data, Remote: true, RendezvousURL: "http://127.0.0.1:1", HTTPClient: unreachableHTTP(), NewTerminal: noTestTerminal},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -194,6 +195,7 @@ func TestS5R3_F8_UnavailableRendezvousLeavesLocalhost(t *testing.T) {
 			DataDir:       data,
 			RendezvousURL: "http://127.0.0.1:1",
 			HTTPClient:    unreachableHTTP(),
+			NewTerminal:   noTestTerminal,
 		},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
