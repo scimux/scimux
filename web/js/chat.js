@@ -236,6 +236,9 @@ export function buildChatSignature(parts){
     p.termOpen,
     p.termFull,
     p.source,
+    /* Transport failures can arrive without a new chat turn. Include the
+       inline message so the status is inserted (and announced) immediately. */
+    p.error || "",
     p.permTitle,
     p.permReason || "",
     p.permOptionsKey,
@@ -1160,10 +1163,10 @@ export function createChatFeature(deps){
     };
   }
 
-  function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek, replyReady, compacting){
+  function applyChatActivityChrome(live, mustShowPane, forcePeek, showPeek, replyReady, compacting, turnInFlight){
     setWorkPulse(workPulseShouldRun(live, mustShowPane, replyReady) || !!compacting);
     if (typeof d.setComposerBusy === "function")
-      d.setComposerBusy((live === "active" && !replyReady) || !!compacting);
+      d.setComposerBusy(!!turnInFlight || !!compacting);
     if (convtools) convtools.hidden = false;
     if (termtoggle){
       termtoggle.innerHTML = icons.ICON_TERM || "";
@@ -1711,6 +1714,7 @@ export function createChatFeature(deps){
       data.live, mustShowPane, forcePeek, showPeek,
       !!data.reply_ready || freshSurface,
       !!data.compacting,
+      !!data.turn_in_flight,
     );
     /* Auto-approve chrome is outside the transcript signature so count/phase
        can repaint without clobbering the composer or rebuilding bubbles. */
@@ -1734,6 +1738,7 @@ export function createChatFeature(deps){
       delivery: data.delivery,
       showPeek, termOpen, termFull,
       source: data.source,
+      error: data.error || "",
       permTitle: data.perm_title,
       permReason: data.perm_reason || "",
       permOptionsKey: permOptionsKey(data.perm_options),

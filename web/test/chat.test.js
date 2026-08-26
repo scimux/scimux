@@ -142,6 +142,17 @@ test("buildChatSignature is stable and order-sensitive", () => {
   );
 });
 
+test("buildChatSignature changes for an inline transport error", () => {
+  const base = {
+    nodeId: "n1", attention: "", delivery: "", showPeek: false,
+    termOpen: false, source: "acp", turnsHash: 1,
+  };
+  assert.notEqual(
+    buildChatSignature(base),
+    buildChatSignature({ ...base, error: "Usage balance exhausted" }),
+  );
+});
+
 test("buildChatSignature includes expanded; flip rebuilds", () => {
   const base = {
     nodeId: "n1", live: "quiet", attention: "approval", attentionHidden: false,
@@ -2312,18 +2323,30 @@ test("work-pulse start/stop via activity chrome", async () => {
   await n2.feature.render();
   assert.equal(n2.roots.workpulse.classList.contains("on"), false);
 
-  // Claude's explicit end_turn releases the main-chat scanner and composer
-  // even while the mechanically debounced pane still reports active.
-  const ready = makeFeature({
-    chatPayload: {
-      turns: [{ role: "assistant", text: "done" }],
-      live: "active", reply_ready: true, delivery: "ok", source: "tmux",
-      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
-    },
-  });
-  await ready.feature.render();
-  assert.equal(ready.roots.workpulse.classList.contains("on"), false);
-  assert.equal(ready.effects.setComposerBusy.at(-1), false);
+  // A transcript end_turn can precede Claude's authoritative Stop hook. Keep
+  // the composer interruptible until the server's turn lease is released.
+	const ready = makeFeature({
+	  chatPayload: {
+		turns: [{ role: "assistant", text: "done" }],
+		live: "active", reply_ready: true, turn_in_flight: true,
+		delivery: "ok", source: "tmux",
+		chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+	  },
+	});
+	await ready.feature.render();
+	assert.equal(ready.roots.workpulse.classList.contains("on"), false);
+	assert.equal(ready.effects.setComposerBusy.at(-1), true);
+
+	const stopped = makeFeature({
+	  chatPayload: {
+		turns: [{ role: "assistant", text: "done" }],
+		live: "active", reply_ready: true, turn_in_flight: false,
+		delivery: "ok", source: "tmux",
+		chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+	  },
+	});
+	await stopped.feature.render();
+	assert.equal(stopped.effects.setComposerBusy.at(-1), false);
 
   const cleared = makeFeature({
     chatPayload: {

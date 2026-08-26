@@ -2336,10 +2336,12 @@ func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
 	a.live[n.ID] = "active" // pane quiet debounce has not elapsed yet
+	a.claudeTurns[n.ID] = claudeAcceptedTurn{Turn: "turn-1", Gen: 1}
 
 	request := func() struct {
-		Live       string `json:"live"`
-		ReplyReady bool   `json:"reply_ready"`
+		Live         string `json:"live"`
+		ReplyReady   bool   `json:"reply_ready"`
+		TurnInFlight bool   `json:"turn_in_flight"`
 	} {
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/api/nodes/c1/chat", nil)
@@ -2349,8 +2351,9 @@ func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
 			t.Fatalf("chat code = %d body %q", rec.Code, rec.Body.String())
 		}
 		var body struct {
-			Live       string `json:"live"`
-			ReplyReady bool   `json:"reply_ready"`
+			Live         string `json:"live"`
+			ReplyReady   bool   `json:"reply_ready"`
+			TurnInFlight bool   `json:"turn_in_flight"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
@@ -2359,13 +2362,20 @@ func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
 	}
 
 	body := request()
-	if body.Live != "active" || !body.ReplyReady {
-		t.Fatalf("active completed reply = live %q ready %v, want active/true", body.Live, body.ReplyReady)
+	if body.Live != "active" || !body.ReplyReady || !body.TurnInFlight {
+		t.Fatalf("pre-Stop reply = live %q ready %v in-flight %v, want active/true/true", body.Live, body.ReplyReady, body.TurnInFlight)
 	}
 	appendLines(t, tx, `{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":"next"}}`)
 	body = request()
-	if body.ReplyReady {
-		t.Fatal("new user turn must withdraw reply_ready")
+	if body.ReplyReady || !body.TurnInFlight {
+		t.Fatal("new user turn must withdraw reply_ready but retain the Stop-hook turn latch")
+	}
+	a.mu.Lock()
+	delete(a.claudeTurns, n.ID) // matching Stop/StopFailure drained
+	a.mu.Unlock()
+	body = request()
+	if body.TurnInFlight {
+		t.Fatal("matching Stop must release the composer turn latch")
 	}
 }
 
@@ -2634,6 +2644,29 @@ func TestPermRequestIDChatExposure(t *testing.T) {
 	}
 	if v, ok := body["perm_request_id"]; ok && v != nil && v != "" {
 		t.Fatalf("tmux chat invented perm_request_id: %v", v)
+	}
+}
+
+func TestProcChatTurnLatchAndReadableUsageError(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "grok-limit", "grok", "acp")
+	stub := &stubProc{live: "active", hasSession: true}
+	resp := map[string]any{}
+	a.procChatInto(resp, n, stub, sessionlog.Segment{})
+	if resp["turn_in_flight"] != true {
+		t.Fatalf("active structured turn latch = %v, want true", resp["turn_in_flight"])
+	}
+
+	stub.live = "quiet"
+	stub.lastError = `Internal error: {"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}`
+	resp = map[string]any{}
+	a.procChatInto(resp, n, stub, sessionlog.Segment{})
+	if resp["turn_in_flight"] != false {
+		t.Fatalf("completed structured turn latch = %v, want false", resp["turn_in_flight"])
+	}
+	const want = "Grok Build usage balance exhausted. Add credits or wait for the balance to reset, then try again."
+	if resp["error"] != want {
+		t.Fatalf("inline error = %q, want %q", resp["error"], want)
 	}
 }
 

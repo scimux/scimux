@@ -778,6 +778,15 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 		waiting, _ = tl.WaitingOn()
 	}
 	replyReady := tl != nil && tl.EndTurn() && pendCalls == 0 && attn == "" && !ended
+	// Claude's Stop/StopFailure hook, not pane activity or an early transcript
+	// boundary, owns the turn lease.  Keep the composer interruptible for the
+	// whole accepted turn; closeClaudeAcceptedTurnLocked clears this only after
+	// the matching hook has been drained (or an explicit interrupt/reset ends
+	// the turn).
+	turnInFlight := false
+	if agent == "claude" {
+		turnInFlight = a.claudeAcceptedTurnOf(n.ID).Turn != ""
+	}
 	compacting, compactTrigger := a.claudeCompactingState(n)
 	if compacting {
 		replyReady = false
@@ -803,6 +812,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	resp["pending_calls"] = pendCalls
 	resp["waiting_on"] = waiting
 	resp["reply_ready"] = replyReady
+	resp["turn_in_flight"] = turnInFlight
 	resp["ctx_used"] = ctxUsed
 	resp["ctx_window"] = ctxWindow
 	resp["ctx_pct"] = ctxPct
@@ -881,7 +891,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 // approval and error a failed/empty turn.
 func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg sessionlog.Segment) {
 	live := pm.Live(n.ID)
-	lastErr := pm.LastError(n.ID)
+	lastErr := userFacingAgentError(n.Agent, pm.LastError(n.ID))
 	pending, hasPerm := pm.Pending(n.ID)
 	attn := ""
 	if hasPerm {
@@ -909,6 +919,11 @@ func (a *app) procChatInto(resp map[string]any, n *Node, pm procManager, seg ses
 	resp["pending_calls"] = 0
 	resp["waiting_on"] = pending.Title
 	resp["reply_ready"] = false
+	// For ACP and codex app-server, Live==active is the manager's protected
+	// turnActive latch. It falls only when Prompt returns / turn/completed (or
+	// an interrupt/error closes the turn), so it is stronger than visual or
+	// timing-based liveness.
+	resp["turn_in_flight"] = live == "active"
 	resp["ctx_used"] = seg.Used
 	resp["ctx_window"] = seg.Size
 	resp["ctx_pct"] = ctxPct

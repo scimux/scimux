@@ -116,6 +116,7 @@ body.cards-open #msgs { overflow: hidden; }
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
+.pending.chaterr { color: var(--bad); font-style: normal; user-select: text; }
 .pending.compacting { color: var(--work); }
 .pending.elicitation { color: var(--work); font-style: normal; }
 .pending.elicitation .elicitation-item { margin-top: 8px; }
