@@ -139,10 +139,20 @@ var reachOpenFindings = map[string]string{
 		"cannot occur.",
 	"DevicePending": "no product caller: the read half of the same map as SetPending.",
 
-	"PairingECDHPublic": "no product caller *yet*: PairingCode carries Code, RID " +
-		"and ExpiresAt but not X, so nothing hands the laptop's static P-256 key to " +
-		"a device. S8's pairing UI is the intended caller. Forward debt, not a " +
-		"regression — but the ATs seal offers to an X no device can currently obtain.",
+	// These two are one finding at two depths. PairingLink gave X a way out
+	// of the laptop, so PairingECDHPublic now has a caller — but that caller
+	// is itself unreached, and reachability is measured from product entry
+	// points, not from any caller at all. Wiring S8's pairing UI to
+	// PairingLink closes both entries at once.
+	"PairingECDHPublic": "no product caller *yet*: reached only through " +
+		"PairingLink, which is itself waived below. The laptop's static P-256 key " +
+		"still has no path to a device in production.",
+
+	"PairingLink": "no product caller *yet*: the invite carries the code, rid " +
+		"and the laptop's static X (rendezvous-v1 §11.1), which is everything a " +
+		"device needs to compute the SAS. Nothing renders or presents it. S8's " +
+		"pairing UI is the intended caller. Until then the ATs seal offers to an " +
+		"X no device can obtain in production.",
 }
 
 // reachConfigDefaults are remote.Config fields internal/remote defaults when
