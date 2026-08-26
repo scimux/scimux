@@ -114,6 +114,23 @@ func (c *Client) takeInviteFD() int {
 	return fd
 }
 
+// releaseInvite drops this client's hold on the invite without destroying
+// it: the descriptor is closed and any in-memory copy cleared, but the file
+// is left intact. It is the counterpart to eraseInvite for the one outcome
+// that proves the invite was never consumed.
+func (c *Client) releaseInvite() {
+	if c == nil {
+		return
+	}
+	c.cfg.InviteString = ""
+	if fd := c.takeInviteFD(); fd >= 0 {
+		_ = syscall.Close(fd)
+	}
+	c.invitePath = ""
+	c.inviteDev = 0
+	c.inviteIno = 0
+}
+
 func (c *Client) eraseInvite(src inviteSrc, invite string) error {
 	_ = invite
 	c.cfg.InviteString = ""

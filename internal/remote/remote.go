@@ -57,15 +57,21 @@ const (
 	ClassPartialIdentity     Class = "partial-identity"
 	ClassCorruptIdentity     Class = "corrupt-identity"
 	ClassAmbiguousEnrollment Class = "ambiguous-enrollment"
-	ClassInviteConflict      Class = "invite-conflict"
-	ClassRevoked             Class = "revoked"
-	ClassDisabled            Class = "disabled"
-	ClassPeerAbsent          Class = "peer-absent"
-	ClassDowngrade           Class = "downgrade"
-	ClassStateLock           Class = "state-lock"
-	ClassNotFound            Class = "not-found"
-	ClassUnauthorized        Class = "unauthorized"
-	ClassUnavailable         Class = "unavailable"
+	// ClassEnrollRejected is the rendezvous answering the §7 constant
+	// rejection to /v1/enroll. Every path that writes it returns before
+	// Bind, so — unlike ClassAmbiguousEnrollment — it is positive evidence
+	// that nothing was bound: the invite is unspent and a rerun is the
+	// whole recovery.
+	ClassEnrollRejected Class = "enroll-rejected"
+	ClassInviteConflict Class = "invite-conflict"
+	ClassRevoked        Class = "revoked"
+	ClassDisabled       Class = "disabled"
+	ClassPeerAbsent     Class = "peer-absent"
+	ClassDowngrade      Class = "downgrade"
+	ClassStateLock      Class = "state-lock"
+	ClassNotFound       Class = "not-found"
+	ClassUnauthorized   Class = "unauthorized"
+	ClassUnavailable    Class = "unavailable"
 	// ClassOriginMismatch is an enrolled identity being presented to a
 	// rendezvous other than the one that issued it. The server cannot report
 	// this — an unknown handle gets the same opaque rejection as a revoked one

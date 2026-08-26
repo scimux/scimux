@@ -204,14 +204,24 @@ func (c *Client) startOwned(ctx context.Context) error {
 			invite, src, err := c.readInvite()
 			if err != nil {
 				if classOfErr(err) == ClassNeedInvite {
-					return classError(ClassAmbiguousEnrollment, "start", "enrollment is ambiguous; recover with an explicit retry")
+					return classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
 				}
 				return err
 			}
 			err = c.enrollWithExistingKey(ctx, invite)
+			// A rejection here is not evidence that nothing happened: the
+			// installation was already ambiguous when this attempt started,
+			// so an *earlier* request may have bound the key — and a
+			// redeemed invite is rejected exactly the same way an unissued
+			// one is. The class names the installation's state, not the last
+			// response, so it stays ambiguous and the invite is treated as
+			// spent.
+			if classOfErr(err) == ClassEnrollRejected {
+				err = classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
+			}
 			return c.consumePostedInvite(src, invite, err)
 		}
-		return classError(ClassAmbiguousEnrollment, "start", "enrollment is ambiguous; recover with an explicit retry")
+		return classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
 	case StateEnrolled:
 		if invite, src, err := c.readInviteOptional(); err != nil {
 			return err
@@ -255,6 +265,36 @@ func (c *Client) startOwned(ctx context.Context) error {
 		c.hosted = "enrolled"
 		return nil
 	}
+}
+
+// ambiguousEnrollmentGuidance is what the human reads after the outcome
+// nothing local can fix. rv may hold this installation's key while this
+// machine never learned its handle, and /v1/challenge needs the handle — so
+// there is no client-side retry that can succeed, with or without the
+// invite. The only lever is the operator's, and the message says so rather
+// than sending the user hunting for a recovery flag.
+const ambiguousEnrollmentGuidance = "enrollment may have partially completed: the rendezvous may hold this " +
+	"installation's key, but this machine never received its handle. Ask whoever issued the invite to " +
+	"revoke this installation and send a new invite"
+
+// constantRejectionBody is the §7 dump's ten bytes. rendezvous-v1 freezes
+// them, so an exact compare is the check — a near miss is some other party's
+// error page and must stay ambiguous.
+var constantRejectionBody = []byte("not found\n")
+
+// isConstantRejection reports whether resp is rv's §7 constant rejection.
+// The content type is asserted as well as the body: the cost of a false
+// positive is telling the user their invite is untouched after rv may have
+// spent it, so every frozen part of the dump is checked and anything else
+// falls through to ambiguous.
+func isConstantRejection(resp *http.Response, body []byte) bool {
+	if resp == nil || resp.StatusCode != http.StatusNotFound {
+		return false
+	}
+	if !bytes.Equal(body, constantRejectionBody) {
+		return false
+	}
+	return acceptMediaType(resp.Header.Get("Content-Type"), "text/plain")
 }
 
 func classOfErr(err error) Class {
@@ -397,6 +437,15 @@ func (c *Client) consumePostedInvite(src inviteSrc, invite string, err error) er
 	if !c.enrollPosted {
 		return err
 	}
+	// FR-02 deletes the plaintext "once enrollment is confirmed". A §7
+	// rejection is the opposite of confirmed and proves the credential was
+	// not consumed, so the user's only copy stays where they put it — the
+	// rerun that fixes this needs it. Every other posted outcome may have
+	// spent it, and is erased as before.
+	if classOfErr(err) == ClassEnrollRejected {
+		c.releaseInvite()
+		return err
+	}
 	eerr := c.eraseInvite(src, invite)
 	if eerr == nil {
 		return err
@@ -408,6 +457,14 @@ func (c *Client) consumePostedInvite(src inviteSrc, invite string, err error) er
 }
 
 func (c *Client) enrollNew(ctx context.Context, invite string) error {
+	// enrollNew replaces c.st wholesale and persists it before it posts, so
+	// the installation is already overwritten by the time rv answers. That is
+	// correct for an ambiguous outcome — the new key may be bound — but a
+	// clean rejection bound nothing, and leaving the wreckage behind would
+	// turn a mistyped rotate into a lost enrollment and a fresh install into
+	// a state file that refuses to start.
+	baseline, hadBaseline := c.enrollBaseline()
+
 	pub, priv, err := ed25519.GenerateKey(c.rand())
 	if err != nil {
 		return err
@@ -429,7 +486,43 @@ func (c *Client) enrollNew(ctx context.Context, invite string) error {
 	if err := c.persist(c.snapshotState()); err != nil {
 		return err
 	}
-	return c.enrollWithExistingKey(ctx, invite)
+	err = c.enrollWithExistingKey(ctx, invite)
+	if classOfErr(err) == ClassEnrollRejected {
+		if rerr := c.restoreEnrollBaseline(baseline, hadBaseline); rerr != nil {
+			return rerr
+		}
+	}
+	return err
+}
+
+// enrollBaseline captures what a rejected enrollment must be rolled back to.
+// An unloaded client has no installation at all, which is a distinct baseline
+// from an empty record: it means "remove the file", not "write a blank one".
+func (c *Client) enrollBaseline() (PersistedState, bool) {
+	if !c.loaded {
+		return PersistedState{}, false
+	}
+	return c.snapshotState(), true
+}
+
+func (c *Client) restoreEnrollBaseline(st PersistedState, had bool) error {
+	if had {
+		if err := c.applyState(st); err != nil {
+			return err
+		}
+		return c.persist(c.snapshotState())
+	}
+	c.st = PersistedState{}
+	c.loaded = false
+	c.pub, c.priv = nil, nil
+	// The temp file goes first: persist renames it away on success, so one
+	// surviving here would classify the next start as StatePartial and undo
+	// the whole point of keeping the invite.
+	_ = os.Remove(c.tempPath())
+	if err := os.Remove(c.StatePath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (c *Client) enrollWithExistingKey(ctx context.Context, invite string) error {
@@ -469,6 +562,18 @@ func (c *Client) enrollWithExistingKey(ctx context.Context, invite string) error
 		return fmt.Errorf("enroll: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		// A §7 constant rejection is the one non-200 that carries positive
+		// information. Every reject(w) in rv's handleEnroll returns before
+		// Bind, so this answer proves no installation key was bound and the
+		// invite was not consumed — the opposite of an ambiguous enrollment.
+		// Anything else (a proxy 502, a truncated body, an unrecognised error
+		// page) may have been written after rv bound the key, so it stays
+		// ambiguous. The discrimination is deliberately one-way.
+		if isConstantRejection(resp, raw) {
+			return classError(ClassEnrollRejected, "enroll",
+				"the rendezvous did not accept this invite; it may be expired, already used, or issued for a different server. "+
+					"Nothing was enrolled and your invite is unchanged, so correct the cause and run the same command again")
+		}
 		c.st.Status = StateAmbiguous
 		_ = c.persist(c.snapshotState())
 		return classError(ClassAmbiguousEnrollment, "enroll", "the invite was not accepted; enrollment remains ambiguous")
