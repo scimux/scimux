@@ -15,6 +15,7 @@ import (
 // implements it. hostedRemote stays HostedStatus-only and cannot reach pairing.
 type hostedPairingClient interface {
 	MintPairingCode(context.Context) (remote.PairingCode, error)
+	PairingLink(remote.PairingCode) (string, error)
 	PairingSession(string) (remote.PairingStatus, error)
 	CompletePairing(context.Context, string, bool, bool) (remote.PairedDevice, error)
 	CancelPairing(context.Context, string) error
@@ -56,11 +57,26 @@ func (a *app) handleRemotePairingMint(w http.ResponseWriter, r *http.Request) {
 		writeRemotePairingError(w, err)
 		return
 	}
+	// The link is what makes the minted session joinable (rendezvous-v1
+	// §11.1). V1 has no typed path, so a code announced without X and the
+	// rid is a pairing no browser can enter — the device could not derive
+	// the SAS even if the human typed every character correctly.
+	//
+	// A link that cannot be built therefore fails the request rather than
+	// returning the code alone. The session is left to expire: that costs
+	// a rate-limit slot, where the alternative sends the user to a page
+	// whose only possible message is that the invite is unusable.
+	link, err := p.PairingLink(code)
+	if err != nil {
+		writeRemotePairingError(w, err)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"code":       code.Code,
 		"rid":        code.RID,
 		"expires_at": code.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		"state":      remote.PairStatePending,
+		"link":       link,
 	})
 }
 

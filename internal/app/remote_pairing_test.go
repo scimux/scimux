@@ -22,6 +22,15 @@ type fakePairingClient struct {
 	devices    []remote.PairedDevice
 	causes     map[string]remote.TransportCause
 	connected  map[string]bool
+
+	// The invite link (§11.1). link is returned verbatim so a test can
+	// assert over a fragment it wrote itself; linkArg records what the
+	// route asked for, which is how "the link matches the code it was
+	// announced with" is checked at all.
+	link      string
+	linkErr   error
+	linkCalls int
+	linkArg   remote.PairingCode
 }
 
 func (f *fakePairingClient) HostedStatus() string { return f.hosted }
