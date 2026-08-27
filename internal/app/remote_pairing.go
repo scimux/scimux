@@ -21,6 +21,7 @@ type hostedPairingClient interface {
 	CancelPairing(context.Context, string) error
 	PairedDevices() ([]remote.PairedDevice, error)
 	RevokePairedDevice(context.Context, string) error
+	Unenroll(context.Context) (bool, error)
 	HostedStatus() string
 	TransportCause(string) (remote.TransportCause, error)
 }
@@ -162,6 +163,36 @@ func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRemoteUnenroll is the way out of an enrollment (rendezvous-v1
+// §4.4). The two halves are not equal partners underneath — the local
+// unlink always happens, the remote release is best-effort — so this
+// route answers 200 with released:false rather than an error when the
+// rendezvous could not be reached. That is the honest report: the laptop
+// is unlinked, and an installation the rendezvous still holds is one only
+// its operator can strike off.
+//
+// A failure of the *local* half is a real error. An identity still on
+// disk is still an enrollment, and a UI told otherwise would leave the
+// user believing they had unlinked.
+func (a *app) handleRemoteUnenroll(w http.ResponseWriter, r *http.Request) {
+	p := a.pairingClient()
+	if p == nil {
+		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
+		return
+	}
+	released, err := p.Unenroll(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The status is read after the unlink so the burger can retire the
+	// remote section without a second round trip.
+	writeJSON(w, map[string]any{
+		"released": released,
+		"hosted":   p.HostedStatus(),
+	})
 }
 
 func (a *app) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {

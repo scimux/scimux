@@ -400,6 +400,11 @@
     <div class="k">Remote access</div>
     <div id="m_devices"></div>
     <button class="cta" id="m_pair">Pair a device</button>
+    <!-- The counterpart to a device revoke: enrolling this laptop was
+         one-way until F1, and an enrollment nobody can hand back is not
+         something to ask someone to try. -->
+    <button class="cta" id="m_unlink" hidden>Unlink this laptop</button>
+    <div id="m_unlink_note" hidden></div>
   </div>
   <div class="sect">
     <div class="item"><span>Version</span><span class="tag" id="m_version">—</span>

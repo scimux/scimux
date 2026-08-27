@@ -27,6 +27,10 @@ var pairSlots = []string{
 	"pair_actions",
 	"pair_live",
 	"pair_x",
+	// F1: the unlink control, which is guarded the same way and would
+	// therefore ship as a Remote access section with no way out.
+	"m_unlink",
+	"m_unlink_note",
 }
 
 func readWebFile(t *testing.T, path string) string {

@@ -683,6 +683,23 @@ expose — `public_key` means ed25519 elsewhere, so it is not reused here.
 
 Revoke one paired device.
 
+### `POST /api/remote/unenroll`
+
+Unlink this laptop: release the installation at the rendezvous
+(rendezvous-v1 §4.4) and forget the identity locally. Answers
+`{"released":bool,"hosted":"..."}`, with `hosted` read after the unlink.
+
+The two halves are deliberately unequal. The local half is
+unconditional — a laptop that cannot reach the rendezvous is exactly the
+one whose owner wants it to stop trying — so an unreachable rendezvous
+still answers 200 with `released:false`. That is the honest report: the
+laptop is unlinked, and an installation the rendezvous still holds can
+only be struck off by whoever issued the invite. A failure of the *local*
+half is a 500, because an identity still on disk is still an enrollment.
+
+§4.4 releases the installation and never the code, so re-enrolling
+afterwards takes a new invite.
+
 ### `GET /api/remote/status`
 
 The installation's hosted enrollment as `hosted` (`enrolled`,

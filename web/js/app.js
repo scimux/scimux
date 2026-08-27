@@ -63,7 +63,7 @@ import {
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
-import { createPairingFeature, createDeviceList } from "./pairing-ui.js";
+import { createPairingFeature, createDeviceList, createUnlinkControl } from "./pairing-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { focusAtEnd } from "./caret.js";
@@ -1173,6 +1173,14 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      #pair_* root and #m_devices, and nothing else here writes into them. */
   const pairingFeature = createPairingFeature({ api, doc: document });
   const deviceList = createDeviceList({ api, doc: document });
+  /* Unlinking this laptop (F1). It shares the burger-open refresh with the
+     device list, and re-reads that list afterwards because an unlink ends
+     every grant on it at once. */
+  const unlinkControl = createUnlinkControl({
+    api,
+    doc: document,
+    onUnlinked: () => { deviceList.refresh(); },
+  });
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
   /* the chevron must describe the tap: on desktop the button is a toggle, so it
@@ -1520,6 +1528,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* Pairing sheet + paired-device list (Packet S8). */
   pairingFeature.bind();
   deviceList.bind();
+  unlinkControl.bind();
   ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
   }, { passive: true }));
@@ -1733,7 +1742,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      a one-second timer would be a second poller for a value that moves
      perhaps twice a year. #burger's open transition belongs to sheets.js;
      this listener only asks for fresh data. */
-  $("#burger").addEventListener("click", () => { deviceList.refresh(); });
+  $("#burger").addEventListener("click", () => { deviceList.refresh(); unlinkControl.refresh(); });
   $("#m_pair").addEventListener("click", () => {
     sheetsFeature.closeSheets();
     pairingFeature.open();

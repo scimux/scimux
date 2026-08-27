@@ -404,3 +404,150 @@ export function createDeviceList({ api, doc } = {}) {
     },
   };
 }
+
+/* F1 — unlinking this laptop.
+ *
+ * The counterpart to the revoke two rows up. A paired device could always
+ * be handed back; the laptop's own enrollment could only be abandoned,
+ * which is a bad trade to offer someone the day you ask them to try
+ * remote access.
+ *
+ * The route underneath does the local unlink unconditionally and the
+ * rendezvous release best-effort, so this control's real job is to report
+ * which halves happened. released:false is not a failure — the laptop is
+ * unlinked either way — but it is something the user must be told, because
+ * only the operator can strike off an installation the rendezvous still
+ * holds. */
+export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
+  let armed = false;
+  let inFlight = false;
+  /* Whether there is an enrollment to unlink at all. An action that
+     cannot do anything is worse than no action. */
+  let enrolled = true;
+  /* Whether the status has ever been read. A read that failed is not
+     evidence that anything changed, so it keeps the last known answer —
+     but before there is one, nothing is claimed and nothing is offered. */
+  let known = false;
+  let done = false;
+  let notice = "";
+  /* Whether the notice is a failure. A message that reads the same
+     whether the laptop was unlinked or not is no message at all. */
+  let noticeBad = false;
+  let chain = Promise.resolve();
+  const cleanups = [];
+
+  const btn = () => doc.querySelector("#m_unlink");
+  const note = () => doc.querySelector("#m_unlink_note");
+
+  function enqueue(fn) {
+    chain = chain.then(fn).catch(() => {});
+    return chain;
+  }
+
+  function render() {
+    const b = btn();
+    if (b) {
+      b.hidden = !enrolled || done;
+      b.innerHTML = armed ? "Confirm unlink" : "Unlink this laptop";
+      b.className = armed ? "cta danger" : "cta";
+    }
+    const n = note();
+    if (n) {
+      n.innerHTML = notice
+        ? `<div class="item ${noticeBad ? "err" : "note"}">${esc(notice)}</div>`
+        : "";
+      n.hidden = !notice;
+    }
+  }
+
+  function unlink() {
+    inFlight = true;
+    enqueue(async () => {
+      try {
+        const r = await api("/api/remote/unenroll", { method: "POST" });
+        done = true;
+        noticeBad = false;
+        notice = r && r.released
+          ? "Unlinked. This laptop is no longer enrolled."
+          : "Unlinked locally, but the rendezvous could not be reached. " +
+            "Ask whoever issued the invite to revoke this installation.";
+        if (onUnlinked) onUnlinked();
+      } catch (e) {
+        /* The identity is still on disk, so this laptop is still
+           enrolled. Saying otherwise is the one lie this surface must
+           never tell — the action stays offerable. */
+        noticeBad = true;
+        notice = "Could not unlink this laptop: " + ((e && e.message) || "unknown error");
+      } finally {
+        inFlight = false;
+        render();
+      }
+    });
+  }
+
+  function onClick(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    if (inFlight || done || !enrolled) return;
+    if (armed) {
+      armed = false;
+      unlink();
+      render();
+      return;
+    }
+    armed = true;
+    render();
+  }
+
+  /* The status is the only thing that knows whether this laptop has an
+     identity on disk at all. revoked and unavailable still do, and those
+     are precisely the installations someone wants rid of, so the test is
+     "any enrollment" rather than "a working one". */
+  async function refresh() {
+    try {
+      const r = await api("/api/remote/status", {});
+      enrolled = !!(r && r.hosted);
+      known = true;
+      if (!enrolled) {
+        armed = false;
+        done = false;
+        notice = "";
+      }
+    } catch {
+      if (!known) enrolled = false;
+    }
+    render();
+  }
+
+  return {
+    refresh: () => enqueue(refresh),
+    bind() {
+      const b = btn();
+      if (!b) return;
+      b.addEventListener("click", onClick);
+      cleanups.push(() => b.removeEventListener("click", onClick));
+      render();
+    },
+    /* Hiding disarms: otherwise the arming survives out of sight and the
+       next tap, minutes later in a different frame of mind, is the
+       confirming one. */
+    setEnrolled(v) {
+      enrolled = !!v;
+      if (!enrolled) {
+        armed = false;
+        done = false;
+        notice = "";
+      }
+      render();
+    },
+    destroy() {
+      while (cleanups.length) cleanups.pop()();
+    },
+    async settled() {
+      let prev;
+      do {
+        prev = chain;
+        await chain;
+      } while (chain !== prev);
+    },
+  };
+}

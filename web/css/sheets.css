@@ -159,6 +159,11 @@
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }
 #m_devices button.danger { color: var(--bad); font-weight: 600; }
+/* Unlinking this laptop ends every grant in the list above at once, so
+   the armed state reads destructive for the same reason a revoke does. */
+#m_unlink.danger { color: var(--bad); font-weight: 600; }
+#m_unlink_note .item.note { color: var(--dim); }
+#m_unlink_note .item.err { color: var(--bad); }
 /* Live regions that exist for a screen reader and must not take layout.
    clip-path over `display:none`, which would remove the region from the
    accessibility tree along with the announcement it was carrying. */

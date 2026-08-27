@@ -31,6 +31,13 @@ type fakePairingClient struct {
 	linkErr   error
 	linkCalls int
 	linkArg   remote.PairingCode
+
+	// The unlink (F1). unenrollReleased is what the §4.4 half reported;
+	// hosted flips on a successful unlink because that is what the real
+	// client does — the route reads the status afterwards.
+	unenrollReleased bool
+	unenrollErr      error
+	unenrollCalls    int
 }
 
 func (f *fakePairingClient) HostedStatus() string { return f.hosted }
@@ -58,6 +65,15 @@ func (f *fakePairingClient) PairedDevices() ([]remote.PairedDevice, error) {
 }
 
 func (f *fakePairingClient) RevokePairedDevice(context.Context, string) error { return nil }
+
+func (f *fakePairingClient) Unenroll(context.Context) (bool, error) {
+	f.unenrollCalls++
+	if f.unenrollErr != nil {
+		return false, f.unenrollErr
+	}
+	f.hosted = ""
+	return f.unenrollReleased, nil
+}
 
 func (f *fakePairingClient) TransportCause(id string) (remote.TransportCause, error) {
 	if f.connected[id] {
