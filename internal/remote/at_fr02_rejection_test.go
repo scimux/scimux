@@ -244,7 +244,7 @@ func TestAT_FR_02_f_RejectionGuidanceSaysRetry(t *testing.T) {
 // about the *earlier* request — and a redeemed invite is rejected byte for
 // byte like an unissued one — so the installation stays ambiguous and the
 // invite is treated as spent.
-func TestAT_FR_02_f_RejectionDuringExplicitRetryStaysAmbiguous(t *testing.T) {
+func TestAT_FR_02_f_RejectionOnARerunStaysAmbiguous(t *testing.T) {
 	fake := newFakeRV(t)
 	fake.Issue(vectorInviteGrouped)
 	fake.DropEnrollResponse(true)
@@ -260,11 +260,12 @@ func TestAT_FR_02_f_RejectionDuringExplicitRetryStaysAmbiguous(t *testing.T) {
 	}
 	_ = c.Close()
 
-	// rv now answers, and rejects: the code it bound is redeemed.
+	// rv now answers, and rejects: the code it bound is redeemed. The
+	// rerun is a plain one — same command, same data directory, an invite
+	// in hand and no flag.
 	fake.DropEnrollResponse(false)
 	retryDir := t.TempDir()
 	retry := cfg
-	retry.ExplicitRetry = true
 	retry.InviteFile = writeInviteFile(t, retryDir, vectorInviteGrouped, 0o600)
 
 	err := NewClient(retry).Start(ctx)

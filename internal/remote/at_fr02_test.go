@@ -423,11 +423,13 @@ func TestAT_FR_02_e_PartialEnrollmentAmbiguity(t *testing.T) {
 		t.Fatal("AT-FR-02-e: restart mutated or substituted the identity")
 	}
 
-	// Explicit retry uses the same public key. V1 rejects a redeemed invite
-	// even from the same key — no invented idempotent enroll.
+	// The retry is the operator running the same command again with the
+	// invite they were given: a fresh process on the same data directory,
+	// no recovery flag anywhere. It uses the same public key, and V1
+	// rejects a redeemed invite even from the same key — no invented
+	// idempotent enroll.
 	fake.DropEnrollResponse(false)
 	cfgRetry := cfg
-	cfgRetry.ExplicitRetry = true
 	cfgRetry.InviteFile = writeInviteFile(t, t.TempDir(), vectorInviteGrouped, 0o600)
 	cRetry := NewClient(cfgRetry)
 	err = cRetry.Start(ctx)
@@ -509,14 +511,16 @@ func TestAT_FR_02_e_PartialEnrollmentAmbiguity(t *testing.T) {
 		scanRootForInvite(t, dir, vectorInviteGrouped)
 
 		// Recovery is a new process-equivalent Client on the same data root:
-		// no invite, no in-memory handle, same identity, no second enroll.
+		// no invite, no in-memory handle, no flag, same identity, no second
+		// enroll. The enrolled record is already on disk under the temp
+		// name; replaying it costs no network and cannot spend a credential,
+		// so there is nothing for an operator to authorise.
 		cfgRecover := Config{
 			DataDir:       dir,
 			Remote:        true,
 			Origin:        DefaultOrigin,
 			RendezvousURL: fake2.URL(),
 			HTTPClient:    fake2.Client(),
-			ExplicitRetry: true,
 			Stdout:        io.Discard,
 			Stderr:        new(bytes.Buffer),
 		}

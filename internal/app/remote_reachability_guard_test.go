@@ -202,9 +202,6 @@ var reachConfigOpenFindings = map[string]string{
 	"Rotate": "remote.go:313 calls this \"the explicit identity rotation action\", " +
 		"but remote_command.go registers no flag for it and nothing sets it. " +
 		"Identity rotation is unreachable from the binary.",
-	"ExplicitRetry": "remote.go:310 calls this \"the operator-driven recovery of " +
-		"AT-FR-02-e\", and no flag or product assignment reaches it. The recovery " +
-		"exists only in tests.",
 	"TunnelHandler": "deprecated by join 3 in favour of TunnelHandlerFor, which " +
 		"remote_command.go does set. The join-2 rows keep the old field exercised " +
 		"until it is removed; this entry goes with it.",

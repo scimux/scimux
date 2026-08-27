@@ -33,6 +33,7 @@ import (
 //	F1-e  TestAT_F1_e_AReachableRendezvousEnrollsExactlyAsBefore
 //	F1-f  TestAT_F1_f_SomethingElseAnsweringTheProbeSpendsNothing
 //	F1-g  TestAT_F1_g_ARendezvousOlderThanTheProbeStillEnrolls
+//	F1-h  TestAT_F1_h_TheAmbiguousRerunProbesBeforeItPostsToo
 
 // inviteUntouched is the property every pre-flight failure must have:
 // the user's only copy of the credential is still there, byte for byte,
@@ -275,6 +276,56 @@ func TestAT_F1_g_ARendezvousOlderThanTheProbeStillEnrolls(t *testing.T) {
 
 	if fake.EnrollCount() != 1 {
 		t.Fatalf("enroll attempts = %d, want 1", fake.EnrollCount())
+	}
+}
+
+func TestAT_F1_h_TheAmbiguousRerunProbesBeforeItPostsToo(t *testing.T) {
+	// The ambiguous branch is the *other* place an invite is posted, and
+	// the user reaching it has already lost one credential. Probing there
+	// too is what stops a second one going the same way when the reason
+	// the first attempt was ambiguous is that the network is broken.
+	fake := newFakeRV(t)
+	fake.Issue(vectorInviteGrouped)
+	fake.DropEnrollResponse(true)
+	cfg := clientCfg(t, fake)
+	cfg.InviteFile = writeInviteFile(t, cfg.DataDir, vectorInviteGrouped, 0o600)
+
+	ctx, cancel := ctxTO(t)
+	defer cancel()
+
+	c := NewClient(cfg)
+	if err := c.Start(ctx); err == nil {
+		t.Fatal("Start succeeded after a dropped enroll response")
+	}
+	_ = c.Close()
+
+	st, _, ok := readStateFile(t, c.StatePath())
+	if !ok || st.Status != StateAmbiguous {
+		t.Fatalf("setup left status %q, want %s", st.Status, StateAmbiguous)
+	}
+
+	// A dead endpoint: the rerun happens on a laptop that still cannot
+	// reach the rendezvous.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL, deadClient := dead.URL, dead.Client()
+	dead.Close()
+
+	rerun := cfg
+	rerun.RendezvousURL = deadURL
+	rerun.HTTPClient = deadClient
+	path := writeInviteFile(t, t.TempDir(), vectorInviteGrouped, 0o600)
+	rerun.InviteFile = path
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := fake.EnrollCount()
+	requireClass(t, NewClient(rerun).Start(ctx), ClassUnreachable)
+
+	inviteUntouched(t, path, before, 0o600)
+	if fake.EnrollCount() != n {
+		t.Fatalf("enroll attempts went from %d to %d against an unreachable rendezvous", n, fake.EnrollCount())
 	}
 }
 

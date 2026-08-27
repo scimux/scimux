@@ -165,18 +165,17 @@ func (c *Client) startOwned(ctx context.Context) error {
 		c.hook().OnStateLoad()
 	}
 
-	if rec, ok := c.recoverEnrolledTemp(); ok && (c.cfg.ExplicitRetry || c.st.Status != StateEnrolled) {
-		if c.cfg.ExplicitRetry && rec.PublicKey == c.st.PublicKey || c.st.PublicKey == "" || rec.PublicKey == c.st.PublicKey {
-			if c.cfg.ExplicitRetry || isCompleteEnrolled(rec) && c.st.Handle == "" {
-				if c.cfg.ExplicitRetry {
-					c.applyState(rec)
-					if err := c.persist(c.snapshotState()); err != nil {
-						return err
-					}
-					return nil
-				}
-			}
-		}
+	// A complete enrolled record under the temp name is the final commit
+	// that failed to rename: the handle was received and this identity is
+	// the one the rendezvous bound. Replaying it costs no network and
+	// cannot spend a credential, so a restart is the whole recovery —
+	// there is nothing here for an operator to authorise. The key match
+	// is the guard that matters: a record belonging to some other
+	// identity is not this installation's to adopt.
+	if rec, ok := c.recoverEnrolledTemp(); ok && c.st.Status != StateEnrolled &&
+		(c.st.PublicKey == "" || rec.PublicKey == c.st.PublicKey) {
+		c.applyState(rec)
+		return c.persist(c.snapshotState())
 	}
 
 	switch c.classify() {
@@ -193,35 +192,32 @@ func (c *Client) startOwned(ctx context.Context) error {
 	case StatePartial:
 		return classError(ClassPartialIdentity, "start", "a partial identity write was left behind")
 	case StateAmbiguous:
-		if c.cfg.ExplicitRetry {
-			if rec, ok := c.recoverEnrolledTemp(); ok && rec.PublicKey == c.st.PublicKey {
-				c.applyState(rec)
-				if err := c.persist(c.snapshotState()); err != nil {
-					return err
-				}
-				return nil
-			}
-			invite, src, err := c.readInvite()
-			if err != nil {
-				if classOfErr(err) == ClassNeedInvite {
-					return classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
-				}
-				return err
-			}
-			err = c.enrollWithExistingKey(ctx, invite)
-			// A rejection here is not evidence that nothing happened: the
-			// installation was already ambiguous when this attempt started,
-			// so an *earlier* request may have bound the key — and a
-			// redeemed invite is rejected exactly the same way an unissued
-			// one is. The class names the installation's state, not the last
-			// response, so it stays ambiguous and the invite is treated as
-			// spent.
-			if classOfErr(err) == ClassEnrollRejected {
-				err = classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
-			}
-			return c.consumePostedInvite(src, invite, err)
+		// The recovery is the operator running the same command again with
+		// the new invite they were issued — no flag, and deliberately
+		// readInviteOptional: a bare restart must neither prompt for a
+		// credential the user does not have nor contact the rendezvous.
+		invite, src, err := c.readInviteOptional()
+		if err != nil {
+			return err
 		}
-		return classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
+		if invite == "" {
+			return classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
+		}
+		if err := c.preflight(ctx); err != nil {
+			return err
+		}
+		err = c.enrollWithExistingKey(ctx, invite)
+		// A rejection here is not evidence that nothing happened: the
+		// installation was already ambiguous when this attempt started,
+		// so an *earlier* request may have bound the key — and a
+		// redeemed invite is rejected exactly the same way an unissued
+		// one is. The class names the installation's state, not the last
+		// response, so it stays ambiguous and the invite is treated as
+		// spent.
+		if classOfErr(err) == ClassEnrollRejected {
+			err = classError(ClassAmbiguousEnrollment, "start", ambiguousEnrollmentGuidance)
+		}
+		return c.consumePostedInvite(src, invite, err)
 	case StateEnrolled:
 		if invite, src, err := c.readInviteOptional(); err != nil {
 			return err
