@@ -63,15 +63,25 @@ const (
 	// that nothing was bound: the invite is unspent and a rerun is the
 	// whole recovery.
 	ClassEnrollRejected Class = "enroll-rejected"
-	ClassInviteConflict Class = "invite-conflict"
-	ClassRevoked        Class = "revoked"
-	ClassDisabled       Class = "disabled"
-	ClassPeerAbsent     Class = "peer-absent"
-	ClassDowngrade      Class = "downgrade"
-	ClassStateLock      Class = "state-lock"
-	ClassNotFound       Class = "not-found"
-	ClassUnauthorized   Class = "unauthorized"
-	ClassUnavailable    Class = "unavailable"
+	// ClassUnreachable is the pre-flight probe (§4.0) failing to get any
+	// answer at all: DNS, dial, TLS, or a timeout. It is deliberately not
+	// ClassAmbiguousEnrollment — nothing was sent, so nothing is in doubt,
+	// the invite is untouched, and the fix is the user's network or their
+	// --rendezvous-url, never an operator's.
+	ClassUnreachable Class = "unreachable"
+	// ClassVersionMismatch is a rendezvous that answered but named a
+	// version window this build is outside of. Enrolling could only be
+	// refused, so the invite is not spent to discover that.
+	ClassVersionMismatch Class = "version-mismatch"
+	ClassInviteConflict  Class = "invite-conflict"
+	ClassRevoked         Class = "revoked"
+	ClassDisabled        Class = "disabled"
+	ClassPeerAbsent      Class = "peer-absent"
+	ClassDowngrade       Class = "downgrade"
+	ClassStateLock       Class = "state-lock"
+	ClassNotFound        Class = "not-found"
+	ClassUnauthorized    Class = "unauthorized"
+	ClassUnavailable     Class = "unavailable"
 	// ClassOriginMismatch is an enrolled identity being presented to a
 	// rendezvous other than the one that issued it. The server cannot report
 	// this — an unknown handle gets the same opaque rejection as a revoked one

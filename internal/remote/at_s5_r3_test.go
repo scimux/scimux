@@ -302,6 +302,8 @@ func TestS5R3_F9_BackoffSchedulerCancel(t *testing.T) {
 	var waits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/hello":
+			helloOK(w)
 		case "/v1/enroll":
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"handle":"ih_041061050R3GG28A","v":1}` + "\n"))
@@ -634,6 +636,8 @@ func (s *strictAuthRV) LastReject() string {
 func (s *strictAuthRV) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
 	switch r.URL.Path {
+	case "/v1/hello":
+		helloOK(w)
 	case "/v1/enroll":
 		var req struct {
 			Code   string `json:"code"`

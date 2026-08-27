@@ -322,6 +322,8 @@ func TestS5R5_F7_ContentTypeSuffixSmuggling(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
+				case "/v1/hello":
+					helloOK(w)
 				case "/v1/enroll":
 					if row.path == "/v1/enroll" {
 						w.Header().Set("Content-Type", row.ct)
@@ -608,6 +610,8 @@ func (s *barrierWaitRV) ArrivedCount() int {
 func (s *barrierWaitRV) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 16<<10))
 	switch r.URL.Path {
+	case "/v1/hello":
+		helloOK(w)
 	case "/v1/enroll":
 		var req struct {
 			PubKey string `json:"pubkey"`

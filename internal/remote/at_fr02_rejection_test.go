@@ -350,6 +350,15 @@ func TestAT_FR_02_f_NearMissRejectionsStayAmbiguous(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The near miss is on enroll. §4.0 is answered
+				// properly so the pre-flight probe passes and the
+				// enroll path is reached at all — a server that
+				// near-missed the probe too would never post the
+				// invite, which is a different property (F1-f).
+				if r.URL.Path == "/v1/hello" {
+					helloOK(w)
+					return
+				}
 				w.Header().Set("Content-Type", tc.contentType)
 				w.Header().Set("X-Content-Type-Options", "nosniff")
 				w.WriteHeader(http.StatusNotFound)

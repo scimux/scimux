@@ -149,6 +149,16 @@ func otherInvite() string {
 	return specFormatInvite(specEncodeInvite(raw))
 }
 
+// helloOK is rendezvous-v1 §4.0 as every rendezvous double must answer
+// it. The pre-flight probe is unauthenticated and runs before enrollment,
+// so a double that leaves it to its default 404 makes an otherwise
+// healthy rendezvous look unreachable and fails tests about something
+// else entirely.
+func helloOK(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte("{\"min\":1,\"v\":1}\n"))
+}
+
 func writeInviteFile(t *testing.T, dir, invite string, perm os.FileMode) string {
 	t.Helper()
 	path := filepath.Join(dir, "invite")
@@ -369,6 +379,15 @@ type fakeRV struct {
 	hostile            atomic.Bool
 	unexpected         []string
 	lastHandle         string
+
+	// The version window /v1/hello reports. Defaults to this build's, so
+	// every existing test keeps a compatible rendezvous without saying so.
+	helloV   atomic.Int64
+	helloMin atomic.Int64
+	// helloUnsupported makes the fake a rendezvous that predates §4.0:
+	// reachable, speaking protocol, answering the probe with its own §7
+	// constant rejection.
+	helloUnsupported atomic.Bool
 }
 
 func newFakeRV(t *testing.T) *fakeRV {
@@ -378,14 +397,17 @@ func newFakeRV(t *testing.T) *fakeRV {
 		invites:  map[string]*fakeInvite{},
 		installs: map[string]*fakeInstall{},
 	}
+	f.helloV.Store(ProtocolVersion)
+	f.helloMin.Store(MinRequestV)
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/hello", f.handleHello)
 	mux.HandleFunc("/v1/enroll", f.handleEnroll)
 	mux.HandleFunc("/v1/challenge", f.handleChallenge)
 	mux.HandleFunc("/v1/verify", f.handleVerify)
 	mux.HandleFunc("/v1/wait", f.handleWait)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/enroll", "/v1/challenge", "/v1/verify", "/v1/wait":
+		case "/v1/hello", "/v1/enroll", "/v1/challenge", "/v1/verify", "/v1/wait":
 			mux.ServeHTTP(w, r)
 		default:
 			f.mu.Lock()
@@ -529,6 +551,32 @@ func (f *fakeRV) record(r *http.Request, body []byte) {
 	f.reqs = append(f.reqs, recordedReq{Method: r.Method, Path: r.URL.Path, Body: append([]byte(nil), body...), Header: h})
 	f.mu.Unlock()
 }
+
+// handleHello is rendezvous-v1 §4.0: unauthenticated, stateless, and the
+// only route a client may call before it holds an invite.
+func (f *fakeRV) handleHello(w http.ResponseWriter, r *http.Request) {
+	f.record(r, nil)
+	if r.Method != http.MethodGet || f.helloUnsupported.Load() {
+		constantReject(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"v":   f.helloV.Load(),
+		"min": f.helloMin.Load(),
+	})
+}
+
+// SetHelloWindow makes the fake report a version window other than this
+// build's, which is the only way to reach the mismatch branch without a
+// second rendezvous implementation.
+func (f *fakeRV) SetHelloWindow(v, min int) {
+	f.helloV.Store(int64(v))
+	f.helloMin.Store(int64(min))
+}
+
+func (f *fakeRV) SetHelloUnsupported(v bool) { f.helloUnsupported.Store(v) }
 
 func (f *fakeRV) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)

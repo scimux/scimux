@@ -248,6 +248,18 @@ func (c *Client) startOwned(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// Reading is not spending. The credential is now in memory and
+		// still on disk, and the probe decides whether it is worth
+		// sending: an unreachable or incompatible rendezvous costs
+		// nothing, because enrollPosted is still false and
+		// consumePostedInvite therefore erases nothing.
+		//
+		// The local checks come first on purpose — an invite with the
+		// wrong mode or the wrong shape is refused without any network
+		// contact at all.
+		if err := c.preflight(ctx); err != nil {
+			return err
+		}
 		err = c.enrollNew(ctx, invite)
 		if err := c.consumePostedInvite(src, invite, err); err != nil {
 			return err

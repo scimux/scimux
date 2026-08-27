@@ -1002,6 +1002,8 @@ func (s *strictWaitRV) LastWait() waitRec {
 func (s *strictWaitRV) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 16<<10))
 	switch r.URL.Path {
+	case "/v1/hello":
+		helloOK(w)
 	case "/v1/enroll":
 		var req struct {
 			PubKey string `json:"pubkey"`

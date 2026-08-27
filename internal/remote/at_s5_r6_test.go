@@ -520,6 +520,8 @@ func (s *r6WaitRV) Release(h *r6HeldWait, how int) {
 func (s *r6WaitRV) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 16<<10))
 	switch r.URL.Path {
+	case "/v1/hello":
+		helloOK(w)
 	case "/v1/enroll":
 		var req struct {
 			PubKey string `json:"pubkey"`
