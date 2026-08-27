@@ -44,6 +44,10 @@ var (
 	golangXLicense = mustEmbeddedLicense("golang-x.LICENSE")
 	uuidLicense    = mustEmbeddedLicense("uuid.LICENSE")
 	anetLicense    = mustEmbeddedLicense("anet.LICENSE")
+	// Not a Go module: web/js/qrcodegen.js is vendored browser source,
+	// embedded and served like the rest of the web tree. `go list -deps`
+	// cannot see it, so it is listed here by hand.
+	qrcodegenLicense = mustEmbeddedLicense("qrcodegen.LICENSE")
 )
 
 func mustEmbeddedLicense(name string) string {
@@ -56,13 +60,14 @@ func mustEmbeddedLicense(name string) string {
 
 func handleLicenses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{
-		"scimux":  ownLicense,
-		"acp":     acpLicense,
-		"go":      goLicense,
-		"pion":    pionLicense,
-		"golangx": golangXLicense,
-		"uuid":    uuidLicense,
-		"anet":    anetLicense,
+		"scimux":    ownLicense,
+		"acp":       acpLicense,
+		"go":        goLicense,
+		"pion":      pionLicense,
+		"golangx":   golangXLicense,
+		"uuid":      uuidLicense,
+		"anet":      anetLicense,
+		"qrcodegen": qrcodegenLicense,
 	})
 }
 
