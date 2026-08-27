@@ -28,6 +28,7 @@ var productionJSURLs = []string{
 	"/js/navigation.js",
 	"/js/notes.js",
 	"/js/pairing.js",
+	"/js/pairing-ui.js",
 	"/js/polling.js",
 	"/js/qr.js",
 	"/js/qrcodegen.js",

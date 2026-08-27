@@ -121,6 +121,11 @@ export function nextPairing(state, event, now) {
       return s;
 
     case "authority-warning":
+      /* Hosted refusal is discovered by the mint, and the mint happens
+       * here and on show-code -- never on pair-a-device, which asks the
+       * server nothing. Routing it to the generic failure instead would
+       * tell a device-side user the network was down. */
+      if (type === "HOSTED_BLOCKED") return { ...withoutCredential(s), screen: "failed", reason: "hosted-blocked" };
       /* Acknowledging is not confirming. The machine moves to show-code
        * with no code yet: the adapter mints on entry and MINTED fills it
        * in, so the human sees the sheet respond immediately rather than
@@ -142,6 +147,7 @@ export function nextPairing(state, event, now) {
         };
       }
       if (type === "MINT_FAILED") return failWith(s, event);
+      if (type === "HOSTED_BLOCKED") return { ...withoutCredential(s), screen: "failed", reason: "hosted-blocked" };
       if (type === "OFFER") return { ...s, screen: "compare-sas", sas: String(event.sas || ""), refreshDue: false };
       if (type === "TICK") return tickShowCode(s, now);
       if (type === "VISIBILITY") return visibility(s, event, now);

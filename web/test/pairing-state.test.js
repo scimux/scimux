@@ -57,10 +57,11 @@ const OFFER = { type: "OFFER", sas: "706990" };
 const TRANSITIONS = {
   closed: { OPEN: "pair-a-device" },
   "pair-a-device": { BEGIN: "authority-warning", CLOSE: "closed", HOSTED_BLOCKED: "failed" },
-  "authority-warning": { ACK_WARNING: "show-code", CANCEL: "pair-a-device", CLOSE: "closed", MINT_FAILED: "failed" },
+  "authority-warning": { ACK_WARNING: "show-code", CANCEL: "pair-a-device", CLOSE: "closed", MINT_FAILED: "failed", HOSTED_BLOCKED: "failed" },
   "show-code": {
     MINTED: "show-code",
     MINT_FAILED: "failed",
+    HOSTED_BLOCKED: "failed",
     OFFER: "compare-sas",
     TICK: "show-code",
     VISIBILITY: "show-code",
