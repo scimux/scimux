@@ -379,6 +379,7 @@ type fakeRV struct {
 	hostile            atomic.Bool
 	unexpected         []string
 	lastHandle         string
+	released           []string
 
 	// The version window /v1/hello reports. Defaults to this build's, so
 	// every existing test keeps a compatible rendezvous without saying so.
@@ -405,9 +406,10 @@ func newFakeRV(t *testing.T) *fakeRV {
 	mux.HandleFunc("/v1/challenge", f.handleChallenge)
 	mux.HandleFunc("/v1/verify", f.handleVerify)
 	mux.HandleFunc("/v1/wait", f.handleWait)
+	mux.HandleFunc("/v1/unenroll", f.handleUnenroll)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/hello", "/v1/enroll", "/v1/challenge", "/v1/verify", "/v1/wait":
+		case "/v1/hello", "/v1/enroll", "/v1/challenge", "/v1/verify", "/v1/wait", "/v1/unenroll":
 			mux.ServeHTTP(w, r)
 		default:
 			f.mu.Lock()
@@ -670,6 +672,58 @@ func (f *fakeRV) handleVerify(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	f.record(r, body)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnenroll is rendezvous-v1 §4.4, and unlike handleVerify it really
+// checks the signature. The route segment of the signed message is the
+// entire security of this endpoint — it is what stops a captured verify
+// signature deleting the installation that made it — so the fake is the
+// place that proves the client puts the right one in.
+func (f *fakeRV) handleUnenroll(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	f.record(r, body)
+	var req struct {
+		V         json.Number `json:"v"`
+		Handle    string      `json:"handle"`
+		Challenge string      `json:"challenge"`
+		Sig       string      `json:"sig"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		constantReject(w)
+		return
+	}
+	f.mu.Lock()
+	inst := f.installs[req.Handle]
+	f.mu.Unlock()
+	if inst == nil || inst.revoked {
+		constantReject(w)
+		return
+	}
+	chal, cerr := hex.DecodeString(req.Challenge)
+	sig, serr := hex.DecodeString(req.Sig)
+	pub, perr := hex.DecodeString(inst.pubkey)
+	if cerr != nil || serr != nil || perr != nil || len(pub) != ed25519.PublicKeySize {
+		constantReject(w)
+		return
+	}
+	if !ed25519.Verify(pub, buildAuthMessage(DefaultOrigin, ProtocolVersion, "/v1/unenroll", req.Handle, chal), sig) {
+		constantReject(w)
+		return
+	}
+	// Released, not revoked: the handle is gone, and §4.4 is explicit that
+	// the code it was redeemed from stays redeemed.
+	f.mu.Lock()
+	delete(f.installs, req.Handle)
+	f.released = append(f.released, req.Handle)
+	f.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Released is the handles §4.4 actually let go of, in order.
+func (f *fakeRV) Released() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.released...)
 }
 
 func (f *fakeRV) handleWait(w http.ResponseWriter, r *http.Request) {
