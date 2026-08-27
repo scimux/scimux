@@ -1,13 +1,13 @@
 package remote
 
-// Join 1 test harness — a rendezvous that can actually hand the laptop a
-// sealed session offer and capture what the laptop sends back.
+// Join 1 test harness — a rendezvous that can actually hand the computer a
+// sealed session offer and capture what the computer sends back.
 //
 // The existing S5 fakes (fakeRV, r6WaitRV) exercise /v1/wait as a long poll
 // whose only interesting outcomes are 204, 404 and transport failure. That was
 // the right scope for S5, which was about enrolment and lifecycle. It cannot
 // express the case join 1 is about: a 200 whose octet-stream body is the
-// device's sealed §12.2 envelope, and the `reply` field the laptop is supposed
+// device's sealed §12.2 envelope, and the `reply` field the computer is supposed
 // to post back on its next wait.
 //
 // This harness is deliberately separate rather than an extension of fakeRV.
@@ -27,7 +27,7 @@ import (
 
 // sessionRV is a rendezvous that speaks exactly the three endpoints the wait
 // loop touches: /v1/challenge, /v1/verify and /v1/wait. It holds one queued
-// envelope per rid and records every reply the laptop posts.
+// envelope per rid and records every reply the computer posts.
 type sessionRV struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -70,7 +70,7 @@ func (f *sessionRV) QueueEnvelope(rid string, sealed []byte) {
 	f.queued[rid] = append([]byte(nil), sealed...)
 }
 
-// Replies is every reply blob the laptop has posted so far.
+// Replies is every reply blob the computer has posted so far.
 func (f *sessionRV) Replies() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()

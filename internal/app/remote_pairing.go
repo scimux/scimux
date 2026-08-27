@@ -102,8 +102,8 @@ func (a *app) handleRemotePairingConfirm(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
-		LaptopConfirm *bool `json:"laptop_confirm"`
-		DeviceConfirm *bool `json:"device_confirm"`
+		ComputerConfirm *bool `json:"computer_confirm"`
+		DeviceConfirm   *bool `json:"device_confirm"`
 	}
 	if r.Header.Get("Content-Type") != "" || r.ContentLength > 0 {
 		if err := decodeJSON(w, r, &body); err != nil {
@@ -111,9 +111,9 @@ func (a *app) handleRemotePairingConfirm(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	laptop := body.LaptopConfirm != nil && *body.LaptopConfirm
+	computer := body.ComputerConfirm != nil && *body.ComputerConfirm
 	device := body.DeviceConfirm != nil && *body.DeviceConfirm
-	dev, err := p.CompletePairing(r.Context(), r.PathValue("code"), laptop, device)
+	dev, err := p.CompletePairing(r.Context(), r.PathValue("code"), computer, device)
 	if err != nil {
 		writeRemotePairingError(w, err)
 		return
@@ -169,7 +169,7 @@ func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 // §4.4). The two halves are not equal partners underneath — the local
 // unlink always happens, the remote release is best-effort — so this
 // route answers 200 with released:false rather than an error when the
-// rendezvous could not be reached. That is the honest report: the laptop
+// rendezvous could not be reached. That is the honest report: the computer
 // is unlinked, and an installation the rendezvous still holds is one only
 // its operator can strike off.
 //
@@ -247,8 +247,8 @@ func pairingStatusJSON(st remote.PairingStatus) map[string]any {
 	if st.SAS != "" {
 		out["sas"] = st.SAS
 	}
-	if len(st.LaptopPub) > 0 {
-		out["laptop_pub"] = hex.EncodeToString(st.LaptopPub)
+	if len(st.ComputerPub) > 0 {
+		out["computer_pub"] = hex.EncodeToString(st.ComputerPub)
 	}
 	if len(st.ReplyNonce) > 0 {
 		out["reply_nonce"] = hex.EncodeToString(st.ReplyNonce)

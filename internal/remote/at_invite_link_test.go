@@ -11,7 +11,7 @@ import (
 //
 // V1 has no typed pairing path: §11.2 records that decision and its exit
 // cost. A device therefore learns the code, the rendezvous ID and the
-// laptop's static X from a link or a QR of the same link — which is why
+// computer's static X from a link or a QR of the same link — which is why
 // this builder is the only way a pairing starts, and why what it emits is
 // protocol rather than presentation.
 
@@ -65,7 +65,7 @@ func TestInviteLinkCarriesEveryValueTheDeviceNeeds(t *testing.T) {
 		t.Fatalf("PairingECDHPublic: %v", err)
 	}
 	if got := q.Get("x"); got != hex.EncodeToString(x) {
-		t.Errorf("x = %q, want the laptop's static X", got)
+		t.Errorf("x = %q, want the computer's static X", got)
 	}
 }
 
@@ -195,9 +195,9 @@ func TestInviteLinkXIsAnUncompressedLowercasePoint(t *testing.T) {
 
 // The point-shape guard cannot be reached through a real client, whose X
 // is always well-formed. It is still worth having: a truncated or
-// compressed point would otherwise leave the laptop and fail at the
+// compressed point would otherwise leave the computer and fail at the
 // device on the six digits, which is the worst place to learn about it.
-func TestInviteLinkRefusesAMalformedLaptopKey(t *testing.T) {
+func TestInviteLinkRefusesAMalformedComputerKey(t *testing.T) {
 	good, err := hex.DecodeString(strings.Repeat("ab", p256UncompressedLen))
 	if err != nil {
 		t.Fatal(err)

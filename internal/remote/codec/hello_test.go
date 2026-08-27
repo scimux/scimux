@@ -47,7 +47,7 @@ func TestHelloRoundTrips(t *testing.T) {
 }
 
 // §5.1: an unknown tag in a hello is exactly the MINOR-bump case the
-// record layer exists for. A future capability must not break a laptop
+// record layer exists for. A future capability must not break a computer
 // that predates it.
 func TestHelloIgnoresATagItDoesNotKnow(t *testing.T) {
 	p, err := encodeHelloPayload(Hello{Role: RoleInitiator, MaxRecvFrame: 4096, Impl: "x"})

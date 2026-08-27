@@ -1,6 +1,6 @@
 package app
 
-// S8 (remote bootstrap) — the laptop half of FR-40.
+// S8 (remote bootstrap) — the computer half of FR-40.
 //
 // web/js/bootstrap.js consumes a manifest of
 // {source, entry, entries:[{url,kind,size,integrity}]}. This file is the
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	remoteBootstrapSource    = "laptop"
+	remoteBootstrapSource    = "computer"
 	remoteBootstrapEntryPath = "/js/app.js"
 )
 
@@ -46,7 +46,7 @@ var (
 	remoteBootstrapErr  error
 )
 
-func laptopBootstrapManifest() (remoteBootstrapManifest, error) {
+func computerBootstrapManifest() (remoteBootstrapManifest, error) {
 	remoteBootstrapOnce.Do(func() {
 		remoteBootstrapVal, remoteBootstrapErr = buildRemoteBootstrapManifest()
 	})
@@ -54,7 +54,7 @@ func laptopBootstrapManifest() (remoteBootstrapManifest, error) {
 }
 
 func (a *app) handleRemoteBootstrapManifest(w http.ResponseWriter, r *http.Request) {
-	m, err := laptopBootstrapManifest()
+	m, err := computerBootstrapManifest()
 	if err != nil {
 		http.Error(w, "bootstrap manifest unavailable", http.StatusInternalServerError)
 		return

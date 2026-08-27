@@ -6,7 +6,7 @@
  * correction level, quiet zone, colours — and everything in qrcodegen.js
  * is upstream's.
  *
- * Why a QR at all: the pairing link carries the laptop's uncompressed
+ * Why a QR at all: the pairing link carries the computer's uncompressed
  * P-256 point as 130 hex characters (internal/remote/invite_link.go), so
  * it cannot be typed, and rendezvous-v1 §11.2 records that V1 has no
  * typed pairing path. Scanning is the only way a device learns X, and X

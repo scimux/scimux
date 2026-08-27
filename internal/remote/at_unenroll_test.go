@@ -12,15 +12,15 @@ import (
 //
 // Enrolling was one-way. Every other grant in this system can be handed
 // back — a paired device is revoked from the burger, a node is deleted —
-// but the laptop's own enrollment had no such action, so a user trying
+// but the computer's own enrollment had no such action, so a user trying
 // scimux remote for the first time could only stop using it, never undo
 // it. That is a bad trade to offer someone on the day you are asking them
 // to try it.
 //
 // rendezvous-v1 §4.4 is the remote half: a route-scoped signature over a
 // fresh challenge releases the installation. The local half is the one
-// that must not be conditional on it — a laptop that cannot reach the
-// rendezvous is exactly the laptop whose owner most wants to stop it
+// that must not be conditional on it — a computer that cannot reach the
+// rendezvous is exactly the computer whose owner most wants to stop it
 // trying, so the unlink completes either way and reports honestly which
 // halves happened.
 //
@@ -29,7 +29,7 @@ import (
 //	U3  TestAT_F1_o_AnUnreachableRendezvousStillUnlinksLocally
 //	U4  TestAT_F1_p_ARevokedInstallationStillUnlinksLocally
 //	U5  TestAT_F1_q_UnlinkingWhenNothingIsEnrolledContactsNobody
-//	U6  TestAT_F1_r_AnUnlinkedLaptopCanEnrollAgainWithANewInvite
+//	U6  TestAT_F1_r_AnUnlinkedComputerCanEnrollAgainWithANewInvite
 
 func TestAT_F1_m_UnlinkReleasesTheInstallationAndForgetsIt(t *testing.T) {
 	fake := newFakeRV(t)
@@ -149,7 +149,7 @@ func TestAT_F1_o_AnUnreachableRendezvousStillUnlinksLocally(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 
-	// The laptop that cannot reach the rendezvous is precisely the one
+	// The computer that cannot reach the rendezvous is precisely the one
 	// whose owner wants it to stop trying. Blocking the unlink on the
 	// release would make the failure mode the reason the escape hatch
 	// does not work.
@@ -216,7 +216,7 @@ func TestAT_F1_q_UnlinkingWhenNothingIsEnrolledContactsNobody(t *testing.T) {
 	}
 }
 
-func TestAT_F1_r_AnUnlinkedLaptopCanEnrollAgainWithANewInvite(t *testing.T) {
+func TestAT_F1_r_AnUnlinkedComputerCanEnrollAgainWithANewInvite(t *testing.T) {
 	fake := newFakeRV(t)
 	cfg := clientCfg(t, fake)
 	cfg.InviteFile = writeInviteFile(t, t.TempDir(), vectorInviteGrouped, 0o600)

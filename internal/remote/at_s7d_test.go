@@ -116,7 +116,7 @@ func s7dOpenJSON(t *testing.T, sealed, recipientPriv []byte, origin, rid string)
 	nonce := sealed[p256UncompressedLen : p256UncompressedLen+gcmNonceLen]
 	plain, err := gcm.Open(nil, nonce, sealed[p256UncompressedLen+gcmNonceLen:], envelopeAD(origin, rid))
 	if err != nil {
-		t.Fatalf("device could not open the laptop's pairing reply: %v", err)
+		t.Fatalf("device could not open the computer's pairing reply: %v", err)
 	}
 	var out map[string]any
 	if err := json.Unmarshal(plain, &out); err != nil {
@@ -158,7 +158,7 @@ func TestAT_S7d_MintRegistersPairWait(t *testing.T) {
 }
 
 // TestAT_S7d_SealedPairOfferGetsSealedReply is the join. A device posts a
-// sealed pair/offer; the laptop must open it via the wait loop, call into
+// sealed pair/offer; the computer must open it via the wait loop, call into
 // AcceptPairingOffer on the product path, and seal a pair-reply to Y.
 func TestAT_S7d_SealedPairOfferGetsSealedReply(t *testing.T) {
 	const at = "AT-S7d-pair-offer-reply"
@@ -175,7 +175,7 @@ func TestAT_S7d_SealedPairOfferGetsSealedReply(t *testing.T) {
 
 	x, err := c.PairingECDHPublic()
 	if err != nil {
-		t.Fatalf("%s: laptop X: %v", at, err)
+		t.Fatalf("%s: computer X: %v", at, err)
 	}
 	devPriv, yPub := deviceKeypair(t)
 	signPub := s7MustSignPub(t)
@@ -239,7 +239,7 @@ func TestAT_S7d_UnopenablePairOfferDoesNotAnswerOrConsume(t *testing.T) {
 	served := rv.PairWaitCount(code.RID)
 	time.Sleep(500 * time.Millisecond)
 	if rs := rv.Replies(); len(rs) != 0 {
-		t.Fatalf("%s: laptop answered an unopenable pair/offer: %d replies", at, len(rs))
+		t.Fatalf("%s: computer answered an unopenable pair/offer: %d replies", at, len(rs))
 	}
 	if rv.PairWaitCount(code.RID) <= served {
 		t.Fatalf("%s: pairing wait loop stopped after junk", at)

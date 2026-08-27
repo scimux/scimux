@@ -12,7 +12,7 @@
  *                                 and URLs built by template literals (tracked
  *                                 through the identifier they are bound to, so
  *                                 `href="${url}"` is seen as a URL sink).
- *   bypassing navigation        — `target=_blank` on a laptop-served URL, and
+ *   bypassing navigation        — `target=_blank` on a computer-served URL, and
  *                                 the `download` attribute in its BARE,
  *                                 value-less form, which is the form this
  *                                 repository actually writes.
@@ -48,7 +48,7 @@ const WEB = join(__dirname, "..");
  * ratchet noisy without making it stricter. Duplicates are carried by `count`,
  * so removing one of two identical sinks still fails. */
 const ALLOWLIST = [
-  /* S2 routed the three direct fetch sites and the seven laptop-served asset
+  /* S2 routed the three direct fetch sites and the seven computer-served asset
    * URL builders through the seam. They are still *found* — classified
    * `seam-routed` — and are excluded from this bypass list because of that
    * classification, not because the detector stopped seeing them. A URL inside

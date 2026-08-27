@@ -14,7 +14,7 @@ const s1FixtureECDHPub = "046a8620064ea5a5629fefc1762c3b84a2aba64bfacdbd50a5719f
 
 // TestAT_S7c_DeviceECDHPubSurvivesRestart: persist.go must carry the
 // device's static P-256 Y both ways. Without it a restart leaves the
-// laptop able to open a session offer and nowhere to seal the answer.
+// computer able to open a session offer and nowhere to seal the answer.
 func TestAT_S7c_DeviceECDHPubSurvivesRestart(t *testing.T) {
 	const at = "AT-S7c-ecdh-persist"
 	c, _, ctx, cancel := s7Enrolled(t)

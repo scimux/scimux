@@ -1,4 +1,4 @@
-// Package remote is the scimux laptop half of remote access (S5).
+// Package remote is the scimux computer half of remote access (S5).
 //
 // R2: enrollment, identity, local device controls, and fail-closed state.
 // Methods perform no WebRTC and import no pion.
@@ -417,7 +417,7 @@ type DeviceRecord struct {
 	// ECDHPub is the device's static P-256 public key Y from the §11 pairing
 	// transcript. PubKey is the ed25519 identity that signs; Y is what a
 	// §12.2 reply envelope is sealed *to*, so the two cannot be the same
-	// field. Without it the laptop can open a device's session offer and has
+	// field. Without it the computer can open a device's session offer and has
 	// nowhere to send the answer.
 	ECDHPub []byte
 }

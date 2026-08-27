@@ -120,7 +120,7 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
         });
       } catch (e) {
         /* 409 is the hosted refusal — a paired device asking to pair
-           further devices. It needs its own screen: "go to the laptop"
+           further devices. It needs its own screen: "go to the computer"
            and "the rendezvous is unreachable" are different problems. */
         if (e && e.status === 409) dispatch({ type: "HOSTED_BLOCKED" });
         else dispatch({ type: "MINT_FAILED", error: (e && e.message) || "" });
@@ -184,7 +184,7 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
       try {
         await api(sessionURL(code, "/confirm"), {
           method: "POST",
-          body: JSON.stringify({ laptop_confirm: true, device_confirm: true }),
+          body: JSON.stringify({ computer_confirm: true, device_confirm: true }),
         });
         dispatch({ type: "COMPLETED" });
       } catch {
@@ -284,7 +284,7 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
 /* ---------- the paired-device list ----------
  *
  * The other half of a grant. Pairing hands a device SSH-equivalent
- * authority on this laptop, so the list of who holds it, and the way to
+ * authority on this computer, so the list of who holds it, and the way to
  * take it back, belong to the same feature rather than to a later phase.
  *
  * Owned root: #m_devices (delegated click on [data-dev]).
@@ -405,16 +405,16 @@ export function createDeviceList({ api, doc } = {}) {
   };
 }
 
-/* F1 — unlinking this laptop.
+/* F1 — unlinking this computer.
  *
  * The counterpart to the revoke two rows up. A paired device could always
- * be handed back; the laptop's own enrollment could only be abandoned,
+ * be handed back; the computer's own enrollment could only be abandoned,
  * which is a bad trade to offer someone the day you ask them to try
  * remote access.
  *
  * The route underneath does the local unlink unconditionally and the
  * rendezvous release best-effort, so this control's real job is to report
- * which halves happened. released:false is not a failure — the laptop is
+ * which halves happened. released:false is not a failure — the computer is
  * unlinked either way — but it is something the user must be told, because
  * only the operator can strike off an installation the rendezvous still
  * holds. */
@@ -431,7 +431,7 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
   let done = false;
   let notice = "";
   /* Whether the notice is a failure. A message that reads the same
-     whether the laptop was unlinked or not is no message at all. */
+     whether the computer was unlinked or not is no message at all. */
   let noticeBad = false;
   let chain = Promise.resolve();
   const cleanups = [];
@@ -448,7 +448,7 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
     const b = btn();
     if (b) {
       b.hidden = !enrolled || done;
-      b.innerHTML = armed ? "Confirm unlink" : "Unlink this laptop";
+      b.innerHTML = armed ? "Confirm unlink" : "Unlink this computer";
       b.className = armed ? "cta danger" : "cta";
     }
     const n = note();
@@ -468,16 +468,16 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
         done = true;
         noticeBad = false;
         notice = r && r.released
-          ? "Unlinked. This laptop is no longer enrolled."
+          ? "Unlinked. This computer is no longer enrolled."
           : "Unlinked locally, but the rendezvous could not be reached. " +
             "Ask whoever issued the invite to revoke this installation.";
         if (onUnlinked) onUnlinked();
       } catch (e) {
-        /* The identity is still on disk, so this laptop is still
+        /* The identity is still on disk, so this computer is still
            enrolled. Saying otherwise is the one lie this surface must
            never tell — the action stays offerable. */
         noticeBad = true;
-        notice = "Could not unlink this laptop: " + ((e && e.message) || "unknown error");
+        notice = "Could not unlink this computer: " + ((e && e.message) || "unknown error");
       } finally {
         inFlight = false;
         render();
@@ -498,7 +498,7 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
     render();
   }
 
-  /* The status is the only thing that knows whether this laptop has an
+  /* The status is the only thing that knows whether this computer has an
      identity on disk at all. revoked and unavailable still do, and those
      are precisely the installations someone wants rid of, so the test is
      "any enrollment" rather than "a working one". */

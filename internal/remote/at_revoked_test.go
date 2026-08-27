@@ -11,7 +11,7 @@ import (
 // `StateRevoked` returned ClassRevoked unconditionally, before an invite
 // was read, and the only branch that could accept a new one was gated on
 // Config.Rotate — a field no flag set and no operator could reach. So the
-// operator's own recovery ("I revoked that laptop; here is a new invite")
+// operator's own recovery ("I revoked that computer; here is a new invite")
 // had no path through the client at all: every start said "this
 // installation has been revoked" and stopped.
 //

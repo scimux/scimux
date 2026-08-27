@@ -36,7 +36,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/remote/codec"
 )
 
-// sessionArrivalDeadline bounds how long a laptop-side session waits for the
+// sessionArrivalDeadline bounds how long a computer-side session waits for the
 // device to finish connecting. Without it an offer from a peer that never
 // dials would hold a peer connection and a goroutine until the process exits.
 // It is generous because it covers ICE on a bad network, not a protocol step.
@@ -76,7 +76,7 @@ func iceServersFromOrigin(origin string) []webrtc.ICEServer {
 // this is the only production peer connection that gathers against one,
 // because it is the path that has to reach a device on another network.
 //
-// The returned Session is the laptop half only: the far end is the device, so
+// The returned Session is the computer half only: the far end is the device, so
 // there is no client-side peer and no RoundTrip. The returned inner is the
 // answer to seal back through the rendezvous.
 func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Handler, iceServers []webrtc.ICEServer) (*Session, SessionInner, error) {
@@ -129,9 +129,9 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 	}
 
 	s := &Session{
-		laptop:     pc,
-		laptopOnly: true,
-		serveDone:  make(chan struct{}),
+		computer:     pc,
+		computerOnly: true,
+		serveDone:    make(chan struct{}),
 		// Until the channel opens, the honest FR-24 answer is that ICE has not
 		// succeeded. It is cleared on open and replaced if a live channel is
 		// later lost.
@@ -150,7 +150,7 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 			webrtc.PeerConnectionStateDisconnected,
 			webrtc.PeerConnectionStateClosed:
 			s.mu.Lock()
-			if s.laptopDC != nil {
+			if s.computerDC != nil {
 				s.cause = CauseConnectedThenLost
 			}
 			s.mu.Unlock()
@@ -162,7 +162,7 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 	return s, answer, nil
 }
 
-// serveArrivingChannel assembles the laptop half once the device's data
+// serveArrivingChannel assembles the computer half once the device's data
 // channel shows up, then serves FR-27 frames off it until the session closes.
 //
 // Every step re-checks whether the session was closed while it was waiting:
@@ -191,7 +191,7 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.
 		_ = stream.Close()
 		return
 	}
-	s.laptopDC, s.laptopStream = dc, stream
+	s.computerDC, s.computerStream = dc, stream
 	s.mu.Unlock()
 
 	if err := stream.waitOpen(ctx); err != nil {
@@ -199,7 +199,7 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.
 		return
 	}
 
-	// The laptop is always the responder: it serves, the browser dials.
+	// The computer is always the responder: it serves, the browser dials.
 	srv := codec.NewConn(stream, stream, codec.RoleResponder)
 	s.mu.Lock()
 	if s.closed {
@@ -211,7 +211,7 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.
 	s.cause = ""
 	s.mu.Unlock()
 
-	// The laptop is the side that outlives deployments, so it is the side
+	// The computer is the side that outlives deployments, so it is the side
 	// most likely to meet a peer of another major. Serve negotiates before
 	// it dispatches anything, and a version verdict is recorded as this
 	// session's FR-24 cause rather than dropped as a serve error.

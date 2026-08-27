@@ -14,10 +14,10 @@ import (
 // §4.4) and then forgets it locally. It is the way out of an enrollment,
 // and the reason it exists is symmetry: every other grant in scimux can
 // be handed back — a paired device is revoked from the same menu, a node
-// is deleted — but the laptop's own enrollment could only be abandoned.
+// is deleted — but the computer's own enrollment could only be abandoned.
 //
 // The two halves are deliberately not equal partners. The local half is
-// unconditional, because the laptop that cannot reach the rendezvous is
+// unconditional, because the computer that cannot reach the rendezvous is
 // exactly the one whose owner wants it to stop trying; making the escape
 // hatch depend on the network would break it in the failure mode it is
 // most needed in. released reports whether the remote half also happened,

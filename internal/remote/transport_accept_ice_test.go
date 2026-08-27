@@ -3,7 +3,7 @@ package remote
 // S6 — the answering path must actually ask STUN.
 //
 // acceptSessionOffer is the one peer connection that carries real traffic: a
-// paired device's sealed §12.1 offer arrives, and the laptop has to traverse
+// paired device's sealed §12.1 offer arrives, and the computer has to traverse
 // NAT to reach a phone on another network. A bare Configuration{} gathers
 // host candidates only. AT-int-a cannot catch that: it joins two pion peers
 // in one process on one host, where host candidates are enough.

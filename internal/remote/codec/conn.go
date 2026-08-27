@@ -253,7 +253,7 @@ func (c *Conn) readLoop(ctx context.Context, server bool) error {
 		if !isKnownType(fr.typ) {
 			// tunnel-v2 §2.1. The frame was read whole, so the
 			// stream stays aligned; dropping it is what makes a
-			// MINOR addition invisible to an older laptop rather
+			// MINOR addition invisible to an older computer rather
 			// than a torn-down session.
 			continue
 		}

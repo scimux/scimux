@@ -35,7 +35,7 @@ func TestAT_FR_12_a_BothEndsSameSASFromTranscript(t *testing.T) {
 		t.Fatalf("%s: transcript does not match S1 pairing-transcript-v1", at)
 	}
 
-	// Device: ECDH(Ypriv, Xpub). Laptop: ECDH(Xpriv, Ypub) with Ypub
+	// Device: ECDH(Ypriv, Xpub). Computer: ECDH(Xpriv, Ypub) with Ypub
 	// derived from sender_priv_hex. Xpriv is the S1 fixture private
 	// bound to the same recipient_pub (envelope-seal-p256), not invented.
 	seal := s7Construction(t, "envelope-seal-p256")
@@ -47,18 +47,18 @@ func TestAT_FR_12_a_BothEndsSameSASFromTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: device DerivePairingSAS: %v", at, err)
 	}
-	laptopSAS, err := DerivePairingSAS(xPriv, yPub, wantTR)
+	computerSAS, err := DerivePairingSAS(xPriv, yPub, wantTR)
 	if err != nil {
-		t.Fatalf("%s: laptop DerivePairingSAS: %v", at, err)
+		t.Fatalf("%s: computer DerivePairingSAS: %v", at, err)
 	}
-	if laptopSAS != deviceSAS {
-		t.Fatalf("%s: laptop SAS %q != device SAS %q", at, laptopSAS, deviceSAS)
+	if computerSAS != deviceSAS {
+		t.Fatalf("%s: computer SAS %q != device SAS %q", at, computerSAS, deviceSAS)
 	}
-	if laptopSAS != wantSAS {
-		t.Fatalf("%s: SAS %q, want S1 vector %q", at, laptopSAS, wantSAS)
+	if computerSAS != wantSAS {
+		t.Fatalf("%s: SAS %q, want S1 vector %q", at, computerSAS, wantSAS)
 	}
-	if len(laptopSAS) != 6 {
-		t.Fatalf("%s: SAS %q is not 6 digits", at, laptopSAS)
+	if len(computerSAS) != 6 {
+		t.Fatalf("%s: SAS %q is not 6 digits", at, computerSAS)
 	}
 }
 
@@ -100,16 +100,16 @@ func TestAT_FR_12_c_WithheldConfirmationDoesNotComplete(t *testing.T) {
 	}
 
 	rows := []struct {
-		name                    string
-		laptopConfirm, deviceOK bool
+		name                      string
+		computerConfirm, deviceOK bool
 	}{
 		{"neither", false, false},
-		{"laptop-only", true, false},
+		{"computer-only", true, false},
 		{"device-only", false, true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			_, err := c.CompletePairing(ctx, code.Code, row.laptopConfirm, row.deviceOK)
+			_, err := c.CompletePairing(ctx, code.Code, row.computerConfirm, row.deviceOK)
 			requireClass(t, err, ClassPairUnconfirmed)
 			list, lerr := c.PairedDevices()
 			if lerr != nil {

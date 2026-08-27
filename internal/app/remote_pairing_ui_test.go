@@ -7,7 +7,7 @@ package app
 // elements the feature reaches for, and whether the sole browser entry
 // imports it at all. A feature that is perfectly tested and never
 // constructed is exactly the hole web/test/reachability.test.js exists to
-// close, and this is its laptop-side mirror for the markup.
+// close, and this is its computer-side mirror for the markup.
 
 import (
 	"io/fs"
@@ -54,7 +54,7 @@ func TestPairingSheetSlotsExist(t *testing.T) {
 }
 
 // TestRemoteAccessIsTheFirstMenuSection pins placement, not decoration.
-// Pairing hands out SSH-equivalent authority on this laptop, and the list of
+// Pairing hands out SSH-equivalent authority on this computer, and the list of
 // who currently holds it is the first thing a burger menu should show —
 // below the version check and the licence notices it is a setting nobody
 // finds until they are looking for it, which is too late.
@@ -86,7 +86,7 @@ func TestRemoteAccessIsTheFirstMenuSection(t *testing.T) {
 }
 
 // TestPairingFeatureIsConstructedByTheBrowserEntry is the reachability
-// assertion for the laptop side. web/test/reachability.test.js can prove a
+// assertion for the computer side. web/test/reachability.test.js can prove a
 // test imports served code; only the entry module can prove the served code
 // ever runs.
 func TestPairingFeatureIsConstructedByTheBrowserEntry(t *testing.T) {

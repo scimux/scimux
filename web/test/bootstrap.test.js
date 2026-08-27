@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   bootstrap,
-  SOURCE_LAPTOP,
+  SOURCE_COMPUTER,
   SOURCE_RENDEZVOUS,
 } from "../js/bootstrap.js";
 
@@ -70,7 +70,7 @@ async function sriOf(bytes) {
   return "sha256-" + btoa(bin);
 }
 
-async function laptopManifest(inventory) {
+async function computerManifest(inventory) {
   const entries = [];
   for (const item of inventory) {
     const bytes = new Uint8Array(readFileSync(item.file));
@@ -81,7 +81,7 @@ async function laptopManifest(inventory) {
       integrity: await sriOf(bytes),
     });
   }
-  return { source: SOURCE_LAPTOP, entry: ENTRY, entries };
+  return { source: SOURCE_COMPUTER, entry: ENTRY, entries };
 }
 
 function bytesResponse(bytes, status = 200) {
@@ -173,7 +173,7 @@ function resolveSpecifier(fromUrl, spec) {
 test("AT-FR-40-a: fake channel serving the real files boots the full graph", async () => {
   const at = "AT-FR-40-a";
   const inventory = servedFromDisk();
-  const manifest = await laptopManifest(inventory);
+  const manifest = await computerManifest(inventory);
   const channel = diskChannel(inventory);
   const s = seams();
 
@@ -275,7 +275,7 @@ test("AT-FR-40-b: a specifier resolving outside the manifest aborts and never st
   await assert.rejects(
     async () => bootstrap({
       channel: diskChannel(inventory),
-      manifest: await laptopManifest(short),
+      manifest: await computerManifest(short),
       createObjectURL: s.createObjectURL,
       installImportMap: s.installImportMap,
       importModule: s.importModule,
@@ -299,7 +299,7 @@ test("AT-FR-40-b: a missing manifest asset aborts and never starts the entry", a
   await assert.rejects(
     async () => bootstrap({
       channel,
-      manifest: await laptopManifest(inventory),
+      manifest: await computerManifest(inventory),
       createObjectURL: s.createObjectURL,
       installImportMap: s.installImportMap,
       importModule: s.importModule,
@@ -323,7 +323,7 @@ test("AT-FR-40-b: a truncated asset aborts and never starts the entry", async ()
   await assert.rejects(
     async () => bootstrap({
       channel,
-      manifest: await laptopManifest(inventory),
+      manifest: await computerManifest(inventory),
       createObjectURL: s.createObjectURL,
       installImportMap: s.installImportMap,
       importModule: s.importModule,
@@ -347,7 +347,7 @@ test("AT-FR-40-b: bytes that fail integrity abort and never start the entry", as
   await assert.rejects(
     async () => bootstrap({
       channel,
-      manifest: await laptopManifest(inventory),
+      manifest: await computerManifest(inventory),
       createObjectURL: s.createObjectURL,
       installImportMap: s.installImportMap,
       importModule: s.importModule,
@@ -365,8 +365,8 @@ test("AT-FR-40-b: bytes that fail integrity abort and never start the entry", as
 test("AT-FR-40-c: integrity offered by the rendezvous is refused", async () => {
   const at = "AT-FR-40-c";
   const inventory = servedFromDisk();
-  const laptop = await laptopManifest(inventory);
-  const rendezvous = { ...laptop, source: SOURCE_RENDEZVOUS };
+  const computer = await computerManifest(inventory);
+  const rendezvous = { ...computer, source: SOURCE_RENDEZVOUS };
   const channel = diskChannel(inventory);
   const s = seams();
   await assert.rejects(
@@ -413,7 +413,7 @@ test("AT-FR-40-d: the suite runs against the repository files and the manifest c
     fail(at, "inventory did not recurse into /assets/agents");
   }
 
-  const manifest = await laptopManifest(inventory);
+  const manifest = await computerManifest(inventory);
   const channel = diskChannel(inventory);
   const s = seams();
   await bootstrap({
@@ -518,7 +518,7 @@ async function withGlobals(values, fn) {
 test("AT-FR-15a-b: the FR-40 bootstrap registers no service worker, on any origin, in any mode", async () => {
   const at = "AT-FR-15a-b";
   const inventory = servedFromDisk();
-  const manifest = await laptopManifest(inventory);
+  const manifest = await computerManifest(inventory);
 
   for (const origin of ["http://127.0.0.1:8787", "https://device.example"]) {
     const trap = installNavigatorTrap();
@@ -589,7 +589,7 @@ test("AT-FR-15a-b: the FR-40 bootstrap registers no service worker, on any origi
 test("AT-FR-41-d: the boot hands back the entry module so the app can be started", async () => {
   const at = "AT-FR-41-d";
   const inventory = servedFromDisk();
-  const manifest = await laptopManifest(inventory);
+  const manifest = await computerManifest(inventory);
   const channel = diskChannel(inventory);
   const s = seams();
 

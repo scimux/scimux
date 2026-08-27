@@ -13,7 +13,7 @@ package app
 // (main.go and remote_command.go) call NewHandler, which returns
 // withLocalBoundary(a, mux) alone; remote.Config.TunnelHandler is never
 // assigned anywhere in this package. So a device can pair, negotiate a
-// session, frame a request through the codec — and the laptop answers
+// session, frame a request through the codec — and the computer answers
 // ClassUnavailable, because tunnelHandler() is nil. Every AT that proves the
 // tunnel boundary drives a handler the product never constructs.
 //

@@ -12,7 +12,7 @@ import (
 func s8Causes() []TransportCause {
 	return []TransportCause{
 		CauseRendezvousUnavailable,
-		CauseLaptopOffline,
+		CauseComputerOffline,
 		CauseSignallingRejected,
 		CauseICEFailed,
 		CauseAuthFailed,
@@ -51,8 +51,8 @@ func TestAT_S8_Cause_NoChannelIsNotACause(t *testing.T) {
 	const at = "AT-S8-cause"
 	c := NewClient(Config{})
 	got, err := c.TransportCause("phone")
-	if got == CauseLaptopOffline {
-		t.Fatalf("%s: never connected mapped onto laptop-offline", at)
+	if got == CauseComputerOffline {
+		t.Fatalf("%s: never connected mapped onto computer-offline", at)
 	}
 	if got != "" {
 		t.Fatalf("%s: no-channel cause = %q, want empty", at, got)
@@ -65,8 +65,8 @@ func TestAT_S8_Cause_NonSessionChannelIsNotACause(t *testing.T) {
 	c := NewClient(Config{})
 	c.channels["phone"] = &fakeChannel{}
 	got, err := c.TransportCause("phone")
-	if got == CauseLaptopOffline {
-		t.Fatalf("%s: a non-Session channel mapped onto laptop-offline", at)
+	if got == CauseComputerOffline {
+		t.Fatalf("%s: a non-Session channel mapped onto computer-offline", at)
 	}
 	if got != "" {
 		t.Fatalf("%s: non-session cause = %q, want empty (not a panic, not a cause)", at, got)
@@ -79,8 +79,8 @@ func TestAT_S8_Cause_ClosedSessionWithNoCauseIsPeerAbsent(t *testing.T) {
 	c := NewClient(Config{})
 	c.channels["phone"] = &Session{}
 	got, err := c.TransportCause("phone")
-	if got == CauseLaptopOffline {
-		t.Fatalf("%s: ClassPeerAbsent mapped onto laptop-offline", at)
+	if got == CauseComputerOffline {
+		t.Fatalf("%s: ClassPeerAbsent mapped onto computer-offline", at)
 	}
 	if got != "" {
 		t.Fatalf("%s: cause = %q, want empty", at, got)

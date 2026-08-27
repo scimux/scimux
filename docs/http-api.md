@@ -664,7 +664,7 @@ FR-38 state for a code, plus SAS once a device offer has arrived.
 
 ### `POST /api/remote/pairing/{code}/confirm`
 
-Complete pairing only when both `laptop_confirm` and `device_confirm`
+Complete pairing only when both `computer_confirm` and `device_confirm`
 are present and `true`. Omitted flags do not default to true.
 
 ### `POST /api/remote/pairing/{code}/cancel`
@@ -685,15 +685,15 @@ Revoke one paired device.
 
 ### `POST /api/remote/unenroll`
 
-Unlink this laptop: release the installation at the rendezvous
+Unlink this computer: release the installation at the rendezvous
 (rendezvous-v1 §4.4) and forget the identity locally. Answers
 `{"released":bool,"hosted":"..."}`, with `hosted` read after the unlink.
 
 The two halves are deliberately unequal. The local half is
-unconditional — a laptop that cannot reach the rendezvous is exactly the
+unconditional — a computer that cannot reach the rendezvous is exactly the
 one whose owner wants it to stop trying — so an unreachable rendezvous
 still answers 200 with `released:false`. That is the honest report: the
-laptop is unlinked, and an installation the rendezvous still holds can
+computer is unlinked, and an installation the rendezvous still holds can
 only be struck off by whoever issued the invite. A failure of the *local*
 half is a 500, because an identity still on disk is still an enrollment.
 
@@ -706,7 +706,7 @@ The installation's hosted enrollment as `hosted` (`enrolled`,
 `disabled`, `revoked`, or `unavailable`) plus a `devices` array. Each
 device is `{"id":"...","connected":true}` when its tunnel is live.
 When it is not, `connected` is false; `cause` is one of the six FR-24
-states (`rendezvous-unavailable`, `laptop-offline`,
+states (`rendezvous-unavailable`, `computer-offline`,
 `signalling-rejected`, `ice-failed`, `auth-failed`,
 `connected-then-lost`) only when the transport has produced one. A
 paired device that has never attached a channel omits `cause`
@@ -731,7 +731,7 @@ leaves a live session `pending` through a transient outage.
 
 ### `GET /api/remote/bootstrap`
 
-Laptop-supplied FR-40 bootstrap manifest. JSON with `source` (`laptop`),
+Computer-supplied FR-40 bootstrap manifest. JSON with `source` (`computer`),
 `entry` (`/js/app.js`), and `entries` naming every served asset with
 `url`, `kind`, `size`, and `integrity` (`sha256-` + standard-base64
 SHA-256 of the bytes that GET on that URL returns). Derived from the

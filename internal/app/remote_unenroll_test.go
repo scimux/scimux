@@ -52,7 +52,7 @@ func TestRemoteUnenrollReleasesAndReportsIt(t *testing.T) {
 }
 
 func TestRemoteUnenrollReportsAnUnreleasedInstallationHonestly(t *testing.T) {
-	// The rendezvous was unreachable. The laptop is unlinked all the same —
+	// The rendezvous was unreachable. The computer is unlinked all the same —
 	// that is the point of the unconditional local half — but the user is
 	// told plainly, because an installation the rendezvous still holds is
 	// one only its operator can strike off.
@@ -107,6 +107,6 @@ func TestRemoteUnenrollNeedsCSRF(t *testing.T) {
 		t.Fatalf("unlink without CSRF = %d, want a refusal", rec.Code)
 	}
 	if f.unenrollCalls != 0 {
-		t.Fatalf("a CSRF-less request unlinked the laptop (%d calls)", f.unenrollCalls)
+		t.Fatalf("a CSRF-less request unlinked the computer (%d calls)", f.unenrollCalls)
 	}
 }

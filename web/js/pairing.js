@@ -10,22 +10,22 @@
  *   pair-a-device -> authority-warning -> show-code -> compare-sas
  *                 -> awaiting-other-side -> succeeded
  *
- * The authority warning is on the laptop and comes BEFORE the code,
+ * The authority warning is on the computer and comes BEFORE the code,
  * because this is the machine granting access and the grant is
  * SSH-equivalent. Warning after minting would disclose it after the fact.
  *
- * compare-sas is not ceremony. The QR carries the laptop's static X to
- * the device out-of-band, so the device holds an authentic laptop key --
+ * compare-sas is not ceremony. The QR carries the computer's static X to
+ * the device out-of-band, so the device holds an authentic computer key --
  * but the device's own key Y comes back through the rendezvous, with
  * nothing visual behind it. The six digits are the only thing binding Y.
- * A compromised rendezvous cannot impersonate the laptop (it never sees
+ * A compromised rendezvous cannot impersonate the computer (it never sees
  * X) but it can offer its own Y' and be paired with as though it were the
  * phone. That is what the comparison catches, and it is what makes "the
  * rendezvous only relays" a mechanism instead of a promise.
  *
  * awaiting-other-side exists because FR-12 requires confirmation on both
- * ends and the laptop cannot speak for the phone. CONFIRM records the
- * laptop's half; only COMPLETED -- fired once the rendezvous reports the
+ * ends and the computer cannot speak for the phone. CONFIRM records the
+ * computer's half; only COMPLETED -- fired once the rendezvous reports the
  * device's own confirmation -- reaches succeeded.
  */
 import { qrMatrix, qrSVG } from "./qr.js";
@@ -45,7 +45,7 @@ export const PAIRING_SCREENS = Object.freeze([
 
 /* VISIBILITY and CLOSE are not part of the pairing protocol; they are the
  * two facts about the human that the machine has to know. VISIBILITY
- * drives the refresh pause (P2) -- a laptop nobody is looking at must not
+ * drives the refresh pause (P2) -- a computer nobody is looking at must not
  * keep a live credential cycling on screen. CLOSE is separate from CANCEL
  * because dismissing the sheet and rejecting a mismatch mean different
  * things and only one of them is evidence of a problem. */
@@ -75,7 +75,7 @@ export function initialPairingState() {
     link: "",
     sas: "",
     expiresAt: 0,
-    laptopConfirmed: false,
+    computerConfirmed: false,
     deviceConfirmed: false,
     /* The adapter's cue to mint. The reducer cannot mint -- that is a
      * network call -- so expiry is expressed as a request rather than
@@ -95,7 +95,7 @@ function withoutCredential(s) {
 }
 
 function closedFrom(s) {
-  return { ...withoutCredential(s), screen: "closed", laptopConfirmed: false, deviceConfirmed: false, reason: "", error: "" };
+  return { ...withoutCredential(s), screen: "closed", computerConfirmed: false, deviceConfirmed: false, reason: "", error: "" };
 }
 
 function beginFrom(s) {
@@ -155,7 +155,7 @@ export function nextPairing(state, event, now) {
       return s;
 
     case "compare-sas":
-      if (type === "CONFIRM") return { ...s, screen: "awaiting-other-side", laptopConfirmed: true, refreshDue: false };
+      if (type === "CONFIRM") return { ...s, screen: "awaiting-other-side", computerConfirmed: true, refreshDue: false };
       if (type === "DEVICE_CONFIRMED") return { ...s, deviceConfirmed: true };
       if (type === "REJECT") return cancelWith(s, "sas-mismatch");
       if (type === "CANCEL") return cancelWith(s, "cancelled");
@@ -196,7 +196,7 @@ function failWith(s, event) {
 }
 
 function cancelWith(s, reason) {
-  return { ...withoutCredential(s), screen: "cancelled", reason, laptopConfirmed: false, deviceConfirmed: false };
+  return { ...withoutCredential(s), screen: "cancelled", reason, computerConfirmed: false, deviceConfirmed: false };
 }
 
 function expiredAt(s, now) {
@@ -225,7 +225,7 @@ function visibility(s, event, now) {
 export function authorityWarningHTML() {
   return (
     '<div class="pair-warn" role="group" aria-label="What a paired device may do">' +
-    "<p>A paired device has <strong>SSH-equivalent authority</strong> on this laptop.</p>" +
+    "<p>A paired device has <strong>SSH-equivalent authority</strong> on this computer.</p>" +
     "<ul>" +
     "<li>It may <code>POST /api/nodes</code> to launch agents that run commands here.</li>" +
     "<li>It may <code>POST /api/update</code> to replace the scimux binary.</li>" +
@@ -271,7 +271,7 @@ const VIEWS = {
   }),
   succeeded: () => ({
     title: "Device paired",
-    body: "It can now reach this laptop. Revoke it any time from Remote access.",
+    body: "It can now reach this computer. Revoke it any time from Remote access.",
     actions: [{ id: "close", label: "Done", primary: true }],
   }),
   cancelled: (s) => ({
@@ -286,10 +286,10 @@ const VIEWS = {
     ],
   }),
   failed: (s) => ({
-    title: s.reason === "hosted-blocked" ? "Pair from the laptop" : "Could not start pairing",
+    title: s.reason === "hosted-blocked" ? "Pair from the computer" : "Could not start pairing",
     body:
       s.reason === "hosted-blocked"
-        ? "A paired device cannot pair further devices. Do this on the laptop running scimux."
+        ? "A paired device cannot pair further devices. Do this on the computer running scimux."
         : s.error || "The rendezvous could not be reached.",
     actions: [
       { id: "begin", label: "Try again", primary: true },

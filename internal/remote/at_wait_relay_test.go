@@ -10,7 +10,7 @@ package remote
 // Concretely, postWaitRID today reads the 200 body into `raw`, validates that
 // its content type is application/octet-stream, and then returns `error`
 // alone — the body is dropped on the floor. So a device can post a sealed
-// session offer, the rendezvous can hand it to the laptop, and the laptop
+// session offer, the rendezvous can hand it to the computer, and the computer
 // will discard it and go back to waiting. The loop is a long poll with no
 // consumer.
 //
@@ -30,7 +30,7 @@ import (
 )
 
 // deviceKeypair mints a device-side static P-256 key. This is Y in the §11
-// pairing transcript, and the key the laptop's reply envelope is sealed to.
+// pairing transcript, and the key the computer's reply envelope is sealed to.
 func deviceKeypair(t *testing.T) (*ecdh.PrivateKey, []byte) {
 	t.Helper()
 	k, err := ecdh.P256().GenerateKey(rand.Reader)
@@ -55,7 +55,7 @@ func enrolledClientWithDevice(t *testing.T, rv *sessionRV, devECDHPub []byte) (*
 	}))
 }
 
-// awaitReply polls rv for the laptop's first reply blob.
+// awaitReply polls rv for the computer's first reply blob.
 func awaitReply(t *testing.T, rv *sessionRV, within time.Duration) []byte {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -70,7 +70,7 @@ func awaitReply(t *testing.T, rv *sessionRV, within time.Duration) []byte {
 }
 
 // TestWaitOpensTheEnvelopeAndPostsASealedAnswer is the join. A device posts a
-// sealed session offer; the laptop must open it, negotiate an answer, and
+// sealed session offer; the computer must open it, negotiate an answer, and
 // seal that answer back to the device.
 func TestWaitOpensTheEnvelopeAndPostsASealedAnswer(t *testing.T) {
 	rv := newSessionRV(t)
@@ -80,12 +80,12 @@ func TestWaitOpensTheEnvelopeAndPostsASealedAnswer(t *testing.T) {
 	ctx, cancel := ctxTO(t)
 	defer cancel()
 
-	// The device seals its offer to the laptop's static X, exactly as a real
+	// The device seals its offer to the computer's static X, exactly as a real
 	// browser peer would. Reading X through the public accessor keeps this on
 	// the product path rather than on a fixture.
 	x, err := c.PairingECDHPublic()
 	if err != nil {
-		t.Fatalf("laptop ECDH public: %v", err)
+		t.Fatalf("computer ECDH public: %v", err)
 	}
 	offer, err := CreateSessionOffer(ctx)
 	if err != nil {
@@ -101,10 +101,10 @@ func TestWaitOpensTheEnvelopeAndPostsASealedAnswer(t *testing.T) {
 
 	// The reply must be a real §12.2 envelope sealed in the opposite
 	// direction: openable by the device's static key, under the same origin
-	// and rid. Anything else means the laptop echoed or improvised.
+	// and rid. Anything else means the computer echoed or improvised.
 	answer, err := OpenEnvelope(reply, devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
-		t.Fatalf("device could not open the laptop's reply: %v", err)
+		t.Fatalf("device could not open the computer's reply: %v", err)
 	}
 	if answer.Type != sessionAnswerType {
 		t.Fatalf("reply inner type = %q, want %q", answer.Type, sessionAnswerType)
@@ -147,7 +147,7 @@ func TestWaitIgnoresAnUnopenableEnvelope(t *testing.T) {
 	served := rv.WaitCount()
 	time.Sleep(500 * time.Millisecond)
 	if rs := rv.Replies(); len(rs) != 0 {
-		t.Fatalf("laptop answered an unopenable envelope: %d reply/replies", len(rs))
+		t.Fatalf("computer answered an unopenable envelope: %d reply/replies", len(rs))
 	}
 	if rv.WaitCount() <= served {
 		t.Fatal("the wait loop stopped after an unopenable envelope; it must keep polling")
@@ -173,6 +173,6 @@ func TestWaitWithNoEnvelopePostsNoReply(t *testing.T) {
 		t.Fatalf("wait loop served only %d waits; it is not polling", rv.WaitCount())
 	}
 	if rs := rv.Replies(); len(rs) != 0 {
-		t.Fatalf("laptop posted %d reply/replies with no envelope outstanding", len(rs))
+		t.Fatalf("computer posted %d reply/replies with no envelope outstanding", len(rs))
 	}
 }

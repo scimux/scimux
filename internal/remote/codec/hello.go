@@ -15,7 +15,7 @@ import (
 const (
 	// RoleInitiator is the side that sends requests (the browser).
 	RoleInitiator uint8 = 0
-	// RoleResponder is the side that serves them (the laptop).
+	// RoleResponder is the side that serves them (the computer).
 	RoleResponder uint8 = 1
 )
 

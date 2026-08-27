@@ -160,7 +160,7 @@ func (c *Command) Run(ctx context.Context) error {
 	}
 
 	// Join 3: without this the whole tunnel half is unreachable — a device
-	// could pair, negotiate a session and frame a request, and the laptop
+	// could pair, negotiate a session and frame a request, and the computer
 	// would answer ClassUnavailable because it serves no handler. The peer is
 	// translated rather than shared: internal/remote cannot import this
 	// package, and this package must not grow a pion-adjacent type.

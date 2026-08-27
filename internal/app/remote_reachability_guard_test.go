@@ -99,7 +99,7 @@ var reachInterfaceMethods = map[string]bool{
 var reachTestSupport = map[string]string{
 	"CreateSessionOffer": "device half: in production the browser creates the offer",
 	"HandshakeSession":   "device half: joins two in-process peers for a test",
-	"RoundTrip":          "device half: the browser issues tunnelled requests, the laptop serves them",
+	"RoundTrip":          "device half: the browser issues tunnelled requests, the computer serves them",
 
 	"SimulateICEFailure":  "fault injection: AT-FR-24 ICE failure",
 	"SimulateChannelLoss": "fault injection: AT-FR-24 data-channel loss",
@@ -633,7 +633,7 @@ func assignedFields(files []reachFile, fields map[string]bool) map[string]bool {
 }
 
 // TestRemoteConfigSeamsAreSetByProductCode is the field-shaped half of the same
-// rule. remote.Config is how the laptop half is told what to be, so a field
+// rule. remote.Config is how the computer half is told what to be, so a field
 // only ever populated by a test describes an installation that has never
 // existed.
 func TestRemoteConfigSeamsAreSetByProductCode(t *testing.T) {

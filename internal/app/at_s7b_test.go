@@ -42,7 +42,7 @@ func s7bMustP256(t *testing.T) (priv, pub []byte) {
 }
 
 // s7bDeviceSAS is protocol §11 computed from the device's private key and
-// the laptop's live public key. Inlined so this AT is not a caller of
+// the computer's live public key. Inlined so this AT is not a caller of
 // DerivePairingSAS (that was S7's defect: the primitive was tested, the
 // product path was not).
 func s7bDeviceSAS(t *testing.T, yPriv, xPub, transcript []byte) string {
@@ -54,7 +54,7 @@ func s7bDeviceSAS(t *testing.T, yPriv, xPub, transcript []byte) string {
 	}
 	pub, err := curve.NewPublicKey(xPub)
 	if err != nil {
-		t.Fatalf("device SAS: laptop pub: %v", err)
+		t.Fatalf("device SAS: computer pub: %v", err)
 	}
 	shared, err := priv.ECDH(pub)
 	if err != nil {
@@ -76,13 +76,13 @@ type s7bMintJSON struct {
 }
 
 type s7bStateJSON struct {
-	State      string `json:"state"`
-	Code       string `json:"code"`
-	RID        string `json:"rid"`
-	SAS        string `json:"sas"`
-	ExpiresAt  string `json:"expires_at"`
-	LaptopPub  string `json:"laptop_pub"`
-	ReplyNonce string `json:"reply_nonce"`
+	State       string `json:"state"`
+	Code        string `json:"code"`
+	RID         string `json:"rid"`
+	SAS         string `json:"sas"`
+	ExpiresAt   string `json:"expires_at"`
+	ComputerPub string `json:"computer_pub"`
+	ReplyNonce  string `json:"reply_nonce"`
 }
 
 type s7bDeviceListJSON struct {
@@ -167,19 +167,19 @@ func TestAT_S7b_SASFromLiveSessionViaHTTP(t *testing.T) {
 	if st.SAS == s1PairingSAS {
 		t.Fatalf("%s: HTTP SAS is the S1 vector %s; product path must use the live session key, not the fixture", at, s1PairingSAS)
 	}
-	if st.LaptopPub == "" || st.LaptopPub == s1PairingXPub {
-		t.Fatalf("%s: laptop_pub %q is empty or the S1 pairing X; want the live ensureX key", at, st.LaptopPub)
+	if st.ComputerPub == "" || st.ComputerPub == s1PairingXPub {
+		t.Fatalf("%s: computer_pub %q is empty or the S1 pairing X; want the live ensureX key", at, st.ComputerPub)
 	}
-	xPub, err := hex.DecodeString(st.LaptopPub)
+	xPub, err := hex.DecodeString(st.ComputerPub)
 	if err != nil {
-		t.Fatalf("%s: laptop_pub hex: %v", at, err)
+		t.Fatalf("%s: computer_pub hex: %v", at, err)
 	}
 	liveX, err := c.PairingECDHPublic()
 	if err != nil {
 		t.Fatalf("%s: PairingECDHPublic: %v", at, err)
 	}
-	if hex.EncodeToString(liveX) != st.LaptopPub {
-		t.Fatalf("%s: HTTP laptop_pub %s != live PairingECDHPublic %s", at, st.LaptopPub, hex.EncodeToString(liveX))
+	if hex.EncodeToString(liveX) != st.ComputerPub {
+		t.Fatalf("%s: HTTP computer_pub %s != live PairingECDHPublic %s", at, st.ComputerPub, hex.EncodeToString(liveX))
 	}
 	replyN, err := hex.DecodeString(st.ReplyNonce)
 	if err != nil || len(replyN) != 32 {
@@ -204,9 +204,9 @@ func TestAT_S7b_MintDoesNotConfirm(t *testing.T) {
 
 	bodies := []string{
 		"",
-		`{"laptop_confirm":true,"device_confirm":true}`,
+		`{"computer_confirm":true,"device_confirm":true}`,
 		`{"confirm":true}`,
-		`{"laptop_confirm":true}`,
+		`{"computer_confirm":true}`,
 	}
 	for _, body := range bodies {
 		rec := routeRequest(h, http.MethodPost, "/api/remote/pairing", body, true)
@@ -245,11 +245,11 @@ func TestAT_S7b_ConfirmRequiresExplicitBothSides(t *testing.T) {
 	for _, body := range []string{
 		"",
 		`{}`,
-		`{"laptop_confirm":true}`,
+		`{"computer_confirm":true}`,
 		`{"device_confirm":true}`,
-		`{"laptop_confirm":false,"device_confirm":false}`,
-		`{"laptop_confirm":true,"device_confirm":false}`,
-		`{"laptop_confirm":false,"device_confirm":true}`,
+		`{"computer_confirm":false,"device_confirm":false}`,
+		`{"computer_confirm":true,"device_confirm":false}`,
+		`{"computer_confirm":false,"device_confirm":true}`,
 	} {
 		rec := routeRequest(h, http.MethodPost, path, body, true)
 		if rec.Code == http.StatusOK {
@@ -265,7 +265,7 @@ func TestAT_S7b_ConfirmRequiresExplicitBothSides(t *testing.T) {
 		}
 	}
 
-	rec := routeRequest(h, http.MethodPost, path, `{"laptop_confirm":true,"device_confirm":true}`, true)
+	rec := routeRequest(h, http.MethodPost, path, `{"computer_confirm":true,"device_confirm":true}`, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%s: both-sides confirm status = %d, want 200; body=%q", at, rec.Code, rec.Body.String())
 	}
@@ -307,7 +307,7 @@ func TestAT_S7b_CancelAndRevokeViaHTTP(t *testing.T) {
 
 	s7bOffer(t, c, minted.Code, "phone", "Phone", yPub, bytesRepeat(0x22, 32))
 	confirm := routeRequest(h, http.MethodPost, "/api/remote/pairing/"+minted.Code+"/confirm",
-		`{"laptop_confirm":true,"device_confirm":true}`, true)
+		`{"computer_confirm":true,"device_confirm":true}`, true)
 	if confirm.Code != http.StatusOK {
 		t.Fatalf("%s: confirm after cancel+reoffer status = %d; body=%q", at, confirm.Code, confirm.Body.String())
 	}

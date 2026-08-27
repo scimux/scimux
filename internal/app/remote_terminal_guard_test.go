@@ -21,7 +21,7 @@ import (
 // blocks on the developer's keyboard.
 //
 // It does not fail there: it fails on the machine that has no controlling
-// terminal — which is to say it passes in CI and on a laptop it hijacks, and
+// terminal — which is to say it passes in CI and on a computer it hijacks, and
 // fails only for the person running the suite from an interactive shell,
 // with a stray keystroke read as the invite. That is the worst shape a test
 // failure can have, so the property is pinned mechanically rather than left

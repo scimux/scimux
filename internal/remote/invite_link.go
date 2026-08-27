@@ -15,7 +15,7 @@ import (
 // carrying x_pub and rid in the pair-reply and unsealing that reply on
 // the typed path — a protocol change, deferred rather than guessed at.
 //
-// So this is how a pairing starts: the laptop builds one link, the
+// So this is how a pairing starts: the computer builds one link, the
 // device opens it (tapped, or scanned as a QR of the same string), and
 // the fragment carries everything §11's transcript needs.
 //
@@ -48,7 +48,7 @@ func (c *Client) PairingLink(pc PairingCode) (string, error) {
 	// carried a truncated or compressed point would fail at the digits
 	// rather than here, where there is something to say about it.
 	if len(x) != p256UncompressedLen || x[0] != 0x04 {
-		return "", fmt.Errorf("remote: invite: laptop key is not an uncompressed P-256 point")
+		return "", fmt.Errorf("remote: invite: computer key is not an uncompressed P-256 point")
 	}
 
 	frag := url.Values{}

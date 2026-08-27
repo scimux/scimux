@@ -1,6 +1,6 @@
 package remote
 
-// Join 3, laptop end. Join 2 proved a live data channel serves whatever
+// Join 3, computer end. Join 2 proved a live data channel serves whatever
 // Config names; internal/app's at_join3_test.go proves the product startup
 // path names the real S3 boundary. What neither covers is the seam between
 // them: the boundary is built *per device*, so the identity the answering
@@ -73,7 +73,7 @@ func sessionRoundTrip(t *testing.T, rv *sessionRV, c *Client, rid string, devPri
 	dev := newDevicePeer(t, ctx)
 	x, err := c.PairingECDHPublic()
 	if err != nil {
-		t.Fatalf("laptop ECDH public: %v", err)
+		t.Fatalf("computer ECDH public: %v", err)
 	}
 	sealed, err := SealEnvelope(dev.offer, x, DefaultOrigin, rid)
 	if err != nil {
@@ -83,7 +83,7 @@ func sessionRoundTrip(t *testing.T, rv *sessionRV, c *Client, rid string, devPri
 
 	answer, err := OpenEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
-		t.Fatalf("device could not open the laptop's reply: %v", err)
+		t.Fatalf("device could not open the computer's reply: %v", err)
 	}
 	if err := dev.applyAnswer(ctx, answer); err != nil {
 		t.Fatalf("the device could not connect to the answered peer: %v", err)

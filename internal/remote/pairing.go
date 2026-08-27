@@ -57,7 +57,7 @@ type PairingCode struct {
 	ExpiresAt time.Time
 }
 
-// PairingOffer is one device-side pair/offer. The laptop decides
+// PairingOffer is one device-side pair/offer. The computer decides
 // legitimacy from key material and envelope contents, never from a
 // caller-supplied hostility flag.
 type PairingOffer struct {
@@ -117,16 +117,16 @@ type pairSession struct {
 	transcript []byte
 }
 
-// PairingStatus is the laptop view of one pairing code: FR-38 state plus
+// PairingStatus is the computer view of one pairing code: FR-38 state plus
 // the SAS derived from this session's own keys and transcript (protocol §11).
 type PairingStatus struct {
-	State      PairingUIState
-	Code       string
-	RID        string
-	SAS        string
-	ExpiresAt  time.Time
-	LaptopPub  []byte
-	ReplyNonce []byte
+	State       PairingUIState
+	Code        string
+	RID         string
+	SAS         string
+	ExpiresAt   time.Time
+	ComputerPub []byte
+	ReplyNonce  []byte
 }
 
 // pairingOf returns the client's own pairing runtime. State belongs to the
@@ -256,7 +256,7 @@ func (c *Client) MintPairingCode(ctx context.Context) (PairingCode, error) {
 	return PairingCode{Code: code, RID: rid, ExpiresAt: exp}, nil
 }
 
-// AcceptPairingOffer is the laptop receiving a pair/offer. An offer does
+// AcceptPairingOffer is the computer receiving a pair/offer. An offer does
 // not consume the code (protocol §10.6).
 func (c *Client) AcceptPairingOffer(ctx context.Context, offer PairingOffer) error {
 	if ctx != nil {
@@ -315,7 +315,7 @@ func (c *Client) derivePairingSASLocked(r *pairingRuntime, s *pairSession) error
 		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived")
 	}
 	if len(r.xPriv) == 0 {
-		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived: laptop pairing key is missing")
+		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived: computer pairing key is missing")
 	}
 	if len(s.offer.DevicePub) == 0 {
 		return classError(ClassUnauthorized, "sas", "pairing SAS was not derived: device pairing public key is missing")
@@ -364,7 +364,7 @@ func offerAttackClass(offer PairingOffer, x []byte) Class {
 	return ""
 }
 
-// FR-12's two-sided confirmation is carried by CompletePairing's laptopConfirm
+// FR-12's two-sided confirmation is carried by CompletePairing's computerConfirm
 // and deviceConfirm arguments — the caller (the pairing UI) owns the two human
 // acts, and CompletePairing fails closed with ClassPairUnconfirmed unless it
 // has both. There is deliberately no ConfirmPairing(code, side) method: one
@@ -377,7 +377,7 @@ func offerAttackClass(offer PairingOffer, x []byte) Class {
 // CompletePairing finishes pairing only when both sides confirm.
 // Withholding either confirmation fails closed with ClassPairUnconfirmed
 // and does not persist a device.
-func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, error) {
+func (c *Client) CompletePairing(ctx context.Context, code string, computerConfirm, deviceConfirm bool) (PairedDevice, error) {
 	// Prepare checks single-use and commit records it; hold the pairing
 	// runtime's completion lock across both so the two cannot interleave
 	// (AT-FR-39-c under concurrency).
@@ -385,7 +385,7 @@ func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm
 	r.completeMu.Lock()
 	defer r.completeMu.Unlock()
 
-	out, live, err := c.preparePairingComplete(ctx, code, laptopConfirm, deviceConfirm)
+	out, live, err := c.preparePairingComplete(ctx, code, computerConfirm, deviceConfirm)
 	if err != nil {
 		return PairedDevice{}, err
 	}
@@ -400,7 +400,7 @@ func (c *Client) CompletePairing(ctx context.Context, code string, laptopConfirm
 	return out, nil
 }
 
-func (c *Client) preparePairingComplete(ctx context.Context, code string, laptopConfirm, deviceConfirm bool) (PairedDevice, DeviceRecord, error) {
+func (c *Client) preparePairingComplete(ctx context.Context, code string, computerConfirm, deviceConfirm bool) (PairedDevice, DeviceRecord, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return PairedDevice{}, DeviceRecord{}, err
@@ -420,7 +420,7 @@ func (c *Client) preparePairingComplete(ctx context.Context, code string, laptop
 	if s.consumed {
 		return PairedDevice{}, DeviceRecord{}, classError(ClassPairConsumed, "complete", "pairing code has already been used")
 	}
-	if !laptopConfirm || !deviceConfirm {
+	if !computerConfirm || !deviceConfirm {
 		return PairedDevice{}, DeviceRecord{}, classError(ClassPairUnconfirmed, "complete", "both sides must confirm; SAS is never a password")
 	}
 	if s.contested || s.offer == nil {
@@ -671,13 +671,13 @@ func (c *Client) PairingSession(code string) (PairingStatus, error) {
 		return PairingStatus{}, classError(ClassNotFound, "pair", "unknown pairing code")
 	}
 	return PairingStatus{
-		State:      s.state,
-		Code:       s.code,
-		RID:        s.rid,
-		SAS:        s.sas,
-		ExpiresAt:  s.expiresAt,
-		LaptopPub:  append([]byte(nil), r.xPub...),
-		ReplyNonce: append([]byte(nil), s.replyNonce...),
+		State:       s.state,
+		Code:        s.code,
+		RID:         s.rid,
+		SAS:         s.sas,
+		ExpiresAt:   s.expiresAt,
+		ComputerPub: append([]byte(nil), r.xPub...),
+		ReplyNonce:  append([]byte(nil), s.replyNonce...),
 	}, nil
 }
 
@@ -745,7 +745,7 @@ func (c *Client) PairedDevices() ([]PairedDevice, error) {
 	return out, nil
 }
 
-// PairingECDHPublic is the laptop static P-256 public key X used in
+// PairingECDHPublic is the computer static P-256 public key X used in
 // the pairing transcript (protocol §11).
 func (c *Client) PairingECDHPublic() ([]byte, error) {
 	if err := c.ensureDurableX(); err != nil {

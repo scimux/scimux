@@ -1,8 +1,8 @@
-/* F1 — unlinking this laptop.
+/* F1 — unlinking this computer.
  *
  * Enrolling was one-way. Every other grant in scimux can be handed back
  * from this very menu — a paired device is revoked two rows up — but the
- * laptop's own enrollment could only be abandoned, which is a bad trade
+ * computer's own enrollment could only be abandoned, which is a bad trade
  * to offer someone on the day you ask them to try remote access.
  *
  * Two properties carry the weight, and both are about honesty rather
@@ -10,7 +10,7 @@
  *   - unlinking is two taps, because it ends every grant at once and
  *     costs a fresh invite to undo.
  *   - the local half always happens and the rendezvous half may not, so
- *     the message says which. A laptop the rendezvous still holds needs
+ *     the message says which. A computer the rendezvous still holds needs
  *     its operator, and a UI that hid that would send the user away
  *     believing something untrue.
  */
@@ -89,12 +89,12 @@ function setup(routes, opts = {}) {
 }
 
 test("the first tap reaches the network for nothing", async () => {
-  /* Unlinking ends every grant this laptop has issued and costs a fresh
+  /* Unlinking ends every grant this computer has issued and costs a fresh
    * invite to undo. One tap is not enough intent for that. */
   const h = setup({ [UNLINK]: { released: true, hosted: "" } });
   h.btn().click();
   await h.f.settled();
-  assert.deepEqual(h.api.calls, [], "one tap unlinked the laptop");
+  assert.deepEqual(h.api.calls, [], "one tap unlinked the computer");
   assert.match(h.btn().innerHTML, /confirm/i, "the armed button does not say what the next tap does");
 });
 
@@ -111,7 +111,7 @@ test("the second tap unlinks and reports the release", async () => {
 });
 
 test("an installation the rendezvous still holds says so", async () => {
-  /* released:false is the honest report, not a failure: the laptop is
+  /* released:false is the honest report, not a failure: the computer is
    * unlinked either way, and only the operator can strike off the
    * installation the rendezvous never heard about. */
   const h = setup({ [UNLINK]: { released: false, hosted: "" } });
@@ -126,7 +126,7 @@ test("an installation the rendezvous still holds says so", async () => {
 
 test("a failed unlink says so and stays offerable", async () => {
   /* The local half failing means the identity is still on disk, which
-   * means this laptop is still enrolled. Saying otherwise would be the
+   * means this computer is still enrolled. Saying otherwise would be the
    * one lie this surface must never tell. */
   const h = setup({ [UNLINK]: () => { throw new Error("identity file is locked"); } });
   h.btn().click();
@@ -145,7 +145,7 @@ test("the button is gone once there is nothing left to unlink", async () => {
   await h.f.settled();
   h.btn().click();
   await h.f.settled();
-  assert.equal(h.btn().hidden, true, "an unlinked laptop still offers to unlink");
+  assert.equal(h.btn().hidden, true, "an unlinked computer still offers to unlink");
 });
 
 test("a second tap while the first is in flight does not unlink twice", async () => {
@@ -162,7 +162,7 @@ test("a second tap while the first is in flight does not unlink twice", async ()
 });
 
 test("the control can be shown and hidden with the enrollment", async () => {
-  /* A laptop that was never enrolled has nothing to unlink, and an
+  /* A computer that was never enrolled has nothing to unlink, and an
    * action that cannot do anything is worse than no action. */
   const h = setup({ [UNLINK]: { released: true, hosted: "" } });
   h.f.setEnrolled(false);
@@ -185,7 +185,7 @@ test("hiding the control disarms it", async () => {
 });
 
 test("a refresh shows the control exactly when there is an enrollment", async () => {
-  /* The status is the only thing that knows whether this laptop has an
+  /* The status is the only thing that knows whether this computer has an
      identity on disk at all. revoked and unavailable still do — those are
      precisely the installations someone wants rid of. */
   for (const hosted of ["enrolled", "revoked", "unavailable"]) {
@@ -195,7 +195,7 @@ test("a refresh shows the control exactly when there is an enrollment", async ()
   }
   const none = setup({ [STATUS]: { hosted: "", devices: [] } });
   await none.f.refresh();
-  assert.equal(none.btn().hidden, true, "a laptop with nothing enrolled was offered an unlink");
+  assert.equal(none.btn().hidden, true, "a computer with nothing enrolled was offered an unlink");
 });
 
 test("a failed status read does not invent an answer either way", async () => {

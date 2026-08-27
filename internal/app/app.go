@@ -542,7 +542,7 @@ type app struct {
 	// configured from -addr and -trusted-host. Nil means the default
 	// loopback policy (127.0.0.1), matching the shipped -addr default.
 	requestPolicy *requestPolicy
-	// hostedRemote, when set, is the laptop remote-access client whose
+	// hostedRemote, when set, is the computer remote-access client whose
 	// status is projected on GET /api/state. Nil without --remote.
 	hostedRemote interface{ HostedStatus() string }
 	// hostedPairing is the pairing API the local HTTP routes call.

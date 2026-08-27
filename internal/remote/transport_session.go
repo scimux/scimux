@@ -2,7 +2,7 @@ package remote
 
 // S6 — the live session: two real peers, one data channel, FR-27 frames.
 //
-// The laptop half of remote access never speaks HTTP over the wire. It
+// The computer half of remote access never speaks HTTP over the wire. It
 // speaks the FR-27 codec (internal/remote/codec) over a WebRTC data
 // channel, and the codec's server side hands each request to the *tunnel*
 // boundary from S3 — not the browser boundary. Session is the client end of
@@ -34,16 +34,16 @@ type Session struct {
 	mu     sync.Mutex
 	closed bool
 
-	client   *webrtc.PeerConnection
-	laptop   *webrtc.PeerConnection
-	clientDC *webrtc.DataChannel
-	laptopDC *webrtc.DataChannel
+	client     *webrtc.PeerConnection
+	computer   *webrtc.PeerConnection
+	clientDC   *webrtc.DataChannel
+	computerDC *webrtc.DataChannel
 
-	clientStream *dcStream
-	laptopStream *dcStream
+	clientStream   *dcStream
+	computerStream *dcStream
 
 	conn *codec.Conn // client side: RoundTrip
-	srv  *codec.Conn // laptop side: Serve
+	srv  *codec.Conn // computer side: Serve
 
 	serveCancel context.CancelFunc
 	serveDone   chan struct{}
@@ -52,13 +52,13 @@ type Session struct {
 	deviceID string
 	offers   int
 
-	// laptopOnly marks a session whose far end is a real device rather than an
+	// computerOnly marks a session whose far end is a real device rather than an
 	// in-process client peer (acceptSessionOffer). Such a session has no
 	// client half at all, so the questions "is the channel live" and "can this
 	// round-trip" have different answers here than for InProcessTunnel — and
 	// the flag says which shape is meant rather than inferring it from a nil,
 	// which a half-built in-process session would also satisfy.
-	laptopOnly bool
+	computerOnly bool
 
 	cause TransportCause
 }
@@ -91,23 +91,23 @@ func inProcessTunnelVia(ctx context.Context, hub *signallingHub, handler http.Ha
 	}
 
 	s := &Session{
-		client:       pair.client,
-		laptop:       pair.laptop,
-		clientDC:     pair.clientDC,
-		laptopDC:     pair.laptopDC,
-		clientStream: pair.clientStream,
-		laptopStream: pair.laptopStream,
-		hub:          hub,
-		offers:       pair.offers,
-		serveDone:    make(chan struct{}),
+		client:         pair.client,
+		computer:       pair.computer,
+		clientDC:       pair.clientDC,
+		computerDC:     pair.computerDC,
+		clientStream:   pair.clientStream,
+		computerStream: pair.computerStream,
+		hub:            hub,
+		offers:         pair.offers,
+		serveDone:      make(chan struct{}),
 	}
 
-	// The laptop end serves; the client end dials. The serve context is
+	// The computer end serves; the client end dials. The serve context is
 	// detached from ctx on purpose: ctx is the *establishment* deadline, and
 	// a session must outlive the call that set it up.
 	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.serveCancel = cancel
-	s.srv = codec.NewConn(pair.laptopStream, pair.laptopStream, codec.RoleResponder)
+	s.srv = codec.NewConn(pair.computerStream, pair.computerStream, codec.RoleResponder)
 	s.conn = codec.NewConn(pair.clientStream, pair.clientStream, codec.RoleInitiator)
 	go func() {
 		defer close(s.serveDone)
@@ -159,7 +159,7 @@ func (s *Session) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, classError(ClassHandshake, "round-trip", "no request")
 	}
 	s.mu.Lock()
-	conn, closed, one := s.conn, s.closed, s.laptopOnly
+	conn, closed, one := s.conn, s.closed, s.computerOnly
 	s.mu.Unlock()
 	if one {
 		// This session serves; it does not dial. The requesting end is the
@@ -201,8 +201,8 @@ func (s *Session) Close() error {
 	s.closed = true
 	cancel := s.serveCancel
 	conn, srv := s.conn, s.srv
-	client, laptop := s.client, s.laptop
-	clientStream, laptopStream := s.clientStream, s.laptopStream
+	client, computer := s.client, s.computer
+	clientStream, computerStream := s.clientStream, s.computerStream
 	device := s.deviceID
 	s.mu.Unlock()
 
@@ -218,14 +218,14 @@ func (s *Session) Close() error {
 	if clientStream != nil {
 		_ = clientStream.Close()
 	}
-	if laptopStream != nil {
-		_ = laptopStream.Close()
+	if computerStream != nil {
+		_ = computerStream.Close()
 	}
 	if client != nil {
 		_ = client.Close()
 	}
-	if laptop != nil {
-		_ = laptop.Close()
+	if computer != nil {
+		_ = computer.Close()
 	}
 	if s.hub != nil {
 		if device != "" {
@@ -257,17 +257,17 @@ func (s *Session) Send([]byte) error {
 // ChannelLive reports whether the data channel is open.
 func (s *Session) ChannelLive() bool {
 	s.mu.Lock()
-	closed, one := s.closed, s.laptopOnly
-	clientDC, laptopDC := s.clientDC, s.laptopDC
+	closed, one := s.closed, s.computerOnly
+	clientDC, computerDC := s.clientDC, s.computerDC
 	s.mu.Unlock()
-	if closed || laptopDC == nil {
+	if closed || computerDC == nil {
 		return false
 	}
-	if laptopDC.ReadyState() != webrtc.DataChannelStateOpen {
+	if computerDC.ReadyState() != webrtc.DataChannelStateOpen {
 		return false
 	}
 	if one {
-		// The client end is the device, out of this process. The laptop's own
+		// The client end is the device, out of this process. The computer's own
 		// channel being open is the whole of what can be observed here.
 		return true
 	}
@@ -451,13 +451,13 @@ func (h *signallingHub) restart() {
 
 // peerPair is one negotiated pair, before it is wrapped in a Session.
 type peerPair struct {
-	client       *webrtc.PeerConnection
-	laptop       *webrtc.PeerConnection
-	clientDC     *webrtc.DataChannel
-	laptopDC     *webrtc.DataChannel
-	clientStream *dcStream
-	laptopStream *dcStream
-	offers       int
+	client         *webrtc.PeerConnection
+	computer       *webrtc.PeerConnection
+	clientDC       *webrtc.DataChannel
+	computerDC     *webrtc.DataChannel
+	clientStream   *dcStream
+	computerStream *dcStream
+	offers         int
 }
 
 // negotiatePair runs a real offer/answer through hub, sealing each side's
@@ -469,27 +469,27 @@ func negotiatePair(ctx context.Context, api *webrtc.API, hub *signallingHub) (*p
 	if err != nil {
 		return nil, classErrorf(ClassHandshake, "negotiate", "could not create the client peer", err)
 	}
-	laptop, err := api.NewPeerConnection(webrtc.Configuration{})
+	computer, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		_ = client.Close()
-		return nil, classErrorf(ClassHandshake, "negotiate", "could not create the laptop peer", err)
+		return nil, classErrorf(ClassHandshake, "negotiate", "could not create the computer peer", err)
 	}
 	fail := func(e error) (*peerPair, error) {
 		_ = client.Close()
-		_ = laptop.Close()
+		_ = computer.Close()
 		return nil, e
 	}
 
-	// The laptop's inbound channel arrives through the callback, so the
+	// The computer's inbound channel arrives through the callback, so the
 	// stream that wraps it has to be built there, before it can open.
-	laptopDCCh := make(chan *webrtc.DataChannel, 1)
-	laptop.OnDataChannel(func(dc *webrtc.DataChannel) {
+	computerDCCh := make(chan *webrtc.DataChannel, 1)
+	computer.OnDataChannel(func(dc *webrtc.DataChannel) {
 		if dc.Label() != tunnelChannelLabel {
 			_ = dc.Close()
 			return
 		}
 		select {
-		case laptopDCCh <- dc:
+		case computerDCCh <- dc:
 		default:
 			_ = dc.Close()
 		}
@@ -511,14 +511,14 @@ func negotiatePair(ctx context.Context, api *webrtc.API, hub *signallingHub) (*p
 	offers := 0
 	answerInner, err := func() (SessionInner, error) {
 		if hub == nil {
-			if err := laptop.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerInner.SDP}); err != nil {
+			if err := computer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerInner.SDP}); err != nil {
 				return SessionInner{}, classErrorf(ClassHandshake, "negotiate", "the offer was refused", err)
 			}
-			return localDescription(ctx, laptop, sessionAnswerType, func() (webrtc.SessionDescription, error) {
-				return laptop.CreateAnswer(nil)
+			return localDescription(ctx, computer, sessionAnswerType, func() (webrtc.SessionDescription, error) {
+				return computer.CreateAnswer(nil)
 			})
 		}
-		return relayThroughHub(ctx, hub, laptop, offerInner, &offers)
+		return relayThroughHub(ctx, hub, computer, offerInner, &offers)
 	}()
 	if err != nil {
 		return fail(err)
@@ -534,41 +534,41 @@ func negotiatePair(ctx context.Context, api *webrtc.API, hub *signallingHub) (*p
 		return fail(classErrorf(ClassHandshake, "negotiate", "the answer was refused", err))
 	}
 
-	var laptopDC *webrtc.DataChannel
+	var computerDC *webrtc.DataChannel
 	select {
-	case laptopDC = <-laptopDCCh:
+	case computerDC = <-computerDCCh:
 	case <-ctx.Done():
-		return fail(classErrorf(ClassHandshake, "negotiate", "the laptop never saw the data channel", ctx.Err()))
+		return fail(classErrorf(ClassHandshake, "negotiate", "the computer never saw the data channel", ctx.Err()))
 	}
-	laptopStream := newDCStream(laptopDC)
+	computerStream := newDCStream(computerDC)
 
 	if err := clientStream.waitOpen(ctx); err != nil {
 		return fail(err)
 	}
-	if err := laptopStream.waitOpen(ctx); err != nil {
+	if err := computerStream.waitOpen(ctx); err != nil {
 		return fail(err)
 	}
 
 	return &peerPair{
-		client:       client,
-		laptop:       laptop,
-		clientDC:     clientDC,
-		laptopDC:     laptopDC,
-		clientStream: clientStream,
-		laptopStream: laptopStream,
-		offers:       offers,
+		client:         client,
+		computer:       computer,
+		clientDC:       clientDC,
+		computerDC:     computerDC,
+		clientStream:   clientStream,
+		computerStream: computerStream,
+		offers:         offers,
 	}, nil
 }
 
-// relayThroughHub posts the sealed offer, opens it on the laptop side, and
-// returns the laptop's sealed-and-reopened answer. The hub only ever holds
+// relayThroughHub posts the sealed offer, opens it on the computer side, and
+// returns the computer's sealed-and-reopened answer. The hub only ever holds
 // ciphertext: that is the property FR-16 exists to keep true, so the
 // in-process path proves it rather than assuming it.
-func relayThroughHub(ctx context.Context, hub *signallingHub, laptop *webrtc.PeerConnection, offerInner SessionInner, offers *int) (SessionInner, error) {
+func relayThroughHub(ctx context.Context, hub *signallingHub, computer *webrtc.PeerConnection, offerInner SessionInner, offers *int) (SessionInner, error) {
 	curve := ecdh.P256()
-	laptopKey, err := curve.GenerateKey(rand.Reader)
+	computerKey, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
-		return SessionInner{}, classErrorf(ClassHandshake, "negotiate", "could not mint the laptop session key", err)
+		return SessionInner{}, classErrorf(ClassHandshake, "negotiate", "could not mint the computer session key", err)
 	}
 	clientKey, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
@@ -579,7 +579,7 @@ func relayThroughHub(ctx context.Context, hub *signallingHub, laptop *webrtc.Pee
 		return SessionInner{}, classErrorf(ClassHandshake, "negotiate", "could not mint a rendezvous id", err)
 	}
 
-	sealedOffer, err := SealEnvelope(offerInner, laptopKey.PublicKey().Bytes(), DefaultOrigin, rid)
+	sealedOffer, err := SealEnvelope(offerInner, computerKey.PublicKey().Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		return SessionInner{}, err
 	}
@@ -590,23 +590,23 @@ func relayThroughHub(ctx context.Context, hub *signallingHub, laptop *webrtc.Pee
 	if !ok {
 		return SessionInner{}, classError(ClassUnavailable, "negotiate", "the hub lost the session offer")
 	}
-	opened, err := OpenEnvelope(blob, laptopKey.Bytes(), DefaultOrigin, rid)
+	opened, err := OpenEnvelope(blob, computerKey.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		return SessionInner{}, err
 	}
 	opened = hub.tamperInner(opened)
-	// The laptop has no local description yet, so the FR-16 check available
+	// The computer has no local description yet, so the FR-16 check available
 	// on this side is the fingerprint binding — which is the check that
 	// catches a substituting hub. The SDP itself is judged by the stack on
 	// the next line.
 	if err := checkRelayedFingerprint(opened); err != nil {
 		return SessionInner{}, err
 	}
-	if err := laptop.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: opened.SDP}); err != nil {
+	if err := computer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: opened.SDP}); err != nil {
 		return SessionInner{}, classErrorf(ClassHandshake, "negotiate", "the relayed offer was refused", err)
 	}
-	answerInner, err := localDescription(ctx, laptop, sessionAnswerType, func() (webrtc.SessionDescription, error) {
-		return laptop.CreateAnswer(nil)
+	answerInner, err := localDescription(ctx, computer, sessionAnswerType, func() (webrtc.SessionDescription, error) {
+		return computer.CreateAnswer(nil)
 	})
 	if err != nil {
 		return SessionInner{}, err

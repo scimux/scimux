@@ -1,6 +1,6 @@
 /* P4 — the paired-device list, which is the other half of a grant.
  *
- * Pairing hands a device SSH-equivalent authority on this laptop. A grant
+ * Pairing hands a device SSH-equivalent authority on this computer. A grant
  * nobody can see and nobody can take back is not a grant, it is a leak, so
  * the list and its revoke are part of the same feature rather than a
  * later nicety.
@@ -173,7 +173,7 @@ test("a failed read never blanks the devices already on screen", async () => {
 test("a first read that fails says so instead of claiming nothing is paired", async () => {
   const h = setup({ [LIST]: () => { throw new Error("network down"); } });
   await h.f.refresh();
-  assert.doesNotMatch(h.html(), /no devices/i, "an unreachable list claimed the laptop had no paired devices");
+  assert.doesNotMatch(h.html(), /no devices/i, "an unreachable list claimed the computer had no paired devices");
   assert.match(h.html(), /could not/i);
 });
 

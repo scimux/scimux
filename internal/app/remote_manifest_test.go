@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// S8-manifest R1 — the laptop half of FR-40. bootstrap.js is the consumer
+// S8-manifest R1 — the computer half of FR-40. bootstrap.js is the consumer
 // (web/js/bootstrap.js); these tests pin the producer against the served
 // inventory rather than against a second walker.
 
@@ -140,9 +140,9 @@ func TestRemoteBootstrapManifestAntiVacuityCounts(t *testing.T) {
 func TestRemoteBootstrapManifestSourceAndEntry(t *testing.T) {
 	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
 	m := getBootstrapManifest(t, h)
-	if m.Source != "laptop" {
+	if m.Source != "computer" {
 		t.Errorf("source=%q, want %q; %s refuses any other value before the channel is touched",
-			m.Source, "laptop", bootstrapConsumer)
+			m.Source, "computer", bootstrapConsumer)
 	}
 	if m.Entry != "/js/app.js" {
 		t.Errorf("entry=%q, want /js/app.js; %s uses that as the module graph entry",

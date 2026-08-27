@@ -20,7 +20,7 @@ import (
 // therefore not presentation — it is the only way a pairing can start.
 //
 // Until now the mint route returned code, rid, expires_at and state, and
-// nothing carried X. The laptop could mint a pairing session that no
+// nothing carried X. The computer could mint a pairing session that no
 // browser had any way to join, which is why /p served a correct pairing
 // page that could never be handed an invite.
 

@@ -100,7 +100,7 @@ func TestAT_FR_24_g_VersionVerdictClassifies(t *testing.T) {
 }
 
 // FR-24 requires the state to say which side is behind, because the user's
-// remedy differs: update the laptop binary, or wait for the deployment.
+// remedy differs: update the computer binary, or wait for the deployment.
 func TestAT_FR_24_g_VerdictNamesWhichSideIsBehind(t *testing.T) {
 	const at = "AT-FR-24-g"
 	behind := noteTunnelError("round-trip", realVersionError(t, 1)).Error()

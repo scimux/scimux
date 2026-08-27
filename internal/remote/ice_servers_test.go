@@ -1,6 +1,6 @@
 package remote
 
-// S6 — ICE servers on the laptop's answering path.
+// S6 — ICE servers on the computer's answering path.
 //
 // Every production peer connection except acceptSessionOffer is created with
 // a bare webrtc.Configuration{} on purpose: those sites are in-process, the

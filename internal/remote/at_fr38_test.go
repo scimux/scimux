@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// FR-38 laptop half: cancelling an accidental pairing leaves the code
+// FR-38 computer half: cancelling an accidental pairing leaves the code
 // unconsumed and reusable within its TTL. The web row AT-FR-38-b drives
 // the same property through the UI; this pins the protocol transition
 // (pair/cancel does not consume — §10.4 / §10.6).

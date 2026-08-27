@@ -14,11 +14,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/html; charset=utf-8",
-        "Digest": "sha-256=:HiFeNBjNsiHdqYjpylvFX0v03OOzqlzKqDDxxOKS658=:",
+        "Digest": "sha-256=:vGhEJ4KoSiglNRxCntX/OpA/kNFPcu1EBtIPjproMCA=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1\"\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp\u003eLoading\u0026#8230;\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module\u003eimport{start}from\"/p/page.js\";start();\u003c/script\u003e\n"
+      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1\"\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp\u003eLoading\u0026#8230;\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
     }
   },
   {
@@ -58,11 +58,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:TYWwk1IGiTza/z4obOP7107ASeGxcro1bgV2/HOfDp8=:",
+        "Digest": "sha-256=:IlPEiHJodPDZWgVWuD60OZdGys5XScAbhGvTa9bnBsI=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "4d85b0935206893cdaff3e286ce3fbd74ec049e1b172ba356e0576fc739f0e9f"
+      "body_sha256": "2253c488726874f0d95a0556b83eb4399746cace5749c01b846bd36bd6e706c2"
     }
   },
   {
@@ -80,11 +80,33 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:HAUbt3/JvOj+BAGlvgDY7rHer/A0Ld92v9gYdEcElRk=:",
+        "Digest": "sha-256=:/XgF3S+gnmTiH97VlI+gsvY1C0FWxjRSSDQEMb0VV6w=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "1c051bb77fc9bce8fe0401a5be00d8eeb1deaff0342ddf76bfd8187447049519"
+      "body_sha256": "fd7805dd2fa09e64e21fded5948fa0b2f6350b4156c6345248340431bd1557ac"
+    }
+  },
+  {
+    "id": "p-start-js",
+    "message": "p-start-js",
+    "comment": "The entry point the page shell loads: imports page.js and calls start(). A row rather than an inline script because the inventory CSP forbids inline. Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/start.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:u8XnU9sYxv4gsJFzt/obcdw1GO5GBa1+byEGgxSv+Hk=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "bbc5e753db18c6fe20b09173b7fa1b71dc3518ee4605ad7e6f21068314aff879"
     }
   },
   {
@@ -102,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:Q0qKsTvG2TZ/qVS1eanTFODhbQaz8JK5wTpwYrp3F1I=:",
+        "Digest": "sha-256=:jGmcQnGCqRsP78R6jEmX9N4SCE3Fmz5Q0U4xuGRdvDw=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "434a8ab13bc6d9367fa954b579a9d314e0e16d06b3f092b9c13a7062ba771752"
+      "body_sha256": "8c699c427182a91b0fefc47a8c4997f4de12084dc59b3e50d14e31b8645dbc3c"
     }
   },
   {
@@ -124,11 +146,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:ocCjL/bF4mGDDiV+M3w+xAGRO4hGrgyZ4YO5rThMMfY=:",
+        "Digest": "sha-256=:GsPdn2tEqqUWAm3smMml462ILp+fLF/GcESs2oLPEAk=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "a1c0a32ff6c5e261830e257e337c3ec401913b8846ae0c99e183b9ad384c31f6"
+      "body_sha256": "1ac3dd9f6b44aaa516026dec98c9a5e3ad882e9f9f2c5fc67044acda82cf1009"
     }
   },
   {
@@ -146,11 +168,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:EplVUUY1+23uCoCbmDWjxcyQUZTy+S0fmgF2kqgpnj0=:",
+        "Digest": "sha-256=:gMNbP2YR6Ho1ou6G/MD0x84N/GFiWB4QIf+rFGXVKKM=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "129955514635fb6dee0a809b9835a3c5cc905194f2f92d1f9a017692a8299e3d"
+      "body_sha256": "80c35b3f6611e87a35a2ee86fcc0f4c7ce0dfc6162581e1021ffab1465d528a3"
     }
   },
   {
@@ -168,11 +190,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:Jht8jXUenK2VIePXnlIdWUmFg+eVDFZy4FF3zh8xU5U=:",
+        "Digest": "sha-256=:6f14vVwji8xSAmHnS3pMu0Kr04pzfxVzw/9ynFHq43I=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "261b7c8d751e9cad9521e3d79e521d59498583e7950c5672e05177ce1f315395"
+      "body_sha256": "e9fd78bd5c238bcc520261e74b7a4cbb42abd38a737f1573c3ff729c51eae372"
     }
   },
   {
@@ -190,11 +212,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:T2Qb/LRRZiJEbTyzN2cokG/Xq6/3xChnLhPGC6NhVJY=:",
+        "Digest": "sha-256=:EXQwNbbWYEcALN9puhDza3AJFA7bXf6KIZjuqtQmPMY=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "4f641bfcb4516622446d3cb3376728906fd7abaff7c428672e13c60ba3615496"
+      "body_sha256": "11743035b6d66047002cdf69ba10f36b7009140edb5dfe8a2198eeaad4263cc6"
     }
   },
   {
@@ -212,11 +234,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:rVEm++8Jn3IipNeIbzcTCa4wDzAJ4ZNfkY9PIXo2X84=:",
+        "Digest": "sha-256=:ZikpzWDYyqO9hIfSaE/4Aw9P2k6vS0FGiT6/z+hcy7I=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "ad5126fbef099f7222a4d7886f371309ae300f3009e1935f918f4f217a365fce"
+      "body_sha256": "662929cd60d8caa3bd8487d2684ff8030f4fda4eaf4b4146893ebfcfe85ccbb2"
     }
   },
   {

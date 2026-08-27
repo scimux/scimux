@@ -54,7 +54,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
     the WebRTC transport is a deliberate, maintainer-approved dependency
     **scoped to `internal/remote/` only**. The decision is made and is not to
     be relitigated: a browser will only speak WebRTC for a peer-to-peer data
-    channel, so the laptop end must speak the same ICE/DTLS/SCTP stack, and
+    channel, so the computer end must speak the same ICE/DTLS/SCTP stack, and
     hand-rolling that in stdlib was rejected as neither realistic nor safe to
     maintain. The module **landed in S6** (2026-08-22) as a single direct
     require, `github.com/pion/webrtc/v4`; its twenty-odd siblings are
@@ -85,23 +85,23 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
     stays in force regardless: approving the dependency widened *what* may be
     imported, never *where it may be imported from*.
 - **The tunnel protocol is owned by scimux-rv, not by this repository.**
-  Decided 2026-08-24. The browser↔laptop data-channel wire format is
+  Decided 2026-08-24. The browser↔computer data-channel wire format is
   specified in scimux-rv's `docs/protocol/tunnel-v2.md`, and its **browser**
   implementation lives there too (`web/js/codec.js`, `web/js/connection.js`
   in that repo, served from the closed `/p` inventory). The reason is
   deployment asymmetry: rv is deployed once and reaches every browser on the
-  next page load, while scimux binaries sit on many laptops at many
+  next page load, while scimux binaries sit on many computers at many
   user-chosen versions. The side that must tolerate the spread is rv's, so rv
   holds it. Do not reintroduce a browser codec or channel transport here —
   it would arrive over the very channel it exists to create.
-  What stays here is the **laptop half**: `internal/remote/codec` (Go), and
+  What stays here is the **computer half**: `internal/remote/codec` (Go), and
   `web/js/bootstrap.js`, which is the *loader*, not the transport. The loader
   runs after the channel works, knows scimux's entry module and specifier
   rules, and therefore ships with the scimux binary — that is what lets this
   repository add modules, rename files, or restructure its graph with no rv
   deployment. Vendoring the loader into rv was considered and rejected: rv
   would go stale on the next module added, and would end up supplying the
-  code that checks this laptop's own integrity values, inverting FR-40.
+  code that checks this computer's own integrity values, inverting FR-40.
   The seam between the two is three fixed constants (§8 of `tunnel-v2.md`):
   `GET /api/remote/bootstrap`, `GET /js/bootstrap.js`, and the
   `bootstrap({channel, manifest, createObjectURL, installImportMap,

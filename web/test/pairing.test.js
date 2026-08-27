@@ -108,7 +108,7 @@ test("AT-NFR-12-a: pairing is the named screen/tap sequence, including inputs, e
     if (screen === "show-code") return { screen, tap: "mint" };
     if (screen === "enter-code") return { screen, tap: "submit", input: "0410-6105" };
     if (screen === "compare-sas") return { screen, tap: "compare", input: "706990" };
-    if (screen === "confirm-laptop") return { screen, tap: "confirm" };
+    if (screen === "confirm-computer") return { screen, tap: "confirm" };
     if (screen === "confirm-phone") return { screen, tap: "confirm" };
     return { screen, tap: "continue" };
   });

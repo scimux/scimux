@@ -71,7 +71,7 @@ import { focusAtEnd } from "./caret.js";
 
 /* FR-42 transport seam: the composition root takes fetchImpl and assetURL as
    required suppliers. No module-global default — a missing supplier throws,
-   so a future caller cannot silently acquire the global. On the laptop origin
+   so a future caller cannot silently acquire the global. On the computer origin
    the browser entry below injects identity assetURL and the platform fetch. */
 export async function createApp({ fetchImpl, assetURL, document, window } = {}) {
   if (typeof fetchImpl !== "function") {
@@ -1173,7 +1173,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      #pair_* root and #m_devices, and nothing else here writes into them. */
   const pairingFeature = createPairingFeature({ api, doc: document });
   const deviceList = createDeviceList({ api, doc: document });
-  /* Unlinking this laptop (F1). It shares the burger-open refresh with the
+  /* Unlinking this computer (F1). It shares the burger-open refresh with the
      device list, and re-reads that list afterwards because an unlink ends
      every grant on it at once. */
   const unlinkControl = createUnlinkControl({

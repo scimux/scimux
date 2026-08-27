@@ -306,7 +306,7 @@ func TestRemotePairingTerminalStatesNotRewritten(t *testing.T) {
 }
 
 var remoteStatusLeakKeys = []string{
-	"code", "rid", "sas", "public_key", "ecdh_public_key", "laptop_pub", "reply_nonce",
+	"code", "rid", "sas", "public_key", "ecdh_public_key", "computer_pub", "reply_nonce",
 }
 
 func assertNoRemoteStatusLeaks(t *testing.T, body map[string]any, raw string) {
@@ -435,7 +435,7 @@ func TestPairedDeviceJSONNamesTheECDHKeyHonestly(t *testing.T) {
 func s8StatusCauses() []remote.TransportCause {
 	return []remote.TransportCause{
 		remote.CauseRendezvousUnavailable,
-		remote.CauseLaptopOffline,
+		remote.CauseComputerOffline,
 		remote.CauseSignallingRejected,
 		remote.CauseICEFailed,
 		remote.CauseAuthFailed,

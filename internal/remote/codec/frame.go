@@ -57,7 +57,7 @@ type frame struct {
 // opinion about. Deliberately not a validity test: tunnel-v2 §2.1 lets a
 // MINOR bump add frame types, and this binary is the half that goes stale
 // (rv is deployed once and reaches every browser; scimux sits on many
-// laptops at many versions). The dispatch switches in conn.go ignore what
+// computers at many versions). The dispatch switches in conn.go ignore what
 // they do not recognise, which is what makes an addition additive.
 //
 // typeReserved is excluded: it never becomes known, because decodeFrame
@@ -90,7 +90,7 @@ func decodeFrame(r io.Reader) (*frame, error) {
 	// No rejection on any other type byte. Rejecting there tore down the
 	// connection *and* desynced the stream, because the length prefix
 	// below had not been read yet: one frame type added in a MINOR bump
-	// would have broken every laptop older than it. Every frame is
+	// would have broken every computer older than it. Every frame is
 	// length-prefixed, so an unknown one is skipped whole instead —
 	// decodeFrame reads it, the dispatch drops it.
 	if _, err := io.ReadFull(r, hdr[1:]); err != nil {

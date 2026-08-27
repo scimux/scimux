@@ -42,7 +42,7 @@ function at(screen, over = {}) {
     base.sas = "706990";
   }
   if (screen === "awaiting-other-side") {
-    base.laptopConfirmed = true;
+    base.computerConfirmed = true;
   }
   return { ...base, ...over };
 }
@@ -155,7 +155,7 @@ test("acknowledging the warning is not confirming the pairing", () => {
   /* AT-FR-38-a's real content: the warning screen must not be able to
    * complete anything, or the grant is disclosed after the fact. */
   const s = nextPairing(at("authority-warning"), { type: "ACK_WARNING" }, T0);
-  assert.equal(s.laptopConfirmed, false);
+  assert.equal(s.computerConfirmed, false);
   assert.equal(s.sas, "");
 });
 
@@ -187,21 +187,21 @@ test("an offer carries the SAS and stops the code being refreshable", () => {
   assert.equal(ticked.refreshDue, false, "an offered pairing was queued for a fresh code");
 });
 
-test("confirming on the laptop waits for the device rather than asserting for it", () => {
-  /* FR-12: both ends confirm. The laptop cannot speak for the phone, so
+test("confirming on the computer waits for the device rather than asserting for it", () => {
+  /* FR-12: both ends confirm. The computer cannot speak for the phone, so
    * CONFIRM alone must never reach succeeded -- only COMPLETED, which the
    * adapter fires after the rendezvous reports the device's own confirm. */
   const s = nextPairing(at("compare-sas"), { type: "CONFIRM" }, T0);
   assert.equal(s.screen, "awaiting-other-side");
-  assert.equal(s.laptopConfirmed, true);
+  assert.equal(s.computerConfirmed, true);
   assert.equal(s.deviceConfirmed, false);
   const still = nextPairing(s, { type: "TICK", now: T0 + 1 }, T0 + 1);
-  assert.equal(still.screen, "awaiting-other-side", "the laptop completed a pairing the device never confirmed");
+  assert.equal(still.screen, "awaiting-other-side", "the computer completed a pairing the device never confirmed");
 });
 
 test("a device confirming first does not skip the human's comparison", () => {
   const s = nextPairing(at("compare-sas"), { type: "DEVICE_CONFIRMED" }, T0);
-  assert.equal(s.screen, "compare-sas", "the device's confirmation advanced the laptop's screen");
+  assert.equal(s.screen, "compare-sas", "the device's confirmation advanced the computer's screen");
   assert.equal(s.deviceConfirmed, true);
 });
 
@@ -244,7 +244,7 @@ test("initialPairingState is closed, unconfirmed and carries no credential", () 
   assert.equal(s.code, "");
   assert.equal(s.link, "");
   assert.equal(s.sas, "");
-  assert.equal(s.laptopConfirmed, false);
+  assert.equal(s.computerConfirmed, false);
   assert.equal(s.deviceConfirmed, false);
 });
 

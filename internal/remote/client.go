@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// Client is the laptop remote-access client.
+// Client is the computer remote-access client.
 type Client struct {
 	cfg Config
 

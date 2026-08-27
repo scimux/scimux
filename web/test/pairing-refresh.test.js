@@ -91,7 +91,7 @@ test("MINTED satisfies the request", () => {
 });
 
 test("hiding the tab stops the refresh; returning to it resumes and re-mints", () => {
-  /* An unattended laptop cycling a live pairing credential on screen is a
+  /* An unattended computer cycling a live pairing credential on screen is a
    * standing invitation. Pause on the condition actually being guarded --
    * nobody is looking -- rather than on a duration. */
   const watched = state("show-code", { expiresAt: DEAD });

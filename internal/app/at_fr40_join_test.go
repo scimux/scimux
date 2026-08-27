@@ -117,8 +117,8 @@ func TestAT_FR_40_JoinRealManifestBootsRealBootstrap(t *testing.T) {
 			at, res.ChannelExtras)
 	}
 
-	if res.ManifestSource != "laptop" || res.ManifestEntry != "/js/app.js" {
-		t.Errorf("%s: manifest source=%q entry=%q, want laptop and /js/app.js",
+	if res.ManifestSource != "computer" || res.ManifestEntry != "/js/app.js" {
+		t.Errorf("%s: manifest source=%q entry=%q, want computer and /js/app.js",
 			at, res.ManifestSource, res.ManifestEntry)
 	}
 

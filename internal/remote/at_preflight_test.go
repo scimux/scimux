@@ -13,7 +13,7 @@ import (
 // An invite is single-use. Until now the client learned whether a
 // rendezvous was reachable by posting the invite to it: enrollPosted was
 // set one line before Do(req), and Do is where DNS, dial and TLS happen.
-// So a typo'd URL, an offline laptop and a blocked port all arrived as
+// So a typo'd URL, an offline computer and a blocked port all arrived as
 // StateAmbiguous — the invite erased, a stuck state persisted, and the
 // only recovery an operator's.
 //
@@ -67,7 +67,7 @@ func nothingPersisted(t *testing.T, c *Client) {
 
 func TestAT_F1_a_UnreachableRendezvousSpendsNothing(t *testing.T) {
 	// No fake at all: clientCfg falls back to a transport that refuses
-	// every request, which is what a typo'd host, an offline laptop and
+	// every request, which is what a typo'd host, an offline computer and
 	// a blocked port have in common.
 	cfg := clientCfg(t, nil)
 	path := writeInviteFile(t, t.TempDir(), vectorInviteGrouped, 0o600)
@@ -304,7 +304,7 @@ func TestAT_F1_h_TheAmbiguousRerunProbesBeforeItPostsToo(t *testing.T) {
 		t.Fatalf("setup left status %q, want %s", st.Status, StateAmbiguous)
 	}
 
-	// A dead endpoint: the rerun happens on a laptop that still cannot
+	// A dead endpoint: the rerun happens on a computer that still cannot
 	// reach the rendezvous.
 	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	deadURL, deadClient := dead.URL, dead.Client()

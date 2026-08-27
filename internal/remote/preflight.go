@@ -12,7 +12,7 @@ import (
 //
 // The failure it exists to prevent: enrolling is how the client used to
 // discover it could not reach the server, and an invite is single-use.
-// A typo'd URL, an offline laptop and a blocked port all became
+// A typo'd URL, an offline computer and a blocked port all became
 // StateAmbiguous — invite erased, stuck state persisted, recovery only an
 // operator's. §4.0 is unauthenticated and stateless precisely so this
 // question can be asked for free.

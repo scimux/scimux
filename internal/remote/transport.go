@@ -45,7 +45,7 @@ type TransportCause string
 
 const (
 	CauseRendezvousUnavailable TransportCause = "rendezvous-unavailable"
-	CauseLaptopOffline         TransportCause = "laptop-offline"
+	CauseComputerOffline       TransportCause = "computer-offline"
 	CauseSignallingRejected    TransportCause = "signalling-rejected"
 	CauseICEFailed             TransportCause = "ice-failed"
 	CauseAuthFailed            TransportCause = "auth-failed"
@@ -85,11 +85,11 @@ const (
 )
 
 // iceFallbackGuidance is AT-FR-24-c. Only the ICE-failure state may carry
-// it: naming a VPN fallback for a revoked credential or an offline laptop
+// it: naming a VPN fallback for a revoked credential or an offline computer
 // would be wrong advice, so this string must not be reused for another
 // class.
 const iceFallbackGuidance = "no direct path between this network pair; " +
-	"reach the laptop over a supported fallback instead — an SSH port-forward, " +
+	"reach the computer over a supported fallback instead — an SSH port-forward, " +
 	"WireGuard, or Tailscale"
 
 // CreateSessionOffer builds a WebRTC offer whose inner JSON includes the
@@ -500,7 +500,7 @@ func SimulateChannelLoss(ctx context.Context) error {
 			"the channel-loss probe never established a channel to lose")
 	}
 	return classError(ClassLost, "transport",
-		"the connection was established and then dropped; the laptop or this device left the network")
+		"the connection was established and then dropped; the computer or this device left the network")
 }
 
 // causeOfClass maps a transport failure class to its FR-24 UI state. The
@@ -515,7 +515,7 @@ func causeOfClass(c Class) TransportCause {
 	case ClassUnavailable:
 		return CauseRendezvousUnavailable
 	case ClassPeerAbsent:
-		return CauseLaptopOffline
+		return CauseComputerOffline
 	case ClassRevoked, ClassUnauthorized:
 		return CauseAuthFailed
 	case ClassHandshake, ClassFingerprint:

@@ -38,7 +38,7 @@ func TestAT_NFR_06_a_EstablishedChannelSurvivesRendezvousRestart(t *testing.T) {
 // NFR-07 client half: reconnection after a restart must not produce a
 // synchronised stampede. With NFR-06 the established channel is the
 // reason no new session-offer burst is required. AT-NFR-07-a itself is
-// the rv row (no Retry-After on wait); this is the laptop half S6 owns.
+// the rv row (no Retry-After on wait); this is the computer half S6 owns.
 func TestAT_NFR_07_ClientDoesNotStampedeAfterRendezvousRestart(t *testing.T) {
 	const at = "NFR-07"
 	c, _, d1, _, _ := enrollTwoDevices(t)

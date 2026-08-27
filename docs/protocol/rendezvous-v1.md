@@ -6,7 +6,7 @@
 **Vector digest:** [`vectors.sha256`](vectors.sha256)
 
 This is the versioned wire specification required by NFR-14. A
-browser and a laptop that have not read the scimux-rv repository
+browser and a computer that have not read the scimux-rv repository
 can be implemented from this document and the JSON files in
 `internal/rv/testdata/vectors/`. Those files are the source copy;
 the scimux side MUST check `vectors.sha256` against its own copy
@@ -48,7 +48,7 @@ It never relays peer traffic.
 
 | Role | Who | Authenticates as |
 |---|---|---|
-| Installation | scimux on the laptop | bound Ed25519 key, via handle + challenge + signature |
+| Installation | scimux on the computer | bound Ed25519 key, via handle + challenge + signature |
 | Device | paired phone or tablet | not at all — holds a rendezvous ID, or a pairing code |
 | Operator | `scimux-rv` CLI | not on the wire; same uid as the daemon, local log only |
 
@@ -114,6 +114,7 @@ replay.
 | `p-boot-css` | bootstrap | `GET /p/boot.css` | device → rv |
 | `p-codec-js` | bootstrap | `GET /p/codec.js` | device → rv |
 | `p-connection-js` | bootstrap | `GET /p/connection.js` | device → rv |
+| `p-start-js` | bootstrap | `GET /p/start.js` | device → rv |
 | `p-page-js` | bootstrap | `GET /p/page.js` | device → rv |
 | `p-pairing-js` | bootstrap | `GET /p/pairing.js` | device → rv |
 | `p-rendezvous-js` | bootstrap | `GET /p/rendezvous.js` | device → rv |
@@ -275,7 +276,7 @@ valid signature is `rejection-unauthorised`.
 
 ### 4.4 `POST /v1/unenroll`
 
-Releases an installation at its own request, so a laptop that
+Releases an installation at its own request, so a computer that
 unlinks locally does not leave a bound row only an operator can
 clear.
 
@@ -418,7 +419,7 @@ global; `/v1//wait` and `/v1/x/../enroll` 301 the same way.
 
 **P4 consequence.** The pairing QR and fragment-link carry a
 client-minted ID. The typed short code only *indexes* a temporary
-waiter the laptop already registered. rv does not mint pairing
+waiter the computer already registered. rv does not mint pairing
 IDs either.
 
 ---
@@ -507,7 +508,7 @@ response is written**, so its 30 s TTL starts when it becomes
 useful. Same store, same single-use / handle-pin / caps as
 `POST /v1/challenge`. The signed route for the next wait is still
 `/v1/wait`. The `reply` field is not part of the signed message;
-the laptop may pre-sign the next wait as soon as this header
+the computer may pre-sign the next wait as soon as this header
 arrives, then fill `reply` after it has sealed the SDP answer.
 
 A challenge obtained from `POST /v1/challenge` *before* a long
@@ -607,7 +608,7 @@ paragraph, and §16 below.
 ## 10. Pairing (rv half)
 
 FR-11, FR-39. Temporary waiters. Prior enrollment is required on
-the laptop side. The phone is unauthenticated.
+the computer side. The phone is unauthenticated.
 
 ### 10.1 Short code
 
@@ -618,7 +619,7 @@ to length 8. The code **indexes** a temporary waiter; it is not
 a secret. Vector `pairing-code-8`.
 
 QR and fragment-link also carry the client-minted RID and the
-laptop's static P-256 public key (§12). The typed path carries
+computer's static P-256 public key (§12). The typed path carries
 only the code.
 
 ### 10.2 `POST /v1/pair/wait`
@@ -680,12 +681,12 @@ waiter receives the envelope bytes (decoded hex) as the
 §9.3.
 
 An offer does **not** consume the pairing waiter. Consumption
-happens at the first `reply` the laptop submits, or at the 60 s
+happens at the first `reply` the computer submits, or at the 60 s
 TTL — **not** at `pair/cancel` (§10.4, §10.6). A `reply` that
 arrives after the offer POST has already completed (`ReplyHold`
 elapsed, disconnect, or revoke) is dropped and does **not**
 consume the code. An attacker who posts first is delivered to
-the laptop; SAS will not match; the laptop does not reply and
+the computer; SAS will not match; the computer does not reply and
 re-waits with the same code; the legitimate phone can still
 offer. That is the rv half of AT-FR-39-a.
 
@@ -729,7 +730,7 @@ Single-use of the *code* is consumed at `reply` or `ttl`, not at
 
 Client-side. rv never sees these bytes.
 
-Laptop holds a static ECDH P-256 key `X` (generated at first
+Computer holds a static ECDH P-256 key `X` (generated at first
 `--remote`, stored with the installation identity, never sent to
 rv) and the Ed25519 installation public key `I` already bound at
 enroll. Device generates a static ECDH P-256 key `Y` at pair
@@ -752,7 +753,7 @@ ambiguous; do not add one without a length prefix.
 || Y_uncompressed || 0x00
 || I || 0x00                   // 32-byte Ed25519 public key
 || offer_nonce || 0x00         // 32 bytes, device-chosen
-|| reply_nonce                 // 32 bytes, laptop-chosen
+|| reply_nonce                 // 32 bytes, computer-chosen
 ```
 
 ```
@@ -794,7 +795,7 @@ rv's access log, and §8 forbids the RID on that surface.
 Decided 2026-08-26. A device that typed only a short code has
 neither `X` nor `rid`. Without `X` it cannot compute `ECDH(X, Y)`
 and so has no digits to compare; without `rid` it cannot even open
-the laptop's `pair-reply`, whose AD is `origin || 0x00 || rid_hex`
+the computer's `pair-reply`, whose AD is `origin || 0x00 || rid_hex`
 (§12.2). §12.3 therefore describes a path no client can complete,
 and a client that appeared to complete it would be showing digits
 it had not derived — the exact failure §12.3 exists to prevent.
@@ -850,9 +851,9 @@ different recipient (unknown-key-share / cross-context reuse).
 Recipient opens with its static private and `E`. Vector
 `envelope-seal-p256` (`ephemeral_priv_hex` is a fixture).
 
-Session offer: phone seals to laptop `X`. Session answer: laptop
+Session offer: phone seals to computer `X`. Session answer: computer
 seals to device `Y`. Pairing QR offer: phone seals to `X` from
-the fragment. Pairing reply: laptop seals to `Y` from the offer.
+the fragment. Pairing reply: computer seals to `Y` from the offer.
 
 ### 12.3 Typed-path offer is unsealed
 
@@ -887,14 +888,15 @@ version banner. That comparison is made through a real HTTP
 client (AT-FR-33-a), not a `ResponseRecorder`.
 
 `/p` MUST NOT pin a client to a scimux version. The application
-is fetched from the laptop (FR-14, FR-40). A scimux version
+is fetched from the computer (FR-14, FR-40). A scimux version
 string in a `/p` body, query, path, or header is a defect. Two
 rv binaries stamped with different version strings MUST serve
 byte-identical inventory responses.
 
 | route | type | cache | integrity | notes |
 |---|---|---|---|---|
-| `GET /p` | `text/html; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the HTML | the page shell: markup and one module import. No application code. |
+| `GET /p` | `text/html; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the HTML | the page shell: markup and one module `src`. No inline script — the CSP below forbids it. No application code. |
+| `GET /p/start.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the entry point: imports `page.js` and calls `start()`. Nothing else. |
 | `GET /p/page.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the pairing screens (NFR-12) and the page's wiring. |
 | `GET /p/boot.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | pairing-to-handover orchestration and the FR-24 causes. Does not load the module graph; that graph arrives over the channel (FR-40). |
 | `GET /p/pairing.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | pairing crypto: transcript, SAS, envelope seal (§11, §12). |
@@ -906,8 +908,15 @@ byte-identical inventory responses.
 | `GET /p/connection.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel request lifecycle and FR-24 states (`tunnel-v2.md` §7, §9). Protocol, not application code. |
 
 The inventory grew from three rows to five on 2026-08-24, when the
-tunnel protocol moved into this repository, and from five to ten on
-2026-08-26, when the pairing client was built. "Closed" means
+tunnel protocol moved into this repository, from five to ten on
+2026-08-26, when the pairing client was built, and to eleven on
+2026-08-27, when the entry point became a row. It had been an inline
+`<script type=module>`, which the CSP two paragraphs below forbids, so
+`/p` rendered its "Loading…" placeholder and stopped there in every
+browser. An inline exemption — `unsafe-inline`, a nonce, or a hash —
+would have been the smaller diff and the wrong one: the inventory is the
+served set, and the code that runs the page belongs in it, carrying a
+`Digest` and closed over this table like every other row. "Closed" means
 **enumerated and fail-closed**, not fixed at any number: a row is
 added by amending this table and `specPInventory`, never by a
 wildcard, a directory handler, or a route that reads from disk per
@@ -915,17 +924,17 @@ request.
 
 Every module is served at the path its own relative imports resolve
 to, so rv's half of the page needs no import map and no specifier
-rewriting. The laptop's graph is a different problem and another
+rewriting. The computer's graph is a different problem and another
 repository's (`tunnel-v2.md` §8).
 
 None of these modules is application code. They implement pairing,
 the tunnel, and the FR-24 states, and they stop at §8's three fixed
 constants. FR-33 is asserted over them as a closure property rather
 than a word ban: every `import` in an inventory body resolves to
-another row of this table, and the only laptop route any of them
+another row of this table, and the only computer route any of them
 names is §8's `/api/remote/bootstrap`, which is fetched over the
 data channel and never from rv. What the browser does *after* the
-channel is negotiated is fetched from the laptop through those three
+channel is negotiated is fetched from the computer through those three
 constants.
 
 Each inventory response also carries:
@@ -962,12 +971,12 @@ map, and no version token:
 <title>Pair with scimux</title>
 <link rel=stylesheet href="/p/boot.css">
 <main id=app><h1>Pair with scimux</h1><p>Loading&#8230;</p></main>
-<script type=module>import{start}from"/p/page.js";start();</script>
+<script type=module src="/p/start.js"></script>
 ```
 
 (the file ends with a newline).
 
-The nine asset rows are **not reproduced inline.** They are hundreds
+The ten asset rows are **not reproduced inline.** They are hundreds
 of lines of protocol and pairing implementation, and pasting them
 here would create a second copy to keep in sync with `web/` — the
 drift this document exists to prevent. Their served bytes are exactly

@@ -5,7 +5,7 @@ package remote
 // The app holds channels as the Channel interface, not *Session; this is
 // the lookup that type-asserts. A missing channel, a Channel that is not
 // a *Session, and a Session whose own TransportCause is ClassPeerAbsent
-// are all "no cause" (D2) — never laptop-offline, never an invented
+// are all "no cause" (D2) — never computer-offline, never an invented
 // constant. A live session returns ("", nil).
 func (c *Client) TransportCause(deviceID string) (TransportCause, error) {
 	if c == nil {

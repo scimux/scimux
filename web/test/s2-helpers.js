@@ -98,7 +98,7 @@ export const CANNED = Object.freeze({
   state: {
     nodes: [],
     unadopted: [],
-    hostname: "laptop",
+    hostname: "computer",
     version: "2.0",
     sys: {},
   },

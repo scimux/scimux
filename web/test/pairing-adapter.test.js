@@ -309,12 +309,12 @@ test("a mint that fails becomes a failed screen carrying the message", async () 
 
 test("a 409 from the mint is the hosted refusal, not a generic failure", async () => {
   /* A paired device asking to pair further devices. The distinction is the
-   * whole point: one tells the human to go to the laptop, the other tells
+   * whole point: one tells the human to go to the computer, the other tells
    * them the network is down. */
   const h = setup({ [MINT]: () => { throw httpError(409, '{"hosted":"device"}'); } });
   await toShowCode(h);
   assert.equal(h.f.screen(), "failed");
-  assert.match(h.doc.el("#pair_body").innerHTML, /laptop/i);
+  assert.match(h.doc.el("#pair_body").innerHTML, /computer/i);
 });
 
 test("a polled SAS moves the sheet to the comparison and stops showing the code", async () => {
@@ -364,12 +364,12 @@ test("confirming sends both halves and completes on success", async () => {
   await h.f.settled();
 
   const body = h.api.calls.find((c) => c.key === CONFIRM).body;
-  assert.deepEqual(body, { laptop_confirm: true, device_confirm: true }, "FR-12 needs both halves");
+  assert.deepEqual(body, { computer_confirm: true, device_confirm: true }, "FR-12 needs both halves");
   assert.equal(h.f.screen(), "succeeded");
 });
 
 test("a confirm the other side has not matched leaves the sheet waiting", async () => {
-  /* 409 is ClassPairUnconfirmed: the laptop's half is recorded, the
+  /* 409 is ClassPairUnconfirmed: the computer's half is recorded, the
    * device's is not. Treating that as a failure would throw away a
    * pairing that is one tap from finishing. */
   const h = setup({
@@ -404,7 +404,7 @@ test("digits that do not match cancel the session on the server too", async () =
 });
 
 test("the device's own confirmation reaches the waiting screen", async () => {
-  /* FR-12's second half. Until it arrives the laptop cannot say the
+  /* FR-12's second half. Until it arrives the computer cannot say the
    * pairing is nearly done, and the human is left reading "confirm on
    * your device" after they already have. */
   let confirmed = false;
@@ -596,7 +596,7 @@ test("the sheet is hidden when closed and shown when open", async () => {
 });
 
 test("visibility changes reach the reducer", async () => {
-  /* The pause that keeps an unattended laptop from cycling credentials is
+  /* The pause that keeps an unattended computer from cycling credentials is
    * only real if the adapter forwards the event. */
   const h = setup({ [MINT]: () => mintOK({ expires_at: new Date(T0 + 60_000).toISOString() }) });
   h.at(T0);

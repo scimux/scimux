@@ -5,7 +5,7 @@ package remote
 // rvLoop long-polls /v1/wait for every live device. A 200 there carries the
 // device's sealed §12.2 session offer; until now postWaitRID read that body,
 // checked its content type, and dropped it. This file is what the body is
-// handed to: open it under the laptop's static P-256 key, negotiate an
+// handed to: open it under the computer's static P-256 key, negotiate an
 // answer, and seal the answer back to the device so the rendezvous can hand
 // it to the still-open POST /v1/envelope/<rid>.
 //
@@ -23,13 +23,13 @@ import (
 	"net/http"
 )
 
-// sessionKeyPriv is the laptop's static P-256 private key X (§11).
+// sessionKeyPriv is the computer's static P-256 private key X (§11).
 //
 // X is minted and owned by the pairing runtime, which is the right home for
 // it: it is the same key the pairing transcript binds. This reads it rather
 // than keeping a second copy, so there is exactly one X per installation and
 // no way for the pairing SAS and the session envelope to disagree about which
-// key the laptop is. Opening an envelope uses X, so the key is durable
+// key the computer is. Opening an envelope uses X, so the key is durable
 // before this returns.
 func (c *Client) sessionKeyPriv() ([]byte, error) {
 	if err := c.ensureDurableX(); err != nil {
@@ -39,7 +39,7 @@ func (c *Client) sessionKeyPriv() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.xPriv) == 0 {
-		return nil, classError(ClassHandshake, "session", "the laptop has no static key to open the envelope with")
+		return nil, classError(ClassHandshake, "session", "the computer has no static key to open the envelope with")
 	}
 	return append([]byte(nil), r.xPriv...), nil
 }

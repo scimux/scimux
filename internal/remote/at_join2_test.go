@@ -79,7 +79,7 @@ func newDevicePeer(t *testing.T, ctx context.Context) *devicePeer {
 }
 
 // applyAnswer completes the device's half of the handshake and waits for the
-// data channel to open. A retained laptop peer makes this succeed; a closed
+// data channel to open. A retained computer peer makes this succeed; a closed
 // one leaves it to time out, which is exactly the failure being asserted.
 func (d *devicePeer) applyAnswer(ctx context.Context, answer SessionInner) error {
 	if err := d.pc.SetRemoteDescription(webrtc.SessionDescription{
@@ -162,7 +162,7 @@ func liveSessionClient(t *testing.T, rv *sessionRV, devECDHPub []byte, h http.Ha
 }
 
 // TestLiveSessionCarriesATunnelledRequest is the join. A device posts a sealed
-// offer, receives the sealed answer, completes ICE against the laptop's
+// offer, receives the sealed answer, completes ICE against the computer's
 // retained peer, and gets a response from the tunnel handler.
 //
 // Every earlier row in this package stops at the answer *value*. This is the
@@ -179,7 +179,7 @@ func TestLiveSessionCarriesATunnelledRequest(t *testing.T) {
 	dev := newDevicePeer(t, ctx)
 	x, err := c.PairingECDHPublic()
 	if err != nil {
-		t.Fatalf("laptop ECDH public: %v", err)
+		t.Fatalf("computer ECDH public: %v", err)
 	}
 	sealed, err := SealEnvelope(dev.offer, x, DefaultOrigin, rid)
 	if err != nil {
@@ -189,11 +189,11 @@ func TestLiveSessionCarriesATunnelledRequest(t *testing.T) {
 
 	answer, err := OpenEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
-		t.Fatalf("device could not open the laptop's reply: %v", err)
+		t.Fatalf("device could not open the computer's reply: %v", err)
 	}
 	if err := dev.applyAnswer(ctx, answer); err != nil {
 		t.Fatalf("the device could not connect to the answered peer; "+
-			"the laptop answered and then discarded the connection: %v", err)
+			"the computer answered and then discarded the connection: %v", err)
 	}
 
 	resp, err := dev.roundTrip(ctx, "/api/nodes")
@@ -220,7 +220,7 @@ func TestLiveSessionCarriesATunnelledRequest(t *testing.T) {
 
 // TestLiveSessionRefusesASubstitutedFingerprint is FR-16 on the path that will
 // carry traffic. The offer's SDP is untouched and parses; only the sealed
-// fingerprint disagrees with it. checkInner accepts that today, so the laptop
+// fingerprint disagrees with it. checkInner accepts that today, so the computer
 // answers a description whose DTLS identity it never verified.
 //
 // The refusal must be total: no reply at all. Answering and then failing later
@@ -240,7 +240,7 @@ func TestLiveSessionRefusesASubstitutedFingerprint(t *testing.T) {
 
 	x, err := c.PairingECDHPublic()
 	if err != nil {
-		t.Fatalf("laptop ECDH public: %v", err)
+		t.Fatalf("computer ECDH public: %v", err)
 	}
 	sealed, err := SealEnvelope(bad, x, DefaultOrigin, rid)
 	if err != nil {
@@ -262,7 +262,7 @@ func TestLiveSessionRefusesASubstitutedFingerprint(t *testing.T) {
 	served := rv.WaitCount()
 	time.Sleep(500 * time.Millisecond)
 	if rs := rv.Replies(); len(rs) != 0 {
-		t.Fatalf("the laptop answered an offer whose sealed fingerprint does not match its SDP; "+
+		t.Fatalf("the computer answered an offer whose sealed fingerprint does not match its SDP; "+
 			"FR-16 is enforced on the in-process path only (%d reply/replies)", len(rs))
 	}
 	if rv.WaitCount() <= served {
@@ -311,7 +311,7 @@ func TestRevokeClosesTheLiveSession(t *testing.T) {
 	dev := newDevicePeer(t, ctx)
 	x, err := c.PairingECDHPublic()
 	if err != nil {
-		t.Fatalf("laptop ECDH public: %v", err)
+		t.Fatalf("computer ECDH public: %v", err)
 	}
 	sealed, err := SealEnvelope(dev.offer, x, DefaultOrigin, rid)
 	if err != nil {

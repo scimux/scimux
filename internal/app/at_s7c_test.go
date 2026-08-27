@@ -39,7 +39,7 @@ func TestAT_S7c_HTTPPairingRegistersLiveDevice(t *testing.T) {
 	}
 
 	confirm := routeRequest(h, http.MethodPost, "/api/remote/pairing/"+minted.Code+"/confirm",
-		`{"laptop_confirm":true,"device_confirm":true}`, true)
+		`{"computer_confirm":true,"device_confirm":true}`, true)
 	if confirm.Code != http.StatusOK {
 		t.Fatalf("%s: both-sides confirm status = %d, want 200; body=%q", at, confirm.Code, confirm.Body.String())
 	}

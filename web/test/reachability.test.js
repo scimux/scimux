@@ -35,7 +35,7 @@ const KNOWN_UNREACHABLE = new Map([
   [
     "./pairing-ui.js",
     "S7 parked the pairing UI in web/test/ deliberately, to keep the served " +
-      "inventory and the FR-40 ratchet untouched while the laptop half was " +
+      "inventory and the FR-40 ratchet untouched while the computer half was " +
       "built. Its own header says so. Five acceptance tests (AT-FR-38-a..c, " +
       "AT-NFR-12-a) therefore pass against an implementation that ships in no " +
       "build. S8 moves it under web/js/ and wires it into index.html; this " +

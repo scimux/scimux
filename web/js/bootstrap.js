@@ -1,12 +1,12 @@
 /* FR-40 remote bootstrap. Checked-in source, no build step.
  *
- * The page is handed a channel fetch (not a peer connection), a laptop-
+ * The page is handed a channel fetch (not a peer connection), a computer-
  * supplied manifest, and platform seams for object URLs, import maps and
  * module import. It fetches every named asset, verifies each digest, rewrites
  * module specifiers, installs the import map, and only then starts the
  * entry. A failure of any one asset is a named abort; the entry never runs.
  *
- * Integrity values are accepted only when the manifest names the laptop as
+ * Integrity values are accepted only when the manifest names the computer as
  * their source. A rendezvous-offered manifest is refused before the channel
  * is touched.
  *
@@ -16,7 +16,7 @@
  */
 "use strict";
 
-export const SOURCE_LAPTOP = "laptop";
+export const SOURCE_COMPUTER = "computer";
 export const SOURCE_RENDEZVOUS = "rendezvous";
 
 const ENTRY = "/js/app.js";
@@ -77,10 +77,10 @@ export async function bootstrap({
   installImportMap,
   importModule,
 } = {}) {
-  if (!manifest || manifest.source !== SOURCE_LAPTOP) {
+  if (!manifest || manifest.source !== SOURCE_COMPUTER) {
     throw named(
       "bootstrap-integrity-source",
-      "integrity values must come from the laptop channel; a rendezvous-offered value is refused",
+      "integrity values must come from the computer channel; a rendezvous-offered value is refused",
     );
   }
 

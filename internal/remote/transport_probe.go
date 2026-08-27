@@ -157,7 +157,7 @@ func probeChannelLoss(ctx context.Context) (probeResult, error) {
 	if err != nil {
 		return probeInconclusive, err
 	}
-	local, remote, dc := pair.client, pair.laptop, pair.clientDC
+	local, remote, dc := pair.client, pair.computer, pair.clientDC
 	defer func() {
 		_ = local.Close()
 		_ = remote.Close()

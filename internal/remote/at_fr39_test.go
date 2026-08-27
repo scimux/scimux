@@ -80,7 +80,7 @@ func TestAT_FR_39_b_AttackerNeverWinsRoleAndReflectionRejected(t *testing.T) {
 		t.Fatalf("%s: PairingECDHPublic: %v", at, err)
 	}
 	if len(x) == 0 {
-		t.Fatalf("%s: laptop pairing public key is empty", at)
+		t.Fatalf("%s: computer pairing public key is empty", at)
 	}
 	roleEnv, err := json.Marshal(map[string]any{
 		"v": 1, "type": "pair-reply", "install_pub": hex.EncodeToString(x),
@@ -105,7 +105,7 @@ func TestAT_FR_39_b_AttackerNeverWinsRoleAndReflectionRejected(t *testing.T) {
 }
 
 // AT-FR-39-c: The single-use moment is exact: a code is consumed at the
-// specified transition (laptop reply / both-sided confirmation, or TTL)
+// specified transition (computer reply / both-sided confirmation, or TTL)
 // and not before — not at offer, not at cancel — proven by driving a
 // failure just either side of it.
 func TestAT_FR_39_c_SingleUseMomentExact(t *testing.T) {

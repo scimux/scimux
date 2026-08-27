@@ -120,7 +120,7 @@
   box-shadow: 0 -8px 40px rgba(0,0,0,.16);
 }
 @media (min-width: 900px) {
-  /* On a laptop the QR is the point of the screen and the phone is held up
+  /* On a computer the QR is the point of the screen and the phone is held up
      to it, so the panel centres rather than clinging to the bottom edge. */
   .pairpanel {
     left: 50%; bottom: 50%; right: auto;
@@ -135,7 +135,7 @@
 /* The QR is one path of unit squares on a white plate; it must stay white
    in dark mode, because a scanner reads contrast, not theme. */
 #pair_qr svg { width: 100%; height: auto; display: block; border-radius: 8px; }
-/* Six digits a human compares against a phone held next to the laptop:
+/* Six digits a human compares against a phone held next to the computer:
    tabular, wide-tracked, and big enough to read at arm's length. */
 #pair_sas {
   font: 700 34px/1.2 ui-monospace, monospace; letter-spacing: .14em;
@@ -159,7 +159,7 @@
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }
 #m_devices button.danger { color: var(--bad); font-weight: 600; }
-/* Unlinking this laptop ends every grant in the list above at once, so
+/* Unlinking this computer ends every grant in the list above at once, so
    the armed state reads destructive for the same reason a revoke does. */
 #m_unlink.danger { color: var(--bad); font-weight: 600; }
 #m_unlink_note .item.note { color: var(--dim); }

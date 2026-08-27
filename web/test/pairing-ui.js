@@ -20,7 +20,7 @@ export const NFR12_SCREENS = Object.freeze([
   "show-code",
   "enter-code",
   "compare-sas",
-  "confirm-laptop",
+  "confirm-computer",
   "confirm-phone",
   "succeeded",
 ]);
@@ -54,7 +54,7 @@ function record(code) {
 export function authorityWarningHTML() {
   return (
     '<div role="dialog" aria-label="authority-warning">' +
-    "A paired device has SSH-equivalent authority on this laptop: " +
+    "A paired device has SSH-equivalent authority on this computer: " +
     "it may POST /api/nodes to launch agents and POST /api/update to replace the binary." +
     "</div>"
   );
@@ -89,7 +89,7 @@ export function tap(screen, action, input) {
   if (screen === "compare-sas") {
     return { sas: input, confirmed: false };
   }
-  if (screen === "confirm-laptop" || screen === "confirm-phone") {
+  if (screen === "confirm-computer" || screen === "confirm-phone") {
     return { confirmed: true };
   }
   if (screen === "pair-a-device" && action === "open") {
