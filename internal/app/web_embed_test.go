@@ -31,6 +31,7 @@ var productionJSModules = []string{
 	"web/js/menu.js",
 	"web/js/navigation.js",
 	"web/js/notes.js",
+	"web/js/pairing.js",
 	"web/js/polling.js",
 	"web/js/qr.js",
 	"web/js/qrcodegen.js",
