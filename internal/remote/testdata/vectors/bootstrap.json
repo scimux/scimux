@@ -2,7 +2,7 @@
   {
     "id": "p-page",
     "message": "p-page",
-    "comment": "Declarative until P5 registers GET /p. Body is §13.1.",
+    "comment": "The page itself: markup only, and small enough to pin verbatim.",
     "kind": "http",
     "request": {
       "method": "GET",
@@ -14,39 +14,17 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/html; charset=utf-8",
-        "Digest": "sha-256=:2tC4m+G4mByGgghU5zDJKhmXxnMu8gJZJ9W44YQ9Bis=:",
+        "Digest": "sha-256=:HiFeNBjNsiHdqYjpylvFX0v03OOzqlzKqDDxxOKS658=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "<!doctype html>\n<meta charset=utf-8>\n<meta name=viewport content=\"width=device-width,initial-scale=1\">\n<title>pair</title>\n<link rel=stylesheet href=\"/p/boot.css\">\n<form id=pair>\n<label>pairing code <input name=code autocomplete=one-time-code></label>\n<button type=submit>continue</button>\n</form>\n<script src=\"/p/boot.js\"></script>\n"
-    }
-  },
-  {
-    "id": "p-boot-js",
-    "message": "p-boot-js",
-    "comment": "Declarative until P5 registers GET /p/boot.js.",
-    "kind": "http",
-    "request": {
-      "method": "GET",
-      "path": "/p/boot.js"
-    },
-    "response": {
-      "status": 200,
-      "headers": {
-        "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:Nfs9UF2WBas13kcbL7bNUg1lLIa8w+BiH06L8a4qGD0=:",
-        "Referrer-Policy": "no-referrer",
-        "X-Content-Type-Options": "nosniff"
-      },
-      "body_utf8": "document.documentElement.dataset.boot=\"1\";\n"
+      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1\"\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp\u003eLoading\u0026#8230;\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module\u003eimport{start}from\"/p/page.js\";start();\u003c/script\u003e\n"
     }
   },
   {
     "id": "p-boot-css",
     "message": "p-boot-css",
-    "comment": "Declarative until P5 registers GET /p/boot.css.",
+    "comment": "The page's only stylesheet. Body pinned by digest; see p-codec-js.",
     "kind": "http",
     "request": {
       "method": "GET",
@@ -58,11 +36,187 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
-        "Digest": "sha-256=:+tpv2NzjwUphpvD/qz6NPHcWFeZwW0/aGPIzmqfSPBE=:",
+        "Digest": "sha-256=:eFrGnxMPfzktYWb/1NQJDPPeeFoKXXkifOif3V4jw7o=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": ":root{font:18px/1.4 system-ui,sans-serif}\nbody{margin:2rem auto;max-width:28rem}\n"
+      "body_sha256": "785ac69f130f7f392d6166ffd4d4090cf3de785a0a5d79227ce89fdd5e23c3ba"
+    }
+  },
+  {
+    "id": "p-codec-js",
+    "message": "p-codec-js",
+    "comment": "Tunnel handshake, frames, records and payloads (tunnel-v2 SS2-SS6). Body pinned by digest, not duplicated: the served bytes are web/js/codec.js and a second copy in this file would drift.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/codec.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:TYWwk1IGiTza/z4obOP7107ASeGxcro1bgV2/HOfDp8=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "4d85b0935206893cdaff3e286ce3fbd74ec049e1b172ba356e0576fc739f0e9f"
+    }
+  },
+  {
+    "id": "p-connection-js",
+    "message": "p-connection-js",
+    "comment": "Tunnel request lifecycle and FR-24 states (tunnel-v2 SS7, SS9). Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/connection.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:HAUbt3/JvOj+BAGlvgDY7rHer/A0Ld92v9gYdEcElRk=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "1c051bb77fc9bce8fe0401a5be00d8eeb1deaff0342ddf76bfd8187447049519"
+    }
+  },
+  {
+    "id": "p-page-js",
+    "message": "p-page-js",
+    "comment": "The pairing screens and the page's wiring (NFR-12). Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/page.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:Q0qKsTvG2TZ/qVS1eanTFODhbQaz8JK5wTpwYrp3F1I=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "434a8ab13bc6d9367fa954b579a9d314e0e16d06b3f092b9c13a7062ba771752"
+    }
+  },
+  {
+    "id": "p-boot-js",
+    "message": "p-boot-js",
+    "comment": "Pairing-to-handover orchestration and the FR-24 causes (FR-40). Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/boot.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:ocCjL/bF4mGDDiV+M3w+xAGRO4hGrgyZ4YO5rThMMfY=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "a1c0a32ff6c5e261830e257e337c3ec401913b8846ae0c99e183b9ad384c31f6"
+    }
+  },
+  {
+    "id": "p-pairing-js",
+    "message": "p-pairing-js",
+    "comment": "Pairing crypto: transcript, SAS and envelope seal (SS11, SS12). Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/pairing.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:EplVUUY1+23uCoCbmDWjxcyQUZTy+S0fmgF2kqgpnj0=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "129955514635fb6dee0a809b9835a3c5cc905194f2f92d1f9a017692a8299e3d"
+    }
+  },
+  {
+    "id": "p-rendezvous-js",
+    "message": "p-rendezvous-js",
+    "comment": "The rendezvous HTTP client (SS9, SS10). Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/rendezvous.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:Jht8jXUenK2VIePXnlIdWUmFg+eVDFZy4FF3zh8xU5U=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "261b7c8d751e9cad9521e3d79e521d59498583e7950c5672e05177ce1f315395"
+    }
+  },
+  {
+    "id": "p-session-js",
+    "message": "p-session-js",
+    "comment": "Session offer/answer and the data channel (SS9, SS12). Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/session.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:T2Qb/LRRZiJEbTyzN2cokG/Xq6/3xChnLhPGC6NhVJY=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "4f641bfcb4516622446d3cb3376728906fd7abaff7c428672e13c60ba3615496"
+    }
+  },
+  {
+    "id": "p-store-js",
+    "message": "p-store-js",
+    "comment": "Per-installation storage namespace. Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/store.js"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Digest": "sha-256=:rVEm++8Jn3IipNeIbzcTCa4wDzAJ4ZNfkY9PIXo2X84=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "ad5126fbef099f7222a4d7886f371309ae300f3009e1935f918f4f217a365fce"
     }
   },
   {

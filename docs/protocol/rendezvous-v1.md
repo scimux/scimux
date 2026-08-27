@@ -77,12 +77,16 @@ replay.
 
 | id | class | route | direction |
 |---|---|---|---|
+| `hello-request` | admission | `GET /v1/hello` | installation → rv |
+| `hello-response` | admission | `GET /v1/hello` | rv → installation |
 | `enroll-request` | admission | `POST /v1/enroll` | installation → rv |
 | `enroll-response` | admission | `POST /v1/enroll` | rv → installation |
 | `challenge-request` | admission | `POST /v1/challenge` | installation → rv |
 | `challenge-response` | admission | `POST /v1/challenge` | rv → installation |
 | `verify-request` | admission | `POST /v1/verify` | installation → rv |
 | `verify-response` | admission | `POST /v1/verify` | rv → installation |
+| `unenroll-request` | admission | `POST /v1/unenroll` | installation → rv |
+| `unenroll-response` | admission | `POST /v1/unenroll` | rv → installation |
 | `auth-message` | construction | — | signed bytes, not an HTTP body |
 | `handle` | construction | — | `ih_` + 16 Crockford characters |
 | `wait-request` | rendezvous | `POST /v1/wait` | installation → rv |
@@ -108,6 +112,13 @@ replay.
 | `p-page` | bootstrap | `GET /p` | device → rv |
 | `p-boot-js` | bootstrap | `GET /p/boot.js` | device → rv |
 | `p-boot-css` | bootstrap | `GET /p/boot.css` | device → rv |
+| `p-codec-js` | bootstrap | `GET /p/codec.js` | device → rv |
+| `p-connection-js` | bootstrap | `GET /p/connection.js` | device → rv |
+| `p-page-js` | bootstrap | `GET /p/page.js` | device → rv |
+| `p-pairing-js` | bootstrap | `GET /p/pairing.js` | device → rv |
+| `p-rendezvous-js` | bootstrap | `GET /p/rendezvous.js` | device → rv |
+| `p-session-js` | bootstrap | `GET /p/session.js` | device → rv |
+| `p-store-js` | bootstrap | `GET /p/store.js` | device → rv |
 | `p-rejection` | bootstrap | `GET /p/not-in-inventory` | rv → device |
 | `stun-binding-request` | stun | — | client → rv (UDP Binding) |
 | `stun-binding-success` | stun | — | rv → client (XOR-MAPPED-ADDRESS) |
@@ -159,6 +170,38 @@ bind.
 As built in P2. Not redesigned.
 
 Admission body cap: **2048 bytes**. Read deadline: **2 s**.
+
+### 4.0 `GET /v1/hello`
+
+The pre-flight probe. Unauthenticated, stateless, and answerable
+before the caller holds an invite, a handle, or a key — which is
+the whole reason it exists.
+
+An installation's invite is single-use, so a client that cannot
+distinguish "this rendezvous is unreachable" from "this rendezvous
+rejected me" must spend the credential to find out. `/v1/hello`
+lets it prove reachability and version compatibility first, and
+leave the invite untouched when either fails.
+
+Request: no body, no credential.
+
+Response: `200`, `application/json`.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | the server constant of §3 |
+| `min` | number | the lowest `v` this server accepts |
+
+Both bounds are present. A client reading only `v` can tell the
+server is newer than it expected but not whether the server would
+still accept it; `min` is what lets the client's error name the
+side that is behind.
+
+The response carries nothing else. It is reachable by anyone who
+can resolve the host, so build strings, counts and operator detail
+must not accumulate here. Any method other than `GET` (and the
+`HEAD` the method-pattern router answers from it) is the constant
+rejection of §7.
 
 ### 4.1 `POST /v1/enroll`
 
@@ -230,6 +273,41 @@ Response: `204` with an empty body and no extra headers.
 The handle alone is not a credential. Presenting it without a
 valid signature is `rejection-unauthorised`.
 
+### 4.4 `POST /v1/unenroll`
+
+Releases an installation at its own request, so a laptop that
+unlinks locally does not leave a bound row only an operator can
+clear.
+
+Request: identical in shape to §4.3, and authenticated the same
+way. The route segment of the signed message (§5) is
+`/v1/unenroll`, so a signature made to reconnect can never be
+replayed to delete the installation instead.
+
+| field | type | encoding |
+|---|---|---|
+| `v` | number | §3 |
+| `handle` | string | §6 |
+| `challenge` | string | 32-byte nonce, 64 hex chars |
+| `sig` | string | 64-byte Ed25519 signature, 128 hex chars |
+
+Response: `204` with an empty body and no extra headers.
+
+On success the server records the same revocation an operator
+`revoke` writes. Afterwards the handle no longer resolves to a
+usable installation: it cannot obtain a challenge, and a second
+release is `rejection-unauthorised`. A released installation and
+one that never existed are indistinguishable to any caller.
+
+**It releases the installation, never the code.** The redeemed
+invite stays redeemed. Unlinking is not a refund, the code log is
+append-only, and there is no operation anywhere in this protocol
+that returns a spent invite to the pool.
+
+Clients treat this as best-effort. An unreachable rendezvous must
+not prevent a local unlink — if it did, the failure mode this
+route exists to avoid would simply move.
+
 ---
 
 ## 5. Signed message
@@ -250,9 +328,9 @@ internally; do not pre-hash.
   normalisation beyond what the operator configured.
 - `ProtocolVersion` is the server constant `1`, decimal ASCII,
   no leading zeros.
-- `route` is the path being authorised: `/v1/verify`, `/v1/wait`,
-  `/v1/pair/wait`, `/v1/pair/cancel`. A signature for one route
-  does not authenticate another.
+- `route` is the path being authorised: `/v1/verify`,
+  `/v1/unenroll`, `/v1/wait`, `/v1/pair/wait`, `/v1/pair/cancel`.
+  A signature for one route does not authenticate another.
 - `raw challenge` is the 32 nonce bytes, not their hex.
 
 Vector `auth-message-verify` / `ed25519-verify-sig`.
@@ -694,6 +772,38 @@ QR / link carry `X`, `rid`, `code`, `origin` in the URL fragment
 `code`; a malicious rv can MITM that path, which is why SAS is
 mandatory there.
 
+### 11.1 Invite fragment
+
+The fragment is `application/x-www-form-urlencoded`:
+
+| key | value |
+|---|---|
+| `v` | `1`. Any other value is refused, never guessed at. |
+| `o` | the rendezvous origin. Optional; when present it MUST equal the origin the page was served from, or the invite is refused. |
+| `c` | the short code, grouped or not (§10.1 normalisation applies). |
+| `r` | the 64-character lowercase-hex RID. |
+| `x` | `X` uncompressed, hex — 130 characters beginning `04`. |
+
+A fragment carrying none of `c`, `r`, `x` is simply not an invite
+and is not an error. A fragment carrying some of them is refused.
+These values MUST NOT appear in the query string: a query reaches
+rv's access log, and §8 forbids the RID on that surface.
+
+### 11.2 The typed path is deferred (V1)
+
+Decided 2026-08-26. A device that typed only a short code has
+neither `X` nor `rid`. Without `X` it cannot compute `ECDH(X, Y)`
+and so has no digits to compare; without `rid` it cannot even open
+the laptop's `pair-reply`, whose AD is `origin || 0x00 || rid_hex`
+(§12.2). §12.3 therefore describes a path no client can complete,
+and a client that appeared to complete it would be showing digits
+it had not derived — the exact failure §12.3 exists to prevent.
+
+V1 clients pair from a link or QR only. Closing the gap means
+carrying `x_pub` and `rid` in the `pair-reply` and unsealing that
+reply on the typed path; it is a change to §12.1 and §12.3 and to
+both implementations, and is deliberately not made here.
+
 ---
 
 ## 12. Envelope inner format and seal
@@ -784,9 +894,39 @@ byte-identical inventory responses.
 
 | route | type | cache | integrity | notes |
 |---|---|---|---|---|
-| `GET /p` | `text/html; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the HTML | pairing-code shell. No application code. |
-| `GET /p/boot.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | bootstrap only. Does not load the module graph; that graph arrives over the channel (FR-40). |
+| `GET /p` | `text/html; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the HTML | the page shell: markup and one module import. No application code. |
+| `GET /p/page.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the pairing screens (NFR-12) and the page's wiring. |
+| `GET /p/boot.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | pairing-to-handover orchestration and the FR-24 causes. Does not load the module graph; that graph arrives over the channel (FR-40). |
+| `GET /p/pairing.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | pairing crypto: transcript, SAS, envelope seal (§11, §12). |
+| `GET /p/rendezvous.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the rendezvous HTTP client (§9, §10). |
+| `GET /p/session.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | session offer/answer and the data channel (§9, §12). |
+| `GET /p/store.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | per-installation storage namespace. |
 | `GET /p/boot.css` | `text/css; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the CSS | bootstrap styles. |
+| `GET /p/codec.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel handshake, frames, records and payloads ([`tunnel-v2.md`](tunnel-v2.md) §2–§6). Protocol, not application code. |
+| `GET /p/connection.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel request lifecycle and FR-24 states (`tunnel-v2.md` §7, §9). Protocol, not application code. |
+
+The inventory grew from three rows to five on 2026-08-24, when the
+tunnel protocol moved into this repository, and from five to ten on
+2026-08-26, when the pairing client was built. "Closed" means
+**enumerated and fail-closed**, not fixed at any number: a row is
+added by amending this table and `specPInventory`, never by a
+wildcard, a directory handler, or a route that reads from disk per
+request.
+
+Every module is served at the path its own relative imports resolve
+to, so rv's half of the page needs no import map and no specifier
+rewriting. The laptop's graph is a different problem and another
+repository's (`tunnel-v2.md` §8).
+
+None of these modules is application code. They implement pairing,
+the tunnel, and the FR-24 states, and they stop at §8's three fixed
+constants. FR-33 is asserted over them as a closure property rather
+than a word ban: every `import` in an inventory body resolves to
+another row of this table, and the only laptop route any of them
+names is §8's `/api/remote/bootstrap`, which is fetched over the
+data channel and never from rv. What the browser does *after* the
+channel is negotiated is fetched from the laptop through those three
+constants.
 
 Each inventory response also carries:
 
@@ -810,47 +950,37 @@ constant 404 before ServeMux can 301.
 
 ### 13.1 Served bytes
 
-These are the inventory bodies. Vectors `p-page`, `p-boot-js`,
-`p-boot-css` carry the same bytes. They contain no `/js/`, no
-`/api/`, no `index.html` of the application, no import map, and
-no version token.
-
-`GET /p` (`p-page`):
+`GET /p` (`p-page`) is the only inventory body small enough to pin
+verbatim, and its vector carries these exact bytes. It contains no
+`/js/` of the application, no `/api/`, no `index.html`, no import
+map, and no version token:
 
 ```
 <!doctype html>
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>pair</title>
+<title>Pair with scimux</title>
 <link rel=stylesheet href="/p/boot.css">
-<form id=pair>
-<label>pairing code <input name=code autocomplete=one-time-code></label>
-<button type=submit>continue</button>
-</form>
-<script src="/p/boot.js"></script>
+<main id=app><h1>Pair with scimux</h1><p>Loading&#8230;</p></main>
+<script type=module>import{start}from"/p/page.js";start();</script>
 ```
 
 (the file ends with a newline).
 
-`GET /p/boot.js` (`p-boot-js`):
+The nine asset rows are **not reproduced inline.** They are hundreds
+of lines of protocol and pairing implementation, and pasting them
+here would create a second copy to keep in sync with `web/` — the
+drift this document exists to prevent. Their served bytes are exactly
+the checked-in bytes of the matching file under `web/js/` and
+`web/css/`, embedded at build time; each vector pins its
+`body_sha256` and its `Digest` header, so a module that changes moves
+its own row and nothing else. The behaviour they implement is
+specified in this document and in [`tunnel-v2.md`](tunnel-v2.md).
 
-```
-document.documentElement.dataset.boot="1";
-```
-
-(the file ends with a newline). Channel setup and the module
-graph are not in this file. A later scimux-owned bootstrap may
-replace these bytes; the inventory, headers, and fail-closed
-rule do not change.
-
-`GET /p/boot.css` (`p-boot-css`):
-
-```
-:root{font:18px/1.4 system-ui,sans-serif}
-body{margin:2rem auto;max-width:28rem}
-```
-
-(the file ends with a newline).
+The FR-33 properties that apply to every inventory row — no scimux
+version token, no application code, imports closed over the table,
+byte-identical across rv versions — are asserted by
+`TestAT_FR_33_b_NoApplicationCode` and `TestAT_FR_33_c_NoScimuxVersionPin`.
 
 ---
 
