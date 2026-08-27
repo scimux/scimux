@@ -199,9 +199,6 @@ var reachConfigSeams = map[string]bool{
 // reachConfigOpenFindings is the Config half of reachOpenFindings: a field the
 // struct documents as an operator action, that no operator can reach.
 var reachConfigOpenFindings = map[string]string{
-	"Rotate": "remote.go:313 calls this \"the explicit identity rotation action\", " +
-		"but remote_command.go registers no flag for it and nothing sets it. " +
-		"Identity rotation is unreachable from the binary.",
 	"TunnelHandler": "deprecated by join 3 in favour of TunnelHandlerFor, which " +
 		"remote_command.go does set. The join-2 rows keep the old field exercised " +
 		"until it is removed; this entry goes with it.",

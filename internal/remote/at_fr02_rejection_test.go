@@ -153,11 +153,12 @@ func TestAT_FR_02_f_LostResponseStillBurnsTheInvite(t *testing.T) {
 	}
 }
 
-// A rejected rotate must not cost the user the enrollment they already had.
-// enrollNew overwrites c.st before it posts, so without a rollback a bad
-// invite typed at an enrolled installation would replace a working identity
-// with a stranded keypair.
-func TestAT_FR_02_f_RejectedRotateKeepsTheEnrolledIdentity(t *testing.T) {
+// A second invite must not cost the user the enrollment they already had.
+// enrollNew overwrites c.st before it posts, so an enrolled installation
+// that ran it on a stray invite would trade a working identity for a
+// stranded keypair — which is why a working installation refuses the
+// credential outright, before any network contact, and keeps both.
+func TestAT_FR_02_f_ASecondInviteKeepsTheEnrolledIdentity(t *testing.T) {
 	fake := newFakeRV(t)
 	fake.Issue(vectorInviteGrouped)
 	cfg := clientCfg(t, fake)
@@ -177,29 +178,46 @@ func TestAT_FR_02_f_RejectedRotateKeepsTheEnrolledIdentity(t *testing.T) {
 
 	_ = c.Close()
 
-	// A second, unissued invite presented with an explicit rotate.
-	rotate := cfg
-	rotate.Rotate = true
-	rotate.InviteFile = writeInviteFile(t, t.TempDir(), unissuedInvite, 0o600)
+	// A second invite arrives at the enrolled installation. It is the
+	// unissued one on purpose: if the refusal ever regressed into an
+	// enrollment attempt, this is the shape that would leave the wreckage
+	// behind, and the assertions below would see it.
+	second := cfg
+	second.InviteFile = writeInviteFile(t, t.TempDir(), unissuedInvite, 0o600)
 
-	c2 := NewClient(rotate)
-	requireClass(t, c2.Start(ctx), ClassEnrollRejected)
+	nreq := fake.RequestCount()
+	c2 := NewClient(second)
+	err := c2.Start(ctx)
+	requireClass(t, err, ClassInviteConflict)
+
+	// The refusal is local. Nothing was asked of the rendezvous, so no
+	// answer of any kind could have cost the user their installation.
+	if fake.RequestCount() != nreq {
+		t.Fatalf("a refused second invite contacted the rendezvous: %v", fake.Paths()[nreq:])
+	}
 
 	after, raw, ok := readStateFile(t, c2.StatePath())
 	if !ok {
-		t.Fatal("a rejected rotate deleted the state file")
+		t.Fatal("a refused second invite deleted the state file")
 	}
 	if after.Status != StateEnrolled {
-		t.Fatalf("status = %q after a rejected rotate, want %s; bytes=%s", after.Status, StateEnrolled, raw)
+		t.Fatalf("status = %q after a refused second invite, want %s; bytes=%s", after.Status, StateEnrolled, raw)
 	}
 	if after.PublicKey != enrolled.PublicKey || after.PrivateKey != enrolled.PrivateKey {
-		t.Fatal("a rejected rotate replaced the working installation identity")
+		t.Fatal("a refused second invite replaced the working installation identity")
 	}
 	if after.Handle != enrolled.Handle {
-		t.Fatalf("handle = %q after a rejected rotate, want %q", after.Handle, enrolled.Handle)
+		t.Fatalf("handle = %q after a refused second invite, want %q", after.Handle, enrolled.Handle)
 	}
-	if _, err := os.Stat(rotate.InviteFile); err != nil {
-		t.Fatalf("the rejected invite was destroyed: %v", err)
+	if _, err := os.Stat(second.InviteFile); err != nil {
+		t.Fatalf("the refused invite was destroyed: %v", err)
+	}
+
+	// The message has to name the way out, because there is one: the
+	// operator revokes this installation and the same invite then lifts it.
+	g := strings.ToLower(guidanceOf(err))
+	if !strings.Contains(g, "revoke") {
+		t.Errorf("invite-conflict guidance names no way forward: %q", guidanceOf(err))
 	}
 }
 

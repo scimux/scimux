@@ -328,9 +328,6 @@ type Config struct {
 	// InviteString is a test/programmatic stand-in for an already-read
 	// invite. Production input is TTY, --invite-file, or --invite-stdin.
 	InviteString string
-	// Rotate is the explicit identity rotation action. A different invite
-	// on an enrolled installation without Rotate is ClassInviteConflict.
-	Rotate bool
 
 	Stdin  io.Reader
 	Stdout io.Writer

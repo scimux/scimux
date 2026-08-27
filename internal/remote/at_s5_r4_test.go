@@ -417,42 +417,42 @@ func TestS5R4_F5_InviteConflictPreservesInvite(t *testing.T) {
 	}
 }
 
-func TestS5R4_F5_RotateFailureBeforeNetworkPreservesInvite(t *testing.T) {
+// enrollNew persists the new identity before it posts, so a disk that
+// fails at that moment must leave the credential unspent. The reachable
+// installation this happens on is a revoked one being lifted by a new
+// invite: the write fault fires on the ambiguous pre-post commit, and the
+// invite has to survive it.
+func TestS5R4_F5_LiftPersistFailurePreservesInvite(t *testing.T) {
 	ctx, cancel := ctxTO(t)
 	defer cancel()
 	fake := newFakeRV(t)
 	cfg := clientCfg(t, fake)
-	path := writeInviteFile(t, cfg.DataDir, vectorInviteGrouped, 0o600)
-	cfg.InviteFile = path
-	c, err := startClient(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatal(err)
-	}
+	seedRevoked(t, NewClient(cfg))
+
 	other := otherInvite()
-	path2 := writeInviteFile(t, t.TempDir(), other, 0o600)
-	before, _ := os.ReadFile(path2)
-	nreq := fake.RequestCount()
 	fake.Issue(other)
+	path := writeInviteFile(t, t.TempDir(), other, 0o600)
+	before, _ := os.ReadFile(path)
 	cfg2 := cfg
-	cfg2.InviteFile = path2
-	cfg2.Rotate = true
+	cfg2.InviteFile = path
 	cfg2.FailWrite = &WriteFault{Step: WriteTempCreate, When: StateAmbiguous}
-	err = NewClient(cfg2).Start(ctx)
+	nEnroll := fake.EnrollCount()
+
+	err := NewClient(cfg2).Start(ctx)
 	if err == nil {
-		t.Fatal("F5: rotate persist failure succeeded")
+		t.Fatal("F5: lift persist failure succeeded")
 	}
-	if fake.RequestCount() != nreq {
-		t.Fatalf("F5: rotate contacted network before persist: %v", fake.Paths())
+	// The pre-flight probe runs before this, so the network was contacted;
+	// what must not have happened is the post that spends the code.
+	if fake.EnrollCount() != nEnroll {
+		t.Fatalf("F5: lift posted the invite before persisting the identity (enrolls %d -> %d)", nEnroll, fake.EnrollCount())
 	}
-	after, err := os.ReadFile(path2)
+	after, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("F5: rotate failure removed invite: %v", err)
+		t.Fatalf("F5: lift failure removed invite: %v", err)
 	}
 	if !bytes.Equal(before, after) {
-		t.Fatalf("F5: rotate failure mutated invite: %q -> %q", before, after)
+		t.Fatalf("F5: lift failure mutated invite: %q -> %q", before, after)
 	}
 }
 

@@ -183,8 +183,30 @@ func (c *Client) startOwned(ctx context.Context) error {
 		c.hosted = "disabled"
 		return classError(ClassDisabled, "start", "remote access is disabled; reenable explicitly")
 	case StateRevoked:
-		c.hosted = "revoked"
-		return classError(ClassRevoked, "start", "this installation has been revoked")
+		// Revocation is the operator saying "not this installation". A new
+		// invite is the same operator saying otherwise, and it is the only
+		// thing that can lift it — so it is read here rather than after the
+		// bail, which is what used to make revocation a dead end. The old
+		// identity is struck off at the rendezvous, so this is an ordinary
+		// first enrollment that happens to have wreckage on disk: fresh
+		// keypair, fresh handle. readInviteOptional again, because a bare
+		// start must answer without contacting a rendezvous that has
+		// already refused this key.
+		invite, src, err := c.readInviteOptional()
+		if err != nil {
+			return err
+		}
+		if invite == "" {
+			c.hosted = "revoked"
+			return classError(ClassRevoked, "start", "this installation has been revoked")
+		}
+		if err := c.enrollFresh(ctx, invite, src); err != nil {
+			if c.st.Status == StateRevoked {
+				c.hosted = "revoked"
+			}
+			return err
+		}
+		return nil
 	case StateKeyMissing:
 		return classError(ClassKeyMissing, "start", "the installation private key is missing")
 	case StateCorrupt:
@@ -219,13 +241,18 @@ func (c *Client) startOwned(ctx context.Context) error {
 		}
 		return c.consumePostedInvite(src, invite, err)
 	case StateEnrolled:
-		if invite, src, err := c.readInviteOptional(); err != nil {
+		// A working installation is not a place to spend a credential. The
+		// invite is refused before any network contact and left on disk:
+		// what the holder of a second invite almost always has is a second
+		// machine, and if they really do mean to replace this one, the
+		// operator revokes it first and the revoked branch above enrolls
+		// it fresh.
+		if invite, _, err := c.readInviteOptional(); err != nil {
 			return err
-		} else if invite != "" && !c.cfg.Rotate {
-			return classError(ClassInviteConflict, "start", "a different invite cannot rotate an enrolled identity without an explicit rotate")
-		} else if invite != "" && c.cfg.Rotate {
-			err := c.enrollNew(ctx, invite)
-			return c.consumePostedInvite(src, invite, err)
+		} else if invite != "" {
+			return classError(ClassInviteConflict, "start",
+				"this installation is already enrolled; a second invite is not used here. To move this "+
+					"installation to a new invite, ask whoever issued it to revoke this one first")
 		}
 		if err := c.authenticate(ctx); err != nil {
 			if classOfErr(err) == ClassRevoked {
@@ -253,26 +280,35 @@ func (c *Client) startOwned(ctx context.Context) error {
 		// The local checks come first on purpose — an invite with the
 		// wrong mode or the wrong shape is refused without any network
 		// contact at all.
-		if err := c.preflight(ctx); err != nil {
-			return err
-		}
-		err = c.enrollNew(ctx, invite)
-		if err := c.consumePostedInvite(src, invite, err); err != nil {
-			return err
-		}
-		if err := c.authenticate(ctx); err != nil {
-			if classOfErr(err) == ClassRevoked {
-				c.hosted = "revoked"
-				c.st.Status = StateRevoked
-				_ = c.persist(c.snapshotState())
-			} else {
-				c.hosted = "unavailable"
-			}
-			return err
-		}
-		c.hosted = "enrolled"
-		return nil
+		return c.enrollFresh(ctx, invite, src)
 	}
+}
+
+// enrollFresh is the whole first-enrollment sequence: prove the path,
+// mint an identity, spend the invite, then authenticate with what the
+// rendezvous bound. A revoked installation presented with a new invite
+// runs exactly this — the only difference between the two callers is
+// where the credential came from, which is why it is passed in.
+func (c *Client) enrollFresh(ctx context.Context, invite string, src inviteSrc) error {
+	if err := c.preflight(ctx); err != nil {
+		return err
+	}
+	err := c.enrollNew(ctx, invite)
+	if err := c.consumePostedInvite(src, invite, err); err != nil {
+		return err
+	}
+	if err := c.authenticate(ctx); err != nil {
+		if classOfErr(err) == ClassRevoked {
+			c.hosted = "revoked"
+			c.st.Status = StateRevoked
+			_ = c.persist(c.snapshotState())
+		} else {
+			c.hosted = "unavailable"
+		}
+		return err
+	}
+	c.hosted = "enrolled"
+	return nil
 }
 
 // ambiguousEnrollmentGuidance is what the human reads after the outcome
@@ -469,7 +505,7 @@ func (c *Client) enrollNew(ctx context.Context, invite string) error {
 	// the installation is already overwritten by the time rv answers. That is
 	// correct for an ambiguous outcome — the new key may be bound — but a
 	// clean rejection bound nothing, and leaving the wreckage behind would
-	// turn a mistyped rotate into a lost enrollment and a fresh install into
+	// turn a mistyped lifting invite into a lost identity and a fresh install into
 	// a state file that refuses to start.
 	baseline, hadBaseline := c.enrollBaseline()
 
