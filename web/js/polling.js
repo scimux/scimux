@@ -36,6 +36,8 @@
  *   - renderChatHead, refreshChat (async), renderWsInbox
  *   - invalidateCardsSig, invalidateMap, invalidateBookmarks, invalidateChat
  *   - onStartPolling — usage prime only (badge HTML + 30s cadence stay shell)
+ *   - onPageVisibility(visible) — sole fan-out of the document's
+ *     visibilitychange to features that must pause when the page hides
  *   - syncwarnEl — exact pending/saved warning text
  *
  * Explicit non-ownership:
@@ -141,6 +143,7 @@ export function createPollingFeature(deps = {}) {
     invalidateBookmarks = () => {},
     invalidateChat = () => {},
     onStartPolling = () => {},
+    onPageVisibility = () => {},
   } = deps;
 
   let stateEtag = "";
@@ -158,6 +161,11 @@ export function createPollingFeature(deps = {}) {
 
   const onVisibility = () => {
     if (destroyed) return;
+    /* Told before we act on it ourselves: this listener is the document's
+       single owner of visibilitychange, so anything else that must pause
+       when the page goes away hears about it here rather than adding a
+       second listener with its own idea of what "hidden" means. */
+    onPageVisibility(!doc.hidden);
     if (doc.hidden) {
       if (pollTimer) clearTimeoutImpl(pollTimer);
       pollTimer = null;

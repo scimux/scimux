@@ -280,3 +280,127 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
     },
   };
 }
+
+/* ---------- the paired-device list ----------
+ *
+ * The other half of a grant. Pairing hands a device SSH-equivalent
+ * authority on this laptop, so the list of who holds it, and the way to
+ * take it back, belong to the same feature rather than to a later phase.
+ *
+ * Owned root: #m_devices (delegated click on [data-dev]).
+ * Server calls: GET /api/remote/devices, DELETE /api/remote/devices/:id.
+ * No timers: the list is read when the menu opens and after a revoke,
+ * never polled — a grant does not change behind the human's back.
+ */
+export function createDeviceList({ api, doc } = {}) {
+  /* The id of the row whose next tap revokes. At most one, ever: two
+     armed rows means a stray tap takes out a device the human armed a
+     minute ago and then thought better of. */
+  let armed = "";
+  let devices = [];
+  /* Whether `devices` is anything at all, as opposed to "we have never
+     managed to read the list". The difference decides whether an empty
+     render is allowed to say "no devices paired". */
+  let known = false;
+  let notice = "";
+  let chain = Promise.resolve();
+  const cleanups = [];
+
+  const root = () => doc.querySelector("#m_devices");
+
+  function enqueue(fn) {
+    chain = chain.then(fn).catch(() => {});
+    return chain;
+  }
+
+  function rowHTML(d) {
+    const id = String((d && d.id) || "");
+    /* A row that says nothing is a row nobody dares revoke, so an
+       unlabelled device falls back to the only other thing that
+       identifies it. */
+    const name = (d && d.label) || id;
+    const armedRow = armed === id;
+    return (
+      `<div class="item"><span>${esc(name)}</span>` +
+      `<button type="button" data-dev="${esc(id)}"` +
+      (armedRow ? ` class="danger"` : "") +
+      `>${armedRow ? "Confirm revoke" : "Revoke"}</button></div>`
+    );
+  }
+
+  function render() {
+    const host = root();
+    if (!host) return;
+    let html = devices.map(rowHTML).join("");
+    if (!html && known) html = `<div class="item note">No devices paired.</div>`;
+    if (notice) html += `<div class="item err">${esc(notice)}</div>`;
+    host.innerHTML = html;
+  }
+
+  async function refresh() {
+    try {
+      const r = await api("/api/remote/devices", {});
+      devices = (r && r.devices) || [];
+      known = true;
+      notice = "";
+    } catch (e) {
+      /* Never blank the list on a failed read. An empty list reads as
+         "nothing is paired", which is the most dangerous sentence this
+         surface can say when it is not true — and on a first read it
+         would be a claim made from no evidence at all. */
+      notice = "Could not read the paired devices: " + ((e && e.message) || "unknown error");
+    }
+    armed = "";
+    render();
+  }
+
+  function revoke(id) {
+    enqueue(async () => {
+      try {
+        await api(`/api/remote/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await refresh();
+      } catch (e) {
+        /* No disarming here: onClick cleared `armed` before it called us,
+           so a second authority over the same field could only disagree. */
+        notice = "Could not revoke that device: " + ((e && e.message) || "unknown error");
+        render();
+      }
+    });
+  }
+
+  function onClick(ev) {
+    const hit = ev && ev.target && ev.target.closest && ev.target.closest("[data-dev]");
+    if (!hit) return;
+    if (ev.preventDefault) ev.preventDefault();
+    const id = hit.dataset.dev;
+    if (armed === id) {
+      armed = "";
+      revoke(id);
+      return;
+    }
+    armed = id;
+    render();
+  }
+
+  function bind() {
+    const host = root();
+    if (!host) return;
+    host.addEventListener("click", onClick);
+    cleanups.push(() => host.removeEventListener("click", onClick));
+  }
+
+  return {
+    bind,
+    destroy() {
+      while (cleanups.length) cleanups.pop()();
+    },
+    refresh: () => enqueue(refresh),
+    async settled() {
+      let prev;
+      do {
+        prev = chain;
+        await chain;
+      } while (chain !== prev);
+    },
+  };
+}

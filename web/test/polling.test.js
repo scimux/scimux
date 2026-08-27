@@ -190,6 +190,7 @@ function makeFeature(overrides = {}) {
     invalidateBookmarks: overrides.invalidateBookmarks || effects.push("invalidateBookmarks"),
     invalidateChat: overrides.invalidateChat || effects.push("invalidateChat"),
     onStartPolling: overrides.onStartPolling || effects.push("onStartPolling"),
+    onPageVisibility: overrides.onPageVisibility,
     ...overrides.extraDeps,
   });
   return { f, timers, storage, document, window, effects, syncwarnEl, fetchBundle };
@@ -894,4 +895,30 @@ test("two-second delay begins only after tick completion", async () => {
   await flush();
   assert.equal(hits, 2);
   f.destroy();
+});
+
+/* The document's visibilitychange has exactly one owner (see
+ * TestAppCompositionRootOwnership); anything else that needs to know the
+ * page went away asks through this seam rather than adding a second
+ * listener with its own idea of what "hidden" means. */
+test("visibility changes are forwarded to the injected seam", async () => {
+  const seen = [];
+  const document = fakeTarget({ hidden: false });
+  const { f } = makeFeature({
+    document,
+    onPageVisibility: (visible) => { seen.push(visible); },
+  });
+  f.bind();
+
+  document.hidden = true;
+  document.dispatch("visibilitychange");
+  document.hidden = false;
+  document.dispatch("visibilitychange");
+  assert.deepEqual(seen, [false, true],
+    "a feature that must pause when the page is hidden was never told");
+
+  f.destroy();
+  document.hidden = true;
+  document.dispatch("visibilitychange");
+  assert.deepEqual(seen, [false, true], "the seam outlived destroy()");
 });

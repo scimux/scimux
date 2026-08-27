@@ -63,6 +63,7 @@ import {
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
+import { createPairingFeature, createDeviceList } from "./pairing-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { focusAtEnd } from "./caret.js";
@@ -1167,6 +1168,12 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     alert: msg => alert(msg),
   });
 
+  /* Device pairing + the list of who holds a grant — Packet S8.
+     Both take the generic api() and the document; pairing-ui.js owns every
+     #pair_* root and #m_devices, and nothing else here writes into them. */
+  const pairingFeature = createPairingFeature({ api, doc: document });
+  const deviceList = createDeviceList({ api, doc: document });
+
   /* Shell navigation into/out of Journeys (not map-local chrome). */
   /* the chevron must describe the tap: on desktop the button is a toggle, so it
      flips with the pane; on the phone Journeys is a forward level and never
@@ -1510,6 +1517,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   searchFeature.bind();
   /* Generic sheets + new-activity + adoption (Packet 7H). */
   sheetsFeature.bind();
+  /* Pairing sheet + paired-device list (Packet S8). */
+  pairingFeature.bind();
+  deviceList.bind();
   ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
   }, { passive: true }));
@@ -1717,6 +1727,26 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closePreview(); }
   });
 
+  /* ---- burger menu: remote access ----
+     The device list is read when the menu opens and after a revoke, never
+     polled: a grant does not change behind the human's back, and a list on
+     a one-second timer would be a second poller for a value that moves
+     perhaps twice a year. #burger's open transition belongs to sheets.js;
+     this listener only asks for fresh data. */
+  $("#burger").addEventListener("click", () => { deviceList.refresh(); });
+  $("#m_pair").addEventListener("click", () => {
+    sheetsFeature.closeSheets();
+    pairingFeature.open();
+  });
+  /* The pairing overlay is not a `.sheet` and so carries its own scrim
+     rather than the shared #backdrop, whose one listener closes every
+     sheet unconditionally. Dismissal is the feature's call: a live pairing
+     code says no, because a scrim tap that abandoned it would leave a
+     minted credential outstanding with no cancel behind it. ✕ is the way out. */
+  $("#pairscrim").addEventListener("click", () => {
+    if (pairingFeature.dismissable()) pairingFeature.close();
+  });
+
   /* ---- burger menu: manual update check + self-update + about ----
      The check and the download run only on an explicit tap; the server never
      phones home on its own. The install is confirm-first, and the button walks
@@ -1833,6 +1863,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     invalidateBookmarks: () => bookmarksFeature.invalidate(),
     invalidateChat: () => chatFeature.invalidate(),
     onStartPolling: () => readUsage(), /* prime; 30s cadence stays shell-owned */
+    /* A phone that sleeps mid-pairing must not keep polling a code that
+       expired while the screen was off; the reducer owns what that means.
+       Routed through polling.js because the document's visibilitychange
+       has exactly one owner. */
+    onPageVisibility: visible => pairingFeature.setVisible(visible),
   });
   pollingFeature.bind();
   /* iOS leaves the layout viewport at the landscape height after rotating back to
