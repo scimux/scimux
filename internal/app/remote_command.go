@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +32,7 @@ type Command struct {
 	application *app
 	client      *remote.Client
 	listenAddr  string
+	listener    net.Listener
 	socket      string
 
 	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
@@ -155,6 +157,19 @@ func (c *Command) Run(ctx context.Context) error {
 		c.handler = local
 	}
 
+	// Bind before enrolling. An invite is single-use, so redeeming one is the
+	// only step of startup that cannot be retried; the listener is the step
+	// most likely to fail, because a port is the one resource another process
+	// can already hold. Ordered the other way round — as it was on 2026-08-27
+	// — a second scimux on the default port cost a real invite and served
+	// nothing. The bound listener is handed to the caller rather than the
+	// address, so the check and the server cannot be about different sockets.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	c.listener = ln
+
 	if !c.Config.Remote {
 		return nil
 	}
@@ -198,12 +213,60 @@ func (c *Command) Run(ctx context.Context) error {
 	if err != nil {
 		switch remoteClass(err) {
 		case remote.ClassRevoked, remote.ClassDisabled, remote.ClassUnavailable:
+			// scimux still starts: losing remote access must never lock an
+			// operator out of the chats on the computer in front of them.
+			// What it must not do is start *quietly*. Until 2026-08-27 this
+			// was a bare `return nil`, so a revoked computer came up looking
+			// exactly like a healthy one and only /api/remote/status knew
+			// otherwise — which is no use to the person reading the terminal
+			// and wondering why their phone cannot reach it.
+			c.reportDegradedRemote(err)
 			return nil
 		default:
+			c.closeListener()
 			return err
 		}
 	}
 	return nil
+}
+
+// reportDegradedRemote prints the one line that says remote is off and why.
+// It prints Guidance, which is the operator-facing half of remote.Error and
+// is already forbidden from carrying invite plaintext, private keys or
+// rendezvous ids; the wrapped cause is deliberately not printed, because at
+// this point the operator's next move is a decision, not a diagnosis.
+func (c *Command) reportDegradedRemote(err error) {
+	if c == nil || c.Stderr == nil {
+		return
+	}
+	var re *remote.Error
+	why := ""
+	if errors.As(err, &re) {
+		why = re.Guidance
+	}
+	if why == "" {
+		why = string(remoteClass(err))
+	}
+	fmt.Fprintf(c.Stderr, "scimux: remote access is off: %s\n", why)
+	fmt.Fprintln(c.Stderr, "scimux: chats on this computer are unaffected; the web UI is local as usual")
+}
+
+func (c *Command) closeListener() {
+	if c == nil || c.listener == nil {
+		return
+	}
+	_ = c.listener.Close()
+	c.listener = nil
+}
+
+// Listener is the bound localhost listener after a successful Run. The caller
+// serves on it rather than on the address: re-binding would defeat the whole
+// point of binding before the invite is spent.
+func (c *Command) Listener() net.Listener {
+	if c == nil {
+		return nil
+	}
+	return c.listener
 }
 
 func (a *app) setHostedRemote(src interface{ HostedStatus() string }) {

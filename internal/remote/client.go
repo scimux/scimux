@@ -317,6 +317,16 @@ func (c *Client) enrollFresh(ctx context.Context, invite string, src inviteSrc) 
 // there is no client-side retry that can succeed, with or without the
 // invite. The only lever is the operator's, and the message says so rather
 // than sending the user hunting for a recovery flag.
+// invitePrompt is what a bare `scimux --remote` asks on a fresh computer. It
+// used to be the single word "invite: ", which names the thing without saying
+// what it looks like or who has one — everything the person who has never
+// seen an invite needs. Echo is off while this is answered, so the prompt is
+// the only place that explanation can go.
+const invitePrompt = "Paste the invite code from whoever runs your rendezvous (six groups of four): "
+
+// noInviteGivenGuidance answers the empty prompt as its own case.
+const noInviteGivenGuidance = "no invite was given; ask whoever runs your rendezvous for one, then start scimux again"
+
 const ambiguousEnrollmentGuidance = "enrollment may have partially completed: the rendezvous may hold this " +
 	"installation's key, but this machine never received its handle. Ask whoever issued the invite to " +
 	"revoke this installation and send a new invite"
@@ -721,6 +731,13 @@ func (c *Client) readInvite() (string, inviteSrc, error) {
 		return "", src, needInviteErr()
 	}
 	raw = strings.TrimSpace(raw)
+	// An empty answer is not a malformed code, and saying so was actively
+	// misleading: the operator who presses Enter at the prompt has usually
+	// not got an invite at all, and "the invite is not a valid code" sends
+	// them looking for a typo in a code they never typed.
+	if raw == "" {
+		return "", src, classError(ClassInviteFormat, "invite", noInviteGivenGuidance)
+	}
 	if _, err := parseInvite(raw); err != nil {
 		return "", src, classError(ClassInviteFormat, "invite", "the invite is not a valid code")
 	}
@@ -733,7 +750,7 @@ func (c *Client) readInviteTTY() (string, error) {
 		rerr := t.RestoreEcho()
 		return "", TerminalInviteError(errors.Join(err, rerr))
 	}
-	perr := t.WritePrompt([]byte("invite: "))
+	perr := t.WritePrompt([]byte(invitePrompt))
 	line, rerr := t.ReadLine()
 	restErr := t.RestoreEcho()
 	if perr != nil || rerr != nil || restErr != nil {

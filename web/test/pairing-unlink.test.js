@@ -218,3 +218,15 @@ test("destroy releases the listener", () => {
   h.f.destroy();
   assert.equal(h.btn().listenerCount("click"), 0);
 });
+
+test("the resting label names what is being unlinked from", () => {
+  /* Finding 7 of the 2026-08-27 run: "Unlink this computer" says which
+   * machine and not which relationship, so from inside a menu it reads as
+   * if it might unlink the computer from scimux — from the chats — rather
+   * than from the rendezvous that carries remote access to a phone. The
+   * armed label stays short on purpose: by then the sentence has already
+   * been read once. */
+  const h = setup({ [UNLINK]: { released: true, hosted: "" } });
+  assert.match(h.btn().innerHTML, /rendezvous/i, "the resting label does not name the rendezvous");
+  assert.doesNotMatch(h.btn().innerHTML, /confirm/i, "the resting label reads as the armed one");
+});

@@ -448,7 +448,7 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
     const b = btn();
     if (b) {
       b.hidden = !enrolled || done;
-      b.innerHTML = armed ? "Confirm unlink" : "Unlink this computer";
+      b.innerHTML = armed ? "Confirm unlink" : "Unlink from the rendezvous";
       b.className = armed ? "cta danger" : "cta";
     }
     const n = note();

@@ -155,6 +155,9 @@
   font: 13px/1.4 ui-monospace, monospace; background: var(--code-bg);
   padding: 1px 5px; border-radius: 4px;
 }
+/* The SSH comparison is for readers it helps and noise for the rest, so it
+   sits below the sentences that carry the warning on their own. */
+.pair-warn-aside { color: var(--dim); font-size: 13px; margin-top: 8px; }
 /* paired-device rows in the burger's Remote access section */
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }

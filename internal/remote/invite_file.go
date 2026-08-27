@@ -21,20 +21,20 @@ func (c *Client) readInviteFileSys(path string) (string, error) {
 	sys := c.sys()
 	st, err := sys.Lstat(path)
 	if err != nil {
-		return "", classErrorf(ClassInviteFile, "invite-file", "invite file is not usable", err)
+		return "", classErrorf(ClassInviteFile, "invite-file", inviteFileGuidance(path, "cannot be opened"), err)
 	}
 	if !st.Regular {
-		return "", classError(ClassInviteFile, "invite-file", "invite file must be a regular file owned by you with mode 0600")
+		return "", inviteFileModeError(path)
 	}
 	if st.Mode&0o777 != 0o600 {
-		return "", classError(ClassInviteFile, "invite-file", "invite file must be a regular file owned by you with mode 0600")
+		return "", inviteFileModeError(path)
 	}
 	if st.UID != sys.EffectiveUID() {
-		return "", classError(ClassInviteFile, "invite-file", "invite file must be a regular file owned by you with mode 0600")
+		return "", inviteFileModeError(path)
 	}
 	b, err := sys.ReadFile(path)
 	if err != nil {
-		return "", classErrorf(ClassInviteFile, "invite-file", "invite file is not readable", err)
+		return "", classErrorf(ClassInviteFile, "invite-file", inviteFileGuidance(path, "cannot be read"), err)
 	}
 	if len(b) > inviteInputMax {
 		return "", classError(ClassInviteFormat, "invite", "invite input exceeds the allowed size")
@@ -42,19 +42,29 @@ func (c *Client) readInviteFileSys(path string) (string, error) {
 	return string(b), nil
 }
 
-func inviteFileModeError() error {
-	return classError(ClassInviteFile, "invite-file", "invite file must be a regular file owned by you with mode 0600")
+// inviteFileGuidance names the path. --invite-file is the operator saying
+// "this file"; when that read fails, the one thing they need back is which
+// path was tried, because the failure is nearly always a typo, a stale copy,
+// or a file an earlier run already consumed. The path is theirs and is not
+// the credential — the invite's *contents* are what must never be printed,
+// and they are not printed here.
+func inviteFileGuidance(path, what string) string {
+	return "invite file " + path + " " + what
 }
 
-func checkInviteFileStat(st syscall.Stat_t) error {
+func inviteFileModeError(path string) error {
+	return classError(ClassInviteFile, "invite-file", inviteFileGuidance(path, "must be a regular file owned by you with mode 0600"))
+}
+
+func checkInviteFileStat(path string, st syscall.Stat_t) error {
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		return inviteFileModeError()
+		return inviteFileModeError(path)
 	}
 	if st.Mode&0777 != 0600 {
-		return inviteFileModeError()
+		return inviteFileModeError(path)
 	}
 	if int(st.Uid) != os.Geteuid() {
-		return inviteFileModeError()
+		return inviteFileModeError(path)
 	}
 	return nil
 }
@@ -64,18 +74,18 @@ func (c *Client) readInviteFileOwned(path string) (string, error) {
 	if err != nil {
 		var st syscall.Stat_t
 		if e2 := syscall.Lstat(path, &st); e2 == nil {
-			if e := checkInviteFileStat(st); e != nil {
+			if e := checkInviteFileStat(path, st); e != nil {
 				return "", e
 			}
 		}
-		return "", classErrorf(ClassInviteFile, "invite-file", "invite file is not usable", err)
+		return "", classErrorf(ClassInviteFile, "invite-file", inviteFileGuidance(path, "cannot be opened"), err)
 	}
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		syscall.Close(fd)
-		return "", classErrorf(ClassInviteFile, "invite-file", "invite file is not usable", err)
+		return "", classErrorf(ClassInviteFile, "invite-file", inviteFileGuidance(path, "cannot be opened"), err)
 	}
-	if err := checkInviteFileStat(st); err != nil {
+	if err := checkInviteFileStat(path, st); err != nil {
 		syscall.Close(fd)
 		return "", err
 	}
@@ -83,7 +93,7 @@ func (c *Client) readInviteFileOwned(path string) (string, error) {
 	n, err := syscall.Read(fd, raw)
 	if err != nil {
 		syscall.Close(fd)
-		return "", classErrorf(ClassInviteFile, "invite-file", "invite file is not readable", err)
+		return "", classErrorf(ClassInviteFile, "invite-file", inviteFileGuidance(path, "cannot be read"), err)
 	}
 	if n > inviteInputMax {
 		syscall.Close(fd)

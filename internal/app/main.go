@@ -155,7 +155,10 @@ func Run() {
 		hostname = h
 	}
 	configureUsage(flag.CommandLine, os.Args[0])
-	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
+	// Registered so this parse accepts it and so -h documents it; the value is
+	// read from Command.Run, which owns the bind. The listener it returns is
+	// what gets served, so nothing here needs the string.
+	_ = flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
 	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
 	doRemote := flag.Bool("remote", false, "enable remote access")
@@ -247,19 +250,26 @@ func Run() {
 		handler = h
 	}
 
-	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
+	// Run already bound this, before it spent anything at the rendezvous.
+	// Serve on that listener rather than re-binding: a second bind would be a
+	// second chance to fail, after the irreversible step.
+	ln := cmd.Listener()
+	if ln == nil {
+		fmt.Fprintln(os.Stderr, "scimux: startup bound no listener")
+		os.Exit(1)
+	}
+	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), *socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)
 	// -addr may be bound wider than loopback, so give the server real
 	// timeouts (slowloris defense). No ReadTimeout/WriteTimeout: legitimate
 	// handlers can be slow (structured sends, the self-update download);
 	// ReadHeaderTimeout covers the attack that matters.
 	srv := &http.Server{
-		Addr:              *addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.Serve(ln); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}

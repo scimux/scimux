@@ -54,8 +54,9 @@ function record(code) {
 export function authorityWarningHTML() {
   return (
     '<div role="dialog" aria-label="authority-warning">' +
-    "A paired device has SSH-equivalent authority on this computer: " +
-    "it may POST /api/nodes to launch agents and POST /api/update to replace the binary." +
+    "A paired device can do anything you can do at this computer: " +
+    "it can start agents with POST /api/nodes and replace the scimux program with " +
+    "POST /api/update. Same risk as giving someone SSH access to this computer." +
     "</div>"
   );
 }

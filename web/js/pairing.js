@@ -219,18 +219,25 @@ function visibility(s, event, now) {
 }
 
 /* The grant this warning describes is the whole reason pairing is
- * invite-only. It names the two routes that make it SSH-equivalent rather
- * than saying "full access", because a human can weigh "it can replace
- * the binary" and cannot weigh an adjective. */
+ * invite-only. It names the two routes rather than saying "full access",
+ * because a human can weigh "it can replace the program" and cannot weigh
+ * an adjective.
+ *
+ * "SSH-equivalent authority" led that sentence until 2026-08-27. It is
+ * exactly right and it is useless to anyone who has not used SSH — which,
+ * for a supervision UI aimed at people who run agents rather than servers,
+ * is most readers. The comparison now comes last, as a line for those it
+ * helps, after two sentences that stand on their own. */
 export function authorityWarningHTML() {
   return (
     '<div class="pair-warn" role="group" aria-label="What a paired device may do">' +
-    "<p>A paired device has <strong>SSH-equivalent authority</strong> on this computer.</p>" +
+    "<p>A paired device <strong>can do anything you can do at this computer</strong>.</p>" +
     "<ul>" +
-    "<li>It may <code>POST /api/nodes</code> to launch agents that run commands here.</li>" +
-    "<li>It may <code>POST /api/update</code> to replace the scimux binary.</li>" +
+    "<li>It can start agents that run commands here. <code>POST /api/nodes</code></li>" +
+    "<li>It can replace the scimux program itself. <code>POST /api/update</code></li>" +
     "</ul>" +
-    "<p>Pair only a device you control, and only over a code you minted just now.</p>" +
+    "<p>Pair only a device you control, and only with a code you just created.</p>" +
+    '<p class="pair-warn-aside">Same risk as giving someone SSH access to this computer.</p>' +
     "</div>"
   );
 }
