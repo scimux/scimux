@@ -68,6 +68,8 @@ func (a *app) claudeHookIDLocked(nodeID string) string {
 	return a.claudeHooks[nodeID]
 }
 
+// claudeGeneration looks up a node's hook generation. Test seam: production
+// calls claudeGenerationLocked with a.mu already held.
 func (a *app) claudeGeneration(nodeID string) int {
 	if a == nil {
 		return 0
@@ -447,6 +449,9 @@ func (a *app) quarantineClaudeHookEvent(hookID, src, name string) {
 	a.finishClaudeHookEvent(hookID, src, name, "rejected")
 }
 
+// processClaudeHookEvent captures the generation itself so tests get a
+// one-argument entry point. Test seam: production captures it at the drain
+// site and passes it in.
 func (a *app) processClaudeHookEvent(nodeID string, ev claudeSessionStartEvent) error {
 	a.mu.Lock()
 	captured := a.claudeGenerationLocked(nodeID)
@@ -591,6 +596,9 @@ func (a *app) bindClaudeClear(nodeID string, ev claudeSessionStartEvent, capture
 	return nil
 }
 
+// advanceClaudeClearAfterWeb advances the detached generation after /clear.
+// Test seam: production calls advanceClaudeClearAfterWebLocked with a.mu
+// already held.
 func (a *app) advanceClaudeClearAfterWeb(n *Node) error {
 	if n == nil {
 		return errClaudeHookRejected

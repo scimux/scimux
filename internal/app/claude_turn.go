@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// claude_turn.go owns the app-side accepted-turn nonce: mint, publish before
+// Enter, close, abort, and the two matching predicates.
+
 var (
 	errClaudeTurnInFlight = errors.New("a Claude turn is still awaiting its Stop hook")
 	errClaudeTurnMarker   = errors.New("could not publish the Claude turn fence")
@@ -174,11 +177,10 @@ func (a *app) abortClaudeAcceptedTurn(nodeID, turn string) {
 	}
 }
 
-// closeClaudeAcceptedTurn moves the current turn to closing so a second
-// Stop for the same turn is idempotent, and a later begin cannot be
-// matched by the closed nonce.
 // closeClaudeAcceptedTurnLocked closes the token while the node's auto gate is
-// held. Serializing this with beginClaudeAcceptedTurn is what prevents Stop N
+// held. It moves the current turn to closing so a second Stop for the same
+// turn is idempotent, and a later begin cannot be matched by the closed nonce.
+// Serializing this with beginClaudeAcceptedTurn is what prevents Stop N
 // from ever observing a token for N+1.
 func (a *app) closeClaudeAcceptedTurnLocked(nodeID string) {
 	a.mu.Lock()
@@ -204,6 +206,15 @@ func clearClaudeAcceptedTurnFileIf(perm, turn string) {
 	}
 }
 
+// claudeStopMatchesTurn reports whether a Stop notice may settle this node's
+// current or closing accepted turn. A late Stop from turn N cannot revoke,
+// clear, tombstone, or otherwise mutate turn N+1: a tagged notice settles
+// only the live turn with that nonce, or, once that nonce has moved to
+// closing, the closing turn — never a successor.
+//
+// An empty notice.Turn is a pre-nonce notice. It has no identity, so it may
+// settle only a node with no current turn; a nonce-fenced live turn must not
+// be closed by an untagged leftover.
 func claudeStopMatchesTurn(notice claudeStopNotice, current, closing claudeAcceptedTurn) bool {
 	if notice.Turn != "" {
 		if current.Turn != "" {
@@ -216,6 +227,23 @@ func claudeStopMatchesTurn(notice claudeStopNotice, current, closing claudeAccep
 	return current.Turn == ""
 }
 
+// claudeNotifyBelongsToCurrentTurn reports whether a Notification may mint a
+// visible-dialog epoch for the live turn. A late notice from turn N cannot
+// present itself as turn N+1's dialog.
+//
+// Generation comparison is skipped when either side is 0: 0 is "unknown",
+// not an identity. Treating a missing generation as older than every live
+// turn would drop a current-turn prompt that simply predates the stamp.
+//
+// An unparseable timestamp skips time fencing instead of rejecting. Time is
+// a sharpening constraint when both clocks parse; a garbage stamp is missing
+// evidence, not proof that the notice belongs to a previous turn.
+//
+// A notice stamped exactly at the live turn's start belongs to it
+// (evAt.Before(curAt) is exclusive): that instant is the turn beginning.
+// A notice stamped exactly at the closed turn's boundary belongs to the
+// closed one (!evAt.After(clAt) is inclusive): that instant is the Stop,
+// and must not mint an epoch for the successor.
 func claudeNotifyBelongsToCurrentTurn(ev claudeNotifyNotice, current claudeAcceptedTurn, closed claudeTurnClosed, hadClosed bool) bool {
 	if ev.Turn != "" {
 		if current.Turn != "" && ev.Turn != current.Turn {

@@ -89,6 +89,8 @@ func (a *app) recordClaudeLaunchError(nodeID, msg string) {
 	a.claudeLaunchErr[nodeID] = msg
 }
 
+// claudeLaunchError returns a recorded launch error. Test seam: production
+// reads a.claudeLaunchErr[...] with a.mu already held.
 func (a *app) claudeLaunchError(nodeID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()

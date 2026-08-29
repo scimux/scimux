@@ -191,12 +191,6 @@ func claudePermRequestPending(req claudePermRequest, now time.Time) bool {
 	return now.Sub(at) < permAnswerWindow
 }
 
-// claudePermMissedDeadline reports the one decline that is a *fault* rather
-// than the fence working: everything passed but the clock. It exists so the
-// degradation can be reported instead of looking like an ordinary policy
-// decline — a human who armed the lease is about to meet a dialog anyway, and
-// the only honest thing is to say why. An unparseable stamp is a parse failure,
-// not a slow host, so it is not counted here.
 // claudePermDeclineReason names the policy/fence reason an armed request
 // cannot be auto-approved. Empty means the request was simply ineligible in
 // a way that is not a failure (no lease, empty id).
@@ -229,6 +223,12 @@ func claudePermDeclineReason(ctx claudePermContext, req claudePermRequest) strin
 	return ""
 }
 
+// claudePermMissedDeadline reports the one decline that is a *fault* rather
+// than the fence working: everything passed but the clock. It exists so the
+// degradation can be reported instead of looking like an ordinary policy
+// decline — a human who armed the lease is about to meet a dialog anyway, and
+// the only honest thing is to say why. An unparseable stamp is a parse failure,
+// not a slow host, so it is not counted here.
 func claudePermMissedDeadline(ctx claudePermContext, req claudePermRequest) bool {
 	if _, err := time.Parse(time.RFC3339Nano, req.At); err != nil {
 		return false
@@ -529,7 +529,8 @@ func runClaudePermissionHookMain(args []string) int {
 // behind for a pane that outlives it.
 const claudeLeaseTTL = 30 * time.Minute
 
-// claudePermBundle returns the on-disk bundle directory for a node, or "".
+// claudePermBundleLocked returns the on-disk bundle directory for a node, or
+// "". Caller holds a.mu.
 func (a *app) claudePermBundleLocked(nodeID string) string {
 	hookID := a.claudeHookIDLocked(nodeID)
 	if !safePathComponent(hookID) {
@@ -555,6 +556,7 @@ func (a *app) claudeHookBundlePath(hookID string) string {
 	return filepath.Join(root, hookID)
 }
 
+// claudePermBundle returns the on-disk bundle directory for a node, or "".
 func (a *app) claudePermBundle(nodeID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()

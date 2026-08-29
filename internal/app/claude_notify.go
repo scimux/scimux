@@ -201,6 +201,8 @@ func newestStandingAsk(perm, session string, now time.Time) (askedFile, bool) {
 	return askedFile{}, false
 }
 
+// mintClaudeVisibleEpoch mints an unlabeled visible-dialog epoch. Test seam:
+// production always mints with a real title and message.
 func mintClaudeVisibleEpoch(perm, session string) (claudeVisibleEpoch, error) {
 	return mintClaudeVisibleEpochLabeled(perm, session, "", "")
 }

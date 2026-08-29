@@ -768,10 +768,6 @@ func firstWords(s string, n int) string {
 	return strings.Join(words, " ")
 }
 
-// sessionFromPane inspects the pane's process and its direct children (tmux
-// may wrap the command in `sh -c`), applying extract to each command line to
-// find an agent session id. Linux /proc only; returns "" anywhere it can't
-// look.
 // paneSessionID resolves the claude session id from the pane's process tree,
 // through the test seam when one is installed.
 func (a *app) paneSessionID(pid string) string {
@@ -781,6 +777,10 @@ func (a *app) paneSessionID(pid string) string {
 	return sessionFromPane(pid, sessionArgFromCmdline)
 }
 
+// sessionFromPane inspects the pane's process and its direct children (tmux
+// may wrap the command in `sh -c`), applying extract to each command line to
+// find an agent session id. Linux /proc only; returns "" anywhere it can't
+// look.
 func sessionFromPane(panePID string, extract func([]string) string) string {
 	if id := extract(procCmdline(panePID)); id != "" {
 		return id
