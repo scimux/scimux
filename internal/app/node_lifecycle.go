@@ -760,6 +760,9 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 	return 0, nil
 }
 
+// firstWords truncates a string to its first n whitespace-separated words.
+// Test seam: its production caller was removed, but node_lifecycle_test.go
+// still exercises it. It is not dead code — do not delete it with the rest.
 func firstWords(s string, n int) string {
 	words := strings.Fields(s)
 	if len(words) > n {

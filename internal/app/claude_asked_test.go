@@ -241,7 +241,7 @@ func newAskedHarness(t *testing.T, capable bool) *askedHarness {
 		"perm", "perm/req", "perm/ans", "perm/processed",
 	}
 	if capable {
-		subs = append(subs, "perm/asked", "perm/shown")
+		subs = append(subs, "perm/asked")
 	}
 	for _, sub := range subs {
 		if err := os.MkdirAll(filepath.Join(bundle, sub), 0o700); err != nil {

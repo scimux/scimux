@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 // claudeSessionHookCmd is the hidden helper argv token. Product behavior stays
@@ -150,7 +149,6 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		"elicitation", filepath.Join("elicitation", "active"),
 		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
 		filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
-		filepath.Join("perm", claudeShownDirName),
 	} {
 		p := filepath.Join(dir, sub)
 		if err := os.MkdirAll(p, 0o700); err != nil {
@@ -912,21 +910,6 @@ func transcriptContradictsSession(path, sid string) bool {
 	return false
 }
 
-func (a *app) archiveClaudeHook(nodeID string) {
-	a.mu.Lock()
-	hookID := a.claudeHookIDLocked(nodeID)
-	delete(a.claudeHooks, nodeID)
-	delete(a.claudeGens, nodeID)
-	delete(a.pendingClaudeHooks, nodeID)
-	delete(a.claudeAck, nodeID)
-	delete(a.claudeLaunchErr, nodeID)
-	delete(a.claudeTurns, nodeID)
-	delete(a.claudeClosing, nodeID)
-	delete(a.claudeDialogNote, nodeID)
-	a.mu.Unlock()
-	a.archiveHookBundle(hookID)
-}
-
 func (a *app) archiveHookBundle(hookID string) {
 	if !safePathComponent(hookID) {
 		return
@@ -988,14 +971,4 @@ func (a *app) cleanupOrphanClaudeHooks() {
 		}
 		a.archiveHookBundle(e.Name())
 	}
-}
-
-func (a *app) claudeReadyPath(n *Node) (string, bool) {
-	if n == nil || n.SessionID == "" {
-		return "", false
-	}
-	if n.Transcript != "" {
-		return n.Transcript, true
-	}
-	return transcript.FindClaudeTranscript(a.home, n.SessionID)
 }

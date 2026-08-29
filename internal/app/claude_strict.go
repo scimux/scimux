@@ -119,7 +119,7 @@ func bundleCompleteCurrent(bundle string) bool {
 		"inbox", "processed", "stop", "notify", "compact",
 		"elicitation", filepath.Join("elicitation", "active"),
 		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
-		filepath.Join("perm", claudeAskedDirName), filepath.Join("perm", claudeShownDirName),
+		filepath.Join("perm", claudeAskedDirName),
 	} {
 		st, err := os.Stat(filepath.Join(bundle, sub))
 		if err != nil || !st.IsDir() {
@@ -178,13 +178,6 @@ func (a *app) claudeStrictSupervised(n *Node) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.claudeSupervisionOf(n) == claudeSupStrict
-}
-
-func (a *app) claudeGated(n *Node) bool {
-	if n == nil || n.Agent != "claude" || n.transport() != "tmux" {
-		return false
-	}
-	return true
 }
 
 func (a *app) claudeAutoApproveArmedLocked(n *Node) bool {
@@ -246,30 +239,6 @@ func (a *app) clearClaudeAttention(n *Node) {
 	if prev != "" {
 		a.persistAttentionTransition(n, prev, "")
 	}
-}
-
-func (a *app) retireClaudeRequest(n *Node, requestID string) bool {
-	if n == nil || requestID == "" || !safePathComponent(requestID) {
-		return false
-	}
-	a.mu.Lock()
-	capable := a.claudeSupervisionOf(n) == claudeSupStrict
-	bundle := ""
-	if capable {
-		bundle = a.claudePermBundleLocked(n.ID)
-	}
-	a.mu.Unlock()
-	if bundle == "" {
-		return false
-	}
-	perm := filepath.Join(bundle, "perm")
-	removed := false
-	if err := os.Remove(claudeAskedPath(perm, requestID)); err == nil {
-		removed = true
-	}
-	_ = os.Remove(claudeShownPath(perm, requestID))
-	markClaudeRequestAnswered(perm, requestID)
-	return removed || claudeRequestAnswered(perm, requestID)
 }
 
 // retireClaudeVisibleDialog retires only the server-minted visible-dialog
@@ -407,7 +376,7 @@ func (a *app) claudeDialogOptions(n *Node, dlg claudeVisibleDialog) []PermOption
 	return out
 }
 
-// resetClaudePermissionTurn tombstones unresolved asked/shown/epoch state
+// resetClaudePermissionTurn tombstones unresolved asked/epoch state
 // belonging to the ending session so a later turn cannot pair with it.
 // It runs at every real turn boundary even when no lease is armed.
 // Unrelated session files are left standing. Callers disarm the lease
@@ -459,7 +428,6 @@ func (a *app) resetClaudePermissionTurnLocked(n *Node) {
 		perm := filepath.Join(bundle, "perm")
 		tombstoneClaudeAskedForSession(perm, sid)
 		clearClaudeVisibleEpoch(perm)
-		clearClaudeShownMarkers(perm)
 		markClaudeTurnClosed(perm, sid, turn.Turn, turn.Gen)
 		clearClaudeElicitationsForSession(bundle, sid)
 	}

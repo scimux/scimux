@@ -266,11 +266,6 @@ func sameLetterSet(a, b map[string]bool) bool {
 	return true
 }
 
-func optionNumber(line string) (int, bool) {
-	n, _, ok := optionNumberAndLabel(line)
-	return n, ok
-}
-
 func optionNumberAndLabel(line string) (int, string, bool) {
 	m := numberedOptionCapture.FindStringSubmatch(line)
 	if m == nil {

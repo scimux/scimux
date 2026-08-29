@@ -21,10 +21,6 @@ import (
 
 const claudeNotifyHookCmd = "__claude-notify-hook"
 
-// claudeShownDirName holds per-request visibility markers written when
-// Notification(permission_prompt) is paired with a standing asked notice.
-const claudeShownDirName = "shown"
-
 // claudeAnsweredDirName holds request ids that were successfully answered
 // through the action bar so a later poll cannot reopen them.
 const claudeAnsweredDirName = "answered"
@@ -58,20 +54,8 @@ func claudeNotifyHookCommand(execPath, hookDir string) (string, error) {
 	return shellQuote(execPath) + " " + claudeNotifyHookCmd + " --dir " + shellQuote(hookDir), nil
 }
 
-func claudeShownPath(perm, id string) string {
-	return filepath.Join(perm, claudeShownDirName, id+".json")
-}
-
 func claudeAnsweredPath(perm, id string) string {
 	return filepath.Join(perm, "processed", claudeAnsweredDirName, id+".json")
-}
-
-func claudeRequestShown(perm, id string) bool {
-	if perm == "" || id == "" {
-		return false
-	}
-	st, err := os.Stat(claudeShownPath(perm, id))
-	return err == nil && st.Mode().IsRegular()
 }
 
 func claudeRequestAnswered(perm, id string) bool {
@@ -80,21 +64,6 @@ func claudeRequestAnswered(perm, id string) bool {
 	}
 	st, err := os.Stat(claudeAnsweredPath(perm, id))
 	return err == nil && st.Mode().IsRegular()
-}
-
-func markClaudeRequestShown(perm, id, session string) error {
-	if perm == "" || id == "" || !safePathComponent(id) {
-		return errClaudeHookRejected
-	}
-	dir := filepath.Join(perm, claudeShownDirName)
-	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		return errClaudeHookRejected
-	}
-	return writeClaudePermFile(claudeShownPath(perm, id), map[string]string{
-		"id":      id,
-		"session": session,
-		"at":      time.Now().UTC().Format(time.RFC3339Nano),
-	})
 }
 
 func markClaudeRequestAnswered(perm, id string) {
@@ -291,21 +260,6 @@ func tombstoneClaudeAskedForSession(perm, session string) {
 		}
 		markClaudeRequestAnswered(perm, id)
 		_ = os.Remove(f.path)
-		_ = os.Remove(claudeShownPath(perm, id))
-	}
-}
-
-func clearClaudeShownMarkers(perm string) {
-	dir := filepath.Join(perm, claudeShownDirName)
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range ents {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, e.Name()))
 	}
 }
 
@@ -475,20 +429,4 @@ func (a *app) dropClaudeNotifyInbox(hookID string) {
 		}
 		a.quarantineClaudeHookEvent(hookID, path, name)
 	}
-}
-
-func bundleSupportsNotify(bundle string) bool {
-	caps, ok := readClaudeHookCapabilities(bundle)
-	if !ok || caps.Notify < 1 {
-		return false
-	}
-	if !claudeBundleExecUsable(caps) {
-		return false
-	}
-	st, err := os.Stat(filepath.Join(bundle, "notify"))
-	if err != nil || !st.IsDir() {
-		return false
-	}
-	st, err = os.Stat(filepath.Join(bundle, "perm", claudeShownDirName))
-	return err == nil && st.IsDir()
 }

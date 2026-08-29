@@ -302,7 +302,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   publishes attention if that dialog is still waiting. Stop, StopFailure,
   interrupt, `/clear`, `/exit`, process loss, and node deletion disarm the
   matching lease, clear Claude attention, and tombstone unresolved
-  asked/shown/epoch records for the ending session so a later turn cannot
+  asked/epoch records for the ending session so a later turn cannot
   pair with them. AskUserQuestion,
   ExitPlanMode, plan choices, deny rules, and unknown modes are never
   auto-answered. Every per-request guard stays: sole one-time
