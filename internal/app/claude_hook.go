@@ -125,7 +125,51 @@ func safePathComponent(s string) bool {
 	return true
 }
 
+// hookOps is the injectable filesystem for writeClaudeHookBundle.
+// Unexported; exists so TestClaudeHookBundleRollsBackOnFailure can fail
+// one operation at a time. The seam pins that a failed prepare leaves
+// no bundle directory and does not call noteClaudeStrictCapability —
+// an incomplete bundle must never mean the Claude node is supported.
+type hookOps struct {
+	MkdirAll   func(path string, perm os.FileMode) error
+	Chmod      func(name string, mode os.FileMode) error
+	WriteFile  func(name string, data []byte, perm os.FileMode) error
+	OpenFile   func(name string, flag int, perm os.FileMode) (hookFile, error)
+	Executable func() (string, error)
+	RemoveAll  func(path string) error
+	// Note, if set, is the success-path capability registration.
+	// Tests supply a counter; production sets noteClaudeStrictCapability.
+	Note func(hookID string)
+}
+
+// hookFile is the settings.json handle OpenFile returns. *os.File
+// already satisfies it; tests substitute to fail Write, Chmod, or Close.
+type hookFile interface {
+	Write([]byte) (int, error)
+	Chmod(os.FileMode) error
+	Close() error
+}
+
+func defaultHookOps() hookOps {
+	return hookOps{
+		MkdirAll:  os.MkdirAll,
+		Chmod:     os.Chmod,
+		WriteFile: os.WriteFile,
+		OpenFile: func(name string, flag int, perm os.FileMode) (hookFile, error) {
+			return os.OpenFile(name, flag, perm)
+		},
+		Executable: os.Executable,
+		RemoveAll:  os.RemoveAll,
+	}
+}
+
 func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath string, err error) {
+	ops := defaultHookOps()
+	ops.Note = a.noteClaudeStrictCapability
+	return a.prepareClaudeHookBundleWith(ops, nodeID)
+}
+
+func (a *app) prepareClaudeHookBundleWith(ops hookOps, nodeID string) (hookID, settingsPath string, err error) {
 	_ = nodeID
 	hookID, err = newHookID()
 	if err != nil {
@@ -135,39 +179,58 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	if root == "" {
 		return "", "", fmt.Errorf("claude hook root: %w", errClaudeHookRejected)
 	}
-	dir := filepath.Join(root, hookID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", "", err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		os.RemoveAll(dir)
-		return "", "", err
-	}
-	for _, sub := range []string{
-		"inbox", "processed", "stop", "notify",
-		"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
-		filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
-		filepath.Join("perm", claudeShownDirName),
-	} {
-		p := filepath.Join(dir, sub)
-		if err := os.MkdirAll(p, 0o700); err != nil {
-			os.RemoveAll(dir)
-			return "", "", err
-		}
-		if err := os.Chmod(p, 0o700); err != nil {
-			os.RemoveAll(dir)
-			return "", "", err
-		}
-	}
-	execPath, err := os.Executable()
+	settingsPath, err = writeClaudeHookBundle(ops, root, hookID)
 	if err != nil {
-		os.RemoveAll(dir)
 		return "", "", err
+	}
+	// Disk completeness is knowable at prepare time. Permission/auto-approve
+	// capability still waits for SessionStart; this only lets supervision
+	// report claude_starting instead of claude_unsupported.
+	if ops.Note != nil {
+		ops.Note(hookID)
+	}
+	return hookID, settingsPath, nil
+}
+
+// claudeHookBundleSubdirs is the layout writeClaudeHookBundle creates
+// under a hook id. Tests range over the same list so a new subdirectory
+// adds its two rollback rows automatically.
+var claudeHookBundleSubdirs = []string{
+	"inbox", "processed", "stop", "notify",
+	"perm", filepath.Join("perm", "req"), filepath.Join("perm", "ans"),
+	filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
+	filepath.Join("perm", claudeShownDirName),
+}
+
+func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath string, err error) {
+	dir := filepath.Join(root, hookID)
+	if err := ops.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := ops.Chmod(dir, 0o700); err != nil {
+		ops.RemoveAll(dir)
+		return "", err
+	}
+	for _, sub := range claudeHookBundleSubdirs {
+		p := filepath.Join(dir, sub)
+		if err := ops.MkdirAll(p, 0o700); err != nil {
+			ops.RemoveAll(dir)
+			return "", err
+		}
+		if err := ops.Chmod(p, 0o700); err != nil {
+			ops.RemoveAll(dir)
+			return "", err
+		}
+	}
+	execPath, err := ops.Executable()
+	if err != nil {
+		ops.RemoveAll(dir)
+		return "", err
 	}
 	raw, err := claudeHookSettingsJSON(execPath, dir)
 	if err != nil {
-		os.RemoveAll(dir)
-		return "", "", err
+		ops.RemoveAll(dir)
+		return "", err
 	}
 	// capabilities.json makes support provable from disk: a bundle prepared
 	// before a feature lacks its member and stays unsupported for it.
@@ -178,18 +241,18 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 	// that the hooks can still run at all (claudeBundleExecUsable).
 	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Exec: execPath})
 	if err != nil {
-		os.RemoveAll(dir)
-		return "", "", err
+		ops.RemoveAll(dir)
+		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), caps, 0o600); err != nil {
-		os.RemoveAll(dir)
-		return "", "", err
+	if err := ops.WriteFile(filepath.Join(dir, "capabilities.json"), caps, 0o600); err != nil {
+		ops.RemoveAll(dir)
+		return "", err
 	}
 	settingsPath = filepath.Join(dir, "settings.json")
-	f, err := os.OpenFile(settingsPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := ops.OpenFile(settingsPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		os.RemoveAll(dir)
-		return "", "", err
+		ops.RemoveAll(dir)
+		return "", err
 	}
 	_, werr := f.Write(raw)
 	if werr == nil {
@@ -199,14 +262,10 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 		werr = cerr
 	}
 	if werr != nil {
-		os.RemoveAll(dir)
-		return "", "", werr
+		ops.RemoveAll(dir)
+		return "", werr
 	}
-	// Disk completeness is knowable at prepare time. Permission/auto-approve
-	// capability still waits for SessionStart; this only lets supervision
-	// report claude_starting instead of claude_unsupported.
-	a.noteClaudeStrictCapability(hookID)
-	return hookID, settingsPath, nil
+	return settingsPath, nil
 }
 
 func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
