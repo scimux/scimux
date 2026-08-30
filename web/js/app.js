@@ -19,6 +19,27 @@
  * when above ~500 lines. It must not re-implement extracted feature bodies or
  * the polling algorithm. No window/global application bridge, no second entry,
  * no bundler.
+ *
+ * What the exception covers, and what it does not
+ * -----------------------------------------------
+ * No test imports or executes this file — it touches the DOM at module scope,
+ * so importing it from Node fails. That is the accepted cost of a composition
+ * root, and it is why the web suite's coverage percentage describes the other
+ * modules only. Quote that number with the exclusion attached.
+ *
+ * The exception covers wiring: construction, injection, bind order, listener
+ * registration, DOM reads and writes. It does not cover pure logic. A function
+ * here that takes values and returns a value or a string — arc geometry,
+ * colour thresholds, HTML assembly, escaping, date formatting, reading a form
+ * choice — is extractable and belongs in a module under ./ with Node tests.
+ * Escaping is the clearest case: no source-text regex can assert it, so it
+ * stays unasserted for exactly as long as it lives in here.
+ *
+ * Extract on sight, one feature at a time. usage.js is the worked example:
+ * decision half and presentation half together, agentLogo, clock and locale
+ * injected so the module stays pure. Do not answer a coverage finding by
+ * adding assertions over this file's source text — they catch deletion, not
+ * breakage, and a test that reads a comment proves nothing.
  */
 import {
   esc, mdInline, md, ageText, fmtDur, fmtStamp, fmtBubbleTime, fmtWhen,

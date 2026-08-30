@@ -46,7 +46,11 @@ commit it.
   on them, but they must not import the application package.
 - `web` contains the checked-in browser source and the small embedding package;
   `legal` contains the notices embedded in the About sheet. Both are imported
-  by `internal/app`, never the reverse.
+  by `internal/app`, never the reverse. `web/js/app.js` is the sole entry and
+  the deliberate untested composition root; its header states what the
+  exception covers (wiring) and what it does not (pure logic, which is
+  extracted into a tested module on sight). Read it before answering a
+  coverage finding about that file.
 - Keep the repository root for module metadata, documentation, licenses, and
   top-level directories. Do not add application Go files or tests there.
 
