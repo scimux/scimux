@@ -10,6 +10,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+const usageSrc = readFileSync(join(__dirname, "../js/usage.js"), "utf8");
 const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
 const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
 
@@ -19,10 +20,7 @@ test("usage.js is pure; app imports it; index has #sysgrok", () => {
   assert.match(appSrc, /case "grok":/);
   assert.match(appSrc, /#sysgrok/);
   assert.match(indexSrc, /id="sysgrok"/);
-  assert.doesNotMatch(
-    readFileSync(join(__dirname, "../js/usage.js"), "utf8"),
-    /document\.|window\.|fetch\(/,
-  );
+  assert.doesNotMatch(usageSrc, /document\.|window\.|fetch\(/);
 });
 
 test("usageAgentDisplayName", () => {
@@ -117,7 +115,13 @@ test("usageResetBars returns two labeled rails, but Grok only its weekly rail", 
 });
 
 test("phone badge owns minimal noninteractive reset rails and one VoiceOver summary", () => {
-  const badge = appSrc.slice(appSrc.indexOf("function usageBadge("), appSrc.indexOf("function renderUsage("));
+  /* The badge HTML moved from app.js into usage.js; this lock follows the code
+     it locks. usageBadge is the last declaration in the module, so the slice
+     runs to end of file. The behavioural assertions live in
+     usage-badge.test.js — this one only pins the accessibility shape. */
+  const start = usageSrc.indexOf("export function usageBadge(");
+  assert.notEqual(start, -1, "usageBadge is declared in usage.js");
+  const badge = usageSrc.slice(start);
   assert.match(badge, /usageResetBars\(/);
   assert.match(badge, /<span class="resetrail"[^>]*aria-hidden="true"/,
     "the visual rails are inert descendants, not controls");
