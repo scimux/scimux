@@ -2,12 +2,12 @@ package remote
 
 import (
 	"encoding/hex"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
-	"unsafe"
 )
 
 func (c *Client) readInviteFile(path string) (string, error) {
@@ -101,7 +101,7 @@ func (c *Client) readInviteFileOwned(path string) (string, error) {
 	}
 	c.closeInviteFD()
 	c.inviteFD = fd
-	c.inviteDev = st.Dev
+	c.inviteDev = uint64(st.Dev)
 	c.inviteIno = st.Ino
 	c.invitePath = path
 	return string(raw[:n]), nil
@@ -166,15 +166,17 @@ func (c *Client) eraseInvite(src inviteSrc, invite string) error {
 		return inviteCleanupErr(err)
 	}
 
-	dirfd, err := syscall.Open(filepath.Dir(src.file), syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	root, err := os.OpenRoot(filepath.Dir(src.file))
 	if err != nil {
 		if shredErr != nil {
 			return inviteCleanupErr(shredErr)
 		}
 		return inviteCleanupErr(err)
 	}
-	defer syscall.Close(dirfd)
+	defer root.Close()
 
+	// Directory-anchored operations need a root; the identity re-checks
+	// below are path opens that were already portable.
 	pathfd, err := syscall.Open(src.file, syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if shredErr != nil {
@@ -227,16 +229,16 @@ func (c *Client) eraseInvite(src inviteSrc, invite string) error {
 	if c.cfg.BeforeInviteUnlinkFinal != nil {
 		c.cfg.BeforeInviteUnlinkFinal()
 	}
-	cerr := c.consumeInviteName(dirfd, filepath.Base(src.file), origFD, orig)
+	cerr := c.consumeInviteName(root, filepath.Base(src.file), origFD, orig)
 	if shredErr != nil {
 		return inviteCleanupErr(shredErr)
 	}
 	return cerr
 }
 
-func (c *Client) consumeInviteName(dirfd int, name string, origFD int, orig syscall.Stat_t) error {
+func (c *Client) consumeInviteName(root *os.Root, name string, origFD int, orig syscall.Stat_t) error {
 	var qname string
-	var renamed bool
+	var claimed bool
 	for i := 0; i < inviteQuarantineAttempts; i++ {
 		rnd := make([]byte, inviteQuarantineEntropy)
 		if _, err := io.ReadFull(c.rand(), rnd); err != nil {
@@ -244,58 +246,111 @@ func (c *Client) consumeInviteName(dirfd int, name string, origFD int, orig sysc
 			return inviteCleanupErr(err)
 		}
 		cand := inviteQuarantinePrefix + hex.EncodeToString(rnd)
-		err := c.renameatNoreplace(dirfd, name, dirfd, cand)
+		err := c.inviteLink(root, name, cand)
 		if err == nil {
+			// Between Link and Remove the invite is briefly reachable
+			// under two names, where a rename moved it atomically. If
+			// the original name is replaced inside that window, Remove
+			// unlinks the replacement rather than our inode. That is an
+			// accepted cost of dropping RENAME_NOREPLACE, not an oversight.
+			if err := root.Remove(name); err != nil {
+				_ = root.Remove(cand)
+				_ = shredInviteFD(origFD)
+				return inviteCleanupErr(err)
+			}
 			qname = cand
-			renamed = true
+			claimed = true
 			break
 		}
-		if err != syscall.EEXIST {
+		if !errors.Is(err, fs.ErrExist) {
 			_ = shredInviteFD(origFD)
 			return inviteCleanupErr(err)
 		}
 	}
-	if !renamed {
+	if !claimed {
 		_ = shredInviteFD(origFD)
 		return inviteCleanupErr(syscall.EEXIST)
 	}
-	qfd, err := syscall.Openat(dirfd, qname, syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	fi, err := root.Lstat(qname)
 	if err != nil {
 		_ = shredInviteFD(origFD)
-		if rerr := c.renameatNoreplace(dirfd, qname, dirfd, name); rerr != nil {
-			return inviteCleanupErr(err)
-		}
+		_ = c.restoreInviteName(root, qname, name)
 		return inviteCleanupErr(err)
 	}
+	if !fi.Mode().IsRegular() {
+		_ = shredInviteFD(origFD)
+		_ = c.restoreInviteName(root, qname, name)
+		return inviteCleanupErr(errInviteQuarantineNotRegular)
+	}
+	// os.Root does not honour O_NOFOLLOW (measured on Go 1.25: OpenFile
+	// followed an in-root symlink that syscall.Open refused). Symlink
+	// resolution cannot escape the root. The Lstat check above is the
+	// explicit refusal; the dev/ino comparison immediately below is the
+	// authority on identity. TestInviteQuarantineRefusesASymlinkedName is
+	// what holds that claim up: restoring O_NOFOLLOW and dropping the
+	// Lstat check still fails it.
+	//
+	// Lstat then OpenFile is two operations, so the entry can change in
+	// between. The check narrows the window and makes the refusal explicit;
+	// it does not close it, and the identity comparison is what actually
+	// decides.
+	qf, err := root.OpenFile(qname, os.O_RDWR, 0)
+	if err != nil {
+		_ = shredInviteFD(origFD)
+		_ = c.restoreInviteName(root, qname, name)
+		return inviteCleanupErr(err)
+	}
+	qfd := int(qf.Fd())
 	var qst syscall.Stat_t
 	if err := syscall.Fstat(qfd, &qst); err != nil {
-		syscall.Close(qfd)
+		qf.Close()
 		_ = shredInviteFD(origFD)
-		if rerr := c.renameatNoreplace(dirfd, qname, dirfd, name); rerr != nil {
+		if rerr := c.restoreInviteName(root, qname, name); rerr != nil {
 			return inviteCleanupErr(err)
 		}
 		return inviteCleanupErr(err)
 	}
 	if qst.Dev != orig.Dev || qst.Ino != orig.Ino {
-		syscall.Close(qfd)
+		qf.Close()
 		if c.cfg.BeforeInviteRestore != nil {
 			c.cfg.BeforeInviteRestore()
 		}
-		if err := c.renameatNoreplace(dirfd, qname, dirfd, name); err != nil {
+		if err := c.restoreInviteName(root, qname, name); err != nil {
 			_ = shredInviteFD(origFD)
 			return inviteCleanupErr(err)
 		}
 		return shredInviteFD(origFD)
 	}
 	if err := shredInviteFD(qfd); err != nil {
-		syscall.Close(qfd)
+		qf.Close()
 		return inviteCleanupErr(err)
 	}
-	syscall.Close(qfd)
-	if err := c.unlinkat(dirfd, qname); err != nil {
+	qf.Close()
+	if err := c.inviteUnlinkFinal(root, qname); err != nil {
 		return inviteCleanupErr(err)
 	}
 	return nil
+}
+
+func (c *Client) inviteLink(root *os.Root, oldname, newname string) error {
+	if c.cfg.InviteLink != nil {
+		return c.cfg.InviteLink(oldname, newname)
+	}
+	return root.Link(oldname, newname)
+}
+
+func (c *Client) inviteUnlinkFinal(root *os.Root, name string) error {
+	if c.cfg.InviteUnlink != nil {
+		return c.cfg.InviteUnlink(name)
+	}
+	return root.Remove(name)
+}
+
+func (c *Client) restoreInviteName(root *os.Root, qname, name string) error {
+	if err := c.inviteLink(root, qname, name); err != nil {
+		return err
+	}
+	return root.Remove(qname)
 }
 
 func inviteCleanupErr(err error) error {
@@ -335,52 +390,6 @@ const (
 	inviteQuarantinePrefix   = ".scimux-consumed-"
 	inviteQuarantineAttempts = 8
 	inviteQuarantineEntropy  = 16
-	renameNoreplace          = 1 // linux RENAME_NOREPLACE
 )
 
-func renameat2Trap() uintptr {
-	switch runtime.GOARCH {
-	case "amd64":
-		return 316
-	case "arm64":
-		return 276
-	default:
-		return 0
-	}
-}
-
-func (c *Client) renameatNoreplace(olddirfd int, oldpath string, newdirfd int, newpath string) error {
-	nr := renameat2Trap()
-	if nr == 0 {
-		return syscall.ENOSYS
-	}
-	oldp, err := syscall.BytePtrFromString(oldpath)
-	if err != nil {
-		return err
-	}
-	newp, err := syscall.BytePtrFromString(newpath)
-	if err != nil {
-		return err
-	}
-	_, _, e := syscall.Syscall6(nr, uintptr(olddirfd), uintptr(unsafe.Pointer(oldp)), uintptr(newdirfd), uintptr(unsafe.Pointer(newp)), uintptr(renameNoreplace), 0)
-	runtime.KeepAlive(oldpath)
-	runtime.KeepAlive(newpath)
-	if e != 0 {
-		return e
-	}
-	return nil
-}
-
-func (c *Client) unlinkat(dirfd int, name string) error {
-	if c.cfg.Unlinkat != nil {
-		return c.cfg.Unlinkat(dirfd, name)
-	}
-	return syscall.Unlinkat(dirfd, name)
-}
-
-func (c *Client) renameat(olddirfd int, oldpath string, newdirfd int, newpath string) error {
-	if c.cfg.Renameat != nil {
-		return c.cfg.Renameat(olddirfd, oldpath, newdirfd, newpath)
-	}
-	return syscall.Renameat(olddirfd, oldpath, newdirfd, newpath)
-}
+var errInviteQuarantineNotRegular = errors.New("quarantine name is not a regular file")

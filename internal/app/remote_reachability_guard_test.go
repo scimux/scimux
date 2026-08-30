@@ -167,8 +167,8 @@ var reachConfigSeams = map[string]bool{
 	"BeforeEnrollRequest":     true,
 	"BeforePersist":           true,
 	"OnLockHeld":              true,
-	"Unlinkat":                true,
-	"Renameat":                true,
+	"InviteUnlink":            true,
+	"InviteLink":              true,
 	"LockHeldFile":            true,
 	"LockReleaseFile":         true,
 	"InviteString":            true, // remote.go:307 says so in as many words

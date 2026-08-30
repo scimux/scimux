@@ -383,12 +383,17 @@ type Config struct {
 	// immediately before the enroll HTTP request is sent. Tests move or
 	// replace the invite pathname during enrollment here.
 	BeforeEnrollRequest func()
-	// Unlinkat, if set, replaces syscall.Unlinkat during invite consume.
-	// Tests inject cleanup failure.
-	Unlinkat func(dirfd int, name string) error
-	// Renameat, if set, replaces syscall.Renameat during invite consume.
-	// Tests inject cleanup failure.
-	Renameat func(olddirfd int, oldpath string, newdirfd int, newpath string) error
+	// InviteUnlink, if set, replaces the final removal of the quarantined
+	// invite during consume. Names are relative to the invite's directory.
+	// Intermediate removes — dropping the original name after linking, and
+	// undoing a link — go straight to the root; a seam that covers some
+	// instances of an operation and not others would otherwise read as a
+	// bug. Tests inject cleanup failure.
+	InviteUnlink func(name string) error
+	// InviteLink, if set, replaces every hard link during invite consume —
+	// both the claim attempts and the restore. Names are relative to the
+	// invite's directory. Tests inject cleanup failure.
+	InviteLink func(oldname, newname string) error
 	// BeforePersist, if set, runs after the state lock is held and
 	// immediately before the identity/state file is written. Tests use
 	// it as an event barrier.

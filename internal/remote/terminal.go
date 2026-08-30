@@ -21,7 +21,7 @@ func OpenOwnerTerminal() (Terminal, error) {
 		return nil, err
 	}
 	t := &ownerTerminal{f: f}
-	if err := t.ioctl(syscall.TCGETS, &t.orig); err != nil {
+	if err := t.ioctl(ioctlGetTermios, &t.orig); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -38,11 +38,11 @@ func (t *ownerTerminal) ioctl(req uintptr, arg *syscall.Termios) error {
 
 func (t *ownerTerminal) DisableEcho() error {
 	var cur syscall.Termios
-	if err := t.ioctl(syscall.TCGETS, &cur); err != nil {
+	if err := t.ioctl(ioctlGetTermios, &cur); err != nil {
 		return err
 	}
 	cur.Lflag &^= syscall.ECHO
-	return t.ioctl(syscall.TCSETS, &cur)
+	return t.ioctl(ioctlSetTermios, &cur)
 }
 
 func (t *ownerTerminal) RestoreEcho() error {
@@ -58,7 +58,7 @@ func (t *ownerTerminal) RestoreEcho() error {
 		}
 		return nil
 	}
-	err := t.ioctl(syscall.TCSETS, &t.orig)
+	err := t.ioctl(ioctlSetTermios, &t.orig)
 	if err != nil {
 		t.restoreErr = err
 		return err
@@ -72,7 +72,7 @@ func (t *ownerTerminal) RestoreEcho() error {
 
 func (t *ownerTerminal) EchoEnabled() bool {
 	var cur syscall.Termios
-	if err := t.ioctl(syscall.TCGETS, &cur); err != nil {
+	if err := t.ioctl(ioctlGetTermios, &cur); err != nil {
 		return false
 	}
 	return cur.Lflag&syscall.ECHO != 0

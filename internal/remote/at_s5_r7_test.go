@@ -20,8 +20,8 @@ func TestS5R7_F1_DroppedEnrollPlusCleanupFailure(t *testing.T) {
 	path := writeInviteFile(t, cfg.DataDir, vectorInviteGrouped, 0o600)
 	cfg.InviteFile = path
 	fail := fmt.Errorf("injected invite cleanup failure")
-	cfg.Unlinkat = func(int, string) error { return fail }
-	cfg.Renameat = func(int, string, int, string) error { return fail }
+	cfg.InviteUnlink = func(string) error { return fail }
+	cfg.InviteLink = func(string, string) error { return fail }
 	c := NewClient(cfg)
 	err := c.Start(ctx)
 	if err == nil {
@@ -62,8 +62,8 @@ func TestS5R7_F1_DroppedEnrollPlusCleanupFailure(t *testing.T) {
 	nreq := fake.RequestCount()
 	cfg2 := cfg
 	cfg2.InviteFile = ""
-	cfg2.Unlinkat = nil
-	cfg2.Renameat = nil
+	cfg2.InviteUnlink = nil
+	cfg2.InviteLink = nil
 	c2 := NewClient(cfg2)
 	err = c2.Start(ctx)
 	requireClass(t, err, ClassAmbiguousEnrollment)

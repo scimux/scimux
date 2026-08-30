@@ -323,8 +323,8 @@ func TestS5R6_F2_CleanupFailureReportsGuidance(t *testing.T) {
 	path := writeInviteFile(t, cfg.DataDir, vectorInviteGrouped, 0o600)
 	cfg.InviteFile = path
 	fail := fmt.Errorf("injected invite cleanup failure")
-	cfg.Unlinkat = func(int, string) error { return fail }
-	cfg.Renameat = func(int, string, int, string) error { return fail }
+	cfg.InviteUnlink = func(string) error { return fail }
+	cfg.InviteLink = func(string, string) error { return fail }
 	c := NewClient(cfg)
 	err := c.Start(ctx)
 	st, _ := c.State()
@@ -365,8 +365,8 @@ func TestS5R6_F2_CleanupFailureReportsGuidance(t *testing.T) {
 
 	cfg2 := cfg
 	cfg2.InviteFile = ""
-	cfg2.Unlinkat = nil
-	cfg2.Renameat = nil
+	cfg2.InviteUnlink = nil
+	cfg2.InviteLink = nil
 	c2, err := startClient(ctx, cfg2)
 	if err != nil {
 		t.Fatalf("F2: restart without invite after cleanup failure: %v", err)
