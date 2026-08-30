@@ -447,9 +447,9 @@ func (a *app) quarantineClaudeHookEvent(hookID, src, name string) {
 	a.finishClaudeHookEvent(hookID, src, name, "rejected")
 }
 
-// processClaudeHookEvent captures the generation itself so tests get a
-// one-argument entry point. Test seam: production captures it at the drain
-// site and passes it in.
+// processClaudeHookEvent captures the generation itself so tests need not
+// supply one. Test seam: production captures it at the drain site and passes
+// it in to processClaudeHookEventAt.
 func (a *app) processClaudeHookEvent(nodeID string, ev claudeSessionStartEvent) error {
 	a.mu.Lock()
 	captured := a.claudeGenerationLocked(nodeID)
