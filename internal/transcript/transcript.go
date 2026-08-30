@@ -102,6 +102,15 @@ func ParseLine(line []byte) (Turn, bool) {
 		if role == "" {
 			role = generic.Type
 		}
+		// message.role is CLI-authored data, so it is validated exactly like
+		// the Codex payload.role below: an unrecognized role is an unknown
+		// shape and is ignored, never rendered. The fallback above is always
+		// valid — the switch has already constrained generic.Type. Callers
+		// rely on this: mirror.go writes Turn.Role into sessionlog.Event.T,
+		// whose members include "source", the /clear page-turn marker.
+		if role != "user" && role != "assistant" {
+			return Turn{}, false
+		}
 		return makeTurn(role, contentText(msg.Content), generic.Timestamp)
 	case "response_item": // Codex rollout log
 		var payload struct {

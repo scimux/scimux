@@ -94,6 +94,44 @@ func TestGarbageInEmptyOutNoPanic(t *testing.T) {
 	}
 }
 
+// A Claude record's message.role is CLI-authored data, not a scimux constant.
+// Only "user" and "assistant" are visible chat roles; anything else is an
+// unknown shape and is silently ignored, exactly as the Codex branch already
+// treats an unexpected payload.role. Found by FuzzParseLine.
+//
+// This matters beyond tidiness because mirror.go writes Turn.Role straight
+// into sessionlog.Event.T, a closed set that includes "source" — the /clear
+// page-turn marker and the mirror's dedupe watermark in an append-only store.
+func TestParseLineRejectsUnknownClaudeRole(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"user","message":{"role":"system","content":"hello"}}`,
+		`{"type":"user","message":{"role":"source","content":"hello"}}`,
+		`{"type":"assistant","message":{"role":"tool","content":"hello"}}`,
+		`{"type":"user","message":{"role":"0","content":"0"}}`,
+		// encoding/json matches field names case-insensitively, so the same
+		// record reaches the Claude branch under mixed-case keys.
+		`{"tYpe":"user","messAge":{"role":"0","Content":"0"}}`,
+		// The scaffolding filter is keyed on role == "user"; an unknown role
+		// must not smuggle an injected block through as a visible turn.
+		`{"type":"user","message":{"role":"x","content":"<user_instructions>secret"}}`,
+	} {
+		if got, ok := ParseLine([]byte(line)); ok {
+			t.Errorf("ParseLine(%s) = (%+v, true), want ignored", line, got)
+		}
+	}
+	// The role fallback for a record that omits message.role stays intact:
+	// the envelope type is already constrained to user/assistant.
+	for _, tc := range []struct{ line, want string }{
+		{`{"type":"user","message":{"content":"hello"}}`, "user"},
+		{`{"type":"assistant","message":{"content":"hello"}}`, "assistant"},
+	} {
+		got, ok := ParseLine([]byte(tc.line))
+		if !ok || got.Role != tc.want {
+			t.Errorf("ParseLine(%s) = (%+v, %v), want role %q", tc.line, got, ok, tc.want)
+		}
+	}
+}
+
 func TestTailerIncrementalAndPartialLines(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "live.jsonl")
