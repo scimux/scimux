@@ -19,6 +19,22 @@ after themselves; they never touch a user's tmux server. Never run a real
 agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests — wrapped
 test commands are `bash --norc` or `cat`.
 
+Two fuzz targets guard the contracts that are stated as properties over all
+inputs rather than as examples. Their seed corpora run under the plain `go
+test` above, so CI cost is unchanged; the `-fuzz` flag is what starts an
+actual session:
+
+```sh
+go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine     -fuzztime=30s
+go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
+```
+
+`FuzzParseLine` asserts defensive parsing (below). `FuzzClaudeHookStdin`
+asserts that no Claude hook helper writes a byte to stdout, whatever it is
+fed. A session that finds something writes the input to `testdata/fuzz/` —
+that file is a bug report, not a fixture: quote it, fix the code, and do not
+commit it.
+
 ## Layout and dependencies
 
 - `cmd/scimux` is the deliberately thin executable: command-line startup and
@@ -63,7 +79,14 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   internals. Unknown record types/shapes are silently ignored, never errors;
   when a transcript is missing or stops making sense, the UI degrades to the
   pane snapshot ("peek"). Keep this contract when touching
-  `internal/transcript`.
+  `internal/transcript`. "Unknown shape" includes an unknown **field value**,
+  not only an unknown record type: `ParseLine` yields a turn only for the
+  roles `user` and `assistant`, in both the Claude and the Codex branch. That
+  is not tidiness — `mirror.go` writes `Turn.Role` straight into
+  `sessionlog.Event.T`, a closed set whose members include `source`, the
+  `/clear` page-turn marker in a store that is never rewritten. A role the
+  parser waves through becomes a counterfeit seam in the session log.
+  `FuzzParseLine` holds this; it is how the gap was found.
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.
 - **One session-log store, one schema.** Every structured transport writes its
