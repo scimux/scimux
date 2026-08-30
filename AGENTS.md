@@ -9,7 +9,7 @@ invariants you must not break and the workflows you need.
 ```sh
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
-go test -short ./...   # unit only; this is what CI runs
+go test -short ./...   # unit only; the offline CI lane (build.yml runs the full suite)
 node --test web/test/*.test.js  # browser unit suite (1181 tests, including web/test/audit.test.js; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```

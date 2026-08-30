@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Add missing tools
         run: |
-          apk add --no-cache file git nodejs
+          apk add --no-cache file git nodejs tmux
 
       - name: Clone and checkout repository
         run: |
@@ -16,9 +16,9 @@ jobs:
           git checkout ${{ github.sha }}
           mkdir -p builds
 
-      - name: Run tests (short mode; integration tests need tmux and are skipped)
+      - name: Run tests (unit and integration; tmux installed above)
         run: |
-          go test -short ./...
+          go test -timeout 20m ./...
 
       - name: Run JavaScript tests (Node 22+)
         run: |
