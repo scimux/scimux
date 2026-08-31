@@ -30,8 +30,11 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 ```
 
 `FuzzParseLine` asserts defensive parsing (below). `FuzzClaudeHookStdin`
-asserts that no Claude hook helper writes a byte to stdout, whatever it is
-fed. A session that finds something writes the input to `testdata/fuzz/` —
+asserts that no Claude hook helper writes a byte to stdout whatever it is fed,
+and that it disturbs nothing outside its own bundle subdirectory — the check
+compares presence, contents, and mode against a planted corpus (including
+`perm/lease` and `capabilities.json`), so an overwrite or a deletion fails it,
+not only a newly created path. A session that finds something writes the input to `testdata/fuzz/` —
 that file is a bug report, not a fixture: quote it, fix the code, and do not
 commit it.
 
@@ -90,7 +93,15 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   `sessionlog.Event.T`, a closed set whose members include `source`, the
   `/clear` page-turn marker in a store that is never rewritten. A role the
   parser waves through becomes a counterfeit seam in the session log.
-  `FuzzParseLine` holds this; it is how the gap was found.
+  A Claude record states its role twice, so there the test is **agreement**,
+  not membership: `message.role` must match the envelope `type`, and a record
+  whose two halves contradict each other is ignored even though both values
+  are individually legal. Either direction is harmful — the turn is
+  misattributed, and because the scaffolding filter keys on `role == "user"`,
+  a `type:"user"` record claiming `role:"assistant"` would render an injected
+  `<user_instructions>` block as agent prose. Real output never disagrees
+  (42,988 records across 173 captured transcripts, checked 2026-08-31).
+  `FuzzParseLine` holds both rules; it is how the first gap was found.
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.
 - **One session-log store, one schema.** Every structured transport writes its
