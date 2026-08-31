@@ -149,14 +149,29 @@ func TestS5R4_F1_SustainedSuccessResetInRVLoop(t *testing.T) {
 	}
 	_ = d
 
+	// The client records one delay per scheduled attempt: delays[0] is the
+	// initial schedule, delays[n] the backoff chosen after failure n. Drive
+	// three failures and read delays[3] by index.
+	//
+	// Neither the server's wait count nor LastDelay() can stand in for that
+	// index. waitForWaits is satisfied by the *server* having seen the wait,
+	// but the delay is recorded by the *client* one handoff later, so a bare
+	// read returns the previous delay; and the wait count is only a lower
+	// bound, so under load the client runs ahead and LastDelay() returns a
+	// delay from a later failure than the one under test. Both were observed:
+	// this row failed several times in ten -race runs of the package, with
+	// delays=[100ms 100ms 200ms 400ms 800ms] against a server count of 4 where
+	// the loop had driven 3. Indexing is immune to the overshoot; waiting on
+	// the scheduler's own record count is immune to the handoff.
 	for i := 0; i < 3; i++ {
 		waitForSched(t, sched, 2*time.Second)
 		sched.FireAll()
 		waitForWaits(t, srv, i+1, 2*time.Second)
 	}
-	afterFail := sched.LastDelay()
+	waitForDelayCount(t, sched, 4, 2*time.Second)
+	afterFail := sched.AllDelays()[3]
 	if afterFail != 400*time.Millisecond {
-		t.Fatalf("F1: delay after 3 failures = %s, want 400ms", afterFail)
+		t.Fatalf("F1: delay after 3 failures = %s, want 400ms (delays %v)", afterFail, sched.AllDelays())
 	}
 
 	srv.FailWaits(false)
@@ -164,14 +179,28 @@ func TestS5R4_F1_SustainedSuccessResetInRVLoop(t *testing.T) {
 	sched.FireAll()
 	waitForWaits(t, srv, 4, 2*time.Second)
 
-	clock.Advance(cfg.Backoff.SuccessFor)
-	srv.FailWaits(true)
+	// The same handoff again, and here it corrupts the input rather than the
+	// reading. The client calls Backoff.NotifyUp — which stamps upAt from the
+	// clock (backoff.go) — only after its wait returns, later than the server
+	// recording that wait. Advancing the clock before that stamp lands makes
+	// upAt the *advanced* time, so the NotifyDown below measures a zero-length
+	// success window, declines to reset the failure count, and the row reads a
+	// still-climbing 800ms instead of Initial. Waiting for the next schedule
+	// proves the success path ran to completion first. (Production is immune:
+	// nothing advances a real clock out from under the stamp.)
 	waitForSched(t, sched, 2*time.Second)
+	clock.Advance(cfg.Backoff.SuccessFor)
+
+	// Take the index of the next delay before provoking it, so the assertion
+	// names one specific scheduling decision — the first failure after the
+	// sustained success — rather than whatever the client scheduled last.
+	next := len(sched.AllDelays())
+	srv.FailWaits(true)
 	sched.FireAll()
-	waitForWaits(t, srv, 5, 2*time.Second)
-	got := sched.LastDelay()
+	waitForDelayCount(t, sched, next+1, 2*time.Second)
+	got := sched.AllDelays()[next]
 	if got != cfg.Backoff.Initial {
-		t.Fatalf("F1: retry after sustained success = %s, want Initial %s", got, cfg.Backoff.Initial)
+		t.Fatalf("F1: retry after sustained success = %s, want Initial %s (delays %v)", got, cfg.Backoff.Initial, sched.AllDelays())
 	}
 }
 
@@ -872,6 +901,12 @@ func (s *delaySched) Pending() int {
 	return n
 }
 
+func (s *delaySched) AllDelays() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.delays...)
+}
+
 func (s *delaySched) LastDelay() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -919,6 +954,20 @@ func waitForSched(t *testing.T, s *delaySched, d time.Duration) {
 	}
 	if s.Pending() == 0 {
 		t.Fatal("no scheduled wait")
+	}
+}
+
+// waitForDelayCount blocks until the scheduler has recorded at least n
+// delays, i.e. until the client has made n scheduling decisions. It is the
+// client-side counterpart to waitForWaits, which counts on the server.
+func waitForDelayCount(t *testing.T, s *delaySched, n int, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for len(s.AllDelays()) < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(s.AllDelays()); got < n {
+		t.Fatalf("scheduler recorded %d delays, want at least %d", got, n)
 	}
 }
 
