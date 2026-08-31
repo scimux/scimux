@@ -10,7 +10,7 @@ invariants you must not break and the workflows you need.
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; the offline CI lane (build.yml runs the full suite)
-node --test web/test/*.test.js  # browser unit suite (1181 tests, including web/test/audit.test.js; no browser needed)
+node --test web/test/*.test.js  # browser unit suite (1,182 tests on 2026-08-31, including web/test/audit.test.js; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 ```
 
@@ -46,7 +46,7 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   - **One approved exception:** `github.com/coder/acp-go-sdk`, the Agent
     Client Protocol peer, is a deliberate, maintainer-approved dependency
     **scoped to `internal/acp/` only** (the ACP transport for pi/opencode/grok; see
-    `acp-integration-plan.md`). A hand-rolled bidirectional JSON-RPC peer with
+    `docs/acp-integration-plan.md`). A hand-rolled bidirectional JSON-RPC peer with
     typed unions was evaluated and rejected as ~600 lines of ongoing schema
     churn. The tmux/transcript core stays stdlib-only; do not let the SDK (or
     any other module) leak beyond `internal/acp/`.
