@@ -12,16 +12,23 @@ internal/transcript/testdata/real-*.jsonl
 internal/acp/codex/testdata/real-*.ndjson
 internal/acp/testdata/real-*.ndjson
 
-# Only README.md, AGENTS.md, CLAUDE.md, and the README-linked docs are
+# Only README.md, AGENTS.md, CLAUDE.md, and the published docs/ set are
 # tracked. Every other markdown file (design/planning intermediates,
 # working notes) is a local or in-repo-but-unpublished document — keep them
-# all out of git.
+# all out of git. The list below must name every tracked .md: this is a
+# deny-by-default list, so a doc missing from it cannot be added to docs/
+# without -f, and a new sibling beside one is invisible to `git add docs/`.
+# (`git ls-files '*.md'` is the check.) An entry for a file that does not
+# exist is not harmless either — it reads as a promise the repo does not
+# keep; `!docs/fare-v2-p1-grounding.md` sat here naming a document that was
+# never tracked at all.
 *.md
 !README.md
 !AGENTS.md
 !CLAUDE.md
 !docs/http-api.md
-!docs/fare-v2-p1-grounding.md
+!docs/rendezvous-protocol-sync.md
+!docs/protocol/rendezvous-v1.md
 
 attic/
 

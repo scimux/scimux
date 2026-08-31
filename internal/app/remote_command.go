@@ -17,6 +17,12 @@ import (
 	"codeberg.org/chrberger/scimux/internal/remote"
 )
 
+// errFlagsReported marks an argv error the FlagSet has already reported to
+// Stderr, message and usage both. Run() (main.go) exits on it silently: -h is
+// a request rather than a failure and exits 0, anything else keeps the status
+// 2 that flag.ExitOnError produced before Phase 3 removed the duplicate parse.
+var errFlagsReported = errors.New("scimux: invalid command line")
+
 // Command is the injectable startup seam for remote-aware scimux (S5).
 // Tests call Run; they must not spawn the scimux binary or os.Exit.
 type Command struct {
@@ -90,6 +96,11 @@ func (c *Command) Run(ctx context.Context) error {
 	} else {
 		fs.SetOutput(io.Discard)
 	}
+	// This is the only parse in the process, so it owns -h. Without
+	// configureUsage the flag package prints its bare "Usage of scimux:"
+	// list, dropping the product summary and the usage line the binary has
+	// always printed.
+	configureUsage(fs, args[0])
 	addr := fs.String("addr", addrDefault, "listen address (loopback only; use an SSH tunnel for remote access)")
 	data := fs.String("data", dataDefault, "data directory for the node store")
 	socket := fs.String("socket", socketDefault, "tmux socket name (tmux -L) for the private server")
@@ -100,7 +111,10 @@ func (c *Command) Run(ctx context.Context) error {
 	var trustedHosts stringList
 	fs.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	if err := fs.Parse(args[1:]); err != nil {
-		return err
+		// fs has already written the message and the usage to Stderr. Wrap so
+		// the process entry point can exit without printing a second copy —
+		// that is what flag.ExitOnError did while Run() owned the parse.
+		return fmt.Errorf("%w: %w", errFlagsReported, err)
 	}
 
 	origin, err := normalizeRendezvousURL(*rvURL)

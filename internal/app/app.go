@@ -79,6 +79,18 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 	// Remote Control must finish bootstrapping before its editor is safe. Tests
 	// inject an acknowledged result so unrelated lifecycle coverage need not
 	// manufacture Claude's private transcript records.
+	//
+	// These three are deliberately fixed rather than Config fields, and the
+	// asymmetry with LaunchGrace/LaunchPoll above is smaller than it looks:
+	// those two are exported on Config but have no production caller either —
+	// both pairs are test seams, differing only in which struct the seam sits
+	// on. Promoting these would create an operator-facing knob for a deadline
+	// whose correct value is a property of the Claude CLI's startup, not of
+	// the user's preference, and whose only two failure modes are already
+	// non-silent: too short surfaces an inline startup error with the prompt
+	// preserved as a draft, too long delays that same error. Tests set the
+	// fields directly (claude_strict_test.go), which is all the seam anyone
+	// has needed.
 	a.claudeReadyTimeout = 15 * time.Second
 	a.claudeDeliveryTimeout = 15 * time.Second
 	a.claudeInitialPoll = 100 * time.Millisecond
