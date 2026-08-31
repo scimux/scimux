@@ -153,6 +153,14 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 	// teardown too. A cause already recorded — a tunnel-version verdict
 	// especially — is the explanation; connected-then-lost is only for a
 	// drop that has none.
+	//
+	// CauseICEFailed counts as none. It is the session's provisional birth
+	// state (set at construction, above), so it predates any channel and
+	// cannot describe the loss of one: by the time computerDC is non-nil, a
+	// channel existed and ICE plainly did not fail. Preserving it here would
+	// report a peer that connected and later dropped as one that never
+	// arrived — which is why it is reset alongside the empty cause, not
+	// treated as a verdict to keep.
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
 		case webrtc.PeerConnectionStateFailed,
