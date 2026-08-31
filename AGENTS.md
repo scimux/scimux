@@ -12,7 +12,16 @@ go test ./...          # unit + integration (integration needs tmux)
 go test -short ./...   # unit only; the offline CI lane (build.yml runs the full suite)
 node --test web/test/*.test.js  # browser unit suite (1,182 tests on 2026-08-31, including web/test/audit.test.js; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
+go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
 ```
+
+The release matrix is not written down twice: `TestCrossBuildTargets` parses
+every `GOOS=… GOARCH=…` pair out of `.forgejo/workflows/{build,release}.yml`
+and compiles `./cmd/scimux` for each, so a target added to a workflow is a
+target the suite defends from that moment. To cross-build one by hand:
+`CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build ./cmd/scimux`. freebsd/amd64
+is built by `build.yml` but deliberately not released — the invariant below
+claims the static build keeps working, and this is what keeps that claim true.
 
 Integration tests create private, randomly named tmux sockets and clean up
 after themselves; they never touch a user's tmux server. Never run a real
