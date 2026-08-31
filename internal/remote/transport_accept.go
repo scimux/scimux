@@ -102,17 +102,20 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 	}
 
 	// The channel arrives through the callback, so the receiver has to be in
-	// place before the remote description is applied.
-	dcCh := make(chan *webrtc.DataChannel, 1)
+	// place before the remote description is applied. The stream that wraps
+	// it is built here, before the callback returns: pion starts delivering
+	// messages only after that, and a late OnMessage drops the preamble.
+	dcCh := make(chan arrivingChannel, 1)
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		if dc.Label() != tunnelChannelLabel {
 			_ = dc.Close()
 			return
 		}
+		stream := newDCStream(dc)
 		select {
-		case dcCh <- dc:
+		case dcCh <- arrivingChannel{dc: dc, stream: stream}:
 		default:
-			_ = dc.Close()
+			_ = stream.Close()
 		}
 	})
 
@@ -162,21 +165,35 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 	return s, answer, nil
 }
 
+// beforeChannelPickup runs in serveArrivingChannel after the arriving
+// channel is taken off dcCh and before anything is wired to it. A test
+// stalls here to model a loaded host scheduling the serve goroutine after
+// pion has already started delivering messages, which is the only thing
+// that makes a late reader observable.
+var beforeChannelPickup = func() {}
+
+// arrivingChannel is the computer's inbound data channel together with the
+// stream that already wraps it. The pair is built inside OnDataChannel.
+type arrivingChannel struct {
+	dc     *webrtc.DataChannel
+	stream *dcStream
+}
+
 // serveArrivingChannel assembles the computer half once the device's data
 // channel shows up, then serves FR-27 frames off it until the session closes.
 //
 // Every step re-checks whether the session was closed while it was waiting:
 // Close can win the race with a device that connects late, and a channel wired
 // in after teardown would be a live tunnel nobody can revoke.
-func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.DataChannel, handler http.Handler) {
+func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan arrivingChannel, handler http.Handler) {
 	defer close(s.serveDone)
 
 	arrive, stop := context.WithTimeout(ctx, sessionArrivalDeadline)
 	defer stop()
 
-	var dc *webrtc.DataChannel
+	var arrived arrivingChannel
 	select {
-	case dc = <-dcCh:
+	case arrived = <-dcCh:
 	case <-arrive.Done():
 		// The device never dialled. Tear the peer down rather than holding it
 		// open for a session that will not happen.
@@ -184,7 +201,9 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan *webrtc.
 		return
 	}
 
-	stream := newDCStream(dc)
+	beforeChannelPickup()
+
+	dc, stream := arrived.dc, arrived.stream
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

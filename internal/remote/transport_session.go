@@ -482,16 +482,17 @@ func negotiatePair(ctx context.Context, api *webrtc.API, hub *signallingHub) (*p
 
 	// The computer's inbound channel arrives through the callback, so the
 	// stream that wraps it has to be built there, before it can open.
-	computerDCCh := make(chan *webrtc.DataChannel, 1)
+	computerDCCh := make(chan arrivingChannel, 1)
 	computer.OnDataChannel(func(dc *webrtc.DataChannel) {
 		if dc.Label() != tunnelChannelLabel {
 			_ = dc.Close()
 			return
 		}
+		stream := newDCStream(dc)
 		select {
-		case computerDCCh <- dc:
+		case computerDCCh <- arrivingChannel{dc: dc, stream: stream}:
 		default:
-			_ = dc.Close()
+			_ = stream.Close()
 		}
 	})
 
@@ -535,12 +536,13 @@ func negotiatePair(ctx context.Context, api *webrtc.API, hub *signallingHub) (*p
 	}
 
 	var computerDC *webrtc.DataChannel
+	var computerStream *dcStream
 	select {
-	case computerDC = <-computerDCCh:
+	case arrived := <-computerDCCh:
+		computerDC, computerStream = arrived.dc, arrived.stream
 	case <-ctx.Done():
 		return fail(classErrorf(ClassHandshake, "negotiate", "the computer never saw the data channel", ctx.Err()))
 	}
-	computerStream := newDCStream(computerDC)
 
 	if err := clientStream.waitOpen(ctx); err != nil {
 		return fail(err)
