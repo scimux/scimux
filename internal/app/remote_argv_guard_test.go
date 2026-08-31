@@ -50,9 +50,10 @@ var argvSubcommands = []string{
 	"__claude-stop-hook",
 }
 
-// argvFlags is the complete set of flags registered in Run(). configureUsage
-// registers none — it only sets fs.Usage — so Run()'s own registrations are
-// the whole flag surface. Same review trigger as above.
+// argvFlags is the complete set of flags registered in Command.Run, which
+// since Phase 3 is the only flag parse in the process. configureUsage
+// registers none — it only sets fs.Usage — so those registrations are the
+// whole flag surface. Same review trigger as above.
 var argvFlags = []string{
 	"addr",
 	"data",
@@ -74,6 +75,7 @@ var argvFlags = []string{
 // any remote code could initialise.
 var runInitCalls = map[string]bool{
 	"Parse":          true, // flag.Parse
+	"Run":            true, // Command.Run: flag parsing and application setup
 	"NewApp":         true,
 	"NewHandler":     true,
 	"prepareDataDir": true,
@@ -81,15 +83,30 @@ var runInitCalls = map[string]bool{
 
 func parseMainGo(t *testing.T) (*token.FileSet, *ast.File) {
 	t.Helper()
+	return parsePackageFile(t, "main.go")
+}
+
+// parseRemoteCommandGo reads the file that owns the flag table. Since Phase 3
+// there is only one parse in the process and it lives on Command.Run's own
+// FlagSet, so the flag half of this guard has to read that file rather than
+// main.go. The subcommand half still reads Run(): argv[1] dispatch happens
+// before Command is even constructed.
+func parseRemoteCommandGo(t *testing.T) (*token.FileSet, *ast.File) {
+	t.Helper()
+	return parsePackageFile(t, "remote_command.go")
+}
+
+func parsePackageFile(t *testing.T, name string) (*token.FileSet, *ast.File) {
+	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	path := filepath.Join(filepath.Dir(thisFile), "main.go")
+	path := filepath.Join(filepath.Dir(thisFile), name)
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
+		t.Fatalf("parse %s: %v", name, err)
 	}
 	return fset, f
 }
@@ -101,9 +118,68 @@ func mustFindFunc(t *testing.T, f *ast.File, name string) *ast.FuncDecl {
 	t.Helper()
 	fn := findFunc(f, name)
 	if fn == nil {
-		t.Fatalf("main.go declares no func %s", name)
+		t.Fatalf("this file declares no func %s", name)
 	}
 	return fn
+}
+
+// mustFindMethod is the same fatal for a method, which findFunc does not
+// reach: Command.Run is the flag surface and it has a receiver.
+func mustFindMethod(t *testing.T, f *ast.File, recv, name string) *ast.FuncDecl {
+	t.Helper()
+	for _, d := range f.Decls {
+		fn, isFunc := d.(*ast.FuncDecl)
+		if !isFunc || fn.Recv == nil || fn.Name.Name != name {
+			continue
+		}
+		for _, field := range fn.Recv.List {
+			typ := field.Type
+			if star, isStar := typ.(*ast.StarExpr); isStar {
+				typ = star.X
+			}
+			if id, isIdent := typ.(*ast.Ident); isIdent && id.Name == recv {
+				return fn
+			}
+		}
+	}
+	t.Fatalf("this file declares no method (%s) %s", recv, name)
+	return nil
+}
+
+// flagSetVarName reports the identifier a func assigns flag.NewFlagSet to. The
+// guard walks registrations on that identifier, so it must be read out of the
+// source rather than assumed to be "fs": renaming the variable would otherwise
+// make this test find nothing and pass vacuously.
+func flagSetVarName(t *testing.T, fn *ast.FuncDecl) string {
+	t.Helper()
+	name := ""
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, isAssign := n.(*ast.AssignStmt)
+		if !isAssign || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		call, isCall := assign.Rhs[0].(*ast.CallExpr)
+		if !isCall {
+			return true
+		}
+		sel, isSel := call.Fun.(*ast.SelectorExpr)
+		if !isSel || sel.Sel.Name != "NewFlagSet" {
+			return true
+		}
+		if pkg, isIdent := sel.X.(*ast.Ident); !isIdent || pkg.Name != "flag" {
+			return true
+		}
+		if id, isIdent := assign.Lhs[0].(*ast.Ident); isIdent {
+			name = id.Name
+		}
+		return true
+	})
+	if name == "" {
+		t.Fatal("found no flag.NewFlagSet assignment: the flag guard has rotted. " +
+			"If the flag table moved, teach this guard where — do not delete it, " +
+			"and do not replace it with a copied list.")
+	}
+	return name
 }
 
 // packageStringConsts resolves the package's string constants so a dispatch
@@ -355,11 +431,12 @@ func TestArgvSubcommandBodiesOnlyExit(t *testing.T) {
 }
 
 // TestArgvFlagSurfaceIsExactlyAllowlisted is AT-FR-02-c's flag half. The names
-// are read out of Run()'s registrations, so the allowlist is compared against
-// source rather than standing in for it.
+// are read out of Command.Run's registrations, so the allowlist is compared
+// against source rather than standing in for it.
 func TestArgvFlagSurfaceIsExactlyAllowlisted(t *testing.T) {
-	_, f := parseMainGo(t)
-	run := mustFindFunc(t, f, "Run")
+	_, f := parseRemoteCommandGo(t)
+	run := mustFindMethod(t, f, "Command", "Run")
+	fsVar := flagSetVarName(t, run)
 
 	var got []string
 	ast.Inspect(run.Body, func(n ast.Node) bool {
@@ -371,8 +448,8 @@ func TestArgvFlagSurfaceIsExactlyAllowlisted(t *testing.T) {
 		if !isSel {
 			return true
 		}
-		// flag.String/Bool/Int/Duration/... take the name first; flag.Var and
-		// the *Var forms take the destination first and the name second.
+		// fs.String/Bool/Int/Duration/... take the name first; fs.Var and the
+		// *Var forms take the destination first and the name second.
 		nameArg := -1
 		switch {
 		case strings.HasSuffix(sel.Sel.Name, "Var"):
@@ -385,8 +462,8 @@ func TestArgvFlagSurfaceIsExactlyAllowlisted(t *testing.T) {
 		default:
 			return true
 		}
-		pkg, isIdent := sel.X.(*ast.Ident)
-		if !isIdent || pkg.Name != "flag" {
+		recv, isIdent := sel.X.(*ast.Ident)
+		if !isIdent || recv.Name != fsVar {
 			return true
 		}
 		if nameArg >= len(call.Args) {
@@ -406,7 +483,7 @@ func TestArgvFlagSurfaceIsExactlyAllowlisted(t *testing.T) {
 	want := append([]string(nil), argvFlags...)
 	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("Run() registers flags %v, allowlist says %v.\n"+
+		t.Fatalf("Command.Run registers flags %v, allowlist says %v.\n"+
 			"FR-02: no flag may carry an invite. An --invite= style flag must never "+
 			"exist; invite input is hidden TTY, --invite-file or --invite-stdin, and "+
 			"none of those puts the code on argv.", got, want)

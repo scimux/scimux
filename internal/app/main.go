@@ -5,13 +5,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -154,24 +154,12 @@ func Run() {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		hostname = h
 	}
-	configureUsage(flag.CommandLine, os.Args[0])
-	// Registered so this parse accepts it and so -h documents it; the value is
-	// read from Command.Run, which owns the bind. The listener it returns is
-	// what gets served, so nothing here needs the string.
-	_ = flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
-	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
-	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
-	doRemote := flag.Bool("remote", false, "enable remote access")
-	inviteFile := flag.String("invite-file", "", "read invite from a 0600 owner-only file")
-	inviteStdin := flag.Bool("invite-stdin", false, "read invite from stdin")
-	// Registered here as well as in Command.Run because this parse runs first
-	// and would reject the flag as unknown. Command.Run owns the normalisation
-	// and the http(s) check; this one only has to accept and forward it.
-	rvURL := flag.String("rendezvous-url", "", "rendezvous base URL (default "+remote.DefaultOrigin+"); also the origin bound into pairing transcripts")
-	var trustedHosts stringList
-	flag.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
-	flag.Parse()
-
+	// Command.Run owns the flag table. This function used to parse the same
+	// eight flags first, on flag.CommandLine, purely to seed the Config that
+	// Run then re-derived from the identical argv — and it discarded -addr
+	// and -trusted-host while doing so. Two tables over one argv can only
+	// drift; the one that binds the listener and builds the request policy is
+	// the one that survives.
 	cmd := &Command{
 		Args:   os.Args,
 		Stdin:  os.Stdin,
@@ -179,17 +167,22 @@ func Run() {
 		Stderr: os.Stderr,
 		Home:   home,
 		Config: remote.Config{
-			DataDir:     *data,
-			Remote:      *doRemote,
-			InviteFile:  *inviteFile,
-			InviteStdin: *inviteStdin,
-			Origin:      *rvURL,
-			Stdin:       os.Stdin,
-			Stdout:      os.Stdout,
-			Stderr:      os.Stderr,
+			Stdin:  os.Stdin,
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
 		},
 	}
 	if err := cmd.Run(context.Background()); err != nil {
+		if errors.Is(err, errFlagsReported) {
+			// Command.Run's FlagSet already wrote the message and the usage.
+			// -h is a request, not a failure, so it exits 0; every other argv
+			// error keeps flag.ExitOnError's status 2. Both are what this
+			// binary did while the parse lived here.
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			os.Exit(2)
+		}
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
@@ -258,8 +251,8 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "scimux: startup bound no listener")
 		os.Exit(1)
 	}
-	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), *socket, a.storePath)
-	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)
+	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), cmd.socket, a.storePath)
+	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", cmd.socket)
 	// -addr may be bound wider than loopback, so give the server real
 	// timeouts (slowloris defense). No ReadTimeout/WriteTimeout: legitimate
 	// handlers can be slow (structured sends, the self-update download);

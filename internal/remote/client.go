@@ -838,8 +838,26 @@ func (c *Client) Handle() (string, error) {
 }
 
 // RegisterDevice records one paired device and mints a 256-bit RID.
+//
+// It is not the production pairing path and has no product caller: pairing
+// adopts a device through CompletePairing -> adoptPairedDevice, which also
+// carries the re-pair semantics this does not (closing the old channel,
+// erasing the pending entry, revoking the previous RID, bumping devEpoch) and
+// publishes to the FR-38 list. Tests that build a device here therefore get one
+// production never produces. That divergence is recorded as open debt in
+// reachOpenFindings (internal/app/remote_reachability_guard_test.go); the fix
+// named there is to wire the join, not to delete this — deleting it would
+// remove the marker while leaving the AT files on the divergent route.
+//
+// ctx is accepted for symmetry with the network operations on this client and
+// is deliberately not honored: cancellation is ignored once the atomic local
+// mutation begins. withStateLock takes the state flock non-blockingly
+// (LOCK_EX|LOCK_NB, lock.go), so nothing here waits on anything a context
+// could shorten — a contended lock is ClassStateLock immediately. Honoring
+// ctx would only add a way for the record to be half-written.
+// TestDurableLocalMutationsIgnoreCancellation pins this for all four.
 func (c *Client) RegisterDevice(ctx context.Context, rec DeviceRecord) (DeviceRecord, error) {
-	_ = ctx
+	_ = ctx // see the contract above; not an oversight
 	var out DeviceRecord
 	err := c.withStateLock("register", func() error {
 		c.mu.Lock()
@@ -925,8 +943,14 @@ func (c *Client) Devices() ([]DeviceRecord, error) {
 }
 
 // RevokeDevice is FR-13/FR-29: durable local revoke, no rendezvous required.
+//
+// ctx is accepted and deliberately not honored, and here that is a security
+// property rather than a convenience: honoring it would mean a caller whose
+// context happened to be cancelled silently leaves a revoked device paired.
+// "No rendezvous required" and "no live context required" are the same
+// guarantee seen from two sides. See RegisterDevice for the mechanism.
 func (c *Client) RevokeDevice(ctx context.Context, id string) error {
-	_ = ctx
+	_ = ctx // see the contract above; not an oversight
 	err := c.withStateLock("revoke", func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -1203,9 +1227,11 @@ func (c *Client) Deliver(ctx context.Context, deviceID string, msg []byte) error
 	return nil
 }
 
-// DisableAll is FR-32.
+// DisableAll is FR-32, the kill switch. ctx is accepted and deliberately not
+// honored, for the same reason as RevokeDevice and more so: a kill switch a
+// cancelled caller can suppress is not a kill switch.
 func (c *Client) DisableAll(ctx context.Context) error {
-	_ = ctx
+	_ = ctx // see the contract above; not an oversight
 	c.stopRVLoop()
 	return c.withStateLock("disable", func() error {
 		return c.disableAllLocked()
@@ -1267,9 +1293,11 @@ func (c *Client) disableAllLocked() error {
 	return nil
 }
 
-// Reenable is the distinct, explicit action that reverses DisableAll.
+// Reenable is the distinct, explicit action that reverses DisableAll. ctx is
+// accepted and deliberately not honored, symmetrically with DisableAll: the
+// operator's intent decides, not the liveness of whatever context carried it.
 func (c *Client) Reenable(ctx context.Context) error {
-	_ = ctx
+	_ = ctx // see the contract above; not an oversight
 	return c.withStateLock("reenable", func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
