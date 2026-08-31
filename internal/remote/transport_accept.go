@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -147,6 +148,11 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 
 	// A peer that fails or goes away must not leave the session claiming to be
 	// live. This is the same edge DisconnectPeer models in-process.
+	//
+	// Close drives the peer to Closed, so this handler fires on our own
+	// teardown too. A cause already recorded — a tunnel-version verdict
+	// especially — is the explanation; connected-then-lost is only for a
+	// drop that has none.
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
 		case webrtc.PeerConnectionStateFailed,
@@ -154,11 +160,15 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 			webrtc.PeerConnectionStateClosed:
 			s.mu.Lock()
 			if s.computerDC != nil {
-				s.cause = CauseConnectedThenLost
+				switch s.cause {
+				case "", CauseICEFailed:
+					s.cause = CauseConnectedThenLost
+				}
 			}
 			s.mu.Unlock()
 		default:
 		}
+		runAfterConnectionStateChange(st)
 	})
 
 	go s.serveArrivingChannel(serveCtx, dcCh, handler)
@@ -171,6 +181,22 @@ func acceptSessionOffer(ctx context.Context, offer SessionInner, handler http.Ha
 // pion has already started delivering messages, which is the only thing
 // that makes a late reader observable.
 var beforeChannelPickup = func() {}
+
+// afterConnectionStateChange runs at the end of the answering path's
+// OnConnectionStateChange handler with the state just handled. A test
+// waits here for Closed so it reads TransportCause after pion has
+// dispatched the teardown callback that would otherwise overwrite a
+// recorded tunnel-version verdict. pion fires that callback on its own
+// goroutine, so replacement is serialised by afterConnectionStateMu.
+var afterConnectionStateMu sync.Mutex
+var afterConnectionStateChange = func(webrtc.PeerConnectionState) {}
+
+func runAfterConnectionStateChange(st webrtc.PeerConnectionState) {
+	afterConnectionStateMu.Lock()
+	f := afterConnectionStateChange
+	afterConnectionStateMu.Unlock()
+	f(st)
+}
 
 // arrivingChannel is the computer's inbound data channel together with the
 // stream that already wraps it. The pair is built inside OnDataChannel.
@@ -233,6 +259,9 @@ func (s *Session) serveArrivingChannel(ctx context.Context, dcCh <-chan arriving
 	// The computer is the side that outlives deployments, so it is the side
 	// most likely to meet a peer of another major. Serve negotiates before
 	// it dispatches anything, and a version verdict is recorded as this
-	// session's FR-24 cause rather than dropped as a serve error.
+	// session's FR-24 cause rather than dropped as a serve error. Close
+	// follows: Serve returning is the session ending, and Close does not
+	// touch the cause noteTunnelError just recorded.
 	_ = s.noteTunnelError("serve", srv.Serve(ctx, &httpTunnelHandler{h: handler}))
+	_ = s.Close()
 }

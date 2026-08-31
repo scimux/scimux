@@ -111,7 +111,8 @@ func inProcessTunnelVia(ctx context.Context, hub *signallingHub, handler http.Ha
 	s.conn = codec.NewConn(pair.clientStream, pair.clientStream, codec.RoleInitiator)
 	go func() {
 		defer close(s.serveDone)
-		_ = s.srv.Serve(serveCtx, &httpTunnelHandler{h: handler})
+		_ = s.noteTunnelError("serve", s.srv.Serve(serveCtx, &httpTunnelHandler{h: handler}))
+		_ = s.Close()
 	}()
 
 	// The peer holds a wait slot on the hub for as long as it is connected;
