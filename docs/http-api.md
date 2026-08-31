@@ -659,3 +659,97 @@ already up to date, a `dev` build, or an update is already in progress.
 ### `GET /api/licenses`
 
 License texts bundled into the binary (shown in the About sheet).
+
+## Remote pairing
+
+Loopback pairing for `--remote`. Confirm is a separate explicit call;
+mint never completes a pairing. The curl recipe and FR-38 state table
+live in `docs/remote-pairing-curl.md`. CSRF is required on unsafe methods;
+GET needs no header. `sameOrigin` is true when both Origin and Referer
+are absent.
+
+### `POST /api/remote/pairing`
+
+Mint an 8-character pairing code with a 60-second TTL. Confirm flags in
+the body are ignored.
+
+### `GET /api/remote/pairing/{code}`
+
+FR-38 state for a code, plus SAS once a device offer has arrived.
+
+### `POST /api/remote/pairing/{code}/confirm`
+
+Complete pairing only when both `computer_confirm` and `device_confirm`
+are present and `true`. Omitted flags do not default to true.
+
+### `POST /api/remote/pairing/{code}/cancel`
+
+Tear down the waiter without consuming the code.
+
+### `GET /api/remote/devices`
+
+Paired devices with stable labels and paired-at times. A device's key is
+`ecdh_public_key`: the static P-256 key a reply envelope is sealed to,
+matching the name the on-disk record uses for the same material. It is
+not the device's ed25519 signing identity, which this API does not
+expose — `public_key` means ed25519 elsewhere, so it is not reused here.
+
+### `DELETE /api/remote/devices/{id}`
+
+Revoke one paired device.
+
+### `POST /api/remote/unenroll`
+
+Unlink this computer: release the installation at the rendezvous
+(rendezvous-v1 §4.4) and forget the identity locally. Answers
+`{"released":bool,"hosted":"..."}`, with `hosted` read after the unlink.
+
+The two halves are deliberately unequal. The local half is
+unconditional — a computer that cannot reach the rendezvous is exactly the
+one whose owner wants it to stop trying — so an unreachable rendezvous
+still answers 200 with `released:false`. That is the honest report: the
+computer is unlinked, and an installation the rendezvous still holds can
+only be struck off by whoever issued the invite. A failure of the *local*
+half is a 500, because an identity still on disk is still an enrollment.
+
+§4.4 releases the installation and never the code, so re-enrolling
+afterwards takes a new invite.
+
+### `GET /api/remote/status`
+
+The installation's hosted enrollment as `hosted` (`enrolled`,
+`disabled`, `revoked`, or `unavailable`) plus a `devices` array. Each
+device is `{"id":"...","connected":true}` when its tunnel is live.
+When it is not, `connected` is false; `cause` is one of the six FR-24
+states (`rendezvous-unavailable`, `computer-offline`,
+`signalling-rejected`, `ice-failed`, `auth-failed`,
+`connected-then-lost`) only when the transport has produced one. A
+paired device that has never attached a channel omits `cause`
+entirely — never connected is not a cause. `guidance` is present only
+for `ice-failed`, and is the only state that names
+SSH/WireGuard/Tailscale. `hosted` is independent of `cause`: a
+revoked installation is still `hosted:"revoked"` and is not an
+FR-24 cause.
+
+`404` when remote pairing is not enabled. GET needs no CSRF header.
+The body never mints a code and never returns a rid, SAS, or public
+key.
+
+`POST /api/remote/pairing` returns `409` with `hosted` and a readable
+`error` when status is `revoked` or `disabled` — durable facts about
+authorization. `unavailable` is a transient rendezvous condition and
+still mints, because the mint is what starts the pairing wait loop that
+clears it; a code minted then is genuinely pairable once the outage
+lifts. For the same reason `GET /api/remote/pairing/{code}` reports
+FR-38 `failed` (plus `reason`) only under `revoked` or `disabled`, and
+leaves a live session `pending` through a transient outage.
+
+### `GET /api/remote/bootstrap`
+
+Computer-supplied FR-40 bootstrap manifest. JSON with `source` (`computer`),
+`entry` (`/js/app.js`), and `entries` naming every served asset with
+`url`, `kind`, `size`, and `integrity` (`sha256-` + standard-base64
+SHA-256 of the bytes that GET on that URL returns). Derived from the
+embedded filesystem the handlers serve, computed once per process. GET
+needs no CSRF header. Always reachable — this is application content,
+not pairing state.

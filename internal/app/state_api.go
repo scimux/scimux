@@ -214,6 +214,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 			unadopted = append(unadopted, s)
 		}
 	}
+	hosted := a.hostedRemote
 	a.mu.Unlock()
 	// Project live context occupancy onto the list — only for live nodes, and
 	// only after the unlock (a.segment takes a.mu itself, so calling it inside
@@ -251,10 +252,14 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		p := ctxPctOf(seg.Used, win)
 		v.CtxPct = &p
 	}
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"nodes": views, "unadopted": unadopted, "sys": sysload(),
 		"socket": a.server.Socket, "hostname": hostname, "version": version,
-	})
+	}
+	if hosted != nil {
+		payload["remote"] = map[string]string{"status": hosted.HostedStatus()}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return

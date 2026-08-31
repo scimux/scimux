@@ -1,0 +1,350 @@
+[
+  {
+    "id": "pair-wait-request",
+    "message": "pair-wait-request",
+    "comment": "max_ms is optional (default 60000). 1 ms makes the empty 204 executable. Signatures do not cover max_ms. The waiter TTL is independently 60 s.",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/wait",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"max_ms\":1}"
+    },
+    "response": {
+      "status": 204,
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Rv-Challenge": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "22222222222222222222222222222222222222222222222222222222222222225555555555555555555555555555555555555555555555555555555555555555",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pair-wait-response",
+    "message": "pair-wait-response",
+    "comment": "200 body is the offer envelope, hex-decoded, unmodified. Not the waiter's later reply.",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/wait",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/octet-stream",
+        "X-Content-Type-Options": "nosniff",
+        "X-Rv-Challenge": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "22222222222222222222222222222222222222222222222222222222222222225555555555555555555555555555555555555555555555555555555555555555",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "poster": {
+        "method": "POST",
+        "path": "/v1/pair/offer",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"code\":\"04106105\",\"envelope\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb\"}"
+      }
+    }
+  },
+  {
+    "id": "pair-offer-request",
+    "message": "pair-offer-request",
+    "comment": "Expected body is the waiter's reply, a different blob sealed in the opposite direction. Not an echo of envelope.",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/offer",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"04106105\",\"envelope\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/octet-stream",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b45547307444444444444444444444444e59e1ee6d2b5d59f90981ac2bd19b333b94805fa34ef161d1f0cb4d49ba93d28214169ec7b975aa075eb7bdde02a686f478ca1e442b7188f9dbc44093fb96d54981722f262d2039762e7d2ba0a8f5bc56ad8a7b7b9b364ec9a12c63329d0d671048577267ca33897b7fedcccb6af68e33d631b3c7aea9aa7ccbf9708"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "222222222222222222222222222222222222222222222222222222222222222255555555555555555555555555555555555555555555555555555555555555557777777777777777777777777777777777777777777777777777777777777777",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "waiter": {
+        "method": "POST",
+        "path": "/v1/pair/wait",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      },
+      "reply_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b45547307444444444444444444444444e59e1ee6d2b5d59f90981ac2bd19b333b94805fa34ef161d1f0cb4d49ba93d28214169ec7b975aa075eb7bdde02a686f478ca1e442b7188f9dbc44093fb96d54981722f262d2039762e7d2ba0a8f5bc56ad8a7b7b9b364ec9a12c63329d0d671048577267ca33897b7fedcccb6af68e33d631b3c7aea9aa7ccbf9708"
+    }
+  },
+  {
+    "id": "pair-offer-response",
+    "message": "pair-offer-response",
+    "comment": "Response side of the offer+reply exchange. body_hex is replySealed, not the posted envelope.",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/offer",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"04106105\",\"envelope\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb\"}"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/octet-stream",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b45547307444444444444444444444444e59e1ee6d2b5d59f90981ac2bd19b333b94805fa34ef161d1f0cb4d49ba93d28214169ec7b975aa075eb7bdde02a686f478ca1e442b7188f9dbc44093fb96d54981722f262d2039762e7d2ba0a8f5bc56ad8a7b7b9b364ec9a12c63329d0d671048577267ca33897b7fedcccb6af68e33d631b3c7aea9aa7ccbf9708"
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "222222222222222222222222222222222222222222222222222222222222222255555555555555555555555555555555555555555555555555555555555555557777777777777777777777777777777777777777777777777777777777777777",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "waiter": {
+        "method": "POST",
+        "path": "/v1/pair/wait",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      },
+      "reply_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b45547307444444444444444444444444e59e1ee6d2b5d59f90981ac2bd19b333b94805fa34ef161d1f0cb4d49ba93d28214169ec7b975aa075eb7bdde02a686f478ca1e442b7188f9dbc44093fb96d54981722f262d2039762e7d2ba0a8f5bc56ad8a7b7b9b364ec9a12c63329d0d671048577267ca33897b7fedcccb6af68e33d631b3c7aea9aa7ccbf9708"
+    }
+  },
+  {
+    "id": "pair-cancel-request",
+    "message": "pair-cancel-request",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/cancel",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"sig\":\"677360f37207be2bb79ce7f114240e5d52f43e4b39ad764c08a8b83df70802c9d328d5ba2fe17d45f95635c0e055914f40b60fa5f0b62b73a2e627deae96e901\",\"code\":\"04106105\"}"
+    },
+    "response": {
+      "status": 204,
+      "headers": {
+        "X-Content-Type-Options": "nosniff"
+      }
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "22222222222222222222222222222222222222222222222222222222222222226666666666666666666666666666666666666666666666666666666666666666",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "waiter": {
+        "method": "POST",
+        "path": "/v1/pair/wait",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      }
+    }
+  },
+  {
+    "id": "pair-cancel-response",
+    "message": "pair-cancel-response",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/cancel",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"sig\":\"677360f37207be2bb79ce7f114240e5d52f43e4b39ad764c08a8b83df70802c9d328d5ba2fe17d45f95635c0e055914f40b60fa5f0b62b73a2e627deae96e901\",\"code\":\"04106105\"}"
+    },
+    "response": {
+      "status": 204,
+      "headers": {
+        "X-Content-Type-Options": "nosniff"
+      }
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "22222222222222222222222222222222222222222222222222222222222222226666666666666666666666666666666666666666666666666666666666666666",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "waiter": {
+        "method": "POST",
+        "path": "/v1/pair/wait",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      }
+    }
+  },
+  {
+    "id": "pair-rate-limit",
+    "message": "pair-rate-limit",
+    "comment": "Second offer while a poster is held. Empty body is intended: §10.3 documents status, Retry-After and the two headers only.",
+    "kind": "http",
+    "request": {
+      "method": "POST",
+      "path": "/v1/pair/offer",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body_utf8": "{\"v\":1,\"code\":\"04106105\",\"envelope\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb\"}"
+    },
+    "response": {
+      "status": 429,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Retry-After": "2",
+        "X-Content-Type-Options": "nosniff"
+      }
+    },
+    "setup": {
+      "origin": "https://my.scimux.eu",
+      "now": "2026-08-15T12:00:00Z",
+      "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
+      "bind_handle_entropy_hex": "0102030405060708090a",
+      "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "rand_hex": "22222222222222222222222222222222222222222222222222222222222222225555555555555555555555555555555555555555555555555555555555555555",
+      "preflights": [
+        {
+          "method": "POST",
+          "path": "/v1/challenge",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\"}"
+        }
+      ],
+      "waiter": {
+        "method": "POST",
+        "path": "/v1/pair/wait",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"469020605a8956da45e178db21f38ff4a135e7e50759b21e3da217adf2c773e82f9c286503a166a380f72bc78748fd361b3a706988c6c938bfccf61aa26b090b\",\"code\":\"04106105\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      },
+      "poster": {
+        "method": "POST",
+        "path": "/v1/pair/offer",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_utf8": "{\"v\":1,\"code\":\"04106105\",\"envelope\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb\"}"
+      }
+    }
+  }
+]

@@ -393,6 +393,19 @@
 <div class="sheet" id="menu">
   <div class="grab"></div>
   <h3>scimux</h3>
+  <!-- Remote access is first on purpose: a paired device holds
+       SSH-equivalent authority on this computer, so the list of who holds it
+       is not a setting to be found below the version check. -->
+  <div class="sect">
+    <div class="k">Remote access</div>
+    <div id="m_devices"></div>
+    <button class="cta" id="m_pair">Pair a device</button>
+    <!-- The counterpart to a device revoke: enrolling this computer was
+         one-way until F1, and an enrollment nobody can hand back is not
+         something to ask someone to try. -->
+    <button class="cta" id="m_unlink" hidden>Unlink from the rendezvous</button>
+    <div id="m_unlink_note" hidden></div>
+  </div>
   <div class="sect">
     <div class="item"><span>Version</span><span class="tag" id="m_version">—</span>
       <button id="m_check" aria-label="check for updates" title="check for updates">&#8635;</button></div>
@@ -409,7 +422,31 @@
     <div class="item"><span>License</span><button class="tag lic" data-lic="scimux">MPL-2.0</button></div>
     <div class="item"><span>acp-go-sdk (ACP transport)</span><button class="tag lic" data-lic="acp">Apache-2.0</button></div>
     <div class="item"><span>Go runtime</span><button class="tag lic" data-lic="go">BSD-3-Clause</button></div>
+    <div class="item"><span>pion (WebRTC transport)</span><button class="tag lic" data-lic="pion">MIT</button></div>
+    <div class="item"><span>golang.org/x (via pion)</span><button class="tag lic" data-lic="golangx">BSD-3-Clause</button></div>
+    <div class="item"><span>google/uuid (via pion)</span><button class="tag lic" data-lic="uuid">BSD-3-Clause</button></div>
+    <div class="item"><span>wlynxg/anet (via pion)</span><button class="tag lic" data-lic="anet">BSD-3-Clause</button></div>
+    <div class="item"><span>Nayuki QR generator (pairing)</span><button class="tag lic" data-lic="qrcodegen">MIT</button></div>
     <pre id="m_lictext" hidden></pre>
+  </div>
+</div>
+
+<!-- Pairing sheet (P3/P4). Deliberately NOT class="sheet": the generic
+     backdrop closes every one of those, and losing this one mid-flow
+     abandons a live pairing code with no cancel behind it. pairing-ui.js
+     owns its visibility and answers dismissable() for the shell. -->
+<div class="pairoverlay" id="pairsheet" role="dialog" aria-modal="true" aria-labelledby="pair_title" hidden>
+  <div id="pairscrim"></div>
+  <div class="pairpanel">
+    <div class="pairhead">
+      <h3 id="pair_title"></h3>
+      <button id="pair_x" aria-label="cancel pairing" title="cancel pairing">&#10005;</button>
+    </div>
+    <div id="pair_body"></div>
+    <div id="pair_qr"></div>
+    <div id="pair_sas"></div>
+    <div id="pair_actions"></div>
+    <div id="pair_live" class="sr-only" aria-live="polite"></div>
   </div>
 </div>
 

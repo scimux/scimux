@@ -36,6 +36,8 @@
  *   - renderChatHead, refreshChat (async), renderWsInbox
  *   - invalidateCardsSig, invalidateMap, invalidateBookmarks, invalidateChat
  *   - onStartPolling — usage prime only (badge HTML + 30s cadence stay shell)
+ *   - onPageVisibility(visible) — sole fan-out of the document's
+ *     visibilitychange to features that must pause when the page hides
  *   - syncwarnEl — exact pending/saved warning text
  *
  * Explicit non-ownership:
@@ -109,11 +111,14 @@ export function stateGetRequest(stateEtag) {
  * All DOM, network, timer, and feature effects are injected.
  */
 export function createPollingFeature(deps = {}) {
+  if (typeof deps.fetchImpl !== "function") {
+    throw new Error("createPollingFeature: fetchImpl is required");
+  }
   const {
     document: doc = globalThis.document,
     window: win = globalThis.window,
     storage,
-    fetchImpl = globalThis.fetch?.bind(globalThis),
+    fetchImpl,
     csrf = "",
     setTimeout: setTimeoutImpl = globalThis.setTimeout?.bind(globalThis),
     clearTimeout: clearTimeoutImpl = globalThis.clearTimeout?.bind(globalThis),
@@ -138,6 +143,7 @@ export function createPollingFeature(deps = {}) {
     invalidateBookmarks = () => {},
     invalidateChat = () => {},
     onStartPolling = () => {},
+    onPageVisibility = () => {},
   } = deps;
 
   let stateEtag = "";
@@ -155,6 +161,11 @@ export function createPollingFeature(deps = {}) {
 
   const onVisibility = () => {
     if (destroyed) return;
+    /* Told before we act on it ourselves: this listener is the document's
+       single owner of visibilitychange, so anything else that must pause
+       when the page goes away hears about it here rather than adding a
+       second listener with its own idea of what "hidden" means. */
+    onPageVisibility(!doc.hidden);
     if (doc.hidden) {
       if (pollTimer) clearTimeoutImpl(pollTimer);
       pollTimer = null;
@@ -282,7 +293,8 @@ export function createPollingFeature(deps = {}) {
       let r;
       try {
         const req = stateGetRequest(stateEtag);
-        r = await fetchImpl(req.path, req.opts);
+        /* A 2s ETag poll must not be served from the HTTP cache. */
+        r = await fetchImpl(req.path, { ...req.opts, cache: "no-store" });
       } catch {
         if (destroyed) return;
         setHostOnline(false);

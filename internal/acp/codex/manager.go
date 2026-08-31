@@ -1,3 +1,31 @@
+// Package codex is scimux's third transport, and the sibling of internal/acp:
+// it supervises Codex nodes by speaking codex-cli's own app-server protocol
+// over stdio to a local child process, instead of driving a tmux-wrapped TUI
+// and photographing the pane.
+//
+// It is a sibling, not a client, of internal/acp. The two present the same
+// surface to the rest of scimux and share the same contract — one node = one
+// subprocess = one thread; the append-only session log (log.go) is the
+// authoritative history, so a node with no live subprocess degrades to
+// read-only history rather than disappearing; unknown protocol records are
+// ignored rather than treated as errors — but the wire underneath differs, and
+// that difference is deliberate. internal/acp speaks the Agent Client Protocol
+// through github.com/coder/acp-go-sdk, which is a maintainer-approved
+// dependency exception scoped to that package. Codex does not speak ACP, so
+// the exception does not reach here: peer.go is a hand-written
+// newline-delimited JSON-RPC peer, stdlib only.
+//
+// The peer is clean-room. Message shapes come only from Codex's first-party
+// generated JSON Schema, never from reading GPL Codex source. Framing was
+// verified live against codex-cli 0.144.1 (one JSON object per line, no
+// Content-Length; responses omit "jsonrpc"; ids may be string or int) and is
+// documented at the peer type rather than assumed.
+//
+// One behavioural difference from internal/acp is worth knowing before
+// changing either: codex runs multiple threads on a single app-server process,
+// so /clear opens a new thread on the same PID. The ACP agents cannot do that
+// — a second session/new on one connection is unproven upstream — so they
+// implement /clear as deterministic process replacement.
 package codex
 
 import (

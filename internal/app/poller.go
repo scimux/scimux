@@ -682,6 +682,37 @@ func (a *app) maybeRelinkTranscript(n *Node) {
 const animMaxLines = 3
 const paneQuietAfter = 8 * time.Second
 
+// The attention ladder. The absolute magnitudes below are conservative
+// choices, not measurements — what is actually load-bearing is their order,
+// and TestAttentionLadderIsOrdered pins it so a plausible-looking tweak to one
+// constant cannot silently invert a rung.
+//
+// Two chains, on two different kinds of evidence:
+//
+//	paneQuietAfter < owedStallCorroborated < owedStallAfter < owedStallAX
+//
+// is the quiet-pane chain, ordered by how much the pane's staticness is worth.
+// paneQuietAfter is the precondition every rung shares; the cancel anchor
+// sharpens by exactly one rung; an AX pane renders flatter and quieter, so its
+// staticness is the weakest evidence of all and it sits slowest.
+//
+//	owedStallAfter < animStallAfter
+//
+// is the cross-branch one: animStallAfter governs a pane that is still
+// *changing*, where a confined animation strip is weaker evidence of a wait
+// than a pane that stopped changing altogether, so the active-pane backstop
+// must be the slower of the two. Both directions of error are bounded and
+// neither is silent — too fast raises a neutral inspect at a busy agent (the
+// user dismisses it), too slow leaves a human waiting, and the incident that
+// motivated this whole branch was a 6m42s wait, which is the scale the numbers
+// are chosen against.
+//
+// For an owned Claude launch whose bundle proves "asked", none of this decides
+// anything: the escalation notice is the sole authority on the active-pane
+// paths, and its absence suppresses the animStallAfter degradation outright.
+// These rungs govern the agents that have no such notice — Codex, ACP, and
+// bundles predating the gate.
+
 // deliveryGrace is how long after a paste the stale-link backstop waits before
 // a transcript with no new content counts as proof the link is dead. It covers
 // the lag between the paste and the agent writing its user record; the pane

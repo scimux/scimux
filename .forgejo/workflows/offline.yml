@@ -1,0 +1,47 @@
+# AT-NFR-08-a — the offline test job.
+#
+# NFR-08: `go test -short ./...` must pass with a warm module cache, no network
+# route, no tmux and no rendezvous. The acceptance test is explicit that this
+# runs *in CI with the network disabled*, "not as a manual check" — a developer
+# unplugging their ethernet once does not keep the property true.
+#
+# The module cache is warmed WITH network first: a cold clone must still fetch
+# the dependency tree, which NFR-08 calls the cost of NFR-02 rather than a test
+# failure. Everything after that runs through scripts/offline-run.sh, which
+# establishes the isolation, proves it, and fails rather than degrading to a
+# networked run. The reasoning behind how it isolates (loopback stays up; the
+# uid must not change) is documented in that script.
+on:
+  push:
+    branches:
+      - "**"
+jobs:
+  offline-tests:
+    runs-on: go-builder
+    steps:
+      - name: Add missing tools
+        run: |
+          apk add --no-cache file git nodejs util-linux iproute2
+
+      - name: Clone and checkout repository
+        run: |
+          git clone https://codeberg.org/chrberger/scimux.git .
+          git checkout ${{ github.sha }}
+
+      - name: Warm the module cache (network required, and allowed here)
+        run: |
+          go mod download all
+          # Build while the network is still up, so a toolchain or module
+          # download can never masquerade as an offline test failure.
+          go build ./...
+
+      - name: Go tests, offline (short mode; integration needs tmux and is skipped)
+        run: |
+          # GOPROXY/GOFLAGS are belt and braces: a cache miss then fails as a
+          # clear module error instead of hanging on a dial.
+          GOPROXY=off GOFLAGS=-mod=readonly sh scripts/offline-run.sh go test -short ./...
+
+      - name: Node tests, offline
+        run: |
+          node -e 'const m = Number(process.versions.node.split(".")[0]); if (m < 22) { console.error(`Node 22+ required; found ${process.versions.node}`); process.exit(1); }'
+          sh scripts/offline-run.sh sh -c 'node --test web/test/*.test.js'

@@ -106,3 +106,77 @@
 #backdrop { position: fixed; inset: 0; z-index: 125; background: rgba(0,0,0,.25);
   opacity: 0; pointer-events: none; transition: opacity .3s; }
 #backdrop.on { opacity: 1; pointer-events: auto; }
+
+/* ---------- pairing (P4) ----------
+   The pairing overlay is deliberately NOT a `.sheet`: the generic backdrop
+   closes every one of those, and losing this one mid-flow abandons a live
+   pairing code with no cancel behind it. It sits one step above the sheet
+   layer so the burger it was opened from cannot draw over it. */
+.pairoverlay { position: fixed; inset: 0; z-index: 131; }
+.pairoverlay[hidden] { display: none; }
+/* Its own scrim, not the shared #backdrop: that one has a single listener
+   that closes every sheet unconditionally, and this overlay answers for
+   its own dismissal (a live pairing code refuses). */
+#pairscrim { position: absolute; inset: 0; background: rgba(0,0,0,.25); }
+.pairpanel {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  background: var(--surface); border-radius: 16px 16px 0 0;
+  padding: 14px 20px calc(24px + env(safe-area-inset-bottom));
+  max-height: 88dvh; overflow-y: auto;
+  box-shadow: 0 -8px 40px rgba(0,0,0,.16);
+}
+@media (min-width: 900px) {
+  /* On a computer the QR is the point of the screen and the phone is held up
+     to it, so the panel centres rather than clinging to the bottom edge. */
+  .pairpanel {
+    left: 50%; bottom: 50%; right: auto;
+    transform: translate(-50%, 50%);
+    width: min(420px, 92vw); border-radius: 16px;
+    padding: 14px 20px 24px;
+  }
+}
+.pairhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pairhead h3 { margin: 0; font-size: 20px; }
+#pair_qr { margin: 18px auto 4px; max-width: 280px; }
+/* The QR is one path of unit squares on a white plate; it must stay white
+   in dark mode, because a scanner reads contrast, not theme. */
+#pair_qr svg { width: 100%; height: auto; display: block; border-radius: 8px; }
+/* Six digits a human compares against a phone held next to the computer:
+   tabular, wide-tracked, and big enough to read at arm's length. */
+#pair_sas {
+  font: 700 34px/1.2 ui-monospace, monospace; letter-spacing: .14em;
+  text-align: center; margin: 14px 0 4px;
+}
+#pair_sas:empty { display: none; }
+#pair_actions { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+#pair_actions button {
+  width: 100%; padding: 13px; border-radius: var(--radius);
+  font-size: 16px; font-weight: 600;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--hairline);
+}
+#pair_actions button.primary { background: var(--work); color: #fff; border-color: transparent; }
+.pair-warn ul { margin: 8px 0; padding-left: 20px; }
+.pair-warn li { margin: 4px 0; }
+.pair-warn code {
+  font: 13px/1.4 ui-monospace, monospace; background: var(--code-bg);
+  padding: 1px 5px; border-radius: 4px;
+}
+/* The SSH comparison is for readers it helps and noise for the rest, so it
+   sits below the sentences that carry the warning on their own. */
+.pair-warn-aside { color: var(--dim); font-size: 13px; margin-top: 8px; }
+/* paired-device rows in the burger's Remote access section */
+#m_devices .item.note { color: var(--dim); }
+#m_devices .item.err { color: var(--bad); }
+#m_devices button.danger { color: var(--bad); font-weight: 600; }
+/* Unlinking this computer ends every grant in the list above at once, so
+   the armed state reads destructive for the same reason a revoke does. */
+#m_unlink.danger { color: var(--bad); font-weight: 600; }
+#m_unlink_note .item.note { color: var(--dim); }
+#m_unlink_note .item.err { color: var(--bad); }
+/* Live regions that exist for a screen reader and must not take layout.
+   clip-path over `display:none`, which would remove the region from the
+   accessibility tree along with the announcement it was carrying. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}

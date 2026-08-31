@@ -5,17 +5,19 @@ package app
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/remote"
 )
 
 // version is set by the command package, whose symbol is stamped at build time
@@ -158,33 +160,43 @@ func Run() {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		hostname = h
 	}
-	configureUsage(flag.CommandLine, os.Args[0])
-	addr := flag.String("addr", "127.0.0.1:8787", "listen address (loopback only; use an SSH tunnel for remote access)")
-	data := flag.String("data", filepath.Join(home, ".scimux"), "data directory for the node store")
-	socket := flag.String("socket", "scimux", "tmux socket name (tmux -L) for the private server")
-	var trustedHosts stringList
-	flag.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
-	flag.Parse()
-
-	if err := prepareDataDir(*data); err != nil {
+	// Command.Run owns the flag table. This function used to parse the same
+	// eight flags first, on flag.CommandLine, purely to seed the Config that
+	// Run then re-derived from the identical argv — and it discarded -addr
+	// and -trusted-host while doing so. Two tables over one argv can only
+	// drift; the one that binds the listener and builds the request policy is
+	// the one that survives.
+	cmd := &Command{
+		Args:   os.Args,
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+		Home:   home,
+		Config: remote.Config{
+			Stdin:  os.Stdin,
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		},
+	}
+	if err := cmd.Run(context.Background()); err != nil {
+		if errors.Is(err, errFlagsReported) {
+			// Command.Run's FlagSet already wrote the message and the usage.
+			// -h is a request, not a failure, so it exits 0; every other argv
+			// error keeps flag.ExitOnError's status 2. Both are what this
+			// binary did while the parse lived here.
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			os.Exit(2)
+		}
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
-	a, err := NewApp(Config{
-		Home:    home,
-		DataDir: *data,
-		Socket:  *socket,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
+	a := cmd.application
+	if a == nil {
+		fmt.Fprintln(os.Stderr, "scimux: startup produced no application")
 		os.Exit(1)
 	}
-	policy, err := newRequestPolicy(*addr, trustedHosts)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "scimux: host policy:", err)
-		os.Exit(1)
-	}
-	a.requestPolicy = policy
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
 	a.warmStartup()
 	status.Done()
@@ -227,25 +239,36 @@ func Run() {
 		a.refreshClaudeModels(ctx)
 	}()
 
-	handler, err := NewHandler(a, webFS)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
+	handler := cmd.Handler()
+	if handler == nil {
+		h, err := NewHandler(a, webFS)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scimux:", err)
+			os.Exit(1)
+		}
+		handler = h
 	}
 
-	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", *addr, *socket, a.storePath)
-	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", *socket)
+	// Run already bound this, before it spent anything at the rendezvous.
+	// Serve on that listener rather than re-binding: a second bind would be a
+	// second chance to fail, after the irreversible step.
+	ln := cmd.Listener()
+	if ln == nil {
+		fmt.Fprintln(os.Stderr, "scimux: startup bound no listener")
+		os.Exit(1)
+	}
+	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), cmd.socket, a.storePath)
+	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", cmd.socket)
 	// -addr may be bound wider than loopback, so give the server real
 	// timeouts (slowloris defense). No ReadTimeout/WriteTimeout: legitimate
 	// handlers can be slow (structured sends, the self-update download);
 	// ReadHeaderTimeout covers the attack that matters.
 	srv := &http.Server{
-		Addr:              *addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.Serve(ln); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}

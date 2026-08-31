@@ -685,6 +685,7 @@ function makeFeature(overrides = {}){
     CSS: { escape: s => String(s) },
     api,
     apiConditionalGet,
+    assetURL: path => path,
     nodes: () => nodes,
     sel: () => sel,
     selGen: () => selGen,

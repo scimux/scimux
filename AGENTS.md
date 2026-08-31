@@ -9,10 +9,19 @@ invariants you must not break and the workflows you need.
 ```sh
 go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
 go test ./...          # unit + integration (integration needs tmux)
-go test -short ./...   # unit only; this is what CI runs
-node --test web/test/*.test.js  # browser unit suite (1125 tests; no browser needed)
+go test -short ./...   # unit only; the offline CI lane (build.yml runs the full suite)
+node --test web/test/*.test.js  # browser unit suite (1,182 tests on 2026-08-31, including web/test/audit.test.js; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
+go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
 ```
+
+The release matrix is not written down twice: `TestCrossBuildTargets` parses
+every `GOOS=… GOARCH=…` pair out of `.forgejo/workflows/{build,release}.yml`
+and compiles `./cmd/scimux` for each, so a target added to a workflow is a
+target the suite defends from that moment. To cross-build one by hand:
+`CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build ./cmd/scimux`. freebsd/amd64
+is built by `build.yml` but deliberately not released — the invariant below
+claims the static build keeps working, and this is what keeps that claim true.
 
 Integration tests create private, randomly named tmux sockets and clean up
 after themselves; they never touch a user's tmux server. Never run a real
@@ -69,10 +78,95 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   - **One approved exception:** `github.com/coder/acp-go-sdk`, the Agent
     Client Protocol peer, is a deliberate, maintainer-approved dependency
     **scoped to `internal/acp/` only** (the ACP transport for pi/opencode/grok; see
-    `acp-integration-plan.md`). A hand-rolled bidirectional JSON-RPC peer with
+    `docs/acp-integration-plan.md`). A hand-rolled bidirectional JSON-RPC peer with
     typed unions was evaluated and rejected as ~600 lines of ongoing schema
     churn. The tmux/transcript core stays stdlib-only; do not let the SDK (or
     any other module) leak beyond `internal/acp/`.
+  - **Approved exception #2 (taken 2026-08-22):** `github.com/pion/...` for
+    the WebRTC transport is a deliberate, maintainer-approved dependency
+    **scoped to `internal/remote/` only**. The decision is made and is not to
+    be relitigated: a browser will only speak WebRTC for a peer-to-peer data
+    channel, so the computer end must speak the same ICE/DTLS/SCTP stack, and
+    hand-rolling that in stdlib was rejected as neither realistic nor safe to
+    maintain. The module **landed in S6** (2026-08-22) as a single direct
+    require, `github.com/pion/webrtc/v4`; its twenty-odd siblings are
+    `// indirect` and are transitive closure, not further decisions. The one
+    direct path is listed in `allowedModuleRequires`
+    (`internal/app/remote_boundary_guard_test.go`), which is the mechanical
+    half of the approval — adding another line there is a new exception, not
+    an upgrade.
+    Nothing outside `internal/remote/` may import it, ever. The scope is
+    mechanically enforced: `internal/app/remote_boundary_guard_test.go`
+    asserts over the module import graph that no package outside
+    `internal/remote/` imports `github.com/pion/...`. That guard was written
+    while it is vacuously true, precisely so it can never be "added along
+    with the dependency".
+  - **Packaging, decided 2026-08-22 — one binary, unconditionally.** pion
+    ships in the single default binary. There is **no build tag, no
+    `remote`/`noremote` variant, and no second artifact**; a two-binary split
+    was considered specifically to keep a pion-free default and was
+    **rejected** — one static binary for everything is the product.
+    Consequences to accept rather than relitigate: pion is compiled into every
+    build, including for users who never pair a device; because remote is a
+    *runtime* switch and not a build-time one, the linker cannot dead-strip
+    it; and the module count rises from 2 to the whole pion family. What does
+    not change: pion is pure Go, so `CGO_ENABLED=0` and the FreeBSD static
+    build keep working, and `go build -o scimux ./cmd/scimux` stays the only
+    build command. Do not reintroduce build tags to "offer a slim build" —
+    that is the rejected option, not an optimisation. The import guard above
+    stays in force regardless: approving the dependency widened *what* may be
+    imported, never *where it may be imported from*.
+- **The tunnel protocol is owned by scimux-rv, not by this repository.**
+  Decided 2026-08-24. The browser↔computer data-channel wire format is
+  specified in scimux-rv's `docs/protocol/tunnel-v2.md`, and its **browser**
+  implementation lives there too (`web/js/codec.js`, `web/js/connection.js`
+  in that repo, served from the closed `/p` inventory). The reason is
+  deployment asymmetry: rv is deployed once and reaches every browser on the
+  next page load, while scimux binaries sit on many computers at many
+  user-chosen versions. The side that must tolerate the spread is rv's, so rv
+  holds it. Do not reintroduce a browser codec or channel transport here —
+  it would arrive over the very channel it exists to create.
+  What stays here is the **computer half**: `internal/remote/codec` (Go), and
+  `web/js/bootstrap.js`, which is the *loader*, not the transport. The loader
+  runs after the channel works, knows scimux's entry module and specifier
+  rules, and therefore ships with the scimux binary — that is what lets this
+  repository add modules, rename files, or restructure its graph with no rv
+  deployment. Vendoring the loader into rv was considered and rejected: rv
+  would go stale on the next module added, and would end up supplying the
+  code that checks this computer's own integrity values, inverting FR-40.
+  The seam between the two is three fixed constants (§8 of `tunnel-v2.md`):
+  `GET /api/remote/bootstrap`, `GET /js/bootstrap.js`, and the
+  `bootstrap({channel, manifest, createObjectURL, installImportMap,
+  importModule})` signature. Those three are **protocol**. Renaming the route,
+  moving the loader, or changing that signature is a MAJOR version bump that
+  breaks every deployed rv, not a local refactor.
+  Tunnel versioning is semantic and both halves bind: MAJOR breaks old
+  binaries by design and must surface as a named FR-24 state saying which
+  side is behind (the `tunnel-version-mismatch` cause); MINOR is additive
+  and must never escalate to the user. What keeps MINOR safe is that
+  unknown frame types, unknown record tags, unknown rejection classes, and
+  trailing bytes are ignored rather than treated as malformed. The one
+  exception is frame type `0x00` and record tag `0x00`, reserved
+  permanently and always malformed — rejectable precisely because no
+  future minor can assign them.
+  Every channel opens with an 8-byte frozen preamble (`SCMX` + major
+  uint16 + minor uint16) from each side, then exactly one hello frame per
+  side, before any request. The preamble never gains a field; capabilities
+  grow in the hello. Payload fields are **tagged records** (`tag uint8` +
+  `length uint24 BE`, the same 4-byte shape as a frame header), not
+  positional, and a tag number is permanent: never reused, never
+  repurposed, never retyped. Do not add a count prefix anywhere — records
+  are read to exhaustion so a claimed count cannot be lied about.
+- **`internal/remote/codec/testdata/vectors.json` is a published contract,
+  not a local fixture.** `vectors_test.go` regenerates it by calling the
+  production encoders and fails on drift; scimux-rv byte-copies it and
+  decodes every vector with its browser codec. It is the only oracle either
+  side has, so it must stay generated — never hand-edited, never
+  pretty-printed, never authored by reading the spec. Changing it changes
+  scimux-rv, and the vendoring lane is recorded in that repository's
+  `docs/tunnel-protocol-sync.md` (the mirror of our
+  `docs/rendezvous-protocol-sync.md`, which carries rv's vectors the other
+  way).
 - **Snapshot over stream.** Output is read via `tmux capture-pane -p`
   snapshots and via the transcript JSONL files the agent CLIs write
   themselves. Never parse the terminal byte stream, never use tmux control
@@ -148,8 +242,9 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   `~/.scimux/claude-hooks/<hex-id>/` (`settings.json` 0600, `inbox/`,
   `processed/`, `stop/`, `notify/`, `compact/`, `elicitation/`, and `perm/` 0700) and passes
   it as `--settings`; the file registers scimux itself as the `SessionStart`
-  command, so the hook firing *is* the process→transcript ownership proof
-  **and** the startup/hook-health acknowledgement. The undocumented transcript `bridge_status` record is not
+  command, so the hook firing *is* the
+  process→transcript ownership proof **and** the startup/hook-health
+  acknowledgement. The undocumented transcript `bridge_status` record is not
   a readiness condition. `--session-id` seeds the first transcript,
   `--continue` is forbidden, and `--settings` must precede
   `--remote-control` (an optional-value flag that would otherwise swallow it).
@@ -459,9 +554,8 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   helper writes one `elicitation/active/<nonce>.json` per current request
   (session, optional elicitation-id digest, accepted-turn fence, bounded MCP
   server name plus correlation digest, message, mode, URL-mode-only validated
-  http(s) URL, timestamp) and
-  never retains `requested_schema` or result `content`. It never prints to
-  stdout/stderr and always exits 0, so scimux
+  http(s) URL, timestamp) and never retains `requested_schema` or result
+  `content`. It never prints to stdout/stderr and always exits 0, so scimux
   cannot deny or rewrite the MCP exchange. A current request raises yellow
   `question` attention even while auto-approve is armed, is never
   auto-answered, and is shown only on `GET /api/nodes/{id}/chat` as
@@ -514,6 +608,19 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   notes only; do not remove it as an accidental invariant violation, and do
   not expand it into a history UI without an explicit phase. There is no
   legacy flat-file migration path.
+- **Frozen characterization suites.** These four are frozen at commit
+  `4e35aad`: `internal/app/router_characterization_test.go`,
+  `internal/app/static_characterization_test.go`,
+  `internal/app/web_js_static_test.go`, and
+  `internal/app/css_cascade_test.go`. Adding assertions is fine. Needing
+  to CHANGE or DELETE one is a review stop, not an edit — it means the
+  refactor has altered behaviour the suites exist to pin. The freeze names
+  a commit rather than "as written" because commit `0848836` deleted a
+  `css_cascade_test.go` assertion (`.stagechip .spin i { animation: none; }`)
+  and replaced it with its opposite, deliberately: indeterminate progress
+  must keep animating under Reduce Motion. That reversal is pre-freeze and
+  arrived via merge from `2026-08-11_scimux-testing`, so it is not a
+  protocol violation, but it is why the freeze needs a commit to point at.
 - The README's **Non-goals** section is a hard scope fence; features listed
   there need explicit maintainer approval, not code.
 

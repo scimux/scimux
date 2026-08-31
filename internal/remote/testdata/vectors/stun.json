@@ -1,0 +1,37 @@
+[
+  {
+    "id": "stun-binding-request",
+    "message": "stun-binding-request",
+    "comment": "Empty Binding Request. RFC 5389 header only.",
+    "kind": "stun",
+    "stun_hex": "000100002112a442000102030405060708090a0b",
+    "transaction_id_hex": "000102030405060708090a0b"
+  },
+  {
+    "id": "stun-binding-success-v4",
+    "message": "stun-binding-success",
+    "comment": "XOR-MAPPED-ADDRESS for 192.0.2.1:3478, same tid as the request vector.",
+    "kind": "stun",
+    "transaction_id_hex": "000102030405060708090a0b",
+    "mapped_ip": "192.0.2.1",
+    "mapped_port": 3478,
+    "response_hex": "0101000c2112a442000102030405060708090a0b0020000800012c84e112a643"
+  },
+  {
+    "id": "stun-binding-success-v6",
+    "message": "stun-binding-success",
+    "comment": "XOR-MAPPED-ADDRESS for [2001:db8::1]:3478.",
+    "kind": "stun",
+    "transaction_id_hex": "000102030405060708090a0b",
+    "mapped_ip": "2001:db8::1",
+    "mapped_port": 3478,
+    "response_hex": "010100182112a442000102030405060708090a0b0020001400022c840113a9fa000102030405060708090a0a"
+  },
+  {
+    "id": "stun-drop-truncated",
+    "message": "stun-drop",
+    "comment": "10-byte prefix of a Binding Request. No response.",
+    "kind": "stun-drop",
+    "stun_hex": "000100002112a4420001"
+  }
+]

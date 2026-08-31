@@ -195,13 +195,78 @@ func TestTheReturnPillIsSharedBetweenChatAndPreview(t *testing.T) {
 	}
 }
 
-// previewFnBody returns just the body of a top-level `function name()` in app.js,
-// so an assertion about what a function does — or does not — cannot be satisfied
-// or spoiled by the rest of the file.
+// previewFnBody returns the source of `function name()` up to, not including,
+// its matching close brace. It used to stop at the first column-0 `\n}\n`,
+// which is how a top-level function ended. createApp nests these handlers, so
+// that sentinel is now the composition root's closer and the extracted "body"
+// would swallow the rest of the file (and every later classList). Brace
+// matching keeps the assertion scoped to the named function.
 func previewFnBody(src, name string) string {
 	body := afterMarker(src, "function "+name+"()")
-	if i := strings.Index(body, "\n}\n"); i >= 0 {
-		return body[:i]
+	open := strings.Index(body, "{")
+	if open < 0 {
+		return body
+	}
+	if end := matchingBrace(body, open); end >= 0 {
+		return body[:end]
 	}
 	return body
+}
+
+// matchingBrace returns the index of the `}` that closes s[open], skipping
+// braces inside strings, template literals, and comments.
+func matchingBrace(s string, open int) int {
+	depth := 0
+	var inStr byte
+	inLineComment := false
+	inBlockComment := false
+	for i := open; i < len(s); i++ {
+		c := s[i]
+		if inLineComment {
+			if c == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if c == '*' && i+1 < len(s) && s[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+		if inStr != 0 {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '*' {
+			inBlockComment = true
+			i++
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			inStr = c
+			continue
+		}
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }

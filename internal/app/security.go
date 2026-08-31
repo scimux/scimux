@@ -352,6 +352,18 @@ func guardMutations(next http.Handler) http.Handler {
 	})
 }
 
+// safeMethod reports whether a method is one of the read-only methods that
+// bypass the mutation checks. It names the set guardMutations has always
+// switched on inline, so the tunnel boundary can apply the same definition
+// without re-listing it. Additive: guardMutations is left exactly as written.
+func safeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
 // sameOrigin rejects a browser request whose Origin (or, absent that, Referer)
 // names a different host than the one it was sent to. A missing Origin *and*
 // Referer is allowed: non-browser clients (curl, scripts) send neither, and for

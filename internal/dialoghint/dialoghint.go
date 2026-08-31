@@ -1,3 +1,35 @@
+// Package dialoghint is the one fenced exception to scimux's "liveness is
+// mechanical only" rule: a small set of regexes over the visible tmux pane of
+// an agent TUI.
+//
+// The fence, not the regexes, is the design decision. Liveness
+// (active/quiet/exited/unavailable) comes from pane-change detection and must
+// stay regex-free — nothing in this package may ever feed it. What these
+// matchers may do is narrower, and each function's doc says which of the two
+// it is:
+//
+//   - classify — take attention the mechanical evidence has already earned and
+//     say what kind of dialog it is (ClassifyVisible, NumberedOptions,
+//     LooksLikeWorkspaceTrust);
+//   - corroborate — sharpen the timing of a verdict the mechanical evidence
+//     already reached, never the kind, and never raise attention alone
+//     (HasCancelAnchor shortens an owing stall; HasInterruptAnchor may only
+//     suppress a neutral inspect).
+//
+// The reason for the fence is that agent CLIs reword their TUIs without
+// notice, and these strings are undocumented internals. So the failure mode is
+// designed in: when a matcher goes dark, the caller degrades to the neutral
+// mechanical verdict (an inspect after a stall) rather than to silence. A
+// matcher that could raise attention on its own would instead fail by going
+// quiet, which is the one outcome a supervisor must not have. It also cuts the
+// other way — the anchor phrases occur in ordinary agent prose, because any
+// session discussing this package prints them — so a matcher that could raise
+// alone would also cry wolf.
+//
+// Consequences for anyone editing this file: adding a matcher is adding a
+// classification or a corroboration, never a new source of attention; and a
+// matcher must not become the sole evidence for a state that has no mechanical
+// backstop underneath it.
 package dialoghint
 
 import (

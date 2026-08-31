@@ -6,6 +6,33 @@ import (
 )
 
 func NewHandler(a *app, web fs.FS) (http.Handler, error) {
+	mux, err := newMux(a, web)
+	if err != nil {
+		return nil, err
+	}
+
+	// withGzip is outermost so every completed response can opt in (it only
+	// wraps the ResponseWriter). withRequestBoundary then sees every request
+	// — Host, Fetch Metadata, anti-framing — before the mutation guard and
+	// the mux, so a hostile Host cannot read the token-bearing index or
+	// reach a 404/405. 304/204 and already-compressed types are skipped
+	// inside the gzip wrapper — see gzip.go.
+	return withLocalBoundary(a, mux), nil
+}
+
+// withLocalBoundary is the browser/TCP chain, byte-for-byte what NewHandler
+// has always returned (FR-15). It is a named function only so the two S3
+// boundary constructors can wrap one owned mux without duplicating it; the
+// composition itself is unchanged.
+func withLocalBoundary(a *app, mux http.Handler) http.Handler {
+	return withGzip(withRequestBoundary(a.requestPolicy, guardMutations(mux)))
+}
+
+// newMux registers the single owned route table. The inventory, patterns,
+// methods and handlers are pinned by the frozen characterization suite; this
+// function exists so the same mux can be wrapped by both S3 boundaries
+// without the route table being written twice.
+func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	webHandlers, err := newWebHandlers(web)
 	if err != nil {
 		return nil, err
@@ -48,12 +75,15 @@ func NewHandler(a *app, web fs.FS) (http.Handler, error) {
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
 	mux.HandleFunc("POST /api/update", a.handleUpdateApply)
 	mux.HandleFunc("GET /api/licenses", handleLicenses)
+	mux.HandleFunc("POST /api/remote/pairing", a.handleRemotePairingMint)
+	mux.HandleFunc("GET /api/remote/pairing/{code}", a.handleRemotePairingState)
+	mux.HandleFunc("POST /api/remote/pairing/{code}/confirm", a.handleRemotePairingConfirm)
+	mux.HandleFunc("POST /api/remote/pairing/{code}/cancel", a.handleRemotePairingCancel)
+	mux.HandleFunc("GET /api/remote/devices", a.handleRemoteDeviceList)
+	mux.HandleFunc("DELETE /api/remote/devices/{id}", a.handleRemoteDeviceRevoke)
+	mux.HandleFunc("POST /api/remote/unenroll", a.handleRemoteUnenroll)
+	mux.HandleFunc("GET /api/remote/status", a.handleRemoteStatus)
+	mux.HandleFunc("GET /api/remote/bootstrap", a.handleRemoteBootstrapManifest)
 
-	// withGzip is outermost so every completed response can opt in (it only
-	// wraps the ResponseWriter). withRequestBoundary then sees every request
-	// — Host, Fetch Metadata, anti-framing — before the mutation guard and
-	// the mux, so a hostile Host cannot read the token-bearing index or
-	// reach a 404/405. 304/204 and already-compressed types are skipped
-	// inside the gzip wrapper — see gzip.go.
-	return withGzip(withRequestBoundary(a.requestPolicy, guardMutations(mux))), nil
+	return mux, nil
 }

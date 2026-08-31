@@ -17,12 +17,21 @@ import (
 
 // TestRouterAPIRouteOwnership locks the Phase 4 boundary: every registered API
 // route has exactly one production handler definition in its expected feature
-// file, router.go stays registration-only, and NewHandler still returns
-// withGzip(withRequestBoundary(policy, guardMutations(mux))).
+// file, router.go stays registration-only, and the local boundary still
+// composes withGzip(withRequestBoundary(policy, guardMutations(mux))).
+//
+// S3 R2 split router.go into newMux (the single owned route table) and
+// withLocalBoundary (the unchanged browser chain) so both S3 boundaries can
+// wrap one mux without a second inventory. The assertions below were moved to
+// follow that split, deliberately and without weakening: the registrations are
+// still counted and order-compared one-for-one against the shared table, the
+// three middleware calls are still counted (now across the whole file, so a
+// second chain anywhere in router.go fails), and the composition is still
+// matched structurally down to the mux identifier.
 func TestRouterAPIRouteOwnership(t *testing.T) {
 	table := characterizationAPIRoutes()
-	if len(table) != 32 {
-		t.Fatalf("characterization table has %d routes, want 32", len(table))
+	if len(table) != 41 {
+		t.Fatalf("characterization table has %d routes, want 41", len(table))
 	}
 
 	// Table-internal uniqueness: each method+pattern pair appears once.
@@ -102,6 +111,7 @@ func TestRouterAPIRouteOwnership(t *testing.T) {
 		"state_api.go", "node_api.go", "conversation_api.go",
 		"attachment_api.go", "ui_state_api.go", "security.go",
 		"usage.go", "notes.go", "search.go", "preview.go", "agents.go", "update.go",
+		"remote_pairing.go",
 	} {
 		if _, err := os.Stat(home); err != nil {
 			t.Errorf("expected home %s: %v", home, err)
@@ -127,13 +137,13 @@ func parseRouterAPIRegistrations(t *testing.T) []routerAPIReg {
 	if err != nil {
 		t.Fatalf("parse router.go: %v", err)
 	}
-	newHandler := findFunc(f, "NewHandler")
-	if newHandler == nil || newHandler.Body == nil {
-		t.Fatal("router.go: NewHandler not found")
+	registrar := findFunc(f, "newMux")
+	if registrar == nil || registrar.Body == nil {
+		t.Fatal("router.go: newMux not found (the single owned route table)")
 	}
 
 	var regs []routerAPIReg
-	ast.Inspect(newHandler.Body, func(n ast.Node) bool {
+	ast.Inspect(registrar.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -250,36 +260,39 @@ func assertRouterRegistrationOnly(t *testing.T) {
 		}
 		funcs = append(funcs, fn.Name.Name)
 	}
-	if len(funcs) != 1 || funcs[0] != "NewHandler" {
-		t.Fatalf("router.go funcs = %v, want only NewHandler (registration/construction)", funcs)
+	sort.Strings(funcs)
+	want := []string{"NewHandler", "newMux", "withLocalBoundary"}
+	sort.Strings(want)
+	if strings.Join(funcs, ",") != strings.Join(want, ",") {
+		t.Fatalf("router.go funcs = %v, want exactly %v (registration/construction only)", funcs, want)
 	}
 
-	// Forbidden behavioral calls inside NewHandler — feature logic must live
-	// in feature files, not the router.
+	// Forbidden behavioral calls anywhere in router.go — feature logic must
+	// live in feature files, not the router. Scanned over every function in
+	// the file, so moving code out of NewHandler cannot dodge the check.
 	forbidden := map[string]bool{
 		"http.Error": true, "writeJSON": true, "decodeJSON": true,
 		"json.NewEncoder": true, "json.NewDecoder": true,
 		"os.WriteFile": true, "os.ReadFile": true,
 	}
-	fn := findFunc(f, "NewHandler")
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		name := callExprName(call.Fun)
 		if forbidden[name] {
-			t.Errorf("router.go NewHandler calls %s (handler behavior, not registration)", name)
+			t.Errorf("router.go calls %s (handler behavior, not registration)", name)
 		}
 		// Direct feature-handler invocations (not as HandleFunc args) would
 		// look like a bare Ident/Selector used as a CallExpr.Fun.
 		if id, ok := call.Fun.(*ast.Ident); ok && strings.HasPrefix(id.Name, "handle") {
-			t.Errorf("router.go NewHandler invokes %s as a call (must only register)", id.Name)
+			t.Errorf("router.go invokes %s as a call (must only register)", id.Name)
 		}
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "handle") {
 			// mux.HandleFunc(..., a.handleX) is SelectorExpr as an *arg*, not Fun.
 			// Fun being a.handleX would mean invoking the handler.
-			t.Errorf("router.go NewHandler invokes %s as a call (must only register)", sel.Sel.Name)
+			t.Errorf("router.go invokes %s as a call (must only register)", sel.Sel.Name)
 		}
 		return true
 	})
@@ -311,14 +324,15 @@ func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse router.go: %v", err)
 	}
-	fn := findFunc(f, "NewHandler")
+	fn := findFunc(f, "withLocalBoundary")
 	if fn == nil || fn.Body == nil {
-		t.Fatal("NewHandler missing")
+		t.Fatal("withLocalBoundary missing")
 	}
 
-	// Count each middleware call in the function body.
+	// Count each middleware call across the whole file, so a second chain
+	// anywhere in router.go — not just inside one function — fails.
 	counts := map[string]int{}
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -332,31 +346,36 @@ func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 		return true
 	})
 	if counts["guardMutations"] != 1 {
-		t.Fatalf("NewHandler contains %d guardMutations calls, want exactly 1", counts["guardMutations"])
+		t.Fatalf("router.go contains %d guardMutations calls, want exactly 1", counts["guardMutations"])
 	}
 	if counts["withGzip"] != 1 {
-		t.Fatalf("NewHandler contains %d withGzip calls, want exactly 1", counts["withGzip"])
+		t.Fatalf("router.go contains %d withGzip calls, want exactly 1", counts["withGzip"])
 	}
 	if counts["withRequestBoundary"] != 1 {
-		t.Fatalf("NewHandler contains %d withRequestBoundary calls, want exactly 1", counts["withRequestBoundary"])
+		t.Fatalf("router.go contains %d withRequestBoundary calls, want exactly 1", counts["withRequestBoundary"])
 	}
 
-	// Final return must be withGzip(withRequestBoundary(..., guardMutations(mux))), nil.
+	// NewHandler must still return the local boundary over the owned mux, and
+	// nothing else: withLocalBoundary(a, mux), nil.
+	assertNewHandlerDelegatesToLocalBoundary(t, f)
+
+	// withLocalBoundary's return must be
+	// withGzip(withRequestBoundary(..., guardMutations(mux))).
 	stmts := fn.Body.List
 	if len(stmts) == 0 {
-		t.Fatal("NewHandler body empty")
+		t.Fatal("withLocalBoundary body empty")
 	}
 	ret, ok := stmts[len(stmts)-1].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 2 {
-		t.Fatalf("NewHandler final statement is not a two-value return: %T", stmts[len(stmts)-1])
+	if !ok || len(ret.Results) != 1 {
+		t.Fatalf("withLocalBoundary final statement is not a single-value return: %T", stmts[len(stmts)-1])
 	}
 	outer, ok := ret.Results[0].(*ast.CallExpr)
 	if !ok {
-		t.Fatalf("NewHandler returns %T, want withGzip(...)", ret.Results[0])
+		t.Fatalf("withLocalBoundary returns %T, want withGzip(...)", ret.Results[0])
 	}
 	outerID, ok := outer.Fun.(*ast.Ident)
 	if !ok || outerID.Name != "withGzip" {
-		t.Fatalf("NewHandler return wrapper = %s, want withGzip", callExprName(outer.Fun))
+		t.Fatalf("withLocalBoundary return wrapper = %s, want withGzip", callExprName(outer.Fun))
 	}
 	if len(outer.Args) != 1 {
 		t.Fatalf("withGzip args = %d, want 1", len(outer.Args))
@@ -386,6 +405,39 @@ func assertNewHandlerReturnsWithGzipOnce(t *testing.T) {
 	muxID, ok := inner.Args[0].(*ast.Ident)
 	if !ok || muxID.Name != "mux" {
 		t.Fatalf("guardMutations argument = %T, want mux", inner.Args[0])
+	}
+}
+
+// assertNewHandlerDelegatesToLocalBoundary pins the other half of the S3
+// split: NewHandler builds the owned mux and hands it to the local boundary,
+// so the public handler is still exactly the chain asserted above.
+func assertNewHandlerDelegatesToLocalBoundary(t *testing.T, f *ast.File) {
+	t.Helper()
+	fn := findFunc(f, "NewHandler")
+	if fn == nil || fn.Body == nil {
+		t.Fatal("NewHandler missing")
+	}
+	stmts := fn.Body.List
+	if len(stmts) == 0 {
+		t.Fatal("NewHandler body empty")
+	}
+	ret, ok := stmts[len(stmts)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 2 {
+		t.Fatalf("NewHandler final statement is not a two-value return: %T", stmts[len(stmts)-1])
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("NewHandler returns %T, want withLocalBoundary(...)", ret.Results[0])
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	if !ok || id.Name != "withLocalBoundary" {
+		t.Fatalf("NewHandler return wrapper = %s, want withLocalBoundary", callExprName(call.Fun))
+	}
+	if len(call.Args) != 2 {
+		t.Fatalf("withLocalBoundary args = %d, want 2 (app, mux)", len(call.Args))
+	}
+	if muxID, ok := call.Args[1].(*ast.Ident); !ok || muxID.Name != "mux" {
+		t.Fatalf("withLocalBoundary second argument = %T, want mux", call.Args[1])
 	}
 	if nilID, ok := ret.Results[1].(*ast.Ident); !ok || nilID.Name != "nil" {
 		t.Fatalf("NewHandler second return = %T, want nil", ret.Results[1])

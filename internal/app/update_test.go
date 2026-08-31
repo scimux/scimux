@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -285,12 +286,47 @@ func TestLicensesEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, marker := range map[string]string{
-		"scimux": "Mozilla Public License Version 2.0",
-		"acp":    "Apache License",
-		"go":     "The Go Authors",
+		"scimux":    "Mozilla Public License Version 2.0",
+		"acp":       "Apache License",
+		"go":        "The Go Authors",
+		"qrcodegen": "Project Nayuki",
 	} {
 		if !strings.Contains(got[key], marker) {
 			t.Errorf("license %q does not contain %q", key, marker)
+		}
+	}
+}
+
+// TestAboutSheetNamesEveryEmbeddedLicense joins the two halves that can
+// drift apart silently: a notice embedded but never offered, and an About
+// row whose button asks for a key the handler does not serve (the sheet
+// shows an empty document, which reads as "no license" rather than as a
+// bug). Vendoring web/js/qrcodegen.js is what made this reachable — it is
+// the first third-party notice that is not a Go module, so the "regenerate
+// from go list" habit in update.go would not have caught it.
+func TestAboutSheetNamesEveryEmbeddedLicense(t *testing.T) {
+	rec := httptest.NewRecorder()
+	handleLicenses(rec, httptest.NewRequest("GET", "/api/licenses", nil))
+	var served map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &served); err != nil {
+		t.Fatal(err)
+	}
+	index, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := map[string]bool{}
+	for _, m := range regexp.MustCompile(`data-lic="([^"]+)"`).FindAllStringSubmatch(string(index), -1) {
+		shown[m[1]] = true
+	}
+	for key := range served {
+		if !shown[key] {
+			t.Errorf("license %q is embedded and served but the About sheet has no row for it", key)
+		}
+	}
+	for key := range shown {
+		if _, ok := served[key]; !ok {
+			t.Errorf("About sheet offers license %q but /api/licenses does not serve it; the sheet would open empty", key)
 		}
 	}
 }

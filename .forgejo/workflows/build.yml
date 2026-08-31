@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Add missing tools
         run: |
-          apk add --no-cache file git nodejs
+          apk add --no-cache file git nodejs tmux
 
       - name: Clone and checkout repository
         run: |
@@ -16,9 +16,9 @@ jobs:
           git checkout ${{ github.sha }}
           mkdir -p builds
 
-      - name: Run tests (short mode; integration tests need tmux and are skipped)
+      - name: Run tests (unit and integration; tmux installed above)
         run: |
-          go test -short ./...
+          go test -timeout 20m ./...
 
       - name: Run JavaScript tests (Node 22+)
         run: |
@@ -40,3 +40,11 @@ jobs:
       - name: Build for darwin/amd64
         run: |
           CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-darwin-amd64 ./cmd/scimux && file builds/scimux-darwin-amd64
+
+      # freebsd is built but not released. AGENTS.md states that the FreeBSD
+      # static build keeps working, and TestCrossBuildTargets derives its whole
+      # matrix from these files — so without this step the claim is defended by
+      # nothing. The same gap is what let the darwin builds stay broken.
+      - name: Build for freebsd/amd64
+        run: |
+          CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o builds/scimux-freebsd-amd64 ./cmd/scimux && file builds/scimux-freebsd-amd64

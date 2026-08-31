@@ -439,8 +439,9 @@ export function tileStyle(tileBox, key){
 
 export function attTileHTML(nodeId, leaf, isImage, {
   escape = esc, iconFile = "", tileBox = {}, rasterRe = RASTER_RE,
+  assetURL = (path) => path,
 } = {}){
-  const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
+  const url = assetURL(`/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`);
   const name = leaf.replace(/^[0-9a-f]{8}-/, "");
   isImage = isImage && rasterRe.test(name);
   return isImage
@@ -462,12 +463,13 @@ export function refTilesHTML(refs, nodeId, deps = {}){
 
 export function assetTileHTML(nodeId, id, alt, rec, {
   escape = esc, iconFile = "", tileBox = {}, rasterRe = RASTER_RE,
+  assetURL = (path) => path,
 } = {}){
   if (!rec){
     return `<span class="attfile missing" title="${escape(alt || id)} — unavailable">` +
            `${iconFile}<span>${escape(alt || "file")} (unavailable)</span></span>`;
   }
-  const url = `/api/nodes/${encodeURIComponent(nodeId)}/assets/${encodeURIComponent(id)}`;
+  const url = assetURL(`/api/nodes/${encodeURIComponent(nodeId)}/assets/${encodeURIComponent(id)}`);
   const name = rec.name || alt || "file";
   const isImage = rasterRe.test(name);
   return isImage
@@ -958,6 +960,9 @@ export function decisionRowHTML(surface, {
 
 export function createChatFeature(deps){
   const d = deps || {};
+  if (typeof d.assetURL !== "function") {
+    throw new Error("createChatFeature: assetURL is required");
+  }
   const roots = d.roots || {};
   const doc = d.document || (typeof document !== "undefined" ? document : null);
   const win = d.window || (typeof window !== "undefined" ? window : null);
@@ -1077,6 +1082,7 @@ export function createChatFeature(deps){
   function tileDeps(){
     return {
       escape, iconFile: icons.ICON_FILE || "", tileBox, rasterRe: RASTER_RE,
+      assetURL: d.assetURL,
     };
   }
 
