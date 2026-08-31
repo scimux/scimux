@@ -3881,6 +3881,9 @@ function createWallScrollFeature(nodes, opts = {}){
       app: opts.app,
     },
     document: stubDocument(body),
+    /* Keep geometry checks deterministic even when another test file has
+       installed a global requestAnimationFrame in this process. */
+    window: { requestAnimationFrame(fn){ fn(); return 0; } },
     storage,
     isDesktop: () => true,
     mapOpen: () => true,
