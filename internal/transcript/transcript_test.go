@@ -114,6 +114,14 @@ func TestParseLineRejectsUnknownClaudeRole(t *testing.T) {
 		// The scaffolding filter is keyed on role == "user"; an unknown role
 		// must not smuggle an injected block through as a visible turn.
 		`{"type":"user","message":{"role":"x","content":"<user_instructions>secret"}}`,
+		// Both roles are individually recognized, but they contradict the
+		// envelope. Real Claude output never disagrees (42,988 records across
+		// 173 captured transcripts, checked 2026-08-31), so a disagreement is
+		// an unknown shape. Accepting it would misattribute a turn — and,
+		// because the scaffolding filter keys on role == "user", the second
+		// form below would render an injected block as agent prose.
+		`{"type":"assistant","message":{"role":"user","content":"I am the agent"}}`,
+		`{"type":"user","message":{"role":"assistant","content":"<user_instructions>secret"}}`,
 	} {
 		if got, ok := ParseLine([]byte(line)); ok {
 			t.Errorf("ParseLine(%s) = (%+v, true), want ignored", line, got)

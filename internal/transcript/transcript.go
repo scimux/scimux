@@ -98,20 +98,27 @@ func ParseLine(line []byte) (Turn, bool) {
 		if err := json.Unmarshal(generic.Message, &msg); err != nil {
 			return Turn{}, false
 		}
-		role := msg.Role
-		if role == "" {
-			role = generic.Type
-		}
-		// message.role is CLI-authored data, so it is validated exactly like
-		// the Codex payload.role below: an unrecognized role is an unknown
-		// shape and is ignored, never rendered. The fallback above is always
-		// valid — the switch has already constrained generic.Type. Callers
-		// rely on this: mirror.go writes Turn.Role into sessionlog.Event.T,
-		// whose members include "source", the /clear page-turn marker.
-		if role != "user" && role != "assistant" {
+		// message.role is CLI-authored data, so it is validated like the Codex
+		// payload.role below — but here the record carries the role twice, and
+		// the envelope type has already been constrained by the switch. So the
+		// test is agreement, not membership: a record whose inner role
+		// contradicts its outer type is an unknown shape and is ignored, never
+		// rendered. Real Claude output never disagrees (42,988 records across
+		// 173 captured transcripts, checked 2026-08-31); an omitted role is
+		// likewise unobserved, so the fallback below is defensive only.
+		//
+		// Membership alone would not be enough. Both halves of a contradicting
+		// record are individually legal, and either direction is harmful: the
+		// turn is misattributed in the chat, and because the scaffolding filter
+		// keys on role == "user", a type:"user" record claiming role:"assistant"
+		// would render an injected <user_instructions> block as agent prose.
+		// Callers rely on the result: mirror.go writes Turn.Role into
+		// sessionlog.Event.T, whose members include "source", the /clear
+		// page-turn marker.
+		if msg.Role != "" && msg.Role != generic.Type {
 			return Turn{}, false
 		}
-		return makeTurn(role, contentText(msg.Content), generic.Timestamp)
+		return makeTurn(generic.Type, contentText(msg.Content), generic.Timestamp)
 	case "response_item": // Codex rollout log
 		var payload struct {
 			Type    string          `json:"type"`
