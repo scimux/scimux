@@ -316,6 +316,11 @@ func isCompleteEnrolled(st PersistedState) bool {
 	return st.Status == StateEnrolled && st.Handle != "" && st.PublicKey != "" && st.PrivateKey != ""
 }
 
+// tmpIncomplete reports whether path exists but cannot be read as JSON.
+// It is a syntactic gate for a half-written temporary state file: missing
+// paths are not incomplete, and a parseable object is not incomplete even
+// when its fields would fail validatePersistedSemantics. Semantic validation
+// stays separate.
 func tmpIncomplete(path string) bool {
 	_, err := os.Stat(path)
 	if err != nil {

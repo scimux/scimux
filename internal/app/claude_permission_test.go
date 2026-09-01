@@ -837,6 +837,25 @@ func TestResolveClaudePermissionIsInertWhenOff(t *testing.T) {
 	}
 }
 
+func TestClaudePermReason(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   claudePermissionEvent
+		want string
+	}{
+		{"no agent id", claudePermissionEvent{}, ""},
+		{"with agent type", claudePermissionEvent{AgentID: "a1", AgentType: "Explore"}, "subagent Explore (a1)"},
+		{"without type uses subagent", claudePermissionEvent{AgentID: "a2"}, "subagent subagent (a2)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudePermReason(tc.ev); got != tc.want {
+				t.Fatalf("claudePermReason() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaudePermToolKindMapsToSharedVocabulary(t *testing.T) {
 	// AT-CP-26: tool_kind is the audit's shared *rendering* vocabulary
 	// (PERM_CODE_KINDS in the UI), not the raw protocol tool name — the same

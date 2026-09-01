@@ -99,6 +99,37 @@ func TestParseGrokModels(t *testing.T) {
 	}
 }
 
+func TestGrokModelsFallback(t *testing.T) {
+	info := grokModelsFallback()
+	if !reflect.DeepEqual(info.Models, []string{"grok-4.5"}) {
+		t.Fatalf("Models = %v, want [grok-4.5]", info.Models)
+	}
+	e, ok := info.Efforts["grok-4.5"]
+	if !ok {
+		t.Fatal("missing effort menu for grok-4.5")
+	}
+	want := grokDefaultEfforts()
+	if !reflect.DeepEqual(e, want) {
+		t.Fatalf("effort = %+v, want %+v", e, want)
+	}
+
+	// Callers may mutate returned maps/slices; a later call must stay independent.
+	info.Models[0] = "mutated"
+	levels := info.Efforts["grok-4.5"].Levels
+	levels[0] = "mutated"
+	info.Efforts["extra"] = modelEffort{}
+	again := grokModelsFallback()
+	if !reflect.DeepEqual(again.Models, []string{"grok-4.5"}) {
+		t.Fatalf("second Models = %v after mutation, want [grok-4.5]", again.Models)
+	}
+	if !reflect.DeepEqual(again.Efforts["grok-4.5"], want) {
+		t.Fatalf("second effort = %+v after mutation, want %+v", again.Efforts["grok-4.5"], want)
+	}
+	if _, ok := again.Efforts["extra"]; ok {
+		t.Fatal("second call shared Efforts map with first")
+	}
+}
+
 func TestWithGrokStaticEfforts(t *testing.T) {
 	info := withGrokStaticEfforts(agentInfo{Models: []string{"grok-4.5", "other"}})
 	for _, id := range info.Models {

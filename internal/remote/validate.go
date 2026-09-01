@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// validatePersistedSemantics checks identity-file field invariants after a
+// successful JSON decode. It is the semantic half of load-time validation;
+// tmpIncomplete only detects an unreadable or malformed temporary file.
 func validatePersistedSemantics(st PersistedState) Class {
 	if st.Status == "" {
 		return ClassCorruptIdentity
