@@ -141,21 +141,40 @@ func (s *dcStream) Write(p []byte) (int, error) {
 // high-water mark. Without it a large response (the index, an asset) would
 // queue the whole body in memory before SCTP had sent any of it.
 func (s *dcStream) awaitDrain() error {
-	if s.dc.BufferedAmount() <= dcHighWater {
+	amount := func() uint64 { return s.dc.BufferedAmount() }
+	// Fast path: stay at or below the waterline without arming the write timer.
+	if amount() <= dcHighWater {
 		return nil
 	}
 	deadline := time.NewTimer(dcWriteTimeout)
 	defer deadline.Stop()
-	for s.dc.BufferedAmount() > dcHighWater {
+	return awaitBufferedDrain(amount, dcHighWater, s.lowCh, s.closeCh, deadline.C)
+}
+
+// awaitBufferedDrain is the pure wait loop behind awaitDrain. Production
+// supplies the live DataChannel amount and a dcWriteTimeout timer; tests
+// inject amount, waterline, low/close/expiry signals without pion or Sleep.
+func awaitBufferedDrain(
+	amount func() uint64,
+	highWater uint64,
+	lowCh <-chan struct{},
+	closeCh <-chan struct{},
+	expiry <-chan time.Time,
+) error {
+	for {
+		if amount() <= highWater {
+			return nil
+		}
 		select {
-		case <-s.lowCh:
-		case <-s.closeCh:
+		case <-lowCh:
+			// Re-read amount on the next iteration; a coalesced low must
+			// not succeed while the buffer is still above the waterline.
+		case <-closeCh:
 			return io.ErrClosedPipe
-		case <-deadline.C:
+		case <-expiry:
 			return classError(ClassLost, "channel", "the data channel stopped draining")
 		}
 	}
-	return nil
 }
 
 func (s *dcStream) Close() error {
