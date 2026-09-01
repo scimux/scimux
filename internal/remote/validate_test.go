@@ -25,6 +25,7 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		V: 1, Status: StateEnrolled, Handle: handle,
 		PublicKey: pubHex, PrivateKey: privHex, Origin: DefaultOrigin,
 	}
+	partial := PersistedState{Status: StatePartial}
 	validDevice := PersistedDevice{ID: "phone", RID: rid1, PubKey: pubHex}
 
 	type row struct {
@@ -38,7 +39,7 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		{"valid disabled", PersistedState{V: 1, Status: StateDisabled, Origin: DefaultOrigin}, ""},
 		{"valid revoked", PersistedState{V: 1, Status: StateRevoked, Origin: DefaultOrigin}, ""},
 		{"valid ambiguous", PersistedState{Status: StateAmbiguous}, ""},
-		{"valid partial", PersistedState{Status: StatePartial}, ""},
+		{"valid partial", partial, ""},
 		{"valid key-missing", PersistedState{Status: StateKeyMissing}, ""},
 		{"valid corrupt", PersistedState{Status: StateCorrupt}, ""},
 		{"valid enrolled with device", func() PersistedState {
@@ -76,22 +77,22 @@ func TestValidatePersistedSemantics(t *testing.T) {
 
 		// Keys.
 		{"malformed public key", func() PersistedState {
-			st := enrolled
-			st.PublicKey = "zz"
+			st := partial
+			st.PublicKey = strings.Repeat("z", ed25519.PublicKeySize*2)
 			return st
 		}(), ClassCorruptIdentity},
 		{"wrong-length public key", func() PersistedState {
-			st := enrolled
+			st := partial
 			st.PublicKey = "ab"
 			return st
 		}(), ClassCorruptIdentity},
 		{"malformed private key", func() PersistedState {
-			st := enrolled
-			st.PrivateKey = "zz"
+			st := partial
+			st.PrivateKey = strings.Repeat("z", ed25519.PrivateKeySize*2)
 			return st
 		}(), ClassCorruptIdentity},
 		{"wrong-length private key", func() PersistedState {
-			st := enrolled
+			st := partial
 			st.PrivateKey = "abcd"
 			return st
 		}(), ClassCorruptIdentity},
@@ -113,7 +114,7 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		}(), ClassCorruptIdentity},
 		{"enrolled invalid handle", func() PersistedState {
 			st := enrolled
-			st.Handle = "not-a-handle"
+			st.Handle = "ih_I41061050R3GG28A"
 			return st
 		}(), ClassCorruptIdentity},
 		{"enrolled missing public key", func() PersistedState {
@@ -152,7 +153,7 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		}(), ClassCorruptIdentity},
 		{"invalid rendezvous id", func() PersistedState {
 			st := enrolled
-			st.Devices = []PersistedDevice{{ID: "phone", RID: "not-a-rid", PubKey: pubHex}}
+			st.Devices = []PersistedDevice{{ID: "phone", RID: strings.Repeat("g", RendezvousIDHexLen), PubKey: pubHex}}
 			return st
 		}(), ClassCorruptIdentity},
 		{"uppercase rendezvous id", func() PersistedState {
@@ -170,7 +171,7 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		}(), ClassCorruptIdentity},
 		{"malformed device public key", func() PersistedState {
 			st := enrolled
-			st.Devices = []PersistedDevice{{ID: "phone", RID: rid1, PubKey: "zz"}}
+			st.Devices = []PersistedDevice{{ID: "phone", RID: rid1, PubKey: strings.Repeat("z", ed25519.PublicKeySize*2)}}
 			return st
 		}(), ClassCorruptIdentity},
 		{"wrong-length device public key", func() PersistedState {
