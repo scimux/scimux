@@ -315,6 +315,31 @@ func TestAT_FR_30_a_StateTable(t *testing.T) {
 	})
 }
 
+// State() projects load failures onto the same FR-30 state vocabulary used by
+// successfully loaded records. Keep the projection exhaustive: callers use the
+// state even when the accompanying diagnostic error is non-nil.
+func TestEnrollmentErrorClassStateProjection(t *testing.T) {
+	tests := []struct {
+		class Class
+		want  EnrollmentState
+	}{
+		{ClassCorruptIdentity, StateCorrupt},
+		{ClassPartialIdentity, StatePartial},
+		{ClassKeyMissing, StateKeyMissing},
+		{ClassAmbiguousEnrollment, StateAmbiguous},
+		{ClassRevoked, StateRevoked},
+		{ClassDisabled, StateDisabled},
+		{Class("future-class"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.class), func(t *testing.T) {
+			if got := eClassState(tt.class); got != tt.want {
+				t.Fatalf("eClassState(%q) = %q, want %q", tt.class, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAT_FR_30_a_TwoProcessesShareStateRoot(t *testing.T) {
 	role := os.Getenv("SCIMUX_S5_HELPER")
 	if role == "A" || role == "B" {

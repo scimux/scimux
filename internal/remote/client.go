@@ -1717,10 +1717,6 @@ func (c *Client) postSignedWait(ctx context.Context, route, rid, code string, re
 	return raw, nil
 }
 
-func (c *Client) postWaitJSON(ctx context.Context, body []byte) (*http.Response, error) {
-	return c.postWaitJSONAt(ctx, "/v1/wait", body)
-}
-
 func (c *Client) postWaitJSONAt(ctx context.Context, route string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.rvBase(), "/")+route, bytes.NewReader(body))
 	if err != nil {

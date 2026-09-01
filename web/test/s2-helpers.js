@@ -765,6 +765,7 @@ export async function driveAppJsSites(transport, { serviceWorker } = {}) {
       seamCalls: transport.fetchImpl.calls.slice(callsBefore),
       globalCalls: host.globalCalls.slice(),
       origin: host.origin,
+      host,
     };
   }
 

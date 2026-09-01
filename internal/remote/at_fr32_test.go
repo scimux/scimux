@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"testing"
@@ -153,6 +154,41 @@ func TestAT_FR_32_b_DisableAllLinearizable(t *testing.T) {
 	}
 	if err := c.Handshake(ctx, d2.ID, newGate()); err == nil {
 		t.Fatal("AT-FR-32-b: new handshake admitted after disable-all")
+	}
+}
+
+func TestPublishChannelSignalsAfterSuccessfulPublication(t *testing.T) {
+	c, _, devices, _, _ := enrollMany(t, 1)
+	gate := newGate()
+	close(gate.Release)
+	want := &fakeChannel{}
+	if err := c.PublishChannel(context.Background(), devices[0].ID, want, gate); err != nil {
+		t.Fatalf("publish channel: %v", err)
+	}
+	select {
+	case <-gate.Published:
+	default:
+		t.Fatal("successful publication did not signal its barrier")
+	}
+	got, err := c.Channel(devices[0].ID)
+	if err != nil {
+		t.Fatalf("published channel lookup: %v", err)
+	}
+	if got != want {
+		t.Fatalf("published channel = %p, want %p", got, want)
+	}
+	// Production does not pass a test gate. Its success path must still publish
+	// the channel rather than treating the absent instrumentation as a barrier.
+	next := &fakeChannel{}
+	if err := c.PublishChannel(context.Background(), devices[0].ID, next, nil); err != nil {
+		t.Fatalf("publish channel without gate: %v", err)
+	}
+	got, err = c.Channel(devices[0].ID)
+	if err != nil || got != next {
+		t.Fatalf("ungated published channel = %p, %v; want %p", got, err, next)
+	}
+	if _, err := c.Channel("missing-device"); classOfErr(err) != ClassNotFound {
+		t.Fatalf("missing channel class = %q, want %q", classOfErr(err), ClassNotFound)
 	}
 }
 

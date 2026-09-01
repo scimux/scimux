@@ -23,6 +23,31 @@ func s8Causes() []TransportCause {
 	}
 }
 
+func TestAT_S8_Cause_ClassProjectionTable(t *testing.T) {
+	tests := []struct {
+		class Class
+		want  TransportCause
+	}{
+		{ClassICEFailed, CauseICEFailed},
+		{ClassLost, CauseConnectedThenLost},
+		{ClassUnavailable, CauseRendezvousUnavailable},
+		{ClassPeerAbsent, CauseComputerOffline},
+		{ClassRevoked, CauseAuthFailed},
+		{ClassUnauthorized, CauseAuthFailed},
+		{ClassHandshake, CauseSignallingRejected},
+		{ClassFingerprint, CauseSignallingRejected},
+		{ClassTunnelVersion, CauseTunnelVersionMismatch},
+		{Class("future-class"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.class), func(t *testing.T) {
+			if got := causeOfClass(tt.class); got != tt.want {
+				t.Fatalf("causeOfClass(%q) = %q, want %q", tt.class, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAT_S8_Cause_EachCauseRoundTrips(t *testing.T) {
 	const at = "AT-S8-cause"
 	c := NewClient(Config{})

@@ -316,6 +316,13 @@ func newTestApp(t *testing.T, f *fakeTmux) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Most application tests exercise request, lifecycle, and rendering paths,
+	// not provider-account discovery. Leave usage disabled unless a test opts in
+	// with installTestUsage: otherwise a successful fake prompt starts a
+	// background walk of the developer's real ~/.codex history (and may also
+	// probe other provider credentials), making the suite depend on private data
+	// volume and leaving work alive after the test that started it.
+	a.usage = nil
 	return a
 }
 
