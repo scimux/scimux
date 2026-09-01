@@ -376,14 +376,6 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	return 0, nil
 }
 
-// createNode validates and reserves the node id under a.mu, then runs the
-// external launch and the store append with the lock released — a structured
-// launch can spend up to its negotiation timeout shelling out, and holding
-// a.mu for that window would stall every handler, /api/state polling included
-// (R18.5). The reservation keeps the id invisible to concurrent creates until
-// the node is published or the attempt failed. Returns the HTTP status to use
-// on error: client mistakes are 400, server-side failures (tmux, store) are
-// 500. taken carries tmux session names that must not be reused as node IDs.
 type initialDelivery string
 
 const (
@@ -397,6 +389,22 @@ const (
 	sendInitialUnconfirmed = "initial_unconfirmed"
 )
 
+// createNode owns new-node publication ordering:
+//
+//  1. resolveNode + reserve the id under a.mu (invisible to concurrent creates);
+//  2. launch with the global app lock released so a long structured negotiation
+//     cannot stall /api/state (R18.5);
+//  3. re-check for an id collision under the lock before publishing;
+//  4. persist store records, then publish in-memory maps — never the reverse;
+//  5. deliver the initial prompt (structured Send, or Claude's deferred
+//     SessionStart paste path);
+//  6. on any failure after reservation, roll back ownership: drop the
+//     reservation, archive a pending Claude hook bundle, kill the process,
+//     and append compensating store records as needed.
+//
+// Returns HTTP status for the caller: client mistakes 400, server-side
+// failures 500, collision 409. taken carries tmux session names that must
+// not be reused as node IDs.
 func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, error) {
 	a.mu.Lock()
 	if status, err := a.resolveNode(n); err != nil {

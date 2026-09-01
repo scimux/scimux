@@ -931,10 +931,18 @@ func attentionKind(tool string) string {
 	return "approval"
 }
 
+// discoverTranscript attempts UUID-directory binding for a tmux node that
+// still lacks a transcript path. Claude is excluded: SessionStart is its
+// only ownership proof. Eligibility requires a SessionID and CreatedAt
+// within 15 minutes; the path must not already be owned, claimed in-flight,
+// or tombstoned. Persist-before-publish keeps a failed store write
+// retryable (claim released, in-memory path empty).
+//
+// Reachability: structured transports never enter this poller branch, and
+// no supported production SessionID for a non-Claude node names a file
+// under ~/.claude/projects. The body after the Claude exit is retained as
+// legacy defensive code — not a supported bind path.
 func (a *app) discoverTranscript(n *Node) {
-	// Claude transcripts are bound only by SessionStart. UUID directory
-	// discovery is not ownership evidence. Other transports do not discover
-	// files here.
 	if n == nil || n.Agent == "claude" {
 		return
 	}

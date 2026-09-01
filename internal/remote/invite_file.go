@@ -236,6 +236,14 @@ func (c *Client) eraseInvite(src inviteSrc, invite string) error {
 	return cerr
 }
 
+// consumeInviteName destroys a posted invite under root after enrollment:
+// link a quarantine name, unlink the original, recheck that the quarantine
+// fd is still the same inode, then shred and unlink-final. Link+unlink is
+// used instead of rename so a concurrent replace of the original name is an
+// accepted race (Remove may drop the replacement) rather than a silent
+// move of a different file. If identity recheck fails after the claim,
+// restoreInviteName puts the original name back before shredding the
+// still-open original fd — destruction must not proceed on the wrong inode.
 func (c *Client) consumeInviteName(root *os.Root, name string, origFD int, orig syscall.Stat_t) error {
 	var qname string
 	var claimed bool

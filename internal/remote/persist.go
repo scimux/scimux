@@ -15,6 +15,18 @@ func (c *Client) tempPath() string {
 	return c.StatePath() + tempSuffix
 }
 
+// persist writes identity state with a durable transaction:
+//
+//	write temp → fsync temp → rename → fsync parent
+//
+// Rename alone is not durable: without the temp and parent fsyncs a crash
+// can leave the new name pointing at a zero-length or never-synced file.
+// Failures before rename intentionally leave a recoverable .tmp next to
+// the live state file; cleanup is not automatic because deleting a temp
+// that may hold the only copy of a newly enrolled identity would destroy
+// recovery evidence. Startup classifies that temp: a complete enrolled
+// record is adopted (recoverEnrolledTemp), while an unreadable or
+// truncated temp is ClassPartialIdentity / StatePartial (tmpIncomplete).
 func (c *Client) persist(st PersistedState) error {
 	if st.V == 0 {
 		st.V = 1

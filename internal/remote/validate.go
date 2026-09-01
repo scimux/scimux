@@ -10,6 +10,19 @@ import (
 // validatePersistedSemantics checks identity-file field invariants after a
 // successful JSON decode. It is the semantic half of load-time validation;
 // tmpIncomplete only detects an unreadable or malformed temporary file.
+//
+// Accepted status classes: enrolled, disabled, revoked, ambiguous, partial,
+// key-missing, corrupt. Enrolled/disabled/revoked additionally require
+// schema version 1 and a non-empty origin. Enrolled further requires a
+// valid handle plus both public and private keys (and forbids a Pending
+// record). Missing enrolled keys are ClassKeyMissing rather than generic
+// corruption so startup can surface a distinct recovery path instead of
+// treating the file as unparsable wreckage. Pending enrollment is legal
+// only on ambiguous state, and then only when Pending.PublicKey matches
+// the outer PublicKey. Device rows must carry unique IDs/RIDs and valid
+// keys. Schema or state additions must update this classifier and its
+// table test in validate_test.go — silent acceptance is not an extension
+// mechanism.
 func validatePersistedSemantics(st PersistedState) Class {
 	if st.Status == "" {
 		return ClassCorruptIdentity

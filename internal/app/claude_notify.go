@@ -325,6 +325,21 @@ func runClaudeNotifyHookMain(args []string) int {
 	return 0
 }
 
+// drainClaudeNotifyInbox / dropClaudeNotifyInbox share a threat model:
+//
+//   - Quarantine (processed/rejected) beats retry-in-place: a notice that
+//     failed validation must not be re-read forever, but must remain on disk
+//     for audit rather than being deleted.
+//   - Current-turn fencing (accepted-turn nonce / closed-turn markers) keeps
+//     a late Notification from minting a dialog epoch for the next turn.
+//   - Bundle confinement: every path is under claude-hooks/<hookID>/; unsafe
+//     hook IDs and unsafe ready-file names are ignored so cleanup cannot
+//     traverse outside the selected bundle.
+//   - Gate ownership spans validation and epoch minting: drain holds the
+//     per-node gate across parse → turn check → mint so two pollers cannot
+//     race two epochs from one inbox.
+//   - Cleanup (drop) accepts only safe *.json ready-file names and never
+//     parses contents — retiring a bundle must not depend on notice shape.
 func (a *app) drainClaudeNotifyInbox(nodeID, hookID string) {
 	if !safePathComponent(hookID) {
 		return
