@@ -103,14 +103,19 @@ type gzipResponseWriter struct {
 	http.ResponseWriter
 	gz          *gzip.Writer
 	status      int
+	statusSet   bool // first WriteHeader latched (may still be delayed)
 	wroteHeader bool
 	skip        bool // never compress this response
 }
 
 func (w *gzipResponseWriter) WriteHeader(code int) {
-	if w.wroteHeader {
+	// net/http: only the first WriteHeader counts. Status may still be
+	// delayed until the first body byte, but a later WriteHeader must not
+	// overwrite the latched code (or a 201 becomes a 400 at close).
+	if w.wroteHeader || w.statusSet {
 		return
 	}
+	w.statusSet = true
 	w.status = code
 	// Empty-body statuses must never open a compressor. Write the header now
 	// so a subsequent accidental Write cannot retrofit Content-Encoding.
