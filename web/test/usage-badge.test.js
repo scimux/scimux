@@ -43,7 +43,8 @@ test("app.js no longer declares the four presentation functions; it imports them
   assert.doesNotMatch(appSrc, /^function fuelGauge\s*\(/m);
   assert.doesNotMatch(appSrc, /^function usageBadge\s*\(/m);
   assert.match(appSrc, /from "\.\/usage\.js"/);
-  assert.match(appSrc, /import \{ usageBadge \} from "\.\/usage\.js"/);
+  assert.match(appSrc, /usageBadge/);
+  assert.match(appSrc, /agentLogo as agentLogoMod|sysMetricHTML|STATUS_PHASES/);
 });
 
 test("usageRemClass at each threshold boundary", () => {

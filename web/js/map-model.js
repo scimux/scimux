@@ -253,6 +253,19 @@ export function tabListForCards(nodes, { cardTab, pinned, archived } = {}){
     (cardTab === "current" && hardAttention(n)));
 }
 
+/* When selecting a node, switch Activities tab so its card is visible —
+   same membership rule as tabListForCards (archived ↔ archived tab;
+   hard-attention surfaces on current). Pinned is left alone: the caller
+   only flips current/archived. */
+export function cardTabForVisibleNode(node, cardTab, archived){
+  if (!node) return cardTab;
+  const archivedHere = isArchived(node.id, archived);
+  const visibleHere = archivedHere === (cardTab === "archived") ||
+    (cardTab === "current" && hardAttention(node));
+  if (visibleHere) return cardTab;
+  return archivedHere ? "archived" : "current";
+}
+
 /* A lane's scope is every thread on that lane (single membership) plus the
    open chat, which always shows. Empty laneFilter = all lanes in scope. */
 export function inLaneScope(n, { laneFilter, selectedId } = {}){

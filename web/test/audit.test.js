@@ -561,7 +561,7 @@ test("AT-FR-42-a: the seam audit matches the allowlist exactly", () => {
     routed.length >= 11,
     `production assetURL builders must be found and classified seam-routed; got ${routed.length}`,
   );
-  assert.ok(routed.some(f => f.file === "js/app.js"), "app.js agentLogo sinks not classified seam-routed");
+  assert.ok(routed.some(f => f.file === "js/usage.js"), "usage.js agentLogo sinks not classified seam-routed");
   assert.ok(routed.some(f => f.file === "js/chat.js"), "chat.js tile sinks not classified seam-routed");
 
   const bypasses = found.filter(f => f.detail !== "seam-routed");

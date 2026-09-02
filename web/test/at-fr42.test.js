@@ -113,12 +113,12 @@ test("AT-FR-42-b: one suite runs twice over the same app code with localhost and
 
 test("AT-FR-42-c: every asset URL resolves through injected assetURL; localhost is identity, channel is blob:", async () => {
   const at = "AT-FR-42-c";
-  const appSrc = readWeb("js/app.js");
+  const usageSrc = readWeb("js/usage.js");
   const chatSrc = readWeb("js/chat.js");
 
   for (const path of Object.values(AGENT_ASSET_PATHS)) {
-    if (!appSrc.includes(path)) {
-      fail(at, `app.js no longer contains today's asset path ${path}`);
+    if (!usageSrc.includes(path)) {
+      fail(at, `usage.js agentLogo no longer contains today's asset path ${path}`);
     }
   }
   if (!chatSrc.includes("/attachments/")) {
@@ -152,7 +152,7 @@ test("AT-FR-42-c: every asset URL resolves through injected assetURL; localhost 
   for (const [agent, path] of Object.entries(AGENT_ASSET_PATHS)) {
     const html = runAgentLogo(agent, marked);
     if (!htmlUsesSupplier(html, marked, path)) {
-      fail(at, `app.js agentLogo(${agent}) does not resolve ${path} through injected assetURL(path)`);
+      fail(at, `usage.js agentLogo(${agent}) does not resolve ${path} through injected assetURL(path)`);
     }
   }
 
@@ -206,7 +206,7 @@ test("AT-FR-42-c: every asset URL resolves through injected assetURL; localhost 
 
   for (const [agent, path] of Object.entries(AGENT_ASSET_PATHS)) {
     if (!htmlUsesSupplier(channelResult.logos[agent], channel.assetURL, path)) {
-      fail(at, `app.js agentLogo(${agent}) does not resolve ${path} through injected assetURL to a blob: URL`);
+      fail(at, `usage.js agentLogo(${agent}) does not resolve ${path} through injected assetURL to a blob: URL`);
     }
   }
   for (const path of tilePaths()) {

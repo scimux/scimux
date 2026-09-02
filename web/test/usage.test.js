@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   usageAgentDisplayName, usageBadgeLayout, resetRemainingPercent, usageResetBars,
+  agentLogo, sysMetricHTML, statusPhaseAt, STATUS_PHASES,
 } from "../js/usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -16,11 +17,58 @@ const layoutCss = readFileSync(join(__dirname, "../css/layout.css"), "utf8");
 
 test("usage.js is pure; app imports it; index has #sysgrok", () => {
   assert.match(appSrc, /from "\.\/usage\.js"/);
-  assert.match(appSrc, /STATUS_PHASES = \["metrics", "claude", "codex", "grok"\]/);
-  assert.match(appSrc, /case "grok":/);
+  assert.match(appSrc, /STATUS_PHASES/);
+  assert.match(appSrc, /agentLogo as agentLogoMod|agentLogoMod/);
   assert.match(appSrc, /#sysgrok/);
   assert.match(indexSrc, /id="sysgrok"/);
   assert.doesNotMatch(usageSrc, /document\.|window\.|fetch\(/);
+  assert.deepEqual(STATUS_PHASES, ["metrics", "claude", "codex", "grok"]);
+});
+
+test("agentLogo routes each known agent through assetURL", () => {
+  const seen = [];
+  const url = (p) => { seen.push(p); return `U:${p}`; };
+  assert.match(agentLogo("claude", url), /U:\/assets\/agents\/claude\.svg/);
+  assert.match(agentLogo("codex", url), /U:\/assets\/agents\/openai\.svg/);
+  assert.match(agentLogo("openai", url), /U:\/assets\/agents\/openai\.svg/);
+  assert.match(agentLogo("pi", url), /U:\/assets\/agents\/pi\.svg/);
+  assert.match(agentLogo("opencode", url), /U:\/assets\/agents\/opencode\.svg/);
+  assert.match(agentLogo("grok", url), /U:\/assets\/agents\/grok\.svg/);
+  assert.match(agentLogo("unknown", url), /<svg/);
+  assert.deepEqual(seen, [
+    "/assets/agents/claude.svg",
+    "/assets/agents/openai.svg",
+    "/assets/agents/openai.svg",
+    "/assets/agents/pi.svg",
+    "/assets/agents/opencode.svg",
+    "/assets/agents/grok.svg",
+  ]);
+});
+
+test("sysMetricHTML: flat/up/down and crit at 90", () => {
+  const flat = sysMetricHTML("M", "50%", 50, 50);
+  assert.match(flat, /a-flat/);
+  assert.match(flat, /→/);
+  const up = sysMetricHTML("M", "60%", 60, 50);
+  assert.match(up, /a-stress/);
+  assert.match(up, /↑/);
+  assert.match(up, /roll-dn/);
+  const down = sysMetricHTML("M", "40%", 40, 50);
+  assert.match(down, /a-good/);
+  assert.match(down, /↓/);
+  const crit = sysMetricHTML("M", "91%", 91, 80);
+  assert.match(crit, /a-crit/);
+  const first = sysMetricHTML("M", "10%", 10, null);
+  assert.match(first, /a-flat/);
+});
+
+test("statusPhaseAt stays on metrics until a snapshot exists", () => {
+  assert.equal(statusPhaseAt(0, null), "metrics");
+  assert.equal(statusPhaseAt(1, null), "metrics");
+  assert.equal(statusPhaseAt(1, {}), "claude");
+  assert.equal(statusPhaseAt(2, {}), "codex");
+  assert.equal(statusPhaseAt(3, {}), "grok");
+  assert.equal(statusPhaseAt(4, {}), "metrics");
 });
 
 test("usageAgentDisplayName", () => {

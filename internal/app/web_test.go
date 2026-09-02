@@ -81,6 +81,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "./chat.js"`,
 		`from "./composer.js"`,
 		`from "./format.js"`,
+		`from "./lane-picker.js"`,
 		`from "./lanes.js"`,
 		`from "./map-model.js"`,
 		`from "./map.js"`,

@@ -6,7 +6,7 @@
  * This module is the only browser entry point and the only composition root.
  * It owns shared application state, feature construction and lazy cross-feature
  * dependency injection, selection/title-edit coordination, shared lane-picker
- * seams, status/usage rendering and existing timers, node rail helpers, station
+ * DOM sync, status/usage rendering and existing timers, node rail helpers, station
  * bookmark/toast/longpress helpers, feature bind order, spatial navigation and
  * document gestures, the read-only chat preview, update/license menu
  * actions, polling construction/bind, and final boot order.
@@ -22,10 +22,13 @@
  *
  * What the exception covers, and what it does not
  * -----------------------------------------------
- * No test imports or executes this file — it touches the DOM at module scope,
- * so importing it from Node fails. That is the accepted cost of a composition
- * root, and it is why the web suite's coverage percentage describes the other
- * modules only. Quote that number with the exclusion attached.
+ * Tests import and execute createApp over file: URLs with injected
+ * fetchImpl/assetURL/document/window (see s2-helpers / AT-FR-42). Module-scope
+ * auto-boot runs only when import.meta.url is https?: — so Node imports do not
+ * touch a real DOM. Coverage therefore includes this file's executed paths;
+ * the deliberate exception is composition-only wiring (bind order, listener
+ * attachment, timer plumbing, feature factory construction), not "the whole
+ * file is untested."
  *
  * The exception covers wiring: construction, injection, bind order, listener
  * registration, DOM reads and writes. It does not cover pure logic. A function
@@ -36,17 +39,23 @@
  * stays unasserted for exactly as long as it lives in here.
  *
  * Extract on sight, one feature at a time. usage.js is the worked example:
- * decision half and presentation half together, agentLogo, clock and locale
- * injected so the module stays pure. Do not answer a coverage finding by
- * adding assertions over this file's source text — they catch deletion, not
- * breakage, and a test that reads a comment proves nothing.
+ * decision half and presentation half together, agent logo / metric / phase
+ * helpers, clock and locale injected so the module stays pure. Do not answer a
+ * coverage finding by adding assertions over this file's source text — they
+ * catch deletion, not breakage, and a test that reads a comment proves nothing.
  */
 import {
   esc, mdInline, md, ageText, fmtDur, fmtStamp, fmtBubbleTime, fmtWhen,
   fmtNoteMeta, bubbleTitle, cssRGB as cssRGBMod,
   contrastText as contrastTextMod,
 } from "./format.js";
-import { usageBadge } from "./usage.js";
+import {
+  usageBadge,
+  agentLogo as agentLogoMod,
+  sysMetricHTML,
+  statusPhaseAt,
+  STATUS_PHASES,
+} from "./usage.js";
 import {
   hashStr, laneList as laneListMod, sortedLaneList as sortedLaneListMod,
   laneById as laneByIdMod, laneName as laneNameMod, laneColor as laneColorMod,
@@ -54,9 +63,16 @@ import {
   laneModel as laneModelMod, stopsOf, stopLabel,
 } from "./lanes.js";
 import {
+  NEW_LANE_VALUE,
+  laneOptionsHTML as laneOptionsHTMLMod,
+  laneSelectHTML as laneSelectHTMLMod,
+  readLaneChoiceFromValues,
+} from "./lane-picker.js";
+import {
   hardAttention, orderedNodes as orderedNodesMod,
   isArchived as isArchivedMod, stationLatestTurn,
   ackReadySeen, pruneReadySeen, loadReadySeen, saveReadySeen,
+  cardTabForVisibleNode,
 } from "./map-model.js";
 import {
   clampLevel, scrimStep, captureTouchStart, documentSwipeDecision,
@@ -352,26 +368,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      (CC BY 4.0), inlined like every other glyph (no webfont classes;
      see TestPinnedIcons). One stable glyph; Fare on/off lives in the menu. */
   const ICON_LAYERS = `<svg width="16" height="16" viewBox="0 0 576 512" fill="currentColor" data-icon="layers" aria-hidden="true"><path d="M264.5 5.2c14.9-6.9 32.1-6.9 47 0l218.6 101c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 149.8C37.4 145.8 32 137.3 32 128s5.4-17.9 13.9-21.8L264.5 5.2zM476.9 209.6l53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 277.8C37.4 273.8 32 265.3 32 256s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0l152-70.2zm-152 198.2l152-70.2 53.2 24.6c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L45.9 405.8C37.4 401.8 32 393.3 32 384s5.4-17.9 13.9-21.8l53.2-24.6 152 70.2c23.4 10.8 50.4 10.8 73.8 0z"/></svg>`;
+  /* One-arg wrapper: call sites and injected deps stay agentLogo(agent);
+     the pure builder in usage.js takes the FR-42 assetURL supplier explicitly. */
   function agentLogo(agent){
-    switch ((agent || "").toLowerCase()){
-    case "claude":
-      return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/claude.svg')}')" aria-hidden="true"></span>`;
-    case "codex":
-    case "openai":
-      return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/openai.svg')}')" aria-hidden="true"></span>`;
-    case "pi":
-      return `<img src="${assetURL('/assets/agents/pi.svg')}" alt="" aria-hidden="true">`;
-    case "opencode":
-      return `<img src="${assetURL('/assets/agents/opencode.svg')}" alt="" aria-hidden="true">`;
-    case "grok":
-      // Mono mark (Lobe Icons / currentColor) via mask so it tracks light/dark ink.
-      return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/grok.svg')}')" aria-hidden="true"></span>`;
-    default:
-      return `<svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="10" fill="var(--dim)"/>
-      <circle cx="12" cy="12" r="3" fill="#fff"/>
-    </svg>`;
-    }
+    return agentLogoMod(agent, assetURL);
   }
 
   /* clipboard: the async API needs a secure context (HTTPS/localhost) — over
@@ -396,15 +396,6 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      same inert-missing-chip projection. */
 
   /* ---------- statusbar ---------- */
-  function metric(label, disp, pct, prevPct){
-    const d = prevPct == null ? 0 : pct - prevPct;
-    const dir  = Math.abs(d) < .4 ? 0 : d > 0 ? 1 : -1;
-    const crit = pct >= 90;
-    const aCls = crit ? "a-crit" : dir > 0 ? "a-stress" : dir < 0 ? "a-good" : "a-flat";
-    const roll = dir > 0 ? "roll-dn" : dir < 0 ? "roll-up" : "";
-    return `<span>${label} <b class="${roll} ${crit ? "a-crit" : ""}">${disp}</b>` +
-           ` <span class="trend ${aCls}">${dir > 0 ? "↑" : dir < 0 ? "↓" : "→"}</span></span>`;
-  }
   function renderSys(sys){
     if (!sys || sys.mem_pct == null) { $("#sysmetrics").textContent = ""; return; }
     const loadPct = sys.ncpu ? 100 * sys.load1 / sys.ncpu : 0;
@@ -413,9 +404,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
         && sys.load1 === prev.load1) return;   /* unchanged: don't re-animate */
     const lbl = (f, a) => `<span class="Lfull">${f}</span><span class="Labbr">${a}</span>`;
     $("#sysmetrics").innerHTML =
-      metric(lbl("MEM","M"),  sys.mem_pct.toFixed(0) + "%",  sys.mem_pct,  prev.mem_pct) +
-      metric(lbl("SWAP","S"), sys.swap_pct.toFixed(0) + "%", sys.swap_pct, prev.swap_pct) +
-      metric(lbl("LOAD","L"), sys.load1.toFixed(2),
+      sysMetricHTML(lbl("MEM","M"),  sys.mem_pct.toFixed(0) + "%",  sys.mem_pct,  prev.mem_pct) +
+      sysMetricHTML(lbl("SWAP","S"), sys.swap_pct.toFixed(0) + "%", sys.swap_pct, prev.swap_pct) +
+      sysMetricHTML(lbl("LOAD","L"), sys.load1.toFixed(2),
              loadPct, prev.ncpu ? 100 * prev.load1 / prev.ncpu : null);
     sysPrev = sys;
   }
@@ -428,8 +419,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      percentages — runway, the value a user needs before starting work. */
   let usageSnap = null;
   /* The slot cycles: system metrics → Claude → Codex → Grok budgets → repeat.
-     Each phase is a fixed-shape row so a flip never reflows the bar. */
-  const STATUS_PHASES = ["metrics", "claude", "codex", "grok"];
+     Each phase is a fixed-shape row so a flip never reflows the bar.
+     Phase ids live in usage.js (STATUS_PHASES); decision via statusPhaseAt. */
   let statusPhaseIdx = 0;
 
   function renderUsage(snap){
@@ -440,10 +431,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     if (grokEl) grokEl.innerHTML = snap ? usageBadge("grok", a.grok, { agentLogo }) : "";
   }
   function applyStatusPhase(){
-    let phase = STATUS_PHASES[statusPhaseIdx];
-    /* Only flip to a budget phase once we've read a snapshot at least once;
-       before that, keep showing metrics rather than an empty slot. */
-    if (phase !== "metrics" && usageSnap == null) phase = "metrics";
+    const phase = statusPhaseAt(statusPhaseIdx, usageSnap);
     $("#sysmetrics").classList.toggle("on", phase === "metrics");
     $("#sysclaude").classList.toggle("on",  phase === "claude");
     $("#syscodex").classList.toggle("on",   phase === "codex");
@@ -466,9 +454,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   /* ---------- cards ---------- */
   /* Card render/time/signature/events live in /js/cards.js (Packet 7A).
-     Lane picker HTML helpers stay here — sheets (new/fork) share them. */
+     Lane picker HTML/choice live in lane-picker.js; DOM sync stays here. */
   const orderedNodes = () => orderedNodesMod(nodes);
-  const NEW_LANE_VALUE = "__new";
   const laneList = () => laneListMod(getUI().lanes);
   const sortedLaneList = () => sortedLaneListMod(getUI().lanes);
   const laneById = id => laneByIdMod(id, getUI().lanes);
@@ -492,16 +479,14 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const nextLaneColor = () => nextLaneColorMod(getUI().lanes);
   const makeLane = name => makeLaneMod(name, getUI().lanes);
   function laneOptionsHTML(selected = "", includeUnset = true, disabled = false){
-    const unset = includeUnset ? `<option value="" ${!selected ? "selected" : ""}>unset</option>` : "";
-    const missing = selected && !laneById(selected)
-      ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>` : "";
-    const lanes = sortedLaneList().map(l =>
-      `<option value="${esc(l.id)}" ${selected === l.id ? "selected" : ""}>${esc(l.name)}</option>`).join("");
-    const create = disabled ? "" : `<option value="${NEW_LANE_VALUE}">New lane...</option>`;
-    return `${unset}${missing}${lanes}${create}`;
+    return laneOptionsHTMLMod(selected, sortedLaneList(), {
+      includeUnset, disabled, escape: esc, laneById,
+    });
   }
   function laneSelectHTML(selected = "", includeUnset = true, disabled = false){
-    return `<select data-lane-select ${disabled ? "disabled" : ""}>${laneOptionsHTML(selected, includeUnset, disabled)}</select>`;
+    return laneSelectHTMLMod(selected, sortedLaneList(), {
+      includeUnset, disabled, escape: esc, laneById,
+    });
   }
   function fillLaneSelect(select, selected = "", includeUnset = true, disabled = false){
     if (!select) return;
@@ -521,14 +506,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     if (swatch) swatch.style.background = select.value === NEW_LANE_VALUE ? nextLaneColor() : laneColor(select.value);
   }
   function readLaneChoice(select, input){
-    const val = select?.value || "";
-    if (val === NEW_LANE_VALUE){
-      const name = input?.value.trim() || "";
-      if (!name) return { error: "Enter a lane name." };
-      const lane = makeLane(name);
-      return { laneID: lane.id, lane };
-    }
-    return { laneID: val };
+    return readLaneChoiceFromValues(select?.value || "", input?.value || "", { makeLane });
   }
   const laneModel = () => laneModelMod(nodes, getUI().lanes);
   const isArchived = id => isArchivedMod(id, getUI().archived);
@@ -1291,9 +1269,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
        same visibility rule as the renderCards filter */
     const seln = nodeById(id);
     if (seln){
-      const visibleHere = isArchived(seln.id) === (cardTab === "archived") ||
-        (cardTab === "current" && hardAttention(seln));
-      if (!visibleHere) cardTab = isArchived(seln.id) ? "archived" : "current";
+      cardTab = cardTabForVisibleNode(seln, cardTab, getUI().archived);
       const nextSeen = ackReadySeen(readySeen, seln);
       if (nextSeen !== readySeen){
         readySeen = nextSeen;

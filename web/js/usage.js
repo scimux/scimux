@@ -1,7 +1,67 @@
 "use strict";
 /* Pure subscription-usage badge: layout, reset rails, fuel gauges, and HTML.
- * Shell (app.js) owns the 30s cadence and the innerHTML write. */
+ * Also owns agent logo markup and status-slot metric/phase presentation.
+ * Shell (app.js) owns the cadence timers and the innerHTML writes. */
 import { esc } from "./format.js";
+
+/** Status-slot phase cycle: system metrics then each agent budget. */
+export const STATUS_PHASES = ["metrics", "claude", "codex", "grok"];
+
+/**
+ * Resolve which status phase to show. Budget phases stay on metrics until a
+ * usage snapshot has been read at least once (avoids an empty flip).
+ */
+export function statusPhaseAt(idx, usageSnap, phases = STATUS_PHASES){
+  const list = phases && phases.length ? phases : STATUS_PHASES;
+  const i = ((Number(idx) || 0) % list.length + list.length) % list.length;
+  const phase = list[i];
+  if (phase !== "metrics" && usageSnap == null) return "metrics";
+  return phase;
+}
+
+/**
+ * Agent logo HTML for cards/map/chat/status. `assetURL` is required so the
+ * FR-42 transport seam stays explicit; the shell closes over its supplier and
+ * keeps the historical one-argument `agentLogo(agent)` call sites.
+ */
+export function agentLogo(agent, assetURL){
+  /* Call the parameter as assetURL(...) so AT-FR-42's seam scanner still
+     classifies these sinks as seam-routed (wrapper name is the contract). */
+  if (typeof assetURL !== "function") assetURL = (p) => p;
+  switch ((agent || "").toLowerCase()){
+  case "claude":
+    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/claude.svg')}')" aria-hidden="true"></span>`;
+  case "codex":
+  case "openai":
+    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/openai.svg')}')" aria-hidden="true"></span>`;
+  case "pi":
+    return `<img src="${assetURL('/assets/agents/pi.svg')}" alt="" aria-hidden="true">`;
+  case "opencode":
+    return `<img src="${assetURL('/assets/agents/opencode.svg')}" alt="" aria-hidden="true">`;
+  case "grok":
+    // Mono mark (Lobe Icons / currentColor) via mask so it tracks light/dark ink.
+    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/grok.svg')}')" aria-hidden="true"></span>`;
+  default:
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" fill="var(--dim)"/>
+      <circle cx="12" cy="12" r="3" fill="#fff"/>
+    </svg>`;
+  }
+}
+
+/**
+ * One system-metric cell: label, display value, trend arrow from pct delta.
+ * Crit at ≥90%; flat within ±0.4 of previous.
+ */
+export function sysMetricHTML(label, disp, pct, prevPct){
+  const d = prevPct == null ? 0 : pct - prevPct;
+  const dir  = Math.abs(d) < .4 ? 0 : d > 0 ? 1 : -1;
+  const crit = pct >= 90;
+  const aCls = crit ? "a-crit" : dir > 0 ? "a-stress" : dir < 0 ? "a-good" : "a-flat";
+  const roll = dir > 0 ? "roll-dn" : dir < 0 ? "roll-up" : "";
+  return `<span>${label} <b class="${roll} ${crit ? "a-crit" : ""}">${disp}</b>` +
+         ` <span class="trend ${aCls}">${dir > 0 ? "↑" : dir < 0 ? "↓" : "→"}</span></span>`;
+}
 
 export function usageAgentDisplayName(agent){
   if (agent === "codex") return "Codex";

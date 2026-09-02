@@ -15,6 +15,7 @@ import {
   isArchived,
   isPinned,
   tabListForCards,
+  cardTabForVisibleNode,
   inLaneScope,
   visibleCardLists,
   headStopKey,
@@ -80,7 +81,8 @@ test("map-model.js exports named pure helpers", async () => {
     "loadReadySeen", "saveReadySeen", "READY_SEEN_KEY",
     "cardCreatedMS", "cardInteractionMS",
     "orderedNodes", "pinnedOrder", "canReceiveSend", "sendableNodes",
-    "isArchived", "isPinned", "tabListForCards", "inLaneScope", "visibleCardLists",
+    "isArchived", "isPinned", "tabListForCards", "cardTabForVisibleNode",
+    "inLaneScope", "visibleCardLists",
     "headStopKey", "toggleMapSelection",
   ]) {
     assert.ok(name in mod, name);
@@ -602,6 +604,20 @@ test("tabListForCards pinned: pinned only, attention-first", () => {
   const pinned = ["p1", "p2"];
   const ids = tabListForCards(nodes, { cardTab: "pinned", pinned }).map(n => n.id);
   assert.deepEqual(ids, ["p2", "p1"]);
+});
+
+test("cardTabForVisibleNode switches current/archived so the selected card is visible", () => {
+  const archived = ["a1"];
+  assert.equal(cardTabForVisibleNode({ id: "live" }, "current", archived), "current");
+  assert.equal(cardTabForVisibleNode({ id: "a1" }, "current", archived), "archived");
+  assert.equal(cardTabForVisibleNode({ id: "live" }, "archived", archived), "current");
+  assert.equal(
+    cardTabForVisibleNode({ id: "a1", attention: "approval" }, "current", archived),
+    "current",
+    "archived hard-attention stays visible on current",
+  );
+  assert.equal(cardTabForVisibleNode({ id: "a1" }, "pinned", archived), "archived");
+  assert.equal(cardTabForVisibleNode(null, "current", archived), "current");
 });
 
 test("inLaneScope: empty filter is all; selectedId exempt; served lane membership", () => {

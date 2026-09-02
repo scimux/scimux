@@ -16,6 +16,7 @@ import {
   splitAssetRefs,
 } from "../js/chat.js";
 import { api } from "../js/api.js";
+import { agentLogo as agentLogoHTML } from "../js/usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const WEB = join(__dirname, "..");
@@ -259,13 +260,9 @@ function extractNamedFunction(src, name) {
 }
 
 export function runAgentLogo(agent, assetURL) {
-  const src = readWeb("js/app.js");
-  const fnSrc = extractNamedFunction(src, "agentLogo");
-  if (!fnSrc) {
-    throw new Error("app.js has no agentLogo; the 5 asset-URL builders are missing");
-  }
-  const make = new Function("assetURL", `"use strict";\n${fnSrc}\nreturn agentLogo;`);
-  return make(assetURL)(agent);
+  /* Pure builder lives in usage.js; app.js keeps a one-arg wrapper that
+     closes over the injected assetURL supplier. */
+  return agentLogoHTML(agent, assetURL);
 }
 
 export function todayAgentLogoHTML() {
