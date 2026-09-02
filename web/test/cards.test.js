@@ -1472,3 +1472,471 @@ test("P2 md: .summary CSS covers paragraphs, lists, tables, blockquotes, code", 
       `cards.css must style ${sel} for Markdown descendants`);
   }
 });
+
+/* ---------- Phase 3: card-list / tabs interaction dispatcher ---------- */
+
+function actTarget(attrs, closestSels){
+  const dataset = {};
+  for (const [k, v] of Object.entries(attrs || {})){
+    const camel = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    dataset[camel] = v;
+  }
+  const t = { dataset, classList: { contains: () => false } };
+  const hit = new Set(Array.isArray(closestSels) ? closestSels : [closestSels].filter(Boolean));
+  t.closest = (sel) => hit.has(sel) ? t : null;
+  return t;
+}
+
+function cardsActionHarness(opts = {}){
+  const state = {
+    nodes: opts.nodes || [{ id: "n1", title: "Alpha", description: "old", live: "quiet", adopted: false }],
+    cardTab: opts.cardTab || "current",
+    actionCard: opts.actionCard || "",
+    editingDesc: opts.editingDesc || "",
+    attnFoldOpen: false,
+    expanded: new Set(opts.expanded || []),
+    pinned: [...(opts.pinned || [])],
+    archived: [...(opts.archived || [])],
+    sel: opts.sel || "",
+    cardsSig: "x",
+    laneFilter: opts.laneFilter || "",
+  };
+  const handlers = { list: new Map(), tabs: new Map() };
+  const list = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+    addEventListener(type, fn){ handlers.list.set(type, fn); },
+    removeEventListener(type){ handlers.list.delete(type); },
+  };
+  const tabs = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+    addEventListener(type, fn){ handlers.tabs.set(type, fn); },
+    removeEventListener(type){ handlers.tabs.delete(type); },
+  };
+  const effects = {
+    apiCalls: [],
+    uiMutate: [],
+    alerts: [],
+    confirms: [],
+    fieldErrors: [],
+    focused: [],
+    exitThread: [],
+    openAdopt: [],
+    selectNode: [],
+    setLevel: [],
+    setLaneFilter: [],
+    updateLocalNode: [],
+    removeNode: [],
+    invalidateChatSig: 0,
+    invalidateMapSig: 0,
+    invalidateStateEtag: 0,
+    renderChatHead: 0,
+    renderMap: 0,
+    scheduleTick: 0,
+  };
+  let apiImpl = opts.api || (async (url, init) => {
+    effects.apiCalls.push({ url, init });
+    return { id: "n1", title: "Alpha", description: "saved" };
+  });
+  let confirmImpl = opts.confirm !== undefined ? opts.confirm : () => true;
+  const docEls = opts.docEls || {};
+  const feature = createCardsFeature({
+    roots: { tabs, list },
+    document: {
+      title: "",
+      querySelector: (sel) => docEls[sel] || null,
+      getElementById: () => null,
+    },
+    CSS: { escape: s => s },
+    nodes: () => state.nodes,
+    unadopted: () => opts.unadopted || [],
+    sel: () => state.sel,
+    setSel: v => { state.sel = v; },
+    cardTab: () => state.cardTab,
+    setCardTab: v => { state.cardTab = v; },
+    laneFilter: () => state.laneFilter,
+    setLaneFilter: v => { effects.setLaneFilter.push(v); state.laneFilter = v; },
+    attnFoldOpen: () => state.attnFoldOpen,
+    setAttnFoldOpen: v => { state.attnFoldOpen = v; },
+    expanded: () => state.expanded,
+    actionCard: () => state.actionCard,
+    setActionCard: v => { state.actionCard = v; },
+    editingDesc: () => state.editingDesc,
+    setEditingDesc: v => { state.editingDesc = v; },
+    editingTitle: () => "",
+    editingTitleScope: () => "",
+    cardsSig: () => state.cardsSig,
+    setCardsSig: v => { state.cardsSig = v; },
+    pinned: () => state.pinned,
+    archived: () => state.archived,
+    lanes: () => opts.lanes || [],
+    laneList: () => opts.lanes || [],
+    bookmarks: () => [],
+    agentLogo: () => "",
+    laneSelectHTML: () => "",
+    laneColor: () => "#000",
+    laneName: () => "",
+    icons: {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+    api: (...a) => apiImpl(...a),
+    uiMutate: (op) => { effects.uiMutate.push(op); },
+    alert: (m) => { effects.alerts.push(m); },
+    confirm: (m) => { effects.confirms.push(m); return typeof confirmImpl === "function" ? confirmImpl(m) : !!confirmImpl; },
+    fieldError: (el, msg) => { effects.fieldErrors.push({ el, msg }); },
+    readLaneChoice: opts.readLaneChoice || (() => ({})),
+    updateLocalNode: (n) => { effects.updateLocalNode.push(n); },
+    removeNode: (id) => {
+      effects.removeNode.push(id);
+      state.nodes = state.nodes.filter(n => n.id !== id);
+    },
+    exitThread: (id) => { effects.exitThread.push(id); },
+    openAdopt: (s) => { effects.openAdopt.push(s); },
+    selectNode: (id) => { effects.selectNode.push(id); },
+    setLevel: (n) => { effects.setLevel.push(n); },
+    isDesktop: () => opts.isDesktop !== undefined ? opts.isDesktop : true,
+    invalidateChatSig: () => { effects.invalidateChatSig++; },
+    invalidateMapSig: () => { effects.invalidateMapSig++; },
+    invalidateStateEtag: () => { effects.invalidateStateEtag++; },
+    renderChatHead: () => { effects.renderChatHead++; },
+    renderMap: () => { effects.renderMap++; },
+    scheduleTick: () => { effects.scheduleTick++; },
+    longpress: opts.longpress || (() => () => {}),
+  });
+  feature.bind();
+  return {
+    state, effects, handlers, feature, list, tabs,
+    setApi(fn){ apiImpl = fn; },
+    setConfirm(v){ confirmImpl = v; },
+    clickList(target){ return handlers.list.get("click")({ target, preventDefault(){} }); },
+    clickTabs(target){ return handlers.tabs.get("click")({ target, preventDefault(){} }); },
+  };
+}
+
+test("tabs: clear-scope clears lane filter only", () => {
+  const h = cardsActionHarness({ laneFilter: "L1" });
+  h.clickTabs(actTarget({}, ["[data-clear-scope]"]));
+  assert.deepEqual(h.effects.setLaneFilter, [""]);
+  assert.equal(h.state.cardTab, "current");
+});
+
+test("tabs: switching tab clears actionCard and editingDesc", () => {
+  const h = cardsActionHarness({ actionCard: "n1", editingDesc: "n1" });
+  const btn = actTarget({ tab: "archived" }, ["[data-tab]"]);
+  const siblings = [{ classList: { toggle(){} } }, btn];
+  btn.classList = { toggle(name, on){ if (on) this._on = true; } };
+  h.tabs.querySelectorAll = () => siblings;
+  h.clickTabs(btn);
+  assert.equal(h.state.cardTab, "archived");
+  assert.equal(h.state.actionCard, "");
+  assert.equal(h.state.editingDesc, "");
+});
+
+test("click: attn fold toggles open state", () => {
+  /* foldList is non-empty only with a lane filter and out-of-scope hard attention;
+     otherwise renderCards forces attnFoldOpen back to false. */
+  const h = cardsActionHarness({
+    laneFilter: "lane-a",
+    nodes: [
+      { id: "n1", title: "In", lane_id: "lane-a", live: "quiet" },
+      { id: "n2", title: "Need", lane_id: "lane-b", live: "quiet", attention: "approval" },
+    ],
+  });
+  h.clickList(actTarget({}, ["[data-attnfold]"]));
+  assert.equal(h.state.attnFoldOpen, true);
+  h.clickList(actTarget({}, ["[data-attnfold]"]));
+  assert.equal(h.state.attnFoldOpen, false);
+});
+
+test("click: save-desc PATCH sends description body and clears editing", async () => {
+  const ta = { value: "  new desc  " };
+  const h = cardsActionHarness({
+    editingDesc: "n1",
+    docEls: { '[data-desc-input="n1"]': ta },
+  });
+  await h.clickList(actTarget({ "save-desc": "n1" }, ["[data-save-desc]"]));
+  assert.equal(h.effects.apiCalls.length, 1);
+  assert.equal(h.effects.apiCalls[0].url, "/api/nodes/n1");
+  assert.equal(h.effects.apiCalls[0].init.method, "PATCH");
+  assert.deepEqual(JSON.parse(h.effects.apiCalls[0].init.body), { description: "new desc" });
+  assert.equal(h.state.editingDesc, "");
+  assert.equal(h.effects.updateLocalNode.length, 1);
+  assert.equal(h.effects.invalidateChatSig, 1);
+  assert.equal(h.effects.renderChatHead, 1);
+});
+
+test("click: save-desc with new lane mutates lanes and includes lane_id", async () => {
+  const lane = { id: "lane-x", name: "Trip", color: "#111" };
+  const h = cardsActionHarness({
+    editingDesc: "n1",
+    lanes: [{ id: "l0", name: "Old" }],
+    docEls: { '[data-desc-input="n1"]': { value: "d" }, '[data-card-lane="n1"]': {
+      querySelector: (sel) => sel.includes("lane-select") ? {} : (sel.includes("lane-new") ? {} : null),
+    } },
+    readLaneChoice: () => ({ laneID: lane.id, lane }),
+  });
+  await h.clickList(actTarget({ "save-desc": "n1" }, ["[data-save-desc]"]));
+  assert.deepEqual(JSON.parse(h.effects.apiCalls[0].init.body), { description: "d", lane_id: "lane-x" });
+  assert.equal(h.effects.uiMutate.length, 1);
+  assert.equal(h.effects.uiMutate[0].k, "lanes");
+  assert.equal(h.effects.uiMutate[0].lanes.length, 2);
+  assert.equal(h.effects.uiMutate[0].lanes[1].id, "lane-x");
+});
+
+test("click: save-desc lane validation error focuses field and skips API", async () => {
+  const laneNew = { focus(){ this._focused = true; }, _focused: false };
+  const laneBox = {
+    querySelector: (sel) => sel.includes("lane-new") ? laneNew : (sel.includes("lane-select") ? {} : null),
+  };
+  const h = cardsActionHarness({
+    editingDesc: "n1",
+    docEls: {
+      '[data-desc-input="n1"]': { value: "d" },
+      '[data-card-lane="n1"]': laneBox,
+    },
+    readLaneChoice: () => ({ error: "Enter a lane name." }),
+  });
+  await h.clickList(actTarget({ "save-desc": "n1" }, ["[data-save-desc]"]));
+  assert.equal(h.effects.apiCalls.length, 0);
+  assert.equal(h.effects.fieldErrors.length, 1);
+  assert.equal(h.effects.fieldErrors[0].msg, "Enter a lane name.");
+  assert.equal(laneNew._focused, true);
+  assert.equal(h.state.editingDesc, "n1", "editing preserved on validation failure");
+});
+
+test("click: save-desc API failure alerts and keeps editingDesc", async () => {
+  const h = cardsActionHarness({
+    editingDesc: "n1",
+    docEls: { '[data-desc-input="n1"]': { value: "d" } },
+    api: async () => { throw new Error("patch failed"); },
+  });
+  await h.clickList(actTarget({ "save-desc": "n1" }, ["[data-save-desc]"]));
+  assert.deepEqual(h.effects.alerts, ["patch failed"]);
+  assert.equal(h.state.editingDesc, "n1");
+  assert.equal(h.effects.updateLocalNode.length, 0);
+});
+
+test("click: pin mutates pin and clears actionCard", () => {
+  const h = cardsActionHarness({ actionCard: "n1", pinned: [] });
+  h.clickList(actTarget({ "pin-action": "n1" }, ["[data-pin-action]"]));
+  assert.deepEqual(h.effects.uiMutate, [{ k: "pin", id: "n1" }]);
+  assert.equal(h.state.actionCard, "");
+});
+
+test("click: unpin when already pinned", () => {
+  const h = cardsActionHarness({ pinned: ["n1"] });
+  h.clickList(actTarget({ "pin-action": "n1" }, ["[data-pin-action]"]));
+  assert.deepEqual(h.effects.uiMutate, [{ k: "unpin", id: "n1" }]);
+});
+
+test("click: exit clears actionCard and calls exitThread", () => {
+  const h = cardsActionHarness({ actionCard: "n1" });
+  h.clickList(actTarget({ exit: "n1" }, ["[data-exit]"]));
+  assert.equal(h.state.actionCard, "");
+  assert.deepEqual(h.effects.exitThread, ["n1"]);
+});
+
+test("click: archive and restore uiMutate", () => {
+  const h = cardsActionHarness({ actionCard: "n1" });
+  h.clickList(actTarget({ "arch-action": "n1" }, ["[data-arch-action]"]));
+  assert.deepEqual(h.effects.uiMutate, [{ k: "arch", id: "n1" }]);
+  assert.equal(h.state.actionCard, "");
+
+  const h2 = cardsActionHarness({ archived: ["n1"] });
+  h2.clickList(actTarget({ "arch-action": "n1" }, ["[data-arch-action]"]));
+  assert.deepEqual(h2.effects.uiMutate, [{ k: "unarch", id: "n1" }]);
+});
+
+test("click: delete confirm owned removes node and clears selection", async () => {
+  const h = cardsActionHarness({
+    sel: "n1",
+    actionCard: "n1",
+    editingDesc: "n1",
+    pinned: ["n1"],
+    archived: ["n1"],
+  });
+  await h.clickList(actTarget({ trash: "n1" }, ["[data-trash]"]));
+  assert.equal(h.effects.apiCalls[0].url, "/api/nodes/n1");
+  assert.equal(h.effects.apiCalls[0].init.method, "DELETE");
+  assert.ok(h.effects.confirms[0].includes("close its running session"));
+  assert.deepEqual(h.effects.removeNode, ["n1"]);
+  assert.equal(h.state.sel, "");
+  assert.equal(h.state.actionCard, "");
+  assert.equal(h.state.editingDesc, "");
+  assert.ok(h.effects.uiMutate.some(op => op.k === "unarch"));
+  assert.ok(h.effects.uiMutate.some(op => op.k === "unpin"));
+  assert.equal(h.effects.scheduleTick, 1);
+  assert.equal(h.effects.invalidateStateEtag, 1);
+});
+
+test("click: delete adopted confirm message mentions adopted session", async () => {
+  const h = cardsActionHarness({
+    nodes: [{ id: "n1", title: "Alpha", adopted: true, live: "quiet" }],
+  });
+  await h.clickList(actTarget({ trash: "n1" }, ["[data-trash]"]));
+  assert.match(h.effects.confirms[0], /adopted tmux session will keep running/);
+});
+
+test("click: delete cancel skips API and removeNode", async () => {
+  const h = cardsActionHarness({ confirm: () => false });
+  await h.clickList(actTarget({ trash: "n1" }, ["[data-trash]"]));
+  assert.equal(h.effects.apiCalls.length, 0);
+  assert.equal(h.effects.removeNode.length, 0);
+  assert.equal(h.state.nodes.length, 1);
+});
+
+test("click: delete API failure alerts and keeps the card", async () => {
+  const h = cardsActionHarness({
+    api: async () => { throw new Error("delete failed"); },
+  });
+  await h.clickList(actTarget({ trash: "n1" }, ["[data-trash]"]));
+  assert.deepEqual(h.effects.alerts, ["delete failed"]);
+  assert.equal(h.effects.removeNode.length, 0);
+  assert.equal(h.state.nodes.length, 1);
+});
+
+test("click: dismiss actions-open clears actionCard without selecting", () => {
+  const go = { dataset: { open: "n1" } };
+  const card = {
+    classList: { contains: () => false },
+    querySelector: (sel) => sel === ".go" ? go : null,
+    closest: (sel) => sel === ".card.actions-open" ? card : null,
+  };
+  const h = cardsActionHarness({ actionCard: "n1" });
+  h.clickList(card);
+  assert.equal(h.state.actionCard, "");
+  assert.equal(h.effects.selectNode.length, 0);
+});
+
+test("click: expand toggles expanded set and clears actionCard", () => {
+  const h = cardsActionHarness({ actionCard: "n1" });
+  h.clickList(actTarget({ x: "n1" }, ["[data-x]"]));
+  assert.equal(h.state.expanded.has("n1"), true);
+  assert.equal(h.state.actionCard, "");
+  h.clickList(actTarget({ x: "n1" }, ["[data-x]"]));
+  assert.equal(h.state.expanded.has("n1"), false);
+});
+
+test("click: adopt calls openAdopt", () => {
+  const h = cardsActionHarness();
+  h.clickList(actTarget({ adopt: "sess-1" }, ["[data-adopt]"]));
+  assert.deepEqual(h.effects.openAdopt, ["sess-1"]);
+});
+
+test("click: open on desktop selects without setLevel", () => {
+  const h = cardsActionHarness({
+    actionCard: "n1",
+    editingDesc: "n1",
+    isDesktop: true,
+  });
+  h.clickList(actTarget({ open: "n1" }, ["[data-open]"]));
+  assert.deepEqual(h.effects.selectNode, ["n1"]);
+  assert.equal(h.effects.setLevel.length, 0);
+  assert.equal(h.state.actionCard, "");
+  assert.equal(h.state.editingDesc, "");
+});
+
+test("click: open on mobile selects and setLevel(1)", () => {
+  const h = cardsActionHarness({ isDesktop: false });
+  h.clickList(actTarget({ open: "n1" }, ["[data-open]"]));
+  assert.deepEqual(h.effects.selectNode, ["n1"]);
+  assert.deepEqual(h.effects.setLevel, [1]);
+});
+
+test("touch: swipe opens actionCard; expanded card ignores swipe", () => {
+  const h = cardsActionHarness();
+  const go = { dataset: { open: "n1" } };
+  const card = {
+    classList: { contains: (c) => false },
+    querySelector: (sel) => sel === ".go" ? go : null,
+    closest: (sel) => sel === ".card" ? card : null,
+  };
+  h.handlers.list.get("touchstart")({ target: card, touches: [{ clientX: 200, clientY: 10 }] });
+  h.handlers.list.get("touchend")({
+    target: card,
+    changedTouches: [{ clientX: 100, clientY: 12 }], /* dx=-100, |dx| > 1.6*|dy| */
+  });
+  assert.equal(h.state.actionCard, "n1");
+
+  const h2 = cardsActionHarness({ actionCard: "" });
+  const expanded = {
+    classList: { contains: (c) => c === "expanded" },
+    querySelector: (sel) => sel === ".go" ? go : null,
+    closest: (sel) => sel === ".card" ? expanded : null,
+  };
+  h2.handlers.list.get("touchstart")({ target: expanded, touches: [{ clientX: 200, clientY: 10 }] });
+  h2.handlers.list.get("touchend")({
+    target: expanded,
+    changedTouches: [{ clientX: 100, clientY: 12 }],
+  });
+  assert.equal(h2.state.actionCard, "", "expanded card must not open actions via swipe");
+});
+
+test("longpress: title starts title edit; card toggles actionCard; adoptable ignored", () => {
+  const lp = [];
+  const startTitleEdit = [];
+  const h = cardsActionHarness({
+    longpress: (root, sel, fn) => { lp.push({ sel, fn }); return () => {}; },
+  });
+  /* Re-bind with startTitleEdit by creating a fresh harness that captures longpress + startTitleEdit */
+  const state = {
+    nodes: [{ id: "n1", title: "A", live: "quiet" }],
+    actionCard: "", editingDesc: "", cardsSig: "x",
+    cardTab: "current", pinned: [], archived: [], expanded: new Set(),
+    attnFoldOpen: false, sel: "", laneFilter: "",
+  };
+  const handlers = { list: new Map(), tabs: new Map() };
+  const list = {
+    innerHTML: "", querySelectorAll: () => [],
+    addEventListener(t, f){ handlers.list.set(t, f); },
+    removeEventListener(t){ handlers.list.delete(t); },
+  };
+  const longpressFns = [];
+  const feature = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll: () => [], addEventListener(t, f){ handlers.tabs.set(t, f); }, removeEventListener(){} }, list },
+    document: { title: "", querySelector: () => null, getElementById: () => null },
+    CSS: { escape: s => s },
+    nodes: () => state.nodes,
+    unadopted: () => [],
+    sel: () => state.sel, setSel: v => { state.sel = v; },
+    cardTab: () => state.cardTab, setCardTab: v => { state.cardTab = v; },
+    laneFilter: () => "",
+    attnFoldOpen: () => false, setAttnFoldOpen: () => {},
+    expanded: () => state.expanded,
+    actionCard: () => state.actionCard, setActionCard: v => { state.actionCard = v; },
+    editingDesc: () => state.editingDesc, setEditingDesc: v => { state.editingDesc = v; },
+    editingTitle: () => "", editingTitleScope: () => "",
+    cardsSig: () => state.cardsSig, setCardsSig: v => { state.cardsSig = v; },
+    pinned: () => [], archived: () => [], lanes: () => [], bookmarks: () => [],
+    agentLogo: () => "", laneSelectHTML: () => "", laneColor: () => "", laneName: () => "",
+    icons: {}, setInterval: () => 0, clearInterval: () => {},
+    startTitleEdit: (id, scope) => { startTitleEdit.push([id, scope]); },
+    longpress: (_r, sel, fn) => { longpressFns.push({ sel, fn }); return () => {}; },
+  });
+  feature.bind();
+  const titleLP = longpressFns.find(x => x.sel === ".card .title");
+  const cardLP = longpressFns.find(x => x.sel === ".card");
+  assert.ok(titleLP && cardLP);
+  titleLP.fn({ dataset: { title: "n1" } });
+  assert.deepEqual(startTitleEdit, [["n1", "cards"]]);
+
+  const cardEl = {
+    classList: { contains: () => false },
+    querySelector: (sel) => sel === ".go" ? { dataset: { open: "n1" } } : null,
+    closest: () => null,
+  };
+  cardLP.fn(cardEl, { target: cardEl });
+  assert.equal(state.actionCard, "n1");
+  cardLP.fn(cardEl, { target: cardEl });
+  assert.equal(state.actionCard, "");
+
+  const adoptable = {
+    classList: { contains: (c) => c === "adoptable" },
+    querySelector: () => ({ dataset: { open: "n1" } }),
+  };
+  state.actionCard = "";
+  cardLP.fn(adoptable, { target: adoptable });
+  assert.equal(state.actionCard, "", "adoptable long-press is a no-op");
+  void h; /* harness used only to prove bind path in prior tests */
+});

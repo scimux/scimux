@@ -1,10 +1,8 @@
 /* P3 — caret at the end, never select-all.
  *
- * Pure caret.js unit cases (1–4) plus the app.js source pin (case 5).
- * caret.js does not exist on the red commit: a static namespace import would
- * abort this whole file (and hide which cases failed). Dynamic import keeps
- * the file loadable so each missing export fails as its own case. Call-site
- * behaviour for the convertible modules lives in their per-module suites. */
+ * Pure caret.js unit cases (1–4) plus the app.js source pin (case 5), then
+ * Phase 3 focusAtEnd branch coverage for missing targets, thrown selection,
+ * contenteditable fallbacks, and sparse DOM hosts. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -54,7 +52,7 @@ function fakeInput(value){
   return el;
 }
 
-function fakeContentEditable(text){
+function fakeContentEditable(text, { nested = false } = {}){
   const textNode = {
     nodeType: 3,
     textContent: text || "",
@@ -94,19 +92,31 @@ function fakeContentEditable(text){
     },
     getSelection(){ return selection; },
   };
+  let lastChild = text ? textNode : null;
+  let childNodes = text ? [textNode] : [];
+  if (nested && text){
+    const inner = {
+      nodeType: 1,
+      textContent: text,
+      childNodes: [textNode],
+      lastChild: textNode,
+    };
+    textNode.parentNode = inner;
+    lastChild = inner;
+    childNodes = [inner];
+  }
   const el = {
     tagName: "DIV",
     isContentEditable: true,
     contentEditable: "true",
     textContent: text || "",
-    childNodes: text ? [textNode] : [],
-    lastChild: text ? textNode : null,
+    childNodes,
+    lastChild,
     ownerDocument: doc,
     _focused: false,
     focus(){ el._focused = true; },
   };
-  /* Walk helpers used by a last-text-node placement. */
-  textNode.parentNode = el;
+  if (!nested && textNode) textNode.parentNode = el;
   return { el, selection, textNode, doc };
 }
 
@@ -155,4 +165,257 @@ test("P3 5: focusTitleEditorNow uses focusAtEnd; only copyText may call .select(
     "no .select() outside copyText — focusTitleEditorNow must not select-all");
   assert.match(appSrc, /function copyText[\s\S]*?\.select\s*\(/,
     "copyText still selects for the execCommand clipboard fallback");
+});
+
+/* ---------- Phase 3: focusAtEnd branch coverage ---------- */
+
+test("focusAtEnd: missing or null target is a safe no-op", async () => {
+  const caret = await loadCaret();
+  assert.doesNotThrow(() => caret.focusAtEnd(null));
+  assert.doesNotThrow(() => caret.focusAtEnd(undefined));
+  assert.doesNotThrow(() => caret.focusAtEnd(false));
+});
+
+test("focusAtEnd: textarea uses setSelectionRange at value length", async () => {
+  const caret = await loadCaret();
+  const el = fakeInput("abc");
+  el.tagName = "TEXTAREA";
+  caret.focusAtEnd(el);
+  assert.equal(el._focused, true);
+  assert.deepEqual(el._range, [3, 3]);
+  assert.equal(el._selected, false);
+});
+
+test("focusAtEnd: setSelectionRange throw is swallowed; still focused", async () => {
+  const caret = await loadCaret();
+  const el = fakeInput("typed");
+  el.setSelectionRange = () => { throw new Error("non-text input"); };
+  assert.doesNotThrow(() => caret.focusAtEnd(el));
+  assert.equal(el._focused, true);
+  assert.equal(el._selected, false, "must not fall through to select()");
+});
+
+test("focusAtEnd: missing ownerDocument is a focused no-op for contenteditable", async () => {
+  const caret = await loadCaret();
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    ownerDocument: null,
+    _focused: false,
+    focus(){ el._focused = true; },
+  };
+  assert.doesNotThrow(() => caret.focusAtEnd(el));
+  assert.equal(el._focused, true);
+});
+
+test("focusAtEnd: missing createRange is a focused no-op", async () => {
+  const caret = await loadCaret();
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    ownerDocument: {},
+    _focused: false,
+    focus(){ el._focused = true; },
+  };
+  assert.doesNotThrow(() => caret.focusAtEnd(el));
+  assert.equal(el._focused, true);
+});
+
+test("focusAtEnd: contenteditable without a text node selects contents and collapses to end", async () => {
+  const caret = await loadCaret();
+  const { el, selection } = fakeContentEditable("");
+  el.childNodes = [];
+  el.lastChild = null;
+  el.textContent = "";
+  caret.focusAtEnd(el);
+  assert.equal(el._focused, true);
+  assert.equal(selection.ranges.length, 1);
+  const r = selection.ranges[0];
+  assert.equal(r.collapsed, true);
+  assert.equal(r.startContainer, el);
+  assert.equal(r.startOffset, 0);
+  assert.equal(r.endOffset, 0);
+});
+
+test("focusAtEnd: selection from document.defaultView.getSelection when doc has none", async () => {
+  const caret = await loadCaret();
+  const ranges = [];
+  const selection = {
+    ranges,
+    removeAllRanges(){ ranges.length = 0; },
+    addRange(r){ ranges.push(r); },
+  };
+  const textNode = { nodeType: 3, textContent: "via-view", lastChild: null };
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    textContent: "via-view",
+    childNodes: [textNode],
+    lastChild: textNode,
+    _focused: false,
+    focus(){ el._focused = true; },
+    ownerDocument: {
+      createRange(){
+        return {
+          startContainer: null, startOffset: 0,
+          endContainer: null, endOffset: 0,
+          collapsed: false,
+          setStart(n, o){ this.startContainer = n; this.startOffset = o; },
+          setEnd(n, o){ this.endContainer = n; this.endOffset = o; this.collapsed = true; },
+          selectNodeContents(){},
+          collapse(){ this.collapsed = true; },
+        };
+      },
+      defaultView: { getSelection(){ return selection; } },
+    },
+  };
+  textNode.parentNode = el;
+  caret.focusAtEnd(el);
+  assert.equal(el._focused, true);
+  assert.equal(selection.ranges.length, 1);
+  assert.equal(selection.ranges[0].startContainer, textNode);
+  assert.equal(selection.ranges[0].startOffset, "via-view".length);
+});
+
+test("focusAtEnd: missing selection is a focused no-op after building the range", async () => {
+  const caret = await loadCaret();
+  const textNode = { nodeType: 3, textContent: "x", lastChild: null };
+  let rangeBuilt = false;
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    textContent: "x",
+    childNodes: [textNode],
+    lastChild: textNode,
+    _focused: false,
+    focus(){ el._focused = true; },
+    ownerDocument: {
+      createRange(){
+        rangeBuilt = true;
+        return {
+          setStart(){}, setEnd(){}, selectNodeContents(){}, collapse(){},
+        };
+      },
+      /* neither getSelection nor defaultView */
+    },
+  };
+  textNode.parentNode = el;
+  assert.doesNotThrow(() => caret.focusAtEnd(el));
+  assert.equal(el._focused, true);
+  assert.equal(rangeBuilt, true);
+});
+
+test("focusAtEnd: selection lacking removeAllRanges still adds the range", async () => {
+  const caret = await loadCaret();
+  const ranges = [];
+  const selection = {
+    ranges,
+    addRange(r){ ranges.push(r); },
+  };
+  const textNode = { nodeType: 3, textContent: "keep", lastChild: null };
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    textContent: "keep",
+    childNodes: [textNode],
+    lastChild: textNode,
+    _focused: false,
+    focus(){ el._focused = true; },
+    ownerDocument: {
+      createRange(){
+        return {
+          startContainer: null, startOffset: 0,
+          endContainer: null, endOffset: 0,
+          collapsed: false,
+          setStart(n, o){ this.startContainer = n; this.startOffset = o; },
+          setEnd(n, o){ this.endContainer = n; this.endOffset = o; this.collapsed = true; },
+        };
+      },
+      getSelection(){ return selection; },
+    },
+  };
+  textNode.parentNode = el;
+  caret.focusAtEnd(el);
+  assert.equal(selection.ranges.length, 1);
+  assert.equal(selection.ranges[0].startOffset, 4);
+});
+
+test("focusAtEnd: selection lacking addRange clears without throwing", async () => {
+  const caret = await loadCaret();
+  let cleared = false;
+  const selection = {
+    removeAllRanges(){ cleared = true; },
+  };
+  const textNode = { nodeType: 3, textContent: "solo", lastChild: null };
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    textContent: "solo",
+    childNodes: [textNode],
+    lastChild: textNode,
+    _focused: false,
+    focus(){ el._focused = true; },
+    ownerDocument: {
+      createRange(){
+        return {
+          setStart(){}, setEnd(){},
+        };
+      },
+      getSelection(){ return selection; },
+    },
+  };
+  textNode.parentNode = el;
+  assert.doesNotThrow(() => caret.focusAtEnd(el));
+  assert.equal(el._focused, true);
+  assert.equal(cleared, true);
+});
+
+test("focusAtEnd: nested child nodes place caret on the deepest last text node", async () => {
+  const caret = await loadCaret();
+  const { el, selection, textNode } = fakeContentEditable("nested end", { nested: true });
+  caret.focusAtEnd(el);
+  assert.equal(el._focused, true);
+  assert.equal(selection.ranges.length, 1);
+  const r = selection.ranges[0];
+  assert.equal(r.startContainer, textNode);
+  assert.equal(r.startOffset, "nested end".length);
+  assert.equal(r.collapsed, true);
+});
+
+test("focusAtEnd: childNodes-only fake without lastChild still finds the text node", async () => {
+  const caret = await loadCaret();
+  const textNode = { nodeType: 3, textContent: "sparse", get lastChild(){ return null; } };
+  const ranges = [];
+  const selection = {
+    ranges,
+    removeAllRanges(){ ranges.length = 0; },
+    addRange(r){ ranges.push(r); },
+  };
+  const el = {
+    tagName: "DIV",
+    isContentEditable: true,
+    textContent: "sparse",
+    /* lastChild absent / null — force the childNodes walk fallback */
+    lastChild: null,
+    childNodes: [textNode],
+    _focused: false,
+    focus(){ el._focused = true; },
+    ownerDocument: {
+      createRange(){
+        return {
+          startContainer: null, startOffset: 0,
+          endContainer: null, endOffset: 0,
+          collapsed: false,
+          setStart(n, o){ this.startContainer = n; this.startOffset = o; },
+          setEnd(n, o){ this.endContainer = n; this.endOffset = o; this.collapsed = true; },
+        };
+      },
+      getSelection(){ return selection; },
+    },
+  };
+  textNode.parentNode = el;
+  caret.focusAtEnd(el);
+  assert.equal(selection.ranges.length, 1);
+  assert.equal(selection.ranges[0].startContainer, textNode);
+  assert.equal(selection.ranges[0].startOffset, 6);
 });
