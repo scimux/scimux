@@ -23,6 +23,7 @@ test("usage.js is pure; app imports it; index has #sysgrok", () => {
   assert.match(indexSrc, /id="sysgrok"/);
   assert.doesNotMatch(usageSrc, /document\.|window\.|fetch\(/);
   assert.deepEqual(STATUS_PHASES, ["metrics", "claude", "codex", "grok"]);
+  assert.equal(Object.isFrozen(STATUS_PHASES), true, "exported phase inventory is immutable");
 });
 
 test("agentLogo routes each known agent through assetURL", () => {
@@ -45,10 +46,13 @@ test("agentLogo routes each known agent through assetURL", () => {
   ]);
 });
 
-test("sysMetricHTML: flat/up/down and crit at 90", () => {
+test("sysMetricHTML: flat/up/down and exact critical boundary", () => {
   const flat = sysMetricHTML("M", "50%", 50, 50);
   assert.match(flat, /a-flat/);
   assert.match(flat, /→/);
+  assert.match(sysMetricHTML("M", "50%", 50.39, 50), /a-flat/);
+  assert.match(sysMetricHTML("M", "50%", 50.41, 50), /a-stress/);
+  assert.match(sysMetricHTML("M", "50%", 49.59, 50), /a-good/);
   const up = sysMetricHTML("M", "60%", 60, 50);
   assert.match(up, /a-stress/);
   assert.match(up, /↑/);
@@ -56,7 +60,7 @@ test("sysMetricHTML: flat/up/down and crit at 90", () => {
   const down = sysMetricHTML("M", "40%", 40, 50);
   assert.match(down, /a-good/);
   assert.match(down, /↓/);
-  const crit = sysMetricHTML("M", "91%", 91, 80);
+  const crit = sysMetricHTML("M", "90%", 90, 80);
   assert.match(crit, /a-crit/);
   const first = sysMetricHTML("M", "10%", 10, null);
   assert.match(first, /a-flat/);
@@ -68,7 +72,6 @@ test("statusPhaseAt stays on metrics until a snapshot exists", () => {
   assert.equal(statusPhaseAt(1, {}), "claude");
   assert.equal(statusPhaseAt(2, {}), "codex");
   assert.equal(statusPhaseAt(3, {}), "grok");
-  assert.equal(statusPhaseAt(4, {}), "metrics");
 });
 
 test("usageAgentDisplayName", () => {

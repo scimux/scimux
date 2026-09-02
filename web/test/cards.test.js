@@ -1534,6 +1534,7 @@ function cardsActionHarness(opts = {}){
     renderChatHead: 0,
     renderMap: 0,
     scheduleTick: 0,
+    startTitleEdit: [],
   };
   let apiImpl = opts.api || (async (url, init) => {
     effects.apiCalls.push({ url, init });
@@ -1602,6 +1603,7 @@ function cardsActionHarness(opts = {}){
     renderChatHead: () => { effects.renderChatHead++; },
     renderMap: () => { effects.renderMap++; },
     scheduleTick: () => { effects.scheduleTick++; },
+    startTitleEdit: (id, scope) => { effects.startTitleEdit.push([id, scope]); },
     longpress: opts.longpress || (() => () => {}),
   });
   feature.bind();
@@ -1874,52 +1876,15 @@ test("touch: swipe opens actionCard; expanded card ignores swipe", () => {
 });
 
 test("longpress: title starts title edit; card toggles actionCard; adoptable ignored", () => {
-  const lp = [];
-  const startTitleEdit = [];
-  const h = cardsActionHarness({
-    longpress: (root, sel, fn) => { lp.push({ sel, fn }); return () => {}; },
-  });
-  /* Re-bind with startTitleEdit by creating a fresh harness that captures longpress + startTitleEdit */
-  const state = {
-    nodes: [{ id: "n1", title: "A", live: "quiet" }],
-    actionCard: "", editingDesc: "", cardsSig: "x",
-    cardTab: "current", pinned: [], archived: [], expanded: new Set(),
-    attnFoldOpen: false, sel: "", laneFilter: "",
-  };
-  const handlers = { list: new Map(), tabs: new Map() };
-  const list = {
-    innerHTML: "", querySelectorAll: () => [],
-    addEventListener(t, f){ handlers.list.set(t, f); },
-    removeEventListener(t){ handlers.list.delete(t); },
-  };
   const longpressFns = [];
-  const feature = createCardsFeature({
-    roots: { tabs: { innerHTML: "", querySelectorAll: () => [], addEventListener(t, f){ handlers.tabs.set(t, f); }, removeEventListener(){} }, list },
-    document: { title: "", querySelector: () => null, getElementById: () => null },
-    CSS: { escape: s => s },
-    nodes: () => state.nodes,
-    unadopted: () => [],
-    sel: () => state.sel, setSel: v => { state.sel = v; },
-    cardTab: () => state.cardTab, setCardTab: v => { state.cardTab = v; },
-    laneFilter: () => "",
-    attnFoldOpen: () => false, setAttnFoldOpen: () => {},
-    expanded: () => state.expanded,
-    actionCard: () => state.actionCard, setActionCard: v => { state.actionCard = v; },
-    editingDesc: () => state.editingDesc, setEditingDesc: v => { state.editingDesc = v; },
-    editingTitle: () => "", editingTitleScope: () => "",
-    cardsSig: () => state.cardsSig, setCardsSig: v => { state.cardsSig = v; },
-    pinned: () => [], archived: () => [], lanes: () => [], bookmarks: () => [],
-    agentLogo: () => "", laneSelectHTML: () => "", laneColor: () => "", laneName: () => "",
-    icons: {}, setInterval: () => 0, clearInterval: () => {},
-    startTitleEdit: (id, scope) => { startTitleEdit.push([id, scope]); },
-    longpress: (_r, sel, fn) => { longpressFns.push({ sel, fn }); return () => {}; },
+  const h = cardsActionHarness({
+    longpress: (_root, sel, fn) => { longpressFns.push({ sel, fn }); return () => {}; },
   });
-  feature.bind();
   const titleLP = longpressFns.find(x => x.sel === ".card .title");
   const cardLP = longpressFns.find(x => x.sel === ".card");
   assert.ok(titleLP && cardLP);
   titleLP.fn({ dataset: { title: "n1" } });
-  assert.deepEqual(startTitleEdit, [["n1", "cards"]]);
+  assert.deepEqual(h.effects.startTitleEdit, [["n1", "cards"]]);
 
   const cardEl = {
     classList: { contains: () => false },
@@ -1927,16 +1892,15 @@ test("longpress: title starts title edit; card toggles actionCard; adoptable ign
     closest: () => null,
   };
   cardLP.fn(cardEl, { target: cardEl });
-  assert.equal(state.actionCard, "n1");
+  assert.equal(h.state.actionCard, "n1");
   cardLP.fn(cardEl, { target: cardEl });
-  assert.equal(state.actionCard, "");
+  assert.equal(h.state.actionCard, "");
 
   const adoptable = {
     classList: { contains: (c) => c === "adoptable" },
     querySelector: () => ({ dataset: { open: "n1" } }),
   };
-  state.actionCard = "";
+  h.state.actionCard = "";
   cardLP.fn(adoptable, { target: adoptable });
-  assert.equal(state.actionCard, "", "adoptable long-press is a no-op");
-  void h; /* harness used only to prove bind path in prior tests */
+  assert.equal(h.state.actionCard, "", "adoptable long-press is a no-op");
 });

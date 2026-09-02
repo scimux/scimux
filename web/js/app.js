@@ -480,12 +480,12 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const makeLane = name => makeLaneMod(name, getUI().lanes);
   function laneOptionsHTML(selected = "", includeUnset = true, disabled = false){
     return laneOptionsHTMLMod(selected, sortedLaneList(), {
-      includeUnset, disabled, escape: esc, laneById,
+      includeUnset, disabled,
     });
   }
   function laneSelectHTML(selected = "", includeUnset = true, disabled = false){
     return laneSelectHTMLMod(selected, sortedLaneList(), {
-      includeUnset, disabled, escape: esc, laneById,
+      includeUnset, disabled,
     });
   }
   function fillLaneSelect(select, selected = "", includeUnset = true, disabled = false){

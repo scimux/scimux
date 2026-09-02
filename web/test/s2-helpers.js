@@ -241,24 +241,6 @@ export function isRendezvousURL(url) {
   return /^https?:\/\//i.test(String(url || "")) && !String(url).startsWith("blob:");
 }
 
-function extractNamedFunction(src, name) {
-  const needle = `function ${name}(`;
-  const start = src.indexOf(needle);
-  if (start < 0) return null;
-  const brace = src.indexOf("{", start);
-  if (brace < 0) return null;
-  let depth = 0;
-  for (let i = brace; i < src.length; i++) {
-    const ch = src[i];
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return src.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
 export function runAgentLogo(agent, assetURL) {
   /* Pure builder lives in usage.js; app.js keeps a one-arg wrapper that
      closes over the injected assetURL supplier. */

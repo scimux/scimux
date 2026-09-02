@@ -10,24 +10,18 @@ export const NEW_LANE_VALUE = "__new";
 export function laneOptionsHTML(selected, lanes, {
   includeUnset = true,
   disabled = false,
-  escape = esc,
-  newLaneValue = NEW_LANE_VALUE,
-  laneById = null,
 } = {}){
   const list = Array.isArray(lanes) ? lanes : [];
-  const byId = typeof laneById === "function"
-    ? laneById
-    : (id) => list.find(l => l && l.id === id);
   const unset = includeUnset
     ? `<option value="" ${!selected ? "selected" : ""}>unset</option>`
     : "";
-  const missing = selected && !byId(selected)
-    ? `<option value="${escape(selected)}" selected>${escape(selected)}</option>`
+  const missing = selected && !list.find(l => l && l.id === selected)
+    ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>`
     : "";
   const opts = list.map(l =>
-    `<option value="${escape(l.id)}" ${selected === l.id ? "selected" : ""}>${escape(l.name)}</option>`
+    `<option value="${esc(l.id)}" ${selected === l.id ? "selected" : ""}>${esc(l.name)}</option>`
   ).join("");
-  const create = disabled ? "" : `<option value="${newLaneValue}">New lane...</option>`;
+  const create = disabled ? "" : `<option value="${NEW_LANE_VALUE}">New lane...</option>`;
   return `${unset}${missing}${opts}${create}`;
 }
 
@@ -44,15 +38,11 @@ export function laneSelectHTML(selected, lanes, opts = {}){
  */
 export function readLaneChoiceFromValues(val, name, {
   makeLane,
-  newLaneValue = NEW_LANE_VALUE,
 } = {}){
   const v = val || "";
-  if (v === newLaneValue){
+  if (v === NEW_LANE_VALUE){
     const trimmed = (name || "").trim();
     if (!trimmed) return { error: "Enter a lane name." };
-    if (typeof makeLane !== "function") {
-      return { error: "Enter a lane name." };
-    }
     const lane = makeLane(trimmed);
     return { laneID: lane.id, lane };
   }

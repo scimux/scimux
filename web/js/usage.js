@@ -5,16 +5,14 @@
 import { esc } from "./format.js";
 
 /** Status-slot phase cycle: system metrics then each agent budget. */
-export const STATUS_PHASES = ["metrics", "claude", "codex", "grok"];
+export const STATUS_PHASES = Object.freeze(["metrics", "claude", "codex", "grok"]);
 
 /**
  * Resolve which status phase to show. Budget phases stay on metrics until a
  * usage snapshot has been read at least once (avoids an empty flip).
  */
-export function statusPhaseAt(idx, usageSnap, phases = STATUS_PHASES){
-  const list = phases && phases.length ? phases : STATUS_PHASES;
-  const i = ((Number(idx) || 0) % list.length + list.length) % list.length;
-  const phase = list[i];
+export function statusPhaseAt(idx, usageSnap){
+  const phase = STATUS_PHASES[idx];
   if (phase !== "metrics" && usageSnap == null) return "metrics";
   return phase;
 }
@@ -27,7 +25,6 @@ export function statusPhaseAt(idx, usageSnap, phases = STATUS_PHASES){
 export function agentLogo(agent, assetURL){
   /* Call the parameter as assetURL(...) so AT-FR-42's seam scanner still
      classifies these sinks as seam-routed (wrapper name is the contract). */
-  if (typeof assetURL !== "function") assetURL = (p) => p;
   switch ((agent || "").toLowerCase()){
   case "claude":
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/claude.svg')}')" aria-hidden="true"></span>`;

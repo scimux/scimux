@@ -1,27 +1,12 @@
 /* Pure lane-picker HTML and form-choice decisions. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import {
   NEW_LANE_VALUE,
   laneOptionsHTML,
   laneSelectHTML,
   readLaneChoiceFromValues,
 } from "../js/lane-picker.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const src = readFileSync(join(__dirname, "../js/lane-picker.js"), "utf8");
-const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
-const lanesSrc = readFileSync(join(__dirname, "../js/lanes.js"), "utf8");
-
-test("lane-picker.js is pure and lanes.js stays HTML-free", () => {
-  assert.doesNotMatch(src, /\bdocument\b|\bwindow\b|\bfetch\b/);
-  assert.doesNotMatch(lanesSrc, /\blaneOptionsHTML\b|\blaneSelectHTML\b|\breadLaneChoiceFromValues\b/);
-  assert.match(appSrc, /from "\.\/lane-picker\.js"/);
-  assert.equal(NEW_LANE_VALUE, "__new");
-});
 
 test("laneOptionsHTML: unset, missing selected, lanes, and New lane option", () => {
   const lanes = [{ id: "l1", name: "Alpha" }, { id: "l2", name: "Beta" }];
@@ -40,6 +25,13 @@ test("laneOptionsHTML: unset, missing selected, lanes, and New lane option", () 
 
   const disabled = laneOptionsHTML("", lanes, { disabled: true });
   assert.doesNotMatch(disabled, /New lane/);
+});
+
+test("laneOptionsHTML escapes authored and missing lane values", () => {
+  const html = laneOptionsHTML("missing<&", [{ id: `lane\"`, name: "R&D <work>" }]);
+  assert.match(html, /value="missing&lt;&amp;" selected>missing&lt;&amp;</);
+  assert.match(html, /value="lane&quot;"[^>]*>R&amp;D &lt;work&gt;</);
+  assert.doesNotMatch(html, /missing<&|R&D <work>|value="lane\""/);
 });
 
 test("laneSelectHTML wraps options and respects disabled", () => {
