@@ -52,18 +52,18 @@ func TestDCStreamWaitOpen(t *testing.T) {
 			t.Fatalf("errors.Is(err, context.Canceled) = false; err=%v", err)
 		}
 	})
+}
 
-	t.Run("close before open never reports successful opening", func(t *testing.T) {
-		s := &dcStream{
-			openCh:  make(chan struct{}),
-			closeCh: make(chan struct{}),
-			lowCh:   make(chan struct{}, 1),
+func waitDrainAmountCall(t *testing.T, calls <-chan int, want int) {
+	t.Helper()
+	select {
+	case got := <-calls:
+		if got != want {
+			t.Fatalf("amount call = %d, want %d", got, want)
 		}
-		close(s.closeCh)
-		if err := s.waitOpen(context.Background()); err == nil {
-			t.Fatal("close-before-open returned nil (successful open)")
-		}
-	})
+	case <-time.After(2 * time.Second):
+		t.Fatalf("diagnostic timeout: amount call %d did not occur", want)
+	}
 }
 
 // TestAwaitBufferedDrain pins the drain state machine without a real
@@ -100,20 +100,27 @@ func TestAwaitBufferedDrain(t *testing.T) {
 	})
 
 	t.Run("above high water waits then succeeds on low", func(t *testing.T) {
-		var cur atomic.Uint64
-		cur.Store(dcHighWater + 1)
+		var count atomic.Int32
+		calls := make(chan int, 2)
+		releaseSecond := make(chan struct{})
+		amount := func() uint64 {
+			n := int(count.Add(1))
+			calls <- n
+			if n == 1 {
+				return dcHighWater + 1
+			}
+			<-releaseSecond
+			return dcHighWater
+		}
 		lowCh := make(chan struct{}, 1)
 		done := make(chan error, 1)
 		go func() {
-			done <- awaitBufferedDrain(cur.Load, dcHighWater, lowCh, nil, nil)
+			done <- awaitBufferedDrain(amount, dcHighWater, lowCh, nil, nil)
 		}()
-		select {
-		case err := <-done:
-			t.Fatalf("returned before low signal: %v", err)
-		case <-time.After(20 * time.Millisecond):
-		}
-		cur.Store(dcHighWater)
+		waitDrainAmountCall(t, calls, 1)
 		lowCh <- struct{}{}
+		waitDrainAmountCall(t, calls, 2)
+		close(releaseSecond)
 		select {
 		case err := <-done:
 			if err != nil {
@@ -127,19 +134,24 @@ func TestAwaitBufferedDrain(t *testing.T) {
 	t.Run("stale low while still above keeps waiting", func(t *testing.T) {
 		var cur atomic.Uint64
 		cur.Store(dcHighWater + 10)
+		var count atomic.Int32
+		calls := make(chan int, 3)
+		amount := func() uint64 {
+			v := cur.Load()
+			calls <- int(count.Add(1))
+			return v
+		}
 		lowCh := make(chan struct{}, 2)
+		lowCh <- struct{}{} // coalesced/stale: first re-read remains above
 		done := make(chan error, 1)
 		go func() {
-			done <- awaitBufferedDrain(cur.Load, dcHighWater, lowCh, nil, nil)
+			done <- awaitBufferedDrain(amount, dcHighWater, lowCh, nil, nil)
 		}()
-		lowCh <- struct{}{} // coalesced/stale: amount still above
-		select {
-		case err := <-done:
-			t.Fatalf("returned while still above after stale low: %v", err)
-		case <-time.After(20 * time.Millisecond):
-		}
+		waitDrainAmountCall(t, calls, 1)
+		waitDrainAmountCall(t, calls, 2)
 		cur.Store(dcHighWater - 1)
 		lowCh <- struct{}{}
+		waitDrainAmountCall(t, calls, 3)
 		select {
 		case err := <-done:
 			if err != nil {

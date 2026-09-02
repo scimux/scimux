@@ -24,9 +24,10 @@ func (c *Client) tempPath() string {
 // Failures before rename intentionally leave a recoverable .tmp next to
 // the live state file; cleanup is not automatic because deleting a temp
 // that may hold the only copy of a newly enrolled identity would destroy
-// recovery evidence. Startup classifies that temp: a complete enrolled
-// record is adopted (recoverEnrolledTemp), while an unreadable or
-// truncated temp is ClassPartialIdentity / StatePartial (tmpIncomplete).
+// recovery evidence. Startup adopts a complete enrolled temp
+// (recoverEnrolledTemp); any other present temp remains partial recovery
+// evidence. tmpIncomplete distinguishes unreadable or malformed JSON from a
+// parseable-but-semantically-incomplete record; semantic validation is separate.
 func (c *Client) persist(st PersistedState) error {
 	if st.V == 0 {
 		st.V = 1

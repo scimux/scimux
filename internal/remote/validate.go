@@ -17,12 +17,11 @@ import (
 // valid handle plus both public and private keys (and forbids a Pending
 // record). Missing enrolled keys are ClassKeyMissing rather than generic
 // corruption so startup can surface a distinct recovery path instead of
-// treating the file as unparsable wreckage. Pending enrollment is legal
-// only on ambiguous state, and then only when Pending.PublicKey matches
-// the outer PublicKey. Device rows must carry unique IDs/RIDs and valid
-// keys. Schema or state additions must update this classifier and its
-// table test in validate_test.go — silent acceptance is not an extension
-// mechanism.
+// treating the file as unparsable wreckage. When ambiguous state carries
+// Pending, its PublicKey must match the outer PublicKey. Device rows must carry
+// unique IDs/RIDs and valid keys. Schema or state additions must update this
+// classifier and its table test in validate_test.go — silent acceptance is not
+// an extension mechanism.
 func validatePersistedSemantics(st PersistedState) Class {
 	if st.Status == "" {
 		return ClassCorruptIdentity

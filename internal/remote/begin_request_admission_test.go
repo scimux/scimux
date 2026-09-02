@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // loadedEnrolledWithDevice builds the smallest already-loaded Client that
@@ -113,10 +112,8 @@ func TestBeginRequestAdmission(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want context.Canceled", err)
 		}
-		// Give any stray post-cancel hook a moment to race; it must not fire.
-		select {
-		case <-time.After(20 * time.Millisecond):
-		}
+		// OnAdmission is synchronous inside BeginRequest. Once BeginRequest
+		// returned, no later callback can be pending.
 		if calls.Load() != 0 {
 			t.Fatalf("OnAdmission calls = %d after cancel-before-release, want 0", calls.Load())
 		}

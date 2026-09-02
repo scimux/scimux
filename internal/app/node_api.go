@@ -142,8 +142,11 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	// Any known claude session id — supplied explicitly (the migration script
 	// sends one) or extracted from the pane above — gets its deterministic
-	// lookup now (the id is the transcript filename). If the file is not visible
-	// yet, discoverTranscript retries the same lookup.
+	// lookup now (the id is the transcript filename). This adoption lookup is
+	// intentionally one-shot: discoverTranscript excludes every Claude node
+	// because SessionStart is the only live ownership proof. If the file is not
+	// visible yet, the adopted node remains transcriptless rather than guessing
+	// a later file owner.
 	if n.Agent == "claude" && n.SessionID != "" && n.Transcript == "" {
 		if path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok {
 			n.Transcript = path
