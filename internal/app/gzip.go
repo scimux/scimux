@@ -109,10 +109,20 @@ type gzipResponseWriter struct {
 }
 
 func (w *gzipResponseWriter) WriteHeader(code int) {
-	// net/http: only the first WriteHeader counts. Status may still be
-	// delayed until the first body byte, but a later WriteHeader must not
-	// overwrite the latched code (or a 201 becomes a 400 at close).
-	if w.wroteHeader || w.statusSet {
+	if w.wroteHeader {
+		return
+	}
+	// net/http permits any number of informational responses before the one
+	// final status. They cannot be delayed or latched as final: 103 followed
+	// by 201 must reach the underlying writer in that order.
+	if code >= 100 && code < 200 {
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	// Only the first final WriteHeader counts. Status may still be delayed
+	// until the first body byte, but a later final status must not overwrite
+	// the latched code (or a 201 becomes a 400 at close).
+	if w.statusSet {
 		return
 	}
 	w.statusSet = true
@@ -183,6 +193,11 @@ func (w *gzipResponseWriter) close() {
 // handler currently relies on it; the seam is kept so a future streaming
 // response is not silently broken by compression.
 func (w *gzipResponseWriter) Flush() {
+	// Flush commits pending headers. Otherwise WriteHeader(202); Flush()
+	// would make the underlying Flusher implicitly send 200, after which the
+	// delayed 202 could never take effect. With no body there is no encoding
+	// decision to make, so later writes remain uncompressed.
+	_ = w.ensureHeader(false)
 	if w.gz != nil {
 		_ = w.gz.Flush()
 	}

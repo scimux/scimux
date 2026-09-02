@@ -28,6 +28,25 @@ type errWriter struct {
 	err    error
 }
 
+// statusRecorder preserves every informational/final WriteHeader call. An
+// httptest.ResponseRecorder intentionally records only its first status, so it
+// cannot assert the net/http 1xx-then-final contract.
+type statusRecorder struct {
+	header http.Header
+	codes  []int
+}
+
+func (w *statusRecorder) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+func (w *statusRecorder) WriteHeader(code int) { w.codes = append(w.codes, code) }
+func (w *statusRecorder) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
 func (w *errWriter) Header() http.Header {
 	if w.header == nil {
 		w.header = make(http.Header)
@@ -79,6 +98,22 @@ func TestGzipResponseWriterInterfaces(t *testing.T) {
 		}
 		if gw.gz != nil {
 			t.Fatal("Flush created gzip writer")
+		}
+	})
+
+	t.Run("Flush commits latched status before delegating", func(t *testing.T) {
+		rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+		gw := &gzipResponseWriter{ResponseWriter: rec}
+		gw.WriteHeader(http.StatusAccepted)
+		gw.Flush()
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", rec.Code)
+		}
+		if rec.flushes != 1 {
+			t.Fatalf("flushes = %d, want 1", rec.flushes)
+		}
+		if !gw.wroteHeader {
+			t.Fatal("Flush did not commit the delayed header")
 		}
 	})
 
@@ -190,6 +225,20 @@ func TestGzipResponseWriterDirectPaths(t *testing.T) {
 		gw.close()
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201 (first WriteHeader)", rec.Code)
+		}
+	})
+
+	t.Run("informational status precedes final status", func(t *testing.T) {
+		rec := &statusRecorder{}
+		gw := &gzipResponseWriter{ResponseWriter: rec}
+		gw.WriteHeader(http.StatusEarlyHints)
+		if len(rec.codes) != 1 || rec.codes[0] != http.StatusEarlyHints {
+			t.Fatalf("codes after 103 = %v, want [103]", rec.codes)
+		}
+		gw.WriteHeader(http.StatusCreated)
+		gw.close()
+		if len(rec.codes) != 2 || rec.codes[0] != http.StatusEarlyHints || rec.codes[1] != http.StatusCreated {
+			t.Fatalf("codes = %v, want [103 201]", rec.codes)
 		}
 	})
 
