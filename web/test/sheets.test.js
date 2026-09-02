@@ -1625,3 +1625,118 @@ test("LI-C5: sheets still imports no later feature module for the echo", () => {
     "the echo record is built as a literal here, like the draft-key contract");
   assert.match(sheetsSrc, /setSentEcho/);
 });
+
+/* ---------- Phase 3 Packet E: edit validation / PATCH fail / single-flight / lane ---------- */
+
+test("Packet E: edit empty title shows fieldError and issues no PATCH", async () => {
+  const ctx = createFeature();
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("p1");
+  ctx.byId.nc_title.value = "   ";
+  const before = ctx.apiCalls.filter(c => c.opts && c.opts.method === "PATCH").length;
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(ctx.byId.nc_title.attributes["aria-invalid"], "true");
+  assert.match(ctx.byId.nc_title.nextElementSibling.textContent, /Enter a title\./);
+  assert.equal(ctx.byId.nc_title._focused, true);
+  assert.equal(
+    ctx.apiCalls.filter(c => c.opts && c.opts.method === "PATCH").length,
+    before,
+    "empty title must not PATCH",
+  );
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true,
+    "validation failure keeps the editor open");
+});
+
+test("Packet E: live-head PATCH failure shows fieldError and refocuses title", async () => {
+  const ctx = createFeature();
+  ctx.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return {};
+    if (path.startsWith("/api/nodes/") && opts.method === "PATCH")
+      throw new Error("head save refused");
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("p1");
+  ctx.byId.nc_title.value = "Renamed";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(ctx.byId.nc_title.attributes["aria-invalid"], "true");
+  assert.equal(ctx.byId.nc_title.nextElementSibling.textContent, "head save refused");
+  assert.equal(ctx.byId.nc_title._focused, true);
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true,
+    "failed head save must leave the draft open");
+  assert.equal(ctx.byId.nc_title.value, "Renamed", "draft title retained after failure");
+});
+
+test("Packet E: station PATCH failure shows fieldError and refocuses title", async () => {
+  const ctx = createFeature();
+  ctx.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return {};
+    if (path.startsWith("/api/nodes/") && opts.method === "PATCH")
+      throw new Error("station save refused");
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("p1", "2020-01-01T00:00:00Z");
+  ctx.byId.nc_title.value = "New frozen";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(ctx.byId.nc_title.attributes["aria-invalid"], "true");
+  assert.equal(ctx.byId.nc_title.nextElementSibling.textContent, "station save refused");
+  assert.equal(ctx.byId.nc_title._focused, true);
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+  assert.equal(ctx.byId.nc_title.value, "New frozen", "station draft retained");
+  assert.equal(
+    ctx.nodes.p1.station_labels["2020-01-01T00:00:00Z"].title,
+    "Frozen",
+    "failed station PATCH must not mutate local labels",
+  );
+});
+
+test("Packet E: edit single-flight submission ignores re-entry", async () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const ctx = createFeature();
+  let patches = 0;
+  ctx.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return {};
+    if (path.startsWith("/api/nodes/") && opts.method === "PATCH"){
+      patches++;
+      await gate;
+      return { id: "p1", title: "Renamed" };
+    }
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("p1");
+  ctx.byId.nc_title.value = "Renamed";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  assert.equal(ctx.byId.nc_start.disabled, true);
+  assert.equal(ctx.byId.nc_start.getAttribute("aria-label"), "Saving...");
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  assert.equal(patches, 1, "re-entry while saving must not issue a second PATCH");
+  release();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(patches, 1);
+});
+
+test("Packet E: create success with new lane uiMutates lanes", async () => {
+  const ctx = createFeature({
+    laneChoice: { laneID: "new-lane", lane: { id: "new-lane", name: "Fresh" } },
+  });
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_title.value = "Work";
+  ctx.byId.nc_lane.value = "__new";
+  ctx.byId.nc_start.dispatch("click");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.deepEqual(ctx.effects.uiMutate, [{
+    k: "lanes",
+    lanes: [{ id: "lane-a", name: "A" }, { id: "new-lane", name: "Fresh" }],
+  }]);
+  assert.deepEqual(ctx.effects.select, ["created-1"]);
+});

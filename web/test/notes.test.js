@@ -2948,3 +2948,372 @@ test("P6 review: reference send-to strips asset markers and excepts the source c
   assert.equal(calls[0].text, "see shot here", "asset markers stripped");
   assert.equal(calls[0].exceptId, "nX", "the reference's source chat is withheld");
 });
+
+/* ---------- Phase 3 Packet D: section menu / save fail / rename / inbox ---------- */
+
+async function openSectionMenuAction(ctx, secId, action){
+  const sec = el("div", { className: "wssec", dataset: { sec: secId } });
+  sec.dataset.sec = secId;
+  const menuBtn = el("button");
+  menuBtn.dataset.secmenu = "";
+  menuBtn.closest = sel => {
+    if (sel === "[data-secmenu]") return menuBtn;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  menuBtn.getBoundingClientRect = () =>
+    ({ top: 100, left: 200, bottom: 144, right: 244, width: 44, height: 44 });
+  ctx.roots.wspanel.getBoundingClientRect = () =>
+    ({ top: 0, left: 0, width: 400, height: 600 });
+  ctx.roots.wssections.appendChild(sec);
+  ctx.roots.wssections.dispatch("click", { target: menuBtn });
+  await settle();
+  const menu = ctx.roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(menu, "section menu opens");
+  const mi = el("button");
+  mi.dataset.mi = action;
+  mi.closest = sel => (sel === "[data-mi]" ? mi : null);
+  menu.dispatch("click", { target: mi });
+  await settle();
+  return menu;
+}
+
+test("Packet D: section move up/down via menu; boundary is a no-op", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [
+          { id: "s1", title: "One", body: "", order: 0, references: [] },
+          { id: "s2", title: "Two", body: "", order: 1, references: [] },
+          { id: "s3", title: "Three", body: "", order: 2, references: [] },
+        ],
+      },
+    },
+  });
+  const { feature, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const before = apiLog.length;
+  await openSectionMenuAction(ctx, "s1", "up");
+  assert.equal(
+    apiLog.slice(before).filter(x => x.method === "PATCH").length,
+    0,
+    "first section Move up must not PATCH",
+  );
+
+  const beforeDown = apiLog.length;
+  await openSectionMenuAction(ctx, "s3", "down");
+  assert.equal(
+    apiLog.slice(beforeDown).filter(x => x.method === "PATCH").length,
+    0,
+    "last section Move down must not PATCH",
+  );
+
+  const beforeMove = apiLog.length;
+  await openSectionMenuAction(ctx, "s2", "up");
+  const patches = apiLog.slice(beforeMove).filter(x => x.method === "PATCH");
+  assert.equal(patches.length, 2, "swap issues two order PATCHes");
+  const bodies = patches.map(p => JSON.parse(p.body).section);
+  assert.deepEqual(
+    bodies.sort((a, b) => a.id.localeCompare(b.id)),
+    [
+      { id: "s1", order: 1 },
+      { id: "s2", order: 0 },
+    ],
+  );
+
+  const beforeDownMove = apiLog.length;
+  await openSectionMenuAction(ctx, "s2", "down");
+  const downPatches = apiLog.slice(beforeDownMove).filter(x => x.method === "PATCH");
+  assert.equal(downPatches.length, 2, "Move down also swaps via two PATCHes");
+});
+
+test("Packet D: section delete via menu PATCHes delete:true", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [
+          { id: "s1", title: "One", body: "", order: 0, references: [] },
+          { id: "s2", title: "Two", body: "", order: 1, references: [] },
+        ],
+      },
+    },
+  });
+  const { feature, apiLog, docs } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const before = apiLog.length;
+  await openSectionMenuAction(ctx, "s2", "del");
+  const del = apiLog.slice(before).find(x => x.method === "PATCH");
+  assert.ok(del, "delete section issues PATCH");
+  assert.deepEqual(JSON.parse(del.body), { section: { id: "s2", delete: true } });
+  assert.equal((docs.n1.sections || []).some(s => s.id === "s2"), false);
+});
+
+test("Packet D: save failure toasts and retains the local edit value", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{ id: "s1", title: "S", body: "original", order: 0, references: [] }],
+      },
+    },
+    api: async (url, opts = {}, { notes, docs }) => {
+      if (opts.method === "PATCH") throw new Error("disk full");
+      if (url === "/api/notes") return { notes };
+      const m = url.match(/^\/api\/notes\/([^/]+)$/);
+      if (m && (!opts.method || opts.method === "GET"))
+        return docs[decodeURIComponent(m[1])];
+      return null;
+    },
+  });
+  const { feature, effects, flush } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const body = el("div", { className: "wssecbody" });
+  const render = el("div", { dataset: { secrender: "" } });
+  render.dataset.secrender = "";
+  body.appendChild(render);
+  sec.appendChild(body);
+  ctx.roots.wssections.appendChild(sec);
+  ctx.roots.wssections.dispatch("click", { target: render });
+
+  const textarea = body.querySelector("textarea");
+  assert.ok(textarea);
+  textarea.value = "kept locally after fail";
+  textarea.dispatch("input", { target: textarea });
+  flush(SAVE_DEBOUNCE_MS);
+  await settle();
+
+  assert.ok(
+    effects.toast.includes("Save failed — will retry on next edit"),
+    "failed PATCH must toast",
+  );
+  assert.equal(textarea.value, "kept locally after fail",
+    "local editor value must survive the failed save");
+});
+
+test("Packet D: rename Escape restores title and issues no PATCH", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Orig", order: 0 }],
+    docs: { n1: { id: "n1", title: "Orig", sections: [] } },
+  });
+  const { feature, roots, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const card = el("div", { className: "wscard", dataset: { note: "n1" } });
+  card.dataset.note = "n1";
+  card.draggable = true;
+  const title = el("div", { className: "wctitle", textContent: "Orig" });
+  card.appendChild(title);
+  const renameBtn = el("button");
+  renameBtn.dataset.wcact = "rename";
+  renameBtn.closest = sel => {
+    if (sel === "[data-wcact]" || String(sel).includes("data-wcact")) return renameBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+
+  roots.wscards.dispatch("click", {
+    target: renameBtn, stopPropagation(){}, preventDefault(){},
+  });
+  const input = card.querySelector("input") || card.querySelector(".wctitleedit");
+  assert.ok(input);
+  input.value = "Should not commit";
+  const before = apiLog.filter(x => x.method === "PATCH").length;
+  input.dispatch("keydown", {
+    key: "Escape", target: input,
+    preventDefault(){}, stopPropagation(){},
+  });
+  await settle();
+  assert.equal(
+    apiLog.filter(x => x.method === "PATCH").length,
+    before,
+    "Escape rename must not PATCH",
+  );
+  assert.equal(roots.wstitle.textContent, "Orig", "active title stays original");
+});
+
+test("Packet D: delete note API failure toasts and keeps the editor open", async () => {
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Keep", order: 0 }],
+    docs: { n1: { id: "n1", title: "Keep", sections: [] } },
+    api: async (url, opts = {}, { notes, docs }) => {
+      if (opts.method === "DELETE") throw new Error("refuse");
+      if (url === "/api/notes") return { notes };
+      const m = url.match(/^\/api\/notes\/([^/]+)$/);
+      if (m && (!opts.method || opts.method === "GET"))
+        return docs[decodeURIComponent(m[1])];
+      return {};
+    },
+  });
+  const { feature, roots, effects, apiLog } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+  assert.ok(roots.notesworkspace.classList.contains("note-open"));
+
+  const card = el("div", { className: "wscard", dataset: { note: "n1" } });
+  card.dataset.note = "n1";
+  const delBtn = el("button", { className: "danger" });
+  delBtn.dataset.wcact = "delete";
+  delBtn.closest = sel => {
+    if (sel === "[data-wcact]" || String(sel).includes("data-wcact")) return delBtn;
+    if (sel === ".wscard") return card;
+    return null;
+  };
+  delBtn.getBoundingClientRect = () =>
+    ({ top: 10, left: 10, bottom: 50, height: 40, width: 44 });
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.appendChild(card);
+  roots.wspanel.getBoundingClientRect = () =>
+    ({ top: 0, left: 0, width: 400, height: 600 });
+
+  roots.wscards.dispatch("click", {
+    target: delBtn, stopPropagation(){}, preventDefault(){},
+  });
+  await settle();
+  const confirm = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(confirm);
+  const ok = el("button");
+  ok.dataset.wconfirm = "ok";
+  ok.closest = sel => (sel === "[data-wconfirm]" || String(sel).includes("data-wconfirm") ? ok : null);
+  confirm.dispatch("click", { target: ok });
+  await settle();
+
+  assert.ok(apiLog.some(x => x.method === "DELETE"), "DELETE was attempted");
+  assert.ok(effects.toast.includes("Delete failed"));
+  assert.equal(roots.notesworkspace.classList.contains("note-open"), true,
+    "failed delete must not clear the open editor");
+  assert.equal(roots.wstitle.textContent, "Keep");
+});
+
+test("Packet D: layout localStorage setItem throw still applies live widths", async () => {
+  const ctx = createFeature({});
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  let threw = false;
+  storage.setItem = () => { threw = true; throw new Error("quota"); };
+
+  const handle = roots.divInbox;
+  assert.doesNotThrow(() => {
+    handle.dispatch("pointerdown", {
+      target: handle, pointerId: 1, clientX: 240, button: 0, preventDefault(){},
+    });
+    handle.dispatch("pointermove", {
+      target: handle, pointerId: 1, clientX: 260,
+    });
+    handle.dispatch("pointerup", {
+      target: handle, pointerId: 1, clientX: 260,
+    });
+  });
+  assert.equal(threw, true, "persist attempted setItem");
+  assert.equal(roots.wszones.style.getPropertyValue("--wsinbox-w"), "260px",
+    "live layout must continue after storage failure");
+  assert.equal(roots.wszones.style.getPropertyValue("--wsnav-w"), "200px");
+});
+
+test("Packet D: inbox del cancel skips mutate; confirm deletes", async () => {
+  const mutations = [];
+  const ctx = createFeature({
+    bookmarks: [{ t: "1", text: "bye", node: "nX", uid: "u1" }],
+    deps: { uiMutate: op => mutations.push(op) },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  const row = el("div", { className: "wsibookmark", dataset: { t: "1" } });
+  row.dataset.t = "1";
+  const bar = el("div", { className: "actionbar" });
+  const del = el("button");
+  del.dataset.bmact = "del";
+  del.closest = sel => {
+    if (sel === "[data-bmact]") return del;
+    if (sel === ".actionbar") return bar;
+    if (sel === ".wsibookmark") return row;
+    return null;
+  };
+  del.getBoundingClientRect = () =>
+    ({ top: 40, left: 40, bottom: 84, right: 84, width: 44, height: 44 });
+  roots.wspanel.getBoundingClientRect = () =>
+    ({ top: 0, left: 0, width: 400, height: 600 });
+
+  roots.wsinboxlist.dispatch("click", { target: del });
+  await settle();
+  assert.equal(mutations.length, 0, "flat-bar delete waits for confirm");
+  const confirm = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(confirm);
+  assert.match(confirm.className, /wsconfirm/);
+
+  const cancel = el("button");
+  cancel.dataset.wconfirm = "cancel";
+  cancel.closest = sel =>
+    (sel === "[data-wconfirm]" || String(sel).includes("data-wconfirm") ? cancel : null);
+  confirm.dispatch("click", { target: cancel });
+  await settle();
+  assert.equal(mutations.length, 0, "cancel must not bookmark-del");
+
+  roots.wsinboxlist.dispatch("click", { target: del });
+  await settle();
+  const confirm2 = roots.wspanel.children.find(c => (c.className || "").includes("popmenu"));
+  assert.ok(confirm2);
+  const ok = el("button");
+  ok.dataset.wconfirm = "ok";
+  ok.closest = sel =>
+    (sel === "[data-wconfirm]" || String(sel).includes("data-wconfirm") ? ok : null);
+  confirm2.dispatch("click", { target: ok });
+  await settle();
+  assert.deepEqual(mutations, [{ k: "bookmark-del", t: "1" }]);
+});
+
+test("Packet D: inbox jump miss toasts when the chat is gone", async () => {
+  const ctx = createFeature({
+    bookmarks: [{ t: "1", text: "orphan", node: "gone", uid: "u-gone" }],
+    jumpOk: false,
+  });
+  const { feature, roots, effects } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+
+  const row = el("div", { className: "wsibookmark", dataset: { t: "1" } });
+  row.dataset.t = "1";
+  const jump = el("button");
+  jump.dataset.bmact = "jump";
+  jump.closest = sel => {
+    if (sel === "[data-bmact]") return jump;
+    if (sel === ".wsibookmark") return row;
+    return null;
+  };
+  roots.wsinboxlist.dispatch("click", { target: jump });
+  assert.equal(effects.jump.length, 1);
+  assert.equal(effects.jump[0].node, "gone");
+  assert.ok(effects.toast.includes("That chat is no longer available."));
+});

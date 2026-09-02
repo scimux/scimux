@@ -1453,18 +1453,17 @@ function el(tag, attrs = {}){
   const listeners = new Map();
   const node = {
     tagName: tag.toUpperCase(),
-    className: attrs.className || "",
     classList: {
       _s: new Set((attrs.className || "").split(/\s+/).filter(Boolean)),
       toggle(c, on){
         if (on === undefined) {
           if (this._s.has(c)) this._s.delete(c); else this._s.add(c);
         } else if (on) this._s.add(c); else this._s.delete(c);
-        node.className = [...this._s].join(" ");
+        _cn = [...this._s].join(" ");
       },
       contains(c){ return this._s.has(c); },
-      add(c){ this._s.add(c); node.className = [...this._s].join(" "); },
-      remove(c){ this._s.delete(c); node.className = [...this._s].join(" "); },
+      add(c){ this._s.add(c); _cn = [...this._s].join(" "); },
+      remove(c){ this._s.delete(c); _cn = [...this._s].join(" "); },
     },
     style: {},
     dataset: { ...(attrs.dataset || {}) },
@@ -1501,8 +1500,22 @@ function el(tag, attrs = {}){
         }
         return null;
       }
+      /* Compound ".turn[data-bk=…]" must not treat the attribute as part of the
+         class token — otherwise bubble-action taps never find the turn node. */
+      const bkCombo = sel.match(/^\.([^.\s\[]+)\[data-bk="([^"]+)"\]$/);
+      if (bkCombo) {
+        const walk = n => {
+          if (n.classList?.contains(bkCombo[1]) && n.dataset?.bk === bkCombo[2]) return n;
+          for (const c of n.children || []) {
+            const f = walk(c);
+            if (f) return f;
+          }
+          return null;
+        };
+        return walk(this);
+      }
       if (sel.startsWith(".")) {
-        const cls = sel.slice(1).split(/[\s.>]/)[0];
+        const cls = sel.slice(1).split(/[\s.>\[\]]/)[0];
         if (this.classList.contains(cls)) return this;
         for (const c of this.children) {
           const f = c.querySelector?.(sel);
@@ -1510,7 +1523,7 @@ function el(tag, attrs = {}){
         }
         return null;
       }
-      // attribute selectors like .turn[data-bk="i:0"]
+      // attribute selectors like [data-bk="i:0"]
       const m = sel.match(/\[data-bk="([^"]+)"\]/);
       if (m) {
         const walk = n => {
@@ -1585,6 +1598,18 @@ function el(tag, attrs = {}){
     listenerCount(type){ return (listeners.get(type) || []).length; },
   };
   if (attrs.id) node.id = attrs.id;
+  /* Keep className ↔ classList in sync. Production often assigns className
+     (e.g. bubactions rows); without this, classList.contains stays stale and
+     bubble-action taps clear tappedTurn. */
+  let _cn = attrs.className || "";
+  Object.defineProperty(node, "className", {
+    configurable: true,
+    get(){ return _cn; },
+    set(v){
+      _cn = String(v);
+      node.classList._s = new Set(_cn.split(/\s+/).filter(Boolean));
+    },
+  });
   /* A real innerHTML write replaces the element's whole subtree. The fake keeps
      children in an array that a plain data property would leave untouched, so
      stale nodes (e.g. a previous #peekhost) would survive a rebuild here but
@@ -4351,5 +4376,288 @@ test("elicitation rebuild preserves a scrolled-up reader and pins a bottom reade
   await ctx.feature.render();
   assert.equal(ctx.roots.msgs.scrollTop, 200,
     "a reader scrolled upward is not pulled to the bottom");
+  ctx.feature.destroy();
+});
+
+/* ---------- Packet C: bubble actions, histload, open-term, thumb error, key rollback ----------
+ * Harness does not materialise HTML buttons as children (same as /key click tests),
+ * so actions click synthetic [data-bact] / .histload / [data-open-terminal] targets.
+ * A live turn must be tapped first so bubbleTurns[tappedTurn] is the action subject.
+ */
+
+function tapBubbleTurn(ctx, bk = "i:0"){
+  const turn = el("div", { className: "turn user", dataset: { bk } });
+  ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: turn });
+  return turn;
+}
+
+function clickBact(ctx, bact){
+  const btn = el("button", { dataset: { bact } });
+  firstListener(ctx.roots.msgs, "click")({ target: btn });
+  return btn;
+}
+
+test("P3C: copy action calls copyText and shows copied ack", async () => {
+  const copied = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "copy me", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: { copyText: s => copied.push(s) },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  const btn = clickBact(ctx, "copy");
+  assert.deepEqual(copied, ["copy me"]);
+  assert.match(btn.innerHTML, /copied/);
+  ctx.feature.destroy();
+});
+
+test("P3C: bookmark add calls uiMutate bookmark-add", async () => {
+  const ops = [];
+  const stamped = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: "note this", time: "2026-01-01T00:01:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, turn) => stamped.push({ bm, turn }),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  const btn = clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].k, "bookmark-add");
+  assert.equal(ops[0].bookmark.text, "note this");
+  assert.equal(ops[0].bookmark.node, "n1");
+  assert.equal(ops[0].bookmark.turnTime, "2026-01-01T00:01:00Z");
+  assert.equal(ops[0].bookmark.lane, "L1");
+  assert.equal(stamped.length, 1);
+  assert.match(btn.innerHTML, /noted/);
+  ctx.feature.destroy();
+});
+
+test("P3C: duplicate bookmark skips uiMutate", async () => {
+  const ops = [];
+  const turnText = "already noted";
+  const turnTime = "2026-01-01T00:01:00Z";
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: turnText, time: turnTime }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: {
+      bookmarks: () => [{
+        t: "2026-01-01T00:00:30Z", text: turnText, node: "n1",
+        turnTime, lane: "L1",
+      }],
+      uiMutate: op => ops.push(op),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  const btn = clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 0, "duplicate must not emit bookmark-add");
+  assert.match(btn.innerHTML, /noted/, "ack still shows for a duplicate");
+  ctx.feature.destroy();
+});
+
+test("P3C: fork click calls forkFromTurn with stripped text", async () => {
+  const forks = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{
+        role: "user",
+        text: "see ![shot](scimux-asset:a1) please",
+        time: "2026-01-01T00:00:00Z",
+      }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: { forkFromTurn: t => forks.push(t) },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "fork");
+  assert.equal(forks.length, 1);
+  assert.equal(forks[0], stripAssetRefs("see ![shot](scimux-asset:a1) please"));
+  assert.doesNotMatch(forks[0], /scimux-asset:/);
+  ctx.feature.destroy();
+});
+
+test("P3C: send-to click opens openSendTo for the source chat", async () => {
+  const sends = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{
+        role: "assistant",
+        text: "carry ![pic](scimux-asset:x) over",
+        time: "2026-01-01T00:01:00Z",
+      }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: { openSendTo: opts => sends.push(opts) },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "sendto");
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].exceptId, "n1");
+  assert.equal(sends[0].title, "Send to chat…");
+  assert.equal(sends[0].text, stripAssetRefs("carry ![pic](scimux-asset:x) over"));
+  assert.doesNotMatch(sends[0].text, /scimux-asset:/);
+  ctx.feature.destroy();
+});
+
+test("P3C: use-as-description sets editor state from the turn", async () => {
+  const timers = [];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "mission brief", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: {
+      setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    },
+  });
+  const input = ctx.roots.chatdescinput;
+  input._focused = false;
+  input._range = null;
+  input.focus = function(){ this._focused = true; };
+  input.setSelectionRange = function(a, b){
+    this.selectionStart = a; this.selectionEnd = b; this._range = [a, b];
+  };
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "desc");
+  assert.equal(ctx.feature.isEditingDesc(), true);
+  assert.equal(input.value, "mission brief");
+  assert.equal(input.dataset.node, "n1");
+  assert.equal(ctx.roots.chatdetails.hidden, false);
+  assert.equal(ctx.roots.chathead.classList.contains("desc-editing"), true);
+  for (const fn of timers) fn();
+  assert.equal(input._focused, true);
+  assert.deepEqual(input._range, [input.value.length, input.value.length]);
+  ctx.feature.destroy();
+});
+
+test("P3C: histload click fetches history API", async () => {
+  const segs = [{
+    start: "2025-12-31T00:00:00Z", seam: "2025-12-31T00:00:00Z",
+    turns: [{ role: "user", text: "old", time: "2025-12-31T00:00:01Z" }],
+  }];
+  const ctx = makeFeature({
+    histSegs: segs,
+    chatPayload: {
+      turns: [{ role: "user", text: "now", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /histload/);
+  const before = ctx.apiCalls.filter(c => c.path.includes("/chat?history=1")).length;
+  const hl = el("button", { className: "histload" });
+  firstListener(ctx.roots.msgs, "click")({ target: hl });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  const histCalls = ctx.apiCalls.filter(c => c.path.includes("/chat?history=1"));
+  assert.equal(histCalls.length, before + 1);
+  assert.match(histCalls[histCalls.length - 1].path, /\/api\/nodes\/n1\/chat\?history=1$/);
+  assert.match(ctx.roots.msgs.innerHTML, /turn hist|data-bk="h:/);
+  ctx.feature.destroy();
+});
+
+test("P3C: open-terminal when closed opens pane and never POSTs /key", async () => {
+  const payload = elicitationPayload();
+  const nodes = [{
+    id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
+    live: "quiet", attention: "question", lane_id: "L1", description: "d",
+  }];
+  const ctx = makeFeature({ nodes, chatPayload: payload });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.equal(ctx.roots.termtoggle.classList.contains("on"), false);
+  const beforeKeys = ctx.apiCalls.filter(c => c.path.includes("/key")).length;
+  const open = el("button", { dataset: { openTerminal: "1" } });
+  firstListener(ctx.roots.msgs, "click")({ target: open });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ctx.roots.termtoggle.classList.contains("on"), true,
+    "closed terminal must open via data-open-terminal");
+  assert.equal(ctx.apiCalls.filter(c => c.path.includes("/key")).length, beforeKeys,
+    "Open Terminal must never POST /key");
+  assert.ok(ctx.apiCalls.some(c => c.path.includes("/peek")),
+    "opening the terminal fetches peek");
+  ctx.feature.destroy();
+});
+
+test("P3C: image error removes .attthumb", async () => {
+  const ctx = makeFeature();
+  ctx.feature.bind();
+  const thumb = el("a", { className: "attthumb", dataset: { tkey: "a1" } });
+  const img = el("img");
+  thumb.appendChild(img);
+  ctx.roots.msgs.appendChild(thumb);
+  assert.equal(thumb.parentNode, ctx.roots.msgs);
+  firstListener(ctx.roots.msgs, "error")({ target: img });
+  assert.equal(thumb.parentNode, null, "broken thumbnail anchor is removed");
+  assert.equal(ctx.roots.msgs.children.includes(thumb), false);
+  ctx.feature.destroy();
+});
+
+test("P3C: key-submit API failure alerts and restores attention row", async () => {
+  const alerts = [];
+  const nodes = [{
+    id: "n1", title: "A", agent: "claude", model: "s", live: "quiet",
+    attention: "question", lane_id: "", description: "",
+  }];
+  const payload = {
+    turns: [{ role: "user", text: "q" }],
+    live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    attention: "question",
+  };
+  const ctx = makeFeature({
+    nodes,
+    chatPayload: payload,
+    api: async (path) => {
+      if (path.includes("/key")) throw new Error("key transport failed");
+      if (path.includes("/peek")) return "pane";
+      if (path.includes("/chat")) return payload;
+      return {};
+    },
+    deps: { alert: msg => alerts.push(msg) },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key=/);
+  const btn = el("button", { dataset: { key: "y" } });
+  firstListener(ctx.roots.keyrow, "click")({ target: btn });
+  assert.equal(ctx.roots.keyrow.innerHTML, "",
+    "optimistic collapse clears the row before the POST settles");
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(alerts, ["key transport failed"]);
+  assert.match(ctx.roots.keyrow.innerHTML, /data-key=/,
+    "failure clears suppress and refreshChat restores the attention row");
   ctx.feature.destroy();
 });
