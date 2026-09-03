@@ -36,11 +36,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
-        "Digest": "sha-256=:eFrGnxMPfzktYWb/1NQJDPPeeFoKXXkifOif3V4jw7o=:",
+        "Digest": "sha-256=:A21D2En+hqfA203+1Pj3vlD9OCrs/IVImXOlDcwQPJQ=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "785ac69f130f7f392d6166ffd4d4090cf3de785a0a5d79227ce89fdd5e23c3ba"
+      "body_sha256": "036d43d849fe86a7c0db4dfed4f8f7be50fd382aecfc85489973a50dcc103c94"
     }
   },
   {
