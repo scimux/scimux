@@ -2,7 +2,7 @@
 
 This repository vendors the scimux-rv rendezvous protocol specification
 and its test vectors. The current copy is taken from scimux-rv committed
-revision 8355a56.
+revision 2a34777.
 
 S1 is Gate B. These files are the protocol artifacts, not shipped product
 logic. The Go and WebCrypto acceptance tests bind both sides to the same
@@ -11,8 +11,8 @@ logic. The Go and WebCrypto acceptance tests bind both sides to the same
 ## Source revision
 
 Name the scimux-rv Git object id that produced the vendored bytes. The
-current source is committed revision **8355a56**
-(`8355a56c13ef6cb96523860b61b780edf0dd7132`). When rv regenerates
+current source is committed revision **2a34777**
+(`2a3477732d14259c78bf02dae08d6b9b72e51e98`). When rv regenerates
 vectors, replace that oid with the new committed revision and record it
 here in the same sentence form: “scimux-rv committed revision \<oid\>”.
 
@@ -35,7 +35,7 @@ forbidden. A pretty-printer or a key reorder silently breaks
 Extraction must come from Git, for example:
 
 ```
-git -C /path/to/scimux-rv cat-file blob $(git -C /path/to/scimux-rv rev-parse 8355a56:docs/protocol/rendezvous-v1.md)
+git -C /path/to/scimux-rv cat-file blob $(git -C /path/to/scimux-rv rev-parse 2a34777:docs/protocol/rendezvous-v1.md)
 ```
 
 and the analogous `rev-parse <oid>:<path>` for the digest and each
@@ -49,7 +49,7 @@ byte-identical to `git cat-file blob`.
 2. Byte-copy the specification, `vectors.sha256`, and every vector
    JSON from that commit using the table above.
 3. Record the new concrete committed Git OID in this document (replace
-   `8355a56` in the source-revision paragraph). Do not leave the old
+   `2a34777` in the source-revision paragraph). Do not leave the old
    oid in place as the current source.
 4. Run both verification commands below. Both must pass against the
    newly copied bytes.

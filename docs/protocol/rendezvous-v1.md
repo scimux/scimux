@@ -1121,6 +1121,11 @@ Request. Vector `stun-drop-truncated` is a 10-byte prefix.
 prints the recovered XOR-MAPPED-ADDRESS. It is how AT-FR-08 is
 reproduced on a deployed host.
 
+Both the browser peer (rv `/p` composition) and the computer peer
+(scimux answering path) derive this same unauthenticated STUN service
+from the rendezvous origin: host of the origin, UDP port `3478`,
+ignoring any HTTP/HTTPS web port. There is no TURN or relay.
+
 ---
 
 ## 18. Aggregate health

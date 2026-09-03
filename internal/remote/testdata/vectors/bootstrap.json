@@ -124,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:Xf9lCOkzeR91vu0tmbfVGB2kuBaFZZp24Om6i8NGD+U=:",
+        "Digest": "sha-256=:jk205PI7QQZrjdftYBtoSEsVcU8+FG8lRloMjH5Hkg4=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "5dff6508e933791f75beed2d99b7d5181da4b81685659a76e0e9ba8bc3460fe5"
+      "body_sha256": "8e4db4e4f23b41066b8dd7ed601b68484b15714f3e146f25465a0c8c7e47920e"
     }
   },
   {
@@ -212,11 +212,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:IVH69bczR2khNAUhJciP9GX+mUFw2AnjPQ3wFpsg2v0=:",
+        "Digest": "sha-256=:Kq0o2uLOEz7pH1bEHbpeG5BYqeYZfua8NGXZzDMNI7A=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "2151faf5b73347692134052125c88ff465fe994170d809e33d0df0169b20dafd"
+      "body_sha256": "2aad28dae2ce133ee91f56c41dba5e1b9058a9e6197ee6bc3465d9cc330d23b0"
     }
   },
   {
