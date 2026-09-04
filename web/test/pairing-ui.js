@@ -54,9 +54,9 @@ function record(code) {
 export function authorityWarningHTML() {
   return (
     '<div role="dialog" aria-label="authority-warning">' +
-    "A paired device can do anything you can do at this computer: " +
-    "it can start agents with POST /api/nodes and replace the scimux program with " +
-    "POST /api/update. Same risk as giving someone SSH access to this computer." +
+    "The user of the paired device can do anything you can do at this computer. " +
+    "Pair only a device you control, and only with a code you just created. " +
+    "Same risk as giving someone SSH access to this computer." +
     "</div>"
   );
 }

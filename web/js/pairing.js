@@ -222,23 +222,26 @@ function visibility(s, event, now) {
 }
 
 /* The grant this warning describes is the whole reason pairing is
- * invite-only. It names the two routes rather than saying "full access",
- * because a human can weigh "it can replace the program" and cannot weigh
- * an adjective.
+ * invite-only, so the warning must state the size of the grant before any
+ * code exists.
  *
- * "SSH-equivalent authority" led that sentence until 2026-08-27. It is
- * exactly right and it is useless to anyone who has not used SSH — which,
- * for a supervision UI aimed at people who run agents rather than servers,
- * is most readers. The comparison now comes last, as a line for those it
- * helps, after two sentences that stand on their own. */
+ * It named the two routes -- POST /api/nodes and POST /api/update -- from
+ * 2026-08-27 until 2026-09-04, on the argument that a human can weigh "it
+ * can replace the program" and cannot weigh an adjective. The routes went
+ * because they are jargon: HIG asks for the consequence in the reader's
+ * words, and a supervision UI aimed at people who run agents rather than
+ * servers cannot assume a reader who parses a method and a path. What is
+ * granted is now carried by the subject of the sentence -- the *user* of
+ * the paired device, not the device -- and by the SSH comparison, which
+ * says "everything" to the readers who can act on it.
+ *
+ * AT-FR-38-a asks that the warning state what is being granted before
+ * confirmation. It does not ask for the route names; those were this
+ * file's reading of it. */
 export function authorityWarningHTML() {
   return (
     '<div class="pair-warn" role="group" aria-label="What a paired device may do">' +
-    "<p>A paired device <strong>can do anything you can do at this computer</strong>.</p>" +
-    "<ul>" +
-    "<li>It can start agents that run commands here. <code>POST /api/nodes</code></li>" +
-    "<li>It can replace the scimux program itself. <code>POST /api/update</code></li>" +
-    "</ul>" +
+    "<p>The user of the paired device <strong>can do anything you can do at this computer</strong>.</p>" +
     "<p>Pair only a device you control, and only with a code you just created.</p>" +
     '<p class="pair-warn-aside">Same risk as giving someone SSH access to this computer.</p>' +
     "</div>"
@@ -247,9 +250,12 @@ export function authorityWarningHTML() {
 
 const VIEWS = {
   closed: () => ({ title: "", body: "", actions: [] }),
+  /* No body: the title names the section and the button names the act, and
+     a sentence that repeats both is one more thing to read before the
+     screen that actually matters (the authority warning). */
   "pair-a-device": () => ({
     title: "Remote access",
-    body: "Pair a phone or tablet to reach these sessions from another device.",
+    body: "",
     actions: [{ id: "begin", label: "Pair a device", primary: true }],
   }),
   "authority-warning": () => ({

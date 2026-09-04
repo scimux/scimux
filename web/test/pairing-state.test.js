@@ -162,11 +162,14 @@ test("acknowledging the warning is not confirming the pairing", () => {
 
 test("the authority warning names the SSH-equivalent grant before any code exists", () => {
   const html = authorityWarningHTML().toLowerCase();
-  for (const marker of ["ssh", "/api/nodes", "/api/update"]) {
+  for (const marker of ["ssh", "anything you can do at this computer"]) {
     assert.ok(html.includes(marker), `warning does not name ${marker}`);
   }
-  assert.ok(html.includes("agent"), "warning does not say agents can be launched");
-  assert.ok(html.includes("binary") || html.includes("replace"), "warning does not say the binary can be replaced");
+  /* The grant lands on a person, not on a device: "a paired device can do
+     anything you can do" invites the reader to picture a phone rather than
+     whoever is holding it. */
+  assert.ok(html.includes("user of the paired device"), "warning does not say who holds the grant");
+  assert.ok(!html.includes("/api/"), "the warning is back to naming routes; that is jargon, not disclosure");
   const view = pairingView(at("authority-warning"));
   assert.equal(view.qr, "", "a code was rendered before the warning was acknowledged");
 });

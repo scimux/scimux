@@ -26,20 +26,24 @@ function s7call(at, fn) {
   }
 }
 
+/* AT-FR-38-a asks that the warning state what is being granted before
+   confirmation. It asks for the size of the grant, not for route names: the
+   markers were /api/nodes and /api/update until 2026-09-04, which tested the
+   jargon rather than the disclosure. What must survive is that the warning
+   says the grant is total, says whose hands it lands in, and gives the SSH
+   comparison for the readers who can act on it. */
 function warningNamesGrant(html) {
   const t = String(html).toLowerCase();
   return t.includes("ssh")
-    && t.includes("/api/nodes")
-    && t.includes("/api/update")
-    && (t.includes("agent") || t.includes("agents"))
-    && (t.includes("binary") || t.includes("replace"));
+    && t.includes("anything you can do at this computer")
+    && t.includes("user of the paired device");
 }
 
 test("AT-FR-38-a: every FR-38 state renders; authority warning names the SSH-equivalent grant before confirmation", () => {
   const at = "AT-FR-38-a";
   const warning = s7call(at, () => authorityWarningHTML());
   if (!warningNamesGrant(warning)) {
-    assert.fail(`${at}: authority warning does not name SSH-equivalent grant (POST /api/nodes launches agents, POST /api/update replaces the binary): ${warning}`);
+    assert.fail(`${at}: authority warning does not state the grant (the paired device\u2019s user can do anything you can do here, SSH-equivalent): ${warning}`);
   }
   const seen = [];
   for (const state of FR38_STATES) {

@@ -155,12 +155,7 @@
   background: var(--bg); color: var(--ink); border: 1px solid var(--hairline);
 }
 #pair_actions button.primary { background: var(--work); color: #fff; border-color: transparent; }
-.pair-warn ul { margin: 8px 0; padding-left: 20px; }
-.pair-warn li { margin: 4px 0; }
-.pair-warn code {
-  font: 13px/1.4 ui-monospace, monospace; background: var(--code-bg);
-  padding: 1px 5px; border-radius: 4px;
-}
+.pair-warn p { margin: 8px 0; }
 /* The SSH comparison is for readers it helps and noise for the rest, so it
    sits below the sentences that carry the warning on their own. */
 .pair-warn-aside { color: var(--dim); font-size: 13px; margin-top: 8px; }
@@ -168,10 +163,21 @@
 #m_devices .item > span {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-#m_devices .item > button { flex: none; }
+/* The revoke control sits on the trailing edge, where a row's action lives,
+   and reads destructive before it is armed rather than only after. A red
+   trash can was considered on 2026-09-04 and rejected: HIG reserves an
+   icon without a label for metaphors every reader already shares, and a
+   trash can says "delete this row" -- the device stays, its authority does
+   not. The verb is the control. */
+#m_devices .item > button {
+  flex: none; margin-left: auto; align-self: center;
+  color: var(--bad); padding: 6px 8px; min-height: 32px;
+}
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }
-#m_devices button.danger { color: var(--bad); font-weight: 600; }
+#m_devices button.danger {
+  font-weight: 600; border: 1px solid var(--bad); border-radius: 8px;
+}
 /* Unlinking this computer ends every grant in the list above at once, so
    the armed state reads destructive for the same reason a revoke does. */
 #m_unlink.danger { color: var(--bad); font-weight: 600; }
