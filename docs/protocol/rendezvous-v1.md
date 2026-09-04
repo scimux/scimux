@@ -940,7 +940,7 @@ constants.
 Each inventory response also carries:
 
 - `X-Content-Type-Options: nosniff`
-- `Content-Security-Policy: default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+- `Content-Security-Policy: default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 - `Referrer-Policy: no-referrer`
 - `Cache-Control: no-store`
 - `Digest: sha-256=:<base64 of SHA-256(body)>:` (RFC 9530)
@@ -949,6 +949,12 @@ Each inventory response also carries:
 scimux version and MUST NOT be derived from the linker-stamped
 binary version. Changing an asset changes its digest; changing
 the rv version string MUST NOT.
+
+The `blob:` allowances are for computer bytes already fetched through the
+authenticated tunnel and checked against the computer's manifest before an
+object URL is minted. Inline and evaluated script remain forbidden. Inline
+style is allowed because the computer UI uses style attributes for dynamic
+layout and state; workers and objects remain forbidden.
 
 POST, PUT, DELETE, PATCH on an inventory path are
 `p-rejection`. `GET /p/` (trailing slash), `GET /p/index.html`,

@@ -12,7 +12,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/html; charset=utf-8",
         "Digest": "sha-256=:vGhEJ4KoSiglNRxCntX/OpA/kNFPcu1EBtIPjproMCA=:",
         "Referrer-Policy": "no-referrer",
@@ -34,7 +34,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
         "Digest": "sha-256=:A21D2En+hqfA203+1Pj3vlD9OCrs/IVImXOlDcwQPJQ=:",
         "Referrer-Policy": "no-referrer",
@@ -56,7 +56,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:yzEtx3hHRAiq6PBYs8QOrCaDXqm9VQHCaEgS8LvaNNM=:",
         "Referrer-Policy": "no-referrer",
@@ -78,7 +78,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:/XgF3S+gnmTiH97VlI+gsvY1C0FWxjRSSDQEMb0VV6w=:",
         "Referrer-Policy": "no-referrer",
@@ -100,13 +100,13 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:u8XnU9sYxv4gsJFzt/obcdw1GO5GBa1+byEGgxSv+Hk=:",
+        "Digest": "sha-256=:z9fqYEe3DBaD/+LDoDzQwDWXa+uBnQZPU/HNz7Bdl3E=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "bbc5e753db18c6fe20b09173b7fa1b71dc3518ee4605ad7e6f21068314aff879"
+      "body_sha256": "cfd7ea6047b70c1683ffe2c3a03cd0c035976beb819d064f53f1cdcfb05d9771"
     }
   },
   {
@@ -122,7 +122,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:82SVAV4VvZifFkHwFpvmMDW8RsihUgUiZSt8vi0F8Fc=:",
         "Referrer-Policy": "no-referrer",
@@ -144,13 +144,13 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:yeJJhJAewQ2ApvlKTEsSjzHd3Ammr4V0B7EGbfZcB/4=:",
+        "Digest": "sha-256=:AtO4EL/vWTsWhJdH583GuEkht8Jo7/wWYMEIeaY4jVk=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "c9e24984901ec10d80a6f94a4c4b128f31dddc09a6af857407b1066df65c07fe"
+      "body_sha256": "02d3b810bfef593b16849747e7cdc6b84921b7c268effc1660c10879a6388d59"
     }
   },
   {
@@ -166,7 +166,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:xMf2wDDByDpuu0bYqGGmGxuuX11BMY8gBFVj0VqaeIE=:",
         "Referrer-Policy": "no-referrer",
@@ -188,7 +188,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:6f14vVwji8xSAmHnS3pMu0Kr04pzfxVzw/9ynFHq43I=:",
         "Referrer-Policy": "no-referrer",
@@ -210,7 +210,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:OpG+/wNjK79otCye4U2hy0dGOEb940gtsb70R/3bV+w=:",
         "Referrer-Policy": "no-referrer",
@@ -232,7 +232,7 @@
       "status": 200,
       "headers": {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
         "Digest": "sha-256=:ZikpzWDYyqO9hIfSaE/4Aw9P2k6vS0FGiT6/z+hcy7I=:",
         "Referrer-Policy": "no-referrer",

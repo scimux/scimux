@@ -70,6 +70,42 @@ function blobType(kind) {
   return "application/octet-stream";
 }
 
+/* The loader owns the computer document as well as its graph. rv must not
+ * learn createApp's API or which verified objects are styles and assets. */
+function activateBrowser(result, { document: doc, window: win, fetchImpl }) {
+  if (!result.module || typeof result.module.createApp !== "function") {
+    throw named("bootstrap-entry", "the entry module exports no createApp()");
+  }
+  if (!win || typeof win.DOMParser !== "function" || !doc) {
+    throw named("bootstrap-document", "the browser cannot install the application document");
+  }
+
+  const parsed = new win.DOMParser().parseFromString(result.index, "text/html");
+  if (!parsed || !parsed.head || !parsed.body) {
+    throw named("bootstrap-document", "the application index is not HTML");
+  }
+  for (const script of parsed.querySelectorAll("script")) script.remove();
+
+  const styles = new Map(result.stylesheets.map(row => [row.url, row.blobURL]));
+  for (const link of parsed.querySelectorAll('link[rel="stylesheet"]')) {
+    const href = link.getAttribute("href");
+    const blobURL = styles.get(href);
+    if (!blobURL) throw named("bootstrap-missing", "no verified object URL for " + href);
+    link.setAttribute("href", blobURL);
+  }
+
+  doc.head.replaceChildren(...Array.from(parsed.head.childNodes, node => doc.importNode(node, true)));
+  doc.body.replaceChildren(...Array.from(parsed.body.childNodes, node => doc.importNode(node, true)));
+
+  const assets = new Map(result.assets.map(row => [row.url, row.blobURL]));
+  result.module.createApp({
+    fetchImpl,
+    assetURL: path => assets.get(path) || "",
+    document: doc,
+    window: win,
+  });
+}
+
 export async function bootstrap({
   channel,
   manifest,
@@ -154,12 +190,19 @@ export async function bootstrap({
   if (!entryBlob) {
     throw named("bootstrap-missing", "manifest entry " + entryUrl + " was not in the graph");
   }
-  // Hand the namespace back rather than discarding it. app.js self-boots only
-  // from an http(s) URL, which the entry blob never is, so the caller has to
-  // call createApp itself — with the channel transport as fetchImpl and blob
-  // URLs for assetURL. Without this the boot verifies every module and then
-  // renders nothing.
+  // app.js self-boots only from an http(s) URL, which the entry blob never is.
+  // The computer loader therefore installs and starts it with the channel
+  // transport as fetchImpl and verified blob URLs for assetURL. Returning the
+  // namespace as well keeps the handover observable without duplicating boot.
   const module = await importModule(entryBlob);
 
-  return { index, imports, stylesheets, assets, entry: entryBlob, module };
+  const result = { index, imports, stylesheets, assets, entry: entryBlob, module };
+  if (typeof globalThis.DOMParser === "function") {
+    activateBrowser(result, {
+      document: globalThis.document,
+      window: globalThis.window,
+      fetchImpl: channel,
+    });
+  }
+  return result;
 }

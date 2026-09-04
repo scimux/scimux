@@ -572,6 +572,33 @@ test("AT-FR-15a-b: the FR-40 bootstrap registers no service worker, on any origi
   }
 });
 
+function browserDocumentFixture() {
+  let scriptsRemoved = 0;
+  const script = { remove() { scriptsRemoved++; } };
+  const link = {
+    href: "/css/tokens.css",
+    getAttribute(name) { return name === "href" ? this.href : null; },
+    setAttribute(name, value) { if (name === "href") this.href = value; },
+  };
+  const parsed = {
+    head: { childNodes: [link] },
+    body: { childNodes: [{ id: "app" }] },
+    querySelectorAll(selector) {
+      if (selector === "script") return [script];
+      if (selector === 'link[rel="stylesheet"]') return [link];
+      return [];
+    },
+  };
+  const installed = { head: [], body: [] };
+  const document = {
+    head: { replaceChildren(...nodes) { installed.head = nodes; } },
+    body: { replaceChildren(...nodes) { installed.body = nodes; } },
+    importNode(node) { return node; },
+  };
+  const window = { DOMParser: class { parseFromString() { return parsed; } } };
+  return { document, window, installed, link, scriptsRemoved: () => scriptsRemoved };
+}
+
 /* FR-41 — the boot has to be able to start the app.
  *
  * app.js self-boots only when its own URL is http(s) (web/js/app.js:1878),
@@ -580,28 +607,32 @@ test("AT-FR-15a-b: the FR-40 bootstrap registers no service worker, on any origi
  * createApp. So a remote boot that verified and blobbed all 24 modules
  * perfectly still ends at a blank page.
  *
- * bootstrap() imports the entry and throws the module namespace away, which
- * leaves its caller nothing to start. Returning the namespace is the whole
- * fix, and it is deliberately all of it: whether the composition root lives
- * in /p or here is an open cross-repo question, and returning the namespace
- * is correct under either answer.
+ * The computer loader owns installation as well as verification: rv must not
+ * learn the computer entry API or its stylesheet/asset conventions.
  */
-test("AT-FR-41-d: the boot hands back the entry module so the app can be started", async () => {
+test("AT-FR-41-d: the computer loader installs and starts its verified application", async () => {
   const at = "AT-FR-41-d";
   const inventory = servedFromDisk();
   const manifest = await computerManifest(inventory);
   const channel = diskChannel(inventory);
   const s = seams();
 
-  const marker = { createApp: () => "started" };
-  const result = await bootstrap({
-    channel,
-    manifest,
-    createObjectURL: s.createObjectURL,
-    installImportMap: s.installImportMap,
-    /* Stand in for a real dynamic import of the entry blob. */
-    importModule: async url => (url === undefined ? undefined : marker),
-  });
+  const dom = browserDocumentFixture();
+  let appDeps = null;
+  const marker = { createApp: deps => { appDeps = deps; } };
+  const result = await withGlobals({
+    document: dom.document,
+    window: dom.window,
+    DOMParser: dom.window.DOMParser,
+  }, () =>
+    bootstrap({
+      channel,
+      manifest,
+      createObjectURL: s.createObjectURL,
+      installImportMap: s.installImportMap,
+      /* Stand in for a real dynamic import of the entry blob. */
+      importModule: async url => (url === undefined ? undefined : marker),
+    }));
 
   if (!result.module) {
     fail(at, "bootstrap returned no entry module; nothing can call createApp, so a remote boot renders nothing");
@@ -612,6 +643,15 @@ test("AT-FR-41-d: the boot hands back the entry module so the app can be started
   if (typeof result.module.createApp !== "function") {
     fail(at, "the returned namespace is not the entry module");
   }
+  assert.equal(dom.scriptsRemoved(), 1, "the localhost script must not run a second time");
+  assert.match(dom.link.href, /^blob:boot\//);
+  assert.equal(dom.installed.head.length, 1);
+  assert.equal(dom.installed.body.length, 1);
+  assert.equal(appDeps.document, dom.document);
+  assert.equal(appDeps.window, dom.window);
+  assert.equal(appDeps.fetchImpl, channel);
+  assert.match(appDeps.assetURL("/assets/agents/claude.svg"), /^blob:boot\//);
+  assert.equal(appDeps.assetURL("/assets/missing.svg"), "");
   /* Anti-vacuity: the existing return contract is unchanged. */
   for (const key of ["index", "stylesheets", "assets", "entry"]) {
     if (!(key in result)) fail(at, `bootstrap stopped returning ${key}`);
