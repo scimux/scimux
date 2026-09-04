@@ -8,9 +8,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   bootstrap,
@@ -760,5 +761,56 @@ test("AT-FR-41-d: the computer loader installs and starts its verified applicati
   /* Anti-vacuity: the existing return contract is unchanged. */
   for (const key of ["index", "stylesheets", "assets", "entry"]) {
     if (!(key in result)) fail(at, `bootstrap stopped returning ${key}`);
+  }
+});
+
+/* The check no seam can fake: hand the minted graph to a real module loader
+ * and make it resolve and evaluate. file: stands in for blob: because Node has
+ * no blob: URLs, and it is a fair stand-in for exactly the property at issue —
+ * an absolute specifier is resolved without consulting a base, so a graph that
+ * links here is a graph that links from blob: URLs too. Run against the loader
+ * as it was before object-URL rewriting, this fails with
+ * ERR_MODULE_NOT_FOUND for file:///js/format.js: the root-relative specifier
+ * resolved against the module's own base, and the import map — which the
+ * browser would never have consulted either — was not there to catch it.
+ *
+ * It is also the only test that evaluates every module: a module that throws
+ * at module scope in the browser cannot pass here. */
+test("AT-FR-40-g: the minted graph resolves and evaluates in a real module loader", async t => {
+  const at = "AT-FR-40-g";
+  const dir = mkdtempSync(join(tmpdir(), "scimux-bootstrap-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const inventory = servedFromDisk();
+  const manifest = await computerManifest(inventory);
+  const written = [];
+  let n = 0;
+
+  const result = await bootstrap({
+    channel: diskChannel(inventory),
+    manifest,
+    // The file is written after bootstrap returns: nothing reads an object URL
+    // until the entry is imported, and a Blob's bytes are only available async.
+    createObjectURL: blob => {
+      const file = join(dir, "m" + ++n + (blob.type === "text/javascript" ? ".mjs" : ".bin"));
+      written.push([file, blob]);
+      return pathToFileURL(file).href;
+    },
+    installImportMap() {
+      throw new Error("no import map may be installed");
+    },
+    importModule: async url => url,
+  });
+
+  for (const [file, blob] of written) {
+    writeFileSync(file, Buffer.from(await blob.arrayBuffer()));
+  }
+  if (written.length !== inventory.length - 1) {
+    fail(at, `minted ${written.length} objects for ${inventory.length - 1} non-index assets`);
+  }
+
+  const mod = await import(result.entry);
+  if (typeof mod.createApp !== "function") {
+    fail(at, "the graph linked but the entry exports no createApp()");
   }
 });
