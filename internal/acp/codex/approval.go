@@ -1,6 +1,9 @@
 package codex
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"sort"
+)
 
 // Approval is a decoded server->client approval request. Codex uses different
 // request/response shapes per approval method; AvailableDecisions is the
@@ -17,7 +20,23 @@ type Approval struct {
 	// legacy exec/patch, permissions). Each decision carries enough payload to
 	// build the method-specific JSON-RPC response.
 	AvailableDecisions []Decision
-	Raw                json.RawMessage // full params, for anything not modelled
+	// ItemID is the thread item this approval belongs to (v2 file-change
+	// approvals carry only this; the paths live on the item itself).
+	ItemID string
+	// FileChanges are the files a file-change approval would touch. v1
+	// (applyPatchApproval) carries them in params; v2 does not, so the
+	// client fills them in from the item it saw on item/started. Empty is
+	// normal and means "the server did not say" — never a guess.
+	FileChanges []FileChangePath
+	Raw         json.RawMessage // full params, for anything not modelled
+}
+
+// FileChangePath is one file a file-change approval would touch. Kind is the
+// codex change type ("add", "delete", "update") or "" when the server did not
+// say; it decides the verb the ask is phrased with, nothing else.
+type FileChangePath struct {
+	Path string
+	Kind string
 }
 
 // Decision is one choice from AvailableDecisions. Key is the string enum or the
@@ -54,11 +73,12 @@ func decodeApproval(method string, params json.RawMessage) Approval {
 		TurnID             string            `json:"turnId"`
 		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
 		Permissions        json.RawMessage   `json:"permissions"`
+		ItemID             string            `json:"itemId"`
 	}
 	_ = json.Unmarshal(params, &p)
 	a := Approval{
 		Method: method, Reason: p.Reason, Command: p.Command, Cwd: p.Cwd,
-		ThreadID: p.ThreadID, TurnID: p.TurnID, Raw: params,
+		ThreadID: p.ThreadID, TurnID: p.TurnID, ItemID: p.ItemID, Raw: params,
 	}
 	switch method {
 	case "item/commandExecution/requestApproval":
@@ -72,6 +92,7 @@ func decodeApproval(method string, params json.RawMessage) Approval {
 		a.AvailableDecisions = []Decision{{Key: "accept"}, {Key: "acceptForSession"}, {Key: "decline"}, {Key: "cancel"}}
 	case "execCommandApproval", "applyPatchApproval":
 		a.AvailableDecisions = []Decision{{Key: "approved"}, {Key: "approved_for_session"}, {Key: "denied"}, {Key: "abort"}}
+		a.FileChanges = decodeApplyPatchFileChanges(params)
 	case "item/permissions/requestApproval":
 		a.AvailableDecisions = permissionDecisions(p.Permissions)
 	}
@@ -134,4 +155,30 @@ func buildDecisionResult(method, key string, payload json.RawMessage) any {
 		return map[string]any{"decision": key}
 	}
 	return map[string]any{"decision": map[string]json.RawMessage{key: payload}}
+}
+
+// decodeApplyPatchFileChanges reads ApplyPatchApprovalParams.fileChanges, a
+// map keyed by path whose values carry the change type. Sorted so the ask a
+// human reads is the same ask every time; Go map order is not.
+func decodeApplyPatchFileChanges(params json.RawMessage) []FileChangePath {
+	var p struct {
+		FileChanges map[string]struct {
+			Type string `json:"type"`
+		} `json:"fileChanges"`
+	}
+	if len(params) == 0 || json.Unmarshal(params, &p) != nil || len(p.FileChanges) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(p.FileChanges))
+	for path := range p.FileChanges {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	out := make([]FileChangePath, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, FileChangePath{Path: path, Kind: p.FileChanges[path].Type})
+	}
+	return out
 }

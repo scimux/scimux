@@ -844,7 +844,8 @@ func mapKeyToDecision(key string, ds []Decision) (int, bool) {
 // codex app-server documents; never show a raw JSON-RPC method name:
 //
 //   - commandExecution: the command string (unchanged)
-//   - fileChange: grantRoot when present ("File changes under …"); else "File changes"
+//   - fileChange: grantRoot when present ("File changes under …"); else the
+//     files the change touches ("Edit `path`"); else "File changes"
 //   - permissions: a short scope summary from permissions.fileSystem / network;
 //     else "Permission change"
 //   - known methods without usable fields: short human phrase (P5b)
@@ -876,22 +877,64 @@ func approvalTitle(a Approval) string {
 	return "approval"
 }
 
-// fileChangeTitle reads optional grantRoot from Raw. The app-server docs say
-// the approval carries itemId/threadId/turnId, optional reason, and may include
-// unstable grantRoot; the actual per-file diffs live on item/started, not here.
-// We never invent a path — absent grantRoot yields "" so approvalTitle can
-// use the generic "File changes" label (P5b).
+// fileChangeTitle names what the change touches. Precedence is by size of the
+// grant, not by how specific the label reads:
+//
+//   - grantRoot asks for writes under a whole root for the rest of the
+//     session. That is larger than the files in flight, so it stays the ask;
+//     naming only the files would understate what is being approved.
+//   - otherwise the files themselves, in the "Verb `payload`" shape the UI
+//     splits into a verb label and a code block (splitPermTitle in chat.js).
+//     v1 approvals carry them in params.fileChanges; v2 approvals carry only
+//     itemId and the client fills them in from the item it saw on
+//     item/started. Either way they came from the server.
+//   - absent both, "" so approvalTitle uses the generic label (P5b). We never
+//     invent a path: an unnamed file is better than a wrong one.
 func fileChangeTitle(a Approval) string {
 	var p struct {
 		GrantRoot string `json:"grantRoot"`
 	}
-	if len(a.Raw) == 0 || json.Unmarshal(a.Raw, &p) != nil {
+	if len(a.Raw) > 0 && json.Unmarshal(a.Raw, &p) == nil && p.GrantRoot != "" {
+		return "File changes under " + p.GrantRoot
+	}
+	if len(a.FileChanges) == 0 {
 		return ""
 	}
-	if p.GrantRoot == "" {
-		return ""
+	return fileChangeVerb(a.FileChanges) + " `" + summarizePaths(a.FileChanges) + "`"
+}
+
+// fileChangeVerb says what will happen to the files. A deletion and an edit
+// are not the same ask, so a single-kind change is named for its kind; a
+// mixed patch falls back to the neutral verb rather than picking a winner.
+func fileChangeVerb(changes []FileChangePath) string {
+	kind := changes[0].Kind
+	for _, c := range changes[1:] {
+		if c.Kind != kind {
+			return "Edit"
+		}
 	}
-	return "File changes under " + p.GrantRoot
+	switch kind {
+	case "add":
+		return "Create"
+	case "delete":
+		return "Delete"
+	}
+	return "Edit"
+}
+
+// summarizePaths keeps the ask readable on a phone. Three paths is as much as
+// a permission row can carry without becoming a wall; the count that follows
+// is what stops the tail from being silently dropped.
+func summarizePaths(changes []FileChangePath) string {
+	const shown = 3
+	paths := make([]string, 0, len(changes))
+	for _, c := range changes {
+		paths = append(paths, c.Path)
+	}
+	if len(paths) <= shown {
+		return strings.Join(paths, ", ")
+	}
+	return strings.Join(paths[:shown], ", ") + " and " + strconv.Itoa(len(paths)-shown) + " more"
 }
 
 // permissionsTitle summarises the requested scope from the documented v2 shape:

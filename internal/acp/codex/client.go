@@ -42,6 +42,14 @@ type Client struct {
 	// (some server versions stream the full answer as deltas and emit an empty
 	// agentMessage in the completed notification — finding 76).
 	deltas map[string]*strings.Builder
+	// fileChanges remembers which files a fileChange item touches, keyed by
+	// item id. A v2 file-change approval carries only itemId
+	// (FileChangeRequestApprovalParams), so without this the ask cannot name
+	// the file — which is what a supervisor with auto-approve on is left
+	// reading in the transcript. Populated from item/started, item/completed
+	// and item/fileChange/patchUpdated; cleared when the turn ends, so it is
+	// bounded by one turn's items.
+	fileChanges map[string][]FileChangePath
 
 	// model is the effective model from the last thread/start (server-reported,
 	// else the request override). Stamped onto UsageEvents as O4 meta.model
@@ -357,7 +365,12 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 			b.WriteString(delta)
 			c.mu.Unlock()
 		}
+	case "item/started":
+		c.recordFileChangeItem(params)
+	case "item/fileChange/patchUpdated":
+		c.recordPatchUpdate(params)
 	case "item/completed":
+		c.recordFileChangeItem(params)
 		// Flush buffered deltas before calling decodeItem: delta-only streams
 		// emit an agentMessage with empty text, which decodeItem returns nil for.
 		// We must still surface the assembled text (finding 76).
@@ -393,6 +406,7 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 	case "turn/started":
 		c.setTurnID(turnIDFromResult(params))
 	case "turn/completed":
+		c.forgetFileChanges()
 		// Safety-net flush: if the server ended the turn without emitting
 		// item/completed for a buffered delta item (protocol churn or an
 		// interrupted item), emit whatever text was accumulated so it is not
@@ -404,10 +418,90 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 		// assistant output for a turn that did not complete (finding 84).
 		c.mu.Lock()
 		c.deltas = nil
+		c.fileChanges = nil
 		c.mu.Unlock()
 		c.emit(Event{T: "error", Error: string(params)})
 		c.signalTurn(turnResult{reason: "error", err: fmt.Errorf("turn failed: %s", string(params))})
 	}
+}
+
+// recordFileChangeItem keeps the paths of a fileChange thread item so a later
+// approval naming only its id can still say which file. Shapes are from
+// `codex app-server generate-json-schema` (codex-cli 0.147.0):
+// FileChangeThreadItem{id, type:"fileChange", status, changes[{path, kind,
+// diff}]}, where kind is an object variant ({"type":"update"}). Any other item
+// type is ignored, and an item that names no path clears nothing — a later
+// patchUpdated may still fill it in.
+func (c *Client) recordFileChangeItem(params json.RawMessage) {
+	var e struct {
+		Item struct {
+			ID      string            `json:"id"`
+			Type    string            `json:"type"`
+			Changes []fileChangeEntry `json:"changes"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &e) != nil || e.Item.Type != "fileChange" {
+		return
+	}
+	c.putFileChanges(e.Item.ID, e.Item.Changes)
+}
+
+// recordPatchUpdate is the same record from item/fileChange/patchUpdated,
+// which restates an item's changes as the patch is refined
+// (FileChangePatchUpdatedNotification{itemId, threadId, turnId, changes}).
+func (c *Client) recordPatchUpdate(params json.RawMessage) {
+	var n struct {
+		ItemID  string            `json:"itemId"`
+		Changes []fileChangeEntry `json:"changes"`
+	}
+	if json.Unmarshal(params, &n) != nil {
+		return
+	}
+	c.putFileChanges(n.ItemID, n.Changes)
+}
+
+type fileChangeEntry struct {
+	Path string `json:"path"`
+	Kind struct {
+		Type string `json:"type"`
+	} `json:"kind"`
+}
+
+func (c *Client) putFileChanges(itemID string, entries []fileChangeEntry) {
+	if itemID == "" || len(entries) == 0 {
+		return
+	}
+	paths := make([]FileChangePath, 0, len(entries))
+	for _, e := range entries {
+		if e.Path == "" {
+			continue
+		}
+		paths = append(paths, FileChangePath{Path: e.Path, Kind: e.Kind.Type})
+	}
+	if len(paths) == 0 {
+		return
+	}
+	c.mu.Lock()
+	if c.fileChanges == nil {
+		c.fileChanges = make(map[string][]FileChangePath)
+	}
+	c.fileChanges[itemID] = paths
+	c.mu.Unlock()
+}
+
+func (c *Client) fileChangesFor(itemID string) []FileChangePath {
+	if itemID == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fileChanges[itemID]
+}
+
+func (c *Client) forgetFileChanges() {
+	c.mu.Lock()
+	c.fileChanges = nil
+	c.mu.Unlock()
 }
 
 // flushDeltas emits any buffered delta fragments as assistant events and clears
@@ -461,6 +555,12 @@ func (c *Client) onRequest(method string, params json.RawMessage) (any, *rpcErro
 
 func (c *Client) handleApproval(method string, params json.RawMessage) (any, *rpcError) {
 	a := decodeApproval(method, params)
+	// A v2 file-change approval names an item, not files. Fill the files in
+	// from the item the server already described; an item we never saw
+	// leaves the ask generic rather than guessed.
+	if len(a.FileChanges) == 0 {
+		a.FileChanges = c.fileChangesFor(a.ItemID)
+	}
 	// Record the approval as a tool event (decision evidence, like scimux's
 	// remote-key store records the pane's bottom lines).
 	c.emit(Event{T: "tool", Tool: &ToolEvent{
