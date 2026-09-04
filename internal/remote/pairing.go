@@ -449,10 +449,12 @@ func (c *Client) preparePairingComplete(ctx context.Context, code string, comput
 		PubKey:   append([]byte(nil), s.offer.DevicePub...),
 	}
 	live := DeviceRecord{
-		ID:      id,
-		RID:     s.rid,
-		PubKey:  append([]byte(nil), s.offer.SignPub...),
-		ECDHPub: append([]byte(nil), s.offer.DevicePub...),
+		ID:       id,
+		RID:      s.rid,
+		PubKey:   append([]byte(nil), s.offer.SignPub...),
+		ECDHPub:  append([]byte(nil), s.offer.DevicePub...),
+		Label:    dev.Label,
+		PairedAt: dev.PairedAt,
 	}
 	return copyDevice(dev), live, nil
 }
@@ -504,10 +506,12 @@ func (c *Client) adoptPairedDevice(rec DeviceRecord) error {
 			}
 		}
 		newRec := DeviceRecord{
-			ID:      rec.ID,
-			RID:     rec.RID,
-			PubKey:  append([]byte(nil), rec.PubKey...),
-			ECDHPub: append([]byte(nil), rec.ECDHPub...),
+			ID:       rec.ID,
+			RID:      rec.RID,
+			PubKey:   append([]byte(nil), rec.PubKey...),
+			ECDHPub:  append([]byte(nil), rec.ECDHPub...),
+			Label:    rec.Label,
+			PairedAt: rec.PairedAt,
 		}
 		prevIdx := -1
 		var previous DeviceRecord
@@ -731,6 +735,21 @@ func (c *Client) PairingState(code string) (PairingUIState, error) {
 		return "", classError(ClassNotFound, "pair", "unknown pairing code")
 	}
 	return s.state, nil
+}
+
+// setPairedDevices replaces the FR-38 list wholesale. It is the load path's
+// half of the list: applyState rebuilds it from the identity file so a
+// restart shows the pairings the wait loop is already polling. Callers hold
+// c.mu; the lock order c.mu -> pairingRuntime.mu is the one applyState
+// already takes through applyPairingXFromDisk.
+func (c *Client) setPairedDevices(list []PairedDevice) {
+	r := pairingOf(c)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.devices = make([]PairedDevice, 0, len(list))
+	for _, d := range list {
+		r.devices = append(r.devices, copyDevice(d))
+	}
 }
 
 // PairedDevices lists completed pairings with stable labels and paired-at.

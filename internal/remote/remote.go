@@ -163,6 +163,14 @@ type PersistedDevice struct {
 	RID     string `json:"rid"`
 	PubKey  string `json:"public_key,omitempty"`
 	ECDHPub string `json:"ecdh_public_key,omitempty"`
+	// Label and PairedAt are the FR-38 list's presentation, not credentials.
+	// They are durable because a device the human cannot see is a device the
+	// human cannot revoke: before they were persisted, a restart left the
+	// Remote-access list empty while the wait loop kept polling the pairings.
+	// Both are omitempty and both are optional on read — a file written
+	// before they existed rehydrates with an empty label and a zero time.
+	Label    string `json:"label,omitempty"`
+	PairedAt string `json:"paired_at,omitempty"` // RFC 3339
 }
 
 // PendingEnrollment is partial-enrollment evidence (AT-FR-02-e). It must
@@ -426,6 +434,11 @@ type DeviceRecord struct {
 	// computer can open a device's session offer and has nowhere to send the
 	// answer.
 	ECDHPub []byte
+	// Label and PairedAt carry the FR-38 list's presentation through the
+	// durable record so a restart can rebuild it. Nothing on the signalling
+	// path reads them.
+	Label    string
+	PairedAt time.Time
 }
 
 // BackoffConfig is exponential backoff plus bounded jitter (FR-22).

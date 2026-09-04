@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 const tempSuffix = ".tmp"
@@ -134,6 +135,10 @@ func (c *Client) snapshotState() PersistedState {
 			RID:     d.RID,
 			PubKey:  hex.EncodeToString(d.PubKey),
 			ECDHPub: hex.EncodeToString(d.ECDHPub),
+			Label:   d.Label,
+		}
+		if !d.PairedAt.IsZero() {
+			st.Devices[i].PairedAt = d.PairedAt.UTC().Format(time.RFC3339)
 		}
 	}
 	return st
@@ -143,8 +148,9 @@ func (c *Client) applyState(st PersistedState) error {
 	c.st = st
 	c.loaded = true
 	c.devices = c.devices[:0]
+	paired := make([]PairedDevice, 0, len(st.Devices))
 	for _, d := range st.Devices {
-		rec := DeviceRecord{ID: d.ID, RID: d.RID}
+		rec := DeviceRecord{ID: d.ID, RID: d.RID, Label: d.Label}
 		if d.PubKey != "" {
 			if raw, err := hex.DecodeString(d.PubKey); err == nil {
 				rec.PubKey = raw
@@ -155,8 +161,28 @@ func (c *Client) applyState(st PersistedState) error {
 				rec.ECDHPub = raw
 			}
 		}
+		if d.PairedAt != "" {
+			if at, err := time.Parse(time.RFC3339, d.PairedAt); err == nil {
+				rec.PairedAt = at
+			}
+		}
 		c.devices = append(c.devices, rec)
+		paired = append(paired, PairedDevice{
+			ID:       rec.ID,
+			RID:      rec.RID,
+			Label:    rec.Label,
+			PairedAt: rec.PairedAt,
+			// The FR-38 list shows the pairing key Y, which the API ships as
+			// ecdh_public_key; the legacy Ed25519 extension is not this list's.
+			PubKey: append([]byte(nil), rec.ECDHPub...),
+		})
 	}
+	// FR-38: rebuild the list the human revokes from. c.devices alone is what
+	// signalling consults, so rehydrating only that left the Remote-access
+	// section empty after every restart. An unparseable timestamp degrades to
+	// a zero time rather than dropping the row: a device that cannot be shown
+	// cannot be revoked.
+	c.setPairedDevices(paired)
 	if st.PublicKey != "" {
 		if raw, err := hex.DecodeString(st.PublicKey); err == nil {
 			c.pub = raw
