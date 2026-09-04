@@ -316,10 +316,13 @@ export function createDeviceList({ api, doc } = {}) {
 
   function rowHTML(d) {
     const id = String((d && d.id) || "");
-    /* A row that says nothing is a row nobody dares revoke, so an
-       unlabelled device falls back to the only other thing that
-       identifies it. */
-    const name = (d && d.label) || id;
+    /* A row that says nothing is a row nobody dares revoke. Browser peers
+       have no label, so keep their machine id recognizable without letting
+       all 64 characters push the revoke control out of view. */
+    const label = String((d && d.label) || "").trim();
+    const name = label || (id.length > 16
+      ? `Device ${id.slice(0, 8)}…${id.slice(-4)}`
+      : id);
     const armedRow = armed === id;
     return (
       `<div class="item"><span>${esc(name)}</span>` +

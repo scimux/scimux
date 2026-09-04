@@ -165,6 +165,10 @@
    sits below the sentences that carry the warning on their own. */
 .pair-warn-aside { color: var(--dim); font-size: 13px; margin-top: 8px; }
 /* paired-device rows in the burger's Remote access section */
+#m_devices .item > span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#m_devices .item > button { flex: none; }
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }
 #m_devices button.danger { color: var(--bad); font-weight: 600; }

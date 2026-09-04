@@ -14,6 +14,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createDeviceList } from "../js/pairing-ui.js";
 
@@ -97,6 +98,21 @@ test("a device with no label is still identifiable", async () => {
   const h = setup({ [LIST]: { devices: [{ id: "dev-a" }] } });
   await h.f.refresh();
   assert.match(h.html(), /dev-a/);
+});
+
+test("a browser device without a label has a compact name and keeps its full identity", async () => {
+  const id = "f2b7eacb4e9665d78162f467b60e23aa4badc43510d422f5d6a97ace33dc2c08";
+  const h = setup({ [LIST]: { devices: [{ id }] } });
+  await h.f.refresh();
+  assert.match(h.html(), /Device f2b7eacb…2c08/);
+  assert.match(h.html(), new RegExp(`data-dev="${id}"`));
+  assert.doesNotMatch(h.html(), new RegExp(`>${id}<`));
+});
+
+test("a long paired-device name cannot push its revoke button out of view", () => {
+  const css = readFileSync(new URL("../css/sheets.css", import.meta.url), "utf8");
+  assert.match(css, /#m_devices \.item > span\s*\{[^}]*min-width:\s*0[^}]*overflow:\s*hidden[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/s);
+  assert.match(css, /#m_devices \.item > button\s*\{[^}]*flex:\s*none/s);
 });
 
 test("an empty list says so rather than showing nothing", async () => {
