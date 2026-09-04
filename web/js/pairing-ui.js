@@ -188,10 +188,11 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
         });
         dispatch({ type: "COMPLETED" });
       } catch {
-        /* 409 is ClassPairUnconfirmed: the other side has not confirmed
-           yet. That is the ordinary case for a human still reaching for
-           their phone, so the sheet keeps waiting rather than tearing
-           down a pairing that is one tap from finishing. */
+        dispatch({ type: "CONFIRM_FAILED" });
+        /* The local call asserted both human confirmations, so any rejection
+           is a failed completion, not evidence that the phone still needs a
+           tap. Release the unusable session best-effort. */
+        releaseCode(code);
       }
     });
   }

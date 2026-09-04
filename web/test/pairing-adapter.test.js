@@ -368,10 +368,7 @@ test("confirming sends both halves and completes on success", async () => {
   assert.equal(h.f.screen(), "succeeded");
 });
 
-test("a confirm the other side has not matched leaves the sheet waiting", async () => {
-  /* 409 is ClassPairUnconfirmed: the computer's half is recorded, the
-   * device's is not. Treating that as a failure would throw away a
-   * pairing that is one tap from finishing. */
+test("a rejected completion is shown instead of waiting forever", async () => {
   const h = setup({
     [MINT]: () => mintOK(),
     [POLL]: () => ({ state: "pending", sas: "706990" }),
@@ -383,8 +380,9 @@ test("a confirm the other side has not matched leaves the sheet waiting", async 
   h.doc.el("#pair_actions").click("confirm");
   await h.f.settled();
 
-  assert.equal(h.f.screen(), "awaiting-other-side");
-  assert.equal(h.f.error(), "", "a routine wait was reported as an error");
+  assert.equal(h.f.screen(), "failed");
+  assert.match(h.doc.el("#pair_title").textContent, /could not finish/i);
+  assert.match(h.doc.el("#pair_body").innerHTML, /nothing was paired/i);
 });
 
 test("digits that do not match cancel the session on the server too", async () => {
@@ -403,28 +401,16 @@ test("digits that do not match cancel the session on the server too", async () =
   assert.ok(h.api.keys().includes(CANCEL), "a rejected code was left live on the rendezvous");
 });
 
-test("the device's own confirmation reaches the waiting screen", async () => {
-  /* FR-12's second half. Until it arrives the computer cannot say the
-   * pairing is nearly done, and the human is left reading "confirm on
-   * your device" after they already have. */
-  let confirmed = false;
+test("a polled device confirmation never skips the computer comparison", async () => {
   const h = setup({
     [MINT]: () => mintOK(),
-    [POLL]: () => ({ state: "pending", sas: "706990", device_confirmed: confirmed }),
-    [CONFIRM]: () => { throw httpError(409, "not both sides"); },
+    [POLL]: () => ({ state: "pending", sas: "706990", device_confirmed: true }),
   });
   await toShowCode(h);
   h.timers.fire();
   await h.f.settled();
-  h.doc.el("#pair_actions").click("confirm");
-  await h.f.settled();
-  assert.match(h.doc.el("#pair_body").innerHTML, /confirm the same numbers/i);
-
-  confirmed = true;
-  h.timers.fire();
-  await h.f.settled();
-  assert.equal(h.f.screen(), "awaiting-other-side", "the device's confirmation completed the pairing on its own");
-  assert.match(h.doc.el("#pair_body").innerHTML, /finishing up/i);
+  assert.equal(h.f.screen(), "compare-sas");
+  assert.match(h.doc.el("#pair_title").textContent, /numbers match/i);
 });
 
 /* ---------- DOM -> events ---------- */
@@ -466,10 +452,11 @@ test("Done on the success screen closes without cancelling anything", async () =
 
 test("the ✕ cancels at every live stage, and always tells the server", async () => {
   for (const stage of ["show-code", "compare-sas", "awaiting-other-side"]) {
+    let finishConfirm;
     const h = setup({
       [MINT]: () => mintOK(),
       [POLL]: () => ({ state: "pending", sas: "706990" }),
-      [CONFIRM]: () => { throw httpError(409, "not both sides"); },
+      [CONFIRM]: () => new Promise((resolve) => { finishConfirm = resolve; }),
       [CANCEL]: () => "",
     });
     await toShowCode(h);
@@ -479,11 +466,13 @@ test("the ✕ cancels at every live stage, and always tells the server", async (
     }
     if (stage === "awaiting-other-side") {
       h.doc.el("#pair_actions").click("confirm");
-      await h.f.settled();
+      await Promise.resolve();
+      assert.equal(typeof finishConfirm, "function", "confirm request did not start");
     }
     assert.equal(h.f.screen(), stage, `${stage}: setup`);
 
     h.doc.el("#pair_x").click();
+    if (finishConfirm) finishConfirm({ id: "dev-1" });
     await h.f.settled();
     assert.equal(h.f.screen(), "closed", `${stage}: the ✕ did not dismiss the sheet`);
     assert.ok(h.api.keys().includes(CANCEL), `${stage}: the code was abandoned rather than cancelled`);

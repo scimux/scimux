@@ -80,6 +80,7 @@ const TRANSITIONS = {
   "awaiting-other-side": {
     DEVICE_CONFIRMED: "awaiting-other-side",
     COMPLETED: "succeeded",
+    CONFIRM_FAILED: "failed",
     REJECT: "cancelled",
     CANCEL: "cancelled",
     TICK: "awaiting-other-side",
@@ -187,16 +188,23 @@ test("an offer carries the SAS and stops the code being refreshable", () => {
   assert.equal(ticked.refreshDue, false, "an offered pairing was queued for a fresh code");
 });
 
-test("confirming on the computer waits for the device rather than asserting for it", () => {
-  /* FR-12: both ends confirm. The computer cannot speak for the phone, so
-   * CONFIRM alone must never reach succeeded -- only COMPLETED, which the
-   * adapter fires after the rendezvous reports the device's own confirm. */
+test("confirming waits for durable completion rather than succeeding optimistically", () => {
+  /* CONFIRM starts the local completion request. Only COMPLETED, emitted
+   * after the device record is durable, may report success. */
   const s = nextPairing(at("compare-sas"), { type: "CONFIRM" }, T0);
   assert.equal(s.screen, "awaiting-other-side");
   assert.equal(s.computerConfirmed, true);
   assert.equal(s.deviceConfirmed, false);
   const still = nextPairing(s, { type: "TICK", now: T0 + 1 }, T0 + 1);
-  assert.equal(still.screen, "awaiting-other-side", "the computer completed a pairing the device never confirmed");
+  assert.equal(still.screen, "awaiting-other-side", "a timer completed pairing before the server did");
+});
+
+test("a failed completion is visible and releases the live credential", () => {
+  const s = nextPairing(at("awaiting-other-side"), { type: "CONFIRM_FAILED" }, T0);
+  assert.equal(s.screen, "failed");
+  assert.equal(s.code, "");
+  assert.match(pairingView(s).title, /could not finish/i);
+  assert.match(pairingView(s).body, /nothing was paired/i);
 });
 
 test("a device confirming first does not skip the human's comparison", () => {

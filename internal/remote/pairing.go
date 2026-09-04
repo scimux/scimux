@@ -67,8 +67,8 @@ type PairingOffer struct {
 	DevicePub  []byte
 	OfferNonce []byte
 	Envelope   []byte
-	// SignPub is the device's ed25519 identity. DevicePub is the P-256 Y
-	// used for SAS and envelope seal; the two cannot share a field.
+	// SignPub is an optional legacy Ed25519 extension. The published browser
+	// offer uses DevicePub, the P-256 Y used for SAS and envelope sealing.
 	SignPub []byte
 }
 
@@ -278,6 +278,9 @@ func (c *Client) AcceptPairingOffer(ctx context.Context, offer PairingOffer) err
 	if s.consumed {
 		return classError(ClassPairConsumed, "offer", "pairing code has already been used")
 	}
+	if len(offer.SignPub) != 0 && len(offer.SignPub) != ed25519.PublicKeySize {
+		return classError(ClassHandshake, "offer", "device_sign_pub has the wrong length")
+	}
 
 	x, err := r.ensureX()
 	if err != nil {
@@ -433,9 +436,6 @@ func (c *Client) preparePairingComplete(ctx context.Context, code string, comput
 			return PairedDevice{}, DeviceRecord{}, s.sasErr
 		}
 		return PairedDevice{}, DeviceRecord{}, classError(ClassUnauthorized, "complete", "pairing SAS was not derived")
-	}
-	if len(s.offer.SignPub) != ed25519.PublicKeySize {
-		return PairedDevice{}, DeviceRecord{}, classError(ClassUnauthorized, "complete", "device identity public key is missing")
 	}
 	id := s.offer.DeviceID
 	if id == "" {

@@ -27,6 +27,7 @@ func TestValidatePersistedSemantics(t *testing.T) {
 	}
 	partial := PersistedState{Status: StatePartial}
 	validDevice := PersistedDevice{ID: "phone", RID: rid1, PubKey: pubHex}
+	validECDHPub := hex.EncodeToString(s7MustP256Pub(t))
 
 	type row struct {
 		name string
@@ -45,6 +46,11 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		{"valid enrolled with device", func() PersistedState {
 			st := enrolled
 			st.Devices = []PersistedDevice{validDevice}
+			return st
+		}(), ""},
+		{"valid enrolled with browser P-256 device", func() PersistedState {
+			st := enrolled
+			st.Devices = []PersistedDevice{{ID: "phone", RID: rid1, ECDHPub: validECDHPub}}
 			return st
 		}(), ""},
 		{"valid ambiguous matching pending", PersistedState{
@@ -177,6 +183,16 @@ func TestValidatePersistedSemantics(t *testing.T) {
 		{"wrong-length device public key", func() PersistedState {
 			st := enrolled
 			st.Devices = []PersistedDevice{{ID: "phone", RID: rid1, PubKey: "ab"}}
+			return st
+		}(), ClassCorruptIdentity},
+		{"malformed device ECDH public key", func() PersistedState {
+			st := enrolled
+			st.Devices = []PersistedDevice{{ID: "phone", RID: rid1, PubKey: pubHex, ECDHPub: "zz"}}
+			return st
+		}(), ClassCorruptIdentity},
+		{"wrong-length device ECDH public key", func() PersistedState {
+			st := enrolled
+			st.Devices = []PersistedDevice{{ID: "phone", RID: rid1, PubKey: pubHex, ECDHPub: "04"}}
 			return st
 		}(), ClassCorruptIdentity},
 	}

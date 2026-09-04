@@ -23,10 +23,9 @@
  * phone. That is what the comparison catches, and it is what makes "the
  * rendezvous only relays" a mechanism instead of a promise.
  *
- * awaiting-other-side exists because FR-12 requires confirmation on both
- * ends and the computer cannot speak for the phone. CONFIRM records the
- * computer's half; only COMPLETED -- fired once the rendezvous reports the
- * device's own confirmation -- reaches succeeded.
+ * awaiting-other-side is the in-flight completion call. The local UI sends
+ * both explicit human confirmations only after the comparison; COMPLETED is
+ * the server's durable acceptance, not a timer or optimistic transition.
  */
 import { qrMatrix, qrSVG } from "./qr.js";
 
@@ -59,6 +58,7 @@ export const PAIRING_EVENTS = Object.freeze([
   "OFFER",
   "DEVICE_CONFIRMED",
   "CONFIRM",
+  "CONFIRM_FAILED",
   "REJECT",
   "CANCEL",
   "COMPLETED",
@@ -168,6 +168,9 @@ export function nextPairing(state, event, now) {
     case "awaiting-other-side":
       if (type === "DEVICE_CONFIRMED") return { ...s, deviceConfirmed: true };
       if (type === "COMPLETED") return { ...withoutCredential(s), screen: "succeeded" };
+      if (type === "CONFIRM_FAILED") {
+        return { ...withoutCredential(s), screen: "failed", reason: "completion-failed" };
+      }
       if (type === "REJECT") return cancelWith(s, "sas-mismatch");
       if (type === "CANCEL") return cancelWith(s, "cancelled");
       return s;
@@ -271,9 +274,9 @@ const VIEWS = {
       { id: "reject", label: "They don't match" },
     ],
   }),
-  "awaiting-other-side": (s) => ({
-    title: "Waiting for your device",
-    body: s.deviceConfirmed ? "Finishing up…" : "Confirm the same numbers on your device to finish pairing.",
+  "awaiting-other-side": () => ({
+    title: "Finishing pairing",
+    body: "Saving this device…",
     actions: [{ id: "cancel", label: "Cancel" }],
   }),
   succeeded: () => ({
@@ -292,17 +295,25 @@ const VIEWS = {
       { id: "close", label: "Close" },
     ],
   }),
-  failed: (s) => ({
-    title: s.reason === "hosted-blocked" ? "Pair from the computer" : "Could not start pairing",
-    body:
-      s.reason === "hosted-blocked"
-        ? "A paired device cannot pair further devices. Do this on the computer running scimux."
-        : s.error || "The rendezvous could not be reached.",
-    actions: [
-      { id: "begin", label: "Try again", primary: true },
-      { id: "close", label: "Close" },
-    ],
-  }),
+  failed: (s) => {
+    let title = "Could not start pairing";
+    let body = s.error || "The rendezvous could not be reached.";
+    if (s.reason === "hosted-blocked") {
+      title = "Pair from the computer";
+      body = "A paired device cannot pair further devices. Do this on the computer running scimux.";
+    } else if (s.reason === "completion-failed") {
+      title = "Could not finish pairing";
+      body = "Nothing was paired. Start again with a new code.";
+    }
+    return {
+      title,
+      body,
+      actions: [
+        { id: "begin", label: "Try again", primary: true },
+        { id: "close", label: "Close" },
+      ],
+    };
+  },
   expired: () => ({
     title: "Code expired",
     body: "Pairing codes are short-lived. Get a fresh one when you are ready to scan.",

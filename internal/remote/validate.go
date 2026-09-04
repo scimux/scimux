@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/hex"
 	"strings"
@@ -19,7 +20,9 @@ import (
 // corruption so startup can surface a distinct recovery path instead of
 // treating the file as unparsable wreckage. When ambiguous state carries
 // Pending, its PublicKey must match the outer PublicKey. Device rows must carry
-// unique IDs/RIDs and valid keys. Schema or state additions must update this
+// unique IDs/RIDs and at least one valid device key. PubKey is the optional
+// legacy Ed25519 extension; ECDHPub is the browser pairing identity used by
+// current sessions. Schema or state additions must update this
 // classifier and its table test in validate_test.go — silent acceptance is not
 // an extension mechanism.
 func validatePersistedSemantics(st PersistedState) Class {
@@ -90,9 +93,23 @@ func validatePersistedSemantics(st PersistedState) Class {
 			return ClassCorruptIdentity
 		}
 		seenRID[d.RID] = struct{}{}
-		raw, err := hex.DecodeString(d.PubKey)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
+		if d.PubKey == "" && d.ECDHPub == "" {
 			return ClassCorruptIdentity
+		}
+		if d.PubKey != "" {
+			raw, err := hex.DecodeString(d.PubKey)
+			if err != nil || len(raw) != ed25519.PublicKeySize {
+				return ClassCorruptIdentity
+			}
+		}
+		if d.ECDHPub != "" {
+			raw, err := hex.DecodeString(d.ECDHPub)
+			if err != nil {
+				return ClassCorruptIdentity
+			}
+			if _, err := ecdh.P256().NewPublicKey(raw); err != nil {
+				return ClassCorruptIdentity
+			}
 		}
 	}
 	return ""

@@ -118,11 +118,11 @@ func TestAT_S7c_MismatchedPairingXFailsStart(t *testing.T) {
 	}
 }
 
-// TestAT_S7c_NoSignPubIsNotACompletedPairing: a pairing that cannot
-// produce a live device is not a completed pairing. Missing SignPub used
-// to return a PairedDevice and register nothing.
-func TestAT_S7c_NoSignPubIsNotACompletedPairing(t *testing.T) {
-	const at = "AT-S7c-no-signpub"
+// TestAT_S7c_PublishedBrowserOfferCompletesWithoutSigningKey pins the
+// rendezvous-owned browser contract: its pair-offer carries device_pub and
+// offer_nonce, not the unused legacy device_sign_pub extension.
+func TestAT_S7c_PublishedBrowserOfferCompletesWithoutSigningKey(t *testing.T) {
+	const at = "AT-S7c-browser-offer"
 	c, _, ctx, cancel := s7Enrolled(t)
 	defer cancel()
 
@@ -133,8 +133,6 @@ func TestAT_S7c_NoSignPubIsNotACompletedPairing(t *testing.T) {
 	_, yPub := s7MustP256(t)
 	if err := c.AcceptPairingOffer(ctx, PairingOffer{
 		Code:       code.Code,
-		DeviceID:   "phone",
-		Label:      "Phone",
 		DevicePub:  yPub,
 		OfferNonce: bytes.Repeat([]byte{0x41}, 32),
 	}); err != nil {
@@ -142,25 +140,65 @@ func TestAT_S7c_NoSignPubIsNotACompletedPairing(t *testing.T) {
 	}
 
 	dev, err := c.CompletePairing(ctx, code.Code, true, true)
-	if err == nil {
-		t.Fatalf("%s: CompletePairing succeeded without SignPub: %+v", at, dev)
+	if err != nil {
+		t.Fatalf("%s: CompletePairing rejected the published browser offer: %v", at, err)
+	}
+	if dev.ID != code.RID {
+		t.Fatalf("%s: anonymous browser device ID = %q, want RID %q", at, dev.ID, code.RID)
 	}
 	paired, perr := c.PairedDevices()
 	if perr != nil {
 		t.Fatalf("%s: PairedDevices: %v", at, perr)
 	}
-	if len(paired) != 0 {
-		t.Fatalf("%s: pairing list registered a device without SignPub: %+v", at, paired)
+	if len(paired) != 1 || paired[0].ID != dev.ID {
+		t.Fatalf("%s: paired devices = %+v, want completed device %q", at, paired, dev.ID)
 	}
 	list, lerr := c.Devices()
 	if lerr != nil {
 		t.Fatalf("%s: Devices: %v", at, lerr)
 	}
-	if len(list) != 0 {
-		t.Fatalf("%s: live registry registered a device without SignPub: %+v", at, list)
+	if len(list) != 1 || !bytes.Equal(list[0].ECDHPub, yPub) {
+		t.Fatalf("%s: live registry = %+v, want browser P-256 key %x", at, list, yPub)
 	}
-	if len(c.devices) != 0 {
-		t.Fatalf("%s: c.devices = %+v, want empty", at, c.devices)
+	if len(list[0].PubKey) != 0 {
+		t.Fatalf("%s: invented a legacy signing key: %x", at, list[0].PubKey)
+	}
+
+	cfg := c.cfg
+	cfg.InviteFile = ""
+	cfg.InviteStdin = false
+	cfg.InviteString = ""
+	if err := c.Close(); err != nil {
+		t.Fatalf("%s: close: %v", at, err)
+	}
+	c2 := NewClient(cfg)
+	if err := c2.Start(ctx); err != nil {
+		t.Fatalf("%s: restart rejected the paired browser device: %v", at, err)
+	}
+	defer c2.Close()
+	reloaded, err := c2.Devices()
+	if err != nil || len(reloaded) != 1 || !bytes.Equal(reloaded[0].ECDHPub, yPub) {
+		t.Fatalf("%s: reloaded devices = %+v, err %v", at, reloaded, err)
+	}
+}
+
+func TestAT_S7c_MalformedOptionalSigningKeyIsRejected(t *testing.T) {
+	c, _, ctx, cancel := s7Enrolled(t)
+	defer cancel()
+	code, err := c.MintPairingCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.AcceptPairingOffer(ctx, PairingOffer{
+		Code:      code.Code,
+		DevicePub: s7MustP256Pub(t),
+		SignPub:   []byte{0x01},
+	})
+	if err == nil {
+		t.Fatal("AcceptPairingOffer accepted a malformed optional signing key")
+	}
+	if got := classOf(err); got != ClassHandshake {
+		t.Fatalf("malformed optional signing key class = %q, want %q", got, ClassHandshake)
 	}
 }
 

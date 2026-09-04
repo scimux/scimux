@@ -416,14 +416,15 @@ type Config struct {
 
 // DeviceRecord is a local device/channel record. No WebRTC.
 type DeviceRecord struct {
-	ID     string
-	RID    string
+	ID  string
+	RID string
+	// PubKey is an optional legacy Ed25519 extension. The rendezvous-owned
+	// browser does not send it and no session request is authenticated by it.
 	PubKey []byte
 	// ECDHPub is the device's static P-256 public key Y from the §11 pairing
-	// transcript. PubKey is the ed25519 identity that signs; Y is what a
-	// §12.2 reply envelope is sealed *to*, so the two cannot be the same
-	// field. Without it the computer can open a device's session offer and has
-	// nowhere to send the answer.
+	// transcript. A §12.2 reply envelope is sealed to Y; without it the
+	// computer can open a device's session offer and has nowhere to send the
+	// answer.
 	ECDHPub []byte
 }
 
