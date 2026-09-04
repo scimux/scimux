@@ -418,11 +418,25 @@ test("a polled device confirmation never skips the computer comparison", async (
 test("cancelling before a code exists asks the server for nothing", async () => {
   const h = setup({ [MINT]: () => mintOK() });
   h.f.open();
-  h.doc.el("#pair_actions").click("begin");
   h.doc.el("#pair_actions").click("cancel");
   await h.f.settled();
-  assert.equal(h.f.screen(), "pair-a-device");
+  assert.equal(h.f.screen(), "closed");
   assert.deepEqual(h.api.keys(), [], "backing out of the warning reached the network");
+});
+
+/* Opening the sheet used to land on a screen with a title, no prose and
+   a single button repeating the menu item that had just been tapped. It
+   asked for a tap without offering a decision, so the first thing the
+   sheet shows is now the screen that does. */
+test("opening the sheet shows the authority warning, not a screen to tap through", async () => {
+  const h = setup({ [MINT]: () => mintOK() });
+  h.f.open();
+  assert.equal(h.f.screen(), "authority-warning");
+  assert.match(h.doc.el("#pair_body").innerHTML, /anything you can do at this computer/i);
+  const actions = h.doc.el("#pair_actions").innerHTML;
+  assert.doesNotMatch(actions, /data-pa="begin"/, "the sheet still opens on a screen that only begins");
+  await h.f.settled();
+  assert.deepEqual(h.api.keys(), [], "opening the sheet reached the network");
 });
 
 test("Done on the success screen closes without cancelling anything", async () => {
@@ -559,7 +573,7 @@ test("every action the view offers is a button the delegation can reach", async 
   const h = setup({ [MINT]: () => mintOK() });
   h.f.open();
   const html = h.doc.el("#pair_actions").innerHTML;
-  assert.match(html, /data-pa="begin"/, "the view's action id reached no attribute");
+  assert.match(html, /data-pa="ack"/, "the view's action id reached no attribute");
   assert.match(html, /<button/, "actions rendered as something unclickable");
   assert.match(html, /class="primary"/, "the view's primary action rendered as an ordinary button");
 });
@@ -569,7 +583,7 @@ test("an unknown action id does nothing", async () => {
   h.f.open();
   h.doc.el("#pair_actions").click("definitely-not-an-action");
   await h.f.settled();
-  assert.equal(h.f.screen(), "pair-a-device");
+  assert.equal(h.f.screen(), "authority-warning");
   assert.deepEqual(h.api.keys(), [], "an unknown tap reached the network");
 });
 

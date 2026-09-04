@@ -55,9 +55,14 @@ const OFFER = { type: "OFFER", sas: "706990" };
  * generated as such, so adding an event without deciding its behaviour
  * everywhere fails rather than defaulting. */
 const TRANSITIONS = {
-  closed: { OPEN: "pair-a-device" },
-  "pair-a-device": { BEGIN: "authority-warning", CLOSE: "closed", HOSTED_BLOCKED: "failed" },
-  "authority-warning": { ACK_WARNING: "show-code", CANCEL: "pair-a-device", CLOSE: "closed", MINT_FAILED: "failed", HOSTED_BLOCKED: "failed" },
+  /* Opening the sheet is the request to pair. It lands on the warning:
+     the screen it used to land on carried a title, no prose and one
+     button repeating the menu item that had just been tapped, so it
+     asked for a tap without offering a decision. */
+  closed: { OPEN: "authority-warning" },
+  /* Cancel on the first screen of the sheet closes the sheet. There is
+     no longer a screen behind it to go back to. */
+  "authority-warning": { ACK_WARNING: "show-code", CANCEL: "closed", CLOSE: "closed", MINT_FAILED: "failed", HOSTED_BLOCKED: "failed" },
   "show-code": {
     MINTED: "show-code",
     MINT_FAILED: "failed",

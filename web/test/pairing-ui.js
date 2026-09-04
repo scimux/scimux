@@ -15,7 +15,6 @@ export const FR38_STATES = Object.freeze([
 /* NFR-12 concrete screens, in order. This is the flow AT-NFR-12-a
  * drives; it is not an action-count metric. */
 export const NFR12_SCREENS = Object.freeze([
-  "pair-a-device",
   "authority-warning",
   "show-code",
   "enter-code",
@@ -92,9 +91,6 @@ export function tap(screen, action, input) {
   }
   if (screen === "confirm-computer" || screen === "confirm-phone") {
     return { confirmed: true };
-  }
-  if (screen === "pair-a-device" && action === "open") {
-    return { open: true };
   }
   return {};
 }

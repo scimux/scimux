@@ -7,8 +7,13 @@
  *
  * The flow, and why it has the shape it does:
  *
- *   pair-a-device -> authority-warning -> show-code -> compare-sas
- *                 -> awaiting-other-side -> succeeded
+ *   authority-warning -> show-code -> compare-sas
+ *                     -> awaiting-other-side -> succeeded
+ *
+ * Opening the sheet is the request to pair, so the warning is the first
+ * screen. It was preceded until 2026-09-04 by a pair-a-device screen
+ * carrying a title, no prose and one button repeating the menu item that
+ * had just been tapped: a tap that offered no decision.
  *
  * The authority warning is on the computer and comes BEFORE the code,
  * because this is the machine granting access and the grant is
@@ -31,7 +36,6 @@ import { qrMatrix, qrSVG } from "./qr.js";
 
 export const PAIRING_SCREENS = Object.freeze([
   "closed",
-  "pair-a-device",
   "authority-warning",
   "show-code",
   "compare-sas",
@@ -110,20 +114,15 @@ export function nextPairing(state, event, now) {
    * them, so they are handled once rather than repeated per screen. Both
    * are refused mid-flow only where the table says so. */
   if (type === "CLOSE" && s.screen !== "closed") return closedFrom(s);
-  if (type === "BEGIN" && (s.screen === "pair-a-device" || isFinished(s.screen))) return beginFrom(s);
+  if (type === "BEGIN" && isFinished(s.screen)) return beginFrom(s);
 
   switch (s.screen) {
     case "closed":
-      return type === "OPEN" ? { ...s, screen: "pair-a-device" } : s;
-
-    case "pair-a-device":
-      if (type === "HOSTED_BLOCKED") return { ...s, screen: "failed", reason: "hosted-blocked" };
-      return s;
+      return type === "OPEN" ? beginFrom(s) : s;
 
     case "authority-warning":
-      /* Hosted refusal is discovered by the mint, and the mint happens
-       * here and on show-code -- never on pair-a-device, which asks the
-       * server nothing. Routing it to the generic failure instead would
+      /* Hosted refusal is discovered by the mint, which happens here and
+       * on show-code. Routing it to the generic failure instead would
        * tell a device-side user the network was down. */
       if (type === "HOSTED_BLOCKED") return { ...withoutCredential(s), screen: "failed", reason: "hosted-blocked" };
       /* Acknowledging is not confirming. The machine moves to show-code
@@ -131,7 +130,9 @@ export function nextPairing(state, event, now) {
        * in, so the human sees the sheet respond immediately rather than
        * waiting on a request before anything appears. */
       if (type === "ACK_WARNING") return { ...s, screen: "show-code", refreshDue: true };
-      if (type === "CANCEL") return { ...closedFrom(s), screen: "pair-a-device", visible: s.visible };
+      /* Cancel on the sheet's first screen closes the sheet; there is no
+       * screen behind this one to return to. */
+      if (type === "CANCEL") return closedFrom(s);
       if (type === "MINT_FAILED") return failWith(s, event);
       return s;
 
@@ -250,14 +251,6 @@ export function authorityWarningHTML() {
 
 const VIEWS = {
   closed: () => ({ title: "", body: "", actions: [] }),
-  /* No body: the title names the section and the button names the act, and
-     a sentence that repeats both is one more thing to read before the
-     screen that actually matters (the authority warning). */
-  "pair-a-device": () => ({
-    title: "Remote access",
-    body: "",
-    actions: [{ id: "begin", label: "Pair a device", primary: true }],
-  }),
   "authority-warning": () => ({
     title: "Before you pair",
     body: authorityWarningHTML(),

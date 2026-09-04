@@ -46,7 +46,6 @@ const CASES = [
   ["compare-sas", false, DEAD, "compare-sas", false],
   ["awaiting-other-side", true, DEAD, "awaiting-other-side", false],
   ["awaiting-other-side", false, DEAD, "awaiting-other-side", false],
-  ["pair-a-device", true, DEAD, "pair-a-device", false],
   ["authority-warning", true, DEAD, "authority-warning", false],
   ["succeeded", true, DEAD, "succeeded", false],
   ["cancelled", true, DEAD, "cancelled", false],

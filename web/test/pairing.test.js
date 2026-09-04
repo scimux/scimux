@@ -107,7 +107,6 @@ test("AT-FR-38: device list has stable labels, duplicate-label handling, and pai
 test("AT-NFR-12-a: pairing is the named screen/tap sequence, including inputs, error states, and SAS confirmation — not an action count", () => {
   const at = "AT-NFR-12-a";
   const steps = NFR12_SCREENS.map((screen) => {
-    if (screen === "pair-a-device") return { screen, tap: "open" };
     if (screen === "authority-warning") return { screen, tap: "acknowledge" };
     if (screen === "show-code") return { screen, tap: "mint" };
     if (screen === "enter-code") return { screen, tap: "submit", input: "0410-6105" };
