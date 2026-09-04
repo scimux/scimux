@@ -993,6 +993,45 @@ func (c *Client) RevokeDevice(ctx context.Context, id string) error {
 	return err
 }
 
+// relabelDevice is the durable half of a rename: the record the wait loop
+// and the sealer read is the one that has to carry the operator's name, or
+// the name is gone at the next restart. Only Label moves; a rename is not
+// a re-registration, so no epoch bump, no revocation, no waiter kick.
+func (c *Client) relabelDevice(ctx context.Context, id, label string) error {
+	_ = ctx // see RevokeDevice's contract; not an oversight
+	return c.withStateLock("rename", func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.loaded {
+			if err := c.loadState(); err != nil {
+				return err
+			}
+		}
+		idx := -1
+		for i, d := range c.devices {
+			if d.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return classError(ClassNotFound, "rename", "paired device not found")
+		}
+		prev := c.devices[idx].Label
+		c.devices[idx].Label = label
+		// An installation with no state on disk has nothing to persist
+		// into; adoptPairedDevice makes the same call for the same reason.
+		if c.st.Status == "" {
+			return nil
+		}
+		if err := c.persist(c.snapshotState()); err != nil {
+			c.devices[idx].Label = prev
+			return err
+		}
+		return nil
+	})
+}
+
 // AttachChannel registers a live fake channel for a device.
 func (c *Client) AttachChannel(id string, ch Channel) error {
 	c.mu.Lock()

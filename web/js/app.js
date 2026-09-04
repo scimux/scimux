@@ -259,6 +259,16 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const ICON_PENCIL = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="M13.5 6.5l3 3"/></svg>`;
+  /* a broken chain link: revoking a paired device severs the link between
+     it and this computer, which is what happened — nothing is deleted, and
+     the same device can pair again tomorrow. Drawn here in the house 24×24
+     stroke style so it sits beside the pencil rather than being lifted from
+     an icon set with its own licence. */
+  const ICON_LINK_SLASH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M10 14l-2 2a3.5 3.5 0 0 1-5-5l2-2"/>
+    <path d="M14 10l2-2a3.5 3.5 0 0 1 5 5l-2 2"/>
+    <path d="M4 4l16 16"/></svg>`;
   /* dog-eared document glyph for non-image attachment chips */
   const ICON_FILE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1099,7 +1109,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      Both take the generic api() and the document; pairing-ui.js owns every
      #pair_* root and #m_devices, and nothing else here writes into them. */
   const pairingFeature = createPairingFeature({ api, doc: document });
-  const deviceList = createDeviceList({ api, doc: document });
+  const deviceList = createDeviceList({
+    api,
+    doc: document,
+    icons: { ICON_PENCIL, ICON_LINK_SLASH },
+  });
   /* Unlinking this computer (F1). It shares the burger-open refresh with the
      device list, and re-reads that list afterwards because an unlink ends
      every grant on it at once. */

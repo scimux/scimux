@@ -698,6 +698,20 @@ expose — `public_key` means ed25519 elsewhere, so it is not reused here.
 
 Revoke one paired device.
 
+### `PATCH /api/remote/devices/{id}`
+
+Rename one paired device: `{"label":"my iPhone"}`, answering the updated
+device. The label a row carries otherwise came from the device itself, in
+its pair-offer, so it is a claim rather than a fact — a phone is free to
+name itself after the laptop beside it. This is how the operator replaces
+that claim with a name they asserted, and it is safe to accept free-form
+text only because the list keeps showing the device identity underneath.
+
+An empty label clears the name rather than failing; the row then falls
+back to the device identity. Labels are bounded and stripped of control
+characters where they are stored, whoever supplied them, so a rename
+never returns exactly what it was given.
+
 ### `POST /api/remote/unenroll`
 
 Unlink this computer: release the installation at the rendezvous

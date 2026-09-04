@@ -80,6 +80,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("POST /api/remote/pairing/{code}/confirm", a.handleRemotePairingConfirm)
 	mux.HandleFunc("POST /api/remote/pairing/{code}/cancel", a.handleRemotePairingCancel)
 	mux.HandleFunc("GET /api/remote/devices", a.handleRemoteDeviceList)
+	mux.HandleFunc("PATCH /api/remote/devices/{id}", a.handleRemoteDeviceRename)
 	mux.HandleFunc("DELETE /api/remote/devices/{id}", a.handleRemoteDeviceRevoke)
 	mux.HandleFunc("POST /api/remote/unenroll", a.handleRemoteUnenroll)
 	mux.HandleFunc("GET /api/remote/status", a.handleRemoteStatus)

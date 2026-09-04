@@ -21,6 +21,7 @@ type hostedPairingClient interface {
 	CancelPairing(context.Context, string) error
 	PairedDevices() ([]remote.PairedDevice, error)
 	RevokePairedDevice(context.Context, string) error
+	RenamePairedDevice(context.Context, string, string) (remote.PairedDevice, error)
 	Unenroll(context.Context) (bool, error)
 	HostedStatus() string
 	TransportCause(string) (remote.TransportCause, error)
@@ -163,6 +164,36 @@ func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRemoteDeviceRename gives a row the operator's own name for it.
+//
+// The name on a row arrives from the device in its pair-offer, which makes
+// it a claim: nothing stops a phone from calling itself after the laptop
+// next to it. Renaming is how the operator replaces that claim with
+// something they asserted, and it is safe to allow free-form only because
+// the row keeps showing the device's identity underneath. The label is
+// bounded and stripped in internal/remote, at the point where it is
+// stored, so both suppliers are held to the same rule.
+func (a *app) handleRemoteDeviceRename(w http.ResponseWriter, r *http.Request) {
+	p := a.pairingClient()
+	if p == nil {
+		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	dev, err := p.RenamePairedDevice(r.Context(), r.PathValue("id"), body.Label)
+	if err != nil {
+		writeRemotePairingError(w, err)
+		return
+	}
+	writeJSON(w, pairedDeviceJSON(dev))
 }
 
 // handleRemoteUnenroll is the way out of an enrollment (rendezvous-v1

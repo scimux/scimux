@@ -285,19 +285,31 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
 /* ---------- the paired-device list ----------
  *
  * The other half of a grant. Pairing hands a device SSH-equivalent
- * authority on this computer, so the list of who holds it, and the way to
- * take it back, belong to the same feature rather than to a later phase.
+ * authority on this computer, so the list of who holds it, the way to
+ * name it and the way to take it back belong to the same feature rather
+ * than to a later phase.
  *
- * Owned root: #m_devices (delegated click on [data-dev]).
- * Server calls: GET /api/remote/devices, DELETE /api/remote/devices/:id.
+ * A row carries two controls, the same round pair a note card carries in
+ * the notes workspace: a pencil that renames and a severed link that
+ * revokes. The name is worth renaming because it is not a fact — it came
+ * from the device itself, in its pair-offer, and a phone is free to call
+ * itself after the laptop beside it. The hash under it is the part the
+ * device cannot choose, so it stays on the row whatever the name says.
+ *
+ * Owned root: #m_devices (delegated click, keydown and focusout).
+ * Server calls: GET /api/remote/devices, PATCH and DELETE on
+ * /api/remote/devices/:id.
  * No timers: the list is read when the menu opens and after a revoke,
  * never polled — a grant does not change behind the human's back.
  */
-export function createDeviceList({ api, doc } = {}) {
+export function createDeviceList({ api, doc, icons } = {}) {
   /* The id of the row whose next tap revokes. At most one, ever: two
      armed rows means a stray tap takes out a device the human armed a
      minute ago and then thought better of. */
   let armed = "";
+  /* The id of the row whose name is open for editing. Also at most one,
+     and never the same row as `armed`: one row, one pending decision. */
+  let editing = "";
   let devices = [];
   /* Whether `devices` is anything at all, as opposed to "we have never
      managed to read the list". The difference decides whether an empty
@@ -306,6 +318,7 @@ export function createDeviceList({ api, doc } = {}) {
   let notice = "";
   let chain = Promise.resolve();
   const cleanups = [];
+  const glyphs = icons || {};
 
   const root = () => doc.querySelector("#m_devices");
 
@@ -314,21 +327,61 @@ export function createDeviceList({ api, doc } = {}) {
     return chain;
   }
 
+  const deviceOf = (id) => devices.find((d) => String((d && d.id) || "") === id);
+  const labelOf = (d) => String((d && d.label) || "").trim();
+
+  /* Browser peers have no label, so keep their machine id recognizable
+     without letting all 64 characters push the row's controls out of
+     view. */
+  function shortID(id) {
+    return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+  }
+
+  function actionsHTML(id) {
+    return (
+      `<div class="roundactions devacts">` +
+      `<button type="button" data-dev="${esc(id)}" data-act="rename"` +
+      ` aria-label="rename this device">${glyphs.ICON_PENCIL || ""}</button>` +
+      `<button type="button" class="danger" data-dev="${esc(id)}" data-act="revoke"` +
+      ` aria-label="revoke this device's access">${glyphs.ICON_LINK_SLASH || ""}</button>` +
+      `</div>`
+    );
+  }
+
+  /* Arming replaces the icons with a question and a verb. An icon may arm
+     a destructive action; it may not be the whole of it, and "revoke" is
+     the word the rest of this feature uses for what happens next. */
+  function confirmHTML(id) {
+    return (
+      `<div class="devconfirm"><span class="devask">Revoke access?</span>` +
+      `<button type="button" data-dev="${esc(id)}" data-act="cancel">Cancel</button>` +
+      `<button type="button" class="danger" data-dev="${esc(id)}" data-act="revoke">Revoke</button>` +
+      `</div>`
+    );
+  }
+
   function rowHTML(d) {
     const id = String((d && d.id) || "");
-    /* A row that says nothing is a row nobody dares revoke. Browser peers
-       have no label, so keep their machine id recognizable without letting
-       all 64 characters push the revoke control out of view. */
-    const label = String((d && d.label) || "").trim();
-    const name = label || (id.length > 16
-      ? `Device ${id.slice(0, 8)}…${id.slice(-4)}`
-      : id);
+    /* A row that says nothing is a row nobody dares revoke. */
+    const label = labelOf(d);
+    const short = shortID(id);
+    const editingRow = editing === id;
     const armedRow = armed === id;
+    /* The identity line is dropped only when the name IS the identity,
+       which is what an unlabelled device shows; printing it twice would
+       say less, not more. */
+    const showID = label !== "" || editingRow;
+    const nameHTML = editingRow
+      ? `<input class="devnameedit" type="text" data-devname="${esc(id)}" value="${esc(label)}"` +
+        ` maxlength="64" aria-label="rename this device">`
+      : `<span class="devname">${esc(label || (id.length > 16 ? `Device ${short}` : id))}</span>`;
     return (
-      `<div class="item"><span>${esc(name)}</span>` +
-      `<button type="button" data-dev="${esc(id)}"` +
-      (armedRow ? ` class="danger"` : "") +
-      `>${armedRow ? "Confirm revoke" : "Revoke"}</button></div>`
+      `<div class="item devrow${armedRow ? " armed" : ""}">` +
+      `<div class="devtext">${nameHTML}` +
+      (showID ? `<span class="devid">${esc(short)}</span>` : "") +
+      `</div>` +
+      (armedRow ? confirmHTML(id) : editingRow ? "" : actionsHTML(id)) +
+      `</div>`
     );
   }
 
@@ -339,6 +392,17 @@ export function createDeviceList({ api, doc } = {}) {
     if (!html && known) html = `<div class="item note">No devices paired.</div>`;
     if (notice) html += `<div class="item err">${esc(notice)}</div>`;
     host.innerHTML = html;
+  }
+
+  /* A field nobody typed into is a field nobody asked for. Opening the
+     name puts the caret in it and selects what is there, so the first
+     keystroke replaces the device's own claim about itself. */
+  function focusRename() {
+    const host = root();
+    const el = host && host.querySelector ? host.querySelector(".devnameedit") : null;
+    if (!el) return;
+    if (el.focus) el.focus();
+    if (el.select) el.select();
   }
 
   async function refresh() {
@@ -355,6 +419,7 @@ export function createDeviceList({ api, doc } = {}) {
       notice = "Could not read the paired devices: " + ((e && e.message) || "unknown error");
     }
     armed = "";
+    editing = "";
     render();
   }
 
@@ -372,25 +437,106 @@ export function createDeviceList({ api, doc } = {}) {
     });
   }
 
+  /* Committing a rename closes the field first, so the row stops being
+     editable the moment the decision is made rather than when the network
+     answers. A name the computer shortened or stripped is what the row
+     then shows: the alternative is a row that disagrees with the next
+     read of the list. */
+  function commitRename(id, value) {
+    const row = deviceOf(id);
+    const next = String(value == null ? "" : value).trim();
+    editing = "";
+    if (!row || next === labelOf(row)) {
+      render();
+      return;
+    }
+    render();
+    enqueue(async () => {
+      try {
+        const r = await api(`/api/remote/devices/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ label: next }),
+        });
+        const stored = r && typeof r.label === "string" ? r.label : next;
+        /* Replace the row rather than writing through to it: the list came
+           from a read, and a read's objects are not ours to edit. */
+        devices = devices.map((d) =>
+          String((d && d.id) || "") === id ? { ...d, label: stored } : d);
+        notice = "";
+      } catch (e) {
+        notice = "Could not rename that device: " + ((e && e.message) || "unknown error");
+      }
+      render();
+    });
+  }
+
   function onClick(ev) {
     const hit = ev && ev.target && ev.target.closest && ev.target.closest("[data-dev]");
     if (!hit) return;
     if (ev.preventDefault) ev.preventDefault();
     const id = hit.dataset.dev;
+    const act = hit.dataset.act || "revoke";
+    if (act === "rename") {
+      armed = "";
+      editing = id;
+      render();
+      focusRename();
+      return;
+    }
+    if (act === "cancel") {
+      armed = "";
+      render();
+      return;
+    }
     if (armed === id) {
       armed = "";
       revoke(id);
       return;
     }
     armed = id;
+    editing = "";
     render();
+  }
+
+  function onKeyDown(ev) {
+    const hit = ev && ev.target && ev.target.closest && ev.target.closest("[data-devname]");
+    if (!hit) return;
+    const id = hit.dataset.devname;
+    if (editing !== id) return;
+    if (ev.key === "Enter") {
+      if (ev.preventDefault) ev.preventDefault();
+      commitRename(id, hit.value);
+    } else if (ev.key === "Escape") {
+      if (ev.preventDefault) ev.preventDefault();
+      if (ev.stopPropagation) ev.stopPropagation();
+      /* Escape puts the name back untouched, and must not reach the sheet
+         behind this list, where it would close the menu as well. */
+      editing = "";
+      render();
+    }
+  }
+
+  /* Leaving the field commits, because on a phone there is no Escape and
+     tapping elsewhere is how anyone finishes typing. The editing guard
+     makes the Return path idempotent: Return already committed and closed
+     the field, so the focusout that follows finds nothing to do. */
+  function onFocusOut(ev) {
+    const hit = ev && ev.target && ev.target.closest && ev.target.closest("[data-devname]");
+    if (!hit) return;
+    const id = hit.dataset.devname;
+    if (editing !== id) return;
+    commitRename(id, hit.value);
   }
 
   function bind() {
     const host = root();
     if (!host) return;
     host.addEventListener("click", onClick);
+    host.addEventListener("keydown", onKeyDown);
+    host.addEventListener("focusout", onFocusOut);
     cleanups.push(() => host.removeEventListener("click", onClick));
+    cleanups.push(() => host.removeEventListener("keydown", onKeyDown));
+    cleanups.push(() => host.removeEventListener("focusout", onFocusOut));
   }
 
   return {

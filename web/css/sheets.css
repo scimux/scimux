@@ -159,25 +159,48 @@
 /* The SSH comparison is for readers it helps and noise for the rest, so it
    sits below the sentences that carry the warning on their own. */
 .pair-warn-aside { color: var(--dim); font-size: 13px; margin-top: 8px; }
-/* paired-device rows in the burger's Remote access section */
-#m_devices .item > span {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* paired-device rows in the burger's Remote access section.
+   A row carries the same round pair a note card carries: a pencil that
+   renames and a severed link that revokes. The cluster is always shown
+   here — this list has no long-press and no swipe, so a hover-only
+   reveal would put both controls out of reach on the phone that is the
+   likeliest device to be reading it. */
+#m_devices .devrow {
+  position: relative; align-items: center; gap: 10px;
+  padding-right: var(--rowacts-gutter, 104px); min-height: 52px;
 }
-/* The revoke control sits on the trailing edge, where a row's action lives,
-   and reads destructive before it is armed rather than only after. A red
-   trash can was considered on 2026-09-04 and rejected: HIG reserves an
-   icon without a label for metaphors every reader already shares, and a
-   trash can says "delete this row" -- the device stays, its authority does
-   not. The verb is the control. */
-#m_devices .item > button {
-  flex: none; margin-left: auto; align-self: center;
-  color: var(--bad); padding: 6px 8px; min-height: 32px;
+#m_devices .devtext { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+#m_devices .devname {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The identity the device cannot choose, kept under the name it can. A
+   renamed row is the operator's assertion; this line is the evidence, so
+   it stays visible rather than being replaced by the nicer name. */
+#m_devices .devid {
+  color: var(--dim); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#m_devices .devnameedit {
+  width: 100%; min-width: 0; font: inherit; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--work); border-radius: 8px;
+  padding: 5px 8px; min-height: 34px;
+}
+#m_devices .devacts { display: flex; --rowacts-inset: 10px; }
+/* Arming replaces the icons with a question and a verb. An icon may arm a
+   destructive action; it may not be the whole of it. A trash can was
+   considered on 2026-09-04 and rejected for the glyph: it says "delete
+   this row" — the device stays, its authority does not. The severed link
+   says the right thing, and the word underneath it says it in full. */
+#m_devices .devrow.armed { padding-right: 12px; }
+#m_devices .devconfirm { flex: none; margin-left: auto; display: flex; align-items: center; gap: 8px; }
+#m_devices .devask { color: var(--dim); font-size: 13px; }
+#m_devices .devconfirm button { padding: 6px 10px; min-height: 32px; }
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }
 #m_devices button.danger {
-  font-weight: 600; border: 1px solid var(--bad); border-radius: 8px;
+  color: var(--bad); font-weight: 600; border: 1px solid var(--bad); border-radius: 8px;
 }
+#m_devices .roundactions button.danger { color: var(--bad); border: 1px solid var(--hairline); }
 /* Unlinking this computer ends every grant in the list above at once, so
    the armed state reads destructive for the same reason a revoke does. */
 #m_unlink.danger { color: var(--bad); font-weight: 600; }

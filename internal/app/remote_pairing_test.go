@@ -66,6 +66,16 @@ func (f *fakePairingClient) PairedDevices() ([]remote.PairedDevice, error) {
 
 func (f *fakePairingClient) RevokePairedDevice(context.Context, string) error { return nil }
 
+func (f *fakePairingClient) RenamePairedDevice(_ context.Context, id, label string) (remote.PairedDevice, error) {
+	for i := range f.devices {
+		if f.devices[i].ID == id {
+			f.devices[i].Label = label
+			return f.devices[i], nil
+		}
+	}
+	return remote.PairedDevice{}, nil
+}
+
 func (f *fakePairingClient) Unenroll(context.Context) (bool, error) {
 	f.unenrollCalls++
 	if f.unenrollErr != nil {

@@ -264,6 +264,10 @@ func (c *Client) AcceptPairingOffer(ctx context.Context, offer PairingOffer) err
 			return err
 		}
 	}
+	// The device names itself, so the name is bounded and stripped here,
+	// at the door, rather than wherever it is later displayed. Everything
+	// downstream reads s.offer.Label.
+	offer.Label = sanitizeDeviceLabel(offer.Label)
 	r := pairingOf(c)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -720,6 +724,83 @@ func (c *Client) RevokePairedDevice(ctx context.Context, id string) error {
 		return err
 	}
 	return nil
+}
+
+// maxDeviceLabel bounds every label this computer stores, whoever supplied
+// it. The device's own name for itself arrives in the pair-offer and is a
+// claim, not a fact: nothing stops a phone from sending a kilobyte, or a
+// newline, or the name of the laptop next to it. The operator's own typing
+// is bounded for the duller reason that a row has to stay a row.
+const maxDeviceLabel = 64
+
+// sanitizeDeviceLabel makes a label safe to put in a list a human reads to
+// decide what to revoke. Control characters go (a label is one line, and a
+// line the device chose must not be able to move the cursor), surrounding
+// space goes, and what is left is cut to maxDeviceLabel runes — runes, so
+// a cut never lands inside a character.
+func sanitizeDeviceLabel(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if n == maxDeviceLabel {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// RenamePairedDevice sets the operator's own name for a paired device.
+//
+// The label is the only thing it touches. The ID, the RID, the keys and
+// the paired-at are what signalling and sealing read, and a rename that
+// disturbed any of them would end the pairing while claiming to have
+// renamed it. An empty name is a clear rather than an error: the row then
+// falls back to the device's identity, which is the only name that was
+// ever a fact.
+func (c *Client) RenamePairedDevice(ctx context.Context, id, label string) (PairedDevice, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return PairedDevice{}, err
+		}
+	}
+	name := sanitizeDeviceLabel(label)
+	r := pairingOf(c)
+	r.mu.Lock()
+	idx := -1
+	for i, d := range r.devices {
+		if d.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		r.mu.Unlock()
+		return PairedDevice{}, classError(ClassNotFound, "rename", "paired device not found")
+	}
+	prev := r.devices[idx].Label
+	r.devices[idx].Label = name
+	out := copyDevice(r.devices[idx])
+	r.mu.Unlock()
+	// The durable half decides. A rename the identity file rejected is a
+	// rename that would vanish at the next restart, so the list is put back
+	// rather than left showing a name nothing on disk agrees with.
+	if err := c.relabelDevice(ctx, id, name); err != nil {
+		r.mu.Lock()
+		for i := range r.devices {
+			if r.devices[i].ID == id {
+				r.devices[i].Label = prev
+				break
+			}
+		}
+		r.mu.Unlock()
+		return PairedDevice{}, err
+	}
+	return out, nil
 }
 
 // PairingState is the current FR-38 UI state for a code.
