@@ -41,11 +41,14 @@ type bootstrapJoinResult struct {
 	ChannelCalls  int      `json:"channelCalls"`
 	ChannelExtras []string `json:"channelExtras"`
 
-	Imported      []string `json:"imported"`
-	ImportMapKeys int      `json:"importMapKeys"`
-	Stylesheets   int      `json:"stylesheets"`
-	Assets        int      `json:"assets"`
-	Entry         string   `json:"entry"`
+	Imported            []string `json:"imported"`
+	ObjectURLs          int      `json:"objectURLs"`
+	ImportMapsInstalled int      `json:"importMapsInstalled"`
+	Unresolvable        []string `json:"unresolvable"`
+	Rewritten           int      `json:"rewritten"`
+	Stylesheets         int      `json:"stylesheets"`
+	Assets              int      `json:"assets"`
+	Entry               string   `json:"entry"`
 
 	IndexLength         int  `json:"indexLength"`
 	IndexHasToken       bool `json:"indexHasToken"`
@@ -130,10 +133,31 @@ func TestAT_FR_40_JoinRealManifestBootsRealBootstrap(t *testing.T) {
 		t.Errorf("%s: imported %q but the entry blob is %q", at, res.Imported[0], res.Entry)
 	}
 
-	// Everything except the index is blobbed and mapped; the index is not.
-	if res.ImportMapKeys != want-1 {
-		t.Errorf("%s: import map has %d keys, want %d (every served asset but the index)",
-			at, res.ImportMapKeys, want-1)
+	// Everything except the index gets exactly one object URL; the index does
+	// not. One per asset is also one module instance per module: a second blob
+	// for the same URL would be a second copy in the browser's module map.
+	if res.ObjectURLs != want-1 {
+		t.Errorf("%s: %d object URLs, want %d (every served asset but the index)",
+			at, res.ObjectURLs, want-1)
+	}
+
+	// The defect that kept a real device on the failure screen with both
+	// suites green. A blob: URL has an opaque path, so nothing relative or
+	// root-absolute resolves against it and the specifier never reaches an
+	// import-map key — the map was unreachable, not late. Every import in a
+	// minted module must therefore already be an absolute blob: URL, and no
+	// map may be installed to stand in for one that is not.
+	if len(res.Unresolvable) != 0 {
+		t.Errorf("%s: minted modules still import %v; a blob: base resolves none of those",
+			at, res.Unresolvable)
+	}
+	if res.Rewritten < 20 {
+		t.Errorf("%s: only %d specifiers were rewritten to object URLs; the graph check is vacuous",
+			at, res.Rewritten)
+	}
+	if res.ImportMapsInstalled != 0 {
+		t.Errorf("%s: %d import maps installed; a blob: module cannot consult one",
+			at, res.ImportMapsInstalled)
 	}
 	if res.Stylesheets != 10 || res.Assets != 5 {
 		t.Errorf("%s: stylesheets=%d assets=%d, want 10 and 5", at, res.Stylesheets, res.Assets)

@@ -140,6 +140,18 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   importModule})` signature. Those three are **protocol**. Renaming the route,
   moving the loader, or changing that signature is a MAJOR version bump that
   breaks every deployed rv, not a local refactor.
+  The loader resolves the verified graph by rewriting every module specifier
+  to the absolute `blob:` URL of the module it imports, and installs **no**
+  import map. This is not a browser workaround: a `blob:` URL has an opaque
+  path, so nothing relative or root-absolute resolves against one, and a
+  specifier that fails to normalise never reaches a map key — whose URL-like
+  keys normalise against the document instead. Two things follow and both
+  bind here. `installImportMap` stays in the signature because it is
+  protocol, and is simply left uncalled. And **the browser module graph must
+  stay acyclic**: a `blob:` graph cannot express a cycle, since one of the two
+  modules would have to be minted before the other's URL exists. A cycle is
+  the named `bootstrap-cyclic` abort (AT-FR-40-f), never a partial boot on a
+  paired device.
   Tunnel versioning is semantic and both halves bind: MAJOR breaks old
   binaries by design and must surface as a named FR-24 state saying which
   side is behind (the `tunnel-version-mismatch` cause); MINOR is additive

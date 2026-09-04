@@ -10,9 +10,12 @@
  * nobody translating between them.
  *
  * Node has no blob: URLs and no import map, so the three platform seams are
- * recorded rather than performed. That is the same boundary the web suite
- * uses; what this driver adds is the real server on the other end of the
- * channel.
+ * recorded rather than performed — but the *contents* handed to
+ * createObjectURL are kept, because the one property a Node seam can still
+ * check is what the loader wrote into each module: every specifier must be an
+ * absolute blob: URL. Nothing relative or root-absolute resolves against a
+ * blob: base, in any browser, so a module that still carries one cannot boot
+ * on a device no matter how green both suites are.
  */
 
 const [bootstrapPath, baseURL, csrfToken] = process.argv.slice(2);
@@ -32,6 +35,7 @@ const channel = async url => {
 };
 
 let blobN = 0;
+const blobs = new Map();
 const importedModules = [];
 const importMaps = [];
 
@@ -42,15 +46,32 @@ if (!manifestRes.ok) {
 }
 const manifest = await manifestRes.json();
 
+let unresolvableSpecifiers = [];
+let rewrittenSpecifiers = 0;
+
 let out;
 try {
   const result = await bootstrap({
     channel,
     manifest,
-    createObjectURL: () => "blob:join/" + ++blobN,
+    createObjectURL: blob => {
+      const url = "blob:join/" + ++blobN;
+      blobs.set(url, blob);
+      return url;
+    },
     installImportMap: map => importMaps.push(map),
     importModule: async url => importedModules.push(url),
   });
+  for (const url of Object.values(result.imports)) {
+    const blob = blobs.get(url);
+    if (!blob || blob.type !== "text/javascript") continue;
+    const source = await blob.text();
+    for (const [, spec] of source.matchAll(/(?:from|import)\s+["']([./][^"']*|blob:[^"']*)["']/g)) {
+      if (spec.startsWith("blob:")) rewrittenSpecifiers += 1;
+      else unresolvableSpecifiers.push(spec);
+    }
+  }
+
   out = {
     manifestEntries: manifest.entries.length,
     manifestSource: manifest.source,
@@ -59,7 +80,12 @@ try {
     // The channel is asked for exactly the manifest's URLs and nothing else.
     channelExtras: channelCalls.filter(u => !manifest.entries.some(e => e.url === u)),
     imported: importedModules,
-    importMapKeys: importMaps.length === 1 ? Object.keys(importMaps[0].imports).length : -1,
+    objectURLs: Object.keys(result.imports).length,
+    importMapsInstalled: importMaps.length,
+    // Specifiers left in a minted module that a blob: base cannot resolve, and
+    // the count of those rewritten to a verified object URL.
+    unresolvable: unresolvableSpecifiers,
+    rewritten: rewrittenSpecifiers,
     stylesheets: result.stylesheets.length,
     assets: result.assets.length,
     entry: result.entry,

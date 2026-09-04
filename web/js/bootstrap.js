@@ -2,9 +2,19 @@
  *
  * The page is handed a channel fetch (not a peer connection), a computer-
  * supplied manifest, and platform seams for object URLs, import maps and
- * module import. It fetches every named asset, verifies each digest, rewrites
- * module specifiers, installs the import map, and only then starts the
- * entry. A failure of any one asset is a named abort; the entry never runs.
+ * module import. It fetches every named asset, verifies each digest, mints one
+ * blob: URL per asset, rewrites each module's specifiers to the blob: URLs of
+ * the modules it imports, and only then starts the entry. A failure of any one
+ * asset is a named abort; the entry never runs.
+ *
+ * Specifiers are rewritten to absolute blob: URLs rather than to root-relative
+ * paths behind an import map, because a blob: URL has an opaque path and
+ * nothing relative resolves against one: `new URL("/js/chat.js", blobURL)` is a
+ * parse failure in every browser, in Node, and in the URL Standard. An import
+ * map cannot rescue that — a URL-like map key normalises against the document,
+ * so it can never equal a specifier that failed to normalise at all — and the
+ * `installImportMap` seam is therefore accepted and left uncalled. Rewriting to
+ * an absolute URL removes the base from the question entirely.
  *
  * Integrity values are accepted only when the manifest names the computer as
  * their source. A rendezvous-offered manifest is refused before the channel
@@ -49,10 +59,55 @@ function resolveSpecifier(fromUrl, spec) {
   return "/" + stack.join("/");
 }
 
-function rewriteSpecifiers(source, fromUrl) {
+function rewriteSpecifiers(source, fromUrl, blobs) {
   return source.replace(SPECIFIER_RE, (m, prefix, quote, spec) => {
-    return prefix + quote + resolveSpecifier(fromUrl, spec) + quote;
+    const target = blobs.get(resolveSpecifier(fromUrl, spec));
+    if (!target) {
+      throw named(
+        "bootstrap-order",
+        fromUrl + " imports " + spec + ", which has no object URL yet",
+      );
+    }
+    return prefix + quote + target + quote;
   });
+}
+
+/* Dependencies first. A module's blob can only be minted once every module it
+ * imports has one, so the graph is walked depth-first and emitted post-order.
+ * The walk is also the cycle check: a blob graph cannot express a cycle — one
+ * of the two modules would have to be minted before the other's URL exists —
+ * so a cycle is a named abort here rather than a half-built graph later.
+ * scimux's graph is acyclic — AT-FR-40-a boots the real one — and AT-FR-40-f
+ * pins what a later cycle would do. */
+function moduleOrder(bodies) {
+  const order = [];
+  const state = new Map();
+  const path = [];
+  const decoder = new TextDecoder();
+
+  const visit = url => {
+    const seen = state.get(url);
+    if (seen === "done") return;
+    if (seen === "open") {
+      const cycle = path.slice(path.indexOf(url)).concat(url).join(" -> ");
+      throw named("bootstrap-cyclic", "import cycle " + cycle + " cannot be resolved to object URLs");
+    }
+    state.set(url, "open");
+    path.push(url);
+    for (const spec of specifiersIn(decoder.decode(bodies.get(url).bytes))) {
+      const dep = resolveSpecifier(url, spec);
+      const body = bodies.get(dep);
+      if (body && body.entry.kind === "js") visit(dep);
+    }
+    path.pop();
+    state.set(url, "done");
+    order.push(url);
+  };
+
+  for (const [url, { entry }] of bodies) {
+    if (entry.kind === "js") visit(url);
+  }
+  return order;
 }
 
 function specifiersIn(source) {
@@ -110,6 +165,9 @@ export async function bootstrap({
   channel,
   manifest,
   createObjectURL,
+  // Part of the §8 signature and deliberately unused: rv passes it, older
+  // loaders called it, and dropping the parameter would be a MAJOR bump for
+  // no gain. See the note at the top of this file for why no map is installed.
   installImportMap,
   importModule,
 } = {}) {
@@ -167,23 +225,24 @@ export async function bootstrap({
       index = new TextDecoder().decode(bytes);
       continue;
     }
-    const payload = entry.kind === "js"
-      ? rewriteSpecifiers(new TextDecoder().decode(bytes), url)
-      : bytes;
-    const blobURL = createObjectURL(new Blob([payload], { type: blobType(entry.kind) }));
+    if (entry.kind === "js") continue; // minted in dependency order below
+    const blobURL = createObjectURL(new Blob([bytes], { type: blobType(entry.kind) }));
     blobs.set(url, blobURL);
     imports[url] = blobURL;
     if (entry.kind === "css") stylesheets.push({ url, blobURL });
     if (entry.kind === "asset") assets.push({ url, blobURL });
   }
 
-  // The map keys on rewritten, root-relative URLs and nothing else. A key that
-  // is not a bare specifier is parsed as a URL against the map's base — the
-  // document — so "./chat.js" would normalise to <origin>/chat.js and never be
-  // consulted; rewriteSpecifiers has already made it "/js/chat.js", which does
-  // resolve correctly from a blob: module. Relative keys would be dead weight
-  // that reads like a working mapping.
-  installImportMap({ imports });
+  for (const url of moduleOrder(bodies)) {
+    const source = rewriteSpecifiers(
+      new TextDecoder().decode(bodies.get(url).bytes),
+      url,
+      blobs,
+    );
+    const blobURL = createObjectURL(new Blob([source], { type: blobType("js") }));
+    blobs.set(url, blobURL);
+    imports[url] = blobURL;
+  }
 
   const entryUrl = manifest.entry || ENTRY;
   const entryBlob = blobs.get(entryUrl);

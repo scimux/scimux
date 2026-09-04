@@ -209,16 +209,15 @@ test("AT-FR-40-a: fake channel serving the real files boots the full graph", asy
   if (!s.imported.length) {
     fail(at, "entry module was not started");
   }
-  if (s.maps.length !== 1 || !s.maps[0] || typeof s.maps[0].imports !== "object") {
-    fail(at, "import map was not installed");
+  if (s.maps.length !== 0) {
+    fail(at, "an import map was installed; a blob: module resolves no URL-like " +
+      "specifier at all, so the map is unreachable by construction — see AT-FR-40-e");
   }
 
-  // Every specifier the loader must resolve, as the *resolved* URL. The raw
-  // relative form is deliberately not required: an import-map key that is not
-  // a bare specifier is parsed as a URL against the map's base — the document
-  // — so "./chat.js" would normalise to <origin>/chat.js and never be
-  // consulted. rewriteSpecifiers has already turned it into "/js/chat.js",
-  // which does resolve correctly from a blob: module.
+  // Every module the loader must resolve, as the *resolved* URL, each carrying
+  // its own object URL. The graph is closed, so the set of resolved specifiers
+  // is the set of module URLs; asserting both sides keeps a loader that mints
+  // blobs but drops an edge from passing.
   const graphSpecs = new Set();
   for (const item of js) {
     graphSpecs.add(item.url);
@@ -227,18 +226,22 @@ test("AT-FR-40-a: fake channel serving the real files boots the full graph", asy
       graphSpecs.add(resolveSpecifier(item.url, spec));
     }
   }
-  const mapped = s.maps[0].imports;
+  const mapped = result.imports;
   for (const spec of graphSpecs) {
     if (!mapped[spec]) {
-      fail(at, `import map does not map specifier ${spec}`);
+      fail(at, `no object URL was minted for ${spec}`);
     }
   }
-  for (const key of Object.keys(mapped)) {
-    if (key.startsWith(".")) {
-      fail(at, `import map key ${key} is relative; such a key resolves against ` +
-        `the document base, not the module that imported it, so it is dead weight ` +
-        `that reads like a working mapping`);
+  for (const [url, blobURL] of Object.entries(mapped)) {
+    if (!String(blobURL).startsWith("blob:")) {
+      fail(at, `${url} resolves to ${blobURL}, which is not an object URL`);
     }
+  }
+  // One object URL per served asset but the index, so a module is a single
+  // instance in the browser's module map rather than one copy per importer.
+  if (Object.keys(mapped).length !== inventory.length - 1) {
+    fail(at, `${Object.keys(mapped).length} object URLs for ${inventory.length - 1} ` +
+      `non-index assets; a module minted twice is two module instances`);
   }
 
   const indexOnDisk = readFileSync(join(WEB, "index.html"), "utf8");
@@ -247,6 +250,108 @@ test("AT-FR-40-a: fake channel serving the real files boots the full graph", asy
   }
   if (s.imported[0] !== mapped[ENTRY]) {
     fail(at, `entry module started as ${s.imported[0]}, want the blob for ${ENTRY}`);
+  }
+});
+
+/* The property the Node seams cannot show by running the graph, and the one
+ * that kept the real device on the failure screen: a blob: URL has an opaque
+ * path, so `new URL("/js/chat.js", blobURL)` is a parse failure and a
+ * specifier that fails to parse never reaches an import-map key at all. The
+ * map was not late, it was unreachable. Every specifier that survives into a
+ * minted module must therefore be an absolute blob: URL, and no map may be
+ * installed to paper over one that is not. */
+test("AT-FR-40-e: every verified module import is an absolute blob: URL, with no import map", async () => {
+  const at = "AT-FR-40-e";
+  const inventory = servedFromDisk();
+  const manifest = await computerManifest(inventory);
+  const s = seams();
+  const result = await bootstrap({
+    channel: diskChannel(inventory),
+    manifest,
+    createObjectURL: s.createObjectURL,
+    installImportMap() {
+      throw new Error("an import map is unreachable from a blob: module and must not be installed");
+    },
+    importModule: s.importModule,
+  });
+
+  // The edges the graph actually has, counted off disk with the loader's own
+  // notion of a specifier, so the rewritten side can be compared to a number
+  // nothing in the loader produced.
+  const js = inventory.filter(i => i.kind === "js");
+  let edges = 0;
+  for (const item of js) edges += specifiersIn(readFileSync(item.file, "utf8")).length;
+  if (edges < 20) {
+    fail(at, `disk has ${edges} module edges; the check is vacuous`);
+  }
+
+  let checked = 0;
+  let rewritten = 0;
+  for (const blobURL of Object.values(result.imports)) {
+    const blob = s.blobs.get(blobURL);
+    if (!blob || blob.type !== "text/javascript") continue;
+    checked += 1;
+    const source = await blob.text();
+    const leftover = source.match(/(?:from|import)\s+["'][./][^"']*["']/);
+    if (leftover) {
+      fail(at, `a minted module still carries ${leftover[0]}; nothing relative or ` +
+        `root-absolute resolves against a blob: base`);
+    }
+    for (const [, spec] of source.matchAll(/(?:from|import)\s+["'](blob:[^"']+)["']/g)) {
+      rewritten += 1;
+      if (!s.blobs.has(spec)) {
+        fail(at, `a minted module imports ${spec}, which is not one of the verified objects`);
+      }
+    }
+  }
+  if (checked !== js.length) {
+    fail(at, `checked ${checked} modules, disk has ${js.length}`);
+  }
+  if (rewritten !== edges) {
+    fail(at, `${rewritten} specifiers were rewritten to object URLs, disk has ${edges} edges`);
+  }
+});
+
+/* A blob graph cannot express a cycle: whichever module is minted first would
+ * need the other's object URL, which does not exist yet. scimux's graph is
+ * acyclic — AT-FR-40-a boots the real one — and this names what happens if a
+ * later change makes it cyclic: a clear abort here, not a partial boot on a
+ * device. */
+test("AT-FR-40-f: an import cycle is a named abort and never starts the entry", async () => {
+  const at = "AT-FR-40-f";
+  // The two fixture bodies are assembled rather than written out literally:
+  // reachability.test.js scans this file's source for import statements naming
+  // a relative module, and would read a fixture body as one of them.
+  const imports = (what, name) => "import { " + what + " } from " + JSON.stringify("./" + name) + ";\n";
+  const files = new Map([
+    ["/", "<!doctype html><html><head></head><body></body></html>"],
+    ["/js/app.js", imports("b", "b.js") + "export function createApp() { return b; }\n"],
+    ["/js/b.js", imports("createApp", "app.js") + "export const b = createApp;\n"],
+  ]);
+  const kinds = new Map([["/", "index"], ["/js/app.js", "js"], ["/js/b.js", "js"]]);
+
+  const entries = [];
+  for (const [url, text] of files) {
+    const bytes = new TextEncoder().encode(text);
+    entries.push({ url, kind: kinds.get(url), size: bytes.byteLength, integrity: await sriOf(bytes) });
+  }
+  const s = seams();
+  await assert.rejects(
+    bootstrap({
+      channel: async url => bytesResponse(new TextEncoder().encode(files.get(url) ?? "")),
+      manifest: { source: SOURCE_COMPUTER, entry: ENTRY, entries },
+      createObjectURL: s.createObjectURL,
+      installImportMap: s.installImportMap,
+      importModule: s.importModule,
+    }),
+    err => {
+      assert.equal(err.name, "bootstrap-cyclic");
+      assert.match(err.message, /\/js\/app\.js|\/js\/b\.js/);
+      return true;
+    },
+  );
+  if (s.imported.length !== 0) {
+    fail(at, "the entry was started despite the cycle");
   }
 });
 
