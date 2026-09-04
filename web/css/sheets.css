@@ -197,10 +197,13 @@
 #m_devices .devconfirm button { padding: 6px 10px; min-height: 32px; }
 #m_devices .item.note { color: var(--dim); }
 #m_devices .item.err { color: var(--bad); }
-#m_devices button.danger {
+/* Scoped to the confirmation, not to the list. `#m_devices button.danger`
+   carries an id, which outranks the shared `.roundactions button` shape and
+   would square off the round revoke while the pencil beside it stayed
+   round. The worded button is the only rectangular one here. */
+#m_devices .devconfirm button.danger {
   color: var(--bad); font-weight: 600; border: 1px solid var(--bad); border-radius: 8px;
 }
-#m_devices .roundactions button.danger { color: var(--bad); border: 1px solid var(--hairline); }
 /* Unlinking this computer ends every grant in the list above at once, so
    the armed state reads destructive for the same reason a revoke does. */
 #m_unlink.danger { color: var(--bad); font-weight: 600; }

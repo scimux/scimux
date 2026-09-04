@@ -184,6 +184,20 @@ test("a long paired-device name cannot push its controls out of view", () => {
   assert.match(css, /#m_devices \.devrow\s*\{[^}]*padding-right:/s);
 });
 
+/* The two controls are a pair, so they have to look like one. A rule
+   written as `#m_devices button.danger` carries an id, which outranks the
+   shared `.roundactions button` shape by specificity and quietly squares
+   off the revoke while the pencil beside it stays round -- the pill
+   styling belongs to the worded confirmation, which is the only
+   rectangular button in this list. */
+test("the revoke button is the same round shape as the pencil", () => {
+  const css = readFileSync(new URL("../css/sheets.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /#m_devices button\.danger\s*\{/,
+    "an id-scoped danger rule outranks the round-button shape");
+  assert.match(css, /#m_devices \.devconfirm button\.danger\s*\{[^}]*border-radius/s,
+    "the pill styling is not scoped to the worded confirmation");
+});
+
 test("an empty list says so rather than showing nothing", async () => {
   const h = setup({ [LIST]: { devices: [] } });
   await h.f.refresh();
