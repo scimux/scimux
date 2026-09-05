@@ -44,6 +44,16 @@ byte-identical to `git cat-file blob`.
 
 ## Future rv vector revision
 
+`scripts/vendor-rendezvous.sh /path/to/scimux-rv [revision]` performs
+the four steps below. It refuses a source tree with uncommitted changes
+to the vendored paths, pins the commit that last *touched* them rather
+than whatever is at HEAD, enumerates the vector JSON from that commit
+so a file added or removed over there arrives here without editing the
+script, and runs both verification commands.
+
+The steps remain the authority; the script is a way of not mistyping
+them.
+
 1. Identify the committed scimux-rv Git OID that authored the new spec
    and vectors.
 2. Byte-copy the specification, `vectors.sha256`, and every vector

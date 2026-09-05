@@ -23,6 +23,7 @@ go test -short ./...   # unit only; the offline CI lane (build.yml runs the full
 node --test web/test/*.test.js  # browser unit suite (1,182 tests on 2026-08-31, including web/test/audit.test.js; no browser needed)
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
+scripts/vendor-rendezvous.sh /path/to/scimux-rv   # re-vendor the rendezvous vectors
 ```
 
 The release matrix is not written down twice: `TestCrossBuildTargets` parses
@@ -199,7 +200,11 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   scimux-rv, and the vendoring lane is recorded in that repository's
   `docs/tunnel-protocol-sync.md` (the mirror of our
   `docs/rendezvous-protocol-sync.md`, which carries rv's vectors the other
-  way).
+  way). Each lane has a one-directional script in the *receiving*
+  repository — `scripts/vendor-rendezvous.sh` here, `scripts/vendor-tunnel.sh`
+  there. There is deliberately no bidirectional one: a single "sync
+  everything" entry point is what would eventually regenerate these
+  vectors on the consuming side.
 - **Snapshot over stream.** Output is read via `tmux capture-pane -p`
   snapshots and via the transcript JSONL files the agent CLIs write
   themselves. Never parse the terminal byte stream, never use tmux control
