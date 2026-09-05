@@ -9,8 +9,8 @@ import (
 	"unicode"
 )
 
-// AT-FR-11-a: A pairing code expires after 60 seconds and is then rejected.
-func TestAT_FR_11_a_PairingCodeExpiresAfter60s(t *testing.T) {
+// AT-FR-11-a: A pairing code expires after 120 seconds and is then rejected.
+func TestAT_FR_11_a_PairingCodeExpiresAfter120s(t *testing.T) {
 	const at = "AT-FR-11-a"
 	c, clk, ctx, cancel := s7Enrolled(t)
 	defer cancel()
@@ -27,8 +27,13 @@ func TestAT_FR_11_a_PairingCodeExpiresAfter60s(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: MintPairingCode: %v", at, err)
 	}
-	if PairingTTL != 60*time.Second {
-		t.Fatalf("%s: PairingTTL = %s, want 60s", at, PairingTTL)
+	// Pinned on both sides of the wire: rv holds the waiter for
+	// PairingWaitTTL and the computer abandons the code at PairingTTL.
+	// If these drift apart the loser is whoever is holding the phone —
+	// either a code the computer has forgotten but rv still answers
+	// for, or the reverse.
+	if PairingTTL != 120*time.Second {
+		t.Fatalf("%s: PairingTTL = %s, want 120s", at, PairingTTL)
 	}
 	norm := s7RequirePairCode(t, at, code.Code)
 	if norm != wantCode {

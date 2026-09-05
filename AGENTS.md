@@ -4,6 +4,16 @@ scimux supervises tmux-wrapped agent chats (Claude Code, Codex) from a local
 web page. Read the README for architecture; this file lists only the
 invariants you must not break and the workflows you need.
 
+The remote-access design is `remote-by-invite-only.md`, tracked in this
+repository. Every FR-xx and NFR-xx cited from `internal/remote`, from the
+two protocol specifications, and from `scimux-rv`'s own `AGENTS.md`
+resolves there — it is the numbering, not a plan, which is why it is
+published rather than kept as a working note. Markdown here is
+deny-by-default: `.gitignore` ignores `*.md` and allowlists the tracked
+set, so a new document is tracked on purpose or not at all
+(`git ls-files '*.md'` is the check). Superseded plans and reviews live in
+the untracked `attic/`.
+
 ## Commands
 
 ```sh
@@ -169,6 +179,17 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   positional, and a tag number is permanent: never reused, never
   repurposed, never retyped. Do not add a count prefix anywhere — records
   are read to exhaustion so a claimed count cannot be lied about.
+- **`PairingTTL` is a constant this repository shares with a server it does
+  not deploy.** `internal/remote.PairingTTL` and scimux-rv's
+  `PairingWaitTTL` must hold the same value — **120 s** as of 2026-09-05.
+  Nothing enforces it: the code is minted here, the slot is held there, and
+  a disagreement is silent in the direction that matters. If this side
+  expires first, the user is told the code is dead while rv still answers
+  for it; if rv expires first, the computer waits on a slot that no longer
+  exists. The number is an economics decision — 10^8 codes against rv's
+  30 offers/s is ~3600 blind tries per window — so change it in both
+  repositories, with the arithmetic, or not at all. `remote-by-invite-only.md`
+  FR-11 and AT-FR-11-a carry the value too.
 - **`internal/remote/codec/testdata/vectors.json` is a published contract,
   not a local fixture.** `vectors_test.go` regenerates it by calling the
   production encoders and fails on drift; scimux-rv byte-copies it and

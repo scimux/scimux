@@ -19,10 +19,14 @@ import (
 	"unicode"
 )
 
-// PairingTTL is FR-11: 60-second lifetime of a pairing code and its
-// temporary waiter, measured from first registration.
+// PairingTTL is FR-11: 120-second lifetime of a pairing code and its
+// temporary waiter, measured from first registration. It matches rv's
+// PairingWaitTTL and must keep matching it: the window is sized for a
+// person unlocking a phone and comparing six digits across two
+// screens, not for the protocol. See §10.2 of rendezvous-v1.md for why
+// widening it is cheap.
 const (
-	PairingTTL              = 60 * time.Second
+	PairingTTL              = 120 * time.Second
 	PairingCodeCrockfordLen = 8
 	pairingCodeEntropyBytes = 5
 )

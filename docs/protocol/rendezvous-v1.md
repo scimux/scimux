@@ -120,6 +120,9 @@ replay.
 | `p-rendezvous-js` | bootstrap | `GET /p/rendezvous.js` | device → rv |
 | `p-session-js` | bootstrap | `GET /p/session.js` | device → rv |
 | `p-store-js` | bootstrap | `GET /p/store.js` | device → rv |
+| `p-manifest` | bootstrap | `GET /p/manifest.webmanifest` | device → rv |
+| `p-icon-180` | bootstrap | `GET /p/icon-180.png` | device → rv |
+| `p-icon-512` | bootstrap | `GET /p/icon-512.png` | device → rv |
 | `p-rejection` | bootstrap | `GET /p/not-in-inventory` | rv → device |
 | `stun-binding-request` | stun | — | client → rv (UDP Binding) |
 | `stun-binding-success` | stun | — | rv → client (XOR-MAPPED-ADDRESS) |
@@ -632,7 +635,7 @@ Authenticated, route `/v1/pair/wait`. JSON:
 | `code` | 8-char normalised (or grouped) short code |
 | `id` | 64-char temp RID, client-minted |
 | `reply` | no; hex of the sealed reply to the previous offer on this code. Same role as §9.2. Not in the signed message. |
-| `max_ms` | no; default 60000, max 120000. Bounds this poll only. The waiter TTL is independently 60 s from first registration. Signatures do not cover `max_ms`. |
+| `max_ms` | no; default 60000, max 120000. Bounds this poll only. The waiter TTL is independently 120 s from first registration. Signatures do not cover `max_ms`. |
 
 Response when an offer is delivered (`pair-wait-response`):
 
@@ -654,8 +657,14 @@ X-Content-Type-Options: nosniff
 X-Rv-Challenge: <64 lowercase hex>
 ```
 
-TTL of the temporary waiter: **60 s** from first registration,
+TTL of the temporary waiter: **120 s** from first registration,
 measured with the injectable admission clock (not a wall timer).
+The window is sized for a person, not for the protocol: unlock a
+phone, open the link, read six digits off one screen and compare
+them on another. Widening it is paid for in guesses, and the price
+is small — the code space is 10^8 and §10.3 caps offers at 30/s
+process-wide, so a blind attacker gets 3600 tries per window
+against 10^8 codes.
 Same installation may re-register the same code until that expiry
 (reconnect / cancel-and-retry). A different installation
 presenting the same code is `rejection-collision` (constant 404).
@@ -681,7 +690,7 @@ waiter receives the envelope bytes (decoded hex) as the
 §9.3.
 
 An offer does **not** consume the pairing waiter. Consumption
-happens at the first `reply` the computer submits, or at the 60 s
+happens at the first `reply` the computer submits, or at the 120 s
 TTL — **not** at `pair/cancel` (§10.4, §10.6). A `reply` that
 arrives after the offer POST has already completed (`ReplyHold`
 elapsed, disconnect, or revoke) is dropped and does **not**
@@ -702,7 +711,7 @@ Authenticated, route `/v1/pair/cancel`. JSON:
 
 Tears down the temporary waiter without treating the code as
 consumed: the same installation may `pair/wait` again with that
-code until the original 60 s expiry (FR-38). Response `204`.
+code until the original 120 s expiry (FR-38). Response `204`.
 
 ### 10.5 Restart
 
@@ -712,7 +721,7 @@ amnesia. In-flight pairings fail; the user generates a new code.
 ### 10.6 State machine (rv)
 
 ```
-absent --pair/wait--> waiting(ttl=60s)
+absent --pair/wait--> waiting(ttl=120s)
 waiting --pair/offer--> holding(replyHold=4s)   [waiter still waiting]
 holding --reply--> consumed (torn down)
 holding --timeout / disconnect--> waiting (if ttl remains) else absent
@@ -906,11 +915,20 @@ byte-identical inventory responses.
 | `GET /p/boot.css` | `text/css; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the CSS | bootstrap styles. |
 | `GET /p/codec.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel handshake, frames, records and payloads ([`tunnel-v2.md`](tunnel-v2.md) §2–§6). Protocol, not application code. |
 | `GET /p/connection.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel request lifecycle and FR-24 states (`tunnel-v2.md` §7, §9). Protocol, not application code. |
+| `GET /p/manifest.webmanifest` | `application/manifest+json; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JSON | the Home Screen app declaration. `display: standalone`; `start_url` and `scope` are both `/p`. |
+| `GET /p/icon-180.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the `apple-touch-icon`. iOS takes the Home Screen icon from the link in the shell, not from the manifest. |
+| `GET /p/icon-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the manifest icon, `purpose: "any maskable"`; artwork inset for launchers that crop. |
 
 The inventory grew from three rows to five on 2026-08-24, when the
 tunnel protocol moved into this repository, from five to ten on
-2026-08-26, when the pairing client was built, and to eleven on
-2026-08-27, when the entry point became a row. It had been an inline
+2026-08-26, when the pairing client was built, to eleven on
+2026-08-27, when the entry point became a row, and to fourteen on
+2026-09-05, when the Home Screen manifest and its two icons became
+rows. Before those three, adding `/p` to a Home Screen produced a
+bookmark rather than an app: nothing in the shell declared one, so the
+launcher opened a browser tab and captured a screenshot for the icon.
+
+The entry point had been an inline
 `<script type=module>`, which the CSP two paragraphs below forbids, so
 `/p` rendered its "Loading…" placeholder and stopped there in every
 browser. An inline exemption — `unsafe-inline`, a nonce, or a hash —
@@ -931,8 +949,10 @@ None of these modules is application code. They implement pairing,
 the tunnel, and the FR-24 states, and they stop at §8's three fixed
 constants. FR-33 is asserted over them as a closure property rather
 than a word ban: every `import` in an inventory body resolves to
-another row of this table, and the only computer route any of them
-names is §8's `/api/remote/bootstrap`, which is fetched over the
+another row of this table, every `icons[].src` in the manifest is a row
+of it, the manifest's `scope` is `/p` rather than `/` — a wider scope
+would claim routes this table does not contain — and the only computer
+route any of them names is §8's `/api/remote/bootstrap`, which is fetched over the
 data channel and never from rv. What the browser does *after* the
 channel is negotiated is fetched from the computer through those three
 constants.

@@ -14,11 +14,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/html; charset=utf-8",
-        "Digest": "sha-256=:vGhEJ4KoSiglNRxCntX/OpA/kNFPcu1EBtIPjproMCA=:",
+        "Digest": "sha-256=:ORq2NWHRxt61bVGc+rpUj2sOcIHq/N1TFF24SS47XQE=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1\"\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp\u003eLoading\u0026#8230;\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
+      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"\u003e\n\u003cmeta name=color-scheme content=\"light dark\"\u003e\n\u003cmeta name=theme-color content=\"#1C1C1E\"\u003e\n\u003cmeta name=apple-mobile-web-app-capable content=yes\u003e\n\u003cmeta name=apple-mobile-web-app-status-bar-style content=black-translucent\u003e\n\u003cmeta name=apple-mobile-web-app-title content=scimux\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=manifest href=\"/p/manifest.webmanifest\"\u003e\n\u003clink rel=apple-touch-icon href=\"/p/icon-180.png\"\u003e\n\u003clink rel=icon href=\"/p/icon-512.png\"\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app aria-live=polite\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp class=busy aria-hidden=true\u003e\u003ci\u003e\u003c/i\u003e\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
     }
   },
   {
@@ -36,11 +36,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
-        "Digest": "sha-256=:A21D2En+hqfA203+1Pj3vlD9OCrs/IVImXOlDcwQPJQ=:",
+        "Digest": "sha-256=:gndTYg0caEF1GwaBB4H/KrX/iqXHAj5ONsFg2lJuevs=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "036d43d849fe86a7c0db4dfed4f8f7be50fd382aecfc85489973a50dcc103c94"
+      "body_sha256": "827753620d1c6841751b06810781ff2ab5ff8aa5c7023e4e36c160da526e7afb"
     }
   },
   {
@@ -124,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:82SVAV4VvZifFkHwFpvmMDW8RsihUgUiZSt8vi0F8Fc=:",
+        "Digest": "sha-256=:Gc0Bz3JoHwdWxVBIG1WpKlbvyTuQ3lzRMtEOSZnQ1Cg=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "f36495015e15bd989f1641f0169be63035bc46c8a1520522652b7cbe2d05f057"
+      "body_sha256": "19cd01cf72681f0756c550481b55a92a56efc93b90de5cd132d10e4999d0d428"
     }
   },
   {
@@ -239,6 +239,72 @@
         "X-Content-Type-Options": "nosniff"
       },
       "body_sha256": "662929cd60d8caa3bd8487d2684ff8030f4fda4eaf4b4146893ebfcfe85ccbb2"
+    }
+  },
+  {
+    "id": "p-manifest",
+    "message": "p-manifest",
+    "comment": "The Home Screen app declaration. Pinned verbatim because its icons[].src close over the inventory the way a module's imports do, and its scope is /p: a scope of / would claim addresses this server does not serve.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/manifest.webmanifest"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "application/manifest+json; charset=utf-8",
+        "Digest": "sha-256=:DWUsMlTNjVsF6BZi6vpJq5N3Z3BM1fJWCOJX0sWepNE=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_utf8": "{\n  \"name\": \"Pair with scimux\",\n  \"short_name\": \"scimux\",\n  \"description\": \"Reach your own computer from this device.\",\n  \"start_url\": \"/p\",\n  \"scope\": \"/p\",\n  \"display\": \"standalone\",\n  \"orientation\": \"portrait\",\n  \"background_color\": \"#1C1C1E\",\n  \"theme_color\": \"#1C1C1E\",\n  \"icons\": [\n    { \"src\": \"/p/icon-180.png\", \"sizes\": \"180x180\", \"type\": \"image/png\" },\n    { \"src\": \"/p/icon-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any maskable\" }\n  ]\n}\n"
+    }
+  },
+  {
+    "id": "p-icon-180",
+    "message": "p-icon-180",
+    "comment": "The apple-touch-icon. Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/icon-180.png"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "image/png",
+        "Digest": "sha-256=:ePO6Vb4YslxMc6Qp435dW0J7eM3byC9dA3EHizdvgtM=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "78f3ba55be18b25c4c73a429e37e5d5b427b78cddbc82f5d0371078b376f82d3"
+    }
+  },
+  {
+    "id": "p-icon-512",
+    "message": "p-icon-512",
+    "comment": "The maskable icon. Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/icon-512.png"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "image/png",
+        "Digest": "sha-256=:uGEPE5z0fvgMT/ex9QM0qe4ykqfWCIza6DRrLBsiJnc=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "b8610f139cf47ef80c4ff7b1f50334a9ee3292a7d6088cdae8346b2c1b222677"
     }
   },
   {
