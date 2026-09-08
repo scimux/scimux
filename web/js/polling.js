@@ -99,23 +99,32 @@ const POLL_INTERVAL_MS = 2000;
  * rather than lost. Long enough that a slow host is never overtaken. */
 export const STALLED_REQUEST_MS = 20000;
 
-/* A latch a stalled request cannot hold shut. The token guards the release so
- * the abandoned holder cannot free its successor's gate; if it ever settles,
- * its result is simply the older of two answers to the same question. */
+/* A latch a stalled request cannot hold shut. The token identifies the current
+ * holder, so an abandoned one can neither free its successor's gate nor act on
+ * its own late answer. That second half is not tidiness: a taken-over request
+ * settles as lost long after the successor succeeded, and letting it run the
+ * failure path repaints "server unreachable" over a working connection. */
 function makeGate(now) {
   let at = 0;
   let seq = 0;
   let held = false;
   return {
-    /** Token to release with, or 0 when another holder is still inside. */
+    /** Token to act and release with, or 0 when another holder is inside. */
     enter() {
       if (held && now() - at < STALLED_REQUEST_MS) return 0;
       held = true;
       at = now();
       return ++seq;
     },
+    /** Whether this token is still the current holder — check after an await. */
+    holds(token) {
+      return token === seq;
+    },
+    /** Releases only for the current holder; reports whether it did. */
     release(token) {
-      if (token === seq) held = false;
+      if (token !== seq) return false;
+      held = false;
+      return true;
     },
   };
 }
@@ -278,17 +287,18 @@ export function createPollingFeature(deps = {}) {
           },
         },
       );
-      if (destroyed) return;
+      if (destroyed || !saveGate.holds(token)) return;
       UI = next.doc;
       uiRev = next.rev;
       uiOps = next.ops;
     } finally {
-      saveGate.release(token);
-      uiSaving = false;
-      if (!destroyed) {
-        renderSyncState();
-        if (uiOps.length && syncwarnEl) {
-          syncwarnEl.textContent = syncWarningText({ failed: true });
+      if (saveGate.release(token)) {
+        uiSaving = false;
+        if (!destroyed) {
+          renderSyncState();
+          if (uiOps.length && syncwarnEl) {
+            syncwarnEl.textContent = syncWarningText({ failed: true });
+          }
         }
       }
     }
@@ -334,12 +344,12 @@ export function createPollingFeature(deps = {}) {
         /* A 2s ETag poll must not be served from the HTTP cache. */
         r = await fetchImpl(req.path, { ...req.opts, cache: "no-store" });
       } catch {
-        if (destroyed) return;
+        if (destroyed || !tickGate.holds(token)) return;
         setHostOnline(false);
         setServerUnreachable();
         return;
       }
-      if (destroyed) return;
+      if (destroyed || !tickGate.holds(token)) return;
       if (r.status === 304) {
         setHostOnline(true);
         updateCardAges();

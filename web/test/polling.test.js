@@ -1003,3 +1003,32 @@ test("a UI save that never settles releases the save gate", async () => {
   assert.equal(syncwarnEl.textContent, "", "and the queue drains");
   f.destroy();
 });
+
+test("a stalled tick taken over cannot paint the status bar behind its successor", async () => {
+  /* The takeover leaves the stalled request in flight. When it finally settles
+     as lost it must stay silent: painting "server unreachable" over the
+     successor's fresh answer is a flicker, and a message the connection
+     contradicts is exactly the misleading state this whole fix is about. */
+  const timers = fakeTimers();
+  let hits = 0;
+  let loseFirst;
+  const fetchImpl = async (path) => {
+    if (path === UI_PATH) return jsonResponse({ status: 304, body: {} });
+    hits++;
+    if (hits === 1) return new Promise((_, reject) => { loseFirst = reject; });
+    return jsonResponse({ body: { nodes: [], unadopted: [] }, etag: '"ok"' });
+  };
+  const effects = effectLog();
+  const { f } = makeFeature({ timers, effects, fetchBundle: { fetchImpl, calls: [] } });
+  f.tick();
+  await flush();
+  timers.advance(STALLED_REQUEST_MS);
+  await f.tick();
+  assert.equal(hits, 2, "the successor ran");
+  effects.clear();
+  loseFirst(new Error("channel lost"));
+  await flush();
+  assert.deepEqual(effects.names(), [],
+    "the older of two answers repaints nothing at all");
+  f.destroy();
+});
