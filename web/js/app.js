@@ -54,6 +54,7 @@ import {
   agentLogo as agentLogoMod,
   sysMetricHTML,
   statusPhaseAt,
+  setStatusUnreachable,
   STATUS_PHASES,
 } from "./usage.js";
 import {
@@ -1819,8 +1820,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     setHostOnline: ok => {
       $("#host").classList.toggle("online", ok);
       $("#host").classList.toggle("offline", !ok);
+      /* The dot and the words are one status; a recovery that moved only the
+         dot left "server unreachable" standing over a working tunnel. */
+      if (ok) setStatusUnreachable($("#sys"), false);
     },
-    setServerUnreachable: () => { $("#sys").textContent = "server unreachable"; },
+    setServerUnreachable: () => setStatusUnreachable($("#sys"), true),
     setHostname: h => { $("#host").textContent = h; },
     setVersion: v => { $("#m_version").textContent = v; },
     publishState: st => {

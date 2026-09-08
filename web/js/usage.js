@@ -8,6 +8,16 @@ import { esc } from "./format.js";
 export const STATUS_PHASES = Object.freeze(["metrics", "claude", "codex", "grok"]);
 
 /**
+ * Mark the status slot unreachable, or clear it. A class, never a write: the
+ * slot is a container of phase elements and a textContent write over it
+ * deleted them for good, so the next metrics render threw on a missing child.
+ * The message has its own element inside the slot; CSS does the swap.
+ */
+export function setStatusUnreachable(el, unreachable){
+  if (el && el.classList) el.classList.toggle("offline", !!unreachable);
+}
+
+/**
  * Resolve which status phase to show. Budget phases stay on metrics until a
  * usage snapshot has been read at least once (avoids an empty flip).
  */

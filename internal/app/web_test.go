@@ -378,7 +378,9 @@ func TestActivityCardShowsUserInteractionAgeAndHostConnectivity(t *testing.T) {
 		`createPollingFeature`,
 		`import { createPollingFeature } from "./polling.js";`,
 		`setHostOnline: ok =>`,
-		`setServerUnreachable: () => { $("#sys").textContent = "server unreachable"; }`,
+		// The message is a class on the status slot, never a write over its
+		// phase children — see web/test/usage.test.js.
+		`setServerUnreachable: () => setStatusUnreachable($("#sys"), true)`,
 		`createCardsFeature`,
 		`import { createCardsFeature } from "./cards.js";`,
 		`function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }`,

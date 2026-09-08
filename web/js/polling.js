@@ -5,9 +5,9 @@
  * Owned state:
  *   - stateEtag          /api/state conditional GET revision
  *   - UI / uiRev / uiOps  shared ui.json document, ETag, pending local ops
- *   - uiLoaded / uiSaving write gates
+ *   - uiLoaded / uiSaving write gates; saveGate / tickGate stall takeover
  *   - uiTimer            300ms coalesced flush timer
- *   - ticking            non-overlap flag for direct/fast ticks
+ *   - tickGate           non-overlap gate for direct/fast ticks
  *   - pollTimer / pollGen visible-tab 2s generation/cancellation loop
  *   - bound / destroyed  lifecycle flags
  *
@@ -50,13 +50,15 @@
  *   - HTTP/reducer/conflict/replay algorithms (api.js + state.js)
  *
  * Contracts preserved:
- *   - Network failure → offline + "server unreachable"
+ *   - Network failure → offline + "server unreachable"; back online clears it
  *   - 304 → online, ages, await chat, fire-and-forget UI poll (no structural rebuild)
  *   - non-OK → offline
  *   - 200 → ETag/nodes/unadopted/hostname/version/sys → selection fallback
  *           → Cards → Map → Bookmarks → await Chat → UI poll
  *   - UI poll never awaited by the state tick
- *   - Direct fast ticks non-overlapping; finally always releases ticking
+ *   - Direct fast ticks non-overlapping; finally always releases the gate,
+ *     and a holder stalled past STALLED_REQUEST_MS is taken over
+ *   - A tick whose render effects throw still reschedules the loop
  *   - Stale generations cannot reschedule; 2s delay only after tick completes
  *   - Hidden pause + immediate visible resume via startPolling
  *   - Exact sync-warning: "syncing…" / "changes not saved yet" / clear
@@ -87,6 +89,36 @@ import {
 
 const FLUSH_COALESCE_MS = 300;
 const POLL_INTERVAL_MS = 2000;
+
+/* How long a request may hold its gate before the next one takes over.
+ * A gate is released in `finally`, so a request that neither resolves nor
+ * rejects would hold one for the life of the page — polling or saving stops
+ * dead while the connection itself is healthy. Nothing else bounds that:
+ * the tunnel has no per-request timeout by design, and the "disconnected"
+ * state a sleeping phone sits in is deliberately treated as recoverable
+ * rather than lost. Long enough that a slow host is never overtaken. */
+export const STALLED_REQUEST_MS = 20000;
+
+/* A latch a stalled request cannot hold shut. The token guards the release so
+ * the abandoned holder cannot free its successor's gate; if it ever settles,
+ * its result is simply the older of two answers to the same question. */
+function makeGate(now) {
+  let at = 0;
+  let seq = 0;
+  let held = false;
+  return {
+    /** Token to release with, or 0 when another holder is still inside. */
+    enter() {
+      if (held && now() - at < STALLED_REQUEST_MS) return 0;
+      held = true;
+      at = now();
+      return ++seq;
+    },
+    release(token) {
+      if (token === seq) held = false;
+    },
+  };
+}
 
 const SYNC_PENDING = "syncing…";
 const SYNC_FAILED = "changes not saved yet";
@@ -122,6 +154,7 @@ export function createPollingFeature(deps = {}) {
     csrf = "",
     setTimeout: setTimeoutImpl = globalThis.setTimeout?.bind(globalThis),
     clearTimeout: clearTimeoutImpl = globalThis.clearTimeout?.bind(globalThis),
+    now = () => Date.now(),
     syncwarnEl = null,
     setHostOnline = () => {},
     setServerUnreachable = () => {},
@@ -153,7 +186,8 @@ export function createPollingFeature(deps = {}) {
   let uiLoaded = false;
   let uiSaving = false;
   let uiTimer = null;
-  let ticking = false;
+  const saveGate = makeGate(now);
+  const tickGate = makeGate(now);
   let pollTimer = null;
   let pollGen = 0;
   let bound = false;
@@ -224,8 +258,10 @@ export function createPollingFeature(deps = {}) {
 
   async function flushUI() {
     if (destroyed) return;
-    if (uiSaving || !uiLoaded || !uiOps.length) return;
-    uiSaving = true;
+    if (!uiLoaded || !uiOps.length) return;
+    const token = saveGate.enter();
+    if (!token) return;
+    uiSaving = true;   /* the value api.js reads, not the latch */
     try {
       const next = await flushUIState(
         { doc: UI, rev: uiRev, ops: uiOps, loaded: uiLoaded, saving: false },
@@ -247,6 +283,7 @@ export function createPollingFeature(deps = {}) {
       uiRev = next.rev;
       uiOps = next.ops;
     } finally {
+      saveGate.release(token);
       uiSaving = false;
       if (!destroyed) {
         renderSyncState();
@@ -287,8 +324,9 @@ export function createPollingFeature(deps = {}) {
   }
 
   async function tick() {
-    if (ticking || destroyed) return;
-    ticking = true;
+    if (destroyed) return;
+    const token = tickGate.enter();
+    if (!token) return;
     try {
       let r;
       try {
@@ -333,12 +371,19 @@ export function createPollingFeature(deps = {}) {
       if (destroyed) return;
       pollUI(); /* fire-and-forget */
     } finally {
-      ticking = false;
+      tickGate.release(token);
     }
   }
 
   async function pollLoop(gen) {
-    await tick();
+    try {
+      await tick();
+    } catch (err) {
+      /* A render effect that throws must not stop the clock: an unscheduled
+         loop is a page that silently freezes and reads as an offline
+         computer, which is exactly what it is not. */
+      globalThis.console?.error("scimux: poll tick failed", err);
+    }
     if (destroyed) return;
     if (!doc.hidden && gen === pollGen) {
       pollTimer = setTimeoutImpl(() => pollLoop(gen), POLL_INTERVAL_MS);

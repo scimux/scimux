@@ -27,6 +27,11 @@
    never reflows the bar. */
 #statusbar .sysphase  { color: var(--dim); gap: 12px; white-space: nowrap; align-items: center; display: none; }
 #statusbar .sysphase.on { display: flex; }
+/* Unreachable is a state of the whole slot, so it outranks the phase cycler
+   that keeps re-asserting `.on` underneath it every 8s. */
+#statusbar #sysoffline { display: none; color: var(--dim); }
+#statusbar .sys.offline .sysphase { display: none; }
+#statusbar .sys.offline #sysoffline { display: inline; }
 #statusbar .sysphase b { color: var(--ink); font-weight: 500; display: inline-block; }
 #statusbar .ubadge { display: inline-flex; align-items: center; gap: 5px; }
 #statusbar .ubadge .agent-logo { width: 13px; height: 13px; opacity: .8; }

@@ -12,6 +12,7 @@ import {
   createPollingFeature,
   stateGetRequest,
   syncWarningText,
+  STALLED_REQUEST_MS,
 } from "../js/polling.js";
 import { UI_PATH, CSRF_HEADER } from "../js/api.js";
 import { CACHED_UI_KEY, PENDING_OPS_KEY, normUI } from "../js/state.js";
@@ -169,6 +170,7 @@ function makeFeature(overrides = {}) {
     csrf: overrides.csrf ?? "tok",
     setTimeout: timers.setTimeout.bind(timers),
     clearTimeout: timers.clearTimeout.bind(timers),
+    now: () => timers.now,
     syncwarnEl,
     setHostOnline: overrides.setHostOnline || effects.push("setHostOnline"),
     setServerUnreachable: overrides.setServerUnreachable || effects.push("setServerUnreachable"),
@@ -921,4 +923,83 @@ test("visibility changes are forwarded to the injected seam", async () => {
   document.hidden = true;
   document.dispatch("visibilitychange");
   assert.deepEqual(seen, [false, true], "the seam outlived destroy()");
+});
+
+/* ---------- surviving an iOS suspend ---------- */
+/* A phone that sleeps thaws into two states this loop used to die in: a render
+   effect throwing over DOM the failure path had destroyed, and a request left
+   in flight that neither resolves nor rejects. Both stopped polling for the
+   life of the page while the tunnel itself was healthy. */
+
+test("a render effect that throws does not stop the poll loop", async () => {
+  const timers = fakeTimers();
+  const document = fakeTarget({ hidden: false });
+  const fetchImpl = async (path) => {
+    if (path === UI_PATH) return jsonResponse({ status: 304, body: {} });
+    return jsonResponse({ body: { nodes: [], unadopted: [], sys: { mem_pct: 1 } }, etag: '"e1"' });
+  };
+  const { f } = makeFeature({
+    timers,
+    document,
+    fetchBundle: { fetchImpl, calls: [] },
+    renderSys: () => { throw new TypeError("Cannot set properties of null"); },
+  });
+  f.startPolling();
+  await flush();
+  assert.equal(timers.pendingCount(), 1, "the next poll is still scheduled");
+  timers.advance(2000);
+  await flush();
+  assert.equal(timers.pendingCount(), 1, "and keeps being scheduled");
+  f.destroy();
+});
+
+test("a request that never settles does not block the next tick", async () => {
+  const timers = fakeTimers();
+  let hits = 0;
+  const fetchImpl = async (path) => {
+    if (path === UI_PATH) return jsonResponse({ status: 304, body: {} });
+    hits++;
+    if (hits === 1) return new Promise(() => {});   /* frozen mid-request */
+    return jsonResponse({ body: { nodes: [], unadopted: [] }, etag: '"e2"' });
+  };
+  const effects = effectLog();
+  const { f } = makeFeature({ timers, effects, fetchBundle: { fetchImpl, calls: [] } });
+  f.tick();                       /* never settles */
+  await flush();
+  assert.equal(hits, 1);
+  await f.tick();
+  assert.equal(hits, 1, "a tick still inside its deadline does not double up");
+  timers.advance(STALLED_REQUEST_MS);
+  await f.tick();
+  assert.equal(hits, 2, "past the deadline the next tick takes over");
+  assert.ok(effects.names().includes("setHostOnline"), "and the status bar moves again");
+  f.destroy();
+});
+
+test("a UI save that never settles releases the save gate", async () => {
+  const timers = fakeTimers();
+  const storage = memStorage();
+  const syncwarnEl = { textContent: "" };
+  let puts = 0;
+  const fetchImpl = async (path, opts = {}) => {
+    if ((opts.method || "GET") === "GET") return jsonResponse({ body: baseDoc(), etag: '"r1"' });
+    puts++;
+    if (puts === 1) return new Promise(() => {});   /* frozen mid-save */
+    return jsonResponse({ status: 200, body: {}, etag: '"r2"' });
+  };
+  const { f } = makeFeature({ timers, storage, syncwarnEl, fetchBundle: { fetchImpl, calls: [] } });
+  await f.loadUI();
+  f.uiMutate({ k: "pin", id: "n1" });
+  timers.advance(300);
+  await flush();
+  assert.equal(puts, 1);
+  assert.equal(syncwarnEl.textContent, "syncing…");
+
+  timers.advance(STALLED_REQUEST_MS);
+  f.uiMutate({ k: "pin", id: "n2" });
+  timers.advance(300);
+  await flush();
+  assert.equal(puts, 2, "the stalled save no longer holds the gate shut");
+  assert.equal(syncwarnEl.textContent, "", "and the queue drains");
+  f.destroy();
 });

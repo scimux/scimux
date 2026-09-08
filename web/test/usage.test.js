@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   usageAgentDisplayName, usageBadgeLayout, resetRemainingPercent, usageResetBars,
-  agentLogo, sysMetricHTML, statusPhaseAt, STATUS_PHASES,
+  agentLogo, sysMetricHTML, statusPhaseAt, STATUS_PHASES, setStatusUnreachable,
 } from "../js/usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -185,4 +185,28 @@ test("phone badge owns minimal noninteractive reset rails and one VoiceOver summ
   assert.match(layoutCss, /@media\s*\(max-width:\s*520px\)[\s\S]*\.Labbr\s*\{[^}]*display:\s*inline-flex/);
   assert.match(layoutCss, /\.resetrail\s*\{[^}]*height:\s*2px[^}]*background:/s);
   assert.match(layoutCss, /\.resetrail\s+i\s*\{[^}]*height:\s*100%[^}]*background:/s);
+});
+
+test("the offline message is a class on the status slot, never a write over its children", () => {
+  /* `$("#sys").textContent = "server unreachable"` deleted the four .sysphase
+     children permanently — nothing recreates them — so the next renderSys threw
+     on a null #sysmetrics and took the poll loop down with it. The message owns
+     its own element and the slot is only ever toggled. */
+  assert.match(indexSrc, /id="sys">[\s\S]*id="sysoffline"/);
+  assert.doesNotMatch(appSrc, /\$\("#sys"\)\.textContent/);
+  assert.match(appSrc, /setStatusUnreachable/);
+
+  const cls = new Set();
+  const el = { classList: { toggle: (n, on) => (on ? cls.add(n) : cls.delete(n)) } };
+  setStatusUnreachable(el, true);
+  assert.ok(cls.has("offline"));
+  setStatusUnreachable(el, false);
+  assert.ok(!cls.has("offline"), "coming back online clears the message");
+  setStatusUnreachable(null, true);   /* no element: no throw */
+
+  /* The offline row has to outrank .sysphase.on, which the 8s phase cycler
+     keeps re-asserting underneath it. */
+  assert.match(layoutCss, /#statusbar #sysoffline\s*\{[^}]*display:\s*none/);
+  assert.match(layoutCss, /#statusbar \.sys\.offline \.sysphase\s*\{[^}]*display:\s*none/);
+  assert.match(layoutCss, /#statusbar \.sys\.offline #sysoffline\s*\{[^}]*display:\s*inline/);
 });
