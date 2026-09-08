@@ -360,8 +360,14 @@ func TestRemoteStatusRoute(t *testing.T) {
 				t.Fatalf("hosted = %v, want %q", body["hosted"], status)
 			}
 			assertNoRemoteStatusLeaks(t, body, raw)
+			// A closed set on purpose: this route is read by the menu and
+			// must not become a place where remote state accretes. Adding a
+			// key is a deliberate act, and can_pair/pair_refusal were added
+			// so the menu need not re-derive the pairing policy from
+			// `hosted` (TestRemoteStatusReportsWhetherPairingIsPossible).
+			allowed := map[string]bool{"hosted": true, "devices": true, "can_pair": true, "pair_refusal": true}
 			for k := range body {
-				if k != "hosted" && k != "devices" {
+				if !allowed[k] {
 					t.Fatalf("unexpected status key %q: %s", k, raw)
 				}
 			}

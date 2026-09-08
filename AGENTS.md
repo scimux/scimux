@@ -180,6 +180,22 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   positional, and a tag number is permanent: never reused, never
   repurposed, never retyped. Do not add a count prefix anywhere — records
   are read to exhaustion so a claimed count cannot be lied about.
+- **Pairing is offered only where it could complete.** Minting is entirely
+  local — a Crockford code, a locally minted rendezvous ID, and a link built
+  from the configured origin — and asks the rendezvous for nothing, so an
+  installation rv would not admit can produce a perfectly well-formed code
+  and a QR for a meeting that can never happen. The user reads the eventual
+  expiry as a timing problem rather than as "this computer is not enrolled".
+  `internal/app.pairingAvailable` is therefore an **allowlist** — "enrolled"
+  and "unavailable", nothing else — and it gates the mint, the session
+  projection and the `can_pair` the menu reads. "unavailable" is in it
+  because the mint is what starts the wait loop that clears a transient
+  outage; refusing it would be self-sustaining. `""` (a computer that just
+  unlinked) and the FR-30 broken states are out. The browser must not
+  re-derive that from `hosted`: one copy of the policy, on the side that
+  enforces it. `#m_pair` ships hidden and is revealed by the status read,
+  and a hidden button leaves `#m_pair_note` saying why — a control that
+  vanishes without a word reads as a bug.
 - **`PairingTTL` is a constant this repository shares with a server it does
   not deploy.** `internal/remote.PairingTTL` and scimux-rv's
   `PairingWaitTTL` must hold the same value — **120 s** as of 2026-09-05.

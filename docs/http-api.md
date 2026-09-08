@@ -732,7 +732,8 @@ afterwards takes a new invite.
 ### `GET /api/remote/status`
 
 The installation's hosted enrollment as `hosted` (`enrolled`,
-`disabled`, `revoked`, or `unavailable`) plus a `devices` array. Each
+`disabled`, `revoked`, `unavailable`, `""` after an unlink, or one of
+the FR-30 broken states) plus `can_pair`, and a `devices` array. Each
 device is `{"id":"...","connected":true}` when its tunnel is live.
 When it is not, `connected` is false; `cause` is one of the six FR-24
 states (`rendezvous-unavailable`, `computer-offline`,
@@ -745,18 +746,33 @@ SSH/WireGuard/Tailscale. `hosted` is independent of `cause`: a
 revoked installation is still `hosted:"revoked"` and is not an
 FR-24 cause.
 
+`can_pair` is whether a pairing started now could complete, and
+`pair_refusal` is the sentence to show in place of the button when it
+cannot. It is answered here so the menu need not re-derive the policy
+from `hosted` and drift from what the mint enforces.
+
 `404` when remote pairing is not enabled. GET needs no CSRF header.
 The body never mints a code and never returns a rid, SAS, or public
 key.
 
 `POST /api/remote/pairing` returns `409` with `hosted` and a readable
-`error` when status is `revoked` or `disabled` — durable facts about
-authorization. `unavailable` is a transient rendezvous condition and
-still mints, because the mint is what starts the pairing wait loop that
-clears it; a code minted then is genuinely pairable once the outage
-lifts. For the same reason `GET /api/remote/pairing/{code}` reports
-FR-38 `failed` (plus `reason`) only under `revoked` or `disabled`, and
-leaves a live session `pending` through a transient outage.
+`error` unless `hosted` is `enrolled` or `unavailable`. Minting is
+entirely local — a code, a locally minted rid, a link off the configured
+origin — so an installation the rendezvous would not admit would
+otherwise hand out a code and a QR for a meeting that can never happen,
+and the eventual expiry reads as a timing problem rather than as "this
+computer is not enrolled". `revoked` and `disabled` are durable facts
+about authorization; `""` is a computer that has just unlinked; the
+FR-30 broken states describe an identity rv would refuse.
+
+`unavailable` is the one refusal-shaped state that still mints, because
+it is a transient rendezvous condition and the mint is what starts the
+pairing wait loop that clears it; a code minted then is genuinely
+pairable once the outage lifts. For the same reason
+`GET /api/remote/pairing/{code}` reports FR-38 `failed` (plus `reason`,
+which is `hosted` or `not-enrolled` when `hosted` is empty) under every
+refusing state, and leaves a live session `pending` through a transient
+outage.
 
 ### `GET /api/remote/bootstrap`
 

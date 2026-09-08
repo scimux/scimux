@@ -399,7 +399,13 @@
   <div class="sect">
     <div class="k">Remote access</div>
     <div id="m_devices"></div>
-    <button class="cta" id="m_pair">Pair a device</button>
+    <!-- Hidden until a status read says this computer could actually
+         complete a pairing. Minting is entirely local, so an unenrolled
+         computer would otherwise hand out a code and a QR for a meeting
+         that can never happen. #m_pair_note says why the button is not
+         there; a control that vanishes without a word reads as a bug. -->
+    <button class="cta" id="m_pair" hidden>Pair a device</button>
+    <div id="m_pair_note" hidden></div>
     <!-- The counterpart to a device revoke: enrolling this computer was
          one-way until F1, and an enrollment nobody can hand back is not
          something to ask someone to try. -->

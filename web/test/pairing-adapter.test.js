@@ -317,6 +317,22 @@ test("a 409 from the mint is the hosted refusal, not a generic failure", async (
   assert.match(h.doc.el("#pair_body").innerHTML, /computer/i);
 });
 
+/* The refusal grew: 409 is now also how a revoked, disabled or unenrolled
+ * computer says no (internal/app/remote_pairing.go). Those need the server's
+ * own sentence — telling someone at the computer to go to the computer is
+ * worse than saying nothing, and "not enrolled" is the one fact that ends
+ * the confusion. */
+test("a 409 that carries a sentence shows that sentence, not the device wording", async () => {
+  const refusal = "This installation is not enrolled with a rendezvous, so there is nowhere for a device to meet it.";
+  const h = setup({
+    [MINT]: () => { throw httpError(409, JSON.stringify({ hosted: "", error: refusal })); },
+  });
+  await toShowCode(h);
+  assert.equal(h.f.screen(), "failed");
+  assert.match(h.doc.el("#pair_body").innerHTML, /not enrolled with a rendezvous/);
+  assert.doesNotMatch(h.doc.el("#pair_body").innerHTML, /pair further devices/);
+});
+
 test("a polled SAS moves the sheet to the comparison and stops showing the code", async () => {
   const h = setup({
     [MINT]: () => mintOK(),

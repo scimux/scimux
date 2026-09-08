@@ -124,7 +124,7 @@ export function nextPairing(state, event, now) {
       /* Hosted refusal is discovered by the mint, which happens here and
        * on show-code. Routing it to the generic failure instead would
        * tell a device-side user the network was down. */
-      if (type === "HOSTED_BLOCKED") return { ...withoutCredential(s), screen: "failed", reason: "hosted-blocked" };
+      if (type === "HOSTED_BLOCKED") return blockedWith(s, event);
       /* Acknowledging is not confirming. The machine moves to show-code
        * with no code yet: the adapter mints on entry and MINTED fills it
        * in, so the human sees the sheet respond immediately rather than
@@ -148,7 +148,7 @@ export function nextPairing(state, event, now) {
         };
       }
       if (type === "MINT_FAILED") return failWith(s, event);
-      if (type === "HOSTED_BLOCKED") return { ...withoutCredential(s), screen: "failed", reason: "hosted-blocked" };
+      if (type === "HOSTED_BLOCKED") return blockedWith(s, event);
       if (type === "OFFER") return { ...s, screen: "compare-sas", sas: String(event.sas || ""), refreshDue: false };
       if (type === "TICK") return tickShowCode(s, now);
       if (type === "VISIBILITY") return visibility(s, event, now);
@@ -193,6 +193,19 @@ export function nextPairing(state, event, now) {
 
 function isFinished(screen) {
   return screen === "succeeded" || screen === "cancelled" || screen === "failed" || screen === "expired";
+}
+
+/* The computer's own refusal, as opposed to the network's. It carries the
+ * server's sentence when there is one: the reason may be a paired device, a
+ * revoked or disabled installation, or no enrollment at all, and only the
+ * side that answered knows which. */
+function blockedWith(s, event) {
+  return {
+    ...withoutCredential(s),
+    screen: "failed",
+    reason: "hosted-blocked",
+    error: String((event && event.error) || ""),
+  };
 }
 
 function failWith(s, event) {
@@ -298,8 +311,13 @@ const VIEWS = {
     let title = "Could not start pairing";
     let body = s.error || "The rendezvous could not be reached.";
     if (s.reason === "hosted-blocked") {
-      title = "Pair from the computer";
-      body = "A paired device cannot pair further devices. Do this on the computer running scimux.";
+      /* The default is the one refusal the computer cannot phrase for
+         itself, because it is the device asking: this app is running on a
+         paired device, and the computer is elsewhere. Every other 409 —
+         revoked, disabled, not enrolled — arrives with the server's own
+         sentence, which names a state this screen would only guess at. */
+      title = s.error ? "Pairing is not available" : "Pair from the computer";
+      body = s.error || "A paired device cannot pair further devices. Do this on the computer running scimux.";
     } else if (s.reason === "completion-failed") {
       title = "Could not finish pairing";
       body = "Nothing was paired. Start again with a new code.";

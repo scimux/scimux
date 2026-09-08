@@ -23,11 +23,22 @@ const s1PairingXPub = "046a8620064ea5a5629fefc1762c3b84a2aba64bfacdbd50a5719f938
 func s7bPairingApp(t *testing.T) (*app, http.Handler, *remote.Client) {
 	t.Helper()
 	a := newTestApp(t, &fakeTmux{})
+	// An enrolled identity on disk, because these ATs are about what an
+	// enrolled computer does. The routes now refuse to mint without one
+	// (TestRemotePairingMintRefusedWithoutAnEnrollment): a code minted by a
+	// computer no rendezvous would admit is a credential nothing can
+	// complete. State() is what loads the record into the client — nothing
+	// else here runs Start, and HostedStatus reads what was loaded.
+	data := t.TempDir()
+	writeEnrolledState(t, data)
 	c := remote.NewClient(remote.Config{
-		DataDir: t.TempDir(),
+		DataDir: data,
 		Remote:  true,
 		Origin:  remote.DefaultOrigin,
 	})
+	if st, err := c.State(); err != nil || st != remote.StateEnrolled {
+		t.Fatalf("fixture enrollment = %q, %v; want enrolled", st, err)
+	}
 	a.hostedPairing = c
 	return a, newTestHandler(t, a), c
 }
@@ -185,7 +196,14 @@ func TestAT_S7b_SASFromLiveSessionViaHTTP(t *testing.T) {
 	if err != nil || len(replyN) != 32 {
 		t.Fatalf("%s: reply_nonce %q: %v", at, st.ReplyNonce, err)
 	}
-	tr, err := remote.BuildPairingTranscript(remote.DefaultOrigin, minted.Code, minted.RID, xPub, yPub, nil, offerN, replyN)
+	// The transcript binds the installation's own identity, so the device
+	// side has to supply it too. It was nil here while the fixture had no
+	// enrollment; a computer that can pair always has one.
+	installPub, err := c.PublicKey()
+	if err != nil {
+		t.Fatalf("%s: PublicKey: %v", at, err)
+	}
+	tr, err := remote.BuildPairingTranscript(remote.DefaultOrigin, minted.Code, minted.RID, xPub, yPub, installPub, offerN, replyN)
 	if err != nil {
 		t.Fatalf("%s: transcript: %v", at, err)
 	}

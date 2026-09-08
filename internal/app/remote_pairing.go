@@ -45,7 +45,7 @@ func (a *app) handleRemotePairingMint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
 	}
-	if hosted := p.HostedStatus(); hostedPairingBlocked(hosted) {
+	if hosted := p.HostedStatus(); !pairingAvailable(hosted) {
 		writeRemoteJSON(w, http.StatusConflict, map[string]any{
 			"hosted": hosted,
 			"error":  hostedPairingRefusal(hosted),
@@ -241,10 +241,21 @@ func (a *app) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {
 	for _, d := range list {
 		devices = append(devices, projectRemoteDeviceCause(p, d.ID))
 	}
-	writeJSON(w, map[string]any{
-		"hosted":  p.HostedStatus(),
-		"devices": devices,
-	})
+	// can_pair is the menu's question, answered here so there is one copy
+	// of the policy: a browser deciding it from `hosted` would be a second
+	// authority, free to drift from the one the mint enforces. The refusal
+	// sentence rides along so the menu has something to put where the
+	// button was — a control that vanishes without a word reads as a bug.
+	hosted := p.HostedStatus()
+	out := map[string]any{
+		"hosted":   hosted,
+		"devices":  devices,
+		"can_pair": pairingAvailable(hosted),
+	}
+	if !pairingAvailable(hosted) {
+		out["pair_refusal"] = hostedPairingRefusal(hosted)
+	}
+	writeJSON(w, out)
 }
 
 // projectRemoteDeviceCause is the FR-24 HTTP view of one paired device.
@@ -293,35 +304,69 @@ func pairingStatusJSON(st remote.PairingStatus) map[string]any {
 // caller concern.
 func projectPairingStatus(st remote.PairingStatus, hosted string) map[string]any {
 	out := pairingStatusJSON(st)
-	if !hostedPairingBlocked(hosted) {
+	reason := pairingRefusalReason(hosted)
+	if reason == "" {
 		return out
 	}
 	switch st.State {
 	case remote.PairStatePending, remote.PairStateWarning:
 		out["state"] = remote.PairStateFailed
-		out["reason"] = hosted
+		out["reason"] = reason
 	}
 	return out
 }
 
-// hostedPairingBlocked reports whether the hosted status is a durable fact
-// about authorization, and so a reason to refuse a mint outright.
+// pairingAvailable reports whether this installation is in a state where a
+// pairing code could actually be completed. It is an allowlist, and that is
+// the point: minting is entirely local — a code, a locally minted RID and a
+// link built from the configured origin, with nothing asked of the
+// rendezvous — so any state this function does not recognise would otherwise
+// hand the user a credential-shaped string, a QR for it, and a wait that can
+// only end in an expiry. A state added later must therefore have to argue
+// its way in here rather than inherit permission by not being listed.
 //
-// "revoked" and "disabled" are such facts. "unavailable" deliberately is not:
-// it is what Start() records on a *transient* authenticate failure
-// (internal/remote/client.go:231), and it returns nil, so scimux comes up
+// "enrolled" is the ordinary case. "unavailable" is in for a specific
+// reason: it is what Start() records on a *transient* authenticate failure
+// (internal/remote/client.go:264), and it returns nil, so scimux comes up
 // normally in that state. The only thing that clears it is noteWaitResult,
 // which runs solely inside waitLoopRID, which exists solely for a RID in
 // liveRIDs() — paired devices plus pairing sessions. A fresh installation
 // with no devices paired has neither until a code is minted, and minting is
 // what registers the pairing waiter (pairing.go:255).
 //
-// So the mint is the recovery path. Refusing it here would be
+// So for that one state the mint is the recovery path. Refusing it would be
 // self-sustaining: one network blip at startup and that user could never
 // pair until scimux restarted. The same reasoning keeps a live session out
 // of FR-38's terminal "failed" while the outage is merely transient.
-func hostedPairingBlocked(hosted string) bool {
-	return hosted == "revoked" || hosted == "disabled"
+//
+// Everything else is refused. "revoked" and "disabled" are durable facts
+// about authorization. "" is what a computer that has just unlinked reports
+// (internal/remote/unenroll.go:116 clears the status along with the identity
+// on disk), and the FR-30 broken states — absent, key-missing, partial,
+// corrupt, ambiguous — describe an identity the rendezvous would not admit.
+// None of them can complete a pairing, so none of them may start one.
+func pairingAvailable(hosted string) bool {
+	switch hosted {
+	case "enrolled", "unavailable":
+		return true
+	}
+	return false
+}
+
+// pairingRefusalReason is the machine-readable half of a refusal, and empty
+// when there is nothing to refuse. The hosted status is its own reason
+// wherever it names something ("revoked", "disabled", "corrupt"); the empty
+// status is the one that does not, so it is given a name here rather than
+// reaching a UI as a blank string nobody can render.
+func pairingRefusalReason(hosted string) string {
+	switch {
+	case pairingAvailable(hosted):
+		return ""
+	case hosted == "":
+		return "not-enrolled"
+	default:
+		return hosted
+	}
 }
 
 func hostedPairingRefusal(hosted string) string {
@@ -330,8 +375,16 @@ func hostedPairingRefusal(hosted string) string {
 		return "This installation has been revoked and can no longer pair devices."
 	case "disabled":
 		return "Remote access is disabled and pairing is not available."
+	case "key-missing", "partial", "corrupt", "ambiguous":
+		// The enrollment exists on disk and is not usable. Saying "not
+		// enrolled" would send the operator to enroll again, which is not
+		// the repair; the state name is what the FR-30 guidance is indexed
+		// by, so it goes in the sentence.
+		return "This installation's enrollment is not usable (" + hosted +
+			") and pairing is not available until it is repaired."
 	default:
-		return "This installation is not enrolled for remote pairing."
+		return "This installation is not enrolled with a rendezvous, so there is " +
+			"nowhere for a device to meet it."
 	}
 }
 

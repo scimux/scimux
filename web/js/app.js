@@ -101,7 +101,7 @@ import {
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
-import { createPairingFeature, createDeviceList, createUnlinkControl } from "./pairing-ui.js";
+import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl } from "./pairing-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { focusAtEnd } from "./caret.js";
@@ -1114,13 +1114,18 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     doc: document,
     icons: { ICON_PENCIL, ICON_LINK_SLASH },
   });
+  /* Whether "Pair a device" is offered at all. A computer with no
+     enrollment mints a perfectly well-formed code that no device can ever
+     meet, so the button is hidden until the status says otherwise. */
+  const pairControl = createPairControl({ api, doc: document });
   /* Unlinking this computer (F1). It shares the burger-open refresh with the
      device list, and re-reads that list afterwards because an unlink ends
-     every grant on it at once. */
+     every grant on it at once — and takes the pair button with it, which is
+     the whole point of asking again here. */
   const unlinkControl = createUnlinkControl({
     api,
     doc: document,
-    onUnlinked: () => { deviceList.refresh(); },
+    onUnlinked: () => { deviceList.refresh(); pairControl.refresh(); },
   });
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
@@ -1472,6 +1477,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* Pairing sheet + paired-device list (Packet S8). */
   pairingFeature.bind();
   deviceList.bind();
+  pairControl.bind();
   unlinkControl.bind();
   ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
@@ -1686,7 +1692,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      a one-second timer would be a second poller for a value that moves
      perhaps twice a year. #burger's open transition belongs to sheets.js;
      this listener only asks for fresh data. */
-  $("#burger").addEventListener("click", () => { deviceList.refresh(); unlinkControl.refresh(); });
+  $("#burger").addEventListener("click", () => {
+    deviceList.refresh();
+    pairControl.refresh();
+    unlinkControl.refresh();
+  });
   $("#m_pair").addEventListener("click", () => {
     sheetsFeature.closeSheets();
     pairingFeature.open();

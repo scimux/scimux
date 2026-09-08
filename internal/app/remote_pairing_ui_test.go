@@ -31,6 +31,9 @@ var pairSlots = []string{
 	// therefore ship as a Remote access section with no way out.
 	"m_unlink",
 	"m_unlink_note",
+	// The note that stands in for a hidden "Pair a device": a missing slot
+	// would ship as a button that silently is not there.
+	"m_pair_note",
 }
 
 func readWebFile(t *testing.T, path string) string {
@@ -95,11 +98,35 @@ func TestPairingFeatureIsConstructedByTheBrowserEntry(t *testing.T) {
 		`from "./pairing-ui.js"`,
 		"createPairingFeature",
 		"createDeviceList",
+		"createPairControl",
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("web/js/app.js does not mention %q: the pairing feature is "+
 				"served, locked and fully tested, and never constructed", want)
 		}
+	}
+}
+
+// TestPairButtonShipsHidden pins the fail-closed half of the gate.
+//
+// Minting is entirely local — a code, a locally minted RID, a link off the
+// configured origin — so an unenrolled computer produces a code and a QR for
+// a meeting that can never happen, and the human reads the expiry as a
+// timing problem. The button is therefore markup that starts hidden and is
+// revealed only by a status read that says pairing could complete
+// (createPairControl). Shipping it visible puts the hole back, and the
+// browser suite cannot see it: its DOM stub starts every element visible.
+func TestPairButtonShipsHidden(t *testing.T) {
+	html := readWebFile(t, "web/index.html")
+	i := strings.Index(html, `id="m_pair"`)
+	if i < 0 {
+		t.Fatal(`index.html has no id="m_pair"`)
+	}
+	tag := html[strings.LastIndex(html[:i], "<"):]
+	tag = tag[:strings.Index(tag, ">")+1]
+	if !strings.Contains(tag, "hidden") {
+		t.Errorf("the pair button ships visible (%s): a computer with no enrollment "+
+			"would offer a pairing code that nothing can ever meet", tag)
 	}
 }
 

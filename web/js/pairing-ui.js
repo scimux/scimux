@@ -44,6 +44,20 @@ function sessionURL(code, suffix = "") {
   return `${PAIRING_ROOT}/${encodeURIComponent(code)}${suffix}`;
 }
 
+/* The refusal sentence out of a 409 body. api() throws with the raw
+ * response text as its message, so a JSON refusal arrives as JSON: parse it
+ * rather than putting a brace-wrapped object in front of a human. A body
+ * with no sentence in it is not an error here — the screen has a fallback,
+ * and inventing one from the status code would be worse than using it. */
+function refusalOf(e) {
+  try {
+    const body = JSON.parse((e && e.message) || "");
+    return String((body && body.error) || "");
+  } catch {
+    return "";
+  }
+}
+
 function actionsHTML(actions) {
   return (actions || [])
     .map(
@@ -119,10 +133,14 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
           expiresAt: Date.parse((r && r.expires_at) || "") || 0,
         });
       } catch (e) {
-        /* 409 is the hosted refusal — a paired device asking to pair
-           further devices. It needs its own screen: "go to the computer"
-           and "the rendezvous is unreachable" are different problems. */
-        if (e && e.status === 409) dispatch({ type: "HOSTED_BLOCKED" });
+        /* 409 is the refusal the computer means, as opposed to the one the
+           network causes: a paired device asking to pair further devices,
+           or a computer that is revoked, disabled or not enrolled at all.
+           It needs its own screen — "go to the computer" and "the
+           rendezvous is unreachable" are different problems — and it
+           carries the server's sentence, which is the only thing that
+           knows which of those refusals this is. */
+        if (e && e.status === 409) dispatch({ type: "HOSTED_BLOCKED", error: refusalOf(e) });
         else dispatch({ type: "MINT_FAILED", error: (e && e.message) || "" });
       } finally {
         minting = false;
@@ -692,6 +710,96 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
     destroy() {
       while (cleanups.length) cleanups.pop()();
     },
+    async settled() {
+      let prev;
+      do {
+        prev = chain;
+        await chain;
+      } while (chain !== prev);
+    },
+  };
+}
+
+/* The gate on "Pair a device" (#m_pair).
+ *
+ * Minting is entirely local: a code, a locally minted rendezvous ID, and a
+ * link built from the configured origin. Nothing in it asks the rendezvous
+ * for anything, so a computer with no enrollment could produce a perfectly
+ * well-formed code and a QR for it, and then wait for an offer that can
+ * never arrive — no admission at rv means no waiter registered, and the
+ * human reads the eventual expiry as a timing problem rather than as the
+ * one fact they needed: this computer is not enrolled.
+ *
+ * So the button ships hidden and is revealed by the status read, the same
+ * shape the unlink control below it has. `can_pair` is the server's answer
+ * and is used as given: deciding it here from `hosted` would be a second
+ * copy of the policy the mint enforces, and the two would drift.
+ *
+ * Owned roots: #m_pair (visibility only — the click belongs to the shell)
+ * and #m_pair_note. No timers: read when the menu opens, and after an
+ * unlink, which is the one action here that changes the answer.
+ */
+export function createPairControl({ api, doc } = {}) {
+  /* Whether pairing is offered. Starts false: before the first answer
+     there is nothing to base a button on, and offering one that mints an
+     unusable code is the failure this control exists to end. */
+  let available = false;
+  /* Whether the status has ever been read. A read that failed is not
+     evidence that anything changed, so it keeps the last known answer —
+     but before there is one, nothing is claimed and nothing is offered. */
+  let known = false;
+  let notice = "";
+  let chain = Promise.resolve();
+
+  /* The one sentence this side owns. Every other refusal is the server's
+     words, because the server is what knows which state it is in — but a
+     status route that is not there at all cannot say anything, and 404 is
+     exactly what a build with remote access switched off answers. */
+  const REMOTE_OFF = "Remote access is not enabled on this computer.";
+
+  const btn = () => doc.querySelector("#m_pair");
+  const note = () => doc.querySelector("#m_pair_note");
+
+  function enqueue(fn) {
+    chain = chain.then(fn).catch(() => {});
+    return chain;
+  }
+
+  function render() {
+    const b = btn();
+    if (b) b.hidden = !available;
+    const n = note();
+    if (n) {
+      n.innerHTML = notice ? `<div class="item note">${esc(notice)}</div>` : "";
+      n.hidden = !notice;
+    }
+  }
+
+  async function refresh() {
+    try {
+      const r = await api("/api/remote/status", {});
+      available = !!(r && r.can_pair);
+      known = true;
+      notice = available ? "" : String((r && r.pair_refusal) || REMOTE_OFF);
+    } catch {
+      /* Only the first read is allowed to conclude anything from a
+         failure. After that the menu keeps what it last learned rather
+         than flickering the button between visits. */
+      if (!known) {
+        available = false;
+        notice = REMOTE_OFF;
+      }
+    }
+    render();
+  }
+
+  return {
+    refresh: () => enqueue(refresh),
+    bind() {
+      render();
+    },
+    /* Test seam, and the same one the unlink control offers: the refresh
+       is queued, so an assertion needs somewhere to wait. */
     async settled() {
       let prev;
       do {
