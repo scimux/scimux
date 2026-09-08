@@ -36,11 +36,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
-        "Digest": "sha-256=:gndTYg0caEF1GwaBB4H/KrX/iqXHAj5ONsFg2lJuevs=:",
+        "Digest": "sha-256=:+G5B0YBwmrY1V0R5Kg43pfj3GQBi9vpJ/p6jwq32gX4=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "827753620d1c6841751b06810781ff2ab5ff8aa5c7023e4e36c160da526e7afb"
+      "body_sha256": "f86e41d180709ab6355744792a0e37a5f8f7190062f6fa49fe9ea3c2adf6817e"
     }
   },
   {
@@ -124,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:72FnfEhtrGWBoCCYTpMWmUjqyBAp1xbYm+pr5APDJvI=:",
+        "Digest": "sha-256=:e9gJ7lMGFVhEHqEFm031LERPCncevJ8j5tAGdlJTPaU=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "ef61677c486dac6581a020984e93169948eac81029d716d89bea6be403c326f2"
+      "body_sha256": "7bd809ee53061558441ea1059b4df52c444f0a771ebc9f23e6d0067652533da5"
     }
   },
   {
@@ -146,11 +146,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:qhulY/u+T5Z7BOQYdfPskuYfHn1oqwhA/DCbdQ8torc=:",
+        "Digest": "sha-256=:xcWJ40nAFVoZIB0dYIdFhCpwzJRF7mKrAF09BCw3tKc=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "aa1ba563fbbe4f967b04e41875f3ec92e61f1e7d68ab0840fc309b750f2da2b7"
+      "body_sha256": "c5c589e349c0155a19201d1d608745842a70cc9445ee62ab005d3d042c37b4a7"
     }
   },
   {
