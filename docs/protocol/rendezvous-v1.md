@@ -660,7 +660,7 @@ X-Rv-Challenge: <64 lowercase hex>
 TTL of the temporary waiter: **120 s** from first registration,
 measured with the injectable admission clock (not a wall timer).
 The window is sized for a person, not for the protocol: unlock a
-phone, open the link, read six digits off one screen and compare
+phone, open the link, read six digits off one screen and type
 them on another. Widening it is paid for in guesses, and the price
 is small — the code space is 10^8 and §10.3 caps offers at 30/s
 process-wide, so a blind attacker gets 3600 tries per window
@@ -875,8 +875,13 @@ the SDP.
 
 That is a complete loss of confidentiality from the server on
 this path. The design accepts a malicious rv here and **requires
-SAS** (§11): pairing MUST NOT complete unless both screens show
-the same six digits and the user confirms. A client that
+SAS** (§11): pairing MUST NOT complete unless both sides derive
+the same six digits and the human confirms them on each. Whether a
+side displays its digits or requires them to be entered is that
+client's decision; scimux displays on the device and requires
+entry on the computer, so that a device which is not the user's
+cannot be waved through by someone with nothing to compare. A
+client that
 auto-confirms, or that treats a typed-path pairing as
 confidential from rv, is not implementing this spec.
 

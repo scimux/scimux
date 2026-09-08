@@ -124,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:CDmyPVdvbsow72s+Axnd+s+smyOatu5ox2/4dxrEtDw=:",
+        "Digest": "sha-256=:72FnfEhtrGWBoCCYTpMWmUjqyBAp1xbYm+pr5APDJvI=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "0839b23d576f6eca30ef6b3e0319ddfacfac9b239ab6ee68c76ff8771ac4b43c"
+      "body_sha256": "ef61677c486dac6581a020984e93169948eac81029d716d89bea6be403c326f2"
     }
   },
   {
