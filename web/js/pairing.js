@@ -28,6 +28,24 @@
  * phone. That is what the comparison catches, and it is what makes "the
  * rendezvous only relays" a mechanism instead of a promise.
  *
+ * The digits are READ on the device and TYPED here (FR-38, 2026-09-07).
+ * Displaying them on both screens and asking "do these match?" is the
+ * textbook construction, and it holds against a relay -- rv substituting
+ * its own Y while the real device is also present, showing digits to
+ * disagree with. It does not hold against a replacement: if the device
+ * that answered is not yours, yours is showing nothing, there is no
+ * second screen, and the affirmative button is a rubber stamp a hurried
+ * human taps. Transcription changes nothing cryptographic -- the ECDH and
+ * the derivation are identical -- but someone who cannot see the digits
+ * cannot produce them, so the wrong device fails at 1 in 10^6 instead of
+ * 1 in 1. The typing goes on the computer because the computer is the
+ * side granting the authority and the side with a keyboard.
+ *
+ * There is deliberately no attempt limit. The adversary this defends
+ * against is not at this keyboard -- if they were, they would not need to
+ * pair -- and a legitimate human who mistypes twice must not be locked
+ * out of their own pairing.
+ *
  * awaiting-other-side is the in-flight completion call. The local UI sends
  * both explicit human confirmations only after the comparison; COMPLETED is
  * the server's durable acceptance, not a timer or optimistic transition.
@@ -81,6 +99,10 @@ export function initialPairingState() {
     expiresAt: 0,
     computerConfirmed: false,
     deviceConfirmed: false,
+    /* Set when the typed digits were not the device's, so the screen has
+     * something to say. Never an error state: the human simply types
+     * again. */
+    sasMismatch: false,
     /* The adapter's cue to mint. The reducer cannot mint -- that is a
      * network call -- so expiry is expressed as a request rather than
      * performed. */
@@ -95,7 +117,7 @@ export function initialPairingState() {
  * from a live pairing so a cancelled or failed screen cannot still be
  * holding a credential that a later render could put back on screen. */
 function withoutCredential(s) {
-  return { ...s, code: "", rid: "", link: "", sas: "", expiresAt: 0, refreshDue: false };
+  return { ...s, code: "", rid: "", link: "", sas: "", expiresAt: 0, refreshDue: false, sasMismatch: false };
 }
 
 function closedFrom(s) {
@@ -156,14 +178,22 @@ export function nextPairing(state, event, now) {
       return s;
 
     case "compare-sas":
-      if (type === "CONFIRM") return { ...s, screen: "awaiting-other-side", computerConfirmed: true, refreshDue: false };
+      if (type === "CONFIRM") {
+        const typed = onlyDigits(event && event.value);
+        const want = onlyDigits(s.sas);
+        /* An empty field is not a wrong answer: leaving the instruction
+         * standing beats telling someone who typed nothing that what they
+         * typed was wrong. */
+        if (want === "" || typed !== want) return { ...s, sasMismatch: typed !== "" };
+        return { ...s, screen: "awaiting-other-side", computerConfirmed: true, refreshDue: false, sasMismatch: false };
+      }
       if (type === "DEVICE_CONFIRMED") return { ...s, deviceConfirmed: true };
       if (type === "REJECT") return cancelWith(s, "sas-mismatch");
       if (type === "CANCEL") return cancelWith(s, "cancelled");
       /* Deliberately inert: TICK and VISIBILITY must not expire or
        * refresh a pairing a device has already offered on. Swapping the
-       * code here would invalidate digits the human is mid-comparison
-       * with, and the mismatch would look like an attack. */
+       * code here would invalidate the digits the human is halfway
+       * through typing, and the mismatch would look like an attack. */
       return s;
 
     case "awaiting-other-side":
@@ -189,6 +219,15 @@ export function nextPairing(state, event, now) {
     default:
       return s;
   }
+}
+
+/* Digits only, so the spacing a phone renders and a human copies is not
+ * treated as a mismatch. Both sides are normalised the same way, which is
+ * why an absent SAS is refused explicitly at the call site: "" would
+ * otherwise match an empty entry and pair a session that never received an
+ * offer. */
+function onlyDigits(v) {
+  return String(v == null ? "" : v).replace(/\D+/g, "");
 }
 
 function isFinished(screen) {
@@ -278,13 +317,17 @@ const VIEWS = {
     actions: [{ id: "cancel", label: "Cancel" }],
     announce: s.code ? "New pairing code ready to scan." : "",
   }),
-  "compare-sas": () => ({
-    title: "Do these numbers match?",
-    body: "Your device is showing six digits. They must match the ones here. If they differ, something is relaying your pairing — do not continue.",
+  "compare-sas": (s) => ({
+    title: "Type the digits from your device",
+    body: s.sasMismatch
+      ? "Those are not the digits this computer is expecting. Check your device and type them again. If your device is not showing any digits, stop — something else answered your code."
+      : "Your device is showing six digits. Type them here. If your device is not showing any digits, stop — something else answered your code.",
+    entry: true,
     actions: [
-      { id: "confirm", label: "They match", primary: true },
-      { id: "reject", label: "They don't match" },
+      { id: "confirm", label: "Pair this device", primary: true },
+      { id: "reject", label: "My device shows nothing" },
     ],
+    announce: s.sasMismatch ? "Those digits do not match. Try again." : "Type the six digits your device is showing.",
   }),
   "awaiting-other-side": () => ({
     title: "Finishing pairing",
@@ -297,10 +340,10 @@ const VIEWS = {
     actions: [{ id: "close", label: "Done", primary: true }],
   }),
   cancelled: (s) => ({
-    title: s.reason === "sas-mismatch" ? "Numbers did not match" : "Pairing cancelled",
+    title: s.reason === "sas-mismatch" ? "Digits did not match" : "Pairing cancelled",
     body:
       s.reason === "sas-mismatch"
-        ? "Nothing was paired. Digits that differ mean the device you scanned is not the device that answered — try again, and if they differ a second time, stop and investigate."
+        ? "Nothing was paired. If your device was not showing those digits, the device that answered your code was not yours — find out why before you try again."
         : "Nothing was paired. The code was not used.",
     actions: [
       { id: "begin", label: "Try again", primary: true },
@@ -354,7 +397,9 @@ export function pairingView(state) {
      * has happened and a still-visible code is just another credential on
      * screen. */
     qr: s.screen === "show-code" && s.link ? qrSVG(qrMatrix(s.link)) : "",
-    sas: s.sas,
+    /* Whether to offer the digit field. The view never carries the digits
+     * themselves: this is the screen asking to be told them. */
+    entry: !!v.entry,
     announce: v.announce || "",
   };
 }

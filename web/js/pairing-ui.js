@@ -4,7 +4,9 @@
  * -----------------------------
  * Owned roots (nothing else writes into these):
  *   - #pairsheet  (hidden marker; shown only while the flow is open)
- *   - #pair_title, #pair_body, #pair_qr, #pair_sas
+ *   - #pair_title, #pair_body, #pair_qr
+ *   - #pair_sas   (the digit ENTRY field, shown only while the comparison
+ *                  screen is up; the computer never displays the digits)
  *   - #pair_actions (delegated click on [data-pa])
  *   - #pair_live  (aria-live="polite"; announcements only)
  *   - #pair_x     (cancel-and-close at every stage)
@@ -98,8 +100,15 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
     if (body) body.innerHTML = v.body;
     const qr = el("#pair_qr");
     if (qr) qr.innerHTML = v.qr;
+    /* The field lives in the page rather than in v.body, which is rewritten
+       on every tick: an input inside that region would lose whatever was
+       half-typed into it once a second. It is cleared on the way out so a
+       later pairing never starts pre-filled. */
     const sas = el("#pair_sas");
-    if (sas) sas.textContent = v.sas;
+    if (sas) {
+      sas.hidden = !v.entry;
+      if (!v.entry) sas.value = "";
+    }
     const actions = el("#pair_actions");
     if (actions) actions.innerHTML = actionsHTML(v.actions);
     /* Only ever written when there is something new to say: assigning ""
@@ -197,7 +206,13 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
 
   function confirm() {
     const code = state.code;
-    dispatch({ type: "CONFIRM" });
+    const field = el("#pair_sas");
+    dispatch({ type: "CONFIRM", value: (field && field.value) || "" });
+    /* The reducer decides whether those were the device's digits. Digits
+       that were not do not reach the server: there is nothing to tell it,
+       and a completion call is the one thing this screen exists to
+       withhold. */
+    if (state.screen !== "awaiting-other-side") return;
     enqueue(async () => {
       try {
         await api(sessionURL(code, "/confirm"), {

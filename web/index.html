@@ -450,7 +450,12 @@
     </div>
     <div id="pair_body"></div>
     <div id="pair_qr"></div>
-    <div id="pair_sas"></div>
+    <!-- The digits are read off the device and typed here; this computer
+         never displays them. Outside #pair_body because that region is
+         rewritten on every tick and would eat what is being typed. -->
+    <input id="pair_sas" type="text" inputmode="numeric" autocomplete="off"
+           spellcheck="false" maxlength="9" placeholder="000000"
+           aria-label="the six digits your device is showing" hidden>
     <div id="pair_actions"></div>
     <div id="pair_live" class="sr-only" aria-live="polite"></div>
   </div>

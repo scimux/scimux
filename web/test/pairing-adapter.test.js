@@ -28,6 +28,7 @@ function makeEl(id) {
     className: "",
     innerHTML: "",
     textContent: "",
+    value: "",
     hidden: false,
     dataset: {},
     attrs,
@@ -146,6 +147,14 @@ const MINT = "POST /api/remote/pairing";
 const POLL = `GET /api/remote/pairing/${CODE}`;
 const CONFIRM = `POST /api/remote/pairing/${CODE}/confirm`;
 const CANCEL = `POST /api/remote/pairing/${CODE}/cancel`;
+const SAS = "706990";
+
+/* Confirming is now transcription: the digits are read off the device and
+ * typed into the field before the button means anything. */
+function typeAndConfirm(h, digits = SAS) {
+  h.doc.el("#pair_sas").value = digits;
+  h.doc.el("#pair_actions").click("confirm");
+}
 
 function setup(routes = {}, over = {}) {
   const doc = makeDoc();
@@ -343,8 +352,41 @@ test("a polled SAS moves the sheet to the comparison and stops showing the code"
   await h.f.settled();
 
   assert.equal(h.f.screen(), "compare-sas");
-  assert.equal(h.doc.el("#pair_sas").textContent, "706990");
+  assert.equal(h.doc.el("#pair_sas").hidden, false, "nowhere to type the digits the device is showing");
+  assert.equal(h.doc.el("#pair_sas").value, "", "the computer filled in the digits it is asking for");
+  assert.ok(
+    !h.doc.el("#pair_body").innerHTML.includes(SAS),
+    "the computer put the digits on its own screen",
+  );
   assert.equal(h.doc.el("#pair_qr").innerHTML, "", "the code stayed on screen after it was scanned");
+});
+
+test("the digits field is only on the screen that asks for them", async () => {
+  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => ({ state: "pending" }) });
+  assert.equal(h.doc.el("#pair_sas").hidden, true, "a closed sheet showed the entry field");
+  await toShowCode(h);
+  assert.equal(h.doc.el("#pair_sas").hidden, true, "the code screen showed the entry field");
+});
+
+test("wrong digits stay on the comparison and never reach the server", async () => {
+  /* The whole point of typing them: the completion call is not reachable
+     from a screen where the human could not produce the digits. */
+  const h = setup({
+    [MINT]: () => mintOK(),
+    [POLL]: () => ({ state: "pending", sas: SAS }),
+    [CANCEL]: () => "",
+  });
+  await toShowCode(h);
+  h.timers.fire();
+  await h.f.settled();
+
+  typeAndConfirm(h, "123456");
+  await h.f.settled();
+
+  assert.equal(h.f.screen(), "compare-sas");
+  assert.equal(h.api.keys().filter((k) => k === CONFIRM).length, 0, "a wrong entry was sent to the server");
+  assert.match(h.doc.el("#pair_body").innerHTML.toLowerCase(), /digits/);
+  assert.equal(h.doc.el("#pair_sas").hidden, false, "the field went away after a mistype");
 });
 
 test("the poll stops once there is nothing left to learn", async () => {
@@ -376,7 +418,7 @@ test("confirming sends both halves and completes on success", async () => {
   h.timers.fire();
   await h.f.settled();
 
-  h.doc.el("#pair_actions").click("confirm");
+  typeAndConfirm(h);
   await h.f.settled();
 
   const body = h.api.calls.find((c) => c.key === CONFIRM).body;
@@ -393,7 +435,7 @@ test("a rejected completion is shown instead of waiting forever", async () => {
   await toShowCode(h);
   h.timers.fire();
   await h.f.settled();
-  h.doc.el("#pair_actions").click("confirm");
+  typeAndConfirm(h);
   await h.f.settled();
 
   assert.equal(h.f.screen(), "failed");
@@ -426,7 +468,7 @@ test("a polled device confirmation never skips the computer comparison", async (
   h.timers.fire();
   await h.f.settled();
   assert.equal(h.f.screen(), "compare-sas");
-  assert.match(h.doc.el("#pair_title").textContent, /numbers match/i);
+  assert.match(h.doc.el("#pair_title").textContent, /type the digits/i);
 });
 
 /* ---------- DOM -> events ---------- */
@@ -464,7 +506,7 @@ test("Done on the success screen closes without cancelling anything", async () =
   await toShowCode(h);
   h.timers.fire();
   await h.f.settled();
-  h.doc.el("#pair_actions").click("confirm");
+  typeAndConfirm(h);
   await h.f.settled();
   assert.equal(h.f.screen(), "succeeded");
 
@@ -495,7 +537,7 @@ test("the ✕ cancels at every live stage, and always tells the server", async (
       await h.f.settled();
     }
     if (stage === "awaiting-other-side") {
-      h.doc.el("#pair_actions").click("confirm");
+      typeAndConfirm(h);
       await Promise.resolve();
       assert.equal(typeof finishConfirm, "function", "confirm request did not start");
     }
@@ -564,7 +606,11 @@ test("the sheet resists dismissal exactly while a credential is live", async () 
 /* ---------- state -> DOM ---------- */
 
 test("the live region is polite and speaks only when there is something new", async () => {
-  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => ({ state: "pending", sas: "706990" }) });
+  const h = setup({
+    [MINT]: () => mintOK(),
+    [POLL]: () => ({ state: "pending", sas: SAS }),
+    [CONFIRM]: () => ({ id: "dev-1" }),
+  });
   const live = h.doc.el("#pair_live");
   assert.equal(live.getAttribute("aria-live"), "polite", "an assertive region interrupts mid-digit");
 
@@ -576,13 +622,19 @@ test("the live region is polite and speaks only when there is something new", as
   await h.f.settled();
   assert.match(live.textContent, /pairing code/i, "the minted code was never announced");
 
-  /* A render with nothing to say must leave the region alone: writing ""
-   * into it truncates whatever is being read out. compare-sas announces
-   * nothing, because the digits are on screen to be compared, not read. */
+  /* compare-sas does announce: it puts a field on screen and a screen
+   * reader user has no other way to learn what goes in it. */
   h.timers.fire();
   await h.f.settled();
   assert.equal(h.f.screen(), "compare-sas");
-  assert.match(live.textContent, /pairing code/i, "a silent render wiped the live region");
+  assert.match(live.textContent, /six digits/i, "a field appeared with no instruction to read");
+
+  /* A render with nothing to say must leave the region alone: writing ""
+   * into it truncates whatever is being read out. */
+  typeAndConfirm(h);
+  await h.f.settled();
+  assert.equal(h.f.screen(), "succeeded");
+  assert.match(live.textContent, /six digits/i, "a silent render wiped the live region");
 });
 
 test("every action the view offers is a button the delegation can reach", async () => {

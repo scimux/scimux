@@ -49,6 +49,9 @@ function at(screen, over = {}) {
 
 const MINTED = { type: "MINTED", code: "04106105", rid: "3d3a9f69", link: "https://x/p#c=1", expiresAt: T0 + TTL };
 const OFFER = { type: "OFFER", sas: "706990" };
+/* CONFIRM carries what the human typed off the device. A bare CONFIRM is
+ * the fail-closed case and is asserted on its own below. */
+const CONFIRM = { type: "CONFIRM", value: "706990" };
 
 /* The table. Rows are screens, columns are events, cells are the screen
  * the machine must be on afterwards. Unlisted pairs are no-ops and are
@@ -101,6 +104,7 @@ const TRANSITIONS = {
 function eventFor(type) {
   if (type === "MINTED") return MINTED;
   if (type === "OFFER") return OFFER;
+  if (type === "CONFIRM") return CONFIRM;
   if (type === "TICK") return { type: "TICK", now: T0 };
   if (type === "VISIBILITY") return { type: "VISIBILITY", visible: true };
   return { type };
@@ -152,6 +156,7 @@ test("leaving a live pairing clears the code, link and SAS from state", () => {
     for (const field of ["code", "link", "sas"]) {
       assert.equal(s[field], "", `${screen} + ${event.type} kept ${field}`);
     }
+    assert.equal(s.sasMismatch, false, `${screen} + ${event.type} kept a mistyped-digits note`);
     assert.equal(s.expiresAt, 0, `${screen} + ${event.type} kept the deadline`);
     assert.equal(pairingView(s).qr, "", `${screen} + ${event.type} still renders a QR`);
   }
@@ -199,7 +204,7 @@ test("an offer carries the SAS and stops the code being refreshable", () => {
 test("confirming waits for durable completion rather than succeeding optimistically", () => {
   /* CONFIRM starts the local completion request. Only COMPLETED, emitted
    * after the device record is durable, may report success. */
-  const s = nextPairing(at("compare-sas"), { type: "CONFIRM" }, T0);
+  const s = nextPairing(at("compare-sas"), CONFIRM, T0);
   assert.equal(s.screen, "awaiting-other-side");
   assert.equal(s.computerConfirmed, true);
   assert.equal(s.deviceConfirmed, false);
@@ -229,7 +234,8 @@ test("rejecting a mismatched SAS is distinguishable from cancelling", () => {
   assert.equal(rejected.screen, "cancelled");
   assert.equal(cancelled.screen, "cancelled");
   assert.notEqual(rejected.reason, cancelled.reason);
-  assert.match(pairingView(rejected).body.toLowerCase(), /match|differ/);
+  assert.match(pairingView(rejected).body.toLowerCase(), /was not yours/);
+  assert.match(pairingView(cancelled).body.toLowerCase(), /the code was not used/);
 });
 
 test("the QR is shown while the code is scannable and nowhere else", () => {
@@ -240,7 +246,6 @@ test("the QR is shown while the code is scannable and nowhere else", () => {
   for (const screen of ["compare-sas", "awaiting-other-side"]) {
     assert.equal(pairingView(at(screen)).qr, "", `${screen} still displays the pairing QR`);
   }
-  assert.equal(pairingView(at("compare-sas")).sas, "706990");
 });
 
 test("every screen renders a title and at least one action, or is closed", () => {
@@ -271,4 +276,64 @@ test("nextPairing does not mutate the state it is given", () => {
   const snapshot = JSON.stringify(before);
   nextPairing(before, OFFER, T0);
   assert.equal(JSON.stringify(before), snapshot);
+});
+
+test("the computer asks for the digits instead of displaying them", () => {
+  /* AT-FR-38-d's first half. The digits are read on the device and typed
+   * on the computer.
+   * A computer that shows them reduces the confirmation to a button, and
+   * a button is exactly what an attacker taps -- with the real device
+   * absent there is no second screen to disagree with, so an affirmative
+   * control is a rubber stamp. Someone who cannot see the digits cannot
+   * proceed without them. */
+  const v = pairingView(at("compare-sas"));
+  assert.equal(v.entry, true, "the comparison screen offers no way to type the digits");
+  assert.ok(
+    !JSON.stringify(v).includes("706990"),
+    "the computer displayed the digits it is asking to be told",
+  );
+  for (const screen of PAIRING_SCREENS) {
+    if (screen === "compare-sas") continue;
+    assert.ok(!pairingView(at(screen)).entry, `${screen} offers a digit entry field`);
+  }
+});
+
+test("only the digits the device is showing confirm the pairing", () => {
+  /* AT-FR-38-d's second half, in the reducer; the adapter suite proves
+   * the same entries reach no server. Including the bare event: a CONFIRM that carries nothing must not
+   * pair, or the fail-closed property is only a convention in the
+   * adapter. */
+  for (const bad of [undefined, "", "706991", "70699", "7069900", "abcdef"]) {
+    const s = nextPairing(at("compare-sas"), { type: "CONFIRM", value: bad }, T0);
+    assert.equal(s.screen, "compare-sas", `entry ${JSON.stringify(bad)} left the comparison`);
+    assert.equal(s.computerConfirmed, false, `entry ${JSON.stringify(bad)} confirmed the pairing`);
+  }
+  const wrong = nextPairing(at("compare-sas"), { type: "CONFIRM", value: "706991" }, T0);
+  assert.equal(wrong.sasMismatch, true, "a wrong entry left the screen nothing to say");
+  assert.match(pairingView(wrong).body.toLowerCase(), /not the digits/);
+  /* An empty field is not a wrong answer. Telling someone who typed
+   * nothing that what they typed was wrong is the machine blaming them
+   * for its own empty state; the instruction simply stands. */
+  const empty = nextPairing(at("compare-sas"), { type: "CONFIRM", value: "  " }, T0);
+  assert.equal(empty.sasMismatch, false);
+  assert.doesNotMatch(pairingView(empty).body.toLowerCase(), /not the digits/);
+});
+
+test("digits typed with the spacing a human uses still confirm", () => {
+  /* People type what they see, and six digits are rendered with room to
+   * breathe. Refusing "706 990" would present the machine's problem as
+   * the human's mistake. */
+  for (const ok of ["706990", " 706990 ", "706 990", "706-990"]) {
+    const s = nextPairing(at("compare-sas"), { type: "CONFIRM", value: ok }, T0);
+    assert.equal(s.screen, "awaiting-other-side", `entry ${JSON.stringify(ok)} did not confirm`);
+    assert.equal(s.sasMismatch, false);
+  }
+});
+
+test("a state with no SAS cannot be confirmed by typing nothing", () => {
+  /* Normalising both sides makes "" == "" true, which would pair a
+   * session that never received an offer. */
+  const s = nextPairing(at("compare-sas", { sas: "" }), { type: "CONFIRM", value: "" }, T0);
+  assert.equal(s.screen, "compare-sas");
+  assert.equal(s.computerConfirmed, false);
 });

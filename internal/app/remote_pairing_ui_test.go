@@ -138,3 +138,22 @@ func indexAfter(t *testing.T, s, sub string) int {
 	}
 	return i + len(sub)
 }
+
+// TestPairingDigitsAreTypedNotShown pins FR-38's direction. The six digits
+// are read on the device and typed on the computer; a computer that
+// displays them reduces the confirmation to a button, and a button is what
+// an attacker taps when the real device is not in the room to disagree with
+// it. The browser suite proves the state machine never discloses the
+// digits. What it cannot see is whether the shipped page carries a field to
+// type them into -- without one the flow has no way forward at all.
+func TestPairingDigitsAreTypedNotShown(t *testing.T) {
+	html := readWebFile(t, "web/index.html")
+	i := strings.Index(html, `id="pair_sas"`)
+	if i < 0 {
+		t.Fatal(`index.html has no id="pair_sas"`)
+	}
+	tag := html[strings.LastIndex(html[:i], "<"):]
+	if !strings.HasPrefix(tag, "<input") {
+		t.Errorf("pair_sas is not an <input> but %.24q; the digits are typed here, never shown", tag)
+	}
+}

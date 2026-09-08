@@ -141,13 +141,17 @@
 /* The QR is one path of unit squares on a white plate; it must stay white
    in dark mode, because a scanner reads contrast, not theme. */
 #pair_qr svg { width: 100%; height: auto; display: block; border-radius: 8px; }
-/* Six digits a human compares against a phone held next to the computer:
-   tabular, wide-tracked, and big enough to read at arm's length. */
+/* Six digits read off a phone held next to the computer and typed in here:
+   tabular, wide-tracked, and big enough to check against the device before
+   committing. */
 #pair_sas {
+  display: block; width: 100%; box-sizing: border-box;
   font: 700 34px/1.2 ui-monospace, monospace; letter-spacing: .14em;
-  text-align: center; margin: 14px 0 4px;
+  text-align: center; margin: 14px 0 4px; padding: 8px 0;
+  background: var(--bg); color: var(--ink);
+  border: 1px solid var(--hairline); border-radius: var(--radius);
 }
-#pair_sas:empty { display: none; }
+#pair_sas[hidden] { display: none; }
 #pair_actions { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
 #pair_actions button {
   width: 100%; padding: 13px; border-radius: var(--radius);
