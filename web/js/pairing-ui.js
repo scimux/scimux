@@ -824,3 +824,80 @@ export function createPairControl({ api, doc } = {}) {
     },
   };
 }
+
+/* The Home Screen offer (#m_homescreen, #hsoffer).
+ *
+ * iOS gives a Home Screen web app its own storage, so the icon opens
+ * with none of the pairing the Safari tab it was made from is holding.
+ * The rendezvous page owns the move itself — it is the side that has
+ * the pairing record — and this control is only the way in: it reveals
+ * the menu entry, makes the offer once, and hands the page over.
+ *
+ * The three conditions are read, not guessed. `blob:` is what the
+ * loader mints for every module it verifies (tunnel-v2 §8), so a module
+ * URL that starts with it is proof this session arrived over the
+ * tunnel and not off the computer's own local page — where there is no
+ * rendezvous to move to and the whole offer is nonsense.
+ */
+export function homeScreenReachable({ moduleURL, standalone, phone } = {}) {
+  return String(moduleURL || "").startsWith("blob:") && !standalone && !!phone;
+}
+
+const HOME_SCREEN_OFFERED = "scimux/home-screen-offered";
+
+export function createHomeScreenControl({
+  doc,
+  win,
+  storage,
+  moduleURL,
+  standalone,
+  phone,
+} = {}) {
+  const reachable = homeScreenReachable({ moduleURL, standalone, phone });
+  const menu = () => doc.querySelector("#m_homescreen");
+  const offer = () => doc.querySelector("#hsoffer");
+
+  const show = (el, on) => {
+    if (el) el.hidden = !on;
+  };
+
+  /* Read and write are both allowed to fail. Private Browsing throws on
+     both, and the cost of a lost record is one repeated offer — which is
+     a smaller failure than never making it. */
+  const spent = () => {
+    try {
+      return storage.getItem(HOME_SCREEN_OFFERED) != null;
+    } catch {
+      return false;
+    }
+  };
+  const spend = () => {
+    try {
+      storage.setItem(HOME_SCREEN_OFFERED, "1");
+    } catch {
+      /* Offered anyway; it may simply be offered again. */
+    }
+  };
+
+  return {
+    bind() {
+      show(menu(), reachable);
+      const asking = reachable && !spent();
+      if (asking) spend();
+      show(offer(), asking);
+    },
+
+    /* The fragment is read by the rendezvous page at start-up, and a
+       fragment change alone never re-runs a page. The reload is what
+       makes the hand-off happen, not decoration on it. */
+    move() {
+      show(offer(), false);
+      win.location.hash = "move";
+      win.location.reload();
+    },
+
+    dismiss() {
+      show(offer(), false);
+    },
+  };
+}

@@ -409,6 +409,11 @@
     <!-- The counterpart to a device revoke: enrolling this computer was
          one-way until F1, and an enrollment nobody can hand back is not
          something to ask someone to try. -->
+    <!-- Only ever revealed on a phone that reached scimux over the
+         tunnel and is not already a Home Screen app; anywhere else the
+         advice is nonsense. The offer below is made once on its own,
+         and this is where it lives afterwards. -->
+    <button class="cta" id="m_homescreen" hidden>Add to Home Screen</button>
     <button class="cta" id="m_unlink" hidden>Unlink from the rendezvous</button>
     <div id="m_unlink_note" hidden></div>
   </div>
@@ -459,6 +464,16 @@
     <div id="pair_actions"></div>
     <div id="pair_live" class="sr-only" aria-live="polite"></div>
   </div>
+</div>
+
+<!-- The one-time offer to become a Home Screen app. Shown once, on the
+     session that could take it, and never again; it stays reachable from
+     the burger menu for anyone who says Not now. Outside every polled
+     render region, like #toast, so a rebuild cannot wipe it. -->
+<div id="hsoffer" hidden>
+  <p>scimux can live on your Home Screen, opening full screen without Safari around it.</p>
+  <button class="cta" id="hsoffer_go">Show me how</button>
+  <button id="hsoffer_no">Not now</button>
 </div>
 
 <script type="module" src="/js/app.js"></script>
