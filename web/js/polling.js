@@ -50,7 +50,8 @@
  *   - HTTP/reducer/conflict/replay algorithms (api.js + state.js)
  *
  * Contracts preserved:
- *   - Network failure → offline + "server unreachable"; back online clears it
+ *   - Network failure → offline + "server unreachable" only once it has
+ *     persisted for OFFLINE_AFTER_FAILURES requests; any answer clears it
  *   - 304 → online, ages, await chat, fire-and-forget UI poll (no structural rebuild)
  *   - non-OK → offline
  *   - 200 → ETag/nodes/unadopted/hostname/version/sys → selection fallback
@@ -98,6 +99,14 @@ const POLL_INTERVAL_MS = 2000;
  * state a sleeping phone sits in is deliberately treated as recoverable
  * rather than lost. Long enough that a slow host is never overtaken. */
 export const STALLED_REQUEST_MS = 20000;
+
+/* How many state requests in a row must fail before the user is told the
+ * server is unreachable. One failure is not an outage: the tunnel rejects an
+ * individual request without losing the connection, so a single miss is
+ * routine and the next request usually succeeds. Reporting each one painted
+ * "server unreachable" over a connection the user was demonstrably using.
+ * At the 2s poll interval a real outage is still named within a few seconds. */
+export const OFFLINE_AFTER_FAILURES = 3;
 
 /* A latch a stalled request cannot hold shut. The token identifies the current
  * holder, so an abandoned one can neither free its successor's gate nor act on
@@ -197,6 +206,7 @@ export function createPollingFeature(deps = {}) {
   let uiTimer = null;
   const saveGate = makeGate(now);
   const tickGate = makeGate(now);
+  let tickFailures = 0;
   let pollTimer = null;
   let pollGen = 0;
   let bound = false;
@@ -333,6 +343,21 @@ export function createPollingFeature(deps = {}) {
     applyRemoteUI();
   }
 
+  /* A tick that produced no state. Silent until the failures persist, so a
+     passing hiccup never contradicts a connection that is working. */
+  function noteTickFailure(unreachable) {
+    tickFailures++;
+    if (tickFailures < OFFLINE_AFTER_FAILURES) return;
+    setHostOnline(false);
+    if (unreachable) setServerUnreachable();
+  }
+
+  /* Any answer at all is proof of reach, and clears what came before it. */
+  function noteTickSuccess() {
+    tickFailures = 0;
+    setHostOnline(true);
+  }
+
   async function tick() {
     if (destroyed) return;
     const token = tickGate.enter();
@@ -343,15 +368,16 @@ export function createPollingFeature(deps = {}) {
         const req = stateGetRequest(stateEtag);
         /* A 2s ETag poll must not be served from the HTTP cache. */
         r = await fetchImpl(req.path, { ...req.opts, cache: "no-store" });
-      } catch {
+      } catch (err) {
         if (destroyed || !tickGate.holds(token)) return;
-        setHostOnline(false);
-        setServerUnreachable();
+        /* Invisible to the user, but the only record of why a request failed. */
+        globalThis.console?.debug?.("scimux: state request failed", err);
+        noteTickFailure(true);
         return;
       }
       if (destroyed || !tickGate.holds(token)) return;
       if (r.status === 304) {
-        setHostOnline(true);
+        noteTickSuccess();
         updateCardAges();
         await refreshChat();
         if (destroyed) return;
@@ -359,10 +385,10 @@ export function createPollingFeature(deps = {}) {
         return;
       }
       if (!r.ok) {
-        setHostOnline(false);
+        noteTickFailure(false);
         return;
       }
-      setHostOnline(true);
+      noteTickSuccess();
       stateEtag = r.headers.get("ETag") || "";
       const st = await r.json();
       if (destroyed) return;
