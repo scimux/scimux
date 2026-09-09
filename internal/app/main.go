@@ -230,6 +230,9 @@ func Run() {
 	// Warm the harness/model probe (it shells out to the agent CLIs) so the
 	// first new-activity dialog doesn't wait on subprocesses.
 	go detectAgents()
+	// Same reason, separate probe: the burger menu reads `<bin> --version`
+	// for every harness, and the menu should open on an answer.
+	go harnessInventory()
 	// Learn the concrete claude model ids (the CLI mis-resolves its own family
 	// aliases) — cached for claudeCacheTTL, so this billed call runs at most
 	// weekly. Background: launches fall back to the bare alias until it returns.

@@ -20,6 +20,7 @@ var productionJSURLs = []string{
 	"/js/chat.js",
 	"/js/composer.js",
 	"/js/format.js",
+	"/js/harness.js",
 	"/js/insets.js",
 	"/js/lane-picker.js",
 	"/js/lanes.js",

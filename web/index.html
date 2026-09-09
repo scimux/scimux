@@ -425,6 +425,17 @@
     <button class="cta" id="m_apply" hidden>Update &amp; restart</button>
     <div id="m_notes" hidden></div>
   </div>
+  <!-- Which agent CLIs this computer actually has, and at which version.
+       The new-activity dialog offers models, so it cannot say that a harness
+       is installed-but-old; drift is what explains an agent that started
+       behaving differently. The upstream check is a separate tap for the same
+       reason as the scimux one: opening a menu must not call five registries. -->
+  <div class="sect">
+    <div class="k">Agent harnesses</div>
+    <div id="m_harnesses"></div>
+    <button class="cta" id="m_hcheck">Check for harness updates</button>
+    <div id="m_hnote" hidden></div>
+  </div>
   <div class="sect">
     <div class="k">About</div>
     <div class="item"><span>Author</span><span class="tag">Christian Berger</span></div>

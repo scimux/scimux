@@ -660,6 +660,27 @@ already up to date, a `dev` build, or an update is already in progress.
 
 License texts bundled into the binary (shown in the About sheet).
 
+### `GET /api/harnesses`
+
+Which supported agent CLIs this computer has, in registry order:
+`{harnesses:[{agent, present, launchable, installed, path}]}`. Local only —
+never a network call, because the menu reads it on every open. `installed` is
+the first version-shaped token of `<bin> --version`, empty when the output
+does not carry one. `present` and `launchable` are separate facts: pi is
+installed as `pi` but launched through `pi-acp`. The probe runs once per
+process, so a harness installed while scimux runs appears after a restart.
+
+### `GET /api/harnesses/latest`
+
+What each harness publishes upstream: `{latest:{<agent>:{version, source}}}`.
+Reached only on an explicit tap, like the scimux update check — the server
+never polls the registries. There is no single lane: three sources are npm
+packages, grok is a plain-text channel file, and Claude's depends on whether
+it was installed natively (compared against the installer's own `stable`, not
+the npm dist-tag, which it can never receive). Sources are read concurrently
+and independently, and an agent whose source failed is simply absent from the
+map — "unknown" is what happened, and it is not the same claim as up to date.
+
 ## Remote pairing
 
 Loopback pairing for `--remote`. Confirm is a separate explicit call;

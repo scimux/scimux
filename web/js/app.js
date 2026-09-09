@@ -100,6 +100,7 @@ import {
   bookmarkClampState as bookmarkClampStateMod,
 } from "./bookmarks.js";
 import { createNotesFeature } from "./notes.js";
+import { harnessRowsHTML, harnessCheckNote } from "./harness.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
   makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
@@ -1741,6 +1742,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     deviceList.refresh();
     pairControl.refresh();
     unlinkControl.refresh();
+    loadHarnesses();
   });
   $("#m_homescreen").addEventListener("click", () => {
     sheetsFeature.closeSheets();
@@ -1812,6 +1814,44 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       btn.textContent = "Update & restart";
     }
   });
+  /* ---- burger menu: which agent harnesses this computer has ----
+     The inventory is local and read when the menu opens; the server probes
+     `--version` once per process, so this is a cached answer and the panel is
+     populated before the human reads down to it. The upstream check is a
+     separate tap for the same reason the scimux one is: opening a menu must
+     not call five registries, and "up to date" is a claim only a check makes. */
+  let harnessRows = null, harnessLatest = null;
+  function renderHarnesses(){
+    if (!harnessRows) return;
+    $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, { agentLogo });
+    const note = harnessCheckNote(harnessRows, harnessLatest);
+    $("#m_hnote").textContent = note;
+    $("#m_hnote").hidden = !note;
+  }
+  async function loadHarnesses(){
+    if (harnessRows) return;
+    try {
+      const d = await api("/api/harnesses");
+      harnessRows = Array.isArray(d.harnesses) ? d.harnesses : [];
+    } catch { return; }
+    renderHarnesses();
+  }
+  $("#m_hcheck").addEventListener("click", async () => {
+    const btn = $("#m_hcheck");
+    btn.disabled = true;
+    btn.textContent = "checking…";
+    try {
+      const d = await api("/api/harnesses/latest");
+      harnessLatest = (d && d.latest) || {};
+      renderHarnesses();
+      btn.textContent = "Check for harness updates";
+    } catch {
+      btn.textContent = "check failed";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   /* license texts: fetched once on first tap, folded like everything else */
   let licenseTexts = null;
   document.querySelectorAll("#menu .lic").forEach(b => b.addEventListener("click", async () => {

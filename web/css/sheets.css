@@ -84,6 +84,20 @@
   border-top: 1px solid var(--hairline); font-size: 14px; }
 #m_lictext { max-height: 40dvh; overflow-y: auto; margin: 8px 0 0; white-space: pre-wrap;
   overflow-wrap: break-word; font: 11px/1.5 ui-monospace, monospace; color: var(--dim); }
+/* Agent-harness rows: name + installed version on the first line, the state
+   sentence wrapped underneath on its own. Beside the version it would squeeze
+   both, and the sentence is the part that explains an unlaunchable or
+   out-of-date harness. Absent harnesses stay listed but recede — "not
+   installed" is an answer to the question, not an item to act on. */
+#m_harnesses .item { flex-wrap: wrap; }
+#m_harnesses .item > span:first-child { display: inline-flex; align-items: center; gap: 6px; }
+#m_harnesses .agent-logo { width: 16px; height: 16px; }
+#m_harnesses .agent-logo img, #m_harnesses .agent-logo svg,
+#m_harnesses .agent-logo .mask-logo { width: 16px; height: 16px; }
+#m_harnesses .hnote { flex-basis: 100%; color: var(--dim); font-size: 12px; }
+#m_harnesses .item[data-state="behind"] .hver { color: var(--work); }
+#m_harnesses .item[data-state="absent"] { opacity: .55; }
+#m_hnote { color: var(--dim); font-size: 12px; margin-top: 8px; }
 .sheet .pos-item { display: flex; gap: 10px; align-items: center; min-height: 44px; margin: 6px 0; font-size: 14px; }
 .sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
 /* send-to group headers — rendered only when both blocks exist, so the split
