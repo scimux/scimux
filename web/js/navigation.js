@@ -34,6 +34,54 @@ export function bookmarkPeekClose(){
   return { type: "setBookmarksOpen", open: false };
 }
 
+/* ---------- which pane a fresh boot opens ---------- */
+
+/* Device-scoped, like every other remembered pane choice (map tab, lane
+   filter). Read by the shell; named here because the decision below is the
+   only thing that interprets it. */
+export const LEVEL_KEY = "scimux-level";
+
+/* A phone that sleeps loses its tunnel, and the re-dial re-runs createApp() in
+   a fresh module graph (lifecycle.js) — so "where I was" can only come from
+   storage. The selection already survives; without the pane too, the phone
+   reopened the remembered chat with the Activities list parked in front of it.
+
+   Deliberately not time-boxed: the last pane the user chose is the last pane
+   they chose, whether that was 15 minutes or a week ago.
+
+   `stored` is the raw storage value (any type — it is user-writable). Anything
+   that is not a pane number, and chat with no chat to show, mean the list. */
+export function bootLevel({ stored, isDesktop, hasSelection } = {}){
+  /* Desktop has no pane stack: setLevel is inert there, so 1 is the only
+     honest answer and a phone-written value must not leak into it. */
+  if (isDesktop) return 1;
+  const n = Number(stored);
+  if (!Number.isInteger(n) || n < 1 || n > 3) return 2;
+  /* Level 1 without a remembered node is an empty chat pane. The map needs no
+     selection — it renders the fleet, not a conversation. */
+  if (n === 1 && !hasSelection) return 2;
+  return clampLevel(n);
+}
+
+/* Injected adapter only (localStorage shape), never a global. Returns the raw
+   value so bootLevel owns validation; a storage that denies reads is a device
+   that simply does not remember. */
+export function loadStoredLevel(storage){
+  try {
+    return storage.getItem(LEVEL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/* Called from setLevel, i.e. on every swipe and scrim tap. A full or denied
+   store must never break navigation, so the write is best-effort. */
+export function saveLevel(storage, level){
+  try {
+    storage.setItem(LEVEL_KEY, String(clampLevel(level)));
+  } catch { /* private mode, quota, disabled storage: forget instead of fail */ }
+}
+
 /* ---------- document swipe: snapshot at start, decide at end ---------- */
 
 /* Capture touchstart geometry and immutable overlay ownership.

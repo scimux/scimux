@@ -83,6 +83,7 @@ import {
 import {
   clampLevel, scrimStep, captureTouchStart, documentSwipeDecision,
   captureNotesTouchStart, notesSwipeBackDecision, journeyToggleState,
+  bootLevel, loadStoredLevel, saveLevel,
 } from "./navigation.js";
 import {
   withCsrf as withCsrfMod, api as apiMod,
@@ -189,7 +190,13 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   let unadopted = [];
   let sel = localStorage.getItem("scimux-sel") || "";
   let readySeen = loadReadySeen(localStorage);
-  let level = matchMedia("(min-width: 900px)").matches ? 1 : 2;  // phone starts on cards
+  /* Where the user left off: a sleep/wake re-dial re-runs createApp() in a
+     fresh module graph, so the pane comes back from storage or not at all. */
+  let level = bootLevel({
+    stored: loadStoredLevel(localStorage),
+    isDesktop: matchMedia("(min-width: 900px)").matches,
+    hasSelection: !!sel,
+  });
   /* termOpen lives inside createChatFeature (Packet 7C). */
   let cardTab = "current";
   let laneFilter = localStorage.getItem("scimux-lanefilter") || "";
@@ -1540,6 +1547,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   function setLevel(n){
     level = clampLevel(n);
     if (isDesktop()) return;
+    saveLevel(localStorage, level);
     document.body.classList.toggle("cards-open", level >= 2);
     $("#cards").classList.toggle("open", level >= 2);
     $("#map").classList.toggle("open", level >= 3);
@@ -1912,6 +1920,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       if (!sel || !nodeById(sel)){
         const first = orderedNodes()[0];
         if (first) select(first.id);
+        /* The chat pane is showing a *substitute* now — a conversation the user
+           never left off in. Only level 1 lies about it; cards and map are
+           already honest, and desktop has no pane stack. */
+        if (!isDesktop() && level === 1) setLevel(2);
       }
     },
     updateCardAges: () => updateCardAges(),
