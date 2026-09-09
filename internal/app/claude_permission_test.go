@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
@@ -1110,5 +1111,25 @@ func TestMissedDeadlineIsVisibleAndPolicyDeclinesAreSilent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A permission title is decision evidence a human reads, so the subject cap
+// must cut between characters. Byte slicing split a multi-byte rune at the
+// boundary and the trailing fragment rendered as U+FFFD.
+func TestClaudePermSubjectCutsOnARuneBoundary(t *testing.T) {
+	// "ü" is two bytes, and 199 ASCII bytes ahead of it put its second byte
+	// exactly on the 200-byte cap.
+	head := strings.Repeat("a", 199)
+	raw, err := json.Marshal(map[string]string{"command": head + "ü" + strings.Repeat("b", 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := claudePermSubject(raw)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated subject is not valid UTF-8: %q", got)
+	}
+	if want := head + "…"; got != want {
+		t.Fatalf("a straddling character must be dropped whole\n got %q\nwant %q", got, want)
 	}
 }

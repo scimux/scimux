@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
@@ -998,10 +999,15 @@ func claudePermSubject(raw json.RawMessage) string {
 
 func truncateOneLine(s string, max int) string {
 	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
-	if len(s) > max {
-		return s[:max] + "…"
+	if len(s) <= max {
+		return s
 	}
-	return s
+	// Cut between characters: max is a byte budget, and slicing it blind
+	// splits a multi-byte rune into a fragment the browser renders as U+FFFD.
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max] + "…"
 }
 
 func (a *app) finishClaudePermRequest(bundle, src, name, kind string) {
