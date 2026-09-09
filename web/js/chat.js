@@ -1494,6 +1494,21 @@ export function createChatFeature(deps){
     }, 0);
   }
 
+  /* Whether this click was the end of a drag that selected text. A click-drag
+     still fires `click` on mouseup, so without this the bubble tap toggles the
+     action bar out from under someone who was only marking a passage to copy.
+     A leftover selection cannot cause a false positive: pressing down collapses
+     one, so anything still selected when the click arrives was selected by this
+     very gesture. */
+  function justSelectedText(){
+    const sel = doc && typeof doc.getSelection === "function"
+      ? doc.getSelection()
+      : (win && typeof win.getSelection === "function" ? win.getSelection() : null);
+    if (!sel || sel.isCollapsed) return false;
+    const text = typeof sel.toString === "function" ? sel.toString() : "";
+    return text.trim() !== "";
+  }
+
   function renderBubbleActions(){
     if (!msgs) return;
     qa(msgs, ".bubactions").forEach(x => x.remove());
@@ -2131,6 +2146,7 @@ export function createChatFeature(deps){
     const turnEl = e.target.closest && e.target.closest(".turn");
     if (turnEl && turnEl.dataset && turnEl.dataset.bk &&
         !(e.target.closest && e.target.closest("a, button"))){
+      if (justSelectedText()) return;
       const k = turnEl.dataset.bk;
       tappedTurn = tappedTurn === k ? "" : k;
       renderBubbleActions();

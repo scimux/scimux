@@ -4392,6 +4392,87 @@ function tapBubbleTurn(ctx, bk = "i:0"){
   return turn;
 }
 
+/* A document whose selection reports what a click-drag would have left behind. */
+function selectingDocument(text){
+  return {
+    createElement: tag => el(tag),
+    querySelector: () => null,
+    getSelection: () => ({
+      isCollapsed: text === "",
+      toString: () => text,
+    }),
+  };
+}
+
+function bubActionRows(ctx){
+  return ctx.roots.msgs.querySelectorAll(".bubactions");
+}
+
+test("P3C: click-dragging a selection inside a bubble does not open the action bar", async () => {
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "select me", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: { document: selectingDocument("select") },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  assert.equal(bubActionRows(ctx).length, 0,
+    "marking text is not a request for the action bar");
+  ctx.feature.destroy();
+});
+
+test("P3C: a selection does not close an action bar that is already open", async () => {
+  let selected = "";
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "select me", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: {
+      document: {
+        createElement: tag => el(tag),
+        querySelector: () => null,
+        getSelection: () => ({
+          isCollapsed: selected === "",
+          toString: () => selected,
+        }),
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const turn = tapBubbleTurn(ctx, "i:0");
+  assert.equal(bubActionRows(ctx).length, 1, "a plain tap still opens it");
+  selected = "select";
+  firstListener(ctx.roots.msgs, "click")({ target: turn });
+  assert.equal(bubActionRows(ctx).length, 1,
+    "and dragging over the same bubble leaves it where it was");
+  ctx.feature.destroy();
+});
+
+test("P3C: a collapsed selection leaves the bubble tap working", async () => {
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "tap me", time: "2026-01-01T00:00:00Z" }],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+    deps: { document: selectingDocument("") },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const turn = tapBubbleTurn(ctx, "i:0");
+  assert.equal(bubActionRows(ctx).length, 1, "opens");
+  firstListener(ctx.roots.msgs, "click")({ target: turn });
+  assert.equal(bubActionRows(ctx).length, 0, "and the second tap closes it");
+  ctx.feature.destroy();
+});
+
 function clickBact(ctx, bact){
   const btn = el("button", { dataset: { bact } });
   firstListener(ctx.roots.msgs, "click")({ target: btn });
