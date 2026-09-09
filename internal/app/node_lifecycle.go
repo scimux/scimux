@@ -600,16 +600,21 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 		time.Sleep(poll)
 	}
 
+	// The transcript may not be bound yet: the CLI creates the file lazily, so
+	// an idle launch has none and this very paste is what brings it into being.
+	// The link then arrives from the same still-pending inbox event, and the
+	// confirmation loop below picks the tailer up when it does. A path already
+	// in hand still gets its watermark, so a pre-existing transcript cannot
+	// confirm the first prompt with one of its old user turns.
 	a.mu.Lock()
 	path := n.Transcript
 	a.mu.Unlock()
-	if path == "" {
-		a.recordClaudeLaunchError(n.ID, claudeStartTimeoutExplain)
-		return initialNotSent
+	var tl *transcript.Tailer
+	before := 0
+	if path != "" {
+		tl = &transcript.Tailer{Path: path}
+		before = len(tl.Poll())
 	}
-
-	tl := &transcript.Tailer{Path: path}
-	before := len(tl.Poll())
 	pasted := time.Now()
 	g := a.autoGateFor(n.ID)
 	g.Lock()
@@ -647,11 +652,27 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 	want := canonicalPrompt(n.Prompt)
 	deliveryDeadline := time.Now().Add(a.claudeDeliveryTimeout)
 	for {
-		turns := tl.Poll()
-		for _, turn := range turns[before:] {
-			if turn.Role == "user" && canonicalPrompt(turn.Text) == want {
-				a.clearClaudeLaunchError(n.ID)
-				return initialAcknowledged
+		if tl == nil {
+			// The paste created the transcript, and the SessionStart that named
+			// it is still in the inbox waiting for exactly that file. Drain here
+			// rather than leaning on the 2 s poll, so confirmation is as prompt
+			// as it is when the file already existed. A file first seen after
+			// the paste needs no watermark: it holds this launch only.
+			a.drainClaudeHooks()
+			a.mu.Lock()
+			path = n.Transcript
+			a.mu.Unlock()
+			if path != "" {
+				tl = &transcript.Tailer{Path: path}
+			}
+		}
+		if tl != nil {
+			turns := tl.Poll()
+			for _, turn := range turns[before:] {
+				if turn.Role == "user" && canonicalPrompt(turn.Text) == want {
+					a.clearClaudeLaunchError(n.ID)
+					return initialAcknowledged
+				}
 			}
 		}
 		if a.claudeDeliveryTimeout <= 0 || time.Now().After(deliveryDeadline) {

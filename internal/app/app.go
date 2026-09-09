@@ -208,6 +208,9 @@ func (a *app) initMaps() {
 	if a.claudeAck == nil {
 		a.claudeAck = map[string]bool{}
 	}
+	if a.claudeStartPending == nil {
+		a.claudeStartPending = map[string]string{}
+	}
 	if a.claudeStrictCap == nil {
 		a.claudeStrictCap = map[string]bool{}
 	}
@@ -404,6 +407,12 @@ type app struct {
 	// claudeAck is set only after a valid SessionStart for that node has
 	// been processed. A newly launched node is not hook-capable until then.
 	claudeAck map[string]bool
+	// claudeStartPending maps a node id to the session id of a SessionStart
+	// that proved itself in every respect except one: the CLI has not created
+	// the transcript file yet. It releases the first-prompt paste gate (the
+	// paste is what creates the file) and nothing else — the binding, the
+	// acknowledgement, and hook capability still wait for the real file.
+	claudeStartPending map[string]string
 	// claudeStrictCap maps a hook bundle id to whether it is the complete
 	// current contract (SessionStart, PermissionRequest, Notification, Stop,
 	// StopFailure, asked layout, runnable exec).

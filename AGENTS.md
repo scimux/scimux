@@ -310,7 +310,19 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   and show the first prompt as a pale pending bubble while SessionStart and
   delivery confirmation are outstanding. The prompt is pasted exactly once,
   only after a valid SessionStart acknowledgement; the bubble becomes solid
-  only when the matching transcript user turn confirms delivery. The send
+  only when the matching transcript user turn confirms delivery. That
+  acknowledgement is the **hook arriving**, deliberately not the transcript
+  file existing: the CLI creates the file lazily, so an idle launch has none
+  for SessionStart to name, and the first prompt is what brings it into being
+  (observed on claude 2.1.266 — before that the file was there ~1 s after
+  launch). Gating the paste on the file is therefore a deadlock, and it read
+  as "SessionStart never arrived" 15 s after the hook had in fact fired. So a
+  SessionStart that passes every identity check and fails only on the missing
+  file releases the paste gate (`claudeStartPending`, fenced by session id)
+  and nothing else: it stays in the inbox, and the binding, the
+  acknowledgement, and hook capability all still wait for the real file under
+  the full filesystem validation. Do not re-tighten the gate to require a
+  bound transcript. The send
   gate stays held across that window so no later prompt can overtake the
   first. SessionStart timeout, a diagnosed workspace-trust dialog, paste
   failure, or final delivery-confirmation failure is an inline error: the

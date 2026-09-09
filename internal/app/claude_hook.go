@@ -560,6 +560,15 @@ func (a *app) noteClaudeHookCapabilitiesForNode(nodeID string) {
 
 func (a *app) bindClaudeStartup(nodeID string, ev claudeSessionStartEvent, capturedGen int) error {
 	if err := a.validateClaudeHookEvent(nodeID, ev, true); err != nil {
+		// Everything that identifies this event as our own launch's has already
+		// passed (session id, path shape, project root, tombstones); only the
+		// file is missing, because the CLI writes it lazily. That is proof
+		// enough that the hook bundle loaded, so release the first-prompt gate
+		// and leave the event in the inbox — the paste creates the file, and
+		// the next drain binds it under the full filesystem validation.
+		if errors.Is(err, errClaudeHookPending) {
+			a.markClaudeStartPending(nodeID, ev.SessionID)
+		}
 		return err
 	}
 	a.mu.Lock()

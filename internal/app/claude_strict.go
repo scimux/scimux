@@ -71,10 +71,38 @@ func (a *app) markClaudeHookAck(nodeID string) {
 		a.claudeAck = map[string]bool{}
 	}
 	a.claudeAck[nodeID] = true
+	// An acknowledged node is bound, so it has no start left pending.
+	delete(a.claudeStartPending, nodeID)
 }
 
 func (a *app) claudeHookAckedLocked(nodeID string) bool {
 	return a.claudeAck[nodeID]
+}
+
+// markClaudeStartPending records a SessionStart that named a transcript the
+// CLI has not written yet. The event itself stays in the inbox and binds when
+// the file appears; this mark exists so the launch does not sit behind a file
+// that only its own first prompt can create.
+func (a *app) markClaudeStartPending(nodeID, sessionID string) {
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.claudeStartPending == nil {
+		a.claudeStartPending = map[string]string{}
+	}
+	a.claudeStartPending[nodeID] = sessionID
+}
+
+// claudeStartPendingLocked reports whether the pending mark belongs to this
+// launch. The session id is the fence: each launch mints its own, so a mark
+// left by an earlier process can never release a later one's gate.
+func (a *app) claudeStartPendingLocked(nodeID, sessionID string) bool {
+	if nodeID == "" || sessionID == "" {
+		return false
+	}
+	return a.claudeStartPending[nodeID] == sessionID
 }
 
 func (a *app) recordClaudeLaunchError(nodeID, msg string) {
@@ -218,13 +246,26 @@ func (a *app) diagnoseClaudeStartFailure(n *Node) string {
 	return claudeStartTimeoutExplain
 }
 
+// claudeSessionStartReady is the first-prompt paste gate: has this exact
+// launched process delivered a valid SessionStart? A bound transcript proves
+// it. So does a pending one — the CLI writes the transcript file lazily, so an
+// idle launch has no file for the hook to name, and the prompt this gate holds
+// back is what would create it. Waiting for the file here deadlocked the
+// launch (observed on claude 2.1.266); the binding still waits for the real
+// file, and the delivery-confirmation loop picks it up from the same event.
 func (a *app) claudeSessionStartReady(n *Node) bool {
 	if n == nil {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.claudeHookAckedLocked(n.ID) && n.Transcript != "" && n.SessionID != ""
+	if n.SessionID == "" {
+		return false
+	}
+	if a.claudeHookAckedLocked(n.ID) && n.Transcript != "" {
+		return true
+	}
+	return a.claudeStartPendingLocked(n.ID, n.SessionID)
 }
 
 func (a *app) clearClaudeAttention(n *Node) {
