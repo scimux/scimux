@@ -39,7 +39,7 @@ const (
 	claudeStartTimeoutExplain = "Claude did not start. SessionStart never arrived, so Remote Control is not ready."
 	claudeStartUnknownExplain = "Claude did not start. SessionStart never arrived. Inspect Claude outside scimux to see why; scimux cannot identify this startup dialog."
 	claudeTrustExplain        = "Claude stopped on a workspace-trust dialog. Trust this directory once in Claude Code outside scimux, then relaunch. scimux does not write Claude trust-state files, and --add-dir does not bypass trust."
-	claudeDeliveryExplain     = "The first prompt could not be confirmed in the transcript. It has been kept as a draft and was not retried."
+	claudeDeliveryExplain     = "Claude started, but never logged the first prompt — something on screen may have swallowed it. Open the terminal to check. The prompt has been kept as a draft and was not retried."
 	claudeResumeExplain       = "Claude could not rebind the new transcript. The previous transcript is still attached. Inspect Claude outside scimux, or fork."
 	claudePasteExplain        = "The first prompt could not be pasted into Claude. It has been kept as a draft and was not retried."
 	claudeTurnFenceExplain    = "Claude supervision could not publish the turn fence, so the prompt was kept as a draft and was not sent. Relaunch this node from scimux."

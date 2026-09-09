@@ -623,11 +623,16 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 		a.byID[n.ID] = n
 		a.nodes = append(a.nodes, n)
 		installPreparedClaudeHook(t, a, n)
-		if got := a.deliverClaudeInitialPrompt(n); got != initialNotSent {
-			t.Fatalf("delivery = %q, want not_sent after confirmation timeout", got)
+		// A moved pane still confirms nothing — that is the assertion. What it
+		// no longer is, is a failure: SessionStart arrived, so the missing turn
+		// means the lazily written transcript has not caught up. The verdict
+		// moves to the poller and, if it never arrives, to the outer bound
+		// (claude_delivery_patience_test.go).
+		if got := a.deliverClaudeInitialPrompt(n); got != initialUnconfirmed {
+			t.Fatalf("delivery = %q, want unconfirmed after the confirmation timeout", got)
 		}
-		if a.claudeLaunchError(n.ID) == "" {
-			t.Fatal("confirmation timeout must record an inline delivery error")
+		if msg := a.claudeLaunchError(n.ID); msg != "" {
+			t.Fatalf("launch error = %q, want none: the pane proves nothing, but the hook did arrive", msg)
 		}
 		if !f.didSendEnter() {
 			t.Fatal("test did not exercise submission")
@@ -636,9 +641,12 @@ func TestDeliverClaudeInitialPromptFailureStates(t *testing.T) {
 }
 
 func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
-	// AT-CR-01/02/04/05: only CR/LF/CRLF are canonicalized. The helper is
-	// not wired yet, so matching text that differs only by line endings stays
-	// unconfirmed, and genuine mismatches plus internal whitespace stay as today.
+	// AT-CR-01/02/04/05: only CR/LF/CRLF are canonicalized. Text differing
+	// only by line endings confirms; a genuine mismatch and internal
+	// whitespace do not. Non-confirmation is initialUnconfirmed rather than
+	// initialNotSent — the paste happened and the launch is healthy, so the
+	// wait passes to the poller; see claude_delivery_patience_test.go for the
+	// outer bound that still turns it into an error.
 	userTurn := func(text string) string {
 		return fmt.Sprintf(`{"type":"user","timestamp":"2026-08-13T15:00:00Z","message":{"role":"user","content":%q}}`, text)
 	}
@@ -648,9 +656,9 @@ func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
 	}{
 		{"AT-CR-01", "lf prompt vs cr turn", "long\ninitial prompt", "long\rinitial prompt", initialAcknowledged},
 		{"AT-CR-02", "lf prompt vs crlf turn", "long\ninitial prompt", "long\r\ninitial prompt", initialAcknowledged},
-		{"AT-CR-04", "different text is a delivery failure", "keep me", "keep me!", initialNotSent},
-		{"AT-CR-05", "repeated spaces are not collapsed", "a  b\n\nc", "a b\n\nc", initialNotSent},
-		{"AT-CR-05", "tabs are not collapsed", "a\t\tb", "a\tb", initialNotSent},
+		{"AT-CR-04", "different text does not confirm", "keep me", "keep me!", initialUnconfirmed},
+		{"AT-CR-05", "repeated spaces are not collapsed", "a  b\n\nc", "a b\n\nc", initialUnconfirmed},
+		{"AT-CR-05", "tabs are not collapsed", "a\t\tb", "a\tb", initialUnconfirmed},
 		{"AT-CR-05", "single-line exact match", "hello", "hello", initialAcknowledged},
 	}
 	for _, tc := range cases {
@@ -660,8 +668,8 @@ func TestDeliverClaudeInitialPromptCanonicalNewlines(t *testing.T) {
 			a.claudeReadyTimeout = testReadyBudget
 			// The budget's meaning differs per case, and conflating the two is
 			// what made this test flake: on an acknowledged case it is only a
-			// race window (generous), on a not-sent case it is the assertion
-			// and the runtime (short). Either way the turn is already on disk
+			// race window (generous), on a non-confirming case it is the
+			// assertion and the runtime (short). Either way the turn is on disk
 			// before the first confirmation poll, so the verdict is decided by
 			// the text, not by the clock.
 			if tc.want == initialAcknowledged {

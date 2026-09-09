@@ -533,6 +533,27 @@ func (a *app) reconcileClaudeInitialDelivery(n *Node) {
 		a.clearClaudeLaunchError(n.ID)
 		return
 	}
+	// Still nothing. The transcript is written lazily, so keep waiting — but
+	// not forever: a paste swallowed by a startup, trust, login, or rate-limit
+	// dialog never reaches Claude's prompt, and no transcript turn will ever
+	// arrive for it. At the outer bound the neutral wait becomes the inline
+	// error, with the prompt handed back as a draft. The error is recorded
+	// before the gate is released so a poll landing between the two shows the
+	// explanation beside the pale bubble rather than a prompt that has briefly
+	// vanished from both the chat and the composer.
+	a.mu.Lock()
+	deliv, delivered := a.lastDeliver[n.ID]
+	a.mu.Unlock()
+	if !delivered || a.claudeDeliveryGiveUp <= 0 ||
+		time.Since(deliv) <= a.claudeDeliveryGiveUp {
+		return
+	}
+	a.recordClaudeLaunchError(n.ID, claudeDeliveryExplain)
+	a.mu.Lock()
+	if a.sendState[n.ID] == sendInitialUnconfirmed {
+		delete(a.sendState, n.ID)
+	}
+	a.mu.Unlock()
 }
 
 // sessionSnapshot runs one list-sessions and returns the name set. ok is

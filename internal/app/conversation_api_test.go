@@ -775,10 +775,19 @@ func TestHandleSendUnconfirmedHoldsNextSend(t *testing.T) {
 	}
 }
 
-// The initial-only internal state still presents the existing delivery
-// warning until late transcript evidence reconciles it. Otherwise the browser
-// would stop forcing the terminal precisely while the delivery is uncertain.
-func TestHandleChatPresentsInitialUnconfirmedAsUnconfirmed(t *testing.T) {
+// The initial-only internal state presents as its own "delivering" value, not
+// as the ordinary delivery warning. This test used to require the opposite, so
+// that the browser would keep forcing the terminal "precisely while the
+// delivery is uncertain" — but that reasoning does not survive contact with
+// the two rules that now bracket it. sendInitialUnconfirmed is only ever set
+// on a Claude node, and the strict terminal policy already forbids the browser
+// from auto-opening the pane for one (chatActivityPolicy's claudeGated branch
+// ignores `unconfirmed` entirely), so nothing was being forced. What was left
+// was the wording: an unconfirmed send offers "check the terminal" and a
+// resume button, and the CLI's lazily written transcript makes that the normal
+// case for a launch whose SessionStart has already arrived and whose prompt is
+// perfectly fine. The doubt now belongs to the outer bound, not to the wait.
+func TestHandleChatPresentsInitialDeliveryAsDelivering(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"n1": true}}
 	a := newTestApp(t, f)
 	seedChatNodeWithLog(t, a, "n1")
@@ -794,8 +803,8 @@ func TestHandleChatPresentsInitialUnconfirmedAsUnconfirmed(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Delivery != "unconfirmed" {
-		t.Fatalf("delivery = %q, want public unconfirmed", body.Delivery)
+	if body.Delivery != "delivering" {
+		t.Fatalf("delivery = %q, want %q", body.Delivery, "delivering")
 	}
 }
 

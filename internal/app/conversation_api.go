@@ -702,8 +702,12 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	if delivery == sendInitialUnconfirmed {
 		// Initial delivery has a distinct internal state so the poller can
 		// reconcile late transcript evidence without weakening the manual gate
-		// for ordinary sends. The browser keeps one uncertainty presentation.
-		delivery = sendUnconfirmed
+		// for ordinary sends. It gets its own browser value rather than the
+		// ordinary "unconfirmed": that presentation tells the user the send
+		// could not be confirmed and offers a resume button, but here
+		// SessionStart has arrived and only the lazily written transcript is
+		// outstanding, so there is nothing yet to doubt.
+		delivery = sendDelivering
 	}
 	agent, model, ended := n.Agent, n.Model, n.EndedAt != ""
 	a.mu.Unlock()
@@ -821,10 +825,10 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 		if explain := claudeSupervisionExplain(sup, launchErr); explain != "" {
 			resp["error"] = explain
 		}
-		if delivery == sendSubmitting || delivery == sendUnconfirmed || delivery == sendInitialUnconfirmed {
+		if delivery == sendSubmitting || delivery == sendUnconfirmed || delivery == sendDelivering {
 			resp["pending_prompt"] = n.Prompt
 		}
-		if launchErr != "" && delivery != sendSubmitting && delivery != sendUnconfirmed && delivery != sendInitialUnconfirmed {
+		if launchErr != "" && delivery != sendSubmitting && delivery != sendUnconfirmed && delivery != sendDelivering {
 			resp["restore_draft"] = n.Prompt
 		}
 		if compacting {

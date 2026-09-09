@@ -4742,3 +4742,31 @@ test("P3C: key-submit API failure alerts and restores attention row", async () =
     "failure clears suppress and refreshChat restores the attention row");
   ctx.feature.destroy();
 });
+
+/* The Claude CLI now writes its transcript lazily, so the first prompt can be
+   pasted and still be unlogged for a while. That neutral wait is delivery
+   "delivering", deliberately distinct from "unconfirmed": the latter tells the
+   user the send could not be confirmed and offers a resume button, which would
+   be a lie while the launch is provably healthy. */
+test("delivering: the neutral first-prompt wait is not the unconfirmed state", () => {
+  const p = chatActivityPolicy({ delivery: "delivering", turnsLength: 1 });
+  assert.equal(p.unconfirmed, false,
+    "delivering must not present as an unconfirmed send");
+  assert.equal(p.delivering, true);
+  assert.equal(p.mustShowPane, false,
+    "a healthy launch waiting for its transcript must never force the terminal open");
+  const u = chatActivityPolicy({ delivery: "unconfirmed", turnsLength: 1 });
+  assert.equal(u.unconfirmed, true, "an ordinary unconfirmed send is unchanged");
+  assert.equal(u.delivering, false);
+});
+
+test("pendingEmptyHTML: delivering says the prompt is in flight, not that Claude is starting", () => {
+  /* SessionStart has already arrived by then, so the startup wording would be
+     stale — that exact mismatch is what read as a stuck launch. */
+  const html = pendingEmptyHTML({ pending: true, supervision: "claude_starting", delivering: true });
+  assert.match(html, /delivering/i);
+  assert.doesNotMatch(html, /SessionStart/);
+  assert.doesNotMatch(html, /raw terminal/i);
+  const strict = pendingEmptyHTML({ pending: true, supervision: "claude_strict", delivering: true });
+  assert.match(strict, /delivering/i);
+});

@@ -93,6 +93,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 	// has needed.
 	a.claudeReadyTimeout = 15 * time.Second
 	a.claudeDeliveryTimeout = 15 * time.Second
+	a.claudeDeliveryGiveUp = 180 * time.Second
 	a.claudeInitialPoll = 100 * time.Millisecond
 	if deps.DeliverClaudeInitial != nil {
 		a.deliverClaudeInitial = deps.DeliverClaudeInitial
@@ -473,8 +474,16 @@ type app struct {
 	launchPoll            time.Duration
 	claudeReadyTimeout    time.Duration
 	claudeDeliveryTimeout time.Duration
-	claudeInitialPoll     time.Duration
-	deliverClaudeInitial  func(*Node) initialDelivery
+	// claudeDeliveryGiveUp is the outer bound on an unconfirmed first prompt.
+	// claudeDeliveryTimeout only ends the synchronous wait; because the CLI
+	// writes the transcript lazily, expiry there is neutral and the poller
+	// keeps watching. This is where the wait finally becomes an inline error,
+	// which it must, or a paste swallowed by a startup dialog would hang in
+	// silence. A non-positive value means no bound: a zero budget must not
+	// turn the backstop itself into an instant failure.
+	claudeDeliveryGiveUp time.Duration
+	claudeInitialPoll    time.Duration
+	deliverClaudeInitial func(*Node) initialDelivery
 	// claudeIDs maps the family alias the UI offers (opus/sonnet/haiku/fable) to
 	// the concrete model id the installed claude CLI actually accepts, probed once
 	// at startup (probeClaudeModels) because the CLI mis-resolves its own aliases.

@@ -324,10 +324,30 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   the full filesystem validation. Do not re-tighten the gate to require a
   bound transcript. The send
   gate stays held across that window so no later prompt can overtake the
-  first. SessionStart timeout, a diagnosed workspace-trust dialog, paste
-  failure, or final delivery-confirmation failure is an inline error: the
-  prompt is restored as the node's draft, never retried automatically, and
-  the terminal is not opened. A generic lettered startup dialog is **not**
+  first. SessionStart timeout, a diagnosed workspace-trust dialog, and paste
+  failure are inline errors: the prompt is restored as the node's draft, never
+  retried automatically, and the terminal is not opened.
+  Delivery confirmation, by contrast, has **two clocks**, because the same
+  laziness that broke the paste gate also delays the proof. SessionStart
+  attests the *launch*; only the transcript attests that the prompt *arrived*,
+  and those settle on different timescales. `claudeDeliveryTimeout` (15 s)
+  therefore ends only the *synchronous* wait, and expiry there is neutral: no
+  error, no draft restore, the pale bubble stands and the send gate stays
+  held, while the poller keeps watching and releases the gate the moment the
+  mirrored turn appears (`reconcileClaudeInitialDelivery`). It becomes an
+  inline error, with the draft restored, only at `claudeDeliveryGiveUp`
+  (180 s from the paste). That outer bound must stay reachable and must not be
+  removed as redundant: a paste swallowed by a startup, trust, login, or
+  rate-limit dialog never reaches Claude's prompt, so no transcript turn will
+  ever arrive for it, and patience without a floor is a silent hang — worse
+  than the error it replaced. The neutral window is projected as its own
+  `delivery: "delivering"`, never the ordinary `unconfirmed`: that
+  presentation tells the user the send could not be confirmed and offers a
+  resume button, which is a lie while SessionStart has arrived. For the same
+  reason the chat's pending note says the first prompt is being delivered
+  rather than "waiting for SessionStart" — by then SessionStart is the one
+  thing that has already happened, and naming it is how a healthy launch came
+  to read as a stuck one. A generic lettered startup dialog is **not**
   diagnosed as workspace trust — the inline error tells the user to inspect
   Claude outside scimux. scimux deliberately supports Claude's default `~/.claude` state root
   only; it does **not** evaluate or support `CLAUDE_CONFIG_DIR`. Keep
@@ -718,8 +738,10 @@ traceable to the phase that introduced it. Do not mass-rename them as jargon.
   scimux waits for a valid SessionStart from that exact launched process,
   pastes the first prompt once, and accepts only the matching transcript user
   turn as confirmation. The pale launch bubble stays pending until that
-  confirmation. A SessionStart, trust, or delivery failure is an inline error
-  that preserves the prompt as a draft and never opens the terminal or retries.
+  confirmation. A SessionStart, trust, or paste failure is an inline error
+  that preserves the prompt as a draft and never opens the terminal or
+  retries; an unconfirmed first prompt is neutral until the 180 s outer bound
+  (see the two-clock rule in the invariant above).
   Later tmux prompts use the same single-paste-then-Enter mechanics.
 
 ## Fixtures and privacy

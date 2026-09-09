@@ -182,6 +182,11 @@ export function chatActivityPolicy({
   permDialogId = "",
 } = {}){
   const unconfirmed = delivery === "unconfirmed";
+  /* "delivering" is the first prompt pasted into a launch whose SessionStart
+     arrived but whose lazily written transcript has not caught up. It is
+     deliberately not `unconfirmed`: nothing has failed, so it must not force
+     the pane, offer a resume button, or say to check the terminal. */
+  const delivering = delivery === "delivering";
   const claudeGated = supervision === "claude_strict" ||
     supervision === "claude_unsupported" ||
     supervision === "claude_starting" ||
@@ -198,7 +203,7 @@ export function chatActivityPolicy({
                          (fresh || (source === "acp" && (priorTurns || 0) > 0));
     const forcePeek = mustShowPane;
     const showPeek = forcePeek || !!termOpen;
-    return { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek };
+    return { unconfirmed, delivering, mustShowPane, freshSurface, forcePeek, showPeek };
   }
   // Server-reported fresh (zero-turn post-seam segment) means a deliberate
   // /clear: show "fresh chat — send a prompt" instead of treating empty+
@@ -212,7 +217,7 @@ export function chatActivityPolicy({
                        (fresh || (source === "acp" && (priorTurns || 0) > 0));
   const forcePeek = mustShowPane || (!turnsLength && !freshSurface);
   const showPeek = forcePeek || !!termOpen;
-  return { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek };
+  return { unconfirmed, delivering, mustShowPane, freshSurface, forcePeek, showPeek };
 }
 
 export function priorSegsFromHistory(histSegs, chatStarted){
@@ -372,8 +377,15 @@ export function histLoadHTML(priorTurns){
   return `<div class="chatseam"><button class="histload">show earlier history &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
 }
 
-export function pendingEmptyHTML({ freshSurface, pending, supervision = "" } = {}){
+export function pendingEmptyHTML({ freshSurface, pending, supervision = "", delivering = false } = {}){
   if (freshSurface) return `<div class="pending">fresh chat \u2014 send a prompt</div>`;
+  /* Ahead of the startup wording on purpose: by the time the prompt is being
+     delivered, SessionStart has arrived, so "waiting for SessionStart" would
+     name the one thing that already happened — which is how a healthy launch
+     came to read as a stuck one. */
+  if (delivering){
+    return `<div class="pending">delivering the first prompt \u2014 waiting for Claude to log it</div>`;
+  }
   if (supervision === "claude_starting"){
     return `<div class="pending">starting Claude \u2014 waiting for SessionStart</div>`;
   }
@@ -1703,7 +1715,7 @@ export function createChatFeature(deps){
       autoApproveArmed: !!(data.auto_approve && data.auto_approve.phase === "armed"),
       permDialogId: data.perm_dialog_id || "",
     });
-    const { unconfirmed, mustShowPane, freshSurface, forcePeek, showPeek } = policy;
+    const { unconfirmed, delivering, mustShowPane, freshSurface, forcePeek, showPeek } = policy;
 
     let peekText = "";
     if (showPeek){
@@ -1835,7 +1847,7 @@ export function createChatFeature(deps){
         : "") +
       (!turns.length && !liveDecisions.length
         ? pendingEmptyHTML({
-            freshSurface, pending: data.pending,
+            freshSurface, pending: data.pending, delivering,
             supervision: data.supervision || n.supervision || "",
           })
         : "") +

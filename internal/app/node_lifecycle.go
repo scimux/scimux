@@ -387,6 +387,10 @@ const (
 	sendSubmitting         = "submitting"
 	sendUnconfirmed        = "unconfirmed"
 	sendInitialUnconfirmed = "initial_unconfirmed"
+	// sendDelivering is how sendInitialUnconfirmed is projected to the browser:
+	// a first prompt pasted into a healthy launch whose transcript has not
+	// caught up. It is deliberately not sendUnconfirmed — see tmuxChatInto.
+	sendDelivering = "delivering"
 )
 
 // createNode owns new-node publication ordering:
@@ -676,8 +680,13 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 			}
 		}
 		if a.claudeDeliveryTimeout <= 0 || time.Now().After(deliveryDeadline) {
-			a.recordClaudeLaunchError(n.ID, claudeDeliveryExplain)
-			return initialNotSent
+			// Not a failure. SessionStart already proved this launch healthy,
+			// and the CLI writes the transcript lazily, so silence here says
+			// only that Claude has not logged the prompt yet. Hand the wait to
+			// the poller: it releases the gate when the mirror catches up, and
+			// raises the inline error at claudeDeliveryGiveUp. Either way the
+			// prompt is never pasted a second time.
+			return initialUnconfirmed
 		}
 		time.Sleep(poll)
 	}
