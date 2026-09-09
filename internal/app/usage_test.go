@@ -598,3 +598,119 @@ func readFixture(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// ---------- Claude window tolerance ----------
+//
+// The oauth/usage contract makes every window nullish and both of its fields
+// nullable: the CLI's own validator accepts the body if ANY known key is
+// present, and reads each window defensively. scimux used to require both
+// five_hour and seven_day, so an account with no weekly window reported
+// "usage unavailable: missing windows" while its five-hour gauge was perfectly
+// healthy. These tests pin the tolerance, window by window.
+
+func TestParseClaudeUsageWeeklyWindowNull(t *testing.T) {
+	body := readFixture(t, "testdata/claude-oauth-usage-weekly-null.json")
+
+	u, err := parseClaudeUsage(body, time.Now())
+	if err != nil {
+		t.Fatalf("parseClaudeUsage: %v, want a usable five-hour-only snapshot", err)
+	}
+	if u.FiveHourUsed == nil || *u.FiveHourUsed != 27 {
+		t.Fatalf("five-hour used = %v, want 27", u.FiveHourUsed)
+	}
+	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 73 {
+		t.Fatalf("five-hour remaining = %v, want 73", u.FiveHourRemaining)
+	}
+	if u.FiveHourReset == nil || u.FiveHourReset.IsZero() {
+		t.Fatal("five-hour reset not parsed")
+	}
+	// A null weekly window is absent, never zero: a 0%-used weekly rail would
+	// claim a full quota this account does not have.
+	if u.WeeklyUsed != nil || u.WeeklyRemaining != nil || u.WeeklyReset != nil {
+		t.Fatalf("weekly = %v/%v/%v, want all nil", u.WeeklyUsed, u.WeeklyRemaining, u.WeeklyReset)
+	}
+	if u.ExtraUsageEnabled == nil || *u.ExtraUsageEnabled {
+		t.Fatalf("extra usage enabled = %v, want false", u.ExtraUsageEnabled)
+	}
+}
+
+func TestParseClaudeUsageWindowWithoutResetIsStillUsable(t *testing.T) {
+	body := []byte(`{"five_hour":{"utilization":12.5,"resets_at":null},"seven_day":null}`)
+
+	u, err := parseClaudeUsage(body, time.Now())
+	if err != nil {
+		t.Fatalf("parseClaudeUsage: %v, want quota without a reset time", err)
+	}
+	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 87.5 {
+		t.Fatalf("five-hour remaining = %v, want 87.5", u.FiveHourRemaining)
+	}
+	// resets_at is nullable in the contract. The gauge is known, the runway is
+	// not; the UI omits that rail rather than inventing one.
+	if u.FiveHourReset != nil {
+		t.Fatalf("five-hour reset = %v, want nil", u.FiveHourReset)
+	}
+}
+
+func TestParseClaudeUsageNullUtilizationIsNotZero(t *testing.T) {
+	body := []byte(`{"five_hour":{"utilization":null,"resets_at":"2030-01-02T03:04:05Z"},` +
+		`"seven_day":{"utilization":40,"resets_at":"2026-09-14T07:00:00Z"}}`)
+
+	u, err := parseClaudeUsage(body, time.Now())
+	if err != nil {
+		t.Fatalf("parseClaudeUsage: %v, want the weekly window alone", err)
+	}
+	if u.FiveHourUsed != nil || u.FiveHourRemaining != nil || u.FiveHourReset != nil {
+		t.Fatalf("five-hour = %v/%v/%v, want all nil for null utilization",
+			u.FiveHourUsed, u.FiveHourRemaining, u.FiveHourReset)
+	}
+	if u.WeeklyRemaining == nil || *u.WeeklyRemaining != 60 {
+		t.Fatalf("weekly remaining = %v, want 60", u.WeeklyRemaining)
+	}
+}
+
+func TestParseClaudeUsageMalformedResetKeepsTheGauge(t *testing.T) {
+	body := []byte(`{"five_hour":{"utilization":20,"resets_at":"not-a-timestamp"}}`)
+
+	u, err := parseClaudeUsage(body, time.Now())
+	if err != nil {
+		t.Fatalf("parseClaudeUsage: %v, want the gauge despite an unparseable reset", err)
+	}
+	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 80 {
+		t.Fatalf("five-hour remaining = %v, want 80", u.FiveHourRemaining)
+	}
+	if u.FiveHourReset != nil {
+		t.Fatalf("five-hour reset = %v, want nil", u.FiveHourReset)
+	}
+}
+
+func TestParseClaudeUsageNoUsableWindowIsUnavailable(t *testing.T) {
+	// Every window null (or unknown-codename-only) carries no gauge at all.
+	// That is the one case that stays an error — with nothing to show, saying
+	// "unavailable" is honest and an empty rail would not be.
+	body := []byte(`{"five_hour":null,"seven_day":null,"seven_day_opus":null,` +
+		`"tangelo":null,"limits":[],"member_dashboard_available":false}`)
+
+	u, err := parseClaudeUsage(body, time.Now())
+	if err == nil {
+		t.Fatalf("parseClaudeUsage = %+v, want an error when no window is usable", u)
+	}
+	if !strings.Contains(err.Error(), "usage unavailable") {
+		t.Fatalf("error = %q, want it to read as unavailable", err)
+	}
+}
+
+func TestParseClaudeUsageUnknownFieldsAreIgnored(t *testing.T) {
+	// MINOR-compatible growth: new codename buckets, new per-window dollar
+	// fields and new top-level objects must never cost us the snapshot.
+	body := []byte(`{"five_hour":{"utilization":5,"resets_at":"2030-01-02T03:04:05Z",` +
+		`"locked_reason":null,"limit_dollars":null},"juniper_tide":{"utilization":3,"resets_at":null},` +
+		`"spend":{"percent":0},"seven_day_breakdown":null,"future_thing":{"nested":[1,2,3]}}`)
+
+	u, err := parseClaudeUsage(body, time.Now())
+	if err != nil {
+		t.Fatalf("parseClaudeUsage: %v, want unknown fields ignored", err)
+	}
+	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 95 {
+		t.Fatalf("five-hour remaining = %v, want 95", u.FiveHourRemaining)
+	}
+}

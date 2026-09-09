@@ -210,3 +210,30 @@ test("the offline message is a class on the status slot, never a write over its 
   assert.match(layoutCss, /#statusbar \.sys\.offline \.sysphase\s*\{[^}]*display:\s*none/);
   assert.match(layoutCss, /#statusbar \.sys\.offline #sysoffline\s*\{[^}]*display:\s*inline/);
 });
+
+/* A valid response can have a five-hour window and no weekly one at all. The
+   badge must read as a session gauge, not as a two-window badge with half of
+   it missing — and it must not say "weekly" when there is no weekly quota.
+   Values in this test are independently synthetic. */
+test("Claude session-only account omits the weekly half", () => {
+  const c = usageBadgeLayout("claude", {
+    available: true,
+    five_hour_remaining: 73,
+    five_hour_reset: "2030-01-02T03:04:05Z",
+  });
+  assert.equal(c.available, true);
+  assert.equal(c.has5h, true);
+  assert.equal(c.hasW, false);
+  assert.match(c.tip, /5h 73% left/);
+  assert.doesNotMatch(c.tip, /weekly/);
+  assert.doesNotMatch(c.tip, /--/);
+});
+
+test("Claude session-only account gets one reset rail", () => {
+  const bars = usageResetBars({
+    five_hour_remaining: 73,
+    five_hour_reset: new Date(Date.now() + 90 * 60_000).toISOString(),
+  });
+  assert.equal(bars.length, 1);
+  assert.equal(bars[0].key, "5h");
+});

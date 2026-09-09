@@ -268,37 +268,60 @@ type claudeUsageResp struct {
 	} `json:"extra_usage"`
 }
 
+// claudeUsageWindow is one quota window. Both fields are nullable in the
+// provider contract, so both are pointers: a null utilization is an unknown
+// gauge, which is not the same fact as 0% used.
 type claudeUsageWindow struct {
-	Utilization float64 `json:"utilization"`
-	ResetsAt    string  `json:"resets_at"`
+	Utilization *float64 `json:"utilization"`
+	ResetsAt    *string  `json:"resets_at"`
 }
 
+// claudeWindow projects one nullish window onto the agentUsage fields.
+//
+// ok is false when the window is absent, null, or carries no utilization —
+// a missing gauge must never render as 0% used, which would claim a full
+// quota the account may not have. A null or unparseable resets_at keeps the
+// gauge and leaves reset nil: the runway is what is unknown, not the budget,
+// and the UI already omits a rail whose reset it cannot place.
+func claudeWindow(w *claudeUsageWindow) (used, remaining *float64, reset *time.Time, ok bool) {
+	if w == nil || w.Utilization == nil {
+		return nil, nil, nil, false
+	}
+	u := *w.Utilization
+	rem := remainingPercent(u)
+	if w.ResetsAt != nil {
+		if t, err := time.Parse(time.RFC3339Nano, *w.ResetsAt); err == nil {
+			reset = &t
+		}
+	}
+	return &u, &rem, reset, true
+}
+
+// parseClaudeUsage reads the oauth/usage body as defensively as the CLI does.
+// Every window is nullish there and new codename buckets appear without
+// notice, so the rule is "any usable window is a usable snapshot": requiring
+// both five_hour and seven_day made an account with no weekly quota report
+// "usage unavailable" while its five-hour gauge was healthy (represented by a synthetic fixture with
+// seven_day null). Only a body with no usable window at all is an
+// error — with nothing to show, "unavailable" is the honest answer.
 func parseClaudeUsage(body []byte, observed time.Time) (agentUsage, error) {
 	var cr claudeUsageResp
 	if err := json.Unmarshal(body, &cr); err != nil {
 		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: unexpected response")
 	}
-	if cr.FiveHour == nil || cr.SevenDay == nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: missing windows")
+	fiveUsed, fiveRem, fiveReset, haveFive := claudeWindow(cr.FiveHour)
+	weeklyUsed, weeklyRem, weeklyReset, haveWeekly := claudeWindow(cr.SevenDay)
+	if !haveFive && !haveWeekly {
+		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: no quota window reported")
 	}
-	fiveReset, err := time.Parse(time.RFC3339Nano, cr.FiveHour.ResetsAt)
-	if err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: bad reset time")
-	}
-	weeklyReset, err := time.Parse(time.RFC3339Nano, cr.SevenDay.ResetsAt)
-	if err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: bad reset time")
-	}
-	fiveUsed, weeklyUsed := cr.FiveHour.Utilization, cr.SevenDay.Utilization
-	fiveRem, weeklyRem := remainingPercent(fiveUsed), remainingPercent(weeklyUsed)
 	u := agentUsage{
 		Agent:             "claude",
-		FiveHourUsed:      &fiveUsed,
-		FiveHourRemaining: &fiveRem,
-		FiveHourReset:     &fiveReset,
-		WeeklyUsed:        &weeklyUsed,
-		WeeklyRemaining:   &weeklyRem,
-		WeeklyReset:       &weeklyReset,
+		FiveHourUsed:      fiveUsed,
+		FiveHourRemaining: fiveRem,
+		FiveHourReset:     fiveReset,
+		WeeklyUsed:        weeklyUsed,
+		WeeklyRemaining:   weeklyRem,
+		WeeklyReset:       weeklyReset,
 		ObservedAt:        observed,
 		Source:            "claude-oauth",
 	}
