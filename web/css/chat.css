@@ -473,13 +473,20 @@ body.cards-open #msgs { overflow: hidden; }
    answer buttons off-screen. .permbtns is flex: 0 0 auto — the pin guarantee.
    Expanded state + .permmore click live in chat.js (permExpanded); clamped
    shows ~3 lines + "show all", expanded is max-height: 30dvh + internal scroll.
-   max-height: 55dvh caps the whole row; .permask flex-shrinks under pressure
-   so answer buttons keep their 44px targets (landscape budget, phase 6). */
+   max-height: 55dvh caps the row (landscape budget, phase 6); overflow-y makes
+   the row the scroller, so past the cap the answers are reached by scrolling.
+   Without it the tail of the stack painted outside the box — under #promptbar's
+   opaque background, which swallowed its taps too — or was clipped by
+   html,body { overflow: clip }, with nothing anywhere to scroll. Every child is
+   unshrinkable for the same reason: flex shrinking runs before a scroller does,
+   so a shrinkable ask is crushed toward nothing while the row could have
+   scrolled instead. */
 #keyrow { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-  padding: 8px 14px; border-top: 1px solid var(--hairline); max-height: 55dvh; }
+  padding: 8px 14px; border-top: 1px solid var(--hairline); max-height: 55dvh;
+  overflow-y: auto; overscroll-behavior: contain; }
 #keyrow:empty { display: none; }
 #keyrow .hint { font-size: 12px; color: var(--dim); }
-.permask { flex: 1 1 auto; min-height: 0; max-height: 30dvh; overflow-y: auto;
+.permask { flex: 0 0 auto; max-height: 30dvh; overflow-y: auto;
   overflow-wrap: anywhere; }
 .permask.clamped { display: -webkit-box; -webkit-line-clamp: 3;
   -webkit-box-orient: vertical; overflow: hidden; }
@@ -515,9 +522,9 @@ body.cards-open #msgs { overflow: hidden; }
   text-align: center; }
 /* Short viewports (landscape phones): ACP labels are short enough for two
    per line. Portrait keeps the column stack above. Reclaim optional chrome
-   so the 55dvh keyrow cap still holds past four options (phase 7): the hint
-   is redundant next to the yellow buttons, and the ask tightens rather than
-   collapsing to 0 under three answer rows. 44px targets and the pin stay. */
+   so the 55dvh keyrow cap still fits four options without scrolling (phase 7):
+   the hint is redundant next to the yellow buttons, and the ask gives up two
+   lines. 44px targets and the pin stay; past that the row scrolls. */
 @media (max-height: 500px) {
   #keyrow .hint { display: none; }
   .permask { max-height: 20dvh; }

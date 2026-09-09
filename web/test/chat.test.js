@@ -1244,15 +1244,24 @@ test("CSS: @media (max-height: 500px) wraps .permbtns; unmediated stays column p
   assert.match(mediaBtn[1], /width:\s*auto/, "short-viewport .permbtn is width: auto");
 });
 
-test("CSS: #keyrow max-height; .permask flex absorbs the squeeze", () => {
+test("CSS: the capped keyrow scrolls, and nothing shrinks inside it", () => {
+  // The cap alone was the bug: #keyrow stopped at 55dvh with overflow visible,
+  // so the tail of the answer stack painted outside the box, under #promptbar's
+  // opaque background (which also swallowed the taps) or clipped away by
+  // html,body { overflow: clip }. Nothing was scrollable but the ask itself.
   const keyrow = chatCssSrc.match(/#keyrow\s*\{([^}]+)\}/);
   assert.ok(keyrow, "#keyrow rule present");
   assert.match(keyrow[1], /max-height:/, "#keyrow declares max-height (the keyrow cap)");
+  assert.match(keyrow[1], /overflow-y:\s*auto/, "#keyrow is the scroller, so every option is reachable");
 
+  // Shrink was the other half: flex shrinking runs before the scroller does,
+  // so a shrinkable ask is crushed toward nothing while the row could have
+  // scrolled instead. Reachability now comes from the scroller, not from
+  // taking height off the question.
   const mask = chatCssSrc.match(/\.permask\s*\{([^}]+)\}/);
   assert.ok(mask, ".permask rule present");
-  assert.match(mask[1], /flex:\s*1\s*1\s*auto/, ".permask is flex: 1 1 auto under pressure");
-  assert.match(mask[1], /min-height:\s*0/, ".permask min-height: 0 so it can shrink");
+  assert.match(mask[1], /flex:\s*0\s*0\s*auto/, ".permask does not shrink (the ask keeps its lines)");
+  assert.doesNotMatch(mask[1], /min-height:\s*0/, "no shrink floor to declare");
   // Cap stays — the ask scrolls internally; it does not grow unbound.
   assert.match(mask[1], /max-height:\s*30dvh/, ".permask keeps max-height: 30dvh");
 });
