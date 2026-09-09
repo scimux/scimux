@@ -29,6 +29,8 @@ internal/acp/testdata/real-*.ndjson
 !docs/http-api.md
 !docs/rendezvous-protocol-sync.md
 !docs/protocol/rendezvous-v1.md
+!docs/invariants/claude-hooks.md
+!docs/invariants/attention.md
 
 attic/
 
