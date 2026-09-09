@@ -27,6 +27,7 @@ var productionJSModules = []string{
 	"web/js/insets.js",
 	"web/js/lane-picker.js",
 	"web/js/lanes.js",
+	"web/js/lifecycle.js",
 	"web/js/map-model.js",
 	"web/js/map.js",
 	"web/js/menu.js",

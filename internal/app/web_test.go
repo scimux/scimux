@@ -226,12 +226,12 @@ func TestAppCompositionRootOwnership(t *testing.T) {
 	}
 	// Document-wide shell listeners live only in app.js (features keep their own).
 	for _, want := range []string{
-		`document.addEventListener("touchstart"`,
-		`document.addEventListener("touchend"`,
-		`document.addEventListener("keydown"`,
-		`document.addEventListener("focusout"`,
-		`document.addEventListener("click"`,
-		`document.addEventListener("change"`,
+		`teardown.on(document, "touchstart"`,
+		`teardown.on(document, "touchend"`,
+		`teardown.on(document, "keydown"`,
+		`teardown.on(document, "focusout"`,
+		`teardown.on(document, "click"`,
+		`teardown.on(document, "change"`,
 		`$("#scrim").addEventListener("click"`,
 	} {
 		if !strings.Contains(app, want) {
@@ -844,7 +844,7 @@ func TestWorkspaceZoneWidthsMatchPanes(t *testing.T) {
 func TestAppSwipeSuppressedUnderOverlays(t *testing.T) {
 	app := mustReadApp(t)
 	// the guard must be inside the document-level touchend handler, before nav.
-	td := strings.Index(app, `document.addEventListener("touchend"`)
+	td := strings.Index(app, `teardown.on(document, "touchend"`)
 	if td < 0 {
 		t.Fatal("could not locate the document-level touchend handler")
 	}
@@ -1208,7 +1208,7 @@ func TestBookmarkIconsAndActionOrder(t *testing.T) {
 func TestBookmarksSwipeOpensNotesOverview(t *testing.T) {
 	app := mustReadApp(t)
 	// find the global touchend gesture handler in the composition entry
-	i := strings.Index(app, `document.addEventListener("touchend"`)
+	i := strings.Index(app, `teardown.on(document, "touchend"`)
 	if i < 0 {
 		t.Fatal("could not locate the touchend gesture handler")
 	}

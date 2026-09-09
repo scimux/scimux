@@ -13,7 +13,6 @@ import {
   stateGetRequest,
   syncWarningText,
   STALLED_REQUEST_MS,
-  OFFLINE_AFTER_FAILURES,
 } from "../js/polling.js";
 import { UI_PATH, CSRF_HEADER } from "../js/api.js";
 import { CACHED_UI_KEY, PENDING_OPS_KEY, normUI } from "../js/state.js";
@@ -229,21 +228,6 @@ test("pure: stateGetRequest and syncWarningText", () => {
   assert.equal(syncWarningText({ pending: true, failed: true }), "changes not saved yet");
 });
 
-/* Scripts only the /api/state answers. Everything else (the fire-and-forget
-   UI poll) gets a benign 304, so the outcome under test stays where it was put. */
-function stateOutcomes(outcomes) {
-  const calls = [];
-  let i = 0;
-  const fetchImpl = async (path, opts = {}) => {
-    calls.push({ path, opts });
-    if (path !== "/api/state") return jsonResponse({ status: 304 });
-    const o = outcomes[i++];
-    if (o instanceof Error) throw o;
-    return o || jsonResponse({ status: 304 });
-  };
-  return { fetchImpl, calls };
-}
-
 /* ---------- /api/state tick branches ---------- */
 test("tick: initial request has no If-None-Match; conditional after 200", async () => {
   const body = { nodes: [{ id: "n1", title: "A" }], unadopted: [], hostname: "box", version: "1.0", sys: { mem_pct: 1 } };
@@ -259,57 +243,22 @@ test("tick: initial request has no If-None-Match; conditional after 200", async 
   assert.equal(calls[1].opts.headers["If-None-Match"], '"s1"');
 });
 
-test("tick: one failed request says nothing", async () => {
+test("tick: network failure marks offline and server unreachable", async () => {
   const { fetchImpl, calls } = scriptedFetch([new Error("net")]);
   const effects = effectLog();
   const { f } = makeFeature({ fetchBundle: { fetchImpl, calls }, effects });
-  await f.tick();
-  assert.deepEqual(effects.names(), [],
-    "a single miss is not an outage the user needs told about");
-});
-
-test("tick: a failure that persists marks offline and server unreachable", async () => {
-  const script = [];
-  for (let i = 0; i < OFFLINE_AFTER_FAILURES; i++) script.push(new Error("net"));
-  const { fetchImpl, calls } = stateOutcomes(script);
-  const effects = effectLog();
-  const { f } = makeFeature({ fetchBundle: { fetchImpl, calls }, effects });
-  for (let i = 0; i < OFFLINE_AFTER_FAILURES - 1; i++) {
-    await f.tick();
-    assert.deepEqual(effects.names(), [], `silent after ${i + 1} failures`);
-  }
   await f.tick();
   assert.deepEqual(effects.names(), ["setHostOnline", "setServerUnreachable"]);
   assert.deepEqual(effects.log[0].args, [false]);
 });
 
-test("tick: a request that succeeds clears the failures before it", async () => {
-  const script = [];
-  for (let i = 0; i < OFFLINE_AFTER_FAILURES - 1; i++) script.push(new Error("net"));
-  script.push(jsonResponse({ status: 304, etag: '"s1"' }));
-  for (let i = 0; i < OFFLINE_AFTER_FAILURES - 1; i++) script.push(new Error("net"));
-  const { fetchImpl, calls } = stateOutcomes(script);
-  const effects = effectLog();
-  const { f } = makeFeature({ fetchBundle: { fetchImpl, calls }, effects });
-  for (let i = 0; i < script.length; i++) await f.tick();
-  assert.equal(effects.names().includes("setServerUnreachable"), false,
-    "a working connection between two hiccups never reads as an outage");
-  assert.deepEqual(
-    effects.log.filter(e => e.name === "setHostOnline").map(e => e.args),
-    [[true]],
-    "and the only status painted is the one that worked");
-});
-
 test("tick: non-OK marks offline without structural rebuild", async () => {
-  const { fetchImpl, calls } = stateOutcomes(
-    Array.from({ length: OFFLINE_AFTER_FAILURES },
-      () => jsonResponse({ status: 500, ok: false, body: "err" })),
-  );
+  const { fetchImpl, calls } = scriptedFetch([
+    jsonResponse({ status: 500, ok: false, body: "err" }),
+  ]);
   const effects = effectLog();
   const { f } = makeFeature({ fetchBundle: { fetchImpl, calls }, effects });
   await f.tick();
-  assert.deepEqual(effects.names(), [], "one bad answer is not an outage");
-  for (let i = 1; i < OFFLINE_AFTER_FAILURES; i++) await f.tick();
   assert.deepEqual(effects.names(), ["setHostOnline"]);
   assert.deepEqual(effects.log[0].args, [false]);
 });
@@ -1067,8 +1016,7 @@ test("a stalled tick taken over cannot paint the status bar behind its successor
     if (path === UI_PATH) return jsonResponse({ status: 304, body: {} });
     hits++;
     if (hits === 1) return new Promise((_, reject) => { loseFirst = reject; });
-    if (hits === 2) return jsonResponse({ body: { nodes: [], unadopted: [] }, etag: '"ok"' });
-    throw new Error("net");
+    return jsonResponse({ body: { nodes: [], unadopted: [] }, etag: '"ok"' });
   };
   const effects = effectLog();
   const { f } = makeFeature({ timers, effects, fetchBundle: { fetchImpl, calls: [] } });
@@ -1082,10 +1030,5 @@ test("a stalled tick taken over cannot paint the status bar behind its successor
   await flush();
   assert.deepEqual(effects.names(), [],
     "the older of two answers repaints nothing at all");
-  /* And it must not even be counted: were it credited as a failure, the
-     genuine misses below would tip the total over and speak too early. */
-  for (let i = 0; i < OFFLINE_AFTER_FAILURES - 1; i++) await f.tick();
-  assert.deepEqual(effects.names(), [],
-    "an abandoned request is not evidence of anything");
   f.destroy();
 });

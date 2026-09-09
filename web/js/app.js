@@ -4,7 +4,9 @@
  * Composition/shell ownership inventory
  * -------------------------------------
  * This module is the only browser entry point and the only composition root.
- * It owns shared application state, feature construction and lazy cross-feature
+ * It owns the instance lifecycle (the window slot it claims, the teardown
+ * ledger every owned thing is registered in, the timer books), shared
+ * application state, feature construction and lazy cross-feature
  * dependency injection, selection/title-edit coordination, shared lane-picker
  * DOM sync, status/usage rendering and existing timers, node rail helpers, station
  * bookmark/toast/longpress helpers, feature bind order, spatial navigation and
@@ -18,7 +20,10 @@
  * Soft line-count guide: app.js is the deliberate composition/shell exception
  * when above ~500 lines. It must not re-implement extracted feature bodies or
  * the polling algorithm. No window/global application bridge, no second entry,
- * no bundler.
+ * no bundler. The single window property is lifecycle.js's APP_SLOT, and it is
+ * not that bridge: it holds one retire handle, exposes no state and no API, and
+ * exists because a handover's fresh module graph has no other way to find the
+ * instance it is replacing. Read lifecycle.js before removing it.
  *
  * What the exception covers, and what it does not
  * -----------------------------------------------
@@ -105,6 +110,7 @@ import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl } from "./pairing-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
+import { claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
 import { focusAtEnd } from "./caret.js";
 
 
@@ -125,6 +131,16 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   if (!window) {
     throw new Error("createApp: window is required");
   }
+  /* One app per window, claimed before anything is registered and before the
+     first await. A remote handover (FR-40) installs a new head/body and calls
+     createApp again over a brand-new module graph; the predecessor's listeners
+     on document/window/matchMedia/visualViewport and its timers all survive
+     that swap, so the successor is the only thing that can retire it.
+     Everything below which outlives an element goes into the ledger. */
+  const teardown = createTeardown();
+  const instance = { retire: teardown.run };
+  claimAppSlot(window, instance);
+  const own = teardown.own;
   /* Prefer the injected window's timers; unref under Node so a test that
      boots the composition root is not kept alive by the 2s poll / 30s usage
      cadence. Browser timers have no unref and are unchanged. */
@@ -136,18 +152,26 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     ? window.setInterval.bind(window) : globalThis.setInterval.bind(globalThis);
   const hostClearInterval = typeof window.clearInterval === "function"
     ? window.clearInterval.bind(window) : globalThis.clearInterval.bind(globalThis);
+  /* Every timer this instance starts is booked, so retirement can stop a
+     cadence nobody kept a handle to — the 8s status phase and the 30s usage
+     read are the two with no other owner. These wrappers stay the single
+     funnel: features receive them, never the host's. */
+  const timeouts = createTimerBook({ set: hostSetTimeout, clear: hostClearTimeout, once: true });
+  const intervals = createTimerBook({ set: hostSetInterval, clear: hostClearInterval, once: false });
+  teardown.add(() => timeouts.clearAll());
+  teardown.add(() => intervals.clearAll());
   function setTimeout(fn, ms, ...rest) {
-    const id = hostSetTimeout(fn, ms, ...rest);
+    const id = timeouts.set(fn, ms, ...rest);
     if (id && typeof id.unref === "function") id.unref();
     return id;
   }
-  function clearTimeout(id) { return hostClearTimeout(id); }
+  function clearTimeout(id) { return timeouts.clear(id); }
   function setInterval(fn, ms, ...rest) {
-    const id = hostSetInterval(fn, ms, ...rest);
+    const id = intervals.set(fn, ms, ...rest);
     if (id && typeof id.unref === "function") id.unref();
     return id;
   }
-  function clearInterval(id) { return hostClearInterval(id); }
+  function clearInterval(id) { return intervals.clear(id); }
   /* Rendering discipline (the port contract):
      1. The prompt bar and key row are singletons outside every render region —
         no render call may rebuild them, so typing is never interrupted.
@@ -523,7 +547,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
-  const cardsFeature = createCardsFeature({
+  const cardsFeature = own(createCardsFeature({
     roots: { tabs: $("#cardtabs"), list: $("#cardlist") },
     document,
     CSS,
@@ -588,7 +612,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     scheduleTick: () => setTimeout(() => pollingFeature.tick(), 200),
     startTitleEdit: (id, scope) => startTitleEdit(id, scope),
     longpress: (container, selector, fn) => longpress(container, selector, fn),
-  });
+  }));
   function renderCards(){ cardsFeature.render(); }
   function updateCardAges(animate=false){ cardsFeature.updateAges(animate); }
 
@@ -601,7 +625,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderCards(); renderMap();
   }
 
-  document.addEventListener("change", e => {
+  teardown.on(document, "change", e => {
     const sel = e.target.closest("[data-lane-select]");
     if (sel) syncLanePicker(sel);
   });
@@ -642,7 +666,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   }
 
   /* Journeys map feature factory — owns tabs/chips/wrap/toolbar/full/fare + map sheet. */
-  const mapFeature = createMapFeature({
+  const mapFeature = own(createMapFeature({
     roots: {
       maptabs: $("#maptabs"),
       lanechips: $("#lanechips"),
@@ -716,7 +740,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     invalidateCardsSig: () => { cardsSig = ""; },
     longpress: (container, selector, fn) => longpress(container, selector, fn),
     prompt: (msg, def) => prompt(msg, def),
-  });
+  }));
   function renderMap(){ mapFeature.render(); }
   function renderMapTabs(){ mapFeature.renderTabs(); }
   function setMapFull(on){ mapFeature.setFull(on); }
@@ -732,7 +756,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   let notesFeature;
   let searchFeature;
   let sheetsFeature;
-  const chatFeature = createChatFeature({
+  const chatFeature = own(createChatFeature({
     roots: {
       chathead: $("#chathead"),
       chattitle: $("#chattitle"),
@@ -818,7 +842,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     isDesktop,
     startTitleEdit: (id, scope) => startTitleEdit(id, scope),
     longpress: (container, selector, fn) => longpress(container, selector, fn),
-  });
+  }));
   function renderChatHead(){ chatFeature.renderHead(); }
   async function refreshChat(){ return chatFeature.render(); }
   function loadChatHistory(id, st){ return chatFeature.loadHistory(id, st); }
@@ -827,7 +851,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   /* Composer singleton — prompt bar, drafts, staging, attachments, send/interrupt.
      Outside every polled render region (invariant). */
-  composerFeature = createComposerFeature({
+  composerFeature = own(createComposerFeature({
     roots: {
       promptbar: $("#promptbar"),
       attstage: $("#attstage"),
@@ -863,11 +887,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     tick: () => pollingFeature.tick(),
     scheduleTick: ms => setTimeout(() => pollingFeature.tick(), ms),
     alert: msg => alert(msg),
-  });
+  }));
 
   /* Bookmarks feature — pane, flags, clamp, reply composer, jump, send-to.
      openNotes is lazy so Notes workspace (Packet 7F) is never imported here. */
-  bookmarksFeature = createBookmarksFeature({
+  bookmarksFeature = own(createBookmarksFeature({
     roots: {
       bookmarkspane: $("#bookmarkspane"),
       bookmarktabs: $("#bookmarktabs"),
@@ -924,7 +948,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     singleZone,
     restartWorkPulse: () => restartWorkPulse(),
     /* P6: longpress send-to removed; send-to is an explicit bar button. */
-  });
+  }));
   function renderBookmarksPane(){ bookmarksFeature.render(); }
   function setBookmarksOpen(open){ bookmarksFeature.setOpen(open); }
   function stampAddress(bookmark, src){ stampAddressMod(bookmark, src); }
@@ -937,7 +961,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   /* Notes workspace — synthesis overlay; owns every #ws* root/listener.
      Bookmarks reaches it only via the lazy openNotes/startPlacement closures above. */
-  notesFeature = createNotesFeature({
+  notesFeature = own(createNotesFeature({
     roots: {
       notesworkspace: $("#notesworkspace"),
       wsscrim: $("#wsscrim"),
@@ -997,7 +1021,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     notesbtn: () => $("#notesbtn"),
     captureNotesTouchStart,
     notesSwipeBackDecision,
-  });
+  }));
   function openWorkspace(){ notesFeature.open(); }
   function closeWorkspace(){ notesFeature.close(); }
   function wsOpen(){ return notesFeature.isOpen(); }
@@ -1005,7 +1029,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   function startPlacement(nt){ notesFeature.startPlacement(nt); }
 
   /* Search overlay — Packet 7G; owns #search* roots, shortcuts, recents, feed. */
-  searchFeature = createSearchFeature({
+  searchFeature = own(createSearchFeature({
     roots: {
       searchoverlay: $("#searchoverlay"),
       searchscrim: $("#searchscrim"),
@@ -1038,13 +1062,13 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     toast: msg => toast(msg),
     prompt: msg => prompt(msg),
     isDesktop: () => isDesktop(),
-  });
+  }));
   function searchOpen(){ return searchFeature.isOpen(); }
   function openSearch(opts){ searchFeature.open(opts); }
   function closeSearch(){ searchFeature.close(); }
 
   /* Generic sheets + new-activity + adoption — Packet 7H. */
-  sheetsFeature = createSheetsFeature({
+  sheetsFeature = own(createSheetsFeature({
     roots: {
       backdrop: $("#backdrop"),
       burger: $("#burger"),
@@ -1104,27 +1128,27 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderChatHead: () => renderChatHead(),
     renderMap: () => renderMap(),
     alert: msg => alert(msg),
-  });
+  }));
 
   /* Device pairing + the list of who holds a grant — Packet S8.
      Both take the generic api() and the document; pairing-ui.js owns every
      #pair_* root and #m_devices, and nothing else here writes into them. */
-  const pairingFeature = createPairingFeature({ api, doc: document });
-  const deviceList = createDeviceList({
+  const pairingFeature = own(createPairingFeature({ api, doc: document }));
+  const deviceList = own(createDeviceList({
     api,
     doc: document,
     icons: { ICON_PENCIL, ICON_LINK_SLASH },
-  });
+  }));
   /* Whether "Pair a device" is offered at all. A computer with no
      enrollment mints a perfectly well-formed code that no device can ever
      meet, so the button is hidden until the status says otherwise. */
-  const pairControl = createPairControl({ api, doc: document });
+  const pairControl = own(createPairControl({ api, doc: document }));
   /* The offer to become a Home Screen app, on a phone that reached this
      page over the tunnel. import.meta.url is the evidence: the loader
      mints a blob: URL per verified module, and a local page never has
      one. The move itself belongs to the rendezvous page, which is the
      side holding the pairing record. */
-  const homeScreen = createHomeScreenControl({
+  const homeScreen = own(createHomeScreenControl({
     doc: document,
     win: window,
     storage: window.localStorage,
@@ -1133,17 +1157,17 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       window.navigator.standalone === true ||
       matchMedia("(display-mode: standalone)").matches,
     phone: isPhoneTouch(),
-  });
+  }));
 
   /* Unlinking this computer (F1). It shares the burger-open refresh with the
      device list, and re-reads that list afterwards because an unlink ends
      every grant on it at once — and takes the pair button with it, which is
      the whole point of asking again here. */
-  const unlinkControl = createUnlinkControl({
+  const unlinkControl = own(createUnlinkControl({
     api,
     doc: document,
     onUnlinked: () => { deviceList.refresh(); pairControl.refresh(); },
-  });
+  }));
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
   /* the chevron must describe the tap: on desktop the button is a toggle, so it
@@ -1318,7 +1342,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderMap();   /* full-screen wall map: move the selection marker + action bar */
     refreshChat();
   }
-  document.addEventListener("keydown", e => {
+  teardown.on(document, "keydown", e => {
     const titleInput = e.target.closest("[data-title-input]");
     if (titleInput){
       if (e.key === "Enter"){
@@ -1351,7 +1375,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       else if (step === "exit-full") setMapFull(false);
     }
   });
-  document.addEventListener("focusout", e => {
+  teardown.on(document, "focusout", e => {
     const titleInput = e.target.closest("[data-title-input]");
     if (titleInput) commitTitleEdit(titleInput.dataset.titleInput, titleInput.value);
   });
@@ -1418,7 +1442,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      A long-press may be followed by a synthesized click on the same element;
      lpFired swallows exactly that one click so tap and hold stay distinct. */
   let lpFired = false;
-  document.addEventListener("click", e => {
+  teardown.on(document, "click", e => {
     if (lpFired){ e.stopPropagation(); e.preventDefault(); lpFired = false; }
   }, true);
   function longpress(container, selector, fn){
@@ -1497,9 +1521,12 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   pairControl.bind();
   homeScreen.bind();
   unlinkControl.bind();
-  ["touchend","pointerup"].forEach(ev => document.addEventListener(ev, () => {
+  const refocusTitleEditor = () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
-  }, { passive: true }));
+  };
+  for (const ev of ["touchend", "pointerup"]) {
+    teardown.on(document, ev, refocusTitleEditor, { passive: true });
+  }
 
 
   /* long-press send-to lives in bookmarksFeature.bind (Packet 7E). */
@@ -1539,7 +1566,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   $("#scrim").addEventListener("click", () => applyNavAction(scrimStep(level)));
   /* #bookmarkpeek listener lives in bookmarksFeature.bind (Packet 7E). */
   let touch = null;
-  document.addEventListener("touchstart", e => {
+  teardown.on(document, "touchstart", e => {
     const t = e.touches[0];
     /* snapshot overlay ownership at START: an overlay's own touchend listener
        bubbles first and can close itself (wsOpen()→false) before this handler
@@ -1551,7 +1578,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       overlayOwned: wsOpen() || searchOpen() || previewOpen(),
     });
   }, { passive: true });
-  document.addEventListener("touchend", e => {
+  teardown.on(document, "touchend", e => {
     const start = touch; touch = null;
     if (!start) return;
     const t = e.changedTouches[0];
@@ -1808,7 +1835,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      visibility pause/resume, UI document mutate/load/flush/poll, and pagehide.
      Usage badge HTML and the 30s cadence stay shell-owned; only the prime is
      injected as onStartPolling. */
-  pollingFeature = createPollingFeature({
+  pollingFeature = own(createPollingFeature({
     document,
     window,
     storage: localStorage,
@@ -1865,33 +1892,33 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
        Routed through polling.js because the document's visibilitychange
        has exactly one owner. */
     onPageVisibility: visible => pairingFeature.setVisible(visible),
-  });
+  }));
   pollingFeature.bind();
   /* iOS leaves the layout viewport at the landscape height after rotating back to
      portrait, pinning the fixed shell above the visible area and sliding the
      status bar under the OS clock. Feed the measured shortfall back as --vvtop. */
-  installInsetRefresh({
+  teardown.add(installInsetRefresh({
     win: window,
     doc: document,
     apply: px => document.documentElement.style.setProperty("--vvtop", px + "px"),
     raf: fn => requestAnimationFrame(fn),
     setTimeout: (fn, ms) => setTimeout(fn, ms),
-  });
+  }));
   setLevel(level);
   renderJourneyToggle();
   renderChatBack();
   /* the Journeys chevron is breakpoint-dependent: the desktop toggle becomes a
      phone forward-arrow when the pane stops being a toggle */
-  window.addEventListener("resize", renderJourneyToggle);
+  teardown.on(window, "resize", renderJourneyToggle);
   /* crossing the workspace's zone breakpoint changes which actions a bookmark
      row offers, so re-render the pane on the edge rather than on every resize */
-  matchMedia(SINGLE_ZONE_QUERY).addEventListener("change", () => {
+  teardown.on(matchMedia(SINGLE_ZONE_QUERY), "change", () => {
     bookmarksFeature.invalidate();
     renderBookmarksPane();
   });
   /* P5/P5b: crossing isDesktop() flips flat bar ↔ overflow more-menu and
      re-clamps a persisted too-narrow inboxW to the flat-row floor. */
-  matchMedia("(min-width: 900px)").addEventListener("change", () => {
+  teardown.on(matchMedia("(min-width: 900px)"), "change", () => {
     bookmarksFeature.invalidate();
     renderBookmarksPane();
     if (typeof notesFeature.applyLayout === "function") notesFeature.applyLayout();
@@ -1903,6 +1930,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   renderMapTabs();
   pollingFeature.loadUI();
   pollingFeature.startPolling();
+  /* The handle a successor's claimAppSlot retires, and the one a caller
+     that owns the page can retire itself. */
+  return instance;
 }
 
 /* Browser entry: index.html loads this module as the sole script. Tests import

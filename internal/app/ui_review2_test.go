@@ -147,7 +147,7 @@ func TestUseInNoteIsGatedOnTheWorkspaceBeingVisible(t *testing.T) {
 	if !strings.Contains(app, "(max-width: 767px)") {
 		t.Errorf("the single-zone query must be the workspace's own breakpoint (>=768px is multi-zone)")
 	}
-	if !strings.Contains(app, `matchMedia(SINGLE_ZONE_QUERY).addEventListener("change"`) {
+	if !strings.Contains(app, `teardown.on(matchMedia(SINGLE_ZONE_QUERY), "change"`) {
 		t.Error("crossing the single-zone breakpoint must re-render the Bookmarks pane, not wait for the next poll")
 	}
 
