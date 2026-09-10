@@ -277,3 +277,26 @@ func TestClaudeModelProbeIgnoresStaleMarker(t *testing.T) {
 		t.Fatal("a stale marker must not satisfy a probe that reported nothing")
 	}
 }
+
+// Every probe session name must fall inside the reserved namespace, because
+// that prefix — not a lifetime registration — is what keeps a probe out of
+// the adoption surface. Ordinary node ids must stay outside it.
+func TestProbeSessionNamesAreReserved(t *testing.T) {
+	for i := 0; i < 8; i++ {
+		name, err := claudeUsageProbeSessionName()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !isProbeSession(name) {
+			t.Errorf("claudeUsageProbeSessionName() = %q, outside the probe namespace", name)
+		}
+		if !tmuxsession.ValidName(name) {
+			t.Errorf("claudeUsageProbeSessionName() = %q, not a valid tmux session name", name)
+		}
+	}
+	for _, name := range []string{"", "ghost", "my-node", "scimux", "scimux-notes", "usage-1"} {
+		if isProbeSession(name) {
+			t.Errorf("isProbeSession(%q) = true, want false", name)
+		}
+	}
+}

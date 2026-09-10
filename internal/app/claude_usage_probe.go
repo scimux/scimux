@@ -56,7 +56,23 @@ const (
 	claudeUsageProbeTimeout      = 90 * time.Second
 	claudeUsageProbePoll         = 250 * time.Millisecond
 	claudeUsageProbeSettingsName = "settings.json"
+	// probeSessionPrefix reserves a namespace on scimux's own tmux socket.
+	// Every probe session name starts with it, and that is what keeps a probe
+	// off the adoption surface: /api/state's unadopted list is subtractive
+	// ("every session no node accounts for"), so without a reserved namespace
+	// a probe is indistinguishable from a session the user made by hand and
+	// gets offered as an "unadopted tmux session" card that appears and
+	// vanishes on its own. A prefix rather than a lifetime registration in
+	// a.reserved, because it also covers a probe leaked by a killed scimux:
+	// such a session is never adoptable, whoever is alive to un-register it.
+	probeSessionPrefix = "scimux-usage-"
 )
+
+// isProbeSession reports whether a tmux session name belongs to scimux's own
+// throwaway probes rather than to anything a user could supervise.
+func isProbeSession(name string) bool {
+	return strings.HasPrefix(name, probeSessionPrefix)
+}
 
 var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 
@@ -225,7 +241,7 @@ func claudeUsageProbeSessionName() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return "scimux-usage-" + hex.EncodeToString(b), nil
+	return probeSessionPrefix + hex.EncodeToString(b), nil
 }
 
 // ---------- app wiring ----------

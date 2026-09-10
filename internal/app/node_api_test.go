@@ -1406,3 +1406,22 @@ func TestHandleUpdateNodeStationOverride(t *testing.T) {
 		t.Fatalf("head title = %q, want Head2", a.nodes[0].Title)
 	}
 }
+
+// A probe session must not be adoptable even if a client asks for one by name
+// (a stale card, or a probe leaked by a killed scimux): adopting it would bind
+// a node to a throwaway probe pane carrying scimux's own status line.
+func TestHandleAdoptRejectsProbeSession(t *testing.T) {
+	probe, err := claudeUsageProbeSessionName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeTmux{alive: map[string]bool{probe: true}}
+	a := newTestApp(t, f)
+	rec := adopt(a, `{"session":"`+probe+`","agent":"claude"}`)
+	if rec.Code != 409 {
+		t.Errorf("probe session: code = %d body %q, want 409", rec.Code, rec.Body.String())
+	}
+	if _, ok := a.byID[probe]; ok {
+		t.Error("probe session was registered as a node")
+	}
+}

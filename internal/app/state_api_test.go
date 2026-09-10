@@ -834,3 +834,28 @@ func TestHandleStateEmitsStationLabels(t *testing.T) {
 		t.Fatalf("station_labels = %+v, want First/first desc", body.Nodes[0].StationLabels)
 	}
 }
+
+// scimux's own throwaway probe sessions (the Claude usage/model status-line
+// probes) live on the supervised socket for a few seconds and account for no
+// node, so the subtractive unadopted list used to offer them for adoption:
+// an "unadopted tmux session" card that appeared and vanished by itself. The
+// probe namespace is reserved, never a stranger.
+func TestHandleStateUnadoptedExcludesProbeSessions(t *testing.T) {
+	probe, err := claudeUsageProbeSessionName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeTmux{list: []string{"ghost", probe}}
+	a := newTestApp(t, f)
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	var body struct {
+		Unadopted []string `json:"unadopted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
+		t.Errorf("unadopted = %v, want [ghost] (%s is a scimux probe)", body.Unadopted, probe)
+	}
+}

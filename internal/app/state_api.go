@@ -207,9 +207,14 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server). A
 	// session whose id is reserved by an in-flight create is already spoken
-	// for (R20.2) — offering it for adoption would race the publish.
+	// for (R20.2) — offering it for adoption would race the publish. So is
+	// one in the probe namespace: scimux launched it itself and will kill it
+	// within seconds (isProbeSession).
 	unadopted := []string{}
 	for _, s := range sessions {
+		if isProbeSession(s) {
+			continue
+		}
 		if _, known := a.byID[s]; !known && !a.reserved[s] {
 			unadopted = append(unadopted, s)
 		}

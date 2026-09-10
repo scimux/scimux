@@ -116,6 +116,14 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("session log %s.jsonl already holds a dead node's history; move it out of the sessions directory (or into sessions/archive/) before adopting this name", body.Session), 409)
 		return
 	}
+	// scimux's own throwaway probe. It is never offered for adoption, so this
+	// is a stale card or a hand-written request; a node bound to it would
+	// supervise a pane that is about to be killed (and, if scimux was killed
+	// mid-probe, one launched with no tools and scimux's status line).
+	if isProbeSession(body.Session) {
+		http.Error(w, fmt.Sprintf("session %q is a scimux usage probe, not an agent chat", body.Session), 409)
+		return
+	}
 	dir := body.Dir
 	if dir == "" {
 		if cwd, err := s.Cwd(); err == nil {

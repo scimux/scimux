@@ -82,7 +82,10 @@ full station chain. `ended_at` (RFC 3339, present only once set) marks a thread
 deliberately closed via
 `POST …/exit`: the node stays visible with a dead-end cap on the map rather
 than being deleted. `unadopted` lists tmux sessions on scimux's socket that no
-node accounts for — candidates for `POST /api/adopt`.
+node accounts for — candidates for `POST /api/adopt`. Sessions in scimux's own
+`scimux-usage-` probe namespace are excluded (and refused by `/api/adopt`):
+they are throwaway status-line probes scimux launched and is about to kill,
+not sessions anyone could supervise.
 
 Responses carry an `ETag`; polling clients may send `If-None-Match` and receive
 `304 Not Modified` when the snapshot is unchanged.
