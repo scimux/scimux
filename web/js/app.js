@@ -109,7 +109,7 @@ import {
   RETURN_MAP, RETURN_SEARCH, RETURN_NOTE,
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
-import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl } from "./pairing-ui.js";
+import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
@@ -1151,11 +1151,16 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      enrollment mints a perfectly well-formed code that no device can ever
      meet, so the button is hidden until the status says otherwise. */
   const pairControl = own(createPairControl({ api, doc: document }));
-  /* The offer to become a Home Screen app, on a phone that reached this
-     page over the tunnel. import.meta.url is the evidence: the loader
-     mints a blob: URL per verified module, and a local page never has
-     one. The move itself belongs to the rendezvous page, which is the
-     side holding the pairing record. */
+  /* The offer to become a Home Screen app, on a device that has one and
+     that reached this page over the tunnel. import.meta.url is the
+     evidence for the second: the loader mints a blob: URL per verified
+     module, and a local page never has one. The move itself belongs to
+     the rendezvous page, which is the side holding the pairing record.
+
+     The capability is homeScreenInstallable()'s to judge, not a viewport
+     query's: isPhoneTouch() used to stand in for it and silently excluded
+     every iPad in landscape, which needs the move exactly as much as a
+     phone does. */
   const homeScreen = own(createHomeScreenControl({
     doc: document,
     win: window,
@@ -1164,7 +1169,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     standalone:
       window.navigator.standalone === true ||
       matchMedia("(display-mode: standalone)").matches,
-    phone: isPhoneTouch(),
+    installable: homeScreenInstallable({
+      standaloneProp: window.navigator.standalone,
+      maxTouchPoints: window.navigator.maxTouchPoints,
+      platform: window.navigator.platform,
+    }),
   }));
 
   /* Unlinking this computer (F1). It shares the burger-open refresh with the

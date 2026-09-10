@@ -1,6 +1,6 @@
 /* Offering the Home Screen, once.
  *
- * A phone paired through Safari works, but it works inside a browser: a
+ * A device paired through Safari works, but it works inside a browser: a
  * tab among tabs, with an address bar over it. iOS will make it a real
  * icon, and Apple lets no page do that on the user's behalf — Share,
  * then Add to Home Screen, is theirs to tap.
@@ -8,20 +8,31 @@
  * What scimux owns is the offer, and the offer's manners. It is made
  * once, quietly, and never again; it lives on in the menu for whoever
  * wants it later; and it is never made where it could not be taken —
- * to a desktop, to a phone that is already a Home Screen app, or to a
- * browser sitting on the computer's own local page, where there is no
- * rendezvous to move anything to.
+ * to a browser with no Home Screen to be added to, to a session already
+ * running as an icon, or to a browser sitting on the computer's own
+ * local page, where there is no rendezvous to move anything to.
+ *
+ * The third condition was a viewport test until 2026-09-10, and that was
+ * the bug: an iPad in landscape is wider than the phone breakpoint, so
+ * iPadOS — which partitions an installed icon's storage exactly as iOS
+ * does, and therefore needs the move exactly as much — was told nothing
+ * and shown no menu entry. What the offer depends on is whether this
+ * browser has a Home Screen at all, and a width has never answered that.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createHomeScreenControl, homeScreenReachable } from "../js/pairing-ui.js";
+import {
+  createHomeScreenControl,
+  homeScreenInstallable,
+  homeScreenReachable,
+} from "../js/pairing-ui.js";
 
 const REMOTE = "blob:https://my.scimux.eu/6b1e-…";
 const LOCAL = "http://127.0.0.1:8765/js/app.js";
 
 test("the move is offered only where it could be taken", () => {
-  const reachable = { moduleURL: REMOTE, standalone: false, phone: true };
+  const reachable = { moduleURL: REMOTE, standalone: false, installable: true };
   assert.equal(homeScreenReachable(reachable), true);
 
   assert.equal(
@@ -35,11 +46,58 @@ test("the move is offered only where it could be taken", () => {
     "it is already the icon it would be asked to become",
   );
   assert.equal(
-    homeScreenReachable({ ...reachable, phone: false }),
+    homeScreenReachable({ ...reachable, installable: false }),
     false,
-    "a Home Screen is a phone's, and this is the wrong device for the advice",
+    "a browser with no Home Screen cannot be told to add one",
   );
   assert.equal(homeScreenReachable({}), false, "knowing nothing offers nothing");
+});
+
+/* The capability, read off the browser rather than off its window size.
+ *
+ * `navigator.standalone` is WebKit's own non-standard answer to "am I an
+ * installed icon", and only an iOS-family browser has an opinion at all —
+ * so the property *existing* is the marker, whichever way it reads. The
+ * second clause is iPadOS asking for desktop-class pages, where the UA and
+ * platform say Macintosh: a Mac reports no touch points, an iPad reports
+ * several, and that difference is the only honest way to tell them apart.
+ */
+test("the Home Screen capability is a property of the browser, not of its width", () => {
+  const iphone = { standaloneProp: false, maxTouchPoints: 5, platform: "iPhone" };
+  const ipad = { standaloneProp: false, maxTouchPoints: 5, platform: "iPad" };
+
+  assert.equal(homeScreenInstallable(iphone), true);
+  assert.equal(
+    homeScreenInstallable(ipad),
+    true,
+    "an iPad partitions an installed icon's storage exactly as an iPhone does",
+  );
+  assert.equal(
+    homeScreenInstallable({ standaloneProp: true, maxTouchPoints: 5, platform: "iPad" }),
+    true,
+    "already being an icon is a different question, asked elsewhere",
+  );
+  assert.equal(
+    homeScreenInstallable({ maxTouchPoints: 5, platform: "MacIntel" }),
+    true,
+    "iPadOS in desktop-class mode is still an iPad: a Mac has no touch points",
+  );
+  assert.equal(
+    homeScreenInstallable({ maxTouchPoints: 0, platform: "MacIntel" }),
+    false,
+    "a Mac has no Home Screen to add anything to",
+  );
+  assert.equal(
+    homeScreenInstallable({ maxTouchPoints: 0, platform: "Linux x86_64" }),
+    false,
+  );
+  assert.equal(
+    homeScreenInstallable({ maxTouchPoints: 5, platform: "Linux armv8l" }),
+    false,
+    "Android installs through its own prompt and partitions no storage; this move is an iOS workaround",
+  );
+  assert.equal(homeScreenInstallable({}), false, "knowing nothing offers nothing");
+  assert.equal(homeScreenInstallable(), false);
 });
 
 /* ------------------------------------------------------------ wiring */
@@ -73,16 +131,16 @@ function makeWin() {
   return win;
 }
 
-function setup({ moduleURL = REMOTE, standalone = false, phone = true, storage } = {}) {
+function setup({ moduleURL = REMOTE, standalone = false, installable = true, storage } = {}) {
   const doc = makeDoc();
   const win = makeWin();
   const store = storage || makeStorage();
-  const f = createHomeScreenControl({ doc, win, storage: store, moduleURL, standalone, phone });
+  const f = createHomeScreenControl({ doc, win, storage: store, moduleURL, standalone, installable });
   f.bind();
   return { f, doc, win, store, menu: () => doc.el("#m_homescreen"), offer: () => doc.el("#hsoffer") };
 }
 
-test("a paired phone in Safari is shown the offer, and keeps the menu entry", () => {
+test("a paired iPhone or iPad in Safari is shown the offer, and keeps the menu entry", () => {
   const s = setup();
   assert.equal(s.offer().hidden, false);
   assert.equal(s.menu().hidden, false);
@@ -114,6 +172,15 @@ test("a browser on the computer itself is offered nothing", () => {
   const s = setup({ moduleURL: LOCAL });
   assert.equal(s.offer().hidden, true);
   assert.equal(s.menu().hidden, true);
+});
+
+/* The regression this file was rewritten for: the offer must not be spent,
+ * or withheld, on a device that could have taken it. */
+test("a browser with no Home Screen is offered nothing and spends nothing", () => {
+  const s = setup({ installable: false });
+  assert.equal(s.offer().hidden, true);
+  assert.equal(s.menu().hidden, true);
+  assert.equal(s.store.m.size, 0, "an offer that was never made must not count as made");
 });
 
 test("taking the offer hands the page to the rendezvous", () => {

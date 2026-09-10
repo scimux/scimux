@@ -825,6 +825,37 @@ export function createPairControl({ api, doc } = {}) {
   };
 }
 
+/* Whether this browser has a Home Screen to be added to.
+ *
+ * Read off the browser, never off its window size. Until 2026-09-10 the
+ * offer was gated on a phone-width viewport, which excluded exactly one
+ * device that needs it: an iPad in landscape is wider than the phone
+ * breakpoint, and iPadOS partitions an installed icon's storage exactly
+ * as iOS does — so a paired iPad was shown neither the offer nor the
+ * menu entry, and the move it needed most looked like a missing feature.
+ *
+ * `navigator.standalone` is WebKit's own non-standard answer to "am I an
+ * installed icon". Only an iOS-family browser has an opinion at all, so
+ * the property *existing* is the marker, whichever way it happens to
+ * read — what it reads is a different question, asked by `standalone`
+ * below. The second clause is iPadOS asking for desktop-class pages,
+ * where the UA and the platform both say Macintosh and the property may
+ * be gone: a Mac reports no touch points and an iPad reports several,
+ * which is the only honest way left to tell the two apart.
+ *
+ * Android is deliberately out. It installs through its own prompt and
+ * partitions nothing, so it needs no clipboard move — this is an iOS
+ * storage workaround, not a general "install me" affordance.
+ */
+export function homeScreenInstallable({
+  standaloneProp,
+  maxTouchPoints = 0,
+  platform = "",
+} = {}) {
+  if (typeof standaloneProp === "boolean") return true;
+  return Number(maxTouchPoints) > 1 && /^mac/i.test(String(platform));
+}
+
 /* The Home Screen offer (#m_homescreen, #hsoffer).
  *
  * iOS gives a Home Screen web app its own storage, so the icon opens
@@ -837,10 +868,12 @@ export function createPairControl({ api, doc } = {}) {
  * loader mints for every module it verifies (tunnel-v2 §8), so a module
  * URL that starts with it is proof this session arrived over the
  * tunnel and not off the computer's own local page — where there is no
- * rendezvous to move to and the whole offer is nonsense.
+ * rendezvous to move to and the whole offer is nonsense. `installable`
+ * is homeScreenInstallable() above, and it is a capability rather than
+ * a device class on purpose.
  */
-export function homeScreenReachable({ moduleURL, standalone, phone } = {}) {
-  return String(moduleURL || "").startsWith("blob:") && !standalone && !!phone;
+export function homeScreenReachable({ moduleURL, standalone, installable } = {}) {
+  return String(moduleURL || "").startsWith("blob:") && !standalone && !!installable;
 }
 
 const HOME_SCREEN_OFFERED = "scimux/home-screen-offered";
@@ -851,9 +884,9 @@ export function createHomeScreenControl({
   storage,
   moduleURL,
   standalone,
-  phone,
+  installable,
 } = {}) {
-  const reachable = homeScreenReachable({ moduleURL, standalone, phone });
+  const reachable = homeScreenReachable({ moduleURL, standalone, installable });
   const menu = () => doc.querySelector("#m_homescreen");
   const offer = () => doc.querySelector("#hsoffer");
 
