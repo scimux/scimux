@@ -607,10 +607,25 @@ func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error))
 
 	var claudeTurn claudeAcceptedTurn
 	var err error
-	if n.Agent == "claude" && !isClear {
-		claudeTurn, err = a.beginClaudeAcceptedTurn(n)
-		if err != nil {
-			return false, err
+	if n.Agent == "claude" {
+		if isClear {
+			// A page turn is not a turn: it must not mint or publish a turn
+			// nonce. But Claude Code absorbs a mid-turn paste into the running
+			// turn (its own transcript calls this "absorbed_mid_turn"), and an
+			// absorbed slash command simply evaporates — while SendAck still
+			// reports the keystrokes delivered. Acting on that would retire and
+			// permanently tombstone a transcript over a rollover that never
+			// happened, so consult the Stop-hook fence without claiming it.
+			// Pane liveness is deliberately not the predicate: approval dialogs
+			// are mechanically quiet, and /clear at one is legitimate.
+			if a.claudeAcceptedTurnOf(n.ID).Turn != "" {
+				return false, errClaudeTurnInFlight
+			}
+		} else {
+			claudeTurn, err = a.beginClaudeAcceptedTurn(n)
+			if err != nil {
+				return false, err
+			}
 		}
 	}
 	acked, err := send()

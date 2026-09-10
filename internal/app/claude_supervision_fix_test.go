@@ -658,3 +658,102 @@ func TestHandleSendClearUnconfirmedStillCleansClaudePermission(t *testing.T) {
 		t.Fatalf("attention after unconfirmed /clear = %q", got)
 	}
 }
+
+// A /clear pasted while a turn is running is absorbed by the CLI, not
+// executed: Claude Code's own transcript names this (`absorbed_mid_turn`),
+// and a slash command absorbed that way leaves no trace at all. SendAck
+// cannot see the difference — it proves keystrokes reached the pane, nothing
+// more. Retiring on that evidence tombstones a live transcript permanently;
+// a live session was stranded this way.
+//
+// So /clear consults the same Stop-hook fence every other Claude send
+// consults. It must not *claim* a turn (beginClaudeAcceptedTurn mints and
+// persists a nonce; a page turn is not a turn), only refuse while one is
+// live. Pane liveness is deliberately not the predicate here — approval
+// dialogs are mechanically quiet, and TestHandleSendClearUnconfirmedStill-
+// CleansClaudePermission pins /clear succeeding at exactly that state.
+func TestClaudeClearRefusedWhileTurnInFlight(t *testing.T) {
+	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "working"}
+	a := newTestApp(t, f)
+	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
+	n, _ := seedPermClaude(t, a, "n1", hookSIDOwn)
+	tx := filepath.Join(t.TempDir(), "sess.jsonl")
+	if err := os.WriteFile(tx, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n.Transcript, n.SessionID = tx, hookSIDOwn
+
+	// A turn scimux accepted, whose Stop hook has not fired.
+	if _, err := a.beginClaudeAcceptedTurn(n); err != nil {
+		t.Fatalf("begin turn: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	req.SetPathValue("id", n.ID)
+	a.handleSend(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("/clear mid-turn = %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	if n.Transcript != tx || n.SessionID != hookSIDOwn {
+		t.Fatalf("refused /clear must not retire the transcript: %q / %q", n.Transcript, n.SessionID)
+	}
+	if a.isDeadTranscript(n.ID, tx, hookSIDOwn) {
+		t.Fatal("refused /clear must not tombstone the transcript")
+	}
+}
+
+// The fence is a refusal, not a claim: a refused /clear must leave the
+// running turn's nonce exactly as it found it, or the Stop hook for that
+// turn would arrive with nothing to settle.
+func TestRefusedClearLeavesTheRunningTurnIntact(t *testing.T) {
+	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "working"}
+	a := newTestApp(t, f)
+	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
+	n, _ := seedPermClaude(t, a, "n1", hookSIDOwn)
+	live, err := a.beginClaudeAcceptedTurn(n)
+	if err != nil {
+		t.Fatalf("begin turn: %v", err)
+	}
+
+	if _, err := a.acceptTmuxPrompt(n, true, func() (bool, error) {
+		t.Fatal("a refused /clear must never reach the pane")
+		return false, nil
+	}); !errors.Is(err, errClaudeTurnInFlight) {
+		t.Fatalf("accept(/clear) = %v, want turn-in-flight", err)
+	}
+	if got := a.claudeAcceptedTurnOf(n.ID); got.Turn != live.Turn {
+		t.Fatalf("refused /clear moved the turn nonce: %+v, want %+v", got, live)
+	}
+}
+
+// Once the turn is over, the same /clear goes through: the fence gates on a
+// live turn, it does not make /clear conditional on anything else.
+func TestClearProceedsOnceTheTurnIsDrained(t *testing.T) {
+	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "working"}
+	a := newTestApp(t, f)
+	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
+	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	if _, err := a.beginClaudeAcceptedTurn(n); err != nil {
+		t.Fatalf("begin turn: %v", err)
+	}
+	if err := RunClaudeStopHook(bundle, strings.NewReader(string(stopEventJSON("Stop", false))), nil, nil); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	a.drainClaudeStopInbox(n.ID, filepath.Base(bundle))
+	if got := a.claudeAcceptedTurnOf(n.ID); got.Turn != "" {
+		t.Fatalf("Stop did not drain the turn: %+v", got)
+	}
+
+	reached := false
+	if _, err := a.acceptTmuxPrompt(n, true, func() (bool, error) {
+		reached = true
+		return true, nil
+	}); err != nil {
+		t.Fatalf("accept(/clear) after Stop = %v, want nil", err)
+	}
+	if !reached {
+		t.Fatal("/clear after Stop must reach the pane")
+	}
+}

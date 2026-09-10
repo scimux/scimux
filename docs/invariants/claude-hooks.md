@@ -58,6 +58,22 @@ startup/hook-health acknowledgement. The undocumented transcript
   is harmless). Never retire a transcript on absent evidence — a just-created
   successor holds only meta records, so "no recognized content yet" is not
   staleness (`maybeRelinkTranscript`).
+- **`/clear` is refused while a turn is in flight**, with the same
+  `errClaudeTurnInFlight` 409 every other Claude send gets. Claude Code
+  absorbs a mid-turn paste into the running turn — its own transcript names
+  this, `absorbed_mid_turn` — and an absorbed *slash command* evaporates
+  leaving no record at all, while the paste still reports delivered. Since
+  the web `/clear` path retires and permanently tombstones the transcript on
+  delivery, acting on that would strand a live session's mirror for the rest
+  of its life; a live session was stranded this way. The fence reads the
+  accepted-turn nonce and must never *claim* one: a page turn is not a turn,
+  and `beginClaudeAcceptedTurn` mints and persists a nonce. Pane liveness is
+  deliberately not the predicate either — approval dialogs are mechanically
+  quiet and a `/clear` at one is legitimate. The deeper fix, deferring the
+  tombstone until `SessionStart source:"clear"` proves the rollover (which
+  `bindClaudeClear` already performs unaided), is a phase, not a patch: it
+  trades a certain protection against rebinding a dead transcript for a
+  timeout window.
 
 ## The first prompt is gated on the hook, not on the transcript file
 
