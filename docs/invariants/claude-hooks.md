@@ -62,18 +62,28 @@ startup/hook-health acknowledgement. The undocumented transcript
   `errClaudeTurnInFlight` 409 every other Claude send gets. Claude Code
   absorbs a mid-turn paste into the running turn — its own transcript names
   this, `absorbed_mid_turn` — and an absorbed *slash command* evaporates
-  leaving no record at all, while the paste still reports delivered. Since
-  the web `/clear` path retires and permanently tombstones the transcript on
-  delivery, acting on that would strand a live session's mirror for the rest
-  of its life; a live session was stranded this way. The fence reads the
-  accepted-turn nonce and must never *claim* one: a page turn is not a turn,
-  and `beginClaudeAcceptedTurn` mints and persists a nonce. Pane liveness is
-  deliberately not the predicate either — approval dialogs are mechanically
-  quiet and a `/clear` at one is legitimate. The deeper fix, deferring the
-  tombstone until `SessionStart source:"clear"` proves the rollover (which
-  `bindClaudeClear` already performs unaided), is a phase, not a patch: it
-  trades a certain protection against rebinding a dead transcript for a
-  timeout window.
+  leaving no record at all, while the paste still reports delivered. The
+  fence reads the accepted-turn nonce and must never *claim* one: a page turn
+  is not a turn, and `beginClaudeAcceptedTurn` mints and persists a nonce.
+  Pane liveness is deliberately not the predicate either — approval dialogs
+  are mechanically quiet and a `/clear` at one is legitimate.
+- **A Claude page turn is authored by the hook, never by the send.**
+  Delivering `/clear` proves only that a paste was accepted, and retirement
+  is irreversible — it tombstones the transcript path and session id for
+  good, so a page turn taken on the delivery report alone strands a live
+  session's mirror for the rest of its life; a live session was stranded this
+  way. So the send does nothing but note the time
+  (`noteClaudeClearSent`), and the whole page turn — retire the old link,
+  tombstone it transactionally with the successor binding, append the
+  path-less seam — belongs to `commitClaudeBinding` under `SessionStart
+  source:"clear"`, which already did exactly that for a `/clear` typed
+  straight into the pane. Nothing else needs to be durable: the hook event
+  lands in the bundle inbox, so a restart mid-wait loses only the notice.
+  That notice is the other half — a `/clear` that never turns a page must not
+  be silent, so `reconcileClaudeClear` gives up after `claudeDeliveryGiveUp`
+  and says so inline. **Never retry `/clear`**: a retry that races a
+  late-arriving rollover pages twice and throws away a turn the user has
+  already spent.
 
 ## The first prompt is gated on the hook, not on the transcript file
 

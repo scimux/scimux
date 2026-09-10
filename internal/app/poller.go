@@ -498,6 +498,30 @@ func (a *app) poll() {
 		a.discoverTranscript(n)
 		a.syncMirror(n)
 		a.reconcileClaudeInitialDelivery(n)
+		a.reconcileClaudeClear(n)
+	}
+}
+
+// reconcileClaudeClear gives up waiting for the SessionStart source:"clear"
+// that would prove a pasted /clear turned the page. Expiry is a notice and
+// nothing more: there is deliberately nothing to undo, because the delivery
+// path no longer retires anything, and nothing to retry, because /clear is
+// never retried. The same outer bound as the first prompt — a paste swallowed
+// by a dialog is the shared cause, and a second clock would only invite the
+// two to disagree.
+func (a *app) reconcileClaudeClear(n *Node) {
+	if n == nil || n.Agent != "claude" || a.claudeDeliveryGiveUp <= 0 {
+		return
+	}
+	a.mu.Lock()
+	sent, waiting := a.claudeClearSent[n.ID]
+	expired := waiting && time.Since(sent) > a.claudeDeliveryGiveUp
+	if expired {
+		a.clearClaudeClearPendingLocked(n.ID)
+	}
+	a.mu.Unlock()
+	if expired {
+		a.recordClaudeLaunchError(n.ID, claudeClearExplain)
 	}
 }
 

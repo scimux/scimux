@@ -43,6 +43,7 @@ const (
 	claudeResumeExplain       = "Claude could not rebind the new transcript. The previous transcript is still attached. Inspect Claude outside scimux, or fork."
 	claudePasteExplain        = "The first prompt could not be pasted into Claude. It has been kept as a draft and was not retried."
 	claudeTurnFenceExplain    = "Claude supervision could not publish the turn fence, so the prompt was kept as a draft and was not sent. Relaunch this node from scimux."
+	claudeClearExplain        = "The /clear reached Claude but no fresh session followed, so this chat was left as it was — something on screen may have swallowed it. Open the terminal to check. It was not retried."
 )
 
 // claudePermissionOptionKind classifies a label taken from a proven AX

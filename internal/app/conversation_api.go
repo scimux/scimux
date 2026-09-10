@@ -274,17 +274,16 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !isClear {
 		a.noteUsagePrompt(n.Agent)
 	}
-	// /clear delivered through scimux is a *known* session rollover: Claude
-	// Code starts a fresh session file. Retire the link right away (path-less
-	// detached seam, peek while waiting). Only that node's SessionStart
-	// source:"clear" hook event may bind the successor. Never retry /clear.
-	// SendAck can return acked=false after paste+Enter succeeded — end the
-	// old permission turn on any send that did not error.
+	// /clear delivered through scimux is a *request* for a session rollover,
+	// never proof of one: the CLI can swallow the paste, and SendAck only
+	// attests keystrokes. So this path turns no page. The whole page turn —
+	// retire, tombstone transactionally with the successor, seam — belongs to
+	// that node's own SessionStart source:"clear", which bindClaudeClear
+	// already performs unaided for a /clear typed straight into the pane
+	// (AT-BIND-06). All this does is start the clock that makes a swallowed
+	// /clear visible instead of silent. Never retry /clear.
 	if n.Agent == "claude" && isClear {
-		a.retireTranscript(n)
-		if err := a.advanceClaudeClearAfterWebLocked(n); err != nil {
-			a.recordClaudeLaunchError(n.ID, claudeResumeExplain)
-		}
+		a.noteClaudeClearSent(n.ID)
 	}
 	if !acked {
 		writeJSON(w, map[string]string{"status": "unconfirmed", "text": body.Text})

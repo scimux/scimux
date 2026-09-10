@@ -151,25 +151,26 @@ func TestPublicRouteSendValidationAndDelivery(t *testing.T) {
 
 // ---------- tmux /clear retirement + source seam ----------
 
-func TestPublicRouteSendClearRetiresTranscript(t *testing.T) {
+// The page turn belongs to the hook, so the route's job is to deliver the
+// keys and change nothing. Once SessionStart source:"clear" confirms the
+// rollover the full page turn lands: the successor bound, and the closing
+// station snapshot ahead of a path-less clear seam.
+func TestPublicRouteSendClearRetiresTranscriptOnHookConfirmation(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"c1": true}, capture: "idle", captureAfterEnter: "cleared"}
 	a := newTestApp(t, f)
 	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	n := seedTmuxNode(a, "c1")
+	tx := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -time.Hour))
+	succ := writeClaudeProject(t, a.home, "-w-proj", hookSIDSuccessor, claudeUserLine("new", 0))
+	n := seedOwnedClaude(t, a, "c1", hookSIDOwn, tx)
 	installPreparedClaudeHook(t, a, n)
-	tx := filepath.Join(t.TempDir(), "sess.jsonl")
-	if err := os.WriteFile(tx, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	n.Transcript, n.SessionID = tx, "sess"
-	// Existing log so retire appends a path-less clear seam.
+	// Existing log so the page turn appends a path-less clear seam.
 	w := &sessionlog.Writer{Path: a.sessionLogPath("c1")}
 	for _, ev := range []sessionlog.Event{
 		sessionlog.NewMeta("c1", "claude", "", "", a.home),
-		sessionlog.NewSource(tx, "sess"),
+		sessionlog.NewSource(tx, hookSIDOwn),
 		{T: "user", Text: "old"},
 	} {
 		if err := w.Append(ev); err != nil {
@@ -182,8 +183,18 @@ func TestPublicRouteSendClearRetiresTranscript(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "acknowledged") {
 		t.Fatalf("/clear: status = %d body %q", rec.Code, rec.Body.String())
 	}
-	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("link not retired: transcript=%q session=%q", n.Transcript, n.SessionID)
+	if n.Transcript != tx || n.SessionID != hookSIDOwn {
+		t.Fatalf("delivery alone retired the link: transcript=%q session=%q", n.Transcript, n.SessionID)
+	}
+
+	if err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
+		HookEventName: "SessionStart", Source: "clear",
+		SessionID: hookSIDSuccessor, TranscriptPath: succ, Cwd: "/w/proj",
+	}); err != nil {
+		t.Fatalf("clear hook: %v", err)
+	}
+	if n.Transcript != succ || n.SessionID != hookSIDSuccessor {
+		t.Fatalf("hook bound %q / %q, want the successor", n.Transcript, n.SessionID)
 	}
 	evs := sessionlog.ReadEvents(a.sessionLogPath("c1"))
 	if len(evs) == 0 {
@@ -2042,7 +2053,7 @@ func TestHandleSendInterruptTmux(t *testing.T) {
 // (persisted as new records), so the UI degrades to peek immediately and the
 // phase-end relink can adopt the fresh session file. Ordinary prompts must
 // not retire anything.
-func TestHandleSendClearRetiresTranscript(t *testing.T) {
+func TestHandleSendClearDoesNotRetireOnDeliveryAlone(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"T": true}, capture: "idle", captureAfterEnter: "cleared"}
 	a := newTestApp(t, f)
 	a.server.PasteDelay, a.server.AckPoll = time.Millisecond, time.Millisecond
@@ -2069,21 +2080,18 @@ func TestHandleSendClearRetiresTranscript(t *testing.T) {
 	if w := send(`"  /clear  "`); w.Code != 200 || !strings.Contains(w.Body.String(), "acknowledged") {
 		t.Fatalf("send /clear: %d %s", w.Code, w.Body.String())
 	}
-	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("link not retired: transcript=%q session=%q", n.Transcript, n.SessionID)
+	// Delivering /clear proves only that keystrokes reached the pane. The
+	// link stands until SessionStart source:"clear" confirms the rollover
+	// (TestWebClearRetiresWhenTheHookConfirms owns that half, and the replay
+	// durability that goes with it).
+	if n.Transcript != tx || n.SessionID != "sess" {
+		t.Fatalf("delivery alone retired the link: transcript=%q session=%q", n.Transcript, n.SessionID)
+	}
+	if a.isDeadTranscript(n.ID, tx, "sess") {
+		t.Fatal("delivery alone tombstoned the link")
 	}
 
-	// The retirement must survive a restart (replay).
-	a2 := &app{byID: map[string]*Node{}, storePath: a.storePath}
-	if err := a2.loadStore(); err != nil {
-		t.Fatal(err)
-	}
-	if got := a2.byID[n.ID]; got == nil || got.Transcript != "" || got.SessionID != "" {
-		t.Fatalf("replay resurrected the link: %+v", got)
-	}
-
-	// An ordinary prompt never retires a link.
-	n.Transcript, n.SessionID = tx, "sess"
+	// An ordinary prompt never retires a link either.
 	if w := send(`"hello"`); w.Code != 200 {
 		t.Fatalf("send hello: %d %s", w.Code, w.Body.String())
 	}

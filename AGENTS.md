@@ -219,8 +219,16 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
     node, because a second `session/new` on one connection is unproven
     upstream while a fresh PID self-evidently carries no context. codex opens
     a new thread on the same PID. In both, the seam is appended only after the
-    protocol call succeeded. Claude gets a path-less "detached" seam at retire
-    time and the successor bind only from its own SessionStart hook.
+    protocol call succeeded. **Claude obeys the same rule**, and its proof is
+    that node's own `SessionStart source:"clear"`: pasting `/clear` turns no
+    page at all, because the CLI absorbs a paste that lands mid-turn and an
+    absorbed slash command evaporates, while the paste still reports
+    delivered. Retirement is irreversible (it tombstones the path and session
+    id for good), so it waits for the hook, which retires the old link,
+    tombstones it transactionally with the successor binding, and appends the
+    path-less seam — the same work it already did for a `/clear` typed
+    straight into the pane. A `/clear` that never lands therefore changes
+    nothing and says so.
   - Fork is the only path that may change launch config: a forked node
     inherits agent/model/effort/dir but never conversation history. Claude's
     native `/fork` and `SessionStart source:"fork"` are unsupported — forking

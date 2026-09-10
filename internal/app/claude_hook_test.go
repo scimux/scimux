@@ -1540,3 +1540,114 @@ func TestFirstPollAfterRestartKeepsIdleTranscripts(t *testing.T) {
 		t.Fatal("restart tombstoned the transcript; the node is stranded in peek")
 	}
 }
+
+// A /clear is a request, not an outcome. Claude Code creates the successor
+// session and only then runs SessionStart source:"clear", so that hook is the
+// only proof the page turned. Until it arrives the old transcript is still
+// the live one and must keep mirroring: retiring on delivery tombstones it
+// permanently (markDeadTranscriptLocked plus a transcript-retired record), and
+// a /clear the CLI swallowed then strands a session that is still running.
+func TestWebClearWaitsForTheHookBeforeRetiring(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}, captureAfterEnter: "cleared"}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -time.Hour))
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
+	writeSeedLog(t, a, n.ID, "before")
+
+	sendClear(t, a, n.ID)
+
+	if n.Transcript != old || n.SessionID != hookSIDOwn {
+		t.Fatalf("unconfirmed /clear retired the link: %q / %q", n.Transcript, n.SessionID)
+	}
+	if a.isDeadTranscript(n.ID, old, hookSIDOwn) {
+		t.Fatal("unconfirmed /clear tombstoned a transcript that may still be live")
+	}
+	if got := clearSeamCount(t, a, n.ID); got != 0 {
+		t.Fatalf("clear seams before the hook = %d, want 0", got)
+	}
+}
+
+// And when the hook does arrive, the page turns exactly once: bindClaudeClear
+// already retires the old link, tombstones it transactionally with the
+// successor binding, and appends the seam.
+func TestWebClearRetiresWhenTheHookConfirms(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}, captureAfterEnter: "cleared"}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -time.Hour))
+	succ := writeClaudeProject(t, a.home, "-w-proj", hookSIDSuccessor, claudeUserLine("new", 0))
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
+	writeSeedLog(t, a, n.ID, "before")
+	persistCommittedBinding(t, a, n, "hook-n1", 1, old, hookSIDOwn, "startup")
+
+	sendClear(t, a, n.ID)
+	if err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
+		HookEventName: "SessionStart", Source: "clear",
+		SessionID: hookSIDSuccessor, TranscriptPath: succ, Cwd: "/w/proj",
+	}); err != nil {
+		t.Fatalf("clear hook: %v", err)
+	}
+
+	if n.Transcript != succ || n.SessionID != hookSIDSuccessor {
+		t.Fatalf("confirmed /clear bound %q / %q, want the successor", n.Transcript, n.SessionID)
+	}
+	if !a.isDeadTranscript(n.ID, old, hookSIDOwn) {
+		t.Fatal("confirmed /clear must tombstone the retired transcript")
+	}
+	if got := clearSeamCount(t, a, n.ID); got != 1 {
+		t.Fatalf("clear seams after the hook = %d, want 1", got)
+	}
+
+	// The page turn is durable: the committed claude-binding carries the
+	// successor and the retired path together, so replay cannot resurrect
+	// the old link nor lose the new one.
+	a2 := reloadApp(t, a, f)
+	got := a2.byID[n.ID]
+	if got == nil || got.Transcript != succ || got.SessionID != hookSIDSuccessor {
+		t.Fatalf("replay lost the page turn: %+v", got)
+	}
+	if !a2.isDeadTranscript(n.ID, old, hookSIDOwn) {
+		t.Fatal("replay lost the tombstone")
+	}
+}
+
+// A swallowed /clear must not be silent. Nothing has to be undone — the fix
+// above means nothing was done — but the user asked for a page turn and did
+// not get one, so say so rather than leaving a chat that quietly ignored the
+// command.
+func TestSwallowedClearBecomesAnInlineError(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"n1": true}, captureAfterEnter: "cleared"}
+	a := newTestApp(t, f)
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -time.Hour))
+	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
+	writeSeedLog(t, a, n.ID, "before")
+
+	sendClear(t, a, n.ID)
+	a.reconcileClaudeClear(n)
+	if got := a.claudeLaunchError(n.ID); got != "" {
+		t.Fatalf("inside the wait the clear is neutral, got %q", got)
+	}
+
+	a.mu.Lock()
+	a.claudeClearSent[n.ID] = time.Now().Add(-2 * a.claudeDeliveryGiveUp)
+	a.mu.Unlock()
+	a.reconcileClaudeClear(n)
+
+	if got := a.claudeLaunchError(n.ID); got != claudeClearExplain {
+		t.Fatalf("swallowed /clear error = %q, want %q", got, claudeClearExplain)
+	}
+	if n.Transcript != old || n.SessionID != hookSIDOwn {
+		t.Fatalf("a swallowed /clear must leave the link alone: %q / %q", n.Transcript, n.SessionID)
+	}
+	if a.isDeadTranscript(n.ID, old, hookSIDOwn) {
+		t.Fatal("a swallowed /clear must not tombstone anything")
+	}
+}

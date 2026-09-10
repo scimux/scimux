@@ -101,7 +101,7 @@ func TestDocCommentTruth(t *testing.T) {
 	seams := []string{
 		"processClaudeHookEvent",
 		"claudeGeneration",
-		"advanceClaudeClearAfterWeb",
+
 		"mintClaudeVisibleEpoch",
 		"claudeLaunchError",
 	}

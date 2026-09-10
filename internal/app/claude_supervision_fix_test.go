@@ -476,6 +476,25 @@ func TestClaudeResumeCandidateThenGenerationChange(t *testing.T) {
 	}
 }
 
+// advanceClearGeneration is what the web /clear path used to do before the
+// page turn moved wholly onto the hook. It survives here as a probe: the
+// property under test is that claudeBindLock serializes a generation advance
+// against a binding commit, and that is a property of the lock, not of
+// /clear.
+func advanceClearGeneration(a *app, n *Node) error {
+	lock := a.claudeBindLock(n.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	a.mu.Lock()
+	hookID := a.claudeHookIDLocked(n.ID)
+	captured := a.claudeGenerationLocked(n.ID)
+	a.mu.Unlock()
+	if hookID == "" {
+		return errClaudeHookRejected
+	}
+	return a.persistClaudeClearGeneration(n.ID, hookID, captured)
+}
+
 func TestClaudeResumeSerializesConcurrentClearGeneration(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
@@ -497,7 +516,7 @@ func TestClaudeResumeSerializesConcurrentClearGeneration(t *testing.T) {
 	a.claudeAfterCandidate = func(string) {
 		go func() {
 			close(attempted)
-			clearDone <- a.advanceClaudeClearAfterWeb(n)
+			clearDone <- advanceClearGeneration(a, n)
 		}()
 		<-attempted
 		select {
@@ -651,8 +670,12 @@ func TestHandleSendClearUnconfirmedStillCleansClaudePermission(t *testing.T) {
 	if got := phaseOf(a, n.ID); got != autoPhaseOff {
 		t.Fatalf("phase after unconfirmed /clear = %q, want off", got)
 	}
-	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("unconfirmed /clear must retire the old transcript: %q / %q", n.Transcript, n.SessionID)
+	// The permission state above is cleaned on delivery because withdrawing
+	// authority is safe whether or not the /clear took effect. The transcript
+	// link is the opposite: retiring it is irreversible, so it waits for
+	// SessionStart source:"clear".
+	if n.Transcript != tx || n.SessionID != hookSIDOwn {
+		t.Fatalf("unconfirmed /clear must leave the transcript alone: %q / %q", n.Transcript, n.SessionID)
 	}
 	if got := a.attn[n.ID]; got != "" {
 		t.Fatalf("attention after unconfirmed /clear = %q", got)

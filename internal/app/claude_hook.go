@@ -662,34 +662,27 @@ func (a *app) bindClaudeClear(nodeID string, ev claudeSessionStartEvent, capture
 	return nil
 }
 
-// advanceClaudeClearAfterWeb advances the detached generation after /clear.
-// Test seam: production calls advanceClaudeClearAfterWebLocked with a.mu
-// already held.
-func (a *app) advanceClaudeClearAfterWeb(n *Node) error {
-	if n == nil {
-		return errClaudeHookRejected
-	}
-	lock := a.claudeBindLock(n.ID)
-	lock.Lock()
-	defer lock.Unlock()
-	return a.advanceClaudeClearAfterWebLocked(n)
-}
-
-// advanceClaudeClearAfterWebLocked advances the detached generation while
-// the caller holds claudeBindLock. The HTTP /clear path holds that lock from
-// before Enter through transcript retirement and this append.
-func (a *app) advanceClaudeClearAfterWebLocked(n *Node) error {
-	if n == nil {
-		return errClaudeHookRejected
+// noteClaudeClearSent starts the wait for the SessionStart source:"clear"
+// that proves a pasted /clear turned the page. It records a time and nothing
+// else: this must never become a second author of the page turn, which is
+// exactly the bug it replaces.
+func (a *app) noteClaudeClearSent(nodeID string) {
+	if nodeID == "" {
+		return
 	}
 	a.mu.Lock()
-	hookID := a.claudeHookIDLocked(n.ID)
-	captured := a.claudeGenerationLocked(n.ID)
-	a.mu.Unlock()
-	if hookID == "" {
-		return errClaudeHookRejected
+	defer a.mu.Unlock()
+	if a.claudeClearSent == nil {
+		a.claudeClearSent = map[string]time.Time{}
 	}
-	return a.persistClaudeClearGeneration(n.ID, hookID, captured)
+	a.claudeClearSent[nodeID] = time.Now()
+}
+
+// clearClaudeClearPendingLocked ends that wait. Any committed binding ends it, not
+// just a clear one: a startup or resume binding means this pane moved on, so
+// no /clear notice could still be about the session in front of the user.
+func (a *app) clearClaudeClearPendingLocked(nodeID string) {
+	delete(a.claudeClearSent, nodeID)
 }
 
 // persistClaudeClearGeneration is called only while claudeBindLock(nodeID) is
@@ -782,6 +775,7 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 	if retirePath != "" || retireSID != "" {
 		a.markDeadTranscriptLocked(nodeID, retirePath, retireSID)
 	}
+	a.clearClaudeClearPendingLocked(nodeID)
 	delete(a.pathClaims, ev.TranscriptPath)
 	return nil
 }

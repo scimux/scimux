@@ -424,6 +424,13 @@ type app struct {
 	// claudeLaunchErr is a durable-for-the-process inline launch/delivery
 	// error for a Claude node. It is never a reason to open the terminal.
 	claudeLaunchErr map[string]string
+	// claudeClearSent is when a /clear was pasted, kept only until the
+	// SessionStart source:"clear" that proves the page actually turned. It
+	// exists to time the wait out, never to act on: the page turn itself is
+	// bindClaudeClear's, on evidence. Losing it to a restart costs the
+	// notice and nothing else, because the hook event is durable in the
+	// bundle inbox and the binding it commits is the whole page turn.
+	claudeClearSent map[string]time.Time
 	// claudeTurns is the live accepted-turn nonce per Claude node. Stop and
 	// Notification helpers capture it; drain matches it exactly.
 	claudeTurns map[string]claudeAcceptedTurn
