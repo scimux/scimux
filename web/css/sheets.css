@@ -95,6 +95,12 @@
 #m_harnesses .agent-logo img, #m_harnesses .agent-logo svg,
 #m_harnesses .agent-logo .mask-logo { width: 16px; height: 16px; }
 #m_harnesses .hnote { flex-basis: 100%; color: var(--dim); font-size: 12px; }
+/* The vendor-terms line. Its own row under the version rather than beside it:
+   the user's agreement is with the vendor, not with scimux, so it is a fact
+   about the row and not chrome on it. 44px because it is a tap target that
+   leaves the app. */
+#m_harnesses .hterms { min-height: 44px; display: flex; align-items: center; }
+#m_harnesses .hterms a { color: var(--dim); text-decoration: underline; }
 /* The usage-check switch. It sits on its own line under the version because it
    is a decision about money, not a property of the row: crowding it next to a
    version tag would read as chrome. 44px is the tap target the rest of the menu
@@ -107,6 +113,10 @@
 #m_harnesses .item[data-state="behind"] .hver { color: var(--work); }
 #m_harnesses .item[data-state="absent"] { opacity: .55; }
 #m_hnote { color: var(--dim); font-size: 12px; margin-top: 8px; }
+/* The not-affiliated statement. Dim and small like every other note in the
+   sheet — it is a standing fact, not a warning, and styling it as an alert
+   would make it read as something to dismiss. */
+#m_affil { color: var(--dim); font-size: 12px; line-height: 1.45; margin: 2px 0 10px; }
 .sheet .pos-item { display: flex; gap: 10px; align-items: center; min-height: 44px; margin: 6px 0; font-size: 14px; }
 .sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
 /* send-to group headers — rendered only when both blocks exist, so the split

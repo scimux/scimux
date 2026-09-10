@@ -33,6 +33,55 @@ function isNewer(installed, latest){
  * Naming the missing binary is the whole value of the row. */
 const LAUNCH_BIN = Object.freeze({ pi: "pi-acp" });
 
+/* Whose agreement the user is actually under, per harness.
+ *
+ * scimux is not a party to any of these, holds no credential for any of them,
+ * and runs no login flow — so the honest thing a row can do is point at the
+ * agreement the user already signed, not summarise it. One tap, one vendor.
+ *
+ * Consumer terms are linked because a coding-harness subscription is the
+ * common case; an API-key user is under the same vendor's commercial terms,
+ * which the README lists. The menu is a pointer, the README is the reference.
+ *
+ * pi and opencode are deliberately absent: they are BYO-provider routers
+ * holding no model of their own, so the binding terms are whichever provider
+ * key the user configured — something scimux cannot read and must not guess.
+ * Naming the wrong vendor would be worse than naming none, so those rows get
+ * a sentence instead of a link.
+ *
+ * Each entry is the whole anchor, with its URL written out literally, and
+ * that is deliberate rather than lazy: the FR-42 audit classifies a
+ * target=_blank by the href on the *same* element, and only a literal
+ * absolute URL is provably external. Building the href from a variable would
+ * be indistinguishable from a local navigation to the scanner and would need
+ * an allowlist entry — for three constants that never vary. Keep them
+ * literal and the ratchet stays honest.
+ *
+ * Names match each vendor's own document title; OpenAI's is "Terms of Use".
+ * target=_blank so leaving does not navigate away from a live supervision
+ * page, rel=noopener because a third-party tab has no business holding a
+ * handle to this one. */
+const HARNESS_TERMS = Object.freeze({
+  claude: `<a href="https://www.anthropic.com/legal/consumer-terms" target="_blank" rel="noopener">Terms of Service</a>`,
+  codex: `<a href="https://openai.com/policies/terms-of-use/" target="_blank" rel="noopener">Terms of Use</a>`,
+  grok: `<a href="https://x.ai/legal/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
+});
+
+const BYO_PROVIDER_NOTE =
+  "Terms are your model provider's — scimux cannot see which one you configured.";
+
+/* The terms line for one row. Absent harnesses keep it: someone deciding
+ * whether to install a harness is exactly the reader who wants the terms
+ * first, and the row is a reference rather than an action. */
+export function harnessTermsHTML(agent){
+  const link = HARNESS_TERMS[agent];
+  if (link) return `<span class="hnote hterms">${link}</span>`;
+  if (agent === "pi" || agent === "opencode"){
+    return `<span class="hnote hterms">${esc(BYO_PROVIDER_NOTE)}</span>`;
+  }
+  return "";
+}
+
 /**
  * One row's state and the sentence under it.
  *
@@ -132,6 +181,7 @@ export function harnessRowsHTML(rows, latest, deps = {}){
       `<span><span class="agent-logo" aria-hidden="true">${agentLogo(s.agent)}</span> ${esc(name)}</span>` +
       `<span class="tag hver">${tag}</span>` +
       (s.note ? `<span class="hnote">${esc(s.note)}</span>` : "") +
+      harnessTermsHTML(s.agent) +
       usage +
       `</div>`;
   }).join("");

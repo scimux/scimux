@@ -190,3 +190,44 @@ test("an absent claude gets no usage switch", () => {
   const html = harnessRowsHTML([{ agent: "claude", present: false, launchable: false }], null, { usageChecks: false });
   assert.doesNotMatch(html, /data-usage-check/);
 });
+
+/* ---------- vendor terms ---------- */
+
+test("every single-vendor harness row links its vendor's terms", () => {
+  /* scimux is not a party to any of these agreements and holds no
+     credential, so the row is a pointer, not a claim: the user's agreement
+     is with the vendor and the row should make that reachable in one tap. */
+  const html = harnessRowsHTML([
+    { agent: "claude", present: true, launchable: true, installed: "2.1.236" },
+    { agent: "codex", present: true, launchable: true, installed: "0.153.4" },
+    { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+  ], null);
+
+  assert.match(html, /href="https:\/\/www\.anthropic\.com\/legal\/consumer-terms"/);
+  assert.match(html, /href="https:\/\/openai\.com\/policies\/terms-of-use\/"/);
+  assert.match(html, /href="https:\/\/x\.ai\/legal\/terms-of-service"/);
+  /* Leaving scimux must not navigate away from a live supervision page, and
+     an opener handle to a third-party tab is a needless one. */
+  assert.equal((html.match(/target="_blank"/g) || []).length, 3);
+  assert.equal((html.match(/rel="noopener"/g) || []).length, 3);
+});
+
+test("a BYO-provider harness says whose terms apply instead of guessing", () => {
+  /* pi and opencode hold no model: the binding terms are whichever provider
+     key the user configured, which scimux cannot read. A link here would name
+     the wrong vendor, which is worse than naming none. */
+  const html = harnessRowsHTML([
+    { agent: "pi", present: true, launchable: true, installed: "0.85.1" },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+  ], null);
+
+  assert.doesNotMatch(html, /href="http/);
+  assert.match(html, /your model provider/i);
+});
+
+test("an absent harness still shows whose terms it would be under", () => {
+  /* The row is a reference, not an action: a user deciding whether to install
+     Codex is exactly the reader who wants the terms first. */
+  const html = harnessRowsHTML([{ agent: "codex", present: false, launchable: false }], null);
+  assert.match(html, /openai\.com\/policies\/terms-of-use/);
+});
