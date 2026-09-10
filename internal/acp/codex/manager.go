@@ -42,6 +42,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/agentperm"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -328,32 +329,12 @@ func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 	return s.pendingInfo()
 }
 
-// PendingPermission is the UI-facing view of one outstanding approval: a title,
-// the tool's kind when known, an optional reason, and the answerable options.
-// Empty ToolKind, option Kind, or Reason means "unknown" — never an error,
-// never a guess. Shape matches acp.PendingPermission so the HTTP/UI layer
-// treats both transports identically.
-//
-// RequestID is an opaque stable identity for the current pending request
-// (derived from the manager's pending sequence). It stays fixed while the same
-// request is pending and advances for the next request even when title/options
-// match.
-type PendingPermission struct {
-	RequestID string // opaque; stable while this request is pending
-	Title     string
-	ToolKind  string
-	Reason    string // why the agent is asking; empty when unknown
-	Options   []PermOption
-}
+// PendingPermission is the UI-facing permission view, identical to
+// agentperm.Pending. RequestID is derived from the manager's pending sequence.
+type PendingPermission = agentperm.Pending
 
-// PermOption is one answerable decision: the key a supervisor presses, a
-// human-readable decision name, and the option's role kind when known. Shape
-// matches acp.PermOption so the HTTP/UI layer treats both transports identically.
-type PermOption struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-	Kind string `json:"kind,omitempty"`
-}
+// PermOption is one answerable permission choice, identical to agentperm.Option.
+type PermOption = agentperm.Option
 
 // RecordStartFailure marks a node whose first prompt could not be delivered
 // (finding 52): it writes the failure to the authoritative log and, if a

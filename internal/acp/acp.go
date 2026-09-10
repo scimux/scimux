@@ -35,6 +35,7 @@ import (
 
 	sdk "github.com/coder/acp-go-sdk"
 
+	"codeberg.org/chrberger/scimux/internal/agentperm"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
@@ -423,32 +424,13 @@ func (m *Manager) Pending(nodeID string) (PendingPermission, bool) {
 	return s.pendingInfo()
 }
 
-// PendingPermission is the UI-facing view of one outstanding approval: a title,
-// the tool's kind when known, an optional reason, and the answerable options.
-// Empty ToolKind, option Kind, or Reason means "unknown" — never an error,
-// never a guess. Shape matches codex.PendingPermission so the HTTP/UI layer
-// treats both transports identically. ACP RequestPermission has no reason
-// field; Reason stays empty there.
-//
-// RequestID is an opaque stable identity for the current pending request
-// (monotonic per-session sequence). It stays fixed while the same request is
-// pending and advances for the next request even when title/options match.
-type PendingPermission struct {
-	RequestID string // opaque; stable while this request is pending
-	Title     string
-	ToolKind  string
-	Reason    string // why the agent is asking; empty when unknown (ACP always empty)
-	Options   []PermOption
-}
+// PendingPermission is the UI-facing permission view, identical to
+// agentperm.Pending. ACP RequestPermission has no reason field, so Reason
+// stays empty here. RequestID is a monotonic per-session sequence.
+type PendingPermission = agentperm.Pending
 
-// PermOption is one answerable permission choice: the key a supervisor presses,
-// the agent's human-readable label, and the option's role kind when known
-// ("allow" | "allow_always" | "reject" | "reject_always" | "").
-type PermOption struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-	Kind string `json:"kind,omitempty"`
-}
+// PermOption is one answerable permission choice, identical to agentperm.Option.
+type PermOption = agentperm.Option
 
 // HasSession reports whether a live subprocess backs this node (vs read-only
 // history after a restart).

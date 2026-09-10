@@ -12,8 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/agentperm"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/transcript"
+)
+
+var (
+	_ procManager = acpManager{}
+	_ procManager = codexManager{}
 )
 
 // ---------- stub procManager for forced failures / policy tests ----------
@@ -2082,4 +2088,44 @@ func TestArmWithoutBoundClearsPriorCutoff(t *testing.T) {
 	if stub.deliverCalls != 0 {
 		t.Fatalf("A:8 must remain manual with empty cutoff; del=%d", stub.deliverCalls)
 	}
+}
+
+func TestPendingPermissionAliasesAgentpermPending(t *testing.T) {
+	src := agentperm.Pending{
+		RequestID: "inc:3",
+		Title:     "edit README",
+		ToolKind:  "edit",
+		Reason:    "write file",
+		Options: []agentperm.Option{
+			{Key: "1", Name: "Allow once", Kind: "allow"},
+		},
+	}
+	var dst PendingPermission = src
+	var back agentperm.Pending = dst
+	if dst.RequestID != src.RequestID || dst.Title != src.Title || dst.ToolKind != src.ToolKind || dst.Reason != src.Reason {
+		t.Fatalf("pending alias = %+v, want %+v", dst, src)
+	}
+	if len(dst.Options) != 1 || dst.Options[0] != src.Options[0] || back.RequestID != src.RequestID {
+		t.Fatalf("round-trip pending = %+v", back)
+	}
+}
+
+func TestPermOptionAliasesAgentpermOption(t *testing.T) {
+	src := agentperm.Option{Key: "2", Name: "Always", Kind: "allow_always"}
+	var dst PermOption = src
+	var back agentperm.Option = dst
+	if dst != src || back != src {
+		t.Fatalf("option alias = %+v, round-trip %+v, want %+v", dst, back, src)
+	}
+	var shared []agentperm.Option
+	var local []PermOption
+	shared = local
+	local = shared
+	_ = shared
+	_ = local
+}
+
+func TestACPAndCodexManagersSatisfyProcManager(t *testing.T) {
+	var _ procManager = acpManager{}
+	var _ procManager = codexManager{}
 }

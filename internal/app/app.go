@@ -11,6 +11,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/agentperm"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/notestore"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -604,26 +605,12 @@ type app struct {
 	hostedPairing hostedPairingClient
 }
 
-// PermOption is one answerable permission/decision choice surfaced to the UI:
-// the key a supervisor presses, its human-readable name, and its role kind
-// when known ("allow" | "allow_always" | "reject" | "reject_always" | "").
-// Empty Kind means "unknown" — never an error, never a guess.
-type PermOption struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-	Kind string `json:"kind,omitempty"`
-}
+// PermOption is one answerable permission choice, identical to agentperm.Option.
+type PermOption = agentperm.Option
 
-// PendingPermission is the UI-facing view of one outstanding approval on a
-// structured-transport node. Empty ToolKind or Reason means "unknown".
-// RequestID is an opaque stable identity for the current pending request.
-type PendingPermission struct {
-	RequestID string // opaque; stable while this request is pending
-	Title     string
-	ToolKind  string
-	Reason    string // why the agent is asking; empty when unknown
-	Options   []PermOption
-}
+// PendingPermission is the UI-facing permission view, identical to
+// agentperm.Pending.
+type PendingPermission = agentperm.Pending
 
 // procManager is the shared surface of scimux's two structured-protocol
 // transports: acp.Manager (pi/opencode/grok over the ACP SDK) and codex.Manager
@@ -666,22 +653,9 @@ type procManager interface {
 }
 
 // acpManager and codexManager adapt the two concrete managers to procManager:
-// each embeds its manager (whose method set already matches) and adds only the
-// two pieces the interface needs but the managers express with package-local
-// types — a PermOption of the shared shape and error classification.
+// each embeds its manager (whose method set already matches) and adds only
+// error classification.
 type acpManager struct{ *acp.Manager }
-
-func (m acpManager) Pending(id string) (PendingPermission, bool) {
-	p, ok := m.Manager.Pending(id)
-	if !ok {
-		return PendingPermission{}, false
-	}
-	out := make([]PermOption, len(p.Options))
-	for i, o := range p.Options {
-		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
-	}
-	return PendingPermission{RequestID: p.RequestID, Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
-}
 
 func (m acpManager) Conflict(err error) bool {
 	return err == acp.ErrNoSession || err == acp.ErrNotAlive ||
@@ -690,18 +664,6 @@ func (m acpManager) Conflict(err error) bool {
 }
 
 type codexManager struct{ *codex.Manager }
-
-func (m codexManager) Pending(id string) (PendingPermission, bool) {
-	p, ok := m.Manager.Pending(id)
-	if !ok {
-		return PendingPermission{}, false
-	}
-	out := make([]PermOption, len(p.Options))
-	for i, o := range p.Options {
-		out[i] = PermOption{Key: o.Key, Name: o.Name, Kind: o.Kind}
-	}
-	return PendingPermission{RequestID: p.RequestID, Title: p.Title, ToolKind: p.ToolKind, Reason: p.Reason, Options: out}, true
-}
 
 func (m codexManager) Conflict(err error) bool {
 	return err == codex.ErrNoSession || err == codex.ErrNotAlive ||
