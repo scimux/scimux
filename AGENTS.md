@@ -229,7 +229,9 @@ a reviewer asks:
   hook (lease, nonce, prompt_id fence, the two deadlines); auto-approve as a
   one-turn lease whose failures keep authority; the strict terminal policy;
   escalation notices as evidence; compaction and MCP elicitation as passive
-  chat UX.
+  chat UX; and the usage status line, which is deliberately *not* a hook — it
+  prints by design and rides a throwaway probe session, never a supervised
+  pane.
 - **`docs/invariants/attention.md`** — required before touching liveness,
   attention or needs-input detection, `internal/dialoghint`, `handlePeek`, the
   inspect/Dismiss surface, `SendKey`, or any polled render region. It owns:

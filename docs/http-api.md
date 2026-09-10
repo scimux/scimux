@@ -107,7 +107,7 @@ status-bar gauge. Returns:
       "source": "codex-session-jsonl"
     },
     "claude": { "available": false, "reason": "usage unavailable",
-                "source": "claude-oauth" },
+                "source": "claude-statusline" },
     "grok": {
       "available": true,
       "plan": "SuperGrok Lite",
@@ -120,14 +120,20 @@ status-bar gauge. Returns:
 ```
 
 Percentages are `0..100`; `*_remaining` is `100 - used` and is the runway a user
-wants before starting work. Claude may additionally carry
-`extra_usage_enabled | extra_usage_used | extra_usage_limit |
-extra_usage_currency`. Grok reports only the weekly credit window (no five-hour
-bucket). Numeric fields are omitted when unknown, so `0` stays distinct from
-missing.
+wants before starting work. Grok reports only the weekly credit window (no
+five-hour bucket), and Claude reports no weekly window on plans that have none.
+Numeric fields are omitted when unknown, so `0` stays distinct from missing.
+
+Claude's reading comes from the status line of a short throwaway probe session
+(`source: "claude-statusline"`), which is the only sanctioned surface that
+states subscription quota. It costs one small API turn, so it is run only while
+a Claude session is actually open, at most once per refresh interval, and never
+at all if the CLI is not installed. It reports `"usage unavailable"` while the
+user is rate-limited, because the probe turn that would measure the limit is
+itself refused.
 
 Two contracts matter. **This read is cache-only:** it never performs provider
-I/O, so opening many tabs cannot fan out into many Claude OAuth calls, Codex
+I/O, so opening many tabs cannot fan out into many Claude probe sessions, Codex
 transcript scans, or Grok ACP billing probes. Collection is prompt-driven
 instead — a successful Claude/Codex/Grok prompt refreshes the snapshot at most
 once every 15 minutes (or immediately when it is older than 60 minutes), and

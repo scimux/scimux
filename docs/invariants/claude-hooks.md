@@ -264,3 +264,55 @@ capabilities are part of the complete current bundle (older bundles are
   `/clear`, Stop, StopFailure, interrupt, `/exit`, a changed-session rebind,
   process loss and node deletion clear it and tombstone unresolved
   asked/epoch records so a later turn cannot pair with them.
+
+## The usage status line is not a hook, and never rides a supervised pane
+
+Claude states subscription quota (`rate_limits.five_hour`, `.seven_day`)
+nowhere except the JSON it pipes to a configured `statusLine` command. Reading
+it replaced an OAuth call that read the CLI's stored credentials file and
+spoke to an undocumented endpoint with the user's own bearer token; that path
+was **deleted, not kept as a fallback**, because a path that reads a token is
+a path that can be asked to read a token. Do not reintroduce it.
+
+- **The status line goes on a throwaway probe session only.** A status line
+  replaces Claude's own footer, and with it the `esc to interrupt` anchor
+  `internal/dialoghint` and the poller read to suppress false attention.
+  A controlled comparison showed that the anchor disappeared with a status
+  line installed. Installing one on a supervised pane
+  trades supervision — the product — for a gauge. `docs/invariants/attention.md`
+  owns the anchor; this rule is why it is still there to own.
+- **The probe is not a hook bundle.** It proves no ownership, binds no
+  transcript and answers no approval, so it gets its own tiny settings file
+  with a `statusLine` key and nothing else: no `hooks`, no
+  `capabilities.json`, no bundle subdirectory, no entry in
+  `claudeHookBundleSubdirs`. Nothing about it is fail-closed-capability
+  gated, because there is no capability to prove.
+- **This helper prints, and every other one must not.** Its stdout *is* the
+  status line, so `FuzzClaudeHookStdin`'s "writes nothing to stdout" contract
+  does not cover it and must not be widened to. `FuzzClaudeUsageStatusLine`
+  states the matching contract instead: stdout is exactly one fixed literal
+  for every possible input, never a byte derived from the snapshot — which
+  carries `cwd`, `transcript_path` and workspace paths.
+- **A blank reading never erases a good one.** `rate_limits` is absent until
+  the session's first API response, so the status line fires several times
+  with nothing in it. Only a snapshot with a usable window touches the marker;
+  the marker's *arrival* is the probe's completion signal, which is why the
+  probe deletes it before launching and why a stale marker is never served as
+  a fresh reading.
+- **The argv is a measured cost control, not a style choice.** Cold-cache
+  comparisons showed that successively removing tools and setting sources,
+  replacing the system prompt, and carrying the prompt in argv reduced the
+  input cost to a small fraction of a default TUI launch. Repeated probes did
+  not visibly move the displayed quota gauge. Dropping a flag can therefore
+  multiply the cost of measuring a budget by spending it. Two things
+  that look like options are not: headless `claude -p` never invokes a status
+  line (so the probe must be a real TUI), and `--bare` forces
+  `ANTHROPIC_API_KEY` auth (so it would measure the wrong account).
+- **A probe is justified by an open Claude session, nothing else.** The
+  refresh policy in `usage.go` is the whole schedule — prompt-driven, at most
+  one reading per `usageMinInterval`, never a wall clock. `hasLiveClaudeNode`
+  is the extra gate: a Codex or Grok prompt drives the same refresh cycle, and
+  without it a user not touching Claude would be billed for a Claude reading.
+  When the user is genuinely rate-limited the probe turn is refused, so the
+  gauge goes dark exactly when it matters most; that is honest ("usage
+  unavailable"), and inventing a number from a failed turn would not be.

@@ -64,7 +64,7 @@ func (c *Command) Run(ctx context.Context) error {
 	if len(args) > 1 {
 		switch args[1] {
 		case claudeSessionHookCmd, claudePermissionHookCmd, claudeStopHookCmd, claudeNotifyHookCmd,
-			claudeCompactHookCmd, claudeElicitationHookCmd:
+			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd:
 			if c.Config.Hooks.OnHookDispatch != nil {
 				c.Config.Hooks.OnHookDispatch(args[1])
 			}

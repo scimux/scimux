@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -96,94 +95,6 @@ func TestParseCodexLineMissingResetsAt(t *testing.T) {
 	}
 	if !u2.FiveHourReset.Equal(time.Unix(1800000000, 0)) {
 		t.Fatalf("FiveHourReset = %v, want %v", u2.FiveHourReset, time.Unix(1800000000, 0))
-	}
-}
-
-func TestQueryClaudeUsageNormalizes(t *testing.T) {
-	dir := t.TempDir()
-	creds := filepath.Join(dir, "credentials.json")
-	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"test-token"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var sawAuth, sawBeta bool
-	body := readFixture(t, "testdata/claude-oauth-usage-success.json")
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		sawAuth = r.Header.Get("Authorization") == "Bearer test-token"
-		sawBeta = r.Header.Get("anthropic-beta") == "oauth-2025-04-20"
-		return jsonResponse(200, string(body)), nil
-	})}
-
-	u, err := queryClaudeUsage(context.Background(), claudeUsageOptions{
-		CredentialsPath: creds,
-		UsageURL:        "https://example.invalid/usage",
-		Client:          client,
-	})
-	if err != nil {
-		t.Fatalf("queryClaudeUsage: %v", err)
-	}
-	if !sawAuth || !sawBeta {
-		t.Fatalf("headers: auth=%v beta=%v, want both set", sawAuth, sawBeta)
-	}
-	// fixture five_hour utilization 12 -> remaining 88; seven_day 34 -> 66.
-	if u.Agent != "claude" || u.FiveHourRemaining == nil || *u.FiveHourRemaining != 88 {
-		t.Fatalf("usage = %+v, want five-hour remaining 88", u)
-	}
-	if u.WeeklyRemaining == nil || *u.WeeklyRemaining != 66 {
-		t.Fatalf("weekly remaining = %v, want 66", u.WeeklyRemaining)
-	}
-	if u.ExtraUsageEnabled == nil || !*u.ExtraUsageEnabled || u.ExtraUsageCurrency != "USD" {
-		t.Fatalf("extra usage = %+v, want enabled USD", u)
-	}
-	if u.FiveHourReset == nil || u.FiveHourReset.IsZero() {
-		t.Fatal("five-hour reset not parsed")
-	}
-}
-
-func TestQueryClaudeUsageAuthFailureIsGeneric(t *testing.T) {
-	dir := t.TempDir()
-	creds := filepath.Join(dir, "credentials.json")
-	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"test-token"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return jsonResponse(http.StatusUnauthorized, `{"error":"secret account detail"}`), nil
-	})}
-	u, err := queryClaudeUsage(context.Background(), claudeUsageOptions{
-		CredentialsPath: creds, UsageURL: "https://example.invalid/usage", Client: client,
-	})
-	if err == nil || !strings.Contains(err.Error(), "auth status 401") {
-		t.Fatalf("err = %v, want generic auth status", err)
-	}
-	if strings.Contains(err.Error(), "secret") {
-		t.Fatalf("error leaked response body: %v", err)
-	}
-	if u.Agent != "claude" {
-		t.Fatalf("agent = %q, want claude", u.Agent)
-	}
-}
-
-func TestQueryClaudeUsageMissingCredsIsGeneric(t *testing.T) {
-	_, err := queryClaudeUsage(context.Background(), claudeUsageOptions{
-		CredentialsPath: filepath.Join(t.TempDir(), "absent.json"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "credentials missing") {
-		t.Fatalf("err = %v, want credentials missing", err)
-	}
-}
-
-func TestClaudeCredentialErrorsDoNotLeakContent(t *testing.T) {
-	dir := t.TempDir()
-	creds := filepath.Join(dir, "credentials.json")
-	// Truncated JSON containing a token-looking prefix; the error must not echo it.
-	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"sk-secret`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := queryClaudeUsage(context.Background(), claudeUsageOptions{CredentialsPath: creds})
-	if err == nil {
-		t.Fatal("expected invalid credentials error")
-	}
-	if strings.Contains(err.Error(), "sk-secret") {
-		t.Fatalf("error leaked credential content: %v", err)
 	}
 }
 
@@ -554,20 +465,11 @@ type staticErr struct{ s string }
 
 func (e *staticErr) Error() string { return e.s }
 
-// roundTripFunc, jsonResponse, writeJSONL, copyFixture, readFixture live here so
-// the usage tests are self-contained even if the prototype's helpers are gone.
+// roundTripFunc, writeJSONL, copyFixture, readFixture live here so the usage
+// tests are self-contained even if the prototype's helpers are gone.
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func jsonResponse(status int, body string) *http.Response {
-	return &http.Response{
-		StatusCode: status,
-		Status:     http.StatusText(status),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}
-}
 
 func writeJSONL(t *testing.T, path string, lines ...string) {
 	t.Helper()
@@ -597,120 +499,4 @@ func readFixture(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
-}
-
-// ---------- Claude window tolerance ----------
-//
-// The oauth/usage contract makes every window nullish and both of its fields
-// nullable: the CLI's own validator accepts the body if ANY known key is
-// present, and reads each window defensively. scimux used to require both
-// five_hour and seven_day, so an account with no weekly window reported
-// "usage unavailable: missing windows" while its five-hour gauge was perfectly
-// healthy. These tests pin the tolerance, window by window.
-
-func TestParseClaudeUsageWeeklyWindowNull(t *testing.T) {
-	body := readFixture(t, "testdata/claude-oauth-usage-weekly-null.json")
-
-	u, err := parseClaudeUsage(body, time.Now())
-	if err != nil {
-		t.Fatalf("parseClaudeUsage: %v, want a usable five-hour-only snapshot", err)
-	}
-	if u.FiveHourUsed == nil || *u.FiveHourUsed != 27 {
-		t.Fatalf("five-hour used = %v, want 27", u.FiveHourUsed)
-	}
-	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 73 {
-		t.Fatalf("five-hour remaining = %v, want 73", u.FiveHourRemaining)
-	}
-	if u.FiveHourReset == nil || u.FiveHourReset.IsZero() {
-		t.Fatal("five-hour reset not parsed")
-	}
-	// A null weekly window is absent, never zero: a 0%-used weekly rail would
-	// claim a full quota this account does not have.
-	if u.WeeklyUsed != nil || u.WeeklyRemaining != nil || u.WeeklyReset != nil {
-		t.Fatalf("weekly = %v/%v/%v, want all nil", u.WeeklyUsed, u.WeeklyRemaining, u.WeeklyReset)
-	}
-	if u.ExtraUsageEnabled == nil || *u.ExtraUsageEnabled {
-		t.Fatalf("extra usage enabled = %v, want false", u.ExtraUsageEnabled)
-	}
-}
-
-func TestParseClaudeUsageWindowWithoutResetIsStillUsable(t *testing.T) {
-	body := []byte(`{"five_hour":{"utilization":12.5,"resets_at":null},"seven_day":null}`)
-
-	u, err := parseClaudeUsage(body, time.Now())
-	if err != nil {
-		t.Fatalf("parseClaudeUsage: %v, want quota without a reset time", err)
-	}
-	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 87.5 {
-		t.Fatalf("five-hour remaining = %v, want 87.5", u.FiveHourRemaining)
-	}
-	// resets_at is nullable in the contract. The gauge is known, the runway is
-	// not; the UI omits that rail rather than inventing one.
-	if u.FiveHourReset != nil {
-		t.Fatalf("five-hour reset = %v, want nil", u.FiveHourReset)
-	}
-}
-
-func TestParseClaudeUsageNullUtilizationIsNotZero(t *testing.T) {
-	body := []byte(`{"five_hour":{"utilization":null,"resets_at":"2030-01-02T03:04:05Z"},` +
-		`"seven_day":{"utilization":40,"resets_at":"2026-09-14T07:00:00Z"}}`)
-
-	u, err := parseClaudeUsage(body, time.Now())
-	if err != nil {
-		t.Fatalf("parseClaudeUsage: %v, want the weekly window alone", err)
-	}
-	if u.FiveHourUsed != nil || u.FiveHourRemaining != nil || u.FiveHourReset != nil {
-		t.Fatalf("five-hour = %v/%v/%v, want all nil for null utilization",
-			u.FiveHourUsed, u.FiveHourRemaining, u.FiveHourReset)
-	}
-	if u.WeeklyRemaining == nil || *u.WeeklyRemaining != 60 {
-		t.Fatalf("weekly remaining = %v, want 60", u.WeeklyRemaining)
-	}
-}
-
-func TestParseClaudeUsageMalformedResetKeepsTheGauge(t *testing.T) {
-	body := []byte(`{"five_hour":{"utilization":20,"resets_at":"not-a-timestamp"}}`)
-
-	u, err := parseClaudeUsage(body, time.Now())
-	if err != nil {
-		t.Fatalf("parseClaudeUsage: %v, want the gauge despite an unparseable reset", err)
-	}
-	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 80 {
-		t.Fatalf("five-hour remaining = %v, want 80", u.FiveHourRemaining)
-	}
-	if u.FiveHourReset != nil {
-		t.Fatalf("five-hour reset = %v, want nil", u.FiveHourReset)
-	}
-}
-
-func TestParseClaudeUsageNoUsableWindowIsUnavailable(t *testing.T) {
-	// Every window null (or unknown-codename-only) carries no gauge at all.
-	// That is the one case that stays an error — with nothing to show, saying
-	// "unavailable" is honest and an empty rail would not be.
-	body := []byte(`{"five_hour":null,"seven_day":null,"seven_day_opus":null,` +
-		`"tangelo":null,"limits":[],"member_dashboard_available":false}`)
-
-	u, err := parseClaudeUsage(body, time.Now())
-	if err == nil {
-		t.Fatalf("parseClaudeUsage = %+v, want an error when no window is usable", u)
-	}
-	if !strings.Contains(err.Error(), "usage unavailable") {
-		t.Fatalf("error = %q, want it to read as unavailable", err)
-	}
-}
-
-func TestParseClaudeUsageUnknownFieldsAreIgnored(t *testing.T) {
-	// MINOR-compatible growth: new codename buckets, new per-window dollar
-	// fields and new top-level objects must never cost us the snapshot.
-	body := []byte(`{"five_hour":{"utilization":5,"resets_at":"2030-01-02T03:04:05Z",` +
-		`"locked_reason":null,"limit_dollars":null},"juniper_tide":{"utilization":3,"resets_at":null},` +
-		`"spend":{"percent":0},"seven_day_breakdown":null,"future_thing":{"nested":[1,2,3]}}`)
-
-	u, err := parseClaudeUsage(body, time.Now())
-	if err != nil {
-		t.Fatalf("parseClaudeUsage: %v, want unknown fields ignored", err)
-	}
-	if u.FiveHourRemaining == nil || *u.FiveHourRemaining != 95 {
-		t.Fatalf("five-hour remaining = %v, want 95", u.FiveHourRemaining)
-	}
 }

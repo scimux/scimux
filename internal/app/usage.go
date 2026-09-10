@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -25,14 +23,15 @@ import (
 // Three provider surfaces:
 //   - Codex mirrors budget percentages into its local session JSONL; we scan
 //     the newest usable token_count record.
-//   - Claude exposes budget percentages from an undocumented OAuth endpoint;
-//     its local JSONL carries token history, not quota percentages.
+//   - Claude states budget percentages on the status line of a session; its
+//     local JSONL carries token history, not quota percentages. Reading one
+//     costs a throwaway probe session (claude_usage_probe.go).
 //   - Grok exposes weekly credit usage via the ACP extension `_x.ai/billing`
 //     on a short-lived `grok agent stdio` process (CLI must already be logged
 //     in; scimux never authenticates). The wire/process lives in
 //     internal/acp; this file only maps the narrow result into agentUsage.
 //
-// Collection is expensive (a recursive file walk, an HTTPS call, a subprocess),
+// Collection is expensive (a recursive file walk, a probe session, a subprocess),
 // so it is kept off the /api/state and /api/usage read paths entirely: /api/usage
 // serves only a cached snapshot, and collection is driven by successful user
 // prompts (noteUsagePrompt) — never by UI polling or a wall clock. This keeps
@@ -41,20 +40,16 @@ import (
 // agentUsage is the normalized internal shape a provider adapter returns.
 // Pointer numeric fields keep 0 distinct from missing/unavailable.
 type agentUsage struct {
-	Agent              string
-	Plan               string
-	FiveHourUsed       *float64
-	FiveHourRemaining  *float64
-	FiveHourReset      *time.Time
-	WeeklyUsed         *float64
-	WeeklyRemaining    *float64
-	WeeklyReset        *time.Time
-	ExtraUsageEnabled  *bool
-	ExtraUsageUsed     *float64
-	ExtraUsageLimit    *float64
-	ExtraUsageCurrency string
-	ObservedAt         time.Time
-	Source             string
+	Agent             string
+	Plan              string
+	FiveHourUsed      *float64
+	FiveHourRemaining *float64
+	FiveHourReset     *time.Time
+	WeeklyUsed        *float64
+	WeeklyRemaining   *float64
+	WeeklyReset       *time.Time
+	ObservedAt        time.Time
+	Source            string
 }
 
 func remainingPercent(used float64) float64 {
@@ -185,154 +180,14 @@ func parseCodexLine(line []byte) (agentUsage, time.Time, bool) {
 }
 
 // ---------- Claude adapter ----------
-
-type claudeUsageOptions struct {
-	CredentialsPath string
-	UsageURL        string
-	Client          *http.Client
-}
-
-func queryClaudeUsage(ctx context.Context, opts claudeUsageOptions) (agentUsage, error) {
-	if opts.CredentialsPath == "" {
-		opts.CredentialsPath = filepath.Join(os.Getenv("HOME"), ".claude", ".credentials.json")
-	}
-	if opts.UsageURL == "" {
-		opts.UsageURL = "https://api.anthropic.com/api/oauth/usage"
-	}
-	client := opts.Client
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-	token, err := claudeToken(opts.CredentialsPath)
-	if err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.UsageURL, nil)
-	if err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, err
-	}
-	// Report only the status class, never the response body — it can carry
-	// account detail, and the body of a 401 is not ours to surface.
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, fmt.Errorf("usage unavailable: auth status %d", resp.StatusCode)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, fmt.Errorf("usage unavailable: status %d", resp.StatusCode)
-	}
-	return parseClaudeUsage(body, time.Now())
-}
-
-// claudeToken reads only the OAuth access token. Errors never include the file
-// contents or the token — a broken credentials file must not leak into a log
-// or an API response.
-func claudeToken(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", errors.New("usage unavailable: credentials missing")
-	}
-	var creds struct {
-		ClaudeAiOAuth struct {
-			AccessToken string `json:"accessToken"`
-		} `json:"claudeAiOauth"`
-	}
-	if err := json.Unmarshal(b, &creds); err != nil {
-		return "", errors.New("usage unavailable: credentials invalid")
-	}
-	if creds.ClaudeAiOAuth.AccessToken == "" {
-		return "", errors.New("usage unavailable: token missing")
-	}
-	return creds.ClaudeAiOAuth.AccessToken, nil
-}
-
-type claudeUsageResp struct {
-	FiveHour *claudeUsageWindow `json:"five_hour"`
-	SevenDay *claudeUsageWindow `json:"seven_day"`
-	Extra    *struct {
-		IsEnabled    bool     `json:"is_enabled"`
-		MonthlyLimit *float64 `json:"monthly_limit"`
-		UsedCredits  *float64 `json:"used_credits"`
-		Currency     string   `json:"currency"`
-	} `json:"extra_usage"`
-}
-
-// claudeUsageWindow is one quota window. Both fields are nullable in the
-// provider contract, so both are pointers: a null utilization is an unknown
-// gauge, which is not the same fact as 0% used.
-type claudeUsageWindow struct {
-	Utilization *float64 `json:"utilization"`
-	ResetsAt    *string  `json:"resets_at"`
-}
-
-// claudeWindow projects one nullish window onto the agentUsage fields.
 //
-// ok is false when the window is absent, null, or carries no utilization —
-// a missing gauge must never render as 0% used, which would claim a full
-// quota the account may not have. A null or unparseable resets_at keeps the
-// gauge and leaves reset nil: the runway is what is unknown, not the budget,
-// and the UI already omits a rail whose reset it cannot place.
-func claudeWindow(w *claudeUsageWindow) (used, remaining *float64, reset *time.Time, ok bool) {
-	if w == nil || w.Utilization == nil {
-		return nil, nil, nil, false
-	}
-	u := *w.Utilization
-	rem := remainingPercent(u)
-	if w.ResetsAt != nil {
-		if t, err := time.Parse(time.RFC3339Nano, *w.ResetsAt); err == nil {
-			reset = &t
-		}
-	}
-	return &u, &rem, reset, true
-}
-
-// parseClaudeUsage reads the oauth/usage body as defensively as the CLI does.
-// Every window is nullish there and new codename buckets appear without
-// notice, so the rule is "any usable window is a usable snapshot": requiring
-// both five_hour and seven_day made an account with no weekly quota report
-// "usage unavailable" while its five-hour gauge was healthy (represented by a synthetic fixture with
-// seven_day null). Only a body with no usable window at all is an
-// error — with nothing to show, "unavailable" is the honest answer.
-func parseClaudeUsage(body []byte, observed time.Time) (agentUsage, error) {
-	var cr claudeUsageResp
-	if err := json.Unmarshal(body, &cr); err != nil {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: unexpected response")
-	}
-	fiveUsed, fiveRem, fiveReset, haveFive := claudeWindow(cr.FiveHour)
-	weeklyUsed, weeklyRem, weeklyReset, haveWeekly := claudeWindow(cr.SevenDay)
-	if !haveFive && !haveWeekly {
-		return agentUsage{Agent: "claude", Source: "claude-oauth"}, errors.New("usage unavailable: no quota window reported")
-	}
-	u := agentUsage{
-		Agent:             "claude",
-		FiveHourUsed:      fiveUsed,
-		FiveHourRemaining: fiveRem,
-		FiveHourReset:     fiveReset,
-		WeeklyUsed:        weeklyUsed,
-		WeeklyRemaining:   weeklyRem,
-		WeeklyReset:       weeklyReset,
-		ObservedAt:        observed,
-		Source:            "claude-oauth",
-	}
-	if cr.Extra != nil {
-		u.ExtraUsageEnabled = &cr.Extra.IsEnabled
-		u.ExtraUsageUsed = cr.Extra.UsedCredits
-		u.ExtraUsageLimit = cr.Extra.MonthlyLimit
-		u.ExtraUsageCurrency = cr.Extra.Currency
-	}
-	return u, nil
-}
+// Claude's quota comes from the status line of a throwaway probe session; the
+// transport is claude_statusline.go and the session is claude_usage_probe.go.
+// Its predecessor read the Claude CLI's stored OAuth credentials file and
+// called an undocumented usage endpoint with the user's own bearer token.
+// That was the one place scimux touched an agent's credentials, and it is
+// deliberately gone rather than kept as a fallback: a path that reads a token
+// is a path that can be asked to read a token.
 
 // ---------- Grok adapter (maps internal/acp billing → agentUsage) ----------
 
@@ -367,20 +222,16 @@ type usageSnapshot struct {
 }
 
 type agentUsageView struct {
-	Available          bool       `json:"available"`
-	Reason             string     `json:"reason,omitempty"`
-	Plan               string     `json:"plan,omitempty"`
-	FiveHourUsed       *float64   `json:"five_hour_used,omitempty"`
-	FiveHourRemaining  *float64   `json:"five_hour_remaining,omitempty"`
-	FiveHourReset      *time.Time `json:"five_hour_reset,omitempty"`
-	WeeklyUsed         *float64   `json:"weekly_used,omitempty"`
-	WeeklyRemaining    *float64   `json:"weekly_remaining,omitempty"`
-	WeeklyReset        *time.Time `json:"weekly_reset,omitempty"`
-	ExtraUsageEnabled  *bool      `json:"extra_usage_enabled,omitempty"`
-	ExtraUsageUsed     *float64   `json:"extra_usage_used,omitempty"`
-	ExtraUsageLimit    *float64   `json:"extra_usage_limit,omitempty"`
-	ExtraUsageCurrency string     `json:"extra_usage_currency,omitempty"`
-	Source             string     `json:"source,omitempty"`
+	Available         bool       `json:"available"`
+	Reason            string     `json:"reason,omitempty"`
+	Plan              string     `json:"plan,omitempty"`
+	FiveHourUsed      *float64   `json:"five_hour_used,omitempty"`
+	FiveHourRemaining *float64   `json:"five_hour_remaining,omitempty"`
+	FiveHourReset     *time.Time `json:"five_hour_reset,omitempty"`
+	WeeklyUsed        *float64   `json:"weekly_used,omitempty"`
+	WeeklyRemaining   *float64   `json:"weekly_remaining,omitempty"`
+	WeeklyReset       *time.Time `json:"weekly_reset,omitempty"`
+	Source            string     `json:"source,omitempty"`
 }
 
 func usageView(u agentUsage, err error) agentUsageView {
@@ -392,19 +243,15 @@ func usageView(u agentUsage, err error) agentUsageView {
 		return agentUsageView{Available: false, Reason: reason, Source: u.Source}
 	}
 	return agentUsageView{
-		Available:          true,
-		Plan:               u.Plan,
-		FiveHourUsed:       u.FiveHourUsed,
-		FiveHourRemaining:  u.FiveHourRemaining,
-		FiveHourReset:      u.FiveHourReset,
-		WeeklyUsed:         u.WeeklyUsed,
-		WeeklyRemaining:    u.WeeklyRemaining,
-		WeeklyReset:        u.WeeklyReset,
-		ExtraUsageEnabled:  u.ExtraUsageEnabled,
-		ExtraUsageUsed:     u.ExtraUsageUsed,
-		ExtraUsageLimit:    u.ExtraUsageLimit,
-		ExtraUsageCurrency: u.ExtraUsageCurrency,
-		Source:             u.Source,
+		Available:         true,
+		Plan:              u.Plan,
+		FiveHourUsed:      u.FiveHourUsed,
+		FiveHourRemaining: u.FiveHourRemaining,
+		FiveHourReset:     u.FiveHourReset,
+		WeeklyUsed:        u.WeeklyUsed,
+		WeeklyRemaining:   u.WeeklyRemaining,
+		WeeklyReset:       u.WeeklyReset,
+		Source:            u.Source,
 	}
 }
 
@@ -574,7 +421,11 @@ func (a *app) maybeRefreshUsageAsync() {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// Wide enough for a Claude probe session: starting a TUI and waiting
+		// for its first API response is tens of seconds, where the file walk
+		// and the grok subprocess are near-instant. The refresh runs off every
+		// request path, so a long ceiling costs nothing but a goroutine.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		a.usage.maybeRefresh(ctx)
 	}()
@@ -588,7 +439,7 @@ func (a *app) collectUsage(ctx context.Context, agent string) (agentUsage, error
 	case "codex":
 		return queryCodexUsage(a.codexSessionsDir)
 	case "claude":
-		return queryClaudeUsage(ctx, claudeUsageOptions{CredentialsPath: a.claudeCredsPath, UsageURL: a.claudeUsageURL})
+		return a.collectClaudeUsage(ctx)
 	case "grok":
 		return queryGrokUsage(ctx, a.grokUsageOpts)
 	default:

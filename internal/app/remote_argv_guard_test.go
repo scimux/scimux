@@ -40,9 +40,11 @@ import (
 )
 
 // argvSubcommands is the complete set of hidden pre-flag subcommands Run()
-// dispatches. Both are stdin→JSONL helpers that run inside a user's own agent
+// dispatches. All are stdin-reading helpers that run inside a user's own agent
 // session (see AGENTS.md: the Claude hook invariants). Adding an entry here is
 // the review trigger: the new subcommand must carry no secret on argv.
+// __claude-usage-statusline is the one that is not a hook — it is the status
+// line of the usage probe session — and like the rest it takes only --dir.
 var argvSubcommands = []string{
 	"__claude-compact-hook",
 	"__claude-elicitation-hook",
@@ -50,6 +52,7 @@ var argvSubcommands = []string{
 	"__claude-permission-hook",
 	"__claude-session-hook",
 	"__claude-stop-hook",
+	"__claude-usage-statusline",
 }
 
 // argvFlags is the complete set of flags registered in Command.Run, which

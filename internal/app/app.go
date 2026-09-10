@@ -563,11 +563,9 @@ type app struct {
 	// by successful Claude/Codex/Grok prompts.
 	usage *usageCache
 	// Provider source overrides for tests; empty means the real default path
-	// (~/.codex/sessions, ~/.claude/.credentials.json, the OAuth endpoint,
-	// live `grok agent stdio` for billing).
+	// (~/.codex/sessions, live `grok agent stdio` for billing). Claude has no
+	// entry here: its reading comes from a probe session, not a file or a URL.
 	codexSessionsDir string
-	claudeCredsPath  string
-	claudeUsageURL   string
 	grokUsageOpts    acp.GrokBillingOptions
 	// requestPolicy is the Host / Fetch Metadata / anti-framing boundary
 	// configured from -addr and -trusted-host. Nil means the default
