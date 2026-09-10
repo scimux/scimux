@@ -84,6 +84,17 @@ func agentCommandClaude(n *Node, addDirs []string, settingsPath string) string {
 	// placed before --remote-control so an empty title cannot treat the
 	// flag as that option's value. Pair with n.AXScreenReader=true at the
 	// launchNode seam so the stored marker matches the launched argv.
+	//
+	// It is not only a rendering preference, so do not make it one. The
+	// Anthropic Consumer Terms bar accessing the Services "through automated
+	// or non-human means, whether through a bot, script, or otherwise",
+	// except via an API key "or where we otherwise explicitly permit it". A
+	// first-party flag whose entire purpose is to make the pane legible to an
+	// external reader is that explicit permission, and because this is the
+	// mode every supervised pane actually runs in, it is a stronger answer
+	// than pointing at hooks or headless mode. Demoting it to an option would
+	// quietly move scimux's Claude integration off the permitted footing for
+	// whoever turned it off.
 	parts := []string{"claude", "--session-id", n.SessionID, "--ax-screen-reader"}
 	if settingsPath != "" {
 		parts = append(parts, "--settings", shellQuote(settingsPath))

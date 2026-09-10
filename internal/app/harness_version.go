@@ -45,6 +45,13 @@ type harnessRow struct {
 // is data, not a hardcoded lane. Kind is "npm" (JSON, read .version) or
 // "text" (the bare version, one line). Label is shown to the user: an update
 // notice is only actionable if you know which channel it came from.
+//
+// Every source here is an unauthenticated public endpoint and must stay one.
+// No vendor credential is ever attached to these requests, and none is read
+// to build them — the harness panel learns a version the same way anyone with
+// curl would. An "authenticated check for better rate limits" would cross the
+// line the whole integration rests on: scimux drives the harness, it never
+// reaches a vendor's service on the user's behalf.
 type harnessSource struct {
 	URL   string `json:"url"`
 	Kind  string `json:"kind"`

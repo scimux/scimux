@@ -8,6 +8,19 @@
 // recognized shape yield turns, everything else is silently ignored, and an
 // unreadable file yields no turns rather than an error. Callers degrade to
 // the raw tmux pane snapshot when this package returns nothing useful.
+//
+// Discarding what it does not understand is right for record types and
+// shapes. Provenance is the one thing it must not discard that way. Meta's
+// AUP bars removing or obscuring "any watermark, label, metadata, or other
+// provenance signal" attached to model output, the SpaceXAI AUP bars
+// "stripping, altering or circumventing embedded provenance metadata or
+// watermarks", and both Anthropic and SpaceXAI bar representing output as
+// human-generated. Dropping such a field is not graceful degradation, it is
+// alteration — and because sessionlog is append-only and never rewritten, it
+// is unrecoverable the moment the turn is mirrored. A provenance-shaped field
+// on a record therefore passes through verbatim rather than being parsed;
+// same discipline as the tunnel protocol's MINOR rule, record what you do not
+// understand.
 package transcript
 
 import (
