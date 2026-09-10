@@ -1625,8 +1625,11 @@ export function createChatFeature(deps){
     const gen = g("selGen", 0);
     const endChatLoad = beginChatLoad(n.id, gen, !chatSig);
     const chatPath = `/api/nodes/${encodeURIComponent(n.id)}/chat`;
-    /* Only the tag for this node — never a sibling's. */
-    const held = chatETag.node === n.id ? chatETag.etag : "";
+    /* Use only this node's tag, and only while its local render remains valid.
+       A local-state change can invalidate chatSig while the server's live
+       segment stays unchanged (history expansion, terminal toggle, local
+       attention state). A 304 has no body from which to rebuild that state. */
+    const held = chatSig && chatETag.node === n.id ? chatETag.etag : "";
     let data;
     try {
       if (typeof d.apiConditionalGet === "function") {

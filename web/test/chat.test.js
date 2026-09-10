@@ -4653,13 +4653,20 @@ test("P3C: histload click fetches history API", async () => {
     start: "2025-12-31T00:00:00Z", seam: "2025-12-31T00:00:00Z",
     turns: [{ role: "user", text: "old", time: "2025-12-31T00:00:01Z" }],
   }];
+  const chatPayload = {
+    turns: [{ role: "user", text: "now", time: "2026-01-01T00:00:00Z" }],
+    live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
+  };
   const ctx = makeFeature({
     histSegs: segs,
-    chatPayload: {
-      turns: [{ role: "user", text: "now", time: "2026-01-01T00:00:00Z" }],
-      live: "quiet", delivery: "ok", source: "tmux",
-      chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
-    },
+    chatPayload,
+    /* Production returns 304 once the live segment's ETag is held. Loading
+       history changes only client state, so its repaint must omit that tag
+       and obtain a body to rebuild from. */
+    chatConditional: (_path, etag) => etag
+      ? { status: 304, etag, data: null }
+      : { status: 200, etag: '"live"', data: chatPayload },
   });
   ctx.feature.bind();
   await ctx.feature.render();
@@ -4672,6 +4679,10 @@ test("P3C: histload click fetches history API", async () => {
   const histCalls = ctx.apiCalls.filter(c => c.path.includes("/chat?history=1"));
   assert.equal(histCalls.length, before + 1);
   assert.match(histCalls[histCalls.length - 1].path, /\/api\/nodes\/n1\/chat\?history=1$/);
+  const liveCalls = ctx.apiCalls.filter(c =>
+    c.kind === "conditional" && c.path.includes("/chat") && !c.path.includes("history"));
+  assert.equal(liveCalls.length, 2);
+  assert.equal(liveCalls[1].etag, "", "local history expansion must bypass the held live ETag");
   assert.match(ctx.roots.msgs.innerHTML, /turn hist|data-bk="h:/);
   ctx.feature.destroy();
 });
