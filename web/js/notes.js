@@ -1489,6 +1489,9 @@ export function createNotesFeature(deps){
         text: stripAssetRefs((ref.snapshot && ref.snapshot.text) || ""),
         exceptId: src.node || "",
         title: "Send to chat\u2026",
+        /* The snapshot froze a display speaker, not a transcript role; map it
+           back so send-to can disclose an Output as AI-generated. */
+        role: (ref.snapshot && ref.snapshot.speaker) === "agent" ? "assistant" : "",
       });
       return;
     }
@@ -1700,6 +1703,7 @@ export function createNotesFeature(deps){
           text: stripAssetRefs(nt.text || ""),
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
+          role: nt.role || "",
         });
         return;
       case "jump":

@@ -1424,6 +1424,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     if (!clean){ toast("Nothing to bookmark here yet."); return; }
     const bookmark = { t: new Date().toISOString(), text: clean, node: id };
     if (turn.time) bookmark.turnTime = turn.time;
+    /* Same reason as the bubble bookmark in chat.js: role is unrecoverable
+       later and send-to's AI disclosure keys on it. */
+    if (turn.role === "user" || turn.role === "assistant")
+      bookmark.role = turn.role;
     if (n.lane_id) bookmark.lane = n.lane_id;
     stampAddress(bookmark, turn);
     uiMutate({ k: "bookmark-add", bookmark });

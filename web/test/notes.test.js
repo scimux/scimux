@@ -3317,3 +3317,13 @@ test("Packet D: inbox jump miss toasts when the chat is gone", async () => {
   assert.equal(effects.jump[0].node, "gone");
   assert.ok(effects.toast.includes("That chat is no longer available."));
 });
+
+/* ---------- AI disclosure on send-to ----------
+   bookmarks.js owns the marker; notes.js owns two of the four callers, and a
+   caller that hands over no role disables the disclosure silently. */
+test("the workspace's two send-to callers pass the role they know", () => {
+  assert.match(notesSrc, /openSendTo\(\{[\s\S]{0,240}?role:\s*nt\.role/,
+    "inbox bookmark send-to passes the bookmark's role");
+  assert.match(notesSrc, /role:\s*\(ref\.snapshot && ref\.snapshot\.speaker\) === "agent"/,
+    "a reference's send-to derives the role from the frozen snapshot speaker");
+});

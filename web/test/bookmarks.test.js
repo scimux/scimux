@@ -28,10 +28,14 @@ import {
   manualBookmarkPayload,
   jumpAddressDecision,
   createBookmarksFeature,
+  AI_DISCLOSURE,
+  discloseAgentOutput,
 } from "../js/bookmarks.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
+const chatSrc = readFileSync(join(__dirname, "../js/chat.js"), "utf8");
+const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
 
 /* ---------- module shape ---------- */
 test("bookmarks.js exports factory and pure helpers; no later-feature imports", () => {
@@ -2011,4 +2015,89 @@ test("P6 review: an overflow-menu click runs its action once, not twice", () => 
 
   assert.deepEqual(effects.copy, ["copy me"],
     "the menu item's action must not also fire on the delegated pane handler");
+});
+
+/* ---------- AI disclosure on send-to (vendor terms) ----------
+   Send-to is the one path where scimux itself moves one agent's output into
+   another agent's input, and the receiving node logs the arrival as a user
+   turn. Without a marker scimux is the party asserting human authorship —
+   see the disclosure comment in bookmarks.js for the clauses. */
+
+test("discloseAgentOutput marks agent output and leaves everything else alone", () => {
+  assert.equal(discloseAgentOutput("hello", "assistant"), AI_DISCLOSURE + "\n\nhello");
+  assert.equal(discloseAgentOutput("hello", "user"), "hello",
+    "the user's own words are already correctly attributed");
+  assert.equal(discloseAgentOutput("hello", ""), "hello",
+    "unknown provenance is not evidence of agent authorship");
+  assert.equal(discloseAgentOutput("", "assistant"), "",
+    "nothing to disclose about nothing");
+  assert.equal(discloseAgentOutput(null, "assistant"), "");
+  assert.match(AI_DISCLOSURE, /AI-generated/,
+    "the disclosure must say the content is AI-generated, not merely quoted");
+});
+
+test("openSendTo discloses agent output in the target's draft", () => {
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: [], isDesktop: false });
+  const { feature, roots, storage } = ctx;
+  storage.setItem(DRAFT_KEY_PREFIX + "ok", "existing");
+  feature.bind();
+  feature.openSendTo({ text: "the agent said this", exceptId: "self", role: "assistant" });
+
+  const fwd = el("button", { dataset: { fwd: "ok" } });
+  fwd.dataset.fwd = "ok";
+  fwd.closest = sel => sel === "[data-fwd]" ? fwd : null;
+  roots.sendtoList.onclick({ target: fwd });
+
+  assert.equal(storage.getItem(DRAFT_KEY_PREFIX + "ok"),
+    "existing\n\n" + AI_DISCLOSURE + "\n\nthe agent said this");
+});
+
+test("openSendTo leaves the user's own bookmark verbatim", () => {
+  const ctx = createFeature({ nodes: sendtoNodes, pinned: [], isDesktop: false });
+  const { feature, roots, storage } = ctx;
+  feature.bind();
+  feature.openSendTo({ text: "my own note", exceptId: "self", role: "user" });
+
+  const fwd = el("button", { dataset: { fwd: "ok" } });
+  fwd.dataset.fwd = "ok";
+  fwd.closest = sel => sel === "[data-fwd]" ? fwd : null;
+  roots.sendtoList.onclick({ target: fwd });
+
+  assert.equal(storage.getItem(DRAFT_KEY_PREFIX + "ok"), "my own note");
+});
+
+test("Start new chat… carries the disclosure too", () => {
+  const seeded = [];
+  const ctx = createFeature({
+    nodes: sendtoNodes, pinned: [],
+    deps: { openNewActivity: o => seeded.push(o) },
+  });
+  ctx.feature.bind();
+  ctx.feature.openSendTo({ text: "agent prose", exceptId: "", role: "assistant" });
+
+  const nc = el("button", { dataset: { newchat: "1" } });
+  nc.dataset.newchat = "1";
+  nc.closest = sel => sel === "[data-newchat]" ? nc : null;
+  ctx.roots.sendtoList.onclick({ target: nc });
+
+  assert.equal(seeded.length, 1);
+  assert.equal(seeded[0].prompt, AI_DISCLOSURE + "\n\nagent prose");
+});
+
+test("every send-to caller hands openSendTo the role it knows", () => {
+  /* One marker, applied once inside openSendTo — but it can only fire if the
+     four callers pass what they know. A caller that forgets is silent. */
+  assert.match(bookmarksSrc, /openSendTo\(\{[\s\S]{0,200}?role:\s*nt\.role/,
+    "bookmark pane send-to passes the bookmark's role");
+  assert.match(chatSrc, /openSendTo\(\{[\s\S]{0,200}?role:\s*turn\.role/,
+    "chat bubble send-to passes the turn's role");
+});
+
+test("a bookmark taken from a chat turn records whose turn it was", () => {
+  /* Without this the role is unknowable by the time send-to runs, and the
+     disclosure silently never fires for the bookmark paths. */
+  assert.match(chatSrc, /bookmark\.role\s*=/,
+    "chat bubble bookmark stamps the turn's role");
+  assert.match(appSrc, /bookmark\.role\s*=/,
+    "station bookmark stamps the turn's role");
 });

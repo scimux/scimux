@@ -358,6 +358,38 @@ export function bookmarksToggleState(open){
   };
 }
 
+/* Send-to is the one place scimux itself moves an agent's Output into another
+   agent's Input. The receiving node records the arrival as an ordinary user
+   turn, in an append-only store that is never rewritten — so without a marker
+   it is *scimux*, not the user, asserting that a model wrote nothing here.
+   SpaceXAI's Enterprise Terms bar misrepresenting Output as human-generated;
+   its Consumer §4 imposes the disclosure affirmatively ("you agree that you
+   will apply such disclosures"); Meta's AUP bars distributing Outputs without
+   their provenance. The clipboard path is deliberately *not* marked: there the
+   user copies, the user pastes and the user attributes, and scimux is upstream
+   of their conduct the way it is of Meta §6.2.
+
+   Marked on evidence only, never on suspicion. An unknown role is a legacy
+   bookmark or a note the user typed themselves, and stamping "an AI wrote
+   this" on the user's own words would be the same misattribution pointed the
+   other way — the receiving agent would discount an instruction it should
+   obey. Every path that knows the role now records it (chat.js and app.js at
+   bookmark time, chat.js live from the turn), so "unknown" shrinks to the
+   bookmarks that predate this rule.
+
+   One line of plain text, then the Output verbatim. Plain because it is pasted
+   into a terminal and read by a model, and verbatim because altering an Output
+   is the neighbouring prohibition. */
+export const AI_DISCLOSURE =
+  "[AI-generated, quoted from another chat \u2014 not written by me:]";
+
+/** Prefix an agent's Output with its disclosure; anything else passes through. */
+export function discloseAgentOutput(text, role){
+  const t = text || "";
+  if (!t || role !== "assistant") return t;
+  return AI_DISCLOSURE + "\n\n" + t;
+}
+
 /** Longpress send-to: merge bookmark text into an existing per-node draft. */
 export function mergeBookmarkIntoDraft(prev, text){
   return (prev ? prev + "\n\n" : "") + (text || "");
@@ -718,6 +750,7 @@ export function createBookmarksFeature(deps){
           text: stripAssetRefs(nt.text || ""),
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
+          role: nt.role || "",
         });
         return;
       }
@@ -812,7 +845,11 @@ export function createBookmarksFeature(deps){
   /* The one send-to dialogue. Both entry points — a chat bubble's "send to…"
      and a bookmark long-press — land here, so the target filter and order can
      never drift apart between them. Only the sheet title differs. */
-  function openSendTo({ text = "", exceptId = "", title = "" } = {}){
+  function openSendTo({ text = "", exceptId = "", title = "", role = "" } = {}){
+    /* Disclose once, here, rather than at each of the four callers: the two
+       branches below (seed a new chat, merge into a live draft) both carry the
+       text onward, and a caller that forgot would fail silently. */
+    const body = discloseAgentOutput(text, role);
     const lm = typeof d.laneModel === "function" ? d.laneModel() : { color: () => "" };
     const nodes = typeof d.orderedNodes === "function" ? d.orderedNodes() : [];
     const pins = typeof d.pinned === "function" ? d.pinned() : [];
@@ -851,7 +888,7 @@ export function createBookmarksFeature(deps){
       if (startNew){
         if (typeof d.closeSheets === "function") d.closeSheets();
         if (typeof d.openNewActivity === "function")
-          d.openNewActivity({ prompt: text || "", focusTitle: true });
+          d.openNewActivity({ prompt: body, focusTitle: true });
         if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
           d.setLevel(1);
         return;
@@ -861,7 +898,7 @@ export function createBookmarksFeature(deps){
       const tgt = b.dataset.fwd;
       const prev = (storage && storage.getItem(DRAFT_KEY_PREFIX + tgt)) || "";
       if (storage)
-        storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, text || ""));
+        storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, body));
       if (typeof d.closeSheets === "function") d.closeSheets();
       if (typeof d.select === "function") d.select(tgt);
       if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
