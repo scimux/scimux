@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   usageAgentDisplayName, usageBadgeLayout, resetRemainingPercent, usageResetBars,
-  agentLogo, sysMetricHTML, statusPhaseAt, STATUS_PHASES, setStatusUnreachable,
+  agentLogo, usageBadge, sysMetricHTML, statusPhaseAt, STATUS_PHASES, setStatusUnreachable,
 } from "../js/usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -236,4 +236,30 @@ test("Claude session-only account gets one reset rail", () => {
   });
   assert.equal(bars.length, 1);
   assert.equal(bars[0].key, "5h");
+});
+
+test("a switched-off gauge is not a broken one", () => {
+  /* "off" is the only dark gauge the user can fix by tapping, so it must not
+     be spelled the same as "unavailable". The tip is where that difference
+     becomes actionable. */
+  const off = usageBadgeLayout("claude", { available: false, off: true, reason: "usage checks are off" });
+  assert.equal(off.available, false);
+  assert.equal(off.off, true);
+  assert.match(off.tip, /off/i);
+  assert.match(off.tip, /tap/i);
+
+  const broken = usageBadgeLayout("claude", { available: false, reason: "usage unavailable: claude not installed" });
+  assert.equal(broken.off, false);
+  assert.doesNotMatch(broken.tip, /tap/i);
+});
+
+test("the off badge is reachable, the unavailable one is not", () => {
+  /* A tappable badge must say so to the accessibility tree as well: an
+     img-role span is not something a screen-reader user can act on. */
+  const off = usageBadge("claude", { available: false, off: true }, {});
+  assert.match(off, /data-usage-off="claude"/);
+  assert.match(off, /role="button"/);
+  const broken = usageBadge("claude", { available: false }, {});
+  assert.doesNotMatch(broken, /data-usage-off/);
+  assert.match(broken, /role="img"/);
 });

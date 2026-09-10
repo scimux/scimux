@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -242,88 +241,63 @@ func TestHandleUIRoundTrip(t *testing.T) {
 	}
 }
 
-// The claude CLI mis-resolves its own family aliases (opus -> claude-4-8-opus,
-// wrong segment order), so scimux probes the concrete ids and maps them itself.
-// Parsing must be defensive: pick model-id-shaped tokens out of arbitrary prose
-// or markdown, first per family wins, and the mis-ordered form must be ignored.
-func TestParseClaudeModels(t *testing.T) {
-	out := "Based on the model IDs available in this environment:\n\n```\n" +
-		"claude-fable-5\nclaude-opus-4-8\nclaude-sonnet-5\nclaude-haiku-4-5\n```\n" +
-		"You could also try claude-4-8-opus (a bogus, mis-ordered id) — ignore it.\n"
-	got := parseClaudeModels(out)
-	want := map[string]string{
-		"fable":  "claude-fable-5",
-		"opus":   "claude-opus-4-8",
-		"sonnet": "claude-sonnet-5",
-		"haiku":  "claude-haiku-4-5",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("parsed %v, want %v", got, want)
-	}
-	for fam, id := range want {
-		if got[fam] != id {
-			t.Errorf("family %q = %q, want %q", fam, got[fam], id)
-		}
-	}
-	// A first-seen id wins; a later dated duplicate for the same family is ignored.
-	dup := parseClaudeModels("claude-opus-4-8\nclaude-opus-4-8-20260101\n")
-	if dup["opus"] != "claude-opus-4-8" {
-		t.Errorf("first-seen id must win, got %q", dup["opus"])
-	}
-	// No model-id tokens at all -> empty map (caller falls back to the alias).
-	if m := parseClaudeModels("I'm not sure which models you have."); len(m) != 0 {
-		t.Errorf("no ids should yield empty map, got %v", m)
-	}
-
-	// A numbered list with backticks and trailing prose is still parsed cleanly.
-	numbered := parseClaudeModels("1. `claude-opus-4-8` — your top model\n" +
-		"2. `claude-sonnet-5` (fast)\n3. `claude-haiku-4-5`\n")
-	if numbered["opus"] != "claude-opus-4-8" || numbered["sonnet"] != "claude-sonnet-5" || numbered["haiku"] != "claude-haiku-4-5" {
-		t.Errorf("numbered/backticked list = %v", numbered)
-	}
-
-	// A date-stamped id is a valid concrete id and must be captured whole.
-	if d := parseClaudeModels("claude-sonnet-5-20260101"); d["sonnet"] != "claude-sonnet-5-20260101" {
-		t.Errorf("dated id truncated: %v", d)
-	}
-}
-
-// A successful probe is cached for claudeCacheTTL so the billed `claude -p` call
-// runs at most weekly; a missing or stale cache is not "fresh" (the caller
-// re-probes), and a stale cache still carries usable ids as a fallback.
+// The model cache is keyed on the CLI's own version, not on time alone. New
+// models arrive with a new claude build, so a matching version is the real
+// evidence that a stored answer still describes reality; the TTL underneath it
+// is only a backstop for a long-lived scimux process.
 func TestClaudeCacheRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "claude-models.json")
 
-	// Missing file: zero cache — no ids, not fresh.
-	if c := readClaudeCache(path); len(c.IDs) != 0 || !c.ProbedAt.IsZero() {
+	// Missing file: zero cache — no ids, no version.
+	if c := readClaudeCache(path); len(c.IDs) != 0 || c.Version != "" {
 		t.Errorf("missing cache = %+v, want zero", c)
 	}
 
-	ids := map[string]string{"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"}
-	if err := writeClaudeCache(path, ids); err != nil {
+	ids := map[string]string{"opus": "claude-opus-5", "sonnet": "claude-sonnet-5"}
+	if err := writeClaudeCache(path, "2.1.267", ids); err != nil {
 		t.Fatal(err)
 	}
 	got := readClaudeCache(path)
-	if got.IDs["opus"] != "claude-opus-4-8" || got.IDs["sonnet"] != "claude-sonnet-5" {
+	if got.IDs["opus"] != "claude-opus-5" || got.IDs["sonnet"] != "claude-sonnet-5" {
 		t.Errorf("round-trip ids = %v", got.IDs)
 	}
-	// A just-written cache is fresh.
-	if time.Since(got.ProbedAt) >= claudeCacheTTL {
-		t.Errorf("fresh cache read as stale: probed_at %v", got.ProbedAt)
+	if got.Version != "2.1.267" {
+		t.Errorf("round-trip version = %q", got.Version)
 	}
+	if !claudeCacheUsable(got, "2.1.267", time.Now()) {
+		t.Error("a just-written cache from this very CLI build is not usable")
+	}
+}
 
-	// Hand-write a stale cache (8 days old): ids still present, but past the TTL.
-	stale := claudeCache{ProbedAt: time.Now().Add(-8 * 24 * time.Hour).UTC(), IDs: ids}
-	b, _ := json.Marshal(stale)
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		t.Fatal(err)
+// The cases that must each independently reject a stored answer. A model list
+// is cheap to rebuild (the probe spends no tokens) and expensive to get wrong:
+// a wrong id fails at the API in the user's face.
+func TestClaudeCacheUsability(t *testing.T) {
+	ids := map[string]string{"opus": "claude-opus-5"}
+	now := time.Now()
+	fresh := claudeCache{Version: "2.1.267", ProbedAt: now.Add(-time.Minute), IDs: ids}
+
+	if claudeCacheUsable(fresh, "2.1.268", now) {
+		t.Error("an upgraded CLI must invalidate the cache: a new build is where new models arrive")
 	}
-	sc := readClaudeCache(path)
-	if len(sc.IDs) == 0 {
-		t.Error("stale cache dropped its ids")
+	old := fresh
+	old.ProbedAt = now.Add(-claudeCacheTTL - time.Minute)
+	if claudeCacheUsable(old, "2.1.267", now) {
+		t.Error("the TTL backstop must still expire a same-version cache: scimux can outlive a release")
 	}
-	if time.Since(sc.ProbedAt) < claudeCacheTTL {
-		t.Error("8-day-old cache should be past the 7-day TTL")
+	empty := fresh
+	empty.IDs = nil
+	if claudeCacheUsable(empty, "2.1.267", now) {
+		t.Error("a cache with no ids is not an answer")
+	}
+	// An unreadable CLI version is not a mismatch. It means the question could
+	// not be asked, and a stored answer within the backstop still beats none.
+	if !claudeCacheUsable(fresh, "", now) {
+		t.Error("an unknown CLI version must fall back to the TTL, not discard the cache")
+	}
+	unversioned := claudeCache{ProbedAt: now.Add(-time.Minute), IDs: ids}
+	if claudeCacheUsable(unversioned, "2.1.267", now) {
+		t.Error("a cache written before versioning cannot claim to match this build")
 	}
 }
 

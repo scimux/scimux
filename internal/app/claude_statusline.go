@@ -184,6 +184,13 @@ func RunClaudeUsageStatusLine(dir string, r io.Reader, stdout, stderr io.Writer)
 	if err != nil || len(body) > claudeUsageStdinLimit {
 		return errClaudeHookRejected
 	}
+	// The model reading is independent of the quota reading and is attempted
+	// first: a payload carries a model on every render, where rate_limits
+	// appears only after the session's first API response. Its failure is
+	// discarded on purpose — the quota path must not inherit it.
+	if mm, err := parseClaudeStatusLineModel(body, time.Now()); err == nil {
+		_ = writeClaudePermFile(claudeModelMarkerPath(dir), mm)
+	}
 	m, err := parseClaudeStatusLine(body, time.Now())
 	if err != nil {
 		return err

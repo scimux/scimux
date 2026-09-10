@@ -52,6 +52,8 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodGet, "/api/agents", "/api/agents", "handleAgents", "agents.go"},                                                                                                     // retained
 		{http.MethodGet, "/api/ui", "/api/ui", "handleUIGet", "ui_state_api.go"},                                                                                                        // extracted
 		{http.MethodPut, "/api/ui", "/api/ui", "handleUIPut", "ui_state_api.go"},                                                                                                        // extracted
+		{http.MethodGet, "/api/settings", "/api/settings", "handleSettingsGet", "settings.go"},                                                                                          // added: computer-owned settings
+		{http.MethodPut, "/api/settings", "/api/settings", "handleSettingsPut", "settings.go"},                                                                                          // added: computer-owned settings
 		{http.MethodGet, "/api/update/check", "/api/update/check", "handleUpdateCheck", "update.go"},                                                                                    // retained
 		{http.MethodPost, "/api/update", "/api/update", "handleUpdateApply", "update.go"},                                                                                               // retained
 		{http.MethodGet, "/api/licenses", "/api/licenses", "handleLicenses", "update.go"},                                                                                               // retained

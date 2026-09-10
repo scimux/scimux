@@ -1752,6 +1752,17 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     unlinkControl.refresh();
     loadHarnesses();
   });
+  /* A dark Claude gauge that the user could switch on is the only badge worth
+     tapping, so tapping it goes where the switch lives rather than explaining
+     itself in a place with no control. usage.js decides which badges carry the
+     marker; this only routes. */
+  $("#sys").addEventListener("click", (e) => {
+    const badge = e.target && e.target.closest ? e.target.closest("[data-usage-off]") : null;
+    if (!badge) return;
+    $("#burger").click();
+    const sec = $("#m_harnesses");
+    if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: "center" });
+  });
   $("#m_homescreen").addEventListener("click", () => {
     sheetsFeature.closeSheets();
     homeScreen.move();
@@ -1828,22 +1839,43 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      populated before the human reads down to it. The upstream check is a
      separate tap for the same reason the scimux one is: opening a menu must
      not call five registries, and "up to date" is a claim only a check makes. */
-  let harnessRows = null, harnessLatest = null;
+  let harnessRows = null, harnessLatest = null, usageChecks = false;
   function renderHarnesses(){
     if (!harnessRows) return;
-    $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, { agentLogo });
+    $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, { agentLogo, usageChecks });
     const note = harnessCheckNote(harnessRows, harnessLatest);
     $("#m_hnote").textContent = note;
     $("#m_hnote").hidden = !note;
   }
   async function loadHarnesses(){
-    if (harnessRows) return;
+    /* The consent flag is re-read on every menu open even when the inventory
+       is already cached: it is the one value here another device can change,
+       and a switch showing the wrong state is worse than no switch. */
     try {
-      const d = await api("/api/harnesses");
-      harnessRows = Array.isArray(d.harnesses) ? d.harnesses : [];
-    } catch { return; }
+      const s = await api("/api/settings");
+      usageChecks = !!(s && s.claude_usage_checks);
+    } catch { /* unreadable settings read as off, like the server's own default */ }
+    if (!harnessRows){
+      try {
+        const d = await api("/api/harnesses");
+        harnessRows = Array.isArray(d.harnesses) ? d.harnesses : [];
+      } catch { return; }
+    }
     renderHarnesses();
   }
+  /* The switch writes through and re-renders from the answer, never from the
+     checkbox: what the server stored is the only thing that gates a probe, so
+     a failed write must snap back rather than leave a lie on screen. */
+  $("#m_harnesses").addEventListener("change", async (e) => {
+    const box = e.target && e.target.closest ? e.target.closest("[data-usage-check]") : null;
+    if (!box) return;
+    const want = !!box.checked;
+    try {
+      const s = await api("/api/settings", { method: "PUT", body: JSON.stringify({ claude_usage_checks: want }) });
+      usageChecks = !!(s && s.claude_usage_checks);
+    } catch { /* keep the stored value; the re-render undoes the tap */ }
+    renderHarnesses();
+  });
   $("#m_hcheck").addEventListener("click", async () => {
     const btn = $("#m_hcheck");
     btn.disabled = true;

@@ -31,13 +31,13 @@ func probeTmux(t *testing.T) *tmuxsession.Server {
 	return sv
 }
 
-func probeOpts(t *testing.T, sv *tmuxsession.Server, command string) claudeUsageProbeOptions {
+func probeOpts(t *testing.T, sv *tmuxsession.Server, command string) claudeProbeOptions {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return claudeUsageProbeOptions{
+	return claudeProbeOptions{
 		Dir:      dir,
 		ExecPath: "/usr/bin/scimux",
 		Server:   sv,
@@ -126,11 +126,11 @@ func TestClaudeUsageProbeIgnoresStaleMarker(t *testing.T) {
 func TestClaudeUsageProbeRejectsIncompleteOptions(t *testing.T) {
 	sv := probeTmux(t)
 	base := probeOpts(t, sv, "bash --norc -c 'sleep 1'")
-	for name, mutate := range map[string]func(*claudeUsageProbeOptions){
-		"no dir":    func(o *claudeUsageProbeOptions) { o.Dir = "" },
-		"rel dir":   func(o *claudeUsageProbeOptions) { o.Dir = "probe" },
-		"no exec":   func(o *claudeUsageProbeOptions) { o.ExecPath = "" },
-		"no server": func(o *claudeUsageProbeOptions) { o.Server = nil },
+	for name, mutate := range map[string]func(*claudeProbeOptions){
+		"no dir":    func(o *claudeProbeOptions) { o.Dir = "" },
+		"rel dir":   func(o *claudeProbeOptions) { o.Dir = "probe" },
+		"no exec":   func(o *claudeProbeOptions) { o.ExecPath = "" },
+		"no server": func(o *claudeProbeOptions) { o.Server = nil },
 	} {
 		o := base
 		mutate(&o)
@@ -143,7 +143,7 @@ func TestClaudeUsageProbeRejectsIncompleteOptions(t *testing.T) {
 // The probe argv is the cost control. Each flag is load-bearing and measured:
 // dropping any one of them multiplies the tokens a probe spends.
 func TestClaudeUsageProbeArgvIsMinimal(t *testing.T) {
-	cmd := claudeUsageProbeArgv("/data/probe/settings.json", "haiku")
+	cmd := claudeUsageProbeArgv("/data/probe/settings.json")
 	for _, want := range []string{
 		"claude ",
 		"--settings '/data/probe/settings.json'",
@@ -210,5 +210,70 @@ func TestClaudeUsageProbeSettingsInstallOnlyTheStatusLine(t *testing.T) {
 	cmd, _ := sl["command"].(string)
 	if !strings.Contains(cmd, claudeUsageStatusLineCmd) || !strings.Contains(cmd, "--dir "+shellQuote(dir)) {
 		t.Fatalf("statusLine command = %q", cmd)
+	}
+}
+
+// writeModelMarkerCmd stands in for a session that rendered its status line.
+func writeModelMarkerCmd(dir, id, display string) string {
+	b, _ := json.Marshal(claudeModelMarker{ID: id, DisplayName: display, At: time.Now().UTC().Format(time.RFC3339Nano)})
+	return "bash --norc -c " + shellQuote("printf %s "+shellQuote(string(b))+" > "+shellQuote(claudeModelMarkerPath(dir))+"; sleep 30")
+}
+
+// The whole point of this probe is that it is free, and it is free only
+// because nothing is ever submitted to the pane. A prompt in this argv — or a
+// -p that would run it headless, where no status line renders at all — turns a
+// zero-token catalog read back into a billed turn.
+func TestClaudeModelProbeArgvSubmitsNothing(t *testing.T) {
+	argv := claudeModelProbeArgv("/probe/settings.json", "claude-opus-5")
+	for _, want := range []string{
+		"--settings " + shellQuote("/probe/settings.json"),
+		"--setting-sources " + shellQuote(""),
+		"--tools " + shellQuote(""),
+		"--model " + shellQuote("claude-opus-5"),
+	} {
+		if !strings.Contains(argv, want) {
+			t.Fatalf("argv %q missing %q", argv, want)
+		}
+	}
+	for _, forbidden := range []string{" -p ", "--print", claudeUsageProbePrompt} {
+		if strings.Contains(argv, forbidden) {
+			t.Fatalf("argv %q must not carry %q — that would cost a turn", argv, forbidden)
+		}
+	}
+	if !strings.HasSuffix(argv, shellQuote("claude-opus-5")) {
+		t.Fatalf("argv %q must end at the model: a trailing argument is a prompt", argv)
+	}
+}
+
+func TestClaudeModelProbeReadsMarker(t *testing.T) {
+	sv := probeTmux(t)
+	opts := probeOpts(t, sv, "")
+	opts.Command = writeModelMarkerCmd(opts.Dir, "claude-opus-5", "Opus 5")
+	m, err := runClaudeModelProbe(context.Background(), opts, "claude-opus-5")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if m.ID != "claude-opus-5" || m.DisplayName != "Opus 5" {
+		t.Fatalf("got %+v", m)
+	}
+	for _, s := range sv.Sessions() {
+		if strings.HasPrefix(s, "scimux-") {
+			t.Fatalf("probe session %q outlived the probe", s)
+		}
+	}
+}
+
+// A marker from an earlier candidate must never be read as this one's answer;
+// otherwise every family would resolve to whatever was probed first.
+func TestClaudeModelProbeIgnoresStaleMarker(t *testing.T) {
+	sv := probeTmux(t)
+	opts := probeOpts(t, sv, "bash --norc -c "+shellQuote("sleep 30"))
+	opts.Timeout = 1500 * time.Millisecond
+	stale, _ := json.Marshal(claudeModelMarker{ID: "claude-sonnet-5", DisplayName: "Sonnet 5", At: time.Now().UTC().Format(time.RFC3339Nano)})
+	if err := os.WriteFile(claudeModelMarkerPath(opts.Dir), stale, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runClaudeModelProbe(context.Background(), opts, "claude-opus-5"); err == nil {
+		t.Fatal("a stale marker must not satisfy a probe that reported nothing")
 	}
 }

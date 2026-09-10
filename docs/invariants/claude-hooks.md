@@ -308,6 +308,16 @@ a path that can be asked to read a token. Do not reintroduce it.
   that look like options are not: headless `claude -p` never invokes a status
   line (so the probe must be a real TUI), and `--bare` forces
   `ANTHROPIC_API_KEY` auth (so it would measure the wrong account).
+- **The gauge is off until the user says otherwise.** `claude_usage_checks`
+  in `~/.scimux/settings.json` gates `collectClaudeUsage` *first*, before the
+  live-node check and before anything is launched. The gate is on the side
+  that spends, not on the browser that renders, and every failure mode reads
+  as off — a missing, unreadable or nonsense settings file is "no consent
+  given", never consent. This is the one store here whose degrade direction is
+  a promise rather than a convenience. `errClaudeUsageOff` is a distinct
+  sentinel and surfaces as `"off": true` on `/api/usage` because it is the
+  only dark gauge a tap can fix: the browser must tell it from a failure
+  without matching on English, the same reason `#m_pair` has `#m_pair_note`.
 - **A probe is justified by an open Claude session, nothing else.** The
   refresh policy in `usage.go` is the whole schedule — prompt-driven, at most
   one reading per `usageMinInterval`, never a wall clock. `hasLiveClaudeNode`
@@ -316,3 +326,70 @@ a path that can be asked to read a token. Do not reintroduce it.
   When the user is genuinely rate-limited the probe turn is refused, so the
   gauge goes dark exactly when it matters most; that is honest ("usage
   unavailable"), and inventing a number from a failed turn would not be.
+
+## The model catalog is read, not asked
+
+Which concrete model ids this account can launch used to be a `claude -p`
+turn: the model was asked to recite a list the CLI already holds (measured
+20,146 input tokens, ~$0.02, on whatever model the user's settings defaulted
+to, so an Opus default paid several times that). That was the wrong
+instrument, and it is deleted — `claudeModelPrompt`, `parseClaudeModels` and
+`probeClaudeModels` are gone. Do not reintroduce a billed model probe.
+
+- **A launch with no prompt costs nothing.** `claude --model <candidate>`
+  renders its status line before any API request, and the status line states
+  the model the CLI *resolved* — `--model sonnet` comes back
+  `claude-sonnet-5`. Measured over nine launches: zero API calls, zero tokens.
+  The whole property rests on submitting nothing, which is why
+  `claudeModelProbeArgv` carries no prompt and no `-p`
+  (`TestClaudeModelProbeArgvSubmitsNothing` is the fence), and why headless
+  `-p` is not an option anyway: it renders no status line at all.
+- **`display_name == id` is the validity oracle, and the only one there is.**
+  A known id comes back with a friendly name ("Opus 5"); an id the catalog
+  does not know echoes itself. It is not decoration: on 2.1.267 `--model opus`
+  still expands to `claude-4-6-opus` — family after version, an id the API
+  refuses — which is the whole reason scimux resolves ids rather than passing
+  aliases through. `claudeModelIDPattern` is anchored so that form can never
+  match.
+- **Two rounds, and the second one costs a session.** Aliases first
+  (authoritative: the CLI resolved them itself); the `/model` picker only for
+  what the aliases could not answer. A family that survives neither round is
+  *dropped*, never guessed — the launcher then passes the bare alias, which is
+  what scimux did before any of this existed. Display names are lossy
+  (`claude-fable-5` and `claude-fable-5-1` both render "Fable 5"), so a
+  picker-derived id is a candidate that must be probed and family-checked
+  before use: an answer from another family would relabel a model, and
+  choosing "opus" in scimux would quietly launch Sonnet.
+- **Opening the picker is a read.** The picker's own footer says Enter sets
+  the default, so no key is ever pressed on a row and the session is killed
+  with the picker still open, which changes nothing persistent. The only thing
+  submitted is `/model` itself, exactly once — a second one would land in a
+  picker that did open, where it is text in a filter box. Readiness is the
+  model marker's arrival, not a sleep and not a guess at the TUI's chrome:
+  the status line renders when the session is up, so that file is mechanical
+  proof a paste will land.
+- **The picker gets a probe directory of its own** (`claudeModelPickerDirName`)
+  and that is what makes the previous bullet true. It is the only probe whose
+  readiness is a marker's *existence*; a candidate probe reads the marker's
+  contents, so a sibling's leftover fails the family check. Measured on
+  2.1.267: a candidate probe's status line writes the shared marker once more
+  *after* its session is killed, landing after the picker cleared the
+  directory and indistinguishable from the picker's own. Readiness fired
+  before the picker's TUI existed, the one `/model` paste was discarded, the
+  capture spent its whole 20 s on a pane that would never draw a picker — and
+  the run dropped `opus`, the single family the picker exists to name. Do not
+  merge the directories back: clearing a file you do not own is not
+  ownership, and the paste is deliberately not retried.
+- **The cache is keyed on the CLI's version, with time as the backstop.** New
+  ids arrive with a new claude build, so `claude --version` (a local
+  subprocess that spends nothing) is the cheap gate on the expensive half.
+  `claudeCacheTTL` is a day rather than the old week because there is no
+  longer a bill to amortize — it exists only for a scimux that outlives a
+  release without restarting. An *unknown* installed version is not a
+  mismatch: it means the question could not be asked, and a stored answer
+  inside the backstop beats none.
+- **The expensive machinery is installed, not constructed.**
+  `installClaudeModelProbe` runs on the serve path only, so `ensureClaudeModels`
+  is inert in every test and from every handler that has no resolver. That is
+  what lets `handleAgents` and `handleHarnessLatest` ask for a refresh at all
+  without the suite ever launching a real `claude`.

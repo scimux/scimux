@@ -143,3 +143,50 @@ test("the check note names the sources that did not answer", () => {
   assert.match(partial, /grok/i);
   assert.doesNotMatch(partial, /opencode/i, "an absent harness has no upstream to miss");
 });
+
+test("harness rows are listed alphabetically, whatever order the server sent", () => {
+  /* The server returns its registry order, which is a code-organisation fact
+     the reader has no way to guess. A list a human scans wants one order they
+     can predict, and it is the one their eye already uses. */
+  const rows = [
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+    { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
+    { agent: "pi", present: false, launchable: false },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+    { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+  ];
+  const html = harnessRowsHTML(rows, null);
+  const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["claude", "codex", "grok", "opencode", "pi"]);
+});
+
+test("only Claude carries a usage-check switch, and it states the price", () => {
+  /* Claude is the one harness whose gauge costs the user's own quota to read,
+     so it is the one harness that gets a choice. The others are read for free
+     and would only be confused by a switch that gates nothing. */
+  const rows = [
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+    { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
+  ];
+  const off = harnessRowsHTML(rows, null, { usageChecks: false });
+  assert.match(off, /data-usage-check="claude"/);
+  assert.doesNotMatch(off, /data-usage-check="codex"/);
+  /* Unchecked, and saying what enabling would cost — a switch a user cannot
+     price is a switch they will not touch. */
+  assert.doesNotMatch(off, /data-usage-check="claude"[^>]*checked/);
+  assert.match(off, /~900 tokens/);
+  assert.match(off, /15 minutes/);
+  assert.match(off, /nothing is spent/i);
+
+  const on = harnessRowsHTML(rows, null, { usageChecks: true });
+  assert.match(on, /data-usage-check="claude"[^>]*checked/);
+  assert.match(on, /5-hour limit/);
+});
+
+test("an absent claude gets no usage switch", () => {
+  /* Consent to spend a quota that cannot be reached is not a choice, it is a
+     dead control — the same reason #m_pair stays hidden until pairing could
+     complete. */
+  const html = harnessRowsHTML([{ agent: "claude", present: false, launchable: false }], null, { usageChecks: false });
+  assert.doesNotMatch(html, /data-usage-check/);
+});

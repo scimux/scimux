@@ -178,6 +178,15 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
     scaffolding filter keys on `role == "user"`, a `type:"user"` record
     claiming `role:"assistant"` would render an injected `<user_instructions>`
     block as agent prose.
+- **Nothing spends the user's quota without consent.** Exactly one reading
+  scimux takes costs money — the Claude usage gauge — and it is off by
+  default, gated server-side in `collectClaudeUsage` on `claude_usage_checks`
+  in `~/.scimux/settings.json`. That file is the *computer's* settings, not
+  the opaque per-browser blob in `ui.json`: a gate the server enforces must be
+  a value the server owns. Every read of it degrades toward off. A new
+  provider call that costs anything gets the same treatment or does not ship;
+  everything scimux learns locally (model catalog, `--version`) must stay
+  free.
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.
 - **One session-log store, one schema.** Every transport writes its per-node
@@ -223,15 +232,17 @@ a reviewer asks:
 
 - **`docs/invariants/claude-hooks.md`** — required before touching
   `internal/app/claude_*.go`, the hook helper commands, hook-bundle or
-  `capabilities.json` handling, or anything that launches, binds or retires a
-  Claude pane. It owns: SessionStart as the sole binding and ownership proof;
+  `capabilities.json` handling, the Claude usage/model probes and their
+  consent gate, or anything that launches, binds or retires a Claude pane. It
+  owns: SessionStart as the sole binding and ownership proof;
   the paste gate and the two delivery clocks; approvals answered through the
   hook (lease, nonce, prompt_id fence, the two deadlines); auto-approve as a
   one-turn lease whose failures keep authority; the strict terminal policy;
   escalation notices as evidence; compaction and MCP elicitation as passive
-  chat UX; and the usage status line, which is deliberately *not* a hook — it
-  prints by design and rides a throwaway probe session, never a supervised
-  pane.
+  chat UX; the usage status line, which is deliberately *not* a hook — it
+  prints by design, rides a throwaway probe session, never a supervised pane,
+  and is **off until the user consents**; and the model catalog, which is
+  *read* from a zero-token launch rather than asked for in a billed turn.
 - **`docs/invariants/attention.md`** — required before touching liveness,
   attention or needs-input detection, `internal/dialoghint`, `handlePeek`, the
   inspect/Dismiss surface, `SendKey`, or any polled render region. It owns:

@@ -280,6 +280,10 @@ func (a *app) handleHarnesses(w http.ResponseWriter, r *http.Request) {
 // explicit tap, like the scimux update check. Sources are read concurrently
 // and independently: one dead registry costs its own row, not the check.
 func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
+	// Tapping "check for updates" is a user saying the installed harnesses may
+	// have moved. The model list is keyed on claude's version, so this is the
+	// one tap that most deserves to invalidate it.
+	a.ensureClaudeModels()
 	type answer struct {
 		Version string `json:"version"`
 		Source  string `json:"source"`

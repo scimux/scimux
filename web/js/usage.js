@@ -82,7 +82,13 @@ export function usageAgentDisplayName(agent){
 export function usageBadgeLayout(agent, v){
   const name = usageAgentDisplayName(agent);
   if (!v || !v.available){
-    return { name, available: false, has5h: false, hasW: false, tip: name + ": usage unavailable" };
+    /* Off is the one dark gauge a tap can fix, so it is the one that says so.
+       Spelling it like every other failure would train the user to read a
+       working switch as a broken feature. */
+    const off = !!(v && v.off);
+    return { name, available: false, off, has5h: false, hasW: false,
+      tip: off ? name + ": usage checks are off — tap to turn on"
+                : name + ": usage unavailable" };
   }
   const fh = v.five_hour_remaining, wk = v.weekly_remaining;
   const has5h = fh != null, hasW = wk != null;
@@ -93,7 +99,7 @@ export function usageBadgeLayout(agent, v){
   if (hasW) tip += ` weekly ${num(wk)}% left`;
   if (!has5h && !hasW) tip += " usage unavailable";
   if (v.plan) tip += ` (${v.plan})`;
-  return { name, available: true, has5h, hasW, tip };
+  return { name, available: true, off: false, has5h, hasW, tip };
 }
 
 /* Determinate time-to-reset gauge. The value is remaining runway (full just
@@ -168,7 +174,13 @@ export function usageBadge(agent, v, deps = {}){
   const logo = `<span class="agent-logo" aria-hidden="true">${agentLogo(agent)}</span>`;
   const layout = usageBadgeLayout(agent, v);
   if (!layout.available){
-    return `<span class="ubadge u-off" role="img" title="${esc(layout.tip)}" aria-label="${esc(layout.tip)}">${logo}` +
+    /* Only the switched-off badge is a control. The rest describe a state the
+       user cannot act on, and a button that does nothing is worse than a
+       label — for a pointer and for the accessibility tree alike. */
+    const act = layout.off
+      ? ` role="button" tabindex="0" data-usage-off="${esc(agent || "")}"`
+      : ` role="img"`;
+    return `<span class="ubadge u-off"${act} title="${esc(layout.tip)}" aria-label="${esc(layout.tip)}">${logo}` +
            `<span class="Lfull">--</span><span class="Labbr">--</span></span>`;
   }
   const fh = v.five_hour_remaining, wk = v.weekly_remaining;

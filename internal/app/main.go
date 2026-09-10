@@ -237,13 +237,12 @@ func Run() {
 	// for every harness, and the menu should open on an answer.
 	go harnessInventory()
 	// Learn the concrete claude model ids (the CLI mis-resolves its own family
-	// aliases) — cached for claudeCacheTTL, so this billed call runs at most
-	// weekly. Background: launches fall back to the bare alias until it returns.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		a.refreshClaudeModels(ctx)
-	}()
+	// aliases). The probe spends no tokens, but it does spend throwaway
+	// sessions, so it is cached against the CLI's version and refreshed only
+	// when that changes. Background: launches fall back to the bare alias until
+	// it returns.
+	a.installClaudeModelProbe()
+	a.ensureClaudeModels()
 
 	handler := cmd.Handler()
 	if handler == nil {

@@ -70,14 +70,43 @@ export function harnessState(row, latest){
     note: `up to date${up.source ? " · " + up.source : ""}` };
 }
 
+/* The usage-check switch's own copy. Claude is the only harness whose gauge
+ * costs the user's own subscription quota to read, so it is the only one that
+ * gets a choice — and a choice nobody can price is a choice nobody makes, so
+ * both states name what is spent. The off text says what turning it on would
+ * cost; the on text says what is being spent now.
+ */
+export function usageCheckNote(on){
+  return on
+    ? "On — one small check (~900 tokens) every 15 minutes, and only while " +
+      "you're working in a Claude session. It counts against the same 5-hour " +
+      "limit it reports; a full working day of checks adds up to about one " +
+      "ordinary message."
+    : "Off — nothing is spent. Turn it on for one small check (~900 tokens) " +
+      "every 15 minutes, and only while you're working in a Claude session; a " +
+      "full working day of checks adds up to about one ordinary message. The " +
+      "other harnesses report usage for free.";
+}
+
+/* Alphabetical by the name on screen, not by the agent key and not in the
+ * order the server sent. The server's order is its registry order — a
+ * code-organisation fact no reader can guess — while a scanned list wants the
+ * one order a human already has in their eye. */
+function harnessDisplayOrder(rows){
+  return rows.slice().sort((a, b) =>
+    usageAgentDisplayName(a && a.agent).localeCompare(usageAgentDisplayName(b && b.agent)));
+}
+
 /**
- * The whole section body, one .item per harness in the order the server sent
- * them. `latest` is the /api/harnesses/latest map, or null before the check.
+ * The whole section body, one .item per harness, alphabetically.
+ * `latest` is the /api/harnesses/latest map, or null before the check.
  * Every string that came off the network is escaped here.
  *
  * `deps.agentLogo` is injected rather than imported: the logo needs the FR-42
  * `assetURL` supplier, which only the shell has, and a module that reached for
- * it directly would break under the bootstrap loader.
+ * it directly would break under the bootstrap loader. `deps.usageChecks` is
+ * the stored consent (`claude_usage_checks`), rendered as a switch on the one
+ * row it governs.
  */
 export function harnessRowsHTML(rows, latest, deps = {}){
   const list = Array.isArray(rows) ? rows : [];
@@ -86,14 +115,24 @@ export function harnessRowsHTML(rows, latest, deps = {}){
   }
   const answers = latest || {};
   const agentLogo = typeof deps.agentLogo === "function" ? deps.agentLogo : () => "";
-  return list.map(row => {
+  const usageOn = !!deps.usageChecks;
+  return harnessDisplayOrder(list).map(row => {
     const s = harnessState(row, answers[row && row.agent]);
     const name = usageAgentDisplayName(s.agent);
     const tag = s.version ? esc(s.version) : "—";
+    /* An absent claude gets no switch: consent to spend a quota that cannot be
+       reached is a dead control, the same reason #m_pair stays hidden until
+       pairing could actually complete. */
+    const usage = (s.agent === "claude" && row && row.present)
+      ? `<label class="hswitch"><input type="checkbox" data-usage-check="claude"` +
+        `${usageOn ? " checked" : ""}> Check usage</label>` +
+        `<span class="hnote">${esc(usageCheckNote(usageOn))}</span>`
+      : "";
     return `<div class="item" data-agent="${esc(s.agent || "")}" data-state="${esc(s.state)}">` +
       `<span><span class="agent-logo" aria-hidden="true">${agentLogo(s.agent)}</span> ${esc(name)}</span>` +
       `<span class="tag hver">${tag}</span>` +
       (s.note ? `<span class="hnote">${esc(s.note)}</span>` : "") +
+      usage +
       `</div>`;
   }).join("");
 }

@@ -72,6 +72,8 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
 	mux.HandleFunc("GET /api/ui", a.handleUIGet)
 	mux.HandleFunc("PUT /api/ui", a.handleUIPut)
+	mux.HandleFunc("GET /api/settings", a.handleSettingsGet)
+	mux.HandleFunc("PUT /api/settings", a.handleSettingsPut)
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
 	mux.HandleFunc("POST /api/update", a.handleUpdateApply)
 	mux.HandleFunc("GET /api/licenses", handleLicenses)

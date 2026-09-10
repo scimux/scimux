@@ -95,6 +95,15 @@
 #m_harnesses .agent-logo img, #m_harnesses .agent-logo svg,
 #m_harnesses .agent-logo .mask-logo { width: 16px; height: 16px; }
 #m_harnesses .hnote { flex-basis: 100%; color: var(--dim); font-size: 12px; }
+/* The usage-check switch. It sits on its own line under the version because it
+   is a decision about money, not a property of the row: crowding it next to a
+   version tag would read as chrome. 44px is the tap target the rest of the menu
+   uses. */
+#m_harnesses .hswitch { flex-basis: 100%; display: flex; align-items: center; gap: 8px;
+  min-height: 44px; font-size: 14px; cursor: pointer; }
+#m_harnesses .hswitch input { width: 18px; height: 18px; accent-color: var(--work); }
+/* The off badge is the only status-bar gauge that is also a control. */
+.ubadge[data-usage-off] { cursor: pointer; }
 #m_harnesses .item[data-state="behind"] .hver { color: var(--work); }
 #m_harnesses .item[data-state="absent"] { opacity: .55; }
 #m_hnote { color: var(--dim); font-size: 12px; margin-top: 8px; }

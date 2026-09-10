@@ -234,29 +234,66 @@ func (a *app) setClaudeIDs(ids map[string]string) {
 	a.claudeMu.Unlock()
 }
 
-// refreshClaudeModels populates the family->id map, preferring a cached probe
-// no older than claudeCacheTTL over a fresh (API-billed) `claude -p` call. A
-// successful probe is cached; a failed one writes nothing and falls back to any
-// stale cache, so the call is retried at the next startup. Best-effort: run in a
-// background goroutine at startup, never blocking the UI.
+// refreshClaudeModels populates the family->id map, preferring a stored answer
+// over a fresh probe. The order is deliberate: read the cache, then ask the CLI
+// its version (a local subprocess that spends nothing), and only when those two
+// disagree spend the throwaway sessions. Best-effort throughout — a probe that
+// answers nothing leaves any stale ids in place and writes nothing, so the
+// retry is simply the next trigger.
 func (a *app) refreshClaudeModels(ctx context.Context) {
 	cache := readClaudeCache(a.claudeCachePath)
-	if len(cache.IDs) > 0 && time.Since(cache.ProbedAt) < claudeCacheTTL {
-		a.setClaudeIDs(cache.IDs)
-		return
-	}
-	if ids := probeClaudeModels(ctx, a.claudeProbeDir); len(ids) > 0 {
-		a.setClaudeIDs(ids)
-		if err := writeClaudeCache(a.claudeCachePath, ids); err != nil {
-			fmt.Fprintf(os.Stderr, "scimux: cache claude models: %v\n", err)
+	serveCache := func() {
+		if len(cache.IDs) > 0 {
+			a.setClaudeIDs(cache.IDs)
 		}
+	}
+	// No resolver means this app was not built to probe (every test, and any
+	// caller that is not the serve path). The cache is still worth serving.
+	if a.claudeResolveModels == nil {
+		serveCache()
 		return
 	}
-	// Probe failed: keep serving a stale cache if we have one; the retry is the
-	// next startup (nothing fresh was written).
-	if len(cache.IDs) > 0 {
-		a.setClaudeIDs(cache.IDs)
+	version := ""
+	if a.claudeVersion != nil {
+		version = a.claudeVersion(ctx)
 	}
+	if claudeCacheUsable(cache, version, time.Now()) {
+		a.setClaudeIDs(cache.IDs)
+		return
+	}
+	ids := a.claudeResolveModels(ctx)
+	if len(ids) == 0 {
+		serveCache()
+		return
+	}
+	a.setClaudeIDs(ids)
+	if err := writeClaudeCache(a.claudeCachePath, version, ids); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: cache claude models: %v\n", err)
+	}
+}
+
+// claudeModelRefreshTimeout bounds one whole refresh: up to four candidate
+// probes and one picker capture, each a session start rather than a round trip.
+const claudeModelRefreshTimeout = 120 * time.Second
+
+// ensureClaudeModels asks for a refresh in the background and returns at once.
+// It is what the triggers call — startup, the new-activity dialog, the burger
+// menu's update check — because a long-lived scimux must notice a claude it did
+// not install itself. Overlapping triggers collapse into one run: the work is
+// idempotent, but four throwaway sessions are not something to do twice.
+func (a *app) ensureClaudeModels() {
+	if a == nil || a.claudeResolveModels == nil {
+		return
+	}
+	if !a.claudeRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer a.claudeRefreshing.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), claudeModelRefreshTimeout)
+		defer cancel()
+		a.refreshClaudeModels(ctx)
+	}()
 }
 
 // resolveNode validates a new-node request and resolves its launch

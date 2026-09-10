@@ -106,7 +106,8 @@ status-bar gauge. Returns:
       "weekly_reset": "2026-08-01T07:00:00Z",
       "source": "codex-session-jsonl"
     },
-    "claude": { "available": false, "reason": "usage unavailable",
+    "claude": { "available": false, "off": true,
+                "reason": "usage checks are off",
                 "source": "claude-statusline" },
     "grok": {
       "available": true,
@@ -126,11 +127,18 @@ Numeric fields are omitted when unknown, so `0` stays distinct from missing.
 
 Claude's reading comes from the status line of a short throwaway probe session
 (`source: "claude-statusline"`), which is the only sanctioned surface that
-states subscription quota. It costs one small API turn, so it is run only while
-a Claude session is actually open, at most once per refresh interval, and never
-at all if the CLI is not installed. It reports `"usage unavailable"` while the
-user is rate-limited, because the probe turn that would measure the limit is
-itself refused.
+states subscription quota. It costs one small API turn, so it is **off by
+default** and runs only with the user's consent
+(`claude_usage_checks` in `PUT /api/settings`) — then only while a Claude
+session is actually open, at most once per refresh interval, and never at all
+if the CLI is not installed. It reports `"usage unavailable"` while the user is
+rate-limited, because the probe turn that would measure the limit is itself
+refused.
+
+`"off": true` is that consent being absent, and it is deliberately distinct
+from every other unavailable state: it is the only one the user can change by
+tapping, so the browser must tell it apart without matching on English. It
+never appears alongside `"available": true`.
 
 Two contracts matter. **This read is cache-only:** it never performs provider
 I/O, so opening many tabs cannot fan out into many Claude probe sessions, Codex
@@ -515,6 +523,28 @@ lanes). GET sets an `ETag` and honors `If-None-Match`. PUT requires
 `If-Match` (the last ETag, or `*` to bootstrap) — `428` without it, `409` on
 mismatch — and replaces the document atomically. Bodies over the size limit
 are `413`.
+
+## Settings
+
+### `GET /api/settings` / `PUT /api/settings`
+
+The **computer's** own settings (`~/.scimux/settings.json`), as opposed to the
+per-browser document at `/api/ui`. The server reads these itself, which is why
+they cannot live in the opaque UI blob.
+
+```json
+{ "claude_usage_checks": false }
+```
+
+`claude_usage_checks` is consent to run the Claude usage probe, which spends a
+small amount of the user's own subscription quota (see `GET /api/usage`).
+**Off is the default and every failure mode reads as off** — a missing,
+unreadable or nonsense settings file is "no consent given", never consent.
+
+PUT replaces the document wholesale: the client sends the state it means, so a
+missing field is `false`, not "unchanged". Malformed JSON is `400`, an
+oversized body `413`. The response is the stored document. Unlike `/api/ui`
+there is no revision check — a single boolean has nothing to merge.
 
 ## Notes
 

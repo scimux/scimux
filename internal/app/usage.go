@@ -222,8 +222,12 @@ type usageSnapshot struct {
 }
 
 type agentUsageView struct {
-	Available         bool       `json:"available"`
-	Reason            string     `json:"reason,omitempty"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	// Off says the gauge is dark because the user has not switched it on, not
+	// because anything failed. The browser needs the two apart without reading
+	// English: one state offers a switch, the other only explains itself.
+	Off               bool       `json:"off,omitempty"`
 	Plan              string     `json:"plan,omitempty"`
 	FiveHourUsed      *float64   `json:"five_hour_used,omitempty"`
 	FiveHourRemaining *float64   `json:"five_hour_remaining,omitempty"`
@@ -240,7 +244,7 @@ func usageView(u agentUsage, err error) agentUsageView {
 		if reason == "" {
 			reason = "usage unavailable"
 		}
-		return agentUsageView{Available: false, Reason: reason, Source: u.Source}
+		return agentUsageView{Available: false, Reason: reason, Off: errors.Is(err, errClaudeUsageOff), Source: u.Source}
 	}
 	return agentUsageView{
 		Available:         true,

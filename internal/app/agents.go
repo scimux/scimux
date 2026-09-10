@@ -135,67 +135,13 @@ func probeAgents(hs []harness) map[string]agentInfo {
 	return res
 }
 
-// claudeModelPrompt asks the running claude harness to enumerate the concrete
-// model ids the current account can use. The CLI (observed on 2.1.x) mis-resolves
-// the short family aliases — `--model opus` expands to `claude-4-8-opus`, the
-// pre-4.x segment order the API no longer accepts — so scimux resolves
-// opus/sonnet/haiku/fable to the concrete id itself and passes that to --model.
-// The model answers from the ids actually available in its environment.
-// The prompt is deliberately terse and format-pinned: the parser takes the
-// first id it sees per family, so prose that mentions an older id before the
-// current one would mislead it. Demanding one id per family, latest only, exact
-// dash-form, no other text keeps the answer a clean list and removes that risk.
-const claudeModelPrompt = "For each Claude model family available to me here — opus, sonnet, haiku, fable — " +
-	"output the single current model id, latest version only, one per line, in exact dash form " +
-	"claude-<family>-<version> (for example claude-opus-4-8). " +
-	"Output only those ids, one per line — no other text, no markdown, no duplicates, no older versions."
-
-// claudeModelID matches a concrete model id of a known family. The family name
-// sits immediately after "claude-", so the mis-ordered "claude-4-8-opus" form
-// never matches — exactly the ids we must not adopt.
-var claudeModelID = regexp.MustCompile(`claude-(fable|opus|sonnet|haiku)-\d+(?:-\d+)*`)
-
-// parseClaudeModels extracts a family->concrete-id map from probe output. It is
-// deliberately tolerant: it picks model-id-shaped tokens out of arbitrary prose
-// or markdown, first id per family wins, and unknown/mis-ordered tokens are
-// ignored. No ids found yields an empty map (callers fall back to the alias).
-func parseClaudeModels(out string) map[string]string {
-	m := map[string]string{}
-	for _, match := range claudeModelID.FindAllStringSubmatch(out, -1) {
-		if _, seen := m[match[1]]; !seen {
-			m[match[1]] = match[0]
-		}
-	}
-	return m
-}
-
-// probeClaudeModels runs the claude harness once to learn the concrete ids it
-// accepts. Best-effort: a missing binary, an auth failure, or an unparseable
-// answer returns nil, and scimux falls back to passing the bare family alias
-// (the pre-existing behavior). This shells out to a real agent CLI, so it runs
-// only at startup, never in tests.
-func probeClaudeModels(ctx context.Context, probeDir string) map[string]string {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return nil
-	}
-	cmd := exec.CommandContext(ctx, bin, "-p", claudeModelPrompt)
-	cmd.Dir = claudeProbeWorkdir(probeDir)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	return parseClaudeModels(string(out))
-}
-
-// claudeProbeWorkdir is the directory the probe runs in, created on demand.
-// It must never be the cwd scimux inherited: claude writes a transcript into
-// ~/.claude/projects/<slug of its cwd>/, so a probe launched from a supervised
-// node's directory drops a throwaway session into that node's project folder,
-// where the relink machinery can adopt it and the enumeration prompt shows up
-// in a live chat. A dedicated dir under ~/.scimux keeps it somewhere no node
-// can own; if that cannot be created the OS temp dir stands in — anything but
-// the inherited cwd.
+// claudeProbeWorkdir is the directory every claude probe runs in, created on
+// demand. It must never be the cwd scimux inherited: claude writes a
+// transcript into ~/.claude/projects/<slug of its cwd>/, so a probe launched
+// from a supervised node's directory drops a throwaway session into that
+// node's project folder, where the relink machinery can adopt it. A dedicated
+// dir under ~/.scimux keeps it somewhere no node can own; if that cannot be
+// created the OS temp dir stands in — anything but the inherited cwd.
 func claudeProbeWorkdir(dir string) string {
 	if dir != "" && os.MkdirAll(dir, 0o700) == nil {
 		return dir
@@ -203,20 +149,27 @@ func claudeProbeWorkdir(dir string) string {
 	return os.TempDir()
 }
 
-// claudeCacheTTL bounds how long a successful model probe is trusted before
-// scimux re-runs the (API-billed) `claude -p` call. A failed probe writes
-// nothing, so a failure is simply retried at the next startup.
-const claudeCacheTTL = 7 * 24 * time.Hour
+// claudeCacheTTL is the backstop under the version key, not the primary
+// invalidation. New model ids arrive with a new claude build, so the CLI's own
+// version is the evidence that a stored answer still holds; the clock only
+// covers the case the version cannot — a scimux process that outlives a
+// release without restarting, which is the shape of a long-running supervisor.
+//
+// It is a day rather than a week because the probe no longer costs anything.
+// The old value bought a weekly ceiling on a billed `claude -p` call; the
+// zero-token catalog read it replaced has no such price to amortize.
+const claudeCacheTTL = 24 * time.Hour
 
 // claudeCache is the on-disk shape of a successful probe (~/.scimux/claude-models.json).
 type claudeCache struct {
+	Version  string            `json:"claude_version"`
 	ProbedAt time.Time         `json:"probed_at"`
 	IDs      map[string]string `json:"ids"`
 }
 
 // readClaudeCache loads a prior successful probe. A missing or unparseable file
 // is not an error the caller must distinguish from staleness — it returns a zero
-// cache, which is neither fresh (old ProbedAt) nor usable (empty IDs).
+// cache, which claudeCacheUsable rejects on every count.
 func readClaudeCache(path string) claudeCache {
 	var c claudeCache
 	b, err := os.ReadFile(path)
@@ -229,13 +182,51 @@ func readClaudeCache(path string) claudeCache {
 	return c
 }
 
-// writeClaudeCache records a successful probe with the current timestamp.
-func writeClaudeCache(path string, ids map[string]string) error {
-	b, err := json.Marshal(claudeCache{ProbedAt: time.Now().UTC(), IDs: ids})
+// claudeCacheUsable decides whether a stored answer may be served for the
+// installed CLI. Both keys must hold, with one asymmetry: an *unknown*
+// installed version (the `claude --version` call failed, or claude is not on
+// PATH) is not a mismatch. It means the question could not be asked, and a
+// stored answer inside the backstop still beats offering none — whereas a
+// cache carrying no version at all cannot claim to match anything.
+func claudeCacheUsable(c claudeCache, version string, now time.Time) bool {
+	if len(c.IDs) == 0 {
+		return false
+	}
+	if now.Sub(c.ProbedAt) >= claudeCacheTTL {
+		return false
+	}
+	if version == "" {
+		return true
+	}
+	return c.Version != "" && c.Version == version
+}
+
+// writeClaudeCache records a successful probe against the build that produced
+// it. A probe with no version is still worth storing: the TTL alone will carry
+// it, and the next run with a readable version replaces it.
+func writeClaudeCache(path, version string, ids map[string]string) error {
+	b, err := json.Marshal(claudeCache{Version: version, ProbedAt: time.Now().UTC(), IDs: ids})
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600)
+}
+
+// claudeCLIVersion reads the installed CLI's version. It is the cheap half of
+// the model probe: a local subprocess that spends nothing, gating the
+// expensive half (four throwaway sessions) behind "has anything changed?".
+// An absent binary or an unreadable answer is "" — see claudeCacheUsable for
+// what that means.
+func claudeCLIVersion(ctx context.Context) string {
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		return ""
+	}
+	// CombinedOutput for the same reason harness_version.go uses it: some CLIs
+	// print their version on stderr, and a non-zero exit is not a reason to
+	// drop a version we can read.
+	b, _ := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
+	return parseHarnessVersion(string(b))
 }
 
 var codexConfigModel = regexp.MustCompile(`(?m)^\s*model\s*=\s*"([^"]+)"`)
@@ -533,5 +524,10 @@ func grokEffortsFromCache(models []string) map[string]modelEffort {
 // new-activity dialog's source of truth (its built-in list is only the
 // fallback for when this call fails).
 func (a *app) handleAgents(w http.ResponseWriter, r *http.Request) {
+	// Opening the new-activity dialog is the moment a stale model list would be
+	// seen, so it is the moment to start refreshing one. This never blocks the
+	// response: the dialog is served from whatever is known now, and a newly
+	// installed claude shows up the next time it opens.
+	a.ensureClaudeModels()
 	writeJSON(w, detectAgents())
 }

@@ -60,7 +60,12 @@ const (
 
 var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 
-type claudeUsageProbeOptions struct {
+// errClaudeUsageOff is the switched-off gauge. It is a distinct value rather
+// than a message because the browser must offer a switch for this one and only
+// this one; every other dark gauge is something the user cannot fix by tapping.
+var errClaudeUsageOff = errors.New("usage checks are off")
+
+type claudeProbeOptions struct {
 	// Dir is the probe's cwd and the marker's home. It must be a directory no
 	// node can own: claude writes a transcript into
 	// ~/.claude/projects/<slug of cwd>/, and a probe launched from a
@@ -69,7 +74,6 @@ type claudeUsageProbeOptions struct {
 	Dir      string
 	ExecPath string
 	Server   *tmuxsession.Server
-	Model    string
 	// Command overrides the launched argv. Tests only — the suite must never
 	// run a real agent CLI.
 	Command string
@@ -79,10 +83,7 @@ type claudeUsageProbeOptions struct {
 
 // claudeUsageProbeArgv builds the launch command. Every flag here is a
 // measured cost control; see the file header for the numbers.
-func claudeUsageProbeArgv(settingsPath, model string) string {
-	if model == "" {
-		model = claudeUsageProbeModel
-	}
+func claudeUsageProbeArgv(settingsPath string) string {
 	parts := []string{
 		"claude",
 		"--settings", shellQuote(settingsPath),
@@ -94,7 +95,7 @@ func claudeUsageProbeArgv(settingsPath, model string) string {
 		// and a probe has nothing to do.
 		"--tools", shellQuote(""),
 		"--system-prompt", shellQuote(claudeUsageProbeSystemPrompt),
-		"--model", shellQuote(model),
+		"--model", shellQuote(claudeUsageProbeModel),
 		shellQuote(claudeUsageProbePrompt),
 	}
 	return strings.Join(parts, " ")
@@ -132,36 +133,62 @@ func writeClaudeUsageProbeSettings(dir, execPath string) (string, error) {
 // carrying no rate_limits and writing nothing, so the file's arrival is
 // exactly the signal that a quota reading exists. A marker left by an earlier
 // probe must never be mistaken for this one's answer.
-func runClaudeUsageProbe(ctx context.Context, opts claudeUsageProbeOptions) (agentUsage, error) {
+func runClaudeUsageProbe(ctx context.Context, opts claudeProbeOptions) (agentUsage, error) {
 	shell := agentUsage{Agent: "claude", Source: "claude-statusline"}
-	if opts.Server == nil || opts.ExecPath == "" {
+	if err := os.Remove(claudeUsageMarkerPath(opts.Dir)); err != nil && !os.IsNotExist(err) {
 		return shell, errClaudeUsageProbe
+	}
+	var got claudeUsageMarker
+	err := runClaudeProbeSession(ctx, opts, claudeUsageProbeArgv, func(*tmuxsession.Session) bool {
+		m, ok := readClaudeUsageMarker(opts.Dir)
+		got = m
+		return ok
+	})
+	if err != nil {
+		return shell, errClaudeUsageProbe
+	}
+	return claudeUsageFromMarker(got, time.Now())
+}
+
+// runClaudeProbeSession is the shared body of every throwaway probe: install
+// the status line, launch one unsupervised pane, wait for it to leave the
+// evidence the caller is after, and kill it on every exit path.
+//
+// Callers own their own marker — removing a stale one before the launch and
+// deciding when it has reappeared — because the two probes wait for different
+// files and a marker left by an earlier run must never be read as this run's
+// answer.
+//
+// ready is handed the live session because one probe must interact with the
+// pane it is waiting on (the picker capture types into it once the TUI is up).
+// Everything the loop guarantees still holds: the session is killed on every
+// exit path, and a ready that never answers is a timeout, never a hang.
+func runClaudeProbeSession(ctx context.Context, opts claudeProbeOptions, argv func(settings string) string, ready func(*tmuxsession.Session) bool) error {
+	if opts.Server == nil || opts.ExecPath == "" || argv == nil || ready == nil {
+		return errClaudeUsageProbe
 	}
 	dir := opts.Dir
 	if dir == "" || !filepath.IsAbs(dir) || dir != filepath.Clean(dir) || !safePathComponent(filepath.Base(dir)) {
-		return shell, errClaudeUsageProbe
+		return errClaudeUsageProbe
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return shell, errClaudeUsageProbe
-	}
-	if err := os.Remove(claudeUsageMarkerPath(dir)); err != nil && !os.IsNotExist(err) {
-		return shell, errClaudeUsageProbe
+		return errClaudeUsageProbe
 	}
 	settings, err := writeClaudeUsageProbeSettings(dir, opts.ExecPath)
 	if err != nil {
-		return shell, errClaudeUsageProbe
+		return errClaudeUsageProbe
 	}
 	command := opts.Command
 	if command == "" {
-		command = claudeUsageProbeArgv(settings, opts.Model)
+		command = argv(settings)
 	}
 	name, err := claudeUsageProbeSessionName()
 	if err != nil {
-		return shell, errClaudeUsageProbe
+		return errClaudeUsageProbe
 	}
 	sess, err := opts.Server.NewSession(name, dir, command)
 	if err != nil {
-		return shell, errClaudeUsageProbe
+		return errClaudeUsageProbe
 	}
 	// The session is a throwaway in every exit path, including a cancelled
 	// context: an orphaned probe pane would keep a claude process alive.
@@ -180,14 +207,14 @@ func runClaudeUsageProbe(ctx context.Context, opts claudeUsageProbeOptions) (age
 	tick := time.NewTicker(poll)
 	defer tick.Stop()
 	for {
-		if m, ok := readClaudeUsageMarker(dir); ok {
-			return claudeUsageFromMarker(m, time.Now())
+		if ready(sess) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return shell, errClaudeUsageProbe
+			return errClaudeUsageProbe
 		case <-deadline.C:
-			return shell, errClaudeUsageProbe
+			return errClaudeUsageProbe
 		case <-tick.C:
 		}
 	}
@@ -213,6 +240,12 @@ func claudeUsageProbeSessionName() (string, error) {
 // is not touching Claude would still be billed for a Claude reading.
 func (a *app) collectClaudeUsage(ctx context.Context) (agentUsage, error) {
 	shell := agentUsage{Agent: "claude", Source: "claude-statusline"}
+	// Consent first, before any other question: this is the only collector that
+	// spends the user's own quota, and the gate belongs on the side that spends
+	// it rather than on the browser that renders the answer.
+	if !a.settings().ClaudeUsageChecks {
+		return shell, errClaudeUsageOff
+	}
 	if a == nil || a.server == nil {
 		return shell, errClaudeUsageProbe
 	}
@@ -226,7 +259,7 @@ func (a *app) collectClaudeUsage(ctx context.Context) (agentUsage, error) {
 	if err != nil || exe == "" {
 		return shell, errClaudeUsageProbe
 	}
-	return runClaudeUsageProbe(ctx, claudeUsageProbeOptions{
+	return runClaudeUsageProbe(ctx, claudeProbeOptions{
 		Dir:      claudeProbeWorkdir(a.claudeProbeDir),
 		ExecPath: exe,
 		Server:   a.server,

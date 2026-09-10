@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/acp"
@@ -68,6 +70,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		codex:           codexManager{codex.NewManager(sessionsDir)},
 		storePath:       filepath.Join(cfg.DataDir, "nodes.jsonl"),
 		uiPath:          filepath.Join(cfg.DataDir, "ui.json"),
+		settingsPath:    filepath.Join(cfg.DataDir, "settings.json"),
 		sessionsDir:     sessionsDir,
 		attachmentsDir:  filepath.Join(cfg.DataDir, "attachments"),
 		assetsDir:       filepath.Join(cfg.DataDir, "assets"),
@@ -486,19 +489,34 @@ type app struct {
 	deliverClaudeInitial func(*Node) initialDelivery
 	// claudeIDs maps the family alias the UI offers (opus/sonnet/haiku/fable) to
 	// the concrete model id the installed claude CLI actually accepts, probed once
-	// at startup (probeClaudeModels) because the CLI mis-resolves its own aliases.
+	// by refreshClaudeModels because the CLI mis-resolves its own aliases.
 	// Empty until the probe returns, and empty forever if claude is absent or the
 	// probe fails — in which case launches fall back to passing the bare alias.
-	// Written once by the startup goroutine, read per launch; guarded by claudeMu.
-	claudeIDs       map[string]string
-	claudeMu        sync.Mutex
-	claudeCachePath string // ~/.scimux/claude-models.json; empty disables caching
-	// claudeProbeDir is the neutral cwd the model probe runs in, so its
-	// throwaway `claude -p` transcript can never land in a node's
+	// Written by the refresh triggers, read per launch; guarded by claudeMu.
+	claudeIDs map[string]string
+	claudeMu  sync.Mutex
+	// claudeResolveModels performs the probe. It is a field, not a call, so the
+	// expensive machinery is installed by the serve path rather than reachable
+	// from any app value: the suite must never launch a real claude, and a
+	// handler that asks for a refresh must stay inert in a test.
+	claudeResolveModels func(context.Context) map[string]string
+	// claudeVersion reads the installed CLI's version, the cheap key the cache
+	// is validated against. Injected for the same reason: a test must not shell
+	// out to whichever claude happens to be on the host.
+	claudeVersion func(context.Context) string
+	// claudeRefreshing collapses overlapping refresh triggers into one run.
+	claudeRefreshing atomic.Bool
+	claudeCachePath  string // ~/.scimux/claude-models.json; empty disables caching
+	// claudeProbeDir is the neutral cwd every claude probe runs in, so a
+	// throwaway session's transcript can never land in a node's
 	// ~/.claude/projects folder (claudeProbeWorkdir).
 	claudeProbeDir string
 	storePath      string
 	uiPath         string
+	// settingsPath is the computer's own settings (~/.scimux/settings.json),
+	// distinct from the opaque per-browser blob at uiPath. Empty disables them,
+	// which reads as every default — see settings.go.
+	settingsPath string
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also
