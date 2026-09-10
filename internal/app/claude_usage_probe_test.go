@@ -26,8 +26,23 @@ func probeTmux(t *testing.T) *tmuxsession.Server {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not in PATH")
 	}
-	sv := tmuxsession.NewServer(fmt.Sprintf("scimux-usage-%d", rand.Int63()))
-	t.Cleanup(func() { sv.KillServer() })
+	// The prefix is deliberately not probeSessionPrefix: that one names
+	// *sessions* on scimux's own socket and is load-bearing (isProbeSession
+	// keeps them off the adoption surface), while this names a private tmux
+	// *socket* that exists only for this test. Sharing the string made the two
+	// look like one namespace when reading /tmp/tmux-<uid>.
+	sv := tmuxsession.NewServer(fmt.Sprintf("scimux-test-%d", rand.Int63()))
+	// Killing the server does not remove its socket file — tmux leaves it
+	// behind — so the test must, or every run adds one to the user's
+	// /tmp/tmux-<uid>.
+	t.Cleanup(func() {
+		if err := sv.KillServer(); err != nil {
+			t.Errorf("kill server %s: %v", sv.Socket, err)
+		}
+		if err := os.Remove(sv.SocketPath()); err != nil && !os.IsNotExist(err) {
+			t.Errorf("leftover tmux socket %s: %v", sv.SocketPath(), err)
+		}
+	})
 	return sv
 }
 

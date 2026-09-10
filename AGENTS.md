@@ -35,10 +35,15 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
   so a target added to a workflow is defended from that moment. freebsd/amd64
   is built but deliberately not released — it keeps the static-build invariant
   honest.
-- Integration tests create private, randomly named tmux sockets and clean up
-  after themselves; they never touch a user's tmux server. Never run a real
-  agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests — wrapped
-  test commands are `bash --norc` or `cat`.
+- Integration tests create private, randomly named tmux sockets and never
+  touch a user's tmux server. They clean up after themselves, and that
+  includes the socket *file*: tmux does not unlink it when the server exits,
+  so a helper that only kills the server leaves one 0-byte name per test in
+  the user's `/tmp/tmux-<uid>` until the next reboot. `SocketPath` is what a
+  cleanup deletes, and the two helpers assert the removal rather than
+  best-effort it — litter nobody is told about is litter nobody clears. Never
+  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests
+  — wrapped test commands are `bash --norc` or `cat`.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing
   below; `FuzzClaudeHookStdin` guards that no Claude hook helper writes to

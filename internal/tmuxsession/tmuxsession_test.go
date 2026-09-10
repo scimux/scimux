@@ -6,6 +6,9 @@ package tmuxsession
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -202,7 +205,17 @@ func TestListSessionsDistinguishesErrorFromEmpty(t *testing.T) {
 	if err != nil || names != nil {
 		t.Fatalf("no server: names=%v err=%v, want nil,nil", names, err)
 	}
+	// A socket that was never created is the same empty set, differently
+	// worded (tmux 3.6). Misreading it as a transient failure would freeze
+	// liveness for callers that hold state on !ok — the poller does.
+	f = &fakeRunner{out: "error connecting to /tmp/tmux-1000/x (No such file or directory)", err: errors.New("exit status 1")}
+	names, err = newTestServer(f).ListSessions()
+	if err != nil || names != nil {
+		t.Fatalf("missing socket: names=%v err=%v, want nil,nil", names, err)
+	}
 	// Transient failure: error returned so callers can leave state alone.
+	// Only the missing-socket reason is reclassified; every other reason a
+	// connect can fail stays a failure.
 	f = &fakeRunner{out: "error connecting to /tmp/tmux", err: errors.New("exit status 1")}
 	names, err = newTestServer(f).ListSessions()
 	if err == nil {
@@ -235,10 +248,26 @@ func TestCwdUsesPaneTarget(t *testing.T) {
 	}
 }
 
+// "A server that is not running is not an error" has two wordings on tmux 3.6,
+// and only one of them says "no server": a socket that exists with nothing
+// answering, and a socket that was never created at all. The second is what a
+// caller sees when it kills a server that never started (a test whose
+// validation rejected the options before any session launched), so both must
+// be a no-op or the promise in the doc comment is not kept.
 func TestKillServerToleratesNoServer(t *testing.T) {
-	f := &fakeRunner{out: "no server running on /tmp/tmux-1000/testsock", err: errors.New("exit status 1")}
-	if err := newTestServer(f).KillServer(); err != nil {
-		t.Fatalf("kill-server on dead server must be a no-op, got %v", err)
+	for _, out := range []string{
+		"no server running on /tmp/tmux-1000/testsock",
+		"error connecting to /tmp/tmux-1000/testsock (No such file or directory)",
+	} {
+		f := &fakeRunner{out: out, err: errors.New("exit status 1")}
+		if err := newTestServer(f).KillServer(); err != nil {
+			t.Errorf("kill-server on dead server (%q) must be a no-op, got %v", out, err)
+		}
+	}
+	// Anything else is a real failure and must be reported.
+	f := &fakeRunner{out: "error connecting to /tmp/tmux-1000/testsock (Permission denied)", err: errors.New("exit status 1")}
+	if err := newTestServer(f).KillServer(); err == nil {
+		t.Error("kill-server refused by the socket must be an error, got nil")
 	}
 }
 
@@ -580,5 +609,23 @@ func TestPasteNormalizationPreservesEverythingElse(t *testing.T) {
 	}
 	if f.calls[0].stdin != text {
 		t.Errorf("LF-only text was altered:\n got %q\nwant %q", f.calls[0].stdin, text)
+	}
+}
+
+// SocketPath must resolve the way tmux itself resolves -L: a socket file named
+// after the server inside tmux-<uid>, under $TMUX_TMPDIR when that is set to
+// something non-empty and /tmp otherwise. Tests rely on it to delete the
+// socket their private server leaves behind, so a wrong answer here is litter
+// nobody notices rather than a failure.
+func TestSocketPathFollowsTmuxLayout(t *testing.T) {
+	sv := NewServer("sock1")
+	dirName := fmt.Sprintf("tmux-%d", os.Getuid())
+	t.Setenv("TMUX_TMPDIR", "")
+	if got, want := sv.SocketPath(), filepath.Join("/tmp", dirName, "sock1"); got != want {
+		t.Errorf("SocketPath() with TMUX_TMPDIR unset = %q, want %q", got, want)
+	}
+	t.Setenv("TMUX_TMPDIR", "/somewhere/else")
+	if got, want := sv.SocketPath(), filepath.Join("/somewhere/else", dirName, "sock1"); got != want {
+		t.Errorf("SocketPath() with TMUX_TMPDIR set = %q, want %q", got, want)
 	}
 }

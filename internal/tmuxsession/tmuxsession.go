@@ -9,7 +9,9 @@ package tmuxsession
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -107,7 +109,7 @@ func (sv *Server) ListSessions() ([]string, error) {
 	out, err := sv.tmux("", "list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		// No private server yet is a real empty set, not a transient failure.
-		if strings.Contains(out, "no server") {
+		if noServer(out) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("tmux list-sessions: %v: %s", err, out)
@@ -118,14 +120,47 @@ func (sv *Server) ListSessions() ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
+// SocketPath is where tmux keeps this server's socket: the same name -L
+// resolves, under tmux-<uid> inside $TMUX_TMPDIR (empty counts as unset, as
+// tmux reads it) or /tmp. tmux does not unlink the file when the server exits,
+// so a caller that creates throwaway servers is the only thing that can clear
+// their names; nothing in scimux does, because the product runs one server on
+// one fixed socket for the process's whole life.
+func (sv *Server) SocketPath() string {
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), sv.Socket)
+}
+
 // KillServer stops the private tmux server and with it every scimux session.
-// A server that is not running is not an error.
+// A server that is not running is not an error. The socket file survives it
+// (see SocketPath) — deliberately not removed here, because KillServer is
+// also called with a fake runner that never launched tmux, and a unit test
+// must not reach the filesystem.
 func (sv *Server) KillServer() error {
 	out, err := sv.tmux("", "kill-server")
-	if err != nil && !strings.Contains(out, "no server") {
+	if err != nil && !noServer(out) {
 		return fmt.Errorf("tmux kill-server: %v: %s", err, out)
 	}
 	return nil
+}
+
+// noServer reports whether a failed tmux invocation failed only because there
+// is no server on this socket. tmux 3.6 says so two ways, and the difference
+// is whether the socket file exists: "no server running on <path>" when it
+// does and nothing answers, "error connecting to <path> (No such file or
+// directory)" when it never was created. Both are an empty server, so a
+// caller must not read either as a transient probe failure and hold stale
+// state. Any other connect failure — refused, permission denied — is real and
+// stays an error, because those say nothing about whether sessions exist.
+func noServer(out string) bool {
+	if strings.Contains(out, "no server") {
+		return true
+	}
+	return strings.Contains(out, "error connecting to") &&
+		strings.Contains(out, "No such file or directory")
 }
 
 // Session is one tmux session running one command in one window/pane.

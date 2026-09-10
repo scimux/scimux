@@ -25,8 +25,41 @@ func integrationServer(t *testing.T) *Server {
 	}
 	sv := NewServer(fmt.Sprintf("scimux-test-%d", rand.Int63()))
 	sv.PasteDelay = 50 * time.Millisecond
-	t.Cleanup(func() { sv.KillServer() })
+	t.Cleanup(func() { killServerAndSocket(t, sv) })
 	return sv
+}
+
+// killServerAndSocket is the whole cleanup a private server needs. Killing it
+// is not enough: tmux never unlinks its socket file when the server exits, so
+// every run of the suite used to leave one 0-byte socket in the user's
+// /tmp/tmux-<uid> under a random name, for the reboot to clear (observed: 45
+// leftovers from one day of test runs). The removal is asserted rather than
+// best-effort, because litter nobody is told about is litter nobody clears.
+func killServerAndSocket(t *testing.T, sv *Server) {
+	t.Helper()
+	if err := sv.KillServer(); err != nil {
+		t.Errorf("kill server %s: %v", sv.Socket, err)
+	}
+	if err := os.Remove(sv.SocketPath()); err != nil && !os.IsNotExist(err) {
+		t.Errorf("leftover tmux socket %s: %v", sv.SocketPath(), err)
+	}
+}
+
+// The cleanup above is only as good as the path it deletes, and a stale name
+// is indistinguishable from a clean run. This pins SocketPath against real
+// tmux: while the server is up, that path is the socket tmux created.
+func TestSocketPathNamesTheFileTmuxCreates(t *testing.T) {
+	sv := integrationServer(t)
+	if _, err := sv.NewSession("sockpath", t.TempDir(), "cat"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Lstat(sv.SocketPath())
+	if err != nil {
+		t.Fatalf("SocketPath() = %q, which tmux did not create: %v", sv.SocketPath(), err)
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		t.Errorf("SocketPath() = %q is not a socket (mode %v)", sv.SocketPath(), st.Mode())
+	}
 }
 
 // waitFor polls cond until it returns true or the deadline passes.
