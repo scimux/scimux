@@ -28,6 +28,9 @@ go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target C
 scripts/vendor-rendezvous.sh /path/to/scimux-rv   # re-vendor the rendezvous vectors
 go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine       -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
+go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
+go test ./internal/app        -run=XXX -fuzz=FuzzWebChildEnvironment -fuzztime=30s
+scripts/test/backend-split-mutations.sh
 ```
 
 - The release matrix is not written down twice: `TestCrossBuildTargets` parses
@@ -71,6 +74,19 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 
 ## Invariants (deliberate design decisions — do not "improve" them away)
 
+- **One command, two process lifetimes.** Users and service managers invoke
+  only `scimux`; `web-child` is a hidden, supervisor-owned role and never a
+  second packaged artifact. The muxer parent owns harness processes, tmux and
+  structured-session state, stores, the public listener, and the private core
+  API. A replaceable web child owns embedded assets, browser request security,
+  and rendezvous/WebRTC. It receives an inherited listener and an explicit
+  capability for a random mode-0700 Unix-socket directory; it never discovers
+  a muxer by scanning files or processes, and secrets/configuration never enter
+  argv. Backend protocol MAJOR mismatches fail readiness; MINOR changes are
+  additive. Self-update must validate a standby before atomic install, then
+  drain and rotate only the web child — it must never call either structured
+  manager's `Shutdown`. A full user-requested stop/restart still shuts those
+  managers down; tmux survives as before.
 - **Zero build dependencies.** Standard library only — no SQLite, no
   WebSocket library, no JS framework. If a feature seems to need a module,
   stop and discuss. Two maintainer-approved exceptions exist, both scoped by

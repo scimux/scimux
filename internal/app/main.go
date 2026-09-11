@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -155,6 +154,9 @@ func Run() {
 	if len(os.Args) > 1 && os.Args[1] == claudeUsageStatusLineCmd {
 		os.Exit(runClaudeUsageStatusLineMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == webChildCmd {
+		os.Exit(runWebChildMain())
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
@@ -180,6 +182,7 @@ func Run() {
 			Stdout: os.Stdout,
 			Stderr: os.Stderr,
 		},
+		muxerOnly: true,
 	}
 	if err := cmd.Run(context.Background()); err != nil {
 		if errors.Is(err, errFlagsReported) {
@@ -203,6 +206,18 @@ func Run() {
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
 	a.warmStartup()
 	status.Done()
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
+	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{report: func(err error) {
+		fmt.Fprintln(os.Stderr, "scimux: restart web child:", err)
+	}})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
 
 	// Structured-protocol subprocesses (ACP, codex app-server) are ours: unlike
 	// tmux sessions (which deliberately survive scimux exit), they must not
@@ -210,12 +225,6 @@ func Run() {
 	// untouched.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-stop
-		a.acp.Shutdown()
-		a.codex.Shutdown()
-		os.Exit(0)
-	}()
 
 	go func() {
 		for {
@@ -244,19 +253,9 @@ func Run() {
 	a.installClaudeModelProbe()
 	a.ensureClaudeModels()
 
-	handler := cmd.Handler()
-	if handler == nil {
-		h, err := NewHandler(a, webFS)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "scimux:", err)
-			os.Exit(1)
-		}
-		handler = h
-	}
-
 	// Run already bound this, before it spent anything at the rendezvous.
-	// Serve on that listener rather than re-binding: a second bind would be a
-	// second chance to fail, after the irreversible step.
+	// The muxer retains it while web generations inherit duplicates, so the
+	// port is never unbound during replacement.
 	ln := cmd.Listener()
 	if ln == nil {
 		fmt.Fprintln(os.Stderr, "scimux: startup bound no listener")
@@ -264,17 +263,8 @@ func Run() {
 	}
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), cmd.socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", cmd.socket)
-	// -addr may be bound wider than loopback, so give the server real
-	// timeouts (slowloris defense). No ReadTimeout/WriteTimeout: legitimate
-	// handlers can be slow (structured sends, the self-update download);
-	// ReadHeaderTimeout covers the attack that matters.
-	srv := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
-	if err := srv.Serve(ln); err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
-	}
+
+	<-stop
+	signal.Stop(stop)
+	_ = runtime.Close()
 }

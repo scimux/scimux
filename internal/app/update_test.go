@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -200,6 +201,85 @@ func TestUpdateApplyInstallsVerifiedBinary(t *testing.T) {
 	if fi, err := os.Stat(exe); err != nil || fi.Mode().Perm()&0o111 == 0 {
 		t.Errorf("installed binary not executable: %v %v", fi, err)
 	}
+}
+
+func TestUpdateApplyPreparesThenCommitsWebOnly(t *testing.T) {
+	newBin := []byte("new split web binary")
+	name := "scimux-" + goosArch()
+	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+		name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
+	})
+	withUpdateSeams(t, srv.URL, "v1.0.0")
+	withTestAssetPolicy(t, srv)
+
+	exe := filepath.Join(t.TempDir(), "scimux")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldExe, oldExec := executablePath, execSelf
+	executablePath = func() (string, error) { return exe, nil }
+	execSelf = func(string) error { t.Error("split update must not exec the muxer"); return nil }
+	t.Cleanup(func() { executablePath, execSelf = oldExe, oldExec })
+
+	prepared := make(chan string, 1)
+	committed := make(chan struct{}, 1)
+	a := newUpdateTestApp(t)
+	a.prepareWebUpdate = func(_ context.Context, path string) (webUpdateHandoff, error) {
+		prepared <- path
+		return webUpdateHandoff{commit: func() error { committed <- struct{}{}; return nil }}, nil
+	}
+	rec := httptest.NewRecorder()
+	a.handleUpdateApply(rec, updateReq("v9.9.9"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	select {
+	case path := <-prepared:
+		if filepath.Dir(path) != filepath.Dir(exe) || !strings.HasPrefix(filepath.Base(path), ".scimux-update-") {
+			t.Fatalf("prepared path %q is not the verified temporary executable beside %q", path, exe)
+		}
+	default:
+		t.Fatal("success response was written before replacement preparation")
+	}
+	select {
+	case <-committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prepared web generation was not committed")
+	}
+	if got, _ := os.ReadFile(exe); string(got) != string(newBin) {
+		t.Fatalf("installed binary = %q", got)
+	}
+}
+
+func TestUpdateApplyPreparationFailureLeavesRunningWebAlone(t *testing.T) {
+	newBin := []byte("verified but incompatible web binary")
+	name := "scimux-" + goosArch()
+	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+		name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
+	})
+	withUpdateSeams(t, srv.URL, "v1.0.0")
+	withTestAssetPolicy(t, srv)
+	exe := filepath.Join(t.TempDir(), "scimux")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldExe := executablePath
+	executablePath = func() (string, error) { return exe, nil }
+	t.Cleanup(func() { executablePath = oldExe })
+
+	a := newUpdateTestApp(t)
+	a.prepareWebUpdate = func(context.Context, string) (webUpdateHandoff, error) {
+		return webUpdateHandoff{}, errors.New("major mismatch")
+	}
+	rec := httptest.NewRecorder()
+	a.handleUpdateApply(rec, updateReq("v9.9.9"))
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "major mismatch") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "old" {
+		t.Fatalf("failed preparation replaced installed binary with %q", got)
+	}
+	assertNoUpdateTemps(t, filepath.Dir(exe))
 }
 
 func TestUpdateApplyChecksumMismatchLeavesBinary(t *testing.T) {
@@ -967,10 +1047,21 @@ func TestUpdateFailureCleanupMatrix(t *testing.T) {
 				oldRename := updateRename
 				updateRename = func(string, string) error { return fmt.Errorf("simulated rename failure") }
 				t.Cleanup(func() { updateRename = oldRename })
+				aborted, committed := false, false
+				a := newUpdateTestApp(t)
+				a.prepareWebUpdate = func(context.Context, string) (webUpdateHandoff, error) {
+					return webUpdateHandoff{
+						commit: func() error { committed = true; return nil },
+						abort:  func() { aborted = true },
+					}, nil
+				}
 				rec := httptest.NewRecorder()
-				newUpdateTestApp(t).handleUpdateApply(rec, updateReq("v9.9.9"))
+				a.handleUpdateApply(rec, updateReq("v9.9.9"))
 				if rec.Code != 500 {
 					t.Fatalf("status %d: %s", rec.Code, rec.Body)
+				}
+				if !aborted || committed {
+					t.Fatalf("failed install handoff: aborted=%v committed=%v", aborted, committed)
 				}
 			},
 		},

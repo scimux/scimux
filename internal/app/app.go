@@ -596,6 +596,15 @@ type app struct {
 	// configured from -addr and -trusted-host. Nil means the default
 	// loopback policy (127.0.0.1), matching the shipped -addr default.
 	requestPolicy *requestPolicy
+	// prepareWebUpdate validates a replacement web child from the verified
+	// temporary executable while the current generation is still serving.
+	// The returned transaction is committed only after atomic installation,
+	// and aborted if installation fails. Nil only in monolithic unit fixtures.
+	prepareWebUpdate func(context.Context, string) (webUpdateHandoff, error)
+	// runtimeStatus is the active web generation's small projection. Harness
+	// state never moves into it; it exists so an old long-lived muxer can name
+	// the newly activated web binary and its web-owned remote client.
+	runtimeStatus *muxerRuntimeStatus
 	// hostedRemote, when set, is the computer remote-access client whose
 	// status is projected on GET /api/state. Nil without --remote.
 	hostedRemote interface{ HostedStatus() string }

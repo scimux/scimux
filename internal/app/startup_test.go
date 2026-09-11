@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrepareDataDirCreatesDurableDirectories(t *testing.T) {
@@ -182,4 +183,43 @@ func TestStartStatusPlainOutput(t *testing.T) {
 	if strings.Count(got, "done") != 1 {
 		t.Fatalf("Done should be idempotent, got %q", got)
 	}
+}
+
+func TestStartStatusAnimatedAndRuntimeHelpers(t *testing.T) {
+	var b strings.Builder
+	status := startStatus(&b, "scimux: preparing chats", true)
+	time.Sleep(130 * time.Millisecond)
+	status.Done()
+	status.Done()
+	got := b.String()
+	if !strings.Contains(got, "\rscimux: preparing chats") || !strings.Contains(got, "\x1b[Kscimux: preparing chats done (") {
+		t.Fatalf("animated status output = %q", got)
+	}
+	if strings.Count(got, "done") != 1 {
+		t.Fatalf("Done should be idempotent, got %q", got)
+	}
+
+	regular, err := os.CreateTemp(t.TempDir(), "terminal-check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer regular.Close()
+	if isTerminal(regular) {
+		t.Fatal("regular file identified as terminal")
+	}
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	if !isTerminal(devNull) {
+		t.Fatal("character device was not identified")
+	}
+
+	oldVersion := version
+	SetVersion("v-test")
+	if version != "v-test" {
+		t.Fatalf("SetVersion left %q", version)
+	}
+	SetVersion(oldVersion)
 }

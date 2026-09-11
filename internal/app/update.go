@@ -5,7 +5,8 @@ package app
 // the corresponding control in the burger menu ("no cloud" holds by
 // construction). The update is notify-and-confirm, never silent: the UI asks
 // before /api/update is called, and the handler verifies the downloaded
-// binary against the release's SHA256SUMS before the atomic rename + re-exec.
+// binary against the release's SHA256SUMS before the atomic rename + web
+// generation handoff. The long-lived muxer and its harnesses are untouched.
 
 import (
 	"context"
@@ -410,12 +411,16 @@ var (
 	updateMu sync.Mutex
 )
 
+type webUpdateHandoff struct {
+	commit func() error
+	abort  func()
+}
+
 // handleUpdateApply downloads the matching release asset, verifies it against
-// the release's SHA256SUMS, renames it over the running binary, and re-execs.
-// Two invariants: nothing replaces the binary before the checksum matched,
-// and the subprocess-owning managers shut down before exec — a plain exec
-// would orphan the ACP/codex children that the signal handler normally kills
-// (tmux sessions survive on purpose, exactly as on a normal restart).
+// the release's SHA256SUMS, renames it over the installed binary, and prepares
+// a replacement web generation. The muxer and every harness process remain
+// alive. The post-response commit is separate because draining the old web
+// child from inside one of its own requests would deadlock.
 func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	// The apply is pinned to the exact tag the check displayed. Without this the
 	// handler re-fetches "latest" and installs whatever it finds — so a release
@@ -486,23 +491,37 @@ func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "update: install: "+err.Error(), 500)
 		return
 	}
+	var handoff webUpdateHandoff
+	if a.prepareWebUpdate != nil {
+		handoff, err = a.prepareWebUpdate(r.Context(), tmp)
+		if err != nil {
+			os.Remove(tmp)
+			http.Error(w, "update: prepare web generation: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	if err := updateRename(tmp, exe); err != nil {
+		if handoff.abort != nil {
+			handoff.abort()
+		}
 		os.Remove(tmp)
 		http.Error(w, "update: install: "+err.Error(), 500)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "version": rel.Tag})
 	go func() {
-		// Let the response reach the browser before the process is replaced.
+		// Let the response clear the old child's handler before graceful drain.
 		time.Sleep(400 * time.Millisecond)
-		a.acp.Shutdown()
-		a.codex.Shutdown()
+		if handoff.commit != nil {
+			if err := handoff.commit(); err != nil {
+				fmt.Fprintln(os.Stderr, "scimux: activate web update failed:", err)
+			}
+			return
+		}
+		// Unit fixtures retain the historical exec seam. Production always
+		// installs prepareWebUpdate before the HTTP surface becomes reachable.
 		if err := execSelf(exe); err != nil {
-			// The new binary is installed but exec failed; the children are
-			// already gone, so a half-alive server would mislead — exit and
-			// let the user restart (tmux agents are untouched either way).
 			fmt.Fprintln(os.Stderr, "scimux: re-exec after update failed:", err)
-			os.Exit(1)
 		}
 	}()
 }

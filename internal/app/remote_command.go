@@ -34,12 +34,17 @@ type Command struct {
 
 	Config remote.Config
 
-	handler     http.Handler
-	application *app
-	client      *remote.Client
-	listenAddr  string
-	listener    net.Listener
-	socket      string
+	handler      http.Handler
+	application  *app
+	client       *remote.Client
+	listenAddr   string
+	listener     net.Listener
+	socket       string
+	trustedHosts []string
+	// muxerOnly is set only by the real process entry point. Injectable
+	// Command tests retain the historical monolithic seam; production leaves
+	// rendezvous/WebRTC initialization to the web child.
+	muxerOnly bool
 
 	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
 	// remote client, or nil for a purely local run. It is kept so the join is
@@ -64,7 +69,7 @@ func (c *Command) Run(ctx context.Context) error {
 	if len(args) > 1 {
 		switch args[1] {
 		case claudeSessionHookCmd, claudePermissionHookCmd, claudeStopHookCmd, claudeNotifyHookCmd,
-			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd:
+			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd, webChildCmd:
 			if c.Config.Hooks.OnHookDispatch != nil {
 				c.Config.Hooks.OnHookDispatch(args[1])
 			}
@@ -128,6 +133,7 @@ func (c *Command) Run(ctx context.Context) error {
 	c.socket = *socket
 	c.Config.DataDir = *data
 	c.Config.Remote = *doRemote
+	c.trustedHosts = append([]string(nil), trustedHosts...)
 	if *inviteFile != "" {
 		c.Config.InviteFile = *inviteFile
 	}
@@ -161,15 +167,20 @@ func (c *Command) Run(ctx context.Context) error {
 	}
 	a.requestPolicy = policy
 
-	// One owned mux, two boundaries (S3). The local chain is byte-for-byte
-	// what NewHandler has always returned (FR-15); the factory binds the same
-	// mux to whichever device the wait loop later proves.
-	local, tunnelFor, err := newBoundaryFactory(a, webFS)
-	if err != nil {
-		return err
-	}
-	if c.handler == nil {
-		c.handler = local
+	var tunnelFor func(tunnelPeer) http.Handler
+	if !c.muxerOnly {
+		// One owned mux, two boundaries (S3). The local chain is byte-for-byte
+		// what NewHandler has always returned (FR-15); the factory binds the same
+		// mux to whichever device the wait loop later proves. Production muxer
+		// startup deliberately skips this presentation graph; its child builds it.
+		local, factory, err := newBoundaryFactory(a, webFS)
+		if err != nil {
+			return err
+		}
+		tunnelFor = factory
+		if c.handler == nil {
+			c.handler = local
+		}
 	}
 
 	// Bind before enrolling. An invite is single-use, so redeeming one is the
@@ -185,7 +196,7 @@ func (c *Command) Run(ctx context.Context) error {
 	}
 	c.listener = ln
 
-	if !c.Config.Remote {
+	if !c.Config.Remote || c.muxerOnly {
 		return nil
 	}
 

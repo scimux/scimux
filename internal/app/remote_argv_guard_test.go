@@ -45,6 +45,8 @@ import (
 // the review trigger: the new subcommand must carry no secret on argv.
 // __claude-usage-statusline is the one that is not a hook — it is the status
 // line of the usage probe session — and like the rest it takes only --dir.
+// web-child carries no values on argv at all: its muxer capability and runtime
+// configuration arrive through inherited descriptors and environment.
 var argvSubcommands = []string{
 	"__claude-compact-hook",
 	"__claude-elicitation-hook",
@@ -53,6 +55,7 @@ var argvSubcommands = []string{
 	"__claude-session-hook",
 	"__claude-stop-hook",
 	"__claude-usage-statusline",
+	"web-child",
 }
 
 // argvFlags is the complete set of flags registered in Command.Run, which
@@ -517,7 +520,11 @@ func TestNoInviteBearingFlagExists(t *testing.T) {
 		}
 	}
 	for _, name := range argvSubcommands {
-		if !strings.HasPrefix(name, "__") {
+		// web-child is a long-lived architectural role, not a hook helper. It
+		// remains internal because it is omitted from help and cannot start
+		// without inherited descriptors; a punctuation convention is not the
+		// security boundary. Its only argv value is the literal role name.
+		if name != webChildCmd && !strings.HasPrefix(name, "__") {
 			t.Errorf("subcommand %q is not marked hidden with a __ prefix", name)
 		}
 	}

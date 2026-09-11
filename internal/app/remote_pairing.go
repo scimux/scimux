@@ -29,6 +29,24 @@ type hostedPairingClient interface {
 
 var _ hostedPairingClient = (*remote.Client)(nil)
 
+// remoteHandlers is web-generation state. Keeping only a client accessor here
+// lets the replaceable web backend own rendezvous/WebRTC without acquiring an
+// app pointer (and therefore without acquiring harness or store authority).
+type remoteHandlers struct {
+	client func() hostedPairingClient
+}
+
+func (h remoteHandlers) pairingClient() hostedPairingClient {
+	if h.client == nil {
+		return nil
+	}
+	return h.client()
+}
+
+func (a *app) remoteHandlers() remoteHandlers {
+	return remoteHandlers{client: a.pairingClient}
+}
+
 func (a *app) pairingClient() hostedPairingClient {
 	if a == nil {
 		return nil
@@ -39,8 +57,8 @@ func (a *app) pairingClient() hostedPairingClient {
 	return p
 }
 
-func (a *app) handleRemotePairingMint(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemotePairingMint(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -82,8 +100,8 @@ func (a *app) handleRemotePairingMint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *app) handleRemotePairingState(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemotePairingState(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -96,8 +114,8 @@ func (a *app) handleRemotePairingState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, projectPairingStatus(st, p.HostedStatus()))
 }
 
-func (a *app) handleRemotePairingConfirm(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemotePairingConfirm(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -122,8 +140,8 @@ func (a *app) handleRemotePairingConfirm(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, pairedDeviceJSON(dev))
 }
 
-func (a *app) handleRemotePairingCancel(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemotePairingCancel(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -135,8 +153,8 @@ func (a *app) handleRemotePairingCancel(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *app) handleRemoteDeviceList(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemoteDeviceList(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -153,8 +171,8 @@ func (a *app) handleRemoteDeviceList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"devices": out})
 }
 
-func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -166,7 +184,7 @@ func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleRemoteDeviceRename gives a row the operator's own name for it.
+// serveRemoteDeviceRename gives a row the operator's own name for it.
 //
 // The name on a row arrives from the device in its pair-offer, which makes
 // it a claim: nothing stops a phone from calling itself after the laptop
@@ -175,8 +193,8 @@ func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 // the row keeps showing the device's identity underneath. The label is
 // bounded and stripped in internal/remote, at the point where it is
 // stored, so both suppliers are held to the same rule.
-func (a *app) handleRemoteDeviceRename(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemoteDeviceRename(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -196,7 +214,7 @@ func (a *app) handleRemoteDeviceRename(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, pairedDeviceJSON(dev))
 }
 
-// handleRemoteUnenroll is the way out of an enrollment (rendezvous-v1
+// serveRemoteUnenroll is the way out of an enrollment (rendezvous-v1
 // §4.4). The two halves are not equal partners underneath — the local
 // unlink always happens, the remote release is best-effort — so this
 // route answers 200 with released:false rather than an error when the
@@ -207,8 +225,8 @@ func (a *app) handleRemoteDeviceRename(w http.ResponseWriter, r *http.Request) {
 // A failure of the *local* half is a real error. An identity still on
 // disk is still an enrollment, and a UI told otherwise would leave the
 // user believing they had unlinked.
-func (a *app) handleRemoteUnenroll(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemoteUnenroll(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -226,8 +244,8 @@ func (a *app) handleRemoteUnenroll(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *app) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {
-	p := a.pairingClient()
+func (h remoteHandlers) serveRemoteStatus(w http.ResponseWriter, r *http.Request) {
+	p := h.pairingClient()
 	if p == nil {
 		http.Error(w, "remote pairing is not enabled", http.StatusNotFound)
 		return
@@ -256,6 +274,45 @@ func (a *app) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {
 		out["pair_refusal"] = hostedPairingRefusal(hosted)
 	}
 	writeJSON(w, out)
+}
+
+// handleRemotePairingMint preserves the established monolithic route table as
+// a characterization oracle. Production split serving registers the
+// corresponding remoteHandlers method in the web child instead.
+func (a *app) handleRemotePairingMint(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemotePairingMint(w, r)
+}
+
+func (a *app) handleRemotePairingState(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemotePairingState(w, r)
+}
+
+func (a *app) handleRemotePairingConfirm(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemotePairingConfirm(w, r)
+}
+
+func (a *app) handleRemotePairingCancel(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemotePairingCancel(w, r)
+}
+
+func (a *app) handleRemoteDeviceList(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemoteDeviceList(w, r)
+}
+
+func (a *app) handleRemoteDeviceRename(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemoteDeviceRename(w, r)
+}
+
+func (a *app) handleRemoteDeviceRevoke(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemoteDeviceRevoke(w, r)
+}
+
+func (a *app) handleRemoteUnenroll(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemoteUnenroll(w, r)
+}
+
+func (a *app) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {
+	a.remoteHandlers().serveRemoteStatus(w, r)
 }
 
 // projectRemoteDeviceCause is the FR-24 HTTP view of one paired device.
