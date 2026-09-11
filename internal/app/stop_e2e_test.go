@@ -193,6 +193,82 @@ func TestMuxerDeathReapsWebChildE2E(t *testing.T) {
 	t.Fatalf("web child retained %s after muxer death\n%s", addr, b)
 }
 
+func TestMuxerDeathReapsWebChildBlockedOnInviteStdinE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the real scimux process")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("scimux ships only Unix process targets")
+	}
+	root := repoRootFromTest(t)
+	bin := filepath.Join(t.TempDir(), "scimux")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/scimux")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build scimux: %v\n%s", err, out)
+	}
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+	home := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "scimux.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	muxer := exec.Command(bin, "-addr", addr, "-socket", "blocked-invite-e2e", "--remote", "--invite-stdin")
+	muxer.Env = append(os.Environ(), "HOME="+home, "PATH="+t.TempDir())
+	muxer.Stdout, muxer.Stderr = logFile, logFile
+	muxer.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	inviteReader, inviteWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxer.Stdin = inviteReader
+	defer inviteReader.Close()
+	defer inviteWriter.Close()
+	if err := muxer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := muxer.Process.Pid
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	exited := make(chan error, 1)
+	go func() { exited <- muxer.Wait() }()
+
+	// The web child creates this persistent lock file immediately before it
+	// blocks reading the still-open stdin pipe.
+	waitForTestPath(t, filepath.Join(home, ".scimux", "remote", "state.lock"))
+	select {
+	case err := <-exited:
+		b, _ := os.ReadFile(logPath)
+		t.Fatalf("muxer exited before parent-death test: %v\n%s", err, b)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := muxer.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("killed muxer did not exit")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(logPath)
+	t.Fatalf("web child blocked on invite stdin retained %s after muxer death\n%s", addr, b)
+}
+
 func waitForLoggedAddress(t *testing.T, logPath string, exited <-chan error) string {
 	t.Helper()
 	const marker = "scimux: http://"

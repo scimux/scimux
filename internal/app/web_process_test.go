@@ -10,10 +10,13 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,6 +65,32 @@ func TestInvalidReadyWebChildHelperProcess(t *testing.T) {
 	if activate != nil {
 		defer activate.Close()
 		_, _ = io.Copy(io.Discard, activate)
+	}
+}
+
+func TestGatedWebChildHelperProcess(t *testing.T) {
+	if os.Getenv("SCIMUX_WEB_CHILD_TEST") != "1" {
+		return
+	}
+	marker, gate := os.Getenv("SCIMUX_WEB_CHILD_MARKER"), os.Getenv("SCIMUX_WEB_CHILD_GATE")
+	if marker == "" || gate == "" {
+		t.Fatal("missing gated-child paths")
+	}
+	if err := os.WriteFile(marker, []byte("started\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for gated-child release")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := runWebChild(context.Background(), os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -484,9 +513,6 @@ func TestServeWebChildInProcess(t *testing.T) {
 				default:
 					t.Fatal("initial remote did not start before readiness")
 				}
-				if !ready.RemoteStarted {
-					t.Fatal("initial readiness did not retire consumed enrollment inputs")
-				}
 			}
 			if !tc.remote && factoryCalls.Load() != 0 {
 				t.Fatal("local child constructed a remote client")
@@ -533,9 +559,6 @@ func TestServeWebChildInProcess(t *testing.T) {
 			result := <-activeResult
 			if result.err != nil || result.event.Phase != "active" {
 				t.Fatalf("active = %#v, %v", result.event, result.err)
-			}
-			if tc.remote && !result.event.RemoteStarted {
-				t.Fatal("successful remote startup was not reported to the supervisor")
 			}
 			resp, err := http.Get("http://" + ln.Addr().String() + "/api/state")
 			if err != nil {
@@ -650,7 +673,7 @@ func TestReplacementWaitsForRealRemoteClientStartup(t *testing.T) {
 	go func() {
 		var active webChildEvent
 		err := dec.Decode(&active)
-		if err == nil && (active.Phase != "active" || !active.RemoteStarted) {
+		if err == nil && active.Phase != "active" {
 			err = fmt.Errorf("active event = %#v", active)
 		}
 		activeResult <- err
@@ -666,6 +689,182 @@ func TestReplacementWaitsForRealRemoteClientStartup(t *testing.T) {
 	}
 	cancel()
 	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
+	var enrollCalls atomic.Int32
+	rv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/challenge":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"challenge":"`+strings.Repeat("11", 32)+`","v":1}`)
+		case "/v1/verify", "/v1/unenroll":
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/enroll":
+			enrollCalls.Add(1)
+			http.Error(w, "unexpected enrollment", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer rv.Close()
+	data := t.TempDir()
+	writeEnrolledState(t, data)
+	rewriteEnrolledOrigin(t, data, rv.URL)
+	s, addr := newRealRemoteWebSupervisor(t, data, rv.URL)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background(), exe); err != nil {
+		t.Fatal(err)
+	}
+	csrf := fetchCSRF(t, addr)
+	code, body := publicJSON(t, addr, http.MethodPost, "/api/remote/unenroll", []byte(`{}`), csrf)
+	if code != http.StatusOK || !strings.Contains(string(body), `"hosted":""`) {
+		t.Fatalf("unlink = %d %s", code, body)
+	}
+	if err := s.Rotate(context.Background(), exe); err != nil {
+		t.Fatalf("rotation after unlink: %v", err)
+	}
+	assertWebGeneration(t, addr, "2")
+
+	recoverCtx, cancelRecover := context.WithCancel(context.Background())
+	defer cancelRecover()
+	recoveryErrors := make(chan error, 1)
+	go s.Recover(recoverCtx, exe, func(err error) { recoveryErrors <- err })
+	if err := s.current.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-recoveryErrors:
+			t.Fatalf("recovery after unlink: %v", err)
+		default:
+		}
+		resp, err := http.Get("http://" + addr + "/api/state")
+		if err == nil {
+			got := resp.Header.Get("X-Scimux-Web-Generation")
+			_ = resp.Body.Close()
+			if got == "3" {
+				if enrollCalls.Load() != 0 {
+					t.Fatalf("replacement attempted enrollment %d times", enrollCalls.Load())
+				}
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("local web API did not recover after unlink")
+}
+
+func TestConsumedInviteAuthOutageThenReplacement(t *testing.T) {
+	var authAvailable atomic.Bool
+	var enrollCalls atomic.Int32
+	rv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"min":1,"v":1}`)
+		case "/v1/enroll":
+			enrollCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"handle":"ih_041061050R3GG28A","v":1}`)
+		case "/v1/challenge":
+			if !authAvailable.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"challenge":"`+strings.Repeat("11", 32)+`","v":1}`)
+		case "/v1/verify":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer rv.Close()
+	data := t.TempDir()
+	invite := filepath.Join(data, "invite")
+	if err := os.WriteFile(invite, []byte("0410-6105-0R3G-G28A-1C60-T3GF\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, addr := newRealRemoteWebSupervisor(t, data, rv.URL)
+	s.config.InviteFile = invite
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background(), exe); err != nil {
+		t.Fatal(err)
+	}
+	assertWebGeneration(t, addr, "1")
+	if _, err := os.Stat(invite); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invite was not consumed: %v", err)
+	}
+	authAvailable.Store(true)
+	if err := s.Rotate(context.Background(), exe); err != nil {
+		t.Fatalf("replacement after authentication recovery: %v", err)
+	}
+	assertWebGeneration(t, addr, "2")
+	if enrollCalls.Load() != 1 {
+		t.Fatalf("enrollment requests = %d, want exactly one", enrollCalls.Load())
+	}
+}
+
+func newRealRemoteWebSupervisor(t *testing.T, data, origin string) (*webSupervisor, string) {
+	t.Helper()
+	coreMux := http.NewServeMux()
+	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	coreMux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"marker":"muxer-alive"}`)
+	})
+	core, err := backend.Listen(t.TempDir(), coreMux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = core.Close() })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	cmd := &Command{
+		Stdout: io.Discard, Stderr: io.Discard, listenAddr: ln.Addr().String(),
+		Config: remote.Config{DataDir: data, Remote: true, Origin: origin},
+	}
+	s, err := newWebSupervisor(ln, core.Link(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.readyTimeout, s.drainTimeout = 5*time.Second, 5*time.Second
+	s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
+	s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, ln.Addr().String()
+}
+
+func rewriteEnrolledOrigin(t *testing.T, data, origin string) {
+	t.Helper()
+	c := remote.NewClient(remote.Config{DataDir: data})
+	raw, err := os.ReadFile(c.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state remote.PersistedState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Origin = origin
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.StatePath(), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -754,45 +953,84 @@ func TestWebChildConfigurationValidation(t *testing.T) {
 	}
 }
 
-func TestRemoteStartupResultControlsEnrollmentInputReuse(t *testing.T) {
-	commit := func(t *testing.T, event webChildEvent) (*webSupervisor, error) {
-		t.Helper()
-		activateR, activateW, err := os.Pipe()
-		if err != nil {
+func TestRemoteLifecycleReconciliation(t *testing.T) {
+	t.Run("local mode is unchanged", func(t *testing.T) {
+		s := &webSupervisor{config: webChildConfig{DataDir: t.TempDir(), InviteStdin: true}}
+		s.reconcileRemoteLifecycle(true)
+		if s.config.Remote || !s.config.InviteStdin {
+			t.Fatalf("local configuration changed: %#v", s.config)
+		}
+	})
+
+	t.Run("state read error preserves remote mode", func(t *testing.T) {
+		data := t.TempDir()
+		statePath := remote.NewClient(remote.Config{DataDir: data}).StatePath()
+		if err := os.MkdirAll(statePath, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		defer activateR.Close()
-		go io.Copy(io.Discard, activateR)
-		events := make(chan webChildEvent, 1)
-		events <- event
-		s := &webSupervisor{
-			config:       webChildConfig{InviteFile: "/already/consumed", InviteStdin: true},
-			readyTimeout: time.Second, drainTimeout: time.Millisecond,
+		s := &webSupervisor{config: webChildConfig{DataDir: data, Remote: true, InviteStdin: true}}
+		s.reconcileRemoteLifecycle(true)
+		if !s.config.Remote || s.config.InviteStdin {
+			t.Fatalf("state read failure changed durable mode or retained stdin: %#v", s.config)
 		}
-		candidate := &webProcess{activate: activateW, events: events, eventErr: make(chan error), done: make(chan struct{}), version: "v1"}
-		return s, s.commitLocked(&preparedWeb{supervisor: s, candidate: candidate, generation: 1})
-	}
+	})
 
-	success, err := commit(t, webChildEvent{Phase: "active", Generation: 1, Version: "v1", RemoteStarted: true})
+	t.Run("preflight outage keeps unspent file", func(t *testing.T) {
+		data := t.TempDir()
+		invite := filepath.Join(data, "invite")
+		if err := os.WriteFile(invite, []byte("unspent"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := &webSupervisor{config: webChildConfig{DataDir: data, Remote: true, InviteFile: invite}}
+		s.reconcileRemoteLifecycle(true)
+		if !s.config.Remote || s.config.InviteFile != invite {
+			t.Fatalf("reusable file was discarded: %#v", s.config)
+		}
+	})
+
+	t.Run("committed enrollment consumes inputs", func(t *testing.T) {
+		data := t.TempDir()
+		writeEnrolledState(t, data)
+		s := &webSupervisor{config: webChildConfig{
+			DataDir: data, Remote: true, InviteFile: "/already/consumed", InviteStdin: true,
+		}}
+		s.reconcileRemoteLifecycle(true)
+		if !s.config.Remote || s.config.InviteFile != "" || s.config.InviteStdin {
+			t.Fatalf("enrolled state retained one-shot inputs: %#v", s.config)
+		}
+		if err := os.Remove(remote.NewClient(remote.Config{DataDir: data}).StatePath()); err != nil {
+			t.Fatal(err)
+		}
+		s.generation = 1
+		s.reconcileRemoteLifecycle(false)
+		if s.config.Remote {
+			t.Fatalf("unlinked state retained remote startup: %#v", s.config)
+		}
+	})
+
+	t.Run("stdin cannot be replayed", func(t *testing.T) {
+		s := &webSupervisor{config: webChildConfig{DataDir: t.TempDir(), Remote: true, InviteStdin: true}}
+		s.reconcileRemoteLifecycle(true)
+		if s.config.Remote || s.config.InviteStdin {
+			t.Fatalf("completed stdin attempt remained replayable: %#v", s.config)
+		}
+	})
+}
+
+func TestCommitRejectsMismatchedActivation(t *testing.T) {
+	activateR, activateW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if success.config.InviteFile != "" || success.config.InviteStdin {
-		t.Fatalf("successful startup retained enrollment inputs: %#v", success.config)
-	}
-	degraded, err := commit(t, webChildEvent{Phase: "active", Generation: 1, Version: "v1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if degraded.config.InviteFile == "" || !degraded.config.InviteStdin {
-		t.Fatalf("unsuccessful startup consumed retry inputs: %#v", degraded.config)
-	}
-	invalid, err := commit(t, webChildEvent{Phase: "active", Generation: 2, Version: "v1", RemoteStarted: true})
+	defer activateR.Close()
+	go io.Copy(io.Discard, activateR)
+	events := make(chan webChildEvent, 1)
+	events <- webChildEvent{Phase: "active", Generation: 2, Version: "v1"}
+	s := &webSupervisor{readyTimeout: time.Second, drainTimeout: time.Millisecond}
+	candidate := &webProcess{activate: activateW, events: events, eventErr: make(chan error), done: make(chan struct{}), version: "v1"}
+	err = s.commitLocked(&preparedWeb{supervisor: s, candidate: candidate, generation: 1})
 	if err == nil || !strings.Contains(err.Error(), "invalid activation") {
 		t.Fatalf("mismatched activation error = %v", err)
-	}
-	if invalid.config.InviteFile == "" || !invalid.config.InviteStdin {
-		t.Fatal("mismatched activation consumed enrollment inputs")
 	}
 }
 
@@ -926,6 +1164,123 @@ func TestPreparedWebCanAbortWithoutDisturbingCurrent(t *testing.T) {
 	if err := nilSupervisor.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestListenerStaysNonblockingDuringGatedReplacement(t *testing.T) {
+	coreMux := http.NewServeMux()
+	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	core, err := backend.Listen(t.TempDir(), coreMux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard,
+		listenAddr: ln.Addr().String(), Config: remoteConfigForWebChildTest(t.TempDir())}
+	s, err := newWebSupervisor(ln, core.Link(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.readyTimeout, s.drainTimeout = 10*time.Second, 5*time.Second
+	s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
+	s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background(), exe); err != nil {
+		t.Fatal(err)
+	}
+	first := s.current
+
+	barrierDir := t.TempDir()
+	marker, gate := filepath.Join(barrierDir, "started"), filepath.Join(barrierDir, "continue")
+	s.childArgs = []string{"-test.run=^TestGatedWebChildHelperProcess$"}
+	s.extraEnv = []string{
+		"SCIMUX_WEB_CHILD_TEST=1",
+		"SCIMUX_WEB_CHILD_MARKER=" + marker,
+		"SCIMUX_WEB_CHILD_GATE=" + gate,
+	}
+	type prepareResult struct {
+		prepared *preparedWeb
+		err      error
+	}
+	preparedCh := make(chan prepareResult, 1)
+	go func() {
+		prepared, err := s.Prepare(context.Background(), exe)
+		preparedCh <- prepareResult{prepared: prepared, err: err}
+	}()
+	waitForTestPath(t, marker)
+	if !testListenerNonblocking(t, ln.(*net.TCPListener)) {
+		t.Fatal("replacement descriptor transfer made the shared listener blocking")
+	}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get("http://" + ln.Addr().String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if err := os.WriteFile(gate, []byte("continue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := <-preparedCh
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	result.prepared.Abort()
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("active child did not shut down promptly after listener inheritance")
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.err(); err != nil {
+		t.Fatalf("graceful child exit = %v", err)
+	}
+}
+
+func testListenerNonblocking(t *testing.T, ln *net.TCPListener) bool {
+	t.Helper()
+	raw, err := ln.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flags uintptr
+	var errno syscall.Errno
+	if err := raw.Control(func(fd uintptr) {
+		flags, _, errno = syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETFL, 0)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if errno != 0 {
+		t.Fatalf("read listener flags: %v", errno)
+	}
+	return flags&syscall.O_NONBLOCK != 0
+}
+
+func waitForTestPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }
 
 func TestWaitWebEventFailures(t *testing.T) {

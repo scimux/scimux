@@ -62,9 +62,6 @@ type webChildEvent struct {
 	Phase      string `json:"phase"`
 	Generation uint64 `json:"generation"`
 	Version    string `json:"version"`
-	// RemoteStarted tells the supervisor it may forget single-use enrollment
-	// inputs. False includes local mode and retryable degraded remote startup.
-	RemoteStarted bool `json:"remote_started,omitempty"`
 }
 
 type webRemoteClient interface {
@@ -76,6 +73,7 @@ type webRemoteClient interface {
 type webChildDeps struct {
 	newRemote func(remote.Config) webRemoteClient
 	ownerDone <-chan struct{}
+	ownerLost func()
 }
 
 func (d webChildDeps) remote(cfg remote.Config) webRemoteClient {
@@ -225,6 +223,9 @@ func (s *webSupervisor) prepareLocked(ctx context.Context, executable string) (*
 	if executable == "" {
 		return nil, errors.New("web supervisor: empty executable")
 	}
+	if s.generation > 0 || s.current != nil {
+		s.reconcileRemoteLifecycle(false)
+	}
 	next := s.generation + 1
 	cfg := s.config
 	cfg.Generation = next
@@ -246,7 +247,9 @@ func (s *webSupervisor) prepareLocked(ctx context.Context, executable string) (*
 		abort()
 		return nil, fmt.Errorf("web supervisor: invalid readiness event %#v", ready)
 	}
-	s.forgetEnrollmentInputs(ready)
+	if !cfg.Replacement {
+		s.reconcileRemoteLifecycle(true)
+	}
 	candidate.version = ready.Version
 	return &preparedWeb{supervisor: s, candidate: candidate, expected: s.current, generation: next}, nil
 }
@@ -285,23 +288,41 @@ func (s *webSupervisor) commitLocked(prepared *preparedWeb) error {
 		abort()
 		return fmt.Errorf("web supervisor: invalid activation event %#v", active)
 	}
-	s.forgetEnrollmentInputs(active)
+	s.reconcileRemoteLifecycle(true)
 	s.current = prepared.candidate
 	s.generation = prepared.generation
 	return nil
 }
 
-func (s *webSupervisor) forgetEnrollmentInputs(event webChildEvent) {
-	if !event.RemoteStarted {
+// reconcileRemoteLifecycle separates three facts that Start's return value
+// cannot: whether a credential is still reusable, whether an identity now
+// exists, and whether the operator intentionally removed that identity. It is
+// called only while the supervisor lock is held.
+func (s *webSupervisor) reconcileRemoteLifecycle(startupCompleted bool) {
+	if !s.config.Remote {
 		return
 	}
-	// Invite file/stdin are enrollment inputs, not durable reconnect
-	// configuration. The real client consumes the file on success; passing
-	// its old name into a replacement would fail before authentication. Initial
-	// startup reports this at ready, closing the crash-before-active window;
-	// replacements report it at active because they start remote after drain.
-	s.config.InviteFile = ""
-	s.config.InviteStdin = false
+	// stdin is a stream, so a completed startup attempt can never replay it.
+	if startupCompleted {
+		s.config.InviteStdin = false
+	}
+	if s.config.InviteFile != "" {
+		if _, err := os.Stat(s.config.InviteFile); errors.Is(err, os.ErrNotExist) {
+			s.config.InviteFile = ""
+		}
+	}
+	probe := remote.NewClient(remote.Config{DataDir: s.config.DataDir, Origin: s.config.RVOrigin})
+	state, err := probe.State()
+	if err != nil {
+		return
+	}
+	if state == remote.StateAbsent && (startupCompleted || s.generation > 0) &&
+		s.config.InviteFile == "" && !s.config.InviteStdin {
+		// An active installation that becomes absent was explicitly unlinked.
+		// Replacement stays local until a new top-level invocation supplies a
+		// fresh invite; it must not reopen a terminal from a background child.
+		s.config.Remote = false
+	}
 }
 
 // Commit drains the expected old child and activates this prepared one.
@@ -336,13 +357,9 @@ func (p *preparedWeb) Abort() {
 }
 
 func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webChildConfig) (*webProcess, error) {
-	fl, ok := s.listener.(interface{ File() (*os.File, error) })
-	if !ok {
-		return nil, fmt.Errorf("web supervisor: listener %T cannot be inherited", s.listener)
-	}
-	publicFile, err := fl.File()
+	publicFile, err := listenerFileForExec(s.listener)
 	if err != nil {
-		return nil, fmt.Errorf("web supervisor: duplicate listener: %w", err)
+		return nil, err
 	}
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
@@ -402,6 +419,41 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 	return p, nil
 }
 
+// listenerFileForExec duplicates the listener without calling os.File.Fd.
+// exec.ExtraFiles calls Fd itself; doing that on the network file returned by
+// Listener.File can temporarily clear O_NONBLOCK on the shared socket and
+// strand another child's Accept in the kernel. A raw dup wrapped in a fresh
+// os.File has no poller state for Fd to dismantle.
+func listenerFileForExec(listener net.Listener) (*os.File, error) {
+	fl, ok := listener.(interface{ File() (*os.File, error) })
+	if !ok {
+		return nil, fmt.Errorf("web supervisor: listener %T cannot be inherited", listener)
+	}
+	networkFile, err := fl.File()
+	if err != nil {
+		return nil, fmt.Errorf("web supervisor: duplicate listener: %w", err)
+	}
+	raw, err := networkFile.SyscallConn()
+	if err != nil {
+		_ = networkFile.Close()
+		return nil, fmt.Errorf("web supervisor: access duplicated listener: %w", err)
+	}
+	inheritedFD := -1
+	var dupErr error
+	controlErr := raw.Control(func(fd uintptr) {
+		inheritedFD, dupErr = syscall.Dup(int(fd))
+	})
+	_ = networkFile.Close()
+	if controlErr != nil {
+		return nil, fmt.Errorf("web supervisor: access duplicated listener: %w", controlErr)
+	}
+	if dupErr != nil {
+		return nil, fmt.Errorf("web supervisor: duplicate listener descriptor: %w", dupErr)
+	}
+	syscall.CloseOnExec(inheritedFD)
+	return os.NewFile(uintptr(inheritedFD), "scimux-public-listener"), nil
+}
+
 func decodeWebEvents(r *os.File, events chan<- webChildEvent, errs chan<- error) {
 	defer r.Close()
 	defer close(events)
@@ -449,9 +501,6 @@ func waitWebEvent(ctx context.Context, p *webProcess, phase string, timeout time
 func stopWebProcess(p *webProcess, timeout time.Duration) {
 	if p == nil {
 		return
-	}
-	if p.owner != nil {
-		_ = p.owner.Close()
 	}
 	if p.cmd == nil || p.cmd.Process == nil {
 		return
@@ -644,7 +693,12 @@ func runWebChild(ctx context.Context, getenv func(string) string, stdin io.Reade
 	ready := os.NewFile(webReadyFD, "scimux-web-ready")
 	activate := os.NewFile(webActivateFD, "scimux-web-activate")
 	owner := os.NewFile(webOwnerFD, "scimux-web-owner")
-	return runWebChildFiles(ctx, cfg, publicFile, ready, activate, owner, stdin, stdout, stderr, webChildDeps{})
+	return runWebChildFiles(ctx, cfg, publicFile, ready, activate, owner, stdin, stdout, stderr, webChildDeps{
+		// Parent loss is the one shutdown state that cannot rely on cooperative
+		// cancellation: enrollment may be blocked in a terminal or stdin read.
+		// The muxer is already gone, so the kernel is the only cleanup owner left.
+		ownerLost: func() { os.Exit(0) },
+	})
 }
 
 // runWebChildFiles is the descriptor-independent half of hidden-role startup.
@@ -660,7 +714,10 @@ func runWebChildFiles(ctx context.Context, cfg webChildConfig, publicFile, ready
 	defer owner.Close()
 	ownerDone := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(io.Discard, owner)
+		_, err := io.Copy(io.Discard, owner)
+		if err == nil && deps.ownerLost != nil {
+			deps.ownerLost()
+		}
 		close(ownerDone)
 	}()
 	ln, err := net.FileListener(publicFile)
@@ -724,29 +781,26 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 	defer web.Close()
 
-	startRemote := func() (bool, error) {
+	startRemote := func() error {
 		if remoteClient == nil {
-			return false, nil
+			return nil
 		}
 		if err := remoteClient.Start(childCtx); err != nil {
 			if childCtx.Err() != nil {
-				return false, childCtx.Err()
+				return childCtx.Err()
 			}
 			switch remoteClass(err) {
 			case remote.ClassRevoked, remote.ClassDisabled, remote.ClassUnavailable:
 				fmt.Fprintln(stderr, "scimux: remote access is off:", err)
-				return false, nil
+				return nil
 			default:
-				return false, err
+				return err
 			}
 		}
-		return true, nil
+		return nil
 	}
-	remoteStarted := false
 	if !cfg.Replacement {
-		var err error
-		remoteStarted, err = startRemote()
-		if err != nil {
+		if err := startRemote(); err != nil {
 			if childCtx.Err() != nil {
 				return nil
 			}
@@ -755,7 +809,7 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 
 	enc := json.NewEncoder(ready)
-	if err := enc.Encode(webChildEvent{Phase: "ready", Generation: cfg.Generation, Version: version, RemoteStarted: remoteStarted}); err != nil {
+	if err := enc.Encode(webChildEvent{Phase: "ready", Generation: cfg.Generation, Version: version}); err != nil {
 		return err
 	}
 	activated := make(chan error, 1)
@@ -776,9 +830,7 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 
 	if cfg.Replacement {
-		var err error
-		remoteStarted, err = startRemote()
-		if err != nil {
+		if err := startRemote(); err != nil {
 			if childCtx.Err() != nil {
 				return nil
 			}
@@ -817,7 +869,7 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	if err := enc.Encode(webChildEvent{Phase: "active", Generation: cfg.Generation, Version: version, RemoteStarted: remoteStarted}); err != nil {
+	if err := enc.Encode(webChildEvent{Phase: "active", Generation: cfg.Generation, Version: version}); err != nil {
 		return err
 	}
 	select {
