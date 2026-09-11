@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
 		Stdout: io.Discard, Stderr: io.Discard,
 		listener: ln, listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data},
 	}
+	claimCommandOwnership(t, cmd)
 	stopRequested := make(chan struct{}, 1)
 	exe, err := os.Executable()
 	if err != nil {
@@ -110,7 +112,7 @@ func assertRuntimeWebGeneration(t *testing.T, addr, want string) {
 
 func TestSplitRuntimeRejectsInvalidComposition(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
-	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard}
+	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard, Config: remote.Config{DataDir: t.TempDir()}}
 	if _, err := startSplitRuntime(context.Background(), nil, cmd, "test", splitRuntimeOptions{}); err == nil {
 		t.Fatal("accepted nil application")
 	}
@@ -120,6 +122,7 @@ func TestSplitRuntimeRejectsInvalidComposition(t *testing.T) {
 	if _, err := startSplitRuntime(context.Background(), a, cmd, "", splitRuntimeOptions{}); err == nil {
 		t.Fatal("accepted empty executable")
 	}
+	claimCommandOwnership(t, cmd)
 	if _, err := startSplitRuntime(context.Background(), a, cmd, "/missing/scimux", splitRuntimeOptions{}); err == nil {
 		t.Fatal("accepted command without a public listener")
 	}
@@ -135,12 +138,9 @@ func TestSplitRuntimeRejectsInvalidComposition(t *testing.T) {
 	}
 }
 
-func TestSplitRuntimeRejectsUnsafeControlDirectory(t *testing.T) {
+func TestSplitRuntimeRequiresEarlyOwnership(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	data := t.TempDir()
-	if err := os.Chmod(data, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -149,19 +149,9 @@ func TestSplitRuntimeRejectsUnsafeControlDirectory(t *testing.T) {
 		Stdout: io.Discard, Stderr: io.Discard,
 		listener: ln, listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data},
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{
-		configureWeb: func(s *webSupervisor) {
-			s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
-			s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
-			s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "owner-only") {
-		t.Fatalf("unsafe control directory error = %v", err)
+	_, err = startSplitRuntime(context.Background(), a, cmd, "unused", splitRuntimeOptions{})
+	if err == nil || !strings.Contains(err.Error(), "does not own") {
+		t.Fatalf("missing ownership error = %v", err)
 	}
 	if cmd.Listener() == nil {
 		t.Fatal("failed runtime unexpectedly consumed the caller-owned listener")
@@ -178,10 +168,78 @@ func TestMuxerOnlyCommandDoesNotConstructPresentation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cmd.closeListener()
+	defer cmd.closeOwnership()
 	if cmd.application == nil || cmd.Listener() == nil {
 		t.Fatal("muxer-only startup did not construct core state and listener")
 	}
 	if cmd.Handler() != nil || cmd.tunnelHandlerFor != nil || cmd.client != nil {
 		t.Fatal("muxer-only startup constructed web or remote presentation")
 	}
+}
+
+func TestMuxerOnlyCommandClaimsBeforeStoreReplay(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := backend.Claim(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	// If startup touched the store before testing ownership, this invalid path
+	// would hide the duplicate-owner error.
+	if err := os.Mkdir(filepath.Join(data, "nodes.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &Command{
+		Args: []string{"scimux", "-addr", "127.0.0.1:0", "-data", data},
+		Home: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard, muxerOnly: true,
+	}
+	if err := cmd.Run(context.Background()); !errors.Is(err, backend.ErrMuxerOwned) {
+		t.Fatalf("duplicate startup error = %v, want ErrMuxerOwned", err)
+	}
+	if cmd.application != nil || cmd.Listener() != nil {
+		t.Fatal("duplicate startup touched application state or public listener")
+	}
+}
+
+func TestMuxerOnlyCommandReleasesOwnershipAfterStoreReplayFailure(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(data, "nodes.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &Command{
+		Args: []string{"scimux", "-addr", "127.0.0.1:0", "-data", data},
+		Home: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard, muxerOnly: true,
+	}
+	if err := cmd.Run(context.Background()); err == nil {
+		t.Fatal("startup accepted an unreadable store")
+	}
+	if cmd.ownership != nil {
+		t.Fatal("failed startup retained data-directory ownership")
+	}
+	owner, err := backend.Claim(data)
+	if err != nil {
+		t.Fatalf("successor could not claim after failed startup: %v", err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func claimCommandOwnership(t *testing.T, cmd *Command) {
+	t.Helper()
+	if err := os.Chmod(cmd.Config.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := backend.Claim(cmd.Config.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.ownership = owner
+	t.Cleanup(cmd.closeOwnership)
 }

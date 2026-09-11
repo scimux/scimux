@@ -138,7 +138,7 @@ func flatStaticHandler(root fs.FS, prefix, ext, contentType string) http.Handler
 	})
 }
 
-// csrfIndex reads the embedded index page once and substitutes the per-process
+// csrfIndex reads the embedded index page once and substitutes the runtime
 // CSRF token into its placeholder meta tag. The token is hex, so it is inert in
 // an HTML attribute; the page is served verbatim thereafter.
 func csrfIndex(fsys fs.FS) ([]byte, error) {

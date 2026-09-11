@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
 )
 
@@ -45,6 +46,7 @@ type Command struct {
 	// Command tests retain the historical monolithic seam; production leaves
 	// rendezvous/WebRTC initialization to the web child.
 	muxerOnly bool
+	ownership *backend.Registration
 
 	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
 	// remote client, or nil for a purely local run. It is kept so the join is
@@ -54,7 +56,7 @@ type Command struct {
 }
 
 // Run starts the process according to Args.
-func (c *Command) Run(ctx context.Context) error {
+func (c *Command) Run(ctx context.Context) (runErr error) {
 	if c == nil {
 		return fmt.Errorf("scimux: nil command")
 	}
@@ -150,6 +152,18 @@ func (c *Command) Run(ctx context.Context) error {
 
 	if err := prepareDataDir(*data); err != nil {
 		return err
+	}
+	if c.muxerOnly {
+		owner, err := backend.Claim(*data)
+		if err != nil {
+			return err
+		}
+		c.ownership = owner
+		defer func() {
+			if runErr != nil {
+				c.closeOwnership()
+			}
+		}()
 	}
 
 	a, err := NewApp(Config{
@@ -283,6 +297,14 @@ func (c *Command) closeListener() {
 	}
 	_ = c.listener.Close()
 	c.listener = nil
+}
+
+func (c *Command) closeOwnership() {
+	if c == nil || c.ownership == nil {
+		return
+	}
+	_ = c.ownership.Close()
+	c.ownership = nil
 }
 
 // Listener is the bound localhost listener after a successful Run. The caller

@@ -12,14 +12,13 @@ import (
 // API, and the web-server supervisor have independent lifetimes, while the
 // public listener remains owned by the muxer process throughout rotations.
 type splitRuntime struct {
-	muxer        *muxerBackend
-	core         *backend.Server
-	web          *webSupervisor
-	registration *backend.Registration
-	stopRecover  context.CancelFunc
-	command      *Command
-	closeOnce    sync.Once
-	closeErr     error
+	muxer       *muxerBackend
+	core        *backend.Server
+	web         *webSupervisor
+	stopRecover context.CancelFunc
+	command     *Command
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 type splitRuntimeOptions struct {
@@ -39,6 +38,9 @@ func startSplitRuntime(ctx context.Context, a *app, cmd *Command, executable str
 	}
 	if executable == "" {
 		return nil, errors.New("split runtime: empty executable")
+	}
+	if cmd.ownership == nil {
+		return nil, errors.New("split runtime: command does not own its data directory")
 	}
 	muxer, err := newMuxerBackend(a)
 	if err != nil {
@@ -61,21 +63,10 @@ func startSplitRuntime(ctx context.Context, a *app, cmd *Command, executable str
 	if opts.configureWeb != nil {
 		opts.configureWeb(web)
 	}
-	if err := web.Start(ctx, executable); err != nil {
-		_ = web.Close()
-		_ = core.Close()
-		muxer.shutdownHarnesses()
-		return nil, err
-	}
-	registration, err := backend.Register(cmd.Config.DataDir, core.Link())
-	if err != nil {
-		_ = web.Close()
-		_ = core.Close()
-		muxer.shutdownHarnesses()
-		return nil, err
-	}
-
-	r := &splitRuntime{muxer: muxer, core: core, web: web, registration: registration, command: cmd}
+	r := &splitRuntime{muxer: muxer, core: core, web: web, command: cmd}
+	// Install the handoff before HTTP can become reachable. An update request
+	// from the first accepted connection must never fall back to replacing the
+	// muxer that owns the harnesses.
 	a.prepareWebUpdate = func(updateCtx context.Context, path string) (webUpdateHandoff, error) {
 		prepared, err := web.Prepare(updateCtx, path)
 		if err != nil {
@@ -83,6 +74,21 @@ func startSplitRuntime(ctx context.Context, a *app, cmd *Command, executable str
 		}
 		return webUpdateHandoff{commit: prepared.Commit, abort: prepared.Abort}, nil
 	}
+	if err := web.Start(ctx, executable); err != nil {
+		a.prepareWebUpdate = nil
+		_ = web.Close()
+		_ = core.Close()
+		muxer.shutdownHarnesses()
+		return nil, err
+	}
+	if err := cmd.ownership.Publish(core.Link()); err != nil {
+		a.prepareWebUpdate = nil
+		_ = web.Close()
+		_ = core.Close()
+		muxer.shutdownHarnesses()
+		return nil, err
+	}
+
 	recoverCtx, stopRecover := context.WithCancel(ctx)
 	r.stopRecover = stopRecover
 	go web.Recover(recoverCtx, executable, opts.report)
@@ -110,8 +116,11 @@ func (r *splitRuntime) Close() error {
 			r.command.closeListener()
 		}
 		r.muxer.shutdownHarnesses()
-		if err := r.registration.Close(); err != nil && r.closeErr == nil {
-			r.closeErr = err
+		if r.command != nil && r.command.ownership != nil {
+			if err := r.command.ownership.Close(); err != nil && r.closeErr == nil {
+				r.closeErr = err
+			}
+			r.command.ownership = nil
 		}
 	})
 	return r.closeErr

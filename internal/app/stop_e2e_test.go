@@ -3,11 +3,14 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -126,4 +129,88 @@ func TestStopCommandE2E(t *testing.T) {
 	if _, err := backend.Discover(data); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("locator survived muxer exit: %v", err)
 	}
+}
+
+func TestMuxerDeathReapsWebChildE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the real scimux process")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("scimux ships only Unix process targets")
+	}
+	root := repoRootFromTest(t)
+	bin := filepath.Join(t.TempDir(), "scimux")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/scimux")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build scimux: %v\n%s", err, out)
+	}
+	home := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "scimux.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	muxer := exec.Command(bin, "-addr", "127.0.0.1:0", "-socket", "parent-death-e2e")
+	muxer.Env = append(os.Environ(), "HOME="+home, "PATH="+t.TempDir())
+	muxer.Stdout, muxer.Stderr = logFile, logFile
+	// Isolate cleanup to this muxer and the web child it spawns.
+	muxer.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := muxer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := muxer.Process.Pid
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	exited := make(chan error, 1)
+	go func() { exited <- muxer.Wait() }()
+
+	addr := waitForLoggedAddress(t, logPath, exited)
+	resp, err := http.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatalf("web child was not serving before muxer death: %v", err)
+	}
+	_ = resp.Body.Close()
+	if err := muxer.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("killed muxer did not exit")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(logPath)
+	t.Fatalf("web child retained %s after muxer death\n%s", addr, b)
+}
+
+func waitForLoggedAddress(t *testing.T, logPath string, exited <-chan error) string {
+	t.Helper()
+	const marker = "scimux: http://"
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(logPath)
+		if _, rest, ok := strings.Cut(string(b), marker); ok {
+			if addr, _, ok := strings.Cut(rest, "/"); ok && addr != "" {
+				return addr
+			}
+		}
+		select {
+		case err := <-exited:
+			t.Fatalf("muxer exited before logging its address: %v\n%s", err, b)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	b, _ := os.ReadFile(logPath)
+	t.Fatalf("muxer did not log its address\n%s", b)
+	return ""
 }

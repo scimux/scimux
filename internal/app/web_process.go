@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +26,7 @@ const (
 	webPublicFD   = 3
 	webReadyFD    = 4
 	webActivateFD = 5
+	webOwnerFD    = 6
 )
 
 const (
@@ -42,6 +41,7 @@ const (
 	envInviteFile  = "SCIMUX_INVITE_FILE"
 	envInviteStdin = "SCIMUX_INVITE_STDIN"
 	envRVOrigin    = "SCIMUX_RENDEZVOUS_ORIGIN"
+	envCSRFToken   = "SCIMUX_CSRF_TOKEN"
 )
 
 type webChildConfig struct {
@@ -55,12 +55,16 @@ type webChildConfig struct {
 	InviteFile   string
 	InviteStdin  bool
 	RVOrigin     string
+	CSRFToken    string
 }
 
 type webChildEvent struct {
 	Phase      string `json:"phase"`
 	Generation uint64 `json:"generation"`
 	Version    string `json:"version"`
+	// RemoteStarted tells the supervisor it may forget single-use enrollment
+	// inputs. False includes local mode and retryable degraded remote startup.
+	RemoteStarted bool `json:"remote_started,omitempty"`
 }
 
 type webRemoteClient interface {
@@ -71,6 +75,7 @@ type webRemoteClient interface {
 
 type webChildDeps struct {
 	newRemote func(remote.Config) webRemoteClient
+	ownerDone <-chan struct{}
 }
 
 func (d webChildDeps) remote(cfg remote.Config) webRemoteClient {
@@ -83,6 +88,7 @@ func (d webChildDeps) remote(cfg remote.Config) webRemoteClient {
 type webProcess struct {
 	cmd      *exec.Cmd
 	activate *os.File
+	owner    *os.File
 	events   <-chan webChildEvent
 	eventErr <-chan error
 	done     chan struct{}
@@ -92,6 +98,9 @@ type webProcess struct {
 }
 
 func (p *webProcess) setWaitErr(err error) {
+	if p.owner != nil {
+		_ = p.owner.Close()
+	}
 	p.waitMu.Lock()
 	p.waitErr = err
 	p.waitMu.Unlock()
@@ -157,6 +166,7 @@ func newWebSupervisor(listener net.Listener, link backend.Link, cmd *Command) (*
 			InviteFile:   cmd.Config.InviteFile,
 			InviteStdin:  cmd.Config.InviteStdin,
 			RVOrigin:     cmd.Config.Origin,
+			CSRFToken:    mustToken(),
 		},
 		stdin: cmd.Stdin, stdout: cmd.Stdout, stderr: cmd.Stderr,
 		readyTimeout: 5 * time.Minute,
@@ -236,6 +246,7 @@ func (s *webSupervisor) prepareLocked(ctx context.Context, executable string) (*
 		abort()
 		return nil, fmt.Errorf("web supervisor: invalid readiness event %#v", ready)
 	}
+	s.forgetEnrollmentInputs(ready)
 	candidate.version = ready.Version
 	return &preparedWeb{supervisor: s, candidate: candidate, expected: s.current, generation: next}, nil
 }
@@ -265,13 +276,32 @@ func (s *webSupervisor) commitLocked(prepared *preparedWeb) error {
 		return fmt.Errorf("web supervisor: activate: %w", err)
 	}
 	_ = prepared.candidate.activate.Close()
-	if _, err := waitWebEvent(context.Background(), prepared.candidate, "active", s.readyTimeout); err != nil {
+	active, err := waitWebEvent(context.Background(), prepared.candidate, "active", s.readyTimeout)
+	if err != nil {
 		abort()
 		return err
 	}
+	if active.Generation != prepared.generation || active.Version != prepared.candidate.version {
+		abort()
+		return fmt.Errorf("web supervisor: invalid activation event %#v", active)
+	}
+	s.forgetEnrollmentInputs(active)
 	s.current = prepared.candidate
 	s.generation = prepared.generation
 	return nil
+}
+
+func (s *webSupervisor) forgetEnrollmentInputs(event webChildEvent) {
+	if !event.RemoteStarted {
+		return
+	}
+	// Invite file/stdin are enrollment inputs, not durable reconnect
+	// configuration. The real client consumes the file on success; passing
+	// its old name into a replacement would fail before authentication. Initial
+	// startup reports this at ready, closing the crash-before-active window;
+	// replacements report it at active because they start remote after drain.
+	s.config.InviteFile = ""
+	s.config.InviteStdin = false
 }
 
 // Commit drains the expected old child and activates this prepared one.
@@ -326,6 +356,15 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 		readyW.Close()
 		return nil, fmt.Errorf("web supervisor: activation pipe: %w", err)
 	}
+	ownerR, ownerW, err := os.Pipe()
+	if err != nil {
+		publicFile.Close()
+		readyR.Close()
+		readyW.Close()
+		activateR.Close()
+		activateW.Close()
+		return nil, fmt.Errorf("web supervisor: parent-lifetime pipe: %w", err)
+	}
 
 	args := s.childArgs
 	if len(args) == 0 {
@@ -337,7 +376,7 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 	cmd := exec.Command(executable, args...)
 	cmd.Env = append(os.Environ(), encodeWebChildEnv(cfg)...)
 	cmd.Env = append(cmd.Env, s.extraEnv...)
-	cmd.ExtraFiles = []*os.File{publicFile, readyW, activateR}
+	cmd.ExtraFiles = []*os.File{publicFile, readyW, activateR, ownerR}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = s.stdin, s.stdout, s.stderr
 	if err := cmd.Start(); err != nil {
 		publicFile.Close()
@@ -345,17 +384,20 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 		readyW.Close()
 		activateR.Close()
 		activateW.Close()
+		ownerR.Close()
+		ownerW.Close()
 		return nil, fmt.Errorf("web supervisor: start: %w", err)
 	}
 	publicFile.Close()
 	readyW.Close()
 	activateR.Close()
+	ownerR.Close()
 
 	events := make(chan webChildEvent, 2)
 	eventErr := make(chan error, 1)
 	go decodeWebEvents(readyR, events, eventErr)
 	done := make(chan struct{})
-	p := &webProcess{cmd: cmd, activate: activateW, events: events, eventErr: eventErr, done: done}
+	p := &webProcess{cmd: cmd, activate: activateW, owner: ownerW, events: events, eventErr: eventErr, done: done}
 	go func() { p.setWaitErr(cmd.Wait()) }()
 	return p, nil
 }
@@ -392,7 +434,10 @@ func waitWebEvent(ctx context.Context, p *webProcess, phase string, timeout time
 		case err := <-p.eventErr:
 			return webChildEvent{}, fmt.Errorf("web supervisor: readiness: %w", err)
 		case <-p.done:
-			return webChildEvent{}, fmt.Errorf("web supervisor: child exited before %s: %w", phase, p.err())
+			if err := p.err(); err != nil {
+				return webChildEvent{}, fmt.Errorf("web supervisor: child exited before %s: %w", phase, err)
+			}
+			return webChildEvent{}, fmt.Errorf("web supervisor: child exited before %s", phase)
 		case <-ctx.Done():
 			return webChildEvent{}, ctx.Err()
 		case <-timer.C:
@@ -402,7 +447,13 @@ func waitWebEvent(ctx context.Context, p *webProcess, phase string, timeout time
 }
 
 func stopWebProcess(p *webProcess, timeout time.Duration) {
-	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+	if p == nil {
+		return
+	}
+	if p.owner != nil {
+		_ = p.owner.Close()
+	}
+	if p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
 	_ = p.cmd.Process.Signal(syscall.SIGTERM)
@@ -530,6 +581,7 @@ func encodeWebChildEnv(cfg webChildConfig) []string {
 		envInviteFile + "=" + cfg.InviteFile,
 		envInviteStdin + "=" + strconv.FormatBool(cfg.InviteStdin),
 		envRVOrigin + "=" + cfg.RVOrigin,
+		envCSRFToken + "=" + cfg.CSRFToken,
 	}
 }
 
@@ -563,9 +615,9 @@ func loadWebChildConfig(getenv func(string) string) (webChildConfig, error) {
 		ListenAddr: getenv(envListenAddr), TrustedHosts: trusted,
 		DataDir: getenv(envDataDir), Remote: remoteEnabled,
 		InviteFile: getenv(envInviteFile), InviteStdin: inviteStdin,
-		RVOrigin: getenv(envRVOrigin),
+		RVOrigin: getenv(envRVOrigin), CSRFToken: getenv(envCSRFToken),
 	}
-	if cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" {
+	if cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken) {
 		return webChildConfig{}, errors.New("web child: incomplete environment")
 	}
 	return cfg, nil
@@ -584,21 +636,41 @@ func runWebChild(ctx context.Context, getenv func(string) string, stdin io.Reade
 	if err != nil {
 		return err
 	}
+	// Each web child is a fresh process, so assigning before constructing any
+	// handler is race-free. The value is minted once by the muxer supervisor
+	// and inherited by every generation, preserving writes from open tabs.
+	csrfToken = cfg.CSRFToken
 	publicFile := os.NewFile(webPublicFD, "scimux-public-listener")
 	ready := os.NewFile(webReadyFD, "scimux-web-ready")
 	activate := os.NewFile(webActivateFD, "scimux-web-activate")
-	if publicFile == nil || ready == nil || activate == nil {
+	owner := os.NewFile(webOwnerFD, "scimux-web-owner")
+	return runWebChildFiles(ctx, cfg, publicFile, ready, activate, owner, stdin, stdout, stderr, webChildDeps{})
+}
+
+// runWebChildFiles is the descriptor-independent half of hidden-role startup.
+// Keeping inherited FD lookup above this seam lets tests exercise listener
+// conversion and the parent-death monitor without altering the test runner's
+// own descriptors 3-6.
+func runWebChildFiles(ctx context.Context, cfg webChildConfig, publicFile, ready, activate, owner *os.File, stdin io.Reader, stdout, stderr io.Writer, deps webChildDeps) error {
+	if publicFile == nil || ready == nil || activate == nil || owner == nil {
 		return errors.New("missing inherited descriptors")
 	}
 	defer ready.Close()
 	defer activate.Close()
+	defer owner.Close()
+	ownerDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, owner)
+		close(ownerDone)
+	}()
 	ln, err := net.FileListener(publicFile)
 	publicFile.Close()
 	if err != nil {
 		return fmt.Errorf("inherit listener: %w", err)
 	}
 	defer ln.Close()
-	return serveWebChild(ctx, cfg, ln, ready, activate, stdin, stdout, stderr, webChildDeps{})
+	deps.ownerDone = ownerDone
+	return serveWebChild(ctx, cfg, ln, ready, activate, stdin, stdout, stderr, deps)
 }
 
 func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, ready io.Writer, activate io.Reader, stdin io.Reader, stdout, stderr io.Writer, deps webChildDeps) error {
@@ -620,6 +692,15 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 
 	childCtx, childCancel := context.WithCancel(ctx)
 	defer childCancel()
+	if deps.ownerDone != nil {
+		go func() {
+			select {
+			case <-deps.ownerDone:
+				childCancel()
+			case <-childCtx.Done():
+			}
+		}()
+	}
 	var remoteClient webRemoteClient
 	var web *webBackend
 	if cfg.Remote {
@@ -641,30 +722,40 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	if err != nil {
 		return err
 	}
+	defer web.Close()
 
-	startRemote := func() error {
+	startRemote := func() (bool, error) {
 		if remoteClient == nil {
-			return nil
+			return false, nil
 		}
 		if err := remoteClient.Start(childCtx); err != nil {
+			if childCtx.Err() != nil {
+				return false, childCtx.Err()
+			}
 			switch remoteClass(err) {
 			case remote.ClassRevoked, remote.ClassDisabled, remote.ClassUnavailable:
 				fmt.Fprintln(stderr, "scimux: remote access is off:", err)
-				return nil
+				return false, nil
 			default:
-				return err
+				return false, err
 			}
 		}
-		return nil
+		return true, nil
 	}
+	remoteStarted := false
 	if !cfg.Replacement {
-		if err := startRemote(); err != nil {
+		var err error
+		remoteStarted, err = startRemote()
+		if err != nil {
+			if childCtx.Err() != nil {
+				return nil
+			}
 			return err
 		}
 	}
 
 	enc := json.NewEncoder(ready)
-	if err := enc.Encode(webChildEvent{Phase: "ready", Generation: cfg.Generation, Version: version}); err != nil {
+	if err := enc.Encode(webChildEvent{Phase: "ready", Generation: cfg.Generation, Version: version, RemoteStarted: remoteStarted}); err != nil {
 		return err
 	}
 	activated := make(chan error, 1)
@@ -684,12 +775,15 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 		return nil
 	}
 
-	if cfg.Replacement && remoteClient != nil {
-		go func() {
-			if err := startRemote(); err != nil {
-				fmt.Fprintln(stderr, "scimux: remote restart failed:", err)
+	if cfg.Replacement {
+		var err error
+		remoteStarted, err = startRemote()
+		if err != nil {
+			if childCtx.Err() != nil {
+				return nil
 			}
-		}()
+			return err
+		}
 	}
 	publish := func() {
 		status := backend.Status{Generation: cfg.Generation, Version: version}
@@ -723,7 +817,7 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	if err := enc.Encode(webChildEvent{Phase: "active", Generation: cfg.Generation, Version: version}); err != nil {
+	if err := enc.Encode(webChildEvent{Phase: "active", Generation: cfg.Generation, Version: version, RemoteStarted: remoteStarted}); err != nil {
 		return err
 	}
 	select {
@@ -737,20 +831,9 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		err := srv.Shutdown(shutdownCtx)
-		_ = web.Close()
 		if err != nil {
 			return err
 		}
 		return nil
 	}
-}
-
-// readReadyLine is retained as a narrow parser seam for malformed child
-// output tests; lifecycle itself uses the streaming decoder above.
-func readReadyLine(line string) (webChildEvent, error) {
-	var event webChildEvent
-	if err := json.NewDecoder(bufio.NewReader(strings.NewReader(line))).Decode(&event); err != nil {
-		return webChildEvent{}, err
-	}
-	return event, nil
 }

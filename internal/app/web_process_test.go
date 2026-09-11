@@ -55,6 +55,14 @@ func TestInvalidReadyWebChildHelperProcess(t *testing.T) {
 	}
 	defer ready.Close()
 	_, _ = io.WriteString(ready, `{"phase":"ready","generation":99,"version":"bad"}`)
+	// Stay alive until the supervisor rejects the event and closes activation.
+	// Exiting here races the readiness decoder and makes the asserted error
+	// depend on which event the scheduler observes first.
+	activate := os.NewFile(webActivateFD, "invalid-web-activate")
+	if activate != nil {
+		defer activate.Close()
+		_, _ = io.Copy(io.Discard, activate)
+	}
 }
 
 func TestWebSupervisorStartsAndReplacesRealChild(t *testing.T) {
@@ -105,6 +113,7 @@ func TestWebSupervisorStartsAndReplacesRealChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstPID := s.current.cmd.Process.Pid
+	firstOwner := s.current.owner
 	assertWebGeneration(t, ln.Addr().String(), "1")
 
 	prepared, err := s.Prepare(context.Background(), exe)
@@ -120,6 +129,9 @@ func TestWebSupervisorStartsAndReplacesRealChild(t *testing.T) {
 	}
 	if s.current.cmd.Process.Pid == firstPID {
 		t.Fatal("rotation retained the old child PID")
+	}
+	if firstOwner == nil {
+		t.Fatal("web child has no parent-lifetime pipe")
 	}
 	assertWebGeneration(t, ln.Addr().String(), "2")
 
@@ -196,6 +208,118 @@ func TestWebSupervisorStartsAndReplacesRealChild(t *testing.T) {
 		case <-deadline:
 			t.Fatal("automatic recovery did not retry generation 4")
 		}
+	}
+}
+
+func TestWebChildExitsWhenMuxerLifetimePipeCloses(t *testing.T) {
+	coreMux := http.NewServeMux()
+	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	core, err := backend.Listen(t.TempDir(), coreMux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard, listenAddr: ln.Addr().String(), Config: remoteConfigForWebChildTest(t.TempDir())}
+	s, err := newWebSupervisor(ln, core.Link(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
+	s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
+	s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+	defer s.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background(), exe); err != nil {
+		t.Fatal(err)
+	}
+	child := s.current
+	if child.owner == nil {
+		t.Fatal("child has no muxer lifetime writer")
+	}
+	if err := child.owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-child.done:
+		if err := child.err(); err != nil {
+			t.Fatalf("parent-death exit = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("web child survived loss of its muxer lifetime pipe")
+	}
+}
+
+func TestRunWebChildFilesOwnsInheritedDescriptors(t *testing.T) {
+	coreMux := http.NewServeMux()
+	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	core, err := backend.Listen(t.TempDir(), coreMux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	publicFile, err := ln.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyR.Close()
+	activateR, activateW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activateW.Close()
+	ownerR, ownerW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		done <- runWebChildFiles(context.Background(), webChildConfig{
+			Link: core.Link(), Generation: 1, ListenAddr: ln.Addr().String(),
+			DataDir: data, CSRFToken: strings.Repeat("a", 64),
+		}, publicFile, readyW, activateR, ownerR, strings.NewReader(""), io.Discard, io.Discard, webChildDeps{})
+	}()
+	dec := json.NewDecoder(readyR)
+	var event webChildEvent
+	if err := dec.Decode(&event); err != nil || event.Phase != "ready" {
+		t.Fatalf("ready = %#v, %v", event, err)
+	}
+	if _, err := activateW.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dec.Decode(&event); err != nil || event.Phase != "active" {
+		t.Fatalf("active = %#v, %v", event, err)
+	}
+	if err := ownerW.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("child did not stop when owner descriptor closed")
+	}
+	if _, err := publicFile.Stat(); err == nil {
+		t.Fatal("web child retained inherited public descriptor")
 	}
 }
 
@@ -276,7 +400,7 @@ func TestWebRotationDrainsInFlightMutation(t *testing.T) {
 	if err := <-rotateDone; err != nil {
 		t.Fatal(err)
 	}
-	if err := postMutation(ln.Addr().String(), fetchCSRF(t, ln.Addr().String())); err != nil {
+	if err := postMutation(ln.Addr().String(), csrf); err != nil {
 		t.Fatal(err)
 	}
 	callsMu.Lock()
@@ -325,6 +449,9 @@ func TestServeWebChildInProcess(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			fakeRemote := newFakeWebRemote("enrolled")
+			if tc.replacement && !tc.startErr {
+				fakeRemote.startGate = make(chan struct{})
+			}
 			if tc.startErr {
 				fakeRemote.startErr = errors.New("replacement remote failed")
 			}
@@ -343,6 +470,7 @@ func TestServeWebChildInProcess(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
+				defer readyW.Close()
 				done <- serveWebChild(ctx, cfg, ln, readyW, activateR, strings.NewReader(""), io.Discard, &childStderr, deps)
 			}()
 			dec := json.NewDecoder(readyR)
@@ -356,6 +484,9 @@ func TestServeWebChildInProcess(t *testing.T) {
 				default:
 					t.Fatal("initial remote did not start before readiness")
 				}
+				if !ready.RemoteStarted {
+					t.Fatal("initial readiness did not retire consumed enrollment inputs")
+				}
 			}
 			if !tc.remote && factoryCalls.Load() != 0 {
 				t.Fatal("local child constructed a remote client")
@@ -364,10 +495,18 @@ func TestServeWebChildInProcess(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = activateW.Close()
-			var active webChildEvent
-			if err := dec.Decode(&active); err != nil || active.Phase != "active" {
-				t.Fatalf("active = %#v, %v", active, err)
-			}
+			activeResult := make(chan struct {
+				event webChildEvent
+				err   error
+			}, 1)
+			go func() {
+				var active webChildEvent
+				err := dec.Decode(&active)
+				activeResult <- struct {
+					event webChildEvent
+					err   error
+				}{active, err}
+			}()
 			if tc.remote && tc.replacement {
 				select {
 				case <-fakeRemote.started:
@@ -375,14 +514,28 @@ func TestServeWebChildInProcess(t *testing.T) {
 					t.Fatal("replacement remote did not start after activation")
 				}
 				if tc.startErr {
-					deadline := time.Now().Add(2 * time.Second)
-					for !strings.Contains(childStderr.String(), "remote restart failed") && time.Now().Before(deadline) {
-						time.Sleep(time.Millisecond)
+					result := <-activeResult
+					if result.err == nil {
+						t.Fatalf("fatal replacement remote became active: %#v", result.event)
 					}
-					if !strings.Contains(childStderr.String(), "replacement remote failed") {
-						t.Fatalf("replacement error was not reported: %q", childStderr.String())
+					if err := <-done; err == nil || !strings.Contains(err.Error(), "replacement remote failed") {
+						t.Fatalf("replacement failure = %v, stderr=%q", err, childStderr.String())
 					}
+					return
 				}
+				select {
+				case result := <-activeResult:
+					t.Fatalf("replacement activated before remote startup completed: %#v, %v", result.event, result.err)
+				case <-time.After(50 * time.Millisecond):
+				}
+				close(fakeRemote.startGate)
+			}
+			result := <-activeResult
+			if result.err != nil || result.event.Phase != "active" {
+				t.Fatalf("active = %#v, %v", result.event, result.err)
+			}
+			if tc.remote && !result.event.RemoteStarted {
+				t.Fatal("successful remote startup was not reported to the supervisor")
 			}
 			resp, err := http.Get("http://" + ln.Addr().String() + "/api/state")
 			if err != nil {
@@ -421,12 +574,109 @@ func TestServeWebChildInProcess(t *testing.T) {
 	}
 }
 
+func TestReplacementWaitsForRealRemoteClientStartup(t *testing.T) {
+	data := t.TempDir()
+	writeEnrolledState(t, data)
+	authEntered := make(chan struct{})
+	releaseAuth := make(chan struct{})
+	var challengeOnce sync.Once
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/challenge":
+			challengeOnce.Do(func() { close(authEntered) })
+			<-releaseAuth
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"challenge":"` + strings.Repeat("11", 32) + `","v":1}`)),
+				Request: req,
+			}, nil
+		case "/v1/verify":
+			return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+		default:
+			return nil, fmt.Errorf("unexpected rendezvous request %s", req.URL.Path)
+		}
+	})}
+
+	coreMux := http.NewServeMux()
+	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	coreMux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "state") })
+	core, err := backend.Listen(t.TempDir(), coreMux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	readyR, readyW := io.Pipe()
+	activateR, activateW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		defer readyW.Close()
+		done <- serveWebChild(ctx, webChildConfig{
+			Link: core.Link(), Generation: 2, Replacement: true,
+			ListenAddr: ln.Addr().String(), DataDir: data, Remote: true,
+		}, ln, readyW, activateR, strings.NewReader(""), io.Discard, io.Discard, webChildDeps{
+			newRemote: func(cfg remote.Config) webRemoteClient {
+				// A successful first generation consumed its invite. Recovery must
+				// construct the real client without that obsolete file/stdin input.
+				cfg.HTTPClient = httpClient
+				cfg.NewTerminal = noTestTerminal
+				return remote.NewClient(cfg)
+			},
+		})
+	}()
+	dec := json.NewDecoder(readyR)
+	var ready webChildEvent
+	if err := dec.Decode(&ready); err != nil || ready.Phase != "ready" {
+		t.Fatalf("ready = %#v, %v", ready, err)
+	}
+	if _, err := activateW.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	_ = activateW.Close()
+	select {
+	case <-authEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("real remote client did not begin authentication")
+	}
+	activeResult := make(chan error, 1)
+	go func() {
+		var active webChildEvent
+		err := dec.Decode(&active)
+		if err == nil && (active.Phase != "active" || !active.RemoteStarted) {
+			err = fmt.Errorf("active event = %#v", active)
+		}
+		activeResult <- err
+	}()
+	select {
+	case err := <-activeResult:
+		t.Fatalf("web became active before real remote startup completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseAuth)
+	if err := <-activeResult; err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type fakeWebRemote struct {
 	hostedPairingClient
 	status    string
 	startErr  error
 	started   chan struct{}
 	closed    chan struct{}
+	startGate chan struct{}
 	startOnce sync.Once
 	closeOnce sync.Once
 }
@@ -454,6 +704,9 @@ func newFakeWebRemote(status string) *fakeWebRemote {
 
 func (f *fakeWebRemote) Start(context.Context) error {
 	f.startOnce.Do(func() { close(f.started) })
+	if f.startGate != nil {
+		<-f.startGate
+	}
 	return f.startErr
 }
 
@@ -473,7 +726,7 @@ func TestWebChildConfigurationValidation(t *testing.T) {
 		Generation: 3, Replacement: true, ListenAddr: "127.0.0.1:8787",
 		TrustedHosts: []string{"lab.example"}, DataDir: "/tmp/data",
 		Remote: true, InviteFile: "/tmp/invite", InviteStdin: false,
-		RVOrigin: "https://rv.example",
+		RVOrigin: "https://rv.example", CSRFToken: strings.Repeat("a", 64),
 	}
 	env := map[string]string{}
 	for _, entry := range encodeWebChildEnv(cfg) {
@@ -484,10 +737,10 @@ func TestWebChildConfigurationValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Generation != cfg.Generation || !got.Replacement || !got.Remote || got.TrustedHosts[0] != "lab.example" {
+	if got.Generation != cfg.Generation || !got.Replacement || !got.Remote || got.TrustedHosts[0] != "lab.example" || got.CSRFToken != cfg.CSRFToken {
 		t.Fatalf("decoded config = %#v", got)
 	}
-	for _, key := range []string{envGeneration, envReplacement, envRemote, envInviteStdin, envTrusted, envCoreSocket} {
+	for _, key := range []string{envGeneration, envReplacement, envRemote, envInviteStdin, envTrusted, envCoreSocket, envCSRFToken} {
 		t.Run(key, func(t *testing.T) {
 			bad := maps.Clone(env)
 			bad[key] = ""
@@ -499,11 +752,47 @@ func TestWebChildConfigurationValidation(t *testing.T) {
 	if _, err := loadWebChildConfig(nil); err == nil {
 		t.Fatal("accepted nil environment")
 	}
-	if _, err := readReadyLine("not-json"); err == nil {
-		t.Fatal("accepted malformed readiness line")
+}
+
+func TestRemoteStartupResultControlsEnrollmentInputReuse(t *testing.T) {
+	commit := func(t *testing.T, event webChildEvent) (*webSupervisor, error) {
+		t.Helper()
+		activateR, activateW, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer activateR.Close()
+		go io.Copy(io.Discard, activateR)
+		events := make(chan webChildEvent, 1)
+		events <- event
+		s := &webSupervisor{
+			config:       webChildConfig{InviteFile: "/already/consumed", InviteStdin: true},
+			readyTimeout: time.Second, drainTimeout: time.Millisecond,
+		}
+		candidate := &webProcess{activate: activateW, events: events, eventErr: make(chan error), done: make(chan struct{}), version: "v1"}
+		return s, s.commitLocked(&preparedWeb{supervisor: s, candidate: candidate, generation: 1})
 	}
-	if event, err := readReadyLine(`{"phase":"ready","generation":1,"version":"v1"}`); err != nil || event.Phase != "ready" {
-		t.Fatalf("read readiness = %#v, %v", event, err)
+
+	success, err := commit(t, webChildEvent{Phase: "active", Generation: 1, Version: "v1", RemoteStarted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if success.config.InviteFile != "" || success.config.InviteStdin {
+		t.Fatalf("successful startup retained enrollment inputs: %#v", success.config)
+	}
+	degraded, err := commit(t, webChildEvent{Phase: "active", Generation: 1, Version: "v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if degraded.config.InviteFile == "" || !degraded.config.InviteStdin {
+		t.Fatalf("unsuccessful startup consumed retry inputs: %#v", degraded.config)
+	}
+	invalid, err := commit(t, webChildEvent{Phase: "active", Generation: 2, Version: "v1", RemoteStarted: true})
+	if err == nil || !strings.Contains(err.Error(), "invalid activation") {
+		t.Fatalf("mismatched activation error = %v", err)
+	}
+	if invalid.config.InviteFile == "" || !invalid.config.InviteStdin {
+		t.Fatal("mismatched activation consumed enrollment inputs")
 	}
 }
 
@@ -591,7 +880,7 @@ func TestPreparedWebCanAbortWithoutDisturbingCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
+	s.readyTimeout, s.drainTimeout = 10*time.Second, 30*time.Second
 	s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
 	s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
 	exe, _ := os.Executable()
@@ -672,6 +961,13 @@ func TestWaitWebEventFailures(t *testing.T) {
 		close(p.done)
 		if _, err := waitWebEvent(context.Background(), p, "ready", time.Second); err == nil {
 			t.Fatal("accepted early exit")
+		}
+	})
+	t.Run("clean-exit", func(t *testing.T) {
+		p, _, _ := process()
+		close(p.done)
+		if _, err := waitWebEvent(context.Background(), p, "ready", time.Second); err == nil || strings.Contains(err.Error(), "%!w") {
+			t.Fatalf("clean early exit error = %v", err)
 		}
 	})
 	t.Run("context", func(t *testing.T) {
@@ -868,6 +1164,7 @@ func FuzzWebChildEnvironment(f *testing.F) {
 			envGeneration: generation, envReplacement: replacement, envRemote: remoteFlag,
 			envInviteStdin: inviteStdin, envTrusted: trusted, envCoreSocket: socket,
 			envCoreToken: token, envListenAddr: addr, envDataDir: data,
+			envCSRFToken: strings.Repeat("a", 64),
 		}
 		cfg, err := loadWebChildConfig(func(key string) string { return env[key] })
 		if err == nil && (cfg.Generation == 0 || cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "") {

@@ -225,7 +225,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const singleZone = () => matchMedia(SINGLE_ZONE_QUERY).matches;
   const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
 
-  /* Per-process CSRF token, embedded in the page by the server. Every unsafe
+  /* Per-muxer-lifetime CSRF token, embedded in the page by the server. Every unsafe
      request echoes it back in X-Scimux-CSRF; a cross-origin page can neither read
      it nor forge the custom header, so this is what stops a web page the operator
      happens to open from driving the local API (send/approve/interrupt/update). */

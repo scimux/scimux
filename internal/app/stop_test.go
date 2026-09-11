@@ -160,6 +160,9 @@ func TestWaitForMuxerStop(t *testing.T) {
 	if err := waitForMuxerStop(ctx, data, link); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled wait = %v", err)
 	}
+	if err := registration.Close(); err != nil {
+		t.Fatal(err)
+	}
 	newRegistration, err := backend.Register(data, backend.Link{Socket: "/tmp/new.sock", Token: "new"})
 	if err != nil {
 		t.Fatal(err)
