@@ -33,6 +33,9 @@ func TestWebChildHelperProcess(t *testing.T) {
 	if os.Getenv("SCIMUX_WEB_CHILD_TEST") != "1" {
 		return
 	}
+	if childVersion := os.Getenv("SCIMUX_WEB_CHILD_TEST_VERSION"); childVersion != "" {
+		version = childVersion
+	}
 	if err := runWebChild(context.Background(), os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		t.Fatal(err)
 	}

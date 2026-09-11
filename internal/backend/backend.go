@@ -48,9 +48,9 @@ type Hello struct {
 	Capabilities []string `json:"capabilities"`
 }
 
-// Status is published by the active web generation. Remote is nil when
-// remote access was not enabled and points at the current hosted state when
-// the web-owned rendezvous client exists.
+// Status is published by the active web generation. Current senders always
+// provide Remote, including an empty value for local-only service. A nil
+// pointer remains valid for older senders and means "retain" to the muxer.
 type Status struct {
 	Generation uint64  `json:"generation"`
 	Version    string  `json:"version"`

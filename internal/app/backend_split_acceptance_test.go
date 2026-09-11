@@ -144,7 +144,7 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 		configureWeb: func(s *webSupervisor) {
 			s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
 			s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
-			s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+			s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1", "SCIMUX_WEB_CHILD_TEST_VERSION=v1.0.0"}
 		},
 	})
 	if err != nil {
@@ -185,7 +185,7 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 	// Drive rotation through POST /api/update, including verified download,
 	// standby preparation, response-safe drain, and activation. The candidate
 	// is a tiny launcher for this same test binary, not a fake supervisor call.
-	launcher := []byte("#!/bin/sh\nexec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" \"$@\"\n")
+	launcher := []byte("#!/bin/sh\nSCIMUX_WEB_CHILD_TEST_VERSION=v9.9.9 exec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" \"$@\"\n")
 	assetName := "scimux-" + goosArch()
 	releases := fakeForgejo(t, "v9.9.9", map[string][]byte{
 		assetName: launcher, "SHA256SUMS": []byte(shaSums(assetName, launcher)),
@@ -206,6 +206,10 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 		t.Fatalf("public update = %d (%s)", code, body)
 	}
 	assertWebGenerationEventually(t, addr, "2")
+	code, body = publicJSON(t, addr, http.MethodPost, "/api/update", updateBody, csrf)
+	if code != http.StatusConflict || !strings.Contains(string(body), "already up to date") {
+		t.Fatalf("active generation accepted its own update again: %d (%s)", code, body)
+	}
 	if got := proc.cmd.Process.Pid; got != harnessPID {
 		t.Fatalf("ACP harness PID changed across web update: %d -> %d", harnessPID, got)
 	}

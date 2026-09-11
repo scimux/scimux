@@ -203,6 +203,19 @@ func TestUpdateApplyInstallsVerifiedBinary(t *testing.T) {
 	}
 }
 
+func TestUpdateApplyUsesActiveWebVersion(t *testing.T) {
+	srv := fakeForgejo(t, "v9.9.9", nil)
+	withUpdateSeams(t, srv.URL, "v1.0.0")
+	a := newUpdateTestApp(t)
+	a.runtimeStatus = &muxerRuntimeStatus{version: "v9.9.9"}
+
+	rec := httptest.NewRecorder()
+	a.handleUpdateApply(rec, updateReq("v9.9.9"))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "already up to date") {
+		t.Fatalf("active web version guard = %d %q, want 409 already up to date", rec.Code, rec.Body.String())
+	}
+}
+
 func TestUpdateApplyPreparesThenCommitsWebOnly(t *testing.T) {
 	newBin := []byte("new split web binary")
 	name := "scimux-" + goosArch()

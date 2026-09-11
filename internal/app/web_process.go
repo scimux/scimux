@@ -893,6 +893,10 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 		w.Header().Set("X-Scimux-Web-Generation", strconv.FormatUint(cfg.Generation, 10))
 		web.local.ServeHTTP(w, r)
 	})
+	// The inherited listener may be bound wider than loopback, so defend
+	// against slowloris clients. Legitimate structured sends and self-update
+	// can be slow; ReadHeaderTimeout covers the attack without imposing a
+	// whole-request ReadTimeout or WriteTimeout.
 	srv := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
 	}

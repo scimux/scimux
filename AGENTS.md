@@ -89,7 +89,8 @@ scripts/test/backend-split-mutations.sh
   managers down; tmux survives as before. `scimux stop [-data <path>]` reaches
   that path through the owner-only `muxer.json` locator in the selected data
   directory; it never signals a PID or addresses `web-child`. The locator is
-  also the single-owner claim: two live muxers must not share one data store.
+  only the stop-command locator; the lifetime-held `muxer.lock` is the
+  single-owner claim, so two live muxers cannot share one data store.
 - **Zero build dependencies.** Standard library only — no SQLite, no
   WebSocket library, no JS framework. If a feature seems to need a module,
   stop and discuss. Two maintainer-approved exceptions exist, both scoped by

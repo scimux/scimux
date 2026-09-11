@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
+	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
 func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
@@ -94,6 +96,111 @@ func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
 	}
 	var nilRuntime *splitRuntime
 	if err := nilRuntime.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSplitRuntimeRetainsOwnershipWhileWebDrains(t *testing.T) {
+	requestEntered := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	a := newTestApp(t, &fakeTmux{})
+	a.server = tmuxsession.NewServerWithRunner("testsock", func(ctx context.Context, _ string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "list-sessions" {
+			enteredOnce.Do(func() { close(requestEntered) })
+			select {
+			case <-releaseRequest:
+				return "", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		return "", nil
+	})
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &Command{
+		Stdout: io.Discard, Stderr: io.Discard, listener: ln,
+		listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data},
+	}
+	claimCommandOwnership(t, cmd)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{
+		configureWeb: func(s *webSupervisor) {
+			s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
+			s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
+			s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseRequest) })
+		_ = rt.Close()
+	})
+
+	requestDone := make(chan error, 1)
+	go func() {
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get("http://" + ln.Addr().String() + "/api/state")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-requestEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not enter the muxer")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- rt.Close() }()
+
+	deadline := time.NewTimer(150 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+retainLoop:
+	for {
+		select {
+		case err := <-closeDone:
+			t.Fatalf("runtime closed before its web request drained: %v", err)
+		case <-ticker.C:
+			contender, err := backend.Claim(data)
+			if err == nil {
+				_ = contender.Close()
+				t.Fatal("successor claimed ownership while the old web request was still draining")
+			}
+			if !errors.Is(err, backend.ErrMuxerOwned) {
+				t.Fatalf("contender claim while draining = %v", err)
+			}
+		case <-deadline.C:
+			break retainLoop
+		}
+	}
+
+	releaseOnce.Do(func() { close(releaseRequest) })
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	successor, err := backend.Claim(data)
+	if err != nil {
+		t.Fatalf("successor could not claim after shutdown: %v", err)
+	}
+	if err := successor.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

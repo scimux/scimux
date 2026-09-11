@@ -448,7 +448,8 @@ func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "update: "+err.Error(), 502)
 		return
 	}
-	if version == "dev" || rel.Tag == version {
+	activeVersion := a.activeWebVersion()
+	if activeVersion == "dev" || rel.Tag == activeVersion {
 		http.Error(w, "already up to date", 409)
 		return
 	}

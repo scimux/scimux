@@ -182,6 +182,15 @@ func (s *muxerRuntimeStatus) Version() string {
 	return s.version
 }
 
+// activeWebVersion keeps muxer-owned APIs aligned with the replaceable child:
+// after self-update the parent binary is intentionally still the older one.
+func (a *app) activeWebVersion() string {
+	if a.runtimeStatus != nil {
+		return a.runtimeStatus.Version()
+	}
+	return version
+}
+
 // webBackendConfig is deliberately capability-shaped. Core is an HTTP
 // capability to the muxer, Pairing is the remote client owned by this web
 // generation, and neither grants access to harness manager state.
