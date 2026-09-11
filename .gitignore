@@ -11,6 +11,8 @@ builds/
 internal/transcript/testdata/real-*.jsonl
 internal/acp/codex/testdata/real-*.ndjson
 internal/acp/testdata/real-*.ndjson
+internal/acp/muse/testdata/real-*.ndjson
+internal/acp/muse/schema/
 
 # Only README.md, AGENTS.md, CLAUDE.md, SECURITY.md, and the published docs/
 # set are tracked. Every other markdown file (design/planning intermediates,
