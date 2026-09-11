@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -537,16 +538,17 @@ type Session struct {
 	ctxSize   int
 	assetHook asset.IngestFunc
 
-	mu            sync.Mutex
-	procAlive     bool
-	retired       bool // /clear replaced this session: its writes must not land after the seam
-	turnActive    bool
-	turnCancel    context.CancelFunc
-	turnHadOutput bool
-	curMsgID      string
-	assistant     strings.Builder
-	pending       *pendingPermission
-	pendingSeq    uint64 // monotonic per-session; pairs with incarn in RequestID
+	mu               sync.Mutex
+	procAlive        bool
+	retired          bool // /clear replaced this session: its writes must not land after the seam
+	turnActive       bool
+	turnCancel       context.CancelFunc
+	turnHadOutput    bool
+	curMsgID         string
+	assistant        strings.Builder
+	assistantEntries []provEntry // source-located _meta contributions for the accumulator
+	pending          *pendingPermission
+	pendingSeq       uint64 // monotonic per-session; pairs with incarn in RequestID
 	// incarn is a collision-resistant identity for this Session value. Request
 	// IDs and prepared tokens include it so a post-/clear (or kill/relaunch)
 	// session cannot accept a stale decision from a prior incarnation that
@@ -635,7 +637,7 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 	defer s.mu.Unlock()
 	switch {
 	case u.AgentMessageChunk != nil:
-		s.appendAssistantLocked(blockText(u.AgentMessageChunk.Content), u.AgentMessageChunk.MessageId)
+		s.appendAssistantLocked(blockText(u.AgentMessageChunk.Content), u.AgentMessageChunk.MessageId, u.AgentMessageChunk.Meta, n.Meta)
 	case u.ToolCall != nil:
 		s.flushAssistantLocked()
 		if s.appendLocked(Event{T: "tool", Tool: &ToolEvent{
@@ -784,6 +786,7 @@ func (s *Session) reserveTurn() (context.Context, bool) {
 	s.curMsgID = ""
 	s.lastError = ""
 	s.assistant.Reset()
+	s.assistantEntries = nil
 	return ctx, true
 }
 
@@ -796,6 +799,9 @@ func (s *Session) abortTurn() {
 		s.turnCancel = nil
 	}
 	s.turnActive = false
+	s.assistant.Reset()
+	s.assistantEntries = nil
+	s.curMsgID = ""
 	s.mu.Unlock()
 }
 
@@ -878,41 +884,111 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 	s.turnHadOutput = false
 }
 
+const (
+	locNotification = "notification"
+	locChunk        = "chunk"
+	keyMeta         = "_meta"
+)
+
+type provEntry struct {
+	Loc string          `json:"loc"`
+	Key string          `json:"key"`
+	V   json.RawMessage `json:"v"`
+}
+
 // appendAssistantLocked accumulates streamed agent text, flushing at a message
-// boundary. Callers hold s.mu.
-func (s *Session) appendAssistantLocked(text string, msgID *string) {
-	if text == "" {
-		return
-	}
+// boundary. Callers hold s.mu. Notification and chunk _meta are associated
+// even on empty-text chunks so later text for the same message keeps them.
+func (s *Session) appendAssistantLocked(text string, msgID *string, chunkMeta, notifMeta map[string]any) {
 	id := ""
 	if msgID != nil {
 		id = *msgID
 	}
-	if s.assistant.Len() > 0 && id != s.curMsgID {
-		s.flushAssistantLocked()
+	if id != s.curMsgID && (s.assistant.Len() > 0 || len(s.assistantEntries) > 0) {
+		if s.assistant.Len() > 0 {
+			s.flushAssistantLocked()
+		} else {
+			// Metadata without text is not a visible message; drop it rather
+			// than inventing a standalone chat turn.
+			s.assistantEntries = nil
+		}
 	}
 	s.curMsgID = id
+	s.addMetaEntry(locNotification, notifMeta)
+	s.addMetaEntry(locChunk, chunkMeta)
+	if text == "" {
+		return
+	}
 	// pi emits a static startup banner as its first agent text; strip only an
 	// exact match of the session's advertised banner so real content is never
 	// dropped (adapter-specific, best-effort — see captureBanner).
 	if !s.bannerDone {
 		s.bannerDone = true
 		if s.banner != "" && strings.TrimSpace(text) == strings.TrimSpace(s.banner) {
+			s.assistantEntries = nil
 			return
 		}
 	}
 	s.assistant.WriteString(text)
 }
 
+func (s *Session) addMetaEntry(loc string, meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	inner, err := json.Marshal(meta)
+	if err != nil {
+		return
+	}
+	ent := provEntry{Loc: loc, Key: keyMeta, V: copyRaw(inner)}
+	for _, e := range s.assistantEntries {
+		if e.Loc == ent.Loc && e.Key == ent.Key && jsonValuesEqual(e.V, ent.V) {
+			return
+		}
+	}
+	s.assistantEntries = append(s.assistantEntries, ent)
+}
+
 func (s *Session) flushAssistantLocked() {
 	if s.assistant.Len() == 0 {
+		s.assistantEntries = nil
 		return
 	}
 	txt := s.assistant.String()
 	s.assistant.Reset()
-	if s.appendLocked(Event{T: "assistant", Text: txt}) {
+	prov := packEntries(s.assistantEntries)
+	s.assistantEntries = nil
+	if s.appendLocked(Event{T: "assistant", Text: txt, Prov: prov}) {
 		s.turnHadOutput = true
 	}
+}
+
+func packEntries(entries []provEntry) json.RawMessage {
+	if len(entries) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(entries)
+	if err != nil {
+		return nil
+	}
+	return copyRaw(b)
+}
+
+func jsonValuesEqual(a, b json.RawMessage) bool {
+	var av, bv any
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
+func copyRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
 }
 
 // setRetired fences this session's writer off the shared log (or lifts the

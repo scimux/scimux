@@ -1,13 +1,17 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
 
 // eventCollector is a concurrency-safe sink capturing decoded log events.
@@ -245,6 +249,132 @@ func TestDeltaClearedOnTurnFailed(t *testing.T) {
 	}
 	if a := col.byType("assistant"); len(a) != 0 {
 		t.Fatalf("want no assistant events on turn failure, got %+v", a)
+	}
+}
+
+func handshakeTurn(t *testing.T, c *Client, ms *mockServer, done chan error) {
+	t.Helper()
+	go func() {
+		_, _ = c.Initialize(context.Background(), "test", "1")
+		ti, _ := c.StartThread(context.Background(), StartThreadParams{Cwd: "/w"})
+		done <- c.RunTurn(context.Background(), ti.ID, "ping")
+	}()
+	ms.reply(t, ms.nextReq(t).ID, `{}`)
+	ms.reply(t, ms.nextReq(t).ID, threadStartResult)
+	ms.reply(t, ms.nextReq(t).ID, `{"turn":{}}`)
+}
+
+func TestClientAgentMessageProvenanceRoundTrip(t *testing.T) {
+	c, ms, col := newClientWithMock(t)
+	done := make(chan error, 1)
+	handshakeTurn(t, c, ms, done)
+	inner := `{"src":"client-path"}`
+	ms.note(t, "item/completed", `{"item":{"type":"agentMessage","text":"pong","provenance":{"src":"client-path"}}}`)
+	ms.note(t, "turn/completed", `{"turn":{}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("turn error: %v", err)
+	}
+	a := col.byType("assistant")
+	if len(a) != 1 || a[0].Text != "pong" {
+		t.Fatalf("assistant = %+v", a)
+	}
+	if len(a[0].Prov) == 0 {
+		t.Fatalf("client dropped provenance: %s", a[0].Prov)
+	}
+	var entries []struct {
+		Loc string          `json:"loc"`
+		Key string          `json:"key"`
+		V   json.RawMessage `json:"v"`
+	}
+	if err := json.Unmarshal(a[0].Prov, &entries); err != nil {
+		t.Fatalf("Prov is not an entry list: %v (%s)", err, a[0].Prov)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Key == "provenance" && string(e.V) == inner {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("provenance value %s missing from %s", inner, a[0].Prov)
+	}
+
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &sessionlog.Writer{Path: path}
+	if err := w.Append(sessionlog.NewMeta("n1", "codex", "gpt-5.5", "", "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(a[0]); err != nil {
+		t.Fatal(err)
+	}
+	turns := sessionlog.ReadTurns(path)
+	if len(turns) != 1 || turns[0].Role != "assistant" || turns[0].Text != "pong" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	if turns[0].Agent != "codex" {
+		t.Errorf("Agent = %q, want codex", turns[0].Agent)
+	}
+	if !bytes.Equal(turns[0].Prov, a[0].Prov) {
+		t.Errorf("round-trip Prov = %s, want %s", turns[0].Prov, a[0].Prov)
+	}
+}
+
+func TestClientDeltaPromotedKeepsCompletedProvenance(t *testing.T) {
+	c, ms, col := newClientWithMock(t)
+	done := make(chan error, 1)
+	handshakeTurn(t, c, ms, done)
+	ms.note(t, "item/agentMessage/delta", `{"itemId":"msg-1","delta":"Hello"}`)
+	ms.note(t, "item/agentMessage/delta", `{"itemId":"msg-1","delta":", world!"}`)
+	ms.note(t, "item/completed", `{"item":{"type":"agentMessage","id":"msg-1","text":"","provenance":{"src":"delta-complete"}}}`)
+	ms.note(t, "turn/completed", `{}`)
+	if err := <-done; err != nil {
+		t.Fatalf("turn error: %v", err)
+	}
+	a := col.byType("assistant")
+	if len(a) != 1 || a[0].Text != "Hello, world!" {
+		t.Fatalf("assistant = %+v", a)
+	}
+	var entries []struct {
+		Loc string          `json:"loc"`
+		Key string          `json:"key"`
+		V   json.RawMessage `json:"v"`
+	}
+	if err := json.Unmarshal(a[0].Prov, &entries); err != nil {
+		t.Fatalf("Prov = %s", a[0].Prov)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Key == "provenance" {
+			var got, want any
+			_ = json.Unmarshal(e.V, &got)
+			_ = json.Unmarshal([]byte(`{"src":"delta-complete"}`), &want)
+			gb, _ := json.Marshal(got)
+			wb, _ := json.Marshal(want)
+			if string(gb) == string(wb) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("promoted provenance = %s", a[0].Prov)
+	}
+}
+
+func TestClientDeltaSafetyNetDoesNotInventProvenance(t *testing.T) {
+	c, ms, col := newClientWithMock(t)
+	done := make(chan error, 1)
+	handshakeTurn(t, c, ms, done)
+	ms.note(t, "item/agentMessage/delta", `{"itemId":"msg-x","delta":"flushed text"}`)
+	ms.note(t, "turn/completed", `{}`)
+	if err := <-done; err != nil {
+		t.Fatalf("turn error: %v", err)
+	}
+	a := col.byType("assistant")
+	if len(a) != 1 || a[0].Text != "flushed text" {
+		t.Fatalf("assistant = %+v", a)
+	}
+	if len(a[0].Prov) != 0 {
+		t.Fatalf("safety-net invented provenance: %s", a[0].Prov)
 	}
 }
 

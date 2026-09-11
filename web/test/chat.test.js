@@ -47,6 +47,7 @@ import {
   elicitationKey,
   isSafeElicitationURL,
   ELICITATION_OPEN_LABEL,
+  hashTurnAttrs,
 } from "../js/chat.js";
 /* P6: ASSET_REF_RE + stripAssetRefs live in format.js (one home for every
    send-to strip). Mechanical import-path move from chat.js. */
@@ -4535,6 +4536,304 @@ test("P3C: bookmark add calls uiMutate bookmark-add", async () => {
   assert.equal(stamped.length, 1);
   assert.match(btn.innerHTML, /noted/);
   ctx.feature.destroy();
+});
+
+test("hashTurnAttrs distinguishes absent prov from explicit null", () => {
+  const absent = [{ role: "assistant", text: "same", agent: "grok" }];
+  const explicitNull = [{ role: "assistant", text: "same", agent: "grok", prov: null }];
+  assert.notEqual(hashTurnAttrs(absent), hashTurnAttrs(explicitNull),
+    "absent prov and own prov:null must not share a hash");
+  assert.equal(hashTurnAttrs(absent), hashTurnAttrs(absent));
+  assert.equal(hashTurnAttrs(explicitNull), hashTurnAttrs(explicitNull));
+});
+
+test("absent-to-null prov rebuilds and bookmarks explicit null", async () => {
+  const ops = [];
+  const base = {
+    role: "assistant", text: "same text", time: "2026-09-10T12:00:00Z",
+    uid: "u1", segment: 0, record: 2, agent: "grok",
+  };
+  let payloadTurns = [{ ...base }];
+  const ctx = makeFeature({
+    chatConditional: async () => ({
+      status: 200,
+      etag: '"e1"',
+      data: {
+        turns: payloadTurns,
+        live: "quiet", delivery: "ok", source: "acp",
+        chat_started: "2026-09-10T11:00:00Z", prior_turns: 0, assets: {},
+      },
+    }),
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, turn) => {
+        bm.uid = turn.uid;
+        bm.segment = turn.segment;
+        bm.record = turn.record;
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  payloadTurns = [{ ...base, prov: null }];
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(ops[0].bookmark, "prov"), true);
+  assert.equal(ops[0].bookmark.prov, null);
+  ctx.feature.destroy();
+});
+
+test("null-to-absent prov rebuilds and omits bookmark prov", async () => {
+  const ops = [];
+  const base = {
+    role: "assistant", text: "same text", time: "2026-09-10T12:00:00Z",
+    uid: "u1", segment: 0, record: 2, agent: "grok",
+  };
+  let payloadTurns = [{ ...base, prov: null }];
+  const ctx = makeFeature({
+    chatConditional: async () => ({
+      status: 200,
+      etag: '"e1"',
+      data: {
+        turns: payloadTurns,
+        live: "quiet", delivery: "ok", source: "acp",
+        chat_started: "2026-09-10T11:00:00Z", prior_turns: 0, assets: {},
+      },
+    }),
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, turn) => {
+        bm.uid = turn.uid;
+        bm.segment = turn.segment;
+        bm.record = turn.record;
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  payloadTurns = [{ ...base }];
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(ops[0].bookmark, "prov"), false);
+  ctx.feature.destroy();
+});
+
+test("same role/text turn with changed agent/prov rebuilds and bookmarks fresh values", async () => {
+  const ops = [];
+  let payloadTurns = [{
+    role: "assistant", text: "same text", time: "2026-09-10T12:00:00Z",
+    uid: "u1", segment: 0, record: 2,
+    agent: "grok", prov: [{ loc: "chunk", key: "_meta", v: { src: "old" } }],
+  }];
+  const ctx = makeFeature({
+    chatConditional: async () => ({
+      status: 200,
+      etag: '"e1"',
+      data: {
+        turns: payloadTurns,
+        live: "quiet", delivery: "ok", source: "acp",
+        chat_started: "2026-09-10T11:00:00Z", prior_turns: 0, assets: {},
+      },
+    }),
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, turn) => {
+        bm.uid = turn.uid;
+        bm.segment = turn.segment;
+        bm.record = turn.record;
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  payloadTurns = [{
+    role: "assistant", text: "same text", time: "2026-09-10T12:00:00Z",
+    uid: "u1", segment: 0, record: 2,
+    agent: "muse", prov: [{ loc: "chunk", key: "_meta", v: { src: "new" } }],
+  }];
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].bookmark.agent, "muse");
+  assert.deepEqual(ops[0].bookmark.prov, [{ loc: "chunk", key: "_meta", v: { src: "new" } }]);
+  ctx.feature.destroy();
+});
+
+test("circular provenance is omitted from bookmark without crashing", async () => {
+  const ops = [];
+  const circ = { src: "circ" };
+  circ.self = circ;
+  const turn = {
+    role: "assistant", text: "keep me", time: "2026-09-10T12:00:00Z",
+    uid: "u1", segment: 1, record: 3, agent: "codex",
+    prov: circ,
+  };
+  assert.doesNotThrow(() => hashTurnAttrs([turn]));
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [turn], live: "quiet", delivery: "ok", source: "acp",
+      chat_started: "t0", prior_turns: 0, assets: {},
+    },
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, t) => {
+        bm.uid = t.uid;
+        bm.segment = t.segment;
+        bm.record = t.record;
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(ops[0].bookmark, "prov"), false);
+  assert.equal(ops[0].bookmark.role, "assistant");
+  assert.equal(ops[0].bookmark.agent, "codex");
+  assert.equal(ops[0].bookmark.text, "keep me");
+  assert.equal(ops[0].bookmark.turnTime, "2026-09-10T12:00:00Z");
+  assert.equal(ops[0].bookmark.uid, "u1");
+  assert.equal(ops[0].bookmark.segment, 1);
+  assert.equal(ops[0].bookmark.record, 3);
+  ctx.feature.destroy();
+});
+
+test("function provenance is omitted from bookmark without crashing", async () => {
+  const ops = [];
+  const turn = {
+    role: "assistant", text: "fn", time: "T",
+    uid: "u", segment: 0, record: 1, agent: "grok",
+    prov: function notJSON() { return 1; },
+  };
+  assert.doesNotThrow(() => hashTurnAttrs([turn]));
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [turn], live: "quiet", delivery: "ok", source: "acp",
+      chat_started: "t0", prior_turns: 0, assets: {},
+    },
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, t) => { bm.uid = t.uid; },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(ops[0].bookmark, "prov"), false);
+  assert.equal(ops[0].bookmark.role, "assistant");
+  assert.equal(ops[0].bookmark.agent, "grok");
+  ctx.feature.destroy();
+});
+
+test("bookmark capture deep-freezes nested provenance", async () => {
+  const ops = [];
+  const nested = { loc: "message", key: "_meta", v: { src: "live", arr: [1, { k: "v" }] } };
+  const turn = {
+    role: "assistant", text: "freeze me", time: "T",
+    uid: "u", segment: 0, record: 1, agent: "codex",
+    prov: [nested],
+  };
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [turn], live: "quiet", delivery: "ok", source: "acp",
+      chat_started: "t0", prior_turns: 0, assets: {},
+    },
+    deps: {
+      bookmarks: () => [],
+      uiMutate: op => ops.push(op),
+      stampAddress: (bm, t) => { bm.uid = t.uid; },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "bookmark");
+  assert.equal(ops.length, 1);
+  nested.v.src = "mutated";
+  nested.v.arr[1].k = "changed";
+  turn.agent = "nope";
+  assert.equal(ops[0].bookmark.agent, "codex");
+  assert.equal(ops[0].bookmark.prov[0].v.src, "live");
+  assert.equal(ops[0].bookmark.prov[0].v.arr[1].k, "v");
+  ctx.feature.destroy();
+});
+
+test("bookmark captures role, agent, prov for Muse/Grok/Codex assistant turns", async () => {
+  const examples = [
+    {
+      name: "muse",
+      turn: {
+        role: "assistant", agent: "muse", text: "synth muse reply",
+        time: "2026-09-10T12:00:00Z", uid: "uid-muse", segment: 1, record: 4,
+        prov: { _meta: { src: "synth-muse", n: 1 } },
+      },
+    },
+    {
+      name: "grok",
+      turn: {
+        role: "assistant", agent: "grok", text: "synth grok reply",
+        time: "2026-09-10T12:00:01Z", uid: "uid-grok", segment: 0, record: 2,
+        prov: { _meta: { src: "synth-grok", k: "v" } },
+      },
+    },
+    {
+      name: "codex",
+      turn: {
+        role: "assistant", agent: "codex", text: "synth codex reply",
+        time: "2026-09-10T12:00:02Z", uid: "uid-codex", segment: 2, record: 9,
+        prov: { provenance: { src: "synth-codex" } },
+      },
+    },
+  ];
+  for (const ex of examples) {
+    const ops = [];
+    const ctx = makeFeature({
+      chatPayload: {
+        turns: [ex.turn],
+        live: "quiet", delivery: "ok", source: "acp",
+        chat_started: "2026-09-10T11:00:00Z", prior_turns: 0, assets: {},
+      },
+      deps: {
+        bookmarks: () => [],
+        uiMutate: op => ops.push(op),
+        stampAddress: (bm, turn) => {
+          bm.uid = turn.uid;
+          bm.segment = turn.segment;
+          bm.record = turn.record;
+        },
+      },
+    });
+    ctx.feature.bind();
+    await ctx.feature.render();
+    tapBubbleTurn(ctx, "i:0");
+    clickBact(ctx, "bookmark");
+    assert.equal(ops.length, 1, ex.name);
+    const bm = ops[0].bookmark;
+    assert.equal(bm.role, "assistant", ex.name);
+    assert.equal(bm.agent, ex.turn.agent, ex.name);
+    assert.deepEqual(bm.prov, ex.turn.prov, ex.name);
+    assert.equal(typeof bm.prov, "object", `${ex.name} prov must stay an object`);
+    assert.notEqual(typeof bm.prov, "string", `${ex.name} must not stringify prov`);
+    assert.equal(bm.text, ex.turn.text, ex.name);
+    assert.equal(bm.turnTime, ex.turn.time, ex.name);
+    assert.equal(bm.uid, ex.turn.uid, ex.name);
+    assert.equal(bm.segment, ex.turn.segment, ex.name);
+    assert.equal(bm.record, ex.turn.record, ex.name);
+    ctx.feature.destroy();
+  }
 });
 
 test("P3C: duplicate bookmark skips uiMutate", async () => {

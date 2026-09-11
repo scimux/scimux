@@ -203,6 +203,10 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
   the transcript mirror (`mirror.go`), with `source` seam records marking
   every transcript (re)bind as the dedupe watermark. New transports write the
   same records to the same directory: no per-transport formats or directories.
+  `~/.scimux/sessions/` is user history and a multi-vendor output corpus.
+  Deterministic heuristics may read it. It must never be used to train,
+  fine-tune, distill, or otherwise develop a model — do not turn it into a
+  training dataset.
   - The store is also the **chat read path for every transport**: handleChat
     renders the current segment (everything after the last `source` seam),
     while the tailer serves only mechanics — needs-input, staleness, delivery

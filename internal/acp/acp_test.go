@@ -2,10 +2,12 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1350,4 +1352,614 @@ func TestPermOptionAliasesAgentpermOption(t *testing.T) {
 	local = shared
 	_ = shared
 	_ = local
+}
+
+func agentChunk(text string, meta map[string]any, msgID *string) sdk.SessionUpdate {
+	return sdk.SessionUpdate{AgentMessageChunk: &sdk.SessionUpdateAgentMessageChunk{
+		Content:   sdk.TextBlock(text),
+		Meta:      meta,
+		MessageId: msgID,
+	}}
+}
+
+func assertProvMetaValue(t *testing.T, prov json.RawMessage, want map[string]any) {
+	t.Helper()
+	entries := acpProvEntries(t, prov)
+	for _, e := range entries {
+		if e.Key != "_meta" {
+			continue
+		}
+		var got any
+		if err := json.Unmarshal(e.V, &got); err != nil {
+			t.Fatal(err)
+		}
+		if reflect.DeepEqual(got, want) {
+			return
+		}
+	}
+	t.Fatalf("Prov missing _meta value %#v in %s", want, prov)
+}
+
+func TestACPAgentMessageRetainsMetaProvenance(t *testing.T) {
+	meta := map[string]any{"src": "synth-acp", "n": float64(1)}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+				SessionId: p.SessionId,
+				Update:    agentChunk("opaque output", meta, nil),
+			})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "grok", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+
+	var asst sessionlog.Event
+	for _, ev := range sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl")) {
+		if ev.T == "assistant" {
+			asst = ev
+			break
+		}
+	}
+	if asst.Text != "opaque output" {
+		t.Fatalf("assistant event = %+v", asst)
+	}
+	assertProvMetaValue(t, asst.Prov, meta)
+
+	turns := m.Turns("n1")
+	if len(turns) < 2 || turns[1].Role != "assistant" || turns[1].Text != "opaque output" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	if turns[1].Agent != "grok" {
+		t.Errorf("Turn.Agent = %q, want grok", turns[1].Agent)
+	}
+	assertProvMetaValue(t, turns[1].Prov, meta)
+}
+
+func TestACPLaterChunkMissingMetaDoesNotErase(t *testing.T) {
+	meta := map[string]any{"src": "keep-first"}
+	id := "msg-1"
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("Hello ", meta, &id)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("world", nil, &id)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	turns := m.Turns("n1")
+	if len(turns) < 2 || turns[1].Text != "Hello world" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertProvMetaValue(t, turns[1].Prov, meta)
+}
+
+func TestACPMessageBoundaryDoesNotLeakProvenance(t *testing.T) {
+	metaA := map[string]any{"src": "msg-a"}
+	metaB := map[string]any{"src": "msg-b"}
+	id1, id2 := "m1", "m2"
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("first", metaA, &id1)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("second", metaB, &id2)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	var assts []sessionlog.Event
+	for _, ev := range sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl")) {
+		if ev.T == "assistant" {
+			assts = append(assts, ev)
+		}
+	}
+	if len(assts) != 2 || assts[0].Text != "first" || assts[1].Text != "second" {
+		t.Fatalf("assistant events = %+v", assts)
+	}
+	assertProvMetaValue(t, assts[0].Prov, metaA)
+	assertProvMetaValue(t, assts[1].Prov, metaB)
+}
+
+func TestACPToolBoundaryFlushesTextProvenancePair(t *testing.T) {
+	metaA := map[string]any{"src": "before-tool"}
+	metaB := map[string]any{"src": "after-tool"}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("before", metaA, nil)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: sdk.SessionUpdate{
+				ToolCall: &sdk.SessionUpdateToolCall{ToolCallId: "t1", Title: "ls", Status: "pending"},
+			}})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("after", metaB, nil)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	var assts []sessionlog.Event
+	for _, ev := range sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl")) {
+		if ev.T == "assistant" {
+			assts = append(assts, ev)
+		}
+	}
+	if len(assts) != 2 || assts[0].Text != "before" || assts[1].Text != "after" {
+		t.Fatalf("assistant events = %+v", assts)
+	}
+	assertProvMetaValue(t, assts[0].Prov, metaA)
+	assertProvMetaValue(t, assts[1].Prov, metaB)
+}
+
+func TestACPReserveTurnClearsProvenanceWithAccumulator(t *testing.T) {
+	s := &Session{logw: &logWriter{Path: filepath.Join(t.TempDir(), "n.jsonl")}}
+	s.mu.Lock()
+	s.assistant.WriteString("stale")
+	s.assistantEntries = []provEntry{{Loc: locChunk, Key: keyMeta, V: json.RawMessage(`{"src":"stale"}`)}}
+	s.mu.Unlock()
+	if _, ok := s.reserveTurn(); !ok {
+		t.Fatal("reserveTurn failed")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.assistant.Len() != 0 {
+		t.Errorf("accumulator not cleared: %q", s.assistant.String())
+	}
+	if len(s.assistantEntries) != 0 {
+		t.Errorf("assistantEntries not cleared: %+v", s.assistantEntries)
+	}
+}
+
+func TestACPEqualMetaOnLaterChunkDoesNotDuplicate(t *testing.T) {
+	meta := map[string]any{"src": "same"}
+	id := "msg-eq"
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("Hello ", meta, &id)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("world", meta, &id)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	turns := m.Turns("n1")
+	if len(turns) < 2 || turns[1].Text != "Hello world" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertProvMetaValue(t, turns[1].Prov, meta)
+	if n := len(acpProvEntries(t, turns[1].Prov)); n != 1 {
+		t.Fatalf("equal repeated metadata must be one entry, got %d (%s)", n, turns[1].Prov)
+	}
+}
+
+func TestAddMetaEntryDedupAndSkipEmpty(t *testing.T) {
+	s := &Session{}
+	s.addMetaEntry(locChunk, nil)
+	s.addMetaEntry(locChunk, map[string]any{})
+	if len(s.assistantEntries) != 0 {
+		t.Fatalf("empty meta must not add entries: %+v", s.assistantEntries)
+	}
+	s.addMetaEntry(locChunk, map[string]any{"src": "a"})
+	s.addMetaEntry(locChunk, map[string]any{"src": "a"})
+	s.addMetaEntry(locChunk, map[string]any{"src": "b"})
+	s.addMetaEntry(locNotification, map[string]any{"src": "a"})
+	if len(s.assistantEntries) != 3 {
+		t.Fatalf("want 3 entries (deduped equal chunk, kept distinct + other loc), got %+v", s.assistantEntries)
+	}
+	if jsonValuesEqual(json.RawMessage(`{`), json.RawMessage(`{`)) {
+		t.Fatal("malformed JSON must not compare equal")
+	}
+	s.addMetaEntry(locChunk, map[string]any{"bad": make(chan int)})
+	if len(s.assistantEntries) != 3 {
+		t.Fatal("unmarshalable meta must not add an entry")
+	}
+}
+
+func acpProvEntries(t *testing.T, raw json.RawMessage) []struct {
+	Loc string          `json:"loc"`
+	Key string          `json:"key"`
+	V   json.RawMessage `json:"v"`
+} {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatal("Prov is empty")
+	}
+	var entries []struct {
+		Loc string          `json:"loc"`
+		Key string          `json:"key"`
+		V   json.RawMessage `json:"v"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("Prov is not an entry list: %v (%s)", err, raw)
+	}
+	return entries
+}
+
+func assertACPEntry(t *testing.T, raw json.RawMessage, loc, key string, want map[string]any) {
+	t.Helper()
+	entries := acpProvEntries(t, raw)
+	for _, e := range entries {
+		if e.Loc != loc || e.Key != key {
+			continue
+		}
+		var got any
+		if err := json.Unmarshal(e.V, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s/%s = %#v, want %#v", loc, key, got, want)
+		}
+		return
+	}
+	t.Fatalf("missing loc=%s key=%s in %s", loc, key, raw)
+}
+
+func TestACPNotificationMetaWithoutChunkMeta(t *testing.T) {
+	meta := map[string]any{"src": "notif-only"}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+				SessionId: p.SessionId,
+				Meta:      meta,
+				Update:    agentChunk("hello", nil, nil),
+			})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "grok", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	turns := m.Turns("n1")
+	if len(turns) < 2 || turns[1].Text != "hello" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertACPEntry(t, turns[1].Prov, "notification", "_meta", meta)
+}
+
+func TestACPNotificationAndChunkMetaBothRetained(t *testing.T) {
+	nmeta := map[string]any{"src": "notif"}
+	cmeta := map[string]any{"src": "chunk"}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+				SessionId: p.SessionId,
+				Meta:      nmeta,
+				Update:    agentChunk("hello", cmeta, nil),
+			})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	turns := m.Turns("n1")
+	if len(turns) < 2 {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertACPEntry(t, turns[1].Prov, "notification", "_meta", nmeta)
+	assertACPEntry(t, turns[1].Prov, "chunk", "_meta", cmeta)
+	if n := len(acpProvEntries(t, turns[1].Prov)); n != 2 {
+		t.Fatalf("want 2 contributions, got %d (%s)", n, turns[1].Prov)
+	}
+}
+
+func TestACPDistinctChunkMetaAllRetainedInOrder(t *testing.T) {
+	id := "msg-d"
+	aMeta := map[string]any{"src": "a"}
+	bMeta := map[string]any{"src": "b"}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("Hello ", aMeta, &id)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("world", bMeta, &id)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	turns := m.Turns("n1")
+	if len(turns) < 2 || turns[1].Text != "Hello world" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	entries := acpProvEntries(t, turns[1].Prov)
+	if len(entries) != 2 {
+		t.Fatalf("distinct chunk metas must both be kept, got %s", turns[1].Prov)
+	}
+	assertACPEntry(t, turns[1].Prov, "chunk", "_meta", aMeta)
+	// Second distinct value: same loc/key, different v, first-seen order.
+	var vs []any
+	for _, e := range entries {
+		if e.Loc == "chunk" && e.Key == "_meta" {
+			var v any
+			_ = json.Unmarshal(e.V, &v)
+			vs = append(vs, v)
+		}
+	}
+	if len(vs) != 2 || !reflect.DeepEqual(vs[0], aMeta) || !reflect.DeepEqual(vs[1], bMeta) {
+		t.Fatalf("chunk _meta order = %#v, want [a, b]", vs)
+	}
+}
+
+func TestACPMetadataOnlyChunkThenText(t *testing.T) {
+	id := "msg-m"
+	meta := map[string]any{"src": "early"}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("", meta, &id)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("later text", nil, &id)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	turns := m.Turns("n1")
+	if len(turns) < 2 || turns[1].Text != "later text" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertACPEntry(t, turns[1].Prov, "chunk", "_meta", meta)
+}
+
+func TestACPMetadataOnlyMessageIDChangeFlushesPrior(t *testing.T) {
+	id1, id2 := "m1", "m2"
+	metaA := map[string]any{"src": "first"}
+	metaB := map[string]any{"src": "second"}
+	agent := &fakeAgent{
+		prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("first", metaA, &id1)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("", metaB, &id2)})
+			_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{SessionId: p.SessionId, Update: agentChunk("second", nil, &id2)})
+			return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+		},
+	}
+	dir := t.TempDir()
+	m := NewManagerWithRunner(dir, fakeRunner(agent))
+	if _, err := m.Launch("n1", "opencode", t.TempDir(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send("n1", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+	var assts []sessionlog.Event
+	for _, ev := range sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl")) {
+		if ev.T == "assistant" {
+			assts = append(assts, ev)
+		}
+	}
+	if len(assts) != 2 || assts[0].Text != "first" || assts[1].Text != "second" {
+		t.Fatalf("assistant events = %+v", assts)
+	}
+	assertACPEntry(t, assts[0].Prov, "chunk", "_meta", metaA)
+	assertACPEntry(t, assts[1].Prov, "chunk", "_meta", metaB)
+	entries0 := acpProvEntries(t, assts[0].Prov)
+	for _, e := range entries0 {
+		var v any
+		_ = json.Unmarshal(e.V, &v)
+		if reflect.DeepEqual(v, metaB) {
+			t.Fatal("second message metadata leaked into the first")
+		}
+	}
+}
+
+func TestACPAbortClearsProvenance(t *testing.T) {
+	s := &Session{logw: &logWriter{Path: filepath.Join(t.TempDir(), "n.jsonl")}}
+	s.mu.Lock()
+	s.assistant.WriteString("partial")
+	s.assistantEntries = []provEntry{{Loc: locChunk, Key: keyMeta, V: json.RawMessage(`{"src":"abort"}`)}}
+	s.mu.Unlock()
+	s.abortTurn()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.assistant.Len() != 0 {
+		t.Errorf("text leaked across abort: %q", s.assistant.String())
+	}
+	if len(s.assistantEntries) != 0 {
+		t.Errorf("provenance leaked across abort: %+v", s.assistantEntries)
+	}
+}
+
+func TestACPWriteFailureDoesNotClaimOutputOrKeepProv(t *testing.T) {
+	dir := t.TempDir()
+	badPath := filepath.Join(dir, "n1.jsonl")
+	if err := os.Mkdir(badPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Session{nodeID: "n1", logw: &logWriter{Path: badPath}}
+	s.mu.Lock()
+	s.assistant.WriteString("real output that cannot be persisted")
+	s.assistantEntries = []provEntry{{Loc: locChunk, Key: keyMeta, V: json.RawMessage(`{"src":"lost"}`)}}
+	s.flushAssistantLocked()
+	hadOutput := s.turnHadOutput
+	s.mu.Unlock()
+	if hadOutput {
+		t.Error("turnHadOutput set for an assistant record that did not persist")
+	}
+	if s.LastError() == "" {
+		t.Error("expected a visible error after a log write failure")
+	}
+}
+
+func provContainsMeta(raw json.RawMessage, want map[string]any) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var entries []struct {
+		Loc string          `json:"loc"`
+		Key string          `json:"key"`
+		V   json.RawMessage `json:"v"`
+	}
+	if json.Unmarshal(raw, &entries) != nil {
+		return false
+	}
+	for _, e := range entries {
+		var got any
+		if json.Unmarshal(e.V, &got) != nil {
+			continue
+		}
+		if reflect.DeepEqual(got, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestACPFilteredBannerDoesNotLeakProvenance(t *testing.T) {
+	const banner = "synth-pi-banner-v0\n---\n"
+	id := "msg-shared"
+	bannerNotif := map[string]any{"src": "banner-notif"}
+	bannerChunk := map[string]any{"src": "banner-chunk"}
+
+	t.Run("real_text_keeps_only_its_own_meta", func(t *testing.T) {
+		realNotif := map[string]any{"src": "real-notif"}
+		realChunk := map[string]any{"src": "real-chunk"}
+		agent := &fakeAgent{
+			newSession: func() sdk.NewSessionResponse {
+				return sdk.NewSessionResponse{
+					SessionId: sdk.SessionId("sess_pi"),
+					Meta:      map[string]any{"piAcp": map[string]any{"startupInfo": banner}},
+				}
+			},
+			prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+				_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+					SessionId: p.SessionId, Meta: bannerNotif,
+					Update: agentChunk(banner, bannerChunk, &id),
+				})
+				_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+					SessionId: p.SessionId, Meta: realNotif,
+					Update: agentChunk("the real answer", realChunk, &id),
+				})
+				return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+			},
+		}
+		dir := t.TempDir()
+		m := NewManagerWithRunner(dir, fakeRunner(agent))
+		if _, err := m.Launch("n1", "pi", t.TempDir(), "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Send("n1", "hi"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+		var assts []sessionlog.Event
+		for _, ev := range sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl")) {
+			if ev.T == "assistant" {
+				if ev.Text == banner {
+					t.Fatalf("banner was stored as an assistant record: %q", ev.Text)
+				}
+				assts = append(assts, ev)
+			}
+		}
+		if len(assts) != 1 || assts[0].Text != "the real answer" {
+			t.Fatalf("assistant events = %+v", assts)
+		}
+		if provContainsMeta(assts[0].Prov, bannerNotif) || provContainsMeta(assts[0].Prov, bannerChunk) {
+			t.Fatalf("banner metadata leaked onto real output: %s", assts[0].Prov)
+		}
+		assertACPEntry(t, assts[0].Prov, "notification", "_meta", realNotif)
+		assertACPEntry(t, assts[0].Prov, "chunk", "_meta", realChunk)
+	})
+
+	t.Run("real_text_without_meta_stays_empty", func(t *testing.T) {
+		agent := &fakeAgent{
+			newSession: func() sdk.NewSessionResponse {
+				return sdk.NewSessionResponse{
+					SessionId: sdk.SessionId("sess_pi"),
+					Meta:      map[string]any{"piAcp": map[string]any{"startupInfo": banner}},
+				}
+			},
+			prompt: func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
+				_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+					SessionId: p.SessionId, Meta: bannerNotif,
+					Update: agentChunk(banner, bannerChunk, &id),
+				})
+				_ = a.conn.SessionUpdate(ctx, sdk.SessionNotification{
+					SessionId: p.SessionId,
+					Update:    agentChunk("the real answer", nil, &id),
+				})
+				return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
+			},
+		}
+		dir := t.TempDir()
+		m := NewManagerWithRunner(dir, fakeRunner(agent))
+		if _, err := m.Launch("n1", "pi", t.TempDir(), "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Send("n1", "hi"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "turn to finish", func() bool { return m.Live("n1") == "quiet" })
+		var assts []sessionlog.Event
+		for _, ev := range sessionlog.ReadEvents(filepath.Join(dir, "n1.jsonl")) {
+			if ev.T == "assistant" {
+				if ev.Text == banner {
+					t.Fatalf("banner was stored as an assistant record: %q", ev.Text)
+				}
+				assts = append(assts, ev)
+			}
+		}
+		if len(assts) != 1 || assts[0].Text != "the real answer" {
+			t.Fatalf("assistant events = %+v", assts)
+		}
+		if len(assts[0].Prov) != 0 {
+			t.Fatalf("real output acquired banner provenance: %s", assts[0].Prov)
+		}
+	})
 }

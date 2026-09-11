@@ -64,6 +64,9 @@ type Event struct {
 	Decision   *DecisionEvent  `json:"decision,omitempty"`   // decision (auto-approval audit; P3)
 	StopReason string          `json:"stopReason,omitempty"` // stop
 	Error      string          `json:"error,omitempty"`      // error
+	// Prov is opaque JSON provenance attached to model output. Additive and
+	// omitempty: legacy records without it stay valid. It is not interpreted.
+	Prov json.RawMessage `json:"prov,omitempty"`
 }
 
 // DecisionEvent is an audited automatic (or future manual) permission choice.
@@ -310,6 +313,7 @@ func (w *Writer) Append(ev Event) error {
 	if ev.Time == "" {
 		ev.Time = nowStamp()
 	}
+	ev.Prov = copyRaw(ev.Prov)
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -365,6 +369,7 @@ func ReadEvents(path string) []Event {
 		if json.Unmarshal(line, &ev) != nil {
 			continue
 		}
+		ev.Prov = copyRaw(ev.Prov)
 		out = append(out, ev)
 	}
 	return out
@@ -372,21 +377,50 @@ func ReadEvents(path string) []Event {
 
 // ReadTurns yields the chat turns (user/assistant) from the log — the
 // structured-transport equivalent of transcript.Tailer.Poll for tmux nodes.
+// Assistant attribution comes from the log's meta.agent, not a per-event copy.
 func ReadTurns(path string) []transcript.Turn {
 	turns := []transcript.Turn{}
+	var agent string
 	for _, ev := range ReadEvents(path) {
+		if ev.T == "meta" && ev.Meta != nil && ev.Meta.Agent != "" {
+			agent = ev.Meta.Agent
+		}
 		switch ev.T {
 		case "user":
 			if strings.TrimSpace(ev.Text) != "" {
-				turns = append(turns, transcript.Turn{Role: "user", Text: ev.Text, Time: ev.Time})
+				turns = append(turns, chatTurn(ev, "", agent, 0, 0))
 			}
 		case "assistant":
 			if strings.TrimSpace(ev.Text) != "" {
-				turns = append(turns, transcript.Turn{Role: "assistant", Text: ev.Text, Time: ev.Time})
+				turns = append(turns, chatTurn(ev, "", agent, 0, 0))
 			}
 		}
 	}
 	return turns
+}
+
+// chatTurn projects a user/assistant event onto a transcript.Turn. Assistant
+// turns receive the log's meta.agent; user turns stay unattributed. Prov is
+// copied so a later mutation of the event cannot alias retained bytes.
+func chatTurn(ev Event, uid, agent string, segment, record int) transcript.Turn {
+	t := transcript.Turn{
+		Role: ev.T, Text: ev.Text, Time: ev.Time,
+		UID: uid, Segment: segment, Record: record,
+		Prov: copyRaw(ev.Prov),
+	}
+	if ev.T == "assistant" && agent != "" {
+		t.Agent = agent
+	}
+	return t
+}
+
+func copyRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
 }
 
 // LatestUsage folds the log's usage records into the newest known values.

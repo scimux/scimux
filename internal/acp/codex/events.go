@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -96,15 +97,16 @@ func decodeTokenUsage(params json.RawMessage, sessionModel string) *UsageEvent {
 
 // item is the common envelope of item/started and item/completed notifications.
 type itemEnvelope struct {
-	Item struct {
-		Type    string          `json:"type"`
-		ID      string          `json:"id"`
-		Text    string          `json:"text"`
-		Content []contentBlock  `json:"content"`
-		Command string          `json:"command"`
-		Status  string          `json:"status"`
-		Raw     json.RawMessage `json:"-"`
-	} `json:"item"`
+	Item json.RawMessage `json:"item"`
+}
+
+type itemBody struct {
+	Type    string         `json:"type"`
+	ID      string         `json:"id"`
+	Text    string         `json:"text"`
+	Content []contentBlock `json:"content"`
+	Command string         `json:"command"`
+	Status  string         `json:"status"`
 }
 
 type contentBlock struct {
@@ -120,7 +122,11 @@ func decodeItem(params json.RawMessage, completed bool) *Event {
 	if json.Unmarshal(params, &e) != nil {
 		return nil
 	}
-	it := e.Item
+	var it itemBody
+	if json.Unmarshal(e.Item, &it) != nil {
+		return nil
+	}
+	prov := packProv(namedProv(params, locNotification), namedProv(e.Item, locItem))
 	switch it.Type {
 	case "userMessage":
 		txt := it.Text
@@ -130,16 +136,16 @@ func decodeItem(params json.RawMessage, completed bool) *Event {
 		if strings.TrimSpace(txt) == "" {
 			return nil
 		}
-		return &Event{T: "user", Text: txt}
+		return &Event{T: "user", Text: txt, Prov: prov}
 	case "agentMessage":
 		txt := it.Text
 		if txt == "" {
 			txt = joinContent(it.Content)
 		}
-		if strings.TrimSpace(txt) == "" {
+		if strings.TrimSpace(txt) == "" && len(prov) == 0 {
 			return nil
 		}
-		return &Event{T: "assistant", Text: txt}
+		return &Event{T: "assistant", Text: txt, Prov: prov}
 	case "reasoning":
 		// Reasoning is not surfaced as chat; ignore.
 		return nil
@@ -177,4 +183,68 @@ func nonEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+const (
+	locNotification = "notification"
+	locItem         = "item"
+	keyMeta         = "_meta"
+	keyProv         = "provenance"
+)
+
+type provEntry struct {
+	Loc string          `json:"loc"`
+	Key string          `json:"key"`
+	V   json.RawMessage `json:"v"`
+}
+
+func namedProv(raw json.RawMessage, loc string) []provEntry {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	var out []provEntry
+	if v, ok := obj[keyMeta]; ok {
+		if vv := validJSONValue(v); vv != nil {
+			out = append(out, provEntry{Loc: loc, Key: keyMeta, V: vv})
+		}
+	}
+	if v, ok := obj[keyProv]; ok {
+		if vv := validJSONValue(v); vv != nil {
+			out = append(out, provEntry{Loc: loc, Key: keyProv, V: vv})
+		}
+	}
+	return out
+}
+
+func validJSONValue(raw json.RawMessage) json.RawMessage {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || !json.Valid(raw) {
+		return nil
+	}
+	return copyRaw(raw)
+}
+
+func packProv(groups ...[]provEntry) json.RawMessage {
+	var all []provEntry
+	for _, g := range groups {
+		all = append(all, g...)
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(all)
+	if err != nil {
+		return nil
+	}
+	return copyRaw(b)
+}
+
+func copyRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
 }

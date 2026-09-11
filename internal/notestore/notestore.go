@@ -44,11 +44,14 @@ import (
 // existing or on live capture-layer state (see notes-design.md "Embedded Chat
 // References"). It is the orphan fallback when the source log is unavailable.
 type Snapshot struct {
-	Lane    string `json:"lane,omitempty"`
-	Station string `json:"station,omitempty"`
-	Speaker string `json:"speaker,omitempty"`
-	Time    string `json:"time,omitempty"`
-	Text    string `json:"text,omitempty"`
+	Lane    string          `json:"lane,omitempty"`
+	Station string          `json:"station,omitempty"`
+	Speaker string          `json:"speaker,omitempty"`
+	Time    string          `json:"time,omitempty"`
+	Text    string          `json:"text,omitempty"`
+	Role    string          `json:"role,omitempty"`
+	Agent   string          `json:"agent,omitempty"`
+	Prov    json.RawMessage `json:"prov,omitempty"`
 }
 
 // Source is the durable address of the chat turn an embedded reference came

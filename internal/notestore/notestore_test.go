@@ -1,6 +1,7 @@
 package notestore
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,6 +189,105 @@ func TestReferenceRoundTrip(t *testing.T) {
 	}
 	if refs[0].Snapshot.Text != "hello" {
 		t.Errorf("snapshot text did not round-trip: %+v", refs[0].Snapshot)
+	}
+}
+
+func TestSnapshotProvenanceSurvivesSaveReloadAndJSON(t *testing.T) {
+	s := New(t.TempDir())
+	sh, err := s.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := json.RawMessage(`{"_meta":{"src":"synth-note","n":1}}`)
+	sh.Sections[0].References = []Reference{{
+		ID:     "ref1",
+		Source: Source{UID: "abc123", Segment: 2, Record: 7, Node: "lane-a", TurnTime: "2026-09-10T12:00:00Z"},
+		Snapshot: Snapshot{
+			Lane: "#c0392b", Station: "lane-a", Speaker: "muse",
+			Time: "2026-09-10T12:00:00Z", Text: "frozen",
+			Role: "assistant", Agent: "muse", Prov: prov,
+		},
+	}}
+	if err := s.Save(sh); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(sh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := got.Sections[0].References[0].Snapshot
+	if snap.Role != "assistant" || snap.Agent != "muse" || snap.Speaker != "muse" || snap.Text != "frozen" {
+		t.Fatalf("reload snapshot = %+v", snap)
+	}
+	if bytes.TrimSpace(snap.Prov)[0] == '"' {
+		t.Fatalf("Prov was stringified: %s", snap.Prov)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(snap.Prov, &decoded); err != nil {
+		t.Fatalf("Prov unmarshal: %v (%s)", err, snap.Prov)
+	}
+	var gotMeta, wantMeta any
+	if err := json.Unmarshal(decoded["_meta"], &gotMeta); err != nil {
+		t.Fatalf("_meta: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{"src":"synth-note","n":1}`), &wantMeta); err != nil {
+		t.Fatal(err)
+	}
+	gotB, _ := json.Marshal(gotMeta)
+	wantB, _ := json.Marshal(wantMeta)
+	if string(gotB) != string(wantB) {
+		t.Fatalf("_meta = %s, want %s", gotB, wantB)
+	}
+
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again Snapshot
+	if err := json.Unmarshal(b, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.Role != "assistant" || again.Agent != "muse" {
+		t.Fatalf("json round-trip identity = %+v", again)
+	}
+	var aVal, sVal any
+	if err := json.Unmarshal(again.Prov, &aVal); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(snap.Prov, &sVal); err != nil {
+		t.Fatal(err)
+	}
+	ab, _ := json.Marshal(aVal)
+	sb, _ := json.Marshal(sVal)
+	if string(ab) != string(sb) {
+		t.Fatalf("json round-trip Prov = %s, want %s", ab, sb)
+	}
+
+	// Self-contained: after the source node/bookmark are gone, the snapshot still holds attribution.
+	body, err := os.ReadFile(filepath.Join(s.Dir, sh.ID, "note.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(`"agent"`)) || !bytes.Contains(body, []byte(`"muse"`)) ||
+		!bytes.Contains(body, []byte(`"role"`)) || !bytes.Contains(body, []byte(`"assistant"`)) {
+		t.Fatalf("on-disk note missing frozen attribution: %s", body)
+	}
+	if !bytes.Contains(body, []byte(`"src"`)) || !bytes.Contains(body, []byte(`"synth-note"`)) {
+		t.Fatalf("on-disk note missing provenance: %s", body)
+	}
+	orig := json.RawMessage(`{"src":"gone"}`)
+	copy(snap.Prov, orig)
+	got2, err := s.Get(sh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var still any
+	if err := json.Unmarshal(got2.Sections[0].References[0].Snapshot.Prov, &still); err != nil {
+		t.Fatal(err)
+	}
+	bStill, _ := json.Marshal(still)
+	if !bytes.Contains(bStill, []byte(`synth-note`)) {
+		t.Fatalf("mutating the in-memory snapshot must not rewrite the store: %s", bStill)
 	}
 }
 

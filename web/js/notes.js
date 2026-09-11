@@ -557,14 +557,34 @@ export function buildBookmarkSnapshot(nt, deps = {}){
   (bookmarks || []).forEach(n => { byT[n.t] = n; });
   const laneId = bookmarkLaneId(nt, byT, nodeById);
   const nd = nt && nt.node ? nodeById(nt.node) : null;
-  const speaker = nt && nt.role === "user" ? "you" : nt && nt.role === "assistant" ? "agent" : "";
-  return {
+  const speaker = snapshotSpeaker(nt);
+  const snap = {
     lane: laneId ? laneColor(laneId) : "",
     station: nd ? nd.title : "",
     speaker,
     time: (nt && (nt.turnTime || nt.t)) || "",
     text: (nt && nt.text) || "",
   };
+  if (nt && nt.role) snap.role = nt.role;
+  if (nt && nt.agent) snap.agent = nt.agent;
+  if (nt && Object.prototype.hasOwnProperty.call(nt, "prov") && nt.prov !== undefined){
+    const cloned = cloneJSONValue(nt.prov);
+    if (cloned !== undefined) snap.prov = cloned;
+  }
+  return snap;
+}
+
+function cloneJSONValue(v){
+  if (v === undefined) return undefined;
+  try { return JSON.parse(JSON.stringify(v)); }
+  catch { return undefined; }
+}
+
+function snapshotSpeaker(nt){
+  if (!nt) return "";
+  if (nt.role === "user") return "you";
+  if (nt.role === "assistant") return nt.agent || "agent";
+  return "";
 }
 
 /* ---------- pure: save enqueue ---------- */
@@ -1489,9 +1509,9 @@ export function createNotesFeature(deps){
         text: stripAssetRefs((ref.snapshot && ref.snapshot.text) || ""),
         exceptId: src.node || "",
         title: "Send to chat\u2026",
-        /* The snapshot froze a display speaker, not a transcript role; map it
-           back so send-to can disclose an Output as AI-generated. */
-        role: (ref.snapshot && ref.snapshot.speaker) === "agent" ? "assistant" : "",
+        /* The snapshot freezes the transcript role independently of its
+           display speaker, which may be an actual agent name. */
+        role: (ref.snapshot && ref.snapshot.role) || "",
       });
       return;
     }

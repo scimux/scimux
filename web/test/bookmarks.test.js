@@ -2029,11 +2029,16 @@ test("discloseAgentOutput marks agent output and leaves everything else alone", 
     "the user's own words are already correctly attributed");
   assert.equal(discloseAgentOutput("hello", ""), "hello",
     "unknown provenance is not evidence of agent authorship");
+  assert.equal(discloseAgentOutput("hello", "grok"), "hello",
+    "an agent display name is not a transcript role and must not trigger disclosure");
   assert.equal(discloseAgentOutput("", "assistant"), "",
     "nothing to disclose about nothing");
   assert.equal(discloseAgentOutput(null, "assistant"), "");
   assert.match(AI_DISCLOSURE, /AI-generated/,
     "the disclosure must say the content is AI-generated, not merely quoted");
+  const once = discloseAgentOutput("quoted grok", "assistant");
+  assert.equal(once.indexOf(AI_DISCLOSURE), 0);
+  assert.equal(once.indexOf(AI_DISCLOSURE, 1), -1, "disclosure is applied exactly once");
 });
 
 test("openSendTo discloses agent output in the target's draft", () => {

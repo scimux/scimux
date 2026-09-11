@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -187,4 +189,193 @@ func TestDecodeItemEmptyTextSkipped(t *testing.T) {
 	if ev := decodeItem([]byte(`garbage`), true); ev != nil {
 		t.Fatalf("garbage item should be nil")
 	}
+}
+
+func assertItemProvKey(t *testing.T, ev *Event, key, inner string) {
+	t.Helper()
+	if ev == nil || len(ev.Prov) == 0 {
+		t.Fatal("want retained provenance")
+	}
+	assertCodexEntry(t, ev.Prov, "item", key, inner)
+}
+
+func TestCopyRawEmptyIsNil(t *testing.T) {
+	if copyRaw(nil) != nil || copyRaw(json.RawMessage{}) != nil {
+		t.Fatal("empty copyRaw must return nil")
+	}
+}
+
+func TestDecodeItemAgentMessageRetainsProvenance(t *testing.T) {
+	inner := `{"src":"synth-codex-item","n":1}`
+	raw := []byte(`{"item":{"type":"agentMessage","id":"i","text":"pong","provenance":{"src":"synth-codex-item","n":1}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.T != "assistant" || ev.Text != "pong" {
+		t.Fatalf("agent item decode: %+v", ev)
+	}
+	assertItemProvKey(t, ev, "provenance", inner)
+}
+
+func TestDecodeItemAgentMessageRetainsMeta(t *testing.T) {
+	inner := `{"src":"codex-meta"}`
+	raw := []byte(`{"item":{"type":"agentMessage","text":"hi","_meta":{"src":"codex-meta"}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.Text != "hi" {
+		t.Fatalf("decode: %+v", ev)
+	}
+	assertItemProvKey(t, ev, "_meta", inner)
+}
+
+func TestDecodeItemAgentMessageContentBlockWithProvenance(t *testing.T) {
+	inner := `{"src":"content-block"}`
+	raw := []byte(`{"item":{"type":"agentMessage","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"provenance":{"src":"content-block"}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.Text != "ab" {
+		t.Fatalf("content join = %+v", ev)
+	}
+	assertItemProvKey(t, ev, "provenance", inner)
+}
+
+func TestDecodeItemWrongShapedProvenanceIgnored(t *testing.T) {
+	raw := []byte(`{"item":{"type":"agentMessage","text":"kept","provenance":"nope"}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.T != "assistant" || ev.Text != "kept" {
+		t.Fatalf("message dropped: %+v", ev)
+	}
+	assertCodexEntry(t, ev.Prov, "item", "provenance", `"nope"`)
+}
+
+func TestDecodeItemAbsentProvenance(t *testing.T) {
+	ev := decodeItem([]byte(`{"item":{"type":"agentMessage","text":"pong"}}`), true)
+	if ev == nil || ev.Text != "pong" || len(ev.Prov) != 0 {
+		t.Fatalf("absent provenance: %+v", ev)
+	}
+}
+
+func TestDecodeItemUserAndReasoningUnchangedWithProvenance(t *testing.T) {
+	u := decodeItem([]byte(`{"item":{"type":"userMessage","text":"hello","provenance":{"src":"user"}}}`), true)
+	if u == nil || u.T != "user" || u.Text != "hello" {
+		t.Fatalf("user item: %+v", u)
+	}
+	if ev := decodeItem([]byte(`{"item":{"type":"reasoning","id":"i","provenance":{"src":"x"}}}`), true); ev != nil {
+		t.Fatalf("reasoning should stay ignored, got %+v", ev)
+	}
+	tool := decodeItem([]byte(`{"item":{"type":"commandExecution","id":"call_x","command":"ls","provenance":{"src":"x"}}}`), true)
+	if tool == nil || tool.T != "tool" || tool.Tool == nil || tool.Tool.Title != "ls" {
+		t.Fatalf("unknown/tool item behavior changed: %+v", tool)
+	}
+}
+
+type codexProv struct {
+	Loc string          `json:"loc"`
+	Key string          `json:"key"`
+	V   json.RawMessage `json:"v"`
+}
+
+func mustCodexProv(t *testing.T, raw json.RawMessage) []codexProv {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatal("Prov is empty")
+	}
+	var entries []codexProv
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("Prov is not an entry list: %v (%s)", err, raw)
+	}
+	return entries
+}
+
+func assertCodexEntry(t *testing.T, raw json.RawMessage, loc, key, wantJSON string) {
+	t.Helper()
+	entries := mustCodexProv(t, raw)
+	for _, e := range entries {
+		if e.Loc != loc || e.Key != key {
+			continue
+		}
+		var got, want any
+		if err := json.Unmarshal(e.V, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(wantJSON), &want); err != nil {
+			t.Fatal(err)
+		}
+		gb, _ := json.Marshal(got)
+		wb, _ := json.Marshal(want)
+		if string(gb) != string(wb) {
+			t.Fatalf("%s/%s = %s, want %s", loc, key, e.V, wantJSON)
+		}
+		return
+	}
+	t.Fatalf("missing loc=%s key=%s in %s", loc, key, raw)
+}
+
+func TestDecodeItemBothMetaAndProvenance(t *testing.T) {
+	raw := []byte(`{"item":{"type":"agentMessage","text":"pong","_meta":{"from":"meta"},"provenance":{"from":"prov"}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.Text != "pong" {
+		t.Fatalf("%+v", ev)
+	}
+	assertCodexEntry(t, ev.Prov, "item", "_meta", `{"from":"meta"}`)
+	assertCodexEntry(t, ev.Prov, "item", "provenance", `{"from":"prov"}`)
+	if len(mustCodexProv(t, ev.Prov)) != 2 {
+		t.Fatalf("want 2 contributions: %s", ev.Prov)
+	}
+}
+
+func TestDecodeItemNotificationAndItemLocations(t *testing.T) {
+	raw := []byte(`{"_meta":{"from":"notif"},"provenance":{"from":"nprov"},"item":{"type":"agentMessage","text":"pong","_meta":{"from":"item"}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil {
+		t.Fatal("nil")
+	}
+	assertCodexEntry(t, ev.Prov, "notification", "_meta", `{"from":"notif"}`)
+	assertCodexEntry(t, ev.Prov, "notification", "provenance", `{"from":"nprov"}`)
+	assertCodexEntry(t, ev.Prov, "item", "_meta", `{"from":"item"}`)
+}
+
+func TestDecodeItemAllJSONValueTypes(t *testing.T) {
+	cases := []string{`{"src":"o"}`, `[1]`, `"s"`, `4`, `false`, `null`}
+	for _, v := range cases {
+		raw := []byte(`{"item":{"type":"agentMessage","text":"pong","_meta":` + v + `}}`)
+		ev := decodeItem(raw, true)
+		if ev == nil || ev.Text != "pong" {
+			t.Errorf("value %s dropped message: %+v", v, ev)
+			continue
+		}
+		assertCodexEntry(t, ev.Prov, "item", "_meta", v)
+	}
+}
+
+func TestDecodeItemExactKeysOnly(t *testing.T) {
+	raw := []byte(`{"item":{"type":"agentMessage","text":"pong","_Meta":{"no":1},"Provenance":{"no":2}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.Text != "pong" {
+		t.Fatalf("%+v", ev)
+	}
+	if len(ev.Prov) != 0 {
+		t.Fatalf("case variants retained: %s", ev.Prov)
+	}
+}
+
+func TestDecodeItemDoesNotAliasParams(t *testing.T) {
+	raw := []byte(`{"item":{"type":"agentMessage","text":"pong","provenance":{"src":"buf"}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || len(ev.Prov) == 0 {
+		t.Fatal("want prov")
+	}
+	saved := append(json.RawMessage(nil), ev.Prov...)
+	for i := range raw {
+		raw[i] = ' '
+	}
+	if !bytes.Equal(ev.Prov, saved) {
+		t.Fatalf("aliased caller buffer: %s", ev.Prov)
+	}
+}
+
+func TestDecodeItemContentBlockBothKeys(t *testing.T) {
+	raw := []byte(`{"item":{"type":"agentMessage","content":[{"type":"text","text":"ab"}],"_meta":{"m":1},"provenance":{"p":2}}}`)
+	ev := decodeItem(raw, true)
+	if ev == nil || ev.Text != "ab" {
+		t.Fatalf("%+v", ev)
+	}
+	assertCodexEntry(t, ev.Prov, "item", "_meta", `{"m":1}`)
+	assertCodexEntry(t, ev.Prov, "item", "provenance", `{"p":2}`)
 }

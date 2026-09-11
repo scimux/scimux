@@ -5,6 +5,7 @@ package transcript
 // whenever a CLI update changes its format.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -1088,4 +1089,351 @@ func TestNewestContentTime(t *testing.T) {
 			t.Fatal("missing file must return ok=false")
 		}
 	})
+}
+
+// --- Phase 2: opaque provenance extraction (inline synthetic payloads only) ---
+
+func assertProvHasKeyValue(t *testing.T, prov json.RawMessage, key, inner string) {
+	t.Helper()
+	entries := mustProvEntries(t, prov)
+	var found json.RawMessage
+	for _, e := range entries {
+		if e.Key == key {
+			found = e.V
+			break
+		}
+	}
+	if len(found) == 0 {
+		t.Fatalf("Prov missing original source key %q: %s", key, prov)
+	}
+	var got, want any
+	if err := json.Unmarshal(found, &got); err != nil {
+		t.Fatalf("v unmarshal: %v (%s)", err, found)
+	}
+	if err := json.Unmarshal([]byte(inner), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Prov[%q] = %s, want %s", key, found, inner)
+	}
+}
+
+func TestParseLineClaudeAssistantRetainsMeta(t *testing.T) {
+	inner := `{"src":"synth-claude","n":1}`
+	line := []byte(`{"type":"assistant","timestamp":"2026-07-11T09:00:05.000Z","message":{"role":"assistant","content":"visible reply","_meta":{"src":"synth-claude","n":1}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("recognized Claude assistant line was ignored")
+	}
+	if got.Role != "assistant" || got.Text != "visible reply" || got.Time != "2026-07-11T09:00:05.000Z" {
+		t.Fatalf("role/text/time changed: %+v", got)
+	}
+	assertProvHasKeyValue(t, got.Prov, "_meta", inner)
+}
+
+func TestParseLineClaudeEnvelopeMetaRetained(t *testing.T) {
+	inner := `{"origin":"envelope"}`
+	line := []byte(`{"type":"assistant","timestamp":"t1","_meta":{"origin":"envelope"},"message":{"role":"assistant","content":"hi"}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("recognized Claude assistant line was ignored")
+	}
+	assertProvHasKeyValue(t, got.Prov, "_meta", inner)
+}
+
+func TestParseLineClaudeNamedProvenanceObject(t *testing.T) {
+	inner := `{"src":"named"}`
+	line := []byte(`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"hi","provenance":{"src":"named"}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("recognized Claude assistant line was ignored")
+	}
+	assertProvHasKeyValue(t, got.Prov, "provenance", inner)
+}
+
+func TestParseLineCodexAssistantRetainsProvenance(t *testing.T) {
+	inner := `{"src":"synth-codex","k":2}`
+	line := []byte(`{"timestamp":"2026-07-11T10:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Sweep started"}],"provenance":{"src":"synth-codex","k":2}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("recognized Codex assistant line was ignored")
+	}
+	if got.Role != "assistant" || got.Text != "Sweep started" || got.Time != "2026-07-11T10:00:06.000Z" {
+		t.Fatalf("role/text/time changed: %+v", got)
+	}
+	assertProvHasKeyValue(t, got.Prov, "provenance", inner)
+}
+
+func TestParseLineCodexAssistantRetainsMeta(t *testing.T) {
+	inner := `{"src":"codex-meta"}`
+	line := []byte(`{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"assistant","content":"pong","_meta":{"src":"codex-meta"}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("recognized Codex assistant line was ignored")
+	}
+	assertProvHasKeyValue(t, got.Prov, "_meta", inner)
+}
+
+func TestParseLineMalformedProvenanceStillYieldsMessage(t *testing.T) {
+	// Valid JSON values under recognized keys (string/array/null) are retained
+	// as the original JSON, never as a stringified object, and never drop text.
+	cases := []string{
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"still visible","_meta":"not-an-object"}}`,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"still visible","_meta":[1,2]}}`,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"still visible","provenance":"nope"}}`,
+		`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"still visible","provenance":null}}`,
+		`{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"assistant","content":"still visible","provenance":"wrong"}}`,
+		`{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"assistant","content":"still visible","_meta":["x"]}}`,
+	}
+	for _, line := range cases {
+		got, ok := ParseLine([]byte(line))
+		if !ok {
+			t.Errorf("ParseLine(%s) ignored a visible message because provenance was present", line)
+			continue
+		}
+		if got.Text != "still visible" || got.Role != "assistant" {
+			t.Errorf("visible message changed: %+v", got)
+		}
+		if len(got.Prov) == 0 {
+			t.Errorf("valid JSON provenance must be retained, got empty from %s", line)
+		}
+	}
+}
+
+func TestParseLineUnrecognizedRecordWithProvenanceIgnored(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"session_meta","_meta":{"src":"x"},"provenance":{"src":"y"},"message":{"role":"assistant","content":"nope"}}`,
+		`{"type":"future_type","payload":{"type":"message","role":"assistant","content":"nope","provenance":{"src":"x"}}}`,
+		`{"type":"event_msg","provenance":{"src":"x"}}`,
+		`{"type":"response_item","payload":{"type":"reasoning","role":"assistant","content":"think","provenance":{"src":"x"}}}`,
+	} {
+		got, ok := ParseLine([]byte(line))
+		if ok || !reflect.DeepEqual(got, Turn{}) {
+			t.Errorf("unrecognized record with provenance must be ignored, got (%+v, %v) from %s", got, ok, line)
+		}
+	}
+}
+
+func TestParseLineConflictingClaudeRolesStillIgnoredWithProvenance(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"assistant","message":{"role":"user","content":"I am the agent","_meta":{"src":"x"}}}`,
+		`{"type":"user","message":{"role":"assistant","content":"<user_instructions>secret","provenance":{"src":"x"}}}`,
+	} {
+		got, ok := ParseLine([]byte(line))
+		if ok {
+			t.Errorf("conflicting Claude roles must stay ignored, got %+v from %s", got, line)
+		}
+	}
+}
+
+func TestParseLineScaffoldingStillRejectedWithProvenance(t *testing.T) {
+	line := `{"type":"user","message":{"role":"user","content":"<user_instructions>secret","_meta":{"src":"x"}}}`
+	got, ok := ParseLine([]byte(line))
+	if ok {
+		t.Fatalf("injected scaffolding must stay rejected, got %+v", got)
+	}
+}
+
+func TestCopyRawEmptyIsNil(t *testing.T) {
+	if copyRaw(nil) != nil || copyRaw(json.RawMessage{}) != nil {
+		t.Fatal("empty copyRaw must return nil")
+	}
+}
+
+func TestNamedProvHelpers(t *testing.T) {
+	if namedProv(json.RawMessage(`not-json`), locEnvelope) != nil {
+		t.Fatal("non-object must yield no entries")
+	}
+	if namedProv(json.RawMessage(`[]`), locEnvelope) != nil {
+		t.Fatal("array object must yield no entries")
+	}
+	if validJSONValue(nil) != nil || validJSONValue(json.RawMessage("  ")) != nil {
+		t.Fatal("empty value omitted")
+	}
+	if validJSONValue(json.RawMessage(`{`)) != nil {
+		t.Fatal("invalid JSON omitted")
+	}
+	if packProv() != nil || packProv(nil) != nil {
+		t.Fatal("empty groups pack to nil")
+	}
+}
+
+func TestParseLineDoesNotAliasCallerBuffer(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"hi","_meta":{"src":"buf"}}}`)
+	got, ok := ParseLine(line)
+	if !ok || len(got.Prov) == 0 {
+		t.Fatalf("want retained provenance, got %+v ok=%v", got, ok)
+	}
+	copy := append(json.RawMessage(nil), got.Prov...)
+	for i := range line {
+		line[i] = ' '
+	}
+	if !bytes.Equal(got.Prov, copy) {
+		t.Fatalf("ParseLine provenance aliased the caller buffer: %s", got.Prov)
+	}
+}
+
+// provWire is the lossless source-located provenance container: an ordered
+// list of {loc, key, v} so envelope/message/payload contributions cannot
+// overwrite one another.
+type provWire struct {
+	Loc string          `json:"loc"`
+	Key string          `json:"key"`
+	V   json.RawMessage `json:"v"`
+}
+
+func mustProvEntries(t *testing.T, raw json.RawMessage) []provWire {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatal("Prov is empty")
+	}
+	if !json.Valid(raw) {
+		t.Fatalf("Prov is not valid JSON: %s", raw)
+	}
+	var entries []provWire
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("Prov is not a source-located entry list: %v (%s)", err, raw)
+	}
+	return entries
+}
+
+func assertProvEntry(t *testing.T, entries []provWire, loc, key, wantJSON string) {
+	t.Helper()
+	var found *provWire
+	for i := range entries {
+		if entries[i].Loc == loc && entries[i].Key == key {
+			found = &entries[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("missing loc=%q key=%q in %+v", loc, key, entries)
+	}
+	var got, want any
+	if err := json.Unmarshal(found.V, &got); err != nil {
+		t.Fatalf("v unmarshal: %v (%s)", err, found.V)
+	}
+	if err := json.Unmarshal([]byte(wantJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s/%s = %s, want %s", loc, key, found.V, wantJSON)
+	}
+}
+
+func TestParseLineClaudeEnvelopeMetaAndInnerProvenanceBothRetained(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"t1","_meta":{"from":"env"},"message":{"role":"assistant","content":"hi","provenance":{"from":"msg"}}}`)
+	got, ok := ParseLine(line)
+	if !ok || got.Text != "hi" {
+		t.Fatalf("ParseLine = (%+v, %v)", got, ok)
+	}
+	entries := mustProvEntries(t, got.Prov)
+	assertProvEntry(t, entries, "envelope", "_meta", `{"from":"env"}`)
+	assertProvEntry(t, entries, "message", "provenance", `{"from":"msg"}`)
+	if len(entries) != 2 {
+		t.Fatalf("want 2 contributions, got %d (%s)", len(entries), got.Prov)
+	}
+}
+
+func TestParseLineClaudeDistinctEnvelopeAndInnerMeta(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"t1","_meta":{"from":"env"},"message":{"role":"assistant","content":"hi","_meta":{"from":"msg"}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("ignored")
+	}
+	entries := mustProvEntries(t, got.Prov)
+	assertProvEntry(t, entries, "envelope", "_meta", `{"from":"env"}`)
+	assertProvEntry(t, entries, "message", "_meta", `{"from":"msg"}`)
+	if len(entries) != 2 {
+		t.Fatalf("distinct _meta values must both be kept, got %s", got.Prov)
+	}
+}
+
+func TestParseLineClaudeAllFourProvenanceLocations(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"t1","_meta":{"e":"m"},"provenance":{"e":"p"},"message":{"role":"assistant","content":"hi","_meta":{"i":"m"},"provenance":{"i":"p"}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("ignored")
+	}
+	entries := mustProvEntries(t, got.Prov)
+	assertProvEntry(t, entries, "envelope", "_meta", `{"e":"m"}`)
+	assertProvEntry(t, entries, "envelope", "provenance", `{"e":"p"}`)
+	assertProvEntry(t, entries, "message", "_meta", `{"i":"m"}`)
+	assertProvEntry(t, entries, "message", "provenance", `{"i":"p"}`)
+	if len(entries) != 4 {
+		t.Fatalf("want 4 contributions, got %d (%s)", len(entries), got.Prov)
+	}
+}
+
+func TestParseLineCodexEnvelopeAndPayloadBothRetained(t *testing.T) {
+	line := []byte(`{"timestamp":"t2","type":"response_item","_meta":{"from":"env"},"payload":{"type":"message","role":"assistant","content":"pong","provenance":{"from":"pay"}}}`)
+	got, ok := ParseLine(line)
+	if !ok || got.Text != "pong" {
+		t.Fatalf("ParseLine = (%+v, %v)", got, ok)
+	}
+	entries := mustProvEntries(t, got.Prov)
+	assertProvEntry(t, entries, "envelope", "_meta", `{"from":"env"}`)
+	assertProvEntry(t, entries, "payload", "provenance", `{"from":"pay"}`)
+}
+
+func TestParseLineCodexDistinctEnvelopeAndPayloadMeta(t *testing.T) {
+	line := []byte(`{"type":"response_item","_meta":{"from":"env"},"payload":{"type":"message","role":"assistant","content":"pong","_meta":{"from":"pay"}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("ignored")
+	}
+	entries := mustProvEntries(t, got.Prov)
+	assertProvEntry(t, entries, "envelope", "_meta", `{"from":"env"}`)
+	assertProvEntry(t, entries, "payload", "_meta", `{"from":"pay"}`)
+}
+
+func TestParseLineCodexAllFourProvenanceLocations(t *testing.T) {
+	line := []byte(`{"type":"response_item","_meta":{"e":"m"},"provenance":{"e":"p"},"payload":{"type":"message","role":"assistant","content":"pong","_meta":{"i":"m"},"provenance":{"i":"p"}}}`)
+	got, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("ignored")
+	}
+	entries := mustProvEntries(t, got.Prov)
+	assertProvEntry(t, entries, "envelope", "_meta", `{"e":"m"}`)
+	assertProvEntry(t, entries, "envelope", "provenance", `{"e":"p"}`)
+	assertProvEntry(t, entries, "payload", "_meta", `{"i":"m"}`)
+	assertProvEntry(t, entries, "payload", "provenance", `{"i":"p"}`)
+	if len(entries) != 4 {
+		t.Fatalf("want 4 contributions, got %d (%s)", len(entries), got.Prov)
+	}
+}
+
+func TestParseLineRetainsEveryValidJSONProvenanceType(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{`{"src":"obj"}`, `{"src":"obj"}`},
+		{`[1,2]`, `[1,2]`},
+		{`"quoted"`, `"quoted"`},
+		{`3`, `3`},
+		{`true`, `true`},
+		{`null`, `null`},
+	}
+	for _, tc := range cases {
+		line := []byte(`{"type":"assistant","timestamp":"t1","message":{"role":"assistant","content":"hi","_meta":` + tc.raw + `}}`)
+		got, ok := ParseLine(line)
+		if !ok || got.Text != "hi" {
+			t.Errorf("value %s dropped the message: ok=%v %+v", tc.raw, ok, got)
+			continue
+		}
+		entries := mustProvEntries(t, got.Prov)
+		assertProvEntry(t, entries, "message", "_meta", tc.want)
+	}
+}
+
+func TestParseLineExactProvenanceKeysOnly(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"t1","_Meta":{"no":"env"},"Provenance":{"no":"envp"},"message":{"role":"assistant","content":"hi","_Meta":{"no":"msg"},"Provenance":{"no":"msgp"}}}`)
+	got, ok := ParseLine(line)
+	if !ok || got.Text != "hi" {
+		t.Fatalf("ParseLine = (%+v, %v)", got, ok)
+	}
+	if len(got.Prov) != 0 {
+		t.Fatalf("case variants must not be retained as recognized keys: %s", got.Prov)
+	}
 }

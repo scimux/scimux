@@ -643,6 +643,104 @@ test("buildBookmarkSnapshot: self-contained; comment inherits parent lane", () =
   assert.equal(withNode.lane, "#abc");
 });
 
+test("buildBookmarkSnapshot freezes role, agent, prov; speaker is actual agent", () => {
+  const prov = { _meta: { src: "synth-note", n: 3 } };
+  const nt = {
+    t: "1", role: "assistant", agent: "muse", text: "frozen reply",
+    turnTime: "2026-09-10T12:00:00Z", node: "n1", lane: "lane-a",
+    uid: "u1", segment: 0, record: 4, prov,
+  };
+  const snap = buildBookmarkSnapshot(nt, {
+    bookmarks: [nt],
+    nodeById: id => (id === "n1" ? { id: "n1", title: "Station", lane_id: "lane-a" } : null),
+    laneColor: id => (id === "lane-a" ? "#c0392b" : ""),
+    bookmarkLaneId,
+  });
+  assert.equal(snap.role, "assistant");
+  assert.equal(snap.agent, "muse");
+  assert.equal(snap.speaker, "muse");
+  assert.equal(snap.station, "Station");
+  assert.equal(snap.lane, "#c0392b");
+  assert.equal(snap.time, "2026-09-10T12:00:00Z");
+  assert.equal(snap.text, "frozen reply");
+  assert.deepEqual(snap.prov, prov);
+  assert.equal(typeof snap.prov, "object");
+  const encoded = JSON.stringify(snap);
+  const decoded = JSON.parse(encoded);
+  assert.equal(typeof decoded.prov, "object");
+  assert.deepEqual(decoded.prov, prov);
+  assert.equal(decoded.agent, "muse");
+  assert.equal(decoded.role, "assistant");
+});
+
+test("buildBookmarkSnapshot omits circular provenance without throwing", () => {
+  const circ = { src: "c" };
+  circ.self = circ;
+  const nt = {
+    t: "1", role: "assistant", agent: "muse", text: "x",
+    turnTime: "T", node: "n1", lane: "lane-a", prov: circ,
+  };
+  let snap;
+  assert.doesNotThrow(() => {
+    snap = buildBookmarkSnapshot(nt, {
+      bookmarks: [nt],
+      nodeById: id => (id === "n1" ? { id: "n1", title: "Station", lane_id: "lane-a" } : null),
+      laneColor: id => (id === "lane-a" ? "#f00" : ""),
+      bookmarkLaneId,
+    });
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(snap, "prov"), false);
+  assert.equal(snap.role, "assistant");
+  assert.equal(snap.agent, "muse");
+  assert.equal(snap.speaker, "muse");
+  assert.equal(snap.text, "x");
+  assert.equal(snap.time, "T");
+  assert.equal(snap.station, "Station");
+  assert.equal(snap.lane, "#f00");
+});
+
+test("buildBookmarkSnapshot deep-freezes nested provenance", () => {
+  const nested = { loc: "item", key: "provenance", v: { src: "snap", kids: [{ n: 1 }] } };
+  const nt = {
+    t: "1", role: "assistant", agent: "grok", text: "x",
+    turnTime: "T", prov: [nested],
+  };
+  const snap = buildBookmarkSnapshot(nt, {
+    bookmarks: [nt], nodeById: () => null, laneColor: () => "", bookmarkLaneId,
+  });
+  nested.v.src = "mutated";
+  nested.v.kids[0].n = 9;
+  nt.agent = "nope";
+  assert.equal(snap.agent, "grok");
+  assert.equal(snap.prov[0].v.src, "snap");
+  assert.equal(snap.prov[0].v.kids[0].n, 1);
+});
+
+test("buildBookmarkSnapshot speaker: you / actual agent / legacy agent fallback", () => {
+  const deps = {
+    bookmarks: [],
+    nodeById: () => null,
+    laneColor: () => "",
+    bookmarkLaneId,
+  };
+  assert.equal(buildBookmarkSnapshot({ role: "user", text: "q" }, deps).speaker, "you");
+  assert.equal(buildBookmarkSnapshot({ role: "assistant", agent: "grok", text: "a" }, deps).speaker, "grok");
+  assert.equal(buildBookmarkSnapshot({ role: "assistant", agent: "codex", text: "a" }, deps).speaker, "codex");
+  assert.equal(buildBookmarkSnapshot({ role: "assistant", text: "legacy" }, deps).speaker, "agent");
+});
+
+test("referenceHTML displays actual agent, not only the generic word agent", () => {
+  const html = referenceHTML({
+    id: "r1",
+    snapshot: {
+      station: "Lane", speaker: "muse", time: "T", text: "hi",
+      role: "assistant", agent: "muse",
+    },
+  }, { fmtWhen: t => t });
+  assert.match(html, />.*muse.*</);
+  assert.doesNotMatch(html, />agent</);
+});
+
 /* ---------- save enqueue serialization ---------- */
 test("createSaveEnqueue: same-field serializes edit then revert", async () => {
   const { enqueue } = createSaveEnqueue();
@@ -3324,9 +3422,117 @@ test("Packet D: inbox jump miss toasts when the chat is gone", async () => {
 /* ---------- AI disclosure on send-to ----------
    bookmarks.js owns the marker; notes.js owns two of the four callers, and a
    caller that hands over no role disables the disclosure silently. */
-test("the workspace's two send-to callers pass the role they know", () => {
+test("placement sends frozen role, agent, and provenance and survives source deletion", async () => {
+  const prov = [{ loc: "chunk", key: "_meta", v: { src: "place" } }];
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "Note", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "Note",
+        sections: [{ id: "s1", title: "S", body: "body", order: 0, references: [] }],
+      },
+    },
+    bookmarks: [{
+      t: "1", text: "quoted", uid: "u1", segment: 1, record: 4,
+      node: "nX", turnTime: "TT", lane: "lane-a",
+      role: "assistant", agent: "muse", prov,
+    }],
+    lanes: [{ id: "lane-a", name: "A", color: "#f00" }],
+    nodes: { nX: { id: "nX", title: "Station", lane_id: "lane-a" } },
+  });
+  const { feature, roots, apiLog, docs } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+  feature.startPlacement({
+    t: "1", text: "quoted", uid: "u1", segment: 1, record: 4,
+    node: "nX", turnTime: "TT", lane: "lane-a",
+    role: "assistant", agent: "muse", prov,
+  });
+  const add = el("button");
+  add.dataset.addhere = "";
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const body = el("div", { className: "wssecbody" });
+  sec.appendChild(body);
+  add.closest = sel => {
+    if (sel === "[data-addhere]") return add;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  roots.wssections.dispatch("click", { target: add });
+  await settle();
+  const post = apiLog.find(x => x.method === "POST" && x.url.includes("/references"));
+  assert.ok(post);
+  const payload = JSON.parse(post.body);
+  assert.equal(payload.snapshot.role, "assistant");
+  assert.equal(payload.snapshot.agent, "muse");
+  assert.equal(payload.snapshot.speaker, "muse");
+  assert.deepEqual(payload.snapshot.prov, prov);
+  ctx.setBookmarks([]);
+  await openNote(ctx, "n1");
+  await settle();
+  const snap = docs.n1.sections[0].references[0].snapshot;
+  assert.equal(snap.role, "assistant");
+  assert.equal(snap.agent, "muse");
+  assert.equal(snap.speaker, "muse");
+  assert.deepEqual(snap.prov, prov);
+  assert.match(roots.wssections.innerHTML, /muse/);
+});
+
+test("reference send-to passes frozen snapshot.role when speaker is grok", async () => {
+  const calls = [];
+  const ctx = createFeature({
+    notes: [{ id: "n1", title: "N", order: 0 }],
+    docs: {
+      n1: {
+        id: "n1", title: "N",
+        sections: [{
+          id: "s1", title: "", body: "x", order: 0,
+          references: [{
+            id: "r1",
+            source: { node: "src-node", uid: "u", segment: 0, record: 0 },
+            snapshot: {
+              text: "quoted grok", lane: "#0a0",
+              role: "assistant", speaker: "grok", agent: "grok",
+            },
+          }],
+        }],
+      },
+    },
+    deps: { openSendTo: opts => calls.push(opts) },
+  });
+  const { feature, roots } = ctx;
+  feature.bind();
+  feature.open();
+  await settle();
+  const card = el("button", { className: "wscard", dataset: { note: "n1" } });
+  card.dataset.note = "n1";
+  card.closest = sel => (sel === ".wscard" ? card : null);
+  roots.wscards.dispatch("click", { target: card });
+  await settle();
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.dataset.sec = "s1";
+  const ref = el("div", { className: "wsref", dataset: { ref: "r1" } });
+  ref.dataset.ref = "r1";
+  const btn = el("button", { dataset: { refact: "sendto" } });
+  btn.dataset.refact = "sendto";
+  btn.closest = sel => {
+    if (sel === "[data-refact]") return btn;
+    if (sel === ".wsref") return ref;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  roots.wssections.dispatch("click", { target: btn });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].role, "assistant");
+  assert.equal(calls[0].text, "quoted grok");
+});
+
+test("the workspace's two send-to callers pass the frozen transcript role", () => {
   assert.match(notesSrc, /openSendTo\(\{[\s\S]{0,240}?role:\s*nt\.role/,
     "inbox bookmark send-to passes the bookmark's role");
-  assert.match(notesSrc, /role:\s*\(ref\.snapshot && ref\.snapshot\.speaker\) === "agent"/,
-    "a reference's send-to derives the role from the frozen snapshot speaker");
+  assert.match(notesSrc, /role:\s*\(ref\.snapshot && ref\.snapshot\.role\)/,
+    "a reference's send-to passes its frozen role even when speaker is an agent name");
 });

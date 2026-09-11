@@ -257,11 +257,35 @@ export function buildChatSignature(parts){
     p.echoHash || "",
     p.histKey || "",
     p.turnsHash || "",
+    p.turnAttrHash || "",
     p.decisionsHash || "",
     p.expanded ? "1" : "0",
     p.compacting ? "1" : "0",
     p.elicitationKey || "",
   ].join("|");
+}
+
+/* Agent and provenance are not part of hashTurns (role+text only). Include
+   them in the rebuild signature so a same-text turn whose attribution
+   changes does not leave stale bubbleTurns. */
+export function hashTurnAttrs(turns, hash = hashStr){
+  let s = "";
+  const list = turns || [];
+  for (let i = 0; i < list.length; i++){
+    const t = list[i] || {};
+    s += "\n" + (t.agent || "") + "\0";
+    const hasProv = Object.prototype.hasOwnProperty.call(t, "prov");
+    s += hasProv ? "1" : "0";
+    try { s += JSON.stringify(hasProv ? t.prov : null); }
+    catch { s += "\0"; }
+  }
+  return hash(s);
+}
+
+function cloneJSONValue(v){
+  if (v === undefined) return undefined;
+  try { return JSON.parse(JSON.stringify(v)); }
+  catch { return undefined; }
 }
 
 export function elicitationKey(data){
@@ -1786,6 +1810,7 @@ export function createChatFeature(deps){
       echoHash: echo ? hash(echo.text) : "",
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hashTurns(turns),
+      turnAttrHash: hashTurnAttrs(turns, hash),
       decisionsHash: decisionsHash(liveDecisions) +
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
@@ -2142,6 +2167,11 @@ export function createChatFeature(deps){
              a guessed role is worse than none. */
           if (turn.role === "user" || turn.role === "assistant")
             bookmark.role = turn.role;
+          if (turn.agent) bookmark.agent = turn.agent;
+          if (Object.prototype.hasOwnProperty.call(turn, "prov") && turn.prov !== undefined){
+            const cloned = cloneJSONValue(turn.prov);
+            if (cloned !== undefined) bookmark.prov = cloned;
+          }
           if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
           if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark });
         }

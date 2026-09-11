@@ -22,14 +22,16 @@ const scanCtxCheck = 256
 // After are the raw excerpt window around the match (never HTML-escaped — the
 // client escapes and wraps only Match in <mark>).
 type Hit struct {
-	UID     string `json:"uid"`
-	Segment int    `json:"segment"`
-	Record  int    `json:"record"`
-	Role    string `json:"role"` // "user" | "assistant" | "asset"
-	Time    string `json:"time"`
-	Before  string `json:"before"`
-	Match   string `json:"match"`
-	After   string `json:"after"`
+	UID     string          `json:"uid"`
+	Segment int             `json:"segment"`
+	Record  int             `json:"record"`
+	Role    string          `json:"role"` // "user" | "assistant" | "asset"
+	Time    string          `json:"time"`
+	Before  string          `json:"before"`
+	Match   string          `json:"match"`
+	After   string          `json:"after"`
+	Agent   string          `json:"agent,omitempty"` // actual harness id for assistant matches
+	Prov    json.RawMessage `json:"prov,omitempty"`  // opaque provenance on the matching turn
 }
 
 // ScanOptions bounds one file's scan. Global caps (files scanned, total hits,
@@ -89,6 +91,7 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	rec, seg := 0, 0
+	var agent string
 	// lastTurnTime is the timestamp of the most recent user/assistant turn in the
 	// current segment. An asset filename hit is not itself a rendered turn, so it
 	// anchors on the turn that owns it (the turn that produced/uploaded the file);
@@ -140,10 +143,17 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 				if role == "asset" && lastTurnTime != "" {
 					hitTime = lastTurnTime
 				}
-				res.Hits = append(res.Hits, Hit{
+				h := Hit{
 					Segment: seg, Record: rec, Role: role, Time: hitTime,
 					Before: b, Match: m, After: a,
-				})
+				}
+				if role == "assistant" {
+					h.Agent = agent
+				}
+				if role == "user" || role == "assistant" {
+					h.Prov = copyRaw(ev.Prov)
+				}
+				res.Hits = append(res.Hits, h)
 				if role == "asset" && lastTurnTime == "" {
 					pendingAssetHits = append(pendingAssetHits, len(res.Hits)-1)
 				}
@@ -161,8 +171,13 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 			}
 			pendingAssetHits = nil
 		}
-		if ev.T == "meta" && res.UID == "" && ev.Meta != nil {
-			res.UID = ev.Meta.UID
+		if ev.T == "meta" && ev.Meta != nil {
+			if res.UID == "" {
+				res.UID = ev.Meta.UID
+			}
+			if ev.Meta.Agent != "" {
+				agent = ev.Meta.Agent
+			}
 		}
 		if ev.T == "source" {
 			seg++
@@ -224,6 +239,7 @@ func ReadTurnWindow(path string, segment, record, before, after int) (window []t
 	var afterTurns []transcript.Turn
 
 	rec, seg, turnCount, lastInSeg := 0, 0, 0, -1
+	var agent string
 	pendingNext := false // owner is the next turn in this segment
 	resolved := false    // the (segment, record) ordinal has been located
 	anchorOrd := -1      // absolute turn index of the owning turn, once known
@@ -253,12 +269,15 @@ func ReadTurnWindow(path string, segment, record, before, after int) (window []t
 			}
 		}
 
+		if ev.T == "meta" && ev.Meta != nil && ev.Meta.Agent != "" {
+			agent = ev.Meta.Agent
+		}
 		if isTurn {
 			if pendingNext {
 				anchorOrd = turnCount
 				pendingNext = false
 			}
-			turn := transcript.Turn{Role: ev.T, Text: ev.Text, Time: ev.Time}
+			turn := chatTurn(ev, "", agent, 0, 0)
 			switch {
 			case collecting:
 				if len(afterTurns) < after {

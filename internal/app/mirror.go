@@ -156,7 +156,7 @@ func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, to
 		// Role is "user"/"assistant" (transcript.ParseLine yields nothing
 		// else), matching the log's record types; the transcript's own
 		// timestamp rides along.
-		if err := m.logw.Append(sessionlog.Event{T: t.Role, Text: t.Text, Time: t.Time}); err != nil {
+		if err := m.logw.Append(sessionlog.Event{T: t.Role, Text: t.Text, Time: t.Time, Prov: t.Prov}); err != nil {
 			return // watermark stays; the failed turn is retried next tick
 		}
 		m.mirrored++

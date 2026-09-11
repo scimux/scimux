@@ -1,12 +1,16 @@
 package sessionlog
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+
+	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
 func TestMetaHeaderRoundTrip(t *testing.T) {
@@ -298,5 +302,183 @@ func TestUsageEvent_StringIncludesModelWhenSet(t *testing.T) {
 	ev := Event{T: "usage", Usage: &withModel}
 	if got := formatEvent(ev); !strings.Contains(got, "model=gpt-5.5") {
 		t.Errorf("formatEvent missing model: %q", got)
+	}
+}
+
+// --- Phase 2: opaque provenance persistence and projections ---
+
+func synthProvJSON(src string) json.RawMessage {
+	return json.RawMessage(`[{"loc":"message","key":"_meta","v":{"src":"` + src + `"}}]`)
+}
+
+func assertRawEqual(t *testing.T, got, want json.RawMessage) {
+	t.Helper()
+	if bytes.Equal(got, want) {
+		return
+	}
+	if len(got) == 0 && len(want) == 0 {
+		return
+	}
+	var gv, wv any
+	if json.Unmarshal(got, &gv) == nil && json.Unmarshal(want, &wv) == nil {
+		g, _ := json.Marshal(gv)
+		w, _ := json.Marshal(wv)
+		if bytes.Equal(g, w) {
+			return
+		}
+	}
+	t.Errorf("prov = %s, want %s", got, want)
+}
+
+func TestAppendReadEventsRetainsProv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	prov := synthProvJSON("sessionlog-append")
+	if err := w.Append(NewMeta("n", "claude", "", "", "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(Event{T: "assistant", Text: "hello", Time: "2026-07-11T09:00:05Z", Prov: prov}); err != nil {
+		t.Fatal(err)
+	}
+	evs := ReadEvents(path)
+	if len(evs) != 2 || evs[1].T != "assistant" || evs[1].Text != "hello" {
+		t.Fatalf("events = %+v", evs)
+	}
+	assertRawEqual(t, evs[1].Prov, prov)
+	if len(evs[1].Prov) == 0 || bytes.TrimSpace(evs[1].Prov)[0] == '"' {
+		t.Fatalf("Prov was stringified: %s", evs[1].Prov)
+	}
+}
+
+func TestReadTurnsRetainsAgentAndProv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	prov := synthProvJSON("read-turns")
+	for _, ev := range []Event{
+		NewMeta("n", "codex", "gpt", "", ""),
+		{T: "user", Text: "question", Time: "t1"},
+		{T: "assistant", Text: "answer", Time: "t2", Prov: prov},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns := ReadTurns(path)
+	if len(turns) != 2 {
+		t.Fatalf("turns = %+v", turns)
+	}
+	if turns[0].Role != "user" || turns[0].Agent != "" || len(turns[0].Prov) != 0 {
+		t.Errorf("user turn must not be agent-authored: %+v", turns[0])
+	}
+	if turns[1].Role != "assistant" || turns[1].Text != "answer" {
+		t.Errorf("assistant turn = %+v", turns[1])
+	}
+	if turns[1].Agent != "codex" {
+		t.Errorf("assistant Agent = %q, want codex from meta.agent", turns[1].Agent)
+	}
+	assertRawEqual(t, turns[1].Prov, prov)
+}
+
+func TestReadTurnsLegacyMissingProvAndAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	// Hand-written old log: no prov field, still parses.
+	body := `{"t":"meta","time":"t0","meta":{"node":"n","uid":"U","agent":"claude","created":"t0"}}` + "\n" +
+		`{"t":"user","time":"t1","text":"old q"}` + "\n" +
+		`{"t":"assistant","time":"t2","text":"old a"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turns := ReadTurns(path)
+	if len(turns) != 2 {
+		t.Fatalf("legacy turns = %+v", turns)
+	}
+	if turns[0].Role != "user" || turns[0].Agent != "" || len(turns[0].Prov) != 0 {
+		t.Errorf("legacy user = %+v", turns[0])
+	}
+	if turns[1].Role != "assistant" || turns[1].Agent != "claude" || len(turns[1].Prov) != 0 {
+		t.Errorf("legacy assistant = %+v (agent from meta, empty prov)", turns[1])
+	}
+}
+
+func TestReadEventsMalformedDoesNotShiftAndUnknownHarmless(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	prov := synthProvJSON("torn")
+	asst, err := json.Marshal(Event{T: "assistant", Text: "kept", Time: "t2", Prov: prov})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"t":"meta","time":"t0","meta":{"node":"n","uid":"U1","agent":"grok","created":"t0"}}` + "\n" +
+		"\n" +
+		"{ this is not json\n" +
+		`{"t":"future-type","x":1,"prov":{"_meta":{"src":"ignored"}}}` + "\n" +
+		string(asst) + "\n" +
+		`{"t":"assistant","text":"torn` // torn tail, no newline close
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evs := ReadEvents(path)
+	// meta, unknown, assistant — blank/malformed/torn skipped, no ordinal shift
+	// for readers that index by successfully-parsed records.
+	if len(evs) != 3 || evs[0].T != "meta" || evs[1].T != "future-type" || evs[2].T != "assistant" {
+		t.Fatalf("events = %+v", evs)
+	}
+	assertRawEqual(t, evs[2].Prov, prov)
+	turns := ReadTurns(path)
+	if len(turns) != 1 || turns[0].Text != "kept" || turns[0].Agent != "grok" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertRawEqual(t, turns[0].Prov, prov)
+}
+
+func TestSessionlogMultiContributionRoundTrip(t *testing.T) {
+	prov := json.RawMessage(`[{"loc":"envelope","key":"_meta","v":{"from":"env"}},{"loc":"message","key":"provenance","v":[1,2]}]`)
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	if err := w.Append(NewMeta("n", "claude", "", "", "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(Event{T: "assistant", Text: "hello", Time: "t1", Prov: prov}); err != nil {
+		t.Fatal(err)
+	}
+	mut := append(json.RawMessage(nil), prov...)
+	for i := range prov {
+		prov[i] = ' '
+	}
+	evs := ReadEvents(path)
+	if len(evs) < 2 {
+		t.Fatal("missing events")
+	}
+	assertRawEqual(t, evs[1].Prov, mut)
+	turns := ReadTurns(path)
+	if len(turns) != 1 || turns[0].Agent != "claude" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	assertRawEqual(t, turns[0].Prov, mut)
+	seg := ReadSegment(path)
+	if len(seg.Turns) != 1 || seg.Turns[0].Agent != "claude" {
+		t.Fatalf("segment = %+v", seg.Turns)
+	}
+	assertRawEqual(t, seg.Turns[0].Prov, mut)
+	hist := ReadHistory(path)
+	if len(hist) != 1 || len(hist[0].Turns) != 1 {
+		t.Fatalf("history = %+v", hist)
+	}
+	assertRawEqual(t, hist[0].Turns[0].Prov, mut)
+	c := &LogCache{}
+	cached := c.Segment(path)
+	if !reflect.DeepEqual(cached.Turns, seg.Turns) {
+		t.Fatalf("cache mismatch:\n got %+v\nwant %+v", cached.Turns, seg.Turns)
+	}
+	b, err := json.Marshal(turns[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again transcript.Turn
+	if err := json.Unmarshal(b, &again); err != nil {
+		t.Fatal(err)
+	}
+	assertRawEqual(t, again.Prov, mut)
+	if again.Agent != "claude" {
+		t.Errorf("json Agent = %q", again.Agent)
 	}
 }

@@ -373,3 +373,57 @@ func TestNewStationRoundTrip(t *testing.T) {
 		t.Fatalf("station = %+v", s)
 	}
 }
+
+func TestReadSegmentRetainsAgentProvAndAddress(t *testing.T) {
+	meta := NewMeta("n1", "grok", "", "", "/tmp")
+	prov := synthProvJSON("segment")
+	path := writeLog(t, []Event{
+		meta,
+		{T: "user", Text: "q", Time: "t1"},
+		{T: "assistant", Text: "a", Time: "t2", Prov: prov},
+	})
+	seg := ReadSegment(path)
+	if len(seg.Turns) != 2 {
+		t.Fatalf("turns = %+v", seg.Turns)
+	}
+	if seg.Turns[0].Role != "user" || seg.Turns[0].Agent != "" || len(seg.Turns[0].Prov) != 0 {
+		t.Errorf("user turn misattributed: %+v", seg.Turns[0])
+	}
+	a := seg.Turns[1]
+	if a.Role != "assistant" || a.Agent != "grok" || a.UID != meta.Meta.UID || a.Segment != 0 || a.Record != 2 {
+		t.Errorf("assistant address/agent = uid=%q seg=%d rec=%d agent=%q", a.UID, a.Segment, a.Record, a.Agent)
+	}
+	assertRawEqual(t, a.Prov, prov)
+}
+
+func TestReadHistoryRetainsAgentProvAcrossSeams(t *testing.T) {
+	meta := NewMeta("n1", "claude", "", "", "/tmp")
+	before := synthProvJSON("history-before")
+	after := synthProvJSON("history-after")
+	path := writeLog(t, []Event{
+		meta,
+		{T: "user", Text: "old q", Time: "2026-07-01T09:00:00Z"},
+		{T: "assistant", Text: "old a", Time: "2026-07-01T09:01:00Z", Prov: before},
+		{T: "source", Time: "2026-07-02T10:00:00Z", Source: &SourceEvent{SessionID: "s2", Reason: "clear"}},
+		{T: "user", Text: "new q", Time: "2026-07-02T10:05:00Z"},
+		{T: "assistant", Text: "new a", Time: "2026-07-02T10:06:00Z", Prov: after},
+	})
+	segs := ReadHistory(path)
+	if len(segs) != 2 {
+		t.Fatalf("surfaces = %d %+v", len(segs), segs)
+	}
+	if len(segs[0].Turns) != 2 || segs[0].Turns[1].Agent != "claude" {
+		t.Fatalf("before-seam turns = %+v", segs[0].Turns)
+	}
+	assertRawEqual(t, segs[0].Turns[1].Prov, before)
+	if segs[0].Turns[1].UID != meta.Meta.UID || segs[0].Turns[1].Segment != 0 {
+		t.Errorf("before-seam address = uid=%q seg=%d rec=%d", segs[0].Turns[1].UID, segs[0].Turns[1].Segment, segs[0].Turns[1].Record)
+	}
+	if len(segs[1].Turns) != 2 || segs[1].Turns[1].Agent != "claude" || segs[1].Turns[1].Segment != 1 {
+		t.Fatalf("after-seam turns = %+v", segs[1].Turns)
+	}
+	assertRawEqual(t, segs[1].Turns[1].Prov, after)
+	if segs[1].Turns[0].Agent != "" {
+		t.Errorf("user turn after seam must not carry agent: %+v", segs[1].Turns[0])
+	}
+}

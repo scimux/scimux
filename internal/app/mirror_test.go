@@ -7,9 +7,12 @@ package app
 // checks idempotence by replaying from disk.
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -645,5 +648,128 @@ func TestMirror_ToolIncrementAndIdle(t *testing.T) {
 	}
 	if tools != 1 {
 		t.Fatalf("idle tick re-projected tools: %d", tools)
+	}
+}
+
+func claudeAssistantWithMeta(text, ts, metaJSON string) string {
+	return fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":%q,"_meta":%s}}`,
+		ts, text, metaJSON) + "\n"
+}
+
+func TestMirrorRetainsProvenanceAndAgent(t *testing.T) {
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sess-1.jsonl")
+	metaJSON := `{"src":"synth-mirror","n":1}`
+	appendFile(t, tp, claudeTurn("user", "question", "t1")+claudeAssistantWithMeta("answer", "t2", metaJSON))
+
+	line := []byte(strings.TrimSpace(claudeAssistantWithMeta("answer", "t2", metaJSON)))
+	parsed, ok := transcript.ParseLine(line)
+	if !ok || parsed.Role != "assistant" || parsed.Text != "answer" || parsed.Time != "t2" {
+		t.Fatalf("ParseLine = (%+v, %v)", parsed, ok)
+	}
+	if len(parsed.Prov) == 0 {
+		t.Fatal("ParseLine dropped provenance before the mirror")
+	}
+
+	n := &Node{ID: "n1", Agent: "claude", Model: "opus", Dir: "/wd", Transcript: tp}
+	a.syncMirror(n)
+
+	evs := contentEvents(logEvents(t, a, "n1"))
+	wantKinds := []string{"meta", "source", "user", "assistant"}
+	if got := kinds(evs); fmt.Sprint(got) != fmt.Sprint(wantKinds) {
+		t.Fatalf("after initial mirror: %v, want %v", got, wantKinds)
+	}
+	if evs[0].Meta == nil || evs[0].Meta.Agent != "claude" {
+		t.Fatalf("meta agent = %+v", evs[0].Meta)
+	}
+	asst := evs[3]
+	if asst.T != "assistant" || asst.Text != "answer" || asst.Time != "t2" {
+		t.Fatalf("mirrored assistant = %+v", asst)
+	}
+	if len(asst.Prov) == 0 || bytes.TrimSpace(asst.Prov)[0] == '"' {
+		t.Fatalf("mirrored Prov missing or stringified: %s", asst.Prov)
+	}
+	var entries []struct {
+		Loc string          `json:"loc"`
+		Key string          `json:"key"`
+		V   json.RawMessage `json:"v"`
+	}
+	if err := json.Unmarshal(asst.Prov, &entries); err != nil {
+		t.Fatalf("Prov is not an entry list: %v (%s)", err, asst.Prov)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Loc == "message" && e.Key == "_meta" {
+			var got, want any
+			_ = json.Unmarshal(e.V, &got)
+			_ = json.Unmarshal([]byte(metaJSON), &want)
+			gb, _ := json.Marshal(got)
+			wb, _ := json.Marshal(want)
+			if string(gb) == string(wb) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("mirrored _meta = %s, want %s", asst.Prov, metaJSON)
+	}
+
+	seg := sessionlog.ReadSegment(filepath.Join(a.sessionsDir, "n1.jsonl"))
+	if len(seg.Turns) != 2 {
+		t.Fatalf("segment turns = %+v", seg.Turns)
+	}
+	if seg.Turns[0].Role != "user" || seg.Turns[0].Agent != "" {
+		t.Errorf("user misattributed: %+v", seg.Turns[0])
+	}
+	if seg.Turns[1].Role != "assistant" || seg.Turns[1].Agent != "claude" || seg.Turns[1].Text != "answer" {
+		t.Errorf("segment assistant = %+v", seg.Turns[1])
+	}
+	if !bytes.Equal(seg.Turns[1].Prov, asst.Prov) {
+		t.Errorf("segment Prov = %s, event Prov = %s", seg.Turns[1].Prov, asst.Prov)
+	}
+
+	// Idle tick must not duplicate turns (provenance is not a dedupe key).
+	a.syncMirror(n)
+	if got := len(contentEvents(logEvents(t, a, "n1"))); got != 4 {
+		t.Fatalf("idle tick appended records: %d content events", got)
+	}
+
+	// Restart / replay: fresh app over the same log, then incremental continuation.
+	b := mirrorTestApp(t)
+	b.sessionsDir = a.sessionsDir
+	b.syncMirror(n)
+	if got := kinds(contentEvents(logEvents(t, b, "n1"))); fmt.Sprint(got) != fmt.Sprint(wantKinds) {
+		t.Fatalf("restart duplicated history: %v", got)
+	}
+
+	appendFile(t, tp, claudeAssistantWithMeta("follow-up", "t3", `{"src":"synth-mirror","n":2}`))
+	b.syncMirror(n)
+	evs = contentEvents(logEvents(t, b, "n1"))
+	if len(evs) != 5 || evs[4].T != "assistant" || evs[4].Text != "follow-up" {
+		t.Fatalf("incremental continuation: %v %+v", kinds(evs), evs[len(evs)-1])
+	}
+	if len(evs[4].Prov) == 0 {
+		t.Fatal("incremental continuation dropped provenance")
+	}
+	seg = sessionlog.ReadSegment(filepath.Join(b.sessionsDir, "n1.jsonl"))
+	if len(seg.Turns) != 3 || seg.Turns[2].Agent != "claude" || seg.Turns[2].Text != "follow-up" {
+		t.Fatalf("post-restart segment = %+v", seg.Turns)
+	}
+
+	// Provenance must not change source-seam or turn counts.
+	seams, users, assts := 0, 0, 0
+	for _, ev := range evs {
+		switch ev.T {
+		case "source":
+			seams++
+		case "user":
+			users++
+		case "assistant":
+			assts++
+		}
+	}
+	if seams != 1 || users != 1 || assts != 2 {
+		t.Fatalf("counts source=%d user=%d assistant=%d", seams, users, assts)
 	}
 }

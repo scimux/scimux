@@ -495,3 +495,81 @@ func TestReadTurnWindow_LockstepWithScanLog(t *testing.T) {
 		t.Errorf("resolve = %q, want beta", got)
 	}
 }
+
+func asstLineProv(time, text, src string) string {
+	return `{"t":"assistant","time":"` + time + `","text":` + jsonStr(text) + `,"prov":[{"loc":"message","key":"_meta","v":{"src":"` + src + `"}}]}`
+}
+
+func TestScanLogRetainsAgentAndProvForAssistant(t *testing.T) {
+	p := writeLines(t,
+		metaU1,
+		userLine("2026-07-01T10:01:00Z", "please login"),
+		asstLineProv("2026-07-01T10:02:00Z", "login is fixed", "search-asst"),
+	)
+	res := ScanLog(p, "login", wideOpt)
+	if len(res.Hits) != 2 {
+		t.Fatalf("hits = %+v", res.Hits)
+	}
+	if res.Hits[0].Role != "user" || res.Hits[0].Agent != "" || len(res.Hits[0].Prov) != 0 {
+		t.Errorf("user hit must not carry agent/prov: %+v", res.Hits[0])
+	}
+	h := res.Hits[1]
+	if h.Role != "assistant" || h.Agent != "claude" {
+		t.Errorf("assistant hit agent = role=%q agent=%q, want assistant/claude", h.Role, h.Agent)
+	}
+	assertRawEqual(t, h.Prov, synthProvJSON("search-asst"))
+}
+
+func TestReadTurnWindowRetainsAgentAndProv(t *testing.T) {
+	p := writeLines(t,
+		metaU1,
+		userLine("2026-07-01T10:01:00Z", "please login"),
+		asstLineProv("2026-07-01T10:02:00Z", "login is fixed", "window-asst"),
+	)
+	res := ScanLog(p, "fixed", wideOpt)
+	if len(res.Hits) != 1 {
+		t.Fatalf("hits = %+v", res.Hits)
+	}
+	win, anchor, _, _, ok := ReadTurnWindow(p, res.Hits[0].Segment, res.Hits[0].Record, 1, 0)
+	if !ok || anchor < 0 || anchor >= len(win) {
+		t.Fatalf("window ok=%v anchor=%d len=%d", ok, anchor, len(win))
+	}
+	if win[anchor].Role != "assistant" || win[anchor].Text != "login is fixed" {
+		t.Fatalf("anchor turn = %+v", win[anchor])
+	}
+	if win[anchor].Agent != "claude" {
+		t.Errorf("window Agent = %q, want claude", win[anchor].Agent)
+	}
+	assertRawEqual(t, win[anchor].Prov, synthProvJSON("window-asst"))
+	if win[0].Role != "user" || win[0].Agent != "" {
+		t.Errorf("user window turn misattributed: %+v", win[0])
+	}
+}
+
+func TestSearchOwnershipUnchangedWithProvenance(t *testing.T) {
+	// Asset hits still own the nearest preceding turn; seams still bound
+	// ownership. Provenance on the assistant must not change ordinals.
+	p := writeLines(t,
+		metaU1, // rec 0
+		userLine("2026-07-01T10:01:00Z", "question one"),                                                      // rec 1
+		asstLineProv("2026-07-01T10:02:00Z", "answer one", "own-asst"),                                        // rec 2
+		`{"t":"asset","time":"2026-07-01T10:02:30Z","asset":{"id":"a_1","name":"plot.png","storage":"blob"}}`, // rec 3
+		`{"t":"source","time":"2026-07-01T11:00:00Z","source":{"reason":"clear"}}`,                            // rec 4
+		userLine("2026-07-01T11:01:00Z", "question two"),                                                      // rec 5
+	)
+	res := ScanLog(p, "plot", wideOpt)
+	if len(res.Hits) != 1 || res.Hits[0].Role != "asset" || res.Hits[0].Record != 3 {
+		t.Fatalf("asset hit = %+v", res.Hits)
+	}
+	if got := anchorText(t, p, 0, 3); got != "answer one" {
+		t.Errorf("asset owner = %q, want answer one", got)
+	}
+	win, anchor, _, _, ok := ReadTurnWindow(p, 0, 3, 0, 0)
+	if !ok || win[anchor].Text != "answer one" || win[anchor].Agent != "claude" {
+		t.Fatalf("asset window = ok=%v %+v", ok, win)
+	}
+	assertRawEqual(t, win[anchor].Prov, synthProvJSON("own-asst"))
+	if _, _, _, _, ok := ReadTurnWindow(p, 1, 3, 8, 8); ok {
+		t.Error("asset record 3 is in segment 0; segment 1 must not resolve it as an owner search across the seam")
+	}
+}

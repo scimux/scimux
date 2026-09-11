@@ -1,6 +1,7 @@
 package sessionlog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -191,4 +192,95 @@ func TestLogCache_MissingEmptyDefensive(t *testing.T) {
 	if cold := ReadFare(missing); cold.Turns != 0 {
 		t.Errorf("cold ReadFare(missing).Turns = %d", cold.Turns)
 	}
+}
+
+func TestLogCacheSegmentMatchesColdForProvAndAgent(t *testing.T) {
+	prov1 := synthProvJSON("cache-initial")
+	path := writeLog(t, []Event{
+		NewMeta("n1", "codex", "", "", "/tmp"),
+		{T: "user", Time: "2026-07-15T09:00:00Z", Text: "hello"},
+		{T: "assistant", Time: "2026-07-15T09:00:01Z", Text: "hi there", Prov: prov1},
+	})
+	c := &LogCache{}
+	got := c.Segment(path)
+	want := ReadSegment(path)
+	if !reflect.DeepEqual(got.Turns, want.Turns) {
+		t.Fatalf("initial scan mismatch:\n got = %+v\nwant = %+v", got.Turns, want.Turns)
+	}
+	if len(got.Turns) != 2 || got.Turns[1].Agent != "codex" {
+		t.Fatalf("initial agent = %+v", got.Turns)
+	}
+	assertRawEqual(t, got.Turns[1].Prov, prov1)
+
+	prov2 := synthProvJSON("cache-append")
+	w := &Writer{Path: path}
+	if err := w.Append(Event{T: "assistant", Time: "2026-07-15T09:00:02Z", Text: "more", Prov: prov2}); err != nil {
+		t.Fatal(err)
+	}
+	got = c.Segment(path)
+	want = ReadSegment(path)
+	if !reflect.DeepEqual(got.Turns, want.Turns) {
+		t.Fatalf("incremental append mismatch:\n got = %+v\nwant = %+v", got.Turns, want.Turns)
+	}
+	if got.Turns[2].Agent != "codex" {
+		t.Errorf("appended Agent = %q", got.Turns[2].Agent)
+	}
+	assertRawEqual(t, got.Turns[2].Prov, prov2)
+
+	// Replacement shorter than watermark forces a cold rebuild.
+	short := writeLog(t, []Event{
+		NewMeta("n1", "codex", "", "", "/tmp"),
+		{T: "assistant", Time: "2026-07-15T09:00:00Z", Text: "rebuilt", Prov: synthProvJSON("cache-rebuild")},
+	})
+	body, err := os.ReadFile(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got = c.Segment(path)
+	want = ReadSegment(path)
+	if !reflect.DeepEqual(got.Turns, want.Turns) {
+		t.Fatalf("rebuild mismatch:\n got = %+v\nwant = %+v", got.Turns, want.Turns)
+	}
+	if len(got.Turns) != 1 || got.Turns[0].Agent != "codex" || got.Turns[0].Text != "rebuilt" {
+		t.Fatalf("rebuild turns = %+v", got.Turns)
+	}
+	assertRawEqual(t, got.Turns[0].Prov, synthProvJSON("cache-rebuild"))
+}
+
+func TestLogCacheSegmentProvIsCallerPrivate(t *testing.T) {
+	prov := json.RawMessage(`[{"loc":"message","key":"_meta","v":{"src":"cache-leak","kids":[1,{"n":2}]}},{"loc":"envelope","key":"provenance","v":null}]`)
+	saved := append(json.RawMessage(nil), prov...)
+	path := writeLog(t, []Event{
+		NewMeta("n1", "claude", "", "", "/tmp"),
+		{T: "assistant", Time: "2026-07-15T09:00:01Z", Text: "visible", Prov: prov},
+	})
+	c := &LogCache{}
+	first := c.Segment(path)
+	if len(first.Turns) != 1 || first.Turns[0].Text != "visible" {
+		t.Fatalf("first segment = %+v", first.Turns)
+	}
+	if len(first.Turns[0].Prov) == 0 {
+		t.Fatal("first Segment dropped provenance")
+	}
+	for i := range first.Turns[0].Prov {
+		first.Turns[0].Prov[i] = 'X'
+	}
+	second := c.Segment(path)
+	if len(second.Turns) != 1 {
+		t.Fatalf("second segment = %+v", second.Turns)
+	}
+	assertRawEqual(t, second.Turns[0].Prov, saved)
+	cold := ReadSegment(path)
+	if len(cold.Turns) != 1 {
+		t.Fatalf("cold segment = %+v", cold.Turns)
+	}
+	assertRawEqual(t, second.Turns[0].Prov, cold.Turns[0].Prov)
+	for i := range second.Turns[0].Prov {
+		second.Turns[0].Prov[i] = 'Y'
+	}
+	third := c.Segment(path)
+	assertRawEqual(t, third.Turns[0].Prov, saved)
 }

@@ -54,6 +54,19 @@ type Turn struct {
 	UID     string `json:"uid,omitempty"`
 	Segment int    `json:"segment,omitempty"`
 	Record  int    `json:"record,omitempty"`
+	// Agent is the actual scimux harness identifier associated with assistant
+	// output (claude, codex, grok, later muse). It is not the generic role
+	// "assistant", the UI word "agent", a model name, or a guessed provider.
+	// Populated when a turn is read from a unified session log from that
+	// log's meta.agent; the raw transcript tailer leaves it empty.
+	Agent string `json:"agent,omitempty"`
+	// Prov is opaque JSON provenance attached to model output. The container
+	// is an ordered JSON array of {loc, key, v} entries so contributions from
+	// different source locations (envelope, message, payload, item,
+	// notification, chunk) cannot overwrite one another. key is exactly
+	// "_meta" or "provenance"; v is any valid JSON value. Absent on legacy
+	// records. Not interpreted, flattened, renamed, or stringified.
+	Prov json.RawMessage `json:"prov,omitempty"`
 }
 
 // ToolStamp is one tool call or result extracted from a transcript line for
@@ -131,7 +144,12 @@ func ParseLine(line []byte) (Turn, bool) {
 		if msg.Role != "" && msg.Role != generic.Type {
 			return Turn{}, false
 		}
-		return makeTurn(generic.Type, contentText(msg.Content), generic.Timestamp)
+		turn, ok := makeTurn(generic.Type, contentText(msg.Content), generic.Timestamp)
+		if !ok {
+			return Turn{}, false
+		}
+		turn.Prov = packProv(namedProv(json.RawMessage(line), locEnvelope), namedProv(generic.Message, locMessage))
+		return turn, true
 	case "response_item": // Codex rollout log
 		var payload struct {
 			Type    string          `json:"type"`
@@ -144,7 +162,12 @@ func ParseLine(line []byte) (Turn, bool) {
 		if payload.Role != "user" && payload.Role != "assistant" {
 			return Turn{}, false
 		}
-		return makeTurn(payload.Role, contentText(payload.Content), generic.Timestamp)
+		turn, ok := makeTurn(payload.Role, contentText(payload.Content), generic.Timestamp)
+		if !ok {
+			return Turn{}, false
+		}
+		turn.Prov = packProv(namedProv(json.RawMessage(line), locEnvelope), namedProv(generic.Payload, locPayload))
+		return turn, true
 	}
 	return Turn{}, false
 }
@@ -161,6 +184,79 @@ func makeTurn(role, text, ts string) (Turn, bool) {
 		return Turn{}, false
 	}
 	return Turn{Role: role, Text: text, Time: ts}, true
+}
+
+const (
+	locEnvelope = "envelope"
+	locMessage  = "message"
+	locPayload  = "payload"
+	keyMeta     = "_meta"
+	keyProv     = "provenance"
+)
+
+// provEntry is one source-located provenance contribution. loc names the
+// source object (envelope, message, payload, item, notification, chunk);
+// key is the exact source field spelling; v is the original JSON value.
+type provEntry struct {
+	Loc string          `json:"loc"`
+	Key string          `json:"key"`
+	V   json.RawMessage `json:"v"`
+}
+
+// namedProv extracts exactly-spelled "_meta" and "provenance" from one JSON
+// object. Map decode is case-sensitive, unlike tagged structs. Any valid JSON
+// value is retained; invalid JSON is omitted.
+func namedProv(raw json.RawMessage, loc string) []provEntry {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	var out []provEntry
+	if v, ok := obj[keyMeta]; ok {
+		if vv := validJSONValue(v); vv != nil {
+			out = append(out, provEntry{Loc: loc, Key: keyMeta, V: vv})
+		}
+	}
+	if v, ok := obj[keyProv]; ok {
+		if vv := validJSONValue(v); vv != nil {
+			out = append(out, provEntry{Loc: loc, Key: keyProv, V: vv})
+		}
+	}
+	return out
+}
+
+func validJSONValue(raw json.RawMessage) json.RawMessage {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || !json.Valid(raw) {
+		return nil
+	}
+	return copyRaw(raw)
+}
+
+func packProv(groups ...[]provEntry) json.RawMessage {
+	var all []provEntry
+	for _, g := range groups {
+		all = append(all, g...)
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(all)
+	if err != nil {
+		return nil
+	}
+	return copyRaw(b)
+}
+
+// copyRaw returns a defensive copy so retained provenance does not alias a
+// caller-owned or decoder-owned buffer that can later be mutated.
+func copyRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
 }
 
 // NewestContentTime returns the newest timestamp among records the existing

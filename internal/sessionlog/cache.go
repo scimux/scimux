@@ -114,7 +114,23 @@ func (c *LogCache) Segment(path string) Segment {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.seg
+	return copySegmentProv(c.seg)
+}
+
+// copySegmentProv returns seg with each turn's Prov copied so a caller cannot
+// mutate the cache's retained provenance bytes. Other Segment fields keep
+// existing snapshot semantics.
+func copySegmentProv(seg Segment) Segment {
+	if len(seg.Turns) == 0 {
+		return seg
+	}
+	turns := make([]transcript.Turn, len(seg.Turns))
+	for i, t := range seg.Turns {
+		t.Prov = copyRaw(t.Prov)
+		turns[i] = t
+	}
+	seg.Turns = turns
+	return seg
 }
 
 // FareAndRides returns whole-journey totals and per-segment rides.
@@ -348,6 +364,9 @@ func (c *LogCache) ingest(ev Event, i int) {
 	// --- segment (raw; backdating applied at snapshot) ---
 	if ev.T == "meta" && ev.Meta != nil {
 		c.uid = ev.Meta.UID
+		if ev.Meta.Agent != "" {
+			c.agent = ev.Meta.Agent
+		}
 	}
 	if c.rawStartTime == "" && ev.Time != "" {
 		c.rawStartTime = ev.Time
@@ -365,10 +384,7 @@ func (c *LogCache) ingest(ev Event, i int) {
 		c.recSeg++
 	case "user", "assistant":
 		if strings.TrimSpace(ev.Text) != "" {
-			c.turns = append(c.turns, transcript.Turn{
-				Role: ev.T, Text: ev.Text, Time: ev.Time,
-				UID: c.uid, Segment: c.recSeg, Record: i,
-			})
+			c.turns = append(c.turns, chatTurn(ev, c.uid, c.agent, c.recSeg, i))
 		}
 	case "usage":
 		if ev.Usage != nil {

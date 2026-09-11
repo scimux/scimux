@@ -388,9 +388,14 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 		if ev == nil && promoted != "" {
 			// Delta-only agentMessage: inline text was empty so decodeItem
 			// returned nil; synthesise the event from buffered deltas.
+			// Do not invent provenance the completed item did not deliver.
 			ev = &Event{T: "assistant", Text: promoted}
-		} else if ev != nil && ev.T == "assistant" && strings.TrimSpace(ev.Text) == "" && promoted != "" {
-			ev.Text = promoted
+		} else if ev != nil && ev.T == "assistant" && strings.TrimSpace(ev.Text) == "" {
+			if promoted != "" {
+				ev.Text = promoted
+			} else {
+				break
+			}
 		}
 		if ev == nil || ev.T == "user" {
 			break
