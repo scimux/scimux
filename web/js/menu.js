@@ -11,16 +11,27 @@
 
 /**
  * Pure placement decision relative to a panel.
- *   top  = anchor.bottom - panel.top + 4
+ *   top  = anchor.bottom - panel.top + 4, unless the measured menu would
+ *          cross the panel's bottom edge; then it opens above the anchor
  *   left = max(8, min(anchor.left - panel.left - offset, panel.width - 190))
  * offset is 150 for the section menu and 40 for the delete confirm — do not
  * bake either in; a wrong default silently moves the other popover 110px.
  */
-export function menuPlacement(anchorRect, panelRect, { offset = 0 } = {}){
+export function menuPlacement(anchorRect, panelRect, { offset = 0, menuHeight = 0 } = {}){
   const r = anchorRect || {};
   const pr = panelRect || {};
   const off = Number(offset) || 0;
-  const top = (Number(r.bottom) || 0) - (Number(pr.top) || 0) + 4;
+  const gap = 4;
+  const inset = 8;
+  const panelTop = Number(pr.top) || 0;
+  const panelHeight = Number(pr.height) ||
+    Math.max(0, (Number(pr.bottom) || 0) - panelTop);
+  const height = Math.max(0, Number(menuHeight) || 0);
+  const below = (Number(r.bottom) || 0) - panelTop + gap;
+  let top = below;
+  if (height > 0 && panelHeight > 0 && below + height > panelHeight - inset){
+    top = Math.max(inset, (Number(r.top) || 0) - panelTop - height - gap);
+  }
   const left = Math.max(
     8,
     Math.min(
@@ -125,7 +136,10 @@ export function createPopoverMenu(doc){
     const pr = panel && typeof panel.getBoundingClientRect === "function"
       ? panel.getBoundingClientRect()
       : { top: 0, left: 0, width: 400 };
-    const pos = menuPlacement(r, pr, { offset });
+    const mr = typeof m.getBoundingClientRect === "function"
+      ? m.getBoundingClientRect()
+      : { height: 0 };
+    const pos = menuPlacement(r, pr, { offset, menuHeight: mr.height });
     m.style.top = pos.top + "px";
     m.style.left = pos.left + "px";
     menuEl = m;

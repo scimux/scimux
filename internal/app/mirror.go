@@ -105,8 +105,20 @@ func (a *app) syncMirror(n *Node) {
 	// This is the restart win: settled nodes (the common case) cost a stat each
 	// instead of a full-file re-parse. A grown or shrunken file falls through to
 	// the full parse below (correctness over the speed-up on change).
+	forceRemirror := false
 	if fi, err := os.Stat(tpath); err == nil && tpath == m.path && fi.Size() == m.tsize {
-		return
+		// Usually unchanged bytes are the whole restart fast path. One narrow
+		// exception is a parser widening: tailerFor's startup catch-up may now
+		// recover a turn that the durable mirror watermark predates. Preserve
+		// the old append-only segment and re-mirror the corrected view instead
+		// of slicing it at the old positional count and shifting every turn.
+		a.mu.Lock()
+		caughtUp := a.tailers[n.ID]
+		a.mu.Unlock()
+		if caughtUp == nil || caughtUp.Path != tpath || caughtUp.TurnCount() == m.mirrored {
+			return
+		}
+		forceRemirror = true
 	}
 
 	tl := a.tailerFor(n)
@@ -117,14 +129,14 @@ func (a *app) syncMirror(n *Node) {
 	tools := tl.ToolStamps() // locked snapshot; Poll already advanced Tools
 	used, win := tl.Usage()
 	bd := tl.UsageBreakdown()
-	m.sync(a, n, tl.Path, turns, tools, used, win, bd)
+	m.sync(a, n, tl.Path, turns, tools, used, win, bd, forceRemirror)
 }
 
 // sync appends any new turns/tools/usage to the log and re-persists the
 // transcript size watermark. The caller has already recovered durable state
 // and confirmed the transcript changed (or is new). Fields are owned by the
 // poller goroutine.
-func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, tools []transcript.ToolStamp, used, win int64, bd transcript.UsageBreakdown) {
+func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, tools []transcript.ToolStamp, used, win int64, bd transcript.UsageBreakdown, forceRemirror bool) {
 	if tpath == "" {
 		return
 	}
@@ -133,7 +145,7 @@ func (m *mirror) sync(a *app, n *Node, tpath string, turns []transcript.Turn, to
 	// reports fewer turns than we mirrored) starts a new source segment.
 	// Tools are also reset: a shorter tool list after rotation means the
 	// tailer rewound, same signal as turns.
-	if tpath != m.path || len(turns) < m.mirrored || len(tools) < m.mirroredTools {
+	if forceRemirror || tpath != m.path || len(turns) < m.mirrored || len(tools) < m.mirroredTools {
 		sid := strings.TrimSuffix(filepath.Base(tpath), ".jsonl")
 		if err := m.logw.Append(sessionlog.NewSource(tpath, sid)); err != nil {
 			return

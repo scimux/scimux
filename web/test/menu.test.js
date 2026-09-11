@@ -162,6 +162,40 @@ test("P5 1c: menuPlacement clamps left edge to 8 and right to width-190", async 
   assert.deepEqual(rightClamp, { top: 54, left: 210 });
 });
 
+test("bookmark delete confirm flips above a near-bottom anchor", async () => {
+  const menu = await loadMenu();
+  const pos = menu.menuPlacement(
+    { top: 530, bottom: 574, left: 200 },
+    { top: 40, left: 0, width: 340, height: 600 },
+    { offset: 40, menuHeight: 142 },
+  );
+  assert.deepEqual(pos, { top: 344, left: 150 });
+});
+
+test("popover controller measures its menu before vertical placement", async () => {
+  const menu = await loadMenu();
+  const doc = makeDoc();
+  doc.createElement = tag => makeEl(tag, {
+    getBoundingClientRect: () => ({
+      top: 0, left: 0, bottom: 142, right: 176, width: 176, height: 142,
+    }),
+  });
+  const { panel, anchor } = makeHost(
+    { top: 530, bottom: 574, left: 200 },
+    { top: 40, left: 0, width: 340, height: 600 },
+  );
+  const ctl = menu.createPopoverMenu(doc);
+  const el = ctl.open({ panel, anchor, offset: 40, html: "Delete?" });
+  assert.equal(el.style.top, "344px");
+  assert.equal(el.style.left, "150px");
+});
+
+test("desktop Bookmarks pane establishes the popover containing block", () => {
+  const notes = readFileSync(join(cssDir, "notes.css"), "utf8");
+  const desktop = notes.slice(notes.indexOf("@media (min-width: 900px)"));
+  assert.match(desktop, /#bookmarkspane\s*\{\s*position:\s*relative;/);
+});
+
 /* Pin the delete-confirm consumer specifically — the extraction is most likely
    to bake in the section-menu offset of 150 and silently move this popover. */
 test("P5 1d: delete-confirm position pin (offset 40, real openDeleteConfirm rects)", async () => {

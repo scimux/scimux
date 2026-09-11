@@ -2686,7 +2686,7 @@ test("P1a: desktop-only shell rules live inside @media (min-width: 900px)", () =
     "#bookmarkpeek hide rule is desktop-only");
 });
 
-test("P1a: desktop #bookmarkspane rule keeps display:none, width:340px, flex:none", () => {
+test("P1a: desktop #bookmarkspane is a positioned, hidden fixed-width flex item", () => {
   /* The desktop #bookmarkspane override must remain a single complete rule
      inside the 900px block. A stray } after the first three decls orphans
      display:none / width / flex:none and leaves the pane as a permanent
@@ -2696,7 +2696,10 @@ test("P1a: desktop #bookmarkspane rule keeps display:none, width:340px, flex:non
   // Standalone #bookmarkspane (not body.map-full #bookmarkspane / body.bookmarks-open …).
   const rule = mediaBody.match(/(?:^|\n)\s*#bookmarkspane\s*\{([^}]+)\}/);
   assert.ok(rule, "desktop #bookmarkspane rule present inside 900px media");
-  assert.match(rule[1], /position:\s*static/, "desktop pane is in the flex row flow");
+  assert.match(rule[1], /position:\s*relative/, "desktop pane anchors its popovers while staying in flex flow");
+  for (const edge of ["top", "right", "bottom", "left"]){
+    assert.match(rule[1], new RegExp(`${edge}:\\s*auto`), `desktop pane clears the phone ${edge} inset`);
+  }
   assert.match(rule[1], /display:\s*none/, "pane stays hidden until bookmarks-open");
   assert.match(rule[1], /width:\s*var\(--pane\)/, "pane column width from the shared token");
   assert.match(rule[1], /flex:\s*none/, "pane does not grow/shrink in the row");
