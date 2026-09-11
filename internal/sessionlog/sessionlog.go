@@ -5,6 +5,25 @@
 // slug; identity across slug reuse comes from the meta header record inside
 // the file. Records are plain-text JSON lines on purpose: the corpus must
 // stay grep/sed/awk/jq-able for future search/consolidation/sharing readers.
+//
+// # The corpus is the user's history and nothing else
+//
+// Taken together these files are an append-only, never-deleted, multi-vendor
+// record of model output. Heuristics may read it freely — that is what
+// search, the fare layer and needs-input detection do. No model may be
+// trained, fine-tuned or distilled from it, ever, and no part of it may be
+// collected into a training dataset. Every vendor whose harness scimux
+// supervises prohibits exactly that (Anthropic Consumer Terms and Commercial
+// D.4, OpenAI Terms of Use, SpaceXAI AUP, Meta Model API ToS 10.1(ix)), so a
+// single change here breaches several agreements at once, on the user's
+// account rather than the project's.
+//
+// This is written at the store rather than in any one transport because the
+// realistic failure is not an adapter: it is a well-meant commit to
+// internal/dialoghint, to search ranking or to the fare layer that reads like
+// an accuracy improvement. If a change would make any of those learn from
+// this directory, it is out of scope for scimux regardless of how well it
+// works.
 package sessionlog
 
 import (

@@ -272,7 +272,11 @@ body.bookmarks-open #bookmarkpeek { display: block; }
   @media (prefers-reduced-motion: reduce) {
     #mapdivider::before { transition: none; }
   }
-  #bookmarkspane { position: static; transform: none; transition: none;
+  /* Relative keeps the panel in flex flow while making its coordinate system
+     the containing block used by the appended bookmark popover. Clear the
+     phone fixed-position insets or relative positioning would offset the pane. */
+  #bookmarkspane { position: relative; top: auto; right: auto; bottom: auto; left: auto;
+    transform: none; transition: none;
     box-shadow: none; display: none; width: var(--pane); flex: none;
     height: auto; border-left: 1px solid var(--hairline); }
   body.bookmarks-open #bookmarkspane { display: flex; }

@@ -231,6 +231,31 @@ scripts/test/backend-split-mutations.sh
     tap). Keep that split: history in the poll payload would ship the whole
     corpus every second, and it can repeat turns across mechanical seams
     because a rotation re-mirrors from turn zero.
+  - **The corpus is the user's history and nothing else.** Heuristics may read
+    it; no model may be trained, fine-tuned or distilled from it, and it is
+    never described as a training dataset. Four vendors bar that act
+    independently, so one commit that reads like an accuracy improvement — a
+    smarter `internal/dialoghint`, a ranked search, a better fare estimate —
+    would breach all four at once and silently. The rule lives with the store
+    and not in an adapter because the store is where the temptation arrives.
+    Cross-harness comparison is the same rule's other half: five agents side
+    by side in the user's own UI is fine, a published benchmark table is not.
+- **An agent's Output is never passed off as the user's.** Two places can
+  break this, and both are quiet. Send-to carries one agent's Output into
+  another agent's Input, and the receiving node records the arrival as an
+  ordinary user turn — so scimux, not the user, would be the party asserting
+  human authorship. `bookmarks.js` owns the one marker (`AI_DISCLOSURE`,
+  applied once inside `openSendTo`); every caller must hand over the role it
+  knows, and a caller that forgets disables the disclosure without a symptom,
+  which is why bookmarks stamp `role` at capture. Provenance is also the named
+  exception to defensive parsing: discarding an unknown record type is right,
+  discarding an unknown *provenance* field is alteration rather than
+  degradation, and `sessionlog` is never rewritten, so the loss is permanent.
+  Two deliberate limits, neither an oversight: the marker fires on evidence
+  only — an unknown role passes through untouched, because stamping "an AI
+  wrote this" on the user's own words is the same misattribution pointed the
+  other way — and the clipboard is outside the rule entirely, because there
+  the user copies, pastes and attributes, and scimux is upstream of that.
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam,
   never a new file or truncation; the context gauge is segment-scoped.

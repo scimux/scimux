@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -372,6 +373,46 @@ func TestTailerProgressPartialLine(t *testing.T) {
 	}
 	if off, prog := tl.Progress(); off != int64(len(full)) || prog != 1 {
 		t.Fatalf("completed record must commit: off=%d prog=%d, want %d and 1", off, prog, len(full))
+	}
+}
+
+// Claude 2.1.236 was observed writing a complete final assistant record into
+// the middle of an unfinished tool-call record after auto-compaction. The two
+// writes shared one physical JSONL line. The corrupt prefix is unusable, but
+// the structurally fenced, complete suffix must not take the final answer with it.
+func TestTailerRecoversCompleteClaudeSuffixFromCorruptLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "sid.jsonl")
+	corrupt := `{"parentUuid":"p0","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"Bash","input":{}}],"usage":{"iterations":[{"input_tokens":2},` +
+		`{"parentUuid":"p1","message":{"id":"msg-final","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"the complete review"}]},"type":"assistant","uuid":"u-final","timestamp":"2026-09-11T12:47:09.042Z","session_id":"sid","sessionId":"sid"}` + "\n"
+	if err := os.WriteFile(p, []byte(corrupt), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := &Tailer{Path: p}
+	turns := tl.Poll()
+	if len(turns) != 1 || turns[0].Role != "assistant" || turns[0].Text != "the complete review" {
+		t.Fatalf("recovered turns = %#v", turns)
+	}
+	if !tl.EndTurn() || !tl.Delivered() || tl.Owing() {
+		t.Fatalf("recovered boundary: end=%v delivered=%v owing=%v", tl.EndTurn(), tl.Delivered(), tl.Owing())
+	}
+	if _, progress := tl.Progress(); progress != 1 {
+		t.Fatalf("recovered assistant progress = %d, want 1", progress)
+	}
+	if tl.Unparseable() {
+		t.Fatal("a recovered record must not count as an unparseable line")
+	}
+}
+
+func TestTailerDoesNotRecoverClaudeLookalikeInsideString(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	lookalike := `{"parentUuid":"p1","message":{"id":"msg-fake","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"counterfeit"}]},"type":"assistant","uuid":"u-fake","timestamp":"2026-09-11T12:47:09.042Z","session_id":"sid","sessionId":"sid"}`
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"command":` + strconv.Quote(lookalike) + `}}]},BROKEN` + "\n"
+	if err := os.WriteFile(p, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := &Tailer{Path: p}
+	if turns := tl.Poll(); len(turns) != 0 {
+		t.Fatalf("recovered string content as a turn: %#v", turns)
 	}
 }
 

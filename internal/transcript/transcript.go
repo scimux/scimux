@@ -8,6 +8,19 @@
 // recognized shape yield turns, everything else is silently ignored, and an
 // unreadable file yields no turns rather than an error. Callers degrade to
 // the raw tmux pane snapshot when this package returns nothing useful.
+//
+// Discarding what it does not understand is right for record types and
+// shapes. Provenance is the one thing it must not discard that way. Meta's
+// AUP bars removing or obscuring "any watermark, label, metadata, or other
+// provenance signal" attached to model output, the SpaceXAI AUP bars
+// "stripping, altering or circumventing embedded provenance metadata or
+// watermarks", and both Anthropic and SpaceXAI bar representing output as
+// human-generated. Dropping such a field is not graceful degradation, it is
+// alteration — and because sessionlog is append-only and never rewritten, it
+// is unrecoverable the moment the turn is mirrored. A provenance-shaped field
+// on a record therefore passes through verbatim rather than being parsed;
+// same discipline as the tunnel protocol's MINOR rule, record what you do not
+// understand.
 package transcript
 
 import (
@@ -620,6 +633,15 @@ func (t *Tailer) EndTurn() bool {
 	return t.endTurn
 }
 
+// TurnCount reports the accumulated visible-turn count without exposing the
+// Tailer's mutable Turns slice. The mirror uses it only to notice that an
+// upgraded defensive parser can now recover content from unchanged bytes.
+func (t *Tailer) TurnCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.Turns)
+}
+
 // NewestTurnTime reports the CLI's stamp on the newest parsed turn. ok is
 // false when no turn has been dated — undated records must read as unknown,
 // so a caller gating on freshness declines rather than guesses.
@@ -797,6 +819,74 @@ func (t *Tailer) resolve(id string) {
 	}
 }
 
+// recoverClaudeRecordSuffix handles one narrow upstream corruption observed
+// in Claude Code 2.1.236 after auto-compaction: a complete final assistant
+// record was appended in the middle of an unfinished record, leaving both on
+// one invalid JSONL line. The prefix cannot be trusted. A suffix is recovered
+// only when it starts outside a JSON string, consumes the rest of the line,
+// carries Claude's redundant session identity matching this transcript's
+// filename, and is itself a visible end_turn assistant record. Anything less
+// stays ordinary defensive-parser garbage.
+func recoverClaudeRecordSuffix(line []byte, path string) []byte {
+	wantSession := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if wantSession == "" {
+		return nil
+	}
+	inString, escaped := false, false
+	var recovered []byte
+	for i, c := range line {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			continue
+		}
+		if c != '{' || !bytes.HasPrefix(line[i:], []byte(`{"parentUuid":`)) {
+			continue
+		}
+		candidate := bytes.TrimSpace(line[i:])
+		var env struct {
+			Type        string `json:"type"`
+			UUID        string `json:"uuid"`
+			ParentUUID  string `json:"parentUuid"`
+			Timestamp   string `json:"timestamp"`
+			SessionID   string `json:"sessionId"`
+			SessionIDV2 string `json:"session_id"`
+			Message     struct {
+				ID         string `json:"id"`
+				Role       string `json:"role"`
+				StopReason string `json:"stop_reason"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(candidate, &env) != nil ||
+			env.Type != "assistant" || env.Message.Role != "assistant" ||
+			env.Message.StopReason != "end_turn" || env.Message.ID == "" ||
+			env.UUID == "" || env.ParentUUID == "" || env.Timestamp == "" ||
+			env.SessionID != wantSession || env.SessionIDV2 != wantSession {
+			continue
+		}
+		turn, ok := ParseLine(candidate)
+		if !ok || turn.Role != "assistant" {
+			continue
+		}
+		// More than one plausible suffix is ambiguity, not recovery.
+		if recovered != nil {
+			return nil
+		}
+		recovered = candidate
+	}
+	return recovered
+}
+
 // Poll reads newly appended bytes and returns the accumulated turn list.
 // All I/O failures are absorbed: the previous turn list is returned and the
 // next poll retries. A shrunken file (rotation) resets the tailer.
@@ -842,19 +932,25 @@ func (t *Tailer) Poll() []Turn {
 		}
 		line := t.buf[:i]
 		t.buf = append([]byte(nil), t.buf[i+1:]...)
-		if len(bytes.TrimSpace(line)) > 0 {
-			if recognizedLine(line) {
+		record := line
+		if len(bytes.TrimSpace(line)) > 0 && !json.Valid(line) {
+			if suffix := recoverClaudeRecordSuffix(line, t.Path); suffix != nil {
+				record = suffix
+			}
+		}
+		if len(bytes.TrimSpace(record)) > 0 {
+			if recognizedLine(record) {
 				t.unknownStreak = 0
 			} else {
 				t.unknownStreak++
 			}
-			if agentShaped(line) {
+			if agentShaped(record) {
 				t.progress++
 			}
 		}
-		t.notePending(line)
-		t.noteUsage(line)
-		if turn, ok := ParseLine(line); ok {
+		t.notePending(record)
+		t.noteUsage(record)
+		if turn, ok := ParseLine(record); ok {
 			t.Turns = append(t.Turns, turn)
 			// Newest, not last-parsed: Claude flushes some records late, so a
 			// trailing older stamp must not age a fresh delivery.

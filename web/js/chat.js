@@ -2134,6 +2134,14 @@ export function createChatFeature(deps){
             t: new Date().toISOString(), text: turn.text || "",
             node: sel, lane: node?.lane_id || "", turnTime: turn.time || "",
           };
+          /* Whose turn this was, recorded now because nothing downstream can
+             recover it: the bookmark outlives the segment it was taken from.
+             It is what lets send-to disclose an Output as AI-generated
+             (bookmarks.js discloseAgentOutput) and what fills the speaker in a
+             note's frozen snapshot. Written only when the transcript said so —
+             a guessed role is worse than none. */
+          if (turn.role === "user" || turn.role === "assistant")
+            bookmark.role = turn.role;
           if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
           if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark });
         }
@@ -2153,6 +2161,7 @@ export function createChatFeature(deps){
           text: stripAssetRefs(turn.text),
           exceptId: g("sel", ""),
           title: "Send to chat…",
+          role: turn.role || "",
         });
       else if (ba.dataset.bact === "desc")
         useTurnAsDescription(turn.text);

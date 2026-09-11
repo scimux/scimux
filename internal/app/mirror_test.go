@@ -133,6 +133,50 @@ func TestMirrorRestartResumes(t *testing.T) {
 	}
 }
 
+func TestMirrorRestartRemirrorsUnchangedTranscriptAfterParserRecovery(t *testing.T) {
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sid.jsonl")
+	corruptFinal := `{"parentUuid":"p0","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"Bash","input":{}}],"usage":{"iterations":[{"input_tokens":2},` +
+		`{"parentUuid":"p1","message":{"id":"msg-final","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"recovered review"}]},"type":"assistant","uuid":"u-final","timestamp":"t2","session_id":"sid","sessionId":"sid"}` + "\n"
+	transcriptText := claudeTurn("user", "initial", "t1") + corruptFinal +
+		claudeTurn("user", "manual follow-up", "t3") + claudeTurn("assistant", "written", "t4")
+	if err := os.WriteFile(tp, []byte(transcriptText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Durable state produced by the old parser: it skipped the corrupt line,
+	// then marked all transcript bytes consumed.
+	logPath := filepath.Join(a.sessionsDir, "n1.jsonl")
+	w := &sessionlog.Writer{Path: logPath}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("n1", "claude", "opus", "", tdir),
+		sessionlog.NewSource(tp, "sid"),
+		{T: "user", Text: "initial", Time: "t1"},
+		{T: "user", Text: "manual follow-up", Time: "t3"},
+		{T: "assistant", Text: "written", Time: "t4"},
+		sessionlog.NewMark(int64(len(transcriptText))),
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n := &Node{ID: "n1", Agent: "claude", Model: "opus", Dir: tdir, Transcript: tp}
+	_ = a.tailerFor(n) // startup catch-up has the widened four-turn view
+	a.syncMirror(n)
+	seg := sessionlog.ReadSegment(logPath)
+	if got := len(seg.Turns); got != 4 {
+		t.Fatalf("remirrored current turns = %d, want 4", got)
+	}
+	if seg.Turns[1].Role != "assistant" || seg.Turns[1].Text != "recovered review" {
+		t.Fatalf("recovered current segment = %#v", seg.Turns)
+	}
+	if history := sessionlog.ReadHistory(logPath); len(history) != 2 {
+		t.Fatalf("segments = %d, want old history + corrected current", len(history))
+	}
+}
+
 func TestMirrorClearRolloverWritesNewSource(t *testing.T) {
 	a := mirrorTestApp(t)
 	tdir := t.TempDir()
