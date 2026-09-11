@@ -864,10 +864,14 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 	publish := func() {
 		status := backend.Status{Generation: cfg.Generation, Version: version}
+		remoteStatus := ""
 		if remoteClient != nil {
-			remoteStatus := remoteClient.HostedStatus()
-			status.Remote = &remoteStatus
+			remoteStatus = remoteClient.HostedStatus()
 		}
+		// Omission means "retain" for compatibility with older web processes,
+		// so every current generation publishes its authoritative value. In
+		// particular, local activation clears a preceding remote generation.
+		status.Remote = &remoteStatus
 		statusCtx, cancel := context.WithTimeout(childCtx, 2*time.Second)
 		defer cancel()
 		_ = core.PublishStatus(statusCtx, status)

@@ -605,9 +605,15 @@ func TestServeWebChildInProcess(t *testing.T) {
 			}
 			select {
 			case status := <-statusReports:
-				wantRemoteStatus := tc.remote && !tc.stayLocal
-				if status.Generation != 9 || status.Version == "" || (status.Remote != nil) != wantRemoteStatus {
+				if status.Generation != 9 || status.Version == "" || status.Remote == nil {
 					t.Fatalf("published status = %#v", status)
+				}
+				wantRemote := ""
+				if tc.remote && !tc.stayLocal {
+					wantRemote = "enrolled"
+				}
+				if *status.Remote != wantRemote {
+					t.Fatalf("published remote status = %q, want %q", *status.Remote, wantRemote)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("web child did not publish status")
@@ -748,7 +754,7 @@ func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
 	data := t.TempDir()
 	writeEnrolledState(t, data)
 	rewriteEnrolledOrigin(t, data, rv.URL)
-	s, addr := newRealRemoteWebSupervisor(t, data, rv.URL)
+	s, addr := newProjectedRemoteWebSupervisor(t, data, rv.URL)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -756,6 +762,7 @@ func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
 	if err := s.Start(context.Background(), exe); err != nil {
 		t.Fatal(err)
 	}
+	assertRemoteProjection(t, addr, "enrolled")
 	csrf := fetchCSRF(t, addr)
 	code, body := publicJSON(t, addr, http.MethodPost, "/api/remote/unenroll", []byte(`{}`), csrf)
 	if code != http.StatusOK || !strings.Contains(string(body), `"hosted":""`) {
@@ -764,7 +771,8 @@ func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
 	if err := s.Rotate(context.Background(), exe); err != nil {
 		t.Fatalf("rotation after unlink: %v", err)
 	}
-	assertWebGeneration(t, addr, "2")
+	assertWebGenerationEventually(t, addr, "2")
+	assertRemoteProjection(t, addr, "")
 
 	recoverCtx, cancelRecover := context.WithCancel(context.Background())
 	defer cancelRecover()
@@ -794,6 +802,7 @@ func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
 				if enrollCalls.Load() != 0 {
 					t.Fatalf("replacement attempted enrollment %d times", enrollCalls.Load())
 				}
+				assertRemoteProjection(t, addr, "")
 				return
 			}
 		}
@@ -829,7 +838,7 @@ func TestUnlinkDuringPreparedHandoff(t *testing.T) {
 	data := t.TempDir()
 	writeEnrolledState(t, data)
 	rewriteEnrolledOrigin(t, data, rv.URL)
-	s, addr := newRealRemoteWebSupervisor(t, data, rv.URL)
+	s, addr := newProjectedRemoteWebSupervisor(t, data, rv.URL)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -837,6 +846,7 @@ func TestUnlinkDuringPreparedHandoff(t *testing.T) {
 	if err := s.Start(context.Background(), exe); err != nil {
 		t.Fatal(err)
 	}
+	assertRemoteProjection(t, addr, "enrolled")
 	prepared, err := s.Prepare(context.Background(), exe)
 	if err != nil {
 		t.Fatal(err)
@@ -884,11 +894,12 @@ func TestUnlinkDuringPreparedHandoff(t *testing.T) {
 	if result.err != nil || result.code != http.StatusOK {
 		t.Fatalf("unlink = %d %s, %v", result.code, result.body, result.err)
 	}
-	assertWebGeneration(t, addr, "2")
+	assertWebGenerationEventually(t, addr, "2")
 	code, body := publicJSON(t, addr, http.MethodGet, "/api/remote/status", nil, "")
 	if code != http.StatusNotFound {
 		t.Fatalf("replacement retained remote routes: %d %s", code, body)
 	}
+	assertRemoteProjection(t, addr, "")
 	if enrollCalls.Load() != 0 {
 		t.Fatalf("prepared replacement attempted enrollment %d times", enrollCalls.Load())
 	}
@@ -956,7 +967,27 @@ func newRealRemoteWebSupervisor(t *testing.T, data, origin string) (*webSupervis
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"marker":"muxer-alive"}`)
 	})
-	core, err := backend.Listen(t.TempDir(), coreMux)
+	return newRemoteWebSupervisorWithCore(t, data, origin, coreMux)
+}
+
+func newProjectedRemoteWebSupervisor(t *testing.T, data, origin string) (*webSupervisor, string) {
+	t.Helper()
+	a := newTestApp(t, &fakeTmux{})
+	muxer, err := newMuxerBackend(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxer.enableRemote(true)
+	coreHandler, err := muxer.handler(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newRemoteWebSupervisorWithCore(t, data, origin, coreHandler)
+}
+
+func newRemoteWebSupervisorWithCore(t *testing.T, data, origin string, coreHandler http.Handler) (*webSupervisor, string) {
+	t.Helper()
+	core, err := backend.Listen(t.TempDir(), coreHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -979,6 +1010,22 @@ func newRealRemoteWebSupervisor(t *testing.T, data, origin string) (*webSupervis
 	s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
 	t.Cleanup(func() { _ = s.Close() })
 	return s, ln.Addr().String()
+}
+
+func assertRemoteProjection(t *testing.T, addr, want string) {
+	t.Helper()
+	code, body := publicJSON(t, addr, http.MethodGet, "/api/state", nil, "")
+	var payload struct {
+		Remote *struct {
+			Status string `json:"status"`
+		} `json:"remote"`
+	}
+	if err := json.Unmarshal(body, &payload); code != http.StatusOK || err != nil {
+		t.Fatalf("state = %d %s, %v", code, body, err)
+	}
+	if payload.Remote == nil || payload.Remote.Status != want {
+		t.Fatalf("remote projection = %#v, want status %q", payload.Remote, want)
+	}
 }
 
 func rewriteEnrolledOrigin(t *testing.T, data, origin string) {
