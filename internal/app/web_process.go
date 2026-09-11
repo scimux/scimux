@@ -66,6 +66,7 @@ type webChildEvent struct {
 
 type webRemoteClient interface {
 	hostedPairingClient
+	State() (remote.EnrollmentState, error)
 	Start(context.Context) error
 	Close() error
 }
@@ -419,11 +420,12 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 	return p, nil
 }
 
-// listenerFileForExec duplicates the listener without calling os.File.Fd.
-// exec.ExtraFiles calls Fd itself; doing that on the network file returned by
-// Listener.File can temporarily clear O_NONBLOCK on the shared socket and
-// strand another child's Accept in the kernel. A raw dup wrapped in a fresh
-// os.File has no poller state for Fd to dismantle.
+// listenerFileForExec duplicates the listener without calling Fd on the
+// network-backed file. That call can temporarily clear O_NONBLOCK on the
+// shared socket and strand another child's Accept in the kernel. The fork
+// lock separately makes Dup plus CloseOnExec atomic with respect to every Go
+// subprocess launch; without it, an unrelated harness can inherit the public
+// listener in the interval between those two calls.
 func listenerFileForExec(listener net.Listener) (*os.File, error) {
 	fl, ok := listener.(interface{ File() (*os.File, error) })
 	if !ok {
@@ -441,7 +443,12 @@ func listenerFileForExec(listener net.Listener) (*os.File, error) {
 	inheritedFD := -1
 	var dupErr error
 	controlErr := raw.Control(func(fd uintptr) {
+		syscall.ForkLock.RLock()
+		defer syscall.ForkLock.RUnlock()
 		inheritedFD, dupErr = syscall.Dup(int(fd))
+		if dupErr == nil {
+			syscall.CloseOnExec(inheritedFD)
+		}
 	})
 	_ = networkFile.Close()
 	if controlErr != nil {
@@ -450,7 +457,6 @@ func listenerFileForExec(listener net.Listener) (*os.File, error) {
 	if dupErr != nil {
 		return nil, fmt.Errorf("web supervisor: duplicate listener descriptor: %w", dupErr)
 	}
-	syscall.CloseOnExec(inheritedFD)
 	return os.NewFile(uintptr(inheritedFD), "scimux-public-listener"), nil
 }
 
@@ -779,7 +785,7 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	if err != nil {
 		return err
 	}
-	defer web.Close()
+	defer func() { _ = web.Close() }()
 
 	startRemote := func() error {
 		if remoteClient == nil {
@@ -830,7 +836,26 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	}
 
 	if cfg.Replacement {
-		if err := startRemote(); err != nil {
+		stayLocal := false
+		if remoteClient != nil && cfg.InviteFile == "" && !cfg.InviteStdin {
+			state, stateErr := remoteClient.State()
+			stayLocal = stateErr == nil && state == remote.StateAbsent
+		}
+		if stayLocal {
+			// The active child may have processed Unenroll after this standby
+			// snapshotted Remote=true. It has now drained, so absence with no
+			// reusable invite is authoritative: expose the same local-only route
+			// set as a replacement prepared after the unlink.
+			localWeb, err := newWebBackend(webBackendConfig{
+				Web: webFS, Core: core.Proxy(), RequestPolicy: policy,
+			})
+			if err != nil {
+				return err
+			}
+			_ = web.Close()
+			web = localWeb
+			remoteClient = nil
+		} else if err := startRemote(); err != nil {
 			if childCtx.Err() != nil {
 				return nil
 			}

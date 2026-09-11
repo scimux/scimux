@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,6 +93,23 @@ func TestGatedWebChildHelperProcess(t *testing.T) {
 	}
 	if err := runWebChild(context.Background(), os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUnrelatedExecDescriptorProbe(t *testing.T) {
+	target := os.Getenv("SCIMUX_LISTENER_PROBE")
+	if target == "" {
+		return
+	}
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range fds {
+		link, _ := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
+		if link == target {
+			t.Fatalf("unrelated process inherited listener as fd %s (%s)", fd.Name(), link)
+		}
 	}
 }
 
@@ -445,11 +464,13 @@ func TestServeWebChildInProcess(t *testing.T) {
 		remote      bool
 		replacement bool
 		startErr    bool
+		stayLocal   bool
 	}{
-		{"local-initial", false, false, false},
-		{"remote-initial", true, false, false},
-		{"remote-replacement", true, true, false},
-		{"remote-replacement-failure", true, true, true},
+		{name: "local-initial"},
+		{name: "remote-initial", remote: true},
+		{name: "remote-replacement", remote: true, replacement: true},
+		{name: "remote-replacement-failure", remote: true, replacement: true, startErr: true},
+		{name: "unlinked-replacement", remote: true, replacement: true, stayLocal: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			statusReports := make(chan backend.Status, 8)
@@ -478,7 +499,10 @@ func TestServeWebChildInProcess(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			fakeRemote := newFakeWebRemote("enrolled")
-			if tc.replacement && !tc.startErr {
+			if tc.stayLocal {
+				fakeRemote.state = remote.StateAbsent
+			}
+			if tc.replacement && !tc.startErr && !tc.stayLocal {
 				fakeRemote.startGate = make(chan struct{})
 			}
 			if tc.startErr {
@@ -533,7 +557,7 @@ func TestServeWebChildInProcess(t *testing.T) {
 					err   error
 				}{active, err}
 			}()
-			if tc.remote && tc.replacement {
+			if tc.remote && tc.replacement && !tc.stayLocal {
 				select {
 				case <-fakeRemote.started:
 				case <-time.After(2 * time.Second):
@@ -569,9 +593,20 @@ func TestServeWebChildInProcess(t *testing.T) {
 			if string(body) != "state" || resp.Header.Get("X-Scimux-Web-Generation") != "9" {
 				t.Fatalf("public response = %q headers %v", body, resp.Header)
 			}
+			if tc.stayLocal {
+				resp, err := http.Get("http://" + ln.Addr().String() + "/api/remote/status")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusNotFound {
+					t.Fatalf("unlinked replacement remote status = %d, want 404", resp.StatusCode)
+				}
+			}
 			select {
 			case status := <-statusReports:
-				if status.Generation != 9 || status.Version == "" || (tc.remote && status.Remote == nil) {
+				wantRemoteStatus := tc.remote && !tc.stayLocal
+				if status.Generation != 9 || status.Version == "" || (status.Remote != nil) != wantRemoteStatus {
 					t.Fatalf("published status = %#v", status)
 				}
 			case <-time.After(2 * time.Second):
@@ -734,18 +769,24 @@ func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
 	recoverCtx, cancelRecover := context.WithCancel(context.Background())
 	defer cancelRecover()
 	recoveryErrors := make(chan error, 1)
-	go s.Recover(recoverCtx, exe, func(err error) { recoveryErrors <- err })
+	go s.Recover(recoverCtx, exe, func(err error) {
+		select {
+		case recoveryErrors <- err:
+		default:
+		}
+	})
 	if err := s.current.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
+	client := &http.Client{Timeout: 250 * time.Millisecond}
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-recoveryErrors:
 			t.Fatalf("recovery after unlink: %v", err)
 		default:
 		}
-		resp, err := http.Get("http://" + addr + "/api/state")
+		resp, err := client.Get("http://" + addr + "/api/state")
 		if err == nil {
 			got := resp.Header.Get("X-Scimux-Web-Generation")
 			_ = resp.Body.Close()
@@ -759,6 +800,98 @@ func TestUnlinkSurvivesWebRotationAndRecovery(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("local web API did not recover after unlink")
+}
+
+func TestUnlinkDuringPreparedHandoff(t *testing.T) {
+	unlinkEntered := make(chan struct{})
+	releaseUnlink := make(chan struct{})
+	var unlinkOnce sync.Once
+	var enrollCalls atomic.Int32
+	rv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/challenge":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"challenge":"`+strings.Repeat("11", 32)+`","v":1}`)
+		case "/v1/verify":
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/unenroll":
+			unlinkOnce.Do(func() { close(unlinkEntered) })
+			<-releaseUnlink
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/enroll":
+			enrollCalls.Add(1)
+			http.Error(w, "unexpected enrollment", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer rv.Close()
+	data := t.TempDir()
+	writeEnrolledState(t, data)
+	rewriteEnrolledOrigin(t, data, rv.URL)
+	s, addr := newRealRemoteWebSupervisor(t, data, rv.URL)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background(), exe); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := s.Prepare(context.Background(), exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Abort()
+
+	type unlinkResult struct {
+		code int
+		body []byte
+		err  error
+	}
+	unlinked := make(chan unlinkResult, 1)
+	csrf := fetchCSRF(t, addr)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/api/remote/unenroll", strings.NewReader(`{}`))
+		if err != nil {
+			unlinked <- unlinkResult{err: err}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Scimux-CSRF", csrf)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			unlinked <- unlinkResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		unlinked <- unlinkResult{code: resp.StatusCode, body: body, err: readErr}
+	}()
+	select {
+	case <-unlinkEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unlink did not reach the rendezvous")
+	}
+	// Keep the request in flight until graceful drain has begun. Commit must
+	// observe its durable result before it activates the already-ready child.
+	s.beforeDrain = func() {
+		time.AfterFunc(50*time.Millisecond, func() { close(releaseUnlink) })
+	}
+	if err := prepared.Commit(); err != nil {
+		t.Fatalf("commit after in-flight unlink: %v", err)
+	}
+	result := <-unlinked
+	if result.err != nil || result.code != http.StatusOK {
+		t.Fatalf("unlink = %d %s, %v", result.code, result.body, result.err)
+	}
+	assertWebGeneration(t, addr, "2")
+	code, body := publicJSON(t, addr, http.MethodGet, "/api/remote/status", nil, "")
+	if code != http.StatusNotFound {
+		t.Fatalf("replacement retained remote routes: %d %s", code, body)
+	}
+	if enrollCalls.Load() != 0 {
+		t.Fatalf("prepared replacement attempted enrollment %d times", enrollCalls.Load())
+	}
 }
 
 func TestConsumedInviteAuthOutageThenReplacement(t *testing.T) {
@@ -872,6 +1005,7 @@ func rewriteEnrolledOrigin(t *testing.T, data, origin string) {
 type fakeWebRemote struct {
 	hostedPairingClient
 	status    string
+	state     remote.EnrollmentState
 	startErr  error
 	started   chan struct{}
 	closed    chan struct{}
@@ -898,7 +1032,10 @@ func (b *lockedBuffer) String() string {
 }
 
 func newFakeWebRemote(status string) *fakeWebRemote {
-	return &fakeWebRemote{status: status, started: make(chan struct{}), closed: make(chan struct{})}
+	return &fakeWebRemote{
+		status: status, state: remote.StateEnrolled,
+		started: make(chan struct{}), closed: make(chan struct{}),
+	}
 }
 
 func (f *fakeWebRemote) Start(context.Context) error {
@@ -907,6 +1044,10 @@ func (f *fakeWebRemote) Start(context.Context) error {
 		<-f.startGate
 	}
 	return f.startErr
+}
+
+func (f *fakeWebRemote) State() (remote.EnrollmentState, error) {
+	return f.state, nil
 }
 
 func (f *fakeWebRemote) Close() error {
@@ -1249,6 +1390,71 @@ func TestListenerStaysNonblockingDuringGatedReplacement(t *testing.T) {
 	}
 	if err := first.err(); err != nil {
 		t.Fatalf("graceful child exit = %v", err)
+	}
+}
+
+func TestListenerDescriptorDoesNotLeakIntoConcurrentExec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("launches subprocesses to stress the fork boundary")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("uses procfs to identify inherited descriptors")
+	}
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	raw, err := ln.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target string
+	var readErr error
+	if err := raw.Control(func(fd uintptr) {
+		target, readErr = os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if readErr != nil || target == "" {
+		t.Fatalf("identify listener descriptor: %q, %v", target, readErr)
+	}
+
+	done := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				f, err := listenerFileForExec(ln)
+				if err != nil {
+					t.Errorf("duplicate listener: %v", err)
+					return
+				}
+				_ = f.Close()
+			}
+		}()
+	}
+	defer func() {
+		close(done)
+		workers.Wait()
+	}()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 50 {
+		cmd := exec.Command(exe, "-test.run=^TestUnrelatedExecDescriptorProbe$")
+		cmd.Env = append(os.Environ(), "SCIMUX_LISTENER_PROBE="+target)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("unrelated exec %d inherited listener: %v\n%s", i, err, out)
+		}
 	}
 }
 
