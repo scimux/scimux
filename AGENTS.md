@@ -86,7 +86,10 @@ scripts/test/backend-split-mutations.sh
   additive. Self-update must validate a standby before atomic install, then
   drain and rotate only the web child — it must never call either structured
   manager's `Shutdown`. A full user-requested stop/restart still shuts those
-  managers down; tmux survives as before.
+  managers down; tmux survives as before. `scimux stop [-data <path>]` reaches
+  that path through the owner-only `muxer.json` locator in the selected data
+  directory; it never signals a PID or addresses `web-child`. The locator is
+  also the single-owner claim: two live muxers must not share one data store.
 - **Zero build dependencies.** Standard library only — no SQLite, no
   WebSocket library, no JS framework. If a feature seems to need a module,
   stop and discuss. Two maintainer-approved exceptions exist, both scoped by

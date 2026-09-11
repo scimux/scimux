@@ -86,7 +86,7 @@ func newMuxerBackend(a *app) (*muxerBackend, error) {
 	return &muxerBackend{app: a, status: status}, nil
 }
 
-func (m *muxerBackend) handler() (http.Handler, error) {
+func (m *muxerBackend) handler(requestStop func()) (http.Handler, error) {
 	if m == nil || m.app == nil {
 		return nil, errors.New("muxer backend: nil app")
 	}
@@ -94,6 +94,7 @@ func (m *muxerBackend) handler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	var stopOnce sync.Once
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/_scimux/status" {
 			var report backend.Status
@@ -104,6 +105,15 @@ func (m *muxerBackend) handler() (http.Handler, error) {
 			}
 			m.status.accept(report)
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/_scimux/stop" {
+			if requestStop == nil {
+				http.Error(w, "muxer stop unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			stopOnce.Do(requestStop)
 			return
 		}
 		core.ServeHTTP(w, r)

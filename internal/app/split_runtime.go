@@ -12,19 +12,21 @@ import (
 // API, and the web-server supervisor have independent lifetimes, while the
 // public listener remains owned by the muxer process throughout rotations.
 type splitRuntime struct {
-	muxer       *muxerBackend
-	core        *backend.Server
-	web         *webSupervisor
-	stopRecover context.CancelFunc
-	command     *Command
-	closeOnce   sync.Once
-	closeErr    error
+	muxer        *muxerBackend
+	core         *backend.Server
+	web          *webSupervisor
+	registration *backend.Registration
+	stopRecover  context.CancelFunc
+	command      *Command
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 type splitRuntimeOptions struct {
 	// configureWeb is a process-test seam. Production must leave it nil so the
 	// only child argv is the literal hidden role "web-child".
 	configureWeb func(*webSupervisor)
+	requestStop  func()
 	report       func(error)
 }
 
@@ -43,7 +45,7 @@ func startSplitRuntime(ctx context.Context, a *app, cmd *Command, executable str
 		return nil, err
 	}
 	muxer.enableRemote(cmd.Config.Remote)
-	coreHandler, err := muxer.handler()
+	coreHandler, err := muxer.handler(opts.requestStop)
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +67,15 @@ func startSplitRuntime(ctx context.Context, a *app, cmd *Command, executable str
 		muxer.shutdownHarnesses()
 		return nil, err
 	}
+	registration, err := backend.Register(cmd.Config.DataDir, core.Link())
+	if err != nil {
+		_ = web.Close()
+		_ = core.Close()
+		muxer.shutdownHarnesses()
+		return nil, err
+	}
 
-	r := &splitRuntime{muxer: muxer, core: core, web: web, command: cmd}
+	r := &splitRuntime{muxer: muxer, core: core, web: web, registration: registration, command: cmd}
 	a.prepareWebUpdate = func(updateCtx context.Context, path string) (webUpdateHandoff, error) {
 		prepared, err := web.Prepare(updateCtx, path)
 		if err != nil {
@@ -101,6 +110,9 @@ func (r *splitRuntime) Close() error {
 			r.command.closeListener()
 		}
 		r.muxer.shutdownHarnesses()
+		if err := r.registration.Close(); err != nil && r.closeErr == nil {
+			r.closeErr = err
+		}
 	})
 	return r.closeErr
 }

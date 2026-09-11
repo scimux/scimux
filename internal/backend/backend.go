@@ -37,8 +37,8 @@ var capabilities = []string{"http-proxy-v1", "status-v1"}
 // child explicitly; children never scan temporary directories or process
 // tables to discover a muxer.
 type Link struct {
-	Socket string
-	Token  string
+	Socket string `json:"socket"`
+	Token  string `json:"token"`
 }
 
 // Hello is the compatibility description returned by a muxer.
@@ -282,6 +282,25 @@ func (c *Client) PublishStatus(ctx context.Context, status Status) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("backend: publish status: %s", resp.Status)
+	}
+	return nil
+}
+
+// RequestStop asks the muxer to enter the same graceful shutdown path used by
+// SIGTERM. Accepted means shutdown was scheduled; the caller observes the
+// registration disappearing to know that teardown completed.
+func (c *Client) RequestStop(ctx context.Context) error {
+	req, err := c.request(ctx, http.MethodPost, "/_scimux/stop", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("backend: request stop: %s", resp.Status)
 	}
 	return nil
 }

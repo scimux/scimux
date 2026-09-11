@@ -39,14 +39,15 @@ import (
 	"testing"
 )
 
-// argvSubcommands is the complete set of hidden pre-flag subcommands Run()
-// dispatches. All are stdin-reading helpers that run inside a user's own agent
-// session (see AGENTS.md: the Claude hook invariants). Adding an entry here is
-// the review trigger: the new subcommand must carry no secret on argv.
+// argvSubcommands is the complete set of pre-flag subcommands Run() dispatches.
+// Most are stdin-reading helpers that run inside a user's own agent session
+// (see AGENTS.md: the Claude hook invariants). Adding an entry here is the
+// review trigger: the new subcommand must carry no secret on argv.
 // __claude-usage-statusline is the one that is not a hook — it is the status
 // line of the usage probe session — and like the rest it takes only --dir.
 // web-child carries no values on argv at all: its muxer capability and runtime
-// configuration arrive through inherited descriptors and environment.
+// configuration arrive through inherited descriptors and environment. stop is
+// the one public subcommand; its optional -data value is a path, not authority.
 var argvSubcommands = []string{
 	"__claude-compact-hook",
 	"__claude-elicitation-hook",
@@ -55,6 +56,7 @@ var argvSubcommands = []string{
 	"__claude-session-hook",
 	"__claude-stop-hook",
 	"__claude-usage-statusline",
+	"stop",
 	"web-child",
 }
 
@@ -524,7 +526,7 @@ func TestNoInviteBearingFlagExists(t *testing.T) {
 		// remains internal because it is omitted from help and cannot start
 		// without inherited descriptors; a punctuation convention is not the
 		// security boundary. Its only argv value is the literal role name.
-		if name != webChildCmd && !strings.HasPrefix(name, "__") {
+		if name != webChildCmd && name != stopCmd && !strings.HasPrefix(name, "__") {
 			t.Errorf("subcommand %q is not marked hidden with a __ prefix", name)
 		}
 	}

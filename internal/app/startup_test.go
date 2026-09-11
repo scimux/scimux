@@ -161,7 +161,7 @@ func TestConfigureUsageIncludesSummary(t *testing.T) {
 	fs.Usage()
 
 	got := b.String()
-	if !strings.HasPrefix(got, appSummary+"\n\nUsage: ./scimux [options]\n\n") {
+	if !strings.HasPrefix(got, appSummary+"\n\nUsage:\n  ./scimux [options]\n  ./scimux stop [options]\n\n") {
 		t.Fatalf("usage header = %q", got)
 	}
 	if !strings.Contains(got, "-addr") {

@@ -18,7 +18,8 @@ func TestMuxerBackendStatusAndOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := m.handler()
+	stopCalls := 0
+	h, err := m.handler(func() { stopCalls++ })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,10 +57,29 @@ func TestMuxerBackendStatusAndOwnership(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"version":"v4"`) {
 		t.Fatalf("state did not project active web version: %d %s", rec.Code, rec.Body.String())
 	}
+	for range 2 {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/_scimux/stop", nil))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("stop = %d", rec.Code)
+		}
+	}
+	if stopCalls != 1 {
+		t.Fatalf("stop callback calls = %d, want 1", stopCalls)
+	}
+	withoutStop, err := m.handler(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	withoutStop.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/_scimux/stop", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured stop = %d", rec.Code)
+	}
 	m.shutdownHarnesses()
 
 	var nilMuxer *muxerBackend
-	if _, err := nilMuxer.handler(); err == nil {
+	if _, err := nilMuxer.handler(nil); err == nil {
 		t.Fatal("nil muxer returned a handler")
 	}
 	nilMuxer.enableRemote(true)

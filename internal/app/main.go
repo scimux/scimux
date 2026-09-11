@@ -70,7 +70,9 @@ func configureUsage(fs *flag.FlagSet, name string) {
 		out := fs.Output()
 		fmt.Fprintln(out, appSummary)
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "Usage: %s [options]\n\n", name)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s [options]\n", name)
+		fmt.Fprintf(out, "  %s stop [options]\n\n", name)
 		fs.PrintDefaults()
 	}
 }
@@ -157,6 +159,9 @@ func Run() {
 	if len(os.Args) > 1 && os.Args[1] == webChildCmd {
 		os.Exit(runWebChildMain())
 	}
+	if len(os.Args) > 1 && os.Args[1] == stopCmd {
+		os.Exit(runStopMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
@@ -211,9 +216,18 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
-	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{report: func(err error) {
-		fmt.Fprintln(os.Stderr, "scimux: restart web child:", err)
-	}})
+	stopRequested := make(chan struct{}, 1)
+	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{
+		requestStop: func() {
+			select {
+			case stopRequested <- struct{}{}:
+			default:
+			}
+		},
+		report: func(err error) {
+			fmt.Fprintln(os.Stderr, "scimux: restart web child:", err)
+		},
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
@@ -264,7 +278,10 @@ func Run() {
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), cmd.socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", cmd.socket)
 
-	<-stop
+	select {
+	case <-stop:
+	case <-stopRequested:
+	}
 	signal.Stop(stop)
 	_ = runtime.Close()
 }
