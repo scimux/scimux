@@ -47,6 +47,9 @@ type Command struct {
 	// rendezvous/WebRTC initialization to the web child.
 	muxerOnly bool
 	ownership *backend.Registration
+	// handoff is populated only after same-PID exec. Command consumes both
+	// descriptors instead of competing for its own still-live port and lock.
+	handoff *muxerExecFiles
 
 	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
 	// remote client, or nil for a purely local run. It is kept so the join is
@@ -63,6 +66,12 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer func() {
+		if runErr != nil && c.handoff != nil {
+			_ = c.handoff.Close()
+			c.handoff = nil
+		}
+	}()
 	args := c.Args
 	if len(args) == 0 {
 		args = []string{"scimux"}
@@ -71,7 +80,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	if len(args) > 1 {
 		switch args[1] {
 		case claudeSessionHookCmd, claudePermissionHookCmd, claudeStopHookCmd, claudeNotifyHookCmd,
-			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd, webChildCmd:
+			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd, webChildCmd, sessionWorkerCmd:
 			if c.Config.Hooks.OnHookDispatch != nil {
 				c.Config.Hooks.OnHookDispatch(args[1])
 			}
@@ -154,7 +163,14 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	if c.muxerOnly {
-		owner, err := backend.Claim(*data)
+		var owner *backend.Registration
+		var err error
+		if c.handoff != nil {
+			owner, err = backend.Adopt(*data, c.handoff.ownership)
+			c.handoff.ownership = nil
+		} else {
+			owner, err = backend.Claim(*data)
+		}
 		if err != nil {
 			return err
 		}
@@ -204,11 +220,26 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	// — a second scimux on the default port cost a real invite and served
 	// nothing. The bound listener is handed to the caller rather than the
 	// address, so the check and the server cannot be about different sockets.
-	ln, err := net.Listen("tcp", *addr)
+	var ln net.Listener
+	if c.handoff != nil {
+		ln, err = net.FileListener(c.handoff.public)
+		_ = c.handoff.public.Close()
+		c.handoff.public = nil
+		if err == nil && !strings.HasPrefix(ln.Addr().Network(), "tcp") {
+			_ = ln.Close()
+			err = errors.New("muxer handoff: inherited public descriptor is not TCP")
+		}
+	} else {
+		ln, err = net.Listen("tcp", *addr)
+	}
 	if err != nil {
 		return err
 	}
 	c.listener = ln
+	if c.handoff != nil {
+		_ = c.handoff.Close()
+		c.handoff = nil
+	}
 
 	if !c.Config.Remote || c.muxerOnly {
 		return nil

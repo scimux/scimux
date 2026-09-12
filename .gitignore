@@ -29,6 +29,7 @@ internal/acp/testdata/real-*.ndjson
 !SECURITY.md
 !docs/http-api.md
 !docs/rendezvous-protocol-sync.md
+!docs/session-workers.md
 !docs/protocol/rendezvous-v1.md
 !docs/invariants/claude-hooks.md
 !docs/invariants/attention.md

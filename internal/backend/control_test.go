@@ -248,6 +248,112 @@ func TestConcurrentOwnershipHasExactlyOneWinner(t *testing.T) {
 	}
 }
 
+func TestRegistrationDescriptorHandoffPreservesLifetimeOwnership(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldLink := Link{Socket: "/tmp/old.sock", Token: "old"}
+	old, err := Register(data, oldLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := old.FileForExec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// exec closes the original descriptor without issuing LOCK_UN. Simulate
+	// that exact transition while the dup keeps the open-file lock alive.
+	if err := old.lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	old.lock = nil
+	adopted, err := Adopt(data, handoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Claim(data); !errors.Is(err, ErrMuxerOwned) {
+		t.Fatalf("contender during descriptor handoff = %v", err)
+	}
+	newLink := Link{Socket: "/tmp/new.sock", Token: "new"}
+	if err := adopted.Publish(newLink); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Discover(data); err != nil || got != newLink {
+		t.Fatalf("adopted locator = %#v, %v", got, err)
+	}
+	if err := adopted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	successor, err := Claim(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = successor.Close()
+}
+
+func TestRegistrationDescriptorHandoffRejectsUnprovenFiles(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var nilRegistration *Registration
+	if _, err := nilRegistration.FileForExec(); err == nil {
+		t.Fatal("nil registration produced a handoff file")
+	}
+	if _, err := Adopt(data, nil); err == nil {
+		t.Fatal("Adopt accepted nil file")
+	}
+	other, err := os.CreateTemp(data, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := Adopt(data, other); err == nil {
+		t.Fatal("Adopt accepted a non-lock file")
+	}
+	closed, err := os.CreateTemp(data, "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Adopt(data, closed); err == nil {
+		t.Fatal("Adopt accepted a closed descriptor")
+	}
+	insecure := t.TempDir()
+	if err := os.Chmod(insecure, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	insecureFile, err := os.CreateTemp(insecure, "lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Adopt(insecure, insecureFile); err == nil {
+		t.Fatal("Adopt accepted an insecure data directory")
+	}
+	missingFile, err := os.CreateTemp(data, "missing-data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Adopt(filepath.Join(data, "absent"), missingFile); err == nil {
+		t.Fatal("Adopt accepted a missing data directory")
+	}
+	owner, err := Claim(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	lock, err := os.OpenFile(filepath.Join(data, lockName), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Adopt(data, lock); err == nil {
+		t.Fatal("Adopt accepted a descriptor independent of the live lock owner")
+	}
+}
+
 func TestPublishLocatorCreationFailure(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	if err := publishLocator(missing, filepath.Join(missing, locatorName), []byte("x")); err == nil {

@@ -60,8 +60,7 @@ func (a *app) ingestAssetBytes(nodeID, name, mime, sourceKind, sourcePath string
 		}
 		ev.BlobPath = relPath
 	}
-	w := &sessionlog.Writer{Path: a.sessionLogPath(nodeID)}
-	if err := w.Append(sessionlog.NewAsset(ev)); err != nil {
+	if err := a.appendSessionEvent(nodeID, sessionlog.NewAsset(ev)); err != nil {
 		// The append-only log record that would reference this asset never
 		// landed. A blob written just above is now orphaned under
 		// assets/<node>/ with nothing pointing at it — and unlike the log,

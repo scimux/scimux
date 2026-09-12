@@ -31,6 +31,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -141,6 +142,32 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	// a plain-text reference to each uploaded file appended (extendPrompt). The
 	// raw text is kept only for /clear detection and unconfirmed-draft echo.
 	delivered := extendPrompt(body.Text, atts)
+	if a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID) {
+		var delivery sessionworker.Delivery
+		var err error
+		if strings.TrimSpace(body.Text) == "/clear" {
+			delivery, err = a.workers.ClearDelivery(n.ID)
+		} else {
+			delivery, err = a.workers.SendDelivery(n.ID, delivered)
+		}
+		if err != nil {
+			code := http.StatusInternalServerError
+			if a.workers.Conflict(err) {
+				code = http.StatusConflict
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		if strings.TrimSpace(body.Text) != "/clear" {
+			a.noteUsagePrompt(n.Agent)
+		}
+		response := map[string]string{"status": delivery.Status}
+		if delivery.Status == sessionworker.DeliveryUnconfirmed {
+			response["text"] = body.Text
+		}
+		writeJSON(w, response)
+		return
+	}
 	// Structured-protocol delivery (ACP, codex) is reliable (no pane-ack race,
 	// so no "unconfirmed" state), but the preflight still holds: refuse a second
 	// turn while one is in flight, and refuse entirely if the subprocess is
@@ -197,51 +224,55 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "acknowledged"})
 		return
 	}
+	status, delivery, err := a.sendTmuxPrompt(n, body.Text, delivered, strings.TrimSpace(body.Text) == "/clear")
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
+	response := map[string]string{"status": string(delivery)}
+	if delivery == initialUnconfirmed {
+		response["text"] = body.Text
+	}
+	writeJSON(w, response)
+}
+
+// sendTmuxPrompt is the established pane-delivery contract shared by the
+// legacy in-process path and the Claude session worker. It returns the HTTP
+// status that the existing public endpoint assigns to a refusal, so moving
+// the caller across a process boundary cannot blur 409 conflicts into 500s.
+func (a *app) sendTmuxPrompt(n *Node, raw, delivered string, isClear bool) (int, initialDelivery, error) {
 	a.mu.Lock()
 	switch a.sendState[n.ID] {
 	case sendSubmitting:
 		a.mu.Unlock()
-		http.Error(w, "a send to this node is still in flight", 409)
-		return
+		return http.StatusConflict, "", errors.New("a send to this node is still in flight")
 	case sendUnconfirmed, sendInitialUnconfirmed:
 		a.mu.Unlock()
-		http.Error(w, "the previous send is unconfirmed — check the terminal, then recheck", 409)
-		return
+		return http.StatusConflict, "", errors.New("the previous send is unconfirmed — check the terminal, then recheck")
 	}
 	if n.Agent == "claude" {
 		sup := a.claudeSupervisionOf(n)
 		launchErr := a.claudeLaunchErr[n.ID]
 		if sup != claudeSupStrict {
 			a.mu.Unlock()
-			http.Error(w, claudeSupervisionExplain(sup, launchErr), http.StatusConflict)
-			return
+			return http.StatusConflict, "", errors.New(claudeSupervisionExplain(sup, launchErr))
 		}
 	}
 	a.sendState[n.ID] = sendSubmitting
 	a.mu.Unlock()
 
-	// Transcript watermark before the send: a new user turn appearing is the
-	// structured acknowledgement (slash commands may never enter the
-	// transcript — for those the mechanical pane change has to carry it).
 	turnsBefore := -1
 	tl := a.tailerFor(n)
 	if tl != nil {
 		turnsBefore = len(tl.Poll())
 	}
 	pasted := time.Now()
-	isClear := strings.TrimSpace(body.Text) == "/clear"
-	// A Claude /clear can fire SessionStart before SendAck returns. Hold the
-	// same binding lock used by SessionStart until the old link is retired and
-	// its successor generation is durable, so the hook can only observe the
-	// completed page-turn state.
 	var clearBind *sync.Mutex
 	if n.Agent == "claude" && isClear {
 		clearBind = a.claudeBindLock(n.ID)
 		clearBind.Lock()
 		defer clearBind.Unlock()
 	}
-	// Paste and lease arm are linearized under the per-node auto-gate so a
-	// concurrent enable cannot install a lease between the two.
 	acked, err := a.acceptTmuxPrompt(n, isClear, func() (bool, error) {
 		return a.server.Session(n.ID).SendAck(delivered)
 	})
@@ -249,18 +280,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		delete(a.sendState, n.ID)
 		a.mu.Unlock()
-		code := http.StatusInternalServerError
+		status := http.StatusInternalServerError
 		if errors.Is(err, errClaudeTurnInFlight) {
-			code = http.StatusConflict
+			status = http.StatusConflict
 		}
-		http.Error(w, err.Error(), code)
-		return
+		return status, "", err
 	}
 	if !acked && tl != nil && len(tl.Poll()) > turnsBefore {
 		acked = true
 	}
-	// The prompt reached the pane, so the agent owes output from here on: this
-	// is the watermark the stale-link backstop judges the transcript against.
 	a.noteDelivery(n.ID, pasted)
 	a.mu.Lock()
 	if acked {
@@ -269,27 +297,19 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		a.sendState[n.ID] = sendUnconfirmed
 	}
 	a.mu.Unlock()
-	// SendAck succeeded, so the prompt was delivered to the pane (acked or
-	// unconfirmed — both consume budget). /clear is a page turn, not a turn.
 	if !isClear {
 		a.noteUsagePrompt(n.Agent)
 	}
-	// /clear delivered through scimux is a *request* for a session rollover,
-	// never proof of one: the CLI can swallow the paste, and SendAck only
-	// attests keystrokes. So this path turns no page. The whole page turn —
-	// retire, tombstone transactionally with the successor, seam — belongs to
-	// that node's own SessionStart source:"clear", which bindClaudeClear
-	// already performs unaided for a /clear typed straight into the pane
-	// (AT-BIND-06). All this does is start the clock that makes a swallowed
-	// /clear visible instead of silent. Never retry /clear.
+	// A pasted /clear is only a request. SessionStart source:"clear" remains
+	// the sole author of retirement, tombstones, and the source seam.
 	if n.Agent == "claude" && isClear {
 		a.noteClaudeClearSent(n.ID)
 	}
 	if !acked {
-		writeJSON(w, map[string]string{"status": "unconfirmed", "text": body.Text})
-		return
+		_ = raw // retained separately so callers can restore exactly the draft
+		return 0, initialUnconfirmed, nil
 	}
-	writeJSON(w, map[string]string{"status": "acknowledged"})
+	return 0, initialAcknowledged, nil
 }
 
 // claudeNativeForkCommand reports whether text is Claude's native /fork
@@ -339,8 +359,7 @@ func (a *app) snapshotClosingStation(n *Node) {
 	if key == "" {
 		return
 	}
-	w := &sessionlog.Writer{Path: logPath}
-	if err := w.Append(sessionlog.NewStation(key, n.Title, n.Description)); err != nil {
+	if err := a.appendSessionEvent(n.ID, sessionlog.NewStation(key, n.Title, n.Description)); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: station snapshot for %s: %v\n", n.ID, err)
 	}
 }
@@ -426,6 +445,18 @@ func (a *app) handleSendResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	if a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID) {
+		if err := a.workers.ResolveDelivery(n.ID); err != nil {
+			code := http.StatusInternalServerError
+			if a.workers.Conflict(err) {
+				code = http.StatusConflict
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "resolved"})
+		return
+	}
 	a.mu.Lock()
 	if a.sendState[n.ID] == sendSubmitting {
 		a.mu.Unlock()
@@ -444,6 +475,25 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.refuseEnded(w, n) {
+		return
+	}
+	if a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID) {
+		evidence, err := a.workers.InterruptEvidence(n.ID)
+		if err != nil {
+			code := http.StatusInternalServerError
+			if a.workers.Conflict(err) {
+				code = http.StatusConflict
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: "Escape", Keys: evidence.Keys,
+			Excerpt: evidence.Evidence, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			fmt.Fprintf(os.Stderr, "scimux: interrupt sent to %s but audit record failed: %v\n", n.ID, err)
+			http.Error(w, "the interrupt was sent, but the audit record failed: "+err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "interrupted"})
 		return
 	}
 	if pm := a.proc(n); pm != nil {
@@ -571,12 +621,23 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	if len(seg.Decisions) > 0 {
 		resp["decisions"] = seg.Decisions
 	}
+	workerClaude := a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID)
+	var workerState sessionworker.State
 	// Authoritative auto-approval state participates in the full-body ETag.
-	a.mu.Lock()
-	aaView := a.autoApproveViewOf(n)
-	a.mu.Unlock()
+	var aaView autoApproveView
+	if workerClaude {
+		workerState = a.workers.State(n.ID)
+		aa := workerState.AutoApprove
+		aaView = autoApproveView{Supported: aa.Supported, Enabled: aa.Enabled, Phase: aa.Phase, Count: aa.Count, Error: aa.Error}
+	} else {
+		a.mu.Lock()
+		aaView = a.autoApproveViewOf(n)
+		a.mu.Unlock()
+	}
 	resp["auto_approve"] = aaView
-	if pm := a.proc(n); pm != nil {
+	if workerClaude {
+		a.claudeWorkerChatInto(resp, n, workerState, seg)
+	} else if pm := a.proc(n); pm != nil {
 		a.procChatInto(resp, n, pm, seg)
 	} else {
 		a.tmuxChatInto(resp, n, seg)
@@ -600,6 +661,59 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+func (a *app) claudeWorkerChatInto(resp map[string]any, n *Node, state sessionworker.State, seg sessionlog.Segment) {
+	resp["pending"] = state.Pending
+	resp["live"] = state.Live
+	resp["fallback"] = state.Fallback
+	resp["attention"] = state.Attention
+	resp["delivery"] = state.Delivery
+	resp["source"] = state.Source
+	resp["reason"] = state.Reason
+	resp["watermark"] = state.Watermark
+	resp["progress"] = state.Progress
+	resp["pending_calls"] = state.PendingCalls
+	resp["waiting_on"] = state.WaitingOn
+	resp["reply_ready"] = state.ReplyReady
+	resp["turn_in_flight"] = state.TurnInFlight
+	resp["ctx_used"] = seg.Used
+	resp["ctx_window"] = ctxWindowFor(seg.Used, seg.Size, n.Model)
+	resp["ctx_pct"] = ctxPctOf(seg.Used, ctxWindowFor(seg.Used, seg.Size, n.Model))
+	resp["supervision"] = state.Supervision
+	if state.LastError != "" {
+		resp["error"] = state.LastError
+	}
+	if state.Delivery == sendSubmitting || state.Delivery == sendUnconfirmed || state.Delivery == sendDelivering {
+		resp["pending_prompt"] = n.Prompt
+	} else if state.LastError != "" {
+		resp["restore_draft"] = n.Prompt
+	}
+	if state.Compacting {
+		resp["compacting"] = true
+		if state.CompactTrigger != "" {
+			resp["compact_trigger"] = state.CompactTrigger
+		}
+	}
+	if state.ElicitationCount > 0 {
+		resp["elicitation_waiting"] = true
+		resp["elicitation_count"] = state.ElicitationCount
+		resp["elicitations"] = state.Elicitations
+	}
+	if pending := state.Permission; pending != nil && pending.Dialog {
+		resp["perm_dialog_id"] = pending.RequestID
+		resp["perm_title"] = pending.Title
+		resp["perm_tool_kind"] = pending.ToolKind
+		if len(pending.Options) > 0 {
+			resp["perm_options"] = pending.Options
+		}
+		if pending.Manual {
+			resp["perm_manual"] = true
+		}
+		if pending.Reason != "" {
+			resp["perm_reason"] = pending.Reason
+		}
+	}
 }
 
 // projectTurns rewrites each turn's attachment markers (internal/asset.Project)
@@ -985,6 +1099,37 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("key %q not allowed", body.Key), 400)
 		return
 	}
+	if a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID) {
+		epoch := body.DialogID
+		if epoch == "" {
+			epoch = body.RequestID
+		}
+		if epoch == "" {
+			http.Error(w, "dialog_id is required for Claude permission decisions", http.StatusBadRequest)
+			return
+		}
+		prepared, err := a.workers.PreparePermission(n.ID, epoch, body.Key)
+		if err != nil {
+			code := http.StatusBadRequest
+			if a.workers.Conflict(err) {
+				code = http.StatusConflict
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		if err := a.appendRecord(storeRecord{Type: "key", ID: n.ID, Key: body.Key,
+			Keys: prepared.Keys, Excerpt: prepared.Evidence, Time: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			http.Error(w, "refusing to answer without an audit record: "+err.Error(), 500)
+			return
+		}
+		if err := a.workers.Deliver(n.ID, prepared.Token); err != nil {
+			fmt.Fprintf(os.Stderr, "scimux: key %q audited on %s but delivery failed: %v\n", body.Key, n.ID, err)
+			http.Error(w, "the decision was recorded, but delivering it to the agent failed: "+err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "sent"})
+		return
+	}
 	// Structured protocols (ACP, codex): the key answers a structured permission
 	// request (there is no pane to press it into). Because resolution is
 	// structured, the key can be mapped to an option and audited *before* the
@@ -1137,7 +1282,11 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	if pm := a.proc(n); pm != nil {
 		// No pane to photograph: peek renders a tail of the raw event log.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprint(w, pm.Peek(n.ID))
+		if workers, ok := pm.(*workerManager); ok && n.Agent == "claude" {
+			fmt.Fprint(w, workers.PeekMode(n.ID, r.URL.Query().Get("mode")))
+		} else {
+			fmt.Fprint(w, pm.Peek(n.ID))
+		}
 		return
 	}
 	s := a.server.Session(n.ID)

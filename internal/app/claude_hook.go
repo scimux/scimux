@@ -6,6 +6,7 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 )
 
 // claudeSessionHookCmd is the hidden helper argv token. Product behavior stays
@@ -45,7 +47,13 @@ type claudeSessionStartEvent struct {
 }
 
 func (a *app) claudeHooksDir() string {
-	if a == nil || a.storePath == "" {
+	if a == nil {
+		return ""
+	}
+	if a.claudeHooksRoot != "" {
+		return a.claudeHooksRoot
+	}
+	if a.storePath == "" {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(a.storePath), "claude-hooks")
@@ -432,6 +440,9 @@ func (a *app) drainClaudeHooks() {
 	a.mu.Lock()
 	pairs := make([][2]string, 0, len(a.claudeHooks))
 	for nodeID, hookID := range a.claudeHooks {
+		if a.workers != nil && a.workers.manages(nodeID) {
+			continue
+		}
 		pairs = append(pairs, [2]string{nodeID, hookID})
 	}
 	a.mu.Unlock()
@@ -1024,6 +1035,42 @@ func (a *app) cleanupOrphanClaudeHooks() {
 		inUse[hookID] = true
 	}
 	a.mu.Unlock()
+	// A session worker can own a newly created hook before the muxer has
+	// durably projected that identity into nodes.jsonl, or while a replacement
+	// muxer is still replaying it. Locators are therefore part of the liveness
+	// proof. Cleanup is optional; if even one locator cannot be authenticated
+	// and described, preserve every bundle rather than destroying a live
+	// worker's capability during restart.
+	locators, err := sessionworker.List(filepath.Dir(a.storePath))
+	if err != nil {
+		return
+	}
+	for _, locator := range locators {
+		if locator.Agent != "claude" {
+			continue
+		}
+		client, err := sessionworker.NewClient(locator.Link)
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		hello, helloErr := client.Hello(ctx)
+		if helloErr == nil {
+			helloErr = sessionworker.CheckCompatibility(hello)
+		}
+		state, stateErr := client.State(ctx)
+		cancel()
+		_ = client.Close()
+		if helloErr != nil || stateErr != nil || hello.Identity != locator.Identity {
+			return
+		}
+		if state.HookID != "" {
+			if !safePathComponent(state.HookID) {
+				return
+			}
+			inUse[state.HookID] = true
+		}
+	}
 	for _, e := range ents {
 		if !e.IsDir() || e.Name() == "archive" {
 			continue

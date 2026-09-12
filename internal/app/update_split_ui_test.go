@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestUpdateUIPromisesWebHandoffWithoutHarnessRestart(t *testing.T) {
+func TestUpdateUIPromisesSessionWorkerContinuity(t *testing.T) {
 	index, err := os.ReadFile("../../web/index.html")
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestUpdateUIPromisesWebHandoffWithoutHarnessRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := string(index) + string(entry)
-	for _, want := range []string{"Update web interface", "Running agent sessions stay connected to the muxer."} {
+	for _, want := range []string{"Install update", "Running agent sessions stay connected to their session workers while scimux switches over."} {
 		if !strings.Contains(all, want) {
 			t.Errorf("update UI missing %q", want)
 		}
@@ -31,7 +31,7 @@ func TestUpdateUIPromisesWebHandoffWithoutHarnessRestart(t *testing.T) {
 	}
 }
 
-func TestWebUpdateCannotShutdownHarnesses(t *testing.T) {
+func TestUpdateHandoffCannotShutdownHarnesses(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "update.go", nil, 0)
 	if err != nil {

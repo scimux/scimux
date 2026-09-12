@@ -1823,8 +1823,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   });
   $("#m_apply").addEventListener("click", async () => {
     if (!updateInfo || !updateInfo.available) return;
-    if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and update the web interface?\n\n` +
-      "Running agent sessions stay connected to the muxer.")) return;
+    if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and install the update?\n\n` +
+      "Running agent sessions stay connected to their session workers while scimux switches over.")) return;
     const btn = $("#m_apply");
     btn.disabled = true;
     btn.textContent = "updating…";
@@ -1843,7 +1843,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     } catch (e) {
       alert("Update failed: " + (e.message || e));
       btn.disabled = false;
-      btn.textContent = "Update web interface";
+      btn.textContent = "Install update";
     }
   });
   /* ---- burger menu: which agent harnesses this computer has ----

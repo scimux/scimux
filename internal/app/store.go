@@ -109,6 +109,9 @@ func (a *app) loadStore() error {
 	if a.deadTranscripts == nil {
 		a.deadTranscripts = map[string]map[string]bool{}
 	}
+	if a.deletedNodes == nil {
+		a.deletedNodes = map[string]bool{}
+	}
 	if a.claudeHooks == nil {
 		a.claudeHooks = map[string]string{}
 	}
@@ -131,6 +134,7 @@ func (a *app) loadStore() error {
 		}
 		switch {
 		case rec.Type == "node" && rec.Node != nil:
+			a.deletedNodes[rec.Node.ID] = false
 			if rec.Node.Description == "" {
 				rec.Node.Description = rec.Node.Prompt
 			}
@@ -151,6 +155,7 @@ func (a *app) loadStore() error {
 		case rec.Type == "claude-binding-candidate":
 			// Uncommitted: replay must keep the previous binding.
 		case rec.Type == "delete":
+			a.deletedNodes[rec.ID] = true
 			a.removeNodeLocked(rec.ID)
 			delete(transcripts, rec.ID)
 			delete(hooks, rec.ID)
@@ -217,7 +222,9 @@ func (a *app) loadStore() error {
 		seen[hookID] = true
 		a.noteClaudeStrictCapability(hookID)
 	}
-	a.cleanupOrphanClaudeHooks()
+	if !a.skipHookCleanup {
+		a.cleanupOrphanClaudeHooks()
+	}
 	return nil
 }
 

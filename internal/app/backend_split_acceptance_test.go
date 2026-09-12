@@ -10,16 +10,15 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
 // TestWebGenerationChangePreservesInFlightPermission is the first backend
@@ -115,18 +114,33 @@ func newTestWebGeneration(t *testing.T, a *app, link backend.Link, pairing hoste
 // boundary involved in the split: public HTTP, the real web child process,
 // the private Unix API, app routing, the real ACP manager, and a synthetic ACP
 // subprocess speaking line-delimited JSON-RPC. No vendor CLI or model runs.
-func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
+func TestWebUpdatePreservesRealSessionWorkerAndPermission(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	statusPath := filepath.Join(t.TempDir(), "agent-status")
-	spawned := make(chan *syntheticACPProcess, 1)
-	m := acp.NewManagerWithRunner(a.sessionsDir, syntheticACPRunner(t, statusPath, spawned))
-	m.SetAssetHook(a.assetHook)
-	a.acp = acpManager{m}
-
 	data := filepath.Dir(a.storePath)
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	agentLauncher := "#!/bin/sh\nexec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" -test.run=^TestSyntheticACPAgentHelperProcess$\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(agentLauncher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCIMUX_SYNTHETIC_ACP", "1")
+	t.Setenv("SCIMUX_SYNTHETIC_ACP_STATUS", statusPath)
+	workers := newWorkerManager(exe, data, "worker-v1.0.0")
+	workers.startOptions = sessionWorkerStartOptions{
+		args:   []string{"-test.run=^TestProductionSessionWorkerHelperProcess$"},
+		env:    []string{"SCIMUX_PRODUCTION_SESSION_WORKER_TEST=1"},
+		stderr: os.Stderr,
+	}
+	a.workers = workers
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -136,10 +150,6 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 		listener: ln, listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data},
 	}
 	claimCommandOwnership(t, cmd)
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{
 		configureWeb: func(s *webSupervisor) {
 			s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
@@ -168,13 +178,11 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 	if err := json.Unmarshal(body, &created); err != nil || created.ID == "" {
 		t.Fatalf("created node = %q, %v", body, err)
 	}
-	var proc *syntheticACPProcess
-	select {
-	case proc = <-spawned:
-	case <-time.After(3 * time.Second):
-		t.Fatal("ACP manager did not spawn the synthetic protocol process")
+	locator, err := sessionworker.Discover(data, created.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	harnessPID := proc.cmd.Process.Pid
+	workerPID := locator.PID
 
 	before := waitForPublicPermission(t, addr, created.ID)
 	requestID, _ := before["perm_request_id"].(string)
@@ -210,8 +218,9 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 	if code != http.StatusConflict || !strings.Contains(string(body), "already up to date") {
 		t.Fatalf("active generation accepted its own update again: %d (%s)", code, body)
 	}
-	if got := proc.cmd.Process.Pid; got != harnessPID {
-		t.Fatalf("ACP harness PID changed across web update: %d -> %d", harnessPID, got)
+	locator, err = sessionworker.Discover(data, created.ID)
+	if err != nil || locator.PID != workerPID {
+		t.Fatalf("session worker changed across web update: PID %d -> %#v (%v)", workerPID, locator, err)
 	}
 	after := waitForPublicPermission(t, addr, created.ID)
 	if after["perm_request_id"] != requestID || after["turn_in_flight"] != true {
@@ -239,10 +248,198 @@ func TestWebUpdatePreservesRealACPProcessAndPermission(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-proc.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("full muxer stop did not reap the ACP harness")
+	if _, err := sessionworker.Discover(data, created.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("full muxer stop left session worker registered: %v", err)
+	}
+}
+
+// TestEveryStructuredHarnessRunsBehindRealSessionWorker is the compact
+// transport matrix. It crosses the production worker factory and each real
+// subprocess launcher, while tiny protocol peers stand in for vendor CLIs so
+// the suite spends no model quota.
+func TestEveryStructuredHarnessRunsBehindRealSessionWorker(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		agent, binary, transport, helper, sessionID string
+	}{
+		{agent: "pi", binary: "pi-acp", transport: "acp", helper: "TestSyntheticACPAgentHelperProcess", sessionID: "split-session"},
+		{agent: "opencode", binary: "opencode", transport: "acp", helper: "TestSyntheticACPAgentHelperProcess", sessionID: "split-session"},
+		{agent: "grok", binary: "grok", transport: "acp", helper: "TestSyntheticACPAgentHelperProcess", sessionID: "split-session"},
+		{agent: "codex", binary: "codex", transport: "codex", helper: "TestSyntheticCodexAgentHelperProcess", sessionID: "codex-thread"},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			data, bin := t.TempDir(), t.TempDir()
+			if err := os.Chmod(data, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			launcher := "#!/bin/sh\nexec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" -test.run=^" + tc.helper + "$\n"
+			if err := os.WriteFile(filepath.Join(bin, tc.binary), []byte(launcher), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("SCIMUX_SYNTHETIC_ACP", "1")
+			t.Setenv("SCIMUX_SYNTHETIC_CODEX", "1")
+			t.Setenv("SCIMUX_SYNTHETIC_ACP_STATUS", filepath.Join(data, "agent-status"))
+
+			workers := newWorkerManager(exe, data, "worker-contract")
+			workers.startOptions = sessionWorkerStartOptions{
+				args: []string{"-test.run=^TestProductionSessionWorkerHelperProcess$"},
+				env:  []string{"SCIMUX_PRODUCTION_SESSION_WORKER_TEST=1"},
+			}
+			t.Cleanup(workers.Shutdown)
+			node := &Node{
+				ID: "chat-" + tc.agent, Title: tc.agent + " worker", Prompt: "ping", Agent: tc.agent,
+				Dir: data, Model: "cheap", Effort: "low", Transport: tc.transport, CreatedAt: "2026-09-11T21:00:00Z",
+			}
+			if sid, err := workers.LaunchNode(node, node.Model); err != nil || sid != tc.sessionID {
+				t.Fatalf("LaunchNode = %q, %v; want %q", sid, err, tc.sessionID)
+			}
+			if err := workers.Send(node.ID, "ping"); err != nil {
+				t.Fatal(err)
+			}
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				state := workers.State(node.ID)
+				peek := workers.Peek(node.ID)
+				if tc.transport == "codex" && state.Live == "quiet" && strings.Contains(peek, "pong") {
+					break
+				}
+				if tc.transport == "acp" && state.Permission != nil {
+					prepared, err := workers.PreparePermission(node.ID, state.Permission.RequestID, "1")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := workers.Deliver(node.ID, prepared.Token); err != nil {
+						t.Fatal(err)
+					}
+					for time.Now().Before(deadline) {
+						if workers.Live(node.ID) == "quiet" && strings.Contains(workers.Peek(node.ID), "continued-after-approval") {
+							break
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if workers.Live(node.ID) == "quiet" && strings.Contains(workers.Peek(node.ID), "continued-after-approval") {
+						break
+					}
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("%s worker did not complete: state=%#v peek=%q", tc.agent, state, peek)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := workers.Kill(node.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sessionworker.Discover(data, node.ID); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("worker locator survived deletion: %v", err)
+			}
+		})
+	}
+}
+
+// TestClaudeSessionWorkerSurvivesMuxerDisconnect uses a real worker process,
+// a private real tmux server, and a shell fixture standing in for Claude. It
+// proves Claude now crosses the same reattachment boundary as ACP/Codex while
+// spending no provider quota.
+func TestClaudeSessionWorkerSurvivesMuxerDisconnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires tmux")
+	}
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := `#!/bin/sh
+sid=
+settings=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) sid=$2; shift 2 ;;
+    --settings) settings=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+bundle=${settings%/*}
+project="$SCIMUX_FAKE_CLAUDE_HOME/.claude/projects/-fake"
+mkdir -p "$project"
+transcript="$project/$sid.jsonl"
+: > "$transcript"
+printf '{"hook_event_name":"SessionStart","session_id":"%s","transcript_path":"%s","cwd":"%s","source":"startup"}\n' "$sid" "$transcript" "$SCIMUX_FAKE_CLAUDE_HOME" > "$bundle/inbox/start.json"
+while IFS= read -r line; do
+  printf '{"type":"user","timestamp":"2026-09-11T00:00:00Z","message":{"role":"user","content":"%s"}}\n' "$line" >> "$transcript"
+  printf '{"type":"assistant","timestamp":"2026-09-11T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"worker-reply"}]}}\n' >> "$transcript"
+done
+`
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCIMUX_FAKE_CLAUDE_HOME", data)
+	socket := fmt.Sprintf("scimux-claude-worker-%d", time.Now().UnixNano())
+	tmux := tmuxsession.NewServer(socket)
+	t.Cleanup(func() {
+		_ = tmux.KillServer()
+		if err := os.Remove(tmux.SocketPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove tmux socket: %v", err)
+		}
+	})
+
+	workers := newWorkerManager(exe, data, "worker-old")
+	workers.home, workers.socket = data, socket
+	workers.startOptions = sessionWorkerStartOptions{
+		args: []string{"-test.run=^TestProductionSessionWorkerHelperProcess$"},
+		env:  []string{"SCIMUX_PRODUCTION_SESSION_WORKER_TEST=1"},
+	}
+	node := &Node{
+		ID: "claude-worker", Title: "Claude worker", Prompt: "hello", Agent: "claude",
+		Dir: data, SessionID: hookSIDOwn, Transport: "tmux", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if sid, err := workers.LaunchNode(node, ""); err != nil || sid != hookSIDOwn {
+		t.Fatalf("LaunchNode = %q, %v", sid, err)
+	}
+	locator, err := sessionworker.Discover(data, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := locator.PID
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		state := workers.State(node.ID)
+		if state.Transcript != "" && state.Delivery == "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if state := workers.State(node.ID); state.Transcript == "" || state.Delivery != "" {
+		t.Fatalf("Claude worker did not bind and confirm prompt: %#v", state)
+	}
+
+	workers.Detach()
+	replacement := newWorkerManager(exe, data, "muxer-new")
+	if err := replacement.Reconcile([]*Node{node}); err != nil {
+		t.Fatal(err)
+	}
+	if !replacement.manages(node.ID) {
+		t.Fatal("replacement muxer did not reattach Claude worker")
+	}
+	after, err := sessionworker.Discover(data, node.ID)
+	if err != nil || after.PID != pid {
+		t.Fatalf("Claude worker PID changed across muxer loss: %d -> %#v (%v)", pid, after, err)
+	}
+	if got := replacement.PeekMode(node.ID, "visible"); got == "" {
+		t.Fatal("reattached worker returned an empty pane snapshot")
+	}
+	if err := replacement.Kill(node.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -295,62 +492,6 @@ func waitForPublicText(t *testing.T, addr, nodeID, want string) {
 	t.Fatalf("public chat did not contain %q", want)
 }
 
-type syntheticACPProcess struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.Reader
-	done     chan struct{}
-	waitOnce sync.Once
-	killOnce sync.Once
-	waitErr  error
-	killErr  error
-}
-
-func (p *syntheticACPProcess) Stdin() io.WriteCloser { return p.stdin }
-func (p *syntheticACPProcess) Stdout() io.Reader     { return p.stdout }
-func (p *syntheticACPProcess) Kill() error {
-	p.killOnce.Do(func() {
-		_ = p.stdin.Close()
-		p.killErr = p.cmd.Process.Kill()
-		if errors.Is(p.killErr, os.ErrProcessDone) {
-			p.killErr = nil
-		}
-	})
-	return p.killErr
-}
-func (p *syntheticACPProcess) Wait() error {
-	p.waitOnce.Do(func() {
-		p.waitErr = p.cmd.Wait()
-		close(p.done)
-	})
-	return p.waitErr
-}
-
-func syntheticACPRunner(t *testing.T, statusPath string, spawned chan<- *syntheticACPProcess) acp.Runner {
-	t.Helper()
-	return func(_, _, dir, _, _ string) (acp.Process, error) {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestSyntheticACPAgentHelperProcess$")
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "SCIMUX_SYNTHETIC_ACP=1", "SCIMUX_SYNTHETIC_ACP_STATUS="+statusPath)
-		cmd.Stderr = io.Discard
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return nil, err
-		}
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			_ = stdin.Close()
-			return nil, err
-		}
-		if err := cmd.Start(); err != nil {
-			return nil, err
-		}
-		proc := &syntheticACPProcess{cmd: cmd, stdin: stdin, stdout: stdout, done: make(chan struct{})}
-		spawned <- proc
-		return proc, nil
-	}
-}
-
 func TestSyntheticACPAgentHelperProcess(t *testing.T) {
 	if os.Getenv("SCIMUX_SYNTHETIC_ACP") != "1" {
 		return
@@ -360,12 +501,81 @@ func TestSyntheticACPAgentHelperProcess(t *testing.T) {
 	}
 }
 
+func TestSyntheticCodexAgentHelperProcess(t *testing.T) {
+	if os.Getenv("SCIMUX_SYNTHETIC_CODEX") != "1" {
+		return
+	}
+	if err := runSyntheticCodexAgent(os.Stdin, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runSyntheticCodexAgent(in io.Reader, out io.Writer) error {
+	type request struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	scan := bufio.NewScanner(in)
+	enc := json.NewEncoder(out)
+	for scan.Scan() {
+		var req request
+		if err := json.Unmarshal(scan.Bytes(), &req); err != nil {
+			return err
+		}
+		respond := func(result any) error {
+			return enc.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": result})
+		}
+		switch req.Method {
+		case "initialize":
+			if err := respond(map[string]any{"userAgent": "synthetic-codex"}); err != nil {
+				return err
+			}
+		case "thread/start":
+			if err := respond(map[string]any{
+				"thread": map[string]any{"id": "codex-thread", "path": "/synthetic/rollout.jsonl"},
+				"model":  "cheap", "approvalPolicy": "on-request",
+			}); err != nil {
+				return err
+			}
+		case "turn/start":
+			if err := respond(map[string]any{"turn": map[string]any{"id": "codex-turn"}}); err != nil {
+				return err
+			}
+			if err := enc.Encode(map[string]any{
+				"jsonrpc": "2.0", "method": "item/completed",
+				"params": map[string]any{"item": map[string]any{"type": "agentMessage", "text": "pong"}},
+			}); err != nil {
+				return err
+			}
+			if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "turn/completed", "params": map[string]any{}}); err != nil {
+				return err
+			}
+		case "turn/interrupt":
+			if err := respond(map[string]any{}); err != nil {
+				return err
+			}
+		}
+	}
+	return scan.Err()
+}
+
 func runSyntheticACPAgent(in io.Reader, out io.Writer, statusPath string) error {
 	type message struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 		Result json.RawMessage `json:"result"`
+	}
+	if statusPath != "" {
+		f, err := os.OpenFile(statusPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(f, "pid:%d\n", os.Getpid())
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
 	}
 	scan := bufio.NewScanner(in)
 	enc := json.NewEncoder(out)

@@ -15,6 +15,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
@@ -34,6 +35,7 @@ func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
 	}
 	claimCommandOwnership(t, cmd)
 	stopRequested := make(chan struct{}, 1)
+	restartRequested := make(chan struct{}, 1)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -44,8 +46,9 @@ func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
 			s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
 			s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
 		},
-		requestStop: func() { stopRequested <- struct{}{} },
-		report:      func(err error) { t.Errorf("unexpected recovery error: %v", err) },
+		requestStop:    func() { stopRequested <- struct{}{} },
+		requestRestart: func() { restartRequested <- struct{}{} },
+		report:         func(err error) { t.Errorf("unexpected recovery error: %v", err) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +81,11 @@ func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
 	if err := handoff.commit(); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case <-restartRequested:
+	default:
+		t.Fatal("committed web candidate did not request muxer replacement")
+	}
 	assertRuntimeWebGeneration(t, ln.Addr().String(), "2")
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
@@ -98,6 +106,99 @@ func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
 	if err := nilRuntime.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestSplitRuntimeRejectsIncompleteCompositionAndNilLifecycle(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	for _, tc := range []struct {
+		a   *app
+		cmd *Command
+		exe string
+	}{
+		{a: nil, cmd: &Command{}, exe: "scimux"},
+		{a: a, cmd: nil, exe: "scimux"},
+		{a: a, cmd: &Command{}, exe: ""},
+		{a: a, cmd: &Command{}, exe: "scimux"},
+	} {
+		if runtime, err := startSplitRuntime(nil, tc.a, tc.cmd, tc.exe, splitRuntimeOptions{}); err == nil || runtime != nil {
+			t.Fatalf("incomplete runtime = %#v, %v", runtime, err)
+		}
+	}
+	var nilRuntime *splitRuntime
+	if files, err := nilRuntime.PrepareExec(); err == nil || files != nil {
+		t.Fatalf("nil PrepareExec = %#v, %v", files, err)
+	}
+	if err := nilRuntime.QuiesceForExec(); err != nil {
+		t.Fatal(err)
+	}
+	if files, err := (&splitRuntime{}).PrepareExec(); err == nil || files != nil {
+		t.Fatalf("empty PrepareExec = %#v, %v", files, err)
+	}
+
+	var nilMuxer *muxerBackend
+	nilMuxer.releaseHarnessesAfterStartupFailure()
+	manager := &workerManager{entries: map[string]*workerEntry{}}
+	(&muxerBackend{app: &app{workers: manager}}).releaseHarnessesAfterStartupFailure()
+	(&muxerBackend{app: newTestApp(t, &fakeTmux{})}).releaseHarnessesAfterStartupFailure()
+}
+
+func TestSplitRuntimeQuiesceForExecPreservesSessionWorkerAndOwnership(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	data := filepath.Dir(a.storePath)
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workers := syntheticWorkerManager(t, data)
+	a.workers = workers
+	if _, err := workers.Launch("survivor", "opencode", data, "cheap", "low"); err != nil {
+		t.Fatal(err)
+	}
+	workerBefore, err := sessionworker.Discover(data, "survivor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard, listener: ln, listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data}}
+	claimCommandOwnership(t, cmd)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{configureWeb: func(s *webSupervisor) {
+		s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
+		s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
+		s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := rt.PrepareExec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	if err := rt.QuiesceForExec(); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Listener() == nil || cmd.ownership == nil {
+		t.Fatal("exec quiesce released public listener or lifetime ownership")
+	}
+	workerAfter, err := sessionworker.Discover(data, "survivor")
+	if err != nil || workerAfter.PID != workerBefore.PID {
+		t.Fatalf("worker after quiesce = %#v, %v; want PID %d", workerAfter, err, workerBefore.PID)
+	}
+	if workers.entry("survivor") != nil {
+		t.Fatal("old muxer retained a worker client after quiesce")
+	}
+	if err := workers.Reconcile([]*Node{{ID: "survivor", Agent: "opencode", Transport: "acp"}}); err != nil {
+		t.Fatal(err)
+	}
+	workers.Shutdown()
+	cmd.closeListener()
+	cmd.closeOwnership()
 }
 
 func TestSplitRuntimeRetainsOwnershipWhileWebDrains(t *testing.T) {

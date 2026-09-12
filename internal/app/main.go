@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -159,8 +160,18 @@ func Run() {
 	if len(os.Args) > 1 && os.Args[1] == webChildCmd {
 		os.Exit(runWebChildMain())
 	}
+	if len(os.Args) > 1 && os.Args[1] == sessionWorkerCmd {
+		os.Exit(runSessionWorkerMain())
+	}
 	if len(os.Args) > 1 && os.Args[1] == stopCmd {
 		os.Exit(runStopMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	handoff, err := loadMuxerExecFiles(os.Getenv)
+	_ = os.Unsetenv(envMuxerPublicFD)
+	_ = os.Unsetenv(envMuxerLockFD)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -188,6 +199,7 @@ func Run() {
 			Stderr: os.Stderr,
 		},
 		muxerOnly: true,
+		handoff:   handoff,
 	}
 	if err := cmd.Run(context.Background()); err != nil {
 		if errors.Is(err, errFlagsReported) {
@@ -208,26 +220,52 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "scimux: startup produced no application")
 		os.Exit(1)
 	}
-	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
-	a.warmStartup()
-	status.Done()
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
 	}
+	dataDir := filepath.Dir(a.storePath)
+	workerExe, err := pinWorkerExecutable(exe, dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
+	workers := newWorkerManager(workerExe, dataDir, version)
+	workers.home, workers.socket = a.home, cmd.socket
+	if err := workers.Reconcile(a.nodes); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: reconnect session workers:", err)
+	}
+	if err := workers.RecoverUnknown(a); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: recover interrupted session-worker transactions:", err)
+	}
+	if err := workers.AdoptExistingClaude(a); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: attach existing Claude chats to session workers:", err)
+	}
+	a.workers = workers
+	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
+	a.warmStartup()
+	status.Done()
 	stopRequested := make(chan struct{}, 1)
-	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{
+	restartRequested := make(chan struct{}, 1)
+	runtimeOpts := splitRuntimeOptions{
 		requestStop: func() {
 			select {
 			case stopRequested <- struct{}{}:
 			default:
 			}
 		},
+		requestRestart: func() {
+			select {
+			case restartRequested <- struct{}{}:
+			default:
+			}
+		},
 		report: func(err error) {
 			fmt.Fprintln(os.Stderr, "scimux: restart web child:", err)
 		},
-	})
+	}
+	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, runtimeOpts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)
@@ -278,10 +316,43 @@ func Run() {
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), cmd.socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", cmd.socket)
 
-	select {
-	case <-stop:
-	case <-stopRequested:
+	for {
+		select {
+		case <-stop:
+			signal.Stop(stop)
+			_ = runtime.Close()
+			return
+		case <-stopRequested:
+			signal.Stop(stop)
+			_ = runtime.Close()
+			return
+		case <-restartRequested:
+			files, prepareErr := runtime.PrepareExec()
+			if prepareErr != nil {
+				fmt.Fprintln(os.Stderr, "scimux: prepare muxer update:", prepareErr)
+				continue
+			}
+			if quiesceErr := runtime.QuiesceForExec(); quiesceErr != nil {
+				_ = files.Close()
+				fmt.Fprintln(os.Stderr, "scimux: quiesce muxer update:", quiesceErr)
+				return
+			}
+			replaceErr := replaceMuxerProcess(exe, files)
+			_ = files.Close()
+			// Exec returns only on failure. Reattach the still-running workers
+			// and restore service with the installed binary's web child.
+			if reconcileErr := workers.Reconcile(a.nodes); reconcileErr != nil {
+				fmt.Fprintln(os.Stderr, "scimux: reconnect workers after failed muxer update:", reconcileErr)
+			}
+			recovered, recoverErr := startSplitRuntime(context.Background(), a, cmd, exe, runtimeOpts)
+			if recoverErr != nil {
+				fmt.Fprintln(os.Stderr, "scimux: muxer update failed:", errors.Join(replaceErr, recoverErr))
+				cmd.closeListener()
+				cmd.closeOwnership()
+				return
+			}
+			runtime = recovered
+			fmt.Fprintln(os.Stderr, "scimux: muxer update exec failed; restored current muxer:", replaceErr)
+		}
 	}
-	signal.Stop(stop)
-	_ = runtime.Close()
 }

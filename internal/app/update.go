@@ -5,8 +5,9 @@ package app
 // the corresponding control in the burger menu ("no cloud" holds by
 // construction). The update is notify-and-confirm, never silent: the UI asks
 // before /api/update is called, and the handler verifies the downloaded
-// binary against the release's SHA256SUMS before the atomic rename + web
-// generation handoff. The long-lived muxer and its harnesses are untouched.
+// binary against the release's SHA256SUMS before the atomic rename. A ready
+// web generation is activated first, then the muxer execs through its listener
+// and ownership handoff. Per-session workers are detached, never stopped.
 
 import (
 	"context"

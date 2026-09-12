@@ -137,6 +137,25 @@ func (m *muxerBackend) shutdownHarnesses() {
 	if m == nil || m.app == nil {
 		return
 	}
+	if m.app.workers != nil {
+		m.app.workers.Shutdown()
+		return
+	}
+	m.app.acp.Shutdown()
+	m.app.codex.Shutdown()
+}
+
+// releaseHarnessesAfterStartupFailure must not convert a bad new web/muxer
+// generation into lost chats. Production workers are detached and remain
+// discoverable; only the legacy in-process test/monolith path is shut down.
+func (m *muxerBackend) releaseHarnessesAfterStartupFailure() {
+	if m == nil || m.app == nil {
+		return
+	}
+	if m.app.workers != nil {
+		m.app.workers.Detach()
+		return
+	}
 	m.app.acp.Shutdown()
 	m.app.codex.Shutdown()
 }

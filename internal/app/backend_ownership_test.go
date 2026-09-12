@@ -94,6 +94,15 @@ type closeRecorder struct{ calls int }
 
 func (c *closeRecorder) Close() error { c.calls++; return nil }
 
+func TestMuxerShutdownUsesSessionWorkersWhenInstalled(t *testing.T) {
+	manager := &workerManager{entries: map[string]*workerEntry{}}
+	a := &app{workers: manager}
+	(&muxerBackend{app: a}).shutdownHarnesses()
+	if a.workers != manager {
+		t.Fatal("worker manager changed during shutdown")
+	}
+}
+
 func TestWebBackendConstructionAndClose(t *testing.T) {
 	if _, err := newWebMux(nil, http.NotFoundHandler(), nil); err == nil {
 		t.Fatal("web mux accepted nil embedded tree")

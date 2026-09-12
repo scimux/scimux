@@ -29,6 +29,12 @@ type Config struct {
 type appDeps struct {
 	Server               *tmuxsession.Server
 	DeliverClaudeInitial func(*Node) initialDelivery
+	// StorePath and ClaudeHooksDir isolate a Claude worker's private harness
+	// journal while retaining the established shared hook-bundle location.
+	// Production muxers leave both empty.
+	StorePath       string
+	ClaudeHooksDir  string
+	SkipHookCleanup bool
 }
 
 func NewApp(cfg Config) (*app, error) {
@@ -78,6 +84,11 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		notes:           notestore.New(notesDir),
 		home:            cfg.Home,
 	}
+	if deps.StorePath != "" {
+		a.storePath = deps.StorePath
+	}
+	a.claudeHooksRoot = deps.ClaudeHooksDir
+	a.skipHookCleanup = deps.SkipHookCleanup
 	// Owned Claude is the sole tmux transport whose first prompt is deferred:
 	// Remote Control must finish bootstrapping before its editor is safe. Tests
 	// inject an acknowledged result so unrelated lifecycle coverage need not
@@ -169,6 +180,9 @@ func (a *app) initMaps() {
 	}
 	if a.reserved == nil {
 		a.reserved = map[string]bool{}
+	}
+	if a.deletedNodes == nil {
+		a.deletedNodes = map[string]bool{}
 	}
 	if a.anim == nil {
 		a.anim = map[string]*animState{}
@@ -366,6 +380,10 @@ type app struct {
 	// runs outside a.mu; uniqueID must not reissue them, like pathClaims for
 	// transcript paths.
 	reserved map[string]bool
+	// deletedNodes retains only the latest replayed lifecycle state. Startup
+	// uses it to finish a deletion instead of resurrecting a worker whose muxer
+	// died between the durable tombstone and the worker Stop.
+	deletedNodes map[string]bool
 	// anim: per-node pane-change geometry (noteAnim). Tracks whether
 	// successive capture diffs stay confined to the same few lines — the
 	// mechanical signature of a static screen with an animation strip (a
@@ -474,6 +492,10 @@ type app struct {
 	server *tmuxsession.Server
 	acp    acpManager
 	codex  codexManager
+	// workers is installed only by the production muxer. Tests and the
+	// session-worker process itself retain the in-process managers above so
+	// their existing state-machine tests stay narrow and deterministic.
+	workers *workerManager
 	// launchGrace bounds how long a freshly-launched tmux agent is watched for
 	// an immediate failure (a rejected --model, a bad flag). The launch is
 	// wrapped so such a process leaves its error on the pane (wrapLaunch); within
@@ -519,7 +541,12 @@ type app struct {
 	// ~/.claude/projects folder (claudeProbeWorkdir).
 	claudeProbeDir string
 	storePath      string
-	uiPath         string
+	// claudeHooksRoot decouples a worker's private harness journal from the
+	// shared hook bundles invoked by the CLI. Empty preserves the ordinary
+	// <data>/claude-hooks derivation.
+	claudeHooksRoot string
+	skipHookCleanup bool
+	uiPath          string
 	// settingsPath is the computer's own settings (~/.scimux/settings.json),
 	// distinct from the opaque per-browser blob at uiPath. Empty disables them,
 	// which reads as every default — see settings.go.
@@ -659,9 +686,7 @@ type procManager interface {
 	// request sequence for auto-approve enable cutoffs. ok is false when
 	// there is no live session.
 	PermissionBoundary(nodeID string) (incarn string, maxSeq uint64, ok bool)
-	Turns(nodeID string) []transcript.Turn
 	Peek(nodeID string) string
-	Usage(nodeID string) (used, window int64)
 	Live(nodeID string) string
 	Attention(nodeID string) string
 	LastError(nodeID string) string
@@ -727,6 +752,14 @@ func (m codexManager) Conflict(err error) bool {
 func (a *app) proc(n *Node) procManager {
 	if a.testProc != nil {
 		return a.testProc
+	}
+	if a.workers != nil {
+		if n.transport() == "acp" || n.transport() == "codex" {
+			return a.workers
+		}
+		if n.Agent == "claude" && a.workers.manages(n.ID) {
+			return a.workers
+		}
 	}
 	switch n.transport() {
 	case "acp":

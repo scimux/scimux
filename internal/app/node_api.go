@@ -98,7 +98,12 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			a.mu.Unlock()
+		}
+	}()
 	if _, taken := a.byID[body.Session]; taken {
 		http.Error(w, "node already exists", 409)
 		return
@@ -174,6 +179,15 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
+	a.mu.Unlock()
+	locked = false
+	if a.workers != nil && n.Agent == "claude" {
+		if _, err := a.workers.AdoptClaude(n, "", 0); err != nil {
+			// Adoption itself already succeeded and must not be rolled back: the
+			// legacy controller remains able to supervise this user-owned pane.
+			fmt.Fprintf(os.Stderr, "scimux: attach adopted Claude chat %s to session worker: %v\n", n.ID, err)
+		}
+	}
 	writeJSON(w, n)
 }
 
@@ -236,7 +250,7 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		InitialDelivery initialDelivery `json:"initial_delivery,omitempty"`
 		InitialError    string          `json:"initial_error,omitempty"`
 	}{Node: &snap, InitialDelivery: initial, InitialError: launchErr})
-	if snap.Agent == "claude" {
+	if snap.Agent == "claude" && (a.workers == nil || !a.workers.manages(snap.ID)) {
 		a.startClaudeInitialDelivery(snap.ID)
 	}
 }
@@ -288,8 +302,7 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no session store", 409)
 			return
 		}
-		wtr := &sessionlog.Writer{Path: a.sessionLogPath(id)}
-		if err := wtr.Append(sessionlog.NewStation(seam, title, desc)); err != nil {
+		if err := a.appendSessionEvent(id, sessionlog.NewStation(seam, title, desc)); err != nil {
 			http.Error(w, "persist station: "+err.Error(), 500)
 			return
 		}

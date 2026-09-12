@@ -98,6 +98,11 @@ func (a *app) liveSessionID(n *Node) string {
 	if n == nil {
 		return ""
 	}
+	if a.workers != nil {
+		if live := a.workers.SessionID(n.ID); live != "" {
+			return live
+		}
+	}
 	if a.acp.Manager != nil {
 		if live := a.acp.SessionID(n.ID); live != "" {
 			return live

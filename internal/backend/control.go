@@ -115,6 +115,64 @@ func Register(dataDir string, link Link) (*Registration, error) {
 	return owner, nil
 }
 
+// FileForExec duplicates the lifetime-lock descriptor for same-PID process
+// replacement. The duplicate is close-on-exec until the caller enters its
+// fork/exec critical section, so unrelated concurrent subprocesses cannot
+// inherit muxer ownership.
+func (r *Registration) FileForExec() (*os.File, error) {
+	if r == nil || r.lock == nil {
+		return nil, errors.New("backend: handoff without ownership")
+	}
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	fd, err := syscall.Dup(int(r.lock.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("backend: duplicate muxer ownership lock: %w", err)
+	}
+	syscall.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), "scimux-muxer-ownership"), nil
+}
+
+// Adopt reconstructs a Registration from a descriptor carried through exec.
+// Flock on the passed descriptor is both validation and a safe fallback: on
+// platforms where exec retained the lock it is idempotent, and if it did not
+// the same nonblocking operation reacquires it before any store access.
+func Adopt(dataDir string, lock *os.File) (*Registration, error) {
+	if lock == nil {
+		return nil, errors.New("backend: adopt without ownership descriptor")
+	}
+	fail := func(err error) (*Registration, error) {
+		_ = lock.Close()
+		return nil, err
+	}
+	info, err := os.Stat(dataDir)
+	if err != nil {
+		return fail(fmt.Errorf("backend: inspect data directory: %w", err))
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return fail(errors.New("backend: data directory is not an owner-only directory"))
+	}
+	lockInfo, err := lock.Stat()
+	if err != nil {
+		return fail(fmt.Errorf("backend: inspect inherited ownership lock: %w", err))
+	}
+	path := filepath.Join(dataDir, lockName)
+	pathInfo, err := os.Stat(path)
+	if err != nil || !lockInfo.Mode().IsRegular() || !os.SameFile(lockInfo, pathInfo) {
+		return fail(errors.New("backend: inherited descriptor is not the muxer ownership lock"))
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return fail(ErrMuxerOwned)
+		}
+		return fail(fmt.Errorf("backend: adopt muxer ownership lock: %w", err))
+	}
+	syscall.CloseOnExec(int(lock.Fd()))
+	locatorPath := filepath.Join(dataDir, locatorName)
+	payload, _ := os.ReadFile(locatorPath)
+	return &Registration{lock: lock, locatorPath: locatorPath, payload: payload}, nil
+}
+
 func publishLocator(dataDir, path string, payload []byte) error {
 	tmp, err := os.CreateTemp(dataDir, ".muxer-*.tmp")
 	if err != nil {
