@@ -231,10 +231,35 @@ func TestCommandConsumesInheritedMuxerOwnershipAndListener(t *testing.T) {
 }
 
 type muxerExecReady struct {
-	DataDir   string `json:"data_dir"`
-	Addr      string `json:"addr"`
-	MuxerPID  int    `json:"muxer_pid"`
-	WorkerPID int    `json:"worker_pid"`
+	DataDir    string         `json:"data_dir"`
+	Addr       string         `json:"addr"`
+	MuxerPID   int            `json:"muxer_pid"`
+	WorkerPIDs map[string]int `json:"worker_pids"`
+}
+
+type muxerExecWorkerState struct {
+	PID       int    `json:"pid"`
+	Build     string `json:"build"`
+	Pending   bool   `json:"pending"`
+	RequestID string `json:"request_id"`
+}
+
+type muxerExecState struct {
+	MuxerPID int                             `json:"muxer_pid"`
+	Build    string                          `json:"build"`
+	Workers  map[string]muxerExecWorkerState `json:"workers"`
+}
+
+var muxerExecHarnesses = []struct {
+	ID        string
+	Agent     string
+	Transport string
+}{
+	{ID: "survivor-claude", Agent: "claude", Transport: "tmux"},
+	{ID: "survivor-codex", Agent: "codex", Transport: "codex"},
+	{ID: "survivor-grok", Agent: "grok", Transport: "acp"},
+	{ID: "survivor-pi", Agent: "pi", Transport: "acp"},
+	{ID: "survivor-opencode", Agent: "opencode", Transport: "acp"},
 }
 
 const muxerExecReadyFDEnv = "SCIMUX_MUXER_EXEC_READY_FD"
@@ -261,15 +286,37 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 	}
 	cmd := &Command{listener: ln, ownership: owner}
 	workers := syntheticWorkerManager(t, data)
-	if _, err := workers.Launch("survivor", "opencode", data, "cheap", "low"); err != nil {
-		t.Fatal(err)
-	}
-	if err := workers.Send("survivor", "permission"); err != nil {
-		t.Fatal(err)
-	}
-	locator, err := sessionworker.Discover(data, "survivor")
-	if err != nil {
-		t.Fatal(err)
+	workers.build = "muxer-v1"
+	workerPIDs := make(map[string]int, len(muxerExecHarnesses))
+	for _, harness := range muxerExecHarnesses {
+		if _, err := workers.Launch(harness.ID, harness.Agent, data, "cheap", "low"); err != nil {
+			t.Fatalf("launch %s: %v", harness.Agent, err)
+		}
+		// Complete one turn before replacement, then leave a second turn
+		// awaiting approval. This distinguishes a surviving chat from a
+		// process that merely retained its PID without retaining its state.
+		if err := workers.Send(harness.ID, "permission-before-update"); err != nil {
+			t.Fatalf("send %s: %v", harness.Agent, err)
+		}
+		pending, ok := workers.Pending(harness.ID)
+		if !ok {
+			t.Fatalf("%s did not expose its first approval", harness.Agent)
+		}
+		token, _, err := workers.PrepareResolve(harness.ID, pending.RequestID, "1")
+		if err == nil {
+			err = workers.Deliver(harness.ID, token)
+		}
+		if err != nil {
+			t.Fatalf("complete %s before update: %v", harness.Agent, err)
+		}
+		if err := workers.Send(harness.ID, "permission-across-update"); err != nil {
+			t.Fatalf("second send %s: %v", harness.Agent, err)
+		}
+		locator, err := sessionworker.Discover(data, harness.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workerPIDs[harness.ID] = locator.PID
 	}
 	workers.Detach()
 	files, err := prepareMuxerExecFiles(cmd)
@@ -281,7 +328,7 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 		t.Fatal("missing muxer-exec readiness descriptor")
 	}
 	ready := os.NewFile(uintptr(readyFD), "muxer-exec-ready")
-	if err := json.NewEncoder(ready).Encode(muxerExecReady{DataDir: data, Addr: ln.Addr().String(), MuxerPID: os.Getpid(), WorkerPID: locator.PID}); err != nil {
+	if err := json.NewEncoder(ready).Encode(muxerExecReady{DataDir: data, Addr: ln.Addr().String(), MuxerPID: os.Getpid(), WorkerPIDs: workerPIDs}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ready.Close(); err != nil {
@@ -323,35 +370,55 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	workers := syntheticWorkerManager(t, data)
-	node := &Node{ID: "survivor", Agent: "opencode", Transport: "acp"}
-	if err := workers.Reconcile([]*Node{node}); err != nil {
+	workers.build = "muxer-v2"
+	nodes := make([]*Node, 0, len(muxerExecHarnesses))
+	for _, harness := range muxerExecHarnesses {
+		nodes = append(nodes, &Node{ID: harness.ID, Agent: harness.Agent, Transport: harness.Transport})
+	}
+	if err := workers.Reconcile(nodes); err != nil {
 		t.Fatal(err)
 	}
-	workerLocator, err := sessionworker.Discover(data, node.ID)
-	if err != nil {
-		t.Fatal(err)
+	workerLocators := make(map[string]sessionworker.Locator, len(nodes))
+	for _, node := range nodes {
+		locator, err := sessionworker.Discover(data, node.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workerLocators[node.ID] = locator
 	}
 	stop := make(chan struct{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, _ *http.Request) {
-		locator, _ := sessionworker.Discover(data, node.ID)
-		pending, ok := workers.Pending(node.ID)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"muxer_pid": os.Getpid(), "worker_pid": locator.PID,
-			"pending": ok, "request_id": pending.RequestID,
-		})
+		state := muxerExecState{MuxerPID: os.Getpid(), Build: workers.build, Workers: make(map[string]muxerExecWorkerState, len(nodes))}
+		for _, node := range nodes {
+			locator, _ := sessionworker.Discover(data, node.ID)
+			pending, ok := workers.Pending(node.ID)
+			state.Workers[node.ID] = muxerExecWorkerState{
+				PID: locator.PID, Build: locator.Identity.Build,
+				Pending: ok, RequestID: pending.RequestID,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(state)
 	})
-	mux.HandleFunc("POST /answer", func(w http.ResponseWriter, _ *http.Request) {
-		pending, ok := workers.Pending(node.ID)
+	mux.HandleFunc("POST /answer", func(w http.ResponseWriter, r *http.Request) {
+		nodeID := r.URL.Query().Get("id")
+		pending, ok := workers.Pending(nodeID)
 		if !ok {
 			http.Error(w, "no permission", http.StatusConflict)
 			return
 		}
-		token, _, err := workers.PrepareResolve(node.ID, pending.RequestID, "1")
+		token, _, err := workers.PrepareResolve(nodeID, pending.RequestID, "1")
 		if err == nil {
-			err = workers.Deliver(node.ID, token)
+			err = workers.Deliver(nodeID, token)
 		}
 		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /send", func(w http.ResponseWriter, r *http.Request) {
+		if err := workers.Send(r.URL.Query().Get("id"), "permission-after-update"); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -369,9 +436,11 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 	<-stop
 	_ = srv.Close()
 	workers.Shutdown()
-	var workerStatus syscall.WaitStatus
-	if pid, err := syscall.Wait4(workerLocator.PID, &workerStatus, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
-		t.Fatalf("reattached worker was not reaped after stop: wait4 pid=%d err=%v status=%v", pid, err, workerStatus)
+	for nodeID, locator := range workerLocators {
+		var workerStatus syscall.WaitStatus
+		if pid, err := syscall.Wait4(locator.PID, &workerStatus, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
+			t.Fatalf("reattached %s worker was not reaped after stop: wait4 pid=%d err=%v status=%v", nodeID, pid, err, workerStatus)
+		}
 	}
 	cmd.closeListener()
 	cmd.closeOwnership()
@@ -422,7 +491,7 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	_ = stdin.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
-	var state map[string]any
+	var state muxerExecState
 	for time.Now().Before(deadline) {
 		if contender, err := backend.Claim(ready.DataDir); err == nil {
 			_ = contender.Close()
@@ -434,23 +503,44 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		if err == nil {
 			err = json.NewDecoder(resp.Body).Decode(&state)
 			_ = resp.Body.Close()
-			if err == nil {
+			if err == nil && len(state.Workers) == len(muxerExecHarnesses) {
 				break
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	muxerPID, muxerOK := state["muxer_pid"].(float64)
-	workerPID, workerOK := state["worker_pid"].(float64)
-	if !muxerOK || !workerOK || int(muxerPID) != ready.MuxerPID || int(workerPID) != ready.WorkerPID || state["pending"] != true || state["request_id"] != "synthetic:1" {
+	if state.MuxerPID != ready.MuxerPID || state.Build != "muxer-v2" {
 		t.Fatalf("state after exec = %#v, ready=%#v", state, ready)
 	}
-	resp, err := http.Post("http://"+ready.Addr+"/answer", "application/json", nil)
-	if err != nil || resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("answer = %#v, %v", resp, err)
+	for _, harness := range muxerExecHarnesses {
+		worker := state.Workers[harness.ID]
+		if worker.PID != ready.WorkerPIDs[harness.ID] || worker.Build != "muxer-v1" || !worker.Pending || worker.RequestID != "synthetic:1" {
+			t.Fatalf("%s state after exec = %#v, ready PID=%d", harness.Agent, worker, ready.WorkerPIDs[harness.ID])
+		}
 	}
-	_ = resp.Body.Close()
-	resp, err = http.Post("http://"+ready.Addr+"/stop", "application/json", nil)
+	postMuxerExec(t, ready.Addr, "/answer", muxerExecHarnesses)
+	postMuxerExec(t, ready.Addr, "/send", muxerExecHarnesses)
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		state = readMuxerExecState(t, ready.Addr)
+		allPending := true
+		for _, harness := range muxerExecHarnesses {
+			worker := state.Workers[harness.ID]
+			allPending = allPending && worker.Pending && worker.PID == ready.WorkerPIDs[harness.ID]
+		}
+		if allPending {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for _, harness := range muxerExecHarnesses {
+		worker := state.Workers[harness.ID]
+		if !worker.Pending || worker.PID != ready.WorkerPIDs[harness.ID] {
+			t.Fatalf("%s did not complete a post-update turn on its original worker: %#v", harness.Agent, worker)
+		}
+	}
+	postMuxerExec(t, ready.Addr, "/answer", muxerExecHarnesses)
+	resp, err := http.Post("http://"+ready.Addr+"/stop", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +549,38 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	waited = true
-	if _, err := sessionworker.Discover(ready.DataDir, "survivor"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("explicit stop left worker: %v", err)
+	for _, harness := range muxerExecHarnesses {
+		if _, err := sessionworker.Discover(ready.DataDir, harness.ID); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("explicit stop left %s worker: %v", harness.Agent, err)
+		}
 	}
+}
+
+func postMuxerExec(t *testing.T, addr, path string, harnesses []struct {
+	ID        string
+	Agent     string
+	Transport string
+}) {
+	t.Helper()
+	for _, harness := range harnesses {
+		resp, err := http.Post("http://"+addr+path+"?id="+harness.ID, "application/json", nil)
+		if err != nil || resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("%s %s = %#v, %v", harness.Agent, path, resp, err)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+func readMuxerExecState(t *testing.T, addr string) muxerExecState {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var state muxerExecState
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state
 }

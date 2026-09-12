@@ -341,6 +341,391 @@ func TestEveryStructuredHarnessRunsBehindRealSessionWorker(t *testing.T) {
 	}
 }
 
+type structuredHarnessAcceptance struct {
+	agent, binary, transport, helper string
+}
+
+// TestStructuredHarnessesMatchMonolithThroughPublicAPI drives the same
+// browser-visible create/chat/approval/peek/send/clear/delete lifecycle through
+// both compositions. The monolith owns the production protocol manager in the
+// HTTP process; the split owns that same adapter in a real per-chat worker and
+// reaches it through the muxer's Unix API. Deterministic protocol peers keep
+// this an offline acceptance test rather than a provider-quota test.
+func TestStructuredHarnessesMatchMonolithThroughPublicAPI(t *testing.T) {
+	for _, harness := range []structuredHarnessAcceptance{
+		{agent: "pi", binary: "pi-acp", transport: "acp", helper: "TestSyntheticACPAgentHelperProcess"},
+		{agent: "opencode", binary: "opencode", transport: "acp", helper: "TestSyntheticACPAgentHelperProcess"},
+		{agent: "grok", binary: "grok", transport: "acp", helper: "TestSyntheticACPAgentHelperProcess"},
+		{agent: "codex", binary: "codex", transport: "codex", helper: "TestSyntheticCodexAgentHelperProcess"},
+	} {
+		t.Run(harness.agent, func(t *testing.T) {
+			workDir := t.TempDir()
+			var monolith, split []string
+			t.Run("monolith", func(t *testing.T) {
+				monolith = runStructuredHarnessPublicE2E(t, harness, workDir, false)
+			})
+			t.Run("split", func(t *testing.T) {
+				split = runStructuredHarnessPublicE2E(t, harness, workDir, true)
+			})
+			if strings.Join(monolith, "\n") != strings.Join(split, "\n") {
+				t.Fatalf("public lifecycle differs\nmonolith=%q\nsplit=%q", monolith, split)
+			}
+		})
+	}
+}
+
+func runStructuredHarnessPublicE2E(t *testing.T, harness structuredHarnessAcceptance, workDir string, split bool) []string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	launcher := "#!/bin/sh\nexec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" -test.run=^" + harness.helper + "$\n"
+	if err := os.WriteFile(filepath.Join(bin, harness.binary), []byte(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCIMUX_SYNTHETIC_ACP", "1")
+	t.Setenv("SCIMUX_SYNTHETIC_CODEX", "1")
+	t.Setenv("SCIMUX_SYNTHETIC_ACP_STATUS", filepath.Join(t.TempDir(), "agent-status"))
+
+	a := newShortAcceptanceApp(t)
+	var handler http.Handler
+	if split {
+		data := filepath.Dir(a.storePath)
+		workers := newWorkerManager(exe, data, "worker-contract")
+		workers.startOptions = sessionWorkerStartOptions{
+			args: []string{"-test.run=^TestProductionSessionWorkerHelperProcess$"},
+			env:  []string{"SCIMUX_PRODUCTION_SESSION_WORKER_TEST=1"},
+		}
+		a.workers = workers
+		t.Cleanup(workers.Shutdown)
+		coreHandler, err := newCoreMux(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		core, err := backend.Listen("", coreHandler)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = core.Close() })
+		handler = newTestWebGeneration(t, a, core.Link(), nil)
+	} else {
+		handler, err = NewHandler(a, webFS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			a.acp.Shutdown()
+			a.codex.Shutdown()
+		})
+	}
+
+	create := fmt.Sprintf(`{"title":%q,"prompt":"ping","agent":%q,"model":"cheap","effort":"low","dir":%q}`,
+		harness.agent+" acceptance", harness.agent, workDir)
+	rec := routeRequest(handler, http.MethodPost, "/api/nodes", create, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create %s = %d (%s)", harness.agent, rec.Code, rec.Body.String())
+	}
+	var created Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("created node = %q, %v", rec.Body.String(), err)
+	}
+	observed := []string{"create:200"}
+	completeStructuredPublicTurn(t, handler, created.ID, harness.transport, 1)
+	observed = append(observed, "initial:complete")
+
+	if rec := routeRequest(handler, http.MethodGet, "/api/state", "", false); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
+		t.Fatalf("state after create = %d (%s)", rec.Code, rec.Body.String())
+	}
+	observed = append(observed, "state:visible")
+	if rec := routeRequest(handler, http.MethodGet, "/api/nodes/"+created.ID+"/peek", "", false); rec.Code != http.StatusOK {
+		t.Fatalf("peek = %d (%s)", rec.Code, rec.Body.String())
+	}
+	observed = append(observed, "peek:200")
+
+	rec = routeRequest(handler, http.MethodPost, "/api/nodes/"+created.ID+"/send", `{"text":"ping again"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second send = %d (%s)", rec.Code, rec.Body.String())
+	}
+	completeStructuredPublicTurn(t, handler, created.ID, harness.transport, 2)
+	observed = append(observed, "second:complete")
+
+	rec = routeRequest(handler, http.MethodPost, "/api/nodes/"+created.ID+"/send", `{"text":"/clear"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear = %d (%s)", rec.Code, rec.Body.String())
+	}
+	observed = append(observed, "clear:200")
+	rec = routeRequest(handler, http.MethodPost, "/api/nodes/"+created.ID+"/send", `{"text":"after clear"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send after clear = %d (%s)", rec.Code, rec.Body.String())
+	}
+	completeStructuredPublicTurn(t, handler, created.ID, harness.transport, 1)
+	observed = append(observed, "post-clear:complete")
+
+	rec = routeRequest(handler, http.MethodDelete, "/api/nodes/"+created.ID, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := routeRequest(handler, http.MethodGet, "/api/nodes/"+created.ID+"/chat", "", false); rec.Code != http.StatusNotFound {
+		t.Fatalf("chat after delete = %d (%s)", rec.Code, rec.Body.String())
+	}
+	return append(observed, "delete:gone")
+}
+
+func newShortAcceptanceApp(t *testing.T) *app {
+	t.Helper()
+	root, err := os.MkdirTemp("", "scmx-harness-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	home, data := filepath.Join(root, "home"), filepath.Join(root, "data")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTmux{}
+	a, err := newApp(Config{Home: home, DataDir: data, LaunchGrace: 40 * time.Millisecond, LaunchPoll: 5 * time.Millisecond}, appDeps{
+		Server: tmuxsession.NewServerWithRunner("testsock", fake.run),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.usage = nil
+	return a
+}
+
+func completeStructuredPublicTurn(t *testing.T, handler http.Handler, nodeID, transport string, wantReplies int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	answered := ""
+	for time.Now().Before(deadline) {
+		rec := routeRequest(handler, http.MethodGet, "/api/nodes/"+nodeID+"/chat", "", false)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("chat = %d (%s)", rec.Code, rec.Body.String())
+		}
+		if transport == "codex" && strings.Count(rec.Body.String(), "pong") >= wantReplies && !strings.Contains(rec.Body.String(), `"turn_in_flight":true`) {
+			return
+		}
+		if transport == "acp" {
+			var chat map[string]any
+			if json.Unmarshal(rec.Body.Bytes(), &chat) == nil {
+				if requestID, _ := chat["perm_request_id"].(string); requestID != "" && requestID != answered {
+					answer := fmt.Sprintf(`{"key":"1","request_id":%q}`, requestID)
+					answerRec := routeRequest(handler, http.MethodPost, "/api/nodes/"+nodeID+"/key", answer, true)
+					if answerRec.Code != http.StatusOK {
+						t.Fatalf("answer = %d (%s)", answerRec.Code, answerRec.Body.String())
+					}
+					answered = requestID
+				}
+			}
+			if strings.Count(rec.Body.String(), "continued-after-approval") >= wantReplies && !strings.Contains(rec.Body.String(), `"turn_in_flight":true`) {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s turn did not complete", transport)
+}
+
+const syntheticClaudeLauncher = `#!/bin/sh
+sid=
+settings=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) sid=$2; shift 2 ;;
+    --settings) settings=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+bundle=${settings%/*}
+project="$SCIMUX_FAKE_CLAUDE_HOME/.claude/projects/-fake"
+mkdir -p "$project"
+transcript="$project/$sid.jsonl"
+: > "$transcript"
+printf '{"hook_event_name":"SessionStart","session_id":"%s","transcript_path":"%s","cwd":"%s","source":"startup"}\n' "$sid" "$transcript" "$SCIMUX_FAKE_CLAUDE_HOME" > "$bundle/inbox/start.json"
+turn=0
+while IFS= read -r line; do
+	turn=$((turn + 1))
+	printf '{"type":"user","timestamp":"2026-09-11T00:00:00Z","uuid":"u%s","sessionId":"%s","session_id":"%s","message":{"role":"user","content":"%s"}}\n' "$turn" "$sid" "$sid" "$line" >> "$transcript"
+	printf '{"type":"assistant","timestamp":"2026-09-11T00:00:01Z","uuid":"a%s","parentUuid":"u%s","sessionId":"%s","session_id":"%s","message":{"id":"m%s","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"worker-reply"}]}}\n' "$turn" "$turn" "$sid" "$sid" "$turn" >> "$transcript"
+	turn_id=$(sed -n 's/.*"turn":"\([^"]*\)".*/\1/p' "$bundle/perm/turn.json")
+	turn_gen=$(sed -n 's/.*"gen":\([0-9]*\).*/\1/p' "$bundle/perm/turn.json")
+	if [ -n "$turn_id" ]; then
+	  printf '{"turn":"%s","turn_gen":%s,"hook_event_name":"Stop","session_id":"%s"}\n' "$turn_id" "$turn_gen" "$sid" > "$bundle/stop/fixture-$turn_id.json"
+	fi
+done
+`
+
+// TestClaudeMatchesMonolithThroughPublicAPI applies the same public lifecycle
+// comparison to the tmux/hook adapter. Each side gets a private real tmux
+// server; the shell peer emits the official SessionStart evidence and a
+// synthetic transcript, so no Claude binary or provider request is involved.
+func TestClaudeMatchesMonolithThroughPublicAPI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires tmux")
+	}
+	workDir := t.TempDir()
+	var monolith, split []string
+	t.Run("monolith", func(t *testing.T) {
+		monolith = runClaudeHarnessPublicE2E(t, workDir, false)
+	})
+	t.Run("split", func(t *testing.T) {
+		split = runClaudeHarnessPublicE2E(t, workDir, true)
+	})
+	if strings.Join(monolith, "\n") != strings.Join(split, "\n") {
+		t.Fatalf("public Claude lifecycle differs\nmonolith=%q\nsplit=%q", monolith, split)
+	}
+}
+
+func runClaudeHarnessPublicE2E(t *testing.T, workDir string, split bool) []string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "scmx-claude-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	home, data, bin := filepath.Join(root, "home"), filepath.Join(root, "data"), filepath.Join(root, "bin")
+	for _, dir := range []string{home, data, bin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(syntheticClaudeLauncher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCIMUX_FAKE_CLAUDE_HOME", home)
+
+	socket := fmt.Sprintf("scimux-claude-public-%d", time.Now().UnixNano())
+	tmux := tmuxsession.NewServer(socket)
+	tmux.PasteDelay, tmux.AckPoll = 0, 5*time.Millisecond
+	t.Cleanup(func() {
+		_ = tmux.KillServer()
+		if err := os.Remove(tmux.SocketPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove tmux socket: %v", err)
+		}
+	})
+	a, err := newApp(Config{Home: home, DataDir: data, Socket: socket}, appDeps{Server: tmux})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.usage = nil
+	a.claudeInitialPoll = 10 * time.Millisecond
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var handler http.Handler
+	if split {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		workers := newWorkerManager(exe, data, "worker-contract")
+		workers.home, workers.socket = home, socket
+		workers.startOptions = sessionWorkerStartOptions{
+			args: []string{"-test.run=^TestProductionSessionWorkerHelperProcess$"},
+			env:  []string{"SCIMUX_PRODUCTION_SESSION_WORKER_TEST=1"},
+		}
+		a.workers = workers
+		t.Cleanup(workers.Shutdown)
+		coreHandler, err := newCoreMux(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		core, err := backend.Listen("", coreHandler)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = core.Close() })
+		handler = newTestWebGeneration(t, a, core.Link(), nil)
+	} else {
+		handler, err = NewHandler(a, webFS)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	create := fmt.Sprintf(`{"title":"claude acceptance","prompt":"ping","agent":"claude","dir":%q}`, workDir)
+	rec := routeRequest(handler, http.MethodPost, "/api/nodes", create, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create Claude = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var created Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("created Claude = %q, %v", rec.Body.String(), err)
+	}
+	waitForClaudePublicReplies(t, a, handler, created.ID, 1)
+	observed := []string{"create:200", "initial:complete"}
+	if rec := routeRequest(handler, http.MethodGet, "/api/state", "", false); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
+		t.Fatalf("Claude state = %d (%s)", rec.Code, rec.Body.String())
+	}
+	observed = append(observed, "state:visible")
+	if rec := routeRequest(handler, http.MethodGet, "/api/nodes/"+created.ID+"/peek", "", false); rec.Code != http.StatusOK {
+		t.Fatalf("Claude peek = %d (%s)", rec.Code, rec.Body.String())
+	}
+	observed = append(observed, "peek:200")
+	rec = routeRequest(handler, http.MethodPost, "/api/nodes/"+created.ID+"/send", `{"text":"ping again"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second Claude send = %d (%s)", rec.Code, rec.Body.String())
+	}
+	waitForClaudePublicReplies(t, a, handler, created.ID, 2)
+	observed = append(observed, "second:complete")
+	rec = routeRequest(handler, http.MethodDelete, "/api/nodes/"+created.ID, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete Claude = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if tmux.Session(created.ID).Alive() {
+		t.Fatal("deleted Claude chat left its private tmux pane alive")
+	}
+	return append(observed, "delete:gone")
+}
+
+func waitForClaudePublicReplies(t *testing.T, a *app, handler http.Handler, nodeID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	last := ""
+	for time.Now().Before(deadline) {
+		a.poll()
+		rec := routeRequest(handler, http.MethodGet, "/api/nodes/"+nodeID+"/chat", "", false)
+		last = rec.Body.String()
+		workerSettled := true
+		if a.workers != nil {
+			state := a.workers.State(nodeID)
+			workerSettled = !state.TurnInFlight && state.Delivery == ""
+		}
+		if rec.Code == http.StatusOK && strings.Count(rec.Body.String(), "worker-reply") >= want &&
+			!strings.Contains(rec.Body.String(), `"turn_in_flight":true`) && workerSettled {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	a.mu.Lock()
+	node := a.byID[nodeID]
+	live, send, launchErr := a.live[nodeID], a.sendState[nodeID], a.claudeLaunchErr[nodeID]
+	a.mu.Unlock()
+	pane, paneErr := a.server.Session(nodeID).Capture()
+	transcript := []byte(nil)
+	sessionLog := []byte(nil)
+	sessionLogPath, sessionLogErr := "", error(nil)
+	if node != nil {
+		transcript, _ = os.ReadFile(node.Transcript)
+		sessionLogPath = a.sessionLogPath(node.ID)
+		sessionLog, sessionLogErr = os.ReadFile(sessionLogPath)
+	}
+	var workerState sessionworker.State
+	if a.workers != nil {
+		workerState = a.workers.State(nodeID)
+	}
+	t.Fatalf("Claude chat did not expose %d completed synthetic replies: node=%#v live=%q send=%q launch=%q worker=%#v pane=%q paneErr=%v transcript=%q sessionsDir=%q sessionlog=%q path=%q err=%v chat=%s",
+		want, node, live, send, launchErr, workerState, pane, paneErr, transcript, a.sessionsDir, sessionLog, sessionLogPath, sessionLogErr, last)
+}
+
 // TestClaudeSessionWorkerSurvivesMuxerDisconnect uses a real worker process,
 // a private real tmux server, and a shell fixture standing in for Claude. It
 // proves Claude now crosses the same reattachment boundary as ACP/Codex while
@@ -358,28 +743,7 @@ func TestClaudeSessionWorkerSurvivesMuxerDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	launcher := `#!/bin/sh
-sid=
-settings=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --session-id) sid=$2; shift 2 ;;
-    --settings) settings=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-bundle=${settings%/*}
-project="$SCIMUX_FAKE_CLAUDE_HOME/.claude/projects/-fake"
-mkdir -p "$project"
-transcript="$project/$sid.jsonl"
-: > "$transcript"
-printf '{"hook_event_name":"SessionStart","session_id":"%s","transcript_path":"%s","cwd":"%s","source":"startup"}\n' "$sid" "$transcript" "$SCIMUX_FAKE_CLAUDE_HOME" > "$bundle/inbox/start.json"
-while IFS= read -r line; do
-  printf '{"type":"user","timestamp":"2026-09-11T00:00:00Z","message":{"role":"user","content":"%s"}}\n' "$line" >> "$transcript"
-  printf '{"type":"assistant","timestamp":"2026-09-11T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"worker-reply"}]}}\n' >> "$transcript"
-done
-`
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(launcher), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(syntheticClaudeLauncher), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
