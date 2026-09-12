@@ -105,6 +105,7 @@ type pendingCall struct {
 	method  string
 	seq     uint64
 	ordered bool
+	apply   func(json.RawMessage) error
 }
 
 type idClass int
@@ -122,12 +123,19 @@ type orderedKind int
 const (
 	orderedNotify orderedKind = iota
 	orderedResponse
+	orderedRequest
 )
 
 type orderedFrame struct {
 	kind orderedKind
 	in   inbound
 	seq  uint64
+}
+
+type notifyItem struct {
+	in       inbound
+	captured string
+	skip     bool
 }
 
 type inbound struct {
@@ -141,7 +149,7 @@ type inbound struct {
 
 type notifyQueue struct {
 	mu   sync.Mutex
-	q    []inbound
+	q    []notifyItem
 	wait chan struct{}
 }
 
@@ -163,9 +171,10 @@ type peer struct {
 	readDone  chan struct{}
 	readOnce  sync.Once
 
-	onNotify   func(method string, params json.RawMessage)
+	onNotify   func(method string, params json.RawMessage, captured string, skip bool)
 	onProtocol func(method string, params json.RawMessage)
-	onRequest  func(method string, params json.RawMessage) (any, error)
+	onRequest  func(method string, params json.RawMessage, captured string, skip bool) (any, error)
+	onScope    func(params json.RawMessage) (captured string, skip bool)
 
 	nq notifyQueue
 
@@ -211,14 +220,18 @@ func (p *peer) Close() error {
 }
 
 func (p *peer) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	return p.call(ctx, method, params, false)
+	return p.call(ctx, method, params, false, nil)
 }
 
 func (p *peer) callOrdered(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	return p.call(ctx, method, params, true)
+	return p.call(ctx, method, params, true, nil)
 }
 
-func (p *peer) call(ctx context.Context, method string, params any, ordered bool) (json.RawMessage, error) {
+func (p *peer) callApply(ctx context.Context, method string, params any, apply func(json.RawMessage) error) (json.RawMessage, error) {
+	return p.call(ctx, method, params, false, apply)
+}
+
+func (p *peer) call(ctx context.Context, method string, params any, ordered bool, apply func(json.RawMessage) error) (json.RawMessage, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -241,6 +254,7 @@ func (p *peer) call(ctx context.Context, method string, params any, ordered bool
 		er:      make(chan error, 1),
 		method:  method,
 		ordered: ordered,
+		apply:   apply,
 	}
 	p.pend[key] = pd
 	p.mu.Unlock()
@@ -256,24 +270,41 @@ func (p *peer) call(ctx context.Context, method string, params any, ordered bool
 		return nil, err
 	}
 
-	select {
-	case res := <-pd.ch:
-		if ordered {
-			if err := p.waitApplied(ctx, pd.seq); err != nil {
-				return nil, err
+	ctxDone := ctx.Done()
+	closed := p.closeCh
+	for {
+		select {
+		case res := <-pd.ch:
+			if ordered {
+				p.waitClaimedApplied(pd.seq)
 			}
+			return res, nil
+		case err := <-pd.er:
+			return nil, err
+		case <-ctxDone:
+			if p.retirePending(key, pd) {
+				return nil, ctx.Err()
+			}
+			ctxDone = nil
+		case <-closed:
+			if p.retirePending(key, pd) {
+				return nil, fmt.Errorf("%w (while calling %s)", ErrClosed, method)
+			}
+			closed = nil
 		}
-		return res, nil
-	case err := <-pd.er:
-		return nil, err
-	case <-ctx.Done():
-		p.mu.Lock()
-		delete(p.pend, key)
-		p.mu.Unlock()
-		return nil, ctx.Err()
-	case <-p.closeCh:
-		return nil, fmt.Errorf("%w (while calling %s)", ErrClosed, method)
 	}
+}
+
+// retirePending claims a still-pending call for cancellation or Close.
+// It returns false when resolve already claimed the call for apply.
+func (p *peer) retirePending(key string, pd *pendingCall) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pend[key] != pd {
+		return false
+	}
+	delete(p.pend, key)
+	return true
 }
 
 func (p *peer) Notify(method string, params any) error {
@@ -342,7 +373,7 @@ func (p *peer) readLoop() error {
 		}
 		switch {
 		case in.Method != "" && (cls == idValidString || cls == idValidNumber):
-			go p.serve(in)
+			p.enqueueOrdered(orderedRequest, in)
 		case in.Method != "" && cls == idInvalid:
 			go p.replyInvalidRequest()
 		case in.Method != "" && (cls == idAbsent || cls == idNull):
@@ -366,6 +397,10 @@ func (p *peer) resolve(in inbound) {
 	}
 	key := canonID(in.ID)
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	pd := p.pend[key]
 	delete(p.pend, key)
 	p.mu.Unlock()
@@ -379,7 +414,23 @@ func (p *peer) resolve(in inbound) {
 		pd.er <- &e
 		return
 	}
-	pd.ch <- copyRaw(in.Result)
+	res := copyRaw(in.Result)
+	if pd.apply != nil {
+		var applyErr error
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					applyErr = fmt.Errorf("apply %s: %v", pd.method, rec)
+				}
+			}()
+			applyErr = pd.apply(res)
+		}()
+		if applyErr != nil {
+			pd.er <- applyErr
+			return
+		}
+	}
+	pd.ch <- res
 }
 
 func (p *peer) replyInvalidRequest() {
@@ -398,7 +449,7 @@ type postAck struct {
 	fn     func()
 }
 
-func (p *peer) serve(in inbound) {
+func (p *peer) serve(in inbound, captured string, skip bool) {
 	var (
 		result  any
 		rpcErr  *RPCError
@@ -414,7 +465,7 @@ func (p *peer) serve(in inbound) {
 			rpcErr = &RPCError{Code: -32601, Message: "method not found"}
 			return
 		}
-		res, err := p.onRequest(in.Method, copyRaw(in.Params))
+		res, err := p.onRequest(in.Method, copyRaw(in.Params), captured, skip)
 		if err != nil {
 			var typed *RPCError
 			if errors.As(err, &typed) {
@@ -496,20 +547,27 @@ func (p *peer) dispatchLoop() {
 		}
 		switch fr.kind {
 		case orderedNotify:
-			if p.onProtocol != nil {
+			captured, skip := p.scopeOf(fr.in.Params)
+			if !skip && p.onProtocol != nil {
 				func() {
 					defer func() { _ = recover() }()
 					p.onProtocol(fr.in.Method, copyRaw(fr.in.Params))
 				}()
 			}
-			p.enqueueNotify(fr.in)
+			p.enqueueNotify(notifyItem{in: fr.in, captured: captured, skip: skip})
 		case orderedResponse:
 			p.mu.Lock()
-			if pd := p.pend[canonID(fr.in.ID)]; pd != nil {
-				pd.seq = fr.seq
+			if !p.closed {
+				if pd := p.pend[canonID(fr.in.ID)]; pd != nil {
+					pd.seq = fr.seq
+				}
 			}
 			p.mu.Unlock()
 			p.resolve(fr.in)
+		case orderedRequest:
+			captured, skip := p.scopeOf(fr.in.Params)
+			in := fr.in
+			go p.serve(in, captured, skip)
 		}
 		p.advanceApplied(fr.seq)
 	}
@@ -524,6 +582,26 @@ func (p *peer) advanceApplied(seq uint64) {
 	p.appliedCh = make(chan struct{})
 	p.mu.Unlock()
 	close(ch)
+}
+
+// waitClaimedApplied waits only for the dispatcher to finish the response's
+// sequence. Once resolve has claimed the pending call, later cancellation or
+// Close cannot replace that response with an error. The dispatcher always
+// advances the sequence after publishing a claimed response.
+func (p *peer) waitClaimedApplied(seq uint64) {
+	if seq == 0 {
+		return
+	}
+	for {
+		p.mu.Lock()
+		if p.appliedSeq >= seq {
+			p.mu.Unlock()
+			return
+		}
+		ch := p.appliedCh
+		p.mu.Unlock()
+		<-ch
+	}
 }
 
 func (p *peer) waitApplied(ctx context.Context, seq uint64) error {
@@ -552,7 +630,20 @@ func (p *peer) waitApplied(ctx context.Context, seq uint64) error {
 	}
 }
 
-func (p *peer) enqueueNotify(in inbound) {
+func (p *peer) scopeOf(params json.RawMessage) (string, bool) {
+	if p.onScope == nil {
+		return "", false
+	}
+	var captured string
+	var skip bool
+	func() {
+		defer func() { _ = recover() }()
+		captured, skip = p.onScope(copyRaw(params))
+	}()
+	return captured, skip
+}
+
+func (p *peer) enqueueNotify(item notifyItem) {
 	select {
 	case <-p.closeCh:
 		return
@@ -565,7 +656,7 @@ func (p *peer) enqueueNotify(in inbound) {
 		return
 	default:
 	}
-	p.nq.q = append(p.nq.q, in)
+	p.nq.q = append(p.nq.q, item)
 	if p.nq.wait != nil {
 		close(p.nq.wait)
 		p.nq.wait = nil
@@ -586,8 +677,8 @@ func (p *peer) notifyLoop() {
 			}
 			continue
 		}
-		in := p.nq.q[0]
-		p.nq.q[0] = inbound{}
+		item := p.nq.q[0]
+		p.nq.q[0] = notifyItem{}
 		p.nq.q = p.nq.q[1:]
 		fn := p.onNotify
 		p.nq.mu.Unlock()
@@ -600,7 +691,7 @@ func (p *peer) notifyLoop() {
 		if fn != nil {
 			func() {
 				defer func() { _ = recover() }()
-				fn(in.Method, copyRaw(in.Params))
+				fn(item.in.Method, copyRaw(item.in.Params), item.captured, item.skip)
 			}()
 		}
 	}
@@ -619,7 +710,7 @@ func (p *peer) fail(cause error) {
 			err = fmt.Errorf("%w: %v", ErrClosed, cause)
 		}
 		for _, pd := range pend {
-			pd.er <- err
+			pd.er <- fmt.Errorf("%w (while calling %s)", err, pd.method)
 		}
 		_ = p.w.Close()
 		if p.rc != nil {

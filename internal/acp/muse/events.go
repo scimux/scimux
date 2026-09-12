@@ -546,7 +546,7 @@ func decodeTurnCompleted(params json.RawMessage) *Event {
 	}
 	switch term {
 	case "completed", "succeeded":
-		return nil
+		return &Event{T: "stop", StopReason: msg}
 	case "cancelled", "interrupted":
 		return &Event{T: "stop", StopReason: msg}
 	default:

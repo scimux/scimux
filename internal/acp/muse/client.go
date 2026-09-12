@@ -39,12 +39,24 @@ type Client struct {
 	gaps          int
 	catalogSource string
 
-	approvals  *approvalState
-	approvalFn func(Approval)
+	approvals   *approvalState
+	approvalFn  func(Approval)
+	sessionGen  uint64
+	approvalGen uint64
+	op          opGate
 
 	rpcCtx       context.Context
 	rpcCancel    context.CancelFunc
 	uiCancelWait time.Duration
+
+	sinkMu      sync.RWMutex
+	sessionSink func(captured string, e Event)
+
+	closeMu   sync.Mutex
+	closing   bool
+	closed    bool
+	closeErr  error
+	closeDone chan struct{}
 
 	doneOnce sync.Once
 	done     chan struct{}
@@ -110,20 +122,27 @@ func (h *terminalHistory) reset() {
 func (h *terminalHistory) count() int { return len(h.order) }
 
 func NewClient(tr Transport, sink func(Event), trace Tracer) *Client {
+	return newClient(tr, sink, nil, trace)
+}
+
+func newClient(tr Transport, sink func(Event), sessionSink func(string, Event), trace Tracer) *Client {
 	rpcCtx, rpcCancel := context.WithCancel(context.Background())
 	c := &Client{
 		tr:           tr,
 		sink:         sink,
+		sessionSink:  sessionSink,
 		fold:         newFold(),
 		approvals:    newApprovalState(),
 		rpcCtx:       rpcCtx,
 		rpcCancel:    rpcCancel,
 		uiCancelWait: 15 * time.Second,
+		closeDone:    make(chan struct{}),
 		done:         make(chan struct{}),
 	}
 	c.peer = newPeer(tr.Stdout(), tr.Stdin())
 	c.peer.trace = trace
 	c.peer.onProtocol = c.onProtocol
+	c.peer.onScope = c.sessionSnapshot
 	c.peer.onNotify = c.onNotify
 	c.peer.onRequest = c.onRequest
 	c.peer.start()
@@ -136,30 +155,104 @@ func NewClient(tr Transport, sink func(Event), trace Tracer) *Client {
 
 func (c *Client) Done() <-chan struct{} { return c.done }
 
+func (c *Client) isClosed() bool {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	return c.closed || c.closing
+}
+
 func (c *Client) Live() error {
+	if c.isClosed() {
+		return ErrClosed
+	}
 	select {
 	case <-c.done:
 		return ErrClosed
 	default:
-		return nil
 	}
-}
-
-func (c *Client) Close() error {
-	if c.rpcCancel != nil {
-		c.rpcCancel()
-	}
-	_ = c.peer.Close()
-	if c.tr != nil {
-		_ = c.tr.Close()
+	if c.peer != nil {
+		select {
+		case <-c.peer.done():
+			return ErrClosed
+		default:
+		}
 	}
 	return nil
 }
 
+func (c *Client) Close() error {
+	c.closeMu.Lock()
+	if c.closed {
+		err := c.closeErr
+		c.closeMu.Unlock()
+		return err
+	}
+	if c.closing {
+		done := c.closeDone
+		c.closeMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		c.closeMu.Lock()
+		err := c.closeErr
+		c.closeMu.Unlock()
+		return err
+	}
+	c.closing = true
+	done := c.closeDone
+	if done == nil {
+		done = make(chan struct{})
+		c.closeDone = done
+	}
+	c.closeMu.Unlock()
+
+	c.doneOnce.Do(func() {
+		if c.done != nil {
+			close(c.done)
+		}
+	})
+	c.op.shutdown()
+	if c.rpcCancel != nil {
+		c.rpcCancel()
+	}
+	if c.peer != nil {
+		_ = c.peer.Close()
+	}
+	var err error
+	if c.tr != nil {
+		err = c.tr.Close()
+	}
+	c.closeMu.Lock()
+	c.closed = true
+	c.closeErr = err
+	c.closeMu.Unlock()
+	close(done)
+	return err
+}
+
 func (c *Client) emit(e Event) {
-	if c.sink == nil {
+	c.dispatchSink("", e)
+}
+
+func (c *Client) stillCurrent(captured string) bool {
+	if captured == "" {
+		return true
+	}
+	return c.SessionID() == captured
+}
+
+func (c *Client) emitIfCurrent(captured string, e Event) {
+	if !c.stillCurrent(captured) {
 		return
 	}
+	if captured == "" {
+		c.emit(e)
+		return
+	}
+	c.dispatchSink(captured, e)
+}
+
+func (c *Client) dispatchSink(captured string, e Event) {
 	e.Prov = copyRaw(e.Prov)
 	if e.Tool != nil {
 		t := *e.Tool
@@ -172,7 +265,17 @@ func (c *Client) emit(e Event) {
 	if e.Time == "" {
 		e.Time = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	c.sink(e)
+	c.sinkMu.RLock()
+	ss := c.sessionSink
+	sk := c.sink
+	c.sinkMu.RUnlock()
+	if ss != nil {
+		ss(captured, e)
+		return
+	}
+	if sk != nil {
+		sk(e)
+	}
 }
 
 // Initialize sends initialize then initialized. Fingerprint drift warns
@@ -244,6 +347,10 @@ func (c *Client) sessionDurable() bool {
 }
 
 func (c *Client) StartSession(ctx context.Context, p StartParams) error {
+	if err := c.op.acquire(ctx, c.Done()); err != nil {
+		return err
+	}
+	defer c.op.release()
 	cmdID, err := NewCommandID()
 	if err != nil {
 		return err
@@ -259,15 +366,19 @@ func (c *Client) StartSession(ctx context.Context, p StartParams) error {
 		params["approvalMode"] = p.ApprovalMode
 	}
 	// Initial session/start omits sessionId so the server mints it.
-	res, err := c.peer.Call(ctx, "session/start", params)
-	if err != nil {
-		return err
-	}
+	// Apply runs on the peer dispatch thread so the new session is
+	// installed before any later frame's onProtocol/onNotify.
+	_, err = c.peer.callApply(ctx, "session/start", params, c.applySessionStart)
+	return err
+}
+
+func (c *Client) applySessionStart(res json.RawMessage) error {
 	sess, cursor, err := parseSessionStart(res)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
+	c.sessionGen++
 	c.session = sess
 	c.cursor = cursor
 	c.activeTurn = ""
@@ -279,9 +390,22 @@ func (c *Client) StartSession(ctx context.Context, p StartParams) error {
 	c.occupancy = Occupancy{}
 	c.occupancyUE = UsageEvent{}
 	c.gaps = 0
-	c.mu.Unlock()
 	c.approvals.clear()
+	c.mu.Unlock()
 	return nil
+}
+
+// withSession runs fn only if captured still names the current session.
+// Lock order: Client.mu then approvalState.mu. Callers must not invoke
+// sinks, log writes, or user callbacks from fn.
+func (c *Client) withSession(captured string, fn func()) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if captured != "" && c.session.SessionID != captured {
+		return false
+	}
+	fn()
+	return true
 }
 
 func parseSessionStart(res json.RawMessage) (Session, string, error) {
@@ -481,20 +605,48 @@ func (c *Client) SetApprovalHandler(fn func(Approval)) {
 }
 
 func (c *Client) PendingApproval() (Approval, bool) {
-	return c.approvals.pending()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, ok := c.approvals.pending()
+	if !ok {
+		return Approval{}, false
+	}
+	if c.approvalGen != 0 && c.approvalGen != c.sessionGen {
+		return Approval{}, false
+	}
+	if a.SessionID != "" && a.SessionID != c.session.SessionID {
+		return Approval{}, false
+	}
+	return a, true
 }
 
 func (c *Client) Decide(ctx context.Context, approvalID string, expected RequirementRef, choiceID, feedback string) error {
+	if err := c.op.acquire(ctx, c.Done()); err != nil {
+		return err
+	}
+	defer c.op.release()
+	c.mu.Lock()
+	if c.approvalGen != 0 && c.approvalGen != c.sessionGen {
+		c.mu.Unlock()
+		return ErrStaleApproval
+	}
 	params, err := c.approvals.prepareDecide(approvalID, expected, choiceID, feedback)
 	if err != nil {
+		c.mu.Unlock()
 		return err
 	}
 	if params.SessionID == "" {
-		params.SessionID = c.SessionID()
+		params.SessionID = c.session.SessionID
 	}
 	if params.SessionID == "" {
+		c.mu.Unlock()
 		return ErrNoSession
 	}
+	if params.SessionID != c.session.SessionID {
+		c.mu.Unlock()
+		return ErrStaleApproval
+	}
+	c.mu.Unlock()
 	_, err = c.peer.Call(ctx, "approval/decide", params)
 	return err
 }
@@ -562,34 +714,50 @@ func (c *Client) onProtocol(method string, params json.RawMessage) {
 	}
 }
 
-func (c *Client) onNotify(method string, params json.RawMessage) {
-	if c.isForeignSession(params) {
+func (c *Client) sessionSnapshot(params json.RawMessage) (captured string, skip bool) {
+	sid := notifySessionID(params)
+	c.mu.Lock()
+	captured = c.session.SessionID
+	c.mu.Unlock()
+	if sid != "" && captured != "" && sid != captured {
+		return captured, true
+	}
+	return captured, false
+}
+
+func (c *Client) onNotify(method string, params json.RawMessage, captured string, skip bool) {
+	if skip {
 		return
 	}
-	if cur := cursorOf(params); cur != "" {
+	if cur := cursorOf(params); cur != "" && c.stillCurrent(captured) {
 		c.mu.Lock()
-		c.cursor = cur
+		if captured == "" || c.session.SessionID == captured {
+			c.cursor = cur
+		}
 		c.mu.Unlock()
 	}
 	switch method {
 	case "approval/requested":
-		c.handleApprovalRequested(params)
+		c.handleApprovalRequested(captured, params)
 		return
 	case "approval/updated":
-		c.handleApprovalUpdated(params)
+		c.handleApprovalUpdated(captured, params)
 		return
 	case "approval/resolved":
-		c.handleApprovalResolved(params)
+		c.handleApprovalResolved(captured, params)
 		return
 	case "userInput/requested":
-		c.declineUserInput(params)
+		c.declineUserInput(captured, params)
 		return
 	case "turn/started":
 		return
 	case "turn/completed":
-		c.emitTurnCompleted(params)
+		c.emitTurnCompleted(captured, params)
 		return
 	case "session/tokenUsage":
+		if !c.stillCurrent(captured) {
+			return
+		}
 		u := decodeTokenUsage(params)
 		if u == nil {
 			return
@@ -605,6 +773,10 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 			next.TotalTokens = cum.Cumulative.TotalTokens
 		}
 		c.mu.Lock()
+		if captured != "" && c.session.SessionID != captured {
+			c.mu.Unlock()
+			return
+		}
 		c.spend = accumulateSpend(c.spend, next)
 		c.spendUE = UsageEvent{
 			InputTokens:         c.spend.InputTokens,
@@ -617,7 +789,7 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 			TurnID:              c.spend.TurnID,
 		}
 		c.mu.Unlock()
-		c.emit(Event{T: "usage", Usage: u})
+		c.emitIfCurrent(captured, Event{T: "usage", Usage: u})
 		return
 	case "session/contextUsage":
 		u := decodeContextUsage(params)
@@ -625,43 +797,65 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 			return
 		}
 		c.mu.Lock()
+		if captured != "" && c.session.SessionID != captured {
+			c.mu.Unlock()
+			return
+		}
 		c.occupancy = Occupancy{Used: u.Used, Size: u.Size}
 		c.occupancyUE = UsageEvent{Used: u.Used, Size: u.Size}
 		c.mu.Unlock()
-		c.emit(Event{T: "usage", Usage: u})
+		c.emitIfCurrent(captured, Event{T: "usage", Usage: u})
 		return
 	case "view/gap":
 		c.mu.Lock()
+		if captured != "" && c.session.SessionID != captured {
+			c.mu.Unlock()
+			return
+		}
 		c.gaps++
 		evs := c.fold.apply(method, params)
 		c.mu.Unlock()
 		for _, ev := range evs {
 			if ev != nil {
-				c.emit(*ev)
+				c.emitIfCurrent(captured, *ev)
 			}
 		}
 		return
 	}
 	c.mu.Lock()
+	if captured != "" && c.session.SessionID != captured {
+		c.mu.Unlock()
+		return
+	}
 	evs := c.fold.apply(method, params)
 	c.mu.Unlock()
 	for _, ev := range evs {
 		if ev != nil {
-			c.emit(*ev)
+			c.emitIfCurrent(captured, *ev)
 		}
 	}
 }
 
-func (c *Client) onRequest(method string, params json.RawMessage) (any, error) {
+func (c *Client) onRequest(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 	switch method {
 	case "approval/request":
 		// Request form is a presentation fallback only. Decision data is
 		// never returned here; the notification path is authoritative.
 		raw := copyRaw(params)
-		return postAck{result: map[string]any{}, fn: func() { c.handleApprovalRequested(raw) }}, nil
+		return postAck{result: map[string]any{}, fn: func() {
+			if skip {
+				return
+			}
+			c.handleApprovalRequested(captured, raw)
+		}}, nil
 	case "userInput/request":
 		raw := copyRaw(params)
-		return postAck{result: map[string]any{}, fn: func() { c.declineUserInput(raw) }}, nil
+		return postAck{result: map[string]any{}, fn: func() {
+			if skip {
+				return
+			}
+			c.declineUserInput(captured, raw)
+		}}, nil
 	}
 	return nil, &RPCError{Code: -32601, Message: "method not found: " + method}
 }
@@ -710,12 +904,16 @@ func (c *Client) noteTurnCompleted(params json.RawMessage) {
 	}
 }
 
-func (c *Client) emitTurnCompleted(params json.RawMessage) {
+func (c *Client) emitTurnCompleted(captured string, params json.RawMessage) {
 	var p struct {
 		TurnID string `json:"turnId"`
 	}
 	_ = json.Unmarshal(params, &p)
 	c.mu.Lock()
+	if captured != "" && c.session.SessionID != captured {
+		c.mu.Unlock()
+		return
+	}
 	ok := c.recent.markEmitted(p.TurnID)
 	var evs []*Event
 	if ok {
@@ -727,85 +925,119 @@ func (c *Client) emitTurnCompleted(params json.RawMessage) {
 	}
 	for _, ev := range evs {
 		if ev != nil {
-			c.emit(*ev)
+			c.emitIfCurrent(captured, *ev)
 		}
 	}
 }
 
-func (c *Client) handleApprovalRequested(params json.RawMessage) {
+func (c *Client) handleApprovalRequested(captured string, params json.RawMessage) {
 	a, err := decodeApproval(params)
 	if err != nil {
-		c.emit(Event{T: "error", Error: err.Error()})
+		c.emitIfCurrent(captured, Event{T: "error", Error: err.Error()})
 		return
 	}
-	c.present(a)
-}
-
-func (c *Client) handleApprovalUpdated(params json.RawMessage) {
-	u, err := c.approvals.applyUpdate(params)
-	if err != nil {
-		c.emit(Event{T: "error", Error: err.Error()})
+	var fn func(Approval)
+	if !c.withSession(captured, func() {
+		c.approvals.setRequested(a)
+		c.approvalGen = c.sessionGen
+		fn = c.approvalFn
+	}) {
 		return
 	}
-	p, ok := c.approvals.pending()
-	if !ok || p.ApprovalID != u.ApprovalID {
-		return
-	}
-	c.present(p)
-}
-
-func (c *Client) handleApprovalResolved(params json.RawMessage) {
-	prior, ok := c.approvals.pending()
-	r, err := c.approvals.applyResolved(params)
-	if err != nil {
-		c.emit(Event{T: "error", Error: err.Error()})
-		return
-	}
-	prov := r.Prov
-	if ok && prior.ApprovalID == r.ApprovalID {
-		prov = mergePackedProv(prior.Prov, r.Prov)
-	}
-	c.emit(Event{T: "tool", Tool: &ToolEvent{
-		ID: r.ApprovalID, Title: "approval " + r.Decision + " by " + r.ResolvedBy,
-		Kind: "approval", Status: "completed",
-	}, Prov: copyRaw(prov)})
-}
-
-func (c *Client) present(a Approval) {
-	c.approvals.setRequested(a)
-	c.mu.Lock()
-	fn := c.approvalFn
-	c.mu.Unlock()
 	if fn != nil {
 		go fn(cloneApproval(a))
 	}
-	c.emit(Event{T: "tool", Tool: &ToolEvent{
+	c.emitIfCurrent(captured, Event{T: "tool", Tool: &ToolEvent{
 		ID: a.ApprovalID, Title: a.Describe(), Kind: "approval", Status: "inProgress",
 		RawInput: a.RawArgs,
 	}, Prov: copyRaw(a.Prov)})
 }
 
-func (c *Client) declineUserInput(params json.RawMessage) {
+func (c *Client) handleApprovalUpdated(captured string, params json.RawMessage) {
+	var (
+		u   Update
+		err error
+		p   Approval
+		ok  bool
+		fn  func(Approval)
+	)
+	if !c.withSession(captured, func() {
+		u, err = c.approvals.applyUpdate(params)
+		if err != nil {
+			return
+		}
+		p, ok = c.approvals.pending()
+		if ok {
+			c.approvalGen = c.sessionGen
+		}
+		fn = c.approvalFn
+	}) {
+		return
+	}
+	if err != nil {
+		c.emitIfCurrent(captured, Event{T: "error", Error: err.Error()})
+		return
+	}
+	if !ok || p.ApprovalID != u.ApprovalID {
+		return
+	}
+	if fn != nil {
+		go fn(cloneApproval(p))
+	}
+	c.emitIfCurrent(captured, Event{T: "tool", Tool: &ToolEvent{
+		ID: p.ApprovalID, Title: p.Describe(), Kind: "approval", Status: "inProgress",
+		RawInput: p.RawArgs,
+	}, Prov: copyRaw(p.Prov)})
+}
+
+func (c *Client) handleApprovalResolved(captured string, params json.RawMessage) {
+	var (
+		prior Approval
+		had   bool
+		r     Resolved
+		err   error
+	)
+	if !c.withSession(captured, func() {
+		prior, had = c.approvals.pending()
+		r, err = c.approvals.applyResolved(params)
+	}) {
+		return
+	}
+	if err != nil {
+		c.emitIfCurrent(captured, Event{T: "error", Error: err.Error()})
+		return
+	}
+	prov := r.Prov
+	if had && prior.ApprovalID == r.ApprovalID {
+		prov = mergePackedProv(prior.Prov, r.Prov)
+	}
+	c.emitIfCurrent(captured, Event{T: "tool", Tool: &ToolEvent{
+		ID: r.ApprovalID, Title: "approval " + r.Decision + " by " + r.ResolvedBy,
+		Kind: "approval", Status: "completed",
+	}, Prov: copyRaw(prov)})
+}
+
+func (c *Client) declineUserInput(captured string, params json.RawMessage) {
 	u, err := decodeUserInput(params)
 	if err != nil {
-		c.emit(Event{T: "error", Error: "malformed user input request"})
+		c.emitIfCurrent(captured, Event{T: "error", Error: "malformed user input request"})
 		return
 	}
 	if u.UserInputID == "" {
-		c.emit(Event{T: "error", Error: "interactive user input is unsupported: missing userInputId"})
+		c.emitIfCurrent(captured, Event{T: "error", Error: "interactive user input is unsupported: missing userInputId"})
 		return
 	}
 	session := u.SessionID
 	if session == "" {
-		session = c.SessionID()
+		session = captured
 	}
 	msg := "interactive user input is unsupported"
 	if u.ToolName != "" {
 		msg += " (" + u.ToolName + ")"
 	}
-	c.emit(Event{T: "error", Error: msg})
+	c.emitIfCurrent(captured, Event{T: "error", Error: msg})
 	if session == "" {
-		c.emit(Event{T: "error", Error: "user input cancelled locally: no session id"})
+		c.emitIfCurrent(captured, Event{T: "error", Error: "user input cancelled locally: no session id"})
 		return
 	}
 	wait := c.uiCancelWait
@@ -819,11 +1051,22 @@ func (c *Client) declineUserInput(params json.RawMessage) {
 	go func() {
 		cmdID, err := NewCommandID()
 		if err != nil {
-			c.emit(Event{T: "error", Error: err.Error()})
+			c.emitIfCurrent(captured, Event{T: "error", Error: err.Error()})
 			return
 		}
 		ctx, cancel := context.WithTimeout(parent, wait)
 		defer cancel()
+		if err := c.op.acquire(ctx, c.Done()); err != nil {
+			if errors.Is(err, ErrClosed) || errors.Is(err, context.Canceled) {
+				return
+			}
+			c.emitIfCurrent(captured, Event{T: "error", Error: "userInput/cancel failed: " + err.Error()})
+			return
+		}
+		defer c.op.release()
+		if captured != c.SessionID() {
+			return
+		}
 		_, err = c.peer.Call(ctx, "userInput/cancel", map[string]any{
 			"commandId":   cmdID,
 			"sessionId":   session,
@@ -836,6 +1079,73 @@ func (c *Client) declineUserInput(params json.RawMessage) {
 		if errors.Is(err, ErrClosed) || errors.Is(err, context.Canceled) {
 			return
 		}
-		c.emit(Event{T: "error", Error: "userInput/cancel failed: " + err.Error()})
+		c.emitIfCurrent(captured, Event{T: "error", Error: "userInput/cancel failed: " + err.Error()})
 	}()
+}
+
+// opGate serializes session transitions with Decide and user-input
+// cancellation. Close wakes waiters; the gate is never held across
+// callbacks or log writes.
+type opGate struct {
+	mu     sync.Mutex
+	held   bool
+	closed bool
+	wait   chan struct{}
+}
+
+func (g *opGate) acquire(ctx context.Context, interrupt <-chan struct{}) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		g.mu.Lock()
+		if g.closed {
+			g.mu.Unlock()
+			return ErrClosed
+		}
+		if !g.held {
+			g.held = true
+			g.mu.Unlock()
+			return nil
+		}
+		wait := g.wait
+		if wait == nil {
+			wait = make(chan struct{})
+			g.wait = wait
+		}
+		g.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-interrupt:
+			return ErrClosed
+		}
+	}
+}
+
+func (g *opGate) release() {
+	g.mu.Lock()
+	g.held = false
+	wait := g.wait
+	g.wait = nil
+	g.mu.Unlock()
+	if wait != nil {
+		close(wait)
+	}
+}
+
+func (g *opGate) shutdown() {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	g.closed = true
+	wait := g.wait
+	g.wait = nil
+	g.mu.Unlock()
+	if wait != nil {
+		close(wait)
+	}
 }

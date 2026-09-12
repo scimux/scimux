@@ -364,7 +364,7 @@ func TestNotificationsArriveInOrder(t *testing.T) {
 	var got []string
 	var mu sync.Mutex
 	unblocked := make(chan struct{})
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		if method == "hold" {
 			<-unblocked
 		}
@@ -419,7 +419,7 @@ func TestServerRequestOffReadLoopAndAlwaysAnswered(t *testing.T) {
 	s := newScriptedPeer(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		close(entered)
 		<-release
 		return map[string]any{"ok": true}, nil
@@ -469,7 +469,7 @@ func TestUnknownServerRequestMethodNotFound(t *testing.T) {
 
 func TestRequestHandlerPanicDoesNotKillPeer(t *testing.T) {
 	s := newScriptedPeer(t)
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		panic("boom")
 	}
 	s.writeRaw(t, `{"jsonrpc":"2.0","id":3,"method":"x"}`)
@@ -491,7 +491,7 @@ func TestRequestHandlerPanicDoesNotKillPeer(t *testing.T) {
 
 func TestHandlerErrorBecomesRPCError(t *testing.T) {
 	s := newScriptedPeer(t)
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		return nil, &RPCError{Code: -32602, Message: "bad"}
 	}
 	s.writeRaw(t, `{"jsonrpc":"2.0","id":4,"method":"y"}`)
@@ -617,7 +617,7 @@ func TestOutgoingJSONRPCVersionAndOneObjectPerLine(t *testing.T) {
 func TestNotifyPreservesUnknownFieldsForHandler(t *testing.T) {
 	s := newScriptedPeer(t)
 	got := make(chan json.RawMessage, 1)
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		got <- append(json.RawMessage(nil), params...)
 	}
 	s.writeRaw(t, `{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"x","kind":"mystery","extra":1},"_meta":{"k":true}}}`)
@@ -659,7 +659,7 @@ func TestCallWriteFailureAndPreCanceledContext(t *testing.T) {
 	if err := <-errc; err != nil {
 		t.Fatalf("null result should succeed: %v", err)
 	}
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		return nil, &RPCError{Code: -32602, Message: "bad", Data: json.RawMessage(`{"k":1}`)}
 	}
 	s.writeRaw(t, `{"jsonrpc":"2.0","id":9,"method":"z"}`)
@@ -669,7 +669,7 @@ func TestCallWriteFailureAndPreCanceledContext(t *testing.T) {
 		t.Fatalf("want data on handler RPCError: %v", resp)
 	}
 	_ = s.peer.Close()
-	s.peer.enqueueNotify(inbound{Method: "late"})
+	s.peer.enqueueNotify(notifyItem{in: inbound{Method: "late"}})
 }
 
 func TestCallNilContextAndClosedPeer(t *testing.T) {
@@ -693,7 +693,7 @@ func TestCallNilContextAndClosedPeer(t *testing.T) {
 
 func TestRequestHandlerGenericErrorAndNilResult(t *testing.T) {
 	s := newScriptedPeer(t)
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		if method == "fail" {
 			return nil, errors.New("boom")
 		}
@@ -729,7 +729,7 @@ func TestCanonIDOddValues(t *testing.T) {
 func TestInvalidJSONRPCVersionIgnored(t *testing.T) {
 	s := newScriptedPeer(t)
 	called := int32(0)
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		atomic.AddInt32(&called, 1)
 	}
 	errc := make(chan error, 1)
@@ -810,7 +810,7 @@ func (f tracerFunc) Trace(dir string, line []byte) { f(dir, line) }
 func TestNullIDIsNotARequest(t *testing.T) {
 	s := newScriptedPeer(t)
 	called := int32(0)
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		atomic.AddInt32(&called, 1)
 		return map[string]any{}, nil
 	}
@@ -922,7 +922,7 @@ func TestBlockedNotifyDoesNotStallOrdinaryCall(t *testing.T) {
 	s := newScriptedPeer(t)
 	unblocked := make(chan struct{})
 	entered := make(chan struct{})
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		if method == "hold" {
 			close(entered)
 			<-unblocked
@@ -958,7 +958,7 @@ func TestBlockedNotifyDoesNotStallOrdinaryCall(t *testing.T) {
 func TestNotificationInputOrderRetained(t *testing.T) {
 	s := newScriptedPeer(t)
 	got := make(chan string, 8)
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		got <- method
 	}
 	s.writeRaw(t, `{"jsonrpc":"2.0","method":"n1"}`)
@@ -1011,14 +1011,14 @@ func TestJSONRPCIDClassificationDispatch(t *testing.T) {
 			s := newScriptedPeer(t)
 			var notifyN, reqN int32
 			mark := make(chan struct{})
-			s.peer.onNotify = func(method string, params json.RawMessage) {
+			s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 				if method == "marker" {
 					close(mark)
 					return
 				}
 				atomic.AddInt32(&notifyN, 1)
 			}
-			s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+			s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 				atomic.AddInt32(&reqN, 1)
 				return map[string]any{}, nil
 			}
@@ -1076,10 +1076,10 @@ func TestJSONRPCIDNotificationFormDelivered(t *testing.T) {
 	} {
 		s := newScriptedPeer(t)
 		got := make(chan string, 1)
-		s.peer.onNotify = func(method string, params json.RawMessage) {
+		s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 			got <- method
 		}
-		s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+		s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 			t.Errorf("onRequest invoked for %s", frame)
 			return nil, nil
 		}
@@ -1099,11 +1099,11 @@ func TestInvalidIDRequestProducesExactlyOneInvalidRequest(t *testing.T) {
 	s := newScriptedPeer(t)
 	var notifyN, reqN int32
 	mark := make(chan struct{})
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		atomic.AddInt32(&reqN, 1)
 		return map[string]any{}, nil
 	}
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		if method == "marker" {
 			close(mark)
 			return
@@ -1159,10 +1159,10 @@ func TestInvalidIDResponseLeavesPendingCallIntact(t *testing.T) {
 func TestJSONRPCVersionDoesNotReachCallbacks(t *testing.T) {
 	s := newScriptedPeer(t)
 	var notifyN, reqN int32
-	s.peer.onNotify = func(method string, params json.RawMessage) {
+	s.peer.onNotify = func(method string, params json.RawMessage, captured string, skip bool) {
 		atomic.AddInt32(&notifyN, 1)
 	}
-	s.peer.onRequest = func(method string, params json.RawMessage) (any, error) {
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
 		atomic.AddInt32(&reqN, 1)
 		return map[string]any{}, nil
 	}
@@ -1303,5 +1303,626 @@ func TestCloseReleasesCallWaitingOnOrderedBarrier(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Call waiting on barrier not released")
+	}
+}
+
+func TestCallApplyRunsBeforeLaterOnProtocol(t *testing.T) {
+	s := newScriptedPeer(t)
+	applied := make(chan struct{})
+	started := make(chan struct{}, 1)
+	var startedBeforeApply atomic.Bool
+	s.peer.onProtocol = func(method string, params json.RawMessage) {
+		if method != "turn/started" {
+			return
+		}
+		select {
+		case <-applied:
+		default:
+			startedBeforeApply.Store(true)
+		}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(context.Background(), "session/start", map[string]any{"k": 1}, func(json.RawMessage) error {
+			close(applied)
+			return nil
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	id := rawID(t, req)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+id+`,"result":{"sessionId":"sess-2"}}`+"\n"+
+		`{"jsonrpc":"2.0","method":"turn/started","params":{"sessionId":"sess-2","turnId":"t2"}}`)
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("later onProtocol never ran")
+	}
+	if startedBeforeApply.Load() {
+		t.Fatal("later onProtocol ran before apply committed")
+	}
+}
+
+func TestCallApplyErrorDoesNotSucceed(t *testing.T) {
+	s := newScriptedPeer(t)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+			return errors.New("malformed start")
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{"sessionId":"x"}}`)
+	err := <-errc
+	if err == nil || !strings.Contains(err.Error(), "malformed start") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCallApplyPanicBecomesError(t *testing.T) {
+	s := newScriptedPeer(t)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+			panic("apply boom")
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{}}`)
+	err := <-errc
+	if err == nil || !strings.Contains(err.Error(), "apply boom") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCallApplyCloseDuringBlockedApply(t *testing.T) {
+	s := newScriptedPeer(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+			close(entered)
+			<-release
+			return nil
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{}}`)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply not entered")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.peer.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked behind apply")
+	}
+	select {
+	case err := <-errc:
+		t.Fatalf("waiter returned %v while claimed apply still blocked", err)
+	default:
+	}
+	close(release)
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("claimed apply must win after Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callApply waiter stuck after apply release")
+	}
+	if n := len(s.peer.pend); n != 0 {
+		t.Fatalf("pending leak %d", n)
+	}
+}
+
+func TestCallApplyCancelDuringBlockedApply(t *testing.T) {
+	s := newScriptedPeer(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(ctx, "session/start", nil, func(json.RawMessage) error {
+			close(entered)
+			<-release
+			return nil
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{}}`)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply not entered")
+	}
+	cancel()
+	select {
+	case err := <-errc:
+		t.Fatalf("waiter returned %v while claimed apply still blocked", err)
+	default:
+	}
+	close(release)
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("claimed apply must win after cancel: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callApply waiter stuck after apply release")
+	}
+	if n := len(s.peer.pend); n != 0 {
+		t.Fatalf("pending leak %d", n)
+	}
+}
+
+func TestCallApplyCancelBeforeResponseIgnoresLateResult(t *testing.T) {
+	s := newScriptedPeer(t)
+	var n atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(ctx, "session/start", nil, func(json.RawMessage) error {
+			n.Add(1)
+			return nil
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	cancel()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not win before response")
+	}
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{"sessionId":"late"}}`)
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n.Load() != 0 {
+			t.Fatal("apply ran after cancel won")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n.Load() != 0 {
+		t.Fatal("apply ran after cancel won")
+	}
+	s.peer.mu.Lock()
+	left := len(s.peer.pend)
+	s.peer.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("pending leak %d", left)
+	}
+}
+
+func TestCallApplyCloseBeforeResponseIgnoresLateResult(t *testing.T) {
+	s := newScriptedPeer(t)
+	var n atomic.Int32
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+			n.Add(1)
+			return nil
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	if err := s.peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not win before response")
+	}
+	_ = req
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n.Load() != 0 {
+			t.Fatal("apply ran after Close won")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.peer.mu.Lock()
+	left := len(s.peer.pend)
+	s.peer.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("pending leak %d", left)
+	}
+}
+
+func TestCallApplyErrorWinsOverCancelOnceClaimed(t *testing.T) {
+	s := newScriptedPeer(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(ctx, "session/start", nil, func(json.RawMessage) error {
+			close(entered)
+			<-release
+			return errors.New("apply failed")
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{}}`)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply not entered")
+	}
+	cancel()
+	select {
+	case err := <-errc:
+		t.Fatalf("cancel stole claimed apply error: %v", err)
+	default:
+	}
+	close(release)
+	err := <-errc
+	if err == nil || !strings.Contains(err.Error(), "apply failed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCallOrderedApplyWaitAppliedSeesClose(t *testing.T) {
+	s := newScriptedPeer(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.call(context.Background(), "session/start", nil, true, func(json.RawMessage) error {
+			close(entered)
+			<-release
+			return nil
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{}}`)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply not entered")
+	}
+	if err := s.peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("Close stole claimed ordered response: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordered call stuck")
+	}
+}
+
+func TestCallApplyPanicWinsOverCloseOnceClaimed(t *testing.T) {
+	s := newScriptedPeer(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+			close(entered)
+			<-release
+			panic("apply boom")
+		})
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{}}`)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply not entered")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.peer.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked behind apply")
+	}
+	select {
+	case err := <-errc:
+		t.Fatalf("Close stole claimed apply panic: %v", err)
+	default:
+	}
+	close(release)
+	err := <-errc
+	if err == nil || !strings.Contains(err.Error(), "apply boom") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolveDoesNotClaimAfterClosed(t *testing.T) {
+	s := newScriptedPeer(t)
+	var applied atomic.Bool
+	pd := &pendingCall{
+		ch:     make(chan json.RawMessage, 1),
+		er:     make(chan error, 1),
+		method: "session/start",
+		apply: func(json.RawMessage) error {
+			applied.Store(true)
+			return nil
+		},
+	}
+	s.peer.mu.Lock()
+	s.peer.pend["n:1"] = pd
+	s.peer.closed = true
+	s.peer.mu.Unlock()
+
+	s.peer.resolve(inbound{ID: json.RawMessage(`1`), Result: json.RawMessage(`{}`)})
+	if applied.Load() {
+		t.Fatal("resolve applied a pending call after the peer was closed")
+	}
+	s.peer.mu.Lock()
+	still := s.peer.pend["n:1"] == pd
+	s.peer.mu.Unlock()
+	if !still {
+		t.Fatal("resolve claimed a call Close already owned")
+	}
+	select {
+	case <-pd.ch:
+		t.Fatal("resolve completed a closed pending call")
+	case <-pd.er:
+		t.Fatal("resolve failed a closed pending call")
+	default:
+	}
+}
+
+func TestClosedPeerHasNoUnclaimedPending(t *testing.T) {
+	s := newScriptedPeer(t)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.peer.Call(context.Background(), "x", nil)
+		errc <- err
+	}()
+	_ = s.readJSON(t)
+
+	s.peer.mu.Lock()
+	if s.peer.closed {
+		t.Fatal("closed before Close")
+	}
+	if len(s.peer.pend) != 1 {
+		s.peer.mu.Unlock()
+		t.Fatalf("pending=%d", len(s.peer.pend))
+	}
+	s.peer.mu.Unlock()
+
+	if err := s.peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.peer.mu.Lock()
+	closed := s.peer.closed
+	n := len(s.peer.pend)
+	s.peer.mu.Unlock()
+	if !closed {
+		t.Fatal("Close did not set closed")
+	}
+	if n != 0 {
+		t.Fatalf("unclaimed pending survived Close: %d", n)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("err=%v", err)
+		}
+		if !strings.Contains(err.Error(), "x") {
+			t.Fatalf("wrapped ErrClosed missing method: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter leaked")
+	}
+}
+
+func TestCloseResolveOwnershipOrders(t *testing.T) {
+	t.Run("response-first", func(t *testing.T) {
+		s := newScriptedPeer(t)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		})
+		var n atomic.Int32
+		errc := make(chan error, 1)
+		go func() {
+			_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+				n.Add(1)
+				close(entered)
+				<-release
+				return nil
+			})
+			errc <- err
+		}()
+		req := s.readJSON(t)
+		s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{"ok":1}}`)
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("apply not entered")
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- s.peer.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close waited for claimed apply")
+		}
+		close(release)
+		if err := <-errc; err != nil {
+			t.Fatalf("response claim must win: %v", err)
+		}
+		if n.Load() != 1 {
+			t.Fatalf("apply count=%d", n.Load())
+		}
+	})
+	t.Run("close-first", func(t *testing.T) {
+		s := newScriptedPeer(t)
+		var n atomic.Int32
+		errc := make(chan error, 1)
+		go func() {
+			_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+				n.Add(1)
+				return nil
+			})
+			errc <- err
+		}()
+		req := s.readJSON(t)
+		if err := s.peer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		err := <-errc
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("err=%v", err)
+		}
+		s.peer.resolve(inbound{ID: json.RawMessage(rawID(t, req)), Result: json.RawMessage(`{"ok":1}`)})
+		if n.Load() != 0 {
+			t.Fatal("late response applied after Close claimed")
+		}
+	})
+	t.Run("cancel-first", func(t *testing.T) {
+		s := newScriptedPeer(t)
+		var n atomic.Int32
+		ctx, cancel := context.WithCancel(context.Background())
+		errc := make(chan error, 1)
+		go func() {
+			_, err := s.peer.callApply(ctx, "session/start", nil, func(json.RawMessage) error {
+				n.Add(1)
+				return nil
+			})
+			errc <- err
+		}()
+		req := s.readJSON(t)
+		cancel()
+		err := <-errc
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+		s.writeRaw(t, `{"jsonrpc":"2.0","id":`+rawID(t, req)+`,"result":{"ok":1}}`)
+		deadline := time.Now().Add(150 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if n.Load() != 0 {
+				t.Fatal("late response applied after cancel claimed")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+}
+
+func TestCloseResolveOwnershipStress(t *testing.T) {
+	const rounds = 80
+	for i := 0; i < rounds; i++ {
+		s := newScriptedPeer(t)
+		var applied atomic.Int32
+		errc := make(chan error, 1)
+		go func() {
+			_, err := s.peer.callApply(context.Background(), "session/start", nil, func(json.RawMessage) error {
+				applied.Add(1)
+				return nil
+			})
+			errc <- err
+		}()
+		req := s.readJSON(t)
+		id := rawID(t, req)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.WriteString(s.toPeer, `{"jsonrpc":"2.0","id":`+id+`,"result":{}}`+"\n")
+		}()
+		go func() {
+			defer wg.Done()
+			_ = s.peer.Close()
+		}()
+		err := <-errc
+		wg.Wait()
+		n := applied.Load()
+		if n > 1 {
+			t.Fatalf("round %d apply ran %d times", i, n)
+		}
+		if n == 1 && err != nil {
+			t.Fatalf("round %d claimed apply lost: %v", i, err)
+		}
+		if n == 0 && !errors.Is(err, ErrClosed) {
+			t.Fatalf("round %d no apply err=%v", i, err)
+		}
+		s.peer.mu.Lock()
+		left := len(s.peer.pend)
+		s.peer.mu.Unlock()
+		if left != 0 {
+			t.Fatalf("round %d pending leak %d", i, left)
+		}
 	}
 }

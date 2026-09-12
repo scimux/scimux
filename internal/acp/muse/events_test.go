@@ -516,7 +516,8 @@ func TestTurnCompletedTerminalEvents(t *testing.T) {
 		kind string
 		want string
 	}{
-		{"succeeded", ""},
+		{"completed", "stop"},
+		{"succeeded", "stop"},
 		{"failed", "error"},
 		{"error", "error"},
 		{"cancelled", "stop"},
@@ -525,12 +526,6 @@ func TestTurnCompletedTerminalEvents(t *testing.T) {
 	}
 	for _, tc := range cases {
 		ev := decodeTurnCompleted(rawJSON(t, `{"turnId":"t1","terminal":"`+tc.kind+`"}`))
-		if tc.want == "" {
-			if ev != nil && (ev.T == "error" || ev.T == "stop") {
-				t.Fatalf("succeeded emitted %s", ev.T)
-			}
-			continue
-		}
 		if ev == nil || ev.T != tc.want {
 			t.Fatalf("kind %s -> %+v, want T=%s", tc.kind, ev, tc.want)
 		}

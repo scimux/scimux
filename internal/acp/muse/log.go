@@ -7,7 +7,10 @@
 // call a Model API, or wire Muse into the application.
 package muse
 
-import "codeberg.org/chrberger/scimux/internal/sessionlog"
+import (
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/transcript"
+)
 
 // Event aliases keep this package on the unified session-log schema.
 // Muse writes the same records every other transport writes; there is no
@@ -16,4 +19,19 @@ type (
 	Event      = sessionlog.Event
 	ToolEvent  = sessionlog.ToolEvent
 	UsageEvent = sessionlog.UsageEvent
+	logWriter  = sessionlog.Writer
 )
+
+func readTurns(path string) []transcript.Turn { return sessionlog.ReadTurns(path) }
+
+func peekLog(path string, maxLines int) string {
+	return sessionlog.PeekLog(path, maxLines, "(no muse events yet)")
+}
+
+// latestSegmentUsage returns context occupancy from the current log segment
+// only. A /clear seam resets the gauge; session/tokenUsage spend records do
+// not populate Used/Size and therefore cannot become occupancy.
+func latestSegmentUsage(path string) (used, window int64) {
+	seg := sessionlog.ReadSegment(path)
+	return seg.Used, seg.Size
+}

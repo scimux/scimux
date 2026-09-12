@@ -19,6 +19,7 @@ var productionFiles = []string{
 	"approval.go",
 	"client.go",
 	"log.go",
+	"manager.go",
 }
 
 func productionDir(t *testing.T) string {
@@ -56,15 +57,15 @@ func TestBoundaryEnumeratesEveryProductionFile(t *testing.T) {
 	if len(extra) > 0 {
 		t.Fatalf("production files not in the explicit scan list (the walk would omit them): %v", extra)
 	}
-	if len(seen) != 7 {
-		t.Fatalf("want 7 production files, listed %d", len(seen))
+	if len(seen) != 8 {
+		t.Fatalf("want 8 production files, listed %d", len(seen))
 	}
 }
 
 func TestBoundaryAntiVacuityScannedTheRealPackage(t *testing.T) {
 	files := readProduction(t)
-	if len(files) != 7 {
-		t.Fatalf("scanned %d production files, want 7", len(files))
+	if len(files) != 8 {
+		t.Fatalf("scanned %d production files, want 8", len(files))
 	}
 	joined := ""
 	for _, b := range files {
@@ -169,12 +170,15 @@ var allowedStdlibImports = map[string]bool{
 	"bufio": true, "bytes": true, "context": true, "crypto/rand": true,
 	"encoding/binary": true, "encoding/hex": true, "encoding/json": true,
 	"errors": true, "fmt": true, "io": true, "os": true, "os/exec": true,
-	"regexp": true, "strconv": true, "strings": true, "sync": true,
-	"syscall": true, "time": true,
+	"path/filepath": true, "regexp": true, "strconv": true, "strings": true,
+	"sync": true, "syscall": true, "time": true,
 }
 
 var allowedInternalImports = map[string]bool{
+	"codeberg.org/chrberger/scimux/internal/agentperm":  true,
+	"codeberg.org/chrberger/scimux/internal/asset":      true,
 	"codeberg.org/chrberger/scimux/internal/sessionlog": true,
+	"codeberg.org/chrberger/scimux/internal/transcript": true,
 }
 
 func allowedImport(p string) bool {
