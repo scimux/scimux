@@ -435,6 +435,16 @@ func (m *Manager) LastError(nodeID string) string {
 	return ""
 }
 
+// FingerprintMismatch reports schema fingerprint drift for a live node. It is
+// observational: mismatch does not kill the session or change liveness.
+func (m *Manager) FingerprintMismatch(nodeID string) bool {
+	s := m.session(nodeID)
+	if s == nil || s.client == nil {
+		return false
+	}
+	return s.client.FingerprintMismatch()
+}
+
 func (m *Manager) HasSession(nodeID string) bool { return m.session(nodeID) != nil }
 
 func (m *Manager) Kill(nodeID string) error {

@@ -4193,3 +4193,62 @@ func TestManagerMalformedClearPreservesPendingAndFence(t *testing.T) {
 		t.Fatalf("fence unusable after malformed clear: %v", err)
 	}
 }
+
+func TestWrapCleanupCombinesErrors(t *testing.T) {
+	if err := wrapCleanup(nil, errors.New("close")); err == nil || err.Error() != "close" {
+		t.Fatalf("nil primary: %v", err)
+	}
+	if err := wrapCleanup(errors.New("launch"), nil); err == nil || err.Error() != "launch" {
+		t.Fatalf("nil cleanup: %v", err)
+	}
+	err := wrapCleanup(errors.New("launch"), errors.New("close"))
+	if err == nil || !strings.Contains(err.Error(), "launch") || !strings.Contains(err.Error(), "close") {
+		t.Fatalf("combined: %v", err)
+	}
+}
+
+func TestManagerFingerprintMismatchObservableWithoutKill(t *testing.T) {
+	ctl := &spawnCtl{}
+	m := NewManagerWithSpawn(t.TempDir(), ctl.spawn)
+	t.Cleanup(m.Shutdown)
+	rc := make(chan launchRes, 1)
+	go func() {
+		id, err := m.Launch("n1", "muse", "/ws", "spark", "")
+		rc <- launchRes{id, err}
+	}()
+	srv := ctl.waitSpawned(t)
+	req := srv.nextReq(t)
+	if req["method"] != "initialize" {
+		t.Fatalf("method=%v", req["method"])
+	}
+	srv.replyOK(t, req, map[string]any{
+		"serverInfo": map[string]any{"name": "muse", "version": ObservedMuseVersion},
+		"schema":     map[string]any{"version": ObservedMSPSchema, "fingerprint": "sha256:deadbeef"},
+	})
+	req = srv.nextReq(t)
+	if req["method"] != "session/start" {
+		t.Fatalf("method=%v", req["method"])
+	}
+	srv.replyOK(t, req, map[string]any{"sessionId": "sess-1", "viewCursor": "c0"})
+	res := <-rc
+	if res.err != nil {
+		t.Fatalf("mismatch must not fail launch: %v", res.err)
+	}
+	if !m.FingerprintMismatch("n1") {
+		t.Fatal("mismatch must be observable")
+	}
+	if m.Live("n1") == "exited" {
+		t.Fatal("mismatch must not kill the node")
+	}
+	if !m.HasSession("n1") {
+		t.Fatal("mismatch must not drop the session")
+	}
+	if m.FingerprintMismatch("missing") {
+		t.Fatal("missing node must not report mismatch")
+	}
+
+	m2, _, _, _ := launchOK(t, t.TempDir())
+	if m2.FingerprintMismatch("n1") {
+		t.Fatal("matching fingerprint must not warn")
+	}
+}

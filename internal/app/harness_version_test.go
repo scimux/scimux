@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -164,6 +165,40 @@ func TestFetchHarnessLatest(t *testing.T) {
 	if _, err := fetchHarnessLatest(context.Background(), harnessSource{URL: junk.URL, Kind: "text"}); err == nil {
 		t.Error("unparseable body: want an error")
 	}
+	museOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Errorf("muse-stable request carried identity headers: %v", r.Header)
+		}
+		_, _ = w.Write([]byte(`{"something":"undocumented"}`))
+	}))
+	defer museOK.Close()
+	if _, err := fetchHarnessLatest(context.Background(), harnessSource{URL: museOK.URL, Kind: "muse-stable"}); err == nil {
+		t.Error("undocumented muse-stable metadata must fail closed")
+	}
+	muse500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", 500)
+	}))
+	defer muse500.Close()
+	if _, err := fetchHarnessLatest(context.Background(), harnessSource{URL: muse500.URL, Kind: "muse-stable"}); err == nil {
+		t.Error("non-2xx muse-stable must fail closed")
+	}
+	museHuge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 2<<20))
+	}))
+	defer museHuge.Close()
+	if _, err := fetchHarnessLatest(context.Background(), harnessSource{URL: museHuge.URL, Kind: "muse-stable"}); err == nil {
+		t.Error("oversized muse-stable body must fail closed")
+	}
+}
+
+func TestHarnessSourcesIncludesMuseStableChannel(t *testing.T) {
+	src := harnessSources()["muse"]
+	if src.URL != museStableChannel || src.Kind != "muse-stable" {
+		t.Fatalf("muse source = %+v", src)
+	}
+	if src.URL != "https://api.meta.ai/muse-code/channels/muse-stable" {
+		t.Fatalf("muse stable URL drifted: %s", src.URL)
+	}
 }
 
 // The native installer tracks its own `stable` channel, which trails the npm
@@ -277,8 +312,8 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 		if s.URL == "" || s.Kind == "" || s.Label == "" {
 			t.Errorf("harness %q source = %+v, want url, kind and label", h.bin, s)
 		}
-		if s.Kind != "npm" && s.Kind != "text" {
-			t.Errorf("harness %q source kind = %q, want npm or text", h.bin, s.Kind)
+		if s.Kind != "npm" && s.Kind != "text" && s.Kind != "muse-stable" {
+			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", h.bin, s.Kind)
 		}
 	}
 }
@@ -295,5 +330,66 @@ func TestProbeHarnessVersionsRunsNoRealCLI(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(empty, "claude")); !os.IsNotExist(err) {
 		t.Fatal("test PATH is not empty")
+	}
+}
+
+func TestMuseHarnessPresentButPolicyClosedIsNotLaunchable(t *testing.T) {
+	binDir := t.TempDir()
+	writeScript(t, binDir, "muse", `printf '%s\n' 'muse 1.2.3'`)
+	t.Setenv("PATH", binDir)
+	rows := probeHarnessVersions([]harness{{bin: "muse"}})
+	if len(rows) != 1 || !rows[0].Present {
+		t.Fatalf("Muse inventory = %+v, want one present row", rows)
+	}
+	if rows[0].Launchable {
+		t.Fatalf("production-policy-closed Muse was advertised launchable: %+v", rows[0])
+	}
+}
+
+func TestMuseStableChannelIsExplicitCheckOnly(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("X-Api-Key") != "" {
+			t.Errorf("muse update request carried credentials: %v", r.Header)
+		}
+		if r.URL.Query().Get("provider") != "" {
+			t.Error("muse update request carried provider information")
+		}
+		_, _ = w.Write([]byte(`{"undocumented":true}`))
+	}))
+	defer srv.Close()
+	restore := setHarnessSourcesForTest(map[string]harnessSource{
+		"muse": {URL: srv.URL, Kind: "muse-stable", Label: "Meta stable channel"},
+	})
+	defer restore()
+
+	a := newTestApp(t, &fakeTmux{})
+	a.agentCatalog = func() map[string]agentInfo { return map[string]agentInfo{} }
+	a.handleHarnesses(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/harnesses", nil))
+	a.handleAgents(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	a.poll()
+	if hits.Load() != 0 {
+		t.Fatalf("stable channel contacted %d times outside an explicit check", hits.Load())
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleHarnessLatest(rec, httptest.NewRequest(http.MethodGet, "/api/harnesses/latest", nil))
+	if rec.Code != 200 {
+		t.Fatalf("explicit check status = %d", rec.Code)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("explicit check hits = %d, want 1", hits.Load())
+	}
+	var got struct {
+		Latest map[string]struct {
+			Version string `json:"version"`
+		} `json:"latest"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Latest["muse"]; ok {
+		t.Fatalf("unresolved muse-stable shape leaked a version: %+v", got.Latest["muse"])
 	}
 }

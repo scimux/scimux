@@ -495,8 +495,7 @@ func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		// Let the response reach the browser before the process is replaced.
 		time.Sleep(400 * time.Millisecond)
-		a.acp.Shutdown()
-		a.codex.Shutdown()
+		a.shutdownStructured()
 		if err := execSelf(exe); err != nil {
 			// The new binary is installed but exec failed; the children are
 			// already gone, so a half-alive server would mislead — exit and

@@ -64,6 +64,10 @@ const (
 	// purpose, and a native install can only ever receive what it names.
 	claudeNativeStable = "https://downloads.claude.ai/claude-code-releases/stable"
 	grokStable         = "https://storage.googleapis.com/grok-build-public-artifacts/cli/stable"
+	// Unauthenticated public channel metadata. Contacted only from the
+	// explicit harness-update-check route. The response shape is not
+	// documented in this repository, so parsing fails closed.
+	museStableChannel = "https://api.meta.ai/muse-code/channels/muse-stable"
 )
 
 // claudeHarnessSource picks Claude's channel from where its binary actually
@@ -92,6 +96,7 @@ func harnessSources() map[string]harnessSource {
 		"pi":       {URL: npmRegistry + "@earendil-works/pi-coding-agent/latest", Kind: "npm", Label: "npm @earendil-works/pi-coding-agent"},
 		"opencode": {URL: npmRegistry + "opencode-ai/latest", Kind: "npm", Label: "npm opencode-ai"},
 		"grok":     {URL: grokStable, Kind: "text", Label: "xAI stable channel"},
+		"muse":     {URL: museStableChannel, Kind: "muse-stable", Label: "Meta stable channel"},
 	}
 }
 
@@ -190,7 +195,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 			if require == "" {
 				require = h.bin
 			}
-			if _, err := exec.LookPath(require); err == nil {
+			if _, err := exec.LookPath(require); err == nil && h.bin != "muse" {
 				row.Launchable = true
 			}
 			bin, err := exec.LookPath(h.bin)
@@ -265,6 +270,11 @@ func fetchHarnessLatest(ctx context.Context, src harnessSource) (string, error) 
 			return "", errHarnessSource("unreadable registry response")
 		}
 		raw = pkg.Version
+	}
+	if src.Kind == "muse-stable" {
+		// No checked-in textual findings document this channel's JSON.
+		// Do not invent a schema; fail closed after a bounded unauthenticated GET.
+		return "", errHarnessSource("unresolved muse-stable metadata shape")
 	}
 	v := parseHarnessVersion(raw)
 	if v == "" {

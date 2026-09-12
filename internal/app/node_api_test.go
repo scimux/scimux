@@ -630,6 +630,10 @@ func TestHandleAdoptValidation(t *testing.T) {
 	if rec := adopt(a, `{"session":"live1","agent":"codex","session_id":"x"}`); rec.Code != 400 {
 		t.Errorf("codex adopt: code = %d, want 400", rec.Code)
 	}
+	// Muse is a structured subprocess transport and is never adopted from tmux.
+	if rec := adopt(a, `{"session":"live1","agent":"muse"}`); rec.Code != 400 {
+		t.Errorf("muse adopt: code = %d, want 400", rec.Code)
+	}
 	// Path claim still enforced for claude.
 	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":`+strconv.Quote(shared)+`}`); rec.Code != 409 {
 		t.Errorf("path claim: code = %d, want 409", rec.Code)
@@ -1423,5 +1427,40 @@ func TestHandleAdoptRejectsProbeSession(t *testing.T) {
 	}
 	if _, ok := a.byID[probe]; ok {
 		t.Error("probe session was registered as a node")
+	}
+}
+
+func TestHandleNewNodeMuseCreatesAndForks(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseTestAuthority(t, a)
+	proc := &countingProc{launchSID: "http-muse"}
+	a.testProc = proc
+	rec := newNode(a, `{"title":"Muse root","prompt":"hello","agent":"muse","dir":`+strconv.Quote(a.home)+`}`)
+	if rec.Code != 200 {
+		t.Fatalf("muse create: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var created Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Agent != "muse" || created.Transport != "muse" || created.SessionID != "http-muse" {
+		t.Fatalf("created = %+v", created)
+	}
+	if proc.launches != 1 || proc.sendCalls != 1 || proc.lastSend != "hello" {
+		t.Fatalf("launch/send = %d/%d %q", proc.launches, proc.sendCalls, proc.lastSend)
+	}
+
+	forkProc := &countingProc{launchSID: "http-fork"}
+	a.testProc = forkProc
+	rec = newNode(a, `{"title":"Muse fork","prompt":"fresh","parent":`+strconv.Quote(created.ID)+`,"dir":`+strconv.Quote(a.home)+`}`)
+	if rec.Code != 200 {
+		t.Fatalf("muse fork: code = %d body %q", rec.Code, rec.Body.String())
+	}
+	var child Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &child); err != nil {
+		t.Fatal(err)
+	}
+	if child.Agent != "muse" || child.Transport != "muse" || child.Parent != created.ID {
+		t.Fatalf("fork = %+v", child)
 	}
 }

@@ -1,0 +1,338 @@
+package app
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// phase5MuseProductionFiles is the explicit scan list for Phase 5 Muse
+// application plumbing. A walk that forgot a file would otherwise pass by
+// omitting the code that could violate the boundary.
+var phase5MuseProductionFiles = []string{
+	"app.go",
+	"node_lifecycle.go",
+	"node_api.go",
+	"conversation_api.go",
+	"poller.go",
+	"state_api.go",
+	"auto_approve.go",
+	"agents.go",
+	"harness_version.go",
+	"settings.go",
+	"main.go",
+	"update.go",
+}
+
+func appDirFromTest(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Dir(thisFile)
+}
+
+func TestMuseBoundaryEnumeratesPhase5ProductionFiles(t *testing.T) {
+	dir := appDirFromTest(t)
+	seen := map[string]bool{}
+	for _, name := range phase5MuseProductionFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected Phase 5 production file %s: %v", name, err)
+		}
+		seen[name] = true
+	}
+	if len(seen) != 12 {
+		t.Fatalf("want 12 Phase 5 production files, listed %d", len(seen))
+	}
+}
+
+func TestMuseBoundaryAntiVacuity(t *testing.T) {
+	files := readPhase5Production(t)
+	joined := ""
+	for _, src := range files {
+		joined += src
+	}
+	needles := []string{
+		`"muse"`,
+		"muse_approval_judge_consent",
+		"museAutoApproveForbidden",
+		"museStableChannel",
+		"museClassify",
+		"museManager",
+		"case \"muse\"",
+	}
+	for _, n := range needles {
+		if !strings.Contains(joined, n) {
+			t.Fatalf("anti-vacuity: scanned production did not contain %q", n)
+		}
+	}
+	if !strings.Contains(files["harness_version.go"], museStableChannel) {
+		t.Fatal("stable-channel source missing from harness_version.go")
+	}
+	for name, src := range files {
+		if assignsMuseClassifier(t, name, src) {
+			t.Fatalf("%s installs a production Muse tier classifier", name)
+		}
+	}
+	if strings.Contains(joined, "this planted token must not appear in production") {
+		t.Fatal("scan included test files")
+	}
+}
+
+func TestMuseBoundaryForbiddenLiteralsAbsentFromProduction(t *testing.T) {
+	files := readPhase5Production(t)
+	for name, src := range files {
+		for _, hit := range museAppForbiddenHits(name, src) {
+			t.Errorf("%s: %s", name, hit)
+		}
+	}
+}
+
+func TestMuseBoundaryImportsAreStdlibOrInternal(t *testing.T) {
+	dir := appDirFromTest(t)
+	fset := token.NewFileSet()
+	for _, name := range phase5MuseProductionFiles {
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, spec := range f.Imports {
+			p, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				continue
+			}
+			if !museAppAllowedImport(p) {
+				t.Errorf("%s imports %s (stdlib or scimux internal only)", name, p)
+			}
+			if strings.Contains(p, "acp-go-sdk") {
+				t.Errorf("%s imports ACP SDK %s", name, p)
+			}
+		}
+	}
+}
+
+func TestMuseBoundaryNoPhase6BrowserFiles(t *testing.T) {
+	root := repoRootFromTest(t)
+	web := filepath.Join(root, "web")
+	err := filepath.WalkDir(web, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "test" || d.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(d.Name()) {
+		case ".js", ".html", ".css":
+		default:
+			return nil
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		src := string(b)
+		if strings.Contains(src, `agent: "muse"`) || strings.Contains(src, "agent:'muse'") ||
+			strings.Contains(src, "muse_models") || strings.Contains(src, "muse_schema_warning") {
+			rel, _ := filepath.Rel(root, path)
+			t.Errorf("Phase 6 browser file %s mentions Muse UI/catalog fields", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMuseBoundaryMatchersCatchPlantedViolations(t *testing.T) {
+	cred := "credentials" + ".json"
+	auth := "auth" + ".json"
+	plants := map[string]string{
+		"other meta endpoint":  `u := "https://api.meta.ai/muse-code/v1/models"`,
+		"stable url elsewhere": `u := "https://api.meta.ai/muse-code/channels/muse-stable"`,
+		"muse config dir":      `path := "/home/user/.muse/tokens"`,
+		"base-url flag":        `args := []string{"serve", "--base-url", "http://127.0.0.1"}`,
+		"provider flag":        `args := []string{"serve", "--provider", "other"}`,
+		"approval-judge":       `args := []string{"serve", "--approval-judge", "off"}`,
+		"cred filename":        "os.ReadFile(\"" + cred + "\")",
+		"auth filename":        "os.ReadFile(\"" + auth + "\")",
+		"launcher curl":        `exec.Command("curl", "https://example.invalid/install-muse.sh")`,
+		"schema artifact":      `os.ReadFile("schema/msp.schema.json")`,
+		"golden testdata":      `os.ReadFile("testdata/golden-approval.ndjson")`,
+		"acp sdk import":       `import "github.com/coder/acp-go-sdk"`,
+		"hardcoded tier map":   `var museTiers = map[string]string{"spark-code": "standard"}`,
+		"auth header":          `req.Header.Set("Authorization", "Bearer x")`,
+	}
+	for label, plant := range plants {
+		file := "agents.go"
+		if label == "stable url elsewhere" {
+			file = "agents.go"
+		}
+		if label == "auth header" {
+			file = "harness_version.go"
+		}
+		hits := museAppForbiddenHits(file, plant)
+		if strings.Contains(plant, "acp-go-sdk") {
+			if museAppAllowedImport("github.com/coder/acp-go-sdk") {
+				t.Fatalf("%s: SDK import was allowed", label)
+			}
+			continue
+		}
+		if len(hits) == 0 {
+			t.Fatalf("matcher missed planted violation %s: %s", label, plant)
+		}
+	}
+	if hits := museAppForbiddenHits("harness_version.go", `u := "https://api.meta.ai/muse-code/channels/muse-stable"`); len(hits) != 0 {
+		t.Fatalf("stable URL in harness_version.go must be allowed, got %v", hits)
+	}
+	if museAppAllowedImport("corp/localpkg") {
+		t.Fatal("dotless third-party import was classified as standard library")
+	}
+	if !assignsMuseClassifier(t, "plant.go", "package app\nfunc f(a *app) { a.museClassify = classify }") {
+		t.Fatal("production classifier assignment guard missed a planted assignment")
+	}
+	safe := []string{
+		`ProviderName string ` + "`json:\"providerName\"`",
+		`Title: "approval-judge unavailable"`,
+		`tier := museTierUnknown`,
+	}
+	for _, s := range safe {
+		if hits := museAppForbiddenHits("agents.go", s); len(hits) > 0 {
+			t.Fatalf("false positive on %q: %v", s, hits)
+		}
+	}
+}
+
+func museAppAllowedImport(p string) bool {
+	if museAppAllowedStdlib[p] {
+		return true
+	}
+	if strings.HasPrefix(p, "codeberg.org/chrberger/scimux/internal/") ||
+		p == "codeberg.org/chrberger/scimux/legal" {
+		return true
+	}
+	return false
+}
+
+var museAppAllowedStdlib = map[string]bool{
+	"context": true, "crypto/rand": true, "crypto/sha256": true,
+	"encoding/hex": true, "encoding/json": true, "errors": true,
+	"flag": true, "fmt": true, "hash/fnv": true, "io": true,
+	"net/http": true, "net/url": true, "os": true, "os/exec": true,
+	"os/signal": true, "path/filepath": true, "regexp": true,
+	"runtime": true, "strconv": true, "strings": true, "sync": true,
+	"sync/atomic": true, "syscall": true, "time": true,
+}
+
+func assignsMuseClassifier(t *testing.T, name, src string) bool {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			sel, ok := lhs.(*ast.SelectorExpr)
+			if ok && sel.Sel.Name == "museClassify" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func readPhase5Production(t *testing.T) map[string]string {
+	t.Helper()
+	dir := appDirFromTest(t)
+	out := map[string]string{}
+	for _, name := range phase5MuseProductionFiles {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[name] = string(b)
+	}
+	return out
+}
+
+func museAppForbiddenHits(file, src string) []string {
+	var hits []string
+	stable := "https://api.meta.ai/muse-code/channels/muse-stable"
+	cred := "credentials" + ".json"
+	auth := "auth" + ".json"
+	checks := []struct {
+		name string
+		ok   func() bool
+	}{
+		{"meta api endpoint", func() bool {
+			if !strings.Contains(src, "api.meta.ai") {
+				return false
+			}
+			if file == "harness_version.go" && strings.Contains(src, stable) &&
+				!strings.Contains(strings.ReplaceAll(src, stable, ""), "api.meta.ai") {
+				return false
+			}
+			return true
+		}},
+		{"stable url outside harness_version.go", func() bool {
+			return file != "harness_version.go" && strings.Contains(src, stable)
+		}},
+		{"muse config dir", func() bool {
+			return strings.Contains(src, "/.muse") || strings.Contains(src, "~/.muse")
+		}},
+		{"base-url flag", func() bool { return strings.Contains(src, "--base-url") }},
+		{"provider flag", func() bool { return strings.Contains(src, "--provider") }},
+		{"approval-judge flag", func() bool { return strings.Contains(src, "--approval-judge") }},
+		{"credential filename", func() bool {
+			return strings.Contains(src, "muse-token") ||
+				strings.Contains(src, cred) ||
+				strings.Contains(src, auth)
+		}},
+		{"launcher fetch", func() bool {
+			return strings.Contains(src, "install-muse") ||
+				(file != "harness_version.go" && strings.Contains(src, "muse-stable"))
+		}},
+		{"schema artifact", func() bool {
+			return strings.Contains(src, "msp.schema.json") || strings.Contains(src, "/schema/")
+		}},
+		{"vendored testdata", func() bool {
+			return strings.Contains(src, "testdata/golden") || strings.Contains(src, "testdata/real-") ||
+				strings.Contains(src, ".ndjson")
+		}},
+		{"hardcoded muse tier map", func() bool {
+			return strings.Contains(src, "museTiers") ||
+				(strings.Contains(src, `map[string]string{`) && strings.Contains(src, `"standard"`) &&
+					strings.Contains(src, "spark"))
+		}},
+		{"muse update authorization", func() bool {
+			if file != "harness_version.go" {
+				return false
+			}
+			return strings.Contains(src, `Header.Set("Authorization"`) ||
+				strings.Contains(src, `Header.Set("Cookie"`) ||
+				strings.Contains(src, "SetCookie")
+		}},
+	}
+	for _, c := range checks {
+		if c.ok() {
+			hits = append(hits, c.name)
+		}
+	}
+	return hits
+}

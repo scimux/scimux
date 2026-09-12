@@ -16,6 +16,7 @@ package app
 // - protocol-specific ACP/Codex argv (internal/acp, internal/codex)
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"testing/iotest"
 
+	"codeberg.org/chrberger/scimux/internal/acp/muse"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
@@ -192,7 +194,7 @@ func TestNodeTransportEmptyIsTmuxForAllAgents(t *testing.T) {
 		}
 	}
 	// Explicit values pass through unchanged.
-	for _, tr := range []string{"tmux", "acp", "codex"} {
+	for _, tr := range []string{"tmux", "acp", "codex", "muse"} {
 		if got := (&Node{Transport: tr}).transport(); got != tr {
 			t.Errorf("explicit transport %q = %q", tr, got)
 		}
@@ -209,6 +211,7 @@ func TestResolveNodeRootTransportByAgent(t *testing.T) {
 		{"codex", "codex"},
 		{"pi", "acp"},
 		{"opencode", "acp"},
+		{"muse", "muse"},
 	}
 	for _, c := range cases {
 		n := Node{Title: "T", Prompt: "p", Agent: c.agent, Dir: dir}
@@ -1131,6 +1134,7 @@ func TestResolveNodeTransport(t *testing.T) {
 		{Node{Title: "T", Prompt: "p", Agent: "grok", Dir: dir}, "acp"},
 		{Node{Title: "T", Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
 		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
+		{Node{Title: "T", Prompt: "p", Agent: "muse", Dir: dir}, "muse"},
 		{Node{Title: "T", Prompt: "p", Parent: "pi-tmux"}, "tmux"}, // fork inherits parent transport
 	}
 	for _, c := range cases {
@@ -1484,5 +1488,498 @@ func TestTheDirectoryExistsBeforeLaunch(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("attachment dir must exist after launch: %v", err)
+	}
+}
+
+// countingProc is a procManager test double that records Launch/Send/Kill.
+type countingProc struct {
+	stubProc
+	launches                                  int
+	kills                                     int
+	clears                                    int
+	interrupts                                int
+	lastID                                    string
+	lastAgent, lastDir, lastModel, lastEffort string
+	lastSend                                  string
+	launchSID                                 string
+	launchErr                                 error
+	killErr                                   error
+	peekText                                  string
+}
+
+func (c *countingProc) Peek(string) string {
+	if c.peekText != "" {
+		return c.peekText
+	}
+	return ""
+}
+
+func (c *countingProc) Launch(nodeID, agent, dir, model, effort string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.launches++
+	c.lastID, c.lastAgent, c.lastDir, c.lastModel, c.lastEffort = nodeID, agent, dir, model, effort
+	c.hasSession = c.launchErr == nil
+	if c.launchErr != nil {
+		return "", c.launchErr
+	}
+	if c.launchSID == "" {
+		return "muse-sid", nil
+	}
+	return c.launchSID, nil
+}
+
+func (c *countingProc) Kill(nodeID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.kills++
+	c.hasSession = false
+	c.lastID = nodeID
+	return c.killErr
+}
+
+func (c *countingProc) Clear(nodeID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clears++
+	c.lastID = nodeID
+	return nil
+}
+
+func (c *countingProc) Interrupt(nodeID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.interrupts++
+	c.lastID = nodeID
+	return nil
+}
+
+func (c *countingProc) Send(nodeID, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sendCalls++
+	c.lastID = nodeID
+	c.lastSend = text
+	if c.sendHook != nil {
+		c.sendHook(&c.stubProc)
+	}
+	return c.sendErr
+}
+
+func TestResolveNodeAcceptsMuse(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{}}
+	n := Node{Title: "M", Prompt: "p", Agent: "muse", Dir: dir}
+	if status, err := a.resolveNode(&n); err != nil {
+		t.Fatalf("resolveNode muse: %d %v", status, err)
+	}
+	if n.Agent != "muse" || n.Transport != "muse" {
+		t.Fatalf("muse node = agent=%q transport=%q, want muse/muse", n.Agent, n.Transport)
+	}
+}
+
+func TestResolveNodeForcesMuseTransport(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{}}
+	n := Node{Title: "M", Prompt: "p", Agent: "muse", Transport: "acp", Dir: dir}
+	if _, err := a.resolveNode(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n.Transport != "muse" {
+		t.Fatalf("agent muse kept transport %q, want muse", n.Transport)
+	}
+	other := Node{Title: "P", Prompt: "p", Agent: "pi", Transport: "muse", Dir: dir}
+	if _, err := a.resolveNode(&other); err != nil {
+		t.Fatal(err)
+	}
+	if other.Transport == "muse" {
+		t.Fatal("non-muse agent must not keep a client-supplied muse transport")
+	}
+}
+
+func TestMuseSameAgentForkInheritsModelAndTransport(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{
+		"m1": {ID: "m1", Agent: "muse", Model: "std-1", Effort: "high", Transport: "muse", Dir: dir, LaneID: "L"},
+	}}
+	child := Node{Title: "Fork", Prompt: "fresh", Parent: "m1"}
+	if _, err := a.resolveNode(&child); err != nil {
+		t.Fatal(err)
+	}
+	if child.Agent != "muse" || child.Transport != "muse" || child.Model != "std-1" || child.Effort != "high" {
+		t.Fatalf("same-agent muse fork = %+v", child)
+	}
+}
+
+func TestMuseCrossAgentForkDoesNotInherit(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, byID: map[string]*Node{
+		"cx": {ID: "cx", Agent: "codex", Model: "gpt-5.5", Effort: "high", Transport: "codex", Dir: dir, LaneID: "L"},
+		"m1": {ID: "m1", Agent: "muse", Model: "std-1", Transport: "muse", Dir: dir, LaneID: "L"},
+	}}
+	toMuse := Node{Title: "T", Prompt: "p", Parent: "cx", Agent: "muse"}
+	if _, err := a.resolveNode(&toMuse); err != nil {
+		t.Fatal(err)
+	}
+	if toMuse.Transport != "muse" || toMuse.Model != "" || toMuse.Effort != "" {
+		t.Fatalf("switch-to-muse inherited model/transport: %+v", toMuse)
+	}
+	away := Node{Title: "T", Prompt: "p", Parent: "m1", Agent: "claude"}
+	if _, err := a.resolveNode(&away); err != nil {
+		t.Fatal(err)
+	}
+	if away.Model != "" || away.Transport != "tmux" {
+		t.Fatalf("switch-from-muse carried muse model/transport: model=%q transport=%q", away.Model, away.Transport)
+	}
+}
+
+func enableMuseConsent(t *testing.T, a *app) {
+	t.Helper()
+	s := a.settings()
+	s.MuseApprovalJudgeConsent = true
+	if err := a.saveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateMuseNodeLaunchesAndDeliversPrompt(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseTestAuthority(t, a)
+	proc := &countingProc{launchSID: "sid-muse"}
+	a.testProc = proc
+	n := &Node{Title: "Muse chat", Prompt: "hello muse", Agent: "muse", Dir: a.home}
+	status, _, err := a.createNode(n, nil)
+	if err != nil || status != 0 {
+		t.Fatalf("createNode: status=%d err=%v", status, err)
+	}
+	if n.Agent != "muse" || n.Transport != "muse" {
+		t.Fatalf("stored identity = agent=%q transport=%q", n.Agent, n.Transport)
+	}
+	if n.SessionID != "sid-muse" {
+		t.Fatalf("session id = %q", n.SessionID)
+	}
+	if proc.launches != 1 {
+		t.Fatalf("launches = %d, want 1", proc.launches)
+	}
+	if proc.lastAgent != "muse" || proc.lastModel != n.Model {
+		t.Fatalf("launch args agent=%q model=%q", proc.lastAgent, proc.lastModel)
+	}
+	if proc.sendCalls != 1 || proc.lastSend != "hello muse" {
+		t.Fatalf("initial send = %d %q", proc.sendCalls, proc.lastSend)
+	}
+	if a.byID[n.ID] == nil {
+		t.Fatal("created muse node was not published")
+	}
+}
+
+func TestCreateMuseNodeRollsBackWhenPersistFails(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseTestAuthority(t, a)
+	proc := &countingProc{launchSID: "sid-rb"}
+	a.testProc = proc
+	a.storePath = filepath.Join(t.TempDir(), "nodes.jsonl")
+	if err := os.Mkdir(a.storePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{Title: "Rollback", Prompt: "p", Agent: "muse", Dir: a.home}
+	status, _, err := a.createNode(n, nil)
+	if err == nil || status != 500 {
+		t.Fatalf("createNode persist failure: status=%d err=%v", status, err)
+	}
+	if proc.launches != 1 {
+		t.Fatalf("launches = %d, want 1 (manager succeeded)", proc.launches)
+	}
+	if proc.kills != 1 {
+		t.Fatalf("kills = %d, want 1 (rollback)", proc.kills)
+	}
+	if proc.sendCalls != 0 {
+		t.Fatalf("initial prompt was delivered after persist failure: %d", proc.sendCalls)
+	}
+	if a.byID[n.ID] != nil {
+		t.Fatal("partially launched muse node remained published")
+	}
+}
+
+func TestCreateMuseNodeLaunchFailureDoesNotPublish(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseTestAuthority(t, a)
+	proc := &countingProc{launchErr: errors.New("spawn refused")}
+	a.testProc = proc
+	n := &Node{Title: "Fail", Prompt: "p", Agent: "muse", Dir: a.home}
+	status, _, err := a.createNode(n, nil)
+	if err == nil || status == 0 {
+		t.Fatal("launch failure succeeded")
+	}
+	if proc.launches != 1 {
+		t.Fatalf("launches = %d", proc.launches)
+	}
+	if proc.sendCalls != 0 {
+		t.Fatal("prompt delivered despite launch failure")
+	}
+	if a.byID[n.ID] != nil {
+		t.Fatal("failed muse node was published")
+	}
+}
+
+func installMuseTestAuthority(t *testing.T, a *app) {
+	t.Helper()
+	enableMuseConsent(t, a)
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{
+			{ID: "std-1", Label: "Standard One", IsDefault: true},
+			{ID: "disc-1", Label: "Discounted One"},
+			{ID: "unk-1", Label: "Unknown One"},
+		}, nil
+	}
+	a.museClassify = func(id string) string {
+		switch id {
+		case "std-1":
+			return museTierStandard
+		case "disc-1":
+			return museTierDiscounted
+		}
+		return museTierUnknown
+	}
+}
+
+func TestCreateMuseNodeDeniedWithoutConsent(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	proc := &countingProc{launchSID: "should-not-spawn"}
+	a.testProc = proc
+	n := &Node{Title: "No consent", Prompt: "p", Agent: "muse", Dir: a.home}
+	status, _, err := a.createNode(n, nil)
+	if err == nil || status < 400 || status > 499 {
+		t.Fatalf("denied consent: status=%d err=%v, want 4xx", status, err)
+	}
+	if !strings.Contains(err.Error(), "consent") {
+		t.Fatalf("denial message %q should name consent", err)
+	}
+	if proc.launches != 0 || proc.sendCalls != 0 {
+		t.Fatalf("spawned or delivered without consent: launches=%d sends=%d", proc.launches, proc.sendCalls)
+	}
+	if a.byID[n.ID] != nil {
+		t.Fatal("denied muse node was published")
+	}
+	if a.sessionLogExists(n.ID) {
+		t.Fatal("denied muse launch created a session log")
+	}
+}
+
+func TestCreateMuseLaunchPolicy(t *testing.T) {
+	type setup func(*app)
+	cases := []struct {
+		name    string
+		model   string
+		parent  *Node
+		setup   setup
+		wantOK  bool
+		wantMod string
+	}{
+		{
+			name:   "standard default when none requested",
+			setup:  func(a *app) { installMuseTestAuthority(t, a) },
+			wantOK: true, wantMod: "std-1",
+		},
+		{
+			name:   "explicit discounted",
+			model:  "disc-1",
+			setup:  func(a *app) { installMuseTestAuthority(t, a) },
+			wantOK: true, wantMod: "disc-1",
+		},
+		{
+			name:  "unknown tier rejected",
+			model: "unk-1",
+			setup: func(a *app) { installMuseTestAuthority(t, a) },
+		},
+		{
+			name:  "forged id rejected",
+			model: "forged-id",
+			setup: func(a *app) { installMuseTestAuthority(t, a) },
+		},
+		{
+			name: "empty catalog rejected",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, nil }
+				a.museClassify = func(string) string { return museTierStandard }
+			},
+		},
+		{
+			name: "probe failure rejected",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, errors.New("probe") }
+				a.museClassify = func(string) string { return museTierStandard }
+			},
+		},
+		{
+			name: "production empty authority rejected",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{{ID: "std-1", Label: "Looks standard", IsDefault: true}}, nil
+				}
+			},
+		},
+		{
+			name: "no standard does not default to discounted",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{{ID: "disc-1", Label: "Only discounted", IsDefault: true}}, nil
+				}
+				a.museClassify = func(string) string { return museTierDiscounted }
+			},
+		},
+		{
+			name: "malformed ids skipped then fail closed",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{{ID: " "}, {ID: ""}, {ID: "\n"}}, nil
+				}
+				a.museClassify = func(string) string { return museTierStandard }
+			},
+		},
+		{
+			name:  "conflicting duplicate not launchable",
+			model: "std-1",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{
+						{ID: "std-1", Label: "A"},
+						{ID: "std-1", Label: "B"},
+					}, nil
+				}
+				a.museClassify = func(string) string { return museTierStandard }
+			},
+		},
+		{
+			name:   "stale inherited fork id rejected",
+			parent: &Node{ID: "old", Agent: "muse", Model: "retired-1", Transport: "muse"},
+			setup:  func(a *app) { installMuseTestAuthority(t, a) },
+		},
+		{
+			name: "first authoritative standard in catalog order",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{
+						{ID: "disc-1", Label: "D"},
+						{ID: "std-a", Label: "A"},
+						{ID: "std-b", Label: "B"},
+					}, nil
+				}
+				a.museClassify = func(id string) string {
+					if strings.HasPrefix(id, "std-") {
+						return museTierStandard
+					}
+					return museTierDiscounted
+				}
+			},
+			wantOK: true, wantMod: "std-a",
+		},
+		{
+			name: "prefer catalog standard marked default",
+			setup: func(a *app) {
+				enableMuseConsent(t, a)
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{
+						{ID: "std-a", Label: "A"},
+						{ID: "std-b", Label: "B", IsDefault: true},
+					}, nil
+				}
+				a.museClassify = func(string) string { return museTierStandard }
+			},
+			wantOK: true, wantMod: "std-b",
+		},
+		{
+			name: "consent false still zero spawn",
+			setup: func(a *app) {
+				a.museCatalog = func(context.Context) ([]muse.Model, error) {
+					return []muse.Model{{ID: "std-1", IsDefault: true}}, nil
+				}
+				a.museClassify = func(string) string { return museTierStandard }
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t, &fakeTmux{})
+			if tc.parent != nil {
+				tc.parent.Dir = a.home
+				a.byID[tc.parent.ID] = tc.parent
+			}
+			tc.setup(a)
+			proc := &countingProc{launchSID: "pol"}
+			a.testProc = proc
+			n := &Node{Title: "P", Prompt: "p", Agent: "muse", Model: tc.model, Dir: a.home}
+			if tc.parent != nil {
+				n.Parent = tc.parent.ID
+				n.Agent = ""
+			}
+			status, _, err := a.createNode(n, nil)
+			if tc.wantOK {
+				if err != nil || status != 0 {
+					t.Fatalf("status=%d err=%v", status, err)
+				}
+				if proc.launches != 1 {
+					t.Fatalf("launches=%d, want 1", proc.launches)
+				}
+				if proc.lastModel != tc.wantMod {
+					t.Fatalf("launched model=%q, want %q (must not send a tier)", proc.lastModel, tc.wantMod)
+				}
+				return
+			}
+			if err == nil || status < 400 {
+				t.Fatalf("wanted rejection, status=%d err=%v launches=%d", status, err, proc.launches)
+			}
+			if proc.launches != 0 || proc.sendCalls != 0 {
+				t.Fatalf("rejected case spawned: launches=%d sends=%d", proc.launches, proc.sendCalls)
+			}
+			if a.byID[n.ID] != nil {
+				t.Fatal("rejected node was published")
+			}
+		})
+	}
+}
+
+func TestCreateMuseNodeDeniedWithoutConsentHTTP(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	proc := &countingProc{}
+	a.testProc = proc
+	rec := newNode(a, `{"title":"No","prompt":"p","agent":"muse","dir":"`+a.home+`"}`)
+	if rec.Code < 400 || rec.Code > 499 {
+		t.Fatalf("HTTP without consent = %d %s, want 4xx", rec.Code, rec.Body)
+	}
+	if proc.launches != 0 {
+		t.Fatalf("HTTP path spawned without consent: %d", proc.launches)
+	}
+}
+
+func TestExplicitMuseTransportSurvivesReload(t *testing.T) {
+	data := t.TempDir()
+	store := filepath.Join(data, "nodes.jsonl")
+	line := `{"type":"node","node":{"id":"m1","title":"M","prompt":"p","agent":"muse","dir":"/tmp","transport":"muse","created_at":"2026-07-14T00:00:00Z"}}` + "\n"
+	if err := os.WriteFile(store, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewApp(Config{Home: t.TempDir(), DataDir: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := a.byID["m1"]
+	if n == nil {
+		t.Fatal("reload dropped the muse node")
+	}
+	if n.Agent != "muse" || n.Transport != "muse" || n.transport() != "muse" {
+		t.Fatalf("reloaded identity = agent=%q transport=%q migrated=%q", n.Agent, n.Transport, n.transport())
+	}
+	if a.proc(n) == nil {
+		t.Fatal("reloaded muse node did not dispatch to the Muse manager")
+	}
+	if _, ok := a.proc(n).(museManager); !ok {
+		t.Fatalf("reloaded muse node dispatched to %T", a.proc(n))
 	}
 }

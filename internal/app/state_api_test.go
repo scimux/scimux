@@ -446,7 +446,8 @@ func TestHandleStateHasTranscriptTmuxVsStructured(t *testing.T) {
 	// a.proc(n) is non-nil for acp/codex transports.
 	acpN := &Node{ID: "acp1", Title: "a1", Agent: "pi", Transport: "acp", CreatedAt: "2026-07-14T00:00:00Z"}
 	codexN := &Node{ID: "codex1", Title: "c1", Agent: "codex", Transport: "codex", CreatedAt: "2026-07-14T00:00:00Z"}
-	a.nodes = []*Node{tmuxNo, tmuxYes, acpN, codexN}
+	museN := &Node{ID: "muse1", Title: "m1", Agent: "muse", Transport: "muse", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes = []*Node{tmuxNo, tmuxYes, acpN, codexN, museN}
 	for _, n := range a.nodes {
 		a.byID[n.ID] = n
 	}
@@ -455,7 +456,7 @@ func TestHandleStateHasTranscriptTmuxVsStructured(t *testing.T) {
 	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
 	nodes := decodeStateNodes(t, rec.Body.Bytes())
 	want := map[string]bool{
-		"tmux-no": false, "tmux-yes": true, "acp1": true, "codex1": true,
+		"tmux-no": false, "tmux-yes": true, "acp1": true, "codex1": true, "muse1": true,
 	}
 	for _, n := range nodes {
 		id := n["id"].(string)
@@ -857,5 +858,61 @@ func TestHandleStateUnadoptedExcludesProbeSessions(t *testing.T) {
 	}
 	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
 		t.Errorf("unadopted = %v, want [ghost] (%s is a scimux probe)", body.Unadopted, probe)
+	}
+}
+
+type fpProc struct {
+	countingProc
+	mismatch bool
+}
+
+func (p *fpProc) FingerprintMismatch(string) bool { return p.mismatch }
+
+func TestHandleStateMuseFingerprintWarningIsAdditive(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-fp", "muse", "muse")
+	proc := &fpProc{mismatch: true}
+	proc.live = "quiet"
+	a.testProc = proc
+	a.live[n.ID] = "quiet"
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, "muse", "std-1", "", a.home),
+		{T: "user", Text: "hi"},
+		{T: "assistant", Text: "hello", Prov: []byte(`[{"loc":"envelope","key":"_meta","v":{"k":1}}]`)},
+	})
+
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	nodes := decodeStateNodes(t, rec.Body.Bytes())
+	var found map[string]any
+	for _, row := range nodes {
+		if row["id"] == n.ID {
+			found = row
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("muse node missing from state")
+	}
+	if found["muse_schema_warning"] != museSchemaWarning {
+		t.Fatalf("warning = %v, want %q", found["muse_schema_warning"], museSchemaWarning)
+	}
+	if found["live"] != "quiet" {
+		t.Fatalf("mismatch changed liveness: %v", found["live"])
+	}
+	if found["has_transcript"] != true {
+		t.Fatal("mismatch suppressed chat availability")
+	}
+
+	proc.mismatch = false
+	rec = httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
+	nodes = decodeStateNodes(t, rec.Body.Bytes())
+	for _, row := range nodes {
+		if row["id"] == n.ID {
+			if _, ok := row["muse_schema_warning"]; ok {
+				t.Fatalf("matching fingerprint still warned: %v", row["muse_schema_warning"])
+			}
+		}
 	}
 }

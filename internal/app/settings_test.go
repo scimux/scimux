@@ -131,3 +131,107 @@ func TestUsageViewMarksOffDistinctly(t *testing.T) {
 func writeFileForSettingsTest(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o600)
 }
+
+func TestMuseConsentDefaultIsFalse(t *testing.T) {
+	a := settingsApp(t)
+	if a.settings().MuseApprovalJudgeConsent {
+		t.Fatal("missing settings file consented to Muse approval-judge")
+	}
+}
+
+func TestMuseConsentEmptyAndCorruptAreFalse(t *testing.T) {
+	a := settingsApp(t)
+	if err := writeFileForSettingsTest(a.settingsPath, ""); err != nil {
+		t.Fatal(err)
+	}
+	if a.settings().MuseApprovalJudgeConsent {
+		t.Fatal("empty settings file consented")
+	}
+	if err := writeFileForSettingsTest(a.settingsPath, "{not json"); err != nil {
+		t.Fatal(err)
+	}
+	if a.settings().MuseApprovalJudgeConsent {
+		t.Fatal("corrupt settings file consented")
+	}
+}
+
+func TestMuseConsentPersistsAcrossRestart(t *testing.T) {
+	a := settingsApp(t)
+	if err := a.saveSettings(settings{MuseApprovalJudgeConsent: true}); err != nil {
+		t.Fatal(err)
+	}
+	b := &app{settingsPath: a.settingsPath}
+	if !b.settings().MuseApprovalJudgeConsent {
+		t.Fatal("Muse consent did not survive a restart")
+	}
+}
+
+func TestSettingsPreserveClaudeWhenWritingMuseConsent(t *testing.T) {
+	a := settingsApp(t)
+	if err := a.saveSettings(settings{ClaudeUsageChecks: true}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"muse_approval_judge_consent":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	a.handleSettingsPut(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT muse consent = %d %s", rec.Code, rec.Body)
+	}
+	got := a.settings()
+	if !got.MuseApprovalJudgeConsent {
+		t.Fatal("muse consent was not stored")
+	}
+	if !got.ClaudeUsageChecks {
+		t.Fatal("writing muse consent clobbered claude_usage_checks")
+	}
+}
+
+func TestSettingsPreserveMuseWhenWritingClaudeUsage(t *testing.T) {
+	a := settingsApp(t)
+	if err := a.saveSettings(settings{MuseApprovalJudgeConsent: true}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"claude_usage_checks":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	a.handleSettingsPut(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT claude usage = %d %s", rec.Code, rec.Body)
+	}
+	got := a.settings()
+	if !got.ClaudeUsageChecks {
+		t.Fatal("claude usage was not stored")
+	}
+	if !got.MuseApprovalJudgeConsent {
+		t.Fatal("writing claude_usage_checks clobbered muse consent")
+	}
+}
+
+func TestSettingsPutPreservesUnknownFutureFields(t *testing.T) {
+	a := settingsApp(t)
+	original := `{"claude_usage_checks":true,"future_policy":{"mode":"strict"},"future_flag":null}`
+	if err := writeFileForSettingsTest(a.settingsPath, original); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"muse_approval_judge_consent":true}`))
+	a.handleSettingsPut(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d %s", rec.Code, rec.Body)
+	}
+	b, err := os.ReadFile(a.settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["future_policy"]) != `{"mode":"strict"}` {
+		t.Fatalf("future_policy was not preserved: %s", raw["future_policy"])
+	}
+	if string(raw["future_flag"]) != "null" {
+		t.Fatalf("future_flag was not preserved: %s", raw["future_flag"])
+	}
+}

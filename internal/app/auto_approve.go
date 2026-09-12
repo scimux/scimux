@@ -158,7 +158,7 @@ func (a *app) autoApproveSupportedFor(n *Node) bool {
 // autoApproveSupported reports whether the node uses a structured transport
 // that can prove permission options (codex app-server, ACP for grok/opencode/pi).
 func autoApproveSupported(n *Node) bool {
-	if n == nil {
+	if n == nil || museAutoApproveForbidden(n) {
 		return false
 	}
 	switch n.transport() {
@@ -166,6 +166,12 @@ func autoApproveSupported(n *Node) bool {
 		return true
 	}
 	return false
+}
+
+// museAutoApproveForbidden is the explicit Muse exclusion: no lease, planted
+// state, or structured-transport generalization may make Muse eligible.
+func museAutoApproveForbidden(n *Node) bool {
+	return n != nil && (n.Agent == "muse" || n.transport() == "muse")
 }
 
 func newLeaseID() string {
@@ -662,7 +668,7 @@ func (a *app) acceptTmuxPrompt(n *Node, isClear bool, send func() (bool, error))
 // manager (not a second app-side snapshot) is the final authority that the
 // request is still current — PrepareResolve binds expectedRequestID.
 func (a *app) maybeAutoApprove(n *Node, pm procManager) {
-	if n == nil || pm == nil || !autoApproveSupported(n) {
+	if n == nil || pm == nil || museAutoApproveForbidden(n) || !autoApproveSupported(n) {
 		return
 	}
 
@@ -812,7 +818,7 @@ func (a *app) handleAutoApprove(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	supported := a.autoApproveSupportedFor(n)
 	a.mu.Unlock()
-	if !supported {
+	if museAutoApproveForbidden(n) || !supported {
 		http.Error(w, "auto-approval is not available for this chat", http.StatusBadRequest)
 		return
 	}

@@ -1,6 +1,11 @@
 package app
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 // TestEligibleAutoAllowMatrix is the pure policy table for structured
 // auto-approval. One function is shared by ACP and Codex — never duplicate.
@@ -188,5 +193,90 @@ func TestEligibleAutoAllowNonPermissionInputs(t *testing.T) {
 	// Disarmed lease even with a perfect option.
 	if _, ok := eligibleAutoAllow(false, false, []PermOption{{Key: "1", Name: "A", Kind: "allow"}}); ok {
 		t.Fatal("disarmed lease must not be eligible")
+	}
+}
+
+func TestMuseAutoApproveIsExplicitlyUnsupported(t *testing.T) {
+	for _, n := range []*Node{
+		{Agent: "muse", Transport: "muse"},
+		{Agent: "muse", Transport: ""},
+		{Agent: "claude", Transport: "muse"},
+	} {
+		if autoApproveSupported(n) {
+			t.Errorf("autoApproveSupported(%q/%q) = true", n.Agent, n.Transport)
+		}
+		if !museAutoApproveForbidden(n) {
+			t.Errorf("museAutoApproveForbidden(%q/%q) = false", n.Agent, n.Transport)
+		}
+	}
+	if museAutoApproveForbidden(&Node{Agent: "codex", Transport: "codex"}) {
+		t.Fatal("codex must remain auto-approve eligible")
+	}
+	if museAutoApproveForbidden(&Node{Agent: "pi", Transport: "acp"}) {
+		t.Fatal("ACP must remain auto-approve eligible")
+	}
+}
+
+func TestMuseAutoApproveEnableHTTP400(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-aa", "muse", "muse")
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/auto-approve", strings.NewReader(`{"enabled":true}`))
+	req.SetPathValue("id", n.ID)
+	rec := httptest.NewRecorder()
+	a.handleAutoApprove(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("enable = %d %s, want 400", rec.Code, rec.Body)
+	}
+	if a.autoApprove[n.ID] != nil {
+		t.Fatal("enable persisted in-memory state for Muse")
+	}
+}
+
+func TestMuseMaybeAutoApproveNeverDelivers(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-plant", "muse", "muse")
+	proc := &countingProc{}
+	proc.live = "active"
+	proc.hasPending = true
+	proc.hasSession = true
+	proc.pending = allowPending("incarn:2")
+	a.testProc = proc
+	a.mu.Lock()
+	a.autoApprove[n.ID] = &autoApproveState{
+		Phase:        autoPhaseArmed,
+		LeaseID:      "forged",
+		EnableIncarn: "incarn",
+		EnableMaxSeq: 0,
+		Attempted:    map[string]bool{},
+	}
+	a.mu.Unlock()
+	a.maybeAutoApprove(n, proc)
+	a.poll()
+	if proc.prepareCalls != 0 || proc.deliverCalls != 0 {
+		t.Fatalf("automatic path called PrepareResolve/Deliver: prepare=%d deliver=%d", proc.prepareCalls, proc.deliverCalls)
+	}
+}
+
+func TestMuseManualKeyAuditsBeforeDeliver(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-key", "muse", "muse")
+	proc := &countingProc{}
+	proc.hasPending = true
+	proc.hasSession = true
+	proc.pending = allowPending("req-1")
+	a.testProc = proc
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/key", strings.NewReader(`{"key":"1","request_id":"req-1"}`))
+	req.SetPathValue("id", n.ID)
+	rec := httptest.NewRecorder()
+	a.handleKey(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("manual key = %d %s", rec.Code, rec.Body)
+	}
+	if proc.prepareCalls != 1 || proc.deliverCalls != 1 {
+		t.Fatalf("manual path prepare=%d deliver=%d", proc.prepareCalls, proc.deliverCalls)
+	}
+	recs := keyRecords(t, a.storePath)
+	if len(recs) == 0 {
+		t.Fatal("manual decision was not audited")
 	}
 }

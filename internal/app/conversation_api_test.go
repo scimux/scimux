@@ -2767,3 +2767,100 @@ func TestHandleKeyStructuredRequestID(t *testing.T) {
 		t.Fatal("tmux /key must deliver a key")
 	}
 }
+
+func TestMuseChatPeekClearExitDelete(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-chat", "muse", "muse")
+	proc := &countingProc{}
+	proc.live = "quiet"
+	proc.hasSession = true
+	proc.peekText = "pane-ish log tail"
+	a.testProc = proc
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, "muse", "std-1", "", a.home),
+		{T: "user", Text: "hello"},
+		{T: "assistant", Text: "from muse", Prov: []byte(`[{"loc":"envelope","key":"_meta","v":1}]`)},
+		{T: "usage", Usage: &sessionlog.UsageEvent{Used: 12, Size: 100}},
+	})
+
+	chatReq := httptest.NewRequest("GET", "/api/nodes/"+n.ID+"/chat", nil)
+	chatReq.SetPathValue("id", n.ID)
+	chatRec := httptest.NewRecorder()
+	a.handleChat(chatRec, chatReq)
+	if chatRec.Code != 200 {
+		t.Fatalf("chat = %d %s", chatRec.Code, chatRec.Body)
+	}
+	var chat map[string]any
+	if err := json.Unmarshal(chatRec.Body.Bytes(), &chat); err != nil {
+		t.Fatal(err)
+	}
+	turns, _ := chat["turns"].([]any)
+	if len(turns) != 2 {
+		t.Fatalf("turns = %#v, want user+assistant once", chat["turns"])
+	}
+	asst, _ := turns[1].(map[string]any)
+	if asst["agent"] != "muse" {
+		t.Fatalf("assistant agent = %v", asst["agent"])
+	}
+	if asst["prov"] == nil {
+		t.Fatal("provenance dropped")
+	}
+
+	peekReq := httptest.NewRequest("GET", "/api/nodes/"+n.ID+"/peek", nil)
+	peekReq.SetPathValue("id", n.ID)
+	peekRec := httptest.NewRecorder()
+	a.handlePeek(peekRec, peekReq)
+	if peekRec.Code != 200 || !strings.Contains(peekRec.Body.String(), "pane-ish log tail") {
+		t.Fatalf("peek = %d %s", peekRec.Code, peekRec.Body)
+	}
+
+	clearReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	clearReq.SetPathValue("id", n.ID)
+	clearRec := httptest.NewRecorder()
+	a.handleSend(clearRec, clearReq)
+	if clearRec.Code != 200 {
+		t.Fatalf("clear = %d %s", clearRec.Code, clearRec.Body)
+	}
+	if proc.clears != 1 {
+		t.Fatalf("clears = %d", proc.clears)
+	}
+
+	intReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/interrupt", nil)
+	intReq.SetPathValue("id", n.ID)
+	intRec := httptest.NewRecorder()
+	a.handleSendInterrupt(intRec, intReq)
+	if intRec.Code != 200 {
+		t.Fatalf("interrupt = %d %s", intRec.Code, intRec.Body)
+	}
+	if proc.interrupts != 1 {
+		t.Fatalf("interrupts = %d", proc.interrupts)
+	}
+
+	exitReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/exit", nil)
+	exitReq.SetPathValue("id", n.ID)
+	exitRec := httptest.NewRecorder()
+	a.handleExitNode(exitRec, exitReq)
+	if exitRec.Code != 200 {
+		t.Fatalf("exit = %d %s", exitRec.Code, exitRec.Body)
+	}
+	if proc.kills != 1 {
+		t.Fatalf("exit kills = %d", proc.kills)
+	}
+
+	n2 := seedStructuredNode(t, a, "muse-del", "muse", "muse")
+	delProc := &countingProc{stubProc: stubProc{hasSession: true}}
+	a.testProc = delProc
+	delReq := httptest.NewRequest("DELETE", "/api/nodes/"+n2.ID, nil)
+	delReq.SetPathValue("id", n2.ID)
+	delRec := httptest.NewRecorder()
+	a.handleDeleteNode(delRec, delReq)
+	if delRec.Code != 200 {
+		t.Fatalf("delete = %d %s", delRec.Code, delRec.Body)
+	}
+	if delProc.kills != 1 {
+		t.Fatalf("delete kills = %d", delProc.kills)
+	}
+	if a.byID[n2.ID] != nil {
+		t.Fatal("deleted muse node still published")
+	}
+}

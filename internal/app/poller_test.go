@@ -2083,3 +2083,32 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		}
 	})
 }
+
+func TestPollerProjectsMuseStructuredState(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-poll", "muse", "muse")
+	proc := &countingProc{}
+	proc.live = "active"
+	proc.hasPending = true
+	proc.hasSession = true
+	proc.lastError = "tool failed"
+	proc.pending = allowPending("req-p")
+	a.testProc = proc
+	a.poll()
+	if a.live[n.ID] != "active" {
+		t.Fatalf("live = %q, want active", a.live[n.ID])
+	}
+	if a.attn[n.ID] != "approval" {
+		t.Fatalf("attn = %q, want approval", a.attn[n.ID])
+	}
+	proc.hasPending = false
+	proc.live = "quiet"
+	proc.lastError = ""
+	a.poll()
+	if a.live[n.ID] != "quiet" {
+		t.Fatalf("live after quiet = %q", a.live[n.ID])
+	}
+	if a.attn[n.ID] != "" {
+		t.Fatalf("attn leaked after pending cleared: %q", a.attn[n.ID])
+	}
+}

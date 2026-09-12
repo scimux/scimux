@@ -212,8 +212,7 @@ func Run() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-stop
-		a.acp.Shutdown()
-		a.codex.Shutdown()
+		a.shutdownStructured()
 		os.Exit(0)
 	}()
 
@@ -243,6 +242,7 @@ func Run() {
 	// it returns.
 	a.installClaudeModelProbe()
 	a.ensureClaudeModels()
+	a.museCatalog = probeMuseCatalog
 
 	handler := cmd.Handler()
 	if handler == nil {

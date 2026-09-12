@@ -131,6 +131,9 @@ type nodeView struct {
 	// on historical / complete-only segments — real_ms still present.
 	// UI (lane heat / capsule) lands in V2-P3/P4; this is data plumbing only.
 	FareSegments []fareSegView `json:"fare_segments,omitempty"`
+	// MuseSchemaWarning is additive fingerprint-drift notice. Older browsers
+	// ignore it. It is never a reason to hide chat or change liveness.
+	MuseSchemaWarning string `json:"muse_schema_warning,omitempty"`
 }
 
 func unixMSStamp(s string) int64 {
@@ -221,6 +224,14 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	hosted := a.hostedRemote
 	a.mu.Unlock()
+	for i := range views {
+		n := views[i].Node
+		if pm := a.proc(n); pm != nil {
+			if fp, ok := pm.(museFingerprintReporter); ok && fp.FingerprintMismatch(n.ID) {
+				views[i].MuseSchemaWarning = museSchemaWarning
+			}
+		}
+	}
 	// Project live context occupancy onto the list — only for live nodes, and
 	// only after the unlock (a.segment takes a.mu itself, so calling it inside
 	// the loop above would deadlock). segment() is cache-backed, so a quiet

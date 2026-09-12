@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"codeberg.org/chrberger/scimux/internal/acp/muse"
 )
 
 // modelEffort is one model's reasoning-effort menu: the levels its CLI accepts
@@ -30,9 +33,32 @@ type modelEffort struct {
 // Efforts is nil for agents that don't advertise it (claude/pi/opencode) and
 // for codex when only the static fallback is available.
 type agentInfo struct {
-	Models  []string               `json:"models"`
-	Efforts map[string]modelEffort `json:"efforts,omitempty"`
+	Models     []string               `json:"models"`
+	Efforts    map[string]modelEffort `json:"efforts,omitempty"`
+	MuseModels []museModelView        `json:"muse_models,omitempty"`
 }
+
+const (
+	museTierStandard   = "standard"
+	museTierDiscounted = "discounted"
+	museTierUnknown    = "unknown"
+)
+
+type museModelView struct {
+	ID           string `json:"id"`
+	Label        string `json:"label,omitempty"`
+	Default      bool   `json:"default,omitempty"`
+	Tier         string `json:"tier"`
+	Launchable   bool   `json:"launchable"`
+	ContextLimit *int   `json:"context_limit,omitempty"`
+	OutputLimit  *int   `json:"output_limit,omitempty"`
+}
+
+var (
+	errMuseCatalogUnavailable = errors.New("muse catalog is unavailable")
+	errMuseModelNotLaunchable = errors.New("requested muse model is not launchable")
+	errMuseNoStandardModel    = errors.New("no launchable muse standard model")
+)
 
 // A harness is probed in two steps: LookPath decides whether it appears at
 // all, then its own list command (where one exists — the CLI is the only
@@ -79,6 +105,10 @@ var harnesses = []harness{
 	// grok exposes ACP as `grok agent stdio`; models come from `grok models`
 	// and per-model effort menus from the CLI's models cache when available.
 	{bin: "grok", list: grokModelsFromCLI, fallback: grokModelsFallback},
+	// Muse has no static model fallback. Catalog rows come from the injectable
+	// probe (handleAgents overlay); an installed binary with no probe is an
+	// empty, valid model list.
+	{bin: "muse"},
 }
 
 var agentsOnce sync.Once
@@ -529,5 +559,228 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request) {
 	// response: the dialog is served from whatever is known now, and a newly
 	// installed claude shows up the next time it opens.
 	a.ensureClaudeModels()
-	writeJSON(w, detectAgents())
+	var base map[string]agentInfo
+	if a != nil && a.agentCatalog != nil {
+		base = a.agentCatalog()
+	} else {
+		base = detectAgents()
+	}
+	// detectAgents returns the process-wide cache. Never apply request/app
+	// overlays to that shared map: concurrent browsers must not race, and one
+	// failed probe must not inherit rows from an earlier request.
+	out := cloneAgentCatalog(base)
+	a.applyMuseCatalog(out)
+	writeJSON(w, out)
+}
+
+func cloneAgentCatalog(in map[string]agentInfo) map[string]agentInfo {
+	out := make(map[string]agentInfo, len(in))
+	for agent, info := range in {
+		out[agent] = info
+	}
+	return out
+}
+
+func (a *app) museTierOf(id string) string {
+	if a == nil || a.museClassify == nil {
+		return museTierUnknown
+	}
+	switch t := a.museClassify(id); t {
+	case museTierStandard, museTierDiscounted:
+		return t
+	}
+	return museTierUnknown
+}
+
+func museModelLabel(m muse.Model) string {
+	if s := strings.TrimSpace(m.Label); s != "" {
+		return s
+	}
+	return strings.TrimSpace(m.Name)
+}
+
+func intPtrEq(a, b *int) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func stringPtrEq(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func copyIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	n := *v
+	return &n
+}
+
+func museModelConflict(a, b muse.Model) bool {
+	if a.Name != b.Name || a.Label != b.Label || a.Source != b.Source || a.ProfileID != b.ProfileID {
+		return true
+	}
+	if a.IsDefault != b.IsDefault {
+		return true
+	}
+	return !intPtrEq(a.ContextLimit, b.ContextLimit) || !intPtrEq(a.OutputLimit, b.OutputLimit) ||
+		!stringPtrEq(a.ReleaseDate, b.ReleaseDate)
+}
+
+func (a *app) museViews(models []muse.Model) []museModelView {
+	type rec struct {
+		view     museModelView
+		src      muse.Model
+		conflict bool
+	}
+	order := make([]string, 0, len(models))
+	byID := map[string]*rec{}
+	for _, m := range models {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			continue
+		}
+		if prev, ok := byID[id]; ok {
+			if museModelConflict(prev.src, m) {
+				prev.conflict = true
+				prev.view.Launchable = false
+			}
+			continue
+		}
+		tier := a.museTierOf(id)
+		view := museModelView{
+			ID:           id,
+			Label:        museModelLabel(m),
+			Default:      m.IsDefault && tier == museTierStandard,
+			Tier:         tier,
+			Launchable:   tier == museTierStandard || tier == museTierDiscounted,
+			ContextLimit: copyIntPtr(m.ContextLimit),
+			OutputLimit:  copyIntPtr(m.OutputLimit),
+		}
+		byID[id] = &rec{view: view, src: m}
+		order = append(order, id)
+	}
+	out := make([]museModelView, 0, len(order))
+	for _, id := range order {
+		r := byID[id]
+		if r.conflict {
+			r.view.Launchable = false
+			r.view.Default = false
+		}
+		out = append(out, r.view)
+	}
+	return out
+}
+
+func (a *app) applyMuseCatalog(out map[string]agentInfo) {
+	if out == nil {
+		return
+	}
+	_, present := out["muse"]
+	if !present {
+		return
+	}
+	info := out["muse"]
+	if info.Models == nil {
+		info.Models = []string{}
+	}
+	if a == nil || a.museCatalog == nil {
+		out["muse"] = info
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	models, err := a.museCatalog(ctx)
+	if err != nil {
+		info.Models = []string{}
+		info.MuseModels = nil
+		out["muse"] = info
+		return
+	}
+	views := a.museViews(models)
+	ids := make([]string, 0, len(views))
+	for _, v := range views {
+		if v.Launchable {
+			ids = append(ids, v.ID)
+		}
+	}
+	info.Models = ids
+	info.MuseModels = views
+	out["muse"] = info
+}
+
+func (a *app) resolveMuseLaunchModel(requested string) (string, error) {
+	if a == nil || a.museCatalog == nil {
+		return "", errMuseCatalogUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	models, err := a.museCatalog(ctx)
+	if err != nil {
+		return "", errMuseCatalogUnavailable
+	}
+	views := a.museViews(models)
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		for _, v := range views {
+			if v.ID == requested {
+				if !v.Launchable {
+					return "", errMuseModelNotLaunchable
+				}
+				return v.ID, nil
+			}
+		}
+		return "", errMuseModelNotLaunchable
+	}
+	firstStd := ""
+	for _, v := range views {
+		if !v.Launchable || v.Tier != museTierStandard {
+			continue
+		}
+		if v.Default {
+			return v.ID, nil
+		}
+		if firstStd == "" {
+			firstStd = v.ID
+		}
+	}
+	if firstStd != "" {
+		return firstStd, nil
+	}
+	return "", errMuseNoStandardModel
+}
+
+// probeMuseCatalog is the production catalog probe: `muse serve` through the
+// isolated MSP client, initialize only, no session and no turn, always closed.
+func probeMuseCatalog(ctx context.Context) ([]muse.Model, error) {
+	return probeMuseCatalogWithSpawn(ctx, muse.Spawn)
+}
+
+func probeMuseCatalogWithSpawn(ctx context.Context, spawn func(context.Context, string) (muse.Transport, error)) ([]muse.Model, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	tr, err := spawn(ctx, "muse")
+	if err != nil {
+		return nil, err
+	}
+	c := muse.NewClient(tr, nil, nil)
+	defer c.Close()
+	if err := c.Initialize(ctx, "scimux", "1"); err != nil {
+		return nil, err
+	}
+	return c.Models(ctx)
 }

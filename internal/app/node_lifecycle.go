@@ -392,23 +392,34 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		n.Agent = "claude"
 	}
 	switch n.Agent {
-	case "claude", "codex", "pi", "opencode", "grok":
+	case "claude", "codex", "pi", "opencode", "grok", "muse":
 	default:
-		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, or grok)", n.Agent)
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, or muse)", n.Agent)
+	}
+	// A client cannot pin the Muse transport onto a different agent, and a
+	// Muse node cannot run on any other transport. Stored records are not
+	// rewritten here: Node.transport still treats an absent field as tmux.
+	if n.Agent != "muse" && n.Transport == "muse" {
+		n.Transport = ""
 	}
 	// New nodes pick a transport by agent: pi/opencode/grok over ACP, codex over
-	// its app-server bridge, claude over tmux. Only set this on creation —
-	// stored records with an absent Transport are migrated to tmux by
-	// Node.transport, never rewritten here.
+	// its app-server bridge, muse over MSP, claude over tmux. Only set this on
+	// creation — stored records with an absent Transport are migrated to tmux
+	// by Node.transport, never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
 		case "pi", "opencode", "grok":
 			n.Transport = "acp"
 		case "codex":
 			n.Transport = "codex"
+		case "muse":
+			n.Transport = "muse"
 		default:
 			n.Transport = "tmux"
 		}
+	}
+	if n.Agent == "muse" {
+		n.Transport = "muse"
 	}
 	if n.Dir == "" {
 		n.Dir = a.home
@@ -747,6 +758,16 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 // run supervised-in-memory but vanish from the registry on restart. The
 // caller publishes the node in memory only after this succeeds.
 func (a *app) launchNode(n *Node, pm procManager) (int, error) {
+	if n != nil && (n.Agent == "muse" || n.transport() == "muse") {
+		if !a.settings().MuseApprovalJudgeConsent {
+			return 400, errMuseConsentRequired
+		}
+		id, err := a.resolveMuseLaunchModel(n.Model)
+		if err != nil {
+			return 400, err
+		}
+		n.Model = id
+	}
 	if pm != nil {
 		sid, err := pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
 		if err != nil {

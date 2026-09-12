@@ -1,18 +1,25 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/acp/muse"
 )
 
 func TestAgentCommandPiOpencode(t *testing.T) {
@@ -468,6 +475,7 @@ printf '%s\n' 'openai/gpt-5.5' 'anthropic/claude-sonnet-4-5'
 if [ "$1" != "models" ]; then exit 2; fi
 printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (default)'
 `)
+	writeScript(t, binDir, "muse", `exit 0`)
 	t.Setenv("PATH", binDir)
 
 	cacheDir := filepath.Join(home, ".grok")
@@ -498,6 +506,9 @@ printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (defaul
 	}
 	if got := grok.Efforts["grok-code-fast-1"]; got.Default != "high" {
 		t.Errorf("grok-code-fast-1 fallback efforts = %+v", got)
+	}
+	if got := agents["muse"].Models; got == nil || len(got) != 0 {
+		t.Errorf("muse models = %v, want empty with no static fallback", got)
 	}
 	for name, info := range agents {
 		if info.Models == nil {
@@ -581,4 +592,403 @@ func TestClaudeProbeWorkdirIsNeverTheInheritedCwd(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestProbeMuseCatalogFailsClosedWithoutBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := probeMuseCatalog(context.Background())
+	if err == nil {
+		t.Fatal("production catalog probe must fail closed when muse is not on PATH")
+	}
+	_, err = probeMuseCatalog(nil)
+	if err == nil {
+		t.Fatal("nil context must still fail closed without spawning a turn")
+	}
+}
+
+type museCatalogPipe struct {
+	stdin     *io.PipeWriter
+	stdout    *io.PipeReader
+	serverIn  *io.PipeReader
+	serverOut *io.PipeWriter
+	once      sync.Once
+	closes    atomic.Int32
+}
+
+func newMuseCatalogPipe() *museCatalogPipe {
+	serverIn, stdin := io.Pipe()
+	stdout, serverOut := io.Pipe()
+	return &museCatalogPipe{stdin: stdin, stdout: stdout, serverIn: serverIn, serverOut: serverOut}
+}
+
+func (p *museCatalogPipe) Stdin() io.WriteCloser { return p.stdin }
+func (p *museCatalogPipe) Stdout() io.Reader     { return p.stdout }
+func (p *museCatalogPipe) Close() error {
+	p.once.Do(func() {
+		p.closes.Add(1)
+		_ = p.stdin.Close()
+		_ = p.stdout.Close()
+		_ = p.serverIn.Close()
+		_ = p.serverOut.Close()
+	})
+	return nil
+}
+
+func TestProbeMuseCatalogWithFakeTransportInitializesListsAndCloses(t *testing.T) {
+	tr := newMuseCatalogPipe()
+	methods := make(chan string, 4)
+	serverDone := make(chan error, 1)
+	go func() {
+		scan := bufio.NewScanner(tr.serverIn)
+		for scan.Scan() {
+			var frame struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			if err := json.Unmarshal(scan.Bytes(), &frame); err != nil {
+				serverDone <- err
+				return
+			}
+			methods <- frame.Method
+			if len(frame.ID) == 0 {
+				continue
+			}
+			var result string
+			switch frame.Method {
+			case "initialize":
+				result = fmt.Sprintf(`{"serverInfo":{"name":"muse","version":%q},"schema":{"version":%d,"fingerprint":%q},"capabilities":{}}`, muse.ObservedMuseVersion, muse.ObservedMSPSchema, muse.PinnedFingerprint)
+			case "model/list":
+				result = `{"source":"synthetic","models":[{"id":"std-synthetic","label":"Synthetic","isDefault":true}]}`
+			default:
+				serverDone <- fmt.Errorf("unexpected request method %q", frame.Method)
+				return
+			}
+			if _, err := fmt.Fprintf(tr.serverOut, `{"jsonrpc":"2.0","id":%s,"result":%s}`+"\n", frame.ID, result); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- scan.Err()
+	}()
+	spawn := func(context.Context, string) (muse.Transport, error) { return tr, nil }
+	models, err := probeMuseCatalogWithSpawn(context.Background(), spawn)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "std-synthetic" {
+		t.Fatalf("models = %+v", models)
+	}
+	if tr.closes.Load() != 1 {
+		t.Fatalf("transport closes = %d, want 1", tr.closes.Load())
+	}
+	close(methods)
+	var got []string
+	for method := range methods {
+		got = append(got, method)
+	}
+	if !reflect.DeepEqual(got, []string{"initialize", "initialized", "model/list"}) {
+		t.Fatalf("wire methods = %v; probe must initialize and list without session or turn", got)
+	}
+	if err := <-serverDone; err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("fake server: %v", err)
+	}
+}
+
+func TestHandleAgentsMuseCatalogIsAdditive(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	base := map[string]agentInfo{"muse": {Models: []string{}}}
+	a.agentCatalog = func() map[string]agentInfo { return base }
+	ctxLim, outLim := 100000, 8192
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{
+			{ID: "std-1", Label: "Standard One", IsDefault: true, ContextLimit: &ctxLim, OutputLimit: &outLim},
+			{ID: "disc-1", Label: "Discounted One"},
+			{ID: "unk-1", Label: "Unknown One"},
+			{ID: "", Label: "dropped"},
+			{ID: "std-1", Label: "Standard One", IsDefault: true, ContextLimit: &ctxLim, OutputLimit: &outLim},
+		}, nil
+	}
+	a.museClassify = func(id string) string {
+		switch id {
+		case "std-1":
+			return museTierStandard
+		case "disc-1":
+			return museTierDiscounted
+		}
+		return museTierUnknown
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body)
+	}
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	info := out["muse"]
+	if !reflect.DeepEqual(info.Models, []string{"std-1", "disc-1"}) {
+		t.Fatalf("models = %v, want only selectable known-tier ids", info.Models)
+	}
+	if len(info.MuseModels) != 3 {
+		t.Fatalf("muse_models = %+v, want 3 rows", info.MuseModels)
+	}
+	std := info.MuseModels[0]
+	if std.ID != "std-1" || !std.Default || std.Tier != museTierStandard || !std.Launchable {
+		t.Fatalf("standard row = %+v", std)
+	}
+	if std.ContextLimit == nil || *std.ContextLimit != 100000 || std.OutputLimit == nil || *std.OutputLimit != 8192 {
+		t.Fatalf("limits fabricated or dropped: %+v", std)
+	}
+	disc := info.MuseModels[1]
+	if disc.Tier != museTierDiscounted || !disc.Launchable || disc.Default {
+		t.Fatalf("discounted row = %+v", disc)
+	}
+	unk := info.MuseModels[2]
+	if unk.Tier != museTierUnknown || unk.Launchable {
+		t.Fatalf("unknown row must be reported and not launchable: %+v", unk)
+	}
+	if !reflect.DeepEqual(base["muse"].Models, []string{}) || len(base["muse"].MuseModels) != 0 {
+		t.Fatalf("handler mutated shared discovery data: %+v", base["muse"])
+	}
+}
+
+func TestHandleAgentsDoesNotAdvertiseAbsentMuse(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.agentCatalog = func() map[string]agentInfo {
+		return map[string]agentInfo{"codex": {Models: []string{"gpt-test"}}}
+	}
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "std-1", IsDefault: true}}, nil
+	}
+	a.museClassify = func(string) string { return museTierStandard }
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["muse"]; ok {
+		t.Fatalf("absent Muse binary was advertised: %+v", out["muse"])
+	}
+}
+
+func TestHandleAgentsMuseConcurrentRequestsKeepDiscoveryCachePrivate(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	base := map[string]agentInfo{"muse": {Models: []string{}}}
+	a.agentCatalog = func() map[string]agentInfo { return base }
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "std-1", IsDefault: true}}, nil
+	}
+	a.museClassify = func(string) string { return museTierStandard }
+	const callers = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+			if rec.Code != http.StatusOK {
+				errs <- errors.New("non-200 response")
+				return
+			}
+			var out map[string]agentInfo
+			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+				errs <- err
+				return
+			}
+			if !reflect.DeepEqual(out["muse"].Models, []string{"std-1"}) {
+				errs <- errors.New("request lost launchable Muse model")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if len(base["muse"].Models) != 0 || len(base["muse"].MuseModels) != 0 {
+		t.Fatalf("shared discovery cache mutated: %+v", base["muse"])
+	}
+}
+
+func installMuseAgentBase(a *app) {
+	a.agentCatalog = func() map[string]agentInfo {
+		return map[string]agentInfo{"muse": {Models: []string{}}}
+	}
+}
+
+func TestMuseModelConflictLimitPointers(t *testing.T) {
+	n := 1
+	a := muse.Model{ID: "x", Label: "L", ContextLimit: &n}
+	b := muse.Model{ID: "x", Label: "L"}
+	if !museModelConflict(a, b) {
+		t.Fatal("nil vs set limit must conflict")
+	}
+	if museModelConflict(a, a) {
+		t.Fatal("identical pointers/values must not conflict")
+	}
+	m := 1
+	c := muse.Model{ID: "x", Label: "L", ContextLimit: &m}
+	if museModelConflict(a, c) {
+		t.Fatal("equal limit values must not conflict")
+	}
+	releaseA, releaseB := "2026-01-01", "2026-01-02"
+	base := muse.Model{ID: "x", Name: "n", Label: "L", Source: "s", ProfileID: "p", ReleaseDate: &releaseA}
+	for label, changed := range map[string]muse.Model{
+		"name":         {ID: "x", Name: "other", Label: "L", Source: "s", ProfileID: "p", ReleaseDate: &releaseA},
+		"source":       {ID: "x", Name: "n", Label: "L", Source: "other", ProfileID: "p", ReleaseDate: &releaseA},
+		"profile":      {ID: "x", Name: "n", Label: "L", Source: "s", ProfileID: "other", ReleaseDate: &releaseA},
+		"release date": {ID: "x", Name: "n", Label: "L", Source: "s", ProfileID: "p", ReleaseDate: &releaseB},
+	} {
+		if !museModelConflict(base, changed) {
+			t.Errorf("duplicate with conflicting %s remained launchable", label)
+		}
+	}
+}
+
+func TestMuseDiscountedAndConflictingRowsAreNeverDefaultsOrLegacySelectable(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.agentCatalog = func() map[string]agentInfo {
+		return map[string]agentInfo{"muse": {Models: []string{}}}
+	}
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{
+			{ID: "disc-1", Label: "Discounted", IsDefault: true},
+			{ID: "std-bad", Label: "A", IsDefault: true},
+			{ID: "std-bad", Label: "B", IsDefault: true},
+		}, nil
+	}
+	a.museClassify = func(id string) string {
+		if id == "disc-1" {
+			return museTierDiscounted
+		}
+		return museTierStandard
+	}
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	info := out["muse"]
+	if !reflect.DeepEqual(info.Models, []string{"disc-1"}) {
+		t.Fatalf("legacy selectable models = %v, want only the launchable discounted id", info.Models)
+	}
+	if len(info.MuseModels) != 2 {
+		t.Fatalf("rows = %+v", info.MuseModels)
+	}
+	for _, row := range info.MuseModels {
+		if row.Default {
+			t.Errorf("non-Standard-default row claimed default: %+v", row)
+		}
+	}
+}
+
+func TestHandleAgentsMuseConflictingDuplicateNotLaunchable(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{
+			{ID: "std-1", Label: "A", IsDefault: true},
+			{ID: "std-1", Label: "B", IsDefault: true},
+		}, nil
+	}
+	a.museClassify = func(string) string { return museTierStandard }
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	rows := out["muse"].MuseModels
+	if len(rows) != 1 || rows[0].Launchable {
+		t.Fatalf("conflicting duplicate became launchable: %+v", rows)
+	}
+}
+
+func TestHandleAgentsMuseEmptyCatalogAndProbeFailure(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, nil }
+	a.museClassify = func(string) string { return museTierStandard }
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out["muse"].Models; got == nil || len(got) != 0 {
+		t.Fatalf("empty catalog models = %v, want []", got)
+	}
+	if len(out["muse"].MuseModels) != 0 {
+		t.Fatalf("empty catalog rows = %+v", out["muse"].MuseModels)
+	}
+
+	a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, errors.New("probe down") }
+	rec = httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	if rec.Code != 200 {
+		t.Fatalf("probe failure must not 5xx the agents list: %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out["muse"].MuseModels) != 0 {
+		t.Fatalf("probe failure leaked rows: %+v", out["muse"].MuseModels)
+	}
+}
+
+func TestHandleAgentsMuseProductionAuthorityIsEmpty(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "std-1", Label: "Looks standard", IsDefault: true}}, nil
+	}
+	// Production classifier is unset/empty.
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	rows := out["muse"].MuseModels
+	if len(rows) != 1 || rows[0].Tier != museTierUnknown || rows[0].Launchable {
+		t.Fatalf("production empty authority must report unknown/unlaunchable: %+v", rows)
+	}
+}
+
+func TestHandleAgentsOtherAgentsKeepShape(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.agentCatalog = func() map[string]agentInfo {
+		return map[string]agentInfo{
+			"muse":   {Models: []string{}},
+			"claude": {Models: []string{"sonnet"}},
+			"codex":  {Models: []string{"gpt-test"}},
+		}
+	}
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "std-1", IsDefault: true}}, nil
+	}
+	a.museClassify = func(string) string { return museTierStandard }
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var raw map[string]map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["muse"]["muse_models"]; !ok {
+		t.Fatal("muse row missing muse_models")
+	}
+	for agent, info := range raw {
+		if agent == "muse" {
+			continue
+		}
+		if _, ok := info["muse_models"]; ok {
+			t.Fatalf("agent %q unexpectedly carries muse_models", agent)
+		}
+	}
 }

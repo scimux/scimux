@@ -11,6 +11,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/acp/muse"
 	"codeberg.org/chrberger/scimux/internal/agentperm"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/notestore"
@@ -69,6 +70,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		claudeProbeDir:  filepath.Join(cfg.DataDir, "probe"),
 		acp:             acpManager{acp.NewManager(sessionsDir)},
 		codex:           codexManager{codex.NewManager(sessionsDir)},
+		muse:            museManager{muse.NewManager(sessionsDir)},
 		storePath:       filepath.Join(cfg.DataDir, "nodes.jsonl"),
 		uiPath:          filepath.Join(cfg.DataDir, "ui.json"),
 		settingsPath:    filepath.Join(cfg.DataDir, "settings.json"),
@@ -110,6 +112,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 	a.assetHook = a.ingestAssetHook
 	a.acp.SetAssetHook(a.assetHook)
 	a.codex.SetAssetHook(a.assetHook)
+	a.muse.SetAssetHook(a.assetHook)
 	a.usage = newUsageCache(a.collectUsage)
 	if err := a.loadStore(); err != nil {
 		return nil, fmt.Errorf("load store: %w", err)
@@ -259,7 +262,7 @@ type Node struct {
 	// is a scimux decision, distinct from a *mechanical* process exit — a crash
 	// leaves the node live until /exit is invoked. Empty means not ended.
 	EndedAt    string `json:"ended_at,omitempty"`
-	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok"
+	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok" | "muse"
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // reasoning effort: claude/grok launch flag or codex thread config
 	Dir        string `json:"dir"`
@@ -277,11 +280,12 @@ type Node struct {
 	AXScreenReader bool `json:"ax_screen_reader,omitempty"`
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
 	// transcript files, the original path — claude), "acp" (an Agent Client
-	// Protocol subprocess, pi/opencode/grok) or "codex" (codex's app-server protocol
-	// wrapped as a structured bridge). "acp" and "codex" are both structured
-	// subprocess transports (no pane); see procManager. An absent value means
-	// tmux — every stored record predates this field, so migration is "" ==
-	// "tmux" (see transport).
+	// Protocol subprocess, pi/opencode/grok), "codex" (codex's app-server protocol
+	// wrapped as a structured bridge), or "muse" (Muse subprocess over MSP).
+	// "acp", "codex" and "muse" are structured subprocess transports (no pane);
+	// see procManager. An absent value means tmux — every stored record that
+	// predates this field migrates as "" == "tmux" (see transport). Empty is
+	// never reinterpreted as muse.
 	Transport string `json:"transport,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
@@ -475,6 +479,7 @@ type app struct {
 	server *tmuxsession.Server
 	acp    acpManager
 	codex  codexManager
+	muse   museManager
 	// launchGrace bounds how long a freshly-launched tmux agent is watched for
 	// an immediate failure (a rejected --model, a bad flag). The launch is
 	// wrapped so such a process leaves its error on the pane (wrapLaunch); within
@@ -525,6 +530,9 @@ type app struct {
 	// distinct from the opaque per-browser blob at uiPath. Empty disables them,
 	// which reads as every default — see settings.go.
 	settingsPath string
+	// settingsMu serializes the settings endpoint's read-modify-write cycle so
+	// concurrent browsers cannot clobber independently updated consent fields.
+	settingsMu sync.Mutex
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also
@@ -564,6 +572,18 @@ type app struct {
 	// never a.mu across those ops). autoGateMu protects the map only.
 	autoGateMu sync.Mutex
 	autoGate   map[string]*sync.Mutex
+	// museCatalog, when set, is the injectable Muse model-list probe. Nil
+	// (the test default) is unavailable authority and fail-closed. Production
+	// installs probeMuseCatalog on the serve path only.
+	museCatalog func(context.Context) ([]muse.Model, error)
+	// agentCatalog overrides installed-harness discovery in focused tests. The
+	// returned map is always cloned before a request-specific Muse overlay, so
+	// the process-wide discovery cache remains immutable and race-safe.
+	agentCatalog func() map[string]agentInfo
+	// museClassify maps an exact model ID to "standard" or "discounted".
+	// Nil or any other result is "unknown". Production leaves this nil:
+	// no authoritative tier source has been supplied.
+	museClassify func(modelID string) string
 	// testProc, when non-nil, is returned by proc() instead of the real ACP
 	// or Codex manager. Tests only — never set in production.
 	testProc procManager
@@ -671,6 +691,47 @@ func (m codexManager) Conflict(err error) bool {
 		err == codex.ErrStalePermission
 }
 
+// museManager adapts *muse.Manager to procManager. Conflict uses errors.Is
+// so wrapped Muse sentinels still classify as HTTP 409.
+type museManager struct{ *muse.Manager }
+
+func (m museManager) Conflict(err error) bool {
+	return errors.Is(err, muse.ErrNoSession) || errors.Is(err, muse.ErrNotAlive) ||
+		errors.Is(err, muse.ErrTurnActive) || errors.Is(err, muse.ErrNoPending) ||
+		errors.Is(err, muse.ErrNoTurn) || errors.Is(err, muse.ErrStalePermission) ||
+		errors.Is(err, muse.ErrLaunchConflict)
+}
+
+func (m museManager) Shutdown() {
+	if m.Manager == nil {
+		return
+	}
+	m.Manager.Shutdown()
+}
+
+func (m museManager) SetAssetHook(f asset.IngestFunc) {
+	if m.Manager == nil {
+		return
+	}
+	m.Manager.SetAssetHook(f)
+}
+
+// museFingerprintReporter is an optional narrow surface implemented by the
+// Muse adapter. It is not on procManager: ACP and Codex must not grow a
+// method solely for this warning.
+type museFingerprintReporter interface {
+	FingerprintMismatch(nodeID string) bool
+}
+
+func (m museManager) FingerprintMismatch(nodeID string) bool {
+	if m.Manager == nil {
+		return false
+	}
+	return m.Manager.FingerprintMismatch(nodeID)
+}
+
+const museSchemaWarning = "muse_schema_fingerprint_mismatch"
+
 // proc returns the structured-protocol manager for a node, or nil for a tmux
 // (claude) node. It is the single dispatch point that lets the HTTP/poll paths
 // treat ACP and codex-app-server nodes identically.
@@ -686,6 +747,20 @@ func (a *app) proc(n *Node) procManager {
 		return a.acp
 	case "codex":
 		return a.codex
+	case "muse":
+		return a.muse
 	}
 	return nil
+}
+
+// shutdownStructured tears down every structured-protocol subprocess manager.
+// tmux sessions are left running on purpose. Both the signal handler and the
+// update/re-exec path call this once; each manager's Shutdown is idempotent.
+func (a *app) shutdownStructured() {
+	if a == nil {
+		return
+	}
+	a.acp.Shutdown()
+	a.codex.Shutdown()
+	a.muse.Shutdown()
 }

@@ -2,12 +2,17 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/acp"
+	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"codeberg.org/chrberger/scimux/internal/acp/muse"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
@@ -240,5 +245,161 @@ func TestNewAppReturnsStoreReadFailure(t *testing.T) {
 	_, err := NewApp(Config{Home: t.TempDir(), DataDir: data})
 	if err == nil {
 		t.Fatal("NewApp returned nil error for unreadable nodes.jsonl")
+	}
+}
+
+func TestNewAppConstructsMuseManagerAndAssetHook(t *testing.T) {
+	a, err := NewApp(Config{Home: t.TempDir(), DataDir: filepath.Join(t.TempDir(), "data")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.muse.Manager == nil {
+		t.Fatal("NewApp did not construct a Muse manager")
+	}
+	src, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []string{
+		"a.acp.SetAssetHook(a.assetHook)",
+		"a.codex.SetAssetHook(a.assetHook)",
+		"a.muse.SetAssetHook(a.assetHook)",
+	} {
+		if !strings.Contains(string(src), call) {
+			t.Fatalf("constructor source is missing %s", call)
+		}
+	}
+}
+
+func TestProcSelectsMuseAndLeavesOtherTransportsAlone(t *testing.T) {
+	a, err := NewApp(Config{Home: t.TempDir(), DataDir: filepath.Join(t.TempDir(), "data")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := a.proc(&Node{Transport: "muse"})
+	if got == nil {
+		t.Fatal(`transport "muse" did not select a structured manager`)
+	}
+	if _, ok := got.(museManager); !ok {
+		t.Fatalf(`transport "muse" selected %T, want museManager`, got)
+	}
+	got = a.proc(&Node{Agent: "muse", Transport: "muse"})
+	if _, ok := got.(museManager); !ok {
+		t.Fatalf("muse agent selected %T, want museManager", got)
+	}
+	got = a.proc(&Node{Transport: "acp"})
+	if _, ok := got.(acpManager); !ok {
+		t.Fatalf(`transport "acp" selected %T, want acpManager`, got)
+	}
+	got = a.proc(&Node{Transport: "codex"})
+	if _, ok := got.(codexManager); !ok {
+		t.Fatalf(`transport "codex" selected %T, want codexManager`, got)
+	}
+	if got := a.proc(&Node{Agent: "claude", Transport: ""}); got != nil {
+		t.Fatalf("legacy empty transport selected %T; want tmux (nil proc)", got)
+	}
+	if got := a.proc(&Node{Agent: "muse", Transport: ""}); got != nil {
+		t.Fatalf("legacy empty transport on a muse-named agent selected %T; empty still means tmux", got)
+	}
+	if got := a.proc(&Node{Transport: "tmux"}); got != nil {
+		t.Fatalf("tmux transport selected %T, want nil", got)
+	}
+}
+
+func TestProcTestProcSeamStillWins(t *testing.T) {
+	a, err := NewApp(Config{Home: t.TempDir(), DataDir: filepath.Join(t.TempDir(), "data")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &stubProc{hasSession: true}
+	a.testProc = stub
+	if got := a.proc(&Node{Transport: "muse"}); got != stub {
+		t.Fatalf("testProc did not replace the Muse manager: got %T", got)
+	}
+	if got := a.proc(&Node{Transport: "acp"}); got != stub {
+		t.Fatalf("testProc did not replace the ACP manager: got %T", got)
+	}
+}
+
+func TestMuseManagerNilSafeMethods(t *testing.T) {
+	var m museManager
+	m.Shutdown()
+	m.SetAssetHook(nil)
+	if m.FingerprintMismatch("n") {
+		t.Fatal("nil manager reported a fingerprint mismatch")
+	}
+	var a *app
+	a.shutdownStructured()
+}
+
+func TestMuseManagerConflictUsesErrorsIs(t *testing.T) {
+	var _ procManager = museManager{}
+	m := museManager{Manager: muse.NewManager(t.TempDir())}
+	t.Cleanup(m.Shutdown)
+	sentinels := []error{
+		muse.ErrNoSession,
+		muse.ErrNotAlive,
+		muse.ErrTurnActive,
+		muse.ErrNoPending,
+		muse.ErrNoTurn,
+		muse.ErrStalePermission,
+		muse.ErrLaunchConflict,
+	}
+	for _, err := range sentinels {
+		if !m.Conflict(err) {
+			t.Errorf("Conflict(%v) = false, want true", err)
+		}
+		wrapped := fmt.Errorf("muse op: %w", err)
+		if !m.Conflict(wrapped) {
+			t.Errorf("Conflict(wrapped %v) = false; adapter must use errors.Is", err)
+		}
+	}
+	if m.Conflict(errors.New("random")) {
+		t.Error("Conflict(random) = true, want false")
+	}
+	if m.Conflict(acp.ErrNoSession) || m.Conflict(codex.ErrNoSession) {
+		t.Error("Muse Conflict matched ACP or Codex sentinels by string or identity")
+	}
+	if p, ok := m.Pending("ghost"); ok {
+		t.Errorf("Pending(ghost) = (%+v, true), want ok=false", p)
+	}
+}
+
+func TestShutdownStructuredClosesMuseExactlyOnce(t *testing.T) {
+	a, err := NewApp(Config{Home: t.TempDir(), DataDir: filepath.Join(t.TempDir(), "data")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := strings.Count(string(src), "a.muse.Shutdown()"); c != 1 {
+		t.Fatalf("shutdownStructured must close Muse exactly once, found %d a.muse.Shutdown() calls", c)
+	}
+	a.shutdownStructured()
+	a.shutdownStructured() // manager Shutdown is idempotent; a second call must not panic
+	if a.muse.HasSession("ghost") {
+		t.Fatal("Muse manager still claims a session after shutdown")
+	}
+}
+
+func TestShutdownStructuredWiredInMainAndUpdate(t *testing.T) {
+	mainSrc, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateSrc, err := os.ReadFile("update.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mainSrc), "a.shutdownStructured()") {
+		t.Fatal("main.go signal path does not shut structured managers through shutdownStructured")
+	}
+	if !strings.Contains(string(updateSrc), "a.shutdownStructured()") {
+		t.Fatal("update.go re-exec path does not shut structured managers through shutdownStructured")
+	}
+	if strings.Contains(string(mainSrc), "a.muse") && !strings.Contains(string(mainSrc), "shutdownStructured") {
+		t.Fatal("main.go talks to Muse outside shutdownStructured")
 	}
 }
