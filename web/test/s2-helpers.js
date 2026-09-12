@@ -175,7 +175,7 @@ export function channelTransport() {
   }
   return {
     mode: "channel",
-    origin: "https://my.scimux.eu",
+    origin: "https://my.scimux.com",
     fetchImpl: makeFetchImpl("channel"),
     assetURL,
     blobs,

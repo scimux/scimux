@@ -130,7 +130,7 @@ function httpError(status, message) {
 
 const T0 = 1_000_000;
 const CODE = "04106105";
-const LINK = "https://my.scimux.eu/p#c=04106105";
+const LINK = "https://my.scimux.com/p#c=04106105";
 
 function mintOK(over = {}) {
   return {

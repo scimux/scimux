@@ -29,13 +29,13 @@ func TestICEServersFromOrigin(t *testing.T) {
 	}{
 		{
 			name:   "https host",
-			origin: "https://my.scimux.eu",
-			want:   []string{"stun:my.scimux.eu:3478"},
+			origin: "https://my.scimux.com",
+			want:   []string{"stun:my.scimux.com:3478"},
 		},
 		{
 			name:   "https host:port",
-			origin: "https://my.scimux.eu:8443",
-			want:   []string{"stun:my.scimux.eu:3478"},
+			origin: "https://my.scimux.com:8443",
+			want:   []string{"stun:my.scimux.com:3478"},
 		},
 		{
 			name:   "http loopback with a port",

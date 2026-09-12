@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **security@nrgeas.eu**. Please don't open a public issue for a security
+Email **security@scimux.com**. Please don't open a public issue for a security
 bug — the repository's issue tracker is public, and so is everything in it.
 
 Useful to include, if you have it: what an attacker gains, the steps to

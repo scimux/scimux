@@ -10,7 +10,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"max_ms\":1}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"max_ms\":1}"
     },
     "response": {
       "status": 204,
@@ -20,7 +20,7 @@
       }
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -48,7 +48,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
     },
     "response": {
       "status": 200,
@@ -60,7 +60,7 @@
       "body_hex": "00fffe534450"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -96,7 +96,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"max_ms\":1}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"max_ms\":1}"
     },
     "response": {
       "status": 204,
@@ -106,7 +106,7 @@
       }
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -142,10 +142,10 @@
         "Content-Type": "application/octet-stream",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb"
+      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645db8b8bf309a7f34b80a877e5afeadc244"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -167,9 +167,9 @@
         "headers": {
           "Content-Type": "application/json"
         },
-        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
       },
-      "reply_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb"
+      "reply_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645db8b8bf309a7f34b80a877e5afeadc244"
     }
   },
   {
@@ -182,7 +182,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"reply\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb\",\"max_ms\":1}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\",\"reply\":\"0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645db8b8bf309a7f34b80a877e5afeadc244\",\"max_ms\":1}"
     },
     "response": {
       "status": 204,
@@ -192,7 +192,7 @@
       }
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -214,7 +214,7 @@
         "headers": {
           "Content-Type": "application/json"
         },
-        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"sig\":\"633685938b955400e9fa538427ba19f85e0516e67375e3357b0a5a2ac2aa57e3ef02c8d1b7ff2f23c0378310c6054fab2e173c376d7881f942844fb77e553705\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"sig\":\"57d105b53bd35113f7602137a34fb77ec244d0bfa1620ce7910400e3a18c8bc4a3b6d276a57494f33c3d2b8322d3a29271986cc5426f13dd41a626f5937b3107\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
       },
       "poster": {
         "method": "POST",
@@ -244,10 +244,10 @@
         "Content-Type": "application/octet-stream",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb"
+      "body_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645db8b8bf309a7f34b80a877e5afeadc244"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -269,9 +269,9 @@
         "headers": {
           "Content-Type": "application/json"
         },
-        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
       },
-      "reply_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645d6a8d2e2cf8107cd922c69d54d34609fb"
+      "reply_hex": "0457a5893cc072bfafebd9dac20eafa93eee77db9aa1f8480d506e01f7fdbc53ab882b1cd5a8115dde1080a6b68534e821fb478a65642084ac4d61d03b455473073333333333333333333333338bcd42332ab754c31fb20fb9dd8e7c85df6308eaca9c8119efaf05cbf4ef4ed646f3ba471eb0246da58ddb46ad97f534716c7a85c9516d3bd124a4ee209b947391f8dfe86812645db8b8bf309a7f34b80a877e5afeadc244"
     }
   },
   {
@@ -296,7 +296,7 @@
       }
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -318,7 +318,7 @@
         "headers": {
           "Content-Type": "application/json"
         },
-        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
       },
       "poster": {
         "method": "POST",
@@ -372,7 +372,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -394,7 +394,7 @@
         "headers": {
           "Content-Type": "application/json"
         },
-        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
       }
     }
   },
@@ -408,7 +408,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"52a076b5cf9b18beb433d708e9fed9f513bbeaf39b47a79085107e1a0fb65dfb13afc7db8ae91a4ebbbc69cf55d037a4770dd20bce86be4d0d3dbd88c369eb05\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"4efa439d37c4b406b5e18cd0948d96ee9f3c73472a9577144d38bf7260f5e2a23c7c6c07119220633c4798f147fce3174f0f012943b578b7d07727fa0d227f07\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
     },
     "response": {
       "status": 404,
@@ -419,14 +419,11 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
       "bind_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
-      "peer_issue_entropy_hex": "0f0e0d0c0b0a090807060504030201",
-      "peer_bind_handle_entropy_hex": "0a090807060504030201",
-      "peer_bind_seed_hex": "3333333333333333333333333333333333333333333333333333333333333333",
       "rand_hex": "44444444444444444444444444444444444444444444444444444444444444442222222222222222222222222222222222222222222222222222222222222222",
       "preflights": [
         {
@@ -452,8 +449,11 @@
         "headers": {
           "Content-Type": "application/json"
         },
-        "body_utf8": "{\"v\":1,\"handle\":\"ih_184GG1R60M2060G1\",\"challenge\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"sig\":\"213cf11f73a26ebe9ac287458871652d9192a60ff26537ec64a711ef1022852a0e82ea32112356cfc14bfb405b4881bd9e9410b27959ec763f2ffc960fd89909\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
-      }
+        "body_utf8": "{\"v\":1,\"handle\":\"ih_184GG1R60M2060G1\",\"challenge\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"sig\":\"992f3f735e4f6271a4feed07af882bc0268396aba59670e576e71fc1600efa289a123107e981612f572a653f7180ef3a20a9d075899ed412c837024ea3883407\",\"id\":\"abababababababababababababababababababababababababababababababab\"}"
+      },
+      "peer_issue_entropy_hex": "0f0e0d0c0b0a090807060504030201",
+      "peer_bind_handle_entropy_hex": "0a090807060504030201",
+      "peer_bind_seed_hex": "3333333333333333333333333333333333333333333333333333333333333333"
     }
   }
 ]
