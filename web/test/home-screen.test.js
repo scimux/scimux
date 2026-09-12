@@ -28,7 +28,7 @@ import {
   homeScreenReachable,
 } from "../js/pairing-ui.js";
 
-const REMOTE = "blob:https://my.scimux.eu/6b1e-…";
+const REMOTE = "blob:https://my.scimux.com/6b1e-…";
 const LOCAL = "http://127.0.0.1:8765/js/app.js";
 
 test("the move is offered only where it could be taken", () => {

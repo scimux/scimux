@@ -35,7 +35,7 @@ function at(screen, over = {}) {
   if (screen === "show-code" || screen === "compare-sas" || screen === "awaiting-other-side") {
     base.code = "04106105";
     base.rid = "3d3a9f69";
-    base.link = "https://my.scimux.eu/p#c=04106105";
+    base.link = "https://my.scimux.com/p#c=04106105";
     base.expiresAt = T0 + TTL;
   }
   if (screen === "compare-sas" || screen === "awaiting-other-side") {

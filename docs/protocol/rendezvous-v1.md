@@ -52,7 +52,7 @@ It never relays peer traffic.
 | Device | paired phone or tablet | not at all — holds a rendezvous ID, or a pairing code |
 | Operator | `scimux-rv` CLI | not on the wire; same uid as the daemon, local log only |
 
-Origin is the `-origin` flag (default `https://my.scimux.eu`). It is
+Origin is the `-origin` flag (default `https://my.scimux.com`). It is
 never taken from `Host`.
 
 All versioned POSTs use UTF-8 JSON unless a section says otherwise.

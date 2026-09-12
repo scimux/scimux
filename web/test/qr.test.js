@@ -12,6 +12,13 @@
  * plan named is translation risk — the TypeScript port ships no tests of
  * its own, they live in c/qrcodegen-test.c — so the oracle has to be the
  * other implementation, or it proves nothing.
+ *
+ * That is also why the link still names my.scimux.eu, the origin scimux
+ * used before 2026-09-12. The link is frozen payload, not a claim about
+ * where the rendezvous lives: the matrix beside it was produced from
+ * these exact bytes, so substituting a new name here without re-running
+ * the C port would assert a matrix nothing ever computed. Both files
+ * move together or neither does.
  */
 import test from "node:test";
 import assert from "node:assert/strict";

@@ -26,7 +26,28 @@ const ProtocolVersion = 1
 const MinRequestV = 1
 
 // DefaultOrigin is the rendezvous origin the protocol vectors use.
-const DefaultOrigin = "https://my.scimux.eu"
+//
+// It is cryptographic material, not a URL. buildAuthMessage domain-separates
+// on it, BuildPairingTranscript binds it into the SAS both humans read aloud,
+// and persist.go writes it into the enrolled state that client.go then
+// refuses to run against a different one. Change it and every installation
+// already enrolled is stranded; lose the domain and whoever takes it serves
+// the code those browsers execute.
+//
+// So it is a one-way door held open only until the first stranger pairs, and
+// the obligation it creates is registrar custody rather than code: lock,
+// auto-renew, longest term, on scimux.com specifically. See
+// remote-by-invite-only.md §4.4. Point a test or a local rehearsal somewhere
+// else with --rendezvous-url; never by editing this line.
+//
+// It read my.scimux.eu until 2026-09-12. That move was free only because
+// nothing outside the maintainer's own machines had enrolled; it is the last
+// time this line can change without stranding someone. Three more places must
+// agree with it, none of them in this repository: -origin in scimux-rv's
+// rc.d, the Caddyfile site name, and the vendored vectors under
+// testdata/vectors, which scimux-rv generates and scripts/vendor-rendezvous.sh
+// copies. Editing this constant alone turns every admission into a silent 404.
+const DefaultOrigin = "https://my.scimux.com"
 
 // PrivateDirName is the owner-only directory under the data root that holds
 // installation identity and remote state (0700).
