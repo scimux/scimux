@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -118,10 +119,49 @@ func TestMuseBoundaryImportsAreStdlibOrInternal(t *testing.T) {
 	}
 }
 
-func TestMuseBoundaryNoPhase6BrowserFiles(t *testing.T) {
+// phase6MuseBrowserFiles owns Muse policy presentation in the browser.
+// Anti-vacuity: a walk that forgot one of these would otherwise pass by
+// omitting the code that must consume the server-owned field names.
+var phase6MuseBrowserFiles = []string{
+	"web/js/sheets.js",
+	"web/js/chat.js",
+	"web/js/harness.js",
+	"web/js/app.js",
+	"web/js/usage.js",
+	"web/index.html",
+}
+
+func TestMuseBoundaryPhase6BrowserFiles(t *testing.T) {
 	root := repoRootFromTest(t)
+	for _, rel := range phase6MuseBrowserFiles {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Fatalf("expected Phase 6 browser file %s: %v", rel, err)
+		}
+	}
+
+	sheets, err := os.ReadFile(filepath.Join(root, "web/js/sheets.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat, err := os.ReadFile(filepath.Join(root, "web/js/chat.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sheets), "muse_models") {
+		t.Error("web/js/sheets.js must consume the literal field name muse_models")
+	}
+	if !strings.Contains(string(chat), "muse_schema_warning") {
+		t.Error("web/js/chat.js must consume the literal field name muse_schema_warning")
+	}
+	if museFieldIsConcealed(string(sheets), "muse_models") {
+		t.Error("web/js/sheets.js conceals muse_models instead of using the literal field name")
+	}
+	if museFieldIsConcealed(string(chat), "muse_schema_warning") {
+		t.Error("web/js/chat.js conceals muse_schema_warning instead of using the literal field name")
+	}
+
 	web := filepath.Join(root, "web")
-	err := filepath.WalkDir(web, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(web, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -141,15 +181,170 @@ func TestMuseBoundaryNoPhase6BrowserFiles(t *testing.T) {
 			return rerr
 		}
 		src := string(b)
-		if strings.Contains(src, `agent: "muse"`) || strings.Contains(src, "agent:'muse'") ||
-			strings.Contains(src, "muse_models") || strings.Contains(src, "muse_schema_warning") {
-			rel, _ := filepath.Rel(root, path)
-			t.Errorf("Phase 6 browser file %s mentions Muse UI/catalog fields", rel)
+		rel, _ := filepath.Rel(root, path)
+		for _, hit := range museBrowserForbiddenHits(src) {
+			t.Errorf("%s: %s", rel, hit)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+var museConcealSpace = regexp.MustCompile(`\s+`)
+
+func museFieldIsConcealed(src, field string) bool {
+	rest, ok := strings.CutPrefix(field, "muse")
+	if !ok || rest == "" {
+		return false
+	}
+	compact := museConcealSpace.ReplaceAllString(src, "")
+	for _, n := range []string{
+		`"muse"+"` + rest + `"`,
+		`'muse'+'` + rest + `'`,
+		`"muse"+'` + rest + `'`,
+		`'muse'+"` + rest + `"`,
+		`["muse","` + rest + `"].join("")`,
+		`["muse","` + rest + `"].join('')`,
+		`['muse','` + rest + `'].join("")`,
+		`['muse','` + rest + `'].join('')`,
+	} {
+		if strings.Contains(compact, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func museBrowserForbiddenHits(src string) []string {
+	cred := "credentials" + ".json"
+	auth := "auth" + ".json"
+	var hits []string
+	if strings.Contains(src, "/.muse") || strings.Contains(src, "~/.muse") {
+		hits = append(hits, "muse config dir")
+	}
+	if strings.Contains(src, "muse-token") ||
+		strings.Contains(src, cred) ||
+		strings.Contains(src, auth) {
+		hits = append(hits, "credential filename")
+	}
+	if strings.Contains(src, "--base-url") {
+		hits = append(hits, "base-url flag")
+	}
+	if strings.Contains(src, "--provider") {
+		hits = append(hits, "provider flag")
+	}
+	if strings.Contains(src, "--approval-judge") {
+		hits = append(hits, "approval-judge flag")
+	}
+	if strings.Contains(src, "api.meta.ai") {
+		hits = append(hits, "meta operational endpoint")
+	}
+	if strings.Contains(src, "install-muse") {
+		hits = append(hits, "launcher fetch")
+	}
+	if strings.Contains(src, "museTiers") ||
+		strings.Contains(src, "tierByModel") ||
+		strings.Contains(src, "modelToTier") ||
+		strings.Contains(src, "MUSE_TIER_BY_ID") {
+		hits = append(hits, "hardcoded muse tier map")
+	}
+	return hits
+}
+
+func TestMuseBrowserBoundaryMatchersCatchPlantedViolations(t *testing.T) {
+	cred := "credentials" + ".json"
+	auth := "auth" + ".json"
+	plants := []struct {
+		name string
+		src  string
+		hit  string
+	}{
+		{"muse config dir", `path = "/home/user/.muse/config"`, "muse config dir"},
+		{"token filename", `n = "muse-token"`, "credential filename"},
+		{"credential filename", `n = "` + cred + `"`, "credential filename"},
+		{"auth filename", `n = "` + auth + `"`, "credential filename"},
+		{"base-url flag", `flag = "--base-url"`, "base-url flag"},
+		{"provider flag", `flag = "--provider"`, "provider flag"},
+		{"approval-judge flag", `flag = "--approval-judge"`, "approval-judge flag"},
+		{"meta endpoint", `u = "https://api.meta.ai/v1"`, "meta operational endpoint"},
+		{"launcher", `u = "https://example.invalid/install-muse.sh"`, "launcher fetch"},
+		{"museTiers", `const museTiers = {}`, "hardcoded muse tier map"},
+		{"tierByModel", `const tierByModel = {}`, "hardcoded muse tier map"},
+		{"modelToTier", `const modelToTier = {}`, "hardcoded muse tier map"},
+		{"MUSE_TIER_BY_ID", `const MUSE_TIER_BY_ID = {}`, "hardcoded muse tier map"},
+	}
+	for _, p := range plants {
+		hits := museBrowserForbiddenHits(p.src)
+		found := false
+		for _, h := range hits {
+			if h == p.hit {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s: want hit %q, got %v", p.name, p.hit, hits)
+		}
+	}
+
+	safe := []string{
+		`info.muse_models`,
+		`n.muse_schema_warning`,
+		`row.tier === "standard"`,
+		`row.tier === "discounted"`,
+		`row.tier === "unknown"`,
+		`const providerName = info.providerName`,
+		`const providerId = m.providerId`,
+		`Muse's approval judge may spend subscription tokens.`,
+		`Muse supervision warning: approvals are notification-only; silence does not mean the agent is held.`,
+	}
+	for _, s := range safe {
+		if hits := museBrowserForbiddenHits(s); len(hits) > 0 {
+			t.Errorf("false positive on %q: %v", s, hits)
+		}
+	}
+
+	conceal := []struct {
+		field, src string
+	}{
+		{"muse_models", `"muse" + "_models"`},
+		{"muse_models", `"muse"+"_models"`},
+		{"muse_models", `'muse' + '_models'`},
+		{"muse_models", `'muse'+'_models'`},
+		{"muse_models", `"muse" + '_models'`},
+		{"muse_models", "\"muse\" +\n \"_models\""},
+		{"muse_models", `["muse", "_models"].join("")`},
+		{"muse_models", `['muse', '_models'].join('')`},
+		{"muse_models", `["muse","_models"].join("")`},
+		{"muse_schema_warning", `"muse" + "_schema_warning"`},
+		{"muse_schema_warning", `"muse"+"_schema_warning"`},
+		{"muse_schema_warning", `'muse' + '_schema_warning'`},
+		{"muse_schema_warning", `'muse'+'_schema_warning'`},
+		{"muse_schema_warning", `"muse" + '_schema_warning'`},
+		{"muse_schema_warning", "\"muse\" +\n \"_schema_warning\""},
+		{"muse_schema_warning", `["muse", "_schema_warning"].join("")`},
+		{"muse_schema_warning", `['muse', '_schema_warning'].join('')`},
+	}
+	for _, c := range conceal {
+		if !museFieldIsConcealed(c.src, c.field) {
+			t.Errorf("concealment missed %s in %q", c.field, c.src)
+		}
+	}
+
+	notConceal := []string{
+		`info.muse_models`,
+		`n.muse_schema_warning`,
+		`const muse = "muse"`,
+		`const models = info.models`,
+		`const schema = "schema"`,
+		`const warning = "warning"`,
+	}
+	for _, s := range notConceal {
+		if museFieldIsConcealed(s, "muse_models") || museFieldIsConcealed(s, "muse_schema_warning") {
+			t.Errorf("false concealment on %q", s)
+		}
 	}
 }
 

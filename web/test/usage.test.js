@@ -81,6 +81,13 @@ test("usageAgentDisplayName", () => {
   assert.equal(usageAgentDisplayName("other"), "other");
 });
 
+test("usageAgentDisplayName names Muse without adding it to usage phases", () => {
+  assert.equal(usageAgentDisplayName("muse"), "Muse");
+  assert.deepEqual(STATUS_PHASES, ["metrics", "claude", "codex", "grok"]);
+  assert.equal(STATUS_PHASES.includes("muse"), false);
+  assert.doesNotMatch(usageSrc, /STATUS_PHASES[^\n]*muse/);
+});
+
 test("weekly-only Grok badge omits 5h half; plan in tip", () => {
   const g = usageBadgeLayout("grok", {
     available: true,

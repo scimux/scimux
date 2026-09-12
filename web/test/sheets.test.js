@@ -15,6 +15,10 @@ import {
   agentOptionsHTML,
   modelDefaultLabel,
   modelOptionsHTML,
+  museModelSelectable,
+  museFreshDefaultId,
+  museModelOptionsHTML,
+  museActivityWarningText,
   effortLevelsFor,
   effortOptionsHTML,
   preservedEffortValue,
@@ -434,9 +438,14 @@ function el(tag, props = {}){
         let m;
         while ((m = re.exec(html))){
           const value = m[1] !== undefined ? m[1] : m[2];
-          opts.push({ value, textContent: m[2] });
+          opts.push({
+            value,
+            textContent: m[2],
+            disabled: /\sdisabled(?:\s|=|>|$)/.test(m[0]),
+          });
         }
         this._options = opts;
+        this.value = opts.length ? opts[0].value : "";
       }
     },
     configurable: true,
@@ -472,6 +481,7 @@ function makeRoots(){
   const nc_lane_new = el("input", { id: "nc_lane_new", hidden: true });
   const nc_lane_hint = el("div", { id: "nc_lane_hint", hidden: true });
   const nc_lane_swatch = el("span", { id: "nc_lane_swatch" });
+  const nc_muse_warn = el("div", { id: "nc_muse_warn", className: "nc-hint", hidden: true });
   newchat._fields = [nc_title, nc_prompt, nc_agent, nc_model, nc_effort, nc_dir, nc_lane, nc_lane_new];
 
   const adopt = el("div", { id: "adopt", className: "sheet" });
@@ -491,6 +501,7 @@ function makeRoots(){
   const byId = {
     backdrop, burger, plusbtn, newchat, nc_head, nc_start, nc_title, nc_prompt,
     nc_agent, nc_model, nc_effort, nc_dir, nc_lane, nc_lane_new, nc_lane_hint, nc_lane_swatch,
+    nc_muse_warn,
     adopt, ad_title, ad_agent, ad_sid, ad_path, ad_titlein, ad_prompt, ad_go, menu,
   };
 
@@ -1739,4 +1750,716 @@ test("Packet E: create success with new lane uiMutates lanes", async () => {
     lanes: [{ id: "lane-a", name: "A" }, { id: "new-lane", name: "Fresh" }],
   }]);
   assert.deepEqual(ctx.effects.select, ["created-1"]);
+});
+
+/* ---------- Phase 6: structured Muse model catalog ---------- */
+
+const MUSE_STD = {
+  id: "synth-std",
+  label: "Synth Standard",
+  default: true,
+  tier: "standard",
+  launchable: true,
+};
+const MUSE_DISC = {
+  id: "synth-disc",
+  label: "Synth Discounted",
+  default: false,
+  tier: "discounted",
+  launchable: true,
+};
+const MUSE_UNK = {
+  id: "synth-unk",
+  label: "Synth Unknown",
+  default: false,
+  tier: "unknown",
+  launchable: false,
+};
+
+function museAgentsPayload(museModels, extras = {}){
+  return {
+    claude: { models: ["opus"] },
+    muse: {
+      models: (museModels || []).filter(r => r && r.launchable).map(r => r.id),
+      muse_models: museModels,
+      ...extras,
+    },
+  };
+}
+
+async function settle(){
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
+test("applyAgentsProbe stores a caller-private Muse catalog snapshot", () => {
+  const row = {
+    id: "synth-std",
+    label: "Synth Standard",
+    default: true,
+    tier: "standard",
+    launchable: true,
+    extra: { secret: "no" },
+    context_limit: 999,
+  };
+  const payload = {
+    muse: { models: ["synth-std"], muse_models: [row] },
+  };
+  const r = applyAgentsProbe(cloneDefaultModels(), {}, payload);
+  assert.equal(r.museModels.length, 1);
+  assert.equal(r.museModels[0].id, "synth-std");
+  assert.equal(r.museModels[0].extra, undefined);
+  row.id = "mutated";
+  row.label = "changed";
+  row.tier = "discounted";
+  row.default = false;
+  row.launchable = false;
+  assert.equal(r.museModels[0].id, "synth-std");
+  assert.equal(r.museModels[0].label, "Synth Standard");
+  assert.equal(r.museModels[0].tier, "standard");
+  assert.equal(r.museModels[0].default, true);
+  assert.equal(r.museModels[0].launchable, true);
+  r.museModels[0].id = "from-return";
+  r.museModels[0].tier = "unknown";
+  assert.equal(payload.muse.muse_models[0].id, "mutated");
+  assert.equal(payload.muse.muse_models[0].tier, "discounted");
+  assert.equal(museModelSelectable(r.museModels[0]), false);
+});
+
+test("applyAgentsProbe Muse snapshot rejects empty ids and keeps fail-closed selectable rules", () => {
+  const r = applyAgentsProbe(cloneDefaultModels(), {}, {
+    muse: { muse_models: [
+      { id: "  ", tier: "standard", launchable: true },
+      { id: "", tier: "standard", launchable: true },
+      { id: "ok", tier: "standard", launchable: true, label: "OK" },
+    ] },
+  });
+  assert.deepEqual(r.museModels.map(x => x.id), ["ok"]);
+  assert.equal(museFreshDefaultId(r.museModels), "");
+});
+
+test("applyAgentsProbe keeps structured Muse metadata out of the agent map", () => {
+  const models = cloneDefaultModels();
+  const me = {};
+  const r = applyAgentsProbe(models, me, museAgentsPayload([MUSE_STD, MUSE_DISC, MUSE_UNK]));
+  assert.equal(r.changed, true);
+  assert.deepEqual(Object.keys(models).sort(), ["claude", "muse"]);
+  assert.equal(models.tier, undefined);
+  assert.equal(models.launchable, undefined);
+  assert.equal(models["synth-std"], undefined);
+  assert.equal(models.muse_models, undefined);
+  assert.ok(Array.isArray(r.museModels));
+  assert.equal(r.museModels.length, 3);
+  assert.equal(r.museModels[0].id, "synth-std");
+  assert.equal(r.museModels[0].tier, "standard");
+  assert.equal(r.museModels[1].tier, "discounted");
+  const html = agentOptionsHTML(models, esc);
+  assert.match(html, />muse</);
+  assert.doesNotMatch(html, />synth-std</);
+  assert.doesNotMatch(html, />standard</);
+});
+
+test("applyAgentsProbe fail-closes when Muse structured metadata is absent or malformed", () => {
+  const models = cloneDefaultModels();
+  const missing = applyAgentsProbe(models, {}, {
+    muse: { models: ["would-look-launchable"] },
+  });
+  assert.deepEqual(missing.museModels, []);
+  assert.deepEqual(models.muse, ["", "would-look-launchable"]);
+
+  const bad = applyAgentsProbe(cloneDefaultModels(), {}, {
+    muse: { models: ["x"], muse_models: { id: "x", tier: "standard", launchable: true } },
+  });
+  assert.deepEqual(bad.museModels, []);
+
+  const empty = applyAgentsProbe(cloneDefaultModels(), {}, null);
+  assert.equal(empty.changed, false);
+  assert.deepEqual(empty.museModels, []);
+});
+
+test("museModelSelectable is exact: launchable true and standard|discounted only", () => {
+  assert.equal(museModelSelectable(MUSE_STD), true);
+  assert.equal(museModelSelectable(MUSE_DISC), true);
+  assert.equal(museModelSelectable(MUSE_UNK), false);
+  assert.equal(museModelSelectable({
+    id: "lie", launchable: true, tier: "unknown",
+  }), false);
+  assert.equal(museModelSelectable({
+    id: "lie-std", launchable: true, tier: "Standard",
+  }), false);
+  assert.equal(museModelSelectable({
+    id: "no-tier", launchable: true,
+  }), false);
+  assert.equal(museModelSelectable({
+    id: "std-closed", launchable: false, tier: "standard",
+  }), false);
+  assert.equal(museModelSelectable({
+    id: "std-yes", launchable: "true", tier: "standard",
+  }), false);
+  assert.equal(museModelSelectable(null), false);
+});
+
+test("museFreshDefaultId requires declared Standard default; never first-row or Discounted", () => {
+  assert.equal(museFreshDefaultId([MUSE_STD, MUSE_DISC]), "synth-std");
+  assert.equal(museFreshDefaultId([MUSE_DISC, MUSE_STD]), "synth-std");
+  assert.equal(museFreshDefaultId([MUSE_DISC, MUSE_UNK]), "");
+  assert.equal(museFreshDefaultId([{
+    id: "first-disc", label: "Looks Standard", default: true,
+    tier: "discounted", launchable: true,
+  }, MUSE_STD]), "synth-std");
+  assert.equal(museFreshDefaultId([{
+    id: "cheap-first", tier: "discounted", launchable: true, default: false,
+  }]), "");
+  assert.equal(museFreshDefaultId([{
+    id: "declared-but-unknown", default: true, tier: "unknown", launchable: true,
+  }]), "");
+  assert.equal(museFreshDefaultId([{
+    id: "declared-unlaunchable", default: true, tier: "standard", launchable: false,
+  }]), "");
+  assert.equal(museFreshDefaultId(null), "");
+});
+
+test("museModelOptionsHTML labels, suffixes, escaping, and fail-closed disabled rows", () => {
+  const html = museModelOptionsHTML([
+    MUSE_STD,
+    MUSE_DISC,
+    MUSE_UNK,
+    { id: "no-label", label: "", tier: "standard", launchable: true },
+    { id: "lie-launch", label: "Open", tier: "mystery", launchable: true },
+    { id: "<xss>", label: "a<b>", tier: "standard", launchable: true },
+    { id: "std-from-name", label: "standard-model", tier: "unknown", launchable: true },
+    { id: "missing-tier", label: "Bare", launchable: true },
+    null,
+    "skip-me",
+    { label: "no-id", tier: "standard", launchable: true },
+  ], esc);
+
+  assert.match(html, /value="synth-std">Synth Standard \u2014 Standard/);
+  assert.match(html, /value="synth-disc">Synth Discounted \u2014 Discounted/);
+  assert.match(html, /value="synth-unk"[^>]*disabled>Synth Unknown \u2014 tier unavailable/);
+  assert.match(html, /value="no-label">no-label \u2014 Standard/);
+  assert.match(html, /value="lie-launch"[^>]*disabled>Open \u2014 tier unavailable/);
+  assert.match(html, /value="&lt;xss&gt;">a&lt;b&gt; \u2014 Standard/);
+  assert.match(html, /value="std-from-name"[^>]*disabled>standard-model \u2014 tier unavailable/);
+  assert.match(html, /value="missing-tier"[^>]*disabled>Bare \u2014 tier unavailable/);
+  assert.doesNotMatch(html, /skip-me/);
+  assert.doesNotMatch(html, />no-id</);
+  assert.doesNotMatch(html, /<xss>/);
+  assert.doesNotMatch(html, /a<b>/);
+  /* Never infer Standard from id, label, or position. */
+  assert.doesNotMatch(html, /std-from-name"[^>]*>standard-model \u2014 Standard/);
+});
+
+test("non-Muse modelOptionsHTML is unchanged by a sibling Muse catalog", () => {
+  const models = cloneDefaultModels();
+  applyAgentsProbe(models, {}, {
+    claude: { models: ["opus", "sonnet"] },
+    muse: { models: ["synth-std"], muse_models: [MUSE_STD] },
+  });
+  const html = modelOptionsHTML(models, "claude", null, esc);
+  assert.match(html, /value="">\(default\)/);
+  assert.match(html, /value="opus">opus/);
+  assert.doesNotMatch(html, /Standard|Discounted|tier unavailable/);
+});
+
+test("fresh Muse activity selects only the declared Standard default", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([
+      { ...MUSE_DISC, id: "first-row" },
+      MUSE_STD,
+      MUSE_UNK,
+    ]),
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  assert.match(ctx.byId.nc_model.innerHTML, /Synth Standard \u2014 Standard/);
+  assert.match(ctx.byId.nc_model.innerHTML, /Synth Discounted \u2014 Discounted/);
+  const unk = ctx.byId.nc_model.options.find(o => o.value === "synth-unk");
+  assert.ok(unk);
+  assert.equal(unk.disabled, true);
+});
+
+test("fresh Muse create payload sends only the selected model id", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC]),
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  ctx.byId.nc_title.value = "Muse work";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  assert.ok(post);
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.agent, "muse");
+  assert.equal(body.model, "synth-std");
+  assert.equal("tier" in body, false);
+  assert.equal("label" in body, false);
+  assert.equal("launchable" in body, false);
+  assert.equal("context_limit" in body, false);
+  assert.equal("output_limit" in body, false);
+  assert.equal("muse_models" in body, false);
+});
+
+test("fresh Muse with no Standard default does not select Discounted and blocks submit", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_DISC, MUSE_UNK]),
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_model.value, "");
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /Synth Discounted \u2014 Standard/);
+  assert.notEqual(ctx.byId.nc_model.value, "synth-disc");
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  assert.equal(ctx.byId.nc_model.attributes["aria-invalid"], "true");
+  assert.match(ctx.byId.nc_model.nextElementSibling.textContent, /Standard/i);
+  assert.equal(ctx.apiCalls.some(c => c.path === "/api/nodes"), false);
+});
+
+test("same-agent Muse fork inherits the parent model and its server-owned tier label", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC, MUSE_UNK]),
+    nodes: {
+      muse1: {
+        id: "muse1", title: "Muse parent", description: "keep going",
+        agent: "muse", model: "synth-disc", effort: "", dir: "/muse",
+        lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+      },
+    },
+    sel: "muse1",
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.feature.forkFromTurn("Follow this", "muse1");
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "synth-disc");
+  assert.match(ctx.byId.nc_model.innerHTML, /Synth Discounted \u2014 Discounted/);
+  ctx.byId.nc_title.value = "Fork";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  assert.ok(post);
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.model, "synth-disc");
+  assert.equal("tier" in body, false);
+  assert.equal(body.agent, "muse");
+});
+
+test("stale or unlaunchable Muse parent model is not made selectable by fork", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_UNK]),
+    nodes: {
+      muse1: {
+        id: "muse1", title: "Stale", description: "",
+        agent: "muse", model: "retired-id", effort: "", dir: "/muse",
+        lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+      },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.feature.forkFromTurn("x", "muse1");
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /retired-id/);
+  assert.notEqual(ctx.byId.nc_model.value, "retired-id");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+});
+
+test("unknown inherited Muse model stays disabled and is not selected", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_UNK]),
+    nodes: {
+      muse1: {
+        id: "muse1", title: "Unk", description: "",
+        agent: "muse", model: "synth-unk", effort: "", dir: "/muse",
+        lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+      },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.feature.forkFromTurn("x", "muse1");
+  const unk = ctx.byId.nc_model.options.find(o => o.value === "synth-unk");
+  assert.ok(unk);
+  assert.equal(unk.disabled, true);
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+});
+
+test("changing away from Muse drops inherited model; switching back does not restore it", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC]),
+    nodes: {
+      muse1: {
+        id: "muse1", title: "Muse parent", description: "",
+        agent: "muse", model: "synth-disc", effort: "", dir: "/muse",
+        lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+      },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.feature.forkFromTurn("x", "muse1");
+  assert.equal(ctx.byId.nc_model.value, "synth-disc");
+  ctx.byId.nc_agent.value = "claude";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.notEqual(ctx.byId.nc_model.value, "synth-disc");
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /Discounted/);
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_model.value, "synth-std",
+    "returning to Muse must follow the Standard default, not re-inherit");
+});
+
+test("cross-agent fork does not inherit a Muse model or tier", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC]),
+    nodes: {
+      p1: {
+        id: "p1", title: "Claude parent", description: "Parent desc",
+        agent: "claude", model: "opus", effort: "high", dir: "/parent",
+        lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+      },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.feature.forkFromTurn("x", "p1");
+  assert.equal(ctx.byId.nc_agent.value, "claude");
+  assert.equal(ctx.byId.nc_model.value, "opus");
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  assert.notEqual(ctx.byId.nc_model.value, "opus");
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /opus/);
+});
+
+test("new-activity Muse warning copy is notification-only and names token spend", () => {
+  const text = museActivityWarningText();
+  assert.match(text, /Muse approvals are notification-only/);
+  assert.match(text, /cannot guarantee that work is held while you decide/);
+  assert.match(text, /approval judge may spend your subscription tokens/);
+  assert.doesNotMatch(text, /block|held until|auto-approve|guaranteed to remain pending|silence means/i);
+  assert.doesNotMatch(text, /supplies Muse|model access/i);
+});
+
+test("new-activity sheet hosts the Muse warning exactly once", () => {
+  const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
+  assert.equal((indexSrc.match(/id="nc_muse_warn"/g) || []).length, 1);
+  assert.match(indexSrc, /id="newchat"[\s\S]*id="nc_muse_warn"/);
+  assert.match(indexSrc, /id="nc_muse_warn"[^>]*class="nc-hint"/);
+});
+
+test("Muse warning is visible while Muse is selected and hidden otherwise", async () => {
+  const ctx = createFeature({
+    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC]),
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, true);
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+  assert.match(ctx.byId.nc_muse_warn.textContent, /notification-only/);
+  assert.match(ctx.byId.nc_muse_warn.textContent, /subscription tokens/);
+  ctx.byId.nc_model.value = "synth-disc";
+  ctx.byId.nc_model.dispatch("change");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+  ctx.byId.nc_agent.value = "claude";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, true);
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+});
+
+test("Muse warning survives probe rebuild, same-agent fork, and failed submit", async () => {
+  let agents = museAgentsPayload([MUSE_STD]);
+  const ctx = createFeature({ agentsPayload: agents });
+  ctx.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return agents;
+    if (path === "/api/nodes" && opts.method === "POST") throw new Error("launch failed");
+    return {};
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.nodes.muse1 = {
+    id: "muse1", title: "Muse parent", description: "",
+    agent: "muse", model: "synth-std", effort: "", dir: "/muse",
+    lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+  };
+  ctx.feature.forkFromTurn("x", "muse1");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false, "failed submit must not hide the warning");
+  assert.ok(ctx.byId.newchat.classList.contains("open"));
+});
+
+test("absent Muse structured catalog does not make legacy models launchable", async () => {
+  const ctx = createFeature({
+    agentsPayload: {
+      claude: { models: ["opus"] },
+      muse: { models: ["looks-open", "also-open"] },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_agent.value = "muse";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /looks-open|also-open/);
+  assert.equal(ctx.byId.nc_model.value, "");
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_model.value = "looks-open";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  assert.equal(ctx.apiCalls.some(c => c.path === "/api/nodes"), false);
+  assert.equal(ctx.byId.nc_model.attributes["aria-invalid"], "true");
+});
+
+function museParentNode(id, model){
+  return {
+    id, title: "Muse parent", description: "keep going",
+    agent: "muse", model, effort: "medium", dir: "/muse",
+    lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+  };
+}
+
+test("delayed agents probe preserves an open same-agent Muse fork", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature({
+    nodes: { muse1: museParentNode("muse1", "synth-disc") },
+    sel: "muse1",
+  });
+  ctx.setApi(async (path, opts = {}) => {
+    ctx.apiCalls.push({ path, opts });
+    if (path === "/api/agents") return pending;
+    if (path === "/api/nodes" && opts.method === "POST")
+      return { id: "created-1", title: JSON.parse(opts.body).title };
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("Follow this", "muse1");
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+  assert.equal(ctx.byId.nc_dir.value, "/muse");
+  assert.equal(ctx.byId.nc_effort.value, "medium");
+  release({
+    claude: { models: ["opus"] },
+    muse: {
+      models: ["synth-std", "synth-disc"],
+      muse_models: [MUSE_STD, MUSE_DISC],
+    },
+  });
+  await settle();
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "synth-disc");
+  assert.match(ctx.byId.nc_model.innerHTML, /Synth Discounted \u2014 Discounted/);
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+  assert.equal(ctx.byId.nc_dir.value, "/muse");
+  assert.equal(ctx.byId.nc_effort.value, "medium");
+  ctx.byId.nc_title.value = "Fork";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  assert.ok(post);
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.agent, "muse");
+  assert.equal(body.model, "synth-disc");
+  assert.equal(body.parent, "muse1");
+  assert.equal("tier" in body, false);
+  assert.equal("label" in body, false);
+  assert.equal("launchable" in body, false);
+});
+
+test("delayed probe does not insert a stale inherited Muse model", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature({
+    nodes: { muse1: museParentNode("muse1", "retired-id") },
+  });
+  ctx.setApi(async path => path === "/api/agents" ? pending : {});
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("x", "muse1");
+  release({
+    claude: { models: ["opus"] },
+    muse: { models: ["synth-std"], muse_models: [MUSE_STD, MUSE_UNK] },
+  });
+  await settle();
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /retired-id/);
+  assert.notEqual(ctx.byId.nc_model.value, "retired-id");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+});
+
+test("delayed probe with no Standard default leaves Muse selected but blocks submit", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature({
+    nodes: { muse1: museParentNode("muse1", "retired-id") },
+  });
+  ctx.setApi(async (path, opts = {}) => {
+    ctx.apiCalls.push({ path, opts });
+    if (path === "/api/agents") return pending;
+    if (path === "/api/nodes") return { id: "nope" };
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("x", "muse1");
+  release({
+    claude: { models: ["opus"] },
+    muse: { models: ["synth-disc"], muse_models: [MUSE_DISC, MUSE_UNK] },
+  });
+  await settle();
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "");
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  assert.equal(ctx.apiCalls.some(c => c.path === "/api/nodes"), false);
+  assert.equal(ctx.byId.nc_model.attributes["aria-invalid"], "true");
+});
+
+test("delayed probe does not reopen a closed sheet or clobber a newer fork", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature({
+    nodes: {
+      muse1: museParentNode("muse1", "synth-disc"),
+      muse2: { ...museParentNode("muse2", "synth-std"), title: "Other", dir: "/other" },
+    },
+  });
+  ctx.setApi(async path => path === "/api/agents" ? pending : {});
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("first", "muse1");
+  ctx.feature.closeSheets();
+  assert.equal(ctx.byId.newchat.classList.contains("open"), false);
+  ctx.feature.forkFromTurn("second", "muse2");
+  assert.equal(ctx.byId.nc_dir.value, "/other");
+  release({
+    claude: { models: ["opus"] },
+    muse: { models: ["synth-std", "synth-disc"], muse_models: [MUSE_STD, MUSE_DISC] },
+  });
+  await settle();
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  assert.equal(ctx.byId.nc_dir.value, "/other");
+  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
+});
+
+test("fresh Muse activity after closing a Discounted selection restores the Standard default", async () => {
+  const ctx = createFeature({
+    agentsPayload: {
+      muse: { models: ["synth-std", "synth-disc"], muse_models: [MUSE_STD, MUSE_DISC] },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  ctx.byId.nc_model.value = "synth-disc";
+  ctx.byId.nc_model.dispatch("change");
+  assert.equal(ctx.byId.nc_model.value, "synth-disc");
+  ctx.feature.closeSheets();
+  ctx.byId.plusbtn.dispatch("click");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  assert.notEqual(ctx.byId.nc_model.value, "synth-disc");
+});
+
+test("openNewActivity send-to entry also restores the Standard default", async () => {
+  const ctx = createFeature({
+    agentsPayload: {
+      muse: { models: ["synth-std", "synth-disc"], muse_models: [MUSE_STD, MUSE_DISC] },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.feature.openNewActivity({ prompt: "from send-to", focusTitle: true });
+  ctx.byId.nc_model.value = "synth-disc";
+  ctx.feature.closeSheets();
+  ctx.feature.openNewActivity({ prompt: "again" });
+  assert.equal(ctx.byId.nc_prompt.value, "again");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+});
+
+test("delayed catalog on an open fresh form selects Standard, not Discounted", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature();
+  ctx.setApi(async path => path === "/api/agents" ? pending : {});
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  release({
+    muse: { models: ["synth-std", "synth-disc"], muse_models: [MUSE_STD, MUSE_DISC] },
+  });
+  await settle();
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "synth-std");
+  ctx.byId.nc_model.value = "synth-disc";
+  ctx.byId.nc_model.dispatch("change");
+  assert.equal(ctx.byId.nc_model.value, "synth-disc",
+    "an explicit live choice on the same open form is kept");
+});
+
+test("fresh Muse with no Standard default stays empty rather than Discounted", async () => {
+  const ctx = createFeature({
+    agentsPayload: {
+      muse: { models: ["synth-disc"], muse_models: [MUSE_DISC] },
+    },
+  });
+  ctx.feature.bind();
+  await settle();
+  ctx.byId.plusbtn.dispatch("click");
+  assert.equal(ctx.byId.nc_model.value, "");
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  assert.equal(ctx.apiCalls.some(c => c.path === "/api/nodes"), false);
+});
+
+test("delayed probe while closed updates catalogs without leaking hidden Muse selection", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature({
+    nodes: { muse1: museParentNode("muse1", "synth-disc") },
+  });
+  ctx.setApi(async path => path === "/api/agents" ? pending : {});
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("x", "muse1");
+  ctx.feature.closeSheets();
+  release({
+    muse: { models: ["synth-std", "synth-disc"], muse_models: [MUSE_STD, MUSE_DISC] },
+  });
+  await settle();
+  assert.equal(ctx.byId.newchat.classList.contains("open"), false);
+  ctx.feature.openNewActivity();
+  assert.equal(ctx.byId.nc_agent.value, "muse");
+  assert.equal(ctx.byId.nc_model.value, "synth-std",
+    "fresh open after a closed delayed probe must use the Standard default");
+  assert.notEqual(ctx.byId.nc_model.value, "synth-disc");
 });

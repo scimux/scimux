@@ -103,6 +103,10 @@ export function harnessState(row, latest){
       note: "installed, but it did not report a version" };
   }
   if (!r.launchable){
+    if (r.agent === "muse"){
+      return { agent: r.agent, state: "unlaunchable", version,
+        note: "installed, but Muse model policy is unavailable — scimux cannot launch it" };
+    }
     const bin = LAUNCH_BIN[r.agent] || r.agent;
     return { agent: r.agent, state: "unlaunchable", version,
       note: `installed, but ${bin} is missing — scimux cannot launch it` };
@@ -125,6 +129,106 @@ export function harnessState(row, latest){
  * both states name what is spent. The off text says what turning it on would
  * cost; the on text says what is being spent now.
  */
+/* Computer-owned settings flags are JSON booleans. Anything else — missing,
+   stringly, numeric — is off, matching the server's own degrade direction. */
+export function computerSettingOn(v){
+  return v === true;
+}
+
+const CLAUDE_USAGE_KEY = "claude_usage_checks";
+const MUSE_CONSENT_KEY = "muse_approval_judge_consent";
+
+function settingsSnapshot(s){
+  return {
+    claude_usage_checks: !!s.claude_usage_checks,
+    muse_approval_judge_consent: !!s.muse_approval_judge_consent,
+  };
+}
+
+function flagFrom(raw, key){
+  if (!raw || typeof raw !== "object" || !(key in raw)) return false;
+  return computerSettingOn(raw[key]);
+}
+
+/**
+ * Computer-owned settings read/write. Injected read/write/render; no DOM.
+ * Operations run FIFO. Confirmed server state is the only thing rendered.
+ */
+export function createSettingsController(deps = {}){
+  const read = typeof deps.read === "function" ? deps.read : async () => ({});
+  const write = typeof deps.write === "function" ? deps.write : async () => ({});
+  const render = typeof deps.render === "function" ? deps.render : () => {};
+  let confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false };
+  let tail = Promise.resolve();
+
+  function snapshot(){
+    return settingsSnapshot(confirmed);
+  }
+
+  function paint(){
+    render(snapshot());
+  }
+
+  function applyRead(raw){
+    confirmed = {
+      claude_usage_checks: computerSettingOn(raw && raw[CLAUDE_USAGE_KEY]),
+      muse_approval_judge_consent: computerSettingOn(raw && raw[MUSE_CONSENT_KEY]),
+    };
+  }
+
+  function applyWrite(changedKey, raw){
+    confirmed[changedKey] = flagFrom(raw, changedKey);
+    const other = changedKey === MUSE_CONSENT_KEY ? CLAUDE_USAGE_KEY : MUSE_CONSENT_KEY;
+    if (raw && typeof raw === "object" && other in raw)
+      confirmed[other] = computerSettingOn(raw[other]);
+  }
+
+  function enqueue(work){
+    const run = tail.then(() => work(), () => work());
+    tail = run.then(() => {}, () => {});
+    return run.then(s => s, () => snapshot());
+  }
+
+  function load(){
+    return enqueue(async () => {
+      try {
+        const s = await read();
+        applyRead(s);
+      } catch {
+        confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false };
+      }
+      paint();
+      return snapshot();
+    });
+  }
+
+  function put(changedKey, want){
+    paint();
+    const body = { [changedKey]: !!want };
+    return enqueue(async () => {
+      try {
+        const s = await write({ [changedKey]: body[changedKey] });
+        applyWrite(changedKey, s);
+      } catch { /* keep last confirmed */ }
+      paint();
+      return snapshot();
+    });
+  }
+
+  return {
+    load,
+    setMuseConsent(want){ return put(MUSE_CONSENT_KEY, want); },
+    setClaudeUsage(want){ return put(CLAUDE_USAGE_KEY, want); },
+    getState(){ return snapshot(); },
+  };
+}
+
+export function museConsentNote(on){
+  return on
+    ? "On — Muse's approval judge may spend subscription tokens. Approval requests remain notification-only."
+    : "Off — Muse launch is blocked on this computer. Enabling it permits Muse's approval judge to spend subscription tokens.";
+}
+
 export function usageCheckNote(on){
   return on
     ? "On — one small check (~900 tokens) every 15 minutes, and only while " +
@@ -155,7 +259,8 @@ function harnessDisplayOrder(rows){
  * `assetURL` supplier, which only the shell has, and a module that reached for
  * it directly would break under the bootstrap loader. `deps.usageChecks` is
  * the stored consent (`claude_usage_checks`), rendered as a switch on the one
- * row it governs.
+ * row it governs. `deps.museConsent` is `muse_approval_judge_consent`,
+ * rendered only on a present Muse row.
  */
 export function harnessRowsHTML(rows, latest, deps = {}){
   const list = Array.isArray(rows) ? rows : [];
@@ -164,7 +269,8 @@ export function harnessRowsHTML(rows, latest, deps = {}){
   }
   const answers = latest || {};
   const agentLogo = typeof deps.agentLogo === "function" ? deps.agentLogo : () => "";
-  const usageOn = !!deps.usageChecks;
+  const usageFlag = !!deps.usageChecks;
+  const museFlag = computerSettingOn(deps.museConsent);
   return harnessDisplayOrder(list).map(row => {
     const s = harnessState(row, answers[row && row.agent]);
     const name = usageAgentDisplayName(s.agent);
@@ -174,15 +280,26 @@ export function harnessRowsHTML(rows, latest, deps = {}){
        pairing could actually complete. */
     const usage = (s.agent === "claude" && row && row.present)
       ? `<label class="hswitch"><input type="checkbox" data-usage-check="claude"` +
-        `${usageOn ? " checked" : ""}> Check usage</label>` +
-        `<span class="hnote">${esc(usageCheckNote(usageOn))}</span>`
+        `${usageFlag ? " checked" : ""}> Check usage</label>` +
+        `<span class="hnote">${esc(usageCheckNote(usageFlag))}</span>`
       : "";
+    let museConsent = "";
+    if (s.agent === "muse"){
+      if (row && row.present){
+        museConsent = `<label class="hswitch"><input type="checkbox" data-muse-consent="muse"` +
+          `${museFlag ? " checked" : ""}> Approval-judge consent</label>` +
+          `<span class="hnote">${esc(museConsentNote(museFlag))}</span>`;
+      } else {
+        museConsent = `<span class="hnote">${esc(museConsentNote(false))}</span>`;
+      }
+    }
     return `<div class="item" data-agent="${esc(s.agent || "")}" data-state="${esc(s.state)}">` +
       `<span><span class="agent-logo" aria-hidden="true">${agentLogo(s.agent)}</span> ${esc(name)}</span>` +
       `<span class="tag hver">${tag}</span>` +
       (s.note ? `<span class="hnote">${esc(s.note)}</span>` : "") +
       harnessTermsHTML(s.agent) +
       usage +
+      museConsent +
       `</div>`;
   }).join("");
 }

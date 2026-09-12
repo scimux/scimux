@@ -74,6 +74,7 @@ export function usageAgentDisplayName(agent){
   if (agent === "codex") return "Codex";
   if (agent === "claude") return "Claude";
   if (agent === "grok") return "Grok";
+  if (agent === "muse") return "Muse";
   return String(agent || "");
 }
 

@@ -104,6 +104,7 @@
       </div>
     </div>
     <div id="gauge" hidden><i id="gaugefill"></i></div>
+    <div id="muse_chat_warn" class="nc-hint" hidden></div>
     <div id="msgwrap">
       <div id="msgs"><div class="empty">Pick an activity, or start one with +</div></div>
       <!-- the scrim is a sibling, never the spinner's parent: see chat.css -->
@@ -303,6 +304,7 @@
     <div><label>model</label><select id="nc_model"></select></div>
     <div><label>effort</label><select id="nc_effort"><option value=""></option></select></div>
   </div>
+  <div id="nc_muse_warn" class="nc-hint" hidden></div>
   <div class="sect nc-create-only">
     <div class="k">Working directory <span class="opt">&#8212; optional, defaults to home</span></div>
     <input id="nc_dir" placeholder="/path/to/experiment">
@@ -429,7 +431,7 @@
        The new-activity dialog offers models, so it cannot say that a harness
        is installed-but-old; drift is what explains an agent that started
        behaving differently. The upstream check is a separate tap for the same
-       reason as the scimux one: opening a menu must not call five registries. -->
+       reason as the scimux one: opening a menu must not call six registries. -->
   <div class="sect">
     <div class="k">Agent harnesses</div>
     <div id="m_harnesses"></div>

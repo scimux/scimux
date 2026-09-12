@@ -93,6 +93,11 @@ export const SCROLL_NEAR_BOTTOM_PX = 80;
 export const CHAT_LOAD_DELAY_MS = 300;
 export const CHAT_DETAIL_SAVED_MS = 2000;
 export const PENDING_JUMP_TTL_MS = 15000;
+export const MUSE_SUPERVISION_WARNING =
+  "Muse supervision warning: approvals are notification-only; silence does not mean the agent is held.";
+export const MUSE_SCHEMA_MISMATCH_WARNING =
+  "Muse protocol compatibility warning: its schema fingerprint differs from the version scimux tested.";
+export const MUSE_SCHEMA_MISMATCH_CODE = "muse_schema_fingerprint_mismatch";
 
 /* Exact client twin of the server's inlineImageTypes allowlist: only these
    raster extensions preview as <img>. Recorded MIME is never consulted. */
@@ -1357,8 +1362,31 @@ export function createChatFeature(deps){
 
   function invalidate(){ chatSig = ""; }
 
+  function museChatWarnHost(){
+    if (roots.muse_chat_warn) return roots.muse_chat_warn;
+    if (doc && typeof doc.getElementById === "function")
+      return doc.getElementById("muse_chat_warn");
+    return null;
+  }
+
+  function syncMuseChatWarning(n){
+    const host = museChatWarnHost();
+    if (!host) return;
+    if (!n || n.agent !== "muse"){
+      host.hidden = true;
+      host.textContent = "";
+      return;
+    }
+    let text = MUSE_SUPERVISION_WARNING;
+    if (n && n.muse_schema_warning === MUSE_SCHEMA_MISMATCH_CODE)
+      text += "\n\n" + MUSE_SCHEMA_MISMATCH_WARNING;
+    host.textContent = text;
+    host.hidden = false;
+  }
+
   function onSelectChange(){
     chatSig = "";
+    syncMuseChatWarning(nodeById(g("sel", "")));
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
     chatETag = { node: "", etag: "" };
     lastAutoView = null;
@@ -1430,6 +1458,7 @@ export function createChatFeature(deps){
         details.setAttribute("aria-hidden", details.hidden ? "true" : "false");
     }
     const n = nodeById(g("sel", ""));
+    syncMuseChatWarning(n);
     const now = typeof d.now === "function" ? d.now() : Date.now();
     const saving = editingChatDesc || now < chatDetailSavedUntil;
     if (toggle) toggle.hidden = !n || (!chatDetailsOpen && !saving);
@@ -1465,7 +1494,8 @@ export function createChatFeature(deps){
       chatagentlogo.title = n.agent || "agent";
     }
     const ctx = chatCtxPct.node === n.id && chatCtxPct.pct != null
-      ? `context ${Math.round(chatCtxPct.pct)}%` : "";
+      ? `context ${Math.round(chatCtxPct.pct)}%`
+      : (n.agent === "muse" ? "context unknown" : "");
     if (chatmeta)
       chatmeta.textContent = [n.agent || "agent", n.model || "default", n.effort || "", ctx].filter(Boolean).join(" · ");
     const desc = n.description || n.prompt || "";
@@ -1752,8 +1782,9 @@ export function createChatFeature(deps){
       if (gen !== g("selGen", 0) || g("sel", "") !== n.id) return;
     }
 
+    const windowKnown = Number(data.ctx_window) > 0;
     if (gauge){
-      if (data.ctx_window){
+      if (windowKnown){
         gauge.hidden = false;
         if (gaugefill){
           gaugefill.style.width = Math.min(100, data.ctx_pct || 0) + "%";
@@ -1763,7 +1794,7 @@ export function createChatFeature(deps){
         gauge.hidden = true;
       }
     }
-    const pct = data.ctx_window ? Math.min(100, data.ctx_pct || 0) : null;
+    const pct = windowKnown ? Math.min(100, data.ctx_pct || 0) : null;
     if (chatCtxPct.node !== n.id || chatCtxPct.pct !== pct){
       chatCtxPct = { node: n.id, pct };
       renderChatHead();

@@ -113,16 +113,37 @@ export function cloneDefaultModels(){
   return out;
 }
 
-/* Apply /api/agents payload into mutable catalogs. Empty/null payload is a no-op. */
+function normalizeMuseModels(raw){
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const row of raw){
+    if (!row || typeof row !== "object") continue;
+    if (typeof row.id !== "string") continue;
+    const id = row.id.trim();
+    if (!id) continue;
+    const copy = { id, launchable: row.launchable, tier: row.tier };
+    if (typeof row.label === "string") copy.label = row.label;
+    if (row.default === true) copy.default = true;
+    out.push(copy);
+  }
+  return out;
+}
+
+/* Apply /api/agents payload into mutable catalogs. Empty/null payload is a no-op.
+   Structured Muse rows stay on the return value — never as keys of `models`,
+   which would make metadata or model ids appear as agents. */
 export function applyAgentsProbe(models, modelEfforts, payload){
-  if (!payload || !Object.keys(payload).length) return { models, modelEfforts, changed: false };
+  if (!payload || !Object.keys(payload).length)
+    return { models, modelEfforts, changed: false, museModels: [] };
   for (const k of Object.keys(models)) delete models[k];
   for (const k of Object.keys(modelEfforts)) delete modelEfforts[k];
+  let museModels = [];
   for (const [agent, info] of Object.entries(payload)){
     models[agent] = ["", ...((info && info.models) || [])];
     modelEfforts[agent] = (info && info.efforts) || {};
+    if (agent === "muse") museModels = normalizeMuseModels(info && info.muse_models);
   }
-  return { models, modelEfforts, changed: true };
+  return { models, modelEfforts, changed: true, museModels };
 }
 
 export function agentOptionsHTML(models, esc = escDefault){
@@ -140,6 +161,48 @@ export function modelOptionsHTML(models, agent, parent, esc = escDefault){
   const dflt = modelDefaultLabel(agent, parent, esc);
   return (models[agent] || [""]).map(m =>
     `<option value="${esc(m)}">${esc(m) || dflt}</option>`).join("");
+}
+
+/* Muse options are server-owned structured rows. Tier is never inferred from
+   id, label, limits, order, or the legacy string `models` list. */
+export function museModelSelectable(row){
+  return !!(row
+    && typeof row.id === "string" && row.id
+    && row.launchable === true
+    && (row.tier === "standard" || row.tier === "discounted"));
+}
+
+export function museFreshDefaultId(rows){
+  if (!Array.isArray(rows)) return "";
+  for (const row of rows){
+    if (row && row.default === true && museModelSelectable(row) && row.tier === "standard")
+      return row.id;
+  }
+  return "";
+}
+
+function museTierSuffix(tier){
+  if (tier === "standard") return " \u2014 Standard";
+  if (tier === "discounted") return " \u2014 Discounted";
+  return " \u2014 tier unavailable";
+}
+
+export function museActivityWarningText(){
+  return "Muse approvals are notification-only. scimux cannot guarantee that work is held while you decide.\n\n"
+    + "Muse's approval judge may spend your subscription tokens.";
+}
+
+export function museModelOptionsHTML(rows, esc = escDefault){
+  const list = Array.isArray(rows) ? rows : [];
+  let html = `<option value=""></option>`;
+  for (const row of list){
+    if (!row || typeof row !== "object") continue;
+    if (typeof row.id !== "string" || !row.id) continue;
+    const label = (typeof row.label === "string" && row.label.trim()) ? row.label : row.id;
+    const disabled = museModelSelectable(row) ? "" : " disabled";
+    html += `<option value="${esc(row.id)}"${disabled}>${esc(label)}${museTierSuffix(row.tier)}</option>`;
+  }
+  return html;
 }
 
 /* Prefer per-model discovered menu; else static per-agent; else common three. */
@@ -332,9 +395,11 @@ export function createSheetsFeature(deps = {}){
   const EFFORTS = { ...DEFAULT_EFFORTS };
   for (const k of Object.keys(EFFORTS)) EFFORTS[k] = EFFORTS[k].slice();
   const MODEL_EFFORTS = {};
+  let MUSE_MODELS = [];
 
   let ncParent = "";
   let ncRationale = "";
+  let ncMuseInherit = false;
   let ncEdit = "";
   let ncEditStop = "";
   let newActivitySubmitting = false;
@@ -468,18 +533,69 @@ export function createSheetsFeature(deps = {}){
     fieldErrorCleanups.add(clear);
   }
 
+  function syncMuseActivityWarning(){
+    const warn = root("nc_muse_warn");
+    if (!warn) return;
+    const agentEl = root("nc_agent");
+    const muse = !!(agentEl && agentEl.value === "muse");
+    warn.hidden = !muse;
+    warn.textContent = muse ? museActivityWarningText() : "";
+  }
+
   function fillAgents(){
     const ag = root("nc_agent");
     if (ag) ag.innerHTML = agentOptionsHTML(MODELS, esc);
   }
 
-  function fillModels(){
+  function museRowById(id){
+    if (!id) return null;
+    return MUSE_MODELS.find(r => r && r.id === id) || null;
+  }
+
+  function applyMuseModelValue(mo, { prev = "", preserveSelection = false } = {}){
+    const p = nodeById(ncParent);
+    const inherited = ncMuseInherit && p && p.agent === "muse" ? (p.model || "") : "";
+    if (preserveSelection && prev && museModelSelectable(museRowById(prev))){
+      mo.value = prev;
+      return;
+    }
+    if (inherited && museModelSelectable(museRowById(inherited))){
+      mo.value = inherited;
+      return;
+    }
+    mo.value = museFreshDefaultId(MUSE_MODELS) || "";
+  }
+
+  function fillModels(opts = {}){
     const mo = root("nc_model");
     if (!mo) return;
+    const prev = mo.value;
     const agentEl = root("nc_agent");
     const agent = agentEl ? agentEl.value : "";
     const p = nodeById(ncParent);
-    mo.innerHTML = modelOptionsHTML(MODELS, agent, p, esc);
+    if (agent === "muse"){
+      mo.innerHTML = museModelOptionsHTML(MUSE_MODELS, esc);
+      applyMuseModelValue(mo, { prev, preserveSelection: !!opts.preserveSelection });
+    } else {
+      mo.innerHTML = modelOptionsHTML(MODELS, agent, p, esc);
+    }
+    syncMuseActivityWarning();
+  }
+
+  function newchatIsOpen(){
+    const sheet = root("newchat");
+    return !!(sheet && sheet.classList && sheet.classList.contains("open"));
+  }
+
+  function applyOpenSheetAfterCatalog(){
+    const live = !ncEdit && newchatIsOpen();
+    const ag = root("nc_agent");
+    const prevAgent = live && ag ? ag.value : "";
+    fillAgents();
+    if (live && ag && prevAgent && Object.prototype.hasOwnProperty.call(MODELS, prevAgent))
+      ag.value = prevAgent;
+    fillModels({ preserveSelection: live });
+    fillEfforts();
   }
 
   function fillEfforts(){
@@ -512,7 +628,8 @@ export function createSheetsFeature(deps = {}){
       }
       fillModels(); fillEfforts();   /* model + effort lists follow the (possibly re-set) agent */
       const mo = root("nc_model");
-      if (mo){
+      const agentNow = ag ? ag.value : "";
+      if (mo && agentNow !== "muse"){
         if (p.model && ![...mo.options].some(o => o.value === p.model))
           if (typeof mo.insertAdjacentHTML === "function")
             mo.insertAdjacentHTML("beforeend", `<option value="${esc(p.model)}">${esc(p.model)}</option>`);
@@ -543,6 +660,7 @@ export function createSheetsFeature(deps = {}){
       el.disabled = false;
       if (el.dataset) delete el.dataset.sheetDisabledByClose;
     }
+    syncMuseActivityWarning();
   }
 
   function prepareNewActivityLane(){
@@ -614,6 +732,7 @@ export function createSheetsFeature(deps = {}){
   function forkFromTurn(text, parent){
     const sel = typeof d.sel === "function" ? d.sel() : "";
     ncParent = parent || sel;
+    ncMuseInherit = !!(nodeById(ncParent) && nodeById(ncParent).agent === "muse");
     ncRationale = forkRationaleFromTurn(text);
     setNewActivitySubmitting(false);
     seedForkTitle(text);
@@ -629,6 +748,7 @@ export function createSheetsFeature(deps = {}){
     if (!n) return;
     ncEdit = ""; ncEditStop = "";
     ncParent = id;
+    ncMuseInherit = n.agent === "muse";
     ncRationale = n.title || "";
     setNewActivitySubmitting(false);
     resetCreateChrome();
@@ -670,6 +790,7 @@ export function createSheetsFeature(deps = {}){
      listener — the Event would be destructured as options; use () => openNewActivity(). */
   function openNewActivity({ prompt = "", focusTitle = false } = {}){
     ncParent = ""; ncRationale = ""; ncEdit = ""; ncEditStop = "";
+    ncMuseInherit = false;
     resetCreateChrome();
     setNewActivitySubmitting(false);
     const title = root("nc_title");
@@ -717,6 +838,7 @@ export function createSheetsFeature(deps = {}){
     clearFieldError(root("nc_prompt"));
     clearFieldError(root("nc_dir"));
     clearFieldError(root("nc_lane"));
+    clearFieldError(root("nc_model"));
     const titleEl = root("nc_title");
     const promptEl = root("nc_prompt");
     const title = (titleEl && titleEl.value || "").trim();
@@ -794,11 +916,21 @@ export function createSheetsFeature(deps = {}){
         lane.scrollIntoView({ block: "center" });
       return;
     }
+    const agent = root("nc_agent") ? root("nc_agent").value : "";
+    const model = root("nc_model") ? root("nc_model").value : "";
+    if (agent === "muse" && !museModelSelectable(museRowById(model))){
+      const mo = root("nc_model");
+      fieldError(mo, "No launchable Standard Muse model is selected. Pick a Standard or Discounted row.");
+      if (mo && typeof mo.focus === "function") mo.focus();
+      if (mo && typeof mo.scrollIntoView === "function")
+        mo.scrollIntoView({ block: "center" });
+      return;
+    }
     const payload = buildCreatePayload({
       title,
       description,
-      agent: root("nc_agent") ? root("nc_agent").value : "",
-      model: root("nc_model") ? root("nc_model").value : "",
+      agent,
+      model,
       effort: root("nc_effort") ? root("nc_effort").value : "",
       dir: root("nc_dir") ? root("nc_dir").value : "",
       parent: ncParent,
@@ -902,8 +1034,16 @@ export function createSheetsFeature(deps = {}){
     }
   }
 
-  function onAgentChange(){ fillModels(); fillEfforts(); }
-  function onModelChange(){ fillEfforts(); }
+  function onAgentChange(){
+    ncMuseInherit = false;
+    const mo = root("nc_model");
+    if (mo) mo.value = "";
+    fillModels(); fillEfforts();
+  }
+  function onModelChange(){
+    fillEfforts();
+    syncMuseActivityWarning();
+  }
 
   function probeAgents(){
     if (probed || !api) return;
@@ -912,7 +1052,10 @@ export function createSheetsFeature(deps = {}){
     Promise.resolve(api("/api/agents")).then(j => {
       if (!bound || generation !== probeGeneration) return;
       const r = applyAgentsProbe(MODELS, MODEL_EFFORTS, j);
-      if (r.changed){ fillAgents(); fillModels(); fillEfforts(); }
+      if (r.changed){
+        MUSE_MODELS = Array.isArray(r.museModels) ? r.museModels : [];
+        applyOpenSheetAfterCatalog();
+      }
     }).catch(() => {});
   }
 
@@ -949,7 +1092,7 @@ export function createSheetsFeature(deps = {}){
     for (const clear of [...fieldErrorCleanups]) clear();
     fieldErrorCleanups.clear();
     /* strip any remaining fielderr nodes under owned sheets */
-    for (const id of ["nc_title", "nc_prompt", "nc_dir", "nc_lane", "nc_lane_new"])
+    for (const id of ["nc_title", "nc_prompt", "nc_dir", "nc_lane", "nc_lane_new", "nc_model"])
       clearFieldError(root(id));
   }
 

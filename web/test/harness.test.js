@@ -6,7 +6,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { harnessState, harnessRowsHTML, harnessCheckNote } from "../js/harness.js";
+import {
+  harnessState, harnessRowsHTML, harnessCheckNote,
+  museConsentNote, computerSettingOn, createSettingsController,
+} from "../js/harness.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
@@ -230,4 +233,567 @@ test("an absent harness still shows whose terms it would be under", () => {
      Codex is exactly the reader who wants the terms first. */
   const html = harnessRowsHTML([{ agent: "codex", present: false, launchable: false }], null);
   assert.match(html, /openai\.com\/policies\/terms-of-use/);
+});
+
+/* ---------- Phase 6: Muse approval-judge consent ---------- */
+
+test("computerSettingOn is true only for the boolean true", () => {
+  assert.equal(computerSettingOn(true), true);
+  assert.equal(computerSettingOn(false), false);
+  assert.equal(computerSettingOn(undefined), false);
+  assert.equal(computerSettingOn(null), false);
+  assert.equal(computerSettingOn(""), false);
+  assert.equal(computerSettingOn("true"), false);
+  assert.equal(computerSettingOn(1), false);
+  assert.equal(computerSettingOn({}), false);
+});
+
+test("museConsentNote names blocked launch, token spend, and notification-only", () => {
+  const off = museConsentNote(false);
+  assert.match(off, /^Off — /);
+  assert.match(off, /Muse launch is blocked on this computer/);
+  assert.match(off, /approval judge to spend subscription tokens/);
+  assert.doesNotMatch(off, /auto-approve|synchronous/i);
+
+  const on = museConsentNote(true);
+  assert.match(on, /^On — /);
+  assert.match(on, /approval judge may spend subscription tokens/);
+  assert.match(on, /notification-only/);
+  assert.doesNotMatch(on, /auto-approve|held while|synchronous/i);
+});
+
+test("only a present Muse row gets an active consent switch", () => {
+  const present = harnessRowsHTML([
+    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+  ], null, { museConsent: false, usageChecks: false });
+  assert.match(present, /data-muse-consent="muse"/);
+  assert.doesNotMatch(present, /data-muse-consent="claude"/);
+  assert.doesNotMatch(present, /data-muse-consent="muse"[^>]*checked/);
+  assert.match(present, /Muse launch is blocked/);
+
+  const on = harnessRowsHTML([
+    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+  ], null, { museConsent: true });
+  assert.match(on, /data-muse-consent="muse"[^>]*checked/);
+  assert.match(on, /notification-only/);
+
+  const absent = harnessRowsHTML([
+    { agent: "muse", present: false, launchable: false },
+  ], null, { museConsent: true });
+  assert.doesNotMatch(absent, /data-muse-consent/);
+  assert.doesNotMatch(absent, /<input type="checkbox"/);
+  assert.match(absent, /Muse launch is blocked|not installed/);
+});
+
+test("Muse consent is not coupled to auto-approve or Claude usage checks", () => {
+  const html = harnessRowsHTML([
+    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+  ], null, { museConsent: true, usageChecks: false });
+  assert.match(html, /data-muse-consent="muse"[^>]*checked/);
+  assert.doesNotMatch(html, /data-usage-check="claude"[^>]*checked/);
+  assert.doesNotMatch(html, /auto-approve/i);
+  assert.doesNotMatch(harnessSrc, /auto-approve/);
+});
+
+test("six harness rows render alphabetically and Muse unlaunchable is policy, not a missing binary", () => {
+  const rows = [
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+    { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
+    { agent: "pi", present: false, launchable: false },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+    { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+  ];
+  const html = harnessRowsHTML(rows, null);
+  const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["claude", "codex", "grok", "muse", "opencode", "pi"]);
+  assert.equal((html.match(/class="item"/g) || []).length, 6);
+  const museState = harnessState(rows[5], null);
+  assert.equal(museState.state, "unlaunchable");
+  assert.match(museState.note, /Muse model policy is unavailable/);
+  assert.doesNotMatch(museState.note, /muse is missing|executable is missing/i);
+  assert.match(html, /Muse model policy is unavailable/);
+  assert.doesNotMatch(html, /muse is missing/);
+});
+
+test("absent Muse is not installed; omitted latest stays unchecked; no Meta terms", () => {
+  const absent = harnessState({ agent: "muse", present: false, launchable: false }, null);
+  assert.equal(absent.state, "absent");
+  assert.match(absent.note, /not installed/i);
+
+  const present = harnessState(
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" }, null);
+  assert.equal(present.state, "unchecked");
+  assert.doesNotMatch(present.note, /up to date/);
+
+  const html = harnessRowsHTML([
+    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+  ], {});
+  assert.doesNotMatch(html, /up to date/);
+  assert.doesNotMatch(html, /href="http/);
+  assert.doesNotMatch(html, /meta\.com|facebook\.com/i);
+  assert.doesNotMatch(indexSrc, /five registries/);
+  assert.doesNotMatch(appSrc, /five registries/);
+});
+
+test("app settings wiring reads and writes both computer-owned flags without clobbering", () => {
+  assert.match(appSrc, /from "\.\/harness\.js"/);
+  assert.match(appSrc, /createSettingsController/);
+  assert.match(appSrc, /data-muse-consent/);
+  assert.match(harnessSrc, /muse_approval_judge_consent/);
+  assert.match(harnessSrc, /claude_usage_checks/);
+  assert.doesNotMatch(harnessSrc, /document\.|innerHTML\s*=/);
+});
+
+function makeSettingsHarness(opts = {}){
+  const renders = [];
+  const writes = [];
+  const reads = [];
+  let readImpl = opts.read || (async () => ({}));
+  let writeImpl = opts.write || (async body => ({ ...body }));
+  const controller = createSettingsController({
+    read: async () => {
+      reads.push("read");
+      return readImpl();
+    },
+    write: async body => {
+      writes.push({ ...body });
+      return writeImpl(body);
+    },
+    render: state => { renders.push({
+      claude_usage_checks: !!state.claude_usage_checks,
+      muse_approval_judge_consent: !!state.muse_approval_judge_consent,
+    }); },
+  });
+  return {
+    controller, renders, writes, reads,
+    setRead(fn){ readImpl = fn; },
+    setWrite(fn){ writeImpl = fn; },
+    last(){ return renders[renders.length - 1]; },
+  };
+}
+
+async function micro(){
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+}
+
+test("settings read: booleans, missing, and malformed values fail closed", async () => {
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: true, muse_approval_judge_consent: true }),
+  });
+  await h.controller.load();
+  assert.deepEqual(h.last(), { claude_usage_checks: true, muse_approval_judge_consent: true });
+
+  const cases = [
+    { claude_usage_checks: false, muse_approval_judge_consent: false },
+    {},
+    { claude_usage_checks: "true", muse_approval_judge_consent: 1 },
+    { claude_usage_checks: null, muse_approval_judge_consent: [] },
+    { claude_usage_checks: {}, muse_approval_judge_consent: { on: true } },
+  ];
+  for (const raw of cases){
+    const c = makeSettingsHarness({ read: async () => raw });
+    await c.controller.load();
+    assert.deepEqual(c.last(), { claude_usage_checks: false, muse_approval_judge_consent: false }, JSON.stringify(raw));
+  }
+});
+
+test("settings read: failed read is both off, including after a previous true", async () => {
+  let impl = async () => ({ claude_usage_checks: true, muse_approval_judge_consent: true });
+  const h = makeSettingsHarness({ read: () => impl() });
+  await h.controller.load();
+  assert.equal(h.last().muse_approval_judge_consent, true);
+  impl = async () => { throw new Error("down"); };
+  await h.controller.load();
+  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false });
+});
+
+test("stale settings read cannot overwrite a newer result", async () => {
+  let release1, release2;
+  const pRead1 = new Promise(r => { release1 = r; });
+  const pRead2 = new Promise(r => { release2 = r; });
+  let n = 0;
+  const h = makeSettingsHarness({
+    read: () => { n++; return n === 1 ? pRead1 : pRead2; },
+  });
+  const p1 = h.controller.load();
+  const p2 = h.controller.load();
+  await micro();
+  assert.equal(n, 1, "the second read waits behind the first");
+  release1({ claude_usage_checks: true, muse_approval_judge_consent: true });
+  await p1;
+  await micro();
+  assert.equal(n, 2);
+  release2({ claude_usage_checks: false, muse_approval_judge_consent: false });
+  await p2;
+  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false });
+});
+
+test("Muse consent write sends only that field and follows the server response", async () => {
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: true, muse_approval_judge_consent: false }),
+    write: async body => ({ claude_usage_checks: true, ...body }),
+  });
+  await h.controller.load();
+  await h.controller.setMuseConsent(true);
+  assert.deepEqual(h.writes, [{ muse_approval_judge_consent: true }]);
+  assert.equal("claude_usage_checks" in h.writes[0], false);
+  assert.equal(h.last().muse_approval_judge_consent, true);
+  assert.equal(h.last().claude_usage_checks, true);
+});
+
+test("Muse consent write: missing/malformed field fails safe; failed write restores", async () => {
+  const h = makeSettingsHarness({
+    read: async () => ({ muse_approval_judge_consent: false, claude_usage_checks: true }),
+    write: async () => ({ ok: true }),
+  });
+  await h.controller.load();
+  await h.controller.setMuseConsent(true);
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  assert.equal(h.last().claude_usage_checks, true);
+
+  h.setWrite(async () => ({ muse_approval_judge_consent: "yes", claude_usage_checks: true }));
+  await h.controller.setMuseConsent(true);
+  assert.equal(h.last().muse_approval_judge_consent, false);
+
+  const confirmed = h.last();
+  h.setWrite(async () => { throw new Error("nope"); });
+  await h.controller.setMuseConsent(true);
+  assert.deepEqual(h.last(), confirmed);
+});
+
+test("Claude usage write sends only that field and does not clobber Muse", async () => {
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: true }),
+    write: async body => ({ muse_approval_judge_consent: true, ...body }),
+  });
+  await h.controller.load();
+  await h.controller.setClaudeUsage(true);
+  assert.deepEqual(h.writes, [{ claude_usage_checks: true }]);
+  assert.equal("muse_approval_judge_consent" in h.writes[0], false);
+  assert.equal(h.last().claude_usage_checks, true);
+  assert.equal(h.last().muse_approval_judge_consent, true);
+});
+
+test("overlapping settings writes are generation-guarded; stale true cannot land", async () => {
+  let releaseTrue, releaseFalse;
+  const trueP = new Promise(r => { releaseTrue = r; });
+  const falseP = new Promise(r => { releaseFalse = r; });
+  let n = 0;
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: false }),
+    write: async body => {
+      n++;
+      return n === 1 ? trueP : falseP;
+    },
+  });
+  await h.controller.load();
+  const pTrue = h.controller.setMuseConsent(true);
+  const pFalse = h.controller.setMuseConsent(false);
+  await micro();
+  assert.equal(n, 1, "second write waits behind the first");
+  releaseTrue({ muse_approval_judge_consent: true, claude_usage_checks: false });
+  await pTrue;
+  await micro();
+  assert.equal(n, 2);
+  releaseFalse({ muse_approval_judge_consent: false, claude_usage_checks: false });
+  await pFalse;
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  assert.equal(h.last().claude_usage_checks, false);
+});
+
+test("failed settings write does not become an unhandled rejection", async () => {
+  const h = makeSettingsHarness({
+    write: async () => { throw new Error("boom"); },
+  });
+  await h.controller.setClaudeUsage(true);
+  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false });
+});
+
+test("settings writes serialize: true then false ends false and invokes writes in order", async () => {
+  let release1, release2;
+  const w1 = new Promise(r => { release1 = r; });
+  const w2 = new Promise(r => { release2 = r; });
+  let n = 0;
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: false }),
+    write: async body => { n++; return n === 1 ? w1 : w2; },
+  });
+  await h.controller.load();
+  const pTrue = h.controller.setMuseConsent(true);
+  const pFalse = h.controller.setMuseConsent(false);
+  await micro();
+  assert.equal(n, 1);
+  assert.deepEqual(h.writes, [{ muse_approval_judge_consent: true }]);
+  assert.equal(h.controller.getState().muse_approval_judge_consent, false);
+  release1({ muse_approval_judge_consent: true });
+  await pTrue;
+  await micro();
+  assert.equal(n, 2);
+  assert.deepEqual(h.writes, [
+    { muse_approval_judge_consent: true },
+    { muse_approval_judge_consent: false },
+  ]);
+  release2({ muse_approval_judge_consent: false });
+  const snap = await pFalse;
+  assert.equal(snap.muse_approval_judge_consent, false);
+  assert.equal(h.controller.getState().muse_approval_judge_consent, false);
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  snap.muse_approval_judge_consent = true;
+  assert.equal(h.controller.getState().muse_approval_judge_consent, false);
+});
+
+test("settings writes serialize: false then true ends true", async () => {
+  let release1, release2;
+  const w1 = new Promise(r => { release1 = r; });
+  const w2 = new Promise(r => { release2 = r; });
+  let n = 0;
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: true }),
+    write: async () => { n++; return n === 1 ? w1 : w2; },
+  });
+  await h.controller.load();
+  const pFalse = h.controller.setMuseConsent(false);
+  const pTrue = h.controller.setMuseConsent(true);
+  await micro();
+  assert.equal(n, 1);
+  release1({ muse_approval_judge_consent: false });
+  await pFalse;
+  await micro();
+  assert.equal(n, 2);
+  release2({ muse_approval_judge_consent: true });
+  await pTrue;
+  assert.equal(h.controller.getState().muse_approval_judge_consent, true);
+  assert.equal(h.last().muse_approval_judge_consent, true);
+});
+
+test("cross-setting writes serialize Muse then Claude", async () => {
+  let releaseMuse, releaseClaude;
+  const museP = new Promise(r => { releaseMuse = r; });
+  const claudeP = new Promise(r => { releaseClaude = r; });
+  const started = [];
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: true }),
+    write: async body => {
+      started.push({ ...body });
+      return ("muse_approval_judge_consent" in body) ? museP : claudeP;
+    },
+  });
+  await h.controller.load();
+  const pMuse = h.controller.setMuseConsent(false);
+  const pClaude = h.controller.setClaudeUsage(true);
+  await micro();
+  assert.deepEqual(started, [{ muse_approval_judge_consent: false }]);
+  releaseMuse({ muse_approval_judge_consent: false, claude_usage_checks: false });
+  await pMuse;
+  await micro();
+  assert.deepEqual(started, [
+    { muse_approval_judge_consent: false },
+    { claude_usage_checks: true },
+  ]);
+  releaseClaude({ claude_usage_checks: true, muse_approval_judge_consent: false });
+  await pClaude;
+  assert.deepEqual(h.controller.getState(), {
+    claude_usage_checks: true,
+    muse_approval_judge_consent: false,
+  });
+});
+
+test("cross-setting writes serialize Claude then Muse", async () => {
+  let releaseClaude, releaseMuse;
+  const claudeP = new Promise(r => { releaseClaude = r; });
+  const museP = new Promise(r => { releaseMuse = r; });
+  const started = [];
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: true, muse_approval_judge_consent: false }),
+    write: async body => {
+      started.push({ ...body });
+      return ("claude_usage_checks" in body) ? claudeP : museP;
+    },
+  });
+  await h.controller.load();
+  const pClaude = h.controller.setClaudeUsage(false);
+  const pMuse = h.controller.setMuseConsent(true);
+  await micro();
+  assert.deepEqual(started, [{ claude_usage_checks: false }]);
+  releaseClaude({ claude_usage_checks: false, muse_approval_judge_consent: false });
+  await pClaude;
+  await micro();
+  assert.deepEqual(started, [
+    { claude_usage_checks: false },
+    { muse_approval_judge_consent: true },
+  ]);
+  releaseMuse({ claude_usage_checks: false, muse_approval_judge_consent: true });
+  await pMuse;
+  assert.deepEqual(h.controller.getState(), {
+    claude_usage_checks: false,
+    muse_approval_judge_consent: true,
+  });
+});
+
+test("a rejected queued write does not poison later writes", async () => {
+  let n = 0;
+  let release2;
+  const w2 = new Promise(r => { release2 = r; });
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: false }),
+    write: async body => {
+      n++;
+      if (n === 1) throw new Error("first failed");
+      return w2;
+    },
+  });
+  await h.controller.load();
+  const p1 = h.controller.setMuseConsent(true);
+  const p2 = h.controller.setMuseConsent(false);
+  const s1 = await p1;
+  assert.equal(s1.muse_approval_judge_consent, false);
+  await micro();
+  assert.equal(n, 2);
+  release2({ muse_approval_judge_consent: false });
+  const s2 = await p2;
+  assert.equal(s2.muse_approval_judge_consent, false);
+  assert.equal(h.controller.getState().muse_approval_judge_consent, false);
+});
+
+test("writes wait for a pending read; a later read waits for a pending write", async () => {
+  let releaseRead1, releaseRead2, releaseWrite;
+  const read1 = new Promise(r => { releaseRead1 = r; });
+  const read2 = new Promise(r => { releaseRead2 = r; });
+  const writeP = new Promise(r => { releaseWrite = r; });
+  let reads = 0, writes = 0;
+  const h = makeSettingsHarness({
+    read: async () => { reads++; return reads === 1 ? read1 : read2; },
+    write: async () => { writes++; return writeP; },
+  });
+  const pLoad = h.controller.load();
+  const pWrite = h.controller.setMuseConsent(true);
+  await micro();
+  assert.equal(reads, 1);
+  assert.equal(writes, 0);
+  releaseRead1({ claude_usage_checks: false, muse_approval_judge_consent: false });
+  await pLoad;
+  await micro();
+  assert.equal(writes, 1);
+  const pLoad2 = h.controller.load();
+  await micro();
+  assert.equal(reads, 1, "second read waits behind the in-flight write");
+  releaseWrite({ muse_approval_judge_consent: true });
+  await pWrite;
+  await micro();
+  assert.equal(reads, 2);
+  releaseRead2({ claude_usage_checks: false, muse_approval_judge_consent: true });
+  await pLoad2;
+  assert.equal(h.controller.getState().muse_approval_judge_consent, true);
+});
+
+test("failed read at queue head turns both off; a later write still runs", async () => {
+  let rejectRead, releaseWrite;
+  const readP = new Promise((_, rej) => { rejectRead = rej; });
+  const writeP = new Promise(r => { releaseWrite = r; });
+  let writes = 0;
+  const h = makeSettingsHarness({
+    read: async () => readP,
+    write: async body => { writes++; return writeP; },
+  });
+  const pLoad = h.controller.load();
+  const pWrite = h.controller.setMuseConsent(true);
+  await micro();
+  assert.equal(writes, 0);
+  rejectRead(new Error("down"));
+  await pLoad;
+  assert.deepEqual(h.controller.getState(), {
+    claude_usage_checks: false, muse_approval_judge_consent: false,
+  });
+  await micro();
+  assert.equal(writes, 1);
+  releaseWrite({ muse_approval_judge_consent: true });
+  await pWrite;
+  assert.equal(h.controller.getState().muse_approval_judge_consent, true);
+});
+
+test("admitting a Muse enable immediately repaints confirmed false", async () => {
+  let release;
+  const pending = new Promise(r => { release = r; });
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: false }),
+    write: async () => pending,
+  });
+  await h.controller.load();
+  const before = h.renders.length;
+  const p = h.controller.setMuseConsent(true);
+  assert.equal(h.controller.getState().muse_approval_judge_consent, false);
+  assert.ok(h.renders.length > before);
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  release({ muse_approval_judge_consent: true });
+  await p;
+  assert.equal(h.last().muse_approval_judge_consent, true);
+});
+
+test("admitting a Muse disable immediately repaints confirmed true", async () => {
+  let release;
+  const pending = new Promise(r => { release = r; });
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: true }),
+    write: async () => pending,
+  });
+  await h.controller.load();
+  const before = h.renders.length;
+  const p = h.controller.setMuseConsent(false);
+  assert.equal(h.controller.getState().muse_approval_judge_consent, true);
+  assert.ok(h.renders.length > before);
+  assert.equal(h.last().muse_approval_judge_consent, true);
+  release({ muse_approval_judge_consent: false });
+  await p;
+  assert.equal(h.last().muse_approval_judge_consent, false);
+});
+
+test("queued second write never renders its requested value before its response", async () => {
+  let release1, release2;
+  const w1 = new Promise(r => { release1 = r; });
+  const w2 = new Promise(r => { release2 = r; });
+  let n = 0;
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: false }),
+    write: async () => { n++; return n === 1 ? w1 : w2; },
+  });
+  await h.controller.load();
+  const p1 = h.controller.setMuseConsent(true);
+  const p2 = h.controller.setMuseConsent(true);
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  await micro();
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  release1({ muse_approval_judge_consent: true });
+  await p1;
+  assert.equal(h.last().muse_approval_judge_consent, true);
+  const p2admit = h.last();
+  await micro();
+  /* Second write is now in flight; still only server-confirmed true. */
+  assert.equal(h.controller.getState().muse_approval_judge_consent, true);
+  release2({ muse_approval_judge_consent: true });
+  await p2;
+  assert.equal(h.last().muse_approval_judge_consent, true);
+  assert.equal(p2admit.muse_approval_judge_consent, true);
+});
+
+test("rejected enable never renders enabled; rejected disable never renders disabled", async () => {
+  const h = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: false }),
+    write: async () => { throw new Error("no"); },
+  });
+  await h.controller.load();
+  await h.controller.setMuseConsent(true);
+  assert.equal(h.last().muse_approval_judge_consent, false);
+  assert.ok(h.renders.every(r => r.muse_approval_judge_consent === false));
+
+  const h2 = makeSettingsHarness({
+    read: async () => ({ claude_usage_checks: false, muse_approval_judge_consent: true }),
+    write: async () => { throw new Error("no"); },
+  });
+  await h2.controller.load();
+  await h2.controller.setMuseConsent(false);
+  assert.equal(h2.last().muse_approval_judge_consent, true);
+  assert.ok(h2.renders.every(r => r.muse_approval_judge_consent === true));
 });

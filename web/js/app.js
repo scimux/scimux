@@ -101,7 +101,7 @@ import {
   bookmarkClampState as bookmarkClampStateMod,
 } from "./bookmarks.js";
 import { createNotesFeature } from "./notes.js";
-import { harnessRowsHTML, harnessCheckNote } from "./harness.js";
+import { harnessRowsHTML, harnessCheckNote, createSettingsController } from "./harness.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
   makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
@@ -1851,23 +1851,31 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      `--version` once per process, so this is a cached answer and the panel is
      populated before the human reads down to it. The upstream check is a
      separate tap for the same reason the scimux one is: opening a menu must
-     not call five registries, and "up to date" is a claim only a check makes. */
-  let harnessRows = null, harnessLatest = null, usageChecks = false;
+     not call six registries, and "up to date" is a claim only a check makes. */
+  let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
   function renderHarnesses(){
     if (!harnessRows) return;
-    $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, { agentLogo, usageChecks });
+    $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, {
+      agentLogo, usageChecks, museConsent,
+    });
     const note = harnessCheckNote(harnessRows, harnessLatest);
     $("#m_hnote").textContent = note;
     $("#m_hnote").hidden = !note;
   }
+  const settingsCtl = createSettingsController({
+    read: () => api("/api/settings"),
+    write: body => api("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
+    render: state => {
+      usageChecks = !!state.claude_usage_checks;
+      museConsent = !!state.muse_approval_judge_consent;
+      renderHarnesses();
+    },
+  });
   async function loadHarnesses(){
-    /* The consent flag is re-read on every menu open even when the inventory
-       is already cached: it is the one value here another device can change,
+    /* Consent flags are re-read on every menu open even when the inventory
+       is already cached: they are the values here another device can change,
        and a switch showing the wrong state is worse than no switch. */
-    try {
-      const s = await api("/api/settings");
-      usageChecks = !!(s && s.claude_usage_checks);
-    } catch { /* unreadable settings read as off, like the server's own default */ }
+    await settingsCtl.load();
     if (!harnessRows){
       try {
         const d = await api("/api/harnesses");
@@ -1876,18 +1884,16 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     }
     renderHarnesses();
   }
-  /* The switch writes through and re-renders from the answer, never from the
-     checkbox: what the server stored is the only thing that gates a probe, so
-     a failed write must snap back rather than leave a lie on screen. */
-  $("#m_harnesses").addEventListener("change", async (e) => {
-    const box = e.target && e.target.closest ? e.target.closest("[data-usage-check]") : null;
-    if (!box) return;
-    const want = !!box.checked;
-    try {
-      const s = await api("/api/settings", { method: "PUT", body: JSON.stringify({ claude_usage_checks: want }) });
-      usageChecks = !!(s && s.claude_usage_checks);
-    } catch { /* keep the stored value; the re-render undoes the tap */ }
-    renderHarnesses();
+  /* Switches write through the tested controller and re-render from confirmed
+     server state, never from the checkbox. */
+  $("#m_harnesses").addEventListener("change", (e) => {
+    const usageBox = e.target && e.target.closest ? e.target.closest("[data-usage-check]") : null;
+    const museBox = e.target && e.target.closest ? e.target.closest("[data-muse-consent]") : null;
+    if (usageBox){
+      settingsCtl.setClaudeUsage(!!usageBox.checked);
+      return;
+    }
+    if (museBox) settingsCtl.setMuseConsent(!!museBox.checked);
   });
   $("#m_hcheck").addEventListener("click", async () => {
     const btn = $("#m_hcheck");

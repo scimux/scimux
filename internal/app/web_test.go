@@ -1673,3 +1673,126 @@ func TestReducedMotionAndModalNoPeek(t *testing.T) {
 		t.Error("the selected-note modal must take NO peek — it is a full-cover leaf, not a line pane")
 	}
 }
+
+// Phase 6: Muse consent and warning hosts are composed in the existing shell.
+func TestMusePhase6BrowserComposition(t *testing.T) {
+	html := mustReadIndex(t)
+	app := mustReadApp(t)
+	harness, err := os.ReadFile(webSourcePath("web/js/harness.js"))
+	if err != nil {
+		t.Fatalf("read harness.js: %v", err)
+	}
+	sheets, err := os.ReadFile(webSourcePath("web/js/sheets.js"))
+	if err != nil {
+		t.Fatalf("read sheets.js: %v", err)
+	}
+	chat, err := os.ReadFile(webSourcePath("web/js/chat.js"))
+	if err != nil {
+		t.Fatalf("read chat.js: %v", err)
+	}
+
+	if got := strings.Count(html, `id="nc_muse_warn"`); got != 1 {
+		t.Errorf("new-activity Muse warning host occurs %d times, want 1", got)
+	}
+	if got := strings.Count(html, `id="muse_chat_warn"`); got != 1 {
+		t.Errorf("chat Muse warning host occurs %d times, want 1", got)
+	}
+	msgsOpen := strings.Index(html, `<div id="msgs"`)
+	msgsClose := -1
+	if msgsOpen >= 0 {
+		msgsClose = strings.Index(html[msgsOpen:], "</div>")
+		if msgsClose >= 0 {
+			msgsClose += msgsOpen
+		}
+	}
+	chatWarn := strings.Index(html, `id="muse_chat_warn"`)
+	if msgsOpen >= 0 && msgsClose >= 0 && chatWarn > msgsOpen && chatWarn < msgsClose {
+		t.Error("#muse_chat_warn must sit outside #msgs so polling cannot erase it")
+	}
+	if chatWarn < 0 {
+		t.Error("#muse_chat_warn host is missing")
+	}
+
+	if !strings.Contains(app, `from "./harness.js"`) {
+		t.Error("app.js must import harness.js")
+	}
+	if !strings.Contains(app, "museConsentNote") && !strings.Contains(string(harness), "museConsentNote") {
+		t.Error("Muse consent copy must live in the tested harness module")
+	}
+	if !strings.Contains(app, "createSettingsController") {
+		t.Error("app.js must compose the tested createSettingsController for settings flags")
+	}
+	if !strings.Contains(app, "muse_approval_judge_consent") || !strings.Contains(app, "claude_usage_checks") {
+		t.Error("app.js settings wiring must name both computer-owned flags")
+	}
+	if !strings.Contains(string(sheets), "museModelOptionsHTML") || !strings.Contains(string(sheets), "museModelSelectable") {
+		t.Error("sheets.js must use tested Muse model helpers")
+	}
+	if !strings.Contains(string(sheets), "muse_models") {
+		t.Error("sheets.js must consume the literal field name muse_models")
+	}
+	if strings.Contains(string(sheets), `"muse" + "_models"`) || strings.Contains(string(sheets), `"muse"+"_models"`) {
+		t.Error("sheets.js must not conceal muse_models by concatenation")
+	}
+	if !strings.Contains(string(chat), "muse_chat_warn") && !strings.Contains(string(chat), "museChatWarn") {
+		t.Error("chat.js must own the Muse supervision warning host")
+	}
+	if !strings.Contains(string(chat), "muse_schema_warning") {
+		t.Error("chat.js must consume the literal field name muse_schema_warning")
+	}
+	if strings.Contains(string(chat), `"muse" + "_schema_warning"`) || strings.Contains(string(chat), `"muse"+"_schema_warning"`) {
+		t.Error("chat.js must not conceal muse_schema_warning by concatenation")
+	}
+
+	joined := app + string(harness) + string(sheets) + html
+	for _, banned := range []string{
+		`"llama-`,
+		"tierByModel",
+		"modelToTier",
+		"MUSE_TIER_BY_ID",
+		"five harnesses",
+		"five agents",
+		"five registries",
+	} {
+		if strings.Contains(joined, banned) {
+			t.Errorf("browser composition still contains %q", banned)
+		}
+	}
+}
+
+func TestMusePhase6Readme(t *testing.T) {
+	b, err := os.ReadFile(webSourcePath("README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	readme := string(b)
+	for _, want := range []string{
+		"Claude Code", "Codex", "pi", "opencode", "Grok", "Muse",
+		"muse serve",
+		"notification-only",
+		"cannot guarantee that work is held",
+		"approval judge",
+		"fail-closed",
+		"supplies no model access",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README.md missing %q", want)
+		}
+	}
+	if strings.Contains(readme, "five agents side by side") {
+		t.Error("README still promises five agents")
+	}
+	if !strings.Contains(readme, "six agents side by side") {
+		t.Error("README must keep the no-benchmark position with six agents")
+	}
+	for _, banned := range []string{
+		"developers.facebook.com",
+		"ai.meta.com",
+		"llama.com",
+		"meta.com/llama",
+	} {
+		if strings.Contains(readme, banned) {
+			t.Errorf("README must not guess Meta documentation links (%q)", banned)
+		}
+	}
+}
