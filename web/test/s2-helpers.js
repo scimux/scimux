@@ -36,6 +36,7 @@ export const AGENT_ASSET_PATHS = Object.freeze({
   pi: "/assets/agents/pi.svg",
   opencode: "/assets/agents/opencode.svg",
   grok: "/assets/agents/grok.svg",
+  muse: "/assets/agents/meta.svg",
 });
 
 export const TILE_NODE = "n1";
@@ -254,6 +255,7 @@ export function todayAgentLogoHTML() {
     pi: runAgentLogo("pi", identityAssetURL),
     opencode: runAgentLogo("opencode", identityAssetURL),
     grok: runAgentLogo("grok", identityAssetURL),
+    muse: runAgentLogo("muse", identityAssetURL),
   };
 }
 
@@ -331,6 +333,7 @@ export function exerciseLogos(assetURL) {
     pi: runAgentLogo("pi", assetURL),
     opencode: runAgentLogo("opencode", assetURL),
     grok: runAgentLogo("grok", assetURL),
+    muse: runAgentLogo("muse", assetURL),
   };
 }
 

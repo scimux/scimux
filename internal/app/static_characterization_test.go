@@ -53,6 +53,7 @@ func TestCharacterizationAgentAssets(t *testing.T) {
 	}{
 		{"/assets/agents/claude.svg", "web/assets/agents/claude.svg"},
 		{"/assets/agents/grok.svg", "web/assets/agents/grok.svg"},
+		{"/assets/agents/meta.svg", "web/assets/agents/meta.svg"},
 		{"/assets/agents/openai.svg", "web/assets/agents/openai.svg"},
 		{"/assets/agents/opencode.svg", "web/assets/agents/opencode.svg"},
 		{"/assets/agents/pi.svg", "web/assets/agents/pi.svg"},
@@ -110,7 +111,7 @@ func TestCharacterizationAssetDirectoryBehavior(t *testing.T) {
 	if agents.Code != http.StatusOK {
 		t.Fatalf("GET /assets/agents/ status = %d, want 200; body=%q", agents.Code, agents.Body.String())
 	}
-	for _, name := range []string{"claude.svg", "grok.svg", "openai.svg", "opencode.svg", "pi.svg"} {
+	for _, name := range []string{"claude.svg", "grok.svg", "meta.svg", "openai.svg", "opencode.svg", "pi.svg"} {
 		if !strings.Contains(agents.Body.String(), name) {
 			t.Fatalf("GET /assets/agents/ body missing %s: %q", name, agents.Body.String())
 		}
@@ -188,6 +189,7 @@ func assertNotIndexOrSVG(t *testing.T, path string, body []byte) {
 	for _, embedPath := range []string{
 		"web/assets/agents/claude.svg",
 		"web/assets/agents/grok.svg",
+		"web/assets/agents/meta.svg",
 		"web/assets/agents/openai.svg",
 		"web/assets/agents/opencode.svg",
 		"web/assets/agents/pi.svg",
