@@ -419,9 +419,10 @@ type webUpdateHandoff struct {
 
 // handleUpdateApply downloads the matching release asset, verifies it against
 // the release's SHA256SUMS, renames it over the installed binary, and prepares
-// a replacement web generation. The muxer and every harness process remain
-// alive. The post-response commit is separate because draining the old web
-// child from inside one of its own requests would deadlock.
+// a replacement web generation. The post-response commit activates that child
+// and requests an in-place muxer exec; every session worker remains alive. The
+// commit is separate because draining the old web child from inside one of its
+// own requests would deadlock.
 func (a *app) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	// The apply is pinned to the exact tag the check displayed. Without this the
 	// handler re-fetches "latest" and installs whatever it finds — so a release

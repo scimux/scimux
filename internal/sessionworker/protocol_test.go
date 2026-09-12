@@ -1,7 +1,9 @@
 package sessionworker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -229,6 +231,24 @@ func authenticatedRequest(t *testing.T, client *Client, method, path, body strin
 	return resp
 }
 
+func probeHello(ctx context.Context, link Link, major, minor int) (int, error) {
+	c, err := NewClient(link)
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	req, err := c.request(ctx, http.MethodGet, "/v1/hello", nil, major, minor)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 func TestProtocolRejectsMalformedBoundedAndTrailingRequests(t *testing.T) {
 	h := &protocolHarness{}
 	server, err := Listen("", Identity{WorkerID: "w", Agent: "pi"}, h)
@@ -405,13 +425,67 @@ func TestClientRejectsMalformedResponsesAndHelloMismatch(t *testing.T) {
 }
 
 func TestCurrentCapabilitiesReturnsIndependentCopy(t *testing.T) {
-	if maxBody <= 1<<20 {
-		t.Fatal("worker envelope cannot carry a maximum-size public prompt plus recovery metadata")
-	}
 	first := CurrentCapabilities()
 	first[0] = "mutated"
 	if second := CurrentCapabilities(); second[0] == "mutated" {
 		t.Fatal("caller mutated protocol capabilities")
+	}
+}
+
+func TestProtocolCarriesMaximumPublicPrompts(t *testing.T) {
+	const prefix = `{"title":"Large","agent":"opencode","prompt":"`
+	const suffix = `"}`
+	unicodePrompt := "x" + strings.Repeat("\u2028", (publicJSONBodyMax-len(prefix)-len(suffix)-2)/3) + "x"
+	unicodeBody := prefix + unicodePrompt + suffix
+	if len(unicodeBody) > publicJSONBodyMax || !json.Valid([]byte(unicodeBody)) {
+		t.Fatal("invalid maximum-size public Unicode fixture")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		prompt string
+	}{
+		{name: "HTML-sensitive", prompt: strings.Repeat("<", publicJSONBodyMax-(4<<10))},
+		{name: "Unicode-line-separator", prompt: unicodePrompt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launch := LaunchRequest{
+				NodeID: "large", Agent: "opencode", Title: "Large", Dir: "/work",
+				Prompt: tc.prompt, Description: tc.prompt,
+			}
+			var wire bytes.Buffer
+			enc := json.NewEncoder(&wire)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(canonicalLaunch(launch)); err != nil {
+				t.Fatal(err)
+			}
+			h := &protocolHarness{}
+			server, err := Listen("", Identity{WorkerID: "large", Agent: launch.Agent}, h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			client, err := NewClient(server.Link())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			if _, err := client.Launch(context.Background(), launch); err != nil {
+				t.Fatalf("Launch rejected a public-size prompt (%d wire bytes): %v", wire.Len(), err)
+			}
+			if h.launch.Prompt != tc.prompt || h.launch.Description != "" {
+				t.Fatal("Launch did not preserve the prompt in canonical recovery form")
+			}
+			h.state = State{Launch: &launch, HasSession: true, Live: "quiet"}
+			state, err := client.State(context.Background())
+			if err != nil {
+				t.Fatalf("State rejected public-size recovery metadata: %v", err)
+			}
+			if state.Launch == nil || state.Launch.Prompt != tc.prompt || state.Launch.Description != "" {
+				t.Fatal("State did not preserve the prompt in canonical recovery form")
+			}
+		})
 	}
 }
 

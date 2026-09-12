@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,7 +165,7 @@ func TestMuxerDeathReapsWebChildE2E(t *testing.T) {
 	go func() { exited <- muxer.Wait() }()
 
 	addr := waitForLoggedAddress(t, logPath, exited)
-	resp, err := http.Get("http://" + addr + "/")
+	resp, err := testHTTPClient.Get("http://" + addr + "/")
 	if err != nil {
 		t.Fatalf("web child was not serving before muxer death: %v", err)
 	}

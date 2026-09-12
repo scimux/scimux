@@ -587,7 +587,7 @@ func TestServeWebChildInProcess(t *testing.T) {
 			if result.err != nil || result.event.Phase != "active" {
 				t.Fatalf("active = %#v, %v", result.event, result.err)
 			}
-			resp, err := http.Get("http://" + ln.Addr().String() + "/api/state")
+			resp, err := testHTTPClient.Get("http://" + ln.Addr().String() + "/api/state")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -597,7 +597,7 @@ func TestServeWebChildInProcess(t *testing.T) {
 				t.Fatalf("public response = %q headers %v", body, resp.Header)
 			}
 			if tc.stayLocal {
-				resp, err := http.Get("http://" + ln.Addr().String() + "/api/remote/status")
+				resp, err := testHTTPClient.Get("http://" + ln.Addr().String() + "/api/remote/status")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -871,7 +871,7 @@ func TestUnlinkDuringPreparedHandoff(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Scimux-CSRF", csrf)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient.Do(req)
 		if err != nil {
 			unlinked <- unlinkResult{err: err}
 			return
@@ -1795,7 +1795,7 @@ func remoteConfigForWebChildTest(data string) remote.Config {
 
 func assertWebGeneration(t *testing.T, addr, want string) {
 	t.Helper()
-	resp, err := http.Get("http://" + addr + "/api/state")
+	resp, err := testHTTPClient.Get("http://" + addr + "/api/state")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1813,7 +1813,7 @@ func assertWebGenerationEventually(t *testing.T, addr, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://" + addr + "/api/state")
+		resp, err := testPollHTTPClient.Get("http://" + addr + "/api/state")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.Header.Get("X-Scimux-Web-Generation") == want {
@@ -1827,7 +1827,7 @@ func assertWebGenerationEventually(t *testing.T, addr, want string) {
 
 func fetchCSRF(t *testing.T, addr string) string {
 	t.Helper()
-	resp, err := http.Get("http://" + addr + "/")
+	resp, err := testHTTPClient.Get("http://" + addr + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1852,7 +1852,7 @@ func postMutation(addr, csrf string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Scimux-CSRF", csrf)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}

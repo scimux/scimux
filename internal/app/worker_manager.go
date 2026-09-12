@@ -20,6 +20,7 @@ var errNoSessionWorker = errors.New("no live session worker for node")
 type workerEntry struct {
 	client  *sessionworker.Client
 	process *sessionWorkerProcess
+	stopMu  sync.Mutex
 	// pid is retained for a worker reattached after an in-place muxer exec.
 	// The replacement has no exec.Cmd, but is still the OS parent and must reap
 	// the child when an explicit Stop makes it exit.
@@ -181,7 +182,9 @@ func (m *workerManager) observe(nodeID string) sessionworker.State {
 		// Claiming the lifetime lock distinguishes a dead owner from a live but
 		// temporarily unreachable one, and removes the locator atomically only
 		// in the former case.
-		reapStaleWorkerLocator(m.dataDir, nodeID)
+		if !reapStaleWorkerLocator(m.dataDir, nodeID) {
+			return sessionworker.State{Live: "unavailable"}
+		}
 		return sessionworker.State{Live: "exited"}
 	}
 	m.mu.Lock()
@@ -365,40 +368,59 @@ func (m *workerManager) Kill(nodeID string) error {
 }
 
 func (m *workerManager) stop(nodeID string, terminateSession bool) error {
-	m.mu.Lock()
-	entry := m.entries[nodeID]
-	delete(m.entries, nodeID)
-	m.mu.Unlock()
+	entry := m.entry(nodeID)
 	if entry == nil {
+		return nil
+	}
+	entry.stopMu.Lock()
+	defer entry.stopMu.Unlock()
+	if m.entry(nodeID) != entry {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := entry.client.Stop(ctx, terminateSession)
 	cancel()
-	_ = entry.client.Close()
-	if entry.process != nil {
-		if waitErr := entry.process.waitForExit(5 * time.Second); err == nil {
-			err = waitErr
-		}
-		return err
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		_, discoverErr := sessionworker.Discover(m.dataDir, nodeID)
-		if errors.Is(discoverErr, os.ErrNotExist) {
-			if reapErr := reapReattachedWorker(entry.pid, deadline); err == nil {
-				err = reapErr
-			}
+	if err != nil {
+		// A timed-out Stop is not permission to forget ownership. If the
+		// lifetime lock is still held, keep the entry so deletion can be retried
+		// after a suspended or unreachable worker recovers.
+		if !reapStaleWorkerLocator(m.dataDir, nodeID) {
+			m.invalidate(nodeID)
 			return err
 		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				return err
+	} else if entry.process == nil {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			_, discoverErr := sessionworker.Discover(m.dataDir, nodeID)
+			if errors.Is(discoverErr, os.ErrNotExist) {
+				break
 			}
-			return errors.New("session worker: locator remained after stop")
+			if time.Now().After(deadline) {
+				m.invalidate(nodeID)
+				return errors.New("session worker: locator remained after stop")
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
+	deadline := time.Now().Add(5 * time.Second)
+	if entry.process != nil {
+		select {
+		case <-entry.process.wait:
+		case <-time.After(time.Until(deadline)):
+			m.invalidate(nodeID)
+			return errors.New("session worker: did not exit after stop")
+		}
+	} else if err := reapReattachedWorker(entry.pid, deadline); err != nil {
+		m.invalidate(nodeID)
+		return err
+	}
+	m.mu.Lock()
+	if m.entries[nodeID] == entry {
+		delete(m.entries, nodeID)
+	}
+	m.mu.Unlock()
+	_ = entry.client.Close()
+	return nil
 }
 
 // reapReattachedWorker matters only across syscall.Exec. The replacement

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -610,6 +611,9 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 }
 
 func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires tmux and real process exec")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -627,7 +631,8 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stderr = os.Stderr
+	var childOutput bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &childOutput, &childOutput
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -641,8 +646,21 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		}
 	}()
 	var ready muxerExecReady
-	if err := json.NewDecoder(readyR).Decode(&ready); err != nil {
-		t.Fatal(err)
+	readyResult := make(chan error, 1)
+	go func() { readyResult <- json.NewDecoder(readyR).Decode(&ready) }()
+	select {
+	case err := <-readyResult:
+		if err != nil {
+			_ = process.Kill()
+			_ = cmd.Wait()
+			waited = true
+			t.Fatalf("read muxer-exec readiness: %v\n%s", err, childOutput.String())
+		}
+	case <-time.After(15 * time.Second):
+		_ = process.Kill()
+		_ = cmd.Wait()
+		waited = true
+		t.Fatalf("timed out waiting for muxer-exec readiness\n%s", childOutput.String())
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(ready.DataDir) })
 	if _, err := backend.Claim(ready.DataDir); !errors.Is(err, backend.ErrMuxerOwned) {
@@ -662,7 +680,7 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		} else if !errors.Is(err, backend.ErrMuxerOwned) {
 			t.Fatalf("ownership during exec = %v", err)
 		}
-		resp, err := http.Get("http://" + ready.Addr + "/state")
+		resp, err := testPollHTTPClient.Get("http://" + ready.Addr + "/state")
 		if err == nil {
 			err = json.NewDecoder(resp.Body).Decode(&state)
 			_ = resp.Body.Close()
@@ -696,7 +714,7 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		}
 	}
 	beforeUpdate := state
-	withoutToken, err := http.Post("http://"+ready.Addr+"/send?id="+muxerExecHarnesses[0].ID, "application/json", nil)
+	withoutToken, err := testHTTPClient.Post("http://"+ready.Addr+"/send?id="+muxerExecHarnesses[0].ID, "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,13 +777,13 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopReq.Header.Set("X-Scimux-CSRF", ready.CSRFToken)
-	resp, err := http.DefaultClient.Do(stopReq)
+	resp, err := testHTTPClient.Do(stopReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
 	if err := cmd.Wait(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("muxer-exec helper: %v\n%s", err, childOutput.String())
 	}
 	waited = true
 	for _, harness := range muxerExecHarnesses {
@@ -793,7 +811,7 @@ func postMuxerExec(t *testing.T, addr, path string, harnesses []muxerExecHarness
 			t.Fatalf("%s %s request: %v", harness.Agent, path, err)
 		}
 		req.Header.Set("X-Scimux-CSRF", csrf)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient.Do(req)
 		if err != nil || resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("%s %s = %#v, %v", harness.Agent, path, resp, err)
 		}
@@ -818,7 +836,7 @@ func waitMuxerExecHTTPState(t *testing.T, addr string, accept func(muxerExecStat
 
 func readMuxerExecState(t *testing.T, addr string) muxerExecState {
 	t.Helper()
-	resp, err := http.Get("http://" + addr + "/state")
+	resp, err := testPollHTTPClient.Get("http://" + addr + "/state")
 	if err != nil {
 		t.Fatal(err)
 	}

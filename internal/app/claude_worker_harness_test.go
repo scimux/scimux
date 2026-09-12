@@ -352,6 +352,22 @@ func TestClaudeSessionHarnessAdoptsExistingPaneWithoutRelaunchOrOwnership(t *tes
 	}
 }
 
+func TestClaudeSessionHarnessAdoptsExistingPaneWithoutPrompt(t *testing.T) {
+	f := &fakeTmux{list: []string{"existing"}, alive: map[string]bool{"existing": true}}
+	h := testClaudeSessionHarness(newTestApp(t, f), "existing")
+	request := sessionworker.LaunchRequest{
+		NodeID: "existing", Agent: "claude", Title: "Existing", Dir: t.TempDir(),
+		Existing: true, Adopted: true,
+	}
+	if _, err := h.Launch(context.Background(), request); err != nil {
+		t.Fatalf("promptless adoption: %v", err)
+	}
+	defer h.Stop(context.Background(), false)
+	if containsSub(f.subcommands(), "new-session") {
+		t.Fatal("promptless adoption relaunched the existing pane")
+	}
+}
+
 func TestClaudeSessionHarnessAdoptionRequiresLivePaneAndDurableHook(t *testing.T) {
 	request := sessionworker.LaunchRequest{
 		NodeID: "existing", Agent: "claude", Title: "Existing", Prompt: "history",

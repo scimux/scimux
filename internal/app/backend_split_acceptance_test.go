@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
@@ -150,18 +152,28 @@ func TestWebUpdatePreservesRealSessionWorkerAndPermission(t *testing.T) {
 		listener: ln, listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data},
 	}
 	claimCommandOwnership(t, cmd)
+	addr := ln.Addr().String()
+	restartGeneration := make(chan string, 1)
 	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{
 		configureWeb: func(s *webSupervisor) {
 			s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
 			s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
 			s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1", "SCIMUX_WEB_CHILD_TEST_VERSION=v1.0.0"}
 		},
+		requestRestart: func() {
+			resp, err := testHTTPClient.Get("http://" + addr + "/api/state")
+			if err != nil {
+				restartGeneration <- "request failed: " + err.Error()
+				return
+			}
+			_ = resp.Body.Close()
+			restartGeneration <- resp.Header.Get("X-Scimux-Web-Generation")
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	addr := ln.Addr().String()
 	csrf := fetchCSRF(t, addr)
 
 	createBody, _ := json.Marshal(map[string]any{
@@ -214,6 +226,14 @@ func TestWebUpdatePreservesRealSessionWorkerAndPermission(t *testing.T) {
 		t.Fatalf("public update = %d (%s)", code, body)
 	}
 	assertWebGenerationEventually(t, addr, "2")
+	select {
+	case generation := <-restartGeneration:
+		if generation != "2" {
+			t.Fatalf("muxer replacement requested while web generation %q was serving, want 2", generation)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("public update activated the web candidate without requesting muxer replacement")
+	}
 	code, body = publicJSON(t, addr, http.MethodPost, "/api/update", updateBody, csrf)
 	if code != http.StatusConflict || !strings.Contains(string(body), "already up to date") {
 		t.Fatalf("active generation accepted its own update again: %d (%s)", code, body)
@@ -454,7 +474,7 @@ func runStructuredHarnessPublicE2E(t *testing.T, harness structuredHarnessAccept
 		t.Fatalf("created node = %q, %v", rec.Body.String(), err)
 	}
 	observed := []string{"create:200"}
-	completeStructuredPublicTurn(t, handler, created.ID, harness.transport, 1)
+	completeStructuredPublicTurn(t, a, handler, created.ID, harness.transport, 1)
 	observed = append(observed, "initial:complete")
 
 	if rec := routeRequest(handler, http.MethodGet, "/api/state", "", false); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
@@ -470,7 +490,7 @@ func runStructuredHarnessPublicE2E(t *testing.T, harness structuredHarnessAccept
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second send = %d (%s)", rec.Code, rec.Body.String())
 	}
-	completeStructuredPublicTurn(t, handler, created.ID, harness.transport, 2)
+	completeStructuredPublicTurn(t, a, handler, created.ID, harness.transport, 2)
 	observed = append(observed, "second:complete")
 
 	rec = routeRequest(handler, http.MethodPost, "/api/nodes/"+created.ID+"/send", `{"text":"/clear"}`, true)
@@ -482,8 +502,22 @@ func runStructuredHarnessPublicE2E(t *testing.T, harness structuredHarnessAccept
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send after clear = %d (%s)", rec.Code, rec.Body.String())
 	}
-	completeStructuredPublicTurn(t, handler, created.ID, harness.transport, 1)
+	completeStructuredPublicTurn(t, a, handler, created.ID, harness.transport, 1)
 	observed = append(observed, "post-clear:complete")
+
+	var attention []string
+	for _, event := range sessionlog.ReadEvents(a.sessionLogPath(created.ID)) {
+		if event.T == "attention" && event.Attention != nil {
+			attention = append(attention, event.Attention.Status)
+		}
+	}
+	if harness.transport == "acp" {
+		want := []string{"start", "end", "start", "end", "start", "end"}
+		if !reflect.DeepEqual(attention, want) {
+			t.Fatalf("durable attention transitions = %v, want %v", attention, want)
+		}
+	}
+	observed = append(observed, "attention:"+strings.Join(attention, ","))
 
 	rec = routeRequest(handler, http.MethodDelete, "/api/nodes/"+created.ID, "", true)
 	if rec.Code != http.StatusOK {
@@ -520,11 +554,12 @@ func newShortAcceptanceApp(t *testing.T) *app {
 	return a
 }
 
-func completeStructuredPublicTurn(t *testing.T, handler http.Handler, nodeID, transport string, wantReplies int) {
+func completeStructuredPublicTurn(t *testing.T, a *app, handler http.Handler, nodeID, transport string, wantReplies int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	answered := ""
 	for time.Now().Before(deadline) {
+		a.poll()
 		rec := routeRequest(handler, http.MethodGet, "/api/nodes/"+nodeID+"/chat", "", false)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("chat = %d (%s)", rec.Code, rec.Body.String())
@@ -536,6 +571,7 @@ func completeStructuredPublicTurn(t *testing.T, handler http.Handler, nodeID, tr
 			var chat map[string]any
 			if json.Unmarshal(rec.Body.Bytes(), &chat) == nil {
 				if requestID, _ := chat["perm_request_id"].(string); requestID != "" && requestID != answered {
+					waitForAppAttention(t, a, nodeID, "approval")
 					answer := fmt.Sprintf(`{"key":"1","request_id":%q}`, requestID)
 					answerRec := routeRequest(handler, http.MethodPost, "/api/nodes/"+nodeID+"/key", answer, true)
 					if answerRec.Code != http.StatusOK {
@@ -545,12 +581,29 @@ func completeStructuredPublicTurn(t *testing.T, handler http.Handler, nodeID, tr
 				}
 			}
 			if strings.Count(rec.Body.String(), "continued-after-approval") >= wantReplies && !strings.Contains(rec.Body.String(), `"turn_in_flight":true`) {
+				waitForAppAttention(t, a, nodeID, "")
 				return
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("%s turn did not complete", transport)
+}
+
+func waitForAppAttention(t *testing.T, a *app, nodeID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		a.poll()
+		a.mu.Lock()
+		got := a.attn[nodeID]
+		a.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("node %s attention did not become %q", nodeID, want)
 }
 
 const syntheticClaudeLauncher = `#!/bin/sh
@@ -840,7 +893,7 @@ func publicJSON(t *testing.T, addr, method, path string, body []byte, csrf strin
 	if csrf != "" {
 		req.Header.Set("X-Scimux-CSRF", csrf)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -123,7 +123,7 @@ func (a *app) poll() {
 			// so the muxer asks their worker to append them. Claude's worker runs
 			// the established tmux poller itself and already owns that append;
 			// repeating it here would create two identical audit records.
-			if workerState == nil {
+			if workerState == nil || n.Agent != "claude" {
 				a.persistAttentionTransition(n, prevAttn, attn)
 			}
 			// Phase 4: re-source pi fare from the native JSONL (session-map

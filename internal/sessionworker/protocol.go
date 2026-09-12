@@ -33,10 +33,14 @@ const (
 	headerToken = "X-Scimux-Worker-Token"
 	headerMajor = "X-Scimux-Worker-Major"
 	headerMinor = "X-Scimux-Worker-Minor"
-	// A public request may itself be 1 MiB. The worker envelope also carries
-	// launch metadata, and State echoes that launch description for recovery,
-	// so the private bound needs deterministic headroom without becoming open.
-	maxBody = 2 << 20
+	// The public JSON boundary is 1 MiB. With HTML escaping disabled, Go's JSON
+	// encoder can still expand raw U+2028/U+2029 from three UTF-8 bytes to a
+	// six-byte escape. Twice the public bound covers that worst case; the fixed
+	// allowance covers the private envelope plus resolved Unix paths, UUIDs,
+	// timestamps and enum labels without leaving the endpoint unbounded.
+	publicJSONBodyMax          = 1 << 20
+	privateEnvelopeMetadataMax = 64 << 10
+	maxBody                    = 2*publicJSONBodyMax + privateEnvelopeMetadataMax
 )
 
 // versionOneCapabilities is immutable for the life of major 1. Capabilities
@@ -120,6 +124,16 @@ type LaunchRequest struct {
 	CreatedAt      string `json:"created_at,omitempty"`
 	HookID         string `json:"hook_id,omitempty"`
 	HookGeneration int    `json:"hook_generation,omitempty"`
+}
+
+// canonicalLaunch avoids carrying the prompt twice when Description has its
+// ordinary default. Recovery already defines an omitted description as the
+// prompt, so this changes only the private representation, not node state.
+func canonicalLaunch(req LaunchRequest) LaunchRequest {
+	if req.Description == req.Prompt {
+		req.Description = ""
+	}
+	return req
 }
 
 const (
@@ -382,7 +396,12 @@ func Listen(parent string, identity Identity, harness Harness) (*Server, error) 
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /v1/state", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, harness.State(r.Context()))
+		state := harness.State(r.Context())
+		if state.Launch != nil {
+			launch := canonicalLaunch(*state.Launch)
+			state.Launch = &launch
+		}
+		writeJSON(w, http.StatusOK, state)
 	})
 	mux.HandleFunc("GET /v1/peek", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -462,7 +481,9 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(value)
 }
 
 func writeHarnessError(w http.ResponseWriter, h Harness, err error) bool {
@@ -589,10 +610,13 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	var body []byte
 	var err error
 	if in != nil {
-		body, err = json.Marshal(in)
-		if err != nil {
+		var encoded bytes.Buffer
+		enc := json.NewEncoder(&encoded)
+		enc.SetEscapeHTML(false)
+		if err = enc.Encode(in); err != nil {
 			return err
 		}
+		body = encoded.Bytes()
 	}
 	req, err := c.request(ctx, method, path, body, ProtocolMajor, ProtocolMinor)
 	if err != nil {
@@ -631,7 +655,7 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (string, error) 
 	var out struct {
 		SessionID string `json:"session_id"`
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/launch", req, &out)
+	err := c.do(ctx, http.MethodPost, "/v1/launch", canonicalLaunch(req), &out)
 	return out.SessionID, err
 }
 
@@ -728,22 +752,4 @@ func (c *Client) Close() error {
 	}
 	c.transport.CloseIdleConnections()
 	return nil
-}
-
-func probeHello(ctx context.Context, link Link, major, minor int) (int, error) {
-	c, err := NewClient(link)
-	if err != nil {
-		return 0, err
-	}
-	defer c.Close()
-	req, err := c.request(ctx, http.MethodGet, "/v1/hello", nil, major, minor)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode, nil
 }

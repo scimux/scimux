@@ -960,6 +960,12 @@ func sessionArgFromCmdline(args []string) string {
 // tmux sessions are deliberately left running — scimux did not start them.
 func (a *app) closeOwned(n *Node) error {
 	if pm := a.proc(n); pm != nil {
+		// The worker is an owned controller even after its underlying harness
+		// exits. Stop it based on that ownership, not on the last liveness
+		// observation; an unreachable worker must make deletion fail closed.
+		if workers, ok := pm.(*workerManager); ok {
+			return workers.Kill(n.ID)
+		}
 		if pm.HasSession(n.ID) {
 			return pm.Kill(n.ID)
 		}

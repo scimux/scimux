@@ -104,7 +104,7 @@ func (h *claudeSessionHarness) node() *Node {
 }
 
 func (h *claudeSessionHarness) Launch(_ context.Context, req sessionworker.LaunchRequest) (string, error) {
-	if req.NodeID != h.nodeID || req.Agent != "claude" || req.Dir == "" || req.Title == "" || req.Prompt == "" {
+	if req.NodeID != h.nodeID || req.Agent != "claude" || req.Dir == "" || req.Title == "" || (!req.Existing && req.Prompt == "") {
 		return "", errors.New("claude session worker: invalid launch request")
 	}
 	h.app.mu.Lock()
@@ -197,7 +197,7 @@ func (h *claudeSessionHarness) Send(_ context.Context, text string) (sessionwork
 	if n == nil {
 		return sessionworker.Delivery{}, errClaudeWorkerConflict
 	}
-	status, delivery, err := h.app.sendTmuxPrompt(n, text, text, false)
+	status, delivery, err := h.app.sendTmuxPrompt(n, text, false)
 	if err != nil {
 		if status == 409 {
 			return sessionworker.Delivery{}, fmt.Errorf("%w: %v", errClaudeWorkerConflict, err)
@@ -212,7 +212,7 @@ func (h *claudeSessionHarness) Clear(context.Context) (sessionworker.Delivery, e
 	if n == nil {
 		return sessionworker.Delivery{}, errClaudeWorkerConflict
 	}
-	status, delivery, err := h.app.sendTmuxPrompt(n, "/clear", "/clear", true)
+	status, delivery, err := h.app.sendTmuxPrompt(n, "/clear", true)
 	if err != nil {
 		if status == 409 {
 			return sessionworker.Delivery{}, fmt.Errorf("%w: %v", errClaudeWorkerConflict, err)

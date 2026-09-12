@@ -235,7 +235,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "acknowledged"})
 		return
 	}
-	status, delivery, err := a.sendTmuxPrompt(n, body.Text, delivered, strings.TrimSpace(body.Text) == "/clear")
+	status, delivery, err := a.sendTmuxPrompt(n, delivered, strings.TrimSpace(body.Text) == "/clear")
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
@@ -251,7 +251,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 // legacy in-process path and the Claude session worker. It returns the HTTP
 // status that the existing public endpoint assigns to a refusal, so moving
 // the caller across a process boundary cannot blur 409 conflicts into 500s.
-func (a *app) sendTmuxPrompt(n *Node, raw, delivered string, isClear bool) (int, initialDelivery, error) {
+func (a *app) sendTmuxPrompt(n *Node, delivered string, isClear bool) (int, initialDelivery, error) {
 	a.mu.Lock()
 	switch a.sendState[n.ID] {
 	case sendSubmitting:
@@ -317,7 +317,6 @@ func (a *app) sendTmuxPrompt(n *Node, raw, delivered string, isClear bool) (int,
 		a.noteClaudeClearSent(n.ID)
 	}
 	if !acked {
-		_ = raw // retained separately so callers can restore exactly the draft
 		return 0, initialUnconfirmed, nil
 	}
 	return 0, initialAcknowledged, nil

@@ -12,10 +12,9 @@ import (
 	"codeberg.org/chrberger/scimux/internal/backend"
 )
 
-// muxerBackend is the long-lived half of scimux. Its app owns every agent
-// process, tmux binding, poller, and durable store. Keeping that ownership in
-// one value makes the process boundary reviewable: a web generation receives
-// only its HTTP handler, never the app or a structured manager.
+// muxerBackend owns global metadata and the private routing registry. Each
+// session worker owns its agent connection and log writer; a web generation
+// receives only the muxer's HTTP capability, never either owner's state.
 type muxerBackend struct {
 	app    *app
 	status *muxerRuntimeStatus
@@ -201,8 +200,8 @@ func (s *muxerRuntimeStatus) Version() string {
 	return s.version
 }
 
-// activeWebVersion keeps muxer-owned APIs aligned with the replaceable child:
-// after self-update the parent binary is intentionally still the older one.
+// activeWebVersion keeps muxer-owned APIs aligned with the serving child during
+// the response-safe interval after standby activation and before muxer exec.
 func (a *app) activeWebVersion() string {
 	if a.runtimeStatus != nil {
 		return a.runtimeStatus.Version()
