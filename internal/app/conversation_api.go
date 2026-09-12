@@ -200,11 +200,22 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			// /clear ends the turn lease (page turn is a hard reset).
 			a.disarmAutoApprove(n.ID)
 			// Keep node.session_id on the post-clear ACP/thread id so the pi
-			// native fare join (session-map.json) stays one hop (Phase 4).
+			// native fare join (session-map.json) stays one hop (Phase 4). The
+			// correction is a new node record: the worker can outlive this muxer,
+			// so an in-memory update would regress after its next restart.
 			if sid := a.liveSessionID(n); sid != "" && sid != n.SessionID {
 				a.mu.Lock()
-				n.SessionID = sid
+				updated := *n
+				updated.SessionID = sid
+				err := a.appendRecord(storeRecord{Type: "node", Node: &updated})
+				if err == nil {
+					n.SessionID = sid
+				}
 				a.mu.Unlock()
+				if err != nil {
+					http.Error(w, "persist clear session: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			writeJSON(w, map[string]string{"status": "acknowledged"})
 			return

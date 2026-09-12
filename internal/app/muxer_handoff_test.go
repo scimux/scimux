@@ -23,6 +23,7 @@ import (
 )
 
 func TestMuxerExecEnvironmentRoundTripAndValidation(t *testing.T) {
+	const inheritedCSRF = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if err := (*muxerExecFiles)(nil).Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +44,10 @@ func TestMuxerExecEnvironmentRoundTripAndValidation(t *testing.T) {
 	for _, values := range []map[string]string{
 		{envMuxerPublicFD: "3"},
 		{envMuxerLockFD: "4"},
+		{envMuxerCSRFToken: inheritedCSRF},
 		{envMuxerPublicFD: "bad", envMuxerLockFD: "4"},
 		{envMuxerPublicFD: "3", envMuxerLockFD: "2"},
+		{envMuxerPublicFD: "3", envMuxerLockFD: "4", envMuxerCSRFToken: "invalid"},
 	} {
 		if files, err := loadMuxerExecFiles(func(key string) string { return values[key] }); err == nil || files != nil {
 			t.Fatalf("invalid handoff %v = %#v, %v", values, files, err)
@@ -61,26 +64,54 @@ func TestMuxerExecEnvironmentRoundTripAndValidation(t *testing.T) {
 	defer publicW.Close()
 	defer lockW.Close()
 	values := map[string]string{
-		envMuxerPublicFD: strconv.Itoa(int(publicR.Fd())),
-		envMuxerLockFD:   strconv.Itoa(int(lockR.Fd())),
+		envMuxerPublicFD:  strconv.Itoa(int(publicR.Fd())),
+		envMuxerLockFD:    strconv.Itoa(int(lockR.Fd())),
+		envMuxerCSRFToken: inheritedCSRF,
 	}
 	files, err := loadMuxerExecFiles(func(key string) string { return values[key] })
 	if err != nil || files == nil {
 		t.Fatalf("valid inherited descriptors = %#v, %v", files, err)
 	}
+	if files.csrfToken != inheritedCSRF {
+		t.Fatalf("inherited CSRF token = %q, want %q", files.csrfToken, inheritedCSRF)
+	}
 	if err := files.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacyPublicR, legacyPublicW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyLockR, legacyLockW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyPublicW.Close()
+	defer legacyLockW.Close()
+	legacyValues := map[string]string{
+		envMuxerPublicFD: strconv.Itoa(int(legacyPublicR.Fd())),
+		envMuxerLockFD:   strconv.Itoa(int(legacyLockR.Fd())),
+	}
+	legacy, err := loadMuxerExecFiles(func(key string) string { return legacyValues[key] })
+	if err != nil || legacy == nil || legacy.csrfToken != "" {
+		t.Fatalf("legacy inherited descriptors = %#v, %v", legacy, err)
+	}
+	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv(envMuxerPublicFD, "stale-public")
 	t.Setenv(envMuxerLockFD, "stale-lock")
-	env := strings.Join(muxerExecEnvironment(7, 8), "\n")
-	if strings.Count(env, envMuxerPublicFD+"=") != 1 || strings.Count(env, envMuxerLockFD+"=") != 1 {
+	t.Setenv(envMuxerCSRFToken, strings.Repeat("f", 64))
+	env := strings.Join(muxerExecEnvironment(7, 8, inheritedCSRF), "\n")
+	if strings.Count(env, envMuxerPublicFD+"=") != 1 || strings.Count(env, envMuxerLockFD+"=") != 1 ||
+		strings.Count(env, envMuxerCSRFToken+"=") != 1 || !strings.Contains(env, envMuxerCSRFToken+"="+inheritedCSRF) {
 		t.Fatalf("replacement environment retained stale descriptors: %s", env)
 	}
 }
 
 func TestMuxerExecPreparationAndReplacementFailClosed(t *testing.T) {
+	const validCSRF = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
@@ -93,7 +124,11 @@ func TestMuxerExecPreparationAndReplacementFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := &Command{listener: fileErrorListener{Listener: ln}, ownership: owner}
+	invalidTokenCmd := &Command{listener: ln, ownership: owner, csrfToken: "invalid"}
+	if files, err := prepareMuxerExecFiles(invalidTokenCmd); err == nil || files != nil {
+		t.Fatalf("handoff accepted invalid CSRF token: %#v, %v", files, err)
+	}
+	cmd := &Command{listener: fileErrorListener{Listener: ln}, ownership: owner, csrfToken: validCSRF}
 	if files, err := prepareMuxerExecFiles(cmd); err == nil || files != nil {
 		t.Fatalf("handoff accepted listener duplication failure: %#v, %v", files, err)
 	}
@@ -116,10 +151,13 @@ func TestMuxerExecPreparationAndReplacementFailClosed(t *testing.T) {
 	}
 	defer publicW.Close()
 	defer lockW.Close()
+	if err := replaceMuxerProcess("/new/scimux", &muxerExecFiles{public: publicR, ownership: lockR, csrfToken: "invalid"}); err == nil {
+		t.Fatal("replacement accepted invalid CSRF token")
+	}
 	if err := publicR.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := replaceMuxerProcess("/new/scimux", &muxerExecFiles{public: publicR, ownership: lockR}); err == nil {
+	if err := replaceMuxerProcess("/new/scimux", &muxerExecFiles{public: publicR, ownership: lockR, csrfToken: validCSRF}); err == nil {
 		t.Fatal("replacement accepted a closed public descriptor")
 	}
 
@@ -132,7 +170,7 @@ func TestMuxerExecPreparationAndReplacementFailClosed(t *testing.T) {
 	if err := lockR.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := replaceMuxerProcess("/new/scimux", &muxerExecFiles{public: publicR, ownership: lockR}); err == nil {
+	if err := replaceMuxerProcess("/new/scimux", &muxerExecFiles{public: publicR, ownership: lockR, csrfToken: validCSRF}); err == nil {
 		t.Fatal("replacement accepted a closed ownership descriptor")
 	}
 	if !descriptorCloseOnExec(t, int(publicR.Fd())) {
@@ -141,6 +179,7 @@ func TestMuxerExecPreparationAndReplacementFailClosed(t *testing.T) {
 }
 
 func TestReplaceMuxerProcessMakesOnlyHandoffDescriptorsInheritable(t *testing.T) {
+	const validCSRF = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	publicR, publicW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +190,7 @@ func TestReplaceMuxerProcessMakesOnlyHandoffDescriptorsInheritable(t *testing.T)
 	}
 	defer publicW.Close()
 	defer lockW.Close()
-	files := &muxerExecFiles{public: publicR, ownership: lockR}
+	files := &muxerExecFiles{public: publicR, ownership: lockR, csrfToken: validCSRF}
 	syscall.CloseOnExec(int(publicR.Fd()))
 	syscall.CloseOnExec(int(lockR.Fd()))
 	wantErr := errors.New("exec refused")
@@ -168,6 +207,9 @@ func TestReplaceMuxerProcessMakesOnlyHandoffDescriptorsInheritable(t *testing.T)
 			if descriptorCloseOnExec(t, fd) {
 				t.Errorf("%s remained close-on-exec inside exec critical section", key)
 			}
+		}
+		if !strings.Contains(joined, envMuxerCSRFToken+"="+validCSRF) {
+			t.Errorf("exec env lacks inherited CSRF token")
 		}
 		return wantErr
 	}
@@ -236,6 +278,7 @@ type muxerExecReady struct {
 	DataDir    string         `json:"data_dir"`
 	Addr       string         `json:"addr"`
 	MuxerPID   int            `json:"muxer_pid"`
+	CSRFToken  string         `json:"csrf_token"`
 	WorkerPIDs map[string]int `json:"worker_pids"`
 }
 
@@ -274,6 +317,7 @@ var muxerExecHarnesses = []muxerExecHarness{
 }
 
 const muxerExecReadyFDEnv = "SCIMUX_MUXER_EXEC_READY_FD"
+const muxerExecCSRFToken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 func productionMuxerExecManager(t *testing.T, data, build string) (*workerManager, string) {
 	t.Helper()
@@ -367,7 +411,7 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := &Command{listener: ln, ownership: owner}
+	cmd := &Command{listener: ln, ownership: owner, csrfToken: muxerExecCSRFToken}
 	workers, socket := productionMuxerExecManager(t, data, "muxer-v1")
 	defer cleanupMuxerExecTmux(t, socket)
 	workerPIDs := make(map[string]int, len(muxerExecHarnesses))
@@ -422,7 +466,10 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 		t.Fatal("missing muxer-exec readiness descriptor")
 	}
 	ready := os.NewFile(uintptr(readyFD), "muxer-exec-ready")
-	if err := json.NewEncoder(ready).Encode(muxerExecReady{DataDir: data, Addr: ln.Addr().String(), MuxerPID: os.Getpid(), WorkerPIDs: workerPIDs}); err != nil {
+	if err := json.NewEncoder(ready).Encode(muxerExecReady{
+		DataDir: data, Addr: ln.Addr().String(), MuxerPID: os.Getpid(),
+		CSRFToken: muxerExecCSRFToken, WorkerPIDs: workerPIDs,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ready.Close(); err != nil {
@@ -461,6 +508,7 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 	handoff, err := loadMuxerExecFiles(os.Getenv)
 	_ = os.Unsetenv(envMuxerPublicFD)
 	_ = os.Unsetenv(envMuxerLockFD)
+	_ = os.Unsetenv(envMuxerCSRFToken)
 	if err != nil || handoff == nil {
 		t.Fatalf("load handoff = %#v, %v", handoff, err)
 	}
@@ -472,6 +520,10 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 	if err := cmd.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if cmd.csrfToken != muxerExecCSRFToken {
+		t.Fatalf("CSRF token after exec = %q, want pre-exec token %q", cmd.csrfToken, muxerExecCSRFToken)
+	}
+	csrfToken = cmd.csrfToken
 	workers, socket := productionMuxerExecManager(t, data, "muxer-v2")
 	nodes := make([]*Node, 0, len(muxerExecHarnesses))
 	for _, harness := range muxerExecHarnesses {
@@ -536,7 +588,7 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 		}
 		close(stop)
 	})
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{Handler: guardMutations(mux)}
 	go func() { _ = srv.Serve(cmd.Listener()) }()
 	<-stop
 	_ = srv.Close()
@@ -644,7 +696,15 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		}
 	}
 	beforeUpdate := state
-	postMuxerExec(t, ready.Addr, "/answer", muxerExecACPHarnesses())
+	withoutToken, err := http.Post("http://"+ready.Addr+"/send?id="+muxerExecHarnesses[0].ID, "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = withoutToken.Body.Close()
+	if withoutToken.StatusCode != http.StatusForbidden {
+		t.Fatalf("post-exec mutation without browser token = %d, want 403", withoutToken.StatusCode)
+	}
+	postMuxerExec(t, ready.Addr, "/answer", muxerExecACPHarnesses(), ready.CSRFToken)
 	waitMuxerExecHTTPState(t, ready.Addr, func(state muxerExecState) bool {
 		for _, harness := range muxerExecACPHarnesses() {
 			worker := state.Workers[harness.ID]
@@ -654,7 +714,7 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		}
 		return true
 	})
-	postMuxerExec(t, ready.Addr, "/send", muxerExecHarnesses)
+	postMuxerExec(t, ready.Addr, "/send", muxerExecHarnesses, ready.CSRFToken)
 	state = waitMuxerExecHTTPState(t, ready.Addr, func(state muxerExecState) bool {
 		for _, harness := range muxerExecHarnesses {
 			worker := state.Workers[harness.ID]
@@ -684,7 +744,7 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 			t.Fatalf("%s did not complete a post-update turn on its original worker: %#v", harness.Agent, worker)
 		}
 	}
-	postMuxerExec(t, ready.Addr, "/answer", muxerExecACPHarnesses())
+	postMuxerExec(t, ready.Addr, "/answer", muxerExecACPHarnesses(), ready.CSRFToken)
 	waitMuxerExecHTTPState(t, ready.Addr, func(state muxerExecState) bool {
 		for _, harness := range muxerExecACPHarnesses() {
 			worker := state.Workers[harness.ID]
@@ -694,7 +754,12 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		}
 		return true
 	})
-	resp, err := http.Post("http://"+ready.Addr+"/stop", "application/json", nil)
+	stopReq, err := http.NewRequest(http.MethodPost, "http://"+ready.Addr+"/stop", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopReq.Header.Set("X-Scimux-CSRF", ready.CSRFToken)
+	resp, err := http.DefaultClient.Do(stopReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,10 +785,15 @@ func muxerExecACPHarnesses() []muxerExecHarness {
 	return out
 }
 
-func postMuxerExec(t *testing.T, addr, path string, harnesses []muxerExecHarness) {
+func postMuxerExec(t *testing.T, addr, path string, harnesses []muxerExecHarness, csrf string) {
 	t.Helper()
 	for _, harness := range harnesses {
-		resp, err := http.Post("http://"+addr+path+"?id="+harness.ID, "application/json", nil)
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+path+"?id="+harness.ID, nil)
+		if err != nil {
+			t.Fatalf("%s %s request: %v", harness.Agent, path, err)
+		}
+		req.Header.Set("X-Scimux-CSRF", csrf)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil || resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("%s %s = %#v, %v", harness.Agent, path, resp, err)
 		}

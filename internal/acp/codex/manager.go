@@ -381,6 +381,19 @@ func (m *Manager) RecordStartFailure(nodeID string, cause error) error {
 // HasSession reports whether a live subprocess backs this node.
 func (m *Manager) HasSession(nodeID string) bool { return m.session(nodeID) != nil }
 
+// SessionID reports the current app-server thread. Clear replaces this value
+// on the same subprocess, so callers must query it instead of retaining the
+// thread returned by Launch.
+func (m *Manager) SessionID(nodeID string) string {
+	s := m.session(nodeID)
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.threadID
+}
+
 // Turns yields the chat history from the node's log (with or without a live
 // subprocess).
 func (m *Manager) Turns(nodeID string) []transcript.Turn { return readTurns(m.logPath(nodeID)) }

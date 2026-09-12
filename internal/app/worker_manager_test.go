@@ -526,6 +526,105 @@ func TestWorkerManagerReportsDisconnectedWorker(t *testing.T) {
 	m.Detach()
 }
 
+func TestWorkerManagerReapsOnlyProvablyStaleLocator(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := syntheticWorkerManager(t, data)
+	if _, err := m.Launch("stale", "pi", data, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	entry := m.entry("stale")
+	realClient := entry.client
+	t.Cleanup(func() { _ = realClient.Close() })
+	unreachable, err := sessionworker.NewClient(sessionworker.Link{
+		Socket: filepath.Join(data, "missing.sock"), Token: "missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.client = unreachable
+
+	if got := m.Live("stale"); got != "exited" {
+		t.Fatalf("unreachable Live = %q", got)
+	}
+	if _, err := sessionworker.Discover(data, "stale"); err != nil {
+		t.Fatalf("live worker locator was reaped: %v", err)
+	}
+
+	process, err := os.FindProcess(entry.process.pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = entry.process.waitForExit(3 * time.Second)
+	entry.observedAt = time.Time{}
+	if got := m.Live("stale"); got != "exited" {
+		t.Fatalf("dead worker Live = %q", got)
+	}
+	if _, err := sessionworker.Discover(data, "stale"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dead worker locator remains: %v", err)
+	}
+	m.Detach()
+}
+
+func TestWorkerManagerReconcileReapsDeadLocator(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := syntheticWorkerManager(t, data)
+	if _, err := first.Launch("dead-at-restart", "opencode", data, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	entry := first.entry("dead-at-restart")
+	first.Detach()
+	process, err := os.FindProcess(entry.process.pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = entry.process.waitForExit(3 * time.Second)
+
+	replacement := syntheticWorkerManager(t, data)
+	node := &Node{ID: "dead-at-restart", Agent: "opencode", Transport: "acp"}
+	if err := replacement.Reconcile([]*Node{node}); err != nil {
+		t.Fatalf("Reconcile dead locator: %v", err)
+	}
+	if _, err := sessionworker.Discover(data, node.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dead locator after Reconcile: %v", err)
+	}
+
+	// The same cleanup applies when the only durable record is a delete and
+	// startup therefore encounters the locator through RecoverUnknown.
+	second := syntheticWorkerManager(t, data)
+	if _, err := second.Launch("dead-after-delete", "pi", data, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	deletedEntry := second.entry("dead-after-delete")
+	second.Detach()
+	process, err = os.FindProcess(deletedEntry.process.pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = deletedEntry.process.waitForExit(3 * time.Second)
+	durable := &app{byID: map[string]*Node{}, deletedNodes: map[string]bool{"dead-after-delete": true}}
+	if err := replacement.RecoverUnknown(durable); err != nil {
+		t.Fatalf("RecoverUnknown dead locator: %v", err)
+	}
+	if _, err := sessionworker.Discover(data, "dead-after-delete"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dead deleted locator after recovery: %v", err)
+	}
+}
+
 func TestAppStructuredDispatchPrefersSessionWorkers(t *testing.T) {
 	workers := &workerManager{}
 	a := &app{workers: workers}

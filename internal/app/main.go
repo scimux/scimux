@@ -169,6 +169,7 @@ func Run() {
 	handoff, err := loadMuxerExecFiles(os.Getenv)
 	_ = os.Unsetenv(envMuxerPublicFD)
 	_ = os.Unsetenv(envMuxerLockFD)
+	_ = os.Unsetenv(envMuxerCSRFToken)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
 		os.Exit(1)

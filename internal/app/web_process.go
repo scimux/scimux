@@ -154,6 +154,13 @@ func newWebSupervisor(listener net.Listener, link backend.Link, cmd *Command) (*
 	if cmd == nil {
 		return nil, errors.New("web supervisor: nil command")
 	}
+	csrf := cmd.csrfToken
+	if csrf == "" {
+		csrf = mustToken()
+		cmd.csrfToken = csrf
+	} else if !validCSRFToken(csrf) {
+		return nil, errors.New("web supervisor: invalid inherited CSRF token")
+	}
 	return &webSupervisor{
 		listener: listener,
 		link:     link,
@@ -165,7 +172,7 @@ func newWebSupervisor(listener net.Listener, link backend.Link, cmd *Command) (*
 			InviteFile:   cmd.Config.InviteFile,
 			InviteStdin:  cmd.Config.InviteStdin,
 			RVOrigin:     cmd.Config.Origin,
-			CSRFToken:    mustToken(),
+			CSRFToken:    csrf,
 		},
 		stdin: cmd.Stdin, stdout: cmd.Stdout, stderr: cmd.Stderr,
 		readyTimeout: 5 * time.Minute,

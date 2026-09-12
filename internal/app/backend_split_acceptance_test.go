@@ -331,6 +331,27 @@ func TestEveryStructuredHarnessRunsBehindRealSessionWorker(t *testing.T) {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
+			if state := workers.State(node.ID); !state.TurnDone {
+				t.Fatalf("completed %s turn was not latched in worker state: %#v", tc.agent, state)
+			}
+			locator, err := sessionworker.Discover(data, node.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workers.Detach()
+			replacement := syntheticWorkerManager(t, data)
+			if err := replacement.Reconcile([]*Node{node}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(replacement.Shutdown)
+			after, err := sessionworker.Discover(data, node.ID)
+			if err != nil || after.PID != locator.PID {
+				t.Fatalf("%s worker changed across muxer reconnect: %#v -> %#v (%v)", tc.agent, locator, after, err)
+			}
+			if state := replacement.State(node.ID); !state.TurnDone {
+				t.Fatalf("reattached %s completion was lost: %#v", tc.agent, state)
+			}
+			workers = replacement
 			if err := workers.Kill(node.ID); err != nil {
 				t.Fatal(err)
 			}

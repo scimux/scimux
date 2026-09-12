@@ -666,7 +666,8 @@ type PendingPermission struct {
 // (codex over its app-server protocol). Both drive one subprocess per node,
 // keep the authoritative history in an append-only session log, and answer
 // permission prompts structurally — so the create/poll/chat/send/key/peek paths
-// treat them uniformly. tmux (claude) nodes are not driven through it.
+// treat them uniformly. The in-process tmux path does not use this interface;
+// workerManager does, including when it routes a Claude session worker.
 type procManager interface {
 	Launch(nodeID, agent, dir, model, effort string) (string, error)
 	Send(nodeID, text string) error
@@ -743,9 +744,9 @@ func (m codexManager) Conflict(err error) bool {
 		err == codex.ErrStalePermission
 }
 
-// proc returns the structured-protocol manager for a node, or nil for a tmux
-// (claude) node. It is the single dispatch point that lets the HTTP/poll paths
-// treat ACP and codex-app-server nodes identically.
+// proc returns the process manager for a node. An in-process tmux (Claude)
+// node has none; a worker-backed Claude node uses the same boundary as ACP and
+// codex-app-server so the HTTP/poll paths do not depend on its transport.
 //
 // When testProc is non-nil (tests only), it replaces the real manager so HTTP
 // handlers can be exercised against a stub without a live agent subprocess.

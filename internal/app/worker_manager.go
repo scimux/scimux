@@ -177,6 +177,11 @@ func (m *workerManager) observe(nodeID string) sessionworker.State {
 	defer cancel()
 	state, err := client.State(ctx)
 	if err != nil {
+		// A failed RPC proves only that this client cannot reach the worker.
+		// Claiming the lifetime lock distinguishes a dead owner from a live but
+		// temporarily unreachable one, and removes the locator atomically only
+		// in the former case.
+		reapStaleWorkerLocator(m.dataDir, nodeID)
 		return sessionworker.State{Live: "exited"}
 	}
 	m.mu.Lock()
@@ -185,6 +190,14 @@ func (m *workerManager) observe(nodeID string) sessionworker.State {
 	}
 	m.mu.Unlock()
 	return state
+}
+
+func reapStaleWorkerLocator(dataDir, nodeID string) bool {
+	registration, err := sessionworker.Claim(dataDir, nodeID)
+	if err != nil {
+		return false
+	}
+	return registration.Close() == nil
 }
 
 func (m *workerManager) withClient(nodeID string, fn func(context.Context, *sessionworker.Client) error) error {
@@ -482,13 +495,18 @@ func (m *workerManager) Reconcile(nodes []*Node) error {
 			continue
 		}
 		client, connectErr := connectWorker(locator)
-		if connectErr != nil || locator.NodeID != node.ID || locator.Agent != node.Agent {
+		if connectErr != nil {
+			if reapStaleWorkerLocator(m.dataDir, node.ID) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", node.ID, connectErr))
+			continue
+		}
+		if locator.NodeID != node.ID || locator.Agent != node.Agent {
 			if client != nil {
 				_ = client.Close()
 			}
-			if connectErr == nil {
-				connectErr = errors.New("worker identity does not match durable node")
-			}
+			connectErr = errors.New("worker identity does not match durable node")
 			errs = append(errs, fmt.Errorf("%s: %w", node.ID, connectErr))
 			continue
 		}
@@ -528,6 +546,9 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		}
 		client, err := connectWorker(locator)
 		if err != nil {
+			if reapStaleWorkerLocator(m.dataDir, locator.NodeID) {
+				continue
+			}
 			errs = append(errs, fmt.Errorf("%s: %w", locator.NodeID, err))
 			continue
 		}

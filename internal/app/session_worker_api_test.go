@@ -30,6 +30,19 @@ func attachSyntheticWorker(t *testing.T, a *app, nodeID string, harness *synthet
 	}, dataDir: t.TempDir()}
 }
 
+func TestPollProjectsStructuredWorkerCompletionAndSessionIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "worker-structured-state", "opencode", "acp")
+	attachSyntheticWorker(t, a, n.ID, &syntheticSessionHarness{launched: true, state: sessionworker.State{
+		HasSession: true, SessionID: "session-after-clear", Live: "quiet", TurnDone: true,
+	}})
+
+	a.poll()
+	if !a.turnDone[n.ID] || n.SessionID != "session-after-clear" {
+		t.Fatalf("projected state: turnDone=%v sessionID=%q", a.turnDone[n.ID], n.SessionID)
+	}
+}
+
 // One HTTP test crosses every Claude-specific worker branch. Harness policy
 // remains contained by the existing Claude suites; this test defends only the
 // public projection and dispatch across the new process boundary.

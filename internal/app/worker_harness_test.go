@@ -164,6 +164,39 @@ func TestOneSessionHarnessUsesManagerSessionIdentityWhenAvailable(t *testing.T) 
 	}
 }
 
+func TestOneSessionHarnessOwnsTurnCompletionAcrossMuxerClients(t *testing.T) {
+	p := &contractProc{}
+	p.live = "quiet"
+	h := newOneSessionHarness("node", p)
+	ctx := context.Background()
+	if _, err := h.Launch(ctx, sessionworker.LaunchRequest{NodeID: "node", Agent: "opencode", Dir: "/work"}); err != nil {
+		t.Fatal(err)
+	}
+	p.sendHook = func(p *stubProc) { p.live = "active" }
+	if _, err := h.Send(ctx, "ping"); err != nil {
+		t.Fatal(err)
+	}
+	if state := h.State(ctx); state.Live != "active" || state.TurnDone {
+		t.Fatalf("active state = %#v", state)
+	}
+
+	p.live = "quiet"
+	if state := h.State(ctx); !state.TurnDone {
+		t.Fatalf("first quiet state = %#v", state)
+	}
+	// State is the complete reconnect contract. A replacement muxer has no
+	// local active→quiet history, so the worker must retain the bounded latch.
+	if state := h.State(ctx); !state.TurnDone {
+		t.Fatalf("reattached quiet state = %#v", state)
+	}
+	if _, err := h.Clear(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state := h.State(ctx); state.TurnDone {
+		t.Fatalf("state after clear = %#v", state)
+	}
+}
+
 func TestOneSessionHarnessOwnsLaunchAndStateSideEffects(t *testing.T) {
 	p := &contractProc{}
 	h := newOneSessionHarness("node", p)

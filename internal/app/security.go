@@ -313,8 +313,10 @@ func withRequestBoundary(p *requestPolicy, next http.Handler) http.Handler {
 // files and self-update. A cross-origin page cannot read this token (the
 // same-origin policy hides the HTML body) and cannot forge the custom header on
 // a simple request, so requiring it closes the CSRF surface with no dependency.
-// The split runtime passes one muxer-minted value to every web generation, so
-// a recovered child does not invalidate writes from already-open tabs.
+// The split runtime passes one muxer-minted value to every web generation and
+// through a controlled muxer exec, so neither recovery nor an update
+// invalidates writes from already-open tabs. A fresh process mints a fresh
+// value; the token is deliberately not persisted for crash recovery.
 var csrfToken = mustToken()
 
 func validCSRFToken(token string) bool {

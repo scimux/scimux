@@ -63,18 +63,22 @@ func (a *app) poll() {
 			// manual attention. Manager + session-log I/O stay outside a.mu.
 			a.maybeAutoApprove(n, pm)
 
-			// Snapshot manager state outside a.mu (HasSession/Live/Attention
-			// are in-memory lookups, but keep the "no a.mu across manager
-			// calls" discipline for consistency with Send/log paths).
-			live := pm.Live(n.ID)
-			attn := pm.Attention(n.ID)
-			lastErr := pm.LastError(n.ID)
+			// Snapshot manager state outside a.mu. A worker exposes one coherent
+			// reconnect contract; an in-process manager retains the older scalar
+			// interface. Never hold a.mu across either form.
+			var live, attn, lastErr string
 			var workerState *sessionworker.State
-			if workers, ok := pm.(*workerManager); ok && n.Agent == "claude" {
+			if workers, ok := pm.(*workerManager); ok {
 				state := workers.State(n.ID)
 				workerState = &state
 				live, attn, lastErr = state.Live, state.Attention, state.LastError
-				a.projectWorkerClaudeHook(n.ID, state)
+				if n.Agent == "claude" {
+					a.projectWorkerClaudeHook(n.ID, state)
+				}
+			} else {
+				live = pm.Live(n.ID)
+				attn = pm.Attention(n.ID)
+				lastErr = pm.LastError(n.ID)
 			}
 			a.mu.Lock()
 			prevAttn := a.attn[n.ID]

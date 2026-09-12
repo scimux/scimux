@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
@@ -15,8 +16,9 @@ import (
 )
 
 // oneSessionHarness narrows the existing multi-node manager interface to the
-// one node owned by a session-worker process. It is intentionally translation
-// only: harness policy and state machines remain in their existing managers.
+// one node owned by a session-worker process. Harness policy and protocol state
+// machines remain in their existing managers; only reconnect-stable lifecycle
+// observations, such as the bounded completion latch, live at this boundary.
 type oneSessionHarness struct {
 	nodeID      string
 	manager     procManager
@@ -25,6 +27,9 @@ type oneSessionHarness struct {
 	beforeState func()
 	logw        *sessionlog.Writer
 	launch      *sessionworker.LaunchRequest
+	lastLive    string
+	lastChg     time.Time
+	turnDone    bool
 }
 
 func newOneSessionHarness(nodeID string, manager procManager) *oneSessionHarness {
@@ -83,6 +88,9 @@ func (h *oneSessionHarness) Launch(_ context.Context, req sessionworker.LaunchRe
 		h.stateMu.Lock()
 		launch := req
 		h.launch = &launch
+		h.lastLive = h.manager.Live(h.nodeID)
+		h.lastChg = time.Time{}
+		h.turnDone = false
 		h.stateMu.Unlock()
 		if h.afterLaunch != nil {
 			h.afterLaunch(req, sid)
@@ -93,11 +101,27 @@ func (h *oneSessionHarness) Launch(_ context.Context, req sessionworker.LaunchRe
 
 func (h *oneSessionHarness) Send(_ context.Context, text string) (sessionworker.Delivery, error) {
 	err := h.manager.Send(h.nodeID, text)
+	if err == nil {
+		// Send acceptance is the mechanical start edge. Record it here even if
+		// a very fast harness is quiet again before the next State request.
+		h.stateMu.Lock()
+		h.lastLive = "active"
+		h.lastChg = time.Now()
+		h.turnDone = false
+		h.stateMu.Unlock()
+	}
 	return sessionworker.Delivery{Status: sessionworker.DeliveryAcknowledged}, err
 }
 
 func (h *oneSessionHarness) Clear(context.Context) (sessionworker.Delivery, error) {
 	err := h.manager.Clear(h.nodeID)
+	if err == nil {
+		h.stateMu.Lock()
+		h.lastLive = h.manager.Live(h.nodeID)
+		h.lastChg = time.Time{}
+		h.turnDone = false
+		h.stateMu.Unlock()
+	}
 	return sessionworker.Delivery{Status: sessionworker.DeliveryAcknowledged}, err
 }
 
@@ -129,6 +153,12 @@ func (h *oneSessionHarness) State(context.Context) sessionworker.State {
 		Attention:  h.manager.Attention(h.nodeID),
 		LastError:  h.manager.LastError(h.nodeID),
 	}
+	now := time.Now()
+	state.TurnDone = structuredTurnDone(state.Live, state.Attention, h.lastLive, state.LastError, "", h.turnDone, h.lastChg, now)
+	if state.Live == "active" {
+		h.lastChg = now
+	}
+	h.lastLive, h.turnDone = state.Live, state.TurnDone
 	if provider, ok := h.manager.(interface{ SessionID(string) string }); ok {
 		state.SessionID = provider.SessionID(h.nodeID)
 	}

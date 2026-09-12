@@ -1232,7 +1232,8 @@ func TestWebSupervisorConstructionAndPreparedGuards(t *testing.T) {
 	}
 	defer ln.Close()
 	link := backend.Link{Socket: "/tmp/muxer.sock", Token: "cap"}
-	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard}
+	const inheritedCSRF = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard, csrfToken: inheritedCSRF}
 	for _, tc := range []struct {
 		name string
 		ln   net.Listener
@@ -1243,6 +1244,7 @@ func TestWebSupervisorConstructionAndPreparedGuards(t *testing.T) {
 		{"empty-socket", ln, backend.Link{Token: "cap"}, cmd},
 		{"empty-token", ln, backend.Link{Socket: "/tmp/muxer.sock"}, cmd},
 		{"nil-command", ln, link, nil},
+		{"invalid-csrf", ln, link, &Command{csrfToken: "invalid"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := newWebSupervisor(tc.ln, tc.link, tc.cmd); err == nil {
@@ -1255,6 +1257,9 @@ func TestWebSupervisorConstructionAndPreparedGuards(t *testing.T) {
 	s, err := newWebSupervisor(wrapped, link, cmd)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if s.config.CSRFToken != inheritedCSRF {
+		t.Fatalf("web child CSRF token = %q, want inherited %q", s.config.CSRFToken, inheritedCSRF)
 	}
 	if err := s.Start(nil, os.Args[0]); err == nil || !strings.Contains(err.Error(), "cannot be inherited") {
 		t.Fatalf("non-inheritable listener error = %v", err)

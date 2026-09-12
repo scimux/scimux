@@ -50,6 +50,9 @@ type Command struct {
 	// handoff is populated only after same-PID exec. Command consumes both
 	// descriptors instead of competing for its own still-live port and lock.
 	handoff *muxerExecFiles
+	// csrfToken is minted by the first web supervisor and inherited only across
+	// a controlled same-PID exec. It is never persisted for a fresh startup.
+	csrfToken string
 
 	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
 	// remote client, or nil for a purely local run. It is kept so the join is
@@ -180,6 +183,9 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 				c.closeOwnership()
 			}
 		}()
+	}
+	if c.handoff != nil && c.handoff.csrfToken != "" {
+		c.csrfToken = c.handoff.csrfToken
 	}
 
 	a, err := NewApp(Config{
