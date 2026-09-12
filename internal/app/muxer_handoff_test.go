@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
 	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
 func TestMuxerExecEnvironmentRoundTripAndValidation(t *testing.T) {
@@ -238,10 +240,17 @@ type muxerExecReady struct {
 }
 
 type muxerExecWorkerState struct {
-	PID       int    `json:"pid"`
-	Build     string `json:"build"`
-	Pending   bool   `json:"pending"`
-	RequestID string `json:"request_id"`
+	PID          int    `json:"pid"`
+	Build        string `json:"build"`
+	SessionID    string `json:"session_id"`
+	Live         string `json:"live"`
+	Peek         string `json:"peek"`
+	Watermark    int64  `json:"watermark"`
+	HasSession   bool   `json:"has_session"`
+	TurnInFlight bool   `json:"turn_in_flight"`
+	Delivery     string `json:"delivery"`
+	Pending      bool   `json:"pending"`
+	RequestID    string `json:"request_id"`
 }
 
 type muxerExecState struct {
@@ -250,11 +259,13 @@ type muxerExecState struct {
 	Workers  map[string]muxerExecWorkerState `json:"workers"`
 }
 
-var muxerExecHarnesses = []struct {
+type muxerExecHarness struct {
 	ID        string
 	Agent     string
 	Transport string
-}{
+}
+
+var muxerExecHarnesses = []muxerExecHarness{
 	{ID: "survivor-claude", Agent: "claude", Transport: "tmux"},
 	{ID: "survivor-codex", Agent: "codex", Transport: "codex"},
 	{ID: "survivor-grok", Agent: "grok", Transport: "acp"},
@@ -263,6 +274,78 @@ var muxerExecHarnesses = []struct {
 }
 
 const muxerExecReadyFDEnv = "SCIMUX_MUXER_EXEC_READY_FD"
+
+func productionMuxerExecManager(t *testing.T, data, build string) (*workerManager, string) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, bin := filepath.Join(data, "home"), filepath.Join(data, "bin")
+	for _, dir := range []string{home, bin, filepath.Join(data, "sessions")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for binary, helper := range map[string]string{
+		"pi-acp":   "TestSyntheticACPAgentHelperProcess",
+		"opencode": "TestSyntheticACPAgentHelperProcess",
+		"grok":     "TestSyntheticACPAgentHelperProcess",
+		"codex":    "TestSyntheticCodexAgentHelperProcess",
+	} {
+		launcher := "#!/bin/sh\nexec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" -test.run=^" + helper + "$\n"
+		if err := os.WriteFile(filepath.Join(bin, binary), []byte(launcher), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(syntheticClaudeLauncher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCIMUX_SYNTHETIC_ACP", "1")
+	t.Setenv("SCIMUX_SYNTHETIC_CODEX", "1")
+	t.Setenv("SCIMUX_SYNTHETIC_ACP_STATUS", filepath.Join(data, "agent-status"))
+	t.Setenv("SCIMUX_FAKE_CLAUDE_HOME", home)
+	socket := "scimux-muxer-exec-" + filepath.Base(data)
+	workers := newWorkerManager(exe, data, build)
+	workers.home, workers.socket = home, socket
+	workers.startOptions = sessionWorkerStartOptions{
+		args: []string{"-test.run=^TestProductionSessionWorkerHelperProcess$"},
+		env:  []string{"SCIMUX_PRODUCTION_SESSION_WORKER_TEST=1"},
+	}
+	return workers, socket
+}
+
+func waitMuxerExecWorker(t *testing.T, workers *workerManager, nodeID string, accept func(sessionworker.State, string) bool) (sessionworker.State, string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var state sessionworker.State
+	var peek string
+	for time.Now().Before(deadline) {
+		state, peek = workers.State(nodeID), workers.Peek(nodeID)
+		if accept(state, peek) {
+			return state, peek
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("worker %s did not reach expected state: state=%#v peek=%q", nodeID, state, peek)
+	return state, peek
+}
+
+func answerMuxerExecPermission(t *testing.T, workers *workerManager, nodeID string) {
+	t.Helper()
+	pending, ok := workers.Pending(nodeID)
+	if !ok {
+		t.Fatalf("%s has no pending approval", nodeID)
+	}
+	token, _, err := workers.PrepareResolve(nodeID, pending.RequestID, "1")
+	if err == nil {
+		err = workers.Deliver(nodeID, token)
+	}
+	if err != nil {
+		t.Fatalf("answer %s: %v", nodeID, err)
+	}
+}
 
 func TestMuxerExecParentHelperProcess(t *testing.T) {
 	if os.Getenv("SCIMUX_MUXER_EXEC_PARENT_TEST") != "1" {
@@ -285,32 +368,43 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := &Command{listener: ln, ownership: owner}
-	workers := syntheticWorkerManager(t, data)
-	workers.build = "muxer-v1"
+	workers, socket := productionMuxerExecManager(t, data, "muxer-v1")
+	defer cleanupMuxerExecTmux(t, socket)
 	workerPIDs := make(map[string]int, len(muxerExecHarnesses))
 	for _, harness := range muxerExecHarnesses {
-		if _, err := workers.Launch(harness.ID, harness.Agent, data, "cheap", "low"); err != nil {
+		node := &Node{
+			ID: harness.ID, Title: harness.Agent + " survivor", Prompt: "before update", Agent: harness.Agent,
+			Dir: workers.home, Model: "cheap", Effort: "low", Transport: harness.Transport,
+			CreatedAt: "2026-09-12T05:00:00Z",
+		}
+		if _, err := workers.LaunchNode(node, node.Model); err != nil {
 			t.Fatalf("launch %s: %v", harness.Agent, err)
 		}
-		// Complete one turn before replacement, then leave a second turn
-		// awaiting approval. This distinguishes a surviving chat from a
-		// process that merely retained its PID without retaining its state.
-		if err := workers.Send(harness.ID, "permission-before-update"); err != nil {
-			t.Fatalf("send %s: %v", harness.Agent, err)
-		}
-		pending, ok := workers.Pending(harness.ID)
-		if !ok {
-			t.Fatalf("%s did not expose its first approval", harness.Agent)
-		}
-		token, _, err := workers.PrepareResolve(harness.ID, pending.RequestID, "1")
-		if err == nil {
-			err = workers.Deliver(harness.ID, token)
-		}
-		if err != nil {
-			t.Fatalf("complete %s before update: %v", harness.Agent, err)
-		}
-		if err := workers.Send(harness.ID, "permission-across-update"); err != nil {
-			t.Fatalf("second send %s: %v", harness.Agent, err)
+		switch harness.Transport {
+		case "acp":
+			if err := workers.Send(harness.ID, "permission-before-update"); err != nil {
+				t.Fatalf("send %s: %v", harness.Agent, err)
+			}
+			waitMuxerExecWorker(t, workers, harness.ID, func(state sessionworker.State, _ string) bool { return state.Permission != nil })
+			answerMuxerExecPermission(t, workers, harness.ID)
+			waitMuxerExecWorker(t, workers, harness.ID, func(state sessionworker.State, peek string) bool {
+				return state.Live == "quiet" && strings.Contains(peek, "continued-after-approval")
+			})
+			if err := workers.Send(harness.ID, "permission-across-update"); err != nil {
+				t.Fatalf("second send %s: %v", harness.Agent, err)
+			}
+			waitMuxerExecWorker(t, workers, harness.ID, func(state sessionworker.State, _ string) bool { return state.Permission != nil })
+		case "codex":
+			if err := workers.Send(harness.ID, "before-update"); err != nil {
+				t.Fatalf("send codex: %v", err)
+			}
+			waitMuxerExecWorker(t, workers, harness.ID, func(state sessionworker.State, peek string) bool {
+				return state.Live == "quiet" && strings.Count(peek, "pong") == 1
+			})
+		case "tmux":
+			waitMuxerExecWorker(t, workers, harness.ID, func(state sessionworker.State, _ string) bool {
+				return state.HasSession && state.Watermark > 0 && state.Delivery == "" && !state.TurnInFlight
+			})
 		}
 		locator, err := sessionworker.Discover(data, harness.ID)
 		if err != nil {
@@ -350,6 +444,15 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 	}
 }
 
+func cleanupMuxerExecTmux(t *testing.T, socket string) {
+	t.Helper()
+	server := tmuxsession.NewServer(socket)
+	_ = server.KillServer()
+	if err := os.Remove(server.SocketPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("remove muxer-exec tmux socket: %v", err)
+	}
+}
+
 func TestMuxerExecChildHelperProcess(t *testing.T) {
 	if os.Getenv("SCIMUX_MUXER_EXEC_CHILD_TEST") != "1" {
 		return
@@ -369,8 +472,7 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 	if err := cmd.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	workers := syntheticWorkerManager(t, data)
-	workers.build = "muxer-v2"
+	workers, socket := productionMuxerExecManager(t, data, "muxer-v2")
 	nodes := make([]*Node, 0, len(muxerExecHarnesses))
 	for _, harness := range muxerExecHarnesses {
 		nodes = append(nodes, &Node{ID: harness.ID, Agent: harness.Agent, Transport: harness.Transport})
@@ -392,9 +494,12 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 		state := muxerExecState{MuxerPID: os.Getpid(), Build: workers.build, Workers: make(map[string]muxerExecWorkerState, len(nodes))}
 		for _, node := range nodes {
 			locator, _ := sessionworker.Discover(data, node.ID)
+			observed := workers.State(node.ID)
 			pending, ok := workers.Pending(node.ID)
 			state.Workers[node.ID] = muxerExecWorkerState{
-				PID: locator.PID, Build: locator.Identity.Build,
+				PID: locator.PID, Build: locator.Identity.Build, SessionID: observed.SessionID,
+				Live: observed.Live, Peek: workers.Peek(node.ID), Watermark: observed.Watermark,
+				HasSession: observed.HasSession, TurnInFlight: observed.TurnInFlight, Delivery: observed.Delivery,
 				Pending: ok, RequestID: pending.RequestID,
 			}
 		}
@@ -435,7 +540,13 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 	go func() { _ = srv.Serve(cmd.Listener()) }()
 	<-stop
 	_ = srv.Close()
+	for _, node := range nodes {
+		if err := workers.Kill(node.ID); err != nil {
+			t.Errorf("stop %s: %v", node.Agent, err)
+		}
+	}
 	workers.Shutdown()
+	cleanupMuxerExecTmux(t, socket)
 	for nodeID, locator := range workerLocators {
 		var workerStatus syscall.WaitStatus
 		if pid, err := syscall.Wait4(locator.PID, &workerStatus, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
@@ -514,32 +625,75 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	}
 	for _, harness := range muxerExecHarnesses {
 		worker := state.Workers[harness.ID]
-		if worker.PID != ready.WorkerPIDs[harness.ID] || worker.Build != "muxer-v1" || !worker.Pending || worker.RequestID != "synthetic:1" {
+		if worker.PID != ready.WorkerPIDs[harness.ID] || worker.Build != "muxer-v1" || !worker.HasSession || worker.Live == "exited" {
 			t.Fatalf("%s state after exec = %#v, ready PID=%d", harness.Agent, worker, ready.WorkerPIDs[harness.ID])
 		}
+		switch harness.Transport {
+		case "acp":
+			if !worker.Pending || worker.RequestID == "" {
+				t.Fatalf("%s lost its in-flight approval: %#v", harness.Agent, worker)
+			}
+		case "codex":
+			if strings.Count(worker.Peek, "pong") != 1 {
+				t.Fatalf("Codex lost its completed pre-update turn: %#v", worker)
+			}
+		case "tmux":
+			if worker.SessionID == "" || worker.Watermark == 0 || worker.Delivery != "" || worker.TurnInFlight {
+				t.Fatalf("Claude lost its completed pre-update turn: %#v", worker)
+			}
+		}
 	}
-	postMuxerExec(t, ready.Addr, "/answer", muxerExecHarnesses)
+	beforeUpdate := state
+	postMuxerExec(t, ready.Addr, "/answer", muxerExecACPHarnesses())
+	waitMuxerExecHTTPState(t, ready.Addr, func(state muxerExecState) bool {
+		for _, harness := range muxerExecACPHarnesses() {
+			worker := state.Workers[harness.ID]
+			if worker.Live != "quiet" || strings.Count(worker.Peek, "continued-after-approval") < 2 {
+				return false
+			}
+		}
+		return true
+	})
 	postMuxerExec(t, ready.Addr, "/send", muxerExecHarnesses)
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		state = readMuxerExecState(t, ready.Addr)
-		allPending := true
+	state = waitMuxerExecHTTPState(t, ready.Addr, func(state muxerExecState) bool {
 		for _, harness := range muxerExecHarnesses {
 			worker := state.Workers[harness.ID]
-			allPending = allPending && worker.Pending && worker.PID == ready.WorkerPIDs[harness.ID]
+			if worker.PID != ready.WorkerPIDs[harness.ID] {
+				return false
+			}
+			switch harness.Transport {
+			case "acp":
+				if !worker.Pending {
+					return false
+				}
+			case "codex":
+				if worker.Live != "quiet" || strings.Count(worker.Peek, "pong") < 2 {
+					return false
+				}
+			case "tmux":
+				if worker.Watermark <= beforeUpdate.Workers[harness.ID].Watermark || worker.Delivery != "" || worker.TurnInFlight {
+					return false
+				}
+			}
 		}
-		if allPending {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return true
+	})
 	for _, harness := range muxerExecHarnesses {
 		worker := state.Workers[harness.ID]
-		if !worker.Pending || worker.PID != ready.WorkerPIDs[harness.ID] {
+		if worker.PID != ready.WorkerPIDs[harness.ID] {
 			t.Fatalf("%s did not complete a post-update turn on its original worker: %#v", harness.Agent, worker)
 		}
 	}
-	postMuxerExec(t, ready.Addr, "/answer", muxerExecHarnesses)
+	postMuxerExec(t, ready.Addr, "/answer", muxerExecACPHarnesses())
+	waitMuxerExecHTTPState(t, ready.Addr, func(state muxerExecState) bool {
+		for _, harness := range muxerExecACPHarnesses() {
+			worker := state.Workers[harness.ID]
+			if worker.Live != "quiet" || strings.Count(worker.Peek, "continued-after-approval") < 3 {
+				return false
+			}
+		}
+		return true
+	})
 	resp, err := http.Post("http://"+ready.Addr+"/stop", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -556,11 +710,17 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	}
 }
 
-func postMuxerExec(t *testing.T, addr, path string, harnesses []struct {
-	ID        string
-	Agent     string
-	Transport string
-}) {
+func muxerExecACPHarnesses() []muxerExecHarness {
+	var out []muxerExecHarness
+	for _, harness := range muxerExecHarnesses {
+		if harness.Transport == "acp" {
+			out = append(out, harness)
+		}
+	}
+	return out
+}
+
+func postMuxerExec(t *testing.T, addr, path string, harnesses []muxerExecHarness) {
 	t.Helper()
 	for _, harness := range harnesses {
 		resp, err := http.Post("http://"+addr+path+"?id="+harness.ID, "application/json", nil)
@@ -569,6 +729,21 @@ func postMuxerExec(t *testing.T, addr, path string, harnesses []struct {
 		}
 		_ = resp.Body.Close()
 	}
+}
+
+func waitMuxerExecHTTPState(t *testing.T, addr string, accept func(muxerExecState) bool) muxerExecState {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var state muxerExecState
+	for time.Now().Before(deadline) {
+		state = readMuxerExecState(t, addr)
+		if accept(state) {
+			return state
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("muxer workers did not reach expected state: %#v", state)
+	return state
 }
 
 func readMuxerExecState(t *testing.T, addr string) muxerExecState {
