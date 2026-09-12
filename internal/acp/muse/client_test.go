@@ -347,6 +347,25 @@ func TestAbsentCapabilitiesMeanCapableDurable(t *testing.T) {
 	}
 }
 
+func TestSessionStartNestedViewCursorWhenTopLevelEmpty(t *testing.T) {
+	h := primed(t)
+	errc := make(chan error, 1)
+	go func() { errc <- h.client.StartSession(context.Background(), StartParams{}) }()
+	req := h.readJSON()
+	h.replyOK(req, map[string]any{
+		"session": map[string]any{"sessionId": "nested-only", "viewCursor": "from-session"},
+	})
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	if h.client.SessionID() != "nested-only" {
+		t.Fatalf("session=%s", h.client.SessionID())
+	}
+	if h.client.ViewCursor() != "from-session" {
+		t.Fatalf("cursor=%s, want nested session.viewCursor when the top-level field is omitted", h.client.ViewCursor())
+	}
+}
+
 func TestSessionStartAndClearRollback(t *testing.T) {
 	h := primed(t)
 	errc := make(chan error, 1)

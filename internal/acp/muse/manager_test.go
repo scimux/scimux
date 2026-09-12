@@ -2147,6 +2147,60 @@ func TestManagerRecordStartFailureSkipsMissingLog(t *testing.T) {
 	}
 }
 
+func TestCloneModelsDoesNotAliasLimitPointers(t *testing.T) {
+	ctx, outn := 100, 20
+	rel := "2026-01-01"
+	in := []Model{
+		{ID: "spark", ContextLimit: &ctx, OutputLimit: &outn, ReleaseDate: &rel},
+		{ID: "other"},
+	}
+	got := cloneModels(in)
+	if len(got) != 2 || got[0].ID != "spark" {
+		t.Fatalf("%+v", got)
+	}
+	got[0].ID = "mut"
+	*got[0].ContextLimit = 1
+	*got[0].OutputLimit = 2
+	*got[0].ReleaseDate = "mutated"
+	if in[0].ID != "spark" || *in[0].ContextLimit != 100 || *in[0].OutputLimit != 20 || *in[0].ReleaseDate != "2026-01-01" {
+		t.Fatalf("cloneModels aliased caller-visible fields: %+v", in[0])
+	}
+	if in[1].ContextLimit != nil || got[1].ContextLimit != nil {
+		t.Fatal("nil limits invented")
+	}
+}
+
+func TestManagerTurnsProvenanceIsCallerPrivate(t *testing.T) {
+	m, _, srv, _ := launchOK(t, t.TempDir())
+	startTurn(t, m, srv, "hi", "turn-1")
+	srv.note(t, "item/completed", map[string]any{
+		"sessionId": "sess-1",
+		"item": map[string]any{
+			"itemId": "a1", "kind": "agentMessage", "revision": 1,
+			"status": "completed", "text": "pong",
+			"_meta": map[string]any{"src": "item"},
+		},
+		"_meta": map[string]any{"src": "note"},
+	})
+	waitFor(t, func() bool { return len(m.Turns("n1")) >= 2 })
+	turns := m.Turns("n1")
+	if len(turns) < 2 || len(turns[1].Prov) == 0 {
+		t.Fatalf("%+v", turns)
+	}
+	saved := append([]byte(nil), turns[1].Prov...)
+	for i := range turns[1].Prov {
+		turns[1].Prov[i] = 'x'
+	}
+	again := m.Turns("n1")
+	if len(again) < 2 {
+		t.Fatal("turns disappeared")
+	}
+	if !bytes.Equal(again[1].Prov, saved) {
+		t.Fatalf("mutating Turns result aliased stored provenance: %s", again[1].Prov)
+	}
+	completeTurn(t, m, srv, "turn-1", "completed")
+}
+
 func TestManagerTurnsPreserveAgentAndProv(t *testing.T) {
 	m, _, srv, _ := launchOK(t, t.TempDir())
 	startTurn(t, m, srv, "hi", "turn-1")

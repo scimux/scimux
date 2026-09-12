@@ -139,6 +139,51 @@ func TestMuseConsentDefaultIsFalse(t *testing.T) {
 	}
 }
 
+func TestMuseConsentUnreadableFileIsFalse(t *testing.T) {
+	a := settingsApp(t)
+	if err := a.saveSettings(settings{MuseApprovalJudgeConsent: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !a.settings().MuseApprovalJudgeConsent {
+		t.Fatal("setup")
+	}
+	if err := os.Remove(a.settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the settings path gives every user, including root, a
+	// deterministic read error without depending on permission semantics.
+	if err := os.Mkdir(a.settingsPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if a.settings().MuseApprovalJudgeConsent {
+		t.Fatal("unreadable settings file consented to Muse approval-judge")
+	}
+	rec := httptest.NewRecorder()
+	a.handleSettingsGet(rec, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d", rec.Code)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["muse_approval_judge_consent"] != false {
+		t.Fatalf("HTTP GET of unreadable settings consented: %v", out["muse_approval_judge_consent"])
+	}
+}
+
+func TestSettingsOversizedFileFailsClosed(t *testing.T) {
+	a := settingsApp(t)
+	body := `{"muse_approval_judge_consent":true,"claude_usage_checks":true,"pad":"` + strings.Repeat("x", settingsMax) + `"}`
+	if err := writeFileForSettingsTest(a.settingsPath, body); err != nil {
+		t.Fatal(err)
+	}
+	got := a.settings()
+	if got.MuseApprovalJudgeConsent || got.ClaudeUsageChecks {
+		t.Fatalf("oversized settings consented: %+v", got)
+	}
+}
+
 func TestMuseConsentEmptyAndCorruptAreFalse(t *testing.T) {
 	a := settingsApp(t)
 	if err := writeFileForSettingsTest(a.settingsPath, ""); err != nil {

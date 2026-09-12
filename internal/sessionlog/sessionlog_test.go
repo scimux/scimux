@@ -482,3 +482,41 @@ func TestSessionlogMultiContributionRoundTrip(t *testing.T) {
 		t.Errorf("json Agent = %q", again.Agent)
 	}
 }
+
+func TestNewAttentionEdgeAndNewMarkShape(t *testing.T) {
+	attn := NewAttentionEdge("approval", "start")
+	if attn.T != "attention" || attn.Attention == nil || attn.Attention.Kind != "approval" || attn.Attention.Status != "start" {
+		t.Fatalf("%+v", attn)
+	}
+	mark := NewMark(42)
+	if mark.T != "mark" || mark.Mark == nil || mark.Mark.Off != 42 {
+		t.Fatalf("%+v", mark)
+	}
+}
+
+func TestReadTurnsCallerMutationDoesNotAliasStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	if err := w.Append(NewMeta("n", "muse", "std-1", "", "/ws")); err != nil {
+		t.Fatal(err)
+	}
+	prov := json.RawMessage(`[{"loc":"envelope","key":"_meta","v":{"src":"synth-muse"}}]`)
+	if err := w.Append(Event{T: "assistant", Text: "pong", Time: "t1", Prov: prov}); err != nil {
+		t.Fatal(err)
+	}
+	turns := ReadTurns(path)
+	if len(turns) != 1 || turns[0].Agent != "muse" || len(turns[0].Prov) == 0 {
+		t.Fatalf("%+v", turns)
+	}
+	saved := append([]byte(nil), turns[0].Prov...)
+	for i := range turns[0].Prov {
+		turns[0].Prov[i] = 'x'
+	}
+	again := ReadTurns(path)
+	if !bytes.Equal(again[0].Prov, saved) {
+		t.Fatalf("mutating ReadTurns result aliased stored provenance: %s", again[0].Prov)
+	}
+	if again[0].Agent != "muse" {
+		t.Fatalf("agent=%q", again[0].Agent)
+	}
+}

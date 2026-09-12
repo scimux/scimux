@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,29 @@ func runTransportHelper() bool {
 	}
 	os.Exit(0)
 	return true
+}
+
+func TestSpawnHelperInvokesTestBinaryNeverMuse(t *testing.T) {
+	restore := installHelper("exit0")
+	defer restore()
+	cmd := commandFn(context.Background(), "muse", "serve")
+	base := filepath.Base(cmd.Path)
+	if cmd.Path == "muse" || base == "muse" {
+		t.Fatalf("helper constructed Path=%q; tests must exec the test binary", cmd.Path)
+	}
+	if !strings.Contains(cmd.Path, os.Args[0]) && base != filepath.Base(os.Args[0]) {
+		t.Fatalf("helper Path=%q, want the test binary %q", cmd.Path, os.Args[0])
+	}
+	found := false
+	for _, e := range cmd.Env {
+		if e == "SCIMUX_MUSE_HELPER=exit0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("helper env missing SCIMUX_MUSE_HELPER")
+	}
 }
 
 func TestSpawnRequestsExactServeArgv(t *testing.T) {

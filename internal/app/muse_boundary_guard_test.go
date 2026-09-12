@@ -348,6 +348,68 @@ func TestMuseBrowserBoundaryMatchersCatchPlantedViolations(t *testing.T) {
 	}
 }
 
+func TestMuseBoundaryTestsNeverExecRealAgentCLI(t *testing.T) {
+	dir := appDirFromTest(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scanned int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for _, hit := range museRealAgentExecHits(string(b)) {
+			t.Errorf("%s: %s", e.Name(), hit)
+		}
+	}
+	if scanned < 10 {
+		t.Fatalf("scanned %d app test files, walk looks vacuous", scanned)
+	}
+}
+
+func TestMuseRealAgentMatcherCatchesPlantedViolations(t *testing.T) {
+	museBin := "mu" + "se"
+	plants := []struct {
+		name string
+		src  string
+	}{
+		{"exec muse", `exec.Command("` + museBin + `", "serve")`},
+		{"command-context muse", `exec.CommandContext(context.Background(), "` + museBin + `", "serve")`},
+		{"lookpath muse", `exec.LookPath("` + museBin + `")`},
+		{"exec claude", `exec.Command("` + "clau" + "de" + `")`},
+		{"exec codex", `exec.Command("` + "cod" + "ex" + `")`},
+		{"exec grok", `exec.Command("` + "gr" + "ok" + `")`},
+		{"exec pi", `exec.Command("` + "p" + "i" + `")`},
+		{"exec opencode", `exec.Command("` + "open" + "code" + `")`},
+	}
+	for _, p := range plants {
+		if hits := museRealAgentExecHits(p.src); len(hits) == 0 {
+			t.Errorf("%s: matcher missed %q", p.name, p.src)
+		}
+	}
+	safe := []string{
+		`exec.Command(os.Args[0])`,
+		`exec.LookPath("tmux")`,
+		`exec.LookPath("git")`,
+		`exec.LookPath("node")`,
+		`writeScript(t, binDir, "muse", "exit 0")`,
+		`if h.bin != "muse"`,
+		`Title: "approval-judge unavailable"`,
+		`const providerName = info.providerName`,
+	}
+	for _, s := range safe {
+		if hits := museRealAgentExecHits(s); len(hits) > 0 {
+			t.Errorf("false positive on %q: %v", s, hits)
+		}
+	}
+}
+
 func TestMuseBoundaryMatchersCatchPlantedViolations(t *testing.T) {
 	cred := "credentials" + ".json"
 	auth := "auth" + ".json"
@@ -527,6 +589,23 @@ func museAppForbiddenHits(file, src string) []string {
 	for _, c := range checks {
 		if c.ok() {
 			hits = append(hits, c.name)
+		}
+	}
+	return hits
+}
+
+func museRealAgentExecHits(src string) []string {
+	var hits []string
+	for _, bin := range []string{"muse", "claude", "codex", "pi", "opencode", "grok"} {
+		literal := `"(?:[^"\n]*/)?` + regexp.QuoteMeta(bin) + `"`
+		if regexp.MustCompile(`exec\.Command\s*\(\s*` + literal).MatchString(src) {
+			hits = append(hits, "exec.Command("+bin+")")
+		}
+		if regexp.MustCompile(`exec\.CommandContext\s*\([^,]+,\s*` + literal).MatchString(src) {
+			hits = append(hits, "exec.CommandContext("+bin+")")
+		}
+		if regexp.MustCompile(`exec\.LookPath\s*\(\s*"` + regexp.QuoteMeta(bin) + `"`).MatchString(src) {
+			hits = append(hits, "exec.LookPath("+bin+")")
 		}
 	}
 	return hits

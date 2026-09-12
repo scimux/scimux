@@ -1224,6 +1224,46 @@ func TestClassifyRPCIDTable(t *testing.T) {
 	}
 }
 
+func TestJSONRPC10ValidIDRequestDoesNotStealWaiter(t *testing.T) {
+	s := newScriptedPeer(t)
+	var reqN int32
+	s.peer.onRequest = func(method string, params json.RawMessage, captured string, skip bool) (any, error) {
+		atomic.AddInt32(&reqN, 1)
+		return map[string]any{"stolen": true}, nil
+	}
+	errc := make(chan error, 1)
+	resc := make(chan json.RawMessage, 1)
+	go func() {
+		res, err := s.peer.Call(context.Background(), "ping", nil)
+		resc <- res
+		errc <- err
+	}()
+	req := s.readJSON(t)
+	id := rawID(t, req)
+	s.writeRaw(t, `{"jsonrpc":"1.0","id":`+id+`,"method":"approval/request","params":{}}`)
+	inv, ok := s.tryReadJSON(t, 2*time.Second)
+	if !ok {
+		t.Fatal("want -32600 for jsonrpc 1.0 request with a valid id")
+	}
+	errObj, _ := inv["error"].(map[string]any)
+	if errObj == nil || errObj["code"].(float64) != -32600 {
+		t.Fatalf("want -32600, got %v", inv)
+	}
+	if inv["id"] != nil {
+		t.Fatalf("invalid-request id=%v, want null", inv["id"])
+	}
+	s.writeRaw(t, `{"jsonrpc":"2.0","id":`+id+`,"result":{"ok":true}}`)
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(<-resc, []byte(`"ok"`)) {
+		t.Fatal("pending call was stolen by a jsonrpc 1.0 request with the same id")
+	}
+	if atomic.LoadInt32(&reqN) != 0 {
+		t.Fatal("jsonrpc 1.0 request invoked onRequest")
+	}
+}
+
 func TestWaitAppliedZeroSeqAndCloseAndCancel(t *testing.T) {
 	s := newScriptedPeer(t)
 	if err := s.peer.waitApplied(context.Background(), 0); err != nil {

@@ -2405,6 +2405,24 @@ test("openNewActivity send-to entry also restores the Standard default", async (
   assert.equal(ctx.byId.nc_model.value, "synth-std");
 });
 
+test("destroy drops a delayed Muse catalog so a closed form is not resurrected", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature();
+  ctx.setApi(async path => path === "/api/agents" ? pending : {});
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+  ctx.feature.closeSheets();
+  ctx.feature.destroy();
+  release({
+    muse: { models: ["synth-std", "synth-disc"], muse_models: [MUSE_STD, MUSE_DISC] },
+  });
+  await settle();
+  assert.equal(ctx.byId.newchat.classList.contains("open"), false);
+  assert.notEqual(ctx.byId.nc_model.value, "synth-disc");
+});
+
 test("delayed catalog on an open fresh form selects Standard, not Discounted", async () => {
   let release;
   const pending = new Promise(resolve => { release = resolve; });

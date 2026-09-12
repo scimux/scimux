@@ -942,6 +942,62 @@ func TestHandleAgentsMuseEmptyCatalogAndProbeFailure(t *testing.T) {
 	}
 }
 
+func TestMuseTierOfRejectsNonExactClassifierValues(t *testing.T) {
+	a := &app{museClassify: func(string) string { return "Standard" }}
+	if got := a.museTierOf("std-1"); got != museTierUnknown {
+		t.Fatalf("title-case classifier = %q, want unknown", got)
+	}
+	a.museClassify = func(string) string { return "STANDARD" }
+	if got := a.museTierOf("std-1"); got != museTierUnknown {
+		t.Fatalf("uppercase classifier = %q, want unknown", got)
+	}
+	a.museClassify = func(id string) string { return id }
+	if got := a.museTierOf("spark-code"); got != museTierUnknown {
+		t.Fatalf("model-id echo = %q, want unknown", got)
+	}
+	a.museClassify = func(string) string { return museTierDiscounted }
+	if got := a.museTierOf("x"); got != museTierDiscounted {
+		t.Fatalf("exact discounted = %q", got)
+	}
+}
+
+func TestMuseViewsCopiesLimitPointers(t *testing.T) {
+	n, outn := 100, 8
+	models := []muse.Model{{ID: "std-1", Label: "Std", IsDefault: true, ContextLimit: &n, OutputLimit: &outn}}
+	a := &app{museClassify: func(string) string { return museTierStandard }}
+	views := a.museViews(models)
+	if len(views) != 1 || views[0].ContextLimit == nil || views[0].OutputLimit == nil {
+		t.Fatalf("%+v", views)
+	}
+	*views[0].ContextLimit = 1
+	*views[0].OutputLimit = 2
+	if n != 100 || outn != 8 {
+		t.Fatalf("museViews aliased catalog pointers: ctx=%d out=%d", n, outn)
+	}
+}
+
+func TestHandleAgentsNonExactClassifierIsUnlaunchable(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "std-1", Label: "Looks standard", IsDefault: true}}, nil
+	}
+	a.museClassify = func(string) string { return "Standard" }
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	rows := out["muse"].MuseModels
+	if len(rows) != 1 || rows[0].Tier != museTierUnknown || rows[0].Launchable || rows[0].Default {
+		t.Fatalf("non-exact classifier must fail closed: %+v", rows)
+	}
+	if len(out["muse"].Models) != 0 {
+		t.Fatalf("legacy selectable = %v, want empty", out["muse"].Models)
+	}
+}
+
 func TestHandleAgentsMuseProductionAuthorityIsEmpty(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	installMuseAgentBase(a)

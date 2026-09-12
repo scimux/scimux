@@ -495,6 +495,10 @@ func TestSpendAccumulateOnly(t *testing.T) {
 	if s.TotalTokens != 15 || s.InputTokens != 11 {
 		t.Fatalf("max-style accumulate failed: %+v", s)
 	}
+	s = accumulateSpend(s, Spend{TotalTokens: 15, InputTokens: 99, OutputTokens: 0})
+	if s.InputTokens != 11 || s.OutputTokens != 4 {
+		t.Fatalf("equal total replaced component counts: %+v", s)
+	}
 }
 
 func TestContextUsageIsOccupancy(t *testing.T) {

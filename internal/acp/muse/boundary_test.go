@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -166,6 +167,69 @@ func TestBoundaryMatchersCatchPlantedViolations(t *testing.T) {
 	}
 }
 
+func TestBoundaryTestsNeverExecRealAgentCLI(t *testing.T) {
+	dir := productionDir(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scanned int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for _, hit := range realAgentExecHits(string(b)) {
+			t.Errorf("%s: %s", e.Name(), hit)
+		}
+	}
+	if scanned < 8 {
+		t.Fatalf("scanned %d muse test files, want at least the package suite", scanned)
+	}
+}
+
+func TestBoundaryRealAgentMatcherCatchesPlantedViolations(t *testing.T) {
+	museBin := "mu" + "se"
+	claudeBin := "clau" + "de"
+	codexBin := "cod" + "ex"
+	grokBin := "gr" + "ok"
+	piBin := "p" + "i"
+	openBin := "open" + "code"
+	plants := map[string]string{
+		"exec muse":            `exec.Command("` + museBin + `", "serve")`,
+		"command-context muse": `exec.CommandContext(context.Background(), "` + museBin + `", "serve")`,
+		"lookpath muse":        `exec.LookPath("` + museBin + `")`,
+		"exec claude":          `c := exec.Command("` + claudeBin + `")`,
+		"exec codex":           `exec.Command("` + codexBin + `", "app-server")`,
+		"exec grok":            `exec.Command("` + grokBin + `")`,
+		"exec pi":              `exec.Command("` + piBin + `", "--version")`,
+		"exec opencode":        `exec.Command("` + openBin + `")`,
+	}
+	for label, plant := range plants {
+		if hits := realAgentExecHits(plant); len(hits) == 0 {
+			t.Fatalf("matcher missed planted violation %s: %s", label, plant)
+		}
+	}
+	safe := []string{
+		`exec.Command(os.Args[0])`,
+		`return exec.Command("/no/such/muse-binary-for-phase4-tests")`,
+		`commandFn = func(ctx context.Context, name string, args ...string) *exec.Cmd {`,
+		`if name != "muse" || args[0] != "serve"`,
+		`writeScript(t, binDir, "muse", "exit 0")`,
+		`Title: "approval-judge unavailable"`,
+		`params["providerId"] = p.ProviderID`,
+	}
+	for _, s := range safe {
+		if hits := realAgentExecHits(s); len(hits) > 0 {
+			t.Fatalf("false positive on %q: %v", s, hits)
+		}
+	}
+}
+
 var allowedStdlibImports = map[string]bool{
 	"bufio": true, "bytes": true, "context": true, "crypto/rand": true,
 	"encoding/binary": true, "encoding/hex": true, "encoding/json": true,
@@ -237,6 +301,23 @@ func forbiddenLiteralHits(src string) []string {
 	for _, c := range checks {
 		if c.ok(src) {
 			hits = append(hits, c.name)
+		}
+	}
+	return hits
+}
+
+func realAgentExecHits(src string) []string {
+	var hits []string
+	for _, bin := range []string{"muse", "claude", "codex", "pi", "opencode", "grok"} {
+		literal := `"(?:[^"\n]*/)?` + regexp.QuoteMeta(bin) + `"`
+		if regexp.MustCompile(`exec\.Command\s*\(\s*` + literal).MatchString(src) {
+			hits = append(hits, "exec.Command("+bin+")")
+		}
+		if regexp.MustCompile(`exec\.CommandContext\s*\([^,]+,\s*` + literal).MatchString(src) {
+			hits = append(hits, "exec.CommandContext("+bin+")")
+		}
+		if regexp.MustCompile(`exec\.LookPath\s*\(\s*"` + regexp.QuoteMeta(bin) + `"`).MatchString(src) {
+			hits = append(hits, "exec.LookPath("+bin+")")
 		}
 	}
 	return hits

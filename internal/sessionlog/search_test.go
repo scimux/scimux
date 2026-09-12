@@ -500,6 +500,28 @@ func asstLineProv(time, text, src string) string {
 	return `{"t":"assistant","time":"` + time + `","text":` + jsonStr(text) + `,"prov":[{"loc":"message","key":"_meta","v":{"src":"` + src + `"}}]}`
 }
 
+func TestScanStringExcerptAndEmptyQuery(t *testing.T) {
+	got := ScanString("please FIX the login handler today", "fix", 8, 8)
+	if !got.OK || got.Match != "FIX" {
+		t.Fatalf("%+v", got)
+	}
+	if !strings.Contains(strings.ToLower(got.Before), "please") {
+		t.Fatalf("before=%q", got.Before)
+	}
+	if !strings.Contains(strings.ToLower(got.After), "the") {
+		t.Fatalf("after=%q", got.After)
+	}
+	if ScanString("nope", "missing", 4, 4).OK {
+		t.Fatal("absent query reported a hit")
+	}
+	if ScanString("hello", "  ", 4, 4).OK {
+		t.Fatal("whitespace query reported a hit")
+	}
+	if ScanString("", "x", 4, 4).OK {
+		t.Fatal("empty haystack reported a hit")
+	}
+}
+
 func TestScanLogRetainsAgentAndProvForAssistant(t *testing.T) {
 	p := writeLines(t,
 		metaU1,
