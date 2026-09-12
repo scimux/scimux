@@ -79,7 +79,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -97,7 +97,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"5c7778c1744b9f9e9b495100dae3790a0aad1635d166452b2786709a90b443d743ccc445bc7faba279bde60bb179f8a5a8d0e866c986d9fb1e4d7ef6e3232a0a\"}"
     },
     "response": {
       "status": 404,
@@ -108,7 +108,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -129,7 +129,7 @@
           "headers": {
             "Content-Type": "application/json"
           },
-          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+          "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"5c7778c1744b9f9e9b495100dae3790a0aad1635d166452b2786709a90b443d743ccc445bc7faba279bde60bb179f8a5a8d0e866c986d9fb1e4d7ef6e3232a0a\"}"
         }
       ]
     }
@@ -144,7 +144,7 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"d35e93a00e680a0363fee336d93b9e85eed5a81c7311d4c93fad653d16860994e0d43aa48a03927f26ce6ef9513783e00e3af914bb5e1f2d9ddecb7713a35c01\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"5c7778c1744b9f9e9b495100dae3790a0aad1635d166452b2786709a90b443d743ccc445bc7faba279bde60bb179f8a5a8d0e866c986d9fb1e4d7ef6e3232a0a\"}"
     },
     "response": {
       "status": 404,
@@ -155,7 +155,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -195,7 +195,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -242,7 +242,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f"
     }
@@ -268,7 +268,7 @@
       "body_utf8": "not found\n"
     },
     "setup": {
-      "origin": "https://my.scimux.eu",
+      "origin": "https://my.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f"
     }

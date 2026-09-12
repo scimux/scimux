@@ -358,7 +358,7 @@ func (s *Session) TransportCause() (TransportCause, error) {
 	return cause, nil
 }
 
-// signallingHub is the in-process stand-in for my.scimux.eu: it relays
+// signallingHub is the in-process stand-in for my.scimux.com: it relays
 // sealed envelopes it cannot read and tracks who is waiting. It is not a
 // model of the hub's HTTP surface — that is the rv repository's job — only
 // of the two properties S6 must demonstrate: that a restart loses hub state

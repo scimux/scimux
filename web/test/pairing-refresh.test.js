@@ -24,7 +24,7 @@ function state(screen, over = {}) {
     screen,
     visible: true,
     code: "04106105",
-    link: "https://my.scimux.eu/p#c=04106105",
+    link: "https://my.scimux.com/p#c=04106105",
     expiresAt: LIVE,
     ...over,
   };
@@ -142,7 +142,7 @@ test("an offer that lands on an already-queued refresh cancels it", () => {
 
 test("the rendered QR follows the link, so a refresh cannot leave a stale image", () => {
   const first = state("show-code");
-  const second = nextPairing(first, { type: "MINTED", code: "99998888", rid: "cd", link: "https://my.scimux.eu/p#c=99998888", expiresAt: LIVE }, T0);
+  const second = nextPairing(first, { type: "MINTED", code: "99998888", rid: "cd", link: "https://my.scimux.com/p#c=99998888", expiresAt: LIVE }, T0);
   const a = pairingView(first).qr;
   const b = pairingView(second).qr;
   assert.match(a, /^<svg /);
