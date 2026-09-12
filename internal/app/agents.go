@@ -592,6 +592,18 @@ func (a *app) museTierOf(id string) string {
 	return museTierUnknown
 }
 
+// classifyMuseStandard is the maintainer-approved production tier authority:
+// every nonblank model ID returned by Muse's live model/list catalog is
+// Standard. Catalog membership remains independently authoritative, so this
+// does not make forged, stale, blank, or malformed IDs launchable and does not
+// infer policy from a model name, label, provider, or update response.
+func classifyMuseStandard(modelID string) string {
+	if strings.TrimSpace(modelID) == "" {
+		return museTierUnknown
+	}
+	return museTierStandard
+}
+
 func museModelLabel(m muse.Model) string {
 	if s := strings.TrimSpace(m.Label); s != "" {
 		return s

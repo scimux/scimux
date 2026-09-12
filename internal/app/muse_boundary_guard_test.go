@@ -77,10 +77,21 @@ func TestMuseBoundaryAntiVacuity(t *testing.T) {
 	if !strings.Contains(files["harness_version.go"], museStableChannel) {
 		t.Fatal("stable-channel source missing from harness_version.go")
 	}
+	var classifierOwner string
 	for name, src := range files {
-		if assignsMuseClassifier(t, name, src) {
-			t.Fatalf("%s installs a production Muse tier classifier", name)
+		if !assignsMuseClassifier(t, name, src) {
+			continue
 		}
+		if classifierOwner != "" {
+			t.Fatalf("multiple production Muse tier classifier owners: %s and %s", classifierOwner, name)
+		}
+		classifierOwner = name
+	}
+	if classifierOwner != "main.go" {
+		t.Fatalf("production Muse tier classifier owner = %q, want main.go", classifierOwner)
+	}
+	if !strings.Contains(files["main.go"], "a.museClassify = classifyMuseStandard") {
+		t.Fatal("main.go must install exactly the maintainer-approved all-Standard classifier")
 	}
 	if strings.Contains(joined, "this planted token must not appear in production") {
 		t.Fatal("scan included test files")
@@ -455,7 +466,7 @@ func TestMuseBoundaryMatchersCatchPlantedViolations(t *testing.T) {
 		t.Fatal("dotless third-party import was classified as standard library")
 	}
 	if !assignsMuseClassifier(t, "plant.go", "package app\nfunc f(a *app) { a.museClassify = classify }") {
-		t.Fatal("production classifier assignment guard missed a planted assignment")
+		t.Fatal("classifier assignment matcher missed a planted assignment")
 	}
 	safe := []string{
 		`ProviderName string ` + "`json:\"providerName\"`",

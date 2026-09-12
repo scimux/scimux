@@ -243,6 +243,7 @@ func Run() {
 	a.installClaudeModelProbe()
 	a.ensureClaudeModels()
 	a.museCatalog = probeMuseCatalog
+	a.museClassify = classifyMuseStandard
 
 	handler := cmd.Handler()
 	if handler == nil {

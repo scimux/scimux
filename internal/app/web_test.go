@@ -1772,7 +1772,7 @@ func TestMusePhase6Readme(t *testing.T) {
 		"notification-only",
 		"cannot guarantee that work is held",
 		"approval judge",
-		"fail-closed",
+		"catalog models as Standard",
 		"supplies no model access",
 	} {
 		if !strings.Contains(readme, want) {

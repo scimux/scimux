@@ -581,8 +581,8 @@ type app struct {
 	// the process-wide discovery cache remains immutable and race-safe.
 	agentCatalog func() map[string]agentInfo
 	// museClassify maps an exact model ID to "standard" or "discounted".
-	// Nil or any other result is "unknown". Production leaves this nil:
-	// no authoritative tier source has been supplied.
+	// Nil or any other result is "unknown". Tests leave it nil by default;
+	// the production serve path installs the maintainer-approved policy.
 	museClassify func(modelID string) string
 	// testProc, when non-nil, is returned by proc() instead of the real ACP
 	// or Codex manager. Tests only — never set in production.

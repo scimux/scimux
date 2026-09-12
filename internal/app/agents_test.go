@@ -998,13 +998,26 @@ func TestHandleAgentsNonExactClassifierIsUnlaunchable(t *testing.T) {
 	}
 }
 
-func TestHandleAgentsMuseProductionAuthorityIsEmpty(t *testing.T) {
+func TestMuseStandardTierAuthority(t *testing.T) {
+	for _, id := range []string{"model-a", "future-model", "standard-looking-is-not-required"} {
+		if got := classifyMuseStandard(id); got != museTierStandard {
+			t.Errorf("classifyMuseStandard(%q) = %q, want %q", id, got, museTierStandard)
+		}
+	}
+	for _, id := range []string{"", " ", "\n"} {
+		if got := classifyMuseStandard(id); got != museTierUnknown {
+			t.Errorf("classifyMuseStandard(%q) = %q, want %q", id, got, museTierUnknown)
+		}
+	}
+}
+
+func TestHandleAgentsMuseProductionAuthorityIsStandard(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	installMuseAgentBase(a)
 	a.museCatalog = func(context.Context) ([]muse.Model, error) {
-		return []muse.Model{{ID: "std-1", Label: "Looks standard", IsDefault: true}}, nil
+		return []muse.Model{{ID: "catalog-model", Label: "Catalog Model", IsDefault: true}}, nil
 	}
-	// Production classifier is unset/empty.
+	a.museClassify = classifyMuseStandard
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var out map[string]agentInfo
@@ -1012,8 +1025,11 @@ func TestHandleAgentsMuseProductionAuthorityIsEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := out["muse"].MuseModels
-	if len(rows) != 1 || rows[0].Tier != museTierUnknown || rows[0].Launchable {
-		t.Fatalf("production empty authority must report unknown/unlaunchable: %+v", rows)
+	if len(rows) != 1 || rows[0].ID != "catalog-model" || rows[0].Tier != museTierStandard || !rows[0].Launchable || !rows[0].Default {
+		t.Fatalf("production Standard authority not projected: %+v", rows)
+	}
+	if !reflect.DeepEqual(out["muse"].Models, []string{"catalog-model"}) {
+		t.Fatalf("selectable models = %v", out["muse"].Models)
 	}
 }
 
