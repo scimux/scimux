@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -130,4 +131,40 @@ func TestUsageViewMarksOffDistinctly(t *testing.T) {
 
 func writeFileForSettingsTest(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o600)
+}
+
+// Consent is the one setting whose success response must be true: a 200 on
+// "turn it off" that leaves the probe authorized would spend the user's quota
+// against an explicit refusal. Concurrent toggles (a double tap, or the local
+// UI and a paired device at once) must therefore either report failure or be
+// the value on disk — never report success while another writer's bytes land.
+func TestSettingsConcurrentTogglesNeverLieAboutSuccess(t *testing.T) {
+	a := settingsApp(t)
+	for round := 0; round < 50; round++ {
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for i, want := range []bool{true, false} {
+			wg.Add(1)
+			go func(i int, want bool) {
+				defer wg.Done()
+				errs[i] = a.saveSettings(settings{ClaudeUsageChecks: want})
+			}(i, want)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: concurrent save %d failed: %v", round, i, err)
+			}
+		}
+		// Both reported success, so the file must be one of them intact —
+		// not a half-written document that the next read degrades to "off"
+		// while the browser shows the switch on.
+		b, err := os.ReadFile(a.settingsPath)
+		if err != nil {
+			t.Fatalf("round %d: settings unreadable after two successful saves: %v", round, err)
+		}
+		if s := string(b); s != `{"claude_usage_checks":true}` && s != `{"claude_usage_checks":false}` {
+			t.Fatalf("round %d: concurrent saves left %q on disk", round, s)
+		}
+	}
 }

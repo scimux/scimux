@@ -483,6 +483,10 @@ type app struct {
 	// cannot interleave a partial line, and pairs each append with an fsync —
 	// these records are the durable truth the supervisor replays and audits.
 	storeMu sync.Mutex
+	// settingsMu serializes saveSettings. The document is consent (settings.go),
+	// so its write-then-rename must be one critical section: a save that
+	// reports success has to be the save that reached disk.
+	settingsMu sync.Mutex
 	// uiMu serializes the read-modify-write of the UI-state file (ui.json),
 	// independent of a.mu. The revision check plus the atomic tmp-write+rename
 	// must be one critical section, but they are pure file I/O over a private
