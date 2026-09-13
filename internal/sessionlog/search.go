@@ -1,7 +1,6 @@
 package sessionlog
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"os"
@@ -85,9 +84,6 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-
 	rec, seg := 0, 0
 	// lastTurnTime is the timestamp of the most recent user/assistant turn in the
 	// current segment. An asset filename hit is not itself a rendered turn, so it
@@ -102,31 +98,25 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 	// arrives. If the segment ends first (seam or EOF) they keep their own time.
 	var pendingAssetHits []int
 	var lineNo int
-	var bytesRead int64
-	for sc.Scan() {
+	// One budget check, reached from every exit: over it, the scan stops and
+	// says so rather than reporting a whole-file answer it did not read.
+	overBudget := func(off int64) bool {
+		if opt.MaxBytes > 0 && off > opt.MaxBytes {
+			res.Partial = true
+			return true
+		}
+		return false
+	}
+	forEachRecord(f, func(line []byte, off int64) bool {
 		lineNo++
 		if lineNo%scanCtxCheck == 0 && ctx.Err() != nil {
 			res.Partial = true
-			break
-		}
-		line := sc.Bytes()
-		bytesRead += int64(len(line)) + 1 // +1 for the stripped newline
-		if len(strings.TrimSpace(string(line))) == 0 {
-			// blank line: not a record, does not advance ordinals
-			if opt.MaxBytes > 0 && bytesRead > opt.MaxBytes {
-				res.Partial = true
-				break
-			}
-			continue
+			return false
 		}
 		var ev Event
 		if json.Unmarshal(line, &ev) != nil {
-			// malformed/torn line: skipped like ReadEvents, no ordinal shift
-			if opt.MaxBytes > 0 && bytesRead > opt.MaxBytes {
-				res.Partial = true
-				break
-			}
-			continue
+			// malformed/torn/oversized line: skipped like ReadEvents, no ordinal shift
+			return !overBudget(off)
 		}
 
 		// This is parsed record `rec`, in segment `seg`.
@@ -149,7 +139,7 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 				}
 				if opt.MaxHits > 0 && len(res.Hits) >= opt.MaxHits {
 					res.Partial = true
-					break
+					return false
 				}
 			}
 		}
@@ -170,12 +160,8 @@ func ScanLogCtx(ctx context.Context, path, query string, opt ScanOptions) ScanRe
 			pendingAssetHits = nil // forward owner never crosses a seam either
 		}
 		rec++
-
-		if opt.MaxBytes > 0 && bytesRead > opt.MaxBytes {
-			res.Partial = true
-			break
-		}
-	}
+		return !overBudget(off)
+	})
 
 	for i := range res.Hits {
 		res.Hits[i].UID = res.UID
@@ -210,9 +196,6 @@ func ReadTurnWindow(path string, segment, record, before, after int) (window []t
 		return nil, 0, false, false, false
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-
 	if before < 0 {
 		before = 0
 	}
@@ -229,14 +212,10 @@ func ReadTurnWindow(path string, segment, record, before, after int) (window []t
 	anchorOrd := -1      // absolute turn index of the owning turn, once known
 	collecting := false  // past the anchor: filling afterTurns
 
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue // blank: no ordinal shift, same as ScanLog/ReadEvents
-		}
+	forEachRecord(f, func(line []byte, _ int64) bool {
 		var ev Event
 		if json.Unmarshal(line, &ev) != nil {
-			continue // malformed/torn: skipped, no ordinal shift
+			return true // malformed/torn/oversized: skipped, no ordinal shift
 		}
 		isTurn := (ev.T == "user" || ev.T == "assistant") && strings.TrimSpace(ev.Text) != ""
 
@@ -285,11 +264,10 @@ func ReadTurnWindow(path string, segment, record, before, after int) (window []t
 			pendingNext = false // a seam terminates the owner search — never cross it
 		}
 		rec++
-
-		if collecting && afterTrunc {
-			break // window is complete: ring + a full after-window + one extra proving truncation
-		}
-	}
+		// The window is complete once the ring, a full after-window and one
+		// extra record proving truncation are in hand.
+		return !(collecting && afterTrunc)
+	})
 
 	if anchorOrd < 0 {
 		return nil, 0, false, false, false

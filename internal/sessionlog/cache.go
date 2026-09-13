@@ -1,7 +1,6 @@
 package sessionlog
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"os"
@@ -307,39 +306,22 @@ func (c *LogCache) resetAccum() {
 
 // consume reads newline-terminated records from r starting at baseOff,
 // feeding each successfully parsed event into the accumulators. The returned
-// watermark is baseOff + bytes through the last complete '\n'. A final line
-// without a trailing newline is left unconsumed (torn-tail safety).
+// watermark is baseOff + bytes through the last complete '\n'; a final line
+// without a trailing newline is left unconsumed (torn-tail safety) and re-read
+// next time. It walks the file with the same forEachRecord as ReadEvents and
+// the search readers on purpose: this cache is the chat read path, so a record
+// one of them skips and this one ingests is two readers showing the user two
+// different conversations -- and record ordinals that no longer line up.
 func (c *LogCache) consume(r io.Reader, baseOff int64) (newOff int64, nBytes int64, err error) {
-	br := bufio.NewReaderSize(r, 64*1024)
-	off := baseOff
-	for {
-		line, err := br.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
-				// Incomplete final line: do not advance watermark past it.
-				// (ReadEvents' Scanner would yield it and skip a failed
-				// unmarshal; we re-read those bytes next time instead.)
-				return off, off - baseOff, nil
-			}
-			return off, off - baseOff, err
-		}
-		// Complete line including '\n'.
-		off += int64(len(line))
-		content := line[:len(line)-1]
-		// Tolerate optional CR before LF.
-		if len(content) > 0 && content[len(content)-1] == '\r' {
-			content = content[:len(content)-1]
-		}
-		if len(strings.TrimSpace(string(content))) == 0 {
-			continue
-		}
+	n, err := forEachRecord(r, func(rec []byte, _ int64) bool {
 		var ev Event
-		if json.Unmarshal(content, &ev) != nil {
-			continue
+		if json.Unmarshal(rec, &ev) == nil {
+			c.ingest(ev, c.recCount)
+			c.recCount++
 		}
-		c.ingest(ev, c.recCount)
-		c.recCount++
-	}
+		return true
+	})
+	return baseOff + n, n, err
 }
 
 // ingest updates every accumulator for one successfully parsed event at
