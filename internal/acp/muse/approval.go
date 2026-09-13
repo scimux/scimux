@@ -99,8 +99,6 @@ type Approval struct {
 	Prov           json.RawMessage `json:"-"`
 }
 
-func (a Approval) AutoApprovable() bool { return false }
-
 func (a Approval) Describe() string {
 	var b strings.Builder
 	kind := a.Subject.Kind

@@ -248,18 +248,19 @@ test("computerSettingOn is true only for the boolean true", () => {
   assert.equal(computerSettingOn({}), false);
 });
 
-test("museConsentNote names blocked launch, token spend, and notification-only", () => {
+test("museConsentNote separates token consent from blocking approvals", () => {
   const off = museConsentNote(false);
-  assert.match(off, /^Off — /);
-  assert.match(off, /Muse launch is blocked on this computer/);
-  assert.match(off, /approval judge to spend subscription tokens/);
-  assert.doesNotMatch(off, /auto-approve|synchronous/i);
+  assert.equal(off,
+    "Off — You cannot start a Muse session. Turn this on to use Muse. Muse " +
+    "may use part of your plan's usage limit when it checks whether tool " +
+    "actions are safe.");
 
   const on = museConsentNote(true);
-  assert.match(on, /^On — /);
-  assert.match(on, /approval judge may spend subscription tokens/);
-  assert.match(on, /notification-only/);
-  assert.doesNotMatch(on, /auto-approve|held while|synchronous/i);
+  assert.equal(on,
+    "On — You can start Muse sessions. Muse may use part of your plan's " +
+    "usage limit to check tool actions. Actions that still need approval " +
+    "stay paused until they are allowed or rejected.");
+  assert.doesNotMatch(off + on, /approval judge|subscription tokens/i);
 });
 
 test("only a present Muse row gets an active consent switch", () => {
@@ -270,20 +271,22 @@ test("only a present Muse row gets an active consent switch", () => {
   assert.match(present, /data-muse-consent="muse"/);
   assert.doesNotMatch(present, /data-muse-consent="claude"/);
   assert.doesNotMatch(present, /data-muse-consent="muse"[^>]*checked/);
-  assert.match(present, /Muse launch is blocked/);
+  assert.match(present, /You cannot start a Muse session/);
+  assert.match(present, /> Enable Muse<\/label>/);
+  assert.doesNotMatch(present, /Approval-judge consent/);
 
   const on = harnessRowsHTML([
     { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
   ], null, { museConsent: true });
   assert.match(on, /data-muse-consent="muse"[^>]*checked/);
-  assert.match(on, /notification-only/);
+	assert.match(on, /Actions that still need approval stay paused/);
 
   const absent = harnessRowsHTML([
     { agent: "muse", present: false, launchable: false },
   ], null, { museConsent: true });
   assert.doesNotMatch(absent, /data-muse-consent/);
   assert.doesNotMatch(absent, /<input type="checkbox"/);
-  assert.match(absent, /Muse launch is blocked|not installed/);
+  assert.match(absent, /You cannot start a Muse session|not installed/);
 });
 
 test("Muse consent is not coupled to auto-approve or Claude usage checks", () => {

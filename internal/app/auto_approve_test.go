@@ -910,7 +910,7 @@ func TestClaudeAutoApproveNeverTouchesTmux(t *testing.T) {
 }
 
 func TestAutoApproveAgentsShareEligibility(t *testing.T) {
-	// Prove codex/grok/opencode/pi all use the same pure function (table already
+	// Prove codex/grok/opencode/pi/muse all use the same pure function (table already
 	// covers options). Here we only assert which transports the *structured*
 	// predicate covers: Claude is not one of them — it reaches auto-approval
 	// through its own hook, checked separately below.
@@ -922,6 +922,7 @@ func TestAutoApproveAgentsShareEligibility(t *testing.T) {
 		{"grok", "acp", true},
 		{"opencode", "acp", true},
 		{"pi", "acp", true},
+		{"muse", "muse", true},
 		{"claude", "tmux", false},
 		{"claude", "", false},
 	}

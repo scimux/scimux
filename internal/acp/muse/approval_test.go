@@ -57,9 +57,6 @@ func TestDecodeApprovalUnknownKindAndStages(t *testing.T) {
 	if a.Describe() == "" || strings.EqualFold(a.Describe(), "command") {
 		t.Fatalf("unknown kind needs a generic description, got %q", a.Describe())
 	}
-	if a.AutoApprovable() {
-		t.Fatal("AutoApprovable must be false")
-	}
 	if len(a.Subject.Stages) != 2 {
 		t.Fatalf("stages=%d", len(a.Subject.Stages))
 	}

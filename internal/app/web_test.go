@@ -1675,7 +1675,7 @@ func TestReducedMotionAndModalNoPeek(t *testing.T) {
 }
 
 // Phase 6: Muse consent and warning hosts are composed in the existing shell.
-func TestMusePhase6BrowserComposition(t *testing.T) {
+func TestMuseBrowserComposition(t *testing.T) {
 	html := mustReadIndex(t)
 	app := mustReadApp(t)
 	harness, err := os.ReadFile(webSourcePath("web/js/harness.js"))
@@ -1691,11 +1691,14 @@ func TestMusePhase6BrowserComposition(t *testing.T) {
 		t.Fatalf("read chat.js: %v", err)
 	}
 
-	if got := strings.Count(html, `id="nc_muse_warn"`); got != 1 {
-		t.Errorf("new-activity Muse warning host occurs %d times, want 1", got)
+	if strings.Contains(html, `id="nc_muse_warn"`) {
+		t.Error("obsolete new-activity Muse warning host remains")
 	}
-	if got := strings.Count(html, `id="muse_chat_warn"`); got != 1 {
-		t.Errorf("chat Muse warning host occurs %d times, want 1", got)
+	if strings.Contains(html, `id="muse_chat_warn"`) {
+		t.Error("obsolete generic Muse chat warning host remains")
+	}
+	if got := strings.Count(html, `id="muse_schema_warn"`); got != 1 {
+		t.Errorf("Muse schema warning host occurs %d times, want 1", got)
 	}
 	msgsOpen := strings.Index(html, `<div id="msgs"`)
 	msgsClose := -1
@@ -1705,12 +1708,12 @@ func TestMusePhase6BrowserComposition(t *testing.T) {
 			msgsClose += msgsOpen
 		}
 	}
-	chatWarn := strings.Index(html, `id="muse_chat_warn"`)
+	chatWarn := strings.Index(html, `id="muse_schema_warn"`)
 	if msgsOpen >= 0 && msgsClose >= 0 && chatWarn > msgsOpen && chatWarn < msgsClose {
-		t.Error("#muse_chat_warn must sit outside #msgs so polling cannot erase it")
+		t.Error("#muse_schema_warn must sit outside #msgs so polling cannot erase it")
 	}
 	if chatWarn < 0 {
-		t.Error("#muse_chat_warn host is missing")
+		t.Error("#muse_schema_warn host is missing")
 	}
 
 	if !strings.Contains(app, `from "./harness.js"`) {
@@ -1734,8 +1737,8 @@ func TestMusePhase6BrowserComposition(t *testing.T) {
 	if strings.Contains(string(sheets), `"muse" + "_models"`) || strings.Contains(string(sheets), `"muse"+"_models"`) {
 		t.Error("sheets.js must not conceal muse_models by concatenation")
 	}
-	if !strings.Contains(string(chat), "muse_chat_warn") && !strings.Contains(string(chat), "museChatWarn") {
-		t.Error("chat.js must own the Muse supervision warning host")
+	if !strings.Contains(string(chat), "muse_schema_warn") {
+		t.Error("chat.js must own the Muse schema warning host")
 	}
 	if !strings.Contains(string(chat), "muse_schema_warning") {
 		t.Error("chat.js must consume the literal field name muse_schema_warning")
@@ -1760,7 +1763,7 @@ func TestMusePhase6BrowserComposition(t *testing.T) {
 	}
 }
 
-func TestMusePhase6Readme(t *testing.T) {
+func TestMuseReadme(t *testing.T) {
 	b, err := os.ReadFile(webSourcePath("README.md"))
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
@@ -1769,14 +1772,19 @@ func TestMusePhase6Readme(t *testing.T) {
 	for _, want := range []string{
 		"Claude Code", "Codex", "pi", "opencode", "Grok", "Muse",
 		"muse serve",
-		"notification-only",
-		"cannot guarantee that work is held",
+		"remain pending until resolved",
+		"Auto-approve this turn",
 		"approval judge",
 		"catalog models as Standard",
 		"supplies no model access",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README.md missing %q", want)
+		}
+	}
+	for _, obsolete := range []string{"notification-only", "cannot guarantee that work is held"} {
+		if strings.Contains(readme, obsolete) {
+			t.Errorf("README.md retains obsolete Muse claim %q", obsolete)
 		}
 	}
 	if strings.Contains(readme, "five agents side by side") {

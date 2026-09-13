@@ -93,8 +93,6 @@ export const SCROLL_NEAR_BOTTOM_PX = 80;
 export const CHAT_LOAD_DELAY_MS = 300;
 export const CHAT_DETAIL_SAVED_MS = 2000;
 export const PENDING_JUMP_TTL_MS = 15000;
-export const MUSE_SUPERVISION_WARNING =
-  "Muse supervision warning: approvals are notification-only; silence does not mean the agent is held.";
 export const MUSE_SCHEMA_MISMATCH_WARNING =
   "Muse protocol compatibility warning: its schema fingerprint differs from the version scimux tested.";
 export const MUSE_SCHEMA_MISMATCH_CODE = "muse_schema_fingerprint_mismatch";
@@ -1362,31 +1360,28 @@ export function createChatFeature(deps){
 
   function invalidate(){ chatSig = ""; }
 
-  function museChatWarnHost(){
-    if (roots.muse_chat_warn) return roots.muse_chat_warn;
+  function museSchemaWarnHost(){
+    if (roots.muse_schema_warn) return roots.muse_schema_warn;
     if (doc && typeof doc.getElementById === "function")
-      return doc.getElementById("muse_chat_warn");
+      return doc.getElementById("muse_schema_warn");
     return null;
   }
 
-  function syncMuseChatWarning(n){
-    const host = museChatWarnHost();
+  function syncMuseSchemaWarning(n){
+    const host = museSchemaWarnHost();
     if (!host) return;
-    if (!n || n.agent !== "muse"){
+    if (!n || n.agent !== "muse" || n.muse_schema_warning !== MUSE_SCHEMA_MISMATCH_CODE){
       host.hidden = true;
       host.textContent = "";
       return;
     }
-    let text = MUSE_SUPERVISION_WARNING;
-    if (n && n.muse_schema_warning === MUSE_SCHEMA_MISMATCH_CODE)
-      text += "\n\n" + MUSE_SCHEMA_MISMATCH_WARNING;
-    host.textContent = text;
+    host.textContent = MUSE_SCHEMA_MISMATCH_WARNING;
     host.hidden = false;
   }
 
   function onSelectChange(){
     chatSig = "";
-    syncMuseChatWarning(nodeById(g("sel", "")));
+    syncMuseSchemaWarning(nodeById(g("sel", "")));
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
     chatETag = { node: "", etag: "" };
     lastAutoView = null;
@@ -1458,7 +1453,7 @@ export function createChatFeature(deps){
         details.setAttribute("aria-hidden", details.hidden ? "true" : "false");
     }
     const n = nodeById(g("sel", ""));
-    syncMuseChatWarning(n);
+    syncMuseSchemaWarning(n);
     const now = typeof d.now === "function" ? d.now() : Date.now();
     const saving = editingChatDesc || now < chatDetailSavedUntil;
     if (toggle) toggle.hidden = !n || (!chatDetailsOpen && !saving);

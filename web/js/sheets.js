@@ -187,11 +187,6 @@ function museTierSuffix(tier){
   return " \u2014 tier unavailable";
 }
 
-export function museActivityWarningText(){
-  return "Muse approvals are notification-only. scimux cannot guarantee that work is held while you decide.\n\n"
-    + "Muse's approval judge may spend your subscription tokens.";
-}
-
 export function museModelOptionsHTML(rows, esc = escDefault){
   const list = Array.isArray(rows) ? rows : [];
   let html = `<option value=""></option>`;
@@ -533,15 +528,6 @@ export function createSheetsFeature(deps = {}){
     fieldErrorCleanups.add(clear);
   }
 
-  function syncMuseActivityWarning(){
-    const warn = root("nc_muse_warn");
-    if (!warn) return;
-    const agentEl = root("nc_agent");
-    const muse = !!(agentEl && agentEl.value === "muse");
-    warn.hidden = !muse;
-    warn.textContent = muse ? museActivityWarningText() : "";
-  }
-
   function fillAgents(){
     const ag = root("nc_agent");
     if (ag) ag.innerHTML = agentOptionsHTML(MODELS, esc);
@@ -579,7 +565,6 @@ export function createSheetsFeature(deps = {}){
     } else {
       mo.innerHTML = modelOptionsHTML(MODELS, agent, p, esc);
     }
-    syncMuseActivityWarning();
   }
 
   function newchatIsOpen(){
@@ -660,7 +645,6 @@ export function createSheetsFeature(deps = {}){
       el.disabled = false;
       if (el.dataset) delete el.dataset.sheetDisabledByClose;
     }
-    syncMuseActivityWarning();
   }
 
   function prepareNewActivityLane(){
@@ -1042,7 +1026,6 @@ export function createSheetsFeature(deps = {}){
   }
   function onModelChange(){
     fillEfforts();
-    syncMuseActivityWarning();
   }
 
   function probeAgents(){

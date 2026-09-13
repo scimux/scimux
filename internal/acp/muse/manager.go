@@ -600,6 +600,18 @@ func encodeFence(f permFence) string {
 	return hex.EncodeToString(b)
 }
 
+// permissionRequestID is the shared structured-manager boundary identity.
+// The app compares it with PermissionBoundary to prove that a request was
+// created after an auto-approve lease was armed. The richer encoded fence is
+// reserved for a prepared decision token, where session, approval, requirement,
+// and choice must all remain bound until delivery.
+func permissionRequestID(f permFence) string {
+	if f.Incarn == "" || f.Seq == 0 {
+		return ""
+	}
+	return f.Incarn + ":" + strconv.FormatUint(f.Seq, 10)
+}
+
 func decodeFence(s string) (permFence, error) {
 	raw, err := hex.DecodeString(s)
 	if err != nil {
@@ -946,11 +958,11 @@ func (s *nodeSession) pendingInfo() (agentperm.Pending, bool) {
 		opts = append(opts, agentperm.Option{
 			Key:  strconv.Itoa(i + 1),
 			Name: name,
-			Kind: choiceKind(c.Decision),
+			Kind: museChoiceKind(a, c),
 		})
 	}
 	return agentperm.Pending{
-		RequestID: encodeFence(s.fenceOfLocked(s.pending)),
+		RequestID: permissionRequestID(s.fenceOfLocked(s.pending)),
 		Title:     a.Describe(),
 		ToolKind:  mapSubjectToolKind(a.Subject.Kind),
 		Options:   opts,
@@ -985,7 +997,7 @@ func (s *nodeSession) prepareResolve(expectedRequestID, key string) (optID, evid
 	if s.pending == nil {
 		return "", "", ErrNoPending
 	}
-	curID := encodeFence(s.fenceOfLocked(s.pending))
+	curID := permissionRequestID(s.fenceOfLocked(s.pending))
 	if expectedRequestID == "" || expectedRequestID != curID {
 		return "", "", ErrStalePermission
 	}
@@ -1146,17 +1158,39 @@ func mapKeyToChoice(key string, cs []Choice) (Choice, error) {
 	return Choice{}, fmt.Errorf("key %q maps to no choice", key)
 }
 
-func choiceKind(decision string) string {
-	switch decision {
-	case "approved":
+func museChoiceKind(approval Approval, choice Choice) string {
+	switch choice.Decision {
+	case "denied", "deniedPolicyAmendment", "timedOut", "abort":
+		return "reject"
+	case "approved", "approvedForSession", "approvedPolicyAmendment":
+		// Classified below with its exact durability.
+	default:
+		return ""
+	}
+	if approval.ApprovalID == "" ||
+		approval.Requirement.ApprovalID != approval.ApprovalID ||
+		approval.Requirement.SourceIndex < 0 ||
+		choice.ChoiceID == "" ||
+		!knownMuseApprovalSubject(approval.Subject.Kind) {
+		return ""
+	}
+	switch {
+	case choice.Decision == "approved" && choice.Scope == "once":
 		return "allow"
-	case "approvedForSession", "approvedPolicyAmendment":
+	case choice.Decision == "approvedForSession" && choice.Scope == "session":
+		return "allow_always"
+	case choice.Decision == "approvedPolicyAmendment" && choice.Scope == "localPersistent":
 		return "allow_always"
 	}
-	if IsRejection(decision) {
-		return "reject"
-	}
 	return ""
+}
+
+func knownMuseApprovalSubject(kind string) bool {
+	switch kind {
+	case "shell", "fileAccess", "network", "process", "tool":
+		return true
+	}
+	return false
 }
 
 func mapSubjectToolKind(kind string) string {

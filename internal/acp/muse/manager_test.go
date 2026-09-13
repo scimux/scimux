@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -523,7 +524,7 @@ func approvalParams(id, session, cmd string, idx int, choices []map[string]any) 
 		"approvalId": id,
 		"sessionId":  session,
 		"turnId":     "turn-1",
-		"subject":    map[string]any{"kind": "command", "command": cmd},
+		"subject":    map[string]any{"kind": "shell", "command": cmd},
 		"currentRequirementId": map[string]any{
 			"approvalId":  id,
 			"sourceIndex": idx,
@@ -534,9 +535,9 @@ func approvalParams(id, session, cmd string, idx int, choices []map[string]any) 
 
 func defaultChoices() []map[string]any {
 	return []map[string]any{
-		{"choiceId": "allow_once", "decision": "approved", "label": "Allow once"},
-		{"choiceId": "allow_sess", "decision": "approvedForSession", "label": "Allow for session"},
-		{"choiceId": "allow_pol", "decision": "approvedPolicyAmendment", "label": "Always allow"},
+		{"choiceId": "allow_once", "decision": "approved", "scope": "once", "label": "Allow once"},
+		{"choiceId": "allow_sess", "decision": "approvedForSession", "scope": "session", "label": "Allow for session"},
+		{"choiceId": "allow_pol", "decision": "approvedPolicyAmendment", "scope": "localPersistent", "label": "Always allow"},
 		{"choiceId": "deny", "decision": "denied", "label": "Reject"},
 		{"choiceId": "mystery", "decision": "mysteryConsent", "label": "Mystery"},
 	}
@@ -1179,6 +1180,26 @@ func TestManagerApprovalRejectDoesNotEndTurn(t *testing.T) {
 	completeTurn(t, m, srv, "turn-1", "completed")
 }
 
+func TestManagerPendingRequestIDMatchesPermissionBoundary(t *testing.T) {
+	m, _, srv, _ := launchOK(t, t.TempDir())
+	startTurn(t, m, srv, "risky", "turn-1")
+	srv.note(t, "approval/requested", approvalParams("ap-1", "sess-1", "ls", 0, defaultChoices()))
+	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
+
+	pending, ok := m.Pending("n1")
+	if !ok {
+		t.Fatal("pending approval missing")
+	}
+	incarn, seq, ok := m.PermissionBoundary("n1")
+	if !ok {
+		t.Fatal("permission boundary missing")
+	}
+	want := fmt.Sprintf("%s:%d", incarn, seq)
+	if pending.RequestID != want {
+		t.Fatalf("RequestID = %q, want shared boundary identity %q", pending.RequestID, want)
+	}
+}
+
 func TestManagerForeignAndDuplicateTerminal(t *testing.T) {
 	m, _, srv, logPath := launchOK(t, t.TempDir())
 	startTurn(t, m, srv, "hi", "turn-1")
@@ -1584,7 +1605,7 @@ func TestManagerApprovalUpdateReplacesFence(t *testing.T) {
 	srv.note(t, "approval/updated", map[string]any{
 		"approvalId": "ap-1", "sessionId": "sess-1",
 		"currentRequirementId": map[string]any{"approvalId": "ap-1", "sourceIndex": 1},
-		"subject":              map[string]any{"kind": "command", "command": "ls -l"},
+		"subject":              map[string]any{"kind": "shell", "command": "ls -l"},
 		"availableChoices": []map[string]any{
 			{"choiceId": "abort", "decision": "abort", "label": "Abort now"},
 		},
@@ -1625,7 +1646,7 @@ func TestManagerPrepareMappingAndEvidence(t *testing.T) {
 		t.Fatal("unknown key")
 	}
 	tokY, evY, err := m.PrepareResolve("n1", p.RequestID, "y")
-	if err != nil || evY == "" || !strings.Contains(evY, "command") {
+	if err != nil || evY == "" || !strings.Contains(evY, "shell") {
 		t.Fatalf("y: tok=%s ev=%s err=%v", tokY, evY, err)
 	}
 	tokN, _, err := m.PrepareResolve("n1", p.RequestID, "n")
@@ -1773,24 +1794,6 @@ func TestManagerPrepareNoPending(t *testing.T) {
 	}
 }
 
-func TestManagerApprovalNotAutoApprovable(t *testing.T) {
-	m, _, srv, _ := launchOK(t, t.TempDir())
-	startTurn(t, m, srv, "risky", "turn-1")
-	srv.note(t, "approval/requested", approvalParams("ap-1", "sess-1", "ls", 0, defaultChoices()))
-	waitFor(t, func() bool { return m.Attention("n1") == "approval" })
-	s := m.session("n1")
-	a, ok := s.client.PendingApproval()
-	if !ok || a.AutoApprovable() {
-		t.Fatal("auto-approvable")
-	}
-	p, _ := m.Pending("n1")
-	for _, o := range p.Options {
-		if o.Kind == "allow" && o.Key == "auto" {
-			t.Fatal("auto option invented")
-		}
-	}
-}
-
 func TestManagerConcurrentUpdateVersusDeliver(t *testing.T) {
 	m, _, srv, _ := launchOK(t, t.TempDir())
 	startTurn(t, m, srv, "risky", "turn-1")
@@ -1803,16 +1806,18 @@ func TestManagerConcurrentUpdateVersusDeliver(t *testing.T) {
 	}
 	start := make(chan struct{})
 	delDone := make(chan error, 1)
+	updateDone := make(chan struct{})
 	go func() {
 		<-start
 		delDone <- m.Deliver("n1", tok)
 	}()
 	go func() {
+		defer close(updateDone)
 		<-start
 		srv.note(t, "approval/updated", map[string]any{
 			"approvalId": "ap-1", "sessionId": "sess-1",
 			"currentRequirementId": map[string]any{"approvalId": "ap-1", "sourceIndex": 1},
-			"subject":              map[string]any{"kind": "command", "command": "ls"},
+			"subject":              map[string]any{"kind": "shell", "command": "ls"},
 			"availableChoices":     defaultChoices(),
 		})
 	}()
@@ -1834,6 +1839,11 @@ func TestManagerConcurrentUpdateVersusDeliver(t *testing.T) {
 	}
 	if delErr != nil && !errors.Is(delErr, ErrStalePermission) {
 		t.Fatalf("deliver err=%v", delErr)
+	}
+	select {
+	case <-updateDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval update did not finish")
 	}
 }
 
@@ -2310,6 +2320,67 @@ func TestManagerUnknownSubjectKindNotGuessed(t *testing.T) {
 	p, _ := m.Pending("n1")
 	if p.ToolKind != "" {
 		t.Fatalf("guessed toolKind=%q", p.ToolKind)
+	}
+	for _, opt := range p.Options {
+		if opt.Kind == "allow" {
+			t.Fatalf("unknown subject exposed an auto-allow choice: %+v", p.Options)
+		}
+	}
+	if len(p.Options) == 0 {
+		t.Fatal("unknown subject lost its manual choices")
+	}
+}
+
+func TestMuseChoiceKindRequiresKnownSubjectAndExactOnceScope(t *testing.T) {
+	approval := func(subject string) Approval {
+		return Approval{
+			ApprovalID:  "ap-1",
+			Requirement: RequirementRef{ApprovalID: "ap-1", SourceIndex: 0},
+			Subject:     Subject{Kind: subject},
+		}
+	}
+	known := []string{"shell", "fileAccess", "network", "process", "tool"}
+	for _, subject := range known {
+		if got := museChoiceKind(approval(subject), Choice{ChoiceID: "once", Decision: "approved", Scope: "once"}); got != "allow" {
+			t.Errorf("%s exact once kind=%q, want allow", subject, got)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		subject string
+		choice  Choice
+		want    string
+	}{
+		{"unknown subject", "futureSubject", Choice{ChoiceID: "c", Decision: "approved", Scope: "once"}, ""},
+		{"undocumented command subject", "command", Choice{ChoiceID: "c", Decision: "approved", Scope: "once"}, ""},
+		{"wrong case subject", "Shell", Choice{ChoiceID: "c", Decision: "approved", Scope: "once"}, ""},
+		{"missing scope", "shell", Choice{ChoiceID: "c", Decision: "approved"}, ""},
+		{"session scope", "shell", Choice{ChoiceID: "c", Decision: "approved", Scope: "session"}, ""},
+		{"persistent scope", "shell", Choice{ChoiceID: "c", Decision: "approved", Scope: "localPersistent"}, ""},
+		{"session decision", "shell", Choice{ChoiceID: "c", Decision: "approvedForSession", Scope: "session"}, "allow_always"},
+		{"policy decision", "shell", Choice{ChoiceID: "c", Decision: "approvedPolicyAmendment", Scope: "localPersistent"}, "allow_always"},
+		{"mismatched persistent decision", "shell", Choice{ChoiceID: "c", Decision: "approvedForSession", Scope: "once"}, ""},
+		{"rejection", "futureSubject", Choice{ChoiceID: "c", Decision: "denied", Scope: "once"}, "reject"},
+		{"unknown decision", "shell", Choice{ChoiceID: "c", Decision: "futureDecision", Scope: "once"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := museChoiceKind(approval(tc.subject), tc.choice); got != tc.want {
+				t.Fatalf("kind=%q want %q", got, tc.want)
+			}
+		})
+	}
+	if got := museChoiceKind(approval("shell"), Choice{Decision: "approved", Scope: "once"}); got != "" {
+		t.Fatalf("empty choice id kind=%q, want manual", got)
+	}
+	badFence := approval("shell")
+	badFence.Requirement.ApprovalID = "other"
+	if got := museChoiceKind(badFence, Choice{ChoiceID: "c", Decision: "approved", Scope: "once"}); got != "" {
+		t.Fatalf("mismatched requirement kind=%q, want manual", got)
+	}
+	badFence = approval("shell")
+	badFence.Requirement.SourceIndex = -1
+	if got := museChoiceKind(badFence, Choice{ChoiceID: "c", Decision: "approved", Scope: "once"}); got != "" {
+		t.Fatalf("negative requirement index kind=%q, want manual", got)
 	}
 }
 
@@ -3330,7 +3401,7 @@ func TestManagerExitLateApprovalCallback(t *testing.T) {
 	_ = srv.tr.Close()
 	waitFor(t, func() bool { return m.Live("n1") == "exited" })
 	s := m.session("n1")
-	s.onApproval(Approval{ApprovalID: "ap-1", Subject: Subject{Kind: "command"}})
+	s.onApproval(Approval{ApprovalID: "ap-1", Subject: Subject{Kind: "shell"}})
 	s.onEvent(Event{T: "assistant", Text: "late-out"})
 	if m.Attention("n1") != "" {
 		t.Fatal("late callback resurrected attention")
@@ -3572,7 +3643,7 @@ func TestManagerEmptySessionApprovalIsImported(t *testing.T) {
 	s := m.session("n1")
 	s.client.approvals.setRequested(Approval{
 		ApprovalID: "ap-blank",
-		Subject:    Subject{Kind: "command", Command: "ls"},
+		Subject:    Subject{Kind: "shell", Command: "ls"},
 		Choices:    []Choice{{ChoiceID: "abort", Decision: "abort"}},
 	})
 	if m.Attention("n1") != "approval" {
@@ -3589,7 +3660,7 @@ func TestManagerForeignApprovalNotImported(t *testing.T) {
 	s.client.approvals.setRequested(Approval{
 		ApprovalID: "ap-foreign",
 		SessionID:  "other-sess",
-		Subject:    Subject{Kind: "command", Command: "rm"},
+		Subject:    Subject{Kind: "shell", Command: "rm"},
 		Choices:    []Choice{{ChoiceID: "abort", Decision: "abort"}},
 	})
 	if m.Attention("n1") == "approval" {

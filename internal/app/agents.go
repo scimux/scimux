@@ -604,6 +604,15 @@ func classifyMuseStandard(modelID string) string {
 	return museTierStandard
 }
 
+// museImplicitDefaultEligible keeps content-sharing contributor variants an
+// explicit user choice. They remain launchable when selected by exact ID, but
+// neither the catalog's default bit nor the server's first-Standard fallback
+// may select one on the user's behalf.
+func museImplicitDefaultEligible(modelID string) bool {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	return id != "" && !strings.HasSuffix(id, "-contributor")
+}
+
 func museModelLabel(m muse.Model) string {
 	if s := strings.TrimSpace(m.Label); s != "" {
 		return s
@@ -674,7 +683,7 @@ func (a *app) museViews(models []muse.Model) []museModelView {
 		view := museModelView{
 			ID:           id,
 			Label:        museModelLabel(m),
-			Default:      m.IsDefault && tier == museTierStandard,
+			Default:      m.IsDefault && tier == museTierStandard && museImplicitDefaultEligible(id),
 			Tier:         tier,
 			Launchable:   tier == museTierStandard || tier == museTierDiscounted,
 			ContextLimit: copyIntPtr(m.ContextLimit),
@@ -757,7 +766,7 @@ func (a *app) resolveMuseLaunchModel(requested string) (string, error) {
 	}
 	firstStd := ""
 	for _, v := range views {
-		if !v.Launchable || v.Tier != museTierStandard {
+		if !v.Launchable || v.Tier != museTierStandard || !museImplicitDefaultEligible(v.ID) {
 			continue
 		}
 		if v.Default {

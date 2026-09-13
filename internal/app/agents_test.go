@@ -1011,6 +1011,52 @@ func TestMuseStandardTierAuthority(t *testing.T) {
 	}
 }
 
+func TestMuseContributorModelIsNeverImplicitDefault(t *testing.T) {
+	const contributor = "muse-spark-1.3-contributor"
+	const ordinary = "muse-spark-1.3"
+	a := newTestApp(t, &fakeTmux{})
+	a.museClassify = classifyMuseStandard
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{
+			{ID: contributor, Label: "Contributor", IsDefault: true},
+			{ID: ordinary, Label: "Ordinary"},
+		}, nil
+	}
+
+	views := a.museViews([]muse.Model{{ID: contributor, IsDefault: true}})
+	if len(views) != 1 || !views[0].Launchable || views[0].Tier != museTierStandard {
+		t.Fatalf("contributor must remain explicitly selectable: %+v", views)
+	}
+	if views[0].Default {
+		t.Fatalf("contributor model became an implicit default: %+v", views[0])
+	}
+
+	got, err := a.resolveMuseLaunchModel("")
+	if err != nil || got != ordinary {
+		t.Fatalf("empty selection resolved to %q, %v; want non-contributor %q", got, err, ordinary)
+	}
+	got, err = a.resolveMuseLaunchModel(contributor)
+	if err != nil || got != contributor {
+		t.Fatalf("explicit contributor selection = %q, %v", got, err)
+	}
+}
+
+func TestMuseOnlyContributorModelsRequireExplicitSelection(t *testing.T) {
+	const contributor = "muse-spark-1.3-contributor"
+	a := newTestApp(t, &fakeTmux{})
+	a.museClassify = classifyMuseStandard
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: contributor, IsDefault: true}}, nil
+	}
+
+	if got, err := a.resolveMuseLaunchModel(""); got != "" || !errors.Is(err, errMuseNoStandardModel) {
+		t.Fatalf("implicit contributor selection = %q, %v; want explicit-selection error", got, err)
+	}
+	if got, err := a.resolveMuseLaunchModel(contributor); err != nil || got != contributor {
+		t.Fatalf("explicit contributor selection = %q, %v", got, err)
+	}
+}
+
 func TestHandleAgentsMuseProductionAuthorityIsStandard(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	installMuseAgentBase(a)

@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"codeberg.org/chrberger/scimux/internal/sessionlog"
 )
 
 // TestEligibleAutoAllowMatrix is the pure policy table for structured
@@ -196,43 +198,40 @@ func TestEligibleAutoAllowNonPermissionInputs(t *testing.T) {
 	}
 }
 
-func TestMuseAutoApproveIsExplicitlyUnsupported(t *testing.T) {
+func TestMuseAutoApproveUsesStructuredEligibility(t *testing.T) {
 	for _, n := range []*Node{
 		{Agent: "muse", Transport: "muse"},
-		{Agent: "muse", Transport: ""},
 		{Agent: "claude", Transport: "muse"},
 	} {
-		if autoApproveSupported(n) {
-			t.Errorf("autoApproveSupported(%q/%q) = true", n.Agent, n.Transport)
-		}
-		if !museAutoApproveForbidden(n) {
-			t.Errorf("museAutoApproveForbidden(%q/%q) = false", n.Agent, n.Transport)
+		if !autoApproveSupported(n) {
+			t.Errorf("autoApproveSupported(%q/%q) = false", n.Agent, n.Transport)
 		}
 	}
-	if museAutoApproveForbidden(&Node{Agent: "codex", Transport: "codex"}) {
-		t.Fatal("codex must remain auto-approve eligible")
-	}
-	if museAutoApproveForbidden(&Node{Agent: "pi", Transport: "acp"}) {
-		t.Fatal("ACP must remain auto-approve eligible")
+	if autoApproveSupported(&Node{Agent: "muse", Transport: ""}) {
+		t.Fatal("a legacy empty transport remains tmux, even when the stored agent is muse")
 	}
 }
 
-func TestMuseAutoApproveEnableHTTP400(t *testing.T) {
+func TestMuseAutoApproveEnableUsesSharedLease(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "muse-aa", "muse", "muse")
+	proc := &countingProc{}
+	proc.live = "active"
+	proc.hasSession = true
+	a.testProc = proc
 	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/auto-approve", strings.NewReader(`{"enabled":true}`))
 	req.SetPathValue("id", n.ID)
 	rec := httptest.NewRecorder()
 	a.handleAutoApprove(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("enable = %d %s, want 400", rec.Code, rec.Body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable = %d %s, want 200", rec.Code, rec.Body)
 	}
-	if a.autoApprove[n.ID] != nil {
-		t.Fatal("enable persisted in-memory state for Muse")
+	if got := a.autoApprove[n.ID]; got == nil || got.Phase != autoPhaseArmed {
+		t.Fatalf("Muse lease not armed: %+v", got)
 	}
 }
 
-func TestMuseMaybeAutoApproveNeverDelivers(t *testing.T) {
+func TestMuseMaybeAutoApproveUsesSharedAuditAndDelivery(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "muse-plant", "muse", "muse")
 	proc := &countingProc{}
@@ -251,9 +250,20 @@ func TestMuseMaybeAutoApproveNeverDelivers(t *testing.T) {
 	}
 	a.mu.Unlock()
 	a.maybeAutoApprove(n, proc)
-	a.poll()
-	if proc.prepareCalls != 0 || proc.deliverCalls != 0 {
-		t.Fatalf("automatic path called PrepareResolve/Deliver: prepare=%d deliver=%d", proc.prepareCalls, proc.deliverCalls)
+	if proc.prepareCalls != 1 || proc.deliverCalls != 1 {
+		t.Fatalf("automatic path calls: prepare=%d deliver=%d", proc.prepareCalls, proc.deliverCalls)
+	}
+	if got := a.autoApprove[n.ID]; got == nil || got.Count != 1 {
+		t.Fatalf("successful Muse delivery did not increment lease: %+v", got)
+	}
+	var decision *sessionlog.DecisionEvent
+	for _, ev := range sessionlog.ReadEvents(a.sessionLogPath(n.ID)) {
+		if ev.T == "decision" {
+			decision = ev.Decision
+		}
+	}
+	if decision == nil || decision.Source != "auto" || decision.Agent != "muse" || decision.Selected.Kind != "allow" {
+		t.Fatalf("Muse decision audit missing or wrong: %+v", decision)
 	}
 }
 

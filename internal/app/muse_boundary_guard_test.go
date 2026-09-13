@@ -63,7 +63,6 @@ func TestMuseBoundaryAntiVacuity(t *testing.T) {
 	needles := []string{
 		`"muse"`,
 		"muse_approval_judge_consent",
-		"museAutoApproveForbidden",
 		"museStableChannel",
 		"museClassify",
 		"museManager",
@@ -73,6 +72,9 @@ func TestMuseBoundaryAntiVacuity(t *testing.T) {
 		if !strings.Contains(joined, n) {
 			t.Fatalf("anti-vacuity: scanned production did not contain %q", n)
 		}
+	}
+	if !strings.Contains(files["auto_approve.go"], `case "acp", "codex", "muse":`) {
+		t.Fatal("auto_approve.go must route Muse through structured auto-approval")
 	}
 	if !strings.Contains(files["harness_version.go"], museStableChannel) {
 		t.Fatal("stable-channel source missing from harness_version.go")
@@ -308,8 +310,8 @@ func TestMuseBrowserBoundaryMatchersCatchPlantedViolations(t *testing.T) {
 		`row.tier === "unknown"`,
 		`const providerName = info.providerName`,
 		`const providerId = m.providerId`,
-		`Muse's approval judge may spend subscription tokens.`,
-		`Muse supervision warning: approvals are notification-only; silence does not mean the agent is held.`,
+		`Muse may use part of your plan's usage limit when it checks whether tool actions are safe.`,
+		`Actions that still need approval stay paused until they are allowed or rejected.`,
 	}
 	for _, s := range safe {
 		if hits := museBrowserForbiddenHits(s); len(hits) > 0 {

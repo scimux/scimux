@@ -1688,7 +1688,7 @@ function makeRoots(){
     chatloading: el("div", { id: "chatloading", hidden: true }),
     gauge: el("div", { id: "gauge", hidden: true }),
     gaugefill: el("i", { id: "gaugefill" }),
-    muse_chat_warn: el("div", { id: "muse_chat_warn", className: "nc-hint", hidden: true }),
+	muse_schema_warn: el("div", { id: "muse_schema_warn", className: "nc-hint", hidden: true }),
     keyrow: makeKeyrow(),
     convtools: el("div", { id: "convtools", hidden: true }),
     termtoggle: el("button", { id: "termtoggle" }),
@@ -5080,50 +5080,16 @@ test("delivering: the neutral first-prompt wait is not the unconfirmed state", (
   assert.equal(u.delivering, false);
 });
 
-test("chat shell hosts the Muse warning once, outside #msgs", () => {
+test("chat shell hosts only the Muse schema warning outside #msgs", () => {
   const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
-  assert.equal((indexSrc.match(/id="muse_chat_warn"/g) || []).length, 1);
+	assert.doesNotMatch(indexSrc, /id="muse_chat_warn"/);
+	assert.equal((indexSrc.match(/id="muse_schema_warn"/g) || []).length, 1);
   const msgsOpen = indexSrc.indexOf(`id="msgs"`);
-  const warnAt = indexSrc.indexOf(`id="muse_chat_warn"`);
+	const warnAt = indexSrc.indexOf(`id="muse_schema_warn"`);
   assert.ok(warnAt >= 0 && msgsOpen >= 0);
   const afterMsgs = indexSrc.slice(msgsOpen, indexSrc.indexOf("</div>", msgsOpen));
-  assert.doesNotMatch(afterMsgs, /muse_chat_warn/);
-  assert.match(indexSrc, /id="muse_chat_warn"[^>]*class="nc-hint"/);
-});
-
-test("Muse chat warning is persistent, outside msgs, and hidden for other agents", async () => {
-  const text = chatmod.MUSE_SUPERVISION_WARNING;
-  assert.match(text, /Muse supervision warning: approvals are notification-only/);
-  assert.match(text, /silence does not mean the agent is held/);
-  assert.doesNotMatch(text, /block|guaranteed|auto-approve|held until/i);
-
-  const museNodes = [{
-    id: "n1", title: "Muse", agent: "muse", model: "synth-std",
-    live: "quiet", attention: "", lane_id: "", description: "",
-  }];
-  const { feature, roots } = makeFeature({
-    nodes: museNodes,
-    chatPayload: { turns: [], live: "quiet", delivery: "ok", source: "acp", chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {} },
-  });
-  feature.bind();
-  feature.renderHead();
-  assert.equal(roots.muse_chat_warn.hidden, false);
-  assert.equal(roots.muse_chat_warn.textContent, text);
-  await feature.render();
-  assert.equal(roots.muse_chat_warn.hidden, false);
-  assert.equal(roots.muse_chat_warn.textContent, text);
-  assert.doesNotMatch(roots.msgs.innerHTML, /Muse supervision warning/);
-  await feature.render();
-  assert.equal((roots.muse_chat_warn.textContent.match(/Muse supervision warning/g) || []).length, 1);
-
-  const other = makeFeature({
-    nodes: [{ id: "n1", title: "Claude", agent: "claude", model: "sonnet", live: "quiet", attention: "", lane_id: "", description: "" }],
-  });
-  other.feature.bind();
-  other.feature.renderHead();
-  await other.feature.render();
-  assert.equal(other.roots.muse_chat_warn.hidden, true);
-  assert.equal(other.roots.muse_chat_warn.textContent, "");
+	assert.doesNotMatch(afterMsgs, /muse_schema_warn/);
+	assert.match(indexSrc, /id="muse_schema_warn"[^>]*class="nc-hint"/);
 });
 
 test("Muse schema mismatch is additive, nonfatal, and not interpolated", async () => {
@@ -5145,17 +5111,16 @@ test("Muse schema mismatch is additive, nonfatal, and not interpolated", async (
   feature.bind();
   feature.renderHead();
   await feature.render();
-  assert.match(roots.muse_chat_warn.textContent, /notification-only/);
-  assert.match(roots.muse_chat_warn.textContent, /schema fingerprint/);
-  assert.doesNotMatch(roots.muse_chat_warn.textContent, /muse_schema_fingerprint_mismatch/);
+	assert.equal(roots.muse_schema_warn.hidden, false);
+	assert.match(roots.muse_schema_warn.textContent, /schema fingerprint/);
+	assert.doesNotMatch(roots.muse_schema_warn.textContent, /muse_schema_fingerprint_mismatch/);
   assert.match(roots.msgs.innerHTML, /still here/);
   assert.equal(roots.msgs.innerHTML.includes("peek") && /force/.test(roots.msgs.innerHTML), false);
 
   nodes[0].muse_schema_warning = "some_other_code<script>";
   feature.renderHead();
-  assert.doesNotMatch(roots.muse_chat_warn.textContent, /some_other_code/);
-  assert.doesNotMatch(roots.muse_chat_warn.textContent, /<script>/);
-  assert.match(roots.muse_chat_warn.textContent, /notification-only/);
+	assert.equal(roots.muse_schema_warn.hidden, true);
+	assert.equal(roots.muse_schema_warn.textContent, "");
 });
 
 test("Muse chat meta says context unknown until a real window arrives", async () => {

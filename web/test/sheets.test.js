@@ -18,7 +18,6 @@ import {
   museModelSelectable,
   museFreshDefaultId,
   museModelOptionsHTML,
-  museActivityWarningText,
   effortLevelsFor,
   effortOptionsHTML,
   preservedEffortValue,
@@ -481,7 +480,6 @@ function makeRoots(){
   const nc_lane_new = el("input", { id: "nc_lane_new", hidden: true });
   const nc_lane_hint = el("div", { id: "nc_lane_hint", hidden: true });
   const nc_lane_swatch = el("span", { id: "nc_lane_swatch" });
-  const nc_muse_warn = el("div", { id: "nc_muse_warn", className: "nc-hint", hidden: true });
   newchat._fields = [nc_title, nc_prompt, nc_agent, nc_model, nc_effort, nc_dir, nc_lane, nc_lane_new];
 
   const adopt = el("div", { id: "adopt", className: "sheet" });
@@ -501,7 +499,6 @@ function makeRoots(){
   const byId = {
     backdrop, burger, plusbtn, newchat, nc_head, nc_start, nc_title, nc_prompt,
     nc_agent, nc_model, nc_effort, nc_dir, nc_lane, nc_lane_new, nc_lane_hint, nc_lane_swatch,
-    nc_muse_warn,
     adopt, ad_title, ad_agent, ad_sid, ad_path, ad_titlein, ad_prompt, ad_go, menu,
   };
 
@@ -2146,69 +2143,10 @@ test("cross-agent fork does not inherit a Muse model or tier", async () => {
   assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /opus/);
 });
 
-test("new-activity Muse warning copy is notification-only and names token spend", () => {
-  const text = museActivityWarningText();
-  assert.match(text, /Muse approvals are notification-only/);
-  assert.match(text, /cannot guarantee that work is held while you decide/);
-  assert.match(text, /approval judge may spend your subscription tokens/);
-  assert.doesNotMatch(text, /block|held until|auto-approve|guaranteed to remain pending|silence means/i);
-  assert.doesNotMatch(text, /supplies Muse|model access/i);
-});
-
-test("new-activity sheet hosts the Muse warning exactly once", () => {
+test("new-activity sheet has no redundant Muse supervision warning", () => {
   const indexSrc = readFileSync(join(__dirname, "../index.html"), "utf8");
-  assert.equal((indexSrc.match(/id="nc_muse_warn"/g) || []).length, 1);
-  assert.match(indexSrc, /id="newchat"[\s\S]*id="nc_muse_warn"/);
-  assert.match(indexSrc, /id="nc_muse_warn"[^>]*class="nc-hint"/);
-});
-
-test("Muse warning is visible while Muse is selected and hidden otherwise", async () => {
-  const ctx = createFeature({
-    agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC]),
-  });
-  ctx.feature.bind();
-  await settle();
-  ctx.byId.plusbtn.dispatch("click");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, true);
-  ctx.byId.nc_agent.value = "muse";
-  ctx.byId.nc_agent.dispatch("change");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
-  assert.match(ctx.byId.nc_muse_warn.textContent, /notification-only/);
-  assert.match(ctx.byId.nc_muse_warn.textContent, /subscription tokens/);
-  ctx.byId.nc_model.value = "synth-disc";
-  ctx.byId.nc_model.dispatch("change");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
-  ctx.byId.nc_agent.value = "claude";
-  ctx.byId.nc_agent.dispatch("change");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, true);
-  ctx.byId.nc_agent.value = "muse";
-  ctx.byId.nc_agent.dispatch("change");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
-});
-
-test("Muse warning survives probe rebuild, same-agent fork, and failed submit", async () => {
-  let agents = museAgentsPayload([MUSE_STD]);
-  const ctx = createFeature({ agentsPayload: agents });
-  ctx.setApi(async (path, opts = {}) => {
-    if (path === "/api/agents") return agents;
-    if (path === "/api/nodes" && opts.method === "POST") throw new Error("launch failed");
-    return {};
-  });
-  ctx.feature.bind();
-  await settle();
-  ctx.nodes.muse1 = {
-    id: "muse1", title: "Muse parent", description: "",
-    agent: "muse", model: "synth-std", effort: "", dir: "/muse",
-    lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
-  };
-  ctx.feature.forkFromTurn("x", "muse1");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
-  ctx.byId.nc_title.value = "T";
-  ctx.byId.nc_lane.value = "lane-a";
-  ctx.byId.nc_start.dispatch("click");
-  await settle();
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false, "failed submit must not hide the warning");
-  assert.ok(ctx.byId.newchat.classList.contains("open"));
+	assert.doesNotMatch(indexSrc, /id="nc_muse_warn"/);
+	assert.doesNotMatch(sheetsSrc, /museActivityWarningText|syncMuseActivityWarning/);
 });
 
 test("absent Muse structured catalog does not make legacy models launchable", async () => {
@@ -2259,7 +2197,6 @@ test("delayed agents probe preserves an open same-agent Muse fork", async () => 
   ctx.feature.bind();
   ctx.feature.forkFromTurn("Follow this", "muse1");
   assert.equal(ctx.byId.nc_agent.value, "muse");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
   assert.equal(ctx.byId.nc_dir.value, "/muse");
   assert.equal(ctx.byId.nc_effort.value, "medium");
   release({
@@ -2273,7 +2210,6 @@ test("delayed agents probe preserves an open same-agent Muse fork", async () => 
   assert.equal(ctx.byId.nc_agent.value, "muse");
   assert.equal(ctx.byId.nc_model.value, "synth-disc");
   assert.match(ctx.byId.nc_model.innerHTML, /Synth Discounted \u2014 Discounted/);
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
   assert.equal(ctx.byId.nc_dir.value, "/muse");
   assert.equal(ctx.byId.nc_effort.value, "medium");
   ctx.byId.nc_title.value = "Fork";
@@ -2309,7 +2245,6 @@ test("delayed probe does not insert a stale inherited Muse model", async () => {
   assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /retired-id/);
   assert.notEqual(ctx.byId.nc_model.value, "retired-id");
   assert.equal(ctx.byId.nc_model.value, "synth-std");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
 });
 
 test("delayed probe with no Standard default leaves Muse selected but blocks submit", async () => {
@@ -2366,7 +2301,6 @@ test("delayed probe does not reopen a closed sheet or clobber a newer fork", asy
   assert.equal(ctx.byId.nc_agent.value, "muse");
   assert.equal(ctx.byId.nc_model.value, "synth-std");
   assert.equal(ctx.byId.nc_dir.value, "/other");
-  assert.equal(ctx.byId.nc_muse_warn.hidden, false);
 });
 
 test("fresh Muse activity after closing a Discounted selection restores the Standard default", async () => {

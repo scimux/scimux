@@ -225,8 +225,12 @@ export function createSettingsController(deps = {}){
 
 export function museConsentNote(on){
   return on
-    ? "On — Muse's approval judge may spend subscription tokens. Approval requests remain notification-only."
-    : "Off — Muse launch is blocked on this computer. Enabling it permits Muse's approval judge to spend subscription tokens.";
+    ? "On — You can start Muse sessions. Muse may use part of your plan's " +
+      "usage limit to check tool actions. Actions that still need approval " +
+      "stay paused until they are allowed or rejected."
+    : "Off — You cannot start a Muse session. Turn this on to use Muse. Muse " +
+      "may use part of your plan's usage limit when it checks whether tool " +
+      "actions are safe.";
 }
 
 export function usageCheckNote(on){
@@ -287,7 +291,7 @@ export function harnessRowsHTML(rows, latest, deps = {}){
     if (s.agent === "muse"){
       if (row && row.present){
         museConsent = `<label class="hswitch"><input type="checkbox" data-muse-consent="muse"` +
-          `${museFlag ? " checked" : ""}> Approval-judge consent</label>` +
+          `${museFlag ? " checked" : ""}> Enable Muse</label>` +
           `<span class="hnote">${esc(museConsentNote(museFlag))}</span>`;
       } else {
         museConsent = `<span class="hnote">${esc(museConsentNote(false))}</span>`;

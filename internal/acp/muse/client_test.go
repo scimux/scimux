@@ -824,14 +824,10 @@ func TestApprovalNotificationAndDecide(t *testing.T) {
 	got := make(chan Approval, 1)
 	h.client.SetApprovalHandler(func(a Approval) { got <- a })
 	h.writeRaw(`{"jsonrpc":"2.0","method":"approval/requested","params":{"approvalId":"ap1","sessionId":"sess-1","subject":{"kind":"command","command":"ls"},"availableChoices":[{"choiceId":"allow_once","decision":"approved"},{"choiceId":"abort","decision":"abort","acceptsFeedback":true}],"currentRequirementId":{"approvalId":"ap1","sourceIndex":0}}}`)
-	var a Approval
 	select {
-	case a = <-got:
+	case <-got:
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler not called")
-	}
-	if a.AutoApprovable() {
-		t.Fatal("auto-approvable")
 	}
 	p, ok := h.client.PendingApproval()
 	if !ok || p.ApprovalID != "ap1" {
