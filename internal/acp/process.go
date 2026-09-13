@@ -83,48 +83,74 @@ func execRunner(nodeID, agent, dir, model, effort string) (Process, error) {
 		// Start closes both pipe ends itself on failure.
 		return nil, fmt.Errorf("start %s ACP: %w", agent, err)
 	}
-	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout, waited: make(chan struct{})}, nil
+	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout}, nil
+}
+
+// groupTermGrace is how long a process group is given to leave of its own
+// accord after SIGTERM, before scimux insists.
+const groupTermGrace = 2 * time.Second
+
+// groupPollInterval is how often the group is asked whether it has emptied
+// while the grace period runs.
+const groupPollInterval = 50 * time.Millisecond
+
+// TerminateGroup stops the process group pgid: SIGTERM, then SIGKILL if the
+// group still has members when the grace period ends. It blocks until the
+// group is empty or has been insisted upon, so callers that must not wait run
+// it in a goroutine.
+//
+// What it waits on is the *group*, not the process scimux started. An ACP
+// agent spawns tool grandchildren into its own group, and those grandchildren
+// are the whole reason orphan prevention exists — an agent that exits
+// promptly while its tools keep working is the ordinary case, not the
+// exception. Gating escalation on the parent's exit therefore cancels it
+// exactly when it is needed, leaving the tools running with nothing
+// supervising them.
+//
+// kill(-pgid, 0) returning ESRCH is the oracle for "the group has no members
+// left", which also keeps the original reason for not using a blind timer:
+// nothing is signalled once the group has emptied, so a pgid the kernel has
+// since handed to an unrelated process is never hit. The emptiness check
+// immediately precedes the SIGKILL, which is as tight as POSIX allows —
+// there is no way to signal a group conditionally on it being the same group.
+//
+// A group whose last member is an unreaped zombie still counts as populated,
+// so the SIGKILL lands on a corpse and does nothing. That is correct and not
+// worth avoiding: every production caller reaps.
+func TerminateGroup(pgid int) {
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err == syscall.ESRCH {
+		return
+	}
+	deadline := time.Now().Add(groupTermGrace)
+	for {
+		if syscall.Kill(-pgid, 0) == syscall.ESRCH {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			return
+		}
+		time.Sleep(groupPollInterval)
+	}
 }
 
 type osProcess struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stdout   io.Reader
-	waited   chan struct{} // closed by Wait once the process is reaped
-	waitOnce sync.Once
 	killOnce sync.Once
 }
 
 func (p *osProcess) Stdin() io.WriteCloser { return p.stdin }
 func (p *osProcess) Stdout() io.Reader     { return p.stdout }
 
-// Kill signals the whole process group (negative pid), then escalates to
-// SIGKILL only if the group is still running — an ACP agent may have spawned
-// tool grandchildren that must not orphan. Escalation is gated on the process
-// actually still being alive (waited), not a blind timer, so a group that
-// exits promptly is never SIGKILLed after its pid/pgid may have been reused by
-// an unrelated process (finding 58). Repeated calls are idempotent.
+// Kill stops the whole process group. Repeated calls are idempotent.
 func (p *osProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
 	}
-	p.killOnce.Do(func() {
-		pgid := p.cmd.Process.Pid
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		go func(pgid int) {
-			select {
-			case <-p.waited:
-				// Exited after SIGTERM; do not signal a possibly-reused pgid.
-			case <-time.After(2 * time.Second):
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
-			}
-		}(pgid)
-	})
+	p.killOnce.Do(func() { go TerminateGroup(p.cmd.Process.Pid) })
 	return nil
 }
 
-func (p *osProcess) Wait() error {
-	err := p.cmd.Wait()
-	p.waitOnce.Do(func() { close(p.waited) })
-	return err
-}
+func (p *osProcess) Wait() error { return p.cmd.Wait() }

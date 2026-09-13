@@ -7,7 +7,8 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
-	"time"
+
+	"codeberg.org/chrberger/scimux/internal/acp"
 )
 
 // Transport is the subprocess seam, mirroring internal/acp's Process. The real
@@ -66,25 +67,15 @@ type execTransport struct {
 func (t *execTransport) Stdin() io.WriteCloser { return t.stdin }
 func (t *execTransport) Stdout() io.Reader     { return t.stdout }
 
-// Close signals the whole process group (negative pid), escalating to SIGKILL
-// only if the group is still alive after a grace period — matching the
-// orphan-prevention discipline in internal/acp/process.go.
+// Close stops the whole process group, on the shared orphan-prevention
+// discipline in internal/acp. reap stays: the group is what gets signalled,
+// but this process is the one scimux must not leave as a zombie.
 func (t *execTransport) Close() error {
 	if t.cmd.Process == nil {
 		return nil
 	}
 	go t.reap()
-	t.killOnce.Do(func() {
-		pgid := t.cmd.Process.Pid
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		go func(pgid int) {
-			select {
-			case <-t.waited:
-			case <-time.After(2 * time.Second):
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
-			}
-		}(pgid)
-	})
+	t.killOnce.Do(func() { go acp.TerminateGroup(t.cmd.Process.Pid) })
 	return nil
 }
 
