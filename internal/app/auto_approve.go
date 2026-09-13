@@ -221,6 +221,24 @@ func (a *app) disableAutoApprove(id string) autoApproveView {
 	return autoApproveView{Supported: true, Enabled: false, Phase: string(autoPhaseOff)}
 }
 
+// authoritativePermissionSnapshot bypasses the worker observation cache at
+// authorization fences and returns one coherent state RPC.
+func authoritativePermissionSnapshot(pm procManager, id string) (live, incarn string, maxSeq uint64, ok bool) {
+	if workers, workerBacked := pm.(*workerManager); workerBacked {
+		state := workers.observeFresh(id)
+		if state.PermissionBoundary == nil {
+			return state.Live, "", 0, false
+		}
+		return state.Live, state.PermissionBoundary.Incarnation, state.PermissionBoundary.MaxSequence, true
+	}
+	live = pm.Live(id)
+	incarn, maxSeq, ok = pm.PermissionBoundary(id)
+	if !ok {
+		incarn, maxSeq = "", 0
+	}
+	return
+}
+
 // enableAutoApprove arms or primes a lease. It wins the per-node gate *before*
 // reading Live/PermissionBoundary so a concurrent decision cannot finish and
 // advance the queue between the enable snapshot and the lease commit. The
@@ -235,10 +253,7 @@ func (a *app) enableAutoApprove(id string, pm procManager) autoApproveView {
 	// Authoritative snapshot only after winning the gate.
 	live, enableIncarn, enableMaxSeq := "", "", uint64(0)
 	if pm != nil {
-		live = pm.Live(id)
-		if incarn, maxSeq, ok := pm.PermissionBoundary(id); ok {
-			enableIncarn, enableMaxSeq = incarn, maxSeq
-		}
+		live, enableIncarn, enableMaxSeq, _ = authoritativePermissionSnapshot(pm, id)
 	} else {
 		// tmux node: liveness is the poller's mechanical pane signal. Claude
 		// has no permission sequence to fence an enable against, but it needs
@@ -537,18 +552,13 @@ func (a *app) acceptStructuredPrompt(n *Node, pm procManager, text string) error
 	g.Lock()
 	defer g.Unlock()
 
-	live := pm.Live(n.ID)
+	live, boundaryIncarn, boundaryMaxSeq, hasBound := authoritativePermissionSnapshot(pm, n.ID)
 	if live != "active" {
 		a.settleAutoApproveAfterTurnLocked(n.ID, "")
 	}
 
 	// Pre-send boundary: permissions with seq > maxSeq (same incarn) are
 	// post-enable once armed — including those this turn is about to issue.
-	boundaryIncarn, boundaryMaxSeq, hasBound := "", uint64(0), false
-	if incarn, maxSeq, ok := pm.PermissionBoundary(n.ID); ok {
-		boundaryIncarn, boundaryMaxSeq, hasBound = incarn, maxSeq, true
-	}
-
 	a.mu.Lock()
 	primedLeaseID := ""
 	if st := a.autoApprove[n.ID]; st != nil && st.Phase == autoPhasePrimed {

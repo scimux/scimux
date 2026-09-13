@@ -14,6 +14,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/agentperm"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
@@ -1436,6 +1437,55 @@ func TestHTTPRearmCutoffExcludesRequestThatArrivedDuringWait(t *testing.T) {
 	a.maybeAutoApprove(n, stub)
 	if stub.deliverCalls != 1 {
 		t.Fatalf("post-rearm request should deliver; del=%d", stub.deliverCalls)
+	}
+}
+
+func TestWorkerEnableUsesFreshPermissionBoundary(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "fresh-cutoff", "codex", "codex")
+	attachSyntheticWorker(t, a, n.ID, &syntheticSessionHarness{launched: true, state: sessionworker.State{
+		HasSession: true, Live: "active",
+		PermissionBoundary: &sessionworker.PermissionBoundary{Incarnation: "inc", MaxSequence: 2},
+	}})
+	a.workers.mu.Lock()
+	entry := a.workers.entries[n.ID]
+	entry.observed = sessionworker.State{Live: "active", PermissionBoundary: &sessionworker.PermissionBoundary{
+		Incarnation: "inc", MaxSequence: 1,
+	}}
+	entry.observedAt = time.Now().Add(time.Hour)
+	a.workers.mu.Unlock()
+
+	a.enableAutoApprove(n.ID, a.workers)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if got := a.autoApprove[n.ID].EnableMaxSeq; got != 2 {
+		t.Fatalf("worker enable cutoff = %d, want fresh sequence 2", got)
+	}
+}
+
+func TestWorkerPromptArmUsesFreshPermissionBoundary(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "fresh-prompt-cutoff", "codex", "codex")
+	attachSyntheticWorker(t, a, n.ID, &syntheticSessionHarness{launched: true, state: sessionworker.State{
+		HasSession: true, Live: "quiet",
+		PermissionBoundary: &sessionworker.PermissionBoundary{Incarnation: "inc", MaxSequence: 2},
+	}})
+	a.setAutoApproveEnabled(n.ID, true, "quiet", "inc", 1)
+	a.workers.mu.Lock()
+	entry := a.workers.entries[n.ID]
+	entry.observed = sessionworker.State{Live: "quiet", PermissionBoundary: &sessionworker.PermissionBoundary{
+		Incarnation: "inc", MaxSequence: 1,
+	}}
+	entry.observedAt = time.Now().Add(time.Hour)
+	a.workers.mu.Unlock()
+
+	if err := a.acceptStructuredPrompt(n, a.workers, "next"); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if got := a.autoApprove[n.ID].EnableMaxSeq; got != 2 {
+		t.Fatalf("worker prompt cutoff = %d, want fresh sequence 2", got)
 	}
 }
 

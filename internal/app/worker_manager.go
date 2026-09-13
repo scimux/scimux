@@ -161,13 +161,21 @@ func (m *workerManager) invalidate(nodeID string) {
 }
 
 func (m *workerManager) observe(nodeID string) sessionworker.State {
+	return m.observeState(nodeID, true)
+}
+
+func (m *workerManager) observeFresh(nodeID string) sessionworker.State {
+	return m.observeState(nodeID, false)
+}
+
+func (m *workerManager) observeState(nodeID string, cached bool) sessionworker.State {
 	m.mu.Lock()
 	entry := m.entries[nodeID]
 	if entry == nil {
 		m.mu.Unlock()
 		return sessionworker.State{Live: "exited"}
 	}
-	if !entry.observedAt.IsZero() && time.Since(entry.observedAt) < 10*time.Millisecond {
+	if cached && !entry.observedAt.IsZero() && time.Since(entry.observedAt) < 10*time.Millisecond {
 		state := entry.observed
 		m.mu.Unlock()
 		return state
