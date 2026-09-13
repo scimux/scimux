@@ -19,6 +19,7 @@ func TestStructuredWorkerInspectFallsBackToCanonicalSessionLog(t *testing.T) {
 	}{
 		{agent: "opencode", transport: "acp"},
 		{agent: "codex", transport: "codex"},
+		{agent: "muse", transport: "muse"},
 	} {
 		t.Run(tc.agent, func(t *testing.T) {
 			a := newTestApp(t, &fakeTmux{})

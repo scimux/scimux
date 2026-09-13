@@ -1304,6 +1304,8 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 				peek = a.acp.Peek(n.ID)
 			case "codex":
 				peek = a.codex.Peek(n.ID)
+			case "muse":
+				peek = a.muse.Peek(n.ID)
 			}
 		}
 		fmt.Fprint(w, peek)
