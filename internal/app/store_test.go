@@ -1083,3 +1083,43 @@ func TestTranscriptRetiredTombstones(t *testing.T) {
 		}
 	})
 }
+
+// An interrupted append leaves the file without its closing newline — ENOSPC
+// returns an error after a short write, a crash truncates mid-line. The store
+// is the durability mechanism, so the *next* record must still be recoverable:
+// appending straight after the fragment welds the two into one malformed line
+// and replay drops both, silently discarding a node the user watched succeed.
+func TestAppendRecoversFromInterruptedTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	writeStoreLines(t, path, false, storeNodeLine(t, "n1", "first", "", ""), `{"type":"node","node":{"id":"trunc"`)
+	a := &app{byID: map[string]*Node{}, storePath: path}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: &Node{ID: "n2", Title: "after"}}); err != nil {
+		t.Fatalf("append after an interrupted tail: %v", err)
+	}
+	fresh := &app{byID: map[string]*Node{}, storePath: path}
+	if err := fresh.loadStore(); err != nil {
+		t.Fatalf("loadStore: %v", err)
+	}
+	if got := nodeIDs(fresh); len(got) != 2 || got[0] != "n1" || got[1] != "n2" {
+		t.Fatalf("replay after an interrupted tail = %v, want [n1 n2]", got)
+	}
+}
+
+// The repair is a newline, never a rewrite: the truncated bytes stay on disk
+// as their own unreadable line. An append-only store corrects by appending,
+// and the fragment is evidence that something was interrupted.
+func TestAppendDoesNotRewriteTheInterruptedFragment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.jsonl")
+	writeStoreLines(t, path, false, `{"type":"node","node":{"id":"trunc"`)
+	a := &app{byID: map[string]*Node{}, storePath: path}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: &Node{ID: "n2"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(b), `{"type":"node","node":{"id":"trunc"`+"\n") {
+		t.Fatalf("the interrupted fragment was not preserved verbatim: %q", string(b))
+	}
+}

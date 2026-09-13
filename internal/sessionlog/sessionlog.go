@@ -289,6 +289,35 @@ func lockPath(path string) func() {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// UnterminatedTail reports whether path ends mid-line — bytes with no closing
+// newline. That is what an interrupted append leaves behind: a short write
+// under ENOSPC returns an error having already put bytes on disk, and a crash
+// truncates wherever it lands.
+//
+// An append-only file is repaired by appending, so a writer that sees this
+// closes the fragment with a newline and leaves it there as the evidence it
+// is. Without that, the next record welds onto the fragment and replay drops
+// one malformed line — losing a record whose append reported success.
+//
+// Unreadable means "no": every caller's fallback is today's behaviour, and a
+// spurious newline in a file we cannot inspect would be its own corruption.
+func UnterminatedTail(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return false
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], st.Size()-1); err != nil {
+		return false
+	}
+	return last[0] != '\n'
+}
+
 // SyncParentDir fsyncs the directory that holds path so a newly created file's
 // directory entry survives a crash. On POSIX, fsyncing a file does not
 // necessarily make its new dirent durable; the parent directory must be synced
@@ -322,6 +351,9 @@ func (w *Writer) Append(ev Event) error {
 	// Detect that under the same per-path lock that serializes the write.
 	_, statErr := os.Stat(w.Path)
 	created := os.IsNotExist(statErr)
+	if UnterminatedTail(w.Path) {
+		b = append([]byte{'\n'}, b...)
+	}
 	// 0600: rawInput and prompt text are as sensitive as pane-excerpt evidence.
 	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {

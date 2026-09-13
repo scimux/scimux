@@ -67,6 +67,11 @@ func (a *app) appendRecord(rec storeRecord) error {
 	// creation under the same lock that serializes the write.
 	_, statErr := os.Stat(a.storePath)
 	created := os.IsNotExist(statErr)
+	// Close an interrupted append before adding to it, or the two become one
+	// malformed line and replay discards both (sessionlog.UnterminatedTail).
+	if sessionlog.UnterminatedTail(a.storePath) {
+		b = append([]byte{'\n'}, b...)
+	}
 	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
