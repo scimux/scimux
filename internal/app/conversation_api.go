@@ -184,6 +184,10 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		// same process, recorded as a source seam — same page-turn semantics
 		// as Claude's /clear, same log file, same node.
 		if strings.TrimSpace(body.Text) == "/clear" {
+			if (n.Agent == "muse" || n.transport() == "muse") && !a.settings().MuseApprovalJudgeConsent {
+				http.Error(w, errMuseConsentRequired.Error(), http.StatusBadRequest)
+				return
+			}
 			// Freeze the closing station's label before the page turns, so a
 			// later rename only moves the fresh head (spec A/B/C). The manager
 			// appends the clear seam inside Clear; this reads the pre-clear stop

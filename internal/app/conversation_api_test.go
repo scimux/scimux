@@ -2102,6 +2102,33 @@ func TestHandleSendClearDoesNotRetireOnDeliveryAlone(t *testing.T) {
 
 // --- /clear: uniform page-turn semantics (session-log phase 3) ---
 
+func TestHandleSendMuseClearRequiresCurrentConsent(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "muse-clear-consent", "muse", "muse")
+	proc := &countingProc{}
+	proc.live = "quiet"
+	a.testProc = proc
+
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	req.SetPathValue("id", n.ID)
+	rec := httptest.NewRecorder()
+	a.handleSend(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "consent") {
+		t.Fatalf("Muse /clear without consent = %d %q", rec.Code, rec.Body.String())
+	}
+	if proc.clears != 0 {
+		t.Fatalf("Muse sessions started without consent = %d", proc.clears)
+	}
+	enableMuseConsent(t, a)
+	req = httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	req.SetPathValue("id", n.ID)
+	rec = httptest.NewRecorder()
+	a.handleSend(rec, req)
+	if rec.Code != http.StatusOK || proc.clears != 1 {
+		t.Fatalf("Muse /clear with consent = %d clears=%d", rec.Code, proc.clears)
+	}
+}
+
 // A "/clear" sent to a structured node must open a fresh protocol session on
 // the same subprocess (second thread/start), append a path-less source seam
 // to the node's log, and leave the chat with a fresh surface: zero turns,
@@ -2860,6 +2887,7 @@ func TestMuseChatPeekClearExitDelete(t *testing.T) {
 		t.Fatalf("peek = %d %s", peekRec.Code, peekRec.Body)
 	}
 
+	enableMuseConsent(t, a)
 	clearReq := httptest.NewRequest("POST", "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
 	clearReq.SetPathValue("id", n.ID)
 	clearRec := httptest.NewRecorder()
