@@ -389,6 +389,11 @@ func TestRunSessionWorkerMainServesUntilAuthenticatedStop(t *testing.T) {
 }
 
 func TestSessionWorkerStartupValidationFailures(t *testing.T) {
+	// A test launched inside scimux can inherit its worker environment, but
+	// descriptor numbers now belong to this test process (including netpoll).
+	// Establish the absent-files case rather than closing unrelated descriptors.
+	t.Setenv(workerConfigFDEnv, "")
+	t.Setenv(workerReadyFDEnv, "")
 	if code := runSessionWorkerMain(); code != 1 {
 		t.Fatalf("worker main without inherited files = %d", code)
 	}

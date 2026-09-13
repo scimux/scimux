@@ -712,34 +712,9 @@ func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *se
 	return data, cmd.Process.Pid, client
 }
 
-func killUnwaitedWorkerAndAwaitZombie(t *testing.T, pid int) {
-	t.Helper()
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := process.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		status, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(status), ") Z ") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("worker did not become a zombie")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func TestWorkerManagerReapsDeadReattachedWorker(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("uses Linux /proc to observe a zombie without reaping it")
+		t.Skip("uses Linux waitid to observe completed exit without reaping")
 	}
 	for _, tc := range []struct {
 		name string
