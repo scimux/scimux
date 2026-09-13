@@ -65,8 +65,8 @@ func TestMuxerExecEnvironmentRoundTripAndValidation(t *testing.T) {
 	defer publicW.Close()
 	defer lockW.Close()
 	values := map[string]string{
-		envMuxerPublicFD:  strconv.Itoa(int(publicR.Fd())),
-		envMuxerLockFD:    strconv.Itoa(int(lockR.Fd())),
+		envMuxerPublicFD:  strconv.Itoa(handOverFD(t, publicR)),
+		envMuxerLockFD:    strconv.Itoa(handOverFD(t, lockR)),
 		envMuxerCSRFToken: inheritedCSRF,
 	}
 	files, err := loadMuxerExecFiles(func(key string) string { return values[key] })
@@ -90,8 +90,8 @@ func TestMuxerExecEnvironmentRoundTripAndValidation(t *testing.T) {
 	defer legacyPublicW.Close()
 	defer legacyLockW.Close()
 	legacyValues := map[string]string{
-		envMuxerPublicFD: strconv.Itoa(int(legacyPublicR.Fd())),
-		envMuxerLockFD:   strconv.Itoa(int(legacyLockR.Fd())),
+		envMuxerPublicFD: strconv.Itoa(handOverFD(t, legacyPublicR)),
+		envMuxerLockFD:   strconv.Itoa(handOverFD(t, legacyLockR)),
 	}
 	legacy, err := loadMuxerExecFiles(func(key string) string { return legacyValues[key] })
 	if err != nil || legacy == nil || legacy.csrfToken != "" {
@@ -224,6 +224,46 @@ func TestReplaceMuxerProcessMakesOnlyHandoffDescriptorsInheritable(t *testing.T)
 		}
 	}
 	_ = files.Close()
+}
+
+// handOverFD duplicates f's descriptor and closes f, so the number it returns
+// has exactly one owner: whoever the test hands it to. worker_process_test.go
+// already hands descriptors over this way.
+func handOverFD(t *testing.T, f *os.File) int {
+	t.Helper()
+	fd, err := syscall.Dup(int(f.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return fd
+}
+
+// A descriptor number handed to code that will own and close it must not be a
+// number the test's own os.File still owns. Two owners means two closes, and
+// the second one lands at an unpredictable later moment -- after the kernel
+// has handed that number to an unrelated open file. The damage then surfaces
+// as "bad file descriptor" somewhere else entirely: another test, a later
+// package, whatever happened to open a file next.
+func TestHandingOverADescriptorLeavesOneOwner(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	owned := int(r.Fd())
+	fd := handOverFD(t, r)
+	if fd == owned {
+		t.Fatalf("handed over descriptor %d, which the pipe still owns", fd)
+	}
+	if err := r.Close(); err == nil {
+		t.Fatal("the pipe was left open, so its finalizer still closes a descriptor it no longer owns")
+	}
+	if err := syscall.Close(fd); err != nil {
+		t.Fatalf("the descriptor handed over was not usable: %v", err)
+	}
 }
 
 func descriptorCloseOnExec(t *testing.T, fd int) bool {
