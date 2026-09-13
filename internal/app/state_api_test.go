@@ -864,9 +864,25 @@ func TestHandleStateUnadoptedExcludesProbeSessions(t *testing.T) {
 type fpProc struct {
 	countingProc
 	mismatch bool
+	calls    int
 }
 
-func (p *fpProc) FingerprintMismatch(string) bool { return p.mismatch }
+func (p *fpProc) FingerprintMismatch(string) bool {
+	p.calls++
+	return p.mismatch
+}
+
+func TestHandleStateSkipsMuseFingerprintProbeForOtherAgents(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	seedStructuredNode(t, a, "codex-fp", "codex", "codex")
+	proc := &fpProc{}
+	a.testProc = proc
+
+	a.handleState(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/state", nil))
+	if proc.calls != 0 {
+		t.Fatalf("Muse fingerprint probes for codex = %d, want 0", proc.calls)
+	}
+}
 
 func TestHandleStateMuseFingerprintWarningIsAdditive(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})

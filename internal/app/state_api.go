@@ -247,7 +247,8 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	for i := range views {
 		n := views[i].Node
-		if pm := a.proc(n); pm != nil {
+		if n.Agent == "muse" {
+			pm := a.proc(n)
 			if fp, ok := pm.(museFingerprintReporter); ok && fp.FingerprintMismatch(n.ID) {
 				views[i].MuseSchemaWarning = museSchemaWarning
 			}
