@@ -5,7 +5,7 @@
 #
 #   curl -fsSL https://scimux.com/install | sh
 #   curl -fsSL https://scimux.com/install -o install.sh   # read before running, if you prefer
-#   sh install.sh --dry-run                               # say what it would do, do nothing
+#   sh install.sh --dry-run                               # say what it would do, install nothing
 #   sh install.sh --version v1.2.3                        # pin a release instead of the latest
 #
 # This script only has to solve the *first* install. scimux updates
@@ -115,6 +115,7 @@ verify_signature() {
 # document whose shape belongs to the host, and it fails on the perfectly valid
 # rest -- pretty-printed, reordered, a new field -- by resolving nothing.
 if [ -z "$VERSION" ]; then
+	echo "resolving $REPO_URL/releases/latest"
 	latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest") ||
 		die "could not reach the release host; try --version <tag>"
 	case "$latest" in
@@ -134,7 +135,7 @@ echo "scimux $VERSION ($os/$arch)"
 echo "  from $base/$asset"
 echo "  to   $INSTALL_DIR/scimux"
 if [ "$DRY_RUN" -eq 1 ]; then
-	echo "  --dry-run: nothing downloaded, nothing written"
+	echo "  --dry-run: stopping here -- no binary fetched, nothing written"
 	exit 0
 fi
 

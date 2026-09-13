@@ -74,11 +74,11 @@ func installAsset(t *testing.T) string {
 
 // runInstallScript runs the real bootstrap installer against srv, installing
 // into dir.
-func runInstallScript(t *testing.T, s *installServer, dir string) (string, error) {
+func runInstallScript(t *testing.T, s *installServer, dir string, args ...string) (string, error) {
 	t.Helper()
 	srv := httptest.NewServer(s.handler(installAsset(t)))
 	t.Cleanup(srv.Close)
-	cmd := exec.Command("sh", filepath.Join(repoRootFromTest(t), "scripts", "install.sh"))
+	cmd := exec.Command("sh", append([]string{filepath.Join(repoRootFromTest(t), "scripts", "install.sh")}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"HOME="+t.TempDir(),
 		"SCIMUX_INSTALL_DIR="+dir,
@@ -134,6 +134,26 @@ func TestInstallResolvesTheLatestRelease(t *testing.T) {
 		t.Fatalf("the installer does not say which release it resolved:\n%s", out)
 	}
 	assertInstalled(t, dir, []byte(inertRelease))
+}
+
+// --dry-run is read as "this makes no request", and it is the option offered
+// to somebody deciding whether to trust the script at all. It is nearly true:
+// resolving "latest" already asked the release host, before the dry run gets
+// to say it is doing nothing. An installer that contacts a host it did not
+// name has spent exactly the trust the option exists to earn, so the request
+// is printed and the dry-run line claims only what it can keep.
+func TestDryRunNamesTheOneRequestItMakes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bin")
+	out, err := runInstallScript(t, &installServer{tag: "v-review", payload: []byte(inertRelease)}, dir, "--dry-run")
+	if err != nil {
+		t.Fatalf("the dry run failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "/releases/latest") {
+		t.Fatalf("the dry run reached the release host without naming the URL:\n%s", out)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the dry run created %s (err %v)", dir, err)
+	}
 }
 
 // mv into an existing directory succeeds by moving the file *inside* it, so
