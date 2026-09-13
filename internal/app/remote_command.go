@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
@@ -270,13 +269,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		rc.NewTerminal = remote.OpenOwnerTerminal
 	}
 	if rc.Backoff.Initial == 0 {
-		rc.Backoff = remote.BackoffConfig{
-			Initial:    100 * time.Millisecond,
-			Max:        1600 * time.Millisecond,
-			Factor:     2,
-			Jitter:     0.2,
-			SuccessFor: 5 * time.Second,
-		}
+		rc.Backoff = remote.DefaultBackoff()
 	}
 	cli := remote.NewClient(rc)
 	c.client = cli

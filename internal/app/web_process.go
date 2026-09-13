@@ -840,6 +840,12 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 			InviteStdin: cfg.InviteStdin, Origin: cfg.RVOrigin,
 			Stdin: stdin, Stdout: stdout, Stderr: stderr,
 			NewTerminal: remote.OpenOwnerTerminal,
+			// Without this the client enrolls and mints, but never runs the
+			// wait loop, so no pairing waiter reaches the rendezvous and a
+			// fresh code is refused as "not in use". This process is the only
+			// one that builds a remote client in production; nothing upstream
+			// supplies the field.
+			Backoff: remote.DefaultBackoff(),
 		}
 		rc.TunnelHandlerFor = func(p remote.TunnelPeer) http.Handler {
 			return web.tunnelFor(tunnelPeer{DeviceID: p.DeviceID, RID: p.RID})

@@ -470,3 +470,29 @@ type BackoffConfig struct {
 	Jitter     float64
 	SuccessFor time.Duration
 }
+
+// DefaultBackoff is the retry shape every production client runs. It is a
+// value rather than five literals at each construction site because a caller
+// that omits it gets a client that looks completely healthy — enrolled,
+// minting codes, drawing QR codes — and never contacts the rendezvous at all.
+func DefaultBackoff() BackoffConfig {
+	return BackoffConfig{
+		Initial:    100 * time.Millisecond,
+		Max:        1600 * time.Millisecond,
+		Factor:     2,
+		Jitter:     0.2,
+		SuccessFor: 5 * time.Second,
+	}
+}
+
+// RunsRendezvousLoop reports whether a client built from this config will run
+// the wait loop, which is what registers device and pairing waiters with the
+// rendezvous. Unconfigured means off, so that the many tests which build a
+// client to exercise local behaviour never reach the network; production must
+// therefore opt in with DefaultBackoff (or, in tests, a Scheduler). The
+// predicate is exported because the cost of getting it wrong lands on the
+// other side of the process boundary, where only a person with a phone in
+// their hand can see it.
+func (c Config) RunsRendezvousLoop() bool {
+	return c.Backoff.Initial > 0 || c.Scheduler != nil
+}
