@@ -7,10 +7,9 @@
 #
 # The module cache is warmed WITH network first: a cold clone must still fetch
 # the dependency tree, which NFR-08 calls the cost of NFR-02 rather than a test
-# failure. Everything after that runs through scripts/offline-run.sh, which
-# establishes the isolation, proves it, and fails rather than degrading to a
-# networked run. The reasoning behind how it isolates (loopback stays up; the
-# uid must not change) is documented in that script.
+# failure. The test step establishes and verifies its network namespace:
+# loopback stays up and the caller's uid does not change. It fails if
+# isolation is unavailable; it must never fall back to a networked run.
 on:
   push:
     branches:
@@ -35,13 +34,39 @@ jobs:
           # download can never masquerade as an offline test failure.
           go build ./...
 
-      - name: Go tests, offline (short mode; integration needs tmux and is skipped)
+      - name: Go and Node tests, offline
         run: |
-          # GOPROXY/GOFLAGS are belt and braces: a cache miss then fails as a
-          # clear module error instead of hanging on a dial.
-          GOPROXY=off GOFLAGS=-mod=readonly sh scripts/offline-run.sh go test -short ./...
+          set -eu
+          OUTER_UID="$(id -u)"
+          export OUTER_UID
 
-      - name: Node tests, offline
-        run: |
-          node -e 'const m = Number(process.versions.node.split(".")[0]); if (m < 22) { console.error(`Node 22+ required; found ${process.versions.node}`); process.exit(1); }'
-          sh scripts/offline-run.sh sh -c 'node --test web/test/*.test.js'
+          # Mapping to root would bypass the suite's file-permission tests.
+          if unshare -n true 2>/dev/null; then
+            NS="unshare -n"
+          elif unshare --user --map-current-user --net true 2>/dev/null; then
+            NS="unshare --user --map-current-user --net"
+          else
+            echo "FAIL: cannot isolate the network without remapping the user" >&2
+            exit 1
+          fi
+
+          $NS sh -c '
+            set -eu
+            ip link set lo up
+            if [ "$(id -u)" != "$OUTER_UID" ]; then
+              echo "FAIL: uid changed inside the namespace" >&2
+              exit 1
+            fi
+            if ! ip addr show lo | grep -q "127.0.0.1"; then
+              echo "FAIL: loopback has no address" >&2
+              exit 1
+            fi
+            if nc -z -w 3 1.1.1.1 443 2>/dev/null; then
+              echo "FAIL: an off-host address is reachable" >&2
+              exit 1
+            fi
+            echo "offline tests: loopback up, uid preserved, no route off-host"
+            GOPROXY=off GOFLAGS=-mod=readonly go test -short ./...
+            node -e "const major = Number(process.versions.node.split(\".\")[0]); if (major < 22) { console.error(\"Node 22+ required\"); process.exit(1); }"
+            node --test web/test/*.test.js
+          '

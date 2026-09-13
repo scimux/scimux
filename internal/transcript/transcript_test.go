@@ -1,8 +1,8 @@
 package transcript
 
 // The fixtures in testdata/ were hand-written from known samples of both
-// CLIs' log formats. Regenerate real ones with scripts/capture-fixtures.sh
-// whenever a CLI update changes its format.
+// CLIs' log formats. Optional real fixtures are supplied locally by maintainers
+// when investigating format changes; they are never a CI dependency.
 
 import (
 	"encoding/json"
@@ -44,14 +44,14 @@ func TestParseCodexFixture(t *testing.T) {
 }
 
 // The real-* fixtures were captured from actual CLI runs (claude 2026-07,
-// codex 0.139.0) via scripts/capture-fixtures.sh. They pin the parser to
+// codex 0.139.0). They pin the parser to
 // formats observed in the wild, including record types the hand-written
 // fixtures don't model (queue-operation, ai-title, developer-role messages,
 // thinking blocks, token_count events).
 
 func TestParseRealClaudeFixture(t *testing.T) {
 	if _, err := os.Stat("testdata/real-claude-session.jsonl"); err != nil {
-		t.Skip("real fixture not captured yet (run scripts/capture-fixtures.sh)")
+		t.Skip("optional local real-Claude fixture is absent")
 	}
 	turns := parseFile(t, "testdata/real-claude-session.jsonl")
 	if len(turns) != 2 {
@@ -67,7 +67,7 @@ func TestParseRealClaudeFixture(t *testing.T) {
 
 func TestParseRealCodexFixture(t *testing.T) {
 	if _, err := os.Stat("testdata/real-codex-rollout.jsonl"); err != nil {
-		t.Skip("real fixture not captured yet (run scripts/capture-fixtures.sh)")
+		t.Skip("optional local real-Codex fixture is absent")
 	}
 	turns := parseFile(t, "testdata/real-codex-rollout.jsonl")
 	if len(turns) != 2 {

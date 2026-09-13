@@ -21,7 +21,7 @@ import (
 // session/prompt, …). Notifications between responses are flushed when the
 // following response is consumed. Fully synthetic fixtures live at
 // testdata/synthetic-*.ndjson; real captures at testdata/real-*.ndjson are
-// gitignored (see scripts/capture-grok-acp-fixture.sh).
+// gitignored and supplied locally by maintainers.
 type fixtureFrame struct {
 	Type   string          `json:"type"`
 	Method string          `json:"method,omitempty"`
@@ -37,7 +37,7 @@ func loadACPFixture(t *testing.T, name string) []fixtureFrame {
 	if err != nil {
 		// real-* captures are gitignored; skip like codex golden tests.
 		if strings.HasPrefix(name, "real-") && os.IsNotExist(err) {
-			t.Skipf("golden fixture %s absent (gitignored real capture); run scripts/capture-grok-acp-fixture.sh", name)
+			t.Skipf("golden fixture %s absent (optional local real capture)", name)
 		}
 		t.Fatalf("read fixture %s: %v", path, err)
 	}
@@ -256,7 +256,7 @@ func TestSyntheticGrokReplay(t *testing.T) {
 	}
 }
 
-// TestRealGrokReplay is the local golden from scripts/capture-grok-acp-fixture.sh.
+// TestRealGrokReplay is an optional maintainer-supplied local golden.
 // Skips when the gitignored capture is absent (CI).
 func TestRealGrokReplay(t *testing.T) {
 	frames := loadACPFixture(t, "real-grok-turn.ndjson")

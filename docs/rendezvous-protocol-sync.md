@@ -44,15 +44,10 @@ byte-identical to `git cat-file blob`.
 
 ## Future rv vector revision
 
-`scripts/vendor-rendezvous.sh /path/to/scimux-rv [revision]` performs
-the four steps below. It refuses a source tree with uncommitted changes
-to the vendored paths, pins the commit that last *touched* them rather
-than whatever is at HEAD, enumerates the vector JSON from that commit
-so a file added or removed over there arrives here without editing the
-script, and runs both verification commands.
-
-The steps remain the authority; the script is a way of not mistyping
-them.
+Use the four steps below. Start from a source tree with no uncommitted
+changes to the vendored paths. Pin the commit that last *touched* them,
+enumerate its vector JSON files, and remove any destination vector that
+is absent from that source revision. Run both verification commands.
 
 1. Identify the committed scimux-rv Git OID that authored the new spec
    and vectors.

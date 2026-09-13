@@ -66,21 +66,19 @@ func TestAT_S7c_HTTPPairingRegistersLiveDevice(t *testing.T) {
 	}
 }
 
-// TestAT_S7c_PairingCurlDocTrackedAndNamesWhoConfirms: the curl recipe
-// must live where git will keep it, and must say who asserts device_confirm.
-func TestAT_S7c_PairingCurlDocTrackedAndNamesWhoConfirms(t *testing.T) {
-	const at = "AT-S7c-curl-doc"
+// The API reference must stay public and say who asserts device_confirm.
+func TestAT_S7c_PairingAPIDocTrackedAndNamesWhoConfirms(t *testing.T) {
+	const at = "AT-S7c-api-doc"
 	root := repoRootFromTest(t)
-	path := filepath.Join(root, "docs", "remote-pairing-curl.md")
+	path := filepath.Join(root, "docs", "http-api.md")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("%s: read %s: %v", at, path, err)
 	}
-	doc := string(raw)
+	// Prose may wrap across lines without changing the documented contract.
+	doc := strings.Join(strings.Fields(string(raw)), " ")
 	for _, phrase := range []string{
-		"curl-only mode",
 		"operator asserts the device's half of the confirmation",
-		"nothing proves it",
 		"server cannot tell",
 	} {
 		if !strings.Contains(doc, phrase) {
@@ -92,7 +90,7 @@ func TestAT_S7c_PairingCurlDocTrackedAndNamesWhoConfirms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: read .gitignore: %v", at, err)
 	}
-	allow := "!docs/remote-pairing-curl.md"
+	allow := "!docs/http-api.md"
 	foundAllow := false
 	for _, line := range strings.Split(string(gi), "\n") {
 		if strings.TrimSpace(line) == allow {
@@ -105,10 +103,10 @@ func TestAT_S7c_PairingCurlDocTrackedAndNamesWhoConfirms(t *testing.T) {
 	}
 
 	if _, err := exec.LookPath("git"); err == nil {
-		chk := exec.Command("git", "check-ignore", "--no-index", "-q", "docs/remote-pairing-curl.md")
+		chk := exec.Command("git", "check-ignore", "--no-index", "-q", "docs/http-api.md")
 		chk.Dir = root
 		if err := chk.Run(); err == nil {
-			t.Fatalf("%s: docs/remote-pairing-curl.md is matched by a .gitignore pattern", at)
+			t.Fatalf("%s: docs/http-api.md is matched by a .gitignore pattern", at)
 		}
 	}
 }

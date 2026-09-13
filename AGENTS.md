@@ -9,12 +9,15 @@ rule being "improved" away. Two subsystem blocks (Claude's hooks, and
 attention/input) live in `docs/invariants/` and load on demand; see
 "Subsystem invariants" below for which one binds your change.
 
-`remote-by-invite-only.md` is the remote-access design and the home of every
-FR-xx/NFR-xx cited from `internal/remote`, the protocol specs and `scimux-rv`.
+The remote wire contract is in `docs/protocol/rendezvous-v1.md`; its vendoring
+procedure is in `docs/rendezvous-protocol-sync.md`. FR-xx/NFR-xx identifiers
+retain their numbering from the archived remote-access requirements.
 Markdown is deny-by-default: `.gitignore` ignores `*.md` and allowlists the
 tracked set, so a new document is tracked on purpose or not at all
 (`git ls-files '*.md'` is the check). Superseded plans live in untracked
-`attic/`.
+`attic/`. Nothing under `attic/` is a build, test, or CI dependency. The only
+published script under `scripts/` is `install.sh`; retired tools stay in
+`attic/scripts/` and must not be force-added.
 
 ## Commands
 
@@ -25,12 +28,10 @@ go test -short ./...   # unit only; the offline CI lane (build.yml runs the full
 node --test web/test/*.test.js  # browser unit suite; no browser needed
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
-scripts/vendor-rendezvous.sh /path/to/scimux-rv   # re-vendor the rendezvous vectors
 go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine       -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
-scripts/test/backend-split-mutations.sh
 ```
 
 - The release matrix is not written down twice: `TestCrossBuildTargets` parses
@@ -96,7 +97,7 @@ scripts/test/backend-split-mutations.sh
   stop and discuss. Two maintainer-approved exceptions exist, both scoped by
   directory, neither to be relitigated:
   - `github.com/coder/acp-go-sdk` (Agent Client Protocol), **only inside
-    `internal/acp/`** — see `docs/acp-integration-plan.md`.
+    `internal/acp/`**.
   - `github.com/pion/webrtc/v4`, **only inside `internal/remote/`**: a browser
     speaks only WebRTC for a peer-to-peer data channel, so the computer end
     must speak the same ICE/DTLS/SCTP stack. That single direct require is the
@@ -151,9 +152,9 @@ scripts/test/backend-split-mutations.sh
   encoders and fails on drift; scimux-rv byte-copies it and decodes every
   vector with its browser codec. It is the only oracle either side has, so it
   must stay generated — never hand-edited, pretty-printed, or authored by
-  reading the spec. Each vendoring lane has a one-directional script in the
-  *receiving* repository (`scripts/vendor-rendezvous.sh` here,
-  `scripts/vendor-tunnel.sh` there; see `docs/rendezvous-protocol-sync.md`);
+  reading the spec. Each vendoring lane is owned by the *receiving*
+  repository: the manual procedure in `docs/rendezvous-protocol-sync.md`
+  here, and `scripts/vendor-tunnel.sh` in scimux-rv;
   a single bidirectional "sync everything" entry point is deliberately absent,
   because it would eventually regenerate these vectors on the consuming side.
 - **`PairingTTL` is a constant shared with a server this repository does not
@@ -333,7 +334,7 @@ anywhere else, the rules above and below are the whole contract.
   `internal/app/router_characterization_test.go`,
   `internal/app/static_characterization_test.go`,
   `internal/app/web_js_static_test.go` and `internal/app/css_cascade_test.go`
-  are frozen at commit `4e35aad`. Adding assertions is fine; needing to CHANGE
+  are frozen at commit `41ed538`. Adding assertions is fine; needing to CHANGE
   or DELETE one is a review stop, not an edit — it means the refactor altered
   behaviour the suites exist to pin. (The freeze names a commit because one
   pre-freeze commit deliberately reversed a `css_cascade_test.go` assertion:
@@ -370,10 +371,11 @@ anywhere else, the rules above and below are the whole contract.
   `internal/acp/codex/testdata/real-*.ndjson` and
   `internal/acp/testdata/real-*.ndjson` are captured from real CLI runs and
   are **gitignored — never commit them**: even scrubbed they are personal
-  environment snapshots. Regenerate with `scripts/capture-fixtures.sh` and
-  `scripts/capture-grok-acp-fixture.sh`, which run one tiny prompt per agent
-  and scrub system prompts, tool/skill/path inventories, hostnames, session
-  ids, timezone and secret-shaped strings.
+  environment snapshots. Optional replay tests skip when these local files
+  are absent. Live capture tools are private maintainer utilities archived
+  under `attic/scripts/`; public tests must not depend on them. Keep system
+  prompts, tool/skill/path inventories, hostnames, session ids, timezone and
+  secret-shaped strings out of committed fixtures.
 - The committed fixtures (`claude-session.jsonl`, `codex-rollout.jsonl`,
   `internal/acp/codex/testdata/synthetic-session.ndjson`,
   `internal/acp/testdata/synthetic-grok-turn.ndjson`) are fully synthetic.
