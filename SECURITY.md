@@ -27,9 +27,10 @@ the maintainer by a route that doesn't depend on email.
 
 ## Supported versions
 
-Only the latest release and `main` are supported. scimux is pre-1.0
-(`v0.0.1`); fixes land on `main` and in the next release, and there are no
-backports to earlier tags.
+Only the latest release and `main` are supported. scimux is pre-1.0: fixes
+land on `main` and in the next release, and there are no backports to earlier
+tags. (No release number is named here on purpose — this file would go stale
+at the next tag, and "the latest release" stays true.)
 
 ## What is in scope
 
@@ -52,9 +53,10 @@ backports to earlier tags.
 
 - **The unauthenticated local UI.** scimux listens on loopback and has no
   authentication: anyone who can reach the port can read your conversations
-  and answer your agents' prompts. That is a documented non-goal, and the
-  intended remote path is an SSH tunnel — see "Remote access and security" in
-  the [README](README.md). A way to reach that port *around* the Host and
+  and answer your agents' prompts. That is a documented non-goal: reaching
+  scimux from elsewhere is a separate, explicit step — an SSH tunnel, or
+  remote access by invite — see "Remote access and security" in the
+  [README](README.md). A way to reach that port *around* the Host and
   `Sec-Fetch` checks is in scope; the absence of a login is not.
 - **Binding `-addr` wider than loopback.** Doing so exposes full controller
   access by design, and the README says so.

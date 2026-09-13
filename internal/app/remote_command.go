@@ -120,7 +120,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	// list, dropping the product summary and the usage line the binary has
 	// always printed.
 	configureUsage(fs, args[0])
-	addr := fs.String("addr", addrDefault, "listen address (loopback only; use an SSH tunnel for remote access)")
+	addr := fs.String("addr", addrDefault, "listen address (defaults to loopback; widening it exposes the unauthenticated UI)")
 	data := fs.String("data", dataDefault, "data directory for the node store")
 	socket := fs.String("socket", socketDefault, "tmux socket name (tmux -L) for the private server")
 	doRemote := fs.Bool("remote", c.Config.Remote, "enable remote access")
