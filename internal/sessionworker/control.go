@@ -23,9 +23,10 @@ var (
 
 type Locator struct {
 	Identity
-	NodeID string `json:"node_id"`
-	PID    int    `json:"pid"`
-	Link   Link   `json:"link"`
+	NodeID     string `json:"node_id"`
+	PID        int    `json:"pid"`
+	Executable string `json:"executable,omitempty"`
+	Link       Link   `json:"link"`
 }
 
 func (l Locator) valid() bool {

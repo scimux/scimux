@@ -185,6 +185,9 @@ func (m *workerManager) observe(nodeID string) sessionworker.State {
 		if !reapStaleWorkerLocator(m.dataDir, nodeID) {
 			return sessionworker.State{Live: "unavailable"}
 		}
+		if err := m.reapWorkerEntry(nodeID, entry, time.Now().Add(5*time.Second)); err != nil {
+			m.invalidate(nodeID)
+		}
 		return sessionworker.State{Live: "exited"}
 	}
 	m.mu.Lock()
@@ -402,16 +405,21 @@ func (m *workerManager) stop(nodeID string, terminateSession bool) error {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	if err := m.reapWorkerEntry(nodeID, entry, time.Now().Add(5*time.Second)); err != nil {
+		m.invalidate(nodeID)
+		return err
+	}
+	return nil
+}
+
+func (m *workerManager) reapWorkerEntry(nodeID string, entry *workerEntry, deadline time.Time) error {
 	if entry.process != nil {
 		select {
 		case <-entry.process.wait:
 		case <-time.After(time.Until(deadline)):
-			m.invalidate(nodeID)
 			return errors.New("session worker: did not exit after stop")
 		}
 	} else if err := reapReattachedWorker(entry.pid, deadline); err != nil {
-		m.invalidate(nodeID)
 		return err
 	}
 	m.mu.Lock()
@@ -560,10 +568,16 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 			continue
 		}
 		a.mu.Lock()
-		known := a.byID[locator.NodeID] != nil
+		knownNode := a.byID[locator.NodeID]
+		known := knownNode != nil
+		ended := known && knownNode.EndedAt != ""
+		knownAgent := ""
+		if known {
+			knownAgent = knownNode.Agent
+		}
 		deleted := a.deletedNodes[locator.NodeID]
 		a.mu.Unlock()
-		if known {
+		if known && !ended {
 			continue
 		}
 		client, err := connectWorker(locator)
@@ -574,12 +588,17 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 			errs = append(errs, fmt.Errorf("%s: %w", locator.NodeID, err))
 			continue
 		}
+		if ended && locator.Agent != knownAgent {
+			_ = client.Close()
+			errs = append(errs, fmt.Errorf("%s: worker identity does not match ended durable node", locator.NodeID))
+			continue
+		}
 		m.mu.Lock()
 		m.entries[locator.NodeID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity}
 		m.mu.Unlock()
-		if deleted {
+		if deleted || ended {
 			if err := m.stop(locator.NodeID, true); err != nil {
-				errs = append(errs, fmt.Errorf("finish deleted worker %s: %w", locator.NodeID, err))
+				errs = append(errs, fmt.Errorf("finish durably stopped worker %s: %w", locator.NodeID, err))
 			}
 			continue
 		}

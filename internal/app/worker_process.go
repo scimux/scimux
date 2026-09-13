@@ -256,7 +256,14 @@ func serveSessionWorker(config sessionWorkerConfig, ready *os.File, harness sess
 		return err
 	}
 	defer server.Close()
-	locator := sessionworker.Locator{Identity: config.Identity, NodeID: config.NodeID, PID: os.Getpid(), Link: server.Link()}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("session worker: locate executable: %w", err)
+	}
+	locator := sessionworker.Locator{
+		Identity: config.Identity, NodeID: config.NodeID, PID: os.Getpid(),
+		Executable: executable, Link: server.Link(),
+	}
 	if err := registration.Publish(locator); err != nil {
 		return err
 	}

@@ -243,6 +243,9 @@ func Run() {
 	if err := workers.AdoptExistingClaude(a); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: attach existing Claude chats to session workers:", err)
 	}
+	if err := sweepWorkerExecutables(dataDir, workerExe); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: clean obsolete session-worker binaries:", err)
+	}
 	a.workers = workers
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
 	a.warmStartup()

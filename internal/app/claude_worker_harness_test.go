@@ -17,10 +17,12 @@ import (
 )
 
 func testClaudeSessionHarness(a *app, id string) *claudeSessionHarness {
-	return &claudeSessionHarness{
+	h := &claudeSessionHarness{
 		nodeID: id, app: a, answers: map[string]preparedClaudeAnswer{},
 		stopCh: make(chan struct{}), done: make(chan struct{}),
 	}
+	h.refreshState()
+	return h
 }
 
 // One test crosses the whole Claude adapter surface with existing synthetic
@@ -47,7 +49,22 @@ func TestClaudeSessionHarnessDescribesAndAnswersCurrentDialog(t *testing.T) {
 	}
 	h := testClaudeSessionHarness(a, n.ID)
 
+	// The worker-owned ticker produces supervision state. Reading that state
+	// may project it, but must not run another supervision cycle at browser
+	// request frequency.
+	h.poll()
+	f.mu.Lock()
+	callsBeforeState := len(f.calls)
+	f.mu.Unlock()
 	state := h.State(context.Background())
+	f.mu.Lock()
+	stateCalls := append([][]string(nil), f.calls[callsBeforeState:]...)
+	f.mu.Unlock()
+	for _, call := range stateCalls {
+		if len(call) >= 3 && (call[2] == "list-sessions" || call[2] == "capture-pane") {
+			t.Fatalf("State ran supervision command %q", call[2])
+		}
+	}
 	if state.Supervision != string(claudeSupStrict) || !state.HasSession || !state.AXScreenReader || !state.AutoApprove.Supported {
 		t.Fatalf("State = %#v", state)
 	}
@@ -162,6 +179,10 @@ func TestClaudeSessionHarnessCurrentTransportOperations(t *testing.T) {
 }
 
 func TestClaudeSessionHarnessActionsFailClosed(t *testing.T) {
+	unpolled := &claudeSessionHarness{}
+	if state := unpolled.State(context.Background()); state.Live != "exited" {
+		t.Fatalf("unpolled state = %#v", state)
+	}
 	empty := testClaudeSessionHarness(newTestApp(t, &fakeTmux{}), "missing")
 	if _, err := empty.Send(context.Background(), "x"); err == nil {
 		t.Fatal("Send accepted a missing chat")

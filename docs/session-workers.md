@@ -67,14 +67,32 @@ Workers do not broadcast. Broadcast discovery would add races, spoofing, and
 platform-specific behavior without identifying ownership. Each worker instead
 holds a kernel lock for its node lifetime and atomically publishes an
 owner-readable locator under `~/.scimux/control/workers/`. The locator contains
-only identity, PID, socket path, and a random capability; the lock, not the JSON
-file, decides ownership. `ls` remains useful for diagnosis. The muxer trusts a
-locator only after the socket's authenticated Hello agrees with the durable
-node identity.
+only identity, PID, executable path, socket path, and a random capability; the
+lock, not the JSON file, decides ownership. `ls` remains useful for diagnosis.
+The muxer trusts a locator only after the socket's authenticated Hello agrees
+with the durable node identity.
+
+The per-node `.lock` inode deliberately remains after the worker exits. It is
+zero bytes and is reused if that node title is launched again. Unlinking after
+taking `flock` is not safe: another claimant may already have opened the old
+inode and be waiting on it, then acquire that unlinked inode while a third
+claimant locks the newly created path. Stable lock inodes trade tiny bounded
+directory entries for the absence of split ownership.
 
 The executable used for workers is copied to a content-addressed, owner-only
 path before launch. Replacing the user-facing `scimux` pathname cannot change
 what an old muxer or long-lived worker will exec halfway through an update.
+Startup hashes the running image and reuses an existing pin without rewriting
+it. After reconciliation it retains the current pin and every pin named by a
+worker locator, and removes other content-addressed generations. A live locator
+from an older worker that cannot name its executable disables that sweep; disk
+cleanup fails safe until that worker exits.
+
+Web-child startup configuration is a bounded JSON document on an inherited
+pipe, so the muxer capability and CSRF token never enter a new child's argv or
+environment. A new web child still reads the former environment contract when
+the pipe marker is absent: that one-way compatibility is what lets an already
+running older muxer prepare and activate the newly downloaded web generation.
 
 Automatic cleanup is fail-safe. A live Claude worker's reported hook identity
 protects its hook bundle even during the narrow launch/publication window; an
@@ -82,8 +100,17 @@ unreadable or unauthenticated locator disables cleanup rather than risking a
 running chat. On startup, an authenticated worker interrupted before its node
 record was published supplies that record's launch description and is recovered.
 If the latest record is instead a delete tombstone, startup finishes the Stop
-and never resurrects it. A muxer crash otherwise merely drops client
-connections. Claude hook rotations (including `/clear`) are projected back to
-the global append-only registry by the normal poll, so a later clean stop and
-re-adoption preserve the worker's newest capability bundle. Explicit deletion
-is the only normal path that tells a worker to terminate its owned session.
+and never resurrects it. An `EndedAt` node receives the same authenticated
+cleanup on startup, covering a crash between persisting `/exit` and reaching
+the worker. A muxer crash otherwise merely drops client connections. Claude
+hook rotations (including `/clear`) are projected back to the global append-only
+registry by the normal poll, so a later clean stop and re-adoption preserve the
+worker's newest capability bundle. Explicit deletion is the only normal path
+that tells a worker to terminate its owned session.
+
+Worker-reported liveness, attention, delivery and permission mechanics are
+derived state, not another durable registry. The worker reconstructs them from
+its provider connection, hook journal, tmux pane and canonical session log; the
+muxer reconstructs its projection by polling `State`. For Claude, the worker's
+fixed two-second supervision lane produces that snapshot. Browser reads return
+the last snapshot and never trigger pane polling or append audit records.

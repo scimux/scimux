@@ -1292,11 +1292,21 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	if pm := a.proc(n); pm != nil {
 		// No pane to photograph: peek renders a tail of the raw event log.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if workers, ok := pm.(*workerManager); ok && n.Agent == "claude" {
-			fmt.Fprint(w, workers.PeekMode(n.ID, r.URL.Query().Get("mode")))
-		} else {
-			fmt.Fprint(w, pm.Peek(n.ID))
+		peek := pm.Peek(n.ID)
+		workers, workerBacked := pm.(*workerManager)
+		if workerBacked && n.Agent == "claude" {
+			peek = workers.PeekMode(n.ID, r.URL.Query().Get("mode"))
+		} else if workerBacked && peek == "" {
+			// A dead structured worker has no RPC endpoint, but its canonical
+			// session log remains the same Inspect source the monolith uses.
+			switch n.transport() {
+			case "acp":
+				peek = a.acp.Peek(n.ID)
+			case "codex":
+				peek = a.codex.Peek(n.ID)
+			}
 		}
+		fmt.Fprint(w, peek)
 		return
 	}
 	s := a.server.Session(n.ID)

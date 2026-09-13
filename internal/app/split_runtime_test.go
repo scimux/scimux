@@ -201,6 +201,51 @@ func TestSplitRuntimeQuiesceForExecPreservesSessionWorkerAndOwnership(t *testing
 	cmd.closeOwnership()
 }
 
+func TestSplitRuntimeQuiesceFailureReleasesListenerAndOwnership(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	data := filepath.Dir(a.storePath)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &Command{Stdout: io.Discard, Stderr: io.Discard, listener: ln, listenAddr: ln.Addr().String(), Config: remote.Config{DataDir: data}}
+	claimCommandOwnership(t, cmd)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := startSplitRuntime(context.Background(), a, cmd, exe, splitRuntimeOptions{configureWeb: func(s *webSupervisor) {
+		s.readyTimeout, s.drainTimeout = 10*time.Second, 10*time.Second
+		s.childArgs = []string{"-test.run=^TestWebChildHelperProcess$"}
+		s.extraEnv = []string{"SCIMUX_WEB_CHILD_TEST=1"}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coreDir := filepath.Dir(rt.core.Link().Socket)
+	blocker := filepath.Join(coreDir, "force-close-error")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(blocker)
+		_ = os.Remove(coreDir)
+	})
+	if err := rt.QuiesceForExec(); err == nil {
+		t.Fatal("forced private-backend cleanup failure was hidden")
+	}
+	if cmd.Listener() != nil || cmd.ownership != nil {
+		t.Fatal("failed exec quiesce retained public listener or data-directory ownership")
+	}
+	replacement, err := backend.Claim(data)
+	if err != nil {
+		t.Fatalf("replacement could not claim ownership after failed quiesce: %v", err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSplitRuntimeRetainsOwnershipWhileWebDrains(t *testing.T) {
 	requestEntered := make(chan struct{})
 	releaseRequest := make(chan struct{})

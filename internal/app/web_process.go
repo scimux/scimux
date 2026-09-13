@@ -27,9 +27,13 @@ const (
 	webReadyFD    = 4
 	webActivateFD = 5
 	webOwnerFD    = 6
+	webConfigFD   = 7
 )
 
 const (
+	envWebConfigFD = "SCIMUX_WEB_CONFIG_FD"
+	// Legacy environment names are read only by a new web child started from
+	// a pre-pipe muxer. New supervisors publish none of these capabilities.
 	envCoreSocket  = "SCIMUX_CORE_SOCKET"
 	envCoreToken   = "SCIMUX_CORE_TOKEN"
 	envGeneration  = "SCIMUX_WEB_GENERATION"
@@ -390,6 +394,17 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 		activateW.Close()
 		return nil, fmt.Errorf("web supervisor: parent-lifetime pipe: %w", err)
 	}
+	configR, configW, err := os.Pipe()
+	if err != nil {
+		publicFile.Close()
+		readyR.Close()
+		readyW.Close()
+		activateR.Close()
+		activateW.Close()
+		ownerR.Close()
+		ownerW.Close()
+		return nil, fmt.Errorf("web supervisor: configuration pipe: %w", err)
+	}
 
 	args := s.childArgs
 	if len(args) == 0 {
@@ -399,9 +414,9 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 	// successfully activated child (an update request ends immediately after
 	// activation).
 	cmd := exec.Command(executable, args...)
-	cmd.Env = append(os.Environ(), encodeWebChildEnv(cfg)...)
+	cmd.Env = append(os.Environ(), envWebConfigFD+"="+strconv.Itoa(webConfigFD))
 	cmd.Env = append(cmd.Env, s.extraEnv...)
-	cmd.ExtraFiles = []*os.File{publicFile, readyW, activateR, ownerR}
+	cmd.ExtraFiles = []*os.File{publicFile, readyW, activateR, ownerR, configR}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = s.stdin, s.stdout, s.stderr
 	if err := cmd.Start(); err != nil {
 		publicFile.Close()
@@ -411,12 +426,32 @@ func (s *webSupervisor) launch(ctx context.Context, executable string, cfg webCh
 		activateW.Close()
 		ownerR.Close()
 		ownerW.Close()
+		configR.Close()
+		configW.Close()
 		return nil, fmt.Errorf("web supervisor: start: %w", err)
 	}
 	publicFile.Close()
 	readyW.Close()
 	activateR.Close()
 	ownerR.Close()
+	configR.Close()
+	if err := json.NewEncoder(configW).Encode(cfg); err != nil {
+		_ = configW.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		readyR.Close()
+		activateW.Close()
+		ownerW.Close()
+		return nil, fmt.Errorf("web supervisor: write configuration: %w", err)
+	}
+	if err := configW.Close(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		readyR.Close()
+		activateW.Close()
+		ownerW.Close()
+		return nil, fmt.Errorf("web supervisor: close configuration: %w", err)
+	}
 
 	events := make(chan webChildEvent, 2)
 	eventErr := make(chan error, 1)
@@ -629,47 +664,43 @@ func (s *webSupervisor) Close() error {
 	return nil
 }
 
-func encodeWebChildEnv(cfg webChildConfig) []string {
-	trusted, _ := json.Marshal(cfg.TrustedHosts)
-	return []string{
-		envCoreSocket + "=" + cfg.Link.Socket,
-		envCoreToken + "=" + cfg.Link.Token,
-		envGeneration + "=" + strconv.FormatUint(cfg.Generation, 10),
-		envReplacement + "=" + strconv.FormatBool(cfg.Replacement),
-		envListenAddr + "=" + cfg.ListenAddr,
-		envTrusted + "=" + string(trusted),
-		envDataDir + "=" + cfg.DataDir,
-		envRemote + "=" + strconv.FormatBool(cfg.Remote),
-		envInviteFile + "=" + cfg.InviteFile,
-		envInviteStdin + "=" + strconv.FormatBool(cfg.InviteStdin),
-		envRVOrigin + "=" + cfg.RVOrigin,
-		envCSRFToken + "=" + cfg.CSRFToken,
+func readWebChildConfig(r io.Reader) (webChildConfig, error) {
+	if r == nil {
+		return webChildConfig{}, errors.New("web child: missing configuration pipe")
 	}
+	var cfg webChildConfig
+	if err := json.NewDecoder(io.LimitReader(r, 64<<10)).Decode(&cfg); err != nil {
+		return webChildConfig{}, fmt.Errorf("web child: read configuration: %w", err)
+	}
+	if cfg.Generation == 0 || cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken) {
+		return webChildConfig{}, errors.New("web child: incomplete configuration")
+	}
+	return cfg, nil
 }
 
-func loadWebChildConfig(getenv func(string) string) (webChildConfig, error) {
+func loadLegacyWebChildConfig(getenv func(string) string) (webChildConfig, error) {
 	if getenv == nil {
-		return webChildConfig{}, errors.New("web child: nil environment")
+		return webChildConfig{}, errors.New("web child: nil legacy environment")
 	}
 	gen, err := strconv.ParseUint(getenv(envGeneration), 10, 64)
 	if err != nil || gen == 0 {
-		return webChildConfig{}, errors.New("web child: invalid generation")
+		return webChildConfig{}, errors.New("web child: invalid legacy generation")
 	}
 	replacement, err := strconv.ParseBool(getenv(envReplacement))
 	if err != nil {
-		return webChildConfig{}, errors.New("web child: invalid replacement flag")
+		return webChildConfig{}, errors.New("web child: invalid legacy replacement flag")
 	}
 	remoteEnabled, err := strconv.ParseBool(getenv(envRemote))
 	if err != nil {
-		return webChildConfig{}, errors.New("web child: invalid remote flag")
+		return webChildConfig{}, errors.New("web child: invalid legacy remote flag")
 	}
 	inviteStdin, err := strconv.ParseBool(getenv(envInviteStdin))
 	if err != nil {
-		return webChildConfig{}, errors.New("web child: invalid invite-stdin flag")
+		return webChildConfig{}, errors.New("web child: invalid legacy invite-stdin flag")
 	}
 	var trusted []string
 	if err := json.Unmarshal([]byte(getenv(envTrusted)), &trusted); err != nil {
-		return webChildConfig{}, errors.New("web child: invalid trusted hosts")
+		return webChildConfig{}, errors.New("web child: invalid legacy trusted hosts")
 	}
 	cfg := webChildConfig{
 		Link:       backend.Link{Socket: getenv(envCoreSocket), Token: getenv(envCoreToken)},
@@ -680,24 +711,54 @@ func loadWebChildConfig(getenv func(string) string) (webChildConfig, error) {
 		RVOrigin: getenv(envRVOrigin), CSRFToken: getenv(envCSRFToken),
 	}
 	if cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken) {
-		return webChildConfig{}, errors.New("web child: incomplete environment")
+		return webChildConfig{}, errors.New("web child: incomplete legacy environment")
 	}
 	return cfg, nil
 }
 
+func loadWebChildStartupConfig(getenv func(string) string, config io.Reader) (webChildConfig, error) {
+	if getenv == nil {
+		return webChildConfig{}, errors.New("web child: nil environment")
+	}
+	marker := getenv(envWebConfigFD)
+	if marker == "" {
+		return loadLegacyWebChildConfig(getenv)
+	}
+	if marker != strconv.Itoa(webConfigFD) {
+		return webChildConfig{}, errors.New("web child: invalid configuration descriptor")
+	}
+	return readWebChildConfig(config)
+}
+
 func runWebChildMain() int {
-	if err := runWebChild(context.Background(), os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
+	legacy := os.Getenv(envWebConfigFD) == ""
+	var config *os.File
+	if !legacy {
+		config = os.NewFile(webConfigFD, "scimux-web-config")
+	}
+	cfg, err := loadWebChildStartupConfig(os.Getenv, config)
+	if config != nil {
+		_ = config.Close()
+	}
+	if legacy {
+		for _, name := range []string{
+			envCoreSocket, envCoreToken, envGeneration, envReplacement, envListenAddr, envTrusted,
+			envDataDir, envRemote, envInviteFile, envInviteStdin, envRVOrigin, envCSRFToken,
+		} {
+			_ = os.Unsetenv(name)
+		}
+	}
+	if err == nil {
+		err = runWebChildConfig(context.Background(), cfg, os.Stdin, os.Stdout, os.Stderr)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux web child:", err)
 		return 1
 	}
 	return 0
 }
 
-func runWebChild(ctx context.Context, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) error {
-	cfg, err := loadWebChildConfig(getenv)
-	if err != nil {
-		return err
-	}
+func runWebChildConfig(ctx context.Context, cfg webChildConfig, stdin io.Reader, stdout, stderr io.Writer) error {
 	// Each web child is a fresh process, so assigning before constructing any
 	// handler is race-free. The value is minted once by the muxer supervisor
 	// and inherited by every generation, preserving writes from open tabs.

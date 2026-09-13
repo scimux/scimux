@@ -23,6 +23,7 @@ type syntheticSessionHarness struct {
 	launched  bool
 	state     sessionworker.State
 	stop      bool
+	stopErr   error
 	terminate bool
 	events    []sessionlog.Event
 	peekMode  string
@@ -112,7 +113,7 @@ func (h *syntheticSessionHarness) Stop(_ context.Context, terminate bool) error 
 	defer h.mu.Unlock()
 	h.stop = true
 	h.terminate = terminate
-	return nil
+	return h.stopErr
 }
 func (h *syntheticSessionHarness) Conflict(err error) bool {
 	return errors.Is(err, errSyntheticWorkerConflict)
@@ -125,6 +126,13 @@ func TestSessionWorkerHelperProcess(t *testing.T) {
 	config, ready, err := readSessionWorkerStartup()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if raw := os.Getenv("SCIMUX_SESSION_WORKER_TEST_READY_DELAY"); raw != "" {
+		delay, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(delay)
 	}
 	if err := serveSessionWorker(config, ready, &syntheticSessionHarness{}); err != nil {
 		t.Fatal(err)

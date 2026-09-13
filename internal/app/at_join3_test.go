@@ -20,7 +20,7 @@ import (
 )
 
 func TestWebChildJoinsRemoteTunnelToRealRoutes(t *testing.T) {
-	tunnelFor := join3WebChildTunnelFactory(t)
+	tunnelFor := join3WebChildTunnelFactory(t, true)
 	if tunnelFor == nil {
 		t.Fatal("production web child handed the remote client no tunnel handler")
 	}
@@ -57,7 +57,13 @@ func TestWebChildJoinsRemoteTunnelToRealRoutes(t *testing.T) {
 	}
 }
 
-func join3WebChildTunnelFactory(t *testing.T) func(remote.TunnelPeer) http.Handler {
+func TestLocalWebChildHandsOverNoTunnelFactory(t *testing.T) {
+	if tunnelFor := join3WebChildTunnelFactory(t, false); tunnelFor != nil {
+		t.Fatal("local-only web child constructed a remote tunnel factory")
+	}
+}
+
+func join3WebChildTunnelFactory(t *testing.T, remoteEnabled bool) func(remote.TunnelPeer) http.Handler {
 	t.Helper()
 	a := newTestApp(t, &fakeTmux{})
 	muxer, err := newMuxerBackend(a)
@@ -88,7 +94,7 @@ func join3WebChildTunnelFactory(t *testing.T) func(remote.TunnelPeer) http.Handl
 	}}
 	cfg := webChildConfig{
 		Link: core.Link(), Generation: 1, ListenAddr: ln.Addr().String(),
-		DataDir: t.TempDir(), Remote: true, CSRFToken: mustToken(),
+		DataDir: t.TempDir(), Remote: remoteEnabled, CSRFToken: mustToken(),
 	}
 	go func() {
 		defer readyW.Close()

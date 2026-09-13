@@ -138,6 +138,13 @@ func (r *splitRuntime) QuiesceForExec() error {
 			r.muxer.app.workers.Detach()
 		}
 	})
+	if r.closeErr != nil && r.command != nil {
+		// Exec cannot proceed after a partial quiesce. The caller exits, so make
+		// that failure observable as no owner rather than leaving muxer.json
+		// pointing at the private server we just closed.
+		r.command.closeListener()
+		r.command.closeOwnership()
+	}
 	return r.closeErr
 }
 

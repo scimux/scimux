@@ -29,7 +29,7 @@ scripts/vendor-rendezvous.sh /path/to/scimux-rv   # re-vendor the rendezvous vec
 go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine       -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
-go test ./internal/app        -run=XXX -fuzz=FuzzWebChildEnvironment -fuzztime=30s
+go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
 scripts/test/backend-split-mutations.sh
 ```
 

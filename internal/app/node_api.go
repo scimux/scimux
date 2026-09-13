@@ -179,16 +179,17 @@ func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	a.nodes = append(a.nodes, n)
 	a.byID[n.ID] = n
+	snapshot := *n
 	a.mu.Unlock()
 	locked = false
-	if a.workers != nil && n.Agent == "claude" {
-		if _, err := a.workers.AdoptClaude(n, "", 0); err != nil {
+	if a.workers != nil && snapshot.Agent == "claude" {
+		if _, err := a.workers.AdoptClaude(&snapshot, "", 0); err != nil {
 			// Adoption itself already succeeded and must not be rolled back: the
 			// legacy controller remains able to supervise this user-owned pane.
-			fmt.Fprintf(os.Stderr, "scimux: attach adopted Claude chat %s to session worker: %v\n", n.ID, err)
+			fmt.Fprintf(os.Stderr, "scimux: attach adopted Claude chat %s to session worker: %v\n", snapshot.ID, err)
 		}
 	}
-	writeJSON(w, n)
+	writeJSON(w, &snapshot)
 }
 
 func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {

@@ -5,12 +5,38 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/sessionworker"
 )
+
+func TestStructuredWorkerInspectFallsBackToCanonicalSessionLog(t *testing.T) {
+	for _, tc := range []struct {
+		agent, transport string
+	}{
+		{agent: "opencode", transport: "acp"},
+		{agent: "codex", transport: "codex"},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			a := newTestApp(t, &fakeTmux{})
+			n := seedStructuredNode(t, a, "dead-"+tc.agent, tc.agent, tc.transport)
+			a.workers = newWorkerManager("", filepath.Dir(a.storePath), "test")
+			if err := (&sessionlog.Writer{Path: a.sessionLogPath(n.ID)}).Append(sessionlog.Event{
+				T: "assistant", Text: "persisted output after worker death",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			rec := routeRequest(newTestHandler(t, a), http.MethodGet, "/api/nodes/"+n.ID+"/peek", "", false)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "persisted output after worker death") {
+				t.Fatalf("Inspect fallback = %d %q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
 
 func attachSyntheticWorker(t *testing.T, a *app, nodeID string, harness *syntheticSessionHarness) {
 	t.Helper()

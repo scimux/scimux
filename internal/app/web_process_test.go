@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,8 +36,8 @@ func TestWebChildHelperProcess(t *testing.T) {
 	if childVersion := os.Getenv("SCIMUX_WEB_CHILD_TEST_VERSION"); childVersion != "" {
 		version = childVersion
 	}
-	if err := runWebChild(context.Background(), os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
-		t.Fatal(err)
+	if code := runWebChildMain(); code != 0 {
+		t.Fatalf("web child exited %d", code)
 	}
 }
 
@@ -94,8 +94,8 @@ func TestGatedWebChildHelperProcess(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if err := runWebChild(context.Background(), os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
-		t.Fatal(err)
+	if code := runWebChildMain(); code != 0 {
+		t.Fatalf("web child exited %d", code)
 	}
 }
 
@@ -164,6 +164,17 @@ func TestWebSupervisorStartsAndReplacesRealChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstPID := s.current.cmd.Process.Pid
+	if runtime.GOOS == "linux" {
+		environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(firstPID), "environ"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for label, secret := range map[string]string{"muxer capability": core.Link().Token, "CSRF token": cmd.csrfToken} {
+			if bytes.Contains(environ, []byte(secret)) {
+				t.Fatalf("web-child environment exposed %s", label)
+			}
+		}
+	}
 	firstOwner := s.current.owner
 	assertWebGeneration(t, ln.Addr().String(), "1")
 
@@ -309,6 +320,21 @@ func TestWebChildExitsWhenMuxerLifetimePipeCloses(t *testing.T) {
 }
 
 func TestRunWebChildFilesOwnsInheritedDescriptors(t *testing.T) {
+	if err := runWebChildFiles(context.Background(), webChildConfig{}, nil, nil, nil, nil, nil, nil, nil, webChildDeps{}); err == nil {
+		t.Fatal("web child accepted missing inherited descriptors")
+	}
+	files := make([]*os.File, 4)
+	for i := range files {
+		file, err := os.CreateTemp(t.TempDir(), "not-a-listener")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[i] = file
+	}
+	if err := runWebChildFiles(context.Background(), webChildConfig{}, files[0], files[1], files[2], files[3], nil, nil, nil, webChildDeps{}); err == nil {
+		t.Fatal("web child accepted a regular file as its public listener")
+	}
+
 	coreMux := http.NewServeMux()
 	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	core, err := backend.Listen(t.TempDir(), coreMux)
@@ -1118,29 +1144,204 @@ func TestWebChildConfigurationValidation(t *testing.T) {
 		Remote: true, InviteFile: "/tmp/invite", InviteStdin: false,
 		RVOrigin: "https://rv.example", CSRFToken: strings.Repeat("a", 64),
 	}
-	env := map[string]string{}
-	for _, entry := range encodeWebChildEnv(cfg) {
-		key, value, _ := strings.Cut(entry, "=")
-		env[key] = value
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	got, err := loadWebChildConfig(func(key string) string { return env[key] })
+	got, err := readWebChildConfig(bytes.NewReader(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Generation != cfg.Generation || !got.Replacement || !got.Remote || got.TrustedHosts[0] != "lab.example" || got.CSRFToken != cfg.CSRFToken {
 		t.Fatalf("decoded config = %#v", got)
 	}
-	for _, key := range []string{envGeneration, envReplacement, envRemote, envInviteStdin, envTrusted, envCoreSocket, envCSRFToken} {
-		t.Run(key, func(t *testing.T) {
-			bad := maps.Clone(env)
-			bad[key] = ""
-			if _, err := loadWebChildConfig(func(k string) string { return bad[k] }); err == nil {
-				t.Fatal("accepted malformed environment")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*webChildConfig)
+	}{
+		{"generation", func(c *webChildConfig) { c.Generation = 0 }},
+		{"core socket", func(c *webChildConfig) { c.Link.Socket = "" }},
+		{"core token", func(c *webChildConfig) { c.Link.Token = "" }},
+		{"listen address", func(c *webChildConfig) { c.ListenAddr = "" }},
+		{"data directory", func(c *webChildConfig) { c.DataDir = "" }},
+		{"CSRF token", func(c *webChildConfig) { c.CSRFToken = "bad" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := cfg
+			tc.mutate(&bad)
+			payload, err := json.Marshal(bad)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readWebChildConfig(bytes.NewReader(payload)); err == nil {
+				t.Fatal("accepted incomplete pipe configuration")
 			}
 		})
 	}
-	if _, err := loadWebChildConfig(nil); err == nil {
-		t.Fatal("accepted nil environment")
+	if _, err := readWebChildConfig(strings.NewReader("{")); err == nil {
+		t.Fatal("accepted malformed pipe configuration")
+	}
+	if _, err := readWebChildConfig(nil); err == nil {
+		t.Fatal("accepted missing pipe configuration")
+	}
+}
+
+func TestWebChildAcceptsLegacyEnvironmentFromOlderMuxer(t *testing.T) {
+	if _, err := loadLegacyWebChildConfig(nil); err == nil {
+		t.Fatal("accepted nil legacy environment")
+	}
+	env := map[string]string{
+		envGeneration: "7", envReplacement: "true", envRemote: "false", envInviteStdin: "false",
+		envTrusted: `["lab.example"]`, envCoreSocket: "/tmp/legacy.sock", envCoreToken: "legacy-capability",
+		envListenAddr: "127.0.0.1:8787", envDataDir: "/tmp/legacy-data", envCSRFToken: strings.Repeat("b", 64),
+	}
+	legacyGetenv := func(key string) string { return env[key] }
+	cfg, err := loadWebChildStartupConfig(legacyGetenv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Generation != 7 || !cfg.Replacement || cfg.Remote || cfg.Link.Token != "legacy-capability" || len(cfg.TrustedHosts) != 1 {
+		t.Fatalf("legacy config = %#v", cfg)
+	}
+	for _, key := range []string{envGeneration, envReplacement, envRemote, envInviteStdin, envTrusted, envCoreSocket, envCoreToken, envListenAddr, envDataDir, envCSRFToken} {
+		t.Run("invalid "+key, func(t *testing.T) {
+			bad := make(map[string]string, len(env))
+			for name, value := range env {
+				bad[name] = value
+			}
+			bad[key] = ""
+			if _, err := loadLegacyWebChildConfig(func(name string) string { return bad[name] }); err == nil {
+				t.Fatal("accepted incomplete legacy environment")
+			}
+		})
+	}
+
+	piped := webChildConfig{
+		Link: backend.Link{Socket: "/tmp/new.sock", Token: "new-capability"}, Generation: 8,
+		ListenAddr: "127.0.0.1:8787", DataDir: "/tmp/new-data", CSRFToken: strings.Repeat("c", 64),
+	}
+	payload, err := json.Marshal(piped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := loadWebChildStartupConfig(func(key string) string {
+		if key == envWebConfigFD {
+			return strconv.Itoa(webConfigFD)
+		}
+		return ""
+	}, bytes.NewReader(payload)); err != nil || got.Link.Token != piped.Link.Token {
+		t.Fatalf("pipe config = %#v, %v", got, err)
+	}
+	if _, err := loadWebChildStartupConfig(func(string) string { return "bad-fd" }, nil); err == nil {
+		t.Fatal("accepted invalid configuration descriptor")
+	}
+	if _, err := loadWebChildStartupConfig(nil, nil); err == nil {
+		t.Fatal("accepted nil startup environment")
+	}
+
+	// Hidden-role startup must fail closed and scrub inherited secrets even
+	// when an older muxer supplies an incomplete legacy environment.
+	legacyNames := []string{
+		envCoreSocket, envCoreToken, envGeneration, envReplacement, envListenAddr, envTrusted,
+		envDataDir, envRemote, envInviteFile, envInviteStdin, envRVOrigin, envCSRFToken,
+	}
+	for _, name := range legacyNames {
+		t.Setenv(name, os.Getenv(name))
+	}
+	t.Setenv(envWebConfigFD, "")
+	t.Setenv(envCoreToken, "must-not-survive-startup")
+	t.Setenv(envGeneration, "")
+	if code := runWebChildMain(); code != 1 {
+		t.Fatalf("invalid legacy startup exit = %d, want 1", code)
+	}
+	if got := os.Getenv(envCoreToken); got != "" {
+		t.Fatalf("legacy core capability survived startup: %q", got)
+	}
+}
+
+func TestOlderMuxerStartsNewWebChild(t *testing.T) {
+	coreMux := http.NewServeMux()
+	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	coreMux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"legacy":"ok"}`) })
+	core, err := backend.Listen(t.TempDir(), coreMux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	publicFile, err := listenerFileForExec(ln)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyR.Close()
+	activateR, activateW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activateW.Close()
+	ownerR, ownerW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := webChildConfig{
+		Link: core.Link(), Generation: 4, ListenAddr: ln.Addr().String(),
+		DataDir: t.TempDir(), CSRFToken: strings.Repeat("d", 64),
+	}
+	trusted, err := json.Marshal(cfg.TrustedHosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestWebChildHelperProcess$")
+	cmd.ExtraFiles = []*os.File{publicFile, readyW, activateR, ownerR}
+	cmd.Env = []string{
+		"SCIMUX_WEB_CHILD_TEST=1",
+		envCoreSocket + "=" + cfg.Link.Socket, envCoreToken + "=" + cfg.Link.Token,
+		envGeneration + "=4", envReplacement + "=false", envListenAddr + "=" + cfg.ListenAddr,
+		envTrusted + "=" + string(trusted), envDataDir + "=" + cfg.DataDir, envRemote + "=false",
+		envInviteStdin + "=false", envCSRFToken + "=" + cfg.CSRFToken,
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	_ = publicFile.Close()
+	_ = readyW.Close()
+	_ = activateR.Close()
+	_ = ownerR.Close()
+	dec := json.NewDecoder(readyR)
+	var event webChildEvent
+	if err := dec.Decode(&event); err != nil || event.Phase != "ready" || event.Generation != cfg.Generation {
+		t.Fatalf("legacy-start readiness = %#v, %v", event, err)
+	}
+	if _, err := activateW.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dec.Decode(&event); err != nil || event.Phase != "active" || event.Generation != cfg.Generation {
+		t.Fatalf("legacy-start activation = %#v, %v", event, err)
+	}
+	resp, err := testHTTPClient.Get("http://" + ln.Addr().String() + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != `{"legacy":"ok"}` {
+		t.Fatalf("legacy-start response = %d %q", resp.StatusCode, body)
+	}
+	if err := ownerW.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1772,19 +1973,26 @@ func TestServeWebChildSetupAndHandshakeFailures(t *testing.T) {
 	}
 }
 
-func FuzzWebChildEnvironment(f *testing.F) {
-	f.Add("1", "false", "false", "false", `[]`, "/tmp/muxer.sock", "cap", "127.0.0.1:8787", "/tmp/data")
-	f.Add("0", "maybe", "x", "x", `{`, "", "", "", "")
-	f.Fuzz(func(t *testing.T, generation, replacement, remoteFlag, inviteStdin, trusted, socket, token, addr, data string) {
+func FuzzWebChildConfiguration(f *testing.F) {
+	f.Add(
+		`{"Link":{"Socket":"/tmp/muxer.sock","Token":"cap"},"Generation":1,"ListenAddr":"127.0.0.1:8787","DataDir":"/tmp/data","CSRFToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+		"1", "false", "false", "false", `[]`, "/tmp/muxer.sock", "cap", "127.0.0.1:8787", "/tmp/data", strings.Repeat("a", 64),
+	)
+	f.Add(`{"Generation":0}`, "0", "maybe", "x", "x", `{`, "", "", "", "", "bad-csrf")
+	f.Fuzz(func(t *testing.T, payload, generation, replacement, remoteFlag, inviteStdin, trusted, socket, token, addr, data, legacyCSRF string) {
+		cfg, err := readWebChildConfig(strings.NewReader(payload))
+		if err == nil && (cfg.Generation == 0 || cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken)) {
+			t.Fatalf("successful parse violated required fields: %#v", cfg)
+		}
+
 		env := map[string]string{
 			envGeneration: generation, envReplacement: replacement, envRemote: remoteFlag,
 			envInviteStdin: inviteStdin, envTrusted: trusted, envCoreSocket: socket,
-			envCoreToken: token, envListenAddr: addr, envDataDir: data,
-			envCSRFToken: strings.Repeat("a", 64),
+			envCoreToken: token, envListenAddr: addr, envDataDir: data, envCSRFToken: legacyCSRF,
 		}
-		cfg, err := loadWebChildConfig(func(key string) string { return env[key] })
-		if err == nil && (cfg.Generation == 0 || cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "") {
-			t.Fatalf("successful parse violated required fields: %#v", cfg)
+		cfg, err = loadLegacyWebChildConfig(func(key string) string { return env[key] })
+		if err == nil && (cfg.Generation == 0 || cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken)) {
+			t.Fatalf("successful legacy parse violated required fields: %#v", cfg)
 		}
 	})
 }

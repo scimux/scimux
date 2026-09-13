@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -77,6 +78,9 @@ func TestWorkerManagerOwnsOneProcessPerSessionAndReconciles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if locator.Executable == "" {
+		t.Fatal("worker locator omitted its pinned executable")
+	}
 	workerPID := locator.PID
 	if !m.HasSession("chat-one") || m.Live("chat-one") != "quiet" {
 		t.Fatalf("initial state: session=%v live=%q", m.HasSession("chat-one"), m.Live("chat-one"))
@@ -144,7 +148,7 @@ func TestWorkerManagerOwnsOneProcessPerSessionAndReconciles(t *testing.T) {
 	}
 }
 
-func TestWorkerManagerRecoversInterruptedCreateAndFinishesDelete(t *testing.T) {
+func TestWorkerManagerRecoversInterruptedCreateAndFinishesDurableStops(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	data := filepath.Dir(a.storePath)
@@ -156,19 +160,29 @@ func TestWorkerManagerRecoversInterruptedCreateAndFinishesDelete(t *testing.T) {
 		Effort: "low", Dir: a.home, Transport: "acp", CreatedAt: createdAt,
 	}
 	deleted := &Node{ID: "deleted", Title: "Deleted", Prompt: "first", Agent: "codex", Dir: a.home, Transport: "codex", CreatedAt: createdAt}
+	ended := &Node{ID: "ended", Title: "Ended", Prompt: "first", Agent: "pi", Dir: a.home, Transport: "acp", CreatedAt: createdAt, EndedAt: createdAt}
 	if _, err := first.LaunchNode(fresh, fresh.Model); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := first.LaunchNode(deleted, deleted.Model); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := first.LaunchNode(ended, ended.Model); err != nil {
+		t.Fatal(err)
+	}
 	first.Detach() // model a killed muxer after worker launch
 	if err := a.appendRecord(storeRecord{Type: "delete", ID: deleted.ID, Time: createdAt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.appendRecord(storeRecord{Type: "node", Node: ended}); err != nil {
 		t.Fatal(err)
 	}
 	a = reloadApp(t, a, f)
 
 	replacement := syntheticWorkerManager(t, data)
+	if err := replacement.Reconcile(a.nodes); err != nil {
+		t.Fatal(err)
+	}
 	if err := replacement.RecoverUnknown(a); err != nil {
 		t.Fatal(err)
 	}
@@ -180,14 +194,16 @@ func TestWorkerManagerRecoversInterruptedCreateAndFinishesDelete(t *testing.T) {
 	if !replacement.manages(fresh.ID) {
 		t.Fatal("recovered node was not attached to its original worker")
 	}
-	if a.byID[deleted.ID] != nil || replacement.manages(deleted.ID) {
-		t.Fatal("durably deleted worker was resurrected")
+	if a.byID[deleted.ID] != nil || replacement.manages(deleted.ID) || replacement.manages(ended.ID) {
+		t.Fatal("durably stopped worker was resurrected or retained")
 	}
-	if _, err := sessionworker.Discover(data, deleted.ID); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("deleted worker locator remains: %v", err)
+	for _, id := range []string{deleted.ID, ended.ID} {
+		if _, err := sessionworker.Discover(data, id); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("durably stopped worker locator %s remains: %v", id, err)
+		}
 	}
 	records := keyRecords(t, a.storePath)
-	if len(records) != 2 || records[0].Type != "delete" || records[1].Type != "node" || records[1].Node.ID != fresh.ID {
+	if len(records) != 3 || records[0].Type != "delete" || records[1].Type != "node" || records[1].Node.ID != ended.ID || records[2].Type != "node" || records[2].Node.ID != fresh.ID {
 		t.Fatalf("recovery records = %#v", records)
 	}
 }
@@ -228,10 +244,16 @@ func TestWorkerManagerRecoveryClassifiesMixedLocatorSet(t *testing.T) {
 	}
 
 	known := &Node{ID: "known", Title: "Known", Agent: "pi", Transport: "acp"}
-	a.nodes = append(a.nodes, known)
+	endedMismatch := &Node{ID: "ended-mismatch", Title: "Ended mismatch", Agent: "pi", Transport: "acp", EndedAt: "2026-09-11T21:00:00Z"}
+	endedStopFailure := &Node{ID: "ended-stop-failure", Title: "Ended stop failure", Agent: "pi", Transport: "acp", EndedAt: "2026-09-11T21:00:00Z"}
+	a.nodes = append(a.nodes, known, endedMismatch, endedStopFailure)
 	a.byID[known.ID] = known
+	a.byID[endedMismatch.ID] = endedMismatch
+	a.byID[endedStopFailure.ID] = endedStopFailure
 	knownClient, _ := register(known.ID, known.Agent, &syntheticSessionHarness{})
 	defer knownClient.Close()
+	register(endedMismatch.ID, "grok", &syntheticSessionHarness{})
+	register(endedStopFailure.ID, endedStopFailure.Agent, &syntheticSessionHarness{stopErr: errors.New("provider refused stop")})
 	managedClient, managedIdentity := register("managed", "opencode", &syntheticSessionHarness{})
 	m.entries["managed"] = &workerEntry{client: managedClient, identity: managedIdentity}
 	register("incomplete", "grok", &syntheticSessionHarness{state: sessionworker.State{HasSession: true, Live: "quiet"}})
@@ -273,8 +295,11 @@ func TestWorkerManagerRecoveryClassifiesMixedLocatorSet(t *testing.T) {
 	if err := m.RecoverUnknown(a); err == nil {
 		t.Fatal("mixed recovery hid malformed and unreachable locators")
 	}
-	if m.manages("incomplete") || m.manages("unreachable") {
+	if m.manages("incomplete") || m.manages("unreachable") || m.manages(endedMismatch.ID) {
 		t.Fatal("invalid worker became routable")
+	}
+	if !m.manages(endedStopFailure.ID) {
+		t.Fatal("failed durable stop forgot the still-live worker")
 	}
 	if !m.manages("managed") {
 		t.Fatal("already managed worker was disturbed")
@@ -563,8 +588,8 @@ func TestWorkerManagerReportsDisconnectedWorker(t *testing.T) {
 	if got := m.Live("gone"); got != "exited" {
 		t.Fatalf("disconnected Live = %q", got)
 	}
-	if got := m.Peek("gone"); !strings.Contains(got, "session worker unavailable") {
-		t.Fatalf("disconnected Peek = %q", got)
+	if got := m.Peek("gone"); got != "" {
+		t.Fatalf("reaped worker manager Peek = %q, want no RPC result", got)
 	}
 	m.Detach()
 }
@@ -614,10 +639,8 @@ func TestWorkerManagerReapsOnlyProvablyStaleLocator(t *testing.T) {
 	m.Detach()
 }
 
-func TestWorkerManagerReapsDeadReattachedWorkerAfterStopRPCFailure(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("uses Linux /proc to observe a zombie without reaping it")
-	}
+func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *sessionworker.Client) {
+	t.Helper()
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
@@ -642,13 +665,28 @@ func TestWorkerManagerReapsDeadReattachedWorkerAfterStopRPCFailure(t *testing.T)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	pid := cmd.Process.Pid
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	var client *sessionworker.Client
+	workerSocketDir := ""
+	t.Cleanup(func() {
+		if client != nil {
+			_ = client.Close()
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		if workerSocketDir != "" {
+			if err := os.RemoveAll(workerSocketDir); err != nil {
+				t.Errorf("remove crashed worker socket directory %s: %v", workerSocketDir, err)
+			}
+			if _, err := os.Stat(workerSocketDir); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("crashed worker socket directory remains: %s: %v", workerSocketDir, err)
+			}
+		}
+	})
 	_ = configR.Close()
 	_ = readyW.Close()
 	config := sessionWorkerConfig{
-		DataDir: data, Home: data, NodeID: "dead",
-		Identity: sessionworker.Identity{WorkerID: "dead-reconnected", Agent: "opencode", Build: "old"},
+		DataDir: data, Home: data, NodeID: nodeID,
+		Identity: sessionworker.Identity{WorkerID: nodeID + "-reconnected", Agent: "opencode", Build: "old"},
 	}
 	if err := json.NewEncoder(configW).Encode(config); err != nil {
 		t.Fatal(err)
@@ -661,30 +699,26 @@ func TestWorkerManagerReapsDeadReattachedWorkerAfterStopRPCFailure(t *testing.T)
 	if err := json.NewDecoder(readyR).Decode(&locator); err != nil {
 		t.Fatal(err)
 	}
-	workerSocketDir := filepath.Dir(locator.Link.Socket)
-	// The helper is deliberately SIGKILLed below, so it cannot run the
-	// worker-owned endpoint cleanup. Test cleanups run after the deferred
-	// Kill/Wait above; remove the exact private directory only once the child
-	// can no longer use it, and assert that the test leaves no socket litter.
-	t.Cleanup(func() {
-		if err := os.RemoveAll(workerSocketDir); err != nil {
-			t.Errorf("remove crashed worker socket directory %s: %v", workerSocketDir, err)
-		}
-		if _, err := os.Stat(workerSocketDir); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("crashed worker socket directory remains: %s: %v", workerSocketDir, err)
-		}
-	})
-	client, err := sessionworker.NewClient(locator.Link)
+	workerSocketDir = filepath.Dir(locator.Link.Socket)
+	client, err = sessionworker.NewClient(locator.Link)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
 	if _, err := client.Launch(context.Background(), sessionworker.LaunchRequest{
-		NodeID: "dead", Agent: "opencode", Title: "dead", Dir: data, Prompt: "ping",
+		NodeID: nodeID, Agent: "opencode", Title: nodeID, Dir: data, Prompt: "ping",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Process.Kill(); err != nil {
+	return data, cmd.Process.Pid, client
+}
+
+func killUnwaitedWorkerAndAwaitZombie(t *testing.T, pid int) {
+	t.Helper()
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -694,21 +728,48 @@ func TestWorkerManagerReapsDeadReattachedWorkerAfterStopRPCFailure(t *testing.T)
 			t.Fatal(err)
 		}
 		if strings.Contains(string(status), ") Z ") {
-			break
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("worker did not become a zombie")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	m := newWorkerManager("", data, "new")
-	m.entries["dead"] = &workerEntry{client: client, pid: pid}
-	if err := m.Kill("dead"); err != nil {
-		t.Fatalf("stop dead reattached worker: %v", err)
+}
+
+func TestWorkerManagerReapsDeadReattachedWorker(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("uses Linux /proc to observe a zombie without reaping it")
 	}
-	var status syscall.WaitStatus
-	if waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
-		t.Fatalf("dead reattached worker was not reaped: pid=%d err=%v", waited, err)
+	for _, tc := range []struct {
+		name string
+		act  func(*workerManager, string) error
+	}{
+		{"failed Stop RPC", func(m *workerManager, id string) error { return m.Kill(id) }},
+		{"periodic observation", func(m *workerManager, id string) error {
+			if got := m.Live(id); got != "exited" {
+				return fmt.Errorf("Live = %q, want exited", got)
+			}
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := strings.ReplaceAll(tc.name, " ", "-")
+			data, pid, client := startUnwaitedSyntheticWorker(t, id)
+			killUnwaitedWorkerAndAwaitZombie(t, pid)
+			m := newWorkerManager("", data, "new")
+			m.entries[id] = &workerEntry{client: client, pid: pid}
+			if err := tc.act(m, id); err != nil {
+				t.Fatal(err)
+			}
+			if m.manages(id) {
+				t.Fatal("dead worker remained in the connection registry")
+			}
+			var status syscall.WaitStatus
+			if waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
+				t.Fatalf("dead reattached worker was not reaped: pid=%d err=%v", waited, err)
+			}
+		})
 	}
 }
 
@@ -736,6 +797,10 @@ func TestWorkerManagerRetriesReapAfterProvenDeadTimeout(t *testing.T) {
 	}
 	defer client.Close()
 	m := newWorkerManager("", data, "new")
+	owned := &workerEntry{process: &sessionWorkerProcess{wait: make(chan struct{})}}
+	if err := m.reapWorkerEntry("owned-timeout", owned, time.Now()); err == nil {
+		t.Fatal("owned worker reap hid a missing exit notification")
+	}
 	entry := &workerEntry{client: client, pid: pid}
 	m.entries["retry-reap"] = entry
 

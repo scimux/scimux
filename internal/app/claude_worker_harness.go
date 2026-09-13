@@ -31,6 +31,8 @@ type claudeSessionHarness struct {
 	stateDir string
 
 	pollMu   sync.Mutex
+	snapshot sessionworker.State
+	ready    bool
 	answerMu sync.Mutex
 	answers  map[string]preparedClaudeAnswer
 	start    sync.Once
@@ -93,7 +95,16 @@ func (h *claudeSessionHarness) startLanes() {
 
 func (h *claudeSessionHarness) poll() {
 	h.pollMu.Lock()
+	defer h.pollMu.Unlock()
 	h.app.poll()
+	h.snapshot = h.projectState()
+	h.ready = true
+}
+
+func (h *claudeSessionHarness) refreshState() {
+	h.pollMu.Lock()
+	h.snapshot = h.projectState()
+	h.ready = true
 	h.pollMu.Unlock()
 }
 
@@ -107,6 +118,7 @@ func (h *claudeSessionHarness) Launch(_ context.Context, req sessionworker.Launc
 	if req.NodeID != h.nodeID || req.Agent != "claude" || req.Dir == "" || req.Title == "" || (!req.Existing && req.Prompt == "") {
 		return "", errors.New("claude session worker: invalid launch request")
 	}
+	defer h.refreshState()
 	h.app.mu.Lock()
 	if existing := h.app.byID[h.nodeID]; existing != nil {
 		sid := existing.SessionID
@@ -193,6 +205,7 @@ func (h *claudeSessionHarness) Launch(_ context.Context, req sessionworker.Launc
 }
 
 func (h *claudeSessionHarness) Send(_ context.Context, text string) (sessionworker.Delivery, error) {
+	defer h.refreshState()
 	n := h.node()
 	if n == nil {
 		return sessionworker.Delivery{}, errClaudeWorkerConflict
@@ -208,6 +221,7 @@ func (h *claudeSessionHarness) Send(_ context.Context, text string) (sessionwork
 }
 
 func (h *claudeSessionHarness) Clear(context.Context) (sessionworker.Delivery, error) {
+	defer h.refreshState()
 	n := h.node()
 	if n == nil {
 		return sessionworker.Delivery{}, errClaudeWorkerConflict
@@ -230,6 +244,7 @@ func deliveryText(delivery initialDelivery, text string) string {
 }
 
 func (h *claudeSessionHarness) ResolveDelivery(context.Context) error {
+	defer h.refreshState()
 	h.app.mu.Lock()
 	defer h.app.mu.Unlock()
 	if h.app.sendState[h.nodeID] == sendSubmitting {
@@ -240,6 +255,7 @@ func (h *claudeSessionHarness) ResolveDelivery(context.Context) error {
 }
 
 func (h *claudeSessionHarness) Interrupt(context.Context) (sessionworker.ActionEvidence, error) {
+	defer h.refreshState()
 	n := h.node()
 	if n == nil {
 		return sessionworker.ActionEvidence{}, errClaudeWorkerConflict
@@ -294,6 +310,7 @@ func (h *claudeSessionHarness) PreparePermission(_ context.Context, decision ses
 }
 
 func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string) error {
+	defer h.refreshState()
 	h.answerMu.Lock()
 	prepared, ok := h.answers[token]
 	delete(h.answers, token)
@@ -319,7 +336,15 @@ func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string
 }
 
 func (h *claudeSessionHarness) State(context.Context) sessionworker.State {
-	h.poll()
+	h.pollMu.Lock()
+	defer h.pollMu.Unlock()
+	if !h.ready {
+		return sessionworker.State{Live: "exited"}
+	}
+	return h.snapshot
+}
+
+func (h *claudeSessionHarness) projectState() sessionworker.State {
 	h.app.mu.Lock()
 	n := h.app.byID[h.nodeID]
 	if n == nil {
@@ -419,6 +444,7 @@ func (h *claudeSessionHarness) Peek(_ context.Context, mode string) string {
 }
 
 func (h *claudeSessionHarness) SetAutoApprove(_ context.Context, enabled bool) (sessionworker.AutoApprove, error) {
+	defer h.refreshState()
 	h.app.mu.Lock()
 	n := h.app.byID[h.nodeID]
 	live := h.app.live[h.nodeID]
