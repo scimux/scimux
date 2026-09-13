@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -67,6 +68,48 @@ func TestPollProjectsStructuredWorkerCompletionAndSessionIdentity(t *testing.T) 
 	a.poll()
 	if !a.turnDone[n.ID] || n.SessionID != "session-after-clear" {
 		t.Fatalf("projected state: turnDone=%v sessionID=%q", a.turnDone[n.ID], n.SessionID)
+	}
+}
+
+func TestPollAndStructuredClearSynchronizeSessionIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "worker-clear-race", "opencode", "acp")
+	attachSyntheticWorker(t, a, n.ID, &syntheticSessionHarness{launched: true, state: sessionworker.State{
+		HasSession: true, SessionID: "session-after-clear", Live: "quiet", TurnDone: true,
+	}})
+	a.sessionsDir = ""
+	handler := newTestHandler(t, a)
+	start := make(chan struct{})
+	errs := make(chan string, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 300 {
+			a.poll()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 300 {
+			rec := routeRequest(handler, http.MethodPost, "/api/nodes/"+n.ID+"/send", `{"text":"/clear"}`, true)
+			if rec.Code != http.StatusOK {
+				select {
+				case errs <- rec.Body.String():
+				default:
+				}
+				return
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	default:
 	}
 }
 

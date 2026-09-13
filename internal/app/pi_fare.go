@@ -107,6 +107,8 @@ func (a *app) liveSessionID(n *Node) string {
 			}
 		}
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return n.SessionID
 }
 
