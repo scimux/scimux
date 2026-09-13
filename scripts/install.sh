@@ -35,8 +35,10 @@
 
 set -eu
 
-REPO_URL="https://codeberg.org/chrberger/scimux"
-API_URL="https://codeberg.org/api/v1/repos/chrberger/scimux"
+# Overridable so the download path can be exercised against a stub in tests
+# (internal/app/install_script_test.go). Nothing but a test sets it, and every
+# URL this script uses is printed before it is fetched.
+REPO_URL="${SCIMUX_REPO_URL:-https://codeberg.org/chrberger/scimux}"
 INSTALL_DIR="${SCIMUX_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Empty until release signing goes live. See verify_signature().
@@ -107,14 +109,25 @@ verify_signature() {
 		die "signature verification failed -- do not run the downloaded file"
 }
 
-# One read-only API call, parsed with sed because requiring jq to install a
-# zero-dependency binary would be a poor joke. Splitting on commas first
-# keeps the match anchored to its own field.
+# The release host answers /releases/latest with a redirect to the tag page, so
+# the resolved URL *is* the version. Reading it that way is the whole reason
+# there is no JSON here: a regex over release metadata reads one spelling of a
+# document whose shape belongs to the host, and it fails on the perfectly valid
+# rest -- pretty-printed, reordered, a new field -- by resolving nothing.
 if [ -z "$VERSION" ]; then
-	VERSION=$(curl -fsSL "$API_URL/releases/latest" | tr ',' '\n' |
-		sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' | head -n 1)
-	[ -n "$VERSION" ] || die "could not resolve the latest release; try --version <tag>"
+	latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest") ||
+		die "could not reach the release host; try --version <tag>"
+	case "$latest" in
+	*/releases/tag/?*) VERSION=${latest##*/} ;;
+	*) die "could not resolve the latest release from $latest; try --version <tag>" ;;
+	esac
 fi
+# Whether it was resolved or typed, the tag is about to be pasted into a URL:
+# no path segments, no leading dash for curl to read as an option, nothing that
+# is not a tag.
+case "$VERSION" in
+'' | -* | *[!A-Za-z0-9._-]* | *..*) die "not a usable release tag: $VERSION" ;;
+esac
 base="$REPO_URL/releases/download/$VERSION"
 
 echo "scimux $VERSION ($os/$arch)"
@@ -125,11 +138,12 @@ if [ "$DRY_RUN" -eq 1 ]; then
 	exit 0
 fi
 
+staged=""
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/scimux-install.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"; [ -z "$staged" ] || rm -f "$staged"' EXIT INT TERM
 
-curl -fsSL "$base/$asset" -o "$tmp/$asset"
-curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+curl -fsSL "$base/$asset" -o "$tmp/$asset" || die "download failed: $base/$asset"
+curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
 verify_signature "$base" "$tmp"
 
 want=$(sed -n "s/^\([0-9a-f]\{64\}\) [ *]$asset\$/\1/p" "$tmp/SHA256SUMS" | head -n 1)
@@ -141,11 +155,25 @@ echo "  sha256 ok"
 # Install by rename inside the target directory: a rename replaces the
 # directory entry while a running scimux keeps its own inode, so upgrading
 # under a live process neither fails with ETXTBSY nor rewrites a binary
-# somebody is executing.
-mkdir -p "$INSTALL_DIR"
-cp "$tmp/$asset" "$INSTALL_DIR/.scimux.new"
-chmod 755 "$INSTALL_DIR/.scimux.new"
-mv -f "$INSTALL_DIR/.scimux.new" "$INSTALL_DIR/scimux"
+# somebody is executing. Until that rename nothing has been touched, which is
+# what leaves the scimux you already had working when a step above fails.
+#
+# The staging name is unique, because a shared one is not private: two
+# installers at once each write the file the other is about to rename, so one
+# of them installs bytes it never downloaded, or finds its own file gone.
+dest="$INSTALL_DIR/scimux"
+mkdir -p "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
+# mv onto a directory succeeds by moving the file *inside* it, so without this
+# the script would report a successful install of a command that is not there.
+if [ -e "$dest" ] && [ ! -f "$dest" ]; then
+	die "$dest exists and is not a regular file; move it aside or set SCIMUX_INSTALL_DIR"
+fi
+staged=$(mktemp "$INSTALL_DIR/.scimux.XXXXXX") || die "cannot write to $INSTALL_DIR"
+cp "$tmp/$asset" "$staged" || die "cannot write to $INSTALL_DIR"
+chmod 755 "$staged" || die "cannot make $staged executable"
+mv -f "$staged" "$dest" || die "cannot replace $dest"
+staged=""
+[ -f "$dest" ] && [ -x "$dest" ] || die "$dest is not an executable file after install"
 
 # scimux supervises agents; with none installed it starts fine and has
 # nothing to show. That is the real first-run disappointment, so say it
@@ -156,7 +184,7 @@ for cli in claude codex pi opencode grok; do
 	command -v "$cli" >/dev/null 2>&1 && found="$found $cli"
 done
 echo
-echo "installed: $INSTALL_DIR/scimux"
+echo "installed: $dest"
 if [ -n "$found" ]; then
 	echo "agents found:$found"
 else
