@@ -29,6 +29,21 @@ var phase5MuseProductionFiles = []string{
 	"settings.go",
 	"main.go",
 	"update.go",
+	"worker_harness.go",
+	"worker_manager.go",
+	"../sessionworker/protocol.go",
+}
+
+func TestMuseBoundaryIncludesSessionWorkerSurfaces(t *testing.T) {
+	listed := map[string]bool{}
+	for _, name := range phase5MuseProductionFiles {
+		listed[name] = true
+	}
+	for _, name := range []string{"worker_harness.go", "worker_manager.go", "../sessionworker/protocol.go"} {
+		if !listed[name] {
+			t.Errorf("Muse session-worker surface %s is outside the boundary scan", name)
+		}
+	}
 }
 
 func appDirFromTest(t *testing.T) string {
@@ -49,8 +64,8 @@ func TestMuseBoundaryEnumeratesPhase5ProductionFiles(t *testing.T) {
 		}
 		seen[name] = true
 	}
-	if len(seen) != 12 {
-		t.Fatalf("want 12 Phase 5 production files, listed %d", len(seen))
+	if len(seen) != 15 {
+		t.Fatalf("want 15 Phase 5 production files, listed %d", len(seen))
 	}
 }
 
@@ -494,9 +509,10 @@ func museAppAllowedImport(p string) bool {
 }
 
 var museAppAllowedStdlib = map[string]bool{
-	"context": true, "crypto/rand": true, "crypto/sha256": true,
-	"encoding/hex": true, "encoding/json": true, "errors": true,
-	"flag": true, "fmt": true, "hash/fnv": true, "io": true,
+	"bytes": true, "context": true, "crypto/rand": true, "crypto/sha256": true,
+	"crypto/subtle": true,
+	"encoding/hex":  true, "encoding/json": true, "errors": true,
+	"flag": true, "fmt": true, "hash/fnv": true, "io": true, "net": true,
 	"net/http": true, "net/url": true, "os": true, "os/exec": true,
 	"os/signal": true, "path/filepath": true, "regexp": true,
 	"runtime": true, "strconv": true, "strings": true, "sync": true,
