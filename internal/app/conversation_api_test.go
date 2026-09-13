@@ -2721,7 +2721,7 @@ func TestProcChatTurnLatchAndReadableUsageError(t *testing.T) {
 	}
 
 	stub.live = "quiet"
-	stub.lastError = `Internal error: {"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}`
+	stub.lastError = `{"code":-32603,"message":"Internal error","data":{"http_status":402,"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}}`
 	resp = map[string]any{}
 	a.procChatInto(resp, n, stub, sessionlog.Segment{})
 	if resp["turn_in_flight"] != false {

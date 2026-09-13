@@ -65,10 +65,21 @@ func findErrorMessage(v any) string {
 				return message
 			}
 		}
+		// JSON-RPC deliberately keeps its generic "Internal error" in the
+		// envelope's message and the provider's actionable explanation in data.
+		// Prefer that structured detail before falling back to the envelope.
+		if nested, ok := x["data"]; ok {
+			if message := findErrorMessage(nested); message != "" {
+				return message
+			}
+		}
 		if message, ok := x["message"].(string); ok && strings.TrimSpace(message) != "" {
 			return strings.TrimSpace(message)
 		}
-		for _, nested := range x {
+		for key, nested := range x {
+			if key == "error" || key == "data" || key == "message" {
+				continue
+			}
 			if message := findErrorMessage(nested); message != "" {
 				return message
 			}

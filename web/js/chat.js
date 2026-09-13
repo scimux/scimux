@@ -901,6 +901,20 @@ export function mergeTimelineItems(turns, decisions){
     if (a.kind !== b.kind) return a.kind === "turn" ? -1 : 1;
     return a.ord - b.ord;
   });
+  /* A lease is one turn. Number its durable decisions after timeline sorting
+     so the last visible number remains the turn's approval total after the
+     live toggle resets to off. Missing lease ids stay unnumbered: grouping
+     unrelated legacy records would invent a turn boundary. */
+  const byLease = new Map();
+  items.forEach(item => {
+    if (item.kind !== "decision") return;
+    const lease = item.decision && item.decision.decision &&
+      String(item.decision.decision.lease_id || "");
+    if (!lease) return;
+    const ordinal = (byLease.get(lease) || 0) + 1;
+    byLease.set(lease, ordinal);
+    item.ordinal = ordinal;
+  });
   return items;
 }
 
@@ -910,7 +924,7 @@ export function mergeTimelineItems(turns, decisions){
    escape-first, so this is still never innerHTML of unescaped agent content.
    No bubble actions. */
 export function decisionRowHTML(surface, {
-  escape = esc, markdown = md, fmtTime = fmtWhen,
+  escape = esc, markdown = md, fmtTime = fmtWhen, ordinal = 0,
 } = {}){
   const s = surface || {};
   const d = s.decision || {};
@@ -941,9 +955,11 @@ export function decisionRowHTML(surface, {
     ? `<div class="decision-row"><span class="k">Reason</span>` +
       ` <div class="decision-reason">${markdown(reason)}</div></div>`
     : "";
+  const count = Number.isSafeInteger(Number(ordinal)) && Number(ordinal) > 0
+    ? ` (#${Number(ordinal)})` : "";
   return `<div class="decision" data-record="${escape(String(s.record ?? ""))}"` +
     ` data-request="${escape(req)}">` +
-    `<div class="decision-head"><span class="decision-state">Auto-approved</span>` +
+    `<div class="decision-head"><span class="decision-state">Auto-approved${count}</span>` +
       (selName ? `<span class="decision-selected">\u2014 ${escape(selName)}</span>` : "") +
     `</div>` +
     `<div class="decision-approved">${verbHTML ? verbHTML : ""}${bodyHTML}</div>` +
@@ -1245,7 +1261,9 @@ export function createChatFeature(deps){
   function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets } = {}){
     return mergeTimelineItems(turns, decisions).map(item => {
       if (item.kind === "decision"){
-        return decisionRowHTML(item.decision, { escape, fmtTime: whenFn });
+        return decisionRowHTML(item.decision, {
+          escape, fmtTime: whenFn, ordinal: item.ordinal,
+        });
       }
       const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
       return renderTurnHTML(item.turn, { bk, hist, nodeId, assets });
@@ -1845,9 +1863,6 @@ export function createChatFeature(deps){
       ).join("") +
       (data.chat_started
         ? `<div class="chatseam curseam"><span>chat started ${escape(whenFn(data.chat_started))}</span></div>` : "") +
-      (data.error
-        ? `<div class="pending chaterr" role="status">${escape(data.error)}</div>`
-        : "") +
       (!turns.length && !liveDecisions.length
         ? pendingEmptyHTML({
             freshSurface, pending: data.pending, delivering,
@@ -1857,6 +1872,12 @@ export function createChatFeature(deps){
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, nodeId: n.id, assets,
       }) +
+      /* A transport error describes the just-finished turn. Keep it at the
+         current end of the conversation where a bottom-pinned reader sees it,
+         rather than above an arbitrarily long timeline. */
+      (data.error
+        ? `<div class="pending chaterr" role="status">${escape(data.error)}</div>`
+        : "") +
       (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
       (data.compacting ? compactingStatusHTML() : "") +
       elicitationStatusHTML(data, { escape });
