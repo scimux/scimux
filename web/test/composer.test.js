@@ -1026,6 +1026,40 @@ test("success cleanup revokes previews; unconfirmed is success", async () => {
   ctx.feature.destroy();
 });
 
+/* A browser can refuse storage at any moment: private mode, a policy change,
+ * a full quota. sendPrompt cleared the composer and dropped the saved draft
+ * before its try block, so the refusal escaped with the text already gone and
+ * no request ever made -- the prompt vanished and nothing happened. */
+test("a storage that refuses must not swallow the prompt", async () => {
+  const storage = makeStorage({ "scimux-draft:n1": "the only copy" });
+  storage.removeItem = () => { throw new Error("SecurityError: access denied"); };
+  const ctx = makeFeature({ storage });
+  ctx.feature.bind();
+  ctx.roots.prompt.textContent = "the only copy";
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.apiCalls.length, 1, "the send must still be attempted");
+  assert.equal(ctx.apiCalls[0].path, "/api/nodes/n1/send");
+  ctx.feature.destroy();
+});
+
+/* The recovery path has the same shape as the failure it recovers from: it
+ * wrote the draft back before putting the text on screen, so a store that
+ * refuses the write took the recovery down with it and the text was lost by
+ * the very code that exists to keep it. */
+test("a send that fails puts the text back even when the draft cannot be saved", async () => {
+  const storage = makeStorage();
+  storage.setItem = () => { throw new Error("QuotaExceededError"); };
+  const ctx = makeFeature({
+    storage,
+    sendHandler: async () => { throw new Error("network down"); },
+  });
+  ctx.feature.bind();
+  ctx.roots.prompt.textContent = "worth keeping";
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.feature.promptText(), "worth keeping", "the only copy left is the visible one");
+  ctx.feature.destroy();
+});
+
 // P1d — an unacknowledged send must not look delivered; 409 must show the
 // server's message instead of being swallowed.
 test("P1d: 200 status unconfirmed is not-delivered and keeps draft", async () => {

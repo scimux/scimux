@@ -114,6 +114,7 @@ import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
 import { focusAtEnd } from "./caret.js";
+import { createStorage } from "./storage.js";
 
 
 /* FR-42 transport seam: the composition root takes fetchImpl and assetURL as
@@ -186,20 +187,28 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   const $ = s => document.querySelector(s);
 
+  /* One store for the whole app, and the only one anything here touches. A
+     browser may refuse storage at any moment -- private mode, a spent quota, a
+     policy change -- and every module below was written against a store that
+     answers; the first read is on the line after this one, so an unguarded
+     refusal is a blank page. storage.js keeps the promise, in memory when it
+     has to, and says which it managed. */
+  const store = createStorage(window.localStorage);
+
   let nodes = [];              // last /api/state nodes
   let unadopted = [];
-  let sel = localStorage.getItem("scimux-sel") || "";
-  let readySeen = loadReadySeen(localStorage);
+  let sel = store.getItem("scimux-sel") || "";
+  let readySeen = loadReadySeen(store);
   /* Where the user left off: a sleep/wake re-dial re-runs createApp() in a
      fresh module graph, so the pane comes back from storage or not at all. */
   let level = bootLevel({
-    stored: loadStoredLevel(localStorage),
+    stored: loadStoredLevel(store),
     isDesktop: matchMedia("(min-width: 900px)").matches,
     hasSelection: !!sel,
   });
   /* termOpen lives inside createChatFeature (Packet 7C). */
   let cardTab = "current";
-  let laneFilter = localStorage.getItem("scimux-lanefilter") || "";
+  let laneFilter = store.getItem("scimux-lanefilter") || "";
   let attnFoldOpen = false;   /* "Input needed" disclosure; folded on scope change */
   /* mapTab / mapFold / mapFull / fare / mapSel live inside createMapFeature (Packet 7B). */
   const expanded = new Set();
@@ -627,8 +636,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   function setLaneFilter(id){
     laneFilter = id || "";
     attnFoldOpen = false;      /* a new scope starts with the fold closed */
-    if (laneFilter) localStorage.setItem("scimux-lanefilter", laneFilter);
-    else localStorage.removeItem("scimux-lanefilter");
+    if (laneFilter) store.setItem("scimux-lanefilter", laneFilter);
+    else store.removeItem("scimux-lanefilter");
     cardsSig = ""; mapFeature.invalidate();
     renderCards(); renderMap();
   }
@@ -696,7 +705,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     document,
     window,
     CSS,
-    storage: localStorage,
+    storage: store,
     setTimeout,
     getComputedStyle,
     esc,
@@ -826,11 +835,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     setComposerBusy: v => composerFeature.setComposerBusy(v),
     setComposerClosed: v => composerFeature.setComposerClosed(v),
     setAttachAvail: v => composerFeature.setAttachAvail(v),
-    storage: localStorage,
+    storage: store,
     composerText: () => (composerFeature && typeof composerFeature.promptText === "function")
       ? (composerFeature.promptText() || "") : "",
     restoreDraft: (id, text) => {
-      try { localStorage.setItem("scimux-draft:" + id, text); } catch { /* ignore */ }
+      store.setItem("scimux-draft:" + id, text);
       if (sel === id && composerFeature && typeof composerFeature.setPromptText === "function"){
         composerFeature.setPromptText(text);
       }
@@ -871,7 +880,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       attfile: $("#attfile"),
     },
     document,
-    storage: localStorage,
+    storage: store,
     sel: () => sel,
     nodeById: id => nodeById(id),
     isPhoneTouch,
@@ -917,7 +926,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       bookmarksend: $("#bookmarksend"),
     },
     document,
-    storage: localStorage,
+    storage: store,
     setTimeout,
     clearTimeout,
     CSS,
@@ -991,7 +1000,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       wsnoteempty: $("#wsnoteempty"),
     },
     document,
-    storage: localStorage,
+    storage: store,
     setTimeout,
     clearTimeout,
     requestAnimationFrame,
@@ -1047,7 +1056,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       searchbtn: $("#searchbtn"),
     },
     document,
-    storage: localStorage,
+    storage: store,
     setTimeout,
     clearTimeout,
     requestAnimationFrame,
@@ -1103,7 +1112,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       ad_go: $("#ad_go"),
     },
     document,
-    storage: localStorage,
+    storage: store,
     setTimeout,
     clearTimeout,
     createElement: tag => document.createElement(tag),
@@ -1164,7 +1173,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const homeScreen = own(createHomeScreenControl({
     doc: document,
     win: window,
-    storage: window.localStorage,
+    storage: store,
     moduleURL: import.meta.url,
     standalone:
       window.navigator.standalone === true ||
@@ -1339,7 +1348,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       chatFeature.onReselect();
     }
     sel = id;
-    localStorage.setItem("scimux-sel", sel);
+    store.setItem("scimux-sel", sel);
     composerFeature.onSelect(); /* draft + stage restore; hide + until chat has turns */
     /* the selected node's card must be visible: opening an archived chat (map
        toolbar, notes jump) switches the Activities tab to where the card lives —
@@ -1350,7 +1359,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       const nextSeen = ackReadySeen(readySeen, seln);
       if (nextSeen !== readySeen){
         readySeen = nextSeen;
-        saveReadySeen(localStorage, readySeen);
+        saveReadySeen(store, readySeen);
       }
     }
     cardsSig = "";
@@ -1560,7 +1569,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   function setLevel(n){
     level = clampLevel(n);
     if (isDesktop()) return;
-    saveLevel(localStorage, level);
+    saveLevel(store, level);
     document.body.classList.toggle("cards-open", level >= 2);
     $("#cards").classList.toggle("open", level >= 2);
     $("#map").classList.toggle("open", level >= 3);
@@ -1931,7 +1940,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   pollingFeature = own(createPollingFeature({
     document,
     window,
-    storage: localStorage,
+    storage: store,
     fetchImpl,
     csrf: CSRF,
     setTimeout,
@@ -1955,7 +1964,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       if (open && open.turn_done) nextSeen = ackReadySeen(nextSeen, open);
       if (nextSeen !== readySeen){
         readySeen = nextSeen;
-        saveReadySeen(localStorage, readySeen);
+        saveReadySeen(store, readySeen);
       }
     },
     renderSys,
@@ -2027,6 +2036,12 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   renderMapTabs();
   pollingFeature.loadUI();
   pollingFeature.startPolling();
+  /* Said once, after the shell is up: a refused store costs the user nothing
+     they can see until they close the tab, so it is a line to read, not a
+     failure to handle -- and repeating it on every write would be noise. */
+  if (!store.persistent){
+    toast("Drafts are kept in this tab, but won't survive closing it");
+  }
   /* The handle a successor's claimAppSlot retires, and the one a caller
      that owns the page can retire itself. */
   return instance;

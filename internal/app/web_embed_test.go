@@ -43,6 +43,7 @@ var productionJSModules = []string{
 	"web/js/search.js",
 	"web/js/sheets.js",
 	"web/js/state.js",
+	"web/js/storage.js",
 	"web/js/usage.js",
 }
 

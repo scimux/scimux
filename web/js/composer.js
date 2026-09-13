@@ -527,10 +527,24 @@ export function createComposerFeature(deps){
     if (selId() === dest) renderStage();
   }
 
+  /* The three places this module touches storage, and the only ones. sendPrompt
+     holds the user's only copy of a prompt, so it does not lean on the injected
+     adapter's goodwill (storage.js): a browser that refuses costs the saved
+     draft and nothing else -- not the send, not the text on screen. */
+  function savedDraft(id){
+    try { return storage.getItem(draftStorageKey(id)) || ""; } catch { return ""; }
+  }
+  function keepDraft(id, text){
+    try { storage.setItem(draftStorageKey(id), text); } catch { /* not persisted */ }
+  }
+  function forgetDraft(id){
+    try { storage.removeItem(draftStorageKey(id)); } catch { /* stays until it can be */ }
+  }
+
   function onSelect(){
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
-    setPromptText(storage.getItem(draftStorageKey(id)) || "");
+    setPromptText(savedDraft(id));
     setAttachAvail(false);
     renderStage();
   }
@@ -586,7 +600,6 @@ export function createComposerFeature(deps){
       return;
     }
     clearPrompt();
-    storage.removeItem(draftStorageKey(dest));
     stage[dest] = []; /* clear optimistically; restore on failure */
     if (selId() === dest) renderStage();
     /* optimistic echo, painted before the POST even resolves */
@@ -614,20 +627,26 @@ export function createComposerFeature(deps){
       if (res && res.status === "unconfirmed") {
         alertFn("not delivered — check the terminal");
         if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
-        const newer = storage.getItem(draftStorageKey(dest)) || "";
+        const newer = savedDraft(dest);
         const merged = mergeFailedDraft(text, newer);
-        if (merged) storage.setItem(draftStorageKey(dest), merged);
         if (items.length)
           stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
+        /* On screen first: the composer is the copy the user can see, and a
+           storage that refuses must not be the reason they never get it back. */
         if (selId() === dest){
           setPromptText(merged);
           renderStage();
         }
+        if (merged) keepDraft(dest, merged);
         if (typeof d.invalidateChat === "function") d.invalidateChat();
         if (typeof d.scheduleTick === "function") d.scheduleTick(400);
         else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
         return;
       }
+      /* Delivered, so the saved copy is finally redundant. Removing it any
+         earlier -- as this did, before the request was even made -- destroys
+         the one copy that outlives the tab while the send can still fail. */
+      forgetDraft(dest);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       items.forEach(x => {
         if (x.preview) URLImpl.revokeObjectURL(x.preview);
@@ -639,15 +658,15 @@ export function createComposerFeature(deps){
       if (err) alertFn(err && err.message);
       /* retract only this destination's echo */
       if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
-      const newer = storage.getItem(draftStorageKey(dest)) || "";
+      const newer = savedDraft(dest);
       const merged = mergeFailedDraft(text, newer);
-      if (merged) storage.setItem(draftStorageKey(dest), merged);
       if (items.length)
         stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
       if (selId() === dest){
         setPromptText(merged);
         renderStage();
       }
+      if (merged) keepDraft(dest, merged);
     }
   }
 
@@ -656,7 +675,7 @@ export function createComposerFeature(deps){
   function onPromptInput(){
     resizePrompt();
     const id = selId();
-    if (id) storage.setItem(draftStorageKey(id), promptText());
+    if (id) keepDraft(id, promptText());
   }
 
   function onPromptPaste(e){
