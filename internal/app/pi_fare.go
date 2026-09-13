@@ -92,15 +92,19 @@ func piOccupancy(u transcript.PiUsage, window int) (used, size int) {
 	return used, size
 }
 
-// liveSessionID prefers the live ACP session id (correct after /clear) and
-// falls back to the durable Node.SessionID.
+// liveSessionID prefers the current harness identity (correct after /clear)
+// and falls back to the durable Node.SessionID. Keeping this on the common
+// manager surface matters for both ACP session replacement and Codex's
+// same-process thread replacement.
 func (a *app) liveSessionID(n *Node) string {
 	if n == nil {
 		return ""
 	}
-	if a.acp.Manager != nil {
-		if live := a.acp.SessionID(n.ID); live != "" {
-			return live
+	if manager := a.proc(n); manager != nil {
+		if provider, ok := manager.(interface{ SessionID(string) string }); ok {
+			if live := provider.SessionID(n.ID); live != "" {
+				return live
+			}
 		}
 	}
 	return n.SessionID

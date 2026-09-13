@@ -20,6 +20,14 @@ func TestFindErrorMessage(t *testing.T) {
 			in:   map[string]any{"message": "outer", "error": map[string]any{"message": "inner"}},
 			want: "inner",
 		},
+		{
+			name: "JSON-RPC data takes precedence over generic envelope message",
+			in: map[string]any{
+				"code": -32603, "message": "Internal error",
+				"data": map[string]any{"http_status": 402, "message": "balance exhausted"},
+			},
+			want: "balance exhausted",
+		},
 		{"blank message ignored", map[string]any{"message": "   "}, ""},
 		{"non-string message ignored", map[string]any{"message": 12}, ""},
 		{"no usable message", map[string]any{"code": 1, "detail": true}, ""},
@@ -42,7 +50,7 @@ func TestUserFacingAgentError(t *testing.T) {
 		{
 			name:  "grok ACP envelope",
 			agent: "grok",
-			raw:   `Internal error: {"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}`,
+			raw:   `{"code":-32603,"message":"Internal error","data":{"http_status":402,"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}}`,
 			want:  "Grok Build usage balance exhausted. Add credits or wait for the balance to reset, then try again.",
 		},
 		{

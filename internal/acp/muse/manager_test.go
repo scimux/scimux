@@ -42,6 +42,7 @@ type managerSurface interface {
 	Attention(nodeID string) string
 	LastError(nodeID string) string
 	HasSession(nodeID string) bool
+	SessionID(nodeID string) string
 	Kill(nodeID string) error
 	RecordStartFailure(nodeID string, cause error) error
 	Shutdown()
@@ -459,6 +460,9 @@ func launchOK(t *testing.T, logDir string) (*Manager, *spawnCtl, *fakeServer, st
 	if res.id != "sess-1" {
 		t.Fatalf("session id=%q", res.id)
 	}
+	if got := m.SessionID("n1"); got != res.id {
+		t.Fatalf("published SessionID=%q, want %q", got, res.id)
+	}
 	return m, ctl, srv, filepath.Join(logDir, "n1.jsonl")
 }
 
@@ -620,6 +624,9 @@ func TestManagerMissingNodeStatus(t *testing.T) {
 	t.Cleanup(m.Shutdown)
 	if m.HasSession("n1") {
 		t.Fatal("HasSession")
+	}
+	if got := m.SessionID("n1"); got != "" {
+		t.Fatalf("SessionID=%q", got)
 	}
 	if m.Live("n1") != "exited" {
 		t.Fatalf("Live=%q", m.Live("n1"))

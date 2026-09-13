@@ -9,9 +9,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -71,7 +71,9 @@ func configureUsage(fs *flag.FlagSet, name string) {
 		out := fs.Output()
 		fmt.Fprintln(out, appSummary)
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "Usage: %s [options]\n\n", name)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s [options]\n", name)
+		fmt.Fprintf(out, "  %s stop [options]\n\n", name)
 		fs.PrintDefaults()
 	}
 }
@@ -155,6 +157,23 @@ func Run() {
 	if len(os.Args) > 1 && os.Args[1] == claudeUsageStatusLineCmd {
 		os.Exit(runClaudeUsageStatusLineMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == webChildCmd {
+		os.Exit(runWebChildMain())
+	}
+	if len(os.Args) > 1 && os.Args[1] == sessionWorkerCmd {
+		os.Exit(runSessionWorkerMain())
+	}
+	if len(os.Args) > 1 && os.Args[1] == stopCmd {
+		os.Exit(runStopMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	handoff, err := loadMuxerExecFiles(os.Getenv)
+	_ = os.Unsetenv(envMuxerPublicFD)
+	_ = os.Unsetenv(envMuxerLockFD)
+	_ = os.Unsetenv(envMuxerCSRFToken)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scimux:", err)
@@ -180,6 +199,8 @@ func Run() {
 			Stdout: os.Stdout,
 			Stderr: os.Stderr,
 		},
+		muxerOnly: true,
+		handoff:   handoff,
 	}
 	if err := cmd.Run(context.Background()); err != nil {
 		if errors.Is(err, errFlagsReported) {
@@ -200,21 +221,65 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "scimux: startup produced no application")
 		os.Exit(1)
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
+	dataDir := filepath.Dir(a.storePath)
+	workerExe, err := pinWorkerExecutable(exe, dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
+	workers := newWorkerManager(workerExe, dataDir, version)
+	workers.home, workers.socket = a.home, cmd.socket
+	if err := workers.Reconcile(a.nodes); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: reconnect session workers:", err)
+	}
+	if err := workers.RecoverUnknown(a); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: recover interrupted session-worker transactions:", err)
+	}
+	if err := workers.AdoptExistingClaude(a); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: attach existing Claude chats to session workers:", err)
+	}
+	if err := sweepWorkerExecutables(dataDir, workerExe); err != nil {
+		fmt.Fprintln(os.Stderr, "scimux: clean obsolete session-worker binaries:", err)
+	}
+	a.workers = workers
 	status := startStatus(os.Stderr, "scimux: preparing chats before opening the web UI", isTerminal(os.Stderr))
 	a.warmStartup()
 	status.Done()
+	stopRequested := make(chan struct{}, 1)
+	restartRequested := make(chan struct{}, 1)
+	runtimeOpts := splitRuntimeOptions{
+		requestStop: func() {
+			select {
+			case stopRequested <- struct{}{}:
+			default:
+			}
+		},
+		requestRestart: func() {
+			select {
+			case restartRequested <- struct{}{}:
+			default:
+			}
+		},
+		report: func(err error) {
+			fmt.Fprintln(os.Stderr, "scimux: restart web child:", err)
+		},
+	}
+	runtime, err := startSplitRuntime(context.Background(), a, cmd, exe, runtimeOpts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scimux:", err)
+		os.Exit(1)
+	}
 
-	// Structured-protocol subprocesses (ACP, codex app-server) are ours: unlike
-	// tmux sessions (which deliberately survive scimux exit), they must not
-	// orphan. Kill every such process group on shutdown. tmux sessions are
-	// untouched.
+	// The split runtime owns graceful worker shutdown. Signals only select that
+	// path here; muxer replacement uses the distinct detach path so live chats
+	// survive an update.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-stop
-		a.shutdownStructured()
-		os.Exit(0)
-	}()
 
 	go func() {
 		for {
@@ -245,19 +310,9 @@ func Run() {
 	a.museCatalog = probeMuseCatalog
 	a.museClassify = classifyMuseStandard
 
-	handler := cmd.Handler()
-	if handler == nil {
-		h, err := NewHandler(a, webFS)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "scimux:", err)
-			os.Exit(1)
-		}
-		handler = h
-	}
-
 	// Run already bound this, before it spent anything at the rendezvous.
-	// Serve on that listener rather than re-binding: a second bind would be a
-	// second chance to fail, after the irreversible step.
+	// The muxer retains it while web generations inherit duplicates, so the
+	// port is never unbound during replacement.
 	ln := cmd.Listener()
 	if ln == nil {
 		fmt.Fprintln(os.Stderr, "scimux: startup bound no listener")
@@ -265,17 +320,44 @@ func Run() {
 	}
 	fmt.Printf("scimux: http://%s/  (tmux socket %q, store %s)\n", ln.Addr(), cmd.socket, a.storePath)
 	fmt.Printf("scimux: attach to a chat by hand: tmux -L %s attach -t <node-id>\n", cmd.socket)
-	// -addr may be bound wider than loopback, so give the server real
-	// timeouts (slowloris defense). No ReadTimeout/WriteTimeout: legitimate
-	// handlers can be slow (structured sends, the self-update download);
-	// ReadHeaderTimeout covers the attack that matters.
-	srv := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
-	if err := srv.Serve(ln); err != nil {
-		fmt.Fprintln(os.Stderr, "scimux:", err)
-		os.Exit(1)
+
+	for {
+		select {
+		case <-stop:
+			signal.Stop(stop)
+			_ = runtime.Close()
+			return
+		case <-stopRequested:
+			signal.Stop(stop)
+			_ = runtime.Close()
+			return
+		case <-restartRequested:
+			files, prepareErr := runtime.PrepareExec()
+			if prepareErr != nil {
+				fmt.Fprintln(os.Stderr, "scimux: prepare muxer update:", prepareErr)
+				continue
+			}
+			if quiesceErr := runtime.QuiesceForExec(); quiesceErr != nil {
+				_ = files.Close()
+				fmt.Fprintln(os.Stderr, "scimux: quiesce muxer update:", quiesceErr)
+				return
+			}
+			replaceErr := replaceMuxerProcess(exe, files)
+			_ = files.Close()
+			// Exec returns only on failure. Reattach the still-running workers
+			// and restore service with the installed binary's web child.
+			if reconcileErr := workers.Reconcile(a.nodes); reconcileErr != nil {
+				fmt.Fprintln(os.Stderr, "scimux: reconnect workers after failed muxer update:", reconcileErr)
+			}
+			recovered, recoverErr := startSplitRuntime(context.Background(), a, cmd, exe, runtimeOpts)
+			if recoverErr != nil {
+				fmt.Fprintln(os.Stderr, "scimux: muxer update failed:", errors.Join(replaceErr, recoverErr))
+				cmd.closeListener()
+				cmd.closeOwnership()
+				return
+			}
+			runtime = recovered
+			fmt.Fprintln(os.Stderr, "scimux: muxer update exec failed; restored current muxer:", replaceErr)
+		}
 	}
 }

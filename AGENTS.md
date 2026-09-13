@@ -28,6 +28,9 @@ go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target C
 scripts/vendor-rendezvous.sh /path/to/scimux-rv   # re-vendor the rendezvous vectors
 go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine       -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
+go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
+go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
+scripts/test/backend-split-mutations.sh
 ```
 
 - The release matrix is not written down twice: `TestCrossBuildTargets` parses
@@ -71,6 +74,23 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 
 ## Invariants (deliberate design decisions — do not "improve" them away)
 
+- **One command, layered process lifetimes.** Users and service managers invoke
+  only `scimux`; `web-child` and `session-worker` are hidden roles in the same
+  static binary. The muxer owns the public listener, metadata/notes, and the
+  private core API. The web child owns embedded assets, browser request
+  security, and rendezvous/WebRTC. One worker per chat owns that CLI connection
+  and is the sole writer for its session log; Claude's worker owns supervision
+  around its tmux pane. There are no provider-manager or information daemons.
+  Self-update activates a ready web child, then hands the listener and muxer
+  lock through exec; it detaches workers and never calls their Stop operation.
+  The replacement reconnects through authenticated owner-only locators under
+  `control/workers/`, so old workers may live beside a newer muxer. Explicit
+  node deletion stops the worker and its owned chat. Full `scimux stop` retires
+  workers and structured subprocesses but preserves Claude tmux panes, matching
+  the monolith. Protocol and discovery rules are in
+  `docs/session-workers.md`. `scimux stop [-data <path>]` addresses only the
+  muxer through `muxer.json`; `muxer.lock` remains the lifetime single-owner
+  claim for the data directory.
 - **Zero build dependencies.** Standard library only — no SQLite, no
   WebSocket library, no JS framework. If a feature seems to need a module,
   stop and discuss. Two maintainer-approved exceptions exist, both scoped by

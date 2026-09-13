@@ -54,6 +54,10 @@ func computerBootstrapManifest() (remoteBootstrapManifest, error) {
 }
 
 func (a *app) handleRemoteBootstrapManifest(w http.ResponseWriter, r *http.Request) {
+	serveRemoteBootstrapManifest(w, r)
+}
+
+func serveRemoteBootstrapManifest(w http.ResponseWriter, r *http.Request) {
 	m, err := computerBootstrapManifest()
 	if err != nil {
 		http.Error(w, "bootstrap manifest unavailable", http.StatusInternalServerError)

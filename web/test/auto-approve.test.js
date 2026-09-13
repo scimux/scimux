@@ -229,9 +229,9 @@ const sampleDecision = {
 };
 
 test("P4 decisionRowHTML: visible approved request, expandable audit, full escape, no bubble actions", () => {
-  const html = decisionRowHTML(sampleDecision, { escape: esc, fmtTime: t => t });
+  const html = decisionRowHTML(sampleDecision, { escape: esc, fmtTime: t => t, ordinal: 54 });
   assert.match(html, /class="decision"/);
-  assert.match(html, /class="decision-head"[^>]*>[\s\S]*Auto-approved/);
+  assert.match(html, /class="decision-head"[^>]*>[\s\S]*Auto-approved \(#54\)/);
   assert.match(html, /Allow once/);
   assert.match(html, /class="decision-approved"/);
   assert.match(html, /<details class="decision-meta"/);
@@ -275,6 +275,20 @@ test("P4 mergeTimelineItems orders by durable record index; live/history parity 
   // Shared renderer path for current and historical (same function).
   assert.match(chatJs, /decisionRowHTML\(item\.decision/);
   assert.match(chatJs, /renderTimelineHTML/);
+});
+
+test("completed-turn audit numbers decisions within each durable lease", () => {
+  const decisions = [
+    { record: 5, decision: { lease_id: "turn-a", title: "two", selected: {} } },
+    { record: 2, decision: { lease_id: "turn-a", title: "one", selected: {} } },
+    { record: 7, decision: { lease_id: "turn-b", title: "new turn", selected: {} } },
+    { record: 8, decision: { lease_id: "", title: "legacy", selected: {} } },
+  ];
+  const items = mergeTimelineItems([], decisions);
+  assert.deepEqual(items.map(item => item.ordinal), [1, 2, 1, undefined]);
+  assert.match(decisionRowHTML(items[1].decision, { ordinal: items[1].ordinal }),
+    /Auto-approved \(#2\)/);
+  assert.doesNotMatch(decisionRowHTML(items[3].decision), /Auto-approved \(#/);
 });
 
 test("P4 decisionsHash changes rebuild signature; count alone is outside turns hash", () => {
@@ -1010,7 +1024,7 @@ test("P4 decisions render in live segment order; history uses same path; no bubb
   feature.bind();
   await feature.render();
   assert.match(roots.msgs.innerHTML, /class="decision"/);
-  assert.match(roots.msgs.innerHTML, /class="decision-state"[^>]*>Auto-approved</);
+  assert.match(roots.msgs.innerHTML, /class="decision-state"[^>]*>Auto-approved \(#1\)</);
   assert.match(roots.msgs.innerHTML, /class="decision-approved"/);
   assert.match(roots.msgs.innerHTML, /&lt;script&gt;/);
   assert.doesNotMatch(roots.msgs.innerHTML, /data-bact=/);
@@ -1021,6 +1035,29 @@ test("P4 decisions render in live segment order; history uses same path; no bubb
   const decAt = html.indexOf("class=\"decision\"");
   assert.ok(userAt >= 0 && decAt > asstAt && asstAt > userAt,
     "order user → assistant → decision");
+  feature.destroy();
+});
+
+test("a completed transport error is visible after the current timeline", async () => {
+  const { feature, roots } = makeFeature({
+    chatPayload: {
+      turns: [
+        { role: "user", text: "try Grok", record: 1 },
+        { role: "assistant", text: "earlier output", record: 2 },
+      ],
+      live: "quiet", delivery: "ok", source: "acp",
+      chat_started: "t", prior_turns: 0, assets: {},
+      error: "Grok Build usage balance exhausted. Add credits or wait for the balance to reset, then try again.",
+      auto_approve: { supported: true, enabled: false, phase: "off", count: 0 },
+    },
+  });
+  feature.bind();
+  await feature.render();
+  const html = roots.msgs.innerHTML;
+  const turnAt = html.indexOf("earlier output");
+  const errorAt = html.indexOf("Grok Build usage balance exhausted");
+  assert.ok(errorAt > turnAt, "the current failure follows the turn it describes");
+  assert.match(html, /class="pending chaterr" role="status"/);
   feature.destroy();
 });
 
@@ -1069,7 +1106,7 @@ test("P4 history segments render decisions; toggle off does not remove durable r
   assert.match(roots.msgs.innerHTML, /class="decision"/);
   // Count badge off does not remove decisions
   assert.equal(roots.autoapprove.getAttribute("aria-pressed"), "false");
-  assert.match(roots.msgs.innerHTML, /class="decision-state"[^>]*>Auto-approved</);
+  assert.match(roots.msgs.innerHTML, /class="decision-state"[^>]*>Auto-approved \(#1\)</);
   assert.match(roots.msgs.innerHTML, /class="decision-approved"/);
   feature.destroy();
 });

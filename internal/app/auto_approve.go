@@ -806,12 +806,17 @@ func (a *app) handleAutoApprove(w http.ResponseWriter, r *http.Request) {
 	if a.refuseEnded(w, n) {
 		return
 	}
-	// The Claude half of the predicate reads a.claudeHooks and the capability
-	// map, both written by the hook drain under a.mu — take the lock for the
-	// read even though the structured half needs none.
-	a.mu.Lock()
-	supported := a.autoApproveSupportedFor(n)
-	a.mu.Unlock()
+	workerClaude := a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID)
+	// The legacy Claude half reads the local hook capability map. A workerized
+	// Claude reports the same capability from the process that owns its bundle.
+	supported := false
+	if workerClaude {
+		supported = a.workers.State(n.ID).AutoApprove.Supported
+	} else {
+		a.mu.Lock()
+		supported = a.autoApproveSupportedFor(n)
+		a.mu.Unlock()
+	}
 	if !supported {
 		http.Error(w, "auto-approval is not available for this chat", http.StatusBadRequest)
 		return
@@ -821,6 +826,19 @@ func (a *app) handleAutoApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(w, r, &body); err != nil || body.Enabled == nil {
 		http.Error(w, "bad request", 400)
+		return
+	}
+	if workerClaude {
+		state, err := a.workers.SetAutoApprove(n.ID, *body.Enabled)
+		if err != nil {
+			code := http.StatusInternalServerError
+			if a.workers.Conflict(err) {
+				code = http.StatusConflict
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		writeJSON(w, autoApproveView{Supported: state.Supported, Enabled: state.Enabled, Phase: state.Phase, Count: state.Count, Error: state.Error})
 		return
 	}
 	if !*body.Enabled {

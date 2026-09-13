@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -265,6 +266,58 @@ func TestPublicRouteAdoptSessionTransportAndTranscript(t *testing.T) {
 	}
 	if a.byID["live1"] == nil {
 		t.Fatal("adopt did not register the node")
+	}
+}
+
+func TestHandleAdoptRespondsFromPublishedSnapshot(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"live-snapshot": true}}
+	a := newTestApp(t, f)
+	workers := syntheticWorkerManager(t, filepath.Dir(a.storePath))
+	workers.startOptions.env = append(workers.startOptions.env, "SCIMUX_SESSION_WORKER_TEST_READY_DELAY=200ms")
+	a.workers = workers
+	t.Cleanup(workers.Shutdown)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- adopt(a, `{"session":"live-snapshot","agent":"claude","title":"Published","session_id":"original","dir":`+strconv.Quote(a.home)+`}`)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		workers.mu.Lock()
+		starting := workers.starting["live-snapshot"]
+		workers.mu.Unlock()
+		if starting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("adoption did not reach the worker boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a.mu.Lock()
+	a.byID["live-snapshot"].SessionID = "poller-update"
+	a.mu.Unlock()
+
+	rec := <-done
+	if rec.Code != http.StatusOK {
+		t.Fatalf("adopt status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.SessionID != "original" {
+		t.Fatalf("adopt response session_id = %q, want committed snapshot", response.SessionID)
+	}
+
+	// Publishing the adopted node is the transaction boundary. A worker
+	// attachment failure must not roll back or turn that successful adoption
+	// into an HTTP failure.
+	failing := newTestApp(t, &fakeTmux{alive: map[string]bool{"live-without-worker": true}})
+	failing.workers = newWorkerManager(filepath.Join(t.TempDir(), "missing-scimux"), filepath.Dir(failing.storePath), "test")
+	rec = adopt(failing, `{"session":"live-without-worker","agent":"claude","dir":`+strconv.Quote(failing.home)+`}`)
+	if rec.Code != http.StatusOK || failing.byID["live-without-worker"] == nil {
+		t.Fatalf("adopt with unavailable worker = %d %q node=%#v", rec.Code, rec.Body.String(), failing.byID["live-without-worker"])
 	}
 }
 

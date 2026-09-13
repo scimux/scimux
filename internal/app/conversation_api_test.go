@@ -2169,6 +2169,52 @@ func TestHandleSendCodexClear(t *testing.T) {
 	}
 }
 
+func TestStructuredClearPersistsLiveSessionIdentity(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	n := seedStructuredNode(t, a, "clear-identity", "opencode", "acp")
+	n.SessionID = "session-before-clear"
+	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		t.Fatal(err)
+	}
+	a.testProc = &sessionIDProc{contractProc: &contractProc{}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	req.SetPathValue("id", n.ID)
+	rec := httptest.NewRecorder()
+	a.handleSend(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/clear = %d %q", rec.Code, rec.Body.String())
+	}
+	if n.SessionID != "provider-session" {
+		t.Fatalf("live SessionID = %q", n.SessionID)
+	}
+
+	reloaded := reloadApp(t, a, f)
+	if got := reloaded.byID[n.ID]; got == nil || got.SessionID != "provider-session" {
+		t.Fatalf("replayed node = %#v", got)
+	}
+}
+
+func TestStructuredClearReportsSessionIdentityPersistenceFailure(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "clear-persist-failure", "pi", "acp")
+	n.SessionID = "session-before-clear"
+	a.testProc = &sessionIDProc{contractProc: &contractProc{}}
+	a.storePath = t.TempDir() // opening a directory for append must fail
+
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+	req.SetPathValue("id", n.ID)
+	rec := httptest.NewRecorder()
+	a.handleSend(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "persist clear session") {
+		t.Fatalf("/clear = %d %q", rec.Code, rec.Body.String())
+	}
+	if n.SessionID != "session-before-clear" {
+		t.Fatalf("failed persistence changed durable projection to %q", n.SessionID)
+	}
+}
+
 // A known Claude rollover (retireTranscript) must turn the page immediately:
 // a path-less seam lands in the log at retire time so the fresh surface does
 // not wait for the relink after the next turn.
@@ -2675,7 +2721,7 @@ func TestProcChatTurnLatchAndReadableUsageError(t *testing.T) {
 	}
 
 	stub.live = "quiet"
-	stub.lastError = `Internal error: {"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}`
+	stub.lastError = `{"code":-32603,"message":"Internal error","data":{"http_status":402,"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}}`
 	resp = map[string]any{}
 	a.procChatInto(resp, n, stub, sessionlog.Segment{})
 	if resp["turn_in_flight"] != false {

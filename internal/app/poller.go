@@ -12,6 +12,7 @@ import (
 
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
 
@@ -53,7 +54,7 @@ func (a *app) poll() {
 	a.drainClaudeHooks()
 
 	for _, n := range nodes {
-		// Structured-protocol nodes (ACP, codex app-server) carry no tmux pane:
+		// Structured-protocol nodes (ACP, codex app-server, Muse MSP) carry no tmux pane:
 		// liveness and needs-input come from the manager's structured state
 		// (process alive, turn in flight, pending permission), not pane-change
 		// detection. No capture, no transcript discovery.
@@ -62,12 +63,23 @@ func (a *app) poll() {
 			// manual attention. Manager + session-log I/O stay outside a.mu.
 			a.maybeAutoApprove(n, pm)
 
-			// Snapshot manager state outside a.mu (HasSession/Live/Attention
-			// are in-memory lookups, but keep the "no a.mu across manager
-			// calls" discipline for consistency with Send/log paths).
-			live := pm.Live(n.ID)
-			attn := pm.Attention(n.ID)
-			lastErr := pm.LastError(n.ID)
+			// Snapshot manager state outside a.mu. A worker exposes one coherent
+			// reconnect contract; an in-process manager retains the older scalar
+			// interface. Never hold a.mu across either form.
+			var live, attn, lastErr string
+			var workerState *sessionworker.State
+			if workers, ok := pm.(*workerManager); ok {
+				state := workers.State(n.ID)
+				workerState = &state
+				live, attn, lastErr = state.Live, state.Attention, state.LastError
+				if n.Agent == "claude" {
+					a.projectWorkerClaudeHook(n.ID, state)
+				}
+			} else {
+				live = pm.Live(n.ID)
+				attn = pm.Attention(n.ID)
+				lastErr = pm.LastError(n.ID)
+			}
 			a.mu.Lock()
 			prevAttn := a.attn[n.ID]
 			prevLive := a.live[n.ID]
@@ -77,7 +89,12 @@ func (a *app) poll() {
 			if live == "active" {
 				a.lastChg[n.ID] = time.Now()
 			}
-			a.turnDone[n.ID] = structuredTurnDone(live, attn, prevLive, lastErr, n.EndedAt, prevDone, a.lastChg[n.ID], time.Now())
+			if workerState != nil {
+				n.SessionID, n.Transcript, n.AXScreenReader = workerState.SessionID, workerState.Transcript, workerState.AXScreenReader
+				a.turnDone[n.ID] = workerState.TurnDone
+			} else {
+				a.turnDone[n.ID] = structuredTurnDone(live, attn, prevLive, lastErr, n.EndedAt, prevDone, a.lastChg[n.ID], time.Now())
+			}
 			// An armed lease cannot cross a turn or a dead process. Every
 			// agent turns it off at completion. Do not touch a primed
 			// lease merely because the process is not yet up (enable while idle
@@ -102,12 +119,16 @@ func (a *app) poll() {
 			if settleLeaseID != "" {
 				a.settleAutoApproveAfterTurn(n.ID, settleLeaseID)
 			}
-			// V2-P2: persist needs-input start→end edges from the existing
-			// mechanical Attention() signal only — no new regex / source.
-			a.persistAttentionTransition(n, prevAttn, attn)
+			// Structured managers expose attention but do not persist its edges,
+			// so the muxer asks their worker to append them. Claude's worker runs
+			// the established tmux poller itself and already owns that append;
+			// repeating it here would create two identical audit records.
+			if workerState == nil || n.Agent != "claude" {
+				a.persistAttentionTransition(n, prevAttn, attn)
+			}
 			// Phase 4: re-source pi fare from the native JSONL (session-map
 			// join). Other structured agents keep ACP/app-server usage only.
-			if n.Agent == "pi" {
+			if n.Agent == "pi" && a.workers == nil {
 				a.syncPiFare(n)
 			}
 			continue
@@ -502,6 +523,37 @@ func (a *app) poll() {
 	}
 }
 
+// projectWorkerClaudeHook keeps the global append-only registry aligned with
+// the capability bundle owned by the Claude worker. In particular, /clear can
+// rotate this identity entirely inside the worker; persisting the new value
+// prevents a later clean scimux stop/restart from treating the active bundle
+// as an orphan before the pane is adopted again.
+func (a *app) projectWorkerClaudeHook(nodeID string, state sessionworker.State) {
+	if !safePathComponent(state.HookID) {
+		return
+	}
+	generation := state.HookGeneration
+	if generation < 1 {
+		generation = 1
+	}
+	a.mu.Lock()
+	currentGeneration := a.claudeGens[nodeID]
+	a.mu.Unlock()
+	// A generation identifies exactly one capability bundle. Accepting a
+	// different ID at the same generation would let a stale observation replace
+	// the bundle without the monotonic proof supplied by /clear.
+	if currentGeneration >= generation {
+		return
+	}
+	if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: nodeID, HookID: state.HookID, Generation: generation}); err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: persist worker hook for %s: %v\n", nodeID, err)
+		return
+	}
+	a.mu.Lock()
+	a.claudeHooks[nodeID], a.claudeGens[nodeID] = state.HookID, generation
+	a.mu.Unlock()
+}
+
 // reconcileClaudeClear gives up waiting for the SessionStart source:"clear"
 // that would prove a pasted /clear turned the page. Expiry is a notice and
 // nothing more: there is deliberately nothing to undo, because the delivery
@@ -633,6 +685,14 @@ func (a *app) persistAttentionTransition(n *Node, prev, next string) {
 func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error {
 	if a.sessionsDir == "" {
 		return nil
+	}
+	if a.workers != nil {
+		a.mu.Lock()
+		node := a.byID[id]
+		a.mu.Unlock()
+		if node != nil && a.workers.manages(id) {
+			return a.workers.AppendSessionEvent(id, ev)
+		}
 	}
 	w := &sessionlog.Writer{Path: a.sessionLogPath(id)}
 	return w.Append(ev)

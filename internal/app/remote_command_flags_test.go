@@ -232,7 +232,7 @@ func TestCommandRunFlagParse(t *testing.T) {
 // TestCommandRunHelpIsTheProcessUsage is the one assertion in this file that
 // does not hold before the refactor. Today `-h` reaches flag.CommandLine
 // first, which configureUsage has taught to print the product summary and
-// the "Usage: <argv0> [options]" line; Command.Run's own FlagSet has no
+// the process usage lines; Command.Run's own FlagSet has no
 // Usage at all and falls back to the flag package's bare "Usage of scimux:".
 // Deleting the first parse would therefore silently downgrade -h. The
 // surviving parse has to carry the same usage.
@@ -248,7 +248,7 @@ func TestCommandRunHelpIsTheProcessUsage(t *testing.T) {
 	if !strings.Contains(out, appSummary) {
 		t.Errorf("-h did not print the product summary.\ngot:\n%s", out)
 	}
-	if !strings.Contains(out, "Usage: scimux [options]") {
+	if !strings.Contains(out, "Usage:\n  scimux [options]\n  scimux stop [options]") {
 		t.Errorf("-h did not print the process usage line.\ngot:\n%s", out)
 	}
 	if !strings.Contains(out, "-trusted-host") {

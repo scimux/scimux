@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 )
 
 const (
@@ -1285,6 +1286,45 @@ func TestOrphanClaudeHookRecordDoesNotResurrectNode(t *testing.T) {
 	}
 	if a2.claudeHookID("ghost") != "" {
 		t.Fatal("orphan claude-hook must not install a hook registration")
+	}
+}
+
+func TestCleanupOrphanClaudeHooksPreservesHookOwnedByLiveWorker(t *testing.T) {
+	f := &fakeTmux{}
+	a := newTestApp(t, f)
+	root := a.claudeHooksDir()
+	for _, hookID := range []string{"hook-worker", "hook-orphan"} {
+		if err := os.MkdirAll(filepath.Join(root, hookID), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	harness := &syntheticSessionHarness{state: sessionworker.State{
+		HasSession: true, Live: "quiet", HookID: "hook-worker", HookGeneration: 1,
+	}}
+	identity := sessionworker.Identity{WorkerID: "worker-live", Agent: "claude", Build: "old"}
+	server, err := sessionworker.Listen("", identity, harness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	dataDir := filepath.Dir(a.storePath)
+	registration, err := sessionworker.Claim(dataDir, "chat-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registration.Close() })
+	if err := registration.Publish(sessionworker.Locator{
+		Identity: identity, NodeID: "chat-live", PID: os.Getpid(), Link: server.Link(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a.cleanupOrphanClaudeHooks()
+	if _, err := os.Stat(filepath.Join(root, "hook-worker")); err != nil {
+		t.Fatalf("live worker hook was archived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "hook-orphan")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan hook still present: %v", err)
 	}
 }
 

@@ -384,7 +384,7 @@ func TestShutdownStructuredClosesMuseExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestShutdownStructuredWiredInMainAndUpdate(t *testing.T) {
+func TestProductionShutdownDoesNotBypassWorkerOwnership(t *testing.T) {
 	mainSrc, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatal(err)
@@ -393,13 +393,19 @@ func TestShutdownStructuredWiredInMainAndUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(mainSrc), "a.shutdownStructured()") {
-		t.Fatal("main.go signal path does not shut structured managers through shutdownStructured")
+	if strings.Contains(string(mainSrc), "a.shutdownStructured()") {
+		t.Fatal("main.go bypasses split-runtime worker ownership")
 	}
-	if !strings.Contains(string(updateSrc), "a.shutdownStructured()") {
-		t.Fatal("update.go re-exec path does not shut structured managers through shutdownStructured")
+	if strings.Contains(string(updateSrc), "a.shutdownStructured()") {
+		t.Fatal("update.go stops harnesses during muxer replacement")
 	}
-	if strings.Contains(string(mainSrc), "a.muse") && !strings.Contains(string(mainSrc), "shutdownStructured") {
-		t.Fatal("main.go talks to Muse outside shutdownStructured")
+	backendSrc, err := os.ReadFile("backend_ownership.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"m.app.workers.Shutdown()", "m.app.muse.Shutdown()"} {
+		if !strings.Contains(string(backendSrc), want) {
+			t.Fatalf("backend ownership is missing %s", want)
+		}
 	}
 }

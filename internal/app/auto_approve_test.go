@@ -58,7 +58,8 @@ type stubProc struct {
 	sendHook  func(*stubProc)
 	// lastError is the structured LastError() projection (empty after a
 	// successful turn; set for interrupt/empty/failed).
-	lastError string
+	lastError     string
+	shutdownCalls atomic.Int32
 }
 
 func (s *stubProc) Launch(string, string, string, string, string) (string, error) {
@@ -91,7 +92,7 @@ func (s *stubProc) Kill(string) error       { return nil }
 func (s *stubProc) RecordStartFailure(string, error) error {
 	return nil
 }
-func (s *stubProc) Shutdown() {}
+func (s *stubProc) Shutdown() { s.shutdownCalls.Add(1) }
 func (s *stubProc) Conflict(err error) bool {
 	for _, e := range s.conflictErrors {
 		if err == e {

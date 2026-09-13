@@ -1419,7 +1419,7 @@ func (c *Client) StopRendezvous() error {
 }
 
 func (c *Client) startRVLoop() {
-	if c.cfg.Backoff.Initial == 0 && c.cfg.Scheduler == nil {
+	if !c.cfg.RunsRendezvousLoop() {
 		return
 	}
 	c.backoff = NewBackoff(c.cfg.Backoff, c.cfg.Clock, c.cfg.RNG)

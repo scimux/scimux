@@ -22,6 +22,9 @@ func launchedManagerWithLog(t *testing.T) (*Manager, *mockTransport, *mockServer
 
 func TestManagerClearNeverLaunched(t *testing.T) {
 	m := NewManagerWithSpawn(t.TempDir(), nil)
+	if got := m.SessionID("n1"); got != "" {
+		t.Fatalf("SessionID before launch = %q", got)
+	}
 	if err := m.Clear("n1"); err != ErrNoSession {
 		t.Fatalf("want ErrNoSession, got %v", err)
 	}
@@ -80,6 +83,9 @@ func TestManagerClearStartsNewThread(t *testing.T) {
 	}
 	if got := m.LastError("n1"); got != "" {
 		t.Fatalf("unexpected last error: %q", got)
+	}
+	if got := m.SessionID("n1"); got != "THREAD-2" {
+		t.Fatalf("SessionID after clear = %q, want THREAD-2", got)
 	}
 }
 

@@ -686,12 +686,17 @@ common request boundary (`Sec-Fetch-Site`).
 Self-update: downloads the release binary for this OS/arch from the trusted
 HTTPS release origin (`codeberg.org` only — exact host, no userinfo, port
 empty or 443), verifies it against the release's `SHA256SUMS` (same origin
-policy on the initial URL and every redirect), and atomically replaces the
-running executable only after size, close, and checksum checks succeed.
+policy on the initial URL and every redirect), starts it as a standby
+web-server child, proves that its private Unix-socket protocol is compatible,
+and atomically replaces the installed executable only after size, close,
+checksum, and compatibility checks succeed. The response then commits a
+graceful web-child handoff. The long-lived muxer, its harness subprocesses,
+tmux sessions, stores, and public listener are not restarted.
 Binary downloads are capped at 256 MiB; a response that exceeds the cap is
 rejected without accepting a truncated payload. Failed verification or
-download leaves the installed executable byte-for-byte unchanged, does not
-restart the process, and removes any `.scimux-update-*` temp file. `409` if
+download, incompatible standby startup, or install leaves the installed
+executable byte-for-byte unchanged, keeps the existing web generation serving,
+and removes any `.scimux-update-*` temp file. `409` if
 already up to date, a `dev` build, or an update is already in progress.
 `502` on download/verify failure; `500` on install (chmod/rename) failure.
 

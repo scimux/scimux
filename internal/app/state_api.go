@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 )
 
 // ---------- sysload ----------
@@ -164,7 +165,7 @@ func lastInteractionMS(n *Node, seg sessionlog.Segment) int64 {
 	return unixMSStamp(n.CreatedAt)
 }
 
-// Snapshot boundary for handleState (existing behavior; do not change locking
+// handleState uses this snapshot boundary (existing behavior; do not change locking
 // merely to match this comment):
 //
 //   - tmux session listing (a.server.Sessions) runs before a.mu.
@@ -176,6 +177,20 @@ func lastInteractionMS(n *Node, seg sessionlog.Segment) int64 {
 //   - JSON and ETag emission is read-only and must not mutate liveness or poll
 //     state.
 func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
+	workerStates := map[string]sessionworker.State{}
+	if a.workers != nil {
+		a.mu.Lock()
+		ids := make([]string, 0, len(a.nodes))
+		for _, n := range a.nodes {
+			if n.Agent == "claude" && a.workers.manages(n.ID) {
+				ids = append(ids, n.ID)
+			}
+		}
+		a.mu.Unlock()
+		for _, id := range ids {
+			workerStates[id] = a.workers.State(id)
+		}
+	}
 	sessions := a.server.Sessions()
 	a.mu.Lock()
 	views := make([]nodeView, 0, len(a.nodes))
@@ -191,21 +206,27 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		// Copy the node while holding the lock: marshaling a live *Node after
 		// unlock races the poller's Transcript writes (a Go data race).
 		nc := *n
-		// Structured-protocol nodes (ACP, codex) keep their history in the
+		// Structured-protocol nodes (ACP, codex, Muse) keep their history in the
 		// manager's session log rather than a linked transcript file, so they
 		// always have chat to show.
-		hasTranscript := n.Transcript != "" || a.proc(n) != nil
+		hasTranscript := n.Transcript != "" || (n.Agent != "claude" && a.proc(n) != nil)
 		sup := a.claudeSupervisionOf(n)
 		attn := a.attn[n.ID]
+		live, turnDone, launchErr := a.live[n.ID], a.turnDone[n.ID], a.claudeLaunchErr[n.ID]
+		if state, ok := workerStates[n.ID]; ok {
+			nc.SessionID, nc.Transcript, nc.AXScreenReader = state.SessionID, state.Transcript, state.AXScreenReader
+			sup, attn, live, turnDone, launchErr = claudeSupervision(state.Supervision), state.Attention, state.Live, state.TurnDone, state.LastError
+			hasTranscript = state.Transcript != ""
+		}
 		if n.Agent == "claude" && attn == "inspect" {
 			attn = ""
 		}
 		if n.Agent == "claude" && sup != claudeSupStrict && attn != "" {
 			attn = ""
 		}
-		views = append(views, nodeView{Node: &nc, Live: a.live[n.ID], Attention: attn, AttentionAt: attentionMS,
-			TurnDone: a.turnDone[n.ID], HasTranscript: hasTranscript, LastActivity: lastMS,
-			Supervision: string(sup), LaunchError: a.claudeLaunchErr[n.ID]})
+		views = append(views, nodeView{Node: &nc, Live: live, Attention: attn, AttentionAt: attentionMS,
+			TurnDone: turnDone, HasTranscript: hasTranscript, LastActivity: lastMS,
+			Supervision: string(sup), LaunchError: launchErr})
 	}
 	// Sessions on our socket that no node accounts for: candidates for
 	// adoption (manually created, or migrated from another tmux server). A
@@ -270,7 +291,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := map[string]any{
 		"nodes": views, "unadopted": unadopted, "sys": sysload(),
-		"socket": a.server.Socket, "hostname": hostname, "version": version,
+		"socket": a.server.Socket, "hostname": hostname, "version": a.activeWebVersion(),
 	}
 	if hosted != nil {
 		payload["remote"] = map[string]string{"status": hosted.HostedStatus()}

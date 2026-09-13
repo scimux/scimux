@@ -490,6 +490,9 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 	}
 	n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	pm := a.proc(n)
+	if pm == nil && a.workers != nil && n.Agent == "claude" && !n.Adopted {
+		pm = a.workers
+	}
 	a.mu.Unlock()
 
 	status, err := a.launchNode(n, pm)
@@ -546,8 +549,21 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 		return 409, "", fmt.Errorf("node id %q was claimed concurrently; launch abandoned", n.ID)
 	}
 
-	if hookID := a.takePendingClaudeHook(n.ID); hookID != "" {
-		if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: n.ID, HookID: hookID, Generation: 1}); err != nil {
+	hookID := a.takePendingClaudeHook(n.ID)
+	hookGeneration := 1
+	if hookID == "" && n.Agent == "claude" && a.workers != nil && pm == a.workers {
+		// The Claude worker, not the muxer, created this capability. Project its
+		// identity into the global append-only registry only after Launch
+		// returned successfully; the worker locator remains the crash-window
+		// liveness proof used by cleanupOrphanClaudeHooks.
+		state := a.workers.State(n.ID)
+		hookID = state.HookID
+		if state.HookGeneration > 0 {
+			hookGeneration = state.HookGeneration
+		}
+	}
+	if hookID != "" {
+		if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: n.ID, HookID: hookID, Generation: hookGeneration}); err != nil {
 			if pm != nil {
 				_ = pm.Kill(n.ID)
 			} else if s := a.server.Session(n.ID); s.Alive() {
@@ -562,7 +578,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 		}
 		a.mu.Lock()
 		a.claudeHooks[n.ID] = hookID
-		a.claudeGens[n.ID] = 1
+		a.claudeGens[n.ID] = hookGeneration
 		a.mu.Unlock()
 	}
 
@@ -571,7 +587,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 	// died during launch, or the user-turn append failed. Persist that failure to
 	// the node's own history so the chat view shows it instead of a silent, empty
 	// successful node (finding 52). Owned Claude is handled separately below.
-	if pm != nil {
+	if pm != nil && !(n.Agent == "claude" && a.workers != nil && pm == a.workers) {
 		if err := pm.Send(n.ID, n.Prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "scimux: first prompt to %s node %s failed: %v\n", n.transport(), n.ID, err)
 			// If the failure record also cannot be written (the session log is
@@ -586,6 +602,9 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 		}
 	}
 	if n.Agent == "claude" && a.deliverClaudeInitial != nil {
+		if a.workers != nil && pm == a.workers {
+			return 0, initialPending, nil
+		}
 		// Return the node immediately so the browser can select it and paint
 		// the pale launch bubble. SessionStart, the single paste, and
 		// transcript confirmation run after the HTTP snapshot is marshaled.
@@ -752,7 +771,8 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 }
 
 // launchNode starts the tmux session or structured-protocol subprocess (ACP
-// for pi/opencode/grok, codex app-server for codex) and persists the node record.
+// for pi/opencode/grok, codex app-server for codex, MSP for Muse) and persists
+// the node record.
 // Runs without a.mu. Persist follows launch: the session/process had to exist
 // first, so a store failure rolls it back (kill) — otherwise a session would
 // run supervised-in-memory but vanish from the registry on restart. The
@@ -768,8 +788,24 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		}
 		n.Model = id
 	}
+	launch := n
+	// Resolve into a launch-only copy: the durable node keeps the family alias
+	// while both the legacy path and the Claude worker receive the concrete id.
+	if n.Agent == "claude" {
+		if id := a.resolveClaudeModel(n.Model); id != "" {
+			cp := *n
+			cp.Model = id
+			launch = &cp
+		}
+	}
 	if pm != nil {
-		sid, err := pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
+		var sid string
+		var err error
+		if workers, ok := pm.(*workerManager); ok {
+			sid, err = workers.LaunchNode(launch, launch.Model)
+		} else {
+			sid, err = pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
+		}
 		if err != nil {
 			return 500, err
 		}
@@ -785,19 +821,6 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 			return 500, fmt.Errorf("persist node (%s session rolled back): %v", n.transport(), err)
 		}
 		return 0, nil
-	}
-	launch := n
-	// Resolve a claude family alias (opus) to the concrete id the CLI accepts
-	// (claude-opus-4-8) — the CLI mis-resolves its own aliases. Resolve into a
-	// copy so the stored node keeps the durable alias; only the launched command
-	// carries the id. No mapping (probe absent/failed, or already a concrete id)
-	// leaves the value unchanged.
-	if n.Agent == "claude" {
-		if id := a.resolveClaudeModel(n.Model); id != "" {
-			cp := *n
-			cp.Model = id
-			launch = &cp
-		}
 	}
 	// Extra directories for Claude --add-dir. Only genuinely additional
 	// directories outside the working directory — today the node's attachment
@@ -959,6 +982,12 @@ func sessionArgFromCmdline(args []string) string {
 // tmux sessions are deliberately left running — scimux did not start them.
 func (a *app) closeOwned(n *Node) error {
 	if pm := a.proc(n); pm != nil {
+		// The worker is an owned controller even after its underlying harness
+		// exits. Stop it based on that ownership, not on the last liveness
+		// observation; an unreachable worker must make deletion fail closed.
+		if workers, ok := pm.(*workerManager); ok {
+			return workers.Kill(n.ID)
+		}
 		if pm.HasSession(n.ID) {
 			return pm.Kill(n.ID)
 		}

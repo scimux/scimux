@@ -304,7 +304,7 @@ func withRequestBoundary(p *requestPolicy, next http.Handler) http.Handler {
 	})
 }
 
-// csrfToken is a per-process secret embedded in the served index page (as the
+// csrfToken is the runtime secret embedded in the served index page (as the
 // scimux-csrf meta tag) and echoed back by the UI in the X-Scimux-CSRF header
 // on every unsafe request. It is the write-side security boundary: scimux is
 // intentionally unauthenticated and usually loopback-bound, but a loopback
@@ -313,7 +313,19 @@ func withRequestBoundary(p *requestPolicy, next http.Handler) http.Handler {
 // files and self-update. A cross-origin page cannot read this token (the
 // same-origin policy hides the HTML body) and cannot forge the custom header on
 // a simple request, so requiring it closes the CSRF surface with no dependency.
+// The split runtime passes one muxer-minted value to every web generation and
+// through a controlled muxer exec, so neither recovery nor an update
+// invalidates writes from already-open tabs. A fresh process mints a fresh
+// value; the token is deliberately not persisted for crash recovery.
 var csrfToken = mustToken()
+
+func validCSRFToken(token string) bool {
+	if len(token) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil
+}
 
 func mustToken() string {
 	b := make([]byte, 32)

@@ -447,6 +447,19 @@ func (m *Manager) FingerprintMismatch(nodeID string) bool {
 
 func (m *Manager) HasSession(nodeID string) bool { return m.session(nodeID) != nil }
 
+// SessionID returns the provider-minted identity for worker state and crash
+// recovery. The session stays owned by this manager; callers receive only the
+// immutable identifier already projected by the public node model.
+func (m *Manager) SessionID(nodeID string) string {
+	s := m.session(nodeID)
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
+}
+
 func (m *Manager) Kill(nodeID string) error {
 	m.mu.Lock()
 	s := m.sessions[nodeID]

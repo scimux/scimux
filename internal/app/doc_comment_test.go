@@ -66,9 +66,7 @@ func TestDocCommentTruth(t *testing.T) {
 
 	// Deliberate first-word exceptions. If a future mismatch appears, this
 	// test must fail rather than be widened.
-	allow := map[string]bool{
-		"state_api.go handleState": true, // Snapshot boundary for handleState — a deliberate prose heading for a bulleted locking contract, not drift
-	}
+	allow := map[string]bool{}
 
 	var unexpected, stale []string
 	for key, msg := range got {

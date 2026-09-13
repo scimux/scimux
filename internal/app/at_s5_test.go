@@ -212,6 +212,9 @@ func TestAT_FR_01_HiddenSubcommandsSkipRemoteInit(t *testing.T) {
 		t.Fatal("no hidden subcommands discovered from Run()")
 	}
 	for _, d := range found {
+		if d.name == stopCmd {
+			continue // public lifecycle command, covered by stop_test.go and E2E
+		}
 		t.Run(d.name, func(t *testing.T) {
 			var remoteInits, dispatches int
 			cmd := &Command{

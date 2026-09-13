@@ -225,7 +225,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const singleZone = () => matchMedia(SINGLE_ZONE_QUERY).matches;
   const isPhoneTouch = () => !isDesktop() && matchMedia("(hover: none) and (pointer: coarse)").matches;
 
-  /* Per-process CSRF token, embedded in the page by the server. Every unsafe
+  /* Per-muxer-lifetime CSRF token, embedded in the page by the server. Every unsafe
      request echoes it back in X-Scimux-CSRF; a cross-origin page can neither read
      it nor forge the custom header, so this is what stops a web page the operator
      happens to open from driving the local API (send/approve/interrupt/update). */
@@ -1798,7 +1798,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* ---- burger menu: manual update check + self-update + about ----
      The check and the download run only on an explicit tap; the server never
      phones home on its own. The install is confirm-first, and the button walks
-     through honest states (checking → available → updating → restarting). */
+     through honest states (checking → available → updating → switching). */
   let updateInfo = null;
   $("#m_check").addEventListener("click", async () => {
     const btn = $("#m_check"), tag = $("#m_version");
@@ -1823,14 +1823,14 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   });
   $("#m_apply").addEventListener("click", async () => {
     if (!updateInfo || !updateInfo.available) return;
-    if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and restart scimux?\n\n` +
-      "pi/opencode/grok/codex agents are stopped by the restart; tmux agents keep running.")) return;
+    if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and install the update?\n\n` +
+      "Running agent sessions stay connected to their session workers while scimux switches over.")) return;
     const btn = $("#m_apply");
     btn.disabled = true;
     btn.textContent = "updating…";
     try {
       await api("/api/update", { method: "POST", body: JSON.stringify({ expected_tag: updateInfo.latest }) });
-      btn.textContent = "restarting…";
+      btn.textContent = "switching…";
       const want = updateInfo.latest, t0 = Date.now();
       while (Date.now() - t0 < 60000){
         await new Promise(res => setTimeout(res, 1000));
@@ -1839,11 +1839,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
           if (st.version === want){ location.reload(); return; }
         } catch {}
       }
-      btn.textContent = "restart timed out — reload the page";
+      btn.textContent = "switch timed out — reload the page";
     } catch (e) {
       alert("Update failed: " + (e.message || e));
       btn.disabled = false;
-      btn.textContent = "Update & restart";
+      btn.textContent = "Install update";
     }
   });
   /* ---- burger menu: which agent harnesses this computer has ----

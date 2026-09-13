@@ -12,8 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
+	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
 )
 
@@ -34,12 +34,24 @@ type Command struct {
 
 	Config remote.Config
 
-	handler     http.Handler
-	application *app
-	client      *remote.Client
-	listenAddr  string
-	listener    net.Listener
-	socket      string
+	handler      http.Handler
+	application  *app
+	client       *remote.Client
+	listenAddr   string
+	listener     net.Listener
+	socket       string
+	trustedHosts []string
+	// muxerOnly is set only by the real process entry point. Injectable
+	// Command tests retain the historical monolithic seam; production leaves
+	// rendezvous/WebRTC initialization to the web child.
+	muxerOnly bool
+	ownership *backend.Registration
+	// handoff is populated only after same-PID exec. Command consumes both
+	// descriptors instead of competing for its own still-live port and lock.
+	handoff *muxerExecFiles
+	// csrfToken is minted by the first web supervisor and inherited only across
+	// a controlled same-PID exec. It is never persisted for a fresh startup.
+	csrfToken string
 
 	// tunnelHandlerFor is the S3 tunnel boundary factory this run handed the
 	// remote client, or nil for a purely local run. It is kept so the join is
@@ -49,13 +61,19 @@ type Command struct {
 }
 
 // Run starts the process according to Args.
-func (c *Command) Run(ctx context.Context) error {
+func (c *Command) Run(ctx context.Context) (runErr error) {
 	if c == nil {
 		return fmt.Errorf("scimux: nil command")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer func() {
+		if runErr != nil && c.handoff != nil {
+			_ = c.handoff.Close()
+			c.handoff = nil
+		}
+	}()
 	args := c.Args
 	if len(args) == 0 {
 		args = []string{"scimux"}
@@ -64,7 +82,7 @@ func (c *Command) Run(ctx context.Context) error {
 	if len(args) > 1 {
 		switch args[1] {
 		case claudeSessionHookCmd, claudePermissionHookCmd, claudeStopHookCmd, claudeNotifyHookCmd,
-			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd:
+			claudeCompactHookCmd, claudeElicitationHookCmd, claudeUsageStatusLineCmd, webChildCmd, sessionWorkerCmd:
 			if c.Config.Hooks.OnHookDispatch != nil {
 				c.Config.Hooks.OnHookDispatch(args[1])
 			}
@@ -128,6 +146,7 @@ func (c *Command) Run(ctx context.Context) error {
 	c.socket = *socket
 	c.Config.DataDir = *data
 	c.Config.Remote = *doRemote
+	c.trustedHosts = append([]string(nil), trustedHosts...)
 	if *inviteFile != "" {
 		c.Config.InviteFile = *inviteFile
 	}
@@ -145,6 +164,28 @@ func (c *Command) Run(ctx context.Context) error {
 	if err := prepareDataDir(*data); err != nil {
 		return err
 	}
+	if c.muxerOnly {
+		var owner *backend.Registration
+		var err error
+		if c.handoff != nil {
+			owner, err = backend.Adopt(*data, c.handoff.ownership)
+			c.handoff.ownership = nil
+		} else {
+			owner, err = backend.Claim(*data)
+		}
+		if err != nil {
+			return err
+		}
+		c.ownership = owner
+		defer func() {
+			if runErr != nil {
+				c.closeOwnership()
+			}
+		}()
+	}
+	if c.handoff != nil && c.handoff.csrfToken != "" {
+		c.csrfToken = c.handoff.csrfToken
+	}
 
 	a, err := NewApp(Config{
 		Home:    home,
@@ -161,15 +202,20 @@ func (c *Command) Run(ctx context.Context) error {
 	}
 	a.requestPolicy = policy
 
-	// One owned mux, two boundaries (S3). The local chain is byte-for-byte
-	// what NewHandler has always returned (FR-15); the factory binds the same
-	// mux to whichever device the wait loop later proves.
-	local, tunnelFor, err := newBoundaryFactory(a, webFS)
-	if err != nil {
-		return err
-	}
-	if c.handler == nil {
-		c.handler = local
+	var tunnelFor func(tunnelPeer) http.Handler
+	if !c.muxerOnly {
+		// One owned mux, two boundaries (S3). The local chain is byte-for-byte
+		// what NewHandler has always returned (FR-15); the factory binds the same
+		// mux to whichever device the wait loop later proves. Production muxer
+		// startup deliberately skips this presentation graph; its child builds it.
+		local, factory, err := newBoundaryFactory(a, webFS)
+		if err != nil {
+			return err
+		}
+		tunnelFor = factory
+		if c.handler == nil {
+			c.handler = local
+		}
 	}
 
 	// Bind before enrolling. An invite is single-use, so redeeming one is the
@@ -179,13 +225,28 @@ func (c *Command) Run(ctx context.Context) error {
 	// — a second scimux on the default port cost a real invite and served
 	// nothing. The bound listener is handed to the caller rather than the
 	// address, so the check and the server cannot be about different sockets.
-	ln, err := net.Listen("tcp", *addr)
+	var ln net.Listener
+	if c.handoff != nil {
+		ln, err = net.FileListener(c.handoff.public)
+		_ = c.handoff.public.Close()
+		c.handoff.public = nil
+		if err == nil && !strings.HasPrefix(ln.Addr().Network(), "tcp") {
+			_ = ln.Close()
+			err = errors.New("muxer handoff: inherited public descriptor is not TCP")
+		}
+	} else {
+		ln, err = net.Listen("tcp", *addr)
+	}
 	if err != nil {
 		return err
 	}
 	c.listener = ln
+	if c.handoff != nil {
+		_ = c.handoff.Close()
+		c.handoff = nil
+	}
 
-	if !c.Config.Remote {
+	if !c.Config.Remote || c.muxerOnly {
 		return nil
 	}
 
@@ -208,13 +269,7 @@ func (c *Command) Run(ctx context.Context) error {
 		rc.NewTerminal = remote.OpenOwnerTerminal
 	}
 	if rc.Backoff.Initial == 0 {
-		rc.Backoff = remote.BackoffConfig{
-			Initial:    100 * time.Millisecond,
-			Max:        1600 * time.Millisecond,
-			Factor:     2,
-			Jitter:     0.2,
-			SuccessFor: 5 * time.Second,
-		}
+		rc.Backoff = remote.DefaultBackoff()
 	}
 	cli := remote.NewClient(rc)
 	c.client = cli
@@ -272,6 +327,14 @@ func (c *Command) closeListener() {
 	}
 	_ = c.listener.Close()
 	c.listener = nil
+}
+
+func (c *Command) closeOwnership() {
+	if c == nil || c.ownership == nil {
+		return
+	}
+	_ = c.ownership.Close()
+	c.ownership = nil
 }
 
 // Listener is the bound localhost listener after a successful Run. The caller
