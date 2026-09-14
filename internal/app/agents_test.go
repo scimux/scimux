@@ -718,6 +718,10 @@ func TestHandleAgentsMuseCatalogIsAdditive(t *testing.T) {
 		return museTierUnknown
 	}
 
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	if rec.Code != 200 {
@@ -782,6 +786,10 @@ func TestHandleAgentsMuseConcurrentRequestsKeepDiscoveryCachePrivate(t *testing.
 		return []muse.Model{{ID: "std-1", IsDefault: true}}, nil
 	}
 	a.museClassify = func(string) string { return museTierStandard }
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	const callers = 24
 	var wg sync.WaitGroup
 	errs := make(chan error, callers)
@@ -868,6 +876,10 @@ func TestMuseDiscountedAndConflictingRowsAreNeverDefaultsOrLegacySelectable(t *t
 		}
 		return museTierStandard
 	}
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var out map[string]agentInfo
@@ -898,6 +910,10 @@ func TestHandleAgentsMuseConflictingDuplicateNotLaunchable(t *testing.T) {
 		}, nil
 	}
 	a.museClassify = func(string) string { return museTierStandard }
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var out map[string]agentInfo
@@ -915,6 +931,7 @@ func TestHandleAgentsMuseEmptyCatalogAndProbeFailure(t *testing.T) {
 	installMuseAgentBase(a)
 	a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, nil }
 	a.museClassify = func(string) string { return museTierStandard }
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var out map[string]agentInfo
@@ -928,7 +945,11 @@ func TestHandleAgentsMuseEmptyCatalogAndProbeFailure(t *testing.T) {
 		t.Fatalf("empty catalog rows = %+v", out["muse"].MuseModels)
 	}
 
+	// A failure over an empty catalog leaves it empty: nothing to keep, and
+	// still nothing to fabricate. TestMuseCatalogRefreshFailureKeepsTheLastGoodAnswer
+	// covers the other starting point.
 	a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, errors.New("probe down") }
+	a.refreshMuseCatalog(context.Background())
 	rec = httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	if rec.Code != 200 {
@@ -983,6 +1004,10 @@ func TestHandleAgentsNonExactClassifierIsUnlaunchable(t *testing.T) {
 		return []muse.Model{{ID: "std-1", Label: "Looks standard", IsDefault: true}}, nil
 	}
 	a.museClassify = func(string) string { return "Standard" }
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var out map[string]agentInfo
@@ -1064,6 +1089,10 @@ func TestHandleAgentsMuseProductionAuthorityIsStandard(t *testing.T) {
 		return []muse.Model{{ID: "catalog-model", Label: "Catalog Model", IsDefault: true}}, nil
 	}
 	a.museClassify = classifyMuseStandard
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var out map[string]agentInfo
@@ -1092,6 +1121,10 @@ func TestHandleAgentsOtherAgentsKeepShape(t *testing.T) {
 		return []muse.Model{{ID: "std-1", IsDefault: true}}, nil
 	}
 	a.museClassify = func(string) string { return museTierStandard }
+	// The catalog is served from cache now, so the probe has to have run.
+	// Production warms it at startup and behind each dialog open; a test says
+	// so out loud rather than depending on a background refresh landing in time.
+	a.refreshMuseCatalog(context.Background())
 	rec := httptest.NewRecorder()
 	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	var raw map[string]map[string]any
@@ -1108,5 +1141,132 @@ func TestHandleAgentsOtherAgentsKeepShape(t *testing.T) {
 		if _, ok := info["muse_models"]; ok {
 			t.Fatalf("agent %q unexpectedly carries muse_models", agent)
 		}
+	}
+}
+
+// GET /api/agents is what the new-activity dialog opens on, and the Muse
+// catalog probe spawns `muse serve`, initializes MSP and waits up to 15 s. Run
+// on the response path, that is a process per dialog open and N processes for N
+// tabs, sitting directly beneath the comment promising the opposite for Claude.
+// The answer must come from the cache, with the probe refreshed behind it.
+func TestHandleAgentsNeverBlocksOnTheMuseCatalogProbe(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	entered := make(chan struct{}, 1)
+	a.museCatalog = func(ctx context.Context) ([]muse.Model, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	}
+	a.museClassify = func(string) string { return museTierStandard }
+
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+		done <- rec.Code
+	}()
+	select {
+	case code := <-done:
+		if code != 200 {
+			t.Fatalf("status = %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GET /api/agents waited on the muse probe; the dialog it feeds would wait with it")
+	}
+	// And it did start the refresh: not blocking must not mean not asking.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no background refresh was started, so the catalog would never arrive")
+	}
+}
+
+// Overlapping triggers collapse into one run, for the same reason Claude's do:
+// the work is idempotent, but a spawned CLI per browser tab is not something to
+// do twice.
+func TestOverlappingMuseCatalogRefreshesSpawnOnce(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	var probes atomic.Int64
+	release := make(chan struct{})
+	running := make(chan struct{}, 1)
+	a.museCatalog = func(ctx context.Context) ([]muse.Model, error) {
+		probes.Add(1)
+		select {
+		case running <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil, nil
+	}
+	a.museClassify = func(string) string { return museTierStandard }
+
+	a.ensureMuseCatalog()
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first refresh never started")
+	}
+	for i := 0; i < 8; i++ {
+		a.ensureMuseCatalog()
+	}
+	close(release)
+	a.waitMuseCatalogForTest(t)
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("%d muse probes for overlapping triggers, want 1", got)
+	}
+}
+
+// A refresh that fails leaves the last answer standing. The catalog is not a
+// consent gate: emptying the picker on one transient probe failure would take
+// muse away from a user whose muse is working, while a stale row costs at most
+// one honest errMuseModelNotLaunchable from the launch path, which probes
+// afresh. Fabricating rows from a failed probe is the thing that stays barred.
+func TestMuseCatalogRefreshFailureKeepsTheLastGoodAnswer(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	a.museClassify = func(string) string { return museTierStandard }
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "std-1", Label: "Standard One", IsDefault: true}}, nil
+	}
+	a.refreshMuseCatalog(context.Background())
+
+	a.museCatalog = func(context.Context) ([]muse.Model, error) { return nil, errors.New("probe down") }
+	a.refreshMuseCatalog(context.Background())
+
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body)
+	}
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out["muse"].Models, []string{"std-1"}) {
+		t.Fatalf("a failed refresh discarded the working catalog: %v", out["muse"].Models)
+	}
+}
+
+// waitMuseCatalogForTest blocks until no background refresh is in flight. It
+// lives here rather than in agents.go because production never waits: the
+// whole point of the refresh is that nothing does.
+func (a *app) waitMuseCatalogForTest(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for a.museRefreshing.Load() {
+		if !time.Now().Before(deadline) {
+			t.Fatal("muse catalog refresh never finished")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

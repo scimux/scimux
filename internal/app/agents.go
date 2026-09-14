@@ -559,6 +559,7 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request) {
 	// response: the dialog is served from whatever is known now, and a newly
 	// installed claude shows up the next time it opens.
 	a.ensureClaudeModels()
+	a.ensureMuseCatalog()
 	var base map[string]agentInfo
 	if a != nil && a.agentCatalog != nil {
 		base = a.agentCatalog()
@@ -704,6 +705,67 @@ func (a *app) museViews(models []muse.Model) []museModelView {
 	return out
 }
 
+// museCatalogTimeout bounds one refresh: a `muse serve` spawn plus an MSP
+// initialize, neither of which a request is waiting on any more.
+const museCatalogTimeout = 15 * time.Second
+
+// museCatalogTTL is how long a stored catalog answers without asking again.
+// The list changes only when the user installs a different muse, so this is
+// not about correctness: the launch path probes afresh and is the authority
+// that can refuse a model. It is short enough that a newly installed muse
+// appears without restarting scimux, and long enough that opening the
+// new-activity dialog repeatedly, or in several tabs, costs one spawn.
+const museCatalogTTL = 2 * time.Minute
+
+// refreshMuseCatalog runs the probe and stores what it returns. A failure
+// leaves the previous answer standing: the catalog is not a consent gate, and
+// emptying the picker on one transient failure would take muse away from a
+// user whose muse works. What a failed probe may never do is contribute rows,
+// which is why nothing here is merged -- a success replaces, a failure is a
+// no-op.
+func (a *app) refreshMuseCatalog(ctx context.Context) {
+	if a == nil || a.museCatalog == nil {
+		return
+	}
+	models, err := a.museCatalog(ctx)
+	if err != nil {
+		return
+	}
+	a.museModelsMu.Lock()
+	a.museModels = models
+	a.museModelsAt = time.Now()
+	a.museModelsMu.Unlock()
+}
+
+// ensureMuseCatalog asks for a refresh in the background and returns at once.
+// Like ensureClaudeModels it is inert wherever no probe was installed, which
+// is every test and every handler on a binary that never reached the serve
+// path -- so a handler may call it without the suite ever spawning a muse.
+func (a *app) ensureMuseCatalog() {
+	if a == nil || a.museCatalog == nil {
+		return
+	}
+	a.museModelsMu.Lock()
+	fresh := !a.museModelsAt.IsZero() && time.Since(a.museModelsAt) < museCatalogTTL
+	a.museModelsMu.Unlock()
+	if fresh {
+		return
+	}
+	if !a.museRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer a.museRefreshing.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), museCatalogTimeout)
+		defer cancel()
+		a.refreshMuseCatalog(ctx)
+	}()
+}
+
+// applyMuseCatalog overlays the stored catalog onto one response. It reads and
+// never probes: this runs on GET /api/agents, which the new-activity dialog
+// opens on, and the Claude comment a few lines up ("This never blocks the
+// response") is a promise this row has to keep too.
 func (a *app) applyMuseCatalog(out map[string]agentInfo) {
 	if out == nil {
 		return
@@ -716,19 +778,13 @@ func (a *app) applyMuseCatalog(out map[string]agentInfo) {
 	if info.Models == nil {
 		info.Models = []string{}
 	}
-	if a == nil || a.museCatalog == nil {
+	if a == nil {
 		out["muse"] = info
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	models, err := a.museCatalog(ctx)
-	if err != nil {
-		info.Models = []string{}
-		info.MuseModels = nil
-		out["muse"] = info
-		return
-	}
+	a.museModelsMu.Lock()
+	models := a.museModels
+	a.museModelsMu.Unlock()
 	views := a.museViews(models)
 	ids := make([]string, 0, len(views))
 	for _, v := range views {
@@ -741,11 +797,15 @@ func (a *app) applyMuseCatalog(out map[string]agentInfo) {
 	out["muse"] = info
 }
 
+// resolveMuseLaunchModel probes rather than reading the cache on purpose. It
+// is the authority that decides whether this launch may spend anything, it
+// runs once per deliberate user action instead of once per dialog open, and a
+// stale yes here is the one that cannot be taken back.
 func (a *app) resolveMuseLaunchModel(requested string) (string, error) {
 	if a == nil || a.museCatalog == nil {
 		return "", errMuseCatalogUnavailable
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), museCatalogTimeout)
 	defer cancel()
 	models, err := a.museCatalog(ctx)
 	if err != nil {

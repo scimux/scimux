@@ -309,6 +309,11 @@ func Run() {
 	a.ensureClaudeModels()
 	a.museCatalog = probeMuseCatalog
 	a.museClassify = classifyMuseStandard
+	// Same shape as the claude probe above, and for the same reason: the muse
+	// catalog costs a `muse serve` spawn, so it is learned in the background
+	// and read from cache by GET /api/agents. Warming it here means the first
+	// new-activity dialog usually opens on an answer instead of on nothing.
+	a.ensureMuseCatalog()
 
 	// Run already bound this, before it spent anything at the rendezvous.
 	// The muxer retains it while web generations inherit duplicates, so the

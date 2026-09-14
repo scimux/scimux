@@ -607,6 +607,17 @@ type app struct {
 	// (the test default) is unavailable authority and fail-closed. Production
 	// installs probeMuseCatalog on the serve path only.
 	museCatalog func(context.Context) ([]muse.Model, error)
+	// museModels is the last catalog a probe returned, and the only thing
+	// GET /api/agents is allowed to read: the probe spawns `muse serve` and
+	// MSP-initializes it, which is not work a browser request may wait on.
+	// museModelsAt dates it; a zero time means no probe has ever succeeded,
+	// which reads as an empty catalog rather than as an error.
+	museModelsMu sync.Mutex
+	museModels   []muse.Model
+	museModelsAt time.Time
+	// museRefreshing collapses overlapping refresh triggers into one run, the
+	// same guard claudeRefreshing provides for the claude probe.
+	museRefreshing atomic.Bool
 	// agentCatalog overrides installed-harness discovery in focused tests. The
 	// returned map is always cloned before a request-specific Muse overlay, so
 	// the process-wide discovery cache remains immutable and race-safe.
