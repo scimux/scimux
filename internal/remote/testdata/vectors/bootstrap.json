@@ -14,11 +14,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/html; charset=utf-8",
-        "Digest": "sha-256=:ORq2NWHRxt61bVGc+rpUj2sOcIHq/N1TFF24SS47XQE=:",
+        "Digest": "sha-256=:tY5BRmTD08hfVRDgZ7cn8yvbhJpGO572mbonFogo+Y4=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"\u003e\n\u003cmeta name=color-scheme content=\"light dark\"\u003e\n\u003cmeta name=theme-color content=\"#1C1C1E\"\u003e\n\u003cmeta name=apple-mobile-web-app-capable content=yes\u003e\n\u003cmeta name=apple-mobile-web-app-status-bar-style content=black-translucent\u003e\n\u003cmeta name=apple-mobile-web-app-title content=scimux\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=manifest href=\"/p/manifest.webmanifest\"\u003e\n\u003clink rel=apple-touch-icon href=\"/p/icon-180.png\"\u003e\n\u003clink rel=icon href=\"/p/icon-512.png\"\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app aria-live=polite\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp class=busy aria-hidden=true\u003e\u003ci\u003e\u003c/i\u003e\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
+      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"\u003e\n\u003cmeta name=color-scheme content=\"light dark\"\u003e\n\u003cmeta name=theme-color content=\"#1C1C1E\"\u003e\n\u003cmeta name=apple-mobile-web-app-capable content=yes\u003e\n\u003cmeta name=apple-mobile-web-app-status-bar-style content=black-translucent\u003e\n\u003cmeta name=apple-mobile-web-app-title content=scimux\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=manifest href=\"/p/manifest.webmanifest\"\u003e\n\u003clink rel=apple-touch-icon href=\"/p/icon-180.png\"\u003e\n\u003clink rel=icon href=\"/p/icon-512.png\"\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app class=wait aria-live=polite\u003e\u003csvg class=orbit viewBox=\"100 100 800 819\" aria-hidden=true\u003e\u003cdefs\u003e\u003clinearGradient id=orbit-petrol x1=20% y1=0% x2=80% y2=100%\u003e\u003cstop offset=0% stop-color=#13A4B1 /\u003e\u003cstop offset=58% stop-color=#0E7C86 /\u003e\u003cstop offset=100% stop-color=#0A6F78 /\u003e\u003c/linearGradient\u003e\u003clinearGradient id=orbit-light x1=0% y1=0% x2=100% y2=100%\u003e\u003cstop offset=0% stop-color=#A8E1EB /\u003e\u003cstop offset=100% stop-color=#BFEAF0 /\u003e\u003c/linearGradient\u003e\u003cradialGradient id=orbit-disc cx=35% cy=28% r=82%\u003e\u003cstop offset=0% stop-color=#14A7B4 /\u003e\u003cstop offset=62% stop-color=#0E7C86 /\u003e\u003cstop offset=100% stop-color=#0A7079 /\u003e\u003c/radialGradient\u003e\u003c/defs\u003e\u003cg class=ring fill=none stroke-linecap=round stroke-width=92\u003e\u003cpath d=\"M 267.362,732.638 A 329,329 0 0 1 500,171\" stroke=\"url(#orbit-light)\" /\u003e\u003cpath d=\"M 500,171 A 329,329 0 1 1 267.362,732.638\" stroke=\"url(#orbit-petrol)\" /\u003e\u003ccircle cx=500 cy=171 r=71 fill=\"url(#orbit-petrol)\" stroke=none /\u003e\u003c/g\u003e\u003crect x=452 y=590 width=96 height=329 rx=48 fill=\"url(#orbit-disc)\" /\u003e\u003ccircle cx=500 cy=500 r=179 fill=\"url(#orbit-disc)\" /\u003e\u003c/svg\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
     }
   },
   {
@@ -36,11 +36,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
-        "Digest": "sha-256=:+G5B0YBwmrY1V0R5Kg43pfj3GQBi9vpJ/p6jwq32gX4=:",
+        "Digest": "sha-256=:KjQDKlDu9Rdkz2DlQc0hEnTky2eUN+ug5J/AOovPt+M=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "f86e41d180709ab6355744792a0e37a5f8f7190062f6fa49fe9ea3c2adf6817e"
+      "body_sha256": "2a34032a50eef51764cf60e541cd211274e4cb679437eba0e49fc03a8bcfb7e3"
     }
   },
   {
@@ -124,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:eQo5yMmlDvKQ0i9UyeT7rRlTUkbCz0uJL6TjD/qm8zI=:",
+        "Digest": "sha-256=:b+pIBKsEVQ6EexkuqVzKSaLh1pg1DxyrMhurIN4A548=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "790a39c8c9a50ef290d22f54c9e4fbad19535246c2cf4b892fa4e30ffaa6f332"
+      "body_sha256": "6fea4804ab04550e847b192ea95cca49a2e1d698350f1cab321bab20de00e78f"
     }
   },
   {
