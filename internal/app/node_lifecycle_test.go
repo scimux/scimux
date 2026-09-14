@@ -17,6 +17,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1661,8 +1662,12 @@ func TestCreateMuseNodeLaunchesAndDeliversPrompt(t *testing.T) {
 	if proc.launches != 1 {
 		t.Fatalf("launches = %d, want 1", proc.launches)
 	}
-	if proc.lastAgent != "muse" || proc.lastModel != n.Model {
-		t.Fatalf("launch args agent=%q model=%q", proc.lastAgent, proc.lastModel)
+	// Named rather than compared against n.Model: the launch model and the
+	// durable model are deliberately no longer the same value, since this node
+	// asked for the current default and must keep asking
+	// (TestMuseLaunchDoesNotPinTheResolvedModelInTheDurableNode).
+	if proc.lastAgent != "muse" || proc.lastModel != "std-1" {
+		t.Fatalf("launch args agent=%q model=%q, want muse/std-1", proc.lastAgent, proc.lastModel)
 	}
 	if proc.sendCalls != 1 || proc.lastSend != "hello muse" {
 		t.Fatalf("initial send = %d %q", proc.sendCalls, proc.lastSend)
@@ -1981,5 +1986,82 @@ func TestExplicitMuseTransportSurvivesReload(t *testing.T) {
 	}
 	if _, ok := a.proc(n).(museManager); !ok {
 		t.Fatalf("reloaded muse node dispatched to %T", a.proc(n))
+	}
+}
+
+// durableNodeModel replays what a restart would see: the model field of the
+// last node record written for id. The in-memory node is not the oracle here,
+// because the pin this test is about outlives the process.
+func durableNodeModel(t *testing.T, a *app, id string) string {
+	t.Helper()
+	b, err := os.ReadFile(a.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, seen := "", false
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec storeRecord
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.Type != "node" || rec.Node == nil || rec.Node.ID != id {
+			continue
+		}
+		model, seen = rec.Node.Model, true
+	}
+	if !seen {
+		t.Fatalf("no node record for %s in the store", id)
+	}
+	return model
+}
+
+// Launching resolves a concrete muse model id, and that resolution is a fact
+// about this launch, not about the node. Claude already keeps the family alias
+// in the durable record and hands the concrete id to a launch-only copy; muse
+// wrote the resolved id back. A node that asked for "whatever is current"
+// would then be pinned forever to the id that happened to be current once, and
+// when that id leaves the catalog every relaunch and every fork of it fails
+// with errMuseModelNotLaunchable -- where an empty Model would simply have
+// resolved again.
+func TestMuseLaunchDoesNotPinTheResolvedModelInTheDurableNode(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseTestAuthority(t, a)
+	proc := &countingProc{launchSID: "sid-muse"}
+	a.testProc = proc
+	n := &Node{Title: "Current default", Prompt: "p", Agent: "muse", Dir: a.home}
+	if status, _, err := a.createNode(n, nil); err != nil || status != 0 {
+		t.Fatalf("createNode: status=%d err=%v", status, err)
+	}
+	// The launch still gets the concrete id: not pinning it must not become
+	// "the tier gate never ran".
+	if proc.lastModel != "std-1" {
+		t.Fatalf("launched with model %q, want the resolved std-1", proc.lastModel)
+	}
+	if n.Model != "" {
+		t.Fatalf("in-memory node pinned to %q; it asked for the current default", n.Model)
+	}
+	if got := durableNodeModel(t, a, n.ID); got != "" {
+		t.Fatalf("store pinned the node to %q; a restart would inherit that pin", got)
+	}
+}
+
+// The other half: an explicit choice is the user's, and it survives verbatim.
+func TestMuseLaunchKeepsAnExplicitModelChoice(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseTestAuthority(t, a)
+	proc := &countingProc{launchSID: "sid-muse"}
+	a.testProc = proc
+	n := &Node{Title: "Chosen", Prompt: "p", Agent: "muse", Dir: a.home, Model: "disc-1"}
+	if status, _, err := a.createNode(n, nil); err != nil || status != 0 {
+		t.Fatalf("createNode: status=%d err=%v", status, err)
+	}
+	if proc.lastModel != "disc-1" {
+		t.Fatalf("launched with model %q, want disc-1", proc.lastModel)
+	}
+	if n.Model != "disc-1" {
+		t.Fatalf("in-memory node model = %q, want disc-1", n.Model)
+	}
+	if got := durableNodeModel(t, a, n.ID); got != "disc-1" {
+		t.Fatalf("store model = %q, want disc-1", got)
 	}
 }

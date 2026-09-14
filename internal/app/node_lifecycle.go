@@ -778,6 +778,14 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 // run supervised-in-memory but vanish from the registry on restart. The
 // caller publishes the node in memory only after this succeeds.
 func (a *app) launchNode(n *Node, pm procManager) (int, error) {
+	launch := n
+	// Resolve into a launch-only copy: the durable node keeps what the user
+	// chose while every launch path receives the concrete id. Claude's choice
+	// is a family alias; muse's is often nothing at all, meaning "whatever is
+	// current". Writing the resolution back would turn either into a pin on the
+	// id that happened to be current once, and a pinned id that later leaves
+	// the catalog fails every relaunch and fork of that node -- where the
+	// unpinned value would simply resolve again.
 	if n != nil && (n.Agent == "muse" || n.transport() == "muse") {
 		if !a.settings().MuseApprovalJudgeConsent {
 			return 400, errMuseConsentRequired
@@ -786,11 +794,10 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		if err != nil {
 			return 400, err
 		}
-		n.Model = id
+		cp := *n
+		cp.Model = id
+		launch = &cp
 	}
-	launch := n
-	// Resolve into a launch-only copy: the durable node keeps the family alias
-	// while both the legacy path and the Claude worker receive the concrete id.
 	if n.Agent == "claude" {
 		if id := a.resolveClaudeModel(n.Model); id != "" {
 			cp := *n
@@ -804,7 +811,11 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		if workers, ok := pm.(*workerManager); ok {
 			sid, err = workers.LaunchNode(launch, launch.Model)
 		} else {
-			sid, err = pm.Launch(n.ID, n.Agent, n.Dir, n.Model, n.Effort)
+			// launch.Model, not n.Model: this is the branch the comment above
+			// calls the legacy path, and it must not be the one place that
+			// launches an unresolved id -- for muse that would skip the tier
+			// gate resolveMuseLaunchModel just applied.
+			sid, err = pm.Launch(n.ID, n.Agent, n.Dir, launch.Model, n.Effort)
 		}
 		if err != nil {
 			return 500, err
