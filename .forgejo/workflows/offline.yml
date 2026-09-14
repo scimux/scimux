@@ -23,9 +23,18 @@ jobs:
           apk add --no-cache file git nodejs util-linux iproute2
 
       - name: Clone and checkout repository
+        # A ${{ }} expression is substituted into the script as text before
+        # any shell parses it, so it must never appear inside a run block:
+        # the value reaches the shell as a variable instead.
+        env:
+          COMMIT_SHA: ${{ github.sha }}
         run: |
+          set -eu
           git clone https://codeberg.org/chrberger/scimux.git .
-          git checkout ${{ github.sha }}
+          case "$COMMIT_SHA" in
+            *[!0-9a-f]* | "") echo "not a commit id: $COMMIT_SHA" >&2; exit 1 ;;
+          esac
+          git checkout "$COMMIT_SHA"
 
       - name: Warm the module cache (network required, and allowed here)
         run: |
