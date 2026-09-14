@@ -256,11 +256,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/manifest+json; charset=utf-8",
-        "Digest": "sha-256=:DWUsMlTNjVsF6BZi6vpJq5N3Z3BM1fJWCOJX0sWepNE=:",
+        "Digest": "sha-256=:bpp/lm2V6Zys8vyAVdqkrZmxMqCT6QpKi9CGuCtWpVA=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "{\n  \"name\": \"Pair with scimux\",\n  \"short_name\": \"scimux\",\n  \"description\": \"Reach your own computer from this device.\",\n  \"start_url\": \"/p\",\n  \"scope\": \"/p\",\n  \"display\": \"standalone\",\n  \"orientation\": \"portrait\",\n  \"background_color\": \"#1C1C1E\",\n  \"theme_color\": \"#1C1C1E\",\n  \"icons\": [\n    { \"src\": \"/p/icon-180.png\", \"sizes\": \"180x180\", \"type\": \"image/png\" },\n    { \"src\": \"/p/icon-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any maskable\" }\n  ]\n}\n"
+      "body_utf8": "{\n  \"name\": \"Pair with scimux\",\n  \"short_name\": \"scimux\",\n  \"description\": \"Reach your own computer from this device.\",\n  \"start_url\": \"/p\",\n  \"scope\": \"/p\",\n  \"display\": \"standalone\",\n  \"orientation\": \"portrait\",\n  \"background_color\": \"#1C1C1E\",\n  \"theme_color\": \"#1C1C1E\",\n  \"icons\": [\n    { \"src\": \"/p/icon-180.png\", \"sizes\": \"180x180\", \"type\": \"image/png\" },\n    { \"src\": \"/p/icon-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any\" },\n    { \"src\": \"/p/icon-maskable-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any maskable\" }\n  ]\n}\n"
     }
   },
   {
@@ -278,17 +278,17 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "image/png",
-        "Digest": "sha-256=:ePO6Vb4YslxMc6Qp435dW0J7eM3byC9dA3EHizdvgtM=:",
+        "Digest": "sha-256=:P5Z3wvEevyELlTDr9kJ497ZxrdN/tOl9OkxRl5pYYc4=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "78f3ba55be18b25c4c73a429e37e5d5b427b78cddbc82f5d0371078b376f82d3"
+      "body_sha256": "3f9677c2f11ebf210b9530ebf64278f7b671add37fb4e97d3a4c51979a5861ce"
     }
   },
   {
     "id": "p-icon-512",
     "message": "p-icon-512",
-    "comment": "The maskable icon. Body pinned by digest; see p-codec-js.",
+    "comment": "The ordinary manifest icon. Body pinned by digest; see p-codec-js.",
     "kind": "http",
     "request": {
       "method": "GET",
@@ -300,11 +300,33 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "image/png",
-        "Digest": "sha-256=:uGEPE5z0fvgMT/ex9QM0qe4ykqfWCIza6DRrLBsiJnc=:",
+        "Digest": "sha-256=:HjRfWdMi7FRZ+4cnv5m5EwbUZ/cEcUHL8wODbSqVEoQ=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "b8610f139cf47ef80c4ff7b1f50334a9ee3292a7d6088cdae8346b2c1b222677"
+      "body_sha256": "1e345f59d322ec5459fb8727bf99b91306d467f7047141cbf303836d2a951284"
+    }
+  },
+  {
+    "id": "p-icon-maskable-512",
+    "message": "p-icon-maskable-512",
+    "comment": "The maskable manifest icon. Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/icon-maskable-512.png"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "image/png",
+        "Digest": "sha-256=:eW4cC1Y0hnx0osaMo1yk97TADXIMQP19co2nA7s/BBM=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "796e1c0b5634867c74a2c68ca35ca4f7b4c00d720c40fd7d728da703bb3f0413"
     }
   },
   {

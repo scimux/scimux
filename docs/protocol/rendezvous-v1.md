@@ -123,6 +123,7 @@ replay.
 | `p-manifest` | bootstrap | `GET /p/manifest.webmanifest` | device → rv |
 | `p-icon-180` | bootstrap | `GET /p/icon-180.png` | device → rv |
 | `p-icon-512` | bootstrap | `GET /p/icon-512.png` | device → rv |
+| `p-icon-maskable-512` | bootstrap | `GET /p/icon-maskable-512.png` | device → rv |
 | `p-rejection` | bootstrap | `GET /p/not-in-inventory` | rv → device |
 | `stun-binding-request` | stun | — | client → rv (UDP Binding) |
 | `stun-binding-success` | stun | — | rv → client (XOR-MAPPED-ADDRESS) |
@@ -257,6 +258,14 @@ The challenge is 32 bytes, hex-encoded. In-memory only. TTL
 **30 s**. Single-use **even when the signature that later presents
 it fails**. Pinned to the handle that received it. Bounded: 256
 global, 4 per handle. Reclamation is a lazy sweep on insert.
+
+Those two numbers bound **this route only**. The challenge a wait
+response carries is minted from a second, separate budget (256
+global, 8 per handle — one per wait an installation may hold).
+They are separate because this route needs no signature and only a
+handle, and the handle is not a credential: one shared budget
+would let any caller holding a handle exhaust it and turn an
+admitted waiter's delivered envelope into the constant 404.
 
 ### 4.3 `POST /v1/verify`
 
@@ -508,16 +517,18 @@ X-Rv-Challenge: <64 lowercase hex>
 
 `X-Rv-Challenge` is the next challenge, minted **when the wait
 response is written**, so its 30 s TTL starts when it becomes
-useful. Same store, same single-use / handle-pin / caps as
-`POST /v1/challenge`. The signed route for the next wait is still
+useful. Same store and the same single-use and handle-pin rules
+as `POST /v1/challenge`; the caps are **not** shared — see §4.2.
+The signed route for the next wait is still
 `/v1/wait`. The `reply` field is not part of the signed message;
 the computer may pre-sign the next wait as soon as this header
 arrives, then fill `reply` after it has sealed the SDP answer.
 
 A challenge obtained from `POST /v1/challenge` *before* a long
 poll is dead on arrival: `ChallengeTTL` is 30 s and a wait is
-longer. Do not refresh during the wait (that burns
-`MaxChallengesPerHandle` and defeats the poll). Use the header.
+longer. Do not refresh during the wait: it burns
+`MaxChallengesPerHandle`, it does not extend the poll, and the
+header is coming anyway. Use the header.
 
 The 200 body is raw bytes. The server does not wrap, decode, or
 re-encode them (AT-FR-07-b).
@@ -922,14 +933,16 @@ byte-identical inventory responses.
 | `GET /p/connection.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel request lifecycle and FR-24 states (`tunnel-v2.md` §7, §9). Protocol, not application code. |
 | `GET /p/manifest.webmanifest` | `application/manifest+json; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JSON | the Home Screen app declaration. `display: standalone`; `start_url` and `scope` are both `/p`. |
 | `GET /p/icon-180.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the `apple-touch-icon`. iOS takes the Home Screen icon from the link in the shell, not from the manifest. |
-| `GET /p/icon-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the manifest icon, `purpose: "any maskable"`; artwork inset for launchers that crop. |
+| `GET /p/icon-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the ordinary manifest icon, `purpose: "any"`. |
+| `GET /p/icon-maskable-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the maskable manifest icon, `purpose: "any maskable"`; artwork inset inside the standard safe circle for launchers that crop. |
 
 The inventory grew from three rows to five on 2026-08-24, when the
 tunnel protocol moved into this repository, from five to ten on
 2026-08-26, when the pairing client was built, to eleven on
-2026-08-27, when the entry point became a row, and to fourteen on
+2026-08-27, when the entry point became a row, to fourteen on
 2026-09-05, when the Home Screen manifest and its two icons became
-rows. Before those three, adding `/p` to a Home Screen produced a
+rows, and to fifteen on 2026-09-13, when ordinary and maskable 512px
+icons became separate rows. Before the Home Screen rows, adding `/p` produced a
 bookmark rather than an app: nothing in the shell declared one, so the
 launcher opened a browser tab and captured a screenshot for the icon.
 
