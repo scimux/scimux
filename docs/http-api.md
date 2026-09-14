@@ -23,10 +23,12 @@ controls protect the loopback/browser boundary; they are not a login.
   identity (and explicit extras); a wildcard bind may be reached by
   IP literal but does not silently trust arbitrary DNS names. A matching
   hostile `Host`/`Origin` (DNS rebinding) is rejected before any handler.
-- **CSRF.** Browser-originated unsafe methods remain same-origin, must
-  carry the `X-Scimux-CSRF` token embedded in the served page, and must use
-  an accepted content type (`application/json` or multipart uploads).
-  CORS is not enabled.
+- **CSRF.** Every unsafe method, including requests from scripts, must
+  carry the `X-Scimux-CSRF` token from the page's `scimux-csrf` meta tag.
+  Origin or Referer, when supplied, must match the request Host. If a
+  Content-Type is supplied, it must be JSON or multipart on the attachment
+  upload route; bodyless requests may omit it. Use `application/json` for
+  JSON bodies. CORS is not enabled.
 - **Fetch Metadata.** Browser requests to any `/api/*` path that arrive
   with `Sec-Fetch-Site: cross-site` or `same-site` are rejected, including
   safe GETs such as search and update-check. `same-origin`, `none`, and
@@ -310,9 +312,11 @@ map from model id to that model's accepted `levels` and its `default`. Codex
 obtains it from `codex debug models`; Grok reads its CLI models cache and fills
 missing entries from its static low/medium/high menu. Agents without per-model
 data (claude/pi/opencode), and codex when only its static fallback is available,
-omit `efforts`; the UI then uses its static per-agent list. The catalog is
-probed once per process at startup and cached for its lifetime; a newly
-installed CLI or model appears after a restart.
+omit `efforts`; the UI then uses its static per-agent list. Most catalogs are
+probed once per process and cached until restart. Claude's model IDs also have
+a persistent cache, refreshed on a CLI version change or after one day;
+`GET /api/agents` can trigger that refresh. Its model probes submit no billed
+prompt and are independent of consent for the usage gauge.
 
 ## Managing nodes
 
@@ -460,12 +464,12 @@ On structured nodes `request_id` is **required** and must match the
 On a strict Claude node with a visible permission dialog, `dialog_id` (or
 `request_id` carrying the same epoch) is required and must match the
 current `perm_dialog_id`. That token is a server-minted visible-dialog
-epoch, not Claude's PermissionRequest identity. Any `dialog_id` that is
-missing from the live epoch, already retired, or mismatched is `409` and
-sends no keys. A successful key retires that epoch only; standing asks
-are not deleted as a guessed identity. Ordinary tmux keys (user-opened
-terminal, no visible dialog, no `dialog_id`) still use the `{key}`-only
-body.
+epoch, not Claude's PermissionRequest identity. A missing required token is
+`400`; an explicit token whose dialog is absent, retired, or mismatched is
+`409`. Neither sends keys. A successful key retires that epoch only;
+standing asks are not deleted as a guessed identity. Worker-managed Claude
+nodes require the token for every `/key` call. The legacy tmux path accepts
+`{key}` alone when no strict permission dialog requires an epoch.
 
 Every accepted key is recorded in the store together with decision evidence
 (the pane's bottom lines, or the tool title on structured transports); on
@@ -683,6 +687,10 @@ common request boundary (`Sec-Fetch-Site`).
 
 ### `POST /api/update`
 
+Body: `{"expected_tag":"vX.Y.Z"}`, using the `latest` tag returned by the
+update check. Missing or malformed input is `400`; if the latest release has
+changed since the check, the apply is `409` and the client must check again.
+
 Self-update: downloads the release binary for this OS/arch from the trusted
 HTTPS release origin (`codeberg.org` only — exact host, no userinfo, port
 empty or 443), verifies it against the release's `SHA256SUMS` (same origin
@@ -690,8 +698,10 @@ policy on the initial URL and every redirect), starts it as a standby
 web-server child, proves that its private Unix-socket protocol is compatible,
 and atomically replaces the installed executable only after size, close,
 checksum, and compatibility checks succeed. The response then commits a
-graceful web-child handoff. The long-lived muxer, its harness subprocesses,
-tmux sessions, stores, and public listener are not restarted.
+graceful web-child handoff followed by an in-place muxer exec. The replacement
+muxer inherits the public listener and ownership lock, then reconnects to the
+existing session workers. Agent processes and Claude tmux panes remain alive;
+the session stores are preserved.
 Binary downloads are capped at 256 MiB; a response that exceeds the cap is
 rejected without accepting a truncated payload. Failed verification or
 download, incompatible standby startup, or install leaves the installed
@@ -727,25 +737,31 @@ map — "unknown" is what happened, and it is not the same claim as up to date.
 
 ## Remote pairing
 
-Loopback pairing for `--remote`. Confirm is a separate explicit call;
-mint never completes a pairing. The curl recipe and FR-38 state table
-live in `docs/remote-pairing-curl.md`. CSRF is required on unsafe methods;
-GET needs no header. `sameOrigin` is true when both Origin and Referer
-are absent.
+Loopback pairing for `-remote`. Confirm is a separate explicit call;
+mint never completes a pairing. CSRF is required on unsafe methods;
+GET needs no CSRF header. Missing Origin and Referer are accepted for scripts,
+but do not bypass the token requirement.
 
 ### `POST /api/remote/pairing`
 
-Mint an 8-character pairing code with a 60-second TTL. Confirm flags in
-the body are ignored.
+Mint an 8-character pairing code with a 120-second TTL. Returns
+`{code, rid, expires_at, state:"pending", link}`; `expires_at` is UTC
+RFC 3339 with optional fractional seconds. Open the returned `link` on the
+device to begin pairing. Confirm flags in the body are ignored.
 
 ### `GET /api/remote/pairing/{code}`
 
-FR-38 state for a code, plus SAS once a device offer has arrived.
+State for a code (`pending`, `authority-warning`, `expired`, `cancelled`,
+`failed`, or `succeeded`), plus SAS once a device offer has arrived.
 
 ### `POST /api/remote/pairing/{code}/confirm`
 
 Complete pairing only when both `computer_confirm` and `device_confirm`
 are present and `true`. Omitted flags do not default to true.
+The operator asserts the device's half of the confirmation: the server cannot
+tell whether a script actually showed the SAS on the device. Compare the SAS
+on both devices before sending these flags; the booleans are not proof of that
+comparison.
 
 ### `POST /api/remote/pairing/{code}/cancel`
 

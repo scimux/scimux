@@ -98,8 +98,11 @@ func TestNodeProjection_FareCachedUntilLogGrows(t *testing.T) {
 	a.byID[n.ID] = n
 	a.live[n.ID] = "active"
 
+	// Reuse the header: independent RFC3339Nano timestamps have variable
+	// lengths, which can make the supposedly shorter replacement log longer.
+	meta := sessionlog.NewMeta(n.ID, "codex", "gpt", "", a.home)
 	writeSessionLog(t, a, n.ID, []sessionlog.Event{
-		sessionlog.NewMeta(n.ID, "codex", "gpt", "", a.home),
+		meta,
 		{T: "usage", Time: "2026-07-15T09:00:00Z", Usage: &sessionlog.UsageEvent{
 			Used: 500, Size: 100_000,
 			InputTokens: 50, OutputTokens: 10, CachedReadTokens: 0, TurnID: "c1",
@@ -143,7 +146,7 @@ func TestNodeProjection_FareCachedUntilLogGrows(t *testing.T) {
 	// restore mtime so the size/mtime key is unchanged.
 	// Single-digit tokens so the rewritten body is shorter than the original
 	// (50/10) and can pad up to the same byte length.
-	alt := buildPaddedFareLog(t, n.ID, a.home, 9, 8, int(origSize))
+	alt := buildPaddedFareLog(t, meta, 9, 8, int(origSize))
 	if err := os.WriteFile(path, alt, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -313,13 +316,13 @@ func fareFolds(t *testing.T, a *app, id string) int {
 // buildPaddedFareLog builds a session log with known fare totals, padded with
 // a trailing whitespace-only comment line so the file is exactly wantSize
 // bytes (for same-size cache-key tests).
-func buildPaddedFareLog(t *testing.T, id, home string, freshIn, out, wantSize int) []byte {
+func buildPaddedFareLog(t *testing.T, meta sessionlog.Event, freshIn, out, wantSize int) []byte {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pad.jsonl")
 	w := &sessionlog.Writer{Path: path}
 	for _, ev := range []sessionlog.Event{
-		sessionlog.NewMeta(id, "codex", "gpt", "", home),
+		meta,
 		{T: "usage", Time: "2026-07-15T09:00:00Z", Usage: &sessionlog.UsageEvent{
 			Used: 1, Size: 100_000,
 			InputTokens: freshIn, OutputTokens: out, TurnID: "alt",

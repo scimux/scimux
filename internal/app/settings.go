@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 )
 
 const settingsMax = 1 << 16
@@ -90,7 +91,27 @@ func (a *app) settings() settings {
 
 // saveSettings replaces the document atomically. Owner-only, like every other
 // private file under ~/.scimux.
+//
+// Serialized, and through a uniquely named temporary file. Both halves matter
+// for the same reason: this document is consent, so a save that reports
+// success must be the save that landed. A shared temporary name lets two
+// concurrent toggles write the same inode and race its rename — the winner
+// reports success having written the loser's value, and the loser fails on a
+// file the winner already renamed away. The user sees "off", the file says on,
+// and the probe keeps spending their quota.
 func (a *app) saveSettings(s settings) error {
+	if a == nil || a.settingsPath == "" {
+		return errSettingsUnavailable
+	}
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	return a.writeSettingsLocked(s)
+}
+
+// writeSettingsLocked publishes the document; the caller already holds
+// settingsMu. handleSettingsPut needs the lock to span its read-modify-write,
+// which is wider than a single save, and sync.Mutex does not nest.
+func (a *app) writeSettingsLocked(s settings) error {
 	if a == nil || a.settingsPath == "" {
 		return errSettingsUnavailable
 	}
@@ -98,8 +119,23 @@ func (a *app) saveSettings(s settings) error {
 	if err != nil {
 		return err
 	}
-	tmp := a.settingsPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(a.settingsPath), ".settings-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	// Leave nothing behind on any failure after this point: the rename is what
+	// publishes the value, so an abandoned temporary is debris, not a setting.
+	defer func() { _ = os.Remove(tmp) }()
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, a.settingsPath)
@@ -156,7 +192,7 @@ func (a *app) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := a.saveSettings(s); err != nil {
+	if err := a.writeSettingsLocked(s); err != nil {
 		http.Error(w, "save settings: "+err.Error(), 500)
 		return
 	}

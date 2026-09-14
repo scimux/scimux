@@ -101,7 +101,7 @@ test("the storage key is the one the shell reads", () => {
 test("app.js derives its starting level from storage, not a hardcoded pane", () => {
   assert.match(appSrc, /let level = bootLevel\(/,
     "the boot pane must come from bootLevel()");
-  assert.match(appSrc, /bootLevel\(\{[\s\S]{0,200}?stored: loadStoredLevel\(localStorage\)/);
+  assert.match(appSrc, /bootLevel\(\{[\s\S]{0,200}?stored: loadStoredLevel\(store\)/);
   assert.match(appSrc, /bootLevel\(\{[\s\S]{0,200}?hasSelection: !!sel/,
     "chat is only restored when a remembered chat exists");
   assert.equal(/let level = matchMedia\([^)]*\)\.matches \? 1 : 2/.test(appSrc), false,
@@ -113,7 +113,7 @@ test("setLevel persists the pane, and only the phone's", () => {
   const start = appSrc.indexOf("function setLevel(n){");
   assert.ok(start >= 0, "setLevel() is a named function");
   const body = appSrc.slice(start, appSrc.indexOf("function applyNavAction", start));
-  assert.match(body, /saveLevel\(localStorage, level\)/);
+  assert.match(body, /saveLevel\(store, level\)/);
   assert.ok(body.indexOf("if (isDesktop()) return;") < body.indexOf("saveLevel("),
     "desktop returns before the write: the stored value is the phone's pane");
 });

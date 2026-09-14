@@ -28,6 +28,7 @@ package sessionlog
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -292,6 +293,35 @@ func lockPath(path string) func() {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// UnterminatedTail reports whether path ends mid-line — bytes with no closing
+// newline. That is what an interrupted append leaves behind: a short write
+// under ENOSPC returns an error having already put bytes on disk, and a crash
+// truncates wherever it lands.
+//
+// An append-only file is repaired by appending, so a writer that sees this
+// closes the fragment with a newline and leaves it there as the evidence it
+// is. Without that, the next record welds onto the fragment and replay drops
+// one malformed line — losing a record whose append reported success.
+//
+// Unreadable means "no": every caller's fallback is today's behaviour, and a
+// spurious newline in a file we cannot inspect would be its own corruption.
+func UnterminatedTail(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return false
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], st.Size()-1); err != nil {
+		return false
+	}
+	return last[0] != '\n'
+}
+
 // SyncParentDir fsyncs the directory that holds path so a newly created file's
 // directory entry survives a crash. On POSIX, fsyncing a file does not
 // necessarily make its new dirent durable; the parent directory must be synced
@@ -326,6 +356,9 @@ func (w *Writer) Append(ev Event) error {
 	// Detect that under the same per-path lock that serializes the write.
 	_, statErr := os.Stat(w.Path)
 	created := os.IsNotExist(statErr)
+	if UnterminatedTail(w.Path) {
+		b = append([]byte{'\n'}, b...)
+	}
 	// 0600: rawInput and prompt text are as sensitive as pane-excerpt evidence.
 	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -349,8 +382,79 @@ func (w *Writer) Append(ev Event) error {
 	return err
 }
 
+// maxRecordBytes is the largest single record a reader will hold in memory.
+// Append writes whatever it is given, so a log can legitimately contain a
+// record larger than this — a pasted file, an agent dumping a build log — and
+// the cap is what keeps one such line from being read into memory by every
+// reader at once. It is a skip threshold, never a stop: see forEachRecord.
+const maxRecordBytes = 8 << 20
+
+// forEachRecord calls fn for each complete newline-terminated record in r,
+// skipping blank lines and any record longer than maxRecordBytes, and returns
+// the byte offset through the last complete '\n'. fn is given the record and
+// the offset just past it, and stops the walk by returning false.
+//
+// Skipping rather than stopping is the whole point. Every reader here is
+// defensive by contract, and a bufio.Scanner is not: one record over its
+// buffer ends the scan, so a log with an oversized record early in it replayed
+// as a chat that stops there — silently, because the scanner's error was
+// dropped. An unterminated final line is left unconsumed: the writer appends
+// under a lock but a reader can still arrive mid-write, and half a record is
+// not a record. Callers that count ordinals must therefore not count skipped
+// lines either, which they do not: identity advances on records that parse.
+func forEachRecord(r io.Reader, fn func(rec []byte, off int64) bool) (int64, error) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var (
+		off     int64
+		carry   []byte
+		toolong bool
+	)
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			// A record longer than one buffer: keep collecting until the cap,
+			// then drop the rest of it without ever holding it.
+			off += int64(len(chunk))
+			if !toolong {
+				if len(carry)+len(chunk) > maxRecordBytes {
+					toolong, carry = true, nil
+				} else {
+					carry = append(carry, chunk...)
+				}
+			}
+			continue
+		}
+		if err != nil {
+			// io.EOF with a partial line, or a read error: neither yields a
+			// record, and neither advances the watermark past it.
+			return off, ignoreEOF(err)
+		}
+		off += int64(len(chunk))
+		if !toolong {
+			rec := chunk[:len(chunk)-1] // drop '\n'
+			if len(carry) > 0 {
+				rec = append(carry, rec...)
+			}
+			if len(rec) > 0 && rec[len(rec)-1] == '\r' {
+				rec = rec[:len(rec)-1] // tolerate CRLF
+			}
+			if len(bytes.TrimSpace(rec)) > 0 && !fn(rec, off) {
+				return off, nil
+			}
+		}
+		carry, toolong = carry[:0], false
+	}
+}
+
+func ignoreEOF(err error) error {
+	if err == io.EOF {
+		return nil
+	}
+	return err
+}
+
 // ReadEvents replays the log file. Defensive like the transcript parser:
-// unreadable file yields nothing, unparseable lines are skipped.
+// unreadable file yields nothing, unparseable and oversized lines are skipped.
 func ReadEvents(path string) []Event {
 	f, err := os.Open(path)
 	if err != nil {
@@ -358,20 +462,14 @@ func ReadEvents(path string) []Event {
 	}
 	defer f.Close()
 	var out []Event
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
-		}
+	forEachRecord(f, func(rec []byte, _ int64) bool {
 		var ev Event
-		if json.Unmarshal(line, &ev) != nil {
-			continue
+		if json.Unmarshal(rec, &ev) == nil {
+			ev.Prov = copyRaw(ev.Prov)
+			out = append(out, ev)
 		}
-		ev.Prov = copyRaw(ev.Prov)
-		out = append(out, ev)
-	}
+		return true
+	})
 	return out
 }
 

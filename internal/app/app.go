@@ -488,6 +488,13 @@ type app struct {
 	// cannot interleave a partial line, and pairs each append with an fsync —
 	// these records are the durable truth the supervisor replays and audits.
 	storeMu sync.Mutex
+	// settingsMu serializes saveSettings. The document is consent (settings.go),
+	// so its write-then-rename must be one critical section: a save that
+	// reports success has to be the save that reached disk. The settings
+	// endpoint holds it across its whole read-modify-write instead, so two
+	// browsers cannot clobber independently updated consent fields, and calls
+	// writeSettingsLocked because this mutex does not nest.
+	settingsMu sync.Mutex
 	// uiMu serializes the read-modify-write of the UI-state file (ui.json),
 	// independent of a.mu. The revision check plus the atomic tmp-write+rename
 	// must be one critical section, but they are pure file I/O over a private
@@ -557,9 +564,6 @@ type app struct {
 	// distinct from the opaque per-browser blob at uiPath. Empty disables them,
 	// which reads as every default — see settings.go.
 	settingsPath string
-	// settingsMu serializes the settings endpoint's read-modify-write cycle so
-	// concurrent browsers cannot clobber independently updated consent fields.
-	settingsMu sync.Mutex
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also

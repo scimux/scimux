@@ -520,3 +520,21 @@ func TestReadTurnsCallerMutationDoesNotAliasStore(t *testing.T) {
 		t.Fatalf("agent=%q", again[0].Agent)
 	}
 }
+
+// The same interrupted-tail contract as the node store: this file is the
+// user's conversation history and is never rewritten, so a record appended
+// after a truncated line must not be welded onto it and lost with it.
+func TestAppendRecoversFromInterruptedTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n1.jsonl")
+	if err := os.WriteFile(path, []byte(`{"t":"user","text":"first"}`+"\n"+`{"t":"assist`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &Writer{Path: path}
+	if err := w.Append(Event{T: "assistant", Text: "after"}); err != nil {
+		t.Fatalf("append after an interrupted tail: %v", err)
+	}
+	evs := ReadEvents(path)
+	if len(evs) != 2 || evs[0].Text != "first" || evs[1].Text != "after" {
+		t.Fatalf("replay after an interrupted tail = %+v, want the first and the new record", evs)
+	}
+}

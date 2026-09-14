@@ -36,8 +36,8 @@ const MinRequestV = 1
 //
 // So it is a one-way door held open only until the first stranger pairs, and
 // the obligation it creates is registrar custody rather than code: lock,
-// auto-renew, longest term, on scimux.com specifically. See
-// remote-by-invite-only.md §4.4. Point a test or a local rehearsal somewhere
+// auto-renew, longest term, on scimux.com specifically.
+// Point a test or a local rehearsal somewhere
 // else with --rendezvous-url; never by editing this line.
 //
 // It read my.scimux.eu until 2026-09-12. That move was free only because
@@ -45,8 +45,9 @@ const MinRequestV = 1
 // time this line can change without stranding someone. Three more places must
 // agree with it, none of them in this repository: -origin in scimux-rv's
 // rc.d, the Caddyfile site name, and the vendored vectors under
-// testdata/vectors, which scimux-rv generates and scripts/vendor-rendezvous.sh
-// copies. Editing this constant alone turns every admission into a silent 404.
+// testdata/vectors, which scimux-rv generates and this repository byte-copies
+// per docs/rendezvous-protocol-sync.md. Editing this constant alone turns
+// every admission into a silent 404.
 const DefaultOrigin = "https://my.scimux.com"
 
 // PrivateDirName is the owner-only directory under the data root that holds

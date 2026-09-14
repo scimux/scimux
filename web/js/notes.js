@@ -29,7 +29,7 @@
  *
  * Ephemeral view state (never ui.json):
  *   - wsNotes / wsActiveId / wsActive / wsReturnFocus
- *   - wsSaveTimers / wsPending / wsSaveChains (per-field serialization)
+ *   - wsSaveTimers / wsPending / wsSaveChains (per-note, per-field serialization)
  *   - wsInboxSig / wsInboxTab / expandedWsInbox / expandedRefs
  *   - wsCardDragging / wsCardDragEl / wsTouch / wsPlacing
  *   - wsSecTitleOrig / popMenu (shared popover slot)
@@ -801,6 +801,9 @@ export function createNotesFeature(deps){
   let wsReturnFocus = null;
   const wsSaveTimers = {};
   const wsPending = {};
+  /* one counter per save slot: a retained failure re-arms itself only while
+     nothing newer has been scheduled for that field */
+  const wsSaveSeq = {};
   const { enqueue: wsEnqueue } = createSaveEnqueue();
   let wsInboxSig = "";
   let wsInboxTab = (storage && storage.getItem(STORAGE_KEY_TAB)) || "GENERAL";
@@ -1233,9 +1236,19 @@ export function createNotesFeature(deps){
     });
   }
 
-  /* --- persistence --- */
-  function wsSend(body){
-    return api("/api/notes/" + encodeURIComponent(wsActiveId),
+  /* --- persistence ---
+     A save is addressed to the note it was typed into, not to the note on
+     screen when it finally runs: debounced by a second and then queued behind
+     whatever is in flight, a PATCH can outlive the selection that scheduled
+     it, and the note it lands on does not know this section id -- so the write
+     is accepted, the edit is gone, and nothing says so. The note is therefore
+     half of the queue identity too, which also stops two notes' saves sharing
+     one chain. */
+  function saveSlot(noteId, key){ return noteId + "\u0000" + key; }
+
+  function wsSend(body, noteId, slot, seq){
+    const id = noteId || wsActiveId;
+    return api("/api/notes/" + encodeURIComponent(id),
       { method: "PATCH", body: JSON.stringify(body) })
       .then(doc => {
         if (doc && doc.id === wsActiveId){
@@ -1248,22 +1261,43 @@ export function createNotesFeature(deps){
         }
         return doc;
       })
-      .catch(() => { toast("Save failed — will retry on next edit"); });
+      .catch(() => {
+        /* Keep the edit. "Retry on next edit" promises nothing to a user who
+           has already moved on; retained, it goes out at the next flush --
+           closing the workspace, or the next save of this field. Only while
+           nothing newer was scheduled, so a stale body cannot land on top of
+           one the user typed after it. */
+        if (slot && wsSaveSeq[slot] === seq)
+          wsPending[slot] = () => wsEnqueue(slot, () => wsSend(body, id, slot, seq));
+        toast("Save failed — will retry on next edit");
+      });
   }
 
   function wsPatch(body, key){
+    const noteId = wsActiveId;
     if (key){
-      clearTimeoutFn(wsSaveTimers[key]);
-      const fire = () => wsEnqueue(key, () => wsSend(body));
-      wsPending[key] = fire;
+      const slot = saveSlot(noteId, key);
+      const seq = wsSaveSeq[slot] = (wsSaveSeq[slot] || 0) + 1;
+      clearTimeoutFn(wsSaveTimers[slot]);
+      const fire = () => wsEnqueue(slot, () => wsSend(body, noteId, slot, seq));
+      wsPending[slot] = fire;
       return new Promise(res => {
-        wsSaveTimers[key] = setTimeoutFn(() => { delete wsPending[key]; res(fire()); }, SAVE_DEBOUNCE_MS);
+        wsSaveTimers[slot] = setTimeoutFn(() => { delete wsPending[slot]; res(fire()); }, SAVE_DEBOUNCE_MS);
       });
     }
-    return wsSend(body);
+    return wsSend(body, noteId);
   }
-  function wsCancelPending(key){ clearTimeoutFn(wsSaveTimers[key]); delete wsPending[key]; }
-  function wsPatchNow(body, key){ wsCancelPending(key); return wsEnqueue(key, () => wsSend(body)); }
+  function wsCancelPending(key, noteId){
+    const slot = saveSlot(noteId || wsActiveId, key);
+    clearTimeoutFn(wsSaveTimers[slot]); delete wsPending[slot];
+  }
+  function wsPatchNow(body, key){
+    const noteId = wsActiveId;
+    const slot = saveSlot(noteId, key);
+    wsCancelPending(key, noteId);
+    const seq = wsSaveSeq[slot] = (wsSaveSeq[slot] || 0) + 1;
+    return wsEnqueue(slot, () => wsSend(body, noteId, slot, seq));
+  }
   function wsFlushPendingSaves(){
     Object.keys(wsSaveTimers).forEach(k => clearTimeoutFn(wsSaveTimers[k]));
     const pend = Object.values(wsPending);

@@ -1497,6 +1497,147 @@ test("save debounce 1100ms, same-field serialize, close flush (section title)", 
   assert.equal(JSON.parse(flushed[flushed.length - 1].body).section.title, "C");
 });
 
+/* ---------- a save belongs to the note it was typed into ---------- */
+
+/* The workspace edits one note while queued PATCHes from another are still in
+   flight, so every save has to carry its own address. Reading the selection
+   when the request finally runs sends the edit to whatever the user opened in
+   the meantime, where its section id means nothing: the PATCH succeeds, the
+   edit is gone, and nothing says so. */
+function attachSectionTitle(ctx, secId, value){
+  const sec = el("div", { className: "wssec", dataset: { sec: secId } });
+  sec.dataset.sec = secId;
+  const title = el("input", { dataset: { sectitle: "" }, value });
+  title.dataset.sectitle = "";
+  title.value = value;
+  title.closest = sel => {
+    if (sel === "[data-sectitle]") return title;
+    if (sel === ".wssec") return sec;
+    return null;
+  };
+  sec.appendChild(title);
+  ctx.roots.wssections.appendChild(sec);
+  ctx.roots.wssections.dispatch("focusin", { target: title });
+  return title;
+}
+
+/* Two notes with *different* section ids: a misdirected PATCH is one the
+   receiving note cannot apply, which is exactly why the edit disappears. */
+function twoNotes(){
+  return {
+    notes: [{ id: "n1", title: "One", order: 0 }, { id: "n2", title: "Two", order: 1 }],
+    docs: {
+      n1: { id: "n1", title: "One", sections: [{ id: "s1", title: "S", body: "", order: 0, references: [] }] },
+      n2: { id: "n2", title: "Two", sections: [{ id: "s2", title: "S", body: "", order: 0, references: [] }] },
+    },
+  };
+}
+
+function patchesMatching(apiLog, text){
+  return apiLog.filter(x => x.method === "PATCH" && x.body && x.body.includes(text));
+}
+
+test("a debounced save addresses the note it was typed into", async () => {
+  const ctx = createFeature(twoNotes());
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const title = attachSectionTitle(ctx, "s1", "S");
+  title.value = "typed into n1";
+  ctx.roots.wssections.dispatch("input", { target: title });
+
+  await openNote(ctx, "n2");   /* the user moves on before the debounce fires */
+  ctx.flush(SAVE_DEBOUNCE_MS);
+  await settle();
+
+  const patches = patchesMatching(ctx.apiLog, "typed into n1");
+  assert.equal(patches.length, 1, "the debounced edit must still be sent");
+  assert.equal(patches[0].url, "/api/notes/n1",
+    "the edit went to the note on screen, where section s1 does not exist");
+});
+
+test("a save queued behind an in-flight one keeps its own note", async () => {
+  const base = twoNotes();
+  const release = [];
+  const ctx = createFeature({
+    ...base,
+    api: async (url, opts = {}) => {
+      if (opts.method === "PATCH")
+        return new Promise(r => release.push(() => r({ id: "n1", edited_at: "e" })));
+      if (url === "/api/notes") return { notes: base.notes };
+      const m = url.match(/^\/api\/notes\/([^/]+)$/);
+      if (m) return base.docs[m[1]];
+      return null;
+    },
+  });
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const title = attachSectionTitle(ctx, "s1", "S");
+  title.value = "first into n1";
+  ctx.roots.wssections.dispatch("input", { target: title });
+  ctx.flush(SAVE_DEBOUNCE_MS);
+  await settle();
+  assert.equal(release.length, 1, "the first save is in flight");
+
+  title.value = "second into n1";
+  ctx.roots.wssections.dispatch("input", { target: title });
+  ctx.flush(SAVE_DEBOUNCE_MS);
+  await settle();
+
+  await openNote(ctx, "n2");   /* switch while one save runs and one waits */
+  release.forEach(fn => fn());
+  await settle();
+  release.forEach(fn => fn());
+  await settle();
+
+  const patches = patchesMatching(ctx.apiLog, "into n1");
+  assert.equal(patches.length, 2, "both saves must be sent");
+  assert.deepEqual(patches.map(p => p.url), ["/api/notes/n1", "/api/notes/n1"],
+    "the queued save read the selection at execution time");
+});
+
+test("a save the server refuses is kept for the next flush, not just announced", async () => {
+  const base = twoNotes();
+  let refuse = true;
+  const ctx = createFeature({
+    ...base,
+    api: async (url, opts = {}) => {
+      if (opts.method === "PATCH"){
+        if (refuse){ refuse = false; throw new Error("server said no"); }
+        return { id: "n1", edited_at: "e" };
+      }
+      if (url === "/api/notes") return { notes: base.notes };
+      const m = url.match(/^\/api\/notes\/([^/]+)$/);
+      if (m) return base.docs[m[1]];
+      return null;
+    },
+  });
+  ctx.feature.bind();
+  ctx.feature.open();
+  await settle();
+  await openNote(ctx, "n1");
+
+  const title = attachSectionTitle(ctx, "s1", "S");
+  title.value = "worth keeping";
+  ctx.roots.wssections.dispatch("input", { target: title });
+  ctx.flush(SAVE_DEBOUNCE_MS);
+  await settle();
+  assert.equal(patchesMatching(ctx.apiLog, "worth keeping").length, 1, "the first attempt failed");
+
+  ctx.feature.close();   /* leaving the workspace flushes what is still unsaved */
+  await settle();
+
+  const patches = patchesMatching(ctx.apiLog, "worth keeping");
+  assert.equal(patches.length, 2,
+    "'will retry on next edit' keeps nothing when the user has moved on");
+  assert.equal(patches[1].url, "/api/notes/n1");
+});
+
 test("Escape section title revert enqueues after in-flight via PatchNow path", async () => {
   const pending = [];
   const ctx = createFeature({

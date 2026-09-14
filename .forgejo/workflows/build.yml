@@ -16,6 +16,22 @@ jobs:
           git checkout ${{ github.sha }}
           mkdir -p builds
 
+      # A vulnerability gate, not a vulnerability report. govulncheck's JSON
+      # mode exits zero while listing findings, so this uses the default mode,
+      # whose non-zero exit is the whole point; a scan whose result nobody acts
+      # on is how twelve advisories against the build inputs went unnoticed
+      # through green builds.
+      #
+      # The scanner is a development tool and deliberately not a build
+      # dependency: it is installed here and appears in no go.mod. GOTOOLCHAIN
+      # and GOFLAGS are cleared only for building the scanner, which tracks a
+      # newer Go than this project targets — the scan itself still reports
+      # against the toolchain that builds scimux.
+      - name: Scan build inputs for known vulnerabilities
+        run: |
+          env GOFLAGS= GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./cmd/scimux
+
       - name: Run tests (unit and integration; tmux installed above)
         run: |
           go test -timeout 20m ./...

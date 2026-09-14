@@ -5,9 +5,8 @@ builds/
 /scimux-*
 /scimux
 
-# locally captured transcript/protocol fixtures (regenerate with
-# scripts/capture-fixtures.sh; they contain personal environment snapshots
-# even after scrubbing, so they stay out of the public repo)
+# Locally captured transcript/protocol fixtures contain personal environment
+# snapshots even after scrubbing, so they stay out of the public repo.
 internal/transcript/testdata/real-*.jsonl
 internal/acp/codex/testdata/real-*.ndjson
 internal/acp/testdata/real-*.ndjson
@@ -36,7 +35,12 @@ internal/acp/muse/schema/
 !docs/invariants/claude-hooks.md
 !docs/invariants/attention.md
 
-attic/
+# Private archives never belong to the published tree.
+/attic/
+
+# The installer is the only published script. Retired tools live in attic/.
+/scripts/*
+!scripts/install.sh
 
 .agent
 .agents
@@ -45,6 +49,3 @@ attic/
 
 # server runtime log (nohup ./scimux …)
 nohup.out
-
-# local E2E scratch script, not part of the test suite
-scripts/mm-e2e-image-delivery.sh
