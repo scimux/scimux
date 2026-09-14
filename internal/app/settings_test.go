@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -325,6 +326,52 @@ func TestSettingsConcurrentTogglesNeverLieAboutSuccess(t *testing.T) {
 		}
 		if s := string(b); s != string(on) && s != string(off) {
 			t.Fatalf("round %d: concurrent saves left %q on disk, want %q or %q", round, s, on, off)
+		}
+	}
+}
+
+// The PUT handler holds settingsMu across its whole read-modify-write, which
+// is wider than the save it ends with. This is what the extra width buys. The
+// two consent fields are independent switches over different costs, and the
+// handler publishes the whole document, so a patch that names one field still
+// rewrites the other from whatever it read. Lock only the save and both
+// requests read the same all-off document; whichever lands second republishes
+// its own field and silently withdraws the consent the other just granted —
+// a 200 to the browser that turned a switch on, and the switch off on disk.
+func TestSettingsConcurrentPutsPreserveEachOthersConsent(t *testing.T) {
+	dir := t.TempDir()
+	patches := []string{
+		`{"claude_usage_checks":true}`,
+		`{"muse_approval_judge_consent":true}`,
+	}
+	for round := 0; round < 50; round++ {
+		a := &app{settingsPath: filepath.Join(dir, "settings-"+strconv.Itoa(round)+".json")}
+		var wg sync.WaitGroup
+		codes := make([]int, len(patches))
+		bodies := make([]string, len(patches))
+		for i, patch := range patches {
+			wg.Add(1)
+			go func(i int, patch string) {
+				defer wg.Done()
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(patch))
+				req.Header.Set("Content-Type", "application/json")
+				a.handleSettingsPut(rec, req)
+				codes[i], bodies[i] = rec.Code, rec.Body.String()
+			}(i, patch)
+		}
+		wg.Wait()
+		for i, code := range codes {
+			if code != http.StatusOK {
+				t.Fatalf("round %d: PUT %s = %d %s", round, patches[i], code, bodies[i])
+			}
+		}
+		// Both were told yes, so both must be true — on disk and to the next
+		// reader, which is the party that decides whether to spend anything.
+		got := a.settings()
+		if !got.ClaudeUsageChecks || !got.MuseApprovalJudgeConsent {
+			t.Fatalf("round %d: concurrent grants left claude=%v muse=%v, want both true; one PUT withdrew the other's consent",
+				round, got.ClaudeUsageChecks, got.MuseApprovalJudgeConsent)
 		}
 	}
 }
