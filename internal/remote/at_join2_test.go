@@ -181,13 +181,13 @@ func TestLiveSessionCarriesATunnelledRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("computer ECDH public: %v", err)
 	}
-	sealed, err := SealEnvelope(dev.offer, x, DefaultOrigin, rid)
+	sealed, err := SealSessionEnvelope(dev.offer, x, devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("seal offer: %v", err)
 	}
 	rv.QueueEnvelope(rid, sealed)
 
-	answer, err := OpenEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), DefaultOrigin, rid)
+	answer, err := OpenSessionEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), x, DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("device could not open the computer's reply: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestLiveSessionCarriesATunnelledRequest(t *testing.T) {
 // would still have handed the far side a usable answer.
 func TestLiveSessionRefusesASubstitutedFingerprint(t *testing.T) {
 	rv := newSessionRV(t)
-	_, devPub := deviceKeypair(t)
+	devPriv, devPub := deviceKeypair(t)
 	seen := make(chan string, 1)
 	c, rid := liveSessionClient(t, rv, devPub, tunnelEcho(seen))
 
@@ -242,7 +242,7 @@ func TestLiveSessionRefusesASubstitutedFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("computer ECDH public: %v", err)
 	}
-	sealed, err := SealEnvelope(bad, x, DefaultOrigin, rid)
+	sealed, err := SealSessionEnvelope(bad, x, devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("seal offer: %v", err)
 	}
@@ -313,13 +313,13 @@ func TestRevokeClosesTheLiveSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("computer ECDH public: %v", err)
 	}
-	sealed, err := SealEnvelope(dev.offer, x, DefaultOrigin, rid)
+	sealed, err := SealSessionEnvelope(dev.offer, x, devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("seal offer: %v", err)
 	}
 	rv.QueueEnvelope(rid, sealed)
 
-	answer, err := OpenEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), DefaultOrigin, rid)
+	answer, err := OpenSessionEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), x, DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("open reply: %v", err)
 	}

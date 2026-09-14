@@ -109,6 +109,7 @@ replay.
 | `pairing-sas` | construction | — | 6-digit numeric comparison |
 | `envelope-inner` | construction | — | plaintext inside the seal |
 | `envelope-seal` | construction | — | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
+| `envelope-seal-v2` | construction | — | two ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
 | `p-page` | bootstrap | `GET /p` | device → rv |
 | `p-boot-js` | bootstrap | `GET /p/boot.js` | device → rv |
 | `p-boot-css` | bootstrap | `GET /p/boot.css` | device → rv |
@@ -848,6 +849,30 @@ causes DTLS failure because the fingerprint is inside the seal.
 
 ### 12.2 Seal
 
+Two constructions, and which one a message uses is fixed by its
+`type`, never negotiated:
+
+| message | seal | authenticates sender |
+|---|---|---|
+| `pair-offer` | **v1**, §12.2.1 | no — see below |
+| `pair-reply` | **v1**, §12.2.1 | no — see below |
+| `session-offer` | **v2**, §12.2.2 | yes |
+| `session-answer` | **v2**, §12.2.2 | yes |
+
+There is no runtime choice and no fallback. A `session-answer` that
+will not open under v2 is a failed session, not a retry under v1;
+accepting either would let an attacker pick the weaker one.
+
+Pairing stays on v1 because at pair time there is no established
+identity to authenticate. The computer has not yet met the device —
+`Y` arrives *inside* the `pair-offer`, so the computer cannot derive
+a key that depends on it — and authenticating the introduction is
+exactly what §11's SAS does, out of band, with a human comparing
+digits. Once pairing has completed, both sides hold the other's
+static key and every session envelope is authenticated by it.
+
+#### 12.2.1 v1 — anonymous, ephemeral-static
+
 Ephemeral-static ECIES, P-256, HKDF-SHA-256, AES-256-GCM.
 A **fresh** ephemeral private key is required for every seal.
 Reusing one across messages reuses the 12-byte nonce space.
@@ -871,9 +896,74 @@ different recipient (unknown-key-share / cross-context reuse).
 Recipient opens with its static private and `E`. Vector
 `envelope-seal-p256` (`ephemeral_priv_hex` is a fixture).
 
-Session offer: phone seals to computer `X`. Session answer: computer
-seals to device `Y`. Pairing QR offer: phone seals to `X` from
-the fragment. Pairing reply: computer seals to `Y` from the offer.
+The sender's own key is **not** an input. Anyone holding the
+recipient's public key can produce a blob that opens correctly, so a
+successful open proves integrity and nothing about who sealed it.
+That is acceptable for pairing, where SAS is the authentication, and
+it is why §12.2.2 exists for everything after.
+
+Pairing QR offer: phone seals to `X` from the fragment. Pairing
+reply: computer seals to `Y` from the offer.
+
+#### 12.2.2 v2 — sender-authenticated, static+ephemeral
+
+Session envelopes only. Same primitives, same wire shape, one extra
+ECDH. This is the Noise `K` one-way pattern (`-> e, es, ss`).
+
+```
+e        = ephemeral P-256 private   // fresh CSPRNG per seal
+E        = e.Public (uncompressed, 65 bytes)
+S        = sender static public      (uncompressed, 65 bytes)
+R        = recipient static public   (uncompressed, 65 bytes)
+shared_e = ECDH(e, R)
+shared_s = ECDH(sender_static_private, R)
+info     = "seal-v2" || 0x00 || E || 0x00 || R || 0x00 || S
+key      = HKDF-SHA-256(ikm=shared_e || shared_s,
+                        salt="scimux-rv/envelope/v2",
+                        info=info, L=32)
+nonce    = 12 CSPRNG bytes
+ad       = origin || 0x00 || rid_hex
+ct       = AES-256-GCM-Seal(key, nonce, plaintext, ad)
+sealed   = E || nonce || ct        // ct includes the 16-byte tag
+```
+
+`shared_s` is what the sender's static private key buys: without it
+the key cannot be derived, so a blob that opens is a blob its holder
+sealed. Authentication is implicit — the GCM tag opening *is* the
+proof, and there is no separate verification step to forget.
+
+The recipient opens with its static private key **and the expected
+sender's static public key**, which it must already hold: the
+computer looks up the paired device's `Y`, the device holds `X` from
+the fragment. Nothing new goes on the wire, and `S` is never sent —
+rv sees the same `E || nonce || ct` it saw before.
+
+The recipient must therefore resolve the expected sender **before** it
+opens, which reorders nothing in practice: the RID already names one
+pairing, so the paired `Y` is a lookup, not a search. An
+implementation that cannot resolve a sender that way may try each
+paired `Y` until one opens — `shared_s` is static per pairing and may
+be cached, so a retry is an HKDF and a GCM open, not an ECDH. What it
+MUST NOT do is put a sender hint on the wire: that would hand rv a
+stable device identifier, which §8 does not permit.
+
+Vector `envelope-seal-v2-p256` (`ephemeral_priv_hex` and
+`sender_priv_hex` are fixtures).
+
+Session offer: phone seals to computer `X`, sender `Y`. Session
+answer: computer seals to device `Y`, sender `X`.
+
+**Known limits, stated rather than implied.** This is Noise `K`:
+authentication level 1, confidentiality level 2. Sender
+authentication is vulnerable to key-compromise impersonation — an
+attacker holding the *recipient's* static private key can forge
+messages from any sender to that recipient, because `shared_s` is
+computable from it. Resistance to that needs a signature and is not
+provided. The payload has no forward secrecy against recipient key
+compromise, which was equally true of v1. Replay is prevented by the
+AD, not by the KDF: `rid_hex` is 32 CSPRNG bytes minted per
+rendezvous and never reused, so a blob replayed into any other
+rendezvous fails the tag.
 
 ### 12.3 Typed-path offer is unsealed
 
@@ -1060,6 +1150,7 @@ kind-specific fields. A file is a JSON array. Kinds:
 | `handle`, `rid`, `pairing-code` | recompute the encoding |
 | `rid-collision-retry` | **test-only** seeded retry; not a minting rule |
 | `envelope-seal` | seal and open. Field `ephemeral_priv_hex` is a fixture so the ciphertext is reproducible. A client MUST draw a fresh ephemeral per seal. |
+| `envelope-seal-v2` | seal and open as §12.2.2. `ephemeral_priv_hex` and `sender_priv_hex` are fixtures; a client MUST draw a fresh ephemeral per seal. Opening under any static other than `sender_pub_hex` MUST fail. |
 | `pairing-transcript`, `pairing-sas` | recompute HKDF |
 | `envelope-inner` | required JSON fields |
 | `http` | if the request path is registered, **replay** through `newAdmissionHandler` and compare `dumpResponse` (status + sorted headers + body). Otherwise declarative. Expected responses for built admission routes are authored from §4, not recorded from the handler. `/p` inventory rows become replayed once those GET routes are registered. |

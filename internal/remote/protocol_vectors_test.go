@@ -597,6 +597,8 @@ func executeVector(t *testing.T, v vector, meta specMeta) {
 		executeRIDCollision(t, v)
 	case "envelope-seal":
 		executeEnvelopeSeal(t, v)
+	case "envelope-seal-v2":
+		executeEnvelopeSealV2(t, v)
 	case "pairing-sas", "pairing-transcript":
 		executePairingSAS(t, v)
 	case "pairing-code":
@@ -751,6 +753,38 @@ func testOnlyDeriveRID(seed []byte, attempt int) []byte {
 	return h.Sum(nil)
 }
 
+// executeEnvelopeSealV2 runs both directions and the negative. The negative
+// is the finding: under §12.2.1 every static opened the blob, so a row that
+// only checked the positive would have passed against the defect.
+func executeEnvelopeSealV2(t *testing.T, v vector) {
+	t.Helper()
+	sealed, err := specSealV2(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := hex.DecodeString(v.SealedHex)
+	if err != nil {
+		t.Fatalf("sealed_hex: %v", err)
+	}
+	if !bytes.Equal(sealed, want) {
+		t.Fatalf("sealed\n got %x\nwant %x", sealed, want)
+	}
+	plain, err := specOpenV2(v, v.SenderPubHex)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	wantPlain, err := hex.DecodeString(v.PlaintextHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(plain, wantPlain) {
+		t.Fatalf("opened plaintext\n got %x\nwant %x", plain, wantPlain)
+	}
+	if _, err := specOpenV2(v, v.EphemeralPubHex); err == nil {
+		t.Fatal("the envelope opened under a static that did not seal it")
+	}
+}
+
 func executeEnvelopeSeal(t *testing.T, v vector) {
 	t.Helper()
 	sealed, err := specSeal(v)
@@ -837,6 +871,151 @@ func sealInfo(ePub, recipientStatic []byte) string {
 	b = append(b, 0)
 	b = append(b, recipientStatic...)
 	return string(b)
+}
+
+// sealInfoV2 is §12.2.2's info, written from the spec's literals like
+// sealInfo above it. A helper that called the product's sessionSealInfo
+// would make this file a round trip rather than an oracle.
+func sealInfoV2(ePub, recipientStatic, senderStatic []byte) string {
+	var b []byte
+	b = append(b, []byte("seal-v2")...)
+	b = append(b, 0)
+	b = append(b, ePub...)
+	b = append(b, 0)
+	b = append(b, recipientStatic...)
+	b = append(b, 0)
+	b = append(b, senderStatic...)
+	return string(b)
+}
+
+func specGCMV2(ePub, recipientStatic, senderStatic, sharedE, sharedS []byte) (cipher.AEAD, error) {
+	ikm := append(append([]byte{}, sharedE...), sharedS...)
+	key, err := hkdf.Key(sha256.New, ikm, []byte("scimux-rv/envelope/v2"),
+		sealInfoV2(ePub, recipientStatic, senderStatic), 32)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func specSealV2(v vector) ([]byte, error) {
+	curve := ecdh.P256()
+	ephBytes, err := hex.DecodeString(v.EphemeralPrivHex)
+	if err != nil {
+		return nil, fmt.Errorf("ephemeral_priv_hex: %w", err)
+	}
+	eph, err := curve.NewPrivateKey(ephBytes)
+	if err != nil {
+		return nil, err
+	}
+	senderBytes, err := hex.DecodeString(v.SenderPrivHex)
+	if err != nil {
+		return nil, fmt.Errorf("sender_priv_hex: %w", err)
+	}
+	sender, err := curve.NewPrivateKey(senderBytes)
+	if err != nil {
+		return nil, err
+	}
+	if v.SenderPubHex != "" && hex.EncodeToString(sender.PublicKey().Bytes()) != v.SenderPubHex {
+		return nil, fmt.Errorf("sender_pub_hex is not sender_priv_hex's point")
+	}
+	pubBytes, err := hex.DecodeString(v.RecipientPubHex)
+	if err != nil {
+		return nil, fmt.Errorf("recipient_pub_hex: %w", err)
+	}
+	pub, err := curve.NewPublicKey(pubBytes)
+	if err != nil {
+		return nil, err
+	}
+	sharedE, err := eph.ECDH(pub)
+	if err != nil {
+		return nil, err
+	}
+	sharedS, err := sender.ECDH(pub)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := hex.DecodeString(v.NonceHex)
+	if err != nil || len(nonce) != 12 {
+		return nil, fmt.Errorf("nonce_hex: need 12 bytes")
+	}
+	plain, err := hex.DecodeString(v.PlaintextHex)
+	if err != nil {
+		return nil, err
+	}
+	ad, err := hex.DecodeString(v.ADHex)
+	if err != nil {
+		return nil, err
+	}
+	ePub := eph.PublicKey().Bytes()
+	gcm, err := specGCMV2(ePub, pubBytes, sender.PublicKey().Bytes(), sharedE, sharedS)
+	if err != nil {
+		return nil, err
+	}
+	ct := gcm.Seal(nil, nonce, plain, ad)
+	return append(append(append([]byte{}, ePub...), nonce...), ct...), nil
+}
+
+// specOpenV2 takes the expected sender separately from the vector so that
+// naming the wrong one is expressible. That is the whole point of §12.2.2,
+// and a helper that read sender_pub_hex internally could not express it.
+func specOpenV2(v vector, senderPubHex string) ([]byte, error) {
+	curve := ecdh.P256()
+	privBytes, err := hex.DecodeString(v.RecipientPrivHex)
+	if err != nil {
+		return nil, fmt.Errorf("recipient_priv_hex: %w", err)
+	}
+	priv, err := curve.NewPrivateKey(privBytes)
+	if err != nil {
+		return nil, err
+	}
+	senderBytes, err := hex.DecodeString(senderPubHex)
+	if err != nil {
+		return nil, fmt.Errorf("sender pub: %w", err)
+	}
+	sender, err := curve.NewPublicKey(senderBytes)
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := hex.DecodeString(v.SealedHex)
+	if err != nil {
+		return nil, err
+	}
+	if len(sealed) < 65+12+16 {
+		return nil, fmt.Errorf("sealed blob too short")
+	}
+	if v.EphemeralPubHex != "" && hex.EncodeToString(sealed[:65]) != v.EphemeralPubHex {
+		return nil, fmt.Errorf("sealed prefix is not ephemeral_pub")
+	}
+	ePub, err := curve.NewPublicKey(sealed[:65])
+	if err != nil {
+		return nil, err
+	}
+	sharedE, err := priv.ECDH(ePub)
+	if err != nil {
+		return nil, err
+	}
+	sharedS, err := priv.ECDH(sender)
+	if err != nil {
+		return nil, err
+	}
+	ad, err := hex.DecodeString(v.ADHex)
+	if err != nil {
+		return nil, err
+	}
+	recipPub, err := hex.DecodeString(v.RecipientPubHex)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := specGCMV2(sealed[:65], recipPub, senderBytes, sharedE, sharedS)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, sealed[65:65+12], sealed[65+12:], ad)
 }
 
 func specOpen(v vector) ([]byte, error) {

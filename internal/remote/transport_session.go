@@ -582,7 +582,7 @@ func relayThroughHub(ctx context.Context, hub *signallingHub, computer *webrtc.P
 		return SessionInner{}, classErrorf(ClassHandshake, "negotiate", "could not mint a rendezvous id", err)
 	}
 
-	sealedOffer, err := SealEnvelope(offerInner, computerKey.PublicKey().Bytes(), DefaultOrigin, rid)
+	sealedOffer, err := SealSessionEnvelope(offerInner, computerKey.PublicKey().Bytes(), clientKey.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		return SessionInner{}, err
 	}
@@ -593,7 +593,7 @@ func relayThroughHub(ctx context.Context, hub *signallingHub, computer *webrtc.P
 	if !ok {
 		return SessionInner{}, classError(ClassUnavailable, "negotiate", "the hub lost the session offer")
 	}
-	opened, err := OpenEnvelope(blob, computerKey.Bytes(), DefaultOrigin, rid)
+	opened, err := OpenSessionEnvelope(blob, computerKey.Bytes(), clientKey.PublicKey().Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		return SessionInner{}, err
 	}
@@ -614,7 +614,7 @@ func relayThroughHub(ctx context.Context, hub *signallingHub, computer *webrtc.P
 	if err != nil {
 		return SessionInner{}, err
 	}
-	sealedAnswer, err := SealEnvelope(answerInner, clientKey.PublicKey().Bytes(), DefaultOrigin, rid)
+	sealedAnswer, err := SealSessionEnvelope(answerInner, clientKey.PublicKey().Bytes(), computerKey.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		return SessionInner{}, err
 	}
@@ -623,7 +623,7 @@ func relayThroughHub(ctx context.Context, hub *signallingHub, computer *webrtc.P
 	if !ok {
 		return SessionInner{}, classError(ClassUnavailable, "negotiate", "the hub lost the session answer")
 	}
-	return OpenEnvelope(blob, clientKey.Bytes(), DefaultOrigin, rid)
+	return OpenSessionEnvelope(blob, clientKey.Bytes(), computerKey.PublicKey().Bytes(), DefaultOrigin, rid)
 }
 
 // localDescription creates a description, applies it, waits for gathering
