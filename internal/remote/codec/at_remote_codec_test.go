@@ -608,7 +608,15 @@ var echoOK = HandlerFunc(func(ctx context.Context, req *Request) (*Response, err
 // AT-remote-codec-d: a 25 MiB multipart upload and a 50 MiB asset response
 // both succeed, and neither is materialised whole in memory on either side.
 func TestATRemoteCodecD_LargeUploadAndAssetNotMaterialized(t *testing.T) {
-	const maxResident = 8 << 20
+	// The codec holds a handful of in-flight frames (maxFramePayload) and the
+	// chunk buffer either side of them, which measured under a megabyte; a
+	// materialised body would be tens of megabytes. The budget sits between
+	// those two scales rather than near the old whole-process heap noise, so
+	// the only thing that can spend it is the failure this test names.
+	const maxResident = 1 << 20
+	// Sample twelve-ish times across either body, often enough that a
+	// materialised one cannot hide between two of them.
+	const sampleEvery = 4 << 20
 
 	t.Run("upload-25mib", func(t *testing.T) {
 		var saw atomic.Int64
@@ -625,7 +633,7 @@ func TestATRemoteCodecD_LargeUploadAndAssetNotMaterialized(t *testing.T) {
 				Body:    bodyOf(`{"ok":true}`),
 			}, nil
 		}))
-		watch := startHeapWatch(t)
+		watch := startLiveHeap(t, sampleEvery)
 		resp := mustRoundTrip(t, client, &Request{
 			ID:     "req-25m",
 			Method: http.MethodPost,
@@ -633,7 +641,10 @@ func TestATRemoteCodecD_LargeUploadAndAssetNotMaterialized(t *testing.T) {
 			Headers: http.Header{
 				"Content-Type": {"multipart/form-data; boundary=x"},
 			},
-			Body: limitBody(AttachUploadMax, 'U'),
+			// Watching the request body samples on the sending side: the
+			// encoder is the goroutine that reads it, so a client that
+			// buffered the upload whole is holding it at every sample.
+			Body: watch.watchBody(limitBody(AttachUploadMax, 'U')),
 		})
 		delta := watch.Delta()
 		if resp.Status != http.StatusOK {
@@ -660,14 +671,14 @@ func TestATRemoteCodecD_LargeUploadAndAssetNotMaterialized(t *testing.T) {
 				Body: limitBody(AgentAssetMax, 'S'),
 			}, nil
 		}))
-		watch := startHeapWatch(t)
+		watch := startLiveHeap(t, sampleEvery)
 		resp := mustRoundTrip(t, client, &Request{
 			ID:     "req-50m",
 			Method: http.MethodGet,
 			Path:   "/api/nodes/n1/assets/a1",
 			Body:   bodyOf(""),
 		})
-		n, err := countBytes(resp.Body)
+		n, err := countBytes(watch.watch(resp.Body))
 		delta := watch.Delta()
 		if err != nil {
 			t.Fatalf("read 50 MiB asset: %v", err)

@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -168,58 +167,82 @@ func (s *stallReader) Read(p []byte) (int, error) {
 
 func (s *stallReader) Close() error { return nil }
 
-type heapWatch struct {
+// liveHeap measures what the codec keeps reachable while a body streams
+// through it. runtime.MemStats.HeapAlloc also counts objects that are already
+// unreachable but not yet swept, so sampling it on a ticker during a 50 MiB
+// transfer reports how far the collector let the heap drift before its next
+// cycle — GC pacing, which moves with whatever else the machine is doing, and
+// not whether a body was materialised. Two collections before every read force
+// the first cycle's sweep to finish, leaving the live set; and the samples are
+// taken at byte milestones rather than on a clock, so each one lands
+// mid-transfer by construction instead of by luck. The pipe underneath is
+// synchronous, so at a sample the producer is blocked and what is reachable is
+// exactly what the codec is holding. A materialised body is a live object at
+// those moments and is still caught in full.
+type liveHeap struct {
 	peak     atomic.Uint64
 	baseline uint64
-	stop     chan struct{}
-	done     chan struct{}
-	once     sync.Once
+	every    int64
+	seen     int64
+	next     int64
 }
 
-func startHeapWatch(t *testing.T) *heapWatch {
+// startLiveHeap begins a measurement that samples once per `every` bytes.
+// Only the single goroutine that reads the watched body advances the counters.
+func startLiveHeap(t *testing.T, every int64) *liveHeap {
 	t.Helper()
+	h := &liveHeap{baseline: readLiveHeap(), every: every, next: every}
+	h.peak.Store(h.baseline)
+	return h
+}
+
+func readLiveHeap() uint64 {
+	// The second collection is not superstition: runtime.GC returns once the
+	// mark phase is done, while the sweep that actually frees the previous
+	// cycle's garbage still runs behind it.
 	runtime.GC()
 	runtime.GC()
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	w := &heapWatch{
-		baseline: ms.HeapAlloc,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-	}
-	w.peak.Store(ms.HeapAlloc)
-	go func() {
-		defer close(w.done)
-		tick := time.NewTicker(5 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-w.stop:
-				return
-			case <-tick.C:
-				var now runtime.MemStats
-				runtime.ReadMemStats(&now)
-				for {
-					old := w.peak.Load()
-					if now.HeapAlloc <= old || w.peak.CompareAndSwap(old, now.HeapAlloc) {
-						break
-					}
-				}
-			}
+	return ms.HeapAlloc
+}
+
+func (h *liveHeap) watch(r io.Reader) io.Reader { return &liveHeapReader{h: h, r: r} }
+
+func (h *liveHeap) watchBody(rc io.ReadCloser) io.ReadCloser {
+	return struct {
+		io.Reader
+		io.Closer
+	}{Reader: h.watch(rc), Closer: rc}
+}
+
+func (h *liveHeap) sample() {
+	live := readLiveHeap()
+	for {
+		old := h.peak.Load()
+		if live <= old || h.peak.CompareAndSwap(old, live) {
+			return
 		}
-	}()
-	t.Cleanup(func() { w.stopWatch() })
-	return w
+	}
 }
 
-func (w *heapWatch) stopWatch() {
-	w.once.Do(func() { close(w.stop) })
-	<-w.done
+func (h *liveHeap) Delta() int64 {
+	return int64(h.peak.Load()) - int64(h.baseline)
 }
 
-func (w *heapWatch) Delta() int64 {
-	w.stopWatch()
-	return int64(w.peak.Load()) - int64(w.baseline)
+type liveHeapReader struct {
+	h *liveHeap
+	r io.Reader
+}
+
+func (l *liveHeapReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	l.h.seen += int64(n)
+	if l.h.seen >= l.h.next {
+		l.h.next = l.h.seen + l.h.every
+		l.h.sample()
+	}
+	return n, err
 }
 
 func cloneHeader(h http.Header) http.Header {
