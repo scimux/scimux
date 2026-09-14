@@ -1031,3 +1031,81 @@ func TestWorkerManagerAdoptsOnlyLiveExistingClaudeChats(t *testing.T) {
 	}
 	m.Shutdown()
 }
+
+// ownedWorkerLockDir returns an owner-only data directory that Claim accepts.
+func ownedWorkerLockDir(t *testing.T) string {
+	t.Helper()
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// holdWorkerLifetimeLock takes the node's lifetime lock the way a live worker
+// does. flock conflicts per open file description, so a second claim is
+// refused even though both live in this process.
+func holdWorkerLifetimeLock(t *testing.T, data, nodeID string) *sessionworker.Registration {
+	t.Helper()
+	held, err := sessionworker.Claim(data, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	return held
+}
+
+// Linux publishes a SIGKILLed process as a zombie before it runs the deferred
+// final __fput that drops the process's flocks, so for about a jiffy after a
+// worker is provably dead its lifetime lock is still held. A single refused
+// claim therefore proves nothing, and treating it as proof of a live owner
+// makes every reaping path misread a dead worker as merely unreachable.
+func TestReapStaleWorkerLocatorWaitsOutADeferredLockRelease(t *testing.T) {
+	data := ownedWorkerLockDir(t)
+	held := holdWorkerLifetimeLock(t, data, "deferred-release")
+	release := time.AfterFunc(20*time.Millisecond, func() { _ = held.Close() })
+	t.Cleanup(func() { release.Stop() })
+	if !reapStaleWorkerLocator(data, "deferred-release") {
+		t.Fatal("reapStaleWorkerLocator gave up on a lock the kernel had not released yet")
+	}
+}
+
+// The grace must not become permission to forget ownership: a lock that stays
+// held is still a live owner, and the verdict must stay false and bounded.
+func TestReapStaleWorkerLocatorFailsClosedWhileTheLockStaysHeld(t *testing.T) {
+	data := ownedWorkerLockDir(t)
+	holdWorkerLifetimeLock(t, data, "live-owner")
+	start := time.Now()
+	if reapStaleWorkerLocator(data, "live-owner") {
+		t.Fatal("reapStaleWorkerLocator claimed a node whose owner still holds the lifetime lock")
+	}
+	if elapsed := time.Since(start); elapsed < staleWorkerLockGrace {
+		t.Fatalf("gave up after %s; the grace is %s", elapsed, staleWorkerLockGrace)
+	} else if elapsed > 5*time.Second {
+		t.Fatalf("fail-closed verdict took %s; the grace budget must stay bounded", elapsed)
+	}
+}
+
+// An error that is not a refused claim describes the directory or the node id,
+// never a lock the kernel is about to release, so it must fail immediately
+// rather than burn the grace.
+func TestReapStaleWorkerLocatorRejectsAnUnusableDataDirectoryAtOnce(t *testing.T) {
+	start := time.Now()
+	if reapStaleWorkerLocator(filepath.Join(t.TempDir(), "absent"), "no-such-node") {
+		t.Fatal("reapStaleWorkerLocator claimed a node under a data directory it cannot use")
+	}
+	if elapsed := time.Since(start); elapsed >= staleWorkerLockGrace {
+		t.Fatalf("permanent error waited %s; only a refused claim may spend the grace", elapsed)
+	}
+}
+
+// The budget has to outlast a deferred release on a loaded host without
+// stalling deletion of a worker that really is unreachable.
+func TestStaleWorkerLockGraceStaysWithinItsBudget(t *testing.T) {
+	if staleWorkerLockGrace < 100*time.Millisecond {
+		t.Fatalf("grace %s is too short to outlast a deferred __fput", staleWorkerLockGrace)
+	}
+	if staleWorkerLockGrace > time.Second {
+		t.Fatalf("grace %s would stall every path that reaps an unreachable worker", staleWorkerLockGrace)
+	}
+}

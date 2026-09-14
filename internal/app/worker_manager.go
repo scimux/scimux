@@ -206,12 +206,30 @@ func (m *workerManager) observeState(nodeID string, cached bool) sessionworker.S
 	return state
 }
 
+// staleWorkerLockGrace bounds how long a refused claim is allowed to mean
+// "the kernel has not caught up yet" instead of "a live owner holds this
+// node". Linux publishes a killed process as a zombie before running the
+// deferred final __fput that drops its flocks, so for about a jiffy after a
+// worker is provably dead its lifetime lock still answers as held. The grace
+// is orders of magnitude above that window and is spent only after an RPC has
+// already failed, so the healthy path never pays it.
+const staleWorkerLockGrace = 250 * time.Millisecond
+
 func reapStaleWorkerLocator(dataDir, nodeID string) bool {
-	registration, err := sessionworker.Claim(dataDir, nodeID)
-	if err != nil {
-		return false
+	deadline := time.Now().Add(staleWorkerLockGrace)
+	for {
+		registration, err := sessionworker.Claim(dataDir, nodeID)
+		if err == nil {
+			return registration.Close() == nil
+		}
+		// Only a refused claim can be the kernel lagging behind a dead owner.
+		// Every other error describes the data directory or the node id and
+		// will not improve by waiting.
+		if !errors.Is(err, sessionworker.ErrWorkerOwned) || !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
 	}
-	return registration.Close() == nil
 }
 
 func (m *workerManager) withClient(nodeID string, fn func(context.Context, *sessionworker.Client) error) error {
