@@ -42,6 +42,32 @@ and the analogous `rev-parse <oid>:<path>` for the digest and each
 JSON file. `git show` of a blob is acceptable only when the output is
 byte-identical to `git cat-file blob`.
 
+## Reading the vendored copy
+
+The specification is a byte copy, so it is written for its own
+repository and reads a little oddly here. Three things a reader of this
+tree will notice, none of which is a defect and none of which may be
+"fixed" in place -- an edit would break the byte copy, disagree with the
+bytes rv publishes, and be reverted by the next sync:
+
+- **Its relative links resolve in rv, not here.** `vectors.sha256` sits
+  beside the spec there; here it is `internal/remote/testdata/vectors.sha256`,
+  per the table above. `tunnel-v2.md` is rv's document and deliberately
+  has no copy in this repository -- see the tunnel-protocol invariant in
+  AGENTS.md for why that half lives there.
+- **It cites two design documents this repository does not track.**
+  `remote-scimux.md` and `remote-by-invite-only.md` are superseded plans,
+  archived under untracked `attic/`. Every citation quotes the sentence it
+  supersedes or relies on, so nothing in the spec depends on opening them;
+  they are provenance for a decision, not a reference you must follow.
+  This is the same arrangement AGENTS.md already records for the FR-xx and
+  NFR-xx numbering, which those archived documents also originate.
+- **It is therefore self-contained, and says so.** Its header claims a
+  browser and a computer that have never read the scimux-rv repository can
+  be implemented from it plus the vectors. That claim is the reason the
+  dangling names above are tolerable: follow the quotation, not the
+  filename.
+
 ## Future rv vector revision
 
 Use the four steps below. Start from a source tree with no uncommitted
