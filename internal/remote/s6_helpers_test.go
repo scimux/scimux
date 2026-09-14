@@ -9,7 +9,7 @@ import (
 )
 
 // Vector recipient from docs/protocol testdata/vectors/constructions.json
-// (envelope-seal-p256). Tests only; the seam must not read this file.
+// (envelope-seal-pairing-p256). Tests only; the seam must not read this file.
 const (
 	s6VectorRecipientPubHex  = "046a8620064ea5a5629fefc1762c3b84a2aba64bfacdbd50a5719f9383bb2bc8f488c9c7c4586f5c5d0523829105d90409ba6b56c208b69add3182430b9120a354"
 	s6VectorRecipientPrivHex = "3232323232323232323232323232323232323232323232323232323232323200"

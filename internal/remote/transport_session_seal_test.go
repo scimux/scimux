@@ -10,7 +10,7 @@ package remote
 //
 // §12.2.2 adds the static-static agreement, so the key exists only for a
 // party that holds the sender's private key. These rows are pinned to the
-// checked-in envelope-seal-v2-p256 vector, which was produced by the
+// checked-in envelope-seal-session-p256 vector, which was produced by the
 // specification rather than by this code, so opening it is evidence and not
 // a round trip.
 
@@ -25,11 +25,11 @@ import (
 func sessionSealVector(t *testing.T) vector {
 	t.Helper()
 	for _, v := range loadVectors(t, "S6-envelope") {
-		if v.ID == "envelope-seal-v2-p256" {
+		if v.ID == "envelope-seal-session-p256" {
 			return v
 		}
 	}
-	t.Fatal("S6-envelope: the envelope-seal-v2-p256 vector is absent")
+	t.Fatal("S6-envelope: the envelope-seal-session-p256 vector is absent")
 	return vector{}
 }
 
@@ -111,11 +111,12 @@ func TestSessionSealBindsTheSenderItDerives(t *testing.T) {
 	}
 }
 
-// TestSessionSealIsNotInterchangeableWithV1 is the no-downgrade property.
+// TestSessionSealIsNotInterchangeableWithPairing is the no-downgrade property.
 // The two constructions share a wire shape by design, so nothing but the
-// derivation stops a v1 blob from being accepted where a v2 one is required.
-// If that ever became possible, an attacker would simply seal v1.
-func TestSessionSealIsNotInterchangeableWithV1(t *testing.T) {
+// derivation stops a pairing blob from being accepted where a session one is
+// required. If that ever became possible, an attacker would simply seal the
+// pairing construction.
+func TestSessionSealIsNotInterchangeableWithPairing(t *testing.T) {
 	v := sessionSealVector(t)
 	recipientPub := mustHex(t, "recipient_pub_hex", v.RecipientPubHex)
 	recipientPriv := mustHex(t, "recipient_priv_hex", v.RecipientPrivHex)
@@ -123,20 +124,20 @@ func TestSessionSealIsNotInterchangeableWithV1(t *testing.T) {
 	senderPub := mustHex(t, "sender_pub_hex", v.SenderPubHex)
 	inner := SessionInner{V: ProtocolVersion, Type: sessionOfferType, SDP: "v=0", Fingerprint: "sha-256 AA:BB"}
 
-	v1, err := sealV1(inner, recipientPub, DefaultOrigin, s6VectorRID)
+	pairing, err := sealPairing(inner, recipientPub, DefaultOrigin, s6VectorRID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenSessionEnvelope(v1, recipientPriv, senderPub, DefaultOrigin, s6VectorRID); err == nil {
-		t.Fatal("a v1 envelope opened as an authenticated session envelope")
+	if _, err := OpenSessionEnvelope(pairing, recipientPriv, senderPub, DefaultOrigin, s6VectorRID); err == nil {
+		t.Fatal("a pairing envelope opened as an authenticated session envelope")
 	}
 
-	v2, err := SealSessionEnvelope(inner, recipientPub, senderPriv, DefaultOrigin, s6VectorRID)
+	session, err := SealSessionEnvelope(inner, recipientPub, senderPriv, DefaultOrigin, s6VectorRID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openV1(v2, recipientPriv, DefaultOrigin, s6VectorRID); err == nil {
-		t.Fatal("a v2 envelope opened as an anonymous v1 envelope")
+	if _, err := openPairing(session, recipientPriv, DefaultOrigin, s6VectorRID); err == nil {
+		t.Fatal("a session envelope opened as an anonymous pairing envelope")
 	}
 }
 

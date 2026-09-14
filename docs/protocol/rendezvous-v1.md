@@ -108,8 +108,8 @@ replay.
 | `pairing-transcript` | construction | — | SAS input |
 | `pairing-sas` | construction | — | 6-digit numeric comparison |
 | `envelope-inner` | construction | — | plaintext inside the seal |
-| `envelope-seal` | construction | — | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
-| `envelope-seal-v2` | construction | — | two ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
+| `envelope-seal-pairing` | construction | — | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
+| `envelope-seal-session` | construction | — | two ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
 | `p-page` | bootstrap | `GET /p` | device → rv |
 | `p-boot-js` | bootstrap | `GET /p/boot.js` | device → rv |
 | `p-boot-css` | bootstrap | `GET /p/boot.css` | device → rv |
@@ -854,16 +854,22 @@ Two constructions, and which one a message uses is fixed by its
 
 | message | seal | authenticates sender |
 |---|---|---|
-| `pair-offer` | **v1**, §12.2.1 | no — see below |
-| `pair-reply` | **v1**, §12.2.1 | no — see below |
-| `session-offer` | **v2**, §12.2.2 | yes |
-| `session-answer` | **v2**, §12.2.2 | yes |
+| `pair-offer` | **pairing**, §12.2.1 | no — see below |
+| `pair-reply` | **pairing**, §12.2.1 | no — see below |
+| `session-offer` | **session**, §12.2.2 | yes |
+| `session-answer` | **session**, §12.2.2 | yes |
+
+The two names are the two jobs, not two versions of one thing. This
+document is the protocol, `v=1` on the wire is its version, and
+neither seal moves that number; a seal named after the phase it
+serves cannot be mistaken for a compatibility step to be climbed.
 
 There is no runtime choice and no fallback. A `session-answer` that
-will not open under v2 is a failed session, not a retry under v1;
-accepting either would let an attacker pick the weaker one.
+will not open under the session seal is a failed session, not a
+retry under the pairing seal; accepting either would let an attacker
+pick the weaker one.
 
-Pairing stays on v1 because at pair time there is no established
+Pairing uses the weaker seal because at pair time there is no established
 identity to authenticate. The computer has not yet met the device —
 `Y` arrives *inside* the `pair-offer`, so the computer cannot derive
 a key that depends on it — and authenticating the introduction is
@@ -871,7 +877,7 @@ exactly what §11's SAS does, out of band, with a human comparing
 digits. Once pairing has completed, both sides hold the other's
 static key and every session envelope is authenticated by it.
 
-#### 12.2.1 v1 — anonymous, ephemeral-static
+#### 12.2.1 The pairing seal — anonymous, ephemeral-static
 
 Ephemeral-static ECIES, P-256, HKDF-SHA-256, AES-256-GCM.
 A **fresh** ephemeral private key is required for every seal.
@@ -881,8 +887,8 @@ Reusing one across messages reuses the 12-byte nonce space.
 e        = ephemeral P-256 private   // fresh CSPRNG per seal
 E        = e.Public (uncompressed, 65 bytes)
 shared   = ECDH(e, recipient_static)
-info     = "seal" || 0x00 || E || 0x00 || recipient_static
-key      = HKDF-SHA-256(ikm=shared, salt="scimux-rv/envelope/v1",
+info     = "seal-pairing" || 0x00 || E || 0x00 || recipient_static
+key      = HKDF-SHA-256(ikm=shared, salt="scimux-rv/envelope/pairing",
                         info=info, L=32)
 nonce    = 12 CSPRNG bytes
 ad       = origin || 0x00 || rid_hex
@@ -894,7 +900,7 @@ sealed   = E || nonce || ct        // ct includes the 16-byte tag
 so a transplanted ephemeral cannot open a blob sealed to a
 different recipient (unknown-key-share / cross-context reuse).
 Recipient opens with its static private and `E`. Vector
-`envelope-seal-p256` (`ephemeral_priv_hex` is a fixture).
+`envelope-seal-pairing-p256` (`ephemeral_priv_hex` is a fixture).
 
 The sender's own key is **not** an input. Anyone holding the
 recipient's public key can produce a blob that opens correctly, so a
@@ -905,7 +911,7 @@ it is why §12.2.2 exists for everything after.
 Pairing QR offer: phone seals to `X` from the fragment. Pairing
 reply: computer seals to `Y` from the offer.
 
-#### 12.2.2 v2 — sender-authenticated, static+ephemeral
+#### 12.2.2 The session seal — sender-authenticated, static+ephemeral
 
 Session envelopes only. Same primitives, same wire shape, one extra
 ECDH. This is the Noise `K` one-way pattern (`-> e, es, ss`).
@@ -917,9 +923,9 @@ S        = sender static public      (uncompressed, 65 bytes)
 R        = recipient static public   (uncompressed, 65 bytes)
 shared_e = ECDH(e, R)
 shared_s = ECDH(sender_static_private, R)
-info     = "seal-v2" || 0x00 || E || 0x00 || R || 0x00 || S
+info     = "seal-session" || 0x00 || E || 0x00 || R || 0x00 || S
 key      = HKDF-SHA-256(ikm=shared_e || shared_s,
-                        salt="scimux-rv/envelope/v2",
+                        salt="scimux-rv/envelope/session",
                         info=info, L=32)
 nonce    = 12 CSPRNG bytes
 ad       = origin || 0x00 || rid_hex
@@ -947,7 +953,7 @@ be cached, so a retry is an HKDF and a GCM open, not an ECDH. What it
 MUST NOT do is put a sender hint on the wire: that would hand rv a
 stable device identifier, which §8 does not permit.
 
-Vector `envelope-seal-v2-p256` (`ephemeral_priv_hex` and
+Vector `envelope-seal-session-p256` (`ephemeral_priv_hex` and
 `sender_priv_hex` are fixtures).
 
 Session offer: phone seals to computer `X`, sender `Y`. Session
@@ -960,7 +966,7 @@ attacker holding the *recipient's* static private key can forge
 messages from any sender to that recipient, because `shared_s` is
 computable from it. Resistance to that needs a signature and is not
 provided. The payload has no forward secrecy against recipient key
-compromise, which was equally true of v1. Replay is prevented by the
+compromise, which was equally true of the pairing seal. Replay is prevented by the
 AD, not by the KDF: `rid_hex` is 32 CSPRNG bytes minted per
 rendezvous and never reused, so a blob replayed into any other
 rendezvous fails the tag.
@@ -1149,8 +1155,8 @@ kind-specific fields. A file is a JSON array. Kinds:
 | `ed25519` | sign and verify from the seed |
 | `handle`, `rid`, `pairing-code` | recompute the encoding |
 | `rid-collision-retry` | **test-only** seeded retry; not a minting rule |
-| `envelope-seal` | seal and open. Field `ephemeral_priv_hex` is a fixture so the ciphertext is reproducible. A client MUST draw a fresh ephemeral per seal. |
-| `envelope-seal-v2` | seal and open as §12.2.2. `ephemeral_priv_hex` and `sender_priv_hex` are fixtures; a client MUST draw a fresh ephemeral per seal. Opening under any static other than `sender_pub_hex` MUST fail. |
+| `envelope-seal-pairing` | seal and open. Field `ephemeral_priv_hex` is a fixture so the ciphertext is reproducible. A client MUST draw a fresh ephemeral per seal. |
+| `envelope-seal-session` | seal and open as §12.2.2. `ephemeral_priv_hex` and `sender_priv_hex` are fixtures; a client MUST draw a fresh ephemeral per seal. Opening under any static other than `sender_pub_hex` MUST fail. |
 | `pairing-transcript`, `pairing-sas` | recompute HKDF |
 | `envelope-inner` | required JSON fields |
 | `http` | if the request path is registered, **replay** through `newAdmissionHandler` and compare `dumpResponse` (status + sorted headers + body). Otherwise declarative. Expected responses for built admission routes are authored from §4, not recorded from the handler. `/p` inventory rows become replayed once those GET routes are registered. |

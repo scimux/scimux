@@ -595,10 +595,10 @@ func executeVector(t *testing.T, v vector, meta specMeta) {
 		executeRID(t, v)
 	case "rid-collision-retry":
 		executeRIDCollision(t, v)
-	case "envelope-seal":
-		executeEnvelopeSeal(t, v)
-	case "envelope-seal-v2":
-		executeEnvelopeSealV2(t, v)
+	case "envelope-seal-pairing":
+		executeEnvelopeSealPairing(t, v)
+	case "envelope-seal-session":
+		executeEnvelopeSealSession(t, v)
 	case "pairing-sas", "pairing-transcript":
 		executePairingSAS(t, v)
 	case "pairing-code":
@@ -753,12 +753,12 @@ func testOnlyDeriveRID(seed []byte, attempt int) []byte {
 	return h.Sum(nil)
 }
 
-// executeEnvelopeSealV2 runs both directions and the negative. The negative
+// executeEnvelopeSealSession runs both directions and the negative. The negative
 // is the finding: under §12.2.1 every static opened the blob, so a row that
 // only checked the positive would have passed against the defect.
-func executeEnvelopeSealV2(t *testing.T, v vector) {
+func executeEnvelopeSealSession(t *testing.T, v vector) {
 	t.Helper()
-	sealed, err := specSealV2(v)
+	sealed, err := specSealSession(v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func executeEnvelopeSealV2(t *testing.T, v vector) {
 	if !bytes.Equal(sealed, want) {
 		t.Fatalf("sealed\n got %x\nwant %x", sealed, want)
 	}
-	plain, err := specOpenV2(v, v.SenderPubHex)
+	plain, err := specOpenSession(v, v.SenderPubHex)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -780,12 +780,12 @@ func executeEnvelopeSealV2(t *testing.T, v vector) {
 	if !bytes.Equal(plain, wantPlain) {
 		t.Fatalf("opened plaintext\n got %x\nwant %x", plain, wantPlain)
 	}
-	if _, err := specOpenV2(v, v.EphemeralPubHex); err == nil {
+	if _, err := specOpenSession(v, v.EphemeralPubHex); err == nil {
 		t.Fatal("the envelope opened under a static that did not seal it")
 	}
 }
 
-func executeEnvelopeSeal(t *testing.T, v vector) {
+func executeEnvelopeSealPairing(t *testing.T, v vector) {
 	t.Helper()
 	sealed, err := specSeal(v)
 	if err != nil {
@@ -846,7 +846,7 @@ func specSeal(v vector) ([]byte, error) {
 		return nil, err
 	}
 	ePub := priv.PublicKey().Bytes()
-	key, err := hkdf.Key(sha256.New, shared, []byte("scimux-rv/envelope/v1"), sealInfo(ePub, pubBytes), 32)
+	key, err := hkdf.Key(sha256.New, shared, []byte("scimux-rv/envelope/pairing"), pairingSpecSealInfo(ePub, pubBytes), 32)
 	if err != nil {
 		return nil, err
 	}
@@ -863,9 +863,9 @@ func specSeal(v vector) ([]byte, error) {
 	return out, nil
 }
 
-func sealInfo(ePub, recipientStatic []byte) string {
+func pairingSpecSealInfo(ePub, recipientStatic []byte) string {
 	var b []byte
-	b = append(b, []byte("seal")...)
+	b = append(b, []byte("seal-pairing")...)
 	b = append(b, 0)
 	b = append(b, ePub...)
 	b = append(b, 0)
@@ -873,12 +873,12 @@ func sealInfo(ePub, recipientStatic []byte) string {
 	return string(b)
 }
 
-// sealInfoV2 is §12.2.2's info, written from the spec's literals like
-// sealInfo above it. A helper that called the product's sessionSealInfo
+// sessionSpecSealInfo is §12.2.2's info, written from the spec's literals
+// like pairingSpecSealInfo above it. A helper that called the product's sessionSealInfo
 // would make this file a round trip rather than an oracle.
-func sealInfoV2(ePub, recipientStatic, senderStatic []byte) string {
+func sessionSpecSealInfo(ePub, recipientStatic, senderStatic []byte) string {
 	var b []byte
-	b = append(b, []byte("seal-v2")...)
+	b = append(b, []byte("seal-session")...)
 	b = append(b, 0)
 	b = append(b, ePub...)
 	b = append(b, 0)
@@ -888,10 +888,10 @@ func sealInfoV2(ePub, recipientStatic, senderStatic []byte) string {
 	return string(b)
 }
 
-func specGCMV2(ePub, recipientStatic, senderStatic, sharedE, sharedS []byte) (cipher.AEAD, error) {
+func specGCMSession(ePub, recipientStatic, senderStatic, sharedE, sharedS []byte) (cipher.AEAD, error) {
 	ikm := append(append([]byte{}, sharedE...), sharedS...)
-	key, err := hkdf.Key(sha256.New, ikm, []byte("scimux-rv/envelope/v2"),
-		sealInfoV2(ePub, recipientStatic, senderStatic), 32)
+	key, err := hkdf.Key(sha256.New, ikm, []byte("scimux-rv/envelope/session"),
+		sessionSpecSealInfo(ePub, recipientStatic, senderStatic), 32)
 	if err != nil {
 		return nil, err
 	}
@@ -902,7 +902,7 @@ func specGCMV2(ePub, recipientStatic, senderStatic, sharedE, sharedS []byte) (ci
 	return cipher.NewGCM(block)
 }
 
-func specSealV2(v vector) ([]byte, error) {
+func specSealSession(v vector) ([]byte, error) {
 	curve := ecdh.P256()
 	ephBytes, err := hex.DecodeString(v.EphemeralPrivHex)
 	if err != nil {
@@ -952,7 +952,7 @@ func specSealV2(v vector) ([]byte, error) {
 		return nil, err
 	}
 	ePub := eph.PublicKey().Bytes()
-	gcm, err := specGCMV2(ePub, pubBytes, sender.PublicKey().Bytes(), sharedE, sharedS)
+	gcm, err := specGCMSession(ePub, pubBytes, sender.PublicKey().Bytes(), sharedE, sharedS)
 	if err != nil {
 		return nil, err
 	}
@@ -960,10 +960,10 @@ func specSealV2(v vector) ([]byte, error) {
 	return append(append(append([]byte{}, ePub...), nonce...), ct...), nil
 }
 
-// specOpenV2 takes the expected sender separately from the vector so that
+// specOpenSession takes the expected sender separately from the vector so that
 // naming the wrong one is expressible. That is the whole point of §12.2.2,
 // and a helper that read sender_pub_hex internally could not express it.
-func specOpenV2(v vector, senderPubHex string) ([]byte, error) {
+func specOpenSession(v vector, senderPubHex string) ([]byte, error) {
 	curve := ecdh.P256()
 	privBytes, err := hex.DecodeString(v.RecipientPrivHex)
 	if err != nil {
@@ -1011,7 +1011,7 @@ func specOpenV2(v vector, senderPubHex string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := specGCMV2(sealed[:65], recipPub, senderBytes, sharedE, sharedS)
+	gcm, err := specGCMSession(sealed[:65], recipPub, senderBytes, sharedE, sharedS)
 	if err != nil {
 		return nil, err
 	}
@@ -1054,7 +1054,7 @@ func specOpen(v vector) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := hkdf.Key(sha256.New, shared, []byte("scimux-rv/envelope/v1"), sealInfo(sealed[:65], recipPub), 32)
+	key, err := hkdf.Key(sha256.New, shared, []byte("scimux-rv/envelope/pairing"), pairingSpecSealInfo(sealed[:65], recipPub), 32)
 	if err != nil {
 		return nil, err
 	}

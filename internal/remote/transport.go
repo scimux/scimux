@@ -66,25 +66,28 @@ const (
 	sessionAnswerType = "session-answer"
 )
 
-// envelopeSaltV1 and envelopeSealLabel are the §12.2 HKDF salt and the
+// pairingSealSalt and pairingSealLabel are the §12.2.1 HKDF salt and the
 // info prefix. The vectors in testdata/vectors/constructions.json
-// (envelope-seal-p256) are the authority; protocol_vectors_test.go executes
-// them against an independent implementation of the same construction.
+// (envelope-seal-pairing-p256) are the authority; protocol_vectors_test.go
+// executes them against an independent implementation of the same
+// construction.
 const (
-	envelopeSaltV1    = "scimux-rv/envelope/v1"
-	envelopeSealLabel = "seal"
+	pairingSealSalt  = "scimux-rv/envelope/pairing"
+	pairingSealLabel = "seal-pairing"
 )
 
-// envelopeSaltV2 and sessionSealLabel are the §12.2.2 HKDF salt and info
-// prefix. The vector is envelope-seal-v2-p256.
+// sessionSealSalt and sessionSealLabel are the §12.2.2 HKDF salt and info
+// prefix. The vector is envelope-seal-session-p256.
 //
-// The two constructions are separate named functions rather than one with an
-// optional sender, because an optional sender is a downgrade waiting for a
-// caller to omit it. There is no argument list that produces an anonymous
-// session envelope and no runtime fallback to v1.
+// The names are the two jobs, not two versions of one protocol: the pairing
+// seal is what an introduction can use, the session seal is what everything
+// after it must use. The two constructions are separate named functions
+// rather than one with an optional sender, because an optional sender is a
+// downgrade waiting for a caller to omit it. There is no argument list that
+// produces an anonymous session envelope and no runtime fallback.
 const (
-	envelopeSaltV2   = "scimux-rv/envelope/v2"
-	sessionSealLabel = "seal-v2"
+	sessionSealSalt  = "scimux-rv/envelope/session"
+	sessionSealLabel = "seal-session"
 )
 
 // p256UncompressedLen is the length of an uncompressed P-256 point, which
@@ -262,13 +265,13 @@ func envelopeAD(origin, rid string) []byte {
 	return ad
 }
 
-// envelopeSealInfo is the HKDF info: the label, the ephemeral public key,
+// pairingSealInfo is the HKDF info: the label, the ephemeral public key,
 // and the recipient's static public key, NUL-separated. Both keys are in
 // the info so a key-substituting hub derives a different key and the open
 // fails.
-func envelopeSealInfo(ephemeralPub, recipientStatic []byte) string {
-	b := make([]byte, 0, len(envelopeSealLabel)+2+len(ephemeralPub)+len(recipientStatic))
-	b = append(b, envelopeSealLabel...)
+func pairingSealInfo(ephemeralPub, recipientStatic []byte) string {
+	b := make([]byte, 0, len(pairingSealLabel)+2+len(ephemeralPub)+len(recipientStatic))
+	b = append(b, pairingSealLabel...)
 	b = append(b, 0)
 	b = append(b, ephemeralPub...)
 	b = append(b, 0)
@@ -277,7 +280,7 @@ func envelopeSealInfo(ephemeralPub, recipientStatic []byte) string {
 }
 
 func envelopeKey(shared, ephemeralPub, recipientStatic []byte) (cipher.AEAD, error) {
-	key, err := hkdf.Key(sha256.New, shared, []byte(envelopeSaltV1), envelopeSealInfo(ephemeralPub, recipientStatic), 32)
+	key, err := hkdf.Key(sha256.New, shared, []byte(pairingSealSalt), pairingSealInfo(ephemeralPub, recipientStatic), 32)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +366,7 @@ func sessionSealKey(sharedE, sharedS, ephemeralPub, recipientStatic, senderStati
 	ikm := make([]byte, 0, len(sharedE)+len(sharedS))
 	ikm = append(ikm, sharedE...)
 	ikm = append(ikm, sharedS...)
-	key, err := hkdf.Key(sha256.New, ikm, []byte(envelopeSaltV2),
+	key, err := hkdf.Key(sha256.New, ikm, []byte(sessionSealSalt),
 		sessionSealInfo(ephemeralPub, recipientStatic, senderStatic), 32)
 	if err != nil {
 		return nil, err

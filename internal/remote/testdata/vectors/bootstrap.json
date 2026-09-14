@@ -168,11 +168,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:gG+Wokb89hpVr5Ej6Gz2Znj9LCXPZIFS801ufUpAM7A=:",
+        "Digest": "sha-256=:2PRjajyUz71INakyJd3X6k+jkV4icldJ9SQ+rmTV8B0=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "806f96a246fcf61a55af9123e86cf66678fd2c25cf648152f34d6e7d4a4033b0"
+      "body_sha256": "d8f4636a3c94cfbd4835a93225ddd7ea4fa3915e22725749f5243eae64d5f01d"
     }
   },
   {

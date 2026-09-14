@@ -120,7 +120,7 @@ func TestTheAnswerIsNotOpenableAsAnonymous(t *testing.T) {
 	rv.QueueEnvelope(rid, sealed)
 
 	reply := awaitReply(t, rv, 8*time.Second)
-	if _, err := openV1(reply, devPriv.Bytes(), DefaultOrigin, rid); err == nil {
+	if _, err := openPairing(reply, devPriv.Bytes(), DefaultOrigin, rid); err == nil {
 		t.Fatal("the computer's answer opened as an anonymous §12.2.1 envelope")
 	}
 	stranger, err := ecdh.P256().GenerateKey(rand.Reader)
@@ -132,10 +132,11 @@ func TestTheAnswerIsNotOpenableAsAnonymous(t *testing.T) {
 	}
 }
 
-// TestAV1OfferIsNoLongerAnswered is the no-downgrade row at the path. The
+// TestAPairingSealedOfferIsNoLongerAnswered is the no-downgrade row at the
+// path. The
 // wire shape is identical, so nothing but the derivation distinguishes the
 // two; if a fallback ever reappeared, the attack would simply seal §12.2.1.
-func TestAV1OfferIsNoLongerAnswered(t *testing.T) {
+func TestAPairingSealedOfferIsNoLongerAnswered(t *testing.T) {
 	rv := newSessionRV(t)
 	_, devPub := deviceKeypair(t)
 	c, rid := enrolledClientWithDevice(t, rv, devPub)
@@ -148,7 +149,7 @@ func TestAV1OfferIsNoLongerAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := sealV1(dev.offer, x, DefaultOrigin, rid)
+	sealed, err := sealPairing(dev.offer, x, DefaultOrigin, rid)
 	if err != nil {
 		t.Fatal(err)
 	}
