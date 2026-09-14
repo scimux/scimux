@@ -353,7 +353,7 @@ async function checkPairingSAS(v) {
   if (v.kind === "pairing-sas") assert.equal(sas, v.sas, `${v.id}: sas`);
 }
 
-async function checkEnvelopeSeal(v) {
+async function checkEnvelopeSealPairing(v) {
   const ePriv = hexToBytes(v.ephemeral_priv_hex);
   const recipPub = hexToBytes(v.recipient_pub_hex);
   const nonce = hexToBytes(v.nonce_hex);
@@ -372,8 +372,60 @@ async function checkEnvelopeSeal(v) {
   if (v.ephemeral_pub_hex) {
     assert.equal(bytesToHex(ePub), v.ephemeral_pub_hex, `${v.id}: ephemeral_pub`);
   }
-  const info = concatBytes(utf8("seal"), new Uint8Array([0]), ePub, new Uint8Array([0]), recipPub);
-  const keyBytes = await hkdfSha256(shared, utf8("scimux-rv/envelope/v1"), info, 32);
+  const info = concatBytes(utf8("seal-pairing"), new Uint8Array([0]), ePub, new Uint8Array([0]), recipPub);
+  const keyBytes = await hkdfSha256(shared, utf8("scimux-rv/envelope/pairing"), info, 32);
+  const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, additionalData: ad, tagLength: 128 },
+    cryptoKey,
+    plain,
+  ));
+  const sealed = concatBytes(ePub, nonce, ct);
+  assert.ok(equalBytes(sealed, hexToBytes(v.sealed_hex)), `${v.id}: sealed mismatch`);
+}
+
+// p256Public derives the uncompressed point for a raw scalar. WebCrypto has
+// no direct route, so the scalar is imported as PKCS#8 and exported as JWK —
+// the same detour checkEnvelopeSealPairing takes for the ephemeral.
+async function p256Public(priv) {
+  const k = await crypto.subtle.importKey(
+    "pkcs8",
+    concatBytes(P256_PKCS8_PREFIX, priv),
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveBits"],
+  );
+  const jwk = await crypto.subtle.exportKey("jwk", k);
+  return concatBytes(new Uint8Array([0x04]), base64urlToBytes(jwk.x), base64urlToBytes(jwk.y));
+}
+
+async function checkEnvelopeSealSession(v) {
+  const ePriv = hexToBytes(v.ephemeral_priv_hex);
+  const senderPriv = hexToBytes(v.sender_priv_hex);
+  const recipPub = hexToBytes(v.recipient_pub_hex);
+  const nonce = hexToBytes(v.nonce_hex);
+  const plain = hexToBytes(v.plaintext_hex);
+  const ad = hexToBytes(v.ad_hex);
+
+  const ePub = await p256Public(ePriv);
+  const senderPub = await p256Public(senderPriv);
+  if (v.ephemeral_pub_hex) {
+    assert.equal(bytesToHex(ePub), v.ephemeral_pub_hex, `${v.id}: ephemeral_pub`);
+  }
+  // The sender's point is asserted rather than taken from the vector: S goes
+  // into the info, so a vector whose sender_pub_hex did not belong to
+  // sender_priv_hex would describe a construction nobody can reproduce.
+  assert.equal(bytesToHex(senderPub), v.sender_pub_hex, `${v.id}: sender_pub`);
+
+  const sharedE = await ecdhP256(ePriv, recipPub);
+  const sharedS = await ecdhP256(senderPriv, recipPub);
+  const info = concatBytes(
+    utf8("seal-session"), new Uint8Array([0]),
+    ePub, new Uint8Array([0]),
+    recipPub, new Uint8Array([0]),
+    senderPub,
+  );
+  const keyBytes = await hkdfSha256(concatBytes(sharedE, sharedS), utf8("scimux-rv/envelope/session"), info, 32);
   const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
   const ct = new Uint8Array(await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: nonce, additionalData: ad, tagLength: 128 },
@@ -495,8 +547,11 @@ async function executeVector(v) {
     case "pairing-transcript":
       await checkPairingSAS(v);
       return "construction";
-    case "envelope-seal":
-      await checkEnvelopeSeal(v);
+    case "envelope-seal-pairing":
+      await checkEnvelopeSealPairing(v);
+      return "construction";
+    case "envelope-seal-session":
+      await checkEnvelopeSealSession(v);
       return "construction";
     case "envelope-inner":
       checkEnvelopeInner(v);

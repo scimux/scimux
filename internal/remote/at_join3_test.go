@@ -75,13 +75,13 @@ func sessionRoundTrip(t *testing.T, rv *sessionRV, c *Client, rid string, devPri
 	if err != nil {
 		t.Fatalf("computer ECDH public: %v", err)
 	}
-	sealed, err := SealEnvelope(dev.offer, x, DefaultOrigin, rid)
+	sealed, err := SealSessionEnvelope(dev.offer, x, devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("seal offer: %v", err)
 	}
 	rv.QueueEnvelope(rid, sealed)
 
-	answer, err := OpenEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), DefaultOrigin, rid)
+	answer, err := OpenSessionEnvelope(awaitReply(t, rv, 8*time.Second), devPriv.Bytes(), x, DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("device could not open the computer's reply: %v", err)
 	}

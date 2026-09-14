@@ -34,6 +34,16 @@ go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
 ```
 
+- **No `${{ }}` inside a workflow `run:` block.** An expression is substituted
+  into the script as *text* before any shell parses it, so a ref name of
+  `v0$(id)` is a command the runner executes — and quoting in the YAML cannot
+  help, because the quotes are inside the text being substituted. Values reach
+  the shell through `env:`, where a substitution can only become a variable's
+  value, and a secret is declared on the one step that spends it rather than
+  at workflow level where `go test` inherits it. `release.yml` also bounds the
+  tag, in a step that runs before anything is built or published: a positive
+  `case` arm is not enough on its own, because a shell glob's `*` matches
+  shell syntax too. `internal/app/workflow_injection_test.go` pins all three.
 - The release matrix is not written down twice: `TestCrossBuildTargets` parses
   the `GOOS=… GOARCH=…` pairs out of `.forgejo/workflows/{build,release}.yml`,
   so a target added to a workflow is defended from that moment. freebsd/amd64

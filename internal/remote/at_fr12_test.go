@@ -37,10 +37,10 @@ func TestAT_FR_12_a_BothEndsSameSASFromTranscript(t *testing.T) {
 
 	// Device: ECDH(Ypriv, Xpub). Computer: ECDH(Xpriv, Ypub) with Ypub
 	// derived from sender_priv_hex. Xpriv is the S1 fixture private
-	// bound to the same recipient_pub (envelope-seal-p256), not invented.
-	seal := s7Construction(t, "envelope-seal-p256")
+	// bound to the same recipient_pub (envelope-seal-pairing-p256), not invented.
+	seal := s7Construction(t, "envelope-seal-pairing-p256")
 	if seal["recipient_pub_hex"] != trVec["recipient_pub_hex"] {
-		t.Fatalf("%s: envelope-seal-p256 recipient_pub is not the pairing X", at)
+		t.Fatalf("%s: envelope-seal-pairing-p256 recipient_pub is not the pairing X", at)
 	}
 	xPriv := s7Hex(t, seal["recipient_priv_hex"].(string))
 	deviceSAS, err := DerivePairingSAS(yPriv, xPub, wantTR)

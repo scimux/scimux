@@ -5,9 +5,12 @@ package remote
 // protocol_vectors_test.go (S1, Gate B) executes the specification with an
 // independent implementation of the same construction. That proves the
 // *spec* is executable; it says nothing about the code the product ships.
-// This file closes that gap: SealEnvelope and OpenEnvelope are pinned to
-// the checked-in envelope-seal-p256 vector, so a construction drift in
-// transport.go fails here rather than in the field.
+// This file closes that gap: the §12.2.1 seal is pinned to the checked-in
+// envelope-seal-pairing-p256 vector, so a construction drift in transport.go fails
+// here rather than in the field. Since finding 9 the only product caller of
+// that construction is pairing, so these rows exercise sealEnvelopeBytes and
+// openEnvelopeBytes — the functions pairing actually calls — rather than a
+// session wrapper kept alive for a test.
 
 import (
 	"bytes"
@@ -15,14 +18,32 @@ import (
 	"testing"
 )
 
+// sealPairing and openPairing lift the pairing-path bytes into §12.1 form so these
+// rows can keep asserting over a SessionInner.
+func sealPairing(inner SessionInner, recipientPub []byte, origin, rid string) ([]byte, error) {
+	plain, err := canonicalInner(inner)
+	if err != nil {
+		return nil, err
+	}
+	return sealEnvelopeBytes(plain, recipientPub, origin, rid)
+}
+
+func openPairing(sealed, recipientPriv []byte, origin, rid string) (SessionInner, error) {
+	plain, err := openEnvelopeBytes(sealed, recipientPriv, origin, rid)
+	if err != nil {
+		return SessionInner{}, err
+	}
+	return decodeSessionInner(plain)
+}
+
 func envelopeSealVector(t *testing.T) vector {
 	t.Helper()
 	for _, v := range loadVectors(t, "S6-envelope") {
-		if v.ID == "envelope-seal-p256" {
+		if v.ID == "envelope-seal-pairing-p256" {
 			return v
 		}
 	}
-	t.Fatal("S6-envelope: the envelope-seal-p256 vector is absent")
+	t.Fatal("S6-envelope: the envelope-seal-pairing-p256 vector is absent")
 	return vector{}
 }
 
@@ -47,9 +68,9 @@ func TestS6ProductOpensTheEnvelopeVector(t *testing.T) {
 		t.Fatalf("the product AD is not the vector's: %q vs %q", envelopeAD(DefaultOrigin, s6VectorRID), ad)
 	}
 
-	inner, err := OpenEnvelope(sealed, priv, DefaultOrigin, s6VectorRID)
+	inner, err := openPairing(sealed, priv, DefaultOrigin, s6VectorRID)
 	if err != nil {
-		t.Fatalf("OpenEnvelope on the spec's own bytes: %v", err)
+		t.Fatalf("openPairing on the spec's own bytes: %v", err)
 	}
 	if inner.V != ProtocolVersion || inner.Type != sessionOfferType {
 		t.Fatalf("opened inner = %+v, want a v%d session-offer", inner, ProtocolVersion)
@@ -83,26 +104,26 @@ func TestS6EnvelopeIsBoundToOriginAndRID(t *testing.T) {
 	}
 
 	inner := SessionInner{V: ProtocolVersion, Type: sessionOfferType, SDP: "v=0", Fingerprint: "sha-256 AA:BB"}
-	sealed, err := SealEnvelope(inner, pub, DefaultOrigin, s6VectorRID)
+	sealed, err := sealPairing(inner, pub, DefaultOrigin, s6VectorRID)
 	if err != nil {
-		t.Fatalf("SealEnvelope: %v", err)
+		t.Fatalf("sealPairing: %v", err)
 	}
-	if got, err := OpenEnvelope(sealed, priv, DefaultOrigin, s6VectorRID); err != nil || got != inner {
+	if got, err := openPairing(sealed, priv, DefaultOrigin, s6VectorRID); err != nil || got != inner {
 		t.Fatalf("round trip: %+v, %v", got, err)
 	}
 
 	otherRID := "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
-	if _, err := OpenEnvelope(sealed, priv, DefaultOrigin, otherRID); err == nil {
+	if _, err := openPairing(sealed, priv, DefaultOrigin, otherRID); err == nil {
 		t.Fatal("an envelope replayed onto another rendezvous id opened")
 	}
-	if _, err := OpenEnvelope(sealed, priv, "https://elsewhere.example", s6VectorRID); err == nil {
+	if _, err := openPairing(sealed, priv, "https://elsewhere.example", s6VectorRID); err == nil {
 		t.Fatal("an envelope opened under another origin")
 	}
 
 	// A flipped ciphertext byte must fail the tag, not decode to something.
 	tampered := append([]byte(nil), sealed...)
 	tampered[len(tampered)-1] ^= 0x01
-	if _, err := OpenEnvelope(tampered, priv, DefaultOrigin, s6VectorRID); err == nil {
+	if _, err := openPairing(tampered, priv, DefaultOrigin, s6VectorRID); err == nil {
 		t.Fatal("a tampered envelope opened")
 	}
 }
@@ -113,11 +134,11 @@ func TestS6EnvelopeIsBoundToOriginAndRID(t *testing.T) {
 func TestS6SealDrawsAFreshEphemeral(t *testing.T) {
 	pub, _ := s6Recipient(t)
 	inner := SessionInner{V: ProtocolVersion, Type: sessionOfferType, SDP: "v=0", Fingerprint: "sha-256 AA:BB"}
-	first, err := SealEnvelope(inner, pub, DefaultOrigin, s6VectorRID)
+	first, err := sealPairing(inner, pub, DefaultOrigin, s6VectorRID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := SealEnvelope(inner, pub, DefaultOrigin, s6VectorRID)
+	second, err := sealPairing(inner, pub, DefaultOrigin, s6VectorRID)
 	if err != nil {
 		t.Fatal(err)
 	}

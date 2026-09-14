@@ -91,7 +91,7 @@ func TestWaitOpensTheEnvelopeAndPostsASealedAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("device session offer: %v", err)
 	}
-	sealed, err := SealEnvelope(offer, x, DefaultOrigin, rid)
+	sealed, err := SealSessionEnvelope(offer, x, devPriv.Bytes(), DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("seal offer: %v", err)
 	}
@@ -99,10 +99,11 @@ func TestWaitOpensTheEnvelopeAndPostsASealedAnswer(t *testing.T) {
 
 	reply := awaitReply(t, rv, 8*time.Second)
 
-	// The reply must be a real §12.2 envelope sealed in the opposite
-	// direction: openable by the device's static key, under the same origin
-	// and rid. Anything else means the computer echoed or improvised.
-	answer, err := OpenEnvelope(reply, devPriv.Bytes(), DefaultOrigin, rid)
+	// The reply must be a real §12.2.2 envelope sealed in the opposite
+	// direction: openable by the device's static key, authenticated as the
+	// computer's own X, under the same origin and rid. Anything else means
+	// the computer echoed or improvised.
+	answer, err := OpenSessionEnvelope(reply, devPriv.Bytes(), x, DefaultOrigin, rid)
 	if err != nil {
 		t.Fatalf("device could not open the computer's reply: %v", err)
 	}

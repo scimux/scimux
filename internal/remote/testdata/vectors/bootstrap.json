@@ -14,11 +14,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/html; charset=utf-8",
-        "Digest": "sha-256=:ORq2NWHRxt61bVGc+rpUj2sOcIHq/N1TFF24SS47XQE=:",
+        "Digest": "sha-256=:tY5BRmTD08hfVRDgZ7cn8yvbhJpGO572mbonFogo+Y4=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"\u003e\n\u003cmeta name=color-scheme content=\"light dark\"\u003e\n\u003cmeta name=theme-color content=\"#1C1C1E\"\u003e\n\u003cmeta name=apple-mobile-web-app-capable content=yes\u003e\n\u003cmeta name=apple-mobile-web-app-status-bar-style content=black-translucent\u003e\n\u003cmeta name=apple-mobile-web-app-title content=scimux\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=manifest href=\"/p/manifest.webmanifest\"\u003e\n\u003clink rel=apple-touch-icon href=\"/p/icon-180.png\"\u003e\n\u003clink rel=icon href=\"/p/icon-512.png\"\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app aria-live=polite\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003cp class=busy aria-hidden=true\u003e\u003ci\u003e\u003c/i\u003e\u003c/p\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
+      "body_utf8": "\u003c!doctype html\u003e\n\u003cmeta charset=utf-8\u003e\n\u003cmeta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"\u003e\n\u003cmeta name=color-scheme content=\"light dark\"\u003e\n\u003cmeta name=theme-color content=\"#1C1C1E\"\u003e\n\u003cmeta name=apple-mobile-web-app-capable content=yes\u003e\n\u003cmeta name=apple-mobile-web-app-status-bar-style content=black-translucent\u003e\n\u003cmeta name=apple-mobile-web-app-title content=scimux\u003e\n\u003ctitle\u003ePair with scimux\u003c/title\u003e\n\u003clink rel=manifest href=\"/p/manifest.webmanifest\"\u003e\n\u003clink rel=apple-touch-icon href=\"/p/icon-180.png\"\u003e\n\u003clink rel=icon href=\"/p/icon-512.png\"\u003e\n\u003clink rel=stylesheet href=\"/p/boot.css\"\u003e\n\u003cmain id=app class=wait aria-live=polite\u003e\u003csvg class=orbit viewBox=\"100 100 800 819\" aria-hidden=true\u003e\u003cdefs\u003e\u003clinearGradient id=orbit-petrol x1=20% y1=0% x2=80% y2=100%\u003e\u003cstop offset=0% stop-color=#13A4B1 /\u003e\u003cstop offset=58% stop-color=#0E7C86 /\u003e\u003cstop offset=100% stop-color=#0A6F78 /\u003e\u003c/linearGradient\u003e\u003clinearGradient id=orbit-light x1=0% y1=0% x2=100% y2=100%\u003e\u003cstop offset=0% stop-color=#A8E1EB /\u003e\u003cstop offset=100% stop-color=#BFEAF0 /\u003e\u003c/linearGradient\u003e\u003cradialGradient id=orbit-disc cx=35% cy=28% r=82%\u003e\u003cstop offset=0% stop-color=#14A7B4 /\u003e\u003cstop offset=62% stop-color=#0E7C86 /\u003e\u003cstop offset=100% stop-color=#0A7079 /\u003e\u003c/radialGradient\u003e\u003c/defs\u003e\u003cg class=ring fill=none stroke-linecap=round stroke-width=92\u003e\u003cpath d=\"M 267.362,732.638 A 329,329 0 0 1 500,171\" stroke=\"url(#orbit-light)\" /\u003e\u003cpath d=\"M 500,171 A 329,329 0 1 1 267.362,732.638\" stroke=\"url(#orbit-petrol)\" /\u003e\u003ccircle cx=500 cy=171 r=71 fill=\"url(#orbit-petrol)\" stroke=none /\u003e\u003c/g\u003e\u003crect x=452 y=590 width=96 height=329 rx=48 fill=\"url(#orbit-disc)\" /\u003e\u003ccircle cx=500 cy=500 r=179 fill=\"url(#orbit-disc)\" /\u003e\u003c/svg\u003e\u003ch1\u003ePair with scimux\u003c/h1\u003e\u003c/main\u003e\n\u003cscript type=module src=\"/p/start.js\"\u003e\u003c/script\u003e\n"
     }
   },
   {
@@ -36,11 +36,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "text/css; charset=utf-8",
-        "Digest": "sha-256=:+G5B0YBwmrY1V0R5Kg43pfj3GQBi9vpJ/p6jwq32gX4=:",
+        "Digest": "sha-256=:KjQDKlDu9Rdkz2DlQc0hEnTky2eUN+ug5J/AOovPt+M=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "f86e41d180709ab6355744792a0e37a5f8f7190062f6fa49fe9ea3c2adf6817e"
+      "body_sha256": "2a34032a50eef51764cf60e541cd211274e4cb679437eba0e49fc03a8bcfb7e3"
     }
   },
   {
@@ -124,11 +124,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:eQo5yMmlDvKQ0i9UyeT7rRlTUkbCz0uJL6TjD/qm8zI=:",
+        "Digest": "sha-256=:b+pIBKsEVQ6EexkuqVzKSaLh1pg1DxyrMhurIN4A548=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "790a39c8c9a50ef290d22f54c9e4fbad19535246c2cf4b892fa4e30ffaa6f332"
+      "body_sha256": "6fea4804ab04550e847b192ea95cca49a2e1d698350f1cab321bab20de00e78f"
     }
   },
   {
@@ -168,11 +168,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:xMf2wDDByDpuu0bYqGGmGxuuX11BMY8gBFVj0VqaeIE=:",
+        "Digest": "sha-256=:2PRjajyUz71INakyJd3X6k+jkV4icldJ9SQ+rmTV8B0=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "c4c7f6c030c1c83a6ebb46d8a861a61b1bae5f5d41318f20045563d15a9a7881"
+      "body_sha256": "d8f4636a3c94cfbd4835a93225ddd7ea4fa3915e22725749f5243eae64d5f01d"
     }
   },
   {
@@ -212,11 +212,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/javascript; charset=utf-8",
-        "Digest": "sha-256=:OpG+/wNjK79otCye4U2hy0dGOEb940gtsb70R/3bV+w=:",
+        "Digest": "sha-256=:nWBwknXzMiS0YOWY5k0j+LaJn6aj8y5vOP0ypVLJA0k=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "3a91beff03632bbf68b42c9ee14da1cb47463846fde3482db1bef447fddb57ec"
+      "body_sha256": "9d60709275f33224b460e598e64d23f8b6899fa6a3f32e6f38fd32a552c90349"
     }
   },
   {
@@ -256,11 +256,11 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "application/manifest+json; charset=utf-8",
-        "Digest": "sha-256=:DWUsMlTNjVsF6BZi6vpJq5N3Z3BM1fJWCOJX0sWepNE=:",
+        "Digest": "sha-256=:bpp/lm2V6Zys8vyAVdqkrZmxMqCT6QpKi9CGuCtWpVA=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_utf8": "{\n  \"name\": \"Pair with scimux\",\n  \"short_name\": \"scimux\",\n  \"description\": \"Reach your own computer from this device.\",\n  \"start_url\": \"/p\",\n  \"scope\": \"/p\",\n  \"display\": \"standalone\",\n  \"orientation\": \"portrait\",\n  \"background_color\": \"#1C1C1E\",\n  \"theme_color\": \"#1C1C1E\",\n  \"icons\": [\n    { \"src\": \"/p/icon-180.png\", \"sizes\": \"180x180\", \"type\": \"image/png\" },\n    { \"src\": \"/p/icon-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any maskable\" }\n  ]\n}\n"
+      "body_utf8": "{\n  \"name\": \"Pair with scimux\",\n  \"short_name\": \"scimux\",\n  \"description\": \"Reach your own computer from this device.\",\n  \"start_url\": \"/p\",\n  \"scope\": \"/p\",\n  \"display\": \"standalone\",\n  \"orientation\": \"portrait\",\n  \"background_color\": \"#1C1C1E\",\n  \"theme_color\": \"#1C1C1E\",\n  \"icons\": [\n    { \"src\": \"/p/icon-180.png\", \"sizes\": \"180x180\", \"type\": \"image/png\" },\n    { \"src\": \"/p/icon-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any\" },\n    { \"src\": \"/p/icon-maskable-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\", \"purpose\": \"any maskable\" }\n  ]\n}\n"
     }
   },
   {
@@ -278,17 +278,17 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "image/png",
-        "Digest": "sha-256=:ePO6Vb4YslxMc6Qp435dW0J7eM3byC9dA3EHizdvgtM=:",
+        "Digest": "sha-256=:P5Z3wvEevyELlTDr9kJ497ZxrdN/tOl9OkxRl5pYYc4=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "78f3ba55be18b25c4c73a429e37e5d5b427b78cddbc82f5d0371078b376f82d3"
+      "body_sha256": "3f9677c2f11ebf210b9530ebf64278f7b671add37fb4e97d3a4c51979a5861ce"
     }
   },
   {
     "id": "p-icon-512",
     "message": "p-icon-512",
-    "comment": "The maskable icon. Body pinned by digest; see p-codec-js.",
+    "comment": "The ordinary manifest icon. Body pinned by digest; see p-codec-js.",
     "kind": "http",
     "request": {
       "method": "GET",
@@ -300,11 +300,33 @@
         "Cache-Control": "no-store",
         "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "Content-Type": "image/png",
-        "Digest": "sha-256=:uGEPE5z0fvgMT/ex9QM0qe4ykqfWCIza6DRrLBsiJnc=:",
+        "Digest": "sha-256=:HjRfWdMi7FRZ+4cnv5m5EwbUZ/cEcUHL8wODbSqVEoQ=:",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff"
       },
-      "body_sha256": "b8610f139cf47ef80c4ff7b1f50334a9ee3292a7d6088cdae8346b2c1b222677"
+      "body_sha256": "1e345f59d322ec5459fb8727bf99b91306d467f7047141cbf303836d2a951284"
+    }
+  },
+  {
+    "id": "p-icon-maskable-512",
+    "message": "p-icon-maskable-512",
+    "comment": "The maskable manifest icon. Body pinned by digest; see p-codec-js.",
+    "kind": "http",
+    "request": {
+      "method": "GET",
+      "path": "/p/icon-maskable-512.png"
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Type": "image/png",
+        "Digest": "sha-256=:eW4cC1Y0hnx0osaMo1yk97TADXIMQP19co2nA7s/BBM=:",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "body_sha256": "796e1c0b5634867c74a2c68ca35ca4f7b4c00d720c40fd7d728da703bb3f0413"
     }
   },
   {

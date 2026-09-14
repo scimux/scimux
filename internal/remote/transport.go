@@ -66,13 +66,28 @@ const (
 	sessionAnswerType = "session-answer"
 )
 
-// envelopeSaltV1 and envelopeSealLabel are the §12.2 HKDF salt and the
+// pairingSealSalt and pairingSealLabel are the §12.2.1 HKDF salt and the
 // info prefix. The vectors in testdata/vectors/constructions.json
-// (envelope-seal-p256) are the authority; protocol_vectors_test.go executes
-// them against an independent implementation of the same construction.
+// (envelope-seal-pairing-p256) are the authority; protocol_vectors_test.go
+// executes them against an independent implementation of the same
+// construction.
 const (
-	envelopeSaltV1    = "scimux-rv/envelope/v1"
-	envelopeSealLabel = "seal"
+	pairingSealSalt  = "scimux-rv/envelope/pairing"
+	pairingSealLabel = "seal-pairing"
+)
+
+// sessionSealSalt and sessionSealLabel are the §12.2.2 HKDF salt and info
+// prefix. The vector is envelope-seal-session-p256.
+//
+// The names are the two jobs, not two versions of one protocol: the pairing
+// seal is what an introduction can use, the session seal is what everything
+// after it must use. The two constructions are separate named functions
+// rather than one with an optional sender, because an optional sender is a
+// downgrade waiting for a caller to omit it. There is no argument list that
+// produces an anonymous session envelope and no runtime fallback.
+const (
+	sessionSealSalt  = "scimux-rv/envelope/session"
+	sessionSealLabel = "seal-session"
 )
 
 // p256UncompressedLen is the length of an uncompressed P-256 point, which
@@ -250,13 +265,13 @@ func envelopeAD(origin, rid string) []byte {
 	return ad
 }
 
-// envelopeSealInfo is the HKDF info: the label, the ephemeral public key,
+// pairingSealInfo is the HKDF info: the label, the ephemeral public key,
 // and the recipient's static public key, NUL-separated. Both keys are in
 // the info so a key-substituting hub derives a different key and the open
 // fails.
-func envelopeSealInfo(ephemeralPub, recipientStatic []byte) string {
-	b := make([]byte, 0, len(envelopeSealLabel)+2+len(ephemeralPub)+len(recipientStatic))
-	b = append(b, envelopeSealLabel...)
+func pairingSealInfo(ephemeralPub, recipientStatic []byte) string {
+	b := make([]byte, 0, len(pairingSealLabel)+2+len(ephemeralPub)+len(recipientStatic))
+	b = append(b, pairingSealLabel...)
 	b = append(b, 0)
 	b = append(b, ephemeralPub...)
 	b = append(b, 0)
@@ -265,7 +280,7 @@ func envelopeSealInfo(ephemeralPub, recipientStatic []byte) string {
 }
 
 func envelopeKey(shared, ephemeralPub, recipientStatic []byte) (cipher.AEAD, error) {
-	key, err := hkdf.Key(sha256.New, shared, []byte(envelopeSaltV1), envelopeSealInfo(ephemeralPub, recipientStatic), 32)
+	key, err := hkdf.Key(sha256.New, shared, []byte(pairingSealSalt), pairingSealInfo(ephemeralPub, recipientStatic), 32)
 	if err != nil {
 		return nil, err
 	}
@@ -276,18 +291,23 @@ func envelopeKey(shared, ephemeralPub, recipientStatic []byte) (cipher.AEAD, err
 	return cipher.NewGCM(block)
 }
 
-// SealEnvelope seals inner to recipientPub under origin and rid as AD
-// (protocol §12.2). The ephemeral key and the nonce are drawn fresh from
-// crypto/rand on every call: the vector's fixed ephemeral is a fixture, not
-// a minting rule, and reusing either would leak the plaintext.
-func SealEnvelope(inner SessionInner, recipientPub []byte, origin, rid string) ([]byte, error) {
-	plain, err := canonicalInner(inner)
-	if err != nil {
-		return nil, classErrorf(ClassHandshake, "seal", "could not encode the session inner", err)
+// decodeSessionInner is the admission every opener shares: §12.1 JSON
+// naming one of the two session types, and nothing else.
+func decodeSessionInner(plain []byte) (SessionInner, error) {
+	var inner SessionInner
+	if err := json.Unmarshal(plain, &inner); err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "the envelope contents are not session JSON", err)
 	}
-	return sealEnvelopeBytes(plain, recipientPub, origin, rid)
+	if inner.Type != sessionOfferType && inner.Type != sessionAnswerType {
+		return SessionInner{}, classError(ClassHandshake, "open", "the envelope is not a session offer or answer")
+	}
+	return inner, nil
 }
 
+// sealEnvelopeBytes and openEnvelopeBytes are §12.2.1, and pairing is all
+// that reaches them now. The SessionInner wrappers that used to sit above
+// them were removed with finding 9: a session envelope is §12.2.2, so a
+// session-shaped anonymous seal had no caller left except a downgrade.
 func sealEnvelopeBytes(plain, recipientPub []byte, origin, rid string) ([]byte, error) {
 	if origin == "" || rid == "" {
 		return nil, classError(ClassHandshake, "seal", "an envelope needs both an origin and a rendezvous id")
@@ -320,22 +340,136 @@ func sealEnvelopeBytes(plain, recipientPub []byte, origin, rid string) ([]byte, 
 	return gcm.Seal(out, nonce, plain, envelopeAD(origin, rid)), nil
 }
 
-// OpenEnvelope opens a sealed session envelope. A blob that does not
-// authenticate under this origin and rid is refused; there is no lenient
-// path that returns a partially trusted inner.
-func OpenEnvelope(sealed, recipientPriv []byte, origin, rid string) (SessionInner, error) {
-	plain, err := openEnvelopeBytes(sealed, recipientPriv, origin, rid)
+// sessionSealInfo is the §12.2.2 HKDF info: the label, the ephemeral public
+// key, the recipient's static and the sender's static, NUL-separated.
+//
+// The sender is in the info as well as in the IKM so that a recipient which
+// opened under the wrong expected sender cannot reach the same key by any
+// route: the derivation disagrees twice, not once.
+func sessionSealInfo(ephemeralPub, recipientStatic, senderStatic []byte) string {
+	b := make([]byte, 0, len(sessionSealLabel)+3+len(ephemeralPub)+len(recipientStatic)+len(senderStatic))
+	b = append(b, sessionSealLabel...)
+	b = append(b, 0)
+	b = append(b, ephemeralPub...)
+	b = append(b, 0)
+	b = append(b, recipientStatic...)
+	b = append(b, 0)
+	b = append(b, senderStatic...)
+	return string(b)
+}
+
+// sessionSealKey derives the AEAD from both agreements. sharedE gives the
+// seal a fresh key per envelope; sharedS is the half only the named sender
+// can compute, and is what makes a successful open evidence of identity
+// rather than of integrity alone.
+func sessionSealKey(sharedE, sharedS, ephemeralPub, recipientStatic, senderStatic []byte) (cipher.AEAD, error) {
+	ikm := make([]byte, 0, len(sharedE)+len(sharedS))
+	ikm = append(ikm, sharedE...)
+	ikm = append(ikm, sharedS...)
+	key, err := hkdf.Key(sha256.New, ikm, []byte(sessionSealSalt),
+		sessionSealInfo(ephemeralPub, recipientStatic, senderStatic), 32)
 	if err != nil {
-		return SessionInner{}, err
+		return nil, err
 	}
-	var inner SessionInner
-	if err := json.Unmarshal(plain, &inner); err != nil {
-		return SessionInner{}, classErrorf(ClassHandshake, "open", "the envelope contents are not session JSON", err)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
 	}
-	if inner.Type != sessionOfferType && inner.Type != sessionAnswerType {
-		return SessionInner{}, classError(ClassHandshake, "open", "the envelope is not a session offer or answer")
+	return cipher.NewGCM(block)
+}
+
+// SealSessionEnvelope seals inner to recipientPub as §12.2.2, authenticated
+// as the holder of senderPriv.
+//
+// The sender's public point is derived here rather than accepted as an
+// argument: a scalar has exactly one point, so there is no pair for a caller
+// to get wrong and no way to claim a static this installation does not hold.
+func SealSessionEnvelope(inner SessionInner, recipientPub, senderPriv []byte, origin, rid string) ([]byte, error) {
+	plain, err := canonicalInner(inner)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "could not encode the session inner", err)
 	}
-	return inner, nil
+	if origin == "" || rid == "" {
+		return nil, classError(ClassHandshake, "seal", "an envelope needs both an origin and a rendezvous id")
+	}
+	curve := ecdh.P256()
+	pub, err := curve.NewPublicKey(recipientPub)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "the recipient key is not a P-256 point", err)
+	}
+	sender, err := curve.NewPrivateKey(senderPriv)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "the sender key is not a P-256 scalar", err)
+	}
+	eph, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "could not draw an ephemeral key", err)
+	}
+	sharedE, err := eph.ECDH(pub)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "the ephemeral key agreement failed", err)
+	}
+	sharedS, err := sender.ECDH(pub)
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "the static key agreement failed", err)
+	}
+	ephPub := eph.PublicKey().Bytes()
+	gcm, err := sessionSealKey(sharedE, sharedS, ephPub, pub.Bytes(), sender.PublicKey().Bytes())
+	if err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "could not derive the envelope key", err)
+	}
+	nonce := make([]byte, gcmNonceLen)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, classErrorf(ClassHandshake, "seal", "could not draw a nonce", err)
+	}
+	out := make([]byte, 0, len(ephPub)+len(nonce)+len(plain)+gcmTagLen)
+	out = append(out, ephPub...)
+	out = append(out, nonce...)
+	return gcm.Seal(out, nonce, plain, envelopeAD(origin, rid)), nil
+}
+
+// OpenSessionEnvelope opens a §12.2.2 envelope and proves it was sealed by
+// the holder of senderPub. The expected sender is required: the caller must
+// have decided who it is talking to before it decides what was said.
+func OpenSessionEnvelope(sealed, recipientPriv, senderPub []byte, origin, rid string) (SessionInner, error) {
+	if len(sealed) < p256UncompressedLen+gcmNonceLen+gcmTagLen {
+		return SessionInner{}, classError(ClassHandshake, "open", "the sealed envelope is too short to be one")
+	}
+	curve := ecdh.P256()
+	priv, err := curve.NewPrivateKey(recipientPriv)
+	if err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "the recipient key is not a P-256 scalar", err)
+	}
+	sender, err := curve.NewPublicKey(senderPub)
+	if err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "the expected sender key is not a P-256 point", err)
+	}
+	ephPub := sealed[:p256UncompressedLen]
+	eph, err := curve.NewPublicKey(ephPub)
+	if err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "the envelope prefix is not an ephemeral P-256 point", err)
+	}
+	sharedE, err := priv.ECDH(eph)
+	if err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "the ephemeral key agreement failed", err)
+	}
+	// ECDH is symmetric, so the recipient reaches the sender's own static
+	// agreement from its private key and the sender's public point.
+	sharedS, err := priv.ECDH(sender)
+	if err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "the static key agreement failed", err)
+	}
+	gcm, err := sessionSealKey(sharedE, sharedS, ephPub, priv.PublicKey().Bytes(), sender.Bytes())
+	if err != nil {
+		return SessionInner{}, classErrorf(ClassHandshake, "open", "could not derive the envelope key", err)
+	}
+	nonce := sealed[p256UncompressedLen : p256UncompressedLen+gcmNonceLen]
+	plain, err := gcm.Open(nil, nonce, sealed[p256UncompressedLen+gcmNonceLen:], envelopeAD(origin, rid))
+	if err != nil {
+		return SessionInner{}, classError(ClassHandshake, "open",
+			"the sealed envelope did not authenticate as this sender for this origin and rendezvous id")
+	}
+	return decodeSessionInner(plain)
 }
 
 func openEnvelopeBytes(sealed, recipientPriv []byte, origin, rid string) ([]byte, error) {

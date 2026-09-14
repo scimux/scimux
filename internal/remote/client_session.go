@@ -84,13 +84,17 @@ func (c *Client) answerSessionEnvelope(ctx context.Context, rid string, sealed [
 	}
 	origin := c.origin()
 
-	offer, err := OpenEnvelope(sealed, priv, origin, rid)
+	// The device is resolved before the envelope is opened, because §12.2.2
+	// needs its static key to derive one: the recipient must decide who it is
+	// talking to before it decides what was said. The RID names exactly one
+	// pairing, so this is a lookup and not a search, and an envelope for an
+	// unknown or unauthorised device is now refused before any key agreement
+	// rather than after.
+	deviceID, peer, err := c.deviceForRID(rid)
 	if err != nil {
 		return nil, err
 	}
-	// Resolve the recipient before spending a peer connection on an answer we
-	// would have nowhere to send.
-	deviceID, peer, err := c.deviceForRID(rid)
+	offer, err := OpenSessionEnvelope(sealed, priv, peer, origin, rid)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +111,7 @@ func (c *Client) answerSessionEnvelope(ctx context.Context, rid string, sealed [
 	if err != nil {
 		return nil, err
 	}
-	blob, err := SealEnvelope(answer, peer, origin, rid)
+	blob, err := SealSessionEnvelope(answer, peer, priv, origin, rid)
 	if err != nil {
 		_ = session.Close()
 		return nil, err

@@ -108,7 +108,8 @@ replay.
 | `pairing-transcript` | construction | — | SAS input |
 | `pairing-sas` | construction | — | 6-digit numeric comparison |
 | `envelope-inner` | construction | — | plaintext inside the seal |
-| `envelope-seal` | construction | — | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
+| `envelope-seal-pairing` | construction | — | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
+| `envelope-seal-session` | construction | — | two ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
 | `p-page` | bootstrap | `GET /p` | device → rv |
 | `p-boot-js` | bootstrap | `GET /p/boot.js` | device → rv |
 | `p-boot-css` | bootstrap | `GET /p/boot.css` | device → rv |
@@ -123,6 +124,7 @@ replay.
 | `p-manifest` | bootstrap | `GET /p/manifest.webmanifest` | device → rv |
 | `p-icon-180` | bootstrap | `GET /p/icon-180.png` | device → rv |
 | `p-icon-512` | bootstrap | `GET /p/icon-512.png` | device → rv |
+| `p-icon-maskable-512` | bootstrap | `GET /p/icon-maskable-512.png` | device → rv |
 | `p-rejection` | bootstrap | `GET /p/not-in-inventory` | rv → device |
 | `stun-binding-request` | stun | — | client → rv (UDP Binding) |
 | `stun-binding-success` | stun | — | rv → client (XOR-MAPPED-ADDRESS) |
@@ -257,6 +259,14 @@ The challenge is 32 bytes, hex-encoded. In-memory only. TTL
 **30 s**. Single-use **even when the signature that later presents
 it fails**. Pinned to the handle that received it. Bounded: 256
 global, 4 per handle. Reclamation is a lazy sweep on insert.
+
+Those two numbers bound **this route only**. The challenge a wait
+response carries is minted from a second, separate budget (256
+global, 8 per handle — one per wait an installation may hold).
+They are separate because this route needs no signature and only a
+handle, and the handle is not a credential: one shared budget
+would let any caller holding a handle exhaust it and turn an
+admitted waiter's delivered envelope into the constant 404.
 
 ### 4.3 `POST /v1/verify`
 
@@ -508,16 +518,18 @@ X-Rv-Challenge: <64 lowercase hex>
 
 `X-Rv-Challenge` is the next challenge, minted **when the wait
 response is written**, so its 30 s TTL starts when it becomes
-useful. Same store, same single-use / handle-pin / caps as
-`POST /v1/challenge`. The signed route for the next wait is still
+useful. Same store and the same single-use and handle-pin rules
+as `POST /v1/challenge`; the caps are **not** shared — see §4.2.
+The signed route for the next wait is still
 `/v1/wait`. The `reply` field is not part of the signed message;
 the computer may pre-sign the next wait as soon as this header
 arrives, then fill `reply` after it has sealed the SDP answer.
 
 A challenge obtained from `POST /v1/challenge` *before* a long
 poll is dead on arrival: `ChallengeTTL` is 30 s and a wait is
-longer. Do not refresh during the wait (that burns
-`MaxChallengesPerHandle` and defeats the poll). Use the header.
+longer. Do not refresh during the wait: it burns
+`MaxChallengesPerHandle`, it does not extend the poll, and the
+header is coming anyway. Use the header.
 
 The 200 body is raw bytes. The server does not wrap, decode, or
 re-encode them (AT-FR-07-b).
@@ -837,6 +849,36 @@ causes DTLS failure because the fingerprint is inside the seal.
 
 ### 12.2 Seal
 
+Two constructions, and which one a message uses is fixed by its
+`type`, never negotiated:
+
+| message | seal | authenticates sender |
+|---|---|---|
+| `pair-offer` | **pairing**, §12.2.1 | no — see below |
+| `pair-reply` | **pairing**, §12.2.1 | no — see below |
+| `session-offer` | **session**, §12.2.2 | yes |
+| `session-answer` | **session**, §12.2.2 | yes |
+
+The two names are the two jobs, not two versions of one thing. This
+document is the protocol, `v=1` on the wire is its version, and
+neither seal moves that number; a seal named after the phase it
+serves cannot be mistaken for a compatibility step to be climbed.
+
+There is no runtime choice and no fallback. A `session-answer` that
+will not open under the session seal is a failed session, not a
+retry under the pairing seal; accepting either would let an attacker
+pick the weaker one.
+
+Pairing uses the weaker seal because at pair time there is no established
+identity to authenticate. The computer has not yet met the device —
+`Y` arrives *inside* the `pair-offer`, so the computer cannot derive
+a key that depends on it — and authenticating the introduction is
+exactly what §11's SAS does, out of band, with a human comparing
+digits. Once pairing has completed, both sides hold the other's
+static key and every session envelope is authenticated by it.
+
+#### 12.2.1 The pairing seal — anonymous, ephemeral-static
+
 Ephemeral-static ECIES, P-256, HKDF-SHA-256, AES-256-GCM.
 A **fresh** ephemeral private key is required for every seal.
 Reusing one across messages reuses the 12-byte nonce space.
@@ -845,8 +887,8 @@ Reusing one across messages reuses the 12-byte nonce space.
 e        = ephemeral P-256 private   // fresh CSPRNG per seal
 E        = e.Public (uncompressed, 65 bytes)
 shared   = ECDH(e, recipient_static)
-info     = "seal" || 0x00 || E || 0x00 || recipient_static
-key      = HKDF-SHA-256(ikm=shared, salt="scimux-rv/envelope/v1",
+info     = "seal-pairing" || 0x00 || E || 0x00 || recipient_static
+key      = HKDF-SHA-256(ikm=shared, salt="scimux-rv/envelope/pairing",
                         info=info, L=32)
 nonce    = 12 CSPRNG bytes
 ad       = origin || 0x00 || rid_hex
@@ -858,11 +900,76 @@ sealed   = E || nonce || ct        // ct includes the 16-byte tag
 so a transplanted ephemeral cannot open a blob sealed to a
 different recipient (unknown-key-share / cross-context reuse).
 Recipient opens with its static private and `E`. Vector
-`envelope-seal-p256` (`ephemeral_priv_hex` is a fixture).
+`envelope-seal-pairing-p256` (`ephemeral_priv_hex` is a fixture).
 
-Session offer: phone seals to computer `X`. Session answer: computer
-seals to device `Y`. Pairing QR offer: phone seals to `X` from
-the fragment. Pairing reply: computer seals to `Y` from the offer.
+The sender's own key is **not** an input. Anyone holding the
+recipient's public key can produce a blob that opens correctly, so a
+successful open proves integrity and nothing about who sealed it.
+That is acceptable for pairing, where SAS is the authentication, and
+it is why §12.2.2 exists for everything after.
+
+Pairing QR offer: phone seals to `X` from the fragment. Pairing
+reply: computer seals to `Y` from the offer.
+
+#### 12.2.2 The session seal — sender-authenticated, static+ephemeral
+
+Session envelopes only. Same primitives, same wire shape, one extra
+ECDH. This is the Noise `K` one-way pattern (`-> e, es, ss`).
+
+```
+e        = ephemeral P-256 private   // fresh CSPRNG per seal
+E        = e.Public (uncompressed, 65 bytes)
+S        = sender static public      (uncompressed, 65 bytes)
+R        = recipient static public   (uncompressed, 65 bytes)
+shared_e = ECDH(e, R)
+shared_s = ECDH(sender_static_private, R)
+info     = "seal-session" || 0x00 || E || 0x00 || R || 0x00 || S
+key      = HKDF-SHA-256(ikm=shared_e || shared_s,
+                        salt="scimux-rv/envelope/session",
+                        info=info, L=32)
+nonce    = 12 CSPRNG bytes
+ad       = origin || 0x00 || rid_hex
+ct       = AES-256-GCM-Seal(key, nonce, plaintext, ad)
+sealed   = E || nonce || ct        // ct includes the 16-byte tag
+```
+
+`shared_s` is what the sender's static private key buys: without it
+the key cannot be derived, so a blob that opens is a blob its holder
+sealed. Authentication is implicit — the GCM tag opening *is* the
+proof, and there is no separate verification step to forget.
+
+The recipient opens with its static private key **and the expected
+sender's static public key**, which it must already hold: the
+computer looks up the paired device's `Y`, the device holds `X` from
+the fragment. Nothing new goes on the wire, and `S` is never sent —
+rv sees the same `E || nonce || ct` it saw before.
+
+The recipient must therefore resolve the expected sender **before** it
+opens, which reorders nothing in practice: the RID already names one
+pairing, so the paired `Y` is a lookup, not a search. An
+implementation that cannot resolve a sender that way may try each
+paired `Y` until one opens — `shared_s` is static per pairing and may
+be cached, so a retry is an HKDF and a GCM open, not an ECDH. What it
+MUST NOT do is put a sender hint on the wire: that would hand rv a
+stable device identifier, which §8 does not permit.
+
+Vector `envelope-seal-session-p256` (`ephemeral_priv_hex` and
+`sender_priv_hex` are fixtures).
+
+Session offer: phone seals to computer `X`, sender `Y`. Session
+answer: computer seals to device `Y`, sender `X`.
+
+**Known limits, stated rather than implied.** This is Noise `K`:
+authentication level 1, confidentiality level 2. Sender
+authentication is vulnerable to key-compromise impersonation — an
+attacker holding the *recipient's* static private key can forge
+messages from any sender to that recipient, because `shared_s` is
+computable from it. Resistance to that needs a signature and is not
+provided. The payload has no forward secrecy against recipient key
+compromise, which was equally true of the pairing seal. Replay is prevented by the
+AD, not by the KDF: `rid_hex` is 32 CSPRNG bytes minted per
+rendezvous and never reused, so a blob replayed into any other
+rendezvous fails the tag.
 
 ### 12.3 Typed-path offer is unsealed
 
@@ -922,14 +1029,16 @@ byte-identical inventory responses.
 | `GET /p/connection.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel request lifecycle and FR-24 states (`tunnel-v2.md` §7, §9). Protocol, not application code. |
 | `GET /p/manifest.webmanifest` | `application/manifest+json; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JSON | the Home Screen app declaration. `display: standalone`; `start_url` and `scope` are both `/p`. |
 | `GET /p/icon-180.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the `apple-touch-icon`. iOS takes the Home Screen icon from the link in the shell, not from the manifest. |
-| `GET /p/icon-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the manifest icon, `purpose: "any maskable"`; artwork inset for launchers that crop. |
+| `GET /p/icon-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the ordinary manifest icon, `purpose: "any"`. |
+| `GET /p/icon-maskable-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the maskable manifest icon, `purpose: "any maskable"`; artwork inset inside the standard safe circle for launchers that crop. |
 
 The inventory grew from three rows to five on 2026-08-24, when the
 tunnel protocol moved into this repository, from five to ten on
 2026-08-26, when the pairing client was built, to eleven on
-2026-08-27, when the entry point became a row, and to fourteen on
+2026-08-27, when the entry point became a row, to fourteen on
 2026-09-05, when the Home Screen manifest and its two icons became
-rows. Before those three, adding `/p` to a Home Screen produced a
+rows, and to fifteen on 2026-09-13, when ordinary and maskable 512px
+icons became separate rows. Before the Home Screen rows, adding `/p` produced a
 bookmark rather than an app: nothing in the shell declared one, so the
 launcher opened a browser tab and captured a screenshot for the icon.
 
@@ -1046,7 +1155,8 @@ kind-specific fields. A file is a JSON array. Kinds:
 | `ed25519` | sign and verify from the seed |
 | `handle`, `rid`, `pairing-code` | recompute the encoding |
 | `rid-collision-retry` | **test-only** seeded retry; not a minting rule |
-| `envelope-seal` | seal and open. Field `ephemeral_priv_hex` is a fixture so the ciphertext is reproducible. A client MUST draw a fresh ephemeral per seal. |
+| `envelope-seal-pairing` | seal and open. Field `ephemeral_priv_hex` is a fixture so the ciphertext is reproducible. A client MUST draw a fresh ephemeral per seal. |
+| `envelope-seal-session` | seal and open as §12.2.2. `ephemeral_priv_hex` and `sender_priv_hex` are fixtures; a client MUST draw a fresh ephemeral per seal. Opening under any static other than `sender_pub_hex` MUST fail. |
 | `pairing-transcript`, `pairing-sas` | recompute HKDF |
 | `envelope-inner` | required JSON fields |
 | `http` | if the request path is registered, **replay** through `newAdmissionHandler` and compare `dumpResponse` (status + sorted headers + body). Otherwise declarative. Expected responses for built admission routes are authored from §4, not recorded from the handler. `/p` inventory rows become replayed once those GET routes are registered. |
@@ -1133,6 +1243,36 @@ outgoing datagram is a Binding Success, 32 bytes (IPv4) or
 44 bytes (IPv6). SOFTWARE, FINGERPRINT, MAPPED-ADDRESS and
 any other attribute MUST NOT be emitted. A version string on
 this path is a defect.
+
+**Response rate.** Shape alone is not a bound: the same 20-byte
+request repeated costs a spoofing sender nothing and creates no
+connection state to limit. Each socket therefore emits at most
+**200** datagrams in a burst, refilling at **100 per second** —
+counted globally, across every source. Global is not a
+simplification: FR-25 keeps the source address out of the server
+and NFR-10 keeps it out of memory, so there is no per-source state
+to key a limit on. That is also what makes the limit safe. A
+per-source bound on a spoofable transport is a way to have the
+server silence a third party on request, and rv has no way to tell
+a spoofed source from a real one.
+
+Only a datagram that would be answered spends budget; every drop
+above is free, so junk cannot starve a legitimate client of a
+reply. Over the bound the responder simply goes quiet — an error
+reply would be one more datagram to bounce, and this section emits
+none. A client MUST tolerate a lost Binding Success; ICE
+retransmits, and the candidate at risk is the server-reflexive one,
+not the host candidates. The numbers are an amplification budget,
+not a fairness knob: one ICE gathering spends a handful of
+requests, while 100 replies per second is under 4 kB/s of reflected
+traffic. The two sockets hold separate budgets, so a flood of one
+family does not silence the other.
+
+Rate-limited datagrams are **not** counted in §18. `rate_limited`
+there is the public HTTP 429 count; folding a UDP drop into it
+would make an operator read a STUN flood as an HTTP one. A flood
+on this surface is visible at the packet filter, which is where
+`docs/runbooks/abuse.md` sends the operator.
 
 **Success.** Type `0x0101`. One attribute, XOR-MAPPED-ADDRESS
 (`0x0020`), encoding the source address of the request:

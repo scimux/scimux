@@ -34,9 +34,10 @@ func TestAT_FR_16_a_SealedEnvelopeContainsFingerprintHubAlteredSDPFailsHandshake
 	}
 
 	pub, priv := s6Recipient(t)
-	sealed, err := SealEnvelope(inner, pub, DefaultOrigin, s6VectorRID)
+	sender, senderPub := deviceKeypair(t)
+	sealed, err := SealSessionEnvelope(inner, pub, sender.Bytes(), DefaultOrigin, s6VectorRID)
 	if err != nil {
-		t.Fatalf("%s: SealEnvelope: %v", at, err)
+		t.Fatalf("%s: SealSessionEnvelope: %v", at, err)
 	}
 	if len(sealed) == 0 {
 		t.Fatalf("%s: sealed envelope is empty", at)
@@ -48,9 +49,9 @@ func TestAT_FR_16_a_SealedEnvelopeContainsFingerprintHubAlteredSDPFailsHandshake
 		t.Fatalf("%s: SDP is visible in the sealed blob", at)
 	}
 
-	opened, err := OpenEnvelope(sealed, priv, DefaultOrigin, s6VectorRID)
+	opened, err := OpenSessionEnvelope(sealed, priv, senderPub, DefaultOrigin, s6VectorRID)
 	if err != nil {
-		t.Fatalf("%s: OpenEnvelope: %v", at, err)
+		t.Fatalf("%s: OpenSessionEnvelope: %v", at, err)
 	}
 	if opened.Fingerprint != inner.Fingerprint {
 		t.Fatalf("%s: opened fingerprint %q, want %q", at, opened.Fingerprint, inner.Fingerprint)
