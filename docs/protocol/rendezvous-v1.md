@@ -1244,6 +1244,36 @@ outgoing datagram is a Binding Success, 32 bytes (IPv4) or
 any other attribute MUST NOT be emitted. A version string on
 this path is a defect.
 
+**Response rate.** Shape alone is not a bound: the same 20-byte
+request repeated costs a spoofing sender nothing and creates no
+connection state to limit. Each socket therefore emits at most
+**200** datagrams in a burst, refilling at **100 per second** —
+counted globally, across every source. Global is not a
+simplification: FR-25 keeps the source address out of the server
+and NFR-10 keeps it out of memory, so there is no per-source state
+to key a limit on. That is also what makes the limit safe. A
+per-source bound on a spoofable transport is a way to have the
+server silence a third party on request, and rv has no way to tell
+a spoofed source from a real one.
+
+Only a datagram that would be answered spends budget; every drop
+above is free, so junk cannot starve a legitimate client of a
+reply. Over the bound the responder simply goes quiet — an error
+reply would be one more datagram to bounce, and this section emits
+none. A client MUST tolerate a lost Binding Success; ICE
+retransmits, and the candidate at risk is the server-reflexive one,
+not the host candidates. The numbers are an amplification budget,
+not a fairness knob: one ICE gathering spends a handful of
+requests, while 100 replies per second is under 4 kB/s of reflected
+traffic. The two sockets hold separate budgets, so a flood of one
+family does not silence the other.
+
+Rate-limited datagrams are **not** counted in §18. `rate_limited`
+there is the public HTTP 429 count; folding a UDP drop into it
+would make an operator read a STUN flood as an HTTP one. A flood
+on this surface is visible at the packet filter, which is where
+`docs/runbooks/abuse.md` sends the operator.
+
 **Success.** Type `0x0101`. One attribute, XOR-MAPPED-ADDRESS
 (`0x0020`), encoding the source address of the request:
 
