@@ -35,7 +35,7 @@ const (
 )
 
 const (
-	claudeUnsupportedExplain  = "This Claude session is not using scimux's current hook bundle, so chat binding, permission dialogs, and auto-approve are unavailable. Fork or relaunch it from scimux."
+	claudeUnsupportedExplain  = "This chat uses an older scimux setup. Fork or relaunch it to use all features."
 	claudeStartTimeoutExplain = "Claude did not start. SessionStart never arrived, so Remote Control is not ready."
 	claudeStartUnknownExplain = "Claude did not start. SessionStart never arrived. Inspect Claude outside scimux to see why; scimux cannot identify this startup dialog."
 	claudeTrustExplain        = "Claude's workspace-trust prompt expired before it was answered. Relaunch and choose y or n in scimux. scimux does not write Claude trust-state files."
@@ -228,6 +228,17 @@ func claudeSupervisionExplain(sup claudeSupervision, launchErr string) string {
 		return claudeStartTimeoutExplain
 	}
 	return ""
+}
+
+// claudeChatSupervisionExplain suppresses compatibility guidance after a
+// thread has ended. The node's Exited state already explains why controls are
+// unavailable; an upgrade instruction at that point is redundant and reads
+// like a fresh problem.
+func claudeChatSupervisionExplain(sup claudeSupervision, launchErr string, ended bool) string {
+	if ended {
+		return ""
+	}
+	return claudeSupervisionExplain(sup, launchErr)
 }
 
 func (a *app) diagnoseClaudeStartFailure(n *Node) string {

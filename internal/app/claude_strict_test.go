@@ -157,6 +157,16 @@ func TestClaudeUnsupportedNeverInspects(t *testing.T) {
 	}
 }
 
+func TestClaudeUnsupportedExplanationIsPlainAndActionable(t *testing.T) {
+	const want = "This chat uses an older scimux setup. Fork or relaunch it to use all features."
+	if got := claudeSupervisionExplain(claudeSupUnsupported, ""); got != want {
+		t.Fatalf("unsupported explanation = %q, want %q", got, want)
+	}
+	if got := claudeChatSupervisionExplain(claudeSupUnsupported, "", true); got != "" {
+		t.Fatalf("ended chat explanation = %q, want no redundant compatibility notice", got)
+	}
+}
+
 func TestClaudePermissionDialogRequiresNotification(t *testing.T) {
 	h := newAskedHarness(t, true)
 	// Write a notice without marking it shown — PermissionRequest alone is not

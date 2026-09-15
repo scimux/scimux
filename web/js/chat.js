@@ -404,7 +404,9 @@ export function histLoadHTML(priorTurns){
   return `<div class="chatseam"><button class="histload">show earlier history &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
 }
 
-export function pendingEmptyHTML({ freshSurface, pending, supervision = "", delivering = false } = {}){
+export function pendingEmptyHTML({
+  freshSurface, pending, supervision = "", delivering = false, ended = false,
+} = {}){
   if (freshSurface) return `<div class="pending">fresh chat \u2014 send a prompt</div>`;
   /* Ahead of the startup wording on purpose: by the time the prompt is being
      delivered, SessionStart has arrived, so "waiting for SessionStart" would
@@ -422,7 +424,8 @@ export function pendingEmptyHTML({ freshSurface, pending, supervision = "", deli
       : "no confirmed turns yet"}</div>`;
   }
   if (supervision === "claude_unsupported"){
-    return `<div class="pending">this Claude session cannot be supervised \u2014 fork or relaunch it</div>`;
+    if (ended) return "";
+    return `<div class="pending">this chat uses an older scimux setup \u2014 fork or relaunch it to use all features</div>`;
   }
   return `<div class="pending">${pending
     ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
@@ -1915,9 +1918,10 @@ export function createChatFeature(deps){
       (data.chat_started
         ? `<div class="chatseam curseam"><span>chat started ${escape(whenFn(data.chat_started))}</span></div>` : "") +
       (!turns.length && !liveDecisions.length
-        ? pendingEmptyHTML({
+          ? pendingEmptyHTML({
             freshSurface, pending: data.pending, delivering,
             supervision: data.supervision || n.supervision || "",
+            ended: !!n.ended_at,
           })
         : "") +
       renderTimelineHTML(turns, liveDecisions, {
@@ -1927,7 +1931,7 @@ export function createChatFeature(deps){
          current end of the conversation where a bottom-pinned reader sees it,
          rather than above an arbitrarily long timeline. */
       (data.error
-        ? `<div class="pending chaterr" role="status">${escape(data.error)}</div>`
+        ? `<div class="pending ${data.reason === "claude_unsupported" ? "chatnotice" : "chaterr"}" role="status">${escape(data.error)}</div>`
         : "") +
       (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
       (data.compacting ? compactingStatusHTML() : "") +

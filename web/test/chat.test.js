@@ -448,6 +448,17 @@ test("chatActivityPolicy: Claude strict never auto-opens except a proven permiss
   assert.equal(manual.forcePeek, false);
 });
 
+test("unsupported Claude guidance is short and neutral", () => {
+  const html = pendingEmptyHTML({ supervision: "claude_unsupported" });
+  assert.match(html, /older scimux setup/i);
+  assert.doesNotMatch(html, /hook bundle|permission dialogs|auto-approve/i);
+  assert.match(chatSrc,
+    /data\.reason === "claude_unsupported" \? "chatnotice" : "chaterr"/);
+  assert.match(chatCssSrc, /\.pending\.chatnotice/);
+  assert.equal(pendingEmptyHTML({ supervision: "claude_unsupported", ended: true }), "",
+    "Exited is already visible; an ended chat needs no compatibility notice");
+});
+
 test("keyRowHTML: Claude permission bar binds the visible-dialog epoch, not a request id", () => {
   const html = keyRowHTML({
     attention: "approval",

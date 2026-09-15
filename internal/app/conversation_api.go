@@ -976,7 +976,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	resp["ctx_pct"] = ctxPct
 	if agent == "claude" {
 		resp["supervision"] = string(sup)
-		if explain := claudeSupervisionExplain(sup, launchErr); explain != "" {
+		if explain := claudeChatSupervisionExplain(sup, launchErr, ended); explain != "" {
 			resp["error"] = explain
 		}
 		if delivery == sendSubmitting || delivery == sendUnconfirmed || delivery == sendDelivering {
