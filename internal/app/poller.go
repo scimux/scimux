@@ -54,6 +54,13 @@ func (a *app) poll() {
 	a.drainClaudeHooks()
 
 	for _, n := range nodes {
+		// Historical external integrations are retained as read-only history.
+		// Keep the one global tmux inventory above for owned-session liveness, but
+		// do no per-node work: no worker state, pane capture, transcript tailing or
+		// discovery, mirroring, attention, or automatic approval processing.
+		if n == nil || n.Adopted {
+			continue
+		}
 		// Structured-protocol nodes (ACP, codex app-server, Muse MSP) carry no tmux pane:
 		// liveness and needs-input come from the manager's structured state
 		// (process alive, turn in flight, pending permission), not pane-change

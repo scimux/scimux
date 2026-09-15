@@ -88,6 +88,17 @@ func (a *app) refuseEnded(w http.ResponseWriter, n *Node) bool {
 	return ended
 }
 
+// refuseRetiredExternal fences every control path for historical nodes that
+// scimux once attached to but never owned. Their saved history remains a read
+// surface; continuing work requires a fresh scimux-owned fork/chat.
+func (a *app) refuseRetiredExternal(w http.ResponseWriter, n *Node) bool {
+	if n == nil || !n.Adopted {
+		return false
+	}
+	http.Error(w, "external session integration is retired; start a fresh chat to continue", http.StatusConflict)
+	return true
+}
+
 // handleSend delivers a web prompt and reports what the delivery evidence
 // supports: "acknowledged" when the pane visibly reacted to Enter or a new
 // transcript turn appeared, "unconfirmed" otherwise. {ok:"sent"} alone would
@@ -99,6 +110,9 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if a.refuseRetiredExternal(w, n) {
 		return
 	}
 	if a.refuseEnded(w, n) {
@@ -462,6 +476,9 @@ func (a *app) handleSendResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	if a.refuseRetiredExternal(w, n) {
+		return
+	}
 	if a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID) {
 		if err := a.workers.ResolveDelivery(n.ID); err != nil {
 			code := http.StatusInternalServerError
@@ -489,6 +506,9 @@ func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if a.refuseRetiredExternal(w, n) {
 		return
 	}
 	if a.refuseEnded(w, n) {
@@ -638,7 +658,7 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	if len(seg.Decisions) > 0 {
 		resp["decisions"] = seg.Decisions
 	}
-	workerClaude := a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID)
+	workerClaude := !n.Adopted && a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID)
 	var workerState sessionworker.State
 	// Authoritative auto-approval state participates in the full-body ETag.
 	var aaView autoApproveView
@@ -652,7 +672,12 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 	}
 	resp["auto_approve"] = aaView
-	if workerClaude {
+	if n.Adopted {
+		resp["live"] = "unavailable"
+		resp["reply_ready"] = false
+		resp["source"] = "transcript"
+		resp["error"] = "This external session integration is retired. Saved history remains available; start a fresh chat to continue."
+	} else if workerClaude {
 		a.claudeWorkerChatInto(resp, n, workerState, seg)
 	} else if pm := a.proc(n); pm != nil {
 		a.procChatInto(resp, n, pm, seg)
@@ -1100,6 +1125,9 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
+	if a.refuseRetiredExternal(w, n) {
+		return
+	}
 	if a.refuseEnded(w, n) {
 		return
 	}
@@ -1294,6 +1322,9 @@ func (a *app) handlePeek(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if a.refuseRetiredExternal(w, n) {
 		return
 	}
 	if pm := a.proc(n); pm != nil {

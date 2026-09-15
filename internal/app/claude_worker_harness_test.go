@@ -337,7 +337,7 @@ func TestClaudeSessionHarnessLaunchesNewPaneWithRecoverableMetadata(t *testing.T
 	}
 }
 
-func TestClaudeSessionHarnessAdoptsExistingPaneWithoutRelaunchOrOwnership(t *testing.T) {
+func TestClaudeSessionHarnessRejectsExternalPaneWithoutRelaunch(t *testing.T) {
 	f := &fakeTmux{list: []string{"existing"}, alive: map[string]bool{"existing": true}, capture: "idle"}
 	a := newTestApp(t, f)
 	h := testClaudeSessionHarness(a, "existing")
@@ -348,55 +348,25 @@ func TestClaudeSessionHarnessAdoptsExistingPaneWithoutRelaunchOrOwnership(t *tes
 		CreatedAt: time.Now().UTC().Format(time.RFC3339), Transcript: "/tmp/existing.jsonl",
 		HookID: "hook-existing", HookGeneration: 4,
 	}
-	if sid, err := h.Launch(context.Background(), request); err != nil || sid != hookSIDOwn {
-		t.Fatalf("adopt Launch = %q, %v", sid, err)
+	if sid, err := h.Launch(context.Background(), request); err == nil || sid != "" {
+		t.Fatalf("external Launch = %q, %v, want rejection", sid, err)
 	}
 	if containsSub(f.subcommands(), "new-session") {
-		t.Fatal("adopting an existing pane relaunched it")
-	}
-	if sid, err := h.Launch(context.Background(), request); err != nil || sid != hookSIDOwn {
-		t.Fatalf("idempotent Launch = %q, %v", sid, err)
-	}
-	state := h.State(context.Background())
-	if state.HookID != "hook-existing" || state.HookGeneration != 4 || state.Transcript != request.Transcript {
-		t.Fatalf("adopted state = %#v", state)
-	}
-	if state.Launch == nil || state.Launch.Parent != request.Parent || state.Launch.Description != request.Description ||
-		state.Launch.Rationale != request.Rationale || state.Launch.LaneID != request.LaneID || state.Launch.ForkKind != request.ForkKind {
-		t.Fatalf("adopted recovery description lost launch metadata: %#v", state.Launch)
-	}
-	if err := h.Stop(context.Background(), true); err != nil {
-		t.Fatal(err)
+		t.Fatal("rejecting an external pane relaunched it")
 	}
 	if !f.alive["existing"] {
-		t.Fatal("stopping an adopted worker killed the user-owned pane")
+		t.Fatal("rejecting an external pane killed it")
 	}
 }
 
-func TestClaudeSessionHarnessAdoptsExistingPaneWithoutPrompt(t *testing.T) {
-	f := &fakeTmux{list: []string{"existing"}, alive: map[string]bool{"existing": true}}
-	h := testClaudeSessionHarness(newTestApp(t, f), "existing")
-	request := sessionworker.LaunchRequest{
-		NodeID: "existing", Agent: "claude", Title: "Existing", Dir: t.TempDir(),
-		Existing: true, Adopted: true,
-	}
-	if _, err := h.Launch(context.Background(), request); err != nil {
-		t.Fatalf("promptless adoption: %v", err)
-	}
-	defer h.Stop(context.Background(), false)
-	if containsSub(f.subcommands(), "new-session") {
-		t.Fatal("promptless adoption relaunched the existing pane")
-	}
-}
-
-func TestClaudeSessionHarnessAdoptionRequiresLivePaneAndDurableHook(t *testing.T) {
+func TestClaudeSessionHarnessOwnedRecoveryRequiresLivePaneAndDurableHook(t *testing.T) {
 	request := sessionworker.LaunchRequest{
 		NodeID: "existing", Agent: "claude", Title: "Existing", Prompt: "history",
 		Dir: t.TempDir(), SessionID: hookSIDOwn, Existing: true, HookID: "hook-existing",
 	}
 	dead := testClaudeSessionHarness(newTestApp(t, &fakeTmux{}), request.NodeID)
 	if _, err := dead.Launch(context.Background(), request); !errors.Is(err, errClaudeWorkerConflict) {
-		t.Fatalf("dead-pane adoption = %v", err)
+		t.Fatalf("dead-pane recovery = %v", err)
 	}
 
 	f := &fakeTmux{list: []string{request.NodeID}, alive: map[string]bool{request.NodeID: true}}
@@ -404,7 +374,7 @@ func TestClaudeSessionHarnessAdoptionRequiresLivePaneAndDurableHook(t *testing.T
 	a.storePath = t.TempDir()
 	brokenStore := testClaudeSessionHarness(a, request.NodeID)
 	if _, err := brokenStore.Launch(context.Background(), request); err == nil {
-		t.Fatal("adoption succeeded without durable node publication")
+		t.Fatal("recovery succeeded without durable node publication")
 	}
 
 	a = newTestApp(t, f)
@@ -413,7 +383,7 @@ func TestClaudeSessionHarnessAdoptionRequiresLivePaneAndDurableHook(t *testing.T
 		t.Fatal(err)
 	}
 	if got := h.State(context.Background()); got.HookID != request.HookID || got.HookGeneration != 1 {
-		t.Fatalf("zero-generation adoption = %#v", got)
+		t.Fatalf("zero-generation recovery = %#v", got)
 	}
 	if err := h.Stop(context.Background(), true); err != nil {
 		t.Fatal(err)

@@ -306,7 +306,7 @@ body.bookmarks-open #bookmarkpeek { display: block; }
 
    ONE HOMONYM TO WATCH: `.sheet` / `sheet` in this file usually means the
    iOS-style *bottom-sheet modal* (openSheet/closeSheets/setSheetActive/
-   openTabSheet, class="sheet", the #newchat / #adopt / #sendto / #tabsheet
+   openTabSheet, class="sheet", the #newchat / #sendto / #tabsheet
    overlays, sheetDisabledByClose) — that is NOT the Note document. Do not
    "align" those to `note`; they are a generic UI primitive.
 

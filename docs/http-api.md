@@ -58,7 +58,6 @@ The polling snapshot the UI runs on. Returns:
   "nodes":     [ { …node fields…, "live": "quiet", "attention": "approval",
                    "has_transcript": true, "last_activity": 1752849600000,
                    "ctx_pct": 37, "stops": ["2026-07-24T09:12:00Z"] } ],
-  "unadopted": [ "tmux-session-name" ],
   "sys":       { …host load/memory… },
   "socket":    "scimux",
   "hostname":  "workstation",
@@ -75,7 +74,7 @@ uses `inspect` for automatic terminal fallback, and never publishes
 attention while auto-approve is armed), `supervision` is the
 Claude-only contract (`claude_starting` for a current bundle awaiting
 SessionStart, `claude_strict` after acknowledgement, `claude_unsupported`
-for adopted/legacy/moved-binary bundles, `claude_failed` for startup or
+for legacy/moved-binary bundles, `claude_failed` for startup or
 delivery errors), and
 `last_activity` is the last pane change in Unix milliseconds. `ctx_pct`, when
 present, is the live segment's context occupancy percentage. `stops` are the
@@ -83,11 +82,8 @@ node's `/clear` page-turn timestamps; the map prepends `created_at` to draw the
 full station chain. `ended_at` (RFC 3339, present only once set) marks a thread
 deliberately closed via
 `POST …/exit`: the node stays visible with a dead-end cap on the map rather
-than being deleted. `unadopted` lists tmux sessions on scimux's socket that no
-node accounts for — candidates for `POST /api/adopt`. Sessions in scimux's own
-`scimux-usage-` probe namespace are excluded (and refused by `/api/adopt`):
-they are throwaway status-line probes scimux launched and is about to kill,
-not sessions anyone could supervise.
+than being deleted. Live tmux inventory is not exposed; it remains internal
+input for owned-session liveness and name-collision checks.
 
 Responses carry an `ETag`; polling clients may send `If-None-Match` and receive
 `304 Not Modified` when the snapshot is unchanged.
@@ -174,10 +170,12 @@ the first Claude prompt is awaiting SessionStart or transcript confirmation,
 `submitting` or `unconfirmed`. A startup or delivery failure sets `error` and
 `restore_draft` with the original prompt; it does not open the terminal.
 
-For structured nodes (`codex`, ACP `pi`/`opencode`/`grok`), `source` is
-`acp`; there is no pane fallback, and pending approval details are returned as
-`perm_title`, `perm_options`, and — only while a permission is pending — an
-opaque `perm_request_id` that `POST …/key` must echo back. Idle structured
+For structured nodes (Codex app-server, ACP `pi`/`opencode`/`grok`, and
+Muse MSP), `source` is `acp` for compatibility across these transports;
+there is no pane fallback. Pending approval details are returned as
+`perm_title`, `perm_options`, `perm_tool_kind`, `perm_reason`, and — only
+while a permission is pending — an opaque `perm_request_id` that
+`POST …/key` must echo back. Idle structured
 chats and tmux nodes do not invent a request id. For a strict Claude
 permission dialog the echo token is `perm_dialog_id`, a **server-minted
 visible-dialog epoch**. Claude's `Notification(permission_prompt)` payload
@@ -215,7 +213,7 @@ content are never included.
 
 Plain-text pane snapshot for tmux nodes (`mode=visible` captures only the
 visible pane instead of history). For structured-transport nodes (ACP,
-codex) there is no pane; peek returns a tail of the raw event log.
+Codex, Muse) there is no pane; peek returns a tail of the raw event log.
 
 ### `GET /api/search?q=<query>`
 
@@ -318,6 +316,22 @@ a persistent cache, refreshed on a CLI version change or after one day;
 `GET /api/agents` can trigger that refresh. Its model probes submit no billed
 prompt and are independent of consent for the usage gauge.
 
+Muse additionally returns `muse_models`, an array of objects with `id`,
+`tier` (`standard`, `discounted`, or `unknown`), and `launchable`, plus
+optional `label`, `default`, `context_limit`, and `output_limit`. Its
+`models` list includes only launchable IDs; clients should use the richer
+rows to display labels and availability. Unknown-tier or conflicting
+duplicate catalog entries are not launchable. An empty catalog is a valid
+response, not a guessed static model list.
+
+Muse's catalog is read from cache. A stale cache, including the initial empty
+cache, starts a background
+refresh through `muse serve` initialization/model listing, without a session
+or prompt; the request does not wait for it. Refreshes are coalesced, the cache
+is fresh for two minutes, and a failed refresh preserves the last good answer.
+Creating a Muse node rechecks the catalog before launch. Model availability
+does not grant the separate launch consent documented under `/api/settings`.
+
 ## Managing nodes
 
 ### `POST /api/nodes`
@@ -334,16 +348,32 @@ first prompt is pasted after SessionStart on a background path. Failures after
 that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
 this response.
 
+Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, and `muse`.
+Muse creation requires `muse_approval_judge_consent: true` in the computer's
+settings; missing consent is `400`. Its requested model must be launchable
+in the current catalog, or creation returns `400`. With no explicit model,
+the server chooses an eligible Standard model; IDs ending in `-contributor`
+require an explicit choice and are never an implicit default. The stored
+node retains the user's model choice (including an empty default choice),
+while the launch receives the resolved concrete ID.
+
 Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
 `transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
-present in the body — they are minted or derived server-side. Adopting an
-existing tmux session is a separate endpoint (`POST /api/adopt`).
+present in the body — they are minted or derived server-side. There is no
+endpoint for attaching or importing an externally started session.
 
 ### `PATCH /api/nodes/{id}`
 
 Body: any of `title`, `description`, `lane_id`. Title must stay non-empty.
 Lane assignment is write-once: setting it on an unassigned node succeeds,
 changing an existing assignment is `409`.
+
+To relabel an earlier map station, include `station` with that station's
+start-time key and a non-empty `title`, plus optional `description`. This
+appends a label to the session log for that station, leaving the current
+node fields and lane assignment unchanged. An empty station key or title
+is `400`; a missing session store is `409`. Omit `station` when editing the
+current node.
 
 ### `POST /api/nodes/{id}/exit`
 
@@ -355,8 +385,8 @@ reach the agent never un-ends the node.
 
 Returns `{"node": <node>, "closed": true, "stopped": <bool>, "reason": <string>}`.
 `stopped` reports whether the underlying process was actually stopped: it is
-`false` with `reason:"adopted"` for an adopted tmux session (scimux never kills
-a session it did not start — the agent keeps running), and `false` with
+`false` with `reason:"adopted"` for a retained historical external record
+(scimux never kills a session it did not start — the agent keeps running), and `false` with
 `reason:"kill_failed"` when teardown was attempted but errored. Owned sessions
 and structured-transport links are stopped (`stopped:true`, empty `reason`).
 `/exit` is idempotent: a repeat call on an already-closed node does not tear the
@@ -367,15 +397,15 @@ agent is still live), so it never issues a second kill.
 
 Appends a `delete` tombstone to the store and archives the node's session
 log to `sessions/archive/`. Uploaded files are archived under
-`attachments/archive/`. History is never destroyed.
+`attachments/archive/`; session assets are archived too. The node's owned
+worker/agent is stopped, while a historical external tmux session is left running.
+History is never destroyed. A teardown failure returns `500` and attempts
+to re-assert the node in the store so it remains visible for retry.
 
-### `POST /api/adopt`
-
-Adopt a tmux session that scimux didn't start. Body: `session` (required;
-must exist on scimux's tmux socket), plus optional `title`, `prompt`,
-`description`, `agent` (default `claude`), `model`, `dir`, `session_id`,
-`transcript`. Adopted sessions are never killed by scimux. `agent:"codex"`
-is rejected — codex runs as a scimux-started subprocess, not in tmux.
+Historical records with `adopted:true` are readable and removable but retired:
+send, resolve, interrupt, key, and auto-approval mutations return `409`; no
+worker is started or resumed, and the external pane remains running. Forking
+such a record creates a fresh scimux-owned chat without importing its history.
 
 ## Talking to a node
 
@@ -387,6 +417,11 @@ turn is still in flight, while a tmux send is unconfirmed, or after `/exit`
 (`thread is closed; fork to continue`). On structured transports `"/clear"` is
 implemented by scimux itself: a fresh protocol session on the same node,
 recorded as a source seam — same page-turn semantics as Claude's `/clear`.
+ACP replaces the agent subprocess; Codex opens a fresh thread on its existing
+process, and Muse starts a fresh session on its connection. Muse `/clear`
+requires the current `muse_approval_judge_consent` setting (`400` when off).
+Claude's page turn is confirmed by its own `SessionStart` clear hook, not
+by successful pasting alone; an unconfirmed `/clear` does not retire history.
 A Claude send whose leading slash command is `/fork` or `/fork …` is `400`
 (Claude's native fork is not supported; use `POST /api/nodes` with `parent`
 to create a fresh node). Ordinary prose that merely contains the text
@@ -480,13 +515,15 @@ the answer.
 
 Body: `{"enabled": true}`. Arms or disarms the server-owned, one-turn
 auto-approval lease. Supported on the structured transports (Codex
-app-server; Grok, OpenCode, and Pi through ACP) and on Claude/tmux chats
-that scimux launched itself — those carry a hook bundle registering a
+app-server; Grok, OpenCode, and Pi through ACP; Muse through MSP) and on
+Claude/tmux chats that scimux launched itself — those carry a hook bundle registering a
 `PermissionRequest` hook, which is how a Claude tool call can be answered at
 all. Two cases still return `400` and create no state: a Claude pane scimux
-did not launch (adopted, or launched before the feature existed, so its
+did not launch before the feature existed, so its
 bundle has no permission rendezvous), and any other unsupported transport.
-State is never persisted across process restart.
+The lease is transient. Structured leases are owned by the muxer; Claude's
+lease is owned by its session worker. Restarting that owner clears its lease;
+a web-child replacement alone does not.
 
 Response (authoritative):
 
@@ -535,23 +572,41 @@ are `413`.
 
 ### `GET /api/settings` / `PUT /api/settings`
 
-The **computer's** own settings (`~/.scimux/settings.json`), as opposed to the
-per-browser document at `/api/ui`. The server reads these itself, which is why
-they cannot live in the opaque UI blob.
+The **computer's** own settings (`~/.scimux/settings.json`). The server reads
+and enforces these values itself; `/api/ui` holds the separate shared UI
+document, whose contents are opaque to the server.
 
 ```json
-{ "claude_usage_checks": false }
+{
+  "claude_usage_checks": false,
+  "muse_approval_judge_consent": false
+}
 ```
 
 `claude_usage_checks` is consent to run the Claude usage probe, which spends a
 small amount of the user's own subscription quota (see `GET /api/usage`).
-**Off is the default and every failure mode reads as off** — a missing,
-unreadable or nonsense settings file is "no consent given", never consent.
 
-PUT replaces the document wholesale: the client sends the state it means, so a
-missing field is `false`, not "unchanged". Malformed JSON is `400`, an
-oversized body `413`. The response is the stored document. Unlike `/api/ui`
-there is no revision check — a single boolean has nothing to merge.
+`muse_approval_judge_consent` permits launching Muse with its default
+approval judge, which can consume the user's quota. It is required for new
+Muse nodes (including forks) and `/clear`. It does not disable the judge,
+grant a tool permission, or arm auto-approval. Turning it off prevents those
+new launches/session resets; it does not stop an existing Muse session.
+
+**Both consent fields default to off.** A missing, unreadable, empty,
+oversized, or invalid settings file is read as no consent.
+
+PUT **merges the supplied JSON object** into the stored document. Omitted
+fields retain their current values, including unknown fields written by a
+newer client. For example, `{"claude_usage_checks":false}` turns off the
+Claude probe without changing Muse consent. To revoke both, explicitly send
+both fields as `false`; `{}` changes nothing. Send booleans for consent:
+`null` leaves the current value unchanged, while other non-boolean values
+are `400`.
+
+The response is the full stored document. Invalid JSON or incompatible field
+types are `400`, an oversized body is `413`, and a save failure is `500`.
+There is no ETag/revision precondition; writes are serialized, unrelated
+fields survive concurrent updates, and the last write to a field wins.
 
 ## Notes
 
@@ -723,6 +778,8 @@ the first version-shaped token of `<bin> --version`, empty when the output
 does not carry one. `present` and `launchable` are separate facts: pi is
 installed as `pi` but launched through `pi-acp`. The probe runs once per
 process, so a harness installed while scimux runs appears after a restart.
+Muse's `launchable` describes its installed executable; creation still
+enforces the separate approval-judge consent and model-catalog checks.
 
 ### `GET /api/harnesses/latest`
 
@@ -731,8 +788,11 @@ Reached only on an explicit tap, like the scimux update check — the server
 never polls the registries. There is no single lane: three sources are npm
 packages, grok is a plain-text channel file, and Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not
-the npm dist-tag, which it can never receive). Sources are read concurrently
-and independently, and an agent whose source failed is simply absent from the
+the npm dist-tag, which it can never receive). Muse has a separate stable
+channel metadata source. Its response format is not yet supported, so Muse
+is currently omitted from `latest` even when the channel is reachable.
+Sources are read concurrently and independently, and an agent whose source
+failed is simply absent from the
 map — "unknown" is what happened, and it is not the same claim as up to date.
 
 ## Remote pairing
@@ -816,10 +876,12 @@ The installation's hosted enrollment as `hosted` (`enrolled`,
 `disabled`, `revoked`, `unavailable`, `""` after an unlink, or one of
 the FR-30 broken states) plus `can_pair`, and a `devices` array. Each
 device is `{"id":"...","connected":true}` when its tunnel is live.
-When it is not, `connected` is false; `cause` is one of the six FR-24
+When it is not, `connected` is false; `cause` is one of the seven FR-24
 states (`rendezvous-unavailable`, `computer-offline`,
 `signalling-rejected`, `ice-failed`, `auth-failed`,
-`connected-then-lost`) only when the transport has produced one. A
+`connected-then-lost`, `tunnel-version-mismatch`) only when the transport
+has produced one. `tunnel-version-mismatch` means a MAJOR tunnel protocol
+incompatibility; a MINOR difference does not produce this cause. A
 paired device that has never attached a channel omits `cause`
 entirely — never connected is not a cause. `guidance` is present only
 for `ice-failed`, and is the only state that names

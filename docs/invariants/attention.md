@@ -3,9 +3,10 @@
 Part of the scimux invariant set (`AGENTS.md`), split out because it binds
 only once you are inside the code it governs. **Read this before touching
 liveness, attention or needs-input detection, `internal/dialoghint`,
-`handlePeek`, the inspect/Dismiss surface, `SendKey`, or any polled render
-region.** These rules draw one line over and over: evidence is structural,
-pane text may only corroborate, and no heuristic may type a key.
+`handlePeek`, the inspect/Dismiss surface, `SendKey`, any polled render
+region, or tmux targeting and prompt delivery.** These rules draw one line
+over and over: evidence is structural, pane text may only corroborate, and
+no heuristic may type a key.
 
 ## Liveness is mechanical only
 
@@ -84,3 +85,26 @@ living *inside* a polled region must survive the rebuild with value, focus
 and cursor intact (`withCardEditsPreserved` for the card editors,
 build-once + `dataset.node` guards for the chat-head editors). Any new
 polled UI element must respect this.
+
+## tmux gotchas (learned the hard way)
+
+- Pane-level commands (`capture-pane`, `paste-buffer`, `send-keys`) need the
+  target written `=name:` (trailing colon). Bare `=name` resolves only for
+  session-level commands (`has-session`, `kill-session`). Observed on tmux 3.6.
+- Prompts are delivered as a single paste (`load-buffer`/`paste-buffer`), then
+  a separate Enter — `send-keys` with raw text would re-interpret newlines as
+  submissions. Structured transports keep their protocol-owned first-turn
+  delivery instead.
+- That paste is bracketed (`paste-buffer -d -p`). tmux translates a buffer's
+  newlines to carriage returns, indistinguishable from Enter, so without the
+  markers a receiving TUI can only guess from arrival speed whether a block
+  was pasted or typed — under load that guess fails and one prompt lands as
+  several submitted messages. tmux emits the markers only when the application
+  requested bracketed-paste mode, so `-p` is inert for a wrapped `cat` or
+  `bash` (pinned by `TestBracketedPasteIsInertWithoutRequest`).
+- Line endings are normalized to LF before `load-buffer`
+  (`normalizeNewlines`). Because tmux rewrites LF to CR on paste, a CRLF pair
+  would survive as CR CR — two line breaks where the author wrote one, which
+  corrupts the prompt and breaks first-turn delivery confirmation (the pasted
+  text stops matching `canonicalPrompt`). Only line endings are touched:
+  whitespace, deliberate blank lines and interior spacing are the user's text.

@@ -640,7 +640,7 @@ func (a *app) refreshClaudePermCaps() {
 // claudePermSupportedLocked reports whether this node can auto-approve via
 // the hook. Caller may hold a.mu.
 func (a *app) claudePermSupportedLocked(n *Node) bool {
-	if n == nil || n.Agent != "claude" || n.transport() != "tmux" {
+	if n == nil || n.Adopted || n.Agent != "claude" || n.transport() != "tmux" {
 		return false
 	}
 	hookID := a.claudeHookIDLocked(n.ID)

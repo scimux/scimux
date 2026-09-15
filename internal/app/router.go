@@ -49,7 +49,6 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("PATCH /api/nodes/{id}", a.handleUpdateNode)
 	mux.HandleFunc("DELETE /api/nodes/{id}", a.handleDeleteNode)
 	mux.HandleFunc("POST /api/nodes/{id}/exit", a.handleExitNode)
-	mux.HandleFunc("POST /api/adopt", a.handleAdopt)
 	mux.HandleFunc("POST /api/nodes/{id}/send", a.handleSend)
 	mux.HandleFunc("POST /api/nodes/{id}/attachments", a.handleUploadAttachments)
 	mux.HandleFunc("GET /api/nodes/{id}/attachments/{name}", a.handleAttachment)

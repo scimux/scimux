@@ -29,7 +29,7 @@
  *
  * Injected transition helpers / feature effects:
  *   - setHostOnline, setServerUnreachable, setHostname, setVersion
- *   - publishState ({ nodes, unadopted }) — shell owns the arrays
+ *   - publishState ({ nodes }) — shell owns the array
  *   - renderSys(sys) — metrics HTML stays shell-owned
  *   - ensureSelection() — selected-node fallback (sel/nodeById/select stay shell)
  *   - updateCardAges, renderCards, renderMap, renderMapTabs, renderBookmarksPane
@@ -53,7 +53,7 @@
  *   - Network failure → offline + "server unreachable"; back online clears it
  *   - 304 → online, ages, await chat, fire-and-forget UI poll (no structural rebuild)
  *   - non-OK → offline
- *   - 200 → ETag/nodes/unadopted/hostname/version/sys → selection fallback
+ *   - 200 → ETag/nodes/hostname/version/sys → selection fallback
  *           → Cards → Map → Bookmarks → await Chat → UI poll
  *   - UI poll never awaited by the state tick
  *   - Direct fast ticks non-overlapping; finally always releases the gate,
@@ -370,7 +370,6 @@ export function createPollingFeature(deps = {}) {
       if (destroyed) return;
       publishState({
         nodes: st.nodes || [],
-        unadopted: st.unadopted || [],
       });
       if (st.hostname) setHostname(st.hostname);
       if (st.version) setVersion(st.version);

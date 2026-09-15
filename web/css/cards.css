@@ -120,10 +120,10 @@
    archive/remove row (same hover idiom as the bubble copy button), so pointer
    users get a discoverable equivalent of the touch long-press. Touch devices
    report (hover: none) and keep long-press/swipe; they never match this. The
-   :not() chain mirrors the long-press guards — no actions on adoptable,
-   expanded, or in-edit cards. */
+   :not() chain mirrors the long-press guards — no actions on expanded or
+   in-edit cards. */
 @media (hover: hover) and (pointer: fine) {
-  .card:not(.adoptable):not(.expanded):not(.editing):not(.title-editing):hover .actions { display: flex; }
+  .card:not(.expanded):not(.editing):not(.title-editing):hover .actions { display: flex; }
 }
 .card .actions .pin { color: var(--work); }
 .card .actions .endthread { color: var(--dim); }
@@ -189,7 +189,6 @@
   0%, 100% { opacity: .35; transform: translateZ(0) scale(.76); }
   50%      { opacity: 1;  transform: translateZ(0) scale(1.22); }
 }
-.card.adoptable { border-style: dashed; }
 /* "Input needed": out-of-scope attention gathered under one pinned fold —
    the yellow dot breathes (same calm cadence as the working dot), never
    blinks; unfolding discloses the cards in place */

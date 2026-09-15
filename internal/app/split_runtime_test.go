@@ -16,7 +16,6 @@ import (
 	"codeberg.org/chrberger/scimux/internal/backend"
 	"codeberg.org/chrberger/scimux/internal/remote"
 	"codeberg.org/chrberger/scimux/internal/sessionworker"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 )
 
 func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {
@@ -250,19 +249,16 @@ func TestSplitRuntimeRetainsOwnershipWhileWebDrains(t *testing.T) {
 	requestEntered := make(chan struct{})
 	releaseRequest := make(chan struct{})
 	var enteredOnce, releaseOnce sync.Once
-	a := newTestApp(t, &fakeTmux{})
-	a.server = tmuxsession.NewServerWithRunner("testsock", func(ctx context.Context, _ string, args ...string) (string, error) {
-		if len(args) >= 3 && args[2] == "list-sessions" {
-			enteredOnce.Do(func() { close(requestEntered) })
-			select {
-			case <-releaseRequest:
-				return "", nil
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{"draining-request": true}})
+	n := &Node{ID: "draining-request", Title: "draining request", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	a.deleteGateHook = func(id string) {
+		if id != n.ID {
+			return
 		}
-		return "", nil
-	})
+		enteredOnce.Do(func() { close(requestEntered) })
+		<-releaseRequest
+	}
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
@@ -298,7 +294,14 @@ func TestSplitRuntimeRetainsOwnershipWhileWebDrains(t *testing.T) {
 	requestDone := make(chan error, 1)
 	go func() {
 		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Get("http://" + ln.Addr().String() + "/api/state")
+		req, err := http.NewRequest(http.MethodDelete, "http://"+ln.Addr().String()+"/api/nodes/"+n.ID, nil)
+		if err == nil {
+			req.Header.Set("X-Scimux-CSRF", cmd.csrfToken)
+		}
+		var resp *http.Response
+		if err == nil {
+			resp, err = client.Do(req)
+		}
 		if err == nil {
 			_ = resp.Body.Close()
 		}

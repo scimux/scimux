@@ -922,6 +922,51 @@ func TestEndedNodeRejectsMutations(t *testing.T) {
 	}
 }
 
+func TestRetiredExternalNodeKeepsHistoryButRejectsInteraction(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"external": true}, capture: "Approve? (y/n)\n"}
+	a := newTestApp(t, f)
+	n := &Node{ID: "external", Title: "Saved external chat", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+		{T: "user", Text: "saved question", Time: "2026-01-01T00:00:01Z"},
+		{T: "assistant", Text: "saved answer", Time: "2026-01-01T00:00:02Z"},
+	})
+	h := newTestHandler(t, a)
+	cases := []struct {
+		path string
+		body string
+	}{
+		{"/api/nodes/external/send", `{"text":"new input"}`},
+		{"/api/nodes/external/send/resolve", `{}`},
+		{"/api/nodes/external/send/interrupt", `{}`},
+		{"/api/nodes/external/key", `{"key":"y"}`},
+		{"/api/nodes/external/auto-approve", `{"enabled":true}`},
+	}
+	for _, tc := range cases {
+		rec := routeRequest(h, http.MethodPost, tc.path, tc.body, true)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "retired") {
+			t.Errorf("POST %s = %d %q, want retired 409", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+	peek := routeRequest(h, http.MethodGet, "/api/nodes/external/peek", "", false)
+	if peek.Code != http.StatusConflict || !strings.Contains(peek.Body.String(), "retired") {
+		t.Errorf("GET retired peek = %d %q, want retired 409", peek.Code, peek.Body.String())
+	}
+	if calls := f.subcommands(); len(calls) != 0 {
+		t.Fatalf("retired node interacted with external tmux pane: %v", calls)
+	}
+	rec := routeRequest(h, http.MethodGet, "/api/nodes/external/chat?history=1", "", false)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "saved answer") {
+		t.Fatalf("saved history became unreadable: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = routeRequest(h, http.MethodGet, "/api/nodes/external/chat", "", false)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "start a fresh chat") {
+		t.Fatalf("retirement explanation missing: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleKeyTmuxEvidenceBeforeAction(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"k1": true}, capture: "some output\nApprove? (y/n)\n"}
 	a := newTestApp(t, f)
@@ -1165,16 +1210,14 @@ func TestHandleKeyAXClaudeCompoundDelivery(t *testing.T) {
 	}
 }
 
-// Legacy Claude, adopted Claude, and non-Claude tmux stay single-key.
-func TestHandleKeyLegacyAdoptedNonClaudeSingleKey(t *testing.T) {
+// Legacy owned Claude and non-Claude tmux stay single-key.
+func TestHandleKeyLegacyOwnedAndNonClaudeSingleKey(t *testing.T) {
 	cases := []struct {
 		name string
 		n    *Node
 	}{
 		{"legacy", &Node{ID: "leg", Title: "leg", Agent: "claude", Transport: "tmux",
 			AXScreenReader: false, CreatedAt: "2026-01-01T00:00:00Z"}},
-		{"adopted", &Node{ID: "adp", Title: "adp", Agent: "claude", Transport: "tmux",
-			Adopted: true, AXScreenReader: false, CreatedAt: "2026-01-01T00:00:00Z"}},
 		{"pi", &Node{ID: "pi1", Title: "pi1", Agent: "pi", Transport: "tmux",
 			CreatedAt: "2026-01-01T00:00:00Z"}},
 	}

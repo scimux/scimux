@@ -168,9 +168,8 @@ func lastInteractionMS(n *Node, seg sessionlog.Segment) int64 {
 // handleState uses this snapshot boundary (existing behavior; do not change locking
 // merely to match this comment):
 //
-//   - tmux session listing (a.server.Sessions) runs before a.mu.
 //   - scalar Node values, poll fields (live/attention/lastChg), HasTranscript,
-//     and the unadopted list are snapshotted under a.mu.
+//     are snapshotted under a.mu.
 //   - live *Node pointers must never be marshaled after unlock (copy under lock).
 //   - segment/session-log projection (stops, station labels, last interaction,
 //     context gauge) runs after unlock because segment reacquires a.mu.
@@ -182,7 +181,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		ids := make([]string, 0, len(a.nodes))
 		for _, n := range a.nodes {
-			if n.Agent == "claude" && a.workers.manages(n.ID) {
+			if !n.Adopted && n.Agent == "claude" && a.workers.manages(n.ID) {
 				ids = append(ids, n.ID)
 			}
 		}
@@ -191,7 +190,6 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 			workerStates[id] = a.workers.State(id)
 		}
 	}
-	sessions := a.server.Sessions()
 	a.mu.Lock()
 	views := make([]nodeView, 0, len(a.nodes))
 	for _, n := range a.nodes {
@@ -213,7 +211,10 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		sup := a.claudeSupervisionOf(n)
 		attn := a.attn[n.ID]
 		live, turnDone, launchErr := a.live[n.ID], a.turnDone[n.ID], a.claudeLaunchErr[n.ID]
-		if state, ok := workerStates[n.ID]; ok {
+		if n.Adopted {
+			live, attn, turnDone = "unavailable", "", false
+			launchErr = "This external session integration is retired. Saved history remains available; start a fresh chat to continue."
+		} else if state, ok := workerStates[n.ID]; ok {
 			nc.SessionID, nc.Transcript, nc.AXScreenReader = state.SessionID, state.Transcript, state.AXScreenReader
 			sup, attn, live, turnDone, launchErr = claudeSupervision(state.Supervision), state.Attention, state.Live, state.TurnDone, state.LastError
 			hasTranscript = state.Transcript != ""
@@ -227,21 +228,6 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		views = append(views, nodeView{Node: &nc, Live: live, Attention: attn, AttentionAt: attentionMS,
 			TurnDone: turnDone, HasTranscript: hasTranscript, LastActivity: lastMS,
 			Supervision: string(sup), LaunchError: launchErr})
-	}
-	// Sessions on our socket that no node accounts for: candidates for
-	// adoption (manually created, or migrated from another tmux server). A
-	// session whose id is reserved by an in-flight create is already spoken
-	// for (R20.2) — offering it for adoption would race the publish. So is
-	// one in the probe namespace: scimux launched it itself and will kill it
-	// within seconds (isProbeSession).
-	unadopted := []string{}
-	for _, s := range sessions {
-		if isProbeSession(s) {
-			continue
-		}
-		if _, known := a.byID[s]; !known && !a.reserved[s] {
-			unadopted = append(unadopted, s)
-		}
 	}
 	hosted := a.hostedRemote
 	a.mu.Unlock()
@@ -291,7 +277,7 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		v.CtxPct = &p
 	}
 	payload := map[string]any{
-		"nodes": views, "unadopted": unadopted, "sys": sysload(),
+		"nodes": views, "sys": sysload(),
 		"socket": a.server.Socket, "hostname": hostname, "version": a.activeWebVersion(),
 	}
 	if hosted != nil {

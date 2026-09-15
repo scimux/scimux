@@ -152,6 +152,9 @@ func parsePermissionRequestID(id string) (incarn string, seq uint64, ok bool) {
 // pane whose own hook bundle carries the permission rendezvous. Caller may
 // hold a.mu (the Claude side is a map lookup, never filesystem I/O).
 func (a *app) autoApproveSupportedFor(n *Node) bool {
+	if n == nil || n.Adopted {
+		return false
+	}
 	return autoApproveSupported(n) || a.claudePermSupportedLocked(n)
 }
 
@@ -811,6 +814,9 @@ func (a *app) handleAutoApprove(w http.ResponseWriter, r *http.Request) {
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if a.refuseRetiredExternal(w, n) {
 		return
 	}
 	if a.refuseEnded(w, n) {

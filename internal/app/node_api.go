@@ -1,4 +1,4 @@
-// node_api.go — HTTP orchestration for node create/adopt/update/exit/delete.
+// node_api.go — HTTP orchestration for node create/update/exit/delete.
 //
 // Ownership (existing boundaries; this file does not change locks):
 //   - Router registration stays in router.go.
@@ -7,9 +7,8 @@
 //   - Store append/replay and session-log archival stay in store.go.
 //   - Attachment/asset archive helpers live in attachment_api.go; delete only
 //     sequences a.archiveAttachments/Assets after removeNodeLocked.
-//   - a.mu: adopt holds the lock across taken-checks, path claim, persist,
-//     and publish; create releases before createNode (which manages its own
-//     lock); update holds through node mutation/persist except the station
+//   - a.mu: create releases before createNode (which manages its own lock);
+//     update holds through node mutation/persist except the station
 //     path; exit/delete persist under a.mu then release before closeOwned
 //     (and delete re-locks for re-assert or removeNodeLocked). Never call
 //     segment() under a.mu from these handlers.
@@ -19,178 +18,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
 )
-
-// handleAdopt registers an already-running tmux session (which scimux did
-// not start) as a node. No tmux state is touched — this only writes the
-// node record, so adoption is always safe for the running agent.
-func (a *app) handleAdopt(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Session     string `json:"session"`
-		Title       string `json:"title"`
-		Prompt      string `json:"prompt"`
-		Description string `json:"description"`
-		Agent       string `json:"agent"`
-		Model       string `json:"model"`
-		Dir         string `json:"dir"`
-		SessionID   string `json:"session_id"`
-		Transcript  string `json:"transcript"`
-	}
-	if err := decodeJSON(w, r, &body); err != nil || body.Session == "" {
-		http.Error(w, "bad request: need session", 400)
-		return
-	}
-	// The tmux session name becomes the node id (and its session-log
-	// filename): hold it to the same rules NewSession applies to created
-	// nodes. tmux itself already rejects '.' and ':', so this is defense in
-	// depth against names that would misbehave as ids (e.g. containing '/').
-	if !tmuxsession.ValidName(body.Session) {
-		http.Error(w, fmt.Sprintf("session name %q is not adoptable as a node id", body.Session), 400)
-		return
-	}
-	agent := body.Agent
-	if agent == "" {
-		agent = "claude"
-	}
-	// Codex now uses the app-server protocol: scimux starts the subprocess
-	// itself via POST /api/nodes. Reject before the tmux Alive check so any
-	// agent:"codex" request gets the clear explanation regardless of whether
-	// the named session exists.
-	if agent == "codex" {
-		http.Error(w, "codex uses the app-server protocol; use POST /api/nodes with agent:\"codex\" to create a new activity", 400)
-		return
-	}
-	// Hold adopted agents to the creation allowlist (minus codex): a direct API
-	// client must not persist a node with an agent the rest of the code does not
-	// support. Only tmux-transport agents are adoptable — ACP agents
-	// (pi/opencode/grok) are created, not adopted, but a legacy tmux-run
-	// pi/opencode may exist. Grok remains non-adoptable: scimux owns its
-	// structured subprocess (same as production Grok nodes).
-	switch agent {
-	case "claude", "pi", "opencode":
-	default:
-		http.Error(w, fmt.Sprintf("unknown agent %q (adoptable: claude, pi, opencode)", agent), 400)
-		return
-	}
-	// A transcript override, if supplied, must be an absolute, cleaned path under
-	// the agent's transcript root. Otherwise a crafted path (paired with a
-	// guessed tmux session) could make scimux parse and mirror an arbitrary
-	// local file under a node's identity. Only claude uses transcript files.
-	if body.Transcript != "" {
-		root := filepath.Join(a.home, ".claude", "projects") + string(filepath.Separator)
-		clean := filepath.Clean(body.Transcript)
-		if agent != "claude" || !filepath.IsAbs(clean) || !strings.HasPrefix(clean, root) {
-			http.Error(w, "transcript override must be an absolute path under ~/.claude/projects/", 400)
-			return
-		}
-		body.Transcript = clean
-	}
-	s := a.server.Session(body.Session)
-	if !s.Alive() {
-		http.Error(w, fmt.Sprintf("no session %q on socket %q", body.Session, a.server.Socket), 404)
-		return
-	}
-	a.mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			a.mu.Unlock()
-		}
-	}()
-	if _, taken := a.byID[body.Session]; taken {
-		http.Error(w, "node already exists", 409)
-		return
-	}
-	// The same taken-checks uniqueID applies to created ids (R20.2, R20.4):
-	// an id reserved by an in-flight create must not be adopted out from under
-	// the launch, and a leftover session log under this slug is a dead node's
-	// history — adopting onto it would bind the mirror to foreign turns under
-	// the dead node's identity.
-	if a.reserved[body.Session] {
-		http.Error(w, fmt.Sprintf("a node %q is being created right now; retry or pick another session name", body.Session), 409)
-		return
-	}
-	if a.sessionLogExists(body.Session) {
-		http.Error(w, fmt.Sprintf("session log %s.jsonl already holds a dead node's history; move it out of the sessions directory (or into sessions/archive/) before adopting this name", body.Session), 409)
-		return
-	}
-	// scimux's own throwaway probe. It is never offered for adoption, so this
-	// is a stale card or a hand-written request; a node bound to it would
-	// supervise a pane that is about to be killed (and, if scimux was killed
-	// mid-probe, one launched with no tools and scimux's status line).
-	if isProbeSession(body.Session) {
-		http.Error(w, fmt.Sprintf("session %q is a scimux usage probe, not an agent chat", body.Session), 409)
-		return
-	}
-	dir := body.Dir
-	if dir == "" {
-		if cwd, err := s.Cwd(); err == nil {
-			dir = cwd
-		}
-	}
-	title := body.Title
-	if title == "" {
-		title = body.Session
-	}
-	n := &Node{ID: body.Session, Title: title, Prompt: body.Prompt, Agent: agent,
-		Model: body.Model, Dir: dir, SessionID: body.SessionID, Transcript: body.Transcript,
-		Description: body.Description, Adopted: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	if n.Description == "" {
-		n.Description = n.Prompt
-	}
-	// Adopted claude session without a known id: try the pane's own process
-	// arguments (claude --resume <id> / --session-id <id>). No newest-file
-	// fallback — without a UUID the node stays transcriptless and peeks.
-	if n.Agent == "claude" && n.SessionID == "" && n.Transcript == "" {
-		if pid, err := s.PanePID(); err == nil {
-			n.SessionID = sessionFromPane(pid, sessionArgFromCmdline)
-		}
-	}
-	// Any known claude session id — supplied explicitly (the migration script
-	// sends one) or extracted from the pane above — gets its deterministic
-	// lookup now (the id is the transcript filename). This adoption lookup is
-	// intentionally one-shot: discoverTranscript excludes every Claude node
-	// because SessionStart is the only live ownership proof. If the file is not
-	// visible yet, the adopted node remains transcriptless rather than guessing
-	// a later file owner.
-	if n.Agent == "claude" && n.SessionID != "" && n.Transcript == "" {
-		if path, ok := transcript.FindClaudeTranscript(a.home, n.SessionID); ok {
-			n.Transcript = path
-		}
-	}
-	// Transcript exclusivity holds for adoption too: a path another node
-	// owns (or a discovery is reserving right now) must not be published twice.
-	if n.Transcript != "" && a.pathClaimedLocked(n.Transcript, n.ID) {
-		http.Error(w, fmt.Sprintf("transcript %q already belongs to another node", n.Transcript), 409)
-		return
-	}
-	// Persist before publishing: an adopted node that exists only in memory
-	// would silently vanish from the registry on restart.
-	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
-		http.Error(w, "persist node: "+err.Error(), 500)
-		return
-	}
-	a.nodes = append(a.nodes, n)
-	a.byID[n.ID] = n
-	snapshot := *n
-	a.mu.Unlock()
-	locked = false
-	if a.workers != nil && snapshot.Agent == "claude" {
-		if _, err := a.workers.AdoptClaude(&snapshot, "", 0); err != nil {
-			// Adoption itself already succeeded and must not be rolled back: the
-			// legacy controller remains able to supervise this user-owned pane.
-			fmt.Fprintf(os.Stderr, "scimux: attach adopted Claude chat %s to session worker: %v\n", snapshot.ID, err)
-		}
-	}
-	writeJSON(w, &snapshot)
-}
 
 func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	var n Node
@@ -200,12 +32,12 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// Scrub every server-owned field before validation: a create request only
 	// supplies launch config (title/description/prompt/agent/model/effort/dir/
-	// parent/lane_id/rationale). Identity, adoption, liveness, the linked
+	// parent/lane_id/rationale). Identity, external ownership, liveness, the linked
 	// transcript, and AX launch mode are all minted or managed by the server,
 	// and trusting them from the body would let a client be born "Closed"
 	// (ended_at), keep an owned tmux session alive forever (adopted → closeOwned
-	// never kills it), bind the mirror to an arbitrary transcript path (no
-	// pathClaimed check on create, unlike handleAdopt), or claim AX key
+	// never kills it), bind the mirror to an arbitrary transcript path without
+	// an ownership check, or claim AX key
 	// semantics for an ordinary external pane. The UI never sends these; this
 	// closes the gap for any other client. ForkKind is recomputed in
 	// resolveNode; AXScreenReader is set only at the owned-Claude launch seam.
@@ -222,7 +54,7 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Snapshot current session names before the critical section (tmux is
-	// slow); the ID allocator must avoid unadopted sessions.
+	// slow); the ID allocator must avoid foreign session names too.
 	taken := map[string]bool{}
 	for _, s := range a.server.Sessions() {
 		taken[s] = true
@@ -380,7 +212,7 @@ func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	// The response reports whether the underlying process actually stopped so the
 	// UI can tell the truth instead of promising a stop it may not have
-	// delivered: an adopted tmux session is deliberately left running
+	// delivered: a historical external tmux session is deliberately left running
 	// (closeOwned returns nil without killing it), and a kill can fail. In both
 	// cases the node is "closed in scimux" but the agent is still alive.
 	stopped, reason := true, ""

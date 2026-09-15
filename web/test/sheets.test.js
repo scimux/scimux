@@ -32,7 +32,6 @@ import {
   isNoOpEditBody,
   isNoOpStationEdit,
   buildStationLabelPayload,
-  buildAdoptPayload,
   createErrorField,
   submitButtonLabel,
   submitButtonHTML,
@@ -215,16 +214,6 @@ test("edit payloads: head diff, station, no-op", () => {
     buildStationLabelPayload("2020-01-01T00:00:00Z", "T", "D"),
     { station: "2020-01-01T00:00:00Z", title: "T", description: "D" },
   );
-});
-
-test("buildAdoptPayload trims fields", () => {
-  assert.deepEqual(buildAdoptPayload({
-    session: "s1", agent: "claude", session_id: "  id  ",
-    transcript: " /p ", title: "  t ", prompt: "  p ",
-  }), {
-    session: "s1", agent: "claude", session_id: "id",
-    transcript: "/p", title: "t", prompt: "p",
-  });
 });
 
 test("createErrorField and submit/head labels", () => {
@@ -1071,65 +1060,13 @@ test("frozen-station edit patches station label; no-op closes", async () => {
   assert.equal(ctx.nodes.p1.station_labels["2020-01-01T00:00:00Z"].title, "New frozen");
 });
 
-/* ---------- adoption ---------- */
-test("adoption reset, payload, success, failure", async () => {
+test("stale adoption controls have no sheet callback or request", async () => {
   const ctx = createFeature();
   ctx.feature.bind();
-  ctx.feature.openAdopt("sess-1");
-  assert.ok(ctx.byId.adopt.classList.contains("open"));
-  assert.equal(ctx.byId.ad_title.textContent, `Adopt "sess-1"`);
-  assert.equal(ctx.byId.ad_agent.value, "claude");
-  assert.equal(ctx.byId.ad_sid.value, "");
-  ctx.byId.ad_sid.value = " uuid ";
-  ctx.byId.ad_path.value = " /t ";
-  ctx.byId.ad_titlein.value = " Title ";
-  ctx.byId.ad_prompt.value = " Work ";
+  assert.equal(ctx.feature.openAdopt, undefined);
   ctx.byId.ad_go.dispatch("click");
   await Promise.resolve();
-  await Promise.resolve();
-  const call = ctx.apiCalls.find(c => c.path === "/api/adopt");
-  assert.ok(call);
-  assert.deepEqual(JSON.parse(call.opts.body), {
-    session: "sess-1",
-    agent: "claude",
-    session_id: "uuid",
-    transcript: "/t",
-    title: "Title",
-    prompt: "Work",
-  });
-  assert.deepEqual(ctx.effects.select, ["adopted-1"]);
-  assert.equal(ctx.effects.tick, 1);
-
-  const ctx2 = createFeature();
-  ctx2.setApi(async path => {
-    if (path === "/api/agents") return {};
-    if (path === "/api/adopt") throw new Error("nope");
-    return {};
-  });
-  ctx2.feature.bind();
-  ctx2.feature.openAdopt("s");
-  ctx2.byId.ad_go.dispatch("click");
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.deepEqual(ctx2.effects.alert, ["nope"]);
-});
-
-test("malformed successful adoption response follows the original failure path", async () => {
-  const ctx = createFeature();
-  ctx.setApi(async path => {
-    if (path === "/api/agents") return {};
-    if (path === "/api/adopt") return null;
-    return {};
-  });
-  ctx.feature.bind();
-  ctx.feature.openAdopt("s");
-  ctx.byId.ad_go.dispatch("click");
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.deepEqual(ctx.effects.select, []);
-  assert.equal(ctx.effects.alert.length, 1);
-  assert.match(ctx.effects.alert[0], /null|id/i);
+  assert.equal(ctx.apiCalls.some(c => c.path === "/api/adopt"), false);
 });
 
 /* ---------- bind/destroy ---------- */
@@ -1219,7 +1156,6 @@ test("public factory API has no mutable test accessors", () => {
     "forkFromStation",
     "forkFromTurn",
     "openActivityEditor",
-    "openAdopt",
     "openNewActivity",
     "openSheet",
   ].sort());

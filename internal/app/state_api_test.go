@@ -2,7 +2,7 @@ package app
 
 // Packet 3C characterization: pure state-projection helpers and /api/state
 // snapshot contracts that existing tests leave as gaps. Complements — does not
-// replace — TestHandleStateETagAndUnadopted, TestHandleStateUnadoptedExcludesReserved,
+// replace — TestHandleStateETag, TestHandleStateOmitsExternalSessionDiscovery,
 // TestHandleStateReportsLastInteractionFromCurrentSegment, TestHandleStateEmitsStationLabels,
 // TestSysloadOnLinux, router GET /api/state characterization, or chat/context
 // coverage that already exercises ctxWindowFor/ctxPctOf through handleChat.
@@ -364,7 +364,6 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 		"agent": "pi", "model": "claude-sonnet", "effort": "high",
 		"dir": "/work", "session_id": "sess-1", "transcript": "/tmp/t.jsonl",
 		"created_at": "2026-07-14T00:00:00Z",
-		"live":       "active", "attention": "approval",
 	}
 	for k, want := range wantStr {
 		if got[k] != want {
@@ -373,6 +372,12 @@ func TestHandleStateProjectsNodeScalarsAndLiveness(t *testing.T) {
 	}
 	if got["adopted"] != true {
 		t.Errorf("adopted = %v, want true", got["adopted"])
+	}
+	if got["live"] != "unavailable" || got["attention"] != nil {
+		t.Errorf("retired external mechanics = live:%v attention:%v", got["live"], got["attention"])
+	}
+	if !strings.Contains(got["launch_error"].(string), "retired") {
+		t.Errorf("retirement explanation = %v", got["launch_error"])
 	}
 	// tmux HasTranscript follows the transcript link.
 	if got["has_transcript"] != true {
@@ -534,7 +539,7 @@ func TestHandleStateDoesNotMutateNodeOrPollState(t *testing.T) {
 	}
 }
 
-// ---------- 4. Response shape, stops, unadopted, ETag/content-type ----------
+// ---------- 4. Response shape, stops, ETag/content-type ----------
 
 func TestHandleStateStopsSegmentDerived(t *testing.T) {
 	// Stops are clear-tagged seams only (segment.ClearTimes), oldest first.
@@ -581,14 +586,13 @@ func TestHandleStateStopsSegmentDerived(t *testing.T) {
 }
 
 func TestHandleStateResponseShapeContentTypeAndStableETag(t *testing.T) {
-	// Complements TestHandleStateETagAndUnadopted (304 path) with top-level
+	// Complements TestHandleStateETag (304 path) with top-level
 	// shape, content type, and etag stability across identical snapshots.
 	f := &fakeTmux{list: []string{"node-a", "ghost"}}
 	a := newTestApp(t, f)
 	a.nodes = []*Node{{ID: "node-a", Title: "A", Agent: "claude", Dir: "/tmp", CreatedAt: "2026-07-14T00:00:00Z"}}
 	a.byID["node-a"] = a.nodes[0]
 	a.reserved["pending"] = true
-	// reserved session is not in list; only ghost is unadopted.
 
 	req1 := httptest.NewRequest("GET", "/api/state", nil)
 	rec1 := httptest.NewRecorder()
@@ -609,7 +613,7 @@ func TestHandleStateResponseShapeContentTypeAndStableETag(t *testing.T) {
 	if err := json.Unmarshal(rec1.Body.Bytes(), &top); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"nodes", "unadopted", "sys", "socket", "hostname", "version"} {
+	for _, key := range []string{"nodes", "sys", "socket", "hostname", "version"} {
 		if _, ok := top[key]; !ok {
 			t.Errorf("top-level missing %q", key)
 		}
@@ -623,10 +627,8 @@ func TestHandleStateResponseShapeContentTypeAndStableETag(t *testing.T) {
 	if top["version"] != version {
 		t.Errorf("version = %v, want %q", top["version"], version)
 	}
-	// unadopted: known sessions excluded; reserved not in list here; ghost adoptable.
-	unad, ok := top["unadopted"].([]any)
-	if !ok || len(unad) != 1 || unad[0] != "ghost" {
-		t.Errorf("unadopted = %v, want [ghost]", top["unadopted"])
+	if _, ok := top["unadopted"]; ok {
+		t.Errorf("removed unadopted field present: %v", top["unadopted"])
 	}
 	sys, ok := top["sys"].(map[string]any)
 	if !ok {
@@ -678,7 +680,7 @@ func TestSysloadOnLinux(t *testing.T) {
 
 // --- /api/state ---
 
-func TestHandleStateETagAndUnadopted(t *testing.T) {
+func TestHandleStateETag(t *testing.T) {
 	f := &fakeTmux{list: []string{"node-a", "ghost"}}
 	a := newTestApp(t, f)
 	a.nodes = []*Node{{ID: "node-a", Title: "A", Agent: "claude", Dir: "/tmp", CreatedAt: "2026-07-14T00:00:00Z"}}
@@ -694,8 +696,7 @@ func TestHandleStateETagAndUnadopted(t *testing.T) {
 		t.Fatal("no ETag header")
 	}
 	var body struct {
-		Unadopted []string `json:"unadopted"`
-		Nodes     []struct {
+		Nodes []struct {
 			ID string `json:"id"`
 		} `json:"nodes"`
 	}
@@ -704,9 +705,6 @@ func TestHandleStateETagAndUnadopted(t *testing.T) {
 	}
 	if len(body.Nodes) != 1 || body.Nodes[0].ID != "node-a" {
 		t.Errorf("nodes = %+v", body.Nodes)
-	}
-	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
-		t.Errorf("unadopted = %v, want [ghost] (node-a is accounted for)", body.Unadopted)
 	}
 
 	// A matching If-None-Match short-circuits to 304 with no body.
@@ -722,22 +720,34 @@ func TestHandleStateETagAndUnadopted(t *testing.T) {
 	}
 }
 
-// The /api/state unadopted list must not offer a session whose id an
-// in-flight create has reserved: adopting it would race the publish (R20.2).
-func TestHandleStateUnadoptedExcludesReserved(t *testing.T) {
+func TestHandleStateOmitsExternalSessionDiscovery(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{list: []string{"foreign-pane"}})
+	rec := httptest.NewRecorder()
+	a.handleState(rec, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("state = %d %q", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := body["unadopted"]; exists {
+		t.Fatalf("state still publishes external-session discovery: %s", rec.Body.String())
+	}
+}
+
+func TestHandleStateDoesNotDiscoverReservedOrForeignSessions(t *testing.T) {
 	f := &fakeTmux{list: []string{"ghost", "pending"}}
 	a := newTestApp(t, f)
 	a.reserved = map[string]bool{"pending": true}
 	rec := httptest.NewRecorder()
 	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
-	var body struct {
-		Unadopted []string `json:"unadopted"`
-	}
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
-		t.Errorf("unadopted = %v, want [ghost] (pending is reserved)", body.Unadopted)
+	if _, ok := body["unadopted"]; ok {
+		t.Errorf("external discovery returned: %s", rec.Body.String())
 	}
 }
 
@@ -841,7 +851,7 @@ func TestHandleStateEmitsStationLabels(t *testing.T) {
 // node, so the subtractive unadopted list used to offer them for adoption:
 // an "unadopted tmux session" card that appeared and vanished by itself. The
 // probe namespace is reserved, never a stranger.
-func TestHandleStateUnadoptedExcludesProbeSessions(t *testing.T) {
+func TestHandleStateDoesNotDiscoverProbeSessions(t *testing.T) {
 	probe, err := claudeUsageProbeSessionName()
 	if err != nil {
 		t.Fatal(err)
@@ -850,14 +860,12 @@ func TestHandleStateUnadoptedExcludesProbeSessions(t *testing.T) {
 	a := newTestApp(t, f)
 	rec := httptest.NewRecorder()
 	a.handleState(rec, httptest.NewRequest("GET", "/api/state", nil))
-	var body struct {
-		Unadopted []string `json:"unadopted"`
-	}
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Unadopted) != 1 || body.Unadopted[0] != "ghost" {
-		t.Errorf("unadopted = %v, want [ghost] (%s is a scimux probe)", body.Unadopted, probe)
+	if _, ok := body["unadopted"]; ok {
+		t.Errorf("external discovery returned for probe %s: %s", probe, rec.Body.String())
 	}
 }
 

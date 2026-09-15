@@ -28,7 +28,6 @@ import {
   CARD_STATES,
   cardTabCount,
   emptyCardsHTML,
-  adoptCardsHTML,
   attnFoldButtonHTML,
   cardTabsHTML,
   pinOrderAfterDrag,
@@ -293,19 +292,18 @@ test("cardTabCount mirrors visible membership for badges", () => {
   }), 2);
 });
 
-test("emptyCardsHTML messages and adoptCardsHTML lane/tab gates", () => {
+test("emptyCardsHTML messages", () => {
   assert.match(emptyCardsHTML({ laneFilter: "L1", cardTab: "current" }), /No activities on this journey/);
   assert.match(emptyCardsHTML({ laneFilter: "L1", cardTab: "archived" }), /No archived activities on this journey/);
   assert.match(emptyCardsHTML({ laneFilter: "", cardTab: "archived" }), /Nothing archived yet/);
-  assert.equal(emptyCardsHTML({ laneFilter: "", cardTab: "current", hasAdoptCards: true }), "");
-  assert.match(emptyCardsHTML({ laneFilter: "", cardTab: "current", hasAdoptCards: false }), /start the first one/);
+  assert.match(emptyCardsHTML({ laneFilter: "", cardTab: "current" }), /start the first one/);
+});
 
-  assert.equal(adoptCardsHTML(["s1"], { cardTab: "archived", laneFilter: "" }), "");
-  assert.equal(adoptCardsHTML(["s1"], { cardTab: "current", laneFilter: "L1" }), "");
-  const ad = adoptCardsHTML(["sess"], { cardTab: "current", laneFilter: "" });
-  assert.match(ad, /class="card adoptable"/);
-  assert.match(ad, /data-adopt="sess"/);
-  assert.match(ad, /aria-label="adopt sess"/);
+test("stale unadopted state cannot render an external-session card", () => {
+  const h = cardsActionHarness({ nodes: [], unadopted: ["foreign-pane"] });
+  h.feature.render();
+  assert.doesNotMatch(h.list.innerHTML, /foreign-pane|data-adopt|adoptable/i);
+  assert.match(h.list.innerHTML, /start the first one/);
 });
 
 test("attnFoldButtonHTML aria-expanded and open class", () => {
@@ -1772,12 +1770,13 @@ test("click: delete confirm owned removes node and clears selection", async () =
   assert.equal(h.effects.invalidateStateEtag, 1);
 });
 
-test("click: delete adopted confirm message mentions adopted session", async () => {
+test("click: delete retired external confirmation preserves history and pane", async () => {
   const h = cardsActionHarness({
     nodes: [{ id: "n1", title: "Alpha", adopted: true, live: "quiet" }],
   });
   await h.clickList(actTarget({ trash: "n1" }, ["[data-trash]"]));
-  assert.match(h.effects.confirms[0], /adopted tmux session will keep running/);
+  assert.match(h.effects.confirms[0], /saved history will be archived/);
+  assert.match(h.effects.confirms[0], /external tmux session will keep running/);
 });
 
 test("click: delete cancel skips API and removeNode", async () => {
@@ -1820,10 +1819,10 @@ test("click: expand toggles expanded set and clears actionCard", () => {
   assert.equal(h.state.expanded.has("n1"), false);
 });
 
-test("click: adopt calls openAdopt", () => {
+test("click: stale adoption target has no callback", () => {
   const h = cardsActionHarness();
   h.clickList(actTarget({ adopt: "sess-1" }, ["[data-adopt]"]));
-  assert.deepEqual(h.effects.openAdopt, ["sess-1"]);
+  assert.deepEqual(h.effects.openAdopt, []);
 });
 
 test("click: open on desktop selects without setLevel", () => {
@@ -1875,7 +1874,7 @@ test("touch: swipe opens actionCard; expanded card ignores swipe", () => {
   assert.equal(h2.state.actionCard, "", "expanded card must not open actions via swipe");
 });
 
-test("longpress: title starts title edit; card toggles actionCard; adoptable ignored", () => {
+test("longpress: title starts title edit; card toggles actionCard", () => {
   const longpressFns = [];
   const h = cardsActionHarness({
     longpress: (_root, sel, fn) => { longpressFns.push({ sel, fn }); return () => {}; },
@@ -1895,12 +1894,4 @@ test("longpress: title starts title edit; card toggles actionCard; adoptable ign
   assert.equal(h.state.actionCard, "n1");
   cardLP.fn(cardEl, { target: cardEl });
   assert.equal(h.state.actionCard, "");
-
-  const adoptable = {
-    classList: { contains: (c) => c === "adoptable" },
-    querySelector: () => ({ dataset: { open: "n1" } }),
-  };
-  h.state.actionCard = "";
-  cardLP.fn(adoptable, { target: adoptable });
-  assert.equal(h.state.actionCard, "", "adoptable long-press is a no-op");
 });

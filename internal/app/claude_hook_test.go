@@ -295,14 +295,6 @@ func TestOwnedClaudeLaunchInstallsPrivateSettings(t *testing.T) {
 		t.Fatalf("grok command must not carry --settings: %s", got)
 	}
 
-	f2 := &fakeTmux{alive: map[string]bool{"adopted": true}}
-	a2 := newTestApp(t, f2)
-	if rec := adopt(a2, `{"session":"adopted","agent":"claude","dir":`+strconv.Quote(a2.home)+`}`); rec.Code != 200 {
-		t.Fatalf("adopt: %d %s", rec.Code, rec.Body.String())
-	}
-	if cmd := fakeNewSessionArgv(f2); strings.Contains(cmd, "--settings") {
-		t.Fatalf("adopt must not launch with --settings: %s", cmd)
-	}
 }
 
 func TestClaudeHookSettingsJSONIsPrivateSessionStartOnly(t *testing.T) {
@@ -1114,21 +1106,17 @@ func TestResumeEventIsParkedNotReplayed(t *testing.T) {
 	}
 }
 
-func TestAdoptedClaudeWithoutUUIDStaysTranscriptless(t *testing.T) {
+func TestRetiredExternalClaudeWithoutUUIDStaysTranscriptless(t *testing.T) {
 	// AT-BIND-12
 	f := &fakeTmux{alive: map[string]bool{"orphan": true}}
 	a := newTestApp(t, f)
 	newest := writeClaudeProject(t, a.home, "-w-proj", hookSIDForeign, claudeUserLine("newest", 0))
-	rec := adopt(a, `{"session":"orphan","agent":"claude","dir":"/w/proj"}`)
-	if rec.Code != 200 {
-		t.Fatalf("adopt: %d %s", rec.Code, rec.Body.String())
-	}
-	var n Node
-	if err := json.Unmarshal(rec.Body.Bytes(), &n); err != nil {
-		t.Fatal(err)
-	}
+	n := &Node{ID: "orphan", Title: "saved", Agent: "claude", Transport: "tmux", Adopted: true, Dir: "/w/proj", CreatedAt: "2026-01-01T00:00:00Z"}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.discoverTranscript(n)
 	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("adopted without UUID bound %q / %q (dir had %q)", n.Transcript, n.SessionID, newest)
+		t.Fatalf("retired external node rebound %q / %q (dir had %q)", n.Transcript, n.SessionID, newest)
 	}
 }
 

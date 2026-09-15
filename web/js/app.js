@@ -196,7 +196,6 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const store = createStorage(window.localStorage);
 
   let nodes = [];              // last /api/state nodes
-  let unadopted = [];
   let sel = store.getItem("scimux-sel") || "";
   let readySeen = loadReadySeen(store);
   /* Where the user left off: a sleep/wake re-dial re-runs createApp() in a
@@ -574,7 +573,6 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     esc,
     ageText,
     nodes: () => nodes,
-    unadopted: () => unadopted,
     sel: () => sel,
     setSel: v => { sel = v; },
     cardTab: () => cardTab,
@@ -612,7 +610,6 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     updateLocalNode: n => updateLocalNode(n),
     nodeById: id => nodeById(id),
     exitThread: id => exitThread(id),
-    openAdopt: s => sheetsFeature.openAdopt(s),
     selectNode: id => select(id),
     setLevel,
     isDesktop,
@@ -663,13 +660,13 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   async function exitThread(id){
     const n = nodeById(id);
     if (!n) return;
-    /* Truth in advertising: scimux never kills a tmux session it only adopted, so
+    /* Truth in advertising: scimux never kills a historical external tmux session, so
        for those "close" means "marked closed here", not "process stopped". Owned
        sessions/links are torn down. The confirm reflects which one this is; the
-       server then reports whether the stop actually happened (adopted / kill
+       server then reports whether the stop actually happened (external / kill
        failure both keep the agent alive). */
     const prompt = n.adopted
-      ? `Close "${n.title}"? It stays on the map with a dead-end cap and is marked closed in scimux — but the adopted tmux session keeps running (scimux never kills a session it didn't start).`
+      ? `Close "${n.title}"? Its saved history stays readable, but this retired external integration cannot accept input. The tmux session keeps running because scimux did not start it.`
       : `Close "${n.title}"? It stays on the map with a dead-end cap, and its running session/link is stopped.`;
     if (!confirm(prompt)) return;
     try {
@@ -1084,7 +1081,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   function openSearch(opts){ searchFeature.open(opts); }
   function closeSearch(){ searchFeature.close(); }
 
-  /* Generic sheets + new-activity + adoption — Packet 7H. */
+  /* Generic sheets + new-activity — Packet 7H. */
   sheetsFeature = own(createSheetsFeature({
     roots: {
       backdrop: $("#backdrop"),
@@ -1102,14 +1099,6 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       nc_lane: $("#nc_lane"),
       nc_lane_new: $("#nc_lane_new"),
       nc_lane_hint: $("#nc_lane_hint"),
-      adopt: $("#adopt"),
-      ad_title: $("#ad_title"),
-      ad_agent: $("#ad_agent"),
-      ad_sid: $("#ad_sid"),
-      ad_path: $("#ad_path"),
-      ad_titlein: $("#ad_titlein"),
-      ad_prompt: $("#ad_prompt"),
-      ad_go: $("#ad_go"),
     },
     document,
     storage: store,
@@ -1227,7 +1216,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       fn(e);
     });
   }
-  emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-adopt],[data-x],[data-open]", () => {
+  emptyTap($("#cardlist"), ".card,button,input,textarea,select,a,[data-x],[data-open]", () => {
     if (isDesktop()){
       /* iPad/desktop columns: tapping the Activity gutter folds the Journey
          column back, mirroring the same gesture on the map itself */
@@ -1410,7 +1399,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      actions, attention suppression, sent-echo, and scroll live in chat.js
      (Packet 7C). Shell keeps document title-edit key handlers above. */
 
-  /* forkFromTurn / forkFromStation / openActivityEditor / openAdopt / openSheet /
+  /* forkFromTurn / forkFromStation / openActivityEditor / openSheet /
      closeSheets live in createSheetsFeature (Packet 7H). Map/chat/search/cards
      reach them through injected sheetsFeature methods. */
   /* wall map: "Add note" files a sticky note for this station. Notes are
@@ -1543,7 +1532,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   notesFeature.bind();
   /* Search overlay listeners + document shortcuts (Packet 7G). */
   searchFeature.bind();
-  /* Generic sheets + new-activity + adoption (Packet 7H). */
+  /* Generic sheets + new-activity (Packet 7H). */
   sheetsFeature.bind();
   /* Pairing sheet + paired-device list (Packet S8). */
   pairingFeature.bind();
@@ -1621,7 +1610,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   }, { passive: true });
 
   /* ---------- sheets (Packet 7H) ----------
-     Generic backdrop/open/close, #newchat create/fork/edit, and #adopt live in
+     Generic backdrop/open/close and #newchat create/fork/edit live in
      createSheetsFeature (web/js/sheets.js). Construction and bind are next to
      searchFeature above. Feature-specific #sendto/#cardact/#tabsheet contents
      remain in bookmarks/cards/map; #menu update/license contents stay shell. */
@@ -1935,7 +1924,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   /* termtoggle + scrollend listeners live in chat.js bind (Packet 7C). */
 
-  /* New activity / adopt / agents probe / fieldError / launch-config / plus /
+  /* New activity / agents probe / fieldError / launch-config / plus /
      nc_start / ad_go live in createSheetsFeature (Packet 7H). */
 
   /* ---------- polling + UI-sync (Packet 7I) ----------
@@ -1964,7 +1953,6 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     setVersion: v => { $("#m_version").textContent = v; },
     publishState: st => {
       nodes = st.nodes || [];
-      unadopted = st.unadopted || [];
       let nextSeen = pruneReadySeen(readySeen, nodes);
       const open = nodeById(sel);
       if (open && open.turn_done) nextSeen = ackReadySeen(nextSeen, open);

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,269 @@ func syntheticWorkerManager(t *testing.T, data string) *workerManager {
 	return m
 }
 
+type retirementHarness struct {
+	*syntheticSessionHarness
+	retired chan bool
+	close   func()
+}
+
+func (h *retirementHarness) Stop(ctx context.Context, terminate bool) error {
+	err := h.syntheticSessionHarness.Stop(ctx, terminate)
+	h.retired <- terminate
+	go h.close()
+	return err
+}
+
+func publishRetirementWorker(t *testing.T, data, nodeID string, state sessionworker.State) (*retirementHarness, func()) {
+	t.Helper()
+	identity := sessionworker.Identity{WorkerID: "legacy-" + nodeID, Agent: "claude", Build: "old"}
+	base := &syntheticSessionHarness{state: state}
+	h := &retirementHarness{syntheticSessionHarness: base, retired: make(chan bool, 1)}
+	server, err := sessionworker.Listen("", identity, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := sessionworker.Claim(data, nodeID)
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	h.close = func() {
+		_ = registration.Close()
+		_ = server.Close()
+	}
+	locator := sessionworker.Locator{Identity: identity, NodeID: nodeID, PID: os.Getpid(), Executable: "/synthetic/old-scimux", Link: server.Link()}
+	if err := registration.Publish(locator); err != nil {
+		h.close()
+		t.Fatal(err)
+	}
+	return h, h.close
+}
+
+func TestReconcileRetiresDurableExternalWorkerWithoutTerminatingPane(t *testing.T) {
+	data := ownedWorkerLockDir(t)
+	n := &Node{ID: "legacy-external", Title: "saved", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+	h, closeWorker := publishRetirementWorker(t, data, n.ID, sessionworker.State{HasSession: true, Launch: &sessionworker.LaunchRequest{NodeID: n.ID, Agent: n.Agent, Adopted: true}})
+	t.Cleanup(closeWorker)
+	m := newWorkerManager("", data, "new")
+	if err := m.Reconcile([]*Node{n}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case terminate := <-h.retired:
+		if terminate {
+			t.Fatal("legacy external worker was told to terminate its pane")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy external worker was not retired")
+	}
+	if m.manages(n.ID) {
+		t.Fatal("retired external worker remains attached")
+	}
+}
+
+func TestDeleteRetiredExternalFailsClosedUntilDisconnectedWorkerRetires(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"external-disconnected": true}}
+	a := newTestApp(t, f)
+	n := &Node{ID: "external-disconnected", Title: "Saved", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+		{T: "assistant", Text: "saved answer"},
+	})
+	beforeHistory, err := os.ReadFile(a.sessionLogPath(n.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data := filepath.Dir(a.storePath)
+	registration, err := sessionworker.Claim(data, n.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registration.Close() })
+	identity := sessionworker.Identity{WorkerID: "old-external", Agent: n.Agent, Build: "old"}
+	locator := sessionworker.Locator{
+		Identity: identity, NodeID: n.ID, PID: os.Getpid(), Executable: "/synthetic/old-scimux",
+		Link: sessionworker.Link{Socket: filepath.Join(data, "unreachable.sock"), Token: "synthetic-token"},
+	}
+	if err := registration.Publish(locator); err != nil {
+		t.Fatal(err)
+	}
+	a.workers = newWorkerManager("", data, "new")
+	if err := a.workers.Reconcile(a.nodes); err == nil {
+		t.Fatal("precondition: unreachable live worker must fail reconciliation")
+	}
+
+	handler := newTestHandler(t, a)
+	response := routeRequest(handler, http.MethodDelete, "/api/nodes/"+n.ID, "", true)
+	if response.Code == http.StatusOK {
+		t.Fatalf("DELETE succeeded despite an unretired live worker: %s", response.Body.String())
+	}
+	if a.byID[n.ID] == nil {
+		t.Error("failed delete forgot the external node")
+	}
+	afterHistory, err := os.ReadFile(a.sessionLogPath(n.ID))
+	if err != nil {
+		t.Errorf("failed delete archived active history: %v", err)
+	} else if !bytes.Equal(afterHistory, beforeHistory) {
+		t.Errorf("failed delete changed active history:\n%s", afterHistory)
+	}
+	if _, err := sessionworker.Discover(data, n.ID); err != nil {
+		t.Errorf("failed delete discarded live worker ownership: %v", err)
+	}
+	if containsSub(f.subcommands(), "kill-session") {
+		t.Errorf("failed delete killed the external pane: %v", f.subcommands())
+	}
+	records := keyRecords(t, a.storePath)
+	if len(records) < 2 || records[len(records)-2].Type != "delete" || records[len(records)-1].Type != "node" {
+		t.Errorf("failed delete was not durably re-asserted: %#v", records)
+	}
+
+	base := &syntheticSessionHarness{state: sessionworker.State{HasSession: true, Launch: &sessionworker.LaunchRequest{
+		NodeID: n.ID, Agent: n.Agent, Adopted: true,
+	}}}
+	retirement := &retirementHarness{syntheticSessionHarness: base, retired: make(chan bool, 1)}
+	server, err := sessionworker.Listen("", identity, retirement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirement.close = func() {
+		_ = registration.Close()
+		_ = server.Close()
+	}
+	t.Cleanup(retirement.close)
+	locator.Link = server.Link()
+	if err := registration.Publish(locator); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.workers.Reconcile(a.nodes); err != nil {
+		t.Fatalf("retry reconciliation: %v", err)
+	}
+	select {
+	case terminate := <-retirement.retired:
+		if terminate {
+			t.Fatal("external worker retirement used Stop(true)")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("external worker was not retired after reachability returned")
+	}
+
+	response = routeRequest(handler, http.MethodDelete, "/api/nodes/"+n.ID, "", true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("DELETE after safe retirement = %d %q", response.Code, response.Body.String())
+	}
+	if a.byID[n.ID] != nil {
+		t.Error("successful retry retained the node")
+	}
+	if _, err := os.Stat(a.sessionLogPath(n.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("successful retry retained active history: %v", err)
+	}
+	archived, err := filepath.Glob(filepath.Join(a.sessionsDir, "archive", n.ID+".*.jsonl"))
+	if err != nil || len(archived) != 1 {
+		t.Errorf("successful retry archive = %v, %v", archived, err)
+	}
+	if containsSub(f.subcommands(), "kill-session") || !f.alive[n.ID] {
+		t.Errorf("successful retry killed the external pane: calls=%v alive=%v", f.subcommands(), f.alive[n.ID])
+	}
+}
+
+func TestDeleteRetiredExternalWithoutWorkerStillArchivesHistory(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"external-idle": true}}
+	a := newTestApp(t, f)
+	n := &Node{ID: "external-idle", Title: "Saved", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionLog(t, a, n.ID, []sessionlog.Event{sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home)})
+	a.workers = newWorkerManager("", filepath.Dir(a.storePath), "new")
+
+	response := routeRequest(newTestHandler(t, a), http.MethodDelete, "/api/nodes/"+n.ID, "", true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("DELETE without worker = %d %q", response.Code, response.Body.String())
+	}
+	if a.byID[n.ID] != nil {
+		t.Error("DELETE without worker retained node")
+	}
+	if containsSub(f.subcommands(), "kill-session") || !f.alive[n.ID] {
+		t.Errorf("DELETE without worker killed external pane: calls=%v alive=%v", f.subcommands(), f.alive[n.ID])
+	}
+}
+
+func TestRecoverUnknownRetiresExternalLocatorWithoutResurrection(t *testing.T) {
+	data := ownedWorkerLockDir(t)
+	n := &Node{ID: "legacy-orphan", Title: "saved", Agent: "claude", Transport: "tmux", Adopted: true, Dir: data, CreatedAt: "2026-01-01T00:00:00Z"}
+	state := sessionworker.State{HasSession: true, SessionID: "external-session", Launch: &sessionworker.LaunchRequest{
+		NodeID: n.ID, Title: n.Title, Agent: n.Agent, Transport: n.Transport, Adopted: true, Dir: n.Dir, CreatedAt: n.CreatedAt,
+	}}
+	h, closeWorker := publishRetirementWorker(t, data, n.ID, state)
+	t.Cleanup(closeWorker)
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{n.ID: true}})
+	m := newWorkerManager("", data, "new")
+	if err := m.RecoverUnknown(a); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case terminate := <-h.retired:
+		if terminate {
+			t.Fatal("unknown legacy external worker was told to terminate its pane")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unknown legacy external worker was not retired")
+	}
+	if a.byID[n.ID] != nil || len(a.nodes) != 0 {
+		t.Fatalf("legacy external locator resurrected a node: %#v", a.nodes)
+	}
+}
+
+func TestReconcileKeepsAuthenticatedOwnedWorkerAttached(t *testing.T) {
+	data := ownedWorkerLockDir(t)
+	n := &Node{ID: "owned-live", Title: "owned", Agent: "claude", Transport: "tmux", CreatedAt: "2026-01-01T00:00:00Z"}
+	h, closeWorker := publishRetirementWorker(t, data, n.ID, sessionworker.State{HasSession: true, Launch: &sessionworker.LaunchRequest{NodeID: n.ID, Agent: n.Agent}})
+	t.Cleanup(closeWorker)
+	m := newWorkerManager("", data, "new")
+	if err := m.Reconcile([]*Node{n}); err != nil {
+		t.Fatal(err)
+	}
+	if !m.manages(n.ID) || !m.HasSession(n.ID) {
+		t.Fatal("authenticated owned worker was not reattached")
+	}
+	select {
+	case terminate := <-h.retired:
+		t.Fatalf("owned worker was retired during reconciliation (terminate=%v)", terminate)
+	default:
+	}
+	if err := m.RetireController(n.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoverUnknownPublishesInterruptedOwnedCreation(t *testing.T) {
+	data := ownedWorkerLockDir(t)
+	n := &Node{ID: "owned-interrupted", Title: "owned", Agent: "claude", Transport: "tmux", Dir: data, CreatedAt: "2026-01-01T00:00:00Z"}
+	state := sessionworker.State{HasSession: true, SessionID: "owned-session", Launch: &sessionworker.LaunchRequest{
+		NodeID: n.ID, Title: n.Title, Agent: n.Agent, Transport: n.Transport, Dir: n.Dir, CreatedAt: n.CreatedAt,
+	}}
+	_, closeWorker := publishRetirementWorker(t, data, n.ID, state)
+	t.Cleanup(closeWorker)
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{n.ID: true}})
+	m := newWorkerManager("", data, "new")
+	if err := m.RecoverUnknown(a); err != nil {
+		t.Fatal(err)
+	}
+	got := a.byID[n.ID]
+	if got == nil || got.Adopted || got.SessionID != state.SessionID || !m.manages(n.ID) {
+		t.Fatalf("interrupted owned creation not recovered: node=%#v managed=%v", got, m.manages(n.ID))
+	}
+	if err := m.RetireController(n.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWorkerManagerRejectsInvalidAndDuplicateLaunches(t *testing.T) {
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
@@ -46,11 +310,14 @@ func TestWorkerManagerRejectsInvalidAndDuplicateLaunches(t *testing.T) {
 	if _, err := m.LaunchNode(nil, ""); err == nil {
 		t.Fatal("nil node launch accepted")
 	}
-	if _, err := m.AdoptClaude(nil, "hook", 1); err == nil {
-		t.Fatal("nil Claude adoption accepted")
+	if _, err := m.AttachOwnedClaudePane(nil, "hook", 1); err == nil {
+		t.Fatal("nil Claude recovery accepted")
 	}
-	if _, err := m.AdoptClaude(&Node{ID: "not-claude", Agent: "pi"}, "hook", 1); err == nil {
-		t.Fatal("non-Claude adoption accepted")
+	if _, err := m.AttachOwnedClaudePane(&Node{ID: "not-claude", Agent: "pi"}, "hook", 1); err == nil {
+		t.Fatal("non-Claude recovery accepted")
+	}
+	if _, err := m.AttachOwnedClaudePane(&Node{ID: "external", Agent: "claude", Adopted: true}, "hook", 1); err == nil {
+		t.Fatal("external Claude recovery accepted")
 	}
 	if _, err := m.Launch("duplicate", "pi", data, "", ""); err != nil {
 		t.Fatal(err)
@@ -975,7 +1242,7 @@ func TestAppStructuredDispatchPrefersSessionWorkers(t *testing.T) {
 	}
 }
 
-func TestWorkerManagerAdoptsOnlyLiveExistingClaudeChats(t *testing.T) {
+func TestWorkerManagerRecoversOnlyLiveOwnedClaudeChats(t *testing.T) {
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
@@ -998,11 +1265,11 @@ func TestWorkerManagerAdoptsOnlyLiveExistingClaudeChats(t *testing.T) {
 		args: []string{"-test.run=^TestSessionWorkerHelperProcess$"},
 		env:  []string{"SCIMUX_SESSION_WORKER_TEST_HELPER=1"},
 	}
-	if err := m.AdoptExistingClaude(a); err != nil {
+	if err := m.RecoverOwnedClaudePanes(a); err != nil {
 		t.Fatal(err)
 	}
 	if !m.manages(live.ID) || m.manages(dead.ID) || m.manages(pi.ID) {
-		t.Fatalf("adopted set: live=%v dead=%v pi=%v", m.manages(live.ID), m.manages(dead.ID), m.manages(pi.ID))
+		t.Fatalf("recovered set: live=%v dead=%v pi=%v", m.manages(live.ID), m.manages(dead.ID), m.manages(pi.ID))
 	}
 	m.Shutdown()
 }

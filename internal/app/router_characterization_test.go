@@ -29,7 +29,6 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodPatch, "/api/nodes/{id}", "/api/nodes/node-1", "handleUpdateNode", "node_api.go"},                                                                                   // extracted
 		{http.MethodDelete, "/api/nodes/{id}", "/api/nodes/node-1", "handleDeleteNode", "node_api.go"},                                                                                  // extracted
 		{http.MethodPost, "/api/nodes/{id}/exit", "/api/nodes/node-1/exit", "handleExitNode", "node_api.go"},                                                                            // extracted
-		{http.MethodPost, "/api/adopt", "/api/adopt", "handleAdopt", "node_api.go"},                                                                                                     // extracted
 		{http.MethodPost, "/api/nodes/{id}/send", "/api/nodes/node-1/send", "handleSend", "conversation_api.go"},                                                                        // extracted
 		{http.MethodPost, "/api/nodes/{id}/attachments", "/api/nodes/node-1/attachments", "handleUploadAttachments", "attachment_api.go"},                                               // extracted
 		{http.MethodGet, "/api/nodes/{id}/attachments/{name}", "/api/nodes/node-1/attachments/file.txt", "handleAttachment", "attachment_api.go"},                                       // extracted
@@ -111,7 +110,6 @@ func TestCharacterizationRepresentativeBindings(t *testing.T) {
 		{"preview missing target", http.MethodGet, "/api/preview", "", "", false, http.StatusBadRequest},
 		{"licenses", http.MethodGet, "/api/licenses", "", "", false, http.StatusOK},
 		{"new node invalid", http.MethodPost, "/api/nodes", `{}`, "application/json", true, http.StatusBadRequest},
-		{"adopt invalid", http.MethodPost, "/api/adopt", `{}`, "application/json", true, http.StatusBadRequest},
 		{"ui put missing if-match", http.MethodPut, "/api/ui", `{}`, "application/json", true, http.StatusPreconditionRequired},
 	}
 
@@ -135,6 +133,15 @@ func TestCharacterizationRepresentativeBindings(t *testing.T) {
 				t.Fatalf("%s %s reached generic 404", tt.method, tt.path)
 			}
 		})
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/adopt", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scimux-CSRF", csrfToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "404 page not found") {
+		t.Fatalf("removed POST /api/adopt = %d %q, want negative-route 404", rec.Code, rec.Body.String())
 	}
 }
 

@@ -1,0 +1,104 @@
+# Storage, history and provenance invariants
+
+Part of the invariant set in `AGENTS.md`. Read before changing transcript
+parsing or mirroring, node persistence, session logs, chat/history reads,
+Send-to or bookmarks, clear/fork behavior, or notes and their git versioning.
+The root guide carries the project-wide privacy and benchmark restrictions.
+Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
+
+- **Defensive transcript parsing.** The CLI log formats are undocumented
+  internals: unknown record types and shapes are silently ignored, never
+  errors, and a transcript that is missing or stops making sense degrades the
+  UI to the pane snapshot ("peek"). Keep that contract in
+  `internal/transcript`. Two non-obvious parts, both held by `FuzzParseLine`:
+  - "Unknown shape" includes an unknown **field value**: `ParseLine` yields a
+    turn only for roles `user` and `assistant`, in both the Claude and Codex
+    branches. Not tidiness — `mirror.go` writes `Turn.Role` straight into
+    `sessionlog.Event.T`, a closed set including `source`, the `/clear`
+    page-turn marker, in a store that is never rewritten, so a role waved
+    through becomes a counterfeit seam.
+  - A Claude record states its role twice, so there the test is **agreement**,
+    not membership: `message.role` must match the envelope `type`, and a
+    self-contradicting record is ignored though both values are individually
+    legal. Either direction misattributes the turn, and because the
+    scaffolding filter keys on `role == "user"`, a `type:"user"` record
+    claiming `role:"assistant"` would render an injected `<user_instructions>`
+    block as agent prose.
+
+- **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
+  corrections are new records, never rewrites.
+- **One session-log store, one schema.** Every transport writes its per-node
+  history to `~/.scimux/sessions/<node-id>.jsonl` as `internal/sessionlog`
+  events — plain JSONL, because the corpus must stay grep/sed/awk-able. The
+  filename is the node's reusable title slug; identity lives in the file's
+  `meta` header record, and deleting a node archives its log so a reissued
+  slug can never append onto dead history. tmux nodes reach the store through
+  the transcript mirror (`mirror.go`), with `source` seam records marking
+  every transcript (re)bind as the dedupe watermark. New transports write the
+  same records to the same directory: no per-transport formats or directories.
+  `~/.scimux/sessions/` is user history and a multi-vendor output corpus.
+  Deterministic heuristics may read it. It must never be used to train,
+  fine-tune, distill, or otherwise develop a model — do not turn it into a
+  training dataset.
+  - The store is also the **chat read path for every transport**: handleChat
+    renders the current segment (everything after the last `source` seam),
+    while the tailer serves only mechanics — needs-input, staleness, delivery
+    confirmation. Earlier segments are readable on demand, never polled
+    (`?history=1`, `sessionlog.ReadHistory`, behind a "show earlier history"
+    tap). Keep that split: history in the poll payload would ship the whole
+    corpus every second, and it can repeat turns across mechanical seams
+    because a rotation re-mirrors from turn zero.
+- **An agent's Output is never passed off as the user's.** Two places can
+  break this, and both are quiet. Send-to carries one agent's Output into
+  another agent's Input, and the receiving node records the arrival as an
+  ordinary user turn — so scimux, not the user, would be the party asserting
+  human authorship. `bookmarks.js` owns the one marker (`AI_DISCLOSURE`,
+  applied once inside `openSendTo`); every caller must hand over the role it
+  knows, and a caller that forgets disables the disclosure without a symptom,
+  which is why bookmarks stamp `role` at capture. Provenance is also the named
+  exception to defensive parsing: discarding an unknown record type is right,
+  discarding an unknown *provenance* field is alteration rather than
+  degradation, and `sessionlog` is never rewritten, so the loss is permanent.
+  Two deliberate limits, neither an oversight: the marker fires on evidence
+  only — an unknown role passes through untouched, because stamping "an AI
+  wrote this" on the user's own words is the same misattribution pointed the
+  other way — and the clipboard is outside the rule entirely, because there
+  the user copies, pastes and attributes, and scimux is upstream of that.
+- **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
+  surface under the *same* node: same log file, an appended `source` seam,
+  never a new file or truncation; the context gauge is segment-scoped.
+  - ACP nodes (pi/opencode/grok) implement it as **deterministic process
+    replacement** — kill the subprocess, negotiate a fresh one under the same
+    node, because a second `session/new` on one connection is unproven
+    upstream while a fresh PID self-evidently carries no context. codex opens
+    a new thread on the same PID. In both, the seam is appended only after the
+    protocol call succeeded. **Claude obeys the same rule**, and its proof is
+    that node's own `SessionStart source:"clear"`: pasting `/clear` turns no
+    page at all, because the CLI absorbs a paste that lands mid-turn and an
+    absorbed slash command evaporates, while the paste still reports
+    delivered. Retirement is irreversible (it tombstones the path and session
+    id for good), so it waits for the hook, which retires the old link,
+    tombstones it transactionally with the successor binding, and appends the
+    path-less seam — the same work it already did for a `/clear` typed
+    straight into the pane. A `/clear` that never lands therefore changes
+    nothing and says so.
+  - Fork is the only path that may change launch config: a forked node
+    inherits agent/model/effort/dir but never conversation history. Claude's
+    native `/fork` and `SessionStart source:"fork"` are unsupported — forking
+    is scimux's Fork action only (fresh node/process, ordinary
+    `source:"startup"`). Never send `/fork` to the Claude CLI.
+
+- **Notes are mutable documents with optional, isolated git plumbing.** Each
+  note lives at `~/.scimux/notes/<id>/note.json` (per-note folder so a note
+  can later be an independent repo; delete archives the whole folder), and the
+  JSON file is always the source of truth. Optional versioning shells out to
+  the **`git` binary** — same pattern as tmux, never a Go module, so zero
+  build dependencies holds — into a private `notes/<id>/.git` with forced
+  identity (`-c user.name=scimux -c user.email=scimux@localhost`); it never
+  opens the user's own repos or depends on their global git config. Commit
+  boundaries are structural mutations and client-signalled body-edit
+  completion (`section.commit`); mid-edit autosaves do not commit. If `git` is
+  absent or fails, note operations succeed unchanged — degrade silently. This
+  **reverses the earlier "no version control" stance** for notes only: do not
+  remove it as an accidental violation, and do not expand it into a history UI
+  without an explicit phase. There is no flat-file migration path.

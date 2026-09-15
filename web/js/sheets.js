@@ -1,4 +1,4 @@
-/* Generic sheets + new-activity + adoption feature.
+/* Generic sheets + new-activity feature.
  *
  * Packet 7H ownership inventory
  * -----------------------------
@@ -15,9 +15,6 @@
  *   - #nc_lane_s / #nc_lane / #nc_lane_new / #nc_lane_hint / #nc_lane_swatch
  *   - #plusbtn (plain new activity)
  *
- * Adoption roots (#adopt):
- *   - #ad_title, #ad_agent, #ad_sid, #ad_path, #ad_titlein, #ad_prompt, #ad_go
- *
  * Explicit non-ownership:
  *   - #sendto contents/listeners (bookmarks.js)
  *   - #cardact contents/listeners (cards.js)
@@ -33,17 +30,15 @@
  *   - EFFORTS — static per-agent fallback levels
  *   - MODEL_EFFORTS — per-agent per-model menus from probe
  *
- * Edit / fork / adopt state (ephemeral):
+ * Edit / fork state (ephemeral):
  *   - ncParent, ncRationale
  *   - ncEdit (node id when editing), ncEditStop (earlier station seam or "")
  *   - newActivitySubmitting (single-flight)
- *   - adoptSession
  *
  * Server calls (via injected api):
  *   - GET  /api/agents
  *   - POST /api/nodes
  *   - PATCH /api/nodes/:id  (head title/desc or station label)
- *   - POST /api/adopt
  *
  * Storage (exact key; throws propagate — no try/catch):
  *   - "scimux-lastdir" get on plain new; set on successful create with dir
@@ -58,11 +53,10 @@
  *   - select, setLevel, isDesktop, tick, invalidateStateEtag
  *   - invalidateCards/Chat/Map + renderCards/ChatHead/Map
  *   - esc, api, storage, document, querySelectorAll, setTimeout/clearTimeout
- *   - alert (adoption failure only)
  *
  * Lifecycle:
  *   - bind() idempotent; owns backdrop, burger, plus, agent/model change,
- *     nc_start, ad_go; initial closeSheets(); probes /api/agents once
+ *     nc_start; initial closeSheets(); probes /api/agents once
  *   - destroy() removes listeners, clears title timer, strips dynamic fielderrs
  *
  * Contracts preserved:
@@ -297,17 +291,6 @@ export function buildStationLabelPayload(station, title, description){
   return { station, title, description };
 }
 
-export function buildAdoptPayload({ session, agent, session_id, transcript, title, prompt }){
-  return {
-    session: session || "",
-    agent: agent || "",
-    session_id: (session_id || "").trim(),
-    transcript: (transcript || "").trim(),
-    title: (title || "").trim(),
-    prompt: (prompt || "").trim(),
-  };
-}
-
 /* ---------- pure: errors / submit chrome ---------- */
 
 export function createErrorField(msg){
@@ -398,7 +381,6 @@ export function createSheetsFeature(deps = {}){
   let ncEdit = "";
   let ncEditStop = "";
   let newActivitySubmitting = false;
-  let adoptSession = "";
   let bound = false;
   let probed = false;
   let probeGeneration = 0;
@@ -790,23 +772,6 @@ export function createSheetsFeature(deps = {}){
     if (focusTitle) scheduleTitleFocus(false);
   }
 
-  function openAdopt(session){
-    adoptSession = session;
-    const adTitle = root("ad_title");
-    if (adTitle) adTitle.textContent = `Adopt "${session}"`;
-    const agent = root("ad_agent");
-    if (agent) agent.value = "claude";
-    const sid = root("ad_sid");
-    if (sid) sid.value = "";
-    const path = root("ad_path");
-    if (path) path.value = "";
-    const titlein = root("ad_titlein");
-    if (titlein) titlein.value = "";
-    const prompt = root("ad_prompt");
-    if (prompt) prompt.value = "";
-    openSheet("#adopt");
-  }
-
   function afterNodeMutation(){
     if (typeof d.invalidateCardsSig === "function") d.invalidateCardsSig();
     if (typeof d.invalidateChat === "function") d.invalidateChat();
@@ -995,29 +960,6 @@ export function createSheetsFeature(deps = {}){
     }
   }
 
-  async function onAdoptClick(){
-    try {
-      const body = buildAdoptPayload({
-        session: adoptSession,
-        agent: root("ad_agent") ? root("ad_agent").value : "",
-        session_id: root("ad_sid") ? root("ad_sid").value : "",
-        transcript: root("ad_path") ? root("ad_path").value : "",
-        title: root("ad_titlein") ? root("ad_titlein").value : "",
-        prompt: root("ad_prompt") ? root("ad_prompt").value : "",
-      });
-      const n = api
-        ? await api("/api/adopt", { method: "POST", body: JSON.stringify(body) })
-        : { id: "adopted" };
-      closeSheets();
-      if (typeof d.invalidateStateEtag === "function") d.invalidateStateEtag();
-      if (typeof d.tick === "function") await d.tick();
-      if (typeof d.select === "function") d.select(n.id);
-    } catch (err) {
-      if (typeof d.alert === "function") d.alert(err.message);
-      else if (typeof alert !== "undefined") alert(err.message);
-    }
-  }
-
   function onAgentChange(){
     ncMuseInherit = false;
     const mo = root("nc_model");
@@ -1062,7 +1004,6 @@ export function createSheetsFeature(deps = {}){
     on(root("nc_agent"), "change", onAgentChange);
     on(root("nc_model"), "change", onModelChange);
     on(root("nc_start"), "click", () => { onStartClick(); });
-    on(root("ad_go"), "click", () => { onAdoptClick(); });
     probeAgents();
   }
 
@@ -1084,7 +1025,6 @@ export function createSheetsFeature(deps = {}){
     destroy,
     openSheet,
     closeSheets,
-    openAdopt,
     openActivityEditor,
     openNewActivity,
     forkFromTurn,

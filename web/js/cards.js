@@ -4,10 +4,10 @@
  * -----------------------------
  * Owned roots:
  *   - #cardtabs  (tab strip: scope / optional Pinned / Archived)
- *   - #cardlist  (fold, adoptable sessions, activity cards, empty states)
+ *   - #cardlist  (fold, activity cards, empty states)
  *
  * Inputs (explicit getters / pure args — never implicit globals):
- *   - nodes, unadopted, selectedId (sel)
+ *   - nodes, selectedId (sel)
  *   - cardTab, laneFilter, attnFoldOpen, expanded
  *   - actionCard, editingDesc, editingTitle, editingTitleScope
  *   - cardsSig, pinDragging (feature-local during drag)
@@ -23,12 +23,12 @@
  *     (cardShapeSignature unchanged): no HTML is parsed and no card element is
  *     replaced, so editors, thumbnails and scroll survive the 2s poll
  *   - uiMutate pin/unpin/arch/unarch/pin-order; PATCH description+lane; DELETE node
- *   - callbacks: exitThread, openAdopt, selectNode, setLevel, setLaneFilter,
+ *   - callbacks: exitThread, selectNode, setLevel, setLaneFilter,
  *     renderChatHead, renderMap, updateLocalNode, scheduleTick
  *
  * Events owned here after one idempotent bind():
  *   - #cardtabs click (tab switch + clear-scope)
- *   - #cardlist click (fold/save/pin/exit/arch/trash/expand/adopt/open/actions-dismiss)
+ *   - #cardlist click (fold/save/pin/exit/arch/trash/expand/open/actions-dismiss)
  *   - #cardlist touchstart/touchend (swipe-to-actions)
  *   - #cardlist dragstart/dragover/drop/dragend (pinned reorder)
  *   - longpress on #cardlist for title / folded-card actions / summary edit
@@ -160,11 +160,10 @@ export function pinnedLiveCount(pinned, nodes){
 /* Everything outside the cards themselves. Shared by both signatures so the
    two can never drift apart on a field only one of them remembers. */
 function cardsSignatureTail({
-  unadopted, sel, expanded, cardTab, laneFilter, foldLen,
+  sel, expanded, cardTab, laneFilter, foldLen,
   attnFoldOpen, bookmarksLen, lanes, pinned, actionCard, editingDesc, editingTitle,
 }){
-  return "|" + JSON.stringify(unadopted || [])
-    + "|" + (sel || "")
+  return "|" + (sel || "")
     + "|" + [...(expanded || [])].join(",")
     + "|" + cardTab
     + "|" + laneFilter
@@ -260,8 +259,8 @@ export function reorderPlan(current, desired){
 }
 
 /* Rewrite only the slots `order`'s members already occupy, leaving every other
-   child in place. #cardlist also holds the attention-fold button, adoptable
-   sessions and the empty state; those are structure, so under a patch they
+   child in place. #cardlist also holds the attention-fold button and the
+   empty state; those are structure, so under a patch they
    have not moved and must not be touched. A block whose members are not all
    present is left alone rather than guessed at. */
 export function permuteSlots(current, order){
@@ -274,32 +273,21 @@ export function permuteSlots(current, order){
   return cur.map(k => set.has(k) ? want[i++] : k);
 }
 
-/* Mirrors the tabList/inScope filtering used for badges (not fold/adoptable). */
+/* Mirrors the tabList/inScope filtering used for badges (not the fold). */
 export function cardTabCount(nodes, { archivedTab, laneFilter, selectedId, archived } = {}){
   return orderedNodes(nodes).filter(n =>
     (isArchivedMod(n.id, archived) === archivedTab || (!archivedTab && hardAttention(n))) &&
     inLaneScope(n, { laneFilter, selectedId })).length;
 }
 
-export function emptyCardsHTML({ laneFilter, cardTab, hasAdoptCards }){
+export function emptyCardsHTML({ laneFilter, cardTab }){
   if (laneFilter) {
     return `<div class="empty">No ${cardTab === "archived" ? "archived " : ""}activities on this journey.</div>`;
   }
   if (cardTab === "archived") {
     return `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`;
   }
-  if (hasAdoptCards) return "";
   return `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`;
-}
-
-export function adoptCardsHTML(unadopted, { cardTab, laneFilter, escape = esc } = {}){
-  if (cardTab !== "current" || laneFilter) return "";
-  return (unadopted || []).map(s => `
-    <div class="card adoptable">
-      <div class="row1"><span class="title">${escape(s)}</span></div>
-      <div class="status">unadopted tmux session</div>
-      <button class="go" data-adopt="${escape(s)}" aria-label="adopt ${escape(s)}"></button>
-    </div>`).join("");
 }
 
 export function attnFoldButtonHTML(foldLen, attnFoldOpen){
@@ -571,9 +559,9 @@ export function createCardsFeature(deps){
       if (status.innerHTML !== next) status.innerHTML = next;
     }
     /* Every child, not just the cards: the fold button and the empty state
-       hold slots too. Adoptable sessions are cards with no id, so several can
-       key as "" — permuteSlots never moves them, which leaves them in the same
-       slots on both sides and reorderPlan reads that as already in place. */
+       hold slots too. Structural children have no id, so several can key as
+       "" — permuteSlots never moves them, which leaves them in the same slots
+       on both sides and reorderPlan reads that as already in place. */
     const children = Array.from(list.children || []);
     const current = children.map(el => el.id || "");
     const byKey = new Map(children.map(el => [el.id || "", el]));
@@ -613,9 +601,8 @@ export function createCardsFeature(deps){
       set("attnFoldOpen", false);
     }
     const expanded = g("expanded", new Set());
-    const unadopted = g("unadopted", []);
     const sig = computeCardsSignature({
-      list: cardArr, foldList, unadopted, sel, expanded, cardTab, laneFilter,
+      list: cardArr, foldList, sel, expanded, cardTab, laneFilter,
       attnFoldOpen,
       bookmarksLen: (g("bookmarks", []) || []).length,
       lanes: g("lanes", []),
@@ -625,7 +612,7 @@ export function createCardsFeature(deps){
       editingTitle: g("editingTitle", ""),
     });
     const shapeSig = cardShapeSignature({
-      list: cardArr, foldList, unadopted, sel, expanded, cardTab, laneFilter,
+      list: cardArr, foldList, sel, expanded, cardTab, laneFilter,
       attnFoldOpen,
       bookmarksLen: (g("bookmarks", []) || []).length,
       lanes: g("lanes", []),
@@ -642,7 +629,6 @@ export function createCardsFeature(deps){
     set("cardsSig", packCardsSig(shapeSig, sig));
     if (decision === "patch"){ patchCards(cardArr, foldList); return; }
     renderCardTabs();
-    const adoptCards = adoptCardsHTML(unadopted, { cardTab, laneFilter, escape });
     const foldHtml = !foldList.length ? "" : (
       attnFoldButtonHTML(foldList.length, attnFoldOpen) +
       (attnFoldOpen ? foldList.map(cardHTML).join("") : "")
@@ -650,13 +636,9 @@ export function createCardsFeature(deps){
     const editingDesc = g("editingDesc", "");
     withCardEditsPreserved(list, editingDesc, () => {
       if (!list) return;
-      list.innerHTML = foldHtml + adoptCards + (cardArr.length
+      list.innerHTML = foldHtml + (cardArr.length
         ? cardArr.map(cardHTML).join("")
-        : emptyCardsHTML({
-          laneFilter,
-          cardTab,
-          hasAdoptCards: !!adoptCards,
-        }));
+        : emptyCardsHTML({ laneFilter, cardTab }));
     }, { document: doc, syncLanePicker: d.syncLanePicker });
     const waiting = nodes.filter(hardAttention).length;
     if (doc) doc.title = (waiting ? `(${waiting}) ` : "") + "scimux";
@@ -762,7 +744,7 @@ export function createCardsFeature(deps){
       const n = nodeById(id);
       if (!n) return;
       const msg = n.adopted
-        ? `Remove "${n.title}" from scimux? The adopted tmux session will keep running.`
+        ? `Remove "${n.title}" from scimux? Its saved history will be archived and the retired external tmux session will keep running.`
         : `Remove "${n.title}" and close its running session/link?`;
       if (typeof d.confirm === "function" ? !d.confirm(msg) : !confirm(msg)) return;
       try {
@@ -807,11 +789,6 @@ export function createCardsFeature(deps){
       set("actionCard", "");
       invalidate();
       renderCards();
-      return;
-    }
-    const ad = e.target.closest("[data-adopt]");
-    if (ad){
-      if (typeof d.openAdopt === "function") d.openAdopt(ad.dataset.adopt);
       return;
     }
     const go = e.target.closest("[data-open]");
@@ -906,7 +883,6 @@ export function createCardsFeature(deps){
       });
       if (typeof titleCleanup === "function") cleanups.push(titleCleanup);
       const cardCleanup = d.longpress(list, ".card", (el, ev) => {
-        if (el.classList.contains("adoptable")) return;
         if (el.classList.contains("expanded") || el.closest(".editing")) return;
         if (ev?.target?.closest(".title,input,textarea,select,button")) return;
         const id = el.querySelector(".go")?.dataset.open;

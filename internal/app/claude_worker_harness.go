@@ -115,6 +115,9 @@ func (h *claudeSessionHarness) node() *Node {
 }
 
 func (h *claudeSessionHarness) Launch(_ context.Context, req sessionworker.LaunchRequest) (string, error) {
+	if req.Adopted {
+		return "", errors.New("external Claude sessions cannot be attached")
+	}
 	if req.NodeID != h.nodeID || req.Agent != "claude" || req.Dir == "" || req.Title == "" || (!req.Existing && req.Prompt == "") {
 		return "", errors.New("claude session worker: invalid launch request")
 	}

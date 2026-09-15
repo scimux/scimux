@@ -355,7 +355,10 @@ test("tick: 200 publishes state then Cards → Map → Bookmarks → await Chat 
     setHostOnline: () => order.push("online"),
     setHostname: (h) => order.push("host:" + h),
     setVersion: (v) => order.push("ver:" + v),
-    publishState: (st) => order.push("publish:" + st.nodes[0].id + "/" + st.unadopted[0].id),
+    publishState: (st) => {
+      assert.deepEqual(st, { nodes: [{ id: "a" }] });
+      order.push("publish:" + st.nodes[0].id);
+    },
     renderSys: () => order.push("sys"),
     ensureSelection: () => order.push("sel"),
     renderCards: () => order.push("cards"),
@@ -374,7 +377,7 @@ test("tick: 200 publishes state then Cards → Map → Bookmarks → await Chat 
   await Promise.resolve();
   assert.deepEqual(order, [
     "online",
-    "publish:a/u",
+    "publish:a",
     "host:host1",
     "ver:v9",
     "sys",

@@ -59,7 +59,7 @@ func TestAT_int_a_InProcessPeersDriveAPIState(t *testing.T) {
 	if err := json.Unmarshal(raw, &top); err != nil {
 		t.Fatalf("%s: /api/state is not JSON: %v (%q)", at, err, raw)
 	}
-	for _, key := range []string{"nodes", "unadopted", "sys", "socket", "hostname", "version"} {
+	for _, key := range []string{"nodes", "sys", "socket", "hostname", "version"} {
 		if _, ok := top[key]; !ok {
 			t.Errorf("%s: top-level missing %q", at, key)
 		}

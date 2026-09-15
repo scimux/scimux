@@ -34,6 +34,9 @@ internal/acp/muse/schema/
 !docs/protocol/rendezvous-v1.md
 !docs/invariants/claude-hooks.md
 !docs/invariants/attention.md
+!docs/invariants/remote.md
+!docs/invariants/storage.md
+!docs/testing.md
 
 # Private archives never belong to the published tree.
 /attic/

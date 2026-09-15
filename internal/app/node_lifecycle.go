@@ -54,7 +54,7 @@ var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 var dashRun = regexp.MustCompile(`-{2,}`)
 
 // uniqueID allocates a slug that collides neither with registered nodes nor
-// with any name in taken — the current tmux sessions, so an unadopted session
+// with any name in taken — the current tmux inventory, so a foreign session
 // with the same slug cannot make new-session fail. A session log left on disk
 // under the slug also counts as taken: it means a dead node's archive rename
 // failed, and reissuing the slug would append new history onto dead history.
@@ -173,8 +173,8 @@ const launchHoldSeconds = 30
 
 // wrapLaunch wraps a tmux launch command so that a process which exits before
 // its interface is ready leaves its error on the pane instead of the session
-// vanishing into an unexplained dead node (the "unknown error state, could not
-// be adopted" failure). The original command runs verbatim first, and the
+// vanishing into an unexplained dead node. The original command runs verbatim
+// first, and the
 // sentinel is emitted only on a non-zero exit, so a clean quit falls through
 // untouched (pane closes, session dies, exactly as before). tmux runs this
 // whole string via `sh -c`.
@@ -501,7 +501,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 	// Re-check the id for a collision at publish time: the launch ran with
 	// a.mu released, and a double-publish would leave two *Node values under
 	// one id with the store replaying both (R20.2). Every id-minting path now
-	// consults a.reserved (uniqueID, handleAdopt), so a hit here should be
+	// consults a.reserved through uniqueID, so a hit here should be
 	// unreachable — but the cost of missing one is silent registry and store
 	// corruption, so the launch is abandoned and rolled back instead.
 	a.mu.Lock()
@@ -540,7 +540,7 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 		// node record wins) — but that same delete would also erase the winner's
 		// earlier record. Re-appending the winner's node record (its *Node is in
 		// hand, captured under the collision lock) makes replay converge on the
-		// live node with no manual re-adopt (R21.4). The winner owns
+		// live node with no manual repair (R21.4). The winner owns
 		// sessions/<id>.jsonl, so its log is left intact — never archived here.
 		_ = a.appendRecord(storeRecord{Type: "delete", ID: n.ID, Time: time.Now().UTC().Format(time.RFC3339)})
 		if winner != nil {
@@ -884,7 +884,7 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 	}
 	// Owned Claude was launched with --ax-screen-reader (agentCommand). Record
 	// that fact on the same Node that is about to be persisted and published.
-	// Never set for adoption, structured transports, or non-Claude tmux.
+	// Never set for historical external records, structured transports, or non-Claude tmux.
 	if n.Agent == "claude" {
 		n.AXScreenReader = true
 	}
@@ -989,9 +989,15 @@ func sessionArgFromCmdline(args []string) string {
 	return ""
 }
 
-// closeOwned tears down the process or tmux session scimux owns for n. Adopted
-// tmux sessions are deliberately left running — scimux did not start them.
+// closeOwned tears down the process or tmux session scimux owns for n.
+// Historical external tmux sessions are deliberately left running.
 func (a *app) closeOwned(n *Node) error {
+	if n.Adopted {
+		if a.workers != nil {
+			return a.workers.RetireExternalController(n)
+		}
+		return nil
+	}
 	if pm := a.proc(n); pm != nil {
 		// The worker is an owned controller even after its underlying harness
 		// exits. Stop it based on that ownership, not on the last liveness
@@ -1002,9 +1008,6 @@ func (a *app) closeOwned(n *Node) error {
 		if pm.HasSession(n.ID) {
 			return pm.Kill(n.ID)
 		}
-		return nil
-	}
-	if n.Adopted {
 		return nil
 	}
 	s := a.server.Session(n.ID)

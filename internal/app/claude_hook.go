@@ -440,6 +440,9 @@ func (a *app) drainClaudeHooks() {
 	a.mu.Lock()
 	pairs := make([][2]string, 0, len(a.claudeHooks))
 	for nodeID, hookID := range a.claudeHooks {
+		if n := a.byID[nodeID]; n != nil && n.Adopted {
+			continue
+		}
 		if a.workers != nil && a.workers.manages(nodeID) {
 			continue
 		}

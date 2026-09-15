@@ -1,20 +1,156 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
+
+func TestPollSkipsRetiredExternalTmuxNodes(t *testing.T) {
+	for _, endedAt := range []string{"", "2026-01-02T00:00:00Z"} {
+		name := "active history"
+		if endedAt != "" {
+			name = "ended history"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := &fakeTmux{
+				list:    []string{"external"},
+				alive:   map[string]bool{"external": true},
+				capture: "synthetic external output",
+			}
+			a := newTestApp(t, f)
+			transcriptPath := filepath.Join(t.TempDir(), "synthetic-external.jsonl")
+			appendLines(t, transcriptPath,
+				`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"external question"}}`,
+				`{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"external-call","name":"Bash","input":{}}]}}`)
+			n := &Node{
+				ID: "external", Title: "Saved", Agent: "pi", Transport: "tmux",
+				Transcript: transcriptPath, Adopted: true, EndedAt: endedAt,
+				CreatedAt: "2026-01-01T00:00:00Z",
+			}
+			a.nodes, a.byID[n.ID] = []*Node{n}, n
+			a.live[n.ID], a.attn[n.ID] = "retired", "retired"
+			a.prevCap[n.ID] = f.capture
+			a.lastChg[n.ID] = time.Now().Add(-paneQuietAfter - time.Second)
+			writeSessionLog(t, a, n.ID, []sessionlog.Event{
+				sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+				{T: "assistant", Text: "saved answer"},
+			})
+			before, err := os.ReadFile(a.sessionLogPath(n.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			a.poll()
+
+			if containsSub(f.subcommands(), "capture-pane") {
+				t.Errorf("retired external pane captured: %v", f.subcommands())
+			}
+			if a.tailers[n.ID] != nil {
+				t.Error("retired external transcript was consumed")
+			}
+			after, err := os.ReadFile(a.sessionLogPath(n.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Errorf("retired external history changed:\n%s", after)
+			}
+			if a.live[n.ID] != "retired" || a.attn[n.ID] != "retired" {
+				t.Errorf("retired external state changed: live=%q attention=%q", a.live[n.ID], a.attn[n.ID])
+			}
+		})
+	}
+}
+
+type pollCountingHarness struct {
+	*syntheticSessionHarness
+	stateCalls atomic.Int32
+}
+
+func (h *pollCountingHarness) State(ctx context.Context) sessionworker.State {
+	h.stateCalls.Add(1)
+	return h.syntheticSessionHarness.State(ctx)
+}
+
+func TestPollSkipsRetiredExternalWorkerAfterRetirementFailure(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{ID: "external-worker", Title: "Saved", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	a.live[n.ID], a.attn[n.ID] = "retired", "retired"
+	harness := &pollCountingHarness{syntheticSessionHarness: &syntheticSessionHarness{state: sessionworker.State{
+		HasSession: true, SessionID: "external-session", Live: "active", Attention: "approval",
+	}}}
+	identity := sessionworker.Identity{WorkerID: "old-external", Agent: n.Agent, Build: "old"}
+	server, err := sessionworker.Listen("", identity, harness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	client, err := sessionworker.NewClient(server.Link())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	a.workers = newWorkerManager("", t.TempDir(), "new")
+	a.workers.entries[n.ID] = &workerEntry{client: client, identity: identity}
+
+	a.poll()
+
+	if calls := harness.stateCalls.Load(); calls != 0 {
+		t.Errorf("retired external worker State called %d times", calls)
+	}
+	if n.SessionID != "" {
+		t.Errorf("retired external worker identity projected into node: %q", n.SessionID)
+	}
+	if a.live[n.ID] != "retired" || a.attn[n.ID] != "retired" {
+		t.Errorf("retired external worker state changed: live=%q attention=%q", a.live[n.ID], a.attn[n.ID])
+	}
+}
+
+func TestPollLeavesRetiredExternalClaudeHookInboxUntouched(t *testing.T) {
+	f := &fakeTmux{list: []string{"external-hook"}, alive: map[string]bool{"external-hook": true}, capture: "external pane"}
+	a := newTestApp(t, f)
+	current := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("saved", 0))
+	n := seedOwnedClaude(t, a, "external-hook", hookSIDOwn, current)
+	n.Adopted = true
+	successor := writeClaudeProject(t, a.home, "-w-proj", hookSIDSuccessor, claudeUserLine("external successor", time.Second))
+	inbox := hookInboxReady(t, a, a.claudeHookID(n.ID), "resume", hookSessionJSON("resume", hookSIDSuccessor, successor))
+	beforeStore, err := os.ReadFile(a.storePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	a.poll()
+
+	if n.SessionID != hookSIDOwn || n.Transcript != current {
+		t.Errorf("retired external hook rebound node to %q / %q", n.SessionID, n.Transcript)
+	}
+	if _, err := os.Stat(inbox); err != nil {
+		t.Errorf("retired external hook event left its inbox: %v", err)
+	}
+	afterStore, err := os.ReadFile(a.storePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterStore, beforeStore) {
+		t.Errorf("retired external hook event changed durable node records:\n%s", afterStore)
+	}
+}
 
 // noteChatProgress turns transcript progress into the stale-chat signal:
 // growth across a whole working phase (judge=true, the active→quiet

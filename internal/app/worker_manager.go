@@ -95,9 +95,9 @@ func (m *workerManager) LaunchNode(n *Node, model string) (string, error) {
 	})
 }
 
-func (m *workerManager) AdoptClaude(n *Node, hookID string, generation int) (string, error) {
-	if n == nil || n.Agent != "claude" {
-		return "", errors.New("session worker: only Claude tmux nodes can be adopted")
+func (m *workerManager) AttachOwnedClaudePane(n *Node, hookID string, generation int) (string, error) {
+	if n == nil || n.Agent != "claude" || n.Adopted {
+		return "", errors.New("session worker: only scimux-owned Claude panes can be attached")
 	}
 	return m.launch(sessionworker.LaunchRequest{
 		NodeID: n.ID, Agent: n.Agent, Parent: n.Parent, Title: n.Title, Prompt: n.Prompt,
@@ -400,6 +400,13 @@ func (m *workerManager) Kill(nodeID string) error {
 	return m.stop(nodeID, true)
 }
 
+// RetireController stops a session worker while deliberately leaving its
+// underlying pane alive. It is used for historical external integrations and
+// whole-program Claude shutdown, never as ownership proof for a pane.
+func (m *workerManager) RetireController(nodeID string) error {
+	return m.stop(nodeID, false)
+}
+
 func (m *workerManager) stop(nodeID string, terminateSession bool) error {
 	entry := m.entry(nodeID)
 	if entry == nil {
@@ -537,6 +544,55 @@ func connectWorker(locator sessionworker.Locator) (*sessionworker.Client, error)
 	return client, nil
 }
 
+// RetireExternalController proves that a historical external node has no live
+// session worker, or authenticates and stops that worker with Stop(false).
+// The manager's connection map is only a cache: absence there says nothing
+// about a worker that survived a muxer restart or a failed reconciliation.
+func (m *workerManager) RetireExternalController(node *Node) error {
+	if m == nil || node == nil || !node.Adopted {
+		return errors.New("session worker: external retirement requires an adopted node")
+	}
+	if entry := m.entry(node.ID); entry != nil {
+		if entry.identity.Agent != "" && entry.identity.Agent != node.Agent {
+			return errors.New("session worker: worker identity does not match durable external node")
+		}
+		return m.RetireController(node.ID)
+	}
+
+	locator, discoverErr := sessionworker.Discover(m.dataDir, node.ID)
+	if discoverErr != nil {
+		// Claiming the lifetime lock is the only proof that no controller remains.
+		// It also safely removes a stale regular locator. A held lock, unreadable
+		// locator, or unusable control directory remains fail-closed.
+		if reapStaleWorkerLocator(m.dataDir, node.ID) {
+			return nil
+		}
+		return fmt.Errorf("session worker: cannot prove external controller absent: %w", discoverErr)
+	}
+	client, connectErr := connectWorker(locator)
+	if connectErr != nil {
+		if reapStaleWorkerLocator(m.dataDir, node.ID) {
+			return nil
+		}
+		return fmt.Errorf("session worker: connect external controller: %w", connectErr)
+	}
+	if locator.NodeID != node.ID || locator.Agent != node.Agent {
+		_ = client.Close()
+		return errors.New("session worker: worker identity does not match durable external node")
+	}
+
+	m.mu.Lock()
+	if m.entries[node.ID] == nil {
+		m.entries[node.ID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity}
+		client = nil
+	}
+	m.mu.Unlock()
+	if client != nil {
+		_ = client.Close()
+	}
+	return m.RetireController(node.ID)
+}
+
 // Reconcile attaches only locators whose authenticated hello agrees with the
 // durable node. Missing locators are the ordinary read-only-history state for
 // sessions created before workers existed or workers that exited.
@@ -544,6 +600,12 @@ func (m *workerManager) Reconcile(nodes []*Node) error {
 	var errs []error
 	for _, node := range nodes {
 		if node == nil || node.EndedAt != "" || (node.transport() != "acp" && node.transport() != "codex" && node.transport() != "muse" && node.Agent != "claude") {
+			continue
+		}
+		if node.Adopted {
+			if err := m.RetireExternalController(node); err != nil {
+				errs = append(errs, fmt.Errorf("retire external worker %s: %w", node.ID, err))
+			}
 			continue
 		}
 		locator, err := sessionworker.Discover(m.dataDir, node.ID)
@@ -601,13 +663,14 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		knownNode := a.byID[locator.NodeID]
 		known := knownNode != nil
 		ended := known && knownNode.EndedAt != ""
+		adopted := known && knownNode.Adopted
 		knownAgent := ""
 		if known {
 			knownAgent = knownNode.Agent
 		}
 		deleted := a.deletedNodes[locator.NodeID]
 		a.mu.Unlock()
-		if known && !ended {
+		if known && !ended && !adopted {
 			continue
 		}
 		client, err := connectWorker(locator)
@@ -626,17 +689,31 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		m.mu.Lock()
 		m.entries[locator.NodeID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity}
 		m.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		state, stateErr := client.State(ctx)
+		cancel()
+		req := state.Launch
+		external := adopted || (stateErr == nil && req != nil && req.Adopted)
+		if external {
+			if err := m.RetireController(locator.NodeID); err != nil {
+				errs = append(errs, fmt.Errorf("retire external worker %s: %w", locator.NodeID, err))
+			}
+			continue
+		}
 		if deleted || ended {
+			if stateErr != nil && deleted && locator.Agent == "claude" {
+				m.mu.Lock()
+				delete(m.entries, locator.NodeID)
+				m.mu.Unlock()
+				_ = client.Close()
+				errs = append(errs, fmt.Errorf("finish durably stopped worker %s: cannot prove whether its pane is external: %w", locator.NodeID, stateErr))
+				continue
+			}
 			if err := m.stop(locator.NodeID, true); err != nil {
 				errs = append(errs, fmt.Errorf("finish durably stopped worker %s: %w", locator.NodeID, err))
 			}
 			continue
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		state, stateErr := client.State(ctx)
-		cancel()
-		req := state.Launch
 		if stateErr != nil || req == nil || !state.HasSession || req.NodeID != locator.NodeID || req.Agent != locator.Agent || req.Title == "" || req.Dir == "" || req.CreatedAt == "" {
 			m.mu.Lock()
 			delete(m.entries, locator.NodeID)
@@ -696,10 +773,10 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 	return errors.Join(errs...)
 }
 
-// AdoptExistingClaude gives pre-worker tmux chats a controller endpoint
-// without restarting their pane. Failure is per chat and non-destructive: the
-// muxer simply keeps using the legacy in-process path for that node.
-func (m *workerManager) AdoptExistingClaude(a *app) error {
+// RecoverOwnedClaudePanes gives scimux-owned pre-worker tmux chats a
+// controller endpoint without restarting their pane. Historical external
+// integrations are intentionally excluded.
+func (m *workerManager) RecoverOwnedClaudePanes(a *app) error {
 	if a == nil || a.server == nil {
 		return nil
 	}
@@ -711,7 +788,7 @@ func (m *workerManager) AdoptExistingClaude(a *app) error {
 	a.mu.Lock()
 	candidates := make([]candidate, 0)
 	for _, node := range a.nodes {
-		if node.Agent != "claude" || node.EndedAt != "" || m.manages(node.ID) {
+		if node.Agent != "claude" || node.Adopted || node.EndedAt != "" || m.manages(node.ID) {
 			continue
 		}
 		candidates = append(candidates, candidate{node: *node, hookID: a.claudeHookIDLocked(node.ID), generation: a.claudeGenerationLocked(node.ID)})
@@ -722,7 +799,7 @@ func (m *workerManager) AdoptExistingClaude(a *app) error {
 		if !a.server.Session(candidate.node.ID).Alive() {
 			continue
 		}
-		if _, err := m.AdoptClaude(&candidate.node, candidate.hookID, candidate.generation); err != nil {
+		if _, err := m.AttachOwnedClaudePane(&candidate.node, candidate.hookID, candidate.generation); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", candidate.node.ID, err))
 		}
 	}

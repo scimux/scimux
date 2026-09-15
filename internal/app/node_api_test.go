@@ -6,6 +6,7 @@ package app
 // node_lifecycle_order_test.go.
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -200,124 +200,38 @@ func TestClaudeCreateHoldsSendGateDuringDeferredInitialDelivery(t *testing.T) {
 	}
 }
 
-// ---------- adopt ----------
+// ---------- removed external-session route ----------
 
-func TestPublicRouteAdoptSessionTransportAndTranscript(t *testing.T) {
-	shared := ""
-	f := &fakeTmux{alive: map[string]bool{"live1": true, "claimer": true, "pending": true}}
+func TestPublicRouteRejectsExternalAdoptionWithoutSideEffects(t *testing.T) {
+	f := &fakeTmux{alive: map[string]bool{"external": true}}
 	a := newTestApp(t, f)
-	shared = filepath.Join(a.home, ".claude", "projects", "proj", "shared.jsonl")
-	a.nodes = []*Node{
-		{ID: "owner", Title: "owner", Agent: "claude", Transcript: shared, CreatedAt: "2026-07-14T00:00:00Z"},
+	transcriptPath := writeClaudeTranscript(t, a.home, "00000000-0000-4000-8000-000000000099")
+	beforeStore, err := os.ReadFile(a.storePath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
-	a.byID["owner"] = a.nodes[0]
-	a.reserved = map[string]bool{"pending": true}
 	h := newTestHandler(t, a)
-
-	// Missing session → 400.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt", `{}`, true); rec.Code != http.StatusBadRequest {
-		t.Fatalf("missing session: status = %d, want 400", rec.Code)
-	}
-	// Dead session → 404.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt", `{"session":"ghost"}`, true); rec.Code != http.StatusNotFound {
-		t.Fatalf("dead session: status = %d, want 404", rec.Code)
-	}
-	// Codex is not adoptable (app-server transport) → 400.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
-		`{"session":"live1","agent":"codex"}`, true); rec.Code != http.StatusBadRequest {
-		t.Fatalf("codex adopt: status = %d, want 400; body=%q", rec.Code, rec.Body.String())
-	}
-	// Grok is a structured ACP subprocess scimux owns — not adoptable.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
-		`{"session":"live1","agent":"grok"}`, true); rec.Code != http.StatusBadRequest {
-		t.Fatalf("grok adopt: status = %d, want 400; body=%q", rec.Code, rec.Body.String())
-	}
-	// Transcript owned by another node → 409.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
-		`{"session":"claimer","agent":"claude","transcript":`+strconv.Quote(shared)+`}`, true); rec.Code != http.StatusConflict {
-		t.Fatalf("path claim: status = %d, want 409", rec.Code)
-	}
-	// Transcript outside ~/.claude/projects/ → 400.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
-		`{"session":"claimer","agent":"claude","transcript":"/tmp/elsewhere.jsonl"}`, true); rec.Code != http.StatusBadRequest {
-		t.Fatalf("out-of-root transcript: status = %d, want 400", rec.Code)
-	}
-	// Reserved in-flight create id → 409.
-	if rec := routeRequest(h, http.MethodPost, "/api/adopt",
-		`{"session":"pending","agent":"claude"}`, true); rec.Code != http.StatusConflict {
-		t.Fatalf("reserved id: status = %d, want 409", rec.Code)
-	}
-
-	// Success: live session with explicit id/dir.
 	rec := routeRequest(h, http.MethodPost, "/api/adopt",
-		`{"session":"live1","agent":"claude","session_id":"sid","dir":`+strconv.Quote(a.home)+`}`, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("adopt success: status = %d body %q", rec.Code, rec.Body.String())
+		`{"session":"external","agent":"claude","session_id":"00000000-0000-4000-8000-000000000099","transcript":`+strconv.Quote(transcriptPath)+`,"dir":`+strconv.Quote(a.home)+`}`,
+		true)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST /api/adopt = %d %q, want 404", rec.Code, rec.Body.String())
 	}
-	var n Node
-	if err := json.Unmarshal(rec.Body.Bytes(), &n); err != nil {
+	if len(a.nodes) != 0 || len(a.byID) != 0 {
+		t.Fatalf("removed route registered a node: nodes=%#v byID=%#v", a.nodes, a.byID)
+	}
+	afterStore, err := os.ReadFile(a.storePath)
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if n.ID != "live1" || !n.Adopted {
-		t.Fatalf("adopted node = %+v", n)
+	if !bytes.Equal(afterStore, beforeStore) {
+		t.Fatalf("removed route changed registry: before=%q after=%q", beforeStore, afterStore)
 	}
-	if n.AXScreenReader {
-		t.Error("adopted Claude must remain ax_screen_reader:false")
-	}
-	if a.byID["live1"] == nil {
-		t.Fatal("adopt did not register the node")
-	}
-}
-
-func TestHandleAdoptRespondsFromPublishedSnapshot(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"live-snapshot": true}}
-	a := newTestApp(t, f)
-	workers := syntheticWorkerManager(t, filepath.Dir(a.storePath))
-	workers.startOptions.env = append(workers.startOptions.env, "SCIMUX_SESSION_WORKER_TEST_READY_DELAY=200ms")
-	a.workers = workers
-	t.Cleanup(workers.Shutdown)
-
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		done <- adopt(a, `{"session":"live-snapshot","agent":"claude","title":"Published","session_id":"original","dir":`+strconv.Quote(a.home)+`}`)
-	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		workers.mu.Lock()
-		starting := workers.starting["live-snapshot"]
-		workers.mu.Unlock()
-		if starting {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("adoption did not reach the worker boundary")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	a.mu.Lock()
-	a.byID["live-snapshot"].SessionID = "poller-update"
-	a.mu.Unlock()
-
-	rec := <-done
-	if rec.Code != http.StatusOK {
-		t.Fatalf("adopt status = %d body=%q", rec.Code, rec.Body.String())
-	}
-	var response Node
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.SessionID != "original" {
-		t.Fatalf("adopt response session_id = %q, want committed snapshot", response.SessionID)
-	}
-
-	// Publishing the adopted node is the transaction boundary. A worker
-	// attachment failure must not roll back or turn that successful adoption
-	// into an HTTP failure.
-	failing := newTestApp(t, &fakeTmux{alive: map[string]bool{"live-without-worker": true}})
-	failing.workers = newWorkerManager(filepath.Join(t.TempDir(), "missing-scimux"), filepath.Dir(failing.storePath), "test")
-	rec = adopt(failing, `{"session":"live-without-worker","agent":"claude","dir":`+strconv.Quote(failing.home)+`}`)
-	if rec.Code != http.StatusOK || failing.byID["live-without-worker"] == nil {
-		t.Fatalf("adopt with unavailable worker = %d %q node=%#v", rec.Code, rec.Body.String(), failing.byID["live-without-worker"])
+	f.mu.Lock()
+	calls := append([][]string(nil), f.calls...)
+	f.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("removed route interacted with tmux: %v", calls)
 	}
 }
 
@@ -419,18 +333,15 @@ func TestPublicRouteExitOwnedAdoptedAndStructured(t *testing.T) {
 		}
 	})
 
-	// Adopted session: closed but not stopped (reason adopted); no kill.
-	t.Run("adopted", func(t *testing.T) {
+	// Historical external session: closed but not stopped; no kill.
+	t.Run("retired external", func(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{"live1": true}}
 		a := newTestApp(t, f)
+		n := &Node{ID: "live1", Title: "saved", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+		a.nodes = []*Node{n}
+		a.byID[n.ID] = n
 		h := newTestHandler(t, a)
-		rec := routeRequest(h, http.MethodPost, "/api/adopt",
-			`{"session":"live1","agent":"claude","dir":`+strconv.Quote(a.home)+`}`, true)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("adopt: %d %s", rec.Code, rec.Body.String())
-		}
-
-		rec = routeRequest(h, http.MethodPost, "/api/nodes/live1/exit", "", true)
+		rec := routeRequest(h, http.MethodPost, "/api/nodes/live1/exit", "", true)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("exit: status = %d body %q", rec.Code, rec.Body.String())
 		}
@@ -620,6 +531,43 @@ func TestPublicRouteDeletePersistCloseArchive(t *testing.T) {
 		}
 	})
 
+	t.Run("retired external history archived without pane termination or resurrection", func(t *testing.T) {
+		f := &fakeTmux{alive: map[string]bool{"external": true}}
+		a := newTestApp(t, f)
+		n := &Node{ID: "external", Title: "saved", Agent: "claude", Transport: "tmux", Adopted: true, CreatedAt: "2026-01-01T00:00:00Z"}
+		a.nodes = []*Node{n}
+		a.byID[n.ID] = n
+		if err := a.appendRecord(storeRecord{Type: "node", Node: n}); err != nil {
+			t.Fatal(err)
+		}
+		writeSessionLog(t, a, n.ID, []sessionlog.Event{
+			sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+			{T: "assistant", Text: "saved answer", Time: "2026-01-01T00:00:01Z"},
+		})
+		h := newTestHandler(t, a)
+		if rec := routeRequest(h, http.MethodDelete, "/api/nodes/external", "", true); rec.Code != http.StatusOK {
+			t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+		}
+		if containsSub(f.subcommands(), "kill-session") || !f.alive[n.ID] {
+			t.Fatalf("delete terminated external pane: calls=%v alive=%v", f.subcommands(), f.alive[n.ID])
+		}
+		archived, err := filepath.Glob(filepath.Join(a.sessionsDir, "archive", n.ID+".*.jsonl"))
+		if err != nil || len(archived) != 1 {
+			t.Fatalf("saved history archive = %v, %v", archived, err)
+		}
+		body, err := os.ReadFile(archived[0])
+		if err != nil || !bytes.Contains(body, []byte("saved answer")) {
+			t.Fatalf("saved history lost: %q, %v", body, err)
+		}
+		fresh := &app{byID: map[string]*Node{}, storePath: a.storePath}
+		if err := fresh.loadStore(); err != nil {
+			t.Fatal(err)
+		}
+		if fresh.byID[n.ID] != nil {
+			t.Fatal("restart resurrected deleted external integration")
+		}
+	})
+
 	// Missing node → 404.
 	t.Run("missing", func(t *testing.T) {
 		a := newTestApp(t, &fakeTmux{})
@@ -657,81 +605,6 @@ func TestPublicRouteAgents(t *testing.T) {
 	rec = routeRequest(h, http.MethodPost, "/api/agents", `{}`, true)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /api/agents: status = %d, want 405", rec.Code)
-	}
-}
-
-func TestHandleAdoptValidation(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"live1": true, "dup": true, "claimer": true}}
-	a := newTestApp(t, f)
-	shared := filepath.Join(a.home, ".claude", "projects", "proj", "shared.jsonl")
-	a.nodes = []*Node{{ID: "dup", Title: "dup", Agent: "claude", CreatedAt: "2026-07-14T00:00:00Z"},
-		{ID: "owner", Title: "owner", Agent: "claude", Transcript: shared, CreatedAt: "2026-07-14T00:00:00Z"}}
-	for _, n := range a.nodes {
-		a.byID[n.ID] = n
-	}
-
-	if rec := adopt(a, `{}`); rec.Code != 400 {
-		t.Errorf("missing session: code = %d, want 400", rec.Code)
-	}
-	if rec := adopt(a, `{"session":"ghost"}`); rec.Code != 404 {
-		t.Errorf("dead session: code = %d, want 404", rec.Code)
-	}
-	if rec := adopt(a, `{"session":"dup"}`); rec.Code != 409 {
-		t.Errorf("duplicate: code = %d, want 409", rec.Code)
-	}
-	// Codex uses the app-server protocol — adoption is rejected with a clear error.
-	if rec := adopt(a, `{"session":"live1","agent":"codex","session_id":"x"}`); rec.Code != 400 {
-		t.Errorf("codex adopt: code = %d, want 400", rec.Code)
-	}
-	// Muse is a structured subprocess transport and is never adopted from tmux.
-	if rec := adopt(a, `{"session":"live1","agent":"muse"}`); rec.Code != 400 {
-		t.Errorf("muse adopt: code = %d, want 400", rec.Code)
-	}
-	// Path claim still enforced for claude.
-	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":`+strconv.Quote(shared)+`}`); rec.Code != 409 {
-		t.Errorf("path claim: code = %d, want 409", rec.Code)
-	}
-	// A transcript override outside the claude root is rejected before any bind.
-	if rec := adopt(a, `{"session":"claimer","agent":"claude","transcript":"/t/elsewhere.jsonl"}`); rec.Code != 400 {
-		t.Errorf("out-of-root transcript: code = %d, want 400", rec.Code)
-	}
-
-	// Success: a claude session with an explicit id and dir.
-	rec := adopt(a, `{"session":"live1","agent":"claude","session_id":"sid","dir":"`+a.home+`"}`)
-	if rec.Code != 200 {
-		t.Fatalf("adopt success: code = %d body %q", rec.Code, rec.Body.String())
-	}
-	if _, ok := a.byID["live1"]; !ok {
-		t.Error("adopted node not registered")
-	}
-}
-
-// An id reserved by an in-flight create must be rejected for adoption, and a
-// leftover session log under the slug is a dead node's history the adopt must
-// not bind onto (R20.2, R20.4).
-func TestHandleAdoptRejectsReservedAndDeadSlug(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"pending": true, "deadslug": true}}
-	a := newTestApp(t, f)
-	a.reserved = map[string]bool{"pending": true}
-	if rec := adopt(a, `{"session":"pending","agent":"claude"}`); rec.Code != 409 {
-		t.Errorf("reserved id: code = %d, want 409", rec.Code)
-	}
-	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(a.sessionsDir, "deadslug.jsonl")
-	if err := os.WriteFile(logPath, []byte(`{"t":"meta"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rec := adopt(a, `{"session":"deadslug","agent":"claude"}`)
-	if rec.Code != 409 {
-		t.Errorf("dead-history slug: code = %d body %q, want 409", rec.Code, rec.Body.String())
-	}
-	if _, ok := a.byID["deadslug"]; ok {
-		t.Error("dead-history adopt still registered a node")
-	}
-	if b, err := os.ReadFile(logPath); err != nil || string(b) != `{"t":"meta"}`+"\n" {
-		t.Errorf("dead node's log was touched: %q %v", b, err)
 	}
 }
 
@@ -882,7 +755,7 @@ func TestHandleNewNodeWrapsLaunchCommand(t *testing.T) {
 // AXScreenReader ownership: owned Claude create/fork are true; adoption and
 // non-Claude creation stay false; client-forged values cannot invent AX
 // semantics; launch failure leaves nothing published or persisted.
-func TestAXScreenReaderOwnershipCreateForkAdopt(t *testing.T) {
+func TestAXScreenReaderOwnershipCreateAndFork(t *testing.T) {
 	// Successful create: returned and published node is AX-marked.
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
@@ -947,40 +820,6 @@ func TestAXScreenReaderOwnershipCreateForkAdopt(t *testing.T) {
 	fFork.mu.Unlock()
 	if c := strings.Count(forkLaunch, "--ax-screen-reader"); c != 1 {
 		t.Errorf("fork launch must contain exactly one --ax-screen-reader (got %d): %q", c, forkLaunch)
-	}
-
-	// Adopted Claude remains false.
-	fAdopt := &fakeTmux{alive: map[string]bool{"adopt-me": true}}
-	aAdopt := newTestApp(t, fAdopt)
-	rec = adopt(aAdopt, `{"session":"adopt-me","agent":"claude","dir":`+strconv.Quote(aAdopt.home)+`}`)
-	if rec.Code != 200 {
-		t.Fatalf("adopt: code = %d body %q", rec.Code, rec.Body.String())
-	}
-	var adopted Node
-	if err := json.Unmarshal(rec.Body.Bytes(), &adopted); err != nil {
-		t.Fatal(err)
-	}
-	if adopted.AXScreenReader {
-		t.Error("adopted Claude must remain AXScreenReader=false")
-	}
-	if aAdopt.byID["adopt-me"].AXScreenReader {
-		t.Error("published adopted node must remain AXScreenReader=false")
-	}
-
-	// Adopted non-Claude tmux sessions remain false too; an unknown request
-	// field cannot opt a legacy pi pane into Claude AX key semantics.
-	fAdoptPi := &fakeTmux{alive: map[string]bool{"adopt-pi": true}}
-	aAdoptPi := newTestApp(t, fAdoptPi)
-	rec = adopt(aAdoptPi, `{"session":"adopt-pi","agent":"pi","dir":`+strconv.Quote(aAdoptPi.home)+`,"ax_screen_reader":true}`)
-	if rec.Code != 200 {
-		t.Fatalf("adopt pi: code = %d body %q", rec.Code, rec.Body.String())
-	}
-	var adoptedPi Node
-	if err := json.Unmarshal(rec.Body.Bytes(), &adoptedPi); err != nil {
-		t.Fatal(err)
-	}
-	if adoptedPi.AXScreenReader {
-		t.Error("adopted non-Claude node must remain AXScreenReader=false")
 	}
 
 	// Non-Claude create (codex) stays false even if the client supplies true.
@@ -1067,6 +906,25 @@ func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
 	}
 	if !resp.AXScreenReader {
 		t.Error("create response must report ax_screen_reader:true for owned Claude")
+	}
+}
+
+func TestPatchCannotSmuggleExternalIdentityOrOwnership(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if rec := newNode(a, `{"title":"Owned","agent":"claude","dir":`+strconv.Quote(a.home)+`}`); rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	n := a.nodes[0]
+	originalSessionID := n.SessionID
+	h := newTestHandler(t, a)
+	rec := routeRequest(h, http.MethodPatch, "/api/nodes/"+n.ID,
+		`{"title":"Renamed","adopted":true,"session_id":"external","transcript":"/tmp/external.jsonl","transport":"tmux","id":"external"}`,
+		true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d %s", rec.Code, rec.Body.String())
+	}
+	if n.Adopted || n.ID == "external" || n.SessionID != originalSessionID || n.Transcript != "" {
+		t.Fatalf("PATCH changed server-owned identity: %#v", n)
 	}
 }
 
@@ -1461,25 +1319,6 @@ func TestHandleUpdateNodeStationOverride(t *testing.T) {
 	}
 	if a.nodes[0].Title != "Head2" {
 		t.Fatalf("head title = %q, want Head2", a.nodes[0].Title)
-	}
-}
-
-// A probe session must not be adoptable even if a client asks for one by name
-// (a stale card, or a probe leaked by a killed scimux): adopting it would bind
-// a node to a throwaway probe pane carrying scimux's own status line.
-func TestHandleAdoptRejectsProbeSession(t *testing.T) {
-	probe, err := claudeUsageProbeSessionName()
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &fakeTmux{alive: map[string]bool{probe: true}}
-	a := newTestApp(t, f)
-	rec := adopt(a, `{"session":"`+probe+`","agent":"claude"}`)
-	if rec.Code != 409 {
-		t.Errorf("probe session: code = %d body %q, want 409", rec.Code, rec.Body.String())
-	}
-	if _, ok := a.byID[probe]; ok {
-		t.Error("probe session was registered as a node")
 	}
 }
 

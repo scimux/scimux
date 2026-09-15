@@ -31,6 +31,14 @@ started them. Newly created chats use the newly installed binary, so a breaking
 change in one vendor CLI rolls out without disturbing unrelated or already
 running chats.
 
+Only `scimux` is a public command; service managers must not invoke the hidden
+roles directly. Self-update activates a ready web child before handing the
+listener and muxer lock through exec, and never calls workers' Stop operation.
+Full `scimux stop` retires workers and structured subprocesses but preserves
+Claude tmux panes. `scimux stop [-data <path>]` addresses only the muxer through
+`muxer.json`; `muxer.lock` remains the lifetime single-owner claim for that
+data directory.
+
 ## Common-denominator protocol
 
 The authenticated HTTP+JSON protocol runs only over a Unix socket in a random
@@ -39,7 +47,7 @@ each is required by at least one current harness path.
 
 | Operation | Current reason it exists |
 | --- | --- |
-| `Launch` | Claude, ACP, Codex, and Muse create a session. It also adopts a pre-worker Claude pane. |
+| `Launch` | Claude, ACP, Codex, and Muse create a session. It also recovers a scimux-owned pre-worker Claude pane. |
 | `Send` | Every harness accepts a user turn. |
 | `Clear` | Every harness implements the existing `/clear` page turn. |
 | `ResolveDelivery` | Claude clears an explicitly acknowledged unconfirmed paste. |
@@ -104,9 +112,16 @@ and never resurrects it. An `EndedAt` node receives the same authenticated
 cleanup on startup, covering a crash between persisting `/exit` and reaching
 the worker. A muxer crash otherwise merely drops client connections. Claude
 hook rotations (including `/clear`) are projected back to the global append-only
-registry by the normal poll, so a later clean stop and re-adoption preserve the
+registry by the normal poll, so a later clean stop and owned-pane recovery preserve the
 worker's newest capability bundle. Explicit deletion is the only normal path
 that tells a worker to terminate its owned session.
+
+Historical workers for records marked `adopted:true` are retired during
+reconciliation with `Stop(false)`: the worker exits, no new controller is
+started, and the external pane remains running. If an authenticated orphan
+worker reports that legacy ownership in its launch description, it is retired
+instead of being republished. Failure to authenticate or read that ownership
+fails closed rather than risking an ordinary stop against an external pane.
 
 Worker-reported liveness, attention, delivery and permission mechanics are
 derived state, not another durable registry. The worker reconstructs them from

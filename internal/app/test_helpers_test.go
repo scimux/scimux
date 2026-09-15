@@ -348,14 +348,6 @@ func keyRecords(t *testing.T, path string) []storeRecord {
 	return recs
 }
 
-// --- /api/adopt ---
-
-func adopt(a *app, bodyJSON string) *httptest.ResponseRecorder {
-	rec := httptest.NewRecorder()
-	a.handleAdopt(rec, httptest.NewRequest("POST", "/api/adopt", strings.NewReader(bodyJSON)))
-	return rec
-}
-
 // --- /api/nodes ---
 
 func newNode(a *app, bodyJSON string) *httptest.ResponseRecorder {
