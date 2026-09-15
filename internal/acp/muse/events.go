@@ -6,12 +6,12 @@ import (
 	"strings"
 )
 
-// Observed against Muse 1.1.1-R2514.1 / MSP schema 1. A fingerprint mismatch
+// Observed against Muse 1.3.0-R3057.1 / MSP schema 1. A fingerprint mismatch
 // is observable on the client and must not fail initialization.
 const (
-	ObservedMuseVersion = "1.1.1-R2514.1"
+	ObservedMuseVersion = "1.3.0-R3057.1"
 	ObservedMSPSchema   = 1
-	PinnedFingerprint   = "sha256:c669a30c2ee17d63192b227865b424d1d78b5d6c04d9f1c9e9b77b9cf03e6a4f"
+	PinnedFingerprint   = "sha256:ab69549a7ebb423fce94068762da0b5ff3cdec1f8fc263dcc17248eda117f852"
 )
 
 type SchemaInfo struct {

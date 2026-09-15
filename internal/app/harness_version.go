@@ -40,11 +40,12 @@ type harnessRow struct {
 }
 
 // harnessSource is where a harness publishes its current version. There is no
-// single answer — two of the five are npm packages, one is a plain-text file
-// in a bucket, and Claude's depends on how it was installed — so the source
-// is data, not a hardcoded lane. Kind is "npm" (JSON, read .version) or
-// "text" (the bare version, one line). Label is shown to the user: an update
-// notice is only actionable if you know which channel it came from.
+// single answer — four are npm packages, Grok is a plain-text file in a
+// bucket, Muse is channel metadata, and Claude's depends on how it was
+// installed — so the source is data, not a hardcoded lane. Kind is "npm"
+// (JSON, read .version), "text" (the bare version, one line), or
+// "muse-stable". Label is shown to the user: an update notice is only
+// actionable if you know which channel it came from.
 //
 // Every source here is an unauthenticated public endpoint and must stay one.
 // No vendor credential is ever attached to these requests, and none is read
@@ -120,10 +121,10 @@ func setHarnessSourcesForTest(src map[string]harnessSource) (restore func()) {
 var versionPattern = regexp.MustCompile(`\bv?(\d+\.\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.\-]+)?)`)
 
 // parseHarnessVersion takes the first version-shaped token in a `--version`
-// output. The five CLIs print five different shapes ("2.1.236 (Claude Code)",
-// "codex-cli 0.147.0", "0.84.3", "grok 1.0.3 (1a29d5bc12) [stable]"), and
-// they are free to change them; an unrecognised output yields "" and the row
-// simply shows no version.
+// output. The six CLIs print several different shapes ("2.1.236 (Claude
+// Code)", "codex-cli 0.147.0", "0.84.3", "grok 1.0.3 (…) [stable]", "Muse
+// Code 1.3.0 (1.3.0-R3057.1)"), and they are free to change them; an
+// unrecognised output yields "" and the row simply shows no version.
 func parseHarnessVersion(out string) string {
 	m := versionPattern.FindStringSubmatch(out)
 	if m == nil {
@@ -195,7 +196,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 			if require == "" {
 				require = h.bin
 			}
-			if _, err := exec.LookPath(require); err == nil && h.bin != "muse" {
+			if _, err := exec.LookPath(require); err == nil {
 				row.Launchable = true
 			}
 			bin, err := exec.LookPath(h.bin)

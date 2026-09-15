@@ -214,6 +214,9 @@ content are never included.
 Plain-text pane snapshot for tmux nodes (`mode=visible` captures only the
 visible pane instead of history). For structured-transport nodes (ACP,
 Codex, Muse) there is no pane; peek returns a tail of the raw event log.
+Historical external nodes with `adopted:true` return `409`; their panes are
+no longer accessed. Saved conversation history remains available through
+`GET /api/nodes/{id}/chat` and its `?history=1` view.
 
 ### `GET /api/search?q=<query>`
 
@@ -402,10 +405,11 @@ worker/agent is stopped, while a historical external tmux session is left runnin
 History is never destroyed. A teardown failure returns `500` and attempts
 to re-assert the node in the store so it remains visible for retry.
 
-Historical records with `adopted:true` are readable and removable but retired:
-send, resolve, interrupt, key, and auto-approval mutations return `409`; no
-worker is started or resumed, and the external pane remains running. Forking
-such a record creates a fresh scimux-owned chat without importing its history.
+Historical records with `adopted:true` retain readable saved history and can
+be removed, but their external integration is retired: peek, send, resolve,
+interrupt, key, and auto-approval requests return `409`. No worker is started
+or resumed, and the external pane remains running. Forking such a record
+creates a fresh scimux-owned chat without importing its history.
 
 ## Talking to a node
 
@@ -778,8 +782,9 @@ the first version-shaped token of `<bin> --version`, empty when the output
 does not carry one. `present` and `launchable` are separate facts: pi is
 installed as `pi` but launched through `pi-acp`. The probe runs once per
 process, so a harness installed while scimux runs appears after a restart.
-Muse's `launchable` describes its installed executable; creation still
-enforces the separate approval-judge consent and model-catalog checks.
+For Muse, `launchable` is true when the `muse` executable is found on `PATH`.
+This inventory flag does not grant permission to create a chat: creation
+separately enforces approval-judge consent and model-catalog checks.
 
 ### `GET /api/harnesses/latest`
 

@@ -103,10 +103,6 @@ export function harnessState(row, latest){
       note: "installed, but it did not report a version" };
   }
   if (!r.launchable){
-    if (r.agent === "muse"){
-      return { agent: r.agent, state: "unlaunchable", version,
-        note: "installed, but Muse model policy is unavailable — scimux cannot launch it" };
-    }
     const bin = LAUNCH_BIN[r.agent] || r.agent;
     return { agent: r.agent, state: "unlaunchable", version,
       note: `installed, but ${bin} is missing — scimux cannot launch it` };

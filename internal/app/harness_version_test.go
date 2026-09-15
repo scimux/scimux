@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// The `--version` strings below are the real output shapes of the five
-// harnesses, captured 2026-09-09 by hand. Only the strings are real: no test
+// The `--version` strings below are real output shapes of the six harnesses,
+// captured by hand. Only the strings are real: no test
 // in this package may invoke an agent CLI, so every probe here runs against a
 // shell stub on a private PATH.
 func TestParseHarnessVersion(t *testing.T) {
@@ -27,6 +27,7 @@ func TestParseHarnessVersion(t *testing.T) {
 		{"pi", "0.84.3\n", "0.84.3"},
 		{"opencode", "1.18.23\n", "1.18.23"},
 		{"grok", "grok 1.0.3 (1a29d5bc12) [stable]\n", "1.0.3"},
+		{"muse", "Muse Code 1.3.0 (1.3.0-R3057.1)\n", "1.3.0"},
 		{"prerelease suffix", "codex-cli 0.148.0-alpha.2\n", "0.148.0-alpha.2"},
 		{"leading v", "grok v1.2.0\n", "1.2.0"},
 		{"two segments", "opencode 1.18\n", "1.18"},
@@ -333,7 +334,7 @@ func TestProbeHarnessVersionsRunsNoRealCLI(t *testing.T) {
 	}
 }
 
-func TestMuseHarnessPresentButPolicyClosedIsNotLaunchable(t *testing.T) {
+func TestMuseHarnessLaunchabilityReportsTheInstalledBinary(t *testing.T) {
 	binDir := t.TempDir()
 	writeScript(t, binDir, "muse", `printf '%s\n' 'muse 1.2.3'`)
 	t.Setenv("PATH", binDir)
@@ -341,8 +342,8 @@ func TestMuseHarnessPresentButPolicyClosedIsNotLaunchable(t *testing.T) {
 	if len(rows) != 1 || !rows[0].Present {
 		t.Fatalf("Muse inventory = %+v, want one present row", rows)
 	}
-	if rows[0].Launchable {
-		t.Fatalf("production-policy-closed Muse was advertised launchable: %+v", rows[0])
+	if !rows[0].Launchable {
+		t.Fatalf("installed Muse was advertised unlaunchable: %+v", rows[0])
 	}
 }
 

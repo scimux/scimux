@@ -50,6 +50,8 @@ var (
 	// embedded and served like the rest of the web tree. `go list -deps`
 	// cannot see it, so it is listed here by hand.
 	qrcodegenLicense = mustEmbeddedLicense("qrcodegen.LICENSE")
+	// Vendored Grok SVG from Lobe Icons; also outside the Go module graph.
+	lobeIconsLicense = mustEmbeddedLicense("lobe-icons.LICENSE")
 )
 
 func mustEmbeddedLicense(name string) string {
@@ -70,6 +72,7 @@ func handleLicenses(w http.ResponseWriter, r *http.Request) {
 		"uuid":      uuidLicense,
 		"anet":      anetLicense,
 		"qrcodegen": qrcodegenLicense,
+		"lobeicons": lobeIconsLicense,
 	})
 }
 

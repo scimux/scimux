@@ -31,7 +31,7 @@ func TestDecodeApprovalUnknownKindAndStages(t *testing.T) {
 		"subject":{
 			"kind":"mysteryGate","command":"echo hi","path":"/tmp/x","access":"write",
 			"host":"h","port":22,"protocol":"ssh","target":"tgt","toolName":"shell",
-			"origin":"model","workspaceRoot":"/ws",
+			"origin":{"kind":"model","command":"echo hi","url":"https://example.invalid"},"workspaceRoot":"/ws",
 			"stages":[
 				{"argv":["echo","hi"],"argvComplete":false,"position":1,"totalStages":2,
 				 "requirementId":{"approvalId":"ap1","sourceIndex":0},
@@ -59,6 +59,10 @@ func TestDecodeApprovalUnknownKindAndStages(t *testing.T) {
 	}
 	if len(a.Subject.Stages) != 2 {
 		t.Fatalf("stages=%d", len(a.Subject.Stages))
+	}
+	if a.Subject.Origin == nil || a.Subject.Origin.Kind != "model" ||
+		a.Subject.Origin.Command != "echo hi" || a.Subject.Origin.URL != "https://example.invalid" {
+		t.Fatalf("approval origin dropped: %+v", a.Subject.Origin)
 	}
 	if a.Subject.Stages[0].Resolution.Kind != "unresolved" || a.Subject.Stages[1].Resolution.Kind != "knownSafe" {
 		t.Fatalf("resolution objects dropped: %+v", a.Subject.Stages)
@@ -390,7 +394,7 @@ func TestApprovalProvenanceOnPendingAndUpdate(t *testing.T) {
 }
 
 func TestApprovalDefensiveCopy(t *testing.T) {
-	raw := []byte(`{"approvalId":"ap1","subject":{"kind":"command","command":"x","stages":[{"argv":["x"],"resolution":{"kind":"unresolved"}}]},"availableChoices":[{"choiceId":"a","decision":"approved"}],"_meta":{"k":"orig"}}`)
+	raw := []byte(`{"approvalId":"ap1","subject":{"kind":"command","command":"x","origin":{"kind":"model"},"stages":[{"argv":["x"],"resolution":{"kind":"unresolved"}}]},"availableChoices":[{"choiceId":"a","decision":"approved"}],"_meta":{"k":"orig"}}`)
 	a, err := decodeApproval(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -403,10 +407,15 @@ func TestApprovalDefensiveCopy(t *testing.T) {
 	a.Subject.Stages[0].Argv[0] = "mutated"
 	st := newApprovalState()
 	st.setRequested(a)
+	a.Subject.Origin.Kind = "outside"
 	p, _ := st.pending()
+	if p.Subject.Origin == nil || p.Subject.Origin.Kind != "model" {
+		t.Fatal("stored approval aliases caller's origin")
+	}
 	p.Choices[0].ChoiceID = "other"
+	p.Subject.Origin.Kind = "other"
 	p2, _ := st.pending()
-	if p2.Choices[0].ChoiceID == "other" {
+	if p2.Choices[0].ChoiceID == "other" || p2.Subject.Origin.Kind == "other" {
 		t.Fatal("pending snapshot aliases stored state")
 	}
 }

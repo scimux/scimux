@@ -265,7 +265,7 @@ test("museConsentNote separates token consent from blocking approvals", () => {
 
 test("only a present Muse row gets an active consent switch", () => {
   const present = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
   ], null, { museConsent: false, usageChecks: false });
   assert.match(present, /data-muse-consent="muse"/);
@@ -276,7 +276,7 @@ test("only a present Muse row gets an active consent switch", () => {
   assert.doesNotMatch(present, /Approval-judge consent/);
 
   const on = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ], null, { museConsent: true });
   assert.match(on, /data-muse-consent="muse"[^>]*checked/);
 	assert.match(on, /Actions that still need approval stay paused/);
@@ -291,7 +291,7 @@ test("only a present Muse row gets an active consent switch", () => {
 
 test("Muse consent is not coupled to auto-approve or Claude usage checks", () => {
   const html = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
   ], null, { museConsent: true, usageChecks: false });
   assert.match(html, /data-muse-consent="muse"[^>]*checked/);
@@ -300,25 +300,25 @@ test("Muse consent is not coupled to auto-approve or Claude usage checks", () =>
   assert.doesNotMatch(harnessSrc, /auto-approve/);
 });
 
-test("six harness rows render alphabetically and Muse unlaunchable is policy, not a missing binary", () => {
+test("six harness rows render alphabetically and installed Muse is launchable", () => {
   const rows = [
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
     { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
     { agent: "pi", present: false, launchable: false },
     { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
     { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ];
   const html = harnessRowsHTML(rows, null);
   const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(order, ["claude", "codex", "grok", "muse", "opencode", "pi"]);
   assert.equal((html.match(/class="item"/g) || []).length, 6);
   const museState = harnessState(rows[5], null);
-  assert.equal(museState.state, "unlaunchable");
-  assert.match(museState.note, /Muse model policy is unavailable/);
-  assert.doesNotMatch(museState.note, /muse is missing|executable is missing/i);
-  assert.match(html, /Muse model policy is unavailable/);
+  assert.equal(museState.state, "unchecked");
+  assert.equal(museState.note, "");
+  assert.doesNotMatch(html, /Muse model policy is unavailable/);
   assert.doesNotMatch(html, /muse is missing/);
+  assert.match(html, /You cannot start a Muse session/);
 });
 
 test("absent Muse is not installed; omitted latest stays unchecked; no Meta terms", () => {
@@ -332,7 +332,7 @@ test("absent Muse is not installed; omitted latest stays unchecked; no Meta term
   assert.doesNotMatch(present.note, /up to date/);
 
   const html = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ], {});
   assert.doesNotMatch(html, /up to date/);
   assert.doesNotMatch(html, /href="http/);
