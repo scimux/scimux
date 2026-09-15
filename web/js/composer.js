@@ -30,7 +30,8 @@
  *   - #attstage chip HTML and per-node in-memory stage map
  *   - draft keys scimux-draft:<node-id> (per device, local only)
  *   - scimux-sendto-pending:<node-id> (durable source intents, local only)
- *   - scimux-sendto-awaiting:<node-id> (expected turn + boundary, local only)
+ *   - scimux-sendto-awaiting:<node-id> (expected turn, boundary, write stamp;
+ *     local only, expires after AWAITING_FORWARD_TTL_MS)
  *   - composerBusy / composerClosed / canAttach edge-only caches
  *   - stageKey counter for chip identity
  *
@@ -53,7 +54,8 @@
  * Storage keys:
  *   - "scimux-draft:" + nodeId  — per-node text drafts (localStorage)
  *   - "scimux-sendto-pending:" + nodeId — unsent source intents
- *   - "scimux-sendto-awaiting:" + nodeId — delivered text awaiting a real turn
+ *   - "scimux-sendto-awaiting:" + nodeId — delivered text awaiting a real turn,
+ *     stamped so an unmatched latch expires instead of wedging the node
  *
  * Injected effects (chat / shell):
  *   - setSentEcho / paintEcho / clearSentEchoFor / invalidate / refreshChat
@@ -557,7 +559,7 @@ export function createComposerFeature(deps){
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
     if (composerNode && composerNode !== id && !promptText().trim() &&
-        !sendingDestinations.has(composerNode) && !readAwaitingForward(storage, composerNode))
+        !sendingDestinations.has(composerNode) && !readAwaitingForward(storage, composerNode, nowFn()))
       clearPendingForwards(storage, composerNode);
     composerNode = id;
     setPromptText(savedDraft(id));
@@ -669,8 +671,8 @@ export function createComposerFeature(deps){
       /* A successful POST proves acceptance, not the destination address.
          chat.js mints the permanent link only after this exact text appears
          beyond the pre-send transcript boundary. */
-      if (pending.length && text && !readAwaitingForward(storage, dest))
-        writeAwaitingForward(storage, dest, text, turns?.length || 0);
+      if (pending.length && text && !readAwaitingForward(storage, dest, nowFn()))
+        writeAwaitingForward(storage, dest, text, turns?.length || 0, nowFn());
       sendingDestinations.delete(dest);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       items.forEach(x => {

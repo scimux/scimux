@@ -155,7 +155,7 @@ test("Send-to marker legacy match uses node and turn time", () => {
 test("deferred new-chat Send-to commits on the matching transcript turn", async () => {
   const data = new Map([
     ["scimux-sendto-pending:n1", JSON.stringify([{ node: "source", turnTime: "old", text: "source" }])],
-    ["scimux-sendto-awaiting:n1", JSON.stringify({ text: "edited prompt", afterTurns: 0 })],
+    ["scimux-sendto-awaiting:n1", JSON.stringify({ text: "edited prompt", afterTurns: 0, at: Date.now() })],
   ]);
   const storage = {
     getItem: key => data.has(key) ? data.get(key) : null,
@@ -185,6 +185,16 @@ test("Send-to confirmation ignores matching turns before its send boundary", () 
   assert.equal(chatmod.matchingForwardDestinationTurn(
     { text: "same", afterTurns: 1 }, [oldTurn, newTurn],
   ), newTurn);
+});
+
+/* The server records what it delivered, and an attachment makes that the
+   prompt plus extendPrompt's appended reference. Equality alone would leave
+   every attachment-bearing Send-to permanently unconfirmed. */
+test("Send-to confirmation survives the attachment reference the server appends", () => {
+  const turn = { role: "user", text: "carry this over\n\n[attached image: /tmp/a.png]" };
+  assert.equal(chatmod.matchingForwardDestinationTurn({ text: "carry this over" }, [turn]), turn);
+  assert.equal(chatmod.matchingForwardDestinationTurn({ text: "carry this" }, [turn]), null,
+    "a bare prefix is a different prompt, not this latch's delivery");
 });
 
 test("truncated fallback addresses match a current turn by prefix", () => {

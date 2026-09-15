@@ -28,18 +28,37 @@ test("clearing pending is explicit; a malformed cache safely becomes empty", () 
   assert.deepEqual(links.readPendingForwards(storage, "n1"), []);
 });
 
-test("delivery latch records the pre-send boundary and reads legacy values", () => {
+test("delivery latch records the pre-send boundary and stamps its write", () => {
   const storage = memory();
-  links.writeAwaitingForward(storage, "dest", "edited prompt", 4);
-  assert.deepEqual(links.readAwaitingForward(storage, "dest"), {
-    text: "edited prompt", afterTurns: 4,
-  });
-  storage.setItem(links.awaitingForwardKey("legacy"), "old prompt");
-  assert.deepEqual(links.readAwaitingForward(storage, "legacy"), {
-    text: "old prompt", afterTurns: 0,
+  links.writeAwaitingForward(storage, "dest", "edited prompt", 4, 5_000);
+  assert.deepEqual(links.readAwaitingForward(storage, "dest", 5_001), {
+    text: "edited prompt", afterTurns: 4, at: 5_000,
   });
   links.clearAwaitingForward(storage, "dest");
-  assert.equal(links.readAwaitingForward(storage, "dest"), null);
+  assert.equal(links.readAwaitingForward(storage, "dest", 5_001), null);
+});
+
+/* A latch only clears when its exact text lands as a destination turn. Any
+   divergence the matcher cannot bridge would otherwise hold the node's
+   Send-to state forever, because both the cancel guard and the overwrite
+   guard read "a latch exists" as "a delivery is still in flight". */
+test("a latch that never confirms expires instead of wedging the node", () => {
+  const storage = memory();
+  links.writeAwaitingForward(storage, "dest", "never lands", 0, 5_000);
+  const late = 5_000 + links.AWAITING_FORWARD_TTL_MS + 1;
+  assert.equal(links.readAwaitingForward(storage, "dest", late), null);
+  assert.equal(storage.getItem(links.awaitingForwardKey("dest")), null,
+    "the dead latch is removed, not merely hidden from this read");
+});
+
+test("unstamped latches from before the TTL cannot wedge a node", () => {
+  const storage = memory({
+    [links.awaitingForwardKey("legacy")]: "old prompt",
+    [links.awaitingForwardKey("v1")]: JSON.stringify({ text: "old prompt", afterTurns: 2 }),
+  });
+  assert.equal(links.readAwaitingForward(storage, "legacy", 5_000), null);
+  assert.equal(links.readAwaitingForward(storage, "v1", 5_000), null);
+  assert.equal(storage.getItem(links.awaitingForwardKey("v1")), null);
 });
 
 test("permanent link uses the confirmed transcript address, not browser time or full text", () => {

@@ -66,9 +66,13 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   the user copies, pastes and attributes, and scimux is upstream of that.
   Send-to destination drafts keep their source intent in device-local storage;
   `forward_links` enters shared `ui.json` only after the sent text is matched to
-  a real destination transcript turn. Editing the draft does not break
-  provenance. Failed or unconfirmed sends remain pending, while leaving an
-  empty destination cancels the pending intent. The shared navigation index
+  a real destination transcript turn -- which is the sent text itself, or that
+  text plus the attachment reference the server appends to what it delivered.
+  Editing the draft does not break provenance. Failed or unconfirmed sends
+  remain pending, while leaving an empty destination cancels the pending
+  intent. The awaiting latch expires after a day, because a latch that never
+  matches would otherwise hold both the cancel guard and the overwrite guard
+  open forever and silently retire Send-to for that node. The shared navigation index
   retains at most the newest 500 links and omits destination text when a
   transcript UID or timestamp can address the turn; last-resort text fallback
   is prefix-bounded.

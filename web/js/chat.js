@@ -325,8 +325,13 @@ export function matchingForwardDestinationTurn(expected, turns = []){
   if (!latch || !latch.text) return null;
   const boundary = Math.max(0, Math.floor(Number(latch.afterTurns) || 0));
   const start = boundary <= turns.length ? boundary : 0;
+  /* Attachments make the recorded turn the prompt plus extendPrompt's
+     appended reference, so the seam is matched, not a loose prefix: an
+     unrelated turn that merely starts with this text is a different send. */
+  const extended = `${latch.text}\n\n`;
   return turns.slice(start).find(turn =>
-    turn && turn.role === "user" && turn.text === latch.text) || null;
+    turn && turn.role === "user" &&
+    (turn.text === latch.text || String(turn.text || "").startsWith(extended))) || null;
 }
 
 export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
@@ -1371,7 +1376,8 @@ export function createChatFeature(deps){
   }
 
   function confirmDeferredForward(nodeId, turns){
-    const expected = readAwaitingForward(d.storage, nodeId);
+    const expected = readAwaitingForward(
+      d.storage, nodeId, typeof d.now === "function" ? d.now() : Date.now());
     const turn = matchingForwardDestinationTurn(expected, turns);
     if (!turn) return;
     const pending = readPendingForwards(d.storage, nodeId);

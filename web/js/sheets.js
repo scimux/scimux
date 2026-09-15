@@ -43,7 +43,8 @@
  * Storage:
  *   - "scimux-lastdir" get on plain new; set on successful create with dir
  *   - "scimux-sendto-pending:" + nodeId for new-chat source intents
- *   - "scimux-sendto-awaiting:" + nodeId for the expected initial turn
+ *   - "scimux-sendto-awaiting:" + nodeId for the expected initial turn,
+ *     stamped at write so an unconfirmed latch expires
  *
  * Timers:
  *   - setTimeout(0) title focus/select after fork seed and edit open
@@ -928,7 +929,7 @@ export function createSheetsFeature(deps = {}){
          acknowledged create response has no durable turn address itself. */
       if (n && n.id && echoLaunchPrompt && payload.prompt && ncForwardSources.length){
         writePendingForwards(storage, n.id, ncForwardSources);
-        writeAwaitingForward(storage, n.id, payload.prompt, 0);
+        writeAwaitingForward(storage, n.id, payload.prompt, 0, nowFn());
       }
       if (laneChoice.lane && typeof d.uiMutate === "function"){
         const list = typeof d.laneList === "function" ? d.laneList() : [];

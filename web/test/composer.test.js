@@ -31,6 +31,7 @@ import {
   createComposerFeature,
   isClaudeNativeForkCommand,
 } from "../js/composer.js";
+import { AWAITING_FORWARD_TTL_MS } from "../js/storage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const composerSrc = readFileSync(join(__dirname, "../js/composer.js"), "utf8");
@@ -551,7 +552,7 @@ test("pending Send-to cancels only after the empty destination is left", () => {
   const inFlight = makeFeature({ drafts: {
     [key]: pending,
     "scimux-draft:n1": "",
-    "scimux-sendto-awaiting:n1": "forwarded",
+    "scimux-sendto-awaiting:n1": JSON.stringify({ text: "forwarded", afterTurns: 0, at: 1_000_000 }),
   } });
   inFlight.feature.onSelect();
   inFlight.setSel("n2");
@@ -570,7 +571,7 @@ test("successful edited Send-to waits for the real transcript turn; failure keep
   assert.deepEqual(JSON.parse(success.storage.getItem(key)), [source]);
   assert.equal(success.uiOps.length, 0);
   assert.deepEqual(JSON.parse(success.storage.getItem("scimux-sendto-awaiting:n1")), {
-    text: "edited before send", afterTurns: 1,
+    text: "edited before send", afterTurns: 1, at: 1_000_000,
   });
 
   const failed = makeFeature({
@@ -600,7 +601,7 @@ test("a later send cannot replace a Send-to turn already awaiting confirmation",
   const key = "scimux-sendto-pending:n1";
   const awaitingKey = "scimux-sendto-awaiting:n1";
   const source = { node: "source", turnTime: "t" };
-  const awaiting = JSON.stringify({ text: "first forwarded send", afterTurns: 1 });
+  const awaiting = JSON.stringify({ text: "first forwarded send", afterTurns: 1, at: 1_000_000 });
   const ctx = makeFeature({ drafts: {
     [key]: JSON.stringify([source]),
     [awaitingKey]: awaiting,
@@ -609,6 +610,24 @@ test("a later send cannot replace a Send-to turn already awaiting confirmation",
   ctx.feature.onSelect();
   await ctx.feature.sendPrompt();
   assert.equal(ctx.storage.getItem(awaitingKey), awaiting);
+});
+
+test("an expired delivery latch never blocks the next Send-to", async () => {
+  const key = "scimux-sendto-pending:n1";
+  const awaitingKey = "scimux-sendto-awaiting:n1";
+  const source = { node: "source", turnTime: "t" };
+  const ctx = makeFeature({ drafts: {
+    [key]: JSON.stringify([source]),
+    [awaitingKey]: JSON.stringify({ text: "never landed", afterTurns: 0, at: 1_000 }),
+    "scimux-draft:n1": "forwarded",
+  } });
+  ctx.setNow(1_000 + AWAITING_FORWARD_TTL_MS + 1);
+  ctx.feature.onSelect();
+  ctx.roots.prompt.innerText = "sent much later";
+  await ctx.feature.sendPrompt();
+  assert.deepEqual(JSON.parse(ctx.storage.getItem(awaitingKey)), {
+    text: "sent much later", afterTurns: 1, at: 1_000 + AWAITING_FORWARD_TTL_MS + 1,
+  });
 });
 
 test("busy/closed edge-only DOM changes", () => {

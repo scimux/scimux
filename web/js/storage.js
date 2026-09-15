@@ -91,6 +91,13 @@ export function createStorage(raw){
 export const PENDING_FORWARD_PREFIX = "scimux-sendto-pending:";
 export const AWAITING_FORWARD_PREFIX = "scimux-sendto-awaiting:";
 export const FORWARD_TEXT_FALLBACK_MAX = 256;
+/* A latch only clears when its text lands as a destination turn, and both the
+   cancel guard and the overwrite guard read a live latch as "still in flight".
+   Any divergence the matcher cannot bridge would therefore freeze the node's
+   Send-to state for good, so an unconfirmed latch is given a life, not a
+   promise. A day is long enough to outlast a closed tab and short enough that
+   a stuck node heals itself without the user knowing there was a latch. */
+export const AWAITING_FORWARD_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function pendingForwardKey(nodeId){
   return PENDING_FORWARD_PREFIX + (nodeId || "");
@@ -134,32 +141,41 @@ export function clearPendingForwards(storage, nodeId){
   return writePendingForwards(storage, nodeId, []);
 }
 
-export function writeAwaitingForward(storage, nodeId, text, afterTurns = 0){
+export function writeAwaitingForward(storage, nodeId, text, afterTurns = 0, at = Date.now()){
   const value = {
     text: String(text || ""),
     afterTurns: Math.max(0, Math.floor(Number(afterTurns) || 0)),
+    at: Number(at) || 0,
   };
   try { storage && storage.setItem(awaitingForwardKey(nodeId), JSON.stringify(value)); }
   catch { /* same best-effort draft cache contract */ }
   return value;
 }
 
-export function readAwaitingForward(storage, nodeId){
+export function readAwaitingForward(storage, nodeId, now = Date.now()){
   let raw = "";
   try { raw = storage && storage.getItem(awaitingForwardKey(nodeId)) || ""; }
   catch { return null; }
   if (!raw) return null;
+  let value = null;
   try {
-    const value = JSON.parse(raw);
-    if (value && typeof value === "object" && typeof value.text === "string"){
-      return {
-        text: value.text,
-        afterTurns: Math.max(0, Math.floor(Number(value.afterTurns) || 0)),
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.text === "string"){
+      value = {
+        text: parsed.text,
+        afterTurns: Math.max(0, Math.floor(Number(parsed.afterTurns) || 0)),
+        at: Number(parsed.at) || 0,
       };
     }
-    if (typeof value === "string") return { text: value, afterTurns: 0 };
-  } catch { /* legacy latches stored the expected text directly */ }
-  return { text: raw, afterTurns: 0 };
+  } catch { /* latches before this shape stored the expected text directly */ }
+  /* An unstamped latch is one that predates the TTL, and the nodes most
+     likely to hold one are exactly the nodes already stuck. Expiring it on
+     sight costs at most one in-flight confirmation and unsticks the rest. */
+  if (!value || !value.at || (Number(now) || 0) - value.at >= AWAITING_FORWARD_TTL_MS){
+    clearAwaitingForward(storage, nodeId);
+    return null;
+  }
+  return value;
 }
 
 export function clearAwaitingForward(storage, nodeId){
