@@ -32,6 +32,7 @@ export function emptyUI() {
     groups: [],
     archived: [],
     bookmarks: [],
+    forward_links: [],
     lanes: [],
     pinned: [],
   };
@@ -44,11 +45,11 @@ export function normUI(j) {
   return Object.assign(emptyUI(), j || {});
 }
 
-/* Only bookmark add/delete are idempotent under R20.7: they dedupe on
-   timestamp and must always replay across revision changes. Wholesale list
+/* Bookmark add/delete and durable Send-to links are idempotent under R20.7:
+   they dedupe by stable identity and must always replay across revision changes. Wholesale list
    snapshots (groups/lanes/pin-order) and arch/unarch/pin are not. */
 export function idempotentOp(op) {
-  return op.k === "bookmark-add" || op.k === "bookmark-del";
+  return op.k === "bookmark-add" || op.k === "bookmark-del" || op.k === "forward-link-add";
 }
 
 /* Apply one operation to doc IN PLACE. Returns the same doc reference.
@@ -86,6 +87,11 @@ export function applyOp(doc, op) {
           }
       }
       doc.bookmarks = (doc.bookmarks || []).filter((n) => n.t !== op.t);
+      break;
+    case "forward-link-add":
+      doc.forward_links ||= [];
+      if (op.link && !doc.forward_links.some(link => link.id === op.link.id))
+        doc.forward_links.push(op.link);
       break;
     case "pin":
       /* new pins land at the FRONT so a freshly pinned card shows at the top of

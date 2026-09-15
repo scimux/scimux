@@ -339,8 +339,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     <path d="M3 12h12"/>
     <path d="M11 8l4 4-4 4"/>
   </svg>`;
-  const ICON_BOOKMARK = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-    <path d="M6 3.5A2.5 2.5 0 0 1 8.5 1h7A2.5 2.5 0 0 1 18 3.5V23l-6-4-6 4V3.5Z"/>
+  /* solid bookmark glyph: fa-solid fa-bookmark, inlined like the existing
+     branch/copy icons so no font or network dependency is introduced. */
+  const ICON_BUBBLE_BOOKMARK = `<svg width="12" height="16" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true">
+    <path d="M0 48V487.7C0 501.1 15.5 508.5 25.9 500.1L192 365.7 358.1 500.1C368.5 508.5 384 501.1 384 487.7V48C384 21.5 362.5 0 336 0H48C21.5 0 0 21.5 0 48Z"/>
   </svg>`;
   /* branch glyph: fa-regular fa-code-branch (exact FA 7.3.1 path), inlined
      like the copy icon. Used by the fork action, unrotated. */
@@ -822,11 +824,12 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     agentLogo,
     icons: {
       ICON_TERM, ICON_CHECK, ICON_CHEV_UP, ICON_CHEV_DOWN,
-      ICON_BRANCH, ICON_INTO, ICON_BOOKMARK, ICON_COPY, ICON_DOWNALL, ICON_FILE,
+      ICON_BRANCH, ICON_INTO, ICON_BUBBLE_BOOKMARK, ICON_COPY, ICON_DOWNALL, ICON_FILE,
       ICON_TOGGLE_OFF, ICON_TOGGLE_ON, ICON_WARN,
     },
     bookmarks: () => getUI().bookmarks,
     noteUsages: () => notesFeature ? notesFeature.usages() : [],
+    forwardLinks: () => getUI().forward_links,
     uiMutate,
     stampAddress: (b, t) => stampAddressMod(b, t),
     copyText: s => copyText(s),
@@ -836,6 +839,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     openBookmark: t => bookmarksFeature.openBookmark(t),
     openChoiceList: opts => bookmarksFeature.openChoiceList(opts),
     openNoteUsage: usage => notesFeature.openAt(usage),
+    jumpToChatAddress: address => bookmarksFeature.jumpToChatAddress(address),
     setComposerBusy: v => composerFeature.setComposerBusy(v),
     setComposerClosed: v => composerFeature.setComposerClosed(v),
     setAttachAvail: v => composerFeature.setAttachAvail(v),
@@ -907,6 +911,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     refreshChat: () => chatFeature.render(),
     tick: () => pollingFeature.tick(),
     scheduleTick: ms => setTimeout(() => pollingFeature.tick(), ms),
+    uiMutate,
     alert: msg => alert(msg),
   }));
 

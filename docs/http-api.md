@@ -569,7 +569,7 @@ as `decisions` on the same response (and in `?history=1` segments).
 ### `GET /api/ui` / `PUT /api/ui`
 
 The shared UI document (`~/.scimux/ui.json`: groups, archived cards, bookmarks,
-lanes). GET sets an `ETag` and honors `If-None-Match`. PUT requires
+Send-to `forward_links`, lanes). GET sets an `ETag` and honors `If-None-Match`. PUT requires
 `If-Match` (the last ETag, or `*` to bootstrap) — `428` without it, `409` on
 mismatch — and replaces the document atomically. Bodies over the size limit
 are `413`.

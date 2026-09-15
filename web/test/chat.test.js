@@ -128,6 +128,56 @@ test("bookmark marker HTML is compact and only counts multiple destinations", ()
   assert.equal(chatmod.bubbleMarkersHTML({}, { iconBookmark: "BOOK" }), "");
 });
 
+test("Send-to marker follows the source turn and coexists with bookmark", () => {
+  const turn = { uid: "u1", segment: 2, record: 7, time: "t", text: "source" };
+  const links = [
+    { id: "l1", source: { uid: "u1", segment: 2, record: 7 }, destination: { node: "d1", text: "edited" } },
+    { id: "l2", source: { uid: "u1", segment: 2, record: 7 }, destination: { node: "d2", text: "other" } },
+  ];
+  assert.deepEqual(chatmod.sentToMarkerModel(turn, "source", links), links);
+  const html = chatmod.bubbleMarkersHTML({
+    bookmark: { t: "b1" }, bookmarkDestinations: [], sentTo: links,
+  }, { iconBookmark: "BOOK", iconInto: "SEND" });
+  assert.match(html, /data-bmarker="bookmark"/);
+  assert.match(html, /data-bmarker="sendto"/);
+  assert.match(html, /rot180[^>]*>SEND/);
+  assert.match(html, /bmarkercount[^>]*>2/);
+});
+
+test("Send-to marker legacy match uses node and turn time", () => {
+  const turn = { time: "t", text: "source" };
+  const link = { id: "l1", source: { node: "source", turnTime: "t" }, destination: { node: "dest" } };
+  assert.deepEqual(chatmod.sentToMarkerModel(turn, "source", [link]), [link]);
+  assert.deepEqual(chatmod.sentToMarkerModel(turn, "other", [link]), []);
+});
+
+test("deferred new-chat Send-to commits on the matching transcript turn", async () => {
+  const data = new Map([
+    ["scimux-sendto-pending:n1", JSON.stringify([{ node: "source", turnTime: "old", text: "source" }])],
+    ["scimux-sendto-awaiting:n1", "edited prompt"],
+  ]);
+  const storage = {
+    getItem: key => data.has(key) ? data.get(key) : null,
+    setItem: (key, value) => data.set(key, String(value)),
+    removeItem: key => data.delete(key),
+  };
+  const ops = [];
+  const ctx = makeFeature({
+    storage,
+    chatPayload: {
+      turns: [{ role: "user", uid: "du", segment: 0, record: 1, time: "landed", text: "edited prompt" }],
+      live: "quiet", delivery: "ok", source: "tmux", chat_started: "start", prior_turns: 0,
+    },
+    deps: { uiMutate: op => ops.push(op) },
+  });
+  await ctx.feature.render();
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].k, "forward-link-add");
+  assert.equal(ops[0].link.destination.uid, "du");
+  assert.equal(data.has("scimux-sendto-pending:n1"), false);
+  assert.equal(data.has("scimux-sendto-awaiting:n1"), false);
+});
+
 test("attention evidence key changes only with kind or fresh evidence epoch", () => {
   assert.equal(chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123 }), "inspect:123");
   assert.equal(chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123, live: "active" }), "inspect:123");
@@ -1611,6 +1661,7 @@ function el(tag, attrs = {}){
       if (sel.includes(".permmore") && this.classList.contains("permmore")) return this;
       if (sel.includes(".permask") && this.classList.contains("permask")) return this;
       if (sel.includes("[data-bact]") && this.dataset?.bact) return this;
+      if (sel.includes("[data-bmarker]") && this.dataset?.bmarker) return this;
       if (sel.includes("[data-dismiss-attention]") && this.dataset?.dismissAttention) return this;
       if (sel.includes("[data-open-terminal]") && this.dataset?.openTerminal) return this;
       if (sel.includes("[data-key]") && this.dataset?.key) return this;
@@ -4952,8 +5003,39 @@ test("P3C: send-to click opens openSendTo for the source chat", async () => {
   assert.equal(sends[0].exceptId, "n1");
   assert.equal(sends[0].title, "Send to chat…");
   assert.equal(sends[0].text, stripAssetRefs("carry ![pic](scimux-asset:x) over"));
+  assert.deepEqual(sends[0].source, {
+    node: "n1", turnTime: "2026-01-01T00:01:00Z",
+  });
   assert.doesNotMatch(sends[0].text, /scimux-asset:/);
   ctx.feature.destroy();
+});
+
+test("Send-to marker jumps directly once and offers a chooser for several", async () => {
+  const jumps = [], choices = [];
+  let links = [{ id: "l1", source: { node: "n1", turnTime: "T" }, destination: { node: "d1", text: "sent" } }];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: "source", time: "T" }],
+      live: "quiet", delivery: "ok", source: "tmux", chat_started: "T0", prior_turns: 0,
+    },
+    deps: {
+      forwardLinks: () => links,
+      jumpToChatAddress: address => jumps.push(address),
+      openChoiceList: opts => choices.push(opts),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const turn = el("div", { className: "turn assistant", dataset: { bk: "i:0" } });
+  const marker = el("button", { dataset: { bmarker: "sendto" } });
+  turn.appendChild(marker); ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+  assert.deepEqual(jumps, [{ node: "d1", text: "sent" }]);
+
+  links = [...links, { id: "l2", source: { node: "n1", turnTime: "T" }, destination: { node: "d2" } }];
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+  assert.equal(choices.length, 1);
+  assert.equal(choices[0].choices.length, 2);
 });
 
 test("P3C: use-as-description sets editor state from the turn", async () => {

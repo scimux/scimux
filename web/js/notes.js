@@ -1581,6 +1581,7 @@ export function createNotesFeature(deps){
         /* The snapshot freezes the transcript role independently of its
            display speaker, which may be an actual agent name. */
         role: (ref.snapshot && ref.snapshot.role) || "",
+        source: (src.node || src.uid) ? { ...src } : null,
       });
       return;
     }
@@ -1795,6 +1796,10 @@ export function createNotesFeature(deps){
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
           role: nt.role || "",
+          source: (nt.node || nt.uid) ? {
+            node: nt.node || "", turnTime: nt.turnTime || "",
+            ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),
+          } : null,
         });
         return;
       case "jump":

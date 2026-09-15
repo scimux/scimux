@@ -892,6 +892,73 @@ test("Claude create with not_sent initial delivery preserves a recoverable compo
   assert.match(ctx.effects.alert.join(" "), /did not start|not delivered/i);
 });
 
+test("new-chat Send-to commits only after initial delivery and keeps modified text", async () => {
+  const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "original" };
+  const ctx = createFeature();
+  ctx.feature.bind();
+  ctx.feature.openNewActivity({ prompt: "forwarded", forwardSources: [source] });
+  ctx.byId.nc_title.value = "Destination";
+  ctx.byId.nc_prompt.value = "edited before creating";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  const link = ctx.effects.uiMutate.find(op => op.k === "forward-link-add");
+  assert.ok(link);
+  assert.equal(link.link.destination.node, "created-1");
+  assert.equal(link.link.destination.text, "edited before creating");
+});
+
+test("new-chat cancel drops Send-to intent; not_sent transfers it to the recovery draft", async () => {
+  const source = { node: "source", turnTime: "t", text: "original" };
+  const cancel = createFeature();
+  cancel.feature.bind();
+  cancel.feature.openNewActivity({ prompt: "forwarded", forwardSources: [source] });
+  cancel.feature.closeSheets();
+  cancel.feature.openNewActivity();
+  cancel.byId.nc_title.value = "Plain";
+  cancel.byId.nc_lane.value = "lane-a";
+  cancel.byId.nc_start.dispatch("click");
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(cancel.effects.uiMutate.some(op => op.k === "forward-link-add"), false);
+
+  const held = createFeature();
+  held.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return {};
+    if (path === "/api/nodes" && opts.method === "POST")
+      return { id: "pending-node", initial_delivery: "not_sent" };
+    return {};
+  });
+  held.feature.bind();
+  held.feature.openNewActivity({ prompt: "forwarded", forwardSources: [source] });
+  held.byId.nc_title.value = "Destination";
+  held.byId.nc_lane.value = "lane-a";
+  held.byId.nc_start.dispatch("click");
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(held.effects.uiMutate.some(op => op.k === "forward-link-add"), false);
+  assert.deepEqual(JSON.parse(held.storage.getItem("scimux-sendto-pending:pending-node")), [source]);
+});
+
+test("new-chat pending delivery waits for transcript confirmation", async () => {
+  const source = { node: "source", turnTime: "t", text: "original" };
+  const ctx = createFeature();
+  ctx.setApi(async (path, opts = {}) => {
+    if (path === "/api/agents") return {};
+    if (path === "/api/nodes" && opts.method === "POST")
+      return { id: "deferred-node", initial_delivery: "pending" };
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.openNewActivity({ prompt: "forwarded", forwardSources: [source] });
+  ctx.byId.nc_title.value = "Destination";
+  ctx.byId.nc_prompt.value = "edited before creating";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(ctx.effects.uiMutate.some(op => op.k === "forward-link-add"), false);
+  assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-pending:deferred-node")), [source]);
+  assert.equal(ctx.storage.getItem("scimux-sendto-awaiting:deferred-node"), "edited before creating");
+});
+
 test("create validation: missing title, fork lane required, new-lane error", async () => {
   const ctx = createFeature();
   ctx.feature.bind();

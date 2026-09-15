@@ -64,6 +64,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   wrote this" on the user's own words is the same misattribution pointed the
   other way — and the clipboard is outside the rule entirely, because there
   the user copies, pastes and attributes, and scimux is upstream of that.
+  Send-to destination drafts keep their source intent in device-local storage;
+  `forward_links` enters shared `ui.json` only after delivery succeeds. Editing
+  the draft does not break provenance. Failed or unconfirmed sends remain
+  pending, while leaving an empty destination cancels the pending intent.
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam,
   never a new file or truncation; the context gauge is segment-scoped.

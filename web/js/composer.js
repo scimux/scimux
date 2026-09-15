@@ -100,6 +100,13 @@
  */
 
 import { esc as escDefault } from "./format.js";
+import {
+  readPendingForwards,
+  clearPendingForwards,
+  readAwaitingForward,
+  clearAwaitingForward,
+  makeForwardLink,
+} from "./storage.js";
 
 /* ---------- public constants ---------- */
 
@@ -340,6 +347,8 @@ export function createComposerFeature(deps){
   let composerClosed = null;
   let canAttach = false;
   let bound = false;
+  let composerNode = "";
+  const sendingDestinations = new Set();
   const cleanups = [];
   /* dynamic remove buttons rebound on each renderStage */
   let stageRemoveCleanups = [];
@@ -544,6 +553,10 @@ export function createComposerFeature(deps){
   function onSelect(){
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
+    if (composerNode && composerNode !== id && !promptText().trim() &&
+        !sendingDestinations.has(composerNode) && !readAwaitingForward(storage, composerNode))
+      clearPendingForwards(storage, composerNode);
+    composerNode = id;
     setPromptText(savedDraft(id));
     setAttachAvail(false);
     renderStage();
@@ -599,6 +612,7 @@ export function createComposerFeature(deps){
       alertFn("Claude /fork is not supported. Use scimux's Fork action to start a fresh chat that inherits launch configuration but not conversation history.");
       return;
     }
+    sendingDestinations.add(dest);
     clearPrompt();
     stage[dest] = []; /* clear optimistically; restore on failure */
     if (selId() === dest) renderStage();
@@ -641,12 +655,24 @@ export function createComposerFeature(deps){
         if (typeof d.invalidateChat === "function") d.invalidateChat();
         if (typeof d.scheduleTick === "function") d.scheduleTick(400);
         else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
+        sendingDestinations.delete(dest);
         return;
       }
       /* Delivered, so the saved copy is finally redundant. Removing it any
          earlier -- as this did, before the request was even made -- destroys
          the one copy that outlives the tab while the send can still fail. */
       forgetDraft(dest);
+      const pending = readPendingForwards(storage, dest);
+      if (pending.length && typeof d.uiMutate === "function"){
+        const sentAt = new Date(nowFn()).toISOString();
+        pending.forEach(source => d.uiMutate({
+          k: "forward-link-add",
+          link: makeForwardLink(source, dest, text, sentAt),
+        }));
+        clearPendingForwards(storage, dest);
+        clearAwaitingForward(storage, dest);
+      }
+      sendingDestinations.delete(dest);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       items.forEach(x => {
         if (x.preview) URLImpl.revokeObjectURL(x.preview);
@@ -667,6 +693,7 @@ export function createComposerFeature(deps){
         renderStage();
       }
       if (merged) keepDraft(dest, merged);
+      sendingDestinations.delete(dest);
     }
   }
 

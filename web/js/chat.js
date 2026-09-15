@@ -84,6 +84,13 @@ import {
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import {
+  readPendingForwards,
+  clearPendingForwards,
+  readAwaitingForward,
+  clearAwaitingForward,
+  makeForwardLinkToTurn,
+} from "./storage.js";
 
 /* ---------- public constants ---------- */
 
@@ -301,6 +308,19 @@ export function bookmarkMarkerModel(turn, nodeId, bookmarks = [], usages = []){
   return { bookmark, destinations };
 }
 
+export function sentToMarkerModel(turn, nodeId, links = []){
+  const key = durableSourceKey(turn);
+  return (links || []).filter(link => {
+    const source = (link && link.source) || {};
+    return (key && durableSourceKey(source) === key) || legacySourceMatches(turn, nodeId, source);
+  });
+}
+
+export function matchingForwardDestinationTurn(expectedText, turns = []){
+  if (!expectedText) return null;
+  return turns.find(turn => turn && turn.role === "user" && turn.text === expectedText) || null;
+}
+
 export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
   const buttons = [];
   if (model.bookmark){
@@ -309,7 +329,7 @@ export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = ""
   }
   if (model.sentTo && model.sentTo.length){
     const n = model.sentTo.length;
-    buttons.push(`<button type="button" class="bmarker" data-bmarker="sendto" aria-label="Open sent-to destination"><span class="rot180">${iconInto}</span>${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
+    buttons.push(`<button type="button" class="bmarker" data-bmarker="sendto" aria-label="Open sent-to destination"${n > 1 ? ` aria-haspopup="menu"` : ""}><span class="rot180">${iconInto}</span>${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
   }
   return buttons.length ? `<div class="bubblemarkers">${buttons.join("")}</div>` : "";
 }
@@ -1323,9 +1343,11 @@ export function createChatFeature(deps){
 
   function renderTurnHTML(t, { bk, hist = false, nodeId, assets } = {}){
     const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
-    const marker = bookmarkMarkerModel(t, nodeId, g("bookmarks", []), g("noteUsages", []));
-    const markers = marker ? bubbleMarkersHTML(marker, {
-      iconBookmark: icons.ICON_BOOKMARK || "",
+    const bookmarkMarker = bookmarkMarkerModel(t, nodeId, g("bookmarks", []), g("noteUsages", []));
+    const sentTo = sentToMarkerModel(t, nodeId, g("forwardLinks", []));
+    const marker = { ...(bookmarkMarker || {}), sentTo };
+    const markers = (bookmarkMarker || sentTo.length) ? bubbleMarkersHTML(marker, {
+      iconBookmark: icons.ICON_BUBBLE_BOOKMARK || "",
       iconInto: icons.ICON_INTO || "",
     }) : "";
     bubbleTurns[bk] = t;
@@ -1337,6 +1359,22 @@ export function createChatFeature(deps){
       <div class="${cls}" ${dataAttrs}>
         <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${markdown(a.clean)}${a.html}</div>
       </div>`;
+  }
+
+  function confirmDeferredForward(nodeId, turns){
+    const expected = readAwaitingForward(d.storage, nodeId);
+    const turn = matchingForwardDestinationTurn(expected, turns);
+    if (!turn) return;
+    const pending = readPendingForwards(d.storage, nodeId);
+    if (pending.length && typeof d.uiMutate === "function"){
+      pending.forEach(source => d.uiMutate({
+        k: "forward-link-add",
+        link: makeForwardLinkToTurn(source, nodeId, turn),
+      }));
+      clearPendingForwards(d.storage, nodeId);
+    }
+    if (!pending.length || typeof d.uiMutate === "function")
+      clearAwaitingForward(d.storage, nodeId);
   }
 
   function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets } = {}){
@@ -1793,6 +1831,8 @@ export function createChatFeature(deps){
     }
 
     const turns = data.turns || [];
+    confirmDeferredForward(n.id, turns);
+    if (data.restore_draft) clearAwaitingForward(d.storage, n.id);
     if (typeof d.setAttachAvail === "function") d.setAttachAvail(turns.length > 0);
 
     if (data.restore_draft && n.id && !restoredDraft[n.id]){
@@ -1912,6 +1952,7 @@ export function createChatFeature(deps){
       markerHash: hash(JSON.stringify({
         bookmarks: g("bookmarks", []),
         noteUsages: g("noteUsages", []),
+        forwardLinks: g("forwardLinks", []),
       })),
       decisionsHash: decisionsHash(liveDecisions) +
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
@@ -2248,10 +2289,12 @@ export function createChatFeature(deps){
     if (marker){
       const turnEl = marker.closest && marker.closest(".turn");
       const turn = turnEl && turnEl.dataset ? bubbleTurns[turnEl.dataset.bk] : null;
-      const model = turn && bookmarkMarkerModel(
+      const bookmarkModel = turn && bookmarkMarkerModel(
         turn, g("sel", ""), g("bookmarks", []), g("noteUsages", []));
-      if (!model) return;
+      const sentTo = turn ? sentToMarkerModel(turn, g("sel", ""), g("forwardLinks", [])) : [];
+      const model = { ...(bookmarkModel || {}), sentTo };
       if (marker.dataset.bmarker === "bookmark"){
+        if (!bookmarkModel) return;
         if (!model.destinations.length){
           if (typeof d.openBookmark === "function") d.openBookmark(model.bookmark.t);
         } else if (model.destinations.length === 1){
@@ -2264,6 +2307,25 @@ export function createChatFeature(deps){
               usage: u,
             })),
             onChoose: choice => d.openNoteUsage(choice.usage),
+          });
+        }
+      } else if (marker.dataset.bmarker === "sendto" && sentTo.length){
+        const openLink = link => {
+          if (typeof d.jumpToChatAddress === "function") d.jumpToChatAddress(link.destination || {});
+        };
+        if (sentTo.length === 1) openLink(sentTo[0]);
+        else if (typeof d.openChoiceList === "function"){
+          d.openChoiceList({
+            title: "Sent to…",
+            choices: sentTo.map((link, i) => {
+              const dest = (link && link.destination) || {};
+              const node = nodeById(dest.node);
+              return {
+                id: String(i), link,
+                label: `${(node && node.title) || "Chat"}${link.sent_at ? " · " + bubTimeFn(link.sent_at) : ""}`,
+              };
+            }),
+            onChoose: choice => openLink(choice.link),
           });
         }
       }
@@ -2324,6 +2386,12 @@ export function createChatFeature(deps){
           exceptId: g("sel", ""),
           title: "Send to chat…",
           role: turn.role || "",
+          source: {
+            node: g("sel", ""), turnTime: turn.time || "",
+            ...(turn.uid ? {
+              uid: turn.uid, segment: Number(turn.segment) || 0, record: Number(turn.record) || 0,
+            } : {}),
+          },
         });
       else if (ba.dataset.bact === "desc")
         useTurnAsDescription(turn.text);

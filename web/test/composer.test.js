@@ -366,6 +366,7 @@ function makeFeature(overrides = {}){
   const echoes = [];
   const paints = [];
   const clears = [];
+  const uiOps = [];
   let chatSig = overrides.chatSig ?? "sig";
   let lastTurns = overrides.lastTurns ?? [{ role: "user", text: "x" }];
   const timers = makeTimers();
@@ -448,6 +449,7 @@ function makeFeature(overrides = {}){
     tick: () => {},
     scheduleTick: () => {},
     alert: msg => alerts.push(msg),
+    uiMutate: op => uiOps.push(op),
     setInterval: timers.setInterval,
     clearInterval: timers.clearInterval,
     setTimeout: timers.setTimeout,
@@ -458,7 +460,7 @@ function makeFeature(overrides = {}){
 
   return {
     feature, roots, storage, apiCalls, fetchCalls, revoked, created, alerts,
-    echoes, paints, clears, timers, doc, nodes,
+    echoes, paints, clears, uiOps, timers, doc, nodes,
     setSel: v => { sel = v; },
     setChatSig: v => { chatSig = v; },
     setLastTurns: v => { lastTurns = v; },
@@ -528,6 +530,70 @@ test("per-node draft persistence on input and restore on select", () => {
   // n1 draft untouched
   assert.equal(ctx.storage.getItem("scimux-draft:n1"), "typed now");
   ctx.feature.destroy();
+});
+
+test("pending Send-to cancels only after the empty destination is left", () => {
+  const key = "scimux-sendto-pending:n1";
+  const pending = JSON.stringify([{ node: "source", turnTime: "t", text: "source text" }]);
+  const hold = makeFeature({ drafts: { [key]: pending, "scimux-draft:n1": "edited draft" } });
+  hold.feature.onSelect();
+  hold.setSel("n2");
+  hold.feature.onSelect();
+  assert.equal(hold.storage.getItem(key), pending, "nonempty draft holds across navigation");
+
+  const cancel = makeFeature({ drafts: { [key]: pending, "scimux-draft:n1": "" } });
+  cancel.feature.onSelect();
+  assert.equal(cancel.storage.getItem(key), pending, "clear alone still holds while open");
+  cancel.setSel("n2");
+  cancel.feature.onSelect();
+  assert.equal(cancel.storage.getItem(key), null, "empty plus leave cancels");
+
+  const inFlight = makeFeature({ drafts: {
+    [key]: pending,
+    "scimux-draft:n1": "",
+    "scimux-sendto-awaiting:n1": "forwarded",
+  } });
+  inFlight.feature.onSelect();
+  inFlight.setSel("n2");
+  inFlight.feature.onSelect();
+  assert.equal(inFlight.storage.getItem(key), pending,
+    "a deferred initial prompt holds while its transcript turn is pending");
+});
+
+test("successful edited Send-to creates a permanent link; failure keeps it pending", async () => {
+  const key = "scimux-sendto-pending:n1";
+  const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "source text" };
+  const success = makeFeature({ drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" } });
+  success.feature.onSelect();
+  success.roots.prompt.innerText = "edited before send";
+  await success.feature.sendPrompt();
+  assert.equal(success.storage.getItem(key), null);
+  assert.equal(success.uiOps.length, 1);
+  assert.equal(success.uiOps[0].k, "forward-link-add");
+  assert.equal(success.uiOps[0].link.destination.node, "n1");
+  assert.equal(success.uiOps[0].link.destination.text, "edited before send");
+
+  const failed = makeFeature({
+    drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" },
+    sendHandler: async () => { throw new Error("offline"); },
+  });
+  failed.feature.onSelect();
+  await failed.feature.sendPrompt();
+  assert.equal(failed.uiOps.length, 0);
+  assert.deepEqual(JSON.parse(failed.storage.getItem(key)), [source]);
+});
+
+test("unconfirmed Send-to remains pending and has no marker", async () => {
+  const key = "scimux-sendto-pending:n1";
+  const source = { node: "source", turnTime: "t", text: "source" };
+  const ctx = makeFeature({
+    drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" },
+    sendHandler: async () => ({ status: "unconfirmed" }),
+  });
+  ctx.feature.onSelect();
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.uiOps.length, 0);
+  assert.deepEqual(JSON.parse(ctx.storage.getItem(key)), [source]);
 });
 
 test("busy/closed edge-only DOM changes", () => {

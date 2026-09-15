@@ -80,6 +80,11 @@
 import { esc as escDefault } from "./format.js";
 import { stopsOf as stopsOfDefault, stopLabel as stopLabelDefault } from "./lanes.js";
 import { focusAtEnd } from "./caret.js";
+import {
+  writePendingForwards,
+  writeAwaitingForward,
+  makeForwardLink,
+} from "./storage.js";
 
 /* ---------- public constants ---------- */
 
@@ -380,6 +385,7 @@ export function createSheetsFeature(deps = {}){
   let ncMuseInherit = false;
   let ncEdit = "";
   let ncEditStop = "";
+  let ncForwardSources = [];
   let newActivitySubmitting = false;
   let bound = false;
   let probed = false;
@@ -458,6 +464,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function closeSheets(){
+    ncForwardSources = [];
     const backdrop = root("backdrop");
     if (backdrop && backdrop.classList) backdrop.classList.remove("on");
     else if (backdrop)
@@ -696,6 +703,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function forkFromTurn(text, parent){
+    ncForwardSources = [];
     const sel = typeof d.sel === "function" ? d.sel() : "";
     ncParent = parent || sel;
     ncMuseInherit = !!(nodeById(ncParent) && nodeById(ncParent).agent === "muse");
@@ -712,6 +720,7 @@ export function createSheetsFeature(deps = {}){
   function forkFromStation(id){
     const n = nodeById(id);
     if (!n) return;
+    ncForwardSources = [];
     ncEdit = ""; ncEditStop = "";
     ncParent = id;
     ncMuseInherit = n.agent === "muse";
@@ -729,6 +738,7 @@ export function createSheetsFeature(deps = {}){
   function openActivityEditor(id, stopTime){
     const n = nodeById(id);
     if (!n) return;
+    ncForwardSources = [];
     ncEdit = id;
     ncEditStop = stopTime || "";
     ncParent = "";
@@ -754,7 +764,8 @@ export function createSheetsFeature(deps = {}){
   /* prompt/focusTitle serve Send-to "Start new chat…" (bookmarks openNewActivity
      dep). Defaults keep plain "+" identical. Never bind this bare as a click
      listener — the Event would be destructured as options; use () => openNewActivity(). */
-  function openNewActivity({ prompt = "", focusTitle = false } = {}){
+  function openNewActivity({ prompt = "", focusTitle = false, forwardSources = [] } = {}){
+    ncForwardSources = Array.isArray(forwardSources) ? forwardSources.slice() : [];
     ncParent = ""; ncRationale = ""; ncEdit = ""; ncEditStop = "";
     ncMuseInherit = false;
     resetCreateChrome();
@@ -899,16 +910,32 @@ export function createSheetsFeature(deps = {}){
         ? await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) })
         : { id: "new" };
       const echoLaunchPrompt = !(n && (n.initial_delivery === "not_sent"));
+      const deferredForward = n &&
+        (n.initial_delivery === "pending" || n.initial_delivery === "unconfirmed");
       if (n && n.id && !echoLaunchPrompt){
         /* Cross-feature storage contract with composer.js, kept as a literal
            here so sheets does not import a later feature module. The server
            already created this exact node; select it and preserve recovery
            rather than leaving Start able to create a duplicate node. */
         if (storage) storage.setItem("scimux-draft:" + n.id, payload.prompt);
+        if (payload.prompt && ncForwardSources.length)
+          writePendingForwards(storage, n.id, ncForwardSources);
         if (typeof d.alert === "function") d.alert(
           n.initial_error ||
           "Claude did not start. The initial prompt was not delivered and has been restored as a draft."
         );
+      }
+      if (n && n.id && deferredForward && payload.prompt && ncForwardSources.length){
+        writePendingForwards(storage, n.id, ncForwardSources);
+        writeAwaitingForward(storage, n.id, payload.prompt);
+      }
+      if (n && n.id && echoLaunchPrompt && !deferredForward && payload.prompt && ncForwardSources.length &&
+          typeof d.uiMutate === "function"){
+        const sentAt = new Date(nowFn()).toISOString();
+        ncForwardSources.forEach(source => d.uiMutate({
+          k: "forward-link-add",
+          link: makeForwardLink(source, n.id, payload.prompt, sentAt),
+        }));
       }
       if (laneChoice.lane && typeof d.uiMutate === "function"){
         const list = typeof d.laneList === "function" ? d.laneList() : [];
@@ -917,6 +944,7 @@ export function createSheetsFeature(deps = {}){
       setLastDir(storage, payload.dir);
       if (promptEl) promptEl.value = "";
       if (titleEl) titleEl.value = "";
+      ncForwardSources = [];
       closeSheets();
       if (typeof d.invalidateStateEtag === "function") d.invalidateStateEtag();
       if (typeof d.tick === "function") await d.tick();

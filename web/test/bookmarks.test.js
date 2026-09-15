@@ -1294,6 +1294,28 @@ test("openSendTo sets the sheet title per caller and merges into the target draf
   assert.equal(roots.chatPrompt._focused, true);
 });
 
+test("openSendTo carries source intent into existing and new-chat destinations", () => {
+  const source = { node: "self", uid: "u1", segment: 2, record: 7, turnTime: "t", text: "original" };
+  const seeded = [];
+  const ctx = createFeature({
+    nodes: sendtoNodes,
+    deps: { openNewActivity: opts => seeded.push(opts) },
+  });
+  ctx.feature.openSendTo({ text: "forwarded", exceptId: "self", source });
+  const target = el("button", { dataset: { fwd: "ok" } });
+  target.dataset.fwd = "ok";
+  target.closest = sel => sel === "[data-fwd]" ? target : null;
+  ctx.roots.sendtoList.onclick({ target });
+  assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-pending:ok")), [source]);
+
+  ctx.feature.openSendTo({ text: "forwarded", exceptId: "self", source });
+  const fresh = el("button", { dataset: { newchat: "" } });
+  fresh.dataset.newchat = "";
+  fresh.closest = sel => sel === "[data-newchat]" ? fresh : null;
+  ctx.roots.sendtoList.onclick({ target: fresh });
+  assert.deepEqual(seeded[0].forwardSources, [source]);
+});
+
 test("openSendTo with no live targets still offers Start new chat… (P4)", () => {
   /* Replaces the pre-P4 dead-end message; case 2 is the full pin. */
   const ctx = createFeature({ nodes: { dead: sendtoNodes.dead }, pinned: [] });

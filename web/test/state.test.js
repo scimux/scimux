@@ -180,9 +180,10 @@ test("normUI: returns a new outer object each call (not the input)", () => {
 });
 
 /* ---------- idempotentOp ---------- */
-test("idempotentOp: only bookmark-add and bookmark-del", () => {
+test("idempotentOp includes append-only forward links", () => {
   assert.equal(idempotentOp({ k: "bookmark-add" }), true);
   assert.equal(idempotentOp({ k: "bookmark-del" }), true);
+  assert.equal(idempotentOp({ k: "forward-link-add" }), true);
   for (const k of [
     "arch",
     "unarch",
@@ -196,6 +197,14 @@ test("idempotentOp: only bookmark-add and bookmark-del", () => {
   ]) {
     assert.equal(idempotentOp({ k }), false, k);
   }
+});
+
+test("forward-link-add appends once by id", () => {
+  const doc = freshDoc();
+  const link = { id: "source>dest:time", source: { node: "source" }, destination: { node: "dest" } };
+  applyOp(doc, { k: "forward-link-add", link });
+  applyOp(doc, { k: "forward-link-add", link: { ...link } });
+  assert.deepEqual(doc.forward_links, [link]);
 });
 
 /* ---------- applyOp mutation model helpers ---------- */

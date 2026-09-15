@@ -85,3 +85,86 @@ export function createStorage(raw){
     },
   };
 }
+
+/* Send-to provenance follows draft lifetime: source intents stay device-local
+ * until the destination send succeeds, then callers append shared UI links. */
+export const PENDING_FORWARD_PREFIX = "scimux-sendto-pending:";
+export const AWAITING_FORWARD_PREFIX = "scimux-sendto-awaiting:";
+
+export function pendingForwardKey(nodeId){
+  return PENDING_FORWARD_PREFIX + (nodeId || "");
+}
+
+export function awaitingForwardKey(nodeId){
+  return AWAITING_FORWARD_PREFIX + (nodeId || "");
+}
+
+export function sourceAddressKey(source = {}){
+  if (source.uid)
+    return `u:${source.uid}:${Number(source.segment) || 0}:${Number(source.record) || 0}`;
+  return `n:${source.node || ""}:${source.turnTime || ""}`;
+}
+
+export function readPendingForwards(storage, nodeId){
+  try {
+    const value = JSON.parse(storage && storage.getItem(pendingForwardKey(nodeId)) || "[]");
+    return Array.isArray(value) ? value.filter(x => x && typeof x === "object") : [];
+  } catch { return []; }
+}
+
+export function writePendingForwards(storage, nodeId, sources){
+  const list = Array.isArray(sources) ? sources : [];
+  try {
+    if (!list.length) storage && storage.removeItem(pendingForwardKey(nodeId));
+    else storage && storage.setItem(pendingForwardKey(nodeId), JSON.stringify(list));
+  } catch { /* a refused local cache must not block Send-to */ }
+  return list;
+}
+
+export function addPendingForward(storage, nodeId, source){
+  if (!source || (!source.uid && !source.node)) return readPendingForwards(storage, nodeId);
+  const list = readPendingForwards(storage, nodeId);
+  const key = sourceAddressKey(source);
+  if (!list.some(item => sourceAddressKey(item) === key)) list.push(source);
+  return writePendingForwards(storage, nodeId, list);
+}
+
+export function clearPendingForwards(storage, nodeId){
+  return writePendingForwards(storage, nodeId, []);
+}
+
+export function writeAwaitingForward(storage, nodeId, text){
+  try { storage && storage.setItem(awaitingForwardKey(nodeId), String(text || "")); }
+  catch { /* same best-effort draft cache contract */ }
+}
+
+export function readAwaitingForward(storage, nodeId){
+  try { return storage && storage.getItem(awaitingForwardKey(nodeId)) || ""; }
+  catch { return ""; }
+}
+
+export function clearAwaitingForward(storage, nodeId){
+  try { storage && storage.removeItem(awaitingForwardKey(nodeId)); }
+  catch { /* same best-effort draft cache contract */ }
+}
+
+export function makeForwardLink(source, destinationNode, sentText, sentAt){
+  const when = sentAt || new Date().toISOString();
+  return {
+    id: `${sourceAddressKey(source)}>${destinationNode || ""}:${when}`,
+    source: { ...(source || {}) },
+    destination: { node: destinationNode || "", turnTime: when, text: sentText || "" },
+    sent_at: when,
+  };
+}
+
+export function makeForwardLinkToTurn(source, destinationNode, turn = {}){
+  const link = makeForwardLink(source, destinationNode, turn.text || "", turn.time || undefined);
+  link.destination = {
+    node: destinationNode || "", text: turn.text || "", turnTime: turn.time || "",
+    ...(turn.uid ? {
+      uid: turn.uid, segment: Number(turn.segment) || 0, record: Number(turn.record) || 0,
+    } : {}),
+  };
+  return link;
+}

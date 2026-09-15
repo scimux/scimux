@@ -113,6 +113,7 @@ import {
 import { hashStr as hashStrDefault } from "./lanes.js";
 import { sendableNodes } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import { addPendingForward } from "./storage.js";
 import {
   createPopoverMenu,
   menuButtonHTML,
@@ -773,6 +774,10 @@ export function createBookmarksFeature(deps){
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
           role: nt.role || "",
+          source: (nt.node || nt.uid) ? {
+            node: nt.node || "", turnTime: nt.turnTime || "",
+            ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),
+          } : null,
         });
         return;
       }
@@ -890,7 +895,7 @@ export function createBookmarksFeature(deps){
     if (typeof d.openSheet === "function") d.openSheet("#sendto");
   }
 
-  function openSendTo({ text = "", exceptId = "", title = "", role = "" } = {}){
+  function openSendTo({ text = "", exceptId = "", title = "", role = "", source = null } = {}){
     /* Disclose once, here, rather than at each of the four callers: the two
        branches below (seed a new chat, merge into a live draft) both carry the
        text onward, and a caller that forgot would fail silently. */
@@ -933,7 +938,7 @@ export function createBookmarksFeature(deps){
       if (startNew){
         if (typeof d.closeSheets === "function") d.closeSheets();
         if (typeof d.openNewActivity === "function")
-          d.openNewActivity({ prompt: body, focusTitle: true });
+          d.openNewActivity({ prompt: body, focusTitle: true, forwardSources: source ? [source] : [] });
         if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
           d.setLevel(1);
         return;
@@ -944,6 +949,7 @@ export function createBookmarksFeature(deps){
       const prev = (storage && storage.getItem(DRAFT_KEY_PREFIX + tgt)) || "";
       if (storage)
         storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, body));
+      if (source) addPendingForward(storage, tgt, source);
       if (typeof d.closeSheets === "function") d.closeSheets();
       if (typeof d.select === "function") d.select(tgt);
       if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
