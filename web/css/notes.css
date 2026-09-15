@@ -562,6 +562,10 @@ body.bookmarks-open #bookmarkpeek { display: block; }
       transparent 0 var(--tearhole), var(--perf) var(--tearhole) calc(var(--tearhole) + 1px),
       transparent calc(var(--tearhole) + 1px));
 }
+.wsref.jump-target, .wssec.jump-target, .bookmark.jump-target {
+  outline: 2px solid color-mix(in srgb, var(--work) 70%, transparent);
+  outline-offset: 2px;
+}
 /* --- placement mode: floating pill + per-section "add bookmark here" target ---
    This was a full-bleed tinted strip that pushed the layout down and read as a
    warning banner (UI review item 10). It cannot simply be deleted: HIG requires

@@ -115,6 +115,15 @@ body.cards-open #msgs { overflow: hidden; }
 .turn.echo .bubble { opacity: .55; }
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
+.bubblemarkers { display: flex; align-items: center; gap: 3px; margin: -5px 0 4px -6px; }
+.bmarker { position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; border-radius: 14px; color: currentColor;
+  background: color-mix(in srgb, currentColor 10%, transparent); opacity: .72; }
+.bmarker:active { opacity: 1; }
+.bmarkercount { position: absolute; inset: -3px -5px auto auto; min-width: 14px; height: 14px;
+  padding: 0 3px; border-radius: 7px; background: var(--ink); color: var(--bg);
+  font-size: 9px; line-height: 14px; font-weight: 700; text-align: center; }
+.turn.user .bmarkercount { background: #fff; color: var(--work); }
 .pending { padding: 6px 10px; color: var(--dim); font-style: italic; font-size: 14px; }
 .pending.chaterr { color: var(--bad); font-style: normal; user-select: text; }
 .pending.chatnotice { font-style: normal; user-select: text; }

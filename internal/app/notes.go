@@ -33,10 +33,26 @@ type noteSummary struct {
 	Lanes        []string `json:"lanes"`
 }
 
+// noteUsage is the reverse index row needed by chat bubble markers. It omits
+// note bodies and frozen snapshots: those are fetched only after the user
+// chooses a destination.
+type noteUsage struct {
+	NoteID       string           `json:"note_id"`
+	NoteTitle    string           `json:"note_title"`
+	SectionID    string           `json:"section_id"`
+	SectionTitle string           `json:"section_title"`
+	ReferenceID  string           `json:"reference_id"`
+	Source       notestore.Source `json:"source"`
+}
+
 func (a *app) handleNoteList(w http.ResponseWriter, r *http.Request) {
 	list, err := a.notes.List()
 	if err != nil {
 		http.Error(w, "list notes: "+err.Error(), 500)
+		return
+	}
+	if r.URL.Query().Get("usages") == "1" {
+		writeJSON(w, map[string]any{"usages": projectNoteUsages(list)})
 		return
 	}
 	out := make([]noteSummary, 0, len(list))
@@ -44,6 +60,35 @@ func (a *app) handleNoteList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, summarize(sh))
 	}
 	writeJSON(w, map[string]any{"notes": out})
+}
+
+func projectNoteUsages(list []notestore.Note) []noteUsage {
+	out := []noteUsage{}
+	seen := map[string]bool{}
+	for _, sh := range list {
+		for _, sec := range sh.Sections {
+			for _, ref := range sec.References {
+				key := sh.ID + "\x00" + sec.ID + "\x00" + noteSourceKey(ref)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, noteUsage{
+					NoteID: sh.ID, NoteTitle: sh.Title,
+					SectionID: sec.ID, SectionTitle: sec.Title,
+					ReferenceID: ref.ID, Source: ref.Source,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func noteSourceKey(ref notestore.Reference) string {
+	if ref.Source.UID != "" {
+		return fmt.Sprintf("u\x00%s\x00%d\x00%d", ref.Source.UID, ref.Source.Segment, ref.Source.Record)
+	}
+	return "n\x00" + ref.Source.Node + "\x00" + ref.Source.TurnTime + "\x00" + ref.Snapshot.Text
 }
 
 // summarize projects a full note to its sparse card row. Represented lane

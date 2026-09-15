@@ -622,6 +622,28 @@ export function createBookmarksFeature(deps){
     if (typeof d.restartWorkPulse === "function") d.restartWorkPulse();
   }
 
+  function openBookmark(t){
+    const all = bookmarks();
+    const target = all.find(nt => nt.t === t);
+    if (!target) return false;
+    const byT = {};
+    all.forEach(nt => { byT[nt.t] = nt; });
+    bookmarkTab = bookmarkLaneId(target, byT, nodeById) || "GENERAL";
+    setStorage(STORAGE_KEY_TAB, bookmarkTab);
+    openBookmarkT = t;
+    setOpen(true);
+    setTimeoutFn(() => {
+      const list = roots.bookmarklist;
+      const selector = `.bookmark[data-t="${CSSObj.escape(t)}"]`;
+      const el = list && typeof list.querySelector === "function" ? list.querySelector(selector) : null;
+      if (!el) return;
+      if (el.classList) el.classList.add("jump-target");
+      if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", behavior: "smooth" });
+      setTimeoutFn(() => { if (el.classList) el.classList.remove("jump-target"); }, 1400);
+    }, 0);
+    return true;
+  }
+
   /* jumpToChatAddress — the one resolver behind both a note's "jump to" and an
      embedded reference's "jump to chat". Leaving any full-screen overlay is
      part of the jump — the destination must show. */
@@ -845,6 +867,29 @@ export function createBookmarksFeature(deps){
   /* The one send-to dialogue. Both entry points — a chat bubble's "send to…"
      and a bookmark long-press — land here, so the target filter and order can
      never drift apart between them. Only the sheet title differs. */
+  function openChoiceList({ title = "Choose…", choices = [], onChoose } = {}){
+    const listEl = d.sendtoList || (doc && doc.querySelector && doc.querySelector("#sendto_list"));
+    if (!listEl) return;
+    const titleEl = d.sendtoTitle || (doc && doc.querySelector && doc.querySelector("#sendto_title"));
+    if (titleEl) titleEl.textContent = title;
+    listEl.innerHTML = choices.map((choice, i) =>
+      `<button type="button" class="pos-item" data-choice="${i}" style="width:100%;text-align:left">${esc(choice.label || "Destination")}</button>`
+    ).join("");
+    if (sendtoListWithHandler && sendtoListWithHandler !== listEl &&
+        sendtoListWithHandler.onclick === sendtoClickHandler)
+      sendtoListWithHandler.onclick = null;
+    sendtoClickHandler = ev => {
+      const button = ev.target.closest && ev.target.closest("[data-choice]");
+      if (!button) return;
+      const choice = choices[Number(button.dataset.choice)];
+      if (typeof d.closeSheets === "function") d.closeSheets();
+      if (choice && typeof onChoose === "function") onChoose(choice);
+    };
+    listEl.onclick = sendtoClickHandler;
+    sendtoListWithHandler = listEl;
+    if (typeof d.openSheet === "function") d.openSheet("#sendto");
+  }
+
   function openSendTo({ text = "", exceptId = "", title = "", role = "" } = {}){
     /* Disclose once, here, rather than at each of the four callers: the two
        branches below (seed a new chat, merge into a live draft) both carry the
@@ -1042,6 +1087,8 @@ export function createBookmarksFeature(deps){
     pinBottom,
     setBackLabel,
     jumpToChatAddress,
+    openBookmark,
+    openChoiceList,
     openSendTo,
     setBookmarkAnchor,
     addManualBookmark,

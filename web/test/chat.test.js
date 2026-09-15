@@ -97,6 +97,37 @@ test("timing constants match live contracts", () => {
   assert.ok(ASSET_REF_RE.test("![x](scimux-asset:abc)"));
 });
 
+test("bookmark marker resolves durable turns and collapses duplicate section usages", () => {
+  const turn = { uid: "u1", segment: 2, record: 7, time: "now", text: "answer" };
+  const bookmark = { t: "b1", uid: "u1", segment: 2, record: 7, node: "lane-a", text: "answer" };
+  const usages = [
+    { note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings", reference_id: "r1", source: { uid: "u1", segment: 2, record: 7 } },
+    { note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings", reference_id: "r2", source: { uid: "u1", segment: 2, record: 7 } },
+    { note_id: "n1", note_title: "Research", section_id: "s2", section_title: "Risks", reference_id: "r3", source: { uid: "u1", segment: 2, record: 7 } },
+  ];
+  const model = chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], usages);
+  assert.equal(model.bookmark, bookmark);
+  assert.deepEqual(model.destinations.map(x => x.section_id), ["s1", "s2"]);
+});
+
+test("bookmark marker supports legacy node/time/text bookmarks and hides when deleted", () => {
+  const turn = { time: "2026-09-15T12:00:00Z", text: "legacy" };
+  const bookmark = { t: "b1", node: "lane-a", turnTime: turn.time, text: turn.text };
+  const usage = { note_id: "n1", section_id: "s1", reference_id: "r1", source: { node: "lane-a", turnTime: turn.time } };
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], [usage]).destinations.length, 1);
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [], [usage]), null);
+});
+
+test("bookmark marker HTML is compact and only counts multiple destinations", () => {
+  const one = chatmod.bubbleMarkersHTML({ bookmark: { t: "b1" }, bookmarkDestinations: [{}] }, { iconBookmark: "BOOK" });
+  const two = chatmod.bubbleMarkersHTML({ bookmark: { t: "b1" }, bookmarkDestinations: [{}, {}] }, { iconBookmark: "BOOK" });
+  assert.match(one, /data-bmarker="bookmark"/);
+  assert.match(one, /BOOK/);
+  assert.doesNotMatch(one, /bmarkercount/);
+  assert.match(two, /bmarkercount[^>]*>2</);
+  assert.equal(chatmod.bubbleMarkersHTML({}, { iconBookmark: "BOOK" }), "");
+});
+
 test("attention evidence key changes only with kind or fresh evidence epoch", () => {
   assert.equal(chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123 }), "inspect:123");
   assert.equal(chatmod.attentionEvidenceKey({ attention: "inspect", attention_at: 123, live: "active" }), "inspect:123");

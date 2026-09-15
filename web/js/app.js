@@ -339,6 +339,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     <path d="M3 12h12"/>
     <path d="M11 8l4 4-4 4"/>
   </svg>`;
+  const ICON_BOOKMARK = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M6 3.5A2.5 2.5 0 0 1 8.5 1h7A2.5 2.5 0 0 1 18 3.5V23l-6-4-6 4V3.5Z"/>
+  </svg>`;
   /* branch glyph: fa-regular fa-code-branch (exact FA 7.3.1 path), inlined
      like the copy icon. Used by the fork action, unrotated. */
   const ICON_BRANCH = `<svg width="15" height="15" viewBox="0 0 640 640" fill="currentColor" aria-hidden="true">
@@ -819,16 +822,20 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     agentLogo,
     icons: {
       ICON_TERM, ICON_CHECK, ICON_CHEV_UP, ICON_CHEV_DOWN,
-      ICON_BRANCH, ICON_INTO, ICON_COPY, ICON_DOWNALL, ICON_FILE,
+      ICON_BRANCH, ICON_INTO, ICON_BOOKMARK, ICON_COPY, ICON_DOWNALL, ICON_FILE,
       ICON_TOGGLE_OFF, ICON_TOGGLE_ON, ICON_WARN,
     },
     bookmarks: () => getUI().bookmarks,
+    noteUsages: () => notesFeature ? notesFeature.usages() : [],
     uiMutate,
     stampAddress: (b, t) => stampAddressMod(b, t),
     copyText: s => copyText(s),
     forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
     /* bookmarks owns #sendto; the bubble action reuses that one dialogue */
     openSendTo: opts => bookmarksFeature.openSendTo(opts),
+    openBookmark: t => bookmarksFeature.openBookmark(t),
+    openChoiceList: opts => bookmarksFeature.openChoiceList(opts),
+    openNoteUsage: usage => notesFeature.openAt(usage),
     setComposerBusy: v => composerFeature.setComposerBusy(v),
     setComposerClosed: v => composerFeature.setComposerClosed(v),
     setAttachAvail: v => composerFeature.setAttachAvail(v),
@@ -1021,6 +1028,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     copyText: s => copyText(s),
     /* bookmarks owns #sendto; inbox + reference bars reuse the one dialogue */
     openSendTo: opts => bookmarksFeature.openSendTo(opts),
+    onUsagesChange: () => chatFeature.invalidate(),
     onVisibilityChange: () => { bookmarksFeature.invalidate(); renderBookmarksPane(); },
     jumpToChatAddress: a => {
       setReturnContext(RETURN_NOTE, { title: notesFeature.activeTitle() });

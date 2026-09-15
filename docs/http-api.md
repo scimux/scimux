@@ -664,6 +664,13 @@ Sparse list of notes — enough to render cards, never section bodies:
 documents whose embedded `id` differs from the folder name are skipped
 defensively (they do not fail the whole list).
 
+With `?usages=1`, the same route returns a sparse reverse index for chat
+markers instead: `{"usages":[{"note_id","note_title","section_id",
+"section_title","reference_id","source"}]}`. Repeated references to the same
+source in one section collapse to one row. Section bodies and frozen reference
+snapshots are never included; the browser fetches the chosen full note only
+after the user opens a destination.
+
 ### `POST /api/notes`
 
 Create a note: server-minted id, auto title (`YYYY-MM-DD HH:MM`), a single

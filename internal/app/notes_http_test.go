@@ -120,6 +120,54 @@ func TestNoteListSparse(t *testing.T) {
 	}
 }
 
+func TestNoteListUsagesIsSparseAndCollapsesSectionDuplicates(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	sh := createNote(t, a)
+	sh.Title = "Research"
+	second := sh.AddSection("Risks")
+	if err := a.notes.Save(sh); err != nil {
+		t.Fatal(err)
+	}
+	source := `"source":{"uid":"u1","segment":2,"record":7,"node":"lane-a","turnTime":"2026-07-28T10:00:00Z"}`
+	ref := `{` + source + `,"snapshot":{"lane":"#c0392b","text":"secret snapshot"}}`
+	for _, sectionID := range []string{sh.Sections[0].ID, sh.Sections[0].ID, second.ID} {
+		if rec := addReference(a, sh.ID, sectionID, ref); rec.Code != 200 {
+			t.Fatalf("add reference: code = %d, body %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	a.handleNoteList(rec, httptest.NewRequest("GET", "/api/notes?usages=1", nil))
+	if rec.Code != 200 {
+		t.Fatalf("list usages: code = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "secret snapshot") {
+		t.Fatal("usage index leaked a reference snapshot")
+	}
+	var resp struct {
+		Usages []struct {
+			NoteID       string           `json:"note_id"`
+			NoteTitle    string           `json:"note_title"`
+			SectionID    string           `json:"section_id"`
+			SectionTitle string           `json:"section_title"`
+			ReferenceID  string           `json:"reference_id"`
+			Source       notestore.Source `json:"source"`
+		} `json:"usages"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Usages) != 2 {
+		t.Fatalf("usages = %d, want one per section: %s", len(resp.Usages), rec.Body.String())
+	}
+	for _, usage := range resp.Usages {
+		if usage.NoteID != sh.ID || usage.NoteTitle != "Research" || usage.ReferenceID == "" ||
+			usage.Source.UID != "u1" || usage.Source.Segment != 2 || usage.Source.Record != 7 {
+			t.Errorf("bad usage projection: %+v", usage)
+		}
+	}
+}
+
 // PATCH renames a note, adds a section, and edits section fields.
 func TestNotePatchTitleAndSections(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})

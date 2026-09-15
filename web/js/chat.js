@@ -261,11 +261,57 @@ export function buildChatSignature(parts){
     p.histKey || "",
     p.turnsHash || "",
     p.turnAttrHash || "",
+    p.markerHash || "",
     p.decisionsHash || "",
     p.expanded ? "1" : "0",
     p.compacting ? "1" : "0",
     p.elicitationKey || "",
   ].join("|");
+}
+
+function durableSourceKey(value = {}){
+  return value.uid
+    ? `u\u0000${value.uid}\u0000${Number(value.segment) || 0}\u0000${Number(value.record) || 0}`
+    : "";
+}
+
+function legacySourceMatches(turn, nodeId, value = {}){
+  return !durableSourceKey(value) && value.node === nodeId &&
+    value.turnTime === (turn.time || "") &&
+    (!Object.prototype.hasOwnProperty.call(value, "text") || value.text === (turn.text || ""));
+}
+
+export function bookmarkMarkerModel(turn, nodeId, bookmarks = [], usages = []){
+  const key = durableSourceKey(turn);
+  const bookmark = bookmarks.find(b =>
+    (key && durableSourceKey(b) === key) || legacySourceMatches(turn, nodeId, b));
+  if (!bookmark) return null;
+  const bookmarkKey = durableSourceKey(bookmark);
+  const seen = new Set();
+  const destinations = usages.filter(u => {
+    const source = (u && u.source) || {};
+    return (bookmarkKey && durableSourceKey(source) === bookmarkKey) ||
+      (!bookmarkKey && source.node === bookmark.node && source.turnTime === bookmark.turnTime);
+  }).filter(u => {
+    const k = `${u.note_id || ""}\u0000${u.section_id || ""}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { bookmark, destinations };
+}
+
+export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
+  const buttons = [];
+  if (model.bookmark){
+    const n = (model.bookmarkDestinations || model.destinations || []).length;
+    buttons.push(`<button type="button" class="bmarker" data-bmarker="bookmark" aria-label="${n ? "Open bookmark destination" : "Open bookmark"}"${n > 1 ? ` aria-haspopup="menu"` : ""}>${iconBookmark}${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
+  }
+  if (model.sentTo && model.sentTo.length){
+    const n = model.sentTo.length;
+    buttons.push(`<button type="button" class="bmarker" data-bmarker="sendto" aria-label="Open sent-to destination"><span class="rot180">${iconInto}</span>${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
+  }
+  return buttons.length ? `<div class="bubblemarkers">${buttons.join("")}</div>` : "";
 }
 
 /* Agent and provenance are not part of hashTurns (role+text only). Include
@@ -1277,6 +1323,11 @@ export function createChatFeature(deps){
 
   function renderTurnHTML(t, { bk, hist = false, nodeId, assets } = {}){
     const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
+    const marker = bookmarkMarkerModel(t, nodeId, g("bookmarks", []), g("noteUsages", []));
+    const markers = marker ? bubbleMarkersHTML(marker, {
+      iconBookmark: icons.ICON_BOOKMARK || "",
+      iconInto: icons.ICON_INTO || "",
+    }) : "";
     bubbleTurns[bk] = t;
     const cls = turnRoleClass(t.role, { hist, media: !!(a.html && !a.clean) });
     const dataAttrs = hist
@@ -1284,7 +1335,7 @@ export function createChatFeature(deps){
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markdown(a.clean)}${a.html}</div>
+        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${markdown(a.clean)}${a.html}</div>
       </div>`;
   }
 
@@ -1858,6 +1909,10 @@ export function createChatFeature(deps){
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hashTurns(turns),
       turnAttrHash: hashTurnAttrs(turns, hash),
+      markerHash: hash(JSON.stringify({
+        bookmarks: g("bookmarks", []),
+        noteUsages: g("noteUsages", []),
+      })),
       decisionsHash: decisionsHash(liveDecisions) +
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
@@ -2189,6 +2244,31 @@ export function createChatFeature(deps){
       if (sel) loadHistory(sel, "seam");
       return;
     }
+    const marker = e.target.closest && e.target.closest("[data-bmarker]");
+    if (marker){
+      const turnEl = marker.closest && marker.closest(".turn");
+      const turn = turnEl && turnEl.dataset ? bubbleTurns[turnEl.dataset.bk] : null;
+      const model = turn && bookmarkMarkerModel(
+        turn, g("sel", ""), g("bookmarks", []), g("noteUsages", []));
+      if (!model) return;
+      if (marker.dataset.bmarker === "bookmark"){
+        if (!model.destinations.length){
+          if (typeof d.openBookmark === "function") d.openBookmark(model.bookmark.t);
+        } else if (model.destinations.length === 1){
+          if (typeof d.openNoteUsage === "function") d.openNoteUsage(model.destinations[0]);
+        } else if (typeof d.openChoiceList === "function"){
+          d.openChoiceList({
+            title: "Used in…",
+            choices: model.destinations.map((u, i) => ({
+              id: String(i), label: `${u.note_title || "Note"} › ${u.section_title || "Section"}`,
+              usage: u,
+            })),
+            onChoose: choice => d.openNoteUsage(choice.usage),
+          });
+        }
+      }
+      return;
+    }
     const ba = e.target.closest && e.target.closest("[data-bact]");
     if (ba){
       const turn = bubbleTurns[tappedTurn];
@@ -2225,6 +2305,7 @@ export function createChatFeature(deps){
           }
           if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
           if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark });
+          chatSig = "";
         }
         ba.innerHTML = "&#10003; noted";
         setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700);

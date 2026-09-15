@@ -796,6 +796,7 @@ export function createNotesFeature(deps){
 
   /* ---- view state ---- */
   let wsNotes = [];
+  let wsUsages = [];
   let wsActiveId = null;
   let wsActive = null;
   let wsReturnFocus = null;
@@ -1066,6 +1067,7 @@ export function createNotesFeature(deps){
     wsLayout = readWsLayout();
     applyWsLayout(wsLayout);
     wsLoadCards();
+    loadUsages();
     adoptSharedBookmarkTab();
     renderInbox();
     rAF(() => {
@@ -1163,6 +1165,15 @@ export function createNotesFeature(deps){
     renderCards();
   }
 
+  async function loadUsages(){
+    try {
+      const resp = await api("/api/notes?usages=1");
+      wsUsages = (resp && resp.usages) || [];
+    } catch { wsUsages = []; }
+    if (typeof d.onUsagesChange === "function") d.onUsagesChange();
+    return wsUsages;
+  }
+
   function renderCards(){
     if (wsCardDragging) return;
     const host = root("wscards");
@@ -1193,6 +1204,28 @@ export function createNotesFeature(deps){
     if (back) back.hidden = false;
     renderNote();
     renderCards();
+  }
+
+  async function openAt(usage = {}){
+    if (!usage.note_id) return false;
+    if (!isOpen()) open();
+    await wsSelect(usage.note_id);
+    if (!wsActive || wsActiveId !== usage.note_id) return false;
+    if (usage.section_id) wsSetFold(usage.section_id, false);
+    renderNote();
+    rAF(() => {
+      const sections = root("wssections");
+      if (!sections || typeof sections.querySelector !== "function") return;
+      const ref = usage.reference_id
+        ? sections.querySelector(`.wsref[data-ref="${cssEsc(usage.reference_id)}"]`) : null;
+      const target = ref || sections.querySelector(`.wssec[data-sec="${cssEsc(usage.section_id || "")}"]`);
+      if (!target) return;
+      if (target.classList) target.classList.add("jump-target");
+      if (typeof target.scrollIntoView === "function")
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      setTimeoutFn(() => { if (target.classList) target.classList.remove("jump-target"); }, 1400);
+    });
+    return true;
   }
 
   function renderNote(){
@@ -1333,6 +1366,7 @@ export function createNotesFeature(deps){
       renderNote();
     }
     await wsLoadCards();
+    await loadUsages();
   }
 
   /** In-workspace confirm before archive-delete (no window.confirm — blocked in iOS PWA). */
@@ -1394,6 +1428,7 @@ export function createNotesFeature(deps){
             if (h2) h2.textContent = plan.topBarText;
           }
           if (docu && docu.edited_at && cardRow) cardRow.edited_at = docu.edited_at;
+          loadUsages();
         }
       } catch { toast("Save failed — will retry on next edit"); }
       card.classList.remove("renaming");
@@ -1457,7 +1492,7 @@ export function createNotesFeature(deps){
     if (action === "add"){ await wsAddSection(); return; }
     if (action === "del"){
       const doc = await wsPatch({ section: { id: secId, delete: true } });
-      if (doc){ wsActive = doc; renderNote(); } return;
+      if (doc){ wsActive = doc; renderNote(); loadUsages(); } return;
     }
     if (action === "up" || action === "down"){
       const plan = sectionSwapPlan(secs, secId, action);
@@ -1609,6 +1644,7 @@ export function createNotesFeature(deps){
         } else {
           renderNote();
         }
+        loadUsages();
       },
     });
   }
@@ -1651,6 +1687,7 @@ export function createNotesFeature(deps){
         renderNote();
       }
       toast("Added to " + (docu.title || "note"));
+      loadUsages();
     }
   }
 
@@ -1991,7 +2028,8 @@ export function createNotesFeature(deps){
     // commit:true marks edit completion for optional git versioning; mid-edit
     // debounced autosaves (onSectionsInput) omit it so keystroke saves do not
     // each become a commit. Enter already blurs into this path.
-    wsPatchNow({ section: { id: secId, title: t.value, commit: true } }, "sectitle-" + secId);
+    wsPatchNow({ section: { id: secId, title: t.value, commit: true } }, "sectitle-" + secId)
+      .then(() => loadUsages());
   }
   function onSectionsKeydown(e){
     const t = e.target.closest && e.target.closest("[data-sectitle]");
@@ -2132,6 +2170,7 @@ export function createNotesFeature(deps){
   function bind(){
     if (bound) return;
     bound = true;
+    loadUsages();
     initIcons();
     const ws = root("notesworkspace");
     const zones = root("wszones");
@@ -2198,6 +2237,9 @@ export function createNotesFeature(deps){
     close,
     isOpen,
     activeTitle: () => (wsActive && wsActive.title) || "",
+    usages: () => wsUsages,
+    refreshUsages: loadUsages,
+    openAt,
     startPlacement,
     endPlacement,
     renderInbox,
