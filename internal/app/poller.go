@@ -150,9 +150,11 @@ func (a *app) poll() {
 		prev := a.live[n.ID] // not yet overwritten this tick
 		a.mu.Unlock()
 		state := "exited"
+		pane := ""
 		if sessionSet[n.ID] {
 			cap, err := s.Capture()
 			if err == nil {
+				pane = cap
 				a.mu.Lock()
 				if pc := a.prevCap[n.ID]; cap != pc {
 					a.noteAnim(n.ID, pc, cap)
@@ -197,11 +199,16 @@ func (a *app) poll() {
 			// Strict hooked Claude: the terminal is never opened from quietness,
 			// AX staticness, unresolved calls, missing/stale/unparseable
 			// transcripts, fallback chat, or owing timeouts. Unsupported and
-			// starting Claude nodes are equally forbidden from inspect.
+			// starting Claude nodes are equally forbidden from inspect; the exact
+			// pre-session workspace-trust dialog is the sole starting-state
+			// exception and is exposed as an explicit web decision.
 			// Attention is a proven visible permission dialog (never while
 			// auto-approve remains armed — that case is an inline error) or
 			// a current MCP elicitation, which stays visible even when the
 			// lease is armed because elicitation is never auto-answered.
+			if claudeSup == claudeSupStarting && dialoghint.LooksLikeWorkspaceTrust(pane) {
+				attn, freshAttn = "dialog", true
+			}
 			if claudeSup == claudeSupStrict && claudeDlg.Attn != "" && !claudeArmed {
 				attn, freshAttn = claudeDlg.Attn, true
 			}

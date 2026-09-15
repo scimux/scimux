@@ -1000,11 +1000,11 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 			resp["perm_manual"] = true
 			resp["perm_reason"] = note
 		}
-		if sup == claudeSupStrict && dlg.DialogID != "" {
-			// perm_dialog_id is a server-minted visible-dialog epoch, not a
-			// PermissionRequest id. Action keys come only from a validated
-			// current AX menu. Missing options → manual response + Open
-			// Terminal, never an invented Yes/No/allow-always row.
+		if dlg.DialogID != "" {
+			// perm_dialog_id is a supervisor identity, not a PermissionRequest
+			// id. Action keys come only from a validated current AX menu (or
+			// the exact pre-session trust menu). Missing options → manual
+			// response + Open Terminal, never invented choices.
 			resp["perm_dialog_id"] = dlg.DialogID
 			resp["perm_title"] = dlg.Title
 			resp["perm_tool_kind"] = claudePermToolKind(dlg.Tool)
@@ -1232,7 +1232,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	if n.Agent == "claude" {
 		dlg := a.claudeVisibleDialog(n)
 		// A dialog_id in the body is fail-closed: send nothing unless it is
-		// exactly the live epoch. A missing, retired, or mismatched epoch
+		// exactly the live identity. A missing, retired, or mismatched identity
 		// must never type a digit/Enter into Claude's prompt.
 		if body.DialogID != "" {
 			if dlg.DialogID == "" || body.DialogID != dlg.DialogID {
@@ -1240,7 +1240,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			claudeEpoch = dlg.DialogID
-		} else if a.claudeStrictSupervised(n) && dlg.DialogID != "" {
+		} else if dlg.DialogID != "" {
 			if body.RequestID != "" && body.RequestID == dlg.DialogID {
 				claudeEpoch = dlg.DialogID
 			} else {

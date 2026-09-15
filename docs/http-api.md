@@ -69,9 +69,11 @@ Each entry is the stored node (id, title, prompt, description, rationale,
 lane_id, fork_kind, agent, model, effort, dir, transport, created_at,
 `ended_at`, …) plus the mechanical view: `live` is
 `active | quiet | exited | unavailable`,
-`attention` (when set) is `approval | question | inspect` (Claude never
-uses `inspect` for automatic terminal fallback, and never publishes
-attention while auto-approve is armed), `supervision` is the
+`attention` (when set) is `approval | question | dialog | inspect`; `dialog`
+includes an exact pre-SessionStart Claude workspace-trust prompt, answerable
+through the audited key route. Claude never uses `inspect` for automatic
+terminal fallback, and never publishes tool-permission attention while
+auto-approve is armed. `supervision` is the
 Claude-only contract (`claude_starting` for a current bundle awaiting
 SessionStart, `claude_strict` after acknowledgement, `claude_unsupported`
 for legacy/moved-binary bundles, `claude_failed` for startup or

@@ -28,7 +28,8 @@ startup/hook-health acknowledgement. The undocumented transcript
   pass `--ax-screen-reader` and an `--add-dir` per genuinely additional
   directory (including attachment staging). `--add-dir` does **not** bypass
   Claude workspace trust, and scimux never edits undocumented trust-state
-  files.
+  files. An exact pre-session workspace-trust dialog is instead surfaced as
+  an audited `y`/`n` web decision; generic lettered menus remain inert.
 - Only Claude's default `~/.claude` state root is supported;
   `CLAUDE_CONFIG_DIR` is deliberately not evaluated, and transcript-path
   validation stays anchored under `~/.claude/projects` unless that scope
@@ -113,10 +114,13 @@ without a floor is a silent hang. The neutral window is projected as its own
 `delivery: "delivering"`, never the ordinary `unconfirmed` — which offers a
 resume button and claims the send is unconfirmed, a lie while SessionStart
 has arrived; for the same reason the pending note names delivery rather than
-SessionStart. SessionStart timeout, a diagnosed
-workspace-trust dialog and paste failure are inline errors that restore the
-prompt as the node's draft, never retry and never open the terminal; a
-generic lettered startup dialog is **not** diagnosed as workspace trust.
+SessionStart. SessionStart timeout and paste failure are inline errors that
+restore the prompt as the node's draft and never retry. An exact
+workspace-trust dialog is the exception: it raises `attention:"dialog"`
+immediately, so the user can answer through the ordinary audited remote-key
+route, and extends the SessionStart wait to `claudeDeliveryGiveUp`; expiry
+then becomes the inline error. A generic lettered startup dialog is **not**
+diagnosed as workspace trust and retains the ordinary short timeout.
 
 ## An approval is answered through the hook, never through the pane
 

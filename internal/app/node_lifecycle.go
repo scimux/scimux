@@ -669,13 +669,26 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 	if poll <= 0 {
 		poll = 100 * time.Millisecond
 	}
-	readyDeadline := time.Now().Add(a.claudeReadyTimeout)
+	started := time.Now()
+	readyDeadline := started.Add(a.claudeReadyTimeout)
+	trustDeadline := started.Add(a.claudeDeliveryGiveUp)
+	trustExtended := false
 	for {
 		a.drainClaudeHooks()
 		if a.claudeSessionStartReady(n) {
 			break
 		}
-		if a.claudeReadyTimeout <= 0 || time.Now().After(readyDeadline) {
+		now := time.Now()
+		if a.claudeReadyTimeout <= 0 || now.After(readyDeadline) {
+			if !trustExtended && trustDeadline.After(readyDeadline) &&
+				now.Before(trustDeadline) && a.claudeWorkspaceTrustVisible(n) {
+				// The exact trust prompt is actionable from the web. Keep the
+				// launch gate alive while the user decides; unknown startup
+				// dialogs retain the ordinary short timeout.
+				readyDeadline = trustDeadline
+				trustExtended = true
+				continue
+			}
 			a.recordClaudeLaunchError(n.ID, a.diagnoseClaudeStartFailure(n))
 			return initialNotSent
 		}

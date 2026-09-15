@@ -38,7 +38,7 @@ const (
 	claudeUnsupportedExplain  = "This Claude session is not using scimux's current hook bundle, so chat binding, permission dialogs, and auto-approve are unavailable. Fork or relaunch it from scimux."
 	claudeStartTimeoutExplain = "Claude did not start. SessionStart never arrived, so Remote Control is not ready."
 	claudeStartUnknownExplain = "Claude did not start. SessionStart never arrived. Inspect Claude outside scimux to see why; scimux cannot identify this startup dialog."
-	claudeTrustExplain        = "Claude stopped on a workspace-trust dialog. Trust this directory once in Claude Code outside scimux, then relaunch. scimux does not write Claude trust-state files, and --add-dir does not bypass trust."
+	claudeTrustExplain        = "Claude's workspace-trust prompt expired before it was answered. Relaunch and choose y or n in scimux. scimux does not write Claude trust-state files."
 	claudeDeliveryExplain     = "Claude started, but never logged the first prompt — something on screen may have swallowed it. Open the terminal to check. The prompt has been kept as a draft and was not retried."
 	claudeResumeExplain       = "Claude could not rebind the new transcript. The previous transcript is still attached. Inspect Claude outside scimux, or fork."
 	claudePasteExplain        = "The first prompt could not be pasted into Claude. It has been kept as a draft and was not retried."
@@ -247,6 +247,14 @@ func (a *app) diagnoseClaudeStartFailure(n *Node) string {
 	return claudeStartTimeoutExplain
 }
 
+func (a *app) claudeWorkspaceTrustVisible(n *Node) bool {
+	if n == nil || a.server == nil {
+		return false
+	}
+	visible, err := a.server.Session(n.ID).CaptureVisible()
+	return err == nil && dialoghint.LooksLikeWorkspaceTrust(visible)
+}
+
 // claudeSessionStartReady is the first-prompt paste gate: has this exact
 // launched process delivered a valid SessionStart? A bound transcript proves
 // it. So does a pending one — the CLI writes the transcript file lazily, so an
@@ -314,18 +322,30 @@ func claudeRequestIsQuestion(tool string) bool {
 	return claudeQuestionTools[tool]
 }
 
-// claudeVisibleDialog is the only automatic terminal/attention source for a
-// strict hooked Claude node. Notification(permission_prompt) proves a dialog
-// is visible and mints a server epoch; it does not identify which
-// PermissionRequest is on screen. Question tools raise attention but are not
-// a permission dialog for the forced-terminal rule.
+// claudeVisibleDialog is the only actionable terminal source for an owned
+// Claude node: the exact pre-session trust prompt while starting, or a
+// Notification(permission_prompt) epoch after SessionStart. Neither identity
+// is a Claude PermissionRequest id.
 type claudeVisibleDialog struct {
 	Attn     string
-	DialogID string // server-minted visible-dialog epoch, not a Claude request id
+	DialogID string // supervisor identity, never a Claude request id
 	Title    string
 	Tool     string
 	Question bool
 	Armed    bool
+}
+
+const claudeWorkspaceTrustPrefix = "workspace-trust:"
+
+func claudeWorkspaceTrustRequestID(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	return claudeWorkspaceTrustPrefix + sessionID
+}
+
+func isClaudeWorkspaceTrustRequestID(id string) bool {
+	return strings.HasPrefix(id, claudeWorkspaceTrustPrefix) && len(id) > len(claudeWorkspaceTrustPrefix)
 }
 
 func (a *app) claudeVisibleDialog(n *Node) claudeVisibleDialog {
@@ -338,10 +358,17 @@ func (a *app) claudeVisibleDialog(n *Node) claudeVisibleDialog {
 	armed := a.claudeAutoApproveArmedLocked(n)
 	bundle := ""
 	sid := n.SessionID
+	attn := a.attn[n.ID]
 	if sup == claudeSupStrict {
 		bundle = a.claudePermBundleLocked(n.ID)
 	}
 	a.mu.Unlock()
+	if sup == claudeSupStarting && attn == "dialog" {
+		return claudeVisibleDialog{
+			Attn: "dialog", DialogID: claudeWorkspaceTrustRequestID(sid),
+			Title: "Trust this directory?", Tool: "workspace",
+		}
+	}
 	if sup != claudeSupStrict || bundle == "" {
 		return empty
 	}
@@ -388,9 +415,10 @@ func (a *app) claudeVisibleDialog(n *Node) claudeVisibleDialog {
 }
 
 // claudeDialogOptions returns action keys only from a structurally validated
-// current AX menu. The pane is consulted only after Notification proved a
-// dialog exists (dlg.DialogID). Failure is empty options — the chat shows a
-// manual-response state instead of invented Yes/No buttons.
+// current AX menu. The pane must still show either the exact workspace-trust
+// grammar or the numbered menu paired with a Notification epoch. Failure is
+// empty options — the chat shows a manual-response state instead of invented
+// choices.
 func (a *app) claudeDialogOptions(n *Node, dlg claudeVisibleDialog) []PermOption {
 	if n == nil || dlg.DialogID == "" || a.server == nil {
 		return nil
@@ -398,6 +426,18 @@ func (a *app) claudeDialogOptions(n *Node, dlg claudeVisibleDialog) []PermOption
 	vis, err := a.server.Session(n.ID).CaptureVisible()
 	if err != nil || vis == "" {
 		return nil
+	}
+	a.mu.Lock()
+	trustID := claudeWorkspaceTrustRequestID(n.SessionID)
+	a.mu.Unlock()
+	if dlg.DialogID == trustID {
+		if !dialoghint.LooksLikeWorkspaceTrust(vis) {
+			return nil
+		}
+		return []PermOption{
+			{Key: "y", Name: "Trust directory", Kind: "allow"},
+			{Key: "n", Name: "Cancel launch", Kind: "reject"},
+		}
 	}
 	items, ok := dialoghint.NumberedOptions(vis)
 	if !ok {
