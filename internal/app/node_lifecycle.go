@@ -727,9 +727,9 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 		a.syncClaudeLeaseMarker(n)
 	}
 	g.Unlock()
-	// The first prompt reached the pane: from here the agent owes output, so
-	// this is the watermark the stale-link backstop judges against. Paste
-	// happens exactly once; confirmation failure never retries it.
+	// The first prompt reached the pane. Record when confirmation began so the
+	// reconciler can eventually surface an unconfirmed delivery. Paste happens
+	// exactly once; confirmation failure never retries it.
 	a.noteDelivery(n.ID, pasted)
 	want := canonicalPrompt(n.Prompt)
 	deliveryDeadline := time.Now().Add(a.claudeDeliveryTimeout)

@@ -692,10 +692,9 @@ func TestPollActiveTranscriptProgressRestartsStallWindow(t *testing.T) {
 	}
 }
 
-// TestPollActiveToQuietTriggersRelink: poll itself (not a direct unit call)
-// drains hook events on active→quiet. It must not choose a newest-file
-// transcript; a legacy stale link detaches.
-func TestPollActiveToQuietTriggersRelink(t *testing.T) {
+// TestPollActiveToQuietPreservesClaudeBinding: poll itself (not a direct unit
+// call) must not infer transcript ownership from delivery or pane timing.
+func TestPollActiveToQuietPreservesClaudeBinding(t *testing.T) {
 	f := &fakeTmux{
 		list:    []string{"c1"},
 		alive:   map[string]bool{"c1": true},
@@ -725,9 +724,8 @@ func TestPollActiveToQuietTriggersRelink(t *testing.T) {
 	a.prevCap["c1"] = "static quiet pane"
 	a.lastChg["c1"] = time.Now().Add(-10 * time.Second)
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
-	// An unanswered pasted prompt is what makes the link provably stale; a
-	// bare pane phase proves nothing (the poller's first capture after a
-	// restart manufactures one).
+	// A pasted prompt may remain behind a Claude modal after the pane becomes
+	// quiet. Delivery timing therefore cannot prove transcript ownership moved.
 	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 
 	a.poll()
@@ -738,8 +736,8 @@ func TestPollActiveToQuietTriggersRelink(t *testing.T) {
 	if n.Transcript == newPath || n.SessionID == "new-session" {
 		t.Fatalf("poll guessed newest file: %q / %q", n.Transcript, n.SessionID)
 	}
-	if n.Transcript != "" {
-		t.Fatalf("legacy stale link must detach on active→quiet, got %q", n.Transcript)
+	if n.Transcript != oldPath || n.SessionID != "old-session" {
+		t.Fatalf("active→quiet changed the binding: %q / %q", n.Transcript, n.SessionID)
 	}
 }
 

@@ -435,7 +435,6 @@ func (a *app) retireTranscript(n *Node) {
 	a.mu.Lock()
 	a.markDeadTranscriptLocked(n.ID, oldPath, oldSID)
 	n.Transcript, n.SessionID = "", ""
-	delete(a.claudeBoundAt, n.ID)
 	delete(a.tailers, n.ID)
 	delete(a.chatMark, n.ID)
 	delete(a.staleChat, n.ID)

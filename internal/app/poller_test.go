@@ -825,10 +825,9 @@ func TestWarmStartupMirrorsAndCachesSegments(t *testing.T) {
 	}
 }
 
-// TestMaybeRelinkTranscriptAfterSessionRollover: a stale linked transcript
-// after /clear must not be replaced by the newest file in the directory.
-// Legacy (no hook) nodes detach; hook-owned nodes wait for SessionStart.
-func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
+// A missing delivered turn must neither detach the owned transcript nor guess
+// a replacement from the directory. SessionStart is the ownership authority.
+func TestMaybeRelinkTranscriptMissingTurnKeepsBinding(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"c1": true}}
 	a := newTestApp(t, f)
 	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
@@ -850,8 +849,8 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	a.nodes = append(a.nodes, n)
 	a.byID["c1"] = n
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
-	// The prompt this file never recorded is the staleness evidence; a bare
-	// pane phase proves nothing (D1/D2).
+	// A prompt missing from this file does not prove that Claude changed
+	// sessions; a local modal may still be holding the paste.
 	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 
 	a.maybeRelinkTranscript(n)
@@ -859,8 +858,8 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	if n.Transcript == newPath || n.SessionID == "new-session" {
 		t.Fatalf("newest-file guess rebound %q / %q", n.Transcript, n.SessionID)
 	}
-	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("legacy stale link must detach, got %q / %q", n.Transcript, n.SessionID)
+	if n.Transcript != oldPath || n.SessionID != "old-session" {
+		t.Fatalf("missing turn changed the binding: %q / %q", n.Transcript, n.SessionID)
 	}
 }
 
@@ -2181,10 +2180,9 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		}
 	})
 
-	// (d) the cur health check no longer treats a metadata-only touch as
-	// "carried the phase" — so a linked dead file with only a late mtime bump
-	// is not considered healthy and relink can proceed to a real new file.
-	t.Run("cur_health_ignores_metadata_only_touch", func(t *testing.T) {
+	// (d) neither content time nor mtime can invalidate an owned link. Only a
+	// validated successor SessionStart may replace it.
+	t.Run("metadata_only_touch_cannot_invalidate_owned_link", func(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{"c1": true}}
 		a := newTestApp(t, f)
 		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
@@ -2208,14 +2206,12 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		a.nodes = append(a.nodes, n)
 		a.byID["c1"] = n
 		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
-		// The unanswered prompt is the staleness evidence (D1/D2).
+		// The unanswered prompt may still be waiting behind a local modal.
 		a.noteDelivery("c1", time.Now().Add(-time.Minute))
 		a.maybeRelinkTranscript(n)
-		if n.Transcript == linked {
-			t.Fatalf("metadata-only mtime touch kept dead link healthy; transcript still %q", linked)
-		}
-		if n.Transcript == newer {
-			t.Fatalf("newest-file guess rebound %q", n.Transcript)
+		if n.Transcript != linked || n.SessionID != "linked" {
+			t.Fatalf("delivery timing changed owned link to %q / %q (newest %q)",
+				n.Transcript, n.SessionID, newer)
 		}
 	})
 }

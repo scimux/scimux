@@ -50,14 +50,15 @@ startup/hook-health acknowledgement. The undocumented transcript
   `capabilities.json` proves the layout from disk and records the `exec`
   path `settings.json` baked; a fresh bundle reports `claude_starting` and
   becomes authoritative only after that process's valid SessionStart.
-- Two consequences to know before "fixing" a bug report: pane noise that
-  trips the staleness backstop drops a node to peek until the next `/clear`
-  or relaunch hook; and because `settings.json` bakes `os.Executable()`, a
-  pane that outlives a *move* of the binary keeps a settings file pointing
-  nowhere, so its next `/clear` silently fails to bind (rebuilding in place
-  is harmless). Never retire a transcript on absent evidence — a just-created
-  successor holds only meta records, so "no recognized content yet" is not
-  staleness (`maybeRelinkTranscript`).
+- Two consequences to know before "fixing" a bug report: delivery timing is
+  never transcript-ownership evidence — Claude may hold a paste behind a
+  local modal and append it to the same transcript later, so only a validated
+  successor SessionStart may replace a binding — and because `settings.json`
+  bakes `os.Executable()`, a pane that outlives a *move* of the binary keeps a
+  settings file pointing nowhere, so its next `/clear` silently fails to bind
+  (rebuilding in place is harmless). A just-created successor may also hold
+  only meta records; "no recognized content yet" is never staleness
+  (`maybeRelinkTranscript`).
 - **`/clear` is refused while a turn is in flight**, with the same
   `errClaudeTurnInFlight` 409 every other Claude send gets. Claude Code
   absorbs a mid-turn paste into the running turn — its own transcript names

@@ -782,10 +782,6 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 	}
 	n.Transcript = ev.TranscriptPath
 	n.SessionID = ev.SessionID
-	if a.claudeBoundAt == nil {
-		a.claudeBoundAt = map[string]time.Time{}
-	}
-	a.claudeBoundAt[nodeID] = time.Now()
 	if retirePath != "" || retireSID != "" {
 		a.markDeadTranscriptLocked(nodeID, retirePath, retireSID)
 	}
@@ -876,14 +872,6 @@ func (a *app) applyRetiredClaudeTranscript(nodeID, oldPath, oldSID string, pageT
 		delete(a.staleChat, nodeID)
 		delete(a.mirrors, nodeID)
 		delete(a.piMirrors, nodeID)
-		if n.Transcript != "" {
-			if a.claudeBoundAt == nil {
-				a.claudeBoundAt = map[string]time.Time{}
-			}
-			a.claudeBoundAt[nodeID] = time.Now()
-		} else {
-			delete(a.claudeBoundAt, nodeID)
-		}
 	}
 	a.mu.Unlock()
 	if !pageTurn || a.sessionsDir == "" || n == nil {

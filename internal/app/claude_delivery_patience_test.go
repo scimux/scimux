@@ -109,7 +109,7 @@ func TestLateTranscriptRetiresTheUnconfirmedFirstPromptCleanly(t *testing.T) {
 	a.nodes = []*Node{n}
 	a.byID[n.ID] = n
 	a.sendState[n.ID] = sendInitialUnconfirmed
-	// Inside the grace window, so the stale-link backstop leaves the link alone.
+	// The delivery watermark lets reconciliation confirm this late transcript.
 	a.noteDelivery(n.ID, time.Now())
 
 	a.poll()

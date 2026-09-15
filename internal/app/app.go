@@ -212,9 +212,6 @@ func (a *app) initMaps() {
 	if a.pendingClaudeHooks == nil {
 		a.pendingClaudeHooks = map[string]string{}
 	}
-	if a.claudeBoundAt == nil {
-		a.claudeBoundAt = map[string]time.Time{}
-	}
 	if a.claudePermCap == nil {
 		a.claudePermCap = map[string]bool{}
 	}
@@ -427,10 +424,6 @@ type app struct {
 	// transcript, so without a watermark one approved call would go on
 	// retiring a notice every tick.
 	claudeAskedTools map[string]int
-	// claudeBoundAt is when each node's current transcript link was
-	// established. A link established after the delivery being judged cannot
-	// have missed it (maybeRelinkTranscript).
-	claudeBoundAt map[string]time.Time
 	// claudeAck is set only after a valid SessionStart for that node has
 	// been processed. A newly launched node is not hook-capable until then.
 	claudeAck map[string]bool

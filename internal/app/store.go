@@ -302,7 +302,6 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.claudeHooks, id)
 	delete(a.claudeGens, id)
 	delete(a.pendingClaudeHooks, id)
-	delete(a.claudeBoundAt, id)
 	delete(a.claudeAck, id)
 	delete(a.claudeStartPending, id)
 	delete(a.claudeLaunchErr, id)
