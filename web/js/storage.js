@@ -87,9 +87,10 @@ export function createStorage(raw){
 }
 
 /* Send-to provenance follows draft lifetime: source intents stay device-local
- * until the destination send succeeds, then callers append shared UI links. */
+ * until the sent text appears as a real destination transcript turn. */
 export const PENDING_FORWARD_PREFIX = "scimux-sendto-pending:";
 export const AWAITING_FORWARD_PREFIX = "scimux-sendto-awaiting:";
+export const FORWARD_TEXT_FALLBACK_MAX = 256;
 
 export function pendingForwardKey(nodeId){
   return PENDING_FORWARD_PREFIX + (nodeId || "");
@@ -133,14 +134,32 @@ export function clearPendingForwards(storage, nodeId){
   return writePendingForwards(storage, nodeId, []);
 }
 
-export function writeAwaitingForward(storage, nodeId, text){
-  try { storage && storage.setItem(awaitingForwardKey(nodeId), String(text || "")); }
+export function writeAwaitingForward(storage, nodeId, text, afterTurns = 0){
+  const value = {
+    text: String(text || ""),
+    afterTurns: Math.max(0, Math.floor(Number(afterTurns) || 0)),
+  };
+  try { storage && storage.setItem(awaitingForwardKey(nodeId), JSON.stringify(value)); }
   catch { /* same best-effort draft cache contract */ }
+  return value;
 }
 
 export function readAwaitingForward(storage, nodeId){
-  try { return storage && storage.getItem(awaitingForwardKey(nodeId)) || ""; }
-  catch { return ""; }
+  let raw = "";
+  try { raw = storage && storage.getItem(awaitingForwardKey(nodeId)) || ""; }
+  catch { return null; }
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw);
+    if (value && typeof value === "object" && typeof value.text === "string"){
+      return {
+        text: value.text,
+        afterTurns: Math.max(0, Math.floor(Number(value.afterTurns) || 0)),
+      };
+    }
+    if (typeof value === "string") return { text: value, afterTurns: 0 };
+  } catch { /* legacy latches stored the expected text directly */ }
+  return { text: raw, afterTurns: 0 };
 }
 
 export function clearAwaitingForward(storage, nodeId){
@@ -148,23 +167,40 @@ export function clearAwaitingForward(storage, nodeId){
   catch { /* same best-effort draft cache contract */ }
 }
 
-export function makeForwardLink(source, destinationNode, sentText, sentAt){
-  const when = sentAt || new Date().toISOString();
-  return {
-    id: `${sourceAddressKey(source)}>${destinationNode || ""}:${when}`,
-    source: { ...(source || {}) },
-    destination: { node: destinationNode || "", turnTime: when, text: sentText || "" },
-    sent_at: when,
-  };
+function compactAddress(value = {}){
+  const out = { node: value.node || "" };
+  if (value.uid){
+    out.uid = value.uid;
+    out.segment = Number(value.segment) || 0;
+    out.record = Number(value.record) || 0;
+  }
+  if (value.turnTime) out.turnTime = value.turnTime;
+  return out;
 }
 
 export function makeForwardLinkToTurn(source, destinationNode, turn = {}){
-  const link = makeForwardLink(source, destinationNode, turn.text || "", turn.time || undefined);
-  link.destination = {
-    node: destinationNode || "", text: turn.text || "", turnTime: turn.time || "",
-    ...(turn.uid ? {
-      uid: turn.uid, segment: Number(turn.segment) || 0, record: Number(turn.record) || 0,
-    } : {}),
+  const compactSource = compactAddress(source);
+  const destination = compactAddress({
+    node: destinationNode,
+    uid: turn.uid,
+    segment: turn.segment,
+    record: turn.record,
+    turnTime: turn.time,
+  });
+  /* Text is only a last-resort live-segment address. Exact and timestamped
+     transcripts do not duplicate message bodies in the shared UI document. */
+  if (!destination.uid && !destination.turnTime){
+    const text = String(turn.text || "");
+    destination.text = text.slice(0, FORWARD_TEXT_FALLBACK_MAX);
+    if (text.length > FORWARD_TEXT_FALLBACK_MAX) destination.textPrefix = true;
+  }
+  const destinationKey = destination.uid || destination.turnTime
+    ? sourceAddressKey(destination)
+    : `n:${destination.node}:text:${destination.text || ""}`;
+  return {
+    id: `${sourceAddressKey(compactSource)}>${destinationKey}`,
+    source: compactSource,
+    destination,
+    sent_at: turn.time || "",
   };
-  return link;
 }

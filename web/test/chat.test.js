@@ -93,6 +93,7 @@ test("timing constants match live contracts", () => {
   assert.equal(CHAT_LOAD_DELAY_MS, 300);
   assert.ok(DEC_LABELS.waiting_approval);
   assert.ok(DEC_LABELS.turn_active);
+  assert.equal(DEC_LABELS.claude_unsupported, "Some chat features aren’t available.");
   assert.ok(RASTER_RE.test("photo.PNG"));
   assert.ok(ASSET_REF_RE.test("![x](scimux-asset:abc)"));
 });
@@ -154,7 +155,7 @@ test("Send-to marker legacy match uses node and turn time", () => {
 test("deferred new-chat Send-to commits on the matching transcript turn", async () => {
   const data = new Map([
     ["scimux-sendto-pending:n1", JSON.stringify([{ node: "source", turnTime: "old", text: "source" }])],
-    ["scimux-sendto-awaiting:n1", "edited prompt"],
+    ["scimux-sendto-awaiting:n1", JSON.stringify({ text: "edited prompt", afterTurns: 0 })],
   ]);
   const storage = {
     getItem: key => data.has(key) ? data.get(key) : null,
@@ -176,6 +177,25 @@ test("deferred new-chat Send-to commits on the matching transcript turn", async 
   assert.equal(ops[0].link.destination.uid, "du");
   assert.equal(data.has("scimux-sendto-pending:n1"), false);
   assert.equal(data.has("scimux-sendto-awaiting:n1"), false);
+});
+
+test("Send-to confirmation ignores matching turns before its send boundary", () => {
+  const oldTurn = { role: "user", time: "old", text: "same" };
+  const newTurn = { role: "user", time: "new", text: "same" };
+  assert.equal(chatmod.matchingForwardDestinationTurn(
+    { text: "same", afterTurns: 1 }, [oldTurn, newTurn],
+  ), newTurn);
+});
+
+test("truncated fallback addresses match a current turn by prefix", () => {
+  assert.equal(chatmod.matchPendingJumpInTurns(
+    { text: "forwarded prefix", textPrefix: true },
+    [{ text: "other" }, { text: "forwarded prefix with the remaining body" }],
+  ), 1);
+});
+
+test("chat marker invalidation does not stringify marker corpora", () => {
+  assert.doesNotMatch(chatSrc, /markerHash:\s*hash\(JSON\.stringify/);
 });
 
 test("attention evidence key changes only with kind or fresh evidence epoch", () => {
@@ -5036,6 +5056,29 @@ test("Send-to marker jumps directly once and offers a chooser for several", asyn
   firstListener(ctx.roots.msgs, "click")({ target: marker });
   assert.equal(choices.length, 1);
   assert.equal(choices[0].choices.length, 2);
+});
+
+test("Send-to marker explains when its destination no longer resolves", async () => {
+  const toasts = [];
+  const links = [{ id: "l1", source: { node: "n1", turnTime: "T" }, destination: { node: "gone" } }];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: "source", time: "T" }],
+      live: "quiet", delivery: "ok", source: "tmux", chat_started: "T0", prior_turns: 0,
+    },
+    deps: {
+      forwardLinks: () => links,
+      jumpToChatAddress: () => false,
+      toast: message => toasts.push(message),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const turn = el("div", { className: "turn assistant", dataset: { bk: "i:0" } });
+  const marker = el("button", { dataset: { bmarker: "sendto" } });
+  turn.appendChild(marker); ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+  assert.deepEqual(toasts, ["This destination chat is no longer available."]);
 });
 
 test("P3C: use-as-description sets editor state from the turn", async () => {

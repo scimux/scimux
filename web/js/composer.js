@@ -29,6 +29,8 @@
  *   - #attadd hidden / disabled / armed / aria-expanded
  *   - #attstage chip HTML and per-node in-memory stage map
  *   - draft keys scimux-draft:<node-id> (per device, local only)
+ *   - scimux-sendto-pending:<node-id> (durable source intents, local only)
+ *   - scimux-sendto-awaiting:<node-id> (expected turn + boundary, local only)
  *   - composerBusy / composerClosed / canAttach edge-only caches
  *   - stageKey counter for chip identity
  *
@@ -50,6 +52,8 @@
  *
  * Storage keys:
  *   - "scimux-draft:" + nodeId  — per-node text drafts (localStorage)
+ *   - "scimux-sendto-pending:" + nodeId — unsent source intents
+ *   - "scimux-sendto-awaiting:" + nodeId — delivered text awaiting a real turn
  *
  * Injected effects (chat / shell):
  *   - setSentEcho / paintEcho / clearSentEchoFor / invalidate / refreshChat
@@ -104,8 +108,7 @@ import {
   readPendingForwards,
   clearPendingForwards,
   readAwaitingForward,
-  clearAwaitingForward,
-  makeForwardLink,
+  writeAwaitingForward,
 } from "./storage.js";
 
 /* ---------- public constants ---------- */
@@ -663,15 +666,11 @@ export function createComposerFeature(deps){
          the one copy that outlives the tab while the send can still fail. */
       forgetDraft(dest);
       const pending = readPendingForwards(storage, dest);
-      if (pending.length && typeof d.uiMutate === "function"){
-        const sentAt = new Date(nowFn()).toISOString();
-        pending.forEach(source => d.uiMutate({
-          k: "forward-link-add",
-          link: makeForwardLink(source, dest, text, sentAt),
-        }));
-        clearPendingForwards(storage, dest);
-        clearAwaitingForward(storage, dest);
-      }
+      /* A successful POST proves acceptance, not the destination address.
+         chat.js mints the permanent link only after this exact text appears
+         beyond the pre-send transcript boundary. */
+      if (pending.length && text && !readAwaitingForward(storage, dest))
+        writeAwaitingForward(storage, dest, text, turns?.length || 0);
       sendingDestinations.delete(dest);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       items.forEach(x => {

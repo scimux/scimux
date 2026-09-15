@@ -17,7 +17,8 @@
  *   - editingTitle / editingTitleScope (shared shell title editor)
  *   - hardAttention, laneColor, agentLogo, icons
  *   - pendingJump get/set (shell jump coordinator for notes/search)
- *   - bookmarks / uiMutate (bubble bookmark action only)
+ *   - bookmarks / noteUsages / forwardLinks / markerVersion / uiMutate
+ *   - openBookmark / openChoiceList / openNoteUsage / jumpToChatAddress
  *   - composer effects: setComposerBusy / setComposerClosed / setAttachAvail
  *   - cards/map invalidation + re-render when live/attention chrome changes
  *   - api, hashStr, md, esc, fmtWhen, fmtBubbleTime, bubbleTitle
@@ -46,7 +47,7 @@
  *   - #msgs scroll (compact header)
  *   - #msgs load capture (thumbnail box + re-pin near bottom)
  *   - #msgs error capture (broken-thumbnail cleanup; no inline onerror)
- *   - #msgs click (histload, bubble tap, bubble actions)
+ *   - #msgs click (histload, marker jumps/menus, bubble tap/actions)
  *   - #msgs touchend (double-tap zoom reset on empty background)
  *   - #keyrow click (dialog keys + attention collapse)
  *   - #termtoggle / #autoapprove / #scrollend click
@@ -63,7 +64,8 @@
  *   - forkFromTurn / openSheet / new-activity configuration (sheets)
  *   - openSendTo: the send-to picker and its target list (bookmarks owns
  *     #sendto; the bubble action only supplies text + the source node id)
- *   - jumpToChatAddress / pendingJump creation (bookmarks/search set them)
+ *   - jumpToChatAddress / pendingJump creation (bookmarks/search set them;
+ *     chat invokes the injected jump for Send-to markers)
  *   - stampAddress pure helper (shell; bubble action injects it)
  *   - archived read-only surface (imports splitAssetRefs only)
  *   - shared startTitleEdit / commitTitleEdit
@@ -119,7 +121,7 @@ export const DEC_LABELS = {
   turn_active: "Agent is working",
   turn_error: "The agent finished without output \u2014 check the log",
   claude_starting: "Starting Claude \u2014 waiting for SessionStart",
-  claude_unsupported: "This Claude session cannot be supervised with the current hook bundle",
+  claude_unsupported: "Some chat features aren’t available.",
   claude_launch_error: "Claude did not start",
   claude_transcript_fault: "The transcript is not readable \u2014 send another prompt or fork",
 };
@@ -316,9 +318,15 @@ export function sentToMarkerModel(turn, nodeId, links = []){
   });
 }
 
-export function matchingForwardDestinationTurn(expectedText, turns = []){
-  if (!expectedText) return null;
-  return turns.find(turn => turn && turn.role === "user" && turn.text === expectedText) || null;
+export function matchingForwardDestinationTurn(expected, turns = []){
+  const latch = typeof expected === "string"
+    ? { text: expected, afterTurns: 0 }
+    : expected;
+  if (!latch || !latch.text) return null;
+  const boundary = Math.max(0, Math.floor(Number(latch.afterTurns) || 0));
+  const start = boundary <= turns.length ? boundary : 0;
+  return turns.slice(start).find(turn =>
+    turn && turn.role === "user" && turn.text === latch.text) || null;
 }
 
 export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
@@ -520,7 +528,8 @@ export function matchPendingJumpInTurns(pending, turns){
     idx = list.findIndex(t => t.uid === pending.uid &&
       (t.segment || 0) === (pending.segment || 0) && (t.record || 0) === (pending.record || 0));
   if (idx < 0 && pending.turnTime) idx = list.findIndex(t => t.time === pending.turnTime);
-  if (idx < 0) idx = list.findIndex(t => t.text === pending.text);
+  if (idx < 0 && pending.text) idx = list.findIndex(t =>
+    t.text === pending.text || (pending.textPrefix && String(t.text || "").startsWith(pending.text)));
   return idx;
 }
 
@@ -1949,11 +1958,7 @@ export function createChatFeature(deps){
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hashTurns(turns),
       turnAttrHash: hashTurnAttrs(turns, hash),
-      markerHash: hash(JSON.stringify({
-        bookmarks: g("bookmarks", []),
-        noteUsages: g("noteUsages", []),
-        forwardLinks: g("forwardLinks", []),
-      })),
+      markerHash: String(g("markerVersion", "")),
       decisionsHash: decisionsHash(liveDecisions) +
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
@@ -2311,7 +2316,9 @@ export function createChatFeature(deps){
         }
       } else if (marker.dataset.bmarker === "sendto" && sentTo.length){
         const openLink = link => {
-          if (typeof d.jumpToChatAddress === "function") d.jumpToChatAddress(link.destination || {});
+          if (typeof d.jumpToChatAddress !== "function") return;
+          if (d.jumpToChatAddress(link.destination || {}) === false && typeof d.toast === "function")
+            d.toast("This destination chat is no longer available.");
         };
         if (sentTo.length === 1) openLink(sentTo[0]);
         else if (typeof d.openChoiceList === "function"){

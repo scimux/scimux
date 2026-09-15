@@ -892,7 +892,7 @@ test("Claude create with not_sent initial delivery preserves a recoverable compo
   assert.match(ctx.effects.alert.join(" "), /did not start|not delivered/i);
 });
 
-test("new-chat Send-to commits only after initial delivery and keeps modified text", async () => {
+test("new-chat Send-to waits for the confirmed initial turn and keeps modified text", async () => {
   const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "original" };
   const ctx = createFeature();
   ctx.feature.bind();
@@ -902,10 +902,11 @@ test("new-chat Send-to commits only after initial delivery and keeps modified te
   ctx.byId.nc_lane.value = "lane-a";
   ctx.byId.nc_start.dispatch("click");
   await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
-  const link = ctx.effects.uiMutate.find(op => op.k === "forward-link-add");
-  assert.ok(link);
-  assert.equal(link.link.destination.node, "created-1");
-  assert.equal(link.link.destination.text, "edited before creating");
+  assert.equal(ctx.effects.uiMutate.some(op => op.k === "forward-link-add"), false);
+  assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-pending:created-1")), [source]);
+  assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-awaiting:created-1")), {
+    text: "edited before creating", afterTurns: 0,
+  });
 });
 
 test("new-chat cancel drops Send-to intent; not_sent transfers it to the recovery draft", async () => {
@@ -956,7 +957,9 @@ test("new-chat pending delivery waits for transcript confirmation", async () => 
   await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   assert.equal(ctx.effects.uiMutate.some(op => op.k === "forward-link-add"), false);
   assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-pending:deferred-node")), [source]);
-  assert.equal(ctx.storage.getItem("scimux-sendto-awaiting:deferred-node"), "edited before creating");
+  assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-awaiting:deferred-node")), {
+    text: "edited before creating", afterTurns: 0,
+  });
 });
 
 test("create validation: missing title, fork lane required, new-lane error", async () => {

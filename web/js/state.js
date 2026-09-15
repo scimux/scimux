@@ -24,6 +24,9 @@
 /* Storage keys — match the inline localStorage names. */
 export const PENDING_OPS_KEY = "scimux-ui-ops";
 export const CACHED_UI_KEY = "scimux-ui";
+/* A navigation index, not an audit log. Keeping the newest 500 prevents this
+   optional marker feature from exhausting the shared 1 MiB UI document. */
+export const MAX_FORWARD_LINKS = 500;
 
 /* Fresh defaults object (new arrays each call — same shape as the inline
    Object.assign source literal evaluated on every normUI call). */
@@ -45,8 +48,8 @@ export function normUI(j) {
   return Object.assign(emptyUI(), j || {});
 }
 
-/* Bookmark add/delete and durable Send-to links are idempotent under R20.7:
-   they dedupe by stable identity and must always replay across revision changes. Wholesale list
+/* Bookmark add/delete and bounded Send-to-link additions are idempotent under
+   R20.7: they dedupe by stable identity and must always replay across revision changes. Wholesale list
    snapshots (groups/lanes/pin-order) and arch/unarch/pin are not. */
 export function idempotentOp(op) {
   return op.k === "bookmark-add" || op.k === "bookmark-del" || op.k === "forward-link-add";
@@ -92,6 +95,8 @@ export function applyOp(doc, op) {
       doc.forward_links ||= [];
       if (op.link && !doc.forward_links.some(link => link.id === op.link.id))
         doc.forward_links.push(op.link);
+      if (doc.forward_links.length > MAX_FORWARD_LINKS)
+        doc.forward_links.splice(0, doc.forward_links.length - MAX_FORWARD_LINKS);
       break;
     case "pin":
       /* new pins land at the FRONT so a freshly pinned card shows at the top of

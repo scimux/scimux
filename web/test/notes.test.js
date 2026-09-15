@@ -1452,6 +1452,24 @@ test("usage index stays sparse until openAt fetches the chosen note and unfolds 
   assert.equal(Object.hasOwn(JSON.parse(ctx.storage.getItem(STORAGE_KEY_FOLDS)), "s1"), false);
 });
 
+test("usage generation changes only when the sparse destination index changes", async () => {
+  let usages = [];
+  const ctx = createFeature({
+    api: async url => url === "/api/notes?usages=1" ? { usages } : { notes: [] },
+  });
+  ctx.feature.bind();
+  await settle();
+  assert.equal(ctx.feature.usagesVersion(), 0);
+  usages = [{ note_id: "n1", section_id: "s1", reference_id: "r1" }];
+  await ctx.feature.refreshUsages();
+  assert.equal(ctx.feature.usagesVersion(), 1);
+  await ctx.feature.refreshUsages();
+  assert.equal(ctx.feature.usagesVersion(), 1);
+  usages = [{ note_id: "n2", section_id: "s2", reference_id: "r2" }];
+  await ctx.feature.refreshUsages();
+  assert.equal(ctx.feature.usagesVersion(), 2, "same-size replacements still invalidate markers");
+});
+
 /* ---------- debounce / flush / serialize via factory ---------- */
 async function settle(n = 8){
   for (let i = 0; i < n; i++) await Promise.resolve();

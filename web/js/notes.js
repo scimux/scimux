@@ -36,6 +36,7 @@
  *
  * Server calls (via injected api):
  *   - GET    /api/notes
+ *   - GET    /api/notes?usages=1
  *   - POST   /api/notes
  *   - GET    /api/notes/:id
  *   - PATCH  /api/notes/:id   (title, section, add_section, order)
@@ -797,6 +798,7 @@ export function createNotesFeature(deps){
   /* ---- view state ---- */
   let wsNotes = [];
   let wsUsages = [];
+  let wsUsagesVersion = 0;
   let wsActiveId = null;
   let wsActive = null;
   let wsReturnFocus = null;
@@ -1166,11 +1168,17 @@ export function createNotesFeature(deps){
   }
 
   async function loadUsages(){
+    let next = [];
     try {
       const resp = await api("/api/notes?usages=1");
-      wsUsages = (resp && resp.usages) || [];
-    } catch { wsUsages = []; }
-    if (typeof d.onUsagesChange === "function") d.onUsagesChange();
+      next = (resp && resp.usages) || [];
+    } catch { next = []; }
+    const changed = JSON.stringify(next) !== JSON.stringify(wsUsages);
+    wsUsages = next;
+    if (changed){
+      wsUsagesVersion++;
+      if (typeof d.onUsagesChange === "function") d.onUsagesChange();
+    }
     return wsUsages;
   }
 
@@ -2243,6 +2251,7 @@ export function createNotesFeature(deps){
     isOpen,
     activeTitle: () => (wsActive && wsActive.title) || "",
     usages: () => wsUsages,
+    usagesVersion: () => wsUsagesVersion,
     refreshUsages: loadUsages,
     openAt,
     startPlacement,

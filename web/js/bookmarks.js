@@ -34,6 +34,7 @@
  * UI operations (via injected uiMutate — state.js applyOp):
  *   - { k: "bookmark-add", bookmark }
  *   - { k: "bookmark-del", t }
+ *   - { k: "forward-link-add", link } (confirmation is minted by chat.js)
  *
  * Owned UI operations / pure decisions:
  *   - Lane derivation (live node.lane_id, captured-lane fallback, comment→anchor)
@@ -443,6 +444,7 @@ export function jumpAddressDecision(a, nodeById){
         uid: a.uid || "",
         segment: a.segment,
         record: a.record,
+        ...(a.textPrefix ? { textPrefix: true } : {}),
       },
     };
   }

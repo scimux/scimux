@@ -40,8 +40,10 @@
  *   - POST /api/nodes
  *   - PATCH /api/nodes/:id  (head title/desc or station label)
  *
- * Storage (exact key; throws propagate — no try/catch):
+ * Storage:
  *   - "scimux-lastdir" get on plain new; set on successful create with dir
+ *   - "scimux-sendto-pending:" + nodeId for new-chat source intents
+ *   - "scimux-sendto-awaiting:" + nodeId for the expected initial turn
  *
  * Timers:
  *   - setTimeout(0) title focus/select after fork seed and edit open
@@ -83,7 +85,6 @@ import { focusAtEnd } from "./caret.js";
 import {
   writePendingForwards,
   writeAwaitingForward,
-  makeForwardLink,
 } from "./storage.js";
 
 /* ---------- public constants ---------- */
@@ -910,8 +911,6 @@ export function createSheetsFeature(deps = {}){
         ? await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) })
         : { id: "new" };
       const echoLaunchPrompt = !(n && (n.initial_delivery === "not_sent"));
-      const deferredForward = n &&
-        (n.initial_delivery === "pending" || n.initial_delivery === "unconfirmed");
       if (n && n.id && !echoLaunchPrompt){
         /* Cross-feature storage contract with composer.js, kept as a literal
            here so sheets does not import a later feature module. The server
@@ -925,17 +924,11 @@ export function createSheetsFeature(deps = {}){
           "Claude did not start. The initial prompt was not delivered and has been restored as a draft."
         );
       }
-      if (n && n.id && deferredForward && payload.prompt && ncForwardSources.length){
+      /* Every accepted launch waits for the transcript turn. Even an
+         acknowledged create response has no durable turn address itself. */
+      if (n && n.id && echoLaunchPrompt && payload.prompt && ncForwardSources.length){
         writePendingForwards(storage, n.id, ncForwardSources);
-        writeAwaitingForward(storage, n.id, payload.prompt);
-      }
-      if (n && n.id && echoLaunchPrompt && !deferredForward && payload.prompt && ncForwardSources.length &&
-          typeof d.uiMutate === "function"){
-        const sentAt = new Date(nowFn()).toISOString();
-        ncForwardSources.forEach(source => d.uiMutate({
-          k: "forward-link-add",
-          link: makeForwardLink(source, n.id, payload.prompt, sentAt),
-        }));
+        writeAwaitingForward(storage, n.id, payload.prompt, 0);
       }
       if (laneChoice.lane && typeof d.uiMutate === "function"){
         const list = typeof d.laneList === "function" ? d.laneList() : [];

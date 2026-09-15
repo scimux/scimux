@@ -560,18 +560,18 @@ test("pending Send-to cancels only after the empty destination is left", () => {
     "a deferred initial prompt holds while its transcript turn is pending");
 });
 
-test("successful edited Send-to creates a permanent link; failure keeps it pending", async () => {
+test("successful edited Send-to waits for the real transcript turn; failure keeps it pending", async () => {
   const key = "scimux-sendto-pending:n1";
   const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "source text" };
   const success = makeFeature({ drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" } });
   success.feature.onSelect();
   success.roots.prompt.innerText = "edited before send";
   await success.feature.sendPrompt();
-  assert.equal(success.storage.getItem(key), null);
-  assert.equal(success.uiOps.length, 1);
-  assert.equal(success.uiOps[0].k, "forward-link-add");
-  assert.equal(success.uiOps[0].link.destination.node, "n1");
-  assert.equal(success.uiOps[0].link.destination.text, "edited before send");
+  assert.deepEqual(JSON.parse(success.storage.getItem(key)), [source]);
+  assert.equal(success.uiOps.length, 0);
+  assert.deepEqual(JSON.parse(success.storage.getItem("scimux-sendto-awaiting:n1")), {
+    text: "edited before send", afterTurns: 1,
+  });
 
   const failed = makeFeature({
     drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" },
@@ -594,6 +594,21 @@ test("unconfirmed Send-to remains pending and has no marker", async () => {
   await ctx.feature.sendPrompt();
   assert.equal(ctx.uiOps.length, 0);
   assert.deepEqual(JSON.parse(ctx.storage.getItem(key)), [source]);
+});
+
+test("a later send cannot replace a Send-to turn already awaiting confirmation", async () => {
+  const key = "scimux-sendto-pending:n1";
+  const awaitingKey = "scimux-sendto-awaiting:n1";
+  const source = { node: "source", turnTime: "t" };
+  const awaiting = JSON.stringify({ text: "first forwarded send", afterTurns: 1 });
+  const ctx = makeFeature({ drafts: {
+    [key]: JSON.stringify([source]),
+    [awaitingKey]: awaiting,
+    "scimux-draft:n1": "ordinary follow-up",
+  } });
+  ctx.feature.onSelect();
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.storage.getItem(awaitingKey), awaiting);
 });
 
 test("busy/closed edge-only DOM changes", () => {

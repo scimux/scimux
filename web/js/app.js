@@ -830,6 +830,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     bookmarks: () => getUI().bookmarks,
     noteUsages: () => notesFeature ? notesFeature.usages() : [],
     forwardLinks: () => getUI().forward_links,
+    markerVersion: () => `${pollingFeature ? pollingFeature.uiGeneration() : 0}:` +
+      `${notesFeature ? notesFeature.usagesVersion() : 0}`,
     uiMutate,
     stampAddress: (b, t) => stampAddressMod(b, t),
     copyText: s => copyText(s),

@@ -28,27 +28,42 @@ test("clearing pending is explicit; a malformed cache safely becomes empty", () 
   assert.deepEqual(links.readPendingForwards(storage, "n1"), []);
 });
 
-test("successful send creates stable links to the actual destination text", () => {
-  const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "old" };
-  const link = links.makeForwardLink(source, "dest", "edited before send", "2026-09-15T12:00:00Z");
-  assert.deepEqual(link.source, source);
-  assert.deepEqual(link.destination, {
-    node: "dest", turnTime: "2026-09-15T12:00:00Z", text: "edited before send",
+test("delivery latch records the pre-send boundary and reads legacy values", () => {
+  const storage = memory();
+  links.writeAwaitingForward(storage, "dest", "edited prompt", 4);
+  assert.deepEqual(links.readAwaitingForward(storage, "dest"), {
+    text: "edited prompt", afterTurns: 4,
   });
+  storage.setItem(links.awaitingForwardKey("legacy"), "old prompt");
+  assert.deepEqual(links.readAwaitingForward(storage, "legacy"), {
+    text: "old prompt", afterTurns: 0,
+  });
+  links.clearAwaitingForward(storage, "dest");
+  assert.equal(links.readAwaitingForward(storage, "dest"), null);
+});
+
+test("permanent link uses the confirmed transcript address, not browser time or full text", () => {
+  const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "old" };
+  const link = links.makeForwardLinkToTurn(
+    source, "dest",
+    { uid: "du", segment: 1, record: 4, time: "new", text: "edited prompt" },
+  );
+  assert.deepEqual(link.source, {
+    node: "source", uid: "u1", segment: 2, record: 7,
+  });
+  assert.deepEqual(link.destination, {
+    node: "dest", uid: "du", segment: 1, record: 4, turnTime: "new",
+  });
+  assert.equal(link.sent_at, "new");
   assert.match(link.id, /u1/);
 });
 
-test("deferred initial delivery has a separate expected-turn latch", () => {
-  const storage = memory();
-  links.writeAwaitingForward(storage, "dest", "edited prompt");
-  assert.equal(links.readAwaitingForward(storage, "dest"), "edited prompt");
+test("permanent link truncates text only when the transcript has no address", () => {
   const link = links.makeForwardLinkToTurn(
     { node: "source", turnTime: "old" }, "dest",
-    { uid: "du", segment: 1, record: 4, time: "new", text: "edited prompt" },
+    { role: "user", text: "x".repeat(400) },
   );
-  assert.deepEqual(link.destination, {
-    node: "dest", uid: "du", segment: 1, record: 4, turnTime: "new", text: "edited prompt",
-  });
-  links.clearAwaitingForward(storage, "dest");
-  assert.equal(links.readAwaitingForward(storage, "dest"), "");
+  assert.equal(link.destination.text.length, links.FORWARD_TEXT_FALLBACK_MAX);
+  assert.equal(link.destination.textPrefix, true);
+  assert.equal(link.destination.turnTime, undefined);
 });
