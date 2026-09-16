@@ -36,14 +36,14 @@ const MinRequestV = 1
 // Point a test or a local rehearsal somewhere
 // else with --rendezvous-url; never by editing this line.
 //
-// It read my.scimux.eu until 2026-09-12. That move was free only because
-// nothing outside the maintainer's own machines had enrolled; it is the last
-// time this line can change without stranding someone. Three more places must
-// agree with it, none of them in this repository: -origin in scimux-rv's
-// rc.d, the Caddyfile site name, and the vendored vectors under
-// testdata/vectors, which scimux-rv generates and this repository byte-copies
-// per docs/rendezvous-protocol-sync.md. Editing this constant alone turns
-// every admission into a silent 404.
+// It read my.scimux.com before the independent-viewer migration. That change
+// intentionally requires the one enrolled installation to unlink at the old
+// service and enroll afresh; editing its saved origin is not a migration.
+// Three more places must agree with this value: -origin in scimux-rv's rc.d,
+// the Caddyfile service name, and the vendored vectors under testdata/vectors,
+// which scimux-rv generates and this repository byte-copies per
+// docs/rendezvous-protocol-sync.md. Editing this constant alone turns every
+// admission into a silent 404.
 const DefaultOrigin = "https://rv.scimux.com"
 
 // PrivateDirName is the owner-only directory under the data root that holds
