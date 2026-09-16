@@ -72,7 +72,7 @@ func TestReleaseArtifactInventoryIsClosed(t *testing.T) {
 			t.Errorf("publish verification does not close over %s", name)
 		}
 	}
-	for _, guard := range []string{"-type l", "unexpected release artifact", "sha256sum -c SHA256SUMS"} {
+	for _, guard := range []string{"-type l", "unexpected release artifact", "invalid checksum manifest", "sha256sum -c SHA256SUMS"} {
 		if !strings.Contains(publish, guard) {
 			t.Errorf("publish verification lacks %q", guard)
 		}

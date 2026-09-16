@@ -95,6 +95,12 @@ jobs:
           scimux-linux-arm64'
           test "$actual" = "$expected" || { echo "unexpected release artifact inventory" >&2; printf '%s\n' "$actual" >&2; exit 1; }
           cd handoff
+          awk '
+            NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { bad=1; next }
+            $2 !~ /^scimux-(darwin-(amd64|arm64)|linux-(amd64|arm64))$/ { bad=1; next }
+            seen[$2]++ { count++ }
+            END { for (name in seen) unique++; exit (bad || count != 4 || unique != 4) }
+          ' SHA256SUMS || { echo "invalid checksum manifest" >&2; exit 1; }
           sha256sum -c SHA256SUMS
       - name: Fetch only the reviewed publishing script
         env:
