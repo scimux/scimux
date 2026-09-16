@@ -1,109 +1,117 @@
 on:
   release:
-    types:
-      - published
+    types: [published]
 jobs:
-  build-and-test-and-release:
+  # Released source runs without publication credentials. The output crosses
+  # to a fresh publisher only through the same-workflow artifact store.
+  build-and-test:
     runs-on: go-builder
-    # A ${{ }} expression is substituted into a run block as text before any
-    # shell parses it, so a tag containing shell syntax would be executed
-    # rather than read. Nothing below interpolates: the ref reaches every
-    # step as a variable. It is declared for the job rather than repeated on
-    # the five steps that read it because it is not a secret — the release
-    # token is, and it stays on the one step that spends it.
     env:
       REF_NAME: ${{ forgejo.ref_name }}
     steps:
-      - name: Add missing tools
-        run: |
-          apk add --no-cache bash curl file git jq nodejs
-
-      - name: Clone and checkout repository
+      - name: Add missing build tools
+        run: apk add --no-cache file git nodejs
+      - name: Clone and bind the release tag to its commit
         env:
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -eu
           case "$COMMIT_SHA" in
-            *[!0-9a-f]* | "") echo "not a commit id: $COMMIT_SHA" >&2; exit 1 ;;
+            ????????????????????????????????????????) ;;
+            *) echo "not a full commit id: $COMMIT_SHA" >&2; exit 1 ;;
           esac
-          git clone https://codeberg.org/chrberger/scimux.git .
-          git checkout "$COMMIT_SHA"
-          mkdir -p builds
-
-      # The tag names a release to the Codeberg API and is stamped into every
-      # binary. Passing it as a variable stops it being executed; this bounds
-      # what it can be. Steps run in order, so a tag that fails here is
-      # refused before anything is built or published.
-      - name: Check the release tag
-        run: |
-          set -eu
-          case "$REF_NAME" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "not a vMAJOR.MINOR.PATCH release tag: $REF_NAME" >&2; exit 1 ;;
+          case "$COMMIT_SHA" in
+            *[!0-9a-f]*) echo "not a commit id: $COMMIT_SHA" >&2; exit 1 ;;
           esac
-          # A shell glob's * matches shell syntax too, so the arm above admits
-          # anything with a matching prefix. This is the rejection.
           case "$REF_NAME" in
             *[!0-9A-Za-z.-]*) echo "release tag has characters outside 0-9A-Za-z.-: $REF_NAME" >&2; exit 1 ;;
           esac
-          echo "release tag: $REF_NAME"
-
-      # A vulnerability gate, not a vulnerability report. govulncheck's JSON
-      # mode exits zero while listing findings, so this uses the default mode,
-      # whose non-zero exit is the whole point; a scan whose result nobody acts
-      # on is how twelve advisories against the build inputs went unnoticed
-      # through green builds.
-      #
-      # The scanner is a development tool and deliberately not a build
-      # dependency: it is installed here and appears in no go.mod. GOTOOLCHAIN
-      # and GOFLAGS are cleared only for building the scanner, which tracks a
-      # newer Go than this project targets — the scan itself still reports
-      # against the toolchain that builds scimux.
+          printf '%s\n' "$REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            || { echo "not an exact vMAJOR.MINOR.PATCH tag: $REF_NAME" >&2; exit 1; }
+          git clone https://codeberg.org/chrberger/scimux.git .
+          git show-ref --verify --quiet "refs/tags/$REF_NAME" \
+            || { echo "release ref is not a repository tag: $REF_NAME" >&2; exit 1; }
+          TAG_COMMIT="$(git rev-parse "$REF_NAME^{commit}")"
+          test "$TAG_COMMIT" = "$COMMIT_SHA" \
+            || { echo "release tag does not name event commit" >&2; exit 1; }
+          git checkout --detach "$COMMIT_SHA"
+          mkdir -p builds
       - name: Scan build inputs for known vulnerabilities
         run: |
           env GOFLAGS= GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./cmd/scimux
-
       - name: Run tests (short mode; integration tests need tmux and are skipped)
-        run: |
-          go test -short ./...
-
+        run: go test -short ./...
       - name: Run JavaScript tests (Node 22+)
         run: |
           node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 22) { console.error(`Node 22+ required; found ${process.versions.node}`); process.exit(1); }'
           node --test web/test/*.test.js
-
       - name: Build for linux/amd64
-        run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-linux-amd64 ./cmd/scimux && file builds/scimux-linux-amd64
-
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-linux-amd64 ./cmd/scimux && file builds/scimux-linux-amd64
       - name: Build for linux/arm64
-        run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-linux-arm64 ./cmd/scimux && file builds/scimux-linux-arm64
-
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-linux-arm64 ./cmd/scimux && file builds/scimux-linux-arm64
       - name: Build for darwin/arm64
-        run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-darwin-arm64 ./cmd/scimux && file builds/scimux-darwin-arm64
-
+        run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-darwin-arm64 ./cmd/scimux && file builds/scimux-darwin-arm64
       - name: Build for darwin/amd64
+        run: CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-darwin-amd64 ./cmd/scimux && file builds/scimux-darwin-amd64
+      - name: Record toolchain and checksum the exact release files
         run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=$REF_NAME" -o builds/scimux-darwin-amd64 ./cmd/scimux && file builds/scimux-darwin-amd64
-
-      # What actually built the artifacts, recorded where a later triage can
-      # read it. The go directive is a language floor, so "go 1.25.0" says
-      # nothing about which patched toolchain a runner selected, and an
-      # advisory assessment that cannot name the toolchain is guesswork.
-      - name: Record the toolchain that built the artifacts
-        run: |
+          set -eu
           go version
           for f in builds/scimux-*; do go version -m "$f" | head -n 2; done
+          cd builds
+          sha256sum scimux-darwin-amd64 scimux-darwin-arm64 scimux-linux-amd64 scimux-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+      - name: Hand tested files to the fresh publisher
+        uses: https://code.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        with:
+          name: scimux-release-${{ github.sha }}
+          path: builds/
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Generate checksums
+  # Runner labels schedule work; they do not authorize it. Repository write
+  # access remains maintainer-only, and production credentials stay outside CI.
+  publish:
+    needs: build-and-test
+    runs-on: release-publisher
+    steps:
+      - name: Add publishing tools
+        run: apk add --no-cache bash curl jq coreutils
+      - name: Download tested release files
+        uses: https://code.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
+        with:
+          name: scimux-release-${{ github.sha }}
+          path: handoff
+      - name: Verify closed inventory and exact digests
         run: |
-          cd builds && sha256sum scimux-* > SHA256SUMS && cat SHA256SUMS
-
-      - name: Attach built artifacts
+          set -eu
+          test -z "$(find handoff -type l -print -quit)" || { echo "symlink in release artifact" >&2; exit 1; }
+          actual="$(find handoff -mindepth 1 -maxdepth 1 -print | sed 's#^handoff/##' | LC_ALL=C sort)"
+          expected='SHA256SUMS
+          scimux-darwin-amd64
+          scimux-darwin-arm64
+          scimux-linux-amd64
+          scimux-linux-arm64'
+          test "$actual" = "$expected" || { echo "unexpected release artifact inventory" >&2; printf '%s\n' "$actual" >&2; exit 1; }
+          cd handoff
+          sha256sum -c SHA256SUMS
+      - name: Fetch only the reviewed publishing script
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          case "$COMMIT_SHA" in
+            ????????????????????????????????????????) ;;
+            *) echo "not a full commit id: $COMMIT_SHA" >&2; exit 1 ;;
+          esac
+          case "$COMMIT_SHA" in
+            *[!0-9a-f]*) echo "not a commit id: $COMMIT_SHA" >&2; exit 1 ;;
+          esac
+          curl -fsS -o /tmp/codeberg-release.sh "https://codeberg.org/chrberger/scimux/raw/commit/$COMMIT_SHA/.forgejo/codeberg-release.sh"
+          chmod 0500 /tmp/codeberg-release.sh
+      - name: Attach the verified files
         env:
           CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
-        run: |
-          .forgejo/codeberg-release.sh "$REF_NAME" ./builds
+          REF_NAME: ${{ forgejo.ref_name }}
+        run: /tmp/codeberg-release.sh "$REF_NAME" ./handoff
