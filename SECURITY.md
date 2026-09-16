@@ -40,6 +40,11 @@ at the next tag, and "the latest release" stays true.)
 - **Remote access by invite** (`internal/remote`): pairing, invite handling,
   the peer-to-peer data channel, and the bootstrap loader. The wire format
   itself is specified in the `scimux-rv` repository, which has its own policy.
+  The official pairing link opens the independently hosted trusted viewer at
+  `my.scimux.com`; authenticated rendezvous and STUN use `rv.scimux.com`.
+  Compromise of the rendezvous may disrupt service and expose its necessary
+  metadata, but must not let it supply viewer executable code or authenticate
+  as the paired computer. The viewer host and its release path remain trusted.
 - **Approvals.** A way to get an agent's tool call approved that the operator
   did not approve — including anything that defeats the one-turn lease, the
   nonce, or the `prompt_id` fence in the Claude permission hook.

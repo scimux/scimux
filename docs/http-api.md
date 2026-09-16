@@ -823,7 +823,10 @@ but do not bypass the token requirement.
 Mint an 8-character pairing code with a 120-second TTL. Returns
 `{code, rid, expires_at, state:"pending", link}`; `expires_at` is UTC
 RFC 3339 with optional fractional seconds. Open the returned `link` on the
-device to begin pairing. Confirm flags in the body are ignored.
+device to begin pairing. A v2 link opens `/p` on the configured trusted viewer;
+its fragment `o` names the separate cryptographic rendezvous service. Pairing
+material stays in the fragment rather than the path or query. Confirm flags in
+the body are ignored. This split does not add CORS to the local HTTP API.
 
 ### `GET /api/remote/pairing/{code}`
 
@@ -884,7 +887,9 @@ only be struck off by whoever issued the invite. A failure of the *local*
 half is a 500, because an identity still on disk is still an enrollment.
 
 §4.4 releases the installation and never the code, so re-enrolling
-afterwards takes a new invite.
+afterwards takes a new invite. Origin migration uses this operation while the
+saved old rendezvous is still configured; it never rewrites the stored origin
+or replaces the whole scimux data directory.
 
 ### `GET /api/remote/status`
 

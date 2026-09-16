@@ -1203,6 +1203,9 @@ func TestWebChildAcceptsLegacyEnvironmentFromOlderMuxer(t *testing.T) {
 	if cfg.Generation != 7 || !cfg.Replacement || cfg.Remote || cfg.Link.Token != "legacy-capability" || len(cfg.TrustedHosts) != 1 {
 		t.Fatalf("legacy config = %#v", cfg)
 	}
+	if cfg.ViewerOrigin != remote.DefaultViewerOrigin {
+		t.Fatalf("legacy ViewerOrigin = %q, want %q", cfg.ViewerOrigin, remote.DefaultViewerOrigin)
+	}
 	for _, key := range []string{envGeneration, envReplacement, envRemote, envInviteStdin, envTrusted, envCoreSocket, envCoreToken, envListenAddr, envDataDir, envCSRFToken} {
 		t.Run("invalid "+key, func(t *testing.T) {
 			bad := make(map[string]string, len(env))

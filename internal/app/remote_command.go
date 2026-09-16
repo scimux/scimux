@@ -127,6 +127,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	inviteFile := fs.String("invite-file", c.Config.InviteFile, "read invite from a 0600 owner-only file")
 	inviteStdin := fs.Bool("invite-stdin", c.Config.InviteStdin, "read invite from stdin")
 	rvURL := fs.String("rendezvous-url", c.Config.Origin, "rendezvous base URL (default "+remote.DefaultOrigin+"); also the origin bound into pairing transcripts")
+	viewerURL := fs.String("viewer-origin", c.Config.ViewerOrigin, "trusted pairing viewer origin (default "+remote.DefaultViewerOrigin+")")
 	var trustedHosts stringList
 	fs.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -141,6 +142,11 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	c.Config.Origin = origin
+	viewerOrigin, err := remote.NormalizeViewerOrigin(*viewerURL)
+	if err != nil {
+		return fmt.Errorf("-viewer-origin: %w", err)
+	}
+	c.Config.ViewerOrigin = viewerOrigin
 
 	c.listenAddr = *addr
 	c.socket = *socket

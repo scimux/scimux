@@ -25,14 +25,18 @@ import (
 
 // InviteVersion is the fragment's `v`. The /p page refuses a version it
 // does not read rather than guessing at the remaining parameters.
-const InviteVersion = "1"
+const InviteVersion = "2"
 
 // PairingLink builds the invite for a freshly minted pairing code.
 //
-// The origin is this installation's configured rendezvous origin and is
-// repeated in `o` so a link opened against the wrong deployment fails
-// loudly at the device instead of pairing somewhere unintended.
+// The page uses the configured trusted viewer origin. The distinct `o` field
+// carries this installation's cryptographic rendezvous service origin so the
+// viewer can reject a link for a different service deployment.
 func (c *Client) PairingLink(pc PairingCode) (string, error) {
+	viewerOrigin, err := c.validatedViewerOrigin()
+	if err != nil {
+		return "", fmt.Errorf("remote: invite: %w", err)
+	}
 	code, err := normalizePairingCode(pc.Code)
 	if err != nil {
 		return "", fmt.Errorf("remote: invite: %w", err)
@@ -57,5 +61,5 @@ func (c *Client) PairingLink(pc PairingCode) (string, error) {
 	frag.Set("c", code)
 	frag.Set("r", pc.RID)
 	frag.Set("x", hex.EncodeToString(x))
-	return c.origin() + "/p#" + frag.Encode(), nil
+	return viewerOrigin + "/p#" + frag.Encode(), nil
 }
