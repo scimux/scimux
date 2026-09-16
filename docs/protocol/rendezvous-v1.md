@@ -35,7 +35,7 @@ It never relays peer traffic.
 10. [Pairing (rv half)](#10-pairing-rv-half)
 11. [Pairing transcript and SAS](#11-pairing-transcript-and-sas)
 12. [Envelope inner format and seal](#12-envelope-inner-format-and-seal)
-13. [`/p` bootstrap inventory](#13-p-bootstrap-inventory)
+13. [API-only public surface](#13-api-only-public-surface)
 14. [Invite codes](#14-invite-codes)
 15. [Test vectors](#15-test-vectors)
 16. [Superseded text](#16-superseded-text)
@@ -52,7 +52,7 @@ It never relays peer traffic.
 | Device | paired phone or tablet | not at all — holds a rendezvous ID, or a pairing code |
 | Operator | `scimux-rv` CLI | not on the wire; same uid as the daemon, local log only |
 
-Origin is the `-origin` flag (default `https://my.scimux.com`). It is
+Origin is the `-origin` flag (default `https://rv.scimux.com`). It is
 never taken from `Host`.
 
 All versioned POSTs use UTF-8 JSON unless a section says otherwise.
@@ -110,22 +110,6 @@ replay.
 | `envelope-inner` | construction | — | plaintext inside the seal |
 | `envelope-seal-pairing` | construction | — | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
 | `envelope-seal-session` | construction | — | two ECDH P-256 + HKDF-SHA-256 + AES-256-GCM |
-| `p-page` | bootstrap | `GET /p` | device → rv |
-| `p-boot-js` | bootstrap | `GET /p/boot.js` | device → rv |
-| `p-boot-css` | bootstrap | `GET /p/boot.css` | device → rv |
-| `p-codec-js` | bootstrap | `GET /p/codec.js` | device → rv |
-| `p-connection-js` | bootstrap | `GET /p/connection.js` | device → rv |
-| `p-start-js` | bootstrap | `GET /p/start.js` | device → rv |
-| `p-page-js` | bootstrap | `GET /p/page.js` | device → rv |
-| `p-pairing-js` | bootstrap | `GET /p/pairing.js` | device → rv |
-| `p-rendezvous-js` | bootstrap | `GET /p/rendezvous.js` | device → rv |
-| `p-session-js` | bootstrap | `GET /p/session.js` | device → rv |
-| `p-store-js` | bootstrap | `GET /p/store.js` | device → rv |
-| `p-manifest` | bootstrap | `GET /p/manifest.webmanifest` | device → rv |
-| `p-icon-180` | bootstrap | `GET /p/icon-180.png` | device → rv |
-| `p-icon-512` | bootstrap | `GET /p/icon-512.png` | device → rv |
-| `p-icon-maskable-512` | bootstrap | `GET /p/icon-maskable-512.png` | device → rv |
-| `p-rejection` | bootstrap | `GET /p/not-in-inventory` | rv → device |
 | `stun-binding-request` | stun | — | client → rv (UDP Binding) |
 | `stun-binding-success` | stun | — | rv → client (XOR-MAPPED-ADDRESS) |
 | `stun-drop` | stun | — | malformed or oversized; no datagram |
@@ -997,141 +981,22 @@ sealed. The typed path is the only exception.
 
 ---
 
-## 13. `/p` bootstrap inventory
+## 13. API-only public surface
 
-FR-33. Closed enumerated GET list. The inventory is this table
-and nothing else. A path, method, or trailing slash that is not
-an exact row is `p-rejection` — the same bytes as
-`constant-rejection` (§7): status 404, the same headers, the
-ten-byte body, `Content-Length: 10`, no `Transfer-Encoding`, no
-`Location`, no `Server`, no listing, no framework error, no
-version banner. That comparison is made through a real HTTP
-client (AT-FR-33-a), not a `ResponseRecorder`.
+The rendezvous origin serves protocol behavior only. Health remains on its
+separate loopback-only listener and is absent from the public origin. The
+public origin does not serve the trusted browser viewer. `GET` and `HEAD` for `/p` and every former
+viewer asset path use the constant rejection from §7, as does every other
+unknown path. The trusted static viewer is published independently at
+`https://my.scimux.com/p` from the scimux-connect repository.
 
-`/p` MUST NOT pin a client to a scimux version. The application
-is fetched from the computer (FR-14, FR-40). A scimux version
-string in a `/p` body, query, path, or header is a defect. Two
-rv binaries stamped with different version strings MUST serve
-byte-identical inventory responses.
-
-| route | type | cache | integrity | notes |
-|---|---|---|---|---|
-| `GET /p` | `text/html; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the HTML | the page shell: markup and one module `src`. No inline script — the CSP below forbids it. No application code. |
-| `GET /p/start.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the entry point: imports `page.js` and calls `start()`. Nothing else. |
-| `GET /p/page.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the pairing screens (NFR-12) and the page's wiring. |
-| `GET /p/boot.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | pairing-to-handover orchestration and the FR-24 causes. Does not load the module graph; that graph arrives over the channel (FR-40). |
-| `GET /p/pairing.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | pairing crypto: transcript, SAS, envelope seal (§11, §12). |
-| `GET /p/rendezvous.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | the rendezvous HTTP client (§9, §10). |
-| `GET /p/session.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | session offer/answer and the data channel (§9, §12). |
-| `GET /p/store.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | per-installation storage namespace. |
-| `GET /p/boot.css` | `text/css; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the CSS | bootstrap styles. |
-| `GET /p/codec.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel handshake, frames, records and payloads ([`tunnel-v2.md`](tunnel-v2.md) §2–§6). Protocol, not application code. |
-| `GET /p/connection.js` | `application/javascript; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JS | tunnel request lifecycle and FR-24 states (`tunnel-v2.md` §7, §9). Protocol, not application code. |
-| `GET /p/manifest.webmanifest` | `application/manifest+json; charset=utf-8` | `no-store` | `Digest: sha-256=:…:` of the JSON | the Home Screen app declaration. `display: standalone`; `start_url` and `scope` are both `/p`. |
-| `GET /p/icon-180.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the `apple-touch-icon`. iOS takes the Home Screen icon from the link in the shell, not from the manifest. |
-| `GET /p/icon-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the ordinary manifest icon, `purpose: "any"`. |
-| `GET /p/icon-maskable-512.png` | `image/png` | `no-store` | `Digest: sha-256=:…:` of the PNG | the maskable manifest icon, `purpose: "any maskable"`; artwork inset inside the standard safe circle for launchers that crop. |
-
-The inventory grew from three rows to five on 2026-08-24, when the
-tunnel protocol moved into this repository, from five to ten on
-2026-08-26, when the pairing client was built, to eleven on
-2026-08-27, when the entry point became a row, to fourteen on
-2026-09-05, when the Home Screen manifest and its two icons became
-rows, and to fifteen on 2026-09-13, when ordinary and maskable 512px
-icons became separate rows. Before the Home Screen rows, adding `/p` produced a
-bookmark rather than an app: nothing in the shell declared one, so the
-launcher opened a browser tab and captured a screenshot for the icon.
-
-The entry point had been an inline
-`<script type=module>`, which the CSP two paragraphs below forbids, so
-`/p` rendered its "Loading…" placeholder and stopped there in every
-browser. An inline exemption — `unsafe-inline`, a nonce, or a hash —
-would have been the smaller diff and the wrong one: the inventory is the
-served set, and the code that runs the page belongs in it, carrying a
-`Digest` and closed over this table like every other row. "Closed" means
-**enumerated and fail-closed**, not fixed at any number: a row is
-added by amending this table and `specPInventory`, never by a
-wildcard, a directory handler, or a route that reads from disk per
-request.
-
-Every module is served at the path its own relative imports resolve
-to, so rv's half of the page needs no import map and no specifier
-rewriting. The computer's graph is a different problem and another
-repository's (`tunnel-v2.md` §8).
-
-None of these modules is application code. They implement pairing,
-the tunnel, and the FR-24 states, and they stop at §8's three fixed
-constants. FR-33 is asserted over them as a closure property rather
-than a word ban: every `import` in an inventory body resolves to
-another row of this table, every `icons[].src` in the manifest is a row
-of it, the manifest's `scope` is `/p` rather than `/` — a wider scope
-would claim routes this table does not contain — and the only computer
-route any of them names is §8's `/api/remote/bootstrap`, which is fetched over the
-data channel and never from rv. What the browser does *after* the
-channel is negotiated is fetched from the computer through those three
-constants.
-
-Each inventory response also carries:
-
-- `X-Content-Type-Options: nosniff`
-- `Content-Security-Policy: default-src 'self'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
-- `Referrer-Policy: no-referrer`
-- `Cache-Control: no-store`
-- `Digest: sha-256=:<base64 of SHA-256(body)>:` (RFC 9530)
-
-`Digest` is a content hash of the embedded bytes. It is not a
-scimux version and MUST NOT be derived from the linker-stamped
-binary version. Changing an asset changes its digest; changing
-the rv version string MUST NOT.
-
-The `blob:` allowances are for computer bytes already fetched through the
-authenticated tunnel and checked against the computer's manifest before an
-object URL is minted. Inline and evaluated script remain forbidden. Inline
-style is allowed because the computer UI uses style attributes for dynamic
-layout and state; workers and objects remain forbidden.
-
-POST, PUT, DELETE, PATCH on an inventory path are
-`p-rejection`. `GET /p/` (trailing slash), `GET /p/index.html`,
-`GET /p/app.js`, and every other `/p…` path are `p-rejection`.
-Query strings on an exact inventory path are ignored (the path
-is the inventory key). An unclean path (`/p/../p`) is the
-constant 404 before ServeMux can 301.
-
-### 13.1 Served bytes
-
-`GET /p` (`p-page`) is the only inventory body small enough to pin
-verbatim, and its vector carries these exact bytes. It contains no
-`/js/` of the application, no `/api/`, no `index.html`, no import
-map, and no version token:
-
-```
-<!doctype html>
-<meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>Pair with scimux</title>
-<link rel=stylesheet href="/p/boot.css">
-<main id=app><h1>Pair with scimux</h1><p>Loading&#8230;</p></main>
-<script type=module src="/p/start.js"></script>
-```
-
-(the file ends with a newline).
-
-The ten asset rows are **not reproduced inline.** They are hundreds
-of lines of protocol and pairing implementation, and pasting them
-here would create a second copy to keep in sync with `web/` — the
-drift this document exists to prevent. Their served bytes are exactly
-the checked-in bytes of the matching file under `web/js/` and
-`web/css/`, embedded at build time; each vector pins its
-`body_sha256` and its `Digest` header, so a module that changes moves
-its own row and nothing else. The behaviour they implement is
-specified in this document and in [`tunnel-v2.md`](tunnel-v2.md).
-
-The FR-33 properties that apply to every inventory row — no scimux
-version token, no application code, imports closed over the table,
-byte-identical across rv versions — are asserted by
-`TestAT_FR_33_b_NoApplicationCode` and `TestAT_FR_33_c_NoScimuxVersionPin`.
-
----
+Browser access is limited to exact-origin CORS for `POST /v1/pair/offer` and
+`POST /v1/envelope/{id}` where `id` is exactly 64 lowercase hexadecimal
+characters. The configured viewer origin defaults to `https://my.scimux.com`.
+An accepted preflight permits only POST and Content-Type. Actual approved
+browser responses expose Retry-After. The server never emits
+Access-Control-Allow-Credentials or a wildcard origin. Native requests with no
+Origin retain their protocol semantics.
 
 ## 14. Invite codes
 

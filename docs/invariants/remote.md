@@ -15,11 +15,11 @@ identifiers retain their numbering from the archived remote-access requirements.
   the other. Custom viewer origins are canonical HTTPS origins and survive the
   bounded web-child configuration pipe; an older pipe document defaults to the
   official viewer. The local HTTP listener does not gain CORS from this split.
-- **The tunnel protocol is owned by scimux-rv, not by this repository.** The
-  browser↔computer wire format is specified in rv's
+- **The tunnel protocol is owned by scimux-connect, not by this repository.** The
+  browser↔computer wire format is specified in scimux-connect's
   `docs/protocol/tunnel-v2.md`, and its **browser** implementation lives there
   too (`web/js/codec.js`, `web/js/connection.js`). Deployment asymmetry is the
-  reason: rv is deployed once and reaches every browser on the next page load,
+  reason: the independent viewer reaches every browser on the next page load,
   while scimux binaries sit on many computers at many versions, so the side
   that must tolerate the spread holds the protocol. Never reintroduce a
   browser codec or channel transport here — it would arrive over the very
@@ -27,13 +27,13 @@ identifiers retain their numbering from the archived remote-access requirements.
   - The computer half is `internal/remote/codec` plus `web/js/bootstrap.js`,
     which is the *loader*, not the transport. It ships with the binary because
     it knows this repository's module graph, which is what lets us restructure
-    that graph with no rv deployment; vendoring it into rv was rejected (rv
-    would go stale, and would supply the code that checks this computer's own
-    integrity values, inverting FR-40).
+    that graph with no viewer deployment. Vendoring it into the viewer would
+    leave it stale and supply the code that checks this computer's own
+    integrity values, inverting FR-40.
   - Three constants are protocol, not local names: `GET /api/remote/bootstrap`,
     `GET /js/bootstrap.js`, and the `bootstrap({channel, manifest,
     createObjectURL, installImportMap, importModule})` signature. Renaming or
-    moving any of them is a MAJOR bump that breaks every deployed rv.
+    moving any of them is a MAJOR bump that breaks every deployed viewer.
   - The loader rewrites every specifier to the imported module's absolute
     `blob:` URL and installs **no** import map (a `blob:` URL has an opaque
     path, so nothing relative or root-absolute resolves against it). Hence
@@ -53,12 +53,12 @@ identifiers retain their numbering from the archived remote-access requirements.
     payload fields are tagged records rather than positional.
 - **`internal/remote/codec/testdata/vectors.json` is a published contract, not
   a local fixture.** `vectors_test.go` regenerates it from the production
-  encoders and fails on drift; scimux-rv byte-copies it and decodes every
+  encoders and fails on drift; scimux-connect byte-copies it and decodes every
   vector with its browser codec. It is the only oracle either side has, so it
   must stay generated — never hand-edited, pretty-printed, or authored by
   reading the spec. Each vendoring lane is owned by the *receiving*
   repository: the manual procedure in `docs/rendezvous-protocol-sync.md`
-  here, and `scripts/vendor-tunnel.sh` in scimux-rv;
+  here, and `scripts/vendor-tunnel.sh` in scimux-connect;
   a single bidirectional "sync everything" entry point is deliberately absent,
   because it would eventually regenerate these vectors on the consuming side.
 - **`PairingTTL` is a constant shared with a server this repository does not

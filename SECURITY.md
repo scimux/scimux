@@ -39,7 +39,8 @@ at the next tag, and "the latest release" stays true.)
   can be bypassed, DNS rebinding, framing.
 - **Remote access by invite** (`internal/remote`): pairing, invite handling,
   the peer-to-peer data channel, and the bootstrap loader. The wire format
-  itself is specified in the `scimux-rv` repository, which has its own policy.
+  itself is specified in `scimux-connect`, which delivers the trusted viewer.
+  The `scimux-rv` repository owns rendezvous and its own security policy.
   The official pairing link opens the independently hosted trusted viewer at
   `my.scimux.com`; authenticated rendezvous and STUN use `rv.scimux.com`.
   Compromise of the rendezvous may disrupt service and expose its necessary
