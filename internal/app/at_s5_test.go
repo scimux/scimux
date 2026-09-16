@@ -121,7 +121,7 @@ func TestAT_FR_01_b_RemoteWithoutInviteFailsLocally(t *testing.T) {
 			t.Fatal(err)
 		}
 		pubHex, privHex := storedEnrollmentKeypair()
-		raw := []byte(`{"v":1,"status":"enrolled","handle":"ih_041061050R3GG28A","public_key":"` + pubHex + `","private_key":"` + privHex + `","origin":"https://my.scimux.com"}`)
+		raw := []byte(`{"v":1,"status":"enrolled","handle":"ih_041061050R3GG28A","public_key":"` + pubHex + `","private_key":"` + privHex + `","origin":"https://rv.scimux.com"}`)
 		if err := os.WriteFile(c.StatePath(), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}
