@@ -37,6 +37,9 @@ internal/acp/muse/schema/
 !docs/invariants/remote.md
 !docs/invariants/storage.md
 !docs/testing.md
+!docs/security-hardening-plan.md
+!docs/security-hardening-implementation.md
+!docs/security-hardening-operations.md
 
 # Private archives never belong to the published tree.
 /attic/
