@@ -1,10 +1,109 @@
 package app
 
 import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestReleaseVerificationBlockExecutesFailClosed(t *testing.T) {
+	names := []string{"scimux-darwin-amd64", "scimux-darwin-arm64", "scimux-linux-amd64", "scimux-linux-arm64"}
+	cases := map[string]func(string, []string){
+		"valid":              nil,
+		"duplicate checksum": func(dir string, lines []string) { writeLines(t, dir, append(lines, lines[0])) },
+		"bad hash": func(dir string, lines []string) {
+			lines[0] = strings.Repeat("0", 64) + "  " + names[0]
+			writeLines(t, dir, lines)
+		},
+		"bad name and path": func(dir string, lines []string) {
+			lines[0] = strings.Fields(lines[0])[0] + "  ../outside"
+			writeLines(t, dir, lines)
+		},
+		"wrong count":     func(dir string, lines []string) { writeLines(t, dir, lines[1:]) },
+		"unexpected file": func(dir string, lines []string) { os.WriteFile(filepath.Join(dir, "extra"), []byte("x"), 0o600) },
+		"symlink": func(dir string, lines []string) {
+			os.Remove(filepath.Join(dir, names[0]))
+			os.Symlink(names[1], filepath.Join(dir, names[0]))
+		},
+		"directory": func(dir string, lines []string) {
+			os.Remove(filepath.Join(dir, names[0]))
+			os.Mkdir(filepath.Join(dir, names[0]), 0o700)
+		},
+		"fifo": func(dir string, lines []string) {
+			os.Remove(filepath.Join(dir, names[0]))
+			if err := exec.Command("mkfifo", filepath.Join(dir, names[0])).Run(); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	script := releaseVerifyScript(t)
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			handoff := filepath.Join(root, "handoff")
+			os.Mkdir(handoff, 0o700)
+			var lines []string
+			for _, file := range names {
+				body := []byte("synthetic-" + file)
+				os.WriteFile(filepath.Join(handoff, file), body, 0o600)
+				sum := sha256.Sum256(body)
+				lines = append(lines, fmt.Sprintf("%x  %s", sum, file))
+			}
+			writeLines(t, handoff, lines)
+			if mutate != nil {
+				mutate(handoff, append([]string(nil), lines...))
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "sh", "-c", script)
+			cmd.Dir = root
+			err := cmd.Run()
+			if ctx.Err() != nil {
+				t.Fatal("verification blocked on untrusted input")
+			}
+			if (mutate == nil) != (err == nil) {
+				t.Fatalf("verification result error=%v", err)
+			}
+		})
+	}
+}
+
+func writeLines(t *testing.T, dir string, lines []string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func releaseVerifyScript(t *testing.T) string {
+	t.Helper()
+	src := mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows/release.yml"))
+	marker := "      - name: Verify closed inventory and exact digests"
+	start := strings.Index(src, marker)
+	if start < 0 {
+		t.Fatal("verification step absent")
+	}
+	rest := src[start:]
+	run := strings.Index(rest, "        run: |\n")
+	if run < 0 {
+		t.Fatal("verification run block absent")
+	}
+	rest = rest[run+len("        run: |\n"):]
+	if end := strings.Index(rest, "      - name:"); end >= 0 {
+		rest = rest[:end]
+	}
+	var lines []string
+	for _, line := range strings.Split(rest, "\n") {
+		lines = append(lines, strings.TrimPrefix(line, "          "))
+	}
+	return strings.Join(lines, "\n")
+}
 
 func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
 	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows/release.yml")))
@@ -72,7 +171,7 @@ func TestReleaseArtifactInventoryIsClosed(t *testing.T) {
 			t.Errorf("publish verification does not close over %s", name)
 		}
 	}
-	for _, guard := range []string{"-type l", "unexpected release artifact", "invalid checksum manifest", "sha256sum -c SHA256SUMS"} {
+	for _, guard := range []string{"-type l", "non-regular release artifact", "unexpected release artifact", "invalid checksum manifest", "sha256sum -c SHA256SUMS"} {
 		if !strings.Contains(publish, guard) {
 			t.Errorf("publish verification lacks %q", guard)
 		}

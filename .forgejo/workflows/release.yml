@@ -87,6 +87,7 @@ jobs:
         run: |
           set -eu
           test -z "$(find handoff -type l -print -quit)" || { echo "symlink in release artifact" >&2; exit 1; }
+          test -z "$(find handoff -mindepth 1 -maxdepth 1 ! -type f -print -quit)" || { echo "non-regular release artifact" >&2; exit 1; }
           actual="$(find handoff -mindepth 1 -maxdepth 1 -print | sed 's#^handoff/##' | LC_ALL=C sort)"
           expected='SHA256SUMS
           scimux-darwin-amd64
@@ -98,7 +99,7 @@ jobs:
           awk '
             NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { bad=1; next }
             $2 !~ /^scimux-(darwin-(amd64|arm64)|linux-(amd64|arm64))$/ { bad=1; next }
-            seen[$2]++ { count++ }
+            { seen[$2]++; count++ }
             END { for (name in seen) unique++; exit (bad || count != 4 || unique != 4) }
           ' SHA256SUMS || { echo "invalid checksum manifest" >&2; exit 1; }
           sha256sum -c SHA256SUMS
