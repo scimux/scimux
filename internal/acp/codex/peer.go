@@ -29,7 +29,7 @@ type peer struct {
 
 	mu      sync.Mutex
 	nextID  int
-	pending map[string]chan rpcMessage // keyed by canonID so string ids ("1") match int ids (1)
+	pending map[string]pendingCall // keyed by canonID so string ids ("1") match int ids (1)
 	closed  bool
 
 	onRequest serverRequestHandler
@@ -64,8 +64,13 @@ type rpcError struct {
 
 func (e *rpcError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message) }
 
+type pendingCall struct {
+	ch       chan rpcMessage
+	observer func(result json.RawMessage, err error)
+}
+
 func newPeer(w io.Writer, log Tracer) *peer {
-	return &peer{w: w, log: log, nextID: 1, pending: map[string]chan rpcMessage{}}
+	return &peer{w: w, log: log, nextID: 1, pending: map[string]pendingCall{}}
 }
 
 // canonID converts a raw JSON id value (int or quoted string) to a canonical
@@ -146,15 +151,21 @@ func (p *peer) readLoop(r io.Reader) error {
 // or crashed server surfaces as an error rather than a deadlock.
 func (p *peer) failAll(err error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.closed = true
 	msg := "peer closed"
 	if err != nil {
 		msg = err.Error()
 	}
-	for id, ch := range p.pending {
-		ch <- rpcMessage{Error: &rpcError{Code: -32000, Message: msg}}
+	failed := make([]pendingCall, 0, len(p.pending))
+	for id, call := range p.pending {
+		failed = append(failed, call)
 		delete(p.pending, id)
+	}
+	p.mu.Unlock()
+
+	response := rpcMessage{Error: &rpcError{Code: -32000, Message: msg}}
+	for _, call := range failed {
+		deliverPending(call, response)
 	}
 }
 
@@ -178,17 +189,34 @@ func (p *peer) dispatchRequest(m rpcMessage) {
 func (p *peer) deliverResponse(m rpcMessage) {
 	key := canonID(m.ID)
 	p.mu.Lock()
-	ch := p.pending[key]
+	call, ok := p.pending[key]
 	delete(p.pending, key)
 	p.mu.Unlock()
-	if ch != nil {
-		ch <- m
+	if ok {
+		deliverPending(call, m)
 	}
+}
+
+func deliverPending(call pendingCall, response rpcMessage) {
+	if call.observer != nil {
+		var err error
+		if response.Error != nil {
+			err = response.Error
+		}
+		call.observer(response.Result, err)
+	}
+	call.ch <- response
 }
 
 // call sends a client->server request and blocks for its response.
 func (p *peer) call(method string, params any) (json.RawMessage, error) {
-	return p.callCtx(context.Background(), method, params)
+	return p.callObserved(method, params, nil)
+}
+
+// callObserved runs observer synchronously on the peer read loop when the
+// response arrives, before any later wire notification is dispatched.
+func (p *peer) callObserved(method string, params any, observer func(json.RawMessage, error)) (json.RawMessage, error) {
+	return p.callCtxObserved(context.Background(), method, params, observer)
 }
 
 // callCtx is call with cancellation: on ctx.Done() the pending id is
@@ -196,6 +224,10 @@ func (p *peer) call(method string, params any) (json.RawMessage, error) {
 // pending-map entry behind. The response channel is buffered, so a response
 // that races the cancellation is dropped, not leaked.
 func (p *peer) callCtx(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return p.callCtxObserved(ctx, method, params, nil)
+}
+
+func (p *peer) callCtxObserved(ctx context.Context, method string, params any, observer func(json.RawMessage, error)) (json.RawMessage, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -205,7 +237,7 @@ func (p *peer) callCtx(ctx context.Context, method string, params any) (json.Raw
 	p.nextID++
 	key := strconv.Itoa(id)
 	ch := make(chan rpcMessage, 1)
-	p.pending[key] = ch
+	p.pending[key] = pendingCall{ch: ch, observer: observer}
 	p.mu.Unlock()
 
 	if err := p.send(map[string]any{"id": id, "method": method, "params": params}); err != nil {

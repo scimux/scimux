@@ -29,6 +29,29 @@ type Client struct {
 	approve  ApprovalFunc
 	turnDone chan turnResult
 	closed   bool
+	// parentThreadID is the most recent thread/start identity. turnThreadID
+	// snapshots it (via RunTurn's argument) for one local invocation so a later
+	// thread or a child thread cannot claim that invocation's lifecycle.
+	parentThreadID string
+	turnThreadID   string
+	turnSeq        uint64
+	turnTerminal   bool
+	// turnOwners remembers which local invocation first established each
+	// server turn id. Notifications may precede their turn/start response, so
+	// the first explicit lifecycle event claims an otherwise unknown id; the
+	// remembered owner then prevents delayed events from an earlier invocation
+	// claiming the startup window of a later one.
+	turnOwners map[string]uint64
+	// unresolvedStarts contains turn/start requests whose responses have not
+	// arrived. A cancelled invocation can leave its detached request unresolved;
+	// while such an older request exists, an unknown lifecycle id cannot safely
+	// be attributed to a newer invocation on the same thread.
+	unresolvedStarts map[uint64]string
+	// pendingTerminals retains explicitly identified terminal notifications that
+	// cannot yet be attributed because an older turn/start response is still
+	// outstanding. A later response either replays the notification for its
+	// active owner or proves that it belongs to a retired invocation.
+	pendingTerminals map[string]terminalNotification
 	// curTurnID is the server-assigned id of the turn in flight (from the
 	// turn/start result, or the turn/started notification for servers that
 	// respond late). turn/interrupt requires it; cleared when the turn ends.
@@ -63,6 +86,18 @@ type Client struct {
 type turnResult struct {
 	reason string
 	err    error
+}
+
+type terminalNotification struct {
+	method   string
+	params   json.RawMessage
+	identity lifecycleIdentity
+}
+
+type terminalDelivery struct {
+	notification terminalNotification
+	done         chan turnResult
+	leftover     map[string]*strings.Builder
 }
 
 // InitializeResult is the subset of the initialize response scimux cares about.
@@ -189,6 +224,7 @@ func (c *Client) StartThread(ctx context.Context, p StartThreadParams) (ThreadIn
 	}
 	c.mu.Lock()
 	c.model = model
+	c.parentThreadID = r.Thread.ID
 	c.mu.Unlock()
 	return ThreadInfo{
 		ID: r.Thread.ID, Path: r.Thread.Path, Model: r.Model,
@@ -210,13 +246,39 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 		c.mu.Unlock()
 		return ErrTurnActive
 	}
+	if c.parentThreadID != "" && threadID != c.parentThreadID {
+		parentThreadID := c.parentThreadID
+		c.mu.Unlock()
+		return fmt.Errorf("turn thread %q is not current parent thread %q", threadID, parentThreadID)
+	}
 	done := make(chan turnResult, 1)
+	c.turnSeq++
+	seq := c.turnSeq
 	c.turnDone = done
+	c.turnThreadID = threadID
+	c.turnTerminal = false
+	c.curTurnID = ""
+	c.turnIDReady = make(chan struct{})
+	if c.unresolvedStarts == nil {
+		c.unresolvedStarts = make(map[uint64]string)
+	}
+	c.unresolvedStarts[seq] = threadID
 	c.mu.Unlock()
 
 	defer func() {
 		c.mu.Lock()
-		c.turnDone = nil
+		if c.turnSeq == seq {
+			c.turnDone = nil
+			c.turnThreadID = ""
+			c.turnTerminal = true
+			c.curTurnID = ""
+			if c.turnIDReady != nil {
+				close(c.turnIDReady)
+				c.turnIDReady = nil
+			}
+			c.deltas = nil
+			c.fileChanges = nil
+		}
 		c.mu.Unlock()
 	}()
 
@@ -225,26 +287,29 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 	// client therefore does not emit the user event itself, and onNotify skips
 	// the server's userMessage echo.
 
-	c.mu.Lock()
-	c.turnIDReady = make(chan struct{})
-	c.mu.Unlock()
-
-	// turn/start runs detached from ctx so a cancel racing the response still
-	// publishes the turn id (setTurnID) — an interrupt needs it to address the
-	// turn that may already be running server-side.
+	// turn/start runs detached from ctx so a cancel racing the response can still
+	// publish the turn id for this exact invocation — an interrupt needs it to
+	// address the turn that may already be running server-side. The invocation
+	// token prevents a late response from repopulating ended or newer state.
 	type startRes struct {
 		raw json.RawMessage
 		err error
 	}
 	startCh := make(chan startRes, 1)
 	go func() {
-		raw, err := c.peer.call("turn/start", map[string]any{
+		raw, err := c.peer.callObserved("turn/start", map[string]any{
 			"threadId": threadID,
 			"input":    []map[string]any{{"type": "text", "text": text}},
+		}, func(raw json.RawMessage, err error) {
+			turnID := ""
+			if err == nil {
+				turnID = turnIDFromResult(raw)
+			}
+			c.setTurnID(seq, turnID)
 		})
-		if err == nil {
-			c.setTurnID(turnIDFromResult(raw))
-		}
+		// A local send failure has no response-dispatch edge. Resolving again is
+		// harmless after an observed response and clears that failure path.
+		c.setTurnID(seq, "")
 		startCh <- startRes{raw, err}
 	}()
 
@@ -253,7 +318,7 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 	// the server to stop (turn/interrupt), then give it a moment to confirm
 	// via turn/completed so a follow-up Send cannot collide with a live turn.
 	cancelAndSettle := func() error {
-		c.interruptTurn(threadID)
+		c.interruptTurn(seq)
 		select {
 		case <-done:
 		case <-time.After(interruptSettle):
@@ -267,6 +332,8 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 		if r.err != nil {
 			return r.err
 		}
+	case r := <-done:
+		return r.err
 	case <-ctx.Done():
 		return cancelAndSettle()
 	case <-c.done:
@@ -292,9 +359,13 @@ var interruptSettle = 5 * time.Second
 // turn/start response — it waits for the id (or the turn's end, or the peer's
 // death) before giving up. Best-effort beyond that: without an id there is
 // nothing addressable to interrupt.
-func (c *Client) interruptTurn(threadID string) {
+func (c *Client) interruptTurn(seq uint64) {
 	c.mu.Lock()
-	turnID, ready := c.curTurnID, c.turnIDReady
+	if c.turnSeq != seq || c.turnTerminal {
+		c.mu.Unlock()
+		return
+	}
+	threadID, turnID, ready := c.turnThreadID, c.curTurnID, c.turnIDReady
 	c.mu.Unlock()
 	if turnID == "" && ready != nil {
 		select {
@@ -303,7 +374,9 @@ func (c *Client) interruptTurn(threadID string) {
 		case <-c.done:
 		}
 		c.mu.Lock()
-		turnID = c.curTurnID
+		if c.turnSeq == seq && !c.turnTerminal {
+			threadID, turnID = c.turnThreadID, c.curTurnID
+		}
 		c.mu.Unlock()
 	}
 	if turnID == "" {
@@ -317,19 +390,68 @@ func (c *Client) interruptTurn(threadID string) {
 	})
 }
 
-// setTurnID publishes the in-flight turn's id and unblocks any interrupt
-// waiting for it. Empty ids are ignored.
-func (c *Client) setTurnID(id string) {
+// setTurnID resolves one turn/start request, publishes the in-flight turn's id,
+// and unblocks any interrupt waiting for it. An empty id still resolves the
+// request but cannot address a server turn.
+func (c *Client) setTurnID(seq uint64, id string) {
+	c.mu.Lock()
+	delete(c.unresolvedStarts, seq)
 	if id == "" {
+		c.prunePendingTerminalsLocked()
+		c.mu.Unlock()
 		return
 	}
-	c.mu.Lock()
-	c.curTurnID = id
-	if c.turnIDReady != nil {
-		close(c.turnIDReady)
-		c.turnIDReady = nil
+	if c.turnOwners == nil {
+		c.turnOwners = make(map[string]uint64)
 	}
+	if owner, known := c.turnOwners[id]; known && owner != seq {
+		delete(c.pendingTerminals, id)
+		c.mu.Unlock()
+		return
+	}
+	c.turnOwners[id] = seq
+	activeOwner := c.turnSeq == seq && c.turnDone != nil && !c.turnTerminal
+	if activeOwner {
+		c.curTurnID = id
+		if c.turnIDReady != nil {
+			close(c.turnIDReady)
+			c.turnIDReady = nil
+		}
+	}
+
+	// A response is authoritative ownership evidence for a retained terminal.
+	// Replay it only for the active invocation; a response for any retired
+	// invocation proves that notification stale and removes it permanently.
+	var delivery *terminalDelivery
+	if notification, ok := c.pendingTerminals[id]; ok {
+		delete(c.pendingTerminals, id)
+		if activeOwner {
+			d := c.retireTurnLocked(notification)
+			delivery = &d
+		}
+	}
+	c.prunePendingTerminalsLocked()
 	c.mu.Unlock()
+	if delivery != nil {
+		c.deliverTerminal(*delivery)
+	}
+}
+
+// prunePendingTerminalsLocked drops notifications that no outstanding start
+// response can still own. Known retired owners are stale; once every response
+// has arrived, an unknown id is likewise proven not to identify a local turn.
+func (c *Client) prunePendingTerminalsLocked() {
+	for id := range c.pendingTerminals {
+		if owner, known := c.turnOwners[id]; known {
+			if owner != c.turnSeq || c.turnDone == nil || c.turnTerminal {
+				delete(c.pendingTerminals, id)
+			}
+			continue
+		}
+		if len(c.unresolvedStarts) == 0 {
+			delete(c.pendingTerminals, id)
+		}
+	}
 }
 
 // turnIDFromResult extracts the turn id from a turn/start result ({"turn":{"id":...}}).
@@ -341,6 +463,216 @@ func turnIDFromResult(res json.RawMessage) string {
 	}
 	_ = json.Unmarshal(res, &v)
 	return v.Turn.ID
+}
+
+// lifecycleIdentity is the explicit ownership carried by a lifecycle
+// notification. A valid identity may be empty: older app-server versions emit
+// identity-less lifecycle forms, which retain their existing connection-local
+// behavior. Once an identity field is present it must be a non-empty string;
+// conflicting top-level and nested turn ids are malformed and fail closed.
+type lifecycleIdentity struct {
+	threadID  string
+	turnID    string
+	hasThread bool
+	hasTurn   bool
+	valid     bool
+}
+
+func decodeLifecycleIdentity(params json.RawMessage) lifecycleIdentity {
+	id := lifecycleIdentity{valid: true}
+	if len(params) == 0 {
+		return id
+	}
+	var value any
+	if json.Unmarshal(params, &value) != nil {
+		id.valid = false
+		return id
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return id
+	}
+	readString := func(key string) (string, bool, bool) {
+		v, present := obj[key]
+		if !present {
+			return "", false, true
+		}
+		s, ok := v.(string)
+		return s, true, ok && s != ""
+	}
+	var okField bool
+	id.threadID, id.hasThread, okField = readString("threadId")
+	if !okField {
+		id.valid = false
+		return id
+	}
+	topTurn, hasTopTurn, okField := readString("turnId")
+	if !okField {
+		id.valid = false
+		return id
+	}
+	nestedTurn, hasNestedTurn := "", false
+	if rawTurn, present := obj["turn"]; present {
+		turn, ok := rawTurn.(map[string]any)
+		if !ok {
+			id.valid = false
+			return id
+		}
+		if rawID, present := turn["id"]; present {
+			nestedTurn, ok = rawID.(string)
+			if !ok || nestedTurn == "" {
+				id.valid = false
+				return id
+			}
+			hasNestedTurn = true
+		}
+	}
+	if hasTopTurn && hasNestedTurn && topTurn != nestedTurn {
+		id.valid = false
+		return id
+	}
+	id.hasTurn = hasTopTurn || hasNestedTurn
+	if hasTopTurn {
+		id.turnID = topTurn
+	} else {
+		id.turnID = nestedTurn
+	}
+	return id
+}
+
+type lifecycleClaim uint8
+
+const (
+	lifecycleRejected lifecycleClaim = iota
+	lifecycleClaimed
+	lifecycleAmbiguous
+)
+
+// claimLifecycleLocked validates explicit identity against the current local
+// invocation and establishes ownership when a legitimate notification arrives
+// before its turn/start response. Identity-less forms remain connection-local
+// for compatibility; malformed explicit identity and any explicit mismatch
+// fail closed. Remembered ownership prevents an old turn on the same thread
+// from claiming a later invocation while its current turn id is still unknown.
+func (c *Client) claimLifecycleLocked(id lifecycleIdentity) lifecycleClaim {
+	if !id.valid || c.turnDone == nil || c.turnTerminal {
+		return lifecycleRejected
+	}
+	if id.hasThread && id.threadID != c.turnThreadID {
+		return lifecycleRejected
+	}
+	if !id.hasTurn {
+		return lifecycleClaimed
+	}
+	if c.curTurnID != "" {
+		if id.turnID != c.curTurnID {
+			return lifecycleRejected
+		}
+	} else {
+		if owner, known := c.turnOwners[id.turnID]; known && owner != c.turnSeq {
+			return lifecycleRejected
+		}
+		for seq, threadID := range c.unresolvedStarts {
+			if seq < c.turnSeq && (!id.hasThread || threadID == id.threadID) {
+				return lifecycleAmbiguous
+			}
+		}
+		c.curTurnID = id.turnID
+		if c.turnIDReady != nil {
+			close(c.turnIDReady)
+			c.turnIDReady = nil
+		}
+	}
+	if c.turnOwners == nil {
+		c.turnOwners = make(map[string]uint64)
+	}
+	c.turnOwners[id.turnID] = c.turnSeq
+	return lifecycleClaimed
+}
+
+func (c *Client) noteTurnStarted(id lifecycleIdentity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !id.hasTurn || c.claimLifecycleLocked(id) != lifecycleClaimed {
+		return
+	}
+}
+
+// finishNotifiedTurn atomically checks ownership, retires the invocation, and
+// detaches its buffers. Callers emit or signal only after releasing c.mu.
+func (c *Client) finishNotifiedTurn(id lifecycleIdentity) (chan turnResult, map[string]*strings.Builder, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.claimLifecycleLocked(id) != lifecycleClaimed {
+		return nil, nil, false
+	}
+	delivery := c.retireTurnLocked(terminalNotification{identity: id})
+	return delivery.done, delivery.leftover, true
+}
+
+func (c *Client) retireTurnLocked(notification terminalNotification) terminalDelivery {
+	c.turnTerminal = true
+	done := c.turnDone
+	c.curTurnID = ""
+	if c.turnIDReady != nil {
+		close(c.turnIDReady)
+		c.turnIDReady = nil
+	}
+	leftover := c.deltas
+	c.deltas = nil
+	c.fileChanges = nil
+	return terminalDelivery{notification: notification, done: done, leftover: leftover}
+}
+
+// finishOrRetainTerminal consumes an attributable terminal immediately and
+// retains only the one case that can become attributable later: a valid,
+// explicitly identified event blocked by an older unresolved start response.
+func (c *Client) finishOrRetainTerminal(method string, params json.RawMessage) (terminalDelivery, bool) {
+	notification := terminalNotification{
+		method:   method,
+		params:   append(json.RawMessage(nil), params...),
+		identity: decodeLifecycleIdentity(params),
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch c.claimLifecycleLocked(notification.identity) {
+	case lifecycleClaimed:
+		return c.retireTurnLocked(notification), true
+	case lifecycleAmbiguous:
+		if c.pendingTerminals == nil {
+			c.pendingTerminals = make(map[string]terminalNotification)
+		}
+		// The first terminal edge for a server turn is authoritative. Ignore a
+		// duplicate or contradictory terminal until ownership is resolved.
+		if _, exists := c.pendingTerminals[notification.identity.turnID]; !exists {
+			c.pendingTerminals[notification.identity.turnID] = notification
+		}
+	}
+	return terminalDelivery{}, false
+}
+
+func (c *Client) deliverTerminal(delivery terminalDelivery) {
+	if delivery.notification.method == "turn/completed" {
+		// Safety-net flush: if the server ended the turn without emitting
+		// item/completed for a buffered delta item, preserve the assembled text.
+		c.emitDeltaBuffers(delivery.leftover)
+		delivery.done <- turnResult{reason: "turn/completed"}
+		return
+	}
+	// Failed turns discard partial delta buffers but preserve the raw failure.
+	c.emit(Event{T: "error", Error: string(delivery.notification.params)})
+	delivery.done <- turnResult{
+		reason: "error",
+		err:    fmt.Errorf("turn failed: %s", string(delivery.notification.params)),
+	}
+}
+
+func (c *Client) emitDeltaBuffers(leftover map[string]*strings.Builder) {
+	for _, b := range leftover {
+		if text := b.String(); text != "" {
+			c.emit(Event{T: "assistant", Text: text})
+		}
+	}
 }
 
 // onNotify routes streaming notifications to the sink and detects turn end.
@@ -409,24 +741,31 @@ func (c *Client) onNotify(method string, params json.RawMessage) {
 			c.emit(Event{T: "usage", Usage: u})
 		}
 	case "turn/started":
-		c.setTurnID(turnIDFromResult(params))
+		c.noteTurnStarted(decodeLifecycleIdentity(params))
 	case "turn/completed":
-		c.forgetFileChanges()
-		// Safety-net flush: if the server ended the turn without emitting
-		// item/completed for a buffered delta item (protocol churn or an
-		// interrupted item), emit whatever text was accumulated so it is not
-		// silently lost (finding 84).
-		c.flushDeltas()
-		c.signalTurn(turnResult{reason: "turn/completed"})
+		delivery, ok := c.finishOrRetainTerminal(method, params)
+		if !ok {
+			break
+		}
+		c.deliverTerminal(delivery)
 	case "turn/failed", "error":
-		// Clear buffered deltas on failure; do not emit partial text as
-		// assistant output for a turn that did not complete (finding 84).
-		c.mu.Lock()
-		c.deltas = nil
-		c.fileChanges = nil
-		c.mu.Unlock()
-		c.emit(Event{T: "error", Error: string(params)})
-		c.signalTurn(turnResult{reason: "error", err: fmt.Errorf("turn failed: %s", string(params))})
+		identity := decodeLifecycleIdentity(params)
+		delivery, ok := c.finishOrRetainTerminal(method, params)
+		if !ok {
+			// An identity-less error is connection-wide. Preserve the existing
+			// behavior of reporting it even while idle; explicitly scoped or
+			// malformed errors are not attributed to this parent.
+			if identity.valid && !identity.hasThread && !identity.hasTurn {
+				c.mu.Lock()
+				idle := c.turnDone == nil
+				c.mu.Unlock()
+				if idle {
+					c.emit(Event{T: "error", Error: string(params)})
+				}
+			}
+			break
+		}
+		c.deliverTerminal(delivery)
 	}
 }
 
@@ -501,44 +840,6 @@ func (c *Client) fileChangesFor(itemID string) []FileChangePath {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.fileChanges[itemID]
-}
-
-func (c *Client) forgetFileChanges() {
-	c.mu.Lock()
-	c.fileChanges = nil
-	c.mu.Unlock()
-}
-
-// flushDeltas emits any buffered delta fragments as assistant events and clears
-// the buffer. Called on turn/completed as a safety net for delta items whose
-// item/completed was never delivered.
-func (c *Client) flushDeltas() {
-	c.mu.Lock()
-	leftover := c.deltas
-	c.deltas = nil
-	c.mu.Unlock()
-	for _, b := range leftover {
-		if text := b.String(); text != "" {
-			c.emit(Event{T: "assistant", Text: text})
-		}
-	}
-}
-
-func (c *Client) signalTurn(r turnResult) {
-	c.mu.Lock()
-	done := c.turnDone
-	c.curTurnID = "" // the turn is over; nothing addressable to interrupt
-	if c.turnIDReady != nil {
-		close(c.turnIDReady) // unblock a waiting interrupt; it reads "" and stops
-		c.turnIDReady = nil
-	}
-	c.mu.Unlock()
-	if done != nil {
-		select {
-		case done <- r:
-		default:
-		}
-	}
 }
 
 // onRequest answers server->client requests: approvals through the injected
