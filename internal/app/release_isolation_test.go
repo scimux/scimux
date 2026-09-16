@@ -7,10 +7,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWorkflowTestJobsInstallReleaseUploadTools(t *testing.T) {
+	for _, lane := range []struct{ file, job string }{
+		{"build.yml", "build-and-test:"},
+		{"offline.yml", "offline-tests:"},
+		{"release.yml", "build-and-test:"},
+	} {
+		t.Run(lane.file, func(t *testing.T) {
+			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows", lane.file)))
+			commands := strings.Join(workflowRunBlocks(workflowJobBlock(t, src, lane.job)), "\n")
+			firstTest := strings.Index(commands, "go test ")
+			if firstTest < 0 {
+				t.Fatal("job no longer runs Go tests")
+			}
+			installed := map[string]bool{}
+			for _, match := range regexp.MustCompile(`(?m)^\s*apk add ([^\n]+)$`).FindAllStringSubmatch(commands[:firstTest], -1) {
+				for _, word := range strings.Fields(match[1]) {
+					installed[word] = true
+				}
+			}
+			for _, tool := range []string{"bash", "curl", "jq"} {
+				if !installed[tool] {
+					t.Errorf("test job must install %s before Go tests; release-upload coverage otherwise silently skips", tool)
+				}
+			}
+		})
+	}
+}
 
 func TestReleaseVerificationBlockExecutesFailClosed(t *testing.T) {
 	names := []string{"scimux-darwin-amd64", "scimux-darwin-arm64", "scimux-linux-amd64", "scimux-linux-arm64"}
@@ -124,7 +153,7 @@ func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
 	if strings.Contains(build, "secrets.") {
 		t.Error("build-and-test job has a secret in reach")
 	}
-	if !strings.Contains(publish, "secrets.CODEBERG_TOKEN") {
+	if !strings.Contains(publish, "CODEBERG_TOKEN: ${{ secrets.CODEBERG_RELEASE_TOKEN }}") {
 		t.Error("only the fresh publish job should receive the release token")
 	}
 	for _, forbidden := range []string{"go test", "go build", "govulncheck", "web/test/"} {
@@ -133,7 +162,7 @@ func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
 		}
 	}
 	verify := strings.Index(publish, "sha256sum -c SHA256SUMS")
-	secret := strings.Index(publish, "secrets.CODEBERG_TOKEN")
+	secret := strings.Index(publish, "secrets.CODEBERG_RELEASE_TOKEN")
 	if verify < 0 || secret < 0 || verify > secret {
 		t.Error("downloaded artifact must pass exact digest validation before the release token is exposed")
 	}
@@ -194,4 +223,39 @@ func workflowJobBlock(t *testing.T, src, key string) string {
 		}
 	}
 	return rest
+}
+
+// Artifact actions are JavaScript programs. Each fresh Alpine job must install
+// their runtime itself; packages installed in the build job do not reach publish.
+func TestReleaseInstallsNodeBeforeArtifactActions(t *testing.T) {
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows", "release.yml")))
+	for _, lane := range []struct{ job, action string }{
+		{"build-and-test:", "upload-artifact@"},
+		{"publish:", "download-artifact@"},
+	} {
+		t.Run(lane.job, func(t *testing.T) {
+			body := workflowJobBlock(t, src, lane.job)
+			action := strings.Index(body, "uses: https://code.forgejo.org/forgejo/"+lane.action)
+			if action < 0 {
+				t.Fatal("artifact action is missing")
+			}
+			installed := false
+			for _, block := range workflowRunBlocks(body[:action]) {
+				for _, line := range strings.Split(block, "\n") {
+					fields := strings.Fields(line)
+					if len(fields) < 3 || fields[0] != "apk" || fields[1] != "add" {
+						continue
+					}
+					for _, pkg := range fields[2:] {
+						if pkg == "nodejs" {
+							installed = true
+						}
+					}
+				}
+			}
+			if !installed {
+				t.Fatal("fresh job must install nodejs before executing its artifact action")
+			}
+		})
+	}
 }

@@ -10,7 +10,7 @@ jobs:
       REF_NAME: ${{ forgejo.ref_name }}
     steps:
       - name: Add missing build tools
-        run: apk add --no-cache file git nodejs
+        run: apk add --no-cache bash curl jq file git nodejs
       - name: Clone and bind the release tag to its commit
         env:
           COMMIT_SHA: ${{ github.sha }}
@@ -77,7 +77,7 @@ jobs:
     runs-on: release-publisher
     steps:
       - name: Add publishing tools
-        run: apk add --no-cache bash curl jq coreutils
+        run: apk add --no-cache bash curl jq coreutils nodejs
       - name: Download tested release files
         uses: https://code.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
         with:
@@ -119,6 +119,6 @@ jobs:
           chmod 0500 /tmp/codeberg-release.sh
       - name: Attach the verified files
         env:
-          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_RELEASE_TOKEN }}
           REF_NAME: ${{ forgejo.ref_name }}
         run: /tmp/codeberg-release.sh "$REF_NAME" ./handoff
