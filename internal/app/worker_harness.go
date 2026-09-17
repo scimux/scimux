@@ -56,7 +56,7 @@ func newProductionSessionHarness(config sessionWorkerConfig) (sessionworker.Harn
 	}
 	var manager procManager
 	switch config.Identity.Agent {
-	case "pi", "opencode", "grok":
+	case "pi", "opencode", "grok", "cursor":
 		m := acpManager{acp.NewManager(sessionsDir)}
 		m.SetAssetHook(assetOwner.ingestAssetHook)
 		manager = m

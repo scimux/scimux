@@ -51,6 +51,9 @@ export function agentLogo(agent, assetURL){
   case "muse":
     // Meta brand mark (Font Awesome Free 7.3.1 / currentColor).
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/meta.svg')}')" aria-hidden="true"></span>`;
+  case "cursor":
+    // Mono mark (Lobe Icons / currentColor) via mask, as for grok.
+    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/cursor.svg')}')" aria-hidden="true"></span>`;
   default:
     return `<svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="10" fill="var(--dim)"/>

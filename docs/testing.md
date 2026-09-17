@@ -50,7 +50,8 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   the user's `/tmp/tmux-<uid>` until the next reboot. `SocketPath` is what a
   cleanup deletes, and the two helpers assert the removal rather than
   best-effort it — litter nobody is told about is litter nobody clears. Never
-  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests
+  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`,
+  `cursor-agent`) in tests
   — wrapped test commands are `bash --norc` or `cat`.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing in

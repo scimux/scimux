@@ -172,8 +172,8 @@ the first Claude prompt is awaiting SessionStart or transcript confirmation,
 `submitting` or `unconfirmed`. A startup or delivery failure sets `error` and
 `restore_draft` with the original prompt; it does not open the terminal.
 
-For structured nodes (Codex app-server, ACP `pi`/`opencode`/`grok`, and
-Muse MSP), `source` is `acp` for compatibility across these transports;
+For structured nodes (Codex app-server, ACP `pi`/`opencode`/`grok`/`cursor`,
+and Muse MSP), `source` is `acp` for compatibility across these transports;
 there is no pane fallback. Pending approval details are returned as
 `perm_title`, `perm_options`, `perm_tool_kind`, `perm_reason`, and — only
 while a permission is pending — an opaque `perm_request_id` that
@@ -313,9 +313,22 @@ agent:
 is added client-side to mean "launch with the harness default". `efforts` is a
 map from model id to that model's accepted `levels` and its `default`. Codex
 obtains it from `codex debug models`; Grok reads its CLI models cache and fills
-missing entries from its static low/medium/high menu. Agents without per-model
-data (claude/pi/opencode), and codex when only its static fallback is available,
-omit `efforts`; the UI then uses its static per-agent list. Most catalogs are
+missing entries from its static low/medium/high menu. Cursor derives both from
+`cursor-agent --list-models`, whose ids already contain the level: each id is
+split into a model row and a level, so `models` lists a few dozen rows instead
+of the CLI's flat two-hundred-odd combinations, and `efforts` holds the levels
+each row actually published. A row whose ids all name a level carries
+`required: true` and a `default`: it has no id meaning "no level", so a blank
+`effort` would be one the server silently replaced, and the dialog offers no
+blank choice for it and preselects the default instead. Elsewhere — codex,
+grok, and cursor rows that do have a level-free id — a blank `effort` stays on
+offer and keeps meaning "use the harness default". The mapping from (model,
+effort) back to the exact id is server-side only and is never part of this
+payload. Agents without
+per-model data (claude/pi/opencode), and codex when only its static fallback is
+available, omit `efforts`; the UI then uses its static per-agent list — for
+cursor that list is deliberately empty, because a row with no published level
+has none. Most catalogs are
 probed once per process and cached until restart. Claude's model IDs also have
 a persistent cache, refreshed on a CLI version change or after one day;
 `GET /api/agents` can trigger that refresh. Its model probes submit no billed
@@ -353,7 +366,12 @@ first prompt is pasted after SessionStart on a background path. Failures after
 that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
 this response.
 
-Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, and `muse`.
+Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, `cursor`,
+and `muse`. A cursor launch whose `model`/`effort` pair is absent from the
+catalog is refused with `400` rather than passed to the CLI, and so is any
+non-empty `effort` the catalog cannot resolve — cursor has no effort flag, so
+an unresolved level would be dropped and the chat would run at a level nobody
+chose.
 Muse creation requires `muse_approval_judge_consent: true` in the computer's
 settings; missing consent is `400`. Its requested model must be launchable
 in the current catalog, or creation returns `400`. With no explicit model,

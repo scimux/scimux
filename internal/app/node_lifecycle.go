@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -392,9 +393,9 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		n.Agent = "claude"
 	}
 	switch n.Agent {
-	case "claude", "codex", "pi", "opencode", "grok", "muse":
+	case "claude", "codex", "pi", "opencode", "grok", "cursor", "muse":
 	default:
-		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, or muse)", n.Agent)
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, or muse)", n.Agent)
 	}
 	// A client cannot pin the Muse transport onto a different agent, and a
 	// Muse node cannot run on any other transport. Stored records are not
@@ -402,13 +403,13 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	if n.Agent != "muse" && n.Transport == "muse" {
 		n.Transport = ""
 	}
-	// New nodes pick a transport by agent: pi/opencode/grok over ACP, codex over
-	// its app-server bridge, muse over MSP, claude over tmux. Only set this on
-	// creation — stored records with an absent Transport are migrated to tmux
-	// by Node.transport, never rewritten here.
+	// New nodes pick a transport by agent: pi/opencode/grok/cursor over ACP,
+	// codex over its app-server bridge, muse over MSP, claude over tmux. Only
+	// set this on creation — stored records with an absent Transport are
+	// migrated to tmux by Node.transport, never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
-		case "pi", "opencode", "grok":
+		case "pi", "opencode", "grok", "cursor":
 			n.Transport = "acp"
 		case "codex":
 			n.Transport = "codex"
@@ -831,6 +832,13 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 			sid, err = pm.Launch(n.ID, n.Agent, n.Dir, launch.Model, n.Effort)
 		}
 		if err != nil {
+			// A cursor pair the catalog does not offer is a launch-config
+			// error, like the muse gate above: the user can fix it in the
+			// dialog, so it must not arrive as a server fault.
+			var badModel cursorModelErr
+			if errors.As(err, &badModel) {
+				return 400, err
+			}
 			return 500, err
 		}
 		n.SessionID = sid

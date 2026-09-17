@@ -36,6 +36,7 @@ test("agentLogo routes each known agent through assetURL", () => {
   assert.match(agentLogo("opencode", url), /U:\/assets\/agents\/opencode\.svg/);
   assert.match(agentLogo("grok", url), /U:\/assets\/agents\/grok\.svg/);
   assert.match(agentLogo("muse", url), /U:\/assets\/agents\/meta\.svg/);
+  assert.match(agentLogo("cursor", url), /U:\/assets\/agents\/cursor\.svg/);
   assert.match(agentLogo("unknown", url), /<svg/);
   assert.deepEqual(seen, [
     "/assets/agents/claude.svg",
@@ -45,6 +46,7 @@ test("agentLogo routes each known agent through assetURL", () => {
     "/assets/agents/opencode.svg",
     "/assets/agents/grok.svg",
     "/assets/agents/meta.svg",
+    "/assets/agents/cursor.svg",
   ]);
 });
 

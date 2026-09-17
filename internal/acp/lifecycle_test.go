@@ -14,8 +14,9 @@ import (
 
 // agentArgv is the pure command-selection seam: pi ships a dedicated binary,
 // opencode exposes ACP as a subcommand, grok as `grok agent stdio` (with
-// optional model/effort flags), and anything else has no ACP transport and
-// must be rejected rather than silently launched.
+// optional model/effort flags), cursor as `cursor-agent acp` (with an
+// optional model flag), and anything else has no ACP transport and must be
+// rejected rather than silently launched.
 func TestAgentArgv(t *testing.T) {
 	cases := []struct {
 		agent, model, effort string
@@ -34,6 +35,18 @@ func TestAgentArgv(t *testing.T) {
 		// pi/opencode ignore model/effort at argv (session options own them).
 		{agent: "pi", model: "x", effort: "high", want: []string{"pi-acp"}},
 		{agent: "opencode", model: "y", effort: "low", want: []string{"opencode", "acp"}},
+		// cursor exposes ACP as `cursor-agent acp` and takes the model as a
+		// launch flag, because its session-level model option is a closed enum
+		// whose values are a different namespace from the CLI's model ids.
+		{agent: "cursor", want: []string{"cursor-agent", "acp"}},
+		{agent: "cursor", model: "claude-opus-5-thinking-high",
+			want: []string{"cursor-agent", "--model", "claude-opus-5-thinking-high", "acp"}},
+		// Effort is never an argv flag for cursor: the level is already folded
+		// into the model id by the catalog, so passing it here would be a
+		// second, unvalidated spelling of the same choice.
+		{agent: "cursor", effort: "high", want: []string{"cursor-agent", "acp"}},
+		{agent: "cursor", model: "auto", effort: "xhigh",
+			want: []string{"cursor-agent", "--model", "auto", "acp"}},
 		{agent: "claude", wantErr: true},
 		{agent: "", wantErr: true},
 	}

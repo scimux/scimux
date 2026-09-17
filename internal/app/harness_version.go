@@ -86,6 +86,13 @@ func claudeHarnessSource(binPath string) harnessSource {
 
 // harnessSources maps each supported harness to its upstream. Claude's entry
 // is resolved per call because it depends on this computer's install.
+//
+// Cursor is deliberately absent. Its CLI reads its own latest version from
+// `getCliDownloadUrl` on the authenticated dashboard backend, and the one
+// public endpoint (cursor.com/api/agent-cli-download) returns the binary
+// itself, not a version. A row with no source shows its installed version and
+// no upstream claim, which is the honest answer; authenticating to get one
+// would cross the line above.
 func harnessSources() map[string]harnessSource {
 	claudePath, _ := exec.LookPath("claude")
 	if resolved, err := filepath.EvalSymlinks(claudePath); err == nil {
@@ -191,7 +198,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 		wg.Add(1)
 		go func(i int, h harness) {
 			defer wg.Done()
-			row := harnessRow{Agent: h.bin}
+			row := harnessRow{Agent: h.agentName()}
 			require := h.require
 			if require == "" {
 				require = h.bin

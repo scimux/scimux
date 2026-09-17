@@ -44,6 +44,11 @@ type workerManager struct {
 	socket       string
 	startOptions sessionWorkerStartOptions
 	nextID       func() string
+	// catalog reads the installed-harness catalog, which cursor launches need
+	// to turn a (model, effort) pair back into one model id. It is a field so
+	// the suite can supply a fixture: probing it for real would run whichever
+	// agent CLIs happen to be on the host.
+	catalog func() map[string]agentInfo
 }
 
 func newWorkerManager(executable, dataDir, build string) *workerManager {
@@ -51,6 +56,7 @@ func newWorkerManager(executable, dataDir, build string) *workerManager {
 		entries: map[string]*workerEntry{}, starting: map[string]bool{},
 		executable: executable, dataDir: dataDir, build: build,
 		nextID:       newWorkerInstanceID,
+		catalog:      detectAgents,
 		startOptions: sessionWorkerStartOptions{stderr: os.Stderr},
 	}
 }
@@ -111,6 +117,9 @@ func (m *workerManager) AttachOwnedClaudePane(n *Node, hookID string, generation
 
 func (m *workerManager) launch(request sessionworker.LaunchRequest) (string, error) {
 	nodeID, agent := request.NodeID, request.Agent
+	if err := m.resolveLaunchModel(&request); err != nil {
+		return "", err
+	}
 	if !m.beginLaunch(nodeID) {
 		return "", errNoSessionWorker
 	}
@@ -142,6 +151,23 @@ func (m *workerManager) launch(request sessionworker.LaunchRequest) (string, err
 	m.entries[nodeID] = &workerEntry{client: process.client, process: process, identity: identity}
 	m.mu.Unlock()
 	return sid, nil
+}
+
+// resolveLaunchModel rewrites a cursor launch into the one field cursor reads.
+// Cursor has no effort flag: the level is part of the model id, so the pair the
+// node stores is collapsed here and the effort is cleared rather than sent on
+// as a second, unvalidated spelling of the same choice. Every other agent
+// carries both fields through untouched.
+func (m *workerManager) resolveLaunchModel(request *sessionworker.LaunchRequest) error {
+	if request.Agent != "cursor" || m.catalog == nil {
+		return nil
+	}
+	model, err := resolveCursorModel(m.catalog()["cursor"], request.Model, request.Effort)
+	if err != nil {
+		return err
+	}
+	request.Model, request.Effort = model, ""
+	return nil
 }
 
 func (m *workerManager) manages(nodeID string) bool { return m.entry(nodeID) != nil }
@@ -737,7 +763,7 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		}
 		if node.Transport == "" {
 			switch node.Agent {
-			case "pi", "opencode", "grok":
+			case "pi", "opencode", "grok", "cursor":
 				node.Transport = "acp"
 			case "codex":
 				node.Transport = "codex"
