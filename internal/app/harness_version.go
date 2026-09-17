@@ -32,6 +32,7 @@ type harnessRow struct {
 	Agent      string `json:"agent"`
 	Present    bool   `json:"present"`
 	Launchable bool   `json:"launchable"`
+	HasSource  bool   `json:"has_source"`
 	Installed  string `json:"installed,omitempty"`
 	Path       string `json:"path,omitempty"`
 	// Latest is never filled by the local inventory. It exists on the row so
@@ -192,6 +193,7 @@ func versionSegments(v string) []int {
 // failed, and the user asked what scimux found — including what it did not.
 func probeHarnessVersions(hs []harness) []harnessRow {
 	rows := make([]harnessRow, 0, len(hs))
+	sources := activeHarnessSources()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	out := make([]harnessRow, len(hs))
@@ -200,6 +202,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 		go func(i int, h harness) {
 			defer wg.Done()
 			row := harnessRow{Agent: h.agentName()}
+			_, row.HasSource = sources[row.Agent]
 			require := h.require
 			if require == "" {
 				require = h.bin

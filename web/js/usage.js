@@ -84,6 +84,7 @@ export function usageAgentDisplayName(agent){
   if (agent === "claude") return "Claude";
   if (agent === "grok") return "Grok";
   if (agent === "muse") return "Muse";
+  if (agent === "cursor") return "Cursor";
   return String(agent || "");
 }
 

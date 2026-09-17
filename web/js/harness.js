@@ -105,7 +105,8 @@ export function harnessTermsHTML(agent){
  *
  * States: "absent" (not on PATH), "unknown" (present, `--version` unreadable),
  * "unlaunchable" (present, but the binary scimux launches is missing),
- * "unchecked" (installed, no upstream answer yet), "behind", "current".
+ * "no-source" (installed, no public version channel), "unchecked" (installed,
+ * no upstream answer yet), "behind", "current".
  *
  * "unchecked" exists because the upstream check is a deliberate tap: before
  * it, "up to date" would be a claim nobody has made.
@@ -124,6 +125,10 @@ export function harnessState(row, latest){
     const bin = LAUNCH_BIN[r.agent] || r.agent;
     return { agent: r.agent, state: "unlaunchable", version,
       note: `installed, but ${bin} is missing — scimux cannot launch it` };
+  }
+  if (r.has_source === false){
+    return { agent: r.agent, state: "no-source", version,
+      note: "no public version channel" };
   }
   const up = latest && latest.version ? latest : null;
   if (!up){
@@ -327,13 +332,15 @@ export function harnessRowsHTML(rows, latest, deps = {}){
  *
  * A check that only half-answered leaves those rows saying "unchecked", which
  * is honest but silent; naming the sources that did not answer is what keeps
- * the panel from reading as a clean bill of health. Harnesses this computer
- * does not have are skipped — an absent harness has no upstream to miss.
+ * the panel from reading as a clean bill of health. Absent harnesses and rows
+ * with no public version source are skipped — neither has an upstream answer
+ * to miss.
  */
 export function harnessCheckNote(rows, latest){
   if (!latest) return "";
   const missing = (Array.isArray(rows) ? rows : [])
-    .filter(r => r && r.present && r.installed && !(latest[r.agent] && latest[r.agent].version))
+    .filter(r => r && r.present && r.installed && r.has_source !== false &&
+      !(latest[r.agent] && latest[r.agent].version))
     .map(r => usageAgentDisplayName(r.agent));
   if (!missing.length) return "";
   return `no upstream answer for ${missing.join(", ")}`;

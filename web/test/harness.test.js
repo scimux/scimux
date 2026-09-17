@@ -32,6 +32,17 @@ test("state before any upstream check is unchecked, not up-to-date", () => {
   assert.doesNotMatch(s.note, /up to date|available/);
 });
 
+test("a row without a public version source has a distinct honest state", () => {
+  const noSource = harnessState({
+    agent: "future-agent", present: true, launchable: true,
+    installed: "1.2.3", has_source: false,
+  }, null);
+  assert.equal(noSource.state, "no-source");
+  assert.equal(noSource.version, "1.2.3");
+  assert.match(noSource.note, /no public version channel/i);
+  assert.doesNotMatch(noSource.note, /missing|unchecked|no upstream answer/i);
+});
+
 test("behind and current are distinguished by the upstream answer", () => {
   const behind = harnessState(
     { agent: "codex", present: true, launchable: true, installed: "0.147.0" },
@@ -145,6 +156,15 @@ test("the check note names the sources that did not answer", () => {
   const partial = harnessCheckNote(rows, { claude: { version: "2.1.236" } });
   assert.match(partial, /grok/i);
   assert.doesNotMatch(partial, /opencode/i, "an absent harness has no upstream to miss");
+
+  const withoutSource = harnessCheckNote([
+    ...rows,
+    { agent: "cursor", present: true, launchable: true,
+      installed: "2026.09.15-d2fe57e", has_source: false },
+  ], { claude: { version: "2.1.236" } });
+  assert.match(withoutSource, /grok/i);
+  assert.doesNotMatch(withoutSource, /cursor/i,
+    "a harness with no source is not a failed upstream answer");
 });
 
 test("harness rows are listed alphabetically, whatever order the server sent", () => {

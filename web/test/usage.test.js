@@ -95,6 +95,7 @@ test("usageAgentDisplayName", () => {
   assert.equal(usageAgentDisplayName("claude"), "Claude");
   assert.equal(usageAgentDisplayName("codex"), "Codex");
   assert.equal(usageAgentDisplayName("grok"), "Grok");
+  assert.equal(usageAgentDisplayName("cursor"), "Cursor");
   assert.equal(usageAgentDisplayName("other"), "other");
 });
 

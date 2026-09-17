@@ -827,12 +827,15 @@ License texts bundled into the binary (shown in the About sheet).
 ### `GET /api/harnesses`
 
 Which supported agent CLIs this computer has, in registry order:
-`{harnesses:[{agent, present, launchable, installed, path}]}`. Local only —
-never a network call, because the menu reads it on every open. `installed` is
-the first version-shaped token of `<bin> --version`, empty when the output
-does not carry one. `present` and `launchable` are separate facts: pi is
-installed as `pi` but launched through `pi-acp`. The probe runs once per
-process, so a harness installed while scimux runs appears after a restart.
+`{harnesses:[{agent, present, launchable, has_source, installed, path}]}`. Local
+only — never a network call, because the menu reads it on every open.
+`has_source` says whether this harness has a public upstream version channel;
+when false, the UI shows the installed version without implying that an
+upstream check failed. `installed` is the first version-shaped token of
+`<bin> --version`, empty when the output does not carry one. `present` and
+`launchable` are separate facts: pi is installed as `pi` but launched through
+`pi-acp`. The probe runs once per process, so a harness installed while scimux
+runs appears after a restart.
 For Muse, `launchable` is true when the `muse` executable is found on `PATH`.
 This inventory flag does not grant permission to create a chat: creation
 separately enforces approval-judge consent and model-catalog checks.

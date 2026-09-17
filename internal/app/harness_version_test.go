@@ -101,6 +101,9 @@ func TestProbeHarnessInventory(t *testing.T) {
 	if got := byAgent["claude"]; got.Installed != "2.1.236" || !got.Present || !got.Launchable {
 		t.Errorf("claude = %+v, want 2.1.236 present and launchable", got)
 	}
+	if !byAgent["claude"].HasSource {
+		t.Error("claude inventory row does not record its upstream source")
+	}
 	if got := byAgent["codex"]; got.Installed != "0.147.0" {
 		t.Errorf("codex = %+v, want 0.147.0", got)
 	}
@@ -124,6 +127,9 @@ func TestProbeHarnessInventory(t *testing.T) {
 	// prints it outside the version token.
 	if got := byAgent["cursor"]; got.Installed != "2026.09.15-d2fe57e" || !got.Present || !got.Launchable {
 		t.Errorf("cursor = %+v, want 2026.09.15-d2fe57e present and launchable", got)
+	}
+	if byAgent["cursor"].HasSource {
+		t.Error("cursor inventory row claims a public version source")
 	}
 	if _, ok := byAgent["cursor-agent"]; ok {
 		t.Error("cursor appeared in the harness panel under its binary name")
@@ -245,12 +251,16 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 	binDir := t.TempDir()
 	writeScript(t, binDir, "claude", `printf '%s\n' '2.1.236 (Claude Code)'`)
 	t.Setenv("PATH", binDir)
-	// Any network read here would be a bug: the inventory is what this
-	// computer has, and opening the menu must not phone home.
-	restore := setHarnessSourcesForTest(map[string]harnessSource{
-		"claude": {URL: "http://127.0.0.1:0/must-not-be-called", Kind: "text"},
-	})
-	defer restore()
+	// Resolve source membership while the once-per-process inventory is built.
+	// Opening the menu after that must use the cached rows, not resolve the
+	// registry again (and never contact any upstream endpoint).
+	_ = harnessInventory()
+	previousSources := activeHarnessSources
+	activeHarnessSources = func() map[string]harnessSource {
+		t.Fatal("opening the harness menu re-resolved version sources")
+		return nil
+	}
+	defer func() { activeHarnessSources = previousSources }()
 
 	a := newTestApp(t, &fakeTmux{})
 	rec := httptest.NewRecorder()
@@ -260,7 +270,10 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	var got struct {
-		Harnesses []harnessRow `json:"harnesses"`
+		Harnesses []struct {
+			harnessRow
+			HasSource *bool `json:"has_source"`
+		} `json:"harnesses"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -269,6 +282,11 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 		t.Fatalf("harnesses = %d rows, want %d", len(got.Harnesses), len(harnesses))
 	}
 	for _, row := range got.Harnesses {
+		if row.HasSource == nil {
+			t.Errorf("%s has_source is absent", row.Agent)
+		} else if want := row.Agent != "cursor"; *row.HasSource != want {
+			t.Errorf("%s has_source = %v, want %v", row.Agent, *row.HasSource, want)
+		}
 		if row.Latest != "" {
 			t.Errorf("%s carries a latest version %q; the local inventory must not check upstream", row.Agent, row.Latest)
 		}
@@ -335,6 +353,20 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 		}
 		if s.Kind != "npm" && s.Kind != "text" && s.Kind != "muse-stable" {
 			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", agent, s)
+		}
+	}
+	want := map[string]bool{}
+	for _, h := range harnesses {
+		if agent := h.agentName(); agent != "cursor" {
+			want[agent] = true
+		}
+	}
+	if len(src) != len(want) {
+		t.Fatalf("source keys = %v, want exactly the harness registry minus cursor (%v)", src, want)
+	}
+	for agent := range src {
+		if !want[agent] {
+			t.Errorf("unexpected harness source %q; want exactly the registry minus cursor", agent)
 		}
 	}
 }
