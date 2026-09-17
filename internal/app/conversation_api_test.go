@@ -2193,6 +2193,53 @@ func TestHandleSendClearMapsARejectedConfigurationTo400(t *testing.T) {
 	}
 }
 
+// snapshotClosingStation runs before the clear it is freezing, and a config
+// refusal now answers 400 — an error the user retries. The retry finds the same
+// stop key (no seam was appended), so an unguarded snapshot would grow an
+// append-only store with copies of one label. An identical record says nothing
+// the log does not already say; a changed one still must land.
+func TestSnapshotClosingStationSkipsAnIdenticalRecord(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "station-retry", "dsh", "acp")
+	n.Description = "first desc"
+
+	stations := func() []sessionlog.StationEvent {
+		b, err := os.ReadFile(a.sessionLogPath(n.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []sessionlog.StationEvent
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			var ev sessionlog.Event
+			if json.Unmarshal([]byte(line), &ev) == nil && ev.T == "station" && ev.Station != nil {
+				out = append(out, *ev.Station)
+			}
+		}
+		return out
+	}
+
+	a.snapshotClosingStation(n)
+	if got := stations(); len(got) != 1 {
+		t.Fatalf("first snapshot wrote %d station records, want 1", len(got))
+	}
+
+	a.snapshotClosingStation(n)
+	if got := stations(); len(got) != 1 {
+		t.Fatalf("a retried snapshot wrote %d station records, want the first one only", len(got))
+	}
+
+	// A real relabel is not a retry: it must still be recorded.
+	n.Title = "renamed"
+	a.snapshotClosingStation(n)
+	got := stations()
+	if len(got) != 2 {
+		t.Fatalf("a changed label wrote %d station records, want 2", len(got))
+	}
+	if got[1].Title != "renamed" || got[1].Desc != "first desc" {
+		t.Fatalf("newest station = %+v, want renamed/first desc", got[1])
+	}
+}
+
 func TestHandleSendMuseClearRequiresCurrentConsent(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedStructuredNode(t, a, "muse-clear-consent", "muse", "muse")

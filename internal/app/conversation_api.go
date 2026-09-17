@@ -388,11 +388,20 @@ func (a *app) snapshotClosingStation(n *Node) {
 	if _, err := os.Stat(logPath); err != nil {
 		return
 	}
+	seg := a.segment(n)
 	key := n.CreatedAt
-	if ct := a.segment(n).ClearTimes; len(ct) > 0 {
+	if ct := seg.ClearTimes; len(ct) > 0 {
 		key = ct[len(ct)-1]
 	}
 	if key == "" {
+		return
+	}
+	// A clear the agent refuses answers 400, which the user retries — and a
+	// refused clear appends no seam, so the retry lands on the same key. The
+	// newest snapshot per seam wins, so a record identical to the one already
+	// held says nothing new; writing it anyway would grow a store that is never
+	// rewritten with copies of one label. Skip it, and let a changed label land.
+	if prev, ok := seg.Stations[key]; ok && prev.Title == n.Title && prev.Desc == n.Description {
 		return
 	}
 	if err := a.appendSessionEvent(n.ID, sessionlog.NewStation(key, n.Title, n.Description)); err != nil {
