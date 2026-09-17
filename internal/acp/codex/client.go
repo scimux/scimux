@@ -278,6 +278,7 @@ func (c *Client) RunTurn(ctx context.Context, threadID, text string) error {
 			}
 			c.deltas = nil
 			c.fileChanges = nil
+			c.pendingTerminals = nil
 		}
 		c.mu.Unlock()
 	}()
@@ -396,62 +397,53 @@ func (c *Client) interruptTurn(seq uint64) {
 func (c *Client) setTurnID(seq uint64, id string) {
 	c.mu.Lock()
 	delete(c.unresolvedStarts, seq)
-	if id == "" {
-		c.prunePendingTerminalsLocked()
-		c.mu.Unlock()
-		return
-	}
-	if c.turnOwners == nil {
-		c.turnOwners = make(map[string]uint64)
-	}
-	if owner, known := c.turnOwners[id]; known && owner != seq {
-		delete(c.pendingTerminals, id)
-		c.mu.Unlock()
-		return
-	}
-	c.turnOwners[id] = seq
-	activeOwner := c.turnSeq == seq && c.turnDone != nil && !c.turnTerminal
-	if activeOwner {
-		c.curTurnID = id
-		if c.turnIDReady != nil {
-			close(c.turnIDReady)
-			c.turnIDReady = nil
+	if id != "" {
+		if c.turnOwners == nil {
+			c.turnOwners = make(map[string]uint64)
+		}
+		if owner, known := c.turnOwners[id]; known && owner != seq {
+			c.mu.Unlock()
+			return
+		}
+		c.turnOwners[id] = seq
+		if c.turnSeq == seq && c.turnDone != nil && !c.turnTerminal {
+			c.curTurnID = id
+			if c.turnIDReady != nil {
+				close(c.turnIDReady)
+				c.turnIDReady = nil
+			}
 		}
 	}
-
-	// A response is authoritative ownership evidence for a retained terminal.
-	// Replay it only for the active invocation; a response for any retired
-	// invocation proves that notification stale and removes it permanently.
-	var delivery *terminalDelivery
-	if notification, ok := c.pendingTerminals[id]; ok {
-		delete(c.pendingTerminals, id)
-		if activeOwner {
-			d := c.retireTurnLocked(notification)
-			delivery = &d
-		}
-	}
-	c.prunePendingTerminalsLocked()
+	delivery, deliver := c.resolvePendingTerminalLocked()
 	c.mu.Unlock()
-	if delivery != nil {
-		c.deliverTerminal(*delivery)
+	if deliver {
+		c.deliverTerminal(delivery)
 	}
 }
 
-// prunePendingTerminalsLocked drops notifications that no outstanding start
-// response can still own. Known retired owners are stale; once every response
-// has arrived, an unknown id is likewise proven not to identify a local turn.
-func (c *Client) prunePendingTerminalsLocked() {
+// resolvePendingTerminalLocked revisits retained events whenever ownership
+// evidence changes. A sole candidate may complete before its own response once
+// older starts are resolved. Multiple unknown candidates require an explicit
+// current id; map iteration order must never decide which event ends the turn.
+func (c *Client) resolvePendingTerminalLocked() (terminalDelivery, bool) {
+	if c.turnDone == nil || c.turnTerminal {
+		c.pendingTerminals = nil
+		return terminalDelivery{}, false
+	}
 	for id := range c.pendingTerminals {
-		if owner, known := c.turnOwners[id]; known {
-			if owner != c.turnSeq || c.turnDone == nil || c.turnTerminal {
-				delete(c.pendingTerminals, id)
-			}
-			continue
-		}
-		if len(c.unresolvedStarts) == 0 {
+		owner, known := c.turnOwners[id]
+		if (known && owner != c.turnSeq) || (c.curTurnID != "" && id != c.curTurnID) {
 			delete(c.pendingTerminals, id)
 		}
 	}
+	if len(c.pendingTerminals) == 1 {
+		for _, notification := range c.pendingTerminals {
+			if c.claimLifecycleLocked(notification.identity) == lifecycleClaimed {
+				return c.retireTurnLocked(notification), true
+			}
+		}
+	}
+	return terminalDelivery{}, false
 }
 
 // turnIDFromResult extracts the turn id from a turn/start result ({"turn":{"id":...}}).
@@ -592,9 +584,14 @@ func (c *Client) claimLifecycleLocked(id lifecycleIdentity) lifecycleClaim {
 
 func (c *Client) noteTurnStarted(id lifecycleIdentity) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !id.hasTurn || c.claimLifecycleLocked(id) != lifecycleClaimed {
+		c.mu.Unlock()
 		return
+	}
+	delivery, deliver := c.resolvePendingTerminalLocked()
+	c.mu.Unlock()
+	if deliver {
+		c.deliverTerminal(delivery)
 	}
 }
 
@@ -621,6 +618,7 @@ func (c *Client) retireTurnLocked(notification terminalNotification) terminalDel
 	leftover := c.deltas
 	c.deltas = nil
 	c.fileChanges = nil
+	c.pendingTerminals = nil
 	return terminalDelivery{notification: notification, done: done, leftover: leftover}
 }
 
@@ -637,6 +635,9 @@ func (c *Client) finishOrRetainTerminal(method string, params json.RawMessage) (
 	defer c.mu.Unlock()
 	switch c.claimLifecycleLocked(notification.identity) {
 	case lifecycleClaimed:
+		if first, retained := c.pendingTerminals[notification.identity.turnID]; retained {
+			notification = first
+		}
 		return c.retireTurnLocked(notification), true
 	case lifecycleAmbiguous:
 		if c.pendingTerminals == nil {

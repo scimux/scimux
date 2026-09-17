@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -421,6 +422,178 @@ func TestAmbiguousTerminalReplayedAfterStartResponses(t *testing.T) {
 				}
 			} else if events := col.byType("error"); len(events) != 0 {
 				t.Fatalf("completion emitted errors: %+v", events)
+			}
+		})
+	}
+}
+
+func TestDeferredTerminalOwnershipResolution(t *testing.T) {
+	for _, method := range []string{"turn/completed", "turn/failed", "error"} {
+		for _, evidence := range []string{"older-response", "current-response", "started", "terminal"} {
+			t.Run(method+"/"+evidence, func(t *testing.T) {
+				oldSettle := interruptSettle
+				interruptSettle = 10 * time.Millisecond
+				defer func() { interruptSettle = oldSettle }()
+				c, ms, col := newClientWithMock(t)
+				initialized := make(chan error, 1)
+				go func() {
+					_, err := c.StartThread(context.Background(), StartThreadParams{Cwd: "/workspace"})
+					initialized <- err
+				}()
+				ms.reply(t, ms.nextReq(t).ID, threadStartResult)
+				if err := <-initialized; err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				first := make(chan error, 1)
+				go func() { first <- c.RunTurn(ctx, "THREAD-1", "first") }()
+				startA := ms.nextReq(t)
+				cancel()
+				if err := awaitTurnResult(t, first); !errors.Is(err, context.Canceled) {
+					t.Fatalf("first turn: %v", err)
+				}
+				next := make(chan error, 1)
+				go func() { next <- c.RunTurn(context.Background(), "THREAD-1", "next") }()
+				startB := ms.nextReq(t)
+				ms.note(t, "item/agentMessage/delta", `{"itemId":"answer","delta":"synthetic answer"}`)
+				ms.note(t, "turn/completed", `{"threadId":"THREAD-1","turnId":"old-turn"}`)
+				ms.note(t, method, `{"threadId":"THREAD-1","turnId":"next-turn","message":"first terminal"}`)
+				// Contradictory duplicates must never replace the first terminal.
+				ms.note(t, "turn/failed", `{"threadId":"THREAD-1","turnId":"next-turn","message":"duplicate"}`)
+				if evidence == "started" || evidence == "terminal" {
+					// Multiple unknown candidates cannot be resolved by map iteration.
+					ms.note(t, "turn/failed", `{"threadId":"THREAD-1","turnId":"other-turn"}`)
+				}
+				lifecycleBarrier(t, ms, 1601)
+				c.mu.Lock()
+				premature := c.turnTerminal
+				c.mu.Unlock()
+				if premature {
+					t.Fatal("ambiguous notification retired the active turn")
+				}
+				switch evidence {
+				case "older-response", "started", "terminal":
+					ms.reply(t, startA.ID, `{"turn":{"id":"old-turn"}}`)
+					if evidence == "started" || evidence == "terminal" {
+						lifecycleBarrier(t, ms, 1602)
+						c.mu.Lock()
+						premature = c.turnTerminal
+						c.mu.Unlock()
+						if premature {
+							t.Fatal("picked an arbitrary terminal from multiple candidates")
+						}
+						if evidence == "started" {
+							ms.note(t, "turn/started", `{"threadId":"THREAD-1","turnId":"next-turn"}`)
+						} else {
+							ms.note(t, "turn/failed", `{"threadId":"THREAD-1","turnId":"next-turn","message":"later terminal"}`)
+						}
+					}
+				case "current-response":
+					ms.reply(t, startB.ID, `{"turn":{"id":"next-turn"}}`)
+				}
+				lifecycleBarrier(t, ms, 1603)
+				c.mu.Lock()
+				retired := c.turnTerminal
+				c.mu.Unlock()
+				// Settle outstanding calls even on a regression, without hiding it.
+				if evidence == "current-response" {
+					ms.reply(t, startA.ID, `{"turn":{"id":"old-turn"}}`)
+				} else {
+					ms.reply(t, startB.ID, `{"turn":{"id":"next-turn"}}`)
+				}
+				err := awaitTurnResult(t, next)
+				if !retired {
+					t.Error("ownership became unambiguous but retained terminal was not delivered")
+				}
+				wantErr := method != "turn/completed"
+				if (err != nil) != wantErr || (wantErr && !strings.Contains(err.Error(), "first terminal")) {
+					t.Fatalf("terminal result = %v, method=%s", err, method)
+				}
+				wantAssistant, wantErrors := 1, 0
+				if wantErr {
+					wantAssistant, wantErrors = 0, 1
+				}
+				if got := len(col.byType("assistant")); got != wantAssistant {
+					t.Errorf("assistant flush count = %d, failure=%v", got, wantErr)
+				}
+				if got := len(col.byType("error")); got != wantErrors {
+					t.Errorf("error count = %d, failure=%v", got, wantErr)
+				}
+			})
+		}
+	}
+}
+
+func TestDeferredTerminalWaitsForEveryOlderStart(t *testing.T) {
+	c := &Client{
+		turnSeq:          3,
+		turnThreadID:     "THREAD-1",
+		turnDone:         make(chan turnResult, 1),
+		unresolvedStarts: map[uint64]string{1: "THREAD-1", 2: "THREAD-1", 3: "THREAD-1"},
+	}
+	c.onNotify("turn/completed", json.RawMessage(`{"threadId":"THREAD-1","turnId":"current"}`))
+	c.setTurnID(1, "old-one")
+	if c.turnTerminal {
+		t.Fatal("resolved ownership while a second older start was still pending")
+	}
+	// An older rejected start (no server id) removes its ambiguity too.
+	c.setTurnID(2, "")
+	if !c.turnTerminal {
+		t.Fatal("did not replay after the last older start resolved")
+	}
+	if len(c.pendingTerminals) != 0 {
+		t.Fatal("terminal left retained notifications behind")
+	}
+}
+
+func TestDeferredTerminalClearedWhenInvocationAbandoned(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shutdown=%t", shutdown), func(t *testing.T) {
+			oldSettle := interruptSettle
+			interruptSettle = 10 * time.Millisecond
+			defer func() { interruptSettle = oldSettle }()
+			c, ms, _ := newClientWithMock(t)
+			// An earlier completed invocation still has an outstanding response.
+			first := make(chan error, 1)
+			go func() { first <- c.RunTurn(context.Background(), "THREAD-1", "first") }()
+			startA := ms.nextReq(t)
+			ms.note(t, "turn/completed", `{"threadId":"THREAD-1","turnId":"old-turn"}`)
+			if err := awaitTurnResult(t, first); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			next := make(chan error, 1)
+			go func() { next <- c.RunTurn(ctx, "THREAD-1", "next") }()
+			startB := ms.nextReq(t)
+			ms.note(t, "turn/completed", `{"threadId":"THREAD-1","turnId":"next-turn"}`)
+			lifecycleBarrier(t, ms, 1701)
+			c.mu.Lock()
+			retained := len(c.pendingTerminals)
+			c.mu.Unlock()
+			if retained != 1 {
+				t.Fatalf("retained count = %d, want 1", retained)
+			}
+			if shutdown {
+				_ = c.t.Close()
+			} else {
+				cancel()
+			}
+			// On transport closure, a retained completion may win the race
+			// with failure of the pending RPC. Either outcome must clean up.
+			if err := awaitTurnResult(t, next); !shutdown && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled turn returned %v", err)
+			}
+			c.mu.Lock()
+			retained = len(c.pendingTerminals)
+			c.mu.Unlock()
+			if retained != 0 {
+				t.Fatal("abandoned invocation leaked retained terminals")
+			}
+			if !shutdown {
+				ms.reply(t, startA.ID, `{"turn":{"id":"old-turn"}}`)
+				ms.reply(t, startB.ID, `{"turn":{"id":"next-turn"}}`)
+				lifecycleBarrier(t, ms, 1702)
 			}
 		})
 	}
