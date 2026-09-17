@@ -370,7 +370,7 @@ func resolveCursorModel(info agentInfo, model, effort string) (string, error) {
 	// is missing entirely -- a failed or timed-out --list-models probe must not
 	// quietly downgrade the launch.
 	if len(info.ids) == 0 {
-		return "", cursorModelErr{fmt.Errorf("cursor model list unavailable, so model %q at effort %q cannot be resolved", model, effort)}
+		return "", fmt.Errorf("cursor model list could not be read, so model %q at effort %q cannot be resolved", model, effort)
 	}
 	return "", cursorModelErr{fmt.Errorf("cursor has no model %q at effort %q", model, effort)}
 }

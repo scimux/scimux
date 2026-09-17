@@ -40,6 +40,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   Deterministic heuristics may read it. It must never be used to train,
   fine-tune, distill, or otherwise develop a model — do not turn it into a
   training dataset.
+  - Cursor records two representations of the same launch choice: the node
+    record keeps the model row and effort level the user selected, while the
+    session-log meta header stores the joined cursor id as `model` and an empty
+    `effort`, matching the concrete request sent to the worker.
   - The store is also the **chat read path for every transport**: handleChat
     renders the current segment (everything after the last `source` seam),
     while the tailer serves only mechanics — needs-input, staleness, delivery

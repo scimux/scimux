@@ -240,7 +240,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 var harnessInventoryOnce sync.Once
 var harnessInventoryCache []harnessRow
 
-// harnessInventory probes once per process, like detectAgents: five
+// harnessInventory probes once per process, like detectAgents: eight
 // subprocesses is not something to repeat on every menu open, and a harness
 // installed while scimux runs appears after a restart.
 func harnessInventory() []harnessRow {

@@ -162,8 +162,9 @@ func agentCommandSettings(n *Node, addDirs []string, settingsPath string) (strin
 	// dsh is deliberately absent: `dsh --profile acp` is the only launch line
 	// scimux knows, and it speaks ACP on stdio rather than to a terminal. A
 	// bare `dsh <prompt>` is a different program with a different profile, so
-	// a tmux fallback here would launch something the node did not ask for.
-	return "", fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, or grok)", n.Agent)
+	// a tmux fallback here would launch something the node did not ask for;
+	// cursor and muse are likewise structured-only and have no tmux fallback.
+	return "", fmt.Errorf("unknown agent %q (want claude, pi, opencode, or grok)", n.Agent)
 }
 
 // launchFailSentinel is printed on the pane by wrapLaunch when the launched

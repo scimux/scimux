@@ -273,6 +273,37 @@ func TestLaunchNodeRefusesAnUnofferedCursorPairWith400(t *testing.T) {
 	}
 }
 
+func TestLaunchNodeReportsAnUnreadableCursorCatalogWith500(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := syntheticWorkerManager(t, data)
+	m.catalog = func() map[string]agentInfo {
+		return map[string]agentInfo{"cursor": {}}
+	}
+	defer m.Shutdown()
+
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{ID: "c1", Agent: "cursor", Transport: "acp", Dir: data, Model: "example-flash", Effort: "high"}
+	status, err := a.launchNode(n, m)
+	if err == nil {
+		t.Fatal("launch accepted a model and effort without a readable cursor catalog")
+	}
+	if status != 500 {
+		t.Errorf("status = %d, want 500 (catalog failure, not a bad user choice)", status)
+	}
+	if !strings.Contains(err.Error(), "model list could not be read") {
+		t.Errorf("error %q does not identify the failed catalog read", err)
+	}
+	if strings.Contains(err.Error(), "cursor has no model") {
+		t.Errorf("error %q mislabels a machine failure as a missing user choice", err)
+	}
+	if n.SessionID != "" {
+		t.Errorf("failed launch still set a session id %q", n.SessionID)
+	}
+}
+
 // The launch request is where a row plus a level becomes the one flag cursor
 // accepts; the effort must not travel on as a second spelling of the choice.
 func TestWorkerManagerResolvesCursorModelBeforeLaunch(t *testing.T) {
