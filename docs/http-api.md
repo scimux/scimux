@@ -465,6 +465,9 @@ recorded as a source seam — same page-turn semantics as Claude's `/clear`.
 ACP replaces the agent subprocess; Codex opens a fresh thread on its existing
 process, and Muse starts a fresh session on its connection. Muse `/clear`
 requires the current `muse_approval_judge_consent` setting (`400` when off).
+A dsh `/clear` that the replacement agent refuses because its saved model or
+effort is no longer offered returns `400` and tells the user to fork with a
+model the agent still offers; other replacement failures remain `500`.
 Claude's page turn is confirmed by its own `SessionStart` clear hook, not
 by successful pasting alone; an unconfirmed `/clear` does not retire history.
 A Claude send whose leading slash command is `/fork` or `/fork …` is `400`

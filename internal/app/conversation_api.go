@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -208,11 +209,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			// chain, so it must run first.
 			a.snapshotClosingStation(n)
 			if err := pm.Clear(n.ID); err != nil {
-				code := 500
+				code := http.StatusInternalServerError
+				message := err.Error()
 				if pm.Conflict(err) {
-					code = 409
+					code = http.StatusConflict
+				} else if acp.IsConfigRejection(err) {
+					code = http.StatusBadRequest
+					message += ". Fork with a model the agent still offers."
 				}
-				http.Error(w, err.Error(), code)
+				http.Error(w, message, code)
 				return
 			}
 			// /clear ends the turn lease (page turn is a hard reset).

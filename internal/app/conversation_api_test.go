@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/acp/codex"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
@@ -2144,6 +2146,52 @@ func TestHandleSendClearDoesNotRetireOnDeliveryAlone(t *testing.T) {
 }
 
 // --- /clear: uniform page-turn semantics (session-log phase 3) ---
+
+type clearErrorProc struct {
+	countingProc
+	clearErr error
+}
+
+func (p *clearErrorProc) Clear(nodeID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clears++
+	p.lastID = nodeID
+	return p.clearErr
+}
+
+func TestHandleSendClearMapsARejectedConfigurationTo400(t *testing.T) {
+	wrapped := fmt.Errorf("acp clear %s: %w", "dsh", acp.ErrConfigRejected)
+	overIPC := errors.New("clear dsh: " + acp.ErrConfigRejected.Error() + ": model \"retired\" is not on the agent's menu")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"wrapped sentinel", wrapped},
+		{"text across the worker boundary", overIPC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t, &fakeTmux{})
+			n := seedStructuredNode(t, a, "dsh-clear-reject", "dsh", "acp")
+			proc := &clearErrorProc{clearErr: tc.err}
+			proc.live = "quiet"
+			a.testProc = proc
+
+			req := httptest.NewRequest(http.MethodPost, "/api/nodes/"+n.ID+"/send", strings.NewReader(`{"text":"/clear"}`))
+			req.SetPathValue("id", n.ID)
+			rec := httptest.NewRecorder()
+			a.handleSend(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("rejected clear = %d %q, want 400", rec.Code, rec.Body.String())
+			}
+			want := tc.err.Error() + ". Fork with a model the agent still offers.\n"
+			if rec.Body.String() != want {
+				t.Fatalf("rejected clear = %q, want cause then remedy %q", rec.Body.String(), want)
+			}
+		})
+	}
+}
 
 func TestHandleSendMuseClearRequiresCurrentConsent(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})

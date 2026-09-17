@@ -86,9 +86,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     replacement is re-configured with the *same* launch configuration the node
     records — dsh carries neither model nor thought level on argv, so a
     replacement that is not configured again is a page turn that silently
-    changes model; a dsh refusal fails the clear before the seam, leaving the
-    old session and its log untouched. codex opens a new thread on the same
-    PID. In both, the seam is appended only after the protocol call succeeded. **Claude obeys the same rule**, and its proof is
+    changes model; a dsh refusal returns HTTP 400 and fails the clear before
+    the seam, leaving the old session and its log untouched. codex opens a new
+    thread on the same PID. In both, the seam is appended only after the
+    protocol call succeeded. **Claude obeys the same rule**, and its proof is
     that node's own `SessionStart source:"clear"`: pasting `/clear` turns no
     page at all, because the CLI absorbs a paste that lands mid-turn and an
     absorbed slash command evaporates, while the paste still reports
