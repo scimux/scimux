@@ -328,11 +328,14 @@ effort) back to the exact id is server-side only and is never part of this
 payload. Agents without per-model data (claude/pi/opencode/dsh), and codex when
 only its static fallback is available, omit `efforts`; the UI then uses its
 static per-agent list — for cursor that list is deliberately empty, because a
-row with no published level has none. Most catalogs are probed once per process
-and cached until restart. dsh has no list command and no read-only discovery
-surface: naming its models would mean
+row with no published level has none.
+
+Most catalogs are probed once per process and cached until restart. dsh has no
+list command and no read-only discovery surface: naming its models would mean
 opening an ACP session, which dsh flushes to its own durable history and offers
-no way to delete, so scimux never opens one for discovery. dsh therefore
+no way to delete, so scimux never opens one for discovery. dsh's `model` and
+`effort` are therefore settable only through the API, and the strict
+configuration path they exercise is not reachable from the dialog. dsh
 reports an empty `models` and no `efforts`; the dialog offers only
 "(default)", it launches on the profile's own default model, and the thought
 levels that model accepts are read from the live session at launch — the UI's
