@@ -35,7 +35,9 @@ type Runner func(nodeID, agent, dir, model, effort string) (Process, error)
 // agentArgv maps a scimux agent name to its ACP launch command. pi ships a
 // dedicated `pi-acp` binary; opencode exposes ACP as `opencode acp`; grok
 // exposes ACP as `grok agent stdio` with optional -m / --reasoning-effort
-// on the agent parent (session options do not carry them).
+// on the agent parent (session options do not carry them); dsh selects ACP by
+// profile, because a dsh profile is what binds the ACP bundle — there is no
+// subcommand to ask for.
 func agentArgv(agent, model, effort string) ([]string, error) {
 	switch agent {
 	case "pi":
@@ -54,6 +56,11 @@ func agentArgv(agent, model, effort string) ([]string, error) {
 		}
 		argv = append(argv, "stdio")
 		return argv, nil
+	case "dsh":
+		// No model/effort on argv: dsh advertises them as session config
+		// options on session/new, so they are set over the wire after the
+		// connection exists (cf. pi/opencode).
+		return []string{"dsh", "--profile", "acp"}, nil
 	}
 	return nil, fmt.Errorf("agent %q has no ACP transport", agent)
 }

@@ -159,8 +159,8 @@ func TestAT_FR_40_JoinRealManifestBootsRealBootstrap(t *testing.T) {
 		t.Errorf("%s: %d import maps installed; a blob: module cannot consult one",
 			at, res.ImportMapsInstalled)
 	}
-	if res.Stylesheets != 10 || res.Assets != 6 {
-		t.Errorf("%s: stylesheets=%d assets=%d, want 10 and 6", at, res.Stylesheets, res.Assets)
+	if res.Stylesheets != 10 || res.Assets != 7 {
+		t.Errorf("%s: stylesheets=%d assets=%d, want 10 and 7", at, res.Stylesheets, res.Assets)
 	}
 }
 

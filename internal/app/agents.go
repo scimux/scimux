@@ -109,6 +109,12 @@ var harnesses = []harness{
 	// probe (handleAgents overlay); an installed binary with no probe is an
 	// empty, valid model list.
 	{bin: "muse"},
+	// dsh has no list command either, and the only thing that could name its
+	// models is a live session/new — which dsh flushes to its own durable
+	// chat history and cannot delete again, so scimux never asks. Presence
+	// alone is the probe; the empty list is the answer, and a dsh chat
+	// launches the profile's own default model.
+	{bin: "dsh"},
 }
 
 var agentsOnce sync.Once

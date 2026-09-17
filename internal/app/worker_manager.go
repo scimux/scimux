@@ -737,7 +737,7 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		}
 		if node.Transport == "" {
 			switch node.Agent {
-			case "pi", "opencode", "grok":
+			case "pi", "opencode", "grok", "dsh":
 				node.Transport = "acp"
 			case "codex":
 				node.Transport = "codex"

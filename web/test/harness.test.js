@@ -800,3 +800,57 @@ test("rejected enable never renders enabled; rejected disable never renders disa
   assert.equal(h2.last().muse_approval_judge_consent, true);
   assert.ok(h2.renders.every(r => r.muse_approval_judge_consent === true));
 });
+
+test("seven harness rows render alphabetically with dsh between codex and grok", () => {
+  /* Adding a harness must not disturb the one order a reader can predict.
+     dsh sorts on its own lowercase name, as pi and opencode do. */
+  const rows = [
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+    { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
+    { agent: "pi", present: false, launchable: false },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+    { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
+    { agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" },
+  ];
+  const html = harnessRowsHTML(rows, null);
+  const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["claude", "codex", "dsh", "grok", "muse", "opencode", "pi"]);
+  assert.equal((html.match(/class="item"/g) || []).length, 7);
+});
+
+test("an installed dsh reads as unchecked with its prerelease version intact", () => {
+  /* dsh ships prerelease semver; truncating it to 0.1.5 would compare a
+     different version against upstream than the one on disk. */
+  const s = harnessState({ agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" }, null);
+  assert.equal(s.state, "unchecked");
+  assert.equal(s.version, "0.1.5-rc.1");
+  const absent = harnessState({ agent: "dsh", present: false, launchable: false }, null);
+  assert.equal(absent.state, "absent");
+  assert.equal(absent.note, "not installed");
+});
+
+test("dsh carries both its vendor's terms and the BYO caveat", () => {
+  /* dsh is the only harness that is both. DeepSeek ships it with a DeepSeek
+     default, so a DeepSeek session is real and its terms apply; it also
+     routes to whatever provider the profile names, and scimux cannot read
+     which. The link alone would report the default as binding; the BYO note
+     alone would deny that a DeepSeek session exists. It gets both. */
+  const html = harnessRowsHTML(
+    [{ agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" }], null);
+  assert.match(html, /href="https:\/\/cdn\.deepseek\.com\/policies\/en-US\/deepseek-terms-of-use\.html"/);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /rel="noopener"/);
+  assert.match(html, /provider you configure yourself/i);
+});
+
+test("the BYO-only harnesses did not inherit dsh's link", () => {
+  /* pi and opencode hold no model of their own: adding a both-branch for dsh
+     must not turn their honest silence into a vendor claim. */
+  const html = harnessRowsHTML([
+    { agent: "pi", present: true, launchable: true, installed: "0.85.1" },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+  ], null);
+  assert.doesNotMatch(html, /href="http/);
+  assert.doesNotMatch(html, /deepseek/i);
+});

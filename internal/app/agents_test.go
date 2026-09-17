@@ -476,6 +476,10 @@ if [ "$1" != "models" ]; then exit 2; fi
 printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (default)'
 `)
 	writeScript(t, binDir, "muse", `exit 0`)
+	// dsh has no model-list command: naming its models would mean opening an
+	// ACP session, which dsh keeps in its own durable chat history — so
+	// scimux never opens one and, like muse, presence alone is the probe.
+	writeScript(t, binDir, "dsh", `exit 0`)
 	t.Setenv("PATH", binDir)
 
 	cacheDir := filepath.Join(home, ".grok")
@@ -509,6 +513,9 @@ printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (defaul
 	}
 	if got := agents["muse"].Models; got == nil || len(got) != 0 {
 		t.Errorf("muse models = %v, want empty with no static fallback", got)
+	}
+	if got := agents["dsh"].Models; got == nil || len(got) != 0 {
+		t.Errorf("dsh models = %v, want empty with no static fallback", got)
 	}
 	for name, info := range agents {
 		if info.Models == nil {

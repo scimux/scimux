@@ -122,3 +122,18 @@ func TestNormalize_UnknownAgentDirectNoPanic(t *testing.T) {
 		t.Errorf("FreshIn = %d, want 1000 (unknown agent → direct)", got.FreshIn)
 	}
 }
+
+func TestNormalize_DshFreshInputDirect(t *testing.T) {
+	// dsh reports occupancy (used/size), never a per-turn split, so the fare
+	// layer sees no dsh turns today. The rule is still written down rather
+	// than left to the unknown-agent default: if a later dsh does emit a
+	// split, "direct" must be a decision someone made, not a fallback nobody
+	// noticed. Its Input would be fresh-only, as for pi/opencode.
+	if got, ok := agentFreshRule["dsh"]; !ok || got != direct {
+		t.Errorf("agentFreshRule[dsh] = %v (present=%v), want direct stated explicitly", got, ok)
+	}
+	raw := RawTokens{Input: 30, CacheRead: 80, Output: 100}
+	if got := Normalize("dsh", raw); got.FreshIn != 30 {
+		t.Errorf("FreshIn = %d, want 30 (direct; subtract would be −50)", got.FreshIn)
+	}
+}

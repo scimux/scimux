@@ -50,8 +50,8 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   the user's `/tmp/tmux-<uid>` until the next reboot. `SocketPath` is what a
   cleanup deletes, and the two helpers assert the removal rather than
   best-effort it — litter nobody is told about is litter nobody clears. Never
-  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests
-  — wrapped test commands are `bash --norc` or `cat`.
+  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`, `dsh`) in
+  tests — wrapped test commands are `bash --norc` or `cat`.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing in
   `docs/invariants/storage.md`; `FuzzClaudeHookStdin` guards that no Claude hook helper writes to
@@ -70,7 +70,15 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   under `attic/scripts/`; public tests must not depend on them. Keep system
   prompts, tool/skill/path inventories, hostnames, session ids, timezone and
   secret-shaped strings out of committed fixtures.
+- `TestRealDshReplay` and `TestRealDshModelMenu` are that lane for dsh, and they
+  are the only checks that a real dsh still states occupancy in `usage_update`
+  and still encodes a model option value as the JSON `["provider","model"]`
+  pair the launch path decodes. A synthetic fixture can only prove we read the
+  shape we wrote down, so when dsh's wire changes these are what notice — and
+  they skip everywhere the capture is absent, which is everywhere but a
+  maintainer's machine.
 - The committed fixtures (`claude-session.jsonl`, `codex-rollout.jsonl`,
   `internal/acp/codex/testdata/synthetic-session.ndjson`,
-  `internal/acp/testdata/synthetic-grok-turn.ndjson`) are fully synthetic.
+  `internal/acp/testdata/synthetic-grok-turn.ndjson`,
+  `internal/acp/testdata/synthetic-dsh-turn.ndjson`) are fully synthetic.
   Keep them that way; never paste real transcript or wire content into them.

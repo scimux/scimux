@@ -98,6 +98,7 @@ func harnessSources() map[string]harnessSource {
 		"opencode": {URL: npmRegistry + "opencode-ai/latest", Kind: "npm", Label: "npm opencode-ai"},
 		"grok":     {URL: grokStable, Kind: "text", Label: "xAI stable channel"},
 		"muse":     {URL: museStableChannel, Kind: "muse-stable", Label: "Meta stable channel"},
+		"dsh":      {URL: npmRegistry + "@deepseek-ai/dsh/latest", Kind: "npm", Label: "npm @deepseek-ai/dsh"},
 	}
 }
 
@@ -121,7 +122,7 @@ func setHarnessSourcesForTest(src map[string]harnessSource) (restore func()) {
 var versionPattern = regexp.MustCompile(`\bv?(\d+\.\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.\-]+)?)`)
 
 // parseHarnessVersion takes the first version-shaped token in a `--version`
-// output. The six CLIs print several different shapes ("2.1.236 (Claude
+// output. The seven CLIs print several different shapes ("2.1.236 (Claude
 // Code)", "codex-cli 0.147.0", "0.84.3", "grok 1.0.3 (…) [stable]", "Muse
 // Code 1.3.0 (1.3.0-R3057.1)"), and they are free to change them; an
 // unrecognised output yields "" and the row simply shows no version.

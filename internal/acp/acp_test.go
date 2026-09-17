@@ -27,9 +27,17 @@ type fakeAgent struct {
 	prompt        func(a *fakeAgent, ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error)
 	newSession    func() sdk.NewSessionResponse
 	newSessionErr error // when set, NewSession fails — drives the launch-failure reaping path
-	mu            sync.Mutex
-	lastConfig    *sdk.SetSessionConfigOptionRequest
-	lastModeSet   *sdk.SetSessionModeRequest
+	// configReply, when set, decides each set_config_option answer: the
+	// post-switch option set an agent returns, or the refusal it sends for a
+	// value it does not have. dsh does both, so the strict path needs both.
+	configReply func(p sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error)
+	mu          sync.Mutex
+	lastConfig  *sdk.SetSessionConfigOptionRequest
+	// configSets is every set_config_option in order. Order is the point for
+	// dsh: the model is applied first, and the effort menu that follows is the
+	// one the model switch returned.
+	configSets  []sdk.SetSessionConfigOptionRequest
+	lastModeSet *sdk.SetSessionModeRequest
 }
 
 var _ sdk.Agent = (*fakeAgent)(nil)
@@ -71,7 +79,12 @@ func (a *fakeAgent) ResumeSession(ctx context.Context, _ sdk.ResumeSessionReques
 func (a *fakeAgent) SetSessionConfigOption(ctx context.Context, p sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error) {
 	a.mu.Lock()
 	a.lastConfig = &p
+	a.configSets = append(a.configSets, p)
+	reply := a.configReply
 	a.mu.Unlock()
+	if reply != nil {
+		return reply(p)
+	}
 	return sdk.SetSessionConfigOptionResponse{}, nil
 }
 func (a *fakeAgent) SetSessionMode(ctx context.Context, p sdk.SetSessionModeRequest) (sdk.SetSessionModeResponse, error) {

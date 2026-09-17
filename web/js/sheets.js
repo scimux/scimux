@@ -104,6 +104,10 @@ export const DEFAULT_EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex:  ["low", "medium", "high"],
   grok:   ["low", "medium", "high"],
+  /* dsh advertises its thought levels per model as a session config option,
+     and drops the option entirely for a model whose route cannot reason.
+     Empty, not absent: the generic fallback would invent levels dsh refuses. */
+  dsh:    [],
 };
 
 /* ---------- pure: catalogs / options ---------- */
@@ -210,6 +214,10 @@ export function effortLevelsFor(agent, model, modelEfforts, efforts = DEFAULT_EF
 }
 
 export function effortOptionsHTML(list, dflt, esc = escDefault){
+  /* No levels at all is a real answer (dsh: the model's route has none, or the
+     agent never advertised any), so the single option says so the way the
+     model menu does rather than presenting an empty control. */
+  if (!list.length) return `<option value="">(default)</option>`;
   return `<option value=""></option>` +
     list.map(e => `<option value="${esc(e)}">${esc(e)}${e === dflt ? " (default)" : ""}</option>`).join("");
 }
@@ -300,10 +308,34 @@ export function buildStationLabelPayload(station, title, description){
 
 /* ---------- pure: errors / submit chrome ---------- */
 
-export function createErrorField(msg){
+export function createErrorField(msg, status){
   const m = msg || "";
   if (/\b(dir|directory|path)\b/i.test(m)) return "dir";
   if (/\btitle\b/i.test(m)) return "title";
+  /* A launch config the agent refused (dsh applies model and effort over the
+     wire) names the knob it refused. Both knobs are selects in this sheet, so
+     the error belongs on the select the user has to change; the prompt
+     fallback would ask them to repair the one field that was not the problem.
+     Tested after dir so a directory that happens to contain a path segment
+     called "model" still reads as a directory error, and effort before model
+     because a refusal can name the model it was refused *for* — there the
+     effort is what has to change.
+
+     Only an HTTP 400 is that refusal. The server answers 400 exactly when the
+     choice itself was wrong and 500 when the same apply failed for a reason
+     the choice had nothing to do with — an internal error, a cancellation, a
+     transport that died mid-launch — and those messages quote the model or
+     effort they were carrying just the same. Without the status a crashed
+     agent reads as "your model is wrong" and sends the supervisor to correct
+     a select that was already right. A rejection that reaches here with no
+     status at all (a network failure, or a throw from the work that follows
+     an accepted create) never classified one either. Directory and title
+     stay status-independent: they name their own field in any answer that can
+     carry them. */
+  if (status === 400){
+    if (/\beffort\b/i.test(m)) return "effort";
+    if (/\bmodel\b/i.test(m)) return "model";
+  }
   return "prompt";
 }
 
@@ -801,6 +833,7 @@ export function createSheetsFeature(deps = {}){
     clearFieldError(root("nc_dir"));
     clearFieldError(root("nc_lane"));
     clearFieldError(root("nc_model"));
+    clearFieldError(root("nc_effort"));
     const titleEl = root("nc_title");
     const promptEl = root("nc_prompt");
     const title = (titleEl && titleEl.value || "").trim();
@@ -970,9 +1003,11 @@ export function createSheetsFeature(deps = {}){
       if (!desktop && typeof d.setLevel === "function") d.setLevel(1);
     } catch (err) {
       const msg = (err && err.message) || "Could not start this activity.";
-      const field = createErrorField(msg);
-      const target = field === "dir" ? root("nc_dir")
-        : field === "title" ? root("nc_title") : root("nc_prompt");
+      const field = createErrorField(msg, err && err.status);
+      /* root() may be absent in a trimmed sheet; the prompt is the last
+         resort so a rejection is never shown nowhere. */
+      const fieldIDs = { dir: "nc_dir", title: "nc_title", model: "nc_model", effort: "nc_effort" };
+      const target = root(fieldIDs[field] || "nc_prompt") || root("nc_prompt");
       fieldError(target, msg);
       if (target && typeof target.focus === "function") target.focus();
       if (target && typeof target.scrollIntoView === "function")

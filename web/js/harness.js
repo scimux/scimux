@@ -49,12 +49,19 @@ const LAUNCH_BIN = Object.freeze({ pi: "pi-acp" });
  * Naming the wrong vendor would be worse than naming none, so those rows get
  * a sentence instead of a link.
  *
+ * dsh is the one harness that is both, and so gets both lines. DeepSeek ships
+ * it with a DeepSeek default, so a DeepSeek session is real and those terms
+ * bind it; it also routes to whatever provider its profile names, and scimux
+ * cannot read which. The link alone would report the default as binding; the
+ * BYO sentence alone would deny that a DeepSeek session exists. Saying both,
+ * and which applies when, is the only honest row.
+ *
  * Each entry is the whole anchor, with its URL written out literally, and
  * that is deliberate rather than lazy: the FR-42 audit classifies a
  * target=_blank by the href on the *same* element, and only a literal
  * absolute URL is provably external. Building the href from a variable would
  * be indistinguishable from a local navigation to the scanner and would need
- * an allowlist entry — for three constants that never vary. Keep them
+ * an allowlist entry — for four constants that never vary. Keep them
  * literal and the ratchet stays honest.
  *
  * Names match each vendor's own document title; OpenAI's is "Terms of Use".
@@ -65,17 +72,27 @@ const HARNESS_TERMS = Object.freeze({
   claude: `<a href="https://www.anthropic.com/legal/consumer-terms" target="_blank" rel="noopener">Terms of Service</a>`,
   codex: `<a href="https://openai.com/policies/terms-of-use/" target="_blank" rel="noopener">Terms of Use</a>`,
   grok: `<a href="https://x.ai/legal/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
+  dsh: `<a href="https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html" target="_blank" rel="noopener">Terms of Use</a>`,
 });
 
 const BYO_PROVIDER_NOTE =
   "Terms are your model provider's — scimux cannot see which one you configured.";
+
+/* Said after the link, not instead of it: the link names the terms that apply
+   when dsh runs DeepSeek's own models, and this names what happens when it
+   does not. */
+const DSH_PROVIDER_NOTE =
+  "DeepSeek's terms cover its own models; a provider you configure yourself is under that provider's.";
 
 /* The terms line for one row. Absent harnesses keep it: someone deciding
  * whether to install a harness is exactly the reader who wants the terms
  * first, and the row is a reference rather than an action. */
 export function harnessTermsHTML(agent){
   const link = HARNESS_TERMS[agent];
-  if (link) return `<span class="hnote hterms">${link}</span>`;
+  if (link){
+    const caveat = agent === "dsh" ? ` ${esc(DSH_PROVIDER_NOTE)}` : "";
+    return `<span class="hnote hterms">${link}${caveat}</span>`;
+  }
   if (agent === "pi" || agent === "opencode"){
     return `<span class="hnote hterms">${esc(BYO_PROVIDER_NOTE)}</span>`;
   }

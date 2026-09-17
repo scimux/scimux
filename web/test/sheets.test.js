@@ -221,6 +221,42 @@ test("createErrorField and submit/head labels", () => {
   assert.equal(createErrorField("unknown path"), "dir");
   assert.equal(createErrorField("title required"), "title");
   assert.equal(createErrorField("something else"), "prompt");
+  /* A dsh launch refused on the wire names the knob it refused. Routing that
+     to the prompt would ask the user to repair the one field that was fine.
+     Only an HTTP 400 is that refusal: the server answers 400 exactly when the
+     choice itself was wrong, and 500 when the same call failed for a reason
+     the user's model and effort had nothing to do with (docs/http-api.md). */
+  assert.equal(createErrorField(
+    'acp: agent rejected the requested session configuration: model "ds/b" is not one this agent offers',
+    400), "model");
+  assert.equal(createErrorField(
+    'acp: agent rejected the requested session configuration: model "ds/b" was chosen but this agent advertises no model option',
+    400), "model");
+  assert.equal(createErrorField(
+    'acp: agent rejected the requested session configuration: effort "medium" is not one this agent offers',
+    400), "effort");
+  assert.equal(createErrorField(
+    'acp: agent rejected the requested session configuration: agent refused effort "max": {"code":-32602}',
+    400), "effort");
+  /* The effort is the knob that failed even when the message names the model
+     it failed for. */
+  assert.equal(createErrorField('model "ds/b" has no effort level "medium"', 400), "effort");
+  /* A broken agent (internal error, cancellation, dead transport) is a 500,
+     and its message still names the model or effort the failed call carried.
+     Blaming those selects would send the supervisor to correct a choice that
+     was never the problem. */
+  assert.equal(createErrorField(
+    'agent failed to set model "ds/b": {"code":-32603,"message":"internal error"}',
+    500), "prompt");
+  assert.equal(createErrorField(
+    'agent failed to set effort "max": write |1: broken pipe', 500), "prompt");
+  /* No status at all is not a refusal either: a network failure, or a throw
+     from the work that follows an accepted create, never classified one. */
+  assert.equal(createErrorField('agent failed to set model "ds/b": boom'), "prompt");
+  /* Directory and title name their own field in any answer that can carry
+     them, so they stay status-independent. */
+  assert.equal(createErrorField("bad directory path", 500), "dir");
+  assert.equal(createErrorField("title is invalid", 500), "title");
   assert.equal(submitButtonLabel({ editing: false, submitting: false }), "Start");
   assert.equal(submitButtonLabel({ editing: false, submitting: true }), "Starting...");
   assert.equal(submitButtonLabel({ editing: true, submitting: false }), "Save");
@@ -560,6 +596,15 @@ function makeStorage(init = {}){
     removeItem: k => { m.delete(k); },
     _map: m,
   };
+}
+
+/* An api() rejection the way decodeResponse builds one: the HTTP status
+   travels on the Error, and the sheet's classifier needs it to tell a wrong
+   choice (400) from a broken agent (500). */
+function apiError(msg, status){
+  const e = new Error(msg);
+  e.status = status;
+  return e;
 }
 
 function createFeature(overrides = {}){
@@ -1022,6 +1067,98 @@ test("create error maps to dir/title/prompt fields", async () => {
     assert.equal(ctx.byId[id].attributes["aria-invalid"], "true", msg);
     assert.equal(ctx.byId[id]._focused, true);
   }
+});
+
+test("a refused model or effort marks the field that was refused", async () => {
+  /* The server answers 400 for a launch config the agent would not take
+     (dsh applies both over the wire). The sheet has to put that error on the
+     select the user must change, and focus it, or the only actionable part of
+     a rejected launch is invisible. The status is part of that contract, so
+     the double carries it the way decodeResponse does. */
+  const cases = [
+    ['acp: agent rejected the requested session configuration: model "ds/b" is not one this agent offers', "nc_model"],
+    ['acp: agent rejected the requested session configuration: effort "medium" is not one this agent offers', "nc_effort"],
+  ];
+  for (const [msg, id] of cases){
+    const ctx = createFeature();
+    ctx.setApi(async path => {
+      if (path === "/api/agents") return {};
+      if (path === "/api/nodes") throw apiError(msg, 400);
+      return {};
+    });
+    ctx.feature.bind();
+    ctx.byId.plusbtn.dispatch("click");
+    ctx.byId.nc_title.value = "T";
+    ctx.byId.nc_lane.value = "lane-a";
+    ctx.byId.nc_start.dispatch("click");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(ctx.byId[id].attributes["aria-invalid"], "true", msg);
+    assert.equal(ctx.byId[id]._focused, true, msg);
+    assert.notEqual(ctx.byId.nc_prompt.attributes["aria-invalid"], "true",
+      "the prompt was not what the agent refused");
+  }
+});
+
+test("a 500 that names a model or effort does not blame those selects", async () => {
+  /* The failure text of a broken apply still quotes the knob it was applying.
+     Only the status separates it from a refusal, so a 500 must land on the
+     prompt with both selects left clean — otherwise an agent that crashed
+     mid-launch reads as "your model is wrong". */
+  const cases = [
+    'agent failed to set model "ds/b": {"code":-32603,"message":"internal error"}',
+    'agent failed to set effort "max": write |1: broken pipe',
+  ];
+  for (const msg of cases){
+    const ctx = createFeature();
+    ctx.setApi(async path => {
+      if (path === "/api/agents") return {};
+      if (path === "/api/nodes") throw apiError(msg, 500);
+      return {};
+    });
+    ctx.feature.bind();
+    ctx.byId.plusbtn.dispatch("click");
+    ctx.byId.nc_title.value = "T";
+    ctx.byId.nc_lane.value = "lane-a";
+    ctx.byId.nc_start.dispatch("click");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(ctx.byId.nc_prompt.attributes["aria-invalid"], "true", msg);
+    assert.equal(ctx.byId.nc_prompt._focused, true, msg);
+    assert.notEqual(ctx.byId.nc_model.attributes["aria-invalid"], "true",
+      "the model was not what failed");
+    assert.notEqual(ctx.byId.nc_effort.attributes["aria-invalid"], "true",
+      "the effort was not what failed");
+  }
+});
+
+test("a refused field is cleared before the next submission", async () => {
+  /* Otherwise a corrected second attempt still shows the first attempt's
+     error on the effort select. */
+  const ctx = createFeature();
+  let fail = true;
+  ctx.setApi(async (path, opts) => {
+    if (path === "/api/agents") return {};
+    if (path === "/api/nodes"){
+      if (fail) throw apiError('acp: agent rejected the requested session configuration: effort "medium" is not one this agent offers', 400);
+      return { id: "created-1", title: JSON.parse(opts.body).title };
+    }
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_title.value = "T";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(ctx.byId.nc_effort.attributes["aria-invalid"], "true");
+  fail = false;
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.notEqual(ctx.byId.nc_effort.attributes["aria-invalid"], "true");
 });
 
 test("malformed successful create response follows the original failure path", async () => {
@@ -2422,4 +2559,35 @@ test("delayed probe while closed updates catalogs without leaking hidden Muse se
   assert.equal(ctx.byId.nc_model.value, "synth-std",
     "fresh open after a closed delayed probe must use the Standard default");
   assert.notEqual(ctx.byId.nc_model.value, "synth-disc");
+});
+
+test("dsh reaches the new-chat dropdown from the probe, with no model menu of its own", () => {
+  /* dsh has no static catalog and no list command: like pi and opencode it
+     appears because the server probed it, and it launches on its profile's
+     own default model. A DEFAULT_MODELS entry would invent a menu. */
+  assert.equal(DEFAULT_MODELS.dsh, undefined);
+  /* dsh advertises its thought levels per model over the wire (and a model
+     whose route has no reasoning advertises none at all), so the static
+     fallback must be empty: the generic low/medium/high menu would offer
+     levels dsh rejects — "medium" is not one of its levels. */
+  assert.deepEqual(DEFAULT_EFFORTS.dsh, []);
+  assert.deepEqual(effortLevelsFor("dsh", "", {}), { list: [], default: undefined });
+  assert.deepEqual(
+    effortLevelsFor("dsh", "p/m", { dsh: { "p/m": { levels: ["off", "low", "high", "max"], default: "high" } } }),
+    { list: ["off", "low", "high", "max"], default: "high" });
+  const models = cloneDefaultModels();
+  const me = {};
+  const r = applyAgentsProbe(models, me, { dsh: { models: [] } });
+  assert.equal(r.changed, true);
+  assert.deepEqual(Object.keys(models), ["dsh"]);
+  assert.match(agentOptionsHTML(models, esc), />dsh</);
+  /* The empty option is the only one, and it reads "(default)" — not a blank
+     line the user has to guess at. */
+  assert.deepEqual(models.dsh, [""]);
+  assert.match(modelOptionsHTML(models, "dsh", null, esc), /value=""[^>]*>\(default\)</);
+  /* An empty effort menu is a real answer, not a broken control: the one
+     option reads "(default)" exactly as the model menu's does. */
+  assert.equal(effortOptionsHTML([], undefined, esc), `<option value="">(default)</option>`);
+  assert.equal(effortOptionsHTML(["low", "high"], "high", esc),
+    `<option value=""></option><option value="low">low</option><option value="high">high (default)</option>`);
 });

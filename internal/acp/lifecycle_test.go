@@ -14,8 +14,8 @@ import (
 
 // agentArgv is the pure command-selection seam: pi ships a dedicated binary,
 // opencode exposes ACP as a subcommand, grok as `grok agent stdio` (with
-// optional model/effort flags), and anything else has no ACP transport and
-// must be rejected rather than silently launched.
+// optional model/effort flags), dsh as `dsh --profile acp`, and anything else
+// has no ACP transport and must be rejected rather than silently launched.
 func TestAgentArgv(t *testing.T) {
 	cases := []struct {
 		agent, model, effort string
@@ -34,6 +34,12 @@ func TestAgentArgv(t *testing.T) {
 		// pi/opencode ignore model/effort at argv (session options own them).
 		{agent: "pi", model: "x", effort: "high", want: []string{"pi-acp"}},
 		{agent: "opencode", model: "y", effort: "low", want: []string{"opencode", "acp"}},
+		// dsh selects its ACP transport with a profile name, not a subcommand;
+		// the profile is what binds the ACP bundle. Model/effort are session
+		// config options over the wire, never argv, so they change nothing here.
+		{agent: "dsh", want: []string{"dsh", "--profile", "acp"}},
+		{agent: "dsh", model: "deepseek-v4-flash", effort: "high",
+			want: []string{"dsh", "--profile", "acp"}},
 		{agent: "claude", wantErr: true},
 		{agent: "", wantErr: true},
 	}
@@ -153,4 +159,137 @@ func TestShutdownStopsSubprocess(t *testing.T) {
 		t.Error("Shutdown must drop the session")
 	}
 	waitFor(t, "subprocess killed", func() bool { return atomic.LoadInt32(&cp.kills) >= 1 })
+}
+
+// dshModelID turns one dsh select-option value into the "provider/model" id
+// scimux already uses for pi and opencode. dsh encodes the pair as a JSON
+// array string, which is dsh's own identity for the pair — so the id is
+// decoded from the wire rather than invented, and re-encodes exactly.
+func TestDshModelID(t *testing.T) {
+	cases := []struct{ value, want string }{
+		{`["deepseek-official","deepseek-v4-flash"]`, "deepseek-official/deepseek-v4-flash"},
+		// A local provider's model name may itself contain a slash. The id
+		// keeps it verbatim: splitting on the last slash instead of the first
+		// would move the provider boundary and name a provider that does not
+		// exist.
+		{`["synthetic-local","synth/local-1"]`, "synthetic-local/synth/local-1"},
+		// Anything that is not a two-element array of strings is not a pair
+		// and must not be guessed at.
+		{`"plain-string"`, ""},
+		{`["only-one"]`, ""},
+		{`["a","b","c"]`, ""},
+		{`[1,2]`, ""},
+		{``, ""},
+		{`not json`, ""},
+		// An empty half would produce "/x" or "x/", neither of which round-trips.
+		{`["","m"]`, ""},
+		{`["p",""]`, ""},
+	}
+	for _, c := range cases {
+		if got := dshModelID(c.value); got != c.want {
+			t.Errorf("dshModelID(%q) = %q, want %q", c.value, got, c.want)
+		}
+	}
+}
+
+// applyModel is applyEffort's sibling: it puts a supervisor's model choice on
+// the agent's own control surface after the session exists, because dsh takes
+// no model on argv. Matching by the decoded pair is what makes the id the
+// dialog shows and the value the agent wants the same thing.
+func TestApplyModelSelectsTheGroupedPair(t *testing.T) {
+	grouped := sdk.SessionConfigSelectOptionsGrouped{
+		{Group: "deepseek-official", Name: "DeepSeek", Options: []sdk.SessionConfigSelectOption{
+			{Value: `["deepseek-official","synth-flash"]`, Name: "Synth-Flash"},
+			{Value: `["deepseek-official","synth-pro"]`, Name: "Synth-Pro"},
+		}},
+		{Group: "synthetic-local", Name: "synthetic-local", Options: []sdk.SessionConfigSelectOption{
+			{Value: `["synthetic-local","synth/local-1"]`, Name: "synth/local-1"},
+		}},
+	}
+	newSession := func() sdk.NewSessionResponse {
+		return sdk.NewSessionResponse{
+			SessionId: "sess_test",
+			ConfigOptions: []sdk.SessionConfigOption{
+				{Select: &sdk.SessionConfigOptionSelect{
+					Id: "model", Name: "Model", CurrentValue: `["synthetic-local","synth/local-1"]`,
+					Options: sdk.SessionConfigSelectOptions{Grouped: &grouped},
+				}},
+			},
+		}
+	}
+
+	t.Run("picks the option whose decoded pair matches", func(t *testing.T) {
+		agent := &fakeAgent{newSession: newSession}
+		m := newManager(t, agent)
+		if _, err := m.Launch("n1", "dsh", t.TempDir(), "deepseek-official/synth-pro", ""); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "model config option set", func() bool {
+			agent.mu.Lock()
+			defer agent.mu.Unlock()
+			return agent.lastConfig != nil && agent.lastConfig.ValueId != nil &&
+				string(agent.lastConfig.ValueId.Value) == `["deepseek-official","synth-pro"]` &&
+				string(agent.lastConfig.ValueId.ConfigId) == "model"
+		})
+	})
+
+	t.Run("an unknown model refuses the launch", func(t *testing.T) {
+		// Launching on the agent's default instead would leave the node record
+		// and the log header naming a model nothing is running. dsh's model
+		// lives only in the session, so the launch is the last moment this can
+		// be said out loud.
+		agent := &fakeAgent{newSession: newSession}
+		m := newManager(t, agent)
+		_, err := m.Launch("n1", "dsh", t.TempDir(), "nobody/nothing", "")
+		if err == nil || !IsConfigRejection(err) {
+			t.Fatalf("launch error = %v, want a rejected configuration", err)
+		}
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		if agent.lastConfig != nil {
+			t.Fatalf("set config to %+v for a model the agent never offered", agent.lastConfig.ValueId)
+		}
+	})
+
+	t.Run("no model means no request at all", func(t *testing.T) {
+		agent := &fakeAgent{newSession: newSession}
+		m := newManager(t, agent)
+		if _, err := m.Launch("n1", "dsh", t.TempDir(), "", ""); err != nil {
+			t.Fatal(err)
+		}
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		if agent.lastConfig != nil {
+			t.Fatalf("set config to %+v with no model requested", agent.lastConfig.ValueId)
+		}
+	})
+
+	t.Run("a non-model select is never touched", func(t *testing.T) {
+		// applyEffort owns the effort select. If applyModel matched on value
+		// alone it could set an effort option to a model id.
+		agent := &fakeAgent{newSession: func() sdk.NewSessionResponse {
+			ung := sdk.SessionConfigSelectOptionsUngrouped{
+				{Value: "deepseek-official/synth-pro", Name: "High"},
+			}
+			return sdk.NewSessionResponse{
+				SessionId: "sess_test",
+				ConfigOptions: []sdk.SessionConfigOption{
+					{Select: &sdk.SessionConfigOptionSelect{
+						Id: "effort", Name: "Effort", CurrentValue: "low",
+						Options: sdk.SessionConfigSelectOptions{Ungrouped: &ung},
+					}},
+				},
+			}
+		}}
+		m := newManager(t, agent)
+		_, err := m.Launch("n1", "dsh", t.TempDir(), "deepseek-official/synth-pro", "")
+		if err == nil || !IsConfigRejection(err) {
+			t.Fatalf("launch error = %v, want a rejected configuration", err)
+		}
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		if agent.lastConfig != nil {
+			t.Fatalf("model choice reached the %q select", agent.lastConfig.ValueId.ConfigId)
+		}
+	})
 }

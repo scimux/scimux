@@ -172,8 +172,8 @@ the first Claude prompt is awaiting SessionStart or transcript confirmation,
 `submitting` or `unconfirmed`. A startup or delivery failure sets `error` and
 `restore_draft` with the original prompt; it does not open the terminal.
 
-For structured nodes (Codex app-server, ACP `pi`/`opencode`/`grok`, and
-Muse MSP), `source` is `acp` for compatibility across these transports;
+For structured nodes (Codex app-server, ACP `pi`/`opencode`/`grok`/`dsh`,
+and Muse MSP), `source` is `acp` for compatibility across these transports;
 there is no pane fallback. Pending approval details are returned as
 `perm_title`, `perm_options`, `perm_tool_kind`, `perm_reason`, and — only
 while a permission is pending — an opaque `perm_request_id` that
@@ -314,10 +314,19 @@ is added client-side to mean "launch with the harness default". `efforts` is a
 map from model id to that model's accepted `levels` and its `default`. Codex
 obtains it from `codex debug models`; Grok reads its CLI models cache and fills
 missing entries from its static low/medium/high menu. Agents without per-model
-data (claude/pi/opencode), and codex when only its static fallback is available,
-omit `efforts`; the UI then uses its static per-agent list. Most catalogs are
-probed once per process and cached until restart. Claude's model IDs also have
-a persistent cache, refreshed on a CLI version change or after one day;
+data (claude/pi/opencode/dsh), and codex when only its static fallback is
+available, omit `efforts`; the UI then uses its static per-agent list. Most
+catalogs are probed once per process and cached until restart. dsh has no list
+command and no read-only discovery surface: naming its models would mean
+opening an ACP session, which dsh flushes to its own durable history and offers
+no way to delete, so scimux never opens one for discovery. dsh therefore
+reports an empty `models` and no `efforts`; the dialog offers only
+"(default)", it launches on the profile's own default model, and the thought
+levels that model accepts are read from the live session at launch — the UI's
+static effort list for dsh is deliberately empty, because dsh's levels are
+`off`/`low`/`high`/`max` for models whose route reasons and absent for the
+rest. Claude's model IDs
+also have a persistent cache, refreshed on a CLI version change or after one day;
 `GET /api/agents` can trigger that refresh. Its model probes submit no billed
 prompt and are independent of consent for the usage gauge.
 
@@ -353,7 +362,8 @@ first prompt is pasted after SessionStart on a background path. Failures after
 that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
 this response.
 
-Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, and `muse`.
+Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, `dsh`, and
+`muse`.
 Muse creation requires `muse_approval_judge_consent: true` in the computer's
 settings; missing consent is `400`. Its requested model must be launchable
 in the current catalog, or creation returns `400`. With no explicit model,
@@ -361,6 +371,18 @@ the server chooses an eligible Standard model; IDs ending in `-contributor`
 require an explicit choice and are never an implicit default. The stored
 node retains the user's model choice (including an empty default choice),
 while the launch receives the resolved concrete ID.
+
+A dsh create carries its model over the wire rather than on argv, and dsh is
+the one agent for which that application is authoritative: if the live agent
+does not offer the requested model, or refuses it (or the requested thought
+level), the launch is refused, the process and its meta-only session log are
+discarded, and the response is `400` naming what was rejected — never a chat
+quietly running a different model from the one the node records. `400` means
+the choice itself was wrong: the option is absent from the set the agent
+advertised, or the agent answered the apply with JSON-RPC `-32602`. A failure
+of the same call for any other reason — an internal error, a cancellation, a
+transport that dies mid-launch — still fails the create, but as `500`, because
+the model and thought level the user picked were not the problem.
 
 Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
 `transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
@@ -801,8 +823,9 @@ separately enforces approval-judge consent and model-catalog checks.
 
 What each harness publishes upstream: `{latest:{<agent>:{version, source}}}`.
 Reached only on an explicit tap, like the scimux update check — the server
-never polls the registries. There is no single lane: three sources are npm
-packages, grok is a plain-text channel file, and Claude's depends on whether
+never polls the registries. There is no single lane: four sources are npm
+packages (codex, pi, opencode and dsh), grok is a plain-text channel file, and
+Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not
 the npm dist-tag, which it can never receive). Muse has a separate stable
 channel metadata source. Its response format is not yet supported, so Muse

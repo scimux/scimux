@@ -10,7 +10,7 @@ accident is the one most likely to be load-bearing: check here before
 
 Claude is the one agent scimux drives through official hooks instead of
 supervision heuristics, so it has its own rules. All of this applies to a
-*scimux-owned* Claude node; Codex, ACP, pi, opencode and grok keep the
+*scimux-owned* Claude node; Codex, ACP, pi, opencode, grok and dsh keep the
 ordinary inspect/fallback behavior.
 
 ## A transcript is bound only by that node's own SessionStart hook

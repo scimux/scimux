@@ -39,8 +39,13 @@ var agentFreshRule = map[string]freshRule{
 	"claude":   direct,
 	"pi":       direct,
 	"opencode": direct,
-	"codex":    subtractCache,
-	"grok":     subtractCache,
+	// dsh reports occupancy (used/size), not a per-turn split, so no dsh turn
+	// reaches Normalize today. Stated anyway: if one ever does, its Input is
+	// fresh-only like pi/opencode, and that is a decision rather than a
+	// default nobody chose.
+	"dsh":   direct,
+	"codex": subtractCache,
+	"grok":  subtractCache,
 }
 
 // Normalize maps one turn's raw stored token fields + agent name to the four

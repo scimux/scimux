@@ -50,7 +50,8 @@ var (
 	// embedded and served like the rest of the web tree. `go list -deps`
 	// cannot see it, so it is listed here by hand.
 	qrcodegenLicense = mustEmbeddedLicense("qrcodegen.LICENSE")
-	// Vendored Grok SVG from Lobe Icons; also outside the Go module graph.
+	// Vendored Grok and DeepSeek SVGs from Lobe Icons; also outside the Go
+	// module graph. One notice covers both: same project, same MIT licence.
 	lobeIconsLicense = mustEmbeddedLicense("lobe-icons.LICENSE")
 )
 
