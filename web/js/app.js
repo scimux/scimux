@@ -1864,7 +1864,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      `--version` once per process, so this is a cached answer and the panel is
      populated before the human reads down to it. The upstream check is a
      separate tap for the same reason the scimux one is: opening a menu must
-     not call six registries, and "up to date" is a claim only a check makes. */
+     not call seven registries, and "up to date" is a claim only a check makes. */
   let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
   function renderHarnesses(){
     if (!harnessRows) return;

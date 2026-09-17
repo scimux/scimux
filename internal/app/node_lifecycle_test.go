@@ -215,6 +215,7 @@ func TestResolveNodeRootTransportByAgent(t *testing.T) {
 		// cursor speaks ACP over stdio like pi/opencode/grok, so it shares
 		// their transport rather than earning one of its own.
 		{"cursor", "acp"},
+		{"dsh", "acp"},
 		{"muse", "muse"},
 	}
 	for _, c := range cases {
@@ -762,7 +763,10 @@ func TestAgentCommandRejectsCodexAndUnknown(t *testing.T) {
 	if _, err := agentCommand(&Node{Agent: "codex", Prompt: "p"}, nil); err == nil {
 		t.Error("agentCommand must reject codex")
 	}
-	for _, agent := range []string{"gemini", "", "Claude"} {
+	// dsh has no tmux fallback on purpose: its ACP profile is the only launch
+	// path scimux knows, and a bare `dsh <prompt>` is a different, interactive
+	// program. Rejecting it here is the honest answer, not an omission.
+	for _, agent := range []string{"dsh", "gemini", "", "Claude"} {
 		if _, err := agentCommand(&Node{Agent: agent, Prompt: "p"}, nil); err == nil {
 			t.Errorf("agentCommand must reject unknown agent %q", agent)
 		}

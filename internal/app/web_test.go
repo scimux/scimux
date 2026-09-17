@@ -1756,6 +1756,8 @@ func TestMuseBrowserComposition(t *testing.T) {
 		"five harnesses",
 		"five agents",
 		"five registries",
+		"six harnesses",
+		"six agents",
 	} {
 		if strings.Contains(joined, banned) {
 			t.Errorf("browser composition still contains %q", banned)
@@ -1770,7 +1772,10 @@ func TestMuseReadme(t *testing.T) {
 	}
 	readme := string(b)
 	for _, want := range []string{
-		"Claude Code", "Codex", "pi", "opencode", "Grok", "Muse",
+		"Claude Code", "Codex", "pi", "opencode", "Grok", "Cursor", "dsh", "Muse",
+		"cursor-agent acp",
+		"dsh --profile acp",
+		"deepseek-terms-of-use",
 		"muse serve",
 		"remain pending until resolved",
 		"Auto-approve this turn",
@@ -1787,11 +1792,13 @@ func TestMuseReadme(t *testing.T) {
 			t.Errorf("README.md retains obsolete Muse claim %q", obsolete)
 		}
 	}
-	if strings.Contains(readme, "five agents side by side") {
-		t.Error("README still promises five agents")
+	for _, stale := range []string{"five agents side by side", "six agents side by side", "seven agents side by side"} {
+		if strings.Contains(readme, stale) {
+			t.Errorf("README still promises %q", stale)
+		}
 	}
-	if !strings.Contains(readme, "six agents side by side") {
-		t.Error("README must keep the no-benchmark position with six agents")
+	if !strings.Contains(readme, "eight agents side by side") {
+		t.Error("README must keep the no-benchmark position with eight agents")
 	}
 	for _, banned := range []string{
 		"developers.facebook.com",

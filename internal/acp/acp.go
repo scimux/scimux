@@ -193,7 +193,11 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 		s.ctxSize = contextSizeFromMeta(resp.Meta, model)
 	}
 	s.captureBanner(resp)
-	s.applyEffort(ctx, effort, resp)
+	if err := s.applyLaunchConfig(ctx, model, effort, resp); err != nil {
+		killAndReap(proc)
+		discardLog()
+		return "", err
+	}
 
 	m.mu.Lock()
 	m.sessions[nodeID] = s
@@ -312,7 +316,15 @@ func (m *Manager) Clear(nodeID string) error {
 		s.ctxSize = n
 	}
 	s.captureBanner(resp)
-	s.applyEffort(ctx, s.effort, resp)
+	// Same apply as Launch, and for the same reason: dsh carries neither knob
+	// on argv, so a replacement process that is not configured again is a
+	// replacement running something else. A refusal here is refused *before*
+	// the seam, leaving the old session and its log untouched.
+	if err := s.applyLaunchConfig(ctx, s.model, s.effort, resp); err != nil {
+		killAndReap(proc)
+		old.abortTurn()
+		return err
+	}
 	// Retire the old session's writer before the seam goes in: from here its
 	// stragglers are dropped rather than landing inside the fresh segment
 	// (finding 91). Reverted if the seam append fails, so that failure path
@@ -1551,40 +1563,204 @@ func floatFromAny(v any) float64 {
 	return 0
 }
 
-// applyEffort maps a scimux effort level onto the agent's own control surface:
-// pi exposes effort as a session mode; opencode as a select config option.
-// Best-effort and tolerant — a mismatch leaves the agent's default standing.
-func (s *Session) applyEffort(ctx context.Context, effort string, resp sdk.NewSessionResponse) {
-	if effort == "" {
-		return
+// ErrConfigRejected marks a launch or clear that failed because the agent
+// would not take the model or effort the user chose. It is a wrong *request*,
+// not a broken agent, which is why the HTTP layer answers 400 rather than 500.
+//
+// It travels as text as well as a value: a session worker is a separate
+// process, so by the time the app sees a launch failure the error is only its
+// message. IsConfigRejection reads both.
+var ErrConfigRejected = errors.New("acp: agent rejected the requested session configuration")
+
+// IsConfigRejection reports whether err is a refusal of an explicit model or
+// effort choice, including one that crossed a process boundary as text.
+func IsConfigRejection(err error) bool {
+	if err == nil {
+		return false
 	}
-	if resp.Modes != nil {
-		for _, mode := range resp.Modes.AvailableModes {
+	return errors.Is(err, ErrConfigRejected) || strings.Contains(err.Error(), ErrConfigRejected.Error())
+}
+
+// jsonrpcInvalidParams is the only answer that says the *request* was wrong.
+// An agent that reports -32603, cancels, or drops the pipe mid-call has
+// failed; the model and effort it was handed may have been perfectly valid.
+const jsonrpcInvalidParams = -32602
+
+// configSetError classifies a failed set_mode or set_config_option. Only a
+// typed -32602 becomes ErrConfigRejected and therefore an HTTP 400: an
+// internal error, a cancellation and a half-closed transport are all the
+// agent breaking, and answering those with "your configuration was rejected"
+// would send the supervisor back to the model picker to correct a choice that
+// was never the problem. Everything else stays an ordinary wrapped error and
+// reaches the browser as a 500.
+//
+// The wrapped message deliberately does not contain the sentinel's text: a
+// launch failure crosses the session-worker boundary as a string, and
+// IsConfigRejection matches on that string as well as on the value.
+func configSetError(err error, knob, value string) error {
+	var re *sdk.RequestError
+	if errors.As(err, &re) && re.Code == jsonrpcInvalidParams {
+		return fmt.Errorf("%w: agent refused %s %q: %v", ErrConfigRejected, knob, value, err)
+	}
+	return fmt.Errorf("agent failed to set %s %q: %w", knob, value, err)
+}
+
+// applyLaunchConfig puts the supervisor's model and effort onto a session that
+// already exists. Launch and Clear both call it, and that shared call is the
+// point: dsh puts neither knob on argv, so anything applied only at Launch is
+// silently dropped by the next /clear.
+//
+// Two policies, stated once. dsh is strict — an explicit choice it cannot
+// apply fails the launch, because the alternative is a node whose record, log
+// header and gauge all name a model the live agent is not running, with
+// nothing on screen to say so. pi, opencode and grok stay tolerant: they have
+// always treated a mismatch as "keep your own default", and changing that is
+// their behaviour to change, not something adding dsh should do to them.
+func (s *Session) applyLaunchConfig(ctx context.Context, model, effort string, resp sdk.NewSessionResponse) error {
+	strict := s.agent == "dsh"
+	opts := resp.ConfigOptions
+	if strict {
+		updated, err := s.applyModel(ctx, model, opts)
+		if err != nil {
+			return err
+		}
+		// The model switch answers with the full option set as it now stands,
+		// and that set is what the effort menu must be read from: dsh offers
+		// reasoning_effort only for a model whose route has one, so the menu
+		// that arrived with session/new described the *previous* model.
+		if len(updated) > 0 {
+			opts = updated
+		}
+	}
+	if err := s.applyEffort(ctx, effort, resp.Modes, opts); err != nil && strict {
+		return err
+	}
+	return nil
+}
+
+// applyEffort maps a scimux effort level onto the agent's own control surface:
+// pi exposes effort as a session mode; opencode and dsh as a select config
+// option. The error says why nothing was applied; applyLaunchConfig decides
+// per agent whether that is fatal or simply the agent's default standing.
+func (s *Session) applyEffort(ctx context.Context, effort string, modes *sdk.SessionModeState, opts []sdk.SessionConfigOption) error {
+	if effort == "" {
+		return nil
+	}
+	if modes != nil {
+		for _, mode := range modes.AvailableModes {
 			if strings.EqualFold(string(mode.Id), effort) || strings.EqualFold(mode.Name, effort) {
-				_, _ = s.conn.SetSessionMode(ctx, sdk.SetSessionModeRequest{SessionId: s.sessionID, ModeId: mode.Id})
-				return
+				if _, err := s.conn.SetSessionMode(ctx, sdk.SetSessionModeRequest{SessionId: s.sessionID, ModeId: mode.Id}); err != nil {
+					return configSetError(err, "effort", effort)
+				}
+				return nil
 			}
 		}
 	}
-	for _, opt := range resp.ConfigOptions {
+	for _, opt := range opts {
 		sel := opt.Select
 		if sel == nil {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(string(sel.Id)), "effort") &&
-			!strings.Contains(strings.ToLower(sel.Name), "effort") {
+		if !containsFold(string(sel.Id), "effort") && !containsFold(sel.Name, "effort") {
 			continue
 		}
 		if val, ok := matchSelectValue(sel, effort); ok {
-			_, _ = s.conn.SetSessionConfigOption(ctx, sdk.SetSessionConfigOptionRequest{
+			if _, err := s.conn.SetSessionConfigOption(ctx, sdk.SetSessionConfigOptionRequest{
 				ValueId: &sdk.SetSessionConfigOptionValueId{ConfigId: sel.Id, SessionId: s.sessionID, Value: val},
-			})
-			return
+			}); err != nil {
+				return configSetError(err, "effort", effort)
+			}
+			return nil
 		}
 	}
+	return fmt.Errorf("%w: effort %q is not one this agent offers", ErrConfigRejected, effort)
 }
 
-func matchSelectValue(sel *sdk.SessionConfigOptionSelect, effort string) (sdk.SessionConfigValueId, bool) {
+// applyModel is applyEffort's sibling for the model knob. dsh takes no model
+// on argv — its ACP profile picks one, and the only way to change it is the
+// "model" select session/new advertises — so a supervisor's choice has to be
+// applied after the session exists. It returns the option set the agent
+// reports afterwards, which is the full configuration as it now stands.
+//
+// A model that is not on the menu, a menu that does not exist, and the agent's
+// own -32602 are ErrConfigRejected: the choice was wrong, and an explicit
+// model is a claim the chat records, so the only honest alternatives are
+// applying it or refusing the launch. Any other RPC failure still fails the
+// launch, but as a server error — see configSetError.
+//
+// Called for dsh only. pi and opencode have ignored the model field over ACP
+// since that transport landed, and making it take effect is a change to their
+// behaviour that belongs to them, not to adding dsh.
+func (s *Session) applyModel(ctx context.Context, model string, opts []sdk.SessionConfigOption) ([]sdk.SessionConfigOption, error) {
+	if model == "" {
+		return nil, nil
+	}
+	for _, opt := range opts {
+		sel := opt.Select
+		if sel == nil {
+			continue
+		}
+		// Scoped to the model select by name. Matching on value across every
+		// select would let a model id land in the effort menu, which happens
+		// to be reachable: both are plain strings on the same wire.
+		if !containsFold(string(sel.Id), "model") && !containsFold(sel.Name, "model") {
+			continue
+		}
+		val, ok := matchModelValue(sel, model)
+		if !ok {
+			return nil, fmt.Errorf("%w: model %q is not one this agent offers", ErrConfigRejected, model)
+		}
+		resp, err := s.conn.SetSessionConfigOption(ctx, sdk.SetSessionConfigOptionRequest{
+			ValueId: &sdk.SetSessionConfigOptionValueId{ConfigId: sel.Id, SessionId: s.sessionID, Value: val},
+		})
+		if err != nil {
+			return nil, configSetError(err, "model", model)
+		}
+		return resp.ConfigOptions, nil
+	}
+	return nil, fmt.Errorf("%w: model %q was chosen but this agent advertises no model option", ErrConfigRejected, model)
+}
+
+// matchModelValue accepts the id as the agent writes it, as it labels it, or —
+// for dsh — as the provider/model pair its opaque value decodes to.
+func matchModelValue(sel *sdk.SessionConfigOptionSelect, model string) (sdk.SessionConfigValueId, bool) {
+	if val, ok := matchSelectValue(sel, model); ok {
+		return val, true
+	}
+	for _, o := range selectOptions(sel) {
+		if dshModelID(string(o.Value)) == model {
+			return o.Value, true
+		}
+	}
+	return "", false
+}
+
+// dshModelID decodes one dsh select value — a JSON ["provider","model"] pair —
+// into the "provider/model" id pi and opencode already use. Anything that is
+// not that exact shape returns "": an id scimux guessed at could not be
+// matched back to an option, so a wrong guess is worse than no id.
+func dshModelID(value string) string {
+	var pair []string
+	if err := json.Unmarshal([]byte(value), &pair); err != nil {
+		return ""
+	}
+	if len(pair) != 2 || pair[0] == "" || pair[1] == "" {
+		return ""
+	}
+	return pair[0] + "/" + pair[1]
+}
+
+// containsFold is a case-insensitive substring test. Config-option ids and
+// names are agent-authored strings ("model", "Model", "modelId"), so which
+// harness wrote them must not decide whether scimux finds the knob.
+func containsFold(haystack, needle string) bool {
+	return strings.Contains(strings.ToLower(haystack), needle)
+}
+
+// selectOptions flattens a select's grouped and ungrouped halves. Groups carry
+// the provider name, which dsh also encodes into each value, so nothing is
+// lost by reading them as one list.
+func selectOptions(sel *sdk.SessionConfigOptionSelect) []sdk.SessionConfigSelectOption {
 	var opts []sdk.SessionConfigSelectOption
 	if sel.Options.Ungrouped != nil {
 		opts = append(opts, (*sel.Options.Ungrouped)...)
@@ -1594,7 +1770,11 @@ func matchSelectValue(sel *sdk.SessionConfigOptionSelect, effort string) (sdk.Se
 			opts = append(opts, g.Options...)
 		}
 	}
-	for _, o := range opts {
+	return opts
+}
+
+func matchSelectValue(sel *sdk.SessionConfigOptionSelect, effort string) (sdk.SessionConfigValueId, bool) {
+	for _, o := range selectOptions(sel) {
 		if strings.EqualFold(string(o.Value), effort) || strings.EqualFold(o.Name, effort) {
 			return o.Value, true
 		}

@@ -51,6 +51,7 @@ func TestWebFSEmbeddedProductionFiles(t *testing.T) {
 	expected := []string{
 		"web/assets/agents/claude.svg",
 		"web/assets/agents/cursor.svg",
+		"web/assets/agents/deepseek.svg",
 		"web/assets/agents/grok.svg",
 		"web/assets/agents/meta.svg",
 		"web/assets/agents/openai.svg",

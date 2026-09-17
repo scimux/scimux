@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// The `--version` strings below are real output shapes of the six harnesses,
+// The `--version` strings below are real output shapes of the eight harnesses,
 // captured by hand. Only the strings are real: no test
 // in this package may invoke an agent CLI, so every probe here runs against a
 // shell stub on a private PATH.
@@ -27,7 +27,10 @@ func TestParseHarnessVersion(t *testing.T) {
 		{"pi", "0.84.3\n", "0.84.3"},
 		{"opencode", "1.18.23\n", "1.18.23"},
 		{"grok", "grok 1.0.3 (1a29d5bc12) [stable]\n", "1.0.3"},
+		{"cursor", "2026.09.15-d2fe57e\n", "2026.09.15-d2fe57e"},
 		{"muse", "Muse Code 1.3.0 (1.3.0-R3057.1)\n", "1.3.0"},
+		// dsh prints a bare semver with a prerelease suffix and nothing else.
+		{"dsh", "0.1.5-rc.1\n", "0.1.5-rc.1"},
 		{"prerelease suffix", "codex-cli 0.148.0-alpha.2\n", "0.148.0-alpha.2"},
 		{"leading v", "grok v1.2.0\n", "1.2.0"},
 		{"two segments", "opencode 1.18\n", "1.18"},

@@ -143,6 +143,12 @@ var harnesses = []harness{
 	// `cursor-agent --list-models`; the binary is not the agent name because
 	// `agent`, cursor's other installed name, is already grok's on some hosts.
 	{name: "cursor", bin: "cursor-agent", list: cursorModelsFromCLI},
+	// dsh has no list command either, and the only thing that could name its
+	// models is a live session/new — which dsh flushes to its own durable
+	// chat history and cannot delete again, so scimux never asks. Presence
+	// alone is the probe; the empty list is the answer, and a dsh chat
+	// launches the profile's own default model.
+	{bin: "dsh"},
 	// Muse has no static model fallback. Catalog rows come from the injectable
 	// probe (handleAgents overlay); an installed binary with no probe is an
 	// empty, valid model list.

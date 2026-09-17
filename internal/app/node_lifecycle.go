@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
 	"codeberg.org/chrberger/scimux/internal/transcript"
 )
@@ -158,6 +159,10 @@ func agentCommandSettings(n *Node, addDirs []string, settingsPath string) (strin
 		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
 	}
+	// dsh is deliberately absent: `dsh --profile acp` is the only launch line
+	// scimux knows, and it speaks ACP on stdio rather than to a terminal. A
+	// bare `dsh <prompt>` is a different program with a different profile, so
+	// a tmux fallback here would launch something the node did not ask for.
 	return "", fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, or grok)", n.Agent)
 }
 
@@ -393,9 +398,9 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		n.Agent = "claude"
 	}
 	switch n.Agent {
-	case "claude", "codex", "pi", "opencode", "grok", "cursor", "muse":
+	case "claude", "codex", "pi", "opencode", "grok", "cursor", "dsh", "muse":
 	default:
-		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, or muse)", n.Agent)
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, dsh, or muse)", n.Agent)
 	}
 	// A client cannot pin the Muse transport onto a different agent, and a
 	// Muse node cannot run on any other transport. Stored records are not
@@ -403,13 +408,13 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	if n.Agent != "muse" && n.Transport == "muse" {
 		n.Transport = ""
 	}
-	// New nodes pick a transport by agent: pi/opencode/grok/cursor over ACP,
+	// New nodes pick a transport by agent: pi/opencode/grok/cursor/dsh over ACP,
 	// codex over its app-server bridge, muse over MSP, claude over tmux. Only
 	// set this on creation — stored records with an absent Transport are
 	// migrated to tmux by Node.transport, never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
-		case "pi", "opencode", "grok", "cursor":
+		case "pi", "opencode", "grok", "cursor", "dsh":
 			n.Transport = "acp"
 		case "codex":
 			n.Transport = "codex"
@@ -785,7 +790,7 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 }
 
 // launchNode starts the tmux session or structured-protocol subprocess (ACP
-// for pi/opencode/grok, codex app-server for codex, MSP for Muse) and persists
+// for pi/opencode/grok/cursor/dsh, codex app-server for codex, MSP for Muse) and persists
 // the node record.
 // Runs without a.mu. Persist follows launch: the session/process had to exist
 // first, so a store failure rolls it back (kill) — otherwise a session would
@@ -837,6 +842,14 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 			// dialog, so it must not arrive as a server fault.
 			var badModel cursorModelErr
 			if errors.As(err, &badModel) {
+				return 400, err
+			}
+			// A configuration the agent refused (an unknown model, a thought
+			// level that model does not have) is the user's choice being
+			// wrong, not the server failing. It reaches here as text once it
+			// has crossed the session-worker boundary, which is why the
+			// classifier matches on the sentinel's message too.
+			if acp.IsConfigRejection(err) {
 				return 400, err
 			}
 			return 500, err

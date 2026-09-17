@@ -58,6 +58,18 @@ func TestNormalize_OpencodeFreshInputDirect(t *testing.T) {
 	}
 }
 
+func TestNormalize_CursorFreshInputDirect(t *testing.T) {
+	// Cursor is ACP like pi/opencode. State the rule explicitly so adding a
+	// usage split later cannot silently inherit the unknown-agent fallback.
+	if got, ok := agentFreshRule["cursor"]; !ok || got != direct {
+		t.Errorf("agentFreshRule[cursor] = %v (present=%v), want direct stated explicitly", got, ok)
+	}
+	raw := RawTokens{Input: 30, CacheRead: 80, Output: 100}
+	if got := Normalize("cursor", raw); got.FreshIn != 30 {
+		t.Errorf("FreshIn = %d, want 30 (direct; subtract would be −50)", got.FreshIn)
+	}
+}
+
 func TestNormalize_CodexSubtractsCache(t *testing.T) {
 	// codex inputTokens is whole-prompt → fresh_in = input − cache_read.
 	raw := RawTokens{
@@ -120,5 +132,20 @@ func TestNormalize_UnknownAgentDirectNoPanic(t *testing.T) {
 	}()
 	if got.FreshIn != 1000 {
 		t.Errorf("FreshIn = %d, want 1000 (unknown agent → direct)", got.FreshIn)
+	}
+}
+
+func TestNormalize_DshFreshInputDirect(t *testing.T) {
+	// dsh reports occupancy (used/size), never a per-turn split, so the fare
+	// layer sees no dsh turns today. The rule is still written down rather
+	// than left to the unknown-agent default: if a later dsh does emit a
+	// split, "direct" must be a decision someone made, not a fallback nobody
+	// noticed. Its Input would be fresh-only, as for pi/opencode.
+	if got, ok := agentFreshRule["dsh"]; !ok || got != direct {
+		t.Errorf("agentFreshRule[dsh] = %v (present=%v), want direct stated explicitly", got, ok)
+	}
+	raw := RawTokens{Input: 30, CacheRead: 80, Output: 100}
+	if got := Normalize("dsh", raw); got.FreshIn != 30 {
+		t.Errorf("FreshIn = %d, want 30 (direct; subtract would be −50)", got.FreshIn)
 	}
 }
