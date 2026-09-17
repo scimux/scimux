@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -825,10 +826,9 @@ func TestWarmStartupMirrorsAndCachesSegments(t *testing.T) {
 	}
 }
 
-// TestMaybeRelinkTranscriptAfterSessionRollover: a stale linked transcript
-// after /clear must not be replaced by the newest file in the directory.
-// Legacy (no hook) nodes detach; hook-owned nodes wait for SessionStart.
-func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
+// A missing delivered turn must neither detach the owned transcript nor guess
+// a replacement from the directory. SessionStart is the ownership authority.
+func TestMaybeRelinkTranscriptMissingTurnKeepsBinding(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"c1": true}}
 	a := newTestApp(t, f)
 	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
@@ -850,8 +850,8 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	a.nodes = append(a.nodes, n)
 	a.byID["c1"] = n
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
-	// The prompt this file never recorded is the staleness evidence; a bare
-	// pane phase proves nothing (D1/D2).
+	// A prompt missing from this file does not prove that Claude changed
+	// sessions; a local modal may still be holding the paste.
 	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 
 	a.maybeRelinkTranscript(n)
@@ -859,8 +859,8 @@ func TestMaybeRelinkTranscriptAfterSessionRollover(t *testing.T) {
 	if n.Transcript == newPath || n.SessionID == "new-session" {
 		t.Fatalf("newest-file guess rebound %q / %q", n.Transcript, n.SessionID)
 	}
-	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("legacy stale link must detach, got %q / %q", n.Transcript, n.SessionID)
+	if n.Transcript != oldPath || n.SessionID != "old-session" {
+		t.Fatalf("missing turn changed the binding: %q / %q", n.Transcript, n.SessionID)
 	}
 }
 
@@ -1972,26 +1972,27 @@ func launchedTrustNode(t *testing.T, pane string, quiet time.Duration) *app {
 		server:    tmuxsession.NewServerWithRunner("testsock", runner),
 	}
 	a.initMaps()
+	a.claudeHooks[n.ID] = "hook-cl1"
+	a.claudeStrictCap["hook-cl1"] = true
 	return a
 }
 
-// A launched Claude node with no transcript on a lettered workspace-trust
-// dialog must classify as dialog (keypad), not the inspect that the
-// noEvidence branch would otherwise raise. No poller change: ClassifyVisible
-// is already consulted first.
+// A launched Claude node with no transcript on an exact workspace-trust
+// dialog must surface an audited web decision. This keeps workspace consent
+// explicit without requiring a terminal or editing Claude's private state.
 func TestLaunchedClaudeTrustDialogNoTranscript(t *testing.T) {
 	a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
 	a.poll()
-	if got := a.attn["cl1"]; got != "" {
-		t.Errorf("attention = %q, want none: a Claude trust dialog is a launch error, not poll inspect", got)
+	if got := a.attn["cl1"]; got != "dialog" {
+		t.Errorf("attention = %q, want dialog", got)
 	}
 	if got := a.live["cl1"]; got != "quiet" {
 		t.Errorf("live = %q, want quiet", got)
 	}
 }
 
-// Liveness stays mechanical: the lettered matcher never turns a static pane
-// active, and a changing pane stays active with no attention raised.
+// Liveness stays mechanical: classification never changes whether the pane is
+// active or quiet. An exact trust prompt is actionable in either state.
 func TestLetteredTrustDialogDoesNotFeedLiveness(t *testing.T) {
 	t.Run("static pane stays quiet", func(t *testing.T) {
 		a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
@@ -2003,17 +2004,70 @@ func TestLetteredTrustDialogDoesNotFeedLiveness(t *testing.T) {
 			t.Error("matcher turned the pane active")
 		}
 	})
-	t.Run("changing pane stays active with no attention", func(t *testing.T) {
+	t.Run("changing pane stays active with dialog attention", func(t *testing.T) {
 		a := launchedTrustNode(t, workspaceTrustPane, paneQuietAfter+time.Second)
 		a.prevCap["cl1"] = "Synthetic workspace menu\nstarting…\n"
 		a.poll()
 		if got := a.live["cl1"]; got != "active" {
 			t.Errorf("live = %q, want active on a changing pane", got)
 		}
-		if got := a.attn["cl1"]; got != "" {
-			t.Errorf("attention = %q, want none while the pane is still changing", got)
+		if got := a.attn["cl1"]; got != "dialog" {
+			t.Errorf("attention = %q, want dialog", got)
 		}
 	})
+	t.Run("generic lettered menu stays non-actionable", func(t *testing.T) {
+		a := launchedTrustNode(t, "y. Continue\nn. Cancel\nEnter y/n:\n", paneQuietAfter+time.Second)
+		a.poll()
+		if got := a.attn["cl1"]; got != "" {
+			t.Errorf("generic menu attention = %q, want none", got)
+		}
+	})
+}
+
+func TestClaudeWorkspaceTrustWebDecisionIsAudited(t *testing.T) {
+	f := &fakeTmux{
+		list: []string{"cl1"}, alive: map[string]bool{"cl1": true},
+		capture: workspaceTrustPane,
+	}
+	a := newTestApp(t, f)
+	n := &Node{ID: "cl1", Agent: "claude", SessionID: hookSIDOwn, AXScreenReader: true}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.claudeHooks[n.ID] = "hook-cl1"
+	a.claudeStrictCap["hook-cl1"] = true
+	a.prevCap[n.ID] = workspaceTrustPane
+	a.lastChg[n.ID] = time.Now().Add(-paneQuietAfter - time.Second)
+
+	a.poll()
+	if got := a.attn[n.ID]; got != "dialog" {
+		t.Fatalf("attention = %q, want dialog", got)
+	}
+	dialogID := a.claudeVisibleDialog(n).DialogID
+	if rec := keyReq(a, n.ID, `{"key":"y"}`); rec.Code != 400 {
+		t.Fatalf("unbound trust decision = %d, want 400", rec.Code)
+	}
+	if containsSub(f.subcommands(), "send-keys") {
+		t.Fatal("unbound trust decision sent keys")
+	}
+	rec := keyReq(a, n.ID, `{"key":"y","dialog_id":`+strconv.Quote(dialogID)+`}`)
+	if rec.Code != 200 {
+		t.Fatalf("trust decision = %d %q", rec.Code, rec.Body.String())
+	}
+	calls := sendKeysCalls(f)
+	if len(calls) != 1 || strings.Join(calls[0][2:], " ") != "send-keys -t =cl1: y Enter" {
+		t.Fatalf("trust keys = %v, want one y Enter delivery", calls)
+	}
+	var audit *storeRecord
+	recs := keyRecords(t, a.storePath)
+	for i := range recs {
+		if recs[i].Type == "key" {
+			audit = &recs[i]
+		}
+	}
+	if audit == nil || audit.Key != "y" || strings.Join(audit.Keys, " ") != "y Enter" ||
+		!strings.Contains(audit.Excerpt, "Accessing workspace") {
+		t.Fatalf("trust audit = %+v", audit)
+	}
 }
 
 // handlePeek / notePeekDialog share quietAttentionFallback, so a one-shot
@@ -2181,10 +2235,9 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		}
 	})
 
-	// (d) the cur health check no longer treats a metadata-only touch as
-	// "carried the phase" — so a linked dead file with only a late mtime bump
-	// is not considered healthy and relink can proceed to a real new file.
-	t.Run("cur_health_ignores_metadata_only_touch", func(t *testing.T) {
+	// (d) neither content time nor mtime can invalidate an owned link. Only a
+	// validated successor SessionStart may replace it.
+	t.Run("metadata_only_touch_cannot_invalidate_owned_link", func(t *testing.T) {
 		f := &fakeTmux{alive: map[string]bool{"c1": true}}
 		a := newTestApp(t, f)
 		proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
@@ -2208,14 +2261,12 @@ func TestMaybeRelinkTranscriptP2ClearStaysCleared(t *testing.T) {
 		a.nodes = append(a.nodes, n)
 		a.byID["c1"] = n
 		a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
-		// The unanswered prompt is the staleness evidence (D1/D2).
+		// The unanswered prompt may still be waiting behind a local modal.
 		a.noteDelivery("c1", time.Now().Add(-time.Minute))
 		a.maybeRelinkTranscript(n)
-		if n.Transcript == linked {
-			t.Fatalf("metadata-only mtime touch kept dead link healthy; transcript still %q", linked)
-		}
-		if n.Transcript == newer {
-			t.Fatalf("newest-file guess rebound %q", n.Transcript)
+		if n.Transcript != linked || n.SessionID != "linked" {
+			t.Fatalf("delivery timing changed owned link to %q / %q (newest %q)",
+				n.Transcript, n.SessionID, newer)
 		}
 	})
 }

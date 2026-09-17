@@ -1259,6 +1259,7 @@ function createFeature(overrides = {}){
   const api = async (url, opts = {}) => {
     apiLog.push({ url, method: opts.method || "GET", body: opts.body });
     if (typeof overrides.api === "function") return overrides.api(url, opts, { notes, docs, apiLog });
+    if (url === "/api/notes?usages=1") return { usages: overrides.usages || [] };
     if (url === "/api/notes" && (!opts.method || opts.method === "GET"))
       return { notes };
     if (url === "/api/notes" && opts.method === "POST"){
@@ -1429,6 +1430,44 @@ test("open is idempotent when already open", () => {
   feature.open();
   ctx.flush(0);
   assert.equal(focusCalls.length, 0);
+});
+
+test("usage index stays sparse until openAt fetches the chosen note and unfolds its section", async () => {
+  let changed = 0;
+  const ctx = createFeature({
+    usages: [{ note_id: "n1", section_id: "s1", reference_id: "r1" }],
+    docs: {
+      n1: { id: "n1", title: "Research", sections: [{ id: "s1", title: "Findings", body: "", order: 0, references: [] }] },
+    },
+    deps: { onUsagesChange: () => { changed++; } },
+  });
+  ctx.storage.setItem(STORAGE_KEY_FOLDS, JSON.stringify({ s1: true }));
+  ctx.feature.bind();
+  await settle();
+  assert.deepEqual(ctx.feature.usages(), [{ note_id: "n1", section_id: "s1", reference_id: "r1" }]);
+  assert.ok(changed > 0);
+
+  assert.equal(await ctx.feature.openAt({ note_id: "n1", section_id: "s1", reference_id: "r1" }), true);
+  assert.ok(ctx.apiLog.some(x => x.url === "/api/notes/n1"));
+  assert.equal(Object.hasOwn(JSON.parse(ctx.storage.getItem(STORAGE_KEY_FOLDS)), "s1"), false);
+});
+
+test("usage generation changes only when the sparse destination index changes", async () => {
+  let usages = [];
+  const ctx = createFeature({
+    api: async url => url === "/api/notes?usages=1" ? { usages } : { notes: [] },
+  });
+  ctx.feature.bind();
+  await settle();
+  assert.equal(ctx.feature.usagesVersion(), 0);
+  usages = [{ note_id: "n1", section_id: "s1", reference_id: "r1" }];
+  await ctx.feature.refreshUsages();
+  assert.equal(ctx.feature.usagesVersion(), 1);
+  await ctx.feature.refreshUsages();
+  assert.equal(ctx.feature.usagesVersion(), 1);
+  usages = [{ note_id: "n2", section_id: "s2", reference_id: "r2" }];
+  await ctx.feature.refreshUsages();
+  assert.equal(ctx.feature.usagesVersion(), 2, "same-size replacements still invalidate markers");
 });
 
 /* ---------- debounce / flush / serialize via factory ---------- */

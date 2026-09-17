@@ -698,6 +698,18 @@ test("loadUI: applies remote, invalidates chat, applyRemoteUI order, flushes pen
   assert.ok(calls.some((c) => c.method === "PUT"));
 });
 
+test("UI generation is an O(1) marker invalidation signal", async () => {
+  const { fetchImpl, calls } = scriptedFetch([
+    jsonResponse({ body: baseDoc(), etag: '"r1"' }),
+  ]);
+  const { f } = makeFeature({ fetchBundle: { fetchImpl, calls } });
+  assert.equal(f.uiGeneration(), 0);
+  await f.loadUI();
+  assert.equal(f.uiGeneration(), 1);
+  f.uiMutate({ k: "forward-link-add", link: { id: "l1" } });
+  assert.equal(f.uiGeneration(), 2);
+});
+
 test("pollUI via tick: applies remote with signature invalidation order", async () => {
   const order = [];
   const timers = fakeTimers();

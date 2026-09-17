@@ -35,7 +35,10 @@ type Runner func(nodeID, agent, dir, model, effort string) (Process, error)
 // agentArgv maps a scimux agent name to its ACP launch command. pi ships a
 // dedicated `pi-acp` binary; opencode exposes ACP as `opencode acp`; grok
 // exposes ACP as `grok agent stdio` with optional -m / --reasoning-effort
-// on the agent parent (session options do not carry them).
+// on the agent parent (session options do not carry them); cursor exposes ACP
+// as `cursor-agent acp` and takes its model the same way grok does; dsh
+// selects ACP by profile, because a dsh profile is what binds the ACP bundle
+// — there is no subcommand to ask for.
 func agentArgv(agent, model, effort string) ([]string, error) {
 	switch agent {
 	case "pi":
@@ -54,6 +57,28 @@ func agentArgv(agent, model, effort string) ([]string, error) {
 		}
 		argv = append(argv, "stdio")
 		return argv, nil
+	case "cursor":
+		// Model is a launch flag, not a session option. Cursor's
+		// session/set_config_option rejects anything outside the closed enum
+		// its own session/new advertised (-32602 "Invalid model value"), and
+		// those values are a different namespace from the ids `cursor-agent
+		// --list-models` prints. The flag takes the printed ids, so that is
+		// the surface scimux drives.
+		//
+		// Effort is deliberately absent: cursor has no effort flag, because
+		// the level is part of the model id ("claude-opus-5-thinking-high").
+		// The catalog resolves (model, effort) to that exact id before launch,
+		// so by the time argv is built the choice is already spelled once.
+		argv := []string{"cursor-agent"}
+		if model != "" {
+			argv = append(argv, "--model", model)
+		}
+		return append(argv, "acp"), nil
+	case "dsh":
+		// No model/effort on argv: dsh advertises them as session config
+		// options on session/new, so they are set over the wire after the
+		// connection exists (cf. pi/opencode).
+		return []string{"dsh", "--profile", "acp"}, nil
 	}
 	return nil, fmt.Errorf("agent %q has no ACP transport", agent)
 }

@@ -178,9 +178,27 @@ func TestParseClaudeModelPickerReadsSyntheticLayouts(t *testing.T) {
 		// The row the picker itself marks as default is not a family, and
 		// reading it would let the user's own default overwrite another
 		// family's id.
-		if len(got) > 4 {
-			t.Fatalf("%s: parsed a non-family row: %v", name, got)
+		wantRows := 4
+		if name == "narrow" {
+			wantRows = 3
+			if _, present := got["haiku"]; present {
+				t.Fatalf("%s: invented a hidden row: %v", name, got)
+			}
+		} else if got["haiku"] != "claude-haiku-9-1" {
+			t.Fatalf("%s: missing visible Haiku row: %v", name, got)
 		}
+		if len(got) != wantRows {
+			t.Fatalf("%s: got %d family rows, want %d: %v", name, len(got), wantRows, got)
+		}
+	}
+}
+
+// Unselectable rows must not become candidates even without an enabled row.
+func TestParseClaudeModelPickerRejectsDefaultAndDisabledOnly(t *testing.T) {
+	pane := "1. Default (recommended) Sonnet 9.7 · fixture default\n" +
+		"2. Fable 9.8 (disabled) · fixture unavailable choice\n"
+	if got := parseClaudeModelPicker(pane); len(got) != 0 {
+		t.Fatalf("unselectable rows yielded candidates: %v", got)
 	}
 }
 

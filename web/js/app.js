@@ -339,6 +339,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     <path d="M3 12h12"/>
     <path d="M11 8l4 4-4 4"/>
   </svg>`;
+  /* solid bookmark glyph: fa-solid fa-bookmark, inlined like the existing
+     branch/copy icons so no font or network dependency is introduced. */
+  const ICON_BUBBLE_BOOKMARK = `<svg width="12" height="16" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true">
+    <path d="M0 48V487.7C0 501.1 15.5 508.5 25.9 500.1L192 365.7 358.1 500.1C368.5 508.5 384 501.1 384 487.7V48C384 21.5 362.5 0 336 0H48C21.5 0 0 21.5 0 48Z"/>
+  </svg>`;
   /* branch glyph: fa-regular fa-code-branch (exact FA 7.3.1 path), inlined
      like the copy icon. Used by the fork action, unrotated. */
   const ICON_BRANCH = `<svg width="15" height="15" viewBox="0 0 640 640" fill="currentColor" aria-hidden="true">
@@ -819,16 +824,24 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     agentLogo,
     icons: {
       ICON_TERM, ICON_CHECK, ICON_CHEV_UP, ICON_CHEV_DOWN,
-      ICON_BRANCH, ICON_INTO, ICON_COPY, ICON_DOWNALL, ICON_FILE,
+      ICON_BRANCH, ICON_INTO, ICON_BUBBLE_BOOKMARK, ICON_COPY, ICON_DOWNALL, ICON_FILE,
       ICON_TOGGLE_OFF, ICON_TOGGLE_ON, ICON_WARN,
     },
     bookmarks: () => getUI().bookmarks,
+    noteUsages: () => notesFeature ? notesFeature.usages() : [],
+    forwardLinks: () => getUI().forward_links,
+    markerVersion: () => `${pollingFeature ? pollingFeature.uiGeneration() : 0}:` +
+      `${notesFeature ? notesFeature.usagesVersion() : 0}`,
     uiMutate,
     stampAddress: (b, t) => stampAddressMod(b, t),
     copyText: s => copyText(s),
     forkFromTurn: (text, parent) => sheetsFeature.forkFromTurn(text, parent),
     /* bookmarks owns #sendto; the bubble action reuses that one dialogue */
     openSendTo: opts => bookmarksFeature.openSendTo(opts),
+    openBookmark: t => bookmarksFeature.openBookmark(t),
+    openChoiceList: opts => bookmarksFeature.openChoiceList(opts),
+    openNoteUsage: usage => notesFeature.openAt(usage),
+    jumpToChatAddress: address => bookmarksFeature.jumpToChatAddress(address),
     setComposerBusy: v => composerFeature.setComposerBusy(v),
     setComposerClosed: v => composerFeature.setComposerClosed(v),
     setAttachAvail: v => composerFeature.setAttachAvail(v),
@@ -900,6 +913,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     refreshChat: () => chatFeature.render(),
     tick: () => pollingFeature.tick(),
     scheduleTick: ms => setTimeout(() => pollingFeature.tick(), ms),
+    uiMutate,
     alert: msg => alert(msg),
   }));
 
@@ -1021,6 +1035,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     copyText: s => copyText(s),
     /* bookmarks owns #sendto; inbox + reference bars reuse the one dialogue */
     openSendTo: opts => bookmarksFeature.openSendTo(opts),
+    onUsagesChange: () => chatFeature.invalidate(),
     onVisibilityChange: () => { bookmarksFeature.invalidate(); renderBookmarksPane(); },
     jumpToChatAddress: a => {
       setReturnContext(RETURN_NOTE, { title: notesFeature.activeTitle() });
@@ -1849,7 +1864,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      `--version` once per process, so this is a cached answer and the panel is
      populated before the human reads down to it. The upstream check is a
      separate tap for the same reason the scimux one is: opening a menu must
-     not call six registries, and "up to date" is a claim only a check makes. */
+     not call seven registries, and "up to date" is a claim only a check makes. */
   let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
   function renderHarnesses(){
     if (!harnessRows) return;

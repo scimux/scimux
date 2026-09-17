@@ -256,7 +256,7 @@ func TestDiscoverTranscriptPersistFailureRetryableAndReleasesClaim(t *testing.T)
 	}
 }
 
-func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing.T) {
+func TestMaybeRelinkTranscriptDoesNotWriteOrGuess(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"c1": true}}
 	a := newTestApp(t, f)
 	proj := filepath.Join(a.home, ".claude", "projects", "-w-proj")
@@ -265,7 +265,6 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	}
 	oldPath := filepath.Join(proj, "old-session.jsonl")
 	newPath := filepath.Join(proj, "new-session.jsonl")
-	// Content time gates require a real turn after the phase watermark.
 	oldTS := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	newTS := time.Now().UTC().Format(time.RFC3339Nano)
 	appendLines(t, oldPath, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"old"}}`, oldTS))
@@ -278,15 +277,15 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	a.nodes = append(a.nodes, n)
 	a.byID["c1"] = n
 	a.activeSince["c1"] = time.Now().Add(-30 * time.Second)
-	// A pasted prompt this file never recorded is what makes the link
-	// provably stale; a bare pane phase proves nothing (D1/D2).
+	// A missing delivered prompt must not trigger a store write or weaken the
+	// existing binding, even when the store itself is unavailable.
 	a.noteDelivery("c1", time.Now().Add(-time.Minute))
 	breakStore(t, a)
 
 	a.maybeRelinkTranscript(n)
 
 	if n.Transcript != oldPath {
-		t.Fatalf("stale detach mutated memory on persist failure: %q", n.Transcript)
+		t.Fatalf("missing turn mutated transcript: %q", n.Transcript)
 	}
 	if n.SessionID != "old-session" {
 		t.Fatalf("session id mutated on persist failure: %q", n.SessionID)
@@ -303,8 +302,8 @@ func TestMaybeRelinkTranscriptPersistFailureRetryableAndReleasesClaim(t *testing
 	if n.Transcript == newPath {
 		t.Fatalf("retry guessed newest file %q", n.Transcript)
 	}
-	if n.Transcript != "" {
-		t.Fatalf("legacy stale link must detach after store fix, got %q", n.Transcript)
+	if n.Transcript != oldPath || n.SessionID != "old-session" {
+		t.Fatalf("missing turn changed binding after store fix: %q / %q", n.Transcript, n.SessionID)
 	}
 }
 

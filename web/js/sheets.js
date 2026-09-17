@@ -40,8 +40,11 @@
  *   - POST /api/nodes
  *   - PATCH /api/nodes/:id  (head title/desc or station label)
  *
- * Storage (exact key; throws propagate — no try/catch):
+ * Storage:
  *   - "scimux-lastdir" get on plain new; set on successful create with dir
+ *   - "scimux-sendto-pending:" + nodeId for new-chat source intents
+ *   - "scimux-sendto-awaiting:" + nodeId for the expected initial turn,
+ *     stamped at write so an unconfirmed latch expires
  *
  * Timers:
  *   - setTimeout(0) title focus/select after fork seed and edit open
@@ -80,6 +83,10 @@
 import { esc as escDefault } from "./format.js";
 import { stopsOf as stopsOfDefault, stopLabel as stopLabelDefault } from "./lanes.js";
 import { focusAtEnd } from "./caret.js";
+import {
+  writePendingForwards,
+  writeAwaitingForward,
+} from "./storage.js";
 
 /* ---------- public constants ---------- */
 
@@ -97,6 +104,15 @@ export const DEFAULT_EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex:  ["low", "medium", "high"],
   grok:   ["low", "medium", "high"],
+  /* Cursor has no agent-wide effort list: the level is spelled inside the
+     model id, so the only levels that exist are the ones a given model row
+     actually published. An empty list is the honest fallback — the common
+     three would name ids cursor does not have. */
+  cursor: [],
+  /* dsh advertises its thought levels per model as a session config option,
+     and drops the option entirely for a model whose route cannot reason.
+     Empty, not absent: the generic fallback would invent levels dsh refuses. */
+  dsh:    [],
 };
 
 /* ---------- pure: catalogs / options ---------- */
@@ -199,17 +215,35 @@ export function effortLevelsFor(agent, model, modelEfforts, efforts = DEFAULT_EF
   const perModel = (modelEfforts[agent] || {})[model];
   const list = (perModel && perModel.levels) || efforts[agent] || ["low", "medium", "high"];
   const dflt = perModel && perModel.default;
-  return { list, default: dflt };
+  return { list, default: dflt, required: !!(perModel && perModel.required) };
 }
 
-export function effortOptionsHTML(list, dflt, esc = escDefault){
-  return `<option value=""></option>` +
+/* required drops the empty option: the catalog is saying this model has no id
+   that means "no level", so an empty choice would be one the server silently
+   replaced. Everywhere else the empty option is the honest "harness default". */
+export function effortOptionsHTML(list, dflt, esc = escDefault, required = false){
+  /* No levels at all is a real answer (dsh: the model's route has none, or the
+     agent never advertised any), so the single option says so the way the
+     model menu does rather than presenting an empty control. */
+  if (!list.length) return `<option value="">(default)</option>`;
+  return (required ? "" : `<option value=""></option>`) +
     list.map(e => `<option value="${esc(e)}">${esc(e)}${e === dflt ? " (default)" : ""}</option>`).join("");
 }
 
 /* Preserve current effort across agent/model rebuild when still valid. */
 export function preservedEffortValue(list, cur){
   return list.includes(cur) ? cur : null;
+}
+
+/* The value an effort select lands on after a rebuild: the wanted level when
+   the new menu still offers it, else blank -- except on a required menu, which
+   has no blank to fall back to, so it lands on the level the launch would have
+   used anyway. `want` is the current selection on an agent/model change and the
+   parent's stored effort on a fork; both ask the same question. */
+export function seededEffortValue({ list, dflt, required, want }){
+  const kept = preservedEffortValue(list, want || "");
+  if (kept !== null) return kept;
+  return required ? (dflt || list[0] || "") : "";
 }
 
 /* ---------- pure: launch seed / lane ---------- */
@@ -293,10 +327,36 @@ export function buildStationLabelPayload(station, title, description){
 
 /* ---------- pure: errors / submit chrome ---------- */
 
-export function createErrorField(msg){
+export function createErrorField(msg, status){
   const m = msg || "";
   if (/\b(dir|directory|path)\b/i.test(m)) return "dir";
   if (/\btitle\b/i.test(m)) return "title";
+  /* A launch config the agent refused (Cursor validates its catalog choice
+     before spawning; dsh applies model and effort over the
+     wire) names the knob it refused. Both knobs are selects in this sheet, so
+     the error belongs on the select the user has to change; the prompt
+     fallback would ask them to repair the one field that was not the problem.
+     Tested after dir so a directory that happens to contain a path segment
+     called "model" still reads as a directory error, and effort before model
+     because a refusal can name the model it was refused *for* — there the
+     effort is what has to change.
+
+     Only an HTTP 400 is that refusal. The server answers 400 exactly when the
+     choice itself was wrong and 500 when the same apply failed for a reason
+     the choice had nothing to do with — an internal error, a cancellation, a
+     transport that died mid-launch — and those messages quote the model or
+     effort they were carrying just the same. Without the status a crashed
+     agent reads as "your model is wrong" and sends the supervisor to correct
+     a select that was already right. A rejection that reaches here with no
+     status at all (a network failure, or a throw from the work that follows
+     an accepted create) never classified one either. Directory and title
+     stay status-independent: they name their own field in any answer that can
+     carry them. */
+  if (status === 400){
+    if (/^cursor has no model\b/i.test(m)) return "model";
+    if (/\beffort\b/i.test(m)) return "effort";
+    if (/\bmodel\b/i.test(m)) return "model";
+  }
   return "prompt";
 }
 
@@ -378,8 +438,13 @@ export function createSheetsFeature(deps = {}){
   let ncParent = "";
   let ncRationale = "";
   let ncMuseInherit = false;
+  /* An inherited effort the menus could not hold yet, kept until the agents
+     probe answers. Cursor publishes its levels only per model, so a fork opened
+     while the probe is in flight has no menu to put the parent's level on. */
+  let ncSeedEffort = "";
   let ncEdit = "";
   let ncEditStop = "";
+  let ncForwardSources = [];
   let newActivitySubmitting = false;
   let bound = false;
   let probed = false;
@@ -458,6 +523,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function closeSheets(){
+    ncForwardSources = [];
     const backdrop = root("backdrop");
     if (backdrop && backdrop.classList) backdrop.classList.remove("on");
     else if (backdrop)
@@ -546,6 +612,13 @@ export function createSheetsFeature(deps = {}){
       applyMuseModelValue(mo, { prev, preserveSelection: !!opts.preserveSelection });
     } else {
       mo.innerHTML = modelOptionsHTML(MODELS, agent, p, esc);
+      /* A rebuilt select falls back to its first (blank) option, which would
+         drop a model the user picked -- or a fork inherited -- while the agents
+         probe was in flight. Restore it only if the arriving catalog still
+         offers it, so a retired id is dropped rather than reinstated, which is
+         the rule the Muse branch applies above. */
+      if (opts.preserveSelection && prev && (MODELS[agent] || [""]).includes(prev))
+        mo.value = prev;
     }
   }
 
@@ -562,20 +635,27 @@ export function createSheetsFeature(deps = {}){
     if (live && ag && prevAgent && Object.prototype.hasOwnProperty.call(MODELS, prevAgent))
       ag.value = prevAgent;
     fillModels({ preserveSelection: live });
-    fillEfforts();
+    /* Now that the per-model menus exist, replay the inherited level the sheet
+       could not show before. Anything chosen since wins: ncSeedEffort is only
+       set when there was no menu to choose from, so a blank here was never a
+       decision. */
+    const ef = root("nc_effort");
+    fillEfforts((ef && ef.value) || ncSeedEffort);
+    ncSeedEffort = "";
   }
 
-  function fillEfforts(){
+  /* want overrides the current selection: a fork seeds from its parent. */
+  function fillEfforts(want){
     const ef = root("nc_effort");
     if (!ef) return;
-    const cur = ef.value;
+    const cur = want === undefined ? ef.value : (want || "");
     const agentEl = root("nc_agent");
     const modelEl = root("nc_model");
     const agent = agentEl ? agentEl.value : "";
     const model = modelEl ? modelEl.value : "";
-    const { list, default: dflt } = effortLevelsFor(agent, model, MODEL_EFFORTS, EFFORTS);
-    ef.innerHTML = effortOptionsHTML(list, dflt, esc);
-    if (list.includes(cur)) ef.value = cur;
+    const { list, default: dflt, required } = effortLevelsFor(agent, model, MODEL_EFFORTS, EFFORTS);
+    ef.innerHTML = effortOptionsHTML(list, dflt, esc, required);
+    ef.value = seededEffortValue({ list, dflt, required, want: cur });
   }
 
   function prepareLaunchConfig(cfg){
@@ -606,13 +686,11 @@ export function createSheetsFeature(deps = {}){
           }
         mo.value = p.model || "";
       }
+      /* Rebuilt against the model just selected, not the one the dialog
+         happened to open on, and seeded from the parent in the same step. */
+      fillEfforts(p.effort || "");
       const ef = root("nc_effort");
-      if (ef){
-        const want = p.effort || "";
-        ef.value = (typeof ef.querySelector === "function"
-          ? ef.querySelector(`option[value="${esc(want)}"]`) : null)
-          ? want : "";
-      }
+      ncSeedEffort = ef && ef.value !== (p.effort || "") ? (p.effort || "") : "";
       const dir = root("nc_dir");
       if (dir) dir.value = p.dir || "";
     } else {
@@ -620,6 +698,7 @@ export function createSheetsFeature(deps = {}){
       if (ef) ef.value = "";
       const dir = root("nc_dir");
       if (dir) dir.value = "";
+      ncSeedEffort = "";
     }
     for (const id of ["nc_agent", "nc_model", "nc_effort", "nc_dir"]){
       const el = root(id);
@@ -696,6 +775,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function forkFromTurn(text, parent){
+    ncForwardSources = [];
     const sel = typeof d.sel === "function" ? d.sel() : "";
     ncParent = parent || sel;
     ncMuseInherit = !!(nodeById(ncParent) && nodeById(ncParent).agent === "muse");
@@ -712,6 +792,7 @@ export function createSheetsFeature(deps = {}){
   function forkFromStation(id){
     const n = nodeById(id);
     if (!n) return;
+    ncForwardSources = [];
     ncEdit = ""; ncEditStop = "";
     ncParent = id;
     ncMuseInherit = n.agent === "muse";
@@ -729,6 +810,7 @@ export function createSheetsFeature(deps = {}){
   function openActivityEditor(id, stopTime){
     const n = nodeById(id);
     if (!n) return;
+    ncForwardSources = [];
     ncEdit = id;
     ncEditStop = stopTime || "";
     ncParent = "";
@@ -754,7 +836,8 @@ export function createSheetsFeature(deps = {}){
   /* prompt/focusTitle serve Send-to "Start new chat…" (bookmarks openNewActivity
      dep). Defaults keep plain "+" identical. Never bind this bare as a click
      listener — the Event would be destructured as options; use () => openNewActivity(). */
-  function openNewActivity({ prompt = "", focusTitle = false } = {}){
+  function openNewActivity({ prompt = "", focusTitle = false, forwardSources = [] } = {}){
+    ncForwardSources = Array.isArray(forwardSources) ? forwardSources.slice() : [];
     ncParent = ""; ncRationale = ""; ncEdit = ""; ncEditStop = "";
     ncMuseInherit = false;
     resetCreateChrome();
@@ -788,6 +871,7 @@ export function createSheetsFeature(deps = {}){
     clearFieldError(root("nc_dir"));
     clearFieldError(root("nc_lane"));
     clearFieldError(root("nc_model"));
+    clearFieldError(root("nc_effort"));
     const titleEl = root("nc_title");
     const promptEl = root("nc_prompt");
     const title = (titleEl && titleEl.value || "").trim();
@@ -905,10 +989,18 @@ export function createSheetsFeature(deps = {}){
            already created this exact node; select it and preserve recovery
            rather than leaving Start able to create a duplicate node. */
         if (storage) storage.setItem("scimux-draft:" + n.id, payload.prompt);
+        if (payload.prompt && ncForwardSources.length)
+          writePendingForwards(storage, n.id, ncForwardSources);
         if (typeof d.alert === "function") d.alert(
           n.initial_error ||
           "Claude did not start. The initial prompt was not delivered and has been restored as a draft."
         );
+      }
+      /* Every accepted launch waits for the transcript turn. Even an
+         acknowledged create response has no durable turn address itself. */
+      if (n && n.id && echoLaunchPrompt && payload.prompt && ncForwardSources.length){
+        writePendingForwards(storage, n.id, ncForwardSources);
+        writeAwaitingForward(storage, n.id, payload.prompt, 0, nowFn());
       }
       if (laneChoice.lane && typeof d.uiMutate === "function"){
         const list = typeof d.laneList === "function" ? d.laneList() : [];
@@ -917,6 +1009,7 @@ export function createSheetsFeature(deps = {}){
       setLastDir(storage, payload.dir);
       if (promptEl) promptEl.value = "";
       if (titleEl) titleEl.value = "";
+      ncForwardSources = [];
       closeSheets();
       if (typeof d.invalidateStateEtag === "function") d.invalidateStateEtag();
       if (typeof d.tick === "function") await d.tick();
@@ -948,9 +1041,11 @@ export function createSheetsFeature(deps = {}){
       if (!desktop && typeof d.setLevel === "function") d.setLevel(1);
     } catch (err) {
       const msg = (err && err.message) || "Could not start this activity.";
-      const field = createErrorField(msg);
-      const target = field === "dir" ? root("nc_dir")
-        : field === "title" ? root("nc_title") : root("nc_prompt");
+      const field = createErrorField(msg, err && err.status);
+      /* root() may be absent in a trimmed sheet; the prompt is the last
+         resort so a rejection is never shown nowhere. */
+      const fieldIDs = { dir: "nc_dir", title: "nc_title", model: "nc_model", effort: "nc_effort" };
+      const target = root(fieldIDs[field] || "nc_prompt") || root("nc_prompt");
       fieldError(target, msg);
       if (target && typeof target.focus === "function") target.focus();
       if (target && typeof target.scrollIntoView === "function")
@@ -962,11 +1057,16 @@ export function createSheetsFeature(deps = {}){
 
   function onAgentChange(){
     ncMuseInherit = false;
+    /* The user has moved off the row the seed belonged to, so it is no longer
+       an inheritance waiting for a menu -- and on an agent where blank is a
+       real choice, replaying it later would submit a level nobody picked. */
+    ncSeedEffort = "";
     const mo = root("nc_model");
     if (mo) mo.value = "";
     fillModels(); fillEfforts();
   }
   function onModelChange(){
+    ncSeedEffort = "";
     fillEfforts();
   }
 

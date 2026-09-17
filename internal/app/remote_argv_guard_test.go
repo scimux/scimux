@@ -79,6 +79,9 @@ var argvFlags = []string{
 	"rendezvous-url",
 	"socket",
 	"trusted-host",
+	// viewer-origin names the independently hosted trusted page. Like the
+	// rendezvous address it contains no invite or pairing credential.
+	"viewer-origin",
 }
 
 // runInitCalls are the calls that mark the end of "before flag parsing". A

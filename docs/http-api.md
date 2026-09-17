@@ -69,9 +69,11 @@ Each entry is the stored node (id, title, prompt, description, rationale,
 lane_id, fork_kind, agent, model, effort, dir, transport, created_at,
 `ended_at`, …) plus the mechanical view: `live` is
 `active | quiet | exited | unavailable`,
-`attention` (when set) is `approval | question | inspect` (Claude never
-uses `inspect` for automatic terminal fallback, and never publishes
-attention while auto-approve is armed), `supervision` is the
+`attention` (when set) is `approval | question | dialog | inspect`; `dialog`
+includes an exact pre-SessionStart Claude workspace-trust prompt, answerable
+through the audited key route. Claude never uses `inspect` for automatic
+terminal fallback, and never publishes tool-permission attention while
+auto-approve is armed. `supervision` is the
 Claude-only contract (`claude_starting` for a current bundle awaiting
 SessionStart, `claude_strict` after acknowledgement, `claude_unsupported`
 for legacy/moved-binary bundles, `claude_failed` for startup or
@@ -170,8 +172,9 @@ the first Claude prompt is awaiting SessionStart or transcript confirmation,
 `submitting` or `unconfirmed`. A startup or delivery failure sets `error` and
 `restore_draft` with the original prompt; it does not open the terminal.
 
-For structured nodes (Codex app-server, ACP `pi`/`opencode`/`grok`, and
-Muse MSP), `source` is `acp` for compatibility across these transports;
+For structured nodes (Codex app-server, ACP
+`pi`/`opencode`/`grok`/`cursor`/`dsh`,
+and Muse MSP), `source` is `acp` for compatibility across these transports;
 there is no pane fallback. Pending approval details are returned as
 `perm_title`, `perm_options`, `perm_tool_kind`, `perm_reason`, and — only
 while a permission is pending — an opaque `perm_request_id` that
@@ -214,6 +217,9 @@ content are never included.
 Plain-text pane snapshot for tmux nodes (`mode=visible` captures only the
 visible pane instead of history). For structured-transport nodes (ACP,
 Codex, Muse) there is no pane; peek returns a tail of the raw event log.
+Historical external nodes with `adopted:true` return `409`; their panes are
+no longer accessed. Saved conversation history remains available through
+`GET /api/nodes/{id}/chat` and its `?history=1` view.
 
 ### `GET /api/search?q=<query>`
 
@@ -308,11 +314,35 @@ agent:
 is added client-side to mean "launch with the harness default". `efforts` is a
 map from model id to that model's accepted `levels` and its `default`. Codex
 obtains it from `codex debug models`; Grok reads its CLI models cache and fills
-missing entries from its static low/medium/high menu. Agents without per-model
-data (claude/pi/opencode), and codex when only its static fallback is available,
-omit `efforts`; the UI then uses its static per-agent list. Most catalogs are
-probed once per process and cached until restart. Claude's model IDs also have
-a persistent cache, refreshed on a CLI version change or after one day;
+missing entries from its static low/medium/high menu. Cursor derives both from
+`cursor-agent --list-models`, whose ids already contain the level: each id is
+split into a model row and a level, so `models` lists a few dozen rows instead
+of the CLI's flat two-hundred-odd combinations, and `efforts` holds the levels
+each row actually published. A row whose ids all name a level carries
+`required: true` and a `default`: it has no id meaning "no level", so a blank
+`effort` would be one the server silently replaced, and the dialog offers no
+blank choice for it and preselects the default instead. Elsewhere — codex,
+grok, and cursor rows that do have a level-free id — a blank `effort` stays on
+offer and keeps meaning "use the harness default". The mapping from (model,
+effort) back to the exact id is server-side only and is never part of this
+payload. Agents without per-model data (claude/pi/opencode/dsh), and codex when
+only its static fallback is available, omit `efforts`; the UI then uses its
+static per-agent list — for cursor that list is deliberately empty, because a
+row with no published level has none.
+
+Most catalogs are probed once per process and cached until restart. dsh has no
+list command and no read-only discovery surface: naming its models would mean
+opening an ACP session, which dsh flushes to its own durable history and offers
+no way to delete, so scimux never opens one for discovery. dsh's `model` and
+`effort` are therefore settable only through the API, and the strict
+configuration path they exercise is not reachable from the dialog. dsh
+reports an empty `models` and no `efforts`; the dialog offers only
+"(default)", it launches on the profile's own default model, and the thought
+levels that model accepts are read from the live session at launch — the UI's
+static effort list for dsh is deliberately empty, because dsh's levels are
+`off`/`low`/`high`/`max` for models whose route reasons and absent for the
+rest. Claude's model IDs also have a persistent cache, refreshed on a CLI
+version change or after one day;
 `GET /api/agents` can trigger that refresh. Its model probes submit no billed
 prompt and are independent of consent for the usage gauge.
 
@@ -348,7 +378,12 @@ first prompt is pasted after SessionStart on a background path. Failures after
 that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
 this response.
 
-Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, and `muse`.
+Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, `cursor`,
+`dsh`, and `muse`. A cursor launch whose `model`/`effort` pair is absent from the
+catalog is refused with `400` rather than passed to the CLI, and so is any
+non-empty `effort` the catalog cannot resolve — cursor has no effort flag, so
+an unresolved level would be dropped and the chat would run at a level nobody
+chose.
 Muse creation requires `muse_approval_judge_consent: true` in the computer's
 settings; missing consent is `400`. Its requested model must be launchable
 in the current catalog, or creation returns `400`. With no explicit model,
@@ -356,6 +391,18 @@ the server chooses an eligible Standard model; IDs ending in `-contributor`
 require an explicit choice and are never an implicit default. The stored
 node retains the user's model choice (including an empty default choice),
 while the launch receives the resolved concrete ID.
+
+A dsh create carries its model over the wire rather than on argv, and dsh is
+the one agent for which that application is authoritative: if the live agent
+does not offer the requested model, or refuses it (or the requested thought
+level), the launch is refused, the process and its meta-only session log are
+discarded, and the response is `400` naming what was rejected — never a chat
+quietly running a different model from the one the node records. `400` means
+the choice itself was wrong: the option is absent from the set the agent
+advertised, or the agent answered the apply with JSON-RPC `-32602`. A failure
+of the same call for any other reason — an internal error, a cancellation, a
+transport that dies mid-launch — still fails the create, but as `500`, because
+the model and thought level the user picked were not the problem.
 
 Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
 `transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
@@ -402,10 +449,11 @@ worker/agent is stopped, while a historical external tmux session is left runnin
 History is never destroyed. A teardown failure returns `500` and attempts
 to re-assert the node in the store so it remains visible for retry.
 
-Historical records with `adopted:true` are readable and removable but retired:
-send, resolve, interrupt, key, and auto-approval mutations return `409`; no
-worker is started or resumed, and the external pane remains running. Forking
-such a record creates a fresh scimux-owned chat without importing its history.
+Historical records with `adopted:true` retain readable saved history and can
+be removed, but their external integration is retired: peek, send, resolve,
+interrupt, key, and auto-approval requests return `409`. No worker is started
+or resumed, and the external pane remains running. Forking such a record
+creates a fresh scimux-owned chat without importing its history.
 
 ## Talking to a node
 
@@ -420,6 +468,9 @@ recorded as a source seam — same page-turn semantics as Claude's `/clear`.
 ACP replaces the agent subprocess; Codex opens a fresh thread on its existing
 process, and Muse starts a fresh session on its connection. Muse `/clear`
 requires the current `muse_approval_judge_consent` setting (`400` when off).
+A dsh `/clear` that the replacement agent refuses because its saved model or
+effort is no longer offered returns `400` and tells the user to fork with a
+model the agent still offers; other replacement failures remain `500`.
 Claude's page turn is confirmed by its own `SessionStart` clear hook, not
 by successful pasting alone; an unconfirmed `/clear` does not retire history.
 A Claude send whose leading slash command is `/fork` or `/fork …` is `400`
@@ -563,7 +614,9 @@ as `decisions` on the same response (and in `?history=1` segments).
 ### `GET /api/ui` / `PUT /api/ui`
 
 The shared UI document (`~/.scimux/ui.json`: groups, archived cards, bookmarks,
-lanes). GET sets an `ETag` and honors `If-None-Match`. PUT requires
+Send-to `forward_links`, lanes). The browser retains the newest 500 Send-to
+links so this navigation index cannot grow without bound. GET sets an `ETag`
+and honors `If-None-Match`. PUT requires
 `If-Match` (the last ETag, or `*` to bootstrap) — `428` without it, `409` on
 mismatch — and replaces the document atomically. Bodies over the size limit
 are `413`.
@@ -657,6 +710,13 @@ Sparse list of notes — enough to render cards, never section bodies:
 (first-seen order). Listing errors are `500`. Invalid directory names and
 documents whose embedded `id` differs from the folder name are skipped
 defensively (they do not fail the whole list).
+
+With `?usages=1`, the same route returns a sparse reverse index for chat
+markers instead: `{"usages":[{"note_id","note_title","section_id",
+"section_title","reference_id","source"}]}`. Repeated references to the same
+source in one section collapse to one row. Section bodies and frozen reference
+snapshots are never included; the browser fetches the chosen full note only
+after the user opens a destination.
 
 ### `POST /api/notes`
 
@@ -772,21 +832,26 @@ License texts bundled into the binary (shown in the About sheet).
 ### `GET /api/harnesses`
 
 Which supported agent CLIs this computer has, in registry order:
-`{harnesses:[{agent, present, launchable, installed, path}]}`. Local only —
-never a network call, because the menu reads it on every open. `installed` is
-the first version-shaped token of `<bin> --version`, empty when the output
-does not carry one. `present` and `launchable` are separate facts: pi is
-installed as `pi` but launched through `pi-acp`. The probe runs once per
-process, so a harness installed while scimux runs appears after a restart.
-Muse's `launchable` describes its installed executable; creation still
-enforces the separate approval-judge consent and model-catalog checks.
+`{harnesses:[{agent, present, launchable, has_source, installed, path}]}`. Local
+only — never a network call, because the menu reads it on every open.
+`has_source` says whether this harness has a public upstream version channel;
+when false, the UI shows the installed version without implying that an
+upstream check failed. `installed` is the first version-shaped token of
+`<bin> --version`, empty when the output does not carry one. `present` and
+`launchable` are separate facts: pi is installed as `pi` but launched through
+`pi-acp`. The probe runs once per process, so a harness installed while scimux
+runs appears after a restart.
+For Muse, `launchable` is true when the `muse` executable is found on `PATH`.
+This inventory flag does not grant permission to create a chat: creation
+separately enforces approval-judge consent and model-catalog checks.
 
 ### `GET /api/harnesses/latest`
 
 What each harness publishes upstream: `{latest:{<agent>:{version, source}}}`.
 Reached only on an explicit tap, like the scimux update check — the server
-never polls the registries. There is no single lane: three sources are npm
-packages, grok is a plain-text channel file, and Claude's depends on whether
+never polls the registries. There is no single lane: four sources are npm
+packages (codex, pi, opencode and dsh), grok is a plain-text channel file, and
+Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not
 the npm dist-tag, which it can never receive). Muse has a separate stable
 channel metadata source. Its response format is not yet supported, so Muse
@@ -807,7 +872,10 @@ but do not bypass the token requirement.
 Mint an 8-character pairing code with a 120-second TTL. Returns
 `{code, rid, expires_at, state:"pending", link}`; `expires_at` is UTC
 RFC 3339 with optional fractional seconds. Open the returned `link` on the
-device to begin pairing. Confirm flags in the body are ignored.
+device to begin pairing. A v2 link opens `/p` on the configured trusted viewer;
+its fragment `o` names the separate cryptographic rendezvous service. Pairing
+material stays in the fragment rather than the path or query. Confirm flags in
+the body are ignored. This split does not add CORS to the local HTTP API.
 
 ### `GET /api/remote/pairing/{code}`
 
@@ -868,7 +936,9 @@ only be struck off by whoever issued the invite. A failure of the *local*
 half is a 500, because an identity still on disk is still an enrollment.
 
 §4.4 releases the installation and never the code, so re-enrolling
-afterwards takes a new invite.
+afterwards takes a new invite. Origin migration uses this operation while the
+saved old rendezvous is still configured; it never rewrites the stored origin
+or replaces the whole scimux data directory.
 
 ### `GET /api/remote/status`
 

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	sdk "github.com/coder/acp-go-sdk"
 )
 
 // fixtureFrame is one agent→client line in a Grok ACP capture.
@@ -256,6 +258,47 @@ func TestSyntheticGrokReplay(t *testing.T) {
 	}
 }
 
+// TestSyntheticDshReplay drives Manager against the committed synthetic dsh
+// fixture. dsh's wire shape differs from Grok's in the two ways that matter
+// to the gauge, and this pins both: initialize carries no modelState, so no
+// context window is knowable at launch; and the prompt response is a bare
+// stopReason with no usage object, so the only statement of spend all turn is
+// the mid-turn usage_update. Read the second without the first and the gauge
+// has a Used with no Size; wait for the turn-end record and it never comes.
+func TestSyntheticDshReplay(t *testing.T) {
+	frames := loadACPFixture(t, "synthetic-dsh-turn.ndjson")
+	assertFixturePrivacy(t, frames)
+
+	m := NewManagerWithRunner(t.TempDir(), fixtureRunner(t, frames))
+	// No model/effort: dsh takes neither on argv, and the default path is the
+	// one every launch uses until a supervisor picks something else.
+	sid, err := m.Launch("n1", "dsh", t.TempDir(), "", "")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if sid != "SESSION-SYN-DSH" {
+		t.Fatalf("session id = %q, want the agent's own", sid)
+	}
+	// Nothing at initialize advertises a window. Inventing one here would
+	// paint a gauge against a denominator no agent stated.
+	if s := m.session("n1"); s == nil || s.ctxSize != 0 {
+		t.Fatalf("ctxSize = %v, want 0 — dsh advertises no window at initialize", s)
+	}
+	if err := m.Send("n1", "Reply with exactly: pong"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitFor(t, "turn quiet", func() bool { return m.Live("n1") == "quiet" })
+
+	used, window := m.Usage("n1")
+	if used != 7516 || window != 262144 {
+		t.Fatalf("usage = %d/%d, want 7516/262144 from the mid-turn usage_update", used, window)
+	}
+	peek := Peek(m, "n1")
+	if !strings.Contains(peek, "pong") {
+		t.Fatalf("synthetic assistant text missing from session log: %q", peek)
+	}
+}
+
 // TestRealGrokReplay is an optional maintainer-supplied local golden.
 // Skips when the gitignored capture is absent (CI).
 func TestRealGrokReplay(t *testing.T) {
@@ -288,6 +331,93 @@ func TestRealGrokReplay(t *testing.T) {
 	}
 	if window <= 0 {
 		t.Fatalf("expected positive context window from real capture, got %d", window)
+	}
+}
+
+// TestRealDshReplay is the dsh half of the optional maintainer lane: a local
+// capture of a real `dsh --profile acp` turn, replayed through Manager. It
+// never runs dsh — the capture is taken by hand, out of band, and the file is
+// gitignored, so CI and every other machine skip this.
+//
+// What it defends that the synthetic fixture cannot: that dsh still states
+// spend the way we read it. dsh sends no usage object on the prompt response
+// and no modelState on initialize, so `usage_update` is the only frame that
+// names the occupancy — if a future dsh moved it, the gauge would read zero
+// and nothing else in the suite would notice.
+func TestRealDshReplay(t *testing.T) {
+	frames := loadACPFixture(t, "real-dsh-turn.ndjson")
+	assertFixturePrivacy(t, frames)
+
+	nResp := 0
+	for _, fr := range frames {
+		if fr.Type == "response" {
+			nResp++
+		}
+	}
+	if nResp < 3 {
+		t.Fatalf("real fixture has %d responses, want >=3 (initialize, session/new, prompt)", nResp)
+	}
+
+	m := NewManagerWithRunner(t.TempDir(), fixtureRunner(t, frames))
+	// Empty model and effort: a real capture was recorded against whatever
+	// the profile defaults to, and a SetSessionConfigOption call here would
+	// consume a scripted response the capture never allocated.
+	if _, err := m.Launch("n1", "dsh", t.TempDir(), "", ""); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if err := m.Send("n1", "Reply with exactly: pong"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitFor(t, "turn quiet", func() bool { return m.Live("n1") == "quiet" })
+
+	used, window := m.Usage("n1")
+	if used <= 0 || window <= 0 {
+		t.Fatalf("usage = %d/%d, want both positive from the real usage_update", used, window)
+	}
+}
+
+// TestRealDshModelMenu reads the model select straight out of the same local
+// capture. It is the only check that a real dsh still encodes a model option
+// value as the JSON ["provider","model"] pair the launch path decodes; the
+// synthetic fixture can only prove that we read the shape we wrote down.
+// It parses the recorded session/new answer rather than opening a session of
+// its own — a dsh session is durable and undeletable, so nothing outside a
+// chat the user launched may create one.
+func TestRealDshModelMenu(t *testing.T) {
+	frames := loadACPFixture(t, "real-dsh-turn.ndjson")
+	assertFixturePrivacy(t, frames)
+
+	var ids []string
+	for _, fr := range frames {
+		if fr.Type != "response" || len(fr.Result) == 0 {
+			continue
+		}
+		var resp sdk.NewSessionResponse
+		if err := json.Unmarshal(fr.Result, &resp); err != nil {
+			continue
+		}
+		if resp.SessionId == "" {
+			continue
+		}
+		for _, opt := range resp.ConfigOptions {
+			sel := opt.Select
+			if sel == nil || !containsFold(string(sel.Id), "model") {
+				continue
+			}
+			for _, o := range selectOptions(sel) {
+				if id := dshModelID(string(o.Value)); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("real capture yielded no models: dsh no longer advertises a model select we can decode")
+	}
+	for _, id := range ids {
+		if !strings.Contains(id, "/") {
+			t.Fatalf("model id %q is not provider/model: the option value stopped decoding as a pair", id)
+		}
 	}
 }
 

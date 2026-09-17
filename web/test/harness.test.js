@@ -32,6 +32,17 @@ test("state before any upstream check is unchecked, not up-to-date", () => {
   assert.doesNotMatch(s.note, /up to date|available/);
 });
 
+test("a row without a public version source has a distinct honest state", () => {
+  const noSource = harnessState({
+    agent: "future-agent", present: true, launchable: true,
+    installed: "1.2.3", has_source: false,
+  }, null);
+  assert.equal(noSource.state, "no-source");
+  assert.equal(noSource.version, "1.2.3");
+  assert.match(noSource.note, /no public version channel/i);
+  assert.doesNotMatch(noSource.note, /missing|unchecked|no upstream answer/i);
+});
+
 test("behind and current are distinguished by the upstream answer", () => {
   const behind = harnessState(
     { agent: "codex", present: true, launchable: true, installed: "0.147.0" },
@@ -145,6 +156,15 @@ test("the check note names the sources that did not answer", () => {
   const partial = harnessCheckNote(rows, { claude: { version: "2.1.236" } });
   assert.match(partial, /grok/i);
   assert.doesNotMatch(partial, /opencode/i, "an absent harness has no upstream to miss");
+
+  const withoutSource = harnessCheckNote([
+    ...rows,
+    { agent: "cursor", present: true, launchable: true,
+      installed: "2026.09.15-d2fe57e", has_source: false },
+  ], { claude: { version: "2.1.236" } });
+  assert.match(withoutSource, /grok/i);
+  assert.doesNotMatch(withoutSource, /cursor/i,
+    "a harness with no source is not a failed upstream answer");
 });
 
 test("harness rows are listed alphabetically, whatever order the server sent", () => {
@@ -204,15 +224,17 @@ test("every single-vendor harness row links its vendor's terms", () => {
     { agent: "claude", present: true, launchable: true, installed: "2.1.236" },
     { agent: "codex", present: true, launchable: true, installed: "0.153.4" },
     { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+    { agent: "cursor", present: true, launchable: true, installed: "2026.09.15-d2fe57e" },
   ], null);
 
   assert.match(html, /href="https:\/\/www\.anthropic\.com\/legal\/consumer-terms"/);
   assert.match(html, /href="https:\/\/openai\.com\/policies\/terms-of-use\/"/);
   assert.match(html, /href="https:\/\/x\.ai\/legal\/terms-of-service"/);
+  assert.match(html, /href="https:\/\/cursor\.com\/terms-of-service"/);
   /* Leaving scimux must not navigate away from a live supervision page, and
      an opener handle to a third-party tab is a needless one. */
-  assert.equal((html.match(/target="_blank"/g) || []).length, 3);
-  assert.equal((html.match(/rel="noopener"/g) || []).length, 3);
+  assert.equal((html.match(/target="_blank"/g) || []).length, 4);
+  assert.equal((html.match(/rel="noopener"/g) || []).length, 4);
 });
 
 test("a BYO-provider harness says whose terms apply instead of guessing", () => {
@@ -265,7 +287,7 @@ test("museConsentNote separates token consent from blocking approvals", () => {
 
 test("only a present Muse row gets an active consent switch", () => {
   const present = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
   ], null, { museConsent: false, usageChecks: false });
   assert.match(present, /data-muse-consent="muse"/);
@@ -276,7 +298,7 @@ test("only a present Muse row gets an active consent switch", () => {
   assert.doesNotMatch(present, /Approval-judge consent/);
 
   const on = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ], null, { museConsent: true });
   assert.match(on, /data-muse-consent="muse"[^>]*checked/);
 	assert.match(on, /Actions that still need approval stay paused/);
@@ -291,7 +313,7 @@ test("only a present Muse row gets an active consent switch", () => {
 
 test("Muse consent is not coupled to auto-approve or Claude usage checks", () => {
   const html = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
   ], null, { museConsent: true, usageChecks: false });
   assert.match(html, /data-muse-consent="muse"[^>]*checked/);
@@ -300,25 +322,25 @@ test("Muse consent is not coupled to auto-approve or Claude usage checks", () =>
   assert.doesNotMatch(harnessSrc, /auto-approve/);
 });
 
-test("six harness rows render alphabetically and Muse unlaunchable is policy, not a missing binary", () => {
+test("six harness rows render alphabetically and installed Muse is launchable", () => {
   const rows = [
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
     { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
     { agent: "pi", present: false, launchable: false },
     { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
     { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ];
   const html = harnessRowsHTML(rows, null);
   const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(order, ["claude", "codex", "grok", "muse", "opencode", "pi"]);
   assert.equal((html.match(/class="item"/g) || []).length, 6);
   const museState = harnessState(rows[5], null);
-  assert.equal(museState.state, "unlaunchable");
-  assert.match(museState.note, /Muse model policy is unavailable/);
-  assert.doesNotMatch(museState.note, /muse is missing|executable is missing/i);
-  assert.match(html, /Muse model policy is unavailable/);
+  assert.equal(museState.state, "unchecked");
+  assert.equal(museState.note, "");
+  assert.doesNotMatch(html, /Muse model policy is unavailable/);
   assert.doesNotMatch(html, /muse is missing/);
+  assert.match(html, /You cannot start a Muse session/);
 });
 
 test("absent Muse is not installed; omitted latest stays unchecked; no Meta terms", () => {
@@ -332,7 +354,7 @@ test("absent Muse is not installed; omitted latest stays unchecked; no Meta term
   assert.doesNotMatch(present.note, /up to date/);
 
   const html = harnessRowsHTML([
-    { agent: "muse", present: true, launchable: false, installed: "0.1.0" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ], {});
   assert.doesNotMatch(html, /up to date/);
   assert.doesNotMatch(html, /href="http/);
@@ -799,4 +821,59 @@ test("rejected enable never renders enabled; rejected disable never renders disa
   await h2.controller.setMuseConsent(false);
   assert.equal(h2.last().muse_approval_judge_consent, true);
   assert.ok(h2.renders.every(r => r.muse_approval_judge_consent === true));
+});
+
+test("eight harness rows render alphabetically with dsh between cursor and grok", () => {
+  /* Adding a harness must not disturb the one order a reader can predict.
+     dsh sorts on its own lowercase name, as pi and opencode do. */
+  const rows = [
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+    { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
+    { agent: "pi", present: false, launchable: false },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+    { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+    { agent: "cursor", present: true, launchable: true, installed: "2026.09.15-d2fe57e" },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
+    { agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" },
+  ];
+  const html = harnessRowsHTML(rows, null);
+  const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["claude", "codex", "cursor", "dsh", "grok", "muse", "opencode", "pi"]);
+  assert.equal((html.match(/class="item"/g) || []).length, 8);
+});
+
+test("an installed dsh reads as unchecked with its prerelease version intact", () => {
+  /* dsh ships prerelease semver; truncating it to 0.1.5 would compare a
+     different version against upstream than the one on disk. */
+  const s = harnessState({ agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" }, null);
+  assert.equal(s.state, "unchecked");
+  assert.equal(s.version, "0.1.5-rc.1");
+  const absent = harnessState({ agent: "dsh", present: false, launchable: false }, null);
+  assert.equal(absent.state, "absent");
+  assert.equal(absent.note, "not installed");
+});
+
+test("dsh carries both its vendor's terms and the BYO caveat", () => {
+  /* dsh is the only harness that is both. DeepSeek ships it with a DeepSeek
+     default, so a DeepSeek session is real and its terms apply; it also
+     routes to whatever provider the profile names, and scimux cannot read
+     which. The link alone would report the default as binding; the BYO note
+     alone would deny that a DeepSeek session exists. It gets both. */
+  const html = harnessRowsHTML(
+    [{ agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" }], null);
+  assert.match(html, /href="https:\/\/cdn\.deepseek\.com\/policies\/en-US\/deepseek-terms-of-use\.html"/);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /rel="noopener"/);
+  assert.match(html, /provider you configure yourself/i);
+});
+
+test("the BYO-only harnesses did not inherit dsh's link", () => {
+  /* pi and opencode hold no model of their own: adding a both-branch for dsh
+     must not turn their honest silence into a vendor claim. */
+  const html = harnessRowsHTML([
+    { agent: "pi", present: true, launchable: true, installed: "0.85.1" },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+  ], null);
+  assert.doesNotMatch(html, /href="http/);
+  assert.doesNotMatch(html, /deepseek/i);
 });

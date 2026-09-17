@@ -767,6 +767,35 @@ test("flags open pane onto tab; notesbtn uses lazy openNotes", () => {
   assert.equal(effects.openNotes.length, 1);
 });
 
+test("openBookmark opens the matching lane and expands that bookmark", () => {
+  const ctx = createFeature({ bookmarks: [{ t: "b1", text: "saved", lane: "lane-a" }] });
+  assert.equal(ctx.feature.openBookmark("b1"), true);
+  assert.equal(ctx.feature.isOpen(), true);
+  assert.equal(ctx.storage.getItem(STORAGE_KEY_TAB), "lane-a");
+  assert.match(ctx.roots.bookmarklist.innerHTML, /data-t="b1"/);
+  assert.match(ctx.roots.bookmarklist.innerHTML, /class="actionbar/);
+  assert.equal(ctx.feature.openBookmark("missing"), false);
+});
+
+test("openChoiceList reuses the destination sheet and returns the selected row", () => {
+  const ctx = createFeature();
+  const picked = [];
+  ctx.feature.openChoiceList({
+    title: "Used in…",
+    choices: [{ label: "Research › Findings", value: 1 }, { label: "Risks <unsafe>", value: 2 }],
+    onChoose: choice => picked.push(choice.value),
+  });
+  assert.equal(ctx.roots.sendtoTitle.textContent, "Used in…");
+  assert.match(ctx.roots.sendtoList.innerHTML, /Research › Findings/);
+  assert.match(ctx.roots.sendtoList.innerHTML, /Risks &lt;unsafe&gt;/);
+  const row = el("button", { dataset: { choice: "1" } });
+  row.dataset.choice = "1";
+  row.closest = sel => sel === "[data-choice]" ? row : null;
+  ctx.roots.sendtoList.onclick({ target: row });
+  assert.deepEqual(picked, [2]);
+  assert.equal(ctx.effects.closeSheets.length, 1);
+});
+
 test("lazy Notes callback without importing notes.js", () => {
   assert.doesNotMatch(bookmarksSrc, /from ["'].*notes/);
   const calls = [];
@@ -1263,6 +1292,28 @@ test("openSendTo sets the sheet title per caller and merges into the target draf
   assert.equal(storage.getItem(DRAFT_KEY_PREFIX + "ok"), "existing\n\ncarried over");
   assert.deepEqual(effects.select, ["ok"]);
   assert.equal(roots.chatPrompt._focused, true);
+});
+
+test("openSendTo carries source intent into existing and new-chat destinations", () => {
+  const source = { node: "self", uid: "u1", segment: 2, record: 7, turnTime: "t", text: "original" };
+  const seeded = [];
+  const ctx = createFeature({
+    nodes: sendtoNodes,
+    deps: { openNewActivity: opts => seeded.push(opts) },
+  });
+  ctx.feature.openSendTo({ text: "forwarded", exceptId: "self", source });
+  const target = el("button", { dataset: { fwd: "ok" } });
+  target.dataset.fwd = "ok";
+  target.closest = sel => sel === "[data-fwd]" ? target : null;
+  ctx.roots.sendtoList.onclick({ target });
+  assert.deepEqual(JSON.parse(ctx.storage.getItem("scimux-sendto-pending:ok")), [source]);
+
+  ctx.feature.openSendTo({ text: "forwarded", exceptId: "self", source });
+  const fresh = el("button", { dataset: { newchat: "" } });
+  fresh.dataset.newchat = "";
+  fresh.closest = sel => sel === "[data-newchat]" ? fresh : null;
+  ctx.roots.sendtoList.onclick({ target: fresh });
+  assert.deepEqual(seeded[0].forwardSources, [source]);
 });
 
 test("openSendTo with no live targets still offers Start new chat… (P4)", () => {

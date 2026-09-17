@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// The `--version` strings below are the real output shapes of the five
-// harnesses, captured 2026-09-09 by hand. Only the strings are real: no test
+// The `--version` strings below are real output shapes of the eight harnesses,
+// captured by hand. Only the strings are real: no test
 // in this package may invoke an agent CLI, so every probe here runs against a
 // shell stub on a private PATH.
 func TestParseHarnessVersion(t *testing.T) {
@@ -27,6 +27,10 @@ func TestParseHarnessVersion(t *testing.T) {
 		{"pi", "0.84.3\n", "0.84.3"},
 		{"opencode", "1.18.23\n", "1.18.23"},
 		{"grok", "grok 1.0.3 (1a29d5bc12) [stable]\n", "1.0.3"},
+		{"cursor", "2026.09.15-d2fe57e\n", "2026.09.15-d2fe57e"},
+		{"muse", "Muse Code 1.3.0 (1.3.0-R3057.1)\n", "1.3.0"},
+		// dsh prints a bare semver with a prerelease suffix and nothing else.
+		{"dsh", "0.1.5-rc.1\n", "0.1.5-rc.1"},
 		{"prerelease suffix", "codex-cli 0.148.0-alpha.2\n", "0.148.0-alpha.2"},
 		{"leading v", "grok v1.2.0\n", "1.2.0"},
 		{"two segments", "opencode 1.18\n", "1.18"},
@@ -79,6 +83,7 @@ func TestProbeHarnessInventory(t *testing.T) {
 	writeScript(t, binDir, "pi", `printf '%s\n' '0.84.3'`)
 	// pi-acp deliberately absent: pi is installed but not launchable.
 	writeScript(t, binDir, "grok", `printf '%s\n' 'grok 1.0.3 (1a29d5bc12) [stable]'`)
+	writeScript(t, binDir, "cursor-agent", `printf '%s\n' '2026.09.15-d2fe57e'`)
 	// opencode absent entirely.
 	t.Setenv("PATH", binDir)
 
@@ -96,6 +101,9 @@ func TestProbeHarnessInventory(t *testing.T) {
 	if got := byAgent["claude"]; got.Installed != "2.1.236" || !got.Present || !got.Launchable {
 		t.Errorf("claude = %+v, want 2.1.236 present and launchable", got)
 	}
+	if !byAgent["claude"].HasSource {
+		t.Error("claude inventory row does not record its upstream source")
+	}
 	if got := byAgent["codex"]; got.Installed != "0.147.0" {
 		t.Errorf("codex = %+v, want 0.147.0", got)
 	}
@@ -110,6 +118,21 @@ func TestProbeHarnessInventory(t *testing.T) {
 	}
 	if got := byAgent["opencode"]; got.Present || got.Installed != "" {
 		t.Errorf("opencode = %+v, want absent with no version", got)
+	}
+	// The row is keyed by the agent name the rest of scimux uses, not by the
+	// binary: cursor launches and lists through `cursor-agent`, but a panel row
+	// headed "cursor-agent" would not match the agent named anywhere else.
+	// Cursor dates its releases; the build suffix is part of what it printed
+	// and is kept, exactly as grok's build hash is dropped because grok
+	// prints it outside the version token.
+	if got := byAgent["cursor"]; got.Installed != "2026.09.15-d2fe57e" || !got.Present || !got.Launchable {
+		t.Errorf("cursor = %+v, want 2026.09.15-d2fe57e present and launchable", got)
+	}
+	if byAgent["cursor"].HasSource {
+		t.Error("cursor inventory row claims a public version source")
+	}
+	if _, ok := byAgent["cursor-agent"]; ok {
+		t.Error("cursor appeared in the harness panel under its binary name")
 	}
 }
 
@@ -228,12 +251,16 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 	binDir := t.TempDir()
 	writeScript(t, binDir, "claude", `printf '%s\n' '2.1.236 (Claude Code)'`)
 	t.Setenv("PATH", binDir)
-	// Any network read here would be a bug: the inventory is what this
-	// computer has, and opening the menu must not phone home.
-	restore := setHarnessSourcesForTest(map[string]harnessSource{
-		"claude": {URL: "http://127.0.0.1:0/must-not-be-called", Kind: "text"},
-	})
-	defer restore()
+	// Resolve source membership while the once-per-process inventory is built.
+	// Opening the menu after that must use the cached rows, not resolve the
+	// registry again (and never contact any upstream endpoint).
+	_ = harnessInventory()
+	previousSources := activeHarnessSources
+	activeHarnessSources = func() map[string]harnessSource {
+		t.Fatal("opening the harness menu re-resolved version sources")
+		return nil
+	}
+	defer func() { activeHarnessSources = previousSources }()
 
 	a := newTestApp(t, &fakeTmux{})
 	rec := httptest.NewRecorder()
@@ -243,7 +270,10 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	var got struct {
-		Harnesses []harnessRow `json:"harnesses"`
+		Harnesses []struct {
+			harnessRow
+			HasSource *bool `json:"has_source"`
+		} `json:"harnesses"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -252,6 +282,11 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 		t.Fatalf("harnesses = %d rows, want %d", len(got.Harnesses), len(harnesses))
 	}
 	for _, row := range got.Harnesses {
+		if row.HasSource == nil {
+			t.Errorf("%s has_source is absent", row.Agent)
+		} else if want := row.Agent != "cursor"; *row.HasSource != want {
+			t.Errorf("%s has_source = %v, want %v", row.Agent, *row.HasSource, want)
+		}
 		if row.Latest != "" {
 			t.Errorf("%s carries a latest version %q; the local inventory must not check upstream", row.Agent, row.Latest)
 		}
@@ -304,17 +339,47 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 	// its version with nothing to explain it.
 	src := harnessSources()
 	for _, h := range harnesses {
-		s, ok := src[h.bin]
+		agent := h.agentName()
+		if agent == "cursor" {
+			continue // see TestCursorPublishesNoUnauthenticatedVersion
+		}
+		s, ok := src[agent]
 		if !ok {
-			t.Errorf("harness %q has no upstream source", h.bin)
+			t.Errorf("harness %q has no upstream source", agent)
 			continue
 		}
 		if s.URL == "" || s.Kind == "" || s.Label == "" {
-			t.Errorf("harness %q source = %+v, want url, kind and label", h.bin, s)
+			t.Errorf("harness %q source = %+v, want url, kind and label", agent, s)
 		}
 		if s.Kind != "npm" && s.Kind != "text" && s.Kind != "muse-stable" {
-			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", h.bin, s.Kind)
+			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", agent, s)
 		}
+	}
+	want := map[string]bool{}
+	for _, h := range harnesses {
+		if agent := h.agentName(); agent != "cursor" {
+			want[agent] = true
+		}
+	}
+	if len(src) != len(want) {
+		t.Fatalf("source keys = %v, want exactly the harness registry minus cursor (%v)", src, want)
+	}
+	for agent := range src {
+		if !want[agent] {
+			t.Errorf("unexpected harness source %q; want exactly the registry minus cursor", agent)
+		}
+	}
+}
+
+// Cursor is the one harness with no upstream row, and that is a finding rather
+// than an omission. Its CLI learns its own latest version from
+// `getCliDownloadUrl` on the authenticated dashboard backend; the only public
+// endpoint, cursor.com/api/agent-cli-download, hands back a binary, not a
+// version. Every source in the map must be an unauthenticated public endpoint,
+// so cursor's version row stays unchecked until such an endpoint exists.
+func TestCursorPublishesNoUnauthenticatedVersion(t *testing.T) {
+	if src, ok := harnessSources()["cursor"]; ok {
+		t.Fatalf("cursor upstream source = %+v; adding one means an authenticated check", src)
 	}
 }
 
@@ -333,7 +398,7 @@ func TestProbeHarnessVersionsRunsNoRealCLI(t *testing.T) {
 	}
 }
 
-func TestMuseHarnessPresentButPolicyClosedIsNotLaunchable(t *testing.T) {
+func TestMuseHarnessLaunchabilityReportsTheInstalledBinary(t *testing.T) {
 	binDir := t.TempDir()
 	writeScript(t, binDir, "muse", `printf '%s\n' 'muse 1.2.3'`)
 	t.Setenv("PATH", binDir)
@@ -341,8 +406,8 @@ func TestMuseHarnessPresentButPolicyClosedIsNotLaunchable(t *testing.T) {
 	if len(rows) != 1 || !rows[0].Present {
 		t.Fatalf("Muse inventory = %+v, want one present row", rows)
 	}
-	if rows[0].Launchable {
-		t.Fatalf("production-policy-closed Muse was advertised launchable: %+v", rows[0])
+	if !rows[0].Launchable {
+		t.Fatalf("installed Muse was advertised unlaunchable: %+v", rows[0])
 	}
 }
 

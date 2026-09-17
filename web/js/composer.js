@@ -29,6 +29,9 @@
  *   - #attadd hidden / disabled / armed / aria-expanded
  *   - #attstage chip HTML and per-node in-memory stage map
  *   - draft keys scimux-draft:<node-id> (per device, local only)
+ *   - scimux-sendto-pending:<node-id> (durable source intents, local only)
+ *   - scimux-sendto-awaiting:<node-id> (expected turn, boundary, write stamp;
+ *     local only, expires after AWAITING_FORWARD_TTL_MS)
  *   - composerBusy / composerClosed / canAttach edge-only caches
  *   - stageKey counter for chip identity
  *
@@ -50,6 +53,9 @@
  *
  * Storage keys:
  *   - "scimux-draft:" + nodeId  — per-node text drafts (localStorage)
+ *   - "scimux-sendto-pending:" + nodeId — unsent source intents
+ *   - "scimux-sendto-awaiting:" + nodeId — delivered text awaiting a real turn,
+ *     stamped so an unmatched latch expires instead of wedging the node
  *
  * Injected effects (chat / shell):
  *   - setSentEcho / paintEcho / clearSentEchoFor / invalidate / refreshChat
@@ -100,6 +106,12 @@
  */
 
 import { esc as escDefault } from "./format.js";
+import {
+  readPendingForwards,
+  clearPendingForwards,
+  readAwaitingForward,
+  writeAwaitingForward,
+} from "./storage.js";
 
 /* ---------- public constants ---------- */
 
@@ -340,6 +352,8 @@ export function createComposerFeature(deps){
   let composerClosed = null;
   let canAttach = false;
   let bound = false;
+  let composerNode = "";
+  const sendingDestinations = new Set();
   const cleanups = [];
   /* dynamic remove buttons rebound on each renderStage */
   let stageRemoveCleanups = [];
@@ -544,6 +558,10 @@ export function createComposerFeature(deps){
   function onSelect(){
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
+    if (composerNode && composerNode !== id && !promptText().trim() &&
+        !sendingDestinations.has(composerNode) && !readAwaitingForward(storage, composerNode, nowFn()))
+      clearPendingForwards(storage, composerNode);
+    composerNode = id;
     setPromptText(savedDraft(id));
     setAttachAvail(false);
     renderStage();
@@ -599,6 +617,7 @@ export function createComposerFeature(deps){
       alertFn("Claude /fork is not supported. Use scimux's Fork action to start a fresh chat that inherits launch configuration but not conversation history.");
       return;
     }
+    sendingDestinations.add(dest);
     clearPrompt();
     stage[dest] = []; /* clear optimistically; restore on failure */
     if (selId() === dest) renderStage();
@@ -641,12 +660,20 @@ export function createComposerFeature(deps){
         if (typeof d.invalidateChat === "function") d.invalidateChat();
         if (typeof d.scheduleTick === "function") d.scheduleTick(400);
         else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
+        sendingDestinations.delete(dest);
         return;
       }
       /* Delivered, so the saved copy is finally redundant. Removing it any
          earlier -- as this did, before the request was even made -- destroys
          the one copy that outlives the tab while the send can still fail. */
       forgetDraft(dest);
+      const pending = readPendingForwards(storage, dest);
+      /* A successful POST proves acceptance, not the destination address.
+         chat.js mints the permanent link only after this exact text appears
+         beyond the pre-send transcript boundary. */
+      if (pending.length && text && !readAwaitingForward(storage, dest, nowFn()))
+        writeAwaitingForward(storage, dest, text, turns?.length || 0, nowFn());
+      sendingDestinations.delete(dest);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       items.forEach(x => {
         if (x.preview) URLImpl.revokeObjectURL(x.preview);
@@ -667,6 +694,7 @@ export function createComposerFeature(deps){
         renderStage();
       }
       if (merged) keepDraft(dest, merged);
+      sendingDestinations.delete(dest);
     }
   }
 

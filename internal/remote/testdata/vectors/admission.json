@@ -54,7 +54,7 @@
       "body_utf8": "{\"handle\":\"ih_041061050R3GG28A\",\"v\":1}\n"
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "rand_hex": "0102030405060708090a"
@@ -81,7 +81,7 @@
       "body_utf8": "{\"handle\":\"ih_041061050R3GG28A\",\"v\":1}\n"
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "rand_hex": "0102030405060708090a"
@@ -108,7 +108,7 @@
       "body_utf8": "{\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"v\":1}\n"
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -137,7 +137,7 @@
       "body_utf8": "{\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"v\":1}\n"
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -155,13 +155,13 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"5c7778c1744b9f9e9b495100dae3790a0aad1635d166452b2786709a90b443d743ccc445bc7faba279bde60bb179f8a5a8d0e866c986d9fb1e4d7ef6e3232a0a\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"95b4cbf211e9ebd2451cd314ab62aa6b5fe0b0965d5b62f04c8b0e9aa915e0966594876f1d7b1c33bbd013ab369496ad0dde5455b06057ee43730a890282a10e\"}"
     },
     "response": {
       "status": 204
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -189,13 +189,13 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"5c7778c1744b9f9e9b495100dae3790a0aad1635d166452b2786709a90b443d743ccc445bc7faba279bde60bb179f8a5a8d0e866c986d9fb1e4d7ef6e3232a0a\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"95b4cbf211e9ebd2451cd314ab62aa6b5fe0b0965d5b62f04c8b0e9aa915e0966594876f1d7b1c33bbd013ab369496ad0dde5455b06057ee43730a890282a10e\"}"
     },
     "response": {
       "status": 204
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -223,13 +223,13 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"72f5f4714db7316b15aca56eb70cdda9e2581a85dc986a3480ac99f2d1980c2dd94182e16716b76b27eb7030416f99e213be0d714f39b1607f5321909d656702\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"bfbc473155a4521ef9cc47ee1e279f4194e3196bdf0bf0a171e18f8707a6d2efe16d699ed90009d0fe04bf8170351b09f87fbf1e1d18e691c72826ed47c08f01\"}"
     },
     "response": {
       "status": 204
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",
@@ -257,13 +257,13 @@
       "headers": {
         "Content-Type": "application/json"
       },
-      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"72f5f4714db7316b15aca56eb70cdda9e2581a85dc986a3480ac99f2d1980c2dd94182e16716b76b27eb7030416f99e213be0d714f39b1607f5321909d656702\"}"
+      "body_utf8": "{\"v\":1,\"handle\":\"ih_041061050R3GG28A\",\"challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"sig\":\"bfbc473155a4521ef9cc47ee1e279f4194e3196bdf0bf0a171e18f8707a6d2efe16d699ed90009d0fe04bf8170351b09f87fbf1e1d18e691c72826ed47c08f01\"}"
     },
     "response": {
       "status": 204
     },
     "setup": {
-      "origin": "https://my.scimux.com",
+      "origin": "https://rv.scimux.com",
       "now": "2026-08-15T12:00:00Z",
       "issue_entropy_hex": "0102030405060708090a0b0c0d0e0f",
       "bind_handle_entropy_hex": "0102030405060708090a",

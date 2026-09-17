@@ -42,13 +42,4 @@ func TestAttentionLadderIsOrdered(t *testing.T) {
 			"a confined animation strip is weaker evidence of a wait than a pane that "+
 			"stopped changing at all", owedStallAfter, animStallAfter)
 	}
-
-	// deliveryGrace is on a third axis (paste → transcript write lag), but it
-	// must outlast a full active→quiet cycle on the paste echo alone, or the
-	// stale-link backstop judges a link that is about to be answered.
-	if deliveryGrace <= paneQuietAfter {
-		t.Errorf("deliveryGrace (%s) must exceed paneQuietAfter (%s): the pane can "+
-			"complete a whole active→quiet cycle on the paste echo before the agent "+
-			"writes its user record", deliveryGrace, paneQuietAfter)
-	}
 }

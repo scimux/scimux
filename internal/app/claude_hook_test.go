@@ -808,9 +808,9 @@ func TestClaudeClearWithoutHookStaysDetached(t *testing.T) {
 	}
 }
 
-func TestHookOwnedStalePhaseDetaches(t *testing.T) {
-	// A hook-owned node whose linked file did not carry the phase must detach
-	// and show the pane. A later valid clear hook still binds the successor.
+func TestHookOwnedMissingTurnWaitsForSessionStart(t *testing.T) {
+	// A missing turn cannot invalidate the ownership established by the hook.
+	// A later valid clear hook remains the only authority that replaces it.
 	f := &fakeTmux{alive: map[string]bool{"n1": true}}
 	a := newTestApp(t, f)
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
@@ -822,26 +822,23 @@ func TestHookOwnedStalePhaseDetaches(t *testing.T) {
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, old)
 	writeSeedLog(t, a, n.ID, "before")
 	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
-	// The phase is only judgeable because a prompt was pasted and this file
-	// never recorded it; a bare pane phase proves nothing (D1/D2).
+	// Even after a delivered prompt remains absent, timing proves nothing about
+	// which transcript the pane owns.
 	a.noteDelivery(n.ID, time.Now().Add(-time.Minute))
 
 	a.maybeRelinkTranscript(n)
 	if n.Transcript == newest || n.SessionID == hookSIDForeign {
-		t.Fatalf("hook-owned stale phase guessed newest file: %q / %q", n.Transcript, n.SessionID)
+		t.Fatalf("missing turn guessed newest file: %q / %q", n.Transcript, n.SessionID)
 	}
-	if n.Transcript != "" || n.SessionID != "" {
-		t.Fatalf("hook-owned stale phase must detach, got %q / %q", n.Transcript, n.SessionID)
+	if n.Transcript != old || n.SessionID != hookSIDOwn {
+		t.Fatalf("missing turn changed the hook-owned binding: %q / %q", n.Transcript, n.SessionID)
 	}
 
-	if err := a.processClaudeHookEvent(n.ID, claudeSessionStartEvent{
-		HookEventName: "SessionStart", Source: "clear",
-		SessionID: hookSIDSuccessor, TranscriptPath: succ, Cwd: "/w/proj",
-	}); err != nil {
-		t.Fatalf("successor after detach: %v", err)
-	}
+	hookInboxReady(t, a, a.claudeHookID(n.ID), "clear",
+		hookSessionJSON("clear", hookSIDSuccessor, succ))
+	a.maybeRelinkTranscript(n)
 	if n.Transcript != succ || n.SessionID != hookSIDSuccessor {
-		t.Fatalf("hook after detach bound %q / %q, want successor", n.Transcript, n.SessionID)
+		t.Fatalf("successor hook bound %q / %q, want successor", n.Transcript, n.SessionID)
 	}
 }
 
@@ -1158,15 +1155,15 @@ func TestLegacyStoreReplayAndNoNewestFileRelink(t *testing.T) {
 		t.Fatalf("reload retired a legacy link it never delivered to: %q", got.Transcript)
 	}
 
-	// Once a prompt is pasted and this file does not record it, it detaches —
-	// still without guessing the newest file.
+	// A prompt missing from the file is not evidence that ownership changed:
+	// Claude may append it after a local modal is dismissed.
 	a2.noteDelivery("legacy", time.Now().Add(-time.Minute))
 	a2.maybeRelinkTranscript(got)
 	if got.Transcript == newest || got.SessionID == hookSIDForeign {
-		t.Fatalf("detach guessed newest file: %q / %q", got.Transcript, got.SessionID)
+		t.Fatalf("missing turn guessed newest file: %q / %q", got.Transcript, got.SessionID)
 	}
-	if got.Transcript != "" {
-		t.Fatalf("legacy stale transcript must detach, got %q", got.Transcript)
+	if got.Transcript != old || got.SessionID != hookSIDOwn {
+		t.Fatalf("missing turn changed the legacy binding: %q / %q", got.Transcript, got.SessionID)
 	}
 }
 
@@ -1398,27 +1395,6 @@ func TestContentlessTranscriptIsNotRetiredAsStale(t *testing.T) {
 	}
 }
 
-// A link established after the phase began cannot be stale for that phase, even
-// if the file's newest content predates it.
-func TestRecentlyBoundTranscriptIsNotRetiredAsStale(t *testing.T) {
-	f := &fakeTmux{alive: map[string]bool{"n1": true}}
-	a := newTestApp(t, f)
-	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cur := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", -2*time.Hour))
-	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, cur)
-	writeSeedLog(t, a, n.ID, "before")
-	a.activeSince[n.ID] = time.Now().Add(-30 * time.Second)
-	a.claudeBoundAt[n.ID] = time.Now()
-
-	a.maybeRelinkTranscript(n)
-
-	if n.Transcript != cur || n.SessionID != hookSIDOwn {
-		t.Fatalf("link bound inside this phase was retired: %q / %q", n.Transcript, n.SessionID)
-	}
-}
-
 // The whole /clear rollover, in the order the poller runs it: the successor is
 // bound by the hook, then the next active→quiet transition must leave it alone.
 func TestClearHookSuccessorSurvivesNextPollTransition(t *testing.T) {
@@ -1454,13 +1430,9 @@ func TestClearHookSuccessorSurvivesNextPollTransition(t *testing.T) {
 	}
 }
 
-// D1/D2. A pane phase is not evidence that the agent worked: the poller's
-// first capture after a restart manufactures one (prevCap is empty, so any
-// pane looks changed), and so does late TUI chrome redrawing seconds after a
-// turn finished. Both were observed retiring healthy transcripts live. The
-// only mechanical proof a link is stale is an *unanswered delivery* — scimux
-// pasted a prompt and the transcript never recorded anything since.
-func TestRelinkRequiresAnUnansweredDelivery(t *testing.T) {
+// A missing turn is not transcript-ownership evidence: a local Claude modal
+// may defer a paste while keeping the same session and transcript.
+func TestRelinkNeverInfersOwnershipFromDeliveryTiming(t *testing.T) {
 	// setup returns an app with a hook-owned node whose transcript's newest
 	// content is contentAge old, and a completed active→quiet phase.
 	setup := func(t *testing.T, contentAge time.Duration) (*app, *Node, string) {
@@ -1503,38 +1475,37 @@ func TestRelinkRequiresAnUnansweredDelivery(t *testing.T) {
 		}
 	})
 
-	// The real stale case: a prompt was pasted and this file never carried it.
-	t.Run("unanswered delivery retires", func(t *testing.T) {
+	// A missing prompt is delivery evidence, never transcript-ownership
+	// evidence. Claude can hold a paste behind a local modal for longer than
+	// the ordinary delivery window and append it to the same transcript later.
+	// Retiring here permanently tombstones the valid path a few seconds before
+	// the delayed turn arrives, stranding the web mirror while the pane keeps
+	// working.
+	t.Run("overdue delivery stays bound and mirrors a late turn", func(t *testing.T) {
 		a, n, cur := setup(t, 2*time.Hour)
+		a.syncMirror(n)
 		a.noteDelivery(n.ID, time.Now().Add(-60*time.Second))
 		a.maybeRelinkTranscript(n)
-		if n.Transcript != "" || n.SessionID != "" {
-			t.Fatalf("unanswered delivery must detach, got %q / %q", n.Transcript, n.SessionID)
+		if n.Transcript != cur || n.SessionID != hookSIDOwn {
+			t.Fatalf("overdue delivery detached valid binding: %q / %q", n.Transcript, n.SessionID)
 		}
-		if !a.deadTranscripts[n.ID][cur] {
-			t.Fatal("retired path not tombstoned")
+		if a.deadTranscripts[n.ID][cur] {
+			t.Fatal("overdue delivery tombstoned a transcript without a successor SessionStart")
 		}
-	})
+		for _, rec := range keyRecords(t, a.storePath) {
+			if rec.ID == n.ID && (rec.Type == "transcript" || rec.Type == "transcript-retired") {
+				t.Fatalf("overdue delivery persisted destructive record: %+v", rec)
+			}
+		}
+		if got := clearSeamCount(t, a, n.ID); got != 0 {
+			t.Fatalf("overdue delivery appended %d fake clear seams", got)
+		}
 
-	// A transcript write lags the paste; judging inside that window would
-	// retire a link that is about to be answered.
-	t.Run("delivery inside the grace window survives", func(t *testing.T) {
-		a, n, cur := setup(t, 2*time.Hour)
-		a.noteDelivery(n.ID, time.Now())
-		a.maybeRelinkTranscript(n)
-		if n.Transcript != cur {
-			t.Fatalf("retired inside the delivery grace window: %q", n.Transcript)
-		}
-	})
-
-	// A link established after the prompt was pasted cannot have missed it.
-	t.Run("link bound after the delivery survives", func(t *testing.T) {
-		a, n, cur := setup(t, 2*time.Hour)
-		a.noteDelivery(n.ID, time.Now().Add(-60*time.Second))
-		a.claudeBoundAt[n.ID] = time.Now()
-		a.maybeRelinkTranscript(n)
-		if n.Transcript != cur {
-			t.Fatalf("link bound after the delivery was retired: %q", n.Transcript)
+		appendLines(t, cur, claudeUserLine("delayed prompt", 0))
+		a.syncMirror(n)
+		seg := sessionlog.ReadSegment(a.sessionLogPath(n.ID))
+		if len(seg.Turns) == 0 || seg.Turns[len(seg.Turns)-1].Text != "delayed prompt" {
+			t.Fatalf("late turn did not reach the existing mirror: %+v", seg.Turns)
 		}
 	})
 }
@@ -1542,7 +1513,7 @@ func TestRelinkRequiresAnUnansweredDelivery(t *testing.T) {
 // D1 end to end through the poller: a fresh process adopting a live pane must
 // survive its own first capture. prevCap is empty at startup, so tick one sees
 // a "change" and opens an active phase that no existing transcript can have
-// carried; tick two closes it as quiet and runs the backstop.
+// carried; tick two closes it as quiet and must preserve the binding.
 func TestFirstPollAfterRestartKeepsIdleTranscripts(t *testing.T) {
 	proj := t.TempDir()
 	n := &Node{ID: "n1", Agent: "claude", Dir: "/w/proj", SessionID: "old-session"}

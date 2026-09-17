@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/acp"
 	"codeberg.org/chrberger/scimux/internal/asset"
 	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
@@ -208,11 +209,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			// chain, so it must run first.
 			a.snapshotClosingStation(n)
 			if err := pm.Clear(n.ID); err != nil {
-				code := 500
+				code := http.StatusInternalServerError
+				message := err.Error()
 				if pm.Conflict(err) {
-					code = 409
+					code = http.StatusConflict
+				} else if acp.IsConfigRejection(err) {
+					code = http.StatusBadRequest
+					message += ". Fork with a model the agent still offers."
 				}
-				http.Error(w, err.Error(), code)
+				http.Error(w, message, code)
 				return
 			}
 			// /clear ends the turn lease (page turn is a hard reset).
@@ -435,7 +440,6 @@ func (a *app) retireTranscript(n *Node) {
 	a.mu.Lock()
 	a.markDeadTranscriptLocked(n.ID, oldPath, oldSID)
 	n.Transcript, n.SessionID = "", ""
-	delete(a.claudeBoundAt, n.ID)
 	delete(a.tailers, n.ID)
 	delete(a.chatMark, n.ID)
 	delete(a.staleChat, n.ID)
@@ -977,7 +981,7 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 	resp["ctx_pct"] = ctxPct
 	if agent == "claude" {
 		resp["supervision"] = string(sup)
-		if explain := claudeSupervisionExplain(sup, launchErr); explain != "" {
+		if explain := claudeChatSupervisionExplain(sup, launchErr, ended); explain != "" {
 			resp["error"] = explain
 		}
 		if delivery == sendSubmitting || delivery == sendUnconfirmed || delivery == sendDelivering {
@@ -1001,11 +1005,11 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 			resp["perm_manual"] = true
 			resp["perm_reason"] = note
 		}
-		if sup == claudeSupStrict && dlg.DialogID != "" {
-			// perm_dialog_id is a server-minted visible-dialog epoch, not a
-			// PermissionRequest id. Action keys come only from a validated
-			// current AX menu. Missing options → manual response + Open
-			// Terminal, never an invented Yes/No/allow-always row.
+		if dlg.DialogID != "" {
+			// perm_dialog_id is a supervisor identity, not a PermissionRequest
+			// id. Action keys come only from a validated current AX menu (or
+			// the exact pre-session trust menu). Missing options → manual
+			// response + Open Terminal, never invented choices.
 			resp["perm_dialog_id"] = dlg.DialogID
 			resp["perm_title"] = dlg.Title
 			resp["perm_tool_kind"] = claudePermToolKind(dlg.Tool)
@@ -1233,7 +1237,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 	if n.Agent == "claude" {
 		dlg := a.claudeVisibleDialog(n)
 		// A dialog_id in the body is fail-closed: send nothing unless it is
-		// exactly the live epoch. A missing, retired, or mismatched epoch
+		// exactly the live identity. A missing, retired, or mismatched identity
 		// must never type a digit/Enter into Claude's prompt.
 		if body.DialogID != "" {
 			if dlg.DialogID == "" || body.DialogID != dlg.DialogID {
@@ -1241,7 +1245,7 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			claudeEpoch = dlg.DialogID
-		} else if a.claudeStrictSupervised(n) && dlg.DialogID != "" {
+		} else if dlg.DialogID != "" {
 			if body.RequestID != "" && body.RequestID == dlg.DialogID {
 				claudeEpoch = dlg.DialogID
 			} else {

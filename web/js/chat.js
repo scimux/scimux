@@ -17,7 +17,8 @@
  *   - editingTitle / editingTitleScope (shared shell title editor)
  *   - hardAttention, laneColor, agentLogo, icons
  *   - pendingJump get/set (shell jump coordinator for notes/search)
- *   - bookmarks / uiMutate (bubble bookmark action only)
+ *   - bookmarks / noteUsages / forwardLinks / markerVersion / uiMutate
+ *   - openBookmark / openChoiceList / openNoteUsage / jumpToChatAddress
  *   - composer effects: setComposerBusy / setComposerClosed / setAttachAvail
  *   - cards/map invalidation + re-render when live/attention chrome changes
  *   - api, hashStr, md, esc, fmtWhen, fmtBubbleTime, bubbleTitle
@@ -46,7 +47,7 @@
  *   - #msgs scroll (compact header)
  *   - #msgs load capture (thumbnail box + re-pin near bottom)
  *   - #msgs error capture (broken-thumbnail cleanup; no inline onerror)
- *   - #msgs click (histload, bubble tap, bubble actions)
+ *   - #msgs click (histload, marker jumps/menus, bubble tap/actions)
  *   - #msgs touchend (double-tap zoom reset on empty background)
  *   - #keyrow click (dialog keys + attention collapse)
  *   - #termtoggle / #autoapprove / #scrollend click
@@ -63,7 +64,8 @@
  *   - forkFromTurn / openSheet / new-activity configuration (sheets)
  *   - openSendTo: the send-to picker and its target list (bookmarks owns
  *     #sendto; the bubble action only supplies text + the source node id)
- *   - jumpToChatAddress / pendingJump creation (bookmarks/search set them)
+ *   - jumpToChatAddress / pendingJump creation (bookmarks/search set them;
+ *     chat invokes the injected jump for Send-to markers)
  *   - stampAddress pure helper (shell; bubble action injects it)
  *   - archived read-only surface (imports splitAssetRefs only)
  *   - shared startTitleEdit / commitTitleEdit
@@ -84,6 +86,13 @@ import {
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import {
+  readPendingForwards,
+  clearPendingForwards,
+  readAwaitingForward,
+  clearAwaitingForward,
+  makeForwardLinkToTurn,
+} from "./storage.js";
 
 /* ---------- public constants ---------- */
 
@@ -108,11 +117,11 @@ export const DEC_LABELS = {
   waiting_question: "Agent is waiting for your answer",
   waiting_approval: "Agent needs your approval",
   quiet_inspect: "Quiet \u2014 inspect the terminal",
-  /* ACP transport (pi/opencode/grok): no pane, so "terminal" reads as the event log */
+  /* ACP transport (pi/opencode/grok/cursor/dsh): no pane, so "terminal" reads as the event log */
   turn_active: "Agent is working",
   turn_error: "The agent finished without output \u2014 check the log",
   claude_starting: "Starting Claude \u2014 waiting for SessionStart",
-  claude_unsupported: "This Claude session cannot be supervised with the current hook bundle",
+  claude_unsupported: "Some chat features aren’t available.",
   claude_launch_error: "Claude did not start",
   claude_transcript_fault: "The transcript is not readable \u2014 send another prompt or fork",
 };
@@ -261,11 +270,81 @@ export function buildChatSignature(parts){
     p.histKey || "",
     p.turnsHash || "",
     p.turnAttrHash || "",
+    p.markerHash || "",
     p.decisionsHash || "",
     p.expanded ? "1" : "0",
     p.compacting ? "1" : "0",
     p.elicitationKey || "",
   ].join("|");
+}
+
+function durableSourceKey(value = {}){
+  return value.uid
+    ? `u\u0000${value.uid}\u0000${Number(value.segment) || 0}\u0000${Number(value.record) || 0}`
+    : "";
+}
+
+function legacySourceMatches(turn, nodeId, value = {}){
+  return !durableSourceKey(value) && value.node === nodeId &&
+    value.turnTime === (turn.time || "") &&
+    (!Object.prototype.hasOwnProperty.call(value, "text") || value.text === (turn.text || ""));
+}
+
+export function bookmarkMarkerModel(turn, nodeId, bookmarks = [], usages = []){
+  const key = durableSourceKey(turn);
+  const bookmark = bookmarks.find(b =>
+    (key && durableSourceKey(b) === key) || legacySourceMatches(turn, nodeId, b));
+  if (!bookmark) return null;
+  const bookmarkKey = durableSourceKey(bookmark);
+  const seen = new Set();
+  const destinations = usages.filter(u => {
+    const source = (u && u.source) || {};
+    return (bookmarkKey && durableSourceKey(source) === bookmarkKey) ||
+      (!bookmarkKey && source.node === bookmark.node && source.turnTime === bookmark.turnTime);
+  }).filter(u => {
+    const k = `${u.note_id || ""}\u0000${u.section_id || ""}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { bookmark, destinations };
+}
+
+export function sentToMarkerModel(turn, nodeId, links = []){
+  const key = durableSourceKey(turn);
+  return (links || []).filter(link => {
+    const source = (link && link.source) || {};
+    return (key && durableSourceKey(source) === key) || legacySourceMatches(turn, nodeId, source);
+  });
+}
+
+export function matchingForwardDestinationTurn(expected, turns = []){
+  const latch = typeof expected === "string"
+    ? { text: expected, afterTurns: 0 }
+    : expected;
+  if (!latch || !latch.text) return null;
+  const boundary = Math.max(0, Math.floor(Number(latch.afterTurns) || 0));
+  const start = boundary <= turns.length ? boundary : 0;
+  /* Attachments make the recorded turn the prompt plus extendPrompt's
+     appended reference, so the seam is matched, not a loose prefix: an
+     unrelated turn that merely starts with this text is a different send. */
+  const extended = `${latch.text}\n\n`;
+  return turns.slice(start).find(turn =>
+    turn && turn.role === "user" &&
+    (turn.text === latch.text || String(turn.text || "").startsWith(extended))) || null;
+}
+
+export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
+  const buttons = [];
+  if (model.bookmark){
+    const n = (model.bookmarkDestinations || model.destinations || []).length;
+    buttons.push(`<button type="button" class="bmarker" data-bmarker="bookmark" aria-label="${n ? "Open bookmark destination" : "Open bookmark"}"${n > 1 ? ` aria-haspopup="menu"` : ""}>${iconBookmark}${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
+  }
+  if (model.sentTo && model.sentTo.length){
+    const n = model.sentTo.length;
+    buttons.push(`<button type="button" class="bmarker" data-bmarker="sendto" aria-label="Open sent-to destination"${n > 1 ? ` aria-haspopup="menu"` : ""}><span class="rot180">${iconInto}</span>${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
+  }
+  return buttons.length ? `<div class="bubblemarkers">${buttons.join("")}</div>` : "";
 }
 
 /* Agent and provenance are not part of hashTurns (role+text only). Include
@@ -404,7 +483,9 @@ export function histLoadHTML(priorTurns){
   return `<div class="chatseam"><button class="histload">show earlier history &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
 }
 
-export function pendingEmptyHTML({ freshSurface, pending, supervision = "", delivering = false } = {}){
+export function pendingEmptyHTML({
+  freshSurface, pending, supervision = "", delivering = false, ended = false,
+} = {}){
   if (freshSurface) return `<div class="pending">fresh chat \u2014 send a prompt</div>`;
   /* Ahead of the startup wording on purpose: by the time the prompt is being
      delivered, SessionStart has arrived, so "waiting for SessionStart" would
@@ -422,7 +503,8 @@ export function pendingEmptyHTML({ freshSurface, pending, supervision = "", deli
       : "no confirmed turns yet"}</div>`;
   }
   if (supervision === "claude_unsupported"){
-    return `<div class="pending">this Claude session cannot be supervised \u2014 fork or relaunch it</div>`;
+    if (ended) return "";
+    return `<div class="pending">this chat uses an older scimux setup \u2014 fork or relaunch it to use all features</div>`;
   }
   return `<div class="pending">${pending
     ? "waiting for the agent's transcript file \u2014 showing the raw terminal below"
@@ -451,7 +533,8 @@ export function matchPendingJumpInTurns(pending, turns){
     idx = list.findIndex(t => t.uid === pending.uid &&
       (t.segment || 0) === (pending.segment || 0) && (t.record || 0) === (pending.record || 0));
   if (idx < 0 && pending.turnTime) idx = list.findIndex(t => t.time === pending.turnTime);
-  if (idx < 0) idx = list.findIndex(t => t.text === pending.text);
+  if (idx < 0 && pending.text) idx = list.findIndex(t =>
+    t.text === pending.text || (pending.textPrefix && String(t.text || "").startsWith(pending.text)));
   return idx;
 }
 
@@ -1274,6 +1357,13 @@ export function createChatFeature(deps){
 
   function renderTurnHTML(t, { bk, hist = false, nodeId, assets } = {}){
     const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
+    const bookmarkMarker = bookmarkMarkerModel(t, nodeId, g("bookmarks", []), g("noteUsages", []));
+    const sentTo = sentToMarkerModel(t, nodeId, g("forwardLinks", []));
+    const marker = { ...(bookmarkMarker || {}), sentTo };
+    const markers = (bookmarkMarker || sentTo.length) ? bubbleMarkersHTML(marker, {
+      iconBookmark: icons.ICON_BUBBLE_BOOKMARK || "",
+      iconInto: icons.ICON_INTO || "",
+    }) : "";
     bubbleTurns[bk] = t;
     const cls = turnRoleClass(t.role, { hist, media: !!(a.html && !a.clean) });
     const dataAttrs = hist
@@ -1281,8 +1371,25 @@ export function createChatFeature(deps){
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markdown(a.clean)}${a.html}</div>
+        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${markdown(a.clean)}${a.html}</div>
       </div>`;
+  }
+
+  function confirmDeferredForward(nodeId, turns){
+    const expected = readAwaitingForward(
+      d.storage, nodeId, typeof d.now === "function" ? d.now() : Date.now());
+    const turn = matchingForwardDestinationTurn(expected, turns);
+    if (!turn) return;
+    const pending = readPendingForwards(d.storage, nodeId);
+    if (pending.length && typeof d.uiMutate === "function"){
+      pending.forEach(source => d.uiMutate({
+        k: "forward-link-add",
+        link: makeForwardLinkToTurn(source, nodeId, turn),
+      }));
+      clearPendingForwards(d.storage, nodeId);
+    }
+    if (!pending.length || typeof d.uiMutate === "function")
+      clearAwaitingForward(d.storage, nodeId);
   }
 
   function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets } = {}){
@@ -1739,6 +1846,8 @@ export function createChatFeature(deps){
     }
 
     const turns = data.turns || [];
+    confirmDeferredForward(n.id, turns);
+    if (data.restore_draft) clearAwaitingForward(d.storage, n.id);
     if (typeof d.setAttachAvail === "function") d.setAttachAvail(turns.length > 0);
 
     if (data.restore_draft && n.id && !restoredDraft[n.id]){
@@ -1855,6 +1964,7 @@ export function createChatFeature(deps){
       histKey: hist ? "h" + priorSegs.length : "",
       turnsHash: hashTurns(turns),
       turnAttrHash: hashTurnAttrs(turns, hash),
+      markerHash: String(g("markerVersion", "")),
       decisionsHash: decisionsHash(liveDecisions) +
         (hist ? "|" + priorSegs.map(s => decisionsHash(s.decisions)).join(";") : ""),
       expanded,
@@ -1915,9 +2025,10 @@ export function createChatFeature(deps){
       (data.chat_started
         ? `<div class="chatseam curseam"><span>chat started ${escape(whenFn(data.chat_started))}</span></div>` : "") +
       (!turns.length && !liveDecisions.length
-        ? pendingEmptyHTML({
+          ? pendingEmptyHTML({
             freshSurface, pending: data.pending, delivering,
             supervision: data.supervision || n.supervision || "",
+            ended: !!n.ended_at,
           })
         : "") +
       renderTimelineHTML(turns, liveDecisions, {
@@ -1927,7 +2038,7 @@ export function createChatFeature(deps){
          current end of the conversation where a bottom-pinned reader sees it,
          rather than above an arbitrarily long timeline. */
       (data.error
-        ? `<div class="pending chaterr" role="status">${escape(data.error)}</div>`
+        ? `<div class="pending ${data.reason === "claude_unsupported" ? "chatnotice" : "chaterr"}" role="status">${escape(data.error)}</div>`
         : "") +
       (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
       (data.compacting ? compactingStatusHTML() : "") +
@@ -2185,6 +2296,54 @@ export function createChatFeature(deps){
       if (sel) loadHistory(sel, "seam");
       return;
     }
+    const marker = e.target.closest && e.target.closest("[data-bmarker]");
+    if (marker){
+      const turnEl = marker.closest && marker.closest(".turn");
+      const turn = turnEl && turnEl.dataset ? bubbleTurns[turnEl.dataset.bk] : null;
+      const bookmarkModel = turn && bookmarkMarkerModel(
+        turn, g("sel", ""), g("bookmarks", []), g("noteUsages", []));
+      const sentTo = turn ? sentToMarkerModel(turn, g("sel", ""), g("forwardLinks", [])) : [];
+      const model = { ...(bookmarkModel || {}), sentTo };
+      if (marker.dataset.bmarker === "bookmark"){
+        if (!bookmarkModel) return;
+        if (!model.destinations.length){
+          if (typeof d.openBookmark === "function") d.openBookmark(model.bookmark.t);
+        } else if (model.destinations.length === 1){
+          if (typeof d.openNoteUsage === "function") d.openNoteUsage(model.destinations[0]);
+        } else if (typeof d.openChoiceList === "function"){
+          d.openChoiceList({
+            title: "Used in…",
+            choices: model.destinations.map((u, i) => ({
+              id: String(i), label: `${u.note_title || "Note"} › ${u.section_title || "Section"}`,
+              usage: u,
+            })),
+            onChoose: choice => d.openNoteUsage(choice.usage),
+          });
+        }
+      } else if (marker.dataset.bmarker === "sendto" && sentTo.length){
+        const openLink = link => {
+          if (typeof d.jumpToChatAddress !== "function") return;
+          if (d.jumpToChatAddress(link.destination || {}) === false && typeof d.toast === "function")
+            d.toast("This destination chat is no longer available.");
+        };
+        if (sentTo.length === 1) openLink(sentTo[0]);
+        else if (typeof d.openChoiceList === "function"){
+          d.openChoiceList({
+            title: "Sent to…",
+            choices: sentTo.map((link, i) => {
+              const dest = (link && link.destination) || {};
+              const node = nodeById(dest.node);
+              return {
+                id: String(i), link,
+                label: `${(node && node.title) || "Chat"}${link.sent_at ? " · " + bubTimeFn(link.sent_at) : ""}`,
+              };
+            }),
+            onChoose: choice => openLink(choice.link),
+          });
+        }
+      }
+      return;
+    }
     const ba = e.target.closest && e.target.closest("[data-bact]");
     if (ba){
       const turn = bubbleTurns[tappedTurn];
@@ -2221,6 +2380,7 @@ export function createChatFeature(deps){
           }
           if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
           if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark });
+          chatSig = "";
         }
         ba.innerHTML = "&#10003; noted";
         setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
@@ -2239,6 +2399,12 @@ export function createChatFeature(deps){
           exceptId: g("sel", ""),
           title: "Send to chat…",
           role: turn.role || "",
+          source: {
+            node: g("sel", ""), turnTime: turn.time || "",
+            ...(turn.uid ? {
+              uid: turn.uid, segment: Number(turn.segment) || 0, record: Number(turn.record) || 0,
+            } : {}),
+          },
         });
       else if (ba.dataset.bact === "desc")
         useTurnAsDescription(turn.text);

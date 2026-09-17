@@ -34,6 +34,15 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   so a target added to a workflow is defended from that moment. freebsd/amd64
   is built but deliberately not released — it keeps the static-build invariant
   honest.
+- Release builds and publication are separate jobs with a same-workflow
+  artifact handoff. The build job has no publication secret; the fresh publish
+  job accepts only the closed binary inventory, verifies `SHA256SUMS`, and only
+  then exposes the release token to the reviewed upload script. Forgejo upload
+  and download actions are pinned to commits
+  `16871d9e8cfcf27ff31822cac382bbb5450f1e1e` and
+  `d8d0a99033603453ad2255e58720b460a0555e1e`. The operator must configure the
+  `release-publisher` runner as a fresh environment. Runner labels do not grant
+  authorization; repository write access remains maintainer-only.
 - Integration tests create private, randomly named tmux sockets and never
   touch a user's tmux server. They clean up after themselves, and that
   includes the socket *file*: tmux does not unlink it when the server exits,
@@ -41,8 +50,9 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   the user's `/tmp/tmux-<uid>` until the next reboot. `SocketPath` is what a
   cleanup deletes, and the two helpers assert the removal rather than
   best-effort it — litter nobody is told about is litter nobody clears. Never
-  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`) in tests
-  — wrapped test commands are `bash --norc` or `cat`.
+  run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`,
+  `cursor-agent`, `dsh`) in tests — wrapped test commands are `bash --norc` or
+  `cat`.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing in
   `docs/invariants/storage.md`; `FuzzClaudeHookStdin` guards that no Claude hook helper writes to
@@ -61,7 +71,15 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   under `attic/scripts/`; public tests must not depend on them. Keep system
   prompts, tool/skill/path inventories, hostnames, session ids, timezone and
   secret-shaped strings out of committed fixtures.
+- `TestRealDshReplay` and `TestRealDshModelMenu` are that lane for dsh, and they
+  are the only checks that a real dsh still states occupancy in `usage_update`
+  and still encodes a model option value as the JSON `["provider","model"]`
+  pair the launch path decodes. A synthetic fixture can only prove we read the
+  shape we wrote down, so when dsh's wire changes these are what notice — and
+  they skip everywhere the capture is absent, which is everywhere but a
+  maintainer's machine.
 - The committed fixtures (`claude-session.jsonl`, `codex-rollout.jsonl`,
   `internal/acp/codex/testdata/synthetic-session.ndjson`,
-  `internal/acp/testdata/synthetic-grok-turn.ndjson`) are fully synthetic.
+  `internal/acp/testdata/synthetic-grok-turn.ndjson`,
+  `internal/acp/testdata/synthetic-dsh-turn.ndjson`) are fully synthetic.
   Keep them that way; never paste real transcript or wire content into them.

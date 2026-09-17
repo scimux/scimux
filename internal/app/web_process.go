@@ -59,6 +59,7 @@ type webChildConfig struct {
 	InviteFile   string
 	InviteStdin  bool
 	RVOrigin     string
+	ViewerOrigin string
 	CSRFToken    string
 }
 
@@ -165,6 +166,10 @@ func newWebSupervisor(listener net.Listener, link backend.Link, cmd *Command) (*
 	} else if !validCSRFToken(csrf) {
 		return nil, errors.New("web supervisor: invalid inherited CSRF token")
 	}
+	viewerOrigin, err := remote.NormalizeViewerOrigin(cmd.Config.ViewerOrigin)
+	if err != nil {
+		return nil, fmt.Errorf("web supervisor: %w", err)
+	}
 	return &webSupervisor{
 		listener: listener,
 		link:     link,
@@ -176,6 +181,7 @@ func newWebSupervisor(listener net.Listener, link backend.Link, cmd *Command) (*
 			InviteFile:   cmd.Config.InviteFile,
 			InviteStdin:  cmd.Config.InviteStdin,
 			RVOrigin:     cmd.Config.Origin,
+			ViewerOrigin: viewerOrigin,
 			CSRFToken:    csrf,
 		},
 		stdin: cmd.Stdin, stdout: cmd.Stdout, stderr: cmd.Stderr,
@@ -323,7 +329,7 @@ func (s *webSupervisor) reconcileRemoteLifecycle(startupCompleted bool) {
 			s.config.InviteFile = ""
 		}
 	}
-	probe := remote.NewClient(remote.Config{DataDir: s.config.DataDir, Origin: s.config.RVOrigin})
+	probe := remote.NewClient(remote.Config{DataDir: s.config.DataDir, Origin: s.config.RVOrigin, ViewerOrigin: s.config.ViewerOrigin})
 	state, err := probe.State()
 	if err != nil {
 		return
@@ -675,6 +681,11 @@ func readWebChildConfig(r io.Reader) (webChildConfig, error) {
 	if cfg.Generation == 0 || cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken) {
 		return webChildConfig{}, errors.New("web child: incomplete configuration")
 	}
+	viewerOrigin, err := remote.NormalizeViewerOrigin(cfg.ViewerOrigin)
+	if err != nil {
+		return webChildConfig{}, fmt.Errorf("web child: %w", err)
+	}
+	cfg.ViewerOrigin = viewerOrigin
 	return cfg, nil
 }
 
@@ -709,6 +720,7 @@ func loadLegacyWebChildConfig(getenv func(string) string) (webChildConfig, error
 		DataDir: getenv(envDataDir), Remote: remoteEnabled,
 		InviteFile: getenv(envInviteFile), InviteStdin: inviteStdin,
 		RVOrigin: getenv(envRVOrigin), CSRFToken: getenv(envCSRFToken),
+		ViewerOrigin: remote.DefaultViewerOrigin,
 	}
 	if cfg.Link.Socket == "" || cfg.Link.Token == "" || cfg.ListenAddr == "" || cfg.DataDir == "" || !validCSRFToken(cfg.CSRFToken) {
 		return webChildConfig{}, errors.New("web child: incomplete legacy environment")
@@ -837,7 +849,7 @@ func serveWebChild(ctx context.Context, cfg webChildConfig, ln net.Listener, rea
 	if cfg.Remote {
 		rc := remote.Config{
 			DataDir: cfg.DataDir, Remote: true, InviteFile: cfg.InviteFile,
-			InviteStdin: cfg.InviteStdin, Origin: cfg.RVOrigin,
+			InviteStdin: cfg.InviteStdin, Origin: cfg.RVOrigin, ViewerOrigin: cfg.ViewerOrigin,
 			Stdin: stdin, Stdout: stdout, Stderr: stderr,
 			NewTerminal: remote.OpenOwnerTerminal,
 			// Without this the client enrolls and mints, but never runs the

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/chrberger/scimux/internal/dialoghint"
 	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	"codeberg.org/chrberger/scimux/internal/sessionworker"
 	"codeberg.org/chrberger/scimux/internal/tmuxsession"
@@ -322,8 +323,17 @@ func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string
 		return errClaudeWorkerConflict
 	}
 	n := h.node()
-	if n == nil || h.app.claudeVisibleDialog(n).DialogID != prepared.dialogID {
+	if n == nil {
 		return errClaudeWorkerConflict
+	}
+	if h.app.claudeVisibleDialog(n).DialogID != prepared.dialogID {
+		return errClaudeWorkerConflict
+	}
+	if isClaudeWorkspaceTrustRequestID(prepared.dialogID) {
+		cap, err := h.app.server.Session(n.ID).Capture()
+		if err != nil || !dialoghint.LooksLikeWorkspaceTrust(cap) {
+			return errClaudeWorkerConflict
+		}
 	}
 	if err := h.app.server.Session(n.ID).SendKeys(prepared.keys...); err != nil {
 		return err

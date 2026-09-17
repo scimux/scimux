@@ -10,7 +10,7 @@ accident is the one most likely to be load-bearing: check here before
 
 Claude is the one agent scimux drives through official hooks instead of
 supervision heuristics, so it has its own rules. All of this applies to a
-*scimux-owned* Claude node; Codex, ACP, pi, opencode and grok keep the
+*scimux-owned* Claude node; Codex, ACP, pi, opencode, grok, cursor and dsh keep the
 ordinary inspect/fallback behavior.
 
 ## A transcript is bound only by that node's own SessionStart hook
@@ -28,7 +28,8 @@ startup/hook-health acknowledgement. The undocumented transcript
   pass `--ax-screen-reader` and an `--add-dir` per genuinely additional
   directory (including attachment staging). `--add-dir` does **not** bypass
   Claude workspace trust, and scimux never edits undocumented trust-state
-  files.
+  files. An exact pre-session workspace-trust dialog is instead surfaced as
+  an audited `y`/`n` web decision; generic lettered menus remain inert.
 - Only Claude's default `~/.claude` state root is supported;
   `CLAUDE_CONFIG_DIR` is deliberately not evaluated, and transcript-path
   validation stays anchored under `~/.claude/projects` unless that scope
@@ -50,14 +51,15 @@ startup/hook-health acknowledgement. The undocumented transcript
   `capabilities.json` proves the layout from disk and records the `exec`
   path `settings.json` baked; a fresh bundle reports `claude_starting` and
   becomes authoritative only after that process's valid SessionStart.
-- Two consequences to know before "fixing" a bug report: pane noise that
-  trips the staleness backstop drops a node to peek until the next `/clear`
-  or relaunch hook; and because `settings.json` bakes `os.Executable()`, a
-  pane that outlives a *move* of the binary keeps a settings file pointing
-  nowhere, so its next `/clear` silently fails to bind (rebuilding in place
-  is harmless). Never retire a transcript on absent evidence — a just-created
-  successor holds only meta records, so "no recognized content yet" is not
-  staleness (`maybeRelinkTranscript`).
+- Two consequences to know before "fixing" a bug report: delivery timing is
+  never transcript-ownership evidence — Claude may hold a paste behind a
+  local modal and append it to the same transcript later, so only a validated
+  successor SessionStart may replace a binding — and because `settings.json`
+  bakes `os.Executable()`, a pane that outlives a *move* of the binary keeps a
+  settings file pointing nowhere, so its next `/clear` silently fails to bind
+  (rebuilding in place is harmless). A just-created successor may also hold
+  only meta records; "no recognized content yet" is never staleness
+  (`maybeRelinkTranscript`).
 - **`/clear` is refused while a turn is in flight**, with the same
   `errClaudeTurnInFlight` 409 every other Claude send gets. Claude Code
   absorbs a mid-turn paste into the running turn — its own transcript names
@@ -112,10 +114,13 @@ without a floor is a silent hang. The neutral window is projected as its own
 `delivery: "delivering"`, never the ordinary `unconfirmed` — which offers a
 resume button and claims the send is unconfirmed, a lie while SessionStart
 has arrived; for the same reason the pending note names delivery rather than
-SessionStart. SessionStart timeout, a diagnosed
-workspace-trust dialog and paste failure are inline errors that restore the
-prompt as the node's draft, never retry and never open the terminal; a
-generic lettered startup dialog is **not** diagnosed as workspace trust.
+SessionStart. SessionStart timeout and paste failure are inline errors that
+restore the prompt as the node's draft and never retry. An exact
+workspace-trust dialog is the exception: it raises `attention:"dialog"`
+immediately, so the user can answer through the ordinary audited remote-key
+route, and extends the SessionStart wait to `claudeDeliveryGiveUp`; expiry
+then becomes the inline error. A generic lettered startup dialog is **not**
+diagnosed as workspace trust and retains the ordinary short timeout.
 
 ## An approval is answered through the hook, never through the pane
 

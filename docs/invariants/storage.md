@@ -40,6 +40,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   Deterministic heuristics may read it. It must never be used to train,
   fine-tune, distill, or otherwise develop a model — do not turn it into a
   training dataset.
+  - Cursor records two representations of the same launch choice: the node
+    record keeps the model row and effort level the user selected, while the
+    session-log meta header stores the joined cursor id as `model` and an empty
+    `effort`, matching the concrete request sent to the worker.
   - The store is also the **chat read path for every transport**: handleChat
     renders the current segment (everything after the last `source` seam),
     while the tailer serves only mechanics — needs-input, staleness, delivery
@@ -64,14 +68,31 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   wrote this" on the user's own words is the same misattribution pointed the
   other way — and the clipboard is outside the rule entirely, because there
   the user copies, pastes and attributes, and scimux is upstream of that.
+  Send-to destination drafts keep their source intent in device-local storage;
+  `forward_links` enters shared `ui.json` only after the sent text is matched to
+  a real destination transcript turn -- which is the sent text itself, or that
+  text plus the attachment reference the server appends to what it delivered.
+  Editing the draft does not break provenance. Failed or unconfirmed sends
+  remain pending, while leaving an empty destination cancels the pending
+  intent. The awaiting latch expires after a day, because a latch that never
+  matches would otherwise hold both the cancel guard and the overwrite guard
+  open forever and silently retire Send-to for that node. The shared navigation index
+  retains at most the newest 500 links and omits destination text when a
+  transcript UID or timestamp can address the turn; last-resort text fallback
+  is prefix-bounded.
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam,
   never a new file or truncation; the context gauge is segment-scoped.
-  - ACP nodes (pi/opencode/grok) implement it as **deterministic process
-    replacement** — kill the subprocess, negotiate a fresh one under the same
+  - ACP nodes (pi/opencode/grok/cursor/dsh) implement it as **deterministic
+    process replacement** — kill the subprocess, negotiate a fresh one under the same
     node, because a second `session/new` on one connection is unproven
-    upstream while a fresh PID self-evidently carries no context. codex opens
-    a new thread on the same PID. In both, the seam is appended only after the
+    upstream while a fresh PID self-evidently carries no context. The
+    replacement is re-configured with the *same* launch configuration the node
+    records — dsh carries neither model nor thought level on argv, so a
+    replacement that is not configured again is a page turn that silently
+    changes model; a dsh refusal returns HTTP 400 and fails the clear before
+    the seam, leaving the old session and its log untouched. codex opens a new
+    thread on the same PID. In both, the seam is appended only after the
     protocol call succeeded. **Claude obeys the same rule**, and its proof is
     that node's own `SessionStart source:"clear"`: pasting `/clear` turns no
     page at all, because the CLI absorbs a paste that lands mid-turn and an

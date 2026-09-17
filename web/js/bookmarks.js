@@ -34,6 +34,7 @@
  * UI operations (via injected uiMutate — state.js applyOp):
  *   - { k: "bookmark-add", bookmark }
  *   - { k: "bookmark-del", t }
+ *   - { k: "forward-link-add", link } (confirmation is minted by chat.js)
  *
  * Owned UI operations / pure decisions:
  *   - Lane derivation (live node.lane_id, captured-lane fallback, comment→anchor)
@@ -113,6 +114,7 @@ import {
 import { hashStr as hashStrDefault } from "./lanes.js";
 import { sendableNodes } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import { addPendingForward } from "./storage.js";
 import {
   createPopoverMenu,
   menuButtonHTML,
@@ -442,6 +444,7 @@ export function jumpAddressDecision(a, nodeById){
         uid: a.uid || "",
         segment: a.segment,
         record: a.record,
+        ...(a.textPrefix ? { textPrefix: true } : {}),
       },
     };
   }
@@ -622,6 +625,28 @@ export function createBookmarksFeature(deps){
     if (typeof d.restartWorkPulse === "function") d.restartWorkPulse();
   }
 
+  function openBookmark(t){
+    const all = bookmarks();
+    const target = all.find(nt => nt.t === t);
+    if (!target) return false;
+    const byT = {};
+    all.forEach(nt => { byT[nt.t] = nt; });
+    bookmarkTab = bookmarkLaneId(target, byT, nodeById) || "GENERAL";
+    setStorage(STORAGE_KEY_TAB, bookmarkTab);
+    openBookmarkT = t;
+    setOpen(true);
+    setTimeoutFn(() => {
+      const list = roots.bookmarklist;
+      const selector = `.bookmark[data-t="${CSSObj.escape(t)}"]`;
+      const el = list && typeof list.querySelector === "function" ? list.querySelector(selector) : null;
+      if (!el) return;
+      if (el.classList) el.classList.add("jump-target");
+      if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", behavior: "smooth" });
+      setTimeoutFn(() => { if (el.classList) el.classList.remove("jump-target"); }, 1400);
+    }, 0);
+    return true;
+  }
+
   /* jumpToChatAddress — the one resolver behind both a note's "jump to" and an
      embedded reference's "jump to chat". Leaving any full-screen overlay is
      part of the jump — the destination must show. */
@@ -751,6 +776,10 @@ export function createBookmarksFeature(deps){
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
           role: nt.role || "",
+          source: (nt.node || nt.uid) ? {
+            node: nt.node || "", turnTime: nt.turnTime || "",
+            ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),
+          } : null,
         });
         return;
       }
@@ -845,7 +874,30 @@ export function createBookmarksFeature(deps){
   /* The one send-to dialogue. Both entry points — a chat bubble's "send to…"
      and a bookmark long-press — land here, so the target filter and order can
      never drift apart between them. Only the sheet title differs. */
-  function openSendTo({ text = "", exceptId = "", title = "", role = "" } = {}){
+  function openChoiceList({ title = "Choose…", choices = [], onChoose } = {}){
+    const listEl = d.sendtoList || (doc && doc.querySelector && doc.querySelector("#sendto_list"));
+    if (!listEl) return;
+    const titleEl = d.sendtoTitle || (doc && doc.querySelector && doc.querySelector("#sendto_title"));
+    if (titleEl) titleEl.textContent = title;
+    listEl.innerHTML = choices.map((choice, i) =>
+      `<button type="button" class="pos-item" data-choice="${i}" style="width:100%;text-align:left">${esc(choice.label || "Destination")}</button>`
+    ).join("");
+    if (sendtoListWithHandler && sendtoListWithHandler !== listEl &&
+        sendtoListWithHandler.onclick === sendtoClickHandler)
+      sendtoListWithHandler.onclick = null;
+    sendtoClickHandler = ev => {
+      const button = ev.target.closest && ev.target.closest("[data-choice]");
+      if (!button) return;
+      const choice = choices[Number(button.dataset.choice)];
+      if (typeof d.closeSheets === "function") d.closeSheets();
+      if (choice && typeof onChoose === "function") onChoose(choice);
+    };
+    listEl.onclick = sendtoClickHandler;
+    sendtoListWithHandler = listEl;
+    if (typeof d.openSheet === "function") d.openSheet("#sendto");
+  }
+
+  function openSendTo({ text = "", exceptId = "", title = "", role = "", source = null } = {}){
     /* Disclose once, here, rather than at each of the four callers: the two
        branches below (seed a new chat, merge into a live draft) both carry the
        text onward, and a caller that forgot would fail silently. */
@@ -888,7 +940,7 @@ export function createBookmarksFeature(deps){
       if (startNew){
         if (typeof d.closeSheets === "function") d.closeSheets();
         if (typeof d.openNewActivity === "function")
-          d.openNewActivity({ prompt: body, focusTitle: true });
+          d.openNewActivity({ prompt: body, focusTitle: true, forwardSources: source ? [source] : [] });
         if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
           d.setLevel(1);
         return;
@@ -899,6 +951,7 @@ export function createBookmarksFeature(deps){
       const prev = (storage && storage.getItem(DRAFT_KEY_PREFIX + tgt)) || "";
       if (storage)
         storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, body));
+      if (source) addPendingForward(storage, tgt, source);
       if (typeof d.closeSheets === "function") d.closeSheets();
       if (typeof d.select === "function") d.select(tgt);
       if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
@@ -1042,6 +1095,8 @@ export function createBookmarksFeature(deps){
     pinBottom,
     setBackLabel,
     jumpToChatAddress,
+    openBookmark,
+    openChoiceList,
     openSendTo,
     setBookmarkAnchor,
     addManualBookmark,

@@ -84,7 +84,7 @@ func sysload() sysInfo {
 type nodeView struct {
 	*Node
 	Live        string `json:"live"`
-	Attention   string `json:"attention,omitempty"`    // "approval" | "question" | "inspect" (quiet, no structured evidence — look at the terminal)
+	Attention   string `json:"attention,omitempty"`    // "approval" | "question" | "dialog" | "inspect"
 	AttentionAt int64  `json:"attention_at,omitempty"` // unix ms of the fresh evidence that raised the current attention
 	// Supervision is Claude-only: starting | strict | unsupported | failed.
 	// Other agents omit it. The UI uses it to refuse inspect/fallback peeks.

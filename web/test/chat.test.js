@@ -93,8 +93,119 @@ test("timing constants match live contracts", () => {
   assert.equal(CHAT_LOAD_DELAY_MS, 300);
   assert.ok(DEC_LABELS.waiting_approval);
   assert.ok(DEC_LABELS.turn_active);
+  assert.equal(DEC_LABELS.claude_unsupported, "Some chat features aren’t available.");
   assert.ok(RASTER_RE.test("photo.PNG"));
   assert.ok(ASSET_REF_RE.test("![x](scimux-asset:abc)"));
+});
+
+test("bookmark marker resolves durable turns and collapses duplicate section usages", () => {
+  const turn = { uid: "u1", segment: 2, record: 7, time: "now", text: "answer" };
+  const bookmark = { t: "b1", uid: "u1", segment: 2, record: 7, node: "lane-a", text: "answer" };
+  const usages = [
+    { note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings", reference_id: "r1", source: { uid: "u1", segment: 2, record: 7 } },
+    { note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings", reference_id: "r2", source: { uid: "u1", segment: 2, record: 7 } },
+    { note_id: "n1", note_title: "Research", section_id: "s2", section_title: "Risks", reference_id: "r3", source: { uid: "u1", segment: 2, record: 7 } },
+  ];
+  const model = chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], usages);
+  assert.equal(model.bookmark, bookmark);
+  assert.deepEqual(model.destinations.map(x => x.section_id), ["s1", "s2"]);
+});
+
+test("bookmark marker supports legacy node/time/text bookmarks and hides when deleted", () => {
+  const turn = { time: "2026-09-15T12:00:00Z", text: "legacy" };
+  const bookmark = { t: "b1", node: "lane-a", turnTime: turn.time, text: turn.text };
+  const usage = { note_id: "n1", section_id: "s1", reference_id: "r1", source: { node: "lane-a", turnTime: turn.time } };
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], [usage]).destinations.length, 1);
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [], [usage]), null);
+});
+
+test("bookmark marker HTML is compact and only counts multiple destinations", () => {
+  const one = chatmod.bubbleMarkersHTML({ bookmark: { t: "b1" }, bookmarkDestinations: [{}] }, { iconBookmark: "BOOK" });
+  const two = chatmod.bubbleMarkersHTML({ bookmark: { t: "b1" }, bookmarkDestinations: [{}, {}] }, { iconBookmark: "BOOK" });
+  assert.match(one, /data-bmarker="bookmark"/);
+  assert.match(one, /BOOK/);
+  assert.doesNotMatch(one, /bmarkercount/);
+  assert.match(two, /bmarkercount[^>]*>2</);
+  assert.equal(chatmod.bubbleMarkersHTML({}, { iconBookmark: "BOOK" }), "");
+});
+
+test("Send-to marker follows the source turn and coexists with bookmark", () => {
+  const turn = { uid: "u1", segment: 2, record: 7, time: "t", text: "source" };
+  const links = [
+    { id: "l1", source: { uid: "u1", segment: 2, record: 7 }, destination: { node: "d1", text: "edited" } },
+    { id: "l2", source: { uid: "u1", segment: 2, record: 7 }, destination: { node: "d2", text: "other" } },
+  ];
+  assert.deepEqual(chatmod.sentToMarkerModel(turn, "source", links), links);
+  const html = chatmod.bubbleMarkersHTML({
+    bookmark: { t: "b1" }, bookmarkDestinations: [], sentTo: links,
+  }, { iconBookmark: "BOOK", iconInto: "SEND" });
+  assert.match(html, /data-bmarker="bookmark"/);
+  assert.match(html, /data-bmarker="sendto"/);
+  assert.match(html, /rot180[^>]*>SEND/);
+  assert.match(html, /bmarkercount[^>]*>2/);
+});
+
+test("Send-to marker legacy match uses node and turn time", () => {
+  const turn = { time: "t", text: "source" };
+  const link = { id: "l1", source: { node: "source", turnTime: "t" }, destination: { node: "dest" } };
+  assert.deepEqual(chatmod.sentToMarkerModel(turn, "source", [link]), [link]);
+  assert.deepEqual(chatmod.sentToMarkerModel(turn, "other", [link]), []);
+});
+
+test("deferred new-chat Send-to commits on the matching transcript turn", async () => {
+  const data = new Map([
+    ["scimux-sendto-pending:n1", JSON.stringify([{ node: "source", turnTime: "old", text: "source" }])],
+    ["scimux-sendto-awaiting:n1", JSON.stringify({ text: "edited prompt", afterTurns: 0, at: Date.now() })],
+  ]);
+  const storage = {
+    getItem: key => data.has(key) ? data.get(key) : null,
+    setItem: (key, value) => data.set(key, String(value)),
+    removeItem: key => data.delete(key),
+  };
+  const ops = [];
+  const ctx = makeFeature({
+    storage,
+    chatPayload: {
+      turns: [{ role: "user", uid: "du", segment: 0, record: 1, time: "landed", text: "edited prompt" }],
+      live: "quiet", delivery: "ok", source: "tmux", chat_started: "start", prior_turns: 0,
+    },
+    deps: { uiMutate: op => ops.push(op) },
+  });
+  await ctx.feature.render();
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].k, "forward-link-add");
+  assert.equal(ops[0].link.destination.uid, "du");
+  assert.equal(data.has("scimux-sendto-pending:n1"), false);
+  assert.equal(data.has("scimux-sendto-awaiting:n1"), false);
+});
+
+test("Send-to confirmation ignores matching turns before its send boundary", () => {
+  const oldTurn = { role: "user", time: "old", text: "same" };
+  const newTurn = { role: "user", time: "new", text: "same" };
+  assert.equal(chatmod.matchingForwardDestinationTurn(
+    { text: "same", afterTurns: 1 }, [oldTurn, newTurn],
+  ), newTurn);
+});
+
+/* The server records what it delivered, and an attachment makes that the
+   prompt plus extendPrompt's appended reference. Equality alone would leave
+   every attachment-bearing Send-to permanently unconfirmed. */
+test("Send-to confirmation survives the attachment reference the server appends", () => {
+  const turn = { role: "user", text: "carry this over\n\n[attached image: /tmp/a.png]" };
+  assert.equal(chatmod.matchingForwardDestinationTurn({ text: "carry this over" }, [turn]), turn);
+  assert.equal(chatmod.matchingForwardDestinationTurn({ text: "carry this" }, [turn]), null,
+    "a bare prefix is a different prompt, not this latch's delivery");
+});
+
+test("truncated fallback addresses match a current turn by prefix", () => {
+  assert.equal(chatmod.matchPendingJumpInTurns(
+    { text: "forwarded prefix", textPrefix: true },
+    [{ text: "other" }, { text: "forwarded prefix with the remaining body" }],
+  ), 1);
+});
+
+test("chat marker invalidation does not stringify marker corpora", () => {
+  assert.doesNotMatch(chatSrc, /markerHash:\s*hash\(JSON\.stringify/);
 });
 
 test("attention evidence key changes only with kind or fresh evidence epoch", () => {
@@ -446,6 +557,17 @@ test("chatActivityPolicy: Claude strict never auto-opens except a proven permiss
   });
   assert.equal(manual.showPeek, true);
   assert.equal(manual.forcePeek, false);
+});
+
+test("unsupported Claude guidance is short and neutral", () => {
+  const html = pendingEmptyHTML({ supervision: "claude_unsupported" });
+  assert.match(html, /older scimux setup/i);
+  assert.doesNotMatch(html, /hook bundle|permission dialogs|auto-approve/i);
+  assert.match(chatSrc,
+    /data\.reason === "claude_unsupported" \? "chatnotice" : "chaterr"/);
+  assert.match(chatCssSrc, /\.pending\.chatnotice/);
+  assert.equal(pendingEmptyHTML({ supervision: "claude_unsupported", ended: true }), "",
+    "Exited is already visible; an ended chat needs no compatibility notice");
 });
 
 test("keyRowHTML: Claude permission bar binds the visible-dialog epoch, not a request id", () => {
@@ -1569,6 +1691,7 @@ function el(tag, attrs = {}){
       if (sel.includes(".permmore") && this.classList.contains("permmore")) return this;
       if (sel.includes(".permask") && this.classList.contains("permask")) return this;
       if (sel.includes("[data-bact]") && this.dataset?.bact) return this;
+      if (sel.includes("[data-bmarker]") && this.dataset?.bmarker) return this;
       if (sel.includes("[data-dismiss-attention]") && this.dataset?.dismissAttention) return this;
       if (sel.includes("[data-open-terminal]") && this.dataset?.openTerminal) return this;
       if (sel.includes("[data-key]") && this.dataset?.key) return this;
@@ -4910,8 +5033,62 @@ test("P3C: send-to click opens openSendTo for the source chat", async () => {
   assert.equal(sends[0].exceptId, "n1");
   assert.equal(sends[0].title, "Send to chat…");
   assert.equal(sends[0].text, stripAssetRefs("carry ![pic](scimux-asset:x) over"));
+  assert.deepEqual(sends[0].source, {
+    node: "n1", turnTime: "2026-01-01T00:01:00Z",
+  });
   assert.doesNotMatch(sends[0].text, /scimux-asset:/);
   ctx.feature.destroy();
+});
+
+test("Send-to marker jumps directly once and offers a chooser for several", async () => {
+  const jumps = [], choices = [];
+  let links = [{ id: "l1", source: { node: "n1", turnTime: "T" }, destination: { node: "d1", text: "sent" } }];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: "source", time: "T" }],
+      live: "quiet", delivery: "ok", source: "tmux", chat_started: "T0", prior_turns: 0,
+    },
+    deps: {
+      forwardLinks: () => links,
+      jumpToChatAddress: address => jumps.push(address),
+      openChoiceList: opts => choices.push(opts),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const turn = el("div", { className: "turn assistant", dataset: { bk: "i:0" } });
+  const marker = el("button", { dataset: { bmarker: "sendto" } });
+  turn.appendChild(marker); ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+  assert.deepEqual(jumps, [{ node: "d1", text: "sent" }]);
+
+  links = [...links, { id: "l2", source: { node: "n1", turnTime: "T" }, destination: { node: "d2" } }];
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+  assert.equal(choices.length, 1);
+  assert.equal(choices[0].choices.length, 2);
+});
+
+test("Send-to marker explains when its destination no longer resolves", async () => {
+  const toasts = [];
+  const links = [{ id: "l1", source: { node: "n1", turnTime: "T" }, destination: { node: "gone" } }];
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "assistant", text: "source", time: "T" }],
+      live: "quiet", delivery: "ok", source: "tmux", chat_started: "T0", prior_turns: 0,
+    },
+    deps: {
+      forwardLinks: () => links,
+      jumpToChatAddress: () => false,
+      toast: message => toasts.push(message),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const turn = el("div", { className: "turn assistant", dataset: { bk: "i:0" } });
+  const marker = el("button", { dataset: { bmarker: "sendto" } });
+  turn.appendChild(marker); ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+  assert.deepEqual(toasts, ["This destination chat is no longer available."]);
 });
 
 test("P3C: use-as-description sets editor state from the turn", async () => {

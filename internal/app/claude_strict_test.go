@@ -67,6 +67,53 @@ func TestClaudeTrustDialogDiagnosesLaunchWithoutTerminal(t *testing.T) {
 	}
 }
 
+func TestClaudeWorkspaceTrustExtendsSessionStartWait(t *testing.T) {
+	f := &fakeTmux{capture: workspaceTrustPane, captureAfterEnter: "Claude ready"}
+	a := newTestApp(t, f)
+	a.claudeReadyTimeout = testTimeoutBudget
+	a.claudeDeliveryGiveUp = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
+	n := &Node{
+		ID: "n1", Agent: "claude", SessionID: hookSIDOwn,
+		Dir: "/new/proj", Prompt: "continue after trust",
+	}
+	path := writeClaudeTranscript(t, a.home, n.SessionID)
+	n.Transcript = path
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	f.appendOnEnter(t, path, claudeUserLine(n.Prompt, 0))
+
+	done := make(chan initialDelivery, 1)
+	go func() { done <- a.deliverClaudeInitialPrompt(n) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !containsSub(f.subcommands(), "capture-pane") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !containsSub(f.subcommands(), "capture-pane") {
+		t.Fatal("startup timeout never inspected the trust prompt")
+	}
+	// Let the timeout branch finish. Without the trust-specific extension it
+	// returns initialNotSent here and the later web decision cannot recover the
+	// launch.
+	time.Sleep(10 * time.Millisecond)
+	select {
+	case got := <-done:
+		t.Fatalf("trust prompt ended startup wait early: %q", got)
+	default:
+	}
+
+	installPreparedClaudeHook(t, a, n)
+	select {
+	case got := <-done:
+		if got != initialAcknowledged {
+			t.Fatalf("delivery after trust = %q, want acknowledged", got)
+		}
+	case <-time.After(testReadyBudget):
+		t.Fatal("delivery did not resume after trust was accepted")
+	}
+}
+
 func TestClaudeCapabilitiesWaitForSessionStart(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")
@@ -107,6 +154,16 @@ func TestClaudeUnsupportedNeverInspects(t *testing.T) {
 	}
 	if a.claudeSupervisionOf(n) != claudeSupUnsupported {
 		t.Fatalf("supervision = %q, want unsupported", a.claudeSupervisionOf(n))
+	}
+}
+
+func TestClaudeUnsupportedExplanationIsPlainAndActionable(t *testing.T) {
+	const want = "This chat uses an older scimux setup. Fork or relaunch it to use all features."
+	if got := claudeSupervisionExplain(claudeSupUnsupported, ""); got != want {
+		t.Fatalf("unsupported explanation = %q, want %q", got, want)
+	}
+	if got := claudeChatSupervisionExplain(claudeSupUnsupported, "", true); got != "" {
+		t.Fatalf("ended chat explanation = %q, want no redundant compatibility notice", got)
 	}
 }
 

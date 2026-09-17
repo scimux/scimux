@@ -36,6 +36,8 @@ test("agentLogo routes each known agent through assetURL", () => {
   assert.match(agentLogo("opencode", url), /U:\/assets\/agents\/opencode\.svg/);
   assert.match(agentLogo("grok", url), /U:\/assets\/agents\/grok\.svg/);
   assert.match(agentLogo("muse", url), /U:\/assets\/agents\/meta\.svg/);
+  assert.match(agentLogo("cursor", url), /U:\/assets\/agents\/cursor\.svg/);
+  assert.match(agentLogo("dsh", url), /U:\/assets\/agents\/deepseek\.svg/);
   assert.match(agentLogo("unknown", url), /<svg/);
   assert.deepEqual(seen, [
     "/assets/agents/claude.svg",
@@ -45,7 +47,20 @@ test("agentLogo routes each known agent through assetURL", () => {
     "/assets/agents/opencode.svg",
     "/assets/agents/grok.svg",
     "/assets/agents/meta.svg",
+    "/assets/agents/cursor.svg",
+    "/assets/agents/deepseek.svg",
   ]);
+});
+
+test("dsh keeps its own lowercase name and stays out of the status rotation", () => {
+  /* Vendor brands get their capital (Claude, Codex, Grok, Muse); a bare CLI
+     name is its own spelling, as for pi and opencode. Renaming dsh to
+     "DeepSeek" here would also be a lie about which model answers: this
+     harness routes to whichever provider its profile names. */
+  assert.equal(usageAgentDisplayName("dsh"), "dsh");
+  /* The rotation is for harnesses with a quota API to read. dsh has none, so
+     a dsh phase would be a gauge that is permanently unavailable. */
+  assert.equal(STATUS_PHASES.includes("dsh"), false);
 });
 
 test("sysMetricHTML: flat/up/down and exact critical boundary", () => {
@@ -80,6 +95,7 @@ test("usageAgentDisplayName", () => {
   assert.equal(usageAgentDisplayName("claude"), "Claude");
   assert.equal(usageAgentDisplayName("codex"), "Codex");
   assert.equal(usageAgentDisplayName("grok"), "Grok");
+  assert.equal(usageAgentDisplayName("cursor"), "Cursor");
   assert.equal(usageAgentDisplayName("other"), "other");
 });
 

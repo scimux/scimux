@@ -4,7 +4,7 @@
  * -----------------------------
  * Owned state:
  *   - stateEtag          /api/state conditional GET revision
- *   - UI / uiRev / uiOps  shared ui.json document, ETag, pending local ops
+ *   - UI / uiRev / uiOps / uiGeneration shared ui.json state and marker epoch
  *   - uiLoaded / uiSaving write gates; saveGate / tickGate stall takeover
  *   - uiTimer            300ms coalesced flush timer
  *   - tickGate           non-overlap gate for direct/fast ticks
@@ -194,6 +194,7 @@ export function createPollingFeature(deps = {}) {
   let uiOps = [];
   let uiLoaded = false;
   let uiSaving = false;
+  let uiGeneration = 0;
   let uiTimer = null;
   const saveGate = makeGate(now);
   const tickGate = makeGate(now);
@@ -240,6 +241,7 @@ export function createPollingFeature(deps = {}) {
   }
 
   function applyRemoteUI() {
+    uiGeneration++;
     invalidateCardsSig();
     invalidateMap();
     invalidateBookmarks();
@@ -253,6 +255,7 @@ export function createPollingFeature(deps = {}) {
   function uiMutate(op) {
     if (destroyed) return;
     queueLocalOp(UI, op, uiRev, uiOps);
+    uiGeneration++;
     savePendingOps(uiOps, storage);
     saveCachedUI(UI, storage);
     renderSyncState();
@@ -445,5 +448,6 @@ export function createPollingFeature(deps = {}) {
     invalidateStateEtag,
     getUI: () => UI,
     isUILoaded: () => uiLoaded,
+    uiGeneration: () => uiGeneration,
   };
 }

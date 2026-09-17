@@ -85,3 +85,138 @@ export function createStorage(raw){
     },
   };
 }
+
+/* Send-to provenance follows draft lifetime: source intents stay device-local
+ * until the sent text appears as a real destination transcript turn. */
+export const PENDING_FORWARD_PREFIX = "scimux-sendto-pending:";
+export const AWAITING_FORWARD_PREFIX = "scimux-sendto-awaiting:";
+export const FORWARD_TEXT_FALLBACK_MAX = 256;
+/* A latch only clears when its text lands as a destination turn, and both the
+   cancel guard and the overwrite guard read a live latch as "still in flight".
+   Any divergence the matcher cannot bridge would therefore freeze the node's
+   Send-to state for good, so an unconfirmed latch is given a life, not a
+   promise. A day is long enough to outlast a closed tab and short enough that
+   a stuck node heals itself without the user knowing there was a latch. */
+export const AWAITING_FORWARD_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function pendingForwardKey(nodeId){
+  return PENDING_FORWARD_PREFIX + (nodeId || "");
+}
+
+export function awaitingForwardKey(nodeId){
+  return AWAITING_FORWARD_PREFIX + (nodeId || "");
+}
+
+export function sourceAddressKey(source = {}){
+  if (source.uid)
+    return `u:${source.uid}:${Number(source.segment) || 0}:${Number(source.record) || 0}`;
+  return `n:${source.node || ""}:${source.turnTime || ""}`;
+}
+
+export function readPendingForwards(storage, nodeId){
+  try {
+    const value = JSON.parse(storage && storage.getItem(pendingForwardKey(nodeId)) || "[]");
+    return Array.isArray(value) ? value.filter(x => x && typeof x === "object") : [];
+  } catch { return []; }
+}
+
+export function writePendingForwards(storage, nodeId, sources){
+  const list = Array.isArray(sources) ? sources : [];
+  try {
+    if (!list.length) storage && storage.removeItem(pendingForwardKey(nodeId));
+    else storage && storage.setItem(pendingForwardKey(nodeId), JSON.stringify(list));
+  } catch { /* a refused local cache must not block Send-to */ }
+  return list;
+}
+
+export function addPendingForward(storage, nodeId, source){
+  if (!source || (!source.uid && !source.node)) return readPendingForwards(storage, nodeId);
+  const list = readPendingForwards(storage, nodeId);
+  const key = sourceAddressKey(source);
+  if (!list.some(item => sourceAddressKey(item) === key)) list.push(source);
+  return writePendingForwards(storage, nodeId, list);
+}
+
+export function clearPendingForwards(storage, nodeId){
+  return writePendingForwards(storage, nodeId, []);
+}
+
+export function writeAwaitingForward(storage, nodeId, text, afterTurns = 0, at = Date.now()){
+  const value = {
+    text: String(text || ""),
+    afterTurns: Math.max(0, Math.floor(Number(afterTurns) || 0)),
+    at: Number(at) || 0,
+  };
+  try { storage && storage.setItem(awaitingForwardKey(nodeId), JSON.stringify(value)); }
+  catch { /* same best-effort draft cache contract */ }
+  return value;
+}
+
+export function readAwaitingForward(storage, nodeId, now = Date.now()){
+  let raw = "";
+  try { raw = storage && storage.getItem(awaitingForwardKey(nodeId)) || ""; }
+  catch { return null; }
+  if (!raw) return null;
+  let value = null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.text === "string"){
+      value = {
+        text: parsed.text,
+        afterTurns: Math.max(0, Math.floor(Number(parsed.afterTurns) || 0)),
+        at: Number(parsed.at) || 0,
+      };
+    }
+  } catch { /* latches before this shape stored the expected text directly */ }
+  /* An unstamped latch is one that predates the TTL, and the nodes most
+     likely to hold one are exactly the nodes already stuck. Expiring it on
+     sight costs at most one in-flight confirmation and unsticks the rest. */
+  if (!value || !value.at || (Number(now) || 0) - value.at >= AWAITING_FORWARD_TTL_MS){
+    clearAwaitingForward(storage, nodeId);
+    return null;
+  }
+  return value;
+}
+
+export function clearAwaitingForward(storage, nodeId){
+  try { storage && storage.removeItem(awaitingForwardKey(nodeId)); }
+  catch { /* same best-effort draft cache contract */ }
+}
+
+function compactAddress(value = {}){
+  const out = { node: value.node || "" };
+  if (value.uid){
+    out.uid = value.uid;
+    out.segment = Number(value.segment) || 0;
+    out.record = Number(value.record) || 0;
+  }
+  if (value.turnTime) out.turnTime = value.turnTime;
+  return out;
+}
+
+export function makeForwardLinkToTurn(source, destinationNode, turn = {}){
+  const compactSource = compactAddress(source);
+  const destination = compactAddress({
+    node: destinationNode,
+    uid: turn.uid,
+    segment: turn.segment,
+    record: turn.record,
+    turnTime: turn.time,
+  });
+  /* Text is only a last-resort live-segment address. Exact and timestamped
+     transcripts do not duplicate message bodies in the shared UI document. */
+  if (!destination.uid && !destination.turnTime){
+    const text = String(turn.text || "");
+    destination.text = text.slice(0, FORWARD_TEXT_FALLBACK_MAX);
+    if (text.length > FORWARD_TEXT_FALLBACK_MAX) destination.textPrefix = true;
+  }
+  const destinationKey = destination.uid || destination.turnTime
+    ? sourceAddressKey(destination)
+    : `n:${destination.node}:text:${destination.text || ""}`;
+  return {
+    id: `${sourceAddressKey(compactSource)}>${destinationKey}`,
+    source: compactSource,
+    destination,
+    sent_at: turn.time || "",
+  };
+}

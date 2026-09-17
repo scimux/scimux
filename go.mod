@@ -13,6 +13,14 @@ go 1.25.0
 // is in the workflows, not on the contributor's machine.
 toolchain go1.25.13
 
+// builds/ is the gitignored directory the workflows write release binaries
+// into, and review sandboxes have parked whole GOCACHE trees under it. It
+// never holds a package, but `./...` walks it anyway — the go command does
+// not read .gitignore — so a stale sandbox turns every `go test ./...` into
+// tens of thousands of extra directory round-trips. Needs the go directive
+// above: the ignore directive is go 1.25.
+ignore builds
+
 require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/pion/webrtc/v4 v4.2.18

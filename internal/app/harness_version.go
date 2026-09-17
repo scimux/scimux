@@ -32,6 +32,7 @@ type harnessRow struct {
 	Agent      string `json:"agent"`
 	Present    bool   `json:"present"`
 	Launchable bool   `json:"launchable"`
+	HasSource  bool   `json:"has_source"`
 	Installed  string `json:"installed,omitempty"`
 	Path       string `json:"path,omitempty"`
 	// Latest is never filled by the local inventory. It exists on the row so
@@ -40,11 +41,12 @@ type harnessRow struct {
 }
 
 // harnessSource is where a harness publishes its current version. There is no
-// single answer — two of the five are npm packages, one is a plain-text file
-// in a bucket, and Claude's depends on how it was installed — so the source
-// is data, not a hardcoded lane. Kind is "npm" (JSON, read .version) or
-// "text" (the bare version, one line). Label is shown to the user: an update
-// notice is only actionable if you know which channel it came from.
+// single answer — four are npm packages, Grok is a plain-text file in a
+// bucket, Muse is channel metadata, and Claude's depends on how it was
+// installed — so the source is data, not a hardcoded lane. Kind is "npm"
+// (JSON, read .version), "text" (the bare version, one line), or
+// "muse-stable". Label is shown to the user: an update notice is only
+// actionable if you know which channel it came from.
 //
 // Every source here is an unauthenticated public endpoint and must stay one.
 // No vendor credential is ever attached to these requests, and none is read
@@ -85,6 +87,13 @@ func claudeHarnessSource(binPath string) harnessSource {
 
 // harnessSources maps each supported harness to its upstream. Claude's entry
 // is resolved per call because it depends on this computer's install.
+//
+// Cursor is deliberately absent. Its CLI reads its own latest version from
+// `getCliDownloadUrl` on the authenticated dashboard backend, and the one
+// public endpoint (cursor.com/api/agent-cli-download) returns the binary
+// itself, not a version. A row with no source shows its installed version and
+// no upstream claim, which is the honest answer; authenticating to get one
+// would cross the line above.
 func harnessSources() map[string]harnessSource {
 	claudePath, _ := exec.LookPath("claude")
 	if resolved, err := filepath.EvalSymlinks(claudePath); err == nil {
@@ -97,6 +106,7 @@ func harnessSources() map[string]harnessSource {
 		"opencode": {URL: npmRegistry + "opencode-ai/latest", Kind: "npm", Label: "npm opencode-ai"},
 		"grok":     {URL: grokStable, Kind: "text", Label: "xAI stable channel"},
 		"muse":     {URL: museStableChannel, Kind: "muse-stable", Label: "Meta stable channel"},
+		"dsh":      {URL: npmRegistry + "@deepseek-ai/dsh/latest", Kind: "npm", Label: "npm @deepseek-ai/dsh"},
 	}
 }
 
@@ -120,10 +130,10 @@ func setHarnessSourcesForTest(src map[string]harnessSource) (restore func()) {
 var versionPattern = regexp.MustCompile(`\bv?(\d+\.\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.\-]+)?)`)
 
 // parseHarnessVersion takes the first version-shaped token in a `--version`
-// output. The five CLIs print five different shapes ("2.1.236 (Claude Code)",
-// "codex-cli 0.147.0", "0.84.3", "grok 1.0.3 (1a29d5bc12) [stable]"), and
-// they are free to change them; an unrecognised output yields "" and the row
-// simply shows no version.
+// output. The eight CLIs print several different shapes ("2.1.236 (Claude
+// Code)", "codex-cli 0.147.0", "0.84.3", "grok 1.0.3 (…) [stable]", "Muse
+// Code 1.3.0 (1.3.0-R3057.1)"), and they are free to change them; an
+// unrecognised output yields "" and the row simply shows no version.
 func parseHarnessVersion(out string) string {
 	m := versionPattern.FindStringSubmatch(out)
 	if m == nil {
@@ -183,6 +193,7 @@ func versionSegments(v string) []int {
 // failed, and the user asked what scimux found — including what it did not.
 func probeHarnessVersions(hs []harness) []harnessRow {
 	rows := make([]harnessRow, 0, len(hs))
+	sources := activeHarnessSources()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	out := make([]harnessRow, len(hs))
@@ -190,12 +201,13 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 		wg.Add(1)
 		go func(i int, h harness) {
 			defer wg.Done()
-			row := harnessRow{Agent: h.bin}
+			row := harnessRow{Agent: h.agentName()}
+			_, row.HasSource = sources[row.Agent]
 			require := h.require
 			if require == "" {
 				require = h.bin
 			}
-			if _, err := exec.LookPath(require); err == nil && h.bin != "muse" {
+			if _, err := exec.LookPath(require); err == nil {
 				row.Launchable = true
 			}
 			bin, err := exec.LookPath(h.bin)
@@ -228,7 +240,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 var harnessInventoryOnce sync.Once
 var harnessInventoryCache []harnessRow
 
-// harnessInventory probes once per process, like detectAgents: five
+// harnessInventory probes once per process, like detectAgents: eight
 // subprocesses is not something to repeat on every menu open, and a harness
 // installed while scimux runs appears after a restart.
 func harnessInventory() []harnessRow {

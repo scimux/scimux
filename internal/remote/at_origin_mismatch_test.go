@@ -1,6 +1,9 @@
 package remote
 
 import (
+	"bytes"
+	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -20,12 +23,22 @@ func TestEnrolledOriginMustMatchTheConfiguredRendezvous(t *testing.T) {
 	cfg := clientCfg(t, nil)
 	cfg.Origin = "https://rv.example"
 	cfg.RendezvousURL = ""
-	writeState(t, NewClient(cfg), enrolledFixture(t, "ih_041061050R3GG28A"))
+	c := NewClient(cfg)
+	writeState(t, c, enrolledFixture(t, "ih_041061050R3GG28A"))
+	before, err := os.ReadFile(c.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	networkCalls := 0
+	cfg.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		networkCalls++
+		return nil, os.ErrPermission
+	})}
 
 	ctx, cancel := ctxTO(t)
 	defer cancel()
 
-	err := NewClient(cfg).Start(ctx)
+	err = NewClient(cfg).Start(ctx)
 	if got := classOf(err); got != ClassOriginMismatch {
 		t.Fatalf("start against a different rendezvous: class %q, want %q (err=%v)",
 			got, ClassOriginMismatch, err)
@@ -36,6 +49,24 @@ func TestEnrolledOriginMustMatchTheConfiguredRendezvous(t *testing.T) {
 			t.Errorf("guidance %q does not name %q; the operator cannot tell which "+
 				"of the two is the stale one", g, want)
 		}
+	}
+	for _, want := range []string{"restart", "Unlink", "fresh invite", "preserves chats"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guidance %q does not explain the supported migration step %q", g, want)
+		}
+	}
+	if strings.Contains(g, "fresh data directory") {
+		t.Fatalf("guidance tells the operator to replace unrelated data: %q", g)
+	}
+	if networkCalls != 0 {
+		t.Fatalf("origin mismatch made %d outbound requests", networkCalls)
+	}
+	after, err := os.ReadFile(c.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("origin mismatch rewrote enrolled state")
 	}
 }
 

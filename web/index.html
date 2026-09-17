@@ -8,7 +8,10 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#F5F4F1" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#161618" media="(prefers-color-scheme: dark)">
-<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="r" x1="64" y1="96" x2="448" y2="416" gradientUnits="userSpaceOnUse"><stop stop-color="%23B1E6EC"/><stop offset=".52" stop-color="%231599A4"/><stop offset="1" stop-color="%230E7C86"/></linearGradient><linearGradient id="m" x1="256" y1="52" x2="256" y2="470" gradientUnits="userSpaceOnUse"><stop stop-color="%231599A4"/><stop offset="1" stop-color="%230E7C86"/></linearGradient></defs><rect width="512" height="512" fill="white"/><path d="M137 375a168 168 0 1 0-49-119" fill="none" stroke="url(%23r)" stroke-width="48" stroke-linecap="round"/><path d="M256 88v356" stroke="url(%23m)" stroke-width="49" stroke-linecap="round"/><circle cx="256" cy="256" r="91" fill="url(%23m)"/></svg>'>
+<!-- Approved Orbit mark: orbit-logo-package-v4 / favicon.svg, coordinates verbatim.
+     Inline because bootstrap.js rewrites only rel=stylesheet links, so a file href
+     would 404 against the rendezvous origin on a remote session. -->
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000"><rect width="1000" height="1000" fill="%23FFFFFF"/><g fill="none" stroke-linecap="round"><path d="M 267.362,732.638 A 329,329 0 0 1 500.000,171.000" stroke="%23BFEAF0" stroke-width="92"/><path d="M 500.000,171.000 A 329,329 0 1 1 267.362,732.638" stroke="%230E7C86" stroke-width="92"/></g><rect x="452.0" y="590" width="96" height="329" rx="48.0" fill="%230E7C86"/><circle cx="500" cy="500" r="179" fill="%230E7C86"/><circle cx="500.000" cy="171.000" r="71" fill="%230E7C86"/></svg>'>
 <title>scimux</title>
 <link rel="stylesheet" href="/css/tokens.css">
 <link rel="stylesheet" href="/css/base.css">
@@ -404,7 +407,7 @@
        The new-activity dialog offers models, so it cannot say that a harness
        is installed-but-old; drift is what explains an agent that started
        behaving differently. The upstream check is a separate tap for the same
-       reason as the scimux one: opening a menu must not call six registries. -->
+       reason as the scimux one: opening a menu must not call seven registries. -->
   <div class="sect">
     <div class="k">Agent harnesses</div>
     <div id="m_harnesses"></div>
@@ -420,7 +423,7 @@
          behind them. -->
     <div class="hnote" id="m_affil">scimux is an independent project. It is not
       affiliated with, endorsed by, or sponsored by Anthropic, OpenAI, xAI,
-      Meta, or the pi or opencode projects. It provides no model access:
+      Meta, Anysphere, DeepSeek, or the pi or opencode projects. It provides no model access:
       you install the agent CLIs and bring your own accounts, and your
       agreement for each one is with that vendor.</div>
     <div class="item"><span>Author</span><span class="tag">Christian Berger</span></div>
@@ -434,6 +437,7 @@
     <div class="item"><span>google/uuid (via pion)</span><button class="tag lic" data-lic="uuid">BSD-3-Clause</button></div>
     <div class="item"><span>wlynxg/anet (via pion)</span><button class="tag lic" data-lic="anet">BSD-3-Clause</button></div>
     <div class="item"><span>Nayuki QR generator (pairing)</span><button class="tag lic" data-lic="qrcodegen">MIT</button></div>
+    <div class="item"><span>Lobe Icons (Grok, Cursor, and DeepSeek icons)</span><button class="tag lic" data-lic="lobeicons">MIT</button></div>
     <pre id="m_lictext" hidden></pre>
   </div>
 </div>

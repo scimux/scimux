@@ -95,6 +95,73 @@ func TestClaudeSessionHarnessDescribesAndAnswersCurrentDialog(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionHarnessRoutesWorkspaceTrustDecision(t *testing.T) {
+	f := &fakeTmux{
+		list: []string{"n1"}, alive: map[string]bool{"n1": true},
+		capture: workspaceTrustPane,
+	}
+	a := newTestApp(t, f)
+	n := &Node{ID: "n1", Agent: "claude", SessionID: hookSIDOwn, AXScreenReader: true}
+	a.nodes = []*Node{n}
+	a.byID[n.ID] = n
+	a.claudeHooks[n.ID] = "hook-n1"
+	a.claudeStrictCap["hook-n1"] = true
+	a.prevCap[n.ID] = workspaceTrustPane
+	a.lastChg[n.ID] = time.Now().Add(-paneQuietAfter - time.Second)
+	h := testClaudeSessionHarness(a, n.ID)
+	h.poll()
+
+	state := h.State(context.Background())
+	if state.Supervision != string(claudeSupStarting) || state.Attention != "dialog" ||
+		state.Permission == nil || state.Permission.RequestID == "" || len(state.Permission.Options) != 2 {
+		t.Fatalf("workspace trust state = %#v", state)
+	}
+	if _, err := h.PreparePermission(context.Background(), sessionworker.PermissionDecision{
+		RequestID: state.Permission.RequestID, Key: "Enter",
+	}); err == nil {
+		t.Fatal("trust decision accepted a key outside y/n")
+	}
+	if _, err := h.PreparePermission(context.Background(), sessionworker.PermissionDecision{
+		RequestID: "workspace-trust:stale", Key: "y",
+	}); !errors.Is(err, errClaudeWorkerConflict) {
+		t.Fatalf("stale trust decision = %v", err)
+	}
+	prepared, err := h.PreparePermission(context.Background(), sessionworker.PermissionDecision{
+		RequestID: state.Permission.RequestID, Key: "y",
+	})
+	if err != nil || prepared.Token == "" || strings.Join(prepared.Keys, " ") != "y Enter" ||
+		!strings.Contains(prepared.Evidence, "Accessing workspace") {
+		t.Fatalf("prepared trust decision = %#v, %v", prepared, err)
+	}
+	if containsSub(f.subcommands(), "send-keys") {
+		t.Fatal("prepare delivered before the muxer could persist its audit")
+	}
+	f.mu.Lock()
+	f.capture = "Claude prompt after trust dialog disappeared"
+	f.mu.Unlock()
+	if err := h.DeliverPermission(context.Background(), prepared.Token); !errors.Is(err, errClaudeWorkerConflict) {
+		t.Fatalf("stale prepared trust decision = %v", err)
+	}
+	if containsSub(f.subcommands(), "send-keys") {
+		t.Fatal("stale trust decision sent keys into Claude's prompt")
+	}
+	f.mu.Lock()
+	f.capture = workspaceTrustPane
+	f.mu.Unlock()
+	prepared, err = h.PreparePermission(context.Background(), sessionworker.PermissionDecision{
+		RequestID: state.Permission.RequestID, Key: "y",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.DeliverPermission(context.Background(), prepared.Token); err != nil {
+		t.Fatal(err)
+	}
+	if calls := sendKeysCalls(f); len(calls) != 1 || strings.Join(calls[0][2:], " ") != "send-keys -t =n1: y Enter" {
+		t.Fatalf("trust delivery = %v", calls)
+	}
+}
+
 func TestClaudeSessionHarnessDeliveryResolutionAndAutoApprove(t *testing.T) {
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "idle"}
 	a := newTestApp(t, f)

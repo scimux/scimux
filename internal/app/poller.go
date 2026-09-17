@@ -150,9 +150,11 @@ func (a *app) poll() {
 		prev := a.live[n.ID] // not yet overwritten this tick
 		a.mu.Unlock()
 		state := "exited"
+		pane := ""
 		if sessionSet[n.ID] {
 			cap, err := s.Capture()
 			if err == nil {
+				pane = cap
 				a.mu.Lock()
 				if pc := a.prevCap[n.ID]; cap != pc {
 					a.noteAnim(n.ID, pc, cap)
@@ -197,11 +199,16 @@ func (a *app) poll() {
 			// Strict hooked Claude: the terminal is never opened from quietness,
 			// AX staticness, unresolved calls, missing/stale/unparseable
 			// transcripts, fallback chat, or owing timeouts. Unsupported and
-			// starting Claude nodes are equally forbidden from inspect.
+			// starting Claude nodes are equally forbidden from inspect; the exact
+			// pre-session workspace-trust dialog is the sole starting-state
+			// exception and is exposed as an explicit web decision.
 			// Attention is a proven visible permission dialog (never while
 			// auto-approve remains armed — that case is an inline error) or
 			// a current MCP elicitation, which stays visible even when the
 			// lease is armed because elicitation is never auto-answered.
+			if claudeSup == claudeSupStarting && dialoghint.LooksLikeWorkspaceTrust(pane) {
+				attn, freshAttn = "dialog", true
+			}
 			if claudeSup == claudeSupStrict && claudeDlg.Attn != "" && !claudeArmed {
 				attn, freshAttn = claudeDlg.Attn, true
 			}
@@ -705,11 +712,11 @@ func (a *app) appendSessionEvent(id string, ev sessionlog.Event) error {
 	return w.Append(ev)
 }
 
-// noteDelivery records that scimux pasted a prompt into a node's pane. It is
-// the watermark the stale-link backstop judges against: after this instant the
-// agent owes output, so a transcript that records nothing is not the file the
-// pane is writing to. Callers pass the paste time rather than "now" so a slow
-// confirmation wait cannot move the watermark forward past the answer.
+// noteDelivery records that scimux pasted a prompt into a node's pane. The
+// initial-delivery reconciler uses this watermark to bound how long it waits
+// for a transcript record before surfacing an unconfirmed delivery. Callers
+// pass the paste time rather than "now" so a slow confirmation wait cannot
+// move the watermark forward.
 func (a *app) noteDelivery(id string, at time.Time) {
 	if id == "" {
 		return
@@ -719,54 +726,15 @@ func (a *app) noteDelivery(id string, at time.Time) {
 	a.mu.Unlock()
 }
 
-// maybeRelinkTranscript is the active→quiet hook drain and stale-link
-// backstop. It must not choose a transcript from cwd, mtime, pane cmdline,
-// or newest-file. After a delivery the linked file did not carry, every Claude
-// node detaches and shows the pane. A later validated hook event still binds
-// the successor.
+// maybeRelinkTranscript drains the only authority allowed to replace a Claude
+// transcript: a validated SessionStart hook. A missing transcript turn is not
+// ownership evidence; Claude may hold a pasted prompt behind a local modal and
+// append it to the currently bound transcript later.
 func (a *app) maybeRelinkTranscript(n *Node) {
 	if n == nil || n.Agent != "claude" {
 		return
 	}
 	a.drainClaudeHooks()
-	a.mu.Lock()
-	cur := n.Transcript
-	deliv, delivered := a.lastDeliver[n.ID]
-	bound := a.claudeBoundAt[n.ID]
-	a.mu.Unlock()
-	if cur == "" {
-		return
-	}
-	// Staleness is judged against a delivery, never against a pane phase. A
-	// phase proves only that the terminal repainted: the poller's very first
-	// capture after a restart opens one (prevCap starts empty, so any live
-	// pane reads as changed), and so does remote-control chrome redrawing
-	// after a turn is already finished. Both were observed retiring healthy
-	// transcripts — the restart case retired every idle Claude node at once.
-	// A delivered prompt is different: the agent owes output for it.
-	if !delivered {
-		return
-	}
-	// The transcript write lags the paste; judging inside that window would
-	// retire a link that is about to be answered.
-	if time.Since(deliv) < deliveryGrace {
-		return
-	}
-	// A link established after the prompt was pasted cannot have missed it.
-	if bound.After(deliv) {
-		return
-	}
-	// No recognized turn yet is absence of evidence, not proof of staleness.
-	// Claude Code fills a fresh /clear successor with mode, bridge-session,
-	// file-history-snapshot and an isMeta caveat record — ParseLine recognizes
-	// none of them — so the file carries no content time until the next human
-	// turn. Retiring on that tombstones the successor and strands the node in
-	// peek for good (observed against claude 2.1.224).
-	ct, ok := transcript.NewestContentTime(cur)
-	if !ok || !ct.Before(deliv) {
-		return
-	}
-	a.retireTranscript(n)
 }
 
 // The quiet gate is structurally blind to one case: an approval dialog with
@@ -825,11 +793,6 @@ const paneQuietAfter = 8 * time.Second
 // These rungs govern the agents that have no such notice — Codex, ACP, and
 // bundles predating the gate.
 
-// deliveryGrace is how long after a paste the stale-link backstop waits before
-// a transcript with no new content counts as proof the link is dead. It covers
-// the lag between the paste and the agent writing its user record; the pane
-// can complete a whole active→quiet cycle on the paste echo alone inside it.
-const deliveryGrace = 30 * time.Second
 const animStallAfter = 90 * time.Second
 const owedStallAfter = 45 * time.Second
 
@@ -1109,7 +1072,6 @@ func (a *app) discoverTranscript(n *Node) {
 	}
 	a.mu.Lock()
 	n.Transcript = path
-	a.claudeBoundAt[n.ID] = time.Now()
 	delete(a.pathClaims, path)
 	a.mu.Unlock()
 }

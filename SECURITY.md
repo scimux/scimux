@@ -39,7 +39,13 @@ at the next tag, and "the latest release" stays true.)
   can be bypassed, DNS rebinding, framing.
 - **Remote access by invite** (`internal/remote`): pairing, invite handling,
   the peer-to-peer data channel, and the bootstrap loader. The wire format
-  itself is specified in the `scimux-rv` repository, which has its own policy.
+  itself is specified in `scimux-connect`, which delivers the trusted viewer.
+  The `scimux-rv` repository owns rendezvous and its own security policy.
+  The official pairing link opens the independently hosted trusted viewer at
+  `my.scimux.com`; authenticated rendezvous and STUN use `rv.scimux.com`.
+  Compromise of the rendezvous may disrupt service and expose its necessary
+  metadata, but must not let it supply viewer executable code or authenticate
+  as the paired computer. The viewer host and its release path remain trusted.
 - **Approvals.** A way to get an agent's tool call approved that the operator
   did not approve — including anything that defeats the one-turn lease, the
   nonce, or the `prompt_id` fence in the Claude permission hook.
@@ -60,7 +66,8 @@ at the next tag, and "the latest release" stays true.)
   `Sec-Fetch` checks is in scope; the absence of a login is not.
 - **Binding `-addr` wider than loopback.** Doing so exposes full controller
   access by design, and the README says so.
-- **Bugs in the wrapped agent CLIs** (claude, codex, pi, opencode, grok).
+- **Bugs in the wrapped agent CLIs** (claude, codex, pi, opencode, grok,
+  cursor-agent, dsh).
   Report those to their vendors. Bugs in how *scimux* drives them are in
   scope.
 - **Findings that assume the attacker already has your OS account**, unless

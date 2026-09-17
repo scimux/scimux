@@ -27,7 +27,7 @@ type Canonical struct {
 type freshRule int
 
 const (
-	// direct: Input is already fresh-only (claude, pi, opencode, unknown).
+	// direct: Input is already fresh-only (claude, pi, opencode, cursor, dsh, unknown).
 	direct freshRule = iota
 	// subtractCache: Input is whole-prompt → FreshIn = Input − CacheRead (≥0).
 	subtractCache
@@ -39,8 +39,14 @@ var agentFreshRule = map[string]freshRule{
 	"claude":   direct,
 	"pi":       direct,
 	"opencode": direct,
-	"codex":    subtractCache,
-	"grok":     subtractCache,
+	"cursor":   direct,
+	// dsh reports occupancy (used/size), not a per-turn split, so no dsh turn
+	// reaches Normalize today. Stated anyway: if one ever does, its Input is
+	// fresh-only like pi/opencode, and that is a decision rather than a
+	// default nobody chose.
+	"dsh":   direct,
+	"codex": subtractCache,
+	"grok":  subtractCache,
 }
 
 // Normalize maps one turn's raw stored token fields + agent name to the four
@@ -48,8 +54,8 @@ var agentFreshRule = map[string]freshRule{
 //
 // Only FreshIn differs by agent:
 //
-//	claude, pi, opencode, unknown → direct (Input is already fresh-only)
-//	codex, grok                   → Input − CacheRead, clamped ≥ 0
+//	claude, pi, opencode, cursor, dsh, unknown → direct (Input is already fresh-only)
+//	codex, grok                                → Input − CacheRead, clamped ≥ 0
 //
 // CacheRead, CacheWrite, and Out are pass-throughs of the raw fields.
 // The agent key is the file's meta.agent (stable per file); unknown agents

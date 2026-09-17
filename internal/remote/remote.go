@@ -25,30 +25,26 @@ const ProtocolVersion = 1
 // refused, never downgraded (FR-37).
 const MinRequestV = 1
 
-// DefaultOrigin is the rendezvous origin the protocol vectors use.
+// DefaultOrigin is the rendezvous service origin the protocol vectors use.
 //
 // It is cryptographic material, not a URL. buildAuthMessage domain-separates
 // on it, BuildPairingTranscript binds it into the SAS both humans read aloud,
 // and persist.go writes it into the enrolled state that client.go then
 // refuses to run against a different one. Change it and every installation
-// already enrolled is stranded; lose the domain and whoever takes it serves
-// the code those browsers execute.
+// already enrolled must unlink and enroll afresh.
 //
-// So it is a one-way door held open only until the first stranger pairs, and
-// the obligation it creates is registrar custody rather than code: lock,
-// auto-renew, longest term, on scimux.com specifically.
 // Point a test or a local rehearsal somewhere
 // else with --rendezvous-url; never by editing this line.
 //
-// It read my.scimux.eu until 2026-09-12. That move was free only because
-// nothing outside the maintainer's own machines had enrolled; it is the last
-// time this line can change without stranding someone. Three more places must
-// agree with it, none of them in this repository: -origin in scimux-rv's
-// rc.d, the Caddyfile site name, and the vendored vectors under
-// testdata/vectors, which scimux-rv generates and this repository byte-copies
-// per docs/rendezvous-protocol-sync.md. Editing this constant alone turns
-// every admission into a silent 404.
-const DefaultOrigin = "https://my.scimux.com"
+// It read my.scimux.com before the independent-viewer migration. That change
+// intentionally requires the one enrolled installation to unlink at the old
+// service and enroll afresh; editing its saved origin is not a migration.
+// Three more places must agree with this value: -origin in scimux-rv's rc.d,
+// the Caddyfile service name, and the vendored vectors under testdata/vectors,
+// which scimux-rv generates and this repository byte-copies per
+// docs/rendezvous-protocol-sync.md. Editing this constant alone turns every
+// admission into a silent 404.
+const DefaultOrigin = "https://rv.scimux.com"
 
 // PrivateDirName is the owner-only directory under the data root that holds
 // installation identity and remote state (0700).
@@ -349,8 +345,9 @@ type Hooks struct {
 
 // Config is the injectable client runtime. Flag parsing belongs to Command.
 type Config struct {
-	DataDir string
-	Origin  string
+	DataDir      string
+	Origin       string
+	ViewerOrigin string
 
 	Remote      bool
 	InviteFile  string

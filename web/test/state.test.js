@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   PENDING_OPS_KEY,
   CACHED_UI_KEY,
+  MAX_FORWARD_LINKS,
   emptyUI,
   normUI,
   idempotentOp,
@@ -180,9 +181,10 @@ test("normUI: returns a new outer object each call (not the input)", () => {
 });
 
 /* ---------- idempotentOp ---------- */
-test("idempotentOp: only bookmark-add and bookmark-del", () => {
+test("idempotentOp includes append-only forward links", () => {
   assert.equal(idempotentOp({ k: "bookmark-add" }), true);
   assert.equal(idempotentOp({ k: "bookmark-del" }), true);
+  assert.equal(idempotentOp({ k: "forward-link-add" }), true);
   for (const k of [
     "arch",
     "unarch",
@@ -196,6 +198,23 @@ test("idempotentOp: only bookmark-add and bookmark-del", () => {
   ]) {
     assert.equal(idempotentOp({ k }), false, k);
   }
+});
+
+test("forward-link-add appends once by id", () => {
+  const doc = freshDoc();
+  const link = { id: "source>dest:time", source: { node: "source" }, destination: { node: "dest" } };
+  applyOp(doc, { k: "forward-link-add", link });
+  applyOp(doc, { k: "forward-link-add", link: { ...link } });
+  assert.deepEqual(doc.forward_links, [link]);
+});
+
+test("forward-link-add retains only the newest bounded set", () => {
+  const doc = freshDoc();
+  for (let i = 0; i < MAX_FORWARD_LINKS + 3; i++)
+    applyOp(doc, { k: "forward-link-add", link: { id: `link-${i}` } });
+  assert.equal(doc.forward_links.length, MAX_FORWARD_LINKS);
+  assert.equal(doc.forward_links[0].id, "link-3");
+  assert.equal(doc.forward_links.at(-1).id, `link-${MAX_FORWARD_LINKS + 2}`);
 });
 
 /* ---------- applyOp mutation model helpers ---------- */

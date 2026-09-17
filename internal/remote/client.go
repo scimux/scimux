@@ -136,6 +136,9 @@ func (c *Client) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if _, err := c.validatedViewerOrigin(); err != nil {
+		return fmt.Errorf("remote: start: %w", err)
+	}
 	if c.hook().OnRemoteInit != nil {
 		c.hook().OnRemoteInit()
 	}
@@ -473,7 +476,8 @@ func (c *Client) checkOrigin(st PersistedState) error {
 	}
 	return classError(ClassOriginMismatch, "start",
 		"this installation is enrolled at "+st.Origin+" but --rendezvous-url names "+
-			c.origin()+"; point it back, or enroll again with a fresh data directory")
+			c.origin()+"; restart with --rendezvous-url "+st.Origin+", use Unlink in Remote access, then restart "+
+			"with the new rendezvous and a fresh invite; unlinking preserves chats, settings, and agent workers")
 }
 
 func (c *Client) recoverEnrolledTemp() (PersistedState, bool) {

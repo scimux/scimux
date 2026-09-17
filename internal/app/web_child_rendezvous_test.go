@@ -24,6 +24,15 @@ import (
 // loop that registers the pairing waiter — so the rendezvous tells the phone
 // the code is not in use, seconds after the computer printed it.
 func TestWebChildRemoteConfigRunsRendezvousLoop(t *testing.T) {
+	testWebChildRemoteConfig(t, false)
+}
+
+func TestReplacementWebChildRetainsViewerOrigin(t *testing.T) {
+	testWebChildRemoteConfig(t, true)
+}
+
+func testWebChildRemoteConfig(t *testing.T, replacement bool) {
+	t.Helper()
 	coreMux := http.NewServeMux()
 	coreMux.HandleFunc("POST /_scimux/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -56,7 +65,8 @@ func TestWebChildRemoteConfigRunsRendezvousLoop(t *testing.T) {
 	}}
 	cfg := webChildConfig{
 		Link: core.Link(), Generation: 3, ListenAddr: ln.Addr().String(),
-		DataDir: t.TempDir(), Remote: true, RVOrigin: remote.DefaultOrigin,
+		DataDir: t.TempDir(), Remote: true, Replacement: replacement, RVOrigin: remote.DefaultOrigin,
+		ViewerOrigin: "https://viewer.example",
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -80,6 +90,9 @@ func TestWebChildRemoteConfigRunsRendezvousLoop(t *testing.T) {
 	}
 	if rc.Backoff != remote.DefaultBackoff() {
 		t.Fatalf("Backoff = %#v, want remote.DefaultBackoff()", rc.Backoff)
+	}
+	if rc.ViewerOrigin != cfg.ViewerOrigin {
+		t.Fatalf("ViewerOrigin = %q, want %q", rc.ViewerOrigin, cfg.ViewerOrigin)
 	}
 
 	cancel()

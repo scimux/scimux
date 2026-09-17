@@ -47,8 +47,8 @@ func TestInviteLinkCarriesEveryValueTheDeviceNeeds(t *testing.T) {
 	c, pc, link := mintedInvite(t)
 
 	q := inviteFragment(t, link)
-	if got := q.Get("v"); got != "1" {
-		t.Errorf("v = %q, want 1", got)
+	if got := q.Get("v"); got != InviteVersion {
+		t.Errorf("v = %q, want %s", got, InviteVersion)
 	}
 	if got := q.Get("o"); got != c.origin() {
 		t.Errorf("o = %q, want %q", got, c.origin())
@@ -101,11 +101,11 @@ func TestInviteLinkKeepsTheSecretsOutOfThePathAndQuery(t *testing.T) {
 	}
 }
 
-// §13: the page is served at /p and nowhere else, and the invite is a
-// link to that page on this installation's own origin.
+// The trusted viewer serves /p. The rendezvous origin remains in fragment o
+// and never determines which host supplies browser code.
 func TestInviteLinkPointsAtThePairingPageOnTheConfiguredOrigin(t *testing.T) {
-	c, _, link := mintedInvite(t)
-	want := c.origin() + "/p#"
+	_, _, link := mintedInvite(t)
+	want := DefaultViewerOrigin + "/p#"
 	if !strings.HasPrefix(link, want) {
 		t.Errorf("invite = %q, want it to start %q", link, want)
 	}

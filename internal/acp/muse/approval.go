@@ -45,19 +45,25 @@ type Stage struct {
 	SuggestedPrefix *SuggestedPrefix `json:"suggestedPrefix"`
 }
 
+type ApprovalOrigin struct {
+	Kind    string `json:"kind"`
+	Command string `json:"command"`
+	URL     string `json:"url"`
+}
+
 type Subject struct {
-	Kind          string  `json:"kind"`
-	Command       string  `json:"command"`
-	Path          string  `json:"path"`
-	Access        string  `json:"access"`
-	Host          string  `json:"host"`
-	Port          int     `json:"port"`
-	Protocol      string  `json:"protocol"`
-	Target        string  `json:"target"`
-	ToolName      string  `json:"toolName"`
-	Origin        string  `json:"origin"`
-	WorkspaceRoot string  `json:"workspaceRoot"`
-	Stages        []Stage `json:"stages"`
+	Kind          string          `json:"kind"`
+	Command       string          `json:"command"`
+	Path          string          `json:"path"`
+	Access        string          `json:"access"`
+	Host          string          `json:"host"`
+	Port          int             `json:"port"`
+	Protocol      string          `json:"protocol"`
+	Target        string          `json:"target"`
+	ToolName      string          `json:"toolName"`
+	Origin        *ApprovalOrigin `json:"origin"`
+	WorkspaceRoot string          `json:"workspaceRoot"`
+	Stages        []Stage         `json:"stages"`
 }
 
 type Choice struct {
@@ -424,6 +430,10 @@ func cloneChoices(in []Choice) []Choice {
 
 func cloneSubject(s Subject) Subject {
 	s.Stages = cloneStages(s.Stages)
+	if s.Origin != nil {
+		origin := *s.Origin
+		s.Origin = &origin
+	}
 	return s
 }
 

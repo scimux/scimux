@@ -548,6 +548,7 @@ func TestWorkerManagerRecoveryClassifiesMixedLocatorSet(t *testing.T) {
 		hook                     bool
 	}{
 		{id: "recover-pi", agent: "pi", wantTransport: "acp"},
+		{id: "recover-cursor", agent: "cursor", wantTransport: "acp"},
 		{id: "recover-codex", agent: "codex", wantTransport: "codex"},
 		{id: "recover-claude", agent: "claude", wantTransport: "tmux", hook: true},
 	} {
@@ -572,7 +573,8 @@ func TestWorkerManagerRecoveryClassifiesMixedLocatorSet(t *testing.T) {
 		t.Fatal("already managed worker was disturbed")
 	}
 	for _, tc := range []struct{ id, transport string }{
-		{"recover-pi", "acp"}, {"recover-codex", "codex"}, {"recover-claude", "tmux"},
+		{"recover-pi", "acp"}, {"recover-cursor", "acp"},
+		{"recover-codex", "codex"}, {"recover-claude", "tmux"},
 	} {
 		if node := a.byID[tc.id]; node == nil || node.Transport != tc.transport || node.Description != "first" {
 			t.Fatalf("recovered %s = %#v", tc.id, node)

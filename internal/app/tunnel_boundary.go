@@ -41,12 +41,11 @@ func tunnelForbiddenHeaders() []string {
 // two different policies, and confusing them is exactly the failure FR-28
 // exists to prevent.
 //
-// Every network source is 'self'. The remote page is served through the data
-// channel by this same handler, so nothing legitimate is fetched from another
-// origin — in particular the rendezvous origin is never a script-src or
-// connect-src, so a compromised rendezvous cannot inject code into, or
-// exfiltrate from, a paired session (AT-FR-28-b). data: is allowed for images
-// only (inline SVG/PNG data URIs the UI already emits); object-src, base-uri,
+// Every network source is 'self'. This header describes responses carried over
+// the authenticated tunnel; it does not set or replace the top-level viewer
+// document's HTTP CSP. The independently served trusted viewer must enforce
+// that policy before its bootstrap executes. data: is allowed for images only
+// (inline SVG/PNG data URIs the UI already emits); object-src, base-uri,
 // form-action and frame-ancestors are closed outright.
 //
 // blob: is required for scripts, styles and images, and is not optional
