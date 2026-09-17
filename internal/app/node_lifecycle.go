@@ -159,12 +159,17 @@ func agentCommandSettings(n *Node, addDirs []string, settingsPath string) (strin
 		}
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
 	}
-	// dsh is deliberately absent: `dsh --profile acp` is the only launch line
-	// scimux knows, and it speaks ACP on stdio rather than to a terminal. A
-	// bare `dsh <prompt>` is a different program with a different profile, so
-	// a tmux fallback here would launch something the node did not ask for;
-	// cursor and muse are likewise structured-only and have no tmux fallback.
-	return "", fmt.Errorf("unknown agent %q (want claude, pi, opencode, or grok)", n.Agent)
+	// Reaching here does not mean the agent is unsupported, and the message
+	// must not read that way: codex, cursor, dsh and muse are all launchable,
+	// just not into a pane. codex is the one that surprises, because it is
+	// wired everywhere else — it is supervised through its app-server bridge,
+	// and `TestAgentCommandRejectsCodexAndUnknown` pins that it has no tmux
+	// launch line. dsh is the clearest case of why a fallback would be wrong:
+	// `dsh --profile acp` is the only launch line scimux knows, it speaks ACP
+	// on stdio rather than to a terminal, and a bare `dsh <prompt>` is a
+	// different program with a different profile, so a tmux fallback here
+	// would launch something the node did not ask for.
+	return "", fmt.Errorf("agent %q has no tmux launch command (codex, cursor, dsh and muse are structured-only)", n.Agent)
 }
 
 // launchFailSentinel is printed on the pane by wrapLaunch when the launched
